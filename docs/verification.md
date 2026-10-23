@@ -1,0 +1,61 @@
+# 工程验证记录
+
+日期：2026-10-24（Asia/Shanghai）。本地为 macOS arm64 / Python 3.12.13；真实引擎部署于用户提供的 Linux 容器 /home/relay/songjiayun/ContextKV。执行成功与研究收益分开记录。
+
+## 本地工程证据
+
+| 验证 | 实际结果 |
+|---|---|
+| 最近完整 CPU 回归（含真实 tokenizer） | 262 passed，另有 6 subtests passed；runs/pytest-engineering-final.log |
+| 固定 Qwen tokenizer 专项 | 单独开启后 1 passed；真实模板、输入 IDs 和 LCP 验证通过 |
+| Ruff / shell / wheel | 通过；wheel 包含 engine_patches.smoke |
+| 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
+| 冻结模拟测试矩阵 | 39 jobs / 117 轮成功 |
+| 继承主方法参数的开发集消融 | 15 jobs / 45 轮成功，不参与主方法选择 |
+| 官方 MTRAG 格式检查器 | 6 轮 fixture，errors / warnings 为空；只证明格式兼容 |
+| 固定 MTRAG 全量复算 | 842 任务 / 110 会话；Cloud 205 / 26；1053 处参考标记 |
+
+矩阵证据在 runs/matched-dev、runs/matched-test 和 runs/matched-ablation-dev。此前 48-job 开发矩阵属于未匹配消融参数的旧版流程，不再作为最终方法对照。runs/official-checker/verification.json 明确使用 fake fixture 答案，不是质量结果。上游 Starlette TestClient 有 HTTPX 弃用提示，不影响通过。
+
+复核使用 .venv/bin/python -m pytest -q 和 .venv/bin/ruff check .；真实 tokenizer 专项设置 CONTEXTKV_TEST_HF_TOKENIZER=1。新增模块的定向测试记录应在下一次完整回归后统一更新总数。
+
+## 已完成的 H200 集成验证
+
+单张 H200、TP=1、Python TreeCore、BF16 权重/KV、page size 64、context 32768、最多 8 个运行请求。实际环境：Python 3.12.3、torch 2.14.1+cu130、CUDA 编译目标 13.0、transformers 5.19.0、tokenizers 0.23.2、驱动 595.58.03。GPU KV pool 为 121920 tokens；host 为 279040 tokens，即 16001269760 字节（约 16 GB / 14.90 GiB）。固定源码的 hicache-size 采用十进制 GB，并按 page 对齐。完整环境保存在 engine-environment.txt。
+
+SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固定 a09a35458c702b33eeacc393d103063234e8bc28。以下初次 GPU 证据使用补丁 49355b997267b7c88ca7182d53ab4846109d13bf7064d1e179b729fc444362a5；后续补丁须分别验证，不能自动继承结论。
+
+| 验证 | 实际结果 |
+|---|---|
+| GPU-only 模型协议冒烟 | 完整生成/结果恢复、重复报价、退役后拒绝请求、ACK 不虚报物理释放，均通过 |
+| kernel + layer-first host 冒烟 | 通过相同验收 |
+| 冷/GPU-ready/host-only 小标定 | 128 输入、8 输出、prefix 0/64、并发 1、每单元 3 次；18 条请求阶段与 12 条完成传输观测 |
+| 小样本 P2，GPU-only | 6 成功 / 0 失败 / 0 未完成 |
+| 小样本 P1、P3，host 启用 | 各 6 成功 / 0 失败 / 0 未完成；P3 使用真实 BM25S |
+| Cloud 开发集 P2，host、并发 4 | 41 成功 / 0 失败 / 0 未完成；512 输出上限下 21 轮触顶截断 |
+| 完整 Cloud 语料 P3 开发集，1024 上限 | 固定 72442 个原始 passage，BM25S 冻结索引；41 成功 / 0 失败 / 0 未完成 |
+| 未补丁原生 B0 / B1 | 分别独立固定源码启动；各自 fixture 6 轮、Cloud P2 开发集 41 轮均成功 |
+
+本地镜像证据在 runs/remote-h200-initial，包含原始报告、manifest、观测和失败/成功日志。容器导出使用明确文件白名单并核对归档 SHA256，没有导出代理配置或权重。
+
+后续补丁 69bf539f582ad7065d1b16c6fa6efe348c3e69d9d4aec8a296f3206996b76912 已在相同 H200 配置通过 runtime_manifest、协议冒烟、暖机小标定及生命周期配对探针。受控 GPU/host 两层实验均显示：保留旧 epoch 时旧/新/共享路径为 256/128/128 tokens；退役旧 epoch 后在相同原生 128-token 淘汰压力下变成 128/256/128。退役瞬间两个 pool 的占用变化均为 0。该 fixture 故意在新路径后再次访问旧路径以隔离软引用作用，commit 边界由工具模拟；它证明限定配置中的机制，不证明一般工作负载吞吐收益。完整证据在容器 runs/lifecycle-paired.json，解释见 [引擎验证](../engine_patches/README.md)。
+
+2026-10-24 从 5 个开发会话按版本年龄 0/1/2+ 分层冻结 15 个 pre-turn 案例，观察到 APPEND 输入最大 11217 tokens，超出此前 8192 的采样上限。因此在相同引擎配置追加 16384 长度标定：prefix 比例 0/.5/.9/.99、并发 1/4、输出 128/512，28 个兼容 case，每 case 1 次 warmup 和 3 次测量，共 70 个预热请求、210 个测量请求、778 条阶段/已完成传输记录。原 1500 条记录独立保留，补充数据在 runs/remote-h200-expanded；扩大覆盖本身不是方法收益。两个 estimator 的支持域已共同加入实测总长度边界，phase 别名按同一预测特征分组，模拟拟合来源不能被加载为硬件校准。
+
+**运行限制。** 原生 kernel + page_first 在首次 D2H 出现段错误，栈为 staged HiCache → cudaMemcpyBatchAsync / cuMemcpyBatchAsync_v2。保持固定源码和 host 语义，改用已有 layer_first 并设置 SGLANG_HICACHE_TMA_TRANSFER=0 后通过上述验收。尚未隔离具体驱动/运行时原因，不声称修复上游 kernel。正式比较必须统一兼容配置并重新标定。
+
+**评测限制。** Cloud 512-token 配置有 21/41 轮截断，成功 receipt 不等于完整优质答案。按技术方案单列 1024-token 敏感性后，41/41 成功、0 截断、平均输出 536 tokens；记录于容器 runs/cloud-dev-p2-output1024。该运行没有控制与前一次相同的缓存初态，只比较截断现象，不能宣称时延改进。正式对照应给所有方法相同输出上限，512 原始结果保留。首次小标定含初始化影响，仅证明管线可运行；正式采集需独立 warmup、充分范围与留出误差报告。
+
+## 已验证的控制开销改进
+
+新增共享提示词开发验证共六组，每组固定 41 轮：Q0/Q1/Q2 分别运行 P1 与 P2。Q1/Q2 减少截断或缩短回答，但完整原文复核仍发现跨产品错答和错引，未选为默认，也未将输出变短算为质量保持下的加速。组合 ID 引用的实际漏计已修正；所有已知 ID 均存在仍不代表支持论断。完整自动统计、24 条定向论断审查及复算入口见[共享提示词验证](shared_prompt_validation.md)。
+
+证据身份只在入口计算一次：100 个已归档证据＋1 个新证据的合成 REBUILD 中，正文 hash 次数从 304 降至 1。实际 token 绑定、请求幂等和 CAS/epoch 约束保留。
+
+252 个静态 Decode 标定点、输出均值 128/P90 256 的本机 CPU 微基准，单候选中位预测耗时由 38.22 ms 降到 0.58 ms；区间案例由 15.55 ms 降到 0.46 ms。原插值、误差与支持范围语义通过随机稀疏/密集、重复点、区间、边界及完整预测等价性测试。证据为 runs/cost-profile/comparison.json；这是 CPU 开销改善，不是 GPU 端到端加速比。
+
+## 仍需完成的研究验收
+
+当前没有正式回答质量非劣、SLO goodput 提升或论文优于基线的结论。仍需充分范围硬件标定与成对决策、原生 B0/B1 及同预算强 B6、匹配参数消融、容量/并发/低重叠负例、真实质量评分和人工盲审。profiling.decision_pairs 与生命周期压力探针分别补充成本差和旧独有分支归因；全局 slot 变化不能替代具体路径证据。
+
+完整 Cloud P3 开发流程已运行。官方 qrels 覆盖 39/41 轮，缺失的两轮单列，未按零分混入；在有标签部分，BM25S recall@5 为 0.2094、nDCG@5 为 0.1671。这只是本配置下的检索弱基线，不是回答质量。原始 qrels 诊断、B0/B1 运行与 P3 生成保存在 runs/remote-h200-native；仍须完成回答质量评价、强基线和冻结 test。缺少评分时，质量覆盖、非劣判定和人工审查保持未验证，不以格式检查、模拟回答或词法代理补齐。运行方法见 [部署说明](deployment.md)、[成对决策](decision_pairs.md) 和 [贡献与实验设计](research_contributions.md)。

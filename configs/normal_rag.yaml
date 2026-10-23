@@ -1,0 +1,9 @@
+engine:
+  kind: mock
+state_dir: runs/normal-rag
+context:
+  max_total_model_tokens: 32768
+  max_new_tokens: 128
+planner:
+  strategy: normal_rag
+# Same epoch infrastructure as the full controller; this is a B2-style layout baseline.

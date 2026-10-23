@@ -1,0 +1,6 @@
+engine:
+  kind: mock
+state_dir: runs/append
+planner:
+  strategy: always_append
+# Hard constraints still force REBUILD when append is invalid.

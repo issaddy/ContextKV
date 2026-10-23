@@ -1,0 +1,22 @@
+engine:
+  kind: sglang
+  base_url: http://127.0.0.1:30000
+  timeout_seconds: 180
+  page_size: 64
+model:
+  name: Qwen/Qwen2.5-7B-Instruct
+  revision: a09a35458c702b33eeacc393d103063234e8bc28
+state_dir: runs/sglang
+context:
+  max_total_model_tokens: 32768
+  max_new_tokens: 512
+planner:
+  strategy: cost
+  delta_abs: 0.0  # Before enabling cost switching, replace with 2 x measured control P95.
+  delta_rel: 0.05
+  z: 1.0
+  min_stable_turns: 2
+  fixed_token_threshold: 8192
+  fallback_strategy: fixed_threshold
+# No hardware calibration yet: planner explicitly falls back to fixed_threshold.
+shadow: true

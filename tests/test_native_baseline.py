@@ -1,0 +1,299 @@
+from __future__ import annotations
+import asyncio
+from dataclasses import replace
+import json
+from pathlib import Path
+import unittest
+
+import httpx
+import pytest
+
+from adapters.mtrag import OnlineSession, load_rows
+from adapters.retrieval import BM25SRetriever, load_beir_corpus, to_evidence
+from bench.native_baseline import (NativeBaseline, NativeProtocolError, NativeSGLangClient,
+                                   validate_engine_manifest)
+from bench.run_sessions import run_sessions
+from controller.templates import ByteTemplate
+from controller.candidates import CandidatePolicy, build_candidates
+from controller.schema import SessionSnapshot
+
+FIXTURE = Path(__file__).parent / "fixtures/mtrag_small.jsonl"
+
+
+class FakeSSEStream(httpx.AsyncByteStream):
+    def __init__(self, frames, *, disconnect=False):
+        self.frames, self.disconnect = frames, disconnect
+
+    async def __aiter__(self):
+        for frame in self.frames:
+            await asyncio.sleep(.002)
+            raw = frame if isinstance(frame, str) else json.dumps(frame)
+            wire = ("data: " + raw + "\n\n").encode()
+            # Exercise line assembly across transport chunks.
+            yield wire[:7]
+            yield wire[7:]
+        if self.disconnect:
+            raise httpx.ReadError("injected partial stream disconnect")
+
+
+class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.requests = []
+        self.responses = []
+        self.finish = "stop"
+        self.missing_ids = False
+        self.client_http = httpx.AsyncClient(base_url="http://fake.test", transport=httpx.MockTransport(self.respond))
+        self.native = NativeSGLangClient("http://fake.test", http_client=self.client_http, audit_prompt_ids=True)
+        self.rows = load_rows(FIXTURE)
+
+    async def asyncTearDown(self):
+        await self.client_http.aclose()
+
+    async def respond(self, request):
+        payload = json.loads(request.content) if request.content else None
+        self.requests.append((request.url.path, payload))
+        if request.url.path == "/server_info":
+            return httpx.Response(200, json={"version": "fixed-source-fake", "enable_session_radix_cache": True})
+        if request.url.path == "/close_session":
+            return httpx.Response(200)
+        if request.url.path != "/generate":
+            return httpx.Response(404)
+        number = sum(path == "/generate" for path, _ in self.requests)
+        text = f"native own answer {number}"
+        data = {"text": text, "output_ids": list(text.encode()), "prompt_token_ids": payload["input_ids"],
+                "meta_info": {"finish_reason": {"type": self.finish}, "completion_tokens": len(text.encode()),
+                              "cached_tokens": 7}}
+        if self.missing_ids:
+            del data["output_ids"]
+        self.responses.append(data)
+        return httpx.Response(200, json=data)
+
+    def baseline(self, kind="B0"):
+        return NativeBaseline(kind, self.native, ByteTemplate(), corpus_snapshot_id="fixture-v1",
+                              test_mode=True, run_id="test-run")
+
+    async def test_custom_system_prompt_matches_shared_candidate_token_for_token(self):
+        prompt = "  Audit only the supplied evidence.\nPreserve this trailing space. \n"
+        policy = CandidatePolicy(system_prompt=prompt)
+        template = ByteTemplate()
+        baseline = NativeBaseline("B0",self.native,template,policy=policy,
+                                  corpus_snapshot_id="fixture-v1",test_mode=True)
+        turn = OnlineSession(self.rows[:3]).current()
+        expected = build_candidates(SessionSnapshot(turn.conversation_id,corpus_snapshot_id="fixture-v1"),
+            turn.query,tuple(to_evidence(context,"fixture-v1") for context in turn.contexts),policy,template)
+        result = await baseline(turn)
+        self.assertEqual(result.input_ids,expected[0].input_ids)
+        self.assertEqual(tuple(self.requests[-1][1]["input_ids"]),expected[0].input_ids)
+        self.assertIn(prompt,bytes(result.input_ids).decode())
+
+    async def test_b0_full_prompt_no_native_or_research_session_fields(self):
+        baseline = self.baseline("B0")
+        report = await run_sessions(self.rows[:3], baseline, protocol="P2")
+        self.assertEqual([r.status for r in report.turns], ["success"] * 3)
+        self.assertEqual([path for path, _ in self.requests], ["/generate"] * 3)
+        for _, payload in self.requests:
+            self.assertNotIn("session_id", payload)
+            self.assertNotIn("session_params", payload)
+            self.assertFalse(any("contextkv" in name for name in payload))
+            self.assertEqual(payload["sampling_params"]["temperature"], 0)
+        second = bytes(self.requests[1][1]["input_ids"]).decode()
+        self.assertIn("native own answer 1", second)
+        self.assertNotIn("REFERENCE ANSWER", second)
+        self.assertNotIn("Original passage a.", second)
+        self.assertIn("Original passage f.", second)
+        snapshot = baseline.snapshots["session-a"]
+        self.assertEqual(len(snapshot.raw_history), 3)
+        self.assertIsNone(snapshot.execution)
+        self.assertEqual(report.turns[0].result.meta_info["cached_tokens"], 7)
+        self.assertFalse(hasattr(report.turns[0].result, "receipt"))
+        self.assertEqual(await baseline.close_all(), ())
+
+    async def test_b1_stable_native_id_across_rebuilds_and_close_is_dispatch_only(self):
+        baseline = self.baseline("B1")
+        await baseline.verify_server()
+        report = await run_sessions(self.rows, baseline, concurrency=2)
+        self.assertEqual(len(report.turns), 6)
+        self.assertTrue(all(r.status == "success" for r in report.turns))
+        requests = [payload for path, payload in self.requests if path == "/generate"]
+        ids = [p["session_id"] for p in requests]
+        self.assertEqual(set(ids), {"native:test-run:session-a", "native:test-run:session-b"})
+        self.assertEqual(ids.count("native:test-run:session-a"), 3)
+        self.assertEqual(ids.count("native:test-run:session-b"), 3)
+        close = await baseline.close_all()
+        self.assertEqual(len(close), 2)
+        self.assertTrue(all(c.acknowledgement == "not_scheduler_ack" and not c.physical_free_observed for c in close))
+        self.assertFalse(any("contextkv" in path or path == "/open_session" for path, _ in self.requests))
+
+    async def test_p1_replaces_generated_answer_with_official_history_explicitly(self):
+        baseline = self.baseline()
+        report = await run_sessions(self.rows[:3], baseline, protocol="P1")
+        self.assertTrue(all(r.status == "success" for r in report.turns))
+        second = bytes(self.requests[1][1]["input_ids"]).decode()
+        self.assertIn("REFERENCE ANSWER 1", second)
+        self.assertNotIn("native own answer 1", second)
+        self.assertEqual(report.turns[1].result.branch_reason, "reference_history_sync")
+        self.assertTrue(all(t.evidence_keys for t in baseline.snapshots["session-a"].raw_history))
+        self.assertFalse(baseline.snapshots["session-a"].raw_history[0].assistant_output_ids)
+
+    async def test_explicit_revisit_uses_same_required_policy_and_restores_original(self):
+        baseline = self.baseline()
+        gate = OnlineSession(self.rows[:3])
+        answer = await baseline(gate.current())
+        gate.commit(gate.current().task_id, answer.assistant_text)
+        reference = next(ref for ref, key in baseline.snapshots["session-a"].reference_map if key.document_id == "a")
+        current = replace(gate.current(), query=f"Revisit {reference} and preserve all conditions")
+        result = await baseline(current)
+        prompt = bytes(result.input_ids).decode()
+        self.assertIn("Original passage a. Do not delete conditions.", prompt)
+        self.assertEqual(len(result.visible_evidence_manifest), 6)
+
+    async def test_abort_and_missing_actual_ids_never_commit_history(self):
+        for finish, missing in ((None, False), ("abort", False), ("stop", True)):
+            with self.subTest(finish=finish, missing=missing):
+                self.finish, self.missing_ids = finish, missing
+                baseline = self.baseline()
+                report = await run_sessions(self.rows[:3], baseline)
+                self.assertEqual([r.status for r in report.turns], ["failed"])
+                self.assertEqual(report.unfinished_turns, 2)
+                self.assertEqual(baseline.snapshots, {})
+                self.assertTrue(self.native.observations)
+
+    async def test_length_is_completed_but_truncation_is_explicit(self):
+        self.finish = "length"
+        baseline = self.baseline()
+        report = await run_sessions(self.rows[:1], baseline)
+        self.assertEqual(report.turns[0].status, "success")
+        self.assertTrue(report.turns[0].result.truncated)
+        self.assertEqual(report.turns[0].result.finish_reason, "length")
+
+    async def test_p3_real_retrieval_to_native_http_and_generated_history(self):
+        from importlib.metadata import PackageNotFoundError, version
+        try:
+            if version("bm25s") != "0.3.15" or version("numpy") != "2.3.5":
+                self.skipTest("pinned retrieval extra not installed")
+        except PackageNotFoundError:
+            self.skipTest("optional retrieval extra not installed")
+        retriever = BM25SRetriever(load_beir_corpus(FIXTURE.with_name("corpus_small.jsonl")), corpus_snapshot_id="fixture-v1")
+        baseline = self.baseline("B1")
+        report = await run_sessions(self.rows, baseline, protocol="P3", concurrency=2, retriever=retriever)
+        self.assertEqual([r.status for r in report.turns], ["success"] * 6)
+        self.assertTrue(all([c.document_id for c in r.online_turn.contexts] == list("abcde") for r in report.turns))
+        for _, payload in self.requests:
+            if payload and "input_ids" in payload:
+                prompt = bytes(payload["input_ids"]).decode()
+                self.assertIn("common identical words", prompt)
+                self.assertNotIn("Original passage", prompt)
+                self.assertNotIn("REFERENCE ANSWER", prompt)
+
+    async def test_formal_mode_requires_engine_manifest_and_real_template(self):
+        self.assertTrue(validate_engine_manifest({}, "B0", ByteTemplate()))
+        with self.assertRaisesRegex(ValueError, "engine manifest"):
+            NativeBaseline("B0", self.native, ByteTemplate(), corpus_snapshot_id="fixture-v1")
+
+    async def test_unmeasured_example_manifests_are_rejected(self):
+        root = Path(__file__).resolve().parents[1]
+        for baseline in ("B0", "B1"):
+            manifest = json.loads((root / f"configs/native_{baseline.lower()}_manifest.example.json").read_text())
+            errors = validate_engine_manifest(manifest, baseline)
+            self.assertIn("example manifest cannot authorize a formal hardware run", errors)
+            self.assertTrue(any("gpu_memory_bytes" in error for error in errors))
+            self.assertTrue(any("tokenizer_hash" in error for error in errors))
+            manifest["example_only"] = False
+            self.assertTrue(validate_engine_manifest(manifest, baseline))
+
+    async def test_history_mismatch_is_rejected(self):
+        baseline = self.baseline()
+        gate = OnlineSession(self.rows[:3])
+        result = await baseline(gate.current())
+        gate.commit(gate.current().task_id, "different invented history")
+        self.assertTrue(result.assistant_text)
+        with self.assertRaisesRegex(NativeProtocolError, "history differs"):
+            await baseline(gate.current())
+        self.assertEqual(len(baseline.snapshots["session-a"].raw_history), 1)
+
+    async def test_native_sse_observes_new_token_chunks_and_commits_only_after_done(self):
+        received = []
+        def respond(request):
+            received.append(json.loads(request.content))
+            partial = {"text": "A", "output_ids": [65], "meta_info": {"finish_reason": None}}
+            two = {"text": "AB", "output_ids": [65, 66], "meta_info": {"finish_reason": None}}
+            terminal = {**two, "meta_info": {"finish_reason": {"type": "stop"}, "completion_tokens": 2}}
+            return httpx.Response(200, stream=FakeSSEStream([partial, two, two, terminal, "[DONE]"]))
+        async with httpx.AsyncClient(base_url="http://fake.test", transport=httpx.MockTransport(respond)) as http:
+            client = NativeSGLangClient("http://fake.test", http_client=http, stream=True)
+            baseline = NativeBaseline("B0", client, ByteTemplate(), corpus_snapshot_id="fixture-v1", test_mode=True)
+            result = await baseline(OnlineSession(self.rows[:3]).current())
+        self.assertTrue(received[0]["stream"])
+        self.assertEqual(result.assistant_text, "AB")
+        self.assertEqual(result.output_ids, (65, 66))
+        self.assertEqual(result.timing.token_observation, "chunk")
+        self.assertLess(result.timing.t_submit, result.timing.t_first)
+        self.assertLess(result.timing.t_first, result.timing.t_last_token)
+        self.assertLess(result.timing.t_last_token, result.timing.t_response_done)
+        self.assertLessEqual(result.timing.t_response_done, result.timing.t_commit)
+        self.assertEqual(len(baseline.snapshots["session-a"].raw_history), 1)
+        self.assertEqual(client.observations[0]["stream_frames"], 4)
+
+    async def test_partial_terminal_or_transport_interruption_cannot_commit(self):
+        partial = {"text": "A", "output_ids": [65], "meta_info": {"finish_reason": None}}
+        final = {**partial, "meta_info": {"finish_reason": {"type": "stop"}, "completion_tokens": 1}}
+        for frames, disconnect in (([partial, "[DONE]"], False), ([final], False), ([partial], True)):
+            with self.subTest(frames=frames, disconnect=disconnect):
+                def respond(request):
+                    return httpx.Response(200, stream=FakeSSEStream(frames, disconnect=disconnect))
+                async with httpx.AsyncClient(base_url="http://fake.test", transport=httpx.MockTransport(respond)) as http:
+                    client = NativeSGLangClient("http://fake.test", http_client=http, stream=True)
+                    baseline = NativeBaseline("B0", client, ByteTemplate(), corpus_snapshot_id="fixture-v1", test_mode=True)
+                    report = await run_sessions(self.rows[:3], baseline)
+                    self.assertEqual([r.status for r in report.turns], ["failed"])
+                    self.assertEqual(report.unfinished_turns, 2)
+                    self.assertEqual(baseline.snapshots, {})
+                    self.assertEqual(client.observations[0]["partial_output_tokens"], 1)
+
+    async def test_native_cumulative_contract_rejects_incremental_server(self):
+        def respond(request):
+            return httpx.Response(200, json={"incremental_streaming_output": True})
+        async with httpx.AsyncClient(base_url="http://fake.test", transport=httpx.MockTransport(respond)) as http:
+            client = NativeSGLangClient("http://fake.test", http_client=http, stream=True)
+            with self.assertRaisesRegex(NativeProtocolError, "incremental_streaming_output=false"):
+                await client.server_info()
+
+
+def test_native_cli_prompt_file_preserves_body_in_policy_and_workload(tmp_path,monkeypatch):
+    import bench.native_baseline as native_module
+    raw = b"  Use only the cited evidence.\r\nKeep this space. \r\n"
+    prompt_file = tmp_path/"prompt.txt"
+    prompt_file.write_bytes(raw)
+    manifest = tmp_path/"engine.json"
+    manifest.write_text("{}")
+    observed = []
+    def respond(request):
+        if request.url.path == "/server_info":
+            return httpx.Response(200,json={"version":"fake-http-correctness"})
+        payload = json.loads(request.content)
+        observed.append(payload)
+        return httpx.Response(200,json={"text":"ok","output_ids":[111,107],
+            "meta_info":{"finish_reason":{"type":"stop"},"completion_tokens":2}})
+    http = httpx.AsyncClient(base_url="http://fake.test",transport=httpx.MockTransport(respond))
+    client_class,baseline_class = native_module.NativeSGLangClient,native_module.NativeBaseline
+    monkeypatch.setattr(native_module,"HuggingFaceTemplate",lambda *args,**kwargs:ByteTemplate())
+    monkeypatch.setattr(native_module,"NativeSGLangClient",lambda *args,**kwargs:
+                        client_class("http://fake.test",http_client=http,stream=False))
+    monkeypatch.setattr(native_module,"NativeBaseline",lambda *args,**kwargs:
+                        baseline_class(*args,**kwargs,test_mode=True,run_id="prompt-audit"))
+    output = tmp_path/"native"
+    try:
+        assert native_module.main([str(FIXTURE),"--baseline","B0","--engine-manifest",str(manifest),
+            "--domain","all","--limit-sessions","1","--output",str(output),
+            "--system-prompt-file",str(prompt_file)]) == 0
+    finally:
+        asyncio.run(http.aclose())
+    payload = json.loads((output/"native-B0-prompt-audit.json").read_text())
+    assert payload["policy"]["system_prompt"] == raw.decode()
+    assert payload["workload"]["system_prompt"] == raw.decode()
+    assert payload["workload"]["system_prompt_file"] == str(prompt_file)
+    assert raw.decode() in bytes(observed[0]["input_ids"]).decode()
+    with pytest.raises(SystemExit) as exc:
+        native_module.main([str(FIXTURE),"--baseline","B0","--engine-manifest",str(manifest),
+            "--system-prompt","one","--system-prompt-file",str(prompt_file)])
+    assert exc.value.code == 2

@@ -1,0 +1,37 @@
+{
+  "engine": {
+    "base_commit": "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b",
+    "research_patch_applied": false,
+    "tree_backend": "python"
+  },
+  "model": {
+    "name": "Qwen/Qwen2.5-7B-Instruct",
+    "revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+    "tokenizer_hash": null,
+    "chat_template_hash": null,
+    "dtype": "bfloat16",
+    "kv_dtype": "bfloat16"
+  },
+  "server": {
+    "enable_session_radix_cache": true,
+    "enable_hierarchical_cache": true,
+    "disable_radix_cache": false,
+    "tp_size": 1,
+    "dp_size": 1,
+    "page_size": 64,
+    "context_length": 32768
+  },
+  "runtime": {
+    "gpu_model": null,
+    "gpu_memory_bytes": null,
+    "driver_cuda_torch_versions": {
+      "driver": null,
+      "cuda": null,
+      "torch": null
+    },
+    "actual_kv_pool_tokens": null,
+    "actual_host_pool_bytes": null
+  },
+  "example_only": true,
+  "notes": "This is an unmeasured configuration template. Replace nulls with observed values and set example_only=false after recording checkout/startup evidence. Never use this example as hardware results."
+}

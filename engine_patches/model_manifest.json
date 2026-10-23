@@ -1,0 +1,15 @@
+{
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+  "config_url": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/resolve/a09a35458c702b33eeacc393d103063234e8bc28/config.json",
+  "canonical_config_sha256": "b6891f5037cc0853d4325d96957f76765bb3ec11b01eee59670e33b825694a06",
+  "canonicalization": "json.dumps(parsed_config, sort_keys=True, separators=(comma,colon)); UTF-8",
+  "weight_files_verified": false,
+  "sglang_dependency_source": "https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/pyproject.toml",
+  "sglang_dependency_source_sha256": "8a176848d601510b3557ece2cf9e37d3fd449f5eca2d469cf34d7078b103bc0c",
+  "sglang_pins": {
+    "transformers": "5.19.0",
+    "tokenizers": "0.23.2",
+    "torch": "2.14.1"
+  }
+}

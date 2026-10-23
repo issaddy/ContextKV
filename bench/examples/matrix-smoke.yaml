@@ -1,0 +1,76 @@
+# Protocol/engineering exercise only. No GPU/quality evidence is produced.
+schema_version: 1
+input: tests/fixtures/mtrag_small.jsonl
+domain: all
+split_manifest: bench/examples/split-smoke.json
+corpus: tests/fixtures/corpus_small.jsonl
+protocols: [P1, P2, P3]
+concurrency: [1]
+seeds: [42]
+reference_method: B3
+tuning:
+  equal_budget: 2
+methods:
+  - id: B2
+    overrides:
+      planner: {strategy: normal_rag}
+  - id: A_only
+    overrides:
+      planner: {strategy: always_append}
+      ablation: {epoch_retirement: false}
+  - id: B3
+    tune: true
+    b6_eligible: true
+    overrides:
+      planner: {strategy: fixed_threshold}
+    candidates:
+      - planner: {fixed_token_threshold: 4000}
+      - planner: {fixed_token_threshold: 8000}
+  - id: B3_periodic
+    tune: true
+    b6_eligible: true
+    overrides:
+      planner: {strategy: fixed_period}
+    candidates:
+      - planner: {period: 2}
+      - planner: {period: 4}
+  - id: B4
+    b6_eligible: true
+    overrides:
+      context: {layout: contextpilot}
+      planner: {strategy: stable_layout}
+  - id: B5
+    tune: true
+    b6_eligible: true
+    overrides:
+      planner: {strategy: warm_idle}
+    candidates:
+      - planner: {warm_ratio: 0.25}
+      - planner: {warm_ratio: 0.75}
+  - id: Ours
+    tune: true
+    overrides:
+      planner: {strategy: cost}
+    candidates:
+      - planner: {delta_rel: 0.05, min_stable_turns: 1}
+      - planner: {delta_rel: 0.1, min_stable_turns: 2}
+  - id: Ours_no_host_cost
+    ablation_of: Ours
+    overrides:
+      ablation: {host_cost: false}
+  - id: Ours_no_decode_cost
+    ablation_of: Ours
+    overrides:
+      ablation: {decode_cost: false}
+  - id: Ours_no_control_cost
+    ablation_of: Ours
+    overrides:
+      ablation: {control_cost: false}
+  - id: Ours_no_hysteresis
+    ablation_of: Ours
+    overrides:
+      ablation: {hysteresis: false}
+  - id: A_B_no_retire
+    ablation_of: Ours
+    overrides:
+      ablation: {epoch_retirement: false}
