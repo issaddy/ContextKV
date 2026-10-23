@@ -24,6 +24,8 @@ B表中的regret来自隔离c1 fixture的server elapsed、尚未纳入答案质�
 
 模块 A 的[混合检索](hybrid_retrieval.md)、[纠正识别 query](correction_query_view.md)都已有真实 P3 结果；[Qwen3同池对照](qwen3_rerank_validation.md)也已运行，39个有标签任务上 R@5=.4085，低于 BGE .5231，故保留 BGE 基座。较新方法不按发布日期自动采用；也不因一次负结果停止原理分析和场景适配。下一阶段选项见[检索与来源研究路线](retrieval_research_next.md)。
 
+接续实现已经落到可选主路径：A 的[字面表格关系注释](table_relations.md)保留原文并增加来源行/对象/值/unit span；B 的[阶段成本](stage_cost_model.md)与[工作量等待模型](admission_wait_model.md)将可测执行和待校准的异质等待分开，原生报价区分容量压力与在途传输，并提供当前请求的标量工作量。前者已完成[82 轮 P3 开关审核](table_relations_validation.md)，但 fresh off 同样答对旧目标，仍需冻结历史隔离作用；后者保留 strict 模式和固定规则对照，不以解析估计冒充校准。CRAFT、SMART、DRE 的行 focus、操作分解和来源范围研究，以及 TIE、WAIT、Tail-Aware 与 Sarathi 的工作量/内存/阶段分析，为后续扩展提供具体入口；当前实现边界分别列在上述文档，未把它们的完整系统或论文收益计作本项目成果。
+
 ## 为什么选择这组基础工作
 
 | 基础工作 | 已有能力与选型依据 | 本项目实际复用及边界 |

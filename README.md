@@ -84,7 +84,7 @@ uv run --extra retrieval contextkv --config configs/demo.yaml \
 
 研究控制器的硬件开发矩阵及专用服务冷态准备见 [硬件 dev 运行](docs/hardware_dev_matrix.md)。示例包含 11 个同预算开发任务及 5 个继承已选配置的消融；原生 B0/B1、host 策略组合和质量准入仍须独立补齐，不能将这一子集命名为完整最强 B6。
 
-`cost` 只有在相应 prefix/suffix/host-load/concurrency 桶存在可信硬件标定时才启用成本切换；否则结果中明确记录 `uncalibrated_cost_fallback`。`shadow: true` 仅记录成本建议，执行固定回退。`calibration_path` 可指定真实 Measurement JSONL。正式启用前还需用本机 profiling 将 `delta_abs` 写为控制开销 P95 的两倍。
+默认 `cost` 只有在相应 prefix/suffix/host-load/concurrency 桶存在可信硬件标定时才启用成本切换；否则结果中明确记录 `uncalibrated_cost_fallback`。显式实验选项 `admission_estimator: native_workload` 使用实测执行阶段和解析等待，单列 `selection_eligible`，不会把未校准等待标成 `calibrated`；配置与边界见[阶段成本模型](docs/stage_cost_model.md)和[原生工作量估计](docs/admission_wait_model.md)。`shadow: true` 仅记录成本建议，执行固定回退。`calibration_path` 可指定真实 Measurement JSONL。正式启用前还需用本机 profiling 将 `delta_abs` 写为控制开销 P95 的两倍。
 
 可选 `positive_basis` 复用 SciPy NNLS 离线拟合，推理只需保存的八个系数；默认仍为查表。按完整特征单元留出，超出实测总长度、混入模拟数据或误差样本不足时不标为硬件校准。共享提示词 Q1/Q2 也仅作为实验配置，真实开发对照发现错引后保持原默认；见[成本验证](docs/data_and_evaluation.md)及[提示词验证](docs/shared_prompt_validation.md)。最新论文与固定作者代码的复用分析见[研究审查](docs/research_review_20261024.md)。
 
@@ -97,6 +97,10 @@ uv run --extra retrieval contextkv --config configs/demo.yaml \
 [有限容量控制器入口](docs/controller_capacity_sweep.md)复用现有引擎与矩阵工具，比较六种固定方法并要求每个容量使用自身的标定。原生和控制器运行器均保留失败结果，并在生成失败时返回非零退出码。
 
 16K 独立标定及六方法的 246 轮真实运行已完成；[标定分析](docs/capacity_calibration_validation.md)和[联合验证](docs/controller_capacity_validation.md)定位了容量不确定标记导致的集中回退，以及输出预算与调度等待耦合。这些结果用于继续改进 B/C，尚不构成完整方法优于强基线的结论。
+
+可选[表格关系注释](docs/table_relations.md)保留完整原文，为对象、列、值和单位附加字面 span。候选和原生对照共用 `context.table_relations`；默认关闭。[82 轮闭环及 8 次冻结历史验证](docs/table_relations_validation.md)观察到旧对象错绑的局部改善，也保留了引用缺失等新问题。独立模型质量评分的固定版本与原生协议见[开源 judge 方案](docs/open_judge_plan.md)。
+
+[阶段成本闭环验证](docs/stage_workload_validation.md)完成四方法两重复共 328 轮。工作量模型提高了成本选择覆盖，但完整响应仍慢于对照，等待误差和门槛影响已按实际轨迹定位。模型计算的 Linux CPU 优化有单独逐字段等价证据，未混入此前的 GPU 性能数字。
 
 ## 真实 SGLang 接入
 

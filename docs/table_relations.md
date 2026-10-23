@@ -19,6 +19,8 @@ supplement = render_table_relations(existing_reference_id, tables)
 
 两者均为纯函数；无表时分别返回空元组、空字符串。调用者决定是否在当前输入附加 `supplement`，并对新增 tokens 使用现有候选预算和审计。它们不访问历史、答案、标签、模型或缓存，不创建 EvidenceKey，不改写 `EvidenceBlock.text`，也不计算新的内容指纹。
 
+共享候选入口已通过 `context.table_relations: true` 接通；原生 CLI 使用 `--table-relations`，matrix 两条执行路径继承共同的 base config。默认关闭。每轮对 required 证据提取一次并供两个候选共用，APPEND 即使复用已有正文，也会在当前消息附加该轮注释；新增长度仍受原共享预算约束。专项集成验证了默认逐字兼容、QA/正文跨度不变、Native 输入一致和哈希调用次数不增加。首次真实开关对照见[验证记录](table_relations_validation.md)，尚无总体质量或性能收益结论。
+
 `SourceSpan(text, start, end)` 使用传入原段落的 Python Unicode 字符偏移，左闭右开，保证 `original[start:end] == text`，不是 UTF-8 字节偏移。`TableRelations` 保存表题、表头、整表跨度、关系与原注释；`TableRelation` 保存 `object/column/value/unit/row_span/notes`。全部是不可变 dataclass，可用 `dataclasses.asdict` 留存审计。正文内空白、Markdown 转义、大小写和数值写法不作归一化；仅排除单元格两端的格式空白。
 
 支持两种明确结构：
