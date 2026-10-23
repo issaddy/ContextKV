@@ -173,6 +173,7 @@ async def benchmark(args, config):
         service.store.close()
         if retriever is not None and hasattr(retriever, "close"):
             retriever.close()
+    return report
 
 
 def main(argv=None):
@@ -247,7 +248,9 @@ def main(argv=None):
         split_path.write_text(dumps(split) + "\n")
         print(json.dumps(profile, indent=2, ensure_ascii=False))
     elif args.command == "bench":
-        asyncio.run(benchmark(args, config))
+        report = asyncio.run(benchmark(args, config))
+        if report.unfinished_turns or report.timed_out_sessions or any(turn.status != "success" for turn in report.turns):
+            raise SystemExit(1)
     else:
         service = create_controller(config)
         if args.command == "inspect":

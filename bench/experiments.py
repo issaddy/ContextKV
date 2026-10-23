@@ -12,6 +12,7 @@ from dataclasses import asdict, replace
 from hashlib import sha256
 from itertools import product
 import json
+import math
 import os
 from pathlib import Path
 from statistics import mean
@@ -76,8 +77,13 @@ def validate_matrix(spec):
     budget = spec.get("tuning", {}).get("equal_budget", 1)
     if budget < 1:
         raise ValueError("tuning budget must be positive")
+    slo = spec.get("slo", {})
+    if set(slo) - {"ttft_seconds", "tpot_seconds"} or any(not math.isfinite(v) or v < 0 for v in slo.values()):
+        raise ValueError("matrix slo needs finite nonnegative ttft_seconds/tpot_seconds")
     methods_by_id = {m["id"]: m for m in spec["methods"]}
-    shared_prompt = matrix_config(spec).context.system_prompt
+    shared_context = matrix_config(spec).context
+    shared_context_values = asdict(shared_context)
+    shared_prompt = shared_context.system_prompt
     effective_shared_prompt = SYSTEM_PROMPT if shared_prompt is None else shared_prompt
     for method in spec["methods"]:
         if method.get("kind", "controller") not in {"controller", "native"}:
@@ -95,6 +101,18 @@ def validate_matrix(spec):
             effective_candidate_prompt = SYSTEM_PROMPT if candidate_prompt is None else candidate_prompt
             if effective_candidate_prompt != effective_shared_prompt:
                 raise ValueError("method-specific system_prompt differs from the shared matrix prompt")
+            candidate_context = decode(type(shared_context), merge(shared_context_values, overrides.get("context", {})))
+            # These fields determine the common material/budget contract. Layout
+            # and annotations may vary for their explicit method/ablation studies.
+            for field in ("revisit_mode", "revisit_history_turns", "allow_version_comparison",
+                          "explicit_keys", "reference_prefix_length", "max_total_model_tokens", "max_new_tokens"):
+                if getattr(candidate_context, field) != getattr(shared_context, field):
+                    raise ValueError(f"method-specific context.{field} differs from the shared matrix policy")
+            for key, field in (("context_length", "max_total_model_tokens"), ("max_new_tokens", "max_new_tokens")):
+                if key in native and native[key] != getattr(shared_context, field):
+                    raise ValueError(f"native {key} differs from the shared matrix budget")
+            if "context_config" in native or "context_policy" in native:
+                raise ValueError("native context policy must come from the shared matrix base_config")
         if method.get("tune", False) and len(candidates) != budget:
             raise ValueError(f"{method['id']} must have exactly equal_budget={budget} candidates")
         if not method.get("tune", False) and len(candidates) != 1:
@@ -280,6 +298,7 @@ async def execute_job(spec, job, directory):
         native = job["native"] or {}
         args.update(baseline=native["baseline"], base_url=native["base_url"], engine_manifest=native["engine_manifest"],
                     model_path=native.get("model_path"),
+                    context_policy=shared_config.context,
                     system_prompt=shared_config.context.system_prompt, system_prompt_file=None,
                     table_relations=shared_config.context.table_relations,
                     table_annotation_style=shared_config.context.table_annotation_style,
@@ -303,7 +322,9 @@ async def execute_job(spec, job, directory):
                 "fair_hardware_comparison_established": False}
     payload["experiment_protocol"] = protocol
     output.write_text(json.dumps(payload, indent=2))
-    summary = summarize_run(payload)
+    slo = spec.get("slo", {})
+    summary = summarize_run(payload, **({"ttft_slo": slo["ttft_seconds"]} if "ttft_seconds" in slo else {}),
+                            **({"tpot_slo": slo["tpot_seconds"]} if "tpot_seconds" in slo else {}))
     summary["experiment_protocol"] = protocol
     (directory / "summary.json").write_text(json.dumps(summary, indent=2))
     (directory / "summary.md").write_text(markdown_report(summary))

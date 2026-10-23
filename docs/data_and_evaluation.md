@@ -196,6 +196,8 @@ uv run python -m bench.native_baseline data/mtrag/RAG.jsonl \
 
 `--local-files-only` 可限制 tokenizer 从本地缓存读取；`--audit-prompt-ids` 请求原生 `return_prompt_token_ids` 并逐项核对完整输入。全量 token 回传会增加开销，正式比较应给所有方法采用相同审计抽样规则。输入文件 hash、split hash、检索 manifest、真实原生 meta_info、HTTP 往返时间、清理时段与关闭 dispatch 状态均写入结果文件。HTTP 往返时间不冒充 GPU Prefill 或端到端 TTFT，原生 `cached_tokens` 也不被推断为实际 Prefill 计算量。
 
+独立原生 CLI 可用 `--context-config CONTROLLER.yaml` 读取完整 `context` 策略，包括显式回访、历史回访窗口、版本比较、explicit_keys、引用前缀长度及注释。未提供时仍使用原默认；显式命令行预算、prompt 或 `--table-relations/--no-table-relations` 覆盖相应字段，实际完整策略写入 `policy`。原生与控制器的直接 CLI 在生成失败、超时或依赖轮次未完成时返回非零，原始失败报告仍保存；内部矩阵继续按失败率与完整覆盖判定候选，不能凭 subprocess 结束就认为所有轮成功。
+
 离线验证命令：
 
 ```bash
@@ -308,6 +310,8 @@ dev 选择每个方法的候选，并在 `b6_eligible:true` 中选择 B6。配�
 
 硬件矩阵通过 `kind: native`、`native: {baseline: B0/B1, base_url: ..., engine_manifest: ...}` 加入原生对照。host 三种写策略必须是实际预先启动的服务，不能靠客户端选项假装变更引擎；候选可用 `native` 覆盖其服务器和 manifest。控制器候选可以覆盖 `engine.base_url` 指向各策略服务器，从而把上下文候选与 host 策略组合一起纳入 B6 的等预算搜索。资源/model/tokenizer 必须通过真实 manifest 对齐后再作性能比较。
 
+矩阵现将 `base_config.context` 的完整不可变策略传给原生运行器。此前只传 prompt/预算/表格选项，非默认回访配置可能让 B0/B1 用回 conservative 默认、引入额外归档正文；实际默认配置一致的既有运行不受该缺陷影响。矩阵在运行前检查各方法的 required 选择字段、引用前缀和总/输出预算一致；布局及表格注释仍可作为明确的方法/消融变量，不把允许变化的布局误判为材料选择差异。显式回访与旧 conservative 的最小反例已通过真实候选构造、HTTP 输入和归档正文测试。
+
 硬件服务器跨 job 的残余缓存也必须控制。矩阵支持显式 `lifecycle: {before_job: ["python", "scripts/my_dedicated_server_setup.py"], cache_state_protocol: "cold_reset_then_fixed_dev_warmup", warmup_input: "data/warmup.jsonl"}`。这里 argv 直接执行，不经过 shell；脚本可通过 `CONTEXTKV_JOB_ID/JOB_SPLIT/JOB_PROTOCOL/JOB_METHOD`（每项均带 `CONTEXTKV_` 前缀）选择本 job 的专用服务。钩子的输出、退出码及耗时保存到 `before-job.json`，失败时不执行生成。预热材料应预先冻结且不读取未来 test 轮次；该文件的内容随实验清单冻结。
 
 研究引擎的 cold reset 仅用于显式启用 `CONTEXTKV_ENABLE_PROFILING=1` 的空闲专用服务；原生服务可由操作者脚本明确重启。默认不会 flush 共享 GPU 服务。未配置时硬件记录 `cache_state_protocol=unspecified_hardware`，不能凭实验矩阵完成就宣称公平性能；mock 每 job 创建独立实例，记录 `fresh_mock_instance`。同样，存在钩子只证明其执行过，报告仍需结合实际启动/测量证据确认资源和预热条件。
@@ -324,6 +328,8 @@ uv run python -m bench.report runs/example/benchmark.json --output runs/evaluati
 ```
 
 缺少相应采样时省略其参数。报告覆盖 TTFT/TPOT/完整轮/队列/控制时间分布、throughput/goodput、失败/超时/依赖未完成、截断、实际 Prefill、唯一 slot 峰值与面积、传输、质量各维度与脚本历史冲突。`TurnRunResult.t_arrive` 覆盖控制器到达点，将 P3 检索时间包括进端到端时延。原生非流式客户端无法提供 TTFT 时保持 null，不用 HTTP 总时长代替首 token；没有真实 transfer/slot 采样时也保持 null。质量比较必须具有相同 task coverage，不可把 judge 失败静默丢弃后计算非劣效。
+
+SLO 默认仍为 TTFT 2 秒、TPOT 0.1 秒，报告在 `timing.slo` 原样记录秒单位阈值。报告 CLI 提供 `--ttft-slo-seconds` 与 `--tpot-slo-seconds`，对候选和 reference 使用同一组值；矩阵可在顶层设置 `slo: {ttft_seconds: 2.0, tpot_seconds: 0.1}`，值随现有 spec provenance 冻结。修改阈值重算旧报告不改生成结果，但不能把不同阈值的 goodput 直接混为同一协议的结果。
 
 标定中 `first_token` 表示包含排队/host restore/prefill 的联合观测；`timing_scope` 随记录与分桶保留。它不等于纯 CUDA prefill，也不与不同 host 恢复量或不同时钟范围的样本混桶。
 

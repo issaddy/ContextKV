@@ -385,22 +385,47 @@ class NativeBaseline:
         return tuple(self.close_dispatches)
 
 
-async def _run(args):
-    manifest_path = Path(args.engine_manifest)
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    template = HuggingFaceTemplate(getattr(args, "model_path", None) or "Qwen/Qwen2.5-7B-Instruct", MODEL_REVISION,
-                                  local_files_only=args.local_files_only)
+def resolve_context_policy(args):
+    """Keep the matrix's complete policy; CLI flags override only explicit values."""
+    policy = getattr(args, "context_policy", None)
+    if policy is None:
+        context_config = getattr(args, "context_config", None)
+        if context_config:
+            from controller.config import load_config
+            policy = load_config(context_config).context
+        else:
+            policy = CandidatePolicy()
+    overrides = {}
+    for argument, field in (("context_length", "max_total_model_tokens"),
+                            ("max_new_tokens", "max_new_tokens"),
+                            ("table_relations", "table_relations"),
+                            ("table_annotation_style", "table_annotation_style")):
+        value = getattr(args, argument, None)
+        if value is not None:
+            overrides[field] = value
     system_prompt = getattr(args, "system_prompt", None)
     if getattr(args, "system_prompt_file", None) is not None:
         with Path(args.system_prompt_file).open("r", encoding="utf-8", newline="") as stream:
             system_prompt = stream.read()
     # Keep the resolved body in existing workload/policy provenance, including
     # intentional leading/trailing whitespace. No separate prompt hash is needed.
-    args.system_prompt = system_prompt
-    policy = CandidatePolicy(max_total_model_tokens=args.context_length,
-                             max_new_tokens=args.max_new_tokens, system_prompt=system_prompt,
-                             table_relations=getattr(args, "table_relations", False),
-                             table_annotation_style=getattr(args, "table_annotation_style", "all_rows"))
+    if system_prompt is not None:
+        overrides["system_prompt"] = system_prompt
+    policy = replace(policy, **overrides)
+    args.system_prompt = policy.system_prompt
+    args.context_length = policy.max_total_model_tokens
+    args.max_new_tokens = policy.max_new_tokens
+    args.table_relations = policy.table_relations
+    args.table_annotation_style = policy.table_annotation_style
+    return policy
+
+
+async def _run(args):
+    policy = resolve_context_policy(args)
+    manifest_path = Path(args.engine_manifest)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    template = HuggingFaceTemplate(getattr(args, "model_path", None) or "Qwen/Qwen2.5-7B-Instruct", MODEL_REVISION,
+                                  local_files_only=args.local_files_only)
     rows = load_rows(args.input)
     if args.domain == "cloud":
         rows = [r for r in rows if r["Collection"] == CLOUD_COLLECTION]
@@ -475,6 +500,9 @@ async def _run(args):
                           "close_acknowledgement": "not_scheduler_ack"}))
         if retriever is not None and hasattr(retriever, "close"):
             retriever.close()
+    if close_error:
+        raise NativeProtocolError(close_error)
+    return report
 
 
 def main(argv=None):
@@ -485,6 +513,7 @@ def main(argv=None):
     parser.add_argument("--engine-manifest", required=True)
     parser.add_argument("--model-path", default=os.environ.get("CONTEXTKV_MODEL_PATH"),
                         help="local pinned snapshot; identity remains checked against the model/tokenizer manifest")
+    parser.add_argument("--context-config", help="reuse the complete context policy from a controller run config")
     prompt = parser.add_mutually_exclusive_group()
     prompt.add_argument("--system-prompt", help="Override the shared system prompt body")
     prompt.add_argument("--system-prompt-file", help="Read the shared system prompt verbatim from UTF-8 text")
@@ -493,8 +522,9 @@ def main(argv=None):
     parser.add_argument("--retriever-index", help="reuse a saved pinned BM25S index")
     parser.add_argument("--retriever-config", help="optional shared P3 hybrid retriever YAML/JSON")
     parser.add_argument("--evidence-corpus", help="original passages with version/condition metadata shared with controller")
-    parser.add_argument("--table-relations", action="store_true", help="append literal source table field associations")
-    parser.add_argument("--table-annotation-style", choices=["all_rows", "focus_refs"], default="all_rows",
+    parser.add_argument("--table-relations", action=argparse.BooleanOptionalAction, default=None,
+                        help="override literal source table field associations")
+    parser.add_argument("--table-annotation-style", choices=["all_rows", "focus_refs"],
                         help="optional annotation style; used only with --table-relations")
     parser.add_argument("--domain", choices=["cloud", "all"], default="cloud")
     parser.add_argument("--split-manifest")
@@ -508,14 +538,15 @@ def main(argv=None):
     parser.add_argument("--drain-timeout", type=float)
     parser.add_argument("--per-turn-timeout", type=float)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--context-length", type=int, default=32768)
-    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--context-length", type=int, help="override the shared context budget (default 32768)")
+    parser.add_argument("--max-new-tokens", type=int, help="override the shared output budget (default 512)")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--audit-prompt-ids", action="store_true")
     parser.add_argument("--no-stream", action="store_true", help="disable client token chunk timing (TTFT/TPOT unavailable)")
     args = parser.parse_args(argv)
-    asyncio.run(_run(args))
-    return 0
+    report = asyncio.run(_run(args))
+    return int(bool(report.unfinished_turns or report.timed_out_sessions or
+                    any(turn.status != "success" for turn in report.turns)))
 
 
 if __name__ == "__main__":

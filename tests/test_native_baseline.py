@@ -1,4 +1,5 @@
 from __future__ import annotations
+import argparse
 import asyncio
 from dataclasses import replace
 import json
@@ -85,6 +86,29 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.input_ids,expected[0].input_ids)
         self.assertEqual(tuple(self.requests[-1][1]["input_ids"]),expected[0].input_ids)
         self.assertIn(prompt,bytes(result.input_ids).decode())
+
+    async def test_shared_explicit_revisit_policy_does_not_restore_a_conservative_only_block(self):
+        from adapters.mtrag import OnlineContext, OnlineMessage, OnlineTurn
+        from bench.native_baseline import resolve_context_policy
+        policy = resolve_context_policy(argparse.Namespace(context_policy=CandidatePolicy(
+            revisit_mode="explicit", revisit_history_turns=6, reference_prefix_length=6)))
+        baseline = NativeBaseline("B0", self.native, ByteTemplate(), policy=policy,
+                                  corpus_snapshot_id="fixture-v1", test_mode=True)
+        first = OnlineTurn("scope", "scope:1", 1, "fixture", "Tell me the timeout limit", (),
+                           (OnlineContext("old", "The timeout limit is 30 seconds.", "docs://old"),), "P2")
+        result = await baseline(first)
+        second = OnlineTurn("scope", "scope:2", 2, "fixture", "What about that limit?",
+            (OnlineMessage("user", first.query), OnlineMessage("assistant", result.assistant_text)),
+            (OnlineContext("current", "Unrelated deployment notes.", "docs://current"),), "P2")
+        snapshot = baseline.snapshots["scope"]
+        evidence = tuple(to_evidence(c, "fixture-v1") for c in second.contexts)
+        shared = build_candidates(snapshot, second.query, evidence, policy, ByteTemplate())[0]
+        old_default = build_candidates(snapshot, second.query, evidence, CandidatePolicy(), ByteTemplate())[0]
+        assert {key.document_id for key in shared.required_blocks} == {"current"}
+        assert {key.document_id for key in old_default.required_blocks} == {"old", "current"}
+        actual = await baseline(second)
+        assert actual.input_ids == shared.input_ids
+        assert {block.key.document_id for block in actual.audit_evidence} == {"current"}
 
     async def test_b0_full_prompt_no_native_or_research_session_fields(self):
         baseline = self.baseline("B0")
@@ -259,21 +283,29 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
                 await client.server_info()
 
 
-def test_native_cli_prompt_file_preserves_body_in_policy_and_workload(tmp_path,monkeypatch):
+@pytest.mark.parametrize("failed_generation", [False, True])
+def test_native_cli_prompt_file_preserves_body_in_policy_and_workload(tmp_path,monkeypatch,failed_generation):
     import bench.native_baseline as native_module
     raw = b"  Use only the cited evidence.\r\nKeep this space. \r\n"
     prompt_file = tmp_path/"prompt.txt"
     prompt_file.write_bytes(raw)
     manifest = tmp_path/"engine.json"
     manifest.write_text("{}")
+    context_config = tmp_path/"context.yaml"
+    context_config.write_text("context:\n  revisit_mode: explicit\n  revisit_history_turns: 6\n"
+                              "  allow_version_comparison: true\n  reference_prefix_length: 6\n"
+                              "  max_new_tokens: 123\n  table_relations: true\n"
+                              "  table_annotation_style: focus_refs\n")
     observed = []
     def respond(request):
         if request.url.path == "/server_info":
             return httpx.Response(200,json={"version":"fake-http-correctness"})
         payload = json.loads(request.content)
         observed.append(payload)
-        return httpx.Response(200,json={"text":"ok","output_ids":[111,107],
-            "meta_info":{"finish_reason":{"type":"stop"},"completion_tokens":2}})
+        response = {"text":"ok", "meta_info":{"finish_reason":{"type":"stop"},"completion_tokens":2}}
+        if not failed_generation:
+            response["output_ids"] = [111,107]
+        return httpx.Response(200,json=response)
     http = httpx.AsyncClient(base_url="http://fake.test",transport=httpx.MockTransport(respond))
     client_class,baseline_class = native_module.NativeSGLangClient,native_module.NativeBaseline
     monkeypatch.setattr(native_module,"HuggingFaceTemplate",lambda *args,**kwargs:ByteTemplate())
@@ -285,15 +317,38 @@ def test_native_cli_prompt_file_preserves_body_in_policy_and_workload(tmp_path,m
     try:
         assert native_module.main([str(FIXTURE),"--baseline","B0","--engine-manifest",str(manifest),
             "--domain","all","--limit-sessions","1","--output",str(output),
-            "--system-prompt-file",str(prompt_file)]) == 0
+            "--system-prompt-file",str(prompt_file), "--context-config",str(context_config)]) == int(failed_generation)
     finally:
         asyncio.run(http.aclose())
     payload = json.loads((output/"native-B0-prompt-audit.json").read_text())
     assert payload["policy"]["system_prompt"] == raw.decode()
     assert payload["workload"]["system_prompt"] == raw.decode()
     assert payload["workload"]["system_prompt_file"] == str(prompt_file)
+    assert payload["policy"]["revisit_mode"] == "explicit"
+    assert payload["policy"]["revisit_history_turns"] == payload["policy"]["reference_prefix_length"] == 6
+    assert payload["policy"]["allow_version_comparison"] is True
+    assert payload["policy"]["max_new_tokens"] == 123
+    assert payload["policy"]["table_relations"] is True
+    assert payload["policy"]["table_annotation_style"] == "focus_refs"
+    if failed_generation:
+        assert payload["report"]["turns"][0]["status"] == "failed"
+        assert payload["report"]["unfinished_turns"] == 2
     assert raw.decode() in bytes(observed[0]["input_ids"]).decode()
     with pytest.raises(SystemExit) as exc:
         native_module.main([str(FIXTURE),"--baseline","B0","--engine-manifest",str(manifest),
             "--system-prompt","one","--system-prompt-file",str(prompt_file)])
     assert exc.value.code == 2
+
+
+def test_controller_cli_failure_is_nonzero_and_keeps_report(tmp_path):
+    from controller.cli import main
+    config = tmp_path/"small.yaml"
+    config.write_text("context:\n  max_total_model_tokens: 200\n  max_new_tokens: 64\n")
+    output = tmp_path/"failed-controller"
+    with pytest.raises(SystemExit) as caught:
+        main(["--config",str(config), "--state-dir",str(output), "bench",str(FIXTURE),
+              "--domain","all", "--limit-sessions","1"])
+    assert caught.value.code == 1
+    report = json.loads(next(output.glob("benchmark-*.json")).read_text())["report"]
+    assert report["turns"][0]["status"] == "failed" and report["unfinished_turns"] == 2
+    assert next(output.glob("summary-*.json")).exists()

@@ -67,7 +67,7 @@ class TurnTiming:
 
 def summarize_timings(turns: Sequence[TurnTiming], *, window_start: float, window_end: float,
                       ttft_slo: float, tpot_slo: float, single_token_policy: str = "ttft_only") -> dict:
-    if window_end <= window_start or min(ttft_slo, tpot_slo) < 0:
+    if window_end <= window_start or any(not math.isfinite(v) or v < 0 for v in (ttft_slo, tpot_slo)):
         raise ValueError("invalid observation window or SLO")
     if single_token_policy not in {"ttft_only", "exclude"}:
         raise ValueError("single-token policy must be ttft_only or exclude")
@@ -79,6 +79,7 @@ def summarize_timings(turns: Sequence[TurnTiming], *, window_start: float, windo
                  or (t.output_tokens == 1 and single_token_policy == "ttft_only"))]
     statuses = {s: sum(t.status == s for t in turns) for s in sorted({t.status for t in turns})}
     return {"observation_seconds": duration, "completed_in_window": len(in_window),
+            "slo": {"ttft_seconds": ttft_slo, "tpot_seconds": tpot_slo},
             "throughput_requests_per_second": len(in_window) / duration,
             "slo_goodput_requests_per_second": len(good) / duration,
             "ttft_seconds": distribution(t.ttft for t in success if t.ttft is not None),

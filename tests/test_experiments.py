@@ -136,7 +136,8 @@ def test_matrix_shares_prompt_and_default_budget_between_native_and_controller(t
     value = spec(tmp_path)
     base = tmp_path/"base.yaml"
     base.write_text(yaml.safe_dump({"context":{"system_prompt":"base prompt", "max_new_tokens":1024,
-                                              "max_total_model_tokens":8192}}))
+        "max_total_model_tokens":8192, "revisit_mode":"explicit", "revisit_history_turns":6,
+        "allow_version_comparison":True, "reference_prefix_length":6}}))
     value["base_config"] = str(base)
     expected = "base prompt"
     if prompt_source == "inline":
@@ -174,6 +175,62 @@ def test_matrix_shares_prompt_and_default_budget_between_native_and_controller(t
     assert seen["native"].max_new_tokens == seen["controller"].context.max_new_tokens == 1024
     assert seen["native"].context_length == seen["controller"].context.max_total_model_tokens == 8192
     assert seen["native"].model_path == "/pinned/model-snapshot"
+    assert seen["native"].context_policy == seen["controller"].context
+    assert native_module.resolve_context_policy(seen["native"]) == seen["controller"].context
+
+
+@pytest.mark.parametrize("field,value", [("revisit_mode", "explicit"), ("revisit_history_turns", 6),
+    ("allow_version_comparison", True), ("reference_prefix_length", 6),
+    ("max_total_model_tokens", 16384), ("max_new_tokens", 1024)])
+def test_matrix_rejects_method_specific_required_policy_or_budget(tmp_path, field, value):
+    matrix = spec(tmp_path)
+    matrix["methods"][0]["overrides"]["context"] = {field:value}
+    with pytest.raises(ValueError, match="shared matrix policy"):
+        matrix_jobs(matrix)
+
+
+def test_matrix_normalizes_shared_explicit_keys_but_allows_layout_and_annotation_studies(tmp_path):
+    from dataclasses import asdict
+    from controller.evidence import make_evidence
+    import yaml
+    key = asdict(make_evidence("fixed source", "one").key)
+    base = tmp_path/"shared-context.yaml"
+    base.write_text(yaml.safe_dump({"context":{"explicit_keys":[key]}}))
+    matrix = spec(tmp_path)
+    matrix["base_config"] = str(base)
+    matrix["methods"][0]["overrides"]["context"] = {
+        "explicit_keys":[key], "layout":"contextpilot", "table_relations":True}
+    assert len(matrix_jobs(matrix)) == 3
+    matrix["methods"][0]["overrides"]["context"]["explicit_keys"] = []
+    with pytest.raises(ValueError, match="context.explicit_keys"):
+        matrix_jobs(matrix)
+
+
+@pytest.mark.parametrize("key,value", [("context_length", 8192), ("max_new_tokens", 128)])
+def test_matrix_native_budget_must_match_common_policy(tmp_path, key, value):
+    matrix = spec(tmp_path)
+    matrix["methods"] = [{"id":"B0", "kind":"native", "native":{key:value}}]
+    with pytest.raises(ValueError, match="shared matrix budget"):
+        matrix_jobs(matrix)
+
+
+def test_matrix_persists_explicit_slo_and_freezes_it_with_selection(tmp_path):
+    matrix = spec(tmp_path)
+    matrix["slo"] = {"ttft_seconds":.5, "tpot_seconds":.02}
+    rows = asyncio.run(run_matrix(matrix, tmp_path/"slo-dev"))
+    assert all(r["summary"]["timing"]["slo"] == matrix["slo"] for r in rows)
+    frozen = select_development(matrix, rows)
+    matrix["slo"]["ttft_seconds"] = .8
+    with pytest.raises(ValueError, match="frozen development"):
+        asyncio.run(run_matrix(matrix, tmp_path/"slo-test", stage="test", frozen=frozen))
+
+
+@pytest.mark.parametrize("slo", [{"ttft_seconds":float("nan")}, {"tpot_seconds":-1}, {"ttft_ms":500}])
+def test_matrix_rejects_invalid_slo_before_generation(tmp_path, slo):
+    matrix = spec(tmp_path)
+    matrix["slo"] = slo
+    with pytest.raises(ValueError, match="matrix slo"):
+        matrix_jobs(matrix)
 
 
 def test_matrix_prompt_provenance_changes_with_file_content_and_rejects_method_mismatch(tmp_path):

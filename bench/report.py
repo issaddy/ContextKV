@@ -242,9 +242,12 @@ def main(argv=None):
     parser.add_argument("--epsilon", type=float, default=.01)
     parser.add_argument("--bootstrap-samples", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--ttft-slo-seconds", type=float, default=2.0)
+    parser.add_argument("--tpot-slo-seconds", type=float, default=.1)
     args = parser.parse_args(argv)
     optional = {key: load_jsonl(getattr(args, key)) if getattr(args, key) else () for key in ("quality", "occupancy", "transfers")}
-    summary = summarize_run(json.loads(Path(args.input).read_text()), **optional)
+    slo = {"ttft_slo": args.ttft_slo_seconds, "tpot_slo": args.tpot_slo_seconds}
+    summary = summarize_run(json.loads(Path(args.input).read_text()), **optional, **slo)
     if args.reference_quality:
         if not args.quality or not args.reference_run:
             parser.error("--reference-quality requires --quality and --reference-run to bind both answers")
@@ -259,7 +262,7 @@ def main(argv=None):
             {key: paired_quality(optional["quality"], reference, dimension=key,
                                  epsilon=args.epsilon, seed=args.seed, samples=args.bootstrap_samples) for key in dimensions})
     if args.reference_run:
-        reference = summarize_run(json.loads(Path(args.reference_run).read_text()))
+        reference = summarize_run(json.loads(Path(args.reference_run).read_text()), **slo)
         summary["paired_latency"] = paired_latency(summary, reference, seed=args.seed, samples=args.bootstrap_samples)
     target = Path(args.output)
     target.parent.mkdir(parents=True, exist_ok=True)
