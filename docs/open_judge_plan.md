@@ -2,7 +2,7 @@
 
 本轮建议先用 **Selene Mini 8B** 做本地元评测，以 **Prometheus 2 7B** 为原协议对照，再为通过实际检查的 evaluator 接入已保存的 Cloud dev 回答。两者分别来自 Llama、Mistral 家族，与当前 Qwen2.5-7B 生成器不同；无需付费 API 或等用户填写人工分数即可推进。跨家族只能减少一种共同偏差，不能证明评分可靠，也不能把模型评分称为人审。
 
-截至 2026-10-24，已完成官方来源审查并实现 `bench/native_judge.py` 薄适配器与 fake HTTP 合同测试；未下载大权重、未启动 GPU 服务、未产生任何新质量分数。小文件与访问记录在 ignored `runs/open-judge-research/`，合成请求准备文件在 `runs/open-judge-preparation/`。本方案独立于 B 阶段计时实验。
+截至 2026-10-24，已完成官方来源审查、`bench/native_judge.py` 原生薄适配器、`bench/grouse_meta.py` 固定元评测与合同测试；Selene/Prometheus 完整权重均已下载并在 stock SGLang/H200/GPU0 上运行。每模型完成 10 次原生诊断评分及完整 GroUSE train16，真实范围漏判和协议失败见[首轮验证](open_judge_validation.md)，不能据此宣布质量可靠。小文件与访问记录在 ignored `runs/open-judge-research/`，合成请求准备文件在 `runs/open-judge-preparation/`。本方案独立于 B 阶段计时实验。
 
 ## 现有链路与最小缺口
 
@@ -29,9 +29,9 @@ GroUSE 官方 README 链接的 `illuin/llama-3-grouse` 本次未鉴权 API 返�
 
 Prometheus 2 为 7.242B BF16 参数，官方权重文件约 14.483 GB；Selene 为 8.030B BF16 参数，约 16.061 GB。权重本身约 13.49 / 14.96 GiB。两者配置均为 32 层、8 个 KV heads、head dimension 128；TP=1、BF16 KV 时，每 token KV 约 128 KiB，32,768 slots 约 4 GiB。**24–32 GiB 是单并发 32K 上下文的初步资源预算，非实测最低显存或峰值**，还需包含激活、图和 allocator。Selene 配置支持 128K，但不能把 32K 预算直接用于 128K。
 
-已有固定 SGLang `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b` 源码包含 MistralForCausalLM 与 LlamaForCausalLM；因此可复用当前隔离 GPU 环境，不必为此再安装 vLLM、FastChat 或完整 Prometheus Python 包。这里只验证了源码支持，实际加载仍需首次运行确认。[固定 Mistral 实现](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/models/mistral.py)、[固定 Llama 实现](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/models/llama.py)。
+已有固定 SGLang `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b` 源码包含 MistralForCausalLM 与 LlamaForCausalLM；因此可复用当前隔离 GPU 环境，不必为此再安装 vLLM、FastChat 或完整 Prometheus Python 包。这两个固定架构均已实际加载并完成开发评分，完整启动/运行信息保存在各自 runtime 文件；显存预算仍不能替代具体峰值测量。[固定 Mistral 实现](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/models/mistral.py)、[固定 Llama 实现](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/models/llama.py)。
 
-后续在性能采样结束后的独立时段，用固定 snapshot 启动 stock SGLang，建议独立端口 `30001`、初始 context/total tokens 32768、并发 1。不要直接复用固定 Qwen revision/fingerprint 的 `scripts/launch_sglang.sh`。原生 chat endpoint 按新模型自身 tokenizer chat template 渲染；不要手工再包一层 Mistral `[INST]` 或 Qwen 模板。保留实际 server info、模型 snapshot、启动参数与显存观测。
+已在与性能采样分开的独立时段，用固定 snapshot 启动 stock SGLang，使用独立端口 `30001`、初始 context/total tokens 32768、并发 1。不要直接复用固定 Qwen revision/fingerprint 的 `scripts/launch_sglang.sh`。原生 chat endpoint 按新模型自身 tokenizer chat template 渲染；不要手工再包一层 Mistral `[INST]` 或 Qwen 模板。保留实际 server info、模型 snapshot、启动参数与显存观测。
 
 现存完整 judge JSON 的实测字符长度：correction P3 的 41 份为 22,216–48,885，16K Ours 的 41 份为 19,620–54,510；这不是 token 数。正式评分前用 judge 的固定 tokenizer 做一次入口预算核对。超限时记录失败或显式换更长上下文运行配置，不能静默丢掉旧可见证据。
 
@@ -54,7 +54,7 @@ request = {
 # 不加 response_format=json_object；保留该模型的原生 Result 格式。
 ```
 
-实际 HTTP 示例（本轮未执行）：
+原生 HTTP 调用示例（上述准备样例本身仅做离线渲染，实际评分由 CLI 发送）：
 
 ```bash
 curl --fail-with-body http://127.0.0.1:30001/v1/chat/completions \
@@ -83,7 +83,7 @@ finally:
 # client.complete(messages) 返回原始 transport 结果；不强制套五维 rubric。
 ```
 
-本地配置示例（model 名需与实际 served-model-name 相同，以下权重仍未下载）：
+本地配置示例（model 名需与实际 served-model-name 相同）：
 
 ```json
 {
@@ -135,8 +135,8 @@ judge 输入只含 `input`、`actual_output`、`expected_output`、`references`�
 
 ## 下一步的有界执行顺序
 
-1. 薄 adapter 与 fake HTTP 测试已完成；下一步用本轮两个请求样例和实际本地服务验证模型输出合同，不先将接口成功记为质量通过。
-2. 性能采样结束后下载固定 Selene snapshot 并独立启动，先做 tokenizer 预算和极少量合成接口检查，再跑 GroUSE train 16。Prometheus 作为同预算候选对照；报告每项通过率、解析率、失败类型、token/时间成本，不把 16 例结果当可信区间保证。
+1. 薄 adapter、固定 GroUSE 元评测和两模型实际服务开发验证已完成。原生输出合同成功但语义漏检明显，不按接口成功认定质量通过。
+2. 两模型同预算 train16 原始结果保留。Selene 的6次格式失败可由显式 `normalized_v1` 恢复，但缺少4–7次下游实际响应，必须完整重跑新train；Prometheus 32次均未产生官方可解析JSON，单纯类型规范化无效。模型/原生模板适配与原子条件判断继续分别改进，不把16例结果当可信区间保证。
 3. 针对项目已见错误增加明确标为开发诊断的反例：附件 10 MB 与 50 MB、错误概括“1 MB 含附件”、把历史 assistant 断言当来源、无效 curl JSON、合理简短拒答与无依据长答。这些是规则/assistant 构造探针，不伪称新增人工标签。
 4. 依据 train 元评测冻结 model/revision、四模板或适配协议、抽样参数、适用性与归一化，再运行 GroUSE test 144 一次。失败如实报告；若后续据此修改，明确它已转为开发证据，不能继续称未见元评测。
 5. 对现有三组 P3 共 123 份实际回答完成五维模型评分，完整覆盖失败、NA、截断和困难案例，按现有会话配对验收。与 MiniCheck、规则 flags 的分歧用于定位缺口，不强行融合成“真值”。dev 可以用于继续优化方法；最终冻结的项目 test 保持独立。
@@ -145,4 +145,4 @@ judge 输入只含 `input`、`actual_output`、`expected_output`、`references`�
 
 ## 近期方法可复用的部分
 
-2026 年 Autorubric 提供 rubric、分维聚合、agreement 等工程实践；可借鉴原子条件与显式聚合，但当前主工程已有 HTTP/绑定/配对统计，不必立即引入其 LiteLLM、statsmodels、sklearn 等完整依赖。[论文](https://arxiv.org/html/2603.00077v1)、[作者仓库](https://github.com/delip/autorubric/tree/3a85dc182a3b4a5ecf3a8eb4765b936d7645fd3e)。PReMISE 强调 rubric 的结构、偏好适配、可靠性和对抗稳健性不能只由高 agreement 代替；其论文链接的作者仓库本次返回 404，故只作研究启示，不列现成可运行依赖。[PReMISE 论文](https://arxiv.org/abs/2605.30803)。本轮到此收敛，不继续扩模型清单或启动训练。
+2026 年 Autorubric 提供 rubric、分维聚合、agreement 等工程实践；可借鉴原子条件与显式聚合，但当前主工程已有 HTTP/绑定/配对统计，不必立即引入其 LiteLLM、statsmodels、sklearn 等完整依赖。[论文](https://arxiv.org/html/2603.00077v1)、[作者仓库](https://github.com/delip/autorubric/tree/3a85dc182a3b4a5ecf3a8eb4765b936d7645fd3e)。PReMISE 强调 rubric 的结构、偏好适配、可靠性和对抗稳健性不能只由高 agreement 代替；其论文链接的作者仓库本次返回 404，故只作研究启示，不列现成可运行依赖。[PReMISE 论文](https://arxiv.org/abs/2605.30803)。后续按已观测的范围漏判、引用校准和条件分支错误选择具体方法、权重或训练扩展；方法清单本身不算完成效果。

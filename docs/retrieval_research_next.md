@@ -10,7 +10,7 @@
 | 纠正识别 query | `correction_aware`已实现；三个词法触发只使用用户文字。真实P3匹配离线路由，附件限额表17→3 | [新答案仍把1MB文档、10MB附件、11MB请求混成一个限制关系](correction_query_view.md)，并发生历史助手句子冒充外部引用；不是重新提出尚未实现的query选择 |
 | Qwen3-Reranker-0.6B | [官方论文](https://arxiv.org/html/2506.05176v3)与固定Apache-2.0模型已复用；同50池/1024 cap真实评分41轮成功、0截断。[独立审查](qwen3_rerank_validation.md)复现R@5 .4085，低于BGE .5231 | 保留BGE及Qwen负结果。该结论限定于当前池与视角；部分qrels下降仍是相关替代段落未标注，不能当作总体回答错误 |
 | MiniCheck + 引用增补 | 固定官方API已运行Q1/Q2完整audit；去掉语义输入中的引用标记后重测。变换已从替换改为保留旧引用、去重新增ID | [两个真实候选](grounding_v2_assistant_audit.md)暴露复合句和段尾作用域。增补合同正确不等于全部子断言得到支持，仍需来源适用性与独立审查 |
-| 原文表格行关系 | [确定性 helper](table_relations.md)已实现 Markdown 和明确编号表题的扁平数值行；实际附件轮两份原段落各提取三行，保留原文位置，未误关联地域脚注 | 以可选辅助表示检验跨对象限额混淆；尚无真实生成质量收益，新增 tokens 和候选选择变化也须计入 |
+| 原文表格行关系与焦点引用 | [确定性 helper](table_relations.md)保留原文及跨度；全行版已完成真实 P3 和冻结对照。新增可选 `focus_refs` 复用 CRAFT 行文本函数，在[12 次冻结开发探针](table_focus_validation.md)的两个历史中稳定改善目标对象/引用错误，生产输入与冻结输入逐 token 等价 | 局部结果不是总体质量通过；继续完整 P3、长表、条件/版本和未触发轮回归，拆解混合干预并计入在线选择开销 |
 | Querit-Reranker | [2026-06论文](https://arxiv.org/html/2606.19037v1)的目标分布合成query、teacher软标签与模型合并已分析；尚未迁移训练或运行权重 | 保留为领域适配选项；不重复计作已完成复用，也不把teacher生成标签称为完全无监督。优先处理当前已可定位的证据使用缺口 |
 
 上述工作可继续在dev迭代。当前/最近历史/纠正路由与模型选型均保留记录，最终test继续冻结；不因五个开发会话的规模而停止实现，也不将这五个已观察会话重新命名为独立最终验证。
@@ -39,22 +39,38 @@ TabRAG的论文标题/仓库README略有差异，身份以论文直接链接的�
 
 [表格研究补充](table_relations.md)已核查 CRAFT（ACL 2026）的作者 MIT 代码、TreeThinker（2025）的原表头路径、SMART（2026）的选择/计算/排序操作、DRE（2026）的错取值与漏行诊断、SSC（2026）的选择性复查和对→错评估。它们针对不同缺口，不能把“新增一个注释段”当成所有结构问题已经解决；也不把这些论文在单表短答案或含 oracle 输入的结果套用到本项目多轮 QA。
 
-优先推进**带来源的行选择与范围核对**：每个数值 claim 保留它使用的对象、原行/值/条件 span，将“值可见”与“新增包含关系有依据”分开；先在保存初稿上检验，再做一次选择性修订。其次可从 CRAFT 的 `build_row_texts` 和行选择逻辑复用小模块，借现有 BGE 给辅助注释选问题相关行，保留全部原正文。原始 HTML/LaTeX 仍有结构时，再扩展 header path 和数值操作验证；扁平文本缺失的关系不由解析器猜造。
+优先推进**带来源的行选择与范围核对**：每个数值 claim 保留它使用的对象、原行/值/条件 span，将“值可见”与“新增包含关系有依据”分开；先在保存初稿上检验，再做一次选择性修订。CRAFT 的 `build_row_texts` 小模块已经直接复用，现有 `focus_refs` 采用轻量词法选择并保留全部原文；现有 BGE 行评分是下一可比较选项，尚未实现。原始 HTML/LaTeX 仍有结构时，再扩展 header path 和数值操作验证；扁平文本缺失的关系不由解析器猜造。
 
-这条顺序不依赖新底座训练或付费 judge，但有明确额外调用与模型误判风险，必须与不复查、普通 NLI、全量修订共同比较。对条件来源、历史助手污染和相关行遗漏仍分别计数；继续保留所有负面结果与未触发轮回归。DRE 原论文的 gold-assisted critic、CRAFT 的 OTT-QA gold passage、TreeThinker 提示中的“问题必有答案”都不进入在线输入。各固定源码、许可核查和具体改动入口见上述补充，当前新机制仍是待实现/验证路线。
+这条顺序不依赖新底座训练或付费 judge，但有明确额外调用与模型误判风险，必须与不复查、普通 NLI、全量修订共同比较。对条件来源、历史助手污染和相关行遗漏仍分别计数；继续保留所有负面结果与未触发轮回归。DRE 原论文的 gold-assisted critic、CRAFT 的 OTT-QA gold passage、TreeThinker 提示中的“问题必有答案”都不进入在线输入。各固定源码、许可核查和具体改动入口见上述补充；词法焦点引用已实现为可选项，BGE 行评分、后置范围核对和更复杂结构路径仍待实现/验证。
 
 这些实验首先共享冻结的初稿/原始材料以定位机制；真实闭环再共享语料、问题、生成模型、输出预算和资源，对照检索与回答过程的变化。代码块语法、claim支持、对象适用性、拒答和完整性分别报告；同一分类器选择修改后，不能仍由它单独证明质量提升。变动轮与未触发轮都保留，历史传播也计入闭环结果。
 
 ## 评估器也需要检验
 
-独立本地judge可作为待盲审包的补充诊断，不应直接替代人工或重复使用MiniCheck自证修复。[GroUSE（COLING 2025）](https://aclanthology.org/2025.coling-main.304/)以具体grounded-QA失败模式评估judge，指出与强模型分数相关不代表能辨别这些错误。[官方固定仓库](https://github.com/illuin-tech/grouse/tree/e4c57ba9eb14548c7642daca3ed4ff24d760c7fa)的`meta-evaluate --train_set`提供16个开发例，另有144个test；代码[MIT许可证](https://github.com/illuin-tech/grouse/blob/e4c57ba9eb14548c7642daca3ed4ff24d760c7fa/LICENSE.txt)已核。默认运行依赖外部API，后续若采用只复用例子/评分协议，明确接本地模型，不直接启动默认付费链路。
+独立本地judge可作为待盲审包的补充诊断，不应直接替代人工或重复使用MiniCheck自证修复。[GroUSE（COLING 2025）](https://aclanthology.org/2025.coling-main.304/)以具体grounded-QA失败模式评估judge，指出与强模型分数相关不代表能辨别这些错误。[官方固定仓库](https://github.com/illuin-tech/grouse/tree/e4c57ba9eb14548c7642daca3ed4ff24d760c7fa)的`meta-evaluate --train_set`提供16个开发例，另有144个test；代码[MIT许可证](https://github.com/illuin-tech/grouse/blob/e4c57ba9eb14548c7642daca3ed4ff24d760c7fa/LICENSE.txt)已核。现有 `bench/native_judge.py` 与 `bench/grouse_meta.py` 已接本地服务，复用固定原生模板、GroUSE 条件规则和失败语义，未启动上游默认外部 API 链路。
 
-[Prometheus-7B-v2.0官方说明](https://huggingface.co/prometheus-eval/prometheus-7b-v2.0)提供rubric、reference answer和专用Mistral模板，绝对评分输出`[RESULT]`1–5，可作为候选judge。先以GroUSE开发例和已有的限额混淆、历史引文、复合来源等目标错误筛查校准与辨别能力，保留误判；用合适的reference评价完整性，外部证据始终单列，参考答案不回流在线系统。GroUSE的144例test不参与调提示；本项目最终test也继续冻结。官方GroUSE微调模型本次访问未成功，不能写成已下载/可用。
+[Prometheus-7B-v2.0官方说明](https://huggingface.co/prometheus-eval/prometheus-7b-v2.0)提供rubric、reference answer和专用Mistral模板，绝对评分输出`[RESULT]`1–5。它和 Selene Mini 8B 均已完成真实首轮开发验证：原生两份 probe 各五维，共各 10 次调用，全部得到合法评分；另各执行 GroUSE train16。两者均未可靠辨别“文档 1 MB 包含附件”这一新增范围错误，因此合法格式和跨模型家族不是质量通过条件。[完整输入核对、原始分数与误差分析](open_judge_validation.md)保留全部结果；未读取 GroUSE test144 或项目最终 test。官方 GroUSE 专门微调模型本次访问未成功，不能写成已下载/可用。
 
-这条judge路线尚未实现或验证。若开发诊断可用，再生成带模型/模板/来源记录的独立意见供盲审；模型分数仍标为模型诊断，不称为human review或独立事实真值。
+当前需要改进的是已实现评估器的格式适配与语义辨别。Selene 原 GroUSE 协议 45 次调用有 39 次解析成功，96 项条件通过 48 项；Prometheus 的 32 次调用全部解析失败，其中 30 次到输出上限，其 0/96 不能解释为 96 次独立语义判断错误。Selene 的可选类型规范化已实现但尚缺后续真实调用，未生成新的通过率；范围限定词、引用作用域与合理拒答仍需独立改善。后续冻结协议再检查未见元评测并扩到完整开发回答，保留失败和不适用项。模型分数始终标为模型诊断，不称为 human review 或独立事实真值。
 
 ## 与B/C形成整体改进
 
 检索增强已进入P3，不再把“接通主路径”列为下一步。接续比较同一选定质量设置下的候选长度/条件误差/收益模型，并重新核查encoder/reranker共享GPU后的成本标定；不能把空闲GPU标定直接当成新负载已验证。C则在已触发host恢复的有限容量区间比较版本退役、原生写策略及必要的写入准入适配。
 
 A带来的额外检索、验证、修订及更长/更短答案，B的预测与切换开销，C的传输和保留影响，都纳入完整响应和会话完成时间。单模块改善不保证联合改善，联合结果也需通过消融定位贡献。若当前组合仍有不足，继续从这些可观察机制优化，不把单个负结果作为停止广泛复用的理由。
+
+## 全开发覆盖扫描与原子条件绑定的新增线索
+
+已对保存的 P3 off/on 各 41 轮做离线枚举，脚本和原始计时位于 `runs/table-focus-dev-review/`。82/82 保存输入可精确重建；每个变体保留各自完整实际历史与全部原段落。两组均仅附件纠正轮触发，两个来源各选中一个焦点行；相同历史下 `all_rows` 增加 417 tokens，`focus_refs` 增加 110，其余 40 轮输入逐 token 不变。这是覆盖与成本验证，不是 focus 的新闭环质量结论。Mac 稳态 parse+focus 的逐轮中位 CPU 再平均约 0.32 ms，首次可选库导入另列；Linux 服务和并发成本仍由真实运行衡量。
+
+扫描还在前一轮发现两张**无编号标题但有明确表头的限额表**，以及一个**带套餐条件的嵌套列表**。前两者因当前扁平表要求编号 caption 而未解析；后者不能直接按数值行展开，否则会把上层套餐条件丢掉。完整原文一直在模型输入中；辅助表示未覆盖不等于检索遗漏。下一步可优先扩展显式无编号标题/表头的结构支持，并为列表建立可核查的父级条件路径，保留来源 offset；对无法确定条件范围的文本仍保持未解析状态。该扫描只产生三个待审查行簇，不将它们冒充表格召回率的完整真值。
+
+以下三项是与此前 CRAFT、TabRAG、SMART 筛选不同的新入口，核查到作者原文及固定公开材料；未迁移其训练、代理工作流或评分结果。
+
+| 新工作与固定依据 | 实质机制、可复用入口和边界 |
+|---|---|
+| **FACTS，Findings ACL 2026**：[论文](https://aclanthology.org/2026.findings-acl.453.pdf)、[作者固定源码](https://github.com/BorealisAI/FACTS/tree/449625cf73ca809d17fa891eab978f0d767f3eb6) | 将 query/schema 生成的 SQL 与 Jinja2 模板分离，执行查询后用具名列渲染，可复用到同 schema 的表。[`src/facts_framework.py`](https://github.com/BorealisAI/FACTS/blob/449625cf73ca809d17fa891eab978f0d767f3eb6/src/facts_framework.py)包含执行反馈、SQL/template 对齐及 `values` 渲染入口；[许可](https://github.com/BorealisAI/FACTS/blob/449625cf73ca809d17fa891eab978f0d767f3eb6/LICENSE)是 CC BY-NC-SA 4.0，不能当 MIT 模块直接并入。最小思想适配是把对象、值、单位、条件和来源作为具名字段投影再渲染，检查所有字段来源；不启动其默认外部 LLM council，也不把 SQL 成功执行当作语义正确。本场景先需要可靠结构提取，不能把任意扁平段落假设为完整关系表。 |
+| **Dawn，SemEval 2026 Task 8**：[论文 §3、Appendix A](https://aclanthology.org/2026.semeval-1.363.pdf) | 将从参考段落抽取原子事实，与从会话恢复问题意图分开，再给出可回答性和回答范围信号；比单一提示词更强调信息来源分工。其多步实现使用 GPT-4o-mini，不能移用成当前 7B 的已验证收益。[官方补充材料](https://aclanthology.org/attachments/2026.semeval-1.363.SupplementaryMaterial.zip)经检查为论文 LaTeX/图及样式文件，并非可运行 RAG 包。可适配为“用户历史解析对象，外部 span 提供事实”的双来源记录：尤其避免历史助手错误成为外部引用。完整 QA 仍保留，事实旁路须绑定现有 ref/span；不直接复制整套多次分类/生成流程。 |
+| **Atomic Reasoning / SciAtomicBench，2025-06**：[原文 §4–5](https://arxiv.org/html/2506.06972v1)、[作者固定仓库](https://github.com/CelestineZYJ/SciAtomicBench/tree/5d29811f2e672520dfbf19a61e5be1c0c18d7942) | 先定位 claim 对应单元格，再分别做结构、实体及数值操作，最后合并局部结果。论文主要验证包含微调的科学表格 claim 验证；固定仓库仅有 README 与四个领域 JSON，未见模型/推理实现或独立 LICENSE，不能声称已复用可运行 verifier。可借其分解原则，在现有保存答案上分别检查“对象匹配、数值/单位匹配、条件保持、跨行运算依据”，用显式未知保留无法判断部分。科学表格二分类和因果推理不直接迁移成限额问答真值。 |
+
+据此，优先的可检验扩展是**带条件路径的来源事实记录与局部范围核对**：先让明确表头/父级条款进入原文 span 表示，再将回答中的对象、值和适用条件逐项对齐。与当前 `focus_refs` 的区别在于补足条件和范围，而非只换排序器；长表语义行评分仍可另用现有 BGE 做对照。比较时共享原始材料、初稿和生成预算，分别统计原对象修复、条件遗漏、新增无据包含关系、拒答和完整性，再进入闭环。来源字段可能解析错、原子拆分可能遗漏复合含义，这些失败都要保留。现有词法选择仅直接复用了 CRAFT 行文本函数，不是其 dense 重排算法复现。

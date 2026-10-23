@@ -6,9 +6,9 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | 430 passed，另有 6 subtests passed；runs/pytest-capacity-quality-final.log，已显式开启真实 tokenizer 项 |
-| 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过；Linux 30 个真实候选也逐 token 相同 |
-| Ruff / shell / wheel | 通过；wheel 包含 engine_patches.smoke |
+| 最近完整 CPU 回归 | 622 passed，6 subtests passed，4 个显式 opt-in tokenizer 项跳过；runs/pytest-table-focus-normalized.log |
+| 固定 Qwen tokenizer 专项 | 随后显式开启检查，5 passed（含上述 4 项）；runs/pytest-table-focus-tokenizer.log。原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过；Linux 30 个真实候选也逐 token 相同 |
+| Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 table_focus、CRAFT 行文本、GroUSE 解析器与候选源码，CRAFT 完整许可在 wheel 中；runs/build-table-focus.log |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
 | 冻结模拟测试矩阵 | 39 jobs / 117 轮成功 |
 | 继承主方法参数的开发集消融 | 15 jobs / 45 轮成功，不参与主方法选择 |
@@ -75,6 +75,8 @@ SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固
 - 16K 研究池独立完成 76 个 case 的标定：552 个正式请求、184 个独立 warmup，共 2268 条阶段/完成传输观测；四份 manifest 与合并文件来源一致。c4 首 token 留出仅 50% 受支持，长输入的输出预算变化主要反映在首次 forward 前的联合等待/准备区间；配置匹配不等于预测准确。详见[有限池标定分析](capacity_calibration_validation.md)。
 - 同一 16K/279040-host 配置的六方法矩阵共 246/246 成功。Ours 与 no-retire 的 41 轮输入/输出完全相同，但仍有 34 次固定策略回退、零成本切换；完成均值 5.325/5.313 s，未观察到退役的时延收益。Rebuild 为 4.122 s，但与其 no-retire 只有 6 轮输入一致，不能将差值直接归因 C。完整状态、真实恢复/传输、回退因子与初态局限见[有限容量联合验证](controller_capacity_validation.md)。
 - 质量验收新增双侧原始问题/历史/检索材料/输入身份绑定，核对原运行的 split 声明与既有摘要，并汇总各层模拟标记。独立反例审查修正了开发数据冒充 heldout、模拟来源被 audit 遮蔽、相同答案挪用到不同提示三个漏检。真实 P3 的 123 轮原始绑定均通过；v2 盲审包评分仍全部为空，不建立质量结论。见[质量验收](quality_acceptance.md)。
+- 字面表格注释已完成 82 轮 P3 与 8 次冻结历史实验；随后直接复用 CRAFT 的 MIT 行文本函数，扩展当前 query 的词法焦点与行内来源。两固定历史、三臂正反顺序共 12 次 GPU 运行全部成功，新样式在两历史中均保留正确单附件限制和支持它的原引用，未重现已知范围错误。已可选接入共享候选、原生基线和矩阵；完整正文/QA/预算保持，默认关闭。仅是开发探针上的局部改善，见[焦点行验证](table_focus_validation.md)。
+- Selene Mini 8B 与 Prometheus 2 7B 的原生五维协议各完成 10 次真实评分，均正常解析，但关键范围扩张与缺引用仍有漏判。GroUSE 固定 train16 分别完成 45/32 次调用；Selene 条件通过48/96，6次字符串 null 失败；Prometheus 30次输出截断、2次JSON失败，零分代表该协议运行失败。官方解析/DTO与判分重放一致。显式 normalized_v1 已实现，尚需完整新 train；不回填缺失调用，不按格式完成率宣布语义可靠。见[独立评审验证](open_judge_validation.md)。
 
 ## 仍需完成的研究验收
 

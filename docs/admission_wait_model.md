@@ -34,3 +34,44 @@ Idle 准备项按候选 `(P,U,L)`——可复用前缀、新计算后缀、host 
 | [Sarathi-Serve，OSDI ’24 官方论文与代码入口](https://www.usenix.org/conference/osdi24/presentation/agrawal) | Prefill 与 Decode 的资源特性和同批干扰不同，需要分阶段定价，而不是把总 TTFT 当作内在 Prefill 成本。 | Chunked prefill、stall-free scheduling 与均匀批次构造。当前 forward/decode 回调复用本机实测，仍保留原生 SGLang 调度。 |
 
 这些来源提供可继续扩展的方向：先用真实 pre-forward 残差检验“固定服务期速率”和 FIFO 近似，必要时按批次成员变化重估剩余服务；在冻结开发/测试边界后，比较经验残余、尾部截断分布和轻量候选条件长度模型；对新的内存等待误差单独校准单侧风险，再做等预算决策实验。若进一步评估 UniBoost/Nested WAIT/Sarathi 类调度，应单列原生 scheduler 实验和基线，避免把控制器选择 APPEND/REBUILD 的收益与引擎调度变化混在一起。
+
+## B-v1 原生合同复核与下一轮设计（只读开发诊断）
+
+本节不修改当前模型、冻结 artifact 或运行中的 B gate 消融。诊断使用 `controller-stage-16384-v1` 两次重复的 72 个 Workload 报价、144 臂预测及已执行臂标签；早期 CPU profile 文件只包含其中 r1 的 36 个报价、72 臂。入口为 `runs/stage-workload-review/admission_contract_probe.py`，结果保存为同目录 `admission-contract-probe.json`。重放基线与保存的 72 个等待预测精确一致，敏感性只比较其中原已 eligible 的 69 个已执行动作。
+
+### 已确认的实现差异
+
+原生源码固定为 `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。本轮重新从官方固定 raw URL 读取 `schedule_policy.py`、`prefill_budget.py`，SHA 分别为 `28f57c7a…5aec68`、`b1d64e64…88e07e`，与工程 source manifest 及本地副本逐字一致；本地副本没有有效 Git HEAD，不能仅凭目录名声称版本正确。其它小型源码保存在 `runs/admission-source-audit/`，均从同一固定 revision 取得。
+
+- **容量预留不是服务长度。** 原生新候选以剩余 `max_new_tokens`（上限 `CLIP_MAX_NEW_TOKENS`，默认 4096）加未驻留输入和每请求页开销检查容量；运行请求的声明剩余预算再乘动态 `new_token_ratio`，`ignore_eos` 则乘 1。当前解析模型用经验条件残余同时决定服务时间和容量，两者可能偏向相反方向。此次所有 176 个 running/waiting 摘要出现次数的上限均为 1024，`ignore_eos=false`；不能将它们当作 176 个独立请求。[原生 PrefillAdder](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/managers/schedule_policy.py#L757-L765)、[新候选容量检查](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/managers/schedule_policy.py#L1360-L1397)
+- **动态比例当前没有被观测。** `scheduler.new_token_ratio_tracker.current` 会随正常 decode 下降、retraction 后更新；默认初始 0.7，最小为 `0.7×0.14=0.098`。它不是输出长度分布参数，也不能根据静态 `schedule_conservativeness=1` 推断每个报价的当前值。[原生 tracker](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/managers/scheduler_components/new_token_ratio_tracker.py)
+- **原生容量有两个账本。** `PrefillBudget` 同时记录 total 与 current offset；新请求先以未舍入总需求作严格 `< remaining_total` 检查，提交预留时将本次 extend 向页取整，再加一页和生成 headroom。当前模型只有一个虚拟 free。这里 page=64、chunk=8192；chunk 未完成时，本轮提交预算不包含最终生成 headroom，不能简单把整段 prompt+输出当作所有调度阶段的即时占用。[原生预算](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/prefill_budget.py#L67-L168)
+- **FIFO 在本次配置有源码支持。** 实际 runtime 为 `fcfs`、priority=false、max-running=8、mixed-chunk=false；FCFS 不重排，容量不足时停止这一轮队列遍历。当前不存在“因为用了优先级调度而 FIFO 必错”的证据。原生仍优先处理续传 chunk，并可能因 LoRA、pooling mode、L3 prefetch 跳过请求；这些能力不能泛化为此轮已经发生。当前报价的 running 集合还含 overlap 的 last batch/chunk，而 PrefillAdder 的运行 headroom 取传入的 `running_batch.reqs`，集合也不能默认为完全相同。[排序入口](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/managers/schedule_policy.py#L211-L278)
+- **树持有的前缀不由单个请求直接释放。** 原生 release 只直接释放 `cache_protected_len` 之后归请求所有的区间，再解锁路径；共享节点只有最后一个设备锁释放时才从 protected 转为 evictable，且这不等于立刻归还 allocator。此次 running 摘要共 99 次，全部有 protected 前缀，其占逻辑 allocated 的平均比例为 96.81%。这要求保留“locked 归一化代理”的限定，不能把 protected 前缀全扣掉（最后解锁可能使其可回收），也不能逐请求承诺全部释放。此前 locked 与 allocated 差额仅与页舍入相容，未证明存在大量共享锁误释放。[KV release](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/common.py#L395-L440)、[FULL 锁计数](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/unified_cache/components/full.py#L282-L377)
+
+### 全预算替换并未改善等待 MAE
+
+以下情景只在诊断进程中替换容量公式，服务长度先验、forward/decode 回调、FIFO、冷 queued 前缀和释放代理全部保持原值；没有读取当前答案来预测。四行使用同一批 69 个原 eligible、且各情景均 supported 的已执行动作。后两行使用默认比例作敏感性场景，**不是还原出的真实动态比例**。
+
+| 离线情景 | 相对基线均值变化个数 | 等待 MAE ms | actual−pred 均值 ms |
+|---|---:|---:|---:|
+| 当前模型 | 0 | 991.51 | +778.22 |
+| candidate/queued 改用 1024 预算及 64-token 页开销 | 18 | 1083.46 | +379.96 |
+| 再将 running 预留改为剩余预算×0.098 | 19 | 1106.72 | +515.22 |
+| 再将 running 预留改为剩余预算×0.7 | 19 | 1070.57 | +367.07 |
+
+统一预算减少了平均低估，但扩大了一些过度等待，整体 MAE 更差；它是需要纠正的语义混用，尚不是已验证的性能改进。既有仅改 candidate reserve=1024 的检查也仅使 MAE 从 991.507 到 991.332 ms，不能据此宣称解决主因。
+
+77 次 waiting 摘要均尚未生成 token；其中 19 次完整输入超过 8192，但其真实缓存命中未在摘要中保存，因此不能断言实际都做了两次 chunk。所有候选报价的未缓存后缀均不超过 8192。通过输入长度及“报价时刻位于同机 submit/response 区间”匹配其它请求，99 次 running、77 次 waiting 都各有一个可能匹配；这仍不是 request identity 证明，重复出现也不是独立样本。仅作离线标签诊断，running 的条件残余均值为 445.88、实际 431.48 tokens，MAE 171.89；waiting 先验 536、实际均值 573.88，MAE 185.42。结果支持继续研究状态条件和尾部，不能简单把公共均值调高后声称改进。
+
+### 下一轮最小观测与实现顺序
+
+先等待冻结 B gate 结果，按是否仍有净诊断价值决定是否扩接口。建议分两步，先精确观测，再单独启用 reservation/service 分离；保持原模型为对照，不同时更换长度先验、margin 或 cache 策略。
+
+1. **窄观测合同。** batch 可直接读 `new_token_ratio_tracker.current`（O(1)）；启动信息记录实际 clip、page、policy、chunk 和 mixed-chunk 设置。若要精确复算运行 headroom，区分 `running_batch.reqs` 与现有 overlap 汇总，或在原生创建 PrefillAdder 时记录其已算好的 running total offset；前者为 O(active)，后者是既有标量读取。不能把上一轮 offset 当作当前值，须附原生 pass/观测时点。
+2. **等待前缀的现成字段及年龄。** `match_kv_cache` 已写入 `req.prefix_len`（设备命中）、`req.host_hit_length`、`req.num_matched_prefix_tokens`；只复制这些标量是 O(waiting)，无需额外树遍历、同步 CUDA、锁前缀或重新 hash。它们是最近一次原生 match 的结果，未走到队头的请求可能尚未初始化，旧结果也可能被淘汰。需要同时记录“是否匹配/最近匹配 pass”；不能把默认零当作确证 cold，也不能在 quote 中调用 `init_next_round_input` 获得新值，因为后者会改变缓存/请求状态。[原生字段写入](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/common.py#L220-L267)
+3. **小型独立记账改动。** 给虚拟 job 分开保存 service 剩余均值/P90 与 native gate reserve；前者仍只决定预测完成时间，后者使用已观察比例、声明预算及页规则，完成时扣除/归还同一份 gate reserve。已知 queued 前缀分开定价设备驻留、host 恢复和新计算；缺失/陈旧观察继续用明确的冷前缀情景。先限于本轮 FCFS、单 FULL 池、不混合 prefill/decode 的配置，不假装复刻全部原生 scheduler。
+4. **必要验证。** CPU 合同测试覆盖 ratio 变化不改变 service 长度、ignore_eos 使用完整剩余预算、clip 在减去 generated 之后、页取整与严格容量边界、queued 首 token/后续 decode、共享锁最后释放、chunk 未完成时 headroom 口径，以及缺失/陈旧前缀保持未知。原生纯预算函数可用固定源码 test double 做差分，避免只用复制公式验证自身。
+5. **小规模可控采样。** 在同 16K/host 配置做“1 running+2 waiting+候选”fixture，分别覆盖 cold、GPU 共享前缀、host 前缀和较长 waiting；只预热物理上能同时容纳的前缀。先用 `ignore_eos` 的已知短/长预算验证容量记账，再用 EOS 请求验证服务长度情景。仅在 quote、原生 admission verdict、forward-entry、terminal 采样 scalar/pool 信息，保存同一请求引用作离线关联，不逐 token 记录或做内容哈希。对照 gate 是否正确、等待残差及状态漂移，再跑同代码、同质量预算的闭环方法对照；不从已执行臂误差直接推出 APPEND/REBUILD 因果收益。
+
+目前没有新增生产 patch，也不选择上表中某个默认 ratio 作为线上“最佳值”。下一轮应先用原生真实状态消除不可辨识项，再决定是否值得加入更细的服务速率/尾部模型。

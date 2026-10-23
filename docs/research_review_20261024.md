@@ -1,5 +1,7 @@
 # 2026-10-24 独立研究审查：模块 B 的近邻、复用与下一步证据
 
+本文保留审查时的源码事实、实验状态和阶段建议。文中“收窄”“暂不扩展”等表述不作为当前研究范围上限；现行路线以[贡献与复用](research_contributions.md)及[工程目标](implementation_plan.md)为准：A、B、C 都可以复用、优化和扩展，按目标场景中的质量、完整成本和资源效果决定采用方式。对已有方法准确归属，约束的是成果表述，不能替代继续改进。
+
 本次审查读取了 [research_screening.md](research_screening.md)、[related_work.md](related_work.md)、[research_contributions.md](research_contributions.md)，再核查作者论文、论文直接链接的仓库及固定源码。检索截止 2026-10-24，围绕 cache-aware compaction、append/rebuild、re-prefill、transfer-aware planner，并沿新论文的参考文献补查。它是针对贡献边界的定向审查，不是穷尽性综述，也不能证明“首次”。文献审查阶段仅新增本文，未修改核心实现、运行上游系统或采集新 GPU 数据。
 
 **判断：现有 B 值得继续验证，但应按受约束的系统方法贡献来表述。** 前缀稳定、压缩与缓存的成本权衡、转移感知计划、Prefill/Decode 分项建模、上下文版本与缓存生命周期协同，均已有直接近邻。新增检索尤其发现了现有三份文档未纳入的 **AKV、SmoothAgent、Context Language Models 的 Suffix Cache Reuse**。本项目可以检验的剩余主张是：在完整原始 QA、同一 required 证据和原生精确前缀语义下，利用真实 GPU/host 驻留选择两个完整文本动作，能否在明确负载区域超过调优简单策略。这个区别本身不等于已证明有效或足以构成强新颖性。
