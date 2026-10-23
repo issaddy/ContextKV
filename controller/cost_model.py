@@ -176,7 +176,7 @@ class CostModel:
         # Fixed calibration makes (context length, concurrency) a pure lookup.
         # Mean/P90 workload scenarios and the two candidates repeatedly traverse
         # the same decode intervals. Cache derived values, not request contents.
-        self._decode = lru_cache(maxsize=8192)(self._decode)
+        self._decode_cached = lru_cache(maxsize=8192)(self._decode_uncached)
 
     @classmethod
     def from_measurements(cls, rows: Iterable[Mapping | object], *, allow_mock: bool = False,
@@ -227,7 +227,7 @@ class CostModel:
     def _source_valid(self, source: str) -> bool:
         return source == "hardware" or self.allow_mock_calibration
 
-    def _interpolate(self, target, samples, *, prepared=None):
+    def _interpolate(self, target, samples, *, prepared=None, max_distance=None):
         """Multilinear cells when available; bounded local interpolation otherwise.
 
         Samples are (coordinates, cost, uncertainty). Outside measured support the
@@ -272,7 +272,8 @@ class CostModel:
         weights = [1/max(distance, 1e-9) for distance, _, _ in selected]
         cost = sum(w*sample[1] for w, sample in zip(weights, selected))/sum(weights)
         error = sum(w*(sample[2]+abs(sample[1]-cost)) for w, sample in zip(weights, selected))/sum(weights)
-        return cost, error, nearby[0][0] <= self.max_normalized_distance
+        limit = self.max_normalized_distance if max_distance is None else max_distance
+        return cost, error, nearby[0][0] <= limit
 
     def _positive_error(self, concurrency, load):
         error = self.positive_prefill.get("error_p99_ms")
@@ -346,13 +347,16 @@ class CostModel:
                    for coordinates in cells) <= self.max_normalized_distance
 
     def _decode(self, context: int, concurrency: int) -> tuple[float,float,bool]:
+        return self._decode_cached(context, concurrency, self.max_normalized_distance)
+
+    def _decode_uncached(self, context: int, concurrency: int, max_distance: float) -> tuple[float,float,bool]:
         points = self._decode_valid_points
         if not points:
             estimate = .01 + .00001*context
             return estimate, estimate, False
         if self._decode_static is not None:
             samples, prepared = self._decode_static
-            return self._interpolate((context, concurrency), samples, prepared=prepared)
+            return self._interpolate((context, concurrency), samples, prepared=prepared, max_distance=max_distance)
         # A measured interval creates an exact cell at the requested context.
         # Match the original reverse-distance overwrite order: nearest midpoint
         # wins, and equal-distance ties go to the later calibration point.
@@ -374,7 +378,7 @@ class CostModel:
                           and point.context_start <= context <= point.context_end else point.context_tokens)
             cells[(coordinate, point.concurrency)] = (point.tpot_ms, point.error_ms)
         return self._interpolate((context, concurrency),
-                                 [(key, *value) for key, value in cells.items()])
+                                 [(key, *value) for key, value in cells.items()], max_distance=max_distance)
 
     @staticmethod
     def _prefill_scope(points):

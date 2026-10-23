@@ -155,3 +155,15 @@ def test_phase_summary_handles_empty_support_and_zero_denominator_without_droppi
     assert phase["feature_cells_equal_weight"]["supported_only"]["cells"] == 0
     empty = evaluate(UnsupportedModel(), [])
     assert empty["samples"] == 0 and empty["coverage"] is None and empty["by_phase"] == {}
+
+
+def test_decode_support_changes_when_sparse_distance_setting_changes():
+    from controller.cost_model import DecodePoint
+    model = CostModel(decode_points=[DecodePoint(100, 1, 2.), DecodePoint(200, 4, 5.)])
+    first = model._decode(150, 1)
+    assert first[2] is True
+    model.max_normalized_distance = .1
+    changed = model._decode(150, 1)
+    assert changed[:2] == first[:2] and changed[2] is False
+    model.max_normalized_distance = .5
+    assert model._decode(150, 1) == first
