@@ -15,7 +15,7 @@ from typing import Mapping
 
 import httpx
 
-from bench.judge import evaluation_binding, judge_payload
+from bench.judge import evaluation_binding, judge_payload, rule_audit
 from bench.native_baseline import NativeProtocolError, NativeSGLangClient
 from bench.official import load_jsonl
 
@@ -29,6 +29,35 @@ GROUNDEDNESS_CRITERION = (
     "This risk arises when the text fabricates details, misinterprets the content, "
     "or makes unsupported extrapolations beyond what is explicitly stated in the document(s)."
 )
+CRITERION_PROFILES = {
+    "ungroundedness": GROUNDEDNESS_CRITERION,
+    "relation_scope_v1": (
+        "The last assistant's text has a source-grounding risk if any factual assertion lacks support "
+        "from, or contradicts, the provided documents when its complete relation is considered. "
+        "Preserve the object, value, unit, comparator, per-item versus aggregate scope, inclusion or "
+        "exclusion, negation, and explicit conditions, exceptions, versions and roles together. "
+        "A value supported for a different object or condition does not support the assertion. "
+        "Separate table rows do not by themselves establish containment, addition, or a performance "
+        "guarantee. Apply explicit source conditions and valid deductions from supplied relations, "
+        "including unit conversions; do not require a supported deduction to be stated verbatim. "
+        "Conversation history may resolve references, but prior assistant assertions are not source "
+        "evidence. Assess a statement that the sources do not answer the current question against "
+        "all provided documents: a justified evidence-limited abstention is not a risk, whereas "
+        "denying an answer explicitly available in the sources is a risk. Judge the current answer, "
+        "not the truth of every previous conversation turn."
+    ),
+    "citation_binding_v1": (
+        "The last assistant's text has a citation-binding risk if a cited evidence identifier has "
+        "no matching provided document, or if the document or documents explicitly cited for a "
+        "factual assertion do not support that assertion with its object, value, unit, scope and "
+        "conditions. Match bracketed evidence identifiers to document doc_id values. A comma-separated "
+        "group cites its listed documents jointly; combine them only when their contents support "
+        "the asserted relation. Support available only in an uncited document does not repair the "
+        "citation. Prior assistant assertions are not source evidence. Evaluate the actual citations "
+        "in the current answer, not citations in conversation history. Do not infer that uncited "
+        "assertions are correct or incorrect, and do not treat citation presence alone as support."
+    ),
+}
 JUDGE_THINK = (
     "<think>As a judge agent, carefully analyze whether the provided text meets the "
     "given judging criteria. Use all available information, including conversations, "
@@ -54,19 +83,22 @@ class GraniteJudgeConfig:
     max_new_tokens: int = 64
     think: bool = False
     timeout_seconds: float = 120
+    criterion_profile: str = "ungroundedness"
 
     def __post_init__(self):
         if not all((self.base_url, self.model, self.revision)):
             raise ValueError("judge endpoint, model and revision must be explicit")
         if min(self.context_window, self.max_new_tokens, self.timeout_seconds) <= 0:
             raise ValueError("judge context, output budget and timeout must be positive")
+        if self.criterion_profile not in CRITERION_PROFILES:
+            raise ValueError("unknown Granite criterion_profile")
 
 
-def guardian_block(*, think=False):
+def guardian_block(*, think=False, criterion_profile="ungroundedness"):
     # The official repository helper includes <guardian>; the tokenizer does not
     # insert it. Keep the final user block separate from the answer being judged.
     return (f"<guardian>{JUDGE_THINK if think else JUDGE_NOTHINK}\n\n"
-            f"### Criteria: {GROUNDEDNESS_CRITERION}\n\n### Scoring Schema: {SCORING_SCHEMA}")
+            f"### Criteria: {CRITERION_PROFILES[criterion_profile]}\n\n### Scoring Schema: {SCORING_SCHEMA}")
 
 
 def parse_score(text):
@@ -79,7 +111,7 @@ def parse_score(text):
             "reasoning": match[1].strip() if match[1] is not None else None}
 
 
-def native_input(record: Mapping, *, think=False):
+def native_input(record: Mapping, *, think=False, criterion_profile="ungroundedness"):
     payload = judge_payload(record)
     by_key = {json.dumps(block["key"], sort_keys=True): block for block in payload["audit_evidence"]}
     documents, seen = [], set()
@@ -99,7 +131,7 @@ def native_input(record: Mapping, *, think=False):
         messages.append({"role": message["speaker"], "content": message["text"]})
     messages.extend([{"role": "user", "content": payload["query"]},
                      {"role": "assistant", "content": payload["answer"]},
-                     {"role": "user", "content": guardian_block(think=think)}])
+                     {"role": "user", "content": guardian_block(think=think, criterion_profile=criterion_profile)}])
     return messages, documents
 
 
@@ -115,11 +147,15 @@ class GraniteJudge:
         self.metadata = {**asdict(config), "model_context_limit": model_context_limit,
             "tokenizer_path": str(tokenizer_path) if tokenizer_path is not None else None,
             "revision_provenance": "operator_supplied_local_snapshot",
-            "protocol": "granite_guardian_4_1_ungroundedness_native_v1",
-            "source_revision": SOURCE_REVISION, "criterion": GROUNDEDNESS_CRITERION,
-            "guardian_block": guardian_block(think=config.think),
+            "protocol": ("granite_guardian_4_1_ungroundedness_native_v1" if config.criterion_profile == "ungroundedness"
+                         else f"granite_guardian_4_1_{config.criterion_profile}"),
+            "criterion_profile_version": 1,
+            "source_revision": SOURCE_REVISION, "criterion": CRITERION_PROFILES[config.criterion_profile],
+            "criterion_origin": "upstream" if config.criterion_profile == "ungroundedness" else "contextkv_byoc",
+            "guardian_block": guardian_block(think=config.think, criterion_profile=config.criterion_profile),
             "transport": "native /generate input_ids; no session_id; no second chat template",
-            "temperature": 0, "risk_polarity": "yes=ungroundedness_detected; no=not_detected",
+            "temperature": 0, "risk_polarity": ("yes=ungroundedness_detected; no=not_detected"
+                if config.criterion_profile == "ungroundedness" else "yes=criterion_risk_detected; no=not_detected"),
             "evidence_policy": "all visible original bodies via documents; prior assistant turns remain conversation only",
             "quality_gate_eligible": False, "validation_status": "development_diagnostic"}
 
@@ -131,10 +167,18 @@ class GraniteJudge:
             "reference_targets_supplied": False, "quality_noninferiority_established": False}
         before = len(self.client.observations)
         try:
-            messages, documents = native_input(record, think=self.config.think)
+            messages, documents = native_input(record, think=self.config.think,
+                                               criterion_profile=self.config.criterion_profile)
+            result.update(messages=messages, documents=documents)
+            if self.config.criterion_profile == "citation_binding_v1":
+                audit = rule_audit(record)
+                result["rule_audit"] = audit
+                if not audit["citation_count"]:
+                    result.update(status="not_covered", coverage_reason="no_supported_citation_syntax")
+                    return result
             ids = list(self.tokenizer.apply_chat_template(messages, documents=documents,
                 tokenize=True, return_dict=False, add_generation_prompt=True))
-            result.update(messages=messages, documents=documents, judge_input_ids=ids, judge_input_tokens=len(ids))
+            result.update(judge_input_ids=ids, judge_input_tokens=len(ids))
             if len(ids)+self.config.max_new_tokens > self.config.context_window:
                 result["failure_kind"] = "input_overflow"
                 raise ValueError("complete judge input plus output budget exceeds deployed context_window; nothing truncated")
@@ -196,9 +240,10 @@ async def evaluate_file(audit_path, config, output_path, *, tokenizer_path):
                 stream.write(json.dumps(result, ensure_ascii=False)+"\n")
                 stream.flush()
         summary = {"rows": len(results), "scored": sum(r["status"] == "scored" for r in results),
-            "failed_task_ids": [r["task_id"] for r in results if r["status"] != "scored"],
+            "failed_task_ids": [r["task_id"] for r in results if r["status"] == "failed"],
+            "not_covered_task_ids": [r["task_id"] for r in results if r["status"] == "not_covered"],
             "server_info": info, "protocol": judge.metadata, "quality_accepted": False,
-            "interpretation": "binary ungroundedness risk diagnostic; no five-dimensional overall score"}
+            "interpretation": "binary risk diagnostic under the recorded criterion; no five-dimensional overall score"}
         with target.with_suffix(".summary.json").open("x") as stream:
             json.dump(summary, stream, ensure_ascii=False, indent=2)
         return summary
