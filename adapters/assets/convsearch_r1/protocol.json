@@ -1,0 +1,29 @@
+{
+  "protocol": "convsearch_r1_actual_history_v1",
+  "source_repository": "https://github.com/BeastyZ/ConvSearch-R1",
+  "source_revision": "e7854c89a79c904f331b306d36edde6e9ed12484",
+  "source_path": "src/infer/infer.py",
+  "source_license": "Apache-2.0",
+  "prompt_lines": [
+    18,
+    28
+  ],
+  "tag_parser_lines": [
+    80,
+    90
+  ],
+  "serialization_lines": [
+    150,
+    163
+  ],
+  "history_policy": "caller supplies complete prior actual user/assistant pairs; no dataset/gold/reference input adapter",
+  "semantic_status": "unverified_rewrite",
+  "retrieval_grounding_claim": false,
+  "format_adaptation": "retain official think/rewrite tags; require stop, exactly one closed pair of each, and nonempty rewrite; preserve raw response on failure",
+  "model_downloaded": false,
+  "candidate_checkpoint": {
+    "model": "BeastyZ/Qwen2.5-3B-ConvSearch-R1-QReCC",
+    "revision": "2756459f017585c71a6ca54316cb9acb43bdfee6",
+    "runtime_or_quality_validated": false
+  }
+}

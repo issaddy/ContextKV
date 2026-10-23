@@ -1,0 +1,9 @@
+Given a query and its context, you must first think about the reasoning process in the mind to decontextualize the query by resolving coreference and omission issues. Then, provide the user with a rewrite that retains its original meaning and is as informative as possible to help search engines retrieve relevant documents effectively. The reasoning process and rewrite should be enclosed within <think> </think> and <rewrite> </rewrite> tags, respectively, i.e., <think> reasoning process here </think>
+<rewrite> rewrite here </rewrite>.
+
+### Context Begin ###
+{context}
+### Context End ###
+
+Query: {query}
+Rewrite:

@@ -7,7 +7,7 @@ name = "contextkv"
 version = "0.1.0"
 description = "Versioned evidence, cost-aware context planning and KV cache lifecycle research"
 readme = "README.md"
-license-files = ["docs/third_party/APACHE-2.0.txt", "docs/third_party/*NOTICE.md", "bench/assets/*/LICENSE*", "bench/assets/*/NOTICE*"]
+license-files = ["docs/third_party/APACHE-2.0.txt", "docs/third_party/*NOTICE.md", "bench/assets/*/LICENSE*", "bench/assets/*/NOTICE*", "adapters/assets/*/LICENSE*", "adapters/assets/*/NOTICE*"]
 requires-python = ">=3.11"
 dependencies = ["httpx>=0.28,<0.29", "PyYAML>=6,<7", "fastapi>=0.115,<1", "uvicorn>=0.34,<1"]
 
@@ -28,6 +28,7 @@ where = ["."]
 include = ["controller*", "adapters*", "bench*", "profiling*", "engine_patches*"]
 
 [tool.setuptools.package-data]
+adapters = ["assets/convsearch_r1/*"]
 bench = ["assets/native_judge/*", "assets/grouse/*", "assets/atomic_judge/*", "assets/lettuce_judge/*"]
 
 [tool.pytest.ini_options]
