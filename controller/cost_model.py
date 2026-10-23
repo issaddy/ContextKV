@@ -104,13 +104,13 @@ class CostModel:
         self.output_length_model = output_length_model
         self.stage_model = dict(stage_model or {})
         self.admission_estimator = admission_estimator
-        if admission_estimator not in {"strict", "native_workload"}:
+        if admission_estimator not in {"strict", "native_workload", "native_budget"}:
             raise ValueError("unknown admission estimator")
-        if self.stage_model and admission_estimator != "native_workload":
-            raise ValueError("forward-stage artifact needs explicit admission_estimator=native_workload")
+        if self.stage_model and admission_estimator not in {"native_workload", "native_budget"}:
+            raise ValueError("forward-stage artifact needs explicit admission_estimator=native_workload or native_budget")
         # An unfitted model is constructed before loading a configured artifact.
-        if admission_estimator == "native_workload" and self.prefill_points and not self.stage_model:
-            raise ValueError("native_workload needs a forward-stage artifact; total TTFT would double-count waiting")
+        if admission_estimator in {"native_workload", "native_budget"} and self.prefill_points and not self.stage_model:
+            raise ValueError("native workload estimators need a forward-stage artifact; total TTFT would double-count waiting")
         if not self.stage_model and any(p.scope == "forward_first" for p in self.prefill_points):
             raise ValueError("forward_first points require a stage model for pre-forward waiting")
         self._idle_pre_forward_samples = ()
@@ -400,6 +400,15 @@ class CostModel:
             supported = supported and valid
         return total, supported
 
+    def _queued_workload_forward(self, input_tokens, device_tokens, host_tokens, concurrency):
+        prefix = min(max(0, input_tokens-1), device_tokens+host_tokens)
+        loaded = host_tokens if self.include_host_cost else 0
+        forward, _, supported = self._prefill(prefix, input_tokens-prefix, loaded, concurrency,
+                                              uncertainty_load=host_tokens)
+        setup, _, setup_supported = self._interpolate(
+            (prefix, input_tokens-prefix, loaded), self._idle_pre_forward_samples)
+        return setup+forward, supported and setup_supported
+
     def predict_native(self, candidate: PromptCandidate, quote: CacheQuote,
                        session: SessionSnapshot | None = None, *,
                        batch: CacheQuoteBatch | None = None, concurrency: int = 1,
@@ -442,15 +451,21 @@ class CostModel:
             calibrated = False
         wait, selection_eligible = None, None
         if self.stage_model:
-            from .admission import estimate_wait
+            from .admission import estimate_native_budget_wait, estimate_wait
             setup_ms, _, setup_supported = self._interpolate(
                 (prefix, max(0,n-prefix), loaded if self.include_host_cost else 0),
                 self._idle_pre_forward_samples)
-            wait = estimate_wait(candidate_input_tokens=n, resident_gpu_tokens=max(0, prefix-loaded),
-                output_mean=prior.mean_tokens, output_p90=prior.p90_tokens, batch=batch,
-                forward_fn=self._workload_forward, decode_fn=self._workload_decode,
+            wait_args = dict(candidate_input_tokens=n, resident_gpu_tokens=max(0, prefix-loaded),
+                batch=batch, forward_fn=self._workload_forward, decode_fn=self._workload_decode,
                 development_lengths=self.stage_model.get("development_output_lengths", {}).get("lengths", ()),
                 idle_ms=setup_ms)
+            if self.admission_estimator == "native_budget":
+                profile = self.calibration_metadata.get("profile_manifest") or {}
+                wait = estimate_native_budget_wait(**wait_args, max_new_tokens=self.max_new_tokens,
+                    page_size=(profile.get("cache_config") or {}).get("page_size"),
+                    queued_forward_fn=self._queued_workload_forward)
+            else:
+                wait = estimate_wait(**wait_args, output_mean=prior.mean_tokens, output_p90=prior.p90_tokens)
             queue_ms = wait.mean_ms
             reasons = set(quote.uncertainty_reasons)
             known_native_state = (not quote.inflight_h2d_tokens and not quote.inflight_d2h_tokens

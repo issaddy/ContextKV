@@ -78,7 +78,7 @@ Idle 准备项按候选 `(P,U,L)`——可复用前缀、新计算后缀、host 
 
 ## 已实现的只读观测扩展
 
-上述诊断之后，研究补丁增加了下列可选字段，**当前 admission/cost/planner 仍忽略这些新字段，默认算法没有改变**。旧 wire 缺字段时，schema 将其解码为 None；不会填零冒充已知状态。`/cache/quote` 与 metrics 共用同一个只读 workload snapshot，HTTP client 沿用已有一次共享 dataclass 解码，没有增加内容 hash 或请求缓存。
+上述诊断之后，研究补丁增加了下列可选字段，**默认 strict 及已有 native_workload 模式仍忽略这些新字段，默认算法没有改变**。下节的显式 native_budget 选项单独使用它们。旧 wire 缺字段时，schema 将其解码为 None；不会填零冒充已知状态。`/cache/quote` 与 metrics 共用同一个只读 workload snapshot，HTTP client 沿用已有一次共享 dataclass 解码，没有增加内容 hash 或请求缓存。
 
 | 位置 / 字段 | 真实来源与语义 |
 |---|---|
@@ -86,6 +86,7 @@ Idle 准备项按候选 `(P,U,L)`——可复用前缀、新计算后缀、host 
 | batch `native_max_new_tokens_clip` | 固定原生模块的 `CLIP_MAX_NEW_TOKENS` 实际值，包含启动环境覆盖 |
 | batch `native_running_budget_requests` | 当前 `scheduler.running_batch.reqs` 的原顺序成员摘要，包含原列表内尚未清理的 finished/retracted 成员；不是旧字段的 overlap/last-batch/chunk 联合集合 |
 | batch `native_running_budget_tokens` | 在上述当前成员与实际 ratio 上直接调用原生 `PrefillAdder._get_running_request_total_token_offset` 求和。保留原生“先减 generated，再 clip”、ignore_eos 与未过滤成员的行为；是当前 running headroom 的可复算快照，不是已执行 admission verdict 或完整 total/current offset |
+| request `request_id` | 直接复制已有原生 `req.rid`，关联服务集合与预算集合及终态 receipt；不创建新 UUID、hash 或按长度猜成员。旧 wire 为 None；它不是业务 session ID |
 | request `native_finished` | 同次读取 `req.finished()`；旧引擎未知为 None，不能用这个标志擅自过滤预算列表 |
 | request `last_native_match` | 最近一次被研究 observer 捕获的原生 `match_kv_cache` 完成结果；未捕获为 None，不从 req 默认 prefix=0 推断确证 cold |
 
@@ -99,4 +100,39 @@ Running 预算和旧服务工作量摘要使用不同成员集合，所以只在
 
 下一轮小 probe 只需保留这些 quote/metrics 原始字段，按 `native_running_budget_requests`、ratio、clip 独立复算预算；将 waiting match 时间与同次 quote 求年龄，区分 None、刚观测和较旧观测。对已有 terminal 的 pre-forward 标签继续只分析已执行臂，不将未来实际输出作为特征。先检查有无实际旧匹配、批次成员差异和容量门槛解释力，再决定是否启用独立 reservation/service 模式；这轮不自动重标定、不改变默认门槛，也不声称等待精度或吞吐已经改善。
 
-H200 上的受控 GPU/host 小 probe 现已完成，详见 [原生观测功能验收](native_observation_validation.md)。三份报告均保留，包括最初因 HTTP 错误包装预期不符而失败的 fixture；重跑两份通过。已观测 ratio 变化、已知/未知 waiting 匹配、同机时间年龄及正常生成/退役/拒绝，但 fixture 全为 `ignore_eos=True`，未覆盖普通 EOS 请求的 ratio 缩放和 clip 触发分支。当前等待算法仍未使用新增字段。
+H200 上的受控 GPU/host 小 probe 现已完成，详见 [原生观测功能验收](native_observation_validation.md)。三份报告均保留，包括最初因 HTTP 错误包装预期不符而失败的 fixture；重跑两份通过。已观测 ratio 变化、已知/未知 waiting 匹配、同机时间年龄及正常生成/退役/拒绝，但 fixture 全为 `ignore_eos=True`，未覆盖普通 EOS 请求的 ratio 缩放和 clip 触发分支。该次 GPU 功能验证没有启用新预算等待模型；下节可选模型仍须独立采样验证。
+
+
+## 可选 native_budget 模式：预留与服务分账
+
+`cost_model.admission_estimator: native_budget` 是新增的显式实验选项，必须配合同配置的 `forward_first` stage artifact。默认设置、已有 `native_workload` 算法、planner 门槛和原生调度不变。新结果的 `waiting_estimate_kind=analytical_native_budget`，`calibrated` 仍为 false；`selection_eligible` 只表示当前启用的预测合同和实测阶段支持域满足，不表示新等待预测已经校准。保存/加载成本 artifact 会保留选项，旧 wire 与旧 artifact 仍可由原模式读取。新模式缺少 request identity、原生比例/预算、容量或 artifact 中的实际 page_size 时明确返回 unsupported，不按请求长度匹配成员。
+
+实现分开维护三类量：
+
+1. **total 容量账本。** 初始值为 `free + evictable − native_running_budget_tokens`。各服务请求完成时，只归还相同原生 `request_id` 对应的预算份额；其公式为 `min(max_new_tokens − generated_tokens, clip) × ratio`，ignore_eos 使用 1。预算列表内不属于服务集合的 finished/retracted 成员继续占着该份额，并记录 `unmatched_native_budget_held`，不为了预测可接纳而擅自删去。Overlap 服务成员若不在预算列表，不能凭空归还一份原生 offset。
+2. **current 容量账本。** 初始值为 `free + evictable`，不扣 running 输出 headroom。Queued 虚拟完整 prefill 的 current 需求为页取整后的完整输入加一页，total 另加完整 clipped 输出预算。候选 gate 用未驻留输入、声明 `max_new_tokens`（受实际 clip 限制）与一页开销，并保留原生严格 `< total` 及页分配 `<= min(current,total)` 边界。对重入 waiting 的请求，gate 使用剩余预算，但完整 prefill commit 使用原生完整预算，两者没有混同。
+3. **服务时间。** Running 的经验条件残余均值/P90、ignore_eos 余量及尾部回退仅决定完成时间，不再决定容量预留。Queued 每次首先定价准备与 forward，产生一个 token，随后才计剩余 decode；其 callback 分别接收 GPU/host 前缀，使用对应形状的 c1 准备项及实测 forward，不重叠叠加含队列的 TTFT。
+
+物理容量释放仍是显式代理：将单一 `capacity − free − evictable` 按当前服务请求的逻辑 allocated 长度归一化分配，完成后转为可用。它不是树的逐节点解锁模拟；无法识别最后一个共享锁。候选的已命中 GPU 前缀在初始及虚拟完成后都要保护，避免将同一前缀同时算作可回收空间与免费复用。完成后保护量使用“原 evictable 加累计虚拟释放”的上限代理，而不是宣称已知哪个请求释放了候选路径。无可解释的完成事件、仍被未知预算占据的空间或超出冷需求容量时，预测可返回 unsupported。
+
+Waiting 容量始终按完整 cold 输入估计；**最近一次 match 不抵扣容量**。服务均值情景可以使用 `last_native_match`，条件只是其输入形状等于当前 `input+generated` 且观测不晚于 quote；reason 明确写 `last_match_service_scenario_not_residency`。这不是新鲜度判定，也不承诺前缀仍驻留。另一情景用 cold forward 和经验 P90 服务长度，输出 `upper=max(mean,cold_p90)`；不是概率上界。缺失、未来时钟或输入形状不符的 saved match 使用明确 cold 情景。没有加入匹配调用、缓存树扫描、每轮 hash、额外 GPU 同步或持久预测状态。
+
+这个模型复用原生 FULL 页预算规则，但仍是 **FIFO、冻结当前 ratio、完整请求预留的有限事件近似**。真实引擎会逐 pass 过滤/合并批次，未完成 chunk 暂不加入最终输出 headroom，后续 ratio 会变化，cache match/淘汰和速率也会变化；本模式没有复刻这些过程。候选受当前缓存布局影响，virtual queued admission 后布局也未被精确重建。因此本轮先限于现有 FCFS、FULL、单 GPU、不混合 chunk 的配置。`capacity_risk` 保留原 P90 物理需求诊断语义，不是新 native gate 的判定结果；旧/新方法比较时不能将这两个量混称。
+
+本地验证包含直接执行固定原生 `PrefillBudget` 的差分测试，覆盖页大小、严格等号、原生初始预算和候选边界；另外验证 request ID 跨成员顺序关联、未匹配 finished 预算保留、ratio/ignore_eos 与服务残余分离、重入队列两种 headroom、旧 host 匹配仅影响服务情景、共享前缀不重复释放、同时完成、即时可容纳不要求无关时间支持，以及 config/artifact/schema/HTTP 往返。新观测只在 `workload_snapshot` 复制一次已有 rid，固定原生源码补丁可应用并编译。这些证据仅证明实现合同，尚不证明真实等待误差或性能改善。
+
+### 首次普通 EOS 工作量采集
+
+独立研究 driver 为 `runs/run-native-budget-observation.py`（ignored，部署时单独上传），默认只输出 plan：
+
+```bash
+RAYON_NUM_THREADS=4 .venv/bin/python runs/run-native-budget-observation.py
+# 仅由远端操作方，在确认端口空闲、已安排原服务恢复后显式执行：
+RAYON_NUM_THREADS=4 .venv/bin/python runs/run-native-budget-observation.py --execute
+```
+
+首次采样仍运行旧 `native_workload` 的 Workload_gate0，完整五个 Cloud dev 会话 41 轮，Q0/P2/c4/1024、正常 EOS、16K GPU 池、相同 HiCache 设置与冻结 stage artifact。只更换观测补丁并保留完整事件/quote/receipt，先建立带原生 request identity 的基线；不从观测缺失推断确证 cold 或公式成立。driver 复用现有容量 runner 和专用 cold hook，启动/清理自己创建的服务，不停止他人服务，也不自动恢复另一个旧进程。stage artifact 的真实容量/host/layout 配置必须通过现有 runtime scope 检查，不能把大池标定伪装为 16K 支持。控制器父进程在 tokenizer 初始化前明确请求 Rayon 4 线程，实际线程数不冒称已观测。
+
+在组清理后，从保留的 SQLite attempt payload 只读导出 `attempt-stages.jsonl`：包含原生 receipt.rid、真实输出数量、服务端 TTFT/forward/完整/decode 时刻以及 `pre_forward=server_ttft−forward_to_first`。FAILED、未完成 attempt 也保留，不因缺 result 删除；该差值只是服务端前置联合墙时，不能叫纯排队或 CUDA 恢复时间。默认 plan 和合成 SQLite 的成功/失败/未完成三种导出已在本地验证，无真实模型生成。
+
+之后用这些相同 quote、原生成前 prior 和阶段标签离线重放两种模式，逐项报告 ID 映射覆盖、ratio/clip 公式、旧 match 年龄/服务情景、unsupported 原因和已执行臂等待残差；不使用当前实际输出作为特征。只有工程与误差检查完成后，才在另一输出目录显式执行 `--admission-estimator native_budget` 闭环。单次 41 轮采样不是独立质量验证，也不构成 APPEND/REBUILD 因果收益；新模型可以没有净性能改进，结果须保留。

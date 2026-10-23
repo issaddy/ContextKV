@@ -315,3 +315,50 @@ def test_native_quote_schema_roundtrips_workload_without_inventing_missing_lists
         old.pop(name)
     legacy = loads(CacheQuoteBatch, json.dumps(old))
     assert legacy.native_running_requests is None and legacy.native_waiting_requests is None
+
+
+def test_native_budget_mode_is_optional_and_roundtrips_with_bound_page_size(tmp_path):
+    original=model()
+    original.calibration_metadata["profile_manifest"]["cache_config"]={"page_size":4}
+    path=tmp_path/"stage.json"
+    original.save(path)
+    old=CostModel.load(path)
+    changed=CostModel.load(path,admission_estimator="native_budget")
+    assert old.admission_estimator == "native_workload"
+    changed.check_calibration_scope({"fingerprint":asdict(FP),"cache_config_hash":"cache"})
+    c=candidate()
+    q=quote(c)
+    snapshot=replace(batch([q]),native_running_budget_requests=(),native_running_budget_tokens=0.,
+                     native_new_token_ratio=.7,native_max_new_tokens_clip=4096)
+    value=changed.predict_native(c,q,batch=snapshot)
+    assert value.selection_eligible and not value.calibrated
+    assert value.waiting_estimate_kind == "analytical_native_budget"
+    changed.save(path)
+    assert CostModel.load(path).admission_estimator == "native_budget"
+    cfg=RunConfig(cost_model=CostSettings(artifact=str(path),admission_estimator="native_budget"))
+    assembled,_=_model_and_knobs(cfg,(SimpleNamespace(max_new_tokens=10,candidates=(c,)),),None)
+    assert assembled.admission_estimator == "native_budget"
+    assert loads(CostEstimate,dumps(value)) == value
+
+
+def test_native_budget_missing_identity_and_page_do_not_become_eligible():
+    value=model()
+    value.admission_estimator="native_budget"
+    c=candidate()
+    q=quote(c)
+    snap=replace(batch([q]),native_running_budget_requests=(),native_running_budget_tokens=0.,
+                 native_new_token_ratio=.7,native_max_new_tokens_clip=4096)
+    missing_page=value.predict_native(c,q,batch=snap)
+    assert not missing_page.selection_eligible and missing_page.waiting_reason == "missing_native_page_size"
+    value.calibration_metadata["profile_manifest"]["cache_config"]={"page_size":4}
+    old_request=NativeRequestSummary(10,2,8,12,11,5)
+    missing_identity=value.predict_native(c,q,batch=replace(snap,native_running_requests=(old_request,)))
+    assert not missing_identity.selection_eligible
+    assert missing_identity.waiting_reason == "missing_native_request_identity"
+
+
+def test_queued_phase_uses_host_specific_idle_setup_without_total_ttft():
+    value=model()
+    # Same forward-first cost 10, but empiric idle is 1 for GPU and 3 for host.
+    assert value._queued_workload_forward(100,50,0,1) == (11.,True)
+    assert value._queued_workload_forward(100,0,50,1) == (13.,True)

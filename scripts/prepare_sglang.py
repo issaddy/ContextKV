@@ -95,6 +95,7 @@ def prepare(checkout: Path, source_only: bool):
     assert match_start < common.index("req.num_matched_prefix_tokens =", match_start) < observer < match_end
     assert b"PrefillAdder._get_running_request_total_token_offset(offset_owner, req)" in runtime
     assert b"budget_requests = self.scheduler.running_batch.reqs" in runtime
+    assert b"request_id=req.rid" in runtime
     return {"base_commit": commit, "patch_sha256": hashlib.sha256(PATCH.read_bytes()).hexdigest(),
             "original_source_hashes_verified": not already_applied,
             "patch_applies": True, "already_applied": already_applied,
@@ -106,6 +107,7 @@ def prepare(checkout: Path, source_only: bool):
             "streaming_terminal_publication_seams_verified": True,
             "native_match_observer_after_original_match": True,
             "native_running_offset_function_reused": True,
+            "native_request_identity_copied": True,
             "source_only": source_only,
             "gpu_runtime_tested": False, "full_dependency_import_tested": False,
             "host_quote_supported": True,

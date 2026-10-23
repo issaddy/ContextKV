@@ -15,6 +15,7 @@ from test_engine_host_quote import (extract_native_class, extract_native_method,
 
 class Request:
     def __init__(self, n=100, generated=4, maximum=1024, *, done=False, ignore_eos=False):
+        self.rid=f"native-{id(self)}"
         self.origin_input_ids=array("q",range(n))
         self.output_ids=array("q",range(generated))
         self.sampling_params=SimpleNamespace(max_new_tokens=maximum,ignore_eos=ignore_eos)
@@ -49,6 +50,7 @@ def test_native_budget_uses_actual_batch_members_and_ratio_without_cleanup(monke
     assert len(snapshot["native_running_requests"])==3  # active, fixed, overlap
     assert len(snapshot["native_running_budget_requests"])==4  # exact native list
     assert snapshot["native_running_budget_requests"][1]["native_finished"] is True
+    assert [r["request_id"] for r in snapshot["native_running_budget_requests"]] == [r.rid for r in runtime.scheduler.running_batch.reqs]
     owner=SimpleNamespace(new_token_ratio=.7)
     assert snapshot["native_running_budget_tokens"]==sum(offset(owner,r) for r in runtime.scheduler.running_batch.reqs)
     runtime.scheduler.new_token_ratio_tracker.decay_step()
@@ -143,9 +145,9 @@ def test_observation_fields_do_not_change_existing_wait_estimator(monkeypatch):
     observed=decode(CacheQuoteBatch,wire)
     legacy=dataclasses.replace(observed,native_new_token_ratio=None,native_max_new_tokens_clip=None,
         native_running_budget_tokens=None,native_running_budget_requests=None,
-        native_running_requests=tuple(dataclasses.replace(r,native_finished=None,last_native_match=None)
+        native_running_requests=tuple(dataclasses.replace(r,native_finished=None,last_native_match=None,request_id=None)
                                       for r in observed.native_running_requests),
-        native_waiting_requests=tuple(dataclasses.replace(r,native_finished=None,last_native_match=None)
+        native_waiting_requests=tuple(dataclasses.replace(r,native_finished=None,last_native_match=None,request_id=None)
                                       for r in observed.native_waiting_requests))
     kwargs=dict(candidate_input_tokens=80,resident_gpu_tokens=0,output_mean=20,output_p90=30,
         forward_fn=lambda n,p,c:(10,True),decode_fn=lambda ctx,steps,c:(steps,True),

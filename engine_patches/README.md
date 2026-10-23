@@ -1,6 +1,6 @@
 # SGLang ContextKV 协议补丁
 
-基准为 SGLang `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。`0001-contextkv-protocol.patch` 是基于该提交真实源码生成的可应用补丁，覆盖 12 个源文件。`source_manifest.json` 保存审查文件 SHA256；`contextkv_runtime.py` 是补丁新增模块的同内容镜像，供 CPU 合同测试。准备脚本校验二者一致。
+基准为 SGLang `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。`0001-contextkv-protocol.patch` 是基于该提交真实源码生成的可应用补丁，覆盖 13 个源文件。`source_manifest.json` 保存审查文件 SHA256；`contextkv_runtime.py` 是补丁新增模块的同内容镜像，供 CPU 合同测试。准备脚本校验二者一致。
 
 已在 macOS 完成固定源码独立下载、原文件 hash 验证、`git apply --check`、应用和 Python 语法编译。协议与树视图有 CPU 单元测试。`verification_report.json` 只记录源码验证，不汇总 GPU 实测；H200 的 GPU-only/兼容 HiCache 功能冒烟与小规模标定已运行，范围和配置见下文。完整性能、质量结论仍须独立实验报告。
 
@@ -65,7 +65,7 @@ scripts/launch_sglang.sh --host 127.0.0.1 --port 30000
 
 报价还返回 `gpu_capacity_tokens` 和原生 `full_evictable_size()` 的 `evictable_gpu_tokens`；两者都是 O(1) 计数。GPU 可淘汰量是 FULL device 未硬锁 token 总数，包含可能被当前候选命中的共享前缀。不能把它与候选 ready prefix 重复计算成 admission 保证。原生 [PrefillBudget](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/prefill_budget.py#L98-L113) 使用 free + evictable；[PrefillAdder](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/managers/schedule_policy.py#L1350-L1407) 再保护候选前缀并考虑已运行请求的剩余输出预算、页开销、chunk 和其他约束。这个补丁不模拟或修改它。Host 没有对应的精确 O(1) token 总计；`evictable_host_tokens=null` 明确未知，既不报假零，也不为报价扫描所有 host 节点。
 
-报价与 metrics 的 `native_running_requests` / `native_waiting_requests` 只传出每个请求的 `input_tokens`、`generated_tokens`、`max_new_tokens`、`ignore_eos`、`kv_allocated_tokens`、`kv_committed_tokens` 和 `cache_protected_tokens`，没有文本、token IDs 或请求标识。输出预算取 native 已按上下文和池容量裁剪后的 `sampling_params.max_new_tokens`，已生成数只取 scheduler 当前已处理的 CPU 状态；不读取未来输出。[ReqKvInfo](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/managers/schedule_batch.py#L974-L987) 的三种 KV 数字是**逻辑序列边界**：树拥有 `[0, cache_protected_tokens)`，请求自有尾部位于其后；共享前缀、页边界和完成后的缓存插入都使其不能直接作为唯一物理占用或即将释放 slot 数。Overlap 时 committed 状态还可能落后已执行 forward。
+报价与 metrics 的 `native_running_requests` / `native_waiting_requests` 只传出每个请求的 `input_tokens`、`generated_tokens`、`max_new_tokens`、`ignore_eos`、`kv_allocated_tokens`、`kv_committed_tokens` 和 `cache_protected_tokens`，没有文本或 token IDs；新增可选 `request_id` 直接复制既有原生 `req.rid`，供服务集合、预算集合和终态 receipt 精确关联，不创建新标识或内容 hash。输出预算取 native 已按上下文和池容量裁剪后的 `sampling_params.max_new_tokens`，已生成数只取 scheduler 当前已处理的 CPU 状态；不读取未来输出。[ReqKvInfo](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/managers/schedule_batch.py#L974-L987) 的三种 KV 数字是**逻辑序列边界**：树拥有 `[0, cache_protected_tokens)`，请求自有尾部位于其后；共享前缀、页边界和完成后的缓存插入都使其不能直接作为唯一物理占用或即将释放 slot 数。Overlap 时 committed 状态还可能落后已执行 forward。
 
 运行集合复用 native `collect_inflight_reqs()` 对 running/last/overlap batch 去重，纳入独立 chunked request，排除已结束请求；已回到 waiting 的请求只计 waiting。Running 摘要无顺序语义；waiting 保留当前列表顺序，但原生优先级、staging 和 admission 可改变实际执行顺序。读取成本为 O(active + waiting)，每个请求只读标量和数组长度，不遍历 token 内容、不维护新缓存、不处理 ACK、不改变锁和 LRU。没有 scheduler 时摘要为 `null`，已知空集合为 `[]`。这些观测可用于区分容量压力和传输未完成，尚不构成经过 GPU 验证的新等待预测模型。
 
@@ -176,3 +176,10 @@ C 配对 fixture 使用 128-token 共享前缀、每个 epoch 各 128-token 独�
 这些审查源码的固定 hash 均纳入 `source_manifest.json`。prepare 脚本检查新增模块镜像、guard 顺序、native timing/ACK seams 与完整结果先发布后 HTTP 返回的路径。
 
 下一阶段 GPU 验收仍包括：真实进程 IPC/完整依赖导入、空/非空树、跨页部分命中、两会话共享前缀、三种 host 写策略 pending/ACK、split 与加载重叠、退役并发、断连/取消、重启、容量压力和持续运行；之后进行等预算基线/消融、P3 检索、质量评估与按会话聚类统计。纯 CUDA Prefill/Decode 内核分解和全分配器精确瞬时峰值仍不在当前测量合同内，需要时再通过 GPU profiler 扩展，不能从现有数据推断。
+
+
+## 原生请求身份的增量观测
+
+当前补丁 SHA256 为 `e004ca96d62a5786f303c465da140513c7213f13ff023407991ec162ef82d92c`。相对于前一观测版本，这次 runtime 只在 workload summary 中复制已有 `req.rid`；原生预算、匹配、锁和调度代码不变。旧 wire 缺 ID 仍可解码，只有可选 `native_budget` 等待模式要求可关联身份。该模式与真实 GPU 采样顺序见 [admission 模型](../docs/admission_wait_model.md#可选-native_budget-模式预留与服务分账)。
+
+该增量已通过 CPU HTTP/schema 合同及干净固定源码的 patch apply/语法编译；`verification_report.json` 记录本次 SHA。此前 GPU 观测验证属于旧补丁，其成功不会自动证明新增身份字段已在 IPC/GPU 路径验证，也不证明新等待模型更准确。下一次完整普通 EOS 41 轮采样须先部署本补丁，并保留旧等待算法作同快照重放基线。

@@ -111,7 +111,7 @@ index bf00f65..aeb7f9e 100644
      """Open a session, and return its unique session id."""
 diff --git a/python/sglang/srt/managers/contextkv_runtime.py b/python/sglang/srt/managers/contextkv_runtime.py
 new file mode 100644
-index 0000000..6d8b58a
+index 0000000..6aa99b5
 --- /dev/null
 +++ b/python/sglang/srt/managers/contextkv_runtime.py
 @@ -0,0 +1,670 @@
@@ -507,7 +507,7 @@ index 0000000..6d8b58a
 +        running = [req for req in running if not req.finished()]
 +
 +        def summary(req):
-+            return dict(input_tokens=len(req.origin_input_ids),
++            return dict(request_id=req.rid, input_tokens=len(req.origin_input_ids),
 +                        generated_tokens=len(req.output_ids),
 +                        max_new_tokens=req.sampling_params.max_new_tokens,
 +                        ignore_eos=req.sampling_params.ignore_eos,

@@ -229,6 +229,7 @@ class NativeRequestSummary:
     ignore_eos: bool = False
     native_finished: bool | None = None
     last_native_match: NativePrefixMatch | None = None
+    request_id: str | None = None
 
 
 @dataclass(frozen=True)

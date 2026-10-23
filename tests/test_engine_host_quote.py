@@ -404,6 +404,7 @@ def test_workload_snapshot_reuses_native_overlap_collection_without_mutation(run
     native_finished = extract_native_method(native_source("finished"), "finished")
     class Request:
         def __init__(self, n, generated, maximum, *, done=False):
+            self.rid=f"request-{n}"
             self.origin_input_ids = array("q",range(n))
             self.output_ids = array("q",range(generated))
             self.sampling_params = SimpleNamespace(max_new_tokens=maximum,ignore_eos=False)
@@ -438,7 +439,7 @@ def test_workload_snapshot_reuses_native_overlap_collection_without_mutation(run
     assert [r["input_tokens"] for r in result["native_waiting_requests"]] == [40,30]
     by_input = {r["input_tokens"]:r for r in result["native_running_requests"]}
     assert set(by_input) == {20,50}
-    assert by_input[20] == dict(input_tokens=20,generated_tokens=3,max_new_tokens=10,
+    assert by_input[20] == dict(request_id=active.rid,input_tokens=20,generated_tokens=3,max_new_tokens=10,
         ignore_eos=False,kv_allocated_tokens=27,kv_committed_tokens=22,cache_protected_tokens=10,
         native_finished=False,last_native_match=None)
     assert [r["input_tokens"] for r in result["native_running_budget_requests"]] == [20,30,60]

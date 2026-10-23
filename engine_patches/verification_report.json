@@ -1,6 +1,6 @@
 {
   "base_commit": "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b",
-  "patch_sha256": "3aac1dfdf5860f70ae868059a9a9a1fa0ed94d48f45a6e9ab7f81b6d80c1ac4b",
+  "patch_sha256": "e004ca96d62a5786f303c465da140513c7213f13ff023407991ec162ef82d92c",
   "original_source_hashes_verified": true,
   "patch_applies": true,
   "already_applied": false,
@@ -26,6 +26,7 @@
   "streaming_terminal_publication_seams_verified": true,
   "native_match_observer_after_original_match": true,
   "native_running_offset_function_reused": true,
+  "native_request_identity_copied": true,
   "source_only": true,
   "gpu_runtime_tested": false,
   "full_dependency_import_tested": false,

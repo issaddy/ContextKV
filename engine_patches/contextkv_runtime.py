@@ -390,7 +390,7 @@ class ContextKVRuntime:
         running = [req for req in running if not req.finished()]
 
         def summary(req):
-            return dict(input_tokens=len(req.origin_input_ids),
+            return dict(request_id=req.rid, input_tokens=len(req.origin_input_ids),
                         generated_tokens=len(req.output_ids),
                         max_new_tokens=req.sampling_params.max_new_tokens,
                         ignore_eos=req.sampling_params.ignore_eos,

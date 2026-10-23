@@ -343,6 +343,7 @@ def test_real_patch_quote_uses_native_array_key_without_mutations(monkeypatch):
     cache.full_evictable_size = lambda:64
     fp = ConfigFingerprint()
     class ActiveRequest:
+        rid = "actual-native-request"
         origin_input_ids = (1,2,3)
         output_ids = (4,)
         sampling_params = SimpleNamespace(max_new_tokens=8,ignore_eos=False)
@@ -378,7 +379,8 @@ def test_real_patch_quote_uses_native_array_key_without_mutations(monkeypatch):
             assert decoded.active_requests == 1 and decoded.queued_requests == 0
             assert decoded.native_running_requests == (NativeRequestSummary(
                 input_tokens=3,generated_tokens=1,max_new_tokens=8,kv_allocated_tokens=4,
-                kv_committed_tokens=3,cache_protected_tokens=2,native_finished=False,last_native_match=match),)
+                kv_committed_tokens=3,cache_protected_tokens=2,native_finished=False,last_native_match=match,
+                request_id=active.rid),)
             assert decoded.native_running_budget_requests == decoded.native_running_requests
             assert decoded.native_running_budget_tokens == 3.5
             assert decoded.native_new_token_ratio == .5 and decoded.native_max_new_tokens_clip == 4096

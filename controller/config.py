@@ -87,8 +87,8 @@ class RunConfig:
             raise ValueError("output priors must be positive")
         if self.cost_model.uncertainty_mode not in (None, "global", "conditional"):
             raise ValueError("uncertainty_mode must be global, conditional or null to use the artifact setting")
-        if self.cost_model.admission_estimator not in (None, "strict", "native_workload"):
-            raise ValueError("admission_estimator must be strict or native_workload")
+        if self.cost_model.admission_estimator not in (None, "strict", "native_workload", "native_budget"):
+            raise ValueError("admission_estimator must be strict, native_workload or native_budget")
         if not 0 < self.cost_model.residual_alpha <= 1 or self.cost_model.max_normalized_distance < 0:
             raise ValueError("invalid cost model calibration parameters")
         if self.cost_model.online_calibration and not all((self.ablation.host_cost,
