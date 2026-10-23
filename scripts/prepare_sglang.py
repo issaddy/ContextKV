@@ -88,6 +88,13 @@ def prepare(checkout: Path, source_only: bool):
     terminal_frame = http.index('yield b"data: " + dumps_json(out)', stream_publish)
     assert token_frame < stream_publish < terminal_frame
     assert 'if key not in {"contextkv_receipt", "contextkv_timing"}' in (checkout / "python/sglang/srt/managers/tokenizer_manager.py").read_text()
+    common = (checkout / "python/sglang/srt/mem_cache/common.py").read_text()
+    match_start = common.index("def match_kv_cache(")
+    match_end = common.index("    return match_result", match_start)
+    observer = common.index("runtime.record_native_match(req, len(token_ids))", match_start)
+    assert match_start < common.index("req.num_matched_prefix_tokens =", match_start) < observer < match_end
+    assert b"PrefillAdder._get_running_request_total_token_offset(offset_owner, req)" in runtime
+    assert b"budget_requests = self.scheduler.running_batch.reqs" in runtime
     return {"base_commit": commit, "patch_sha256": hashlib.sha256(PATCH.read_bytes()).hexdigest(),
             "original_source_hashes_verified": not already_applied,
             "patch_applies": True, "already_applied": already_applied,
@@ -97,6 +104,8 @@ def prepare(checkout: Path, source_only: bool):
             "native_dma_ack_observer_seams_verified": True,
             "complete_result_published_before_http_delivery": True,
             "streaming_terminal_publication_seams_verified": True,
+            "native_match_observer_after_original_match": True,
+            "native_running_offset_function_reused": True,
             "source_only": source_only,
             "gpu_runtime_tested": False, "full_dependency_import_tested": False,
             "host_quote_supported": True,

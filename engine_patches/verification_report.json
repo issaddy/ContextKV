@@ -1,6 +1,6 @@
 {
   "base_commit": "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b",
-  "patch_sha256": "80147e2bbce6f5cb2191c7cef4fc381d5c8bcca578d330ea9ffbaebb594476a5",
+  "patch_sha256": "3aac1dfdf5860f70ae868059a9a9a1fa0ed94d48f45a6e9ab7f81b6d80c1ac4b",
   "original_source_hashes_verified": true,
   "patch_applies": true,
   "already_applied": false,
@@ -16,13 +16,16 @@
     "python/sglang/srt/mem_cache/unified_cache/session_ref_tracker.py",
     "python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py",
     "python/sglang/srt/mem_cache/unified_cache/unified_tree_core_interface.py",
-    "python/sglang/srt/mem_cache/unified_radix_cache.py"
+    "python/sglang/srt/mem_cache/unified_radix_cache.py",
+    "python/sglang/srt/mem_cache/common.py"
   ],
   "guard_precedes_native_auto_ensure": true,
   "native_completion_timing_seams_verified": true,
   "native_dma_ack_observer_seams_verified": true,
   "complete_result_published_before_http_delivery": true,
   "streaming_terminal_publication_seams_verified": true,
+  "native_match_observer_after_original_match": true,
+  "native_running_offset_function_reused": true,
   "source_only": true,
   "gpu_runtime_tested": false,
   "full_dependency_import_tested": false,

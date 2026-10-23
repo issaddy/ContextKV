@@ -114,6 +114,8 @@ python -m profiling.sglang_probe --config configs/sglang.yaml --base-url http://
 
 ## H200 上已验证的 HiCache 兼容配置
 
+最新只读观测补丁 `3aac1dfd…c1ac4b` 在此基础上增加实际 native ratio/clip、当前 running_batch 的预算成员与原生 offset 复算值，以及最近一次原生 match 的标量结果和服务端 monotonic 纳秒时点。该版本已完成 CPU 原源码/HTTP 合同与干净固定源码应用检查，**本次扩展尚未进行 GPU/IPC 验收**；下面已有实测不能自动算作新 hook 的运行验证。字段、O(active+waiting) 成本、None/过时观测语义和下一轮 probe 合同见[等待模型观测扩展](../docs/admission_wait_model.md#已实现的只读观测扩展等待下一轮-gpu-采样)。本次不改变原生调度或控制器预测策略。
+
 只读工作量扩展补丁 `80147e2b…4476a5` 已在同一 H200 完成四方法两重复共 328 轮 16K 闭环及 8 次冻结输入生成，均成功；运行/等待摘要在实际请求进行中核对过。原始补丁 `69bf539f…76912` 的功能与受控生命周期记录继续保留。新阶段的范围、成本与负面结果见[工作量验证](../docs/stage_workload_validation.md)，表格局部实验见[冻结历史验证](../docs/table_relations_validation.md)。源码验证 JSON 仍只描述静态检查，不用于汇总 GPU 效果。
 
 2026-10-23 的远端 H200 环境使用 driver 595.58.03、PyTorch 2.14.1+cu130 和固定 SGLang 源码。GPU-only 协议冒烟与多轮生成闭环已通过。原生 `kernel + page_first` 在 D2H staged 路径出现进程 segfault，栈经过 `transfer_hicache_all_layer_staged_lf_pf → staged_write_back → cudaMemcpyBatchAsync/cuMemcpyBatchAsync_v2`；尚未隔离到驱动、运行时或上游实现的单一原因，不能将其断定为驱动问题。

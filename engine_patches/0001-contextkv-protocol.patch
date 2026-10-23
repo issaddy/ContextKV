@@ -111,10 +111,10 @@ index bf00f65..aeb7f9e 100644
      """Open a session, and return its unique session id."""
 diff --git a/python/sglang/srt/managers/contextkv_runtime.py b/python/sglang/srt/managers/contextkv_runtime.py
 new file mode 100644
-index 0000000..34aae78
+index 0000000..6d8b58a
 --- /dev/null
 +++ b/python/sglang/srt/managers/contextkv_runtime.py
-@@ -0,0 +1,640 @@
+@@ -0,0 +1,670 @@
 +"""Scheduler-owned ContextKV protocol, for the pinned SGLang Python backend.
 +
 +This module deliberately has no background thread or GPU synchronizations. It is
@@ -131,6 +131,7 @@ index 0000000..34aae78
 +import os
 +from pathlib import Path
 +import time
++from types import SimpleNamespace
 +import uuid
 +
 +COMMIT = "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b"
@@ -485,7 +486,19 @@ index 0000000..34aae78
 +        """
 +        if self.scheduler is None:
 +            return dict(active_requests=None, queued_requests=None,
-+                        native_running_requests=None, native_waiting_requests=None)
++                        native_running_requests=None, native_waiting_requests=None,
++                        native_new_token_ratio=None, native_max_new_tokens_clip=None,
++                        native_running_budget_tokens=None, native_running_budget_requests=None)
++        from sglang.srt.managers.schedule_policy import CLIP_MAX_NEW_TOKENS, PrefillAdder
++
++        # Keep the exact current scheduler.running_batch membership. PrefillAdder
++        # sums it without filtering finished/retracted requests. This is NOT the
++        # broader overlap/last-batch/chunk union exported for service work below.
++        budget_requests = self.scheduler.running_batch.reqs
++        ratio = self.scheduler.new_token_ratio_tracker.current
++        offset_owner = SimpleNamespace(new_token_ratio=ratio)
++        running_budget = sum(PrefillAdder._get_running_request_total_token_offset(offset_owner, req)
++                             for req in budget_requests)
 +        waiting = [req for req in self.scheduler.waiting_queue if not req.finished()]
 +        running = self.scheduler.collect_inflight_reqs()
 +        if self.scheduler.chunked_req is not None:
@@ -500,11 +513,28 @@ index 0000000..34aae78
 +                        ignore_eos=req.sampling_params.ignore_eos,
 +                        kv_allocated_tokens=req.kv.kv_allocated_len,
 +                        kv_committed_tokens=req.kv.kv_committed_len,
-+                        cache_protected_tokens=req.kv.cache_protected_len)
++                        cache_protected_tokens=req.kv.cache_protected_len,
++                        native_finished=req.finished(),
++                        last_native_match=dict(req.contextkv_last_native_match)
++                            if getattr(req, "contextkv_last_native_match", None) is not None else None)
 +
 +        return dict(active_requests=len(running), queued_requests=len(waiting),
 +                    native_running_requests=[summary(req) for req in running],
-+                    native_waiting_requests=[summary(req) for req in waiting])
++                    native_waiting_requests=[summary(req) for req in waiting],
++                    native_new_token_ratio=ratio, native_max_new_tokens_clip=CLIP_MAX_NEW_TOKENS,
++                    native_running_budget_tokens=running_budget,
++                    native_running_budget_requests=[summary(req) for req in budget_requests])
++
++    def record_native_match(self, req, input_tokens):
++        """Observe a completed native match; overwrite bounded per-request scalars.
++
++        Called by match_kv_cache, never by quote. Subsequent locking, load-back,
++        eviction or retraction can change residency: timestamp is observation age,
++        not a promise that the saved tier layout remains valid.
++        """
++        req.contextkv_last_native_match = dict(observed_time_ns=time.monotonic_ns(),
++            input_tokens=input_tokens, device_prefix_tokens=req.prefix_len,
++            host_hit_tokens=req.host_hit_length, matched_prefix_tokens=req.num_matched_prefix_tokens)
 +
 +    def quote(self, data):
 +        from sglang.srt.mem_cache.radix_cache import RadixKey
@@ -1106,3 +1136,15 @@ index 8e797ab..d662e63 100644
              if self.metrics_collector is not None:
                  for pool, num_tokens in (ack.num_tokens_by_pool or {}).items():
                      if num_tokens > 0:
+diff --git a/python/sglang/srt/mem_cache/common.py b/python/sglang/srt/mem_cache/common.py
+index b556dad..07a1d1c 100644
+--- a/python/sglang/srt/mem_cache/common.py
++++ b/python/sglang/srt/mem_cache/common.py
+@@ -266,2 +266,7 @@ def match_kv_cache(
+         req.kv.cache_protected_len = match_result.cache_protected_len
++    # Research observer: save only this completed native match's CPU scalars.
++    # Never refresh a prefix or acquire a lock on behalf of a quote.
++    runtime = getattr(tree_cache, "contextkv_runtime", None)
++    if runtime is not None:
++        runtime.record_native_match(req, len(token_ids))
+     return match_result

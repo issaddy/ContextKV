@@ -75,3 +75,26 @@ Idle 准备项按候选 `(P,U,L)`——可复用前缀、新计算后缀、host 
 5. **小规模可控采样。** 在同 16K/host 配置做“1 running+2 waiting+候选”fixture，分别覆盖 cold、GPU 共享前缀、host 前缀和较长 waiting；只预热物理上能同时容纳的前缀。先用 `ignore_eos` 的已知短/长预算验证容量记账，再用 EOS 请求验证服务长度情景。仅在 quote、原生 admission verdict、forward-entry、terminal 采样 scalar/pool 信息，保存同一请求引用作离线关联，不逐 token 记录或做内容哈希。对照 gate 是否正确、等待残差及状态漂移，再跑同代码、同质量预算的闭环方法对照；不从已执行臂误差直接推出 APPEND/REBUILD 因果收益。
 
 目前没有新增生产 patch，也不选择上表中某个默认 ratio 作为线上“最佳值”。下一轮应先用原生真实状态消除不可辨识项，再决定是否值得加入更细的服务速率/尾部模型。
+
+## 已实现的只读观测扩展（等待下一轮 GPU 采样）
+
+上述诊断之后，研究补丁增加了下列可选字段，**当前 admission/cost/planner 仍忽略这些新字段，默认算法没有改变**。旧 wire 缺字段时，schema 将其解码为 None；不会填零冒充已知状态。`/cache/quote` 与 metrics 共用同一个只读 workload snapshot，HTTP client 沿用已有一次共享 dataclass 解码，没有增加内容 hash 或请求缓存。
+
+| 位置 / 字段 | 真实来源与语义 |
+|---|---|
+| batch `native_new_token_ratio` | 报价时 `scheduler.new_token_ratio_tracker.current` 的实际值，不以启动默认值代替动态值 |
+| batch `native_max_new_tokens_clip` | 固定原生模块的 `CLIP_MAX_NEW_TOKENS` 实际值，包含启动环境覆盖 |
+| batch `native_running_budget_requests` | 当前 `scheduler.running_batch.reqs` 的原顺序成员摘要，包含原列表内尚未清理的 finished/retracted 成员；不是旧字段的 overlap/last-batch/chunk 联合集合 |
+| batch `native_running_budget_tokens` | 在上述当前成员与实际 ratio 上直接调用原生 `PrefillAdder._get_running_request_total_token_offset` 求和。保留原生“先减 generated，再 clip”、ignore_eos 与未过滤成员的行为；是当前 running headroom 的可复算快照，不是已执行 admission verdict 或完整 total/current offset |
+| request `native_finished` | 同次读取 `req.finished()`；旧引擎未知为 None，不能用这个标志擅自过滤预算列表 |
+| request `last_native_match` | 最近一次被研究 observer 捕获的原生 `match_kv_cache` 完成结果；未捕获为 None，不从 req 默认 prefix=0 推断确证 cold |
+
+`last_native_match` 保存五个标量：`observed_time_ns`、本次参与匹配的 `input_tokens`、`device_prefix_tokens`、`host_hit_tokens`、`matched_prefix_tokens`。Hook 在原生函数已经完成 match 和请求字段更新之后，只复制结果与 `time.monotonic_ns()`；不修改原生返回值，不再调用 match、树遍历、锁、DMA 或 GPU 同步。每请求只覆盖一份记录，不积累历史。未启用研究 runtime 的 cache 不记录。
+
+`last_native_match.observed_time_ns` 与 batch `observed_time_ns` 均为**同一 scheduler 进程的 monotonic 纳秒**，可直接相减得到此次匹配观测的年龄；不得与 wall clock、跨机器客户端时钟或 CUDA event 相减。年龄不是缓存仍驻留的证明：匹配后可能被淘汰、加载或重入队列，单次报价也不预留前缀。Saved match 是匹配时的字段副本；之后 req.prefix_len/host_hit_length 的原生变化不会把旧记录悄悄刷新。已有候选纯 peek 的行为保持不变，新增等待请求观测不主动触发任何匹配。
+
+Running 预算和旧服务工作量摘要使用不同成员集合，所以只在少量长度标量上有 O(active) 的必要重复；没有重复 token 数组、文本或物理 slot。Observer 每次原生 match 的额外工作为 O(1)，workload 导出为 O(active+waiting)，不会扫描缓存树。报价时重算的 running headroom 使用当前成员；下一次实际 prefill pass 可能先合并、过滤或改变批次，因此不能把这个标量叫未来 admission 的精确承诺，也不包含 mixed-decode、已准入 prefill 和页开销等完整预算项。
+
+本地验证直接复用固定原生 offset、ratio tracker、match 函数源码片段，检查 finished/retracted/overlap 成员差异、ratio 衰减、remaining-then-clip、ignore_eos、原生返回与字段不变、未知匹配/过时匹配/只读副本、旧 wire、嵌套 dataclass HTTP 合同，以及旧等待估计在加入观测后逐值不变。完整补丁在干净固定源码上应用并静态编译；该结果不代替 GPU/IPC 验收。
+
+下一轮小 probe 只需保留这些 quote/metrics 原始字段，按 `native_running_budget_requests`、ratio、clip 独立复算预算；将 waiting match 时间与同次 quote 求年龄，区分 None、刚观测和较旧观测。对已有 terminal 的 pre-forward 标签继续只分析已执行臂，不将未来实际输出作为特征。先检查有无实际旧匹配、批次成员差异和容量门槛解释力，再决定是否启用独立 reservation/service 模式；这轮不自动重标定、不改变默认门槛，也不声称等待精度或吞吐已经改善。

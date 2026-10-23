@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import time
+from types import SimpleNamespace
 import uuid
 
 COMMIT = "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b"
@@ -368,7 +369,19 @@ class ContextKVRuntime:
         """
         if self.scheduler is None:
             return dict(active_requests=None, queued_requests=None,
-                        native_running_requests=None, native_waiting_requests=None)
+                        native_running_requests=None, native_waiting_requests=None,
+                        native_new_token_ratio=None, native_max_new_tokens_clip=None,
+                        native_running_budget_tokens=None, native_running_budget_requests=None)
+        from sglang.srt.managers.schedule_policy import CLIP_MAX_NEW_TOKENS, PrefillAdder
+
+        # Keep the exact current scheduler.running_batch membership. PrefillAdder
+        # sums it without filtering finished/retracted requests. This is NOT the
+        # broader overlap/last-batch/chunk union exported for service work below.
+        budget_requests = self.scheduler.running_batch.reqs
+        ratio = self.scheduler.new_token_ratio_tracker.current
+        offset_owner = SimpleNamespace(new_token_ratio=ratio)
+        running_budget = sum(PrefillAdder._get_running_request_total_token_offset(offset_owner, req)
+                             for req in budget_requests)
         waiting = [req for req in self.scheduler.waiting_queue if not req.finished()]
         running = self.scheduler.collect_inflight_reqs()
         if self.scheduler.chunked_req is not None:
@@ -383,11 +396,28 @@ class ContextKVRuntime:
                         ignore_eos=req.sampling_params.ignore_eos,
                         kv_allocated_tokens=req.kv.kv_allocated_len,
                         kv_committed_tokens=req.kv.kv_committed_len,
-                        cache_protected_tokens=req.kv.cache_protected_len)
+                        cache_protected_tokens=req.kv.cache_protected_len,
+                        native_finished=req.finished(),
+                        last_native_match=dict(req.contextkv_last_native_match)
+                            if getattr(req, "contextkv_last_native_match", None) is not None else None)
 
         return dict(active_requests=len(running), queued_requests=len(waiting),
                     native_running_requests=[summary(req) for req in running],
-                    native_waiting_requests=[summary(req) for req in waiting])
+                    native_waiting_requests=[summary(req) for req in waiting],
+                    native_new_token_ratio=ratio, native_max_new_tokens_clip=CLIP_MAX_NEW_TOKENS,
+                    native_running_budget_tokens=running_budget,
+                    native_running_budget_requests=[summary(req) for req in budget_requests])
+
+    def record_native_match(self, req, input_tokens):
+        """Observe a completed native match; overwrite bounded per-request scalars.
+
+        Called by match_kv_cache, never by quote. Subsequent locking, load-back,
+        eviction or retraction can change residency: timestamp is observation age,
+        not a promise that the saved tier layout remains valid.
+        """
+        req.contextkv_last_native_match = dict(observed_time_ns=time.monotonic_ns(),
+            input_tokens=input_tokens, device_prefix_tokens=req.prefix_len,
+            host_hit_tokens=req.host_hit_length, matched_prefix_tokens=req.num_matched_prefix_tokens)
 
     def quote(self, data):
         from sglang.srt.mem_cache.radix_cache import RadixKey

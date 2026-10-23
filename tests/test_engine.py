@@ -9,7 +9,7 @@ import pytest
 from controller.engine_client import (EngineError, SGLangEngineClient, UnknownOutcomeError,
                                       SGLANG_COMMIT, token_hash)
 from controller.mock_engine import MockEngine
-from controller.schema import ConfigFingerprint, NativeRequestSummary, PromptCandidate
+from controller.schema import ConfigFingerprint, NativePrefixMatch, NativeRequestSummary, PromptCandidate
 from engine_patches.contextkv_runtime import ContextKVError, ContextKVRuntime
 
 
@@ -151,7 +151,8 @@ def test_http_quote_decodes_optional_native_workload_contract(workload):
                     guarded_generate_supported=True, scheduler_owned=True,
                     completion_status_supported=True, sglang_commit=SGLANG_COMMIT, fingerprint=asdict(fp))
         summary = NativeRequestSummary(input_tokens=100,generated_tokens=4,max_new_tokens=20,
-            kv_allocated_tokens=108,kv_committed_tokens=103,cache_protected_tokens=64)
+            kv_allocated_tokens=108,kv_committed_tokens=103,cache_protected_tokens=64,
+            native_finished=False,last_native_match=NativePrefixMatch(1000,100,32,32,64))
         wire = dict(request_id="q",observed_seq=0,observed_time_ns=1,engine_restart_id="r",
             cache_config_hash="c",free_gpu_tokens=0,free_host_tokens=10,fingerprint=asdict(fp),
             quotes=[dict(candidate_id="a",input_hash=item.input_hash,input_len=3,match_limit=2)])
@@ -162,6 +163,9 @@ def test_http_quote_decodes_optional_native_workload_contract(workload):
                 native_waiting_requests=[])
             wire["quotes"][0].update(native_estimate_uncertain=True,
                                       uncertainty_reasons=["capacity_pressure"])
+        if workload == "one":
+            wire.update(native_new_token_ratio=.125,native_max_new_tokens_clip=4096,
+                        native_running_budget_tokens=2.0,native_running_budget_requests=[asdict(summary)])
         client = SGLangEngineClient("http://test",fp,transport=httpx.MockTransport(
             lambda request:httpx.Response(200,json=info if request.url.path == "/context/engine/info" else wire)))
         try:
@@ -175,6 +179,13 @@ def test_http_quote_decodes_optional_native_workload_contract(workload):
             else:
                 assert result.gpu_capacity_tokens is None
                 assert result.quotes[0].uncertainty_reasons == ()
+            if workload == "one":
+                assert result.native_running_budget_requests == (summary,)
+                assert result.native_new_token_ratio == .125 and result.native_running_budget_tokens == 2
+                assert isinstance(result.native_running_requests[0].last_native_match,NativePrefixMatch)
+            else:
+                assert result.native_new_token_ratio is result.native_max_new_tokens_clip is None
+                assert result.native_running_budget_requests is result.native_running_budget_tokens is None
         finally:
             await client.aclose()
     run(scenario())
@@ -307,11 +318,18 @@ def test_real_patch_quote_uses_native_array_key_without_mutations(monkeypatch):
         def finished(self):
             return False
     active = ActiveRequest()
-    scheduler = SimpleNamespace(collect_inflight_reqs=lambda:{active},waiting_queue=[],chunked_req=None)
+    from test_engine_host_quote import install_native_policy
+    install_native_policy(monkeypatch)
+    scheduler = SimpleNamespace(collect_inflight_reqs=lambda:{active},waiting_queue=[],chunked_req=None,
+        running_batch=SimpleNamespace(reqs=[active]),new_token_ratio_tracker=SimpleNamespace(current=.5))
     runtime = ContextKVRuntime(cache,asdict(fp),scheduler=scheduler)
+    active.prefix_len, active.host_hit_length, active.num_matched_prefix_tokens = 2,0,2
+    runtime.record_native_match(active,3)
+    match = NativePrefixMatch(**active.contextkv_last_native_match)
     request = {"request_id": "q", "fingerprint": asdict(fp), "candidates": [
         {"candidate_id": "a", "snapshot_version": 0, "input_ids": [1, 2, 3], "input_hash": token_hash([1, 2, 3])}]}
     quote = runtime.quote(request)
+    assert quote["observed_time_ns"] >= match.observed_time_ns
     assert quote["quotes"][0]["ready_gpu_prefix_tokens"] == 2
     assert quote["host_quote_supported"] is True
     assert runtime.observed_seq == 0 and not runtime.epochs and not runtime.attempts
@@ -328,7 +346,10 @@ def test_real_patch_quote_uses_native_array_key_without_mutations(monkeypatch):
             assert decoded.active_requests == 1 and decoded.queued_requests == 0
             assert decoded.native_running_requests == (NativeRequestSummary(
                 input_tokens=3,generated_tokens=1,max_new_tokens=8,kv_allocated_tokens=4,
-                kv_committed_tokens=3,cache_protected_tokens=2),)
+                kv_committed_tokens=3,cache_protected_tokens=2,native_finished=False,last_native_match=match),)
+            assert decoded.native_running_budget_requests == decoded.native_running_requests
+            assert decoded.native_running_budget_tokens == 3.5
+            assert decoded.native_new_token_ratio == .5 and decoded.native_max_new_tokens_clip == 4096
             assert decoded.native_waiting_requests == () and decoded.evictable_host_tokens is None
         finally:
             await client.aclose()

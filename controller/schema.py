@@ -208,6 +208,16 @@ class CacheQuote:
 
 
 @dataclass(frozen=True)
+class NativePrefixMatch:
+    """Last native match, not reserved/current residency; server monotonic ns."""
+    observed_time_ns: int
+    input_tokens: int
+    device_prefix_tokens: int
+    host_hit_tokens: int
+    matched_prefix_tokens: int
+
+
+@dataclass(frozen=True)
 class NativeRequestSummary:
     """Observed CPU-side logical lengths, never unique/releasable physical slots."""
     input_tokens: int
@@ -217,6 +227,8 @@ class NativeRequestSummary:
     kv_committed_tokens: int
     cache_protected_tokens: int
     ignore_eos: bool = False
+    native_finished: bool | None = None
+    last_native_match: NativePrefixMatch | None = None
 
 
 @dataclass(frozen=True)
@@ -238,10 +250,14 @@ class CacheQuoteBatch:
     gpu_capacity_tokens: int | None = None
     native_running_requests: tuple[NativeRequestSummary, ...] | None = None
     native_waiting_requests: tuple[NativeRequestSummary, ...] | None = None
+    native_new_token_ratio: float | None = None
+    native_max_new_tokens_clip: int | None = None
+    native_running_budget_tokens: float | None = None
+    native_running_budget_requests: tuple[NativeRequestSummary, ...] | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "quotes")
-        for name in ("native_running_requests", "native_waiting_requests"):
+        for name in ("native_running_requests", "native_waiting_requests", "native_running_budget_requests"):
             if getattr(self, name) is not None:
                 _tuples(self, name)
 

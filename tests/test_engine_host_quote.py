@@ -387,7 +387,18 @@ def test_runtime_quote_uses_native_array_limit_and_host_threshold(runtime,monkey
     assert compact_state(tree) == before
 
 
-def test_workload_snapshot_reuses_native_overlap_collection_without_mutation(runtime):
+def install_native_policy(monkeypatch):
+    offset = extract_native_method(native_source("_get_running_request_total_token_offset"),
+        "_get_running_request_total_token_offset", {"CLIP_MAX_NEW_TOKENS":4096})
+    module = ModuleType("sglang.srt.managers.schedule_policy")
+    module.CLIP_MAX_NEW_TOKENS = 4096
+    module.PrefillAdder = SimpleNamespace(_get_running_request_total_token_offset=offset)
+    monkeypatch.setitem(sys.modules,module.__name__,module)
+    return offset
+
+
+def test_workload_snapshot_reuses_native_overlap_collection_without_mutation(runtime,monkeypatch):
+    install_native_policy(monkeypatch)
     native_kv = extract_native_class(native_source("ReqKvInfo"), "ReqKvInfo",
                                     {"dataclasses":dataclasses})
     native_finished = extract_native_method(native_source("finished"), "finished")
@@ -413,6 +424,7 @@ def test_workload_snapshot_reuses_native_overlap_collection_without_mutation(run
         collect_inflight_reqs = collect
     scheduler = Scheduler()
     scheduler.running_batch = SimpleNamespace(reqs=[active,retracted,done])
+    scheduler.new_token_ratio_tracker = SimpleNamespace(current=.5)
     scheduler.last_batch = SimpleNamespace(reqs=[active])
     scheduler.enable_continuous_input_polling = True
     scheduler.result_queue = [(SimpleNamespace(reqs=[active,retracted]),object())]
@@ -427,7 +439,12 @@ def test_workload_snapshot_reuses_native_overlap_collection_without_mutation(run
     by_input = {r["input_tokens"]:r for r in result["native_running_requests"]}
     assert set(by_input) == {20,50}
     assert by_input[20] == dict(input_tokens=20,generated_tokens=3,max_new_tokens=10,
-        ignore_eos=False,kv_allocated_tokens=27,kv_committed_tokens=22,cache_protected_tokens=10)
+        ignore_eos=False,kv_allocated_tokens=27,kv_committed_tokens=22,cache_protected_tokens=10,
+        native_finished=False,last_native_match=None)
+    assert [r["input_tokens"] for r in result["native_running_budget_requests"]] == [20,30,60]
+    assert result["native_running_budget_requests"][-1]["native_finished"] is True
+    assert result["native_running_budget_tokens"] == 3.5
+    assert result["native_new_token_ratio"] == .5 and result["native_max_new_tokens_clip"] == 4096
     from controller.schema import CacheQuoteBatch, NativeRequestSummary
     from controller.serialization import dumps, loads
     wire = dict(request_id="q",observed_seq=0,observed_time_ns=1,engine_restart_id="r",
@@ -438,6 +455,7 @@ def test_workload_snapshot_reuses_native_overlap_collection_without_mutation(run
     assert isinstance(decoded.native_running_requests,tuple)
     assert all(isinstance(row,NativeRequestSummary) for row in decoded.native_running_requests)
     assert decoded.native_waiting_requests[1].generated_tokens == 4
+    assert len(decoded.native_running_budget_requests) == 3
     assert loads(CacheQuoteBatch,dumps(decoded)) == decoded
     assert [r.__dict__ for r in (active,retracted,queued,chunked,done)] == state_before
     assert scheduler.waiting_queue == [queued,retracted,done]
@@ -448,7 +466,8 @@ def test_workload_snapshot_reuses_native_overlap_collection_without_mutation(run
     scheduler.result_queue = []
     scheduler.chunked_req = done
     assert bridge.workload_snapshot() == dict(active_requests=0,queued_requests=0,
-        native_running_requests=[],native_waiting_requests=[])
+        native_running_requests=[],native_waiting_requests=[], native_running_budget_requests=[],
+        native_running_budget_tokens=0,native_new_token_ratio=.5,native_max_new_tokens_clip=4096)
 
 
 def test_native_gpu_evictable_counter_is_constant_time_and_not_host_capacity():
