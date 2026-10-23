@@ -302,6 +302,7 @@ async def execute_job(spec, job, directory):
                     system_prompt=shared_config.context.system_prompt, system_prompt_file=None,
                     table_relations=shared_config.context.table_relations,
                     table_annotation_style=shared_config.context.table_annotation_style,
+                    table_structure_mode=shared_config.context.table_structure_mode,
                     output=str(directory), context_length=native.get("context_length", shared_config.context.max_total_model_tokens),
                     max_new_tokens=native.get("max_new_tokens", shared_config.context.max_new_tokens), local_files_only=native.get("local_files_only", False),
                     audit_prompt_ids=native.get("audit_prompt_ids", False), no_stream=native.get("no_stream", False))

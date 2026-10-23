@@ -43,7 +43,8 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     if policy.table_relations:
         from adapters.table_relations import extract_table_relations, render_table_relations
         by_key = {key: reference for reference, key in references}
-        tables = tuple((by_key[block.key], extract_table_relations(block.text)) for block in required)
+        options = {} if policy.table_structure_mode == "legacy" else {"mode": policy.table_structure_mode}
+        tables = tuple((by_key[block.key], extract_table_relations(block.text, **options)) for block in required)
         if policy.table_annotation_style == "focus_refs":
             from adapters.table_focus import focused_annotation
             table_annotations, _ = focused_annotation(query, tables)

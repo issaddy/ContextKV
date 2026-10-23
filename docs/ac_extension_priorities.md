@@ -6,6 +6,8 @@
 
 **当前直接依据。** `focus_refs`只在41轮中的附件纠正轮触发。已完成的开发正文扫描另发现两张无编号标题的明确限额表、一处带套餐条件的嵌套列表；现helper未覆盖这些结构。完整P3仍出现默认/套餐/对象范围混用。这里优先补足可见来源的结构，而不是再换一个通用判断提示。
 
+实施更新：可选 `table_structure_mode: explicit` 的CPU入口已完成，[全41轮复核](table_structure_validation.md)新增两张表、六条关系。套餐列表在实际冻结正文中已失去缩进，不能把候选lead称为仍有明确嵌套结构；本轮未猜其父级关系。真正保留标题/缩进的父路径通过通用合同测试，但真实cohort未激活，生成效果尚待验证。
+
 **复用与最小扩展。** 保留现有 `table_relations`原文span、CRAFT的MIT `build_row_texts`和当前词法focus；增加明确无编号表头、列表缩进/显式标题的父级路径。输出每项包含原对象、列/值、单位、父条件span、行内Evidence ID。只有原文结构支持的祖先作用域进入路径；无标记相邻注释仍标“scope unspecified”。不能从扁平缺失的colspan猜关系，也不把“同为MB”当作包含关系。TreeThinker的层次表头思想对应此缺口；其完整LLM树生成流程未复制，许可边界沿用既有核查。[TreeThinker论文§4](https://arxiv.org/html/2506.13405v1)、[已固定的CRAFT行表示](https://github.com/coral-lab-asu/CRAFT/blob/7c4be45bb292f4e050c4237b4141ccc9e91ebe30/src/craft_tabqa/core/text.py)。
 
 **可检验假设。** 在相同正文/QA/当前top5下，显式父条件路径比单层行表示更少产生“某套餐条件应用于全部对象”和“默认值覆盖例外”，同时不增加无源条件。新增贡献候选是有来源的作用域表示与生成使用效果，不是表头树概念本身。

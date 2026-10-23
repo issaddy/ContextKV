@@ -27,6 +27,7 @@ class EvidencePolicy:
     system_prompt: str | None = None
     table_relations: bool = False
     table_annotation_style: str = "all_rows"
+    table_structure_mode: str = "legacy"
 
     def __post_init__(self) -> None:
         if self.max_total_model_tokens < 1 or self.max_new_tokens < 1:
@@ -41,6 +42,8 @@ class EvidencePolicy:
             raise ValueError("system_prompt must be nonempty when provided")
         if self.table_annotation_style not in {"all_rows", "focus_refs"}:
             raise ValueError("table_annotation_style must be all_rows or focus_refs")
+        if self.table_structure_mode not in {"legacy", "explicit"}:
+            raise ValueError("table_structure_mode must be legacy or explicit")
 
 
 def content_hash(text: str) -> str:

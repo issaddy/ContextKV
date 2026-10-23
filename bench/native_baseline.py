@@ -399,7 +399,8 @@ def resolve_context_policy(args):
     for argument, field in (("context_length", "max_total_model_tokens"),
                             ("max_new_tokens", "max_new_tokens"),
                             ("table_relations", "table_relations"),
-                            ("table_annotation_style", "table_annotation_style")):
+                            ("table_annotation_style", "table_annotation_style"),
+                            ("table_structure_mode", "table_structure_mode")):
         value = getattr(args, argument, None)
         if value is not None:
             overrides[field] = value
@@ -417,6 +418,7 @@ def resolve_context_policy(args):
     args.max_new_tokens = policy.max_new_tokens
     args.table_relations = policy.table_relations
     args.table_annotation_style = policy.table_annotation_style
+    args.table_structure_mode = policy.table_structure_mode
     return policy
 
 
@@ -526,6 +528,8 @@ def main(argv=None):
                         help="override literal source table field associations")
     parser.add_argument("--table-annotation-style", choices=["all_rows", "focus_refs"],
                         help="optional annotation style; used only with --table-relations")
+    parser.add_argument("--table-structure-mode", choices=["legacy", "explicit"],
+                        help="optional literal unnumbered-table/parent-path parser; requires --table-relations")
     parser.add_argument("--domain", choices=["cloud", "all"], default="cloud")
     parser.add_argument("--split-manifest")
     parser.add_argument("--split", choices=["dev", "test"], default="test")

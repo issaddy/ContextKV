@@ -23,7 +23,9 @@ supplement = render_table_relations(existing_reference_id, tables)
 
 新增的 `context.table_annotation_style` 默认为 `all_rows`，保留原全行输出；设为 `focus_refs` 才使用问题相关行和原引用样式，而且仍须 `table_relations: true`。该轻量样式直接复用 CRAFT 的行文本构造函数，词法选择复用现有 BM25S 与纠正线索，所需依赖已属于 `contextkv[retrieval]`；默认关闭和全行样式不加载此可选依赖。接口、明确的局部验证与完整 MIT 归属见[focus 验证及配置](table_focus_validation.md)和[CRAFT notice](third_party/CRAFT_NOTICE.md)。它不是后置答案验证器，也没有迁移 CRAFT 的 dense 重排。
 
-`SourceSpan(text, start, end)` 使用传入原段落的 Python Unicode 字符偏移，左闭右开，保证 `original[start:end] == text`，不是 UTF-8 字节偏移。`TableRelations` 保存表题、表头、整表跨度、关系与原注释；`TableRelation` 保存 `object/column/value/unit/row_span/notes`。全部是不可变 dataclass，可用 `dataclasses.asdict` 留存审计。正文内空白、Markdown 转义、大小写和数值写法不作归一化；仅排除单元格两端的格式空白。
+可选 `context.table_structure_mode: explicit` 已补无编号明确数量表头和有实际 Markdown 标题/缩进的父路径；默认 `legacy` 保留本节原两种格式。它没有推断真实扁平列表中丢失的缩进。全 41 轮覆盖、原文边界和未验证之处见[结构扩展验证](table_structure_validation.md)。
+
+`SourceSpan(text, start, end)` 使用传入原段落的 Python Unicode 字符偏移，左闭右开，保证 `original[start:end] == text`，不是 UTF-8 字节偏移。`TableRelations` 保存表题、表头、整表跨度、关系与原注释；`TableRelation` 保存 `object/column/value/unit/row_span/notes/parent_path`，默认父路径为空。全部是不可变 dataclass，可用 `dataclasses.asdict` 留存审计。正文内空白、Markdown 转义、大小写和数值写法不作归一化；仅排除单元格两端的格式空白。
 
 支持两种明确结构：
 

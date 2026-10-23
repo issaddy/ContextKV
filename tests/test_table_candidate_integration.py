@@ -180,15 +180,17 @@ def test_table_annotation_reuses_existing_hash_work_and_fingerprints(monkeypatch
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("style", ["all_rows", "focus_refs"])
-async def test_native_and_controller_share_table_annotated_input_exactly(style):
+@pytest.mark.parametrize("structure", ["legacy", "explicit"])
+async def test_native_and_controller_share_table_annotated_input_exactly(style, structure):
     from bench.native_baseline import NativeBaseline
     sent = []
     async def generate(ids, **kwargs):
         sent.append(ids)
         return SimpleNamespace(text="answer", output_ids=(1,), finish_reason="stop", truncated=False,
                                meta_info={}, raw_response={}, http_elapsed_ms=1.0, timing=None)
-    policy = EvidencePolicy(table_relations=True, table_annotation_style=style)
-    turn = OnlineTurn("s", "task", 1, "test", "Current?", (), (OnlineContext("table", TABLE),), "P3")
+    policy = EvidencePolicy(table_relations=True, table_annotation_style=style, table_structure_mode=structure)
+    text = TABLE if structure == "legacy" else TABLE.replace("Table 8. ", "")
+    turn = OnlineTurn("s", "task", 1, "test", "Current?", (), (OnlineContext("table", text),), "P3")
     template = ByteTemplate()
     expected = build_candidates(SessionSnapshot("s", corpus_snapshot_id="test-v1"), turn.query,
         tuple(to_evidence(c, "test-v1") for c in turn.contexts), policy, template)[0]
@@ -203,7 +205,8 @@ async def test_native_and_controller_share_table_annotated_input_exactly(style):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("style", ["all_rows", "focus_refs"])
-async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monkeypatch, enabled, style):
+@pytest.mark.parametrize("structure", ["legacy", "explicit"])
+async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monkeypatch, enabled, style, structure):
     import bench.experiments as experiments
     import bench.native_baseline as native_module
     import controller.cli as cli
@@ -211,7 +214,8 @@ async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monk
     split.write_text(json.dumps({"dev": ["session-a"], "test": ["session-b"]}))
     manifest.write_text("{}")
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps({"context": {"table_relations": enabled, "table_annotation_style": style}}))
+    config_path.write_text(json.dumps({"context": {"table_relations": enabled, "table_annotation_style": style,
+                                                  "table_structure_mode": structure}}))
     spec = {"schema_version": 1, "input": str(Path(__file__).parent / "fixtures/mtrag_small.jsonl"),
         "domain": "all", "split_manifest": str(split), "protocols": ["P2"], "concurrency": [1], "seeds": [42],
         "base_config": str(config_path), "methods": [
@@ -220,10 +224,11 @@ async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monk
             {"id": "controller"}]}
     seen = {}
     async def native_run(args):
-        seen["native"] = (args.table_relations, args.table_annotation_style)
+        seen["native"] = (args.table_relations, args.table_annotation_style, args.table_structure_mode)
         (Path(args.output) / "native-fake.json").write_text(json.dumps({"baseline": "B0"}))
     async def controller_run(args, config):
-        seen["controller"] = (config.context.table_relations, config.context.table_annotation_style)
+        seen["controller"] = (config.context.table_relations, config.context.table_annotation_style,
+                              config.context.table_structure_mode)
         (Path(config.state_dir) / "benchmark-fake.json").write_text(json.dumps({"engine_kind": "mock"}))
     monkeypatch.setattr(native_module, "_run", native_run)
     monkeypatch.setattr(cli, "benchmark", controller_run)
@@ -231,7 +236,7 @@ async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monk
     monkeypatch.setattr(experiments, "markdown_report", lambda summary: "mock contract")
     for job in experiments.matrix_jobs(spec):
         await experiments.execute_job(spec, job, tmp_path / job["job_id"])
-    assert seen == {"native": (enabled, style), "controller": (enabled, style)}
+    assert seen == {"native": (enabled, style, structure), "controller": (enabled, style, structure)}
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -241,14 +246,14 @@ def test_native_cli_keeps_explicit_style_separate_from_enable_flag(monkeypatch, 
     seen = []
     async def fake_run(args):
         policy = native_module.resolve_context_policy(args)
-        seen.append((policy.table_relations, policy.table_annotation_style))
+        seen.append((policy.table_relations, policy.table_annotation_style, policy.table_structure_mode))
         return RunReport(mode="closed_loop", seed=42, started_at=0, arrival_window_end=0,
             completed_at=0, turns=(), scheduled_sessions=0, arrived_sessions=0,
             unfinished_turns=0, timed_out_sessions=(), session_makespans=(), time_origin="fixture")
     monkeypatch.setattr(native_module, "_run", fake_run)
     argv = ["unused.jsonl", "--baseline", "B0", "--engine-manifest", "unused.json",
-            "--table-annotation-style", "focus_refs"]
+            "--table-annotation-style", "focus_refs", "--table-structure-mode", "explicit"]
     if enabled:
         argv.append("--table-relations")
     assert native_module.main(argv) == 0
-    assert seen == [(enabled, "focus_refs")]
+    assert seen == [(enabled, "focus_refs", "explicit")]
