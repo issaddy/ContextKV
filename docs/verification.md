@@ -42,6 +42,8 @@ SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固
 
 2026-10-24 从 5 个开发会话按版本年龄 0/1/2+ 分层冻结 15 个 pre-turn 案例，观察到 APPEND 输入最大 11217 tokens，超出此前 8192 的采样上限。因此在相同引擎配置追加 16384 长度标定：prefix 比例 0/.5/.9/.99、并发 1/4、输出 128/512，28 个兼容 case，每 case 1 次 warmup 和 3 次测量，共 70 个预热请求、210 个测量请求、778 条阶段/已完成传输记录。原 1500 条记录独立保留，补充数据在 runs/remote-h200-expanded；扩大覆盖本身不是方法收益。两个 estimator 的支持域已共同加入实测总长度边界，phase 别名按同一预测特征分组，模拟拟合来源不能被加载为硬件校准。
 
+随后 15 cases × 3 缓存状态 × 2 次重复共 90 对全部完成，82/90 双臂处于标定支持域。Lookup 6 次成本切换，平均单步 regret 366.55 ms；同一观测上的 positive 离线重评分未切换，regret 437.05 ms。固定 REBUILD 为 129.14 ms，8192 阈值为 177.11 ms；当前结果不支持 B 优于简单策略。84/90 对的 Decode 差主要来自输出长度，180 个臂中有 18 个截断；这是并发 1、冻结历史下的诊断，尚无质量调整或闭环基线结论。详见[分层决策验证](stratified_decision_validation.md)。
+
 **运行限制。** 原生 kernel + page_first 在首次 D2H 出现段错误，栈为 staged HiCache → cudaMemcpyBatchAsync / cuMemcpyBatchAsync_v2。保持固定源码和 host 语义，改用已有 layer_first 并设置 SGLANG_HICACHE_TMA_TRANSFER=0 后通过上述验收。尚未隔离具体驱动/运行时原因，不声称修复上游 kernel。正式比较必须统一兼容配置并重新标定。
 
 **评测限制。** Cloud 512-token 配置有 21/41 轮截断，成功 receipt 不等于完整优质答案。按技术方案单列 1024-token 敏感性后，41/41 成功、0 截断、平均输出 536 tokens；记录于容器 runs/cloud-dev-p2-output1024。该运行没有控制与前一次相同的缓存初态，只比较截断现象，不能宣称时延改进。正式对照应给所有方法相同输出上限，512 原始结果保留。首次小标定含初始化影响，仅证明管线可运行；正式采集需独立 warmup、充分范围与留出误差报告。
@@ -55,6 +57,8 @@ SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固
 252 个静态 Decode 标定点、输出均值 128/P90 256 的本机 CPU 微基准，单候选中位预测耗时由 38.22 ms 降到 0.58 ms；区间案例由 15.55 ms 降到 0.46 ms。原插值、误差与支持范围语义通过随机稀疏/密集、重复点、区间、边界及完整预测等价性测试。证据为 runs/cost-profile/comparison.json；这是 CPU 开销改善，不是 GPU 端到端加速比。
 
 15 个真实长会话快照的局部 CPU profile 显示重复类型注解解析和标量通用遍历可避免；只缓存静态 schema 并增加标量快路径后，临时 WAL/FULL 部分存储链的等案例均值从 47.22 ms 降为 13.46 ms，JSON 字节和 typed contract 保持一致。候选构建的哈希本身占比很低，没有因此删除证据校验。该局部结果不包含 RPC、并发等待和全部事务成本，不能换算为远端控制 P95；详见[控制路径诊断](controller_control_profile.md)。
+
+远端 P1/always_rebuild/c4 的一次 before→after 对照均 41/41 成功，全部输入 IDs 相同，control P95 为 456.11→168.68 ms；16 个同输入/输出样本的 control P95 为 378.55→157.07 ms。P2 对照虽然也观察到控制耗时下降，但只有 6/41 输入相同，历史与动作变化存在混杂。两组均非随机交叉重复实验，P1 输入仅 2460–4231 tokens；不外推长 APPEND、质量一致或一般吞吐增益。原始数据在 runs/remote-h200-control，逐项校验与统计见同一控制路径文档。
 
 ## 仍需完成的研究验收
 
