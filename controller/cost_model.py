@@ -76,7 +76,8 @@ class CostModel:
                  max_normalized_distance: float = .5,
                  include_host_cost: bool = True, include_decode_cost: bool = True,
                  include_control_cost: bool = True, residual_alpha: float = .1,
-                 prefill_estimator: str = "lookup", positive_prefill: Mapping | None = None) -> None:
+                 prefill_estimator: str = "lookup", positive_prefill: Mapping | None = None,
+                 uncertainty_mode: str | None = None, output_length_model=None) -> None:
         self.prefill_points = tuple(prefill_points)
         self.decode_points = tuple(decode_points)
         self.default_output_tokens = default_output_tokens
@@ -93,6 +94,11 @@ class CostModel:
             raise ValueError("prefill_estimator must be lookup or positive_basis")
         self.prefill_estimator = prefill_estimator
         self.positive_prefill = dict(positive_prefill or {})
+        self.uncertainty_mode = (self.positive_prefill.get("uncertainty_mode", "global")
+                                 if uncertainty_mode is None else uncertainty_mode)
+        if self.uncertainty_mode not in {"global", "conditional"}:
+            raise ValueError("uncertainty_mode must be global or conditional")
+        self.output_length_model = output_length_model
         self._bias_ms = 0.0
         self._past_residuals: list[float] = []
         self.calibration_metadata: dict = {}
@@ -233,8 +239,21 @@ class CostModel:
         error = sum(w*(sample[2]+abs(sample[1]-cost)) for w, sample in zip(weights, selected))/sum(weights)
         return cost, error, nearby[0][0] <= self.max_normalized_distance
 
+    def _positive_error(self, concurrency, load):
+        error = self.positive_prefill.get("error_p99_ms")
+        if self.uncertainty_mode == "conditional":
+            table = self.positive_prefill.get("conditional_uncertainty", {})
+            minimum = table.get("minimum_feature_cells", 20)
+            host_load = load > 0
+            for level in (host_load, None):
+                for row in table.get("strata", ()):
+                    if (row["concurrency"] == concurrency and row["host_load"] is level
+                            and host_load in row["host_load_states"] and row["feature_cells"] >= minimum):
+                        return row["error_p99_ms"]
+        return error
+
     def _prefill(self, prefix: int, suffix: int, load: int,
-                 concurrency: int) -> tuple[float, float, bool]:
+                 concurrency: int, *, uncertainty_load: int | None = None) -> tuple[float, float, bool]:
         # Separate P/U axis bounds can admit unmeasured total lengths. Both
         # estimators keep diagnostic values but require the observed n range.
         bounds = self._prefill_input_bounds
@@ -243,7 +262,7 @@ class CostModel:
             estimate = sum(a*b for a, b in zip(positive_prefill_features(prefix, suffix, load, concurrency),
                                                self.positive_prefill["coefficients"]))
             sufficient = self.positive_prefill.get("uncertainty_sufficient") is True
-            error = self.positive_prefill.get("error_p99_ms")
+            error = self._positive_error(concurrency, load if uncertainty_load is None else uncertainty_load)
             if not sufficient or error is None:
                 return estimate, max(estimate, error or 0), False
             sources = self.positive_prefill.get("fit_sources")
@@ -329,6 +348,11 @@ class CostModel:
         # Candidate/quote identity is checked by the planner at the batch boundary.
         prior = output_length_prior(session, global_mean=self.default_output_tokens,
             global_p90=self.p90_output_tokens, max_new_tokens=self.max_new_tokens)
+        length_prediction = None
+        if self.output_length_model is not None:
+            length_prediction = self.output_length_model.predict_prior(
+                candidate, session, self.max_new_tokens, prior)
+            prior = OutputPrior(length_prediction.mean_tokens, length_prediction.p90_tokens)
         n = len(candidate.input_ids)
         loaded = max(0, min(quote.host_only_load_tokens, quote.native_load_estimate))
         # A GPU-resident segment can follow a host-only gap. Once every missing
@@ -339,7 +363,7 @@ class CostModel:
         prefix = min(quote.match_limit, quote.recoverable_prefix_tokens if full_restore
                      else quote.ready_gpu_prefix_tokens)
         joint, joint_error, calibrated = self._prefill(prefix, max(0,n-prefix),
-                            loaded if self.include_host_cost else 0, concurrency)
+                            loaded if self.include_host_cost else 0, concurrency, uncertainty_load=loaded)
         control_ms = control_ms if self.include_control_cost else 0.0
         # first_token observations already include the server-side queue.
         if any(p.scope == "first_token" and self._source_valid(p.source) for p in self.prefill_points):
@@ -362,7 +386,12 @@ class CostModel:
                             batch.free_gpu_tokens+batch.evictable_gpu_tokens)
         return CostEstimate(candidate.candidate_id, cost, control_ms, queue_ms, joint,
             decode, joint_error+decode_error, prior.mean_tokens, prior.p90_tokens,
-            max(0.0, control_ms+queue_ms+joint+risk_decode+self._bias_ms), calibrated, capacity_risk)
+            max(0.0, control_ms+queue_ms+joint+risk_decode+self._bias_ms), calibrated, capacity_risk,
+            # Length residuals have a different meaning from timing errors.
+            # Keep them diagnostic; mean/p90 affect expected/risk decode cost.
+            output_length_error_tokens=length_prediction.error_tokens if length_prediction else None,
+            output_length_model=length_prediction.model_kind if length_prediction else "shared",
+            output_length_in_range=length_prediction.within_training_range if length_prediction else None)
 
     def paired_error(self, append: CostEstimate, rebuild: CostEstimate) -> float:
         # Online residuals are from completed prior requests. Without paired dev
@@ -408,7 +437,7 @@ class CostModel:
         """Freeze fitted points and priors. Runtime residual adaptation is not persisted."""
         settings = {name: getattr(self, name) for name in (
             "default_output_tokens", "p90_output_tokens", "max_new_tokens", "paired_error_ms",
-            "max_normalized_distance", "include_host_cost", "include_decode_cost", "include_control_cost", "residual_alpha", "prefill_estimator")}
+            "max_normalized_distance", "include_host_cost", "include_decode_cost", "include_control_cost", "residual_alpha", "prefill_estimator", "uncertainty_mode")}
         payload = {"version": 1, "settings": settings, "prefill_points": [asdict(p) for p in self.prefill_points],
                    "decode_points": [asdict(p) for p in self.decode_points],
                    "metadata": dict(self.calibration_metadata if metadata is None else metadata),
@@ -420,6 +449,8 @@ class CostModel:
     @classmethod
     def load(cls, path: str | Path, **overrides) -> "CostModel":
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        if overrides.get("uncertainty_mode") is None:
+            overrides.pop("uncertainty_mode", None)
         settings = {**payload["settings"], "positive_prefill": payload.get("positive_prefill"), **overrides}
         model = cls((LookupPoint(**p) for p in payload["prefill_points"]),
                     (DecodePoint(**p) for p in payload["decode_points"]), **settings)

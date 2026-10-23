@@ -351,8 +351,10 @@ def _model_and_knobs(config, cases, artifact):
     common = dict(max_new_tokens=cases[0].max_new_tokens,
                   include_host_cost=config.ablation.host_cost, include_decode_cost=config.ablation.decode_cost,
                   include_control_cost=config.ablation.control_cost)
+    if config.cost_model.uncertainty_mode is not None:
+        common["uncertainty_mode"] = config.cost_model.uncertainty_mode
     settings = asdict(config.cost_model)
-    for key in ("artifact", "online_calibration"):
+    for key in ("artifact", "online_calibration", "output_length_artifact", "uncertainty_mode"):
         settings.pop(key)
     if artifact:
         model = CostModel.load(artifact, **common)
@@ -361,6 +363,10 @@ def _model_and_knobs(config, cases, artifact):
         model = CostModel.from_measurements(rows, **common, **settings)
     else:
         model = CostModel(**common, **settings)
+    if config.cost_model.output_length_artifact:
+        from controller.output_length import OutputLengthModel
+        model.output_length_model = OutputLengthModel.load(config.cost_model.output_length_artifact,
+            expected_fingerprint=cases[0].candidates[0].fingerprint, max_new_tokens=cases[0].max_new_tokens)
     knobs = config.planner if config.ablation.hysteresis else replace(
         config.planner, delta_abs=0, delta_rel=0, z=0, min_stable_turns=0)
     return model, knobs
@@ -425,7 +431,9 @@ def rescore_pairs(rows, cases, model, knobs, engine_info):
         row["rescoring"] = {"status": "rescored", "source_selected_action": source["selected_action"],
             "source_plan_reason": source["plan_reason"], "source_calibration_scope": source.get("calibration_scope"),
             "source_predictions": {action: deepcopy(arm["prediction"]) for action, arm in source["observations"].items()},
-            "decision_quote_arm": order[0], "outcomes_unchanged": True, "current_outcomes_used_for_selection": False}
+            "decision_quote_arm": order[0], "outcomes_unchanged": True,
+            "current_outcomes_used_for_selection": False,
+            "current_outcomes_scope": "runtime_feature_inputs_only; fitted model labels must be audited separately"}
         row.update(selected_action=selected.candidate.action, plan_reason=selected.reason,
                    calibration_scope=scope, prediction_control_ms=0)
         rescored.append(row)
@@ -462,10 +470,16 @@ def rescore_file(args):
         "frozen": frozen, "cases_path": str(Path(args.cases).resolve()),
         "config": asdict(config), "config_scope": "cost ablations and planner; candidates/budgets come from frozen cases",
         "cost_artifact": str(Path(artifact).resolve()), "cost_artifact_sha256": sha256(Path(artifact).read_bytes()).hexdigest(),
+        "output_length_artifact": config.cost_model.output_length_artifact,
+        "output_length_artifact_sha256": sha256(Path(config.cost_model.output_length_artifact).read_bytes()).hexdigest()
+            if config.cost_model.output_length_artifact else None,
+        "output_length_training_metadata": model.output_length_model.metadata if model.output_length_model else None,
         "engine": source_manifest["engine"], "calibration_scope": model.calibration_scope_report,
         "measurement_source_counts": dict(Counter(row.get("measurement_source", "not_recorded") for row in records)),
         "new_generations": 0, "new_engine_requests": 0, "online_model_updates": False,
-        "current_outcomes_used_for_selection": False, "quality_evaluated": False,
+        "current_outcomes_used_for_selection": False,
+        "current_outcomes_scope": "runtime_feature_inputs_only; fitted model labels must be audited separately",
+        "quality_evaluated": False,
         "pressure_concurrency": 1, "prediction_control_ms": 0}
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8") as stream:
@@ -498,6 +512,9 @@ async def collect(args):
         "cache_states": args.cache_states, "repetitions": args.repetitions, "seed": args.seed,
         "config": asdict(config), "cost_artifact": artifact,
         "cost_artifact_sha256": sha256(Path(artifact).read_bytes()).hexdigest() if artifact else None,
+        "output_length_artifact": config.cost_model.output_length_artifact,
+        "output_length_artifact_sha256": sha256(Path(config.cost_model.output_length_artifact).read_bytes()).hexdigest()
+            if config.cost_model.output_length_artifact else None,
         "quality_evaluated": False, "fixtures_destructive_on_isolated_server": True,
         "online_model_updates": False, "pressure_concurrency": 1,
         "client_complete_scope": "generate_submit_to_complete_response; excludes fixture,prepare,retire,ledger_commit"}

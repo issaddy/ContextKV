@@ -1,7 +1,10 @@
 """Optional SciPy NNLS fitter; serving uses only saved coefficients and geometry."""
 from __future__ import annotations
 
+import argparse
 from importlib.metadata import version
+import json
+from pathlib import Path
 import random
 import statistics
 
@@ -11,6 +14,35 @@ from profiling.fit import feature_cell_key, validate_timing_scopes
 
 BASES = ("constant", "suffix", "attention", "host_load", "pressure", "pressure_suffix", "pressure_attention", "pressure_host_load")
 FIRST_PHASES = {"prefill", "restore_prefill", "first_token"}
+
+
+def conditional_uncertainty(predictions, *, minimum_feature_cells=20):
+    """Pool OOF cell errors by observable load, never by measured pair outcomes.
+
+    Twenty distinct feature cells are required before using a conditional tail.
+    Narrow host strata fall back to the same concurrency, then the global error.
+    These are empirical maxima quantiles, not coverage/confidence guarantees.
+    """
+    groups = {}
+    for row in predictions:
+        raw_key = row["feature_cell"]
+        key = ("restore_prefill" if raw_key[0] in {"prefill", "restore_prefill"} else raw_key[0], *raw_key[1:])
+        concurrency, host_load = key[4], key[3] > 0
+        for group in ((concurrency, host_load), (concurrency, None)):
+            cells = groups.setdefault(group, {})
+            cells[key] = max(cells.get(key, 0), row["max_absolute_error_ms"])
+    strata = []
+    for (concurrency, host_load), cells in sorted(groups.items(), key=lambda item: repr(item[0])):
+        errors = list(cells.values())
+        strata.append({"concurrency": concurrency, "host_load": host_load,
+            "host_load_states": sorted({key[3] > 0 for key in cells}),
+            "feature_cells": len(cells), "sufficient": len(cells) >= minimum_feature_cells,
+            "error_p95_ms": percentile(errors, .95), "error_p99_ms": percentile(errors, .99)})
+    return {"kind": "oof_concurrency_host_hierarchy_v1", "minimum_feature_cells": minimum_feature_cells,
+            "matching": "exact_concurrency_and_observed_host_load_state",
+            "fallback_order": ["concurrency_and_host_load", "concurrency", "global"],
+            "definition": "P95/P99 of per-feature-cell maximum absolute OOF request error; empirical, not a confidence guarantee",
+            "strata": strata}
 
 
 def calibration_cells(rows):
@@ -81,6 +113,7 @@ def fit_positive_prefill(rows, *, seed=2026, folds=5, minimum_oof_cells=10):
             "dependency_versions": {"scipy": version("scipy"), "numpy": version("numpy")},
             "uncertainty_sufficient": sufficient, "error_p95_ms": percentile(maxima, .95),
             "error_p99_ms": percentile(maxima, .99),
+            "conditional_uncertainty": conditional_uncertainty(predictions),
             "uncertainty_definition": "P95/P99 of per-feature-cell maximum absolute OOF request error; not a confidence guarantee",
             "support_definition": "shared_P_U_L_concurrency_lookup_geometry_and_observed_total_input_range",
             "validation_protocol": {"kind": "out_of_fold_whole_first_token_feature_cells", "seed": seed,
@@ -88,3 +121,30 @@ def fit_positive_prefill(rows, *, seed=2026, folds=5, minimum_oof_cells=10):
                 "oof_feature_cells": len(predictions), "status": "available" if sufficient else "insufficient_feature_cells",
                 "lookup_support_coverage": statistics.mean(row["supported_by_training_lookup"] for row in predictions) if predictions else None,
                 "oof_predictions": predictions}}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Derive opt-in conditional uncertainty from an existing positive artifact's OOF cells")
+    parser.add_argument("--input-artifact", required=True)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args(argv)
+    target = Path(args.output)
+    if target.exists():
+        raise FileExistsError("choose a new output artifact; the original calibration stays frozen")
+    model = CostModel.load(args.input_artifact)
+    if model.prefill_estimator != "positive_basis":
+        raise ValueError("conditional OOF uncertainty requires a positive_basis artifact")
+    predictions = model.positive_prefill.get("validation_protocol", {}).get("oof_predictions", [])
+    model.positive_prefill["conditional_uncertainty"] = conditional_uncertainty(predictions)
+    model.uncertainty_mode = "conditional"
+    model.calibration_metadata["conditional_uncertainty_update"] = {
+        "source_artifact": str(Path(args.input_artifact).resolve()),
+        "minimum_feature_cells": 20, "source": "existing_whole_feature_cell_oof_predictions",
+        "new_coefficients_fitted": False, "generation_outcomes_used": False,
+        "status": "development_exploration_not_independent_validation"}
+    model.save(target)
+    print(json.dumps({"artifact": str(target), "conditional_uncertainty": model.positive_prefill["conditional_uncertainty"]}, indent=2))
+
+
+if __name__ == "__main__":
+    main()

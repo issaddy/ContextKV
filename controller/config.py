@@ -51,6 +51,8 @@ class AblationConfig:
 @dataclass(frozen=True)
 class CostSettings:
     artifact: str | None = None
+    output_length_artifact: str | None = None
+    uncertainty_mode: str | None = None
     default_output_tokens: int = 128
     p90_output_tokens: int = 256
     paired_error_ms: float = 0.0
@@ -82,6 +84,8 @@ class RunConfig:
             raise ValueError("SGLang runs require a pinned model revision SHA")
         if min(self.cost_model.default_output_tokens, self.cost_model.p90_output_tokens) < 1:
             raise ValueError("output priors must be positive")
+        if self.cost_model.uncertainty_mode not in (None, "global", "conditional"):
+            raise ValueError("uncertainty_mode must be global, conditional or null to use the artifact setting")
         if not 0 < self.cost_model.residual_alpha <= 1 or self.cost_model.max_normalized_distance < 0:
             raise ValueError("invalid cost model calibration parameters")
         if self.cost_model.online_calibration and not all((self.ablation.host_cost,
@@ -112,6 +116,8 @@ def create_controller(config: RunConfig) -> Controller:
     common = dict(max_new_tokens=config.context.max_new_tokens,
                   include_host_cost=config.ablation.host_cost, include_decode_cost=config.ablation.decode_cost,
                   include_control_cost=config.ablation.control_cost)
+    if config.cost_model.uncertainty_mode is not None:
+        common["uncertainty_mode"] = config.cost_model.uncertainty_mode
     settings = dict(default_output_tokens=config.cost_model.default_output_tokens,
                     p90_output_tokens=config.cost_model.p90_output_tokens,
                     paired_error_ms=config.cost_model.paired_error_ms,
@@ -123,6 +129,10 @@ def create_controller(config: RunConfig) -> Controller:
     elif config.calibration_path:
         rows = [json.loads(line) for line in Path(config.calibration_path).read_text().splitlines() if line.strip()]
         model = CostModel.from_measurements(rows, **common, **settings)
+    if config.cost_model.output_length_artifact:
+        from .output_length import OutputLengthModel
+        model.output_length_model = OutputLengthModel.load(config.cost_model.output_length_artifact,
+            expected_fingerprint=template.fingerprint, max_new_tokens=config.context.max_new_tokens)
     knobs = config.planner if config.ablation.hysteresis else replace(config.planner,
                 delta_abs=0, delta_rel=0, z=0, min_stable_turns=0)
     state_dir = Path(config.state_dir)

@@ -153,7 +153,7 @@ def matrix_jobs(spec, *, split="dev", frozen=None, ablations_only=False):
 def provenance(spec):
     config = matrix_config(spec)
     files = {spec.get("system_prompt_file"), spec.get("corpus"), spec.get("evidence_corpus"), spec.get("lifecycle", {}).get("warmup_input"), config.calibration_path,
-             getattr(config.cost_model, "artifact", None)}
+             config.cost_model.artifact, config.cost_model.output_length_artifact}
     if spec.get("retriever_index"):
         files.add(str(Path(spec["retriever_index"]) / "manifest.json"))
     for method in spec["methods"]:
@@ -163,6 +163,7 @@ def provenance(spec):
             files.add(native.get("engine_manifest"))
             files.add(overrides.get("calibration_path"))
             files.add(overrides.get("cost_model", {}).get("artifact"))
+            files.add(overrides.get("cost_model", {}).get("output_length_artifact"))
     return {"input_sha256": sha256(Path(spec["input"]).read_bytes()).hexdigest(),
             "split_sha256": sha256(Path(spec["split_manifest"]).read_bytes()).hexdigest(),
             # Config identity is a single experiment boundary check, never a request-path hash.

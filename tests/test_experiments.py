@@ -91,6 +91,17 @@ def test_explicit_setup_failure_is_reported_without_running_generation(tmp_path)
     assert not list((tmp_path / "setup-failure").rglob("benchmark-*.json"))
 
 
+def test_output_length_artifact_contents_bind_generation_identity(tmp_path):
+    value = spec(tmp_path)
+    artifact = tmp_path / "length.json"
+    artifact.write_text('{"model":"first"}')
+    value["methods"][1]["overrides"]["cost_model"] = {"output_length_artifact": str(artifact)}
+    before = generation_provenance(value)
+    artifact.write_text('{"model":"second"}')
+    after = generation_provenance(value)
+    assert before["external_inputs"][str(artifact)] != after["external_inputs"][str(artifact)]
+
+
 def test_ablations_inherit_frozen_parent_and_do_not_consume_tuning_budget(tmp_path):
     value = spec(tmp_path)
     value["methods"][0]["overrides"]["planner"]["delta_rel"] = .25

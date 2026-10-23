@@ -28,6 +28,8 @@ def _manifest(config, controller, info, protocol: str):
                "controller_source_sha256": source_hash,
                "cost_model_artifact_sha256": hashlib.sha256(Path(config.cost_model.artifact).read_bytes()).hexdigest()
                     if config.cost_model.artifact else None,
+               "output_length_artifact_sha256": hashlib.sha256(Path(config.cost_model.output_length_artifact).read_bytes()).hexdigest()
+                    if config.cost_model.output_length_artifact else None,
                "runtime": {"python": sys.version, "platform": platform.platform(), "machine": platform.machine()},
                "quality_evaluated": False, "gpu_performance_validated": False}
     path = Path(config.state_dir) / f"manifest-{controller.events.run_id}.json"

@@ -5,6 +5,7 @@ from pathlib import Path
 import random
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,7 +14,7 @@ pytest.importorskip("scipy")
 from controller.cost_model import CostModel, LookupPoint, positive_prefill_features
 from profiling.compare_models import folds, nonnegative_least_squares
 from profiling.fit import feature_cell_key, fit
-from profiling.positive_prefill import fit_positive_prefill
+from profiling.positive_prefill import conditional_uncertainty, fit_positive_prefill, main as uncertainty_main
 
 
 def observations():
@@ -198,3 +199,88 @@ def test_legacy_positive_sources_need_explicit_hardware_metadata(tmp_path):
     payload["metadata"].pop("measurement_sources")
     path.write_text(json.dumps(payload))
     assert not CostModel.load(path)._prefill(0,2048,0,1)[2]
+
+
+def uncertainty_predictions(*, counts=(13, 9), concurrencies=(1, 4)):
+    return [{"feature_cell": ["first_token", 1000+i*100, 100, 100 if host else 0, concurrency, "server_request"],
+             "max_absolute_error_ms": 7. if concurrency == 1 else 500., "observations": 1000}
+            for concurrency in concurrencies for host, count in enumerate(counts) for i in range(count)]
+
+
+def uncertainty_spec(predictions):
+    return {"coefficients": [1., 0., 0., 0., 0., 0., 0., 0.], "fit_sources": ["hardware"],
+            "uncertainty_sufficient": True, "error_p95_ms": 90., "error_p99_ms": 100.,
+            "conditional_uncertainty": conditional_uncertainty(predictions),
+            "validation_protocol": {"oof_predictions": predictions}}
+
+
+def test_conditional_uncertainty_counts_cells_not_repeats_and_uses_coarse_concurrency():
+    predictions = uncertainty_predictions()
+    table = conditional_uncertainty(predictions * 100)
+    narrow = [row for row in table["strata"] if row["host_load"] is not None]
+    broad = [row for row in table["strata"] if row["host_load"] is None]
+    assert sorted(row["feature_cells"] for row in narrow) == [9, 9, 13, 13]
+    assert all(not row["sufficient"] for row in narrow)
+    assert [row["feature_cells"] for row in broad] == [22, 22]
+    assert all(row["sufficient"] for row in broad)
+    spec = uncertainty_spec(predictions)
+    global_model = CostModel(prefill_estimator="positive_basis", positive_prefill=spec)
+    conditional = CostModel(prefill_estimator="positive_basis", positive_prefill=spec, uncertainty_mode="conditional")
+    assert global_model._positive_error(1, 0) == 100.
+    assert conditional._positive_error(1, 0) == conditional._positive_error(1, 100) == 7.
+    assert conditional._positive_error(4, 0) == 500.  # A conditional error can also be larger.
+    assert conditional._positive_error(2, 0) == 100.  # No observed c=2 stratum.
+    assert conditional._positive_error(3, 100) == 100.
+    alias_rows = [{**row, "feature_cell": [phase, *row["feature_cell"][1:]]}
+                  for row in predictions for phase in ("prefill", "restore_prefill")]
+    aliases = conditional_uncertainty(alias_rows)
+    assert [row["feature_cells"] for row in aliases["strata"]] == [row["feature_cells"] for row in table["strata"]]
+
+
+def test_conditional_uncertainty_missing_host_state_or_insufficient_cells_falls_back():
+    for counts, load in (((19, 0), 0), ((20, 0), 100)):
+        spec = uncertainty_spec(uncertainty_predictions(counts=counts, concurrencies=(1,)))
+        model = CostModel(prefill_estimator="positive_basis", positive_prefill=spec, uncertainty_mode="conditional")
+        assert model._positive_error(1, load) == 100.
+    spec.pop("conditional_uncertainty")
+    assert CostModel(prefill_estimator="positive_basis", positive_prefill=spec,
+                     uncertainty_mode="conditional")._positive_error(1, 0) == 100.
+
+
+def test_conditional_uncertainty_uses_true_quote_load_even_in_no_host_cost_ablation():
+    from controller.schema import CacheQuote
+    predictions = uncertainty_predictions(counts=(20, 20), concurrencies=(1,))
+    for row in predictions:
+        row["max_absolute_error_ms"] = 8. if row["feature_cell"][3] else 2.
+    model = CostModel(prefill_estimator="positive_basis", positive_prefill=uncertainty_spec(predictions),
+                     uncertainty_mode="conditional", include_host_cost=False, include_decode_cost=False,
+                     default_output_tokens=1, p90_output_tokens=1)
+    candidate = SimpleNamespace(input_ids=(1,)*1000, candidate_id="test")
+    quote = CacheQuote("test", "unused", 1000, 999, recoverable_prefix_tokens=64,
+                       host_only_load_tokens=64, native_load_estimate=64)
+    assert model._positive_error(1, 0) == 2.
+    assert model.predict_native(candidate, quote).error_ms == 8.
+
+
+def test_conditional_artifact_reuses_frozen_oof_and_preserves_default_and_override(tmp_path):
+    spec = uncertainty_spec(uncertainty_predictions())
+    model = CostModel(prefill_estimator="positive_basis", positive_prefill=spec)
+    source, target = tmp_path/"global.json", tmp_path/"conditional.json"
+    model.save(source)
+    original = source.read_bytes()
+    uncertainty_main(["--input-artifact", str(source), "--output", str(target)])
+    assert source.read_bytes() == original
+    loaded = CostModel.load(target, uncertainty_mode=None)
+    assert loaded.uncertainty_mode == "conditional"
+    assert loaded.positive_prefill["coefficients"] == spec["coefficients"]
+    assert loaded.positive_prefill["validation_protocol"] == spec["validation_protocol"]
+    assert loaded._positive_error(1, 0) == 7.
+    assert CostModel.load(target, uncertainty_mode="global")._positive_error(1, 0) == 100.
+    assert CostModel.load(source).uncertainty_mode == "global"
+    subprocess.check_call([sys.executable, "-S", "-c",
+        "import sys; from controller.cost_model import CostModel; "
+        "assert CostModel.load(sys.argv[1])._positive_error(1, 0) == 7.; "
+        "assert 'scipy' not in sys.modules and 'numpy' not in sys.modules", str(target)],
+        cwd=Path(__file__).resolve().parents[1])
+    with pytest.raises(ValueError, match="uncertainty_mode"):
+        CostModel(uncertainty_mode="unknown")

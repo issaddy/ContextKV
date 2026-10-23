@@ -302,6 +302,9 @@ class CostEstimate:
     risk_cost: float = 0.0
     calibrated: bool = False
     capacity_risk: bool = False
+    output_length_error_tokens: float | None = None
+    output_length_model: str = "shared"
+    output_length_in_range: bool | None = None
 
 
 @dataclass(frozen=True)
