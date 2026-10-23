@@ -6,7 +6,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归（含真实 tokenizer） | 273 passed，另有 6 subtests passed；runs/pytest-offline-comparison.log |
+| 最近完整 CPU 回归（含真实 tokenizer） | 283 passed，另有 6 subtests passed；runs/pytest-serialization-final.log |
 | 固定 Qwen tokenizer 专项 | 单独开启后 1 passed；真实模板、输入 IDs 和 LCP 验证通过 |
 | Ruff / shell / wheel | 通过；wheel 包含 engine_patches.smoke |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
@@ -53,6 +53,8 @@ SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固
 证据身份只在入口计算一次：100 个已归档证据＋1 个新证据的合成 REBUILD 中，正文 hash 次数从 304 降至 1。实际 token 绑定、请求幂等和 CAS/epoch 约束保留。
 
 252 个静态 Decode 标定点、输出均值 128/P90 256 的本机 CPU 微基准，单候选中位预测耗时由 38.22 ms 降到 0.58 ms；区间案例由 15.55 ms 降到 0.46 ms。原插值、误差与支持范围语义通过随机稀疏/密集、重复点、区间、边界及完整预测等价性测试。证据为 runs/cost-profile/comparison.json；这是 CPU 开销改善，不是 GPU 端到端加速比。
+
+15 个真实长会话快照的局部 CPU profile 显示重复类型注解解析和标量通用遍历可避免；只缓存静态 schema 并增加标量快路径后，临时 WAL/FULL 部分存储链的等案例均值从 47.22 ms 降为 13.46 ms，JSON 字节和 typed contract 保持一致。候选构建的哈希本身占比很低，没有因此删除证据校验。该局部结果不包含 RPC、并发等待和全部事务成本，不能换算为远端控制 P95；详见[控制路径诊断](controller_control_profile.md)。
 
 ## 仍需完成的研究验收
 

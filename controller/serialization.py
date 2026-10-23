@@ -2,12 +2,21 @@
 from __future__ import annotations
 
 import dataclasses
+from functools import cache
 import json
 import types
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
 
+@cache
+def _schema_hints(cls):
+    # Contract classes have fixed annotations; no session data is cached.
+    return get_type_hints(cls)
+
+
 def to_jsonable(value: Any) -> Any:
+    if value is None or type(value) in (str, int, float, bool):
+        return value
     if dataclasses.is_dataclass(value):
         return {f.name: to_jsonable(getattr(value, f.name)) for f in dataclasses.fields(value)}
     if isinstance(value, (set, frozenset)):
@@ -24,7 +33,7 @@ def dumps(value: Any) -> str:
 
 
 def decode(cls: Any, value: Any) -> Any:
-    if value is None or cls is Any:
+    if value is None or cls is Any or cls in (str, int, float, bool):
         return value
     origin, args = get_origin(cls), get_args(cls)
     if origin in (Union, types.UnionType):
@@ -40,7 +49,7 @@ def decode(cls: Any, value: Any) -> Any:
         element = args[0] if args else Any
         return origin(decode(element, v) for v in value)
     if dataclasses.is_dataclass(cls):
-        hints = get_type_hints(cls)
+        hints = _schema_hints(cls)
         unknown = set(value) - set(hints)
         if unknown:
             raise ValueError(f"Unknown fields for {cls.__name__}: {unknown}")
