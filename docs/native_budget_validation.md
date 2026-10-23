@@ -92,7 +92,9 @@ SLO 使用既有 TTFT≤2 s、TPOT≤0.1 s，并基于客户端 chunk 观察；�
 
 新运行有独立的 36 quotes/72 arms。按实际保存的 estimator=`native_budget` 重放，等待均值逐项精确重现；JSON 的 `old_saved_mean_difference_ms` 此时表示“旧反事实估计减新记录”，不应被误读为复现失败。新等待回调支持 60/72，12 个 unsupported 仍为 waiting timing，已执行臂可用 30 个。在这些**新运行的相同 30 个支持样本**上，旧等待公式 MAE 为 437.22 ms，新为 438.79 ms；actual 超出较大风险情景的个数为 11/18。这个样本与前节旧闭环的 28 臂不同，不可跨行拼接为独立泛化结果。源码、合同与完整闭环已验证，等待精度改善仍未证实。
 
-## 定向标定入口与合同（CPU 已验证，GPU 采样待执行）
+## 定向标定入口与合同（CPU与目标GPU采样已完成）
+
+后续四组96目标请求已全部完成并满足exact合同，合并拟合与冻结quote反事实结果见[定向补采验证](native_budget_targeted_validation.md)。以下保留入口与采样合同；覆盖扩展不代表等待误差或闭环收益已成立。
 
 保持同 16K GPU、279040 host、page64、layout/IO/source/model，先补 c2 的缺失形状，不放宽 0.5 支持距离。`profiling.sglang_probe` 已允许任意正整数 prompt 长度；只有可复用 prefix 向下页对齐。因此 suffix 131、1129、4204 本身可以精确保留。可用页内分数 `(P+0.5)/n` 避免浮点正好落在页边界，CPU `calibration_grid` 已核得到目标 P。
 
@@ -117,6 +119,8 @@ Mixed case 现已实现小型事前 fixture：先将完整 2176 前缀备份并�
 
 `PrefillCase` 只追加可选 `device_prefix_tokens`，默认记录仍保持原五字段；旧 CLI 默认三态未改变。`stage_fit` 的 mixed 特征 L 由事前 `P-D` 生成，再核对实际 receipt。**不能把全 host2176 的测量改标签成 mixed960**。旧三态继续使用 prepared 特征合同，实际 tier 漂移仍单独审计：重新加载旧 552 条正式记录全部通过，36 条漂移仍原样保留（concurrent-small 6、concurrent-long-device 30），未从未来实际恢复改写 L。每个 group 的 prepared/exact 合同、正式请求数与漂移数写入新拟合 provenance；新 mixed 始终 exact，无全局放宽或自动删旧样本。本次三个纯 host 目标的精确执行由采样后的独立审核另核，不冒称所有旧样本都具有精确实际 L。
 
-Root 的 ignored 入口 `runs/run-native-budget-targeted-profile.py` 已与新 CLI 做 plan-only 兼容核查：四形状、c1/c2、output128/512，各暖1/正式3，共72正式+24暖机目标请求，另有120个一-token前缀准备请求；它独占启动/清理16K服务并恢复保存的研究服务。当前仅完成本地计划核查。27项初始合同及后续57项组合测试覆盖混合恢复、严格 quote/receipt、旧记录编码、整批漂移原样保留、失败 metrics、部分成功 repetition 的真实写入行数、阶段拟合兼容。CPU double 不代表真实 CUDA/IPC 通过；新 output 目录的完整结果仍待统一 GPU 调度。
+ignored入口 `runs/run-native-budget-targeted-profile.py` 已完成真实采样：四形状、c1/c2、output128/512，各暖1/正式3，共72正式+24暖机目标请求，另有120个一-token前缀准备请求；它独占启动/清理16K服务并恢复保存的研究服务。新96目标均complete且prepared/receipt形状exact，独立audit为issues=[]。27项初始合同及后续57项组合测试验证工程路径，实际GPU结果另以原始telemetry/receipt核对；不能把CPU double当硬件证据。原始目录和逐形状结果见[定向补采验证](native_budget_targeted_validation.md)。
 
 合并复用现有 `profiling.stage_fit`：保留原四组完整 Measurements、compact stage 与各原 manifest，再追加新组，给每组传 `--profile-manifest GROUP=PATH`；所有 run_id 必须完整对应、共同 fingerprint/cache_config_hash 一致。原始 telemetry 逐请求压缩为现有 `group/case/index/warmup/timing/receipt` compact，不按时延排序，暖机不入训练。用冻结旧 stage artifact 作为 `--base-artifact` 可保留已有 decode、长度先验及其来源，输出新的 stage artifact 与 whole-cell OOF validation，不覆盖 v2。定向形状来自开发运行，补采仍是开发定向校准；须另用新采样/闭环检验误差，不能把同一测量标签同时当特征或独立验证。
+
+合并首次fit在冻结先验来源绑定处失败，`809a3c1`修复继承路径后保留原decode/经验长度与来源，成功生成624正式请求、46 forward cells的新artifact。两组冻结quotes的native-budget等待覆盖补齐到72/72，共同支持MAE只小幅变化，且一个未执行APPEND的idle setup仍不支持；新同源164轮闭环尚无结果。完整失败日志、artifact SHA、人群分母和解释边界见[补采与反事实验证](native_budget_targeted_validation.md)。
