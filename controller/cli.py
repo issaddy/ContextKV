@@ -69,7 +69,8 @@ async def demo(config):
 
 async def benchmark(args, config):
     from adapters.mtrag import CLOUD_COLLECTION, load_rows
-    from adapters.retrieval import BM25SRetriever, load_beir_corpus, to_evidence
+    from adapters.retrieval import to_evidence
+    from adapters.retriever_factory import create_retriever
     from bench.run_sessions import run_sessions
     from bench.quality import export_evaluation
     from bench.report import summarize_run, markdown_report
@@ -86,15 +87,10 @@ async def benchmark(args, config):
         ids = set(sorted({r["conversation_id"] for r in rows})[:args.limit_sessions])
         rows = [r for r in rows if r["conversation_id"] in ids]
     corpus_snapshot = "mtrag-53fef6f5917c7e10c436f697e69a955dbc795d81"
-    retriever = None
-    if args.protocol == "P3":
-        if args.retriever_index:
-            retriever = BM25SRetriever.load(args.retriever_index)
-            corpus_snapshot = retriever.corpus_snapshot_id
-        elif args.corpus:
-            retriever = BM25SRetriever(load_beir_corpus(args.corpus), corpus_snapshot_id=corpus_snapshot)
-        else:
-            raise ValueError("P3 requires --corpus or --retriever-index")
+    retriever = create_retriever(args.protocol, config_path=getattr(args, "retriever_config", None),
+                                index_path=getattr(args, "retriever_index", None), corpus_path=getattr(args, "corpus", None))
+    if retriever is not None:
+        corpus_snapshot = retriever.corpus_snapshot_id
     corpus_index = (CorpusIndex.from_jsonl(args.evidence_corpus, corpus_id="mtrag", snapshot_id=corpus_snapshot)
                     if args.evidence_corpus else None)
     service = create_controller(config)
@@ -136,7 +132,8 @@ async def benchmark(args, config):
                                  "domain": args.domain, "selected_sessions": sorted({r["conversation_id"] for r in rows})},
                         workload={"seed": args.seed, "concurrency": args.concurrency, "think_time": args.think_time,
                                   "arrival_rate": args.arrival_rate, "arrival_window": args.arrival_window,
-                                  "per_turn_timeout": args.per_turn_timeout, "drain_timeout": args.drain_timeout},
+                                  "per_turn_timeout": args.per_turn_timeout, "drain_timeout": args.drain_timeout,
+                                  "retriever_config": getattr(args, "retriever_config", None)},
                         retrieval=retriever.manifest if retriever else {"kind": "official_fixed_top5"})
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
         telemetry_before = await service.engine.metrics()
@@ -144,6 +141,9 @@ async def benchmark(args, config):
                                     think_time=args.think_time, arrival_rate=args.arrival_rate,
                                     seed=args.seed, retriever=retriever, drain_timeout=args.drain_timeout,
                                     arrival_window=args.arrival_window, per_turn_timeout=args.per_turn_timeout)
+        if retriever is not None:
+            manifest["retrieval"] = retriever.manifest
+            manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
         cleanup_start = time.monotonic()
         for sid in {r.conversation_id for r in report.turns}:
             if not service.store.pending_attempt(f"{run_prefix}:{sid}"):
@@ -167,6 +167,8 @@ async def benchmark(args, config):
     finally:
         await service.aclose()
         service.store.close()
+        if retriever is not None and hasattr(retriever, "close"):
+            retriever.close()
 
 
 def main(argv=None):
@@ -196,6 +198,7 @@ def main(argv=None):
     bench.add_argument("--domain", choices=["cloud", "all"], default="cloud")
     bench.add_argument("--corpus")
     bench.add_argument("--retriever-index", help="Load a previously frozen BM25S index")
+    bench.add_argument("--retriever-config", help="Optional shared P3 hybrid retriever YAML/JSON")
     bench.add_argument("--evidence-corpus", help="Original passages with version/condition/header metadata")
     bench.add_argument("--concurrency", type=int, default=1)
     bench.add_argument("--think-time", type=float, default=0)

@@ -6,7 +6,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归（含真实 tokenizer） | 283 passed，另有 6 subtests passed；runs/pytest-serialization-final.log |
+| 最近完整 CPU 回归 | 336 passed，1 skipped，另有 6 subtests passed；runs/pytest-hybrid-grounding.log，跳过的是需显式开启的真实 tokenizer 项 |
 | 固定 Qwen tokenizer 专项 | 单独开启后 1 passed；真实模板、输入 IDs 和 LCP 验证通过 |
 | Ruff / shell / wheel | 通过；wheel 包含 engine_patches.smoke |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
@@ -59,6 +59,13 @@ SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固
 15 个真实长会话快照的局部 CPU profile 显示重复类型注解解析和标量通用遍历可避免；只缓存静态 schema 并增加标量快路径后，临时 WAL/FULL 部分存储链的等案例均值从 47.22 ms 降为 13.46 ms，JSON 字节和 typed contract 保持一致。候选构建的哈希本身占比很低，没有因此删除证据校验。该局部结果不包含 RPC、并发等待和全部事务成本，不能换算为远端控制 P95；详见[控制路径诊断](controller_control_profile.md)。
 
 远端 P1/always_rebuild/c4 的一次 before→after 对照均 41/41 成功，全部输入 IDs 相同，control P95 为 456.11→168.68 ms；16 个同输入/输出样本的 control P95 为 378.55→157.07 ms。P2 对照虽然也观察到控制耗时下降，但只有 6/41 输入相同，历史与动作变化存在混杂。两组均非随机交叉重复实验，P1 输入仅 2460–4231 tokens；不外推长 APPEND、质量一致或一般吞吐增益。原始数据在 runs/remote-h200-control，逐项校验与统计见同一控制路径文档。
+
+## 新增方法与真实开发验证
+
+- 候选长度、条件误差、会话留一训练及离线 planner 重评分已实现。15 cases / 5 sessions / 90 pairs 的联合探索中，conditional＋candidate OOF regret 为 270.30 ms，低于原 global 437.05 ms，但仍高于固定 REBUILD 的 129.14 ms。完整 GPU P2/c4 集成 41/41 成功；该运行使用 full-fit dev artifact，不是 OOF 验证，且没有触发成本节省切换。见[长度与决策验证](length_decision_validation.md)。
+- 原硬件控制器矩阵 11 jobs 和匹配消融 5 jobs，共 656/656 成功。所有实际 host 恢复为零，退役 ACK 不虚报物理释放；该结果不能证明 host 项或容量竞争收益。逐轮机制诊断见[硬件矩阵分析](hardware_controller_matrix.md)。
+- 固定 MiniCheck 在 H200 上完成 Q1/Q2 各 41 个完整 audit 的评分。已修复把引用 ID 当事实输入产生伪负例的问题；两个高置信引用替换候选仍经原文审查发现部分支持及段尾绑定歧义，因而默认改为只增补来源。分句/未覆盖/评分与修正局限见[assistant 审查](grounding_v2_assistant_audit.md)，不计为人工盲审或正式质量通过。
+- 原始 72442 passage 的 BGE-M3 索引与三种 query 视角、四阶段检索均已在 GPU 执行。39/41 个有 qrels 的开发问题上，last3/BM25 Recall@5=0.2094、nDCG@5=0.1671；current/hybrid_rerank=0.5231、0.4833。原文、候选池、模型版本、时长和全部阶段结果保存在 runs/remote-h200-retrieval。该提升属于已观察开发集的检索相关性，不等于回答质量或缓存收益。
 
 ## 仍需完成的研究验收
 

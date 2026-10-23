@@ -1,6 +1,6 @@
 # 原始段落上的混合检索与重排序实验
 
-此分支直接改善模块 A 的证据相关性与完整性：复用固定 BGE 权重和官方 Transformers 接口，保留 BM25S，比较 dense、RRF 混合与 cross-encoder 重排序。它不改变默认在线检索，也不改变原文、段落边界、证据 ID、生成提示词或缓存策略。先在已有开发集做无需生成的检索实验，再把有效的设置接入独立 P3 闭环实验；开发集可用于选择与改进，最终 test 保持冻结。
+此分支直接改善模块 A 的证据相关性与完整性：复用固定 BGE 权重和官方 Transformers 接口，保留 BM25S，比较 dense、RRF 混合与 cross-encoder 重排序。它不改变默认在线检索，也不改变原文、段落边界、证据 ID、生成提示词或缓存策略。先在已有开发集做无需生成的检索实验，再通过共享可选入口进行真实 P3 闭环实验；开发集可用于选择与改进，最终 test 保持冻结。
 
 ## 选择依据与具体复用
 
@@ -66,6 +66,31 @@ python -m bench.retrieval_eval evaluate \
 当前固定 Cloud dev 为 5 会话、41 轮。稀疏语料 snapshot 为 `mtrag-53fef6f5917c7e10c436f697e69a955dbc795d81`，原始 passage 数 72,442，语料摘要 `04fb31f7d4301aa2fd3d12c161cf06265a9bbf9f41e56116d90637f9d053afad`；实际 build manifest 必须与稀疏 manifest 对齐。使用 passage-level 文件，不能把文档级 ID 与带 chunk offsets 的 qrels 混用。
 
 省 GPU 的首轮只做上述检索，不生成 12 组答案。已有 BM25-only 可省略 dense/encoder/reranker 参数；固定真实历史视角可显式加 `--query-modes generated_history --history-audit <P2或P3完整audit.jsonl>`，并另存目录。正式性能实验再独立加载选定检索器，计入实际检索/重排成本和显存占用。
+
+## 共享 P3 生成入口
+
+[`adapters/retriever_factory.py`](../adapters/retriever_factory.py)同时供控制器 CLI 和原生 B0/B1 CLI 使用。两者新增相同的 `--retriever-config`，接受 JSON 或 YAML，示例为 [`configs/retriever_hybrid.example.yaml`](../configs/retriever_hybrid.example.yaml)。与其他命令行路径一样，资产相对路径以工作目录为基准；run manifest 保存配置原文对应的解析字段、路径基准、两个索引 manifest 与模型信息。
+
+配置可选 `stage: dense / hybrid / hybrid_rerank` 和 `query_mode: current / last3 / all_user`。默认示例是 current + hybrid_rerank、候选 50、reranker 1024、BF16；这是显式开发实验选择，不替换全项目 BM25 默认。未传新参数时，现有 `--retriever-index` 或 `--corpus` 行为保持不变。配置文件与旧参数不可同时指定，以免运行来源不明确。
+
+```bash
+python -m controller.cli \
+  --config configs/hardware_dev_controller.yaml \
+  --state-dir runs/hybrid-p3-controller \
+  bench data/mtrag/RAG.jsonl --protocol P3 --domain cloud \
+  --split-manifest data/mtrag/split_manifest.json --split dev \
+  --retriever-config configs/retriever_hybrid.example.yaml
+```
+
+原生生成使用同一份配置：在已有、经过 manifest 核对的 B0/B1 命令中，将 `--retriever-index` 替换为 `--retriever-config configs/retriever_hybrid.example.yaml`，其余模型、提示词、1024 输出上限与资源条件保持一致。矩阵顶层同样支持 `retriever_config`；配置文件及两个索引 manifest 纳入既有 `external_inputs` provenance。矩阵不接受方法私有检索覆盖；要比较不同检索器，应创建明确的检索实验组，并在每组内共享设置比较控制器/原生方法。
+
+`HybridRetriever.retrieve_turn`只接受 P3 的 `OnlineTurn`，直接从其 `user_questions` 创建查询，不读取助手回答、参考 rewrite、qrels 或原始任务对象。P3 会话仍等当前答案提交后才进入下一轮；答案历史由原有 runner 生成，状态恢复、证据归档和提交语义不变。线上暂不开放离线 `generated_history` 视角，以保持首轮实验选择明确。
+
+模型与索引每个 run 初始化一次，`initialization_seconds` 单列；逐轮复用同一模型实例。并发会话对这一模型对的调用以一把锁串行，锁排队也发生在 `t_arrive → t_retrieval_done` 之间。runner 已有的 `time_origin=pipeline_arrival` 以及 `t_arrive → commit` 完整响应指标覆盖检索、融合、重排序、排队和生成，因此没有再加一份检索时间。模型初始化与结束释放在逐轮计时之外；run 结束显式删除本进程模型并释放本进程闲置 CUDA allocator，避免下一矩阵 job 残留检索模型显存。
+
+encoder/reranker 与 SGLang 共用 GPU 时，其他会话检索可能与生成竞争；这属于真实系统成本。当前锁只限制检索模型的并发，不阻断 SGLang。正式报告要同时给完整响应时延、检索阶段耗时、失败/未完成率、GPU 资源条件与检索模型驻留；已有空闲 GPU 成本标定不能自动当作新并发负载已验证。
+
+接线测试运行两种真实 CLI 路径（测试模型与 fake HTTP），验证相同前五、每轮实际生成历史、无参考答案进入查询、每 run 只加载一次、模型释放、矩阵来源绑定以及检索排队计时。这些测试仅说明合同正确；真实 P3 的回答质量与整体成本仍需独立测量。
 
 ## 可证伪假设与后续改进
 

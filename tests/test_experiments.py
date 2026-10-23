@@ -209,3 +209,46 @@ def test_matrix_default_and_explicit_default_prompt_are_equivalent(tmp_path,expl
     value["methods"][0]["overrides"]["context"] = {
         "system_prompt":None if explicit_root else SYSTEM_PROMPT}
     assert len(matrix_jobs(value)) == 3
+
+
+def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tmp_path, monkeypatch):
+    import bench.experiments as experiments
+    import bench.native_baseline as native_module
+    import controller.cli as cli
+    value = spec(tmp_path)
+    config = tmp_path/"retriever.json"
+    for name in ("sparse", "dense"):
+        (tmp_path/name).mkdir()
+        (tmp_path/name/"manifest.json").write_text('{"fixture":1}')
+    config_body = {"sparse_index":str(tmp_path/"sparse"), "dense_index":str(tmp_path/"dense"),
+                   "encoder_path":"encoder", "reranker_path":"reranker", "query_mode":"current"}
+    config.write_text(json.dumps(config_body))
+    engine = tmp_path/"engine.json"
+    engine.write_text("{}")
+    value.update(protocols=["P3"], retriever_config=str(config), methods=[
+        {"id":"B0","kind":"native","native":{"baseline":"B0","base_url":"http://fake.test",
+            "engine_manifest":str(engine)}}, {"id":"full"}])
+    before = generation_provenance(value)
+    assert {str(config), str(tmp_path/"sparse/manifest.json"), str(tmp_path/"dense/manifest.json")} <= before["external_inputs"].keys()
+    config_body["query_mode"] = "last3"
+    config.write_text(json.dumps(config_body))
+    assert generation_provenance(value)["external_inputs"][str(config)] != before["external_inputs"][str(config)]
+    seen = []
+    async def native_run(args):
+        seen.append(args.retriever_config)
+        (Path(args.output)/"native-fake.json").write_text(json.dumps({"baseline":"B0"}))
+    async def controller_run(args, config):
+        seen.append(args.retriever_config)
+        (Path(config.state_dir)/"benchmark-fake.json").write_text(json.dumps({"engine_kind":"mock"}))
+    monkeypatch.setattr(native_module, "_run", native_run)
+    monkeypatch.setattr(cli, "benchmark", controller_run)
+    monkeypatch.setattr(experiments, "summarize_run", lambda payload:{"measurement_kind":"simulation"})
+    monkeypatch.setattr(experiments, "markdown_report", lambda summary:"fake contract report")
+    async def scenario():
+        for job in matrix_jobs(value):
+            await experiments.execute_job(value, job, tmp_path/job["job_id"])
+    asyncio.run(scenario())
+    assert seen == [str(config), str(config)]
+    value["methods"][0]["native"]["retriever_config"] = str(config)
+    with pytest.raises(ValueError, match="shared at the matrix root"):
+        matrix_jobs(value)

@@ -23,7 +23,8 @@ import httpx
 
 from adapters.mtrag import CLOUD_COLLECTION, DATASET_COMMIT, OnlineTurn, load_rows
 from adapters.corpus import CorpusIndex
-from adapters.retrieval import BM25SRetriever, load_beir_corpus, to_evidence
+from adapters.retrieval import to_evidence
+from adapters.retriever_factory import create_retriever
 from bench.run_sessions import run_sessions
 from bench.quality import export_evaluation
 from controller.candidates import CandidatePolicy, build_candidates
@@ -408,16 +409,11 @@ async def _run(args):
     if args.limit_sessions:
         selected = set(sorted({r["conversation_id"] for r in rows})[:args.limit_sessions])
         rows = [r for r in rows if r["conversation_id"] in selected]
-    retriever = None
     corpus_snapshot = f"mtrag-{DATASET_COMMIT}"
-    if args.protocol == "P3":
-        if getattr(args, "retriever_index", None):
-            retriever = BM25SRetriever.load(args.retriever_index)
-            corpus_snapshot = retriever.corpus_snapshot_id
-        elif not args.corpus:
-            raise ValueError("P3 requires --corpus")
-        else:
-            retriever = BM25SRetriever(load_beir_corpus(args.corpus), corpus_snapshot_id=corpus_snapshot)
+    retriever = create_retriever(args.protocol, config_path=getattr(args, "retriever_config", None),
+                                index_path=getattr(args, "retriever_index", None), corpus_path=args.corpus)
+    if retriever is not None:
+        corpus_snapshot = retriever.corpus_snapshot_id
     corpus_index = (CorpusIndex.from_jsonl(args.evidence_corpus, corpus_id="mtrag", snapshot_id=corpus_snapshot)
                     if getattr(args, "evidence_corpus", None) else None)
     client = NativeSGLangClient(args.base_url, audit_prompt_ids=args.audit_prompt_ids,
@@ -473,6 +469,8 @@ async def _run(args):
         print(json.dumps({"output": str(target.resolve()), "baseline": args.baseline,
                           "success": sum(r.status == "success" for r in report.turns) if report else 0,
                           "close_acknowledgement": "not_scheduler_ack"}))
+        if retriever is not None and hasattr(retriever, "close"):
+            retriever.close()
 
 
 def main(argv=None):
@@ -489,6 +487,7 @@ def main(argv=None):
     parser.add_argument("--protocol", choices=["P1", "P2", "P3"], default="P2")
     parser.add_argument("--corpus")
     parser.add_argument("--retriever-index", help="reuse a saved pinned BM25S index")
+    parser.add_argument("--retriever-config", help="optional shared P3 hybrid retriever YAML/JSON")
     parser.add_argument("--evidence-corpus", help="original passages with version/condition metadata shared with controller")
     parser.add_argument("--domain", choices=["cloud", "all"], default="cloud")
     parser.add_argument("--split-manifest")

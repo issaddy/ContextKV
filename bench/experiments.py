@@ -21,6 +21,7 @@ import time
 import yaml
 
 from adapters.mtrag import load_rows
+from adapters.retriever_factory import retriever_config_sources
 from bench.report import markdown_report, paired_latency, summarize_run
 from controller.config import RunConfig, load_config
 from controller.serialization import decode
@@ -58,8 +59,10 @@ def validate_matrix(spec):
         raise ValueError("methods and valid protocols are required")
     if any(c < 1 for c in spec["concurrency"]) or not spec["concurrency"] or not spec["seeds"]:
         raise ValueError("nonempty positive concurrency and seeds are required")
-    if "P3" in spec["protocols"] and not (spec.get("corpus") or spec.get("retriever_index")):
-        raise ValueError("P3 requires corpus or retriever_index")
+    if "P3" in spec["protocols"] and not (spec.get("corpus") or spec.get("retriever_index") or spec.get("retriever_config")):
+        raise ValueError("P3 requires corpus, retriever_index or retriever_config")
+    if spec.get("retriever_config") and (spec.get("corpus") or spec.get("retriever_index")):
+        raise ValueError("choose shared retriever_config or legacy corpus/retriever_index")
     names = [m["id"] for m in spec["methods"]]
     if len(names) != len(set(names)) or any(not name.replace("_", "").replace("-", "").isalnum() for name in names):
         raise ValueError("method IDs must be unique simple directory names")
@@ -83,6 +86,9 @@ def validate_matrix(spec):
         for candidate in candidates:
             overrides = merge(method.get("overrides", {}), candidate)
             native = merge(method.get("native") or {}, overrides.get("native", {}))
+            if any(key in source for source in (method, overrides, native)
+                   for key in ("retriever_config", "retriever_index", "corpus")):
+                raise ValueError("retriever configuration must be shared at the matrix root")
             if any(key in native for key in ("system_prompt", "system_prompt_file")):
                 raise ValueError("matrix prompts must be shared at the matrix root or base_config.context")
             candidate_prompt = overrides.get("context", {}).get("system_prompt", shared_prompt)
@@ -156,6 +162,8 @@ def provenance(spec):
              config.cost_model.artifact, config.cost_model.output_length_artifact}
     if spec.get("retriever_index"):
         files.add(str(Path(spec["retriever_index"]) / "manifest.json"))
+    if spec.get("retriever_config"):
+        files.update(retriever_config_sources(spec["retriever_config"]))
     for method in spec["methods"]:
         for candidate in method.get("candidates", [{}]):
             overrides = merge(method.get("overrides", {}), candidate)
@@ -260,6 +268,7 @@ async def execute_job(spec, job, directory):
     args = dict(input=spec["input"], domain=spec.get("domain", "cloud"),
                 split_manifest=spec["split_manifest"], split=job["split"], protocol=job["protocol"],
                 corpus=spec.get("corpus"), retriever_index=spec.get("retriever_index"),
+                retriever_config=spec.get("retriever_config"),
                 evidence_corpus=spec.get("evidence_corpus"),
                 concurrency=job["concurrency"], seed=job["seed"], limit_sessions=spec.get("limit_sessions"),
                 think_time=spec.get("think_time", 0), arrival_rate=spec.get("arrival_rate"),

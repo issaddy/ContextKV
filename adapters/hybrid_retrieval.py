@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 import json
 from pathlib import Path
+from threading import Lock
 import time
 
 from .mtrag import OnlineContext, json_hash
@@ -104,6 +105,14 @@ class LocalBGE:
             raise ValueError("dense encoder is not a cross-encoder")
         # Raw logits provide a ranking, not a calibrated relevance probability.
         return self._forward([(query, c.title+"\n"+c.text) for c in contexts])
+
+    def close(self):
+        """Release this process's model between matrix jobs; metadata stays readable."""
+        device = self.model.device
+        del self.model
+        if device.type == "cuda":
+            with self.torch.cuda.device(device):
+                self.torch.cuda.empty_cache()
 
 
 class DenseIndex:
@@ -203,3 +212,67 @@ def search_variants(query, sparse, dense, encoder, reranker=None, *, candidate_k
             "elapsed_ms": sparse_ms+dense_ms+fusion_ms+(time.perf_counter()-started)*1000,
             "rerank_candidate_ids": [c.document_id for c in candidates]}
     return stages
+
+
+class HybridRetriever:
+    """One loaded model pair shared by P3 sessions; only user questions form queries."""
+    def __init__(self, sparse, dense, encoder, reranker=None, *, query_mode="current",
+                 stage="hybrid_rerank", candidate_k=50, rerank_k=50, rrf_k=60,
+                 source_config=None):
+        if query_mode not in {"current", "last3", "all_user"}:
+            raise ValueError("online query_mode must use current/last3/all_user questions")
+        if stage not in {"dense", "hybrid", "hybrid_rerank"}:
+            raise ValueError("unknown online retrieval stage")
+        if stage == "hybrid_rerank" and reranker is None:
+            raise ValueError("hybrid_rerank requires a loaded reranker")
+        if candidate_k < 5 or rerank_k < 5 or rrf_k < 0:
+            raise ValueError("retrieval budgets must cover five passages and a nonnegative RRF constant")
+        if sparse.manifest["corpus_sha256"] != dense.manifest["corpus_sha256"]:
+            raise ValueError("sparse and dense stages must use the same original corpus")
+        self.sparse, self.dense, self.encoder, self.reranker = sparse, dense, encoder, reranker
+        self.corpus_snapshot_id = sparse.corpus_snapshot_id
+        self.query_mode, self.stage = query_mode, stage
+        self.candidate_k, self.rerank_k, self.rrf_k = candidate_k, rerank_k, rrf_k
+        self.source_config = source_config
+        self._lock = Lock()
+        self.requests = 0
+        self.initialization_seconds = None
+
+    @property
+    def manifest(self):
+        return {"kind": "bge_hybrid", "corpus_snapshot_id": self.corpus_snapshot_id,
+            "query_mode": self.query_mode, "stage": self.stage, "top_k": 5,
+            "candidate_k": self.candidate_k, "rerank_k": self.rerank_k, "rrf_k": self.rrf_k,
+            "sparse": self.sparse.manifest, "dense": self.dense.manifest,
+            "encoder": self.encoder.manifest, "reranker": self.reranker.manifest if self.reranker else None,
+            "configuration": self.source_config,
+            "initialization_seconds": self.initialization_seconds,
+            "execution": "one loaded model pair per run; serialized retrieval, queue time included in P3 pipeline time",
+            "completed_retrievals": self.requests,
+            "model_usage": {name: {"texts_processed": model.texts_processed,
+                "token_limit_hits": model.token_limit_hits}
+                for name, model in (("encoder", self.encoder), ("reranker", self.reranker)) if model is not None},
+            "token_limit_note": "at configured token cap; includes possible exact-length inputs"}
+
+    def retrieve_turn(self, turn):
+        if turn.protocol != "P3":
+            raise ValueError("hybrid retrieval requires a P3 turn")
+        query = query_text(turn.user_questions, self.query_mode)
+        # run_sessions dispatches retrieval via to_thread. Serialize this model
+        # pair instead of allowing overlapping forwards and unbounded GPU batches.
+        with self._lock:
+            if self.stage == "dense":
+                contexts = self.dense.search(query, self.encoder, top_k=5)
+            else:
+                stages = search_variants(query, self.sparse, self.dense, self.encoder,
+                    self.reranker if self.stage == "hybrid_rerank" else None,
+                    candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k)
+                contexts = stages[self.stage]["contexts"][:5]
+            self.requests += 1
+        return replace(turn, contexts=tuple(contexts))
+
+    def close(self):
+        with self._lock:
+            self.encoder.close()
+            if self.reranker is not None:
+                self.reranker.close()

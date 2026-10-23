@@ -38,12 +38,12 @@ curl http://127.0.0.1:8000/sessions/example/turns \
 |---|---|
 | `controller/schema.py` | 不可变证据、候选、账本、报价与 receipt 合同 |
 | `controller/evidence.py`, `templates.py`, `candidates.py` | 版本/hash 身份、稳定引用、完整正文 span 校验、全量 QA 与纯候选 |
-| `controller/cost_model.py`, `planner.py` | 测量查表、可选非负拟合、历史输出先验、误差阈值、滞回与显式回退 |
+| `controller/cost_model.py`, `output_length.py`, `planner.py` | 测量查表、可选非负拟合、候选长度预测、并发条件误差、滞回与显式回退 |
 | `controller/session_store.py`, `service.py`, `epoch.py` | SQLite WAL、CAS、单未决 attempt、同结果恢复、持久 outbox、退役 ACK |
 | `controller/mock_engine.py`, `engine_client.py` | CPU 协议模型与研究引擎 HTTP 客户端 |
 | `engine_patches/` | 指定 SGLang commit 的源码补丁、原文件 SHA256 和静态验证记录 |
-| `adapters/` | MTRAG 白名单、P1/P2/P3 历史门控、确定性 BM25S |
-| `bench/`, `profiling/` | 多会话负载、失败保留、性能汇总、质量区间、正式标定入口 |
+| `adapters/` | MTRAG 白名单、P1/P2/P3 历史门控、BM25S、可选 BGE dense / RRF / reranker |
+| `bench/`, `profiling/` | 多会话负载、失败保留、性能汇总、质量区间、MiniCheck 支持评分、引用增补、会话 OOF 与真实标定 |
 | `tests/` | 覆盖版本/回访、缓存只读、生命周期/并发/恢复及 P3 集成 |
 
 事务与恢复说明见 [架构文档](docs/architecture.md)，数据和评测细节见 [数据文档](docs/data_and_evaluation.md)。论文与开源方法的原理、复用范围、适用条件及可证伪贡献见 [贡献与实验设计](docs/research_contributions.md) 和 [调研记录](docs/related_work.md)。
@@ -87,6 +87,8 @@ uv run --extra retrieval contextkv --config configs/demo.yaml \
 `cost` 只有在相应 prefix/suffix/host-load/concurrency 桶存在可信硬件标定时才启用成本切换；否则结果中明确记录 `uncalibrated_cost_fallback`。`shadow: true` 仅记录成本建议，执行固定回退。`calibration_path` 可指定真实 Measurement JSONL。正式启用前还需用本机 profiling 将 `delta_abs` 写为控制开销 P95 的两倍。
 
 可选 `positive_basis` 复用 SciPy NNLS 离线拟合，推理只需保存的八个系数；默认仍为查表。按完整特征单元留出，超出实测总长度、混入模拟数据或误差样本不足时不标为硬件校准。共享提示词 Q1/Q2 也仅作为实验配置，真实开发对照发现错引后保持原默认；见[成本验证](docs/data_and_evaluation.md)及[提示词验证](docs/shared_prompt_validation.md)。最新论文与固定作者代码的复用分析见[研究审查](docs/research_review_20261024.md)。
+
+可选候选长度模型与条件误差已完成真实控制器集成及按会话 OOF 的联合决策重评分，结果与局限见[长度与决策验证](docs/length_decision_validation.md)。检索增强的模型、构建命令和对照见[BGE 混合检索](docs/hybrid_retrieval.md)，较新方法的原理与复用入口见[后续检索研究](docs/retrieval_research_next.md)。[证据支持工具](docs/evidence_support_proposal.md)直接复用固定 MiniCheck；真实误例已促使引用修改改为保留旧来源的增补，逐项审查见[评分与引用审查](docs/grounding_v2_assistant_audit.md)。这些能力均为可选择的研究路径，不以模型分数替代独立回答质量验收。
 
 ## 真实 SGLang 接入
 
