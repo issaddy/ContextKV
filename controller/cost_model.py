@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, is_dataclass
 from bisect import bisect_left
+from functools import lru_cache
 from itertools import product
 import json
 import math
@@ -172,6 +173,10 @@ class CostModel:
             axes = [sorted({coordinate[i] for coordinate in cells}) for i in range(2)]
             scales = [max(1, values[-1] - values[0]) for values in axes]
             self._decode_static = (samples, (cells, axes, scales))
+        # Fixed calibration makes (context length, concurrency) a pure lookup.
+        # Mean/P90 workload scenarios and the two candidates repeatedly traverse
+        # the same decode intervals. Cache derived values, not request contents.
+        self._decode = lru_cache(maxsize=8192)(self._decode)
 
     @classmethod
     def from_measurements(cls, rows: Iterable[Mapping | object], *, allow_mock: bool = False,

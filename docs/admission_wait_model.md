@@ -20,6 +20,8 @@ Idle 准备项按候选 `(P,U,L)`——可复用前缀、新计算后缀、host 
 
 合同测试覆盖共享前缀的物理归一化、候选 resident 双计、运行 future headroom、条件残余与尾部回退、queued first-token 记账、同刻/零时完成、即时可接纳路径、旧/缺失摘要与无时间支持。这些 CPU 测试验证算法记账，不代替真实等待预测残差、决策 regret 或性能实验。
 
+首次真实运行还暴露了解码插值的 CPU 开销。用该运行的 36 次真实报价、72 个候选长度及已保存 prior 在本地重放，`_decode` 被调用 286819 次；主要时间花在对同一 context/concurrency 重复插值。成本模型现为固定标定表的这个纯函数保留最多 8192 项 LRU 派生值，模型实例之间不共享，不存请求文本或 token 内容，也不增加内容哈希。72 臂的所有 `CostEstimate` 字段逐项精确一致，冷缓存整体 CPU wall 从 1.924 s 到 0.485 s。证据为 `runs/stage-workload-review/cache-equivalence.json` 及 profile；这是本地计算优化，不能外推为端到端比例收益。`controller-stage-16384-v1` 使用优化前的固定代码，后续 GPU 对照须同时更新各策略的实现。
+
 ## 原理来源与复用边界
 
 本模块复用下列公开工作的建模思想，并依照固定 SGLang 的可读状态实现小型估计器；没有直接移植这些系统的 scheduler。
