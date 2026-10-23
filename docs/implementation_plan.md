@@ -4,7 +4,9 @@
 
 已观察 dev 可以用于特征开发、训练与按会话 OOF。相同会话的两候选、状态重复和提示词变体保持同组；OOF 结果用于开发决策并如实标记，独立 test 不参与选特征、调阈值或挑路线。新增会话有助于提高可信度，但不设置“凑足固定数量新会话才能实现”的前置门槛。
 
-16K 独立标定和六方法联合运行已完成 246 轮，见[联合验证](controller_capacity_validation.md)。它定位了空闲 slot 不足导致集中回退，以及 first-token 表混合前置等待两个问题。`bc6c803` 已实现[阶段拆分](stage_cost_model.md)、原生只读工作量摘要和[条件剩余工作等待估计](admission_wait_model.md)，并完成四方法两重复 328 轮，详见[阶段闭环验证](stage_workload_validation.md)。双候选可比较 52/72 轮，但完成时间仍慢于严格模式和固定规则；等待尾部、状态漂移及稳定轮门槛成为明确改进目标。新增解码计算缓存已在 Linux 的 72 个候选上验证逐字段一致、计算墙时约降低 74%，未混入此前闭环数字；[同一优化后代码的 gate2/gate0 对照](stage_gate_validation.md)又完成 328 轮。gate0 两重复等会话均值比 gate2 下降 19.88%，但仍比 Fixed4096 慢 15.16%；P2 历史/答案已分叉，不把差值当作单个动作的因果收益。`70f0487`审计基线的最近完整回归为726项与6项子测试通过，包含显式开启的真实tokenizer检查；Ruff和安装包源码/许可核对通过。后续新增小修的定向验证单列，不将局部通过写成新一轮完整回归。
+16K 独立标定和六方法联合运行已完成 246 轮，见[联合验证](controller_capacity_validation.md)。它定位了空闲 slot 不足导致集中回退，以及 first-token 表混合前置等待两个问题。`bc6c803` 已实现[阶段拆分](stage_cost_model.md)、原生只读工作量摘要和[条件剩余工作等待估计](admission_wait_model.md)，并完成四方法两重复 328 轮，详见[阶段闭环验证](stage_workload_validation.md)。双候选可比较 52/72 轮，但完成时间仍慢于严格模式和固定规则；等待尾部、状态漂移及稳定轮门槛成为明确改进目标。新增解码计算缓存已在 Linux 的 72 个候选上验证逐字段一致、计算墙时约降低 74%，未混入此前闭环数字；[同一优化后代码的 gate2/gate0 对照](stage_gate_validation.md)又完成 328 轮。gate0 两重复等会话均值比 gate2 下降 19.88%，但仍比 Fixed4096 慢 15.16%；P2 历史/答案已分叉，不把差值当作单个动作的因果收益。`5b2825f`稳定提交的完整回归为878项与6项子测试通过，包含显式开启的真实tokenizer检查；Ruff与wheel/sdist资产、许可核对通过。该轮已包含可选来源结构、mixed采样和BYOC合同；其新的GPU实验结果仍待记录。
+
+新的[预算与服务分离验证](native_budget_validation.md)已完成旧/新模式各41轮普通EOS闭环。预算公式、RID与阶段绑定正确；共同支持样本等待MAE未改善。等会话完整响应均值4.94→4.39秒，P95却由7.58→7.94秒，回退7→12次、答案/历史也分叉，只作为开发观察。下一步补足四类host/mixed实测形状，保持旧artifact与资格阈值，区分预算语义、支持域与决策收益。
 
 质量侧的[表格字面关系注释](table_relations.md)完成82轮闭环及8次冻结历史对照；进一步复用CRAFT行文本，焦点行与行内来源在12次冻结三臂对照获得局部改善，并以 `focus_refs` 接入共享工程路径。[完整三臂P3](table_focus_p3_validation.md)123轮已完成，仍保留条件/跨产品错误。[用户主题视图](user_topic_retrieval_validation.md)完成820条真实检索及[两臂82轮P3](user_topic_p3_validation.md)；[固定预算双路融合](current_topic_fusion_validation.md)完成82次真实检索和[两臂82轮P3](current_topic_fusion_p3_validation.md)，恢复候选覆盖、局部定义改善，但仍有无据API及版本/产品混用。没有因top5指标持平或答案变短宣称质量不变。[跨家族judge](open_judge_validation.md)及[三轮原子诊断](atomic_judge_validation.md)均已真跑：v1/v2/v3分别42/58/67调用，v3格式改善后prose仍8 matched/5 mismatched/11 unknown。继续沿用[答案绑定与盲审链路](quality_acceptance.md)，不能让结构化输出替代语义核验。
 
@@ -23,7 +25,7 @@ A/C的下一步机制优先级已收敛为[三个可独立验证的扩展](ac_ex
 
 接续的具体实验：gate2/gate0同代码对照已完成并支持保留gate0开发分支；[实际预算与match时间观测](native_observation_validation.md)也已H200验证，但fixture均ignoreEOS，仍须在normal-EOS压力下区分容量预留、服务长度和状态时效，检查等待残差而非套用默认比例。A的用户topic与双路完整P3已经完成，应据保存的条件/版本/代码错误改进，而非继续把意图补全列为待实现。质量链路保留Selene/Prometheus、GroUSE规范化51调用及原子三轮负例，接续[专用判别器与数量关系](quantity_judge_reuse.md)的原生开发验证；独立meta-test仍待协议冻结。C保留工作集、三写策略和退役对照，最后以实际质量与完整成本选择强B6并执行正式test。
 
-[独立目标验收审计](goal_acceptance_audit.md)给出逐模块/基线证据等级及剩余最终流程。`41d75c0` 已修复native共享完整context policy、显式秒单位SLO及直接CLI失败退出，82项与6子测试通过；尚无修复后对应硬件比较，当前默认运行不因非默认策略缺口被追认无效。`5a009f4` 已实现固定LettuceDetect span适配，随后完整29项真实调用完成；Granite经 `856a753` 修复tokenizer返回类型后也完成29/29原生判分。其22条事实控制匹配，但恰当拒答误报、错引未检和真实对象范围漏检仍需处理，不能提升为质量验收，详见[Granite真实验证](granite_judge_validation.md)。正式流程依次是比较合同、开发质量、压力决策、强组合、冻结test与联合报告；不因当前负结果或相近文献收窄A/B/C，也不以工程测试成功代替整体目标完成。
+[独立目标验收审计](goal_acceptance_audit.md)给出逐模块/基线证据等级及剩余最终流程。`41d75c0` 已修复native共享完整context policy、显式秒单位SLO及直接CLI失败退出，82项与6子测试通过；随后82轮调度报告已记录显式SLO；非默认共享策略的独立硬件对照仍未完成，旧默认运行不因该缺口被追认无效。`5a009f4` 已实现固定LettuceDetect span适配，随后完整29项真实调用完成；Granite经 `856a753` 修复tokenizer返回类型后也完成29/29原生判分。其22条事实控制匹配，但恰当拒答误报、错引未检和真实对象范围漏检仍需处理，不能提升为质量验收，详见[Granite真实验证](granite_judge_validation.md)。正式流程依次是比较合同、开发质量、压力决策、强组合、冻结test与联合报告；不因当前负结果或相近文献收窄A/B/C，也不以工程测试成功代替整体目标完成。
 
 ## 工作包
 
