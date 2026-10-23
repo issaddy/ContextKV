@@ -78,6 +78,8 @@ python runs/run-granite-development.py \
   --profiles ungroundedness relation_scope_v1 citation_binding_v1
 ```
 
-显式加 `--execute` 后按所列顺序执行，每profile单独保存同29个输入、原标签sidecar、config、manifest、runtime、ledger与execution。无引用行仍在对应ledger，不选取改善的样本；一组失败后保存失败并继续其余预设组，最终任一真实失败使进程非零退出。`not_covered`单列而非失败。顶层 `profiles.json`保存顺序与结果，不作共享cache环境下的速度因果比较。新BYOC标准和16变体尚未真实模型验证；原29是已知开发回归，后续需冻结独立meta-test才可判断泛化。
+显式加 `--execute` 后按所列顺序执行，每profile单独保存同29个输入、原标签sidecar、config、manifest、runtime、ledger与execution。无引用行仍在对应ledger，不选取改善的样本；一组失败后保存失败并继续其余预设组，最终任一真实失败使进程非零退出。`not_covered`单列而非失败。顶层 `profiles.json`保存顺序与结果，不作共享cache环境下的速度因果比较。原29×三个profile与新16×三个profile现已全部真实运行，共135行、126次HTTP、9条未覆盖，0失败/截断。relation修正一条拒答却新增换算误报，引用标准仍漏旧错引，未改变默认；完整结果见[BYOC真实验证](granite_byoc_validation.md)。原29是已知开发回归，新16也是合成开发变体，后续需冻结独立meta-test才可判断泛化。
 
-本地52项Granite合同测试、native/quality联合99项及6子测试通过。固定官方tokenizer将原29个默认输入重建为与既有v2逐token相同的IDs；新relation/citation预检最大输入分别4,229/3,999 tokens，均满足32,768窗口与64输出预留。同29引用profile覆盖23条、未覆盖6条，派生预算记录在 `runs/granite-development-review/byoc-prepared-budget.json`。这些均是执行前工程检查，尚无新增模型准确率结论。
+本地52项Granite合同测试、native/quality联合99项及6子测试通过。固定官方tokenizer将原29个默认输入重建为与既有v2逐token相同的IDs；新relation/citation预检最大输入分别4,229/3,999 tokens，均满足32,768窗口与64输出预留。同29引用profile覆盖23条、未覆盖6条，派生预算记录在 `runs/granite-development-review/byoc-prepared-budget.json`。这些是执行前工程检查；后续真实模型行为及其不稳定性另见[BYOC验证](granite_byoc_validation.md)，不能将工程检查视为语义正确率。
+
+16项固定变体的独立driver为 `runs/run-granite-byoc-variants.py`，默认plan，显式 `--execute`才执行完整三个profile；旧29项driver仍保持其固定29项合同。真实结果已独立逐token重建并核对，当前不把任何profile升级为正式quality gate。

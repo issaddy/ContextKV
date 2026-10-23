@@ -78,7 +78,7 @@ Granite使用完整有角色的历史、documents及一个整答风险标签；L
 
 ## 值得验证的BYOC扩展
 
-官方4.1支持Bring Your Own Criteria，保持原生yes/no与固定模板即可指定独立标准；其论文/模型卡上的总体成绩不能代替本项目验证。[官方固定BYOC说明](https://huggingface.co/ibm-granite/granite-guardian-4.1-8b/blob/ab01ccca5dcfb80246369a086a4a87a29198f5af/README.md)。当前应保留原始ungroundedness作为基线，考虑两项**候选协议，尚未实现/验证**：
+官方4.1支持Bring Your Own Criteria，保持原生yes/no与固定模板即可指定独立标准；其论文/模型卡上的总体成绩不能代替本项目验证。[官方固定BYOC说明](https://huggingface.co/ibm-granite/granite-guardian-4.1-8b/blob/ab01ccca5dcfb80246369a086a4a87a29198f5af/README.md)。以下是当时提出的两项候选。后续已实现为固定profile并完成旧29与新16的真实三臂验证，结果与回归见[BYOC验证](granite_byoc_validation.md)；原始ungroundedness仍保留为默认基线：
 
 1. 对象—量值—条件绑定风险：只评当前答案，将对象、单位、逐项/合计、包含关系、版本/角色/套餐、否定和例外作为不可随意删改的断言组成；要求documents对完整关系提供支持，分列值不能自动推出包含、相加或性能保证。历史只能解析指代，不能提供事实。关于“来源未提供”的拒答按来源可答性核查，不把缺少该数值本身当成拒答失实。
 2. 实际引用绑定风险：单独判断答案标出的来源ID能否支持相应断言。全visible其他地方有支持仍不能替错误引用补证；没有显式引用时标为未覆盖，不能自动推成引用正确或不正确。此项与事实grounding分别报告，避免一个yes/no混合两种错误后失去解释性。
