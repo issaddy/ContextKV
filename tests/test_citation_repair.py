@@ -16,15 +16,26 @@ def example():
              "source_uri": "cloudant"}]}]}
 
 
-def test_rebinds_only_citation_and_retains_original():
+def test_augments_citation_and_retains_original_bindings():
     record = example()
     saved = deepcopy(record)
     result = repair_record(record)
-    assert result["repaired_answer"] == record["answer"].replace("E_aa", "E_bb")
+    assert result["repaired_answer"] == record["answer"].replace("[E_aa]", "[E_aa, E_bb]")
     assert result["original_answer"] == record["answer"]
     assert record == saved
     assert not result["quality_validated"] and not result["wording_changed"]
     assert result["changes"][0]["new_source_uri"] == "cloudant"
+    assert result["original_citations_preserved"]
+
+
+def test_compound_claim_preserves_distinct_sources_and_adds_once():
+    record = example()
+    record["answer"] = "First clause [E_aa], and second clause [E_cc]."
+    claim = record["claims"][0]
+    claim.update(start=0, end=len(record["answer"]), text=record["answer"], citations=["E_aa", "E_cc"])
+    claim["pairs"].append({"status": "scored", "cited": True, "reference_id": "E_cc", "probability": .1})
+    result = repair_record(record)
+    assert result["repaired_answer"] == "First clause [E_aa], and second clause [E_cc, E_bb]."
 
 
 @pytest.mark.parametrize("mutation", ["truncated", "inline_code", "uncertain", "unknown", "supported"])

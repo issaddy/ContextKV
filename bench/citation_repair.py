@@ -1,4 +1,4 @@
-"""Optional offline citation rebinding from complete grounding diagnostics.
+"""Optional offline citation augmentation from complete grounding diagnostics.
 
 The answer wording and evidence remain fixed. This is an experimental repair,
 not an independently validated quality score or an online default.
@@ -39,7 +39,16 @@ def repair_record(record, *, support_threshold=.9, cited_ceiling=.2):
         original = answer[start:end]
         if not 0 <= start < end <= len(answer) or original != claim["text"]:
             raise ValueError("grounding claim offsets do not match its original answer")
-        replacement = CITATION_PATTERN.sub("[" + best["reference_id"] + "]", original)
+        # A sentence-level classifier can support only one clause of a compound
+        # claim. Preserve every original binding and add the candidate source
+        # once, in the last citation group; source deletion needs finer evidence.
+        matches = list(CITATION_PATTERN.finditer(original))
+        if not matches:
+            continue
+        last = matches[-1]
+        references = [reference.strip() for reference in last.group(1).split(",")]
+        references = list(dict.fromkeys([*references, best["reference_id"]]))
+        replacement = original[:last.start()] + "[" + ", ".join(references) + "]" + original[last.end():]
         if replacement == original:
             continue
         changes.append({"start": start, "end": end, "before": original, "after": replacement,
@@ -57,7 +66,8 @@ def repair_record(record, *, support_threshold=.9, cited_ceiling=.2):
     return {"task_id": record["task_id"], "conversation_id": record.get("conversation_id"),
             "original_answer": answer, "repaired_answer": revised, "changes": changes,
             "wording_changed": False, "new_evidence_added": False,
-            "quality_validated": False, "policy": "visible_source_citation_rebinding_v1",
+            "quality_validated": False, "policy": "visible_source_citation_augmentation_v1",
+            "original_citations_preserved": True,
             "support_threshold": support_threshold, "cited_ceiling": cited_ceiling,
             "thresholds_calibrated": False,
             "scope": "offline model-guided repair; independent evaluation required"}

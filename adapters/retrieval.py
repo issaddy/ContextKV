@@ -130,14 +130,16 @@ class BM25SRetriever:
                                                show_progress=False)
         return result
 
-    def retrieve(self, user_questions: Sequence[str]) -> tuple[OnlineContext, ...]:
+    def retrieve(self, user_questions: Sequence[str], *, top_k: int = 5) -> tuple[OnlineContext, ...]:
+        if top_k < 1:
+            raise ValueError("top_k must be positive")
         query = retrieval_query(user_questions)
         tokens = self._bm25s.tokenize([query], stopwords="en", stemmer=None,
                                       return_ids=False, show_progress=False)[0]
         if not tokens:
             return ()
         scores = self._index.get_scores(tokens)
-        order = deterministic_top_k(scores, 5, self._np)
+        order = deterministic_top_k(scores, top_k, self._np)
         return tuple(replace(self._contexts[int(i)], score=float(scores[i])) for i in order)
 
     def retrieve_turn(self, turn: OnlineTurn) -> OnlineTurn:
