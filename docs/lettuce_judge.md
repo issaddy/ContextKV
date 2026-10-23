@@ -1,6 +1,6 @@
 # LettuceDetect v2 的独立本地诊断入口
 
-`bench/lettuce_judge.py` 复用作者固定 QA 输入格式、二分类方向和 span 解码思路，直接运行已有 Transformers token-classification 接口，不引入整个 LettuceDetect 框架。它与 Atomic/native 默认评分互不替换，没有五维 scores、Atomic 三/五分类 verdict 或正式质量通过标志。初始实现只完成 CPU 合同验证；真实固定模型的结果需单独记录。
+`bench/lettuce_judge.py` 复用作者固定 QA 输入格式、二分类方向和 span 解码思路，直接运行已有 Transformers token-classification 接口，不引入整个 LettuceDetect 框架。它与 Atomic/native 默认评分互不替换，没有五维 scores、Atomic 三/五分类 verdict 或正式质量通过标志。已完成固定模型的完整 29 条 GPU 开发诊断，全部可运行，但范围漏检和正确换算误伤仍明显；详见 [真实验证记录](lettuce_judge_validation.md)。
 
 固定模型为 `KRLabsOrg/lettucedect-v2-mmbert-base`，revision `8831ce063dff760b01efe4519b4188f5ee2456f2`，Apache-2.0 权重，模型 config 的上限为 8192。固定作者实现为 `fbce1991f26e210cc49ace3913562ab4f2f31a60`、MIT；英文 QA 模板逐字保存在 `bench/assets/lettuce_judge/qa_prompt_en.txt`，完整 MIT 与适配说明在同目录 LICENSE/NOTICE。模型权重不随本项目分发。[模型卡](https://huggingface.co/KRLabsOrg/lettucedect-v2-mmbert-base/blob/8831ce063dff760b01efe4519b4188f5ee2456f2/README.md)、[作者输入格式](https://github.com/KRLabsOrg/LettuceDetect/blob/fbce1991f26e210cc49ace3913562ab4f2f31a60/lettucedetect/detectors/prompt_utils.py)、[英文模板](https://github.com/KRLabsOrg/LettuceDetect/blob/fbce1991f26e210cc49ace3913562ab4f2f31a60/lettucedetect/prompts/qa_prompt_en.txt)。
 
