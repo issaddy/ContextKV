@@ -237,9 +237,14 @@ async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monk
 @pytest.mark.parametrize("enabled", [False, True])
 def test_native_cli_keeps_explicit_style_separate_from_enable_flag(monkeypatch, enabled):
     import bench.native_baseline as native_module
+    from bench.run_sessions import RunReport
     seen = []
     async def fake_run(args):
-        seen.append((args.table_relations, args.table_annotation_style))
+        policy = native_module.resolve_context_policy(args)
+        seen.append((policy.table_relations, policy.table_annotation_style))
+        return RunReport(mode="closed_loop", seed=42, started_at=0, arrival_window_end=0,
+            completed_at=0, turns=(), scheduled_sessions=0, arrived_sessions=0,
+            unfinished_turns=0, timed_out_sessions=(), session_makespans=(), time_origin="fixture")
     monkeypatch.setattr(native_module, "_run", fake_run)
     argv = ["unused.jsonl", "--baseline", "B0", "--engine-manifest", "unused.json",
             "--table-annotation-style", "focus_refs"]

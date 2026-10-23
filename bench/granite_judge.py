@@ -133,7 +133,7 @@ class GraniteJudge:
         try:
             messages, documents = native_input(record, think=self.config.think)
             ids = list(self.tokenizer.apply_chat_template(messages, documents=documents,
-                tokenize=True, add_generation_prompt=True))
+                tokenize=True, return_dict=False, add_generation_prompt=True))
             result.update(messages=messages, documents=documents, judge_input_ids=ids, judge_input_tokens=len(ids))
             if len(ids)+self.config.max_new_tokens > self.config.context_window:
                 result["failure_kind"] = "input_overflow"

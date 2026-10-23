@@ -16,7 +16,10 @@ class Tokenizer:
 
     def apply_chat_template(self, messages, **kwargs):
         self.calls.append((deepcopy(messages), deepcopy(kwargs)))
-        return [101, 202, 303, 404]
+        # Transformers 5 defaults to BatchEncoding; the adapter must explicitly
+        # request token IDs rather than iterating the mapping's string keys.
+        ids = [101, 202, 303, 404]
+        return ids if kwargs.get("return_dict") is False else {"input_ids": ids}
 
 
 def record():
@@ -92,6 +95,7 @@ def test_native_ids_exact_wire_without_double_template_and_failures_retained(res
             result = await judge.evaluate(record())
             assert len(tokenizer.calls) == 1 and tokenizer.calls[0][1]["tokenize"] is True
             assert tokenizer.calls[0][1]["add_generation_prompt"] is True
+            assert tokenizer.calls[0][1]["return_dict"] is False
             assert result["judge_input_ids"] == requests[0]["input_ids"]
             assert result["raw_response"] == result["native_observation"]["response"]
             assert "scores" not in result and not result["quality_noninferiority_established"]
