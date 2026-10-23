@@ -84,7 +84,7 @@ uv run --extra retrieval contextkv --config configs/demo.yaml \
 
 研究控制器的硬件开发矩阵及专用服务冷态准备见 [硬件 dev 运行](docs/hardware_dev_matrix.md)。示例包含 11 个同预算开发任务及 5 个继承已选配置的消融；原生 B0/B1、host 策略组合和质量准入仍须独立补齐，不能将这一子集命名为完整最强 B6。
 
-默认 `cost` 只有在相应 prefix/suffix/host-load/concurrency 桶存在可信硬件标定时才启用成本切换；否则结果中明确记录 `uncalibrated_cost_fallback`。显式实验选项 `admission_estimator: native_workload` 使用实测执行阶段和解析等待，单列 `selection_eligible`，不会把未校准等待标成 `calibrated`；配置与边界见[阶段成本模型](docs/stage_cost_model.md)和[原生工作量估计](docs/admission_wait_model.md)。`shadow: true` 仅记录成本建议，执行固定回退。`calibration_path` 可指定真实 Measurement JSONL。正式启用前还需用本机 profiling 将 `delta_abs` 写为控制开销 P95 的两倍。
+默认 `cost` 只有在相应 prefix/suffix/host-load/concurrency 桶存在可信硬件标定时才启用成本切换；否则结果中明确记录 `uncalibrated_cost_fallback`。显式实验选项 `admission_estimator: native_workload` 使用实测执行阶段和解析等待；`native_budget` 进一步将原生容量预留与经验服务长度分开，并按已有请求 ID 关联预算释放。两者单列 `selection_eligible`，不会把未校准等待标成 `calibrated`；配置与边界见[阶段成本模型](docs/stage_cost_model.md)和[原生工作量估计](docs/admission_wait_model.md)。`shadow: true` 仅记录成本建议，执行固定回退。`calibration_path` 可指定真实 Measurement JSONL。正式启用前还需用本机 profiling 将 `delta_abs` 写为控制开销 P95 的两倍。
 
 可选 `positive_basis` 复用 SciPy NNLS 离线拟合，推理只需保存的八个系数；默认仍为查表。按完整特征单元留出，超出实测总长度、混入模拟数据或误差样本不足时不标为硬件校准。共享提示词 Q1/Q2 也仅作为实验配置，真实开发对照发现错引后保持原默认；见[成本验证](docs/data_and_evaluation.md)及[提示词验证](docs/shared_prompt_validation.md)。最新论文与固定作者代码的复用分析见[研究审查](docs/research_review_20261024.md)。
 
@@ -102,7 +102,9 @@ uv run --extra retrieval contextkv --config configs/demo.yaml \
 
 [用户主题查询](docs/user_topic_query_view.md)已接入共享检索入口；[五视图真实开发对照](docs/user_topic_retrieval_validation.md)完成820条结果，最终R@5从current的52.31%到54.87%，同时保留WebSocket问题候选召回下降。[82轮完整问答](docs/user_topic_p3_validation.md)已完成并保留具体改善与新错误；[固定总重排预算的双路融合](docs/query_fusion_research.md)已实现为可选实验；[真实重排](docs/current_topic_fusion_validation.md)恢复了候选池覆盖，最终top5指标持平；[随后82轮P3](docs/current_topic_fusion_p3_validation.md)保留定义改善与后续回答回归，默认保持单路。
 
-[阶段成本闭环验证](docs/stage_workload_validation.md)完成四方法两重复共 328 轮。工作量模型提高了成本选择覆盖，但完整响应仍慢于对照，等待误差和门槛影响已按实际轨迹定位。模型计算的 Linux CPU 优化有单独逐字段等价证据，未混入此前的 GPU 性能数字。随后[优化后代码的门槛对照](docs/stage_gate_validation.md)又完成 328 轮，gate0 相比 gate2 的等会话均值降低 19.88%，仍慢于固定阈值；这个开发结果继续用于纠偏。新增[原生预算与匹配观测](docs/native_observation_validation.md)已在H200 GPU/host受控负载中完成复算和生命周期验收，当前计划器尚未使用新字段。
+[阶段成本闭环验证](docs/stage_workload_validation.md)完成四方法两重复共 328 轮。工作量模型提高了成本选择覆盖，但完整响应仍慢于对照，等待误差和门槛影响已按实际轨迹定位。模型计算的 Linux CPU 优化有单独逐字段等价证据，未混入此前的 GPU 性能数字。随后[优化后代码的门槛对照](docs/stage_gate_validation.md)又完成 328 轮，gate0 相比 gate2 的等会话均值降低 19.88%，仍慢于固定阈值；这个开发结果继续用于纠偏。新增[原生预算与匹配观测](docs/native_observation_validation.md)已在H200 GPU/host受控负载中完成复算和生命周期验收，默认计划器保持原行为，显式 `native_budget` 分支使用实际预算与请求身份，历史 match 仅用于声明清楚的服务时间情景。
+
+新增 [LettuceDetect span 诊断](docs/lettuce_judge.md)和 [Granite Guardian 原生风险诊断](docs/granite_judge.md)均复用固定模型与作者协议，读取完整实际可见证据，保留失败、截断和原输出；二分类结果不能补造五维质量分数。整体剩余验收及 A/B/C 的下一步机制见[目标审计](docs/goal_acceptance_audit.md)和[扩展设计](docs/ac_extension_priorities.md)。
 
 ## 真实 SGLang 接入
 

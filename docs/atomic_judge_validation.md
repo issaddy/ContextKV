@@ -10,7 +10,7 @@
 
 三个真实输入来自 `runs/table-frozen-pairs-v2/cases.json` 和 `h200-order-pairs/measurements.jsonl`：`old_error_history`、repeat 0、`off / all_rows / focus_refs`。独立构造器 `runs/atomic-development-review/prepare_inputs.py` 已逐项核对实际 input IDs、既有 token hash、receipt 与输出，且三者的 query、actual history、可见来源及原文相同。执行侧使用的原始生成长度分别为 277、218、114 tokens，均未截断；这些长度只作为离线来源信息，不是评审标签。
 
-导入时三条真实生成的 `unvalidated_hardware_run` 标记被标准化成 `hardware`，差异记录在 `source-marker-note.json`，未改变模型输入。分析保留这个来源限定：这些生成并未因此成为已验证的性能或质量测量。原 audit 和响应均未回填修改。
+v1 导入时三条真实生成的 `unvalidated_hardware_run` 标记被标准化成 `hardware`，差异记录在 `source-marker-note.json`，未改变模型输入。v2/v3 保留原始 `unvalidated_hardware_run`；后续 Lettuce/Granite 使用与 v3 逐字节相同的 audit，没有沿用 v1 的标记转换。这些生成并未因此成为已验证的性能或质量测量，各版本原 audit 和响应均未回填修改。
 
 Selene 的模型为 `AtlaAI/Selene-1-Mini-Llama-3.1-8B`，revision `427792f1c3e2073cb7da216924fd884b1ba496e0`；本轮提前固定 temperature 0、单调用输出预算 4096、上下文窗口 32768，并以固定本地 tokenizer 完整计数。输入不会为了容纳模型而截掉来源。Atomic 使用自己的提取与检查 prompt；配置中的 native protocol 名称只来自复用的运输配置，不表示本轮使用五维 Result 评分模板。
 

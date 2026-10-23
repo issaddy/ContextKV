@@ -6,7 +6,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | 726 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-query-fusion-final.log |
+| 最近完整 CPU 回归 | `3b852aa`：804 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-native-budget-judges-complete.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
 | Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 atomic_judge 模块/协议资产、table_focus、CRAFT 行文本与 GroUSE 源码，CRAFT 完整许可在 wheel 中；runs/build-atomic-focus.log；新增guided schema、query view、observation probe与client也已重建并逐字核对（runs/build-guided-wheel.log）；融合模块也已构建并逐字核对（runs/build-query-fusion-wheel.log） |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
@@ -16,6 +16,8 @@
 | 固定 MTRAG 全量复算 | 842 任务 / 110 会话；Cloud 205 / 26；1053 处参考标记 |
 
 矩阵证据在 runs/matched-dev、runs/matched-test 和 runs/matched-ablation-dev。此前 48-job 开发矩阵属于未匹配消融参数的旧版流程，不再作为最终方法对照。runs/official-checker/verification.json 明确使用 fake fixture 答案，不是质量结果。上游 Starlette TestClient 有 HTTPX 弃用提示，不影响通过。
+
+`3b852aa` 同轮 Ruff 全仓通过；`runs/build-native-budget-judges.log` 的 wheel/sdist 构建通过，wheel 包含两种新增 judge、Lettuce 原生模板/协议/MIT 许可及 Granite Apache 归属，不包含运行数据或模型权重。真实 Granite 首轮另发现 Transformers 5 默认返回 BatchEncoding；`856a753` 显式请求 token ID 列表并增加相应合同测试，首轮失败记录与修复后结果分别保存。
 
 复核使用 .venv/bin/python -m pytest -q 和 .venv/bin/ruff check .；真实 tokenizer 专项设置 CONTEXTKV_TEST_HF_TOKENIZER=1。新增模块的定向测试记录应在下一次完整回归后统一更新总数。
 
