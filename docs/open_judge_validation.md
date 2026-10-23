@@ -102,3 +102,15 @@ Prometheus 的 16 个样本都在 relevancy/completeness 阶段失败，因此�
 5. **修改后用 train 开发，再冻结元评测。** 先比较真实错误是否减少、正确答案是否被误伤、调用与 token 成本；之后才冻结并运行未访问的 GroUSE test。项目已有 123 份 P3 回答可继续获得模型评分，但在 evaluator 尚不能识别这些关键错误时，不以宽松满分宣布质量非劣。
 
 当前结论是需要改进 evaluator 的证据检查和评分校准；无需把范围缩为只报告接口成功，也不需要等待用户先提供人工分数才能继续开发。
+
+## Selene 显式规范化后的完整 train v2
+
+随后使用同一固定模型、stock SGLang、原始四模板、train16 和抽样设置，在新目录 `runs/remote-h200-judge/runs/selene-normalized-development-v2/` 完整重跑，显式设置 `parser_mode=normalized_v1`。旧结果保持不变，没有回填旧流程缺失的响应。全部 **51 次调用正常 stop、解析成功**；运行中记录 14 个字符串 `"null"` 和 1 个整数串的逐字段规范化，没有将非数值内容猜成分数。
+
+六项条件通过数依次为 **11、5、10、15、12、11 / 16**，合计 **64/96=66.67%**，严格 v1 为48/96。新增的六次实际调用是 train:2/12 的 usefulness、faithfulness，train:4 的 usefulness，以及 train:8 的 faithfulness。train:4 的 usefulness 已不适用，因此没有虚构第七个调用。
+
+这不是纯解析变更的因果效果：两次运行共有45个调用，其中仅20个原始文本逐字相同。四个原已解析 metric 的数值也发生变化（train:6 relevancy 3→2，train:7 relevancy 4→5，train:11 faithfulness 1→0，train:14 completeness 3→4）；温度0.01及条件调用序列均应保留在解释中。冻结旧45条响应的离线规范化能单独证明类型兼容性，完整新运行则提供之前没有的实际下游判断，两者不混算。可复算脚本为 `runs/open-judge-review/compare_normalized.py`，原调用、变更与新增调用列表均保留。
+
+完整性仍只通过5/16，说明格式问题解决后语义缺口仍然明显。没有运行 GroUSE test，也没有把新分数用于宣布项目回答质量非劣。下一步继续[原子声明与条件范围核验](atomic_judge_proposal.md)及完整开发回答对照；支持率、引用是否正确、拒答适用性和答案完整性分别检查。
+
+独立脚本 `runs/open-judge-review/independent_normalized.py` 在应用已声明转换后，直接执行固定官方 DTO、条件流程和 MetaEvaluator，51 次调用及96项条件结果均一致。若不先转换，官方 DTO 会拒绝其中8次，所以66.67%属于明确标名的 normalized_v1，不能冒称原始官方协议成绩。两次数据、模板、模型revision声明和抽样参数一致，配置仅新增 parser_mode；运行记录仍是操作者来源声明，不等于远程权重认证。

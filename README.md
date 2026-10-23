@@ -100,7 +100,7 @@ uv run --extra retrieval contextkv --config configs/demo.yaml \
 
 可选[表格关系注释](docs/table_relations.md)保留完整原文，为对象、列、值和单位附加字面 span。候选和原生对照共用 `context.table_relations`；默认关闭。新增 `table_annotation_style: focus_refs` 复用 CRAFT 行文本并按当前 query 选择焦点、逐行附原引用；[12 次冻结历史验证](docs/table_focus_validation.md)在两个开发历史中改善了已知对象/引用错误，完整 P3 泛化仍待验证。独立模型的[原生协议](docs/open_judge_plan.md)和[GroUSE 元评测](docs/grouse_meta.md)已实现；[真实首轮结果](docs/open_judge_validation.md)暴露范围漏判与格式失败，当前不能用于宣布质量非劣。
 
-[阶段成本闭环验证](docs/stage_workload_validation.md)完成四方法两重复共 328 轮。工作量模型提高了成本选择覆盖，但完整响应仍慢于对照，等待误差和门槛影响已按实际轨迹定位。模型计算的 Linux CPU 优化有单独逐字段等价证据，未混入此前的 GPU 性能数字。
+[阶段成本闭环验证](docs/stage_workload_validation.md)完成四方法两重复共 328 轮。工作量模型提高了成本选择覆盖，但完整响应仍慢于对照，等待误差和门槛影响已按实际轨迹定位。模型计算的 Linux CPU 优化有单独逐字段等价证据，未混入此前的 GPU 性能数字。随后[优化后代码的门槛对照](docs/stage_gate_validation.md)又完成 328 轮，gate0 相比 gate2 的等会话均值降低 19.88%，仍慢于固定阈值；这个开发结果继续用于纠偏。
 
 ## 真实 SGLang 接入
 
