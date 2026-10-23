@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,7 @@ name = "contextkv"
 version = "0.1.0"
 description = "Versioned evidence, cost-aware context planning and KV cache lifecycle research"
 readme = "README.md"
+license-files = ["docs/third_party/APACHE-2.0.txt", "docs/third_party/*NOTICE.md"]
 requires-python = ">=3.11"
 dependencies = ["httpx>=0.28,<0.29", "PyYAML>=6,<7", "fastapi>=0.115,<1", "uvicorn>=0.34,<1"]
 

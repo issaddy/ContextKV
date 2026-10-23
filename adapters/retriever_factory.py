@@ -37,8 +37,8 @@ def load_retriever_config(path):
     value = HybridRetrievalConfig(**yaml.safe_load(Path(path).read_text(encoding="utf-8")))
     if value.schema_version != 1 or value.kind != "hybrid":
         raise ValueError("retriever config requires schema_version=1 and kind=hybrid")
-    if value.query_mode not in {"current", "last3", "all_user"}:
-        raise ValueError("online query_mode must use current/last3/all_user questions")
+    if value.query_mode not in {"current", "last3", "all_user", "correction_aware"}:
+        raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware")
     if value.stage not in {"dense", "hybrid", "hybrid_rerank"}:
         raise ValueError("unknown retrieval stage")
     if value.stage == "hybrid_rerank" and not value.reranker_path:

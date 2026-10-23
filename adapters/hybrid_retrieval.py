@@ -12,6 +12,7 @@ from threading import Lock
 import time
 
 from .mtrag import OnlineContext, json_hash
+from .query_views import correction_query_mode
 from .retrieval import deterministic_top_k, retrieval_query
 
 
@@ -25,6 +26,8 @@ def query_text(user_questions, mode="last3", *, generated_history=None):
     """No answers/labels are accepted implicitly; history must be supplied explicitly."""
     if not user_questions:
         raise ValueError("retrieval requires the current user question")
+    if mode == "correction_aware":
+        mode = correction_query_mode(user_questions[-1])
     if mode == "current":
         return user_questions[-1]
     if mode == "last3":
@@ -219,8 +222,8 @@ class HybridRetriever:
     def __init__(self, sparse, dense, encoder, reranker=None, *, query_mode="current",
                  stage="hybrid_rerank", candidate_k=50, rerank_k=50, rrf_k=60,
                  source_config=None):
-        if query_mode not in {"current", "last3", "all_user"}:
-            raise ValueError("online query_mode must use current/last3/all_user questions")
+        if query_mode not in {"current", "last3", "all_user", "correction_aware"}:
+            raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware")
         if stage not in {"dense", "hybrid", "hybrid_rerank"}:
             raise ValueError("unknown online retrieval stage")
         if stage == "hybrid_rerank" and reranker is None:

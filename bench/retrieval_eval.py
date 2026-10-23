@@ -144,7 +144,7 @@ def main(argv=None):
     evaluate.add_argument("--reranker-max-length", type=int, default=512)
     evaluate.add_argument("--qrels", required=True)
     evaluate.add_argument("--output", required=True)
-    evaluate.add_argument("--query-modes", nargs="+", choices=["current", "last3", "all_user", "generated_history"], default=["last3"])
+    evaluate.add_argument("--query-modes", nargs="+", choices=["current", "last3", "all_user", "correction_aware", "generated_history"], default=["last3"])
     evaluate.add_argument("--history-audit")
     evaluate.add_argument("--candidate-k", type=int, default=50)
     evaluate.add_argument("--rerank-k", type=int, default=50)
