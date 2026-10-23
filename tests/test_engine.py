@@ -191,6 +191,38 @@ def test_http_quote_decodes_optional_native_workload_contract(workload):
     run(scenario())
 
 
+def test_nonstream_native_top_level_409_preserves_message_and_http_status():
+    async def scenario():
+        # Actual pinned SGLang /generate body observed after a retired epoch.
+        body={"object":"error","message":"EPOCH_RETIRED: EPOCH_RETIRED",
+              "type":"409","param":None,"code":409}
+        client=SGLangEngineClient("http://test",ConfigFingerprint(),stream=False,
+            transport=httpx.MockTransport(lambda request:httpx.Response(409,json=body)))
+        try:
+            with pytest.raises(EngineError) as caught:
+                await client._post("/generate",{})
+            assert caught.value.code=="HTTP_ERROR"
+            assert str(caught.value)=="HTTP_ERROR: HTTP 409: EPOCH_RETIRED: EPOCH_RETIRED"
+        finally:
+            await client.aclose()
+    run(scenario())
+
+
+def test_nested_context_error_retains_its_original_protocol_code():
+    async def scenario():
+        client=SGLangEngineClient("http://test",ConfigFingerprint(),
+            transport=httpx.MockTransport(lambda request:httpx.Response(200,json={
+                "error":{"code":"STALE_GENERATION","message":"generation changed"}})))
+        try:
+            with pytest.raises(EngineError) as caught:
+                await client._post("/context/epoch/retire",{})
+            assert caught.value.code=="STALE_GENERATION"
+            assert str(caught.value)=="STALE_GENERATION: generation changed"
+        finally:
+            await client.aclose()
+    run(scenario())
+
+
 class FakeNativeCache:
     """Only the existing native tracker boundary is mocked in these tests."""
     page_size = 1

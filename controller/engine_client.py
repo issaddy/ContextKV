@@ -127,7 +127,13 @@ class SGLangEngineClient:
         except ValueError as exc:
             raise EngineError("INVALID_ENGINE_RESPONSE", response.text[:200]) from exc
         if response.is_error or data.get("error"):
-            detail = data.get("error", data.get("detail", {}))
+            detail = data.get("error", data.get("detail"))
+            if detail is None:
+                # Native non-stream /generate HTTPException uses a top-level
+                # ErrorResponse; context control uses the nested envelope below.
+                # Preserve HTTP status/message without guessing a protocol code
+                # from the human-readable message.
+                raise EngineError("HTTP_ERROR", f"HTTP {response.status_code}: {data.get('message', str(data))}")
             if isinstance(detail, dict):
                 raise EngineError(detail.get("code", "HTTP_ERROR"), detail.get("message", str(detail)))
             raise EngineError("HTTP_ERROR", str(detail))
