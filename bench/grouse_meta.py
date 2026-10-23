@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import math
 import operator
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ import httpx
 ASSETS = Path(__file__).parent / "assets/grouse"
 PROTOCOL = "grouse-four-template-json-v1"
 PARSER = "bounded-json-scores-v1"
+PARSERS = {"strict_v1":PARSER,"normalized_v1":"bounded-normalized-json-scores-v1"}
 DIRECT = ("answer_relevancy", "completeness", "faithfulness", "usefulness")
 METRICS = (*DIRECT, "positive_acceptance", "negative_rejection")
 SAMPLE_FIELDS = ("input", "actual_output", "expected_output", "references")
@@ -41,12 +43,15 @@ class GrouseConfig:
     timeout_seconds: float = 120.0
     concurrency: int = 1
     api_key_env: str = "CONTEXTKV_JUDGE_API_KEY"
+    parser_mode: str = "strict_v1"
 
     def __post_init__(self):
         if not all((self.model,self.revision,self.base_url,self.provider)):
             raise ValueError("model/revision/base_url/provider must be explicit")
         if self.max_tokens<1 or self.concurrency<1 or self.timeout_seconds<=0 or self.temperature<0:
             raise ValueError("invalid judge sampling configuration")
+        if self.parser_mode not in PARSERS:
+            raise ValueError(f"unknown GroUSE parser_mode: {self.parser_mode}")
 
 
 class HTTPCall:
@@ -92,7 +97,7 @@ def templates():
 
 def evaluator_identity(config):
     manifest=source_manifest()
-    return {"protocol":PROTOCOL,"parser":PARSER,"config":asdict(config),
+    return {"protocol":PROTOCOL,"parser":PARSERS[config.parser_mode],"config":asdict(config),
         "evaluator_source_sha256":hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "source_commit":manifest["commit"],"dataset_revision":manifest["dataset"]["revision"],
         "template_sha256":{name:entry["sha256"] for name,entry in manifest["files"].items() if name.endswith(".jinja")},
@@ -108,7 +113,19 @@ def score(value, justification="", *, skipped=False):
     return {"status":"ok","value":value,"justification":justification,"skipped":skipped}
 
 
-def parse_pair(text, metric):
+def _normalize_score(value):
+    if value == "null":
+        return None,"string_null"
+    if isinstance(value,str) and re.fullmatch(r"[+-]?[0-9]+",value):
+        return int(value),"integer_string"
+    if type(value) is float and math.isfinite(value) and value.is_integer():
+        return int(value),"integer_float"
+    return value,None
+
+
+def parse_pair(text, metric, *, parser_mode="strict_v1", normalization_trace=None):
+    if parser_mode not in PARSERS:
+        raise ValueError(f"unknown GroUSE parser_mode: {parser_mode}")
     # Preserve upstream fenced-JSON handling and require both answer objects.
     matches=re.findall(r"```[a-zA-Z]*\n(.*?)```",text,re.DOTALL)
     pair=json.loads(matches[0].strip() if matches else text.strip())
@@ -123,10 +140,21 @@ def parse_pair(text, metric):
         # Upstream DTO defaults omitted score fields to None. Enforce the
         # template's stated numeric range, which its permissive DTO does not.
         value=item.get(metric)
+        if parser_mode=="normalized_v1":
+            original=value
+            value,rule=_normalize_score(value)
+            if rule is not None:
+                item[metric]=value
+                if normalization_trace is not None:
+                    normalization_trace.append({"answer":name,"metric":metric,"rule":rule,
+                                                "original":original,"normalized":value})
         if metric=="faithfulness" and type(value) is bool:
             # Its official template explicitly requests boolean/null; upstream
             # Pydantic Optional[int] normalizes true/false to one/zero.
             value=item[metric]=int(value)
+            if normalization_trace is not None:
+                normalization_trace.append({"answer":name,"metric":metric,"rule":"faithfulness_boolean",
+                                            "original":bool(value),"normalized":value})
         allowed=range(1,6) if metric in DIRECT[:2] else range(2)
         if value is not None and (type(value) is not int or value not in allowed):
             raise ValueError(f"{metric} must be null or an integer in {list(allowed)}")
@@ -145,8 +173,11 @@ def derive_acceptance(relevancy, completeness):
 
 
 class GroUSEEvaluator:
-    def __init__(self, call: Call):
+    def __init__(self, call: Call, *, parser_mode="strict_v1"):
         self.call=call
+        if parser_mode not in PARSERS:
+            raise ValueError(f"unknown GroUSE parser_mode: {parser_mode}")
+        self.parser_mode=parser_mode
         self.templates=templates()
 
     def messages(self, metric, sample):
@@ -160,7 +191,7 @@ class GroUSEEvaluator:
         async def invoke(metric):
             messages=self.messages(metric,sample)
             started=time.perf_counter()
-            record={"metric":metric,"raw_response":None}
+            record={"metric":metric,"raw_response":None,"normalization_trace":[]}
             try:
                 response=await self.call(messages)
                 record["raw_response"]=response
@@ -173,7 +204,8 @@ class GroUSEEvaluator:
                     if choice.get("finish_reason")!="stop":
                         raise ValueError(f"incomplete judge output: {choice.get('finish_reason')}")
                     text=choice["message"]["content"]
-                value=parse_pair(text,metric)
+                value=parse_pair(text,metric,parser_mode=self.parser_mode,
+                                 normalization_trace=record["normalization_trace"])
                 record["status"]="ok"
             except (httpx.HTTPError,ValueError,TypeError,KeyError,IndexError) as error:
                 value=failed(f"{type(error).__name__}: {error}")
@@ -302,7 +334,7 @@ async def evaluate_run(config, split, output, *, dataset_file=None, frozen_path=
         if call is None:
             http=HTTPCall(config)
             call=http
-        evaluator=GroUSEEvaluator(call)
+        evaluator=GroUSEEvaluator(call,parser_mode=config.parser_mode)
         inputs,dataset=load_split(split,dataset_file=dataset_file)
         manifest["dataset"]=dataset
         (target/"manifest.json").write_text(json.dumps(manifest,indent=2)+"\n")

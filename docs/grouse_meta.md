@@ -25,7 +25,11 @@ uv sync --extra evaluation
 - Prompt 只渲染 `input`、`actual_output`、`expected_output` 和 `references`，各模板按官方需要使用相应字段。`conditions`、`metadata.goal/test_type` 仅保存在离线记录，不进入模型请求。
 - 保留完整引用正文，不按 top-k、字符或 token 数截断。该入口不自行估算 tokenizer budget；服务端超限等 HTTP 错误记 Failed。若外部使用 Transformers 5.19 做预算检查，需显式 `apply_chat_template(..., return_dict=False)`，不能把返回字典长度当 token 数。
 
-解析适配明确命名为 `bounded-json-scores-v1`：保留官方首个 fenced JSON 提取和缺失可选 score 默认 null 的语义；另外检查模板规定的数值范围，拒绝越界及数值字符串，避免把诸如 relevancy=99 误计为通过 `>=3`。Faithfulness 的布尔转换如上。这比原始 Pydantic DTO 的通用整数转换更严格，报告不能省略该差异。真实 HTTP 响应只有 `finish_reason="stop"` 才参与评分；length、缺失终态或其它终态均记 Failed，且保存 raw response、usage、原因和调用时间。不自动修复 JSON 或重试选择性失败。
+默认配置 `parser_mode="strict_v1"` 对应 `bounded-json-scores-v1`：保留官方首个 fenced JSON 提取和缺失可选 score 默认 null 的语义；另外检查模板规定的数值范围，拒绝越界及数值字符串，避免把诸如 relevancy=99 误计为通过 `>=3`。Faithfulness 的布尔转换如上。这比原始 Pydantic DTO 的通用整数转换更严格，报告不能省略该差异。真实 HTTP 响应只有 `finish_reason="stop"` 才参与评分；length、缺失终态或其它终态均记 Failed，且保存 raw response、usage、原因和调用时间。不修复 JSON 语法或重试选择性失败。
+
+可选配置 `parser_mode="normalized_v1"` 对应 `bounded-normalized-json-scores-v1`，只在 score 字段做三种无歧义转换：精确字符串 `"null"` → null、匹配 `[+-]?[0-9]+` 的 ASCII 整数串 → 整数、有限且没有小数部分的 float → 整数。转换后仍检查原指标范围；非 faithfulness 的 boolean 仍拒绝。不转换 `"NULL"`、首尾空白字符串、`"1.0"`、`"1e0"`、`"true"`、非整数 float、NaN/Infinity，也不转换理由、声明布尔值或其它字段。两臂都检查；任一仍无效则整个调用 Failed。每次字段转换（包括官方 faithfulness boolean）写入调用的 `normalization_trace`，保留 answer、metric、原值、规范值与规则；`raw_response` 始终不改。
+
+这是独立的解析协议选择，不是把旧结果修成新成绩。Selene 原 train16 的 6 个失败调用均可由新模式解析，原 39 个成功调用的值不变；但原先失败分支少调用了 train:2/4/12 的 usefulness 及 train:8 的 faithfulness，前三例还可能各需一次 faithfulness。因此缺 4 个必需、最多 7 个下游响应，不能从保存的 45 次调用补算完整新总分。诊断见 `runs/open-judge-review/normalization-probe.json`；原 strict-v1 总分保持 0.5。采用新模式须在新目录完整重跑 train，再冻结。新增配置字段、parser 标识和实现源码都进入冻结身份；旧源码产生的冻结文件不能冒充新实现。
 
 ## Train 开发、冻结、Test
 
@@ -78,6 +82,8 @@ Test 必须提供由完成的 train run 产生的 frozen evaluator。配置、�
 
 `GroUSEEvaluator(call)` 接受异步 `call(messages) -> response`。真实 transport 返回 OpenAI response dict，以保留终态和 usage；测试或已显式负责完整性的 adapter 可返回字符串。`HTTPCall(GrouseConfig(...), transport=...)` 支持 httpx MockTransport，便于不启动模型的合同测试。
 
+配置 JSON 可添加 `"parser_mode": "normalized_v1"`；省略时仍为 strict_v1。Python 注入入口为 `GroUSEEvaluator(call, parser_mode="normalized_v1")`。同一模式在 `evaluate_run` 中由配置传入，HTTP 提示词和采样参数保持原值。
+
 `evaluate_sample(sample)` 返回六指标状态与调用记录；`evaluate_conditions(evaluation, conditions)` 只做离线比较，支持官方数值比较和 `==None`，不执行任意表达式。完整运行用 `evaluate_run`，不需要把主项目质量评分的五维 JSON 套到 GroUSE 六项上。
 
-39 项 fake 边界测试覆盖三/四调用分支、nullable 推导、Failed 传播与分母、faithfulness boolean、越界/缺字段/截断、条件和 goal 不泄漏、完整 references、单 split 来源、先冻结后读 test、独占输出及缺少可选依赖。独立审查另核对了 nullable acceptance 组合。这里只报告工程验证，没有产生真实 judge 元评测成绩。
+61 项 fake 边界测试覆盖三/四调用分支、nullable 推导、Failed 传播与分母、faithfulness boolean、越界/缺字段/截断、条件和 goal 不泄漏、完整 references、单 split 来源、先冻结后读 test、独占输出及缺少可选依赖；另覆盖可选字段规范化、raw/trace 保留、错误类型拒绝、恢复后完整调用和冻结模式身份。独立审查另核对了 nullable acceptance 组合。Fake 测试只验证工程合同；真实开发结果另见 `docs/open_judge_validation.md`。

@@ -80,6 +80,83 @@ def test_values_outside_template_protocol_fail_instead_of_earning_meta_credit(me
         gm.parse_pair(pair(metric,value),metric)
 
 
+@pytest.mark.parametrize("value,expected,rule",[("null",None,"string_null"),("+1",1,"integer_string"),
+    ("01",1,"integer_string"),(1.0,1,"integer_float")])
+def test_optional_normalization_converts_only_score_fields_and_records_exact_change(value,expected,rule):
+    raw=pair("completeness",value)
+    trace=[]
+    with pytest.raises(ValueError):
+        gm.parse_pair(raw,"completeness")  # default strict_v1 preserves its original acceptance
+    result=gm.parse_pair(raw,"completeness",parser_mode="normalized_v1",normalization_trace=trace)
+    assert result["value"]==expected and result["justification"]=="because"
+    assert trace==[{"answer":"answer_2","metric":"completeness","rule":rule,
+                   "original":value,"normalized":expected}]
+
+
+@pytest.mark.parametrize("metric,value",[("completeness","NULL"),("completeness"," null "),
+    ("completeness","1.0"),("completeness","1e0"),("completeness"," 1 "),
+    ("completeness","１"),("completeness",1.5),("completeness",float("inf")),
+    ("completeness",float("nan")),("completeness","6"),("completeness",True),
+    ("usefulness",True),("usefulness","2"),("faithfulness","true")])
+def test_optional_normalization_retains_ranges_boolean_rules_and_unambiguous_grammar(metric,value):
+    with pytest.raises(ValueError,match="must be null"):
+        gm.parse_pair(pair(metric,value),metric,parser_mode="normalized_v1")
+
+
+def test_optional_normalization_does_not_coerce_justifications_or_other_flags():
+    value=json.loads(pair("answer_relevancy","1"))
+    value["answer_2"]["answer_affirms_no_document_answers"]="false"
+    with pytest.raises(ValueError,match="boolean"):
+        gm.parse_pair(json.dumps(value),"answer_relevancy",parser_mode="normalized_v1")
+    value=json.loads(pair("completeness","1"))
+    value["answer_2"]["completeness_justification"]=1
+    with pytest.raises(ValueError,match="justification string"):
+        gm.parse_pair(json.dumps(value),"completeness",parser_mode="normalized_v1")
+
+
+def test_normalized_mode_records_changes_and_preserves_raw_when_pair_still_fails():
+    raw=pair("answer_relevancy",6,first="null")
+    call=Calls([raw,pair("completeness",None)])
+    result=asyncio.run(gm.GroUSEEvaluator(call,parser_mode="normalized_v1").evaluate_sample(sample()))
+    record=result["calls"][0]
+    assert record["raw_response"]==raw and record["status"]=="failed"
+    assert record["normalization_trace"]==[{"answer":"answer_1","metric":"answer_relevancy",
+        "rule":"string_null","original":"null","normalized":None}]
+    assert result["scores"]["usefulness"]["status"]=="failed" and len(call.messages)==2
+
+
+def test_normalized_config_runs_all_new_required_calls_and_freeze_binds_mode(tmp_path,monkeypatch):
+    monkeypatch.setattr(gm,"load_split",lambda split,**kwargs:([sample()],{"split":split,"rows":1}))
+    config=gm.GrouseConfig("model","revision","http://test/v1",parser_mode="normalized_v1")
+    raw=[pair("answer_relevancy","null",first="null"),pair("completeness","null"),
+         pair("usefulness","1"),pair("faithfulness",False)]
+    call=Calls(raw)
+    run=tmp_path/"train-normalized"
+    report=asyncio.run(gm.evaluate_run(config,"train",run,call=call))
+    assert report["calls"]==4 and report["failed_calls"]==0
+    result=json.loads((run/"results.jsonl").read_text())
+    assert [c["raw_response"] for c in result["evaluation"]["calls"]]==raw
+    assert result["evaluation"]["calls"][-1]["normalization_trace"]==[
+        {"answer":"answer_2","metric":"faithfulness","rule":"faithfulness_boolean",
+         "original":False,"normalized":0}]
+    frozen=tmp_path/"frozen-normalized.json"
+    gm.freeze(run,frozen)
+    assert gm.resolve_evaluator("test",frozen_path=frozen)==config
+    identity=json.loads(frozen.read_text())["evaluator"]
+    assert identity["config"]["parser_mode"]=="normalized_v1"
+    assert identity["parser"]=="bounded-normalized-json-scores-v1"
+    value=json.loads(frozen.read_text())
+    value["evaluator"]["config"]["parser_mode"]="strict_v1"
+    frozen.write_text(json.dumps(value))
+    with pytest.raises(ValueError,match="differs"):
+        gm.resolve_evaluator("test",frozen_path=frozen)
+
+
+def test_unknown_parser_mode_rejected_at_configuration_boundary():
+    with pytest.raises(ValueError,match="parser_mode"):
+        gm.GrouseConfig("model","revision","http://test/v1",parser_mode="guess")
+
+
 def test_failed_relevancy_keeps_completeness_call_and_propagates_failed_not_null():
     call=Calls(["invalid JSON",pair("completeness",5)])
     row=sample(completeness="==5")
