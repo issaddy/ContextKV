@@ -41,10 +41,9 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     references = assign_references(archive, existing_refs, prefix_length=policy.reference_prefix_length)
     previous = (() if snapshot.execution is None else
                 snapshot.execution.last_input_ids + snapshot.execution.last_output_ids)
-    candidates: list[PromptCandidate] = []
+    prompts = []
 
-    def render(action, messages, spans, visible, reason=None):
-        rendered = template.render(messages)
+    def candidate(action, messages, spans, visible, reason, rendered):
         verify_rendered_evidence(messages, spans, rendered.text)
         if not required_keys <= visible:
             reason = "required_evidence_not_visible"
@@ -81,9 +80,8 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         current, spans = current_user_message(query, missing, references,
             message_index=len(execution.messages), reused=required_keys & visible,
             layout=policy.layout, retrieval_priority=retrieval_priority)
-        candidates.append(render("APPEND", execution.messages + (current,),
-                                  execution.evidence_spans + spans,
-                                  visible | frozenset(span.key for span in spans), reason))
+        prompts.append(("APPEND", execution.messages + (current,), execution.evidence_spans + spans,
+                        visible | frozenset(span.key for span in spans), reason))
 
     messages = [system_message]
     for turn in snapshot.raw_history:
@@ -92,6 +90,9 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
                                          message_index=len(messages), layout=policy.layout,
                                          retrieval_priority=retrieval_priority)
     messages.append(current)
-    candidates.append(render("REBUILD", tuple(messages), spans,
-                              frozenset(span.key for span in spans)))
-    return tuple(candidates)
+    prompts.append(("REBUILD", tuple(messages), spans, frozenset(span.key for span in spans), None))
+    conversations = tuple(prompt[1] for prompt in prompts)
+    render_many = getattr(template, "render_many", None)
+    rendered = (render_many(conversations) if render_many is not None else
+                tuple(template.render(messages) for messages in conversations))
+    return tuple(candidate(*prompt, output) for prompt, output in zip(prompts, rendered, strict=True))

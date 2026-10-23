@@ -459,6 +459,8 @@ async def _run(args):
                    "template_fingerprint": asdict(template.fingerprint), "policy": asdict(policy),
                    "retrieval": None if retriever is None else retriever.manifest,
                    "workload": vars(args), "report": report, "native_http_observations": client.observations,
+                   "client_requested_thread_environment": {key: os.environ.get(key) for key in
+                       ("TOKENIZERS_PARALLELISM", "RAYON_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")},
                    "close_dispatches": baseline.close_dispatches, "close_error": close_error,
                    "undispatched_native_sessions": sorted(baseline._native_sessions),
                    "cleanup_started_at": cleanup_start, "cleanup_finished_at": cleanup_end,

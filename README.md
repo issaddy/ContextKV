@@ -90,6 +90,8 @@ uv run --extra retrieval contextkv --config configs/demo.yaml \
 
 可选候选长度模型与条件误差已完成真实控制器集成及按会话 OOF 的联合决策重评分，结果与局限见[长度与决策验证](docs/length_decision_validation.md)。检索增强的模型、构建命令和对照见[BGE 混合检索](docs/hybrid_retrieval.md)，较新方法的原理与复用入口见[后续检索研究](docs/retrieval_research_next.md)。[证据支持工具](docs/evidence_support_proposal.md)直接复用固定 MiniCheck；真实误例已促使引用修改改为保留旧来源的增补，逐项审查见[评分与引用审查](docs/grounding_v2_assistant_audit.md)。这些能力均为可选择的研究路径，不以模型分数替代独立回答质量验收。
 
+进一步验证包含[嵌套增益校准](docs/gain_calibration_validation.md)、[实际 P3 集成](docs/p3_retrieval_integration.md)、[纠错查询](docs/correction_query_view.md)、[新版重排器的负面结果](docs/qwen3_rerank_validation.md)及[16K/32K 原生缓存压力](docs/native_policy_validation.md)。保持逐 token 等价的[候选分词优化](docs/candidate_tokenization_profile.md)已在本地和 Linux 验证，并记录线程预算对 CPU 消耗的影响。
+
 ## 真实 SGLang 接入
 
 在 Linux GPU 主机使用独立环境安装固定 SGLang 的实际依赖，控制器依赖由本项目 `uv.lock` 管理。主实验固定 Python TreeCore、TP=1、DP=1、FULL attention、BF16 权重与 KV，不启用 L3 或推测解码。完整安装、分阶段 GPU/host 验证和标定命令见 [部署说明](docs/deployment.md)；`bash scripts/bootstrap_sglang.sh` 可准备独立环境、固定源码补丁与模型。

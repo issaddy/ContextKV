@@ -6,8 +6,8 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | 336 passed，1 skipped，另有 6 subtests passed；runs/pytest-hybrid-grounding.log，跳过的是需显式开启的真实 tokenizer 项 |
-| 固定 Qwen tokenizer 专项 | 单独开启后 1 passed；真实模板、输入 IDs 和 LCP 验证通过 |
+| 最近完整 CPU 回归 | 392 passed，另有 6 subtests passed；runs/pytest-complete-methods.log，已显式开启真实 tokenizer 项 |
+| 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过；Linux 30 个真实候选也逐 token 相同 |
 | Ruff / shell / wheel | 通过；wheel 包含 engine_patches.smoke |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
 | 冻结模拟测试矩阵 | 39 jobs / 117 轮成功 |
@@ -60,15 +60,21 @@ SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固
 
 远端 P1/always_rebuild/c4 的一次 before→after 对照均 41/41 成功，全部输入 IDs 相同，control P95 为 456.11→168.68 ms；16 个同输入/输出样本的 control P95 为 378.55→157.07 ms。P2 对照虽然也观察到控制耗时下降，但只有 6/41 输入相同，历史与动作变化存在混杂。两组均非随机交叉重复实验，P1 输入仅 2460–4231 tokens；不外推长 APPEND、质量一致或一般吞吐增益。原始数据在 runs/remote-h200-control，逐项校验与统计见同一控制路径文档。
 
+候选联合分词进一步复用本次调用中相同的特殊 token 边界片段，保持完整文本及 IDs 等价；本地完整构建 13.31→4.63 ms。Linux 四线程分词局部 wall 22.61→7.58 ms、CPU 22.49→17.44 ms；默认大线程池则 CPU 增加，不能泛称减少算量。源码依据、逐 token 验证和线程预算见[候选分词测量](candidate_tokenization_profile.md)。
+
 ## 新增方法与真实开发验证
 
 - 候选长度、条件误差、会话留一训练及离线 planner 重评分已实现。15 cases / 5 sessions / 90 pairs 的联合探索中，conditional＋candidate OOF regret 为 270.30 ms，低于原 global 437.05 ms，但仍高于固定 REBUILD 的 129.14 ms。完整 GPU P2/c4 集成 41/41 成功；该运行使用 full-fit dev artifact，不是 OOF 验证，且没有触发成本节省切换。见[长度与决策验证](length_decision_validation.md)。
 - 原硬件控制器矩阵 11 jobs 和匹配消融 5 jobs，共 656/656 成功。所有实际 host 恢复为零，退役 ACK 不虚报物理释放；该结果不能证明 host 项或容量竞争收益。逐轮机制诊断见[硬件矩阵分析](hardware_controller_matrix.md)。
 - 固定 MiniCheck 在 H200 上完成 Q1/Q2 各 41 个完整 audit 的评分。已修复把引用 ID 当事实输入产生伪负例的问题；两个高置信引用替换候选仍经原文审查发现部分支持及段尾绑定歧义，因而默认改为只增补来源。分句/未覆盖/评分与修正局限见[assistant 审查](grounding_v2_assistant_audit.md)，不计为人工盲审或正式质量通过。
 - 原始 72442 passage 的 BGE-M3 索引与三种 query 视角、四阶段检索均已在 GPU 执行。39/41 个有 qrels 的开发问题上，last3/BM25 Recall@5=0.2094、nDCG@5=0.1671；current/hybrid_rerank=0.5231、0.4833。原文、候选池、模型版本、时长和全部阶段结果保存在 runs/remote-h200-retrieval。该提升属于已观察开发集的检索相关性，不等于回答质量或缓存收益。
+- 嵌套会话留一的增益模型将候选长度分支 regret 270.30→236.14 ms，但决策与简单的稳定期内支持域门控完全一致，尚无细粒度学习增量。见[增益校准验证](gain_calibration_validation.md)。
+- P3 BM25 与 BGE 增强各 41/41 成功，检索 ID/次序与离线结果一致；增强分支检索均值 4.94→699.26 ms，完整轮均值 2.546→3.624 s，且回答仍有事实/代码错误。纠错查询又完成 41/41，取回 10MB 附件限制表，但回答仍错误合并文档与附件限制。详见[P3 集成](p3_retrieval_integration.md)、[纠错查询](correction_query_view.md)和[代码审计](code_audit.md)。
+- 固定 Qwen3-Reranker-0.6B 在同一 41 问题、2050 个候选对上真实评分；无截断或接口对接错误，Recall@5/nDCG@5 却降至 0.4085/0.3907。因此保留 BGE 为增强分支选择，负面结果及未标注替代相关段落一并保留。见[较新重排器验证](qwen3_rerank_validation.md)。
+- 原生三种 HiCache 写策略分别完成 32K 和 16K GPU 池各 123 轮。32K 无 host 恢复；16K 恢复 10752/896/13120 tokens，各组全部成功、无 retraction。单次运行、输出和等待差异不足以选 B6，原始证据见[容量与写策略](native_policy_validation.md)。
 
 ## 仍需完成的研究验收
 
-当前没有正式回答质量非劣、SLO goodput 提升或论文优于基线的结论。仍需充分范围硬件标定与成对决策、原生 B0/B1 及同预算强 B6、匹配参数消融、容量/并发/低重叠负例、真实质量评分和人工盲审。profiling.decision_pairs 与生命周期压力探针分别补充成本差和旧独有分支归因；全局 slot 变化不能替代具体路径证据。
+当前没有正式回答质量非劣、SLO goodput 提升或论文优于基线的结论。已有 B0/B1、控制器矩阵、匹配消融、成对诊断和原生容量实验；仍需把有限容量的匹配标定与完整方法/强基线联合对照补齐，再进行同预算 B6 选择、低重叠负例、真实质量评分和人工盲审。profiling.decision_pairs 与生命周期压力探针分别补充成本差和旧独有分支归因；全局 slot 变化不能替代具体路径证据。
 
 完整 Cloud P3 开发流程已运行。官方 qrels 覆盖 39/41 轮，缺失的两轮单列，未按零分混入；在有标签部分，BM25S recall@5 为 0.2094、nDCG@5 为 0.1671。这只是本配置下的检索弱基线，不是回答质量。原始 qrels 诊断、B0/B1 运行与 P3 生成保存在 runs/remote-h200-native；仍须完成回答质量评价、强基线和冻结 test。缺少评分时，质量覆盖、非劣判定和人工审查保持未验证，不以格式检查、模拟回答或词法代理补齐。运行方法见 [部署说明](deployment.md)、[成对决策](decision_pairs.md) 和 [贡献与实验设计](research_contributions.md)。

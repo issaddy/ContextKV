@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import replace
 import hashlib
 import json
+import os
 import platform
 from pathlib import Path
 import sys
@@ -30,7 +31,10 @@ def _manifest(config, controller, info, protocol: str):
                     if config.cost_model.artifact else None,
                "output_length_artifact_sha256": hashlib.sha256(Path(config.cost_model.output_length_artifact).read_bytes()).hexdigest()
                     if config.cost_model.output_length_artifact else None,
-               "runtime": {"python": sys.version, "platform": platform.platform(), "machine": platform.machine()},
+               "runtime": {"python": sys.version, "platform": platform.platform(), "machine": platform.machine(),
+                    "logical_cpu_count": os.cpu_count(),
+                    "requested_thread_environment": {key: os.environ.get(key) for key in
+                        ("TOKENIZERS_PARALLELISM", "RAYON_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")}},
                "quality_evaluated": False, "gpu_performance_validated": False}
     path = Path(config.state_dir) / f"manifest-{controller.events.run_id}.json"
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
