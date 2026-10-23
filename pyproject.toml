@@ -28,7 +28,7 @@ where = ["."]
 include = ["controller*", "adapters*", "bench*", "profiling*", "engine_patches*"]
 
 [tool.setuptools.package-data]
-bench = ["assets/native_judge/*", "assets/grouse/*"]
+bench = ["assets/native_judge/*", "assets/grouse/*", "assets/atomic_judge/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
