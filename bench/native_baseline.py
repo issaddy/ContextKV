@@ -399,7 +399,8 @@ async def _run(args):
     args.system_prompt = system_prompt
     policy = CandidatePolicy(max_total_model_tokens=args.context_length,
                              max_new_tokens=args.max_new_tokens, system_prompt=system_prompt,
-                             table_relations=getattr(args, "table_relations", False))
+                             table_relations=getattr(args, "table_relations", False),
+                             table_annotation_style=getattr(args, "table_annotation_style", "all_rows"))
     rows = load_rows(args.input)
     if args.domain == "cloud":
         rows = [r for r in rows if r["Collection"] == CLOUD_COLLECTION]
@@ -493,6 +494,8 @@ def main(argv=None):
     parser.add_argument("--retriever-config", help="optional shared P3 hybrid retriever YAML/JSON")
     parser.add_argument("--evidence-corpus", help="original passages with version/condition metadata shared with controller")
     parser.add_argument("--table-relations", action="store_true", help="append literal source table field associations")
+    parser.add_argument("--table-annotation-style", choices=["all_rows", "focus_refs"], default="all_rows",
+                        help="optional annotation style; used only with --table-relations")
     parser.add_argument("--domain", choices=["cloud", "all"], default="cloud")
     parser.add_argument("--split-manifest")
     parser.add_argument("--split", choices=["dev", "test"], default="test")

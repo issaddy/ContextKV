@@ -43,8 +43,13 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     if policy.table_relations:
         from adapters.table_relations import extract_table_relations, render_table_relations
         by_key = {key: reference for reference, key in references}
-        table_annotations = "\n".join(annotation for block in required
-            if (annotation := render_table_relations(by_key[block.key], extract_table_relations(block.text))))
+        tables = tuple((by_key[block.key], extract_table_relations(block.text)) for block in required)
+        if policy.table_annotation_style == "focus_refs":
+            from adapters.table_focus import focused_annotation
+            table_annotations, _ = focused_annotation(query, tables)
+        else:
+            table_annotations = "\n".join(annotation for ref, extracted in tables
+                if (annotation := render_table_relations(ref, extracted)))
     previous = (() if snapshot.execution is None else
                 snapshot.execution.last_input_ids + snapshot.execution.last_output_ids)
     prompts = []

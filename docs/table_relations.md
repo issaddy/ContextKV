@@ -21,6 +21,8 @@ supplement = render_table_relations(existing_reference_id, tables)
 
 共享候选入口已通过 `context.table_relations: true` 接通；原生 CLI 使用 `--table-relations`，matrix 两条执行路径继承共同的 base config。默认关闭。每轮对 required 证据提取一次并供两个候选共用，APPEND 即使复用已有正文，也会在当前消息附加该轮注释；新增长度仍受原共享预算约束。专项集成验证了默认逐字兼容、QA/正文跨度不变、Native 输入一致和哈希调用次数不增加。首次真实开关对照见[验证记录](table_relations_validation.md)，尚无总体质量或性能收益结论。
 
+新增的 `context.table_annotation_style` 默认为 `all_rows`，保留原全行输出；设为 `focus_refs` 才使用问题相关行和原引用样式，而且仍须 `table_relations: true`。该轻量样式直接复用 CRAFT 的行文本构造函数，词法选择复用现有 BM25S 与纠正线索，所需依赖已属于 `contextkv[retrieval]`；默认关闭和全行样式不加载此可选依赖。接口、明确的局部验证与完整 MIT 归属见[focus 验证及配置](table_focus_validation.md)和[CRAFT notice](third_party/CRAFT_NOTICE.md)。它不是后置答案验证器，也没有迁移 CRAFT 的 dense 重排。
+
 `SourceSpan(text, start, end)` 使用传入原段落的 Python Unicode 字符偏移，左闭右开，保证 `original[start:end] == text`，不是 UTF-8 字节偏移。`TableRelations` 保存表题、表头、整表跨度、关系与原注释；`TableRelation` 保存 `object/column/value/unit/row_span/notes`。全部是不可变 dataclass，可用 `dataclasses.asdict` 留存审计。正文内空白、Markdown 转义、大小写和数值写法不作归一化；仅排除单元格两端的格式空白。
 
 支持两种明确结构：
@@ -60,7 +62,7 @@ literal helper 只解决输入表示的一部分：它与当前问题无关，�
 
 在冻结初稿上量化诊断后，再研究一次选择性修订：反馈具体的错取行、缺失行或无据范围，保存初稿与修订稿，仍保留完整 QA/证据，并允许选择不修订。线上检查不接收 reference 或未来轮答案。无需立刻增加新的 critic 权重；可以先接现有本地模型，同时将调用、等待、输出及提交耗时计入总响应。该入口是 DRE/SMART/SSC 的组合适配假设，尚未实现，不能称为这些论文的完整代码复现。
 
-**优先二：CRAFT 式问题相关行焦点。** 对当前 required 中的表格，复用已准备的 BGE 编码或 reranker，根据当前用户问题和已批准的 user-only query view 给行排序；返回原 span 与得分，只调整新增注释，不删除源段落、不改变原 top5 和完整 QA。必要脚注与显式同对象条件随焦点一起呈现。先比较所有行注释、相关行注释、相关行加显式条件闭包；在三行小表上不预设收益，长表与相似对象混淆才是该机制的主要适用场景。
+**优先二：CRAFT 式问题相关行焦点。** 轻量词法对照已成为可选 `focus_refs` 样式，[12 次冻结探针](table_focus_validation.md)在两个开发历史中改善了目标对象/引用错误；既有 BGE 编码或 reranker 的行评分尚未接入。当前选择只调整新增注释，不删除源段落、不改变原 top5 和完整 QA，并保留原 span 和显式脚注关联。接续比较全行、词法焦点、BGE 焦点及明确条件闭包，同时拆解行选择与引用呈现的作用；三行小表的局部结果不能替代长表、相似对象或跨版本验证。
 
 **优先三：层次表头与可执行数值操作。** 在来源保有结构的材料上引入 TreeThinker 式 header path，将父级对象、版本、指标和单位随单元格带入派生表示；再借鉴 SMART，仅对明确要求计算或排序的问题使用带原单元格引用的操作。不能把“可计算”当作“有权合并这些对象”。来源只剩无分隔文本时，保留当前不猜测行为，后续通过同版本原始材料或公开元数据补结构，而非把今天网页状态回填固定旧快照。
 

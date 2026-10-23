@@ -34,7 +34,8 @@ def committed_snapshot(blocks):
 
 
 @pytest.mark.parametrize("layout", ["stable_key", "contextpilot"])
-def test_required_table_annotation_is_shared_once_and_append_reuses_complete_body(monkeypatch, layout):
+@pytest.mark.parametrize("style", ["all_rows", "focus_refs"])
+def test_required_table_annotation_is_shared_once_and_append_reuses_complete_body(monkeypatch, layout, style):
     table = make_evidence(TABLE, "table")
     unrelated = make_evidence(TABLE.replace("Alpha", "Unrelated"), "unrelated")
     current = make_evidence("New original passage.", "current", dependencies=(table.key,))
@@ -48,11 +49,15 @@ def test_required_table_annotation_is_shared_once_and_append_reuses_complete_bod
         return extract(text)
 
     monkeypatch.setattr(relations, "extract_table_relations", record)
-    policy = EvidencePolicy(layout=layout, table_relations=True)
+    policy = EvidencePolicy(layout=layout, table_relations=True, table_annotation_style=style)
     append, rebuild = build_candidates(snapshot, "Current exact query?\n", (current,), policy)
     assert sorted(parsed) == sorted([table.text, current.text])  # Shared required set, once per build.
     ref = next(ref for ref, key in append.reference_map if key == table.key)
-    annotation = relations.render_table_relations(ref, extract(table.text))
+    if style == "focus_refs":
+        from adapters.table_focus import focused_annotation
+        annotation, _ = focused_annotation("Current exact query?\n", ((ref, extract(table.text)),))
+    else:
+        annotation = relations.render_table_relations(ref, extract(table.text))
     assert annotation and all(annotation in c.messages[-1].content for c in (append, rebuild))
     assert all("Unrelated" not in c.messages[-1].content for c in (append, rebuild))
     assert append.required_blocks == rebuild.required_blocks == {table.key, current.key}
@@ -85,14 +90,31 @@ def test_repeated_retrieved_table_gets_current_annotation_even_with_no_new_bodie
     assert table.text in rebuild.messages[-1].content
 
 
-def test_default_off_is_exact_legacy_message_and_token_output(monkeypatch):
+def test_focus_uses_current_query_without_removing_unselected_required_rows():
+    text = "Table 2. Operations\n\nObject Maximum\n\n Width 4 mm\n Duration 7 ms\n"
+    block = make_evidence(text, "operations")
+    snapshot = committed_snapshot((block,))
+    candidates = build_candidates(snapshot, "Not widths, I meant durations?", (block,),
+        EvidencePolicy(table_relations=True, table_annotation_style="focus_refs"))
+    for candidate in candidates:
+        current = candidate.messages[-1].content
+        assert 'object="Duration"' in current and 'object="Width"' not in current
+        assert candidate.required_blocks == {block.key}
+        span = next(s for s in candidate.evidence_spans if s.key == block.key)
+        assert candidate.messages[span.message_index].content[span.start:span.end] == text
+        assert "Width 4 mm" in candidate.messages[span.message_index].content
+
+
+@pytest.mark.parametrize("style", ["all_rows", "focus_refs"])
+def test_default_off_is_exact_legacy_message_and_token_output(monkeypatch, style):
     table = make_evidence(TABLE, "table")
     snapshot = SessionSnapshot("s", raw_history=(TurnRecord(1, "Full prior question", "Full prior answer"),))
     def unexpected(_):
         raise AssertionError("disabled feature must not parse evidence")
     monkeypatch.setattr(relations, "extract_table_relations", unexpected)
     implicit = build_candidates(snapshot, "Question?", (table,))[0]
-    explicit = build_candidates(snapshot, "Question?", (table,), EvidencePolicy(table_relations=False))[0]
+    explicit = build_candidates(snapshot, "Question?", (table,),
+        EvidencePolicy(table_relations=False, table_annotation_style=style))[0]
     ref = next(ref for ref, key in implicit.reference_map if key == table.key)
     metadata = json.dumps({"id": ref, "corpus": table.key.corpus_id, "document": table.key.document_id,
         "passage": table.key.passage_id, "version": table.key.version, "source": table.source_uri,
@@ -108,16 +130,19 @@ def test_default_off_is_exact_legacy_message_and_token_output(monkeypatch):
     assert implicit.evidence_spans == explicit.evidence_spans
 
 
-def test_annotation_tokens_use_shared_overflow_without_trimming_qa_or_bodies():
+@pytest.mark.parametrize("style", ["all_rows", "focus_refs"])
+def test_annotation_tokens_use_shared_overflow_without_trimming_qa_or_bodies(style):
     table = make_evidence(TABLE, "table")
     snapshot = committed_snapshot((table,))
-    enabled = build_candidates(snapshot, "Current?", (table,), EvidencePolicy(table_relations=True))
+    enabled = build_candidates(snapshot, "Current?", (table,),
+        EvidencePolicy(table_relations=True, table_annotation_style=style))
     disabled = build_candidates(snapshot, "Current?", (table,))
     output_budget = 32
     limit = min(len(c.input_ids) for c in enabled) + output_budget - 1
     assert max(len(c.input_ids) for c in disabled) + output_budget <= limit
     bounded = build_candidates(snapshot, "Current?", (table,),
-        EvidencePolicy(table_relations=True, max_new_tokens=output_budget, max_total_model_tokens=limit))
+        EvidencePolicy(table_relations=True, table_annotation_style=style,
+                       max_new_tokens=output_budget, max_total_model_tokens=limit))
     for full, candidate in zip(enabled, bounded):
         assert not candidate.feasible and candidate.reason == "shared_context_policy_overflow"
         assert candidate.messages == full.messages and candidate.input_ids == full.input_ids
@@ -125,7 +150,8 @@ def test_annotation_tokens_use_shared_overflow_without_trimming_qa_or_bodies():
         assert snapshot.raw_history[0].assistant_text in [m.content for m in candidate.messages]
 
 
-def test_table_annotation_reuses_existing_hash_work_and_fingerprints(monkeypatch):
+@pytest.mark.parametrize("style", ["all_rows", "focus_refs"])
+def test_table_annotation_reuses_existing_hash_work_and_fingerprints(monkeypatch, style):
     import controller.evidence as evidence
     import controller.templates as templates
     table = make_evidence(TABLE, "table")
@@ -142,7 +168,8 @@ def test_table_annotation_reuses_existing_hash_work_and_fingerprints(monkeypatch
     off = build_candidates(snapshot, "Current?", (table,), EvidencePolicy(table_relations=False))
     expected_counts = counts.copy()
     counts.update({k: 0 for k in counts})
-    on = build_candidates(snapshot, "Current?", (table,), EvidencePolicy(table_relations=True))
+    on = build_candidates(snapshot, "Current?", (table,),
+        EvidencePolicy(table_relations=True, table_annotation_style=style))
     assert counts == expected_counts == {"content": 1, "identity": 0, "tokens": 2}
     for before, after in zip(off, on):
         assert before.fingerprint == after.fingerprint
@@ -152,14 +179,15 @@ def test_table_annotation_reuses_existing_hash_work_and_fingerprints(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_native_and_controller_share_table_annotated_input_exactly():
+@pytest.mark.parametrize("style", ["all_rows", "focus_refs"])
+async def test_native_and_controller_share_table_annotated_input_exactly(style):
     from bench.native_baseline import NativeBaseline
     sent = []
     async def generate(ids, **kwargs):
         sent.append(ids)
         return SimpleNamespace(text="answer", output_ids=(1,), finish_reason="stop", truncated=False,
                                meta_info={}, raw_response={}, http_elapsed_ms=1.0, timing=None)
-    policy = EvidencePolicy(table_relations=True)
+    policy = EvidencePolicy(table_relations=True, table_annotation_style=style)
     turn = OnlineTurn("s", "task", 1, "test", "Current?", (), (OnlineContext("table", TABLE),), "P3")
     template = ByteTemplate()
     expected = build_candidates(SessionSnapshot("s", corpus_snapshot_id="test-v1"), turn.query,
@@ -168,12 +196,14 @@ async def test_native_and_controller_share_table_annotated_input_exactly():
         policy=policy, corpus_snapshot_id="test-v1", test_mode=True)
     response = await native(turn)
     assert response.input_ids == sent[0] == expected.input_ids
-    assert "Table row associations from [" in bytes(response.input_ids).decode()
+    expected_marker = "Source table facts relevant" if style == "focus_refs" else "Table row associations from ["
+    assert expected_marker in bytes(response.input_ids).decode()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
-async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monkeypatch, enabled):
+@pytest.mark.parametrize("style", ["all_rows", "focus_refs"])
+async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monkeypatch, enabled, style):
     import bench.experiments as experiments
     import bench.native_baseline as native_module
     import controller.cli as cli
@@ -181,7 +211,7 @@ async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monk
     split.write_text(json.dumps({"dev": ["session-a"], "test": ["session-b"]}))
     manifest.write_text("{}")
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps({"context": {"table_relations": enabled}}))
+    config_path.write_text(json.dumps({"context": {"table_relations": enabled, "table_annotation_style": style}}))
     spec = {"schema_version": 1, "input": str(Path(__file__).parent / "fixtures/mtrag_small.jsonl"),
         "domain": "all", "split_manifest": str(split), "protocols": ["P2"], "concurrency": [1], "seeds": [42],
         "base_config": str(config_path), "methods": [
@@ -190,10 +220,10 @@ async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monk
             {"id": "controller"}]}
     seen = {}
     async def native_run(args):
-        seen["native"] = args.table_relations
+        seen["native"] = (args.table_relations, args.table_annotation_style)
         (Path(args.output) / "native-fake.json").write_text(json.dumps({"baseline": "B0"}))
     async def controller_run(args, config):
-        seen["controller"] = config.context.table_relations
+        seen["controller"] = (config.context.table_relations, config.context.table_annotation_style)
         (Path(config.state_dir) / "benchmark-fake.json").write_text(json.dumps({"engine_kind": "mock"}))
     monkeypatch.setattr(native_module, "_run", native_run)
     monkeypatch.setattr(cli, "benchmark", controller_run)
@@ -201,4 +231,19 @@ async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monk
     monkeypatch.setattr(experiments, "markdown_report", lambda summary: "mock contract")
     for job in experiments.matrix_jobs(spec):
         await experiments.execute_job(spec, job, tmp_path / job["job_id"])
-    assert seen == {"native": enabled, "controller": enabled}
+    assert seen == {"native": (enabled, style), "controller": (enabled, style)}
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_native_cli_keeps_explicit_style_separate_from_enable_flag(monkeypatch, enabled):
+    import bench.native_baseline as native_module
+    seen = []
+    async def fake_run(args):
+        seen.append((args.table_relations, args.table_annotation_style))
+    monkeypatch.setattr(native_module, "_run", fake_run)
+    argv = ["unused.jsonl", "--baseline", "B0", "--engine-manifest", "unused.json",
+            "--table-annotation-style", "focus_refs"]
+    if enabled:
+        argv.append("--table-relations")
+    assert native_module.main(argv) == 0
+    assert seen == [(enabled, "focus_refs")]

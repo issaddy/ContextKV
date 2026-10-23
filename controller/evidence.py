@@ -26,6 +26,7 @@ class EvidencePolicy:
     revisit_history_turns: int = 3
     system_prompt: str | None = None
     table_relations: bool = False
+    table_annotation_style: str = "all_rows"
 
     def __post_init__(self) -> None:
         if self.max_total_model_tokens < 1 or self.max_new_tokens < 1:
@@ -38,6 +39,8 @@ class EvidencePolicy:
             raise ValueError("revisit_history_turns must be positive")
         if self.system_prompt is not None and not self.system_prompt.strip():
             raise ValueError("system_prompt must be nonempty when provided")
+        if self.table_annotation_style not in {"all_rows", "focus_refs"}:
+            raise ValueError("table_annotation_style must be all_rows or focus_refs")
 
 
 def content_hash(text: str) -> str:
