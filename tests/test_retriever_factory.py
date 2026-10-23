@@ -116,10 +116,12 @@ def test_dense_stage_does_not_load_or_call_reranker(retriever_config, monkeypatc
     assert retriever.encoder.inputs[-1] == "session-a question 1\nsession-a question 2"
 
 
-def test_optional_user_topic_query_is_shared_with_encoder_reranker_and_manifest(retriever_config):
+@pytest.mark.parametrize("fusion", ["single", "current_topic_rrf"])
+def test_optional_user_topic_query_is_shared_with_encoder_reranker_and_manifest(retriever_config, fusion):
     from adapters.mtrag import OnlineMessage
     value = yaml.safe_load(retriever_config.read_text())
     value["query_mode"] = "user_topic"
+    value["query_fusion"] = fusion
     retriever_config.write_text(yaml.safe_dump(value))
     retriever = create_retriever("P3", config_path=retriever_config)
     original = OnlineSession(load_rows(FIXTURE)[:3], "P3").current()
@@ -130,12 +132,29 @@ def test_optional_user_topic_query_is_shared_with_encoder_reranker_and_manifest(
                  OnlineMessage("assistant", "Reference answer must not enter retrieval")))
     output = retriever.retrieve_turn(turn)
     expected = turn.query+"\nUser topic context: Acme Store"
-    assert retriever.encoder.inputs == retriever.reranker.inputs == [expected]
+    assert retriever.encoder.inputs == ([turn.query, expected] if fusion == "current_topic_rrf" else [expected])
+    assert retriever.reranker.inputs == [expected]
     assert output.history == turn.history and output.query == turn.query
     assert retriever.manifest["query_view"]["extra_model_calls"] == 0
     trace = retriever.manifest["query_view_traces"][0]
     assert trace["task_id"] == turn.task_id and trace["source_user_turns"] == [1, 3]
     assert trace["selected_history_spans"][0]["text"] == "Acme Store"
+    assert retriever.manifest["query_fusion"] == fusion
+    assert retriever.manifest["configuration"]["resolved"]["query_fusion"] == fusion
+    if fusion == "current_topic_rrf":
+        assert trace["query_fusion_trace"]["retrieval_query_count"] == 2
+        assert trace["query_fusion_trace"]["rerank_pairs"] == 6
+        assert "Misleading" not in json.dumps(trace["query_fusion_trace"])
+
+
+@pytest.mark.parametrize("mode,stage", [("current", "hybrid_rerank"), ("user_topic", "dense")])
+def test_query_fusion_configuration_rejects_ambiguous_stages_before_model_loading(retriever_config, mode, stage):
+    value = yaml.safe_load(retriever_config.read_text())
+    value.update(query_fusion="current_topic_rrf", query_mode=mode, stage=stage)
+    retriever_config.write_text(yaml.safe_dump(value))
+    with pytest.raises(ValueError, match="requires user_topic and hybrid/hybrid_rerank"):
+        create_retriever("P3", config_path=retriever_config)
+    assert not LocalModelFixture.instances
 
 
 def test_concurrent_sessions_include_retrieval_queue_in_pipeline_time(retriever_config):
@@ -151,14 +170,44 @@ def test_concurrent_sessions_include_retrieval_queue_in_pipeline_time(retriever_
     assert all("actual answer" not in query for query in retriever.encoder.inputs)
 
 
-@pytest.mark.parametrize("query_mode", ["current", "user_topic"])
-def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retriever_config, tmp_path, monkeypatch, query_mode):
+def test_offline_cli_dual_uses_shared_models_then_opens_qrels(retriever_config, tmp_path, monkeypatch):
+    from bench import retrieval_eval
+    monkeypatch.setattr(retrieval_eval, "LocalBGE", LocalModelFixture)
+    config = load_retriever_config(retriever_config)
+    split = tmp_path/"split.json"
+    split.write_text(json.dumps({"dev": ["session-a"]}))
+    qrels = tmp_path/"qrels.tsv"
+    qrels.write_text("query-id\tcorpus-id\tscore\nsession-a<::>1\ta\t1\n")
+    original_qrels = retrieval_eval.load_qrels
+
+    def after_ranking(path):
+        assert LocalModelFixture.instances[0].texts_processed == 3
+        assert LocalModelFixture.instances[1].texts_processed == 18
+        return original_qrels(path)
+
+    monkeypatch.setattr(retrieval_eval, "load_qrels", after_ranking)
+    output = tmp_path/"offline-dual"
+    retrieval_eval.main(["evaluate", "--input", str(FIXTURE), "--split-manifest", str(split),
+        "--sparse-index", config.sparse_index, "--dense-index", config.dense_index,
+        "--encoder-path", "encoder", "--reranker-path", "reranker", "--qrels", str(qrels),
+        "--query-modes", "user_topic", "--query-fusion", "current_topic_rrf", "--output", str(output)])
+    manifest = json.loads((output/"manifest.json").read_text())
+    rows = [json.loads(line) for line in (output/"retrieval.jsonl").read_text().splitlines()]
+    assert manifest["status"] == "complete" and manifest["config"]["query_fusion"] == "current_topic_rrf"
+    assert len(rows) == 6 and {r["stage"] for r in rows} == {"hybrid", "hybrid_rerank"}
+    assert all(r["query_fusion_trace"]["duplicate_query_skipped"] for r in rows)
+
+
+@pytest.mark.parametrize("query_mode,fusion", [("current", "single"), ("user_topic", "single"),
+                                               ("user_topic", "current_topic_rrf")])
+def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retriever_config, tmp_path, monkeypatch, query_mode, fusion):
     import bench.native_baseline as native_module
     import controller.cli as cli
     from controller.templates import ByteTemplate
 
     value = yaml.safe_load(retriever_config.read_text())
     value["query_mode"] = query_mode
+    value["query_fusion"] = fusion
     retriever_config.write_text(yaml.safe_dump(value))
 
     def respond(request):
@@ -199,6 +248,10 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
     assert native["retrieval"]["completed_retrievals"] == controller_manifest["retrieval"]["completed_retrievals"] == 3
     for manifest in (native["retrieval"], controller_manifest["retrieval"]):
         assert manifest["query_mode"] == query_mode
+        assert manifest["query_fusion"] == fusion
         if query_mode == "user_topic":
             assert len(manifest["query_view_traces"]) == 3
             assert all("actual" not in v["text"] for v in manifest["query_view_traces"])
+            if fusion == "current_topic_rrf":
+                assert all(v["query_fusion_trace"]["duplicate_query_skipped"] for v in manifest["query_view_traces"])
+                assert manifest["model_usage"]["encoder"]["texts_processed"] == 3

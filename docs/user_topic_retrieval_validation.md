@@ -84,3 +84,5 @@ query 视图构造的 mean wall time 分别为 current/last3/all_user 约0.004ms
 ## 下一步
 
 在相同可选 focus 样式、同一生成模型/预算和资源下比较 correction_aware 与 user_topic 的完整 P3，保留全41轮，而非只重跑 SDK 成功例。优先核 SDK 实际产品/版本/代码来源、Lite/Standard 条件与 b461 customization ID 的解释完整性；同时检查两个 CocoaPods 变更轮及未触发轮。若生成仍不正确，继续改进意图/来源适用性和事实绑定，不能以检索指标抵销回答错误。保留 all_user/last3 的局部优势作为进一步选择性历史或双路径预算分配的依据，不将当前词法方案视为终点。
+
+另已完成不改在线代码的[双路冻结池诊断与近期方法核查](query_fusion_research.md)：当前query与topic的四种预设融合/配额策略都在总50篇池内找回b461t4定义正例。该结果只涉及候选覆盖，因新query-document对缺少真实logits，未构造新top5分数；后续可以用已有BGE接口补测。

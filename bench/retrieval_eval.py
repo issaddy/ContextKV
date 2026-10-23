@@ -14,7 +14,7 @@ from pathlib import Path
 from statistics import mean
 import time
 
-from adapters.hybrid_retrieval import DenseIndex, LocalBGE, query_text, search_variants
+from adapters.hybrid_retrieval import DenseIndex, LocalBGE, query_text, search_current_topic, search_variants
 from adapters.mtrag import CLOUD_COLLECTION, DATASET_COMMIT, OnlineContext, load_rows
 from adapters.retrieval import BM25SRetriever, load_beir_corpus
 from adapters.query_views import user_topic_manifest, user_topic_view
@@ -72,23 +72,32 @@ def prepare_queries(rows, split_manifest, *, split="dev", collection=CLOUD_COLLE
 
 
 def evaluate_queries(queries, sparse, dense=None, encoder=None, reranker=None, *,
-                     modes=("last3",), candidate_k=50, rerank_k=50, rrf_k=60):
+                     modes=("last3",), candidate_k=50, rerank_k=50, rrf_k=60, query_fusion="single"):
     """Yield per-stage results. Neither qrels nor reference answers are inputs."""
     if reranker is not None and dense is None:
         raise ValueError("hybrid reranking requires a dense index")
+    if query_fusion not in {"single", "current_topic_rrf"}:
+        raise ValueError("unknown query fusion")
+    if query_fusion == "current_topic_rrf" and (tuple(modes) != ("user_topic",) or dense is None):
+        raise ValueError("current_topic_rrf requires only user_topic and a dense index")
     for item in queries:
         for mode in modes:
             view_started = time.perf_counter()
             view = user_topic_view(item.user_questions) if mode == "user_topic" else None
             query = view["text"] if view else query_text(item.user_questions, mode, generated_history=item.generated_history)
             view_ms = (time.perf_counter()-view_started)*1000
-            stages = search_variants(query, sparse, dense, encoder, reranker,
-                                     candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k)
+            if query_fusion == "current_topic_rrf":
+                stages = search_current_topic(item.user_questions[-1], query, sparse, dense, encoder, reranker,
+                    candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k)
+            else:
+                stages = search_variants(query, sparse, dense, encoder, reranker,
+                    candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k)
             for stage, values in stages.items():
                 yield {"task_id": item.task_id, "conversation_id": item.conversation_id,
                     "turn": item.turn, "query_mode": mode, "query_text": query, "stage": stage,
                     "query_view_trace": view, "query_view_ms": view_ms,
-                    "method": f"{mode}/{stage}", "status": "complete",
+                    "method": f"{mode}{'+'+query_fusion if query_fusion != 'single' else ''}/{stage}", "status": "complete",
+                    "query_fusion": query_fusion, "query_fusion_trace": values.get("query_fusion_trace"),
                     "contexts": [asdict(c) for c in values["contexts"][:5]],
                     "candidate_ids": [c.document_id for c in values["contexts"]],
                     "candidate_scores": [c.score for c in values["contexts"]],
@@ -152,6 +161,7 @@ def main(argv=None):
     evaluate.add_argument("--output", required=True)
     evaluate.add_argument("--query-modes", nargs="+", choices=["current", "last3", "all_user", "correction_aware", "user_topic", "generated_history"], default=["last3"])
     evaluate.add_argument("--history-audit")
+    evaluate.add_argument("--query-fusion", choices=["single", "current_topic_rrf"], default="single")
     evaluate.add_argument("--candidate-k", type=int, default=50)
     evaluate.add_argument("--rerank-k", type=int, default=50)
     evaluate.add_argument("--rrf-k", type=int, default=60)
@@ -174,6 +184,8 @@ def main(argv=None):
             parser.error("generated_history requires --history-audit from an actual P2/P3 run")
         if len(set(args.query_modes)) != len(args.query_modes):
             parser.error("query modes must be unique")
+        if args.query_fusion == "current_topic_rrf" and (args.query_modes != ["user_topic"] or not args.dense_index):
+            parser.error("current_topic_rrf requires --query-modes user_topic and --dense-index")
     encoder = (LocalBGE(args.encoder_path, device=args.device, dtype=args.dtype,
                        batch_size=args.batch_size, max_length=args.encoder_max_length)
                if args.encoder_path else None)
@@ -210,7 +222,8 @@ def main(argv=None):
     try:
         with (output/"retrieval.jsonl").open("w") as stream:
             for row in evaluate_queries(queries, sparse, dense, encoder, reranker, modes=args.query_modes,
-                                        candidate_k=args.candidate_k, rerank_k=args.rerank_k, rrf_k=args.rrf_k):
+                                        candidate_k=args.candidate_k, rerank_k=args.rerank_k, rrf_k=args.rrf_k,
+                                        query_fusion=args.query_fusion):
                 results.append(row)
                 stream.write(json.dumps(row, ensure_ascii=False)+"\n")
                 stream.flush()

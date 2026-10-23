@@ -20,6 +20,7 @@ class HybridRetrievalConfig:
     kind: str = "hybrid"
     stage: str = "hybrid_rerank"
     query_mode: str = "current"
+    query_fusion: str = "single"
     reranker_path: str | None = None
     device: str = "cpu"
     dtype: str = "float32"
@@ -41,6 +42,10 @@ def load_retriever_config(path):
         raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
     if value.stage not in {"dense", "hybrid", "hybrid_rerank"}:
         raise ValueError("unknown retrieval stage")
+    if value.query_fusion not in {"single", "current_topic_rrf"}:
+        raise ValueError("unknown query fusion")
+    if value.query_fusion == "current_topic_rrf" and (value.query_mode != "user_topic" or value.stage == "dense"):
+        raise ValueError("current_topic_rrf requires user_topic and hybrid/hybrid_rerank")
     if value.stage == "hybrid_rerank" and not value.reranker_path:
         raise ValueError("hybrid_rerank requires reranker_path")
     if value.dtype not in {"float32", "float16", "bfloat16"}:
@@ -77,6 +82,7 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
                     if config.stage == "hybrid_rerank" else None)
         result = HybridRetriever(sparse, dense, encoder, reranker, query_mode=config.query_mode,
             stage=config.stage, candidate_k=config.candidate_k, rerank_k=config.rerank_k, rrf_k=config.rrf_k,
+            query_fusion=config.query_fusion,
             source_config={"path": str(Path(config_path).resolve()), "resolved": asdict(config),
                            "relative_path_base": str(Path.cwd())})
         result.initialization_seconds = time.perf_counter()-started

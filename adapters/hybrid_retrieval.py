@@ -219,15 +219,84 @@ def search_variants(query, sparse, dense, encoder, reranker=None, *, candidate_k
     return stages
 
 
+def search_current_topic(current_query, topic_query, sparse, dense, encoder, reranker=None, *,
+                         candidate_k=50, rerank_k=50, rrf_k=60):
+    """One fixed equal-RRF pool, scored entirely with the topic query.
+
+    Retain separate raw/topic retrieval when the texts differ. Fusion is one
+    sum over their original BM25/dense lists, never fusion of fused scores.
+    Per-view stages also provide an auditable cost and pool-size breakdown.
+    Only hybrid stages are returned; no ambiguous combined BM25/dense stage.
+    """
+    if dense is None or encoder is None:
+        raise ValueError("current_topic_rrf requires a dense index and encoder")
+    same_query = current_query == topic_query
+    started = time.perf_counter()
+    if same_query:
+        # Exact original path: one encode, sparse search, and (if requested) score.
+        single = search_variants(topic_query, sparse, dense, encoder, reranker,
+            candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k)
+        source_stages = [("shared_current_topic", topic_query, single)]
+        selected_stages = {key: value for key, value in single.items() if key in {"hybrid", "hybrid_rerank"}}
+        fusion_ms, additional_current_ms = 0.0, 0.0
+    else:
+        raw = search_variants(current_query, sparse, dense, encoder,
+            candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k)
+        topic = search_variants(topic_query, sparse, dense, encoder,
+            candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k)
+        source_stages = [("current", current_query, raw), ("topic", topic_query, topic)]
+        fusion_started = time.perf_counter()
+        fused = reciprocal_rank_fusion([[c.document_id for c in stages[stage]["contexts"]]
+            for _, _, stages in source_stages for stage in ("bm25", "dense")], k=rrf_k)
+        contexts = tuple(replace(dense.by_id[pid], score=score) for pid, score in fused)
+        fusion_ms = (time.perf_counter()-fusion_started)*1000
+        selected_stages = {"hybrid": {"contexts": contexts, "elapsed_ms": (time.perf_counter()-started)*1000}}
+        additional_current_ms = raw["hybrid"]["elapsed_ms"]
+        if reranker is not None:
+            candidates = contexts[:rerank_k]
+            scores = reranker.score(topic_query, candidates)
+            if len(scores) != len(candidates):
+                raise ValueError("reranker scores must align with candidate passages")
+            ranked = tuple(replace(c, score=float(score)) for c, score in sorted(zip(candidates, scores),
+                key=lambda item: (-float(item[1]), item[0].document_id)))
+            selected_stages["hybrid_rerank"] = {"contexts": ranked,
+                "elapsed_ms": (time.perf_counter()-started)*1000,
+                "rerank_candidate_ids": [c.document_id for c in candidates]}
+    trace = {"strategy": "current_topic_rrf", "weights": "equal per unique query and retriever",
+        "current_query": current_query, "topic_query": topic_query,
+        "retrieval_query_count": len(source_stages), "duplicate_query_skipped": same_query,
+        "candidate_k_per_query_retriever": candidate_k, "rerank_k_total": rerank_k, "rrf_k": rrf_k,
+        "source_queries": [{"role": role, "query": query,
+            "bm25_candidates": len(stages["bm25"]["contexts"]),
+            "dense_candidates": len(stages["dense"]["contexts"]),
+            "bm25_candidate_ids": [c.document_id for c in stages["bm25"]["contexts"]],
+            "dense_candidate_ids": [c.document_id for c in stages["dense"]["contexts"]],
+            "per_query_union_candidates": len(stages["hybrid"]["contexts"]),
+            "retrieval_ms": stages["hybrid"]["elapsed_ms"]} for role, query, stages in source_stages],
+        "fused_union_candidates": len(selected_stages["hybrid"]["contexts"]),
+        "additional_current_retrieval_ms": additional_current_ms, "cross_query_fusion_ms": fusion_ms}
+    for stage, values in selected_stages.items():
+        reranked = stage == "hybrid_rerank"
+        values["query_fusion_trace"] = {**trace, "rerank_query": topic_query if reranked else None,
+            "rerank_candidate_ids": values.get("rerank_candidate_ids", []),
+            "rerank_pairs": len(values["contexts"]) if reranked else 0,
+            "rerank_ms": values["elapsed_ms"]-selected_stages["hybrid"]["elapsed_ms"] if reranked else 0.0}
+    return selected_stages
+
+
 class HybridRetriever:
     """One loaded model pair shared by P3 sessions; only user questions form queries."""
     def __init__(self, sparse, dense, encoder, reranker=None, *, query_mode="current",
                  stage="hybrid_rerank", candidate_k=50, rerank_k=50, rrf_k=60,
-                 source_config=None):
+                 source_config=None, query_fusion="single"):
         if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic"}:
             raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
         if stage not in {"dense", "hybrid", "hybrid_rerank"}:
             raise ValueError("unknown online retrieval stage")
+        if query_fusion not in {"single", "current_topic_rrf"}:
+            raise ValueError("unknown query fusion")
+        if query_fusion == "current_topic_rrf" and (query_mode != "user_topic" or stage == "dense"):
+            raise ValueError("current_topic_rrf requires user_topic and hybrid/hybrid_rerank")
         if stage == "hybrid_rerank" and reranker is None:
             raise ValueError("hybrid_rerank requires a loaded reranker")
         if candidate_k < 5 or rerank_k < 5 or rrf_k < 0:
@@ -237,6 +306,7 @@ class HybridRetriever:
         self.sparse, self.dense, self.encoder, self.reranker = sparse, dense, encoder, reranker
         self.corpus_snapshot_id = sparse.corpus_snapshot_id
         self.query_mode, self.stage = query_mode, stage
+        self.query_fusion = query_fusion
         self.candidate_k, self.rerank_k, self.rrf_k = candidate_k, rerank_k, rrf_k
         self.source_config = source_config
         self._lock = Lock()
@@ -248,6 +318,7 @@ class HybridRetriever:
     def manifest(self):
         manifest = {"kind": "bge_hybrid", "corpus_snapshot_id": self.corpus_snapshot_id,
             "query_mode": self.query_mode, "stage": self.stage, "top_k": 5,
+            "query_fusion": self.query_fusion,
             "candidate_k": self.candidate_k, "rerank_k": self.rerank_k, "rrf_k": self.rrf_k,
             "sparse": self.sparse.manifest, "dense": self.dense.manifest,
             "encoder": self.encoder.manifest, "reranker": self.reranker.manifest if self.reranker else None,
@@ -271,8 +342,15 @@ class HybridRetriever:
         # run_sessions dispatches retrieval via to_thread. Serialize this model
         # pair instead of allowing overlapping forwards and unbounded GPU batches.
         with self._lock:
+            fusion_trace = None
             if self.stage == "dense":
                 contexts = self.dense.search(query, self.encoder, top_k=5)
+            elif self.query_fusion == "current_topic_rrf":
+                stages = search_current_topic(turn.query, query, self.sparse, self.dense, self.encoder,
+                    self.reranker if self.stage == "hybrid_rerank" else None,
+                    candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k)
+                contexts = stages[self.stage]["contexts"][:5]
+                fusion_trace = stages[self.stage]["query_fusion_trace"]
             else:
                 stages = search_variants(query, self.sparse, self.dense, self.encoder,
                     self.reranker if self.stage == "hybrid_rerank" else None,
@@ -281,7 +359,7 @@ class HybridRetriever:
             self.requests += 1
             if view is not None:
                 self.query_view_traces.append({"task_id": turn.task_id, "conversation_id": turn.conversation_id,
-                                              "turn": turn.turn, **view})
+                    "turn": turn.turn, **view, **({"query_fusion_trace": fusion_trace} if fusion_trace else {})})
         return replace(turn, contexts=tuple(contexts))
 
     def close(self):
