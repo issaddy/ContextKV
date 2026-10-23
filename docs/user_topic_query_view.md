@@ -1,6 +1,6 @@
 # 用户历史主题补全：可选检索视图
 
-`query_mode: user_topic` 已接共享 P3 retriever factory、controller/native CLI 和离线检索评测。它保留当前用户问题原文，在少量显式后续问题后附加历史用户原文中的命名短语；不生成新事实，也不修改生成阶段的 query、完整 QA 或证据。默认仍为 `current`，原 BM25 与其他视图不变。当前仅完成工程与开发视图核对，尚未获得该模式的真实检索/回答质量结果。
+`query_mode: user_topic` 已接共享 P3 retriever factory、controller/native CLI 和离线检索评测。它保留当前用户问题原文，在少量显式后续问题后附加历史用户原文中的命名短语；不生成新事实，也不修改生成阶段的 query、完整 QA 或证据。默认仍为 `current`，原 BM25 与其他视图不变。[五视图真实检索对照](user_topic_retrieval_validation.md)已完成820条结果核验：SDK来源改善，同时保留WebSocket定义候选丢出预算的反例；回答质量尚需完整P3验证。
 
 ## 为什么增加这一对照
 
