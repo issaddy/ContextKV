@@ -6,9 +6,9 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | 622 passed，6 subtests passed，4 个显式 opt-in tokenizer 项跳过；runs/pytest-table-focus-normalized.log |
-| 固定 Qwen tokenizer 专项 | 随后显式开启检查，5 passed（含上述 4 项）；runs/pytest-table-focus-tokenizer.log。原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过；Linux 30 个真实候选也逐 token 相同 |
-| Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 table_focus、CRAFT 行文本、GroUSE 解析器与候选源码，CRAFT 完整许可在 wheel 中；runs/build-table-focus.log |
+| 最近完整 CPU 回归 | 667 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-atomic-focus-final.log |
+| 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
+| Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 atomic_judge 模块/协议资产、table_focus、CRAFT 行文本与 GroUSE 源码，CRAFT 完整许可在 wheel 中；runs/build-atomic-focus.log |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
 | 冻结模拟测试矩阵 | 39 jobs / 117 轮成功 |
 | 继承主方法参数的开发集消融 | 15 jobs / 45 轮成功，不参与主方法选择 |
@@ -77,6 +77,9 @@ SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固
 - 质量验收新增双侧原始问题/历史/检索材料/输入身份绑定，核对原运行的 split 声明与既有摘要，并汇总各层模拟标记。独立反例审查修正了开发数据冒充 heldout、模拟来源被 audit 遮蔽、相同答案挪用到不同提示三个漏检。真实 P3 的 123 轮原始绑定均通过；v2 盲审包评分仍全部为空，不建立质量结论。见[质量验收](quality_acceptance.md)。
 - 字面表格注释已完成 82 轮 P3 与 8 次冻结历史实验；随后直接复用 CRAFT 的 MIT 行文本函数，扩展当前 query 的词法焦点与行内来源。两固定历史、三臂正反顺序共 12 次 GPU 运行全部成功，新样式在两历史中均保留正确单附件限制和支持它的原引用，未重现已知范围错误。已可选接入共享候选、原生基线和矩阵；完整正文/QA/预算保持，默认关闭。仅是开发探针上的局部改善，见[焦点行验证](table_focus_validation.md)。
 - Selene Mini 8B 与 Prometheus 2 7B 的原生五维协议各完成 10 次真实评分，均正常解析，但关键范围扩张与缺引用仍有漏判。GroUSE 固定 train16 分别完成 45/32 次调用；Selene 条件通过48/96，6次字符串 null 失败；Prometheus 30次输出截断、2次JSON失败，零分代表该协议运行失败。官方解析/DTO与判分重放一致。显式 normalized_v1 已实现并完整重跑 train：51次调用全解析、64/96条件通过，完整性仍仅5/16；不回填旧调用，不按格式完成率宣布语义可靠。见[独立评审验证](open_judge_validation.md)。
+- 同一优化源码的 gate2/gate0/Fixed4096/Rebuild 两次对照完成328/328轮；源码、8份冷态和全部原始记录通过独立复核。Gate0等会话完成均值下降19.88%，但比Fixed4096慢15.16%，P2输入输出分叉且仍有截断，不建立质量相等或强B6胜出结论。见[稳定期消融](stage_gate_validation.md)。
+- `focus_refs` 完整P3三臂共123/123成功、每臂2轮截断，完整输入/QA/来源重建通过。附件目标有原始引用的10MB回答改善了已知范围错误，但后续套餐条件、SDK跨产品混引仍存在，非触发轮也因闭环生成变化而分叉，见[P3焦点验证](table_focus_p3_validation.md)。
+- 新增[原子声明诊断](atomic_judge_proposal.md)复用既有HTTP、完整输入绑定与来源合同，适配RefChecker/Claimify等抽取和来源核验原则。实际代码支持抽取、原文位置、限定槽位、可见/被引来源分判及未知/失败记录；41项专项与独立审查通过，已包含在667项全套中。尚无真实原子模型评测，不进入正式五维质量gate，也未在线修答案。
 
 ## 仍需完成的研究验收
 
