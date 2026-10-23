@@ -1,6 +1,6 @@
 # 原子评审开发验证
 
-本轮验证冻结的 `bench.atomic_judge`（v1 源码 commit `dc6b8170d0a8e2619b5f187f21d26d3a05410c92`），不改 `native_v1` 的五维协议，不回填既有分数，也不构成人工验收或 test 非劣结论。v1 的 29 条真实本地模型调用结果已导入：42 次 HTTP 全部正常结束，但 21 条 ledger 为 partial。既有接口类型问题，也有抽取改变范围、历史污染和正确短答误伤，不能把问题归结为 JSON 格式。方法来源与实现边界见 [原子评审提案](atomic_judge_proposal.md)，原生评审对照见 [开源 judge 验证](open_judge_validation.md)。
+本轮已完成 v1、v2 与 guided v3 三次完整 29 条开发验证。**固定 XGrammar 的 schema 编译和生成可用，消除了 v2 的两个顶层 JSON 失败，但当前模型的语义判断未改善**：v2/v3 的 24 条 prose 都是 8 matched、5 mismatched、11 unknown，真实例仍有对象混淆和正确短答误伤。这里不改 `native_v1` 的五维协议，不回填既有分数，也不构成人工验收或 test 非劣结论。v1 源码 commit 为 `dc6b8170d0a8e2619b5f187f21d26d3a05410c92`，guided v3 为 `9db698a7df088fb3071032379a43c577efece36d`。方法来源与实现边界见 [原子评审提案](atomic_judge_proposal.md)，原生评审对照见 [开源 judge 验证](open_judge_validation.md)。
 
 ## 输入与冻结边界
 
@@ -98,15 +98,15 @@ python runs/atomic-development-review/analyze.py \
 
 原始结果在 `runs/remote-h200-atomic/runs/atomic-development-v2/`，只读派生结果为 `runs/atomic-development-review/analysis-v2.json`。仍为同一固定模型、temperature 0、4096 输出预算、完整 29 输入，没有选择性重跑失败项。58 次 HTTP 全部 `stop`，输入 68,276、输出 9,920 tokens；单调用输入最多 5,341、输出最多 1,009 tokens。两个 failed 不是输出截断。
 
-| 指标 | v1 | v2 |
-|---|---:|---:|
-| 全部输入 | 29 | 29 |
-| complete / partial / failed | 8 / 21 / 0 | 15 / 12 / 2 |
-| 24 prose：matched / mismatched / unknown | 6 / 1 / 17 | 8 / 5 / 11 |
-| 12 正事实：matched / mismatched / unknown | 3 / 0 / 9 | 5 / 4 / 3 |
-| 10 负事实：matched / mismatched / unknown | 3 / 1 / 6 | 3 / 1 / 6 |
-| 2 拒答：完成原协议要求的判定 | 0 | 0 |
-| 实际 HTTP 调用 | 42 | 58 |
+| 指标 | v1 | v2 | guided v3 |
+|---|---:|---:|---:|
+| 全部输入 | 29 | 29 | 29 |
+| complete / partial / failed | 8 / 21 / 0 | 15 / 12 / 2 | 15 / 14 / 0 |
+| 24 prose：matched / mismatched / unknown | 6 / 1 / 17 | 8 / 5 / 11 | 8 / 5 / 11 |
+| 12 正事实：matched / mismatched / unknown | 3 / 0 / 9 | 5 / 4 / 3 | 5 / 4 / 3 |
+| 10 负事实：matched / mismatched / unknown | 3 / 1 / 6 | 3 / 1 / 6 | 3 / 1 / 6 |
+| 2 拒答：完成原协议要求的判定 | 0 | 0 | 0 |
+| 实际 HTTP 调用 | 42 | 58 | 67 |
 
 数值表示拒收消失，模型也不再复制 statement 的示例占位词。由于更多 claim 进入 checker，正确例误伤被显露出来，不能把 complete 增长当质量改善。尤其：
 
@@ -123,7 +123,7 @@ python runs/atomic-development-review/analyze.py \
 
 ## 可选 v3：复用固定运行时的 JSON Schema 约束
 
-值得做一次完整 29 条开发对照，目的限定为减少顶层形状、缺字段和类型造成的损失，并观察对语义行为的影响。不能预先声称 schema 能修复条件、换算、来源角色或拒答判断。v2 的 prompt 与自由输出默认行为保持原样；新模式不手工修 JSON，不在失败后重试自由生成，也不覆盖 v1/v2 结果。
+该可选模式用于减少顶层形状、缺字段和类型造成的损失，并观察对语义行为的影响。v2 的 prompt 与自由输出默认行为保持原样；新模式不手工修 JSON，不在失败后重试自由生成，也不覆盖 v1/v2 结果。完整开发对照的结果见下一节，未证明它能修复条件、换算、来源角色或拒答判断。
 
 固定 SGLang commit `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b` 的实际调用链已核：
 
@@ -142,9 +142,9 @@ python -m bench.atomic_judge \
   --output runs/atomic-development-guided-v3/ledger.jsonl
 ```
 
-83 项 atomic/native 测试通过，覆盖默认无约束请求不变、固定 schema 与独立协议身份、schema 失败不降级、length/裸 array 仍保留失败，以及结构合法但引文不真实仍拒绝。两份 schema 已通过固定官方不支持特性检查器，记录在 `runs/atomic-development-review/schema-source-check.json`。本机未安装 XGrammar，尚未声称完成真实 grammar 编译或 GPU guided 生成。
+83 项 atomic/native 测试通过，覆盖默认无约束请求不变、固定 schema 与独立协议身份、schema 失败不降级、length/裸 array 仍保留失败，以及结构合法但引文不真实仍拒绝。最初本地阶段仅运行了固定官方不支持特性检查器，记录在 `runs/atomic-development-review/schema-source-check.json`；后来在实际服务环境完成了短编译 probe 和完整 guided 运行，不能混淆这两层验证。
 
-下一次运行需记录当次 `/get_server_info` 的实际 grammar_backend 与已安装 XGrammar 版本，并先用固定 extract/check schema 做短的真实编译调用。v2 历史 runtime 为 `xgrammar`，不能代替新运行证明。若 tokenizer/backend 不支持，固定运行时可能拒绝请求；应保留失败，不静默退回自由生成。随后仍完整重跑 29 条，继续分别报告 schema、quote、覆盖及语义错误，不把 grammar 成功当作质量验收。[固定 backend 选择](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/constrained/base_grammar_backend.py#L371-L425)、[编译失败处理](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/constrained/grammar_manager.py#L145-L193)。
+每次运行记录当次 `/get_server_info` 的实际 grammar_backend 与已安装 XGrammar 版本，v2 历史 runtime 不能代替新运行证明。若 tokenizer/backend 不支持，固定运行时可能拒绝请求；保留失败，不静默退回自由生成。schema、quote、覆盖及语义错误分别报告，不把 grammar 成功当作质量验收。[固定 backend 选择](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/constrained/base_grammar_backend.py#L371-L425)、[编译失败处理](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/constrained/grammar_manager.py#L145-L193)。
 
 短 probe 已准备为 `runs/atomic-development-review/guided_probe.py`，默认只 plan，不连接服务。它预先固定第一条 `p001`，做一次抽取和一次 checker；checker 输入取该条冻结 v2 的首个 claim，不依据新抽取结果挑选样本。显式 `--execute` 后记录本机解释器包版本、实际服务配置、两个请求与完整原始 HTTP 响应/失败内容，并用服务环境已有的 jsonschema 检查返回形状。没有下载模型、重试或降级；本机包版本不会被当成远端环境证明。运行前应使用启动服务器的相同 Python 环境。
 
@@ -158,3 +158,29 @@ python runs/atomic-development-review/guided_probe.py \
 ```
 
 该两调用 probe 仅核实际接口和 grammar 路径，不加入 29 条质量统计，也不产生质量通过结论。完整 guided 运行中仍保留每次 `requested_response_format`、HTTP 状态与原文响应，以便区分编译拒绝、生成中断和语义失败。
+
+## guided v3 实测：结构可用，语义未改善
+
+已独立检查导入目录 `runs/remote-h200-atomic/runs/atomic-development-v3` 与 `atomic-guided-compile-v1`。短 probe 的 extract/check 各一次，均 completed/stop 且返回通过固定 schema 检查；实际 runtime 为 XGrammar 0.2.7、SGLang `0.0.0.dev1+g3f36fc083`、Transformers 5.19.0、jsonschema 4.26.0，服务 grammar_backend 为 xgrammar。
+
+v2/v3 的 `audit.jsonl`、`labels.jsonl`、`config.json` 三个文件逐字节相同，SHA 分别相同；其中 audit SHA 为 `2138d69c41e502ed24e2c332236ed64e4fefee94758731104ee3eb6ac6a10e8b`。两版提取和 checker prompt 文本也相同，区别为显式 schema 请求及独立协议身份。完整对照没有把裸 array 手工补成 object，没有回填旧结果。
+
+v3 全部 67 次 HTTP 返回 200/stop，29 条提取均返回可解析顶层 object；总输入 117,222、输出 11,288 tokens。58 个共有调用阶段中，50 个模型 `raw_text` 完全相同；29 次提取中 24 次完全相同。变化的提取是 p024、p025、p026、real-001、real-002，共有 checker 中 p011、p012、p024 的原文发生变化；这些变化没有改变 24 条 prose 的最终对应情况。这里比较模型正文，不把带 request ID 等字段的 HTTP envelope 冒称逐字相同。
+
+工程收益具体是：real-001/002 从 failed 转为 partial，新增 9 个 checker 调用。它们没有变成质量通过：
+
+| 真实案例 | v3 实际覆盖 | 新暴露的问题 |
+|---|---|---|
+| real-001 / off | 6 个提取 claim；4 个进入 checker，另 2 个因 quote 去掉原文 Markdown 格式而定位失败；17 个原文单元只绑定 4 个 | 正确的“单附件 10 MB”和“每个附件最多 10 MB”仍被判 contradicted，引用却标 supports；有问题的“文档包含附件 1 MB”也没有得到可靠的范围判定。4 个 checker 均未形成有效 assessed verdict。 |
+| real-002 / all_rows | 5 个 claim 进入 checker，13 个原文单元只绑定 5 个 | 三个附件 10 MB claim 得到 entailed；正确的“单文档 1 MB”却被附件 10 MB/请求 11 MB 混淆为矛盾。组合请求 11 MB 的关系解释也给出了与 supports 引文不一致的 contradicted。 |
+| real-003 / focus_refs | 与 v2 的提取及三个 checker raw_text 全部相同 | 正确短答继续被误伤，仍有“原回答是 50 MB”的虚构理由；schema 并未纠正该判断。 |
+
+本轮三条真实答案合计有 9 次 verdict=contradicted 但 evidence relation=supports 的无效结果；来源 quote 能定位仍不能转换成正确判分。另有未覆盖单元、错误拒答的类型识别、联合来源换算及历史污染问题。schema 使接口走通，但没有给出本项目语义准确性的改进证据；现在应保留该模式作工程选项，后续专用判别模型/数值关系路线见 [开源复用取舍](quantity_judge_reuse.md)，本轮未下载或启用新模型。
+
+### tokenizer 长度告警的含义
+
+完整 driver log 已保留为 `runs/remote-h200-atomic/runs/atomic-development-v3-driver.log`，仅包含一次 `5478 > 4096` tokenizer 警告与完成标记。它对应首个超出 tokenizer `model_max_length=4096` 元数据的输入，即 real-001 的第一个 checker；不是输出预算耗尽，也不是实际服务只允许 4096 tokens。
+
+当前 `apply_chat_template` 路径默认 `truncation=False`，Transformers 这条警告仅在首次超过 tokenizer 元数据上限时输出，因此 5478 不是本轮最大输入。实际 ledger 最大输入为 **5501**，67 次客户端完整 token 计数全部与服务器 `usage.prompt_tokens` 相等；服务 runtime 为 **context_length=32768、allow_auto_truncate=false**。独立的输出预算是 **max_tokens=4096**，实际单调用输出最多 **862**，全部 finish_reason=stop。最大输入加预留输出预算为 9597，仍在当前服务窗口内。这些记录支持本轮没有因该警告发生静默输入截断或输出 length 停止，不能把通用 tokenizer 警告描述成已出现模型索引错误；也不能由这一次通过推断任意超长输入均安全。
+
+独立派生文件为 `runs/atomic-development-review/analysis-v3-independent.json`；成对输入/原始文本/预算核查为 `paired-v2-v3.json`，可用同目录 `compare_v2_v3.py --output NEW_PATH.json` 重算。原始 v1/v2/v3、短 probe 和 driver log 均保留，没有修改任何模型响应。

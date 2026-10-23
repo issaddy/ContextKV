@@ -6,7 +6,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | 717 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-guided-client-final.log |
+| 最近完整 CPU 回归 | 726 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-query-fusion-final.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
 | Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 atomic_judge 模块/协议资产、table_focus、CRAFT 行文本与 GroUSE 源码，CRAFT 完整许可在 wheel 中；runs/build-atomic-focus.log；新增guided schema、query view、observation probe与client也已重建并逐字核对（runs/build-guided-wheel.log） |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
@@ -79,13 +79,13 @@ SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固
 - Selene Mini 8B 与 Prometheus 2 7B 的原生五维协议各完成 10 次真实评分，均正常解析，但关键范围扩张与缺引用仍有漏判。GroUSE 固定 train16 分别完成 45/32 次调用；Selene 条件通过48/96，6次字符串 null 失败；Prometheus 30次输出截断、2次JSON失败，零分代表该协议运行失败。官方解析/DTO与判分重放一致。显式 normalized_v1 已实现并完整重跑 train：51次调用全解析、64/96条件通过，完整性仍仅5/16；不回填旧调用，不按格式完成率宣布语义可靠。见[独立评审验证](open_judge_validation.md)。
 - 同一优化源码的 gate2/gate0/Fixed4096/Rebuild 两次对照完成328/328轮；源码、8份冷态和全部原始记录通过独立复核。Gate0等会话完成均值下降19.88%，但比Fixed4096慢15.16%，P2输入输出分叉且仍有截断，不建立质量相等或强B6胜出结论。见[稳定期消融](stage_gate_validation.md)。
 - `focus_refs` 完整P3三臂共123/123成功、每臂2轮截断，完整输入/QA/来源重建通过。附件目标有原始引用的10MB回答改善了已知范围错误，但后续套餐条件、SDK跨产品混引仍存在，非触发轮也因闭环生成变化而分叉，见[P3焦点验证](table_focus_p3_validation.md)。
-- 新增[原子声明诊断](atomic_judge_proposal.md)复用既有HTTP、完整输入绑定与来源合同，适配RefChecker/Claimify等抽取和来源核验原则。实际代码支持抽取、原文位置、限定槽位、可见/被引来源分判及未知/失败记录；41项专项与独立审查通过，已包含在667项全套中。尚无真实原子模型评测，不进入正式五维质量gate，也未在线修答案。
+- 新增[原子声明诊断](atomic_judge_proposal.md)复用既有HTTP、完整输入绑定与来源合同，适配RefChecker/Claimify等抽取和来源核验原则。实际代码支持抽取、原文位置、限定槽位、可见/被引来源分判及未知/失败记录；新增可选JSON Schema协议并通过真实XGrammar 0.2.7编译；v1/v2/v3分别在同一29输入完成42/58/67次调用。v3消除了两条顶层JSON失败，但24条prose仍为8 matched、5 mismatched、11 unknown，与v2相同。详见[原子实测](atomic_judge_validation.md)，不进入正式五维质量gate，也未在线修答案。
+
+- 新预算/匹配观测补丁 `3aac1df…` 已完成[H200功能验收](native_observation_validation.md)：三份保留报告共474个报价预算逐项复算一致，GPU-v2与host各三请求完成/退役/拒绝旧epoch通过；首次probe的HTTP代码预期错误与客户端消息丢失均保留并修正。真实fixture全部ignoreEOS，尚未覆盖ratio缩放或clip饱和；normalRAG的82轮事件没有quote，不作补充覆盖。
+- [用户主题五视图检索](user_topic_retrieval_validation.md)完成820条结果，R@5提升至54.87%，保留R@50下降及WebSocket候选丢失。新完整P3两臂各41轮全部执行成功、各一轮截断，82条输入/历史/正文/receipt核对无错误；语义审查仍发现SDK扩写和跨平台混用。
 
 ## 仍需完成的研究验收
 
 当前没有正式回答质量非劣、SLO goodput 提升或论文优于基线的结论。已有 B0/B1、控制器矩阵、匹配消融、成对诊断、原生容量实验及 16K 匹配标定/六方法联合运行。接续重点是区分可观测容量压力与传输不确定性、改善等待成本估计，补 32K 对照、重复测量、同预算 B6、低重叠负例、真实质量评分和人工盲审。profiling.decision_pairs 与生命周期压力探针分别补充成本差和旧独有分支归因；全局 slot 变化不能替代具体路径证据。
 
 完整 Cloud P3 开发流程已运行。官方 qrels 覆盖 39/41 轮，缺失的两轮单列，未按零分混入；在有标签部分，BM25S recall@5 为 0.2094、nDCG@5 为 0.1671。这只是本配置下的检索弱基线，不是回答质量。原始 qrels 诊断、B0/B1 运行与 P3 生成保存在 runs/remote-h200-native；仍须完成回答质量评价、强基线和冻结 test。缺少评分时，质量覆盖、非劣判定和人工审查保持未验证，不以格式检查、模拟回答或词法代理补齐。运行方法见 [部署说明](deployment.md)、[成对决策](decision_pairs.md) 和 [贡献与实验设计](research_contributions.md)。
-
-- 新预算/匹配观测补丁 `3aac1df…` 已完成[H200功能验收](native_observation_validation.md)：三份保留报告共474个报价预算逐项复算一致，GPU-v2与host各三请求完成/退役/拒绝旧epoch通过；首次probe的HTTP代码预期错误与客户端消息丢失均保留并修正。真实fixture全部ignoreEOS，尚未覆盖ratio缩放或clip饱和；normalRAG的82轮事件没有quote，不作补充覆盖。
-- [用户主题五视图检索](user_topic_retrieval_validation.md)完成820条结果，R@5提升至54.87%，保留R@50下降及WebSocket候选丢失。新完整P3两臂各41轮全部执行成功、各一轮截断，82条输入/历史/正文/receipt核对无错误；语义审查仍发现SDK扩写和跨平台混用。

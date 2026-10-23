@@ -58,4 +58,6 @@ GPU-v2 与 host fixture 改为同时检查异常及权威 terminal 拒绝后通�
 
 本轮确认这些观测可以采集，尚未证明把它们用于预测会更准确。下一步先从普通 `ignore_eos=False` 工作负载的 `quote_observed` 事件复算动态比例分支，并按原始成员集合核查剩余预算、匹配年龄和已知/未知状态。分析器接受该 JSONL；并发响应可能按不同于快照时间的次序落盘，故仅报告文件内顺序反转，不将它误判为服务器时钟故障。未知或未采到的状态属于覆盖不足。
 
+随后导入的 `p3-user-topic-v1` 两组各 41 轮、405 条事件均没有 `quote_observed`（固定 `normal_rag` 路径不报价）。`runs/native-observation-review/p3-eos-summary.json` 记录每组 quote_count=0、budget_formula_coverage=not_observed；这批普通 EOS 生成没有补上比例分支的运行时证据，也不是补丁失败。
+
 之后才单独比较 service 长度与 native gate reservation 分离、已知 queued 前缀及其陈旧情景；保持当前模型为对照。还需实际 pre-forward 标签、同配置负载和独立决策评估，不能从这次功能通过推导等待精度、APPEND/REBUILD 收益、一般调度正确性或质量准入。
