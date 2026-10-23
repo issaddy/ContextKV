@@ -1,0 +1,24 @@
+{
+  "version": "contextkv-lettuce-span-v1",
+  "upstream_repository": "https://github.com/KRLabsOrg/LettuceDetect",
+  "upstream_revision": "fbce1991f26e210cc49ace3913562ab4f2f31a60",
+  "model": "KRLabsOrg/lettucedect-v2-mmbert-base",
+  "model_revision": "8831ce063dff760b01efe4519b4188f5ee2456f2",
+  "model_license": "Apache-2.0",
+  "reused_code_and_template_license": "MIT",
+  "base_family": "ModernBERT/mmBERT",
+  "context_limit_tokens": 8192,
+  "label_direction": {
+    "0": "supported",
+    "1": "hallucinated"
+  },
+  "input_format": "Pinned upstream PromptUtils.format_context(context, question, en); tokenizer(prompt, raw_answer) pair with special tokens",
+  "source_policy": "All visible audit bodies in manifest order, including duplicates; no extra retrieval or references",
+  "history_policy": "actual_history not submitted; upstream QA interface has no history field; current query remains verbatim",
+  "answer_policy": "Original answer verbatim, including citations/code/formatting; citation overlap marked separately",
+  "length_policy": "Single full pair count; no truncation or chunking; over-limit remains not_covered",
+  "prediction_policy": "Per-answer-token argmax of two class probabilities, ties choose 0; no tuned threshold",
+  "span_policy": "Merge consecutive class-1 answer tokens; confidence=max class-1 probability within that span only",
+  "offset_policy": "Fast tokenizer sequence_ids==1 and non-special nonempty offsets; preserve direct answer-relative offsets, no subtraction of first offset",
+  "interpretation": "Unsupported-token diagnostic; not Atomic verdicts, five-dimensional scores, semantic certainty, or formal quality acceptance"
+}
