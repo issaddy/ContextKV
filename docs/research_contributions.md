@@ -30,6 +30,8 @@ B表中的regret来自隔离c1 fixture的server elapsed、尚未纳入答案质�
 
 B 的[原生预算与匹配时间观测](native_observation_validation.md)直接复用固定引擎预算函数并保存已有match标量，真实GPU/host探针已验证采集和生命周期合同；它为后续reservation/service分离提供数据，没有新建缓存树、反复hash或改变默认调度。评测侧的[原子诊断实测](atomic_judge_validation.md)则证明格式约束不能修复语义错误，下一轮[专用判别器与数量关系复用](quantity_judge_reuse.md)已落实到固定来源、许可、原生输入格式和具体适配边界。两者属于支持方法改进的工程与评价能力，不以观测通过或JSON合法单列质量贡献。
 
+新增[原生预算与服务分离](native_budget_validation.md)已完成两种模型各41轮真实压力闭环：普通EOS预算公式与请求身份关联均通过；同支持样本的等待MAE未改善，平均完整响应下降同时尾部变差，尚不构成稳定净收益。后续以真实host/mixed采样补足支持域，而非放宽资格阈值。质量侧的[Lettuce](lettuce_judge_validation.md)与[Granite](granite_judge_validation.md)各完成同29项原生诊断，提供了适用区域与失效证据；测量能力改进与A/B/C方法贡献分别记录。接续的[来源结构/API证据路线](ac_extension_priorities.md)及[业务版本感知host准入](host_admission_design.md)已有具体原生接点、复用边界和可证伪验证方案。
+
 ## 为什么选择这组基础工作
 
 | 基础工作 | 已有能力与选型依据 | 本项目实际复用及边界 |
