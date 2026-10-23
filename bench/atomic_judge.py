@@ -10,6 +10,7 @@ import asyncio
 from dataclasses import asdict
 from importlib.resources import files
 import json
+import math
 from pathlib import Path
 import re
 from typing import Mapping
@@ -54,9 +55,13 @@ def _bind_claim(claim, units, seen_ids):
     seen_ids.add(claim["claim_id"])
     if claim["kind"] not in KINDS:
         raise ValueError("unknown claim kind")
-    for key in ("object", "relation", "value_raw", "unit_raw", "comparator", "scope", "modality"):
+    for key in ("object", "relation", "unit_raw", "comparator", "scope", "modality"):
         if key not in claim or (claim[key] is not None and not isinstance(claim[key], str)):
             raise ValueError(f"claim requires explicit string-or-null {key}")
+    value = claim.get("value_raw")
+    if ("value_raw" not in claim or (value is not None and type(value) not in {str, int, float})
+            or (type(value) is float and not math.isfinite(value))):
+        raise ValueError("value_raw must be an explicit string, finite number, or null")
     if claim["modality"] not in {None, "asserted", "conditional", "recommended", "hypothetical", "uncertain"}:
         raise ValueError("unknown claim modality")
     if not isinstance(claim.get("conditions"), list) or any(not isinstance(x, str) for x in claim["conditions"]):
@@ -75,12 +80,12 @@ def _bind_claim(claim, units, seen_ids):
     declared = claim.get("citation_ids")
     if not isinstance(declared, list) or any(not isinstance(x, str) for x in declared):
         raise ValueError("citation_ids must be a list of original IDs")
-    if set(declared) - set(citations):
-        raise ValueError("extractor introduced a citation absent from the original unit")
     start = unit["start"] + locations[0]
     return {"unit_id": unit["unit_id"], "start": start, "end": start+len(claim["answer_quote"]),
             "text": claim["answer_quote"], "unit_text": unit["text"],
-            "citation_ids": citations, "citation_scope": "original_unit_group_not_proven_claim_attachment",
+            "citation_ids": citations, "extractor_citation_ids": declared,
+            "extra_extractor_citation_ids": sorted(set(declared) - set(citations)),
+            "citation_scope": "original_unit_group_not_proven_claim_attachment",
             "meaning": "exact location only; extraction faithfulness still model-assessed"}
 
 
@@ -150,7 +155,7 @@ class AtomicJudgeClient:
     async def _check(self, record, claim, binding, sources):
         response = await self._json_call("check", {
             "query": record["query"], "actual_history": record["actual_history"],
-            "claim": claim, "original_answer": record["answer"],
+            "claim": {**claim, "citation_ids": binding["citation_ids"]}, "original_answer": record["answer"],
             "answer_binding": binding, "sources": sources})
         if response["status"] == "completed":
             try:
@@ -204,6 +209,12 @@ class AtomicJudgeClient:
                 entry["error"] = str(exc)
                 continue
             entry["answer_binding"] = binding
+            entry["citation_declaration"] = {
+                "status": "extra_ids_not_bound_to_unit" if binding["extra_extractor_citation_ids"] else "no_extra_ids",
+                "declared_ids": binding["extractor_citation_ids"],
+                "original_unit_ids": binding["citation_ids"],
+                "extra_ids": binding["extra_extractor_citation_ids"],
+                "meaning": "extractor declarations do not select sources or establish claim attachment"}
             identity = {k: v for k, v in claim.items() if k != "claim_id"}
             duplicate = next((previous for value, previous in deduplicated if value == identity), None)
             if duplicate is not None:
@@ -245,6 +256,8 @@ class AtomicJudgeClient:
             "unaccounted_units": unaccounted, "errors": coverage_errors,
             "structural_review_units": [u["unit_id"] for u in units if u["kind"] in {"code", "table"}],
             "unbound_citation_units": [u["unit_id"] for u in units if u["kind"] == "ambiguous_citation_binding"],
+            "citation_declaration_errors": [e["entry_index"] for e in result["claims"]
+                if e.get("citation_declaration", {}).get("extra_ids")],
             "meaning": "A located claim does not prove that all qualifiers or facts were extracted."}
         result["summary"] = {"unique_bound_claims": len(deduplicated), "assessed_claims": len(assessed),
             "visible_assessed_claims": len(visible_assessed),
@@ -254,6 +267,7 @@ class AtomicJudgeClient:
         uncovered_review = any(reason not in {"nonverifiable", "heading"} for reason in declared.values())
         incomplete = (unaccounted or coverage_errors or uncovered_review or result["coverage"]["structural_review_units"]
                       or result["coverage"]["unbound_citation_units"]
+                      or result["coverage"]["citation_declaration_errors"]
                       or any(e["status"] in {"failed", "unresolved"} for e in result["claims"]))
         result["status"] = "partial" if incomplete else "complete"
         if not result["claims"]:

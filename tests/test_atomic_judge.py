@@ -155,13 +155,69 @@ async def test_checker_cannot_clean_up_extraction_and_call_it_verified():
 @pytest.mark.parametrize("updates",[
     {"answer_quote":"This quote was invented."},
     {"unit_id":"u99"},
-    {"citation_ids":["E_ff"]},
 ])
 async def test_invalid_extracted_span_does_not_call_checker(updates):
     record=audit()
     result,requests=await run(record,extraction(record["answer"],**updates))
     assert len(requests)==1 and result["claims"][0]["status"]=="failed"
     assert result["coverage"]["unaccounted_units"]==["u1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [7, 10.5, "7", None])
+async def test_numeric_value_representation_is_preserved_not_a_semantic_rejection(value):
+    record=audit("The cache limit is 8 MiB.")
+    result,requests=await run(record,extraction(record["answer"],value_raw=value),checked())
+    assert len(requests)==2 and result["claims"][0]["status"]=="assessed"
+    assert result["claims"][0]["extracted"]["value_raw"]==value
+    submitted=json.loads(requests[1]["messages"][1]["content"])["claim"]["value_raw"]
+    assert submitted==value and type(submitted) is type(value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [True, [], {}, float("inf"), float("nan")])
+async def test_invalid_value_structure_still_fails_at_input_boundary(value):
+    record=audit("The cache limit is 8 MiB.")
+    result,requests=await run(record,extraction(record["answer"],value_raw=value))
+    assert len(requests)==1 and result["claims"][0]["status"]=="failed"
+    assert "value_raw" in result["claims"][0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_extra_extractor_citation_does_not_drop_claim_or_expand_cited_sources():
+    record=audit("The cache limit is 8 MiB [E_02].")
+    result,requests=await run(record,extraction(record["answer"],citation_ids=["E_01","E_ff"]),
+                              checked(),checked("insufficient",quote=None))
+    entry=result["claims"][0]
+    assert entry["status"]=="assessed" and entry["visible_check"]["verdict"]=="entailed"
+    assert entry["cited_check"]["verdict"]=="insufficient"
+    assert entry["extracted"]["citation_ids"]==["E_01","E_ff"]
+    assert entry["citation_declaration"]["extra_ids"]==["E_01","E_ff"]
+    for request in requests[1:]:
+        assert json.loads(request["messages"][1]["content"])["claim"]["citation_ids"]==["E_02"]
+    cited=json.loads(requests[2]["messages"][1]["content"])
+    assert [s["reference_id"] for s in cited["sources"]]==["E_02"]
+    assert result["status"]=="partial" and result["coverage"]["citation_declaration_errors"]==[0]
+
+
+@pytest.mark.asyncio
+async def test_borrowed_neighbor_citation_does_not_invent_cited_check():
+    record=audit("The cache limit is 8 MiB.\n[E_01]")
+    out=extraction("The cache limit is 8 MiB.",citation_ids=["E_01"])
+    out["uncovered_units"]=[{"unit_id":"u2","reason":"nonverifiable"}]
+    result,requests=await run(record,out,checked())
+    entry=result["claims"][0]
+    assert len(requests)==2 and entry["visible_check"]["verdict"]=="entailed"
+    assert entry["cited_check"] is None and entry["citation_status"]=="not_bound_to_unit"
+    assert result["status"]=="partial"
+
+
+def test_v2_prompts_describe_fields_without_literal_placeholder_answers():
+    protocol=json.loads(Path("bench/assets/atomic_judge/protocol.json").read_text())
+    assert protocol["version"]=="contextkv-atomic-evidence-v2"
+    assert "standalone assertion preserving qualifiers" not in protocol["extract_system"]
+    assert "short source-based explanation" not in protocol["check_system"]
+    assert "finite JSON number" in protocol["extract_system"]
 
 
 @pytest.mark.asyncio
@@ -315,6 +371,6 @@ async def test_malformed_coverage_unit_is_recorded_and_next_file_row_runs(tmp_pa
 def test_protocol_assets_declare_adaptation_and_no_five_dimension_gate():
     root=Path(__file__).resolve().parents[1]
     p=json.loads((root/"bench/assets/atomic_judge/protocol.json").read_text())
-    assert p["version"]=="contextkv-atomic-evidence-v1"
+    assert p["version"]=="contextkv-atomic-evidence-v2"
     assert p["method_provenance"]["upstream_prompt_strings_copied"] is False
     assert "not a full reproduction" in p["method_provenance"]["adaptation"]
