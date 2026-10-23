@@ -76,13 +76,12 @@ class SGLangProbe:
         info = await self.engine.info()
         if info.engine_kind != "sglang" or not info.profiling_enabled:
             raise ValueError("profiling requires a dedicated patched SGLang with CONTEXTKV_ENABLE_PROFILING=1")
-        if case.cache_state not in {"cold", "gpu_ready", "host_only"}:
-            raise ValueError("unknown cache state")
-        if case.cache_state == "cold" and case.prefix_tokens:
-            raise ValueError("cold cases must request zero reusable prefix")
-        if case.cache_state != "cold" and case.prefix_tokens <= 0:
-            raise ValueError("warm cases need a nonempty reusable prefix")
-        await self._fixture("cold")
+        device_prefix, host_prefix = case.prefix_split()
+        reset = await self._fixture("cold")
+        if case.cache_state == "mixed":
+            page = reset["pool"]["page_size"]
+            if case.prefix_tokens % page or device_prefix % page:
+                raise ValueError("mixed prefixes must align to the actual native page size")
         self.repetition += 1
         rng = random.Random(self.seed + self.repetition)
         # Distinct leading tokens prevent cross-request cache hits in the same
@@ -99,17 +98,37 @@ class SGLangProbe:
                 sentinel = next(t for t in self.tokens if t != ids[case.prefix_tokens])
                 warms.append(self._generate(ids[:case.prefix_tokens]+(sentinel,), 1))
             await asyncio.gather(*warms)
-            await self._fixture("host_only" if case.cache_state == "host_only" else "settle")
+            await self._fixture("host_only" if case.cache_state in {"host_only", "mixed"} else "settle")
+            if case.cache_state == "mixed":
+                # Reuse native matching/splitting: restore only the shorter GPU
+                # prefix, while a divergent sentinel leaves the target tail on host.
+                warms = []
+                for ids in self._inputs:
+                    sentinel = next(t for t in self.tokens if t != ids[device_prefix])
+                    warms.append(self._generate(ids[:device_prefix]+(sentinel,), 1))
+                await asyncio.gather(*warms)
+                await self._fixture("settle")
         quotes = await self.engine.quote_batch(
             [self._candidate(ids, index) for index, ids in enumerate(self._inputs)], self.engine.fingerprint)
         for quote in quotes.quotes:
-            observed = (quote.ready_gpu_prefix_tokens if case.cache_state != "host_only"
-                        else quote.host_only_load_tokens)
-            if observed != case.prefix_tokens:
-                raise ValueError(f"cache fixture {case.cache_state} expected {case.prefix_tokens}, got {observed}; "
-                                 "check capacity, page alignment, host write policy and native admission threshold")
+            if case.cache_state == "mixed":
+                observed = (quote.ready_gpu_prefix_tokens, quote.host_only_load_tokens)
+                if (observed != (device_prefix, host_prefix)
+                        or quote.recoverable_prefix_tokens != case.prefix_tokens
+                        or quote.inflight_h2d_tokens or quote.inflight_d2h_tokens):
+                    self._write_telemetry({"event": "fixture_failed", "stage": "prepare", "case": case.record(),
+                                           "quote": asdict(quotes), "reason": "mixed_prefix_split_or_pending"})
+                    raise ValueError(f"cache fixture mixed expected device/host "
+                        f"{(device_prefix, host_prefix)}, got {observed}; check capacity, page alignment, "
+                        "host write policy, pending transfers and native admission threshold")
+            else:
+                observed = (quote.ready_gpu_prefix_tokens if case.cache_state != "host_only"
+                            else quote.host_only_load_tokens)
+                if observed != case.prefix_tokens:
+                    raise ValueError(f"cache fixture {case.cache_state} expected {case.prefix_tokens}, got {observed}; "
+                                     "check capacity, page alignment, host write policy and native admission threshold")
         self._before = await self.engine.metrics()
-        self._write_telemetry({"event": "prepared", "case": asdict(case),
+        self._write_telemetry({"event": "prepared", "case": case.record(),
                                "quote": asdict(quotes), "metrics": self._before})
 
     async def probe(self, case: PrefillCase):
@@ -119,6 +138,22 @@ class SGLangProbe:
         await self._fixture("settle")
         after = await self.engine.metrics(after_seq=self._before["next_seq"])
         rows = []
+        if case.cache_state == "mixed":
+            expected = case.prefix_split()
+            mismatches = []
+            for index, result in enumerate(results):
+                receipt = result.receipt
+                valid = ((receipt.actual_device_hit_tokens, receipt.actual_host_loaded_tokens) == expected
+                         and receipt.actual_prefill_tokens == case.prompt_tokens-case.prefix_tokens)
+                self._write_telemetry({"event": "request", "case": case.record(), "index": index,
+                                       "result": asdict(result), "exact_prefix_split": valid})
+                if not valid:
+                    mismatches.append(index)
+            if mismatches:
+                self._write_telemetry({"event": "fixture_failed", "stage": "execution", "case": case.record(),
+                                       "request_indices": mismatches, "metrics": after,
+                                       "reason": "mixed_execution_prefix_split_or_prefill"})
+                raise ValueError(f"mixed execution device/host split or prefill changed for requests {mismatches}")
         for index, result in enumerate(results):
             if not result.generation_complete or result.server_ttft_ms is None:
                 raise ValueError("engine did not provide a complete request with native server TTFT")
@@ -133,15 +168,16 @@ class SGLangProbe:
             rows.append(Measurement(phase="first_token", elapsed_ms=result.server_ttft_ms, **common))
             if len(result.output_ids) > 1 and result.decode_ms is not None:
                 rows.append(Measurement(phase="decode", elapsed_ms=result.decode_ms, **common))
-            self._write_telemetry({"event": "request", "case": asdict(case), "index": index,
-                                   "result": asdict(result)})
+            if case.cache_state != "mixed":
+                self._write_telemetry({"event": "request", "case": case.record(), "index": index,
+                                       "result": asdict(result)})
         if after["events_truncated"]:
             raise ValueError("telemetry buffer overflow; reduce calibration concurrency or poll metrics more often")
         dma = [e for e in after["events"] if e["event"] == "transfer" and e.get("duration_ms") is not None]
         rows.extend(replace(row, concurrency=case.concurrency, run_id=self.run_id,
                             repetition=self.repetition, timing_scope="cuda_event")
                     for row in from_completed_events(dma))
-        self._write_telemetry({"event": "completed", "case": asdict(case), "metrics": after})
+        self._write_telemetry({"event": "completed", "case": case.record(), "metrics": after})
         return tuple(rows)
 
 
@@ -183,8 +219,14 @@ async def _run(args):
         cases = calibration_grid(args.lengths, args.prefix_fractions, args.outputs,
             args.concurrency, page_size=snapshot["pool"]["page_size"],
             context_limit=config.context.max_total_model_tokens)
-        expanded = [replace(case, cache_state=state) for case in cases for state in args.cache_states
+        expanded = [replace(case, cache_state=state,
+                            device_prefix_tokens=args.device_prefix_tokens if state == "mixed" else None)
+                    for case in cases for state in args.cache_states
                     if (state == "cold") == (case.prefix_tokens == 0)]
+        for case in expanded:
+            device, _ = case.prefix_split()
+            if case.cache_state == "mixed" and device % snapshot["pool"]["page_size"]:
+                raise ValueError("--device-prefix-tokens must align to the actual native page size")
         if not expanded:
             raise ValueError("no compatible calibration cases")
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -194,16 +236,25 @@ async def _run(args):
                     "runtime_manifest": runtime_manifest,
                     "fingerprint": asdict(template.fingerprint), "seed": args.seed,
                     "timing_scope": "server_request; transfer CUDA ACK events",
-                    "cases": [asdict(case) for case in expanded], "repetitions": args.repetitions,
+                    "cases": [case.record() for case in expanded], "repetitions": args.repetitions,
                     "warmup_per_case": args.warmup,
                     "warmup_request_count": sum(case.concurrency for case in expanded)*args.warmup,
-                    "warmup_in_training_measurements": False}
+                    "warmup_in_training_measurements": False,
+                    "prefix_tier_binding": {"mixed": "prepared_and_execution_exact",
+                                            "cold_gpu_ready_host_only": "prepared_split_execution_drift_audited"}}
         manifest_path = output.with_suffix(".manifest.json")
         manifest_path.write_text(json.dumps(manifest, indent=2)+"\n")
         count = 0
-        for case in expanded:
-            count += await collect_case(probe,case,warmup=args.warmup,
-                                        repetitions=args.repetitions,output_path=output)
+        try:
+            for case in expanded:
+                count += await collect_case(probe,case,warmup=args.warmup,
+                                            repetitions=args.repetitions,output_path=output)
+        except Exception as error:
+            written = sum(bool(line.strip()) for line in output.read_text().splitlines()) if output.exists() else 0
+            manifest.update(status="failed", measurement_count=written, completed_case_measurement_count=count,
+                            error=f"{type(error).__name__}: {error}")
+            manifest_path.write_text(json.dumps(manifest, indent=2)+"\n")
+            raise
         manifest.update(status="complete", measurement_count=count)
         manifest_path.write_text(json.dumps(manifest, indent=2)+"\n")
         print(json.dumps({"status": "complete", "measurement_count": count, "output": str(output)}))
@@ -222,7 +273,10 @@ def main(argv=None):
     parser.add_argument("--prefix-fractions", type=lambda s: tuple(map(float, s.split(","))), default=(0,.5,.99))
     parser.add_argument("--outputs", type=lambda s: tuple(map(int, s.split(","))), default=(128,512))
     parser.add_argument("--concurrency", type=lambda s: tuple(map(int, s.split(","))), default=(1,4))
-    parser.add_argument("--cache-states", type=lambda s: tuple(s.split(",")), default=("cold","gpu_ready","host_only"))
+    parser.add_argument("--cache-states", type=lambda s: tuple(s.split(",")), default=("cold","gpu_ready","host_only"),
+                        help="cold,gpu_ready,host_only,mixed; mixed needs --device-prefix-tokens")
+    parser.add_argument("--device-prefix-tokens", type=int,
+                        help="prepared GPU part of a mixed prefix; total prefix still uses --prefix-fractions")
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1, help="Per-case warmup runs excluded from training JSONL")
     parser.add_argument("--seed", type=int, default=42)

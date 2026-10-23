@@ -20,6 +20,7 @@ from statistics import mean
 from controller.cost_model import CostModel
 from profiling.common import load_measurements
 from profiling.fit import measurement_provenance
+from profiling.prefill import PrefillCase
 
 FORWARD_FEATURES = ("prefix_tokens", "suffix_tokens", "host_load_tokens", "concurrency")
 WAITING_FEATURES = (*FORWARD_FEATURES, "requested_output_budget", "gpu_capacity_tokens")
@@ -81,6 +82,11 @@ def load_bound_rows(compact_path, measurements_path, manifests):
         case = record["case"]
         if case not in manifest.get("cases",[]):
             raise ValueError("compact fixture is absent from its original profile manifest")
+        fixture = PrefillCase(**case)
+        prepared_device, prepared_host = fixture.prefix_split()
+        if (fixture.cache_state == "mixed" and
+                (record["actual_device_hit_tokens"], record["actual_host_loaded_tokens"]) != (prepared_device, prepared_host)):
+            raise ValueError("mixed device/host split changed from its prepared fixture")
         prefix = record["actual_device_hit_tokens"] + record["actual_host_loaded_tokens"]
         expected = {"prompt_tokens": case["prompt_tokens"], "prefix_tokens": prefix,
                     "host_load_tokens": record["actual_host_loaded_tokens"], "concurrency": case["concurrency"],
@@ -98,8 +104,10 @@ def load_bound_rows(compact_path, measurements_path, manifests):
         row = {"run_id": run_id, "batch_id": f"{run_id}:{observed['repetition']}",
                "group": record["group"], "request_index": record["index"], "input_hash": record["input_hash"],
                "prefix_tokens": case["prefix_tokens"], "suffix_tokens": case["prompt_tokens"]-case["prefix_tokens"],
-               "host_load_tokens": case["prefix_tokens"] if case["cache_state"] == "host_only" else 0,
+               "host_load_tokens": prepared_host,
                "actual_host_loaded_tokens": observed["host_load_tokens"],
+               "prefix_tier_binding": "prepared_and_execution_exact" if fixture.cache_state == "mixed" else "prepared",
+               "prepared_device_prefix_tokens": prepared_device,
                "concurrency": case["concurrency"], "requested_output_budget": case["output_tokens"],
                "gpu_capacity_tokens": manifest["pool"]["gpu_capacity_tokens"],
                "forward_ms": values[0], "pre_forward_ms": values[1]-values[0], "total_ttft_ms": values[1]}
@@ -120,6 +128,12 @@ def load_bound_rows(compact_path, measurements_path, manifests):
         "warmup_requests_excluded": sum(bool(row["warmup"]) for row in compact),
         "formal_requests": len(rows), "batches": len(batches),
         "prepared_vs_actual_host_load_changed_requests": sum(r["host_load_tokens"] != r["actual_host_loaded_tokens"] for r in rows),
+        "groups": {group: {
+            "prefix_tier_binding": sorted({r["prefix_tier_binding"] for r in rows if r["group"] == group}),
+            "formal_requests": sum(r["group"] == group for r in rows),
+            "prepared_vs_actual_host_load_changed_requests": sum(r["host_load_tokens"] != r["actual_host_loaded_tokens"]
+                                                                  for r in rows if r["group"] == group)}
+            for group in manifest_rows},
         "batch_binding": "original_first_token_order_and_exact_fields_to_run_id_repetition"}
     return rows, provenance
 

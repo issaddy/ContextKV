@@ -21,7 +21,7 @@ class ProtocolDouble(MockEngine):
         elif mode == "host_only":
             for slot in self._slots.values():
                 slot.gpu, slot.host = False, True
-        return {"mode": mode}
+        return {"mode": mode, "pool": {"page_size": self.page_size}}
 
     async def metrics(self, after_seq=0):
         return {"next_seq": 0, "events": [], "events_truncated": False,
@@ -118,3 +118,96 @@ def test_calibration_warmup_is_observed_but_never_written_to_training_rows(tmp_p
         assert count == 3
         assert [row.elapsed_ms for row in load_measurements(output)] == [12,12,12]
     asyncio.run(scenario())
+
+
+def test_mixed_fixture_uses_native_restore_then_checks_both_tiers(tmp_path):
+    import json
+    async def scenario():
+        engine = ProtocolDouble(response_text="abcd", page_size=4)
+        probe = SGLangProbe(engine, range(20), telemetry_path=tmp_path/"mixed.jsonl")
+        case = PrefillCase(12, 8, 4, 2, "mixed", 4)
+        await probe.prepare(case)
+        rows = await probe.probe(case)
+        assert all(row.prefix_tokens == 8 and row.host_load_tokens == 4 for row in rows)
+        events = [json.loads(line) for line in (tmp_path/"mixed.jsonl").read_text().splitlines()]
+        prepared = next(row for row in events if row["event"] == "prepared")
+        assert all(q["ready_gpu_prefix_tokens"] == q["host_only_load_tokens"] == 4 for q in prepared["quote"]["quotes"])
+        requests = [row for row in events if row["event"] == "request"]
+        assert len(requests) == 2 and all(row["exact_prefix_split"] for row in requests)
+        assert all(row["case"]["device_prefix_tokens"] == 4 for row in requests)
+    asyncio.run(scenario())
+
+
+def test_mixed_execution_tier_drift_is_retained_and_refused(tmp_path):
+    import json
+    class Drift(ProtocolDouble):
+        async def generate(self, **kwargs):
+            result = await super().generate(**kwargs)
+            if len(kwargs["input_ids"]) == 12:
+                result = replace(result,receipt=replace(result.receipt,actual_device_hit_tokens=8,actual_host_loaded_tokens=0))
+            return result
+    async def scenario():
+        probe = SGLangProbe(Drift(page_size=4),range(20),telemetry_path=tmp_path/"drift.jsonl")
+        case = PrefillCase(12,8,4,2,"mixed",4)
+        await probe.prepare(case)
+        with pytest.raises(ValueError,match="execution device/host split"):
+            await probe.probe(case)
+        rows = [json.loads(line) for line in (tmp_path/"drift.jsonl").read_text().splitlines()]
+        requests = [row for row in rows if row["event"] == "request"]
+        assert len(requests) == 2 and all(row["exact_prefix_split"] is False for row in requests)
+        assert all(row["result"]["receipt"]["actual_host_loaded_tokens"] == 0 for row in requests)
+        failure = next(row for row in rows if row["event"] == "fixture_failed")
+        assert failure["stage"] == "execution" and failure["request_indices"] == [0,1]
+        assert failure["metrics"]["events"] == [] and failure["metrics"]["pool"]["unique_host_tokens"] > 0
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("device", [None,0,8,9,True])
+def test_mixed_requires_an_explicit_partial_device_prefix(device):
+    with pytest.raises(ValueError,match="device_prefix_tokens"):
+        PrefillCase(12,8,4,1,"mixed",device).prefix_split()
+
+
+def test_default_case_record_stays_compatible_and_mixed_pages_are_checked():
+    assert PrefillCase(8,4,4,1,"gpu_ready").record() == dict(
+        prompt_tokens=8,prefix_tokens=4,output_tokens=4,concurrency=1,cache_state="gpu_ready")
+    async def scenario():
+        with pytest.raises(ValueError,match="page size"):
+            await SGLangProbe(ProtocolDouble(page_size=4),range(20)).prepare(PrefillCase(12,8,4,1,"mixed",2))
+    asyncio.run(scenario())
+
+
+
+def test_failed_case_manifest_counts_rows_already_written(tmp_path,monkeypatch):
+    from argparse import Namespace
+    from types import SimpleNamespace
+    import json
+    import profiling.sglang_probe as module
+    from controller.schema import ConfigFingerprint
+    from profiling.common import Measurement, write_measurements
+    engine = ProtocolDouble()
+    async def metrics(after_seq=0):
+        return {"pool":{"page_size":1},"cache_config":{}}
+    async def aclose():
+        pass
+    engine.metrics = metrics
+    engine.aclose = aclose
+    monkeypatch.setattr(module,"SGLangEngineClient",lambda *a,**k:engine)
+    tokenizer = SimpleNamespace(all_special_ids=(),get_vocab=lambda:{"a":1,"b":2})
+    monkeypatch.setattr(module,"HuggingFaceTemplate",lambda *a,**k:
+                        SimpleNamespace(tokenizer=tokenizer,fingerprint=ConfigFingerprint()))
+    async def interrupted(probe,case,*,warmup,repetitions,output_path):
+        write_measurements(output_path,[Measurement("first_token",8,0,4,1,0,10.,"hardware")]*2)
+        raise ValueError("third repetition fixture failed")
+    monkeypatch.setattr(module,"collect_case",interrupted)
+    config=tmp_path/"config.yaml"
+    config.write_text("engine:\n  kind: sglang\n")
+    output=tmp_path/"probe.jsonl"
+    args=Namespace(config=str(config),runtime_manifest=None,model_path=None,base_url=None,output=str(output),
+        seed=42,lengths=(8,),prefix_fractions=(0,),outputs=(4,),concurrency=(1,),
+        cache_states=("cold",),device_prefix_tokens=None,repetitions=3,warmup=1)
+    with pytest.raises(ValueError,match="third repetition"):
+        asyncio.run(module._run(args))
+    manifest=json.loads(output.with_suffix(".manifest.json").read_text())
+    assert manifest["status"]=="failed" and manifest["measurement_count"]==2
+    assert manifest["completed_case_measurement_count"]==0

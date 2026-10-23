@@ -156,3 +156,38 @@ def test_development_length_distribution_must_match_bound_completed_report(tmp_p
     report.write_text('{}')
     with pytest.raises(ValueError,match="already bound"):
         fit_artifact(examples(),provenance,base,development_report=report)
+
+
+
+def mixed_inputs(tmp_path, *, drift=False):
+    cp, mp, manifests, compact = inputs(tmp_path)
+    manifest = json.loads(manifests["group"].read_text())
+    case = dict(manifest["cases"][0],cache_state="mixed",device_prefix_tokens=256)
+    manifest["cases"] = [case]
+    manifests["group"].write_text(json.dumps(manifest))
+    for row in compact:
+        row["case"] = case
+        row["actual_device_hit_tokens"] = 0 if drift else 256
+        row["actual_host_loaded_tokens"] = 512 if drift else 256
+    cp.write_text("".join(json.dumps(row)+"\n" for row in compact))
+    measurements = [json.loads(line) for line in mp.read_text().splitlines()]
+    for row in measurements:
+        row.update(cache_state="mixed",host_load_tokens=512 if drift else 256)
+    mp.write_text("".join(json.dumps(row)+"\n" for row in measurements))
+    return cp, mp, manifests
+
+
+def test_mixed_stage_features_use_the_declared_split_with_exact_receipts(tmp_path):
+    cp, mp, manifests = mixed_inputs(tmp_path)
+    rows, provenance = load_bound_rows(cp,mp,manifests)
+    assert len(rows)==4
+    assert all(row["host_load_tokens"]==row["prepared_device_prefix_tokens"]==256 for row in rows)
+    assert provenance["stage_compact"]["groups"]["group"] == {
+        "prefix_tier_binding":["prepared_and_execution_exact"],"formal_requests":4,
+        "prepared_vs_actual_host_load_changed_requests":0}
+
+
+def test_mixed_stage_refuses_tier_drift_even_if_total_prefix_and_measurements_agree(tmp_path):
+    cp, mp, manifests = mixed_inputs(tmp_path,drift=True)
+    with pytest.raises(ValueError,match="mixed device/host split changed"):
+        load_bound_rows(cp,mp,manifests)

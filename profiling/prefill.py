@@ -21,6 +21,33 @@ class PrefillCase:
     output_tokens: int
     concurrency: int
     cache_state: str
+    device_prefix_tokens: int | None = None
+
+    def record(self) -> dict:
+        """Keep the original five-field wire shape for legacy fixtures."""
+        value = asdict(self)
+        if self.device_prefix_tokens is None:
+            value.pop("device_prefix_tokens")
+        return value
+
+    def prefix_split(self) -> tuple[int, int]:
+        """Prepared device/host-only tokens, never inferred from execution."""
+        if self.cache_state != "mixed" and self.device_prefix_tokens is not None:
+            raise ValueError("device_prefix_tokens is only used by mixed cases")
+        if self.cache_state == "cold":
+            if self.prefix_tokens:
+                raise ValueError("cold cases must request zero reusable prefix")
+            return 0, 0
+        if self.cache_state not in {"gpu_ready", "host_only", "mixed"}:
+            raise ValueError("unknown cache state")
+        if self.prefix_tokens <= 0:
+            raise ValueError("warm cases need a nonempty reusable prefix")
+        if self.cache_state == "mixed":
+            device = self.device_prefix_tokens
+            if type(device) is not int or not 0 < device < self.prefix_tokens:
+                raise ValueError("mixed cases need 0 < device_prefix_tokens < prefix_tokens")
+            return device, self.prefix_tokens-device
+        return (self.prefix_tokens, 0) if self.cache_state == "gpu_ready" else (0, self.prefix_tokens)
 
 
 def calibration_grid(lengths: Sequence[int] = (1024, 2048, 4096, 8192, 16384),
@@ -78,7 +105,7 @@ def main(argv=None):
     if args.measurements:
         payload = {"status": "summarized_observations", "buckets": summarize_measurements(load_measurements(args.measurements), allow_mock=args.allow_mock)}
     else:
-        payload = {"status": "not_run", "hardware_measurements": None, "cases": [asdict(c) for c in calibration_grid()],
+        payload = {"status": "not_run", "hardware_measurements": None, "cases": [c.record() for c in calibration_grid()],
                    "instructions": "Use collect(cases, prepare=cache_reset_or_warm, probe=instrumented_engine). No GPU measurements exist in this file."}
     target = Path(args.output)
     target.parent.mkdir(parents=True, exist_ok=True)
