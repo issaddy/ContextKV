@@ -96,6 +96,8 @@ uv run --extra retrieval contextkv --config configs/demo.yaml \
 
 [有限容量控制器入口](docs/controller_capacity_sweep.md)复用现有引擎与矩阵工具，比较六种固定方法并要求每个容量使用自身的标定。原生和控制器运行器均保留失败结果，并在生成失败时返回非零退出码。
 
+16K 独立标定及六方法的 246 轮真实运行已完成；[标定分析](docs/capacity_calibration_validation.md)和[联合验证](docs/controller_capacity_validation.md)定位了容量不确定标记导致的集中回退，以及输出预算与调度等待耦合。这些结果用于继续改进 B/C，尚不构成完整方法优于强基线的结论。
+
 ## 真实 SGLang 接入
 
 在 Linux GPU 主机使用独立环境安装固定 SGLang 的实际依赖，控制器依赖由本项目 `uv.lock` 管理。主实验固定 Python TreeCore、TP=1、DP=1、FULL attention、BF16 权重与 KV，不启用 L3 或推测解码。完整安装、分阶段 GPU/host 验证和标定命令见 [部署说明](docs/deployment.md)；`bash scripts/bootstrap_sglang.sh` 可准备独立环境、固定源码补丁与模型。
