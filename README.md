@@ -82,6 +82,8 @@ uv run --extra retrieval contextkv --config configs/demo.yaml \
 
 原生 B0/B1 有独立入口 `python -m bench.native_baseline`：B0 不传 session ID，B1 在整个业务会话中保持同一个原生 session ID；二者都不使用研究报价或伪造 receipt。分别在未打研究补丁、按基线启用缓存的服务器上运行，并根据实际启动日志补齐 `configs/native_b0_manifest.example.json` / `native_b1_manifest.example.json` 中的未知字段。示例文件会被验证器拒绝用作正式实验。完整命令与服务器参数见 [原生基线说明](docs/data_and_evaluation.md)。
 
+研究控制器的硬件开发矩阵及专用服务冷态准备见 [硬件 dev 运行](docs/hardware_dev_matrix.md)。示例包含 11 个同预算开发任务及 5 个继承已选配置的消融；原生 B0/B1、host 策略组合和质量准入仍须独立补齐，不能将这一子集命名为完整最强 B6。
+
 `cost` 只有在相应 prefix/suffix/host-load/concurrency 桶存在可信硬件标定时才启用成本切换；否则结果中明确记录 `uncalibrated_cost_fallback`。`shadow: true` 仅记录成本建议，执行固定回退。`calibration_path` 可指定真实 Measurement JSONL。正式启用前还需用本机 profiling 将 `delta_abs` 写为控制开销 P95 的两倍。
 
 可选 `positive_basis` 复用 SciPy NNLS 离线拟合，推理只需保存的八个系数；默认仍为查表。按完整特征单元留出，超出实测总长度、混入模拟数据或误差样本不足时不标为硬件校准。共享提示词 Q1/Q2 也仅作为实验配置，真实开发对照发现错引后保持原默认；见[成本验证](docs/data_and_evaluation.md)及[提示词验证](docs/shared_prompt_validation.md)。最新论文与固定作者代码的复用分析见[研究审查](docs/research_review_20261024.md)。

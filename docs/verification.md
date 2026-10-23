@@ -6,7 +6,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归（含真实 tokenizer） | 262 passed，另有 6 subtests passed；runs/pytest-engineering-final.log |
+| 最近完整 CPU 回归（含真实 tokenizer） | 273 passed，另有 6 subtests passed；runs/pytest-offline-comparison.log |
 | 固定 Qwen tokenizer 专项 | 单独开启后 1 passed；真实模板、输入 IDs 和 LCP 验证通过 |
 | Ruff / shell / wheel | 通过；wheel 包含 engine_patches.smoke |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |

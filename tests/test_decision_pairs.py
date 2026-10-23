@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 from dataclasses import asdict, replace
 from hashlib import sha256
 import json
@@ -16,7 +17,7 @@ from controller.service import Controller
 from controller.session_store import SessionStore
 from controller.templates import ByteTemplate
 from profiling.decision_pairs import (DecisionPairCollector, analyze_pairs, freeze_cases,
-                                      load_frozen, select_cases, write_frozen)
+                                      load_frozen, main, rescore_pairs, select_cases, write_frozen)
 
 
 def source_run(tmp_path, *, layout="stable_key"):
@@ -209,3 +210,110 @@ def test_analysis_distinguishes_prediction_sign_selection_regret_and_fallback():
     assert report["fallback_pairs"] == 1 and report["failed_or_unmeasured_pairs"] == 1
     assert report["mean_selected_regret_ms"] == pytest.approx(20/3)
     assert report["equal_session_mean_regret_ms"] == 8.75
+
+
+def measured_pair(tmp_path):
+    database, manifest, split, manifest_path, split_path = source_run(tmp_path)
+    case = freeze_cases(database, manifest, split, ByteTemplate())[0][0]
+    async def measure():
+        engine = PairEngineDouble()
+        info = await engine.info()
+        row = await DecisionPairCollector(engine, CostModel()).measure(case, "cold")
+        row["measurement_source"] = "simulation"
+        return row, info
+    row, info = asyncio.run(measure())
+    return case, row, info, (database, manifest_path, split_path)
+
+
+def rescore_model(case, *, prefer="REBUILD"):
+    return CostModel([LookupPoint(0, len(c.input_ids), 1, 20 if c.action == prefer else 100)
+                      for c in case.candidates], include_decode_cost=False, allow_mock_calibration=True)
+
+
+def test_rescore_uses_only_frozen_history_and_quotes_and_keeps_all_measurements(tmp_path):
+    case, row, info, _ = measured_pair(tmp_path)
+    untouched = deepcopy(row)
+    knobs = PlannerKnobs(min_stable_turns=0, delta_rel=0, z=0)
+    changed = deepcopy(row)
+    for index, arm in enumerate(changed["observations"].values()):
+        arm.update(server_elapsed_ms=99999-index, client_complete_ms=index, output_tokens=400-index)
+        arm["result"].update(text="CURRENT FUTURE ANSWER", output_ids=[90]*(400-index))
+    first = rescore_pairs([row], [case], rescore_model(case), knobs, info)[0]
+    second = rescore_pairs([changed], [case], rescore_model(case), knobs, info)[0]
+    assert first["selected_action"] == second["selected_action"] == "REBUILD"
+    assert first["plan_reason"] == second["plan_reason"] == "cost_saving"
+    for action in ("APPEND", "REBUILD"):
+        assert first["observations"][action]["prediction"] == second["observations"][action]["prediction"]
+        for key, value in untouched["observations"][action].items():
+            if key != "prediction":
+                assert first["observations"][action][key] == value
+    other_model = rescore_pairs([row], [case], rescore_model(case, prefer="APPEND"), knobs, info)[0]
+    assert other_model["selected_action"] == "APPEND"
+    assert first["measurement_source"] == "simulation"
+    assert first["rescoring"]["source_predictions"]["APPEND"] == row["observations"]["APPEND"]["prediction"]
+    assert row == untouched
+
+
+@pytest.mark.parametrize("corruption", ("case_id", "input_hash", "quote_hash", "shape"))
+def test_rescore_rejects_wrong_frozen_input_or_cache_preparation(tmp_path, corruption):
+    case, row, info, _ = measured_pair(tmp_path)
+    changed = deepcopy(row)
+    if corruption == "case_id":
+        changed["case_id"] = "different-source-case"
+    elif corruption == "input_hash":
+        changed["observations"]["APPEND"]["input_hash"] = "different-input"
+    elif corruption == "quote_hash":
+        changed["observations"]["REBUILD"]["quote"]["quotes"][0]["input_hash"] = "different-input"
+    else:
+        changed["observations"]["REBUILD"]["quote"]["free_gpu_tokens"] += 1
+    with pytest.raises(ValueError, match="case_id|input_hash|quote does not describe|different prepared"):
+        rescore_pairs([changed], [case], rescore_model(case), PlannerKnobs(), info)
+
+
+def test_rescore_preserves_failed_rows_and_calibration_scope_mismatch(tmp_path):
+    case, row, info, _ = measured_pair(tmp_path)
+    failed = {"case_id": case.case_id, "conversation_id": case.conversation_id,
+              "status": "failed", "error": "SOURCE_SECOND_ARM_FAILED", "observations": {}}
+    model = rescore_model(case)
+    model.calibration_metadata = {"profile_manifest": {"fingerprint": asdict(info.fingerprint),
+                                    "engine": {"cache_config_hash": "other-engine-config"}}}
+    result = rescore_pairs([row, failed], [case], model, PlannerKnobs(), info)
+    assert result[0]["plan_reason"] == "uncalibrated_cost_fallback"
+    assert result[0]["calibration_scope"]["status"] == "mismatch"
+    assert result[1]["error"] == failed["error"] and result[1]["status"] == "failed"
+    assert result[1]["rescoring"]["status"] == "source_failure_preserved"
+    assert analyze_pairs(result)["failed_or_unmeasured_pairs"] == 1
+    assert "rescoring" not in failed
+
+
+def test_rescore_cli_records_source_identity_without_constructing_engine(tmp_path, monkeypatch):
+    import profiling.decision_pairs as module
+    case, row, info, inputs = measured_pair(tmp_path)
+    cases_path = tmp_path/"cases.jsonl"
+    frozen = write_frozen(*inputs, cases_path, ByteTemplate())
+    pairs = tmp_path/"pairs.jsonl"
+    pairs.write_text(dumps(row)+"\n")
+    original = pairs.read_bytes()
+    source_manifest = {"split": "dev", "status": "complete", "frozen": frozen,
+                       "engine": asdict(info), "config": asdict(RunConfig())}
+    pairs.with_suffix(".manifest.json").write_text(json.dumps(source_manifest))
+    config = tmp_path/"config.yaml"
+    config.write_text(json.dumps(asdict(RunConfig())))
+    artifact = tmp_path/"cost.json"
+    rescore_model(case).save(artifact)
+    def unexpected_engine(*args, **kwargs):
+        raise AssertionError("offline rescore constructed an engine client")
+    monkeypatch.setattr(module, "SGLangEngineClient", unexpected_engine)
+    output = tmp_path/"rescored.jsonl"
+    args = ["rescore", "--cases", str(cases_path), "--input", str(pairs), "--config", str(config),
+            "--cost-artifact", str(artifact), "--output", str(output)]
+    main(args)
+    metadata = json.loads(output.with_suffix(".manifest.json").read_text())
+    assert metadata["source_pairs_sha256"] == sha256(original).hexdigest()
+    assert metadata["source_manifest_sha256"] == sha256(pairs.with_suffix(".manifest.json").read_bytes()).hexdigest()
+    assert metadata["measurement_source_counts"] == {"simulation": 1}
+    assert metadata["new_generations"] == metadata["new_engine_requests"] == 0
+    assert not metadata["current_outcomes_used_for_selection"]
+    assert pairs.read_bytes() == original
+    with pytest.raises(FileExistsError):
+        main(args)

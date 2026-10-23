@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter, defaultdict
+from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import json
@@ -22,9 +23,9 @@ import uuid
 from controller.candidates import build_candidates
 from controller.config import RunConfig, load_config
 from controller.cost_model import CostModel
-from controller.engine_client import EngineError, SGLangEngineClient
+from controller.engine_client import EngineError, EngineInfo, SGLangEngineClient
 from controller.planner import PlannerKnobs, choose_plan
-from controller.schema import NoFeasiblePlan, PromptCandidate, SessionSnapshot
+from controller.schema import CacheQuoteBatch, NoFeasiblePlan, PromptCandidate, SessionSnapshot
 from controller.serialization import decode, dumps, loads
 from controller.session_store import Attempt
 from controller.templates import ByteTemplate, HuggingFaceTemplate
@@ -321,7 +322,7 @@ def analyze_pairs(rows, *, time_field="server_elapsed_ms", tie_ms=1.0):
         selected = row["observations"][row["selected_action"]][time_field]
         regret = selected - min(a[time_field], r[time_field])
         item = {"case_id": row["case_id"], "conversation_id": row["conversation_id"],
-                "cache_state": row["cache_state"], "calibrated": calibrated,
+                "cache_state": row["cache_state"], "repetition": row.get("repetition", 0), "calibrated": calibrated,
                 "predicted_append_minus_rebuild_ms": predicted, "actual_append_minus_rebuild_ms": actual,
                 "sign_correct": sign(predicted) == sign(actual), "selected_regret_ms": regret,
                 "outputs": {"APPEND": a["output_tokens"], "REBUILD": r["output_tokens"]}}
@@ -346,15 +347,7 @@ def analyze_pairs(rows, *, time_field="server_elapsed_ms", tie_ms=1.0):
             "interpretation": "offline fixture decisions; not original concurrency replay or quality-adjusted oracle"}
 
 
-async def collect(args):
-    cases, frozen = load_frozen(args.cases)
-    if frozen["source_measurement_kind"] == "simulation":
-        raise ValueError("hardware decision collection requires a source run with real model tokens")
-    config = load_config(args.config)
-    fingerprint = cases[0].candidates[0].fingerprint
-    engine = SGLangEngineClient(args.base_url or config.engine.base_url, fingerprint,
-                                timeout=config.engine.timeout_seconds, stream=False)
-    artifact = args.cost_artifact or config.cost_model.artifact
+def _model_and_knobs(config, cases, artifact):
     common = dict(max_new_tokens=cases[0].max_new_tokens,
                   include_host_cost=config.ablation.host_cost, include_decode_cost=config.ablation.decode_cost,
                   include_control_cost=config.ablation.control_cost)
@@ -370,6 +363,130 @@ async def collect(args):
         model = CostModel(**common, **settings)
     knobs = config.planner if config.ablation.hysteresis else replace(
         config.planner, delta_abs=0, delta_rel=0, z=0, min_stable_turns=0)
+    return model, knobs
+
+
+def rescore_pairs(rows, cases, model, knobs, engine_info):
+    """Re-plan saved inputs/quotes only; retain current outcomes for later analysis.
+
+    The first measured arm supplies the decision quote, as in collection. Each
+    arm's prediction uses its own saved quote. No current result enters planning.
+    """
+    info = decode(EngineInfo, engine_info) if isinstance(engine_info, dict) else engine_info
+    scope = model.check_calibration_scope(info)
+    by_case = {case.case_id: case for case in cases}
+    if len(by_case) != len(cases):
+        raise ValueError("duplicate frozen case IDs")
+    rescored = []
+    for source in rows:
+        case = by_case.get(source["case_id"])
+        if case is None or source["conversation_id"] != case.conversation_id:
+            raise ValueError("saved pair case_id/conversation does not match frozen cases")
+        row = deepcopy(source)
+        if source.get("status") != "completed":
+            row["rescoring"] = {"status": "source_failure_preserved"}
+            rescored.append(row)
+            continue
+        if source["request_id"] != case.request_id:
+            raise ValueError("saved pair request does not match frozen case")
+        if model.max_new_tokens != case.max_new_tokens:
+            raise ValueError("rescoring must preserve the frozen generation budget")
+        candidates = {candidate.action: candidate for candidate in case.candidates}
+        order = source["execution_order"]
+        if (set(candidates) != {"APPEND", "REBUILD"} or len(order) != 2
+                or set(order) != set(candidates) or set(source["observations"]) != set(candidates)):
+            raise ValueError("completed pair requires two frozen arms and their original execution order")
+        plans, first_shape = {}, None
+        for action in order:
+            candidate, observation = candidates[action], source["observations"][action]
+            if (observation["input_hash"] != candidate.input_hash
+                    or observation["input_tokens"] != len(candidate.input_ids)
+                    or observation["result"]["receipt"]["input_hash"] != candidate.input_hash):
+                raise ValueError("saved arm input_hash/length differs from frozen candidate")
+            quote = decode(CacheQuoteBatch, observation["quote"])
+            if quote.fingerprint != info.fingerprint or quote.cache_config_hash != info.cache_config_hash:
+                raise ValueError("saved quote differs from recorded engine configuration")
+            if first_shape is not None and _shape(quote) != first_shape:
+                raise ValueError("saved pair arms have different prepared cache shapes")
+            first_shape = _shape(quote)
+            # choose_plan validates every candidate/quote identity in this batch.
+            plan = choose_plan(case.candidates, quote, model, case.snapshot, knobs,
+                               concurrency=1, control_ms=0)
+            if isinstance(plan, NoFeasiblePlan):
+                raise ValueError("frozen decision has no feasible plan")
+            plans[action] = plan
+            estimate = next((item for item in plan.predicted if item.candidate_id == candidate.candidate_id), None)
+            if estimate is None:
+                own_quote = next(item for item in quote.quotes if item.candidate_id == candidate.candidate_id)
+                estimate = model.predict_native(candidate, own_quote, case.snapshot, batch=quote,
+                                                concurrency=1, control_ms=0)
+            row["observations"][action]["prediction"] = asdict(estimate)
+        selected = plans[order[0]]
+        row["rescoring"] = {"status": "rescored", "source_selected_action": source["selected_action"],
+            "source_plan_reason": source["plan_reason"], "source_calibration_scope": source.get("calibration_scope"),
+            "source_predictions": {action: deepcopy(arm["prediction"]) for action, arm in source["observations"].items()},
+            "decision_quote_arm": order[0], "outcomes_unchanged": True, "current_outcomes_used_for_selection": False}
+        row.update(selected_action=selected.candidate.action, plan_reason=selected.reason,
+                   calibration_scope=scope, prediction_control_ms=0)
+        rescored.append(row)
+    return rescored
+
+
+def rescore_file(args):
+    cases, frozen = load_frozen(args.cases)
+    source_path = Path(args.input)
+    source_manifest_path = source_path.with_suffix(".manifest.json")
+    source_manifest = json.loads(source_manifest_path.read_text())
+    if source_manifest.get("status") not in {"complete", "complete_with_failures"}:
+        raise ValueError("finish source pair collection before offline rescoring")
+    if (source_manifest.get("split") != "dev"
+            or source_manifest["frozen"]["cases_sha256"] != frozen["cases_sha256"]):
+        raise ValueError("saved pairs were not collected from this frozen development bundle")
+    output = Path(args.output)
+    targets = (output, output.with_suffix(".manifest.json"), output.with_suffix(".summary.json"))
+    if any(path.exists() for path in targets):
+        raise FileExistsError("rescored output already exists; choose a new output")
+    config = load_config(args.config)
+    artifact = args.cost_artifact or config.cost_model.artifact
+    if not artifact:
+        raise ValueError("offline rescoring requires a frozen cost artifact")
+    model, knobs = _model_and_knobs(config, cases, artifact)
+    rows = [json.loads(line) for line in source_path.read_text().splitlines() if line]
+    records = rescore_pairs(rows, cases, model, knobs, source_manifest["engine"])
+    metadata = {"schema_version": 1, "split": "dev", "operation": "offline_rescore",
+        "status": "complete_with_failures" if any(row["status"] != "completed" for row in records) else "complete",
+        "source_pairs": str(source_path.resolve()), "source_pairs_sha256": sha256(source_path.read_bytes()).hexdigest(),
+        "source_manifest": str(source_manifest_path.resolve()),
+        "source_manifest_sha256": sha256(source_manifest_path.read_bytes()).hexdigest(),
+        "source_measurement_manifest": source_manifest,
+        "frozen": frozen, "cases_path": str(Path(args.cases).resolve()),
+        "config": asdict(config), "config_scope": "cost ablations and planner; candidates/budgets come from frozen cases",
+        "cost_artifact": str(Path(artifact).resolve()), "cost_artifact_sha256": sha256(Path(artifact).read_bytes()).hexdigest(),
+        "engine": source_manifest["engine"], "calibration_scope": model.calibration_scope_report,
+        "measurement_source_counts": dict(Counter(row.get("measurement_source", "not_recorded") for row in records)),
+        "new_generations": 0, "new_engine_requests": 0, "online_model_updates": False,
+        "current_outcomes_used_for_selection": False, "quality_evaluated": False,
+        "pressure_concurrency": 1, "prediction_control_ms": 0}
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("x", encoding="utf-8") as stream:
+        stream.write("".join(dumps(row)+"\n" for row in records))
+    output.with_suffix(".manifest.json").write_text(json.dumps(metadata, indent=2)+"\n")
+    summary = analyze_pairs(records)
+    output.with_suffix(".summary.json").write_text(json.dumps(summary, indent=2)+"\n")
+    print(json.dumps({"output": str(output), "status": metadata["status"], "completed_pairs": summary["completed_pairs"],
+                      "new_generations": 0}))
+
+
+async def collect(args):
+    cases, frozen = load_frozen(args.cases)
+    if frozen["source_measurement_kind"] == "simulation":
+        raise ValueError("hardware decision collection requires a source run with real model tokens")
+    config = load_config(args.config)
+    artifact = args.cost_artifact or config.cost_model.artifact
+    model, knobs = _model_and_knobs(config, cases, artifact)
+    fingerprint = cases[0].candidates[0].fingerprint
+    engine = SGLangEngineClient(args.base_url or config.engine.base_url, fingerprint,
+                                timeout=config.engine.timeout_seconds, stream=False)
     collector = DecisionPairCollector(engine, model, knobs,
                                       context_limit=config.context.max_total_model_tokens)
     output = Path(args.output)
@@ -433,6 +550,12 @@ def main(argv=None):
     run.add_argument("--repetitions", type=int, default=3)
     run.add_argument("--seed", type=int, default=42)
     run.add_argument("--output", required=True)
+    rescore = commands.add_parser("rescore", help="re-score saved pairs with a frozen model; no engine calls")
+    rescore.add_argument("--cases", required=True)
+    rescore.add_argument("--input", required=True, help="saved pairs JSONL and adjacent .manifest.json")
+    rescore.add_argument("--config", required=True)
+    rescore.add_argument("--cost-artifact")
+    rescore.add_argument("--output", required=True)
     analyze = commands.add_parser("analyze")
     analyze.add_argument("input")
     analyze.add_argument("--time-field", choices=("server_elapsed_ms", "client_complete_ms"), default="server_elapsed_ms")
@@ -451,6 +574,8 @@ def main(argv=None):
         if args.repetitions < 1:
             parser.error("repetitions must be positive")
         asyncio.run(collect(args))
+    elif args.command == "rescore":
+        rescore_file(args)
     else:
         rows = [json.loads(line) for line in Path(args.input).read_text().splitlines() if line]
         Path(args.output).write_text(json.dumps(analyze_pairs(rows, time_field=args.time_field,

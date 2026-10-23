@@ -415,4 +415,8 @@ uv run python -m profiling.fit runs/calibration/measured.jsonl \
 
 独立新 artifact `runs/remote-h200-cost/cost-dev-positive-v1.json` 保留原输出先验 433/512，并记录其源 artifact hash，没有改变输出长度模型或覆盖原始 `cost-dev.json`。最终拟合的 30 个 OOF cell 给出 P95=151.17 ms、P99=269.53 ms；原 holdout 支持覆盖仍为 36/84，仅点估计改善，supported-only MAE 从 55.56 降至 37.39 ms。较大的误差门槛会保守地抑制切换。这些结果足以支持增加可审查的选项，尚不能证明在线决策收益、质量非劣效或跨硬件泛化。
 
+2026-10-24 追加 16384 长度标定后，两个原始采集 run 共 2278 条记录，其中 first-token 和 Decode 各 660 条，D2H 774 条、H2D 184 条。合并时保留两份原始 manifest，校对相同模型指纹、cache configuration、host layout、实际池容量与硬件清单；前后 server restart ID 不同，不将启动标识混同配置。输出先验仍为 433/512，仅扩大输入标定范围，没有用新的成对回答拟合。
+
+扩展集合的固定 seed=42 whole-feature-cell 留出中，first-token 支持为 78/132；查表 MAE 58.41 ms、可选正系数拟合 28.82 ms，supported-only 分别为 62.91 / 34.67 ms。Decode MAE 均为 0.292 ms/token。16K 留出部分支持仅 6/60，可选模型 OOF P99 为 472.57 ms；仍有明显覆盖和不确定性限制。新 artifact 与详细来源在 `runs/remote-h200-expanded/`，没有覆盖旧 v2。该批数据的拆分不同于旧集合，不能用不同留出任务的总平均来宣称扩展采样提高了准确率，更不能据此宣称决策或质量收益。
+
 后续独立审查修正了三个校准边界。第一，原查表仅检查独立 P/U 轴，可能把 P=6000、U=4000（总输入 10000）标为支持，即使实际只测过 2048/4096/8192。现在 lookup 与 positive 共用实际总输入 n=P+U 的最小/最大范围约束；越界仍保留诊断点估计与误差，但不允许成本策略接管，没有额外扩大或细分比例包络。第二，`prefill` 与 `restore_prefill` 按运行时同一预测特征规范化 cell key，避免同一个 (P,U,L,c) 因 phase 别名跨越训练/留出集、虚增独立样本数；每个预测器不兼容的 timing_scope 会在离线拟合/比较入口被拒绝。第三，positive spec 记录实际 `fit_sources`；含 mock 的系数在普通 serving 中不再因过滤 mock 查表点而变成 calibrated，诊断点估计仍可读取。旧 positive spec 缺少此字段时，仅在已有上层 `measurement_sources` 明确全为 hardware 时维持校准资格，否则回退。以上不增加请求路径 hash。原 v1 记录保留，比较和 OOF artifact 应以独立 v2 文件重新生成，不覆盖历史结果。

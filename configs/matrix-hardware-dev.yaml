@@ -1,0 +1,85 @@
+# Controller-only Cloud dev matrix; run with bench.experiments tune, not test.
+# Example paths are repository-relative and must match the actual deployment.
+# B0/B1 need a separate unpatched server and its manifest. No method here is
+# B6-eligible: this subset cannot establish a complete strongest baseline.
+# Quality eligibility is intentionally absent until real offline dev scoring.
+schema_version: 1
+base_config: configs/hardware_dev_controller.yaml
+input: data/mtrag/RAG.jsonl
+domain: cloud
+split_manifest: configs/mtrag_split_manifest.json
+protocols: [P2]
+concurrency: [4]
+seeds: [42]
+reference_method: B3
+tuning:
+  equal_budget: 2
+lifecycle:
+  # Explicit cold reset on a dedicated research server, with profiling enabled.
+  # This hook does not generate a warmup answer. Never point it at a shared server.
+  before_job: [python, -m, scripts.prepare_cold_job, --base-url, "http://127.0.0.1:30000", --config, configs/hardware_dev_controller.yaml]
+  cache_state_protocol: dedicated_research_cold_reset_no_generation_warmup
+  timeout_seconds: 180
+methods:
+  - id: B2
+    overrides:
+      planner: {strategy: normal_rag}
+  - id: A_only
+    overrides:
+      planner: {strategy: always_append}
+      ablation: {epoch_retirement: false}
+  - id: B3
+    tune: true
+    overrides:
+      planner: {strategy: fixed_threshold}
+    candidates:
+      - planner: {fixed_token_threshold: 4096}
+      - planner: {fixed_token_threshold: 8192}
+  - id: B3_periodic
+    tune: true
+    overrides:
+      planner: {strategy: fixed_period}
+    candidates:
+      - planner: {period: 2}
+      - planner: {period: 4}
+  - id: B4
+    # ContextPilot-style layout adaptation, not the complete upstream system.
+    overrides:
+      context: {layout: contextpilot}
+      planner: {strategy: stable_layout}
+  - id: B5
+    tune: true
+    overrides:
+      planner: {strategy: warm_idle}
+    candidates:
+      - planner: {warm_ratio: 0.25}
+      - planner: {warm_ratio: 0.75}
+  - id: Ours
+    tune: true
+    overrides:
+      planner: {strategy: cost}
+    candidates:
+      - planner: {delta_rel: 0.05, min_stable_turns: 1}
+      - planner: {delta_rel: 0.1, min_stable_turns: 2}
+  # Run ablate-dev after freezing Ours; every ablation inherits its complete
+  # winning configuration and changes only the named switch below.
+  - id: Ours_no_host_cost
+    ablation_of: Ours
+    overrides:
+      ablation: {host_cost: false}
+  - id: Ours_no_decode_cost
+    ablation_of: Ours
+    overrides:
+      ablation: {decode_cost: false}
+  - id: Ours_no_control_cost
+    ablation_of: Ours
+    overrides:
+      ablation: {control_cost: false}
+  - id: Ours_no_hysteresis
+    ablation_of: Ours
+    overrides:
+      ablation: {hysteresis: false}
+  - id: A_B_no_retire
+    ablation_of: Ours
+    overrides:
+      ablation: {epoch_retirement: false}

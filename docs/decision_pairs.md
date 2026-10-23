@@ -85,10 +85,38 @@ python -m profiling.decision_pairs analyze runs/decision-dev/pairs.jsonl \
 
 **该 regret 是受控 fixture 的时延诊断，不是质量约束的 oracle。** 两候选生成内容和长度可能不同，较短但错误的回答也可能更快。只有另行完成同任务质量评估后，才能将决策结果用于方法收益论证。文件只允许开发集调试；不得用测试集反事实结果继续挑阈值。
 
+## 4. 在同一批真实输出上比较冻结成本模型
+
+`rescore` 复用一次已经完成的成对采集，离线比较例如 lookup 与 positive-basis artifact。它不创建 engine client，不发送请求，也不重新生成候选或答案：
+
+```bash
+python -m profiling.decision_pairs rescore \
+  --cases runs/decision-dev/cases.jsonl \
+  --input runs/decision-dev/pairs.jsonl \
+  --config configs/cost.yaml \
+  --cost-artifact runs/calibration/cost-positive.json \
+  --output runs/decision-dev/pairs-positive-rescore.jsonl
+```
+
+`--input` 旁必须保留原 `.manifest.json`；其 frozen bundle 必须与 `--cases` 相同，源采集必须完成。`--cost-artifact` 也可由配置的 `cost_model.artifact` 指定，但必须是已冻结 artifact。`--config` 只提供成本项消融和 planner 参数；候选文本、生成上限、历史输出先验的已提交数据来自 frozen cases，不能通过新配置改变已经采集的生成条件。为了单独比较成本模型，应保持两次 planner 与消融设置相同。
+
+重评分流程：
+
+1. 匹配每行 `case_id` / conversation / request 及每臂保存的输入 hash、长度、receipt；校验两臂报价描述冻结候选，且缓存准备 shape 相同。
+2. 用源 manifest 的 engine 配置检查新 artifact 的标定范围。已知不匹配时保留诊断预测，但标为未标定并回退；不把来源不明的配置称为硬件已验证。
+3. 按原 `execution_order`，使用**先执行那一臂的原报价**重放 `choose_plan`。每臂自身的 prediction 使用该臂原报价，与采集时一致；并发仍为 1、共同控制成本仍为 0。
+4. `choose_plan` 只接收冻结的 pre-turn snapshot、两候选、原 quote、新模型和 planner 参数。当前生成文本、实际输出长度和耗时不作为输入，不调用 `observe`。当前输出/耗时只有在事后的 `analyze_pairs` 中参与差值、regret 和长度展示。
+
+输出新的 JSONL、manifest 和 summary，默认拒绝覆盖已有文件。每臂的实测时间、输出、receipt、warmup、报价和 hardware/simulation 来源保持原值；原选择、原因和预测保存在 `rescoring` 中。源失败行保留为失败并标记 `source_failure_preserved`，不会静默丢弃或变成成功。结果仍可用现有 `analyze` 选择 server/client 时间范围，summary 的逐 pair 明确记录 repetition。
+
+新 manifest 保存源 pairs/manifest 的路径与文件 hash、源采集完整清单、frozen 来源、替换 artifact、配置使用范围、标定 scope 和 `new_generations: 0`。这些是文件级实验来源检查，不在请求路径增加 hash。原始采集文件与答案不改写。
+
+这允许在**完全相同的实测结果**上比较决策模型，节约 GPU 并消除重新采样答案的差异；它不是新质量实验，也不是另一套工作负载的硬件复测。模型仍应以独立阶段标定数据拟合；若看这批 dev regret 后调参，必须如实标为开发调试，不能再将同一批结果称为独立泛化证据。
+
 ## 本地合同验证
 
 ```bash
 python -m pytest -q tests/test_decision_pairs.py
 ```
 
-CPU 测试覆盖只读冻结、当前答案排除、dev/test/P1 边界、B4 排名保持、候选漂移跳过、两臂独立重置/同历史预热、host 状态、部分失败留存和差值/regret 算法。测试 double 的时间仅用于验证统计，不能作为硬件结果。
+CPU 测试覆盖只读冻结、当前答案排除、dev/test/P1 边界、B4 排名保持、候选漂移跳过、两臂独立重置/同历史预热、host 状态、部分失败留存和差值/regret 算法。重评分测试还验证修改当前输出/耗时不会改变预测和选择、错误 case/hash/shape 被拒绝、原行不被修改、失败行与来源标签保留、CLI 不创建 engine client。测试 double 的时间仅用于验证统计，不能作为硬件结果。

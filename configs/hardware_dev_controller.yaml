@@ -1,0 +1,43 @@
+# Controller-only hardware development example; not a complete B0/B1/B6 comparison.
+# Run from the repository root. Replace endpoint, artifact, state and model paths
+# for the actual deployment. Native B0/B1 require a separate unpatched server.
+engine:
+  kind: sglang
+  base_url: http://127.0.0.1:30000
+  timeout_seconds: 180
+  stream: true
+  page_size: 64
+model:
+  # Use the pinned Hub cache, or replace name with its fixed local snapshot path.
+  name: Qwen/Qwen2.5-7B-Instruct
+  revision: a09a35458c702b33eeacc393d103063234e8bc28
+  namespace_hash: default
+  local_files_only: true
+state_dir: runs/hardware-dev-controller
+context:
+  max_total_model_tokens: 32768
+  max_new_tokens: 1024
+  layout: stable_key
+  revisit_mode: conservative
+  revisit_history_turns: 3
+planner:
+  strategy: cost
+  concurrency: 4
+  delta_abs: 0.0
+  delta_rel: 0.05
+  z: 1.0
+  min_stable_turns: 2
+  fixed_token_threshold: 8192
+  fallback_strategy: fixed_threshold
+cost_model:
+  # This artifact retains historical 433/512 output priors. The shared context
+  # max_new_tokens above overrides its generation cap; no current answer is fitted.
+  artifact: runs/remote-h200-expanded/cost-dev-expanded-lookup.json
+  online_calibration: false
+ablation:
+  host_cost: true
+  decode_cost: true
+  control_cost: true
+  epoch_retirement: true
+  hysteresis: true
+shadow: false
