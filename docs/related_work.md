@@ -11,6 +11,9 @@
 | LightRSI / TokenPilot | `9f0f19308a30445438779efbf3108a7d965a55c7`，[MIT](https://github.com/zjunlp/LightRSI/blob/9f0f19308a30445438779efbf3108a7d965a55c7/LICENSE) | 借鉴稳定前缀和批量生命周期门控；未移植其 TypeScript 运行时、任务估计模型或内容压缩器 |
 | ReCAP | [论文 v1](https://arxiv.org/html/2609.40118v1) 为 CC BY 4.0；核查时[官方仓库为空](https://github.com/UCSB-NLP-Chang/ReCAP) | warm/idle 仅为受其缓存兼容机制启发的策略基线，不是持久注意力图的复现，无可直接复用代码 |
 | EfficientAgent | `b21b12a07a3ccf473c82acf00820b1aa2073044b`，[Apache-2.0](https://github.com/KunmingSHAO/efficientagent_release/blob/b21b12a07a3ccf473c82acf00820b1aa2073044b/LICENSE) | 工作集与 host 写入准入为后续可选扩展依据；不能将 vLLM/LMCache connector 直接接入 SGLang |
+| BGE-M3 / BGE-reranker-v2-m3 | `5617a9f61b028005a4858fdac845db406aefb181` / `953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e`，官方模型卡分别MIT / Apache-2.0 | 直接加载固定权重，复用官方Transformers接口；BM25/RRF融合为方法适配。已经进入真实P3，检索收益与新增系统成本均保留，见[开发分析](hybrid_retrieval_dev_analysis.md) |
+| MiniCheck | 官方代码 `b58b9fa69acbd1015ec970fa65dd752413a053d2`，Apache-2.0；DeBERTa权重 `2f2d01a54fa022a7ffadb76260e1ea8bc88c82bb`，MIT | 直接复用官方分块/score/inference，仅适配固定本地加载与可见证据输入；真实v2评分及引用增补已运行，不把增补合同通过当整体质量收益 |
+| Qwen3-Reranker-0.6B | `fd9fb1d26c07223ced488065909faf522e29cc7d`，Apache-2.0；[归因记录](third_party/QWEN3_RERANKER_NOTICE.md) | 官方模板与末位yes/no打分已适配并运行同池对照；[负结果](qwen3_rerank_validation.md)支持当前保留BGE，不外推为较新方法普遍无用 |
 
 本项目 ContextPilot 适配代码为按公开算法重新实现的独立短实现，没有分发上游源码副本。未来若直接复制或修改上游源文件，应同时保留原许可证、版权和修改说明；这里的许可证记录不是对全部上游依赖的审计。
 
@@ -61,8 +64,14 @@
 
 候选路径继续遵循入口校验一次、已提交状态可信、每个候选只 render/tokenize 一次。没有为这些扩展新增正文全量重复哈希、运行时镜像状态或多层相同校验。
 
+## 由真实错误推进的新增研究选项
+
+[研究路线](retrieval_research_next.md)纳入TabRAG（2025-11）的行/列/值绑定、FullCite（2026-06）的document+span定位、Deceptive Grounding（2026-07）的来源实体适用性。它们分别针对已取回的限额表被错误组合、历史助手句子被误当外部原文、同数值/相邻产品的错误归属。当前均为尚未实现/验证的实验选项：TabRAG已核作者固定代码及CC BY-NC许可，另外两项仅确认论文/作者说明，未冒称直接源码复用。
+
+长度与决策侧的SSJF/LTR/PARS/TIE原理及固定源码见[长度研究](output_length_research.md)；目前实际训练使用轻量候选特征、NumPy与嵌套会话验证，不能称已经迁移其神经预测器。候选长度、条件误差、收益校准均已有真实pairs上的结果，见[决策验证](length_decision_validation.md)与[收益校准](gain_calibration_validation.md)。C侧则已有32K/16K原生写策略实测，不再把host实验仅列为未来计划。
+
 ## 本地检查与后续证据
 
 `uv run pytest -q tests/test_candidates.py tests/test_corpus.py tests/test_tokenizer_optional.py` 覆盖版本/依赖、回访歧义、真实可见性、两种布局差异、完整 QA 和候选纯函数。真实 tokenizer 检查需额外依赖与缓存模型文件，使用 `CONTEXTKV_TEST_HF_TOKENIZER=1` 显式运行。
 
-后续 GPU 实验需把布局、回访、成本选择和 epoch 退役分别消融，并报告相同证据预算下的质量、完成时间、实际 Prefill/传输/唯一 KV slot。实现通过 CPU 检查不代表任何策略已获得性能优势。
+已有H200矩阵、P3闭环与有限容量实验继续保留；接续将布局、回访、候选决策、epoch退役和原生写策略放入匹配对照，报告质量、完整成本与实际资源。CPU检查、检索qrels、NLI分数和恢复量各自只验证不同环节，整体效果需要联合实测；不以任何单项替代其余证据，也不以一次负结果停止复用和机制改进。

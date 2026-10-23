@@ -2,6 +2,7 @@
 from argparse import Namespace
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -117,3 +118,45 @@ def test_native_cache_observations_keep_missing_breakdown_unknown():
     missing = sweep.summarize_native(payload)["native_cache_observations"]
     assert missing["device_hit_tokens"] is missing["host_loaded_tokens"] is None
     assert missing["breakdown_unavailable_turns"] == 1
+
+
+def test_native_generation_failures_return_nonzero_after_owned_cleanup(tmp_path, monkeypatch):
+    from adapters import mtrag
+    from controller import templates
+    from controller.schema import ConfigFingerprint
+    from profiling import runtime_manifest
+    model, checkout = tmp_path/"model", tmp_path/"checkout"
+    model.mkdir()
+    (model/"config.json").write_text("{}")
+    split = tmp_path/"split.json"
+    split.write_text(json.dumps({"dev": [f"s{i}" for i in range(5)]}))
+    args = Namespace(checkout=checkout, model_path=model, input=tmp_path/"input", split_manifest=split,
+                     output=tmp_path/"output", port=0, gpu_tokens=16384, startup_timeout=1, job_timeout=1)
+    directory = args.output/"job"
+    jobs = [{"directory": str(directory), "policy": "write_through", "repetition": 1,
+             "server_argv": ["fake-server"], "benchmark_argv": ["fake-benchmark"]}]
+    monkeypatch.setattr(sweep, "check_stock", lambda path: {})
+    monkeypatch.setattr(mtrag, "load_rows", lambda path: [{"conversation_id": f"s{i%5}", "Collection": mtrag.CLOUD_COLLECTION} for i in range(41)])
+    monkeypatch.setattr(templates, "HuggingFaceTemplate", lambda *a, **kw: SimpleNamespace(fingerprint=ConfigFingerprint()))
+    monkeypatch.setattr(sweep, "command", lambda *a, **kw: str(checkout/"python/sglang/__init__.py"))
+    monkeypatch.setattr(runtime_manifest, "collect_local_runtime", lambda: {})
+    monkeypatch.setattr(sweep, "wait_ready", lambda *a: {})
+    monkeypatch.setattr(sweep, "pool_measurements", lambda *a: {})
+    monkeypatch.setattr(sweep, "native_manifest", lambda *a: {})
+    monkeypatch.setattr(sweep, "get_json", lambda *a: {})
+    monkeypatch.setattr(sweep, "get_text", lambda *a: "")
+    process, stopped = SimpleNamespace(pid=456, returncode=0), []
+    monkeypatch.setattr(sweep.subprocess, "Popen", lambda *a, **kw: process)
+    monkeypatch.setattr(sweep, "stop_owned_server", lambda p: stopped.append(p.pid))
+    def benchmark(*args, **kwargs):
+        (directory/"native-B1-failed.json").write_text(json.dumps({"report": {"turns": [{"status": "failed"}]}}))
+    monkeypatch.setattr(sweep.subprocess, "run", benchmark)
+    monkeypatch.setattr(sweep, "summarize_native", lambda payload: {"success_count": 0})
+    assert sweep.execute(args, jobs) == 1
+    assert stopped == [456]
+    assert json.loads((args.output/"results.json").read_text())[0]["status"] == "generation_failures"
+
+
+def test_native_cli_propagates_execution_failure_status(monkeypatch):
+    monkeypatch.setattr(sweep, "execute", lambda args, jobs: 1)
+    assert sweep.main(["--model-path", "model", "--execute"]) == 1

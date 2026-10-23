@@ -254,6 +254,7 @@ def execute(args, jobs):
             completed.append(result)
             write_json(args.output / "results.json", completed)
         print(json.dumps({"policy": job["policy"], "repetition": job["repetition"], "status": result["status"]}), flush=True)
+    return 0 if all(result["status"] == "completed" for result in completed) else 1
 
 
 def main(argv=None):
@@ -293,10 +294,11 @@ def main(argv=None):
                     "SGLANG_HICACHE_TMA_TRANSFER": "0"},
                 "scope": "B1 stock native, P2 Cloud dev 5 sessions/41 turns, c4, cap1024, Q0; quality unvalidated"})
     if args.execute:
-        execute(args, jobs)
+        return execute(args, jobs)
     else:
         print(json.dumps({"execute": False, "jobs": jobs}, indent=2))
+        return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

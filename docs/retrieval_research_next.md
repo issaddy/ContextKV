@@ -1,14 +1,51 @@
-# 检索增强的后续研究入口
+# 检索、限额关系与来源绑定的研究路线
 
-2026-10-24 核查。BGE-M3＋RRF＋BGE reranker 已形成可运行对照；后续选型仍开放，以本场景质量和完整成本决定采用什么。
+2026-10-24 更新。目标是通过广泛的开源复用与必要优化取得较好的完整问答效果；下文区分已实现机制、真实结果和待验证方案，当前实现不是最终可探索范围。
 
-| 工作 | 原理与本课题价值 | 当前复用状态 |
+## 已完成到哪一步
+
+| 机制 | 已实现与实测 | 现在应解决的问题 |
 |---|---|---|
-| [Qwen3 Embedding，2025](https://arxiv.org/html/2506.05176v1) | 利用 foundation model、多阶段相关性训练与模型合并，提供可指令化的 embedding/reranking。0.6B 型号与当前 BGE 接近，适合在同一候选池、输出预算下比较 | 已核查论文与[官方固定模型卡](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/blob/fd9fb1d26c07223ced488065909faf522e29cc7d/README.md)，尚未下载或运行。官方 reranker 使用格式化 query/document 输入和最后位置 yes/no logits，不能把它当 BGE 分类头直接替换。代码/模型卡标 Apache-2.0 |
-| [Querit-Reranker，2026-06](https://arxiv.org/html/2606.19037v1) | 目标分布合成 query、teacher 连续软标签及 SLERP 合并，减少目标任务人工标注需求并避免运行时多模型集成。这为云文档术语、追问及跨产品 hard negatives 的领域适配提供具体入口 | 已核查作者论文及其模型发布链接，未迁移训练或加载权重。“label-free”不表示没有监督信号；teacher 分数仍是标签。训练复现还需核查实际数据、许可与代码，不能把作者基准收益当本项目收益 |
+| BGE-M3 + BM25/RRF + BGE reranker | 固定权重、本地加载、共享 P3 factory 和完整检索计时均已接通；[39轮qrels](hybrid_retrieval_dev_analysis.md)与[41轮真实P3](p3_retrieval_integration.md)已完成 | R@5提升并未自动成为更快、更正确的答案。保留query/retriever交叉对照，研究成批执行、选择性历史及后续证据使用 |
+| 纠正识别 query | `correction_aware`已实现；三个词法触发只使用用户文字。真实P3匹配离线路由，附件限额表17→3 | [新答案仍把1MB文档、10MB附件、11MB请求混成一个限制关系](correction_query_view.md)，并发生历史助手句子冒充外部引用；不是重新提出尚未实现的query选择 |
+| Qwen3-Reranker-0.6B | [官方论文](https://arxiv.org/html/2506.05176v3)与固定Apache-2.0模型已复用；同50池/1024 cap真实评分41轮成功、0截断。[独立审查](qwen3_rerank_validation.md)复现R@5 .4085，低于BGE .5231 | 保留BGE及Qwen负结果。该结论限定于当前池与视角；部分qrels下降仍是相关替代段落未标注，不能当作总体回答错误 |
+| MiniCheck + 引用增补 | 固定官方API已运行Q1/Q2完整audit；去掉语义输入中的引用标记后重测。变换已从替换改为保留旧引用、去重新增ID | [两个真实候选](grounding_v2_assistant_audit.md)暴露复合句和段尾作用域。增补合同正确不等于全部子断言得到支持，仍需来源适用性与独立审查 |
+| Querit-Reranker | [2026-06论文](https://arxiv.org/html/2606.19037v1)的目标分布合成query、teacher软标签与模型合并已分析；尚未迁移训练或运行权重 | 保留为领域适配选项；不重复计作已完成复用，也不把teacher生成标签称为完全无监督。优先处理当前已可定位的证据使用缺口 |
 
-目前开发结果显示，把历史问题无差别拼接可能损害检索；当前问题视角的 hybrid rerank 比 last3 更好。这支持继续探索**选择性历史利用**：比较当前问题、最近问题、实体约束的历史筛选，以及小模型独立 query 改写。必须报告独立问题与追问分组，保留 query 原文、参与的历史和新增成本；当前视角在总体均值上较好不代表每种追问都不需要历史。
+上述工作可继续在dev迭代。当前/最近历史/纠正路由与模型选型均保留记录，最终test继续冻结；不因五个开发会话的规模而停止实现，也不将这五个已观察会话重新命名为独立最终验证。
 
-另一个可实现增量是**联合来源支持**。MiniCheck 的真实误例表明，复合句中两个来源分别支持不同子断言时，单来源最高分不足以决定删除旧引用。可比较单来源、有限长度的联合来源、原子 claim 拆分三条路径，分别测遗漏和误报。query-document 相关性重排与 claim-document 支持度核验解决不同问题，不互相替代。
+## 表格与来源关系的三项原理核查
 
-工程上先让增强检索进入 P3 的真实请求路径，固定同一生成策略对照 BM25；确认回答与完整响应时间后，再与 B/C 联合。若 encoder/reranker 与 SGLang 共用 GPU，其他会话检索会干扰生成，必须计入实际端到端开销并重新检查成本模型适用性，不能只报告检索离线分数或把旧的空闲 GPU 标定当作新负载已验证。测试集保持冻结，阈值、模型和 query 视角的开发选择全部保留记录。
+检索聚焦2025–2026的表格结构保留、细粒度来源和对象归属。它们补足已有ContextPilot布局、CRAG/Self-RAG及MiniCheck支持评分，不再把同一篇泛RAG工作重复列为新机制。只使用作者论文与官方仓库；下面均是待验证的适配选项。
+
+| 工作 | 已核查原理与直接入口 | 最小可复用干预与本项目区别 |
+|---|---|---|
+| **TabRAG，2025-11**：[论文§2及Appendix A](https://arxiv.org/html/2511.06582v1)；[作者源码固定版](https://github.com/jacobyhsi/TabRAG/tree/c3aba4190f141737f1a52ed1bacce95bec337667) | 区域解析后将单元格与行名、列名、单位绑定，再形成可检索表示。[`src/prompts.py`](https://github.com/jacobyhsi/TabRAG/blob/c3aba4190f141737f1a52ed1bacce95bec337667/src/prompts.py)的`VLMPrompts.vlm_table_prompt`给出row/column/value/units结构；[`LICENSE`](https://github.com/jacobyhsi/TabRAG/blob/c3aba4190f141737f1a52ed1bacce95bec337667/LICENSE)为CC BY-NC4.0。完整论文使用VLM、LLM和embedding，不是简单正则解析 | **优先适配结构绑定思想**：现有MTRAG限额表已完整，不先引入视觉解析器。保留原文，在旁路记录对象、量、单位、条件、原行span；分别表达document/attachment/request限制，不把它们合并成一个总上限。此适配尚未实现；直接复用上游文件须保留许可。固定仓库将部分评测脚本留在本地，不能称它完整评测流程已可直接复现 |
+| **FullCite，2026-06**：[论文§4.1、§5、限制](https://arxiv.org/html/2606.07130v1) | 每个claim同时引用document ID与原文span，比较普通提示、文法约束和后置近似对齐；研究区分文档正确、span定位和支持关系。全文为CC BY4.0，本次未确认官方源码入口，不声称已有可直接安装包。作者结果包含span改善与语义对齐权衡 | **优先适配可验证引用定位**：对声称逐字引用的内容，用现有EvidenceKey/ref及字符offset在当前`audit_evidence`核对；若只在`actual_history.assistant`出现，记录来源混淆。后置相似对齐只产生待核查span，不继承论文阈值或把相似度当支持。完整QA仍保留，历史助手文本可以帮助理解会话，但不自动成为外部证据 |
+| **Deceptive Grounding，2026-07**：[论文§5.4、Appendix A/B](https://arxiv.org/html/2607.09349v1)及[作者说明](https://cedriccaruzzo.github.io/blog/deceptive_grounding.html) | 引用真实、内容有据仍可能归给错误实体；EAV逐claim检查被引来源实体是否适用于问题对象。作者为临床场景，并分析judge在实体替换和部分句子归属上的盲点。论文CC BY-NC-ND4.0；本次未确认公开实现仓库，不复制其补充代码 | **适配对象/作用域核查**：在MiniCheck信号外，核对claim的产品/版本/限制对象与所引行的对象，而非仅检查“1MB”是否出现在同一段。将entity替换扩展为document/attachment/request关系是本项目的待验假设，不能套用临床论文检出率。也记录“转答另一个对象”和“没有来源”两类错误，避免只检测显式错绑 |
+
+TabRAG的论文标题/仓库README略有差异，身份以论文直接链接的作者仓库为准；核查固定到上述commit，不依赖README中不一致的arXiv badge。三个选项尚未实现或验证，不将论文报告的性能换算成本项目收益。
+
+## 可执行的干预对照
+
+**选项一：原文行关系旁路。** 在原段落不变、完整QA不变的条件下，比较无辅助表示、只增加对象/数值/单位行表示、再加条件/例外绑定。现有1MB/10MB/11MB反例是回归样本，补同对象不同版本、相同数值不同对象、真正存在总量关系的开发例，防止规则一律禁止组合关系。验收看无据关系新增率、条件保留、回答完整性和额外token/延迟，不只看JSON格式有效。
+
+**选项二：引用来源定位与有限修订。** 比较现有引用增补、doc+span核对、doc+span+联合/原子claim支持。先在冻结初稿上检验诊断的漏报、误报及段尾覆盖；再将明确错误作为选择性修订输入，与统一修订/不修订对照。核对外部span和助手历史的来源类别，保留原回答与修订记录，不自动删除完整历史。逐字quote与普通paraphrase分开评价，无法逐字匹配的转述不能直接判为无据。
+
+**选项三：对象适用性与NLI联合。** 比较MiniCheck单独评分、对象/关系检查单独使用、两者联合；对未知对象或不明确关系保留未知，不伪造确定的支持结论。该信号先作为离线诊断，再研究它是否值得触发补充检索或修订；在线动作依据误报与实际效果选择。新增信号必须改善实际错误识别/答案，而非通过多报错获得看似更严格的分数。
+
+这些实验首先共享冻结的初稿/原始材料以定位机制；真实闭环再共享语料、问题、生成模型、输出预算和资源，对照检索与回答过程的变化。代码块语法、claim支持、对象适用性、拒答和完整性分别报告；同一分类器选择修改后，不能仍由它单独证明质量提升。变动轮与未触发轮都保留，历史传播也计入闭环结果。
+
+## 评估器也需要检验
+
+独立本地judge可作为待盲审包的补充诊断，不应直接替代人工或重复使用MiniCheck自证修复。[GroUSE（COLING 2025）](https://aclanthology.org/2025.coling-main.304/)以具体grounded-QA失败模式评估judge，指出与强模型分数相关不代表能辨别这些错误。[官方固定仓库](https://github.com/illuin-tech/grouse/tree/e4c57ba9eb14548c7642daca3ed4ff24d760c7fa)的`meta-evaluate --train_set`提供16个开发例，另有144个test；代码[MIT许可证](https://github.com/illuin-tech/grouse/blob/e4c57ba9eb14548c7642daca3ed4ff24d760c7fa/LICENSE.txt)已核。默认运行依赖外部API，后续若采用只复用例子/评分协议，明确接本地模型，不直接启动默认付费链路。
+
+[Prometheus-7B-v2.0官方说明](https://huggingface.co/prometheus-eval/prometheus-7b-v2.0)提供rubric、reference answer和专用Mistral模板，绝对评分输出`[RESULT]`1–5，可作为候选judge。先以GroUSE开发例和已有的限额混淆、历史引文、复合来源等目标错误筛查校准与辨别能力，保留误判；用合适的reference评价完整性，外部证据始终单列，参考答案不回流在线系统。GroUSE的144例test不参与调提示；本项目最终test也继续冻结。官方GroUSE微调模型本次访问未成功，不能写成已下载/可用。
+
+这条judge路线尚未实现或验证。若开发诊断可用，再生成带模型/模板/来源记录的独立意见供盲审；模型分数仍标为模型诊断，不称为human review或独立事实真值。
+
+## 与B/C形成整体改进
+
+检索增强已进入P3，不再把“接通主路径”列为下一步。接续比较同一选定质量设置下的候选长度/条件误差/收益模型，并重新核查encoder/reranker共享GPU后的成本标定；不能把空闲GPU标定直接当成新负载已验证。C则在已触发host恢复的有限容量区间比较版本退役、原生写策略及必要的写入准入适配。
+
+A带来的额外检索、验证、修订及更长/更短答案，B的预测与切换开销，C的传输和保留影响，都纳入完整响应和会话完成时间。单模块改善不保证联合改善，联合结果也需通过消融定位贡献。若当前组合仍有不足，继续从这些可观察机制优化，不把单个负结果作为停止广泛复用的理由。
