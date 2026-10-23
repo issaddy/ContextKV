@@ -84,7 +84,7 @@ SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固
 - 新预算/匹配观测补丁 `3aac1df…` 已完成[H200功能验收](native_observation_validation.md)：三份保留报告共474个报价预算逐项复算一致，GPU-v2与host各三请求完成/退役/拒绝旧epoch通过；首次probe的HTTP代码预期错误与客户端消息丢失均保留并修正。真实fixture全部ignoreEOS，尚未覆盖ratio缩放或clip饱和；normalRAG的82轮事件没有quote，不作补充覆盖。
 - [用户主题五视图检索](user_topic_retrieval_validation.md)完成820条结果，R@5提升至54.87%，保留R@50下降及WebSocket候选丢失。新完整P3两臂各41轮全部执行成功、各一轮截断，82条输入/历史/正文/receipt核对无错误；语义审查仍发现SDK扩写和跨平台混用。
 
-- [双路融合真实检索](current_topic_fusion_validation.md)完成82/82尝试、246阶段结果；86次query编码、4100对重排。新增75对全部实际评分，R@50恢复至76.07%，最终R@5/nDCG保持54.87%/51.49%；38/41 top5相同，3轮材料变化继续进入P3验证。
+- [双路融合真实检索](current_topic_fusion_validation.md)完成82/82尝试、246阶段结果；86次query编码、4100对重排。新增75对全部实际评分，R@50恢复至76.07%，最终R@5/nDCG保持54.87%/51.49%；38/41 top5相同，3轮材料变化已进入[完整P3两臂验证](current_topic_fusion_p3_validation.md)：82/82成功、各一轮生成截断，完整输入重建和检索绑定均通过；定义/链接有局部改善，但无据API、版本和产品混用仍存在，默认single保持不变。
 
 ## 仍需完成的研究验收
 

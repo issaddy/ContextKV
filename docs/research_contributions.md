@@ -26,7 +26,7 @@ B表中的regret来自隔离c1 fixture的server elapsed、尚未纳入答案质�
 
 接续实现已经落到可选主路径：A 的[字面表格关系注释](table_relations.md)保留原文并增加来源行/对象/值/unit span；B 的[阶段成本](stage_cost_model.md)与[工作量等待模型](admission_wait_model.md)将可测执行和待校准的异质等待分开，原生报价区分容量压力与在途传输，并提供当前请求的标量工作量。前者已完成[82 轮 P3 开关审核](table_relations_validation.md)和 8 次冻结历史对照，定位引用缺失与额外解释；进一步直接复用 CRAFT MIT 行文本并扩展当前 query 焦点与行内来源，[12 次冻结三臂对照](table_focus_validation.md)在两历史上均消除了已知目标范围/引用问题，且已可选接线。它是混合干预的局部开发改善，尚不支持总体质量结论；后者保留 strict 模式和固定规则对照，不以解析估计冒充校准。CRAFT、SMART、DRE 的行 focus、操作分解和来源范围研究，以及 TIE、WAIT、Tail-Aware 与 Sarathi 的工作量/内存/阶段分析，为后续扩展提供具体入口；当前实现边界分别列在上述文档，未把它们的完整系统或论文收益计作本项目成果。
 
-本轮接续形成了可运行的增量链路：A 的[用户主题视图](user_topic_query_view.md)在五视图、820条真实检索结果中将 R@5 从 current 的52.31%提高到54.87%，同时保留候选召回退化；[82轮完整P3](user_topic_p3_validation.md)确认套餐/SDK取材改善与跨平台、代码扩写问题并存。进一步[复用少量独立查询与RRF融合思想](query_fusion_research.md)，实现相同query不重复检索、固定总重排预算的可选双路模式，继续用真实重排验证候选覆盖和最终效果，不能把它直接列为质量收益。
+本轮接续形成了可运行的增量链路：A 的[用户主题视图](user_topic_query_view.md)在五视图、820条真实检索结果中将 R@5 从 current 的52.31%提高到54.87%，同时保留候选召回退化；[82轮完整P3](user_topic_p3_validation.md)确认套餐/SDK取材改善与跨平台、代码扩写问题并存。进一步[复用少量独立查询与RRF融合思想](query_fusion_research.md)，实现相同query不重复检索、固定总重排预算的可选双路模式，[真实重排](current_topic_fusion_validation.md)恢复了候选覆盖但top5指标持平；[随后完整P3](current_topic_fusion_p3_validation.md)确认GUID定义与库链接的局部改善，同时保留版本/产品回归，不能把它直接列为整体质量收益。
 
 B 的[原生预算与匹配时间观测](native_observation_validation.md)直接复用固定引擎预算函数并保存已有match标量，真实GPU/host探针已验证采集和生命周期合同；它为后续reservation/service分离提供数据，没有新建缓存树、反复hash或改变默认调度。评测侧的[原子诊断实测](atomic_judge_validation.md)则证明格式约束不能修复语义错误，下一轮[专用判别器与数量关系复用](quantity_judge_reuse.md)已落实到固定来源、许可、原生输入格式和具体适配边界。两者属于支持方法改进的工程与评价能力，不以观测通过或JSON合法单列质量贡献。
 
