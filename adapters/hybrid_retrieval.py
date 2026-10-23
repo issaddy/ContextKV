@@ -12,7 +12,7 @@ from threading import Lock
 import time
 
 from .mtrag import OnlineContext, json_hash
-from .query_views import correction_query_mode
+from .query_views import correction_query_mode, user_topic_manifest, user_topic_view
 from .retrieval import deterministic_top_k, retrieval_query
 
 
@@ -28,6 +28,8 @@ def query_text(user_questions, mode="last3", *, generated_history=None):
         raise ValueError("retrieval requires the current user question")
     if mode == "correction_aware":
         mode = correction_query_mode(user_questions[-1])
+    if mode == "user_topic":
+        return user_topic_view(user_questions)["text"]
     if mode == "current":
         return user_questions[-1]
     if mode == "last3":
@@ -222,8 +224,8 @@ class HybridRetriever:
     def __init__(self, sparse, dense, encoder, reranker=None, *, query_mode="current",
                  stage="hybrid_rerank", candidate_k=50, rerank_k=50, rrf_k=60,
                  source_config=None):
-        if query_mode not in {"current", "last3", "all_user", "correction_aware"}:
-            raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware")
+        if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic"}:
+            raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
         if stage not in {"dense", "hybrid", "hybrid_rerank"}:
             raise ValueError("unknown online retrieval stage")
         if stage == "hybrid_rerank" and reranker is None:
@@ -240,10 +242,11 @@ class HybridRetriever:
         self._lock = Lock()
         self.requests = 0
         self.initialization_seconds = None
+        self.query_view_traces = []
 
     @property
     def manifest(self):
-        return {"kind": "bge_hybrid", "corpus_snapshot_id": self.corpus_snapshot_id,
+        manifest = {"kind": "bge_hybrid", "corpus_snapshot_id": self.corpus_snapshot_id,
             "query_mode": self.query_mode, "stage": self.stage, "top_k": 5,
             "candidate_k": self.candidate_k, "rerank_k": self.rerank_k, "rrf_k": self.rrf_k,
             "sparse": self.sparse.manifest, "dense": self.dense.manifest,
@@ -256,11 +259,15 @@ class HybridRetriever:
                 "token_limit_hits": model.token_limit_hits}
                 for name, model in (("encoder", self.encoder), ("reranker", self.reranker)) if model is not None},
             "token_limit_note": "at configured token cap; includes possible exact-length inputs"}
+        if self.query_mode == "user_topic":
+            manifest.update(query_view=user_topic_manifest(), query_view_traces=list(self.query_view_traces))
+        return manifest
 
     def retrieve_turn(self, turn):
         if turn.protocol != "P3":
             raise ValueError("hybrid retrieval requires a P3 turn")
-        query = query_text(turn.user_questions, self.query_mode)
+        view = user_topic_view(turn.user_questions) if self.query_mode == "user_topic" else None
+        query = view["text"] if view else query_text(turn.user_questions, self.query_mode)
         # run_sessions dispatches retrieval via to_thread. Serialize this model
         # pair instead of allowing overlapping forwards and unbounded GPU batches.
         with self._lock:
@@ -272,6 +279,9 @@ class HybridRetriever:
                     candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k)
                 contexts = stages[self.stage]["contexts"][:5]
             self.requests += 1
+            if view is not None:
+                self.query_view_traces.append({"task_id": turn.task_id, "conversation_id": turn.conversation_id,
+                                              "turn": turn.turn, **view})
         return replace(turn, contexts=tuple(contexts))
 
     def close(self):

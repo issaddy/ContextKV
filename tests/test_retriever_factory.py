@@ -116,6 +116,28 @@ def test_dense_stage_does_not_load_or_call_reranker(retriever_config, monkeypatc
     assert retriever.encoder.inputs[-1] == "session-a question 1\nsession-a question 2"
 
 
+def test_optional_user_topic_query_is_shared_with_encoder_reranker_and_manifest(retriever_config):
+    from adapters.mtrag import OnlineMessage
+    value = yaml.safe_load(retriever_config.read_text())
+    value["query_mode"] = "user_topic"
+    retriever_config.write_text(yaml.safe_dump(value))
+    retriever = create_retriever("P3", config_path=retriever_config)
+    original = OnlineSession(load_rows(FIXTURE)[:3], "P3").current()
+    turn = replace(original, query="One last thing, where is the python SDK?", turn=3,
+        history=(OnlineMessage("user", "How do I use Acme Store?"),
+                 OnlineMessage("assistant", "Misleading Other Database SDK"),
+                 OnlineMessage("user", "What about storage?"),
+                 OnlineMessage("assistant", "Reference answer must not enter retrieval")))
+    output = retriever.retrieve_turn(turn)
+    expected = turn.query+"\nUser topic context: Acme Store"
+    assert retriever.encoder.inputs == retriever.reranker.inputs == [expected]
+    assert output.history == turn.history and output.query == turn.query
+    assert retriever.manifest["query_view"]["extra_model_calls"] == 0
+    trace = retriever.manifest["query_view_traces"][0]
+    assert trace["task_id"] == turn.task_id and trace["source_user_turns"] == [1, 3]
+    assert trace["selected_history_spans"][0]["text"] == "Acme Store"
+
+
 def test_concurrent_sessions_include_retrieval_queue_in_pipeline_time(retriever_config):
     retriever = create_retriever("P3", config_path=retriever_config)
     async def answer(turn):
@@ -129,10 +151,15 @@ def test_concurrent_sessions_include_retrieval_queue_in_pipeline_time(retriever_
     assert all("actual answer" not in query for query in retriever.encoder.inputs)
 
 
-def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retriever_config, tmp_path, monkeypatch):
+@pytest.mark.parametrize("query_mode", ["current", "user_topic"])
+def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retriever_config, tmp_path, monkeypatch, query_mode):
     import bench.native_baseline as native_module
     import controller.cli as cli
     from controller.templates import ByteTemplate
+
+    value = yaml.safe_load(retriever_config.read_text())
+    value["query_mode"] = query_mode
+    retriever_config.write_text(yaml.safe_dump(value))
 
     def respond(request):
         if request.url.path == "/server_info":
@@ -170,3 +197,8 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
         assert turns[1]["online_turn"]["history"][-1]["text"] == turns[0]["assistant_text"]
         assert "REFERENCE ANSWER" not in json.dumps(turns)
     assert native["retrieval"]["completed_retrievals"] == controller_manifest["retrieval"]["completed_retrievals"] == 3
+    for manifest in (native["retrieval"], controller_manifest["retrieval"]):
+        assert manifest["query_mode"] == query_mode
+        if query_mode == "user_topic":
+            assert len(manifest["query_view_traces"]) == 3
+            assert all("actual" not in v["text"] for v in manifest["query_view_traces"])

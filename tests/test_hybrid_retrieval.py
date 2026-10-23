@@ -162,6 +162,21 @@ def test_offline_analysis_has_missing_coverage_and_session_metrics():
     assert before == json.dumps(rows, sort_keys=True)
 
 
+def test_offline_user_topic_preserves_query_source_trace_and_cost():
+    from bench.retrieval_eval import RetrievalQuery
+    item = RetrievalQuery("arbitrary", "session", 2,
+        ("How does Acme Store work?", "One last thing, where is the python SDK?"))
+    sparse = Sparse(contexts())
+    rows = list(evaluate_queries([item], sparse, modes=("current", "all_user", "user_topic"), candidate_k=7))
+    assert len(rows) == 3
+    result = rows[-1]
+    assert result["query_text"].endswith("User topic context: Acme Store")
+    assert result["query_view_trace"]["selected_history_spans"][0]["user_turn"] == 1
+    assert result["elapsed_ms"] >= result["query_view_ms"] >= 0
+    assert sparse.calls[-1][0] == [result["query_text"]]
+    assert rows[1]["query_mode"] == "all_user"
+
+
 def test_actual_cloud_dev_query_cohort_has_41_turns_and_5_sessions():
     root = Path(__file__).parents[1]
     path = root/"data/mtrag/RAG.jsonl"
@@ -173,7 +188,8 @@ def test_actual_cloud_dev_query_cohort_has_41_turns_and_5_sessions():
     assert all(len(q.user_questions) == q.turn for q in queries)
 
 
-def test_cli_reads_qrels_after_all_rankings_and_keeps_artifacts(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["last3", "user_topic"])
+def test_cli_reads_qrels_after_all_rankings_and_keeps_artifacts(tmp_path, monkeypatch, mode):
     from bench import retrieval_eval
     index = tmp_path/"sparse"
     retriever = BM25SRetriever(load_beir_corpus(FIXTURE.with_name("corpus_small.jsonl")), corpus_snapshot_id="fixture")
@@ -198,9 +214,12 @@ def test_cli_reads_qrels_after_all_rankings_and_keeps_artifacts(tmp_path, monkey
     monkeypatch.setattr(retrieval_eval, "load_qrels", track_qrels)
     output = tmp_path/"evaluation"
     retrieval_eval.main(["evaluate", "--input", str(FIXTURE), "--split-manifest", str(split),
-        "--sparse-index", str(index), "--qrels", str(qrels), "--output", str(output)])
+        "--sparse-index", str(index), "--qrels", str(qrels), "--output", str(output), "--query-modes", mode])
     manifest = json.loads((output/"manifest.json").read_text())
     assert manifest["status"] == "complete" and manifest["encoder"] is None
     assert len(manifest["tasks"]) == 3
     assert len((output/"retrieval.jsonl").read_text().splitlines()) == 3
-    assert json.loads((output/"summary.json").read_text())["methods"]["last3/bm25"]["top5"]["evaluated_tasks"] == 1
+    assert json.loads((output/"summary.json").read_text())["methods"][mode+"/bm25"]["top5"]["evaluated_tasks"] == 1
+    if mode == "user_topic":
+        assert manifest["query_view"]["extra_model_calls"] == 0
+        assert all(r["query_view_trace"] for r in map(json.loads, (output/"retrieval.jsonl").read_text().splitlines()))

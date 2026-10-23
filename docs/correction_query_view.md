@@ -74,4 +74,4 @@ python -m bench.query_selector \
 
 **历史回答被误当证据。** CocoaPods turn2 新答案给出带引号的句子 `This method might require additional setup for CocoaPods and could introduce dependency management issues.`，并绑定 `E_69ea040ae8`（`ibmcld_02772-4213-5899`）。该字符串不在五段 `audit_evidence` 中，却精确存在于此前 assistant turn1。这里不仅是引用格式问题，而是模型将自己的历史陈述提升成了外部证据。纠正路由只使用 user questions，未将这句送入检索；错误发生在后续回答利用会话上下文时。
 
-本轮不增加新 prompt/model 实验，也不因一个失败例终止此路线。可保留的结果是：狭窄纠正线索能将目标限额证据送到正确位置；下一阶段需要独立检验**限额对象/条件的逐项引用**及**历史助手文本与外部证据的区分**，同时观察三个触发轮和未触发轮的回归。默认模式、正式质量门与最终 test 状态保持不变。
+可保留的结果是：狭窄纠正线索能将目标限额证据送到正确位置，但尚需独立检验**限额对象/条件的逐项引用**及**历史助手文本与外部证据的区分**，同时观察三个触发轮和未触发轮的回归。后续[焦点行完整P3](table_focus_p3_validation.md)和[用户历史主题视图](user_topic_query_view.md)沿这些实际缺口推进；后者保留当前模式作为对照，没有替换其原有规则。默认模式、正式质量门与最终 test 状态保持不变。

@@ -12,10 +12,12 @@ from hashlib import sha256
 import json
 from pathlib import Path
 from statistics import mean
+import time
 
 from adapters.hybrid_retrieval import DenseIndex, LocalBGE, query_text, search_variants
 from adapters.mtrag import CLOUD_COLLECTION, DATASET_COMMIT, OnlineContext, load_rows
 from adapters.retrieval import BM25SRetriever, load_beir_corpus
+from adapters.query_views import user_topic_manifest, user_topic_view
 from bench.metrics import percentile
 from bench.quality import load_qrels, retrieval_quality
 
@@ -76,18 +78,22 @@ def evaluate_queries(queries, sparse, dense=None, encoder=None, reranker=None, *
         raise ValueError("hybrid reranking requires a dense index")
     for item in queries:
         for mode in modes:
-            query = query_text(item.user_questions, mode, generated_history=item.generated_history)
+            view_started = time.perf_counter()
+            view = user_topic_view(item.user_questions) if mode == "user_topic" else None
+            query = view["text"] if view else query_text(item.user_questions, mode, generated_history=item.generated_history)
+            view_ms = (time.perf_counter()-view_started)*1000
             stages = search_variants(query, sparse, dense, encoder, reranker,
                                      candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k)
             for stage, values in stages.items():
                 yield {"task_id": item.task_id, "conversation_id": item.conversation_id,
                     "turn": item.turn, "query_mode": mode, "query_text": query, "stage": stage,
+                    "query_view_trace": view, "query_view_ms": view_ms,
                     "method": f"{mode}/{stage}", "status": "complete",
                     "contexts": [asdict(c) for c in values["contexts"][:5]],
                     "candidate_ids": [c.document_id for c in values["contexts"]],
                     "candidate_scores": [c.score for c in values["contexts"]],
                     "rerank_candidate_ids": values.get("rerank_candidate_ids"),
-                    "elapsed_ms": values["elapsed_ms"]}
+                    "elapsed_ms": view_ms+values["elapsed_ms"]}
 
 
 def summarize(rows, qrels, *, candidate_k=50):
@@ -115,7 +121,7 @@ def summarize(rows, qrels, *, candidate_k=50):
                            "p95": percentile(latencies, .95)}}
     return {"schema_version": 1, "methods": methods,
         "answer_quality_evaluated": False,
-        "timing_scope": "sequential stage wall time; excludes model/index loading and answer generation; "
+        "timing_scope": "query-view formation plus sequential stage wall time; excludes model/index loading and answer generation; "
                         "shared stages are reused, not an independent latency benchmark",
         "interpretation": "Qrels measure labelled passage relevance, not answer correctness, "
                           "claim support, completeness or quality noninferiority."}
@@ -144,7 +150,7 @@ def main(argv=None):
     evaluate.add_argument("--reranker-max-length", type=int, default=512)
     evaluate.add_argument("--qrels", required=True)
     evaluate.add_argument("--output", required=True)
-    evaluate.add_argument("--query-modes", nargs="+", choices=["current", "last3", "all_user", "correction_aware", "generated_history"], default=["last3"])
+    evaluate.add_argument("--query-modes", nargs="+", choices=["current", "last3", "all_user", "correction_aware", "user_topic", "generated_history"], default=["last3"])
     evaluate.add_argument("--history-audit")
     evaluate.add_argument("--candidate-k", type=int, default=50)
     evaluate.add_argument("--rerank-k", type=int, default=50)
@@ -196,6 +202,8 @@ def main(argv=None):
         "reranker": reranker.manifest if reranker else None,
         "measurement_kind": "local_pretrained_retrieval" if dense else "local_bm25_retrieval",
         "scope": "offline fixed-query retrieval exploration; no answer generation or online policy changes"}
+    if "user_topic" in args.query_modes:
+        manifest["query_view"] = user_topic_manifest()
     path = output/"manifest.json"
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
     results = []

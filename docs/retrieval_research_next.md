@@ -8,9 +8,10 @@
 |---|---|---|
 | BGE-M3 + BM25/RRF + BGE reranker | 固定权重、本地加载、共享 P3 factory 和完整检索计时均已接通；[39轮qrels](hybrid_retrieval_dev_analysis.md)与[41轮真实P3](p3_retrieval_integration.md)已完成 | R@5提升并未自动成为更快、更正确的答案。保留query/retriever交叉对照，研究成批执行、选择性历史及后续证据使用 |
 | 纠正识别 query | `correction_aware`已实现；三个词法触发只使用用户文字。真实P3匹配离线路由，附件限额表17→3 | [新答案仍把1MB文档、10MB附件、11MB请求混成一个限制关系](correction_query_view.md)，并发生历史助手句子冒充外部引用；不是重新提出尚未实现的query选择 |
+| 用户历史主题视图 | [可选 `user_topic`](user_topic_query_view.md)已接共享 factory/双 CLI/离线评测，保留来源 user turn/span；41轮视图核对中3轮补入原用户主题、1轮复用纠正last3，无额外模型调用 | 尚未验证检索收益；与 current、last3、all_user、correction_aware 同预算比较。大小写/工具名和隐式换题仍有局限，不把词法线索当可靠实体消解 |
 | Qwen3-Reranker-0.6B | [官方论文](https://arxiv.org/html/2506.05176v3)与固定Apache-2.0模型已复用；同50池/1024 cap真实评分41轮成功、0截断。[独立审查](qwen3_rerank_validation.md)复现R@5 .4085，低于BGE .5231 | 保留BGE及Qwen负结果。该结论限定于当前池与视角；部分qrels下降仍是相关替代段落未标注，不能当作总体回答错误 |
 | MiniCheck + 引用增补 | 固定官方API已运行Q1/Q2完整audit；去掉语义输入中的引用标记后重测。变换已从替换改为保留旧引用、去重新增ID | [两个真实候选](grounding_v2_assistant_audit.md)暴露复合句和段尾作用域。增补合同正确不等于全部子断言得到支持，仍需来源适用性与独立审查 |
-| 原文表格行关系与焦点引用 | [确定性 helper](table_relations.md)保留原文及跨度；全行版已完成真实 P3 和冻结对照。新增可选 `focus_refs` 复用 CRAFT 行文本函数，在[12 次冻结开发探针](table_focus_validation.md)的两个历史中稳定改善目标对象/引用错误，生产输入与冻结输入逐 token 等价 | 局部结果不是总体质量通过；继续完整 P3、长表、条件/版本和未触发轮回归，拆解混合干预并计入在线选择开销 |
+| 原文表格行关系与焦点引用 | [确定性 helper](table_relations.md)保留原文及跨度；可选 `focus_refs` 复用 CRAFT 行文本函数，在[12 次冻结探针](table_focus_validation.md)改善目标对象/引用错误，后续[三臂完整 P3 共123轮](table_focus_p3_validation.md)已成功，输入与完整历史均核验 | 目标局部改善仍伴随后续条件标题、跨产品SDK错误；继续长表、条件/版本和未触发轮回归，拆解混合干预。完整P3成功不是总体质量通过 |
 | Querit-Reranker | [2026-06论文](https://arxiv.org/html/2606.19037v1)的目标分布合成query、teacher软标签与模型合并已分析；尚未迁移训练或运行权重 | 保留为领域适配选项；不重复计作已完成复用，也不把teacher生成标签称为完全无监督。优先处理当前已可定位的证据使用缺口 |
 
 上述工作可继续在dev迭代。当前/最近历史/纠正路由与模型选型均保留记录，最终test继续冻结；不因五个开发会话的规模而停止实现，也不将这五个已观察会话重新命名为独立最终验证。
