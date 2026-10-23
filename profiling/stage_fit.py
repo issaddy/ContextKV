@@ -279,7 +279,16 @@ def fit_artifact(rows, provenance, base_artifact, *, folds=5, seed=42, developme
         "feature_timing":"prepared prefix/host fixture before request submission; realized restores are not features",
         "excluded_features":["request_index","TTFT_rank","actual_output_tokens","actual_host_loaded_tokens","actual_future_queue_order"],
         "gpu_capacity_tokens":rows[0]["gpu_capacity_tokens"]}
-    if development_report:
+    frozen_lengths = (base.get("stage_model") or {}).get("development_output_lengths")
+    if frozen_lengths:
+        # Refining a stage artifact must preserve its already bound empirical
+        # prior. Its measurement provenance now describes stage profiling, so
+        # the original report binding lives with the distribution itself.
+        if (development_report and sha256(Path(development_report).read_bytes()).hexdigest()
+                != frozen_lengths["source"]["sha256"]):
+            raise ValueError("development outputs must match the report already bound to the base artifact")
+        model["stage_model"]["development_output_lengths"] = deepcopy(frozen_lengths)
+    elif development_report:
         report_bytes = Path(development_report).read_bytes()
         digest = sha256(report_bytes).hexdigest()
         bound = base.get("metadata",{}).get("measurement_provenance",{}).get("files",{}).get("development_report")

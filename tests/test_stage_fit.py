@@ -158,6 +158,30 @@ def test_development_length_distribution_must_match_bound_completed_report(tmp_p
         fit_artifact(examples(),provenance,base,development_report=report)
 
 
+@pytest.mark.parametrize("supply_report", [False, True])
+def test_refitting_stage_base_preserves_frozen_empirical_prior(tmp_path, supply_report):
+    report = tmp_path/"dev.json"
+    report.write_text(json.dumps({"turns": [{"status": "success", "conversation_id": "dev-session",
+        "result": {"output_tokens": 37, "truncated": True}}]}))
+    base, provenance = make_base(tmp_path, report)
+    # Stage fitting replaces measurement provenance with the new profile files.
+    provenance["measurement_provenance"] = {"files": {"profile": {"sha256": "fixture-profile"}}}
+    first, _ = fit_artifact(examples(), provenance, base, development_report=report)
+    stage_base = tmp_path/"stage-base.json"
+    stage_base.write_text(json.dumps(first))
+    original = stage_base.read_bytes()
+    refined, _ = fit_artifact(examples(), provenance, stage_base,
+                              development_report=report if supply_report else None)
+    assert stage_base.read_bytes() == original
+    assert refined["stage_model"]["development_output_lengths"] == first["stage_model"]["development_output_lengths"]
+    assert refined["decode_points"] == first["decode_points"]
+    assert refined["settings"] == first["settings"]
+    assert refined["stage_model"]["development_output_lengths"] is not first["stage_model"]["development_output_lengths"]
+    report.write_text('{}')
+    with pytest.raises(ValueError, match="already bound"):
+        fit_artifact(examples(), provenance, stage_base, development_report=report)
+
+
 
 def mixed_inputs(tmp_path, *, drift=False):
     cp, mp, manifests, compact = inputs(tmp_path)
