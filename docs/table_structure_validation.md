@@ -1,6 +1,6 @@
-# 可选原文结构扩展：CPU 实现与全 41 轮覆盖
+# 可选原文结构扩展：全 41 轮覆盖与单轮 GPU 对照
 
-2026-10-24。本轮实现 `table_structure_mode: explicit`：在既有来源跨度、CRAFT 行文本与词法 focus 上增加无编号表和明确父路径。默认仍是 `legacy`；未运行新生成或 judge，没有质量改善结论。此实现借鉴[既有研究记录](table_relations.md)中层次表头的表示思想，不复制 TreeThinker 的模型生成树，也不从丢失结构的正文重建 colspan。
+2026-10-24。本轮实现 `table_structure_mode: explicit`：在既有来源跨度、CRAFT 行文本与词法 focus 上增加无编号表和明确父路径。默认仍是 `legacy`。全41轮CPU扫描后，已对唯一新增轮做6次冻结GPU生成：表内数值使用改善，但没有解决当前产品/问题的适用性，也没有补出引用，不能称完整回答修复或总体质量提升。此实现借鉴[既有研究记录](table_relations.md)中层次表头的表示思想，不复制 TreeThinker 的模型生成树，也不从丢失结构的正文重建 colspan。
 
 ## 接线与解析边界
 
@@ -63,4 +63,50 @@ CPU 是本机 Mac 上每轮 7 次的局部观测，排除首次可选库导入�
 
 `tests/test_table_structure.py` 覆盖非产品特定的单位/对象/数值、Unicode/CRLF 精确跨度、标题关闭、真正嵌套与同级列表、失去缩进、混合列表表格、未知单位、代码、原文/历史保持和策略入口。独立审查还发现父列表内的缩进代码可能被误识为子列表；已按父内容列的四空格代码边界修正，并加入原反例。原表格、focus、Native/controller 输入一致、matrix 继承和默认字节测试继续通过：本轮定向共 **95 tests＋6 subtests**；Ruff 通过。
 
-下一步可由统一 GPU 调度对新增轮冻结相同历史/证据/Q0，比较 legacy focus 和 explicit focus，记录六行被如何使用、对象/套餐/范围/引用错误、额外 tokens 与响应成本。父条件效果需要另一个确有原始层次的来源场景；当前 41 轮不能证实它。本轮不改默认，不声称原子 judge 或结构提取等于事实验证。
+下面的真实对照已执行上述唯一新增轮，父条件效果仍需要确有原始层次的来源场景；当前41轮不能证实它。本轮不改默认，不声称原子judge或结构提取等于事实验证。
+
+## 单轮冻结历史的6次真实GPU生成
+
+完整原件保存在 `runs/remote-h200-table-structure/runs/table-structure-frozen-v1/`，执行 run ID 为 `ae9b6b33ed094966a510e17a0b36a320`。`cases.json` 与运行前本地冻结文件逐字相同，SHA `82e69551f2f9472b7b303ffaf1106a7b9a37d36686922a2c1844ce1861db6825`；原结果未改写。只读复核脚本及派生摘要为 `runs/table-structure-gpu-review/{analyze.py,summary.json}`。
+
+范围是已见开发任务 `d5b1e735a040853ed361a3dfde1b8ef0<::>4`，**同一个历史与问题，不是6个独立样本**。Q0、完整6条历史消息、原query末尾空格和全部5段来源一致。温度0、上限1024、正常EOS；未检索、未调用judge、未给模型当轮原答案或评审判据。顺序为：
+
+1. off → legacy_focus → explicit_focus。
+2. legacy_focus → explicit_focus → off。
+
+这两个循环改变了位置，但不是三位置完全平衡设计。所复用的是既有冻结对照执行器，不经过完整P3检索/控制器闭环。
+
+独立复核确认：
+
+- 三臂完整消息重新分词后与冻结IDs相同；off与legacy_focus的全部消息、IDs、hash完全相同，并匹配旧off输入receipt。每个臂的原历史与原证据字符跨度保持不变。
+- 6/6成功，全部 `stop` 且receipt完整，无1024截断；每条实际receipt的input hash、attempt、engine session、generation和restart身份都与对应prepare/retire一致，实际轮换顺序符合计划。
+- 每次cold reset后GPU/host占用和active/queued均为0；实际device hit和host load均0，prefill分别完整覆盖4737或4992输入tokens。池容量为GPU121920/host279040 tokens、page64，本实验不是有限容量下的恢复收益对照。
+- 6次retire均ack，但物理free计数均0；后续cold reset清掉残留缓存。不能把retire确认描述为本轮释放了全部KV。
+- 四个off/legacy输出的文字和IDs完全相同，而且文字与旧off答案一致；两个explicit输出也完全相同。**6/6都没有Evidence ID引用**，内联引用注释在本例未转化为答案引用。
+
+| 臂，各2次 | 输入 tokens | 输出 tokens（两次相同） | client首token均值 | guarded generate完成均值 | client TPOT均值 |
+|---|---:|---:|---:|---:|---:|
+| off | 4737 | 412 | 140.03 ms | 2056.88 ms | 4.655 ms |
+| legacy_focus | 4737 | 412 | 114.30 ms | 2031.38 ms | 4.655 ms |
+| explicit_focus | 4992 | 140 | 117.93 ms | 770.97 ms | 4.669 ms |
+
+client TPOT按实际首/末chunk与输出token数计算；server TPOT另存原结果。冷重置/prepare耗时分别保留，未混入表中guarded generate。首个off的client TTFT为165.46ms，第二次为114.61ms，说明小样本/位置仍影响时延；没有为比较删掉第一条。explicit输入多255 tokens，但答案少272 tokens，完成更快主要伴随生成长度变化。**答案内容和完整性未等价，不能报同质量加速或P3总体收益**。
+
+### 按原来源核对的有限改善与剩余错误
+
+以下是assistant逐源审查，没有自动填入人评分，也不形成正式五维质量gate。
+
+先明确产品范围：三条先前用户问题从“IBM是否有文档数据库”推进到“任意JSON”及“image/PDF与document一起存储”，用户从未直接说Cloudant；历史assistant将话题具体化到Cloudant。第一轮真实来源支持Cloudant是JSON文档数据库，但不能据此把后续assistant的错误数值或代码当事实。当前五段材料是Akamai CDN、两段Discovery文档/字段限制，以及两段File Storage卷/inode说明，**没有Cloudant单附件上限的直接依据**。本6次保持这些材料，不额外补源。
+
+| 原来源/对象 | off与legacy_focus的四次相同回答 | explicit_focus的两次相同回答 |
+|---|---|---|
+| `E_8fac10f0de`，Discovery **上传文档**的套餐表 | 把Discovery计划冠名Cloudant；Cloud Pak for Data50MB正确，但Premium错写10MB（原表50MB），Enterprise10MB正确，未列Plus | 四行原表值均正确：Cloud Pak for Data/Premium50MB，Enterprise/Plus10MB；没有显式标明Discovery或“上传”适用范围 |
+| `E_c07431a963`，**索引field**上限 | 未列这两行 | 正确保留HTML field5MB、Sum of all other fields1MB。没有观察到把1MB直接称Cloudant附件上限；这项预先担忧未在本输出发生 |
+| 两段File Storage/inode说明 | 将7.8TB达到最大inode数的**卷容量门槛**改称单个文件大小上限，错误 | 未再输出该错误；这是删除无关/错误细节，不证明已答对当前附件问题 |
+| CDN默认/优化条件 | 未使用 | 未使用；没有凭其不同产品的数值补Cloudant限制 |
+| 当前对话的产品与所问对象 | 明确把Discovery的上传/爬取限额当Cloudant，错误 | 开头改说“documents in IBM Cloud Pak for Data”，却未说明为何适用于前文Cloudant的image/PDF附件；没有承认当前证据不足以确定Cloudant附件限制 |
+| 引用及额外操作建议 | 无Evidence ID引用 | 无Evidence ID引用；结尾建议外部保存文件并在document引用，重复了历史建议，但当前5sources没有提供该产品操作的支持 |
+
+explicit的六个表值和行标签匹配原文，Premium错误得到局部纠正，原7.8TB错误未再出现，不能把这些变化抹成“毫无改善”。与此同时，它把回答焦点转为Cloud Pak for Data，并未完成当前对话中的Cloudant附件问题，也没有给出源ID或证据不足说明。**Discovery数字更准确，不等于Cloudant答案正确**。
+
+这次结果支持继续研究“结构表示帮助源内取值”的机制，但表明只加行关系不能解决产品适用性和检索主题断裂。下一项独立分支可检查来源约束的对话主题解析：历史assistant只辅助指代/意图，产品实体必须回溯当时实际证据，事实依据仍来自当前明确来源；简单放宽用户历史的命名实体regex无法补出从未由用户写出的Cloudant。本次不同时改检索或提示，不把这6次开发重复当独立质量验证。
