@@ -92,4 +92,69 @@ python runs/atomic-development-review/analyze.py \
 - 模型声明的额外引用不再丢弃语义 claim。原声明、原单元 ID 与额外 ID 分开记录；checker 的 citation_ids 和 cited 来源集合始终由宿主从原单元解析。额外 ID 不产生支持证据，仍让整体 ledger 保持 partial。
 - 提取和检查模板改成字段说明，去掉容易被复读的示例答案值；保留条件、scope、模态、精确原文定位、抽取忠实性与证据支持要求。没有依据本轮错误修改已有分数或自动修答案。
 
-本地 atomic/native 75 项针对测试通过，覆盖数值原样保留、非法结构、借入邻单元 ID、可见来源与引用子集分离、quote 精确性及旧有泄漏边界。v2 仍需对同一 29 条完整重跑，并分别报告新增可评估项和新增语义错误；格式可用性改善不能预先声称已解决历史污染、范围错改或正确例误伤。
+本地 atomic/native 75 项针对测试通过，覆盖数值原样保留、非法结构、借入邻单元 ID、可见来源与引用子集分离、quote 精确性及旧有泄漏边界。随后已对同一 29 条完整重跑 v2，结果如下；格式可用性改善没有解决历史污染、范围推理或正确例误伤。
+
+## v2 完整重跑：可评估范围增加，语义错误仍明显
+
+原始结果在 `runs/remote-h200-atomic/runs/atomic-development-v2/`，只读派生结果为 `runs/atomic-development-review/analysis-v2.json`。仍为同一固定模型、temperature 0、4096 输出预算、完整 29 输入，没有选择性重跑失败项。58 次 HTTP 全部 `stop`，输入 68,276、输出 9,920 tokens；单调用输入最多 5,341、输出最多 1,009 tokens。两个 failed 不是输出截断。
+
+| 指标 | v1 | v2 |
+|---|---:|---:|
+| 全部输入 | 29 | 29 |
+| complete / partial / failed | 8 / 21 / 0 | 15 / 12 / 2 |
+| 24 prose：matched / mismatched / unknown | 6 / 1 / 17 | 8 / 5 / 11 |
+| 12 正事实：matched / mismatched / unknown | 3 / 0 / 9 | 5 / 4 / 3 |
+| 10 负事实：matched / mismatched / unknown | 3 / 1 / 6 | 3 / 1 / 6 |
+| 2 拒答：完成原协议要求的判定 | 0 | 0 |
+| 实际 HTTP 调用 | 42 | 58 |
+
+数值表示拒收消失，模型也不再复制 statement 的示例占位词。由于更多 claim 进入 checker，正确例误伤被显露出来，不能把 complete 增长当质量改善。尤其：
+
+- `p005` 正确的 2048 KiB→2 MiB 被判 insufficient，理由要求来源逐字写出换算后单位，忽略已给出的换算关系。
+- `p011` Enterprise 300 秒被判 contradicted；理由同时复述“默认 90、Enterprise 300”，却仍声称与 300 矛盾，说明条件范围推理失败。
+- `p017` 的全部可见来源包含明确端口事实，仍被判 insufficient；只传正确被引用来源时又得到 entailed。无关来源的加入暴露不稳定性，不能反过来把 cited 结果覆盖 visible 结果。
+- `p019` 的正确 8 秒与来源逐字一致，模型仍称来源没有 backoff 信息；历史问题干扰没有解决。
+- `p004` 的抽取现在保留“四个 worker 总量”，checker 却忽略来源明确的总量 28，仍判 insufficient。该例不再只是抽取错改。
+- `p015` 将历史 assistant 的 400 伪装成 E_01 原文引文，被 exact quote 检查拒绝。这说明来源绑定有实际价值，但不等于 judge 已摆脱历史污染。
+- `p010/p012/p014/p016/p020` 等继续把事实与来源不符和抽取不忠实混淆。`p013` 的理由甚至承认 96 小时相当于 4 天，仍判信息不足。
+- `p021/p024` 两种拒答均被抽成 assertion；错误拒答还给出“来源没有保留天数”的错误理由，忽略明确的 14 天，不能因为 source_answers_current_question 出现布尔值就计为合格拒答评估。
+
+三个真实例没有获得可接受的整体评审：`real-001` 提取输出两个连续裸 array，`real-002` 输出一个裸 array，均因顶层协议不符停止，原文未被拼接或补壳。`real-003` 的三个 claim 均进入检查，但三个 verdict 都为 contradicted、引用关系却是 supports；最后一个理由还虚构原回答说过 50 MB。原答案只说单附件 10 MB。因此必须同时保留格式失败与正确短答误伤，不能只看前两例被格式挡住。
+
+## 可选 v3：复用固定运行时的 JSON Schema 约束
+
+值得做一次完整 29 条开发对照，目的限定为减少顶层形状、缺字段和类型造成的损失，并观察对语义行为的影响。不能预先声称 schema 能修复条件、换算、来源角色或拒答判断。v2 的 prompt 与自由输出默认行为保持原样；新模式不手工修 JSON，不在失败后重试自由生成，也不覆盖 v1/v2 结果。
+
+固定 SGLang commit `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b` 的实际调用链已核：
+
+1. OpenAI 兼容接口接受 `response_format.type=json_schema` 与 `json_schema.{name,schema,strict}`。`strict=true` 明确请求约束；普通 chat 路径会将 schema 写入采样参数，而 `json_object` 只给顶层 object，不能保证所需字段。[固定协议定义及转换](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/entrypoints/openai/protocol.py#L223-L236)、[采样参数转换](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/entrypoints/openai/protocol.py#L1180-L1191)。
+2. XGrammar backend 先检查不支持的 schema 特性，再调用 `GrammarCompiler.compile_json_schema`；编译错误产生无效 grammar，而不是成功的自由输出。固定版本的检查器拒绝 `if/then/else/not/contains/dependent*/uniqueItems/multipleOf` 等特性。本模块只用 object、required、additionalProperties、array/items、enum、简单 minLength 与 nullable type，没有加入语义蕴含规则。[固定 backend](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/constrained/xgrammar_backend.py#L384-L408)、[支持边界检查](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/constrained/json_schema_validation.py#L167-L202)。
+3. 固定服务器依赖 XGrammar 0.2.7。其官方 `GrammarCompiler` 默认 `strict_mode=true`、`any_order=false`，编译 schema 到 tokenizer 对应 grammar 并复用编译缓存；C++ schema parser 支持 type 数组，因此 string/number/null 槽位可表达。没有把接口的 `strict` 布尔值误称成语义严格验证。[固定依赖](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/pyproject.toml#L97)、[XGrammar 0.2.7 compiler](https://github.com/mlc-ai/xgrammar/blob/82505d0d987c36a4209fb3d8571cf6b0f28b5acd/python/xgrammar/compiler.py#L131-L192)、[官方 type-array parser](https://github.com/mlc-ai/xgrammar/blob/82505d0d987c36a4209fb3d8571cf6b0f28b5acd/cpp/json_schema_converter.cc#L184-L225)。
+
+实现接口为 `NativeJudgeClient.complete(messages, response_format=None)`；默认不发送 response_format。`AtomicJudgeClient(..., output_mode="json_schema_v1")` 与 `evaluate_file` 同名参数使用固定的 `bench/assets/atomic_judge/schemas.json`；CLI 加 `--output-mode json_schema_v1`。guided 模式单独标记为 `contextkv-atomic-evidence-v3-json-schema-v1`，保存完整 schema、base v2 协议、模式及每次实际请求的 response_format。没有从探针标签动态生成 schema，也没有把预期 verdict、来源 ID 或正确值固定进 grammar。
+
+```bash
+python -m bench.atomic_judge \
+  --audit runs/atomic-development-inputs-v1/audit.jsonl \
+  --config runs/atomic-development-inputs-v1/config.json \
+  --tokenizer-path /absolute/path/to/fixed/Selene-tokenizer \
+  --output-mode json_schema_v1 \
+  --output runs/atomic-development-guided-v3/ledger.jsonl
+```
+
+83 项 atomic/native 测试通过，覆盖默认无约束请求不变、固定 schema 与独立协议身份、schema 失败不降级、length/裸 array 仍保留失败，以及结构合法但引文不真实仍拒绝。两份 schema 已通过固定官方不支持特性检查器，记录在 `runs/atomic-development-review/schema-source-check.json`。本机未安装 XGrammar，尚未声称完成真实 grammar 编译或 GPU guided 生成。
+
+下一次运行需记录当次 `/get_server_info` 的实际 grammar_backend 与已安装 XGrammar 版本，并先用固定 extract/check schema 做短的真实编译调用。v2 历史 runtime 为 `xgrammar`，不能代替新运行证明。若 tokenizer/backend 不支持，固定运行时可能拒绝请求；应保留失败，不静默退回自由生成。随后仍完整重跑 29 条，继续分别报告 schema、quote、覆盖及语义错误，不把 grammar 成功当作质量验收。[固定 backend 选择](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/constrained/base_grammar_backend.py#L371-L425)、[编译失败处理](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/constrained/grammar_manager.py#L145-L193)。
+
+短 probe 已准备为 `runs/atomic-development-review/guided_probe.py`，默认只 plan，不连接服务。它预先固定第一条 `p001`，做一次抽取和一次 checker；checker 输入取该条冻结 v2 的首个 claim，不依据新抽取结果挑选样本。显式 `--execute` 后记录本机解释器包版本、实际服务配置、两个请求与完整原始 HTTP 响应/失败内容，并用服务环境已有的 jsonschema 检查返回形状。没有下载模型、重试或降级；本机包版本不会被当成远端环境证明。运行前应使用启动服务器的相同 Python 环境。
+
+```bash
+python runs/atomic-development-review/guided_probe.py \
+  --audit runs/atomic-development-v2/audit.jsonl \
+  --frozen-ledger runs/atomic-development-v2/ledger.jsonl \
+  --config runs/atomic-development-v2/config.json \
+  --tokenizer-path /absolute/path/to/fixed/Selene-tokenizer \
+  --output runs/atomic-guided-probe-v3 --execute
+```
+
+该两调用 probe 仅核实际接口和 grammar 路径，不加入 29 条质量统计，也不产生质量通过结论。完整 guided 运行中仍保留每次 `requested_response_format`、HTTP 状态与原文响应，以便区分编译拒绝、生成中断和语义失败。

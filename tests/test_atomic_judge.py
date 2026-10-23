@@ -77,6 +77,8 @@ async def test_pipeline_binds_answer_and_sources_without_leaking_offline_labels(
     assert result["formal_quality_eligible"] is False and result["summary"]["quality_score"] is None
     assert result["input_hash"]==token_hash([3,4]) and result["generation_measurement_kind"]=="simulation"
     assert len(requests)==3
+    assert all("response_format" not in r for r in requests)
+    assert result["judge"]["protocol"]=="contextkv-atomic-evidence-v2"
     inputs=[json.loads(r["messages"][1]["content"]) for r in requests]
     assert "sources" not in inputs[0] and "actual_history" in inputs[0]
     assert len(inputs[1]["sources"])==2 and len(inputs[2]["sources"])==1
@@ -218,6 +220,71 @@ def test_v2_prompts_describe_fields_without_literal_placeholder_answers():
     assert "standalone assertion preserving qualifiers" not in protocol["extract_system"]
     assert "short source-based explanation" not in protocol["check_system"]
     assert "finite JSON number" in protocol["extract_system"]
+
+
+@pytest.mark.asyncio
+async def test_schema_mode_sends_fixed_schemas_and_records_separate_identity():
+    record=audit()
+    result,requests=await run(record,extraction(record["answer"]),checked(),checked(),
+                              output_mode="json_schema_v1")
+    assert result["status"]=="complete"
+    assert result["judge"]["protocol"]=="contextkv-atomic-evidence-v3-json-schema-v1"
+    assert result["judge"]["output_mode"]=="json_schema_v1"
+    manifest=result["judge"]["protocol_manifest"]
+    assert manifest["base_protocol"]=="contextkv-atomic-evidence-v2"
+    schemas=manifest["response_schema_manifest"]
+    for index,request in enumerate(requests):
+        stage="extract" if index==0 else "check"
+        response_format=request["response_format"]
+        assert response_format["type"]=="json_schema"
+        assert response_format["json_schema"]=={
+            "name":f"contextkv_atomic_{stage}_v1", "strict":True, "schema":schemas[stage]}
+        assert "GOLD_MUST_NOT_APPEAR" not in json.dumps(response_format)
+        assert "E_01" not in json.dumps(response_format)  # no sample-conditioned IDs/labels
+    assert result["extraction"]["requested_response_format"]==requests[0]["response_format"]
+    assert result["formal_quality_eligible"] is False
+
+
+@pytest.mark.asyncio
+async def test_guided_response_still_requires_exact_source_binding():
+    record=audit("The cache limit is 8 MiB.")
+    result,_=await run(record,extraction(record["answer"]),checked(quote="Invented evidence"),
+                       output_mode="json_schema_v1")
+    assert result["claims"][0]["visible_check"]["status"]=="failed"
+    assert result["status"]=="partial" and result["summary"]["quality_score"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [
+    [],
+    {"claims":[]},
+    httpx.Response(400,json={"error":{"message":"Invalid grammar"}}),
+    httpx.Response(200,json={"choices":[{"message":{"content":'{"claims":['},"finish_reason":"length"}]}),
+])
+async def test_schema_mode_keeps_bad_or_truncated_response_failed_without_repair_or_retry(response):
+    result,requests=await run(audit(),response,output_mode="json_schema_v1")
+    assert len(requests)==1
+    assert result["status"]=="failed" and result["extraction"]["status"]=="failed"
+    assert "error" in result["extraction"]
+    assert result["extraction"]["raw_http_response"]
+
+
+def test_guided_schemas_do_not_encode_semantic_decisions():
+    schemas=json.loads(Path("bench/assets/atomic_judge/schemas.json").read_text())
+    claim=schemas["extract"]["properties"]["claims"]["items"]
+    assert claim["properties"]["value_raw"]["type"]==["string","number","null"]
+    assert set(claim["required"])==set(claim["properties"])
+    check=schemas["check"]
+    assert check["properties"]["extraction_faithful"]["type"]==["boolean","null"]
+    assert check["properties"]["evidence"].get("minItems",0)==0
+    # Contradicted-with-supporting-evidence remains expressible, so the host
+    # catches it instead of forcing a superficially consistent model verdict.
+    assert "if" not in check and "then" not in check
+
+
+def test_unknown_output_mode_is_rejected_before_transport_creation():
+    with pytest.raises(ValueError,match="output_mode"):
+        AtomicJudgeClient(config(),output_mode="repair_json")
 
 
 @pytest.mark.asyncio

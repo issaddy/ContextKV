@@ -187,7 +187,7 @@ class NativeJudgeClient:
             messages.insert(0, {"role": "system", "content": self.template["system"]})
         return messages
 
-    async def complete(self, messages: list[dict]) -> dict:
+    async def complete(self, messages: list[dict], *, response_format: Mapping | None = None) -> dict:
         """One raw HTTP completion; preserves response details even when unusable."""
         result = {"status": "failed", "raw_text": None, "finish_reason": None, "usage": None}
         try:
@@ -195,9 +195,15 @@ class NativeJudgeClient:
             result["input_tokens"] = count
             if self.config.context_window is not None and count + self.config.max_tokens > self.config.context_window:
                 raise ValueError("judge input plus output budget exceeds context_window; evidence was not truncated")
-            response = await self.client.post("chat/completions", json={
+            request = {
                 "model": self.config.model, "temperature": self.config.temperature,
-                "max_tokens": self.config.max_tokens, "stream": False, "messages": messages})
+                "max_tokens": self.config.max_tokens, "stream": False, "messages": messages}
+            if response_format is not None:
+                request["response_format"] = dict(response_format)
+                result["requested_response_format"] = dict(response_format)
+            response = await self.client.post("chat/completions", json=request)
+            if response_format is not None:
+                result.update(http_status=response.status_code, raw_http_response=response.text)
             response.raise_for_status()
             raw = response.json()
             result.update(api_response_id=raw.get("id"), served_model=raw.get("model"), usage=raw.get("usage"))

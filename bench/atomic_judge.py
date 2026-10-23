@@ -130,21 +130,37 @@ def _bind_check(value, claim_id, sources):
 
 class AtomicJudgeClient:
     """Reuse native_judge's raw transport, not its native scoring templates."""
-    def __init__(self, config: NativeJudgeConfig, *, transport=None, token_counter=None):
+    def __init__(self, config: NativeJudgeConfig, *, transport=None, token_counter=None,
+                 output_mode="unconstrained"):
+        if output_mode not in {"unconstrained", "json_schema_v1"}:
+            raise ValueError("unsupported atomic output_mode")
         self.transport = NativeJudgeClient(config, transport=transport, token_counter=token_counter)
         self.protocol = json.loads(files("bench").joinpath("assets/atomic_judge/protocol.json").read_text())
+        self.response_formats = {}
+        if output_mode == "json_schema_v1":
+            schemas = json.loads(files("bench").joinpath("assets/atomic_judge/schemas.json").read_text())
+            self.response_formats = {stage: {"type": "json_schema", "json_schema": {
+                "name": f"contextkv_atomic_{stage}_v1", "strict": True, "schema": schemas[stage]}}
+                for stage in ("extract", "check")}
+            self.protocol = {**self.protocol, "base_protocol": self.protocol["version"],
+                "version": "contextkv-atomic-evidence-v3-json-schema-v1",
+                "output_mode": output_mode, "response_schema_manifest": schemas,
+                "meaning": "v2 prompts with constrained structure; syntax is not semantic validation"}
         used = ("provider", "model", "revision", "base_url", "temperature", "max_tokens", "timeout_seconds",
                 "api_key_env", "base_model", "base_family", "context_window")
         configuration = asdict(config)
         self.metadata = {k: configuration[k] for k in used}
         self.metadata.update(protocol=self.protocol["version"], protocol_manifest=self.protocol,
+            output_mode=output_mode,
             model_revision_provenance="operator_declared",
             context_budget="exact_chat_tokens_plus_max_tokens" if token_counter else "not_checked")
 
     async def _json_call(self, stage, payload):
-        response = await self.transport.complete([
+        messages = [
             {"role": "system", "content": self.protocol[stage+"_system"]},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}])
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+        response = await self.transport.complete(messages, **(
+            {"response_format": self.response_formats[stage]} if self.response_formats else {}))
         if response["status"] == "completed":
             try:
                 response["parsed"] = _object(response["raw_text"])
@@ -278,12 +294,14 @@ class AtomicJudgeClient:
         await self.transport.aclose()
 
 
-async def evaluate_file(audit_path, config, output_path, *, transport=None, token_counter=None):
+async def evaluate_file(audit_path, config, output_path, *, transport=None, token_counter=None,
+                        output_mode="unconstrained"):
     rows = load_jsonl(audit_path)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x") as stream:
-        client = AtomicJudgeClient(config, transport=transport, token_counter=token_counter)
+        client = AtomicJudgeClient(config, transport=transport, token_counter=token_counter,
+                                   output_mode=output_mode)
         try:
             for row in rows:
                 result = await client.evaluate(row)
@@ -299,6 +317,8 @@ def main(argv=None):
     parser.add_argument("--config", required=True, help="native judge config; transport/model/budget fields are reused")
     parser.add_argument("--output", required=True)
     parser.add_argument("--tokenizer-path", help="fixed local tokenizer, never downloaded")
+    parser.add_argument("--output-mode", choices=("unconstrained", "json_schema_v1"), default="unconstrained",
+                        help="optional server JSON Schema grammar; semantic and quote checks stay unchanged")
     args = parser.parse_args(argv)
     config = NativeJudgeConfig(**json.loads(Path(args.config).read_text()))
     counter = None
@@ -309,7 +329,8 @@ def main(argv=None):
         def counter(messages):
             return len(tokenizer.apply_chat_template(messages, tokenize=True,
                                                        add_generation_prompt=True, return_dict=False))
-    asyncio.run(evaluate_file(args.audit, config, args.output, token_counter=counter))
+    asyncio.run(evaluate_file(args.audit, config, args.output, token_counter=counter,
+                              output_mode=args.output_mode))
 
 
 if __name__ == "__main__":
