@@ -91,6 +91,25 @@ def test_matching_declared_capacity_still_needs_actual_scope_check(tmp_path):
         sweep.validate_runtime(group, runtime(32768))
 
 
+def test_stage_artifact_runtime_check_requires_configured_admission_opt_in(tmp_path):
+    path = cost_artifact(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["prefill_points"] = [dict(prefix_tokens=0,suffix_tokens=1024,concurrency=1,
+                                      elapsed_ms=10,scope="forward_first")]
+    payload["stage_model"] = {"version":1,"pre_forward":{"cells":[
+        {"features":[0,1024,0,1,128,16384],"requests":3,"mean_ms":1.0}]}}
+    path.write_text(json.dumps(payload))
+    group = {"requested_gpu_tokens":16384,"cost_methods_requested":True,
+             "calibration":sweep.artifact_plan(path,16384)}
+    with pytest.raises(ValueError,match="explicit admission_estimator"):
+        sweep.validate_runtime(group,runtime())
+    group["config"] = {"cost_model":{"admission_estimator":"native_workload"}}
+    observed = sweep.validate_runtime(group,runtime())
+    assert observed["calibration_scope"]["status"] == "matching_scope"
+    with pytest.raises(ValueError,match="newly bound"):
+        sweep.validate_runtime(group,runtime(cache_hash="different-physical-config"))
+
+
 def test_fixed_methods_can_run_without_cost_fit_but_must_observe_real_pool(tmp_path, monkeypatch, capsys):
     config = tmp_path/"config.yaml"
     config.write_text("cost_model:\n  artifact: missing-large-pool.json\n")

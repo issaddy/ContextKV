@@ -53,6 +53,7 @@ class CostSettings:
     artifact: str | None = None
     output_length_artifact: str | None = None
     uncertainty_mode: str | None = None
+    admission_estimator: str | None = None
     default_output_tokens: int = 128
     p90_output_tokens: int = 256
     paired_error_ms: float = 0.0
@@ -86,6 +87,8 @@ class RunConfig:
             raise ValueError("output priors must be positive")
         if self.cost_model.uncertainty_mode not in (None, "global", "conditional"):
             raise ValueError("uncertainty_mode must be global, conditional or null to use the artifact setting")
+        if self.cost_model.admission_estimator not in (None, "strict", "native_workload"):
+            raise ValueError("admission_estimator must be strict or native_workload")
         if not 0 < self.cost_model.residual_alpha <= 1 or self.cost_model.max_normalized_distance < 0:
             raise ValueError("invalid cost model calibration parameters")
         if self.cost_model.online_calibration and not all((self.ablation.host_cost,
@@ -118,6 +121,8 @@ def create_controller(config: RunConfig) -> Controller:
                   include_control_cost=config.ablation.control_cost)
     if config.cost_model.uncertainty_mode is not None:
         common["uncertainty_mode"] = config.cost_model.uncertainty_mode
+    if config.cost_model.admission_estimator is not None:
+        common["admission_estimator"] = config.cost_model.admission_estimator
     settings = dict(default_output_tokens=config.cost_model.default_output_tokens,
                     p90_output_tokens=config.cost_model.p90_output_tokens,
                     paired_error_ms=config.cost_model.paired_error_ms,

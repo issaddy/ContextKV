@@ -98,7 +98,7 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
     estimates = tuple(model.predict_native(c,by_id[c.candidate_id],session,
                       batch=quotes,concurrency=concurrency or knobs.concurrency,
                       control_ms=control_ms,queue_ms=queue_ms) for c in valid)
-    if not all(e.calibrated for e in estimates):
+    if not all(e.calibrated if e.selection_eligible is None else e.selection_eligible for e in estimates):
         return Plan(_fixed(append,rebuild,knobs.fallback_strategy,knobs,session),
                     predicted=estimates, quote_seq=quotes.observed_seq,
                     reason="uncalibrated_cost_fallback")

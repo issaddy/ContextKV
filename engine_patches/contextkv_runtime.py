@@ -358,6 +358,37 @@ class ContextKVRuntime:
                     engine_session_id=sid, session_generation=epoch["generation"] if epoch else None,
                     inflight=bool(epoch and epoch["inflight"]), terminal=bool(epoch and epoch["state"] == "RETIRED"))
 
+    def workload_snapshot(self):
+        """Scheduler-visible logical work, never uniquely owned physical slots.
+
+        Native in-flight collection handles overlap and repeated batch membership.
+        Waiting wins over in-flight membership during retraction; a chunked
+        request can be absent from both batches. No request IDs or token arrays
+        leave the scheduler, and no cache state or completion events are advanced.
+        """
+        if self.scheduler is None:
+            return dict(active_requests=None, queued_requests=None,
+                        native_running_requests=None, native_waiting_requests=None)
+        waiting = [req for req in self.scheduler.waiting_queue if not req.finished()]
+        running = self.scheduler.collect_inflight_reqs()
+        if self.scheduler.chunked_req is not None:
+            running.add(self.scheduler.chunked_req)
+        running.difference_update(waiting)
+        running = [req for req in running if not req.finished()]
+
+        def summary(req):
+            return dict(input_tokens=len(req.origin_input_ids),
+                        generated_tokens=len(req.output_ids),
+                        max_new_tokens=req.sampling_params.max_new_tokens,
+                        ignore_eos=req.sampling_params.ignore_eos,
+                        kv_allocated_tokens=req.kv.kv_allocated_len,
+                        kv_committed_tokens=req.kv.kv_committed_len,
+                        cache_protected_tokens=req.kv.cache_protected_len)
+
+        return dict(active_requests=len(running), queued_requests=len(waiting),
+                    native_running_requests=[summary(req) for req in running],
+                    native_waiting_requests=[summary(req) for req in waiting])
+
     def quote(self, data):
         from sglang.srt.mem_cache.radix_cache import RadixKey
         from sglang.srt.managers.schedule_batch import Req
@@ -384,18 +415,24 @@ class ContextKVRuntime:
             host_load = view["host_only_load_tokens"]
             threshold = max(1, getattr(self.cache, "load_back_threshold", 10))
             native_load = host_load if host_load >= threshold else 0
-            uncertain = (bool(view["inflight_h2d_tokens"] or view["inflight_d2h_tokens"])
-                         or free_gpu < max(0, len(ids) - view["ready_gpu_prefix_tokens"]))
+            reasons = []
+            if free_gpu < max(0, len(ids) - view["ready_gpu_prefix_tokens"]):
+                reasons.append("capacity_pressure")
+            if view["inflight_h2d_tokens"] or view["inflight_d2h_tokens"]:
+                reasons.append("inflight_transfer")
             quotes.append(dict(candidate_id=c["candidate_id"], input_hash=c["input_hash"],
                 input_len=len(ids), match_limit=limit, **view,
-                native_load_estimate=native_load, native_estimate_uncertain=uncertain))
+                native_load_estimate=native_load, native_estimate_uncertain=bool(reasons),
+                uncertainty_reasons=reasons))
         return dict(request_id=data["request_id"], observed_seq=self.observed_seq,
                     observed_time_ns=time.monotonic_ns(), engine_restart_id=self.restart_id,
                     cache_config_hash=self.cache_config_hash,
                     free_gpu_tokens=free_gpu, free_host_tokens=free_host,
+                    gpu_capacity_tokens=int(self.cache.token_to_kv_pool_allocator.size),
+                    evictable_gpu_tokens=int(self.cache.full_evictable_size()),
+                    evictable_host_tokens=None,
                     quotes=quotes, fingerprint=self.fingerprint, host_quote_supported=True,
-                    active_requests=len(self.scheduler.running_batch.reqs) if self.scheduler else 1,
-                    queued_requests=len(self.scheduler.waiting_queue) if self.scheduler else 0)
+                    **self.workload_snapshot())
 
     def _drop_result(self, attempt):
         item = self.results.pop(attempt, None)
@@ -475,8 +512,7 @@ class ContextKVRuntime:
         return dict(engine_restart_id=self.restart_id, observed_seq=self.observed_seq,
                     observed_time_ns=time.monotonic_ns(), clock="server_monotonic",
                     pool=self.pool_snapshot(), cache_config=self.cache_config,
-                    active_requests=len(self.scheduler.running_batch.reqs) if self.scheduler else 0,
-                    queued_requests=len(self.scheduler.waiting_queue) if self.scheduler else 0,
+                    **self.workload_snapshot(),
                     events=[e for e in self.events if e["seq"] > after],
                     next_seq=self.event_seq, dropped_before_seq=oldest-1,
                     events_truncated=after < oldest-1,

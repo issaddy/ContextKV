@@ -25,6 +25,7 @@ class EvidencePolicy:
     revisit_mode: str = "conservative"
     revisit_history_turns: int = 3
     system_prompt: str | None = None
+    table_relations: bool = False
 
     def __post_init__(self) -> None:
         if self.max_total_model_tokens < 1 or self.max_new_tokens < 1:

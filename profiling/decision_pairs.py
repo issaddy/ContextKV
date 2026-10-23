@@ -353,8 +353,10 @@ def _model_and_knobs(config, cases, artifact):
                   include_control_cost=config.ablation.control_cost)
     if config.cost_model.uncertainty_mode is not None:
         common["uncertainty_mode"] = config.cost_model.uncertainty_mode
+    if config.cost_model.admission_estimator is not None:
+        common["admission_estimator"] = config.cost_model.admission_estimator
     settings = asdict(config.cost_model)
-    for key in ("artifact", "online_calibration", "output_length_artifact", "uncertainty_mode"):
+    for key in ("artifact", "online_calibration", "output_length_artifact", "uncertainty_mode", "admission_estimator"):
         settings.pop(key)
     if artifact:
         model = CostModel.load(artifact, **common)

@@ -281,6 +281,7 @@ async def execute_job(spec, job, directory):
         args.update(baseline=native["baseline"], base_url=native["base_url"], engine_manifest=native["engine_manifest"],
                     model_path=native.get("model_path"),
                     system_prompt=shared_config.context.system_prompt, system_prompt_file=None,
+                    table_relations=shared_config.context.table_relations,
                     output=str(directory), context_length=native.get("context_length", shared_config.context.max_total_model_tokens),
                     max_new_tokens=native.get("max_new_tokens", shared_config.context.max_new_tokens), local_files_only=native.get("local_files_only", False),
                     audit_prompt_ids=native.get("audit_prompt_ids", False), no_stream=native.get("no_stream", False))

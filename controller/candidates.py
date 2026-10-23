@@ -39,6 +39,12 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     if snapshot.execution:
         existing_refs = (*existing_refs, *snapshot.execution.reference_map)
     references = assign_references(archive, existing_refs, prefix_length=policy.reference_prefix_length)
+    table_annotations = ""
+    if policy.table_relations:
+        from adapters.table_relations import extract_table_relations, render_table_relations
+        by_key = {key: reference for reference, key in references}
+        table_annotations = "\n".join(annotation for block in required
+            if (annotation := render_table_relations(by_key[block.key], extract_table_relations(block.text))))
     previous = (() if snapshot.execution is None else
                 snapshot.execution.last_input_ids + snapshot.execution.last_output_ids)
     prompts = []
@@ -79,7 +85,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         missing = tuple(block for block in required if block.key not in visible)
         current, spans = current_user_message(query, missing, references,
             message_index=len(execution.messages), reused=required_keys & visible,
-            layout=policy.layout, retrieval_priority=retrieval_priority)
+            layout=policy.layout, retrieval_priority=retrieval_priority, table_annotations=table_annotations)
         prompts.append(("APPEND", execution.messages + (current,), execution.evidence_spans + spans,
                         visible | frozenset(span.key for span in spans), reason))
 
@@ -88,7 +94,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         messages.extend((Message("user", turn.user_text), Message("assistant", turn.assistant_text)))
     current, spans = current_user_message(query, required, references,
                                          message_index=len(messages), layout=policy.layout,
-                                         retrieval_priority=retrieval_priority)
+                                         retrieval_priority=retrieval_priority, table_annotations=table_annotations)
     messages.append(current)
     prompts.append(("REBUILD", tuple(messages), spans, frozenset(span.key for span in spans), None))
     conversations = tuple(prompt[1] for prompt in prompts)

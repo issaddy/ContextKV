@@ -201,6 +201,22 @@ class CacheQuote:
     inflight_d2h_tokens: int = 0
     native_load_estimate: int = 0
     native_estimate_uncertain: bool = False
+    uncertainty_reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _tuples(self, "uncertainty_reasons")
+
+
+@dataclass(frozen=True)
+class NativeRequestSummary:
+    """Observed CPU-side logical lengths, never unique/releasable physical slots."""
+    input_tokens: int
+    generated_tokens: int
+    max_new_tokens: int
+    kv_allocated_tokens: int
+    kv_committed_tokens: int
+    cache_protected_tokens: int
+    ignore_eos: bool = False
 
 
 @dataclass(frozen=True)
@@ -215,13 +231,19 @@ class CacheQuoteBatch:
     quotes: tuple[CacheQuote, ...]
     fingerprint: ConfigFingerprint | None = None
     evictable_gpu_tokens: int = 0
-    evictable_host_tokens: int = 0
+    evictable_host_tokens: int | None = None
     host_quote_supported: bool = True
     active_requests: int | None = None
     queued_requests: int | None = None
+    gpu_capacity_tokens: int | None = None
+    native_running_requests: tuple[NativeRequestSummary, ...] | None = None
+    native_waiting_requests: tuple[NativeRequestSummary, ...] | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "quotes")
+        for name in ("native_running_requests", "native_waiting_requests"):
+            if getattr(self, name) is not None:
+                _tuples(self, name)
 
 
 @dataclass(frozen=True)
@@ -305,6 +327,11 @@ class CostEstimate:
     output_length_error_tokens: float | None = None
     output_length_model: str = "shared"
     output_length_in_range: bool | None = None
+    selection_eligible: bool | None = None
+    waiting_estimate_kind: str | None = None
+    waiting_upper_ms: float | None = None
+    waiting_reason: str | None = None
+    timing_components_supported: bool | None = None
 
 
 @dataclass(frozen=True)

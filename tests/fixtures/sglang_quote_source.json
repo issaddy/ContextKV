@@ -57,6 +57,54 @@
       "original_file_sha256": "4c5ffeb710f1777b442ff9bf29078ce06898ccf76adbf06916652362b62ffc39",
       "source_sha256": "783f61297743b7089534382e9b873e3a65b1e0fde6f15dd50d89046b9ef0ef68",
       "source": "        current_output_len = len(self.output_ids[-1])\n        if req.customized_info is not None:\n            for key, req_values in req.customized_info.items():\n                is_request_level = self.is_request_level_customized_info_key(key)\n                if is_request_level:\n                    if req.stream:\n                        if send_token_offset != 0:\n                            continue\n                    elif not req.finished():\n                        continue\n                if key not in self.customized_info:\n                    self.customized_info[key] = [\n                        [] if is_request_level else [None] * len(prev_output_ids)\n                        for prev_output_ids in self.output_ids[:-1]\n                    ]\n                if req_values is None:\n                    values = [] if is_request_level else [None] * current_output_len\n                elif is_request_level:\n                    values = req_values\n                else:\n                    values = req_values[send_token_offset : len(output_ids_)]\n                self.customized_info[key].append(values)\n\n        for key, per_request_values in self.customized_info.items():\n            if len(per_request_values) < len(self.output_ids):\n                per_request_values.append(\n                    []\n                    if self.is_request_level_customized_info_key(key)\n                    else [None] * current_output_len\n                )\n"
+    },
+    "ReqKvInfo": {
+      "path": "python/sglang/srt/managers/schedule_batch.py",
+      "start_line": 974,
+      "end_line": 1054,
+      "original_file_sha256": "da593fe4696d4275589cd9b6164c1907b858d6e3ac81fd58fa46804ccacd189c",
+      "source_sha256": "78ec05bef977dd1a6fe03af28ebef42247d9517b405ba425213caa14c5610ad4",
+      "source": "@dataclasses.dataclass(slots=True, kw_only=True)\nclass ReqKvInfo:\n    # Device KV a request holds outside the prefix cache. Always present on the Req;\n    # whether any KV is held is `holds_kv` (a row is registered).\n    # Match observations and scheduling state stay on the Req itself.\n    req_pool_idx: Optional[int] = None  # req_to_token row, the register for the slots\n\n    # The request's own KV is [cache_protected_len, kv_allocated_len).\n    cache_protected_len: int = 0  # Tree cache owns [0, here) (matched or inserted)\n    # This request already inserted [0, here) into the tree; later inserts count\n    # a hit only on the nodes past it, so a request counts each node once.\n    cache_inserted_len: int = 0\n    kv_committed_len: int = 0  # KV content committed up to here, <= kv_allocated_len\n    kv_allocated_len: int = 0\n\n    # SWA slots in [swa_dead_lo(page_size), get_evicted_seqlen(SWA)) are freed.\n    swa_evict_floor: int = 0  # [0, here) never window-evicted (prefill-aware SWA)\n    component_evicted_seqlens: dict[ComponentType, int] = dataclasses.field(\n        default_factory=dict\n    )\n\n    # Host-side KV backup the request holds across a retraction (unified cache).\n    retraction_backup: Optional[RetractionBackup] = None\n\n    # Mamba state: an independent resource; whether it is held is `holds_mamba`.\n    mamba_pool_idx: Optional[torch.Tensor] = None  # shape (1)\n    mamba_ping_pong_track_buffer: Optional[torch.Tensor] = None  # shape (2)\n    # Per entry of the ping-pong buffer: True where it holds no slot (-1).\n    mamba_ping_pong_empty: Optional[list[bool]] = None\n    mamba_next_track_idx: Optional[int] = None  # 0 or 1\n    mamba_last_track_idx: Optional[int] = None  # 0 or 1\n    # Seq len of the last cached mamba state\n    mamba_last_track_seqlen: Optional[int] = None\n    # Seq len of the other ping-pong slot's state. None means what is in\n    # that slot cannot be named (never written, donated, freed).\n    mamba_prev_track_seqlen: Optional[int] = None\n    # Decode batch whose boundary step rode a mixed forward, which wrote no\n    # track state; the undo there leaves next == last without an in-place write.\n    mamba_untracked_decode_batch_idx: Optional[int] = None\n    # Deferred COW: source mamba pool index from radix cache node (copy on forward stream)\n    mamba_cow_src_index: Optional[torch.Tensor] = None\n    # Deferred clear: newly allocated mamba slot needs zeroing on forward stream\n    mamba_needs_clear: bool = False\n\n    def swa_dead_lo(self, page_size: int) -> int:\n        # Lowest SWA position this request may free itself: above the tree-owned\n        # prefix and above the eviction shield, page-aligned upward.\n        lo = max(self.cache_protected_len, self.swa_evict_floor)\n        if page_size > 1 and lo > self.cache_protected_len:\n            lo = ceil_align(lo, page_size)\n        return lo\n\n    @property\n    def holds_kv(self) -> bool:\n        return self.req_pool_idx is not None\n\n    @property\n    def holds_mamba(self) -> bool:\n        return self.mamba_pool_idx is not None\n\n    @property\n    def is_kv_released(self) -> bool:\n        return self.kv_allocated_len == 0 and self.max_evicted_seqlen == 0\n\n    @property\n    def max_evicted_seqlen(self) -> int:\n        return max(self.component_evicted_seqlens.values(), default=0)\n\n    def get_evicted_seqlen(self, component_type: ComponentType) -> int:\n        return self.component_evicted_seqlens.get(component_type, 0)\n\n    def set_evicted_seqlen(self, component_type: ComponentType, length: int) -> None:\n        self.component_evicted_seqlens[component_type] = length\n\n    def clamp_evicted_seqlens(self, length: int) -> None:\n        for component, cursor in self.component_evicted_seqlens.items():\n            self.component_evicted_seqlens[component] = min(cursor, length)\n\n    def mark_kv_released(self) -> None:\n        self.kv_allocated_len = 0\n        self.component_evicted_seqlens.clear()\n"
+    },
+    "finished": {
+      "path": "python/sglang/srt/managers/schedule_batch.py",
+      "start_line": 1679,
+      "end_line": 1681,
+      "original_file_sha256": "da593fe4696d4275589cd9b6164c1907b858d6e3ac81fd58fa46804ccacd189c",
+      "source_sha256": "e9520ce0af62f8c7ecd751d9f603a65cff9cfc3752c13e4f7a656d74021384fc",
+      "source": "    def finished(self) -> bool:\n        # Whether request reached finished condition\n        return self.finished_reason is not None\n"
+    },
+    "collect_inflight_reqs": {
+      "path": "python/sglang/srt/managers/scheduler.py",
+      "start_line": 5543,
+      "end_line": 5549,
+      "original_file_sha256": "658616840e161e3f6624e5adc957be855fd1bc8b7dea942970d5f1a9d9d50538",
+      "source_sha256": "fb6f29c470bccb534ac168f0b5a51716beabbb9458a39cfd4a7df30fbcedccfd",
+      "source": "    def collect_inflight_reqs(self) -> Set[Req]:\n        return {\n            req\n            for batch in self._collect_inflight_batches()\n            if batch is not None\n            for req in batch.reqs\n        }\n"
+    },
+    "_collect_inflight_batches": {
+      "path": "python/sglang/srt/managers/scheduler.py",
+      "start_line": 5551,
+      "end_line": 5559,
+      "original_file_sha256": "658616840e161e3f6624e5adc957be855fd1bc8b7dea942970d5f1a9d9d50538",
+      "source_sha256": "2baf58f0697a250a648452ee820dfe7edf82261cc9f392aae213e6866b2b908d",
+      "source": "    def _collect_inflight_batches(self) -> list[ScheduleBatch | None]:\n        if get_parallel().pp_size == 1:\n            inflight_batches = [self.running_batch, self.last_batch]\n        else:\n            inflight_batches = [*self.running_mbs, *self.mbs]\n        if self.enable_continuous_input_polling and self.result_queue:\n            # Polling can run intake before the newest queued batch becomes last_batch.\n            inflight_batches.extend(batch for batch, _ in self.result_queue)\n        return inflight_batches\n"
+    },
+    "evictable_size": {
+      "path": "python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py",
+      "start_line": 3324,
+      "end_line": 3325,
+      "original_file_sha256": "a109a77f1c48bbfef04ab071ca06fb91eae81c48a2cebaaa9e84c4b341e538aa",
+      "source_sha256": "42e70e49292a8aae7d48c49da5083bc96bf070fafb046215e09dfb7a75f90cd5",
+      "source": "    def evictable_size(self) -> int:\n        return self.component_evictable_size_.get(BASE_COMPONENT_TYPE, 0)\n"
+    },
+    "full_evictable_size": {
+      "path": "python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py",
+      "start_line": 3337,
+      "end_line": 3338,
+      "original_file_sha256": "a109a77f1c48bbfef04ab071ca06fb91eae81c48a2cebaaa9e84c4b341e538aa",
+      "source_sha256": "013a1d13f6c1a9bbe3f85be5542c7c3b52a7b3d67b7e2be8ff1f2e522238a1cd",
+      "source": "    def full_evictable_size(self) -> int:\n        return self.evictable_size()\n"
     }
   }
 }

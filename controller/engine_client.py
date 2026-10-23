@@ -11,8 +11,9 @@ import json
 from typing import Protocol, Sequence
 import uuid
 
-from controller.schema import (CacheQuote, CacheQuoteBatch, CompletionReceipt,
+from controller.schema import (CacheQuoteBatch, CompletionReceipt,
                                ConfigFingerprint, GenerationResult, PromptCandidate)
+from controller.serialization import decode
 from controller.templates import token_hash as token_hash
 
 PROTOCOL_VERSION = "contextkv-v1"
@@ -159,9 +160,7 @@ class SGLangEngineClient:
             "candidates": [{"candidate_id": c.candidate_id, "input_ids": list(c.input_ids),
                             "input_hash": c.input_hash, "snapshot_version": c.snapshot_version}
                            for c in candidates]})
-        data["quotes"] = tuple(CacheQuote(**q) for q in data["quotes"])
-        data["fingerprint"] = ConfigFingerprint(**data["fingerprint"])
-        return CacheQuoteBatch(**data)
+        return decode(CacheQuoteBatch, data)
 
     def _check_fingerprint(self, fingerprint):
         if fingerprint != self.fingerprint:

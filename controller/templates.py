@@ -160,7 +160,8 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
                          references: tuple[tuple[str, EvidenceKey], ...], *,
                          message_index: int,
                          reused: Iterable[EvidenceKey] = (), layout: str = "stable_key",
-                         retrieval_priority: Iterable[EvidenceKey] = ()
+                         retrieval_priority: Iterable[EvidenceKey] = (),
+                         table_annotations: str = ""
                          ) -> tuple[Message, tuple[EvidenceSpan, ...]]:
     by_key = {key: reference for reference, key in references}
     # Keep repeated evidence ahead of this turn's changing question so a shared
@@ -189,6 +190,8 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
         priority = tuple(dict.fromkeys(retrieval_priority))
         if priority:
             content += "\n" + retrieval_order_annotation(by_key[key] for key in priority) + "\n"
+    if table_annotations:
+        content += "\n" + table_annotations + "\n"
     content += f"\nQuestion:\n{query}\n"
     return Message("user", content), tuple(spans)
 

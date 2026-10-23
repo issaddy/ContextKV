@@ -143,7 +143,10 @@ def validate_runtime(group, runtime, *, expected_host_tokens=None):
         raise ValueError(f"actual research server pool/host settings differ from the sweep: {mismatch}")
     scope = None
     if group["cost_methods_requested"]:
-        model = CostModel.load(group["calibration"]["path"], max_new_tokens=1024)
+        options = group.get("config", {}).get("cost_model", {})
+        estimator = options.get("admission_estimator")
+        model = CostModel.load(group["calibration"]["path"], max_new_tokens=1024,
+                               **({"admission_estimator": estimator} if estimator else {}))
         scope = model.check_calibration_scope(info)
         if scope["status"] != "matching_scope":
             raise ValueError(f"Ours requires a newly bound cost artifact for this actual pool: {scope}")

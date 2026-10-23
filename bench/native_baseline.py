@@ -398,7 +398,8 @@ async def _run(args):
     # intentional leading/trailing whitespace. No separate prompt hash is needed.
     args.system_prompt = system_prompt
     policy = CandidatePolicy(max_total_model_tokens=args.context_length,
-                             max_new_tokens=args.max_new_tokens, system_prompt=system_prompt)
+                             max_new_tokens=args.max_new_tokens, system_prompt=system_prompt,
+                             table_relations=getattr(args, "table_relations", False))
     rows = load_rows(args.input)
     if args.domain == "cloud":
         rows = [r for r in rows if r["Collection"] == CLOUD_COLLECTION]
@@ -491,6 +492,7 @@ def main(argv=None):
     parser.add_argument("--retriever-index", help="reuse a saved pinned BM25S index")
     parser.add_argument("--retriever-config", help="optional shared P3 hybrid retriever YAML/JSON")
     parser.add_argument("--evidence-corpus", help="original passages with version/condition metadata shared with controller")
+    parser.add_argument("--table-relations", action="store_true", help="append literal source table field associations")
     parser.add_argument("--domain", choices=["cloud", "all"], default="cloud")
     parser.add_argument("--split-manifest")
     parser.add_argument("--split", choices=["dev", "test"], default="test")

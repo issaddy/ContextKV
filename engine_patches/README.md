@@ -10,7 +10,7 @@
 - 批量报价使用同一个观察周期，对完整最终 token IDs 共用原生 `Req._compute_max_prefix_len` 与页对齐。native radix key 使用 `array('q')`，与真实树一致。
 - `UnifiedTreeCore.peek_full_prefix` 只遍历匹配路径，返回连续 GPU ready、GPU/host recoverable、需新加载的 host-only、H2D pending、D2H pending。节点中间命中不 split；不触碰 LRU、引用、分配器、传输队列或 CUDA fence。
 - H2D 的 `contextkv_h2d_pending_id` 是新增观测字段，对所有原生写策略在提交加载时标记，节点 split 继承、原生加载 ACK 后清除。它不参与原生 admission、锁、淘汰决策。D2H 使用已有 `write_through_pending_id`；已发布地址但未完成传输的副本不计 ready。
-- NATIVE 加载预测参考原生 `load_back_threshold`；存在 pending 或瞬时 free GPU slot 不足时标记不确定。报价不是预留，实际匹配、加载、排队与预算决定仍由原生路径执行。
+- NATIVE 加载预测参考原生 `load_back_threshold`；旧 `native_estimate_uncertain` 保留 pending 或瞬时 free GPU slot 不足的原语义，同时 `uncertainty_reasons` 区分 `inflight_transfer` 与 `capacity_pressure`。后者表示可能需要原生淘汰或等待，不表示缓存信息不可读取。报价不是预留，实际匹配、加载、排队与预算决定仍由原生路径执行。
 - prepare 同一 operation 幂等，不重开 native generation；生成在原生 `ensure_session_generation` 前同时验证 restart、registry 状态和当前 tracker generation。研究 epoch 禁止经原生 open/close 重新开启或绕过退役。
 - retire 先阻止新请求，等待已接纳请求终态，再撤销 native 软引用并 ACK。软引用退役的 free 计数恒为零；缓存物理占用不会被假定已回收。原生已接纳请求在 RETIRING 期间可能先完成注册、再立即被退役撤销，因此 receipt 的 `session_ref_registered` 表示本次曾成功经过注册路径，不是 ACK 后仍持有引用的证明。
 - 终态 receipt 通过原生 customized-info 输出，包含真实 tracker 注册结果、cache inserted length 和 native 分层命中。实际 prefill 工作来自每次成功 worker forward 的 `extend_lens` 累计，覆盖 chunk/retraction 重算并排除 mixed batch 的 decode 行，不用 input-minus-hit 冒充真实执行工作。
@@ -62,6 +62,12 @@ scripts/launch_sglang.sh --host 127.0.0.1 --port 30000
 ## 观测与恢复合同
 
 `/context/metrics` 经相同 scheduler 控制面读取原生 allocator 的 `capacity − free`，返回 GPU/host 唯一物理占用和当前 running/waiting 请求数。它不扫描树，不按 session 引用重复计数。事件环最多保留 4096 条记录，`after_seq` 增量拉取，并通过 `events_truncated/dropped_before_seq` 显式暴露丢失区间。
+
+报价还返回 `gpu_capacity_tokens` 和原生 `full_evictable_size()` 的 `evictable_gpu_tokens`；两者都是 O(1) 计数。GPU 可淘汰量是 FULL device 未硬锁 token 总数，包含可能被当前候选命中的共享前缀。不能把它与候选 ready prefix 重复计算成 admission 保证。原生 [PrefillBudget](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/prefill_budget.py#L98-L113) 使用 free + evictable；[PrefillAdder](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/managers/schedule_policy.py#L1350-L1407) 再保护候选前缀并考虑已运行请求的剩余输出预算、页开销、chunk 和其他约束。这个补丁不模拟或修改它。Host 没有对应的精确 O(1) token 总计；`evictable_host_tokens=null` 明确未知，既不报假零，也不为报价扫描所有 host 节点。
+
+报价与 metrics 的 `native_running_requests` / `native_waiting_requests` 只传出每个请求的 `input_tokens`、`generated_tokens`、`max_new_tokens`、`ignore_eos`、`kv_allocated_tokens`、`kv_committed_tokens` 和 `cache_protected_tokens`，没有文本、token IDs 或请求标识。输出预算取 native 已按上下文和池容量裁剪后的 `sampling_params.max_new_tokens`，已生成数只取 scheduler 当前已处理的 CPU 状态；不读取未来输出。[ReqKvInfo](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/managers/schedule_batch.py#L974-L987) 的三种 KV 数字是**逻辑序列边界**：树拥有 `[0, cache_protected_tokens)`，请求自有尾部位于其后；共享前缀、页边界和完成后的缓存插入都使其不能直接作为唯一物理占用或即将释放 slot 数。Overlap 时 committed 状态还可能落后已执行 forward。
+
+运行集合复用 native `collect_inflight_reqs()` 对 running/last/overlap batch 去重，纳入独立 chunked request，排除已结束请求；已回到 waiting 的请求只计 waiting。Running 摘要无顺序语义；waiting 保留当前列表顺序，但原生优先级、staging 和 admission 可改变实际执行顺序。读取成本为 O(active + waiting)，每个请求只读标量和数组长度，不遍历 token 内容、不维护新缓存、不处理 ACK、不改变锁和 LRU。没有 scheduler 时摘要为 `null`，已知空集合为 `[]`。这些观测可用于区分容量压力和传输未完成，尚不构成经过 GPU 验证的新等待预测模型。
 
 - `request_terminal`：receipt 与原生完成时序。
 - `transfer`：在原生 HiCache ACK 已完成后复用 `num_bytes`、`start_event.elapsed_time(finish_event)`，输出 H2D/D2H 字节与 CUDA event 时间。计时不支持时为 `null`，不能将 CPU enqueue 时间替代它。该观察点不增加 CUDA 同步，不改变传输调度。

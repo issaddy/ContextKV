@@ -27,7 +27,9 @@
     "python/sglang/kernels/ops/kvcache/hicache.py": "f26aa62750f30ae9ce7a49ced671407daa97e3334288f8d335d51d666c5cc97d",
     "python/sglang/srt/environ.py": "e15f05e345703aa78d0a3af806bb1daeccf736ee44c4475216c39a7f1afb04c1",
     "python/sglang/srt/mem_cache/pool_host/base.py": "e57a060e2fd54905a4f16c4e440bafb8356f1967713c8a50f2667b2057d65bf6",
-    "python/sglang/srt/mem_cache/pool_host/mha.py": "e5cd25529af91c934376ca1eea9f019afc4cac75fe717a6879eb47a4d730a4eb"
+    "python/sglang/srt/mem_cache/pool_host/mha.py": "e5cd25529af91c934376ca1eea9f019afc4cac75fe717a6879eb47a4d730a4eb",
+    "python/sglang/srt/managers/schedule_policy.py": "28f57c7a6ef21f386d9083f24cbc4077280dd31e7abbc94667c904f9365aec68",
+    "python/sglang/srt/mem_cache/prefill_budget.py": "b1d64e648d958aeb82fe60c8acacbe9ecd4d0c83ca2ea8a058eaaaf0b488e07e"
   },
   "changed_files": [
     "python/sglang/srt/entrypoints/api_contract.py",

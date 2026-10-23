@@ -10,6 +10,7 @@ from __future__ import annotations
 from array import array
 import ast
 import copy
+import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -339,7 +340,9 @@ def test_native_split_inherits_observation_marker():
 
 
 @pytest.mark.parametrize("threshold,expected",[(4,8),(9,0)])
-def test_runtime_quote_uses_native_array_limit_and_host_threshold(runtime,monkeypatch,threshold,expected):
+@pytest.mark.parametrize("free_gpu", [0, 100])
+@pytest.mark.parametrize("pending", [None, 7])
+def test_runtime_quote_uses_native_array_limit_and_host_threshold(runtime,monkeypatch,threshold,expected,free_gpu,pending):
     native_key = extract_native_class(native_source("RadixKey"),"RadixKey",{"array":array})
     max_prefix = extract_native_method(native_source("_compute_max_prefix_len"),"_compute_max_prefix_len")
     for name in ("sglang","sglang.srt","sglang.srt.mem_cache","sglang.srt.managers"):
@@ -351,11 +354,13 @@ def test_runtime_quote_uses_native_array_limit_and_host_threshold(runtime,monkey
     schedule_module.Req = type("Req",(),{"_compute_max_prefix_len":max_prefix})
     monkeypatch.setitem(sys.modules,"sglang.srt.mem_cache.radix_cache",radix_module)
     monkeypatch.setitem(sys.modules,"sglang.srt.managers.schedule_batch",schedule_module)
-    tree,_,_ = tree_chain((tuple(range(8)),{"gpu":False,"host":True}),page_size=4,key_cls=native_key)
+    tree,_,_ = tree_chain((tuple(range(8)),{"gpu":False,"host":True,"d2h":pending}),
+                          page_size=4,key_cls=native_key)
     tree.peek_full_prefix = lambda key:runtime.peek_full_prefix(tree,key)
     cache = SimpleNamespace(tree_core=tree,page_size=4,_tree_core_backend="python",
         cache_controller=SimpleNamespace(mem_pool_host=SimpleNamespace(available_size=lambda:100)),
-        token_to_kv_pool_allocator=SimpleNamespace(available_size=lambda:100),load_back_threshold=threshold)
+        token_to_kv_pool_allocator=SimpleNamespace(available_size=lambda:free_gpu,size=256),
+        full_evictable_size=lambda:128,load_back_threshold=threshold)
     fingerprint = {"model_revision":"test"}
     bridge = runtime.ContextKVRuntime(cache,fingerprint)
     ids = list(range(10))
@@ -364,7 +369,97 @@ def test_runtime_quote_uses_native_array_limit_and_host_threshold(runtime,monkey
         {"candidate_id":"a","snapshot_version":0,"input_ids":ids,"input_hash":runtime.token_hash(ids)}]})
     row = quote["quotes"][0]
     assert row["match_limit"] == 8
-    assert row["native_load_estimate"] == expected
-    assert row["host_only_load_tokens"] == 8
+    assert row["native_load_estimate"] == (expected if pending is None else 0)
+    assert row["host_only_load_tokens"] == (8 if pending is None else 0)
     assert quote["free_host_tokens"] == 100 and quote["host_quote_supported"]
+    assert quote["gpu_capacity_tokens"] == 256 and quote["evictable_gpu_tokens"] == 128
+    assert quote["evictable_host_tokens"] is None
+    assert row["uncertainty_reasons"] == ((["capacity_pressure"] if free_gpu == 0 else [])
+                                        + (["inflight_transfer"] if pending else []))
+    assert row["native_estimate_uncertain"] == (free_gpu == 0 or pending is not None)
+    assert quote["native_running_requests"] is quote["native_waiting_requests"] is None
+    from controller.schema import CacheQuoteBatch
+    from controller.serialization import dumps, loads
+    decoded = loads(CacheQuoteBatch, dumps(quote))
+    assert decoded.gpu_capacity_tokens == 256 and decoded.evictable_host_tokens is None
+    assert decoded.quotes[0].uncertainty_reasons == tuple(row["uncertainty_reasons"])
+    assert loads(CacheQuoteBatch, dumps(decoded)) == decoded
     assert compact_state(tree) == before
+
+
+def test_workload_snapshot_reuses_native_overlap_collection_without_mutation(runtime):
+    native_kv = extract_native_class(native_source("ReqKvInfo"), "ReqKvInfo",
+                                    {"dataclasses":dataclasses})
+    native_finished = extract_native_method(native_source("finished"), "finished")
+    class Request:
+        def __init__(self, n, generated, maximum, *, done=False):
+            self.origin_input_ids = array("q",range(n))
+            self.output_ids = array("q",range(generated))
+            self.sampling_params = SimpleNamespace(max_new_tokens=maximum,ignore_eos=False)
+            self.kv = native_kv(kv_allocated_len=n+generated+4,
+                               kv_committed_len=n+generated-1,cache_protected_len=n//2)
+            self.finished_reason = "length" if done else None
+        finished = native_finished
+    # running + last + overlap results contain aliases, including a retracted
+    # request already back in waiting. An unfinished chunk may be in neither.
+    active, retracted, queued, chunked, done = (
+        Request(20,3,10), Request(30,4,4), Request(40,0,12),
+        Request(50,0,8), Request(60,10,10,done=True))
+    collect_batches = extract_native_method(native_source("_collect_inflight_batches"),
+        "_collect_inflight_batches", {"get_parallel":lambda:SimpleNamespace(pp_size=1)})
+    collect = extract_native_method(native_source("collect_inflight_reqs"),"collect_inflight_reqs")
+    class Scheduler:
+        _collect_inflight_batches = collect_batches
+        collect_inflight_reqs = collect
+    scheduler = Scheduler()
+    scheduler.running_batch = SimpleNamespace(reqs=[active,retracted,done])
+    scheduler.last_batch = SimpleNamespace(reqs=[active])
+    scheduler.enable_continuous_input_polling = True
+    scheduler.result_queue = [(SimpleNamespace(reqs=[active,retracted]),object())]
+    scheduler.chunked_req = chunked
+    scheduler.waiting_queue = [queued,retracted,done]
+    bridge = object.__new__(runtime.ContextKVRuntime)
+    bridge.scheduler = scheduler
+    state_before = copy.deepcopy([r.__dict__ for r in (active,retracted,queued,chunked,done)])
+    result = bridge.workload_snapshot()
+    assert result["active_requests"] == result["queued_requests"] == 2
+    assert [r["input_tokens"] for r in result["native_waiting_requests"]] == [40,30]
+    by_input = {r["input_tokens"]:r for r in result["native_running_requests"]}
+    assert set(by_input) == {20,50}
+    assert by_input[20] == dict(input_tokens=20,generated_tokens=3,max_new_tokens=10,
+        ignore_eos=False,kv_allocated_tokens=27,kv_committed_tokens=22,cache_protected_tokens=10)
+    from controller.schema import CacheQuoteBatch, NativeRequestSummary
+    from controller.serialization import dumps, loads
+    wire = dict(request_id="q",observed_seq=0,observed_time_ns=1,engine_restart_id="r",
+                cache_config_hash="c",free_gpu_tokens=0,free_host_tokens=10,quotes=[],
+                gpu_capacity_tokens=16384,evictable_gpu_tokens=128,evictable_host_tokens=None,
+                **result)
+    decoded = loads(CacheQuoteBatch,dumps(wire))
+    assert isinstance(decoded.native_running_requests,tuple)
+    assert all(isinstance(row,NativeRequestSummary) for row in decoded.native_running_requests)
+    assert decoded.native_waiting_requests[1].generated_tokens == 4
+    assert loads(CacheQuoteBatch,dumps(decoded)) == decoded
+    assert [r.__dict__ for r in (active,retracted,queued,chunked,done)] == state_before
+    assert scheduler.waiting_queue == [queued,retracted,done]
+    assert scheduler.running_batch.reqs == [active,retracted,done]
+    scheduler.waiting_queue = []
+    scheduler.running_batch.reqs = []
+    scheduler.last_batch = None
+    scheduler.result_queue = []
+    scheduler.chunked_req = done
+    assert bridge.workload_snapshot() == dict(active_requests=0,queued_requests=0,
+        native_running_requests=[],native_waiting_requests=[])
+
+
+def test_native_gpu_evictable_counter_is_constant_time_and_not_host_capacity():
+    evictable = extract_native_method(native_source("evictable_size"), "evictable_size",
+                                      {"BASE_COMPONENT_TYPE":0})
+    full = extract_native_method(native_source("full_evictable_size"), "full_evictable_size")
+    class Tree:
+        component_evictable_size_ = {0:128}
+        evictable_size = evictable
+        full_evictable_size = full
+        @property
+        def root_node(self):
+            raise AssertionError("counter access must not walk the tree")
+    assert Tree().full_evictable_size() == 128

@@ -9,7 +9,7 @@ import pytest
 from controller.engine_client import (EngineError, SGLangEngineClient, UnknownOutcomeError,
                                       SGLANG_COMMIT, token_hash)
 from controller.mock_engine import MockEngine
-from controller.schema import ConfigFingerprint, PromptCandidate
+from controller.schema import ConfigFingerprint, NativeRequestSummary, PromptCandidate
 from engine_patches.contextkv_runtime import ContextKVError, ContextKVRuntime
 
 
@@ -142,6 +142,44 @@ def test_http_rejects_unverified_engine_capabilities_and_fingerprint():
     run(scenario())
 
 
+@pytest.mark.parametrize("workload", ["legacy", "null", "empty", "one"])
+def test_http_quote_decodes_optional_native_workload_contract(workload):
+    async def scenario():
+        fp = ConfigFingerprint()
+        item = candidate((1,2,3))
+        info = dict(engine_restart_id="r", protocol_version="contextkv-v1", engine_kind="sglang",
+                    guarded_generate_supported=True, scheduler_owned=True,
+                    completion_status_supported=True, sglang_commit=SGLANG_COMMIT, fingerprint=asdict(fp))
+        summary = NativeRequestSummary(input_tokens=100,generated_tokens=4,max_new_tokens=20,
+            kv_allocated_tokens=108,kv_committed_tokens=103,cache_protected_tokens=64)
+        wire = dict(request_id="q",observed_seq=0,observed_time_ns=1,engine_restart_id="r",
+            cache_config_hash="c",free_gpu_tokens=0,free_host_tokens=10,fingerprint=asdict(fp),
+            quotes=[dict(candidate_id="a",input_hash=item.input_hash,input_len=3,match_limit=2)])
+        if workload != "legacy":
+            wire.update(gpu_capacity_tokens=16384,evictable_gpu_tokens=128,evictable_host_tokens=None,
+                native_running_requests=(None if workload == "null" else
+                                         [asdict(summary)] if workload == "one" else []),
+                native_waiting_requests=[])
+            wire["quotes"][0].update(native_estimate_uncertain=True,
+                                      uncertainty_reasons=["capacity_pressure"])
+        client = SGLangEngineClient("http://test",fp,transport=httpx.MockTransport(
+            lambda request:httpx.Response(200,json=info if request.url.path == "/context/engine/info" else wire)))
+        try:
+            result = await client.quote_batch([item],fp)
+            assert result.native_running_requests == ((summary,) if workload == "one" else
+                                                     () if workload == "empty" else None)
+            if workload != "legacy":
+                assert result.native_waiting_requests == ()
+                assert result.gpu_capacity_tokens == 16384 and result.evictable_host_tokens is None
+                assert result.quotes[0].uncertainty_reasons == ("capacity_pressure",)
+            else:
+                assert result.gpu_capacity_tokens is None
+                assert result.quotes[0].uncertainty_reasons == ()
+        finally:
+            await client.aclose()
+    run(scenario())
+
+
 class FakeNativeCache:
     """Only the existing native tracker boundary is mocked in these tests."""
     page_size = 1
@@ -238,6 +276,7 @@ def test_real_patch_extend_counter_counts_chunk_and_retry_work_not_prompt_minus_
 
 
 def test_real_patch_quote_uses_native_array_key_without_mutations(monkeypatch):
+    import json
     import sys
     from array import array
     from types import ModuleType
@@ -257,9 +296,20 @@ def test_real_patch_quote_uses_native_array_key_without_mutations(monkeypatch):
         raw_match_tokens=len(key.ids), ready_gpu_prefix_tokens=len(key.ids),
         recoverable_prefix_tokens=len(key.ids), host_only_load_tokens=0,
         inflight_h2d_tokens=0, inflight_d2h_tokens=0))
-    cache.token_to_kv_pool_allocator = SimpleNamespace(available_size=lambda: 100)
-    runtime = ContextKVRuntime(cache, {})
-    request = {"request_id": "q", "fingerprint": {}, "candidates": [
+    cache.token_to_kv_pool_allocator = SimpleNamespace(available_size=lambda: 100,size=256)
+    cache.full_evictable_size = lambda:64
+    fp = ConfigFingerprint()
+    class ActiveRequest:
+        origin_input_ids = (1,2,3)
+        output_ids = (4,)
+        sampling_params = SimpleNamespace(max_new_tokens=8,ignore_eos=False)
+        kv = SimpleNamespace(kv_allocated_len=4,kv_committed_len=3,cache_protected_len=2)
+        def finished(self):
+            return False
+    active = ActiveRequest()
+    scheduler = SimpleNamespace(collect_inflight_reqs=lambda:{active},waiting_queue=[],chunked_req=None)
+    runtime = ContextKVRuntime(cache,asdict(fp),scheduler=scheduler)
+    request = {"request_id": "q", "fingerprint": asdict(fp), "candidates": [
         {"candidate_id": "a", "snapshot_version": 0, "input_ids": [1, 2, 3], "input_hash": token_hash([1, 2, 3])}]}
     quote = runtime.quote(request)
     assert quote["quotes"][0]["ready_gpu_prefix_tokens"] == 2
@@ -268,6 +318,21 @@ def test_real_patch_quote_uses_native_array_key_without_mutations(monkeypatch):
     cache.ongoing_load_back[1] = object()
     runtime.quote(request)
     assert len(cache.ongoing_load_back) == 1  # quote does not process transfer ACKs
+    async def scenario():
+        def handler(request):
+            handler = runtime.info if request.url.path == "/context/engine/info" else runtime.quote
+            return httpx.Response(200,json=handler(json.loads(request.content)))
+        client = SGLangEngineClient("http://test",fp,transport=httpx.MockTransport(handler))
+        try:
+            decoded = await client.quote_batch([candidate((1,2,3))],fp)
+            assert decoded.active_requests == 1 and decoded.queued_requests == 0
+            assert decoded.native_running_requests == (NativeRequestSummary(
+                input_tokens=3,generated_tokens=1,max_new_tokens=8,kv_allocated_tokens=4,
+                kv_committed_tokens=3,cache_protected_tokens=2),)
+            assert decoded.native_waiting_requests == () and decoded.evictable_host_tokens is None
+        finally:
+            await client.aclose()
+    run(scenario())
 
 
 def test_native_timing_uses_completion_clock_without_inventing_gpu_phases():
