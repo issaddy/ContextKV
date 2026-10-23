@@ -88,6 +88,9 @@ calibration = [
     { name = "numpy" },
     { name = "scipy" },
 ]
+evaluation = [
+    { name = "jinja2" },
+]
 retrieval = [
     { name = "bm25s" },
     { name = "numpy" },
@@ -110,6 +113,7 @@ requires-dist = [
     { name = "bm25s", marker = "extra == 'retrieval'", specifier = "==0.3.15" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "httpx", specifier = ">=0.28,<0.29" },
+    { name = "jinja2", marker = "extra == 'evaluation'", specifier = ">=3.1,<4" },
     { name = "jinja2", marker = "extra == 'tokenizer'", specifier = ">=3.1,<4" },
     { name = "numpy", marker = "extra == 'calibration'", specifier = "==2.3.5" },
     { name = "numpy", marker = "extra == 'retrieval'", specifier = "==2.3.5" },
@@ -119,7 +123,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'tokenizer'", specifier = "==5.19.0" },
     { name = "uvicorn", specifier = ">=0.34,<1" },
 ]
-provides-extras = ["tokenizer", "retrieval", "calibration"]
+provides-extras = ["tokenizer", "retrieval", "calibration", "evaluation"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -15,6 +15,8 @@ from bench.judge import DIMENSIONS, evaluation_binding
 from bench.official import load_jsonl
 from bench.report import bind_quality_rows, paired_quality
 
+NATIVE_EVALUATOR_FIELDS = ("protocol", "base_model", "base_family", "na_policy", "context_window", "protocol_manifest")
+
 
 def evaluator_identity(row, generator):
     """Identity is recorded provenance, not remote weight attestation."""
@@ -31,8 +33,12 @@ def evaluator_identity(row, generator):
         return "unknown", None
     same = judge["model"] == generator["model"] or judge["revision"] == generator["revision"]
     signature = ("offline_judge", *(judge.get(k) for k in ("provider", "model", "revision", "prompt", "temperature", "max_tokens")),
-                 row.get("reference_targets_supplied"))
-    return "self_judge" if same else "independent_model_declared", signature
+                 row.get("reference_targets_supplied"),
+                 *(json.dumps(judge.get(k), sort_keys=True) for k in NATIVE_EVALUATOR_FIELDS))
+    related = bool(judge.get("base_family") and generator.get("base_family")
+                   and judge["base_family"] == generator["base_family"])
+    kind = "self_judge" if same else "related_model_family_declared" if related else "independent_model_declared"
+    return kind, signature
 
 
 def frozen_evaluator_matches(protocol, row):
@@ -44,6 +50,8 @@ def frozen_evaluator_matches(protocol, row):
         required = ("provider", "model", "revision", "prompt", "temperature", "max_tokens")
         return (row.get("source") == "offline_judge" and all(k in protocol.get("judge", {}) for k in required)
                 and all(row.get("judge", {}).get(k) == protocol["judge"][k] for k in required)
+                and all(row.get("judge", {}).get(k) == protocol["judge"].get(k)
+                        for k in NATIVE_EVALUATOR_FIELDS)
                 and "reference_targets_supplied" in protocol
                 and row.get("reference_targets_supplied") == protocol["reference_targets_supplied"])
     raise ValueError("frozen evaluator kind must be human_blind or offline_judge")

@@ -300,3 +300,45 @@ def test_human_aggregation_is_explicit_equal_rater_and_retains_na_and_disagreeme
         aggregate_ratings([first, first])
     with pytest.raises(ValueError, match="human blind"):
         aggregate_ratings([base | {"source": "offline_judge"}])
+
+
+def test_native_rubric_and_parser_changes_are_part_of_evaluator_identity(tmp_path):
+    from dataclasses import asdict
+    spec = setup_methods(tmp_path, source="offline_judge")
+    judge = asdict(JudgeConfig("local", "Judge", "judge-weights", "http://localhost/v1")) | {
+        "protocol": "selene_absolute_v1", "base_family": "llama-3.1",
+        "protocol_manifest": {"parser": "result-v1", "rubrics": {"correctness": "original"}},
+    }
+    for method in spec["methods"]:
+        edit_scores(spec, method, lambda rows: [r.update(judge=judge) for r in rows])
+    assert evaluate(spec)["comparisons"]["candidate"]["dev_quality_eligible"]
+    edit_scores(spec, "candidate", lambda rows: rows[0]["judge"]["protocol_manifest"]["rubrics"].update(correctness="changed"))
+    result = evaluate(spec)["comparisons"]["candidate"]
+    assert "missing_or_unmatched_evaluator_protocol" in result["acceptance_blockers"]
+
+
+def test_native_frozen_protocol_cannot_omit_rubric_or_na_extension():
+    from dataclasses import asdict
+    from bench.quality_acceptance import frozen_evaluator_matches
+    judge = asdict(JudgeConfig("local", "Judge", "judge-weights", "http://localhost/v1"))
+    row = {"source": "offline_judge", "judge": judge | {"na_policy": "explicit_na_v1",
+           "protocol_manifest": {"rubric": "v1"}}, "reference_targets_supplied": False}
+    frozen = {"kind": "offline_judge", "judge": judge, "reference_targets_supplied": False}
+    assert not frozen_evaluator_matches(frozen, row)
+    frozen["judge"] = dict(row["judge"])
+    assert frozen_evaluator_matches(frozen, row)
+    row["judge"]["na_policy"] = "native_numeric_only"
+    assert not frozen_evaluator_matches(frozen, row)
+
+
+def test_related_family_is_explicit_without_becoming_self_or_human_judging():
+    from dataclasses import asdict
+    from bench.quality_acceptance import evaluator_identity
+    judge = asdict(JudgeConfig("local", "OtherTunedModel", "different-weights", "http://localhost/v1"))
+    row = {"source": "offline_judge", "judge": judge | {"base_family": "qwen2.5"}}
+    generator = {"model": "QwenGenerator", "revision": "generator-weights", "base_family": "qwen2.5"}
+    assert evaluator_identity(row, generator)[0] == "related_model_family_declared"
+    row["judge"]["base_family"] = "llama-3.1"
+    assert evaluator_identity(row, generator)[0] == "independent_model_declared"
+    row["judge"]["revision"] = generator["revision"]
+    assert evaluator_identity(row, generator)[0] == "self_judge"

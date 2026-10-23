@@ -2,13 +2,13 @@
 
 本轮建议先用 **Selene Mini 8B** 做本地元评测，以 **Prometheus 2 7B** 为原协议对照，再为通过实际检查的 evaluator 接入已保存的 Cloud dev 回答。两者分别来自 Llama、Mistral 家族，与当前 Qwen2.5-7B 生成器不同；无需付费 API 或等用户填写人工分数即可推进。跨家族只能减少一种共同偏差，不能证明评分可靠，也不能把模型评分称为人审。
 
-截至 2026-10-24，本轮完成官方论文、作者仓库、固定模型元数据和本地质量代码审查；未下载大权重、未启动 GPU 服务、未产生任何新质量分数。小文件与访问记录在 ignored `runs/open-judge-research/`，请求准备文件在 `runs/open-judge-preparation/`。本方案独立于正在运行的 B 阶段计时实验。
+截至 2026-10-24，已完成官方来源审查并实现 `bench/native_judge.py` 薄适配器与 fake HTTP 合同测试；未下载大权重、未启动 GPU 服务、未产生任何新质量分数。小文件与访问记录在 ignored `runs/open-judge-research/`，合成请求准备文件在 `runs/open-judge-preparation/`。本方案独立于 B 阶段计时实验。
 
 ## 现有链路与最小缺口
 
-仓库当前没有 `bench/local_judge.py`。现有入口是 `bench/judge.py`：它已有 OpenAI-compatible HTTP、固定 model/revision/prompt/temperature、完整可见证据与实际历史、规则 flags、query/input_hash 绑定和失败记录。但它强制一次返回五维 JSON，不能直接保持专用 judge 的原生 rubric 格式。新工作应是一个薄的本地模型 prompt/parser 适配器，复用这些输入与输出边界，而非再建一套验收框架。
+仓库没有 `bench/local_judge.py`。原 `bench/judge.py` 保留一次五维 JSON 的接口；新 `bench/native_judge.py` 专门支持 Selene/Prometheus 原生 rubric 格式。它复用既有完整证据白名单、query/input_hash 绑定与规则审核，未改主控制器或生成模板。
 
-`bench/quality_acceptance.py` 已核对真实 run、audit、答案、提示身份和划分，并区分自评、开发集准入、heldout 模型 evaluator 非劣与人工质量结论。后续仍保留 `scores` 五维完整键、NA 和失败；新增原生分数/推理文本作为诊断。同底座不同微调模型目前可能被识别为 `independent_model_declared`，因此新 manifest 还应记录 base model family；首选跨家族模型，不能靠改路径或 served model 名“变成独立”。详见 [现有质量验收](quality_acceptance.md)。
+`bench/quality_acceptance.py` 已核对真实 run、audit、答案、提示身份和划分，并区分自评、开发集准入、heldout 模型 evaluator 非劣与人工质量结论。保留 `scores` 五维完整键、NA 和失败，新增原生分数/推理文本作为诊断。本轮接线将同 base family 的不同 checkpoint 标记为 `related_model_family_declared`，保留其开发诊断但不称跨家族独立；精确同权重仍是自评。首选跨家族模型，不能靠改路径或 served model 名“变成独立”。详见 [现有质量验收](quality_acceptance.md)。
 
 ## 已核实的候选与版本
 
@@ -64,12 +64,52 @@ curl --fail-with-body http://127.0.0.1:30001/v1/chat/completions \
 
 Prometheus 则使用 `[RESULT]` 后的 1–5 或 A/B。其固定官方 wrapper 默认 `ABSOLUTE_PROMPT_WO_REF`，仅传 `reference_answers` 不会自动切换 reference 模板；RAG 模板还有 `{relevant_context}`，但通用 `absolute_grade` 没有提供该格式变量。应显式渲染对应官方模板，不应误称“传了参考答案就已被模型使用”。[固定 prompts](https://github.com/prometheus-eval/prometheus-eval/blob/dcfb44272d5d0414832f5dbb8c2a05ebc2614234/libs/prometheus-eval/prometheus_eval/prompts.py)、[固定 wrapper](https://github.com/prometheus-eval/prometheus-eval/blob/dcfb44272d5d0414832f5dbb8c2a05ebc2614234/libs/prometheus-eval/prometheus_eval/judge.py)、[固定 parser](https://github.com/prometheus-eval/prometheus-eval/blob/dcfb44272d5d0414832f5dbb8c2a05ebc2614234/libs/prometheus-eval/prometheus_eval/parser.py)。
 
-最小代码合同如下，后续由 root 实现：
+已实现的代码合同如下：
 
-1. 复用 `judge_payload`、`evaluation_binding`、`rule_audit`、已有 HTTP transport 和独占输出创建。每维独立 rubric，冻结完整模板、rubric、解析、参考答案策略和聚合版本；输出仍是原 `offline_judge` 绑定格式。
-2. Selene/Prometheus 各自解析原生结尾字段，保留 raw response、native score、reason、finish reason 和 usage。有效 1–5 才映射 `(score - 1) / 4`。解析失败或输出被截断不补分；NA 不自动当 0。原生 1–5 模板没有 NA，因此若某维确实无法判断，需要显式适用性步骤或协议变体，经元评测后冻结；不能声称原模板天然支持 null。
+1. 复用 `judge_payload`、`evaluation_binding`、`rule_audit`、httpx transport 和独占输出创建。每维独立 rubric，`judge.protocol_manifest` 保存完整固定模板、五维 rubric、data policy、解析、参考答案策略与聚合声明，供已有 acceptance 比较；输出仍是 `offline_judge` 绑定格式。模板位于 `bench/assets/native_judge/`，包含固定来源、NOTICE 和 Apache-2.0 文本。
+2. Selene/Prometheus 各自严格解析唯一的末尾 Result 字段，保留 `native_results` 中的 raw text、native score、reason、finish reason、API identity 和 usage。有效 1–5 才映射 `(score - 1) / 4`。默认 `na_policy=native_numeric_only` 不接受 NA；可选 `explicit_na_v1` 在原模板后追加明确的项目适用性扩展，合法 NA 记为 `not_applicable`、该维仍为 null。扩展不是作者原协议，尚需元评测。格式错误、HTTP 失败、非 stop 完成（包括 length）记为 `failed`，不是 NA；任一维失败则整行 status=failed，仍保留其余维度的诊断分数。
 3. 主评测先用完整可见证据和自身历史、无黄金参考答案。需要 reference 的独立轨道才离线 join targets，并记录 `reference_targets_supplied`；黄金答案不是模型当时可见的 source。脚本历史与实际自身历史不一致仍单列，不把参考答案适用于不同历史当作既定事实。
-4. 可复用一次加载的模型身份、模板与预算检查；不新增逐请求多层 hash。冻结 evaluator metadata 应完整传到 acceptance，不能更换模板而沿用同一个配置身份。
+4. 一次构造完整协议声明；不新增逐请求多层 hash。可配置 `context_window` 并提供固定 tokenizer，按完整 chat prompt tokens + max_tokens 做入口核对，超限不发送、不截断。`base_model`/`base_family` 必填；它们仍是明确的操作者身份声明。`script_history_mismatch` 未单独判分，输出 null，不能当作 false。
+
+可调用 API：
+
+```python
+client = NativeJudgeClient(config, transport=optional_httpx_transport,
+                           token_counter=optional_exact_chat_token_counter)
+try:
+    result = await client.evaluate(audit_record, reference=optional_offline_reference)
+finally:
+    await client.aclose()
+# client.complete(messages) 返回原始 transport 结果；不强制套五维 rubric。
+```
+
+本地配置示例（model 名需与实际 served-model-name 相同，以下权重仍未下载）：
+
+```json
+{
+  "provider": "local_openai_compatible",
+  "model": "AtlaAI/Selene-1-Mini-Llama-3.1-8B",
+  "revision": "427792f1c3e2073cb7da216924fd884b1ba496e0",
+  "base_url": "http://127.0.0.1:30001/v1",
+  "protocol": "selene_absolute_v1",
+  "base_model": "meta-llama/Llama-3.1-8B-Instruct",
+  "base_family": "llama",
+  "na_policy": "native_numeric_only",
+  "temperature": 0.0,
+  "max_tokens": 1536,
+  "context_window": 32768
+}
+```
+
+```bash
+python -m bench.native_judge --audit PATH_TO_SAVED_AUDIT.jsonl \
+  --config PATH_TO_CONFIG.json --output NEW_SCORES.jsonl \
+  --tokenizer-path PATH_TO_PINNED_LOCAL_SELENE_SNAPSHOT
+# 参考答案轨道才添加 --references OFFLINE_LABELS.jsonl。
+# tokenizer 仅 local_files_only 加载；不触发权重或 tokenizer 下载。
+```
+
+Prometheus 配置使用 `protocol=prometheus_absolute_v1`、模型/revision 表中固定值、`base_model=mistralai/Mistral-7B-Instruct-v0.2`、`base_family=mistral`。API/CLI 都不会安装依赖或启动服务器。针对测试覆盖 23 项协议、输入、完整证据、失败、NA、绑定、预算与文件不覆盖合同；预算计数显式 `return_dict=False`，避免 Transformers 5 默认 BatchEncoding 的字段数被误当 token 数。这些都是工程测试，不能当作真实模型有效性测量。
 
 ## GroUSE：先验证 evaluator，再用于本项目
 
@@ -95,7 +135,7 @@ judge 输入只含 `input`、`actual_output`、`expected_output`、`references`�
 
 ## 下一步的有界执行顺序
 
-1. 准备薄 adapter 与 fake HTTP 测试：正确/缺失/越界 Result、NA 适用性、finish_reason=length、引用正文与实际历史完整保留、评分绑定/失败不丢行。以本轮两个请求样例验证协议，不产生质量分数。
+1. 薄 adapter 与 fake HTTP 测试已完成；下一步用本轮两个请求样例和实际本地服务验证模型输出合同，不先将接口成功记为质量通过。
 2. 性能采样结束后下载固定 Selene snapshot 并独立启动，先做 tokenizer 预算和极少量合成接口检查，再跑 GroUSE train 16。Prometheus 作为同预算候选对照；报告每项通过率、解析率、失败类型、token/时间成本，不把 16 例结果当可信区间保证。
 3. 针对项目已见错误增加明确标为开发诊断的反例：附件 10 MB 与 50 MB、错误概括“1 MB 含附件”、把历史 assistant 断言当来源、无效 curl JSON、合理简短拒答与无依据长答。这些是规则/assistant 构造探针，不伪称新增人工标签。
 4. 依据 train 元评测冻结 model/revision、四模板或适配协议、抽样参数、适用性与归一化，再运行 GroUSE test 144 一次。失败如实报告；若后续据此修改，明确它已转为开发证据，不能继续称未见元评测。
