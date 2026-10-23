@@ -8,7 +8,7 @@
 |---|---|
 | 最近完整 CPU 回归 | 726 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-query-fusion-final.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
-| Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 atomic_judge 模块/协议资产、table_focus、CRAFT 行文本与 GroUSE 源码，CRAFT 完整许可在 wheel 中；runs/build-atomic-focus.log；新增guided schema、query view、observation probe与client也已重建并逐字核对（runs/build-guided-wheel.log） |
+| Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 atomic_judge 模块/协议资产、table_focus、CRAFT 行文本与 GroUSE 源码，CRAFT 完整许可在 wheel 中；runs/build-atomic-focus.log；新增guided schema、query view、observation probe与client也已重建并逐字核对（runs/build-guided-wheel.log）；融合模块也已构建并逐字核对（runs/build-query-fusion-wheel.log） |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
 | 冻结模拟测试矩阵 | 39 jobs / 117 轮成功 |
 | 继承主方法参数的开发集消融 | 15 jobs / 45 轮成功，不参与主方法选择 |
@@ -83,6 +83,8 @@ SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固
 
 - 新预算/匹配观测补丁 `3aac1df…` 已完成[H200功能验收](native_observation_validation.md)：三份保留报告共474个报价预算逐项复算一致，GPU-v2与host各三请求完成/退役/拒绝旧epoch通过；首次probe的HTTP代码预期错误与客户端消息丢失均保留并修正。真实fixture全部ignoreEOS，尚未覆盖ratio缩放或clip饱和；normalRAG的82轮事件没有quote，不作补充覆盖。
 - [用户主题五视图检索](user_topic_retrieval_validation.md)完成820条结果，R@5提升至54.87%，保留R@50下降及WebSocket候选丢失。新完整P3两臂各41轮全部执行成功、各一轮截断，82条输入/历史/正文/receipt核对无错误；语义审查仍发现SDK扩写和跨平台混用。
+
+- [双路融合真实检索](current_topic_fusion_validation.md)完成82/82尝试、246阶段结果；86次query编码、4100对重排。新增75对全部实际评分，R@50恢复至76.07%，最终R@5/nDCG保持54.87%/51.49%；38/41 top5相同，3轮材料变化继续进入P3验证。
 
 ## 仍需完成的研究验收
 

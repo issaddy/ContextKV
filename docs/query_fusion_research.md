@@ -1,6 +1,6 @@
 # 原查询与主题补全双路：近期方法核查及冻结池诊断
 
-2026-10-24。问题来自真实开发结果：`user_topic` 将 Cloudant SDK 支持段排入前两名，却把 WebSocket/customization ID 的一个定义正例从融合第9位推到第53位，超出50篇重排池。[完整五视图结果](user_topic_retrieval_validation.md)仍保留。为保留两种互补视角，现已实现显式可选 `query_fusion: current_topic_rrf`，默认仍为 `single`。CPU冻结池与实现合同已验证，新增神经重排/完整回答收益尚待实测。
+2026-10-24。问题来自真实开发结果：`user_topic` 将 Cloudant SDK 支持段排入前两名，却把 WebSocket/customization ID 的一个定义正例从融合第9位推到第53位，超出50篇重排池。[完整五视图结果](user_topic_retrieval_validation.md)仍保留。为保留两种互补视角，已实现显式可选 `query_fusion: current_topic_rrf`，默认仍为 `single`。真实82次同重排预算检索已完成：池R@50恢复74.79%→76.07%，最终R@5/nDCG@5持平54.87%/51.49%，目标正例重排第6；38/41轮top5逐字相同，3轮材料有变化。[实测核验](current_topic_fusion_validation.md)保留这些差异，完整回答效果尚待验证。
 
 ## 四项原始方法核查
 
@@ -19,7 +19,7 @@
 
 脚本 `runs/user-topic-retrieval-review/frozen_pool_probe.py` 只读五视图的保存排名，构造新50篇池，再读取相同dev qrels计算覆盖；没有GPU、搜索或模型调用，也没有使用标签选择在线规则。输出 `frozen-pools.jsonl` 记录每个候选、来源覆盖及缺失logit，`frozen-pool-summary.json` 保留全部预设策略。
 
-预设策略为原current前50、原user_topic前50、一次性 query×retriever 的RRF（权重raw:topic=1:1、2:1、1:2），以及两路各保留前25、去重后交替补齐到50的quota对照。RRF k固定60；相同query文本只运行一次，避免重复投票。本次41轮只有4轮 current与user_topic文本不同，因此实际部署这个候选方案会增加4次 query编码/双路检索，而总cross-encoder预算仍是每轮50对。它比“每轮双倍重排”更有希望，但额外编码/CPU搜索与模型共GPU成本仍需实测。
+预设策略为原current前50、原user_topic前50、一次性 query×retriever 的RRF（权重raw:topic=1:1、2:1、1:2），以及两路各保留前25、去重后交替补齐到50的quota对照。RRF k固定60；相同query文本只运行一次，避免重复投票。本次41轮只有4轮 current与user_topic文本不同，因此equal-RRF会增加4次query编码/检索，总cross-encoder预算仍是每轮50对；后续真实模型计数已确认这一预算。与生成共GPU的完整时延仍需P3实测。
 
 | 冻结池策略 | dev R@50 | 相对user_topic改善/持平/退化（39标注轮） | b461t4定义正例在新池中的位置 |
 |---|---:|---:|---:|
@@ -32,7 +32,7 @@
 
 四种方案都找回 `ibmcld_13386-1713-3820`，并保留d5 SDK两段正例，现有标注覆盖不能区分它们谁更好。报告没有按已知正例挑最优权重，也不将quota的构造次序计算为有效排名分。其余37个相同query的任务沿用同一候选集合，新增开销只发生在不同视图任务；另一个变化是附件纠正轮，未使用任务专名路由。
 
-**还不能报告新top5。** equal-RRF在b461t4的新50池中，有22篇没有此前以user_topic query得到的cross-encoder logits；d5t9也有17篇缺失。raw-query logits不能替代topic-query logits，不能将缺项补零或只挑有分段落计算虚假新结果。当前报告只有pool coverage，最终神经重排与回答指标均未测量。
+**这项CPU诊断本身不能报告新top5。** equal-RRF在b461t4的新50池中，有22篇没有此前以user_topic query得到的cross-encoder logits；d5t9也有17篇缺失。raw-query logits不能替代topic-query logits，不能将缺项补零或只挑有分段落计算虚假新结果。之后的真实模型实验补齐了全部75个新pair评分，最终排名结果见[独立实测报告](current_topic_fusion_validation.md)；不能把后来的真实分数归给此前CPU回放。
 
 ## 已实现的固定预算入口
 
@@ -42,9 +42,9 @@
 
 验证包括：相同query的原候选/分数/排序完全相等且模型各调用一次；不同query的新池包含原路独有文档，全部用topic评分且总预算不翻倍；共享工厂与两条真实CLI均持久化同一配置，离线qrels在所有排名之后才读取。64项相关测试通过（另1项可选全量数据测试未运行）。`runs/user-topic-retrieval-review/verify_shared_fusion.py`用保存的原排名回放生产纯逻辑，41/41新池与之前冻结equal-RRF池完全一致；预计45次query检索，对应41轮中4次额外查询。75个query-document对缺少旧topic logits，不能由这项CPU回放生成新top5。
 
-## 可复跑的真实模型对照
+## 已完成、可复跑的真实模型对照
 
-`runs/run-current-topic-fusion-retrieval.py`已准备：同41轮dev、同BGE固定权重/BF16/cuda:0、8192编码与1024重排长度、batch16、每路50且总重排50；模型/索引加载一次。每个query先 `single` 后 `current_topic_rrf`，两者都重新执行编码和评分，不跨模式复用旧logits。全部排名尝试完成后才打开dev qrels。结果保留原top5正文、完整候选IDs/分数、query来源trace及失败；摘要单列每模式预期/成功/失败任务数，不把失败当成功空排名。固定顺序存在热效应，时长仅作描述。
+`runs/run-current-topic-fusion-retrieval.py`已在H200执行：同41轮dev、同BGE固定权重/BF16/cuda:0、8192编码与1024重排长度、batch16、每路50且总重排50；模型/索引加载一次。每个query先 `single` 后 `current_topic_rrf`，两者都重新执行编码和评分，不跨模式复用旧logits。全部排名尝试完成后才打开dev qrels。82/82尝试成功、246阶段记录完整；实际86次query编码、4100对重排，token-cap hits为0。结果保留原top5正文、完整候选IDs/分数、query来源trace及失败口径；摘要单列每模式预期/成功/失败任务数，不把失败当成功空排名。固定顺序存在显著执行条件差异，时长仅作描述，不能称双路加速。
 
 ```bash
 python runs/run-current-topic-fusion-retrieval.py \
@@ -67,6 +67,6 @@ python -m bench.retrieval_eval evaluate \
   --output runs/cloud-dev-current-topic-fusion-standalone
 ```
 
-首个真实对照固定equal-RRF，不因dev覆盖选择权重。quota仍为CPU候选诊断，尚未接在线。候选保留与排序query是两项独立因素：原query保住其有利定义段，不保证topic评分会把它排入前五，必须保留这一可能失败。已有 `LocalBGE.score`、原dense索引的`by_id`和原始passage直接复用，无需重建索引或扩大重排预算。
+首个真实对照固定equal-RRF，不因dev覆盖选择权重。quota仍为CPU候选诊断，尚未接在线。候选保留与排序query是两项独立因素：本次原query把定义段恢复到融合第7，topic评分却排到第6，明确验证了“恢复入池未必改善最终top5”。同时另一个无qrel标注的GUID定义段进入top5，不能只凭指标持平判断材料无变化。已有 `LocalBGE.score`、原dense索引的`by_id`和原始passage直接复用，无需重建索引或扩大重排预算。
 
-如果双路池恢复覆盖却仍排不进前五，再比较评分query策略或有来源的澄清，而非不断增加段数。更复杂的多步模型可作为后续路线，但先明确其训练来源、步骤成本与停止条件，不把ICR的gold轨迹筛选或Multi-Step的训练奖励当在线信号。完整P3仍需保持当前问题、完整QA、原正文、生成预算与资源对等；记录产品适用性、条件/版本和新增错误，不能用R@50恢复代替答案验证。
+后续可预先声明评分query策略或有来源澄清的对照，分别诊断入池与排序阶段，不根据这轮已知正例调权。更复杂的多步模型仍是可探索路线，需明确其训练来源、步骤成本与停止条件，不把ICR的gold轨迹筛选或Multi-Step的训练奖励当在线信号。由于本次有3轮top5正文变化，完整P3仍需保持当前问题、完整QA、原正文、生成预算与资源对等，检查产品适用性、条件/版本及后续历史传播，不能用R@50恢复或R@5持平代替答案验证。
