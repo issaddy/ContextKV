@@ -98,9 +98,11 @@ uv run --extra retrieval contextkv --config configs/demo.yaml \
 
 16K 独立标定及六方法的 246 轮真实运行已完成；[标定分析](docs/capacity_calibration_validation.md)和[联合验证](docs/controller_capacity_validation.md)定位了容量不确定标记导致的集中回退，以及输出预算与调度等待耦合。这些结果用于继续改进 B/C，尚不构成完整方法优于强基线的结论。
 
-可选[表格关系注释](docs/table_relations.md)保留完整原文，为对象、列、值和单位附加字面 span。候选和原生对照共用 `context.table_relations`；默认关闭。新增 `table_annotation_style: focus_refs` 复用 CRAFT 行文本并按当前 query 选择焦点、逐行附原引用；[12 次冻结历史验证](docs/table_focus_validation.md)在两个开发历史中改善了已知对象/引用错误，完整 P3 泛化仍待验证。独立模型的[原生协议](docs/open_judge_plan.md)和[GroUSE 元评测](docs/grouse_meta.md)已实现；[真实首轮结果](docs/open_judge_validation.md)暴露范围漏判与格式失败，当前不能用于宣布质量非劣。 新增[原子声明诊断 CLI](docs/atomic_judge_proposal.md)独立保留限定条件与来源核验结果，已通过工程测试，真实模型效果待验。焦点样式的[完整 P3 三臂结果](docs/table_focus_p3_validation.md)保留了目标修复和后续条件/产品错误。
+可选[表格关系注释](docs/table_relations.md)保留完整原文，为对象、列、值和单位附加字面 span。候选和原生对照共用 `context.table_relations`；默认关闭。新增 `table_annotation_style: focus_refs` 复用 CRAFT 行文本并按当前 query 选择焦点、逐行附原引用；[12 次冻结历史验证](docs/table_focus_validation.md)在两个开发历史中改善了已知对象/引用错误，[完整 P3 三臂验证](docs/table_focus_p3_validation.md)已完成123轮，保留目标修复及后续条件/产品错误。独立模型的[原生协议](docs/open_judge_plan.md)和[GroUSE 元评测](docs/grouse_meta.md)已实现；[真实首轮结果](docs/open_judge_validation.md)暴露范围漏判与格式失败，当前不能用于宣布质量非劣。 新增[原子声明诊断 CLI](docs/atomic_judge_proposal.md)独立保留限定条件与来源核验结果，已完成两轮真实29例开发诊断，格式完成率提高但仍有量词、数值与来源适用性误判；[验证记录](docs/atomic_judge_validation.md)保留全部失败。可选JSON Schema模式用于约束输出结构，语义可靠性另行验证。
 
-[阶段成本闭环验证](docs/stage_workload_validation.md)完成四方法两重复共 328 轮。工作量模型提高了成本选择覆盖，但完整响应仍慢于对照，等待误差和门槛影响已按实际轨迹定位。模型计算的 Linux CPU 优化有单独逐字段等价证据，未混入此前的 GPU 性能数字。随后[优化后代码的门槛对照](docs/stage_gate_validation.md)又完成 328 轮，gate0 相比 gate2 的等会话均值降低 19.88%，仍慢于固定阈值；这个开发结果继续用于纠偏。
+[用户主题查询](docs/user_topic_query_view.md)已接入共享检索入口；[五视图真实开发对照](docs/user_topic_retrieval_validation.md)完成820条结果，最终R@5从current的52.31%到54.87%，同时保留WebSocket问题候选召回下降。完整问答与固定总重排预算的多查询融合继续独立验证。
+
+[阶段成本闭环验证](docs/stage_workload_validation.md)完成四方法两重复共 328 轮。工作量模型提高了成本选择覆盖，但完整响应仍慢于对照，等待误差和门槛影响已按实际轨迹定位。模型计算的 Linux CPU 优化有单独逐字段等价证据，未混入此前的 GPU 性能数字。随后[优化后代码的门槛对照](docs/stage_gate_validation.md)又完成 328 轮，gate0 相比 gate2 的等会话均值降低 19.88%，仍慢于固定阈值；这个开发结果继续用于纠偏。新增[原生预算与匹配观测](docs/native_observation_validation.md)已在H200 GPU/host受控负载中完成复算和生命周期验收，当前计划器尚未使用新字段。
 
 ## 真实 SGLang 接入
 

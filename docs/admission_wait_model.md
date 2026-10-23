@@ -74,9 +74,9 @@ Idle 准备项按候选 `(P,U,L)`——可复用前缀、新计算后缀、host 
 4. **必要验证。** CPU 合同测试覆盖 ratio 变化不改变 service 长度、ignore_eos 使用完整剩余预算、clip 在减去 generated 之后、页取整与严格容量边界、queued 首 token/后续 decode、共享锁最后释放、chunk 未完成时 headroom 口径，以及缺失/陈旧前缀保持未知。原生纯预算函数可用固定源码 test double 做差分，避免只用复制公式验证自身。
 5. **小规模可控采样。** 在同 16K/host 配置做“1 running+2 waiting+候选”fixture，分别覆盖 cold、GPU 共享前缀、host 前缀和较长 waiting；只预热物理上能同时容纳的前缀。先用 `ignore_eos` 的已知短/长预算验证容量记账，再用 EOS 请求验证服务长度情景。仅在 quote、原生 admission verdict、forward-entry、terminal 采样 scalar/pool 信息，保存同一请求引用作离线关联，不逐 token 记录或做内容哈希。对照 gate 是否正确、等待残差及状态漂移，再跑同代码、同质量预算的闭环方法对照；不从已执行臂误差直接推出 APPEND/REBUILD 因果收益。
 
-目前没有新增生产 patch，也不选择上表中某个默认 ratio 作为线上“最佳值”。下一轮应先用原生真实状态消除不可辨识项，再决定是否值得加入更细的服务速率/尾部模型。
+该诊断阶段没有新增生产 patch，也不选择上表中某个默认 ratio 作为线上“最佳值”。后续先用原生真实状态消除不可辨识项，再决定是否值得加入更细的服务速率/尾部模型。
 
-## 已实现的只读观测扩展（等待下一轮 GPU 采样）
+## 已实现的只读观测扩展
 
 上述诊断之后，研究补丁增加了下列可选字段，**当前 admission/cost/planner 仍忽略这些新字段，默认算法没有改变**。旧 wire 缺字段时，schema 将其解码为 None；不会填零冒充已知状态。`/cache/quote` 与 metrics 共用同一个只读 workload snapshot，HTTP client 沿用已有一次共享 dataclass 解码，没有增加内容 hash 或请求缓存。
 
@@ -98,3 +98,5 @@ Running 预算和旧服务工作量摘要使用不同成员集合，所以只在
 本地验证直接复用固定原生 offset、ratio tracker、match 函数源码片段，检查 finished/retracted/overlap 成员差异、ratio 衰减、remaining-then-clip、ignore_eos、原生返回与字段不变、未知匹配/过时匹配/只读副本、旧 wire、嵌套 dataclass HTTP 合同，以及旧等待估计在加入观测后逐值不变。完整补丁在干净固定源码上应用并静态编译；该结果不代替 GPU/IPC 验收。
 
 下一轮小 probe 只需保留这些 quote/metrics 原始字段，按 `native_running_budget_requests`、ratio、clip 独立复算预算；将 waiting match 时间与同次 quote 求年龄，区分 None、刚观测和较旧观测。对已有 terminal 的 pre-forward 标签继续只分析已执行臂，不将未来实际输出作为特征。先检查有无实际旧匹配、批次成员差异和容量门槛解释力，再决定是否启用独立 reservation/service 模式；这轮不自动重标定、不改变默认门槛，也不声称等待精度或吞吐已经改善。
+
+H200 上的受控 GPU/host 小 probe 现已完成，详见 [原生观测功能验收](native_observation_validation.md)。三份报告均保留，包括最初因 HTTP 错误包装预期不符而失败的 fixture；重跑两份通过。已观测 ratio 变化、已知/未知 waiting 匹配、同机时间年龄及正常生成/退役/拒绝，但 fixture 全为 `ignore_eos=True`，未覆盖普通 EOS 请求的 ratio 缩放和 clip 触发分支。当前等待算法仍未使用新增字段。
