@@ -281,6 +281,8 @@ uv run python -m bench.blind_review import --key runs/evaluation/blind/private-k
 
 将 `review.jsonl` 与 `ratings.csv` 交给评审者，独立保管 `private-key.json`，不要把其方法映射一起发出。随机顺序隐藏方法名，保留回答与全部证据用于判定。回填须含 reviewer ID、五项评分或 `NA`、历史不一致标记及备注。多评审者可各自填写；汇总前应显式处理多评审者分歧，配对统计不悄悄删除缺失评分或合并重复评分。
 
+新增 `bench.blind_review aggregate` 显式聚合多评审者，`bench.quality_acceptance` 绑定两侧真实答案、完整任务覆盖、评分协议与固定 dev/test 划分。重新导出拒绝覆盖旧评分表。真实 P3 的 123 份空白包、非付费本地 judge 路径、自评限制和最终冻结合同见 [质量验收操作说明](quality_acceptance.md)。当前空表不是已完成人工评价。
+
 ### 统一矩阵、等预算 dev 调参与冻结 B6
 
 `bench.experiments` 复用既有 runner 和两个真实客户端；每个 job 独立数据库/日志目录，job 顺序执行，各 job 内会话按指定并发运行。支持 P1/P2/P3、并发、seed、think time、会话到达率/窗口/超时、各方法配置、原生服务器和消融。

@@ -16,6 +16,25 @@ def _dict(value):
     return asdict(value) if is_dataclass(value) else value
 
 
+def bind_quality_rows(turns, quality_rows, *, require_answer=False):
+    """Check external scores against the run's successful answers once at import."""
+    expected = {_dict(r)["task_id"]: _dict(r) for r in turns if _dict(r)["status"] == "success"}
+    ids = [r["task_id"] for r in quality_rows]
+    if len(set(ids)) != len(ids):
+        raise ValueError("quality report needs one score per task; select a method and aggregate human raters first")
+    if set(ids) - expected.keys():
+        raise ValueError("quality scores contain tasks absent from this run's successful answers")
+    for row in quality_rows:
+        target = expected[row["task_id"]]
+        if row.get("conversation_id") != target["conversation_id"]:
+            raise ValueError("quality task conversation differs from the evaluated run")
+        if require_answer and "answer" not in row:
+            raise ValueError("external quality scores must retain the evaluated answer")
+        if "answer" in row and row["answer"] != target["assistant_text"]:
+            raise ValueError("quality scores belong to a different answer for this task")
+    return expected
+
+
 def receipt_summary(rows):
     """Executed prefill can exceed prompt length after re-execution; do not clamp."""
     observed_cold = [r["cold"] for r in rows if r["cold"] is not None]
@@ -117,18 +136,7 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=2
     if any((_dict(_dict(row).get("result") or {})).get("measurement_kind") == "fake_http_correctness" for row in turns):
         source = "simulation"
     quality_rows = list(quality)
-    expected_quality = {_dict(r)["task_id"]: _dict(r) for r in turns if _dict(r)["status"] == "success"}
-    quality_ids = [r["task_id"] for r in quality_rows]
-    if len(set(quality_ids)) != len(quality_ids):
-        raise ValueError("quality report needs one score per task; select a method and aggregate human raters first")
-    if set(quality_ids) - expected_quality.keys():
-        raise ValueError("quality scores contain tasks absent from this run's successful answers")
-    for row in quality_rows:
-        expected = expected_quality[row["task_id"]]
-        if row.get("conversation_id") != expected["conversation_id"]:
-            raise ValueError("quality task conversation differs from the evaluated run")
-        if "answer" in row and row["answer"] != expected["assistant_text"]:
-            raise ValueError("quality scores belong to a different answer for this task")
+    expected_quality = bind_quality_rows(turns, quality_rows)
     scored = [r for r in quality_rows if r.get("scores")]
     dimensions = sorted({k for r in scored for k in r["scores"]})
     missing_quality = sorted(expected_quality.keys() - {r["task_id"] for r in scored})
@@ -158,6 +166,8 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=2
             "transfers": transfer_totals(transfers) if transfers else (transfer_totals(()) if telemetry_info.get("available") else None),
             "telemetry": telemetry_info,
             "quality": {"status": quality_status, "simulation_scores": quality_simulated,
+                        "quality_noninferiority_established": False,
+                        "interpretation": "score_summary_only_use_quality_acceptance_for_provenance_and_scope",
                         "expected_successful_tasks": len(expected_quality), "missing_scored_task_ids": missing_quality,
                         "scored_tasks": len(scored), "failed_tasks": sum(r.get("status") == "failed" for r in quality_rows),
                         "dimensions": {key: distribution(r["scores"][key] for r in scored if r["scores"].get(key) is not None) for key in dimensions},
@@ -227,7 +237,7 @@ def main(argv=None):
     parser.add_argument("--quality")
     parser.add_argument("--occupancy")
     parser.add_argument("--transfers")
-    parser.add_argument("--reference-quality", help="paired offline quality JSONL; requires --quality")
+    parser.add_argument("--reference-quality", help="paired offline quality JSONL; requires --quality and --reference-run")
     parser.add_argument("--reference-run", help="raw reference run for paired complete-turn latency intervals")
     parser.add_argument("--epsilon", type=float, default=.01)
     parser.add_argument("--bootstrap-samples", type=int, default=5000)
@@ -236,12 +246,16 @@ def main(argv=None):
     optional = {key: load_jsonl(getattr(args, key)) if getattr(args, key) else () for key in ("quality", "occupancy", "transfers")}
     summary = summarize_run(json.loads(Path(args.input).read_text()), **optional)
     if args.reference_quality:
-        if not args.quality:
-            parser.error("--reference-quality requires --quality")
+        if not args.quality or not args.reference_run:
+            parser.error("--reference-quality requires --quality and --reference-run to bind both answers")
         reference = load_jsonl(args.reference_quality)
+        reference_payload = json.loads(Path(args.reference_run).read_text())
+        expected_reference = bind_quality_rows(reference_payload.get("report", reference_payload)["turns"], reference, require_answer=True)
+        candidate_payload = json.loads(Path(args.input).read_text())
+        bind_quality_rows(candidate_payload.get("report", candidate_payload)["turns"], optional["quality"], require_answer=True)
         dimensions = sorted({k for row in optional["quality"] if row.get("scores") for k in row["scores"]})
         summary["paired_quality"] = ({"status": "not_validated_simulation"} if summary["quality"]["simulation_scores"] else
-            {"status": "incomplete_quality_coverage"} if summary["quality"]["missing_scored_task_ids"] else
+            {"status": "incomplete_quality_coverage"} if summary["quality"]["missing_scored_task_ids"] or set(expected_reference) != {r["task_id"] for r in reference if r.get("scores")} else
             {key: paired_quality(optional["quality"], reference, dimension=key,
                                  epsilon=args.epsilon, seed=args.seed, samples=args.bootstrap_samples) for key in dimensions})
     if args.reference_run:

@@ -17,6 +17,7 @@ from bench.quality import export_evaluation, official_record
 from bench.report import paired_quality, summarize_run, telemetry_series
 from bench.run_sessions import run_sessions
 from profiling.common import Measurement, summarize_measurements
+from controller.templates import token_hash
 
 FIXTURE = Path(__file__).parent / "fixtures/mtrag_small.jsonl"
 
@@ -66,12 +67,14 @@ def test_judge_http_retains_all_visible_bodies_and_freezes_config():
         judge = OfflineJudge(JudgeConfig("local", "frozen", "revision-1", "http://localhost/v1"),
                              transport=httpx.MockTransport(respond))
         try:
-            result = await judge.evaluate(audit_record())
+            record = audit_record() | {"input_ids": [11, 22, 33]}
+            result = await judge.evaluate(record)
         finally:
             await judge.aclose()
         assert result["generation_measurement_kind"] == "simulation"
         assert result["judge"]["revision"] == "revision-1"
         assert result["source"] == "offline_judge"
+        assert result["query"] == record["query"] and result["input_hash"] == token_hash(record["input_ids"])
     asyncio.run(check())
     evidence = json.loads(requests[0]["messages"][1]["content"])["audit_evidence"]
     assert len(evidence) == 12 and evidence[-1]["text"] == "Full original evidence 11"

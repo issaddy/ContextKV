@@ -92,6 +92,10 @@ uv run --extra retrieval contextkv --config configs/demo.yaml \
 
 进一步验证包含[嵌套增益校准](docs/gain_calibration_validation.md)、[实际 P3 集成](docs/p3_retrieval_integration.md)、[纠错查询](docs/correction_query_view.md)、[新版重排器的负面结果](docs/qwen3_rerank_validation.md)及[16K/32K 原生缓存压力](docs/native_policy_validation.md)。保持逐 token 等价的[候选分词优化](docs/candidate_tokenization_profile.md)已在本地和 Linux 验证，并记录线程预算对 CPU 消耗的影响。
 
+[质量验收入口](docs/quality_acceptance.md)支持多评审聚合、双方实际答案绑定、完整评分覆盖和固定 dev/test 划分核对；已生成三组真实 P3 共 123 份待盲审样本，尚无人工评分。自动模型评分、开发探索和最终人工验收分别标记。
+
+[有限容量控制器入口](docs/controller_capacity_sweep.md)复用现有引擎与矩阵工具，比较六种固定方法并要求每个容量使用自身的标定。原生和控制器运行器均保留失败结果，并在生成失败时返回非零退出码。
+
 ## 真实 SGLang 接入
 
 在 Linux GPU 主机使用独立环境安装固定 SGLang 的实际依赖，控制器依赖由本项目 `uv.lock` 管理。主实验固定 Python TreeCore、TP=1、DP=1、FULL attention、BF16 权重与 KV，不启用 L3 或推测解码。完整安装、分阶段 GPU/host 验证和标定命令见 [部署说明](docs/deployment.md)；`bash scripts/bootstrap_sglang.sh` 可准备独立环境、固定源码补丁与模型。

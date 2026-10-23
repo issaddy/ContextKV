@@ -17,6 +17,7 @@ from typing import Mapping
 import httpx
 
 from bench.official import load_jsonl
+from controller.templates import token_hash
 
 DIMENSIONS = ("correctness", "groundedness", "answerability", "conditions_versions", "citations")
 CITATION_PARSER_VERSION = "evidence-id-groups-v2"
@@ -92,6 +93,14 @@ def judge_payload(record: Mapping, reference: Mapping | None = None) -> dict:
     return payload
 
 
+def evaluation_binding(record: Mapping) -> dict:
+    """Reuse the engine's token identity once when importing an offline audit."""
+    binding = {"query": record["query"]}
+    if record.get("input_ids") is not None:
+        binding["input_hash"] = token_hash(record["input_ids"])
+    return binding
+
+
 class OfflineJudge:
     def __init__(self, config: JudgeConfig, *, transport=None):
         self.config = config
@@ -114,10 +123,12 @@ class OfflineJudge:
             raise ValueError("judge must return every score dimension as null or a number in [0,1]")
         return {"task_id": record["task_id"], "conversation_id": record["conversation_id"],
                 "answer": record["answer"],
+                **evaluation_binding(record),
                 "scores": scores, "script_history_mismatch": result.get("script_history_mismatch"),
                 "reason": result.get("reason"), "unsupported_claims": result.get("unsupported_claims", []),
                 "judge": asdict(self.config), "api_response_id": raw.get("id"),
                 "served_model": raw.get("model"), "revision_provenance": "operator_declared",
+                "reference_targets_supplied": reference is not None,
                 "rule_audit": rule_audit(record), "source": "offline_judge",
                 "generation_measurement_kind": record.get("measurement_kind")}
 
@@ -139,7 +150,10 @@ async def evaluate_file(audit_path, config: JudgeConfig, output_path, *, referen
                     result = await judge.evaluate(row, reference=references.get(row["task_id"]))
                 except (httpx.HTTPError, ValueError, KeyError) as exc:
                     result = {"task_id": row["task_id"], "conversation_id": row["conversation_id"],
-                              "status": "failed", "error": str(exc), "scores": None}
+                              **evaluation_binding(row),
+                              "answer": row["answer"], "status": "failed", "error": str(exc), "scores": None,
+                              "source": "offline_judge", "judge": asdict(config),
+                              "generation_measurement_kind": row.get("measurement_kind")}
                 stream.write(json.dumps(result, ensure_ascii=False) + "\n")
                 stream.flush()
     finally:

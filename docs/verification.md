@@ -6,7 +6,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | 392 passed，另有 6 subtests passed；runs/pytest-complete-methods.log，已显式开启真实 tokenizer 项 |
+| 最近完整 CPU 回归 | 430 passed，另有 6 subtests passed；runs/pytest-capacity-quality-final.log，已显式开启真实 tokenizer 项 |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过；Linux 30 个真实候选也逐 token 相同 |
 | Ruff / shell / wheel | 通过；wheel 包含 engine_patches.smoke |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
@@ -72,6 +72,7 @@ SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固
 - P3 BM25 与 BGE 增强各 41/41 成功，检索 ID/次序与离线结果一致；增强分支检索均值 4.94→699.26 ms，完整轮均值 2.546→3.624 s，且回答仍有事实/代码错误。纠错查询又完成 41/41，取回 10MB 附件限制表，但回答仍错误合并文档与附件限制。详见[P3 集成](p3_retrieval_integration.md)、[纠错查询](correction_query_view.md)和[代码审计](code_audit.md)。
 - 固定 Qwen3-Reranker-0.6B 在同一 41 问题、2050 个候选对上真实评分；无截断或接口对接错误，Recall@5/nDCG@5 却降至 0.4085/0.3907。因此保留 BGE 为增强分支选择，负面结果及未标注替代相关段落一并保留。见[较新重排器验证](qwen3_rerank_validation.md)。
 - 原生三种 HiCache 写策略分别完成 32K 和 16K GPU 池各 123 轮。32K 无 host 恢复；16K 恢复 10752/896/13120 tokens，各组全部成功、无 retraction。单次运行、输出和等待差异不足以选 B6，原始证据见[容量与写策略](native_policy_validation.md)。
+- 质量验收新增双侧原始问题/历史/检索材料/输入身份绑定，核对原运行的 split 声明与既有摘要，并汇总各层模拟标记。独立反例审查修正了开发数据冒充 heldout、模拟来源被 audit 遮蔽、相同答案挪用到不同提示三个漏检。真实 P3 的 123 轮原始绑定均通过；v2 盲审包评分仍全部为空，不建立质量结论。见[质量验收](quality_acceptance.md)。
 
 ## 仍需完成的研究验收
 
