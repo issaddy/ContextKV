@@ -352,3 +352,72 @@ def test_controller_cli_failure_is_nonzero_and_keeps_report(tmp_path):
     report = json.loads(next(output.glob("benchmark-*.json")).read_text())["report"]
     assert report["turns"][0]["status"] == "failed" and report["unfinished_turns"] == 2
     assert next(output.glob("summary-*.json")).exists()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("configured", [False, True])
+def test_native_optional_sampling_preserves_default_wire_and_audits_actual_recipe(stream, configured):
+    async def scenario():
+        received = []
+        recipe = {"temperature": .7, "top_p": .8, "top_k": 20, "min_p": 0}
+        frozen_recipe = dict(recipe)
+
+        def respond(request):
+            received.append(json.loads(request.content))
+            terminal = {"text": "A", "output_ids": [65], "prompt_token_ids": [12, 13],
+                        "meta_info": {"finish_reason": {"type": "stop"}, "completion_tokens": 1}}
+            if stream:
+                partial = {"text": "A", "output_ids": [65], "meta_info": {"finish_reason": None}}
+                return httpx.Response(200, stream=FakeSSEStream([partial, terminal, "[DONE]"]))
+            return httpx.Response(200, json=terminal)
+
+        async with httpx.AsyncClient(base_url="http://fake.test", transport=httpx.MockTransport(respond)) as http:
+            client = NativeSGLangClient("http://fake.test", http_client=http, stream=stream,
+                                       audit_prompt_ids=True, sampling_params=recipe if configured else None)
+            # The caller's mutable configuration must not change a running client.
+            recipe["temperature"] = .2
+            recipe["max_new_tokens"] = 999
+            for cap in (1, 3):
+                result = await client.generate([12, 13], max_new_tokens=cap, rid=f"case:{cap}")
+                assert result.output_ids == (65,)
+                assert result.finish_reason == "stop" and not result.truncated
+                assert received[-1] == {
+                    "input_ids": [12, 13], "stream": stream, "return_prompt_token_ids": True,
+                    "sampling_params": {**(frozen_recipe if configured else {"temperature": 0}),
+                                        "max_new_tokens": cap}, "rid": f"case:{cap}"}
+                assert client.observations[-1]["request"] == received[-1]
+            assert result.timing.token_observation == ("chunk" if stream else "none")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("settings", [
+    {"max_new_tokens": 2048}, {"sampling_seed": 42}, {"ignore_eos": True},
+    {"temperature": float("nan")}, {"temperature": -1}, {"temperature": True},
+    {"top_p": 0}, {"top_p": 1.1}, {"min_p": float("inf")}, {"min_p": -0.1},
+    {"top_k": 0}, {"top_k": 20.0},
+])
+def test_native_sampling_settings_rejected_at_constructor_before_http(settings, monkeypatch):
+    def unexpected_http_client(*args, **kwargs):
+        raise AssertionError("invalid configuration must fail before opening HTTP client")
+    monkeypatch.setattr(httpx, "AsyncClient", unexpected_http_client)
+    with pytest.raises(ValueError):
+        NativeSGLangClient("http://fake.test", sampling_params=settings)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_native_configured_sampling_still_rejects_output_exceeding_call_budget(stream):
+    async def scenario():
+        def respond(request):
+            assert json.loads(request.content)["sampling_params"]["max_new_tokens"] == 1
+            terminal = {"text": "AB", "output_ids": [65, 66],
+                        "meta_info": {"finish_reason": {"type": "length"}, "completion_tokens": 2}}
+            return (httpx.Response(200, stream=FakeSSEStream([terminal, "[DONE]"])) if stream
+                    else httpx.Response(200, json=terminal))
+        async with httpx.AsyncClient(base_url="http://fake.test", transport=httpx.MockTransport(respond)) as http:
+            client = NativeSGLangClient("http://fake.test", http_client=http, stream=stream,
+                sampling_params={"temperature": .7, "top_p": .8, "top_k": 20, "min_p": 0})
+            with pytest.raises(NativeProtocolError, match="shared generation budget"):
+                await client.generate([12, 13], max_new_tokens=1)
+            assert client.observations[-1]["request"]["sampling_params"]["max_new_tokens"] == 1
+    asyncio.run(scenario())

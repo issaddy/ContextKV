@@ -12,6 +12,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -129,10 +130,36 @@ def validate_engine_manifest(manifest: Mapping[str, Any], baseline: str,
 
 
 class NativeSGLangClient:
-    """Only native endpoints, with no retry of ambiguous generation outcomes."""
+    """Only native endpoints, with no retry of ambiguous generation outcomes.
+
+    Optional sampling settings are fixed at construction; the per-call output
+    budget remains authoritative. Request-level seeds are deliberately outside
+    this interface; their native behavior depends on the inference backend.
+    """
     def __init__(self, base_url: str, *, timeout_seconds: float = 120,
                  http_client: httpx.AsyncClient | None = None, audit_prompt_ids: bool = False,
-                 stream: bool = False):
+                 stream: bool = False, sampling_params: Mapping[str, Any] | None = None):
+        sampling = {"temperature": 0}
+        if sampling_params is not None:
+            settings = dict(sampling_params)
+            allowed = {"temperature", "top_p", "top_k", "min_p"}
+            if settings.keys() - allowed:
+                raise ValueError("unsupported native sampling settings: " + ", ".join(sorted(settings.keys() - allowed)))
+            for name in ("temperature", "top_p", "min_p"):
+                if name not in settings:
+                    continue
+                value = settings[name]
+                if type(value) not in (int, float) or not math.isfinite(value):
+                    raise ValueError(f"{name} must be a finite number")
+                if ((name == "temperature" and value < 0)
+                        or (name == "top_p" and not 0 < value <= 1)
+                        or (name == "min_p" and not 0 <= value <= 1)):
+                    raise ValueError(f"invalid native sampling setting: {name}")
+            if "top_k" in settings and (type(settings["top_k"]) is not int
+                                       or (settings["top_k"] != -1 and settings["top_k"] < 1)):
+                raise ValueError("top_k must be -1 or a positive integer")
+            sampling.update(settings)
+        self._sampling_params = sampling
         self._owned = http_client is None
         self.http = http_client or httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=timeout_seconds)
         self.audit_prompt_ids = audit_prompt_ids
@@ -158,7 +185,7 @@ class NativeSGLangClient:
         if max_new_tokens < 1:
             raise ValueError("max_new_tokens must be positive")
         payload = {"input_ids": list(input_ids), "stream": self.stream,
-                   "sampling_params": {"temperature": 0, "max_new_tokens": max_new_tokens},
+                   "sampling_params": {**self._sampling_params, "max_new_tokens": max_new_tokens},
                    "return_prompt_token_ids": self.audit_prompt_ids}
         if session_id is not None:
             payload["session_id"] = session_id
