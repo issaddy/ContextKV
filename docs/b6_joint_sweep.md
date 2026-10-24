@@ -73,7 +73,7 @@ tuning:
 
 有真实但未完成/不合格评分时保存 `frozen.readiness.json`，非零退出且不产出 frozen；路径/协议不符直接拒绝。所有 13 格及完整任务分母保留，不只给最快格补评分。符合本开发 evaluator 的候选才进入现有时延选择；目标是每格完整 turn 时延均值（`max(t_response_done,t_commit)-arrival`），不是质量胜率。评分文件与协议在最终 freeze 一次绑定；无逐请求新 hash。
 
-本 driver **只有 dev owned-server 入口**。其动态 native manifest 不能由普通 `experiments test` 自动启动重现，当前不提供 heldout 执行器；不能把 dev freeze 解释为通用 test 命令可直接运行。下一阶段须复用 owned executor 做受控 heldout 接线，或先声明静态服务器 manifest 方案并重新完成其 dev 冻结。
+历史 `0893134` phase1 **只有 dev owned-server 入口**。新增[通用 owned matrix 入口](b6_owned_matrix.md)已支持读取既有声明并执行冻结后的 test/dev_ablation，但尚未完成实际 heldout 验收。动态 native manifest 仍不能由普通 `experiments test` 自动启动重现；新入口必须使用与新实现匹配的完整 dev/frozen 记录，不能将旧 phase1 结果改标后直接用于新源码的 test。
 
 phase 1 结果不能拼入后来扩大 B4/B5/Ours/P3/消融/自然容量的 spec 再补 provenance。后续需要新的自足预声明矩阵、少量共同 anchors，以及与相应 dev 覆盖一致的最终 test。成本型 Ours 可先用已有匹配 write_through/16K targeted-stage + 显式 native_budget 与同写简单策略比较，再比 phase 1 最佳完整配置；若选 write_back/selective 或 conditioned host admission，须实际重标定该 cache 配置，不复制改 hash 或借 legacy 模式绕过。
 
@@ -83,7 +83,7 @@ phase 1 结果不能拼入后来扩大 B4/B5/Ours/P3/消融/自然容量的 spec
 
 后续 `bench.experiments` 支持显式 `repetitions: [1, 2]`，与 `seeds: [42]` 分开：每个系统重复仍使用声明的 seed，job ID 增加 `-r1` / `-r2`，结果及实际 raw `experiment_protocol` 保存 repetition；before-job hook 还接收 `CONTEXTKV_JOB_REPETITION`。重复按列表顺序外层展开，每次内部保持原方法/候选顺序，本接点不自动轮换或声称顺序无偏。未配置 repetition 时，旧 job ID、结果字段和执行顺序保持不变。时延配对只匹配相同 protocol / concurrency / seed / repetition 的参照。
 
-这是通用矩阵入口能力，**尚未扩展本页 phase1 owned driver 的单重复计划，也未增加 owned heldout 执行入口**。多候选或多 workload/repetition 的质量冻结使用下列新索引文件；原单格 quality acceptance 配置继续可用。
+本页 phase1 构造器仍保持单重复计划；新增[通用 owned matrix 入口](b6_owned_matrix.md)已接入显式重复及冻结 test/dev_ablation，工程入口完成不代表已做硬件 heldout 验收。多候选或多 workload/repetition 的质量冻结使用下列新索引文件；原单格 quality acceptance 配置继续可用。
 
 ```json
 {

@@ -138,6 +138,8 @@ def validate_matrix(spec):
                 raise ValueError("ablation_of must name a primary method, not an ablation")
             if parent.get("kind", "controller") != "controller" or method.get("kind", "controller") != "controller":
                 raise ValueError("matched ablations require a controller parent")
+            if ("server_profile" in method and method["server_profile"] != parent.get("server_profile")):
+                raise ValueError("matched ablations must inherit the parent server_profile")
             if method.get("tune") or method.get("b6_eligible") or "candidates" in method:
                 raise ValueError("ablations inherit the frozen parent candidate and do not participate in tuning/B6")
     lifecycle = spec.get("lifecycle", {})
@@ -186,8 +188,9 @@ def matrix_jobs(spec, *, split="dev", frozen=None, ablations_only=False):
                          "native": native, "protocol": protocol,
                          "concurrency": concurrency, "seed": seed, "status": "not_run",
                          "ablation_of": ablation_parent})
-            if method.get("server_profile") is not None:
-                jobs[-1]["server_profile"] = method["server_profile"]
+            profile = parent.get("server_profile") if ablation_parent else method.get("server_profile")
+            if profile is not None:
+                jobs[-1]["server_profile"] = profile
     if "repetitions" in spec:
         jobs = [{**deepcopy(job), "job_id": f"{job['job_id']}-r{repetition}", "repetition": repetition}
                 for repetition in spec["repetitions"] for job in jobs]

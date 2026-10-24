@@ -115,6 +115,8 @@ def test_owned_execution_binds_real_profiles_continues_failures_and_cleans_each_
         result['cache_config']['write_policy'] = active['CONTEXTKV_WRITE_POLICY']
         result['server_info'].update(sweep.COMMON_SERVER)
         result['server_info'].update(max_total_num_tokens=16384,
+            model_path=str(args.model_path), tokenizer_path=str(args.model_path), revision=sweep.server.MODEL_REVISION,
+            dtype='bfloat16', kv_cache_dtype='bfloat16',
             enable_session_radix_cache=active['CONTEXTKV_ENABLE_SESSION_RADIX'] == '1',
             enable_hierarchical_cache=active['CONTEXTKV_ENABLE_HICACHE'] == '1',
             disable_radix_cache=False, incremental_streaming_output=False,
