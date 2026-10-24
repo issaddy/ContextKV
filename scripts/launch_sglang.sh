@@ -16,6 +16,10 @@ export PYTHONPATH="$CHECKOUT/python${PYTHONPATH:+:$PYTHONPATH}"
 # HiCache execution remains native; the research quote classifies FULL GPU/host
 # ready and pending copies without touching transfer queues or native locks.
 HICACHE_ARGS=()
+SESSION_ARGS=()
+if [[ "${CONTEXTKV_ENABLE_SESSION_RADIX:-1}" == 1 ]]; then
+  SESSION_ARGS=(--enable-session-radix-cache)
+fi
 if [[ "${CONTEXTKV_ENABLE_HICACHE:-1}" == 1 ]]; then
   HICACHE_ARGS=(--enable-hierarchical-cache --hicache-host-memory-mode cache
     --hicache-size "${CONTEXTKV_HICACHE_GB:-16}" --hicache-write-policy "${CONTEXTKV_WRITE_POLICY:-write_through}"
@@ -25,5 +29,5 @@ fi
 exec python -m sglang.launch_server \
   --model-path "$CONTEXTKV_MODEL_PATH" --revision a09a35458c702b33eeacc393d103063234e8bc28 --tp 1 \
   --dtype bfloat16 --kv-cache-dtype bfloat16 --context-length 32768 \
-  --page-size "${CONTEXTKV_PAGE_SIZE:-64}" --enable-session-radix-cache \
-  --enable-metrics "${HICACHE_ARGS[@]}" "$@"
+  --page-size "${CONTEXTKV_PAGE_SIZE:-64}" ${SESSION_ARGS[@]+"${SESSION_ARGS[@]}"} \
+  --enable-metrics ${HICACHE_ARGS[@]+"${HICACHE_ARGS[@]}"} "$@"

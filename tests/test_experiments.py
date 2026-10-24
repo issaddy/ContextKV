@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from hashlib import sha256
 import json
 from pathlib import Path
 import sys
@@ -89,7 +90,8 @@ def test_development_generation_identity_and_later_offline_quality_gate(tmp_path
 
 
 @pytest.mark.parametrize("relative", ["adapters/hybrid_retrieval.py", "adapters/query_views.py",
-    "controller/planner.py", "bench/run_sessions.py", "bench/report.py", "adapters/assets/convsearch_r1/prompt.txt"])
+    "controller/planner.py", "bench/run_sessions.py", "bench/report.py", "bench/quality.py", "bench/official.py",
+    "profiling/common.py", "bench/quality_acceptance.py", "bench/judge.py", "adapters/assets/convsearch_r1/prompt.txt"])
 def test_freeze_rejects_old_results_after_execution_source_or_prompt_change(tmp_path, monkeypatch, relative):
     import bench.experiments as experiments
     value = spec(tmp_path)
@@ -243,7 +245,8 @@ def test_matrix_shares_prompt_and_default_budget_between_native_and_controller(t
     seen = {}
     async def native_run(args):
         seen["native"] = args
-        (Path(args.output)/"native-fake.json").write_text(json.dumps({"baseline":"B0"}))
+        (Path(args.output)/"native-fake.json").write_text(json.dumps({"baseline":"B0",
+            "engine_manifest_sha256": sha256(Path(args.engine_manifest).read_bytes()).hexdigest()}))
     async def controller_run(args,config):
         seen["controller"] = config
         (Path(config.state_dir)/"benchmark-fake.json").write_text(json.dumps({"engine_kind":"mock"}))
@@ -378,7 +381,8 @@ def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tm
     seen = []
     async def native_run(args):
         seen.append(args.retriever_config)
-        (Path(args.output)/"native-fake.json").write_text(json.dumps({"baseline":"B0"}))
+        (Path(args.output)/"native-fake.json").write_text(json.dumps({"baseline":"B0",
+            "engine_manifest_sha256": sha256(Path(args.engine_manifest).read_bytes()).hexdigest()}))
     async def controller_run(args, config):
         seen.append(args.retriever_config)
         (Path(config.state_dir)/"benchmark-fake.json").write_text(json.dumps({"engine_kind":"mock"}))
@@ -394,3 +398,32 @@ def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tm
     value["methods"][0]["native"]["retriever_config"] = str(config)
     with pytest.raises(ValueError, match="shared at the matrix root"):
         matrix_jobs(value)
+
+
+def test_runtime_native_manifest_is_supplied_only_after_owned_server_validation(tmp_path, monkeypatch):
+    from bench import experiments, native_baseline
+    value = spec(tmp_path)
+    value['server_profiles'] = {'stock': {'kind': 'stock', 'write_policy': 'write_back'}}
+    value['methods'] = [{'id': 'B1', 'kind': 'native', 'server_profile': 'stock',
+        'native': {'baseline': 'B1', 'base_url': 'http://fake.test', 'audit_prompt_ids': True}}]
+    path = tmp_path/'observed-native.json'
+    path.write_text('{"actual_runtime_fixture":true}')
+    seen = []
+    async def generate(args):
+        seen.append(args.engine_manifest)
+        (Path(args.output)/'native-fixture.json').write_text(json.dumps({'baseline': 'B1',
+            'engine_manifest_sha256': sha256(Path(args.engine_manifest).read_bytes()).hexdigest()}))
+    monkeypatch.setattr(native_baseline, '_run', generate)
+    monkeypatch.setattr(experiments, 'summarize_run', lambda value: {'measurement_kind': 'fake_contract'})
+    monkeypatch.setattr(experiments, 'markdown_report', lambda value: '')
+    job = matrix_jobs(value)[0]
+    record = {'status': 'running', 'server_profile': 'stock', 'profile': value['server_profiles']['stock']}
+    result = asyncio.run(experiments.execute_job(value, job, tmp_path/'actual',
+        native_engine_manifest=path, verified_server=record))
+    assert seen == [str(path)]
+    assert result['native_engine_manifest'] == {'path': str(path), 'sha256': sha256(path.read_bytes()).hexdigest()}
+    job['native']['engine_manifest'] = str(tmp_path/'another-declared.json')
+    with pytest.raises(ValueError, match='cannot replace a declared'):
+        asyncio.run(experiments.execute_job(value, job, tmp_path/'wrong',
+            native_engine_manifest=path, verified_server=record))
+    assert len(seen) == 1

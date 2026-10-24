@@ -160,3 +160,34 @@ def test_native_generation_failures_return_nonzero_after_owned_cleanup(tmp_path,
 def test_native_cli_propagates_execution_failure_status(monkeypatch):
     monkeypatch.setattr(sweep, "execute", lambda args, jobs: 1)
     assert sweep.main(["--model-path", "model", "--execute"]) == 1
+
+
+def test_b0_requires_observed_disabled_host_without_allocation_log():
+    info = {'max_total_num_tokens': 16384, 'enable_hierarchical_cache': False}
+    measured = sweep.pool_measurements(info, 'ready', MODEL_CONFIG, 16384, host_enabled=False)
+    assert measured['actual_host_pool_tokens'] == measured['actual_host_pool_bytes'] == 0
+    with pytest.raises(ValueError, match='disabled HiCache'):
+        sweep.pool_measurements({**info, 'enable_hierarchical_cache': True}, '', MODEL_CONFIG, 16384, host_enabled=False)
+    with pytest.raises(ValueError, match='no native host allocation'):
+        sweep.pool_measurements(info, HOST_LOG, MODEL_CONFIG, 16384, host_enabled=False)
+
+
+def test_launch_b0_omits_hicache_and_session_flags_with_native_defaults_preserved(tmp_path):
+    import os
+    import subprocess
+    import sys
+    fake = tmp_path/'python'
+    fake.write_text(f'#!{sys.executable}\nimport sys,json\nprint(json.dumps(sys.argv[1:]))\n')
+    fake.chmod(0o755)
+    env = {**os.environ, 'PATH': str(tmp_path)+os.pathsep+os.environ['PATH'],
+        'CONTEXTKV_MODEL_PATH': '/fixture/model', 'CONTEXTKV_FINGERPRINT_JSON': '{}',
+        'SGLANG_CHECKOUT': str(tmp_path/'stock')}
+    for baseline in ('default', 'B0'):
+        actual_env = env if baseline == 'default' else {**env, 'CONTEXTKV_ENABLE_HICACHE': '0',
+            'CONTEXTKV_ENABLE_SESSION_RADIX': '0'}
+        completed = subprocess.run(['bash', str(sweep.ROOT/'scripts/launch_sglang.sh')], env=actual_env,
+                                   capture_output=True, text=True, check=True)
+        argv = json.loads(completed.stdout)
+        assert ('--enable-hierarchical-cache' in argv) == (baseline == 'default')
+        assert ('--enable-session-radix-cache' in argv) == (baseline == 'default')
+        assert '--disable-radix-cache' not in argv

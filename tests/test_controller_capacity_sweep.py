@@ -182,3 +182,13 @@ def test_failed_generation_sets_nonzero_cli_status_after_cleanup_and_results(tmp
     assert json.loads((output/"results.json").read_text())[0]["status"] == "generation_failures"
     group = json.loads((output/"gpu-16384/r1/group.json").read_text())
     assert group["server_returncode_after_cleanup"] == 0 and group["jobs"][0]["status"] == "completed"
+
+
+def test_actual_write_policy_must_match_owned_server_environment():
+    group = {'requested_gpu_tokens': 16384, 'cost_methods_requested': False,
+             'server_environment': {'CONTEXTKV_WRITE_POLICY': 'write_back'}}
+    observed = runtime()
+    observed['cache_config']['write_policy'] = 'write_back'
+    assert sweep.validate_runtime(group, observed)['calibration_scope'] is None
+    with pytest.raises(ValueError, match='pool/host'):
+        sweep.validate_runtime(group, runtime())

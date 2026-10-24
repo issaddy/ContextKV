@@ -76,13 +76,19 @@ def benchmark_command(args, directory):
             "--max-new-tokens", "1024", "--context-length", "32768", "--seed", "42", "--output", str(directory)]
 
 
-def pool_measurements(info, startup_log, model_config, expected_gpu_tokens):
+def pool_measurements(info, startup_log, model_config, expected_gpu_tokens, *, host_enabled=True):
     # This fixed native /get_server_info publishes the actual scheduler capacity.
     gpu = info["max_total_num_tokens"]
     if type(gpu) is not int or gpu != expected_gpu_tokens:
         raise ValueError(f"actual native GPU capacity must be {expected_gpu_tokens}, observed {gpu!r}")
     # Pinned HostKVCache._allocate_host_buffer logs the allocated token slots.
     matches = re.findall(r"Allocating (\S+) hierarchical KV host pool: (\d+) tokens, ([\d.]+) GB host memory", startup_log)
+    if not host_enabled:
+        if info.get("enable_hierarchical_cache") is not False or matches:
+            raise ValueError("B0 requires observed disabled HiCache and no native host allocation")
+        return {"actual_kv_pool_tokens": gpu, "actual_host_pool_tokens": 0, "actual_host_pool_bytes": 0,
+                "gpu_pool_provenance": "native get_server_info.max_total_num_tokens",
+                "host_bytes_provenance": "observed disabled hierarchical cache and no host allocation log"}
     if len(matches) != 1:
         raise ValueError("expected one Qwen TP=1 MHA host-pool allocation log; cannot invent measured host capacity")
     label, tokens, rounded_gb = matches[0]
@@ -95,13 +101,16 @@ def pool_measurements(info, startup_log, model_config, expected_gpu_tokens):
             "host_bytes_provenance": "native startup token slots times TP1 BF16 Qwen KV geometry; excludes allocator overhead"}
 
 
-def native_manifest(info, runtime, pools, fingerprint, policy, source, expected_gpu_tokens):
-    expected = {"enable_session_radix_cache": True, "enable_hierarchical_cache": True,
+def native_manifest(info, runtime, pools, fingerprint, policy, source, expected_gpu_tokens, *, baseline="B1"):
+    if baseline not in {"B0", "B1"}:
+        raise ValueError("native manifest baseline must be B0 or B1")
+    expected = {"enable_session_radix_cache": baseline == "B1", "enable_hierarchical_cache": baseline == "B1",
                 "disable_radix_cache": False, "tp_size": 1, "dp_size": 1, "page_size": 64,
                 "context_length": 32768, "incremental_streaming_output": False,
-                "hicache_host_memory_mode": "cache", "hicache_size": 16,
-                "hicache_write_policy": policy, "hicache_io_backend": "kernel", "hicache_mem_layout": "layer_first",
                 "max_total_tokens": expected_gpu_tokens, "skip_server_warmup": True, "random_seed": 42}
+    if baseline == "B1":
+        expected.update(hicache_host_memory_mode="cache", hicache_size=16, hicache_write_policy=policy,
+                        hicache_io_backend="kernel", hicache_mem_layout="layer_first")
     if any(info.get(key) != value for key, value in expected.items()):
         mismatch = {key: {"expected": value, "observed": info.get(key)} for key, value in expected.items() if info.get(key) != value}
         raise ValueError(f"native server configuration differs: {mismatch}")

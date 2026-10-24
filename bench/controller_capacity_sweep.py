@@ -132,7 +132,8 @@ def validate_runtime(group, runtime, *, expected_host_tokens=None):
     info, pool, cache = runtime["engine"], runtime["pool"], runtime["cache_config"]
     expected = {"gpu_capacity_tokens": capacity, "page_size": 64, "hicache": True,
         "host_memory_mode": "cache", "host_layout": "layer_first", "hicache_io_backend": "kernel",
-        "write_policy": "write_through", "tma_transfer_enabled": False, "sample_pool": True}
+        "write_policy": group.get("server_environment", {}).get("CONTEXTKV_WRITE_POLICY", "write_through"),
+        "tma_transfer_enabled": False, "sample_pool": True}
     mismatch = {key: {"expected": value, "observed": cache.get(key)} for key, value in expected.items()
                 if cache.get(key) != value}
     if (info.get("engine_kind") != "sglang" or not info.get("profiling_enabled")

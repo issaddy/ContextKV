@@ -81,6 +81,13 @@ def validate_matrix(spec):
     if set(slo) - {"ttft_seconds", "tpot_seconds"} or any(not math.isfinite(v) or v < 0 for v in slo.values()):
         raise ValueError("matrix slo needs finite nonnegative ttft_seconds/tpot_seconds")
     methods_by_id = {m["id"]: m for m in spec["methods"]}
+    if spec.get("tuning", {}).get("require_quality_evidence"):
+        constraints = spec["tuning"].get("quality_constraints", {})
+        epsilon = constraints.get("epsilon")
+        if (set(constraints) != {"reference", "epsilon"} or constraints["reference"] not in methods_by_id
+                or isinstance(epsilon, bool) or not isinstance(epsilon, (int, float))
+                or not math.isfinite(epsilon) or not 0 < epsilon < 1):
+            raise ValueError("required quality evidence needs a declared reference and finite epsilon in (0,1)")
     shared_context = matrix_config(spec).context
     shared_context_values = asdict(shared_context)
     shared_prompt = shared_context.system_prompt
@@ -88,6 +95,8 @@ def validate_matrix(spec):
     for method in spec["methods"]:
         if method.get("kind", "controller") not in {"controller", "native"}:
             raise ValueError("method kind must be controller or native")
+        if method.get("server_profile") is not None and method["server_profile"] not in spec.get("server_profiles", {}):
+            raise ValueError("method server_profile must name a declared owned-server profile")
         candidates = method.get("candidates", [{}])
         for candidate in candidates:
             overrides = merge(method.get("overrides", {}), candidate)
@@ -171,6 +180,8 @@ def matrix_jobs(spec, *, split="dev", frozen=None, ablations_only=False):
                          "native": native, "protocol": protocol,
                          "concurrency": concurrency, "seed": seed, "status": "not_run",
                          "ablation_of": ablation_parent})
+            if method.get("server_profile") is not None:
+                jobs[-1]["server_profile"] = method["server_profile"]
     return jobs
 
 
@@ -185,7 +196,10 @@ def implementation_manifest():
     paths = set(controller) | set((root / "adapters").rglob("*.py"))
     paths.update(root / name for name in (
         "bench/experiments.py", "bench/native_baseline.py", "bench/run_sessions.py",
-        "bench/report.py", "bench/metrics.py", "profiling/positive_prefill.py",
+        "bench/report.py", "bench/metrics.py", "bench/quality.py", "bench/official.py",
+        "bench/quality_acceptance.py", "bench/judge.py",
+        "bench/b6_joint_sweep.py", "bench/native_policy_sweep.py", "bench/controller_capacity_sweep.py",
+        "profiling/common.py", "profiling/positive_prefill.py",
         "scripts/prepare_cold_job.py", "scripts/launch_sglang.sh"))
     paths.update(p for p in (root / "adapters/assets").rglob("*")
                  if p.suffix in {".txt", ".json", ".jinja", ".jinja2"}
@@ -213,6 +227,7 @@ def provenance(spec, *, implementation=None):
             files.add(overrides.get("calibration_path"))
             files.add(overrides.get("cost_model", {}).get("artifact"))
             files.add(overrides.get("cost_model", {}).get("output_length_artifact"))
+    files.update(quality_evidence_files(spec))
     return {"input_sha256": sha256(Path(spec["input"]).read_bytes()).hexdigest(),
             "split_sha256": sha256(Path(spec["split_manifest"]).read_bytes()).hexdigest(),
             # Config identity is a single experiment boundary check, never a request-path hash.
@@ -226,7 +241,97 @@ def generation_provenance(spec, *, implementation=None):
     """Offline quality eligibility can be added after generation; inputs cannot."""
     generation_spec = deepcopy(spec)
     generation_spec.get("tuning", {}).pop("quality_eligible", None)
+    generation_spec.get("tuning", {}).pop("quality_evidence", None)
     return provenance(generation_spec, implementation=implementation)
+
+
+class QualityNotReady(ValueError):
+    """A real acceptance report exists, but cannot authorize a B6 freeze."""
+    def __init__(self, report):
+        super().__init__("required quality evidence is incomplete or no B6 candidate is eligible; keep readiness, not a frozen B6")
+        self.report = report
+
+
+def quality_evidence_files(spec):
+    """Bind saved grading inputs once at freeze; none are generation inputs."""
+    path = spec.get("tuning", {}).get("quality_evidence")
+    if path is None:
+        return set()
+    value = json.loads(Path(path).read_text())
+    files = {str(path), value.get("frozen_protocol")}
+    for method in value.get("methods", {}).values():
+        files.update(method.get(k) for k in ("run", "audit", "scores", "manifest", "server_record"))
+    return {p for p in files if p}
+
+
+def quality_gate_from_evidence(spec, results):
+    """Finite single-cell methods use real answer-bound independent dev scoring."""
+    from adapters.mtrag import CLOUD_COLLECTION
+    from bench.quality_acceptance import evaluate
+
+    tuning = spec["tuning"]
+    if "quality_eligible" in tuning:
+        raise ValueError("require_quality_evidence rejects a supplied boolean quality gate")
+    if not tuning.get("quality_evidence"):
+        raise ValueError("require_quality_evidence needs the saved quality_acceptance config; no B6 is frozen")
+    by_method = {row["method"]: row for row in results}
+    if len(by_method) != len(results) or any(row["candidate_index"] != 0 for row in results):
+        raise ValueError("required quality evidence currently supports one declared job per method, not pooled repetitions")
+    value = json.loads(Path(tuning["quality_evidence"]).read_text())
+    constraints = tuning["quality_constraints"]
+    if (value.get("scope") != "dev" or value.get("reference") != constraints["reference"]
+            or value.get("epsilon") != constraints["epsilon"] or not value.get("frozen_protocol")
+            or set(value.get("methods", {})) != set(by_method)
+            or Path(value.get("split_manifest", "")).resolve() != Path(spec["split_manifest"]).resolve()):
+        raise ValueError("quality evidence must match all declared jobs, dev split, reference, epsilon and frozen evaluator protocol")
+    split = set(json.loads(Path(spec["split_manifest"]).read_text())["dev"])
+    cohort = [row for row in load_rows(spec["input"]) if row["conversation_id"] in split
+              and (spec.get("domain", "cloud") != "cloud" or row["Collection"] == CLOUD_COLLECTION)]
+    if spec.get("limit_sessions"):
+        selected = set(sorted({r["conversation_id"] for r in cohort})[:spec["limit_sessions"]])
+        cohort = [r for r in cohort if r["conversation_id"] in selected]
+    expected_tasks = {row["task_id"] for row in cohort}
+    for method, result in by_method.items():
+        declared = value["methods"][method]
+        bindings = [("run", "raw_output"), ("audit", "audit_output")]
+        if result.get("run_manifest"):
+            bindings.append(("manifest", "run_manifest"))
+        elif declared.get("manifest"):
+            raise ValueError(f"quality manifest has no recorded generation source for {method}")
+        for field, result_key in bindings:
+            if not result.get(result_key) or not declared.get(field) or Path(declared[field]).resolve() != Path(result[result_key]).resolve():
+                raise ValueError(f"quality {field} is not the actual generated artifact for {method}")
+            recorded = result.get("artifact_sha256", {}).get(result_key)
+            if recorded is None or sha256(Path(declared[field]).read_bytes()).hexdigest() != recorded:
+                raise ValueError(f"quality {field} bytes differ from the completed generation artifact for {method}")
+        payload = json.loads(Path(declared["run"]).read_text())
+        turns = payload.get("report", payload)["turns"]
+        if len(turns) != len(expected_tasks) or {r["task_id"] for r in turns} != expected_tasks:
+            raise ValueError(f"quality run does not retain the complete declared development cohort: {method}")
+        if any((row.get("online_turn") or {}).get("protocol") != result["protocol"] for row in turns):
+            raise ValueError(f"quality run protocol differs from its declared job: {method}")
+        if result.get("server_profile"):
+            recorded = result.get("server_execution", {}).get("record")
+            if (not recorded or Path(declared.get("server_record", "")).resolve() != Path(recorded).resolve()
+                    or sha256(Path(recorded).read_bytes()).hexdigest() != result.get("artifact_sha256", {}).get("server_record")):
+                raise ValueError(f"quality server record is not bound to the actual owned execution: {method}")
+    report = evaluate(value)
+    complete = all(not data["simulation"] and not data["generation_incomplete"]
+        and not data["unbound_audit_task_ids"] and not data["unbound_score_task_ids"]
+        and data["evaluator_kinds"] and set(data["evaluator_kinds"]) <= {"human_blind", "independent_model_declared"}
+        and all(not dimension["missing_task_ids"] for dimension in data["coverage"].values())
+        for data in report["methods"].values())
+    complete &= all(not row["acceptance_blockers"] for row in report["comparisons"].values())
+    gate = {name: {"0": (name == constraints["reference"] or report["comparisons"][name]["dev_quality_eligible"])}
+            for name in by_method}
+    eligible_candidates = [m["id"] for m in spec["methods"] if m.get("b6_eligible") and gate[m["id"]]["0"]]
+    report["matrix_evidence_gate"] = {"all_required_evidence_complete": complete,
+        "unaccepted_evaluator_methods": [name for name, data in report["methods"].items()
+            if not data["evaluator_kinds"] or not set(data["evaluator_kinds"]) <= {"human_blind", "independent_model_declared"}],
+        "eligible_b6_candidates_on_evaluator": eligible_candidates, "ready_to_freeze": complete and bool(eligible_candidates)}
+    if not complete or not eligible_candidates:
+        raise QualityNotReady(report)
+    return gate, report
 
 
 def select_development(spec, results):
@@ -253,7 +358,11 @@ def select_development(spec, results):
         row = indexed[job["job_id"]]
         grouped.setdefault((job["method"], job["candidate_index"]), []).append(row)
     winners = {}
-    quality_gate = spec.get("tuning", {}).get("quality_eligible", {})
+    quality_report = None
+    if spec.get("tuning", {}).get("require_quality_evidence"):
+        quality_gate, quality_report = quality_gate_from_evidence(spec, results)
+    else:
+        quality_gate = spec.get("tuning", {}).get("quality_eligible", {})
     for method in spec["methods"]:
         if method.get("ablation_of"):
             continue
@@ -282,10 +391,17 @@ def select_development(spec, results):
             "winners": winners, "b6": b6, "objective": "equal_cell_weight_mean_complete_turn_seconds",
             "simulation_only": simulation, "quality_gate_applied": bool(quality_gate),
             "quality_noninferiority_established": False,
+            "quality_evidence_report": quality_report,
             "equal_budget": spec.get("tuning", {}).get("equal_budget", 1)}
 
 
-async def execute_job(spec, job, directory):
+async def execute_job(spec, job, directory, *, native_engine_manifest=None, verified_server=None):
+    if job.get("server_profile") is not None:
+        profile_id = job["server_profile"]
+        if (verified_server is None or verified_server.get("status") != "running"
+                or verified_server.get("server_profile") != profile_id
+                or verified_server.get("profile") != spec["server_profiles"][profile_id]):
+            raise ValueError("server_profile requires its verified owned-server executor before generation")
     from controller.cli import benchmark
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
@@ -323,7 +439,14 @@ async def execute_job(spec, job, directory):
     if job["kind"] == "native":
         from bench.native_baseline import _run
         native = job["native"] or {}
-        args.update(baseline=native["baseline"], base_url=native["base_url"], engine_manifest=native["engine_manifest"],
+        declared_manifest = native.get("engine_manifest")
+        if (native_engine_manifest is not None and declared_manifest is not None
+                and Path(native_engine_manifest).resolve() != Path(declared_manifest).resolve()):
+            raise ValueError("runtime native manifest cannot replace a declared static manifest")
+        observed_manifest = native_engine_manifest or declared_manifest
+        if observed_manifest is None:
+            raise ValueError("native job requires a verified engine manifest from its owned-server executor")
+        args.update(baseline=native["baseline"], base_url=native["base_url"], engine_manifest=str(observed_manifest),
                     model_path=native.get("model_path"),
                     context_policy=shared_config.context,
                     system_prompt=shared_config.context.system_prompt, system_prompt_file=None,
@@ -357,11 +480,22 @@ async def execute_job(spec, job, directory):
     (directory / "summary.json").write_text(json.dumps(summary, indent=2))
     (directory / "summary.md").write_text(markdown_report(summary))
     result = {**job, "status": "completed", "raw_output": str(output), "summary": summary}
+    audits = list(directory.glob("audit-*.jsonl"))
+    if len(audits) == 1:
+        result["audit_output"] = str(audits[0])
+    if job["kind"] == "native":
+        result["native_engine_manifest"] = {"path": str(Path(observed_manifest).resolve()),
+                                           "sha256": payload["engine_manifest_sha256"]}
     if job["kind"] == "controller":
         manifest_path = output.with_name(output.name.replace("benchmark-", "manifest-", 1))
         if manifest_path.is_file():
             recorded = json.loads(manifest_path.read_text())
             result["controller_source_sha256"] = recorded.get("controller_source_sha256")
+            result["run_manifest"] = str(manifest_path)
+    if spec.get("tuning", {}).get("require_quality_evidence"):
+        # One completed-artifact boundary, outside the request path.
+        result["artifact_sha256"] = {key: sha256(Path(result[key]).read_bytes()).hexdigest()
+                                     for key in ("raw_output", "audit_output", "run_manifest") if key in result}
     return result
 
 
@@ -433,7 +567,14 @@ def main(argv=None):
         if not args.results:
             parser.error("freeze requires --results from the same generation configuration")
         results = [json.loads(line) for line in Path(args.results).read_text().splitlines() if line.strip()]
-        selected = select_development(spec, results)
+        try:
+            selected = select_development(spec, results)
+        except QualityNotReady as exc:
+            readiness = Path(args.output).with_suffix(".readiness.json")
+            readiness.parent.mkdir(parents=True, exist_ok=True)
+            with readiness.open("x") as stream:
+                json.dump(exc.report, stream, indent=2)
+            raise SystemExit(f"Quality readiness saved to {readiness}; no B6 freeze produced") from exc
         target = Path(args.output)
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("x") as stream:
