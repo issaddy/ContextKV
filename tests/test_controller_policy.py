@@ -13,7 +13,8 @@ from controller.session_store import SessionStore
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("strategy,quotes", [("always_append", 0), ("always_rebuild", 0),
-    ("fixed_threshold", 0), ("fixed_period", 0), ("contextpilot", 0), ("cost", 1), ("warm_idle", 1)])
+    ("fixed_threshold", 0), ("fixed_period", 0), ("contextpilot", 0), ("redundancy_threshold", 0),
+    ("cost", 1), ("warm_idle", 1)])
 async def test_quotes_only_when_policy_uses_them(tmp_path, monkeypatch, strategy, quotes):
     engine = MockEngine()
     controller = Controller(SessionStore(tmp_path/"sessions.sqlite3"), engine,

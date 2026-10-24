@@ -118,7 +118,9 @@ def freeze_cases(database, manifest, split, template, *, limit=None, selection="
             policy = (replace(config.context, layout="contextpilot")
                       if config.planner.strategy == "contextpilot" else config.context)
             candidates = build_candidates(snapshot, attempt.query, attempt.evidence, policy, template,
-                                          retrieval_priority=attempt.retrieval_priority)
+                                          retrieval_priority=attempt.retrieval_priority,
+                                          measure_evidence_redundancy="redundancy_threshold" in {
+                                              config.planner.strategy, config.planner.fallback_strategy})
             original = next((c for c in candidates if c.action == attempt.plan.candidate.action), None)
             if original is None or original.input_hash != attempt.plan.candidate.input_hash:
                 skipped.append({"attempt_id": attempt.attempt_id, "reason": "source_candidate_changed"})

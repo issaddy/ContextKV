@@ -20,15 +20,18 @@ class PlannerKnobs:
     concurrency: int = 1
     period: int = 4
     warm_ratio: float = .5
+    redundancy_threshold: float = .4
 
     def __post_init__(self) -> None:
-        supported = {"cost", "always_append", "always_rebuild", "fixed_threshold", "stable_layout", "normal_rag", "fixed_period", "warm_idle", "contextpilot"}
+        supported = {"cost", "always_append", "always_rebuild", "fixed_threshold", "stable_layout", "normal_rag", "fixed_period", "warm_idle", "contextpilot", "redundancy_threshold"}
         if self.strategy not in supported or self.fallback_strategy not in supported - {"cost", "warm_idle"}:
             raise ValueError("unknown planner strategy or recursive fallback")
         if min(self.delta_abs,self.delta_rel,self.z,self.min_stable_turns,self.fixed_token_threshold) < 0:
             raise ValueError("planner thresholds must be nonnegative")
         if self.period < 1 or not 0 <= self.warm_ratio <= 1:
             raise ValueError("period must be positive and warm_ratio must be in [0, 1]")
+        if not 0 <= self.redundancy_threshold <= 1:
+            raise ValueError("redundancy_threshold must be in [0, 1]")
 
 
 def _fixed(append, rebuild, strategy, knobs, session, quotes=None):
@@ -38,6 +41,11 @@ def _fixed(append, rebuild, strategy, knobs, session, quotes=None):
         return append
     if strategy == "fixed_period":
         return rebuild if session.turns_since_rebuild + 1 >= knobs.period else append
+    if strategy == "redundancy_threshold":
+        if append.evidence_body_tokens is None or append.nonrequired_evidence_body_tokens is None:
+            raise ValueError("redundancy_threshold requires measured evidence body tokens")
+        ratio = append.nonrequired_evidence_body_tokens / max(1, append.evidence_body_tokens)
+        return rebuild if ratio > knobs.redundancy_threshold else append
     if strategy == "warm_idle":
         if quotes is None:
             return _fixed(append,rebuild,knobs.fallback_strategy,knobs,session)

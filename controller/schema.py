@@ -163,6 +163,8 @@ class PromptCandidate:
     corpus_snapshot_id: str = "demo-v1"
     fingerprint: ConfigFingerprint | None = None
     evidence_resolution: tuple[tuple[EvidenceKey, str], ...] = ()
+    evidence_body_tokens: int | None = None
+    nonrequired_evidence_body_tokens: int | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "messages", "input_ids", "evidence_spans", "evidence_resolution")

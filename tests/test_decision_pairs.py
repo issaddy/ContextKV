@@ -20,14 +20,15 @@ from profiling.decision_pairs import (DecisionPairCollector, analyze_pairs, free
                                       load_frozen, main, rescore_pairs, select_cases, write_frozen)
 
 
-def source_run(tmp_path, *, layout="stable_key"):
+def source_run(tmp_path, *, layout="stable_key", strategy="always_append"):
     async def prepare():
         config = RunConfig()
-        config = replace(config, context=replace(config.context, layout=layout))
+        config = replace(config, context=replace(config.context, layout=layout),
+                         planner=PlannerKnobs(strategy=strategy))
         engine = MockEngine(response_text="ONLY_PREVIOUS_ANSWER")
         store = SessionStore(tmp_path / "source.sqlite3")
         service = Controller(store, engine, policy=config.context,
-                             knobs=PlannerKnobs(strategy="always_append"))
+                             knobs=config.planner)
         a, b = make_evidence("body alpha", "alpha"), make_evidence("body beta", "beta")
         try:
             await service.serve_turn("run:dev-session", "first query", (a,), request_id="first")
@@ -84,6 +85,23 @@ def test_freeze_rejects_test_or_reference_history_and_reports_prompt_drift(tmp_p
     manifest["config"]["context"]["layout"] = "contextpilot"
     cases, skipped = freeze_cases(database, manifest, split, ByteTemplate())
     assert not cases and skipped[-1]["reason"] == "source_candidate_changed"
+
+
+def test_freeze_and_replay_redundancy_baseline_retain_body_measurements(tmp_path):
+    database, manifest, split, _, _ = source_run(tmp_path, strategy="redundancy_threshold")
+    case = freeze_cases(database, manifest, split, ByteTemplate())[0][0]
+    for candidate in case.candidates:
+        assert candidate.evidence_body_tokens == len("body alpha") + len("body beta")
+        assert candidate.nonrequired_evidence_body_tokens == 0
+
+    async def scenario():
+        engine = PairEngineDouble()
+        knobs = PlannerKnobs(strategy="redundancy_threshold")
+        row = await DecisionPairCollector(engine, CostModel(), knobs).measure(case, "cold")
+        assert row["status"] == "completed" and row["selected_action"] == "APPEND"
+        rescored = rescore_pairs([row], [case], CostModel(), knobs, await engine.info())
+        assert rescored[0]["selected_action"] == "APPEND"
+    asyncio.run(scenario())
 
 
 def test_stratified_selection_covers_conversations_and_epoch_age_without_current_output(tmp_path):

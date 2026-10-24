@@ -30,6 +30,12 @@ def test_pinned_qwen_template_and_epoch_independent_input():
         enable_thinking=template.enable_thinking)
     assert first.input_ids == tuple(native_ids)
     assert "random-engine-id" not in template.render(first.messages).text
+    measured = build_candidates(snapshot, "配置超时是多少？", evidence, template=template,
+                                measure_evidence_redundancy=True)[0]
+    assert measured.input_ids == first.input_ids and measured.input_hash == first.input_hash
+    assert measured.evidence_body_tokens == len(template.tokenizer.encode(
+        evidence[0].text, add_special_tokens=False))
+    assert measured.nonrequired_evidence_body_tokens == 0
     for layout in ("stable_key", "contextpilot"):
         first = build_candidates(snapshot, "配置超时是多少？", evidence,
                                  EvidencePolicy(layout=layout), template)[0]

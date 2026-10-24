@@ -17,7 +17,8 @@ CandidatePolicy = EvidencePolicy
 def build_candidates(snapshot: SessionSnapshot, query: str,
                      retrieved: Iterable[EvidenceBlock], policy: EvidencePolicy | None = None,
                      template: Template | None = None, *,
-                     retrieval_priority: tuple[EvidenceKey, ...] | None = None
+                     retrieval_priority: tuple[EvidenceKey, ...] | None = None,
+                     measure_evidence_redundancy: bool = False
                      ) -> tuple[PromptCandidate, ...]:
     """No archive/seen/epoch/template state is changed by candidate generation."""
     started = time.perf_counter()
@@ -54,9 +55,24 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     previous = (() if snapshot.execution is None else
                 snapshot.execution.last_input_ids + snapshot.execution.last_output_ids)
     prompts = []
+    body_lengths = {}
 
     def candidate(action, messages, spans, visible, reason, rendered):
         verify_rendered_evidence(messages, spans, rendered.text)
+        total_body_tokens = nonrequired_body_tokens = None
+        if measure_evidence_redundancy:
+            # Count each complete body independently with the generation tokenizer.
+            # This is a text redundancy proxy, not a prompt-token or KV subtraction.
+            # Reuse lengths only inside this build; still count every physical span.
+            total_body_tokens = nonrequired_body_tokens = 0
+            for span in spans:
+                if span.key not in body_lengths:
+                    body = messages[span.message_index].content[span.start:span.end]
+                    body_lengths[span.key] = len(template.tokenizer.encode(body, add_special_tokens=False))
+                count = body_lengths[span.key]
+                total_body_tokens += count
+                if span.key not in required_keys:
+                    nonrequired_body_tokens += count
         if not required_keys <= visible:
             reason = "required_evidence_not_visible"
         if len(rendered.input_ids) + policy.max_new_tokens > policy.max_total_model_tokens:
@@ -69,7 +85,8 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
             reason=reason, evidence_spans=spans, reference_map=references,
             theoretical_lcp=longest_common_prefix(rendered.input_ids, previous),
             corpus_snapshot_id=snapshot.corpus_snapshot_id, fingerprint=template.fingerprint,
-            evidence_resolution=resolution)
+            evidence_resolution=resolution, evidence_body_tokens=total_body_tokens,
+            nonrequired_evidence_body_tokens=nonrequired_body_tokens)
 
     execution = snapshot.execution
     if execution is not None:

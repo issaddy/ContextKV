@@ -191,14 +191,18 @@ class Controller:
                     raise EngineError("FINGERPRINT_MISMATCH")
                 recovery = snap.current_epoch is not None and snap.current_epoch.engine_restart_id != info.engine_restart_id
                 planning_snap = replace(snap, force_new_epoch_for_recovery=True, must_rebuild=True) if recovery else snap
+                measure_redundancy = "redundancy_threshold" in {self.knobs.strategy, self.knobs.fallback_strategy}
                 candidates = build_candidates(planning_snap, query, evidence, self.policy, self.template,
-                                               retrieval_priority=retrieval_priority)
+                                               retrieval_priority=retrieval_priority,
+                                               measure_evidence_redundancy=measure_redundancy)
                 for candidate in candidates:
                     self.events.emit("candidate_built", business_session_id=session_id, attempt_id=attempt.attempt_id,
                                      candidate_id=candidate.candidate_id, action=candidate.action,
                                      input_hash=candidate.input_hash, input_tokens=len(candidate.input_ids),
                                      theoretical_lcp=candidate.theoretical_lcp, feasible=candidate.feasible,
-                                     evidence_spans=candidate.evidence_spans, build_ms=candidate.build_ms)
+                                     evidence_spans=candidate.evidence_spans, build_ms=candidate.build_ms,
+                                     evidence_body_tokens=candidate.evidence_body_tokens,
+                                     nonrequired_evidence_body_tokens=candidate.nonrequired_evidence_body_tokens)
                 valid = tuple(c for c in candidates if c.feasible)
                 if not valid:
                     raise ContextOverflow("shared_context_policy_overflow: required evidence and full QA exceed budget")
@@ -211,7 +215,8 @@ class Controller:
                     info = await self.engine.info()
                     planning_snap = replace(snap, force_new_epoch_for_recovery=True, must_rebuild=True)
                     candidates = build_candidates(planning_snap, query, evidence, self.policy, self.template,
-                                                   retrieval_priority=retrieval_priority)
+                                                   retrieval_priority=retrieval_priority,
+                                                   measure_evidence_redundancy=measure_redundancy)
                     valid = tuple(c for c in candidates if c.feasible)
                     quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
                     if quotes.engine_restart_id != info.engine_restart_id:

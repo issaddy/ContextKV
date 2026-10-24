@@ -28,9 +28,14 @@ async def measure(config, *, samples: int = 100, warmup: int = 10, session_id: s
         for index in range(warmup + samples):
             t0 = time.perf_counter()
             candidates = build_candidates(snapshot, "Compare the two timeout settings.", blocks,
-                                          controller.policy, controller.template)
+                                          controller.policy, controller.template,
+                                          measure_evidence_redundancy="redundancy_threshold" in {
+                                              controller.knobs.strategy, controller.knobs.fallback_strategy})
             t1 = time.perf_counter()
-            quotes = await controller.engine.quote_batch(tuple(c for c in candidates if c.feasible), controller.template.fingerprint)
+            valid = tuple(c for c in candidates if c.feasible)
+            needs_quote = controller.knobs.strategy in {"cost", "warm_idle"} and len(valid) > 1
+            quotes = (await controller.engine.quote_batch(valid, controller.template.fingerprint)
+                      if needs_quote else None)
             t2 = time.perf_counter()
             choose_plan(candidates, quotes, controller.cost_model, snapshot, controller.knobs)
             t3 = time.perf_counter()
@@ -43,7 +48,7 @@ async def measure(config, *, samples: int = 100, warmup: int = 10, session_id: s
                 "configuration": to_jsonable(config), "fingerprint": to_jsonable(controller.template.fingerprint),
                 "snapshot_version": snapshot.version, "summary": summary, "observations": rows,
                 "delta_abs_2x_p95_ms": 2 * summary["total_ms"]["p95"],
-                "scope": "candidate/template + quote + decision; excludes retrieval and persistence",
+                "scope": "candidate/template + policy-required quote + decision; excludes retrieval and persistence",
                 "hardware_generation_measured": False,
                 "note": "Mock engine quote timing cannot stand in for a remote SGLang RPC. Use representative saved sessions on the target system."}
     finally:
