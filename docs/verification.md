@@ -6,7 +6,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | `d4473ae`：1091 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-b6-native-regex-complete.log |
+| 最近完整 CPU 回归 | `5d07915`：1156 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-owned-matrix-complete.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
 | Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 atomic_judge 模块/协议资产、table_focus、CRAFT 行文本与 GroUSE 源码，CRAFT 完整许可在 wheel 中；runs/build-atomic-focus.log；新增guided schema、query view、observation probe与client也已重建并逐字核对（runs/build-guided-wheel.log）；融合模块也已构建并逐字核对（runs/build-query-fusion-wheel.log） |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
@@ -29,7 +29,13 @@
 
 独立[ConvSearch-R1 41次改写](convsearch_validation.md)、[八查询方法328条检索](frozen_query_retrieval_validation.md)及[SDK证据12次生成](api_evidence_validation.md)均已真实执行，原始输入、失败/截断分母和具体退化保留。这些硬件记录的项目源码仍为各自manifest所记的`20fef31`等版本，不能追认为包含后续新代码。后续[四臂冻结重排](frozen_rerank_validation.md)已完成164条记录：分离查询挽回了长改写重排的退化，但尚未稳定胜过简单用户主题视图。[完整独立开发评分](dev_quality_validation.md)已完成615次尝试，609维有效、6维null；完整配对维度仍不确定，两个候选均未通过开发质量门。下一全cohort可选原生格式约束已完成CPU合同，但不修正评审器语义错误。最终B6与冻结test仍未完成。
 
-`e544ea7` 新增[13格B6联合执行器](b6_joint_sweep.md)与真实答案绑定的开发质量冻结；审查发现并修复了通用入口忽略服务器profile的问题。全仓首次回归发现8个表格测试的native模拟payload缺少已有的engine_manifest_sha256字段，`d4473ae`补齐测试合同，未放松真实清单要求；复跑1091项和6个子测试全部通过。Ruff、shell语法和diff检查通过。`179f844`的可选原生Selene格式约束默认兼容旧协议，已完成独立118项相关测试和真实tokenizer/XGrammar CPU检查，尚不代表约束后模型评分已完成。最终包记录在`runs/dist-b6-native-regex-complete/asset-check.json`；13格真实新运行仍待执行，不能把fake-owned测试当作硬件结果。
+`e544ea7` 新增[13格B6联合执行器](b6_joint_sweep.md)与真实答案绑定的开发质量冻结；审查发现并修复了通用入口忽略服务器profile的问题。全仓首次回归发现8个表格测试的native模拟payload缺少已有的engine_manifest_sha256字段，`d4473ae`补齐测试合同，未放松真实清单要求；复跑1091项和6个子测试全部通过。Ruff、shell语法和diff检查通过。`179f844`的可选原生Selene格式约束默认兼容旧协议，已完成独立118项相关测试和真实tokenizer/XGrammar CPU检查，尚不代表约束后模型评分已完成。最终包记录在`runs/dist-b6-native-regex-complete/asset-check.json`；后续真实13格使用下述独立0893134来源，不能把fake-owned测试当作硬件结果。
+
+`cac25e6` 增加显式系统repetition与逐job/block质量绑定；`5d07915` 增加[通用owned矩阵入口](b6_owned_matrix.md)，在启动前验证冻结选择和实际成本适用范围，支持dev/test/dev_ablation及父profile继承。全仓1156项和6个子测试通过，Ruff/diff检查通过；运行文档明确完整cohort、显式GPU上限和固定host支持范围。新增入口尚未在真实heldout使用，不能给旧运行补写新的源码身份。
+
+真实[13格phase1](b6_joint_sweep.md)在项目`0893134`的310文件核验部署下完成 **533/533轮、0生成失败、13个length答案保留**。远端独立CPU审计13格/533轮issues=0；prepare再次核对533份完整自身QA与2725个可见正文span。实际为GPU16384、非B0 host279040、P2/c4/Q0/cap1024、host admission off、单次有序运行。前两格完成后曾在远端压缩/传输公共快照，可能与后续格host CPU/IO重叠；本次只能作开发筛查，正式计时重复应延后归档。原服务已由supervisor恢复，随后另行进入离线评价时段。
+
+本轮完整2665维Selene输入预检通过，最大input14381，加1536输出预算不超过32768，未裁证据；tokenizer元数据4096的提示保留，实际模型config位置上限131072及Llama3 RoPE已另存核对。新原生regex协议的真实评分仍在执行，尚不建立B6选择或质量非劣。原始生成位于远端`runs/b6-joint-dev-phase1-v1`，CPU审计位于`runs/b6-joint-review/h200-v1`，评价准备位于`runs/b6-quality-prep/frozen-v1`；这些记录的生成/评分环境保持0893134，未部署本地后续矩阵扩展。
 
 ## 已完成的 H200 集成验证
 

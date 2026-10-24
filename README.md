@@ -139,6 +139,8 @@ uv run python scripts/prepare_sglang.py --source-only \
   --checkout vendor/sglang-source-check --report runs/patch-verification.json
 ```
 
+[通用自有服务器矩阵入口](docs/b6_owned_matrix.md)支持开发、冻结测试和匹配消融，并按实际写策略启动服务；系统重复与随机种子分开，质量按真实job/block绑定。已有[13格开发筛查](docs/b6_joint_sweep.md)完成533轮生成，完整独立评分仍在执行；新入口的CPU验证不能替代正式heldout结果。
+
 ## 验证与正式实验边界
 
 ```bash
