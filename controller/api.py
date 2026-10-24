@@ -81,6 +81,44 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
         raise ValueError("corpus_id must be nonempty")
     resolved_config = (config or RunConfig()) if controller is None else None
     service = controller if controller is not None else create_controller(resolved_config)
+    active_requests = 0
+    requests_drained = asyncio.Event()
+    requests_drained.set()
+    stopping = False
+
+    class TrackRequests:
+        """Track the ASGI request lifetime, including its cancellation cleanup."""
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            nonlocal active_requests
+            if scope["type"] != "http":
+                return await self.app(scope, receive, send)
+            if stopping:
+                response = JSONResponse(status_code=503, content={"code": "SERVICE_SHUTTING_DOWN",
+                    "detail": "service shutdown is in progress"})
+                return await response(scope, receive, send)
+            active_requests += 1
+            requests_drained.clear()
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                active_requests -= 1
+                if not active_requests:
+                    requests_drained.set()
+
+    async def drain_requests():
+        # A server's graceful deadline may cancel requests without awaiting their
+        # cleanup. Cancellation cannot stop their synchronous retrieval workers.
+        cancelled = None
+        while not requests_drained.is_set():
+            try:
+                await requests_drained.wait()
+            except asyncio.CancelledError as error:
+                cancelled = error
+        if cancelled is not None:
+            raise cancelled
 
     async def retries():
         while True:
@@ -89,6 +127,7 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
 
     @asynccontextmanager
     async def lifespan(app):
+        nonlocal stopping
         worker = loader = None
         try:
             info = await service.engine.info()
@@ -108,29 +147,34 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
             app.state.ready = True
             yield
         finally:
+            stopping = True
             app.state.ready = False
             try:
-                if worker is not None:
-                    worker.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await worker
+                await drain_requests()
             finally:
                 try:
-                    if loader is not None and app.state.retrieval is None:
-                        # A cancelled startup does not stop its loading thread.
-                        # Reclaim its result before closing; preserve the original
-                        # startup error/cancellation if loading itself failed.
-                        with suppress(Exception):
-                            app.state.retrieval = await asyncio.shield(loader)
-                    if app.state.retrieval is not None:
-                        await asyncio.to_thread(app.state.retrieval.close)
+                    if worker is not None:
+                        worker.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await worker
                 finally:
                     try:
-                        await service.aclose()
+                        if loader is not None and app.state.retrieval is None:
+                            # A cancelled startup does not stop its loading thread.
+                            # Reclaim its result before closing; preserve the original
+                            # startup error/cancellation if loading itself failed.
+                            with suppress(Exception):
+                                app.state.retrieval = await asyncio.shield(loader)
+                        if app.state.retrieval is not None:
+                            await asyncio.to_thread(app.state.retrieval.close)
                     finally:
-                        service.store.close()
+                        try:
+                            await service.aclose()
+                        finally:
+                            service.store.close()
 
     app = FastAPI(title="ContextKV", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(TrackRequests)
     app.state.controller = service
     app.state.retrieval = retrieval
     app.state.ready = False

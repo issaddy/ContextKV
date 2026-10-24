@@ -42,7 +42,8 @@ class SGLangProbe:
         if self.telemetry_path:
             self.telemetry_path.parent.mkdir(parents=True, exist_ok=True)
             with self.telemetry_path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps({"run_id": self.run_id, "warmup": self.warmup, **record}) + "\n")
+                stream.write(json.dumps({"run_id": self.run_id, "repetition": self.repetition,
+                                         "warmup": self.warmup, **record}) + "\n")
 
     async def _fixture(self, mode):
         # HTTP completion can precede the last overlapped housekeeping step.

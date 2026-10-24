@@ -33,6 +33,27 @@ v0.9 wOOD使用其独立文档/训练文件，显式传`--source-format v0.9`、
 
 只有实际引用到的span按Python Unicode字符半开区间验证一次并复用。错位或缺失引用明确失败，不用`find`取第一次、不clamp、不归一化。`text_sec`在真实数据中存在遗漏嵌套正文的情况，故不使用它替换原文或拼支持范围。标签不进入corpus，不生成静态dependencies，也不把空reference自动标成全语料无支持。
 
+## 按严格历史前缀构造研究样本
+
+`adapters.dialogue_examples`进一步将侧车投影为每个原agent轮次的下一发言实例，供来源阅读、历史条件与对话动作研究使用。实现吸取[ACT固定源码审查](applicability_mechanism.md)中的未来目标泄漏反例，独立编写，未复制其训练器或构造假偏好。
+
+```bash
+uv run python -m adapters.dialogue_examples \
+  --supervision runs/doc2dial-v1-prepared/supervision.jsonl \
+  --output runs/doc2dial-v1-causal
+```
+
+输出`examples.jsonl`和成功后的`manifest.json`，不覆盖已有目录。入口逐行读取、单遍计算原输入摘要；不重复哈希每个历史或目标。一个实例包含：
+
+- `input.turns`：严格位于目标之前的全部原始`turn_id/role/utterance`，没有目标、未来轮次或任何DA/grounding标签。原agent角色保持为agent，由后续具体模型适配显式转换。
+- `supervision`：目标原始turn，包括原文、DA、原`references`/`reference`容器和精确grounding；不推导“应该澄清”“无答案”或偏好真值。
+- `address`与数据字段：原conversation/target turn身份、dataset version、source format和split。
+- `task_scope`：单独声明`offline_given_document`及原passage身份。它不是检索结果，不进入`input`，不能在真实检索实验中用它偷选gold材料。
+
+连续同role不合并或丢弃：连续agent的后一个目标可看到前一个已观察agent发言。首轮agent可以有空前缀；末尾user不制造后续答案。每条样本保留独立的前缀视图，消费者修改一条不会改变源对话或后续样本。当前接口不直接序列化为SGLang请求，也不改变生产完整QA协议。
+
+两份已有train导出逐目标核对通过：v1有21998条实例，其中1567条紧随另一agent、167个对话以user结束；v0.9 wOOD有25126条实例，其中1977条紧随另一agent、139个对话以user结束。实例数不是独立训练单元数，不能随机逐轮切分或把两版本重叠对话当独立样本。验证保留于`runs/causal-dialogue-projection/`，没有模型调用，也没有因地址与因果合同通过就授予原target语义质量资格。
+
 ## 接到已有检索与HTTP
 
 ```bash

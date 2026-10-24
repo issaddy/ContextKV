@@ -101,6 +101,10 @@ curl -sS -X POST http://127.0.0.1:18080/sessions/demo/recover \
 
 请求取消也等待同一次检索线程结束后再释放会话锁并传播取消，不重新执行检索。真实Hybrid调度反例确认了原先“取消await→关闭模型→尚未取锁的线程继续检索”的竞态，已由局部任务收尾修复；没有新增请求状态表或重试机制。
 
+应用关闭还必须等待这些请求的收尾：Uvicorn的graceful timeout会取消HTTP任务，但可能在任务退出前开始lifespan shutdown。仅在请求内部等待检索线程不够。应用现以纯ASGI计数/Event跟踪已接受请求，关闭期间新请求返回503 `SERVICE_SHUTTING_DOWN`；等请求finally结束后才关闭retriever、engine和SQLite。没有增加每请求任务或影子会话状态。停机期限触发取消，不是同步线程的强杀期限，排空可能超过它。
+
+[真实Uvicorn CPU复现](../runs/runtime-shutdown-audit/README.md)中，修复前线程使用已关闭资源、SQLite报错、attempt留在STARTED；修复后先排空，attempt正确FAILED且无QA提交。被服务器取消的HTTP仍返回500，不宣称取消请求成功。另覆盖正常在途生成和已接受的close请求，两者都完成并持久化后才释放store。这是停机可靠性改进，未消耗模型/GPU；硬进程终止仍依赖原durable恢复合同。
+
 `/health`保留实际engine信息及pending retire计数，并轻量提供检索manifest；未启用检索时为null。该健康状态不授予语义或性能资格。默认仍一个Uvicorn worker，不增加跨进程共享检索模型框架。
 
 启动成功前只记录一次`service_started`事件，保留实际engine/fingerprint及真正用于创建控制器的完整RunConfig；直接注入控制器时明确标记`injected_controller`、config为null，不猜其配置。该事件与`retrieval_configured`及逐attempt采样记录共同提供运行来源，不新增哈希或manifest框架。

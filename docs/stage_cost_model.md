@@ -76,6 +76,24 @@ forward 的 402 个支持残差来自 28 个独立 cell，绝对误差经验 P95
 
 ## 运行与验证
 
+当前`SGLangProbe`直接在原生telemetry中保存`run_id/repetition/warmup`，request记录还有原index、receipt和`forward_to_first_token_ms`。阶段拟合已能直接读取这些产物，不再要求先运行仓库外的compact转换脚本。下一次**确有必要的新Qwen3采集**可使用以下入口；这里不启动采集，不使用旧模型artifact：
+
+```bash
+python -m profiling.stage_fit \
+  --telemetry selected=runs/NEW-QWEN3/profile.telemetry.jsonl \
+  --measurements runs/NEW-QWEN3/profile.jsonl \
+  --profile-manifest selected=runs/NEW-QWEN3/profile.manifest.json \
+  --base-artifact runs/NEW-QWEN3/cost-lookup.json \
+  --output runs/NEW-QWEN3/cost-stage.json \
+  --validation runs/NEW-QWEN3/stage-validation.json
+```
+
+多组采集可重复`--telemetry GROUP=PATH`，与`--profile-manifest`逐组一致。直接入口核对原生计时、完整generation、显式run/repetition、原first_token记录的写入顺序及完整并发成员；不是按耗时排序或任意乱序join。warmup不进入拟合。实际GPU→host漂移保留为标签/诊断，输入仍取prepared case的host量。缺阶段标签、缺请求或身份不符明确失败，不从客户端时延补造原生阶段。来源文件在离线边界记录摘要，重拟合的metadata只声明本次阶段输入，原base仍单独绑定。
+
+collector→telemetry→stage artifact的CPU协议闭环及旧compact合同通过41项针对性测试；其中合成时间只验证数据接线，不是硬件标定。记录在`runs/b-current-integration-audit/`。当前仍没有Qwen3可用的实测成本表或在线净收益结论；这一补齐消除了将来必要采集的不可复现人工步骤，没有因此扩大采集矩阵。
+
+下述旧compact命令仅用于复算上文既有历史数据，不启动旧模型或新增实验。旧文件没有repetition时保留这一显式兼容入口，不伪造新telemetry身份：
+
 ```bash
 python -m profiling.stage_fit \
   --compact runs/remote-h200-capacity-matrix/runs/capacity-calibration/16384/stage-timings.jsonl \
