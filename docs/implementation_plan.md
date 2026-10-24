@@ -42,6 +42,8 @@
 
 HTTP集成后完整回归通过1361项及6个子测试，开启真实Qwen3 tokenizer metadata，无跳过；Ruff和diff检查通过。真实CLI/TCP/BM25两轮验证了条件闭包、完整历史、旧请求重放、冲突、输入白名单与关闭，只有2次模拟生成、0次模型调用。随后补齐的启动来源事件与取消竞态由完整回归覆盖。记录在`runs/pytest-http-retrieval.log`和`runs/http-retrieval-tcp-v1/`；TCP退出完成应用清理，macOS信号退出另有1个semaphore清理警告，尚不宣称长时间资源稳定性已验证。
 
+实现`0d1ae96`已提交、打包并同步容器。wheel/sdist逐字核对86模块、31包资产（含可运行HTTP示例）、348个sdist文件及13份许可，通过且无运行数据、权重、私有环境；记录为`runs/dist-http-retrieval/asset-check.json`。容器349个tracked条目与同一提交一致，CLI导入/help和Python编译通过；原引擎补丁未改动，GPU0空闲，没有启动模型。远端公共证据位于`runs/remote-h200-http-retrieval/`。
+
 以下为上一轮Qwen3整合的已完成记录，不包含本轮新增HTTP自动检索代码：
 
 全仓回归在真实Qwen3 tokenizer metadata下通过：1323项测试及6个子测试，Ruff和diff检查通过。引擎补丁固定上游源码的应用/反向检查、15个修改文件语法与镜像校验通过。全部为CPU/源码检查，本轮没有模型生成；此前硬件结果保留各自身份。
