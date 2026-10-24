@@ -72,6 +72,25 @@ def calibration_grid(lengths: Sequence[int] = (1024, 2048, 4096, 8192, 16384),
     return tuple(cases)
 
 
+def load_cases(path: str | Path, *, page_size: int, context_limit: int) -> tuple[PrefillCase, ...]:
+    """Load selected shapes without generating a Cartesian experiment matrix."""
+    records = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(records, list) or not records:
+        raise ValueError("case file must contain a nonempty JSON list")
+    cases = tuple(PrefillCase(**record) for record in records)
+    for case in cases:
+        if (any(type(value) is not int for value in (case.prompt_tokens, case.prefix_tokens,
+                case.output_tokens, case.concurrency)) or min(case.prompt_tokens, case.output_tokens,
+                case.concurrency) < 1 or not 0 <= case.prefix_tokens < case.prompt_tokens):
+            raise ValueError("case sizes must be integers with positive prompt/output/concurrency and 0 <= prefix < prompt")
+        if case.prompt_tokens + case.output_tokens > context_limit:
+            raise ValueError("case exceeds configured context limit")
+        device, _ = case.prefix_split()
+        if case.prefix_tokens % page_size or device % page_size:
+            raise ValueError("case prefixes must align to the actual native page size")
+    return cases
+
+
 async def collect(cases: Sequence[PrefillCase], *,
                   prepare: Callable[[PrefillCase], Awaitable[None]],
                   probe: Callable[[PrefillCase], Awaitable[Sequence[Measurement]]],

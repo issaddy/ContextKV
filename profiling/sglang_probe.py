@@ -20,7 +20,7 @@ from controller.schema import PromptCandidate
 from controller.sampling import request_sampling
 from controller.templates import token_hash
 from profiling.common import Measurement, write_measurements
-from profiling.prefill import PrefillCase, calibration_grid
+from profiling.prefill import PrefillCase, calibration_grid, load_cases
 from profiling.transfers import from_completed_events
 
 
@@ -222,19 +222,27 @@ async def _run(args):
     try:
         info = await engine.info()
         snapshot = await engine.metrics()
-        cases = calibration_grid(args.lengths, args.prefix_fractions, args.outputs,
-            args.concurrency, page_size=snapshot["pool"]["page_size"],
-            context_limit=config.context.max_total_model_tokens)
-        expanded = [replace(case, cache_state=state,
-                            device_prefix_tokens=args.device_prefix_tokens if state == "mixed" else None)
-                    for case in cases for state in args.cache_states
-                    if (state == "cold") == (case.prefix_tokens == 0)]
+        case_file = getattr(args, "cases_file", None)
+        if case_file:
+            expanded = load_cases(case_file, page_size=snapshot["pool"]["page_size"],
+                                  context_limit=config.context.max_total_model_tokens)
+        else:
+            cases = calibration_grid(args.lengths, args.prefix_fractions, args.outputs,
+                args.concurrency, page_size=snapshot["pool"]["page_size"],
+                context_limit=config.context.max_total_model_tokens)
+            expanded = [replace(case, cache_state=state,
+                                device_prefix_tokens=args.device_prefix_tokens if state == "mixed" else None)
+                        for case in cases for state in args.cache_states
+                        if (state == "cold") == (case.prefix_tokens == 0)]
         for case in expanded:
             device, _ = case.prefix_split()
             if case.cache_state == "mixed" and device % snapshot["pool"]["page_size"]:
                 raise ValueError("--device-prefix-tokens must align to the actual native page size")
         if not expanded:
             raise ValueError("no compatible calibration cases")
+        target_requests = sum(case.concurrency for case in expanded)
+        fixture_requests = sum(case.concurrency * (int(case.prefix_tokens > 0) +
+                               int(case.cache_state == "mixed")) for case in expanded)
         output.parent.mkdir(parents=True, exist_ok=True)
         manifest = {"run_id": probe.run_id, "status": "running", "source": "hardware",
                     "engine": asdict(info), "pool": snapshot["pool"],
@@ -246,8 +254,14 @@ async def _run(args):
                                             "seed_scope": "input_fixture_only_not_request_sampler"},
                     "timing_scope": "server_request; transfer CUDA ACK events",
                     "cases": [case.record() for case in expanded], "repetitions": args.repetitions,
+                    "case_selection": "explicit_list" if case_file else "grid",
                     "warmup_per_case": args.warmup,
                     "warmup_request_count": sum(case.concurrency for case in expanded)*args.warmup,
+                    "planned_generation_requests": {
+                        "measured": target_requests * args.repetitions,
+                        "warmup": target_requests * args.warmup,
+                        "prefix_preparation": fixture_requests * (args.warmup + args.repetitions),
+                        "total": (target_requests + fixture_requests) * (args.warmup + args.repetitions)},
                     "warmup_in_training_measurements": False,
                     "prefix_tier_binding": {"mixed": "prepared_and_execution_exact",
                                             "cold_gpu_ready_host_only": "prepared_split_execution_drift_audited"}}
@@ -283,11 +297,12 @@ def main(argv=None):
     parser.add_argument("--base-url", help="Override config URL for the isolated profiler server")
     parser.add_argument("--output", required=True)
     parser.add_argument("--runtime-manifest", help="Bind the JSON emitted by profiling.runtime_manifest unchanged")
-    parser.add_argument("--lengths", type=lambda s: tuple(map(int, s.split(","))), default=(1024,4096,8192))
-    parser.add_argument("--prefix-fractions", type=lambda s: tuple(map(float, s.split(","))), default=(0,.5,.99))
-    parser.add_argument("--outputs", type=lambda s: tuple(map(int, s.split(","))), default=(128,512))
-    parser.add_argument("--concurrency", type=lambda s: tuple(map(int, s.split(","))), default=(1,4))
-    parser.add_argument("--cache-states", type=lambda s: tuple(s.split(",")), default=("cold","gpu_ready","host_only"),
+    parser.add_argument("--cases-file", help="JSON list of exact PrefillCase records; excludes grid options")
+    parser.add_argument("--lengths", type=lambda s: tuple(map(int, s.split(","))))
+    parser.add_argument("--prefix-fractions", type=lambda s: tuple(map(float, s.split(","))))
+    parser.add_argument("--outputs", type=lambda s: tuple(map(int, s.split(","))))
+    parser.add_argument("--concurrency", type=lambda s: tuple(map(int, s.split(","))))
+    parser.add_argument("--cache-states", type=lambda s: tuple(s.split(",")),
                         help="cold,gpu_ready,host_only,mixed; mixed needs --device-prefix-tokens")
     parser.add_argument("--device-prefix-tokens", type=int,
                         help="prepared GPU part of a mixed prefix; total prefix still uses --prefix-fractions")
@@ -295,6 +310,14 @@ def main(argv=None):
     parser.add_argument("--warmup", type=int, default=1, help="Per-case warmup runs excluded from training JSONL")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args(argv)
+    grid_defaults = {"lengths": (1024,4096,8192), "prefix_fractions": (0,.5,.99),
+                     "outputs": (128,512), "concurrency": (1,4),
+                     "cache_states": ("cold","gpu_ready","host_only"), "device_prefix_tokens": None}
+    if args.cases_file and any(getattr(args, name) is not None for name in grid_defaults):
+        parser.error("--cases-file cannot be combined with grid options")
+    for name, default in grid_defaults.items():
+        if getattr(args, name) is None:
+            setattr(args, name, default)
     if args.repetitions < 1 or args.warmup < 0:
         parser.error("--repetitions must be positive and --warmup nonnegative")
     asyncio.run(_run(args))

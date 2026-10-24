@@ -7,7 +7,7 @@ from test_model_scope import local_scope as local_scope
 
 from controller.engine_client import EngineError
 from controller.mock_engine import MockEngine
-from profiling.prefill import PrefillCase
+from profiling.prefill import PrefillCase, load_cases
 from profiling.sglang_probe import SGLangProbe
 
 
@@ -277,3 +277,77 @@ def test_profile_manifest_claim_precedes_cache_preparation(tmp_path, monkeypatch
         asyncio.run(module._run(args))
     assert len(calls) == 1
     assert all(path.read_bytes() == value for path, value in before.items())
+
+
+@pytest.mark.parametrize("change,error", [
+    ({"prefix_tokens": 12}, "prefix < prompt"),
+    ({"prefix_tokens": 7}, "page size"),
+    ({"device_prefix_tokens": 2}, "page size"),
+    ({"output_tokens": 100}, "context limit"),
+    ({"concurrency": 0}, "positive"),
+    ({"prompt_tokens": True}, "integers"),
+    ({"cache_state": "unknown"}, "device_prefix_tokens"),
+])
+def test_explicit_case_boundary_refuses_invalid_shapes(tmp_path, change, error):
+    import json
+    path = tmp_path/"cases.json"
+    row = PrefillCase(12,8,4,1,"mixed",4).record()
+    path.write_text(json.dumps([{**row, **change}]))
+    with pytest.raises(ValueError, match=error):
+        load_cases(path, page_size=4, context_limit=32)
+
+
+def test_explicit_cases_execute_only_listed_shapes_through_existing_collector(tmp_path, monkeypatch, local_scope):
+    from argparse import Namespace
+    from types import SimpleNamespace
+    import json
+    import profiling.sglang_probe as module
+    from controller.schema import ConfigFingerprint
+    from profiling.common import load_measurements
+
+    class SelectedEngine(ProtocolDouble):
+        async def metrics(self, after_seq=0):
+            return {**await super().metrics(after_seq), "pool": {"page_size": 4}}
+
+        async def aclose(self):
+            pass
+
+    engine = SelectedEngine(page_size=4, response_text="abcd")
+    monkeypatch.setattr(module, "SGLangEngineClient", lambda *a, **k: engine)
+    tokenizer = SimpleNamespace(all_special_ids=(), get_vocab=lambda: {str(n): n for n in range(20)})
+    monkeypatch.setattr("controller.config.create_model_template", lambda *a, **k:
+                        SimpleNamespace(tokenizer=tokenizer, fingerprint=ConfigFingerprint()))
+    cases = [PrefillCase(8,0,4,1,"cold"), PrefillCase(12,8,4,2,"mixed",4)]
+    path = tmp_path/"cases.json"
+    path.write_text(json.dumps([case.record() for case in cases]))
+    config = tmp_path/"config.yaml"
+    config.write_text(f"engine:\n  kind: sglang\nmodel:\n  scope_path: {local_scope.path}\n")
+    output = tmp_path/"profile.jsonl"
+    # No grid arguments: the list is the full, ordered request specification.
+    args = Namespace(config=str(config), runtime_manifest=None, model_path=None, base_url=None,
+                     output=str(output), seed=42, cases_file=str(path), repetitions=2, warmup=1)
+    asyncio.run(module._run(args))
+    rows = load_measurements(output)
+    assert [(r.prompt_tokens, r.concurrency) for r in rows] == [(8,1)]*4 + [(12,2)]*8
+    manifest = json.loads(output.with_suffix(".manifest.json").read_text())
+    assert manifest["status"] == "complete"
+    assert manifest["cases"] == [case.record() for case in cases]
+    assert manifest["case_selection"] == "explicit_list"
+    assert manifest["planned_generation_requests"] == {
+        "measured": 6, "warmup": 3, "prefix_preparation": 12, "total": 21}
+    events = [json.loads(line) for line in output.with_suffix(".telemetry.jsonl").read_text().splitlines()]
+    assert [e["case"] for e in events if e["event"] == "prepared"] == [
+        case.record() for case in cases for _ in range(3)]
+    assert sum(e["event"] == "request" and e["warmup"] for e in events) == 3
+
+
+def test_explicit_case_cli_does_not_silently_ignore_grid_options(tmp_path, monkeypatch):
+    import profiling.sglang_probe as module
+
+    async def no_run(args):
+        raise AssertionError("ambiguous sampling specification must fail before engine access")
+
+    monkeypatch.setattr(module, "_run", no_run)
+    with pytest.raises(SystemExit) as error:
+        module.main(["--cases-file", "selected.json", "--lengths", "4096", "--output", str(tmp_path/"out")])
+    assert error.value.code == 2

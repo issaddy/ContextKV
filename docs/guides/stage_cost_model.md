@@ -76,6 +76,10 @@ forward 的 402 个支持残差来自 28 个独立 cell，绝对误差经验 P95
 
 ## 运行与验证
 
+定向补采可向同一 `profiling.sglang_probe` 入口传 `--cases-file PATH`。文件是 `PrefillCase` 的 JSON 数组，每项包含 `prompt_tokens`、`prefix_tokens`、`output_tokens`、`concurrency`、`cache_state`；`mixed` 另带 `device_prefix_tokens`。只执行列出的形状及其明确配置的预热/重复，不与长度、比例、并发、缓存状态网格参数混用。清单按实际引擎页大小和配置上下文预算检查后，才进入缓存准备。原网格入口保留。
+
+manifest 保存完整有序清单与 `case_selection`，并在 `planned_generation_requests` 中分别记录正式、预热、前缀物化和合计调用数；失败时这些是计划数量，实际完成情况以原有 telemetry 和 measurement 为准。显式清单继续输出原有测量协议，直接进入下述 fit/stage_fit，不引入另一套标定器。CPU 协议检查覆盖冷输入与 mixed 前缀、顺序、实际采集数量和原拟合接口；没有新增 Qwen3 硬件测量。
+
 `profiling.sglang_probe`的measurement、telemetry和manifest输出使用新的文件前缀。已有任一产物会在访问引擎前拒绝；manifest在缓存准备和生成前独占创建，防止重复命令混写不同run ID并覆盖原始来源。失败仍保留已写测量与分母，不自动覆盖重跑。该工程修复不产生新的标定值。
 
 当前`SGLangProbe`直接在原生telemetry中保存`run_id/repetition/warmup`，request记录还有原index、receipt和`forward_to_first_token_ms`。阶段拟合已能直接读取这些产物，不再要求先运行仓库外的compact转换脚本。下一次**确有必要的新Qwen3采集**可使用以下入口；这里不启动采集，不使用旧模型artifact：
