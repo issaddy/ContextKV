@@ -41,6 +41,7 @@
 ## 提取与未知范围
 
 - 函数/异步方法保留包括装饰器、签名、docstring与方法体的连续原文区间；类记录保留装饰器、类声明及完整类docstring，缺docstring时只保留声明。不存在的文档不补写，类片段不承诺是独立可执行程序。
+- 可显式选择公开类的`Client.__init__`，或将它作为操作符号的同文件依赖；初始化函数保留原始完整源码、声明参数与`initializer_of`。这是[真实生成对照](api_evidence_validation.md)中操作参数正确但构造器错误后的工程补充。仅选择`Client`不会自动展开初始化代码，也不开放其他私有/dunder符号；继承而未在该类定义的初始化仍为未知。它不自动补齐外部认证库或证明整个示例可执行。
 - `span` 是按源文件声明encoding解码后的Unicode字符偏移，半开区间；行号从1开始。CRLF、Unicode及原缩进保留。原文件字节SHA与文本字符偏移用途不同。
 - `api_source.signature`、`docstring`、HTTP原表达式均附原文span；签名按token定位，不重构格式。`required_declared_parameters`按原AST列出必需的声明参数，也包含声明中的 `self`；不是运行时绑定后的调用签名。
 - 只识别函数体中的语法形式 `*.prepare_request(method=..., url=...)`。直接字符串或同一函数体唯一、前序、无条件字符串赋值可以列出原字面值；动态format、属性、其他请求库、条件改写等保留unknown。它描述源码中的请求配置，不保证实际transport行为；装饰器、默认值、参数/返回注解和嵌套函数/class/lambda中的调用不算该方法体的请求。
@@ -73,4 +74,4 @@ blocks = index.resolve(("ibmcloudant:ibmcloudant/cloudant_v1.py#CloudantV1.post_
 
 `tests/test_api_evidence.py`覆盖无执行、装饰器/async、Unicode/CRLF原文与偏移、复杂签名/缺文档、显式和注解依赖、Literal/Annotated非类型内容、动态HTTP/嵌套作用域、继承/重载未知、版本/仓库歧义、未到达的依赖声明、离线源身份核对、许可复制与CLI退出码。与既有CorpusIndex测试合计26项通过。
 
-真实离线构建产物为 `runs/api-evidence-review/production-bundle-v2`；`production-contract-check-v2.json`证明两份固定官方源的10条正文、span、行号与此前保存的10个preview完全一致，并列出各闭包。`PYTHONPATH=. .venv/bin/python runs/api-evidence-review/validate_production.py --bundle runs/api-evidence-review/production-bundle-v2 --output runs/api-evidence-review/rechecked.json` 可重新核验。旧回答、旧audit、旧preview与构建v1均保留。此验证只证明工程提取与来源绑定，没有新增生成、运行时API正确性或总体答案质量结论。
+真实离线构建产物为 `runs/api-evidence-review/production-bundle-v2`；`production-contract-check-v2.json`证明两份固定官方源的10条正文、span、行号与此前保存的10个preview完全一致，并列出各闭包。`PYTHONPATH=. .venv/bin/python runs/api-evidence-review/validate_production.py --bundle runs/api-evidence-review/production-bundle-v2 --output runs/api-evidence-review/rechecked.json` 可重新核验。旧回答、旧audit、旧preview与构建v1均保留。随后[12次真实生成](api_evidence_validation.md)也已完成，局部参数修正与新增初始化错误均保留；原v2包没有构造器，不能将后续提取能力倒填为这些生成已见材料。没有运行时API正确性或总体质量收益结论。

@@ -20,8 +20,13 @@ from adapters.corpus import CorpusIndex
 
 
 def _public_symbol(value: str) -> bool:
+    parts = value.split(".")
+    # An explicitly requested public class initializer is part of its API use
+    # contract. Other private/dunder declarations remain outside this builder.
+    if len(parts) > 1 and parts[-1] == "__init__":
+        parts = parts[:-1]
     return bool(value) and all(part.isidentifier() and not part.startswith("_")
-                               for part in value.split("."))
+                               for part in parts)
 
 
 def _validate_spec(spec: Mapping[str, Any]) -> None:
@@ -218,6 +223,13 @@ def extract_sdk_records(source_path: str | Path, source_spec: Mapping[str, Any]
                 "not_declared_in_file_inheritance_and_imports_not_resolved"})
             continue
         node = matches[0]
+        if symbol.endswith(".__init__"):
+            owners = declarations.get(symbol.rpartition(".")[0], ())
+            if (len(owners) != 1 or not isinstance(owners[0], ast.ClassDef)
+                    or not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+                unknown.append({"symbol": symbol, "status": "unknown",
+                                "reason": "initializer_not_unique_class_method"})
+                continue
         signature = source.signature(node)
         first = node.body[0]
         has_doc = (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
@@ -251,6 +263,8 @@ def extract_sdk_records(source_path: str | Path, source_spec: Mapping[str, Any]
             details["bases"] = [source.fragment(base) for base in node.bases]
             details["inheritance_status"] = "not_resolved"
         else:
+            if symbol.endswith(".__init__"):
+                details["initializer_of"] = symbol.rpartition(".")[0]
             positional = node.args.posonlyargs + node.args.args
             required = positional[:len(positional) - len(node.args.defaults)]
             required += [arg for arg, default in zip(node.args.kwonlyargs,

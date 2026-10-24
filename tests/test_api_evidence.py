@@ -110,6 +110,38 @@ def test_inheritance_and_overloads_not_guessed(tmp_path):
         "not_declared_in_file_inheritance_and_imports_not_resolved", "ambiguous_multiple_declarations"]
 
 
+def test_explicit_public_initializer_is_original_source_dependency_not_automatic_class_expansion(tmp_path):
+    text = ('raise RuntimeError("NEVER EXECUTE")\n'
+            'class Client:\n    """Public client."""\n'
+            '    def __init__(self, *, authenticator):\n'
+            '        """The client initialization contract."""\n'
+            '        raise RuntimeError("NEVER INSTANTIATE")\n'
+            '    def fetch(self, doc_id):\n        return doc_id\n'
+            'class Child(Client):\n    pass\n')
+    rows, _ = extract(tmp_path, text, spec(["Client"]))
+    assert len(rows) == 1 and "def __init__" not in rows[0]["text"]
+    rows, manifest = extract(tmp_path, text, spec(["Client.fetch"],
+        dependencies={"Client.fetch": ["Client.__init__"]}))
+    assert [row["api_source"]["symbol"] for row in rows] == ["Client.fetch", "Client.__init__"]
+    initializer = rows[1]
+    assert initializer["api_source"]["initializer_of"] == "Client"
+    assert initializer["api_source"]["required_declared_parameters"] == ["self", "authenticator"]
+    assert initializer["api_source"]["extra_keyword_parameter"] is None
+    assert text[slice(*initializer["span"])] == initializer["text"]
+    assert 'raise RuntimeError("NEVER INSTANTIATE")' in initializer["text"]
+    index = CorpusIndex.from_records(rows, corpus_id="sdk", snapshot_id="frozen")
+    assert len(index.resolve((rows[0]["passage_id"],))) == 2
+    assert manifest["code_executed"] is False
+    rows, manifest = extract(tmp_path, text, spec(["Child.__init__"]))
+    assert rows == () and manifest["status"] == "incomplete_unknown_symbols"
+
+
+@pytest.mark.parametrize("symbol", ["__init__", "_Client.__init__", "Client._method", "Client.__new__"])
+def test_initializer_support_does_not_open_arbitrary_private_symbols(tmp_path, symbol):
+    with pytest.raises(ValueError, match="public declarations"):
+        extract(tmp_path, "class Client:\n    pass\n", spec([symbol]))
+
+
 def test_http_scope_excludes_decorator_defaults_annotations_and_nested_scopes(tmp_path):
     text = ('@wrap(client.prepare_request(method="GET", url="/decorator"))\n'
             'def operation(\n'
