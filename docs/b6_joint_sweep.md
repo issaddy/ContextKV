@@ -1,89 +1,20 @@
-# 有限联合 B6 开发执行器：phase 1
+# 声明式 B6 矩阵、重复与冻结
 
-`python -m bench.b6_joint_sweep` 将文本整理策略与真实 HiCache 写策略组成预先声明的开发矩阵。默认只打印计划，不加载权重、不连接引擎、不创建结果目录；`--execute` 才在当前机器逐格启动、验证和清理自有服务器。它复用 `native_policy_sweep` 的启动/原生容量证据、`controller_capacity_sweep` 的研究引擎配置检查及 `experiments.run_matrix` 的串行执行/结果绑定，没有新增线上调度或成本模型。
+2026-10-24清理后，唯一owned生成入口为 `python -m bench.b6_joint_sweep --matrix ... --output ...`，模型必须来自共享显式Qwen3 scope。默认只打印计划，`--execute`才启动自有服务器。固定7B生成、13格自动构造器及两套旧sweep CLI均已删除，不再进行7B实验。
 
-本阶段是 **Cloud dev / P2 的固定配置筛查**，尚不是完整 B6 或 heldout 结论。P2 使用固定检索材料和本臂真实生成的完整历史 QA，不调用 retriever；后续 P3 共同 A 计划采用低成本 `user_topic` 单路，不能把该检索策略计入本轮 P2。
+[通用owned入口](b6_owned_matrix.md)说明资源、服务器验证及cleanup；[native入口](native_model_scope.md)说明B0/B1。原native_policy_sweep仅保留进程/测量/清单helpers，controller_capacity_sweep仅保留成本来源与实际runtime验证。历史13格及其判断见[b6_joint_validation.md](b6_joint_validation.md)，原产物不重写、不通过当前源码重跑。
 
-| 文本/原生家族 | 真正启动的写策略 | 格数 |
-| --- | --- | ---: |
-| Rebuild | write_through / write_through_selective / write_back | 3 |
-| Fixed4096 | 同上 | 3 |
-| Redundancy40 | 同上 | 3 |
-| stock B1 | 同上 | 3 |
-| stock B0 参照 | 禁用 HiCache 和 session radix，保留原生普通 radix | 1 |
+## 生成与质量边界
 
-合计 13 格，每格完整 5 会话 / 41 轮，即计划 533 轮。`Redundancy40` 使用已有 evidence body span 的 tokenizer 长度比例，不把 prompt 长度差视为正文冗余。12 个 `b6_eligible` 标记仅表示预声明候选资格，**不是质量通过**；B0 是共同质量/延迟参照，不参与 B6 候选选择。每个家族显式枚举三个写策略；`equal_budget=1` 表示每个已命名固定格只有一个参数候选，不意味着家族搜索次数相等。
+每job保存实际server/runtime/pool、run/audit/summary和失败；模型、采样、材料、预算及源码保持预声明绑定。新生成不能借用其它模型或cache配置的成本标定。默认plan、CPU合同和一次小功能验收都不授予B6或质量资格。
 
-共同设置为 GPU KV 16384 tokens、host 请求 16 GB、page 64、固定 Qwen2.5-7B-Instruct revision `a09a35458c702b33eeacc393d103063234e8bc28`、BF16、模型上下文 32768、Q0、输出上限 1024、正常 EOS、c4、seed 42。三个控制器家族均开启旧 epoch retirement，host admission 均实际关闭；shadow/在线标定和成本/输出长度 artifact 均关闭。固定策略通过原有路径选择动作，不请求成本 quote。
-
-每格是新的服务器进程、空 KV、跳过 generation warmup，记录为 `fresh_process_empty_KV_no_generation_warmup`。父控制器进程、磁盘 Triton/torch 扩展缓存等仍可跨格保留，因此不声称完全相同的 JIT 冷态。只实现第一重复；计划保存今后三次整格顺序的轮换，但未把它们执行、合并，或用不同 seed 冒充重复。一次有序开发运行不足以证明性能显著性；P2 历史和实际输入也可能随输出/策略分叉。
-
-## 执行
-
-在对应 Linux/CUDA 环境激活已有 venv，准备固定 patched / clean stock 两份源码和现有模型文件。先检查计划：
-
-```bash
-RAYON_NUM_THREADS=4 .venv/bin/python -m bench.b6_joint_sweep \
-  --model-path models/Qwen2.5-7B-Instruct \
-  --patched-checkout vendor/sglang --stock-checkout vendor/sglang-stock \
-  --output runs/b6-joint-dev-phase1 > runs/b6-joint-plan.json
-```
-
-确认外层操作者已停自己拥有的现有服务，且 GPU 0 没有并行实验后，运行同一命令并追加 `--execute`（不要把标准输出重定向到尚未创建的结果目录内部）。父命令必须显式 `RAYON_NUM_THREADS=4`；只设服务器环境不会配置已初始化的客户端 tokenizer。
-
-本执行器 **不停止或恢复已有大服务**。端口占用会拒绝当前格；外层 owner/supervisor 负责原服务的停止及最终恢复。执行器的 `finally` 只清理自己新启动的 process group。单格启动、运行或结果不完整会保留 `server.json`、已有原始结果和错误，其余格继续；整个 CLI 在有失败时非零退出，不生成 B6 结论。
-
-实际服务器必须通过固定 commit/checkout 检查及公共 `/get_server_info` 核验：FA3、chunk 8192、FCFS、max running 8、TP/DP 1、page、上下文、GPU token cap、seed 和 skip warmup。运行时另记录 GPU UUID/型号/显存与 driver/CUDA/torch，矩阵内需一致。GPU 容量取原生 scheduler 观测值；host slot 取真实启动分配日志，字节数用固定模型 KV 几何计算，不将 `16 GB` 参数当作实际 allocator 字节数。HiCache 各格实际 host slots 必须相同；B0 要求观察到 HiCache 关闭且无 host 分配日志，host 为 0。
-
-研究格还核实际 cache 配置、host admission off 与初始 unique GPU/host KV 为 0。stock 格的 native manifest 只在对应服务器成功启动验证后生成并交给 native baseline；全部 native 格保存 prompt IDs，支持后续答案/输入绑定。`server_profile` 的普通 `experiments tune/test` 调用在生成前拒绝，防止三个写策略被悄悄发往同一个现有服务。
-
-主要产物：
-
-- `controller.yaml`、`matrix.yaml`、`plan.json`：完整共同配置、13 格及源码检查结果。
-- `servers/<job>/`：自有 PID、启动日志、实际 runtime 前后快照、研究 metrics 或原生 metrics、完成/失败记录，stock 格另有实际 native manifest。
-- `matrix-results/results.jsonl` 及各格原始 benchmark/native、audit、manifest/summary：失败不删行，成功格保留实际输入/生成历史/输出。
-- `completion.json` 与 `quality-evidence.template.json`：后者只有真实文件引用，评分和 evaluator protocol 均留空，没有伪造质量资格。
-
-cache configuration hash 只证明配置范围匹配，不证明 GPU/driver 等所有环境相同；本轮固定策略不借用大池或其他写策略的成本标定。
-
-## 离线质量与冻结
-
-`require_quality_evidence=true` 从预声明开始绑定；reference=B0、epsilon=0.01、13 个方法/输入/划分/生成配置/实现源码都不能在生成后悄悄替换。后补的只有离线 `tuning.quality_evidence` 文件引用与评分，不从 generation provenance 剥离任何生成或协议约束。
-
-生成后可复制模板为真实 quality acceptance 配置，使用完整 cohort 的五维答案绑定评分，并按 [quality_acceptance.md](quality_acceptance.md) 保存独立 evaluator 协议。当前入口接受人工盲审或已声明独立模型，相关家族自评仅诊断；不接受手填 `quality_eligible` 布尔值。冻结边界核每格实际 run/audit/controller manifest/owned server record 的路径和完成时字节绑定，并调用已有 `bench.quality_acceptance.evaluate` 核对输入/输出、缺分、划分、协议及五维非劣。完整 dev 也不等于最终人工质量通过。
-
-把实际评分配置的路径作为唯一后添字段写入已生成 `matrix.yaml`：
-
-```yaml
-tuning:
-  equal_budget: 1
-  require_quality_evidence: true
-  quality_constraints: {reference: B0, epsilon: 0.01}
-  quality_evidence: /absolute/path/quality-evidence.json
-```
-
-然后在同一生成源码与路径环境执行：
-
-```bash
-.venv/bin/python -m bench.experiments freeze \
-  --config runs/b6-joint-dev-phase1/matrix.yaml \
-  --results runs/b6-joint-dev-phase1/matrix-results/results.jsonl \
-  --output runs/b6-joint-dev-phase1/frozen.json
-```
-
-有真实但未完成/不合格评分时保存 `frozen.readiness.json`，非零退出且不产出 frozen；路径/协议不符直接拒绝。所有 13 格及完整任务分母保留，不只给最快格补评分。符合本开发 evaluator 的候选才进入现有时延选择；目标是每格完整 turn 时延均值（`max(t_response_done,t_commit)-arrival`），不是质量胜率。评分文件与协议在最终 freeze 一次绑定；无逐请求新 hash。
-
-历史 `0893134` phase1 **只有 dev owned-server 入口**。新增[通用 owned matrix 入口](b6_owned_matrix.md)已支持读取既有声明并执行冻结后的 test/dev_ablation，但尚未完成实际 heldout 验收。动态 native manifest 仍不能由普通 `experiments test` 自动启动重现；新入口必须使用与新实现匹配的完整 dev/frozen 记录，不能将旧 phase1 结果改标后直接用于新源码的 test。
-
-phase 1 结果不能拼入后来扩大 B4/B5/Ours/P3/消融/自然容量的 spec 再补 provenance。后续需要新的自足预声明矩阵、少量共同 anchors，以及与相应 dev 覆盖一致的最终 test。成本型 Ours 可先用已有匹配 write_through/16K targeted-stage + 显式 native_budget 与同写简单策略比较，再比 phase 1 最佳完整配置；若选 write_back/selective 或 conditioned host admission，须实际重标定该 cache 配置，不复制改 hash 或借 legacy 模式绕过。
-
-本地验收覆盖 13 格计划、fake owned process 生命周期/真实配置传递/失败继续与非零退出、B0 启动 flags、动态 native manifest、错误 generic executor 拦截，以及真实文件形式的质量正反例。这些 CPU 合同测试不构成 GPU 13 格性能或质量结果。
+开发矩阵可显式配置 `tuning.require_quality_evidence: true`，完成后只生成引用实际job文件的空评分模板。离线评分须满足[quality_acceptance](quality_acceptance.md)的完整cohort、答案绑定、固定evaluator及缺分规则。不能填quality_eligible布尔值代替评分。freeze不齐时只保存readiness，不能删失败job或只选最快子集。新的Qwen3生成、评分与冻结必须自足绑定，历史结果不能改标复用为同源性能/质量证据。
 
 ## 后续矩阵的显式重复与分组质量文件
 
 后续 `bench.experiments` 支持显式 `repetitions: [1, 2]`，与 `seeds: [42]` 分开：每个系统重复仍使用声明的 seed，job ID 增加 `-r1` / `-r2`，结果及实际 raw `experiment_protocol` 保存 repetition；before-job hook 还接收 `CONTEXTKV_JOB_REPETITION`。重复按列表顺序外层展开，每次内部保持原方法/候选顺序，本接点不自动轮换或声称顺序无偏。未配置 repetition 时，旧 job ID、结果字段和执行顺序保持不变。时延配对只匹配相同 protocol / concurrency / seed / repetition 的参照。
 
-本页 phase1 构造器仍保持单重复计划；新增[通用 owned matrix 入口](b6_owned_matrix.md)已接入显式重复及冻结 test/dev_ablation，工程入口完成不代表已做硬件 heldout 验收。多候选或多 workload/repetition 的质量冻结使用下列新索引文件；原单格 quality acceptance 配置继续可用。
+固定7B的phase1构造器已删除。[Qwen3 owned matrix入口](b6_owned_matrix.md)支持显式重复及冻结test/dev_ablation；工程入口完成不代表heldout验收。多候选或多 workload/repetition 的质量冻结使用下列新索引文件；原单格 quality acceptance 配置继续可用。
 
 ```json
 {

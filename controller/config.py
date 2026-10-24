@@ -51,9 +51,10 @@ class ModelConfig:
                 raise ValueError("model fields conflict with the explicit local scope")
             name, revision, local = scope.model_path, scope.identity, True
         else:
-            name = "Qwen/Qwen2.5-7B-Instruct" if self.name is None else self.name
-            revision = "a09a35458c702b33eeacc393d103063234e8bc28" if self.revision is None else self.revision
-            local = False if self.local_files_only is None else self.local_files_only
+            # CPU simulations have no model. Loading a real model always needs
+            # an explicit supported local scope; names are not download defaults.
+            name, revision = self.name, self.revision
+            local = True if self.local_files_only is None else self.local_files_only
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "revision", revision)
         object.__setattr__(self, "local_files_only", local)
@@ -108,8 +109,8 @@ class RunConfig:
             raise ValueError("output budget must be smaller than the total context budget")
         if self.engine.page_size < 1 or min(self.engine.gpu_capacity_tokens, self.engine.host_capacity_tokens) < 0:
             raise ValueError("invalid cache capacities/page size")
-        if self.engine.kind == "sglang" and self.model.scope is None and len(self.model.revision) != 40:
-            raise ValueError("SGLang runs require a pinned model revision SHA")
+        if self.engine.kind == "sglang" and self.model.scope is None:
+            raise ValueError("SGLang runs require an explicit Qwen3 model.scope_path")
         if self.model.scope is not None and self.context.max_total_model_tokens > self.model.scope.context_limit:
             raise ValueError("context budget exceeds the explicit model scope")
         if min(self.cost_model.default_output_tokens, self.cost_model.p90_output_tokens) < 1:
@@ -137,17 +138,16 @@ def load_config(path: str | Path | None = None) -> RunConfig:
 
 def create_model_template(model: ModelConfig, *, model_path: str | None = None,
                           local_files_only: bool | None = None):
+    if model.scope is None:
+        raise ValueError("real model loading requires an explicit Qwen3 model.scope_path")
     path = model_path or model.name
     local = model.local_files_only if local_files_only is None else local_files_only
-    if model.scope is not None:
-        if not local:
-            raise ValueError("explicit local scope cannot enable remote model loading")
-        model.scope.verify_files(path)
-    options = {"model_identity": model.revision} if model.scope is not None else {}
-    template = HuggingFaceTemplate(path, None if model.scope is not None else model.revision,
-                                   namespace_hash=model.namespace_hash, local_files_only=local, **options)
-    if model.scope is not None:
-        model.scope.verify_fingerprint(asdict(template.fingerprint))
+    if not local:
+        raise ValueError("explicit local scope cannot enable remote model loading")
+    model.scope.verify_files(path)
+    template = HuggingFaceTemplate(path, None, model_identity=model.revision,
+                                   namespace_hash=model.namespace_hash, local_files_only=True)
+    model.scope.verify_fingerprint(asdict(template.fingerprint))
     return template
 
 

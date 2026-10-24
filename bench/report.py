@@ -126,7 +126,7 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=2
         for field, target in (("engine_elapsed_ms", engine_ms), ("server_ttft_ms", server_ttft), ("tpot_ms", server_tpot)):
             if result.get(field) is not None:
                 target.append(result[field])
-        timing_sources[result.get("timing_source", "unavailable")] += 1
+        timing_sources[result.get("timing_source") or "unavailable"] += 1
     # Fixed cohorts finish at completed_at; open-loop throughput uses its specified
     # arrival window, with the drained cohort separately visible.
     start, end = report["started_at"], report["arrival_window_end"]

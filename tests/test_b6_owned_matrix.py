@@ -13,8 +13,9 @@ import yaml
 from bench import b6_joint_sweep as sweep
 from bench import experiments
 from controller.cost_model import CostModel, LookupPoint, DecodePoint
-from controller.schema import ConfigFingerprint
-from test_native_policy_sweep import MODEL_CONFIG, HOST_LOG
+from test_native_policy_sweep import HOST_LOG
+from controller.config import ModelConfig
+from test_model_scope import local_scope as local_scope
 
 
 def save(path, value):
@@ -26,17 +27,13 @@ def read(path):
 
 
 @pytest.fixture
-def matrix(tmp_path):
+def matrix(tmp_path, local_scope):
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
-    model = tmp_path/'model'
-    model.mkdir()
-    save(model/'config.json', MODEL_CONFIG)
-    fp = ConfigFingerprint(model_revision=sweep.server.MODEL_REVISION, tokenizer_hash='a'*64,
-                           template_hash='b'*64, namespace_hash='owned-fixture')
-    config = {'model': {'name': str(model), 'revision': sweep.server.MODEL_REVISION,
-                       'namespace_hash': fp.namespace_hash, 'local_files_only': True},
+    model = local_scope.model_path
+    fp = local_scope.fingerprint
+    config = {'model': asdict(ModelConfig(scope_path=str(local_scope.path))),
         'engine': {'kind': 'sglang', 'base_url': f'http://127.0.0.1:{port}', 'gpu_capacity_tokens': 32768, 'page_size': 64},
         'context': {'max_total_model_tokens': 32768, 'max_new_tokens': 256, 'system_prompt': 'Keep exact shared prompt.\n'},
         'planner': {'strategy': 'always_rebuild', 'concurrency': 2}, 'shadow': False}
@@ -48,7 +45,7 @@ def matrix(tmp_path):
     data.write_text(''.join(json.dumps(row)+'\n' for row in rows))
     save(split, {'dev': ['s0', 's1'], 'test': ['s2']})
     profiles = {kind: {'kind': kind, 'write_policy': 'write_through', 'hicache': True, 'session_radix': True,
-                       'gpu_tokens': 32768, 'hicache_gb': 16, 'checkout': str(tmp_path/kind)}
+                       'gpu_tokens': 32768, 'hicache_gb': 16, 'mem_fraction_static': .8, 'checkout': str(tmp_path/kind)}
                 for kind in ('patched', 'stock')}
     spec = {'schema_version': 1, 'base_config': str(config_path), 'input': str(data), 'split_manifest': str(split),
         'domain': 'all', 'protocols': ['P2'], 'concurrency': [2], 'seeds': [17], 'repetitions': [1, 2],
@@ -65,7 +62,7 @@ def matrix(tmp_path):
     path.write_text(yaml.safe_dump(spec))
     args = Namespace(matrix=path, stage='dev', frozen=None, output=tmp_path/'new-output', port=port,
                      model_path=model, startup_timeout=1, job_timeout=1)
-    return SimpleNamespace(args=args, spec=spec, config=config, config_path=config_path, fp=fp, rows=rows)
+    return SimpleNamespace(args=args, spec=spec, config=config, config_path=config_path, fp=fp, rows=rows, scope=local_scope.scope)
 
 
 def write_spec(fixture):
@@ -89,7 +86,7 @@ def fake_hardware(fixture, monkeypatch, *, runtime_cache='cache-32', incomplete_
     seen, launched, stopped, current = [], [], [], {}
     monkeypatch.setenv('RAYON_NUM_THREADS', '4')
     def template(model, revision, **kwargs):
-        assert model == fixture.config['model']['name'] and revision == sweep.server.MODEL_REVISION
+        assert model == fixture.config['model']['name'] and revision == fixture.scope.identity
         assert kwargs['namespace_hash'] == fixture.fp.namespace_hash
         return SimpleNamespace(fingerprint=fixture.fp)
     monkeypatch.setattr(sweep, 'create_model_template', lambda model: template(model.name, model.revision, namespace_hash=model.namespace_hash))
@@ -113,13 +110,16 @@ def fake_hardware(fixture, monkeypatch, *, runtime_cache='cache-32', incomplete_
                            'driver_cuda_torch_versions': {'driver': 'fake', 'cuda': 'fake', 'torch': 'fake'}, 'collection_errors': []},
             'server_info': {**sweep.COMMON_SERVER, 'max_total_tokens': capacity, 'max_total_num_tokens': capacity,
                 'model_path': env['CONTEXTKV_MODEL_PATH'], 'tokenizer_path': env['CONTEXTKV_MODEL_PATH'],
-                'revision': sweep.server.MODEL_REVISION, 'dtype': 'bfloat16', 'kv_cache_dtype': 'bfloat16',
+                'revision': None, 'dtype': 'bfloat16', 'kv_cache_dtype': 'bfloat16',
+                'pp_size': 1, 'quantization': None, 'load_format': 'safetensors', 'json_model_override_args': '{}',
+                'mem_fraction_static': .8,
                 'enable_session_radix_cache': True, 'enable_hierarchical_cache': True, 'disable_radix_cache': False,
                 'hicache_size': 16, 'hicache_write_policy': env['CONTEXTKV_WRITE_POLICY'], 'hicache_host_memory_mode': 'cache',
                 'hicache_io_backend': 'kernel', 'hicache_mem_layout': 'layer_first', 'incremental_streaming_output': False},
             'engine': {'engine_kind': 'sglang', 'profiling_enabled': True, 'sglang_commit': sweep.server.COMMIT,
+                       'model_scope': fixture.scope.manifest(),
                        'fingerprint': asdict(fixture.fp), 'cache_config_hash': runtime_cache},
-            'pool': {'gpu_capacity_tokens': capacity, 'host_capacity_tokens': 279040},
+            'pool': {'gpu_capacity_tokens': capacity, 'host_capacity_tokens': 61056},
             'cache_config': {'gpu_capacity_tokens': capacity, 'page_size': 64, 'hicache': True,
                 'host_memory_mode': 'cache', 'host_layout': 'layer_first', 'hicache_io_backend': 'kernel',
                 'write_policy': env['CONTEXTKV_WRITE_POLICY'], 'tma_transfer_enabled': False, 'sample_pool': True}}

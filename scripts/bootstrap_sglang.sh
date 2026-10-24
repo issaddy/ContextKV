@@ -4,8 +4,7 @@
 set -euo pipefail
 CHECKOUT="${SGLANG_CHECKOUT:-vendor/sglang}"
 ENV_DIR="${CONTEXTKV_ENGINE_ENV:-.venv-sglang}"
-MODEL_DIR="${CONTEXTKV_MODEL_PATH:-models/Qwen2.5-7B-Instruct}"
-REVISION=a09a35458c702b33eeacc393d103063234e8bc28
+: "${CONTEXTKV_MODEL_SCOPE_PATH:?Set to the existing local Qwen3 model scope JSON; bootstrap does not download weights}"
 if [[ "$(uname -s)" != Linux ]]; then
   echo 'SGLang runtime installation requires Linux; use prepare_sglang.py --source-only for CPU validation.' >&2
   exit 2
@@ -20,19 +19,17 @@ SGLANG_BUILD_RUST_EXTS=none uv pip install --python "$ENV_DIR/bin/python" \
   -e "$CHECKOUT/python" -e '.[tokenizer,retrieval]'
 mkdir -p runs
 uv pip freeze --python "$ENV_DIR/bin/python" > runs/engine-environment.txt
-"$ENV_DIR/bin/python" - "$MODEL_DIR" "$REVISION" <<'PY'
-import sys
-from huggingface_hub import snapshot_download
-snapshot_download("Qwen/Qwen2.5-7B-Instruct", revision=sys.argv[2], local_dir=sys.argv[1],
-                  allow_patterns=["*.json", "*.safetensors", "*.txt", "*.model"])
-PY
-"$ENV_DIR/bin/python" - "$MODEL_DIR" "$REVISION" <<'PY'
+"$ENV_DIR/bin/python" - "$CONTEXTKV_MODEL_SCOPE_PATH" <<'PY_SCOPE'
 from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
-from controller.templates import HuggingFaceTemplate
-template = HuggingFaceTemplate(sys.argv[1], sys.argv[2], local_files_only=True)
+from controller.config import ModelConfig, create_model_template
+model = ModelConfig(scope_path=sys.argv[1])
+template = create_model_template(model)
 Path("runs/fingerprint.json").write_text(json.dumps(asdict(template.fingerprint), indent=2)+"\n")
-PY
-echo "Prepared $ENV_DIR and $MODEL_DIR. Activate the environment, then run scripts/launch_sglang.sh."
+Path("runs/model-scope.json").write_text(json.dumps(model.scope.manifest(), indent=2)+"\n")
+print("Verified existing local model:", model.scope.model_path)
+PY_SCOPE
+echo "Prepared $ENV_DIR using $CONTEXTKV_MODEL_SCOPE_PATH. No model weights downloaded."
+echo "Activate the environment, export CONTEXTKV_FINGERPRINT_JSON from runs/fingerprint.json, then launch."

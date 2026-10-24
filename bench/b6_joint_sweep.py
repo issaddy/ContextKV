@@ -1,13 +1,12 @@
-"""Plan a finite 13-configuration P2 dev study; --execute owns one server per cell.
+"""Run explicitly declared Qwen3 matrices with one owned server per job.
 
-This phase is not a complete B6/test acceptance. It uses the existing matrix
-executor and requires saved independent quality evidence before any B6 freeze.
+Plan by default. Saved independent quality evidence is required for B6 freeze.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from hashlib import sha256
 import json
 import math
@@ -25,84 +24,22 @@ from bench import controller_capacity_sweep as research
 from bench import native_policy_sweep as server
 from bench.experiments import (execute_job, run_matrix, matrix_jobs, matrix_config,
                                merge, provenance)
-from controller.config import RunConfig, load_config, create_model_template
+from controller.config import RunConfig, create_model_template
 from controller.cost_model import CostModel
 from controller.serialization import decode
 from controller.sampling import SamplingRecipe, request_sampling
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
-TEXT_POLICIES = {
-    "Rebuild": {"strategy": "always_rebuild"},
-    "Fixed4096": {"strategy": "fixed_threshold", "fixed_token_threshold": 4096},
-    "Redundancy40": {"strategy": "redundancy_threshold", "redundancy_threshold": .4},
-}
 COMMON_SERVER = {"attention_backend": "fa3", "chunked_prefill_size": 8192,
     "schedule_policy": "fcfs", "max_running_requests": 8, "page_size": 64,
     "context_length": 32768, "max_total_tokens": 16384, "random_seed": 42,
     "skip_server_warmup": True, "tp_size": 1, "dp_size": 1}
 
 
-def build_plan(args):
-    base = load_config(args.config)
-    if base.model.scope is not None or base.sampling not in (None, SamplingRecipe()):
-        raise ValueError("phase1 remains legacy 7B/greedy; use an explicit --matrix for model scope or sampling")
-    config = replace(base,
-        model=replace(base.model, name=str(args.model_path), revision=server.MODEL_REVISION,
-                      namespace_hash="default", local_files_only=True),
-        engine=replace(base.engine, kind="sglang", base_url=f"http://127.0.0.1:{args.port}", stream=True,
-                       gpu_capacity_tokens=16384, page_size=64),
-        context=replace(base.context, max_total_model_tokens=32768, max_new_tokens=1024, system_prompt=None),
-        planner=replace(base.planner, strategy="always_rebuild", concurrency=4),
-        cost_model=replace(base.cost_model, artifact=None, output_length_artifact=None,
-                           online_calibration=False, admission_estimator=None, uncertainty_mode=None),
-        calibration_path=None, shadow=False,
-        ablation=replace(base.ablation, epoch_retirement=True))
-    profiles, methods = {}, []
-    for kind in ("patched", "stock"):
-        for policy in server.POLICIES:
-            profile_id = f"{kind}_{policy}"
-            profiles[profile_id] = {"kind": kind, "write_policy": policy, "hicache": True,
-                "session_radix": True, "gpu_tokens": 16384, "hicache_gb": 16,
-                "checkout": str(args.patched_checkout if kind == "patched" else args.stock_checkout)}
-    profiles["stock_B0"] = {"kind": "stock", "write_policy": None, "hicache": False,
-        "session_radix": False, "gpu_tokens": 16384, "hicache_gb": 0, "checkout": str(args.stock_checkout)}
-    for name, knobs in TEXT_POLICIES.items():
-        for policy in server.POLICIES:
-            methods.append({"id": f"{name}_{policy}", "family": name, "b6_eligible": True,
-                "server_profile": f"patched_{policy}", "overrides": {"planner": knobs,
-                    "ablation": {"epoch_retirement": True}}})
-    for policy in server.POLICIES:
-        methods.append({"id": f"B1_{policy}", "family": "B1", "kind": "native", "b6_eligible": True,
-            "server_profile": f"stock_{policy}", "native": {"baseline": "B1", "base_url": config.engine.base_url,
-                "model_path": str(args.model_path), "local_files_only": True, "audit_prompt_ids": True}})
-    methods.append({"id": "B0", "family": "B0_reference", "kind": "native", "b6_eligible": False,
-        "server_profile": "stock_B0", "native": {"baseline": "B0", "base_url": config.engine.base_url,
-            "model_path": str(args.model_path), "local_files_only": True, "audit_prompt_ids": True}})
-    spec = {"schema_version": 1, "base_config": str(args.output/"controller.yaml"),
-        "input": str(args.input), "split_manifest": str(args.split_manifest), "domain": "cloud",
-        "protocols": ["P2"], "concurrency": [4], "seeds": [42], "reference_method": "B0",
-        "server_profiles": profiles, "methods": methods,
-        "tuning": {"equal_budget": 1, "require_quality_evidence": True,
-                   "quality_constraints": {"reference": "B0", "epsilon": .01}},
-        "finite_enumeration": {"family_counts": {"Rebuild": 3, "Fixed4096": 3, "Redundancy40": 3, "B1": 3, "B0_reference": 1},
-            "interpretation": "13 fixed configurations; three write policies per family, not equal family search effort inferred from equal_budget=1"},
-        "lifecycle": {"cache_state_protocol": "fresh_process_empty_KV_no_generation_warmup"},
-        "scope": "phase1 Cloud dev P2 only; no retriever, no Ours/B4/B5/ablations/P3/test claim"}
-    argv = server.server_command(argparse.Namespace(port=args.port, gpu_tokens=16384)) + [
-        "--attention-backend", "fa3", "--chunked-prefill-size", "8192", "--schedule-policy", "fcfs"]
-    names = [m["id"] for m in methods]
-    return {"execute": False, "config": asdict(config), "matrix": spec, "server_argv": argv,
-        "common_server_expectations": COMMON_SERVER, "host_admission": "off", "normal_eos": True,
-        "planned_cells": 13, "planned_turns": 533, "active_repetition": 1,
-        "future_repeat_orders": [names[n:]+names[:n] for n in range(3)],
-        "repetition_scope": "one repeat implemented; future orders predeclared, not new seeds or fabricated pooled results",
-        "parent_thread_environment": {k: os.environ.get(k) for k in ("RAYON_NUM_THREADS", "TOKENIZERS_PARALLELISM", "OMP_NUM_THREADS")},
-        "server_initial_state": "new owned process per cell, skip generation warmup; disk/compiler caches and parent client process can persist",
-        "quality_evaluated": False, "b6_selected": None, "test_content_used": False}
-
-
-def server_environment(profile, args, fingerprint, *, model_scope=None):
+def server_environment(profile, args, fingerprint, *, model_scope):
+    if model_scope is None:
+        raise ValueError("owned generation requires an explicit Qwen3 model scope")
     checkout = Path(profile["checkout"]).resolve()
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="0", SGLANG_CHECKOUT=str(checkout),
         CONTEXTKV_MODEL_PATH=str(args.model_path), CONTEXTKV_FINGERPRINT_JSON=json.dumps(fingerprint),
@@ -114,9 +51,7 @@ def server_environment(profile, args, fingerprint, *, model_scope=None):
         CONTEXTKV_SAMPLE_POOL="1", CONTEXTKV_ENABLE_PROFILING="1" if profile["kind"] == "patched" else "0")
     # Do not inherit a different model identity from an operator shell. The
     # explicit scope owns model/tokenizer/revision through the existing launcher.
-    env.pop("CONTEXTKV_MODEL_SCOPE_PATH", None)
-    if model_scope is not None:
-        env["CONTEXTKV_MODEL_SCOPE_PATH"] = model_scope.source_path
+    env["CONTEXTKV_MODEL_SCOPE_PATH"] = model_scope.source_path
     env["PYTHONPATH"] = str(checkout/"python")+os.pathsep+str(ROOT)
     env["PATH"] = str(Path(sys.executable).parent)+os.pathsep+env["PATH"]
     return env
@@ -183,12 +118,11 @@ def job_requirements(spec, job, shared):
             or config.context.max_new_tokens != shared.context.max_new_tokens):
         raise ValueError("owned jobs must use the shared SGLang endpoint/model/context/output budget and page 64")
     profile = spec.get("server_profiles", {}).get(job.get("server_profile"))
-    fields = {"kind", "write_policy", "hicache", "session_radix", "gpu_tokens", "hicache_gb", "checkout"}
-    if profile is None or not fields <= profile.keys() or profile.keys() - fields - {"mem_fraction_static"}:
+    fields = {"kind", "write_policy", "hicache", "session_radix", "gpu_tokens", "hicache_gb", "checkout", "mem_fraction_static"}
+    if profile is None or set(profile) != fields:
         raise ValueError("owned jobs require a declared supported server_profile")
-    fraction = profile.get("mem_fraction_static", .15)
-    if (type(fraction) not in (int, float) or not math.isfinite(fraction) or not 0 < fraction < 1
-            or shared.model.scope is not None and "mem_fraction_static" not in profile):
+    fraction = profile["mem_fraction_static"]
+    if type(fraction) not in (int, float) or not math.isfinite(fraction) or not 0 < fraction < 1:
         raise ValueError("owned scope requires an explicit finite mem_fraction_static in (0,1)")
     capacity = profile["gpu_tokens"]
     if type(capacity) is not int or capacity < 64 or capacity % 64 or config.engine.gpu_capacity_tokens != capacity:
@@ -222,7 +156,7 @@ def job_requirements(spec, job, shared):
 def matrix_requirements(spec, jobs, shared):
     requirements = {job["job_id"]: job_requirements(spec, job, shared) for job in jobs}
     profiles = [spec["server_profiles"][job["server_profile"]] for job in jobs]
-    if (len({profile.get("mem_fraction_static", .15) for profile in profiles}) != 1
+    if (len({profile["mem_fraction_static"] for profile in profiles}) != 1
             or len({profile["hicache_gb"] for profile in profiles if profile["hicache"]}) > 1):
         raise ValueError("all profiles must share mem_fraction_static and HiCache GB (B0 host zero is the exception)")
     if len({profile["gpu_tokens"] for profile in profiles}) != 1:
@@ -241,16 +175,15 @@ def build_matrix_plan(args):
     frozen = json.loads(args.frozen.read_text()) if args.frozen else None
     jobs = frozen_jobs(spec, args.stage, frozen)
     config = matrix_config(spec)
-    if (config.model.scope is None and config.model.revision != server.MODEL_REVISION
-            or not config.model.local_files_only
+    if (config.model.scope is None or not config.model.local_files_only
             or config.engine.kind != "sglang" or spec.get("domain", "cloud") not in {"cloud", "all"}):
-        raise ValueError("owned matrix requires pinned local Qwen7B or explicit supported local scope, SGLang and a declared cloud/all domain")
+        raise ValueError("owned matrix requires an explicit local Qwen3 scope, SGLang and a declared cloud/all domain")
     if spec.get("arrival_rate") is not None and spec.get("arrival_window") is not None:
         raise ValueError("owned full-cohort mode does not support arrival_rate with an arrival_window that can omit sessions")
     port = local_endpoint(config.engine.base_url)
     requirements = matrix_requirements(spec, jobs, config)
     cohort = selected_cohort(spec, args.stage)
-    return {"execute": False, "phase1_only": False, "matrix_path": str(args.matrix),
+    return {"execute": False, "matrix_path": str(args.matrix),
         "matrix": spec, "config": asdict(config), "stage": args.stage, "frozen": frozen,
         "jobs": jobs, "job_requirements": requirements, "port": port,
         "planned_cells": len(jobs), "planned_turns": len(jobs)*len(cohort),
@@ -260,7 +193,7 @@ def build_matrix_plan(args):
         "quality_evaluated": False, "b6_selected": None}
 
 
-def job_server_command(port, capacity, *, mem_fraction_static=.15):
+def job_server_command(port, capacity, *, mem_fraction_static):
     command = server.server_command(argparse.Namespace(port=port, gpu_tokens=capacity),
                                     mem_fraction_static=mem_fraction_static) + [
         "--attention-backend", "fa3", "--chunked-prefill-size", "8192", "--schedule-policy", "fcfs"]
@@ -298,10 +231,10 @@ async def research_metrics(base_url, fingerprint):
 def quality_template(results, spec, *, by_job=False):
     """References real artifacts, but supplies no evaluator identity or scores."""
     model = matrix_config(spec).model
-    generator = {"model": "Qwen/Qwen2.5-7B-Instruct", "revision": server.MODEL_REVISION, "base_family": "Qwen2.5"}
-    if model.scope is not None:
-        generator = {"model": model.scope.model_path, "revision": model.scope.identity, "base_family": "Qwen3",
-                     "identity_kind": "local_snapshot_metadata", "hf_revision": None, "weight_content_verified": False}
+    if model.scope is None:
+        raise ValueError("owned quality templates require the actual explicit Qwen3 scope")
+    generator = {"model": model.scope.model_path, "revision": model.scope.identity, "base_family": "Qwen3",
+                 "identity_kind": "local_snapshot_metadata", "hf_revision": None, "weight_content_verified": False}
     return {"scope": "dev", "reference": spec["tuning"]["quality_constraints"]["reference"], "epsilon": spec["tuning"]["quality_constraints"]["epsilon"],
         "split_manifest": spec["split_manifest"], "frozen_protocol": None,
         "methods": {row["job_id"] if by_job else row["method"]: {"run": row.get("raw_output"), "audit": row.get("audit_output"),
@@ -348,17 +281,15 @@ def make_owned_executor(args, shared, sources, cohort, requirements):
         support.mkdir(parents=True)
         env = server_environment(profile, args, fingerprint, model_scope=shared.model.scope)
         capacity = profile["gpu_tokens"]
-        command = job_server_command(args.port, capacity, mem_fraction_static=profile.get("mem_fraction_static", .15))
+        command = job_server_command(args.port, capacity, mem_fraction_static=profile["mem_fraction_static"])
         config = decode(RunConfig, merge(asdict(shared), job["overrides"]))
         requirement = requirements[job["job_id"]]
         process, result = None, None
         record = {"job_id": job["job_id"], "server_profile": job["server_profile"], "profile": profile,
                   "status": "starting", "argv": command, "requirements": requirement,
                   "source_checkout": sources[str(Path(profile["checkout"]).resolve())]}
-        if shared.model.scope is not None:
-            record["model_scope"] = shared.model.scope.manifest()
-        if shared.model.scope is not None or shared.sampling is not None:
-            record["sampling_recipe"] = request_sampling(shared.sampling)
+        record["model_scope"] = shared.model.scope.manifest()
+        record["sampling_recipe"] = request_sampling(shared.sampling)
         base_url = shared.engine.base_url.rstrip("/")
         try:
             origin = server.command([sys.executable, "-c", "import importlib.util; print(importlib.util.find_spec('sglang').origin)"], env=env)
@@ -378,12 +309,12 @@ def make_owned_executor(args, shared, sources, cohort, requirements):
                                                source_checkout=profile["checkout"])
                 server.write_json(support/"runtime-before.json", runtime)
                 observed_hardware = check_common_runtime(runtime["server_info"], runtime["runtime"], gpu_tokens=capacity)
-                expected = {"model_path": str(Path(shared.model.name).resolve()), "revision": None if shared.model.scope is not None else shared.model.revision,
+                expected = {"model_path": str(Path(shared.model.name).resolve()), "revision": None,
                     "tokenizer_path": str(Path(shared.model.name).resolve()), "dtype": "bfloat16", "kv_cache_dtype": "bfloat16",
                     "enable_session_radix_cache": profile["session_radix"], "enable_hierarchical_cache": profile["hicache"]}
                 if any(runtime["server_info"].get(k) != v for k, v in expected.items()):
                     raise ValueError("actual owned model/tokenizer/dtype/cache flags differ from the shared job configuration")
-                if "mem_fraction_static" in profile and runtime["server_info"].get("mem_fraction_static") != profile["mem_fraction_static"]:
+                if runtime["server_info"].get("mem_fraction_static") != profile["mem_fraction_static"]:
                     raise ValueError("actual memory fraction differs from the declared shared resource")
                 if hardware is not None and hardware != observed_hardware:
                     raise ValueError("GPU/driver/runtime changed within this declared matrix")
@@ -396,20 +327,18 @@ def make_owned_executor(args, shared, sources, cohort, requirements):
                     host_tokens = pools["actual_host_pool_tokens"]
                 native_path = None
                 if profile["kind"] == "patched":
-                    if shared.model.scope is not None:
-                        shared.model.scope.verify_native_settings(SimpleNamespace(**runtime["server_info"]))
-                        if runtime["server_info"].get("pp_size") != 1:
-                            raise ValueError("owned local scope requires PP1")
+                    shared.model.scope.verify_native_settings(SimpleNamespace(**runtime["server_info"]))
+                    if runtime["server_info"].get("pp_size") != 1:
+                        raise ValueError("owned local scope requires PP1")
                     scope = research.validate_runtime({"requested_gpu_tokens": capacity, "cost_methods_requested": False,
                         "server_environment": env}, runtime, expected_host_tokens=host_tokens,
                         expected_hicache_gb=profile["hicache_gb"])
                     if runtime["engine"]["fingerprint"] != fingerprint:
                         raise ValueError("actual research tokenizer/template namespace differs from the shared fingerprint")
-                    if shared.model.scope is not None:
-                        actual_scope = runtime["engine"].get("model_scope") or {}
-                        if (actual_scope.get("identity") != shared.model.scope.identity
-                                or actual_scope.get("record", {}).get("model_path") != shared.model.scope.model_path):
-                            raise ValueError("actual research model scope differs from the shared local identity/path")
+                    actual_scope = runtime["engine"].get("model_scope") or {}
+                    if (actual_scope.get("identity") != shared.model.scope.identity
+                            or actual_scope.get("record", {}).get("model_path") != shared.model.scope.model_path):
+                        raise ValueError("actual research model scope differs from the shared local identity/path")
                     if requirement["needs_cost"]:
                         scope["calibration_scope"] = fitted_scope(config, requirement["calibration"], runtime)
                     metrics = await research_metrics(base_url, template.fingerprint)
@@ -461,27 +390,17 @@ def make_owned_executor(args, shared, sources, cohort, requirements):
 
 
 def execute(args, plan):
-    phase1 = plan.get("phase1_only", True)
     stage, frozen = plan.get("stage", "dev"), plan.get("frozen")
     spec, shared = plan["matrix"], decode(RunConfig, plan["config"])
     if os.environ.get("RAYON_NUM_THREADS") != "4":
         raise ValueError("launch the parent command with RAYON_NUM_THREADS=4; server-only settings do not configure the client")
-    # Phase1 writes its own new declarations; an existing matrix is never rewritten.
-    if phase1:
-        cohort = selected_cohort(spec, "dev")
-        if len(cohort) != 41 or len({row["conversation_id"] for row in cohort}) != 5:
-            raise ValueError("phase1 requires the complete five-session / 41-turn Cloud dev cohort")
-        args.output.mkdir(parents=True, exist_ok=False)
-        (args.output/"controller.yaml").write_text(yaml.safe_dump(plan["config"], sort_keys=False))
-        (args.output/"matrix.yaml").write_text(yaml.safe_dump(spec, sort_keys=False))
     jobs = frozen_jobs(spec, stage, frozen)
     requirements = matrix_requirements(spec, jobs, shared)
     for need in requirements.values():
         if need["needs_cost"] and need["calibration"]["status"] == "requires_calibration":
             raise ValueError(f"cost job needs its own bound artifact before startup: {need['calibration']}")
-    if not phase1:
-        cohort = selected_cohort(spec, stage)
-        args.output.mkdir(parents=True, exist_ok=False)
+    cohort = selected_cohort(spec, stage)
+    args.output.mkdir(parents=True, exist_ok=False)
     sources = {}
     for job in jobs:
         profile = spec["server_profiles"][job["server_profile"]]
@@ -491,9 +410,7 @@ def execute(args, plan):
     server.write_json(args.output/"plan.json", {**plan, "execute": True, "source_checkouts": sources})
     executor = make_owned_executor(args, shared, sources, cohort, requirements)
     results = asyncio.run(run_matrix(spec, args.output/"matrix-results", stage=stage, frozen=frozen, executor=executor))
-    if phase1:
-        server.write_json(args.output/"quality-evidence.template.json", quality_template(results, spec))
-    elif stage == "dev" and spec.get("tuning", {}).get("require_quality_evidence"):
+    if stage == "dev" and spec.get("tuning", {}).get("require_quality_evidence"):
         write_block_quality_templates(results, spec, args.output)
     complete = all(row["status"] == "completed" and row["summary"]["timing"]["failure_fraction"] == 0
                    and row["summary"]["cohort"]["unfinished_turns"] == 0
@@ -501,57 +418,30 @@ def execute(args, plan):
     server.write_json(args.output/"completion.json", {"status": "completed" if complete else "generation_failures",
         "cells": len(results), "expected_turns_per_job": len(cohort), "stage": stage,
         "quality_evaluated": False, "b6_selected": None,
-        "freeze_requires_real_quality_evidence": True, "phase1_only": phase1,
+        "freeze_requires_real_quality_evidence": True,
         "quality_template_scope": "dev_only; test/ablation require their real matched scoring sources"})
     return 0 if complete else 1
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--matrix", type=Path, help="existing declared matrix; never rewritten")
+    parser.add_argument("--matrix", type=Path, required=True, help="explicit Qwen3 matrix; never rewritten")
     parser.add_argument("--stage", choices=("dev", "test", "dev_ablation"), default="dev")
     parser.add_argument("--frozen", type=Path)
-    parser.add_argument("--config", type=Path)
-    parser.add_argument("--model-path", type=Path)
-    parser.add_argument("--patched-checkout", type=Path)
-    parser.add_argument("--stock-checkout", type=Path)
-    parser.add_argument("--input", type=Path)
-    parser.add_argument("--split-manifest", type=Path)
-    parser.add_argument("--output", type=Path)
-    parser.add_argument("--port", type=int)
+    parser.add_argument("--output", type=Path, required=True, help="new output directory")
     parser.add_argument("--startup-timeout", type=float, default=300)
     parser.add_argument("--job-timeout", type=float, default=900)
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
     if min(args.startup_timeout, args.job_timeout) <= 0:
         parser.error("positive timeouts are required")
-    if args.matrix and args.output is None:
-        parser.error("--matrix requires a separate new --output directory")
-    args.output = (args.output or ROOT/"runs/b6-joint-dev-phase1").resolve()
-    if args.matrix:
-        if any(getattr(args, name) is not None for name in ("config", "model_path", "patched_checkout", "stock_checkout", "input", "split_manifest", "port")):
-            parser.error("--matrix uses its existing config/profile paths; phase1 overrides cannot be combined")
-        args.matrix = args.matrix.resolve()
-        if args.frozen:
-            args.frozen = args.frozen.resolve()
-        plan = build_matrix_plan(args)
-        args.port = plan["port"]
-        args.model_path = Path(plan["config"]["model"]["name"]).resolve()
-    else:
-        if args.stage != "dev" or args.frozen:
-            parser.error("test/dev_ablation/frozen require --matrix")
-        if args.model_path is None:
-            parser.error("phase1 requires --model-path")
-        defaults = {"config": ROOT/"configs/hardware_dev_controller.yaml", "patched_checkout": ROOT/"vendor/sglang",
-            "stock_checkout": ROOT/"vendor/sglang-stock", "input": ROOT/"data/mtrag/RAG.jsonl",
-            "split_manifest": ROOT/"data/mtrag/split_manifest.json"}
-        for name, default in defaults.items():
-            setattr(args, name, (getattr(args, name) or default).resolve())
-        args.model_path = args.model_path.resolve()
-        args.port = 30000 if args.port is None else args.port
-        if not 1 <= args.port <= 65535:
-            parser.error("a valid TCP port is required")
-        plan = build_plan(args)
+    args.output = args.output.resolve()
+    args.matrix = args.matrix.resolve()
+    if args.frozen:
+        args.frozen = args.frozen.resolve()
+    plan = build_matrix_plan(args)
+    args.port = plan["port"]
+    args.model_path = Path(plan["config"]["model"]["name"]).resolve()
     if args.execute:
         return execute(args, plan)
     print(json.dumps(plan, indent=2))

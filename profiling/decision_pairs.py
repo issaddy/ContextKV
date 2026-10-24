@@ -20,15 +20,15 @@ import statistics
 import time
 import uuid
 
-from controller.candidates import build_candidates
-from controller.config import RunConfig, load_config
+from controller.candidates import CandidatePolicy, build_candidates
+from controller.config import RunConfig, create_model_template, load_config
 from controller.cost_model import CostModel
 from controller.engine_client import EngineError, EngineInfo, SGLangEngineClient
 from controller.planner import PlannerKnobs, choose_plan
 from controller.schema import CacheQuoteBatch, NoFeasiblePlan, PromptCandidate, SessionSnapshot
 from controller.serialization import decode, dumps, loads
 from controller.session_store import Attempt
-from controller.templates import ByteTemplate, HuggingFaceTemplate
+from controller.templates import ByteTemplate
 
 
 @dataclass(frozen=True)
@@ -83,7 +83,10 @@ def freeze_cases(database, manifest, split, template, *, limit=None, selection="
         raise ValueError("source run must identify only development conversations")
     if manifest.get("protocol") not in {"P2", "P3"}:
         raise ValueError("decision pairs require generated P2/P3 history, not reference P1 history")
-    config = decode(RunConfig, manifest["config"])
+    # Read only the recorded candidate policy. Historical manifests must remain
+    # inspectable without turning their retired model into a runnable config.
+    policy_config = decode(CandidatePolicy, manifest["config"].get("context", {}))
+    planner = decode(PlannerKnobs, manifest["config"].get("planner", {}))
     if asdict(template.fingerprint) != manifest["fingerprint"]:
         raise ValueError("freezing tokenizer/template differs from the source run")
     vocabulary = (range(256) if isinstance(template, ByteTemplate) else
@@ -115,12 +118,12 @@ def freeze_cases(database, manifest, split, template, *, limit=None, selection="
                 skipped.append({"attempt_id": attempt.attempt_id, "reason": "initial_turn_has_one_candidate"})
                 continue
             snapshot = loads(SessionSnapshot, old[0])
-            policy = (replace(config.context, layout="contextpilot")
-                      if config.planner.strategy == "contextpilot" else config.context)
+            policy = (replace(policy_config, layout="contextpilot")
+                      if planner.strategy == "contextpilot" else policy_config)
             candidates = build_candidates(snapshot, attempt.query, attempt.evidence, policy, template,
                                           retrieval_priority=attempt.retrieval_priority,
                                           measure_evidence_redundancy="redundancy_threshold" in {
-                                              config.planner.strategy, config.planner.fallback_strategy})
+                                              planner.strategy, planner.fallback_strategy})
             original = next((c for c in candidates if c.action == attempt.plan.candidate.action), None)
             if original is None or original.input_hash != attempt.plan.candidate.input_hash:
                 skipped.append({"attempt_id": attempt.attempt_id, "reason": "source_candidate_changed"})
@@ -520,8 +523,12 @@ async def collect(args):
     artifact = args.cost_artifact or config.cost_model.artifact
     model, knobs = _model_and_knobs(config, cases, artifact)
     fingerprint = cases[0].candidates[0].fingerprint
+    if config.engine.kind != "sglang" or config.model.scope is None:
+        raise ValueError("hardware decision collection requires an explicit Qwen3 scope")
+    config.model.scope.verify_fingerprint(asdict(fingerprint))
     engine = SGLangEngineClient(args.base_url or config.engine.base_url, fingerprint,
-                                timeout=config.engine.timeout_seconds, sampling=config.sampling, stream=False)
+                                timeout=config.engine.timeout_seconds, sampling=config.sampling, stream=False,
+                                model_scope=config.model.scope.manifest())
     collector = DecisionPairCollector(engine, model, knobs,
                                       context_limit=config.context.max_total_model_tokens)
     output = Path(args.output)
@@ -604,8 +611,7 @@ def main(argv=None):
         manifest = json.loads(Path(args.run_manifest).read_text())
         config = decode(RunConfig, manifest["config"])
         template = (ByteTemplate(namespace_hash=config.model.namespace_hash) if config.engine.kind == "mock" else
-                    HuggingFaceTemplate(args.model_path or config.model.name, config.model.revision,
-                                        namespace_hash=config.model.namespace_hash, local_files_only=True))
+                    create_model_template(config.model, model_path=args.model_path, local_files_only=True))
         print(json.dumps(write_frozen(args.database, args.run_manifest, args.split_manifest, args.output,
                                      template, limit=args.limit, selection=args.selection, seed=args.seed), indent=2))
     elif args.command == "run":

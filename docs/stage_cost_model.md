@@ -1,6 +1,6 @@
 # B 的阶段成本 artifact 与开发验证
 
-`profiling.stage_fit` 已实现可运行的离线阶段训练入口，产出 `runs/stage-model-dev-v2/cost-stage.json` 和逐请求 OOF `validation.json`。它提供执行到首 token 的 lookup、联合前置区间的经验单元、总 TTFT 对照和已完成开发输出长度分布。`CostModel` 已接入该 artifact，使用显式 `admission_estimator: native_workload` 选项；配置示例见 `configs/hardware_stage_controller.yaml`。离线训练复用已采集数据，不改写原始 artifact。
+`profiling.stage_fit` 已实现可运行的离线阶段训练入口，产出 `runs/stage-model-dev-v2/cost-stage.json` 和逐请求 OOF `validation.json`。它提供执行到首 token 的 lookup、联合前置区间的经验单元、总 TTFT 对照和已完成开发输出长度分布。`CostModel` 已接入该 artifact，使用显式 `admission_estimator: native_workload` 选项；旧运行配置已退役；保留拟合器与原始证据供只读复核，新Qwen3运行不得加载该7B artifact。离线训练复用已采集数据，不改写原始 artifact。
 
 在线成本使用本表的 forward、原实测 decode，以及[原生工作量等待估计](admission_wait_model.md)。候选的单请求准备项按 `(P,U,L)` 插值 c1 的 pre_forward 单元，合并两个输出预算；没有把同质 c4 的平均等待套到异质队列。`selection_eligible` 表示该显式实验模式可比较，`calibrated` 仍为 false；默认 strict 模式继续要求完整成本已校准。缺少工作量快照、配置不匹配、所需时间超支持域、在途传输或部分恢复时回退。经验时间误差只覆盖 forward/decode，等待均值/P90 差是启发式风险情景，不会加进经验置信误差冒充覆盖保证。
 

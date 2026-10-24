@@ -36,7 +36,7 @@ profiler 必须启用 `CONTEXTKV_ENABLE_PROFILING=1`，并且不承担业务请�
 ```bash
 python -m profiling.decision_pairs run \
   --cases runs/decision-dev/cases.jsonl \
-  --config configs/sglang.yaml \
+  --config configs/qwen3_8b_scope.example.yaml \
   --base-url http://127.0.0.1:31000 \
   --cost-artifact runs/calibration/cost-model.json \
   --cache-states cold,gpu_ready,host_only \

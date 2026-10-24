@@ -113,7 +113,7 @@ uv run python -m profiling.prefill \
 
 测量包含 phase、真实输入/前缀/输出长度、并发、传输字节、持续时间与 `source=hardware`；联合 restore/prefill 另记录 `host_load_tokens`。应先采集真实证据再标记 hardware。mock 仅可用显式 `--allow-mock` 作格式演练，不能用于性能结论或硬件成本标定。
 
-`profiling.common.run_manifest()` 对未知 GPU、实际 KV pool、host pool 等字段保存 `null`。`validate_manifest()` 列出正式硬件运行仍缺失的字段。不要用示意容量或占位字符串填充来通过校验。项目当前默认 mock 运行清单也明确标记模拟结果、质量未评测、GPU 性能未验证。
+实际运行使用 `profiling.runtime_manifest.build_manifest()` 采集服务与硬件，native/owned入口按其真实scope验证。无生产消费者的旧7B清单模板已删除。不要用示意容量或占位字符串填充来通过校验。项目当前默认 mock 运行清单也明确标记模拟结果、质量未评测、GPU 性能未验证。
 
 容量指标只接受全局唯一 slot 占用采样，不能将多个 epoch 的共享祖先逐个相加。传输按 transfer ID 去重，并分别保留 completed 与 pending 字节。真实 Prefill tokens 必须来自引擎执行计数，不能由 `prompt_tokens - cache_hits` 代替，因为 chunk 和抢占重算会改变实际计算量。
 
@@ -134,43 +134,7 @@ B1 使用原生会话软引用标签，不调用传统会话续写的 `session_p
 
 启动配置由实验者分别运行的 SGLang 实例决定；选择客户端的 `B0` / `B1` 不会更改服务器启动参数。正式运行前必须提供 `--engine-manifest`，并将来源代码固定到 `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。CLI 会读取原生 `/server_info`，旧入口返回 404 时再使用 `/get_server_info`，比对实际可见的配置字段。官方接口并不提供可靠的远程 Git commit 证明，因此清单明确标记 `operator_manifest_not_remote_attestation`，仍需实验者保存代码 checkout、启动命令和环境证据。
 
-仓库提供 `configs/native_b0_manifest.example.json` 与 `configs/native_b1_manifest.example.json`。两者均标记 `example_only=true`，正式验证器会拒绝；应另存硬件运行清单、记录真实测量与源码/启动证据后再改为 `false`，不能只删除示例标记。清单结构如下；`null` 表示待实测/计算的字段，下面这个示意文件会被正式验证器拒绝，不能直接作为实验数据：
-
-```json
-{
-  "engine": {
-    "base_commit": "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b",
-    "research_patch_applied": false,
-    "tree_backend": "python"
-  },
-  "model": {
-    "name": "Qwen/Qwen2.5-7B-Instruct",
-    "revision": "a09a35458c702b33eeacc393d103063234e8bc28",
-    "tokenizer_hash": null,
-    "chat_template_hash": null,
-    "dtype": "bfloat16",
-    "kv_dtype": "bfloat16"
-  },
-  "server": {
-    "enable_session_radix_cache": false,
-    "enable_hierarchical_cache": false,
-    "disable_radix_cache": false,
-    "tp_size": 1,
-    "dp_size": 1,
-    "page_size": 64,
-    "context_length": 32768
-  },
-  "runtime": {
-    "gpu_model": null,
-    "gpu_memory_bytes": null,
-    "driver_cuda_torch_versions": {"driver": null, "cuda": null, "torch": null},
-    "actual_kv_pool_tokens": null,
-    "actual_host_pool_bytes": 0
-  }
-}
-```
-
-上述模板表达 B0 的 host 关闭状态。B1 必须将两个 enable 字段设为 `true`，并填写真实分配的大于零的 host pool 字节数。tokenizer/template hash 必须与本次固定 Hugging Face 模板一致；客户端仅加载 tokenizer，不下载模型权重。
+新运行必须使用显式Qwen3 `--run-config`；旧7B示例manifest已删除。优先使用[owned矩阵入口](b6_owned_matrix.md)从实际服务生成manifest，避免手填容量或身份。预启动服务仍需要相同模型/采样范围的真实manifest。
 
 原生 CLI 默认发送 `stream=true`，与研究控制器采用相同的客户端 token chunk 观测口径。只在累计 `output_ids` 增长时更新首/末 token chunk 时间，重复输出和终态 metadata 不移动末 token 时间；收到完整终态帧及 `[DONE]` 后才提交历史。SSE 断连、缺失终态或缺失 DONE 都停止会话且不提交部分答案。`NativeTurnResponse.timing` 记录同一客户端 monotonic 时钟中的到达、提交、首/末 chunk、响应结束及历史提交时间。chunk 可以含多 token，因此标签为 `chunk`，不声称逐 token ITL。
 
@@ -182,21 +146,23 @@ B1 使用原生会话软引用标签，不调用传统会话续写的 `session_p
 uv sync --extra tokenizer --extra retrieval
 uv run python -m bench.native_baseline data/mtrag/RAG.jsonl \
   --baseline B0 --protocol P2 --domain cloud \
+  --run-config configs/qwen3_8b_scope.example.yaml \
   --engine-manifest runs/hardware/b0-engine.json \
   --split-manifest configs/mtrag_split_manifest.json --split test \
   --base-url http://127.0.0.1:30000 --output runs/native-b0
 
 uv run python -m bench.native_baseline data/mtrag/RAG.jsonl \
   --baseline B1 --protocol P3 --domain cloud \
+  --run-config configs/qwen3_8b_scope.example.yaml \
   --corpus data/mtrag/cloud/corpus.jsonl \
   --engine-manifest runs/hardware/b1-engine.json \
   --split-manifest configs/mtrag_split_manifest.json --split test \
   --base-url http://127.0.0.1:30001 --output runs/native-b1
 ```
 
-`--local-files-only` 可限制 tokenizer 从本地缓存读取；`--audit-prompt-ids` 请求原生 `return_prompt_token_ids` 并逐项核对完整输入。全量 token 回传会增加开销，正式比较应给所有方法采用相同审计抽样规则。输入文件 hash、split hash、检索 manifest、真实原生 meta_info、HTTP 往返时间、清理时段与关闭 dispatch 状态均写入结果文件。HTTP 往返时间不冒充 GPU Prefill 或端到端 TTFT，原生 `cached_tokens` 也不被推断为实际 Prefill 计算量。
+显式scope只读取已准备的本地模型文件；`--audit-prompt-ids` 请求原生 `return_prompt_token_ids` 并逐项核对完整输入。全量 token 回传会增加开销，正式比较应给所有方法采用相同审计抽样规则。输入文件 hash、split hash、检索 manifest、真实原生 meta_info、HTTP 往返时间、清理时段与关闭 dispatch 状态均写入结果文件。HTTP 往返时间不冒充 GPU Prefill 或端到端 TTFT，原生 `cached_tokens` 也不被推断为实际 Prefill 计算量。
 
-独立原生 CLI 可用 `--context-config CONTROLLER.yaml` 读取完整 `context` 策略，包括显式回访、历史回访窗口、版本比较、explicit_keys、引用前缀长度及注释。未提供时仍使用原默认；显式命令行预算、prompt 或 `--table-relations/--no-table-relations` 覆盖相应字段，实际完整策略写入 `policy`。原生与控制器的直接 CLI 在生成失败、超时或依赖轮次未完成时返回非零，原始失败报告仍保存；内部矩阵继续按失败率与完整覆盖判定候选，不能凭 subprocess 结束就认为所有轮成功。
+独立原生 CLI 通过必填 `--run-config CONTROLLER.yaml` 读取完整model/sampling及 `context` 策略，包括显式回访、历史回访窗口、版本比较、explicit_keys、引用前缀长度及注释。显式命令行预算、prompt 或 `--table-relations/--no-table-relations` 覆盖相应字段，实际完整策略写入 `policy`。原生与控制器的直接 CLI 在生成失败、超时或依赖轮次未完成时返回非零，原始失败报告仍保存；内部矩阵继续按失败率与完整覆盖判定候选，不能凭 subprocess 结束就认为所有轮成功。
 
 离线验证命令：
 

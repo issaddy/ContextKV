@@ -162,18 +162,42 @@ async def benchmark(args, config):
             manifest["retrieval"] = retriever.manifest
             manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
         cleanup_start = time.monotonic()
-        for sid in {r.conversation_id for r in report.turns}:
-            if not service.store.pending_attempt(f"{run_prefix}:{sid}"):
-                await service.close_session(f"{run_prefix}:{sid}")
-        await service.drain()
+        cleanup_error = None
+        cleanup_stage = "close_sessions"
+        skipped_uncreated_sessions = []
+        pending_retire_operations = telemetry_after = None
+        try:
+            for sid in {r.conversation_id for r in report.turns}:
+                session_id = f"{run_prefix}:{sid}"
+                try:
+                    service.store.get_snapshot(session_id)
+                except KeyError:
+                    # P3 can fail in retrieval before serving creates a session.
+                    skipped_uncreated_sessions.append(sid)
+                    continue
+                if not service.store.pending_attempt(session_id):
+                    await service.close_session(session_id)
+            cleanup_stage = "drain"
+            await service.drain()
+            pending_retire_operations = len(service.store.outbox())
+            cleanup_stage = "metrics_after"
+            telemetry_after = await service.engine.metrics()
+        except Exception as exc:
+            # Persist the already completed workload before propagating cleanup
+            # failure; do not relabel successful turns or replace their errors.
+            cleanup_error = exc
         cleanup_end = time.monotonic()
-        telemetry_after = await service.engine.metrics()
         output = Path(config.state_dir) / f"benchmark-{run_prefix}.json"
         from .sampling import request_sampling
         payload = {"sampling_recipe": request_sampling(config.sampling), "engine_kind": config.engine.kind, "quality_evaluated": False, "report": report,
                    "telemetry": {"before": telemetry_before, "after": telemetry_after},
                                 "cleanup": {"start": cleanup_start, "end": cleanup_end,
-                                            "pending_retire_operations": len(service.store.outbox())}}
+                                            "pending_retire_operations": pending_retire_operations,
+                                            "skipped_uncreated_sessions": sorted(skipped_uncreated_sessions),
+                                            "status": "failed" if cleanup_error else "completed",
+                                            **({"failed_stage": cleanup_stage,
+                                                "error": f"{type(cleanup_error).__name__}: {cleanup_error}"}
+                                               if cleanup_error else {})}}
         output.write_text(dumps(payload) + "\n", encoding="utf-8")
         summary = summarize_run(to_jsonable(payload))
         (Path(config.state_dir) / f"summary-{run_prefix}.json").write_text(dumps(summary) + "\n")
@@ -182,6 +206,8 @@ async def benchmark(args, config):
         print(json.dumps({"output": str(output.resolve()), "success": success,
                           "failed": len(report.turns)-success, "unfinished": report.unfinished_turns,
                           "engine_kind": config.engine.kind}, ensure_ascii=False))
+        if cleanup_error is not None:
+            raise cleanup_error
     finally:
         await service.aclose()
         service.store.close()

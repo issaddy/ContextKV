@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import replace
 
 import pytest
+from test_model_scope import local_scope as local_scope
 
 from controller.engine_client import EngineError
 from controller.mock_engine import MockEngine
@@ -178,7 +179,7 @@ def test_default_case_record_stays_compatible_and_mixed_pages_are_checked():
 
 
 
-def test_failed_case_manifest_counts_rows_already_written(tmp_path,monkeypatch):
+def test_failed_case_manifest_counts_rows_already_written(tmp_path,monkeypatch,local_scope):
     from argparse import Namespace
     from types import SimpleNamespace
     import json
@@ -201,7 +202,7 @@ def test_failed_case_manifest_counts_rows_already_written(tmp_path,monkeypatch):
         raise ValueError("third repetition fixture failed")
     monkeypatch.setattr(module,"collect_case",interrupted)
     config=tmp_path/"config.yaml"
-    config.write_text("engine:\n  kind: sglang\n")
+    config.write_text(f"engine:\n  kind: sglang\nmodel:\n  scope_path: {local_scope.path}\n")
     output=tmp_path/"probe.jsonl"
     args=Namespace(config=str(config),runtime_manifest=None,model_path=None,base_url=None,output=str(output),
         seed=42,lengths=(8,),prefix_fractions=(0,),outputs=(4,),concurrency=(1,),

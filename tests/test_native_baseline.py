@@ -8,6 +8,7 @@ import unittest
 
 import httpx
 import pytest
+from test_model_scope import local_scope as local_scope
 
 from adapters.mtrag import OnlineSession, load_rows
 from adapters.retrieval import BM25SRetriever, load_beir_corpus, to_evidence
@@ -211,17 +212,16 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_formal_mode_requires_engine_manifest_and_real_template(self):
         self.assertTrue(validate_engine_manifest({}, "B0", ByteTemplate()))
-        with self.assertRaisesRegex(ValueError, "engine manifest"):
+        with self.assertRaisesRegex(ValueError, "explicit Qwen3"):
             NativeBaseline("B0", self.native, ByteTemplate(), corpus_snapshot_id="fixture-v1")
 
     async def test_unmeasured_example_manifests_are_rejected(self):
-        root = Path(__file__).resolve().parents[1]
         for baseline in ("B0", "B1"):
-            manifest = json.loads((root / f"configs/native_{baseline.lower()}_manifest.example.json").read_text())
+            manifest = {"example_only":True}
             errors = validate_engine_manifest(manifest, baseline)
             self.assertIn("example manifest cannot authorize a formal hardware run", errors)
             self.assertTrue(any("gpu_memory_bytes" in error for error in errors))
-            self.assertTrue(any("tokenizer_hash" in error for error in errors))
+            self.assertTrue(any("model.name" in error for error in errors))
             manifest["example_only"] = False
             self.assertTrue(validate_engine_manifest(manifest, baseline))
 
@@ -284,7 +284,7 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
 
 
 @pytest.mark.parametrize("failed_generation", [False, True])
-def test_native_cli_prompt_file_preserves_body_in_policy_and_workload(tmp_path,monkeypatch,failed_generation):
+def test_native_cli_prompt_file_preserves_body_in_policy_and_workload(tmp_path,monkeypatch,failed_generation,local_scope):
     import bench.native_baseline as native_module
     raw = b"  Use only the cited evidence.\r\nKeep this space. \r\n"
     prompt_file = tmp_path/"prompt.txt"
@@ -292,7 +292,7 @@ def test_native_cli_prompt_file_preserves_body_in_policy_and_workload(tmp_path,m
     manifest = tmp_path/"engine.json"
     manifest.write_text("{}")
     context_config = tmp_path/"context.yaml"
-    context_config.write_text("context:\n  revisit_mode: explicit\n  revisit_history_turns: 6\n"
+    context_config.write_text(f"model:\n  scope_path: {local_scope.path}\ncontext:\n  revisit_mode: explicit\n  revisit_history_turns: 6\n"
                               "  allow_version_comparison: true\n  reference_prefix_length: 6\n"
                               "  max_new_tokens: 123\n  table_relations: true\n"
                               "  table_annotation_style: focus_refs\n")
@@ -308,7 +308,7 @@ def test_native_cli_prompt_file_preserves_body_in_policy_and_workload(tmp_path,m
         return httpx.Response(200,json=response)
     http = httpx.AsyncClient(base_url="http://fake.test",transport=httpx.MockTransport(respond))
     client_class,baseline_class = native_module.NativeSGLangClient,native_module.NativeBaseline
-    monkeypatch.setattr(native_module,"HuggingFaceTemplate",lambda *args,**kwargs:ByteTemplate())
+    monkeypatch.setattr("controller.config.create_model_template",lambda *args,**kwargs:ByteTemplate())
     monkeypatch.setattr(native_module,"NativeSGLangClient",lambda *args,**kwargs:
                         client_class("http://fake.test",http_client=http,stream=False))
     monkeypatch.setattr(native_module,"NativeBaseline",lambda *args,**kwargs:
@@ -317,7 +317,7 @@ def test_native_cli_prompt_file_preserves_body_in_policy_and_workload(tmp_path,m
     try:
         assert native_module.main([str(FIXTURE),"--baseline","B0","--engine-manifest",str(manifest),
             "--domain","all","--limit-sessions","1","--output",str(output),
-            "--system-prompt-file",str(prompt_file), "--context-config",str(context_config)]) == int(failed_generation)
+            "--system-prompt-file",str(prompt_file), "--run-config",str(context_config)]) == int(failed_generation)
     finally:
         asyncio.run(http.aclose())
     payload = json.loads((output/"native-B0-prompt-audit.json").read_text())

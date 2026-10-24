@@ -1,62 +1,33 @@
 """Native sweeps must change real launch capacity and preserve native provenance."""
 from argparse import Namespace
+from dataclasses import asdict
 import json
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from bench import native_policy_sweep as sweep
+from test_model_scope import local_scope as local_scope
 
 
-MODEL_CONFIG = {"hidden_size": 3584, "num_attention_heads": 28,
-                "num_hidden_layers": 28, "num_key_value_heads": 4}
-HOST_LOG = "Allocating kv hierarchical KV host pool: 279040 tokens, 16.00 GB host memory."
+@pytest.mark.parametrize('module',['bench.native_policy_sweep','bench.controller_capacity_sweep'])
+def test_removed_standalone_cli_exits_without_launching(module):
+    import subprocess
+    import sys
+    result=subprocess.run([sys.executable,'-m',module,'--execute','--model-path','historical-model'],
+                          capture_output=True,text=True)
+    assert result.returncode!=0 and 'Standalone sweep removed' in result.stderr
 
 
-def test_plan_16k_never_starts_services_and_keeps_32k_model_context(tmp_path, monkeypatch, capsys):
-    def forbidden(*args, **kwargs):
-        pytest.fail("plan mode must not launch processes, connect or create output")
-    monkeypatch.setattr(sweep, "execute", forbidden)
-    monkeypatch.setattr(sweep, "get_json", forbidden)
-    monkeypatch.setattr(sweep, "check_stock", forbidden)
-    output = tmp_path / "not-created"
-    sweep.main(["--model-path", str(tmp_path / "model"), "--gpu-tokens", "16384", "--output", str(output)])
-    plan = json.loads(capsys.readouterr().out)
-    assert plan["execute"] is False and not output.exists()
-    assert [j["policy"] for j in plan["jobs"]] == list(sweep.POLICIES)
-    for job in plan["jobs"]:
-        server, bench = job["server_argv"], job["benchmark_argv"]
-        assert server[server.index("--max-total-tokens") + 1] == "16384"
-        assert bench[bench.index("--context-length") + 1] == "32768"
-        assert bench[bench.index("--max-new-tokens") + 1] == "1024"
-        assert bench[bench.index("--split") + 1] == "dev"
-        assert bench[bench.index("--split-manifest") + 1] == str(sweep.ROOT / "data/mtrag/split_manifest.json")
-        assert "--skip-server-warmup" in server
-        assert job["server_environment"]["SGLANG_HICACHE_TMA_TRANSFER"] == "0"
-        assert Path(job["server_environment"]["SGLANG_CHECKOUT"]).name == "sglang-stock"
-
-
-def test_default_capacity_and_repetition_order_are_explicit(capsys):
-    sweep.main(["--model-path", "models/Qwen2.5-7B-Instruct", "--repetitions", "3"])
-    jobs = json.loads(capsys.readouterr().out)["jobs"]
-    assert len(jobs) == 9
-    assert all(j["requested_gpu_tokens"] == 32768 for j in jobs)
-    assert [j["policy"] for j in jobs[3:6]] == ["write_through_selective", "write_back", "write_through"]
-
-
-@pytest.mark.parametrize("tokens", ["0", "-64", "1000"])
-def test_page_misaligned_capacity_rejected(tokens):
-    with pytest.raises(SystemExit) as error:
-        sweep.main(["--model-path", "model", "--gpu-tokens", tokens])
-    assert error.value.code == 2
+MODEL_CONFIG = {"hidden_size": 5120, "num_attention_heads": 64, "head_dim": 128,
+                "num_hidden_layers": 64, "num_key_value_heads": 8}
+HOST_LOG = "Allocating kv hierarchical KV host pool: 61056 tokens, 16.00 GB host memory."
 
 
 def test_pool_size_comes_from_actual_server_and_startup_log():
     actual = sweep.pool_measurements({"max_total_num_tokens": 16384}, HOST_LOG, MODEL_CONFIG, 16384)
     assert actual["actual_kv_pool_tokens"] == 16384
-    assert actual["actual_host_pool_tokens"] == 279040
-    assert actual["actual_host_pool_bytes"] == 16001269760
+    assert actual["actual_host_pool_tokens"] == 61056
+    assert actual["actual_host_pool_bytes"] == 16005464064
     assert actual["actual_host_pool_bytes"] != 16 * 1024**3
     with pytest.raises(ValueError, match="observed 32768"):
         sweep.pool_measurements({"max_total_num_tokens": 32768}, HOST_LOG, MODEL_CONFIG, 16384)
@@ -64,21 +35,24 @@ def test_pool_size_comes_from_actual_server_and_startup_log():
         sweep.pool_measurements({"max_total_num_tokens": 16384}, "server ready", MODEL_CONFIG, 16384)
 
 
-def test_native_manifest_binds_requested_pool_and_observed_policy():
+def test_native_manifest_binds_requested_pool_and_observed_policy(local_scope):
     info = {"enable_session_radix_cache": True, "enable_hierarchical_cache": True,
             "disable_radix_cache": False, "tp_size": 1, "dp_size": 1, "page_size": 64,
             "context_length": 32768, "incremental_streaming_output": False,
             "hicache_host_memory_mode": "cache", "hicache_size": 16,
             "hicache_write_policy": "write_back", "hicache_io_backend": "kernel", "hicache_mem_layout": "layer_first",
-            "max_total_tokens": 16384, "skip_server_warmup": True, "random_seed": 42}
+            "max_total_tokens": 16384, "skip_server_warmup": True, "random_seed": 42,
+            "model_path":local_scope.scope.model_path,"tokenizer_path":local_scope.scope.model_path,
+            "revision":None,"dtype":"bfloat16","kv_cache_dtype":"bfloat16","pp_size":1,
+            "quantization":None,"load_format":"safetensors","json_model_override_args":"{}"}
     runtime = {"gpus": [{"index": 0, "name": "test-only", "uuid": "test", "memory_bytes": 1}],
                "driver_cuda_torch_versions": {"driver": "test", "cuda": "test", "torch": "test"}}
-    fingerprint = {"tokenizer_hash": "a" * 64, "template_hash": "b" * 64}
-    result = sweep.native_manifest(info, runtime, {"actual_kv_pool_tokens": 16384}, fingerprint, "write_back", {}, 16384)
+    fingerprint = asdict(local_scope.fingerprint)
+    result = sweep.native_manifest(info, runtime, {"actual_kv_pool_tokens": 16384}, fingerprint, "write_back", {}, 16384,model_scope=local_scope.scope)
     assert result["server"]["max_total_tokens"] == result["runtime"]["actual_kv_pool_tokens"] == 16384
     assert result["engine"]["research_patch_applied"] is False
     with pytest.raises(ValueError, match="configuration differs"):
-        sweep.native_manifest(info, runtime, {}, fingerprint, "write_through", {}, 16384)
+        sweep.native_manifest(info, runtime, {}, fingerprint, "write_through", {}, 16384,model_scope=local_scope.scope)
 
 
 def test_stock_rejects_research_marker_and_dirty_tree(tmp_path, monkeypatch):
@@ -120,48 +94,6 @@ def test_native_cache_observations_keep_missing_breakdown_unknown():
     assert missing["breakdown_unavailable_turns"] == 1
 
 
-def test_native_generation_failures_return_nonzero_after_owned_cleanup(tmp_path, monkeypatch):
-    from adapters import mtrag
-    from controller import templates
-    from controller.schema import ConfigFingerprint
-    from profiling import runtime_manifest
-    model, checkout = tmp_path/"model", tmp_path/"checkout"
-    model.mkdir()
-    (model/"config.json").write_text("{}")
-    split = tmp_path/"split.json"
-    split.write_text(json.dumps({"dev": [f"s{i}" for i in range(5)]}))
-    args = Namespace(checkout=checkout, model_path=model, input=tmp_path/"input", split_manifest=split,
-                     output=tmp_path/"output", port=0, gpu_tokens=16384, startup_timeout=1, job_timeout=1)
-    directory = args.output/"job"
-    jobs = [{"directory": str(directory), "policy": "write_through", "repetition": 1,
-             "server_argv": ["fake-server"], "benchmark_argv": ["fake-benchmark"]}]
-    monkeypatch.setattr(sweep, "check_stock", lambda path: {})
-    monkeypatch.setattr(mtrag, "load_rows", lambda path: [{"conversation_id": f"s{i%5}", "Collection": mtrag.CLOUD_COLLECTION} for i in range(41)])
-    monkeypatch.setattr(templates, "HuggingFaceTemplate", lambda *a, **kw: SimpleNamespace(fingerprint=ConfigFingerprint()))
-    monkeypatch.setattr(sweep, "command", lambda *a, **kw: str(checkout/"python/sglang/__init__.py"))
-    monkeypatch.setattr(runtime_manifest, "collect_local_runtime", lambda: {})
-    monkeypatch.setattr(sweep, "wait_ready", lambda *a: {})
-    monkeypatch.setattr(sweep, "pool_measurements", lambda *a: {})
-    monkeypatch.setattr(sweep, "native_manifest", lambda *a: {})
-    monkeypatch.setattr(sweep, "get_json", lambda *a: {})
-    monkeypatch.setattr(sweep, "get_text", lambda *a: "")
-    process, stopped = SimpleNamespace(pid=456, returncode=0), []
-    monkeypatch.setattr(sweep.subprocess, "Popen", lambda *a, **kw: process)
-    monkeypatch.setattr(sweep, "stop_owned_server", lambda p: stopped.append(p.pid))
-    def benchmark(*args, **kwargs):
-        (directory/"native-B1-failed.json").write_text(json.dumps({"report": {"turns": [{"status": "failed"}]}}))
-    monkeypatch.setattr(sweep.subprocess, "run", benchmark)
-    monkeypatch.setattr(sweep, "summarize_native", lambda payload: {"success_count": 0})
-    assert sweep.execute(args, jobs) == 1
-    assert stopped == [456]
-    assert json.loads((args.output/"results.json").read_text())[0]["status"] == "generation_failures"
-
-
-def test_native_cli_propagates_execution_failure_status(monkeypatch):
-    monkeypatch.setattr(sweep, "execute", lambda args, jobs: 1)
-    assert sweep.main(["--model-path", "model", "--execute"]) == 1
-
-
 def test_b0_requires_observed_disabled_host_without_allocation_log():
     info = {'max_total_num_tokens': 16384, 'enable_hierarchical_cache': False}
     measured = sweep.pool_measurements(info, 'ready', MODEL_CONFIG, 16384, host_enabled=False)
@@ -180,7 +112,7 @@ def test_launch_b0_omits_hicache_and_session_flags_with_native_defaults_preserve
     fake.write_text(f'#!{sys.executable}\nimport sys,json\nprint(json.dumps(sys.argv[1:]))\n')
     fake.chmod(0o755)
     env = {**os.environ, 'PATH': str(tmp_path)+os.pathsep+os.environ['PATH'],
-        'CONTEXTKV_MODEL_PATH': '/fixture/model', 'CONTEXTKV_FINGERPRINT_JSON': '{}',
+        'CONTEXTKV_MODEL_SCOPE_PATH': '/fixture/scope.json', 'CONTEXTKV_FINGERPRINT_JSON': '{}',
         'SGLANG_CHECKOUT': str(tmp_path/'stock')}
     for baseline in ('default', 'B0'):
         actual_env = env if baseline == 'default' else {**env, 'CONTEXTKV_ENABLE_HICACHE': '0',

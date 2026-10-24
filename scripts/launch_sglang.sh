@@ -3,9 +3,7 @@
 # pinned checkout's own dependencies, and activate its isolated environment.
 set -euo pipefail
 CHECKOUT="${SGLANG_CHECKOUT:-vendor/sglang}"
-if [[ -z "${CONTEXTKV_MODEL_SCOPE_PATH:-}" ]]; then
-  : "${CONTEXTKV_MODEL_PATH:?Set to the pinned local Qwen2.5-7B-Instruct snapshot}"
-fi
+: "${CONTEXTKV_MODEL_SCOPE_PATH:?Set to an explicit local Qwen3 model scope JSON}"
 : "${CONTEXTKV_FINGERPRINT_JSON:?Set the exact HFTemplateAdapter fingerprint JSON}"
 if [[ -f "$CHECKOUT/.contextkv-source-only" ]]; then
   echo 'A source-only validation directory cannot run SGLang.' >&2
@@ -28,16 +26,9 @@ if [[ "${CONTEXTKV_ENABLE_HICACHE:-1}" == 1 ]]; then
     --hicache-io-backend "${CONTEXTKV_HICACHE_IO_BACKEND:-kernel}"
     --hicache-mem-layout "${CONTEXTKV_HICACHE_LAYOUT:-page_first}")
 fi
-if [[ -n "${CONTEXTKV_MODEL_SCOPE_PATH:-}" ]]; then
-  PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  exec python "$PROJECT_ROOT/engine_patches/contextkv_model_scope.py" \
-    --scope "$CONTEXTKV_MODEL_SCOPE_PATH" --launch \
-    --tp 1 --dtype bfloat16 --kv-cache-dtype bfloat16 --context-length 32768 \
-    --page-size "${CONTEXTKV_PAGE_SIZE:-64}" ${SESSION_ARGS[@]+"${SESSION_ARGS[@]}"} \
-    --enable-metrics ${HICACHE_ARGS[@]+"${HICACHE_ARGS[@]}"} "$@"
-fi
-exec python -m sglang.launch_server \
-  --model-path "$CONTEXTKV_MODEL_PATH" --revision a09a35458c702b33eeacc393d103063234e8bc28 --tp 1 \
-  --dtype bfloat16 --kv-cache-dtype bfloat16 --context-length 32768 \
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec python "$PROJECT_ROOT/engine_patches/contextkv_model_scope.py" \
+  --scope "$CONTEXTKV_MODEL_SCOPE_PATH" --launch \
+  --tp 1 --dtype bfloat16 --kv-cache-dtype bfloat16 --context-length 32768 \
   --page-size "${CONTEXTKV_PAGE_SIZE:-64}" ${SESSION_ARGS[@]+"${SESSION_ARGS[@]}"} \
   --enable-metrics ${HICACHE_ARGS[@]+"${HICACHE_ARGS[@]}"} "$@"

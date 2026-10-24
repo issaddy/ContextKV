@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 
 import pytest
+from test_model_scope import local_scope as local_scope
 
 from bench.experiments import generation_provenance, matrix_jobs, run_matrix, select_development
 
@@ -217,14 +218,14 @@ def test_ablations_inherit_frozen_parent_and_do_not_consume_tuning_budget(tmp_pa
 
 
 @pytest.mark.parametrize("prompt_source",["base_config","inline","file"])
-def test_matrix_shares_prompt_and_default_budget_between_native_and_controller(tmp_path,monkeypatch,prompt_source):
+def test_matrix_shares_prompt_and_default_budget_between_native_and_controller(tmp_path,monkeypatch,prompt_source,local_scope):
     import bench.experiments as experiments
     import bench.native_baseline as native_module
     import controller.cli as cli
     import yaml
     value = spec(tmp_path)
     base = tmp_path/"base.yaml"
-    base.write_text(yaml.safe_dump({"context":{"system_prompt":"base prompt", "max_new_tokens":1024,
+    base.write_text(yaml.safe_dump({"model":{"scope_path":str(local_scope.path)},"context":{"system_prompt":"base prompt", "max_new_tokens":1024,
         "max_total_model_tokens":8192, "revisit_mode":"explicit", "revisit_history_turns":6,
         "allow_version_comparison":True, "reference_prefix_length":6}}))
     value["base_config"] = str(base)
@@ -242,7 +243,7 @@ def test_matrix_shares_prompt_and_default_budget_between_native_and_controller(t
     manifest.write_text("{}")
     value["methods"] = [
         {"id":"B0","kind":"native","native":{"baseline":"B0","base_url":"http://fake.test",
-            "engine_manifest":str(manifest),"model_path":"/pinned/model-snapshot"}},
+            "engine_manifest":str(manifest),"model_path":str(local_scope.model_path)}},
         {"id":"full","overrides":{"planner":{"strategy":"cost"}}}]
     seen = {}
     async def native_run(args):
@@ -264,7 +265,7 @@ def test_matrix_shares_prompt_and_default_budget_between_native_and_controller(t
     assert seen["native"].system_prompt_file is None
     assert seen["native"].max_new_tokens == seen["controller"].context.max_new_tokens == 1024
     assert seen["native"].context_length == seen["controller"].context.max_total_model_tokens == 8192
-    assert seen["native"].model_path == "/pinned/model-snapshot"
+    assert seen["native"].model_path == str(local_scope.model_path)
     assert seen["native"].context_policy == seen["controller"].context
     assert native_module.resolve_context_policy(seen["native"]) == seen["controller"].context
 
@@ -297,8 +298,11 @@ def test_matrix_normalizes_shared_explicit_keys_but_allows_layout_and_annotation
 
 
 @pytest.mark.parametrize("key,value", [("context_length", 8192), ("max_new_tokens", 128)])
-def test_matrix_native_budget_must_match_common_policy(tmp_path, key, value):
+def test_matrix_native_budget_must_match_common_policy(tmp_path, key, value, local_scope):
     matrix = spec(tmp_path)
+    path=tmp_path/'shared.json'
+    path.write_text(json.dumps({'model':{'scope_path':str(local_scope.path)}}))
+    matrix['base_config']=str(path)
     matrix["methods"] = [{"id":"B0", "kind":"native", "native":{key:value}}]
     with pytest.raises(ValueError, match="shared matrix budget"):
         matrix_jobs(matrix)
@@ -358,11 +362,14 @@ def test_matrix_default_and_explicit_default_prompt_are_equivalent(tmp_path,expl
     assert len(matrix_jobs(value)) == 3
 
 
-def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tmp_path, monkeypatch):
+def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tmp_path, monkeypatch, local_scope):
     import bench.experiments as experiments
     import bench.native_baseline as native_module
     import controller.cli as cli
     value = spec(tmp_path)
+    base=tmp_path/'shared.json'
+    base.write_text(json.dumps({'model':{'scope_path':str(local_scope.path)}}))
+    value['base_config']=str(base)
     config = tmp_path/"retriever.json"
     for name in ("sparse", "dense"):
         (tmp_path/name).mkdir()
@@ -402,9 +409,12 @@ def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tm
         matrix_jobs(value)
 
 
-def test_runtime_native_manifest_is_supplied_only_after_owned_server_validation(tmp_path, monkeypatch):
+def test_runtime_native_manifest_is_supplied_only_after_owned_server_validation(tmp_path, monkeypatch, local_scope):
     from bench import experiments, native_baseline
     value = spec(tmp_path)
+    base=tmp_path/'shared.json'
+    base.write_text(json.dumps({'model':{'scope_path':str(local_scope.path)}}))
+    value['base_config']=str(base)
     value['server_profiles'] = {'stock': {'kind': 'stock', 'write_policy': 'write_back'}}
     value['methods'] = [{'id': 'B1', 'kind': 'native', 'server_profile': 'stock',
         'native': {'baseline': 'B1', 'base_url': 'http://fake.test', 'audit_prompt_ids': True}}]

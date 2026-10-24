@@ -245,21 +245,27 @@ def test_owned_scope_recipe_job_declaration_keeps_verified_executor_requirement(
     matrix["base_config"] = str(path)
     matrix["server_profiles"] = {"stock": {}}
     matrix["methods"].append({"id": "Native", "kind": "native", "server_profile": "stock", "native": {"baseline": "B0"}})
-    jobs = matrix_jobs(matrix)
-    assert next(job for job in jobs if job["method"] == "Native")["server_profile"] == "stock"
+    if use_scope:
+        jobs = matrix_jobs(matrix)
+        assert next(job for job in jobs if job["method"] == "Native")["server_profile"] == "stock"
+    else:
+        with pytest.raises(ValueError, match="scope_path"):
+            matrix_jobs(matrix)
 
 
-def test_explicit_standard_greedy_keeps_legacy_manifest_compatibility(local_scope):
-    from profiling.common import MODEL_REVISION
+def test_legacy_manifest_is_read_only_and_cannot_authorize_generation(local_scope):
+    from profiling.common import LEGACY_MODEL_REVISION
     template, manifest, _ = contract(local_scope)
     manifest.pop("model_scope")
     manifest.pop("sampling_recipe")
-    manifest["model"] = {"name": "Qwen/Qwen2.5-7B-Instruct", "revision": MODEL_REVISION,
+    manifest["model"] = {"name": "Qwen/Qwen2.5-7B-Instruct", "revision": LEGACY_MODEL_REVISION,
         "tokenizer_hash": template.fingerprint.tokenizer_hash, "chat_template_hash": template.fingerprint.template_hash,
         "dtype": "bfloat16", "kv_dtype": "bfloat16"}
-    template.fingerprint = replace(template.fingerprint, model_revision=MODEL_REVISION)
+    template.fingerprint = replace(template.fingerprint, model_revision=LEGACY_MODEL_REVISION)
     original = deepcopy(manifest)
     client = NativeSGLangClient("http://fake", http_client=object(), sampling_params=SamplingRecipe().record())
-    baseline = NativeBaseline("B0", client, template, corpus_snapshot_id="fixture", engine_manifest=manifest,
-                              sampling=SamplingRecipe())
-    assert not baseline.test_mode and manifest == original and "sampling_recipe" not in manifest
+    assert not validate_engine_manifest(manifest,"B0",template,sampling=SamplingRecipe())
+    with pytest.raises(ValueError, match="explicit Qwen3"):
+        NativeBaseline("B0", client, template, corpus_snapshot_id="fixture", engine_manifest=manifest,
+                       sampling=SamplingRecipe())
+    assert manifest == original

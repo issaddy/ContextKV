@@ -97,40 +97,16 @@ or code from memory. Avoid unrelated examples and repeated summaries.
 
 使用 Q1 / Q2 分开判断“引用格式改善”和“减少无根据扩写”的影响。先不强制 JSON：普通段落/步骤内引用已经兼容所有方法，JSON 会额外引入输出格式和解析变化。也不把所有 Sources 放在末尾，以免截断时只丢来源；不靠硬性短输出上限制造表面时延提升。
 
-公平验证顺序：
-
-1. 等当前 profiler / frozen pair 运行结束后，将原提示词 Q0 与候选 Q1/Q2 明确记录在新运行的配置/源码 provenance。旧冻结文件保持原样。普通最终 token/hash 已能区分实际内容，无需增加模板格式 hash。
-2. 仅在预先固定的 dev 会话上比较。使用同模型、retrieval、required 集合规则、完整 QA、输出上限（可先统一 1024）和采样设置。先用固定策略隔离提示词影响；任何拟采用的共享提示词随后对所有 B1–B6 与 Ours 对等应用，不为 Ours 单独优化。
-3. 分开看 P1 的可控历史与 P2 的真实历史；P2 按会话汇总，保留前轮错误传播与脚本历史错配，不能当作互相独立的单轮样本。
-4. 导出完整 visible audit，对上述少量问题定向检查，并按同一冻结的离线评价规则评估全部 dev 回答。同时报告正确性/支持程度、正确拒答与过度拒答、版本条件、ID 存在率与实际引用支持率、截断率、输出长度及完整响应时延；presence 不能作为唯一质量指标。
-5. 只有在质量未损害且工程代价可接受时选择共享候选；若模型只是增加装饰性 ID，Q1 假设被否定；若 Q2 增加过度拒答或遗漏必要步骤，则撤回该扩展。确定后冻结提示词和策略，再做 test，不根据 test 回调。
-
-提示词改动会改变初始 prefix 和输出长度分布；后续成本标定应验证适用范围/先验，成对验证需从新提示词运行重新冻结，不能把旧 pair 的时延改善直接移植过来。
+以上Q0/Q1/Q2为历史诊断设计，相关7B运行配置已退役，不再执行这组提示词实验。保留问题分类与提示词文本作为机制复核材料；当前研发顺序以[研发策略](research_strategy.md)为准。
 
 ## 已实现的配置入口与实验隔离
 
 `CandidatePolicy` 共享字段 `context.system_prompt` 接受完整文本；省略或设为 `null` 使用原 Q0。控制器与 `NativeBaseline` 通过同一个 `build_candidates` 构造最终消息。原 `SYSTEM_PROMPT` 常量、chat template 指纹和既有 frozen cases 未改变。
 
-现成配置：
-
-- `configs/quality_dev_q0.yaml`：原 Q0 对照。
-- `configs/quality_dev_q1.yaml`：明确精确 ID 格式的候选 Q1。
-- `configs/quality_dev_q2.yaml`：Q1 加简洁、有据回答约束的候选 Q2。
-
-三个配置都使用 `always_rebuild`、`max_new_tokens: 1024`、`shadow: false`，用于提示词开发对照，不用于证明成本规划或 epoch 退役的收益。尚无运行结果证明 Q1/Q2 改善语义质量。运行前将配置中的 endpoint 和本地模型路径设为实际部署值，保留固定 revision。每个配置分别执行 P1 和 P2，例如：
-
-```bash
-python -m controller.cli \
-  --config configs/quality_dev_q1.yaml \
-  --state-dir runs/quality-dev-q1-p1 \
-  bench data/mtrag/RAG.jsonl \
-  --split-manifest configs/mtrag_split_manifest.json --split dev --protocol P1
-```
-
 控制器另支持全局 `--system-prompt TEXT` 或 `--system-prompt-file PATH`（放在 `bench` / `serve` 子命令之前）；原生基线支持同名互斥参数。文件按 UTF-8 读取并保留换行和首尾空白，最终正文写入现有 config/policy/workload provenance，没有新的 prompt hash 体系。
 
-矩阵运行可在顶层设置 `system_prompt` 或 `system_prompt_file`，两者互斥，统一覆盖所有控制器与原生方法；未设置时继承 `base_config.context.system_prompt`。方法或候选不能绕过它设置不同提示词。将 `base_config` 指向上述任一配置即可继承共享提示词，原生方法未显式指定时也继承其上下文和输出预算。Q0/Q1/Q2 使用三个独立矩阵，不把提示词变体伪装成不同系统方法。
+矩阵运行可在顶层设置 `system_prompt` 或 `system_prompt_file`，两者互斥，统一覆盖所有控制器与原生方法；未设置时继承 `base_config.context.system_prompt`。方法或候选不能绕过它设置不同提示词。共享配置继承上下文和输出预算；不把提示词变体伪装成不同系统方法。
 
 已经存在的会话切换提示词时，候选构造直接比较执行账本首个 system 消息的角色/正文。内容不同使 APPEND 不可行（`system_prompt_changed`），REBUILD 使用新指令、完整实际 QA 与同一 required 证据集合。旧执行消息保持原样，稳定证据 ID 不变；新指令提交后下一轮可正常 APPEND。显式配置与 Q0 完全相同的文本不会触发无意义重建。
 
-本地验证覆盖默认保持、精确文本/换行配置、已提交会话的提示词切换、固定 APPEND 策略下的强制重建、完整 QA/证据/引用保留、原生与控制器共享输入以及矩阵 provenance。硬件回答效果仍需按上面的对等 dev 方案检验。
+本地验证覆盖默认保持、精确文本/换行配置、已提交会话的提示词切换、固定 APPEND 策略下的强制重建、完整 QA/证据/引用保留、原生与控制器共享输入以及矩阵 provenance。这些合同不建立硬件回答质量收益；不再启动上面的历史实验。

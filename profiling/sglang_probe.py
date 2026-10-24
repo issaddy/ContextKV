@@ -270,7 +270,7 @@ async def _run(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/sglang.yaml")
+    parser.add_argument("--config", default="configs/qwen3_8b_scope.example.yaml")
     parser.add_argument("--model-path", default=os.environ.get("CONTEXTKV_MODEL_PATH"))
     parser.add_argument("--base-url", help="Override config URL for the isolated profiler server")
     parser.add_argument("--output", required=True)

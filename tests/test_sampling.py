@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from test_model_scope import local_scope as local_scope
 
 from controller.config import RunConfig, create_controller, load_config
 from controller.cost_model import CostModel
@@ -219,7 +220,7 @@ def test_unknown_profiles_never_gain_an_explicit_recipe_through_merge(tmp_path):
     assert explicit["measurement_provenance"]["sampling_recipe_binding"] == "explicit"
 
 
-def test_profiler_cli_records_the_recipe_actually_given_to_its_client(tmp_path, monkeypatch):
+def test_profiler_cli_records_the_recipe_actually_given_to_its_client(tmp_path, monkeypatch, local_scope):
     from argparse import Namespace
     import profiling.sglang_probe as module
     from test_engine_profiling import ProtocolDouble
@@ -240,7 +241,8 @@ def test_profiler_cli_records_the_recipe_actually_given_to_its_client(tmp_path, 
         return 0
     monkeypatch.setattr(module, "collect_case", no_generations)
     config, output = tmp_path / "config.yaml", tmp_path / "probe.jsonl"
-    config.write_text(json.dumps({"engine": {"kind": "sglang"}, "sampling": RECIPE.record()}))
+    config.write_text(json.dumps({"engine": {"kind": "sglang"}, "model": {"scope_path": str(local_scope.path)},
+                                 "sampling": RECIPE.record()}))
     args = Namespace(config=str(config), runtime_manifest=None, model_path=None, base_url=None, output=str(output),
         seed=42, lengths=(8,), prefix_fractions=(0,), outputs=(4,), concurrency=(1,),
         cache_states=("cold",), device_prefix_tokens=None, repetitions=3, warmup=1)
@@ -252,17 +254,19 @@ def test_profiler_cli_records_the_recipe_actually_given_to_its_client(tmp_path, 
 
 
 @pytest.mark.parametrize("location", ["base", "controller_candidate"])
-def test_native_matrix_accepts_shared_recipe_but_refuses_method_sampling_difference(tmp_path, location):
+def test_native_matrix_accepts_shared_recipe_but_refuses_method_sampling_difference(tmp_path, location, local_scope):
     from bench.experiments import matrix_jobs
     from test_experiments import spec
     matrix = spec(tmp_path)
     matrix["methods"].append({"id": "Native", "kind": "native", "native": {"baseline": "B1"}})
+    path = tmp_path / "base.json"
+    base = {"model": {"scope_path": str(local_scope.path)}}
     if location == "base":
-        path = tmp_path / "base.json"
-        path.write_text(json.dumps({"sampling": RECIPE.record()}))
-        matrix["base_config"] = str(path)
+        base["sampling"] = RECIPE.record()
     else:
         matrix["methods"][0]["candidates"][0]["sampling"] = RECIPE.record()
+    path.write_text(json.dumps(base))
+    matrix["base_config"] = str(path)
     if location == "base":
         assert len(matrix_jobs(matrix)) == 4
     else:
@@ -270,14 +274,15 @@ def test_native_matrix_accepts_shared_recipe_but_refuses_method_sampling_differe
             matrix_jobs(matrix)
 
 
-def test_controller_only_matrix_allows_explicit_recipe_and_standard_native_stays_compatible(tmp_path):
+def test_controller_only_matrix_allows_recipe_and_native_requires_shared_scope(tmp_path, local_scope):
     from bench.experiments import matrix_jobs
     from test_experiments import spec
     matrix, path = spec(tmp_path), tmp_path / "base.json"
     path.write_text(json.dumps({"sampling": RECIPE.record()}))
     matrix["base_config"] = str(path)
     assert len(matrix_jobs(matrix)) == 3
-    path.write_text(json.dumps({"sampling": SamplingRecipe().record()}))
+    path.write_text(json.dumps({"model": {"scope_path": str(local_scope.path)},
+                                "sampling": SamplingRecipe().record()}))
     matrix["methods"].append({"id": "Native", "kind": "native", "native": {"baseline": "B1"}})
     assert len(matrix_jobs(matrix)) == 4
 

@@ -192,17 +192,6 @@ def test_actual_scope_or_resource_mismatch_never_reaches_generation(matrix, loca
     assert seen == [] and len(launched) == len(stopped) == 1
 
 
-def test_legacy_environment_cannot_inherit_an_unrelated_scope(matrix, monkeypatch):
-    monkeypatch.setenv('CONTEXTKV_MODEL_SCOPE_PATH', '/unrelated/scope.json')
-    profile = matrix.spec['server_profiles']['stock']
-    env = sweep.server_environment(profile, matrix.args, asdict(matrix.fp))
-    assert 'CONTEXTKV_MODEL_SCOPE_PATH' not in env
-    assert env['CONTEXTKV_MODEL_PATH'] == str(matrix.args.model_path)
-    assert env['CONTEXTKV_HICACHE_GB'] == '16'
-    argv = sweep.job_server_command(matrix.args.port, 16384)
-    assert argv[argv.index('--mem-fraction-static')+1] == '0.15'
-
-
 @pytest.mark.parametrize('binding', ['old_model', 'unknown_sampling', 'matching'])
 def test_cost_binding_cannot_reuse_old_model_or_unbound_new_recipe(matrix, local_scope, monkeypatch, binding):
     from controller.cost_model import CostModel, LookupPoint, DecodePoint
@@ -224,29 +213,3 @@ def test_cost_binding_cannot_reuse_old_model_or_unbound_new_recipe(matrix, local
     assert sweep.execute(matrix.args, sweep.build_matrix_plan(matrix.args)) == int(binding != 'matching')
     assert len(seen) == int(binding == 'matching')
     assert len(launched) == len(stopped) == 1
-
-
-def test_legacy_shared_recipe_is_bound_to_real_native_manifest(matrix, monkeypatch):
-    matrix.config['sampling'] = RECIPE.record()
-    owned_fixtures.write_spec(matrix)
-    seen, launched, stopped = owned_fixtures.fake_hardware(matrix, monkeypatch)
-    original = sweep.execute_job
-    manifests = []
-    async def execute(*args, native_engine_manifest, **kwargs):
-        if native_engine_manifest:
-            manifests.append(json.loads(native_engine_manifest.read_text()))
-        return await original(*args, native_engine_manifest=native_engine_manifest, **kwargs)
-    monkeypatch.setattr(sweep, 'execute_job', execute)
-    assert sweep.execute(matrix.args, sweep.build_matrix_plan(matrix.args)) == 0
-    assert len(seen) == len(launched) == len(stopped) == 6 and len(manifests) == 2
-    assert all(m['sampling_recipe'] == RECIPE.record() for m in manifests)
-    assert all(m['model']['revision'] == sweep.server.MODEL_REVISION and 'model_scope' not in m for m in manifests)
-
-
-def test_phase1_constructor_does_not_silently_expand_its_sampling_protocol(tmp_path):
-    from test_b6_joint_sweep import arguments
-    args = arguments(tmp_path)
-    args.config.write_text(json.dumps({'sampling': RECIPE.record()}))
-    with pytest.raises(ValueError, match='phase1 remains legacy'):
-        sweep.build_plan(args)
-    assert not args.output.exists()

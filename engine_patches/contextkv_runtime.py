@@ -13,15 +13,12 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import time
 from types import SimpleNamespace
 import uuid
 
 COMMIT = "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b"
 PROTOCOL = "contextkv-v1"
-MODEL_REVISION = "a09a35458c702b33eeacc393d103063234e8bc28"
-MODEL_CONFIG_HASH = "b6891f5037cc0853d4325d96957f76765bb3ec11b01eee59670e33b825694a06"
 
 
 def snapshot_extend_work(batch):
@@ -893,34 +890,20 @@ def get_runtime(scheduler):
             raise ValueError("v1 requires the default cache key")
     except (KeyError, ValueError, AssertionError) as exc:
         raise ContextKVError("INVALID_FINGERPRINT_CONFIG", "set complete CONTEXTKV_FINGERPRINT_JSON") from exc
-    # Default remains the previously validated Qwen2.5-7B identity. Explicit
-    # local scopes are read once at initialization and verified against the
-    # actual running model/tokenizer, not merely echoed from a client.
-    model_scope = None
+    # Actual engine admission requires an explicitly selected local Qwen3
+    # snapshot. This one-time check has no legacy model/revision fallback.
+    scope_path = os.environ.get("CONTEXTKV_MODEL_SCOPE_PATH")
+    if not scope_path:
+        raise ContextKVError("MODEL_SCOPE_REQUIRED", "set CONTEXTKV_MODEL_SCOPE_PATH to the local Qwen3 scope")
     try:
-        scope_path = os.environ.get("CONTEXTKV_MODEL_SCOPE_PATH")
-        if scope_path:
-            from sglang.srt.managers.contextkv_model_scope import load_model_scope
-            from sglang.srt.runtime_context import get_server_args
-            scope = load_model_scope(scope_path)
-            scope.verify_native_settings(get_server_args())
-            scope.verify_files(get_model().model_path)
-            scope.verify_tokenizer(scheduler.tokenizer)
-            scope.verify_fingerprint(fp)
-            model_scope = scope.manifest()
-        else:
-            if get_model().revision != MODEL_REVISION or fp["model_revision"] != MODEL_REVISION:
-                raise ValueError("wrong model revision")
-            config = json.loads((Path(get_model().model_path) / "config.json").read_text())
-            canonical = json.dumps(config, sort_keys=True, separators=(",", ":"))
-            if hashlib.sha256(canonical.encode()).hexdigest() != MODEL_CONFIG_HASH:
-                raise ValueError("wrong model config")
-            tokenizer = scheduler.tokenizer
-            actual_tokenizer = hashlib.sha256(tokenizer.backend_tokenizer.to_str().encode()).hexdigest()
-            template = json.dumps({"template": tokenizer.chat_template, "enable_thinking": False}, sort_keys=True)
-            actual_template = hashlib.sha256(template.encode()).hexdigest()
-            if actual_tokenizer != fp["tokenizer_hash"] or actual_template != fp["template_hash"]:
-                raise ValueError("wrong tokenizer or template")
+        from sglang.srt.managers.contextkv_model_scope import load_model_scope
+        from sglang.srt.runtime_context import get_server_args
+        scope = load_model_scope(scope_path)
+        scope.verify_native_settings(get_server_args())
+        scope.verify_files(get_model().model_path)
+        scope.verify_tokenizer(scheduler.tokenizer)
+        scope.verify_fingerprint(fp)
+        model_scope = scope.manifest()
     except (AssertionError, AttributeError, OSError, ValueError) as exc:
         raise ContextKVError("FINGERPRINT_MISMATCH", "running model config/revision/tokenizer/template differs") from exc
     from sglang.srt.environ import envs

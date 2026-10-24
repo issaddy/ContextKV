@@ -4,7 +4,6 @@ import pytest
 
 from controller.candidates import CandidatePolicy
 from controller.cli import main
-from controller.config import load_config
 from controller.evidence import make_evidence
 from controller.mock_engine import MockEngine
 from controller.planner import PlannerKnobs
@@ -52,12 +51,3 @@ def test_cli_prompt_override_retains_exact_content_and_config_provenance(tmp_pat
     main([*option, "demo"])
     assert captured[0].context.system_prompt == text
     assert captured[0].config_hash != replace(captured[0], context=CandidatePolicy()).config_hash
-
-
-def test_dev_prompt_configs_keep_equal_budget_and_fixed_policy():
-    configs = [load_config(f"configs/quality_dev_q{index}.yaml") for index in range(3)]
-    assert configs[0].context.system_prompt is None
-    assert all(c.context.max_new_tokens == 1024 and c.planner.strategy == "always_rebuild" for c in configs)
-    assert configs[1].context.system_prompt in configs[2].context.system_prompt
-    for config in configs:
-        assert config.shadow is False and config.cost_model.online_calibration is False

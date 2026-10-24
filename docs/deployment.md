@@ -1,57 +1,45 @@
-# Linux/NVIDIA 部署与实测
+# Qwen3 Linux/NVIDIA 部署
 
-本项目在独立虚拟环境安装固定 SGLang 源码，避免更改容器原有的 torch、transformers 或服务。用户提供容器的项目目录是 `/home/relay/songjiayun/ContextKV`。先用单 GPU 验证，并为本项目选择空闲端口。代理从运行环境继承；凭据只存放于权限为 `600` 的 `runs/network.env` 等忽略文件中，不进入命令示例、日志和版本库。
+当前仅使用已有 Qwen3-8B/32B 本地快照。Qwen2.5-7B 已停用，旧下载、隐式启动和恢复入口已移除。用户容器项目目录为 `/home/relay/songjiayun/ContextKV`；模型位于 `/media/ssd1/qwen3-8b`、`/media/ssd1/qwen3-32b`。代理从私有运行环境继承，凭据不进入源码、示例或公开产物。
 
-## 安装固定版本
+## 准备已有模型与固定引擎
 
 在项目根目录执行：
 
 ```bash
-# 需要代理时，先加载自己的运行配置。
-source runs/network.env
+export CONTEXTKV_MODEL_SCOPE_PATH="$PWD/configs/model_scopes/qwen3-8b.local.json"
 bash scripts/bootstrap_sglang.sh
 source .venv-sglang/bin/activate
 export CUDA_VISIBLE_DEVICES=0
 export NO_PROXY=127.0.0.1,localhost
 export no_proxy="$NO_PROXY"
-export CONTEXTKV_MODEL_PATH="$PWD/models/Qwen2.5-7B-Instruct"
 export CONTEXTKV_FINGERPRINT_JSON="$(cat runs/fingerprint.json)"
 ```
 
-脚本固定 SGLang `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b` 和 Qwen2.5-7B-Instruct `a09a35458c702b33eeacc393d103063234e8bc28`。引擎自身 pyproject 规定 torch/CUDA/attention 依赖，安装后的完整列表记录于 `runs/engine-environment.txt`。主项目的 `uv.lock` 是 CPU 控制器环境锁文件，不能用它替代引擎依赖。默认跳过原生 Rust 扩展，使用固定的 Python TreeCore。
+bootstrap只安装固定 SGLang commit `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b` 及其依赖，并通过现有scope核对用户已有文件、tokenizer和模板，不下载生成模型。改变本地模型目录须重新生成/核对scope，不能修改路径后沿用不匹配身份。实际HF loading revision为null，metadata identity不冒充权重内容验证。见[模型scope](model_scope.md)。
 
-## 分阶段验证
+控制器的 `uv.lock` 与独立 `.venv-sglang` 分工不变；引擎依赖由固定上游pyproject定义。记录实际安装环境，不用CPU锁替代引擎依赖。
 
-先关闭 host tier，确认模型、CUDA kernel、IPC 与业务协议：
+## 启动与使用
 
-```bash
-CONTEXTKV_ENABLE_HICACHE=0 bash scripts/launch_sglang.sh \
-  --host 127.0.0.1 --port 30000 --mem-fraction-static 0.15 --max-running-requests 8
-```
-
-这里的显存比例是 H200 集成检查示例。显存较小的卡应按模型权重与 KV 池容量调整；正式实验记录实际池容量，不将比例相同当作容量相同。在另一终端激活相同环境并设置相同模型路径后执行：
+下面是已有H200功能检查所用的一组明确资源参数，不是性能最优配置。启动前由操作者确认所用GPU与端口空闲；脚本不停止其他服务。
 
 ```bash
-python -m engine_patches.smoke --config configs/sglang.yaml --report runs/gpu-smoke.json
+CONTEXTKV_HICACHE_GB=8 CONTEXTKV_HICACHE_LAYOUT=layer_first \
+SGLANG_HICACHE_TMA_TRANSFER=0 bash scripts/launch_sglang.sh \
+  --host 127.0.0.1 --port 30000 --max-total-tokens 16384 \
+  --mem-fraction-static 0.8 --max-running-requests 8 \
+  --attention-backend fa3 --chunked-prefill-size 8192 --schedule-policy fcfs
 ```
 
-通过后停止本项目进程，再启用 host tier 和隔离标定接口：
+真实运行配置为 `configs/qwen3_8b_scope.example.yaml`。在另一终端使用同一引擎环境启动 `controller.cli ... serve`，或按[项目入口](../README.md)运行P2/P3。32B须同时更换scope和共享配置，不共享8B的成本artifact。容量以实际服务池/分配记录为准，不以请求的比例或GB代替。
 
-```bash
-CONTEXTKV_ENABLE_PROFILING=1 CONTEXTKV_HICACHE_GB=16 \
-  CONTEXTKV_HICACHE_LAYOUT=layer_first SGLANG_HICACHE_TMA_TRANSFER=0 \
-  bash scripts/launch_sglang.sh --host 127.0.0.1 --port 30000 \
-  --mem-fraction-static 0.15 --max-running-requests 8
-python -m engine_patches.smoke --config configs/sglang.yaml --report runs/host-smoke.json
-python -m profiling.sglang_probe --config configs/sglang.yaml \
-  --lengths 128 --prefix-fractions 0,.5 --outputs 8 --concurrency 1 \
-  --warmup 1 --repetitions 3 --output runs/calibration-smoke.jsonl
-```
+服务变更后的必要协议检查可使用 `python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml --report runs/qwen3-smoke.json`。它会实际生成，只在引擎/模型变更需要确认时运行，不是每次文档或分析变更后的例行实验。CPU检查与真实运行边界见[引擎说明](../engine_patches/README.md)。
 
-`CONTEXTKV_ENABLE_PROFILING=1` 的冷缓存/host-only 准备会改变该服务器缓存状态，只能在独立标定服务使用。冒烟网格只验证测量管线，不能覆盖真实多轮请求范围。正式标定扫描开发集长度、prefix/suffix、host-load、输出长度和并发区域，随后运行 `python -m profiling.fit MEASUREMENTS --output ARTIFACT`，检查留出误差和覆盖率，再设置 `cost_model.artifact` 与实际控制开销门槛。
+## 分析和实验的边界
 
-控制器直接使用本地模型时，可将运行配置的 `model.name` 指向模型目录，设置 `model.local_files_only: true`。模型 revision、tokenizer 和 template 指纹仍须与引擎一致。SSE 默认开启；`engine.stream: false` 只用于不需要客户端 TTFT 的诊断。
+正常服务不启用冷缓存标定。只有需要解决具体成本不确定性时，在独立服务显式设置 `CONTEXTKV_ENABLE_PROFILING=1` 并选定必要测点；该接口会改变缓存状态。旧7B或其他recipe的测量仍可只读分析，不能绑定到Qwen3执行。
 
-## 验收证据
+原生B0/B1使用clean stock checkout；研究控制器使用patched checkout。优先让[owned显式矩阵](b6_owned_matrix.md)管理各自进程、生成真实manifest并保留完整失败记录。该入口不恢复外部服务；后续supervisor也不得恢复已退役7B。默认plan不启动模型，`--execute`才执行所声明的有限任务。
 
-依次保留源码核验、安装环境、启动日志、smoke JSON、标定 manifest/原始观测、开发集选择及冻结文件、测试逐轮结果、质量评分和最终汇总。GPU 冒烟通过仅证明这个模型和配置的协议链路；完整质量、预测泛化、容量收益和并发性能须分别给出实验。记录不通过的配置及失败原因，不以模拟或 fake HTTP 测试替代真实运行。
+共享配置、原始输入/输出、源码、实际资源、失败及后续恢复信息一起保留。已完成的[四调用验收](owned_local_scope_validation.md)属于当时源码；本轮scope-only清理先以源码/CPU合同验证，不将旧批次改写为新版本硬件证据。

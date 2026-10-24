@@ -64,16 +64,23 @@ def test_actual_qwen3_records_have_distinct_local_identity_and_explicit_head_dim
     assert config["hidden_size"] // config["num_attention_heads"] == 80
 
 
-def test_default_model_values_and_old_runtime_wire_cache_identity_stay_unchanged(local_scope, monkeypatch):
+def test_cpu_default_has_no_model_and_generic_runtime_cache_identity_stays_unchanged(local_scope, monkeypatch):
     monkeypatch.delenv("CONTEXTKV_HOST_ADMISSION", raising=False)
     model = ModelConfig()
-    assert model.name == "Qwen/Qwen2.5-7B-Instruct"
-    assert model.revision == "a09a35458c702b33eeacc393d103063234e8bc28"
-    assert model.local_files_only is False and model.scope is None
+    assert model.name is None and model.revision is None
+    assert model.local_files_only is True and model.scope is None
     old = native.ContextKVRuntime(FakeNativeCache(), asdict(ConfigFingerprint()))
     selected = native.ContextKVRuntime(FakeNativeCache(), asdict(local_scope.fingerprint), model_scope=local_scope.scope.manifest())
     assert "model_scope" not in old.info({})
     assert old.cache_config == selected.cache_config and old.cache_config_hash == selected.cache_config_hash
+
+
+def test_missing_scope_never_loads_a_real_model(monkeypatch):
+    monkeypatch.setattr("controller.config.HuggingFaceTemplate", lambda *a, **kw: pytest.fail("model loading"))
+    with pytest.raises(ValueError, match="scope_path"):
+        RunConfig(engine=EngineConfig(kind="sglang"))
+    with pytest.raises(ValueError, match="scope_path"):
+        create_model_template(ModelConfig(name="Qwen/Qwen2.5-7B-Instruct", revision="a" * 40))
 
 
 def test_scope_config_resolves_once_without_faking_hf_revision(local_scope, monkeypatch):

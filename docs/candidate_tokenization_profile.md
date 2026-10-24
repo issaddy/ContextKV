@@ -1,5 +1,7 @@
 # 保持逐 token 等价的候选分词优化
 
+> 历史测量记录：仅匹配旧Qwen2 tokenizer摘要的分段快路已随7B退役删除。Qwen3一直走完整prompt批量分词；保留本报告作为优化原理与负载证据，不再执行旧模型实验。
+
 2026-10-24。在同一组 15 个真实冻结快照上，完整 APPEND/REBUILD 候选构建的本地耗时从 **13.31 降到 4.63 ms**。这里是每个 case 测量中位数的等 case 平均，不是线上 P95。15 对候选的完整字段（实际计时 `build_ms` 除外）、渲染文本、token IDs、证据 span 和输入哈希与原版完全一致。
 
 主要改动位于 `controller/templates.py` 和 `controller/candidates.py`。没有改变 planner、材料选择、required/visible evidence、消息顺序、生成预算、模板文本或默认策略，也没有删除 APPEND/REBUILD 中的任何候选。下面分别记录本机完整候选构建与服务器分词测量，不能把局部收益按比例换算为 control、TTFT 或整轮性能。

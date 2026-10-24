@@ -1,20 +1,14 @@
-"""Opt-in verification against the pinned Qwen tokenizer, without loading weights."""
-import os
+"""Opt-in verification against the local Qwen3 tokenizer, without loading weights."""
 from dataclasses import replace
-
-import pytest
 
 from controller.candidates import build_candidates
 from controller.evidence import EvidencePolicy, make_evidence
 from controller.schema import ContextEpoch, SessionSnapshot
-from controller.templates import HuggingFaceTemplate, longest_common_prefix
+from controller.templates import longest_common_prefix
 
 
-@pytest.mark.skipif(os.environ.get("CONTEXTKV_TEST_HF_TOKENIZER") != "1",
-                    reason="opt-in pinned tokenizer check; run with tokenizer extra and cached HF files")
-def test_pinned_qwen_template_and_epoch_independent_input():
-    template = HuggingFaceTemplate("Qwen/Qwen2.5-7B-Instruct",
-                                  "a09a35458c702b33eeacc393d103063234e8bc28", local_files_only=True)
+def test_qwen3_template_and_epoch_independent_input(qwen3_tokenizer_template):
+    template = qwen3_tokenizer_template
     snapshot = SessionSnapshot("first")
     evidence = (make_evidence("请求超时为30秒；连接超时为5秒。", "timeouts"),)
     first = build_candidates(snapshot, "配置超时是多少？", evidence, template=template)[0]

@@ -1,9 +1,11 @@
-# Same-container fixed-policy scope smoke. No Qwen3 timing/quality calibration.
-# Sampling remains the research client's legacy greedy recipe in this slice.
+# Explicit local Qwen3, single-call REBUILD; no inherited cost artifact.
 engine:
   kind: sglang
   base_url: http://127.0.0.1:30000
   page_size: 64
+  timeout_seconds: 180
+  gpu_capacity_tokens: 16384
+  stream: true
 model:
   scope_path: configs/model_scopes/qwen3-8b.local.json
 context:
@@ -13,3 +15,8 @@ planner:
   strategy: always_rebuild
 shadow: false
 state_dir: runs/qwen3-8b-scope
+sampling:
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  min_p: 0

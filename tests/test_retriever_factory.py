@@ -8,6 +8,7 @@ import httpx
 import numpy as np
 import pytest
 import yaml
+from test_model_scope import local_scope as local_scope
 
 from adapters.hybrid_retrieval import DenseIndex
 from adapters.mtrag import OnlineContext, OnlineSession, load_rows
@@ -325,7 +326,7 @@ def test_offline_cli_dual_uses_shared_models_then_opens_qrels(retriever_config, 
                                                ("user_topic", "current_topic_rrf"),
                                                ("source_topic", "current_topic_rrf"),
                                                ("assistant_topic_unverified", "current_topic_rrf")])
-def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retriever_config, tmp_path, monkeypatch, query_mode, fusion):
+def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retriever_config, tmp_path, monkeypatch, query_mode, fusion, local_scope):
     import bench.native_baseline as native_module
     import controller.cli as cli
     from controller.templates import ByteTemplate
@@ -359,7 +360,7 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
             "meta_info": {"finish_reason": {"type": "stop"}, "completion_tokens": len(b"native actual")}})
     http = httpx.AsyncClient(base_url="http://fake.test", transport=httpx.MockTransport(respond))
     client_class, baseline_class = native_module.NativeSGLangClient, native_module.NativeBaseline
-    monkeypatch.setattr(native_module, "HuggingFaceTemplate", lambda *a, **k: ByteTemplate())
+    monkeypatch.setattr("controller.config.create_model_template", lambda *a, **k: ByteTemplate())
     monkeypatch.setattr(native_module, "NativeSGLangClient", lambda *a, **k:
                         client_class("http://fake.test", http_client=http, stream=False))
     monkeypatch.setattr(native_module, "NativeBaseline", lambda *a, **k:
@@ -367,10 +368,12 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
     native_dir, controller_dir = tmp_path/"native", tmp_path/"controller"
     engine = tmp_path/"engine.json"
     engine.write_text("{}")
+    run_config = tmp_path/"native-config.yaml"
+    run_config.write_text(yaml.safe_dump({"model":{"scope_path":str(local_scope.path)}}))
     common = [str(FIXTURE), "--protocol", "P3", "--domain", "all", "--limit-sessions", "1",
               "--retriever-config", str(retriever_config)]
     try:
-        native_module.main(common+["--baseline", "B0", "--engine-manifest", str(engine), "--output", str(native_dir)])
+        native_module.main(common+["--baseline", "B0", "--run-config",str(run_config),"--engine-manifest", str(engine), "--output", str(native_dir)])
         cli.main(["--state-dir", str(controller_dir), "bench"]+common)
     finally:
         asyncio.run(http.aclose())

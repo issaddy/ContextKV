@@ -42,8 +42,8 @@ context:
 
 Controller 的 `request_submitted` 事件记录由同一配置构造的实际请求参数及本次输出预算。流式与非流式共用同一 payload；completion receipt、原生 admission、失败恢复、模型 token 和 full-QA 合同不变。MockEngine 不模拟采样或质量；其事件只记录请求设置，simulation 标签保持。
 
-后续薄接线已为正式 native benchmark 增加显式共享 RunConfig 路径，见 [native_model_scope.md](native_model_scope.md)：静态实际manifest可使用同一model/context/recipe；含native的矩阵拒绝方法单独改变采样/模型。旧无配置仍贪心。显式owned `--matrix` 随后已支持共同scope/recipe，使用前要求声明资源并核实际manifest，见 [b6_owned_matrix.md](b6_owned_matrix.md)；旧13格构造器仍保持7B/标准贪心。两个 owned cost preflight 继续在生成前拒绝采样不匹配的成本 artifact；不能让 Ours 静默全回退后仍声称运行了已标定策略。旧采样批次、manifest和冻结来源不因新入口而改写。
+当前正式native、controller与owned入口共用显式Qwen3 scope/context/recipe，硬件配置缺scope时拒绝。旧无配置7B入口和13格构造器已删除；历史采样清单不改写。见[native入口](native_model_scope.md)与[owned入口](b6_owned_matrix.md)。
 
-采样接线当时的验证是本地 CPU/HTTP 合同：默认 wire、显式四项、stream/nonstream、预算唯一来源、事件/collector manifest、旧/新配方、未知来源合并、length 模型、owned preflight 与 native 矩阵拒绝。已完成的 a876 Qwen3 硬件 scope probe 没有部署这次采样代码，不能作为这条新 research client 接线的 GPU 验收。
+Qwen3示例配置明确写入`.7/.8/20/0`，不是通过模型名称隐式更改全局默认。CPU mock和显式null仍使用贪心recipe。时间/长度artifact继续核对真实采样来源，不允许旧表或recipe不匹配的Ours静默获得标定资格。
 
-后续[8B owned入口验收](owned_local_scope_validation.md)已实际运行显式`.7/.8/20/0`的原生B1与研究Controller各两轮。原生保留实际HTTP采样参数，研究保留request_submitted事件与真实terminal receipt；不把事件称作原始HTTP抓包。全部自然stop，未建立采样的质量/性能优胜或成本标定资格。
+已有[8B owned入口验收](owned_local_scope_validation.md)实际运行该recipe的B1与Controller各两轮。原生保留HTTP参数，研究保留request_submitted事件和真实receipt；它是原源码下的有限功能证据，不证明质量/性能优胜，也不代替本轮scope-only清理后的测试。

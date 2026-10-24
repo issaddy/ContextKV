@@ -60,7 +60,7 @@ CPU 测试提取固定源码并应用本仓实际 patch，覆盖严格容量边�
 
 ```sh
 python -m engine_patches.observation_probe \
-  --config configs/hardware_stage_controller.yaml --base-url http://127.0.0.1:30001 \
+  --config configs/qwen3_8b_scope.example.yaml --base-url http://127.0.0.1:30001 \
   --model-path /绝对路径/Qwen模型 --cache-state gpu_ready \
   --report runs/admission-functional.json
 ```

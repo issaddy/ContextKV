@@ -1,6 +1,6 @@
 # SGLang ContextKV 协议补丁
 
-基准为 SGLang `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。`0001-contextkv-protocol.patch` 是基于该提交真实源码生成的可应用补丁，覆盖 14 个源文件。`source_manifest.json` 保存审查文件 SHA256；`contextkv_runtime.py` 是补丁新增模块的同内容镜像，供 CPU 合同测试。准备脚本校验二者一致。
+基准为 SGLang `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。`0001-contextkv-protocol.patch` 是基于该提交真实源码生成的可应用补丁，覆盖 15 个源文件。`source_manifest.json` 保存审查文件 SHA256；`contextkv_runtime.py` 是补丁新增模块的同内容镜像，供 CPU 合同测试。准备脚本校验二者一致。
 
 已在 macOS 完成固定源码独立下载、原文件 hash 验证、`git apply --check`、应用和 Python 语法编译。协议与树视图有 CPU 单元测试。`verification_report.json` 只记录源码验证，不汇总 GPU 实测；H200 的 GPU-only/兼容 HiCache 功能冒烟与小规模标定已运行，范围和配置见下文。完整性能、质量结论仍须独立实验报告。
 
@@ -15,7 +15,7 @@
 - retire 先阻止新请求，等待已接纳请求终态，再撤销 native 软引用并 ACK。软引用退役的 free 计数恒为零；缓存物理占用不会被假定已回收。原生已接纳请求在 RETIRING 期间可能先完成注册、再立即被退役撤销，因此 receipt 的 `session_ref_registered` 表示本次曾成功经过注册路径，不是 ACK 后仍持有引用的证明。
 - 终态 receipt 通过原生 customized-info 输出，包含真实 tracker 注册结果、cache inserted length 和 native 分层命中。实际 prefill 工作来自每次成功 worker forward 的 `extend_lens` 累计，覆盖 chunk/retraction 重算并排除 mixed batch 的 decode 行，不用 input-minus-hit 冒充真实执行工作。
 
-首版运行合同是单 GPU、TP/DP/PP=1、Python TreeCore、dense FULL、Qwen2.5-7B-Instruct 固定 revision、单条累计 SSE 流式或非流式请求、无 LoRA、默认 cache key。HiCache 的 cache 模式受支持，buffer-only、L3、外部 linker、SWA/Mamba、speculative、PD/PDMux 不在此补丁范围。HTTP client 必须先验证研究能力，绝不把 guard 字段直接提交给原生未补丁服务器。
+当前运行合同是显式 Qwen3 LocalModelScope、单 GPU、TP/DP/PP=1、Python TreeCore、dense FULL、单条累计 SSE 流式或非流式请求、无 LoRA、默认 cache key。旧Qwen2.5-7B下载/启动/runtime fallback已删除，不再支持该模型的新运行；历史源码/GPU记录只作已有机制证据，不能作为新模型校准。HiCache 的 cache 模式受支持，buffer-only、L3、外部 linker、SWA/Mamba、speculative、PD/PDMux 不在此补丁范围。HTTP client 必须先验证研究能力，绝不把 guard 字段直接提交给原生未补丁服务器。
 
 ## 准备与启动
 
@@ -36,28 +36,28 @@ SGLANG_BUILD_RUST_EXTS=none python -m pip install -e vendor/sglang/python
 
 Python TreeCore 运行合同可使用固定 [`python/setup.py`](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/setup.py) 支持的 `SGLANG_BUILD_RUST_EXTS=none` 跳过 Rust 扩展编译，无需为本课题构建 Rust TreeCore。
 
-固定源码的 `python/pyproject.toml` 实际声明 `torch==2.14.1`、`transformers==5.19.0`、`tokenizers==0.23.2`；文件原 hash 纳入 `source_manifest.json`，来源与模型 config hash 另见 `model_manifest.json`。这是一份明确依赖来源的安装入口，未在当前 macOS 环境验证整套 CUDA 构建。正式运行应冻结 Linux 环境包清单、驱动和编译器版本。
+固定源码的 `python/pyproject.toml` 实际声明 `torch==2.14.1`、`transformers==5.19.0`、`tokenizers==0.23.2`；文件原 SHA256 `8a176848d601510b3557ece2cf9e37d3fd449f5eca2d469cf34d7078b103bc0c` 纳入 `source_manifest.json`；依赖的来源是同一固定提交的 `python/pyproject.toml`。已删旧模型专用 `model_manifest.json`，模型配置/库存身份直接复用 `configs/model_scopes/` 的显式本地记录，不维护第二套清单。这是一份明确依赖来源的安装入口，未在当前 macOS 环境验证整套 CUDA 构建。正式运行应冻结 Linux 环境包清单、驱动和编译器版本。
 
-在控制器和服务端使用相同 tokenizer 栈，从本地固定模型快照生成指纹：
+使用用户已经提供的 Qwen3 权重，不下载任何生成模型。先声明一个已有 scope；例如8B配置指向 `/media/ssd1/qwen3-8b`，32B配置指向 `/media/ssd1/qwen3-32b`：
 
 ```bash
-export CONTEXTKV_MODEL_PATH=/path/to/pinned/Qwen2.5-7B-Instruct
-export CONTEXTKV_FINGERPRINT_JSON="$(python - <<'PY'
-import json, os
-from dataclasses import asdict
-from controller.templates import HuggingFaceTemplate
-adapter = HuggingFaceTemplate(
-    os.environ['CONTEXTKV_MODEL_PATH'],
-    revision='a09a35458c702b33eeacc393d103063234e8bc28',
-    local_files_only=True,
-)
-print(json.dumps(asdict(adapter.fingerprint)))
-PY
-)"
-scripts/launch_sglang.sh --host 127.0.0.1 --port 30000
+export CONTEXTKV_MODEL_SCOPE_PATH=configs/model_scopes/qwen3-8b.local.json
+scripts/bootstrap_sglang.sh
+source .venv-sglang/bin/activate
+export CONTEXTKV_FINGERPRINT_JSON="$(cat runs/fingerprint.json)"
+# 资源/兼容路径显式选择；例值不是最佳参数或显存可用保证。
+CONTEXTKV_HICACHE_GB=8 CONTEXTKV_HICACHE_LAYOUT=layer_first \
+SGLANG_HICACHE_TMA_TRANSFER=0 scripts/launch_sglang.sh \
+  --host 127.0.0.1 --port 30000 --max-total-tokens 16384 --mem-fraction-static .8
 ```
 
-启动脚本固定模型 revision，默认开启原生 HiCache（host 容量示例 16 GB）；通过 `CONTEXTKV_ENABLE_HICACHE=0` 运行 GPU-only 对照，通过 `CONTEXTKV_HICACHE_GB` 与 `CONTEXTKV_PAGE_SIZE` 设置实验容量与页大小，`CONTEXTKV_WRITE_POLICY` 可选择原生 `write_through`、`write_through_selective`、`write_back`。默认值是启动配置，不是经验证的最佳参数。scheduler 首次建立协议时验证实际运行 tokenizer 的 backend 序列化 hash、chat template hash、配置中的 model revision 和本地 `config.json` 的固定 canonical hash；这些检查不等于对所有权重文件做过完整 hash 校验。
+`bootstrap_sglang.sh`仅安装固定SGLang/项目依赖，然后通过共享`ModelConfig/create_model_template`验证已存在的scope快照、tokenizer和模板，保存指纹。它不调用snapshot_download，不创建旧模型目录；缺少scope或本地文件会明确失败。完整源码准备可以下载SGLang/依赖，不能被误读为下载模型权重。
+
+`launch_sglang.sh`必须设置`CONTEXTKV_MODEL_SCOPE_PATH`；仅有`CONTEXTKV_MODEL_PATH`不能启动。scope拥有实际model/tokenizer路径，HF loading revision为None，不接受尾部`--revision`或另一个model/tokenizer路径。可选`CONTEXTKV_MODEL_PATH`仅作为同scope路径一致性检查，不能作为fallback。scope记录是metadata/分片库存身份，不编造HF revision，也不声称权重内容逐字验证。
+
+通过 `CONTEXTKV_ENABLE_HICACHE=0` 可运行GPU-only功能检查；`CONTEXTKV_HICACHE_GB`/`CONTEXTKV_PAGE_SIZE`设置容量与页大小，`CONTEXTKV_WRITE_POLICY`复用原生三写策略。scheduler的`get_runtime`首次初始化必须读取scope，验证实际模型设置、config/库存、tokenizer/template与fingerprint；缺scope返回`MODEL_SCOPE_REQUIRED`，不存在旧revision/config隐式支持。初始化后复用实例，不逐请求扫描/重新解析。纯CPU `ContextKVRuntime`协议容器仍可用无模型fixture测试缓存/事务机制，这不是可启动原生模型的后门。
+
+当前scope仅支持已明确的dense Qwen3、BF16、无SWA/RoPE扩展；32B的head_dim使用显式128。缓存、事务、只读观测、DMA和原生admission逻辑保持，未为退役旧模型改动这些通用机制。
 
 ## 观测与恢复合同
 
@@ -87,7 +87,7 @@ scripts/launch_sglang.sh --host 127.0.0.1 --port 30000
 先在正常研究服务器验证协议，不 flush 共享缓存：
 
 ```bash
-python -m engine_patches.smoke --config configs/sglang.yaml \
+python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml \
   --report runs/sglang-smoke.json
 ```
 
@@ -98,13 +98,13 @@ python -m engine_patches.smoke --config configs/sglang.yaml \
 ```bash
 CONTEXTKV_ENABLE_PROFILING=1 CONTEXTKV_SAMPLE_POOL=1 \
   scripts/launch_sglang.sh --host 127.0.0.1 --port 30001
-python -m profiling.sglang_probe --config configs/sglang.yaml --base-url http://127.0.0.1:30001 \
+python -m profiling.sglang_probe --config configs/qwen3_8b_scope.example.yaml --base-url http://127.0.0.1:30001 \
   --output runs/calibration.jsonl --lengths 1024,4096,8192 \
   --prefix-fractions 0,0.5,0.99 --outputs 128,512 --concurrency 1,4 \
   --cache-states cold,gpu_ready,host_only --warmup 1 --repetitions 3
 ```
 
-设置 `CONTEXTKV_MODEL_PATH` 指向固定模型目录，或给两个 CLI 传 `--model-path`。客户端本地 tokenizer 与引擎必须一致。正式标定前先用 `--lengths 128 --prefix-fractions 0,0.5 --outputs 8 --concurrency 1 --repetitions 1` 冒烟。
+配置中的 `model.scope_path` 与服务端 `CONTEXTKV_MODEL_SCOPE_PATH`必须指向同一显式Qwen3身份；客户端本地tokenizer与引擎必须一致。不要通过`--model-path`绕过scope或重用旧模型的成本产物。正式标定前先用 `--lengths 128 --prefix-fractions 0,0.5 --outputs 8 --concurrency 1 --repetitions 1` 冒烟。
 
 `/context/profiling/prepare` 默认禁用，并仅在空闲专用实例接受操作。cold 调用原生 cache flush 并更新 restart identity；gpu_ready 由普通原生生成暖前缀并 settle 写入；host_only 在暖前缀后经原生 write ACK、软引用退役和 eviction 构造。每轮测量前后均在专用实例 settle 写 ACK，前游标排除暖缓存传输，后游标包含本轮生成写回；它不进入 server request 阶段耗时。客户端随后用只读报价核实**实际**前缀和页边界，容量/写策略不满足时停止，不能用标签伪称“冷/暖/host”。GPU-only 服务须省略 host_only。write_through_selective 若未保存 host 前缀也会显式失败，不能误记为 host 测量。
 
@@ -135,7 +135,7 @@ SGLANG_HICACHE_TMA_TRANSFER=0 CONTEXTKV_ENABLE_PROFILING=1 \
 ## C：受控生命周期归因验收
 
 ```bash
-python -m engine_patches.lifecycle_probe --config configs/sglang.yaml \
+python -m engine_patches.lifecycle_probe --config configs/qwen3_8b_scope.example.yaml \
   --base-url http://127.0.0.1:30001 --tiers gpu,host \
   --shared-tokens 128 --branch-tokens 128 --report runs/lifecycle-paired.json
 ```
@@ -213,3 +213,7 @@ scripts/launch_sglang.sh --max-total-tokens 16384 --port 30000
 ## 可选原生 admission 诊断
 
 `CONTEXTKV_ENABLE_PROFILING=1` 与 `CONTEXTKV_ADMISSION_DIAGNOSTICS=1` 同时开启后，guarded 请求的 terminal event 保存原生 receive/首次 forward/first-token/completion 时间及实际访问 gate 的有限预算摘要。真实加入 `can_run_list` 决定接受结果；返回 `NO_TOKEN` 也可能表示加入后预算耗尽。默认关闭，旧 cache identity/receipt 不变。详见 [诊断合同与本地验证](../docs/native_admission_diagnostic.md)。本次增量尚待受控 GPU 验收，不覆盖此前补丁已完成的硬件证据。
+
+## 当前模型入口清理的验证边界
+
+Qwen3-only 补丁 SHA256 为 `579324222b2c620aac06de6101f5203991c797c336ce5542306e72aafcd450ea`，上游仍固定 `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。本轮利用已核验的本地上游原件完成全部原SHA检查、正向应用、反向check、15个patch文件语法检查和runtime/scope镜像一致性；没有下载或运行旧模型，没有远端/GPU操作。相关141项engine CPU合同、shell语法与Ruff通过，包括无scope拒绝、错误模型scope拒绝和真实shell参数转发。`verification_report.json`仍只表示source-only，`gpu_runtime_tested=false`；既有Qwen3功能记录不能自动视为这一新入口清理版本已部署验收。

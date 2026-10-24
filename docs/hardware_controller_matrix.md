@@ -1,5 +1,7 @@
 # Cloud dev 控制器硬件子矩阵：16 次运行诊断
 
+> 历史只读报告。固定7B实验入口与配置已删除，不再运行本矩阵；当前工程仅使用显式Qwen3 scope。以下数值保留原批次范围，不能作为新模型证据。
+
 2026-10-24，来源为 `runs/remote-h200-matrix/runs/hardware-controller-dev*/results.jsonl`、各 job manifest，以及从原始 benchmark/events 只读提取的 `runs/remote-h200-grounding/runs/matrix-compact-details.json`；派生数值保存在 `runs/remote-h200-matrix/independent-summary.json`，提取脚本为 `runs/remote-h200-matrix/extract_details.py`。这批真实运行证明矩阵、流式计时、实际 receipt 和缓存遥测能够贯通，但**尚不证明质量不变条件下的方法速度收益**。
 
 ## 范围与可比条件

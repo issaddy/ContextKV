@@ -98,6 +98,8 @@ def validate_matrix(spec):
     from controller.sampling import SamplingRecipe
     from controller.config import ModelConfig
     native_present = any(m.get("kind", "controller") == "native" for m in spec["methods"])
+    if native_present and shared_config.model.scope is None:
+        raise ValueError("native matrices require a shared explicit Qwen3 model.scope_path")
     shared_context = shared_config.context
     shared_context_values = asdict(shared_context)
     shared_prompt = shared_context.system_prompt

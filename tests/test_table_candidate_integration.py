@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_model_scope import local_scope as local_scope
 
 import adapters.table_relations as relations
 from adapters.mtrag import OnlineContext, OnlineTurn
@@ -207,7 +208,7 @@ async def test_native_and_controller_share_table_annotated_input_exactly(style, 
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("style", ["all_rows", "focus_refs"])
 @pytest.mark.parametrize("structure", ["legacy", "explicit"])
-async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monkeypatch, enabled, style, structure):
+async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monkeypatch, enabled, style, structure, local_scope):
     import bench.experiments as experiments
     import bench.native_baseline as native_module
     import controller.cli as cli
@@ -215,7 +216,7 @@ async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monk
     split.write_text(json.dumps({"dev": ["session-a"], "test": ["session-b"]}))
     manifest.write_text("{}")
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps({"context": {"table_relations": enabled, "table_annotation_style": style,
+    config_path.write_text(json.dumps({"model":{"scope_path":str(local_scope.path)},"context": {"table_relations": enabled, "table_annotation_style": style,
                                                   "table_structure_mode": structure}}))
     spec = {"schema_version": 1, "input": str(Path(__file__).parent / "fixtures/mtrag_small.jsonl"),
         "domain": "all", "split_manifest": str(split), "protocols": ["P2"], "concurrency": [1], "seeds": [42],
@@ -254,6 +255,7 @@ def test_native_cli_keeps_explicit_style_separate_from_enable_flag(monkeypatch, 
             unfinished_turns=0, timed_out_sessions=(), session_makespans=(), time_origin="fixture")
     monkeypatch.setattr(native_module, "_run", fake_run)
     argv = ["unused.jsonl", "--baseline", "B0", "--engine-manifest", "unused.json",
+            "--run-config", "unused-scope-config.yaml",
             "--table-annotation-style", "focus_refs", "--table-structure-mode", "explicit"]
     if enabled:
         argv.append("--table-relations")

@@ -75,7 +75,7 @@ python -m bench.retrieval_eval evaluate \
 
 ```bash
 python -m controller.cli \
-  --config configs/hardware_dev_controller.yaml \
+  --config configs/qwen3_8b_scope.example.yaml \
   --state-dir runs/hybrid-p3-controller \
   bench data/mtrag/RAG.jsonl --protocol P3 --domain cloud \
   --split-manifest data/mtrag/split_manifest.json --split dev \

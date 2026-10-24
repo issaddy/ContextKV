@@ -33,8 +33,8 @@ from controller.candidates import CandidatePolicy, build_candidates
 from controller.schema import ClientTiming, SessionSnapshot, TurnRecord
 from controller.sampling import SamplingRecipe, bound_recipe, request_sampling
 from controller.serialization import to_jsonable
-from controller.templates import HuggingFaceTemplate, Template
-from profiling.common import ENGINE_COMMIT, MODEL_REVISION
+from controller.templates import Template
+from profiling.common import ENGINE_COMMIT, LEGACY_MODEL_REVISION
 
 
 class NativeProtocolError(RuntimeError):
@@ -87,7 +87,7 @@ class NativeCloseDispatch:
 def validate_engine_manifest(manifest: Mapping[str, Any], baseline: str,
                              template: Template | None = None, *, model_scope=None,
                              sampling: SamplingRecipe | None = None) -> list[str]:
-    """Check explicit operator provenance; this is not remote commit attestation."""
+    """Read-only manifest validation, including historical records; not execution permission."""
     errors = []
     if manifest.get("example_only") is True:
         errors.append("example manifest cannot authorize a formal hardware run")
@@ -95,7 +95,7 @@ def validate_engine_manifest(manifest: Mapping[str, Any], baseline: str,
         return ["baseline must be B0 or B1"]
     expected = {"engine": {"base_commit": ENGINE_COMMIT, "research_patch_applied": False,
                            "tree_backend": "python"},
-                "model": {"name": "Qwen/Qwen2.5-7B-Instruct", "revision": MODEL_REVISION,
+                "model": {"name": "Qwen/Qwen2.5-7B-Instruct", "revision": LEGACY_MODEL_REVISION,
                           "dtype": "bfloat16", "kv_dtype": "bfloat16"},
                 "server": {"enable_session_radix_cache": baseline == "B1",
                            "enable_hierarchical_cache": baseline == "B1",
@@ -114,7 +114,7 @@ def validate_engine_manifest(manifest: Mapping[str, Any], baseline: str,
     if template is not None:
         expected["model"].update(tokenizer_hash=template.fingerprint.tokenizer_hash,
                                  chat_template_hash=template.fingerprint.template_hash)
-        if model_scope is None and template.fingerprint.model_revision != MODEL_REVISION:
+        if model_scope is None and template.fingerprint.model_revision != LEGACY_MODEL_REVISION:
             errors.append("template must use the pinned real model revision")
         elif model_scope is not None:
             try:
@@ -351,6 +351,8 @@ class NativeBaseline:
         if baseline not in {"B0", "B1"}:
             raise ValueError("native baseline must be B0 or B1")
         if not test_mode:
+            if model_scope is None:
+                raise ValueError("formal native generation requires an explicit Qwen3 model scope")
             errors = validate_engine_manifest(engine_manifest or {}, baseline, template,
                                               model_scope=model_scope, sampling=sampling)
             if errors:
@@ -467,12 +469,7 @@ def resolve_context_policy(args):
     """Keep the matrix's complete policy; CLI flags override only explicit values."""
     policy = getattr(args, "context_policy", None)
     if policy is None:
-        context_config = getattr(args, "context_config", None)
-        if context_config:
-            from controller.config import load_config
-            policy = load_config(context_config).context
-        else:
-            policy = CandidatePolicy()
+        policy = CandidatePolicy()
     overrides = {}
     for argument, field in (("context_length", "max_total_model_tokens"),
                             ("max_new_tokens", "max_new_tokens"),
@@ -504,18 +501,16 @@ async def _run(args):
     from controller.config import create_model_template, load_config
     shared = load_config(args.run_config) if getattr(args, "run_config", None) else None
     model = shared.model if shared is not None else getattr(args, "model_config", None)
+    if model is None or model.scope is None:
+        raise NativeProtocolError("formal native generation requires a shared explicit Qwen3 model.scope_path")
     sampling = shared.sampling if shared is not None else getattr(args, "sampling", None)
     if shared is not None:
         args.context_policy = shared.context
     policy = resolve_context_policy(args)
     manifest_path = Path(args.engine_manifest)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    scope = model.scope if model is not None else None
-    template = (create_model_template(model, model_path=getattr(args, "model_path", None),
-                    local_files_only=True if scope is not None else (args.local_files_only or model.local_files_only))
-                if model is not None else
-                HuggingFaceTemplate(getattr(args, "model_path", None) or "Qwen/Qwen2.5-7B-Instruct", MODEL_REVISION,
-                                    local_files_only=args.local_files_only))
+    scope = model.scope
+    template = create_model_template(model)
     rows = load_rows(args.input)
     if args.domain == "cloud":
         rows = [r for r in rows if r["Collection"] == CLOUD_COLLECTION]
@@ -611,11 +606,7 @@ def main(argv=None):
     parser.add_argument("--baseline", choices=["B0", "B1"], required=True)
     parser.add_argument("--base-url", default="http://127.0.0.1:30000")
     parser.add_argument("--engine-manifest", required=True)
-    parser.add_argument("--model-path", default=os.environ.get("CONTEXTKV_MODEL_PATH"),
-                        help="local pinned snapshot; identity remains checked against the model/tokenizer manifest")
-    configuration = parser.add_mutually_exclusive_group()
-    configuration.add_argument("--run-config", help="explicit shared model/context/sampling RunConfig; local models require model.scope_path")
-    configuration.add_argument("--context-config", help="reuse only the context policy from a controller run config")
+    parser.add_argument("--run-config", required=True, help="shared Qwen3 model.scope_path, context and sampling RunConfig")
     prompt = parser.add_mutually_exclusive_group()
     prompt.add_argument("--system-prompt", help="Override the shared system prompt body")
     prompt.add_argument("--system-prompt-file", help="Read the shared system prompt verbatim from UTF-8 text")
@@ -644,7 +635,6 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--context-length", type=int, help="override the shared context budget (default 32768)")
     parser.add_argument("--max-new-tokens", type=int, help="override the shared output budget (default 512)")
-    parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--audit-prompt-ids", action="store_true")
     parser.add_argument("--no-stream", action="store_true", help="disable client token chunk timing (TTFT/TPOT unavailable)")
     args = parser.parse_args(argv)
