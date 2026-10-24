@@ -33,6 +33,7 @@ class HybridRetrievalConfig:
     cpu_threads: int = 1
     selector: dict | None = None
     selector_history_turns: int = 3
+    selector_schema_mode: str = "static_v1"
 
 
 def load_retriever_config(path):
@@ -40,7 +41,7 @@ def load_retriever_config(path):
     value = HybridRetrievalConfig(**yaml.safe_load(Path(path).read_text(encoding="utf-8")))
     if value.schema_version != 1 or value.kind != "hybrid":
         raise ValueError("retriever config requires schema_version=1 and kind=hybrid")
-    from adapters.query_resolution import SOURCE_MODES
+    from adapters.query_resolution import SCHEMA_MODES, SOURCE_MODES
     if value.query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", *SOURCE_MODES}:
         raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
     if value.stage not in {"dense", "hybrid", "hybrid_rerank"}:
@@ -56,8 +57,12 @@ def load_retriever_config(path):
         SelectorConfig(**value.selector)
         if value.selector_history_turns < 1:
             raise ValueError("selector_history_turns must be positive")
+        if value.selector_schema_mode not in SCHEMA_MODES:
+            raise ValueError("unknown selector schema mode")
     elif value.selector is not None:
         raise ValueError("selector config is only used by explicit topic selector modes")
+    elif value.selector_schema_mode != "static_v1":
+        raise ValueError("selector_schema_mode is only used by explicit topic selector modes")
     if value.stage == "hybrid_rerank" and not value.reranker_path:
         raise ValueError("hybrid_rerank requires reranker_path")
     if value.dtype not in {"float32", "float16", "bfloat16"}:
@@ -97,7 +102,7 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
             from adapters.query_resolution import TopicResolver
             from adapters.query_selector import OpenAICompletionClient, SelectorConfig
             resolver = TopicResolver(OpenAICompletionClient(SelectorConfig(**config.selector)), config.query_mode,
-                                     history_turns=config.selector_history_turns)
+                                     history_turns=config.selector_history_turns, schema_mode=config.selector_schema_mode)
         result = HybridRetriever(sparse, dense, encoder, reranker, query_mode=config.query_mode,
             stage=config.stage, candidate_k=config.candidate_k, rerank_k=config.rerank_k, rrf_k=config.rrf_k,
             query_fusion=config.query_fusion,

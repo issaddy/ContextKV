@@ -6,7 +6,7 @@ import pytest
 
 from adapters.mtrag import OnlineMessage, OnlineTurn
 from adapters.query_resolution import (PriorContext, PriorSource, TopicResolver, candidates,
-    controller_context_provider, native_context_provider, snapshot_context)
+    controller_context_provider, native_context_provider, selection_response_format, snapshot_context)
 from adapters.query_selector import CompletionResult
 from controller.evidence import make_evidence
 from controller.mock_engine import MockEngine
@@ -142,9 +142,10 @@ def test_unknown_ids_or_invalid_model_structure_remain_raw_and_use_original_quer
 
 @pytest.mark.parametrize("status,finish", [("completed", "length"), ("completed", None),
                                            ("failed", None), ("input_over_budget", None)])
-def test_truncated_failed_and_overbudget_selector_do_not_change_query(status, finish):
+@pytest.mark.parametrize("schema_mode", ["static_v1", "enum_v2"])
+def test_truncated_failed_and_overbudget_selector_do_not_change_query(status, finish, schema_mode):
     turn, context = fixture()
-    result = TopicResolver(SelectingClient("{}", finish=finish, status=status)).resolve(turn, context)
+    result = TopicResolver(SelectingClient("{}", finish=finish, status=status), schema_mode=schema_mode).resolve(turn, context)
     assert result["text"] == turn.query
     assert result["model_called"] == (status != "input_over_budget")
 
@@ -183,3 +184,67 @@ async def test_controller_provider_reads_real_committed_state_without_creating_s
     assert context.sources == (PriorSource(source, (1,)),)
     assert store.get_snapshot("run:s") == before
     await service.aclose()
+
+
+def test_enum_mode_changes_only_response_schema_not_messages_or_candidates():
+    from adapters.query_resolution import ENUM_VERSION, RESPONSE_FORMAT, VERSION
+    turn, context = fixture()
+    clients = [SelectingClient(), SelectingClient()]
+    traces = [TopicResolver(client, schema_mode=mode).resolve(turn, context)
+              for client, mode in zip(clients, ("static_v1", "enum_v2"))]
+    assert clients[0].inputs[0][0] == clients[1].inputs[0][0]
+    assert clients[0].inputs[0][1]["response_format"] == RESPONSE_FORMAT
+    assert traces[0]["version"] == VERSION and "response_format" not in traces[0]
+    assert traces[1]["version"] == ENUM_VERSION and traces[1]["schema_mode"] == "enum_v2"
+    for field in ("entity_candidates", "user_turn_candidates", "excluded_unqualified", "text", "selection"):
+        assert traces[0][field] == traces[1][field]
+    response_format = traces[1]["response_format"]
+    assert response_format == clients[1].inputs[0][1]["response_format"]
+    schema = response_format["json_schema"]["schema"]
+    for field, candidates_field in (("entity_ids", "entity_candidates"), ("user_turn_ids", "user_turn_candidates")):
+        assert schema["properties"][field]["items"]["enum"] == [e["id"] for e in traces[1][candidates_field]]
+        assert "maxItems" not in schema["properties"][field]
+    assert "]u2" not in schema["properties"]["user_turn_ids"]["items"]["enum"]
+
+
+@pytest.mark.parametrize("entities,users", [([], []), ([], ["u2"]), (["e3", "e92"], [])])
+def test_enum_empty_catalog_is_only_empty_array_and_does_not_create_empty_enum(entities, users):
+    schema = selection_response_format(entities, users, schema_mode="enum_v2")["json_schema"]["schema"]
+    assert schema["required"] == ["status", "entity_ids", "user_turn_ids"]
+    for field, ids in (("entity_ids", entities), ("user_turn_ids", users)):
+        if not ids:
+            assert schema["properties"][field]["maxItems"] == 0
+            assert "enum" not in schema["properties"][field]["items"]
+            assert schema["properties"][field] == {"type": "array", "items": {"type": "string"}, "maxItems": 0}
+
+
+@pytest.mark.parametrize("selection", [
+    {"status": "resolved", "entity_ids": [], "user_turn_ids": ["]u2"]},
+    {"status": "resolved", "entity_ids": ["e999"], "user_turn_ids": ["u2"]},
+    {"status": "unchanged", "entity_ids": [], "user_turn_ids": ["u2"]},
+])
+def test_enum_host_still_rejects_bad_ids_or_state_without_repair(selection):
+    turn, context = fixture()
+    raw = json.dumps(selection)
+    trace = TopicResolver(SelectingClient(raw), schema_mode="enum_v2").resolve(turn, context)
+    assert trace["status"] == "failed" and trace["text"] == turn.query
+    assert trace["completion"]["text"] == raw
+    assert "selection" not in trace and "selected_entities" not in trace
+
+
+def test_enum_empty_sources_keep_semantic_user_selection_possible_and_first_turn_skips():
+    turn, _ = fixture()
+    client = SelectingClient({"status": "resolved", "entity_ids": [], "user_turn_ids": ["u2"]})
+    resolver = TopicResolver(client, schema_mode="enum_v2")
+    trace = resolver.resolve(turn, PriorContext())
+    assert trace["status"] == "resolved" and trace["entity_candidates"] == []
+    assert trace["response_format"]["json_schema"]["schema"]["properties"]["entity_ids"]["maxItems"] == 0
+    before = len(client.inputs)
+    skipped = resolver.resolve(replace(turn, turn=1, history=()), PriorContext())
+    assert len(client.inputs) == before and not skipped["model_called"]
+    assert "response_format" not in skipped
+
+
+def test_unknown_schema_mode_fails_at_configuration_boundary():
+    with pytest.raises(ValueError, match="schema mode"):
+        TopicResolver(SelectingClient(), schema_mode="guess")

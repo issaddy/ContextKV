@@ -1,6 +1,6 @@
 # 来源支持的对话主题解析：可选工程链与开发准备
 
-2026-10-24，基于 `e43112f` 源码定位后的最小可选工程链已实现：snapshot provider、两种ID selector、P3双路检索与离线入口、本地HTTP合同测试、全41轮冻结模型输入。**尚未执行真实selector或新增检索，不能声称话题选择或质量改善。** 不改当前 `user_topic` 默认，也不改C生命周期/host admission核心。
+2026-10-24，基于 `e43112f` 源码定位后的最小可选工程链已实现：snapshot provider、两种ID selector、P3双路检索与离线入口、本地HTTP合同测试、全41轮冻结模型输入。真实v1 selector已完成82条ledger/72次模型调用，结果及正反例见[独立验证](source_topic_selector_validation.md)；尚未执行这些新query的检索，不能声称检索或回答质量改善。不改当前 `user_topic` 默认，也不改C生命周期/host admission核心。
 
 ## 具体缺口与已有状态
 
@@ -86,6 +86,8 @@ active_turn = retriever.retrieve_turn(active_turn, resolution=resolved)
 `adapters/query_resolution.py`提供`PriorContext/PriorSource`、`snapshot_context`、controller/native provider和`TopicResolver`。`adapters/query_selector.py`提供固定配置的同步`OpenAICompletionClient`；它在已有retriever worker内调用，不依赖bench，避免循环import。真实controller CLI与Native CLI均已接入`run_sessions(...retrieval_context_provider=...)`。旧mode不构造selector、不读取该provider；原query/history不被改写。
 
 新模式为`source_topic`和`assistant_topic_unverified`。两者使用相同SYSTEM/schema、同一模型选择器、同一显式历史窗口；区别是后者允许没有来源支持的assistant实体候选，因此名称和manifest始终标注unverified。两者都要求`current_topic_rrf`，最终候选池与原文通过既有`search_current_topic`和总50重排，未另写融合器。
+
+默认结构协议仍为`static_v1`。可显式设`selector_schema_mode: enum_v2`，把每次实际目录ID写入schema enum，空目录使用`maxItems: 0`；消息、候选提取、预算和历史窗口不改。v2协议身份与每次实际schema另存，来源资格和合法ID仍不等于语义正确。[v1实际失败、v2冻结与编译probe边界](source_topic_selector_validation.md#enum_v2已实现并冻结尚无实际v2模型结果)。
 
 ```yaml
 # 路径按已有固定本地快照替换；程序不会下载模型或索引。

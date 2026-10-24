@@ -5,7 +5,8 @@ before HTTP and never truncates history, source windows, or model output.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+import math
 import time
 
 import httpx
@@ -24,6 +25,9 @@ class SelectorConfig:
     max_input_tokens: int = 8192
     max_new_tokens: int = 256
     timeout_seconds: float = 60.0
+    temperature: float = 0
+    top_p: float | None = None
+    chat_template_kwargs: dict = field(default_factory=lambda: dict(CHAT_TEMPLATE_KWARGS))
 
     def __post_init__(self):
         if not self.base_url or not self.model or not self.revision:
@@ -32,6 +36,12 @@ class SelectorConfig:
             raise ValueError("selector budgets and timeout must be positive")
         if self.max_input_tokens + self.max_new_tokens > self.context_window:
             raise ValueError("selector input/output budgets exceed context_window")
+        if (not math.isfinite(self.temperature) or self.temperature < 0
+                or (self.top_p is not None and (not math.isfinite(self.top_p) or not 0 < self.top_p <= 1))):
+            raise ValueError("invalid completion sampling parameters")
+        if not isinstance(self.chat_template_kwargs, dict) or set(self.chat_template_kwargs) & {
+                "tokenize", "return_dict", "add_generation_prompt", "truncation", "max_length", "padding"}:
+            raise ValueError("chat_template_kwargs cannot override exact input token counting")
 
 
 @dataclass(frozen=True)
@@ -61,9 +71,9 @@ class OpenAICompletionClient:
 
     @property
     def manifest(self):
-        return {**asdict(self.config), "temperature": 0, "local_files_only": True,
+        return {**asdict(self.config), "local_files_only": True,
                 "model_identity": "configured_revision_not_remote_attestation",
-                "chat_template_kwargs": dict(CHAT_TEMPLATE_KWARGS),
+                "chat_template_kwargs": dict(self.config.chat_template_kwargs),
                 "chat_template": self.tokenizer.chat_template, "http_calls": self.calls,
                 "input_policy": "count complete messages; no truncation"}
 
@@ -73,9 +83,11 @@ class OpenAICompletionClient:
         if count > self.config.max_input_tokens or count + self.config.max_new_tokens > self.config.context_window:
             return CompletionResult("input_over_budget", input_tokens=count,
                                     elapsed_ms=(time.perf_counter()-started)*1000)
-        body = {"model": self.config.model, "messages": messages, "temperature": 0,
+        body = {"model": self.config.model, "messages": messages, "temperature": self.config.temperature,
                 "max_tokens": self.config.max_new_tokens, "stream": False,
-                "chat_template_kwargs": dict(CHAT_TEMPLATE_KWARGS)}
+                "chat_template_kwargs": dict(self.config.chat_template_kwargs)}
+        if self.config.top_p is not None:
+            body["top_p"] = self.config.top_p
         if response_format is not None:
             body["response_format"] = response_format
         base = self.config.base_url.rstrip("/")
@@ -99,7 +111,7 @@ class OpenAICompletionClient:
 
     def count_input_tokens(self, messages):
         ids = self.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True,
-            return_dict=False, **CHAT_TEMPLATE_KWARGS)
+            return_dict=False, **self.config.chat_template_kwargs)
         return len(ids)
 
     def close(self):

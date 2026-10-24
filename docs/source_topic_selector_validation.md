@@ -99,8 +99,30 @@ completion elapsed包括本地计数和HTTP；wrapper还包括候选/来源构�
 
 ## 下一步：先修输出空间，再验证语义机制
 
-**优先的窄工程改动是显式`enum_v2`实验协议。** 按每次实际实体/用户候选ID构造JSON Schema enum，空集合用已验证的空array约束；保持prompt/messages、候选提取、3轮窗口、256预算和模型不变。不清洗`"]u7"`、不部分挽救失败、不改v1分数，v1仍为默认。需要实际XGrammar编译检查，且按同41全部重跑，统计raw变化、格式失败与合法但偏题的选择。动态grammar编译成本要记录；合法ID不保证正确主题，也不以任意实体数量上限掩盖枚举问题。
+**优先的窄工程改动是显式`enum_v2`实验协议。** 按每次实际实体/用户候选ID构造JSON Schema enum，空集合只允许空array；保持prompt/messages、候选提取、3轮窗口、256预算和模型不变。不清洗`"]u7"`、不部分挽救失败、不改v1分数，v1仍为默认。需要实际XGrammar编译检查，且按同41全部重跑，统计raw变化、格式失败与合法但偏题的选择。动态grammar编译成本要记录；合法ID不保证正确主题，也不以任意实体数量上限掩盖枚举问题。
 
 **语义改进应针对当前意图与产品/对象关系，而非仅合法词袋。** 本次最有价值的负例是“Cloudant和Attachments都可选却只取对象”、明确Carthage仍选CocoaPods、创建镜像却选By。接续可比较先定位相关历史轮/对象、再选择来源支持的产品—对象组合，并把“无需补全”作为实际可选决策；来源资格保持为依据，不取代意图解析。它必须在同41正反例和额外开发材料中检验，不能只调d5t4。
 
-同时保留作者固定ConvSearch-R1 3B学习式CQR基线，使用其full-history/prompt/stop格式并单列窗口、模型和成本差异，避免只围绕自制selector反复调提示。随后应将v1合法选择及失败回退完整送入实际相同预算检索，才能判断这些新增查询的价值。本报告没有读取qrels、修改生产或重写冻结输入。
+同时保留作者固定ConvSearch-R1 3B学习式CQR基线，使用其full-history/prompt/stop格式并单列窗口、模型和成本差异，避免只围绕自制selector反复调提示。随后应将v1合法选择及失败回退完整送入实际相同预算检索，才能判断这些新增查询的价值。v1分析没有读取qrels、修改生产或重写冻结输入；随后新增的可选v2实现与独立冻结如下。
+
+## enum_v2：已实现并冻结，尚无实际v2模型结果
+
+可选接口为`TopicResolver(..., schema_mode="enum_v2")`，检索配置为`selector_schema_mode: enum_v2`。默认`static_v1`沿用原静态schema、消息和trace；v2单独记录协议`source-topic-selector-enum-v2`，每次调用trace保留完整实际`response_format`。仅候选ID集合进入grammar，不把“应该选谁”、结果标签或正确产品放入约束。非空集合不增加数量上限，也不使用`uniqueItems`；重复ID仍按既有宿主规则保序去重。`resolved`必须非空、另外两状态必须空的语义合同仍在宿主检查，没有增加条件schema分支。
+
+固定XGrammar源码对非空enum生成字符串分支；空enum被明确拒绝，因此空catalog使用`items: {type: string}, maxItems: 0`，其array生成器直接返回空数组。[固定enum实现](https://github.com/mlc-ai/xgrammar/blob/82505d0d987c36a4209fb3d8571cf6b0f28b5acd/cpp/json_schema_converter.cc#L1359-L1370)、[空array实现](https://github.com/mlc-ai/xgrammar/blob/82505d0d987c36a4209fb3d8571cf6b0f28b5acd/cpp/json_schema_converter.cc#L2278-L2294)。这些特征不在固定SGLang XGrammar拒绝列表中，但源码支持不等于当次服务器成功编译。[固定检查器](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/constrained/json_schema_validation.py#L154-L185)
+
+`runs/source-topic-preparation/freeze_enum.py`从原v1 cases派生`frozen-v2`，不运行tokenizer、模型或检索。逐项验证41轮的原query、完整history/source、候选及顺序、72组messages和输入计数保持相同，仅response_format改变。新cases SHA为`963537420e1628070e88ac6dcbb66c1a5c85c03b90a05a1e7a908be37f037d0b`，旧v1文件未变。manifest显式保留temperature0、top_p未指定/请求省略、enable_thinking=false与原预算（避免把服务端sampling_defaults=model改成客户端top_p1）；execute仍重新核对本地tokens，服务端usage将用于实际对齐。全41的预算覆盖不变：24576输入预算无超限，8192敏感性仍是source14/36、unverified18/36。
+
+复用现有driver，以下命令默认只plan；由统一GPU操作者另行决定`--execute`：
+
+```bash
+python runs/source-topic-preparation/probe_enum.py \
+  --inputs runs/source-topic-preparation/frozen-v2 \
+  --tokenizer-path models/Qwen2.5-7B-Instruct
+python runs/source-topic-preparation/run_selector.py \
+  --inputs runs/source-topic-preparation/frozen-v2 \
+  --output runs/source-topic-selector-v2 \
+  --tokenizer-path models/Qwen2.5-7B-Instruct
+```
+
+短probe在当次服务Python环境内记录XGrammar/SGLang版本及runtime，CPU编译非空/全空/仅user三种schema，并检查非法用户ID无法匹配；随后仅发首个冻结真实输入和明示合成空目录两次HTTP，保存raw、finish、失败及schema检验，不回退、不重试。这两次是协议可运行性检查，不并入82条正式开发ledger或语义评分。主v2仍完整82行、72次预期调用；动态grammar编译、共享KV及输入输出差异都需进入后续成本解释。当前只完成CPU合同测试和plan，没有宣称格式或语义已改善。

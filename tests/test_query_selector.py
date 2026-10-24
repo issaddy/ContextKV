@@ -34,6 +34,7 @@ def test_complete_preserves_raw_usage_and_counts_actual_token_ids():
     assert result.status == "completed" and result.input_tokens == 12
     assert result.raw_response == raw and result.usage == raw["usage"]
     assert calls[0]["temperature"] == 0 and calls[0]["max_tokens"] == 256
+    assert "top_p" not in calls[0] and client.manifest["top_p"] is None
     assert calls[0]["response_format"] == {"type": "json_object"}
     assert calls[0]["chat_template_kwargs"] == client.manifest["chat_template_kwargs"] == {"enable_thinking": False}
     assert client.tokenizer.calls[0][1]["enable_thinking"] is False
@@ -72,7 +73,31 @@ def test_timeout_is_recorded_and_not_retried():
     client.close()
 
 
-@pytest.mark.parametrize("settings", [{"revision": ""}, {"max_input_tokens": 32768}, {"timeout_seconds": 0}])
+def test_author_sampling_and_empty_template_kwargs_match_count_http_manifest():
+    sent = []
+    def respond(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "literal"}, "finish_reason": "stop"}]})
+    tokenizer = Tokenizer()
+    client = OpenAICompletionClient(config(temperature=.7, top_p=1., max_new_tokens=4096,
+        chat_template_kwargs={}), tokenizer=tokenizer, transport=httpx.MockTransport(respond))
+    assert client.complete([{"role": "user", "content": "full QA"}]).status == "completed"
+    assert sent[0]["temperature"] == .7 and sent[0]["top_p"] == 1 and sent[0]["max_tokens"] == 4096
+    assert sent[0]["chat_template_kwargs"] == client.manifest["chat_template_kwargs"] == {}
+    assert "enable_thinking" not in tokenizer.calls[0][1]
+    assert "response_format" not in sent[0] and "stop" not in sent[0]
+    client.close()
+
+
+def test_legacy_config_missing_sampling_fields_preserves_selector_defaults():
+    legacy = SelectorConfig(**{"base_url": "http://local", "model": "model", "revision": "rev"})
+    assert legacy.temperature == 0 and legacy.top_p is None
+    assert legacy.chat_template_kwargs == {"enable_thinking": False}
+
+
+@pytest.mark.parametrize("settings", [{"revision": ""}, {"max_input_tokens": 32768}, {"timeout_seconds": 0},
+    {"temperature": -1}, {"temperature": float("nan")}, {"top_p": 0}, {"top_p": 1.1},
+    {"chat_template_kwargs": {"truncation": True}}, {"chat_template_kwargs": {"return_dict": True}}])
 def test_invalid_selector_contract_is_rejected_at_config_boundary(settings):
     values = {"base_url": "http://local", "model": "model", "revision": "rev", **settings}
     with pytest.raises(ValueError):

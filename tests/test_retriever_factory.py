@@ -116,6 +116,26 @@ def test_dense_stage_does_not_load_or_call_reranker(retriever_config, monkeypatc
     assert retriever.encoder.inputs[-1] == "session-a question 1\nsession-a question 2"
 
 
+def test_optional_enum_schema_is_wired_once_and_rejected_on_unused_modes(retriever_config, monkeypatch):
+    from adapters import query_selector
+    class NoNetworkClient:
+        manifest = {"model": "fake"}
+        def __init__(self, config):
+            self.config = config
+    monkeypatch.setattr(query_selector, "OpenAICompletionClient", NoNetworkClient)
+    value = yaml.safe_load(retriever_config.read_text())
+    value.update(query_mode="source_topic", query_fusion="current_topic_rrf", selector_schema_mode="enum_v2",
+                 selector={"base_url": "http://fake", "model": "fake", "revision": "fixed"})
+    retriever_config.write_text(yaml.safe_dump(value))
+    retriever = create_retriever("P3", config_path=retriever_config)
+    assert retriever.resolver.schema_mode == "enum_v2"
+    assert retriever.resolver.manifest["version"] == "source-topic-selector-enum-v2"
+    value.update(query_mode="current", query_fusion="single", selector=None)
+    retriever_config.write_text(yaml.safe_dump(value))
+    with pytest.raises(ValueError, match="only used"):
+        load_retriever_config(retriever_config)
+
+
 @pytest.mark.parametrize("fusion", ["single", "current_topic_rrf"])
 def test_optional_user_topic_query_is_shared_with_encoder_reranker_and_manifest(retriever_config, fusion):
     from adapters.mtrag import OnlineMessage
