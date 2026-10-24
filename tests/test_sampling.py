@@ -252,7 +252,7 @@ def test_profiler_cli_records_the_recipe_actually_given_to_its_client(tmp_path, 
 
 
 @pytest.mark.parametrize("location", ["base", "controller_candidate"])
-def test_native_matrix_refuses_nondefault_recipe_before_any_job(tmp_path, location):
+def test_native_matrix_accepts_shared_recipe_but_refuses_method_sampling_difference(tmp_path, location):
     from bench.experiments import matrix_jobs
     from test_experiments import spec
     matrix = spec(tmp_path)
@@ -263,8 +263,11 @@ def test_native_matrix_refuses_nondefault_recipe_before_any_job(tmp_path, locati
         matrix["base_config"] = str(path)
     else:
         matrix["methods"][0]["candidates"][0]["sampling"] = RECIPE.record()
-    with pytest.raises(ValueError, match="native matrix runner"):
-        matrix_jobs(matrix)
+    if location == "base":
+        assert len(matrix_jobs(matrix)) == 4
+    else:
+        with pytest.raises(ValueError, match="method sampling differs"):
+            matrix_jobs(matrix)
 
 
 def test_controller_only_matrix_allows_explicit_recipe_and_standard_native_stays_compatible(tmp_path):

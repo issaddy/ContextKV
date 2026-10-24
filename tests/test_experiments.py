@@ -53,7 +53,8 @@ def test_local_tune_freeze_test_end_to_end(tmp_path):
     assert frozen["simulation_only"] and frozen["b6"] == "B3"
     assert frozen["quality_noninferiority_established"] is False
     tests = asyncio.run(run_matrix(value, tmp_path / "test", stage="test", frozen=frozen))
-    assert {r["method"] for r in tests} == {"B3", "B6", "full"}
+    assert {r["method"] for r in tests} == {"B3", "full"}
+    assert next(r for r in tests if r["method"] == "B3")["method_aliases"] == ["B6"]
     assert all(r["status"] == "completed" for r in tests)
     assert all(set(r["summary"]["latency_by_session"]) == {"session-b"} for r in tests)
     with pytest.raises(ValueError, match="test results"):

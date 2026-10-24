@@ -106,3 +106,9 @@ phase 1 结果不能拼入后来扩大 B4/B5/Ours/P3/消融/自然容量的 spec
 资格按 `(method, candidate_index)` 在**全部预声明块上取 AND**。报告保留每块原有 session-cluster 区间，不把多次重复当作新增独立会话，也不输出合并重复的总体 CI。证据不齐与某候选完整评分后未通过是两种不同状态；前者阻止整个冻结，后者可使该候选落选。延续原行为：某个需要 tuning 的方法若没有任何合格完整候选，整体开发选择仍拒绝，不悄悄删除这个方法。所有块 AND 是预声明的开发准入规则，不是新的统计保证。
 
 格式兼容不代表跨实现结果兼容。当前 phase1 远端 `0893134` 的结果若以后评分/冻结，仍须在该源码快照下处理；本地新增 repetition/block 实现改变了 implementation manifest，不能给旧 13 格补身份或改标成同源新实验。下一轮必须保留新矩阵、新实现及其完整原始执行记录。
+
+## B6 是赢家别名，不再重复生成
+
+冻结后的执行保留赢家原来的 `method`、`source_method`、candidate、job ID 和真实产物，增加 `method_aliases: ["B6"]`；不再另建一份相同配置的 `B6-*` 生成任务。`method-aliases.json` 将 B6 映射到每个实际 workload/repetition 的 canonical job ID。这些别名不是新样本或额外重复，赢家失败时 B6 也指向同一失败，不重试、不复制成功结果。
+
+`reference_method: B6` 在冻结执行的时延比较中解析到该原赢家，comparison 仍保存真实 job ID。质量文件继续使用真实 method/job ID 和原 run/audit/scores，不能把 B6 别名再添加为一份独立评分。匹配消融只继承父配置，不继承 B6 名称；显式 repetitions 仍各自真实执行。此变更不重写历史报告；旧源码曾实际运行的 B6 副本继续作为历史原始执行保留，不能事后合并成只运行一次。

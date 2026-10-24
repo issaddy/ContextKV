@@ -246,6 +246,9 @@ class Controller:
                                        concurrency=pressure, control_ms=planning_control_ms)
                 self.events.emit("plan_selected", business_session_id=session_id, attempt_id=attempt.attempt_id,
                                  action=plan.candidate.action, reason=plan.reason, predicted=plan.predicted,
+                                 switch_margin_ms=plan.switch_margin_ms, predicted_saving_ms=plan.predicted_saving_ms,
+                                 turns_since_rebuild=planning_snap.turns_since_rebuild,
+                                 min_stable_turns=self.knobs.min_stable_turns,
                                  execution_mode=plan.execution_mode, pressure_bucket=pressure,
                                  observed_queued_requests=quotes.queued_requests if quotes else None)
                 append_failure = next((c.reason for c in candidates if c.action == "APPEND" and not c.feasible), None)

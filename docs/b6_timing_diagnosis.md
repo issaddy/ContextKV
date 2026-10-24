@@ -1,6 +1,8 @@
 # B6 phase1 的真实计时分解
 
-2026-10-24。**下一步应优先补足原生 admission/恢复就绪的时间归因，而不是先扩大 forward 拟合。** 九个控制器格的写策略差异主要落在首次 forward 之前；现有时间戳不能把这段分成纯排队、容量准入与缓存准备。本结论只定位观测与模型缺口，不指定策略赢家，也不证明某写策略或 DMA 造成了这些差异。
+**2026-10-24 后续状态：** 本文保留对`0893134`的计时分析，不回填后来观测。原生准入诊断随后已实现，并完成[264次peer实验](peer_interference_validation.md)及[32次共享前缀锁验证](shared_prefix_admission_validation.md)；不再将其列为未实现。它们确认了具体机制，但没有证明一般等待模型或完整策略优胜。当前投入顺序见[研究策略](research_strategy.md)。
+
+本批分析当时的结论是：**优先补足原生admission/恢复就绪的时间归因，而不是先扩大forward拟合。** 九个控制器格的写策略差异主要落在首次forward之前；本批时间戳不能把这段分成纯排队、容量准入与缓存准备。该结论只定位观测与模型缺口，不指定策略赢家，也不证明某写策略或DMA造成了这些差异。
 
 数据来自 `runs/remote-h200-b6-phase1/runs/b6-joint-dev-phase1-v1`：Rebuild、Fixed4096、Redundancy40 × write_through/ selective/write_back，P2、c4、seed42、单次运行，每格5会话/41轮。实际 GPU/host 池为16,384/279,040 tokens，page64；各方法有自己的生成历史。没有读取质量评分、qrels 或 test。复算入口和6项CPU合同测试为 `runs/b6-timing-decomposition/{analyze.py,test_analyze.py}`；完整逐轮、分层和配对结果保存于同目录 `analysis.json`，原始结果未改。
 
@@ -73,4 +75,4 @@ completed DMA只在整格关联，单位MiB。九格共634个独立transfer_id�
 
 SEL传输量明显更少，但WB的D2H仍接近WT且pre也下降；仅看总字节无法解释等待。H>0常与更长pre共现，也可能同时标记容量竞争、上下文长度或先前轨迹差异，不能判定恢复操作本身耗掉了这些秒数。
 
-最小下一步是在既有Req/终态观测上记录**实际尝试准入的门控、真正加入can_run_list的接受时刻、相关预算以及恢复未就绪区间**，保留同attempt/rid与服务端时钟。返回NO_TOKEN/OTHER不必然表示当前请求被拒绝，须区分“成功加入后不能再接下一条”的情况。随后才区分容量阻塞、传输就绪和调度顺序，并评估是否要改等待/联合决策模型。现forward曲线仍有价值，但本批证据不支持把更精细forward拟合列为解释写策略差异的首要动作；decode仍占完整服务成本约64%，输出长度和生成质量也不能被忽略。
+本批提出的最小下一步是记录实际准入门控、是否真正加入can_run_list及其预算，并保留同attempt/rid与原生时钟；后续[原生诊断](native_admission_diagnostic.md)及上述两个fixture已提供有限证据。返回NO_TOKEN/OTHER不必然表示当前请求被拒绝，须区分“成功加入后不能再接下一条”。一般恢复未就绪区间和异质等待仍未被这两项fixture完整分离，不应宣布整段pre已完成归因，也无需重做已经确认的共享锁布局。现forward曲线仍有价值，但本批证据不支持把更精细forward拟合列为解释写策略差异的首要动作；decode仍占完整服务成本约64%，输出长度和生成质量也不能被忽略。

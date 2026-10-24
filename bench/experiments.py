@@ -96,9 +96,8 @@ def validate_matrix(spec):
             raise ValueError("required quality evidence needs a declared reference and finite epsilon in (0,1)")
     shared_config = matrix_config(spec)
     from controller.sampling import SamplingRecipe
+    from controller.config import ModelConfig
     native_present = any(m.get("kind", "controller") == "native" for m in spec["methods"])
-    if native_present and shared_config.sampling not in (None, SamplingRecipe()):
-        raise ValueError("native matrix runner supports only the legacy standard greedy recipe")
     shared_context = shared_config.context
     shared_context_values = asdict(shared_context)
     shared_prompt = shared_context.system_prompt
@@ -106,16 +105,33 @@ def validate_matrix(spec):
     for method in spec["methods"]:
         if method.get("kind", "controller") not in {"controller", "native"}:
             raise ValueError("method kind must be controller or native")
+        if (method.get("kind") == "native" and method.get("server_profile") is not None
+                and (shared_config.model.scope is not None
+                     or shared_config.sampling not in (None, SamplingRecipe()))):
+            raise ValueError("owned native server profiles currently support only legacy 7B/greedy; use a prestarted scoped manifest")
         if method.get("server_profile") is not None and method["server_profile"] not in spec.get("server_profiles", {}):
             raise ValueError("method server_profile must name a declared owned-server profile")
         candidates = method.get("candidates", [{}])
         for candidate in candidates:
             overrides = merge(method.get("overrides", {}), candidate)
             if native_present and "sampling" in overrides:
-                requested = decode(SamplingRecipe | None, overrides["sampling"])
-                if requested not in (None, SamplingRecipe()):
-                    raise ValueError("native matrix runner supports only the legacy standard greedy recipe")
+                actual = merge(asdict(shared_config), overrides)
+                requested = decode(SamplingRecipe | None, actual["sampling"])
+                if (requested or SamplingRecipe()) != (shared_config.sampling or SamplingRecipe()):
+                    raise ValueError("method sampling differs from the shared native/controller recipe")
+            if native_present and "model" in overrides:
+                requested_model = decode(ModelConfig, merge(asdict(shared_config.model), overrides["model"]))
+                if requested_model != shared_config.model:
+                    raise ValueError("method model differs from the shared native/controller model")
             native = merge(method.get("native") or {}, overrides.get("native", {}))
+            if any(key in native for key in ("model_scope", "model_config", "sampling", "sampling_params", "run_config", "revision")):
+                raise ValueError("native model and sampling must come from the shared matrix base_config")
+            if method.get("kind") == "native" and shared_config.model.scope is not None:
+                if (native.get("model_path") is not None
+                        and Path(native["model_path"]).resolve() != Path(shared_config.model.name)):
+                    raise ValueError("native model_path differs from the shared local model scope")
+                if native.get("local_files_only") is False:
+                    raise ValueError("local model scope requires local_files_only")
             if any(key in source for source in (method, overrides, native)
                    for key in ("retriever_config", "retriever_index", "corpus")):
                 raise ValueError("retriever configuration must be shared at the matrix root")
@@ -164,12 +180,11 @@ def matrix_jobs(spec, *, split="dev", frozen=None, ablations_only=False):
     validate_matrix(spec)
     jobs = []
     methods = list(spec["methods"])
-    if frozen is not None:
-        by_id = {m["id"]: m for m in methods}
-        if frozen.get("b6"):
-            chosen = deepcopy(by_id[frozen["b6"]])
-            chosen["id"], chosen["source_method"] = "B6", frozen["b6"]
-            methods.append(chosen)
+    b6 = frozen.get("b6") if frozen is not None else None
+    if b6 and b6 not in {m["id"] for m in methods}:
+        raise ValueError("frozen B6 must identify a declared method")
+    if b6 and b6 != "B6" and any(m["id"] == "B6" for m in methods):
+        raise ValueError("B6 alias conflicts with a separately declared method")
     for method in methods:
         source_id = method.get("source_method", method["id"])
         ablation_parent = method.get("ablation_of")
@@ -197,6 +212,10 @@ def matrix_jobs(spec, *, split="dev", frozen=None, ablations_only=False):
                          "native": native, "protocol": protocol,
                          "concurrency": concurrency, "seed": seed, "status": "not_run",
                          "ablation_of": ablation_parent})
+            if method["id"] == b6 and b6 != "B6":
+                # The selected baseline is one physical run, not a second
+                # method or repetition under a publication label.
+                jobs[-1]["method_aliases"] = ["B6"]
             profile = parent.get("server_profile") if ablation_parent else method.get("server_profile")
             if profile is not None:
                 jobs[-1]["server_profile"] = profile
@@ -570,6 +589,7 @@ async def execute_job(spec, job, directory, *, native_engine_manifest=None, veri
             raise ValueError("native job requires a verified engine manifest from its owned-server executor")
         args.update(baseline=native["baseline"], base_url=native["base_url"], engine_manifest=str(observed_manifest),
                     model_path=native.get("model_path"),
+                    model_config=shared_config.model, sampling=shared_config.sampling,
                     context_policy=shared_config.context,
                     system_prompt=shared_config.context.system_prompt, system_prompt_file=None,
                     table_relations=shared_config.context.table_relations,
@@ -654,12 +674,23 @@ async def run_matrix(spec, output, *, stage="dev", frozen=None, executor=execute
                 hook_log = root / job["job_id"] / "before-job.json"
                 if hook_log.exists():
                     result["before_job"] = json.loads(hook_log.read_text())
+            if job.get("method_aliases"):
+                result["method_aliases"] = job["method_aliases"]
             result["experiment_provenance"] = run_provenance
             results.append(result)
             stream.write(json.dumps(result) + "\n")
             stream.flush()
+    aliases = {}
+    for job in jobs:
+        for alias in job.get("method_aliases", []):
+            entry = aliases.setdefault(alias, {"canonical_method": job["method"], "job_ids": [],
+                "scope": "same physical executions; not additional samples or repetitions"})
+            entry["job_ids"].append(job["job_id"])
+    if aliases:
+        (root / "method-aliases.json").write_text(json.dumps(aliases, indent=2) + "\n")
     comparisons = []
     reference = spec.get("reference_method", "B3")
+    reference = aliases.get(reference, {}).get("canonical_method", reference)
     for candidate in results:
         matches = [r for r in results if r["method"] == reference and r["status"] == "completed"
                    and _block_key(r) == _block_key(candidate)]

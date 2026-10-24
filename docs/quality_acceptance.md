@@ -1,6 +1,8 @@
 # 可执行的离线质量验收
 
-截至本轮，真实生成、完整 evidence audit、规则审核、MiniCheck、官方 evaluator 适配、HTTP judge 和人工盲审入口均已存在。缺口是实际评分及其可信接入：旧 Q0/Q1/Q2 的 P1/P2 各 123 份盲审表仍为空；本轮新增三组 P3 的 123 份空白样本。没有将 assistant 的案例检查写成人工评分，也没有执行付费 API 或启动远端 judge。
+**2026-10-24 状态补记：** 本文主体记录早期123份P3盲审包及验收接口，后续决策顺序见[研究策略](research_strategy.md)。之后已完成[615维开发评分](dev_quality_validation.md)、[533答案2665维完整评分](b6_quality_validation.md)和[Qwen3四域318答案关键论断审查](qwen3_reference_validation.md)。完整模型评分已经存在；可靠性、统计资格与真实人工盲审仍是不同的未完成事项。
+
+建包时，真实生成、完整 evidence audit、规则审核、MiniCheck、官方 evaluator 适配、HTTP judge 和人工盲审入口均已存在。旧 Q0/Q1/Q2 的 P1/P2 各 123 份盲审表及本批新增P3的123份表仍为空；该批当时没有付费API或远端judge调用。后续独立模型的实际运行不回填这些人工表，assistant案例检查也不作为人工评分。
 
 本轮补齐三个实质问题：重新导出不再覆盖已填写的盲审包；多评审者有显式聚合入口；双侧分数必须绑定各自真实运行的答案和提示，不能用同一 task 的另一份回答或同一回答的另一份提示代替。离线入口复用已有 task/conversation/query/input IDs 与 `receipt.input_hash`，只在导入时用既有 `token_hash` 核对，不新增在线 hash。
 
@@ -47,7 +49,7 @@ python -m bench.quality_acceptance \
   --output runs/quality-acceptance-dev-v2/human-acceptance.json
 ```
 
-未评分时同一入口已实际产生 `readiness.json`：每方法五维各缺 41 个 task，`dev_quality_eligible=false`，没有伪造 CI。分数不齐时仅完整维度计算配对会话 bootstrap，不删除困难 task、NA 或截断答案来凑交集。
+这个尚未回填的123份包已实际产生 `readiness.json`：每方法五维各缺41个task，`dev_quality_eligible=false`，没有伪造CI。它不是后续2665维运行的状态；后者分数完整，但12候选五维联合非劣均未成立。分数不齐时仅完整维度计算配对会话bootstrap，不删除困难task、NA或截断答案来凑交集。
 
 若要先跑零付费自评诊断，已有 `local-qwen-self-judge.json` 固定现有 7B revision 与 prompt。服务地址及 served model 名需对应实际服务器；本轮未发起此请求，性能实验期间不要并行运行 judge。
 
@@ -63,7 +65,7 @@ python -m bench.judge --audit PATH_TO_SAVED_AUDIT \
 
 `bench.quality_acceptance` 读取每方法 `run`、`audit`、可选 `scores` 与 generator model/revision。它复用 `bench.report.bind_quality_rows` 将双方评分绑定真实成功回答；audit 必须覆盖全部成功答案。audit 的 query/protocol/自身历史/检索证据核对原 `online_turn`；原生提示 IDs 直接比较，controller 则复用原 receipt 的 input_hash。新 judge 与盲审评分保留 query/input_hash，缺少绑定的旧分数仅作诊断。双方 query/conversation/protocol 必须相同，允许方法自身历史不同。payload、turn.result、audit 或 score 任一位置记录 simulation/fake_http_correctness 都阻止验收，较宽泛的硬件标签不会掩盖它。generation 失败、未完成依赖、缺分、未知/不匹配评分协议或自评也不能准入。`bench.report --reference-quality` 同样要求 `--reference-run` 并核对双方答案，单独报告不宣称正式非劣。
 
-dev 的 `dev_quality_eligible` 只表示在本次开发 evaluator 上五维 CI 均通过既定 epsilon，可作为已有 `experiments.freeze` 的人工可审查输入；本工具不自动改矩阵或 B6。模型/规则探索与已看过的会话不能被改名为正式验证。
+dev 的 `dev_quality_eligible` 只表示在本次开发 evaluator 上五维CI均通过既定epsilon。矩阵显式启用 `require_quality_evidence` 后会在freeze边界读取并核对实际评分/生成文件、完整任务及各workload/repetition块；本工具本身不修改矩阵或自动认证语义真值。模型/规则探索与已看过的会话不能被改名为正式验证。
 
 最终 `scope=heldout` 要求提供原固定 `split_manifest`，audit 的全部会话确实属于 test 且不属于 dev；还核对原运行已有 `workload.split` 及 `split_manifest_sha256`。controller 的同 UUID `manifest-*.json` 自动读取，也可用方法声明中的 `manifest` 指定保存的 sidecar；使用其现有 dataset 摘要。划分文件只在离线入口读/hash 一次。已存在的矛盾拒绝导入；没有原始摘要的旧记录仍可诊断，但不能 established。还须提供预先保存的 `frozen_protocol` JSON，其字段必须与实际配置一致：
 

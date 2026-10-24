@@ -244,7 +244,11 @@ def test_frozen_test_uses_only_winning_candidate_and_actual_test_cohort(matrix, 
     plan = sweep.build_matrix_plan(matrix.args)
     assert plan['cohort_turns'] == 1 and plan['selected_sessions'] == ['s2']
     assert sweep.execute(matrix.args, plan) == 0
-    assert len(seen) == len(launched) == len(stopped) == 6
+    assert len(seen) == len(launched) == len(stopped) == 4
+    assert sum(job.get('method_aliases') == ['B6'] for job in seen) == 2
+    aliases = read(matrix.args.output/'matrix-results/method-aliases.json')
+    assert aliases['B6']['canonical_method'] == 'Fixed'
+    assert aliases['B6']['job_ids'] == [job['job_id'] for job in seen if job['method'] == 'Fixed']
     assert all(job['candidate_index'] == 1 and job['overrides']['planner']['period'] == 4
                for job in seen if job['kind'] == 'controller')
     assert all(job['split'] == 'test' for job in seen)

@@ -284,7 +284,8 @@ def test_frozen_selection_keeps_repeat_ids_and_changed_plan_cannot_reuse_it(tmp_
     frozen = experiments.select_development(spec, results)
     jobs = experiments.matrix_jobs(spec, split='test', frozen=frozen)
     assert {(j['method'], j['repetition']) for j in jobs} == {
-        (name, repetition) for name in ('candidate', 'reference', 'B6') for repetition in (1, 2)}
+        (name, repetition) for name in ('candidate', 'reference') for repetition in (1, 2)}
+    assert all(j.get('method_aliases') == ['B6'] for j in jobs if j['method'] == 'candidate')
     assert all(j['candidate_index'] == 0 and j['split'] == 'test' and j['seed'] == 42 for j in jobs)
     changed = deepcopy(spec)
     changed['repetitions'] = [1, 2, 3]

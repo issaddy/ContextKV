@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 import time
 from typing import Any, Mapping, Sequence
+from types import SimpleNamespace
 import uuid
 
 import httpx
@@ -30,6 +31,7 @@ from bench.run_sessions import run_sessions
 from bench.quality import export_evaluation
 from controller.candidates import CandidatePolicy, build_candidates
 from controller.schema import ClientTiming, SessionSnapshot, TurnRecord
+from controller.sampling import SamplingRecipe, bound_recipe, request_sampling
 from controller.serialization import to_jsonable
 from controller.templates import HuggingFaceTemplate, Template
 from profiling.common import ENGINE_COMMIT, MODEL_REVISION
@@ -83,7 +85,8 @@ class NativeCloseDispatch:
 
 
 def validate_engine_manifest(manifest: Mapping[str, Any], baseline: str,
-                             template: Template | None = None) -> list[str]:
+                             template: Template | None = None, *, model_scope=None,
+                             sampling: SamplingRecipe | None = None) -> list[str]:
     """Check explicit operator provenance; this is not remote commit attestation."""
     errors = []
     if manifest.get("example_only") is True:
@@ -97,11 +100,36 @@ def validate_engine_manifest(manifest: Mapping[str, Any], baseline: str,
                 "server": {"enable_session_radix_cache": baseline == "B1",
                            "enable_hierarchical_cache": baseline == "B1",
                            "disable_radix_cache": False, "tp_size": 1, "dp_size": 1}}
+    if model_scope is not None:
+        expected["model"] = {"name": model_scope.model_path, "revision": None,
+            "identity_kind": "local_snapshot_metadata", "identity": model_scope.identity,
+            "dtype": "bfloat16", "kv_dtype": "bfloat16"}
+        expected["server"]["pp_size"] = 1
+        declared = manifest.get("model_scope") or {}
+        record = declared.get("record") or {}
+        if (declared.get("identity") != model_scope.identity
+                or not record.get("model_path")
+                or Path(record["model_path"]).resolve() != Path(model_scope.model_path)):
+            errors.append("model_scope must bind the same explicit local identity and canonical path")
     if template is not None:
         expected["model"].update(tokenizer_hash=template.fingerprint.tokenizer_hash,
                                  chat_template_hash=template.fingerprint.template_hash)
-        if template.fingerprint.model_revision != MODEL_REVISION:
+        if model_scope is None and template.fingerprint.model_revision != MODEL_REVISION:
             errors.append("template must use the pinned real model revision")
+        elif model_scope is not None:
+            try:
+                model_scope.verify_fingerprint(asdict(template.fingerprint))
+            except ValueError as error:
+                errors.append(str(error))
+    if model_scope is not None or sampling is not None or "sampling_recipe" in manifest:
+        try:
+            bound = bound_recipe(manifest.get("sampling_recipe"))
+            requested = sampling or SamplingRecipe()
+            legacy_greedy = model_scope is None and "sampling_recipe" not in manifest and requested == SamplingRecipe()
+            if bound != requested and not legacy_greedy:
+                errors.append("sampling_recipe must explicitly match the native request configuration")
+        except (ValueError, TypeError) as error:
+            errors.append(str(error))
     for section, fields in expected.items():
         for name, expected_value in fields.items():
             value = manifest.get(section, {}).get(name)
@@ -318,13 +346,17 @@ class NativeBaseline:
     def __init__(self, baseline: str, client: NativeSGLangClient, template: Template, *,
                  corpus_snapshot_id: str, policy: CandidatePolicy | None = None,
                  engine_manifest: Mapping[str, Any] | None = None, test_mode: bool = False,
-                 run_id: str | None = None, corpus_index: CorpusIndex | None = None):
+                 run_id: str | None = None, corpus_index: CorpusIndex | None = None,
+                 model_scope=None, sampling: SamplingRecipe | None = None):
         if baseline not in {"B0", "B1"}:
             raise ValueError("native baseline must be B0 or B1")
         if not test_mode:
-            errors = validate_engine_manifest(engine_manifest or {}, baseline, template)
+            errors = validate_engine_manifest(engine_manifest or {}, baseline, template,
+                                              model_scope=model_scope, sampling=sampling)
             if errors:
                 raise ValueError("invalid engine manifest: " + "; ".join(errors))
+            if bound_recipe(client._sampling_params) != (sampling or SamplingRecipe()):
+                raise ValueError("native client sampling differs from declared shared configuration")
         self.baseline, self.client, self.template = baseline, client, template
         self.corpus_snapshot_id = corpus_snapshot_id
         self.policy = policy or CandidatePolicy()
@@ -334,6 +366,8 @@ class NativeBaseline:
         if not test_mode and engine_manifest["server"]["context_length"] != self.policy.max_total_model_tokens:
             raise ValueError("native server context length differs from the shared model budget")
         self.engine_manifest = deepcopy(dict(engine_manifest or {}))
+        self.model_scope = model_scope
+        self.sampling = sampling
         self.test_mode = test_mode
         self.run_id = run_id or uuid.uuid4().hex
         self.snapshots: dict[str, SessionSnapshot] = {}
@@ -344,13 +378,23 @@ class NativeBaseline:
 
     async def verify_server(self) -> dict[str, Any]:
         info = await self.client.server_info()
+        self.observed_server_info = deepcopy(info)
         if not self.test_mode:
             observed = info.get("server_args", info)
+            if self.model_scope is not None:
+                try:
+                    self.model_scope.verify_native_settings(SimpleNamespace(**observed))
+                except (AttributeError, ValueError) as error:
+                    raise NativeProtocolError(f"actual native model settings differ from scope: {error}") from error
+                missing = set(self.engine_manifest["server"]) - set(observed)
+                if missing:
+                    raise NativeProtocolError(f"scoped native server_info lacks required settings: {sorted(missing)}")
+                if info.get("max_total_num_tokens") != self.engine_manifest["runtime"]["actual_kv_pool_tokens"]:
+                    raise NativeProtocolError("actual native GPU pool differs from scoped engine manifest")
             for name, expected in self.engine_manifest["server"].items():
                 # Absent fields remain operator-attested, never falsely verified.
                 if name in observed and observed[name] != expected:
                     raise NativeProtocolError(f"server_info differs from engine manifest: {name}")
-        self.observed_server_info = deepcopy(info)
         return info
 
     async def __call__(self, turn: OnlineTurn) -> NativeTurnResponse:
@@ -457,11 +501,21 @@ def resolve_context_policy(args):
 
 
 async def _run(args):
+    from controller.config import create_model_template, load_config
+    shared = load_config(args.run_config) if getattr(args, "run_config", None) else None
+    model = shared.model if shared is not None else getattr(args, "model_config", None)
+    sampling = shared.sampling if shared is not None else getattr(args, "sampling", None)
+    if shared is not None:
+        args.context_policy = shared.context
     policy = resolve_context_policy(args)
     manifest_path = Path(args.engine_manifest)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    template = HuggingFaceTemplate(getattr(args, "model_path", None) or "Qwen/Qwen2.5-7B-Instruct", MODEL_REVISION,
-                                  local_files_only=args.local_files_only)
+    scope = model.scope if model is not None else None
+    template = (create_model_template(model, model_path=getattr(args, "model_path", None),
+                    local_files_only=True if scope is not None else (args.local_files_only or model.local_files_only))
+                if model is not None else
+                HuggingFaceTemplate(getattr(args, "model_path", None) or "Qwen/Qwen2.5-7B-Instruct", MODEL_REVISION,
+                                    local_files_only=args.local_files_only))
     rows = load_rows(args.input)
     if args.domain == "cloud":
         rows = [r for r in rows if r["Collection"] == CLOUD_COLLECTION]
@@ -480,9 +534,11 @@ async def _run(args):
     corpus_index = (CorpusIndex.from_jsonl(args.evidence_corpus, corpus_id="mtrag", snapshot_id=corpus_snapshot)
                     if getattr(args, "evidence_corpus", None) else None)
     client = NativeSGLangClient(args.base_url, audit_prompt_ids=args.audit_prompt_ids,
-                               stream=not getattr(args, "no_stream", False))
+                               stream=not getattr(args, "no_stream", False),
+                               sampling_params=request_sampling(sampling) if sampling is not None else None)
     baseline = NativeBaseline(args.baseline, client, template, policy=policy,
-                              corpus_snapshot_id=corpus_snapshot, engine_manifest=manifest, corpus_index=corpus_index)
+                              corpus_snapshot_id=corpus_snapshot, engine_manifest=manifest, corpus_index=corpus_index,
+                              model_scope=scope, sampling=sampling)
     retrieval_context_provider = None
     if getattr(retriever, "requires_history_context", False):
         from adapters.query_resolution import native_context_provider
@@ -534,6 +590,9 @@ async def _run(args):
                    "cleanup_started_at": cleanup_start, "cleanup_finished_at": cleanup_end,
                    "scheduler_retirement_ack_available": False, "physical_free_measured": False,
                    "gpu_performance_validated": False, "quality_evaluated": False}
+        if shared is not None or model is not None or sampling is not None:
+            payload["shared_configuration"] = {"model": to_jsonable(model), "sampling_recipe": request_sampling(sampling),
+                                               "context": to_jsonable(policy)}
         target = output / f"native-{args.baseline}-{baseline.run_id}.json"
         target.write_text(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(json.dumps({"output": str(target.resolve()), "baseline": args.baseline,
@@ -554,7 +613,9 @@ def main(argv=None):
     parser.add_argument("--engine-manifest", required=True)
     parser.add_argument("--model-path", default=os.environ.get("CONTEXTKV_MODEL_PATH"),
                         help="local pinned snapshot; identity remains checked against the model/tokenizer manifest")
-    parser.add_argument("--context-config", help="reuse the complete context policy from a controller run config")
+    configuration = parser.add_mutually_exclusive_group()
+    configuration.add_argument("--run-config", help="explicit shared model/context/sampling RunConfig; local models require model.scope_path")
+    configuration.add_argument("--context-config", help="reuse only the context policy from a controller run config")
     prompt = parser.add_mutually_exclusive_group()
     prompt.add_argument("--system-prompt", help="Override the shared system prompt body")
     prompt.add_argument("--system-prompt-file", help="Read the shared system prompt verbatim from UTF-8 text")
