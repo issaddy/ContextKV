@@ -6,7 +6,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | `58a0a08`：969 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-host-source-topic-http-final.log |
+| 最近完整 CPU 回归 | `494e33a`：1051 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-rerank-redundancy-stable.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
 | Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 atomic_judge 模块/协议资产、table_focus、CRAFT 行文本与 GroUSE 源码，CRAFT 完整许可在 wheel 中；runs/build-atomic-focus.log；新增guided schema、query view、observation probe与client也已重建并逐字核对（runs/build-guided-wheel.log）；融合模块也已构建并逐字核对（runs/build-query-fusion-wheel.log） |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
@@ -23,7 +23,11 @@
 
 `58a0a08` 的完整回归包含业务会话host准入、准备恢复ACK、来源主题解析的两条CLI、离线来源范围及ConvSearch-R1原生格式。Ruff通过；`runs/dist-host-source-topic-http` 的wheel/sdist已核对六个相关模块、ConvSearch prompt/protocol/完整许可/NOTICE与EfficientAgent归属，未打入运行数据或权重。新增HTTP与本地tokenizer共享thinking参数，避免换模型时两种模板设置漂移。
 
-后续真实验证记录分别为[同源164轮标定比较](native_budget_targeted_validation.md)和[host准入机制](host_admission_validation.md)。前者降低回退但未证明稳定加速；后者证明固定过滤及新请求补齐，同时保留即时回访增加重算、累计D2H相同的负例。历史主题选择另完成82条记录、72次模型调用，结果解析与语义审查进行中，不据完成次数认定质量通过。
+后续真实验证记录分别为[同源164轮标定比较](native_budget_targeted_validation.md)和[host准入机制](host_admission_validation.md)。前者降低回退但未证明稳定加速；后者的过滤/补齐4次、压力与身份控制15次、中等容量双方向重访16次均已独立复核，保留业务间前缀保留收益及自身重算代价。历史主题v1/v2各82条记录、72次HTTP与语义审查已完成，enum减少结构失败但没有纠正话题选择，见[选择器验证](source_topic_selector_validation.md)。
+
+`494e33a`完整回归又覆盖[SDK原文与显式初始化合同](api_evidence.md)、[正文冗余基线](redundancy_baseline.md)、查询解析失败留痕、召回/重排查询分离及矩阵启动源码绑定。Ruff与diff检查通过；`uv build`生成的`runs/dist-rerank-redundancy-stable`已逐字核对全部包内Python模块、运行资产/许可和sdist测试/配置，不含运行数据、权重或环境文件。初次`python -m build`因本地缺该构建入口失败，日志保留；使用项目已有uv构建成功，没有为此修改依赖。新基线CLI四轮模拟演示依次REBUILD/APPEND/REBUILD/REBUILD，事件含正文分子/分母；不作硬件性能证据。
+
+独立[ConvSearch-R1 41次改写](convsearch_validation.md)、[八查询方法328条检索](frozen_query_retrieval_validation.md)及[SDK证据12次生成](api_evidence_validation.md)均已真实执行，原始输入、失败/截断分母和具体退化保留。这些硬件记录的项目源码仍为各自manifest所记的`20fef31`等版本，不能追认为包含后续新代码。召回/重排分离的新四臂及完整独立开发质量评分正在准备，最终B6与冻结test未完成。
 
 ## 已完成的 H200 集成验证
 
