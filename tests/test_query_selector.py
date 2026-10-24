@@ -35,6 +35,8 @@ def test_complete_preserves_raw_usage_and_counts_actual_token_ids():
     assert result.raw_response == raw and result.usage == raw["usage"]
     assert calls[0]["temperature"] == 0 and calls[0]["max_tokens"] == 256
     assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[0]["chat_template_kwargs"] == client.manifest["chat_template_kwargs"] == {"enable_thinking": False}
+    assert client.tokenizer.calls[0][1]["enable_thinking"] is False
     assert client.manifest["http_calls"] == 1
     client.close()
 

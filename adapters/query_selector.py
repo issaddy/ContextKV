@@ -10,6 +10,8 @@ import time
 
 import httpx
 
+CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
+
 
 @dataclass(frozen=True)
 class SelectorConfig:
@@ -61,6 +63,7 @@ class OpenAICompletionClient:
     def manifest(self):
         return {**asdict(self.config), "temperature": 0, "local_files_only": True,
                 "model_identity": "configured_revision_not_remote_attestation",
+                "chat_template_kwargs": dict(CHAT_TEMPLATE_KWARGS),
                 "chat_template": self.tokenizer.chat_template, "http_calls": self.calls,
                 "input_policy": "count complete messages; no truncation"}
 
@@ -71,7 +74,8 @@ class OpenAICompletionClient:
             return CompletionResult("input_over_budget", input_tokens=count,
                                     elapsed_ms=(time.perf_counter()-started)*1000)
         body = {"model": self.config.model, "messages": messages, "temperature": 0,
-                "max_tokens": self.config.max_new_tokens, "stream": False}
+                "max_tokens": self.config.max_new_tokens, "stream": False,
+                "chat_template_kwargs": dict(CHAT_TEMPLATE_KWARGS)}
         if response_format is not None:
             body["response_format"] = response_format
         base = self.config.base_url.rstrip("/")
@@ -95,7 +99,7 @@ class OpenAICompletionClient:
 
     def count_input_tokens(self, messages):
         ids = self.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True,
-            enable_thinking=False, return_dict=False)
+            return_dict=False, **CHAT_TEMPLATE_KWARGS)
         return len(ids)
 
     def close(self):
