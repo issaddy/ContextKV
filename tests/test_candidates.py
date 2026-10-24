@@ -91,6 +91,52 @@ def test_explicit_version_comparison_restores_both_versions():
     assert '"version":"v2"' in candidate.messages[-1].content
 
 
+@pytest.mark.parametrize("document_id,title,query,current_document", (
+    ("api", "", "What is the rapid v1 retry interval?", "rapid"),
+    ("support-guide", "Support", "How are unsupported v1 settings handled?", "unsupported"),
+))
+def test_explicit_version_revisit_does_not_match_part_of_another_document_name(
+        document_id, title, query, current_document):
+    old = make_evidence("Unrelated archived source", document_id, title=title, version="v1")
+    current = make_evidence("Current requested source", current_document, version="v1")
+    snapshot = SessionSnapshot("s", archive=(old,))
+    candidate = build_candidates(snapshot, query, (current,),
+                                 EvidencePolicy(revisit_mode="explicit"))[0]
+    assert candidate.required_blocks == candidate.visible_blocks == {current.key}
+    assert dict(candidate.evidence_resolution) == {current.key: "current_retrieval"}
+
+
+def test_unrelated_version_name_does_not_create_false_conflict_during_rebuild():
+    old_api = make_evidence("OLD_API_SOURCE", "api", version="v1")
+    new_api = make_evidence("CURRENT_API_SOURCE", "api", version="v2")
+    rapid = make_evidence("RAPID_SOURCE", "rapid", version="v1")
+    snapshot = SessionSnapshot("s")
+    first = build_candidates(snapshot, "Initial API question", (old_api,))[0]
+    snapshot = committed(first, snapshot, "Initial API question", (old_api,))
+    append, rebuild = build_candidates(snapshot, "What is the rapid v1 retry interval?",
+                                       (new_api, rapid), EvidencePolicy(revisit_mode="explicit"))
+    assert append.required_blocks == rebuild.required_blocks == {new_api.key, rapid.key}
+    assert not append.feasible and append.reason == "invalid_visible_version"
+    assert rebuild.feasible and rebuild.visible_blocks == {new_api.key, rapid.key}
+    assert "OLD_API_SOURCE" not in "".join(message.content for message in rebuild.messages)
+    assert rebuild.messages[1:3] == (
+        Message("user", "Initial API question"), Message("assistant", "Complete original answer."))
+
+
+@pytest.mark.parametrize("document_id,title,query", (
+    ("api", "", "Explain API v1"),
+    ("internal-doc", "接口说明", "解释接口说明 v1 的参数"),
+    ("docs/client-api.md", "", "Explain docs/client-api.md v1"),
+))
+def test_explicit_document_version_revisit_preserves_literal_names(document_id, title, query):
+    old = make_evidence("Archived requested source", document_id, title=title, version="v1")
+    unrelated = make_evidence("Other retrieved source", "other", version="v2")
+    candidate = build_candidates(SessionSnapshot("s", archive=(old,)), query, (unrelated,),
+                                 EvidencePolicy(revisit_mode="explicit"))[0]
+    assert candidate.feasible and candidate.required_blocks == {old.key, unrelated.key}
+    assert dict(candidate.evidence_resolution)[old.key] == "explicit_document_version"
+
+
 def test_reference_collision_extends_new_id_and_keeps_old_mapping(monkeypatch):
     a,b = make_evidence("a","a"),make_evidence("b","b")
     monkeypatch.setattr("controller.evidence.identity_hash",

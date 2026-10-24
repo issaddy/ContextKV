@@ -212,3 +212,68 @@ def test_failed_case_manifest_counts_rows_already_written(tmp_path,monkeypatch,l
     manifest=json.loads(output.with_suffix(".manifest.json").read_text())
     assert manifest["status"]=="failed" and manifest["measurement_count"]==2
     assert manifest["completed_case_measurement_count"]==0
+
+
+@pytest.mark.parametrize("existing", ["measurements", "telemetry", "manifest"])
+def test_existing_profile_artifact_is_rejected_before_engine_access(tmp_path, monkeypatch, existing):
+    from argparse import Namespace
+    import profiling.sglang_probe as module
+    output = tmp_path / "probe.jsonl"
+    paths = {"measurements": output, "telemetry": output.with_suffix(".telemetry.jsonl"),
+             "manifest": output.with_suffix(".manifest.json")}
+    paths[existing].write_bytes(b"previous run must remain unchanged\n")
+
+    def no_engine(*args, **kwargs):
+        raise AssertionError("existing run must be rejected before contacting the engine")
+
+    monkeypatch.setattr(module, "SGLangEngineClient", no_engine)
+    with pytest.raises(FileExistsError, match="new output prefix"):
+        # No valid config is needed: artifact ownership is the first boundary.
+        asyncio.run(module._run(Namespace(output=str(output), config="missing.yaml")))
+    assert paths[existing].read_bytes() == b"previous run must remain unchanged\n"
+    assert all(not path.exists() for name, path in paths.items() if name != existing)
+
+
+def test_profile_manifest_claim_precedes_cache_preparation(tmp_path, monkeypatch, local_scope):
+    from argparse import Namespace
+    from types import SimpleNamespace
+    import json
+    import profiling.sglang_probe as module
+    from controller.schema import ConfigFingerprint
+    from profiling.common import Measurement, write_measurements
+
+    class CollectorEngine(ProtocolDouble):
+        async def metrics(self, after_seq=0):
+            return {"pool": {"page_size": 1}, "cache_config": {}}
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(module, "SGLangEngineClient", lambda *args, **kwargs: CollectorEngine())
+    tokenizer = SimpleNamespace(all_special_ids=(), get_vocab=lambda: {"a": 1, "b": 2})
+    monkeypatch.setattr("controller.config.create_model_template", lambda *args, **kwargs:
+                        SimpleNamespace(tokenizer=tokenizer, fingerprint=ConfigFingerprint()))
+    calls = []
+
+    async def collected(probe, case, *, warmup, repetitions, output_path):
+        manifest = json.loads(output_path.with_suffix(".manifest.json").read_text())
+        assert manifest["status"] == "running" and manifest["run_id"] == probe.run_id
+        calls.append(probe.run_id)
+        write_measurements(output_path, [Measurement("first_token", 8, 0, 4, 1, 0,
+            10.0, "hardware", run_id=probe.run_id)])
+        return 1
+
+    monkeypatch.setattr(module, "collect_case", collected)
+    config = tmp_path / "config.yaml"
+    config.write_text(f"engine:\n  kind: sglang\nmodel:\n  scope_path: {local_scope.path}\n")
+    output = tmp_path / "probe.jsonl"
+    args = Namespace(config=str(config), runtime_manifest=None, model_path=None, base_url=None,
+        output=str(output), seed=42, lengths=(8,), prefix_fractions=(0,), outputs=(4,),
+        concurrency=(1,), cache_states=("cold",), device_prefix_tokens=None, repetitions=1, warmup=0)
+    asyncio.run(module._run(args))
+    before = {path: path.read_bytes() for path in (output, output.with_suffix(".manifest.json"))}
+    assert json.loads(before[output.with_suffix(".manifest.json")])["measurement_count"] == 1
+    with pytest.raises(FileExistsError, match="new output prefix"):
+        asyncio.run(module._run(args))
+    assert len(calls) == 1
+    assert all(path.read_bytes() == value for path, value in before.items())

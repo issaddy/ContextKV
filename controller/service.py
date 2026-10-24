@@ -89,14 +89,25 @@ class Controller:
         self._calibration_identity = None
         self._locks: dict[str, asyncio.Lock] = {}
         self._background: set[asyncio.Task] = set()
+        self._retire_requested = False
 
     def _lock(self, session_id: str):
         return self._locks.setdefault(session_id, asyncio.Lock())
 
     def _retire_background(self):
-        task = asyncio.create_task(self.epochs.flush())
+        self._retire_requested = True
+        if any(not task.done() for task in self._background):
+            return
+        task = asyncio.create_task(self._flush_retire_requests())
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+
+    async def _flush_retire_requests(self):
+        # Coalesce turn notifications while one retirement is slow. A new
+        # commit during flush still triggers a fresh durable-outbox snapshot.
+        while self._retire_requested:
+            self._retire_requested = False
+            await self.epochs.flush()
 
     async def drain(self):
         if self._background:

@@ -243,7 +243,7 @@ def resolve_required_evidence_with_reasons(query: str, current: Iterable[Evidenc
         # similarity-based restoration of arbitrary historical evidence.
         names = (block.key.document_id, block.title)
         if _mentioned(block.key.version,folded) and any(
-                name and name.casefold() in folded for name in names):
+                _mentioned(name, folded) for name in names if name):
             reasons.setdefault(block.key, "explicit_document_version")
     for matches in anchor_matches.values():
         # A configuration identifier can occur in unrelated products. Scope it

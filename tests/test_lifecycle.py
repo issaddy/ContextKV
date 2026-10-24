@@ -104,6 +104,51 @@ async def test_retire_failure_does_not_rollback_committed_answer(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_slow_retirement_coalesces_turns_and_drains_new_outbox_entries(tmp_path, monkeypatch):
+    controller, store, engine = system(tmp_path, knobs=PlannerKnobs(strategy="always_rebuild"))
+    evidence = (make_evidence("The timeout is thirty seconds", "timeout"),)
+    await controller.serve_turn("initial", "q", evidence, request_id="1")
+    await controller.drain()
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+    original = engine.retire
+
+    async def slow_retire(*args):
+        calls.append(args[2])
+        if len(calls) == 1:
+            started.set()
+            await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(engine, "retire", slow_retire)
+    try:
+        await controller.serve_turn("initial", "q2", evidence, request_id="2")
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        async def other_conversation(index):
+            session = f"peer-{index}"
+            await controller.serve_turn(session, "q", evidence, request_id="1")
+            await controller.serve_turn(session, "q2", evidence, request_id="2")
+            assert len(store.read_snapshot(session).raw_history) == 2
+
+        # Generations and commits continue while the first retirement is held.
+        await asyncio.gather(*(other_conversation(i) for i in range(6)))
+        assert len(store.outbox()) == 7
+        assert len([task for task in controller._background if not task.done()]) == 1
+        release.set()
+        await asyncio.gather(*tuple(controller._background))
+        # Entries committed after the first flush snapshot must be picked up
+        # without a new request, periodic HTTP worker or explicit final drain.
+        assert not store.outbox()
+        assert len(calls) == len(set(calls)) == 7
+        assert all(store.get_snapshot(f"peer-{i}").current_epoch is not None for i in range(6))
+    finally:
+        release.set()
+        await controller.aclose()
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_restart_rebuilds_from_committed_history(tmp_path):
     controller, store, engine = system(tmp_path)
     evidence = (make_evidence("a fact", "a"),)

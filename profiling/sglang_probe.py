@@ -201,6 +201,11 @@ async def collect_case(probe, case, *, warmup, repetitions, output_path):
 
 async def _run(args):
     from controller.config import create_model_template, load_config
+    output = Path(args.output)
+    telemetry_path = output.with_suffix(".telemetry.jsonl")
+    manifest_path = output.with_suffix(".manifest.json")
+    if any(path.exists() for path in (output, telemetry_path, manifest_path)):
+        raise FileExistsError("profile output already exists; choose a new output prefix")
     config = load_config(args.config)
     runtime_manifest = (json.loads(Path(args.runtime_manifest).read_text())
                         if args.runtime_manifest else None)
@@ -212,9 +217,8 @@ async def _run(args):
     engine = SGLangEngineClient(args.base_url or config.engine.base_url, template.fingerprint,
                                 timeout=config.engine.timeout_seconds, sampling=config.sampling, stream=False,
                                 **({"model_scope": config.model.scope.manifest()} if config.model.scope else {}))
-    output = Path(args.output)
     probe = SGLangProbe(engine, tokens, seed=args.seed,
-                       telemetry_path=output.with_suffix(".telemetry.jsonl"))
+                       telemetry_path=telemetry_path)
     try:
         info = await engine.info()
         snapshot = await engine.metrics()
@@ -249,8 +253,11 @@ async def _run(args):
                                             "cold_gpu_ready_host_only": "prepared_split_execution_drift_audited"}}
         if config.model.scope is not None:
             manifest["model_scope"] = config.model.scope.manifest()
-        manifest_path = output.with_suffix(".manifest.json")
-        manifest_path.write_text(json.dumps(manifest, indent=2)+"\n")
+        # Claim this run before any destructive cache preparation or generation.
+        # In particular, concurrent invocations cannot replace the same manifest
+        # while appending measurements with different run IDs to one file.
+        with manifest_path.open("x") as stream:
+            stream.write(json.dumps(manifest, indent=2)+"\n")
         count = 0
         try:
             for case in expanded:

@@ -111,6 +111,8 @@ async def benchmark(args, config):
     if getattr(retriever, "requires_history_context", False):
         from adapters.query_resolution import controller_context_provider
         retrieval_context_provider = controller_context_provider(service.store, run_prefix)
+    export_failures = []
+    first_export_error = None
 
     async def handle(turn):
         history = None
@@ -124,11 +126,18 @@ async def benchmark(args, config):
         else:
             evidence = tuple(to_evidence(c, corpus_snapshot) for c in turn.contexts)
             retrieval_priority = tuple(block.key for block in evidence)
-        result = await service.serve_turn(session_id, turn.query,
+        return await service.serve_turn(session_id, turn.query,
                     evidence, request_id=turn.task_id, corpus_snapshot_id=corpus_snapshot,
                     reference_history=history, retrieval_priority=retrieval_priority)
-        snapshot = service.store.read_snapshot(session_id)
-        export_evaluation(turn, result.assistant_text,
+
+    def export_result(item):
+        nonlocal first_export_error
+        if item.status != "success":
+            return
+        turn, result = item.online_turn, item.result
+        try:
+            snapshot = service.store.read_snapshot(f"{run_prefix}:{turn.conversation_id}")
+            export_evaluation(turn, result.assistant_text,
                           official_path=Path(config.state_dir) / f"official-{run_prefix}.jsonl",
                           audit_path=Path(config.state_dir) / f"audit-{run_prefix}.jsonl",
                           visible_evidence_manifest=snapshot.execution.evidence_spans,
@@ -137,7 +146,14 @@ async def benchmark(args, config):
                           branch_reason=result.branch_reason,
                           measurement_kind="simulation" if config.engine.kind == "mock" else "hardware",
                           truncated=result.truncated)
-        return result
+        except Exception as exc:
+            # Serving and the runner have committed this answer. Preserve the
+            # actual next-turn history; fail artifact delivery after saving the
+            # workload report instead of labelling generation as failed.
+            if first_export_error is None:
+                first_export_error = exc
+            export_failures.append({"conversation_id": turn.conversation_id, "task_id": turn.task_id,
+                                    "turn": turn.turn, "error": f"{type(exc).__name__}: {exc}"})
 
     try:
         manifest_path = _manifest(config, service, await service.engine.info(), args.protocol)
@@ -157,7 +173,8 @@ async def benchmark(args, config):
                                     think_time=args.think_time, arrival_rate=args.arrival_rate,
                                     seed=args.seed, retriever=retriever, drain_timeout=args.drain_timeout,
                                     retrieval_context_provider=retrieval_context_provider,
-                                    arrival_window=args.arrival_window, per_turn_timeout=args.per_turn_timeout)
+                                    arrival_window=args.arrival_window, per_turn_timeout=args.per_turn_timeout,
+                                    on_result=export_result)
         if retriever is not None:
             manifest["retrieval"] = retriever.manifest
             manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
@@ -190,6 +207,7 @@ async def benchmark(args, config):
         output = Path(config.state_dir) / f"benchmark-{run_prefix}.json"
         from .sampling import request_sampling
         payload = {"sampling_recipe": request_sampling(config.sampling), "engine_kind": config.engine.kind, "quality_evaluated": False, "report": report,
+                   "evaluation_export": {"status": "failed" if export_failures else "completed", "failures": export_failures},
                    "telemetry": {"before": telemetry_before, "after": telemetry_after},
                                 "cleanup": {"start": cleanup_start, "end": cleanup_end,
                                             "pending_retire_operations": pending_retire_operations,
@@ -205,9 +223,13 @@ async def benchmark(args, config):
         success = sum(r.status == "success" for r in report.turns)
         print(json.dumps({"output": str(output.resolve()), "success": success,
                           "failed": len(report.turns)-success, "unfinished": report.unfinished_turns,
+                          "evaluation_export_failed": len(export_failures),
                           "engine_kind": config.engine.kind}, ensure_ascii=False))
         if cleanup_error is not None:
             raise cleanup_error
+        if first_export_error is not None:
+            raise RuntimeError(f"evaluation export failed for {len(export_failures)} committed turn(s); "
+                               f"workload and export failures saved to {output}") from first_export_error
     finally:
         await service.aclose()
         service.store.close()
