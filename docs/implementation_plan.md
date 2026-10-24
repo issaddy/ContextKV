@@ -43,6 +43,8 @@
 
 最新结构证据集成回归通过1373项及6个子测试，开启真实Qwen3 tokenizer metadata；Ruff/diff通过。交换依赖边、旧APPEND账本、精确revision/cycle、无元数据兼容及预算计入均有合同检查；另用既有固定SDK包打通真实BM25索引/元数据/Qwen3分词。记录为`runs/pytest-evidence-context.log`和`runs/evidence-context-integration/sdk-v1/result.json`，没有模型/GPU调用，不能据此宣布语义质量提升。
 
+实现`c1cc617`已打包并同步容器：86模块、31资产、350个sdist文件、106测试/配置及13许可逐字核对通过；351个远端tracked条目与提交一致，CLI导入/编译通过。原生补丁未变、GPU0空闲，源码证据为`runs/remote-h200-evidence-context/`，包证据为`runs/dist-evidence-context/asset-check.json`。
+
 HTTP集成后完整回归通过1361项及6个子测试，开启真实Qwen3 tokenizer metadata，无跳过；Ruff和diff检查通过。真实CLI/TCP/BM25两轮验证了条件闭包、完整历史、旧请求重放、冲突、输入白名单与关闭，只有2次模拟生成、0次模型调用。随后补齐的启动来源事件与取消竞态由完整回归覆盖。记录在`runs/pytest-http-retrieval.log`和`runs/http-retrieval-tcp-v1/`；TCP退出完成应用清理，macOS信号退出另有1个semaphore清理警告，尚不宣称长时间资源稳定性已验证。
 
 实现`0d1ae96`已提交、打包并同步容器。wheel/sdist逐字核对86模块、31包资产（含可运行HTTP示例）、348个sdist文件及13份许可，通过且无运行数据、权重、私有环境；记录为`runs/dist-http-retrieval/asset-check.json`。容器349个tracked条目与同一提交一致，CLI导入/help和Python编译通过；原引擎补丁未改动，GPU0空闲，没有启动模型。远端公共证据位于`runs/remote-h200-http-retrieval/`。

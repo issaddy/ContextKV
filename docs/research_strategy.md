@@ -35,6 +35,8 @@ CPU结构量不等于KV驻留或毫秒，旧R输出不等于反事实A输出。1
 
 固定作者机制、许可和移植限制见[支持设计](source_bound_generation_design.md)、[精确支持地址](source_local_support_design.md)。AFTG某些模糊/跨源回绑不照搬；ReClaim训练及adapter/KV重置不在当前Qwen3简单计划中。复用应取其有效原理和正确实现条件，不按论文名称堆功能。
 
+本轮[低额外调用调研](../runs/grounding-low-call-research/README.md)只保留有明确用途的两条路线：SPIRE的结构上下文思想已用于修补显式关系的数据损失；若进一步改变单次生成的支持行为，先离线审查[LongCite](https://aclanthology.org/2025.findings-acl.264/)公开归因监督是否覆盖目标场景的条件、量词、多轮指代及无支持情况，再决定Qwen3适配。作者[固定Apache-2.0代码](https://github.com/THUDM/LongCite/tree/d7d772e39fb15357749f54a2fe1e2dce77df5255)中的首次字符串回绑、越界夹取和删异常不能照搬。低在线调用仍有教师与训练成本；当前未训练、未换权重，不将合法引用监督预设为语义修复。
+
 ## 执行顺序与停止条件
 
 1. **收束完整流程。** HTTP自动检索已复用现有主线，完成集成回归与配置文档后保持可用；实际模型接口若仍有未覆盖边界，只做最小充分验收。检索耗时计入端到端而不重复归入控制成本，缓冲HTTP响应不冒充客户端流式TTFT。研究探索不无限推迟交付。
