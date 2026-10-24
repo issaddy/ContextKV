@@ -6,7 +6,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | `5d07915`：1156 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-owned-matrix-complete.log |
+| 最近完整 CPU 回归 | `4e689eb`：1179 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-admission-client-complete.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
 | Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 atomic_judge 模块/协议资产、table_focus、CRAFT 行文本与 GroUSE 源码，CRAFT 完整许可在 wheel 中；runs/build-atomic-focus.log；新增guided schema、query view、observation probe与client也已重建并逐字核对（runs/build-guided-wheel.log）；融合模块也已构建并逐字核对（runs/build-query-fusion-wheel.log） |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
@@ -35,7 +35,13 @@
 
 真实[13格phase1](b6_joint_sweep.md)在项目`0893134`的310文件核验部署下完成 **533/533轮、0生成失败、13个length答案保留**。远端独立CPU审计13格/533轮issues=0；prepare再次核对533份完整自身QA与2725个可见正文span。实际为GPU16384、非B0 host279040、P2/c4/Q0/cap1024、host admission off、单次有序运行。前两格完成后曾在远端压缩/传输公共快照，可能与后续格host CPU/IO重叠；本次只能作开发筛查，正式计时重复应延后归档。原服务已由supervisor恢复，随后另行进入离线评价时段。
 
-本轮完整2665维Selene输入预检通过，最大input14381，加1536输出预算不超过32768，未裁证据；tokenizer元数据4096的提示保留，实际模型config位置上限131072及Llama3 RoPE已另存核对。新原生regex协议的真实评分仍在执行，尚不建立B6选择或质量非劣。原始生成位于远端`runs/b6-joint-dev-phase1-v1`，CPU审计位于`runs/b6-joint-review/h200-v1`，评价准备位于`runs/b6-quality-prep/frozen-v1`；这些记录的生成/评分环境保持0893134，未部署本地后续矩阵扩展。
+本轮完整2665维Selene输入预检通过，最大input14381，加1536输出预算不超过32768，未裁证据；tokenizer元数据4096的提示保留，实际模型config位置上限131072及Llama3 RoPE已另存核对。新原生regex协议已完成[533答案/2665维评价与独立审计](b6_quality_validation.md)，全部有效、issues=0；60维比较7项noninferior、53项inconclusive，12候选均未获得联合资格。原089入口保存readiness而未产出B6，未改门槛。原始生成位于远端`runs/b6-joint-dev-phase1-v1`，CPU审计位于`runs/b6-joint-review/h200-v1`，评价准备位于`runs/b6-quality-prep/frozen-v1`；这些记录的生成/评分环境保持0893134；之后的新版本部署不追改本批来源。
+
+`c005319`新增默认关闭的原生准入门控诊断；独立整合审查发现新info字段尚未进入typed客户端，`4e689eb`补齐默认False兼容字段和真实MockTransport合同。修复后完整1179项及6子测试、全仓Ruff通过；固定SGLang原文件校验、补丁正反应用与14文件语法检查通过。新补丁为`730ead04291bb23e5ab09ee6acb15df9225c0d1942a14dd3516f20c5a103c474`，不改变原生预算、调度或锁。已在远端核验部署321个tracked文件并完成真实完整checkout的源检查；受控并发硬件执行另存记录，源检查本身不是GPU验证。
+
+本轮包检查进一步发现sdist漏收三个`bench/examples`文件，`6d63af9`补齐package data；旧构建保留。最终`runs/dist-admission-client-complete/asset-check.json`按固定4e689eb Git树逐字核对83模块、29个wheel包内非Python资产、320个sdist tracked文件（含97测试/配置）及13个许可文件，均通过，不含运行数据、权重或环境文件。29是包内资产的完整枚举，不能与旧报告的19个限定运行资产直接比较新增数量。
+
+[369轮计时分解](b6_timing_diagnosis.md)和[联合问题模型](joint_optimization_model.md)进一步明确了下一项机制的证据要求。旧等待估计器不把候选服务插入peer事件，不能据此生成externality分数；因此先做固定两peer与A/R候选的受控fixture。该入口的本地14项CPU合同及独立审查通过，远端默认plan与全部来源核验通过；容器环境没有pytest，远端CPU测试命令未运行成功，未为重复CPU测试安装额外包。正式计划54个episode、暖机18个，216个target加48个历史seed，共264次模型请求，全部失败和未重叠记录保留；它不是自然EOS问答质量实验。
 
 ## 已完成的 H200 集成验证
 

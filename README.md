@@ -1,6 +1,6 @@
 # ContextKV
 
-面向多轮文档问答的上下文与 KV 缓存协同优化研究原型，按 [技术方案](llm_qa_context_kv_technical_plan.md) 组织。项目提供版本化证据、APPEND/REBUILD 候选、成本计划器、SQLite 双账本与 epoch 生命周期、固定 SGLang 源码补丁，以及 MTRAG 数据和实验工具。
+面向多轮文档问答的上下文与 KV 缓存协同优化研究原型，以 [技术方案](llm_qa_context_kv_technical_plan.md) 为起点，持续研究[完整交互的联合优化](docs/joint_optimization_model.md)。项目提供版本化证据、APPEND/REBUILD 候选、成本计划器、SQLite 双账本与 epoch 生命周期、固定 SGLang 源码补丁，以及 MTRAG 数据和实验工具。
 
 **可直接运行 CPU 模拟演示；固定 Qwen2.5-7B 与 SGLang 已在 H200 上通过真实 GPU/host 协议、P1/P2/P3 集成和受控生命周期验证。当前尚未建立正式质量非劣或吞吐优势结论。** 模拟数据、真实观测与限定实验结果均有明确标记，详见 [验证记录](docs/verification.md)。
 
@@ -139,7 +139,7 @@ uv run python scripts/prepare_sglang.py --source-only \
   --checkout vendor/sglang-source-check --report runs/patch-verification.json
 ```
 
-[通用自有服务器矩阵入口](docs/b6_owned_matrix.md)支持开发、冻结测试和匹配消融，并按实际写策略启动服务；系统重复与随机种子分开，质量按真实job/block绑定。已有[13格开发筛查](docs/b6_joint_sweep.md)完成533轮生成，完整独立评分仍在执行；新入口的CPU验证不能替代正式heldout结果。
+[通用自有服务器矩阵入口](docs/b6_owned_matrix.md)支持开发、冻结测试和匹配消融，并按实际写策略启动服务；系统重复与随机种子分开，质量按真实job/block绑定。已有[13格开发筛查](docs/b6_joint_validation.md)完成533轮生成和[2665维独立评分](docs/b6_quality_validation.md)，完整审计通过，但12个候选均未获得五维联合非劣资格，未选出B6。[369轮计时分解](docs/b6_timing_diagnosis.md)将主要TTFT差异定位到首次forward之前；新增[默认关闭的原生准入诊断](docs/native_admission_diagnostic.md)，进一步用受控并发检验阻塞与请求间影响。新入口的CPU验证不能替代正式heldout结果。
 
 ## 验证与正式实验边界
 
