@@ -13,6 +13,14 @@ from bench.experiments import generation_provenance, matrix_jobs, run_matrix, se
 FIXTURE = Path(__file__).parent / "fixtures/mtrag_small.jsonl"
 
 
+def completed_results(value):
+    identity = generation_provenance(value)
+    return [{**job, "status": "completed", "experiment_provenance": identity,
+             "summary": {"measurement_kind": "simulation", "timing": {
+                 "failure_fraction": 0, "turn_seconds": {"mean": 1}}, "cohort": {"unfinished_turns": 0}}}
+            for job in matrix_jobs(value)]
+
+
 def spec(tmp_path):
     split = tmp_path / "split.json"
     split.write_text(json.dumps({"dev": ["session-a"], "test": ["session-b"]}))
@@ -78,6 +86,83 @@ def test_development_generation_identity_and_later_offline_quality_gate(tmp_path
     frozen = select_development(gated, results)
     assert frozen["quality_gate_applied"]
     assert frozen["winners"]["B3"]["candidate_index"] == 1
+
+
+@pytest.mark.parametrize("relative", ["adapters/hybrid_retrieval.py", "adapters/query_views.py",
+    "controller/planner.py", "bench/run_sessions.py", "bench/report.py", "adapters/assets/convsearch_r1/prompt.txt"])
+def test_freeze_rejects_old_results_after_execution_source_or_prompt_change(tmp_path, monkeypatch, relative):
+    import bench.experiments as experiments
+    value = spec(tmp_path)
+    results = completed_results(value)
+    target = Path(experiments.__file__).resolve().parents[1]/relative
+    original = Path.read_bytes
+    # Observe changed file bytes without mutating shared repository files.
+    def changed(path):
+        return original(path)+(b"\nchanged implementation\n" if path.resolve() == target else b"")
+    monkeypatch.setattr(Path, "read_bytes", changed)
+    with pytest.raises(ValueError, match="implementation"):
+        select_development(value, results)
+
+
+def test_documentation_changes_do_not_invalidate_generation_identity(tmp_path, monkeypatch):
+    import bench.experiments as experiments
+    value = spec(tmp_path)
+    results = completed_results(value)
+    original = Path.read_bytes
+    root = Path(experiments.__file__).resolve().parents[1]
+    def docs_changed(path):
+        return original(path)+(b"\nnew research notes\n" if path.resolve().is_relative_to(root/"docs") else b"")
+    monkeypatch.setattr(Path, "read_bytes", docs_changed)
+    assert select_development(value, results)["winners"]
+    paths = results[0]["experiment_provenance"]["implementation"]["files"]
+    assert not any(p.startswith(("docs/", "tests/")) or p == "README.md" for p in paths)
+
+
+def test_legacy_unbound_source_results_cannot_be_frozen_as_current_implementation(tmp_path):
+    value = spec(tmp_path)
+    results = completed_results(value)
+    for result in results:
+        result["experiment_provenance"] = {k: v for k, v in result["experiment_provenance"].items() if k != "implementation"}
+    with pytest.raises(ValueError, match="legacy unbound"):
+        select_development(value, results)
+
+
+def test_matrix_reads_one_source_snapshot_and_reuses_existing_controller_run_manifests(tmp_path, monkeypatch):
+    import bench.experiments as experiments
+    value = spec(tmp_path)
+    calls = []
+    original = experiments.implementation_manifest
+    def counted():
+        calls.append(1)
+        return original()
+    monkeypatch.setattr(experiments, "implementation_manifest", counted)
+    results = asyncio.run(run_matrix(value, tmp_path/"one-source-read"))
+    assert len(calls) == 1  # three jobs, no extra implementation hash per job
+    recorded = json.loads((tmp_path/"one-source-read/implementation-manifest.json").read_text())
+    assert all(r["controller_source_sha256"] == recorded["controller_source_sha256"] for r in results)
+    assert all(r["experiment_provenance"]["implementation"] == recorded for r in results)
+    select_development(value, results)
+    assert len(calls) == 2  # one new snapshot for the whole selection boundary
+    results[0]["controller_source_sha256"] = "different-controller-run"
+    with pytest.raises(ValueError, match="run source manifest"):
+        select_development(value, results)
+
+
+def test_frozen_test_is_rejected_before_executor_after_adapter_change(tmp_path, monkeypatch):
+    import bench.experiments as experiments
+    value = spec(tmp_path)
+    frozen = select_development(value, completed_results(value))
+    original = experiments.implementation_manifest
+    def changed():
+        result = original()
+        result["files"]["adapters/hybrid_retrieval.py"] = "new-adapter-version"
+        return result
+    monkeypatch.setattr(experiments, "implementation_manifest", changed)
+    async def forbidden(*args):
+        pytest.fail("mismatched implementation must not start heldout execution")
+    with pytest.raises(ValueError, match="frozen development.*implementation"):
+        asyncio.run(run_matrix(value, tmp_path/"mismatched-test", stage="test", frozen=frozen, executor=forbidden))
+    assert not (tmp_path/"mismatched-test").exists()
 
 
 def test_explicit_setup_failure_is_reported_without_running_generation(tmp_path):

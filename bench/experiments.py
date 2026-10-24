@@ -174,7 +174,30 @@ def matrix_jobs(spec, *, split="dev", frozen=None, ablations_only=False):
     return jobs
 
 
-def provenance(spec):
+def implementation_manifest():
+    """Snapshot local execution sources once at a matrix/selection boundary.
+
+    Deliberately excludes Git HEAD, docs and tests. This is not attestation of
+    the remote engine or model files, whose existing manifests remain separate.
+    """
+    root = Path(__file__).resolve().parents[1]
+    controller = sorted((root / "controller").glob("*.py"))
+    paths = set(controller) | set((root / "adapters").rglob("*.py"))
+    paths.update(root / name for name in (
+        "bench/experiments.py", "bench/native_baseline.py", "bench/run_sessions.py",
+        "bench/report.py", "bench/metrics.py", "profiling/positive_prefill.py",
+        "scripts/prepare_cold_job.py", "scripts/launch_sglang.sh"))
+    paths.update(p for p in (root / "adapters/assets").rglob("*")
+                 if p.suffix in {".txt", ".json", ".jinja", ".jinja2"}
+                 and not p.name.upper().startswith(("LICENSE", "NOTICE")))
+    content = {p: p.read_bytes() for p in sorted(paths) if p.is_file()}
+    return {"schema_version": 1, "scope": "local controller/adapters and matrix execution/report sources",
+        "files": {str(p.relative_to(root)): sha256(data).hexdigest() for p, data in content.items()},
+        # Match controller.cli's existing run manifest using these same reads.
+        "controller_source_sha256": sha256(b"".join(p.name.encode() + content[p] for p in controller)).hexdigest()}
+
+
+def provenance(spec, *, implementation=None):
     config = matrix_config(spec)
     files = {spec.get("system_prompt_file"), spec.get("corpus"), spec.get("evidence_corpus"), spec.get("lifecycle", {}).get("warmup_input"), config.calibration_path,
              config.cost_model.artifact, config.cost_model.output_length_artifact}
@@ -195,14 +218,15 @@ def provenance(spec):
             # Config identity is a single experiment boundary check, never a request-path hash.
             "spec_sha256": sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest(),
             "base_config_sha256": sha256(json.dumps(asdict(config), sort_keys=True).encode()).hexdigest(),
+            "implementation": implementation if implementation is not None else implementation_manifest(),
             "external_inputs": {str(path): sha256(Path(path).read_bytes()).hexdigest() for path in sorted(p for p in files if p)}}
 
 
-def generation_provenance(spec):
+def generation_provenance(spec, *, implementation=None):
     """Offline quality eligibility can be added after generation; inputs cannot."""
     generation_spec = deepcopy(spec)
     generation_spec.get("tuning", {}).pop("quality_eligible", None)
-    return provenance(generation_spec)
+    return provenance(generation_spec, implementation=implementation)
 
 
 def select_development(spec, results):
@@ -218,9 +242,12 @@ def select_development(spec, results):
         raise ValueError("development result coverage differs from the complete matrix")
     if any(r["split"] != "dev" for r in results):
         raise ValueError("test results cannot enter development selection")
-    expected_provenance = generation_provenance(spec)
+    implementation = implementation_manifest()
+    expected_provenance = generation_provenance(spec, implementation=implementation)
     if any(r.get("experiment_provenance") != expected_provenance for r in results):
-        raise ValueError("development results belong to different or unrecorded inputs/configuration")
+        raise ValueError("development results belong to different or unrecorded inputs/configuration/implementation; legacy unbound results require a new run")
+    if any(r.get("controller_source_sha256") not in (None, implementation["controller_source_sha256"]) for r in results):
+        raise ValueError("development run source manifest differs from its matrix implementation")
     grouped = {}
     for job in expected:
         row = indexed[job["job_id"]]
@@ -251,7 +278,7 @@ def select_development(spec, results):
               and (not quality_gate or winners[m["id"]]["quality_eligible"])]
     b6 = min(simple, key=lambda name: (winners[name]["dev_mean_turn_seconds"], name)) if simple else None
     simulation = any(r["summary"]["measurement_kind"] == "simulation" for r in results if r.get("summary"))
-    return {"schema_version": 1, "selection_split": "dev", "provenance": provenance(spec),
+    return {"schema_version": 1, "selection_split": "dev", "provenance": provenance(spec, implementation=implementation),
             "winners": winners, "b6": b6, "objective": "equal_cell_weight_mean_complete_turn_seconds",
             "simulation_only": simulation, "quality_gate_applied": bool(quality_gate),
             "quality_noninferiority_established": False,
@@ -329,7 +356,13 @@ async def execute_job(spec, job, directory):
     summary["experiment_protocol"] = protocol
     (directory / "summary.json").write_text(json.dumps(summary, indent=2))
     (directory / "summary.md").write_text(markdown_report(summary))
-    return {**job, "status": "completed", "raw_output": str(output), "summary": summary}
+    result = {**job, "status": "completed", "raw_output": str(output), "summary": summary}
+    if job["kind"] == "controller":
+        manifest_path = output.with_name(output.name.replace("benchmark-", "manifest-", 1))
+        if manifest_path.is_file():
+            recorded = json.loads(manifest_path.read_text())
+            result["controller_source_sha256"] = recorded.get("controller_source_sha256")
+    return result
 
 
 async def run_matrix(spec, output, *, stage="dev", frozen=None, executor=execute_job):
@@ -337,10 +370,11 @@ async def run_matrix(spec, output, *, stage="dev", frozen=None, executor=execute
         raise ValueError("stage must be dev, test or dev_ablation")
     jobs = matrix_jobs(spec, split="dev" if stage == "dev_ablation" else stage,
                        frozen=frozen, ablations_only=stage == "dev_ablation")
-    run_provenance = generation_provenance(spec)
+    implementation = implementation_manifest()
+    run_provenance = generation_provenance(spec, implementation=implementation)
     if stage in {"test", "dev_ablation"}:
-        if frozen is None or frozen["provenance"] != provenance(spec):
-            raise ValueError("test and matched dev ablations require a frozen development selection of this exact dataset/config/split")
+        if frozen is None or frozen["provenance"] != provenance(spec, implementation=implementation):
+            raise ValueError("test and matched dev ablations require a frozen development selection of this exact dataset/config/split/implementation")
         if frozen["simulation_only"]:
             hardware = any(j["kind"] == "native" for j in jobs) or load_config(spec.get("base_config")).engine.kind != "mock"
             hardware |= any(j["overrides"].get("engine", {}).get("kind") == "sglang" for j in jobs)
@@ -351,9 +385,12 @@ async def run_matrix(spec, output, *, stage="dev", frozen=None, executor=execute
     result_path = root / "results.jsonl"
     results = []
     with result_path.open("x") as stream:
+        (root / "implementation-manifest.json").write_text(json.dumps(implementation, indent=2) + "\n")
         for job in jobs:
             try:
                 result = await executor(spec, job, root / job["job_id"])
+                if result.get("controller_source_sha256") not in (None, implementation["controller_source_sha256"]):
+                    result.update(status="failed", error="run source manifest differs from the matrix startup implementation")
             except Exception as exc:
                 result = {**job, "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
                 hook_log = root / job["job_id"] / "before-job.json"

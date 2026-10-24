@@ -306,6 +306,10 @@ dev 选择每个方法的候选，并在 `b6_eligible:true` 中选择 B6。配�
 
 每次 generation 开始时保存输入、检索/元数据、标定、原生 manifest 和配置的 provenance，离线选择拒绝用同 job ID 的旧配置结果代替新结果。dev 生成后可以离线评审并将准入表写入配置，再运行 `python -m bench.experiments freeze --config MATRIX.yaml --results runs/matrix-dev/results.jsonl --output runs/matrix-dev/quality-frozen.json`；这一步不再次生成答案。仅离线 `quality_eligible` 可以在这两步之间新增，输入或候选变更均需重新运行 dev。质量不合格的固定消融仍可保留用于分析，但不能成为 B6；可调方法须至少有一个合格候选。
 
+矩阵启动时另外采集一次`implementation-manifest.json`，绑定本地controller/adapters Python、adapter运行prompt/schema资产及矩阵执行/报告相关源码。各job复用这一份清单，不新增逐请求或逐job全树哈希；已有controller运行manifest的`controller_source_sha256`直接复用核对。freeze、test和匹配消融入口要求同一实现内容；纯docs/tests或Git HEAD变化不构成算法变化。旧结果若缺少该实现绑定，仍可用于历史诊断，但不能被当前freeze追认为同实现；不要用当前checkout给旧结果补造身份。
+
+**运行期间源码必须保持不变。** 这是启动快照和选择边界核对，不是进程隔离或连续文件监控；adapter中途被修改不会被仅覆盖controller的旧hash自动发现。它也不证明远程引擎、实际权重或依赖二进制与本地源码一致；这些继续依赖原生运行清单、部署/版本及实际fingerprint证据。没有新增resume功能或自动重用同名结果目录。
+
 匹配消融使用 `ablation_of: Ours`，只在 `overrides` 写要改变的实验开关。它不参加 dev 候选搜索，也不占用父方法的调参预算；test 从父方法 frozen winner 继承完整参数，再应用该开关，避免将默认参数的消融与调优后的完整系统比较。若要在 dev 上审查消融，先冻结父配置，再运行 `python -m bench.experiments ablate-dev --config MATRIX.yaml --frozen FROZEN.json --output runs/matched-dev`；该命令只运行匹配的消融，结果不参与原始选择。父 winner 改变后应重新运行相应消融。随附 smoke 矩阵使用这一方式，初始 dev 是 33 个 job，冻结后的 test 是 39 个 job，另行 matched dev 消融是 15 个 job。
 
 硬件矩阵通过 `kind: native`、`native: {baseline: B0/B1, base_url: ..., engine_manifest: ...}` 加入原生对照。host 三种写策略必须是实际预先启动的服务，不能靠客户端选项假装变更引擎；候选可用 `native` 覆盖其服务器和 manifest。控制器候选可以覆盖 `engine.base_url` 指向各策略服务器，从而把上下文候选与 host 策略组合一起纳入 B6 的等预算搜索。资源/model/tokenizer 必须通过真实 manifest 对齐后再作性能比较。
