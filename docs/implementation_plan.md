@@ -17,7 +17,7 @@
 
 | 工作 | 交付结果 | 验证边界 |
 |---|---|---|
-| 原生模型/采样 | B0/B1 共用 RunConfig 的 scope/context/recipe；旧 7B 兼容；新B0真实SSE入口已通过 | [8B owned B1/Controller四调用真机验收](owned_local_scope_validation.md)完成；旧13格保留，下一步先做既有轨迹CPU候选结构审计 |
+| 原生模型/采样 | B0/B1 共用 RunConfig 的 scope/context/recipe；旧 7B 兼容；新B0真实SSE入口已通过 | [8B owned B1/Controller四调用真机验收](owned_local_scope_validation.md)完成；旧13格保留；[159轮CPU候选结构审计](qwen3_candidate_opportunity.md)完成，后续仅核能改变选择的真实成本 |
 | B6 去重复 | 唯一赢家执行，B6 为 job 别名 | 不合并真实 repetitions，不复制失败/质量分，不改旧产物 |
 | 诊断与纠偏 | 记录已有收益/margin/稳定期；修正控制成本建议和文档陈旧待办 | 无新增报价/hash/模型；定向测试后一次完整回归/打包 |
 | 机制诊断及取舍 | [12题实测](source_plan_diagnostic_validation.md)：D12回答、N0、P9；全部失败/成本留存 | 实际45诊断+3接口调用；当前v2不扩159、不按原样产品化；保留单次基座；[精确支持地址](source_local_support_design.md)仅为已完成的离线表示工具 |
