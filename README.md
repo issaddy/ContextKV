@@ -48,6 +48,8 @@ curl http://127.0.0.1:8000/sessions/example/turns \
 
 事务与恢复说明见 [架构文档](docs/architecture.md)，数据和评测细节见 [数据文档](docs/data_and_evaluation.md)。论文与开源方法的原理、复用范围、适用条件及可证伪贡献见 [贡献与实验设计](docs/research_contributions.md) 和 [调研记录](docs/related_work.md)。
 
+近期扩展包括[来源支持的历史主题解析](docs/source_grounded_query_resolution.md)、[定向host/mixed标定](docs/native_budget_targeted_validation.md)和[业务会话感知host备份准入](docs/host_admission_design.md)，均保持可选。真实[主题解析](docs/source_topic_selector_validation.md)保留格式与话题偏移问题；[host准入对照](docs/host_admission_validation.md)验证了过滤、补齐和业务去重，也记录即时回访额外重算及小池无净流量收益。开源复用、当前实现与效果证据分别说明，A/B/C继续根据这些结果改进。
+
 ## 固定数据与协议
 
 ```bash

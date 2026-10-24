@@ -1,6 +1,6 @@
 # C：业务会话与版本感知的 host 备份准入
 
-2026-10-24。可选主流程已实现，默认关闭；固定源码应用、CPU 原生方法/action 顺序、HTTP 和恢复合同通过，[首轮GPU机制验收](host_admission_validation.md)已通过off/fixed两臂：备份过滤、后续补齐和host退役观测均成立，但即时回访多重算4,032 tokens、累计D2H相同。conditioned压力分支与完整负载收益尚待验证。当前补丁 SHA256 为 `0ed0295274411b9fe60415e7f48604937d84d3fc894eabd9e143b0560de7488f`。既有 epoch 退役结果不能替代本次新准入的验证。固定来源与获取摘要保存在 `runs/c-host-admission-review/sources/sources.json`。
+2026-10-24。可选主流程已实现，默认关闭；固定源码应用、CPU 原生方法/action 顺序、HTTP 和恢复合同通过，[首轮GPU机制验收](host_admission_validation.md)已通过off/fixed两臂：备份过滤、后续补齐和host退役观测均成立，但即时回访多重算4,032 tokens、累计D2H相同。随后五种压力/身份设置也完成15次真实生成：条件触发、同业务去重与大池负例成立，但小池各策略实际D2H相同；完整负载收益尚待验证。当前补丁 SHA256 为 `0ed0295274411b9fe60415e7f48604937d84d3fc894eabd9e143b0560de7488f`。既有 epoch 退役结果不能替代本次新准入的验证。固定来源与获取摘要保存在 `runs/c-host-admission-review/sources/sources.json`。
 
 ## 复用依据与实际接点
 
@@ -68,8 +68,8 @@ skip = enabled AND pressure AND N > 0 AND B + N > K
 
 ## 第二阶段计划：conditioned 和容量
 
-固定源码 `hicache_size` 为整数字段、十进制GB。当前模型每token KV为57344 bytes、page64；1GB源码预期17472 host tokens。size=0比例模式在GPU16384、ratio0.5下源码预期8256 host tokens，运行时必须读取pool，当前未在本扩展实测。[host pool 分配](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/pool_host/base.py)、[参数](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/arg_groups/fields/memory.py)。
+固定源码 `hicache_size` 为整数字段、十进制GB。当前模型每token KV为57344 bytes、page64；1GB源码预期17472 host tokens。size=0比例模式在GPU16384、ratio0.5下源码预期8256 host tokens，运行时必须读取pool；追加实测已经分别确认8256与34880，结果见[验证记录](host_admission_validation.md)。[host pool 分配](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/pool_host/base.py)、[参数](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/arg_groups/fields/memory.py)。
 
-conditioned不在首个driver执行。后续可在约8256 host池顺序生成不同业务的8192、8192-token路径，使原生备份分配实际淘汰并留下高占用；在60秒窗口内提交第三业务12288-token请求。必须先核近期eviction>0、占用≥.95、其他业务工作集>host，再检查该Req首128页允许/后64页跳过；如整节点淘汰或调度导致条件未成立，保留未覆盖结果，不人为填计数。再比较同一业务多epoch、退休旧epoch后工作集退出而物理占用不变，以及无压力允许超预算。
+conditioned不在首个driver执行；追加的独立driver已按以下计划完成真实验证。在约8256 host池顺序生成不同业务的8192、8192-token路径，使原生备份分配实际淘汰并留下高占用；在60秒窗口内提交第三业务12288-token请求。必须先核近期eviction>0、占用≥.95、其他业务工作集>host，再检查该Req首128页允许/后64页跳过；如整节点淘汰或调度导致条件未成立，保留未覆盖结果，不人为填计数。再比较同一业务多epoch、退休旧epoch后工作集退出而物理占用不变，以及无压力允许超预算。
 
 小host/启用策略改变cache identity，旧大host成本artifact不适用。首轮只有固定动作机制验收；之后实际完成时长、host恢复、额外重算与完成DMA一起报告，降低D2H不能独立证明改善。完整闭环和质量验证另做，不以实现完成代替效果验证。
