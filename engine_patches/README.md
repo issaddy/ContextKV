@@ -1,6 +1,6 @@
 # SGLang ContextKV 协议补丁
 
-基准为 SGLang `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。`0001-contextkv-protocol.patch` 是基于该提交真实源码生成的可应用补丁，覆盖 13 个源文件。`source_manifest.json` 保存审查文件 SHA256；`contextkv_runtime.py` 是补丁新增模块的同内容镜像，供 CPU 合同测试。准备脚本校验二者一致。
+基准为 SGLang `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。`0001-contextkv-protocol.patch` 是基于该提交真实源码生成的可应用补丁，覆盖 14 个源文件。`source_manifest.json` 保存审查文件 SHA256；`contextkv_runtime.py` 是补丁新增模块的同内容镜像，供 CPU 合同测试。准备脚本校验二者一致。
 
 已在 macOS 完成固定源码独立下载、原文件 hash 验证、`git apply --check`、应用和 Python 语法编译。协议与树视图有 CPU 单元测试。`verification_report.json` 只记录源码验证，不汇总 GPU 实测；H200 的 GPU-only/兼容 HiCache 功能冒烟与小规模标定已运行，范围和配置见下文。完整性能、质量结论仍须独立实验报告。
 
@@ -209,3 +209,7 @@ scripts/launch_sglang.sh --max-total-tokens 16384 --port 30000
 `host_backup_admission` 事件记录允许/跳过原因、实际新页、业务/epoch/native request identity、容量/占用与窗口统计；metrics 累计 `considered_actions`、`allowed_actions`、`skipped_actions`、允许计划/跳过的新 token 数、成功准入的新 token/pages 与 allocation-evicted host tokens；计划允许和成功准入分开。**跳过数是计划省略，不是已经节省的 DMA 字节**；DMA 仍只在原生 ACK 完成后计量。动作可能重复触及同一尚未备份路径，因此也不把这些 token 累计当作唯一物理槽。
 
 本地测试覆盖业务/多 epoch、首次匹配去重、退休仍占槽、失败请求在 terminal 后退出工作集、默认旧 wire/hash、HTTP/控制器接线、整条共享祖先先跳过后补齐、原生去重、其它 action 顺序、write_back 不过滤及分配失败/淘汰计数。测试也覆盖 chunk8192 的累计预算、部分祖先分配成功/后代失败、零新页重入和新请求补齐。固定源码 patch apply/语法检查和这些 CPU 结果不能代替 GPU DMA/锁/恢复验收。下一步先以预声明的小阈值和小 host 固定动作验证通路，再比较起始 128-page 条件/固定规则、原生三写策略与版本消融；等待、重算、host 恢复、完成 DMA 与完整延迟共同判断效果。[设计与容量边界](../docs/host_admission_design.md)；[EfficientAgent 许可和适配归属](../docs/third_party/EFFICIENTAGENT_NOTICE.md)。
+
+## 可选原生 admission 诊断
+
+`CONTEXTKV_ENABLE_PROFILING=1` 与 `CONTEXTKV_ADMISSION_DIAGNOSTICS=1` 同时开启后，guarded 请求的 terminal event 保存原生 receive/首次 forward/first-token/completion 时间及实际访问 gate 的有限预算摘要。真实加入 `can_run_list` 决定接受结果；返回 `NO_TOKEN` 也可能表示加入后预算耗尽。默认关闭，旧 cache identity/receipt 不变。详见 [诊断合同与本地验证](../docs/native_admission_diagnostic.md)。本次增量尚待受控 GPU 验收，不覆盖此前补丁已完成的硬件证据。

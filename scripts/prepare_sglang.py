@@ -105,6 +105,18 @@ def prepare(checkout: Path, source_only: bool):
             < backup.index("runtime.record_host_backup_admitted("))
     assert "contextkv_request=req" in cache
     assert "runtime.record_host_capacity_eviction(evicted)" in cache
+    policy = (checkout / "python/sglang/srt/managers/schedule_policy.py").read_text()
+    select = policy[policy.index("    def _select_prefill_admission("):
+                    policy.index("    def _commit_prefill_admission(")]
+    assert (select.index("self._check_prefill_budget(")
+            < select.index('"prefill_budget_accepted" if can_admit else "prefill_budget_rejected"')
+            < select.index("if not can_admit:"))
+    raw_prefill = scheduler[scheduler.index("    def _get_new_batch_prefill_raw("):
+                            scheduler.index("    def update_running_batch(")]
+    assert (raw_prefill.index("admitted_before = len(adder.can_run_list)")
+            < raw_prefill.index("res = adder.add_one_req(")
+            < raw_prefill.index("record_admission_outcome(req, adder, admitted_before, res)")
+            < raw_prefill.index("if res != AddReqResult.CONTINUE:"))
     return {"base_commit": commit, "patch_sha256": hashlib.sha256(PATCH.read_bytes()).hexdigest(),
             "original_source_hashes_verified": not already_applied,
             "patch_applies": True, "already_applied": already_applied,
@@ -120,6 +132,7 @@ def prepare(checkout: Path, source_only: bool):
             "host_admission_precedes_native_allocation_and_dma": True,
             "host_admitted_budget_follows_native_commit_and_pending": True,
             "host_capacity_eviction_observer_verified": True,
+            "admission_diagnostic_observes_actual_gate_and_membership": True,
             "source_only": source_only,
             "gpu_runtime_tested": False, "full_dependency_import_tested": False,
             "host_quote_supported": True,

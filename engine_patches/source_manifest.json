@@ -46,6 +46,7 @@
     "python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py",
     "python/sglang/srt/mem_cache/unified_cache/unified_tree_core_interface.py",
     "python/sglang/srt/mem_cache/unified_radix_cache.py",
-    "python/sglang/srt/mem_cache/common.py"
+    "python/sglang/srt/mem_cache/common.py",
+    "python/sglang/srt/managers/schedule_policy.py"
   ]
 }

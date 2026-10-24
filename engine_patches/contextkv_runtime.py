@@ -62,6 +62,86 @@ def native_timing(stats, output_count):
         tpot_ms=decode/(output_count-1) if decode is not None and output_count > 1 else None)
 
 
+class AdmissionDiagnostic:
+    """Per guarded Req, bounded by native reason names, emitted only at terminal.
+
+    Gate observations are not duration attribution. No cache contents or request
+    text are copied, and the native request timestamps are never resampled.
+    """
+    def __init__(self):
+        self.gates = {}
+        self.outcomes = Counter()
+
+    def observe(self, reason, snapshot):
+        row = self.gates.get(reason)
+        if row is None:
+            self.gates[reason] = dict(count=1, first=snapshot, last=snapshot)
+        else:
+            row["count"] += 1
+            row["last"] = snapshot
+
+    def finish(self, req):
+        stats = req.time_stats
+        return dict(version="native_admission_diagnostic_v1", request_id=req.rid,
+            clock="server_perf_counter_seconds", timestamps={
+                name: getattr(stats, name) or None for name in (
+                    "scheduler_recv_time", "forward_entry_time", "prefill_finished_time",
+                    "completion_time", "wait_queue_entry_time")},
+            queue_duration_s=stats.queue_duration_s,
+            queue_duration_scope="native_accumulated_wait_including_cache_preparation_and_reentry",
+            gates=self.gates, adder_outcomes=dict(self.outcomes),
+            scope="visited_native_gates_only_not_wait_duration_attribution")
+
+
+def record_admission_gate(req, adder, reason, **details):
+    diagnostic = getattr(req, "contextkv_admission_diagnostic", None)
+    if diagnostic is None:
+        return
+    # These are the live native pass budgets, including its temporary prefix
+    # pin when called from _select_prefill_admission. No match/lock/ACK here.
+    diagnostic.observe(reason, dict(observed_at=time.perf_counter(),
+        prompt_tokens=len(req.origin_input_ids), full_fill_tokens=len(req.full_untruncated_fill_ids),
+        prefix_tokens=req.prefix_len,
+        host_hit_tokens=req.host_hit_length, generated_tokens=len(req.output_ids),
+        max_new_tokens=req.sampling_params.max_new_tokens,
+        ignore_eos=req.sampling_params.ignore_eos,
+        remaining_total=adder.rem_total_tokens, remaining_current=adder.cur_rem_tokens,
+        total_offset=adder.memory_budget.total_offset, current_offset=adder.memory_budget.current_offset,
+        page_size=adder.page_size,
+        remaining_input=adder.rem_input_tokens, remaining_chunk=adder.rem_chunk_tokens,
+        new_token_ratio=adder.new_token_ratio, admitted_requests=len(adder.can_run_list),
+        budget_type=type(adder.memory_budget).__name__, **details))
+
+
+def record_admission_outcome(req, adder, admitted_before, result):
+    diagnostic = getattr(req, "contextkv_admission_diagnostic", None)
+    if diagnostic is None:
+        return
+    accepted = len(adder.can_run_list) > admitted_before and adder.can_run_list[-1] is req
+    # add_one_req's result can describe exhaustion AFTER committing this Req.
+    # Membership, not NO_TOKEN/OTHER, determines whether it was admitted.
+    outcome = ("accepted:" if accepted else "not_accepted:") + result.name
+    diagnostic.outcomes[outcome] += 1
+    record_admission_gate(req, adder, "adder_accepted" if accepted else "adder_not_accepted",
+                          return_state=result.name, accepted=accepted)
+
+
+def record_scheduler_gate(scheduler, running_batch, reason):
+    # Only the head present at this early pass gate is sampled. Do not walk or
+    # attribute the entire waiting queue to a cause that was never tested for it.
+    if not scheduler.waiting_queue:
+        return
+    req = scheduler.waiting_queue[0]
+    diagnostic = getattr(req, "contextkv_admission_diagnostic", None)
+    if diagnostic is None:
+        return
+    diagnostic.observe(reason, dict(observed_at=time.perf_counter(),
+        scope="scheduler_pass_head_observation", running_requests=len(running_batch.reqs),
+        waiting_requests=len(scheduler.waiting_queue), batch_is_full=running_batch.batch_is_full,
+        new_token_ratio=scheduler.new_token_ratio_tracker.current,
+        budget=None))  # No PrefillAdder exists at these early gates.
+
+
 class ContextKVStream:
     """Normalize only guarded native SSE snapshots; keep exact terminal text."""
     def __init__(self, incremental):
@@ -255,6 +335,8 @@ class ContextKVRuntime:
         self.event_seq = 0
         self.sample_pool_enabled = os.environ.get("CONTEXTKV_SAMPLE_POOL") == "1"
         self.profiling_enabled = os.environ.get("CONTEXTKV_ENABLE_PROFILING") == "1"
+        self.admission_diagnostics_enabled = (
+            self.profiling_enabled and os.environ.get("CONTEXTKV_ADMISSION_DIAGNOSTICS") == "1")
         self.last_pool_sample = None
         cache.contextkv_runtime = self
         self.observed_seq = 0
@@ -306,6 +388,8 @@ class ContextKVRuntime:
                     profiling_enabled=self.profiling_enabled, streaming_generation_supported=True)
         if self.host_admission.mode != "off":
             info["business_session_identity_supported"] = True
+        if self.admission_diagnostics_enabled:
+            info["admission_diagnostics_enabled"] = True
         return info
 
     def prepare(self, data):
@@ -375,6 +459,8 @@ class ContextKVRuntime:
         req.contextkv_input_hash = token_hash(recv.input_ids)
         req.contextkv_session_ref_registered = False
         req.contextkv_prefill_tokens = 0
+        if self.admission_diagnostics_enabled:
+            req.contextkv_admission_diagnostic = AdmissionDiagnostic()
 
     def record_rejection(self, recv, error):
         attempt = recv.contextkv_attempt_id
@@ -416,7 +502,9 @@ class ContextKVRuntime:
             output_count = min(output_count, req.finished_len)
         timing = native_timing(getattr(req, "time_stats", None), output_count)
         req.customized_info["contextkv_timing"] = [timing]
-        self._event("request_terminal", attempt_id=attempt, receipt=receipt, timing=timing)
+        diagnostic = getattr(req, "contextkv_admission_diagnostic", None)
+        extra = {"admission_diagnostic": diagnostic.finish(req)} if diagnostic is not None else {}
+        self._event("request_terminal", attempt_id=attempt, receipt=receipt, timing=timing, **extra)
         epoch = self.epochs[req.session_id]
         epoch["inflight"].discard(attempt)
         if epoch["state"] == "RETIRING" and not epoch["inflight"]:
@@ -694,6 +782,7 @@ class ContextKVRuntime:
         return dict(engine_restart_id=self.restart_id, observed_seq=self.observed_seq,
                     observed_time_ns=time.monotonic_ns(), clock="server_monotonic",
                     pool=self.pool_snapshot(), cache_config=self.cache_config,
+                    admission_diagnostics_enabled=self.admission_diagnostics_enabled,
                     host_admission=self.host_admission.snapshot(time.monotonic()),
                     **self.workload_snapshot(),
                     events=[e for e in self.events if e["seq"] > after],
