@@ -179,7 +179,8 @@ class NativeSGLangClient:
         return result
 
     async def generate(self, input_ids: Sequence[int], *, max_new_tokens: int,
-                       session_id: str | None = None, rid: str | None = None) -> NativeGeneration:
+                       session_id: str | None = None, rid: str | None = None,
+                       json_schema: Mapping[str, Any] | None = None) -> NativeGeneration:
         if not input_ids or any(type(token) is not int or token < 0 for token in input_ids):
             raise ValueError("input_ids must be actual nonnegative integer token IDs")
         if max_new_tokens < 1:
@@ -187,6 +188,12 @@ class NativeSGLangClient:
         payload = {"input_ids": list(input_ids), "stream": self.stream,
                    "sampling_params": {**self._sampling_params, "max_new_tokens": max_new_tokens},
                    "return_prompt_token_ids": self.audit_prompt_ids}
+        if json_schema is not None:
+            if not isinstance(json_schema, Mapping):
+                raise ValueError("json_schema must be a schema object")
+            # The native SamplingParams field is a JSON string. Compile/validate
+            # its grammar in the existing engine; it applies to this call only.
+            payload["sampling_params"]["json_schema"] = json.dumps(dict(json_schema), allow_nan=False)
         if session_id is not None:
             payload["session_id"] = session_id
         if rid is not None:

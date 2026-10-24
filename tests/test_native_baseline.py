@@ -421,3 +421,47 @@ def test_native_configured_sampling_still_rejects_output_exceeding_call_budget(s
                 await client.generate([12, 13], max_new_tokens=1)
             assert client.observations[-1]["request"]["sampling_params"]["max_new_tokens"] == 1
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_native_json_schema_is_per_call_and_keeps_actual_prompt_audit(stream):
+    async def scenario():
+        received = []
+        schema = {"type": "object", "properties": {"unit": {"type": "integer", "enum": [0, 1]}},
+                  "required": ["unit"], "additionalProperties": False}
+        original = json.loads(json.dumps(schema))
+        def respond(request):
+            received.append(json.loads(request.content))
+            terminal = {"text": '{"unit":0}', "output_ids": [11], "prompt_token_ids": [12, 13],
+                        "meta_info": {"finish_reason": {"type": "stop"}, "completion_tokens": 1}}
+            return (httpx.Response(200, stream=FakeSSEStream([terminal, "[DONE]"])) if stream
+                    else httpx.Response(200, json=terminal))
+        async with httpx.AsyncClient(base_url="http://fake.test", transport=httpx.MockTransport(respond)) as http:
+            client = NativeSGLangClient("http://fake.test", http_client=http, stream=stream,
+                                       audit_prompt_ids=True, sampling_params={"temperature": .7})
+            await client.generate([12, 13], max_new_tokens=17, json_schema=schema)
+            assert schema == original
+            assert json.loads(received[-1]["sampling_params"]["json_schema"]) == original
+            assert received[-1]["sampling_params"]["max_new_tokens"] == 17
+            schema["properties"]["unit"]["enum"].append(9)
+            assert json.loads(client.observations[0]["request"]["sampling_params"]["json_schema"]) == original
+            await client.generate([12, 13], max_new_tokens=8)
+            assert received[-1]["sampling_params"] == {"temperature": .7, "max_new_tokens": 8}
+            assert all(r["input_ids"] == [12, 13] and r["return_prompt_token_ids"] for r in received)
+    asyncio.run(scenario())
+
+
+def test_native_grammar_error_is_retained_without_retry_or_unconstrained_fallback():
+    async def scenario():
+        calls = []
+        def respond(request):
+            calls.append(json.loads(request.content))
+            return httpx.Response(400, json={"error": "grammar compilation failed"})
+        async with httpx.AsyncClient(base_url="http://fake.test", transport=httpx.MockTransport(respond)) as http:
+            client = NativeSGLangClient("http://fake.test", http_client=http)
+            with pytest.raises(httpx.HTTPStatusError):
+                await client.generate([12], max_new_tokens=8, json_schema={"type": "unknown_type"})
+            assert len(calls) == 1
+            assert client.observations[-1]["http_status"] == 400
+            assert json.loads(calls[0]["sampling_params"]["json_schema"]) == {"type": "unknown_type"}
+    asyncio.run(scenario())
