@@ -32,7 +32,7 @@
 3. **第一次调用。** 输出 `groups: [{support_units: [合法 unit_id…], role: direct_answer | necessary_qualification}]`，另可输出 `coverage: supported | partial | insufficient`。枚举约束禁止虚构 source/span；模型仍可能合法错选或误判 coverage。允许联合来源、合法空计划；格式/length 失败保留且不重试，不能伪装成空计划成功。
 4. **第二次调用。** 模型对既定 group 生成句段，或输出明确未覆盖段；宿主在句段后附该组的稳定 E_ID。逐字 quote 由宿主复制 `source[start:end]`，不让模型重写引文或再猜引用 ID。原响应、计划、最终渲染都保存。未覆盖段若含实质事实，仍计入完整质量分母，不能因状态标签而免责。
 
-结构合同只有：`rendered_refs(segment) = refs(selected_group)`，且 `rendered_quote = source[start:end]`。**它不推出 `source ⊨ generated_text`。** 合法组仍可能属于错误产品/版本，遗漏必要条件，无法支持复合句，或被转述成无据包含关系/性能保证；正确 quote 也不代表回答了用户问题。完整 schema、边界与渲染规格见 [原型规格](../runs/quality-next-research/prototype-spec.md)。
+结构合同只有：`rendered_refs(segment) = refs(selected_group)`，且 `rendered_quote = source[start:end]`。**它不推出 `source ⊨ generated_text`。** 合法组仍可能属于错误产品/版本，遗漏必要条件，无法支持复合句，或被转述成无据包含关系/性能保证；正确 quote 也不代表回答了用户问题。完整 schema、边界与渲染规格见 [原型规格](../runs/quality-next-research/prototype-spec.md)，全开发材料的结构覆盖和最小接口见[支持单元设计](support_unit_design.md)。
 
 与已有方法的增量应具体归因：source_topic/ConvSearch 选择检索语境，本机制选择回答依据；table focus 提供结构单元，本机制继续绑定最终出处；MiniCheck 在事后提出信号，本机制改变生成过程。仍然保留这些原有对照，不将其重新命名为新贡献。
 
@@ -68,7 +68,7 @@ A1/A2 同阶段预算，不代表实际 token/耗时相同。必须计入所有�
 
 **在扩机制之前控制生成器能力。** 当前大多数失误来自固定Qwen2.5-7B；AFTG包含few-shot/微调实验，ReClaim完整方法也有训练，仅把其流程提示给通用7B不等于复现原效果。用户已提供 `/media/ssd1/qwen3-8b` 与 `/media/ssd1/qwen3-32b`，当前改用这两个现成本地模型，先前Qwen2.5-32B下载方案未执行。先建立Qwen3-8B完整159轮P2基线，再用32B重放其相同实际前序QA、原文、Q0与最终cap1024；不启用旧cost planner。两者同系用于减少架构/协议变化，不把规模当唯一差别，也不预设32B可靠。若强原稿已解决主要问题，先比较直接换基座与小模型附加机制的完整质量/成本；若仍失败，再做模型与机制的交叉。
 
-本地只读核验确认两者均为BF16稠密Qwen3ForCausalLM，36/64层、均8个KV heads且显式head_dim128，5/17个权重分片齐全。真实分词器/模板加载已通过，两目录的backend与模板fingerprint一致；`enable_thinking=False`的输入渲染也与原生模板调用一致。尚未启动两模型生成，未确认权重的上游commit，不用目录名或自行生成的40位hash冒充HF revision。先用32768窗口，不依tokenizer元数据131072启用未经验证的长上下文。
+本地只读核验确认两者均为BF16稠密Qwen3ForCausalLM，36/64层、均8个KV heads且显式head_dim128，5/17个权重分片齐全。真实分词器/模板加载已通过，两目录的backend与模板fingerprint一致；`enable_thinking=False`的输入渲染也与原生模板调用一致。已启动独立stock引擎的完整开发集能力参考，尚无质量结论；未确认权重的上游commit，不用目录名或自行生成的40位hash冒充HF revision。先用32768窗口，不依tokenizer元数据131072启用未经验证的长上下文。
 
 采样也应适配模型原理：[官方8B](https://huggingface.co/Qwen/Qwen3-8B#best-practices)与[32B模型卡](https://huggingface.co/Qwen/Qwen3-32B#best-practices)给出non-thinking的temperature0.7/top_p0.8/top_k20/min_p0建议。`870a250`已为原生客户端实现这四项显式可选设置并保留旧默认协议；新能力运行采用server seed42、c1与固定请求顺序，不声称逐请求确定性。固定引擎对request seed的使用依赖deterministic/backend路径，不能只给HTTP加一个seed就承诺精确复现。思考开关通过模板设置，不以删除响应内容代替；单个seed的开发比较也不当作稳定总体收益。现有launch、运行身份校验和原生基线manifest仍固定7B，先复用固定stock引擎及完整input-ID客户端做隔离参考，随后参数化扩展工程合同。不同模型的实际池、显存、标定和质量资格分别记录。[完整能力审查](../runs/quality-next-research/generator-capability-review.md)保留原方案、LongCite归因训练边界与新Qwen3决策。
 
