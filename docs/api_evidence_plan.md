@@ -1,6 +1,6 @@
 # A：版本化API证据包的最小实施方案
 
-2026-10-24。依据[三项机制优先级](ac_extension_priorities.md)第3项，已完成保存答案的离线扫描和三个具体来源复核。结果支持把“缺接口材料”“材料已有但字段用错”“题目不需要而额外扩写”分开处理。当前产物是可复算的诊断与原始源码证据包预览；生产adapter和新增生成对照尚未实现。
+2026-10-24。依据[三项机制优先级](ac_extension_priorities.md)第3项，已完成保存答案的离线扫描和三个具体来源复核。结果支持把“缺接口材料”“材料已有但字段用错”“题目不需要而额外扩写”分开处理。[独立离线adapter与CLI](api_evidence.md)已实现，固定真实源码10个片段与原预览逐字/逐span一致；新增生成对照尚未进行，工程实现不单独构成质量收益。
 
 ## 扫描范围与可复核产物
 
@@ -47,7 +47,7 @@
 
 ## 最小adapter与复用边界
 
-建议新增一个离线 `adapters/api_evidence.py`，只做 `extract_sdk_records(source_path, source_spec)`，输出现有 `CorpusIndex.from_records` 能直接读取的记录。初版支持本任务已核的Python SDK原文；有实际需求再接OpenAPI，不先做多语言训练框架。
+已实现独立离线 `adapters/api_evidence.py`，核心为 `extract_sdk_records(source_path, source_spec)`，输出现有 `CorpusIndex.from_records` 能直接读取的记录及manifest。初版支持本任务已核的Python SDK原文；有实际需求再接OpenAPI，不先做多语言训练框架。
 
 1. `source_spec` 显式给repository、固定commit/tag、源文件、语言/包名、目标版本状态和选择的公开符号。SDK代码用AST定位类、方法签名及docstring，HTTP方法/路径只提取源码中可确定的字面值。遇到动态路径或继承外部实现就保留原文与未知范围，不推断缺失事实。
 2. 每条记录的 `text` 是连续原文区间，`span` 对应整份源文件字符偏移，`source_uri` 指向固定commit和行号，`version` 用该固定源版本，`anchors` 保存原符号；许可和source-spec放离线manifest/provenance。不同版本或语言是不同记录，不重写旧MTRAG EvidenceKey/正文。包名与版本只用于限定来源，不是答案标签。
