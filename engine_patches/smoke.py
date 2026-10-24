@@ -9,10 +9,10 @@ import os
 from pathlib import Path
 import uuid
 
-from controller.config import load_config
+from controller.config import create_model_template, load_config
 from controller.engine_client import EngineError, SGLangEngineClient
 from controller.schema import PromptCandidate
-from controller.templates import HuggingFaceTemplate, token_hash
+from controller.templates import token_hash
 
 
 async def verify(engine, input_ids, *, max_new_tokens=16):
@@ -67,13 +67,13 @@ async def _run(args):
     config = load_config(args.config)
     if config.engine.kind != "sglang":
         raise ValueError("engine.kind must be sglang")
-    template = HuggingFaceTemplate(args.model_path or config.model.name, config.model.revision,
-        namespace_hash=config.model.namespace_hash, local_files_only=True)
+    template = create_model_template(config.model, model_path=args.model_path, local_files_only=True)
     nonce = uuid.uuid4().hex
     ids = template.tokenizer.encode(f"ContextKV protocol test {nonce}. "+"Check cache behavior. "*64,
                                     add_special_tokens=False)
     engine = SGLangEngineClient(config.engine.base_url, template.fingerprint,
-                                timeout=config.engine.timeout_seconds)
+                                timeout=config.engine.timeout_seconds,
+                                **({"model_scope":config.model.scope.manifest()} if config.model.scope else {}))
     try:
         report = await verify(engine, ids, max_new_tokens=args.max_new_tokens)
         target = Path(args.report)

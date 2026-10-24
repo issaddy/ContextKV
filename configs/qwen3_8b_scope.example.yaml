@@ -1,0 +1,15 @@
+# Same-container fixed-policy scope smoke. No Qwen3 timing/quality calibration.
+# Sampling remains the research client's legacy greedy recipe in this slice.
+engine:
+  kind: sglang
+  base_url: http://127.0.0.1:30000
+  page_size: 64
+model:
+  scope_path: configs/model_scopes/qwen3-8b.local.json
+context:
+  max_total_model_tokens: 32768
+  max_new_tokens: 1024
+planner:
+  strategy: always_rebuild
+shadow: false
+state_dir: runs/qwen3-8b-scope

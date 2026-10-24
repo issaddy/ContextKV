@@ -16,10 +16,10 @@ from pathlib import Path
 import random
 import uuid
 
-from controller.config import load_config
+from controller.config import create_model_template, load_config
 from controller.engine_client import EngineError, SGLangEngineClient
 from controller.schema import PromptCandidate
-from controller.templates import HuggingFaceTemplate, token_hash
+from controller.templates import token_hash
 
 
 class LifecycleProbe:
@@ -163,11 +163,11 @@ async def _run(args):
     config = load_config(args.config)
     if config.engine.kind != "sglang":
         raise ValueError("engine.kind must be sglang")
-    template = HuggingFaceTemplate(args.model_path or config.model.name,config.model.revision,
-        namespace_hash=config.model.namespace_hash,local_files_only=True)
+    template = create_model_template(config.model, model_path=args.model_path, local_files_only=True)
     tokens = sorted(set(template.tokenizer.get_vocab().values())-set(template.tokenizer.all_special_ids))
     engine = SGLangEngineClient(args.base_url or config.engine.base_url,template.fingerprint,
-                               timeout=config.engine.timeout_seconds,stream=False)
+                               timeout=config.engine.timeout_seconds,stream=False,
+                               **({"model_scope":config.model.scope.manifest()} if config.model.scope else {}))
     try:
         report = await LifecycleProbe(engine,tokens,shared_tokens=args.shared_tokens,
             branch_tokens=args.branch_tokens,seed=args.seed).run(args.tiers)

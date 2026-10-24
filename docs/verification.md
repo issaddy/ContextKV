@@ -55,6 +55,8 @@ fixture本地19项合同包含6项真实typed客户端到Runtime.quote的快照�
 
 模型迁移审查发现主候选只验证证据消息，未检查原生模板是否改写历史助手正文。现有渲染边界已扩展为按序检查全部消息正文，保持原生模板和既有函数入口，不新增render或hash。CPU反例覆盖reasoning-prefix变换、重复历史、APPEND/REBUILD和失败时快照不变；不是对所有模板语义或角色边界的形式证明。真实固定7B tokenizer启用的完整回归为 **1210项及6子测试通过**，Ruff通过，记录在`runs/pytest-full-qa-render.log`。当前Qwen3运行器已有同类完整历史检查，本地修复没有改动正在运行的远端源码。
 
+显式[Qwen3本地模型配置](model_scope.md)已贯穿controller、launcher、native guard和profiling/lifecycle探针；local identity与HF加载revision分离，初始化检查实际目录/metadata/tokenizer/模板，旧无scope默认保持7B。新scope不能采用未绑定或旧模型的成本artifact。最终 **1236项及6子测试通过**，另25项原测试与4项独立scope合同通过，Ruff/shell/diff检查通过。新patch为`b1b58e096c309eef1d7c10b1da3d29bec86503030e72f0f8e3badba9cf9c8a05`，固定原源码校验、应用/逆向检查及15文件编译通过。本地模型接入代码尚未部署，正在运行的能力参考仍绑定`a6b5711`stock引擎，不能把CPU接入测试写成新patch已通过GPU验证。
+
 ## 已完成的 H200 集成验证
 
 单张 H200、TP=1、Python TreeCore、BF16 权重/KV、page size 64、context 32768、最多 8 个运行请求。实际环境：Python 3.12.3、torch 2.14.1+cu130、CUDA 编译目标 13.0、transformers 5.19.0、tokenizers 0.23.2、驱动 595.58.03。GPU KV pool 为 121920 tokens；host 为 279040 tokens，即 16001269760 字节（约 16 GB / 14.90 GiB）。固定源码的 hicache-size 采用十进制 GB，并按 page 对齐。完整环境保存在 engine-environment.txt。

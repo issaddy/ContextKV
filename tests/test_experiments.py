@@ -91,7 +91,8 @@ def test_development_generation_identity_and_later_offline_quality_gate(tmp_path
 
 @pytest.mark.parametrize("relative", ["adapters/hybrid_retrieval.py", "adapters/query_views.py",
     "controller/planner.py", "bench/run_sessions.py", "bench/report.py", "bench/quality.py", "bench/official.py",
-    "profiling/common.py", "bench/quality_acceptance.py", "bench/judge.py", "adapters/assets/convsearch_r1/prompt.txt"])
+    "profiling/common.py", "bench/quality_acceptance.py", "bench/judge.py", "engine_patches/contextkv_model_scope.py",
+    "adapters/assets/convsearch_r1/prompt.txt"])
 def test_freeze_rejects_old_results_after_execution_source_or_prompt_change(tmp_path, monkeypatch, relative):
     import bench.experiments as experiments
     value = spec(tmp_path)

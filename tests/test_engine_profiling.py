@@ -194,7 +194,7 @@ def test_failed_case_manifest_counts_rows_already_written(tmp_path,monkeypatch):
     engine.aclose = aclose
     monkeypatch.setattr(module,"SGLangEngineClient",lambda *a,**k:engine)
     tokenizer = SimpleNamespace(all_special_ids=(),get_vocab=lambda:{"a":1,"b":2})
-    monkeypatch.setattr(module,"HuggingFaceTemplate",lambda *a,**k:
+    monkeypatch.setattr("controller.config.create_model_template",lambda *a,**k:
                         SimpleNamespace(tokenizer=tokenizer,fingerprint=ConfigFingerprint()))
     async def interrupted(probe,case,*,warmup,repetitions,output_path):
         write_measurements(output_path,[Measurement("first_token",8,0,4,1,0,10.,"hardware")]*2)

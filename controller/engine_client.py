@@ -49,6 +49,7 @@ class EngineInfo:
     streaming_generation_supported: bool = False
     business_session_identity_supported: bool = False
     admission_diagnostics_enabled: bool = False
+    model_scope: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -109,9 +110,11 @@ def decode_result(value: dict) -> GenerationResult:
 
 class SGLangEngineClient:
     def __init__(self, base_url: str, fingerprint: ConfigFingerprint, *, timeout: float = 120.0,
-                 transport=None, stream: bool = True):
+                 transport=None, stream: bool = True, model_scope: dict | None = None):
         import httpx
         self.fingerprint = fingerprint
+        self._expected_model_scope = ((model_scope["identity"], model_scope["record"]["model_path"])
+                                      if model_scope is not None else None)
         self.stream = stream
         self._client = httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=timeout,
                                          transport=transport)
@@ -154,6 +157,10 @@ class SGLangEngineClient:
             raise EngineError("UNSUPPORTED_ENGINE", "fixed-commit scheduler-owned contextkv-v1 patch required")
         if data.get("fingerprint") != asdict(self.fingerprint):
             raise EngineError("FINGERPRINT_MISMATCH", "engine model/tokenizer/template/namespace differ")
+        if self._expected_model_scope is not None:
+            actual = data.get("model_scope") or {}
+            if (actual.get("identity"), actual.get("record", {}).get("model_path")) != self._expected_model_scope:
+                raise EngineError("MODEL_SCOPE_MISMATCH", "engine local model identity/path differs from configured scope")
         data["fingerprint"] = ConfigFingerprint(**data["fingerprint"])
         self._info = EngineInfo(**data)
         return self._info

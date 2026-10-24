@@ -212,6 +212,7 @@ def implementation_manifest():
         "bench/quality_acceptance.py", "bench/judge.py",
         "bench/b6_joint_sweep.py", "bench/native_policy_sweep.py", "bench/controller_capacity_sweep.py",
         "profiling/common.py", "profiling/positive_prefill.py",
+        "engine_patches/contextkv_model_scope.py",
         "scripts/prepare_cold_job.py", "scripts/launch_sglang.sh"))
     paths.update(p for p in (root / "adapters/assets").rglob("*")
                  if p.suffix in {".txt", ".json", ".jinja", ".jinja2"}

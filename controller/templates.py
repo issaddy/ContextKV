@@ -79,16 +79,20 @@ class ByteTemplate:
 
 class HuggingFaceTemplate:
     """Optional, lazy Transformers adapter pinned to an explicit model revision."""
-    def __init__(self, model: str, revision: str, *, namespace_hash: str = "default",
-                 enable_thinking: bool = False, local_files_only: bool = False) -> None:
-        if not revision:
-            raise ValueError("an explicit model/tokenizer revision is required")
+    def __init__(self, model: str, revision: str | None, *, namespace_hash: str = "default",
+                 enable_thinking: bool = False, local_files_only: bool = False,
+                 model_identity: str | None = None) -> None:
+        identity = revision if model_identity is None else model_identity
+        if not identity:
+            raise ValueError("an explicit model/tokenizer revision or local identity is required")
         try:
             from transformers import AutoTokenizer
         except ImportError as exc:
             raise RuntimeError("Install contextkv[tokenizer] to use a real model tokenizer") from exc
-        self.tokenizer = AutoTokenizer.from_pretrained(model, revision=revision,
-                                    local_files_only=local_files_only)
+        loading = {"local_files_only": local_files_only}
+        if revision is not None:
+            loading["revision"] = revision
+        self.tokenizer = AutoTokenizer.from_pretrained(model, **loading)
         self.enable_thinking = enable_thinking
         chat_template = self.tokenizer.chat_template
         if not chat_template:
@@ -97,7 +101,7 @@ class HuggingFaceTemplate:
         template_payload = json.dumps({"template": chat_template,
                                       "enable_thinking": enable_thinking}, sort_keys=True)
         self.fingerprint = ConfigFingerprint(
-            model_revision=revision,
+            model_revision=identity,
             tokenizer_hash=hashlib.sha256(serialized.encode()).hexdigest(),
             template_hash=hashlib.sha256(template_payload.encode()).hexdigest(),
             namespace_hash=namespace_hash,

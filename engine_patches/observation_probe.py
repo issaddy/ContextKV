@@ -15,9 +15,8 @@ from pathlib import Path
 import time
 import uuid
 
-from controller.config import load_config
+from controller.config import create_model_template, load_config
 from controller.engine_client import EngineError, SGLangEngineClient
-from controller.templates import HuggingFaceTemplate
 from profiling.prefill import PrefillCase
 from profiling.sglang_probe import SGLangProbe
 
@@ -163,11 +162,11 @@ class ObservationProbe:
 
 async def _run(args):
     config=load_config(args.config)
-    template=HuggingFaceTemplate(args.model_path or config.model.name,config.model.revision,
-        namespace_hash=config.model.namespace_hash,local_files_only=True)
+    template=create_model_template(config.model,model_path=args.model_path,local_files_only=True)
     special=set(template.tokenizer.all_special_ids)
     tokens=sorted(set(template.tokenizer.get_vocab().values())-special)
-    engine=SGLangEngineClient(args.base_url,template.fingerprint,timeout=config.engine.timeout_seconds,stream=False)
+    engine=SGLangEngineClient(args.base_url,template.fingerprint,timeout=config.engine.timeout_seconds,stream=False,
+                               **({"model_scope":config.model.scope.manifest()} if config.model.scope else {}))
     probe=ObservationProbe(engine,tokens,seed=args.seed,timeout_seconds=args.timeout_seconds)
     target=Path(args.report)
     target.parent.mkdir(parents=True,exist_ok=True)

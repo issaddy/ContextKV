@@ -31,7 +31,8 @@
     "python/sglang/srt/managers/schedule_policy.py": "28f57c7a6ef21f386d9083f24cbc4077280dd31e7abbc94667c904f9365aec68",
     "python/sglang/srt/mem_cache/prefill_budget.py": "b1d64e648d958aeb82fe60c8acacbe9ecd4d0c83ca2ea8a058eaaaf0b488e07e",
     "python/sglang/srt/mem_cache/common.py": "31855ecda6410c78966952c3d19b1b6556f13a23b7378cc05df51320ba2e43f1",
-    "python/sglang/srt/managers/scheduler_components/new_token_ratio_tracker.py": "d6ad7ede11e9262318649cc5427ee44fb14973d22f8ada26b6d5383a1e77a271"
+    "python/sglang/srt/managers/scheduler_components/new_token_ratio_tracker.py": "d6ad7ede11e9262318649cc5427ee44fb14973d22f8ada26b6d5383a1e77a271",
+    "python/sglang/srt/runtime_context.py": "c36673ec3abb38e7f95c840fd6da8552de3b3f5e4ab5a498c22958e3988b4b1e"
   },
   "changed_files": [
     "python/sglang/srt/entrypoints/api_contract.py",
@@ -47,6 +48,7 @@
     "python/sglang/srt/mem_cache/unified_cache/unified_tree_core_interface.py",
     "python/sglang/srt/mem_cache/unified_radix_cache.py",
     "python/sglang/srt/mem_cache/common.py",
-    "python/sglang/srt/managers/schedule_policy.py"
+    "python/sglang/srt/managers/schedule_policy.py",
+    "python/sglang/srt/managers/contextkv_model_scope.py"
   ]
 }

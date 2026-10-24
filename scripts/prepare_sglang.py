@@ -72,6 +72,8 @@ def prepare(checkout: Path, source_only: bool):
     assert guard < ensure
     runtime = (checkout / "python/sglang/srt/managers/contextkv_runtime.py").read_bytes()
     assert runtime == (ROOT / "engine_patches/contextkv_runtime.py").read_bytes()
+    scope = (checkout / "python/sglang/srt/managers/contextkv_model_scope.py").read_bytes()
+    assert scope == (ROOT / "engine_patches/contextkv_model_scope.py").read_bytes()
     # Check the exact pinned native observation/transport seams without importing CUDA.
     processor = (checkout / "python/sglang/srt/managers/scheduler_components/batch_result_processor.py").read_text()
     assert "result.copy_done.synchronize()" in processor
@@ -133,6 +135,7 @@ def prepare(checkout: Path, source_only: bool):
             "host_admitted_budget_follows_native_commit_and_pending": True,
             "host_capacity_eviction_observer_verified": True,
             "admission_diagnostic_observes_actual_gate_and_membership": True,
+            "local_model_scope_parser_matches_standalone": True,
             "source_only": source_only,
             "gpu_runtime_tested": False, "full_dependency_import_tested": False,
             "host_quote_supported": True,

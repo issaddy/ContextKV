@@ -17,7 +17,7 @@ import uuid
 
 from controller.engine_client import EngineError, SGLangEngineClient
 from controller.schema import PromptCandidate
-from controller.templates import HuggingFaceTemplate, token_hash
+from controller.templates import token_hash
 from profiling.common import Measurement, write_measurements
 from profiling.prefill import PrefillCase, calibration_grid
 from profiling.transfers import from_completed_events
@@ -198,18 +198,18 @@ async def collect_case(probe, case, *, warmup, repetitions, output_path):
 
 
 async def _run(args):
-    from controller.config import load_config
+    from controller.config import create_model_template, load_config
     config = load_config(args.config)
     runtime_manifest = (json.loads(Path(args.runtime_manifest).read_text())
                         if args.runtime_manifest else None)
     if config.engine.kind != "sglang":
         raise ValueError("use an engine.kind=sglang config")
-    template = HuggingFaceTemplate(args.model_path or config.model.name, config.model.revision,
-        namespace_hash=config.model.namespace_hash, local_files_only=True)
+    template = create_model_template(config.model, model_path=args.model_path, local_files_only=True)
     special = set(template.tokenizer.all_special_ids)
     tokens = sorted(set(template.tokenizer.get_vocab().values()) - special)
     engine = SGLangEngineClient(args.base_url or config.engine.base_url, template.fingerprint,
-                                timeout=config.engine.timeout_seconds, stream=False)
+                                timeout=config.engine.timeout_seconds, stream=False,
+                                **({"model_scope": config.model.scope.manifest()} if config.model.scope else {}))
     output = Path(args.output)
     probe = SGLangProbe(engine, tokens, seed=args.seed,
                        telemetry_path=output.with_suffix(".telemetry.jsonl"))
@@ -242,6 +242,8 @@ async def _run(args):
                     "warmup_in_training_measurements": False,
                     "prefix_tier_binding": {"mixed": "prepared_and_execution_exact",
                                             "cold_gpu_ready_host_only": "prepared_split_execution_drift_audited"}}
+        if config.model.scope is not None:
+            manifest["model_scope"] = config.model.scope.manifest()
         manifest_path = output.with_suffix(".manifest.json")
         manifest_path.write_text(json.dumps(manifest, indent=2)+"\n")
         count = 0
