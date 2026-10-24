@@ -44,6 +44,8 @@
 
 新Doc2Dial适配与共享检索取消收尾通过1383项测试及8个子测试，真实Qwen3 tokenizer项开启，Ruff/diff通过。两份作者train的完整转换、角色/文本/引用独立比较及488文档真实索引→五文档→5424-token Qwen3候选通过；没有模型调用。P3取消反例证明关闭前必须等待同一次检索线程，未生成或提交答案，后续未完成分母保留。记录为`runs/pytest-doc2dial-integration.log`与`runs/doc2dial-integration/audit.json`。
 
+实现`185fa7e`已打包并同步容器：87模块、31资产、353个sdist文件、107测试/配置及13许可逐字核对通过；354个远端tracked条目与提交一致，HTTP与新adapter CLI导入/help及编译通过。模型服务未启动，原生补丁保持不变；包和部署原件分别为`runs/dist-doc2dial-integration/`、`runs/remote-h200-doc2dial-integration/`。下述c1cc617两轮GPU记录保留原身份，不追认为新源码的GPU重复验收。
+
 `c1cc617`另完成当前HTTP正常路径的两次真实Qwen3生成，REBUILD/stop各2次，无重试，实际历史/原文/IDs/receipt、幂等与关闭经独立审计0 issues。使用仓库合成语料和现有采样/cap，不作质量或性能比较；范围覆盖和scope连接的局部问题原样保留。详见[真实HTTP验收](http_retrieval.md#qwen3真实http链路验收)。GPU0及本轮端口已释放。
 
 最新结构证据集成回归通过1373项及6个子测试，开启真实Qwen3 tokenizer metadata；Ruff/diff通过。交换依赖边、旧APPEND账本、精确revision/cycle、无元数据兼容及预算计入均有合同检查；另用既有固定SDK包打通真实BM25索引/元数据/Qwen3分词。记录为`runs/pytest-evidence-context.log`和`runs/evidence-context-integration/sdk-v1/result.json`，没有模型/GPU调用，不能据此宣布语义质量提升。
