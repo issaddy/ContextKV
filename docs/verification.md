@@ -6,7 +6,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | `16e4ef9`：1189 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-shared-pin-complete.log |
+| 最近完整 CPU 回归 | `870a250`：1207 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-qwen3-sampling-complete.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
 | Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 atomic_judge 模块/协议资产、table_focus、CRAFT 行文本与 GroUSE 源码，CRAFT 完整许可在 wheel 中；runs/build-atomic-focus.log；新增guided schema、query view、observation probe与client也已重建并逐字核对（runs/build-guided-wheel.log）；融合模块也已构建并逐字核对（runs/build-query-fusion-wheel.log） |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
@@ -48,6 +48,10 @@ fixture本地19项合同包含6项真实typed客户端到Runtime.quote的快照�
 `16e4ef9`在既有只读prefix遍历中增加匹配GPU前缀与FULL硬锁状态的交集，只修正可选native_budget、无waiting/host/pending情况下的即时fit。完整1189项及6子测试、Ruff、固定补丁正反应用与14文件语法检查通过；`runs/dist-shared-pin-complete/asset-check.json`逐字核对83个Python模块、29个包内资产、322个sdist tracked文件、97个测试/配置和13份许可。已在远端部署并验证323个Git blobs，新patch为`7a67fc7fea1eec99c3c578f061bc59dd442d0304101d2a90bda2730218b1333f`。9项独立fixture/恢复合同通过，默认plan不发生成请求。
 
 [共享前缀H200验证](shared_prefix_admission_validation.md)随后完成8个episode/32次调用；30文件完整公共导出保留全部预热与正式结果。正式3个共享状态纠正了旧等待分类，3个无关状态仍需等待；实际forward顺序支持这一作用路径。未运行新旧planner的自然问答策略对照，不宣布系统加速。supervisor恢复命令返回0后，首个health探针仍处加载期；随后同PID70413返回HTTP200，没有重启或重跑实验。
+
+`870a250`为原生客户端增加可选temperature/top_p/top_k/min_p设置，仅在构造边界复制/校验一次，默认温度0的请求保持原样，输出预算仍由每次generate唯一指定；实际stream/nonstream请求审计保留采样参数。完整1207项及6子测试、独立相关审查与Ruff通过。固定源码构建的wheel/sdist核对83模块、29资产、324 tracked文件、97测试/配置、13许可，见`runs/dist-qwen3-sampling-complete/asset-check.json`；远端共享前缀实验仍绑定16e，未追改其身份。
+
+用户现有`/media/ssd1/qwen3-8b`与`/media/ssd1/qwen3-32b`已只读检查，5/17分片齐全、两个真实tokenizer可加载、非思考模板渲染一致，记录于`runs/qwen3-local-model-inspection.json`。这不是模型生成或权重逐字校验，未确认上游revision；未启动新权重下载。接续按[来源生成/能力对照](source_bound_generation_design.md)准备隔离的完整159轮Qwen3研究，采样接口通过不代表新模型质量通过。
 
 ## 已完成的 H200 集成验证
 
