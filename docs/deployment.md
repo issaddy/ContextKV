@@ -34,6 +34,16 @@ SGLANG_HICACHE_TMA_TRANSFER=0 bash scripts/launch_sglang.sh \
 
 真实运行配置为 `configs/qwen3_8b_scope.example.yaml`。在另一终端使用同一引擎环境启动 `controller.cli ... serve`，或按[项目入口](../README.md)运行P2/P3。32B须同时更换scope和共享配置，不共享8B的成本artifact。容量以实际服务池/分配记录为准，不以请求的比例或GB代替。
 
+当前容器还提供已装配核对的 `runs/mainline-delivery/serving-config.json`：使用 Qwen3-8B 实测 `cost-stage.json`、`native_workload` 等待估计和无固定轮数冷却的成本选择。它是本次已执行的配置，不代表已经优于原生或适用于其他硬件。加载该配置时，在上述引擎启动命令前设置 `export CONTEXTKV_SAMPLE_POOL=1`，与 artifact 的 cache configuration 保持一致；实际 GPU/Host 槽数应为 16384/54272。对照运行的完整 argv、线程设置、模型和环境记录保存在 `runs/mainline-delivery/corrected-run/servers/`。正常服务无需设置 `CONTEXTKV_ENABLE_PROFILING=1`。
+
+引擎就绪后，在项目根目录运行：
+
+```bash
+python -m controller.cli --config runs/mainline-delivery/serving-config.json serve
+```
+
+该配置的状态目录是 `runs/mainline-delivery/service`。本轮模型运行已结束，拥有的服务进程均已停止；成本文件和配置保留在容器中，不需要重新采集。对应采集来源、支持范围及本地公开副本见[阶段成本说明](guides/stage_cost_model.md)。
+
 服务变更后的必要协议检查可使用 `python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml --report runs/qwen3-smoke.json`。它会实际生成，只在引擎/模型变更需要确认时运行，不是每次文档或分析变更后的例行实验。CPU检查与真实运行边界见[引擎说明](../engine_patches/README.md)。
 
 ## 分析和实验的边界
@@ -42,4 +52,4 @@ SGLANG_HICACHE_TMA_TRANSFER=0 bash scripts/launch_sglang.sh \
 
 原生B0/B1使用clean stock checkout；研究控制器使用patched checkout。优先让[owned显式矩阵](guides/b6_owned_matrix.md)管理各自进程、生成真实manifest并保留完整失败记录。该入口不恢复外部服务；后续supervisor也不得恢复已退役7B。默认plan不启动模型，`--execute`才执行所声明的有限任务。
 
-共享配置、原始输入/输出、源码、实际资源、失败及后续恢复信息一起保留。已完成的[四调用验收](archive/owned_local_scope_validation.md)属于当时源码；本轮scope-only清理先以源码/CPU合同验证，不将旧批次改写为新版本硬件证据。
+共享配置、原始输入/输出、源码、实际资源、失败及后续恢复信息一起保留。[四调用验收](archive/owned_local_scope_validation.md)属于历史版本；当前 Qwen3 成本与四会话 A/B/C 开发运行见[当前实现清单](implementation_plan.md)。每批保留实际源码身份，不将历史批次改写为最新版本证据。

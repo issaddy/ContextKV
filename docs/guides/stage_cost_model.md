@@ -1,88 +1,58 @@
-# B 的阶段成本 artifact 与开发验证
+# B 的阶段成本与运行配置
 
-`profiling.stage_fit` 已实现可运行的离线阶段训练入口，产出 `runs/stage-model-dev-v2/cost-stage.json` 和逐请求 OOF `validation.json`。它提供执行到首 token 的 lookup、联合前置区间的经验单元、总 TTFT 对照和已完成开发输出长度分布。`CostModel` 已接入该 artifact，使用显式 `admission_estimator: native_workload` 选项；旧运行配置已退役；保留拟合器与原始证据供只读复核，新Qwen3运行不得加载该7B artifact。离线训练复用已采集数据，不改写原始 artifact。
+`profiling.sglang_probe → profiling.fit → profiling.stage_fit → CostModel` 是唯一的采集、拟合和装配链。当前已产出 H200/Qwen3-8B 的 `runs/mainline-delivery/cost-stage.json`；`runs/mainline-delivery/serving-config.json` 使用显式 `admission_estimator: native_workload`，并在容器通过装配及保存运行身份/采样绑定检查。完整系统结论维护在[当前实现清单](../implementation_plan.md)，本指南只说明成本机制和复现入口。
 
-在线成本使用本表的 forward、原实测 decode，以及[原生工作量等待估计](../research/admission_wait_model.md)。候选的单请求准备项按 `(P,U,L)` 插值 c1 的 pre_forward 单元，合并两个输出预算；没有把同质 c4 的平均等待套到异质队列。`selection_eligible` 表示该显式实验模式可比较，`calibrated` 仍为 false；默认 strict 模式继续要求完整成本已校准。缺少工作量快照、配置不匹配、所需时间超支持域、在途传输或部分恢复时回退。经验时间误差只覆盖 forward/decode，等待均值/P90 差是启发式风险情景，不会加进经验置信误差冒充覆盖保证。
+## 当前实测范围
 
-## 标签、特征与数据来源
+- 固定 SGLang、Qwen3-8B、BF16、GPU 16384 槽、实际 Host 54272 槽、page 64、FA3、chunk 8192、FCFS；HiCache 为 layer_first/kernel/write_through、TMA 关闭，`sample_pool=true`。
+- 20 个明确 case，覆盖选定冷/GPU/Host/mixed 前缀及并发 1/2；60 个正式请求、30 个预热请求、84 个前缀物化调用。并发 mixed 的页对齐与总工作集在执行前检查，未执行组合网格。
+- 采集 run ID 为 `452258dcb15a42bdbcd333878dd141fc`，共 256 条 measurement；拟合得到 20 个 forward 点和 14 个 decode 区间。原始 `profile.jsonl`、`profile.telemetry.jsonl`、`profile.manifest.json` 和 `runtime.json` 与 artifact 同目录。
+- 复用同模型、同采样 recipe 的 159 个既有开发输出长度，来自 22 个原始 dev 会话。全局均值先验为 580，P90 为 1024；在线再按已完成会话历史收缩。没有用当前待生成答案或质量标签预测长度。
+- whole-cell OOF 的 forward MAE 为 52.54 ms；留出支持域内 38/60 请求的 MAE 为 47.54 ms，经验 P99 绝对残差约 202.35 ms。这是插值支持诊断，不是策略净收益或统计覆盖保证。
+
+测点由已有候选的提交前输入/前缀形状选择，未按新答案或时延挑选。原始 case、选择记录和运行命令保存在同目录；本地公开副本位于 `runs/mainline-delivery/remote/mainline-delivery/`。旧模型 artifact 保留为历史证据，不用于当前运行，也不触发旧模型实验。
+
+## 阶段边界与决策含义
 
 - `forward_first`：服务端 forward start 到首 token 的 wall interval，包含该阶段实际执行与调度交互，不称作 CUDA kernel 时间。
-- `pre_forward`：`server_ttft_ms - forward_to_first_token_ms`，是联合 admission/等待/恢复前置区间；现有记录不能将它再精确分成独立 queue、host restore 与控制耗时。
-- `total_ttft`：原 server TTFT，保留为对照。三者不与客户端 TTFT 混用，也不包含控制器本地候选构造。
+- `pre_forward`：`server_ttft_ms - forward_to_first_token_ms`，是 admission/等待/恢复的联合前置区间，现有记录不将它伪拆成独立精确时间。
+- `decode`：实测上下文区间内每个后续 token 的成本；首 token 已由 forward 计入。
+- 控制器本地候选构造、报价与提交开销另计，不和服务端 TTFT 重复累加。
 
-输入为本地既有 `stage-timings.jsonl`、完整 16K measurements 和四个原始 manifest。compact 有 736 条，其中 184 条 warmup 全部排除，552 条正式请求来自 228 个 batch。compact 的 repetition 全为 null，因此入口复用原 collector 的 request 写入顺序，逐字段核对原 first_token measurement（run ID、case、TTFT、实际 prefix/load/output），恢复原 `(run_id,repetition)`。未按 TTFT 大小排序，不用排序位次或 index 预测等待。
+在线使用实测 forward/decode、c1 的单请求准备项，以及[原生工作量等待估计](../research/admission_wait_model.md)。同质 burst 的前置时间不能直接替代异质会话队列；`native_workload` 与 `native_budget` 都是显式解析估计，后者还使用原生预算观测。`selection_eligible` 表示允许该模式参与选择，`calibrated` 仍为 false，不将这两个字段混用。
 
-forward 的已知特征为 `(P,U,L,c)`，其中 `n=P+U`；联合前置模型增加 `requested_output_budget`、`gpu_capacity_tokens`。P、L 来自请求提交前的 prepared case/quote，预算来自 case 的请求上限，GPU 容量来自实际 manifest。当前只拟合实际 16384 池，不外推不同 pool/configuration。
+无工作量快照、配置/采样不匹配、所需执行时间超支持域、在途传输或部分恢复时，沿用已有简单回退。经验时间误差只覆盖 forward/decode；等待均值与 P90 的差描述风险情景，不冒充经验置信误差。选择价值由完整闭环效果判断，单臂预测 MAE 仅供定位问题。
 
-36/552 请求虽然准备时是 GPU-ready，执行时其前缀已改从 host 恢复。它们的总可复用 prefix 与 prepared 值仍一致。**不删除这 36 行，也不把其事后 actual_host_loaded_tokens 填回特征**：GPU-ready 的已知 L 仍为 0，实际恢复变化只记诊断，由前置区间标签体现报价到执行之间的压力变化。当前实际输出长度、未来队列顺序和 TTFT 排序也都不入特征。
+输出长度是已完成的实际服务长度，受生成预算限制。等待估计使用 `E[L-g | L>g]` 及对应经验 P90；若已生成长度超过观测尾部，使用已知剩余预算并标记原因。标定时 `ignore_eos` 强制产生的固定长度不充当自然回答长度分布。
 
-forward 有 38 个特征单元；加入两个预算 128/512 后，pre_forward 有 76 个单元。每单元先按 batch 求均值，再对 batch 等权；同时保留请求经验 P95/P99/max。并发成员具有共同的可知输入，不能用其中最快/最慢成员的实测排序作为在线已知量。
+## Artifact 接口与来源
 
-## Artifact 稳定接口
-
-沿用原 CostModel 的 `version/settings/decode_points`；新的 `prefill_points` 是已有 LookupPoint 结构，`scope="forward_first"`、`source="hardware"`。Decode 点及旧输出先验逐项保留，不用当前矩阵答案重拟合。`settings.prefill_estimator="lookup"`。
-
-新增 `stage_model`：
+沿用 `version/settings/prefill_points/decode_points`；forward 点仍是 `LookupPoint`，`scope="forward_first"`、`source="hardware"`，采用现有 lookup 插值。`stage_model` 保存：
 
 ```text
 version: 1
-waiting_calibration_scope: "homogeneous_burst_only"
-forward:
-  features: [prefix_tokens, suffix_tokens, host_load_tokens, concurrency]
-  cells: [{features, mean_ms, p95_ms, p99_ms, max_ms, batches, requests}]
-  error_source, oof_residuals, independent_feature_cells
-  empirical_error_p95_ms, empirical_error_p99_ms, empirical_error_max_ms
-  confidence_coverage_guarantee: false
-pre_forward:
-  features: [prefix_tokens, suffix_tokens, host_load_tokens, concurrency,
-             requested_output_budget, gpu_capacity_tokens]
-  cells: [...]
-  online_heterogeneous_queue_calibrated: false
-total_ttft_reference: {features, cells}
-total_ttft_budget_reference: {features, cells}
-development_output_lengths: {lengths, source, tasks, sessions, truncated_outputs, ...}
-validation: {protocol, folds, metrics, ...}
+waiting_calibration_scope: homogeneous_burst_only
+forward: features [prefix_tokens, suffix_tokens, host_load_tokens, concurrency]
+         cells, OOF residuals, empirical error quantiles
+pre_forward: 上述特征加 requested_output_budget、gpu_capacity_tokens
+             online_heterogeneous_queue_calibrated: false
+total_ttft_reference, total_ttft_budget_reference
+development_output_lengths, validation
 ```
 
-前向点的 `error_ms` 使用 whole-cell OOF 中受支持请求的绝对残差经验 P99。没有“至少八个 cell 才有资格”门槛；同时给出独立 cell 数、残差数和 max，明确经验分位不是置信覆盖保证。只有完全没有可用 OOF 残差才沿用点成本本身作为保守误差，并记录原因。
+特征使用准备时已知的 `(P,U,L,c)` 和实际声明容量/预算。执行中 GPU 前缀漂移到 Host 时保留记录，不删除不利样本，也不把事后恢复量填回已知特征。当前实际输出长度、未来队列顺序、耗时排序不入特征。
 
-`pre_forward` 的分位值描述同质 burst 的实际离散程度，不是等待硬上限。在线异质队列不能据此设置 calibrated=true，尤其当前 1024 输出预算也不在这两个标定预算的范围内。主控制器可以另用原生已知运行/等待工作量构建显式 analytical/estimated 等待项，但必须与本经验单元的校准范围区分，并另外验证。不能简单把同质 batch 均值加给每个异质请求后宣称队列预测已验证。
+拟合先按 batch 均值、再对 batch 等权。同一 forward 特征单元的预算、重复和并发成员在 OOF 中保持同折。经验 P99 使用受支持留出残差，同时保留残差数、独立单元数及最大误差；不把相关请求数当作独立样本数。
 
-## 不泄漏的开发验证与结果
+`CostModel` 绑定实际 fingerprint、cache configuration 和采样 recipe；这些身份检查不等同于自动确认另一台 GPU 的硬件等价。运行硬件与环境来自对应 runtime manifest。更换模型、池配置或 recipe 后，应先判断现有范围能否复用，再决定是否需要定向补采。
 
-5 折按完整 forward 特征单元划分；同一单元的两个预算、全部重复与 batch 内全部成员始终在同一折。每折只用训练折拟合表，再预测其 heldout cell。独立测试扰动某折所有目标标签后，该折的预测完全不变。这里不是把 552 个相关请求当作 552 个独立样本。
+## 复现与必要补采
 
-OOF 支持 402/552 请求（72.83%）、168/228 batch、28/38 forward cell。下表是受支持请求以及对应 batch 均值的 MAE；超出留出支持范围的诊断误差仍保存在 JSON，未删去。
+已保存产物可以直接加载和离线复算，无需重启模型。只有实际决策遇到关键成本空白才补采，使用独立服务及 `CONTEXTKV_ENABLE_PROFILING=1`，因为准备接口会改变缓存状态。正常服务不启用冷缓存标定；本次成本配置的启动条件见[部署说明](../deployment.md)。
 
-| 预测目标/对照 | 请求 MAE ms | batch 均值 MAE ms |
-|---|---:|---:|
-| forward_first | 27.76 | 24.55 |
-| pre_forward | 483.44 | 130.23 |
-| forward + pre_forward | 485.55 | 144.86 |
-| 总 TTFT，原 `(P,U,L,c)` 特征族 | 523.79 | 211.63 |
-| 总 TTFT，同预算/容量特征对照 | 485.53 | 144.87 |
+`--cases-file PATH` 接收有序 `PrefillCase` JSON 数组，每项包含 `prompt_tokens`、`prefix_tokens`、`output_tokens`、`concurrency`、`cache_state`；mixed 另含 `device_prefix_tokens`。它不与网格参数混用，执行前按真实页大小和上下文预算校验。manifest 的 `planned_generation_requests` 分别记录正式、预热、前缀准备和合计；失败时实际完成分母以 telemetry 为准。
 
-最后一行控制“新增预算特征”的影响：拆阶段后的联合预测与同特征的总 TTFT 几乎相同，**不能把约 38 ms 的请求 MAE 差异全部归因于阶段拆分算法**。分阶段的直接价值是隔离出可部署的执行成本与仍需研究的前置等待，而不是已经证明了整体决策收益。总 TTFT 对照重新使用同一 prepared 特征族，避免用事后恢复量给它额外信息；原旧 artifact 仍原样保留并有来源 SHA。
-
-forward 的 402 个支持残差来自 28 个独立 cell，绝对误差经验 P95=78.53 ms、P99=168.48 ms、max=169.98 ms。全部请求（包括不支持点）的 forward MAE=39.62 ms。联合前置区间在请求级比 batch 均值更难预测，反映同一同质 burst 内先执行与后等待成员差异；不应通过事后 rank 特征把这部分误差“拟合掉”。近零前置区间使 MRE 很敏感，判断时应同时查看绝对毫秒和分组统计。
-
-这些是同池、同质 burst、开发数据的 feature-cell 留出结果，没有异质真实会话队列或跨机器验证，没有使用质量 test，也没有据此宣称在线性能改善。
-
-## 已完成输出长度的剩余工作先验
-
-可选 `--development-report` 必须与 base artifact 已绑定的 development report SHA 一致。当前保存 5 个 dev 会话的 41 个已完成输出长度，截断标记为 0，来源为原 `cloud-dev-p2-output1024/benchmark-9ad65448c01e442aac00b757bc17bcb3.json`，SHA `3703184ba68479100a93d0540a0e0c9d346c0caf2e556bc76bd42406d442c964`。
-
-这些是已完成的实际服务长度，仍受生成预算制约，不称为无限预算自然长度。它们可供主控制器计算有存活样本时的 `E[L-g | L>g]` 及经验 P90，避免已生成长度超过无条件均值后把剩余工作置零。超出观测尾部应使用已知剩余输出预算并标记 fallback；不能拿标定时 `ignore_eos` 强制生成的 128/512 来假装自然分布。
-
-## 运行与验证
-
-定向补采可向同一 `profiling.sglang_probe` 入口传 `--cases-file PATH`。文件是 `PrefillCase` 的 JSON 数组，每项包含 `prompt_tokens`、`prefix_tokens`、`output_tokens`、`concurrency`、`cache_state`；`mixed` 另带 `device_prefix_tokens`。只执行列出的形状及其明确配置的预热/重复，不与长度、比例、并发、缓存状态网格参数混用。清单按实际引擎页大小和配置上下文预算检查后，才进入缓存准备。原网格入口保留。
-
-manifest 保存完整有序清单与 `case_selection`，并在 `planned_generation_requests` 中分别记录正式、预热、前缀物化和合计调用数；失败时这些是计划数量，实际完成情况以原有 telemetry 和 measurement 为准。显式清单继续输出原有测量协议，直接进入下述 fit/stage_fit，不引入另一套标定器。CPU 协议检查覆盖冷输入与 mixed 前缀、顺序、实际采集数量和原拟合接口；没有新增 Qwen3 硬件测量。
-
-`profiling.sglang_probe`的measurement、telemetry和manifest输出使用新的文件前缀。已有任一产物会在访问引擎前拒绝；manifest在缓存准备和生成前独占创建，防止重复命令混写不同run ID并覆盖原始来源。失败仍保留已写测量与分母，不自动覆盖重跑。该工程修复不产生新的标定值。
-
-当前`SGLangProbe`直接在原生telemetry中保存`run_id/repetition/warmup`，request记录还有原index、receipt和`forward_to_first_token_ms`。阶段拟合已能直接读取这些产物，不再要求先运行仓库外的compact转换脚本。下一次**确有必要的新Qwen3采集**可使用以下入口；这里不启动采集，不使用旧模型artifact：
+原生 telemetry 保存 `run_id/repetition/warmup`、request index、receipt 和阶段时间，直接进入拟合，不需要外部 compact 转换步骤：
 
 ```bash
 python -m profiling.stage_fit \
@@ -90,27 +60,9 @@ python -m profiling.stage_fit \
   --measurements runs/NEW-QWEN3/profile.jsonl \
   --profile-manifest selected=runs/NEW-QWEN3/profile.manifest.json \
   --base-artifact runs/NEW-QWEN3/cost-lookup.json \
+  --development-report runs/NEW-QWEN3/development-lengths.json \
   --output runs/NEW-QWEN3/cost-stage.json \
   --validation runs/NEW-QWEN3/stage-validation.json
 ```
 
-多组采集可重复`--telemetry GROUP=PATH`，与`--profile-manifest`逐组一致。直接入口核对原生计时、完整generation、显式run/repetition、原first_token记录的写入顺序及完整并发成员；不是按耗时排序或任意乱序join。warmup不进入拟合。实际GPU→host漂移保留为标签/诊断，输入仍取prepared case的host量。缺阶段标签、缺请求或身份不符明确失败，不从客户端时延补造原生阶段。来源文件在离线边界记录摘要，重拟合的metadata只声明本次阶段输入，原base仍单独绑定。
-
-collector→telemetry→stage artifact的CPU协议闭环及旧compact合同通过41项针对性测试；其中合成时间只验证数据接线，不是硬件标定。记录在`runs/b-current-integration-audit/`。当前仍没有Qwen3可用的实测成本表或在线净收益结论；这一补齐消除了将来必要采集的不可复现人工步骤，没有因此扩大采集矩阵。
-
-下述旧compact命令仅用于复算上文既有历史数据，不启动旧模型或新增实验。旧文件没有repetition时保留这一显式兼容入口，不伪造新telemetry身份：
-
-```bash
-python -m profiling.stage_fit \
-  --compact runs/remote-h200-capacity-matrix/runs/capacity-calibration/16384/stage-timings.jsonl \
-  --measurements runs/remote-h200-capacity-calibration/runs/capacity-calibration/16384/measurements.jsonl \
-  --profile-manifest single=runs/remote-h200-capacity-calibration/runs/capacity-calibration/16384/single.manifest.json \
-  --profile-manifest concurrent-small=runs/remote-h200-capacity-calibration/runs/capacity-calibration/16384/concurrent-small.manifest.json \
-  --profile-manifest concurrent-long-device=runs/remote-h200-capacity-calibration/runs/capacity-calibration/16384/concurrent-long-device.manifest.json \
-  --profile-manifest concurrent-long-host=runs/remote-h200-capacity-calibration/runs/capacity-calibration/16384/concurrent-long-host.manifest.json \
-  --base-artifact runs/remote-h200-capacity-calibration/runs/capacity-calibration/16384/cost-lookup.json \
-  --development-report runs/remote-h200-final/cloud-dev-p2-output1024/benchmark-9ad65448c01e442aac00b757bc17bcb3.json \
-  --output runs/NEW-STAGE/cost-stage.json --validation runs/NEW-STAGE/validation.json
-```
-
-文件采用独占创建，已有结果不会覆盖。完整 manifest/run_id/源文件 SHA 保留在 artifact metadata，source绑定只在离线入口执行。v1 原型保留，v2 更新了 manifest case 核对与 metadata 内阶段 validation 的标识；数值表和 OOF 结果相同。10 项新测试及 13 项既有 provenance 测试通过，覆盖 warmup 排除、原批次重建、事后恢复不入特征、全 cell/batch 分折、heldout 标签扰动、预算同折、旧点/先验保留，以及开发输出来源拒绝错配。
+新采集/拟合使用新的文件前缀，已有产物不覆盖。warmup 不入拟合；缺阶段标签、请求缺失或来源身份不一致明确失败，不从客户端时间补造原生阶段。`--development-report` 必须与 base artifact 已绑定来源一致。多组采集可重复 `--telemetry GROUP=PATH` 与同名 `--profile-manifest`。原 `--compact` 入口仅供读取旧测量协议，不改变当前模型范围。
