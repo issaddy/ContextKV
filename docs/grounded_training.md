@@ -1,6 +1,6 @@
 # 有源多轮回答的离线训练链路
 
-2026-10-24。新增`training`包，复用 Transformers Trainer、PEFT LoRA 和官方collator，实现明确训练样本→精确推理前缀/目标labels→有步数上限的训练→adapter保存。线上仍使用原单次生成。当前已验证编码、真实CPU训练与保存重载合同，尚未训练Qwen3-8B语义模型、部署adapter或证明质量提升。
+2026-10-24。`training`包复用 Transformers Trainer、PEFT LoRA 和官方collator，实现明确训练样本→精确推理前缀/目标labels→有步数上限的训练→adapter保存→离线合并为独立BF16 checkpoint及新scope。线上仍使用原单次生成。编码、真实CPU训练及导出重载合同已通过；尚未训练Qwen3-8B语义模型或证明质量提升。
 
 ## 方法依据与本项目适配
 
@@ -65,9 +65,47 @@ UV_PROJECT_ENVIRONMENT=.venv-training uv run --extra training --locked \
 
 产物`adapter/`含PEFT权重/config和tokenizer，`trainer_state.json`保留实际步骤；manifest记录原scope、准备产物、有效训练参数、库版本、结果及adapter文件身份。文件摘要只在产物边界计算。全量base参数冻结，adapter不能冒充原base identity或沿用已有KV/成本标定。
 
-**当前native guard不支持动态LoRA。** 新产物明确标记`native_serving_compatible=false`。后续需合并到独立checkpoint并建立区别于基座的新权重身份、核对生成结果后接入现有服务；现metadata scope仅凭config和shard库存不能保证区分同大小的新权重，这一集成尚未实现。不能将训练loss下降或adapter保存当作系统交付完成。
+**当前native guard不支持动态LoRA。** adapter训练产物仍标记`native_serving_compatible=false`。下面的离线导出将它转换为普通dense checkpoint，使用新模型身份接现有控制器、stock SGLang和研究引擎，不在请求时切换adapter。
 
-## 已执行验证
+## 独立checkpoint导出与接入
+
+对已完成的训练产物运行：
+
+```bash
+UV_PROJECT_ENVIRONMENT=.venv-training uv run --extra training --locked \
+  python -m training.export \
+  --training-run runs/COMPLETED-SFT-RUN \
+  --model-scope configs/model_scopes/qwen3-8b.local.json \
+  --output runs/NEW-MERGED-CHECKPOINT \
+  --max-shard-size 5GB
+```
+
+导出器先核对训练完成状态、adapter文件及其绑定的基座身份，再独立加载CPU BF16基座，通过PEFT `merge_and_unload(safe_merge=True)`生成dense权重。输出必须是新的独立目录，不覆盖基座、训练目录或旧导出；失败记录保留，不自动重试、启动服务器或发布Hub。原始tokenizer/template文件原样复制，正常保存模型config和推理所需的`use_cache=True`，不靠修改架构或虚构HF revision制造身份差异。
+
+`safe_merge=True`检查合并权重是否有限，不检验回答是否正确。普通LoRA合并遵循`W' = W + (alpha/r)BA`；复用[PEFT官方合并接口](https://huggingface.co/docs/peft/developer_guides/checkpoint)及[固定0.21.0实现](https://github.com/huggingface/peft/blob/v0.21.0/src/peft/tuners/lora/layer.py)，不复制另一个合并器。BF16合并会舍入更新，微小LoRA增量可能被舍入，因此不承诺未合并adapter与dense模型逐值相等或生成逐token相同。保存/重载的一致性、实际模型可加载与任务质量需要分别验证。
+
+输出包括普通HF checkpoint、`export-manifest.json`和最后发布的`model-scope.json`。只在权重保存完成且库存检查通过后发布scope；manifest保留基座身份、adapter身份、导出参数和库版本。`quality_validated=false`与`native_serving_validated=false`明确不授予语义或GPU运行资格。单文件`model.safetensors`无需伪造index；分片输出使用保存器实际产生的index。
+
+新scope采用schema v2、`identity_kind=local_checkpoint_artifact`：每个weight文件记录`file/bytes/sha256`，按文件名规范排序，与config、tokenizer和template共同绑定`local-checkpoint:`身份。相同大小但不同权重得到不同身份；目录位置和来源说明不改变身份。原基座schema v1及`local-snapshot:`指纹保持不变。
+
+每个新权重文件只在这次**导出发布边界**读取全量内容并计算摘要。随后启动核对config、文件名/大小和index；单文件只读8字节header长度及JSON offsets验证tensor字节数，不读或哈希tensor body。`weight_content_verified=false`表示启动未全量复验当前内容，发布摘要不是持续防篡改监控。产物发布后按不可变目录使用；若改动权重，应导出到新目录并生成新scope，不能保留旧身份冒充原产物。
+
+复制所需Qwen3共享运行配置，将其中`model.scope_path`改为导出的绝对路径，例如：
+
+```yaml
+model:
+  scope_path: /home/relay/songjiayun/ContextKV/runs/NEW-MERGED-CHECKPOINT/model-scope.json
+```
+
+继续使用同一共享配置的采样、预算与现有服务入口。启动器的`CONTEXTKV_MODEL_SCOPE_PATH`也指向该scope，并重新生成对应fingerprint；stock/native基线按同一scope加载dense模型。使用独立state/run目录和新引擎实例，不复用基座session/KV、成本表或输出长度标定。已有指纹和成本绑定负责拒绝混用，无需新缓存或调度器。详细启动流程见[固定引擎部署](deployment.md)及[引擎scope合同](../engine_patches/README.md)。接口接通不代表这一新权重已完成GPU验收。
+
+## 本轮导出验证
+
+本地真实Qwen3 tokenizer整仓回归为1478 passed、8 subtests、2 skipped；两个跳过项是显式opt-in训练/导出CPU运行合同，分别在容器运行。原v1的8B/32B身份逐值不变，v2同尺寸不同内容、native/HTTP指纹隔离、拒绝基座成本模型及stock/质量记录的identity kind均有合同覆盖。固定SGLang补丁完整应用、15文件编译及独立scope镜像一致检查通过；这是源码验证，不冒充GPU运行。
+
+本轮容器CPU使用真实PEFT/Transformers和原tokenizer，随机1层16hidden Qwen3、非零LoRA，执行完整export入口。dense重载与独立未合并参考在BF16容差内一致，实际投影权重改变、基座参数/文件不变；两份同形状同字节数但不同LoRA值的导出身份不同。真实NaN adapter被PEFT拒绝，失败manifest保留且无scope。没有加载8B权重、optimizer step、GPU或服务生成调用。11项测试（含真实runtime）通过；help子进程因staged源码与已部署旧包的导入路径冲突单独失败，修正测试工作目录后1项help通过，未重复runtime。前两次同类路径错误在收集阶段退出，日志保留。现有pytest异步配置/SWIG弃用提示不影响同步合同；本地另有既存Starlette提示。
+
+## 此前已执行的训练验证
 
 真实Qwen3 tokenizer的编码/数据合同34项通过，覆盖连续assistant、目标前导换行、EOS、padding接口、超长失败、严格数据分母与metadata隔离；六条实际起步数据通过同一prepare CLI。
 

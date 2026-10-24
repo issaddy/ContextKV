@@ -110,7 +110,7 @@ def native_manifest(info, runtime, pools, fingerprint, policy, source, expected_
     gpu = next(g for g in runtime["gpus"] if g["index"] == 0)
     result = {"engine": {"base_commit": COMMIT, "research_patch_applied": False, "tree_backend": "python"},
             "model": {"name": model_scope.model_path, "revision": None,
-                      "identity": model_scope.identity, "identity_kind": "local_snapshot_metadata",
+                      "identity": model_scope.identity, "identity_kind": model_scope.manifest()["record"]["identity_kind"],
                       "tokenizer_hash": fingerprint["tokenizer_hash"], "chat_template_hash": fingerprint["template_hash"],
                       "dtype": "bfloat16", "kv_dtype": "bfloat16"},
             "server": expected,

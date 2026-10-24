@@ -234,7 +234,8 @@ def quality_template(results, spec, *, by_job=False):
     if model.scope is None:
         raise ValueError("owned quality templates require the actual explicit Qwen3 scope")
     generator = {"model": model.scope.model_path, "revision": model.scope.identity, "base_family": "Qwen3",
-                 "identity_kind": "local_snapshot_metadata", "hf_revision": None, "weight_content_verified": False}
+                 "identity_kind": model.scope.manifest()["record"]["identity_kind"],
+                 "hf_revision": None, "weight_content_verified": False}
     return {"scope": "dev", "reference": spec["tuning"]["quality_constraints"]["reference"], "epsilon": spec["tuning"]["quality_constraints"]["epsilon"],
         "split_manifest": spec["split_manifest"], "frozen_protocol": None,
         "methods": {row["job_id"] if by_job else row["method"]: {"run": row.get("raw_output"), "audit": row.get("audit_output"),

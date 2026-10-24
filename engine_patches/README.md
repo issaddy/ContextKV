@@ -15,7 +15,7 @@
 - retire 先阻止新请求，等待已接纳请求终态，再撤销 native 软引用并 ACK。软引用退役的 free 计数恒为零；缓存物理占用不会被假定已回收。原生已接纳请求在 RETIRING 期间可能先完成注册、再立即被退役撤销，因此 receipt 的 `session_ref_registered` 表示本次曾成功经过注册路径，不是 ACK 后仍持有引用的证明。
 - 终态 receipt 通过原生 customized-info 输出，包含真实 tracker 注册结果、cache inserted length 和 native 分层命中。实际 prefill 工作来自每次成功 worker forward 的 `extend_lens` 累计，覆盖 chunk/retraction 重算并排除 mixed batch 的 decode 行，不用 input-minus-hit 冒充真实执行工作。
 
-当前运行合同是显式 Qwen3 LocalModelScope、单 GPU、TP/DP/PP=1、Python TreeCore、dense FULL、单条累计 SSE 流式或非流式请求、无 LoRA、默认 cache key。旧Qwen2.5-7B下载/启动/runtime fallback已删除，不再支持该模型的新运行；历史源码/GPU记录只作已有机制证据，不能作为新模型校准。HiCache 的 cache 模式受支持，buffer-only、L3、外部 linker、SWA/Mamba、speculative、PD/PDMux 不在此补丁范围。HTTP client 必须先验证研究能力，绝不把 guard 字段直接提交给原生未补丁服务器。
+当前运行合同是显式 Qwen3 LocalModelScope、单 GPU、TP/DP/PP=1、Python TreeCore、dense FULL、单条累计 SSE 流式或非流式请求、无动态 LoRA、默认 cache key。LoRA可先离线导出为独立dense checkpoint，再用新scope走同一合同。旧Qwen2.5-7B下载/启动/runtime fallback已删除，不再支持该模型的新运行；历史源码/GPU记录只作已有机制证据，不能作为新模型校准。HiCache 的 cache 模式受支持，buffer-only、L3、外部 linker、SWA/Mamba、speculative、PD/PDMux 不在此补丁范围。HTTP client 必须先验证研究能力，绝不把 guard 字段直接提交给原生未补丁服务器。
 
 ## 准备与启动
 
@@ -53,7 +53,11 @@ SGLANG_HICACHE_TMA_TRANSFER=0 scripts/launch_sglang.sh \
 
 `bootstrap_sglang.sh`仅安装固定SGLang/项目依赖，然后通过共享`ModelConfig/create_model_template`验证已存在的scope快照、tokenizer和模板，保存指纹。它不调用snapshot_download，不创建旧模型目录；缺少scope或本地文件会明确失败。完整源码准备可以下载SGLang/依赖，不能被误读为下载模型权重。
 
-`launch_sglang.sh`必须设置`CONTEXTKV_MODEL_SCOPE_PATH`；仅有`CONTEXTKV_MODEL_PATH`不能启动。scope拥有实际model/tokenizer路径，HF loading revision为None，不接受尾部`--revision`或另一个model/tokenizer路径。可选`CONTEXTKV_MODEL_PATH`仅作为同scope路径一致性检查，不能作为fallback。scope记录是metadata/分片库存身份，不编造HF revision，也不声称权重内容逐字验证。
+`launch_sglang.sh`必须设置`CONTEXTKV_MODEL_SCOPE_PATH`；仅有`CONTEXTKV_MODEL_PATH`不能启动。scope拥有实际model/tokenizer路径，HF loading revision为None，不接受尾部`--revision`或另一个model/tokenizer路径。可选`CONTEXTKV_MODEL_PATH`仅作为同scope路径一致性检查，不能作为fallback。scope不编造HF revision，也不声称启动时权重内容逐字验证。
+
+schema v1 `local_snapshot_metadata`保持原有config/分片库存身份和全部旧指纹。离线`python -m training.export`新增schema v2 `local_checkpoint_artifact`，将完成的LoRA产物合并到新的独立BF16 dense目录，按每个weight文件的`file/bytes/sha256`建立`local-checkpoint:`身份；同大小不同内容可区分，目录位置和来源注释不进入身份。发布后应保持目录不可变；控制器`model.scope_path`和引擎`CONTEXTKV_MODEL_SCOPE_PATH`指向同一新scope，重新生成fingerprint并使用独立state/engine，不继承基座KV和成本标定。stock/native基线复用该身份接口，无需动态LoRA缓存路径。完整命令见[训练与导出](../docs/grounded_training.md)。
+
+v2的权重摘要仅在导出发布边界全量计算一次。启动时核对config、实际文件名/大小与index；单文件`model.safetensors`无需index，只读取header长度及JSON offsets核对tensor字节数，不读或哈希tensor body。`weight_content_verified=false`明确当前内容未被启动时全量复验，发布摘要不能监控后续同尺寸文件改写。PEFT `safe_merge=True`只检查有限值，BF16舍入和实际回答效果另行验证；本轮接口实现不等于8B质量或GPU验收。
 
 通过 `CONTEXTKV_ENABLE_HICACHE=0` 可运行GPU-only功能检查；`CONTEXTKV_HICACHE_GB`/`CONTEXTKV_PAGE_SIZE`设置容量与页大小，`CONTEXTKV_WRITE_POLICY`复用原生三写策略。scheduler的`get_runtime`首次初始化必须读取scope，验证实际模型设置、config/库存、tokenizer/template与fingerprint；缺scope返回`MODEL_SCOPE_REQUIRED`，不存在旧revision/config隐式支持。初始化后复用实例，不逐请求扫描/重新解析。纯CPU `ContextKVRuntime`协议容器仍可用无模型fixture测试缓存/事务机制，这不是可启动原生模型的后门。
 
@@ -214,6 +218,6 @@ scripts/launch_sglang.sh --max-total-tokens 16384 --port 30000
 
 `CONTEXTKV_ENABLE_PROFILING=1` 与 `CONTEXTKV_ADMISSION_DIAGNOSTICS=1` 同时开启后，guarded 请求的 terminal event 保存原生 receive/首次 forward/first-token/completion 时间及实际访问 gate 的有限预算摘要。真实加入 `can_run_list` 决定接受结果；返回 `NO_TOKEN` 也可能表示加入后预算耗尽。默认关闭，旧 cache identity/receipt 不变。详见 [诊断合同与本地验证](../docs/native_admission_diagnostic.md)。本次增量尚待受控 GPU 验收，不覆盖此前补丁已完成的硬件证据。
 
-## 当前模型入口清理的验证边界
+## Qwen3-only入口清理阶段的验证记录
 
-Qwen3-only 补丁 SHA256 为 `579324222b2c620aac06de6101f5203991c797c336ce5542306e72aafcd450ea`，上游仍固定 `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。本轮利用已核验的本地上游原件完成全部原SHA检查、正向应用、反向check、15个patch文件语法检查和runtime/scope镜像一致性；没有下载或运行旧模型，没有远端/GPU操作。相关141项engine CPU合同、shell语法与Ruff通过，包括无scope拒绝、错误模型scope拒绝和真实shell参数转发。`verification_report.json`仍只表示source-only，`gpu_runtime_tested=false`；既有Qwen3功能记录不能自动视为这一新入口清理版本已部署验收。
+该阶段补丁 SHA256 为 `579324222b2c620aac06de6101f5203991c797c336ce5542306e72aafcd450ea`，上游固定 `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。当时利用已核验的本地上游原件完成全部原SHA检查、正向应用、反向check、15个patch文件语法检查和runtime/scope镜像一致性；没有下载或运行旧模型，没有远端/GPU操作。相关141项engine CPU合同、shell语法与Ruff通过，包括无scope拒绝、错误模型scope拒绝和真实shell参数转发。该记录只表示source-only，`gpu_runtime_tested=false`；本轮scope v2改动的源码与运行验证需单独记录，不能继承此前补丁的验证资格。

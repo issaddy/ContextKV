@@ -102,7 +102,7 @@ def validate_engine_manifest(manifest: Mapping[str, Any], baseline: str,
                            "disable_radix_cache": False, "tp_size": 1, "dp_size": 1}}
     if model_scope is not None:
         expected["model"] = {"name": model_scope.model_path, "revision": None,
-            "identity_kind": "local_snapshot_metadata", "identity": model_scope.identity,
+            "identity_kind": model_scope.manifest()["record"]["identity_kind"], "identity": model_scope.identity,
             "dtype": "bfloat16", "kv_dtype": "bfloat16"}
         expected["server"]["pp_size"] = 1
         declared = manifest.get("model_scope") or {}

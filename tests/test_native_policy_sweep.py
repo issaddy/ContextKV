@@ -6,7 +6,7 @@ import json
 import pytest
 
 from bench import native_policy_sweep as sweep
-from test_model_scope import local_scope as local_scope
+from test_model_scope import local_scope as local_scope, checkpoint_fixture
 
 
 @pytest.mark.parametrize('module',['bench.native_policy_sweep','bench.controller_capacity_sweep'])
@@ -35,7 +35,10 @@ def test_pool_size_comes_from_actual_server_and_startup_log():
         sweep.pool_measurements({"max_total_num_tokens": 16384}, "server ready", MODEL_CONFIG, 16384)
 
 
-def test_native_manifest_binds_requested_pool_and_observed_policy(local_scope):
+@pytest.mark.parametrize("checkpoint", [False, True])
+def test_native_manifest_binds_requested_pool_and_observed_policy(local_scope, tmp_path, checkpoint):
+    if checkpoint:
+        local_scope = checkpoint_fixture(local_scope, tmp_path)
     info = {"enable_session_radix_cache": True, "enable_hierarchical_cache": True,
             "disable_radix_cache": False, "tp_size": 1, "dp_size": 1, "page_size": 64,
             "context_length": 32768, "incremental_streaming_output": False,
@@ -51,6 +54,7 @@ def test_native_manifest_binds_requested_pool_and_observed_policy(local_scope):
     result = sweep.native_manifest(info, runtime, {"actual_kv_pool_tokens": 16384}, fingerprint, "write_back", {}, 16384,model_scope=local_scope.scope)
     assert result["server"]["max_total_tokens"] == result["runtime"]["actual_kv_pool_tokens"] == 16384
     assert result["engine"]["research_patch_applied"] is False
+    assert result["model"]["identity_kind"] == local_scope.scope.manifest()["record"]["identity_kind"]
     with pytest.raises(ValueError, match="configuration differs"):
         sweep.native_manifest(info, runtime, {}, fingerprint, "write_through", {}, 16384,model_scope=local_scope.scope)
 

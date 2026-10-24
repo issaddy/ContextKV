@@ -26,7 +26,8 @@ def contract(scope, baseline="B0", recipe=RECIPE):
     template.fingerprint = scope.fingerprint
     enabled = baseline == "B1"
     manifest = {"engine": {"base_commit": ENGINE_COMMIT, "research_patch_applied": False, "tree_backend": "python"},
-        "model": {"name": scope.scope.model_path, "revision": None, "identity_kind": "local_snapshot_metadata",
+        "model": {"name": scope.scope.model_path, "revision": None,
+                  "identity_kind": scope.scope.manifest()["record"]["identity_kind"],
                   "identity": scope.scope.identity, "dtype": "bfloat16", "kv_dtype": "bfloat16",
                   "tokenizer_hash": scope.fingerprint.tokenizer_hash, "chat_template_hash": scope.fingerprint.template_hash},
         "model_scope": scope.scope.manifest(), "sampling_recipe": request_sampling(recipe),
@@ -126,6 +127,27 @@ def test_explicit_qwen3_32b_head_dim_and_cross_model_identity(local_scope):
     assert not validate_engine_manifest(manifest, "B0", template, model_scope=local_scope.scope, sampling=RECIPE)
     other = load_model_scope(Path(__file__).parents[1] / "configs/model_scopes/qwen3-8b.local.json")
     assert validate_engine_manifest(manifest, "B0", template, model_scope=other, sampling=RECIPE)
+
+
+def test_merged_checkpoint_native_baseline_requires_its_artifact_identity_kind(local_scope, tmp_path):
+    fixture = scope_fixtures.checkpoint_fixture(local_scope, tmp_path)
+    template, manifest, _ = contract(fixture)
+    assert not validate_engine_manifest(manifest, "B0", template, model_scope=fixture.scope, sampling=RECIPE)
+    manifest["model"]["identity_kind"] = "local_snapshot_metadata"
+    assert validate_engine_manifest(manifest, "B0", template, model_scope=fixture.scope, sampling=RECIPE)
+
+
+def test_merged_checkpoint_quality_provenance_keeps_its_identity_kind(local_scope, tmp_path, monkeypatch):
+    from bench import b6_joint_sweep
+    fixture = scope_fixtures.checkpoint_fixture(local_scope, tmp_path)
+    config = RunConfig(model=ModelConfig(scope_path=str(fixture.path)))
+    monkeypatch.setattr(b6_joint_sweep, "matrix_config", lambda spec: config)
+    spec = {"tuning": {"quality_constraints": {"reference": "baseline", "epsilon": .05}},
+            "split_manifest": "fixture-split"}
+    result = b6_joint_sweep.quality_template([{"method": "merged"}], spec)
+    generator = result["methods"]["merged"]["generator"]
+    assert generator["identity_kind"] == "local_checkpoint_artifact"
+    assert generator["revision"] == fixture.scope.identity
 
 
 @pytest.mark.parametrize("change", ["missing", "gpu_capacity"])
