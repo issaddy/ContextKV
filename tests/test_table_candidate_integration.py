@@ -1,5 +1,6 @@
 import copy
 from dataclasses import replace
+from hashlib import sha256
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -225,7 +226,8 @@ async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monk
     seen = {}
     async def native_run(args):
         seen["native"] = (args.table_relations, args.table_annotation_style, args.table_structure_mode)
-        (Path(args.output) / "native-fake.json").write_text(json.dumps({"baseline": "B0"}))
+        (Path(args.output) / "native-fake.json").write_text(json.dumps({"baseline": "B0",
+            "engine_manifest_sha256": sha256(Path(args.engine_manifest).read_bytes()).hexdigest()}))
     async def controller_run(args, config):
         seen["controller"] = (config.context.table_relations, config.context.table_annotation_style,
                               config.context.table_structure_mode)
