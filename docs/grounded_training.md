@@ -1,6 +1,8 @@
 # 有源多轮回答的离线训练链路
 
-2026-10-24。`training`包复用 Transformers Trainer、PEFT LoRA 和官方collator，实现明确训练样本→精确推理前缀/目标labels→有步数上限的训练→adapter保存→离线合并为独立BF16 checkpoint及新scope。线上仍使用原单次生成。编码、真实CPU训练及导出重载合同已通过；尚未训练Qwen3-8B语义模型或证明质量提升。
+> 当前状态：可选支线，暂缓扩展。一次30-step Qwen3-8B训练（一个完整遍历）和独立CPU合并已完成；未执行准备中的32次对比生成，尚无语义收益结论。课题主线及后续优先级见[项目范围](project_scope.md)。下文接口、方法和材料保留供复用，不是当前必做清单。
+
+2026-10-24。`training`包复用 Transformers Trainer、PEFT LoRA 和官方collator，实现明确训练样本→精确推理前缀/目标labels→有步数上限的训练→adapter保存→离线合并为独立BF16 checkpoint及新scope。编码、CPU训练及导出重载合同已通过；已执行的小规模8B训练仅证明运行与更新，未证明质量提升，当前服务主线仍使用原基座。
 
 ## 方法依据与本项目适配
 
