@@ -68,6 +68,7 @@ async def run_sessions(sessions: Mapping[str, Sequence[Mapping[str, Any]]] | Seq
                        seed: int = 42, arrival_window: float | None = None,
                        drain_timeout: float | None = None, per_turn_timeout: float | None = None,
                        retriever: Any | None = None,
+                       retrieval_context_provider: Callable[[OnlineTurn], Any] | None = None,
                        on_result: Callable[[TurnRunResult], Any] | None = None) -> RunReport:
     """Run a fixed cohort or Poisson session arrivals, then drain all arrived work.
 
@@ -131,7 +132,13 @@ async def run_sessions(sessions: Mapping[str, Sequence[Mapping[str, Any]]] | Seq
                     retrieval_done = None
                     try:
                         if protocol == "P3":
-                            active = await asyncio.to_thread(retriever.retrieve_turn, active)
+                            if retrieval_context_provider is None:
+                                active = await asyncio.to_thread(retriever.retrieve_turn, active)
+                            else:
+                                def retrieve():
+                                    context = retrieval_context_provider(active)
+                                    return retriever.retrieve_turn(active, prior_context=context)
+                                active = await asyncio.to_thread(retrieve)
                         retrieval_done = time.monotonic()
                         operation = handler(active)
                         result = await asyncio.wait_for(operation, per_turn_timeout) if per_turn_timeout else await operation

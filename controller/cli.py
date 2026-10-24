@@ -99,6 +99,10 @@ async def benchmark(args, config):
                     if args.evidence_corpus else None)
     service = create_controller(config)
     run_prefix = service.events.run_id
+    retrieval_context_provider = None
+    if getattr(retriever, "requires_history_context", False):
+        from adapters.query_resolution import controller_context_provider
+        retrieval_context_provider = controller_context_provider(service.store, run_prefix)
 
     async def handle(turn):
         history = None
@@ -144,6 +148,7 @@ async def benchmark(args, config):
         report = await run_sessions(rows, handle, protocol=args.protocol, concurrency=args.concurrency,
                                     think_time=args.think_time, arrival_rate=args.arrival_rate,
                                     seed=args.seed, retriever=retriever, drain_timeout=args.drain_timeout,
+                                    retrieval_context_provider=retrieval_context_provider,
                                     arrival_window=args.arrival_window, per_turn_timeout=args.per_turn_timeout)
         if retriever is not None:
             manifest["retrieval"] = retriever.manifest

@@ -31,6 +31,8 @@ class HybridRetrievalConfig:
     rerank_k: int = 50
     rrf_k: int = 60
     cpu_threads: int = 1
+    selector: dict | None = None
+    selector_history_turns: int = 3
 
 
 def load_retriever_config(path):
@@ -38,14 +40,24 @@ def load_retriever_config(path):
     value = HybridRetrievalConfig(**yaml.safe_load(Path(path).read_text(encoding="utf-8")))
     if value.schema_version != 1 or value.kind != "hybrid":
         raise ValueError("retriever config requires schema_version=1 and kind=hybrid")
-    if value.query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic"}:
+    from adapters.query_resolution import SOURCE_MODES
+    if value.query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", *SOURCE_MODES}:
         raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
     if value.stage not in {"dense", "hybrid", "hybrid_rerank"}:
         raise ValueError("unknown retrieval stage")
     if value.query_fusion not in {"single", "current_topic_rrf"}:
         raise ValueError("unknown query fusion")
-    if value.query_fusion == "current_topic_rrf" and (value.query_mode != "user_topic" or value.stage == "dense"):
-        raise ValueError("current_topic_rrf requires user_topic and hybrid/hybrid_rerank")
+    if value.query_fusion == "current_topic_rrf" and (value.query_mode not in {"user_topic", *SOURCE_MODES} or value.stage == "dense"):
+        raise ValueError("current_topic_rrf requires user_topic/source_topic/assistant_topic_unverified and hybrid/hybrid_rerank")
+    if value.query_mode in SOURCE_MODES:
+        from adapters.query_selector import SelectorConfig
+        if value.query_fusion != "current_topic_rrf" or value.selector is None:
+            raise ValueError("topic selector modes require selector config and current_topic_rrf")
+        SelectorConfig(**value.selector)
+        if value.selector_history_turns < 1:
+            raise ValueError("selector_history_turns must be positive")
+    elif value.selector is not None:
+        raise ValueError("selector config is only used by explicit topic selector modes")
     if value.stage == "hybrid_rerank" and not value.reranker_path:
         raise ValueError("hybrid_rerank requires reranker_path")
     if value.dtype not in {"float32", "float16", "bfloat16"}:
@@ -80,9 +92,16 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
         reranker = (LocalBGE(config.reranker_path, reranker=True, device=config.device, dtype=config.dtype,
                             batch_size=config.batch_size, max_length=config.reranker_max_length)
                     if config.stage == "hybrid_rerank" else None)
+        resolver = None
+        if config.selector is not None:
+            from adapters.query_resolution import TopicResolver
+            from adapters.query_selector import OpenAICompletionClient, SelectorConfig
+            resolver = TopicResolver(OpenAICompletionClient(SelectorConfig(**config.selector)), config.query_mode,
+                                     history_turns=config.selector_history_turns)
         result = HybridRetriever(sparse, dense, encoder, reranker, query_mode=config.query_mode,
             stage=config.stage, candidate_k=config.candidate_k, rerank_k=config.rerank_k, rrf_k=config.rrf_k,
             query_fusion=config.query_fusion,
+            resolver=resolver,
             source_config={"path": str(Path(config_path).resolve()), "resolved": asdict(config),
                            "relative_path_base": str(Path.cwd())})
         result.initialization_seconds = time.perf_counter()-started

@@ -152,7 +152,7 @@ def test_query_fusion_configuration_rejects_ambiguous_stages_before_model_loadin
     value = yaml.safe_load(retriever_config.read_text())
     value.update(query_fusion="current_topic_rrf", query_mode=mode, stage=stage)
     retriever_config.write_text(yaml.safe_dump(value))
-    with pytest.raises(ValueError, match="requires user_topic and hybrid/hybrid_rerank"):
+    with pytest.raises(ValueError, match="requires user_topic.* and hybrid/hybrid_rerank"):
         create_retriever("P3", config_path=retriever_config)
     assert not LocalModelFixture.instances
 
@@ -199,7 +199,9 @@ def test_offline_cli_dual_uses_shared_models_then_opens_qrels(retriever_config, 
 
 
 @pytest.mark.parametrize("query_mode,fusion", [("current", "single"), ("user_topic", "single"),
-                                               ("user_topic", "current_topic_rrf")])
+                                               ("user_topic", "current_topic_rrf"),
+                                               ("source_topic", "current_topic_rrf"),
+                                               ("assistant_topic_unverified", "current_topic_rrf")])
 def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retriever_config, tmp_path, monkeypatch, query_mode, fusion):
     import bench.native_baseline as native_module
     import controller.cli as cli
@@ -208,6 +210,23 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
     value = yaml.safe_load(retriever_config.read_text())
     value["query_mode"] = query_mode
     value["query_fusion"] = fusion
+    selectors = []
+    if query_mode in {"source_topic", "assistant_topic_unverified"}:
+        from adapters import query_selector
+        from adapters.query_selector import CompletionResult
+        class Selector:
+            manifest = {"model": "fake-selector", "revision": "fixture"}
+            def __init__(self, config):
+                self.inputs, self.closed = [], False
+                selectors.append(self)
+            def complete(self, messages, **kwargs):
+                self.inputs.append(json.loads(messages[-1]["content"]))
+                return CompletionResult("completed", json.dumps({"status": "unchanged", "entity_ids": [],
+                                                                  "user_turn_ids": []}), "stop")
+            def close(self):
+                self.closed = True
+        monkeypatch.setattr(query_selector, "OpenAICompletionClient", Selector)
+        value["selector"] = {"base_url": "http://fake", "model": "fake", "revision": "fixed"}
     retriever_config.write_text(yaml.safe_dump(value))
 
     def respond(request):
@@ -246,6 +265,11 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
         assert turns[1]["online_turn"]["history"][-1]["text"] == turns[0]["assistant_text"]
         assert "REFERENCE ANSWER" not in json.dumps(turns)
     assert native["retrieval"]["completed_retrievals"] == controller_manifest["retrieval"]["completed_retrievals"] == 3
+    if selectors:
+        assert len(selectors) == 2 and all(s.closed and len(s.inputs) == 2 for s in selectors)
+        for selector in selectors:
+            assert [len(body["actual_history"]) for body in selector.inputs] == [2, 4]
+            assert "REFERENCE ANSWER" not in json.dumps(selector.inputs)
     for manifest in (native["retrieval"], controller_manifest["retrieval"]):
         assert manifest["query_mode"] == query_mode
         assert manifest["query_fusion"] == fusion
@@ -255,3 +279,9 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
             if fusion == "current_topic_rrf":
                 assert all(v["query_fusion_trace"]["duplicate_query_skipped"] for v in manifest["query_view_traces"])
                 assert manifest["model_usage"]["encoder"]["texts_processed"] == 3
+        if query_mode in {"source_topic", "assistant_topic_unverified"}:
+            traces = manifest["query_view_traces"]
+            assert [t["snapshot_version"] for t in traces] == [None, 1, 2]
+            assert [t["model_called"] for t in traces] == [False, True, True]
+            assert all(t["missing_source_keys"] == [] for t in traces)
+            assert all(t["query_fusion_trace"]["duplicate_query_skipped"] for t in traces)

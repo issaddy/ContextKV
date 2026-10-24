@@ -285,18 +285,21 @@ def search_current_topic(current_query, topic_query, sparse, dense, encoder, rer
 
 
 class HybridRetriever:
-    """One loaded model pair shared by P3 sessions; only user questions form queries."""
+    """Shared P3 retrieval; source-qualified history resolution is explicit opt-in."""
     def __init__(self, sparse, dense, encoder, reranker=None, *, query_mode="current",
                  stage="hybrid_rerank", candidate_k=50, rerank_k=50, rrf_k=60,
-                 source_config=None, query_fusion="single"):
-        if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic"}:
+                 source_config=None, query_fusion="single", resolver=None):
+        from adapters.query_resolution import SOURCE_MODES
+        if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", *SOURCE_MODES}:
             raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
         if stage not in {"dense", "hybrid", "hybrid_rerank"}:
             raise ValueError("unknown online retrieval stage")
         if query_fusion not in {"single", "current_topic_rrf"}:
             raise ValueError("unknown query fusion")
-        if query_fusion == "current_topic_rrf" and (query_mode != "user_topic" or stage == "dense"):
-            raise ValueError("current_topic_rrf requires user_topic and hybrid/hybrid_rerank")
+        if query_fusion == "current_topic_rrf" and (query_mode not in {"user_topic", *SOURCE_MODES} or stage == "dense"):
+            raise ValueError("current_topic_rrf requires user_topic/source_topic/assistant_topic_unverified and hybrid/hybrid_rerank")
+        if query_mode in SOURCE_MODES and (resolver is None or query_fusion != "current_topic_rrf"):
+            raise ValueError("topic selector modes require resolver and current_topic_rrf")
         if stage == "hybrid_rerank" and reranker is None:
             raise ValueError("hybrid_rerank requires a loaded reranker")
         if candidate_k < 5 or rerank_k < 5 or rrf_k < 0:
@@ -307,6 +310,8 @@ class HybridRetriever:
         self.corpus_snapshot_id = sparse.corpus_snapshot_id
         self.query_mode, self.stage = query_mode, stage
         self.query_fusion = query_fusion
+        self.resolver = resolver
+        self.requires_history_context = query_mode in SOURCE_MODES
         self.candidate_k, self.rerank_k, self.rrf_k = candidate_k, rerank_k, rrf_k
         self.source_config = source_config
         self._lock = Lock()
@@ -332,16 +337,22 @@ class HybridRetriever:
             "token_limit_note": "at configured token cap; includes possible exact-length inputs"}
         if self.query_mode == "user_topic":
             manifest.update(query_view=user_topic_manifest(), query_view_traces=list(self.query_view_traces))
+        if self.resolver is not None:
+            manifest.update(query_view=self.resolver.manifest, query_view_traces=list(self.query_view_traces))
         return manifest
 
-    def retrieve_turn(self, turn):
+    def retrieve_turn(self, turn, *, prior_context=None):
         if turn.protocol != "P3":
             raise ValueError("hybrid retrieval requires a P3 turn")
         view = user_topic_view(turn.user_questions) if self.query_mode == "user_topic" else None
-        query = view["text"] if view else query_text(turn.user_questions, self.query_mode)
         # run_sessions dispatches retrieval via to_thread. Serialize this model
         # pair instead of allowing overlapping forwards and unbounded GPU batches.
         with self._lock:
+            if self.resolver is not None:
+                if prior_context is None:
+                    raise ValueError("topic selector requires an explicit committed history context")
+                view = self.resolver.resolve(turn, prior_context)
+            query = view["text"] if view else query_text(turn.user_questions, self.query_mode)
             fusion_trace = None
             if self.stage == "dense":
                 contexts = self.dense.search(query, self.encoder, top_k=5)
@@ -367,3 +378,5 @@ class HybridRetriever:
             self.encoder.close()
             if self.reranker is not None:
                 self.reranker.close()
+            if self.resolver is not None:
+                self.resolver.close()

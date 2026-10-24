@@ -449,6 +449,10 @@ async def _run(args):
                                stream=not getattr(args, "no_stream", False))
     baseline = NativeBaseline(args.baseline, client, template, policy=policy,
                               corpus_snapshot_id=corpus_snapshot, engine_manifest=manifest, corpus_index=corpus_index)
+    retrieval_context_provider = None
+    if getattr(retriever, "requires_history_context", False):
+        from adapters.query_resolution import native_context_provider
+        retrieval_context_provider = native_context_provider(baseline)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     report = None
@@ -471,6 +475,7 @@ async def _run(args):
                                     think_time=args.think_time, arrival_rate=args.arrival_rate,
                                     arrival_window=args.arrival_window, drain_timeout=args.drain_timeout,
                                     per_turn_timeout=args.per_turn_timeout, retriever=retriever, seed=args.seed,
+                                    retrieval_context_provider=retrieval_context_provider,
                                     on_result=export_result)
     finally:
         cleanup_start = time.monotonic()
