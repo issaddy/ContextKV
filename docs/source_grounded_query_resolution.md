@@ -87,7 +87,7 @@ active_turn = retriever.retrieve_turn(active_turn, resolution=resolved)
 
 新模式为`source_topic`和`assistant_topic_unverified`。两者使用相同SYSTEM/schema、同一模型选择器、同一显式历史窗口；区别是后者允许没有来源支持的assistant实体候选，因此名称和manifest始终标注unverified。两者都要求`current_topic_rrf`，最终候选池与原文通过既有`search_current_topic`和总50重排，未另写融合器。
 
-默认结构协议仍为`static_v1`。可显式设`selector_schema_mode: enum_v2`，把每次实际目录ID写入schema enum，空目录使用`maxItems: 0`；消息、候选提取、预算和历史窗口不改。v2协议身份与每次实际schema另存，来源资格和合法ID仍不等于语义正确。[v1实际失败、v2冻结与编译probe边界](source_topic_selector_validation.md#enum_v2已实现并冻结尚无实际v2模型结果)。
+默认结构协议仍为`static_v1`。可显式设`selector_schema_mode: enum_v2`，把每次实际目录ID写入schema enum，空目录使用`maxItems: 0`；消息、候选提取、预算和历史窗口不改。v2协议身份与每次实际schema另存，来源资格和合法ID仍不等于语义正确。[真实v1/v2对照](source_topic_selector_validation.md)已完成：格式失败11→1，原合法61次输出逐字不变，不能宣称已有语义反例被修复。
 
 ```yaml
 # 路径按已有固定本地快照替换；程序不会下载模型或索引。

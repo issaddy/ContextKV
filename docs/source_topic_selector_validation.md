@@ -1,6 +1,8 @@
-# 来源支持主题选择器 v1：41轮真实开发验证
+# 来源支持主题选择器：41轮 v1/v2 真实开发验证
 
-2026-10-24。两种模式各覆盖同一固定41轮，其中各36轮实际调用Qwen、各5个首轮直接保留问题。共82条ledger、72次HTTP，全部原始completion已保存。**来源资格检查能限制无源名称，但不能保证话题选择正确；目标d5t4中，来源约束模式漏选Cloudant，无约束对照反而选出了Cloudant＋Attachments。** 本轮没有执行新检索或答案生成，不能据此宣布召回、回答质量或整体性能收益。
+2026-10-24。v1两种模式各覆盖同一固定41轮，其中各36轮实际调用Qwen、各5个首轮直接保留问题。共82条ledger、72次HTTP，全部原始completion已保存。**来源资格检查能限制无源名称，但不能保证话题选择正确；目标d5t4中，来源约束模式漏选Cloudant，无约束对照反而选出了Cloudant＋Attachments。** 本轮没有执行新检索或答案生成，不能据此宣布召回、回答质量或整体性能收益。
+
+随后同输入完成显式enum_v2：失败11→1、resolved60→70；v1原来合法的61次模型输出逐字全不变。它修复了输出空间问题，未修复已有语义反例；新增10条可用结果也不能自动计为10次正确消歧。原v1结果和默认static_v1保留，v2实际核验在文末。
 
 ## 数据与执行范围
 
@@ -105,7 +107,7 @@ completion elapsed包括本地计数和HTTP；wrapper还包括候选/来源构�
 
 同时保留作者固定ConvSearch-R1 3B学习式CQR基线，使用其full-history/prompt/stop格式并单列窗口、模型和成本差异，避免只围绕自制selector反复调提示。随后应将v1合法选择及失败回退完整送入实际相同预算检索，才能判断这些新增查询的价值。v1分析没有读取qrels、修改生产或重写冻结输入；随后新增的可选v2实现与独立冻结如下。
 
-## enum_v2：已实现并冻结，尚无实际v2模型结果
+## enum_v2：实现与冻结
 
 可选接口为`TopicResolver(..., schema_mode="enum_v2")`，检索配置为`selector_schema_mode: enum_v2`。默认`static_v1`沿用原静态schema、消息和trace；v2单独记录协议`source-topic-selector-enum-v2`，每次调用trace保留完整实际`response_format`。仅候选ID集合进入grammar，不把“应该选谁”、结果标签或正确产品放入约束。非空集合不增加数量上限，也不使用`uniqueItems`；重复ID仍按既有宿主规则保序去重。`resolved`必须非空、另外两状态必须空的语义合同仍在宿主检查，没有增加条件schema分支。
 
@@ -125,4 +127,58 @@ python runs/source-topic-preparation/run_selector.py \
   --tokenizer-path models/Qwen2.5-7B-Instruct
 ```
 
-短probe在当次服务Python环境内记录XGrammar/SGLang版本及runtime，CPU编译非空/全空/仅user三种schema，并检查非法用户ID无法匹配；随后仅发首个冻结真实输入和明示合成空目录两次HTTP，保存raw、finish、失败及schema检验，不回退、不重试。这两次是协议可运行性检查，不并入82条正式开发ledger或语义评分。主v2仍完整82行、72次预期调用；动态grammar编译、共享KV及输入输出差异都需进入后续成本解释。当前只完成CPU合同测试和plan，没有宣称格式或语义已改善。
+短probe在当次服务Python环境内记录XGrammar/SGLang版本及runtime，CPU编译非空/全空/仅user三种schema，并检查非法用户ID无法匹配；随后仅发首个冻结真实输入和明示合成空目录两次HTTP，保存raw、finish、失败及schema检验，不回退、不重试。这两次是协议可运行性检查，不并入82条正式开发ledger或语义评分。主v2仍完整82行、72次预期调用；动态grammar编译、共享KV及输入输出差异都需进入后续成本解释。上述冻结先完成CPU合同与plan，之后再执行以下真实运行。
+
+## enum_v2 实际运行：格式恢复，既有语义结果未变
+
+原始目录`runs/remote-h200-source-topic-enum/runs/`，11文件导入包SHA为`0f684c635a689686ea059d2557e4d4db539cd2c1a420b033aa31d521d5e25592`，项目部署293文件、commit`20fef31`。派生结果`runs/source-topic-review-v2/comparison.json`包含全部82对照行、两版raw、每mode统计、所有恢复/残余失败、实际schema/usage核对及计时子集；复跑入口`runs/source-topic-preparation/compare_selector.py`。没有读取qrels或改写原始输出。
+
+**实际编译与输入核验通过。** 当次XGrammar0.2.7、SGLang`0.0.0.dev1+g3f36fc083`、Transformers5.19.0、jsonschema4.26.0。三种schema实际CPU编译分别2.11/1.22/1.44ms，都接受合法空数组且拒绝坏ID；两次HTTP均stop且通过schema。该编译时间是独立本地compiler探针，不代表主服务器72个grammar的总编译成本。
+
+两版远端冻结cases均与本地逐字一致；v1/v2的41个query、完整history/source、候选、72组messages、输入计数和调用顺序相同，只72个response_format不同。实际v2 trace的schema全部匹配冻结版本。82/82完整，无重复、额外或缺失；72次HTTP全部有completion，72次服务端prompt usage与两版本地/冻结计数完全相同，来源绑定无新增损坏。配置仍为temperature0、未显式top_p、thinking=false、输入24576/context32768/输出256。
+
+| 每mode41条 / 36次模型调用 | source v1 | source v2 | unverified v1 | unverified v2 |
+|---|---:|---:|---:|---:|
+| resolved | 32 | 36 | 28 | 34 |
+| ambiguous | 0 | 0 | 1 | 1 |
+| failed | 4 | 0 | 7 | 1 |
+| 首轮unchanged | 5 | 5 | 5 | 5 |
+| stop / length | 35 / 1 | 36 / 0 | 33 / 3 | 35 / 1 |
+
+v1的7个坏ID stop以及3个length结果恢复为resolved，没有新增失败。**原v1的60个resolved和1个ambiguous，raw文本逐字全部相同。** 加上残余失败也相同，72次模型输出中62次完全不变；变化恰好是那10个恢复结果。两mode共82个最终query有72个不变，其中包括首轮及保留原query的情况。这是执行可用性提升，不能当作原语义选择更准确。
+
+唯一剩余失败为`1c041…t7 / assistant_topic_unverified`，当前问`how to create schema or tables?`。两版raw完全相同：从e0顺序列举到e50，随后在256输出预算结束，JSON没有闭合。输入19726 tokens，实际finish=length；这里没有未知ID或HTTP故障。合法ID enum不能阻止把大量合法候选全部枚举，也不保证有限预算内输出完成。宿主继续保留原query，没有补括号或挽救部分选择。
+
+### 全部10条恢复结果：不等于10次语义成功
+
+下表是assistant对当前问题和冻结历史的逐条诊断，非人类标注，不给准确率或检索胜负。原current query仍保留在最终查询中；风险来自追加锚点。
+
+| task / mode | v2实际选择摘要 | 语义观察 |
+|---|---|---|
+| 1c041…t5 / unverified | By、To | 存储增删/限额题恢复成两个连接词；格式成功没有提供明确对象 |
+| 1c041…t7 / source | Sort、Storage Space | schema/table创建题被追加排序与存储空间；没有恢复可靠数据库/产品对象 |
+| 1c041…t8 / source | Create Schema、Tables | 当前明确IBM Cloudant Query，却又加旧建表话题；不能仅因两个词有来源就称相关性正确 |
+| 1c041…t8 / unverified | 7项，包括跨行`Addressing Storage Space Limits\n\nTo`、Set、Adding、Select、Querying Data、Create | 宿主按真实候选原样组成query；没有清洗成产品实体。多项是旧回答标题或动词 |
+| b4614…t8 / source | Phone Connection、Include＋u7号码数量问题 | Phone Connection可能提供领域语境，但Include不是实体；旧号码数量问题不是当前call/transfer failure的等价需求 |
+| b4614…t8 / unverified | Adding More Phone Numbers、Add More Phone Numbers＋u7 | 格式恢复后仍偏向先前号码扩容，当前是转接故障与第三方提供商 |
+| c01c8…t5 / unverified | CocoaPods、Install＋u2/u3/u4三个旧CocoaPods问题 | 当前明确要求Carthage；新恢复结果延续旧工具偏置，与source既有反例一致 |
+| c6c3b…t9 / source | Container Registry及IBM Cloud Container Registry＋u6/u7/u8 | 产品锚点与namespace问题有联系；但同时带回加密镜像、产品澄清、授权三题，需实际检索验证必要性 |
+| d5b1e…t8 / unverified | 20项，含Lite Plan/Standard Plan，也含Free、Limited、If、There、Delete等＋u7 | 保留了计划比较语境，同时明显过选；没有任意数量上限去掩盖这一现象 |
+| d5b1e…t9 / unverified | If、Lite、Lite Plan | 当前问Python SDK，却加连接词和旧计划话题，没有补Cloudant产品 |
+
+原关键反例全部还在：d5t4 source仍仅Attachments＋u3、unverified仍Cloudant＋Attachments；source Data lakes仍选Knowledge Studio/Admin，source Carthage仍选CocoaPods，创建加密镜像两mode仍选By，Container Registry澄清仍回带Vulnerability Advisor旧话题。其raw既然未改变，不能因为v2全局失败数下降而重命名为“修复”。来源scope的宿主限制工作正常，**主要未解决点已转为候选实体质量、当前意图与历史话题关联、过选/该不该追加历史。**
+
+### 成本与缓存口径
+
+v2主运行前显式KV cold reset，GPU121920/host279040均为空。两次编译HTTP probe在reset之前，**grammar cache未重置**；runtime-before明确保存此备注。主运行没有逐call清KV，模式交替顺序与v1相同，后续仍可能原生prefix复用。不是新进程、均等grammar冷态或72次独立冷请求。
+
+| 每mode36次调用，含失败 | source v1→v2 | unverified v1→v2 |
+|---|---:|---:|
+| completion elapsed均值 | 350.59→324.25ms | 537.29→395.39ms |
+| completion elapsed P90 | 517.77→521.83ms | 1216.81→747.15ms |
+| wrapper wall均值 | 402.00→375.32ms | 590.21→448.04ms |
+| 输出tokens均值 | 32.92→26.72 | 46.97→36.61 |
+
+恢复的10次输出tokens总计1024→428，少生成了失败尾串；这能解释一部分工作量变化。原61个合法结果输出tokens完全相同（总1596），但其completion elapsed均值也356.07→303.37ms，说明本次时长变化不能仅归于输出变短或schema因果收益。计时包括本地分词与HTTP，wrapper还包括冻结复核；没有分离服务器grammar、排队、GPU执行与缓存效应，也没有独立重复运行。不能据这张表报整体P3加速或质量不变。
+
+下一步应保留enum_v2作为明确的执行协议选项，继续完成作者ConvSearch-R1学习式CQR基线及同预算下游检索比较，检查新增查询究竟帮助还是偏移；不要再用格式计数代替语义目标。本轮没有修改core/default、追加过滤词表、调选择数量或提高输出预算，也没有把10个恢复结果当作训练/质量真值。
