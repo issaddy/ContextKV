@@ -45,3 +45,5 @@ Controller 的 `request_submitted` 事件记录由同一配置构造的实际请
 后续薄接线已为正式 native benchmark 增加显式共享 RunConfig 路径，见 [native_model_scope.md](native_model_scope.md)：静态实际manifest可使用同一model/context/recipe；含native的矩阵拒绝方法单独改变采样/模型。旧无配置仍贪心。显式owned `--matrix` 随后已支持共同scope/recipe，使用前要求声明资源并核实际manifest，见 [b6_owned_matrix.md](b6_owned_matrix.md)；旧13格构造器仍保持7B/标准贪心。两个 owned cost preflight 继续在生成前拒绝采样不匹配的成本 artifact；不能让 Ours 静默全回退后仍声称运行了已标定策略。旧采样批次、manifest和冻结来源不因新入口而改写。
 
 采样接线当时的验证是本地 CPU/HTTP 合同：默认 wire、显式四项、stream/nonstream、预算唯一来源、事件/collector manifest、旧/新配方、未知来源合并、length 模型、owned preflight 与 native 矩阵拒绝。已完成的 a876 Qwen3 硬件 scope probe 没有部署这次采样代码，不能作为这条新 research client 接线的 GPU 验收。
+
+后续[8B owned入口验收](owned_local_scope_validation.md)已实际运行显式`.7/.8/20/0`的原生B1与研究Controller各两轮。原生保留实际HTTP采样参数，研究保留request_submitted事件与真实terminal receipt；不把事件称作原始HTTP抓包。全部自然stop，未建立采样的质量/性能优胜或成本标定资格。

@@ -37,7 +37,7 @@
 ## 当前工程切片
 
 1. **消除 B6 重复执行。** 赢家保留唯一 job/产物，`method_aliases: ["B6"]` 与 `method-aliases.json` 提供名称映射；失败和质量绑定沿用原 job，真正 repetitions 仍分别执行。见[B6 合同](b6_joint_sweep.md)。
-2. **统一正式原生入口。** B0/B1 使用共享 RunConfig 的显式本地 scope、context、四字段 sampling，核对实际服务。旧 7B 路径兼容；新模型的静态入口已实现，后续显式[owned矩阵](b6_owned_matrix.md)也接通共同scope/recipe及实际资源校验；旧13格自动构造器保持7B/greedy，新owned路径尚未真机验收。见[原生模型入口](native_model_scope.md)。随后B0的新scope/采样入口已完成一次真实合成SSE检查；新B1/联合负载不能由此追认，见[限定结果](source_plan_diagnostic_validation.md)。
+2. **统一正式原生入口。** B0/B1 使用共享 RunConfig 的显式本地 scope、context、四字段 sampling，核对实际服务。旧 7B 路径兼容；新模型的静态入口已实现，后续显式[owned矩阵](b6_owned_matrix.md)也接通共同scope/recipe及实际资源校验；旧13格自动构造器保持7B/greedy；随后[8B owned B1/Controller四调用验收](owned_local_scope_validation.md)完成，关闭这一功能缺口。见[原生模型入口](native_model_scope.md)。随后B0的新scope/采样入口已完成一次真实合成SSE检查；新B1/联合负载不能由此追认，见[限定结果](source_plan_diagnostic_validation.md)。
 3. **减少诊断重算。** `plan_selected` 直接保存已有 Plan 的收益、margin 和稳定期状态，不增加报价、哈希或预测器。纠正共有 control P95 乘二作为切换成本的旧建议，不借此调参数追结果。
 
 本轮机制诊断采用 Qwen3-8B、non-thinking、显式 `.7/.8/20/0`、完整 QA/正文、32768 窗口、final cap1024、Rebuild。这是工作配置，不是质量赢家或最终联合配置。既有 32B 只作能力参考，不自动复制矩阵。新机制未获支持前，核心保留单次生成与原生提交路径。
@@ -83,3 +83,7 @@
 不原样重复同一 Cloud 小集的 reranker/更多历史/enum/表格复制，不为每个无据 SDK 调用补一个符号，不扩 judge 网格追通过，不为单臂 MAE、合法 ID、低 D2H、高覆盖率单独扩大 GPU 实验。新方法必须对应尚未解决且影响选择的问题，先核作者机制和已有证据，再决定是否运行。
 
 边界校验一次，内部复用已验证状态。保留身份、幂等、真实输入绑定、CAS/epoch；不新增全权重哈希、影子 cache/scheduler、重复解析、隐式重试或无消费者抽象。既有正确 CPU 优化保留，不把局部倍数外推端到端收益。
+
+## 最近工程验收后的投入
+
+统一入口的最小真实运行已完成，不因它可运行就自动重开矩阵。下一步复用既有Qwen3-8B 159轮的真实R轨迹、原tokenizer和`build_candidates`，先逐token复现原R，再审计137个真实前状态的一步A/R候选；22首轮单列。量清可行性、与真实前序input+output的raw/page前缀、潜在新增prefill及额外保留材料，决定新scope是否及在哪些输入形状值得采成本。原轨迹用Q0，不冒充后来的D目录提示；不沿假A结果滚动、不造cache quote、不借旧7B成本，也不从token差宣布时间或质量收益。一次完整CPU审计后收束，只有影响技术选择的剩余不确定性才值得GPU投入。

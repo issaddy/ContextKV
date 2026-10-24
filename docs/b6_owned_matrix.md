@@ -71,3 +71,5 @@ stock B0/B1 的 actual native manifest 在服务验证后才生成：保留 `mod
 固定策略可以立即走此入口而不要求旧cost表；cost/shadow cost路径仍须真实同fingerprint/cache/sampling scope和hardware点。旧7B或不同recipe artifact不会因为GPU token cap相同而获得新模型校准资格；匹配失败在生成前拒绝，不暗中全回退。任何实际运行、评分和freeze必须绑定本次实现与声明，不能重写历史13格或跨模型沿用其资格。
 
 本次本地CPU合同覆盖新scope真实factory→owned参数→实际runtime→native validator→quality template、显式head128/实际池、B0/B1 flags、继承环境清理、资源/模型/recipe/cost不匹配零生成、失败cleanup和旧默认；没有新增GPU运行。本入口是否在某一真实资源组合运行成功，仍须后续单独的最小功能验收，不能用既有Qwen3 scope/probe或静态B0检查追认整个新owned矩阵。
+
+随后已完成[8B最小真机验收](owned_local_scope_validation.md)：stock B1与patched Controller各两轮，共4次真实生成全部自然stop，Controller实际R→A，容量/身份/历史与恢复均留证。它关闭此配置的新入口功能缺口，不扩大到32B/P3/成本拟合、质量或性能结论。

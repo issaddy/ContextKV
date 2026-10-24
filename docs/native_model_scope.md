@@ -57,3 +57,5 @@ CPU合同使用真实 `NativeSGLangClient` + `httpx.MockTransport`、明确的�
 这些测试没有加载权重或生成答案。此前stock318与patched Qwen3有限scope实测证明相关底层机制可运行，但不追认为这一新正式入口已做GPU验收。需要后续使用时先做最小入口功能检查，不自动扩展为159轮或13格运行。
 
 随后已完成一次[Qwen3-8B新B0实际入口检查](source_plan_diagnostic_validation.md)：同scope/显式采样，真实`--run-config`、SSE、cap64、合成五源，prompt/output IDs与请求配方核对通过。这是有限功能证据，不是B1新模型/HiCache、完整矩阵或性能结论；同一服务另外两次nonstream只验证计划grammar及其解除。研究Controller采样路径本轮未运行。
+
+随后[统一owned入口真机验收](owned_local_scope_validation.md)补齐8B新B1及研究Controller的共同scope/采样路径，各两轮实际P2历史。此前B0证据范围不变；新结果仍是有限功能检查。

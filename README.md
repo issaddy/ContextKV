@@ -84,7 +84,7 @@ uv run --extra retrieval contextkv --config configs/demo.yaml \
 
 `fixed_threshold` 按输入长度重建，`fixed_period` 按轮次重建，[`redundancy_threshold`](docs/redundancy_baseline.md)按非本轮required的可见证据正文token比例重建，`warm_idle` 使用实际 GPU ready 报价比例门控。正文比例不等于prompt长度差或可释放KV比例。稳定排序/引用与 warm/idle 属于原理适配，不能称为完整复现 ContextPilot 或 ReCAP。
 
-原生 B0/B1 有独立入口 `python -m bench.native_baseline`：B0 不传 session ID，B1 在整个业务会话中保持同一个原生 session ID；二者都不使用研究报价或伪造 receipt。分别在未打研究补丁、按基线启用缓存的服务器上运行，并根据实际启动日志补齐 `configs/native_b0_manifest.example.json` / `native_b1_manifest.example.json` 中的未知字段。示例文件会被验证器拒绝用作正式实验。完整命令与服务器参数见 [原生基线说明](docs/data_and_evaluation.md)。新 `--run-config` 入口可复用控制器的显式本地模型 scope、context 和 sampling，见[同模型基线入口](docs/native_model_scope.md)；预启动服务与显式[owned `--matrix`](docs/b6_owned_matrix.md)共用此配置；旧13格自动构造器仍为7B/greedy，新owned接线目前只有CPU验证。
+原生 B0/B1 有独立入口 `python -m bench.native_baseline`：B0 不传 session ID，B1 在整个业务会话中保持同一个原生 session ID；二者都不使用研究报价或伪造 receipt。分别在未打研究补丁、按基线启用缓存的服务器上运行，并根据实际启动日志补齐 `configs/native_b0_manifest.example.json` / `native_b1_manifest.example.json` 中的未知字段。示例文件会被验证器拒绝用作正式实验。完整命令与服务器参数见 [原生基线说明](docs/data_and_evaluation.md)。新 `--run-config` 入口可复用控制器的显式本地模型 scope、context 和 sampling，见[同模型基线入口](docs/native_model_scope.md)；预启动服务与显式[owned `--matrix`](docs/b6_owned_matrix.md)共用此配置；旧13格自动构造器仍为7B/greedy；新owned入口已完成[8B B1/Controller四调用有限验收](docs/owned_local_scope_validation.md)，完整历史、资源与恢复通过。
 
 研究控制器的硬件开发矩阵及专用服务冷态准备见 [硬件 dev 运行](docs/hardware_dev_matrix.md)。示例包含 11 个同预算开发任务及 5 个继承已选配置的消融；原生 B0/B1、host 策略组合和质量准入仍须独立补齐，不能将这一子集命名为完整最强 B6。
 
