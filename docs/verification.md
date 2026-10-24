@@ -25,7 +25,7 @@
 
 后续真实验证记录分别为[同源164轮标定比较](native_budget_targeted_validation.md)和[host准入机制](host_admission_validation.md)。前者降低回退但未证明稳定加速；后者的过滤/补齐4次、压力与身份控制15次、中等容量双方向重访16次均已独立复核，保留业务间前缀保留收益及自身重算代价。历史主题v1/v2各82条记录、72次HTTP与语义审查已完成，enum减少结构失败但没有纠正话题选择，见[选择器验证](source_topic_selector_validation.md)。
 
-`494e33a`完整回归又覆盖[SDK原文与显式初始化合同](api_evidence.md)、[正文冗余基线](redundancy_baseline.md)、查询解析失败留痕、召回/重排查询分离及矩阵启动源码绑定。Ruff与diff检查通过；`uv build`生成的`runs/dist-rerank-redundancy-stable`已逐字核对全部包内Python模块、运行资产/许可和sdist测试/配置，不含运行数据、权重或环境文件。初次`python -m build`因本地缺该构建入口失败，日志保留；使用项目已有uv构建成功，没有为此修改依赖。新基线CLI四轮模拟演示依次REBUILD/APPEND/REBUILD/REBUILD，事件含正文分子/分母；不作硬件性能证据。
+`494e33a`完整回归又覆盖[SDK原文与显式初始化合同](api_evidence.md)、[正文冗余基线](redundancy_baseline.md)、查询解析失败留痕、召回/重排查询分离及矩阵启动源码绑定。Ruff与diff检查通过。初次`python -m build`因本地缺该构建入口失败；改用项目已有uv成功构建，但逐文件核对发现sdist遗漏`tests/fixtures/*.txt`，已补MANIFEST收录并重新打包，旧日志和旧包保留。最终包验证结果另存`runs/dist-rerank-redundancy-complete/asset-check.json`，核对包内Python模块、运行资产/许可和sdist测试/配置，不包含运行数据、权重或环境文件。新基线CLI四轮模拟演示依次REBUILD/APPEND/REBUILD/REBUILD，事件含正文分子/分母；不作硬件性能证据。
 
 独立[ConvSearch-R1 41次改写](convsearch_validation.md)、[八查询方法328条检索](frozen_query_retrieval_validation.md)及[SDK证据12次生成](api_evidence_validation.md)均已真实执行，原始输入、失败/截断分母和具体退化保留。这些硬件记录的项目源码仍为各自manifest所记的`20fef31`等版本，不能追认为包含后续新代码。召回/重排分离的新四臂及完整独立开发质量评分正在准备，最终B6与冻结test未完成。
 
