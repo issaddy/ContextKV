@@ -48,7 +48,7 @@ curl http://127.0.0.1:8000/sessions/example/turns \
 
 事务与恢复说明见 [架构文档](docs/architecture.md)，数据和评测细节见 [数据文档](docs/data_and_evaluation.md)。论文与开源方法的原理、复用范围、适用条件及可证伪贡献见 [贡献与实验设计](docs/research_contributions.md) 和 [调研记录](docs/related_work.md)。
 
-用户现有 Qwen3-8B/32B 已通过[显式本地模型配置](docs/model_scope.md)接入同容器的控制器、启动脚本、引擎握手和生命周期探针，并完成[有限H200协议验收](docs/qwen3_scope_gpu_validation.md)。另有[159＋159轮同输入能力参考](docs/qwen3_reference_validation.md)与四域诊断；新模型独立成本标定、质量机制与正式综合实验仍在推进，旧7B正式基线与结果保留。
+用户现有 Qwen3-8B/32B 已通过[显式本地模型配置](docs/model_scope.md)接入同容器的控制器、启动脚本、引擎握手和生命周期探针，并完成[有限H200协议验收](docs/qwen3_scope_gpu_validation.md)。另有[159＋159轮同输入能力参考](docs/qwen3_reference_validation.md)与四域诊断；新模型独立成本标定与正式综合实验仍在推进，旧7B正式基线与结果保留。已完成[共同提示12题诊断](docs/source_plan_diagnostic_validation.md)：普通notes全部未在预算内结束，支持计划仍有覆盖/引用错误，当前两阶段版本不扩大运行；新正式B0入口的有限真实检查通过。
 
 近期扩展包括[来源支持的历史主题解析](docs/source_grounded_query_resolution.md)、[固定ConvSearch-R1适配](docs/convsearch_validation.md)、[版本化SDK证据包](docs/api_evidence.md)、[定向host/mixed标定](docs/native_budget_targeted_validation.md)和[业务会话感知host备份准入](docs/host_admission_design.md)，均保持可选。[八方法328条检索对照](docs/frozen_query_retrieval_validation.md)区分候选召回与最终重排，保留长改写的退化；[SDK生成对照](docs/api_evidence_validation.md)保留参数局部修正与初始化代码回归；[host准入对照](docs/host_admission_validation.md)记录了保住另一会话前缀的收益和自身重访的代价。开源复用、实现和效果证据分别说明，A/B/C继续根据结果改进。
 

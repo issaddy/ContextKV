@@ -17,7 +17,7 @@
 
 `cae9149` 的全局审查切片完成[正式原生模型/采样入口](native_model_scope.md)、B6赢家别名去重复，以及已有Plan收益/margin/稳定期的事件投影。25项新模型合同、5项别名合同包含在完整回归；独立复核还重放四份旧真实B0/B1 manifest，全部兼容。旧冻结模拟矩阵的39 jobs是其实际历史执行数，不因新别名逻辑重写成更少job。
 
-本切片未部署远端、未运行新GPU实验；已有a876 Qwen3 scope真机证据不能追认为新采样/正式入口验收。原795次计划暂不执行，已用固定seed42、纯会话/轮次元数据冻结[12题诊断选择](../runs/source-plan-diagnostic-prep/README.md)，12个不同会话/四域/早中晚，最多60次生成，实际调用0。选择与既有159冻结输入的task/conversation/turn映射一致；新D/N/P提示/运行协议仍须完成后才执行。
+该CPU切片验收时尚未部署或运行新GPU实验。随后`04b92f8`已在远端核验343个tracked文件，完成[固定12题D/N/P真实诊断](source_plan_diagnostic_validation.md)：3次stock接口检查通过，45次诊断HTTP均有终态，保留36个回答/60个stage位置。D12个final；N12次准备均384/length、未执行final；P9个final、3次准备length。独立实际输入/采样/原生输出/停止原因核验无问题；N未完成并非全局EOS失效。当前v2不扩159，不提高cap补跑。原研究服务已恢复、health200且池为空；研究Controller新采样、本地新B1完整路径未由这次stock检查验证。
 
 矩阵证据在 runs/matched-dev、runs/matched-test 和 runs/matched-ablation-dev。此前 48-job 开发矩阵属于未匹配消融参数的旧版流程，不再作为最终方法对照。runs/official-checker/verification.json 明确使用 fake fixture 答案，不是质量结果。上游 Starlette TestClient 有 HTTPX 弃用提示，不影响通过。
 
