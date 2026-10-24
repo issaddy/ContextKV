@@ -38,25 +38,32 @@ def to_evidence(context: OnlineContext | Mapping[str, Any], corpus_snapshot_id: 
     c = clean_context(context)
     key = EvidenceKey(corpus_id, c.document_id, c.document_id, corpus_snapshot_id, c.content_sha256)
     tokens = tuple(tokenizer.encode(c.text)) if tokenizer is not None else ()
-    uri = c.source or f"mtrag://{corpus_snapshot_id}/{c.document_id}"
+    uri = c.source or f"{corpus_id}://{corpus_snapshot_id}/{c.document_id}"
     return EvidenceBlock(key, uri, c.title, c.text, token_ids=tokens,
                          provenance=(uri, f"corpus_snapshot:{corpus_snapshot_id}"))
 
 
 def load_beir_corpus(path: str | Path) -> dict[str, dict[str, Any]]:
-    """Preserve public passage boundaries and text, with no normalization/rechunking."""
+    """Preserve BEIR or CorpusIndex passage identities and original bodies.
+
+    Retrieval keys identify passages; a source document can contain several of
+    them. Public metadata follows CorpusIndex's top-level-over-metadata rule.
+    The historical document_id-only input remains a single-passage record.
+    """
     corpus = {}
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
-        pid = str(row.get("_id", row.get("document_id", "")))
+        metadata = {**row.get("metadata", {}), **row}
+        pid = str(metadata.get("passage_id", metadata.get("_id", metadata.get("document_id", ""))))
         if not pid or pid in corpus:
             raise ValueError(f"missing or duplicate passage ID {pid!r}")
         if not isinstance(row.get("text"), str):
             raise ValueError(f"passage {pid} has no original text")
         corpus[pid] = {"document_id": pid, "title": str(row.get("title") or ""),
-                       "text": row["text"], "source": str(row.get("source") or "")}
+                       "text": row["text"],
+                       "source": str(metadata.get("source_uri") or metadata.get("source") or "")}
     return corpus
 
 

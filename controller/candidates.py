@@ -8,7 +8,7 @@ from .evidence import (EvidenceError, EvidencePolicy, allows_version_comparison,
                        evidence_index, resolve_required_evidence_with_reasons, version_conflicts)
 from .schema import EvidenceBlock, EvidenceKey, Message, PromptCandidate, SessionSnapshot
 from .templates import (SYSTEM_PROMPT, ByteTemplate, Template, current_user_message,
-                        longest_common_prefix, verify_rendered_evidence)
+                        longest_common_prefix, render_evidence_relations, verify_rendered_evidence)
 
 
 CandidatePolicy = EvidencePolicy
@@ -40,6 +40,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     if snapshot.execution:
         existing_refs = (*existing_refs, *snapshot.execution.reference_map)
     references = assign_references(archive, existing_refs, prefix_length=policy.reference_prefix_length)
+    evidence_relations = render_evidence_relations(required, references)
     table_annotations = ""
     if policy.table_relations:
         from adapters.table_relations import extract_table_relations, render_table_relations
@@ -108,7 +109,8 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         missing = tuple(block for block in required if block.key not in visible)
         current, spans = current_user_message(query, missing, references,
             message_index=len(execution.messages), reused=required_keys & visible,
-            layout=policy.layout, retrieval_priority=retrieval_priority, table_annotations=table_annotations)
+            layout=policy.layout, retrieval_priority=retrieval_priority, table_annotations=table_annotations,
+            evidence_relations=evidence_relations)
         prompts.append(("APPEND", execution.messages + (current,), execution.evidence_spans + spans,
                         visible | frozenset(span.key for span in spans), reason))
 
@@ -117,7 +119,8 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         messages.extend((Message("user", turn.user_text), Message("assistant", turn.assistant_text)))
     current, spans = current_user_message(query, required, references,
                                          message_index=len(messages), layout=policy.layout,
-                                         retrieval_priority=retrieval_priority, table_annotations=table_annotations)
+                                         retrieval_priority=retrieval_priority, table_annotations=table_annotations,
+                                         evidence_relations=evidence_relations)
     messages.append(current)
     prompts.append(("REBUILD", tuple(messages), spans, frozenset(span.key for span in spans), None))
     conversations = tuple(prompt[1] for prompt in prompts)

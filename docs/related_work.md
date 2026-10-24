@@ -60,6 +60,10 @@
 
 需要保留 B4 检索排名时，先取 `keys = index.retrieved_keys(contexts)`，再用 `index.resolve(keys)`取得正文与条件闭包，并把 `keys` 作为 `retrieval_priority` 传给候选。正文匹配执行一次；支持材料进入 required 集合但不获得虚构的 top5 排名。
 
+显式关系现继续进入共享A/R提示：required材料的dependency refs及parent_section形成一次紧凑注记，避免“正文齐全、关系却在渲染时丢失”。这与[SPIRE §2.3/§3.1](https://arxiv.org/html/2604.20849v1)保留标题、父级结构并在同来源合并上下文的原理一致；本项目只使用已有确定元数据，没有迁移其HTML树检索或LLM过滤，也未确认可复用作者代码。该修复有可逆的字面关系合同，不构成隐式语义关系抽取或质量优胜。
+
+[FullCite](https://arxiv.org/html/2606.07130v1)将文档归属、支持片段定位和claim-citation忠实性分开评价，进一步说明仅保证ref合法或quote存在不足以解决条件错绑。它已在先前调研中收录；本轮不重复实现其额外重试或模糊回绑。新增SDK检索入口及实际成本见[证据包接线](api_evidence.md)。
+
 自然回访需当前问题出现明确指代词，再从有限近期已提交轮次寻找正文支持的唯一主题匹配；多候选不猜，不能利用数据集 follow-up 标签、reference 或未来问题。`context.revisit_mode: explicit` 可关闭该扩展做消融。每个候选的 `evidence_resolution` 记录检索、显式引用、配置锚点、自然回访或依赖原因。这些规则应在所有基线共用，不能把多拿材料的质量收益归因于布局或 KV 策略。
 
 “旧版本是否也适用”等明确旧版请求可通过当前 passage 身份和历史已提交版本恢复唯一前版，保留双方版本说明；普通“那个超时”不会自动恢复已被当前版本替代的旧证据。

@@ -68,7 +68,28 @@ index = CorpusIndex.from_jsonl(
 blocks = index.resolve(("ibmcloudant:ibmcloudant/cloudant_v1.py#CloudantV1.post_document",))
 ```
 
-它不会自动接入检索：扩展索引、目标包/版本选择及生成对照须另行明确配置。未来缓存策略比较必须共享同一冻结扩展包；不能把新API材料带来的变化混入同材料B0–B6缓存比较。
+证据包可由同一BM25构建入口索引，检索key取`passage_id`，不会把同一源码文件中的多个符号误当重复document。固定`source_uri`保留为原GitHub出处；HTTP通过同一records作为metadata恢复真实document/version和依赖：
+
+```bash
+uv run python -m adapters.retrieval build \
+  --corpus runs/api-evidence-review/production-bundle-v2/records.jsonl \
+  --index runs/sdk-bm25 \
+  --snapshot cloudant-0.0.27-watson-7.0.0
+uv run contextkv --config configs/demo.yaml --state-dir runs/sdk-demo-state serve \
+  --retriever-index runs/sdk-bm25 \
+  --evidence-corpus runs/api-evidence-review/production-bundle-v2/records.jsonl \
+  --corpus-id official-sdk-preview
+```
+
+以上路径指已冻结的本地研究产物，不随wheel发布；使用自己的包时替换路径和身份。示例生成器是CPU mock，实际Qwen3使用对应scope配置及已启动引擎。扩展索引和目标包/版本仍由调用方明确选择；不能把新增SDK材料带来的效果混入同材料缓存比较。
+
+## 将已声明关系传入回答
+
+之前闭包会补正文，但模板丢掉`dependencies`和`parent_section`。同一组原文只交换两条依赖边，就得到完全相同的输入IDs，生成器无法区分这些关系。现由共享候选构造器一次生成当前required材料的紧凑JSON注记，映射为稳定E_ID→dependency E_ID及原parent_section，A/R和原生基线共用。APPEND只追加当前关系，不修改旧正文或已提交spans；无关系元数据时输入逐字不变。
+
+generic依赖只表示语料声明的关联，不擅自升级为条件、事实蕴含或问题适用性。完整正文/QA、精确版本、已有闭包与预算约束继续成立；注记增加的tokens计入真实输入预算，不宣称减少prefill。未增加模型调用、状态表、策略开关或hash。
+
+冻结v2包的CPU桥接检查已通过：10个片段/2份源码全部读取，真实BM25建盘/重载后取得5个原排名结果并补1个依赖正文；3条依赖和3个parent_section进入实际Qwen3候选。原正文及spans通过，输入从同正文无关系的5829增为5950tokens（+121），0模型/GPU调用。记录在`runs/evidence-context-integration/sdk-v1/result.json`。此包仍没有后来新增的构造器材料，不能把关系可见称作代码可执行或回答质量改善。
 
 ## 已完成验证
 

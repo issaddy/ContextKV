@@ -56,6 +56,8 @@ uv run --extra tokenizer --extra retrieval contextkv \
 
 `--evidence-corpus`可选，读取原文、版本、条件/表头依赖的JSONL；`--corpus-id`是证据命名空间，默认`mtrag`，自有文档应明确填写。服务的corpus snapshot只取已加载retriever的manifest；请求不能任意指定snapshot。元数据必须能精确匹配原检索正文，条件闭包不会改写正文，也不给追加依赖编造检索排名。
 
+索引构建同时接受BEIR `_id`和元数据语料的`passage_id`；同一`document_id`下的不同片段保持独立，`source_uri`可来自顶层或metadata。缺少来源地址时，证据URI使用显式`corpus_id`命名空间。旧版本可能把自有语料的缺省来源错误写成`mtrag://…`；既有archive不会自动改写，同key的来源变更仍会被拒绝。此类旧状态应显式使用新会话/新state并固定正确source，不能静默迁移后宣称来源一直相同；默认MTRAG来源格式保持不变。
+
 ## 请求、结果与来源
 
 新query请求只接受两个非空字段，拒绝`history`、`evidence`、`targets`、`reference`、`corpus_snapshot_id`等额外输入。没有配置检索器或应用未就绪时返回503与`RETRIEVAL_NOT_READY`，不会静默以空材料生成。

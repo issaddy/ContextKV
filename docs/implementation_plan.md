@@ -6,7 +6,7 @@
 
 | 模块 | 已完成、可复用 | 待完善或优化 | 可扩展但不作为当前前置 |
 |---|---|---|---|
-| A：证据管理 | 原文/版本身份、稳定引用、明确依赖闭包、CorpusIndex、完整QA与证据spans | 语料元数据完整性、对象/时间/版本/条件与答案的语义对应；位置正确不等于支持正确 | API/SDK与结构表格证据、source-local支持地址；仅按真实材料需要启用 |
+| A：证据管理 | 原文/版本身份、稳定引用、明确依赖闭包、CorpusIndex、完整QA与证据spans；当前required的显式依赖和章节关系传入A/R共同提示 | 语料元数据完整性、对象/时间/版本/条件与答案的语义对应；关系可见不等于支持正确 | 固定SDK包已可接现有检索/HTTP；结构表格、source-local地址按材料需要启用 |
 | A：检索与上下文 | BM25S、BGE dense、RRF/reranker、多轮query视图；召回与重排查询可分离；CLI与HTTP复用同一factory、原文metadata闭包与排名；共同A/R构造与批量分词 | 选中来源适用性、追问指代、错误来源进入答案；Qwen3历史重渲染的前缀边界 | 已有复杂改写/selector保持可选；不再扩已失败的两阶段来源计划 |
 | B：在线决策 | 固定/周期/冗余/warm/cost策略、原生报价、阶段与长度模型、支持域和显式回退 | Qwen3实际范围内完整成本；先识别有价值候选，不为覆盖率拟合整表 | 必要时对有明显取舍的形状做小规模标定；没有净收益就保留强简单策略 |
 | C：KV与资源 | epoch/CAS/attempt/outbox、原生Radix/HiCache、共享pin、GPU/host ready/pending/传输观测 | 自然负载下保护收益与后续重算代价，业务关闭与物理释放的边界 | host admission默认off；不新建影子cache/scheduler，不用受控fixture代替自然净收益 |
@@ -25,6 +25,7 @@
 4. **补齐P3失败闭环。** 首轮检索失败不清理不存在的session；清理/末次metrics失败先保存原报告再重抛。显式null timing source归为unavailable，使成功/失败混合结果可序列化。未增加隐式重试、重复hash或通用异常吞掉层。
 5. **接通HTTP自动检索。** `/sessions/{id}/query`只接收问题和request ID；复用已加载BM25/Hybrid及CorpusIndex，保留原始排名与追加条件正文的区别。历史只取服务已提交的完整QA；幂等检查、未决恢复、读取snapshot、检索与提交共享原会话锁。结果保留原attempt的检索耗时和可见来源，重放不再检索；端到端时序包含检索，控制成本不重复相加。
 6. **收束长服务资源与记录。** 检索/元数据只在启动加载一次，部分初始化失败、取消及退出均关闭已创建资源；Hybrid外部trace sink不再积累请求列表。历史来源投影改用已提交QA序号，避免恢复/CAS版本跳号误判可见轮次，原TurnRecord身份不变。默认路径不新增逐请求hash或模型调用。
+7. **补齐结构证据的数据链。** 自有语料检索按passage_id区分同document的多个片段，保留source_uri及显式namespace。原本已补入正文却丢失的dependency/parent_section进入A/R共同提示，原生基线同步使用；无元数据输入逐字不变。冻结SDK包的实际BM25→闭包→Qwen3分词已通过，所需额外121tokens计入预算，没有新增模型调用。见[原理与边界](api_evidence.md)。
 
 依赖核查和原始失败复现见[整合审查](../runs/qwen3-consolidation-review/inventory.md)，HTTP配置、失败/恢复及计时边界见[入口说明](http_retrieval.md)。本轮真实BM25、Controller/SQLite与MockEngine验证的是工程合同，不是回答质量或GPU收益。部署、CPU测试与包验证结果在阶段完成时单列，旧四调用只证明当时版本，不冒充本轮HTTP或引擎改动的GPU验收。
 
@@ -39,6 +40,8 @@
 可运行工程、研究批次完整、整体优胜是三个不同状态。负结果不阻碍交付可用系统，也不允许降低证据标准宣称收益。
 
 ## 本阶段检查
+
+最新结构证据集成回归通过1373项及6个子测试，开启真实Qwen3 tokenizer metadata；Ruff/diff通过。交换依赖边、旧APPEND账本、精确revision/cycle、无元数据兼容及预算计入均有合同检查；另用既有固定SDK包打通真实BM25索引/元数据/Qwen3分词。记录为`runs/pytest-evidence-context.log`和`runs/evidence-context-integration/sdk-v1/result.json`，没有模型/GPU调用，不能据此宣布语义质量提升。
 
 HTTP集成后完整回归通过1361项及6个子测试，开启真实Qwen3 tokenizer metadata，无跳过；Ruff和diff检查通过。真实CLI/TCP/BM25两轮验证了条件闭包、完整历史、旧请求重放、冲突、输入白名单与关闭，只有2次模拟生成、0次模型调用。随后补齐的启动来源事件与取消竞态由完整回归覆盖。记录在`runs/pytest-http-retrieval.log`和`runs/http-retrieval-tcp-v1/`；TCP退出完成应用清理，macOS信号退出另有1个semaphore清理警告，尚不宣称长时间资源稳定性已验证。
 

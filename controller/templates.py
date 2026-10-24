@@ -135,12 +135,35 @@ def _evidence_header(block: EvidenceBlock, reference: str) -> str:
     return f"\nEvidence [{reference}] {metadata}\n<evidence_body>\n"
 
 
+def render_evidence_relations(blocks: Iterable[EvidenceBlock],
+                              references: tuple[tuple[str, EvidenceKey], ...]) -> str:
+    """Expose declared metadata, without interpreting edges as entailment.
+
+    The caller supplies the already resolved required closure. Exact keys keep
+    different revisions distinct; no relation is inferred from text or titles.
+    """
+    by_key = {key: reference for reference, key in references}
+    rows = []
+    for block in sorted(blocks, key=lambda value: value.key):
+        if not block.dependencies and block.parent_section is None:
+            continue
+        row = {"id": by_key[block.key]}
+        if block.dependencies:
+            row["dependencies"] = [by_key[key] for key in sorted(set(block.dependencies))]
+        if block.parent_section is not None:
+            row["parent_section"] = block.parent_section
+        rows.append(row)
+    if not rows:
+        return ""
+    return "Declared evidence metadata:\n" + json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+
+
 def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
                          references: tuple[tuple[str, EvidenceKey], ...], *,
                          message_index: int,
                          reused: Iterable[EvidenceKey] = (), layout: str = "stable_key",
                          retrieval_priority: Iterable[EvidenceKey] = (),
-                         table_annotations: str = ""
+                         table_annotations: str = "", evidence_relations: str = ""
                          ) -> tuple[Message, tuple[EvidenceSpan, ...]]:
     by_key = {key: reference for reference, key in references}
     # Keep repeated evidence ahead of this turn's changing question so a shared
@@ -171,6 +194,8 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
             content += "\n" + retrieval_order_annotation(by_key[key] for key in priority) + "\n"
     if table_annotations:
         content += "\n" + table_annotations + "\n"
+    if evidence_relations:
+        content += "\n" + evidence_relations + "\n"
     content += f"\nQuestion:\n{query}\n"
     return Message("user", content), tuple(spans)
 
