@@ -36,9 +36,9 @@
 | B5 | ready-GPU比例warm/idle适配；.25/.75已真跑，.75实际触发两支 | 不是ReCAP完整图。明确host-only/pending信号边界，在有压力和回访的相同负载里检验；.25全APPEND不能证明有用的冷热门控 |
 | B6 | 选择与冻结框架存在；当前controller示例显式不设任何`b6_eligible` | **尚未形成真实、质量合格的最强组合。** 应将已验证较强的上下文规则与原生write policy组成有限候选，通过共同dev质量/完整时延选择，再冻结。不能用模拟的B3_periodic别名或大池无host恢复结果代替 |
 
-原方案第12.2节的冗余20/40/60%、token4k/8k/12k/16k、周期2/4/8是“dev起始搜索”，不是最低版本要求穷尽全部笛卡尔积。当前planner支持token/period/warm，但没有独立冗余比例策略，是**可补的强简单对照**，不是核心工程不可运行。
+原方案第12.2节的冗余20/40/60%、token4k/8k/12k/16k、周期2/4/8是“dev起始搜索”，不是最低版本要求穷尽全部笛卡尔积。审计时planner只有token/period/warm；后续 `91b38aa` 已实现独立[正文冗余阈值策略](redundancy_baseline.md)，并接通控制器、冻结双臂和控制开销profiling。真实dev性能与质量对照尚未完成，不以新增策略填补强B6验收。
 
-若补该对照，建议精确定义为 **旧的、在APPEND中可见、但本轮不在required中的完整证据正文token占比**：分子为这些旧非必需块的正文span token长度之和，分母为APPEND所有可见证据正文span token长度之和；QA、system、来源头、引用提示、table annotation不进入分子分母。正文计数使用固定tokenizer对原body的明确计量口径，不能把 `len(APPEND)-len(REBUILD)` 称为纯证据冗余。零证据时定义0；超过预设阈值仅在REBUILD合法时选它。该指标是文本冗余代理，不是实际KV可释放比例；最终prompt仍完整编码、不删required。以相同候选/退役/质量门比较有限0.2/0.4/0.6对照，或预先声明其中两点的等预算搜索；不读取未来或标签。
+实现口径为 **旧的、在APPEND中可见、但本轮不在required中的完整证据正文token占比**：用固定生成tokenizer独立编码每个原始body，按物理span求和；QA、system、来源头、引用提示、table annotation不进入分子分母。它不是 `len(APPEND)-len(REBUILD)`，也不声称等于BPE拼接后的可减token跨度。零证据时定义0；严格超过阈值且REBUILD合法时才重建。该指标是文本冗余代理，不是实际KV可释放比例；最终prompt完整编码、不删required。开发阶段可按相同候选/退役/质量门比较有限0.2/0.4/0.6或预声明的等预算点；不读取未来或标签。
 
 ## 三、本次发现的可执行缺口
 
