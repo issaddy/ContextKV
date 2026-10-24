@@ -4,7 +4,7 @@ import json
 import pytest
 
 from bench.metrics import TurnTiming, summarize_timings
-from bench.report import main, summarize_run
+from bench.report import main, summarize_run, decision_summary
 
 
 def payload():
@@ -25,6 +25,30 @@ def test_default_thresholds_are_recorded_without_changing_goodput():
     assert strict["timing"]["slo"] == {"ttft_seconds": .5, "tpot_seconds": .02}
     assert strict["timing"]["slo_goodput_requests_per_second"] == 0
     assert strict["timing"]["turn_seconds"] == result["timing"]["turn_seconds"]
+
+
+def test_decision_summary_separates_cost_selection_fallback_and_native_results():
+    cases = [
+        ("REBUILD", "only_feasible_candidate", None),
+        ("APPEND", "uncalibrated_cost_fallback", {"calibrated": False}),
+        ("REBUILD", "cost_saving", {"calibrated": True}),
+        ("APPEND", "hysteresis", {"calibrated": False, "selection_eligible": True}),
+        ("REBUILD", "always_rebuild", None),
+    ]
+    turns = [{"status": "success", "result": {"action": action, "reason": reason,
+                                               "prediction": estimate}}
+             for action, reason, estimate in cases]
+    turns += [{"status": "failed", "result": None},
+              {"status": "success", "result": {"output_ids": [1]}}]
+    result = decision_summary(turns)
+    assert result["observed_turns"] == 5
+    assert result["actions"] == {"REBUILD": 3, "APPEND": 2}
+    assert result["cost_based_selection_turns"] == 2
+    assert result["fallback_turns"] == 1
+    assert result["selected_prediction_turns"] == 3
+    assert result["selected_prediction_calibrated_turns"] == 1
+    assert result["selected_prediction_eligible_turns"] == 2
+    assert summarize_run(payload())["decisions"]["observed_turns"] == 0
 
 
 @pytest.mark.parametrize("cli,expected", [([], {"ttft_seconds": 2.0, "tpot_seconds": .1}),

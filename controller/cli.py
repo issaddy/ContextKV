@@ -199,6 +199,10 @@ async def benchmark(args, config):
             pending_retire_operations = len(service.store.outbox())
             cleanup_stage = "metrics_after"
             telemetry_after = await service.engine.metrics()
+            if pending_retire_operations:
+                cleanup_stage = "drain"
+                raise RuntimeError(f"{pending_retire_operations} retirement operation(s) remain pending; "
+                                   "durable outbox retained for recovery")
         except Exception as exc:
             # Persist the already completed workload before propagating cleanup
             # failure; do not relabel successful turns or replace their errors.

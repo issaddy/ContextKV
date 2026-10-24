@@ -46,6 +46,33 @@ def receipt_summary(rows):
             "complete_turn_seconds": distribution(r["turn_seconds"] for r in rows if r["turn_seconds"] is not None)}
 
 
+def decision_summary(turns):
+    """Describe executed controller choices, without treating fallback as cost selection."""
+    actions, reasons = defaultdict(int), defaultdict(int)
+    cost_choices = fallbacks = predicted = calibrated = eligible = 0
+    for row in turns:
+        row = _dict(row)
+        result = _dict(row.get("result") or {})
+        action, reason = result.get("action"), result.get("reason")
+        if row["status"] != "success" or action is None or reason is None:
+            continue
+        actions[action] += 1
+        reasons[reason] += 1
+        cost_choices += reason in {"cost_saving", "hysteresis"}
+        fallbacks += reason.endswith("_fallback")
+        estimate = _dict(result.get("prediction") or {})
+        if estimate:
+            predicted += 1
+            calibrated += estimate.get("calibrated") is True
+            supported = estimate.get("selection_eligible")
+            eligible += (estimate.get("calibrated") is True if supported is None else supported is True)
+    return {"scope": "successful_controller_turn_responses", "observed_turns": sum(actions.values()),
+            "actions": dict(actions), "reasons": dict(reasons),
+            "cost_based_selection_turns": cost_choices, "fallback_turns": fallbacks,
+            "selected_prediction_turns": predicted, "selected_prediction_calibrated_turns": calibrated,
+            "selected_prediction_eligible_turns": eligible}
+
+
 def telemetry_series(telemetry):
     """Normalize native /context/metrics snapshots without changing clock domains."""
     snapshots = list(telemetry.values()) if isinstance(telemetry, dict) else list(telemetry)
@@ -145,6 +172,7 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=2
                       "partially_evaluated" if missing_quality else "evaluated")
     return {"measurement_kind": source, "performance_claims_validated": False,
             "time_origin": report["time_origin"], "timing": summary,
+            "decisions": decision_summary(turns),
             "cohort": {"scheduled_sessions": report["scheduled_sessions"], "arrived_sessions": report["arrived_sessions"],
                        "unfinished_turns": report["unfinished_turns"], "timed_out_sessions": report["timed_out_sessions"],
                        "drain_seconds": max(0, report["completed_at"] - end)},
@@ -226,6 +254,7 @@ def markdown_report(summary):
             f"- TTFT observations: {timing['ttft_seconds']['count']}\n"
             f"- Unfinished dependent turns: {summary['cohort']['unfinished_turns']}\n"
             f"- Quality status: {summary['quality']['status']}\n"
+            f"- Controller decision reasons: {json.dumps(summary.get('decisions', {}).get('reasons', {}))}\n"
             f"- GPU peak unique slots: {summary['occupancy']['gpu_peak_slots']}\n\n"
             "See the companion JSON for distributions, failure counts, timing provenance and missing telemetry.\n")
 

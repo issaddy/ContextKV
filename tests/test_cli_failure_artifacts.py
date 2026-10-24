@@ -99,14 +99,43 @@ def test_later_p3_retrieval_failure_closes_the_existing_session(tmp_path, monkey
 
 def test_normal_p2_cleanup_and_cli_success_are_unchanged(tmp_path):
     cli.main(arguments(tmp_path, 'P2'))
-    payload, _ = raw_output(tmp_path)
+    payload, summary = raw_output(tmp_path)
     assert payload['cleanup']['status'] == 'completed'
     assert payload['cleanup']['skipped_uncreated_sessions'] == []
     assert payload['cleanup']['pending_retire_operations'] == 0
     assert payload['telemetry']['after'] is not None
     assert all(t['status'] == 'success' for t in payload['report']['turns'])
+    assert summary['decisions']['observed_turns'] == len(payload['report']['turns'])
+    assert summary['decisions']['cost_based_selection_turns'] == 0
+    assert summary['decisions']['fallback_turns'] > 0
     with sqlite3.connect(tmp_path/'sessions.sqlite3') as db:
         assert db.execute('SELECT count(*) FROM sessions WHERE closed=1').fetchone()[0] == 1
+
+
+def test_pending_retirement_is_not_reported_as_completed_cleanup(tmp_path, monkeypatch):
+    from controller.engine_client import EngineError
+
+    def controller(config):
+        service = create_controller(config)
+
+        async def pending_retire(*args, **kwargs):
+            raise EngineError('RETIRE_PENDING')
+
+        service.engine.retire = pending_retire
+        return service
+
+    monkeypatch.setattr(cli, 'create_controller', controller)
+    with pytest.raises(RuntimeError, match='retirement operation'):
+        cli.main(arguments(tmp_path, 'P2'))
+    payload, summary = raw_output(tmp_path)
+    assert all(turn['status'] == 'success' for turn in payload['report']['turns'])
+    assert payload['cleanup']['status'] == 'failed'
+    assert payload['cleanup']['failed_stage'] == 'drain'
+    assert payload['cleanup']['pending_retire_operations'] > 0
+    assert payload['telemetry']['after'] is not None
+    assert summary['cleanup'] == payload['cleanup']
+    with sqlite3.connect(tmp_path/'sessions.sqlite3') as db:
+        assert db.execute("SELECT count(*) FROM attempts WHERE stage='COMMITTED'").fetchone()[0] == 3
 
 
 @pytest.mark.parametrize('fail_every_export', [False, True])
