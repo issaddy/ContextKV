@@ -61,9 +61,9 @@ def check_stock(checkout):
             "contextkv_markers_absent": True, "research_patch_applied": False}
 
 
-def server_command(args):
+def server_command(args, *, mem_fraction_static=.15):
     return ["bash", str(ROOT / "scripts/launch_sglang.sh"), "--host", "127.0.0.1", "--port", str(args.port),
-            "--max-total-tokens", str(args.gpu_tokens), "--mem-fraction-static", "0.15",
+            "--max-total-tokens", str(args.gpu_tokens), "--mem-fraction-static", str(mem_fraction_static),
             "--max-running-requests", "8", "--random-seed", "42", "--skip-server-warmup",
             "--enable-cache-report"]
 
@@ -101,7 +101,8 @@ def pool_measurements(info, startup_log, model_config, expected_gpu_tokens, *, h
             "host_bytes_provenance": "native startup token slots times TP1 BF16 Qwen KV geometry; excludes allocator overhead"}
 
 
-def native_manifest(info, runtime, pools, fingerprint, policy, source, expected_gpu_tokens, *, baseline="B1"):
+def native_manifest(info, runtime, pools, fingerprint, policy, source, expected_gpu_tokens, *, baseline="B1",
+                    model_scope=None, sampling=None, hicache_gb=16):
     if baseline not in {"B0", "B1"}:
         raise ValueError("native manifest baseline must be B0 or B1")
     expected = {"enable_session_radix_cache": baseline == "B1", "enable_hierarchical_cache": baseline == "B1",
@@ -109,13 +110,18 @@ def native_manifest(info, runtime, pools, fingerprint, policy, source, expected_
                 "context_length": 32768, "incremental_streaming_output": False,
                 "max_total_tokens": expected_gpu_tokens, "skip_server_warmup": True, "random_seed": 42}
     if baseline == "B1":
-        expected.update(hicache_host_memory_mode="cache", hicache_size=16, hicache_write_policy=policy,
+        expected.update(hicache_host_memory_mode="cache", hicache_size=hicache_gb, hicache_write_policy=policy,
                         hicache_io_backend="kernel", hicache_mem_layout="layer_first")
+    if model_scope is not None:
+        from types import SimpleNamespace
+        model_scope.verify_native_settings(SimpleNamespace(**info))
+        model_scope.verify_fingerprint(fingerprint)
+        expected["pp_size"] = 1
     if any(info.get(key) != value for key, value in expected.items()):
         mismatch = {key: {"expected": value, "observed": info.get(key)} for key, value in expected.items() if info.get(key) != value}
         raise ValueError(f"native server configuration differs: {mismatch}")
     gpu = next(g for g in runtime["gpus"] if g["index"] == 0)
-    return {"engine": {"base_commit": COMMIT, "research_patch_applied": False, "tree_backend": "python"},
+    result = {"engine": {"base_commit": COMMIT, "research_patch_applied": False, "tree_backend": "python"},
             "model": {"name": "Qwen/Qwen2.5-7B-Instruct", "revision": MODEL_REVISION,
                       "tokenizer_hash": fingerprint["tokenizer_hash"], "chat_template_hash": fingerprint["template_hash"],
                       "dtype": "bfloat16", "kv_dtype": "bfloat16"},
@@ -125,6 +131,14 @@ def native_manifest(info, runtime, pools, fingerprint, policy, source, expected_
             "source_checkout": source, "example_only": False,
             "cache_state_protocol": "new_stock_server_skip_generation_warmup_empty_initial_KV",
             "quality_evaluated": False, "performance_claims_validated": False}
+    if model_scope is not None:
+        result["model"].update(name=model_scope.model_path, revision=None, identity=model_scope.identity,
+                               identity_kind="local_snapshot_metadata")
+        result["model_scope"] = model_scope.manifest()
+    if model_scope is not None or sampling is not None:
+        from controller.sampling import request_sampling
+        result["sampling_recipe"] = request_sampling(sampling)
+    return result
 
 
 def summarize_native(payload):

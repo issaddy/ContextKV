@@ -235,7 +235,7 @@ async def test_matrix_native_executor_receives_the_shared_typed_scope_and_recipe
 
 
 @pytest.mark.parametrize("use_scope", [False, True])
-def test_unextended_owned_native_profiles_rejected_before_start(tmp_path, local_scope, use_scope):
+def test_owned_scope_recipe_job_declaration_keeps_verified_executor_requirement(tmp_path, local_scope, use_scope):
     from bench.experiments import matrix_jobs
     from test_experiments import spec
     matrix = spec(tmp_path)
@@ -245,8 +245,8 @@ def test_unextended_owned_native_profiles_rejected_before_start(tmp_path, local_
     matrix["base_config"] = str(path)
     matrix["server_profiles"] = {"stock": {}}
     matrix["methods"].append({"id": "Native", "kind": "native", "server_profile": "stock", "native": {"baseline": "B0"}})
-    with pytest.raises(ValueError, match="owned native server profiles"):
-        matrix_jobs(matrix)
+    jobs = matrix_jobs(matrix)
+    assert next(job for job in jobs if job["method"] == "Native")["server_profile"] == "stock"
 
 
 def test_explicit_standard_greedy_keeps_legacy_manifest_compatibility(local_scope):

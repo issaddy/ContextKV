@@ -105,10 +105,6 @@ def validate_matrix(spec):
     for method in spec["methods"]:
         if method.get("kind", "controller") not in {"controller", "native"}:
             raise ValueError("method kind must be controller or native")
-        if (method.get("kind") == "native" and method.get("server_profile") is not None
-                and (shared_config.model.scope is not None
-                     or shared_config.sampling not in (None, SamplingRecipe()))):
-            raise ValueError("owned native server profiles currently support only legacy 7B/greedy; use a prestarted scoped manifest")
         if method.get("server_profile") is not None and method["server_profile"] not in spec.get("server_profiles", {}):
             raise ValueError("method server_profile must name a declared owned-server profile")
         candidates = method.get("candidates", [{}])

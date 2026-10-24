@@ -48,7 +48,7 @@ N全部恰为384个实际output IDs，finish为length，无ignore_eos/额外stop
 
 ## 从来源到计划再到回答的错误
 
-下列为assistant逐题原文审查，包含正例与退化，不是人类盲审、五维评分或全声明错误率。全部12题记录见[Cloud](../runs/source-plan-diagnostic-review/semantic-cloud.json)、[ClapNQ](../runs/source-plan-diagnostic-review/semantic-clapnq.md)、[FiQA/Govt](../runs/source-plan-diagnostic-review/semantic-fiqa-govt.md)，共保留111处来源/答案/计划的逐字字符位置。准备截断与未生成final不补分；[独立机械审计](../runs/source-plan-diagnostic-review/h200-v1-final/README.md)逐stage实际重渲染、分词、解码及原始绑定检查通过。
+下列为assistant逐题原文审查，包含正例与退化，不是人类盲审、五维评分或全声明错误率。全部12题记录见[Cloud](../runs/source-plan-diagnostic-review/semantic-cloud.json)、[ClapNQ](../runs/source-plan-diagnostic-review/semantic-clapnq.md)、[FiQA/Govt](../runs/source-plan-diagnostic-review/semantic-fiqa-govt.md)，共保留111处逐字字符位置（43来源、42答案、24准备、2历史；并非111个独立事实）。准备截断与未生成final不补分；[独立机械审计](../runs/source-plan-diagnostic-review/h200-v1-final/README.md)逐stage实际重渲染、分词、解码及原始绑定检查通过。
 
 | 观测 | 说明的机制问题 |
 |---|---|

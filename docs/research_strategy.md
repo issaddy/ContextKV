@@ -2,7 +2,7 @@
 
 2026-10-24，全局复核后的当前策略。目标是多轮文档问答下回答质量、完整响应成本、有限 GPU/host 资源和工程可靠性的综合权衡。“更优”须相对同模型、材料、预算和资源的实际强基线成立，不宣称求得一般意义的全局最优。本文替代历史报告里的待办顺序；历史运行、负结果及实现身份保持不变。
 
-**本轮诊断已完成：** [12题真实结果](source_plan_diagnostic_validation.md)保留36个回答位置，实际45次诊断调用加3次接口检查。N全部准备截断，P三次准备截断，完成答案仍有可核的缺源误判/错引。当前v2不扩到159，不按原样产品化；继续单次工程基座与已有来源→计划→回答的离线机制分析。
+**本轮诊断已完成：** [12题真实结果](source_plan_diagnostic_validation.md)保留36个回答位置，实际45次诊断调用加3次接口检查。N全部准备截断，P三次准备截断，完成答案仍有可核的缺源误判/错引。当前v2不扩到159，不按原样产品化；继续单次工程基座。[指定来源支持地址](source_local_support_design.md)已用现有matcher/SpanRef完成薄离线原型；43条已有source坐标可回放，不因此授予语义或下一GPU实验资格。
 
 ## 当前判断
 
@@ -37,7 +37,7 @@
 ## 当前工程切片
 
 1. **消除 B6 重复执行。** 赢家保留唯一 job/产物，`method_aliases: ["B6"]` 与 `method-aliases.json` 提供名称映射；失败和质量绑定沿用原 job，真正 repetitions 仍分别执行。见[B6 合同](b6_joint_sweep.md)。
-2. **统一正式原生入口。** B0/B1 使用共享 RunConfig 的显式本地 scope、context、四字段 sampling，核对实际服务。旧 7B 路径兼容；新模型先支持静态预启动服务，owned 13 格启动器保留旧 7B/greedy 范围。见[原生模型入口](native_model_scope.md)。随后B0的新scope/采样入口已完成一次真实合成SSE检查；新B1/联合负载不能由此追认，见[限定结果](source_plan_diagnostic_validation.md)。
+2. **统一正式原生入口。** B0/B1 使用共享 RunConfig 的显式本地 scope、context、四字段 sampling，核对实际服务。旧 7B 路径兼容；新模型的静态入口已实现，后续显式[owned矩阵](b6_owned_matrix.md)也接通共同scope/recipe及实际资源校验；旧13格自动构造器保持7B/greedy，新owned路径尚未真机验收。见[原生模型入口](native_model_scope.md)。随后B0的新scope/采样入口已完成一次真实合成SSE检查；新B1/联合负载不能由此追认，见[限定结果](source_plan_diagnostic_validation.md)。
 3. **减少诊断重算。** `plan_selected` 直接保存已有 Plan 的收益、margin 和稳定期状态，不增加报价、哈希或预测器。纠正共有 control P95 乘二作为切换成本的旧建议，不借此调参数追结果。
 
 本轮机制诊断采用 Qwen3-8B、non-thinking、显式 `.7/.8/20/0`、完整 QA/正文、32768 窗口、final cap1024、Rebuild。这是工作配置，不是质量赢家或最终联合配置。既有 32B 只作能力参考，不自动复制矩阵。新机制未获支持前，核心保留单次生成与原生提交路径。

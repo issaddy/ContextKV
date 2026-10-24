@@ -126,7 +126,7 @@ def check_research_checkout(checkout):
             "verification": "read-only reverse-apply check of the current patch"}
 
 
-def validate_runtime(group, runtime, *, expected_host_tokens=None):
+def validate_runtime(group, runtime, *, expected_host_tokens=None, expected_hicache_gb=16):
     """Actual scheduler capacities and unchanged cost binding, before generation."""
     capacity = group["requested_gpu_tokens"]
     info, pool, cache = runtime["engine"], runtime["pool"], runtime["cache_config"]
@@ -139,7 +139,7 @@ def validate_runtime(group, runtime, *, expected_host_tokens=None):
     if (info.get("engine_kind") != "sglang" or not info.get("profiling_enabled")
             or info.get("sglang_commit") != server.COMMIT or mismatch
             or pool["gpu_capacity_tokens"] != capacity or pool["host_capacity_tokens"] <= 0
-            or runtime["server_info"].get("hicache_size") != 16
+            or runtime["server_info"].get("hicache_size") != expected_hicache_gb
             or (expected_host_tokens is not None and pool["host_capacity_tokens"] != expected_host_tokens)):
         raise ValueError(f"actual research server pool/host settings differ from the sweep: {mismatch}")
     scope = None

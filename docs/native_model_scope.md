@@ -1,6 +1,6 @@
 # Native B0/B1 的显式本地模型与采样入口
 
-正式 `bench.native_baseline` 现在可以使用与研究 Controller 相同的 `RunConfig.model/context/sampling`。这是一条预启动 stock 服务的入口接线；没有扩大 owned B6 启动器、自动部署、下载权重、改写历史 manifest 或执行新的 GPU 批次。
+正式 `bench.native_baseline` 现在可以使用与研究 Controller 相同的 `RunConfig.model/context/sampling`。这是一条预启动 stock 服务的入口接线；该薄入口没有自动部署、下载权重或改写历史 manifest；后续已有显式 [owned matrix 接线](b6_owned_matrix.md)，其CPU验证与此入口的实际GPU检查分开记录。
 
 B0 仍提交完整共享候选，不发送 native session ID，不开启 HiCache/SessionRadix；它不是完全无 radix 缓存。B1 仍对同一会话使用稳定 native session ID，完整重建输入并保留实际 QA；`close_session` 只作为 dispatch，不伪造 scheduler retirement ACK 或物理回收。
 
@@ -46,7 +46,7 @@ stock HTTP没有完整host allocator观测，因此host容量仍需要原生allo
 
 `bench.experiments`将同一已解析 `ModelConfig`、`SamplingRecipe`和context policy传给native，Controller也使用这份共享配置。含native的矩阵要求方法/候选的model与sampling等价，拒绝native自带另一份scope/recipe/config以及与共享scope不同的model_path。不能通过方法级温度变化把采样干预伪装成B0/B1/Controller策略差异。
 
-这一入口允许**静态、实际已观测的 engine_manifest + 预启动服务**运行新scope/recipe。带 `server_profile` 的现有owned native路径仍只允许legacy7B/标准贪心，并在启动前拒绝新scope或recipe：旧owned manifest工厂和启动配置本轮未泛化。原13格及其旧freeze身份保持；新代码不能追认旧结果同源。
+这一入口允许**静态、实际已观测的 engine_manifest + 预启动服务**运行新scope/recipe。带 `server_profile` 的 [owned `--matrix` 路径](b6_owned_matrix.md)现也可显式声明共同scope/recipe；它要求明确新模型资源并验证实际服务后生成manifest。旧13格构造器仍仅legacy7B/标准贪心，旧freeze身份保持；新代码不能追认旧结果同源。
 
 新 native 输出保存 `shared_configuration`、原engine manifest、实际server info、模板fingerprint及每次真实HTTP参数/输入输出；现有完整QA、正文span、失败、length与质量导出分母继续复用。这个入口不使用研究cost artifact，不将Qwen3绑定到7B的时间/输出长度分布，也不自动授予quality eligibility或B6资格。
 

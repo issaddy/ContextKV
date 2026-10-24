@@ -85,7 +85,6 @@ def freeze(fixture, *, simulation=False):
 
 
 def fake_hardware(fixture, monkeypatch, *, runtime_cache='cache-32', incomplete_job=None):
-    from controller import templates
     from profiling import runtime_manifest
     seen, launched, stopped, current = [], [], [], {}
     monkeypatch.setenv('RAYON_NUM_THREADS', '4')
@@ -93,7 +92,7 @@ def fake_hardware(fixture, monkeypatch, *, runtime_cache='cache-32', incomplete_
         assert model == fixture.config['model']['name'] and revision == sweep.server.MODEL_REVISION
         assert kwargs['namespace_hash'] == fixture.fp.namespace_hash
         return SimpleNamespace(fingerprint=fixture.fp)
-    monkeypatch.setattr(templates, 'HuggingFaceTemplate', template)
+    monkeypatch.setattr(sweep, 'create_model_template', lambda model: template(model.name, model.revision, namespace_hash=model.namespace_hash))
     monkeypatch.setattr(sweep.research, 'check_research_checkout', lambda path: {'path': str(path), 'research_patch_applied': True})
     monkeypatch.setattr(sweep.server, 'check_stock', lambda path: {'path': str(path), 'research_patch_applied': False})
     monkeypatch.setattr(sweep.server, 'command', lambda argv, env: str(Path(env['SGLANG_CHECKOUT'])/'python/sglang/__init__.py'))

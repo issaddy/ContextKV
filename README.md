@@ -48,7 +48,7 @@ curl http://127.0.0.1:8000/sessions/example/turns \
 
 事务与恢复说明见 [架构文档](docs/architecture.md)，数据和评测细节见 [数据文档](docs/data_and_evaluation.md)。论文与开源方法的原理、复用范围、适用条件及可证伪贡献见 [贡献与实验设计](docs/research_contributions.md) 和 [调研记录](docs/related_work.md)。
 
-用户现有 Qwen3-8B/32B 已通过[显式本地模型配置](docs/model_scope.md)接入同容器的控制器、启动脚本、引擎握手和生命周期探针，并完成[有限H200协议验收](docs/qwen3_scope_gpu_validation.md)。另有[159＋159轮同输入能力参考](docs/qwen3_reference_validation.md)与四域诊断；新模型独立成本标定与正式综合实验仍在推进，旧7B正式基线与结果保留。已完成[共同提示12题诊断](docs/source_plan_diagnostic_validation.md)：普通notes全部未在预算内结束，支持计划仍有覆盖/引用错误，当前两阶段版本不扩大运行；新正式B0入口的有限真实检查通过。
+用户现有 Qwen3-8B/32B 已通过[显式本地模型配置](docs/model_scope.md)接入同容器的控制器、启动脚本、引擎握手和生命周期探针，并完成[有限H200协议验收](docs/qwen3_scope_gpu_validation.md)。另有[159＋159轮同输入能力参考](docs/qwen3_reference_validation.md)与四域诊断；新模型独立成本标定与正式综合实验仍在推进，旧7B正式基线与结果保留。已完成[共同提示12题诊断](docs/source_plan_diagnostic_validation.md)：普通notes全部未在预算内结束，支持计划仍有覆盖/引用错误，当前两阶段版本不扩大运行；新正式B0入口的有限真实检查通过。[指定来源支持地址](docs/source_local_support_design.md)已完成薄离线原型，复用精确span定位，尚不作为生成质量结论。
 
 近期扩展包括[来源支持的历史主题解析](docs/source_grounded_query_resolution.md)、[固定ConvSearch-R1适配](docs/convsearch_validation.md)、[版本化SDK证据包](docs/api_evidence.md)、[定向host/mixed标定](docs/native_budget_targeted_validation.md)和[业务会话感知host备份准入](docs/host_admission_design.md)，均保持可选。[八方法328条检索对照](docs/frozen_query_retrieval_validation.md)区分候选召回与最终重排，保留长改写的退化；[SDK生成对照](docs/api_evidence_validation.md)保留参数局部修正与初始化代码回归；[host准入对照](docs/host_admission_validation.md)记录了保住另一会话前缀的收益和自身重访的代价。开源复用、实现和效果证据分别说明，A/B/C继续根据结果改进。
 
@@ -84,7 +84,7 @@ uv run --extra retrieval contextkv --config configs/demo.yaml \
 
 `fixed_threshold` 按输入长度重建，`fixed_period` 按轮次重建，[`redundancy_threshold`](docs/redundancy_baseline.md)按非本轮required的可见证据正文token比例重建，`warm_idle` 使用实际 GPU ready 报价比例门控。正文比例不等于prompt长度差或可释放KV比例。稳定排序/引用与 warm/idle 属于原理适配，不能称为完整复现 ContextPilot 或 ReCAP。
 
-原生 B0/B1 有独立入口 `python -m bench.native_baseline`：B0 不传 session ID，B1 在整个业务会话中保持同一个原生 session ID；二者都不使用研究报价或伪造 receipt。分别在未打研究补丁、按基线启用缓存的服务器上运行，并根据实际启动日志补齐 `configs/native_b0_manifest.example.json` / `native_b1_manifest.example.json` 中的未知字段。示例文件会被验证器拒绝用作正式实验。完整命令与服务器参数见 [原生基线说明](docs/data_and_evaluation.md)。新 `--run-config` 入口可复用控制器的显式本地模型 scope、context 和 sampling，见[同模型基线入口](docs/native_model_scope.md)；预启动服务支持此路径，owned 启动器仍保留旧 7B/greedy 范围。
+原生 B0/B1 有独立入口 `python -m bench.native_baseline`：B0 不传 session ID，B1 在整个业务会话中保持同一个原生 session ID；二者都不使用研究报价或伪造 receipt。分别在未打研究补丁、按基线启用缓存的服务器上运行，并根据实际启动日志补齐 `configs/native_b0_manifest.example.json` / `native_b1_manifest.example.json` 中的未知字段。示例文件会被验证器拒绝用作正式实验。完整命令与服务器参数见 [原生基线说明](docs/data_and_evaluation.md)。新 `--run-config` 入口可复用控制器的显式本地模型 scope、context 和 sampling，见[同模型基线入口](docs/native_model_scope.md)；预启动服务与显式[owned `--matrix`](docs/b6_owned_matrix.md)共用此配置；旧13格自动构造器仍为7B/greedy，新owned接线目前只有CPU验证。
 
 研究控制器的硬件开发矩阵及专用服务冷态准备见 [硬件 dev 运行](docs/hardware_dev_matrix.md)。示例包含 11 个同预算开发任务及 5 个继承已选配置的消融；原生 B0/B1、host 策略组合和质量准入仍须独立补齐，不能将这一子集命名为完整最强 B6。
 

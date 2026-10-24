@@ -79,7 +79,6 @@ def test_runtime_checks_scheduling_and_hardware_not_just_cache_hash():
 @pytest.mark.parametrize('failed_first_job', [False, True])
 def test_owned_execution_binds_real_profiles_continues_failures_and_cleans_each_process(tmp_path, monkeypatch, failed_first_job):
     from adapters import mtrag
-    from controller import templates
     from profiling import runtime_manifest
     args = arguments(tmp_path)
     args.model_path.mkdir()
@@ -92,7 +91,7 @@ def test_owned_execution_binds_real_profiles_continues_failures_and_cleans_each_
         {'conversation_id': 'heldout', 'task_id': 'heldout:1', 'turn': 1, 'Collection': mtrag.CLOUD_COLLECTION}]))
     monkeypatch.setenv('RAYON_NUM_THREADS', '4')
     fp = ConfigFingerprint(tokenizer_hash='a'*64, template_hash='b'*64)
-    monkeypatch.setattr(templates, 'HuggingFaceTemplate', lambda *a, **kw: SimpleNamespace(fingerprint=fp))
+    monkeypatch.setattr(sweep, 'create_model_template', lambda model: SimpleNamespace(fingerprint=fp))
     monkeypatch.setattr(mtrag, 'load_rows', lambda path: rows)
     monkeypatch.setattr(sweep.research, 'check_research_checkout', lambda path: {'path': str(path), 'commit': sweep.server.COMMIT})
     monkeypatch.setattr(sweep.server, 'check_stock', lambda path: {'path': str(path), 'commit': sweep.server.COMMIT})

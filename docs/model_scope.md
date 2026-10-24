@@ -51,7 +51,7 @@ research client仍保持原temperature0默认；**没有**把独立Qwen3能力�
 
 `profiling.sglang_probe`与smoke/lifecycle/observation工具使用同一模板factory及预期scope；probe清单增加已解析model_scope，同时保留真实fingerprint、engine、pool、cache_config和runtime。Measurement列、fit/interpolation与旧artifact不改变。`controller.cli._manifest`本来记录真实config/fingerprint/engine，scope数据经engine info进入该清单。
 
-`profiling.common.run_manifest`是未被当前controller/probe生产路径调用的旧7B清单模板，本切片保留其历史默认；不能把它用于Qwen3再称真实模型记录。后续[正式native B0/B1薄入口](native_model_scope.md)已允许共享显式scope/recipe与实际静态manifest，不使用test_mode绕过身份。owned B6启动器仍限定原7B/标准贪心；该新入口不追认旧a876硬件批次或历史manifest。
+`profiling.common.run_manifest`是未被当前controller/probe生产路径调用的旧7B清单模板，本切片保留其历史默认；不能把它用于Qwen3再称真实模型记录。后续[正式native B0/B1薄入口](native_model_scope.md)已允许共享显式scope/recipe与实际静态manifest，不使用test_mode绕过身份。后续[owned显式矩阵](b6_owned_matrix.md)也已接通共同scope/recipe与明确资源profile，旧13格自动构造器保持7B/标准贪心；新owned路径当前仅CPU合同，不追认旧a876硬件批次或历史manifest。
 
 ## 本地验证与后续GPU验收
 

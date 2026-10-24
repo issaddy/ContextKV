@@ -10,6 +10,7 @@ import asyncio
 from dataclasses import asdict, replace
 from hashlib import sha256
 import json
+import math
 import os
 from pathlib import Path
 from urllib.parse import urlparse
@@ -24,9 +25,11 @@ from bench import controller_capacity_sweep as research
 from bench import native_policy_sweep as server
 from bench.experiments import (execute_job, run_matrix, matrix_jobs, matrix_config,
                                merge, provenance)
-from controller.config import RunConfig, load_config
+from controller.config import RunConfig, load_config, create_model_template
 from controller.cost_model import CostModel
 from controller.serialization import decode
+from controller.sampling import SamplingRecipe, request_sampling
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 TEXT_POLICIES = {
@@ -42,6 +45,8 @@ COMMON_SERVER = {"attention_backend": "fa3", "chunked_prefill_size": 8192,
 
 def build_plan(args):
     base = load_config(args.config)
+    if base.model.scope is not None or base.sampling not in (None, SamplingRecipe()):
+        raise ValueError("phase1 remains legacy 7B/greedy; use an explicit --matrix for model scope or sampling")
     config = replace(base,
         model=replace(base.model, name=str(args.model_path), revision=server.MODEL_REVISION,
                       namespace_hash="default", local_files_only=True),
@@ -97,16 +102,21 @@ def build_plan(args):
         "quality_evaluated": False, "b6_selected": None, "test_content_used": False}
 
 
-def server_environment(profile, args, fingerprint):
+def server_environment(profile, args, fingerprint, *, model_scope=None):
     checkout = Path(profile["checkout"]).resolve()
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="0", SGLANG_CHECKOUT=str(checkout),
         CONTEXTKV_MODEL_PATH=str(args.model_path), CONTEXTKV_FINGERPRINT_JSON=json.dumps(fingerprint),
         CONTEXTKV_ENABLE_SESSION_RADIX="1" if profile["session_radix"] else "0",
         CONTEXTKV_ENABLE_HICACHE="1" if profile["hicache"] else "0",
-        CONTEXTKV_HICACHE_GB="16", CONTEXTKV_WRITE_POLICY=profile["write_policy"] or "write_through",
+        CONTEXTKV_HICACHE_GB=str(profile["hicache_gb"]), CONTEXTKV_WRITE_POLICY=profile["write_policy"] or "write_through",
         CONTEXTKV_HICACHE_LAYOUT="layer_first", CONTEXTKV_HICACHE_IO_BACKEND="kernel",
         CONTEXTKV_HOST_ADMISSION="off", CONTEXTKV_PAGE_SIZE="64", SGLANG_HICACHE_TMA_TRANSFER="0",
         CONTEXTKV_SAMPLE_POOL="1", CONTEXTKV_ENABLE_PROFILING="1" if profile["kind"] == "patched" else "0")
+    # Do not inherit a different model identity from an operator shell. The
+    # explicit scope owns model/tokenizer/revision through the existing launcher.
+    env.pop("CONTEXTKV_MODEL_SCOPE_PATH", None)
+    if model_scope is not None:
+        env["CONTEXTKV_MODEL_SCOPE_PATH"] = model_scope.source_path
     env["PYTHONPATH"] = str(checkout/"python")+os.pathsep+str(ROOT)
     env["PATH"] = str(Path(sys.executable).parent)+os.pathsep+env["PATH"]
     return env
@@ -168,13 +178,18 @@ def job_requirements(spec, job, shared):
     config = decode(RunConfig, merge(asdict(shared), job["overrides"]))
     if (config.engine.kind != "sglang" or config.engine.base_url != shared.engine.base_url
             or config.model != shared.model or config.engine.page_size != 64
+            or (config.sampling or SamplingRecipe()) != (shared.sampling or SamplingRecipe())
             or config.context.max_total_model_tokens != 32768
             or config.context.max_new_tokens != shared.context.max_new_tokens):
         raise ValueError("owned jobs must use the shared SGLang endpoint/model/context/output budget and page 64")
     profile = spec.get("server_profiles", {}).get(job.get("server_profile"))
     fields = {"kind", "write_policy", "hicache", "session_radix", "gpu_tokens", "hicache_gb", "checkout"}
-    if profile is None or set(profile) != fields:
+    if profile is None or not fields <= profile.keys() or profile.keys() - fields - {"mem_fraction_static"}:
         raise ValueError("owned jobs require a declared supported server_profile")
+    fraction = profile.get("mem_fraction_static", .15)
+    if (type(fraction) not in (int, float) or not math.isfinite(fraction) or not 0 < fraction < 1
+            or shared.model.scope is not None and "mem_fraction_static" not in profile):
+        raise ValueError("owned scope requires an explicit finite mem_fraction_static in (0,1)")
     capacity = profile["gpu_tokens"]
     if type(capacity) is not int or capacity < 64 or capacity % 64 or config.engine.gpu_capacity_tokens != capacity:
         raise ValueError("profile GPU capacity must match the job config and be positive/page-aligned")
@@ -182,9 +197,11 @@ def job_requirements(spec, job, shared):
     baseline = job["native"].get("baseline") if job["kind"] == "native" else None
     host = baseline != "B0"
     if (profile["kind"] != expected_kind or profile["hicache"] is not host
-            or profile["session_radix"] is not host or profile["hicache_gb"] != (16 if host else 0)
+            or profile["session_radix"] is not host
+            or type(profile["hicache_gb"]) not in (int, float) or not math.isfinite(profile["hicache_gb"])
+            or (profile["hicache_gb"] <= 0 if host else profile["hicache_gb"] != 0)
             or (profile["write_policy"] not in server.POLICIES if host else profile["write_policy"] is not None)):
-        raise ValueError("owned profiles support patched HiCache or stock B0/B1, host 16GB and native write policies")
+        raise ValueError("owned profiles support patched HiCache or stock B0/B1, explicit positive host GB (B0 zero) and native write policies")
     if job["kind"] == "native":
         native = job["native"]
         if (baseline not in {"B0", "B1"} or native.get("base_url") != shared.engine.base_url
@@ -205,6 +222,9 @@ def job_requirements(spec, job, shared):
 def matrix_requirements(spec, jobs, shared):
     requirements = {job["job_id"]: job_requirements(spec, job, shared) for job in jobs}
     profiles = [spec["server_profiles"][job["server_profile"]] for job in jobs]
+    if (len({profile.get("mem_fraction_static", .15) for profile in profiles}) != 1
+            or len({profile["hicache_gb"] for profile in profiles if profile["hicache"]}) > 1):
+        raise ValueError("all profiles must share mem_fraction_static and HiCache GB (B0 host zero is the exception)")
     if len({profile["gpu_tokens"] for profile in profiles}) != 1:
         raise ValueError("all profiles in one owned matrix must share the same GPU token capacity")
     kinds = {}
@@ -221,9 +241,10 @@ def build_matrix_plan(args):
     frozen = json.loads(args.frozen.read_text()) if args.frozen else None
     jobs = frozen_jobs(spec, args.stage, frozen)
     config = matrix_config(spec)
-    if (config.model.revision != server.MODEL_REVISION or not config.model.local_files_only
+    if (config.model.scope is None and config.model.revision != server.MODEL_REVISION
+            or not config.model.local_files_only
             or config.engine.kind != "sglang" or spec.get("domain", "cloud") not in {"cloud", "all"}):
-        raise ValueError("owned matrix requires the pinned local Qwen7B, SGLang and a declared cloud/all domain")
+        raise ValueError("owned matrix requires pinned local Qwen7B or explicit supported local scope, SGLang and a declared cloud/all domain")
     if spec.get("arrival_rate") is not None and spec.get("arrival_window") is not None:
         raise ValueError("owned full-cohort mode does not support arrival_rate with an arrival_window that can omit sessions")
     port = local_endpoint(config.engine.base_url)
@@ -239,8 +260,9 @@ def build_matrix_plan(args):
         "quality_evaluated": False, "b6_selected": None}
 
 
-def job_server_command(port, capacity):
-    command = server.server_command(argparse.Namespace(port=port, gpu_tokens=capacity)) + [
+def job_server_command(port, capacity, *, mem_fraction_static=.15):
+    command = server.server_command(argparse.Namespace(port=port, gpu_tokens=capacity),
+                                    mem_fraction_static=mem_fraction_static) + [
         "--attention-backend", "fa3", "--chunked-prefill-size", "8192", "--schedule-policy", "fcfs"]
     return command
 
@@ -275,13 +297,17 @@ async def research_metrics(base_url, fingerprint):
 
 def quality_template(results, spec, *, by_job=False):
     """References real artifacts, but supplies no evaluator identity or scores."""
+    model = matrix_config(spec).model
+    generator = {"model": "Qwen/Qwen2.5-7B-Instruct", "revision": server.MODEL_REVISION, "base_family": "Qwen2.5"}
+    if model.scope is not None:
+        generator = {"model": model.scope.model_path, "revision": model.scope.identity, "base_family": "Qwen3",
+                     "identity_kind": "local_snapshot_metadata", "hf_revision": None, "weight_content_verified": False}
     return {"scope": "dev", "reference": spec["tuning"]["quality_constraints"]["reference"], "epsilon": spec["tuning"]["quality_constraints"]["epsilon"],
         "split_manifest": spec["split_manifest"], "frozen_protocol": None,
         "methods": {row["job_id"] if by_job else row["method"]: {"run": row.get("raw_output"), "audit": row.get("audit_output"),
             "manifest": row.get("run_manifest"),
             "server_record": row.get("server_execution", {}).get("record"),
-            "scores": None, "generator": {"model": "Qwen/Qwen2.5-7B-Instruct", "revision": server.MODEL_REVISION,
-                                           "base_family": "Qwen2.5"}}
+            "scores": None, "generator": dict(generator)}
             for row in results},
         "template_only": True, "note": "fill an independent frozen evaluator protocol and full answer-bound five-dimension scores; never copy eligibility booleans"}
 
@@ -310,9 +336,7 @@ def write_block_quality_templates(results, spec, output):
 
 def make_owned_executor(args, shared, sources, cohort, requirements):
     from profiling.runtime_manifest import build_manifest
-    from controller.templates import HuggingFaceTemplate
-    template = HuggingFaceTemplate(shared.model.name, shared.model.revision,
-        namespace_hash=shared.model.namespace_hash, local_files_only=True)
+    template = create_model_template(shared.model)
     model_config = json.loads((Path(shared.model.name)/"config.json").read_text())
     fingerprint = asdict(template.fingerprint)
     hardware, host_tokens = None, None
@@ -322,15 +346,19 @@ def make_owned_executor(args, shared, sources, cohort, requirements):
         profile = spec["server_profiles"][job["server_profile"]]
         support = args.output/"servers"/job["job_id"]
         support.mkdir(parents=True)
-        env = server_environment(profile, args, fingerprint)
+        env = server_environment(profile, args, fingerprint, model_scope=shared.model.scope)
         capacity = profile["gpu_tokens"]
-        command = job_server_command(args.port, capacity)
+        command = job_server_command(args.port, capacity, mem_fraction_static=profile.get("mem_fraction_static", .15))
         config = decode(RunConfig, merge(asdict(shared), job["overrides"]))
         requirement = requirements[job["job_id"]]
         process, result = None, None
         record = {"job_id": job["job_id"], "server_profile": job["server_profile"], "profile": profile,
                   "status": "starting", "argv": command, "requirements": requirement,
                   "source_checkout": sources[str(Path(profile["checkout"]).resolve())]}
+        if shared.model.scope is not None:
+            record["model_scope"] = shared.model.scope.manifest()
+        if shared.model.scope is not None or shared.sampling is not None:
+            record["sampling_recipe"] = request_sampling(shared.sampling)
         base_url = shared.engine.base_url.rstrip("/")
         try:
             origin = server.command([sys.executable, "-c", "import importlib.util; print(importlib.util.find_spec('sglang').origin)"], env=env)
@@ -350,11 +378,13 @@ def make_owned_executor(args, shared, sources, cohort, requirements):
                                                source_checkout=profile["checkout"])
                 server.write_json(support/"runtime-before.json", runtime)
                 observed_hardware = check_common_runtime(runtime["server_info"], runtime["runtime"], gpu_tokens=capacity)
-                expected = {"model_path": str(Path(shared.model.name).resolve()), "revision": shared.model.revision,
+                expected = {"model_path": str(Path(shared.model.name).resolve()), "revision": None if shared.model.scope is not None else shared.model.revision,
                     "tokenizer_path": str(Path(shared.model.name).resolve()), "dtype": "bfloat16", "kv_cache_dtype": "bfloat16",
                     "enable_session_radix_cache": profile["session_radix"], "enable_hierarchical_cache": profile["hicache"]}
                 if any(runtime["server_info"].get(k) != v for k, v in expected.items()):
                     raise ValueError("actual owned model/tokenizer/dtype/cache flags differ from the shared job configuration")
+                if "mem_fraction_static" in profile and runtime["server_info"].get("mem_fraction_static") != profile["mem_fraction_static"]:
+                    raise ValueError("actual memory fraction differs from the declared shared resource")
                 if hardware is not None and hardware != observed_hardware:
                     raise ValueError("GPU/driver/runtime changed within this declared matrix")
                 hardware = observed_hardware
@@ -366,10 +396,20 @@ def make_owned_executor(args, shared, sources, cohort, requirements):
                     host_tokens = pools["actual_host_pool_tokens"]
                 native_path = None
                 if profile["kind"] == "patched":
+                    if shared.model.scope is not None:
+                        shared.model.scope.verify_native_settings(SimpleNamespace(**runtime["server_info"]))
+                        if runtime["server_info"].get("pp_size") != 1:
+                            raise ValueError("owned local scope requires PP1")
                     scope = research.validate_runtime({"requested_gpu_tokens": capacity, "cost_methods_requested": False,
-                        "server_environment": env}, runtime, expected_host_tokens=host_tokens)
+                        "server_environment": env}, runtime, expected_host_tokens=host_tokens,
+                        expected_hicache_gb=profile["hicache_gb"])
                     if runtime["engine"]["fingerprint"] != fingerprint:
                         raise ValueError("actual research tokenizer/template namespace differs from the shared fingerprint")
+                    if shared.model.scope is not None:
+                        actual_scope = runtime["engine"].get("model_scope") or {}
+                        if (actual_scope.get("identity") != shared.model.scope.identity
+                                or actual_scope.get("record", {}).get("model_path") != shared.model.scope.model_path):
+                            raise ValueError("actual research model scope differs from the shared local identity/path")
                     if requirement["needs_cost"]:
                         scope["calibration_scope"] = fitted_scope(config, requirement["calibration"], runtime)
                     metrics = await research_metrics(base_url, template.fingerprint)
@@ -381,7 +421,8 @@ def make_owned_executor(args, shared, sources, cohort, requirements):
                     record["scope"] = scope
                 else:
                     native = server.native_manifest(runtime["server_info"], runtime["runtime"], pools, fingerprint,
-                        profile["write_policy"], sources[str(Path(profile["checkout"]).resolve())], capacity, baseline=job["native"]["baseline"])
+                        profile["write_policy"], sources[str(Path(profile["checkout"]).resolve())], capacity, baseline=job["native"]["baseline"],
+                        model_scope=shared.model.scope, sampling=shared.sampling, hicache_gb=profile["hicache_gb"])
                     native["server"].update({**COMMON_SERVER, "max_total_tokens": capacity})
                     native_path = support/"native-manifest.json"
                     server.write_json(native_path, native)
