@@ -14,7 +14,10 @@ class PlannerKnobs:
     delta_abs: float = 0.0
     delta_rel: float = .05
     z: float = 1.0
-    min_stable_turns: int = 2
+    # Net savings already include the measured execution/control costs and an
+    # uncertainty margin. A fixed dwell time can veto avoiding native KV waits.
+    # Retain an explicit dwell option for reproducing older policies only.
+    min_stable_turns: int = 0
     fixed_token_threshold: int = 8192
     fallback_strategy: str = "fixed_threshold"
     concurrency: int = 1

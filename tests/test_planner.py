@@ -44,10 +44,24 @@ def test_cost_saving_requires_absolute_relative_and_error_margin():
 def test_minimum_stable_turns_and_forced_rebuild_precedence():
     a,r = candidate("APPEND",1000),candidate("REBUILD",500)
     snap = SessionSnapshot("s",turns_since_rebuild=0)
-    assert choose_plan((a,r),batch(a,r),MeasuredModel(),snap).candidate == a
-    assert choose_plan((a,r),batch(a,r),MeasuredModel(),replace(snap,must_rebuild=True)).candidate == r
+    legacy = PlannerKnobs(min_stable_turns=2)
+    assert choose_plan((a,r),batch(a,r),MeasuredModel(),snap,legacy).candidate == a
+    assert choose_plan((a,r),batch(a,r),MeasuredModel(),replace(snap,must_rebuild=True),legacy).candidate == r
     invalid = replace(a,feasible=False,reason="invalid_visible_version")
     assert choose_plan((invalid,r),None,MeasuredModel(),snap).candidate == r
+
+
+@pytest.mark.parametrize("since_rebuild", [0, 1])
+def test_supported_net_savings_can_avoid_waiting_immediately_after_rebuild(since_rebuild):
+    a,r = candidate("APPEND",10547),candidate("REBUILD",7600)
+    snap = SessionSnapshot("s",turns_since_rebuild=since_rebuild)
+    # Representative scale from the real Qwen3 queue-pressure trace: the
+    # cost/uncertainty decision favours R, regardless of the turn counter.
+    plan = choose_plan((a,r),batch(a,r),MeasuredModel(a=7539,r=4529,error=251),snap)
+    assert plan.reason == "cost_saving" and plan.candidate == r
+    assert plan.predicted_saving_ms > plan.switch_margin_ms
+    uncertain = choose_plan((a,r),batch(a,r),MeasuredModel(a=7539,r=7400,error=251),snap)
+    assert uncertain.reason == "hysteresis" and uncertain.candidate == a
 
 
 def test_uncalibrated_and_quote_failure_use_common_fixed_threshold():
