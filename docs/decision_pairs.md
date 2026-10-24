@@ -57,6 +57,8 @@ python -m profiling.decision_pairs run \
 
 两臂之间重新执行上述流程，因此先执行的候选不会为另一候选留下 KV。发现其他请求在执行/排队、状态不符或两臂 cache shape 不一致时记录失败。若第二臂失败，第一臂已经得到的输出和报价仍保留；不把失败 pair 从失败统计中抹去。
 
+`cold/gpu_ready`还逐臂核对实际receipt的`device/host/prefill`是否等于该臂原生quote给出的`ready_gpu/0/input-ready_gpu`。quote已应用原生`n-1`和page边界，不再减一次；比较的是实际执行而非离线LCP。发现执行时转host、命中变化或重计算时，完整result保留并把pair标为失败，不能以准备时的状态名归为纯GPU结果。此约束只适用于本独占fixture；`host_only`仍允许原生准入选择重算而非全部恢复。
+
 这只是**并发 1、单条已提交历史路径的受控缓存准备**，不等于还原源运行中的其他会话、所有分支、LRU 顺序或真实并发物理快照。`host_only` 的原生加载是否被 admission 接受仍由实际报价和执行 receipt 记录，不能只因 host 有副本就假定全部被加载。
 
 ## 3. 比较差值与错误动作代价

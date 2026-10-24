@@ -286,6 +286,19 @@ class DecisionPairCollector:
                     raise ValueError("incomplete candidate generation")
                 if result.receipt.input_hash != candidate.input_hash:
                     raise ValueError("candidate receipt does not describe frozen input")
+                if state in {"cold", "gpu_ready"}:
+                    # The native quote already applies the n-1/page match limit.
+                    # In these isolated fixtures, no host restore or retraction
+                    # should change that prefix or add recomputation at execution.
+                    prefix = quotes_by_id[candidate.candidate_id].ready_gpu_prefix_tokens
+                    expected = (prefix, 0, len(candidate.input_ids)-prefix)
+                    receipt = result.receipt
+                    actual = (receipt.actual_device_hit_tokens, receipt.actual_host_loaded_tokens,
+                              receipt.actual_prefill_tokens)
+                    observations[candidate.action]["execution_fixture_matches_quote"] = actual == expected
+                    if actual != expected:
+                        raise ValueError(f"{state} execution device/host/prefill changed: "
+                                         f"expected {expected}, got {actual}")
         except Exception as error:
             return {"case_id": case.case_id, "conversation_id": case.conversation_id,
                     "request_id": case.request_id, "cache_state": state, "repetition": repetition,

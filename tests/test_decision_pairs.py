@@ -120,8 +120,8 @@ def test_stratified_selection_covers_conversations_and_epoch_age_without_current
 
 
 class PairEngineDouble(MockEngine):
-    def __init__(self):
-        super().__init__(response_text="PAIR_ANSWER")
+    def __init__(self, *, page_size=1):
+        super().__init__(response_text="PAIR_ANSWER", page_size=page_size)
         self.resets = 0
         self.warm_inputs = []
         self.target_inputs = []
@@ -146,11 +146,12 @@ class PairEngineDouble(MockEngine):
 
 
 @pytest.mark.parametrize("state", ("cold", "gpu_ready", "host_only"))
-def test_each_arm_resets_and_warms_identical_history_without_target_answer(tmp_path, state):
+@pytest.mark.parametrize("page_size", (1, 64))
+def test_each_arm_resets_and_warms_identical_history_without_target_answer(tmp_path, state, page_size):
     database, manifest, split, _, _ = source_run(tmp_path)
     case = freeze_cases(database, manifest, split, ByteTemplate())[0][0]
     async def scenario():
-        engine = PairEngineDouble()
+        engine = PairEngineDouble(page_size=page_size)
         collector = DecisionPairCollector(engine, CostModel(), PlannerKnobs(strategy="cost"))
         row = await collector.measure(case, state)
         assert row["status"] == "completed", row
@@ -159,9 +160,66 @@ def test_each_arm_resets_and_warms_identical_history_without_target_answer(tmp_p
         assert row["plan_reason"] == "uncalibrated_cost_fallback"
         assert not row["quality_evaluated"]
         assert all(arm["result"]["text"] == "PAIR_ANSWER" for arm in row["observations"].values())
+        if state != "host_only":
+            assert all(arm["execution_fixture_matches_quote"] for arm in row["observations"].values())
+        for arm in row["observations"].values():
+            own = next(q for q in arm["quote"]["quotes"] if q["input_hash"] == arm["input_hash"])
+            assert own["match_limit"] == (arm["input_tokens"]-1)//page_size*page_size
         if state == "cold":
             assert all(quote["raw_match_tokens"] == 0 for arm in row["observations"].values()
                        for quote in arm["quote"]["quotes"])
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("state", ("cold", "gpu_ready"))
+@pytest.mark.parametrize("field", ("actual_device_hit_tokens", "actual_host_loaded_tokens", "actual_prefill_tokens"))
+def test_execution_fixture_drift_fails_and_retains_both_actual_observations(tmp_path, state, field):
+    database, manifest, split, _, _ = source_run(tmp_path)
+    case = freeze_cases(database, manifest, split, ByteTemplate())[0][0]
+
+    class Drift(PairEngineDouble):
+        async def generate(self, **kwargs):
+            result = await super().generate(**kwargs)
+            if not kwargs["ignore_eos"] and len(self.target_inputs) == 2:
+                receipt = replace(result.receipt, **{field: getattr(result.receipt, field)+1})
+                return replace(result, receipt=receipt)
+            return result
+
+    async def scenario():
+        engine = Drift(page_size=64)
+        row = await DecisionPairCollector(engine, CostModel()).measure(case, state)
+        assert row["status"] == "failed" and "execution device/host/prefill changed" in row["error"]
+        first, second = (row["observations"][action] for action in row["execution_order"])
+        assert first["execution_fixture_matches_quote"] is True
+        assert second["execution_fixture_matches_quote"] is False
+        assert all(arm["result"]["receipt"]["generation_complete"] for arm in (first, second))
+        assert all(arm["result"]["text"] == "PAIR_ANSWER" for arm in (first, second))
+        assert len(engine.target_inputs) == 2
+        assert analyze_pairs([row])["failed_or_unmeasured_pairs"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_host_only_receipt_may_recompute_instead_of_restore(tmp_path):
+    database, manifest, split, _, _ = source_run(tmp_path)
+    case = freeze_cases(database, manifest, split, ByteTemplate())[0][0]
+
+    class Recompute(PairEngineDouble):
+        async def generate(self, **kwargs):
+            result = await super().generate(**kwargs)
+            if not kwargs["ignore_eos"]:
+                return replace(result, receipt=replace(result.receipt, actual_device_hit_tokens=0,
+                    actual_host_loaded_tokens=0, actual_prefill_tokens=len(kwargs["input_ids"])))
+            return result
+
+    async def scenario():
+        row = await DecisionPairCollector(Recompute(), CostModel()).measure(case, "host_only")
+        assert row["status"] == "completed", row
+        for arm in row["observations"].values():
+            assert "execution_fixture_matches_quote" not in arm
+            assert arm["result"]["receipt"]["actual_host_loaded_tokens"] == 0
+            assert arm["result"]["receipt"]["actual_prefill_tokens"] == arm["input_tokens"]
+
     asyncio.run(scenario())
 
 
