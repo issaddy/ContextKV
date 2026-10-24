@@ -41,7 +41,9 @@
 
 本轮包检查进一步发现sdist漏收三个`bench/examples`文件，`6d63af9`补齐package data；旧构建保留。最终`runs/dist-admission-client-complete/asset-check.json`按固定4e689eb Git树逐字核对83模块、29个wheel包内非Python资产、320个sdist tracked文件（含97测试/配置）及13个许可文件，均通过，不含运行数据、权重或环境文件。29是包内资产的完整枚举，不能与旧报告的19个限定运行资产直接比较新增数量。
 
-[369轮计时分解](b6_timing_diagnosis.md)和[联合问题模型](joint_optimization_model.md)进一步明确了下一项机制的证据要求。旧等待估计器不把候选服务插入peer事件，不能据此生成externality分数；因此先做固定两peer与A/R候选的受控fixture。该入口的本地14项CPU合同及独立审查通过，远端默认plan与全部来源核验通过；容器环境没有pytest，远端CPU测试命令未运行成功，未为重复CPU测试安装额外包。正式计划54个episode、暖机18个，216个target加48个历史seed，共264次模型请求，全部失败和未重叠记录保留；它不是自然EOS问答质量实验。
+[369轮计时分解](b6_timing_diagnosis.md)和[联合问题模型](joint_optimization_model.md)进一步明确了下一项机制的证据要求。旧等待估计器不把候选服务插入peer事件，不能据此生成externality分数。[两peer受控fixture](peer_interference_validation.md)现已完成54个正式episode、18个暖机，216个target加48个历史seed，共264/264次模型调用；39文件公共归档经独立审计issues=0，来源为部署4e689eb，研究服务恢复且健康检查通过。27个正式配对的peer项非零，但自身与总flow-time排序全部同向；大APPEND的准入门槛不能被GPU命中消除，不据此新增planner收益结论。
+
+fixture本地19项合同包含6项真实typed客户端到Runtime.quote的快照测试；远端默认plan、只读原生quote预检与全部部署来源核验通过。容器没有pytest，远端CPU测试命令未成功，未为重复CPU测试安装额外包。v1/v2零生成工程失败、v3的72次MIXED_SNAPSHOT失败及48次已完成seed分别保存，不拼入v4成功分母。v4修复仅将A/R与两个peer分为2/1/1报价，不改原生快照协议。固定输出512的实验不作为自然EOS问答质量证据。
 
 ## 已完成的 H200 集成验证
 

@@ -62,7 +62,11 @@ U(p,\tau)=\mathbb E[J_{\mathrm{skip}}-J_{\mathrm{admit}}\mid s,p,\tau].
 
 ## 5. 下一轮应回答的可证伪问题
 
-首先用现有9个控制器格的369轮原生终态计时，按 `attempt_id` 与实际receipt绑定，分开 `server_ttft − forward_to_first_token`、forward段和decode段。第一项只表示scheduler收到至首次forward，包含部分缓存准备，不能称为纯排队。全量结果与首轮、host恢复、实际输入/输出相同子集分别报告；子集仍不控制到达时序及驻留状态。这个诊断决定先补admission/缓存准备观测还是forward成本模型。仅当相同输入受控实验复现差异时，才进一步归因或替换机制；不从cell级DMA总量估算每条路径的净价值。
+[369轮计时分解](b6_timing_diagnosis.md)已经完成，全部按 `attempt_id` 与实际receipt绑定。`server_ttft − forward_to_first_token` 平均占TTFT的93.59%，但只表示scheduler收到至首次forward，包含缓存准备，不能称为纯排队；decode占server elapsed的64.42%。相同输入/输出子集仍未控制到达与驻留，不能由此单独归因写策略或DMA收益。
+
+随后启用只读原生准入诊断，完成[两peer与A/R候选的受控实验](peer_interference_validation.md)：72个episode、264次模型调用，包含27个正式配对。peer完成时间差非零，但27/27自身与总flow-time排序相同，没有证据支持立刻新增外部性评分。大APPEND的GPU-ready与host-only首gate均缺1999 tokens；GPU命中实际保留，锁内/解锁后预算差支持新增pin占用的解释。复用减少计算量，却未消除最终KV容量约束。
+
+该实验的quote在peer到达前取得，不能据它证明现有等待模型已经预测准入时状态；尚未运行cost artifact选择或测planner regret。当前 `min(device_hit, evictable)` 对新增pin量只是一般静态上界，已审计的9次拒绝中恰好等于实际增量。下一步先检验共享已锁前缀下是否造成错误等待分类，再决定是否沿现有只读遍历补充精确观测；不为尚未发生的误差增加全树追踪。上述固定512输出的机制实验也不代替自然EOS、质量与完整闭环验证。
 
 | 问题 | 最小设计与复用入口 | 支持或否定依据 |
 | --- | --- | --- |
