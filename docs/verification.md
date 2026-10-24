@@ -10,7 +10,7 @@
 |---|---|
 | 最近完整 CPU 回归 | 有源训练工程：1448 passed，8 subtests passed，真实Qwen3 tokenizer开启；1项显式训练运行测试本地跳过并另在容器通过。runs/pytest-grounded-training.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
-| Ruff / wheel | `e85663e`的Ruff/diff通过；包核对88模块、31资产、358个sdist tracked文件及13许可，通过且无运行数据/权重/环境；runs/dist-b-receipt-fixture/asset-check.json |
+| Ruff / wheel | `f72d152`的Ruff/diff通过；包核对92模块（含training）、31资产、367个sdist tracked文件及13许可，通过且无运行数据/权重/环境；runs/dist-grounded-training/asset-check.json |
 | HTTP自动检索 | 真实CLI/TCP/BM25、明确依赖闭包、两轮提交、原结果重放及close通过；2次mock生成，0次模型调用；runs/http-retrieval-tcp-v1/result.json。启动来源/取消竞态最终修复由全回归覆盖 |
 | Qwen3 HTTP正常路径 | `c1cc617`两次实际8B生成均stop；原生终态/完整IDs/历史/来源/重放/提交/close独立审计0 issues，保持语义覆盖/scope歧义；runs/remote-h200-http-qwen3/、runs/http-qwen3-review/analysis-v2.json。仅本配置正常链路，非质量/性能对照 |
 | SDK证据桥接 | 原loader对同document第2片段报重复；修复后10原片段/2文档建盘重载，通过5原检索+1依赖的完整正文、3条边和3章节投影。Qwen3输入5950tokens，关系增量121，0模型调用；runs/evidence-context-integration/sdk-v1/result.json |
@@ -20,7 +20,7 @@
 | B阶段接线 | 原生telemetry显式批次身份→既有stage fit的CPU闭环通过，prepared host特征与实际恢复诊断分离；未增加Qwen3硬件测量或宣称性能收益；runs/b-current-integration-audit/ |
 | 有源训练工程 | 六条真实train起步样本→同一prepare入口11870tokens完整保留；随机tiny Qwen3+实际tokenizer的CPU两步LoRA、base冻结、CE、adapter重载通过。opt-in回归1 passed；未训练8B或启用GPU，非质量收益。见[训练说明](grounded_training.md) |
 | Qwen3定向成本诊断 | `e85663e`，3个预选形状，6正式+6历史物化，全部正常终态；285项原件审计0问题，执行quote/receipt一致。decode占95.49%–99.16%，输出和语义不相同，非成本策略或质量优胜；runs/qwen3-b-targeted-native-review/ |
-| 当前容器源码 | `e85663e`，359个tracked条目一致；补丁保持57932422，CLI导入/help与编译通过。72项配对/scope/sampling针对性测试通过，后续上述12调用实测完成；GPU0空闲。runs/remote-h200-qwen3-b-targeted/runs/qwen3-b-targeted-sourcecheck.json。最近全回归仍为445b233的1404项，不追认更大测试数 |
+| 当前容器源码 | `f72d152`，368个tracked条目一致，training/API CLI导入/help与编译通过；补丁保持57932422，GPU0空闲。CPU训练执行的staged模块与已部署源码相同；runs/remote-h200-grounded-training/。此前e85663e的12调用保留其原身份 |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
 | 冻结模拟测试矩阵 | 39 jobs / 117 轮成功 |
 | 继承主方法参数的开发集消融 | 15 jobs / 45 轮成功，不参与主方法选择 |

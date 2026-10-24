@@ -45,6 +45,8 @@
 
 最新[训练工程](grounded_training.md)整合通过1448项及8个子测试，实际Qwen3 tokenizer开启；本地1项训练运行测试显式跳过，另在容器CPU实跑为1 passed。新prepare与LoRA入口复用成熟Trainer/PEFT，完整mask/冻结/保存重载已核实；首次API参数不兼容失败原样保留后修复。六条审查样本完整编码11870tokens，未训练8B或使用GPU；正式语义训练、独立评价及新权重/native身份接入仍待完成。
 
+`f72d152`已打包并同步容器：92模块（含training）、31资产、367sdist文件、113测试/配置和13许可核验通过；368个远端tracked文件与提交相同，CLI导入/help及编译通过，原生补丁未变。CPU失败、修复及实际opt-in测试保留在`runs/remote-h200-grounded-training/`，不是GPU模型验收。完成后的生成构建目录已移除，Git、发行包及原件保留。
+
 `e85663e`补齐离线cold/GPU-ready配对的执行receipt校验，72项针对性测试通过；359个远端tracked条目、88模块/31资产/358sdist/13许可发行包核验通过。随后完成[三处Qwen3成本诊断](qwen3_b_targeted_validation.md)，6正式+6物化全部正常终态，独立审计0问题。实际decode占95.49%–99.16%，完整耗时差伴随输出长度与内容变化，未拟合新成本表或改变默认策略；来源混用及无据扩写仍是优先解决项。原始产物、未校准预测和质量局限全部保留，GPU与端口已释放。
 
 最新条件机制/成本接线/服务停机整合通过1404项测试及8个子测试，真实Qwen3 tokenizer项开启，Ruff/diff通过，记录`runs/pytest-causal-stage-shutdown.log`。实际Uvicorn超时取消路径修复了提前close造成的closed database与STARTED残留；修复后先排空、attempt为FAILED，被取消的HTTP仍500。原生collector→stage fit通过合成协议闭环，未新采硬件成本。两版Doc2Dial逐目标因果投影核对通过，并完成原文件首行的真实CLI导出；没有模型/GPU调用。机制复用、研究限制见[分析](applicability_mechanism.md)，三项工程入口分别见[数据](doc2dial.md)、[阶段模型](stage_cost_model.md)和[HTTP](http_retrieval.md)。

@@ -84,3 +84,7 @@ python -m pytest -q tests/test_training_runtime.py
 ```
 
 容器验证将新增纯Python依赖放在独立目录，只为该命令设置PYTHONPATH，未升级或修改SGLang环境。验证前后GPU空闲。远端pytest未装异步插件产生`asyncio_mode`配置提示，另有既存SWIG弃用提示；该测试同步执行且通过，不将这些提示隐藏为无警告运行。
+
+`f72d152`已打包并同步容器，92模块/31资产/367sdist/13许可及368个远端tracked条目核验通过，training CLI help可在未安装PEFT的常规环境运行。CPU合同执行的staged源码与最终部署逐字相同。12文件公共记录为`runs/grounded-training-public-v1.tar.xz`，19160 bytes，SHA256 `3a795864b93c3711abd475cc3a5603e6bf5f9e596812c23d6d99fe0195c495f2`，11个payload核验通过；保留首次失败及后续成功，不包含临时随机模型权重。
+
+[方法、样本与准备产物快照](../runs/grounded-training-review-v1.tar.xz)共96文件、539176 bytes，SHA256 `31420cc8e284f9205533ea2e0b2e1a36ef0c28c200c619f9bb73077720a92dce`，95个payload核验通过。源数据仍绑定先前下载的作者train；没有额外复制验证/测试对话、完整公开训练集、第三方运行环境或大模型权重。
