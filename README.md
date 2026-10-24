@@ -72,6 +72,6 @@ python -m controller.cli --config configs/qwen3_8b_scope.example.yaml \
 
 [Doc2Dial数据适配](docs/doc2dial.md)提供另一条可复用的研究入口：完整原文可直接建索引，原始多轮角色和精确grounding单独保存；下一发言实例按严格历史前缀构造，目标与标签隔离。监督标签不进入在线检索；导出成功不代表数据已成为干净训练集。条件推理与对话策略的复用选择见[机制分析](docs/applicability_mechanism.md)。
 
-[有源多轮训练](docs/grounded_training.md)已接通prepare、有步数上限的LoRA及`python -m training.export`入口。完成的adapter可离线合并为独立BF16 dense checkpoint，通过导出的`model-scope.json`接现有控制器与stock/native基线；动态LoRA仍未启用。v1基座身份不变，v2绑定发布时的权重摘要，避免同大小新权重误用基座KV或标定。此前随机小模型CPU合同验证了训练、冻结与重载，本轮导出运行验收待记录；尚无8B训练质量或新checkpoint GPU结论。
+[有源多轮训练](docs/grounded_training.md)已接通prepare、有步数上限的LoRA及`python -m training.export`入口。完成的adapter可离线合并为独立BF16 dense checkpoint，通过导出的`model-scope.json`接现有控制器与stock/native基线；动态LoRA仍未启用。v1基座身份不变，v2绑定发布时的权重摘要，避免同大小新权重误用基座KV或标定。随机小模型CPU合同已验证训练、冻结、合并重载和失败发布边界；尚无8B训练质量或新checkpoint GPU结论。
 
 配置和资产在边界核对；不逐请求重哈希权重/语料，不建立影子缓存调度器。共享资源、模型身份、真实 token IDs 与提交一致性校验保留。原始方案见[技术方案](llm_qa_context_kv_technical_plan.md)，它不覆盖后续事实与模型退役决定。第三方来源与许可随各资产及[来源说明](docs/third_party)保留。

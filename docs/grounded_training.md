@@ -49,6 +49,16 @@ uv run --extra tokenizer python -m training.sft prepare \
 
 六条来自四个真实train对话/全文：四个原回答仅附文档引用、两个澄清原文不硬加引用，合计11870tokens、最大3425。审核明确为assistant弱监督，不是最终训练集或独立验证集。20,431个user后目标的单全文/完整历史输入最大6429tokens，在8K内可预留1024输出；这个预算结果不适用于top-k多文档，也不是训练显存估计。证据见[材料设计](../runs/grounded-supervision-design/README.md)。
 
+## 按来源分组的实际训练起点
+
+[小型监督队列](../runs/grounded-training-cohort-v1/README.md)从已有Doc2Dial v1原train中先冻结来源家庭和完整对话，再审阅目标：train为16家庭/32对话/205候选，内部development为4家庭/8对话/54候选。家庭、对话和逐字相同全文跨分区无重叠；明确登记此前见过的4个train家庭/6条starter。没有读取作者dev/test，内部development目标尚未语义审阅；它不是最终独立测试，也不能排除语义近重复或预训练曝光。
+
+现有30条可直接准备的弱监督包括6条starter及24条新增目标。交叉审阅后，新增为4条原样、5条仅附引用、15条明确assistant修订；保留完整原历史、原目标、准确来源见证和修改理由。修正覆盖遗属/配偶概念混淆、未来作者答案影响澄清、情态词与项目范围丢失、全文支付说明不一致等实际问题。它们是有源弱监督，不是人审金标。`prepared-v2/`为当前产物：30/30成功、39012 prompt tokens、1531 target/EOS tokens、合计40543、最大3425；原v1保留为明确superseded的纠偏记录。
+
+这一步提供可训练的数据与完整工程接线，不以30条样本或合法引用证明语义改善。后续有限训练需要检查同输入条件/历史行为、完整答案与成本，未审核的175个候选不得自动进入loss；若值得扩展，沿冻结train来源扩充。保留来源留出开发与最终测试的不同用途，不用开发答案反向修订训练目标，也不以政府数据单独证明技术/API质量。
+
+队列、两次审阅、修前纠偏原件及本轮本地检查的27文件快照为`runs/checkpoint-export-cohort-v1.tar.xz`，199472 bytes，SHA256 `1e91ed6d2286d6c912d47d53b746d8dfe348ce24fcf4c69d4b25a343cb90e3cb`。26个payload已核验并同步容器同名`runs/`路径；它与生产wheel分开保存，不含大模型权重、运行依赖或私有环境。
+
 ## 有上限的LoRA训练与产物
 
 对已经选定的训练分区，入口为：
@@ -104,6 +114,8 @@ model:
 本地真实Qwen3 tokenizer整仓回归为1478 passed、8 subtests、2 skipped；两个跳过项是显式opt-in训练/导出CPU运行合同，分别在容器运行。原v1的8B/32B身份逐值不变，v2同尺寸不同内容、native/HTTP指纹隔离、拒绝基座成本模型及stock/质量记录的identity kind均有合同覆盖。固定SGLang补丁完整应用、15文件编译及独立scope镜像一致检查通过；这是源码验证，不冒充GPU运行。
 
 本轮容器CPU使用真实PEFT/Transformers和原tokenizer，随机1层16hidden Qwen3、非零LoRA，执行完整export入口。dense重载与独立未合并参考在BF16容差内一致，实际投影权重改变、基座参数/文件不变；两份同形状同字节数但不同LoRA值的导出身份不同。真实NaN adapter被PEFT拒绝，失败manifest保留且无scope。没有加载8B权重、optimizer step、GPU或服务生成调用。11项测试（含真实runtime）通过；help子进程因staged源码与已部署旧包的导入路径冲突单独失败，修正测试工作目录后1项help通过，未重复runtime。前两次同类路径错误在收集阶段退出，日志保留。现有pytest异步配置/SWIG弃用提示不影响同步合同；本地另有既存Starlette提示。
+
+实现`a52f127`已打包并部署容器：93模块/31资产/369sdist/13许可及370个tracked条目核验通过。native仅更新scope镜像，补丁SHA256为`404bb984ffed4d4f23ab47f3a5afb48d432ef21a6ffbebfb3faf5e7a623e3fa4`；全补丁反向检查及固定15文件静态检查通过。12文件公共记录为`runs/checkpoint-export-public-v1.tar.xz`，20456 bytes，SHA256 `444759530b8292c266dc788e4c7267012baa71b6ed9bc77a2f45e5726bccfa64`；已独立核对11个payload、staged源码和完整部署Git清单。未启动模型服务，GPU0空闲；失败导入日志也在记录中。
 
 ## 此前已执行的训练验证
 
