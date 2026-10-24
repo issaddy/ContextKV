@@ -6,7 +6,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | `494e33a`：1051 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-rerank-redundancy-stable.log |
+| 最近完整 CPU 回归 | `d4473ae`：1091 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-b6-native-regex-complete.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
 | Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 atomic_judge 模块/协议资产、table_focus、CRAFT 行文本与 GroUSE 源码，CRAFT 完整许可在 wheel 中；runs/build-atomic-focus.log；新增guided schema、query view、observation probe与client也已重建并逐字核对（runs/build-guided-wheel.log）；融合模块也已构建并逐字核对（runs/build-query-fusion-wheel.log） |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
@@ -27,7 +27,9 @@
 
 `494e33a`完整回归又覆盖[SDK原文与显式初始化合同](api_evidence.md)、[正文冗余基线](redundancy_baseline.md)、查询解析失败留痕、召回/重排查询分离及矩阵启动源码绑定。Ruff与diff检查通过。初次`python -m build`因本地缺该构建入口失败；改用项目已有uv成功构建，但逐文件核对发现sdist遗漏`tests/fixtures/*.txt`，已补MANIFEST收录并重新打包，旧日志和旧包保留。最终包验证结果另存`runs/dist-rerank-redundancy-complete/asset-check.json`，核对包内Python模块、运行资产/许可和sdist测试/配置，不包含运行数据、权重或环境文件。新基线CLI四轮模拟演示依次REBUILD/APPEND/REBUILD/REBUILD，事件含正文分子/分母；不作硬件性能证据。
 
-独立[ConvSearch-R1 41次改写](convsearch_validation.md)、[八查询方法328条检索](frozen_query_retrieval_validation.md)及[SDK证据12次生成](api_evidence_validation.md)均已真实执行，原始输入、失败/截断分母和具体退化保留。这些硬件记录的项目源码仍为各自manifest所记的`20fef31`等版本，不能追认为包含后续新代码。召回/重排分离的新四臂及完整独立开发质量评分正在准备，最终B6与冻结test未完成。
+独立[ConvSearch-R1 41次改写](convsearch_validation.md)、[八查询方法328条检索](frozen_query_retrieval_validation.md)及[SDK证据12次生成](api_evidence_validation.md)均已真实执行，原始输入、失败/截断分母和具体退化保留。这些硬件记录的项目源码仍为各自manifest所记的`20fef31`等版本，不能追认为包含后续新代码。后续[四臂冻结重排](frozen_rerank_validation.md)已完成164条记录：分离查询挽回了长改写重排的退化，但尚未稳定胜过简单用户主题视图。[完整独立开发评分](dev_quality_validation.md)已完成615次尝试，609维有效、6维null；完整配对维度仍不确定，两个候选均未通过开发质量门。下一全cohort可选原生格式约束已完成CPU合同，但不修正评审器语义错误。最终B6与冻结test仍未完成。
+
+`e544ea7` 新增[13格B6联合执行器](b6_joint_sweep.md)与真实答案绑定的开发质量冻结；审查发现并修复了通用入口忽略服务器profile的问题。全仓首次回归发现8个表格测试的native模拟payload缺少已有的engine_manifest_sha256字段，`d4473ae`补齐测试合同，未放松真实清单要求；复跑1091项和6个子测试全部通过。Ruff、shell语法和diff检查通过。`179f844`的可选原生Selene格式约束默认兼容旧协议，已完成独立118项相关测试和真实tokenizer/XGrammar CPU检查，尚不代表约束后模型评分已完成。最终包记录在`runs/dist-b6-native-regex-complete/asset-check.json`；13格真实新运行仍待执行，不能把fake-owned测试当作硬件结果。
 
 ## 已完成的 H200 集成验证
 
