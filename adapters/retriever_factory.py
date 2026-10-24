@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from contextlib import ExitStack
 from pathlib import Path
 import time
 
@@ -86,7 +87,7 @@ def retriever_config_sources(path):
             str(Path(config.dense_index)/"manifest.json"))
 
 
-def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path=None):
+def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path=None, trace_sink=None):
     if protocol != "P3":
         return None
     if config_path:
@@ -97,24 +98,33 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
         config = load_retriever_config(config_path)
         sparse = BM25SRetriever.load(config.sparse_index, cpu_threads=config.cpu_threads)
         dense = DenseIndex.load(config.dense_index)
-        encoder = LocalBGE(config.encoder_path, device=config.device, dtype=config.dtype,
-                           batch_size=config.batch_size, max_length=config.encoder_max_length)
-        reranker = (LocalBGE(config.reranker_path, reranker=True, device=config.device, dtype=config.dtype,
-                            batch_size=config.batch_size, max_length=config.reranker_max_length)
-                    if config.stage == "hybrid_rerank" else None)
-        resolver = None
-        if config.selector is not None:
-            from adapters.query_resolution import TopicResolver
-            from adapters.query_selector import OpenAICompletionClient, SelectorConfig
-            resolver = TopicResolver(OpenAICompletionClient(SelectorConfig(**config.selector)), config.query_mode,
-                                     history_turns=config.selector_history_turns, schema_mode=config.selector_schema_mode)
-        result = HybridRetriever(sparse, dense, encoder, reranker, query_mode=config.query_mode,
-            stage=config.stage, candidate_k=config.candidate_k, rerank_k=config.rerank_k, rrf_k=config.rrf_k,
-            query_fusion=config.query_fusion,
-            rerank_query_mode=config.rerank_query_mode,
-            resolver=resolver,
-            source_config={"path": str(Path(config_path).resolve()), "resolved": asdict(config),
-                           "relative_path_base": str(Path.cwd())})
+        # Ownership transfers to HybridRetriever only after complete construction.
+        # Failed startup closes the models/client already created on this path.
+        with ExitStack() as cleanup:
+            encoder = LocalBGE(config.encoder_path, device=config.device, dtype=config.dtype,
+                               batch_size=config.batch_size, max_length=config.encoder_max_length)
+            cleanup.callback(encoder.close)
+            reranker = None
+            if config.stage == "hybrid_rerank":
+                reranker = LocalBGE(config.reranker_path, reranker=True, device=config.device, dtype=config.dtype,
+                                   batch_size=config.batch_size, max_length=config.reranker_max_length)
+                cleanup.callback(reranker.close)
+            resolver = None
+            if config.selector is not None:
+                from adapters.query_resolution import TopicResolver
+                from adapters.query_selector import OpenAICompletionClient, SelectorConfig
+                client = OpenAICompletionClient(SelectorConfig(**config.selector))
+                cleanup.callback(client.close)
+                resolver = TopicResolver(client, config.query_mode, history_turns=config.selector_history_turns,
+                                         schema_mode=config.selector_schema_mode)
+            result = HybridRetriever(sparse, dense, encoder, reranker, query_mode=config.query_mode,
+                stage=config.stage, candidate_k=config.candidate_k, rerank_k=config.rerank_k, rrf_k=config.rrf_k,
+                query_fusion=config.query_fusion,
+                rerank_query_mode=config.rerank_query_mode,
+                resolver=resolver, trace_sink=trace_sink,
+                source_config={"path": str(Path(config_path).resolve()), "resolved": asdict(config),
+                               "relative_path_base": str(Path.cwd())})
+            cleanup.pop_all()
         result.initialization_seconds = time.perf_counter()-started
         return result
     if index_path:

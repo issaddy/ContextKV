@@ -50,6 +50,7 @@ class Attempt:
     created_ns: int = 0
     branch_reason: str = ""
     retrieval_priority: tuple[EvidenceKey, ...] | None = None
+    retrieval_ms: float | None = None
 
 
 ACTIVE_STAGES = ("STARTED", "PLANNED", "PREPARING", "PREPARED", "SUBMITTED", "RESULT_READY")

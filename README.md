@@ -31,7 +31,7 @@ CPU mock 演示无需模型，结果用于协议正确性，不代表回答质�
 python -m controller.cli --config configs/qwen3_8b_scope.example.yaml serve
 ```
 
-`POST /sessions/{id}/turns` 接收 query、request_id 和来源 evidence；支持状态查询、恢复及关闭。证据由调用方提供，API 不隐式检索或换模型。业务成功提交一次，失败保留待恢复状态；退役 ACK 不代表物理缓存立即释放。见[引擎协议](engine_patches/README.md)。
+`POST /sessions/{id}/turns` 接收 query、request_id 和来源 evidence；配置检索器后，`POST /sessions/{id}/query` 只需当前问题和 request_id，服务读取已提交完整历史并自动检索。两条入口共用提交、幂等、恢复和关闭机制。退役 ACK 不代表物理缓存立即释放。见[引擎协议](engine_patches/README.md)。
 
 ## 完整检索与多轮流程
 
@@ -41,6 +41,8 @@ python -m controller.cli --config configs/qwen3_8b_scope.example.yaml serve
 python scripts/fetch_mtrag.py
 python -m adapters.prepare_data --cloud-corpus
 ```
+
+HTTP 服务可直接复用现有索引：在 `serve` 后加 `--retriever-index data/cloud-bm25s --corpus-id mtrag`，或用 `--retriever-config` 选择已有混合检索配置。可选 `--evidence-corpus` 补入原文版本和明确条件依赖。检索器启动时加载一次；同一请求重放原答案与来源，不再次检索或生成。仓库附有无需 GPU 的真实 BM25 多轮示例，见[HTTP 完整流程](docs/http_retrieval.md)。
 
 P2 使用给定五源和本方法真实生成历史；P3 增加真实检索、同样按已提交答案推进下一轮。例如，在研究引擎已启动、数据已准备后运行单一 P3 配置：
 

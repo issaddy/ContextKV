@@ -228,6 +228,11 @@ def main(argv=None):
     serve = sub.add_parser("serve", help="Start the local controller API")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+    retrieval = serve.add_mutually_exclusive_group()
+    retrieval.add_argument("--retriever-index", help="Frozen BM25S index for HTTP query retrieval")
+    retrieval.add_argument("--retriever-config", help="Shared hybrid retriever YAML/JSON for HTTP queries")
+    serve.add_argument("--evidence-corpus", help="Optional original version/condition metadata JSONL")
+    serve.add_argument("--corpus-id", default="mtrag", help="Evidence corpus namespace; snapshot comes from the index")
     inspect = sub.add_parser("inspect", help="Read a persisted session")
     inspect.add_argument("session_id")
     recover = sub.add_parser("recover", help="Recover a pending engine result, or explicitly abandon preparation")
@@ -272,7 +277,11 @@ def main(argv=None):
     elif args.command == "serve":
         import uvicorn
         from .api import create_app
-        uvicorn.run(create_app(config=config), host=args.host, port=args.port)
+        if args.evidence_corpus and not (args.retriever_index or args.retriever_config):
+            parser.error("--evidence-corpus requires --retriever-index or --retriever-config")
+        uvicorn.run(create_app(config=config, retriever_index=args.retriever_index,
+            retriever_config=args.retriever_config, evidence_corpus=args.evidence_corpus,
+            corpus_id=args.corpus_id), host=args.host, port=args.port)
     elif args.command == "profile-data":
         from adapters.mtrag import dataset_profile, load_rows, stratified_split
         path = Path(args.input)

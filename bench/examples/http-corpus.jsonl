@@ -1,0 +1,8 @@
+{"_id": "p01-request", "title": "ORCHID request timeout", "text": "ORCHID request timeout is 30 seconds for the request mode described by the accompanying scope note.", "source": "synthetic://http-corpus/p01-request"}
+{"_id": "p02-retry", "title": "ORCHID request retry", "text": "ORCHID request retry permits at most three retries with exponential backoff, subject to the accompanying scope note.", "source": "synthetic://http-corpus/p02-retry"}
+{"_id": "p03-connect", "title": "ORCHID connection timeout", "text": "ORCHID connection timeout is 5 seconds. It is distinct from the request timeout.", "source": "synthetic://http-corpus/p03-connect"}
+{"_id": "p04-auth", "title": "ORCHID retry exclusions", "text": "ORCHID authentication failures must not be retried. Request timeout alone does not authorize a retry.", "source": "synthetic://http-corpus/p04-auth"}
+{"_id": "p05-idempotency", "title": "ORCHID retry eligibility", "text": "ORCHID request retry is permitted only for idempotent operations.", "source": "synthetic://http-corpus/p05-idempotency"}
+{"_id": "p06-maple", "title": "MAPLE unrelated service", "text": "MAPLE is a different fictional service. Its shelf labels describe storage locations.", "source": "synthetic://http-corpus/p06-maple"}
+{"_id": "p07-colours", "title": "Fictional colours", "text": "The fictional cabinet uses amber and violet labels. This page has no client operation rules.", "source": "synthetic://http-corpus/p07-colours"}
+{"_id": "p90-scope", "title": "Applicable mode and release", "text": "These limits apply only to unattended batch operations in release r2. Interactive operations are outside this note.", "source": "synthetic://http-corpus/p90-scope"}

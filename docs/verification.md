@@ -2,13 +2,16 @@
 
 日期：2026-10-24（Asia/Shanghai）。本地为 macOS arm64 / Python 3.12.13；真实引擎部署于用户提供的 Linux 容器 /home/relay/songjiayun/ContextKV。执行成功与研究收益分开记录。
 
+当前只使用显式Qwen3-8B/32B；旧Qwen2.5-7B已退役。下文旧模型、旧配置、旧源码和服务恢复叙述均是历史记录，不是执行指令或当前运行状态。最新模块状态见[模块盘点](implementation_plan.md)。
+
 ## 本地工程证据
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | `af9e139`：1328 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-owned-local-scope-complete.log |
+| 最近完整 CPU 回归 | HTTP自动检索集成：1361 passed，6 subtests passed，开启真实Qwen3 tokenizer metadata，无跳过；runs/pytest-http-retrieval.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
-| Ruff / wheel | Ruff、diff检查通过；固定`af9e139`源码构建wheel/sdist，逐字核对85模块、29包内资产、345个sdist tracked文件、106测试/配置及13许可，未包含运行数据、模型或环境；runs/dist-owned-local-scope/asset-check.json |
+| Ruff / wheel | HTTP集成Ruff/diff通过；上一版`771aef9`包核对85模块、28资产、340个sdist tracked文件及13许可，通过且无运行数据/权重/环境；runs/dist-qwen3-consolidation/asset-check.json。新包单列后续结果 |
+| HTTP自动检索 | 真实CLI/TCP/BM25、明确依赖闭包、两轮提交、原结果重放及close通过；2次mock生成，0次模型调用；runs/http-retrieval-tcp-v1/result.json。启动来源/取消竞态最终修复由全回归覆盖 |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
 | 冻结模拟测试矩阵 | 39 jobs / 117 轮成功 |
 | 继承主方法参数的开发集消融 | 15 jobs / 45 轮成功，不参与主方法选择 |
@@ -136,7 +139,7 @@ SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固
 
 ## 仍需完成的研究验收
 
-当前没有正式回答质量非劣、SLO goodput提升或整体优于强基线的结论。[研发策略](research_strategy.md)是最新投入顺序：先检验共同提示下额外规划的机制价值，保留或替换后才接入自有历史P2、共同Cloud P3及有限B/C联合。normal-EOS、定向标定、完整模型评分、第二模型、共享pin等已完成项不再作为待办重跑。
+当前没有正式回答质量非劣、SLO goodput提升或整体优于强基线的结论。[研发策略](research_strategy.md)是最新投入顺序：先完善单次回答、真实检索、持久提交与恢复主线；依据已有错误和候选结构证据，再处理来源适用性、条件/引用及Qwen3实际成本。两阶段来源计划已收束为负结果，不再扩诊断。normal-EOS、定向标定、完整模型评分、第二模型、共享pin等已完成项不作为待办重跑。
 
 533答案/2665维评分已经完整，但12候选均未获联合资格；当前缺口是评价器可靠性、统计证据与真实人工盲审，不是缺评分工具。318份Qwen3关键论断审查属于assistant审查，不补造人工评分或总体错误率。最终代码/模型/采样/资源/方法与评价协议固定后，才执行预声明heldout主比较；失败、不确定和无加速同样进入交付。
 

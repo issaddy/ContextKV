@@ -83,9 +83,11 @@ def snapshot_context(turn, snapshot):
         raise ValueError("retrieval history differs from committed snapshot")
     by_key = {b.key: b for b in snapshot.archive}
     seen = {}
-    for record in snapshot.raw_history:
+    # Resolver user/entity IDs use positions in committed QA, not ledger CAS
+    # versions. Recovery may advance versions without adding a dialogue turn.
+    for ordinal, record in enumerate(snapshot.raw_history, 1):
         for key in record.evidence_keys:
-            seen.setdefault(key, []).append(record.turn_id)
+            seen.setdefault(key, []).append(ordinal)
     return PriorContext(tuple(PriorSource(by_key[k], tuple(turns)) for k, turns in seen.items() if k in by_key),
                         tuple(k for k in seen if k not in by_key), snapshot.version)
 

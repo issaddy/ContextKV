@@ -87,6 +87,83 @@ def test_factory_loads_models_once_and_retrieves_only_user_questions(retriever_c
         retriever.retrieve_turn(replace(outputs[0], protocol="P1"))
 
 
+def test_external_trace_sink_does_not_retain_service_history_or_change_ranking(retriever_config):
+    value=yaml.safe_load(retriever_config.read_text())
+    value['query_mode']='user_topic'
+    retriever_config.write_text(yaml.safe_dump(value))
+    traces=[]
+    service=create_retriever('P3',config_path=retriever_config,trace_sink=traces.append)
+    benchmark=create_retriever('P3',config_path=retriever_config)
+    gate=OnlineSession(load_rows(FIXTURE)[:3],'P3')
+    while not gate.done:
+        turn=gate.current()
+        assert service.retrieve_turn(turn).contexts==benchmark.retrieve_turn(turn).contexts
+        gate.commit(turn.task_id,'actual previous answer')
+    assert len(traces)==3 and service.query_view_traces==[]
+    assert 'query_view_traces' not in service.manifest
+    assert service.manifest['query_view_trace_storage']=='external_sink'
+    assert len(benchmark.manifest['query_view_traces'])==3
+    assert 'query_view_trace_storage' not in benchmark.manifest
+    service.close()
+    benchmark.close()
+
+
+@pytest.mark.parametrize('failure',['reranker','hybrid'])
+def test_failed_factory_closes_only_successfully_constructed_owned_models(retriever_config,monkeypatch,failure):
+    from adapters import hybrid_retrieval
+    def model(path,*,reranker=False,**kwargs):
+        if failure=='reranker' and reranker:
+            raise RuntimeError('injected reranker initialization failure')
+        return LocalModelFixture(path,reranker=reranker,**kwargs)
+    monkeypatch.setattr(hybrid_retrieval,'LocalBGE',model)
+    if failure=='hybrid':
+        def fail(*args,**kwargs):
+            raise RuntimeError('injected hybrid initialization failure')
+        monkeypatch.setattr(hybrid_retrieval,'HybridRetriever',fail)
+    with pytest.raises(RuntimeError,match='initialization failure'):
+        create_retriever('P3',config_path=retriever_config)
+    assert len(LocalModelFixture.instances)==(1 if failure=='reranker' else 2)
+    assert all(model.closed for model in LocalModelFixture.instances)
+
+
+def test_factory_closes_selector_client_if_resolver_initialization_fails(retriever_config,monkeypatch):
+    from adapters import query_resolution, query_selector
+    value=yaml.safe_load(retriever_config.read_text())
+    value.update(query_mode='source_topic',query_fusion='current_topic_rrf',
+                 selector={'base_url':'http://fake','model':'fake','revision':'fixed'})
+    retriever_config.write_text(yaml.safe_dump(value))
+    closed=[]
+    class Client:
+        def __init__(self,config):
+            pass
+        def close(self):
+            closed.append(True)
+    def fail(*args,**kwargs):
+        raise RuntimeError('resolver construction failed')
+    monkeypatch.setattr(query_selector,'OpenAICompletionClient',Client)
+    monkeypatch.setattr(query_resolution,'TopicResolver',fail)
+    with pytest.raises(RuntimeError,match='resolver construction failed'):
+        create_retriever('P3',config_path=retriever_config)
+    assert closed==[True] and all(model.closed for model in LocalModelFixture.instances)
+
+
+def test_external_trace_sink_retains_retrieval_failure_without_swallowing_it(retriever_config,monkeypatch):
+    value=yaml.safe_load(retriever_config.read_text())
+    value['query_mode']='user_topic'
+    retriever_config.write_text(yaml.safe_dump(value))
+    traces=[]
+    retriever=create_retriever('P3',config_path=retriever_config,trace_sink=traces.append)
+    def fail(*args,**kwargs):
+        raise RuntimeError('ranker failed')
+    monkeypatch.setattr(retriever.reranker,'score',fail)
+    turn=OnlineSession(load_rows(FIXTURE)[:3],'P3').current()
+    with pytest.raises(RuntimeError,match='ranker failed'):
+        retriever.retrieve_turn(turn)
+    assert traces[0]['retrieval_status']=='failed' and 'ranker failed' in traces[0]['retrieval_error']
+    assert retriever.query_view_traces==[]
+    retriever.close()
+
+
 def test_legacy_bm25_default_and_fixed_protocol_need_no_model(retriever_config):
     config = load_retriever_config(retriever_config)
     retriever = create_retriever("P3", index_path=config.sparse_index)
@@ -123,6 +200,8 @@ def test_optional_enum_schema_is_wired_once_and_rejected_on_unused_modes(retriev
         manifest = {"model": "fake"}
         def __init__(self, config):
             self.config = config
+        def close(self):
+            pass
     monkeypatch.setattr(query_selector, "OpenAICompletionClient", NoNetworkClient)
     value = yaml.safe_load(retriever_config.read_text())
     value.update(query_mode="source_topic", query_fusion="current_topic_rrf", selector_schema_mode="enum_v2",

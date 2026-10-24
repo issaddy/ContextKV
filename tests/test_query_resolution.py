@@ -81,6 +81,19 @@ def test_later_source_does_not_retroactively_ground_an_earlier_assistant_name():
     assert "PhantomStore" not in [e["text"] for e in entities]
 
 
+def test_snapshot_source_visibility_uses_dialogue_ordinal_after_recovery_version_gaps():
+    turn, context = fixture()
+    source = context.sources[0].block
+    history = tuple(TurnRecord(version, turn.history[i].text, turn.history[i+1].text,
+                              evidence_keys=(source.key,)) for version,i in ((3,0),(8,2)))
+    snapshot = SessionSnapshot('s',version=8,raw_history=history,archive=(source,))
+    projected = snapshot_context(turn,snapshot)
+    assert projected.sources[0].visible_turns == (1,2)
+    entities,_,_ = candidates(turn,projected,'source_topic')
+    assert any(e['text']=='IBM Cloudant' and e['supports'] for e in entities)
+    assert [r.turn_id for r in snapshot.raw_history] == [3,8]
+
+
 def test_empty_or_current_turn_sources_cannot_ground_history_entities():
     turn, context = fixture()
     for prior in (PriorContext(), PriorContext((PriorSource(context.sources[0].block, (turn.turn,)),))):

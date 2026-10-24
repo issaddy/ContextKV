@@ -29,7 +29,7 @@ include = ["controller*", "adapters*", "bench*", "profiling*", "engine_patches*"
 
 [tool.setuptools.package-data]
 adapters = ["assets/convsearch_r1/*"]
-bench = ["assets/native_judge/*", "assets/grouse/*", "assets/atomic_judge/*", "assets/lettuce_judge/*", "examples/*.json", "examples/*.yaml"]
+bench = ["assets/native_judge/*", "assets/grouse/*", "assets/atomic_judge/*", "assets/lettuce_judge/*", "examples/*.json", "examples/*.jsonl", "examples/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

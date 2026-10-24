@@ -7,6 +7,7 @@ import hashlib
 import time
 import uuid
 import statistics
+from typing import Awaitable, Callable
 
 from .candidates import CandidatePolicy, build_candidates
 from .cost_model import CostModel
@@ -15,7 +16,7 @@ from .epoch import EpochCoordinator
 from .events import EventLog
 from .planner import PlannerKnobs, choose_plan
 from .schema import (ClientTiming, CompletionReceipt, CostEstimate, EvidenceBlock, EvidenceKey,
-                     GenerationResult, NoFeasiblePlan, TurnRecord)
+                     EvidenceSpan, GenerationResult, NoFeasiblePlan, SessionSnapshot, TurnRecord)
 from .serialization import dumps
 from .sampling import SamplingRecipe, request_sampling
 from .session_store import (Attempt, IdempotencyConflict, PendingAttempt, SessionStore, StoreError)
@@ -24,6 +25,13 @@ from .templates import ByteTemplate
 
 class ContextOverflow(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class EvidenceSelection:
+    """Material returned by a configured retriever inside the turn transaction."""
+    evidence: tuple[EvidenceBlock, ...]
+    retrieval_priority: tuple[EvidenceKey, ...]
 
 
 @dataclass(frozen=True)
@@ -55,6 +63,8 @@ class TurnResponse:
     timing_source: str | None = None
     truncated: bool = False
     branch_reason: str = ""
+    retrieval_ms: float | None = None
+    visible_evidence_manifest: tuple[EvidenceSpan, ...] = ()
 
 
 class Controller:
@@ -144,18 +154,26 @@ class Controller:
                             receipt.actual_prefill_tokens, elapsed_ms, ttft, replay,
                             timing, receipt, prediction, control_ms, result.elapsed_ms,
                             result.server_ttft_ms, result.tpot_ms, result.timing_source,
-                            result.finish_reason in {"length", "max_tokens"}, attempt.branch_reason)
+                            result.finish_reason in {"length", "max_tokens"}, attempt.branch_reason,
+                            retrieval_ms=attempt.retrieval_ms,
+                            visible_evidence_manifest=plan.candidate.evidence_spans)
 
-    async def serve_turn(self, session_id: str, query: str, evidence: tuple[EvidenceBlock, ...], *,
+    async def serve_turn(self, session_id: str, query: str, evidence: tuple[EvidenceBlock, ...] = (), *,
                          request_id: str | None = None, corpus_snapshot_id: str = "demo-v1",
                          reference_history: tuple[TurnRecord, ...] | None = None,
-                         retrieval_priority: tuple[EvidenceKey, ...] | None = None) -> TurnResponse:
+                         retrieval_priority: tuple[EvidenceKey, ...] | None = None,
+                         evidence_provider: Callable[[SessionSnapshot], Awaitable[EvidenceSelection]] | None = None) -> TurnResponse:
         if not session_id or not query.strip():
             raise ValueError("session_id and query must be nonempty")
         evidence = tuple(evidence)
+        if evidence_provider is not None and (evidence or reference_history is not None or retrieval_priority is not None):
+            raise ValueError("retrieved queries cannot also supply evidence, reference history or retrieval priority")
         request_id = request_id or uuid.uuid4().hex
-        request_hash = hashlib.sha256(dumps((query, evidence, corpus_snapshot_id, reference_history,
-                                            retrieval_priority)).encode()).hexdigest()
+        # Query identity is stable before retrieval. A retry returns the original
+        # attempt rather than re-retrieving against newer history or rankings.
+        content = (("retrieved_query", query, corpus_snapshot_id) if evidence_provider is not None else
+                   (query, evidence, corpus_snapshot_id, reference_history, retrieval_priority))
+        request_hash = hashlib.sha256(dumps(content).encode()).hexdigest()
         arrived = time.monotonic()
         async with self._lock(session_id):
             entered = time.monotonic()
@@ -187,7 +205,24 @@ class Controller:
                 return self._response(attempt, replay=True)
             if attempt.stage == "FAILED":
                 raise StoreError("Previous attempt failed; use a new request_id")
+            retrieval_ms = None
             try:
+                if evidence_provider is not None:
+                    retrieval_started = time.monotonic()
+                    try:
+                        selection = await evidence_provider(snap)
+                    except BaseException as exc:
+                        self.events.emit("retrieval_failed", business_session_id=session_id,
+                                         attempt_id=attempt.attempt_id, error=str(exc),
+                                         retrieval_ms=(time.monotonic()-retrieval_started)*1000)
+                        raise
+                    retrieval_ms = (time.monotonic()-retrieval_started)*1000
+                    evidence = tuple(selection.evidence)
+                    retrieval_priority = tuple(selection.retrieval_priority)
+                    self.events.emit("retrieval_finished", business_session_id=session_id,
+                                     attempt_id=attempt.attempt_id, retrieval_ms=retrieval_ms,
+                                     retrieval_priority=retrieval_priority,
+                                     selected_evidence_keys=tuple(b.key for b in evidence))
                 info = await self.engine.info()
                 if info.fingerprint != self.template.fingerprint:
                     raise EngineError("FINGERPRINT_MISMATCH")
@@ -232,7 +267,7 @@ class Controller:
                 # The planner validates this batch once before selecting a candidate.
                 pressure = (max(1, quotes.active_requests + (quotes.queued_requests or 0) + 1) if quotes is not None
                             and quotes.active_requests is not None else max(1, self._active_generations + 1))
-                planning_control_ms = (time.monotonic()-entered)*1000 + (
+                planning_control_ms = (time.monotonic()-entered)*1000 - (retrieval_ms or 0) + (
                     statistics.mean(self._postplan_control_ms) if self._postplan_control_ms else 0)
                 plan_started = time.monotonic()
                 plan = choose_plan(candidates, quotes, self.cost_model, planning_snap, self.knobs,
@@ -258,7 +293,8 @@ class Controller:
                           (append_failure or plan.reason) if plan.candidate.action == "REBUILD" else "append")
                 attempt = self.store.save_attempt(replace(attempt, stage="PLANNED", evidence=evidence,
                                                          plan=plan, branch_reason=reason,
-                                                         retrieval_priority=retrieval_priority))
+                                                         retrieval_priority=retrieval_priority,
+                                                         retrieval_ms=retrieval_ms))
                 # No-C ablation keeps the native session across text rebuilds.
                 # History protocol changes and failed attempts still need safe recovery.
                 new_epoch = (snap.current_epoch is None or snap.history_sync_pending
@@ -295,7 +331,7 @@ class Controller:
                     submitted+result.ttft_ms/1000 if result.ttft_ms is not None else None,
                     submitted+result.last_token_ms/1000 if result.last_token_ms is not None else None,
                     response_done, committed_at, token_observation="chunk" if result.ttft_ms is not None else "none")
-                control_ms = ((submitted-entered) + (committed_at-response_done))*1000
+                control_ms = ((submitted-entered) + (committed_at-response_done))*1000 - (retrieval_ms or 0)
                 self._postplan_control_ms.append(((submitted-plan_started)+(committed_at-response_done))*1000)
                 self._postplan_control_ms = self._postplan_control_ms[-32:]
                 selected_estimate = next((e for e in plan.predicted if e.candidate_id == plan.candidate.candidate_id), None)

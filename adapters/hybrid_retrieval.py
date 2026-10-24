@@ -304,7 +304,7 @@ class HybridRetriever:
     """Shared P3 retrieval; source-qualified history resolution is explicit opt-in."""
     def __init__(self, sparse, dense, encoder, reranker=None, *, query_mode="current",
                  stage="hybrid_rerank", candidate_k=50, rerank_k=50, rrf_k=60,
-                 source_config=None, query_fusion="single", resolver=None, rerank_query_mode="resolved"):
+                 source_config=None, query_fusion="single", resolver=None, rerank_query_mode="resolved", trace_sink=None):
         from adapters.query_resolution import SOURCE_MODES
         if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", *SOURCE_MODES}:
             raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
@@ -339,6 +339,7 @@ class HybridRetriever:
         self.requests = 0
         self.initialization_seconds = None
         self.query_view_traces = []
+        self.trace_sink = trace_sink
 
     @property
     def manifest(self):
@@ -365,6 +366,9 @@ class HybridRetriever:
             manifest["query_view_traces"] = list(self.query_view_traces)
         if self.rerank_query_mode == "user_topic":
             manifest["rerank_query_view"] = user_topic_manifest()
+        if self.trace_sink is not None:
+            manifest.pop("query_view_traces", None)
+            manifest["query_view_trace_storage"] = "external_sink"
         return manifest
 
     def retrieve_turn(self, turn, *, prior_context=None):
@@ -408,7 +412,7 @@ class HybridRetriever:
                 raise
             finally:
                 if view is not None:
-                    self.query_view_traces.append({"task_id": turn.task_id, "conversation_id": turn.conversation_id,
+                    trace = {"task_id": turn.task_id, "conversation_id": turn.conversation_id,
                         "turn": turn.turn, **view,
                         "rerank_query_mode": self.rerank_query_mode,
                         "rerank_query": scoring_query if self.stage == "hybrid_rerank" else None,
@@ -417,7 +421,11 @@ class HybridRetriever:
                         # Full local wall interval, including lock wait and query resolution.
                         # The resolver's own elapsed_ms remains unchanged in view.
                         "retrieval_elapsed_ms": (time.perf_counter()-started)*1000,
-                        **({"query_fusion_trace": fusion_trace} if fusion_trace else {})})
+                        **({"query_fusion_trace": fusion_trace} if fusion_trace else {})}
+                    if self.trace_sink is None:
+                        self.query_view_traces.append(trace)
+                    else:
+                        self.trace_sink(trace)
         return replace(turn, contexts=tuple(contexts))
 
     def close(self):
