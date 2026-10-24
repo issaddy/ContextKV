@@ -79,3 +79,5 @@ uv run contextkv --config configs/demo.yaml --state-dir runs/doc2dial-demo-state
 OOD只能说明问题不适用于给定文档：例如在DMV材料下问VA事务，完整语料可能另有VA答案。真实target也有条件否定反转等噪声；地址正确不授予target语义资格。固定开发材料的有限字面重叠检查无命中，不代表全量去污染完成。
 
 [FaithDial/CHARP对照研究](../runs/multiturn-grounding-alternatives/README.md)补充了另一约束：人工修订与history字段不保证模型需要利用历史；CHARP同知识、不同末问的成对设计更能隔离历史消歧。当前保留这些有效原理和数据接口，后续按真正的历史、条件及证据充分性问题设计机制；没有因适配成功就启动训练或重跑大矩阵。
+
+接续已进入[真实训练工程](grounded_training.md)：完整single-document输入预算可容纳8K，但作者grounding也可能错指或遗漏；六条逐来源审查的起步样本已通过同一prepare入口，target/labels与来源历史分离。它们用于流程验证，不能替代有来源分组的训练/验证设计或证明8B语义效果。

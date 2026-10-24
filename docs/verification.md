@@ -8,7 +8,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | 因果样本/原生阶段接线/HTTP关闭排空：1404 passed，8 subtests passed，开启真实Qwen3 tokenizer metadata，无跳过；runs/pytest-causal-stage-shutdown.log |
+| 最近完整 CPU 回归 | 有源训练工程：1448 passed，8 subtests passed，真实Qwen3 tokenizer开启；1项显式训练运行测试本地跳过并另在容器通过。runs/pytest-grounded-training.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
 | Ruff / wheel | `e85663e`的Ruff/diff通过；包核对88模块、31资产、358个sdist tracked文件及13许可，通过且无运行数据/权重/环境；runs/dist-b-receipt-fixture/asset-check.json |
 | HTTP自动检索 | 真实CLI/TCP/BM25、明确依赖闭包、两轮提交、原结果重放及close通过；2次mock生成，0次模型调用；runs/http-retrieval-tcp-v1/result.json。启动来源/取消竞态最终修复由全回归覆盖 |
@@ -18,6 +18,7 @@
 | 因果样本投影 | v1 21998 / v0.9 25126原agent目标逐条核对严格历史前缀；两版原文件首行分别6/9实例的真实CLI导出核对通过。0模型调用，非语义质量标签；runs/causal-dialogue-projection/ |
 | 停机可靠性 | Uvicorn 0.54.0真实超时取消复现：先排空再close，线程不使用已关闭资源，attempt从错误STARTED变为FAILED。被取消HTTP仍500；runs/runtime-shutdown-audit/ |
 | B阶段接线 | 原生telemetry显式批次身份→既有stage fit的CPU闭环通过，prepared host特征与实际恢复诊断分离；未增加Qwen3硬件测量或宣称性能收益；runs/b-current-integration-audit/ |
+| 有源训练工程 | 六条真实train起步样本→同一prepare入口11870tokens完整保留；随机tiny Qwen3+实际tokenizer的CPU两步LoRA、base冻结、CE、adapter重载通过。opt-in回归1 passed；未训练8B或启用GPU，非质量收益。见[训练说明](grounded_training.md) |
 | Qwen3定向成本诊断 | `e85663e`，3个预选形状，6正式+6历史物化，全部正常终态；285项原件审计0问题，执行quote/receipt一致。decode占95.49%–99.16%，输出和语义不相同，非成本策略或质量优胜；runs/qwen3-b-targeted-native-review/ |
 | 当前容器源码 | `e85663e`，359个tracked条目一致；补丁保持57932422，CLI导入/help与编译通过。72项配对/scope/sampling针对性测试通过，后续上述12调用实测完成；GPU0空闲。runs/remote-h200-qwen3-b-targeted/runs/qwen3-b-targeted-sourcecheck.json。最近全回归仍为445b233的1404项，不追认更大测试数 |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |

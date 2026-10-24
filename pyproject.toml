@@ -16,6 +16,7 @@ tokenizer = ["transformers==5.19.0", "tokenizers==0.23.2", "jinja2>=3.1,<4"]
 retrieval = ["bm25s==0.3.15", "numpy==2.3.5"]
 calibration = ["numpy==2.3.5", "scipy==1.17.1"]
 evaluation = ["jinja2>=3.1,<4"]
+training = ["transformers==5.19.0", "tokenizers==0.23.2", "peft==0.21.0", "accelerate==1.15.0", "torch>=2.6"]
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.11,<1"]
@@ -25,7 +26,7 @@ contextkv = "controller.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["controller*", "adapters*", "bench*", "profiling*", "engine_patches*"]
+include = ["controller*", "adapters*", "bench*", "profiling*", "engine_patches*", "training*"]
 
 [tool.setuptools.package-data]
 adapters = ["assets/convsearch_r1/*"]
