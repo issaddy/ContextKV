@@ -6,9 +6,9 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | `870a250`：1207 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-qwen3-sampling-complete.log |
+| 最近完整 CPU 回归 | `b3d3c2f`：1277 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-research-sampling-v2.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
-| Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 atomic_judge 模块/协议资产、table_focus、CRAFT 行文本与 GroUSE 源码，CRAFT 完整许可在 wheel 中；runs/build-atomic-focus.log；新增guided schema、query view、observation probe与client也已重建并逐字核对（runs/build-guided-wheel.log）；融合模块也已构建并逐字核对（runs/build-query-fusion-wheel.log） |
+| Ruff / shell / wheel | Ruff、shell与diff检查通过；固定`b3d3c2f`源码构建wheel/sdist，逐字核对85模块、29包内资产、338个sdist tracked文件、103测试/配置及13许可，未包含运行数据、模型或环境；runs/dist-research-sampling-final/asset-check.json |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
 | 冻结模拟测试矩阵 | 39 jobs / 117 轮成功 |
 | 继承主方法参数的开发集消融 | 15 jobs / 45 轮成功，不参与主方法选择 |
@@ -56,6 +56,8 @@ fixture本地19项合同包含6项真实typed客户端到Runtime.quote的快照�
 模型迁移审查发现主候选只验证证据消息，未检查原生模板是否改写历史助手正文。现有渲染边界已扩展为按序检查全部消息正文，保持原生模板和既有函数入口，不新增render或hash。CPU反例覆盖reasoning-prefix变换、重复历史、APPEND/REBUILD和失败时快照不变；不是对所有模板语义或角色边界的形式证明。真实固定7B tokenizer启用的完整回归为 **1210项及6子测试通过**，Ruff通过，记录在`runs/pytest-full-qa-render.log`。当前Qwen3运行器已有同类完整历史检查，本地修复没有改动正在运行的远端源码。
 
 显式[Qwen3本地模型配置](model_scope.md)已贯穿controller、launcher、native guard和profiling/lifecycle探针；local identity与HF加载revision分离，初始化检查实际目录/metadata/tokenizer/模板，旧无scope默认保持7B。新scope不能采用未绑定或旧模型的成本artifact。`a87638a`最终 **1236项及6子测试通过**，另25项原测试与4项独立scope合同通过，Ruff/shell/diff检查通过。新patch为`b1b58e096c309eef1d7c10b1da3d29bec86503030e72f0f8e3badba9cf9c8a05`，固定原源码校验、应用/逆向检查及15文件编译通过。其固定Git树构建核对84模块、29包内资产、332个sdist tracked文件、102测试/配置及13许可，见`runs/dist-qwen3-scope-complete/asset-check.json`。随后333个tracked源码已部署，两模型完成[有限H200协议/完整QA/GPU与Host生命周期验收](qwen3_scope_gpu_validation.md)，并保留并发观测的partial覆盖。此前能力参考始终绑定`a6b5711`stock引擎，两个实验的源码、配置与结论独立记录。
+
+`b3d3c2f`将[显式采样](sampling.md)贯通研究client/controller/profiler与离线重评分，默认旧wire保持。旧执行时间点保留；跨配方不冒充已校准，经验长度和learned模型分别绑定来源与实际残差基准。初轮完整回归1273通过、1项旧list形态合同失败，日志v1保留；恢复原只读容器形态并修正训练/服务先验中心后，最终1277项与6子测试通过。新增41项、另4项独立合同通过，独审实际运行了四会话的length-fit CLI。CLI demo同时修正真实引擎被恒标simulation的问题，mock四轮与实际8B记录的CPU回放分支检查通过；后者没有新模型调用。最终固定Git源码包的核验见上表。本批采样实现尚未部署；容器仍是已完成GPU验收的`a87638a`及原生兼容补丁，不将先前硬件探针追记为新采样验证。
 
 ## 已完成的 H200 集成验证
 

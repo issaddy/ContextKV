@@ -45,7 +45,7 @@ bash scripts/launch_sglang.sh --host 127.0.0.1 --port 30000 \
 
 ## 采样与标定范围
 
-本切片的research client仍保持原temperature0默认；**没有**把独立Qwen3能力参考的`.7/.8/top_k20/min_p0`悄悄应用到主工程。示例配置是身份/协议烟测用途，不用于宣称推荐采样的质量。主研究采样接线将作为独立改动；同时需要在新profile里记录真实recipe。
+research client仍保持原temperature0默认；**没有**把独立Qwen3能力参考的`.7/.8/top_k20/min_p0`悄悄应用到主工程。后续`b3d3c2f`已提供独立[显式采样配置](sampling.md)，同时记录实际request/profile配方，并分别核对时间表、经验长度与learned模型的来源和残差基准。此处示例配置仍是默认贪心的身份/协议烟测，不用于宣称推荐采样的质量。已完成的`a87638a`硬件验收不包含后续采样接线，新配方的主工程GPU实验另行记录。
 
 显式scope若配置cost artifact，factory要求其profile manifest绑定相同实际fingerprint及cache_config_hash。旧7B artifact、没有来源绑定的legacy lookup、只有raw calibration rows都会在创建客户端前拒绝；不靠legacy_unbound让新模型成为calibrated。实际cache_config匹配仍由原有启动/重启scope检查完成。无artifact的固定策略可运行，但没有GPU时间校准资格。旧7B未选scope时，其已有legacy处理不变。
 
