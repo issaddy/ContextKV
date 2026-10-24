@@ -36,6 +36,7 @@ class _Epoch:
     operation_id: str
     state: str = "PREPARED"
     inflight: set[str] = field(default_factory=set)
+    business_session_id: str | None = None
 
 
 class MockEngine:
@@ -112,6 +113,7 @@ class MockEngine:
 
     async def info(self):
         return EngineInfo(engine_restart_id=self.engine_restart_id, fingerprint=self.fingerprint,
+                          business_session_identity_supported=True,
                           metrics_supported=True, result_replay_supported=True,
                           cache_config_hash=f"mock-trie-p{self.page_size}-{self.gpu_capacity_tokens}-{self.host_capacity_tokens}")
 
@@ -164,7 +166,7 @@ class MockEngine:
                 evictable_gpu_tokens=sum(s.gpu and not s.refs and not s.h2d for s in self._slots.values()),
                 evictable_host_tokens=sum(s.host and not s.refs and not s.d2h for s in self._slots.values()))
 
-    async def prepare(self, engine_session_id, operation_id, expected_restart_id):
+    async def prepare(self, engine_session_id, operation_id, expected_restart_id, *, business_session_id=None):
         async with self._lock:
             self._check_restart(expected_restart_id)
             epoch = self._epochs.get(engine_session_id)
@@ -172,15 +174,18 @@ class MockEngine:
                     and self._prepare_operations[operation_id] != engine_session_id):
                 raise EngineError("OPERATION_CONFLICT")
             if epoch:
+                if business_session_id is not None and business_session_id != epoch.business_session_id:
+                    raise EngineError("EPOCH_CONFLICT")
                 if epoch.operation_id != operation_id or epoch.state not in {"PREPARED", "COMMITTED"}:
                     raise EngineError("EPOCH_CONFLICT")
             else:
                 self._prepare_operations[operation_id] = engine_session_id
                 self._generation += 1
-                epoch = self._epochs[engine_session_id] = _Epoch(self._generation, operation_id)
+                epoch = self._epochs[engine_session_id] = _Epoch(self._generation, operation_id,
+                                                               business_session_id=business_session_id)
                 self._event("prepare", session_id=engine_session_id)
             return PrepareAck(engine_session_id, epoch.generation, self.engine_restart_id,
-                              operation_id, epoch.state)
+                              operation_id, epoch.state, epoch.business_session_id)
 
     def _guard(self, session_id, generation, restart_id):
         self._check_restart(restart_id)

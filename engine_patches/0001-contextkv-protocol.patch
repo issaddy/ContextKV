@@ -111,10 +111,10 @@ index bf00f65..aeb7f9e 100644
      """Open a session, and return its unique session id."""
 diff --git a/python/sglang/srt/managers/contextkv_runtime.py b/python/sglang/srt/managers/contextkv_runtime.py
 new file mode 100644
-index 0000000..6aa99b5
+index 0000000..85e8181
 --- /dev/null
 +++ b/python/sglang/srt/managers/contextkv_runtime.py
-@@ -0,0 +1,670 @@
+@@ -0,0 +1,823 @@
 +"""Scheduler-owned ContextKV protocol, for the pinned SGLang Python backend.
 +
 +This module deliberately has no background thread or GPU synchronizations. It is
@@ -125,9 +125,10 @@ index 0000000..6aa99b5
 +from __future__ import annotations
 +
 +from array import array
-+from collections import OrderedDict, deque
++from collections import Counter, OrderedDict, deque
 +import hashlib
 +import json
++import math
 +import os
 +from pathlib import Path
 +import time
@@ -257,6 +258,100 @@ index 0000000..6aa99b5
 +    return counts
 +
 +
++class HostAdmissionPolicy:
++    """Bounded scalar state for optional request-triggered backup admission.
++
++    Adapted from EfficientAgent b21b12a (Apache-2.0): pressure AND large write.
++    Here a request spends its incremental budget only on native-admitted FULL
++    BackupKV pages; failed allocations and already-backed specs spend nothing.
++    8192 tokens starts from its 8 x 1024-token threshold; it is not tuned here.
++    """
++    def __init__(self, mode="off", threshold_tokens=8192, occupancy_threshold=.95,
++                 window_seconds=60., prompt_window=256):
++        if mode not in {"off", "fixed", "conditioned"}:
++            raise ValueError("unknown host admission mode")
++        if (threshold_tokens < 0 or not 0 <= occupancy_threshold <= 1
++                or not math.isfinite(window_seconds) or window_seconds <= 0 or prompt_window < 1):
++            raise ValueError("invalid host admission settings")
++        self.mode, self.threshold_tokens = mode, threshold_tokens
++        self.occupancy_threshold, self.window_seconds = occupancy_threshold, window_seconds
++        self.prompt_window = prompt_window
++        self.live = {}  # engine epoch -> business identity and last first-match time
++        self.prompts = deque(maxlen=prompt_window)
++        self.evictions = deque()
++        self.counters = Counter(first_match_observations=0, allocation_evicted_host_tokens=0,
++            considered_actions=0, allowed_actions=0, skipped_actions=0,
++            allowed_planned_new_tokens=0, skipped_new_tokens=0,
++            admitted_new_tokens=0, admitted_new_pages=0, unknown_business_actions_native=0)
++
++    def config(self):
++        return dict(version=1, mode=self.mode, threshold_tokens=self.threshold_tokens,
++                    occupancy_threshold=self.occupancy_threshold,
++                    window_seconds=self.window_seconds, prompt_window=self.prompt_window,
++                    new_write_unit="native_FULL_BackupKV_pages",
++                    admission_scope="incremental_request_backup_budget")
++
++    def _prune(self, now):
++        cutoff = now-self.window_seconds
++        self.live = {sid: row for sid, row in self.live.items() if row[1] >= cutoff}
++        while self.evictions and self.evictions[0][0] < cutoff:
++            self.evictions.popleft()
++
++    def observe(self, sid, business_id, prompt_tokens, now):
++        self._prune(now)
++        self.live[sid] = (business_id, now)
++        self.prompts.append((sid, now, prompt_tokens))
++        self.counters["first_match_observations"] += 1
++
++    def retire(self, sid):
++        self.live.pop(sid, None)
++        self.prompts = deque((row for row in self.prompts if row[0] != sid), maxlen=self.prompt_window)
++
++    def capacity_evicted(self, tokens, now):
++        if tokens > 0:
++            self._prune(now)
++            self.evictions.append((now, tokens))
++            self.counters["allocation_evicted_host_tokens"] += tokens
++
++    def window(self, now):
++        cutoff = now-self.window_seconds
++        active = {sid: row for sid, row in self.live.items() if row[1] >= cutoff}
++        businesses = {row[0] for row in active.values()}
++        lengths = [n for sid, at, n in self.prompts if sid in active and at >= cutoff]
++        mean_prompt = sum(lengths)/len(lengths) if lengths else 0.
++        return dict(active_business_sessions=len(businesses), active_engine_epochs=len(active),
++                    prompt_observations=len(lengths), mean_prompt_tokens=mean_prompt,
++                    other_business_working_set_tokens=max(0, len(businesses)-1)*mean_prompt,
++                    window_evicted_host_tokens=sum(n for at, n in self.evictions if at >= cutoff))
++
++    def decide(self, new_tokens, page_size, host_capacity, host_used, now, *, admitted_pages=0):
++        self._prune(now)
++        window = self.window(now)
++        new_pages = -(-new_tokens//page_size)
++        threshold_pages = -(-self.threshold_tokens//page_size)
++        above = window["other_business_working_set_tokens"] > host_capacity
++        full_evicting = (host_capacity > 0 and host_used >= self.occupancy_threshold*host_capacity
++                         and window["window_evicted_host_tokens"] > 0)
++        pressure = self.mode == "fixed" or (above and full_evicting)
++        projected_pages = admitted_pages + new_pages
++        skip = self.mode != "off" and pressure and projected_pages > threshold_pages and new_pages > 0
++        self.counters["considered_actions"] += 1
++        self.counters["skipped_actions" if skip else "allowed_actions"] += 1
++        self.counters["skipped_new_tokens" if skip else "allowed_planned_new_tokens"] += new_tokens
++        reason = ("request_backup_budget_exceeded" if skip else "already_backed" if new_pages == 0 else
++                  "within_request_page_budget" if projected_pages <= threshold_pages else "pressure_not_met")
++        return dict(allowed=not skip, reason=reason, mode=self.mode, pressure=pressure,
++                    working_set_above_capacity=above, host_full_and_evicting=full_evicting,
++                    new_tokens=new_tokens, new_pages=new_pages, threshold_pages=threshold_pages,
++                    request_admitted_pages=admitted_pages, projected_request_pages=projected_pages,
++                    host_capacity_tokens=host_capacity, host_used_tokens=host_used, **window)
++
++    def snapshot(self, now):
++        return dict(config=self.config(), counters=dict(self.counters), **self.window(now),
++                    eviction_scope="native_backup_capacity_reclaim",
++                    skipped_tokens_meaning="planned_backup_omission_not_completed_DMA_savings")
++
++
 +class ContextKVRuntime:
 +    def __init__(self, cache, fingerprint, receipt_limit=1024, *, scheduler=None,
 +                 result_ttl_seconds=900, result_max_bytes=64 << 20, event_limit=4096,
@@ -280,6 +375,12 @@ index 0000000..6aa99b5
 +        self.last_pool_sample = None
 +        cache.contextkv_runtime = self
 +        self.observed_seq = 0
++        self.host_admission = HostAdmissionPolicy(
++            mode=os.environ.get("CONTEXTKV_HOST_ADMISSION", "off"),
++            threshold_tokens=int(os.environ.get("CONTEXTKV_HOST_ADMISSION_THRESHOLD_TOKENS", "8192")),
++            occupancy_threshold=float(os.environ.get("CONTEXTKV_HOST_ADMISSION_OCCUPANCY_THRESHOLD", ".95")),
++            window_seconds=float(os.environ.get("CONTEXTKV_HOST_ADMISSION_WINDOW_SECONDS", "60")),
++            prompt_window=int(os.environ.get("CONTEXTKV_HOST_ADMISSION_PROMPT_WINDOW", "256")))
 +        cc = cache.cache_controller
 +        allocator = getattr(cache, "token_to_kv_pool_allocator", None)
 +        config = {"page_size": cache.page_size, "backend": cache._tree_core_backend,
@@ -293,6 +394,8 @@ index 0000000..6aa99b5
 +                  "host_capacity_tokens": getattr(getattr(cc, "mem_pool_host", None), "size", None),
 +                  "load_back_threshold": getattr(cache, "load_back_threshold", None),
 +                  "sample_pool": self.sample_pool_enabled}
++        if self.host_admission.mode != "off":
++            config["host_admission"] = self.host_admission.config()
 +        self.cache_config = config
 +        self.cache_config_hash = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
 +
@@ -310,7 +413,7 @@ index 0000000..6aa99b5
 +        return getattr(self, action)(data)
 +
 +    def info(self, data):
-+        return dict(engine_restart_id=self.restart_id, protocol_version=PROTOCOL,
++        info = dict(engine_restart_id=self.restart_id, protocol_version=PROTOCOL,
 +                    engine_kind="sglang", host_quote_supported=True,
 +                    completion_status_supported=True, guarded_generate_supported=True,
 +                    scheduler_owned=True, cache_config_hash=self.cache_config_hash,
@@ -318,14 +421,22 @@ index 0000000..6aa99b5
 +                    metrics_supported=True, result_replay_supported=True,
 +                    result_ttl_seconds=self.result_ttl_seconds,
 +                    profiling_enabled=self.profiling_enabled, streaming_generation_supported=True)
++        if self.host_admission.mode != "off":
++            info["business_session_identity_supported"] = True
++        return info
 +
 +    def prepare(self, data):
 +        self._restart(data["expected_restart_id"])
 +        sid, op = data["engine_session_id"], data["operation_id"]
 +        if not isinstance(sid, str) or not sid or not isinstance(op, str) or not op:
 +            raise ContextKVError("INVALID_ID")
++        business_id = data.get("business_session_id")
++        if business_id is not None and (not isinstance(business_id, str) or not business_id):
++            raise ContextKVError("INVALID_BUSINESS_SESSION_ID")
 +        epoch = self.epochs.get(sid)
 +        if epoch:
++            if (business_id is not None and business_id != epoch.get("business_session_id")):
++                raise ContextKVError("EPOCH_CONFLICT")
 +            if epoch["operation_id"] != op or epoch["state"] not in {"PREPARED", "COMMITTED"}:
 +                raise ContextKVError("EPOCH_CONFLICT")
 +        else:
@@ -338,10 +449,13 @@ index 0000000..6aa99b5
 +            if generation is None:
 +                raise ContextKVError("SESSION_CACHE_DISABLED")
 +            epoch = self.epochs[sid] = dict(generation=generation, operation_id=op,
-+                                           state="PREPARED", inflight=set())
++                                           state="PREPARED", inflight=set(), business_session_id=business_id)
 +            self.operations[op] = ("prepare", sid, generation)
-+        return dict(engine_session_id=sid, session_generation=epoch["generation"],
-+                    engine_restart_id=self.restart_id, operation_id=op, state=epoch["state"])
++        ack = dict(engine_session_id=sid, session_generation=epoch["generation"],
++                   engine_restart_id=self.restart_id, operation_id=op, state=epoch["state"])
++        if epoch.get("business_session_id") is not None:
++            ack["business_session_id"] = epoch["business_session_id"]
++        return ack
 +
 +    def admit(self, recv, req):
 +        """Executed before ensure_session_generation. Never reopens a retired ID."""
@@ -437,6 +551,7 @@ index 0000000..6aa99b5
 +    def _release(self, sid, epoch):
 +        self.cache.release_radix_session(sid)
 +        epoch["state"] = "RETIRED"
++        self.host_admission.retire(sid)
 +        self._event("retire_ref", session_id=sid, freed_gpu_tokens=0, freed_host_tokens=0)
 +
 +    def retire(self, data):
@@ -481,8 +596,8 @@ index 0000000..6aa99b5
 +
 +        Native in-flight collection handles overlap and repeated batch membership.
 +        Waiting wins over in-flight membership during retraction; a chunked
-+        request can be absent from both batches. No request IDs or token arrays
-+        leave the scheduler, and no cache state or completion events are advanced.
++        request can be absent from both batches. Existing native IDs and scalar
++        summaries leave the scheduler; token arrays and cache state do not change.
 +        """
 +        if self.scheduler is None:
 +            return dict(active_requests=None, queued_requests=None,
@@ -535,6 +650,43 @@ index 0000000..6aa99b5
 +        req.contextkv_last_native_match = dict(observed_time_ns=time.monotonic_ns(),
 +            input_tokens=input_tokens, device_prefix_tokens=req.prefix_len,
 +            host_hit_tokens=req.host_hit_length, matched_prefix_tokens=req.num_matched_prefix_tokens)
++        if self.host_admission.mode != "off" and not getattr(req, "contextkv_host_admission_observed", False):
++            req.contextkv_host_admission_observed = True
++            epoch = self.epochs.get(req.session_id)
++            if epoch and epoch.get("business_session_id") is not None and epoch["state"] != "RETIRED":
++                self.host_admission.observe(req.session_id, epoch["business_session_id"],
++                                            len(req.origin_input_ids), time.monotonic())
++
++    def allow_host_backup(self, req, new_tokens):
++        """Called before allocation/locking; no match, tree walk or DMA here."""
++        policy = self.host_admission
++        if policy.mode == "off":
++            return True
++        epoch = self.epochs.get(req.session_id)
++        if epoch is None or epoch.get("business_session_id") is None:
++            policy.counters["unknown_business_actions_native"] += 1
++            return True
++        host = self.cache.cache_controller.mem_pool_host
++        decision = policy.decide(new_tokens, self.cache.page_size, int(host.size),
++                                 int(host.size-host.available_size()), time.monotonic(),
++                                 admitted_pages=getattr(req, "contextkv_host_backup_admitted_pages", 0))
++        self._event("host_backup_admission", rid=req.rid, engine_session_id=req.session_id,
++                    business_session_id=epoch["business_session_id"], **decision)
++        return decision["allowed"]
++
++    def record_host_backup_admitted(self, req, new_tokens):
++        """Native host allocation/commit succeeded; DMA may still be queued."""
++        epoch = self.epochs.get(req.session_id)
++        if epoch is None or epoch.get("business_session_id") is None:
++            return
++        pages = -(-new_tokens//self.cache.page_size)
++        req.contextkv_host_backup_admitted_pages = getattr(req, "contextkv_host_backup_admitted_pages", 0) + pages
++        self.host_admission.counters["admitted_new_tokens"] += new_tokens
++        self.host_admission.counters["admitted_new_pages"] += pages
++
++    def record_host_capacity_eviction(self, tokens):
++        if self.host_admission.mode != "off":
++            self.host_admission.capacity_evicted(tokens, time.monotonic())
 +
 +    def quote(self, data):
 +        from sglang.srt.mem_cache.radix_cache import RadixKey
@@ -659,6 +811,7 @@ index 0000000..6aa99b5
 +        return dict(engine_restart_id=self.restart_id, observed_seq=self.observed_seq,
 +                    observed_time_ns=time.monotonic_ns(), clock="server_monotonic",
 +                    pool=self.pool_snapshot(), cache_config=self.cache_config,
++                    host_admission=self.host_admission.snapshot(time.monotonic()),
 +                    **self.workload_snapshot(),
 +                    events=[e for e in self.events if e["seq"] > after],
 +                    next_seq=self.event_seq, dropped_before_seq=oldest-1,
@@ -1033,6 +1186,22 @@ index 34fe4cf..b8df87a 100644
                  session_params=session_params,
                  custom_logit_processor=obj.custom_logit_processor,
                  require_reasoning=obj.require_reasoning,
+diff --git a/python/sglang/srt/mem_cache/common.py b/python/sglang/srt/mem_cache/common.py
+index b556dad..07a1d1c 100644
+--- a/python/sglang/srt/mem_cache/common.py
++++ b/python/sglang/srt/mem_cache/common.py
+@@ -264,6 +264,11 @@ def match_kv_cache(
+         req.mamba_branching_seqlen = match_result.mamba_branching_seqlen
+     if match_result.cache_protected_len is not None:
+         req.kv.cache_protected_len = match_result.cache_protected_len
++    # Research observer: save only this completed native match's CPU scalars.
++    # Never refresh a prefix or acquire a lock on behalf of a quote.
++    runtime = getattr(tree_cache, "contextkv_runtime", None)
++    if runtime is not None:
++        runtime.record_native_match(req, len(token_ids))
+     return match_result
+ 
+ 
 diff --git a/python/sglang/srt/mem_cache/unified_cache/session_ref_tracker.py b/python/sglang/srt/mem_cache/unified_cache/session_ref_tracker.py
 index 73f03a0..b7c2007 100644
 --- a/python/sglang/srt/mem_cache/unified_cache/session_ref_tracker.py
@@ -1113,10 +1282,141 @@ index 3bc4616..9e62987 100644
      def match_full_device_prefix(self, key: RadixKey) -> tuple[int, NodeId, int]:
          """Return (matched tokens, deepest node, FULL tokens pinned by it)."""
 diff --git a/python/sglang/srt/mem_cache/unified_radix_cache.py b/python/sglang/srt/mem_cache/unified_radix_cache.py
-index 8e797ab..d662e63 100644
+index 8e797ab..44d204b 100644
 --- a/python/sglang/srt/mem_cache/unified_radix_cache.py
 +++ b/python/sglang/srt/mem_cache/unified_radix_cache.py
-@@ -3500,6 +3500,9 @@ class UnifiedRadixCache(BasePrefixCache):
+@@ -656,7 +656,7 @@ class UnifiedRadixCache(BasePrefixCache):
+         same_params=["len(params.key)"],
+         same_results=["result.prefix_len"],
+     )
+-    def insert(self, params: InsertParams) -> InsertResult:
++    def insert(self, params: InsertParams, *, contextkv_request=None) -> InsertResult:
+         if self.disable:
+             return InsertResult(prefix_len=0)
+         # Fail fast on re-entrancy without touching the in-flight walk.
+@@ -667,7 +667,7 @@ class UnifiedRadixCache(BasePrefixCache):
+         try:
+             step = self.tree_core.begin_insert(params)
+             while True:
+-                self._apply_cache_actions(step.actions)
++                self._apply_cache_actions(step.actions, contextkv_request=contextkv_request)
+                 if step.result is not None:
+                     # Walk actions flow through the steps; the result is action-free.
+                     assert not step.result.cache_actions
+@@ -675,7 +675,7 @@ class UnifiedRadixCache(BasePrefixCache):
+                 step = self.tree_core.resume_insert()
+         finally:
+             # Drain still-pending actions so frees reach the allocator on abort.
+-            self._apply_cache_actions(self.tree_core.end_insert())
++            self._apply_cache_actions(self.tree_core.end_insert(), contextkv_request=contextkv_request)
+             if self.buffer_pipeline is not None:
+                 self.buffer_pipeline.end_insert_walk()
+ 
+@@ -1228,7 +1228,7 @@ class UnifiedRadixCache(BasePrefixCache):
+ 
+         insert_params.key = radix_key
+         insert_params.value = values
+-        result = self.insert(insert_params)
++        result = self.insert(insert_params, contextkv_request=req)
+ 
+         if result.rotation_tail_declined:
+             # Rotation-base discontinuity with the matched chain (pipelined
+@@ -1271,7 +1271,8 @@ class UnifiedRadixCache(BasePrefixCache):
+                     priority=min(
+                         insert_params.priority + 1, torch.iinfo(torch.int64).max
+                     ),
+-                )
++                ),
++                contextkv_request=req,
+             )
+ 
+         # With PD decode radix caching, SWA matching can stop short of the inserted path.
+@@ -1365,17 +1366,17 @@ class UnifiedRadixCache(BasePrefixCache):
+     # ---- Internal Helpers ----
+ 
+     def _apply_cache_actions(
+-        self, actions: list[CacheAction | ComponentAction]
++        self, actions: list[CacheAction | ComponentAction], *, contextkv_request=None
+     ) -> None:
+         # Apply and consume one at a time: a spent list cannot be double-applied.
+         actions.reverse()
+         try:
+             while actions:
+-                self._apply_cache_action(actions.pop())
++                self._apply_cache_action(actions.pop(), contextkv_request=contextkv_request)
+         finally:
+             actions.reverse()
+ 
+-    def _apply_cache_action(self, action: CacheAction | ComponentAction) -> None:
++    def _apply_cache_action(self, action: CacheAction | ComponentAction, *, contextkv_request=None) -> None:
+         # Component actions route to their component class; the rest are
+         # cache-owned and handled here by type.
+         if isinstance(action, ComponentAction):
+@@ -1403,7 +1404,7 @@ class UnifiedRadixCache(BasePrefixCache):
+             if self.linker is not None:
+                 self.linker.offload_nodes(action.node_ids)
+             else:
+-                self._execute_and_commit_kv_backup(action)
++                self._execute_and_commit_kv_backup(action, contextkv_request=contextkv_request)
+         else:
+             raise AssertionError(f"unhandled CacheAction: {type(action).__name__}")
+ 
+@@ -1672,7 +1673,7 @@ class UnifiedRadixCache(BasePrefixCache):
+         )
+ 
+     def _execute_and_commit_kv_backup(
+-        self, action: BackupKV, write_back: bool = False
++        self, action: BackupKV, write_back: bool = False, *, contextkv_request=None
+     ) -> int:
+         """Run a backup action top-down, stopping at the first failed backup."""
+         if self.buffer_pipeline is not None:
+@@ -1683,9 +1684,22 @@ class UnifiedRadixCache(BasePrefixCache):
+             for node_id in action.node_ids:
+                 self.buffer_pipeline.enqueue_backup_intent(node_id)
+             return 0
++        prepared_specs = None
++        runtime = getattr(self, "contextkv_runtime", None)
++        if (contextkv_request is not None and not write_back and runtime is not None
++                and runtime.host_admission.mode != "off"
++                and self.cache_controller.write_policy in {"write_through", "write_through_selective"}):
++            # FULL-only research runtime: build the same specs once. This is
++            # before host allocation, commit, added locks, pending state or DMA.
++            prepared_specs = {node_id: self.tree_core.build_backup_spec(node_id)
++                              for node_id in action.node_ids}
++            new_tokens = sum(len(value) for value, _ in prepared_specs.values())
++            if not runtime.allow_host_backup(contextkv_request, new_tokens):
++                return 0
+         written = 0
+         for node_id in action.node_ids:
+-            device_value, comp_xfers = self.tree_core.build_backup_spec(node_id)
++            device_value, comp_xfers = (self.tree_core.build_backup_spec(node_id)
++                                       if prepared_specs is None else prepared_specs[node_id])
+             # Overlapping chain actions may revisit nodes with Full KV already
+             # backed up. Skip only when no transfer remains.
+             if device_value.numel() == 0 and not comp_xfers:
+@@ -1704,6 +1718,8 @@ class UnifiedRadixCache(BasePrefixCache):
+             self._track_write_through_node(
+                 node_id, lock_params, publish_node_ids=publish_node_ids
+             )
++            if prepared_specs is not None:
++                runtime.record_host_backup_admitted(contextkv_request, len(host_indices))
+             written = len(host_indices)
+         return written
+ 
+@@ -1738,7 +1754,11 @@ class UnifiedRadixCache(BasePrefixCache):
+             host_avail = self.cache_controller.mem_pool_host.available_size()
+             if host_avail < kv_tokens:
+                 needed = kv_tokens - host_avail
+-                if self.evict_host(needed) < needed:
++                evicted = self.evict_host(needed)
++                runtime = getattr(self, "contextkv_runtime", None)
++                if runtime is not None:
++                    runtime.record_host_capacity_eviction(evicted)
++                if evicted < needed:
+                     return None
+         aux_xfers = [x for xfers in comp_xfers.values() for x in xfers]
+         aux_xfers.extend(sidecar_xfers)
+@@ -3500,6 +3520,9 @@ class UnifiedRadixCache(BasePrefixCache):
  
      def _log_write_ack_metrics(self, ack: HiCacheAck) -> None:
          """Record D->H backup volume and duration for a completed write ack."""
@@ -1126,7 +1426,7 @@ index 8e797ab..d662e63 100644
          if self.metrics_collector is None:
              return
          for pool, num_tokens in (ack.num_tokens_by_pool or {}).items():
-@@ -3551,6 +3554,9 @@ class UnifiedRadixCache(BasePrefixCache):
+@@ -3551,6 +3574,9 @@ class UnifiedRadixCache(BasePrefixCache):
                  # Unpin the loaded nodes; host copies stay as reclaimable duplicates.
                  self.tree_core.finish_load_back(node)
  
@@ -1136,15 +1436,3 @@ index 8e797ab..d662e63 100644
              if self.metrics_collector is not None:
                  for pool, num_tokens in (ack.num_tokens_by_pool or {}).items():
                      if num_tokens > 0:
-diff --git a/python/sglang/srt/mem_cache/common.py b/python/sglang/srt/mem_cache/common.py
-index b556dad..07a1d1c 100644
---- a/python/sglang/srt/mem_cache/common.py
-+++ b/python/sglang/srt/mem_cache/common.py
-@@ -266,2 +266,7 @@ def match_kv_cache(
-         req.kv.cache_protected_len = match_result.cache_protected_len
-+    # Research observer: save only this completed native match's CPU scalars.
-+    # Never refresh a prefix or acquire a lock on behalf of a quote.
-+    runtime = getattr(tree_cache, "contextkv_runtime", None)
-+    if runtime is not None:
-+        runtime.record_native_match(req, len(token_ids))
-     return match_result

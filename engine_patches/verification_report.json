@@ -1,6 +1,6 @@
 {
   "base_commit": "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b",
-  "patch_sha256": "e004ca96d62a5786f303c465da140513c7213f13ff023407991ec162ef82d92c",
+  "patch_sha256": "0ed0295274411b9fe60415e7f48604937d84d3fc894eabd9e143b0560de7488f",
   "original_source_hashes_verified": true,
   "patch_applies": true,
   "already_applied": false,
@@ -27,6 +27,9 @@
   "native_match_observer_after_original_match": true,
   "native_running_offset_function_reused": true,
   "native_request_identity_copied": true,
+  "host_admission_precedes_native_allocation_and_dma": true,
+  "host_admitted_budget_follows_native_commit_and_pending": true,
+  "host_capacity_eviction_observer_verified": true,
   "source_only": true,
   "gpu_runtime_tested": false,
   "full_dependency_import_tested": false,

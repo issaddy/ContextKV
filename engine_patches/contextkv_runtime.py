@@ -8,9 +8,10 @@ ACKs, takes locks, splits nodes or treats queued transfers as ready GPU copies.
 from __future__ import annotations
 
 from array import array
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, deque
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -140,6 +141,100 @@ def peek_full_prefix(tree, key, full_component_type=0):
     return counts
 
 
+class HostAdmissionPolicy:
+    """Bounded scalar state for optional request-triggered backup admission.
+
+    Adapted from EfficientAgent b21b12a (Apache-2.0): pressure AND large write.
+    Here a request spends its incremental budget only on native-admitted FULL
+    BackupKV pages; failed allocations and already-backed specs spend nothing.
+    8192 tokens starts from its 8 x 1024-token threshold; it is not tuned here.
+    """
+    def __init__(self, mode="off", threshold_tokens=8192, occupancy_threshold=.95,
+                 window_seconds=60., prompt_window=256):
+        if mode not in {"off", "fixed", "conditioned"}:
+            raise ValueError("unknown host admission mode")
+        if (threshold_tokens < 0 or not 0 <= occupancy_threshold <= 1
+                or not math.isfinite(window_seconds) or window_seconds <= 0 or prompt_window < 1):
+            raise ValueError("invalid host admission settings")
+        self.mode, self.threshold_tokens = mode, threshold_tokens
+        self.occupancy_threshold, self.window_seconds = occupancy_threshold, window_seconds
+        self.prompt_window = prompt_window
+        self.live = {}  # engine epoch -> business identity and last first-match time
+        self.prompts = deque(maxlen=prompt_window)
+        self.evictions = deque()
+        self.counters = Counter(first_match_observations=0, allocation_evicted_host_tokens=0,
+            considered_actions=0, allowed_actions=0, skipped_actions=0,
+            allowed_planned_new_tokens=0, skipped_new_tokens=0,
+            admitted_new_tokens=0, admitted_new_pages=0, unknown_business_actions_native=0)
+
+    def config(self):
+        return dict(version=1, mode=self.mode, threshold_tokens=self.threshold_tokens,
+                    occupancy_threshold=self.occupancy_threshold,
+                    window_seconds=self.window_seconds, prompt_window=self.prompt_window,
+                    new_write_unit="native_FULL_BackupKV_pages",
+                    admission_scope="incremental_request_backup_budget")
+
+    def _prune(self, now):
+        cutoff = now-self.window_seconds
+        self.live = {sid: row for sid, row in self.live.items() if row[1] >= cutoff}
+        while self.evictions and self.evictions[0][0] < cutoff:
+            self.evictions.popleft()
+
+    def observe(self, sid, business_id, prompt_tokens, now):
+        self._prune(now)
+        self.live[sid] = (business_id, now)
+        self.prompts.append((sid, now, prompt_tokens))
+        self.counters["first_match_observations"] += 1
+
+    def retire(self, sid):
+        self.live.pop(sid, None)
+        self.prompts = deque((row for row in self.prompts if row[0] != sid), maxlen=self.prompt_window)
+
+    def capacity_evicted(self, tokens, now):
+        if tokens > 0:
+            self._prune(now)
+            self.evictions.append((now, tokens))
+            self.counters["allocation_evicted_host_tokens"] += tokens
+
+    def window(self, now):
+        cutoff = now-self.window_seconds
+        active = {sid: row for sid, row in self.live.items() if row[1] >= cutoff}
+        businesses = {row[0] for row in active.values()}
+        lengths = [n for sid, at, n in self.prompts if sid in active and at >= cutoff]
+        mean_prompt = sum(lengths)/len(lengths) if lengths else 0.
+        return dict(active_business_sessions=len(businesses), active_engine_epochs=len(active),
+                    prompt_observations=len(lengths), mean_prompt_tokens=mean_prompt,
+                    other_business_working_set_tokens=max(0, len(businesses)-1)*mean_prompt,
+                    window_evicted_host_tokens=sum(n for at, n in self.evictions if at >= cutoff))
+
+    def decide(self, new_tokens, page_size, host_capacity, host_used, now, *, admitted_pages=0):
+        self._prune(now)
+        window = self.window(now)
+        new_pages = -(-new_tokens//page_size)
+        threshold_pages = -(-self.threshold_tokens//page_size)
+        above = window["other_business_working_set_tokens"] > host_capacity
+        full_evicting = (host_capacity > 0 and host_used >= self.occupancy_threshold*host_capacity
+                         and window["window_evicted_host_tokens"] > 0)
+        pressure = self.mode == "fixed" or (above and full_evicting)
+        projected_pages = admitted_pages + new_pages
+        skip = self.mode != "off" and pressure and projected_pages > threshold_pages and new_pages > 0
+        self.counters["considered_actions"] += 1
+        self.counters["skipped_actions" if skip else "allowed_actions"] += 1
+        self.counters["skipped_new_tokens" if skip else "allowed_planned_new_tokens"] += new_tokens
+        reason = ("request_backup_budget_exceeded" if skip else "already_backed" if new_pages == 0 else
+                  "within_request_page_budget" if projected_pages <= threshold_pages else "pressure_not_met")
+        return dict(allowed=not skip, reason=reason, mode=self.mode, pressure=pressure,
+                    working_set_above_capacity=above, host_full_and_evicting=full_evicting,
+                    new_tokens=new_tokens, new_pages=new_pages, threshold_pages=threshold_pages,
+                    request_admitted_pages=admitted_pages, projected_request_pages=projected_pages,
+                    host_capacity_tokens=host_capacity, host_used_tokens=host_used, **window)
+
+    def snapshot(self, now):
+        return dict(config=self.config(), counters=dict(self.counters), **self.window(now),
+                    eviction_scope="native_backup_capacity_reclaim",
+                    skipped_tokens_meaning="planned_backup_omission_not_completed_DMA_savings")
+
+
 class ContextKVRuntime:
     def __init__(self, cache, fingerprint, receipt_limit=1024, *, scheduler=None,
                  result_ttl_seconds=900, result_max_bytes=64 << 20, event_limit=4096,
@@ -163,6 +258,12 @@ class ContextKVRuntime:
         self.last_pool_sample = None
         cache.contextkv_runtime = self
         self.observed_seq = 0
+        self.host_admission = HostAdmissionPolicy(
+            mode=os.environ.get("CONTEXTKV_HOST_ADMISSION", "off"),
+            threshold_tokens=int(os.environ.get("CONTEXTKV_HOST_ADMISSION_THRESHOLD_TOKENS", "8192")),
+            occupancy_threshold=float(os.environ.get("CONTEXTKV_HOST_ADMISSION_OCCUPANCY_THRESHOLD", ".95")),
+            window_seconds=float(os.environ.get("CONTEXTKV_HOST_ADMISSION_WINDOW_SECONDS", "60")),
+            prompt_window=int(os.environ.get("CONTEXTKV_HOST_ADMISSION_PROMPT_WINDOW", "256")))
         cc = cache.cache_controller
         allocator = getattr(cache, "token_to_kv_pool_allocator", None)
         config = {"page_size": cache.page_size, "backend": cache._tree_core_backend,
@@ -176,6 +277,8 @@ class ContextKVRuntime:
                   "host_capacity_tokens": getattr(getattr(cc, "mem_pool_host", None), "size", None),
                   "load_back_threshold": getattr(cache, "load_back_threshold", None),
                   "sample_pool": self.sample_pool_enabled}
+        if self.host_admission.mode != "off":
+            config["host_admission"] = self.host_admission.config()
         self.cache_config = config
         self.cache_config_hash = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
 
@@ -193,7 +296,7 @@ class ContextKVRuntime:
         return getattr(self, action)(data)
 
     def info(self, data):
-        return dict(engine_restart_id=self.restart_id, protocol_version=PROTOCOL,
+        info = dict(engine_restart_id=self.restart_id, protocol_version=PROTOCOL,
                     engine_kind="sglang", host_quote_supported=True,
                     completion_status_supported=True, guarded_generate_supported=True,
                     scheduler_owned=True, cache_config_hash=self.cache_config_hash,
@@ -201,14 +304,22 @@ class ContextKVRuntime:
                     metrics_supported=True, result_replay_supported=True,
                     result_ttl_seconds=self.result_ttl_seconds,
                     profiling_enabled=self.profiling_enabled, streaming_generation_supported=True)
+        if self.host_admission.mode != "off":
+            info["business_session_identity_supported"] = True
+        return info
 
     def prepare(self, data):
         self._restart(data["expected_restart_id"])
         sid, op = data["engine_session_id"], data["operation_id"]
         if not isinstance(sid, str) or not sid or not isinstance(op, str) or not op:
             raise ContextKVError("INVALID_ID")
+        business_id = data.get("business_session_id")
+        if business_id is not None and (not isinstance(business_id, str) or not business_id):
+            raise ContextKVError("INVALID_BUSINESS_SESSION_ID")
         epoch = self.epochs.get(sid)
         if epoch:
+            if (business_id is not None and business_id != epoch.get("business_session_id")):
+                raise ContextKVError("EPOCH_CONFLICT")
             if epoch["operation_id"] != op or epoch["state"] not in {"PREPARED", "COMMITTED"}:
                 raise ContextKVError("EPOCH_CONFLICT")
         else:
@@ -221,10 +332,13 @@ class ContextKVRuntime:
             if generation is None:
                 raise ContextKVError("SESSION_CACHE_DISABLED")
             epoch = self.epochs[sid] = dict(generation=generation, operation_id=op,
-                                           state="PREPARED", inflight=set())
+                                           state="PREPARED", inflight=set(), business_session_id=business_id)
             self.operations[op] = ("prepare", sid, generation)
-        return dict(engine_session_id=sid, session_generation=epoch["generation"],
-                    engine_restart_id=self.restart_id, operation_id=op, state=epoch["state"])
+        ack = dict(engine_session_id=sid, session_generation=epoch["generation"],
+                   engine_restart_id=self.restart_id, operation_id=op, state=epoch["state"])
+        if epoch.get("business_session_id") is not None:
+            ack["business_session_id"] = epoch["business_session_id"]
+        return ack
 
     def admit(self, recv, req):
         """Executed before ensure_session_generation. Never reopens a retired ID."""
@@ -320,6 +434,7 @@ class ContextKVRuntime:
     def _release(self, sid, epoch):
         self.cache.release_radix_session(sid)
         epoch["state"] = "RETIRED"
+        self.host_admission.retire(sid)
         self._event("retire_ref", session_id=sid, freed_gpu_tokens=0, freed_host_tokens=0)
 
     def retire(self, data):
@@ -364,8 +479,8 @@ class ContextKVRuntime:
 
         Native in-flight collection handles overlap and repeated batch membership.
         Waiting wins over in-flight membership during retraction; a chunked
-        request can be absent from both batches. No request IDs or token arrays
-        leave the scheduler, and no cache state or completion events are advanced.
+        request can be absent from both batches. Existing native IDs and scalar
+        summaries leave the scheduler; token arrays and cache state do not change.
         """
         if self.scheduler is None:
             return dict(active_requests=None, queued_requests=None,
@@ -418,6 +533,43 @@ class ContextKVRuntime:
         req.contextkv_last_native_match = dict(observed_time_ns=time.monotonic_ns(),
             input_tokens=input_tokens, device_prefix_tokens=req.prefix_len,
             host_hit_tokens=req.host_hit_length, matched_prefix_tokens=req.num_matched_prefix_tokens)
+        if self.host_admission.mode != "off" and not getattr(req, "contextkv_host_admission_observed", False):
+            req.contextkv_host_admission_observed = True
+            epoch = self.epochs.get(req.session_id)
+            if epoch and epoch.get("business_session_id") is not None and epoch["state"] != "RETIRED":
+                self.host_admission.observe(req.session_id, epoch["business_session_id"],
+                                            len(req.origin_input_ids), time.monotonic())
+
+    def allow_host_backup(self, req, new_tokens):
+        """Called before allocation/locking; no match, tree walk or DMA here."""
+        policy = self.host_admission
+        if policy.mode == "off":
+            return True
+        epoch = self.epochs.get(req.session_id)
+        if epoch is None or epoch.get("business_session_id") is None:
+            policy.counters["unknown_business_actions_native"] += 1
+            return True
+        host = self.cache.cache_controller.mem_pool_host
+        decision = policy.decide(new_tokens, self.cache.page_size, int(host.size),
+                                 int(host.size-host.available_size()), time.monotonic(),
+                                 admitted_pages=getattr(req, "contextkv_host_backup_admitted_pages", 0))
+        self._event("host_backup_admission", rid=req.rid, engine_session_id=req.session_id,
+                    business_session_id=epoch["business_session_id"], **decision)
+        return decision["allowed"]
+
+    def record_host_backup_admitted(self, req, new_tokens):
+        """Native host allocation/commit succeeded; DMA may still be queued."""
+        epoch = self.epochs.get(req.session_id)
+        if epoch is None or epoch.get("business_session_id") is None:
+            return
+        pages = -(-new_tokens//self.cache.page_size)
+        req.contextkv_host_backup_admitted_pages = getattr(req, "contextkv_host_backup_admitted_pages", 0) + pages
+        self.host_admission.counters["admitted_new_tokens"] += new_tokens
+        self.host_admission.counters["admitted_new_pages"] += pages
+
+    def record_host_capacity_eviction(self, tokens):
+        if self.host_admission.mode != "off":
+            self.host_admission.capacity_evicted(tokens, time.monotonic())
 
     def quote(self, data):
         from sglang.srt.mem_cache.radix_cache import RadixKey
@@ -542,6 +694,7 @@ class ContextKVRuntime:
         return dict(engine_restart_id=self.restart_id, observed_seq=self.observed_seq,
                     observed_time_ns=time.monotonic_ns(), clock="server_monotonic",
                     pool=self.pool_snapshot(), cache_config=self.cache_config,
+                    host_admission=self.host_admission.snapshot(time.monotonic()),
                     **self.workload_snapshot(),
                     events=[e for e in self.events if e["seq"] > after],
                     next_seq=self.event_seq, dropped_before_seq=oldest-1,

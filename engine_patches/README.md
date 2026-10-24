@@ -180,6 +180,32 @@ C 配对 fixture 使用 128-token 共享前缀、每个 epoch 各 128-token 独�
 
 ## 原生请求身份的增量观测
 
-当前补丁 SHA256 为 `e004ca96d62a5786f303c465da140513c7213f13ff023407991ec162ef82d92c`。相对于前一观测版本，这次 runtime 只在 workload summary 中复制已有 `req.rid`；原生预算、匹配、锁和调度代码不变。旧 wire 缺 ID 仍可解码，只有可选 `native_budget` 等待模式要求可关联身份。该模式与真实 GPU 采样顺序见 [admission 模型](../docs/admission_wait_model.md#可选-native_budget-模式预留与服务分账)。
+原生请求身份观测补丁 SHA256 为 `e004ca96d62a5786f303c465da140513c7213f13ff023407991ec162ef82d92c`。相对于前一观测版本，这次 runtime 只在 workload summary 中复制已有 `req.rid`；原生预算、匹配、锁和调度代码不变。旧 wire 缺 ID 仍可解码，只有可选 `native_budget` 等待模式要求可关联身份。该模式与真实 GPU 采样顺序见 [admission 模型](../docs/admission_wait_model.md#可选-native_budget-模式预留与服务分账)。
 
-该增量已通过 CPU HTTP/schema 合同及干净固定源码的 patch apply/语法编译；`verification_report.json` 记录本次 SHA。此前 GPU 观测验证属于旧补丁，其成功不会自动证明新增身份字段已在 IPC/GPU 路径验证，也不证明新等待模型更准确。下一次完整普通 EOS 41 轮采样须先部署本补丁，并保留旧等待算法作同快照重放基线。
+e004 增量随后已用于真实 H200 的两组完整普通 EOS 41 轮观测/闭环，以及定向补采后的四组41轮配对对照；RID、实际 ratio/clip、预算公式、最近 match 与 receipt/stage 绑定均有原始记录。见[原生预算82轮验证](../docs/native_budget_validation.md)和[定向标定及164轮对照](../docs/native_budget_targeted_validation.md)。这些验证说明 e004 的实际观测/执行合同，不自动证明等待预测或决策收益。当前 `verification_report.json` 已对应下面新增 C 的0ed补丁；该新补丁仍未进行 GPU 验收。
+
+## 可选 C：业务会话与 epoch 感知的 host 备份准入
+
+当前增量补丁 SHA256 为 `0ed0295274411b9fe60415e7f48604937d84d3fc894eabd9e143b0560de7488f`。这次新增主流程接线与 CPU 合同；**尚未部署 GPU 验收**，前面的 e004/历史硬件结果不能视为本补丁的新验证。
+
+默认 `CONTEXTKV_HOST_ADMISSION=off`。此时原 `cache_config` 字典/hash、info/prepare 默认 wire 保持不变，旧 stage artifact 不因添加这个可选能力失配。`/context/metrics` 可独立展示策略配置和零/累计计数。显式启用例子：
+
+```bash
+CONTEXTKV_HOST_ADMISSION=conditioned \
+CONTEXTKV_HICACHE_LAYOUT=layer_first SGLANG_HICACHE_TMA_TRANSFER=0 \
+scripts/launch_sglang.sh --max-total-tokens 16384 --port 30000
+```
+
+支持 `off`、`fixed`、`conditioned`。起始配置为 threshold 8192 tokens（实际 page64 时 128 pages）、occupancy 0.95、activity/eviction window 60 s、prompt window 256；可分别通过 `CONTEXTKV_HOST_ADMISSION_THRESHOLD_TOKENS`、`CONTEXTKV_HOST_ADMISSION_OCCUPANCY_THRESHOLD`、`CONTEXTKV_HOST_ADMISSION_WINDOW_SECONDS`、`CONTEXTKV_HOST_ADMISSION_PROMPT_WINDOW` 设置。开启时这些配置和版本才进入 cache identity，故不同策略/容量不能沿用不匹配的标定范围。8192 来源是 EfficientAgent 默认 8×1024 的起始换算，**不是已验证最优值**。本项目将它适配为每个原生 Req 累计成功准入的 FULL 备份页预算（incremental request backup budget），不是上游整请求预先跳过规则；每个 action 的实际新页从已有 backup spec 计量。
+
+服务端只在开启时通告 `business_session_identity_supported`。控制器复用已有业务 session ID，在新 epoch 和准备恢复时透传；prepare 的可选字段和 ACK 保持幂等关联，不能用同一 epoch 重绑另一业务。正常执行与恢复共用 ACK 校验：sid、restart、operation、正 generation 和通告能力下的业务身份必须匹配，才持久化 generation；错 ACK 保留待恢复记录。旧 wire 缺身份、独立原生请求以及专用 profiler 未提供业务身份时仍走原生写入，不猜测业务归属。不要求更换 `contextkv-v1`：默认 wire 未扩字段，开启能力通过可选字段协商。
+
+首次原生 match 为请求记录一次已知 prompt 长度和业务活动；再次匹配/重入队列只更新原匹配观察，不重复计入均值。窗口内活跃任务按业务身份去重，engine epoch 数另报。原退役协议确认后，该 epoch 从未来工作集和相关 prompt 样本移除；RETIRING 且仍有 inflight 时保留，实际 host allocator 占用始终保留到原生释放。引擎 COMMITTED 不是 SQLite 提交事件。
+
+条件策略使用 `(活跃业务数−1)×近期平均prompt_tokens > 实际host容量`，且实际占用达到阈值、同窗口观察到备份空间不足引发的 host 淘汰，才约束该 Req 的累计备份预算；fixed 始终约束预算。在启用约束时，`该 Req 已成功准入页 + 本 action 新页 > 阈值页` 才跳过整 action。page64/chunk8192 下，首批 128 页可写，随后新增 64 页被跳过；没有压力时保留原生写入，即使该 Req 已超过预算。这里的工作集是启发式，不是共享前缀去重后的物理工作集证明。O(active) 标量窗口与现有 allocator 计数在 scheduler 同进程读取，不加内容 hash、背景线程或第二棵缓存树。
+
+真实接点为 `checkpoint_into_tree(req)` 的两次 insert 及 insert barrier 的整条 `BackupKV` action。仅对请求触发的 write_through / write_through_selective 过滤；write_back 淘汰保留原生。FULL backup specs 各构建一次并复用，读取已有 tensor 长度统计实际未备份页，在 host 分配、commit、新锁、pending、DMA 之前决定。跳过整条祖先链，保留其它 free/split action 原顺序；不永久标记共享 node，不取消已启动 DMA。以后允许的请求仍可通过原生构造器补齐祖先，已存在副本仍按原生 spec 去重。只有 host 分配、native commit 和 pending 跟踪成功后，才把实际新页记到 Req；分配失败不扣额度，祖先成功而后代失败只记成功祖先，重排队的零新页 spec 不重复扣。这里的成功准入仍可能等待 DMA，并非已完成备份；不改变原生部分失败时的返回值。
+
+`host_backup_admission` 事件记录允许/跳过原因、实际新页、业务/epoch/native request identity、容量/占用与窗口统计；metrics 累计 `considered_actions`、`allowed_actions`、`skipped_actions`、允许计划/跳过的新 token 数、成功准入的新 token/pages 与 allocation-evicted host tokens；计划允许和成功准入分开。**跳过数是计划省略，不是已经节省的 DMA 字节**；DMA 仍只在原生 ACK 完成后计量。动作可能重复触及同一尚未备份路径，因此也不把这些 token 累计当作唯一物理槽。
+
+本地测试覆盖业务/多 epoch、首次匹配去重、退休仍占槽、失败请求在 terminal 后退出工作集、默认旧 wire/hash、HTTP/控制器接线、整条共享祖先先跳过后补齐、原生去重、其它 action 顺序、write_back 不过滤及分配失败/淘汰计数。测试也覆盖 chunk8192 的累计预算、部分祖先分配成功/后代失败、零新页重入和新请求补齐。固定源码 patch apply/语法检查和这些 CPU 结果不能代替 GPU DMA/锁/恢复验收。下一步先以预声明的小阈值和小 host 固定动作验证通路，再比较起始 128-page 条件/固定规则、原生三写策略与版本消融；等待、重算、host 恢复、完成 DMA 与完整延迟共同判断效果。[设计与容量边界](../docs/host_admission_design.md)；[EfficientAgent 许可和适配归属](../docs/third_party/EFFICIENTAGENT_NOTICE.md)。

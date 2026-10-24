@@ -10,7 +10,7 @@ import statistics
 
 from .candidates import CandidatePolicy, build_candidates
 from .cost_model import CostModel
-from .engine_client import Engine, EngineError
+from .engine_client import Engine, EngineError, EngineInfo, PrepareAck
 from .epoch import EpochCoordinator
 from .events import EventLog
 from .planner import PlannerKnobs, choose_plan
@@ -95,6 +95,19 @@ class Controller:
         await self.drain()
         if hasattr(self.engine, "aclose"):
             await self.engine.aclose()
+
+    async def _prepare_epoch(self, attempt: Attempt, info: EngineInfo) -> PrepareAck:
+        epoch, operation_id = attempt.epoch, f"prepare:{attempt.attempt_id}"
+        ack = await self.engine.prepare(epoch.engine_session_id, operation_id, epoch.engine_restart_id,
+            **({"business_session_id": attempt.session_id}
+               if info.business_session_identity_supported else {}))
+        if ((ack.engine_session_id, ack.engine_restart_id, ack.operation_id)
+                != (epoch.engine_session_id, epoch.engine_restart_id, operation_id)
+                or ack.session_generation <= 0
+                or (info.business_session_identity_supported
+                    and ack.business_session_id != attempt.session_id)):
+            raise EngineError("PREPARE_ACK_MISMATCH")
+        return ack
 
     def _validate(self, attempt: Attempt, result: GenerationResult):
         candidate, epoch = attempt.plan.candidate, attempt.epoch
@@ -243,11 +256,7 @@ class Controller:
                              or planning_snap.force_new_epoch_for_recovery)
                 if new_epoch:
                     attempt = self.store.allocate_epoch(attempt, info.engine_restart_id, reason)
-                    ack = await self.engine.prepare(attempt.epoch.engine_session_id,
-                                                    f"prepare:{attempt.attempt_id}", info.engine_restart_id)
-                    if (ack.engine_session_id, ack.engine_restart_id, ack.operation_id) != (
-                            attempt.epoch.engine_session_id, info.engine_restart_id, f"prepare:{attempt.attempt_id}") or ack.session_generation <= 0:
-                        raise EngineError("PREPARE_ACK_MISMATCH")
+                    ack = await self._prepare_epoch(attempt, info)
                     epoch = replace(attempt.epoch, session_generation=ack.session_generation)
                 else:
                     epoch = snap.current_epoch
@@ -331,7 +340,8 @@ class Controller:
                 raise PendingAttempt("Unfinished preparation: confirm old controller stopped, then recover with abandon=True")
             if attempt.epoch and attempt.epoch.session_generation == 0:
                 try:
-                    ack = await self.engine.prepare(attempt.epoch.engine_session_id, f"prepare:{attempt.attempt_id}", attempt.epoch.engine_restart_id)
+                    info = await self.engine.info()
+                    ack = await self._prepare_epoch(attempt, info)
                     attempt = self.store.save_attempt(replace(attempt, epoch=replace(attempt.epoch, session_generation=ack.session_generation)))
                 except EngineError as exc:
                     if exc.code != "STALE_RESTART":

@@ -47,6 +47,7 @@ class EngineInfo:
     result_ttl_seconds: float | None = None
     profiling_enabled: bool = False
     streaming_generation_supported: bool = False
+    business_session_identity_supported: bool = False
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ class PrepareAck:
     engine_restart_id: str
     operation_id: str
     state: str = "PREPARED"
+    business_session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,7 +88,8 @@ class EpochStatus:
 class Engine(Protocol):
     async def info(self) -> EngineInfo: ...
     async def quote_batch(self, candidates: Sequence[PromptCandidate], fingerprint: ConfigFingerprint) -> CacheQuoteBatch: ...
-    async def prepare(self, engine_session_id: str, operation_id: str, expected_restart_id: str) -> PrepareAck: ...
+    async def prepare(self, engine_session_id: str, operation_id: str, expected_restart_id: str,
+                      *, business_session_id: str | None = None) -> PrepareAck: ...
     async def generate(self, *, input_ids: Sequence[int], session_id: str, expected_generation: int,
                        expected_restart_id: str, attempt_id: str, fingerprint: ConfigFingerprint,
                        max_new_tokens: int = 128, ignore_eos: bool = False) -> GenerationResult: ...
@@ -172,11 +175,15 @@ class SGLangEngineClient:
         if fingerprint != self.fingerprint:
             raise EngineError("FINGERPRINT_MISMATCH")
 
-    async def prepare(self, engine_session_id, operation_id, expected_restart_id):
+    async def prepare(self, engine_session_id, operation_id, expected_restart_id, *, business_session_id=None):
         await self._ready()
-        return PrepareAck(**await self._post("/context/epoch/prepare", {
-            "engine_session_id": engine_session_id, "operation_id": operation_id,
-            "expected_restart_id": expected_restart_id}))
+        body = {"engine_session_id": engine_session_id, "operation_id": operation_id,
+                "expected_restart_id": expected_restart_id}
+        if business_session_id is not None:
+            if not self._info.business_session_identity_supported:
+                raise EngineError("BUSINESS_SESSION_IDENTITY_UNSUPPORTED")
+            body["business_session_id"] = business_session_id
+        return PrepareAck(**await self._post("/context/epoch/prepare", body))
 
     async def generate(self, *, input_ids, session_id, expected_generation, expected_restart_id,
                        attempt_id, fingerprint, max_new_tokens=128, ignore_eos=False):

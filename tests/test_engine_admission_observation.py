@@ -8,7 +8,7 @@ import pytest
 
 from controller.schema import CacheQuoteBatch, NativePrefixMatch
 from controller.serialization import decode, dumps, loads
-from engine_patches.contextkv_runtime import ContextKVRuntime
+from engine_patches.contextkv_runtime import ContextKVRuntime, HostAdmissionPolicy
 from test_engine_host_quote import (extract_native_class, extract_native_method,
                                     install_native_policy, native_source)
 
@@ -30,6 +30,7 @@ def bridge(running=(),waiting=(),overlap=()):
     tracker=extract_native_class(native_source("NewTokenRatioTracker"),"NewTokenRatioTracker",
                                  {"dataclass":dataclasses.dataclass})
     runtime=object.__new__(ContextKVRuntime)
+    runtime.host_admission=HostAdmissionPolicy()
     runtime.scheduler=SimpleNamespace(running_batch=SimpleNamespace(reqs=list(running)),
         new_token_ratio_tracker=tracker(init=.7,min=.098,decay=.1,current=.7),
         waiting_queue=list(waiting),chunked_req=None,

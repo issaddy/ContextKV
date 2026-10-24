@@ -11,6 +11,8 @@ if [[ -f "$CHECKOUT/.contextkv-source-only" ]]; then
 fi
 export SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND=python
 export PYTHONPATH="$CHECKOUT/python${PYTHONPATH:+:$PYTHONPATH}"
+# Optional host admission uses inherited CONTEXTKV_HOST_ADMISSION=off|fixed|conditioned.
+# Off preserves native backup behavior and the previous cache configuration hash.
 # HiCache execution remains native; the research quote classifies FULL GPU/host
 # ready and pending copies without touching transfer queues or native locks.
 HICACHE_ARGS=()

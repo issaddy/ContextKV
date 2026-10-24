@@ -221,8 +221,8 @@ async def test_closed_session_rejects_new_turn(tmp_path):
 async def test_lost_prepare_ack_can_be_abandoned_safely(tmp_path, monkeypatch):
     controller, store, engine = system(tmp_path)
     original = engine.prepare
-    async def lost(*args):
-        await original(*args)
+    async def lost(*args, **kwargs):
+        await original(*args, **kwargs)
         raise UnknownOutcomeError("TRANSPORT_ERROR")
     monkeypatch.setattr(engine, "prepare", lost)
     with pytest.raises(UnknownOutcomeError):
@@ -234,6 +234,39 @@ async def test_lost_prepare_ack_can_be_abandoned_safely(tmp_path, monkeypatch):
     await controller.recover("s", abandon=True)
     assert store.pending_attempt("s") is None and not store.outbox()
     assert not store.read_snapshot("s").raw_history
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrong", [
+    {"engine_session_id": "wrong"}, {"engine_restart_id": "wrong"},
+    {"operation_id": "wrong"}, {"session_generation": 0},
+    {"business_session_id": "wrong"},
+])
+async def test_recovery_rejects_mismatched_prepare_ack_before_saving_generation(tmp_path, monkeypatch, wrong):
+    controller, store, engine = system(tmp_path)
+    original = engine.prepare
+
+    async def lost(*args, **kwargs):
+        await original(*args, **kwargs)
+        raise UnknownOutcomeError("TRANSPORT_ERROR")
+
+    monkeypatch.setattr(engine, "prepare", lost)
+    with pytest.raises(UnknownOutcomeError):
+        await controller.serve_turn("s", "q", ())
+    pending = store.pending_attempt("s")
+
+    async def corrupted(*args, **kwargs):
+        return replace(await original(*args, **kwargs), **wrong)
+
+    monkeypatch.setattr(engine, "prepare", corrupted)
+    with pytest.raises(EngineError, match="PREPARE_ACK_MISMATCH"):
+        await controller.recover("s", abandon=True)
+    assert store.pending_attempt("s") == pending
+    assert not store.read_snapshot("s").raw_history
+    assert not store.outbox()
+    monkeypatch.setattr(engine, "prepare", original)
+    await controller.recover("s", abandon=True)
+    assert store.pending_attempt("s") is None
 
 
 def test_reopen_store_preserves_immutable_state(tmp_path):

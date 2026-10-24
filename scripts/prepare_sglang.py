@@ -96,6 +96,15 @@ def prepare(checkout: Path, source_only: bool):
     assert b"PrefillAdder._get_running_request_total_token_offset(offset_owner, req)" in runtime
     assert b"budget_requests = self.scheduler.running_batch.reqs" in runtime
     assert b"request_id=req.rid" in runtime
+    backup_start = cache.index("    def _execute_and_commit_kv_backup(")
+    backup_end = cache.index("    @staticmethod", backup_start)
+    backup = cache[backup_start:backup_end]
+    assert backup.index("runtime.allow_host_backup") < backup.index("self._execute_kv_backup(")
+    assert (backup.index("self.tree_core.commit_backup(")
+            < backup.index("self._track_write_through_node(")
+            < backup.index("runtime.record_host_backup_admitted("))
+    assert "contextkv_request=req" in cache
+    assert "runtime.record_host_capacity_eviction(evicted)" in cache
     return {"base_commit": commit, "patch_sha256": hashlib.sha256(PATCH.read_bytes()).hexdigest(),
             "original_source_hashes_verified": not already_applied,
             "patch_applies": True, "already_applied": already_applied,
@@ -108,6 +117,9 @@ def prepare(checkout: Path, source_only: bool):
             "native_match_observer_after_original_match": True,
             "native_running_offset_function_reused": True,
             "native_request_identity_copied": True,
+            "host_admission_precedes_native_allocation_and_dma": True,
+            "host_admitted_budget_follows_native_commit_and_pending": True,
+            "host_capacity_eviction_observer_verified": True,
             "source_only": source_only,
             "gpu_runtime_tested": False, "full_dependency_import_tested": False,
             "host_quote_supported": True,
