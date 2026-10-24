@@ -51,7 +51,9 @@ fixture本地19项合同包含6项真实typed客户端到Runtime.quote的快照�
 
 `870a250`为原生客户端增加可选temperature/top_p/top_k/min_p设置，仅在构造边界复制/校验一次，默认温度0的请求保持原样，输出预算仍由每次generate唯一指定；实际stream/nonstream请求审计保留采样参数。完整1207项及6子测试、独立相关审查与Ruff通过。固定源码构建的wheel/sdist核对83模块、29资产、324 tracked文件、97测试/配置、13许可，见`runs/dist-qwen3-sampling-complete/asset-check.json`；远端共享前缀实验仍绑定16e，未追改其身份。
 
-用户现有`/media/ssd1/qwen3-8b`与`/media/ssd1/qwen3-32b`已只读检查，5/17分片齐全、两个真实tokenizer可加载、非思考模板渲染一致，记录于`runs/qwen3-local-model-inspection.json`。这不是模型生成或权重逐字校验，未确认上游revision；未启动新权重下载。接续按[来源生成/能力对照](source_bound_generation_design.md)准备隔离的完整159轮Qwen3研究，采样接口通过不代表新模型质量通过。
+用户现有`/media/ssd1/qwen3-8b`与`/media/ssd1/qwen3-32b`已只读检查，5/17分片齐全、两个真实tokenizer可加载、非思考模板渲染一致，记录于`runs/qwen3-local-model-inspection.json`。这不是权重逐字校验，未确认上游revision；未启动新权重下载。已在325文件核验的`a6b5711`部署上启动[完整159轮8B P2、随后32B同输入重放](source_bound_generation_design.md)，使用独立stock引擎和本地模型身份；运行完成与质量结论另行审查，不继承旧7B标定或B0/B6身份。
+
+模型迁移审查发现主候选只验证证据消息，未检查原生模板是否改写历史助手正文。现有渲染边界已扩展为按序检查全部消息正文，保持原生模板和既有函数入口，不新增render或hash。CPU反例覆盖reasoning-prefix变换、重复历史、APPEND/REBUILD和失败时快照不变；不是对所有模板语义或角色边界的形式证明。真实固定7B tokenizer启用的完整回归为 **1210项及6子测试通过**，Ruff通过，记录在`runs/pytest-full-qa-render.log`。当前Qwen3运行器已有同类完整历史检查，本地修复没有改动正在运行的远端源码。
 
 ## 已完成的 H200 集成验证
 

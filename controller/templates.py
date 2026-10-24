@@ -198,10 +198,19 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
 
 def verify_rendered_evidence(messages: tuple[Message, ...], spans: tuple[EvidenceSpan, ...],
                              rendered_text: str) -> None:
-    """Catch templates that drop or transform a message containing evidence."""
-    for index in {span.message_index for span in spans}:
-        if messages[index].content not in rendered_text:
-            raise EvidenceError("template omitted or transformed original evidence payload")
+    """Check complete ordered message payloads at the rendered-candidate boundary.
+
+    Retain the existing span argument/API, but also cover raw historical QA and
+    the system/current question. Some valid model templates transform assistant
+    content (for example a reasoning prefix); that conflicts with our full-QA
+    contract even when every external evidence body remains intact.
+    """
+    position = 0
+    for index, message in enumerate(messages):
+        offset = rendered_text.find(message.content, position)
+        if offset < 0:
+            raise EvidenceError(f"template omitted or transformed original message {index} ({message.role})")
+        position = offset + len(message.content)
 
 
 def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSpan, ...],

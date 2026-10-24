@@ -212,6 +212,49 @@ def test_template_cannot_drop_committed_or_new_evidence_payload(omitted_body):
         build_candidates(snap, "next", (new,), template=DroppingTemplate())
 
 
+@pytest.mark.parametrize("with_execution", [False, True])
+def test_template_reasoning_transform_cannot_silently_drop_raw_assistant_history(with_execution):
+    old, new = make_evidence("Old original source", "a"), make_evidence("Current original source", "b")
+    snapshot = SessionSnapshot("s")
+    answer = "Original literal prefix</think>Final text with conditions."
+    snapshot = committed(build_candidates(snapshot, "Prior question", (old,))[0], snapshot,
+                         "Prior question", (old,), answer)
+    if not with_execution:
+        snapshot = replace(snapshot, execution=None)
+    original = copy.deepcopy(snapshot)
+
+    class ReasoningTemplate(ByteTemplate):
+        render_calls = 0
+
+        def render(self, messages):
+            self.render_calls += 1
+            # Model-template reasoning handling is valid in isolation, but the
+            # resulting candidate cannot claim to retain this entire raw QA.
+            transformed = tuple(replace(m, content=m.content.split("</think>")[-1])
+                                if m.role == "assistant" else m for m in messages)
+            return super().render(transformed)
+
+    template = ReasoningTemplate()
+    with pytest.raises(EvidenceError, match=r"original message .*\(assistant\)"):
+        build_candidates(snapshot, "Current question", (new,), template=template)
+    assert snapshot == original
+    assert template.render_calls == (2 if with_execution else 1)  # no validation re-render
+
+
+def test_rendered_candidate_requires_history_occurrences_in_order_but_allows_template_wrappers():
+    from controller.templates import verify_rendered_evidence
+
+    messages = (Message("system", "Policy"), Message("user", "First question"),
+                Message("assistant", "Same answer"), Message("user", "Second question"),
+                Message("assistant", "Same answer"), Message("user", "Current question"))
+    rendered = "\n".join(f"<role={m.role}>\n{m.content}\n</role>" for m in messages)
+    verify_rendered_evidence(messages, (), rendered+"\n<assistant><think>\n\n</think>\n")
+    with pytest.raises(EvidenceError, match="template omitted or transformed"):
+        verify_rendered_evidence(messages, (), rendered.replace("Same answer", "", 1))
+    with pytest.raises(EvidenceError, match="template omitted or transformed"):
+        verify_rendered_evidence(messages, (), rendered.replace("Second question", "changed question"))
+
+
 def test_current_candidate_cannot_read_future_or_truth():
     block = make_evidence("body","a")
     with pytest.raises(EvidenceError,match="unknown evidence reference"):
