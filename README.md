@@ -61,12 +61,14 @@ python -m controller.cli --config configs/qwen3_8b_scope.example.yaml \
 | 目录 | 实际职责 |
 |---|---|
 | `controller/` | 版本化证据、完整历史、候选构造、成本/固定策略、SQLite CAS、attempt/outbox、API/CLI |
-| `adapters/` | MTRAG、原始语料、BM25/BGE 检索与重排、多轮 query 视图、结构证据 |
+| `adapters/` | MTRAG、Doc2Dial离线原文/监督适配、BM25/BGE 检索与重排、多轮query视图、结构证据 |
 | `engine_patches/` | 固定 SGLang 的 guard/receipt、GPU/host 观测、epoch 退役；复用原生分配、传输、淘汰 |
 | `bench/` | 同源 B0/B1、有限矩阵、失败分母、质量绑定、冻结选择与匹配消融 |
 | `profiling/` | 真实阶段观测、离线拟合、支持域、输出长度及成对决策分析 |
 | `tests/` | CPU/HTTP/源码合同；真实运行证据另行保存，不互相替代 |
 
 默认采用可用的单次回答基座。复杂来源计划、成本决策及host准入只有明确系统净收益才进入默认路径；不为功能齐全开启全部实验机制。研究记录见[验证索引](docs/verification.md)、[Qwen3统一入口验收](docs/owned_local_scope_validation.md)、[候选结构审计](docs/qwen3_candidate_opportunity.md)。
+
+[Doc2Dial数据适配](docs/doc2dial.md)提供另一条可复用的研究入口：完整原文可直接建索引，原始多轮角色和精确grounding单独保存。监督标签不进入在线检索；导出成功不代表数据已成为干净训练集。
 
 配置和资产在边界核对；不逐请求重哈希权重/语料，不建立影子缓存调度器。共享资源、模型身份、真实 token IDs 与提交一致性校验保留。原始方案见[技术方案](llm_qa_context_kv_technical_plan.md)，它不覆盖后续事实与模型退役决定。第三方来源与许可随各资产及[来源说明](docs/third_party)保留。

@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import asdict
 import json
 from pathlib import Path
+import threading
 import unittest
 
 from adapters.mtrag import (OnlineMessage, OnlineSession, json_hash, load_rows,
@@ -125,6 +126,71 @@ class DataTests(unittest.TestCase):
             self.assertEqual(report.unfinished_turns, 2)
             self.assertEqual(report.timed_out_sessions, ("session-a",))
         asyncio.run(check())
+
+    def test_p3_drain_cancellation_waits_for_retrieval_before_owned_close(self):
+        for use_provider in (False, True):
+            with self.subTest(use_provider=use_provider):
+                async def check():
+                    started, release = threading.Event(), threading.Event()
+                    actions, generated, provider_threads = [], [], []
+                    context = object()
+                    main_thread = threading.get_ident()
+
+                    class Retriever:
+                        closed = False
+
+                        def retrieve_turn(inner, turn, *, prior_context=None):
+                            self.assertIs(prior_context, context if use_provider else None)
+                            started.set()
+                            self.assertTrue(release.wait(5), "test did not release retrieval")
+                            self.assertFalse(inner.closed, "retrieval used a closed model")
+                            actions.append("retrieval_finished")
+                            return turn
+
+                        def close(inner):
+                            inner.closed = True
+                            actions.append("closed")
+
+                    retriever = Retriever()
+
+                    def provider(turn):
+                        provider_threads.append(threading.get_ident())
+                        self.assertEqual(turn.history, ())
+                        return context
+
+                    async def handler(turn):
+                        generated.append(turn.task_id)
+                        return "must not be committed"
+
+                    async def owner():
+                        try:
+                            return await run_sessions(self.rows[:3], handler, protocol="P3",
+                                retriever=retriever, drain_timeout=.01,
+                                retrieval_context_provider=provider if use_provider else None)
+                        finally:
+                            retriever.close()
+
+                    task = asyncio.create_task(owner())
+                    try:
+                        self.assertTrue(await asyncio.to_thread(started.wait, 5))
+                        await asyncio.sleep(.04)  # Let the declared drain deadline cancel this turn.
+                        self.assertFalse(task.done())
+                        self.assertFalse(retriever.closed)
+                        self.assertEqual(generated, [])
+                    finally:
+                        release.set()
+                        report = await task
+                    self.assertEqual(actions, ["retrieval_finished", "closed"])
+                    self.assertEqual(generated, [])
+                    self.assertEqual([r.status for r in report.turns], ["cancelled"])
+                    self.assertEqual(report.turns[0].online_turn.history, ())
+                    self.assertIsNone(report.turns[0].assistant_text)
+                    self.assertEqual(report.unfinished_turns, 2)
+                    self.assertEqual(report.timed_out_sessions, ("session-a",))
+                    self.assertEqual(len(provider_threads), int(use_provider))
+                    self.assertTrue(all(thread != main_thread for thread in provider_threads))
+
+                asyncio.run(check())
 
     def test_sink_failure_does_not_reclassify_committed_generation(self):
         async def check():

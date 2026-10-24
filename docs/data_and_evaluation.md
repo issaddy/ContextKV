@@ -2,6 +2,8 @@
 
 本项目已经验证固定 MTRAG 文件读取、标签隔离、会话级划分和真实 BM25S 检索，并在 H200 上完成固定模型的 P1/P2/P3 集成、原生 B0/B1 运行与有限标定。完整 Cloud P3 开发集的 qrels 覆盖 39/41 轮，recall@5 为 0.2094、nDCG@5 为 0.1671；正式回答质量与优于强基线的结论仍未建立。mock 输出只用于协议和状态一致性验证。实际证据见[验证记录](verification.md)与[共享提示词开发验证](shared_prompt_validation.md)。
 
+文中早期Cloud数值是对应历史配置的观测；当前仅运行显式Qwen3-8B/32B，旧Qwen2.5-7B已退役。最新正常HTTP流程已通过两轮实际Qwen3验收，见[当前接口证据](http_retrieval.md)。已有真实生成和质量评分批次不等于正式非劣或整体优胜，旧待办不能自动转为新实验任务。
+
 ## 安装与已验证数据
 
 在项目根目录运行：
@@ -41,7 +43,7 @@ uv run python scripts/fetch_mtrag.py --offline
 |---|---|---|---|
 | P1 | 当前任务官方 input 中的参考历史 | 官方固定 top5 | 与公共任务对齐的逐轮输入、受控成本 |
 | P2 | 当前方法已成功提交的真实输出 | 官方固定 top5 | 固定证据下的闭环上下文和缓存机制 |
-| P3 | 当前方法已成功提交的真实输出 | 在线 BM25S top5 | 真实检索的脚本化多轮服务 |
+| P3 | 当前方法已成功提交的真实输出 | 显式声明的真实BM25S或hybrid检索，当前top5 | 真实检索的脚本化多轮服务 |
 
 P2 的预检索结果可能依赖参考历史，不能据此称为完整在线 RAG。P2/P3 的未来用户问题仍来自固定脚本，不随模型答案变化；正式质量评审需要保留该方法自身历史，并单列脚本预设与自身历史不一致的样本。
 
@@ -53,7 +55,7 @@ P2 的预检索结果可能依赖参考历史，不能据此称为完整在线 R
 
 检索依赖为 `bm25s==0.3.15`、`numpy==2.3.5`。这些依赖按需导入；使用其他版本时检索器拒绝启动，不自动切换实现。
 
-冻结配置：Lucene BM25，`k1=1.5`、`b=0.75`，NumPy backend，英文 stopwords，无 stemming，无 reranker，top5。query 仅由截至当前的最后三个用户问题用换行拼接，不含参考答案或任何方法的生成答案。使用分数 partition 找出 top5 边界，只对入选的五项排序；同分按 passage ID 排序，包含 top5 边界，不依赖随机 tie-breaking。随机及大规模同分测试与完整 lexsort 的集合和次序完全一致。检索耗时包含实际分数计算和选择。
+本节BM25S默认配置：Lucene BM25，`k1=1.5`、`b=0.75`，NumPy backend，英文 stopwords，无 stemming，无 reranker，top5。query 仅由截至当前的最后三个用户问题用换行拼接，不含参考答案或任何方法的生成答案。使用分数 partition 找出 top5 边界，只对入选的五项排序；同分按 passage ID 排序，包含 top5 边界，不依赖随机 tie-breaking。随机及大规模同分测试与完整 lexsort 的集合和次序完全一致。检索耗时包含实际分数计算和选择。BGE/hybrid及其他query视图由[独立配置](hybrid_retrieval.md)声明，不能把默认三问规则描述成所有P3。
 
 BEIR JSONL 读取器保留原 passage ID 和原文，不重切段、不清洗正文。返回证据绑定语料快照、内容 hash、source URI 和 provenance。索引用 `title + "\n" + text`，该分词副本不替换原始正文。空或只有停用词的 query 返回空结果，不从标签中补材料。
 
@@ -78,17 +80,23 @@ uv run contextkv --state-dir runs/p3-fixture bench tests/fixtures/mtrag_small.js
 
 `RunReport` 保存任务状态、会话 makespan、到达/完成时间、未完成轮次、超时会话和 drain 时间。每个 `TurnRunResult` 保存本轮实际在线对象、生成结果以及 `t_retrieval_done`。P3 的时间原点为流水线到达；P1/P2 的时间原点为固定检索输入就绪，不应把这两种 TTFT 直接混成一列。
 
+HTTP与批处理P3共用检索worker收尾：取消await无法终止同步线程，drain触发取消后等待该次检索结束再释放模型。它不会重检索或提交答案，也不允许尚未取锁的旧worker访问已关闭模型。因此drain_timeout是取消起点，不是强杀线程的硬上界；后续未执行轮次仍计入分母，per_turn_timeout仍只作用于handler。
+
 客户端没有 token 到达观测时，不能由一次完整响应伪造 TTFT、TPOT 或 ITL。`TurnTiming` 对缺失字段保留 `None`；`output_tokens <= 1` 时 TPOT 不定义。goodput 对单 token 回答使用预先指定的 `ttft_only` 或 `exclude` 规则，零 token 回答不凭空算作满足 TPOT。
 
 报告区分窗口内完成吞吐与整个到达 cohort 的最终结果。控制器在生成完成后的会话关闭和退役排空应单列成本与未完成 outbox；不可据此把物理资源已释放当作默认事实。
+
+## 新的多轮监督来源
+
+[Doc2Dial适配器](doc2dial.md)已将真实v1/v0.9原文与监督侧车接入项目：完整角色顺序、原turn ID和精确引用保留，标签不会进入检索语料。它不是MTRAG格式的替代别名，也未把连续同role对话强塞进当前交替QA gate。训练、源隔离和语义验收另行决定；不会用数据导出成功代替质量结论。
 
 ## 质量评价与完整审计
 
 `bench.quality` 提供官方记录导出、原始证据完整审计、qrels 读取与 Recall/nDCG 计算，以及配对会话 cluster bootstrap。
 
-官方兼容导出使用本轮检索证据，最多 10 个 context。实际可见证据和原始审计材料放在不同文件，包含完整 manifest、真实输入/输出 IDs 与实际历史；超过 10 个的完整证据不能为通过官方 checker 而截断。当前模块不声称已经运行官方全部算法指标、RAGAS、RADBench 或 LLM judge。
+官方兼容导出使用本轮检索证据，最多 10 个 context。实际可见证据和原始审计材料放在不同文件，包含完整 manifest、真实输入/输出 IDs 与实际历史；超过 10 个的完整证据不能为通过官方 checker 而截断。格式和统计检查本身不等于运行官方全部指标、RAGAS、RADBench或judge；已完成的真实评分见下段。
 
-qrels 路径应显式指向实际的 `mtrag-human/retrieval_tasks/<domain>/qrels/dev.tsv`。缺少标签的生成任务在结果中列出 task ID，不当作零分，也不无说明地删除。官方评测适配、judge 配置冻结、人工盲审导出和回填均已实现，操作见下文。正式使用的实际 judge 模型、版本及重型官方依赖环境需由实验配置指定；当前未执行收费 judge 或真实质量实验。
+qrels 路径应显式指向实际的 `mtrag-human/retrieval_tasks/<domain>/qrels/dev.tsv`。缺少标签的生成任务在结果中列出 task ID，不当作零分，也不无说明地删除。官方评测适配、judge 配置冻结、人工盲审导出和回填均已实现，操作见下文。实际 judge 模型、版本及重型依赖环境由实验配置明确指定；[真实开发评分](dev_quality_validation.md)和[533答案/2665维评分](b6_quality_validation.md)已完成，保留各自源码/模型范围、失败和未通过联合门的结果，不追认当前Qwen3的质量资格。人工盲审尚不能以assistant审查替代。
 
 质量统计按配对会话重采样，保留会话内各轮的相关性。输入必须在分组前按 task ID 严格对齐，候选与参考的会话/轮次数不一致时拒绝计算。默认统计量为按轮次加权的平均差，亦可选择会话均值。只有差值置信区间下界严格高于 `-epsilon` 才报告 `noninferior`；样本不足或区间跨越边界报告 `inconclusive`。不把差异“不显著”解释为质量相同。
 
@@ -101,7 +109,7 @@ uv run python -m profiling.prefill --output runs/calibration/prefill_grid.json
 uv run python -m profiling.transfers --output runs/calibration/transfer_grid.json
 ```
 
-输出明确标记 `status=not_run`、`hardware_measurements=null`。冷/暖 cache 初始化、CUDA/server 计时和具体 GPU 引擎探针需要在硬件端实施。Python 接口 `profiling.prefill.collect(cases, prepare=..., probe=...)` 要求 `prepare` 显式清空/预热，`probe` 返回实际 `Measurement`。它拒绝 mock 记录；传输测量仅接受已完成事件与同一 CUDA/server 单调时钟。
+上述plan命令输出明确标记 `status=not_run`、`hardware_measurements=null`。已有真实sglang_probe、阶段标定及有限生命周期验收按各自源码/模型范围保留；旧记录不能直接用于新Qwen3 scope校准。Python 接口 `profiling.prefill.collect(cases, prepare=..., probe=...)` 要求 `prepare` 显式清空/预热，`probe` 返回实际 `Measurement`。它拒绝 mock 记录；传输测量仅接受已完成事件与同一 CUDA/server 单调时钟。
 
 获得真实测量 JSONL 后可汇总：
 

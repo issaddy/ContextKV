@@ -1,6 +1,7 @@
 """Shared, deterministic retrieval. BM25S is imported only when explicitly used."""
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, replace
 from hashlib import sha256
 from importlib.metadata import version
@@ -18,6 +19,28 @@ RETRIEVAL_CONFIG = {"implementation": "bm25s", "version": BM25S_VERSION,
                     "b": .75, "backend": "numpy", "csc_backend": "numpy",
                     "stopwords": "en", "stemmer": None, "query_user_turns": 3, "top_k": 5,
                     "tie_break": "ascending_passage_id"}
+
+
+async def run_retrieval_worker(operation, /, *args, **kwargs):
+    """Run one synchronous retrieval; cancellation drains it before returning.
+
+    Threads cannot be cancelled by cancelling their await. Both serving and
+    workload shutdown must wait before closing the shared retrieval models.
+    """
+    worker = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        while True:
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                if not worker.done():
+                    continue
+            except Exception:
+                pass  # Preserve the caller's cancellation, not a late error.
+            break
+        raise
 
 
 def fixed_retrieve(turn: OnlineTurn) -> tuple[OnlineContext, ...]:

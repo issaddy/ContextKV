@@ -14,6 +14,7 @@ import time
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from adapters.mtrag import OnlineSession, OnlineTurn, Protocol, group_sessions
+from adapters.retrieval import run_retrieval_worker
 
 
 @dataclass(frozen=True)
@@ -133,12 +134,12 @@ async def run_sessions(sessions: Mapping[str, Sequence[Mapping[str, Any]]] | Seq
                     try:
                         if protocol == "P3":
                             if retrieval_context_provider is None:
-                                active = await asyncio.to_thread(retriever.retrieve_turn, active)
+                                active = await run_retrieval_worker(retriever.retrieve_turn, active)
                             else:
                                 def retrieve():
                                     context = retrieval_context_provider(active)
                                     return retriever.retrieve_turn(active, prior_context=context)
-                                active = await asyncio.to_thread(retrieve)
+                                active = await run_retrieval_worker(retrieve)
                         retrieval_done = time.monotonic()
                         operation = handler(active)
                         result = await asyncio.wait_for(operation, per_turn_timeout) if per_turn_timeout else await operation

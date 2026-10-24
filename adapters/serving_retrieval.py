@@ -1,12 +1,11 @@
 """Configured retrieval from a committed controller snapshot, without dataset rows."""
 from __future__ import annotations
 
-import asyncio
 import time
 
 from adapters.mtrag import OnlineMessage, OnlineTurn
 from adapters.query_resolution import snapshot_context
-from adapters.retrieval import to_evidence
+from adapters.retrieval import run_retrieval_worker, to_evidence
 from controller.service import EvidenceSelection
 
 
@@ -40,22 +39,7 @@ class ServingRetriever:
 
     async def retrieve(self, snapshot, query: str, request_id: str) -> EvidenceSelection:
         started = time.monotonic()
-        worker = asyncio.create_task(asyncio.to_thread(self._retrieve, snapshot, query, request_id, started))
-        try:
-            return await asyncio.shield(worker)
-        except asyncio.CancelledError:
-            # Cancelling an await cannot stop its thread. Keep the turn's lock
-            # until that same worker finishes, before shutdown closes its models.
-            while True:
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    if not worker.done():
-                        continue
-                except Exception:
-                    pass  # The cancelled caller retains its original outcome.
-                break
-            raise
+        return await run_retrieval_worker(self._retrieve, snapshot, query, request_id, started)
 
     def _retrieve(self, snapshot, query, request_id, started):
         history = tuple(message for turn in snapshot.raw_history for message in (
