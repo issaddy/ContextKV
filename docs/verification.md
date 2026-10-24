@@ -12,6 +12,7 @@
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
 | Ruff / wheel | 结构证据集成`c1cc617`的Ruff/diff通过；包核对86模块、31资产、350个sdist tracked文件及13许可，通过且无运行数据/权重/环境；runs/dist-evidence-context/asset-check.json |
 | HTTP自动检索 | 真实CLI/TCP/BM25、明确依赖闭包、两轮提交、原结果重放及close通过；2次mock生成，0次模型调用；runs/http-retrieval-tcp-v1/result.json。启动来源/取消竞态最终修复由全回归覆盖 |
+| Qwen3 HTTP正常路径 | `c1cc617`两次实际8B生成均stop；原生终态/完整IDs/历史/来源/重放/提交/close独立审计0 issues，保持语义覆盖/scope歧义；runs/remote-h200-http-qwen3/、runs/http-qwen3-review/analysis-v2.json。仅本配置正常链路，非质量/性能对照 |
 | SDK证据桥接 | 原loader对同document第2片段报重复；修复后10原片段/2文档建盘重载，通过5原检索+1依赖的完整正文、3条边和3章节投影。Qwen3输入5950tokens，关系增量121，0模型调用；runs/evidence-context-integration/sdk-v1/result.json |
 | 当前容器源码 | `c1cc617`，351个tracked条目一致，CLI导入/help与编译通过；补丁保持57932422、GPU0空闲，无模型服务/新调用；runs/remote-h200-evidence-context/runs/evidence-context-sourcecheck.json |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |

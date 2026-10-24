@@ -106,3 +106,13 @@ curl -sS -X POST http://127.0.0.1:18080/sessions/demo/recover \
 启动成功前只记录一次`service_started`事件，保留实际engine/fingerprint及真正用于创建控制器的完整RunConfig；直接注入控制器时明确标记`injected_controller`、config为null，不猜其配置。该事件与`retrieval_configured`及逐attempt采样记录共同提供运行来源，不新增哈希或manifest框架。
 
 `tests/test_http_retrieval.py`使用真实BM25、Controller、SQLite与MockEngine验证两轮实际历史、原来源、跨后续轮幂等、白名单、明确5xx、完整结果恢复、一次加载、显式依赖、启动失败/取消清理和CLI接线；`tests/test_api.py`继续验证供证据接口。模拟资源/答案只验证合同；真实模型API验收必须另绑定实际scope/检索/receipt，不能追认此前owned或离线候选实验。
+
+## Qwen3真实HTTP链路验收
+
+2026-10-24，源码`c1cc617`在用户H200容器完成本页合成语料的两轮HTTP query。使用现有Qwen3-8B scope和共享配置：非思考、`.7/.8/20/0`、cap1024、正常EOS、always_rebuild；固定patched SGLang、FA3/FCFS/page64/chunk8192、GPU16384、实际host54272 tokens。没有生成warmup或重试，两轮均REBUILD/stop，实际input为1039/1124、output为70/101tokens。
+
+独立审计核对了两次原生scheduler终态、receipt/实际IDs、Qwen3完整重渲染、第二轮完整前答、每轮六段原文及声明关系、SQLite成功一次提交、r1原结果重放，以及close后的409。实际只发生2次检索和2次生成。两个epoch退役ACK均有对应账本操作；close后仍有2304个GPU及host驻留tokens，正确体现软引用撤销不等于立即物理释放。API与引擎仅关闭自身进程组，结束后GPU0与端口均空闲，没有恢复旧模型。
+
+原件：[20文件公共归档](../runs/remote-h200-http-qwen3/public-export-manifest.json)，SHA256 `11fd18c9670c1bfdeb7d3987dc292f10267aaeb8a2fd3a7f69d79cc2302c2c11`；[独立审计](../runs/http-qwen3-review/analysis-v2.json)为0 issues。审计v1将退役操作字段误写为commit_version，修成实际committed_ledger_version后重读同一原件，没有重跑生成。原始日志不外传，数据库使用停止API后的SQLite backup。
+
+[两轮语义观察](../runs/http-qwen3-review/semantic.md)是assistant_audit：r1的30秒及条件来源对应，r2认证失败/timeout禁限正确，但未覆盖幂等限制，尾句将scope连接到auth exclusions仍有歧义。合法引用、条件正文可见和HTTP成功都不是总体质量通过；本次没有无关系注释对照，不归因质量收益，也不作性能优胜。它补齐当前配置的真实HTTP正常流程验收，跨进程崩溃/引擎重启及其他策略不由这两轮追认。
