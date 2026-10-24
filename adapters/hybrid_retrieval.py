@@ -344,6 +344,7 @@ class HybridRetriever:
     def retrieve_turn(self, turn, *, prior_context=None):
         if turn.protocol != "P3":
             raise ValueError("hybrid retrieval requires a P3 turn")
+        started = time.perf_counter()
         view = user_topic_view(turn.user_questions) if self.query_mode == "user_topic" else None
         # run_sessions dispatches retrieval via to_thread. Serialize this model
         # pair instead of allowing overlapping forwards and unbounded GPU batches.
@@ -352,25 +353,37 @@ class HybridRetriever:
                 if prior_context is None:
                     raise ValueError("topic selector requires an explicit committed history context")
                 view = self.resolver.resolve(turn, prior_context)
-            query = view["text"] if view else query_text(turn.user_questions, self.query_mode)
             fusion_trace = None
-            if self.stage == "dense":
-                contexts = self.dense.search(query, self.encoder, top_k=5)
-            elif self.query_fusion == "current_topic_rrf":
-                stages = search_current_topic(turn.query, query, self.sparse, self.dense, self.encoder,
-                    self.reranker if self.stage == "hybrid_rerank" else None,
-                    candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k)
-                contexts = stages[self.stage]["contexts"][:5]
-                fusion_trace = stages[self.stage]["query_fusion_trace"]
-            else:
-                stages = search_variants(query, self.sparse, self.dense, self.encoder,
-                    self.reranker if self.stage == "hybrid_rerank" else None,
-                    candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k)
-                contexts = stages[self.stage]["contexts"][:5]
-            self.requests += 1
-            if view is not None:
-                self.query_view_traces.append({"task_id": turn.task_id, "conversation_id": turn.conversation_id,
-                    "turn": turn.turn, **view, **({"query_fusion_trace": fusion_trace} if fusion_trace else {})})
+            retrieval_error = None
+            try:
+                query = view["text"] if view else query_text(turn.user_questions, self.query_mode)
+                if self.stage == "dense":
+                    contexts = self.dense.search(query, self.encoder, top_k=5)
+                elif self.query_fusion == "current_topic_rrf":
+                    stages = search_current_topic(turn.query, query, self.sparse, self.dense, self.encoder,
+                        self.reranker if self.stage == "hybrid_rerank" else None,
+                        candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k)
+                    contexts = stages[self.stage]["contexts"][:5]
+                    fusion_trace = stages[self.stage]["query_fusion_trace"]
+                else:
+                    stages = search_variants(query, self.sparse, self.dense, self.encoder,
+                        self.reranker if self.stage == "hybrid_rerank" else None,
+                        candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k)
+                    contexts = stages[self.stage]["contexts"][:5]
+                self.requests += 1
+            except Exception as exc:
+                retrieval_error = f"{type(exc).__name__}: {exc}"
+                raise
+            finally:
+                if view is not None:
+                    self.query_view_traces.append({"task_id": turn.task_id, "conversation_id": turn.conversation_id,
+                        "turn": turn.turn, **view,
+                        "retrieval_status": "failed" if retrieval_error else "completed",
+                        "retrieval_error": retrieval_error,
+                        # Full local wall interval, including lock wait and query resolution.
+                        # The resolver's own elapsed_ms remains unchanged in view.
+                        "retrieval_elapsed_ms": (time.perf_counter()-started)*1000,
+                        **({"query_fusion_trace": fusion_trace} if fusion_trace else {})})
         return replace(turn, contexts=tuple(contexts))
 
     def close(self):

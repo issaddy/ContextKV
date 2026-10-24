@@ -136,6 +136,65 @@ def test_optional_enum_schema_is_wired_once_and_rejected_on_unused_modes(retriev
         load_retriever_config(retriever_config)
 
 
+@pytest.mark.parametrize("selector_failed", [False, True])
+@pytest.mark.parametrize("failed_stage", ["encode", "score"])
+def test_query_resolution_trace_survives_downstream_retrieval_failure(
+        retriever_config, monkeypatch, selector_failed, failed_stage):
+    from adapters import query_selector
+    from adapters.mtrag import OnlineMessage
+    from adapters.query_resolution import PriorContext
+    from adapters.query_selector import CompletionResult
+
+    raw = {"error": "selector unavailable"} if selector_failed else {"raw": "completed selection"}
+
+    class Selector:
+        manifest = {"model": "fake-selector"}
+
+        def __init__(self, config):
+            pass
+
+        def complete(self, messages, **kwargs):
+            return CompletionResult("failed" if selector_failed else "completed",
+                json.dumps({"status": "unchanged", "entity_ids": [], "user_turn_ids": []}),
+                None if selector_failed else "stop", raw_response=raw, elapsed_ms=7.5)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(query_selector, "OpenAICompletionClient", Selector)
+    value = yaml.safe_load(retriever_config.read_text())
+    value.update(query_mode="source_topic", query_fusion="current_topic_rrf",
+                 selector={"base_url": "http://fake", "model": "fake", "revision": "fixed"})
+    retriever_config.write_text(yaml.safe_dump(value))
+    retriever = create_retriever("P3", config_path=retriever_config)
+    original = OnlineSession(load_rows(FIXTURE)[:3], "P3").current()
+    turn = replace(original, turn=2, history=(OnlineMessage("user", "Earlier question"),
+                                            OnlineMessage("assistant", "Earlier actual answer")))
+    error = RuntimeError("original model failure")
+
+    def fail(*args, **kwargs):
+        raise error
+
+    model = retriever.encoder if failed_stage == "encode" else retriever.reranker
+    monkeypatch.setattr(model, failed_stage, fail)
+    try:
+        with pytest.raises(RuntimeError) as observed:
+            retriever.retrieve_turn(turn, prior_context=PriorContext())
+        assert observed.value is error
+        assert retriever.requests == 0
+        trace, = retriever.manifest["query_view_traces"]
+        assert trace["completion"]["raw_response"] == raw
+        assert trace["completion"]["elapsed_ms"] == 7.5
+        assert trace["status"] == ("failed" if selector_failed else "unchanged")
+        assert trace["text"] == turn.query
+        assert trace["retrieval_status"] == "failed"
+        assert trace["retrieval_error"] == "RuntimeError: original model failure"
+        assert trace["retrieval_elapsed_ms"] >= trace["elapsed_ms"] >= 0
+        assert "query_fusion_trace" not in trace
+    finally:
+        retriever.close()
+
+
 @pytest.mark.parametrize("fusion", ["single", "current_topic_rrf"])
 def test_optional_user_topic_query_is_shared_with_encoder_reranker_and_manifest(retriever_config, fusion):
     from adapters.mtrag import OnlineMessage
@@ -158,6 +217,8 @@ def test_optional_user_topic_query_is_shared_with_encoder_reranker_and_manifest(
     assert retriever.manifest["query_view"]["extra_model_calls"] == 0
     trace = retriever.manifest["query_view_traces"][0]
     assert trace["task_id"] == turn.task_id and trace["source_user_turns"] == [1, 3]
+    assert trace["retrieval_status"] == "completed" and trace["retrieval_error"] is None
+    assert trace["retrieval_elapsed_ms"] > 0
     assert trace["selected_history_spans"][0]["text"] == "Acme Store"
     assert retriever.manifest["query_fusion"] == fusion
     assert retriever.manifest["configuration"]["resolved"]["query_fusion"] == fusion
