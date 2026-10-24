@@ -39,6 +39,8 @@ flowchart LR
 
 一个事务同时写入新 QA、执行账本、当前 epoch、已提交 attempt 和旧 epoch 退役 outbox。事务内重新检查 attempt 阶段与 snapshot version。新版本提交前绝不退役旧当前 epoch。
 
+多会话的后台退役通知合并到一个运行中的worker。慢退役期间新提交的outbox由下一轮快照继续处理，不为每个已完成请求积压一个等待锁的task；失败仍留在原持久outbox，由既有周期重试或显式drain处理。此处不改变原生淘汰策略，也不将减少控制器任务误报为释放GPU KV。
+
 ## 故障恢复
 
 | 状态 | 恢复行为 |

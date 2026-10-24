@@ -8,9 +8,10 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | checkpoint导出/身份：1478 passed，8 subtests passed，真实Qwen3 tokenizer开启；2项显式训练/导出运行测试本地跳过，分别在容器CPU通过。runs/pytest-checkpoint-export.log |
+| 最近完整 CPU 回归 | A/B/C协同修复：1494 passed，8 subtests passed，真实Qwen3 tokenizer开启；2项未修改的训练/导出opt-in测试跳过。runs/abc-integration-repair/full-pytest.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
-| Ruff / wheel | `a52f127`的Ruff/diff通过；包核对93模块、31资产、369个sdist tracked文件、114测试/配置及13许可，通过且无运行数据/权重/环境；runs/dist-checkpoint-export/asset-check.json |
+| Ruff / wheel | `cf4ea07`的Ruff/diff通过；包核对93模块、31资产、370个sdist tracked文件、114测试/配置及13许可，通过且无运行数据/权重/环境；runs/dist-abc-integration/asset-check.json |
+| A/B/C协同修复 | 防止文档名子串误回访/伪版本冲突；慢退役13任务→1个worker且新outbox不遗漏；已提交答案不被导出失败重标；重复标定输出拒绝覆盖。Controller/SQLite/MockEngine与实际CLI合同，非GPU性能结论。runs/abc-integration-repair/ |
 | HTTP自动检索 | 真实CLI/TCP/BM25、明确依赖闭包、两轮提交、原结果重放及close通过；2次mock生成，0次模型调用；runs/http-retrieval-tcp-v1/result.json。启动来源/取消竞态最终修复由全回归覆盖 |
 | Qwen3 HTTP正常路径 | `c1cc617`两次实际8B生成均stop；原生终态/完整IDs/历史/来源/重放/提交/close独立审计0 issues，保持语义覆盖/scope歧义；runs/remote-h200-http-qwen3/、runs/http-qwen3-review/analysis-v2.json。仅本配置正常链路，非质量/性能对照 |
 | SDK证据桥接 | 原loader对同document第2片段报重复；修复后10原片段/2文档建盘重载，通过5原检索+1依赖的完整正文、3条边和3章节投影。Qwen3输入5950tokens，关系增量121，0模型调用；runs/evidence-context-integration/sdk-v1/result.json |
@@ -22,7 +23,7 @@
 | checkpoint导出 | 真正PEFT safe_merge→BF16 dense保存重载通过；基座不变、同尺寸不同权重身份、真实NaN失败无scope。容器11项含runtime通过，help单独修正staged导入路径后1项通过；未重复runtime或加载8B。runs/remote-h200-checkpoint-export/ |
 | 来源分组训练材料 | 16 train家庭/32对话、4内部dev家庭/8对话；30条弱监督经交叉审阅修正7处问题，prepared-v2为40543 tokens/最长3425。30条因果输入/来源与3种破坏检查通过；无语义质量或最终独立测试资格。runs/grounded-training-cohort-v1/ |
 | Qwen3定向成本诊断 | `e85663e`，3个预选形状，6正式+6历史物化，全部正常终态；285项原件审计0问题，执行quote/receipt一致。decode占95.49%–99.16%，输出和语义不相同，非成本策略或质量优胜；runs/qwen3-b-targeted-native-review/ |
-| 当前容器源码 | `a52f127`，370个tracked条目一致，training/export/API CLI导入/help与编译通过；补丁404bb984只更新native scope解析，15文件静态检查通过，GPU0空闲。CPU导出执行的staged模块与已部署源码相同；runs/remote-h200-checkpoint-export/。已有GPU调用保留原身份 |
+| 最近已核验的容器源码 | `a52f127`，370个tracked条目一致，CLI导入/help、编译及补丁404bb984静态检查通过；runs/remote-h200-checkpoint-export/。本轮远端读取被自动审批拒绝，`cf4ea07`尚未同步；不将已有GPU结果追认为本轮验证 |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
 | 冻结模拟测试矩阵 | 39 jobs / 117 轮成功 |
 | 继承主方法参数的开发集消融 | 15 jobs / 45 轮成功，不参与主方法选择 |

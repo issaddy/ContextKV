@@ -76,6 +76,8 @@ forward 的 402 个支持残差来自 28 个独立 cell，绝对误差经验 P95
 
 ## 运行与验证
 
+`profiling.sglang_probe`的measurement、telemetry和manifest输出使用新的文件前缀。已有任一产物会在访问引擎前拒绝；manifest在缓存准备和生成前独占创建，防止重复命令混写不同run ID并覆盖原始来源。失败仍保留已写测量与分母，不自动覆盖重跑。该工程修复不产生新的标定值。
+
 当前`SGLangProbe`直接在原生telemetry中保存`run_id/repetition/warmup`，request记录还有原index、receipt和`forward_to_first_token_ms`。阶段拟合已能直接读取这些产物，不再要求先运行仓库外的compact转换脚本。下一次**确有必要的新Qwen3采集**可使用以下入口；这里不启动采集，不使用旧模型artifact：
 
 ```bash
