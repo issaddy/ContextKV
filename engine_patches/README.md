@@ -55,7 +55,7 @@ SGLANG_HICACHE_TMA_TRANSFER=0 scripts/launch_sglang.sh \
 
 `launch_sglang.sh`必须设置`CONTEXTKV_MODEL_SCOPE_PATH`；仅有`CONTEXTKV_MODEL_PATH`不能启动。scope拥有实际model/tokenizer路径，HF loading revision为None，不接受尾部`--revision`或另一个model/tokenizer路径。可选`CONTEXTKV_MODEL_PATH`仅作为同scope路径一致性检查，不能作为fallback。scope不编造HF revision，也不声称启动时权重内容逐字验证。
 
-schema v1 `local_snapshot_metadata`保持原有config/分片库存身份和全部旧指纹。离线`python -m training.export`新增schema v2 `local_checkpoint_artifact`，将完成的LoRA产物合并到新的独立BF16 dense目录，按每个weight文件的`file/bytes/sha256`建立`local-checkpoint:`身份；同大小不同内容可区分，目录位置和来源注释不进入身份。发布后应保持目录不可变；控制器`model.scope_path`和引擎`CONTEXTKV_MODEL_SCOPE_PATH`指向同一新scope，重新生成fingerprint并使用独立state/engine，不继承基座KV和成本标定。stock/native基线复用该身份接口，无需动态LoRA缓存路径。完整命令见[训练与导出](../docs/grounded_training.md)。
+schema v1 `local_snapshot_metadata`保持原有config/分片库存身份和全部旧指纹。离线`python -m training.export`新增schema v2 `local_checkpoint_artifact`，将完成的LoRA产物合并到新的独立BF16 dense目录，按每个weight文件的`file/bytes/sha256`建立`local-checkpoint:`身份；同大小不同内容可区分，目录位置和来源注释不进入身份。发布后应保持目录不可变；控制器`model.scope_path`和引擎`CONTEXTKV_MODEL_SCOPE_PATH`指向同一新scope，重新生成fingerprint并使用独立state/engine，不继承基座KV和成本标定。stock/native基线复用该身份接口，无需动态LoRA缓存路径。完整命令见[训练与导出](../docs/research/grounded_training.md)。
 
 v2的权重摘要仅在导出发布边界全量计算一次。启动时核对config、实际文件名/大小与index；单文件`model.safetensors`无需index，只读取header长度及JSON offsets核对tensor字节数，不读或哈希tensor body。`weight_content_verified=false`明确当前内容未被启动时全量复验，发布摘要不能监控后续同尺寸文件改写。PEFT `safe_merge=True`只检查有限值，BF16舍入和实际回答效果另行验证；本轮接口实现不等于8B质量或GPU验收。
 
@@ -118,9 +118,9 @@ python -m profiling.sglang_probe --config configs/qwen3_8b_scope.example.yaml --
 
 ## H200 上已验证的 HiCache 兼容配置
 
-最新只读观测补丁 `3aac1dfd…c1ac4b` 在此基础上增加实际 native ratio/clip、当前 running_batch 的预算成员与原生 offset 复算值，以及最近一次原生 match 的标量结果和服务端 monotonic 纳秒时点。该版本已完成 CPU 原源码/HTTP 合同与干净固定源码应用检查，**本次扩展尚未进行 GPU/IPC 验收**；下面已有实测不能自动算作新 hook 的运行验证。字段、O(active+waiting) 成本、None/过时观测语义和下一轮 probe 合同见[等待模型观测扩展](../docs/admission_wait_model.md#已实现的只读观测扩展等待下一轮-gpu-采样)。本次不改变原生调度或控制器预测策略。
+最新只读观测补丁 `3aac1dfd…c1ac4b` 在此基础上增加实际 native ratio/clip、当前 running_batch 的预算成员与原生 offset 复算值，以及最近一次原生 match 的标量结果和服务端 monotonic 纳秒时点。该版本已完成 CPU 原源码/HTTP 合同与干净固定源码应用检查，**本次扩展尚未进行 GPU/IPC 验收**；下面已有实测不能自动算作新 hook 的运行验证。字段、O(active+waiting) 成本、None/过时观测语义和下一轮 probe 合同见[等待模型观测扩展](../docs/research/admission_wait_model.md#已实现的只读观测扩展等待下一轮-gpu-采样)。本次不改变原生调度或控制器预测策略。
 
-只读工作量扩展补丁 `80147e2b…4476a5` 已在同一 H200 完成四方法两重复共 328 轮 16K 闭环及 8 次冻结输入生成，均成功；运行/等待摘要在实际请求进行中核对过。原始补丁 `69bf539f…76912` 的功能与受控生命周期记录继续保留。新阶段的范围、成本与负面结果见[工作量验证](../docs/stage_workload_validation.md)，表格局部实验见[冻结历史验证](../docs/table_relations_validation.md)。源码验证 JSON 仍只描述静态检查，不用于汇总 GPU 效果。
+只读工作量扩展补丁 `80147e2b…4476a5` 已在同一 H200 完成四方法两重复共 328 轮 16K 闭环及 8 次冻结输入生成，均成功；运行/等待摘要在实际请求进行中核对过。原始补丁 `69bf539f…76912` 的功能与受控生命周期记录继续保留。新阶段的范围、成本与负面结果见[工作量验证](../docs/archive/stage_workload_validation.md)，表格局部实验见[冻结历史验证](../docs/archive/table_relations_validation.md)。源码验证 JSON 仍只描述静态检查，不用于汇总 GPU 效果。
 
 2026-10-23 的远端 H200 环境使用 driver 595.58.03、PyTorch 2.14.1+cu130 和固定 SGLang 源码。GPU-only 协议冒烟与多轮生成闭环已通过。原生 `kernel + page_first` 在 D2H staged 路径出现进程 segfault，栈经过 `transfer_hicache_all_layer_staged_lf_pf → staged_write_back → cudaMemcpyBatchAsync/cuMemcpyBatchAsync_v2`；尚未隔离到驱动、运行时或上游实现的单一原因，不能将其断定为驱动问题。
 
@@ -184,13 +184,13 @@ C 配对 fixture 使用 128-token 共享前缀、每个 epoch 各 128-token 独�
 
 ## 原生请求身份的增量观测
 
-原生请求身份观测补丁 SHA256 为 `e004ca96d62a5786f303c465da140513c7213f13ff023407991ec162ef82d92c`。相对于前一观测版本，这次 runtime 只在 workload summary 中复制已有 `req.rid`；原生预算、匹配、锁和调度代码不变。旧 wire 缺 ID 仍可解码，只有可选 `native_budget` 等待模式要求可关联身份。该模式与真实 GPU 采样顺序见 [admission 模型](../docs/admission_wait_model.md#可选-native_budget-模式预留与服务分账)。
+原生请求身份观测补丁 SHA256 为 `e004ca96d62a5786f303c465da140513c7213f13ff023407991ec162ef82d92c`。相对于前一观测版本，这次 runtime 只在 workload summary 中复制已有 `req.rid`；原生预算、匹配、锁和调度代码不变。旧 wire 缺 ID 仍可解码，只有可选 `native_budget` 等待模式要求可关联身份。该模式与真实 GPU 采样顺序见 [admission 模型](../docs/research/admission_wait_model.md#可选-native_budget-模式预留与服务分账)。
 
-e004 增量随后已用于真实 H200 的两组完整普通 EOS 41 轮观测/闭环，以及定向补采后的四组41轮配对对照；RID、实际 ratio/clip、预算公式、最近 match 与 receipt/stage 绑定均有原始记录。见[原生预算82轮验证](../docs/native_budget_validation.md)和[定向标定及164轮对照](../docs/native_budget_targeted_validation.md)。这些验证说明 e004 的实际观测/执行合同，不自动证明等待预测或决策收益。当前 `verification_report.json` 已对应下面新增 C 的0ed补丁；该新补丁仍未进行 GPU 验收。
+e004 增量随后已用于真实 H200 的两组完整普通 EOS 41 轮观测/闭环，以及定向补采后的四组41轮配对对照；RID、实际 ratio/clip、预算公式、最近 match 与 receipt/stage 绑定均有原始记录。见[原生预算82轮验证](../docs/archive/native_budget_validation.md)和[定向标定及164轮对照](../docs/archive/native_budget_targeted_validation.md)。这些验证说明 e004 的实际观测/执行合同，不自动证明等待预测或决策收益。当前 `verification_report.json` 已对应下面新增 C 的0ed补丁；该新补丁仍未进行 GPU 验收。
 
 ## 可选 C：业务会话与 epoch 感知的 host 备份准入
 
-当前增量补丁 SHA256 为 `0ed0295274411b9fe60415e7f48604937d84d3fc894eabd9e143b0560de7488f`。这次新增主流程接线与 CPU 合同；随后[首轮GPU机制验收](../docs/host_admission_validation.md)通过off/fixed两臂，真实观察到128页准入/64页跳过及新请求补齐。即时回访增加重算、累计D2H相同；conditioned压力/身份与大池负例随后也通过15次生成，但小池各策略实际D2H相同，完整负载效果仍待验证。前面的e004结果保持其原实验归属。
+当前增量补丁 SHA256 为 `0ed0295274411b9fe60415e7f48604937d84d3fc894eabd9e143b0560de7488f`。这次新增主流程接线与 CPU 合同；随后[首轮GPU机制验收](../docs/archive/host_admission_validation.md)通过off/fixed两臂，真实观察到128页准入/64页跳过及新请求补齐。即时回访增加重算、累计D2H相同；conditioned压力/身份与大池负例随后也通过15次生成，但小池各策略实际D2H相同，完整负载效果仍待验证。前面的e004结果保持其原实验归属。
 
 默认 `CONTEXTKV_HOST_ADMISSION=off`。此时原 `cache_config` 字典/hash、info/prepare 默认 wire 保持不变，旧 stage artifact 不因添加这个可选能力失配。`/context/metrics` 可独立展示策略配置和零/累计计数。显式启用例子：
 
@@ -212,11 +212,11 @@ scripts/launch_sglang.sh --max-total-tokens 16384 --port 30000
 
 `host_backup_admission` 事件记录允许/跳过原因、实际新页、业务/epoch/native request identity、容量/占用与窗口统计；metrics 累计 `considered_actions`、`allowed_actions`、`skipped_actions`、允许计划/跳过的新 token 数、成功准入的新 token/pages 与 allocation-evicted host tokens；计划允许和成功准入分开。**跳过数是计划省略，不是已经节省的 DMA 字节**；DMA 仍只在原生 ACK 完成后计量。动作可能重复触及同一尚未备份路径，因此也不把这些 token 累计当作唯一物理槽。
 
-本地测试覆盖业务/多 epoch、首次匹配去重、退休仍占槽、失败请求在 terminal 后退出工作集、默认旧 wire/hash、HTTP/控制器接线、整条共享祖先先跳过后补齐、原生去重、其它 action 顺序、write_back 不过滤及分配失败/淘汰计数。测试也覆盖 chunk8192 的累计预算、部分祖先分配成功/后代失败、零新页重入和新请求补齐。固定源码 patch apply/语法检查和这些 CPU 结果不能代替 GPU DMA/锁/恢复验收。下一步先以预声明的小阈值和小 host 固定动作验证通路，再比较起始 128-page 条件/固定规则、原生三写策略与版本消融；等待、重算、host 恢复、完成 DMA 与完整延迟共同判断效果。[设计与容量边界](../docs/host_admission_design.md)；[EfficientAgent 许可和适配归属](../docs/third_party/EFFICIENTAGENT_NOTICE.md)。
+本地测试覆盖业务/多 epoch、首次匹配去重、退休仍占槽、失败请求在 terminal 后退出工作集、默认旧 wire/hash、HTTP/控制器接线、整条共享祖先先跳过后补齐、原生去重、其它 action 顺序、write_back 不过滤及分配失败/淘汰计数。测试也覆盖 chunk8192 的累计预算、部分祖先分配成功/后代失败、零新页重入和新请求补齐。固定源码 patch apply/语法检查和这些 CPU 结果不能代替 GPU DMA/锁/恢复验收。下一步先以预声明的小阈值和小 host 固定动作验证通路，再比较起始 128-page 条件/固定规则、原生三写策略与版本消融；等待、重算、host 恢复、完成 DMA 与完整延迟共同判断效果。[设计与容量边界](../docs/research/host_admission_design.md)；[EfficientAgent 许可和适配归属](../docs/third_party/EFFICIENTAGENT_NOTICE.md)。
 
 ## 可选原生 admission 诊断
 
-`CONTEXTKV_ENABLE_PROFILING=1` 与 `CONTEXTKV_ADMISSION_DIAGNOSTICS=1` 同时开启后，guarded 请求的 terminal event 保存原生 receive/首次 forward/first-token/completion 时间及实际访问 gate 的有限预算摘要。真实加入 `can_run_list` 决定接受结果；返回 `NO_TOKEN` 也可能表示加入后预算耗尽。默认关闭，旧 cache identity/receipt 不变。详见 [诊断合同与本地验证](../docs/native_admission_diagnostic.md)。本次增量尚待受控 GPU 验收，不覆盖此前补丁已完成的硬件证据。
+`CONTEXTKV_ENABLE_PROFILING=1` 与 `CONTEXTKV_ADMISSION_DIAGNOSTICS=1` 同时开启后，guarded 请求的 terminal event 保存原生 receive/首次 forward/first-token/completion 时间及实际访问 gate 的有限预算摘要。真实加入 `can_run_list` 决定接受结果；返回 `NO_TOKEN` 也可能表示加入后预算耗尽。默认关闭，旧 cache identity/receipt 不变。详见 [诊断合同与本地验证](../docs/research/native_admission_diagnostic.md)。本次增量尚待受控 GPU 验收，不覆盖此前补丁已完成的硬件证据。
 
 ## Qwen3-only入口清理阶段的验证记录
 

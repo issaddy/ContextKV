@@ -1,8 +1,8 @@
 # 数据、负载与评测验证说明
 
-本项目已经验证固定 MTRAG 文件读取、标签隔离、会话级划分和真实 BM25S 检索，并在 H200 上完成固定模型的 P1/P2/P3 集成、原生 B0/B1 运行与有限标定。完整 Cloud P3 开发集的 qrels 覆盖 39/41 轮，recall@5 为 0.2094、nDCG@5 为 0.1671；正式回答质量与优于强基线的结论仍未建立。mock 输出只用于协议和状态一致性验证。实际证据见[验证记录](verification.md)与[共享提示词开发验证](shared_prompt_validation.md)。
+本项目已经验证固定 MTRAG 文件读取、标签隔离、会话级划分和真实 BM25S 检索，并在 H200 上完成固定模型的 P1/P2/P3 集成、原生 B0/B1 运行与有限标定。完整 Cloud P3 开发集的 qrels 覆盖 39/41 轮，recall@5 为 0.2094、nDCG@5 为 0.1671；正式回答质量与优于强基线的结论仍未建立。mock 输出只用于协议和状态一致性验证。实际证据见[验证记录](archive/verification.md)与[共享提示词开发验证](archive/shared_prompt_validation.md)。
 
-文中早期Cloud数值是对应历史配置的观测；当前仅运行显式Qwen3-8B/32B，旧Qwen2.5-7B已退役。最新正常HTTP流程已通过两轮实际Qwen3验收，见[当前接口证据](http_retrieval.md)。已有真实生成和质量评分批次不等于正式非劣或整体优胜，旧待办不能自动转为新实验任务。
+文中早期Cloud数值是对应历史配置的观测；当前仅运行显式Qwen3-8B/32B，旧Qwen2.5-7B已退役。最新正常HTTP流程已通过两轮实际Qwen3验收，见[当前接口证据](guides/http_retrieval.md)。已有真实生成和质量评分批次不等于正式非劣或整体优胜，旧待办不能自动转为新实验任务。
 
 CLI将已提交回答的评测导出放在共享runner的`on_result`中，与原生基线采用相同边界。导出或导出所需账本读取失败不会把已经提交的生成重标为失败，也不会将下一轮历史换成参考答案；报告单列`evaluation_export.status/failures`，保存业务运行与清理结果后CLI非零退出。单轮pipeline完成时刻以回答提交为准，不再包含离线audit写入；导出仍在本次运行内执行并影响会话/整批耗时，不据此宣称推理加速。
 
@@ -57,7 +57,7 @@ P2 的预检索结果可能依赖参考历史，不能据此称为完整在线 R
 
 检索依赖为 `bm25s==0.3.15`、`numpy==2.3.5`。这些依赖按需导入；使用其他版本时检索器拒绝启动，不自动切换实现。
 
-本节BM25S默认配置：Lucene BM25，`k1=1.5`、`b=0.75`，NumPy backend，英文 stopwords，无 stemming，无 reranker，top5。query 仅由截至当前的最后三个用户问题用换行拼接，不含参考答案或任何方法的生成答案。使用分数 partition 找出 top5 边界，只对入选的五项排序；同分按 passage ID 排序，包含 top5 边界，不依赖随机 tie-breaking。随机及大规模同分测试与完整 lexsort 的集合和次序完全一致。检索耗时包含实际分数计算和选择。BGE/hybrid及其他query视图由[独立配置](hybrid_retrieval.md)声明，不能把默认三问规则描述成所有P3。
+本节BM25S默认配置：Lucene BM25，`k1=1.5`、`b=0.75`，NumPy backend，英文 stopwords，无 stemming，无 reranker，top5。query 仅由截至当前的最后三个用户问题用换行拼接，不含参考答案或任何方法的生成答案。使用分数 partition 找出 top5 边界，只对入选的五项排序；同分按 passage ID 排序，包含 top5 边界，不依赖随机 tie-breaking。随机及大规模同分测试与完整 lexsort 的集合和次序完全一致。检索耗时包含实际分数计算和选择。BGE/hybrid及其他query视图由[独立配置](guides/hybrid_retrieval.md)声明，不能把默认三问规则描述成所有P3。
 
 BEIR JSONL 读取器保留原 passage ID 和原文，不重切段、不清洗正文。返回证据绑定语料快照、内容 hash、source URI 和 provenance。索引用 `title + "\n" + text`，该分词副本不替换原始正文。空或只有停用词的 query 返回空结果，不从标签中补材料。
 
@@ -90,7 +90,7 @@ HTTP与批处理P3共用检索worker收尾：取消await无法终止同步线程
 
 ## 新的多轮监督来源
 
-[Doc2Dial适配器](doc2dial.md)已将真实v1/v0.9原文与监督侧车接入项目：完整角色顺序、原turn ID和精确引用保留，标签不会进入检索语料。它不是MTRAG格式的替代别名，也未把连续同role对话强塞进当前交替QA gate。训练、源隔离和语义验收另行决定；不会用数据导出成功代替质量结论。
+[Doc2Dial适配器](guides/doc2dial.md)已将真实v1/v0.9原文与监督侧车接入项目：完整角色顺序、原turn ID和精确引用保留，标签不会进入检索语料。它不是MTRAG格式的替代别名，也未把连续同role对话强塞进当前交替QA gate。训练、源隔离和语义验收另行决定；不会用数据导出成功代替质量结论。
 
 ## 质量评价与完整审计
 
@@ -98,7 +98,7 @@ HTTP与批处理P3共用检索worker收尾：取消await无法终止同步线程
 
 官方兼容导出使用本轮检索证据，最多 10 个 context。实际可见证据和原始审计材料放在不同文件，包含完整 manifest、真实输入/输出 IDs 与实际历史；超过 10 个的完整证据不能为通过官方 checker 而截断。格式和统计检查本身不等于运行官方全部指标、RAGAS、RADBench或judge；已完成的真实评分见下段。
 
-qrels 路径应显式指向实际的 `mtrag-human/retrieval_tasks/<domain>/qrels/dev.tsv`。缺少标签的生成任务在结果中列出 task ID，不当作零分，也不无说明地删除。官方评测适配、judge 配置冻结、人工盲审导出和回填均已实现，操作见下文。实际 judge 模型、版本及重型依赖环境由实验配置明确指定；[真实开发评分](dev_quality_validation.md)和[533答案/2665维评分](b6_quality_validation.md)已完成，保留各自源码/模型范围、失败和未通过联合门的结果，不追认当前Qwen3的质量资格。人工盲审尚不能以assistant审查替代。
+qrels 路径应显式指向实际的 `mtrag-human/retrieval_tasks/<domain>/qrels/dev.tsv`。缺少标签的生成任务在结果中列出 task ID，不当作零分，也不无说明地删除。官方评测适配、judge 配置冻结、人工盲审导出和回填均已实现，操作见下文。实际 judge 模型、版本及重型依赖环境由实验配置明确指定；[真实开发评分](archive/dev_quality_validation.md)和[533答案/2665维评分](archive/b6_quality_validation.md)已完成，保留各自源码/模型范围、失败和未通过联合门的结果，不追认当前Qwen3的质量资格。人工盲审尚不能以assistant审查替代。
 
 质量统计按配对会话重采样，保留会话内各轮的相关性。输入必须在分组前按 task ID 严格对齐，候选与参考的会话/轮次数不一致时拒绝计算。默认统计量为按轮次加权的平均差，亦可选择会话均值。只有差值置信区间下界严格高于 `-epsilon` 才报告 `noninferior`；样本不足或区间跨越边界报告 `inconclusive`。不把差异“不显著”解释为质量相同。
 
@@ -144,7 +144,7 @@ B1 使用原生会话软引用标签，不调用传统会话续写的 `session_p
 
 启动配置由实验者分别运行的 SGLang 实例决定；选择客户端的 `B0` / `B1` 不会更改服务器启动参数。正式运行前必须提供 `--engine-manifest`，并将来源代码固定到 `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。CLI 会读取原生 `/server_info`，旧入口返回 404 时再使用 `/get_server_info`，比对实际可见的配置字段。官方接口并不提供可靠的远程 Git commit 证明，因此清单明确标记 `operator_manifest_not_remote_attestation`，仍需实验者保存代码 checkout、启动命令和环境证据。
 
-新运行必须使用显式Qwen3 `--run-config`；旧7B示例manifest已删除。优先使用[owned矩阵入口](b6_owned_matrix.md)从实际服务生成manifest，避免手填容量或身份。预启动服务仍需要相同模型/采样范围的真实manifest。
+新运行必须使用显式Qwen3 `--run-config`；旧7B示例manifest已删除。优先使用[owned矩阵入口](guides/b6_owned_matrix.md)从实际服务生成manifest，避免手填容量或身份。预启动服务仍需要相同模型/采样范围的真实manifest。
 
 原生 CLI 默认发送 `stream=true`，与研究控制器采用相同的客户端 token chunk 观测口径。只在累计 `output_ids` 增长时更新首/末 token chunk 时间，重复输出和终态 metadata 不移动末 token 时间；收到完整终态帧及 `[DONE]` 后才提交历史。SSE 断连、缺失终态或缺失 DONE 都停止会话且不提交部分答案。`NativeTurnResponse.timing` 记录同一客户端 monotonic 时钟中的到达、提交、首/末 chunk、响应结束及历史提交时间。chunk 可以含多 token，因此标签为 `chunk`，不声称逐 token ITL。
 
@@ -259,7 +259,7 @@ uv run python -m bench.blind_review import --key runs/evaluation/blind/private-k
 
 将 `review.jsonl` 与 `ratings.csv` 交给评审者，独立保管 `private-key.json`，不要把其方法映射一起发出。随机顺序隐藏方法名，保留回答与全部证据用于判定。回填须含 reviewer ID、五项评分或 `NA`、历史不一致标记及备注。多评审者可各自填写；汇总前应显式处理多评审者分歧，配对统计不悄悄删除缺失评分或合并重复评分。
 
-新增 `bench.blind_review aggregate` 显式聚合多评审者，`bench.quality_acceptance` 绑定两侧真实答案、完整任务覆盖、评分协议与固定 dev/test 划分。重新导出拒绝覆盖旧评分表。真实 P3 的 123 份空白包、非付费本地 judge 路径、自评限制和最终冻结合同见 [质量验收操作说明](quality_acceptance.md)。当前空表不是已完成人工评价。
+新增 `bench.blind_review aggregate` 显式聚合多评审者，`bench.quality_acceptance` 绑定两侧真实答案、完整任务覆盖、评分协议与固定 dev/test 划分。重新导出拒绝覆盖旧评分表。真实 P3 的 123 份空白包、非付费本地 judge 路径、自评限制和最终冻结合同见 [质量验收操作说明](guides/quality_acceptance.md)。当前空表不是已完成人工评价。
 
 ### 统一矩阵、等预算 dev 调参与冻结 B6
 

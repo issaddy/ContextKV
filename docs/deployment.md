@@ -16,7 +16,7 @@ export no_proxy="$NO_PROXY"
 export CONTEXTKV_FINGERPRINT_JSON="$(cat runs/fingerprint.json)"
 ```
 
-bootstrap只安装固定 SGLang commit `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b` 及其依赖，并通过现有scope核对用户已有文件、tokenizer和模板，不下载生成模型。改变本地模型目录须重新生成/核对scope，不能修改路径后沿用不匹配身份。实际HF loading revision为null，metadata identity不冒充权重内容验证。见[模型scope](model_scope.md)。
+bootstrap只安装固定 SGLang commit `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b` 及其依赖，并通过现有scope核对用户已有文件、tokenizer和模板，不下载生成模型。改变本地模型目录须重新生成/核对scope，不能修改路径后沿用不匹配身份。实际HF loading revision为null，metadata identity不冒充权重内容验证。见[模型scope](guides/model_scope.md)。
 
 控制器的 `uv.lock` 与独立 `.venv-sglang` 分工不变；引擎依赖由固定上游pyproject定义。记录实际安装环境，不用CPU锁替代引擎依赖。
 
@@ -40,6 +40,6 @@ SGLANG_HICACHE_TMA_TRANSFER=0 bash scripts/launch_sglang.sh \
 
 正常服务不启用冷缓存标定。只有需要解决具体成本不确定性时，在独立服务显式设置 `CONTEXTKV_ENABLE_PROFILING=1` 并选定必要测点；该接口会改变缓存状态。旧7B或其他recipe的测量仍可只读分析，不能绑定到Qwen3执行。
 
-原生B0/B1使用clean stock checkout；研究控制器使用patched checkout。优先让[owned显式矩阵](b6_owned_matrix.md)管理各自进程、生成真实manifest并保留完整失败记录。该入口不恢复外部服务；后续supervisor也不得恢复已退役7B。默认plan不启动模型，`--execute`才执行所声明的有限任务。
+原生B0/B1使用clean stock checkout；研究控制器使用patched checkout。优先让[owned显式矩阵](guides/b6_owned_matrix.md)管理各自进程、生成真实manifest并保留完整失败记录。该入口不恢复外部服务；后续supervisor也不得恢复已退役7B。默认plan不启动模型，`--execute`才执行所声明的有限任务。
 
-共享配置、原始输入/输出、源码、实际资源、失败及后续恢复信息一起保留。已完成的[四调用验收](owned_local_scope_validation.md)属于当时源码；本轮scope-only清理先以源码/CPU合同验证，不将旧批次改写为新版本硬件证据。
+共享配置、原始输入/输出、源码、实际资源、失败及后续恢复信息一起保留。已完成的[四调用验收](archive/owned_local_scope_validation.md)属于当时源码；本轮scope-only清理先以源码/CPU合同验证，不将旧批次改写为新版本硬件证据。
