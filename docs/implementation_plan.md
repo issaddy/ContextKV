@@ -42,6 +42,8 @@
 
 ## 本阶段检查
 
+`e85663e`补齐离线cold/GPU-ready配对的执行receipt校验，72项针对性测试通过；359个远端tracked条目、88模块/31资产/358sdist/13许可发行包核验通过。随后完成[三处Qwen3成本诊断](qwen3_b_targeted_validation.md)，6正式+6物化全部正常终态，独立审计0问题。实际decode占95.49%–99.16%，完整耗时差伴随输出长度与内容变化，未拟合新成本表或改变默认策略；来源混用及无据扩写仍是优先解决项。原始产物、未校准预测和质量局限全部保留，GPU与端口已释放。
+
 最新条件机制/成本接线/服务停机整合通过1404项测试及8个子测试，真实Qwen3 tokenizer项开启，Ruff/diff通过，记录`runs/pytest-causal-stage-shutdown.log`。实际Uvicorn超时取消路径修复了提前close造成的closed database与STARTED残留；修复后先排空、attempt为FAILED，被取消的HTTP仍500。原生collector→stage fit通过合成协议闭环，未新采硬件成本。两版Doc2Dial逐目标因果投影核对通过，并完成原文件首行的真实CLI导出；没有模型/GPU调用。机制复用、研究限制见[分析](applicability_mechanism.md)，三项工程入口分别见[数据](doc2dial.md)、[阶段模型](stage_cost_model.md)和[HTTP](http_retrieval.md)。
 
 实现`445b233`已打包并部署容器：88模块、31资产、358个sdist文件、110测试/配置和13许可核对通过；359个远端tracked条目与提交一致，新CLI导入/help与编译通过，原生补丁未变、GPU0空闲。没有重复两轮正常模型验收。包与部署原件为`runs/dist-causal-stage-shutdown/`及`runs/remote-h200-causal-stage-shutdown/`。研究与CPU见证的[86文件快照](../runs/causal-stage-shutdown-review-v1.tar.xz)为183184 bytes，SHA256 `c1a1aec6282ad80cb7a51dc649d4a27087c2cc059b6371b4bad41d4e417782b8`；85个payload摘要核验通过，不含权重或私有环境。
