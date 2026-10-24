@@ -44,6 +44,8 @@
 
 最新条件机制/成本接线/服务停机整合通过1404项测试及8个子测试，真实Qwen3 tokenizer项开启，Ruff/diff通过，记录`runs/pytest-causal-stage-shutdown.log`。实际Uvicorn超时取消路径修复了提前close造成的closed database与STARTED残留；修复后先排空、attempt为FAILED，被取消的HTTP仍500。原生collector→stage fit通过合成协议闭环，未新采硬件成本。两版Doc2Dial逐目标因果投影核对通过，并完成原文件首行的真实CLI导出；没有模型/GPU调用。机制复用、研究限制见[分析](applicability_mechanism.md)，三项工程入口分别见[数据](doc2dial.md)、[阶段模型](stage_cost_model.md)和[HTTP](http_retrieval.md)。
 
+实现`445b233`已打包并部署容器：88模块、31资产、358个sdist文件、110测试/配置和13许可核对通过；359个远端tracked条目与提交一致，新CLI导入/help与编译通过，原生补丁未变、GPU0空闲。没有重复两轮正常模型验收。包与部署原件为`runs/dist-causal-stage-shutdown/`及`runs/remote-h200-causal-stage-shutdown/`。研究与CPU见证的[86文件快照](../runs/causal-stage-shutdown-review-v1.tar.xz)为183184 bytes，SHA256 `c1a1aec6282ad80cb7a51dc649d4a27087c2cc059b6371b4bad41d4e417782b8`；85个payload摘要核验通过，不含权重或私有环境。
+
 新Doc2Dial适配与共享检索取消收尾通过1383项测试及8个子测试，真实Qwen3 tokenizer项开启，Ruff/diff通过。两份作者train的完整转换、角色/文本/引用独立比较及488文档真实索引→五文档→5424-token Qwen3候选通过；没有模型调用。P3取消反例证明关闭前必须等待同一次检索线程，未生成或提交答案，后续未完成分母保留。记录为`runs/pytest-doc2dial-integration.log`与`runs/doc2dial-integration/audit.json`。
 
 实现`185fa7e`已打包并同步容器：87模块、31资产、353个sdist文件、107测试/配置及13许可逐字核对通过；354个远端tracked条目与提交一致，HTTP与新adapter CLI导入/help及编译通过。模型服务未启动，原生补丁保持不变；包和部署原件分别为`runs/dist-doc2dial-integration/`、`runs/remote-h200-doc2dial-integration/`。下述c1cc617两轮GPU记录保留原身份，不追认为新源码的GPU重复验收。

@@ -10,7 +10,7 @@
 |---|---|
 | 最近完整 CPU 回归 | 因果样本/原生阶段接线/HTTP关闭排空：1404 passed，8 subtests passed，开启真实Qwen3 tokenizer metadata，无跳过；runs/pytest-causal-stage-shutdown.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
-| Ruff / wheel | Doc2Dial/共享取消`185fa7e`的Ruff/diff通过；包核对87模块、31资产、353个sdist tracked文件及13许可，通过且无运行数据/权重/环境；runs/dist-doc2dial-integration/asset-check.json |
+| Ruff / wheel | `445b233`的Ruff/diff通过；包核对88模块、31资产、358个sdist tracked文件及13许可，通过且无运行数据/权重/环境；runs/dist-causal-stage-shutdown/asset-check.json |
 | HTTP自动检索 | 真实CLI/TCP/BM25、明确依赖闭包、两轮提交、原结果重放及close通过；2次mock生成，0次模型调用；runs/http-retrieval-tcp-v1/result.json。启动来源/取消竞态最终修复由全回归覆盖 |
 | Qwen3 HTTP正常路径 | `c1cc617`两次实际8B生成均stop；原生终态/完整IDs/历史/来源/重放/提交/close独立审计0 issues，保持语义覆盖/scope歧义；runs/remote-h200-http-qwen3/、runs/http-qwen3-review/analysis-v2.json。仅本配置正常链路，非质量/性能对照 |
 | SDK证据桥接 | 原loader对同document第2片段报重复；修复后10原片段/2文档建盘重载，通过5原检索+1依赖的完整正文、3条边和3章节投影。Qwen3输入5950tokens，关系增量121，0模型调用；runs/evidence-context-integration/sdk-v1/result.json |
@@ -18,7 +18,7 @@
 | 因果样本投影 | v1 21998 / v0.9 25126原agent目标逐条核对严格历史前缀；两版原文件首行分别6/9实例的真实CLI导出核对通过。0模型调用，非语义质量标签；runs/causal-dialogue-projection/ |
 | 停机可靠性 | Uvicorn 0.54.0真实超时取消复现：先排空再close，线程不使用已关闭资源，attempt从错误STARTED变为FAILED。被取消HTTP仍500；runs/runtime-shutdown-audit/ |
 | B阶段接线 | 原生telemetry显式批次身份→既有stage fit的CPU闭环通过，prepared host特征与实际恢复诊断分离；未增加Qwen3硬件测量或宣称性能收益；runs/b-current-integration-audit/ |
-| 当前容器源码 | `185fa7e`，354个tracked条目一致，HTTP/adapter CLI导入/help与编译通过；补丁保持57932422、GPU0空闲，本次source部署无新模型调用；runs/remote-h200-doc2dial-integration/runs/doc2dial-integration-sourcecheck.json。此前c1cc617真机记录不改写 |
+| 当前容器源码 | `445b233`，359个tracked条目一致，HTTP/因果样本/stage-fit CLI导入/help与编译通过；补丁保持57932422、GPU0空闲，本次source部署无新模型调用；runs/remote-h200-causal-stage-shutdown/runs/causal-stage-shutdown-sourcecheck.json。此前c1cc617真机记录不改写 |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
 | 冻结模拟测试矩阵 | 39 jobs / 117 轮成功 |
 | 继承主方法参数的开发集消融 | 15 jobs / 45 轮成功，不参与主方法选择 |
