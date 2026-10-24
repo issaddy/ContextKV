@@ -542,18 +542,30 @@ async def _run(args):
     output.mkdir(parents=True, exist_ok=True)
     report = None
     close_error = None
+    export_failures = []
+    first_export_error = None
 
     def export_result(item):
+        nonlocal first_export_error
         if item.status != "success":
             return
         result = item.result
-        export_evaluation(item.online_turn, result.assistant_text,
+        try:
+            export_evaluation(item.online_turn, result.assistant_text,
                           official_path=output / f"official-{baseline.run_id}.jsonl",
                           audit_path=output / f"audit-{baseline.run_id}.jsonl",
                           visible_evidence_manifest=result.visible_evidence_manifest,
                           audit_evidence=result.audit_evidence, input_ids=result.input_ids,
                           output_ids=result.output_ids, branch_reason=result.branch_reason,
                           measurement_kind="unvalidated_hardware_run", truncated=result.truncated)
+        except Exception as exc:
+            # The answer already advanced both native and runner history.
+            # An artifact failure must not cancel the remaining conversations.
+            if first_export_error is None:
+                first_export_error = exc
+            turn = item.online_turn
+            export_failures.append({"conversation_id": turn.conversation_id, "task_id": turn.task_id,
+                                    "turn": turn.turn, "error": f"{type(exc).__name__}: {exc}"})
     try:
         await baseline.verify_server()
         report = await run_sessions(rows, baseline, protocol=args.protocol, concurrency=args.concurrency,
@@ -578,6 +590,7 @@ async def _run(args):
                    "template_fingerprint": asdict(template.fingerprint), "policy": asdict(policy),
                    "retrieval": None if retriever is None else retriever.manifest,
                    "workload": vars(args), "report": report, "native_http_observations": client.observations,
+                   "evaluation_export": {"status": "failed" if export_failures else "completed", "failures": export_failures},
                    "client_requested_thread_environment": {key: os.environ.get(key) for key in
                        ("TOKENIZERS_PARALLELISM", "RAYON_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")},
                    "close_dispatches": baseline.close_dispatches, "close_error": close_error,
@@ -592,11 +605,15 @@ async def _run(args):
         target.write_text(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(json.dumps({"output": str(target.resolve()), "baseline": args.baseline,
                           "success": sum(r.status == "success" for r in report.turns) if report else 0,
+                          "evaluation_export_failed": len(export_failures),
                           "close_acknowledgement": "not_scheduler_ack"}))
         if retriever is not None and hasattr(retriever, "close"):
             retriever.close()
     if close_error:
         raise NativeProtocolError(close_error)
+    if first_export_error is not None:
+        raise RuntimeError(f"evaluation export failed for {len(export_failures)} committed turn(s); "
+                           f"workload and export failures saved to {target}") from first_export_error
     return report
 
 

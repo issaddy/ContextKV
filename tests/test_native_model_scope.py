@@ -1,6 +1,7 @@
 """Explicit local models through the formal native path; no GPU or test_mode."""
 from dataclasses import asdict, replace
 from copy import deepcopy
+from contextlib import nullcontext
 import json
 from pathlib import Path
 
@@ -188,18 +189,21 @@ def test_matrix_shared_scope_recipe_and_method_override_rejection(tmp_path, loca
             matrix_jobs(bad)
 
 
-def test_run_config_cli_uses_real_scope_factory_and_recipe_without_test_mode(tmp_path, local_scope, monkeypatch):
+@pytest.mark.parametrize("baseline", ["B0", "B1"])
+@pytest.mark.parametrize("export_failure", ["none", "first", "all"])
+def test_run_config_cli_uses_real_scope_factory_and_recipe_without_test_mode(
+        tmp_path, local_scope, monkeypatch, baseline, export_failure):
     import asyncio
     import bench.native_baseline as module
     import controller.config as configuration
     from controller.candidates import CandidatePolicy
-    template, manifest, info = contract(local_scope)
+    template, manifest, info = contract(local_scope, baseline)
     manifest_path, config_path = tmp_path / "engine.json", tmp_path / "shared.json"
     manifest_path.write_text(json.dumps(manifest))
     config = RunConfig(model=ModelConfig(scope_path=str(local_scope.path)), sampling=RECIPE,
                        context=replace(CandidatePolicy(), max_new_tokens=64))
     config_path.write_text(json.dumps(asdict(config)))
-    loaded, requests = [], []
+    loaded, requests, closes, exports = [], [], [], []
     def template_factory(path, revision, **options):
         loaded.append((path, revision, options))
         return template
@@ -208,28 +212,59 @@ def test_run_config_cli_uses_real_scope_factory_and_recipe_without_test_mode(tmp
         if request.url.path == "/server_info":
             return httpx.Response(200, json=info)
         body = json.loads(request.content)
+        if request.url.path == "/close_session":
+            closes.append(body["session_id"])
+            return httpx.Response(200)
         requests.append(body)
-        text = "Complete native answer"
+        text = f"Complete native answer {len(requests)}"
         return httpx.Response(200, json={"text": text, "output_ids": list(text.encode()), "prompt_token_ids": body["input_ids"],
             "meta_info": {"finish_reason": {"type": "stop"}, "completion_tokens": len(text)}})
     http = httpx.AsyncClient(base_url="http://fake", transport=httpx.MockTransport(handler))
     original_client = module.NativeSGLangClient
     monkeypatch.setattr(module, "NativeSGLangClient", lambda *a, **k: original_client(*a, **k, http_client=http))
+    original_export = module.export_evaluation
+
+    def export(turn, answer, **kwargs):
+        exports.append(turn.task_id)
+        if export_failure == "all" or (export_failure == "first" and len(exports) == 1):
+            raise OSError("controlled native export failure")
+        return original_export(turn, answer, **kwargs)
+
+    monkeypatch.setattr(module, "export_evaluation", export)
     output = tmp_path / "run"
     try:
-        assert module.main([str(FIXTURE), "--baseline", "B0", "--base-url", "http://fake", "--domain", "all",
-                            "--run-config", str(config_path), "--engine-manifest", str(manifest_path),
-                            "--output", str(output), "--limit-sessions", "1", "--audit-prompt-ids", "--no-stream"]) == 0
+        expected = (nullcontext() if export_failure == "none" else
+                    pytest.raises(RuntimeError, match="evaluation export failed for"))
+        with expected:
+            assert module.main([str(FIXTURE), "--baseline", baseline, "--base-url", "http://fake", "--domain", "all",
+                                "--run-config", str(config_path), "--engine-manifest", str(manifest_path),
+                                "--output", str(output), "--concurrency", "2", "--audit-prompt-ids", "--no-stream"]) == 0
     finally:
         asyncio.run(http.aclose())
     assert loaded == [(local_scope.scope.model_path, None, {"namespace_hash": "default", "local_files_only": True,
                                                             "model_identity": local_scope.scope.identity})]
-    assert len(requests) == 3 and all(r["sampling_params"] == {**RECIPE.record(), "max_new_tokens": 64} for r in requests)
+    assert len(requests) == len(exports) == 6
+    assert all(r["sampling_params"] == {**RECIPE.record(), "max_new_tokens": 64} for r in requests)
     payload = json.loads(next(output.glob("native-*.json")).read_text())
     assert payload["shared_configuration"]["sampling_recipe"] == RECIPE.record()
     assert payload["template_fingerprint"]["model_revision"] == local_scope.scope.identity
     assert payload["engine_manifest"]["model"]["revision"] is None
-    assert len(payload["report"]["turns"]) == 3
+    turns = payload["report"]["turns"]
+    assert len(turns) == 6 and all(t["status"] == "success" for t in turns)
+    assert payload["report"]["unfinished_turns"] == 0
+    assert payload["close_error"] is None and payload["undispatched_native_sessions"] == []
+    assert len(closes) == (2 if baseline == "B1" else 0)
+    failures = payload["evaluation_export"]["failures"]
+    assert len(failures) == {"none": 0, "first": 1, "all": 6}[export_failure]
+    assert payload["evaluation_export"]["status"] == ("completed" if export_failure == "none" else "failed")
+    if failures:
+        assert failures[0]["task_id"] == exports[0]
+        assert failures[0]["error"] == "OSError: controlled native export failure"
+    for turn in turns:
+        if turn["turn"] > 1:
+            previous = next(t for t in turns if t["conversation_id"] == turn["conversation_id"]
+                            and t["turn"] == turn["turn"] - 1)
+            assert turn["online_turn"]["history"][-1]["text"] == previous["assistant_text"]
 
 
 @pytest.mark.asyncio
