@@ -165,7 +165,8 @@ def estimate_native_budget_wait(candidate_input_tokens: int, resident_gpu_tokens
                                 forward_fn: ForwardFunction, decode_fn: DecodeFunction,
                                 queued_forward_fn: QueuedForwardFunction,
                                 development_lengths: Sequence[int], idle_ms: float,
-                                page_size: int | None) -> WaitEstimate:
+                                page_size: int | None, *,
+                                initial_pinned_tokens: int | None = None) -> WaitEstimate:
     """Optional native-budget/empirical-service scenarios, not a scheduler clone.
 
     Initial running headroom is the native scalar and is released by existing
@@ -175,6 +176,8 @@ def estimate_native_budget_wait(candidate_input_tokens: int, resident_gpu_tokens
     the P90 scenario recomputes cold. Neither claims that an old match resides
     now. Page/gate formulas mirror FULL native admission; chunks and subsequent
     ratio changes are not simulated. Callback four-arg order is (n, GPU, host, c).
+    An observed pure-GPU incremental pin is used only for the initial fit with
+    no queued requests. Later lock releases still use the logical proxy below.
     """
     kind = "analytical_native_budget"
 
@@ -211,6 +214,10 @@ def estimate_native_budget_wait(candidate_input_tokens: int, resident_gpu_tokens
     resident = min(candidate_input_tokens, max(0, resident_gpu_tokens))
     pinned_proxy = min(resident, batch.evictable_gpu_tokens)
     flags = {"native_initial_budget", "frozen_ratio_full_request_proxy"}
+    initial_pin = pinned_proxy
+    if not waiting and initial_pinned_tokens is not None:
+        initial_pin = initial_pinned_tokens
+        flags.add("observed_initial_gpu_pin")
     running_ids = {req.request_id for req in running}
     if any(req.request_id not in running_ids for req in budget_members):
         flags.add("unmatched_native_budget_held")
@@ -294,7 +301,7 @@ def estimate_native_budget_wait(candidate_input_tokens: int, resident_gpu_tokens
             immediate_total -= reserved_total
             immediate_current -= reserved_current
         else:
-            if fits(candidate_gate, candidate_paged, immediate_total, immediate_current, pinned_proxy):
+            if fits(candidate_gate, candidate_paged, immediate_total, immediate_current, initial_pin):
                 return idle_ms, True, "ok"
         if locked and logical_total:
             flags.add("logical_release_proxy")

@@ -204,6 +204,9 @@ class CacheQuote:
     native_load_estimate: int = 0
     native_estimate_uncertain: bool = False
     uncertainty_reasons: tuple[str, ...] = ()
+    # Ready contiguous GPU prefix currently carrying no native FULL hard lock.
+    # None means an older engine did not observe it; zero is a measured value.
+    evictable_gpu_prefix_tokens: int | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "uncertainty_reasons")

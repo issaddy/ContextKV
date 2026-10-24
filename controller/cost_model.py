@@ -461,9 +461,16 @@ class CostModel:
                 idle_ms=setup_ms)
             if self.admission_estimator == "native_budget":
                 profile = self.calibration_metadata.get("profile_manifest") or {}
+                # This observation describes only the current contiguous GPU
+                # match, not resident tails after a host gap or future unlocks.
+                initial_pin = (quote.evictable_gpu_prefix_tokens
+                    if not quote.host_only_load_tokens
+                    and not quote.inflight_h2d_tokens and not quote.inflight_d2h_tokens
+                    and wait_args["resident_gpu_tokens"] == quote.ready_gpu_prefix_tokens
+                    else None)
                 wait = estimate_native_budget_wait(**wait_args, max_new_tokens=self.max_new_tokens,
                     page_size=(profile.get("cache_config") or {}).get("page_size"),
-                    queued_forward_fn=self._queued_workload_forward)
+                    queued_forward_fn=self._queued_workload_forward, initial_pinned_tokens=initial_pin)
             else:
                 wait = estimate_wait(**wait_args, output_mean=prior.mean_tokens, output_p90=prior.p90_tokens)
             queue_ms = wait.mean_ms

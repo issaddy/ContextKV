@@ -311,10 +311,31 @@ def test_native_quote_schema_roundtrips_workload_without_inventing_missing_lists
     )
     assert loads(CacheQuoteBatch, dumps(current)) == current
     old = asdict(current)
+    old["quotes"][0].pop("evictable_gpu_prefix_tokens")
     for name in ("gpu_capacity_tokens", "native_running_requests", "native_waiting_requests"):
         old.pop(name)
     legacy = loads(CacheQuoteBatch, json.dumps(old))
     assert legacy.native_running_requests is None and legacy.native_waiting_requests is None
+    assert legacy.quotes[0].evictable_gpu_prefix_tokens is None
+
+
+@pytest.mark.parametrize("extra,observed",[
+    ({},True),
+    ({"inflight_h2d_tokens":1},False),
+    ({"inflight_d2h_tokens":1},False),
+    ({"host_only_load_tokens":50,"native_load_estimate":50,"recoverable_prefix_tokens":100},False),
+])
+def test_native_budget_uses_observed_pin_only_for_unambiguous_gpu_match(extra,observed):
+    value=model()
+    value.admission_estimator="native_budget"
+    value.calibration_metadata["profile_manifest"]["cache_config"]={"page_size":4}
+    c=candidate()
+    q=quote(c,ready_gpu_prefix_tokens=50,evictable_gpu_prefix_tokens=0,**extra)
+    snapshot=replace(batch([q]),native_running_budget_requests=(),native_running_budget_tokens=0.,
+        native_new_token_ratio=.7,native_max_new_tokens_clip=4096)
+    result=value.predict_native(c,q,batch=snapshot)
+    assert ("observed_initial_gpu_pin" in result.waiting_reason) == observed
+    assert loads(CacheQuoteBatch,dumps(snapshot)).quotes[0].evictable_gpu_prefix_tokens == 0
 
 
 def test_native_budget_mode_is_optional_and_roundtrips_with_bound_page_size(tmp_path):

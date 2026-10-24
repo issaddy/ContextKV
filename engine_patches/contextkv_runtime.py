@@ -188,6 +188,7 @@ def peek_full_prefix(tree, key, full_component_type=0):
     key = key.page_aligned(tree.page_size)
     node = tree.root_node
     counts = dict(raw_match_tokens=0, ready_gpu_prefix_tokens=0,
+                  evictable_gpu_prefix_tokens=0,
                   recoverable_prefix_tokens=0, host_only_load_tokens=0,
                   inflight_h2d_tokens=0, inflight_d2h_tokens=0)
     gpu_contiguous = recoverable_contiguous = True
@@ -210,6 +211,8 @@ def peek_full_prefix(tree, key, full_component_type=0):
         recoverable_contiguous = recoverable_contiguous and (gpu_ready or host_ready)
         if gpu_contiguous:
             counts["ready_gpu_prefix_tokens"] += matched
+            if full.lock_ref == 0:
+                counts["evictable_gpu_prefix_tokens"] += matched
         if recoverable_contiguous:
             counts["recoverable_prefix_tokens"] += matched
             if host_ready and full.value is None and not h2d_pending:

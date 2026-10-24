@@ -74,7 +74,7 @@ def node(ids=(), *, gpu=True, host=False, h2d=None, d2h=None, node_id=1, key_cls
     return SimpleNamespace(
         id=node_id,key=key_cls(array("q",ids)),children={},parent=None,
         component_data=[SimpleNamespace(value=tuple(ids) if gpu else None,
-                                         host_value=tuple(ids) if host else None)],
+                                         host_value=tuple(ids) if host else None,lock_ref=0)],
         contextkv_h2d_pending_id=h2d,write_through_pending_id=d2h,
         load_back_pending_id=None,last_access_time=123,lock_ref=0,session_ref=0)
 
@@ -106,7 +106,8 @@ def compact_state(tree):
             current.parent.id if current.parent else None,
             copy.deepcopy(current.component_data[0].__dict__),
             current.contextkv_h2d_pending_id,current.write_through_pending_id,
-            current.last_access_time,current.lock_ref,current.session_ref))
+            current.last_access_time,current.lock_ref,current.session_ref,
+            current.component_data[0].lock_ref))
         pending.extend(current.children.values())
     return tuple(state)
 
@@ -165,6 +166,30 @@ def test_non_page_aligned_input_matches_partial_node_without_split(runtime):
     quote = runtime.peek_full_prefix(tree,StrictKey(array("q",range(10))))
     assert quote["raw_match_tokens"] == quote["ready_gpu_prefix_tokens"] == 8
     assert len(nodes[0].key) == 12
+    assert compact_state(tree) == before
+
+
+@pytest.mark.parametrize("hard_refs,expected",[(0,8),(1,0),(2,0)])
+def test_evictable_prefix_counts_partial_full_fragments_not_soft_session_refs(runtime,hard_refs,expected):
+    tree,nodes,_ = tree_chain((tuple(range(12)),{}),page_size=4)
+    nodes[0].component_data[0].lock_ref = hard_refs
+    nodes[0].session_ref = 3
+    before = compact_state(tree)
+    quote = runtime.peek_full_prefix(tree,StrictKey(array("q",range(10))))
+    assert quote["ready_gpu_prefix_tokens"] == 8
+    assert quote["evictable_gpu_prefix_tokens"] == expected
+    assert compact_state(tree) == before
+
+
+def test_evictable_prefix_excludes_locked_ancestors_and_stops_at_unready_gap(runtime):
+    tree,nodes,key = tree_chain(((1,2),{}),((3,4),{}),
+        ((5,6),{"gpu":False,"host":True}),((7,8),{}))
+    nodes[0].component_data[0].lock_ref = 1
+    before = compact_state(tree)
+    quote = runtime.peek_full_prefix(tree,key)
+    assert quote["ready_gpu_prefix_tokens"] == 4
+    assert quote["recoverable_prefix_tokens"] == 8
+    assert quote["evictable_gpu_prefix_tokens"] == 2
     assert compact_state(tree) == before
 
 

@@ -23,11 +23,48 @@ def batch(*, capacity=200, free=0, evictable=0, running=(), waiting=(), budget=N
         native_new_token_ratio=ratio,native_max_new_tokens_clip=clip)
 
 
-def estimate(snapshot, *, n=30, resident=0, maximum=10, page=4, lengths=(20,30), forward=None, queued=None, decode=None):
+def estimate(snapshot, *, n=30, resident=0, maximum=10, page=4, lengths=(20,30), forward=None, queued=None, decode=None, pin=None):
     return estimate_native_budget_wait(n,resident,maximum,snapshot,
         forward or (lambda n,p,c:(float(n-p),True)),
         decode or (lambda context,steps,c:(float(steps),True)),
-        queued or (lambda n,p,h,c:(float(n-p-h)+h*.1,True)),lengths,1.0,page)
+        queued or (lambda n,p,h,c:(float(n-p-h)+h*.1,True)),lengths,1.0,page,
+        initial_pinned_tokens=pin)
+
+
+def test_shared_prefix_observation_corrects_false_wait_against_native_full_gate():
+    # X/Y are equal 4096-token resident branches. The running peer locks X
+    # (shared) or Y (unrelated); the old scalar quote is identical in both.
+    active=req("peer",n=6144,g=1,maximum=512,allocated=6208,fixed=True)
+    snapshot=batch(capacity=16384,free=6080,evictable=4096,running=(active,))
+    native=extract_native_class(native_source("PrefillBudget"),"PrefillBudget")
+    legacy=estimate(snapshot,n=12288,resident=4096,maximum=512,page=64)
+    assert legacy.mean_ms > 1
+    for pin,accepted in ((0,True),(4096,False)):
+        original=native(SimpleNamespace(page_size=64,available_size=lambda:6080),
+            SimpleNamespace(supports_mamba=lambda:False,evictable_size=lambda:4096-pin))
+        original.total_offset=snapshot.native_running_budget_tokens
+        gate,_=original.check_prefill(extend_input_len=8192,total_tokens=8768,
+            max_new_tokens=512,input_tokens=8192,swa_host_hit_length=0,chunk_limit=None)
+        allocation=original.can_allocate_prefill(paged_input=8192,extend_input_len=8192,
+            max_new_tokens=512,chunk_limit=None)
+        revised=estimate(snapshot,n=12288,resident=4096,maximum=512,page=64,pin=pin)
+        assert bool(gate and allocation) == accepted == (revised.mean_ms == 1)
+        assert revised.supported
+        assert "observed_initial_gpu_pin" in revised.reason
+    assert estimate(snapshot,n=12288,resident=4096,maximum=512,page=64,pin=4096).mean_ms == legacy.mean_ms
+
+
+def test_initial_pin_is_not_reused_after_virtual_queue_admission_or_completion():
+    active=req("peer",n=100,g=1,maximum=20,allocated=100,fixed=True)
+    queued=req("queued",n=20,g=0,maximum=20,allocated=0,fixed=True)
+    snapshot=batch(capacity=200,free=80,evictable=20,running=(active,),waiting=(queued,))
+    assert estimate(snapshot,n=70,resident=20,pin=0) == estimate(snapshot,n=70,resident=20)
+    # Even observed zero pin does not grant the candidate newly-unlocked slots
+    # twice after a completion; the legacy release proxy remains unchanged.
+    snapshot=replace(snapshot,native_waiting_requests=())
+    old=estimate(snapshot,n=130,resident=20,maximum=20)
+    revised=estimate(snapshot,n=130,resident=20,maximum=20,pin=0)
+    assert old.mean_ms > 1 and revised.mean_ms == old.mean_ms
 
 
 def test_full_native_gate_matches_original_source_for_strict_boundary_and_pages():
