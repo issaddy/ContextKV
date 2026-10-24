@@ -6,14 +6,18 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | `cae9149`：1310 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-global-strategy-integration.log |
+| 最近完整 CPU 回归 | `af9e139`：1328 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-owned-local-scope-complete.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
-| Ruff / wheel | Ruff、diff检查通过；固定`cae9149`源码构建wheel/sdist，逐字核对85模块、29包内资产、342个sdist tracked文件、105测试/配置及13许可，未包含运行数据、模型或环境；runs/dist-global-strategy/asset-check.json |
+| Ruff / wheel | Ruff、diff检查通过；固定`af9e139`源码构建wheel/sdist，逐字核对85模块、29包内资产、345个sdist tracked文件、106测试/配置及13许可，未包含运行数据、模型或环境；runs/dist-owned-local-scope/asset-check.json |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
 | 冻结模拟测试矩阵 | 39 jobs / 117 轮成功 |
 | 继承主方法参数的开发集消融 | 15 jobs / 45 轮成功，不参与主方法选择 |
 | 官方 MTRAG 格式检查器 | 6 轮 fixture，errors / warnings 为空；只证明格式兼容 |
 | 固定 MTRAG 全量复算 | 842 任务 / 110 会话；Cloud 205 / 26；1053 处参考标记 |
+
+`af9e139`继续将显式本地scope与共同采样接到owned `--matrix`，以声明的显存比例/hostGB替代新模型误用旧7B固定值，按实际模型、池、cost scope校验后生成native清单；质量模板使用真实local-snapshot身份。旧13格自动构造器、greedy默认、质量gate与调度保持。18项新合同包含在全回归，独立38项审查通过；该owned切片尚未部署或真机验收，不能借上轮静态B0 probe追认。
+
+另完成[指定来源支持地址](source_local_support_design.md)离线原型：直接复用exact matcher/SpanRef，6项通用反例和43条已有来源坐标重放通过。固定作者代码6组见证进一步明确AFTG宽松定位与ReClaim隔离/训练边界。没有新增GPU、模型或在线生成协议，不构成语义质量或prefill节省。26文件研究快照独立归档于`runs/source-local-support-artifact-v1.tar.xz`，与核心wheel/sdist分开。
 
 `cae9149` 的全局审查切片完成[正式原生模型/采样入口](native_model_scope.md)、B6赢家别名去重复，以及已有Plan收益/margin/稳定期的事件投影。25项新模型合同、5项别名合同包含在完整回归；独立复核还重放四份旧真实B0/B1 manifest，全部兼容。旧冻结模拟矩阵的39 jobs是其实际历史执行数，不因新别名逻辑重写成更少job。
 
