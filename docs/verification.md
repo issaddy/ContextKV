@@ -6,7 +6,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | `4e689eb`：1179 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-admission-client-complete.log |
+| 最近完整 CPU 回归 | `16e4ef9`：1189 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-shared-pin-complete.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
 | Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 atomic_judge 模块/协议资产、table_focus、CRAFT 行文本与 GroUSE 源码，CRAFT 完整许可在 wheel 中；runs/build-atomic-focus.log；新增guided schema、query view、observation probe与client也已重建并逐字核对（runs/build-guided-wheel.log）；融合模块也已构建并逐字核对（runs/build-query-fusion-wheel.log） |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
@@ -44,6 +44,10 @@
 [369轮计时分解](b6_timing_diagnosis.md)和[联合问题模型](joint_optimization_model.md)进一步明确了下一项机制的证据要求。旧等待估计器不把候选服务插入peer事件，不能据此生成externality分数。[两peer受控fixture](peer_interference_validation.md)现已完成54个正式episode、18个暖机，216个target加48个历史seed，共264/264次模型调用；39文件公共归档经独立审计issues=0，来源为部署4e689eb，研究服务恢复且健康检查通过。27个正式配对的peer项非零，但自身与总flow-time排序全部同向；大APPEND的准入门槛不能被GPU命中消除，不据此新增planner收益结论。
 
 fixture本地19项合同包含6项真实typed客户端到Runtime.quote的快照测试；远端默认plan、只读原生quote预检与全部部署来源核验通过。容器没有pytest，远端CPU测试命令未成功，未为重复CPU测试安装额外包。v1/v2零生成工程失败、v3的72次MIXED_SNAPSHOT失败及48次已完成seed分别保存，不拼入v4成功分母。v4修复仅将A/R与两个peer分为2/1/1报价，不改原生快照协议。固定输出512的实验不作为自然EOS问答质量证据。
+
+`16e4ef9`在既有只读prefix遍历中增加匹配GPU前缀与FULL硬锁状态的交集，只修正可选native_budget、无waiting/host/pending情况下的即时fit。完整1189项及6子测试、Ruff、固定补丁正反应用与14文件语法检查通过；`runs/dist-shared-pin-complete/asset-check.json`逐字核对83个Python模块、29个包内资产、322个sdist tracked文件、97个测试/配置和13份许可。已在远端部署并验证323个Git blobs，新patch为`7a67fc7fea1eec99c3c578f061bc59dd442d0304101d2a90bda2730218b1333f`。9项独立fixture/恢复合同通过，默认plan不发生成请求。
+
+[共享前缀H200验证](shared_prefix_admission_validation.md)随后完成8个episode/32次调用；30文件完整公共导出保留全部预热与正式结果。正式3个共享状态纠正了旧等待分类，3个无关状态仍需等待；实际forward顺序支持这一作用路径。未运行新旧planner的自然问答策略对照，不宣布系统加速。supervisor恢复命令返回0后，首个health探针仍处加载期；随后同PID70413返回HTTP200，没有重启或重跑实验。
 
 ## 已完成的 H200 集成验证
 
