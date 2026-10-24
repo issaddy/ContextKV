@@ -186,7 +186,7 @@ e004 增量随后已用于真实 H200 的两组完整普通 EOS 41 轮观测/闭
 
 ## 可选 C：业务会话与 epoch 感知的 host 备份准入
 
-当前增量补丁 SHA256 为 `0ed0295274411b9fe60415e7f48604937d84d3fc894eabd9e143b0560de7488f`。这次新增主流程接线与 CPU 合同；**尚未部署 GPU 验收**，前面的 e004/历史硬件结果不能视为本补丁的新验证。
+当前增量补丁 SHA256 为 `0ed0295274411b9fe60415e7f48604937d84d3fc894eabd9e143b0560de7488f`。这次新增主流程接线与 CPU 合同；随后[首轮GPU机制验收](../docs/host_admission_validation.md)通过off/fixed两臂，真实观察到128页准入/64页跳过及新请求补齐。即时回访增加重算、累计D2H相同；conditioned压力分支与完整负载效果仍待验证。前面的e004结果保持其原实验归属。
 
 默认 `CONTEXTKV_HOST_ADMISSION=off`。此时原 `cache_config` 字典/hash、info/prepare 默认 wire 保持不变，旧 stage artifact 不因添加这个可选能力失配。`/context/metrics` 可独立展示策略配置和零/累计计数。显式启用例子：
 

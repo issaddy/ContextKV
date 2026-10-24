@@ -1,6 +1,6 @@
 # C：业务会话与版本感知的 host 备份准入
 
-2026-10-24。可选主流程已实现，默认关闭；固定源码应用、CPU 原生方法/action 顺序、HTTP 和恢复合同通过，尚未进行本扩展的 GPU 验收。当前补丁 SHA256 为 `0ed0295274411b9fe60415e7f48604937d84d3fc894eabd9e143b0560de7488f`。既有 epoch 退役结果不能替代本次新准入的验证。固定来源与获取摘要保存在 `runs/c-host-admission-review/sources/sources.json`。
+2026-10-24。可选主流程已实现，默认关闭；固定源码应用、CPU 原生方法/action 顺序、HTTP 和恢复合同通过，[首轮GPU机制验收](host_admission_validation.md)已通过off/fixed两臂：备份过滤、后续补齐和host退役观测均成立，但即时回访多重算4,032 tokens、累计D2H相同。conditioned压力分支与完整负载收益尚待验证。当前补丁 SHA256 为 `0ed0295274411b9fe60415e7f48604937d84d3fc894eabd9e143b0560de7488f`。既有 epoch 退役结果不能替代本次新准入的验证。固定来源与获取摘要保存在 `runs/c-host-admission-review/sources/sources.json`。
 
 ## 复用依据与实际接点
 

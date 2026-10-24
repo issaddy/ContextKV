@@ -6,7 +6,7 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | `5b2825f`：878 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-structure-mixed-byoc.log |
+| 最近完整 CPU 回归 | `58a0a08`：969 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-host-source-topic-http-final.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
 | Ruff / shell / wheel | Ruff 通过；wheel/sdist 构建通过，已逐字核对 atomic_judge 模块/协议资产、table_focus、CRAFT 行文本与 GroUSE 源码，CRAFT 完整许可在 wheel 中；runs/build-atomic-focus.log；新增guided schema、query view、observation probe与client也已重建并逐字核对（runs/build-guided-wheel.log）；融合模块也已构建并逐字核对（runs/build-query-fusion-wheel.log） |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
@@ -20,6 +20,10 @@
 `3b852aa` 同轮 Ruff 全仓通过；`runs/build-native-budget-judges.log` 的 wheel/sdist 构建通过，wheel 包含两种新增 judge、Lettuce 原生模板/协议/MIT 许可及 Granite Apache 归属，不包含运行数据或模型权重。真实 Granite 首轮另发现 Transformers 5 默认返回 BatchEncoding；`856a753` 显式请求 token ID 列表并增加相应合同测试，首轮失败记录与修复后结果分别保存。
 
 复核使用 .venv/bin/python -m pytest -q 和 .venv/bin/ruff check .；真实 tokenizer 专项设置 CONTEXTKV_TEST_HF_TOKENIZER=1。新增模块的定向测试记录应在下一次完整回归后统一更新总数。
+
+`58a0a08` 的完整回归包含业务会话host准入、准备恢复ACK、来源主题解析的两条CLI、离线来源范围及ConvSearch-R1原生格式。Ruff通过；`runs/dist-host-source-topic-http` 的wheel/sdist已核对六个相关模块、ConvSearch prompt/protocol/完整许可/NOTICE与EfficientAgent归属，未打入运行数据或权重。新增HTTP与本地tokenizer共享thinking参数，避免换模型时两种模板设置漂移。
+
+后续真实验证记录分别为[同源164轮标定比较](native_budget_targeted_validation.md)和[host准入机制](host_admission_validation.md)。前者降低回退但未证明稳定加速；后者证明固定过滤及新请求补齐，同时保留即时回访增加重算、累计D2H相同的负例。历史主题选择另完成82条记录、72次模型调用，结果解析与语义审查进行中，不据完成次数认定质量通过。
 
 ## 已完成的 H200 集成验证
 

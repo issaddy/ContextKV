@@ -123,4 +123,4 @@ ignored入口 `runs/run-native-budget-targeted-profile.py` 已完成真实采样
 
 合并复用现有 `profiling.stage_fit`：保留原四组完整 Measurements、compact stage 与各原 manifest，再追加新组，给每组传 `--profile-manifest GROUP=PATH`；所有 run_id 必须完整对应、共同 fingerprint/cache_config_hash 一致。原始 telemetry 逐请求压缩为现有 `group/case/index/warmup/timing/receipt` compact，不按时延排序，暖机不入训练。用冻结旧 stage artifact 作为 `--base-artifact` 可保留已有 decode、长度先验及其来源，输出新的 stage artifact 与 whole-cell OOF validation，不覆盖 v2。定向形状来自开发运行，补采仍是开发定向校准；须另用新采样/闭环检验误差，不能把同一测量标签同时当特征或独立验证。
 
-合并首次fit在冻结先验来源绑定处失败，`809a3c1`修复继承路径后保留原decode/经验长度与来源，成功生成624正式请求、46 forward cells的新artifact。两组冻结quotes的native-budget等待覆盖补齐到72/72，共同支持MAE只小幅变化，且一个未执行APPEND的idle setup仍不支持；新同源164轮闭环尚无结果。完整失败日志、artifact SHA、人群分母和解释边界见[补采与反事实验证](native_budget_targeted_validation.md)。
+合并首次fit在冻结先验来源绑定处失败，`809a3c1`修复继承路径后保留原decode/经验长度与来源，成功生成624正式请求、46 forward cells的新artifact。两组冻结quotes的native-budget等待覆盖补齐到72/72，共同支持MAE只小幅变化，且一个未执行APPEND的idle setup仍不支持；新同源164轮闭环已完成：回退30→14，但等会话均值两次变化方向相反，平均仅约−0.50%，SLO通过42→41，未证明稳定加速。完整失败日志、artifact SHA、人群分母和解释边界见[补采与反事实验证](native_budget_targeted_validation.md)。

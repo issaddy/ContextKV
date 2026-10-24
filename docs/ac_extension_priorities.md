@@ -6,7 +6,7 @@
 
 **当前直接依据。** `focus_refs`只在41轮中的附件纠正轮触发。已完成的开发正文扫描另发现两张无编号标题的明确限额表、一处带套餐条件的嵌套列表；现helper未覆盖这些结构。完整P3仍出现默认/套餐/对象范围混用。这里优先补足可见来源的结构，而不是再换一个通用判断提示。
 
-实施更新：可选 `table_structure_mode: explicit` 的CPU入口已完成，[全41轮复核](table_structure_validation.md)新增两张表、六条关系。套餐列表在实际冻结正文中已失去缩进，不能把候选lead称为仍有明确嵌套结构；本轮未猜其父级关系。真正保留标题/缩进的父路径通过通用合同测试，但真实cohort未激活，生成效果尚待验证。
+实施更新：可选 `table_structure_mode: explicit` 的CPU入口已完成，[全41轮复核](table_structure_validation.md)新增两张表、六条关系。套餐列表在实际冻结正文中已失去缩进，不能把候选lead称为仍有明确嵌套结构；本轮未猜其父级关系。六次冻结历史的真实生成已完成：新增结构修复了局部套餐数值，却仍存在产品范围混淆和缺少引用。真正保留标题/缩进的父路径通过通用合同测试，真实cohort未激活。这进一步推动[有来源的历史主题解析](source_grounded_query_resolution.md)，补足用户省略产品名时的检索语境；各项改善分别检查其额外开销。
 
 **复用与最小扩展。** 保留现有 `table_relations`原文span、CRAFT的MIT `build_row_texts`和当前词法focus；增加明确无编号表头、列表缩进/显式标题的父级路径。输出每项包含原对象、列/值、单位、父条件span、行内Evidence ID。只有原文结构支持的祖先作用域进入路径；无标记相邻注释仍标“scope unspecified”。不能从扁平缺失的colspan猜关系，也不把“同为MB”当作包含关系。TreeThinker的层次表头思想对应此缺口；其完整LLM树生成流程未复制，许可边界沿用既有核查。[TreeThinker论文§4](https://arxiv.org/html/2506.13405v1)、[已固定的CRAFT行表示](https://github.com/coral-lab-asu/CRAFT/blob/7c4be45bb292f4e050c4237b4141ccc9e91ebe30/src/craft_tabqa/core/text.py)。
 
@@ -18,7 +18,9 @@ BGE行评分可复用现有模型，但应在这项结构对照之后单独比�
 
 ## 2. C：按可恢复工作集和版本存活状态控制host写入
 
-**当前直接依据。** 大池矩阵发生约6–9GB D2H但没有实际host恢复；16K已有恢复却host池仍很充足，Ours/no-retire未显示明显收益。当前C控制旧软引用，尚未控制新写入。最值得增加的是受控的写入准入分支，而不是把retire ACK改称physical free。
+**当前直接依据。** 大池矩阵发生约6–9GB D2H但没有实际host恢复；16K已有恢复却host池仍很充足，Ours/no-retire未显示明显收益。此前C只控制旧软引用，未控制新写入。最值得增加的是受控的写入准入分支，而不是把retire ACK改称physical free。
+
+实施更新：`e95fdfd` 已将[可选准入](host_admission_design.md)接入真实原生 BackupKV 流程。最终采用业务会话去重与每 Req 累计成功准入页预算，适配 chunked prefill；失败分配不消耗额度，默认关闭。CPU原生路径、HTTP和恢复合同通过；[GPU off/fixed机制](host_admission_validation.md)已验证真实过滤与补齐，也观测到即时回访重算增加。条件压力及完整负载效果继续验证。
 
 **复用与最小扩展。** EfficientAgent固定Apache-2.0源码在首次已解析prefix lookup时，按新增完整chunk数与host工作集/容量压力决定是否跳过该请求的新备份，并将决定贯穿重入队；复制时避免重复保存已有chunk。[固定`get_num_new_matched_tokens`与`_pressure`](https://github.com/KunmingSHAO/efficientagent_release/blob/b21b12a07a3ccf473c82acf00820b1aa2073044b/efficientagent/kvtier/connector.py)、[原论文§3–4](https://arxiv.org/html/2609.33762v1)。
 
