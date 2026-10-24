@@ -45,6 +45,17 @@ def query_text(user_questions, mode="last3", *, generated_history=None):
     raise ValueError("unknown query representation")
 
 
+def rerank_query_text(turn, resolved_query, mode="resolved"):
+    """Choose only from pre-retrieval question views; no answers or labels."""
+    if mode == "resolved":
+        return resolved_query
+    if mode == "current":
+        return turn.query
+    if mode == "user_topic":
+        return user_topic_view(turn.user_questions)["text"]
+    raise ValueError("unknown rerank query mode")
+
+
 def reciprocal_rank_fusion(rankings, *, k=60):
     """Equal-weight RRF; duplicate IDs cannot vote twice within one ranking."""
     if k < 0:
@@ -184,7 +195,8 @@ class DenseIndex:
         return tuple(replace(self.contexts[int(i)], score=float(scores[i])) for i in indices)
 
 
-def search_variants(query, sparse, dense, encoder, reranker=None, *, candidate_k=50, rerank_k=50, rrf_k=60):
+def search_variants(query, sparse, dense, encoder, reranker=None, *, candidate_k=50, rerank_k=50, rrf_k=60,
+                    rerank_query=None):
     """Return reusable stage outputs; no qrels or generated answer arguments."""
     if candidate_k < 5 or rerank_k < 5:
         raise ValueError("candidate/rerank budgets must cover the final top five")
@@ -208,20 +220,22 @@ def search_variants(query, sparse, dense, encoder, reranker=None, *, candidate_k
     if reranker is not None:
         started = time.perf_counter()
         candidates = contexts[:rerank_k]
-        scores = reranker.score(query, candidates)
+        scoring_query = query if rerank_query is None else rerank_query
+        scores = reranker.score(scoring_query, candidates)
         if len(scores) != len(candidates):
             raise ValueError("reranker scores must align with candidate passages")
         reranked = tuple(replace(c, score=float(score)) for c, score in sorted(zip(candidates, scores),
                           key=lambda item: (-float(item[1]), item[0].document_id)))
         stages["hybrid_rerank"] = {"contexts": reranked,
             "elapsed_ms": sparse_ms+dense_ms+fusion_ms+(time.perf_counter()-started)*1000,
+            "rerank_query": scoring_query,
             "rerank_candidate_ids": [c.document_id for c in candidates]}
     return stages
 
 
 def search_current_topic(current_query, topic_query, sparse, dense, encoder, reranker=None, *,
-                         candidate_k=50, rerank_k=50, rrf_k=60):
-    """One fixed equal-RRF pool, scored entirely with the topic query.
+                         candidate_k=50, rerank_k=50, rrf_k=60, rerank_query=None):
+    """One fixed equal-RRF pool, scored with topic unless explicitly overridden.
 
     Retain separate raw/topic retrieval when the texts differ. Fusion is one
     sum over their original BM25/dense lists, never fusion of fused scores.
@@ -231,11 +245,12 @@ def search_current_topic(current_query, topic_query, sparse, dense, encoder, rer
     if dense is None or encoder is None:
         raise ValueError("current_topic_rrf requires a dense index and encoder")
     same_query = current_query == topic_query
+    scoring_query = topic_query if rerank_query is None else rerank_query
     started = time.perf_counter()
     if same_query:
         # Exact original path: one encode, sparse search, and (if requested) score.
         single = search_variants(topic_query, sparse, dense, encoder, reranker,
-            candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k)
+            candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k, rerank_query=scoring_query)
         source_stages = [("shared_current_topic", topic_query, single)]
         selected_stages = {key: value for key, value in single.items() if key in {"hybrid", "hybrid_rerank"}}
         fusion_ms, additional_current_ms = 0.0, 0.0
@@ -254,13 +269,14 @@ def search_current_topic(current_query, topic_query, sparse, dense, encoder, rer
         additional_current_ms = raw["hybrid"]["elapsed_ms"]
         if reranker is not None:
             candidates = contexts[:rerank_k]
-            scores = reranker.score(topic_query, candidates)
+            scores = reranker.score(scoring_query, candidates)
             if len(scores) != len(candidates):
                 raise ValueError("reranker scores must align with candidate passages")
             ranked = tuple(replace(c, score=float(score)) for c, score in sorted(zip(candidates, scores),
                 key=lambda item: (-float(item[1]), item[0].document_id)))
             selected_stages["hybrid_rerank"] = {"contexts": ranked,
                 "elapsed_ms": (time.perf_counter()-started)*1000,
+                "rerank_query": scoring_query,
                 "rerank_candidate_ids": [c.document_id for c in candidates]}
     trace = {"strategy": "current_topic_rrf", "weights": "equal per unique query and retriever",
         "current_query": current_query, "topic_query": topic_query,
@@ -277,7 +293,7 @@ def search_current_topic(current_query, topic_query, sparse, dense, encoder, rer
         "additional_current_retrieval_ms": additional_current_ms, "cross_query_fusion_ms": fusion_ms}
     for stage, values in selected_stages.items():
         reranked = stage == "hybrid_rerank"
-        values["query_fusion_trace"] = {**trace, "rerank_query": topic_query if reranked else None,
+        values["query_fusion_trace"] = {**trace, "rerank_query": scoring_query if reranked else None,
             "rerank_candidate_ids": values.get("rerank_candidate_ids", []),
             "rerank_pairs": len(values["contexts"]) if reranked else 0,
             "rerank_ms": values["elapsed_ms"]-selected_stages["hybrid"]["elapsed_ms"] if reranked else 0.0}
@@ -288,7 +304,7 @@ class HybridRetriever:
     """Shared P3 retrieval; source-qualified history resolution is explicit opt-in."""
     def __init__(self, sparse, dense, encoder, reranker=None, *, query_mode="current",
                  stage="hybrid_rerank", candidate_k=50, rerank_k=50, rrf_k=60,
-                 source_config=None, query_fusion="single", resolver=None):
+                 source_config=None, query_fusion="single", resolver=None, rerank_query_mode="resolved"):
         from adapters.query_resolution import SOURCE_MODES
         if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", *SOURCE_MODES}:
             raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
@@ -302,6 +318,10 @@ class HybridRetriever:
             raise ValueError("topic selector modes require resolver and current_topic_rrf")
         if stage == "hybrid_rerank" and reranker is None:
             raise ValueError("hybrid_rerank requires a loaded reranker")
+        if rerank_query_mode not in {"resolved", "current", "user_topic"}:
+            raise ValueError("unknown rerank query mode")
+        if stage != "hybrid_rerank" and rerank_query_mode != "resolved":
+            raise ValueError("rerank_query_mode requires hybrid_rerank")
         if candidate_k < 5 or rerank_k < 5 or rrf_k < 0:
             raise ValueError("retrieval budgets must cover five passages and a nonnegative RRF constant")
         if sparse.manifest["corpus_sha256"] != dense.manifest["corpus_sha256"]:
@@ -310,6 +330,7 @@ class HybridRetriever:
         self.corpus_snapshot_id = sparse.corpus_snapshot_id
         self.query_mode, self.stage = query_mode, stage
         self.query_fusion = query_fusion
+        self.rerank_query_mode = rerank_query_mode
         self.resolver = resolver
         self.requires_history_context = query_mode in SOURCE_MODES
         self.candidate_k, self.rerank_k, self.rrf_k = candidate_k, rerank_k, rrf_k
@@ -324,6 +345,7 @@ class HybridRetriever:
         manifest = {"kind": "bge_hybrid", "corpus_snapshot_id": self.corpus_snapshot_id,
             "query_mode": self.query_mode, "stage": self.stage, "top_k": 5,
             "query_fusion": self.query_fusion,
+            "rerank_query_mode": self.rerank_query_mode,
             "candidate_k": self.candidate_k, "rerank_k": self.rerank_k, "rrf_k": self.rrf_k,
             "sparse": self.sparse.manifest, "dense": self.dense.manifest,
             "encoder": self.encoder.manifest, "reranker": self.reranker.manifest if self.reranker else None,
@@ -339,6 +361,10 @@ class HybridRetriever:
             manifest.update(query_view=user_topic_manifest(), query_view_traces=list(self.query_view_traces))
         if self.resolver is not None:
             manifest.update(query_view=self.resolver.manifest, query_view_traces=list(self.query_view_traces))
+        if self.rerank_query_mode != "resolved":
+            manifest["query_view_traces"] = list(self.query_view_traces)
+        if self.rerank_query_mode == "user_topic":
+            manifest["rerank_query_view"] = user_topic_manifest()
         return manifest
 
     def retrieve_turn(self, turn, *, prior_context=None):
@@ -355,20 +381,26 @@ class HybridRetriever:
                 view = self.resolver.resolve(turn, prior_context)
             fusion_trace = None
             retrieval_error = None
+            scoring_query = None
             try:
                 query = view["text"] if view else query_text(turn.user_questions, self.query_mode)
+                scoring_query = rerank_query_text(turn, query, self.rerank_query_mode)
+                if view is None and self.rerank_query_mode != "resolved":
+                    view = {"mode": self.query_mode, "text": query}
                 if self.stage == "dense":
                     contexts = self.dense.search(query, self.encoder, top_k=5)
                 elif self.query_fusion == "current_topic_rrf":
                     stages = search_current_topic(turn.query, query, self.sparse, self.dense, self.encoder,
                         self.reranker if self.stage == "hybrid_rerank" else None,
-                        candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k)
+                        candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
+                        rerank_query=scoring_query)
                     contexts = stages[self.stage]["contexts"][:5]
                     fusion_trace = stages[self.stage]["query_fusion_trace"]
                 else:
                     stages = search_variants(query, self.sparse, self.dense, self.encoder,
                         self.reranker if self.stage == "hybrid_rerank" else None,
-                        candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k)
+                        candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
+                        rerank_query=scoring_query)
                     contexts = stages[self.stage]["contexts"][:5]
                 self.requests += 1
             except Exception as exc:
@@ -378,6 +410,8 @@ class HybridRetriever:
                 if view is not None:
                     self.query_view_traces.append({"task_id": turn.task_id, "conversation_id": turn.conversation_id,
                         "turn": turn.turn, **view,
+                        "rerank_query_mode": self.rerank_query_mode,
+                        "rerank_query": scoring_query if self.stage == "hybrid_rerank" else None,
                         "retrieval_status": "failed" if retrieval_error else "completed",
                         "retrieval_error": retrieval_error,
                         # Full local wall interval, including lock wait and query resolution.

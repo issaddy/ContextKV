@@ -34,6 +34,7 @@ class HybridRetrievalConfig:
     selector: dict | None = None
     selector_history_turns: int = 3
     selector_schema_mode: str = "static_v1"
+    rerank_query_mode: str = "resolved"
 
 
 def load_retriever_config(path):
@@ -65,6 +66,10 @@ def load_retriever_config(path):
         raise ValueError("selector_schema_mode is only used by explicit topic selector modes")
     if value.stage == "hybrid_rerank" and not value.reranker_path:
         raise ValueError("hybrid_rerank requires reranker_path")
+    if value.rerank_query_mode not in {"resolved", "current", "user_topic"}:
+        raise ValueError("unknown rerank query mode")
+    if value.stage != "hybrid_rerank" and value.rerank_query_mode != "resolved":
+        raise ValueError("rerank_query_mode requires hybrid_rerank")
     if value.dtype not in {"float32", "float16", "bfloat16"}:
         raise ValueError("unsupported model dtype")
     if min(value.batch_size, value.encoder_max_length, value.reranker_max_length, value.cpu_threads) < 1:
@@ -106,6 +111,7 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
         result = HybridRetriever(sparse, dense, encoder, reranker, query_mode=config.query_mode,
             stage=config.stage, candidate_k=config.candidate_k, rerank_k=config.rerank_k, rrf_k=config.rrf_k,
             query_fusion=config.query_fusion,
+            rerank_query_mode=config.rerank_query_mode,
             resolver=resolver,
             source_config={"path": str(Path(config_path).resolve()), "resolved": asdict(config),
                            "relative_path_base": str(Path.cwd())})

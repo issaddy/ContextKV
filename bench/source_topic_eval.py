@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 import time
 
-from adapters.hybrid_retrieval import search_current_topic
+from adapters.hybrid_retrieval import rerank_query_text, search_current_topic
 from adapters.mtrag import CLOUD_COLLECTION, OnlineMessage, OnlineTurn
 from adapters.query_resolution import PriorContext, PriorSource, SOURCE_MODES
 from adapters.retriever_factory import create_retriever, load_retriever_config
@@ -130,6 +130,7 @@ def evaluate_prepared(prepared, retriever, *, collection=CLOUD_COLLECTION):
         turn = _online_turn(query, collection)
         base = {'task_id': query.task_id, 'conversation_id': query.conversation_id, 'turn': query.turn,
             'query_mode': retriever.query_mode, 'query_fusion': retriever.query_fusion,
+            'rerank_query_mode': retriever.rerank_query_mode,
             'current_query': turn.query, 'actual_history': [asdict(m) for m in turn.history],
             'history_protocol': 'frozen_actual_history_with_strictly_prior_visible_sources_v1',
             'source_inventory_scope': prior.source_inventory_scope,
@@ -142,7 +143,8 @@ def evaluate_prepared(prepared, retriever, *, collection=CLOUD_COLLECTION):
             resolution_ms = (time.perf_counter()-started)*1000
             stages = search_current_topic(turn.query, view['text'], retriever.sparse, retriever.dense,
                 retriever.encoder, retriever.reranker if retriever.stage == 'hybrid_rerank' else None,
-                candidate_k=retriever.candidate_k, rerank_k=retriever.rerank_k, rrf_k=retriever.rrf_k)
+                candidate_k=retriever.candidate_k, rerank_k=retriever.rerank_k, rrf_k=retriever.rrf_k,
+                rerank_query=rerank_query_text(turn, view['text'], retriever.rerank_query_mode))
             for stage in expected_stages:
                 values = stages[stage]
                 yield {**base, 'stage': stage,

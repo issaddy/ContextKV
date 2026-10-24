@@ -111,6 +111,31 @@ def test_hybrid_only_does_not_score_and_requires_dense():
         search_current_topic("raw", "topic", sparse, None, None)
 
 
+@pytest.mark.parametrize("topic", ["raw", "topic"])
+def test_explicit_rerank_query_changes_only_scoring_not_raw_or_topic_recall(topic):
+    original = search_current_topic("raw", topic, *fixture(), candidate_k=5, rerank_k=5)
+    sparse, dense, encoder, reranker = fixture()
+    actual = search_current_topic("raw", topic, sparse, dense, encoder, reranker,
+        candidate_k=5, rerank_k=5, rerank_query="short scoring query")
+    assert actual["hybrid"]["contexts"] == original["hybrid"]["contexts"]
+    assert actual["hybrid_rerank"]["rerank_candidate_ids"] == original["hybrid_rerank"]["rerank_candidate_ids"]
+    assert encoder.calls == ([["raw"]] if topic == "raw" else [["raw"], ["topic"]])
+    assert len(reranker.calls) == 1 and reranker.calls[0][0] == "short scoring query"
+    assert len(reranker.calls[0][1]) == 5
+    trace = actual["hybrid_rerank"]["query_fusion_trace"]
+    assert trace["topic_query"] == topic and trace["rerank_query"] == "short scoring query"
+    assert actual["hybrid_rerank"]["rerank_query"] == "short scoring query"
+
+
+def test_explicit_single_route_rerank_query_preserves_original_union():
+    sparse, dense, encoder, reranker = fixture()
+    actual = search_variants("topic", sparse, dense, encoder, reranker,
+        candidate_k=5, rerank_k=5, rerank_query="raw")
+    assert sparse.calls == [(["topic"], 5)] and encoder.calls == [["topic"]]
+    assert reranker.calls == [("raw", actual["hybrid"]["contexts"][:5])]
+    assert actual["hybrid_rerank"]["rerank_query"] == "raw"
+
+
 def test_offline_dual_stages_share_trace_and_keep_original_question():
     sparse, dense, encoder, reranker = fixture()
     query = RetrievalQuery("unrelated-task-id", "arbitrary", 2,

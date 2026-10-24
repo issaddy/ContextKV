@@ -118,6 +118,7 @@ class Resolver:
 
 def retriever(events):
     return SimpleNamespace(query_mode='source_topic', query_fusion='current_topic_rrf', stage='hybrid_rerank',
+        rerank_query_mode='resolved',
         resolver=Resolver(events), sparse=object(), dense=object(), encoder=object(), reranker=object(),
         candidate_k=50, rerank_k=50, rrf_k=60, manifest={'fixture': True}, close=lambda: events.append(('close',)))
 
@@ -126,7 +127,8 @@ def search_fixture(events, *, fail_turn=None):
     def search(current, topic, sparse, dense, encoder, reranker, **budgets):
         turn = int(current.rsplit(' ', 1)[-1])
         events.append(('search', turn))
-        assert current == topic and budgets == {'candidate_k': 50, 'rerank_k': 50, 'rrf_k': 60}
+        assert current == topic and budgets == {'candidate_k': 50, 'rerank_k': 50, 'rrf_k': 60,
+                                                'rerank_query': topic}
         if turn == fail_turn:
             raise RuntimeError('retrieval fixture failure')
         contexts = tuple(OnlineContext(str(n), f'original passage {n}', score=float(50-n)) for n in range(50))
@@ -158,6 +160,25 @@ def test_shared_search_keeps_full_pool_and_selector_fallback_is_not_retrieval_fa
         assert value['top5']['requested_tasks'] == 3 and value['top5']['mean_recall'] == pytest.approx(2/3)
     for value in summary['completed_only_diagnostic']['methods'].values():
         assert value['top5']['requested_tasks'] == 2 and value['top5']['mean_recall'] == 1
+
+
+def test_source_offline_entry_honors_explicit_current_reranking(monkeypatch):
+    import bench.source_topic_eval as module
+    model = retriever([])
+    model.rerank_query_mode = 'current'
+    model.resolver.resolve = lambda turn, prior: {'text': turn.query+' topic expansion', 'status': 'resolved'}
+    calls = []
+
+    def search(current, topic, *args, **kwargs):
+        calls.append((current, topic, kwargs['rerank_query']))
+        return {stage: {'contexts': (), 'elapsed_ms': 0, 'query_fusion_trace': {},
+                        'rerank_candidate_ids': []} for stage in ('hybrid', 'hybrid_rerank')}
+
+    monkeypatch.setattr(module, 'search_current_topic', search)
+    results = list(evaluate_prepared(prepare_cohort(audits(), {'dev': ['s']}), model))
+    assert len(calls) == 3 and len(results) == 6
+    assert all(scoring == current and topic != current for current, topic, scoring in calls)
+    assert all(r['rerank_query_mode'] == 'current' for r in results)
 
 
 @pytest.mark.parametrize('execute', [False, True])

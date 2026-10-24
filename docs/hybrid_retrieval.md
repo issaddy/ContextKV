@@ -84,13 +84,27 @@ python -m controller.cli \
 
 原生生成使用同一份配置：在已有、经过 manifest 核对的 B0/B1 命令中，将 `--retriever-index` 替换为 `--retriever-config configs/retriever_hybrid.example.yaml`，其余模型、提示词、1024 输出上限与资源条件保持一致。矩阵顶层同样支持 `retriever_config`；配置文件及两个索引 manifest 纳入既有 `external_inputs` provenance。矩阵不接受方法私有检索覆盖；要比较不同检索器，应创建明确的检索实验组，并在每组内共享设置比较控制器/原生方法。
 
-`HybridRetriever.retrieve_turn`只接受 P3 的 `OnlineTurn`，直接从其 `user_questions` 创建查询，不读取助手回答、参考 rewrite、qrels 或原始任务对象。P3 会话仍等当前答案提交后才进入下一轮；答案历史由原有 runner 生成，状态恢复、证据归档和提交语义不变。线上暂不开放离线 `generated_history` 视角，以保持首轮实验选择明确。
+`HybridRetriever.retrieve_turn`只接受 P3 的 `OnlineTurn`。current/last3/all_user/user_topic 从 `user_questions` 创建查询；显式 source_topic/assistant_topic_unverified 则使用实际历史和已提交来源投影，详见[来源主题解析](source_grounded_query_resolution.md)。不读取参考 rewrite、qrels 或原始任务对象。P3 会话仍等当前答案提交后才进入下一轮；答案历史由原有 runner 生成，状态恢复、证据归档和提交语义不变。线上不开放离线 `generated_history` 视角。
 
-模型与索引每个 run 初始化一次，`initialization_seconds` 单列；逐轮复用同一模型实例。并发会话对这一模型对的调用以一把锁串行，锁排队也发生在 `t_arrive → t_retrieval_done` 之间。runner 已有的 `time_origin=pipeline_arrival` 以及 `t_arrive → commit` 完整响应指标覆盖检索、融合、重排序、排队和生成，因此没有再加一份检索时间。模型初始化与结束释放在逐轮计时之外；run 结束显式删除本进程模型并释放本进程闲置 CUDA allocator，避免下一矩阵 job 残留检索模型显存。
+模型与索引每个 run 初始化一次，`initialization_seconds` 单列；逐轮复用同一模型实例。并发会话对这一模型对的调用以一把锁串行，锁排队也发生在 `t_arrive → t_retrieval_done` 之间。runner 已有的 `time_origin=pipeline_arrival` 以及 `max(t_response_done,t_commit)-t_arrive` 完整响应指标覆盖检索、融合、重排序、排队和生成，因此没有再加一份检索时间。模型初始化与结束释放在逐轮计时之外；run 结束显式删除本进程模型并释放本进程闲置 CUDA allocator，避免下一矩阵 job 残留检索模型显存。
 
 encoder/reranker 与 SGLang 共用 GPU 时，其他会话检索可能与生成竞争；这属于真实系统成本。当前锁只限制检索模型的并发，不阻断 SGLang。正式报告要同时给完整响应时延、检索阶段耗时、失败/未完成率、GPU 资源条件与检索模型驻留；已有空闲 GPU 成本标定不能自动当作新并发负载已验证。
 
 接线测试运行两种真实 CLI 路径（测试模型与 fake HTTP），验证相同前五、每轮实际生成历史、无参考答案进入查询、每 run 只加载一次、模型释放、矩阵来源绑定以及检索排队计时。这些测试仅说明合同正确；真实 P3 的回答质量与整体成本仍需独立测量。
+
+## 可选的召回/重排查询分离
+
+共享配置新增 `rerank_query_mode`，仅在 `stage: hybrid_rerank` 生效：
+
+- `resolved`（默认）：继续用召回的 topic/解析后查询重排，保留原行为。
+- `current`：候选池仍按原 query_mode/query_fusion 产生，只用当前原问题评分。
+- `user_topic`：候选池不变，评分用已有确定性 user_topic 视图，仅从用户问题取词。
+
+例如在已有 `user_topic + current_topic_rrf` 配置中增加 `rerank_query_mode: current`，仍召回原问题和 user_topic 两路、统一取 RRF 前50；只改变同50段分类时的查询。不会把当前问题或历史替换成生成答案，不增加重排候选数量，不按相关性标签选择模式。controller/native P3 与 `bench.source_topic_eval` 共用这一选择函数。
+
+底层 `search_variants` / `search_current_topic` 接受 `rerank_query=None`；None 分别保留原 query/topic，显式字符串仅传给 reranker。输出及 fusion trace 记录实际 `rerank_query`；主链 trace 还记录 `rerank_query_mode`，即使后续 encoder/reranker 失败也保留已产生的 query resolution 原响应、耗时与 retrieval error，原异常继续向外抛出。`retrieval_elapsed_ms` 是包括锁等待、解析和排名的本地墙时，resolver 原有 `elapsed_ms` 仍只表示解析阶段，不能两者相加。
+
+本功能由[八方法冻结检索诊断](frozen_query_retrieval_validation.md)中的“候选50较好、重排top5退化”触发。它是可选工程能力，尚未证明新模式优于原设置；默认不变。ConvSearch 仍未接入在线 factory，本轮仅用其已冻结输出设计同41轮四臂重排试验。
 
 ## 可证伪假设与后续改进
 

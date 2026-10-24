@@ -228,6 +228,48 @@ def test_optional_user_topic_query_is_shared_with_encoder_reranker_and_manifest(
         assert "Misleading" not in json.dumps(trace["query_fusion_trace"])
 
 
+@pytest.mark.parametrize("query_mode,fusion,rerank_mode", [
+    ("user_topic", "single", "current"), ("user_topic", "current_topic_rrf", "current"),
+    ("current", "single", "user_topic"), ("user_topic", "single", "resolved")])
+def test_factory_separates_recall_and_rerank_views_without_changing_generation_input(
+        retriever_config, query_mode, fusion, rerank_mode):
+    from adapters.mtrag import OnlineMessage
+    value = yaml.safe_load(retriever_config.read_text())
+    value.update(query_mode=query_mode, query_fusion=fusion, rerank_query_mode=rerank_mode)
+    retriever_config.write_text(yaml.safe_dump(value))
+    retriever = create_retriever("P3", config_path=retriever_config)
+    original = OnlineSession(load_rows(FIXTURE)[:3], "P3").current()
+    turn = replace(original, query="One last thing, where is the python SDK?", turn=2,
+        history=(OnlineMessage("user", "How do I use Acme Store?"),
+                 OnlineMessage("assistant", "WrongProduct has an invented 100 MB limit")))
+    topic = turn.query+"\nUser topic context: Acme Store"
+    try:
+        output = retriever.retrieve_turn(turn)
+        assert output.query == turn.query and output.history == turn.history
+        expected_recall = topic if query_mode == "user_topic" else turn.query
+        expected_scoring = turn.query if rerank_mode == "current" else topic
+        assert retriever.encoder.inputs == ([turn.query, topic] if fusion == "current_topic_rrf" else [expected_recall])
+        assert retriever.reranker.inputs == [expected_scoring]
+        trace, = retriever.manifest["query_view_traces"]
+        assert trace["text"] == expected_recall and trace["rerank_query"] == expected_scoring
+        assert trace["rerank_query_mode"] == retriever.manifest["rerank_query_mode"] == rerank_mode
+        assert "WrongProduct" not in expected_scoring
+        assert len(output.contexts) == 5
+    finally:
+        retriever.close()
+
+
+@pytest.mark.parametrize("stage,mode", [("dense", "current"), ("hybrid", "user_topic"),
+                                       ("hybrid_rerank", "not-a-mode")])
+def test_invalid_rerank_query_policy_fails_before_loading_models(retriever_config, stage, mode):
+    value = yaml.safe_load(retriever_config.read_text())
+    value.update(stage=stage, rerank_query_mode=mode)
+    retriever_config.write_text(yaml.safe_dump(value))
+    with pytest.raises(ValueError, match="rerank"):
+        create_retriever("P3", config_path=retriever_config)
+    assert LocalModelFixture.instances == []
+
+
 @pytest.mark.parametrize("mode,stage", [("current", "hybrid_rerank"), ("user_topic", "dense")])
 def test_query_fusion_configuration_rejects_ambiguous_stages_before_model_loading(retriever_config, mode, stage):
     value = yaml.safe_load(retriever_config.read_text())
