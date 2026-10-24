@@ -132,6 +132,8 @@ class AtomicJudgeClient:
     """Reuse native_judge's raw transport, not its native scoring templates."""
     def __init__(self, config: NativeJudgeConfig, *, transport=None, token_counter=None,
                  output_mode="unconstrained"):
+        if config.output_constraint is not None:
+            raise ValueError("atomic judging uses its own output_mode, not a native output_constraint")
         if output_mode not in {"unconstrained", "json_schema_v1"}:
             raise ValueError("unsupported atomic output_mode")
         self.transport = NativeJudgeClient(config, transport=transport, token_counter=token_counter)

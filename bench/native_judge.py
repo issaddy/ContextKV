@@ -37,6 +37,11 @@ explain the missing basis in the feedback and put NA in the final Result field i
 of a number. Difficulty, uncertainty about a claim, a missing citation or an empty
 answer alone do not make the criterion inapplicable. Otherwise use the 1–5 rubric."""
 
+# SGLang's top-level regex uses XGrammar's regular subset (no lookahead).
+# It prevents EOS before a numeric Result; the existing parser still rejects
+# repeated markers. Keep feedback unrestricted, including Unicode and newlines.
+SELENE_NUMERIC_REGEX = r"\s*\*\*Reasoning:\*\*\s*\S[\s\S]*\*\*Result:\*\*\s*[1-5]\s*"
+
 # Each criterion has its own anchors. The transport records this complete bundle,
 # not just a version tag, so later acceptance can compare the actual protocol.
 RUBRICS = {
@@ -101,6 +106,7 @@ class NativeJudgeConfig(JudgeConfig):
     base_family: str = ""
     na_policy: str = "native_numeric_only"
     context_window: int | None = None
+    output_constraint: str | None = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -112,6 +118,10 @@ class NativeJudgeConfig(JudgeConfig):
             raise ValueError("unsupported NA policy")
         if self.context_window is not None and self.context_window <= self.max_tokens:
             raise ValueError("context_window must exceed the judge output budget")
+        if self.output_constraint not in {None, "native_regex_v1"}:
+            raise ValueError("unsupported native output_constraint")
+        if self.output_constraint and (self.protocol != "selene_absolute_v1" or self.na_policy != "native_numeric_only"):
+            raise ValueError("native_regex_v1 requires Selene with native_numeric_only")
 
 
 def parse_native_result(text: str, protocol: str, *, na_policy: str = "native_numeric_only") -> dict:
@@ -158,6 +168,15 @@ class NativeJudgeClient:
             "script_history_mismatch": "not_separately_scored",
             "validation_status": "engineering_adapter_not_meta_validated",
         }}
+        if config.output_constraint is None:
+            # Preserve the original unconstrained protocol's recorded identity.
+            self.metadata.pop("output_constraint")
+        else:
+            self.metadata["protocol_manifest"]["output_constraint"] = {
+                "version": config.output_constraint, "request_field": "regex",
+                "regex": SELENE_NUMERIC_REGEX, "backend_contract": "sglang_top_level_regex_xgrammar",
+                "meaning": "numeric Result required before EOS; duplicate markers remain parser failures; no semantic guarantee",
+            }
         key = os.environ.get(config.api_key_env)
         self.client = httpx.AsyncClient(base_url=config.base_url.rstrip("/") + "/",
             headers={"Authorization": f"Bearer {key}"} if key else {},
@@ -189,6 +208,8 @@ class NativeJudgeClient:
 
     async def complete(self, messages: list[dict], *, response_format: Mapping | None = None) -> dict:
         """One raw HTTP completion; preserves response details even when unusable."""
+        if response_format is not None and self.config.output_constraint is not None:
+            raise ValueError("response_format and native output_constraint cannot be combined")
         result = {"status": "failed", "raw_text": None, "finish_reason": None, "usage": None}
         try:
             count = self.token_counter(messages) if self.token_counter else None
@@ -201,8 +222,11 @@ class NativeJudgeClient:
             if response_format is not None:
                 request["response_format"] = dict(response_format)
                 result["requested_response_format"] = dict(response_format)
+            if self.config.output_constraint is not None:
+                request["regex"] = SELENE_NUMERIC_REGEX
+                result["requested_regex"] = SELENE_NUMERIC_REGEX
             response = await self.client.post("chat/completions", json=request)
-            if response_format is not None:
+            if response_format is not None or self.config.output_constraint is not None:
                 result.update(http_status=response.status_code, raw_http_response=response.text)
             response.raise_for_status()
             raw = response.json()

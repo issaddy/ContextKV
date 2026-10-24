@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 import json
+import re
 import sys
 from types import SimpleNamespace
 
@@ -10,7 +11,8 @@ import pytest
 
 from bench.judge import DIMENSIONS
 from bench.native_judge import (
-    DATA_POLICY, NativeJudgeClient, NativeJudgeConfig, evaluate_file, main, parse_native_result,
+    DATA_POLICY, SELENE_NUMERIC_REGEX, NativeJudgeClient, NativeJudgeConfig, evaluate_file,
+    main, parse_native_result,
 )
 from controller.templates import token_hash
 
@@ -89,7 +91,7 @@ async def test_full_evidence_history_binding_and_native_metadata_survive():
         assert "Full visible body 11" in text and "A prior claim" in text
         assert "Current source" in text and "10 MB [E_abc]" in text
         assert "FORBIDDEN" not in text and "Reference answer:" not in text
-        assert "response_format" not in request and request["stream"] is False
+        assert "response_format" not in request and "regex" not in request and request["stream"] is False
     assert row["scores"] == dict.fromkeys(DIMENSIONS, .75)
     assert row["status"] == "success" and row["source"] == "offline_judge"
     assert row["generation_measurement_kind"] == "simulation"
@@ -103,6 +105,7 @@ async def test_full_evidence_history_binding_and_native_metadata_survive():
     assert set(meta["protocol_manifest"]["rubrics"]) == set(DIMENSIONS)
     assert meta["protocol_manifest"]["native_templates"]["revision"] == "418c5ce2d8c4d89c5bd971ce60c7589eb8f9d8de"
     assert meta["protocol_manifest"]["data_policy"] == DATA_POLICY
+    assert "output_constraint" not in meta and "output_constraint" not in meta["protocol_manifest"]
 
 
 @pytest.mark.asyncio
@@ -280,3 +283,82 @@ async def test_protocol_metadata_changes_when_policy_changes():
         await second.aclose()
     with pytest.raises(ValueError, match="base_model"):
         replace(original, base_family="")
+
+
+@pytest.mark.parametrize("overrides", [
+    {"output_constraint": "unknown"},
+    {"output_constraint": "native_regex_v1", "protocol": "prometheus_absolute_v1"},
+    {"output_constraint": "native_regex_v1", "na_policy": "explicit_na_v1"},
+])
+def test_regex_constraint_rejects_incompatible_protocol(overrides):
+    with pytest.raises(ValueError):
+        config(**overrides)
+
+
+@pytest.mark.asyncio
+async def test_opt_in_regex_preserves_full_messages_and_records_changed_evaluator_identity():
+    from bench.quality_acceptance import evaluator_identity, frozen_evaluator_matches
+
+    requests = []
+    def serve(request):
+        requests.append(json.loads(request.content))
+        return response()
+    plain = NativeJudgeClient(config())
+    constrained = NativeJudgeClient(config(output_constraint="native_regex_v1"),
+                                   transport=httpx.MockTransport(serve))
+    try:
+        row = await constrained.evaluate(audit())
+        for dimension, request in zip(DIMENSIONS, requests):
+            assert request["messages"] == plain.messages(audit(), dimension)
+            assert request["regex"] == SELENE_NUMERIC_REGEX
+            assert "response_format" not in request
+            assert request["max_tokens"] == plain.config.max_tokens
+            grade = row["native_results"][dimension]
+            assert grade["requested_regex"] == SELENE_NUMERIC_REGEX
+            assert grade["http_status"] == 200 and json.loads(grade["raw_http_response"])["id"] == "response-id"
+        assert row["status"] == "success"
+        assert row["judge"]["protocol_manifest"]["output_constraint"]["regex"] == SELENE_NUMERIC_REGEX
+        original_row = row | {"judge": plain.metadata}
+        generator = {"model": "qwen", "revision": "other"}
+        assert evaluator_identity(row, generator) != evaluator_identity(original_row, generator)
+        frozen = {"kind": "offline_judge", "judge": plain.metadata, "reference_targets_supplied": False}
+        assert not frozen_evaluator_matches(frozen, row)
+        assert frozen_evaluator_matches(frozen | {"judge": constrained.metadata}, row)
+        with pytest.raises(ValueError, match="cannot be combined"):
+            await constrained.complete([], response_format={"type": "json_object"})
+        assert len(requests) == 5
+    finally:
+        await plain.aclose()
+        await constrained.aclose()
+
+
+@pytest.mark.asyncio
+async def test_regex_is_not_used_to_repair_or_retry_invalid_server_output():
+    duplicate = "**Reasoning:** First **Result:** 1 actually **Result:** 5"
+    # This supported regular subset deliberately leaves marker uniqueness to
+    # the parser; constraining structure is not a replacement for validation.
+    assert re.fullmatch(SELENE_NUMERIC_REGEX, duplicate)
+    calls = []
+    responses = iter([response(duplicate), response(finish="length"),
+        response("**Reasoning:** No result"), response("**Reasoning:** **Result:** 4"),
+        httpx.Response(400, text="regex unsupported")])
+    def serve(request):
+        calls.append(request)
+        return next(responses)
+    client = NativeJudgeClient(config(output_constraint="native_regex_v1"),
+                               transport=httpx.MockTransport(serve))
+    try:
+        row = await client.evaluate(audit())
+    finally:
+        await client.aclose()
+    assert len(calls) == 5 and row["status"] == "failed"
+    assert row["scores"] == dict.fromkeys(DIMENSIONS)
+    assert row["native_results"]["correctness"]["raw_text"] == duplicate
+    assert row["native_results"]["groundedness"]["finish_reason"] == "length"
+    assert row["native_results"]["citations"]["raw_http_response"] == "regex unsupported"
+
+
+def test_native_constraint_cannot_change_atomic_transport_silently():
+    from bench.atomic_judge import AtomicJudgeClient
+    with pytest.raises(ValueError, match="its own output_mode"):
+        AtomicJudgeClient(config(output_constraint="native_regex_v1"))

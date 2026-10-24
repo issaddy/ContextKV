@@ -99,6 +99,22 @@ Gate0 将 `E_8312203498` 用于准确的 Avoid using attachments 原句，将 `E
 
 若在新13格评分开始前决定改善**格式可靠性**，最小可复用方案是保留同一 Selene 权重、全部材料、原五维 rubric、temperature0、1536预算和严格解析器，只新增明确版本的“原生格式约束解码”协议：要求 Reasoning 后必须有唯一最终 Result1–5。固定 stock 的 `ChatCompletionRequest` 已支持顶层 `regex` / `ebnf`；`response_format` 的基本类型则为 text/json_object/json_schema，不能虚构 `response_format.type=regex`。可直接复用这个已有服务能力，而不是换 judge 或再训练。具体约束及请求字段必须作为新协议记录，完整新矩阵各臂一律应用；不能只约束本轮失败条目后与旧分混合。[SGLang 固定官方源码](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/entrypoints/openai/protocol.py#L800-L881)
 
-这仍是尚未实现/验证的候选，约束解码会改变生成分布；要先做纯工程的格式合同检查，再按预先声明方案全量执行并保留任何 length/格式失败。它只处理输出结构，不能解决已实证的来源错绑、对象范围混淆或评价器打分偏高，不应以“全绿格式”为新质量贡献。
+约束解码会改变生成分布；采用时必须按预先声明方案全量执行并保留任何 length/格式失败。它只处理输出结构，不能解决已实证的来源错绑、对象范围混淆或评价器打分偏高，不应以“全绿格式”为新质量贡献。
+
+### 可选原生格式约束的工程验证
+
+后续实现已在 `NativeJudgeConfig` 中增加可选 `output_constraint: native_regex_v1`，仅用于 Selene 的 `native_numeric_only`。默认省略时，请求与已冻结的 metadata 保持原样。启用时，同一原生模板、完整材料、rubric 与输出预算保持不变，通过 SGLang 顶层 `regex` 传入：
+
+```text
+\s*\*\*Reasoning:\*\*\s*\S[\s\S]*\*\*Result:\*\*\s*[1-5]\s*
+```
+
+完整模式及请求字段记录在 `protocol_manifest.output_constraint`，每个调用保留 `requested_regex`、HTTP 状态、原始 HTTP 响应。新旧约束对应不同 evaluator 身份，不允许混用冻结评分协议。原解析器未改；服务拒绝约束、length、重复 marker 等仍产生 null，没有重试或从正文猜分。Atomic JSON 诊断使用自身 `output_mode`，不能混入这个原生格式约束。
+
+固定 XGrammar **0.2.7** 不支持负向前瞻，因此没有引入手写自动机来禁止理由中的 Result 字样。上述模式约束完整输出末尾的数字 Result，唯一 marker 仍由原严格解析器检查；它也不能保证无界理由在预算内结束。[固定转换器源码](https://github.com/mlc-ai/xgrammar/blob/v0.2.7/cpp/regex_converter.cc#L257-L284)
+
+H200 容器中的 **CPU-only** 验证使用真实固定 Selene tokenizer、128256 词表及模型配置中的全部停止 token **128001 / 128008 / 128009**。8 类合同包括正常、多行中文、缺 Result、只有 marker、空理由、重复 marker、超范围和尾随正文。缺失与非法末尾状态均不能接受这三个停止 token；重复 marker 可被 grammar 接受，但严格解析器拒绝。随后将旧615份 `raw_text` 用真实 tokenizer 重新编码后重放（旧评分记录不含服务原始 output IDs）：609份有效输出全部兼容，6份缺Result输出全部不允许EOS，逐项 mask/accept-token 一致，issues为空。XGrammar 编译出现负字符类非ASCII裁剪提示，真实中文合同与615份输入均通过上述检查；不将有限兼容检查宣称为所有Unicode语言证明。
+
+原始验证保存在 `runs/native-regex-prep/cpu_check.py` 与 `cpu-results/{summary.json,records.jsonl}`，归档 SHA256 为 `a0efc3162726bda72d4920790ac3a172a863d0583d12c9a869b54811ff7909b1`。这些检查没有模型推理、没有改变旧分数；约束后的真实新评分完成率仍待完整新 cohort 验证。本地原生/原子/质量绑定的118项测试通过，覆盖默认兼容、协议区分、全材料不变与失败保留。
 
 B6 选择需要完整、同源、同预算的新开发矩阵及各方法实际答案的质量绑定；本批旧 r1 分数只描述本批答案。正式结论继续区分固定自动评价器结果和技术方案 §11.5 要求的风险层人工盲审，test仍冻结。本轮没有修改质量gate、执行重试、读取test问答或生成任何人工分数。
