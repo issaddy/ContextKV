@@ -60,6 +60,12 @@ def validate_matrix(spec):
         raise ValueError("methods and valid protocols are required")
     if any(c < 1 for c in spec["concurrency"]) or not spec["concurrency"] or not spec["seeds"]:
         raise ValueError("nonempty positive concurrency and seeds are required")
+    if "repetitions" in spec:
+        repetitions = spec["repetitions"]
+        if (not isinstance(repetitions, list) or not repetitions
+                or any(type(r) is not int or r < 1 for r in repetitions)
+                or len(set(repetitions)) != len(repetitions)):
+            raise ValueError("repetitions must be distinct positive integer run IDs, separate from seeds")
     if "P3" in spec["protocols"] and not (spec.get("corpus") or spec.get("retriever_index") or spec.get("retriever_config")):
         raise ValueError("P3 requires corpus, retriever_index or retriever_config")
     if spec.get("retriever_config") and (spec.get("corpus") or spec.get("retriever_index")):
@@ -182,6 +188,9 @@ def matrix_jobs(spec, *, split="dev", frozen=None, ablations_only=False):
                          "ablation_of": ablation_parent})
             if method.get("server_profile") is not None:
                 jobs[-1]["server_profile"] = method["server_profile"]
+    if "repetitions" in spec:
+        jobs = [{**deepcopy(job), "job_id": f"{job['job_id']}-r{repetition}", "repetition": repetition}
+                for repetition in spec["repetitions"] for job in jobs]
     return jobs
 
 
@@ -253,45 +262,44 @@ class QualityNotReady(ValueError):
 
 
 def quality_evidence_files(spec):
-    """Bind saved grading inputs once at freeze; none are generation inputs."""
+    """Bind saved grading files once at freeze; none are generation inputs."""
     path = spec.get("tuning", {}).get("quality_evidence")
     if path is None:
         return set()
     value = json.loads(Path(path).read_text())
-    files = {str(path), value.get("frozen_protocol")}
-    for method in value.get("methods", {}).values():
-        files.update(method.get(k) for k in ("run", "audit", "scores", "manifest", "server_record"))
+    files = {str(path)}
+    configs = [value]
+    if value.get("schema_version") == 2:
+        paths = {block["quality_config"] for block in value["blocks"]}
+        files.update(paths)
+        configs = [json.loads(Path(p).read_text()) for p in paths]
+    for config in configs:
+        files.add(config.get("frozen_protocol"))
+        for method in config.get("methods", {}).values():
+            files.update(method.get(k) for k in ("run", "audit", "scores", "manifest", "server_record"))
     return {p for p in files if p}
 
 
-def quality_gate_from_evidence(spec, results):
-    """Finite single-cell methods use real answer-bound independent dev scoring."""
+def _quality_tasks(spec):
     from adapters.mtrag import CLOUD_COLLECTION
-    from bench.quality_acceptance import evaluate
-
-    tuning = spec["tuning"]
-    if "quality_eligible" in tuning:
-        raise ValueError("require_quality_evidence rejects a supplied boolean quality gate")
-    if not tuning.get("quality_evidence"):
-        raise ValueError("require_quality_evidence needs the saved quality_acceptance config; no B6 is frozen")
-    by_method = {row["method"]: row for row in results}
-    if len(by_method) != len(results) or any(row["candidate_index"] != 0 for row in results):
-        raise ValueError("required quality evidence currently supports one declared job per method, not pooled repetitions")
-    value = json.loads(Path(tuning["quality_evidence"]).read_text())
-    constraints = tuning["quality_constraints"]
-    if (value.get("scope") != "dev" or value.get("reference") != constraints["reference"]
-            or value.get("epsilon") != constraints["epsilon"] or not value.get("frozen_protocol")
-            or set(value.get("methods", {})) != set(by_method)
-            or Path(value.get("split_manifest", "")).resolve() != Path(spec["split_manifest"]).resolve()):
-        raise ValueError("quality evidence must match all declared jobs, dev split, reference, epsilon and frozen evaluator protocol")
     split = set(json.loads(Path(spec["split_manifest"]).read_text())["dev"])
     cohort = [row for row in load_rows(spec["input"]) if row["conversation_id"] in split
               and (spec.get("domain", "cloud") != "cloud" or row["Collection"] == CLOUD_COLLECTION)]
     if spec.get("limit_sessions"):
         selected = set(sorted({r["conversation_id"] for r in cohort})[:spec["limit_sessions"]])
         cohort = [r for r in cohort if r["conversation_id"] in selected]
-    expected_tasks = {row["task_id"] for row in cohort}
-    for method, result in by_method.items():
+    return {row["task_id"] for row in cohort}
+
+
+def _evaluate_bound_quality(spec, by_name, value, reference, expected_tasks):
+    """Shared file/cohort/evaluator contract for legacy methods and block job IDs."""
+    from bench.quality_acceptance import evaluate
+    if (value.get("scope") != "dev" or value.get("reference") != reference
+            or value.get("epsilon") != spec["tuning"]["quality_constraints"]["epsilon"]
+            or not value.get("frozen_protocol") or set(value.get("methods", {})) != set(by_name)
+            or Path(value.get("split_manifest", "")).resolve() != Path(spec["split_manifest"]).resolve()):
+        raise ValueError("quality evidence must match all declared jobs, dev split, reference, epsilon and frozen evaluator protocol")
+    for method, result in by_name.items():
         declared = value["methods"][method]
         bindings = [("run", "raw_output"), ("audit", "audit_output")]
         if result.get("run_manifest"):
@@ -310,6 +318,9 @@ def quality_gate_from_evidence(spec, results):
             raise ValueError(f"quality run does not retain the complete declared development cohort: {method}")
         if any((row.get("online_turn") or {}).get("protocol") != result["protocol"] for row in turns):
             raise ValueError(f"quality run protocol differs from its declared job: {method}")
+        if ("repetition" in result
+                and payload.get("experiment_protocol", {}).get("repetition") != result["repetition"]):
+            raise ValueError(f"quality run repetition differs from its declared job: {method}")
         if result.get("server_profile"):
             recorded = result.get("server_execution", {}).get("record")
             if (not recorded or Path(declared.get("server_record", "")).resolve() != Path(recorded).resolve()
@@ -322,14 +333,110 @@ def quality_gate_from_evidence(spec, results):
         and all(not dimension["missing_task_ids"] for dimension in data["coverage"].values())
         for data in report["methods"].values())
     complete &= all(not row["acceptance_blockers"] for row in report["comparisons"].values())
-    gate = {name: {"0": (name == constraints["reference"] or report["comparisons"][name]["dev_quality_eligible"])}
-            for name in by_method}
-    eligible_candidates = [m["id"] for m in spec["methods"] if m.get("b6_eligible") and gate[m["id"]]["0"]]
+    unaccepted = [name for name, data in report["methods"].items()
+        if not data["evaluator_kinds"] or not set(data["evaluator_kinds"]) <= {"human_blind", "independent_model_declared"}]
+    gate = {name: name == reference or report["comparisons"][name]["dev_quality_eligible"] for name in by_name}
+    return gate, report, complete, unaccepted
+
+
+BLOCK_FIELDS = ("protocol", "concurrency", "seed", "repetition")
+
+
+def _block_key(job):
+    return (job["protocol"], job["concurrency"], job["seed"], job.get("repetition", 1))
+
+
+def _quality_gate_by_block(spec, results, evidence, expected_tasks):
+    planned = {job["job_id"]: job for job in matrix_jobs(spec)}
+    actual = {job["job_id"]: job for job in results}
+    if len(actual) != len(results) or set(actual) != set(planned):
+        raise ValueError("block quality evidence needs every declared job, including failures")
+    expected_blocks = {}
+    for job_id, job in planned.items():
+        recorded = actual[job_id]
+        if (any(recorded.get(k) != job.get(k) for k in (*BLOCK_FIELDS, "method", "candidate_index", "split", "server_profile"))):
+            raise ValueError(f"recorded job identity differs from its declared block: {job_id}")
+        expected_blocks.setdefault(_block_key(job), {})[job_id] = recorded
+    blocks = {}
+    for entry in evidence["blocks"]:
+        if set(entry) != {*BLOCK_FIELDS, "quality_config"}:
+            raise ValueError("each quality block requires protocol, concurrency, seed, repetition and quality_config")
+        key = _block_key(entry)
+        if key in blocks:
+            raise ValueError("duplicate quality block")
+        blocks[key] = entry
+    if set(blocks) != set(expected_blocks):
+        raise ValueError("quality blocks must exactly cover all declared protocol/concurrency/seed/repetition blocks")
+    reports, gate, evaluator = [], {}, None
+    complete, unaccepted_jobs = True, []
+    for key, jobs in expected_blocks.items():
+        entry = blocks[key]
+        references = [job_id for job_id, job in jobs.items()
+                      if job["method"] == spec["tuning"]["quality_constraints"]["reference"]]
+        if len(references) != 1:
+            raise ValueError("each quality block requires exactly one actual reference job; reference candidates are ambiguous")
+        value = json.loads(Path(entry["quality_config"]).read_text())
+        if set(value.get("methods", {})) != set(jobs) or value.get("reference") != references[0]:
+            raise ValueError("quality block methods/reference must be its complete actual job IDs")
+        failed = [job_id for job_id, job in jobs.items() if job["status"] != "completed"
+                  or job["summary"]["timing"]["failure_fraction"] != 0
+                  or job["summary"]["cohort"]["unfinished_turns"] != 0]
+        block_report = {**entry, "job_ids": list(jobs), "generation_incomplete_jobs": failed}
+        if failed:
+            passed, block_complete = {}, False
+            block_report.update(report=None, readiness_reason="generation_incomplete")
+        else:
+            passed, report, block_complete, rejected = _evaluate_bound_quality(
+                spec, jobs, value, references[0], expected_tasks)
+            protocol = json.loads(Path(value["frozen_protocol"]).read_text())
+            identity = {k: protocol.get(k) for k in ("evaluator", "dimensions", "epsilon")}
+            if evaluator is not None and identity != evaluator:
+                raise ValueError("quality blocks must share the complete evaluator protocol, dimensions and epsilon")
+            evaluator = identity
+            unaccepted_jobs.extend(rejected)
+            block_report["report"] = report
+        complete &= block_complete
+        block_report["evidence_complete"] = block_complete
+        reports.append(block_report)
+        for job_id, job in jobs.items():
+            candidates = gate.setdefault(job["method"], {})
+            index = str(job["candidate_index"])
+            candidates[index] = candidates.get(index, True) and block_complete and passed.get(job_id, False)
+    eligible = [{"method": method["id"], "candidate_index": int(index)}
+                for method in spec["methods"] if method.get("b6_eligible")
+                for index, passed in gate.get(method["id"], {}).items() if passed]
+    report = {"schema_version": 2, "scope": "dev", "blocks": reports, "candidate_eligibility": gate,
+        "aggregation": "all_declared_blocks_must_pass; separate session-cluster intervals, no pooled repetition CI",
+        "matrix_evidence_gate": {"all_required_evidence_complete": complete,
+            "unaccepted_evaluator_jobs": unaccepted_jobs, "eligible_b6_candidates_on_evaluator": eligible,
+            "ready_to_freeze": complete and bool(eligible)}}
+    if not complete or not eligible:
+        raise QualityNotReady(report)
+    return gate, report
+
+
+def quality_gate_from_evidence(spec, results):
+    """Keep the legacy single-cell format; v2 explicitly binds all workload blocks."""
+    tuning = spec["tuning"]
+    if "quality_eligible" in tuning:
+        raise ValueError("require_quality_evidence rejects a supplied boolean quality gate")
+    if not tuning.get("quality_evidence"):
+        raise ValueError("require_quality_evidence needs the saved quality_acceptance config; no B6 is frozen")
+    value = json.loads(Path(tuning["quality_evidence"]).read_text())
+    expected_tasks = _quality_tasks(spec)
+    if value.get("schema_version") == 2:
+        return _quality_gate_by_block(spec, results, value, expected_tasks)
+    by_method = {row["method"]: row for row in results}
+    if len(by_method) != len(results) or any(row["candidate_index"] != 0 for row in results):
+        raise ValueError("legacy quality evidence supports one declared job per method; use schema_version=2 blocks")
+    passed, report, complete, unaccepted = _evaluate_bound_quality(
+        spec, by_method, value, tuning["quality_constraints"]["reference"], expected_tasks)
+    gate = {name: {"0": passed[name]} for name in by_method}
+    eligible = [m["id"] for m in spec["methods"] if m.get("b6_eligible") and gate[m["id"]]["0"]]
     report["matrix_evidence_gate"] = {"all_required_evidence_complete": complete,
-        "unaccepted_evaluator_methods": [name for name, data in report["methods"].items()
-            if not data["evaluator_kinds"] or not set(data["evaluator_kinds"]) <= {"human_blind", "independent_model_declared"}],
-        "eligible_b6_candidates_on_evaluator": eligible_candidates, "ready_to_freeze": complete and bool(eligible_candidates)}
-    if not complete or not eligible_candidates:
+        "unaccepted_evaluator_methods": unaccepted,
+        "eligible_b6_candidates_on_evaluator": eligible, "ready_to_freeze": complete and bool(eligible)}
+    if not complete or not eligible:
         raise QualityNotReady(report)
     return gate, report
 
@@ -412,6 +519,8 @@ async def execute_job(spec, job, directory, *, native_engine_manifest=None, veri
         environment = {**os.environ, "CONTEXTKV_JOB_ID": job["job_id"],
                        "CONTEXTKV_JOB_SPLIT": job["split"], "CONTEXTKV_JOB_PROTOCOL": job["protocol"],
                        "CONTEXTKV_JOB_METHOD": job["method"]}
+        if "repetition" in job:
+            environment["CONTEXTKV_JOB_REPETITION"] = str(job["repetition"])
         command = lifecycle["before_job"]
         hook = {"argv": command, "cache_state_protocol": lifecycle["cache_state_protocol"]}
         try:
@@ -471,6 +580,8 @@ async def execute_job(spec, job, directory, *, native_engine_manifest=None, veri
     protocol = {"cache_state_protocol": lifecycle.get("cache_state_protocol", default_cache_state),
                 "before_job": hook, "warmup_input": lifecycle.get("warmup_input"),
                 "fair_hardware_comparison_established": False}
+    if "repetition" in job:
+        protocol["repetition"] = job["repetition"]
     payload["experiment_protocol"] = protocol
     output.write_text(json.dumps(payload, indent=2))
     slo = spec.get("slo", {})
@@ -538,7 +649,7 @@ async def run_matrix(spec, output, *, stage="dev", frozen=None, executor=execute
     reference = spec.get("reference_method", "B3")
     for candidate in results:
         matches = [r for r in results if r["method"] == reference and r["status"] == "completed"
-                   and all(r[k] == candidate[k] for k in ("protocol", "concurrency", "seed"))]
+                   and _block_key(r) == _block_key(candidate)]
         if candidate["status"] == "completed" and candidate["method"] != reference and len(matches) == 1:
             try:
                 comparison = paired_latency(candidate["summary"], matches[0]["summary"], samples=1000)
