@@ -15,6 +15,7 @@ from .events import EventLog
 from .mock_engine import MockEngine
 from .planner import PlannerKnobs
 from .serialization import decode, dumps
+from .sampling import SamplingRecipe
 from .service import Controller
 from .session_store import SessionStore
 from .templates import ByteTemplate, HuggingFaceTemplate
@@ -98,6 +99,7 @@ class RunConfig:
     state_dir: str = "runs/local"
     calibration_path: str | None = None
     shadow: bool = False
+    sampling: SamplingRecipe | None = None
 
     def __post_init__(self):
         if self.engine.kind not in ("mock", "sglang"):
@@ -176,22 +178,25 @@ def create_controller(config: RunConfig) -> Controller:
         cache_binding = manifest.get("engine", {}).get("cache_config_hash")
         if bound != asdict(template.fingerprint) or not isinstance(cache_binding, str) or not cache_binding:
             raise ValueError("explicit model scope requires a cost artifact bound to its actual fingerprint and cache configuration")
+    model.configure_sampling(config.sampling, fallback_mean=config.cost_model.default_output_tokens,
+                             fallback_p90=config.cost_model.p90_output_tokens)
     if config.cost_model.output_length_artifact:
         from .output_length import OutputLengthModel
         model.output_length_model = OutputLengthModel.load(config.cost_model.output_length_artifact,
-            expected_fingerprint=template.fingerprint, max_new_tokens=config.context.max_new_tokens)
+            expected_fingerprint=template.fingerprint, max_new_tokens=config.context.max_new_tokens, sampling=config.sampling,
+            expected_priors=model.effective_output_prior)
     knobs = config.planner if config.ablation.hysteresis else replace(config.planner,
                 delta_abs=0, delta_rel=0, z=0, min_stable_turns=0)
     engine = (MockEngine(fingerprint=template.fingerprint, gpu_capacity_tokens=config.engine.gpu_capacity_tokens,
                          host_capacity_tokens=config.engine.host_capacity_tokens, page_size=config.engine.page_size)
               if config.engine.kind == "mock" else
               SGLangEngineClient(config.engine.base_url, template.fingerprint,
-                                 timeout=config.engine.timeout_seconds, stream=config.engine.stream,
+                                 timeout=config.engine.timeout_seconds, stream=config.engine.stream, sampling=config.sampling,
                                  **({"model_scope": config.model.scope.manifest()} if config.model.scope else {})))
     state_dir = Path(config.state_dir)
     return Controller(SessionStore(state_dir / "sessions.sqlite3"), engine, template=template,
                       policy=config.context, knobs=knobs, cost_model=model, shadow=config.shadow,
                       epoch_retirement=config.ablation.epoch_retirement,
-                      online_calibration=config.cost_model.online_calibration,
+                      online_calibration=config.cost_model.online_calibration, sampling=config.sampling,
                       events=EventLog(state_dir / "events.jsonl", config_hash=config.config_hash,
                                       engine_kind=config.engine.kind))

@@ -94,7 +94,12 @@ def validate_matrix(spec):
                 or isinstance(epsilon, bool) or not isinstance(epsilon, (int, float))
                 or not math.isfinite(epsilon) or not 0 < epsilon < 1):
             raise ValueError("required quality evidence needs a declared reference and finite epsilon in (0,1)")
-    shared_context = matrix_config(spec).context
+    shared_config = matrix_config(spec)
+    from controller.sampling import SamplingRecipe
+    native_present = any(m.get("kind", "controller") == "native" for m in spec["methods"])
+    if native_present and shared_config.sampling not in (None, SamplingRecipe()):
+        raise ValueError("native matrix runner supports only the legacy standard greedy recipe")
+    shared_context = shared_config.context
     shared_context_values = asdict(shared_context)
     shared_prompt = shared_context.system_prompt
     effective_shared_prompt = SYSTEM_PROMPT if shared_prompt is None else shared_prompt
@@ -106,6 +111,10 @@ def validate_matrix(spec):
         candidates = method.get("candidates", [{}])
         for candidate in candidates:
             overrides = merge(method.get("overrides", {}), candidate)
+            if native_present and "sampling" in overrides:
+                requested = decode(SamplingRecipe | None, overrides["sampling"])
+                if requested not in (None, SamplingRecipe()):
+                    raise ValueError("native matrix runner supports only the legacy standard greedy recipe")
             native = merge(method.get("native") or {}, overrides.get("native", {}))
             if any(key in source for source in (method, overrides, native)
                    for key in ("retriever_config", "retriever_index", "corpus")):

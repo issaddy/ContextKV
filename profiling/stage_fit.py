@@ -18,6 +18,7 @@ import random
 from statistics import mean
 
 from controller.cost_model import CostModel
+from controller.sampling import bound_recipe
 from profiling.common import load_measurements
 from profiling.fit import measurement_provenance
 from profiling.prefill import PrefillCase
@@ -249,6 +250,8 @@ def fit_artifact(rows, provenance, base_artifact, *, folds=5, seed=42, developme
         new = new or manifest.get("engine",{}).get(key)
         if not old or old != new:
             raise ValueError("base decode/prior artifact must bind the same engine configuration")
+    if bound_recipe(original_manifest.get("sampling_recipe")) != bound_recipe(manifest.get("sampling_recipe")):
+        raise ValueError("base decode and new forward observations must bind the same sampling recipe")
     validation = validate(rows,folds=folds,seed=seed)
     forward = fit_cells(rows,"forward_ms")
     waiting = fit_cells(rows,"pre_forward_ms",budget=True)
@@ -301,6 +304,7 @@ def fit_artifact(rows, provenance, base_artifact, *, folds=5, seed=42, developme
         if not lengths or any(type(length) is not int or length<=0 for length in lengths):
             raise ValueError("development report has no valid completed output lengths")
         model["stage_model"]["development_output_lengths"] = {
+            "sampling_recipe": base.get("metadata", {}).get("output_prior_sampling"),
             "lengths":lengths,"source":{"path":str(Path(development_report).resolve()),"sha256":digest,
                                          "binding":"matches_original_base_artifact_development_report"},
             "tasks":len(lengths),"sessions":len({r['conversation_id'] for r in completed}),

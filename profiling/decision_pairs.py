@@ -367,10 +367,13 @@ def _model_and_knobs(config, cases, artifact):
         model = CostModel.from_measurements(rows, **common, **settings)
     else:
         model = CostModel(**common, **settings)
+    model.configure_sampling(config.sampling, fallback_mean=config.cost_model.default_output_tokens,
+                             fallback_p90=config.cost_model.p90_output_tokens)
     if config.cost_model.output_length_artifact:
         from controller.output_length import OutputLengthModel
         model.output_length_model = OutputLengthModel.load(config.cost_model.output_length_artifact,
-            expected_fingerprint=cases[0].candidates[0].fingerprint, max_new_tokens=cases[0].max_new_tokens)
+            expected_fingerprint=cases[0].candidates[0].fingerprint, max_new_tokens=cases[0].max_new_tokens, sampling=config.sampling,
+            expected_priors=model.effective_output_prior)
     knobs = config.planner if config.ablation.hysteresis else replace(
         config.planner, delta_abs=0, delta_rel=0, z=0, min_stable_turns=0)
     return model, knobs
@@ -459,6 +462,19 @@ def rescore_file(args):
     if any(path.exists() for path in targets):
         raise FileExistsError("rescored output already exists; choose a new output")
     config = load_config(args.config)
+    from controller.sampling import SamplingRecipe
+    source_config = source_manifest.get("config")
+    if source_config is None:
+        source_sampling = None
+        sampling_binding = "unknown_legacy_standard_greedy_compatibility"
+    else:
+        value = source_config.get("sampling")
+        source_sampling = SamplingRecipe(**value) if value is not None else SamplingRecipe()
+        sampling_binding = "source_run_configuration"
+    requested = config.sampling or SamplingRecipe()
+    if (source_sampling is None and requested != SamplingRecipe()
+            or source_sampling is not None and source_sampling != requested):
+        raise ValueError("offline rescoring cannot change the measured sampling recipe")
     artifact = args.cost_artifact or config.cost_model.artifact
     if not artifact:
         raise ValueError("offline rescoring requires a frozen cost artifact")
@@ -473,6 +489,7 @@ def rescore_file(args):
         "source_measurement_manifest": source_manifest,
         "frozen": frozen, "cases_path": str(Path(args.cases).resolve()),
         "config": asdict(config), "config_scope": "cost ablations and planner; candidates/budgets come from frozen cases",
+        "sampling_binding": sampling_binding,
         "cost_artifact": str(Path(artifact).resolve()), "cost_artifact_sha256": sha256(Path(artifact).read_bytes()).hexdigest(),
         "output_length_artifact": config.cost_model.output_length_artifact,
         "output_length_artifact_sha256": sha256(Path(config.cost_model.output_length_artifact).read_bytes()).hexdigest()
@@ -504,7 +521,7 @@ async def collect(args):
     model, knobs = _model_and_knobs(config, cases, artifact)
     fingerprint = cases[0].candidates[0].fingerprint
     engine = SGLangEngineClient(args.base_url or config.engine.base_url, fingerprint,
-                                timeout=config.engine.timeout_seconds, stream=False)
+                                timeout=config.engine.timeout_seconds, sampling=config.sampling, stream=False)
     collector = DecisionPairCollector(engine, model, knobs,
                                       context_limit=config.context.max_total_model_tokens)
     output = Path(args.output)

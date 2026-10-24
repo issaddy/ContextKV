@@ -14,6 +14,7 @@ import uuid
 from controller.schema import (CacheQuoteBatch, CompletionReceipt,
                                ConfigFingerprint, GenerationResult, PromptCandidate)
 from controller.serialization import decode
+from .sampling import SamplingRecipe, request_sampling
 from controller.templates import token_hash as token_hash
 
 PROTOCOL_VERSION = "contextkv-v1"
@@ -110,9 +111,11 @@ def decode_result(value: dict) -> GenerationResult:
 
 class SGLangEngineClient:
     def __init__(self, base_url: str, fingerprint: ConfigFingerprint, *, timeout: float = 120.0,
-                 transport=None, stream: bool = True, model_scope: dict | None = None):
+                 transport=None, stream: bool = True, model_scope: dict | None = None,
+                 sampling: SamplingRecipe | None = None):
         import httpx
         self.fingerprint = fingerprint
+        self._sampling_params = request_sampling(sampling)
         self._expected_model_scope = ((model_scope["identity"], model_scope["record"]["model_path"])
                                       if model_scope is not None else None)
         self.stream = stream
@@ -198,7 +201,7 @@ class SGLangEngineClient:
         await self._ready()
         self._check_fingerprint(fingerprint)
         start = time.perf_counter()
-        sampling = {"temperature": 0, "max_new_tokens": max_new_tokens}
+        sampling = {**self._sampling_params, "max_new_tokens": max_new_tokens}
         if ignore_eos:
             sampling["ignore_eos"] = True
         body = {

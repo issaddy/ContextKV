@@ -54,18 +54,26 @@ async def demo(config):
              ("Revisit the retry policy and its exceptions.", (b,))]
     results = []
     try:
-        manifest = _manifest(config, service, await service.engine.info(), "synthetic-correctness-demo")
+        info = await service.engine.info()
+        simulated = info.engine_kind == "mock"
+        manifest = _manifest(config, service, info, "synthetic-correctness-demo")
+        hit_field = "simulated_gpu_hit_tokens" if simulated else "actual_device_hit_tokens"
         for index, (query, evidence) in enumerate(turns, 1):
             response = await service.serve_turn(sid, query, evidence, request_id=f"turn-{index}")
             results.append(response)
             print(json.dumps({"turn": index, "action": response.action, "reason": response.reason,
                               "epoch": response.epoch_no, "input_tokens": response.input_tokens,
-                              "simulated_gpu_hit_tokens": response.actual_device_hit_tokens,
+                              hit_field: response.actual_device_hit_tokens,
                               "answer": response.assistant_text}, ensure_ascii=False))
         await service.close_session(sid)
         result_path = Path(config.state_dir) / f"demo-{service.events.run_id}.json"
-        result_path.write_text(dumps({"measurement_kind": "simulation", "session_id": sid, "turns": results}) + "\n", encoding="utf-8")
-        print(f"结果：{result_path.resolve()}\n运行清单：{manifest.resolve()}\n注意：模拟 token/缓存轨迹仅验证协议，不代表 GPU 性能或回答质量。")
+        result_path.write_text(dumps({"measurement_kind": "simulation" if simulated else "hardware",
+                                     "protocol": "synthetic-correctness-demo", "session_id": sid,
+                                     "quality_evaluated": False, "gpu_performance_validated": False,
+                                     "turns": results}) + "\n", encoding="utf-8")
+        note = ("模拟 token/缓存轨迹仅验证协议，不代表 GPU 性能或回答质量。" if simulated else
+                "真实引擎上的合成材料协议演示，不建立回答质量或系统性能结论。")
+        print(f"结果：{result_path.resolve()}\n运行清单：{manifest.resolve()}\n注意：{note}")
     finally:
         await service.aclose()
         service.store.close()
@@ -161,7 +169,8 @@ async def benchmark(args, config):
         cleanup_end = time.monotonic()
         telemetry_after = await service.engine.metrics()
         output = Path(config.state_dir) / f"benchmark-{run_prefix}.json"
-        payload = {"engine_kind": config.engine.kind, "quality_evaluated": False, "report": report,
+        from .sampling import request_sampling
+        payload = {"sampling_recipe": request_sampling(config.sampling), "engine_kind": config.engine.kind, "quality_evaluated": False, "report": report,
                    "telemetry": {"before": telemetry_before, "after": telemetry_after},
                                 "cleanup": {"start": cleanup_start, "end": cleanup_end,
                                             "pending_retire_operations": len(service.store.outbox())}}

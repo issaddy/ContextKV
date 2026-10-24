@@ -132,6 +132,10 @@ class CostModel:
                 for key, cells in groups.items())
         self._bias_ms = 0.0
         self._past_residuals: list[float] = []
+        self.sampling_scope_compatible = True
+        self.sampling_scope_report = None
+        self._sampling_prior_override = None
+        self._development_lengths = self.stage_model.get("development_output_lengths", {}).get("lengths", ())
         self.calibration_metadata: dict = {}
         self.calibration_scope_compatible: bool | None = None
         self.calibration_scope_report: dict | None = None
@@ -414,8 +418,9 @@ class CostModel:
                        batch: CacheQuoteBatch | None = None, concurrency: int = 1,
                        control_ms: float = 0.0, queue_ms: float = 0.0) -> CostEstimate:
         # Candidate/quote identity is checked by the planner at the batch boundary.
-        prior = output_length_prior(session, global_mean=self.default_output_tokens,
-            global_p90=self.p90_output_tokens, max_new_tokens=self.max_new_tokens)
+        mean, p90 = self.effective_output_prior
+        prior = output_length_prior(session, global_mean=mean,
+            global_p90=p90, max_new_tokens=self.max_new_tokens)
         length_prediction = None
         if self.output_length_model is not None:
             length_prediction = self.output_length_model.predict_prior(
@@ -445,7 +450,8 @@ class CostModel:
             if step < prior.p90_tokens:
                 risk_decode += tpot
             calibrated = calibrated and step_calibrated
-        components_supported = calibrated and self.calibration_scope_compatible is not False
+        components_supported = (calibrated and self.calibration_scope_compatible is not False
+                                and self.sampling_scope_compatible)
         calibrated = components_supported and not quote.native_estimate_uncertain and not partial_restore
         if batch is not None and not batch.host_quote_supported:
             calibrated = False
@@ -457,7 +463,7 @@ class CostModel:
                 self._idle_pre_forward_samples)
             wait_args = dict(candidate_input_tokens=n, resident_gpu_tokens=max(0, prefix-loaded),
                 batch=batch, forward_fn=self._workload_forward, decode_fn=self._workload_decode,
-                development_lengths=self.stage_model.get("development_output_lengths", {}).get("lengths", ()),
+                development_lengths=self._development_lengths,
                 idle_ms=setup_ms)
             if self.admission_estimator == "native_budget":
                 profile = self.calibration_metadata.get("profile_manifest") or {}
@@ -514,6 +520,48 @@ class CostModel:
         self._past_residuals = self._past_residuals[-128:]
         self._bias_ms += self.residual_alpha * (actual_elapsed_ms-predicted.cost)
 
+    @property
+    def effective_output_prior(self) -> tuple[int, int]:
+        return self._sampling_prior_override or (self.default_output_tokens, self.p90_output_tokens)
+
+    def configure_sampling(self, sampling, *, fallback_mean: int, fallback_p90: int) -> dict:
+        """Bind request policy once, without changing measured execution points.
+
+        Server wall intervals include sampler work. Cross-recipe timing reuse is
+        diagnostic, not validated calibration. The output distribution has its
+        own source: a profiler's fixed-output requests do not fit EOS lengths.
+        """
+        from .sampling import SamplingRecipe, bound_recipe, request_sampling
+        recipe = sampling or SamplingRecipe()
+        manifest = self.calibration_metadata.get("profile_manifest") or {}
+        manifests = self.calibration_metadata.get("profile_manifests") or [manifest]
+        timing_recipes = [bound_recipe(entry.get("sampling_recipe")) for entry in manifests]
+        # Preserve old standard-greedy loading without inventing source proof.
+        legacy_compatible = recipe == SamplingRecipe()
+        self.sampling_scope_compatible = all(
+            value == recipe or value is None and legacy_compatible for value in timing_recipes)
+        prior_recipe = bound_recipe(self.calibration_metadata.get("output_prior_sampling"))
+        prior_matches = recipe == prior_recipe or prior_recipe is None and legacy_compatible
+        self._sampling_prior_override = None if prior_matches else (fallback_mean, fallback_p90)
+        lengths = self.stage_model.get("development_output_lengths", {})
+        length_recipe = bound_recipe(lengths.get("sampling_recipe", self.calibration_metadata.get("output_prior_sampling")))
+        lengths_match = recipe == length_recipe or length_recipe is None and legacy_compatible
+        self._development_lengths = lengths.get("lengths", ()) if lengths_match else ()
+        self.sampling_scope_report = {
+            "requested_sampling": request_sampling(sampling),
+            "timing_recipes": [value.record() if value is not None else None for value in timing_recipes],
+            "timing_binding": "legacy_unbound" if any(value is None for value in timing_recipes) else "explicit",
+            "timing_compatible": self.sampling_scope_compatible,
+            "timing_scope": "measured_server_wall_including_sampler; cross_recipe_unvalidated",
+            "output_prior_recipe": prior_recipe.record() if prior_recipe is not None else None,
+            "output_prior_status": ("legacy_unbound_compatibility" if prior_recipe is None else "matching_recipe")
+                if prior_matches else "configured_prior_fallback",
+            "development_lengths_status": ("legacy_unbound_compatibility" if length_recipe is None else "matching_recipe")
+                if lengths_match else "disabled_recipe_mismatch",
+            "legacy_missing_binding": "unknown; compatibility exception only for standard greedy serving",
+        }
+        return self.sampling_scope_report
+
     def check_calibration_scope(self, info) -> dict:
         """Compare a bound engine configuration once at startup/restart.
 
@@ -538,6 +586,8 @@ class CostModel:
             "profile_run_ids": [entry["run_id"] for entry in manifests if entry.get("run_id")],
             "gpu_hardware_verified": False,
             "measurement_binding": self.calibration_metadata.get("measurement_provenance", {}).get("binding_status", "not_provided")}
+        if self.sampling_scope_report is not None:
+            self.calibration_scope_report["sampling"] = self.sampling_scope_report
         return self.calibration_scope_report
 
     def save(self, path: str | Path, *, metadata: Mapping | None = None) -> None:

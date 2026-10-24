@@ -166,7 +166,7 @@ async def _run(args):
     template = create_model_template(config.model, model_path=args.model_path, local_files_only=True)
     tokens = sorted(set(template.tokenizer.get_vocab().values())-set(template.tokenizer.all_special_ids))
     engine = SGLangEngineClient(args.base_url or config.engine.base_url,template.fingerprint,
-                               timeout=config.engine.timeout_seconds,stream=False,
+                               timeout=config.engine.timeout_seconds, sampling=config.sampling,stream=False,
                                **({"model_scope":config.model.scope.manifest()} if config.model.scope else {}))
     try:
         report = await LifecycleProbe(engine,tokens,shared_tokens=args.shared_tokens,

@@ -17,6 +17,7 @@ from .planner import PlannerKnobs, choose_plan
 from .schema import (ClientTiming, CompletionReceipt, CostEstimate, EvidenceBlock, EvidenceKey,
                      GenerationResult, NoFeasiblePlan, TurnRecord)
 from .serialization import dumps
+from .sampling import SamplingRecipe, request_sampling
 from .session_store import (Attempt, IdempotencyConflict, PendingAttempt, SessionStore, StoreError)
 from .templates import ByteTemplate
 
@@ -61,7 +62,7 @@ class Controller:
                  policy: CandidatePolicy | None = None, knobs: PlannerKnobs | None = None,
                  cost_model: CostModel | None = None, events: EventLog | None = None,
                  shadow: bool = False, epoch_retirement: bool = True,
-                 online_calibration: bool = False):
+                 online_calibration: bool = False, sampling: SamplingRecipe | None = None):
         self.store, self.engine = store, engine
         self.template = template or ByteTemplate()
         self.policy = policy or CandidatePolicy()
@@ -72,6 +73,7 @@ class Controller:
         self.shadow = shadow
         self.epoch_retirement = epoch_retirement
         self.online_calibration = online_calibration
+        self._sampling_params = request_sampling(sampling)
         self._active_generations = 0
         self._postplan_control_ms: list[float] = []
         self._calibration_identity = None
@@ -268,7 +270,8 @@ class Controller:
                 attempt = self.store.save_attempt(replace(attempt, stage="PREPARED", epoch=epoch))
                 self.events.emit("epoch_prepared", business_session_id=session_id, attempt_id=attempt.attempt_id, epoch=epoch)
                 attempt = self.store.save_attempt(replace(attempt, stage="SUBMITTED"))
-                self.events.emit("request_submitted", business_session_id=session_id, attempt_id=attempt.attempt_id)
+                self.events.emit("request_submitted", business_session_id=session_id, attempt_id=attempt.attempt_id,
+                                 sampling_params={**self._sampling_params, "max_new_tokens": self.policy.max_new_tokens})
                 submitted = time.monotonic()
                 self._active_generations += 1
                 try:

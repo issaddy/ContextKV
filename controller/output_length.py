@@ -14,6 +14,7 @@ import re
 import statistics
 
 from .schema import ConfigFingerprint, PromptCandidate, SessionSnapshot
+from .sampling import SamplingRecipe, bound_recipe
 
 
 FEATURE_NAMES = (
@@ -103,13 +104,32 @@ class OutputLengthModel:
 
     @classmethod
     def load(cls, path: str | Path, *, expected_fingerprint: ConfigFingerprint | None = None,
-             max_new_tokens: int | None = None) -> OutputLengthModel:
+             max_new_tokens: int | None = None, sampling: SamplingRecipe | None = None,
+             expected_priors: tuple[int, int] | None = None) -> OutputLengthModel:
         model = cls(json.loads(Path(path).read_text()))
         target = model.specification["target"]
         if expected_fingerprint is not None and target["fingerprint"] != asdict(expected_fingerprint):
             raise ValueError("output-length artifact target fingerprint differs from serving")
         if max_new_tokens is not None and target["max_new_tokens"] != max_new_tokens:
             raise ValueError("output-length artifact budget differs from serving")
+        source_config = model.metadata.get("source_configuration")
+        if "sampling_recipe" in target:
+            binding = bound_recipe(target["sampling_recipe"])
+        elif source_config is not None:
+            # A real run config has known defaults; missing artifact metadata does not.
+            configured = source_config.get("sampling")
+            binding = SamplingRecipe(**configured) if configured is not None else SamplingRecipe()
+        else:
+            binding = None
+        requested = sampling or SamplingRecipe()
+        if binding != requested and not (binding is None and requested == SamplingRecipe()):
+            raise ValueError("output-length artifact sampling recipe differs from serving (unknown legacy binding is compatible only with standard greedy)")
+        priors = model.metadata.get("global_priors")
+        if expected_priors is not None:
+            if priors is not None and tuple(priors) != tuple(expected_priors):
+                raise ValueError("output-length artifact shared prior center differs from serving")
+            if priors is None and requested != SamplingRecipe():
+                raise ValueError("nonstandard sampling output-length artifact needs a bound shared prior center")
         return model
 
     def save(self, path: str | Path) -> None:

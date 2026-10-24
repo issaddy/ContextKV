@@ -253,8 +253,10 @@ def fitted_scope(config, calibration, runtime):
         if getattr(config.cost_model, field) is not None:
             options[field] = getattr(config.cost_model, field)
     model = CostModel.load(calibration["path"], **options)
+    model.configure_sampling(config.sampling, fallback_mean=config.cost_model.default_output_tokens,
+                             fallback_p90=config.cost_model.p90_output_tokens)
     scope = model.check_calibration_scope(runtime["engine"])
-    if scope["status"] != "matching_scope":
+    if scope["status"] != "matching_scope" or not model.sampling_scope_compatible:
         raise ValueError(f"cost job needs an artifact bound to the actual engine configuration: {scope}")
     if (not any(p.source == "hardware" for p in model.prefill_points)
             or config.ablation.decode_cost and not any(p.source == "hardware" for p in model.decode_points)):

@@ -17,6 +17,7 @@ import uuid
 
 from controller.engine_client import EngineError, SGLangEngineClient
 from controller.schema import PromptCandidate
+from controller.sampling import request_sampling
 from controller.templates import token_hash
 from profiling.common import Measurement, write_measurements
 from profiling.prefill import PrefillCase, calibration_grid
@@ -208,7 +209,7 @@ async def _run(args):
     special = set(template.tokenizer.all_special_ids)
     tokens = sorted(set(template.tokenizer.get_vocab().values()) - special)
     engine = SGLangEngineClient(args.base_url or config.engine.base_url, template.fingerprint,
-                                timeout=config.engine.timeout_seconds, stream=False,
+                                timeout=config.engine.timeout_seconds, sampling=config.sampling, stream=False,
                                 **({"model_scope": config.model.scope.manifest()} if config.model.scope else {}))
     output = Path(args.output)
     probe = SGLangProbe(engine, tokens, seed=args.seed,
@@ -235,6 +236,9 @@ async def _run(args):
                     "cache_config": snapshot.get("cache_config"),
                     "runtime_manifest": runtime_manifest,
                     "fingerprint": asdict(template.fingerprint), "seed": args.seed,
+                    "sampling_recipe": request_sampling(config.sampling),
+                    "generation_protocol": {"ignore_eos": True, "output_budget": "per_case",
+                                            "seed_scope": "input_fixture_only_not_request_sampler"},
                     "timing_scope": "server_request; transfer CUDA ACK events",
                     "cases": [case.record() for case in expanded], "repetitions": args.repetitions,
                     "warmup_per_case": args.warmup,

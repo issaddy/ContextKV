@@ -349,6 +349,27 @@ def fit_exploration(cases, *, priors=(433, 512)):
     return artifacts, report
 
 
+def training_priors(baseline, source_configuration):
+    """Use the serving prior center for residuals, including recipe fallback.
+
+    Only prior settings/metadata are needed; timing points and stage simulation
+    are not loaded or changed by length fitting.
+    """
+    from controller.cost_model import CostModel
+    from controller.sampling import SamplingRecipe
+    model = CostModel(default_output_tokens=baseline["settings"]["default_output_tokens"],
+                      p90_output_tokens=baseline["settings"]["p90_output_tokens"])
+    model.calibration_metadata = baseline.get("metadata", {})
+    if source_configuration is None:
+        return model.effective_output_prior, {"status": "unknown_source_configuration_legacy_prior"}
+    configured = source_configuration.get("sampling")
+    sampling = SamplingRecipe(**configured) if configured is not None else None
+    settings = source_configuration.get("cost_model") or {}
+    report = model.configure_sampling(sampling, fallback_mean=settings.get("default_output_tokens", 128),
+                                      fallback_p90=settings.get("p90_output_tokens", 256))
+    return model.effective_output_prior, report
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", required=True)
@@ -370,24 +391,29 @@ def main(argv=None):
         if path and Path(path).exists():
             raise FileExistsError(path)
     baseline = json.loads(paths["baseline_cost_artifact"].read_text())
-    priors = (baseline["settings"]["default_output_tokens"], baseline["settings"]["p90_output_tokens"])
+    source_configuration = json.loads(paths["pairs_manifest"].read_text()).get("config")
+    priors, prior_binding = training_priors(baseline, source_configuration)
     cases, failures = build_cases(read_jsonl(paths["cases"]), read_jsonl(paths["pairs"]))
     artifacts, report = fit_exploration(cases, priors=priors)
     provenance = {name: {"path": str(path.resolve()), "sha256": sha256(path.read_bytes()).hexdigest()}
                   for name, path in paths.items()}
-    report.update(provenance=provenance, excluded_failures=failures,
+    report.update(provenance=provenance, excluded_failures=failures, training_prior_sampling=prior_binding,
                   truncated_arms=sum(sum(c.truncated_counts.values()) for c in cases),
                   label_semantics="served tokens at frozen budget; truncation is not natural EOS length")
-    source_configuration = json.loads(paths["pairs_manifest"].read_text()).get("config")
+    from controller.sampling import SamplingRecipe, request_sampling
     for kind, path in (("candidate", args.output), ("action_only", args.action_output)):
+        if source_configuration is not None:
+            artifacts[kind]["target"]["sampling_recipe"] = request_sampling(SamplingRecipe(**source_configuration["sampling"])
+                if source_configuration.get("sampling") is not None else None)
         if path:
             artifacts[kind]["metadata"].update(provenance=provenance, excluded_failures=failures,
                                                truncated_arms=report["truncated_arms"],
-                                               source_configuration=source_configuration)
+                                               source_configuration=source_configuration, training_prior_sampling=prior_binding)
             OutputLengthModel(artifacts[kind]).save(path)
     if args.delta_output:
         artifacts["paired_delta"]["metadata"].update(provenance=provenance,
-            truncated_arms=report["truncated_arms"], source_configuration=source_configuration)
+            truncated_arms=report["truncated_arms"], source_configuration=source_configuration,
+            training_prior_sampling=prior_binding)
         path = Path(args.delta_output)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("x") as stream:

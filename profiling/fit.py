@@ -11,6 +11,7 @@ import random
 import statistics
 
 from controller.cost_model import CostModel
+from controller.sampling import bound_recipe
 from profiling.common import load_measurements
 
 
@@ -28,6 +29,7 @@ def measurement_provenance(rows, measurements_path, *, profile_manifest_path=Non
     manifest_paths = ([profile_manifest_path] if isinstance(profile_manifest_path, (str, Path))
                       else list(profile_manifest_path or []))
     manifests = [json.loads(Path(path).read_text()) for path in manifest_paths]
+    recipes = [bound_recipe(entry.get("sampling_recipe")) for entry in manifests]
     manifest = manifests[0] if manifests else None
     run_ids = sorted({r.get("run_id") for r in rows if r.get("run_id")})
     binding = "not_provided"
@@ -41,6 +43,8 @@ def measurement_provenance(rows, measurements_path, *, profile_manifest_path=Non
                       for entry in manifests]
         if any(not all(identity.values()) or identity != identities[0] for identity in identities):
             raise ValueError("profile manifests must have the same fingerprint and cache_config_hash to merge")
+        if any(recipe != recipes[0] for recipe in recipes):
+            raise ValueError("profile manifests must have the same sampling recipe to merge")
         binding = "run_id_matched"
     elif manifest is not None:
         if run_ids and run_ids != [manifest.get("run_id")]:
@@ -56,8 +60,12 @@ def measurement_provenance(rows, measurements_path, *, profile_manifest_path=Non
     if manifest_files:
         files["profile_manifest"] = {key: manifest_files[0][key] for key in ("path", "sha256")}
         files["profile_manifests"] = manifest_files
-    return {"profile_manifest": manifest, "profile_manifests": manifests,
+    prior_binding = ({"output_prior_sampling":
+                      json.loads(Path(development_report_path).read_text()).get("sampling_recipe")}
+                     if development_report_path else {})
+    return {**prior_binding, "profile_manifest": manifest, "profile_manifests": manifests,
             "measurement_provenance": {"binding_status": binding, "run_ids": run_ids,
+                "sampling_recipe_binding": "explicit" if recipes and all(r is not None for r in recipes) else "unknown_legacy_unbound",
                 "files": files,
                 "sampling": phases, "cross_configuration_validation": False}}
 

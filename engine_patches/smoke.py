@@ -72,7 +72,7 @@ async def _run(args):
     ids = template.tokenizer.encode(f"ContextKV protocol test {nonce}. "+"Check cache behavior. "*64,
                                     add_special_tokens=False)
     engine = SGLangEngineClient(config.engine.base_url, template.fingerprint,
-                                timeout=config.engine.timeout_seconds,
+                                timeout=config.engine.timeout_seconds, sampling=config.sampling,
                                 **({"model_scope":config.model.scope.manifest()} if config.model.scope else {}))
     try:
         report = await verify(engine, ids, max_new_tokens=args.max_new_tokens)

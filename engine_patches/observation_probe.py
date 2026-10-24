@@ -165,7 +165,7 @@ async def _run(args):
     template=create_model_template(config.model,model_path=args.model_path,local_files_only=True)
     special=set(template.tokenizer.all_special_ids)
     tokens=sorted(set(template.tokenizer.get_vocab().values())-special)
-    engine=SGLangEngineClient(args.base_url,template.fingerprint,timeout=config.engine.timeout_seconds,stream=False,
+    engine=SGLangEngineClient(args.base_url,template.fingerprint,timeout=config.engine.timeout_seconds, sampling=config.sampling,stream=False,
                                **({"model_scope":config.model.scope.manifest()} if config.model.scope else {}))
     probe=ObservationProbe(engine,tokens,seed=args.seed,timeout_seconds=args.timeout_seconds)
     target=Path(args.report)
