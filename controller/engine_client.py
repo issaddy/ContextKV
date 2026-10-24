@@ -48,6 +48,7 @@ class EngineInfo:
     profiling_enabled: bool = False
     streaming_generation_supported: bool = False
     business_session_identity_supported: bool = False
+    admission_diagnostics_enabled: bool = False
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,7 @@
 
 ## 开启与记录
 
-仅在专用研究服务同时设置 `CONTEXTKV_ENABLE_PROFILING=1` 和 `CONTEXTKV_ADMISSION_DIAGNOSTICS=1`。缺任一个均不启用。`/context/metrics` 的 `admission_diagnostics_enabled` 是实际运行开关；开启时 `/context/info` 也声明它。仅通过 ContextKV guard 接纳的 Req 建立诊断状态，普通原生请求不被悄悄纳入研究日志。
+仅在专用研究服务同时设置 `CONTEXTKV_ENABLE_PROFILING=1` 和 `CONTEXTKV_ADMISSION_DIAGNOSTICS=1`。缺任一个均不启用。`/context/metrics` 的 `admission_diagnostics_enabled` 是实际运行开关；开启时 `/context/engine/info` 也声明它。客户端 `EngineInfo` 默认该字段为 false，旧 wire 省略字段仍可读取；启用服务的 true 值由真实 HTTP 边界合同测试覆盖。仅通过 ContextKV guard 接纳的 Req 建立诊断状态，普通原生请求不被悄悄纳入研究日志。
 
 每个请求仍只有原有的一条 `request_terminal` event，开启后增加 `admission_diagnostic`；HTTP response 的 receipt/timing schema 保持原样。默认关闭仍有固定 helper/getattr/len 调用，但不建立诊断对象、读取额外预算或调用诊断时钟，不能因此声称零开销。`cache_config` 和其 hash 保持旧值。开启后的观测开销须由 runtime 开关、源版本和实验 manifest 单列，配置 hash 本身不能证明运行时开销相同。
 
