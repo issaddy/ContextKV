@@ -1,6 +1,6 @@
 # C：host 备份准入的真实机制与压力对照
 
-2026-10-24，在 H200 GPU0 先完成 `off`、`fixed` 两个新进程的隔离对照，两臂各生成两次。固定规则确实在原生 chunked prefill 中生效，后续请求能补齐被跳过的备份；即时回访则揭示了额外重算的代价。随后完成五种压力/身份设置、共15次生成，条件策略及同业务去重的行为均通过核验，但小池各策略实际完成D2H相同。**这些结果未证明整体性能或质量收益。**
+2026-10-24，在 H200 GPU0 先完成 `off`、`fixed` 两个新进程的隔离对照，两臂各生成两次。固定规则确实在原生 chunked prefill 中生效，后续请求能补齐被跳过的备份；即时回访则揭示了额外重算的代价。随后完成五种压力/身份设置、共15次生成，条件策略及同业务去重的行为均通过核验，但小池各策略实际完成D2H相同。最新中容量四个独立cold臂又完成16次生成：条件策略真实保住另一业务B的host前缀，回访B少重算；回访被限写的C则多重算并补写。**这是受控机制的收益与代价证据，尚未证明整体P3性能或质量收益。**
 
 ## 固定输入与可复现记录
 
@@ -58,3 +58,53 @@ off关闭了新增准入观察器，所以其raw零值不能当作“实际准�
 **小池没有实际流量收益。** 同业务策略允许最后4096 tokens，原生分配却没有成功提交它；成功准入计数保持24576，恰与其他小池case的完成D2H一致。策略跳过与原生容量失败在这个设置下产生相同的物理写出结果。小池不能容纳完整12288-token分支，不能据此将计划跳过4096写成实测节省4096。下一步应在能容纳单个完整分支、但不足以容纳多业务工作集的中等容量点，比较被保留的其他业务前缀及真实回访，而不是继续缩池制造更多skip。
 
 本轮退役前五case均仍有12288个GPU tokens；host分别为8192或28672。全部epoch退休后两池占用保持不变，策略业务/epoch活动数退出窗口。这补充了首轮“退役时GPU已先清空”的覆盖限制，仍不等于以后原生淘汰不会释放这些槽。
+
+## 中容量独立回访：16次生成的正反方向验证
+
+原始数据在`runs/remote-h200-c-revisit/runs/c-host-revisit-fixture-v1/`，项目部署`20fef314241c60530775a41f07fdba15c40752fd`，原0ed引擎补丁、固定SGLang/Qwen revision不变。每臂新进程并cold reset，实际GPU16384/host17472/page64，write_through、kernel/layer_first、TMA0、chunk8192；设置保持8192-token预算、0.95占用阈值、60s窗口。三业务输入改为A8192、B9216、C12288，均输出1 token、ignore_eos；不是自然问答。
+
+四臂顺序为off回访B、conditioned回访B、conditioned回访C、off回访C。每臂先顺序完成并settle三业务，再用既有profiler只回收GPU当前12288 slots，随后只回访一个业务。**该GPU压力注入保留session refs，不回收host；它是两臂相同的机制控制，不是正常P3负载延迟。** B和C各用独立cold臂，避免先回访B改变C负例。回访使用原准备好的business/epoch、相同完整输入，新rid；不额外prepare或先retire。
+
+独立重算脚本`runs/c-host-admission-review/analyze_revisit.py`直接读取trace、receipt、native event与pool，不读取driver assessment，输出`revisit-summary.json`。它核对了：
+
+- 16个唯一rid的request_start、result和原生request_terminal一致；每份receipt的D+L+U等于8192/9216/12288对应输入长度，existing input_hash匹配plan完整IDs。每臂三个seed输出都为`[11] / [320] / [323]`；B回访为`[320]`、C为`[323]`，同目标两策略四次输入/输出全部相同。
+- 重复metrics快照按原生event seq合并，重复事件逐字一致、seq无缺口、event ring未截断；得到**24个唯一transfer_id完成事件**。这些均为hardware/CUDA-event计时，bytes与tokens一致。按serial请求及settle边界区分seed/回访DMA；transfer事件本身不带rid，不伪称逐rid直接标签。
+- 四臂回访前GPU均为0，quote无在途H2D/D2H，压力记录host释放0、refs_released=false。conditioned三个business分别绑定三个原epoch，回访再次使用同一原epoch；off关闭业务身份观察器，对其业务计数留未观测。
+
+### 容量压力与被保留分支
+
+A+B后四臂host都占17408/17472。此时conditioned没有近期分配淘汰，因此C首8192 action的pressure为false，但因预算内而允许。首批写入发生原生8192-token host回收，第二4096 action看到：host仍17408、窗口淘汰8192、3个业务/3个epoch、平均prompt9898.67，其他业务工作集19797.33>17472；三项压力成立且累计已准入128页，故后续64页被跳过。**不能把首action的pressure=false误报为机制未激活。**
+
+GPU压力步骤后，各quote可恢复host前缀为：
+
+| 策略，两个独立回访臂均相同 | A | B | C | 物理host占用 |
+|---|---:|---:|---:|---:|
+| off | 0 | 0 | 12288 | 12288 |
+| conditioned | 0 | 9216 | 8192 | 17408 |
+
+这直接验证conditioned保留了B、少保存了C尾部。off观察器关闭，不能把raw零计数当“零host淘汰”；其A/B丢失与剩余C前缀由真实quote和池占用确认。原生按整node而非恰好所缺slots回收的解释与固定源码相符，但本轮off没有逐次allocation-eviction观察值，不能补造其计数。
+
+### 回访收益与代价都成立
+
+| 单次回访 | off | conditioned |
+|---|---:|---:|
+| B：实际host load / prefill tokens | 0 / 9216 | 9152 / 64 |
+| B：server elapsed | 196.136ms | 24.740ms |
+| B：本次完成D2H / H2D | 504 / 0MiB | 0 / 500.5MiB |
+| C：实际host load / prefill tokens | 12224 / 64 | 8192 / 4096 |
+| C：server elapsed | 30.601ms | 108.933ms |
+| C：本次完成D2H / H2D | 0 / 668.5MiB | 224 / 448MiB |
+
+四份回访device-hit都为0。quote使用`input+sentinel`观察完整前缀，实际generation用原输入且原生保留末token/page64对齐，因此完整B的9216 quote对应9152 load＋64 prefill，完整C的12288 quote对应12224＋64；不能混用。
+
+三次seed阶段off实际完成D2H29696 tokens/1624MiB，conditioned25600 tokens/1400MiB，**真实少写4096 tokens/224MiB**，不再只是小8256池的“策略skip但原生也写不出”。含B回访的四次总D2H分别2128与1400MiB；含C回访的四次总D2H则都回到1624MiB。两条轨迹不能混合成平均收益，因为下一次回访哪个业务正是决定取舍的变量。
+
+conditioned回访C时，虽pressure仍true，新Req的已准入预算从0开始，4096/64页写入被允许；实际补写224MiB。原生allocation eviction计数从8192增至17408（再释放9216），B前缀从9216变0，host占用17408→12288，C前缀补齐。这再次表明预算针对单次请求的新增备份，**没有给节点永久禁备份，也不能保证B永远保留**。
+
+### 退役、进程结束与适用范围
+
+12份retire ACK均确认RETIRED，并各自对应原生retire_ref事件；GPU/host即时释放数均0。回访B两臂退役前后pool都为GPU9216/host17408；回访C两臂都为GPU12288/host12288。conditioned活动business/epoch窗口从3/3变0/0。该记录证明ACK/ref退役事件及策略身份退出、槽未立即释放；**没有导出每个tree node的逐ref计数**，不伪造“所有节点ref=0”的额外证明。
+
+四个owned-server清理后的returncode均为-9；driver16次生成完成并返回0，supervisor记录原研究服务恢复returncode0。此处没有本地shutdown尾日志，不能将-9自动归因于helper超时、正常SIGTERM退出或生成中崩溃，也未修复上游shutdown行为。
+
+每个目标/模式只有一次受控回访，重复token、output1、显式GPU回收、独立cold启动均区别于自然多轮问答。冷seed时长也受启动状态影响，不据本轮报告加速比、置信区间或正式质量非劣。它提供的是容量中间点下**少备份C能真实保住B并减少B重算，同时伤害C即时回访**的可复核工程证据；总体收益仍取决于真实回访分布、并发、写回摊销、质量和端到端控制成本，需要后续P3/回访负载验证。
