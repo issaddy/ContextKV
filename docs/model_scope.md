@@ -59,4 +59,4 @@ bash scripts/launch_sglang.sh --host 127.0.0.1 --port 30000 \
 
 当前完整本地套件：1236 passed、6 subtests；真实7B tokenizer启用，Ruff通过。另有4项独立合同覆盖旧guard、缺scope连接、cold reset和实际缓存配置变化，共29项scope专项通过；[独立审查](../runs/qwen3-scope-review/README.md)保留具体边界。固定原源码SHA、补丁应用、15个相关Python文件静态编译、统一guard时序及解析器副本一致性已通过source-only检查；报告在`runs/qwen3-engine-scope-sourcecheck.json`，明确GPU/runtime依赖导入未验。
 
-下一步GPU仅需每个拟采用模型的有限合同：info/scope、实际pool、固定请求、prepare/generate/status/retire、完整QA/实际IDs、host quote/恢复与DMA ACK。不能从metadata加载成功推出缓存性能、时延预测或质量提升。新模型使用独立state目录；不把旧7B实际历史或pending attempt无声迁移成Qwen3自有历史。
+随后已在H200对两个模型执行[有限GPU验收](qwen3_scope_gpu_validation.md)：info/scope、实际pool、prepare/generate/status/retire、四轮完整QA与实际IDs、GPU/Host配对生命周期及并发观测均有真实记录；并发观测的已知match等待状态仍未覆盖，明确为partial。部署源为`a87638a`，两模型独立state，未迁移旧7B历史或pending attempt。这不验证新模型成本预测、质量或一般性能收益；独立标定及正式负载验证仍需继续。

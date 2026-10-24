@@ -55,7 +55,7 @@ fixture本地19项合同包含6项真实typed客户端到Runtime.quote的快照�
 
 模型迁移审查发现主候选只验证证据消息，未检查原生模板是否改写历史助手正文。现有渲染边界已扩展为按序检查全部消息正文，保持原生模板和既有函数入口，不新增render或hash。CPU反例覆盖reasoning-prefix变换、重复历史、APPEND/REBUILD和失败时快照不变；不是对所有模板语义或角色边界的形式证明。真实固定7B tokenizer启用的完整回归为 **1210项及6子测试通过**，Ruff通过，记录在`runs/pytest-full-qa-render.log`。当前Qwen3运行器已有同类完整历史检查，本地修复没有改动正在运行的远端源码。
 
-显式[Qwen3本地模型配置](model_scope.md)已贯穿controller、launcher、native guard和profiling/lifecycle探针；local identity与HF加载revision分离，初始化检查实际目录/metadata/tokenizer/模板，旧无scope默认保持7B。新scope不能采用未绑定或旧模型的成本artifact。`a87638a`最终 **1236项及6子测试通过**，另25项原测试与4项独立scope合同通过，Ruff/shell/diff检查通过。新patch为`b1b58e096c309eef1d7c10b1da3d29bec86503030e72f0f8e3badba9cf9c8a05`，固定原源码校验、应用/逆向检查及15文件编译通过。其固定Git树构建核对84模块、29包内资产、332个sdist tracked文件、102测试/配置及13许可，见`runs/dist-qwen3-scope-complete/asset-check.json`。本地模型接入代码尚未部署，本批能力参考始终绑定`a6b5711`stock引擎，不能把CPU接入测试写成新patch已通过GPU验证。
+显式[Qwen3本地模型配置](model_scope.md)已贯穿controller、launcher、native guard和profiling/lifecycle探针；local identity与HF加载revision分离，初始化检查实际目录/metadata/tokenizer/模板，旧无scope默认保持7B。新scope不能采用未绑定或旧模型的成本artifact。`a87638a`最终 **1236项及6子测试通过**，另25项原测试与4项独立scope合同通过，Ruff/shell/diff检查通过。新patch为`b1b58e096c309eef1d7c10b1da3d29bec86503030e72f0f8e3badba9cf9c8a05`，固定原源码校验、应用/逆向检查及15文件编译通过。其固定Git树构建核对84模块、29包内资产、332个sdist tracked文件、102测试/配置及13许可，见`runs/dist-qwen3-scope-complete/asset-check.json`。随后333个tracked源码已部署，两模型完成[有限H200协议/完整QA/GPU与Host生命周期验收](qwen3_scope_gpu_validation.md)，并保留并发观测的partial覆盖。此前能力参考始终绑定`a6b5711`stock引擎，两个实验的源码、配置与结论独立记录。
 
 ## 已完成的 H200 集成验证
 
