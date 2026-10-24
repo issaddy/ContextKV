@@ -6,14 +6,18 @@
 
 | 验证 | 实际结果 |
 |---|---|
-| 最近完整 CPU 回归 | `b3d3c2f`：1277 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-research-sampling-v2.log |
+| 最近完整 CPU 回归 | `cae9149`：1310 passed，6 subtests passed，已显式开启真实 tokenizer 项，无跳过；runs/pytest-global-strategy-integration.log |
 | 固定 Qwen tokenizer 专项 | 原生完整编码、批量编码、边界回退与冻结候选 IDs 等价通过，包含在最新完整回归中；Linux 30 个真实候选也逐 token 相同 |
-| Ruff / shell / wheel | Ruff、shell与diff检查通过；固定`b3d3c2f`源码构建wheel/sdist，逐字核对85模块、29包内资产、338个sdist tracked文件、103测试/配置及13许可，未包含运行数据、模型或环境；runs/dist-research-sampling-final/asset-check.json |
+| Ruff / wheel | Ruff、diff检查通过；固定`cae9149`源码构建wheel/sdist，逐字核对85模块、29包内资产、342个sdist tracked文件、105测试/配置及13许可，未包含运行数据、模型或环境；runs/dist-global-strategy/asset-check.json |
 | 开发集模拟矩阵 | 33 jobs / 99 轮成功 |
 | 冻结模拟测试矩阵 | 39 jobs / 117 轮成功 |
 | 继承主方法参数的开发集消融 | 15 jobs / 45 轮成功，不参与主方法选择 |
 | 官方 MTRAG 格式检查器 | 6 轮 fixture，errors / warnings 为空；只证明格式兼容 |
 | 固定 MTRAG 全量复算 | 842 任务 / 110 会话；Cloud 205 / 26；1053 处参考标记 |
+
+`cae9149` 的全局审查切片完成[正式原生模型/采样入口](native_model_scope.md)、B6赢家别名去重复，以及已有Plan收益/margin/稳定期的事件投影。25项新模型合同、5项别名合同包含在完整回归；独立复核还重放四份旧真实B0/B1 manifest，全部兼容。旧冻结模拟矩阵的39 jobs是其实际历史执行数，不因新别名逻辑重写成更少job。
+
+本切片未部署远端、未运行新GPU实验；已有a876 Qwen3 scope真机证据不能追认为新采样/正式入口验收。原795次计划暂不执行，已用固定seed42、纯会话/轮次元数据冻结[12题诊断选择](../runs/source-plan-diagnostic-prep/README.md)，12个不同会话/四域/早中晚，最多60次生成，实际调用0。选择与既有159冻结输入的task/conversation/turn映射一致；新D/N/P提示/运行协议仍须完成后才执行。
 
 矩阵证据在 runs/matched-dev、runs/matched-test 和 runs/matched-ablation-dev。此前 48-job 开发矩阵属于未匹配消融参数的旧版流程，不再作为最终方法对照。runs/official-checker/verification.json 明确使用 fake fixture 答案，不是质量结果。上游 Starlette TestClient 有 HTTPX 弃用提示，不影响通过。
 
@@ -128,6 +132,8 @@ SGLang 固定 3f36fc08331f64cd63c4fbbdf39cc402f38bb38b，Qwen2.5-7B-Instruct 固
 
 ## 仍需完成的研究验收
 
-当前没有正式回答质量非劣、SLO goodput 提升或论文优于基线的结论。已有 B0/B1、控制器矩阵、匹配消融、成对诊断、原生容量实验及 16K 匹配标定/六方法联合运行。接续重点是区分可观测容量压力与传输不确定性、改善等待成本估计，补 32K 对照、重复测量、同预算 B6、低重叠负例、真实质量评分和人工盲审。profiling.decision_pairs 与生命周期压力探针分别补充成本差和旧独有分支归因；全局 slot 变化不能替代具体路径证据。
+当前没有正式回答质量非劣、SLO goodput提升或整体优于强基线的结论。[研发策略](research_strategy.md)是最新投入顺序：先检验共同提示下额外规划的机制价值，保留或替换后才接入自有历史P2、共同Cloud P3及有限B/C联合。normal-EOS、定向标定、完整模型评分、第二模型、共享pin等已完成项不再作为待办重跑。
 
-完整 Cloud P3 开发流程已运行。官方 qrels 覆盖 39/41 轮，缺失的两轮单列，未按零分混入；在有标签部分，BM25S recall@5 为 0.2094、nDCG@5 为 0.1671。这只是本配置下的检索弱基线，不是回答质量。原始 qrels 诊断、B0/B1 运行与 P3 生成保存在 runs/remote-h200-native；仍须完成回答质量评价、强基线和冻结 test。缺少评分时，质量覆盖、非劣判定和人工审查保持未验证，不以格式检查、模拟回答或词法代理补齐。运行方法见 [部署说明](deployment.md)、[成对决策](decision_pairs.md) 和 [贡献与实验设计](research_contributions.md)。
+533答案/2665维评分已经完整，但12候选均未获联合资格；当前缺口是评价器可靠性、统计证据与真实人工盲审，不是缺评分工具。318份Qwen3关键论断审查属于assistant审查，不补造人工评分或总体错误率。最终代码/模型/采样/资源/方法与评价协议固定后，才执行预声明heldout主比较；失败、不确定和无加速同样进入交付。
+
+工程可运行、研究批次完整、质量/性能结论成立分别记录。保留现有强简单基线与负结果，复杂机制须证明净收益；不机械补齐所有容量/写策略/模型矩阵，也不通过改epsilon、重复调参或换judge取得想要的结论。安装与实跑方法见[部署说明](deployment.md)、[同模型原生基线](native_model_scope.md)和[执行计划](implementation_plan.md)。
