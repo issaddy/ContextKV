@@ -85,9 +85,7 @@ def test_qualified_assistant_name_is_context_not_an_answer_fact():
 
 @pytest.mark.parametrize("value,finish", [
     ({"query":"answer", "relation":"followup", "history_turns":[2]}, "stop"),
-    ({"query":"answer", "relation":"followup", "history_turns":[]}, "stop"),
     ({"query":"answer", "relation":"unknown", "history_turns":[1]}, "stop"),
-    ({"query":"answer", "relation":"standalone", "history_turns":[1]}, "stop"),
     ({"query":"answer", "relation":"followup", "history_turns":[1]}, "length"),
 ])
 def test_invalid_or_truncated_interpretation_uses_current_query_once(value, finish):
@@ -96,6 +94,14 @@ def test_invalid_or_truncated_interpretation_uses_current_query_once(value, fini
     view = ConversationResolver(client).resolve(original, PriorContext())
     assert view["status"] == "failed" and view["text"] == original.query and view["context"] is None
     assert len(client.inputs) == 1
+
+
+def test_label_mismatch_does_not_discard_a_rewrite_with_valid_antecedents():
+    query = "How do I create tables using AtlasCloud?"
+    client = Client({"query": query, "relation": "standalone", "history_turns": [1]})
+    view = ConversationResolver(client).resolve(turn("Use AtlasCloud", ("How do I create tables?",)), PriorContext())
+    assert view["text"] == query and view["declared_relation"] == "standalone"
+    assert view["context"]["relation"] == "followup"
 
 
 @pytest.mark.parametrize("relation", ("condition_change", "correction", "standalone", "followup"))

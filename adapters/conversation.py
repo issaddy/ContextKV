@@ -115,12 +115,18 @@ class ConversationResolver:
             ids = value["history_turns"]
             if not isinstance(ids, list) or any(type(n) is not int or not 1 <= n <= len(users) for n in ids):
                 raise ValueError("interpretation cites an unavailable user turn")
-            if value["relation"] in {"standalone", "topic_switch"} and ids:
-                raise ValueError("a standalone/new topic cannot inherit old turns")
-            if value["relation"] in {"followup", "correction", "condition_change", "revisit"} and not ids:
-                raise ValueError("a contextual interpretation needs its prior user-turn provenance")
-            query = turn.query if value["relation"] in {"standalone", "ambiguous"} else value["query"].strip()
-            resolved = QueryContext(query, value["relation"], tuple(sorted(set(ids))))
+            relation = value["relation"]
+            # Labels describe how a query was interpreted, not a hard gate on
+            # a useful rewrite. Models sometimes call the RESULT standalone
+            # while correctly supplying the antecedent and inherited task.
+            if ids and relation in {"standalone", "topic_switch"}:
+                relation = "followup"
+            elif not ids and relation in {"followup", "correction", "condition_change", "revisit"}:
+                relation = "standalone"
+            query = turn.query if relation in {"standalone", "ambiguous"} else value["query"].strip()
+            resolved = QueryContext(query, relation, tuple(sorted(set(ids))))
+            if relation != value["relation"]:
+                trace["declared_relation"] = value["relation"]
         except (ValueError, TypeError, KeyError) as error:
             trace.update(status="failed", error=str(error))
             return finish("invalid_interpretation_use_current_query")
