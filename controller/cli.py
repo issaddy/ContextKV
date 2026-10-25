@@ -128,7 +128,8 @@ async def benchmark(args, config):
             retrieval_priority = tuple(block.key for block in evidence)
         return await service.serve_turn(session_id, turn.query,
                     evidence, request_id=turn.task_id, corpus_snapshot_id=corpus_snapshot,
-                    reference_history=history, retrieval_priority=retrieval_priority)
+                    reference_history=history, retrieval_priority=retrieval_priority,
+                    query_context=turn.query_context)
 
     def export_result(item):
         nonlocal first_export_error

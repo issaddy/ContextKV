@@ -12,7 +12,7 @@ import time
 
 from adapters.query_views import named_user_spans, user_topic_view
 from adapters.table_relations import SourceSpan
-from controller.schema import EvidenceBlock, EvidenceKey
+from controller.schema import EvidenceBlock, EvidenceKey, QueryContext
 
 SOURCE_MODES = {"source_topic", "assistant_topic_unverified"}
 VERSION = "source-topic-selector-v1"
@@ -69,6 +69,7 @@ class PriorContext:
     missing_keys: tuple[EvidenceKey, ...] = ()
     snapshot_version: int | None = None
     source_inventory_scope: str = "committed_required_keys"
+    interpretations: tuple[QueryContext | None, ...] = ()
 
 
 def snapshot_context(turn, snapshot):
@@ -89,7 +90,8 @@ def snapshot_context(turn, snapshot):
         for key in record.evidence_keys:
             seen.setdefault(key, []).append(ordinal)
     return PriorContext(tuple(PriorSource(by_key[k], tuple(turns)) for k, turns in seen.items() if k in by_key),
-                        tuple(k for k in seen if k not in by_key), snapshot.version)
+                        tuple(k for k in seen if k not in by_key), snapshot.version,
+                        interpretations=tuple(t.query_context for t in snapshot.raw_history))
 
 
 def controller_context_provider(store, run_prefix):

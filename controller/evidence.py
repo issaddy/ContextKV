@@ -153,18 +153,21 @@ _TOPICS = {
 
 def _natural_revisits(query: str, archive: Mapping[EvidenceKey, EvidenceBlock],
                       snapshot: SessionSnapshot, policy: EvidencePolicy,
-                      current: set[EvidenceKey]) -> dict[EvidenceKey, str]:
+                      current: set[EvidenceKey], revisit_turns: tuple[int, ...] | None = None) -> dict[EvidenceKey, str]:
     """Resolve explicit anaphora only when a recent committed turn disambiguates it.
 
     A semantic topic must occur in the evidence itself. Ties are left unresolved;
     recency or a dataset's follow-up label alone is never enough to invent a match.
     """
     prior_version = bool(_PRIOR_VERSION.search(query))
-    if policy.revisit_mode != "conservative" or not (_REVISIT.search(query) or prior_version):
+    if (policy.revisit_mode != "conservative" or revisit_turns == ()
+            or revisit_turns is None and not (_REVISIT.search(query) or prior_version)):
         return {}
     topics = [name for name, pattern in _TOPICS.items() if pattern.search(query)]
     current_groups = {(k.corpus_id, k.document_id, k.passage_id) for k in current}
-    for turn in reversed(snapshot.raw_history[-policy.revisit_history_turns:]):
+    history = (snapshot.raw_history[-policy.revisit_history_turns:] if revisit_turns is None else
+               tuple(turn for ordinal, turn in enumerate(snapshot.raw_history, 1) if ordinal in revisit_turns))
+    for turn in reversed(history):
         keys = [key for key in turn.evidence_keys if key in archive and
                 (prior_version or key in current or (key.corpus_id, key.document_id, key.passage_id)
                  not in current_groups)]
@@ -216,7 +219,8 @@ def resolve_required_evidence(query: str, current: Iterable[EvidenceKey],
 def resolve_required_evidence_with_reasons(query: str, current: Iterable[EvidenceKey],
                               archive: Mapping[EvidenceKey, EvidenceBlock],
                               snapshot: SessionSnapshot,
-                              policy: EvidencePolicy | None = None
+                              policy: EvidencePolicy | None = None, *,
+                              revisit_turns: tuple[int, ...] | None = None
                               ) -> tuple[tuple[EvidenceBlock, ...],
                                          tuple[tuple[EvidenceKey, str], ...]]:
     policy = policy or EvidencePolicy()
@@ -244,7 +248,7 @@ def resolve_required_evidence_with_reasons(query: str, current: Iterable[Evidenc
         names = (block.key.document_id, block.title)
         if _mentioned(block.key.version,folded) and any(
                 _mentioned(name, folded) for name in names if name):
-            reasons.setdefault(block.key, "explicit_document_version")
+            reasons[block.key] = "explicit_document_version"
     for matches in anchor_matches.values():
         # A configuration identifier can occur in unrelated products. Scope it
         # using explicit source/version names or the current retrieval, rather
@@ -265,8 +269,21 @@ def resolve_required_evidence_with_reasons(query: str, current: Iterable[Evidenc
             continue
         for block in scoped:
             reasons.setdefault(block.key, "configuration_anchor")
-    for key, reason in _natural_revisits(query, archive, snapshot, policy, current).items():
+    for key, reason in _natural_revisits(query, archive, snapshot, policy, current, revisit_turns).items():
         reasons.setdefault(key, reason)
+    if not allows_version_comparison(query, policy):
+        # An explicitly requested archived revision replaces a conflicting
+        # retrieval hit for the SAME passage. Other documents and declared
+        # dependencies remain subject to the existing visibility checks.
+        explicit = {}
+        for key, reason in reasons.items():
+            if reason == "explicit_document_version" or reason.startswith("explicit_reference:"):
+                group = (key.corpus_id, key.document_id, key.passage_id)
+                explicit.setdefault(group, set()).add(key)
+        for key in tuple(reasons):
+            choices = explicit.get((key.corpus_id, key.document_id, key.passage_id), ())
+            if reasons[key] == "current_retrieval" and len(choices) == 1 and key not in choices:
+                del reasons[key]
     required = set(reasons)
     pending = list(required)
     while pending:

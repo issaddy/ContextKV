@@ -68,6 +68,17 @@ class Message:
 
 
 @dataclass(frozen=True)
+class QueryContext:
+    """Derived conversational intent, never an evidence source or a raw QA edit."""
+    query: str
+    relation: str
+    history_turns: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        _tuples(self, "history_turns")
+
+
+@dataclass(frozen=True)
 class TurnRecord:
     turn_id: int
     user_text: str
@@ -75,6 +86,7 @@ class TurnRecord:
     assistant_output_ids: tuple[int, ...] = ()
     finish_reason: str = "stop"
     evidence_keys: tuple[EvidenceKey, ...] = ()
+    query_context: QueryContext | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "assistant_output_ids", "evidence_keys")

@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import time
+import re
 from typing import Iterable
 
 from .evidence import (EvidenceError, EvidencePolicy, allows_version_comparison, assign_references,
                        evidence_index, resolve_required_evidence_with_reasons, version_conflicts)
-from .schema import EvidenceBlock, EvidenceKey, Message, PromptCandidate, SessionSnapshot
+from .schema import EvidenceBlock, EvidenceKey, Message, PromptCandidate, QueryContext, SessionSnapshot
 from .templates import (SYSTEM_PROMPT, ByteTemplate, Template, current_user_message,
                         current_source_guide, longest_common_prefix, render_evidence_relations, verify_rendered_evidence)
 
@@ -18,6 +19,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
                      retrieved: Iterable[EvidenceBlock], policy: EvidencePolicy | None = None,
                      template: Template | None = None, *,
                      retrieval_priority: tuple[EvidenceKey, ...] | None = None,
+                     query_context: QueryContext | None = None,
                      measure_evidence_redundancy: bool = False
                      ) -> tuple[PromptCandidate, ...]:
     """No archive/seen/epoch/template state is changed by candidate generation."""
@@ -30,8 +32,15 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     if not set(retrieval_priority) <= {block.key for block in retrieved}:
         raise EvidenceError("retrieval priority must reference supplied retrieval evidence")
     archive = evidence_index(retrieved, committed=snapshot.archive)
+    intent_query = query if query_context is None else query_context.query
+    # Retain explicit source references even if a resolver expands their names.
+    evidence_query = intent_query if query_context is None else (
+        intent_query + " " + " ".join(re.findall(r"\bE_[a-zA-Z0-9]+\b", query)))
+    revisit_turns = (None if query_context is None else
+                     query_context.history_turns if query_context.relation == "revisit" else ())
     required, resolution = resolve_required_evidence_with_reasons(
-        query, (block.key for block in retrieved), archive, snapshot, policy)
+        evidence_query, (block.key for block in retrieved), archive, snapshot, policy,
+        revisit_turns=revisit_turns)
     if policy.layout == "contextpilot":
         from adapters.contextpilot import order_evidence
         required = order_evidence(required, snapshot, retrieval_priority)
@@ -41,7 +50,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         existing_refs = (*existing_refs, *snapshot.execution.reference_map)
     references = assign_references(archive, existing_refs, prefix_length=policy.reference_prefix_length)
     evidence_relations = render_evidence_relations(required, references)
-    source_guide = current_source_guide(query, required, references)
+    source_guide = current_source_guide(intent_query, required, references)
     table_annotations = ""
     if policy.table_relations:
         from adapters.table_relations import extract_table_relations, render_table_relations
@@ -105,8 +114,13 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
             reason = "system_prompt_changed"
         elif snapshot.force_new_epoch_for_recovery or snapshot.must_rebuild:
             reason = "recovery_requires_rebuild"
-        elif not allows_version_comparison(query, policy) and version_conflicts(visible, required_keys):
+        elif not allows_version_comparison(evidence_query, policy) and version_conflicts(visible, required_keys):
             reason = "invalid_visible_version"
+        elif (query_context is not None and query_context.relation not in {"followup", "revisit"}
+              and visible - required_keys):
+            # A changed/independent intent must not retain a stale source set.
+            # Stable follow-ups still compete on cost, using the same evidence.
+            reason = "intent_changed_with_stale_evidence"
         elif visible and not required_keys & visible:
             # No current source body would be reused. Carrying the old evidence
             # only adds an ineligible source set; rebuild keeps the actual QA.
@@ -115,7 +129,8 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         current, spans = current_user_message(query, missing, references,
             message_index=len(execution.messages), reused=required_keys & visible,
             layout=policy.layout, retrieval_priority=retrieval_priority, table_annotations=table_annotations,
-            evidence_relations=evidence_relations, citation_scope=required_keys, source_guide=source_guide)
+            evidence_relations=evidence_relations, citation_scope=required_keys, source_guide=source_guide,
+            query_context=query_context)
         prompts.append(("APPEND", execution.messages + (current,), execution.evidence_spans + spans,
                         visible | frozenset(span.key for span in spans), reason))
 
@@ -126,7 +141,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
                                          message_index=len(messages), layout=policy.layout,
                                          retrieval_priority=retrieval_priority, table_annotations=table_annotations,
                                          evidence_relations=evidence_relations, citation_scope=required_keys,
-                                         source_guide=source_guide)
+                                         source_guide=source_guide, query_context=query_context)
     messages.append(current)
     prompts.append(("REBUILD", tuple(messages), spans, frozenset(span.key for span in spans), None))
     conversations = tuple(prompt[1] for prompt in prompts)

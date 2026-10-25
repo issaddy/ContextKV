@@ -306,16 +306,18 @@ class HybridRetriever:
                  stage="hybrid_rerank", candidate_k=50, rerank_k=50, rrf_k=60,
                  source_config=None, query_fusion="single", resolver=None, rerank_query_mode="resolved", trace_sink=None):
         from adapters.query_resolution import SOURCE_MODES
-        if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", *SOURCE_MODES}:
+        if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", *SOURCE_MODES}:
             raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
         if stage not in {"dense", "hybrid", "hybrid_rerank"}:
             raise ValueError("unknown online retrieval stage")
         if query_fusion not in {"single", "current_topic_rrf"}:
             raise ValueError("unknown query fusion")
-        if query_fusion == "current_topic_rrf" and (query_mode not in {"user_topic", *SOURCE_MODES} or stage == "dense"):
+        if query_fusion == "current_topic_rrf" and (query_mode not in {"user_topic", "conversational", *SOURCE_MODES} or stage == "dense"):
             raise ValueError("current_topic_rrf requires user_topic/source_topic/assistant_topic_unverified and hybrid/hybrid_rerank")
         if query_mode in SOURCE_MODES and (resolver is None or query_fusion != "current_topic_rrf"):
             raise ValueError("topic selector modes require resolver and current_topic_rrf")
+        if query_mode == "conversational" and (resolver is None or rerank_query_mode != "resolved"):
+            raise ValueError("conversational retrieval needs resolver and resolved reranking")
         if stage == "hybrid_rerank" and reranker is None:
             raise ValueError("hybrid_rerank requires a loaded reranker")
         if rerank_query_mode not in {"resolved", "current", "user_topic"}:
@@ -332,7 +334,7 @@ class HybridRetriever:
         self.query_fusion = query_fusion
         self.rerank_query_mode = rerank_query_mode
         self.resolver = resolver
-        self.requires_history_context = query_mode in SOURCE_MODES
+        self.requires_history_context = query_mode in SOURCE_MODES or query_mode == "conversational"
         self.candidate_k, self.rerank_k, self.rrf_k = candidate_k, rerank_k, rrf_k
         self.source_config = source_config
         self._lock = Lock()
@@ -426,7 +428,9 @@ class HybridRetriever:
                         self.query_view_traces.append(trace)
                     else:
                         self.trace_sink(trace)
-        return replace(turn, contexts=tuple(contexts))
+        from controller.schema import QueryContext
+        intent = QueryContext(**view["context"]) if view is not None and view.get("context") is not None else None
+        return replace(turn, contexts=tuple(contexts), query_context=intent)
 
     def close(self):
         with self._lock:

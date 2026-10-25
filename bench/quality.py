@@ -140,6 +140,8 @@ def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Pat
             "output_ids": list(output_ids), "actual_history": _jsonable(turn.history)}
     if citation_scope is not None:
         full["citation_scope"] = list(citation_scope)
+    if turn.query_context is not None:
+        full["query_context"] = _jsonable(turn.query_context)
     for path, record in ((official_path, official_record(turn, answer)), (audit_path, full)):
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)

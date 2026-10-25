@@ -71,8 +71,9 @@ class ServingRetriever:
                 corpus_snapshot_id=self.corpus_snapshot_id,
                 retrieval_elapsed_ms=(time.monotonic()-started)*1000,
                 ranking=[{"passage_id": c.document_id, "score": c.score} for c in retrieved.contexts],
-                retrieval_priority=priority, supplied_evidence_keys=tuple(b.key for b in blocks))
-        return EvidenceSelection(blocks, priority)
+                retrieval_priority=priority, supplied_evidence_keys=tuple(b.key for b in blocks),
+                query_context=retrieved.query_context)
+        return EvidenceSelection(blocks, priority, retrieved.query_context)
 
     def close(self):
         """Application shutdown calls once; HybridRetriever.close waits on its lock."""

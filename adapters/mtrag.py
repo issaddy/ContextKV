@@ -6,6 +6,8 @@ never copy official assistant messages or annotations into online objects.
 """
 from __future__ import annotations
 
+from controller.schema import QueryContext
+
 from collections import defaultdict
 from dataclasses import dataclass
 from hashlib import sha256
@@ -58,6 +60,7 @@ class OnlineTurn:
     history: tuple[OnlineMessage, ...]
     contexts: tuple[OnlineContext, ...]
     protocol: Protocol
+    query_context: QueryContext | None = None
 
     @property
     def question(self) -> str:

@@ -1,0 +1,30 @@
+# Conditional Qwen3 intent resolution on the existing local generation service.
+# Reuses one hybrid search/rerank; the original user question/history remain intact.
+schema_version: 1
+kind: hybrid
+stage: hybrid_rerank
+query_mode: conversational
+sparse_index: data/cloud-bm25s
+dense_index: data/cloud-bge-m3
+encoder_path: models/bge-m3
+reranker_path: models/bge-reranker-v2-m3
+device: cuda:0
+dtype: bfloat16
+batch_size: 16
+encoder_max_length: 8192
+reranker_max_length: 1024
+candidate_k: 50
+rerank_k: 50
+rrf_k: 60
+cpu_threads: 1
+query_fusion: single
+selector:
+  base_url: http://127.0.0.1:30000
+  model: /media/ssd1/qwen3-8b
+  revision: local-snapshot:9e3a121da0ce4bba14a09f453123d3ca33caf62c3097ea54ee44ab29c8dbffd2
+  tokenizer_path: /media/ssd1/qwen3-8b
+  max_input_tokens: 8192
+  max_new_tokens: 192
+  context_window: 32768
+  timeout_seconds: 60
+  temperature: 0

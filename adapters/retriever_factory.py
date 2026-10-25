@@ -44,15 +44,20 @@ def load_retriever_config(path):
     if value.schema_version != 1 or value.kind != "hybrid":
         raise ValueError("retriever config requires schema_version=1 and kind=hybrid")
     from adapters.query_resolution import SCHEMA_MODES, SOURCE_MODES
-    if value.query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", *SOURCE_MODES}:
+    if value.query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", *SOURCE_MODES}:
         raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
     if value.stage not in {"dense", "hybrid", "hybrid_rerank"}:
         raise ValueError("unknown retrieval stage")
     if value.query_fusion not in {"single", "current_topic_rrf"}:
         raise ValueError("unknown query fusion")
-    if value.query_fusion == "current_topic_rrf" and (value.query_mode not in {"user_topic", *SOURCE_MODES} or value.stage == "dense"):
+    if value.query_fusion == "current_topic_rrf" and (value.query_mode not in {"user_topic", "conversational", *SOURCE_MODES} or value.stage == "dense"):
         raise ValueError("current_topic_rrf requires user_topic/source_topic/assistant_topic_unverified and hybrid/hybrid_rerank")
-    if value.query_mode in SOURCE_MODES:
+    if value.query_mode == "conversational":
+        from adapters.query_selector import SelectorConfig
+        if value.selector is None or value.rerank_query_mode != "resolved":
+            raise ValueError("conversational retrieval needs selector configuration and resolved reranking")
+        SelectorConfig(**value.selector)
+    elif value.query_mode in SOURCE_MODES:
         from adapters.query_selector import SelectorConfig
         if value.query_fusion != "current_topic_rrf" or value.selector is None:
             raise ValueError("topic selector modes require selector config and current_topic_rrf")
@@ -115,8 +120,12 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
                 from adapters.query_selector import OpenAICompletionClient, SelectorConfig
                 client = OpenAICompletionClient(SelectorConfig(**config.selector))
                 cleanup.callback(client.close)
-                resolver = TopicResolver(client, config.query_mode, history_turns=config.selector_history_turns,
-                                         schema_mode=config.selector_schema_mode)
+                if config.query_mode == "conversational":
+                    from adapters.conversation import ConversationResolver
+                    resolver = ConversationResolver(client)
+                else:
+                    resolver = TopicResolver(client, config.query_mode, history_turns=config.selector_history_turns,
+                                             schema_mode=config.selector_schema_mode)
             result = HybridRetriever(sparse, dense, encoder, reranker, query_mode=config.query_mode,
                 stage=config.stage, candidate_k=config.candidate_k, rerank_k=config.rerank_k, rrf_k=config.rrf_k,
                 query_fusion=config.query_fusion,

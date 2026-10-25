@@ -17,7 +17,7 @@ from .epoch import EpochCoordinator
 from .events import EventLog
 from .planner import PlannerKnobs, choose_plan
 from .schema import (ClientTiming, CompletionReceipt, CostEstimate, EvidenceBlock, EvidenceKey,
-                     EvidenceSpan, GenerationResult, NoFeasiblePlan, SessionSnapshot, TurnRecord)
+                     EvidenceSpan, GenerationResult, NoFeasiblePlan, QueryContext, SessionSnapshot, TurnRecord)
 from .serialization import dumps
 from .sampling import SamplingRecipe, request_sampling
 from .session_store import (Attempt, IdempotencyConflict, PendingAttempt, SessionStore, StoreError)
@@ -33,6 +33,7 @@ class EvidenceSelection:
     """Material returned by a configured retriever inside the turn transaction."""
     evidence: tuple[EvidenceBlock, ...]
     retrieval_priority: tuple[EvidenceKey, ...]
+    query_context: QueryContext | None = None
 
 
 @dataclass(frozen=True)
@@ -177,17 +178,21 @@ class Controller:
                          request_id: str | None = None, corpus_snapshot_id: str = "demo-v1",
                          reference_history: tuple[TurnRecord, ...] | None = None,
                          retrieval_priority: tuple[EvidenceKey, ...] | None = None,
+                         query_context: QueryContext | None = None,
                          evidence_provider: Callable[[SessionSnapshot], Awaitable[EvidenceSelection]] | None = None) -> TurnResponse:
         if not session_id or not query.strip():
             raise ValueError("session_id and query must be nonempty")
         evidence = tuple(evidence)
-        if evidence_provider is not None and (evidence or reference_history is not None or retrieval_priority is not None):
+        if evidence_provider is not None and (evidence or reference_history is not None or retrieval_priority is not None
+                                             or query_context is not None):
             raise ValueError("retrieved queries cannot also supply evidence, reference history or retrieval priority")
         request_id = request_id or uuid.uuid4().hex
         # Query identity is stable before retrieval. A retry returns the original
         # attempt rather than re-retrieving against newer history or rankings.
         content = (("retrieved_query", query, corpus_snapshot_id) if evidence_provider is not None else
                    (query, evidence, corpus_snapshot_id, reference_history, retrieval_priority))
+        if query_context is not None:
+            content = (*content, query_context)
         request_hash = hashlib.sha256(dumps(content).encode()).hexdigest()
         arrived = time.monotonic()
         async with self._lock(session_id):
@@ -234,6 +239,7 @@ class Controller:
                     retrieval_ms = (time.monotonic()-retrieval_started)*1000
                     evidence = tuple(selection.evidence)
                     retrieval_priority = tuple(selection.retrieval_priority)
+                    query_context = selection.query_context
                     self.events.emit("retrieval_finished", business_session_id=session_id,
                                      attempt_id=attempt.attempt_id, retrieval_ms=retrieval_ms,
                                      retrieval_priority=retrieval_priority,
@@ -246,6 +252,7 @@ class Controller:
                 measure_redundancy = "redundancy_threshold" in {self.knobs.strategy, self.knobs.fallback_strategy}
                 candidates = build_candidates(planning_snap, query, evidence, self.policy, self.template,
                                                retrieval_priority=retrieval_priority,
+                                               query_context=query_context,
                                                measure_evidence_redundancy=measure_redundancy)
                 for candidate in candidates:
                     self.events.emit("candidate_built", business_session_id=session_id, attempt_id=attempt.attempt_id,
@@ -268,6 +275,7 @@ class Controller:
                     planning_snap = replace(snap, force_new_epoch_for_recovery=True, must_rebuild=True)
                     candidates = build_candidates(planning_snap, query, evidence, self.policy, self.template,
                                                    retrieval_priority=retrieval_priority,
+                                                   query_context=query_context,
                                                    measure_evidence_redundancy=measure_redundancy)
                     valid = tuple(c for c in candidates if c.feasible)
                     quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
@@ -316,7 +324,8 @@ class Controller:
                           (append_failure or plan.reason) if plan.candidate.action == "REBUILD" else "append")
                 planned = replace(attempt, stage="PLANNED", evidence=evidence,
                                   plan=plan, branch_reason=reason,
-                                  retrieval_priority=retrieval_priority, retrieval_ms=retrieval_ms)
+                                  retrieval_priority=retrieval_priority, retrieval_ms=retrieval_ms,
+                                  query_context=query_context)
                 # No-C ablation keeps the native session across text rebuilds.
                 # History protocol changes and failed attempts still need safe recovery.
                 new_epoch = (snap.current_epoch is None or snap.history_sync_pending

@@ -1,7 +1,7 @@
 """Fixed chat templates, actual token hashing, and body-span verification."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from collections import Counter
 import hashlib
 import json
@@ -10,7 +10,7 @@ import re
 from typing import Iterable, Protocol
 
 from .evidence import EvidenceError, evidence_index
-from .schema import ConfigFingerprint, EvidenceBlock, EvidenceKey, EvidenceSpan, Message
+from .schema import ConfigFingerprint, EvidenceBlock, EvidenceKey, EvidenceSpan, Message, QueryContext
 
 
 SYSTEM_PROMPT = (
@@ -266,6 +266,7 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
                          retrieval_priority: Iterable[EvidenceKey] = (),
                          table_annotations: str = "", evidence_relations: str = "",
                          source_guide: str = "",
+                         query_context: QueryContext | None = None,
                          citation_scope: Iterable[EvidenceKey] | None = None
                          ) -> tuple[Message, tuple[EvidenceSpan, ...]]:
     by_key = {key: reference for reference, key in references}
@@ -307,6 +308,12 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
     ids = ", ".join(f"[{by_key[key]}]" for key in allowed) or "none"
     content += f"\nCitations allowed for this answer: {ids}.\n"
     content += "Use only these sources. Answer supported parts; identify any unsupported part separately.\n"
+    if query_context is not None:
+        content += ("\nCurrent conversational intent (a derived interpretation, not evidence):\n"
+                    + json.dumps(asdict(query_context), ensure_ascii=False, separators=(",", ":"))
+                    + "\nThe current question overrides older assumptions. Keep product, population, region and version "
+                    "conditions separate; use only applicable evidence. If the intended object remains ambiguous, "
+                    "ask for the missing distinction while answering any supported part.\n")
     content += f"\nQuestion:\n{query}\n"
     return Message("user", content), tuple(spans)
 

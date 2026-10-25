@@ -159,7 +159,7 @@ def test_explicit_version_revisit_does_not_match_part_of_another_document_name(
     candidate = build_candidates(snapshot, query, (current,),
                                  EvidencePolicy(revisit_mode="explicit"))[0]
     assert candidate.required_blocks == candidate.visible_blocks == {current.key}
-    assert dict(candidate.evidence_resolution) == {current.key: "current_retrieval"}
+    assert dict(candidate.evidence_resolution) == {current.key: "explicit_document_version"}
 
 
 def test_unrelated_version_name_does_not_create_false_conflict_during_rebuild():

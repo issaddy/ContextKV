@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 
-from .schema import (ContextEpoch, EvidenceBlock, EvidenceKey, ExecutionLedger, GenerationResult, Message,
+from .schema import (ContextEpoch, EvidenceBlock, EvidenceKey, ExecutionLedger, GenerationResult, Message, QueryContext,
                      Plan, RetireOperation, SessionSnapshot, TurnRecord)
 from .serialization import dumps, loads
 
@@ -51,6 +51,7 @@ class Attempt:
     branch_reason: str = ""
     retrieval_priority: tuple[EvidenceKey, ...] | None = None
     retrieval_ms: float | None = None
+    query_context: QueryContext | None = None
 
 
 ACTIVE_STAGES = ("STARTED", "PLANNED", "PREPARING", "PREPARED", "SUBMITTED", "RESULT_READY")
@@ -194,7 +195,8 @@ class SessionStore:
             if attempt == old:
                 return False
             raise StoreError(f"Invalid or stale attempt transition {old.stage} -> {attempt.stage}")
-        if old.plan is not None and (attempt.plan != old.plan or attempt.evidence != old.evidence):
+        if old.plan is not None and (attempt.plan != old.plan or attempt.evidence != old.evidence
+                                     or attempt.query_context != old.query_context):
             raise StoreError("A selected plan and its evidence are immutable")
         if old.result is not None and attempt.result != old.result:
             raise StoreError("A durable result is immutable")
@@ -296,7 +298,7 @@ class SessionStore:
             version = snap.version + 1
             history_version = snap.raw_history_version + 1
             turn = TurnRecord(len(snap.raw_history) + 1, attempt.query, result.text, result.output_ids,
-                              result.finish_reason, tuple(sorted(candidate.required_blocks)))
+                              result.finish_reason, tuple(sorted(candidate.required_blocks)), attempt.query_context)
             ledger = ExecutionLedger(epoch.epoch_no, epoch.engine_session_id, history_version,
                                      candidate.messages + (Message("assistant", result.text),),
                                      candidate.input_ids, result.output_ids, candidate.visible_blocks,

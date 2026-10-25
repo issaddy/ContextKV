@@ -87,6 +87,39 @@ def test_factory_loads_models_once_and_retrieves_only_user_questions(retriever_c
         retriever.retrieve_turn(replace(outputs[0], protocol="P1"))
 
 
+def test_conversational_factory_shares_one_query_with_retrieval_generation_and_serving(retriever_config, monkeypatch):
+    from adapters import query_selector
+    from adapters.query_selector import CompletionResult
+    from adapters.serving_retrieval import ServingRetriever
+    from controller.schema import QueryContext, SessionSnapshot, TurnRecord
+    value = yaml.safe_load(retriever_config.read_text())
+    value.update(query_mode="conversational", query_fusion="single",
+                 selector={"base_url":"http://fake","model":"fake","revision":"fixed"})
+    retriever_config.write_text(yaml.safe_dump(value))
+    calls = []
+    class Client:
+        manifest = {"model":"fixture"}
+        def complete(self, messages, **kwargs):
+            calls.append(messages)
+            return CompletionResult("completed", json.dumps({"query":"Atlas attachment limits?",
+                "relation":"correction","history_turns":[1]}), "stop")
+        def close(self):
+            pass
+    monkeypatch.setattr(query_selector, "OpenAICompletionClient", lambda _:Client())
+    retriever = create_retriever("P3", config_path=retriever_config)
+    assert retriever.requires_history_context
+    wrapper = ServingRetriever(retriever, corpus_id="fixture")
+    snapshot = SessionSnapshot("s", raw_history=(TurnRecord(1,"Atlas document limits?","An actual response."),))
+    try:
+        selection = wrapper._retrieve(snapshot, "No, I meant attachments.", "request", time.monotonic())
+        assert selection.query_context == QueryContext("Atlas attachment limits?", "correction", (1,))
+        assert retriever.encoder.inputs == retriever.reranker.inputs == [selection.query_context.query]
+        assert len(selection.evidence) == 5 and len(calls) == 1
+        assert retriever.manifest["query_view_traces"][0]["context"]["relation"] == "correction"
+    finally:
+        wrapper.close()
+
+
 def test_external_trace_sink_does_not_retain_service_history_or_change_ranking(retriever_config):
     value=yaml.safe_load(retriever_config.read_text())
     value['query_mode']='user_topic'

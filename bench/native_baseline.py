@@ -433,7 +433,7 @@ class NativeBaseline:
             # execution=None yields one REBUILD and still uses the same shared
             # current/explicit-revisit/dependency evidence selection and stable IDs.
             candidates = build_candidates(snapshot, turn.query, retrieved, self.policy, self.template,
-                                          retrieval_priority=retrieval_priority)
+                                          retrieval_priority=retrieval_priority, query_context=turn.query_context)
             candidate = next(c for c in candidates if c.action == "REBUILD")
             if not candidate.feasible:
                 raise NativeProtocolError(candidate.reason or "infeasible shared prompt")
@@ -447,7 +447,7 @@ class NativeBaseline:
             # Candidate construction has already validated this turn's evidence.
             archive = {block.key: block for block in (*snapshot.archive, *retrieved)}
             record = TurnRecord(turn.turn, turn.query, result.text, result.output_ids,
-                                result.finish_reason, tuple(sorted(candidate.required_blocks)))
+                                result.finish_reason, tuple(sorted(candidate.required_blocks)), turn.query_context)
             self.snapshots[turn.conversation_id] = replace(snapshot, version=snapshot.version + 1,
                 raw_history=history + (record,), raw_history_version=snapshot.raw_history_version + 1,
                 archive=tuple(archive[key] for key in sorted(archive)), reference_map=candidate.reference_map)
