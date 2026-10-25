@@ -62,9 +62,9 @@ def test_oof_replay_uses_real_planner_and_preserves_measurements(tmp_path):
     original = deepcopy(rows)
     records, summaries = evaluate_decisions(cases, rows, validation, RunConfig(), artifact, info)
     assert len(records) == 8
-    assert summaries["global-candidate"]["plan_reasons"] == {"hysteresis": 2}
+    assert summaries["global-candidate"]["plan_reasons"] == {"context_size_tie_break": 2}
     assert summaries["conditional-candidate"]["plan_reasons"] == {"cost_saving": 2}
-    assert summaries["conditional-shared_history"]["mean_selected_regret_ms"] == 40.
+    assert summaries["conditional-shared_history"]["mean_selected_regret_ms"] == 0.
     assert summaries["conditional-candidate"]["mean_selected_regret_ms"] == 0.
     assert all(arm["prediction"]["output_length_error_tokens"] == 500.
                for row in records["conditional-candidate"] for arm in row["observations"].values())

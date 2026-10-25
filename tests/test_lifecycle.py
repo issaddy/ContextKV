@@ -41,6 +41,49 @@ async def test_success_dual_ledger_rebuild_and_retire(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("lost_response", [False,True])
+async def test_cost_tie_compacts_evidence_and_retires_only_after_commit(tmp_path,monkeypatch,lost_response):
+    from controller.cost_model import CostModel
+    from controller.schema import CostEstimate
+
+    model = CostModel()
+    monkeypatch.setattr(model,"predict_native",lambda candidate,*args,**kwargs:
+        CostEstimate(candidate.candidate_id,100,error_ms=10,calibrated=True))
+    controller,store,engine = system(tmp_path,cost_model=model)
+    old_evidence = make_evidence("Old material. "*200,"old")
+    new_evidence = make_evidence("Current material.","new")
+    first = await controller.serve_turn("s","Summarize the old material.",(old_evidence,),request_id="1")
+    old = store.read_snapshot("s").current_epoch
+    retired = []
+    original_retire = engine.retire
+
+    async def retire_after_commit(session_id,*args,**kwargs):
+        if session_id == old.engine_session_id:
+            snapshot = store.read_snapshot("s")
+            assert store.find_request("s","2").stage == "COMMITTED"
+            assert snapshot.current_epoch != old
+            assert len(snapshot.raw_history) == 2
+            retired.append(session_id)
+        return await original_retire(session_id,*args,**kwargs)
+
+    monkeypatch.setattr(engine,"retire",retire_after_commit)
+    if lost_response:
+        engine.drop_next_generate_response = True
+        with pytest.raises(UnknownOutcomeError):
+            await controller.serve_turn("s","Summarize the new material.",(new_evidence,),request_id="2")
+        assert store.read_snapshot("s").current_epoch == old
+        assert not retired and (await engine.status(engine_session_id=old.engine_session_id)).state != "RETIRED"
+    second = await controller.serve_turn("s","Summarize the new material.",(new_evidence,),request_id="2")
+    snapshot = store.read_snapshot("s")
+    assert second.action == "REBUILD" and second.reason == "context_size_tie_break"
+    assert second.idempotent_replay == lost_response
+    assert snapshot.raw_history[0].assistant_text == first.assistant_text
+    assert snapshot.execution.visible_blocks == frozenset((new_evidence.key,))
+    await controller.drain()
+    assert retired == [old.engine_session_id] and not store.outbox()
+
+
+@pytest.mark.asyncio
 async def test_idempotent_retry_and_conflict(tmp_path):
     controller, store, engine = system(tmp_path)
     evidence = (make_evidence("a fact", "a"),)

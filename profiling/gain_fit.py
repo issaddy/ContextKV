@@ -17,7 +17,7 @@ from statistics import mean
 from bench.metrics import percentile
 from controller.config import load_config
 from controller.output_length import OutputLengthModel, OutputLengthPrediction
-from controller.planner import choose_plan
+from controller.planner import COST_SELECTION_REASONS, choose_plan
 from controller.schema import CacheQuoteBatch
 from controller.serialization import decode
 from profiling.decision_pairs import _model_and_knobs, load_frozen, rescore_pairs
@@ -108,7 +108,7 @@ def prediction_features(case, quote, model, knobs):
         "baseline_action": plan.candidate.action, "baseline_reason": plan.reason,
         "margin_ms": plan.switch_margin_ms,
         "stable": case.snapshot.turns_since_rebuild >= knobs.min_stable_turns,
-        "eligible": plan.reason in {"cost_saving", "hysteresis"},
+        "eligible": plan.reason in COST_SELECTION_REASONS,
         "calibrated": a.calibrated and r.calibrated,
         "length_means": {action: estimate.predicted_output_tokens for action, estimate in estimates.items()}}
 

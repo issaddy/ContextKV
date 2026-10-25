@@ -1,4 +1,4 @@
-"""Hard constraints precede measured-cost switching and hysteresis."""
+"""Feasible candidates compete on full cost, then their KV working set."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +6,9 @@ from typing import Iterable
 
 from .cost_model import CostModel
 from .schema import CacheQuoteBatch, NoFeasiblePlan, Plan, PromptCandidate, SessionSnapshot
+
+
+COST_SELECTION_REASONS = frozenset({"cost_saving", "hysteresis", "native_kv_tie_break", "context_size_tie_break"})
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,33 @@ def _fixed(append, rebuild, strategy, knobs, session, quotes=None):
         ratio = quote.ready_gpu_prefix_tokens / max(1, quote.match_limit)
         return append if ratio >= knobs.warm_ratio else rebuild
     return rebuild if len(append.input_ids) > knobs.fixed_token_threshold else append
+
+
+def _resource_tie_break(append, rebuild, quotes, observed, estimates):
+    """Rank a cost near-tie; do not reserve capacity or credit future retirement.
+
+    For a ready GPU prefix D, pinning its evictable part I makes the native
+    FULL gate's candidate-dependent input demand n-D+I. The common requested
+    output budget/page overhead cancels between A/R. A resident prefix is not
+    free capacity unless another request already holds its hard lock.
+    With a queue, host gap, pending transfer or older quote, rank logical input
+    lengths instead; neither rank claims future physical occupancy/admission.
+    """
+    use_native_pin = quotes.native_waiting_requests == () and all(
+        q.evictable_gpu_prefix_tokens is not None
+        and not (q.host_only_load_tokens or q.inflight_h2d_tokens or q.inflight_d2h_tokens)
+        for q in (observed[append.candidate_id], observed[rebuild.candidate_id]))
+
+    def rank(candidate):
+        n = len(candidate.input_ids)
+        q = observed[candidate.candidate_id]
+        demand = n-q.ready_gpu_prefix_tokens+q.evictable_gpu_prefix_tokens if use_native_pin else n
+        # With identical resource/cost ranks, retaining the current epoch avoids
+        # an unnecessary lifecycle operation. No action gets a general margin.
+        return demand, n, estimates[candidate.candidate_id].cost, candidate.action == "REBUILD"
+
+    return (min((append, rebuild), key=rank),
+            "native_kv_tie_break" if use_native_pin else "context_size_tie_break")
 
 
 def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch | None,
@@ -116,9 +146,13 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
     by_estimate = {e.candidate_id:e for e in estimates}
     a, r = by_estimate[append.candidate_id], by_estimate[rebuild.candidate_id]
     saving = a.cost-r.cost
-    margin = max(knobs.delta_abs,knobs.delta_rel*a.cost,knobs.z*model.paired_error(a,r))
-    stable = session.turns_since_rebuild >= knobs.min_stable_turns
-    chosen = rebuild if stable and saving > margin else append
+    margin = max(knobs.delta_abs,knobs.delta_rel*min(a.cost,r.cost),knobs.z*model.paired_error(a,r))
+    if abs(saving) > margin:
+        chosen, reason = (rebuild if saving > 0 else append), "cost_saving"
+    else:
+        chosen, reason = _resource_tie_break(append, rebuild, quotes, by_id, by_estimate)
+    if chosen is rebuild and session.turns_since_rebuild < knobs.min_stable_turns:
+        chosen, reason = append, "hysteresis"  # explicit legacy dwell only
     return Plan(chosen, predicted=estimates, quote_seq=quotes.observed_seq,
-                reason="cost_saving" if chosen is rebuild else "hysteresis",
+                reason=reason,
                 switch_margin_ms=margin, predicted_saving_ms=saving)

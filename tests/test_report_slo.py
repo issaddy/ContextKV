@@ -33,6 +33,8 @@ def test_decision_summary_separates_cost_selection_fallback_and_native_results()
         ("APPEND", "uncalibrated_cost_fallback", {"calibrated": False}),
         ("REBUILD", "cost_saving", {"calibrated": True}),
         ("APPEND", "hysteresis", {"calibrated": False, "selection_eligible": True}),
+        ("REBUILD", "native_kv_tie_break", {"calibrated": False, "selection_eligible": True}),
+        ("REBUILD", "context_size_tie_break", {"calibrated": False, "selection_eligible": True}),
         ("REBUILD", "always_rebuild", None),
     ]
     turns = [{"status": "success", "result": {"action": action, "reason": reason,
@@ -41,13 +43,13 @@ def test_decision_summary_separates_cost_selection_fallback_and_native_results()
     turns += [{"status": "failed", "result": None},
               {"status": "success", "result": {"output_ids": [1]}}]
     result = decision_summary(turns)
-    assert result["observed_turns"] == 5
-    assert result["actions"] == {"REBUILD": 3, "APPEND": 2}
-    assert result["cost_based_selection_turns"] == 2
+    assert result["observed_turns"] == 7
+    assert result["actions"] == {"REBUILD": 5, "APPEND": 2}
+    assert result["cost_based_selection_turns"] == 4
     assert result["fallback_turns"] == 1
-    assert result["selected_prediction_turns"] == 3
+    assert result["selected_prediction_turns"] == 5
     assert result["selected_prediction_calibrated_turns"] == 1
-    assert result["selected_prediction_eligible_turns"] == 2
+    assert result["selected_prediction_eligible_turns"] == 4
     assert summarize_run(payload())["decisions"]["observed_turns"] == 0
 
 

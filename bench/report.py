@@ -10,6 +10,7 @@ from pathlib import Path
 from bench.metrics import TurnTiming, distribution, occupancy_integral, summarize_timings, transfer_totals
 from bench.official import load_jsonl
 from bench.quality import paired_cluster_bootstrap
+from controller.planner import COST_SELECTION_REASONS
 
 
 def _dict(value):
@@ -58,7 +59,7 @@ def decision_summary(turns):
             continue
         actions[action] += 1
         reasons[reason] += 1
-        cost_choices += reason in {"cost_saving", "hysteresis"}
+        cost_choices += reason in COST_SELECTION_REASONS
         fallbacks += reason.endswith("_fallback")
         estimate = _dict(result.get("prediction") or {})
         if estimate:

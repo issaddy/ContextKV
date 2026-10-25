@@ -27,7 +27,7 @@ flowchart LR
 - `templates.py` 对完整 prompt 分词；保留证据原文的消息内字符 span、身份和来源。ByteTemplate 只用于模拟；HuggingFaceTemplate 固定 revision，每个候选只渲染一次、分词一次。与原生 apply_chat_template 分词结果的一致性放在 tokenizer 测试中验证。
 - `candidates.py` 保留完整原始 QA。APPEND 只省略可用正文 span 证明仍在输入中的材料；历史同步、配置变化、冲突版本、恢复或超预算会使其不可行。REBUILD 从原始 QA 和共同证据重建。
 - `cost_model.py` 使用已完成历史估计输出长度，按 prefix/suffix/host-load/concurrency 查询标定点。未标定桶、未知 host 状态与不确定传输不能当作准确预测。
-- `planner.py` 将硬约束置于误差阈值和滞回之前。无硬件标定时采用显式固定策略回退。`observe` 提供残差更新接口，默认运行冻结离线模型。
+- `planner.py` 先满足硬约束，再对称比较完整成本；成本接近时复用原生共享前缀锁观测排序 KV 工作集，观测不适用时双方统一使用逻辑输入长度，不默认偏向 APPEND。无硬件标定时采用显式固定策略回退。`observe` 提供残差更新接口，默认运行冻结离线模型。
 
 校验集中在数据进入、引擎响应和持久提交边界。新传入证据在候选入口校验一次内容 hash，内部共用证据索引并信任已提交的不可变账本；归档时不重复哈希或读回已有正文。报价身份由计划器统一校验，成本模型直接使用已校验的数据。保留用于证据身份、实际输入关联和请求幂等的 hash，以及 CAS、epoch 代际和完整回答提交约束；不为内部正常数据增加重复防御层。
 
