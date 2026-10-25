@@ -71,3 +71,7 @@ stock B0/B1的manifest只在实际服务验证后生成：revision为null，另�
 固定策略可以立即走此入口而不要求旧cost表；cost/shadow cost路径仍须真实同fingerprint/cache/sampling scope和hardware点。旧7B或不同recipe artifact不会因为GPU token cap相同而获得新模型校准资格；匹配失败在生成前拒绝，不暗中全回退。任何实际运行、评分和freeze必须绑定本次实现与声明，不能重写历史13格或跨模型沿用其资格。
 
 CPU合同覆盖scope factory、owned参数/实际runtime、native validator、quality模板、显式head_dim、B0/B1 flags、继承环境替换、资源/模型/recipe/cost不匹配零生成与失败cleanup。当前清理删除了旧默认/旧驱动相关测试，保留通用合同。
+
+## 统一评价口径
+
+当前报告指标版本2默认`response_mode: buffered`，`slo.complete_seconds`只接受预先声明的完整响应期限；未声明则goodput保持未配置。真实流式交付显式声明`response_mode: streaming`并使用`ttft_seconds/tpot_seconds`，可同时声明`complete_seconds`。这只是测量合同，不会启用HTTP流式接口。相同声明写入每个原始run的`experiment_protocol`，应用于全部方法并纳入冻结来源；离线报告默认复用该声明。主表只呈现质量、交付延迟、非截断时延达标吞吐和资源效率；选择原因等在JSON作诊断。详见[指标定义](../project_scope.md#核心指标与判断方式)。

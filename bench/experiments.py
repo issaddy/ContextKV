@@ -84,8 +84,10 @@ def validate_matrix(spec):
     if budget < 1:
         raise ValueError("tuning budget must be positive")
     slo = spec.get("slo", {})
-    if set(slo) - {"ttft_seconds", "tpot_seconds"} or any(not math.isfinite(v) or v < 0 for v in slo.values()):
-        raise ValueError("matrix slo needs finite nonnegative ttft_seconds/tpot_seconds")
+    if set(slo) - {"ttft_seconds", "tpot_seconds", "complete_seconds"} or any(not math.isfinite(v) or v < 0 for v in slo.values()):
+        raise ValueError("matrix slo needs finite nonnegative ttft_seconds/tpot_seconds/complete_seconds")
+    if spec.get("response_mode", "buffered") not in {"buffered", "streaming"}:
+        raise ValueError("matrix response_mode must be buffered or streaming")
     methods_by_id = {m["id"]: m for m in spec["methods"]}
     if spec.get("tuning", {}).get("require_quality_evidence"):
         constraints = spec["tuning"].get("quality_constraints", {})
@@ -610,14 +612,13 @@ async def execute_job(spec, job, directory, *, native_engine_manifest=None, veri
     default_cache_state = "fresh_mock_instance" if payload.get("engine_kind") == "mock" else "unspecified_hardware"
     protocol = {"cache_state_protocol": lifecycle.get("cache_state_protocol", default_cache_state),
                 "before_job": hook, "warmup_input": lifecycle.get("warmup_input"),
+                "response_mode": spec.get("response_mode", "buffered"), "slo": spec.get("slo", {}),
                 "fair_hardware_comparison_established": False}
     if "repetition" in job:
         protocol["repetition"] = job["repetition"]
     payload["experiment_protocol"] = protocol
     output.write_text(json.dumps(payload, indent=2))
-    slo = spec.get("slo", {})
-    summary = summarize_run(payload, **({"ttft_slo": slo["ttft_seconds"]} if "ttft_seconds" in slo else {}),
-                            **({"tpot_slo": slo["tpot_seconds"]} if "tpot_seconds" in slo else {}))
+    summary = summarize_run(payload)
     summary["experiment_protocol"] = protocol
     (directory / "summary.json").write_text(json.dumps(summary, indent=2))
     (directory / "summary.md").write_text(markdown_report(summary))

@@ -6,7 +6,9 @@ from collections import defaultdict
 from dataclasses import asdict, is_dataclass
 import json
 from pathlib import Path
+from statistics import mean
 
+from bench.judge import DIMENSIONS, parse_citations
 from bench.metrics import TurnTiming, distribution, occupancy_integral, summarize_timings, transfer_totals
 from bench.official import load_jsonl
 from bench.quality import paired_cluster_bootstrap
@@ -105,8 +107,15 @@ def telemetry_series(telemetry):
         "peak_interpretation": "observed_samples_not_allocator_instantaneous_peak"}
 
 
-def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=2.0, tpot_slo=.1):
+def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=None, tpot_slo=None,
+                  response_mode=None, complete_slo=None):
     payload = _dict(payload)
+    protocol = payload.get("experiment_protocol", {})
+    recorded_slo = protocol.get("slo", {})
+    response_mode = protocol.get("response_mode", "buffered") if response_mode is None else response_mode
+    ttft_slo = recorded_slo.get("ttft_seconds", 2.0) if ttft_slo is None else ttft_slo
+    tpot_slo = recorded_slo.get("tpot_seconds", .1) if tpot_slo is None else tpot_slo
+    complete_slo = recorded_slo.get("complete_seconds") if complete_slo is None else complete_slo
     sampled_occupancy, sampled_transfers, telemetry_info = telemetry_series(payload.get("telemetry", ()))
     occupancy = occupancy or sampled_occupancy
     transfers = transfers or sampled_transfers
@@ -117,11 +126,20 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=2
     timing_sources = defaultdict(int)
     latency_pairs = defaultdict(list)
     receipt_rows, receipt_sessions, receipt_branches = [], defaultdict(list), defaultdict(list)
+    citations = {"observed_turns": 0, "scope_observed_turns": 0,
+                 "unknown_reference_task_ids": [], "out_of_scope_task_ids": []}
     for value in turns:
         row = _dict(value)
         result = _dict(row.get("result") or {})
         timing = _dict(result.get("timing") or {})
         receipt = _dict(result.get("receipt") or {})
+        finish = result.get("finish_reason", receipt.get("finish_reason"))
+        is_truncated = result.get("truncated", receipt.get("truncated"))
+        if is_truncated is None:
+            if finish in ("length", "max_tokens"):
+                is_truncated = True
+            elif finish == "stop":
+                is_truncated = False
         # Both streaming clients use the same monotonic chunk timestamps.
         # Legacy/nonstream completion proves response+commit, never TTFT.
         fallback_done = row["t_done"] if row["status"] == "success" else None
@@ -130,9 +148,9 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=2
                           row["t_arrive"], timing.get("t_first"), timing.get("t_last_token"),
                           timing.get("t_response_done", fallback_done), timing.get("t_commit", fallback_done),
                           timing.get("t_submit"), timing.get("t_admit"), timing.get("t_retire_ack"),
-                          timing.get("token_observation", "none"))
+                          timing.get("token_observation", "none"), is_truncated)
         timings.append(item)
-        if item.turn_seconds is not None:
+        if row["status"] == "success" and item.turn_seconds is not None:
             latency_pairs[row["conversation_id"]].append({"task_id": row["task_id"], "value": item.turn_seconds})
         count = result.get("actual_prefill_tokens", receipt.get("actual_prefill_tokens"))
         if count is not None:
@@ -147,8 +165,18 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=2
             receipt_sessions[row["conversation_id"]].append(observed)
             branch = result.get("branch_reason") or result.get("action") or "unspecified"
             receipt_branches[branch].append(observed)
-        if "truncated" in result or "truncated" in receipt:
-            truncated.append(result.get("truncated", receipt.get("truncated")))
+        if row["status"] == "success" and is_truncated is not None:
+            truncated.append(is_truncated)
+        if row["status"] == "success" and "visible_evidence_manifest" in result:
+            citations["observed_turns"] += 1
+            cited = parse_citations(row["assistant_text"])
+            visible = {span["reference_id"] for span in result["visible_evidence_manifest"]}
+            if cited - visible:
+                citations["unknown_reference_task_ids"].append(row["task_id"])
+            if "citation_scope" in result:
+                citations["scope_observed_turns"] += 1
+                if (cited & visible) - set(result["citation_scope"]):
+                    citations["out_of_scope_task_ids"].append(row["task_id"])
         if result.get("control_ms") is not None:
             controls.append(result["control_ms"])
         for field, target in (("engine_elapsed_ms", engine_ms), ("server_ttft_ms", server_ttft), ("tpot_ms", server_tpot)):
@@ -159,7 +187,8 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=2
     # arrival window, with the drained cohort separately visible.
     start, end = report["started_at"], report["arrival_window_end"]
     summary = summarize_timings(timings, window_start=start, window_end=max(end, start + 1e-9),
-                                ttft_slo=ttft_slo, tpot_slo=tpot_slo)
+                                ttft_slo=ttft_slo, tpot_slo=tpot_slo,
+                                response_mode=response_mode, complete_slo=complete_slo)
     source = "simulation" if payload.get("engine_kind") == "mock" else payload.get("measurement_kind", "unvalidated_hardware_run")
     if any((_dict(_dict(row).get("result") or {})).get("measurement_kind") == "fake_http_correctness" for row in turns):
         source = "simulation"
@@ -171,13 +200,27 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=2
     quality_simulated = source == "simulation" or any(r.get("generation_measurement_kind") == "simulation" for r in quality_rows)
     quality_status = ("not_validated" if quality_simulated or not scored else
                       "partially_evaluated" if missing_quality else "evaluated")
-    return {"measurement_kind": source, "performance_claims_validated": False,
+    pools = {**occupancy_integral(occupancy), "sample_count": len(occupancy),
+             "sample_span_seconds": max(r["timestamp"] for r in occupancy) - min(r["timestamp"] for r in occupancy) if occupancy else None}
+    nontruncated = sum(t.status == "success" and t.completed_at is not None
+                      and t.truncated is False and t.output_tokens > 0 for t in timings)
+    normalize = nontruncated and pools["sample_span_seconds"] and not telemetry_info.get("events_truncated")
+    resource_efficiency = {"denominator": "nontruncated_completed_turns_including_drain",
+        "completion_count": nontruncated, "measurement_span_seconds": pools["sample_span_seconds"],
+        "semantic_quality_included": False,
+        **{f"{tier}_slot_seconds_per_nontruncated_turn": pools[f"{tier}_slot_seconds"] / nontruncated if normalize else None
+           for tier in ("gpu", "host")}}
+    return {"metric_schema_version": 2, "measurement_kind": source, "performance_claims_validated": False,
             "time_origin": report["time_origin"], "timing": summary,
             "decisions": decision_summary(turns),
             "cohort": {"scheduled_sessions": report["scheduled_sessions"], "arrived_sessions": report["arrived_sessions"],
                        "unfinished_turns": report["unfinished_turns"], "timed_out_sessions": report["timed_out_sessions"],
                        "drain_seconds": max(0, report["completed_at"] - end)},
             "session_makespan_seconds": distribution(t[1] for t in report["session_makespans"]),
+            "session_latency": {
+                "equal_session_mean_turn_seconds": mean(mean(t["value"] for t in rows) for rows in latency_pairs.values()) if latency_pairs else None,
+                "cumulative_system_wait_seconds": distribution(sum(t["value"] for t in rows) for rows in latency_pairs.values()),
+                "scope": "observed_successful_turns_excluding_user_think_time"},
             "control_ms": distribution(controls), "latency_by_session": dict(latency_pairs),
             "engine_elapsed_ms": distribution(engine_ms),
             "server_metrics": {"ttft_ms": distribution(server_ttft), "tpot_ms": distribution(server_tpot),
@@ -188,10 +231,10 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=2
                              "by_session": {k: receipt_summary(v) for k, v in receipt_sessions.items()},
                              "by_branch": {k: receipt_summary(v) for k, v in receipt_branches.items()}},
             "truncated_answers": {"observed_turns": len(truncated), "count": sum(truncated)},
+            "citation_validity": citations,
             # Occupancy timestamps may be engine-local. Integrate only within the
             # sample clock; never extrapolate to a client completion timestamp.
-            "occupancy": {**occupancy_integral(occupancy), "sample_count": len(occupancy),
-                          "sample_span_seconds": max(r["timestamp"] for r in occupancy) - min(r["timestamp"] for r in occupancy) if occupancy else None},
+            "occupancy": pools, "resource_efficiency": resource_efficiency,
             "transfers": transfer_totals(transfers) if transfers else (transfer_totals(()) if telemetry_info.get("available") else None),
             "telemetry": telemetry_info,
             "quality": {"status": quality_status, "simulation_scores": quality_simulated,
@@ -247,17 +290,49 @@ def paired_latency(candidate_summary, reference_summary, *, seed=42, samples=500
 
 def markdown_report(summary):
     timing = summary["timing"]
-    avg = timing["turn_seconds"]["mean"]
-    return (f"# ContextKV run report\n\nMeasurement: {summary['measurement_kind']}. "
-            "Hardware performance claims are not validated by this report alone.\n\n"
-            f"- Statuses: {json.dumps(timing['statuses'])}\n"
-            f"- Mean complete-turn time (seconds): {avg}\n"
-            f"- TTFT observations: {timing['ttft_seconds']['count']}\n"
-            f"- Unfinished dependent turns: {summary['cohort']['unfinished_turns']}\n"
-            f"- Quality status: {summary['quality']['status']}\n"
-            f"- Controller decision reasons: {json.dumps(summary.get('decisions', {}).get('reasons', {}))}\n"
-            f"- GPU peak unique slots: {summary['occupancy']['gpu_peak_slots']}\n\n"
-            "See the companion JSON for distributions, failure counts, timing provenance and missing telemetry.\n")
+    def number(value):
+        return "未测量/未配置" if value is None else f"{value:.3f}"
+
+    rows = [
+        ("完整响应，会话等权均值 / s", summary["session_latency"]["equal_session_mean_turn_seconds"]),
+        ("完整响应 P95 / s", timing["turn_seconds"]["p95"]),
+        ("会话累计系统等待均值 / s（不含用户停顿）", summary["session_latency"]["cumulative_system_wait_seconds"]["mean"]),
+    ]
+    if timing["response_mode"] == "streaming":
+        rows.extend([(name, timing[key][quantile]) for name, key, quantile in (
+            ("TTFT P50 / s", "ttft_seconds", "median"), ("TTFT P95 / s", "ttft_seconds", "p95"),
+            ("TPOT P95 / s", "tpot_seconds", "p95"))])
+    rows.append(("非截断、时延达标吞吐 / 请求每秒", timing["latency_slo_goodput_requests_per_second"]))
+    for tier in ("gpu", "host"):
+        rows.append((f"{tier.upper()} KV占用时间 / 非截断完成轮次（slot·s）",
+                     summary["resource_efficiency"][f"{tier}_slot_seconds_per_nontruncated_turn"]))
+    lines = ["# ContextKV 目标场景评价", "",
+        f"指标版本：2；测量类型：{summary['measurement_kind']}；返回方式：{timing['response_mode']}。",
+        f"时间起点：{summary['time_origin']}；声明SLO：{json.dumps(timing['slo'])}。", "",
+        "| 主要服务指标 | 数值 |", "|---|---:|",
+        *(f"| {label} | {number(value)} |" for label, value in rows), "",
+        f"质量评价状态：{summary['quality']['status']}。语义质量独立评价，不计入上述goodput。"]
+    quality = summary["quality"]
+    if quality["scored_tasks"]:
+        labels = ("正确性与必要内容覆盖", "证据支持", "可回答性", "条件/版本", "引用支持")
+        lines += ["", "| 质量维度 | 已有评分均值 | 样本数 |", "|---|---:|---:|"]
+        for key, label in zip(DIMENSIONS, labels):
+            value = quality["dimensions"].get(key)
+            if value:
+                lines.append(f"| {label} | {number(value['mean'])} | {value['count']} |")
+        lines += ["", "这些分数不自动构成独立质量合格或非劣结论。"]
+    refs = summary["citation_validity"]
+    lines += ["", f"运行状态：{json.dumps(timing['statuses'])}；未完成依赖轮次：{summary['cohort']['unfinished_turns']}；"
+        f"截断：{summary['truncated_answers']['count']}/{summary['truncated_answers']['observed_turns']}条有终态观测的回答。",
+        f"Goodput窗口内终态不明的完成请求：{timing['unknown_truncation_in_window']}，不计入达标分子。",
+        f"引用可见性违规：{len(refs['unknown_reference_task_ids'])}/{refs['observed_turns']}；"
+        f"本轮范围违规：{len(refs['out_of_scope_task_ids'])}/{refs['scope_observed_turns']}。编号检查不代表语义支持。",
+        "资源效率使用整批运行及收尾的实际采样区间；缺失/截断遥测不补造效率值。"]
+    if timing["response_mode"] == "buffered":
+        lines.append("当前为完整返回，内部引擎TTFT/TPOT保留在JSON作诊断，不作为HTTP用户首字延迟。")
+    lines += ["当前负载点的吞吐不代表最大承载能力；质量、资源与负载须共同匹配。",
+              "控制开销、Prefill、缓存命中、传输与动作分布见附带JSON，用于解释机制。", ""]
+    return "\n".join(lines)
 
 
 def main(argv=None):
@@ -272,11 +347,14 @@ def main(argv=None):
     parser.add_argument("--epsilon", type=float, default=.01)
     parser.add_argument("--bootstrap-samples", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--ttft-slo-seconds", type=float, default=2.0)
-    parser.add_argument("--tpot-slo-seconds", type=float, default=.1)
+    parser.add_argument("--ttft-slo-seconds", type=float)
+    parser.add_argument("--tpot-slo-seconds", type=float)
+    parser.add_argument("--response-mode", choices=("buffered", "streaming"), help="reuse recorded mode; legacy default is buffered")
+    parser.add_argument("--complete-slo-seconds", type=float, help="declared full-response deadline; no inferred default")
     args = parser.parse_args(argv)
     optional = {key: load_jsonl(getattr(args, key)) if getattr(args, key) else () for key in ("quality", "occupancy", "transfers")}
-    slo = {"ttft_slo": args.ttft_slo_seconds, "tpot_slo": args.tpot_slo_seconds}
+    slo = {"ttft_slo": args.ttft_slo_seconds, "tpot_slo": args.tpot_slo_seconds,
+           "response_mode": args.response_mode, "complete_slo": args.complete_slo_seconds}
     summary = summarize_run(json.loads(Path(args.input).read_text()), **optional, **slo)
     if args.reference_quality:
         if not args.quality or not args.reference_run:

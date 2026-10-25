@@ -13,17 +13,17 @@ from profiling.transfers import from_completed_events
 
 class MetricTests(unittest.TestCase):
     def test_ttft_tpot_commit_tail_and_slo_window(self):
-        sample = TurnTiming("s", "1", "success", 3, 0, 1, 3, 4, 5, token_observation="token_events")
+        sample = TurnTiming("s", "1", "success", 3, 0, 1, 3, 4, 5, token_observation="token_events", truncated=False)
         self.assertEqual(sample.ttft, 1)
         self.assertEqual(sample.tpot, 1)
         self.assertEqual(sample.turn_seconds, 5)
-        single = TurnTiming("s", "2", "success", 1, 2, 3, 3, 4, 4)
+        single = TurnTiming("s", "2", "success", 1, 2, 3, 3, 4, 4, truncated=False)
         zero = TurnTiming("s", "3", "success", 0, 2, None, None, 4, 4)
         failed = TurnTiming("s", "4", "failed", 0, 4)
         report = summarize_timings([sample, single, zero, failed], window_start=0, window_end=5,
-                                   ttft_slo=1, tpot_slo=1)
+                                   ttft_slo=1, tpot_slo=1, response_mode="streaming")
         self.assertEqual(report["completed_in_window"], 2)
-        self.assertEqual(report["slo_goodput_requests_per_second"], .2)
+        self.assertEqual(report["latency_slo_goodput_requests_per_second"], .2)
         self.assertEqual(report["failure_fraction"], .25)
         self.assertEqual(report["undefined_tpot_count"], 2)
 

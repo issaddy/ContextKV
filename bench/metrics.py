@@ -39,6 +39,7 @@ class TurnTiming:
     t_admit: float | None = None
     t_retire_ack: float | None = None
     token_observation: str = "unknown"  # token_events, chunk_events, or unknown
+    truncated: bool | None = None
 
     @property
     def ttft(self) -> float | None:
@@ -66,22 +67,42 @@ class TurnTiming:
 
 
 def summarize_timings(turns: Sequence[TurnTiming], *, window_start: float, window_end: float,
-                      ttft_slo: float, tpot_slo: float, single_token_policy: str = "ttft_only") -> dict:
-    if window_end <= window_start or any(not math.isfinite(v) or v < 0 for v in (ttft_slo, tpot_slo)):
+                      ttft_slo: float, tpot_slo: float, single_token_policy: str = "ttft_only",
+                      response_mode: str = "buffered", complete_slo: float | None = None) -> dict:
+    thresholds = [ttft_slo, tpot_slo] + ([complete_slo] if complete_slo is not None else [])
+    if window_end <= window_start or any(not math.isfinite(v) or v < 0 for v in thresholds):
         raise ValueError("invalid observation window or SLO")
+    if response_mode not in {"buffered", "streaming"}:
+        raise ValueError("response_mode must be buffered or streaming")
     if single_token_policy not in {"ttft_only", "exclude"}:
         raise ValueError("single-token policy must be ttft_only or exclude")
     duration = window_end - window_start
     success = [t for t in turns if t.status == "success"]
     in_window = [t for t in success if t.completed_at is not None and window_start <= t.completed_at < window_end]
-    good = [t for t in in_window if t.ttft is not None and t.ttft <= ttft_slo
-            and ((t.tpot is not None and t.tpot <= tpot_slo)
-                 or (t.output_tokens == 1 and single_token_policy == "ttft_only"))]
+    # Missing legacy finish metadata does not establish a nontruncated answer.
+    eligible = [t for t in in_window if t.truncated is False and t.output_tokens > 0]
+    slo = ({"ttft_seconds": ttft_slo, "tpot_seconds": tpot_slo}
+           if response_mode == "streaming" else {})
+    if complete_slo is not None:
+        slo["complete_seconds"] = complete_slo
+        eligible = [t for t in eligible if t.turn_seconds <= complete_slo]
+    if response_mode == "streaming":
+        good = [t for t in eligible if t.ttft is not None and t.ttft <= ttft_slo
+                and ((t.tpot is not None and t.tpot <= tpot_slo)
+                     or (t.output_tokens == 1 and single_token_policy == "ttft_only"))]
+    else:
+        good = eligible if complete_slo is not None else None
     statuses = {s: sum(t.status == s for t in turns) for s in sorted({t.status for t in turns})}
     return {"observation_seconds": duration, "completed_in_window": len(in_window),
-            "slo": {"ttft_seconds": ttft_slo, "tpot_seconds": tpot_slo},
+            "response_mode": response_mode, "slo": slo,
+            "slo_status": "configured" if good is not None else "not_configured",
             "throughput_requests_per_second": len(in_window) / duration,
-            "slo_goodput_requests_per_second": len(good) / duration,
+            "latency_slo_goodput_requests_per_second": len(good) / duration if good is not None else None,
+            "slo_met_in_window": len(good) if good is not None else None,
+            "truncated_in_window": sum(t.truncated is True for t in in_window),
+            "unknown_truncation_in_window": sum(t.truncated is None for t in in_window),
+            "semantic_quality_included_in_goodput": False,
+            "first_token_role": "delivery_latency" if response_mode == "streaming" else "engine_client_diagnostic",
             "ttft_seconds": distribution(t.ttft for t in success if t.ttft is not None),
             "tpot_seconds": distribution(t.tpot for t in success if t.tpot is not None),
             "turn_seconds": distribution(t.turn_seconds for t in success if t.turn_seconds is not None),

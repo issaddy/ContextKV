@@ -308,18 +308,28 @@ def test_matrix_native_budget_must_match_common_policy(tmp_path, key, value, loc
         matrix_jobs(matrix)
 
 
-def test_matrix_persists_explicit_slo_and_freezes_it_with_selection(tmp_path):
+@pytest.mark.parametrize("response_mode,slo,key", [
+    ("streaming", {"ttft_seconds":.5, "tpot_seconds":.02}, "ttft_seconds"),
+    ("buffered", {"complete_seconds":3.0}, "complete_seconds"),
+])
+def test_matrix_persists_explicit_slo_and_freezes_it_with_selection(tmp_path, response_mode, slo, key):
     matrix = spec(tmp_path)
-    matrix["slo"] = {"ttft_seconds":.5, "tpot_seconds":.02}
+    matrix["response_mode"] = response_mode
+    matrix["slo"] = slo
     rows = asyncio.run(run_matrix(matrix, tmp_path/"slo-dev"))
     assert all(r["summary"]["timing"]["slo"] == matrix["slo"] for r in rows)
+    from bench.report import summarize_run
+    for row in rows:
+        recorded = json.loads(Path(row["raw_output"]).read_text())
+        assert recorded["experiment_protocol"]["response_mode"] == response_mode
+        assert summarize_run(recorded)["timing"]["slo"] == slo
     frozen = select_development(matrix, rows)
-    matrix["slo"]["ttft_seconds"] = .8
+    matrix["slo"][key] += .3
     with pytest.raises(ValueError, match="frozen development"):
         asyncio.run(run_matrix(matrix, tmp_path/"slo-test", stage="test", frozen=frozen))
 
 
-@pytest.mark.parametrize("slo", [{"ttft_seconds":float("nan")}, {"tpot_seconds":-1}, {"ttft_ms":500}])
+@pytest.mark.parametrize("slo", [{"ttft_seconds":float("nan")}, {"tpot_seconds":-1}, {"complete_seconds":-1}, {"ttft_ms":500}])
 def test_matrix_rejects_invalid_slo_before_generation(tmp_path, slo):
     matrix = spec(tmp_path)
     matrix["slo"] = slo
