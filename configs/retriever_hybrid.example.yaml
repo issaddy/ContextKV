@@ -1,13 +1,15 @@
-# Optional P3 experiment; paths resolve from the working directory, like CLI paths.
+# Measured fast P3 path: last3 + stable_key (the controller's default layout).
+# Qwen3/H200 deployment uses generation GPU0 and retrieval GPU1.
+# Use the documented client thread environment when comparing saved timings.
 schema_version: 1
 kind: hybrid
 stage: hybrid_rerank
-query_mode: current
+query_mode: last3
 sparse_index: data/cloud-bm25s
 dense_index: data/cloud-bge-m3
 encoder_path: models/bge-m3
 reranker_path: models/bge-reranker-v2-m3
-device: cuda:0
+device: cuda:1
 dtype: bfloat16
 batch_size: 16
 encoder_max_length: 8192

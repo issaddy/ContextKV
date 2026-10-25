@@ -1,7 +1,8 @@
 # Literal task continuation + history retrieval, without auxiliary generation.
 # Reuses one hybrid search/rerank; original questions/history remain intact.
 # Optional context.layout=contextpilot separates cached body order and relevance.
-# The measured lightweight profile uses retrieval GPU1; set device for your host.
+# The measured deployment uses generation GPU0 and retrieval GPU1.
+# Keep stable_key for the integrated path; ContextPilot is a separate layout choice.
 schema_version: 1
 kind: hybrid
 stage: hybrid_rerank
@@ -10,7 +11,7 @@ sparse_index: data/cloud-bm25s
 dense_index: data/cloud-bge-m3
 encoder_path: models/bge-m3
 reranker_path: models/bge-reranker-v2-m3
-device: cuda:0
+device: cuda:1
 dtype: bfloat16
 batch_size: 16
 encoder_max_length: 8192
