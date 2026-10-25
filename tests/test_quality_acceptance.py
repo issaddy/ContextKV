@@ -389,6 +389,19 @@ def test_native_rubric_and_parser_changes_are_part_of_evaluator_identity(tmp_pat
     assert "missing_or_unmatched_evaluator_protocol" in result["acceptance_blockers"]
 
 
+def test_current_task_requirements_must_match_for_the_paired_answers(tmp_path):
+    from dataclasses import asdict
+    spec = setup_methods(tmp_path, source="offline_judge")
+    judge = asdict(JudgeConfig("local", "Judge", "judge-weights", "http://localhost/v1"))
+    for method in spec["methods"]:
+        edit_scores(spec, method, lambda rows: [r.update(judge=judge,
+            task_requirements={"requirement":r["task_id"]+" current task", "dimensions":["correctness"]}) for r in rows])
+    assert evaluate(spec)["comparisons"]["candidate"]["dev_quality_eligible"]
+    edit_scores(spec, "candidate", lambda rows: rows[0]["task_requirements"].update(requirement="A future task"))
+    result = evaluate(spec)["comparisons"]["candidate"]
+    assert "missing_or_unmatched_evaluator_protocol" in result["acceptance_blockers"]
+
+
 def test_native_frozen_protocol_cannot_omit_rubric_or_na_extension():
     from dataclasses import asdict
     from bench.quality_acceptance import frozen_evaluator_matches

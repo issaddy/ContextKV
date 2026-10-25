@@ -52,6 +52,7 @@ def evaluator_identity(row, generator):
     same = judge["model"] == generator["model"] or judge["revision"] == generator["revision"]
     signature = ("offline_judge", *(judge.get(k) for k in ("provider", "model", "revision", "prompt", "temperature", "max_tokens")),
                  row.get("reference_targets_supplied"),
+                 json.dumps(row.get("task_requirements"), sort_keys=True),
                  *(json.dumps(judge.get(k), sort_keys=True) for k in NATIVE_EVALUATOR_FIELDS))
     related = bool(judge.get("base_family") and generator.get("base_family")
                    and judge["base_family"] == generator["base_family"])

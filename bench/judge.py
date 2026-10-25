@@ -33,6 +33,9 @@ scope, prerequisites and exceptions, and whether cited reference IDs exist and s
 the claims. When citation_scope is supplied, citations must also belong to that list;
 IDs mentioned only in earlier answers do not prove their source body is available.
 Judge necessary abstention positively; do not equate verbosity with quality.
+When task_requirements is supplied, evaluate its current requirement and applicable
+dimensions only; return null for other dimensions. Do not impose future questions
+or requirements from other conversations on this answer.
 Also identify script_history_mismatch when the current scripted question presupposes
 something contradicted by this method's actual prior answers. Return only one JSON
 object with keys scores (the five dimensions), script_history_mismatch (boolean),
@@ -92,7 +95,16 @@ def rule_audit(record: Mapping) -> dict:
             "out_of_scope_citations": sorted(out_of_scope), "semantic_quality_score": None}
 
 
-def judge_payload(record: Mapping, reference: Mapping | None = None) -> dict:
+def task_requirements(protocol: Mapping, task_id: str) -> dict:
+    """Project one task's rubric; future tasks never enter this judge request."""
+    return {"requirement": protocol["task_requirements"][task_id],
+            "dimensions": [dimension for dimension in protocol["dimensions"]
+                           if dimension not in protocol.get("task_scope", {})
+                           or task_id in protocol["task_scope"][dimension]]}
+
+
+def judge_payload(record: Mapping, reference: Mapping | None = None,
+                  requirements: Mapping | None = None) -> dict:
     # Explicit offline payload: full evidence is retained, with no top-k truncation.
     payload = {k: record[k] for k in ("task_id", "query", "answer", "actual_history",
                "retrieved_evidence", "visible_evidence_manifest", "audit_evidence")}
@@ -100,6 +112,8 @@ def judge_payload(record: Mapping, reference: Mapping | None = None) -> dict:
         payload["citation_scope"] = record["citation_scope"]
     if reference is not None:
         payload["reference_targets"] = reference.get("targets", [])
+    if requirements is not None:
+        payload["task_requirements"] = requirements
     return payload
 
 
@@ -144,11 +158,12 @@ class OfflineJudge:
         self.client = httpx.AsyncClient(base_url=config.base_url.rstrip("/") + "/",
                                         headers=headers, timeout=config.timeout_seconds, transport=transport)
 
-    async def evaluate(self, record: Mapping, *, reference: Mapping | None = None) -> dict:
+    async def evaluate(self, record: Mapping, *, reference: Mapping | None = None,
+                       requirements: Mapping | None = None) -> dict:
         payload = {"model": self.config.model, "temperature": self.config.temperature,
                    "max_tokens": self.config.max_tokens, "response_format": {"type": "json_object"},
                    "messages": [{"role": "system", "content": self.config.prompt},
-                                {"role": "user", "content": json.dumps(judge_payload(record, reference), ensure_ascii=False)}]}
+                                {"role": "user", "content": json.dumps(judge_payload(record, reference, requirements), ensure_ascii=False)}]}
         if self.config.enable_thinking is not None:
             payload["chat_template_kwargs"] = {"enable_thinking": self.config.enable_thinking}
         response = await self.client.post("chat/completions", json=payload)
@@ -164,6 +179,7 @@ class OfflineJudge:
                 "api_response_id": raw.get("id"),
                 "served_model": raw.get("model"), "revision_provenance": "operator_declared",
                 "reference_targets_supplied": reference is not None,
+                "task_requirements": requirements,
                 "rule_audit": rule_audit(record), "source": "offline_judge",
                 "generation_measurement_kind": record.get("measurement_kind")}
 
@@ -171,8 +187,10 @@ class OfflineJudge:
         await self.client.aclose()
 
 
-async def evaluate_file(audit_path, config: JudgeConfig, output_path, *, references_path=None):
+async def evaluate_file(audit_path, config: JudgeConfig, output_path, *, references_path=None,
+                        task_protocol_path=None):
     references = {r["task_id"]: r for r in load_jsonl(references_path)} if references_path else {}
+    protocol = json.loads(Path(task_protocol_path).read_text()) if task_protocol_path else None
     rows = load_jsonl(audit_path)
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -181,13 +199,15 @@ async def evaluate_file(audit_path, config: JudgeConfig, output_path, *, referen
     try:
         with target.open("x") as stream:
             for row in rows:
+                requirements = task_requirements(protocol, row["task_id"]) if protocol is not None else None
                 try:
-                    result = await judge.evaluate(row, reference=references.get(row["task_id"]))
+                    result = await judge.evaluate(row, reference=references.get(row["task_id"]), requirements=requirements)
                 except (httpx.HTTPError, ValueError, KeyError) as exc:
                     result = {"task_id": row["task_id"], "conversation_id": row["conversation_id"],
                               **evaluation_binding(row),
                               "answer": row["answer"], "status": "failed", "error": str(exc), "scores": None,
                               "source": "offline_judge", "judge": asdict(config),
+                              "task_requirements": requirements,
                               "generation_measurement_kind": row.get("measurement_kind")}
                     if isinstance(exc, JudgeResponseError):
                         result["judge_response"] = exc.response
@@ -203,10 +223,12 @@ def main(argv=None):
     parser.add_argument("--output", required=True)
     parser.add_argument("--config", help="explicitly execute HTTP judge with this frozen JSON config")
     parser.add_argument("--references", help="offline reference file, never used in serving")
+    parser.add_argument("--task-protocol", help="offline task requirements/applicability JSON; send only this task's entry")
     args = parser.parse_args(argv)
     if args.config:
         config = JudgeConfig(**json.loads(Path(args.config).read_text()))
-        asyncio.run(evaluate_file(args.audit, config, args.output, references_path=args.references))
+        asyncio.run(evaluate_file(args.audit, config, args.output, references_path=args.references,
+                                 task_protocol_path=args.task_protocol))
     else:
         Path(args.output).write_text("".join(json.dumps(rule_audit(r)) + "\n" for r in load_jsonl(args.audit)))
 

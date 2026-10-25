@@ -126,6 +126,42 @@ def test_score_metadata_does_not_invalidate_named_measurements():
     assert parsed == scores and result["reason"] == "task result"
 
 
+def test_failed_file_assessment_keeps_raw_output_for_offline_repair(tmp_path, monkeypatch):
+    from bench import judge as module
+    raw = {"choices":[{"finish_reason":"stop", "message":{"content":'{"reason":"missing scores"}'}}]}
+    monkeypatch.setattr(module, "OfflineJudge", lambda config: OfflineJudge(
+        config, transport=httpx.MockTransport(lambda request:httpx.Response(200, json=raw))))
+    source, target = tmp_path/"audit.jsonl", tmp_path/"scores.jsonl"
+    source.write_text(json.dumps(audit_record())+"\n")
+    asyncio.run(module.evaluate_file(source, JudgeConfig("local","frozen","revision-1","http://localhost/v1"), target))
+    saved = json.loads(target.read_text())
+    assert saved["status"] == "failed" and saved["scores"] is None
+    assert saved["judge_response"] == raw
+
+
+def test_task_protocol_sends_only_current_requirements_and_applicability(tmp_path, monkeypatch):
+    from bench import judge as module
+    requests = []
+    def respond(request):
+        requests.append(json.loads(request.content))
+        value = {"scores":{k:1 if k == "correctness" else None for k in DIMENSIONS}, "reason":"current task only"}
+        return httpx.Response(200, json={"choices":[{"finish_reason":"stop", "message":{"content":json.dumps(value)}}]})
+    monkeypatch.setattr(module, "OfflineJudge", lambda config: OfflineJudge(config, transport=httpx.MockTransport(respond)))
+    source, protocol, target = tmp_path/"audit.jsonl", tmp_path/"protocol.json", tmp_path/"scores.jsonl"
+    source.write_text(json.dumps(audit_record())+"\n")
+    protocol.write_text(json.dumps({"dimensions":["correctness","conditions_versions"],
+        "task_scope":{"conditions_versions":["future-task"]},
+        "task_requirements":{"s1::1":"Answer only the current limit question.",
+                             "future-task":"Private future product requirement."}}))
+    asyncio.run(module.evaluate_file(source, JudgeConfig("local","frozen","revision-1","http://localhost/v1"),
+                                     target, task_protocol_path=protocol))
+    payload = json.loads(requests[0]["messages"][-1]["content"])
+    expected = {"requirement":"Answer only the current limit question.", "dimensions":["correctness"]}
+    assert payload["task_requirements"] == expected
+    assert json.loads(target.read_text())["task_requirements"] == expected
+    assert "future-task" not in json.dumps(requests) and "Private future" not in json.dumps(requests)
+
+
 def test_rule_audit_flags_invalid_citation_without_inventing_quality():
     record = audit_record()
     record["answer"] = "Unsupported [E_deadbeef]"
