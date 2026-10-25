@@ -39,4 +39,8 @@ EfficientAgent 的 vLLM/LMCache connector 不能直接接到 SGLang。现有可�
 
 ## 许可与可复现性
 
+本轮引用资格直接复用固定 SGLang 的 [XGrammar regex backend](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/constrained/xgrammar_backend.py)，把本轮允许的 Evidence IDs 编成标准引用格式的正则约束。它限制标识符，不证明引用支持论断；原生对照使用同样的原生能力。
+
+当前来源定位表是轻量词项重合与 IDF 的工程适配，保留完整正文并提供原文字段坐标。[Lost in the Middle](https://arxiv.org/abs/2307.03172) 提供长上下文位置敏感性的研究依据，不能替代本项目的质量验证，也不表示本实现复现了该论文方法。已有定点结果说明定位提示能促使部分回答，但仍可能发生适用对象泛化；不把它单独列为已证实的质量贡献。
+
 直接复制的函数、提示与资产保留原许可证和 NOTICE；按公开原理独立实现的短算法注明来源和差异。模型权重、数据许可与代码许可分别记录，不将第三方数据和模型打入 Python 发行包。未进入当前服务的训练、复杂来源选择和离线评分工具保留复用价值，不能视作默认运行步骤或本次实测贡献。

@@ -13,21 +13,28 @@ flowchart LR
   Quote --> Planner[成本 / 固定策略]
   Fixed --> Planner
   Planner --> Prepare[仅选中版本 prepare]
-  Prepare --> Generate[完整 token 输入与代际 guard]
+  Prepare --> Generate[完整 token 输入、引用约束与代际 guard]
   Generate --> Result[持久化完整结果]
   Result --> Commit[CAS 提交历史与 outbox]
   Commit --> Store
   Commit --> Retire[异步退役 ACK / 重试]
+  Commit --> Feedback[已完成长度与控制耗时统计]
+  Feedback --> Planner
+  Generate --> Cache[原生 Radix / HiCache 状态]
+  Retire --> Cache
+  Cache --> Quote
 ```
 
 ## 应用层
 
-- `schema.py` 定义 frozen dataclass，集合与消息使用不可变结构。`serialization.py` 按类型恢复 JSON，不使用 pickle。
+- `schema.py` 定义 frozen dataclass，集合与消息使用不可变结构。`serialization.py` 按类型恢复 JSON，不使用 pickle；写入由原生 JSON 编码器遍历 token 容器，dataclass/集合只做浅层适配，保持原规范字节。
 - `evidence.py` 以 corpus/document/passage/version/SHA256 定义身份，稳定引用发生短 hash 碰撞时仅延长新编号。回访只从已归档原文恢复；必须证据先统一形成，再构造候选。
 - `templates.py` 对完整 prompt 分词；保留证据原文的消息内字符 span、身份和来源。ByteTemplate 只用于模拟；HuggingFaceTemplate 固定 revision，每个候选只渲染一次；Qwen3 在已核实 AddedToken 边界按请求复用共同分词段，其他 tokenizer 沿用完整 prompt 编码。与原生 apply_chat_template 分词结果的一致性放在 tokenizer 测试中验证。
-- `candidates.py` 保留完整原始 QA。APPEND 只省略可用正文 span 证明仍在输入中的材料；历史同步、配置变化、冲突版本、恢复或超预算会使其不可行。REBUILD 从原始 QA 和共同证据重建。
-- `cost_model.py` 使用已完成历史估计输出长度，按 prefix/suffix/host-load/concurrency 查询标定点。未标定桶、未知 host 状态与不确定传输不能当作准确预测。
-- `planner.py` 先满足硬约束，再选择预计完整成本较低者；误差带仅作诊断，成本相同时才复用原生共享前缀锁观测排序 KV 工作集。正常配置使用原生实际预算观测，缺少执行成本支持时采用显式简单回退。`observe` 提供残差更新接口，默认运行冻结离线模型。
+- `candidates.py` 保留完整原始 QA。APPEND 只省略可用正文 span 证明仍在输入中的材料；历史同步、配置变化、冲突版本、恢复、超预算或本轮必需证据与原可见正文完全不相交时，使用 REBUILD。完全换题时不为保留无资格旧正文发起双候选报价；有共同证据时仍比较两种成本。
+- 当前消息包含共同的来源定位表：合法 ID、标题及按词项重合选出的原文片段/字符坐标。它不删除正文、不赋予额外来源资格、不证明语义支持；两种候选共享该表，真实新增 tokens 进入成本与预算。共享回答协议要求先回答有依据部分，再明确缺失内容。
+- `engine_client.py` 与原生对照共同复用 SGLang 的 XGrammar/regex 约束，只允许本轮合法 ID 出现在规范 `[E_…]` 引用中。没有第二次生成、事后替换引用或改写历史；引用覆盖与语义支持仍需独立检查。
+- `cost_model.py` 按 prefix/suffix/host-load/concurrency 复用固定耗时测量和插值结构。长度先验另外检查回答协议；未绑定或不同协议不沿用旧长度分布，使用配置先验及本会话已完成历史。等待预测优先使用本服务最近 128 个已提交输出的实际长度，容量预留继续使用原生预算。
+- `planner.py` 比较预计完整成本，追加/重建分别使用最近完成请求的控制耗时；误差带仅作诊断，相同成本才比较原生工作集。未支持范围使用既有回退。耗时模型默认冻结，`observe` 的可选残差更新与长度/控制耗时反馈分开，不需要训练。
 
 校验集中在数据进入、引擎响应和持久提交边界。新传入证据在候选入口校验一次内容 hash，内部共用证据索引并信任已提交的不可变账本；归档时不重复哈希或读回已有正文。报价身份由计划器统一校验，成本模型直接使用已校验的数据。保留用于证据身份、实际输入关联和请求幂等的 hash，以及 CAS、epoch 代际和完整回答提交约束；不为内部正常数据增加重复防御层。
 
