@@ -36,11 +36,11 @@ UV_PROJECT_ENVIRONMENT=.venv-training uv sync --extra training --locked
 
 messages应由严格历史前缀和真实来源构造；DA、gold span、审核理由放在provenance/独立侧车。准备器不自动判断语义、修正target或检测人为预先塞入messages的未来答案，也不依据provenance文字给予质量资格。
 
-现有六条起步包可运行：
+输入已审核材料后，可使用既有准备入口：
 
 ```bash
 uv run --extra tokenizer python -m training.sft prepare \
-  --examples runs/grounded-supervision-design/starter.messages-target.jsonl \
+  --examples data/reviewed-training.messages-target.jsonl \
   --output runs/NEW-SFT-PREPARED \
   --model-scope configs/model_scopes/qwen3-8b.local.json \
   --tokenizer-path runs/remote-h200-qwen3-reference/model-metadata/8b \
@@ -50,16 +50,6 @@ uv run --extra tokenizer python -m training.sft prepare \
 `--tokenizer-path`可指向本地metadata而不加载权重；指纹仍与scope核对。输出`examples.jsonl`包含实际IDs/labels/attention mask及离线身份，`manifest.json`绑定模板、输入/输出文件摘要和计数。来源、目标及EOS必须共同适配预算；遇到超长、非train、重复身份或无效输入时，整次准备失败，已写原件及失败/未处理分母保留。没有静默裁剪或跳样。加载阶段只接受完成且内容/指纹相符的产物，不重新分词或逐样本hash。
 
 六条来自四个真实train对话/全文：四个原回答仅附文档引用、两个澄清原文不硬加引用，合计11870tokens、最大3425。审核明确为assistant弱监督，不是最终训练集或独立验证集。20,431个user后目标的单全文/完整历史输入最大6429tokens，在8K内可预留1024输出；这个预算结果不适用于top-k多文档，也不是训练显存估计。证据见[材料设计](../../runs/grounded-supervision-design/README.md)。
-
-## 按来源分组的实际训练起点
-
-[小型监督队列](../../runs/grounded-training-cohort-v1/README.md)从已有Doc2Dial v1原train中先冻结来源家庭和完整对话，再审阅目标：train为16家庭/32对话/205候选，内部development为4家庭/8对话/54候选。家庭、对话和逐字相同全文跨分区无重叠；明确登记此前见过的4个train家庭/6条starter。没有读取作者dev/test，内部development目标尚未语义审阅；它不是最终独立测试，也不能排除语义近重复或预训练曝光。
-
-现有30条可直接准备的弱监督包括6条starter及24条新增目标。交叉审阅后，新增为4条原样、5条仅附引用、15条明确assistant修订；保留完整原历史、原目标、准确来源见证和修改理由。修正覆盖遗属/配偶概念混淆、未来作者答案影响澄清、情态词与项目范围丢失、全文支付说明不一致等实际问题。它们是有源弱监督，不是人审金标。`prepared-v2/`为当前产物：30/30成功、39012 prompt tokens、1531 target/EOS tokens、合计40543、最大3425；原v1保留为明确superseded的纠偏记录。
-
-这一步提供可训练的数据与完整工程接线，不以30条样本或合法引用证明语义改善。后续有限训练需要检查同输入条件/历史行为、完整答案与成本，未审核的175个候选不得自动进入loss；若值得扩展，沿冻结train来源扩充。保留来源留出开发与最终测试的不同用途，不用开发答案反向修订训练目标，也不以政府数据单独证明技术/API质量。
-
-队列、两次审阅、修前纠偏原件及本轮本地检查的27文件快照为`runs/checkpoint-export-cohort-v1.tar.xz`，199472 bytes，SHA256 `1e91ed6d2286d6c912d47d53b746d8dfe348ce24fcf4c69d4b25a343cb90e3cb`。26个payload已核验并同步容器同名`runs/`路径；它与生产wheel分开保存，不含大模型权重、运行依赖或私有环境。
 
 ## 有上限的LoRA训练与产物
 
@@ -110,33 +100,3 @@ model:
 ```
 
 继续使用同一共享配置的采样、预算与现有服务入口。启动器的`CONTEXTKV_MODEL_SCOPE_PATH`也指向该scope，并重新生成对应fingerprint；stock/native基线按同一scope加载dense模型。使用独立state/run目录和新引擎实例，不复用基座session/KV、成本表或输出长度标定。已有指纹和成本绑定负责拒绝混用，无需新缓存或调度器。详细启动流程见[固定引擎部署](../deployment.md)及[引擎scope合同](../../engine_patches/README.md)。接口接通不代表这一新权重已完成GPU验收。
-
-## 本轮导出验证
-
-本地真实Qwen3 tokenizer整仓回归为1478 passed、8 subtests、2 skipped；两个跳过项是显式opt-in训练/导出CPU运行合同，分别在容器运行。原v1的8B/32B身份逐值不变，v2同尺寸不同内容、native/HTTP指纹隔离、拒绝基座成本模型及stock/质量记录的identity kind均有合同覆盖。固定SGLang补丁完整应用、15文件编译及独立scope镜像一致检查通过；这是源码验证，不冒充GPU运行。
-
-本轮容器CPU使用真实PEFT/Transformers和原tokenizer，随机1层16hidden Qwen3、非零LoRA，执行完整export入口。dense重载与独立未合并参考在BF16容差内一致，实际投影权重改变、基座参数/文件不变；两份同形状同字节数但不同LoRA值的导出身份不同。真实NaN adapter被PEFT拒绝，失败manifest保留且无scope。没有加载8B权重、optimizer step、GPU或服务生成调用。11项测试（含真实runtime）通过；help子进程因staged源码与已部署旧包的导入路径冲突单独失败，修正测试工作目录后1项help通过，未重复runtime。前两次同类路径错误在收集阶段退出，日志保留。现有pytest异步配置/SWIG弃用提示不影响同步合同；本地另有既存Starlette提示。
-
-实现`a52f127`已打包并部署容器：93模块/31资产/369sdist/13许可及370个tracked条目核验通过。native仅更新scope镜像，补丁SHA256为`404bb984ffed4d4f23ab47f3a5afb48d432ef21a6ffbebfb3faf5e7a623e3fa4`；全补丁反向检查及固定15文件静态检查通过。12文件公共记录为`runs/checkpoint-export-public-v1.tar.xz`，20456 bytes，SHA256 `444759530b8292c266dc788e4c7267012baa71b6ed9bc77a2f45e5726bccfa64`；已独立核对11个payload、staged源码和完整部署Git清单。未启动模型服务，GPU0空闲；失败导入日志也在记录中。
-
-## 此前已执行的训练验证
-
-真实Qwen3 tokenizer的编码/数据合同34项通过，覆盖连续assistant、目标前导换行、EOS、padding接口、超长失败、严格数据分母与metadata隔离；六条实际起步数据通过同一prepare CLI。
-
-容器CPU使用实际Torch2.14.1/Transformers5.19.0及隔离目录的PEFT0.21.0/Accelerate1.15.0，随机初始化1层/32hidden的小Qwen3，执行两个optimizer steps。1024个LoRA可训参数、9717184总参数；原base/embedding/lm_head参数不变、七类投影正确、LoRA B发生更新、目标/EOS/padding mask保留、手算shifted CE一致、同一base重载adapter后logits一致。临时小模型与adapter随合同验证结束删除，不替换8B权重。
-
-首次CPU尝试在创建TrainingArguments时发现5.19已移除`warmup_ratio`，尚未执行训练；已按固定版本改为接受比例的`warmup_steps=0.03`，保留失败和修复后的记录。小模型loss约11.9仅证明训练接线，不能解释为语义改善。没有GPU训练或8B生成。后续只有经过来源/对话分组的实际训练与独立任务对照，才可判断范围、条件、覆盖和完整响应成本的综合收益。
-
-整仓回归为1448 passed、8 subtests、1 skipped（本地未安装训练运行库，显式opt-in的CPU训练测试未启用）；该项另在容器实际执行为1 passed/7.29s，检查同一训练函数、两步更新与逐值重载一致性。命令为：
-
-```bash
-CONTEXTKV_TEST_TRAINING=1 CONTEXTKV_TEST_HF_TOKENIZER=1 \
-CONTEXTKV_TEST_TOKENIZER_PATH=/media/ssd1/qwen3-8b \
-python -m pytest -q tests/test_training_runtime.py
-```
-
-容器验证将新增纯Python依赖放在独立目录，只为该命令设置PYTHONPATH，未升级或修改SGLang环境。验证前后GPU空闲。远端pytest未装异步插件产生`asyncio_mode`配置提示，另有既存SWIG弃用提示；该测试同步执行且通过，不将这些提示隐藏为无警告运行。
-
-`f72d152`已打包并同步容器，92模块/31资产/367sdist/13许可及368个远端tracked条目核验通过，training CLI help可在未安装PEFT的常规环境运行。CPU合同执行的staged源码与最终部署逐字相同。12文件公共记录为`runs/grounded-training-public-v1.tar.xz`，19160 bytes，SHA256 `3a795864b93c3711abd475cc3a5603e6bf5f9e596812c23d6d99fe0195c495f2`，11个payload核验通过；保留首次失败及后续成功，不包含临时随机模型权重。
-
-[方法、样本与准备产物快照](../../runs/grounded-training-review-v1.tar.xz)共96文件、539176 bytes，SHA256 `31420cc8e284f9205533ea2e0b2e1a36ef0c28c200c619f9bb73077720a92dce`，95个payload核验通过。源数据仍绑定先前下载的作者train；没有额外复制验证/测试对话、完整公开训练集、第三方运行环境或大模型权重。

@@ -45,5 +45,3 @@ Controller 的 `request_submitted` 事件记录由同一配置构造的实际请
 当前正式native、controller与owned入口共用显式Qwen3 scope/context/recipe，硬件配置缺scope时拒绝。旧无配置7B入口和13格构造器已删除；历史采样清单不改写。见[native入口](native_model_scope.md)与[owned入口](b6_owned_matrix.md)。
 
 Qwen3示例配置明确写入`.7/.8/20/0`，不是通过模型名称隐式更改全局默认。CPU mock和显式null仍使用贪心recipe。时间/长度artifact继续核对真实采样来源，不允许旧表或recipe不匹配的Ours静默获得标定资格。
-
-已有[8B owned入口验收](../archive/owned_local_scope_validation.md)实际运行该recipe的B1与Controller各两轮。原生保留HTTP参数，研究保留request_submitted事件和真实receipt；它是原源码下的有限功能证据，不证明质量/性能优胜，也不代替本轮scope-only清理后的测试。

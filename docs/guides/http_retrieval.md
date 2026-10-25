@@ -66,6 +66,7 @@ uv run --extra tokenizer --extra retrieval contextkv \
 
 - `retrieval_ms`：原attempt这次检索及元数据适配的实际耗时。
 - `visible_evidence_manifest`：原attempt所选candidate的EvidenceSpan，含稳定ref、EvidenceKey、source_uri、provenance和该次输入消息内的正文位置。
+- `citation_scope`：本轮必需证据对应的允许引用ID；APPEND与REBUILD共用同一范围。APPEND中仍可见的旧材料不自动获得本轮引用资格，明确回访时正文与资格一起恢复。
 
 visible说明该次实际输入包含哪些正文，**不是答案实际引用清单，也不证明支持答案**。完整原文可从`GET /sessions/{id}`的archive按EvidenceKey回读；消息内位置属于这次attempt的输入，不能套到后续execution上。retrieval rank/score、返回材料与明确依赖记录在现有events；初始化时的`retrieval_configured`记录检索配置/来源manifest，不每请求重复hash索引或权重。
 

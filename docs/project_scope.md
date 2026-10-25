@@ -82,18 +82,18 @@ HTTP/CLI、检索适配器、SQLite、可观测性、故障恢复和评测是这
 
 ## 5. 当前状态与正确的推进顺序
 
-现有 `controller/service.py`、`candidates.py`、`planner.py`、`epoch.py`、Session Store 和固定引擎补丁已经打通主流程。已有 HTTP/CLI、检索、提交/恢复，当前 Qwen3 阶段成本与 A/B/C 开发负载已联合执行，**无需重新搭建一套系统**。通用示例保留 `always_rebuild`，本次实测成本配置位于 `runs/mainline-delivery/serving-config.json`；默认冷却修正已有闭环收益，但仍需改善相对强原生基线的表现。
+现有 `controller/service.py`、`candidates.py`、`planner.py`、`epoch.py`、Session Store 和固定引擎补丁已经打通主流程。已有 HTTP/CLI、检索、提交/恢复，当前 Qwen3 阶段成本与 A/B/C 开发负载已联合执行，**无需重新搭建一套系统**。通用示例保留 `always_rebuild`，本次实测成本配置位于 `configs/qwen3_8b_cost.yaml`；最新六会话对照已完成，场景收益与整体差距见评价说明。
 
-具体工作顺序只维护在[当前实现清单](implementation_plan.md)，本文不另列阶段计划。`guides/` 是使用说明，`research/` 是方法参考，`archive/` 是历史证据；其中旧“下一步”不自动进入当前执行队列。
+具体工作顺序只维护在[当前实现清单](implementation_plan.md)，本文不另列阶段计划。`guides/` 是使用说明，`research/` 是现有机制参考；旧计划和逐轮纪要已从当前文档树移除。
 
-当前尚未完成的是共同目标负载上的系统联合验收、Qwen3 成本决策有效性和有限资源下生命周期净收益。不能用更多格式测试、通用问答数据审阅或微调接口代替这些结果。
+当前工程与开发对照已完成，整体质量非劣与性能优胜仍需独立证据。机制实现、局部收益和广泛优胜是不同层次的结论。
 
 ## 6. 贡献与扩展如何保持对齐
 
 可形成贡献的主线为：**版本与可见性感知的上下文组织；真实缓存状态与完整执行成本驱动的选择；业务上下文版本和原生缓存生命周期的协同机制。** 这些是待证实的贡献方向，不把已有实现直接写成优胜结论，也不把 SGLang 本来就有的缓存能力算成原创。
 
-继续复用已核对的 ContextPilot/TokenPilot 组织思想、成熟检索/重排、SGLang Radix/HiCache 与会话软引用、标准成本拟合和在线决策方法；具体复用、修改点及证据分别记录在[贡献说明](research_contributions.md)、[架构](architecture.md)和[验证记录](archive/verification.md)。不因论文名称增加模块，先理解适用条件和运行代价。
+继续复用已核对的 ContextPilot/TokenPilot 组织思想、成熟检索/重排、SGLang Radix/HiCache 与会话软引用、标准成本拟合和在线决策方法；具体复用、修改点及证据分别记录在[贡献说明](research_contributions.md)、[架构](architecture.md)和[数据与评价](data_and_evaluation.md)。不因论文名称增加模块，先理解适用条件和运行代价。
 
 不限制以后从检索、证据选择、调度、成本学习、压缩或模型适配提出改进。但新增方向应先明确：它解决哪个已观察到的核心瓶颈、怎样与现有机制协同、带来多少额外成本、如何在共同基线下判断价值。
 
-**训练目前是暂缓扩展的可选支线。** 已完成的 30-step Qwen3-8B 小规模训练与 CPU 合并产物保留，不表示质量改善；已准备的 32 次对比生成没有执行。当前不扩大训练、teacher 或专门训练评测，把资源回到上述主线。训练将来可以有价值，但不是课题实现、创新或验收的必要条件。
+**训练是暂缓扩展的可选支线。** 已有通用工具和产物保留，当前不扩大训练、teacher 或专门训练评测；它们不是 A/B/C 运行和交付的前置。

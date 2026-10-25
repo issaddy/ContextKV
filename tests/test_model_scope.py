@@ -397,11 +397,13 @@ def test_actual_shell_launcher_uses_scope_paths_and_no_fake_revision(local_scope
     package = checkout/"python/sglang"
     package.mkdir(parents=True)
     (package/"__init__.py").write_text("")
-    (package/"launch_server.py").write_text('import json,os,sys\nprint(json.dumps({"argv":sys.argv[1:],"scope":os.environ["CONTEXTKV_MODEL_SCOPE_PATH"]}))\n')
+    (package/"launch_server.py").write_text('import json,os,sys\nprint(json.dumps({"argv":sys.argv[1:],"scope":os.environ["CONTEXTKV_MODEL_SCOPE_PATH"],"tma":os.environ["SGLANG_HICACHE_TMA_TRANSFER"]}))\n')
     env = {**os.environ, "SGLANG_CHECKOUT": str(checkout), "CONTEXTKV_MODEL_SCOPE_PATH": str(local_scope.path),
            "CONTEXTKV_FINGERPRINT_JSON": json.dumps(asdict(local_scope.fingerprint)),
            "PATH": str(Path(sys.executable).parent)+os.pathsep+os.environ["PATH"]}
     env.pop("CONTEXTKV_MODEL_PATH", None)
+    env.pop("CONTEXTKV_HICACHE_LAYOUT", None)
+    env.pop("SGLANG_HICACHE_TMA_TRANSFER", None)
     completed = subprocess.run(["bash", str(ROOT/"scripts/launch_sglang.sh"), "--port", "30001"],
                                env=env, text=True, capture_output=True, check=True)
     result = json.loads(completed.stdout)
@@ -409,6 +411,8 @@ def test_actual_shell_launcher_uses_scope_paths_and_no_fake_revision(local_scope
     assert argv[argv.index("--model-path")+1] == str(local_scope.model_path)
     assert argv[argv.index("--tokenizer-path")+1] == str(local_scope.model_path)
     assert "--revision" not in argv and "--enable-session-radix-cache" in argv
+    assert argv[argv.index("--hicache-mem-layout")+1] == "layer_first"
+    assert result["tma"] == "0"
     assert result["scope"] == str(local_scope.path)
     conflict = subprocess.run(["bash", str(ROOT/"scripts/launch_sglang.sh"), "--revision", "a"*40],
                               env=env, text=True, capture_output=True)

@@ -24,7 +24,7 @@ flowchart LR
 
 - `schema.py` 定义 frozen dataclass，集合与消息使用不可变结构。`serialization.py` 按类型恢复 JSON，不使用 pickle。
 - `evidence.py` 以 corpus/document/passage/version/SHA256 定义身份，稳定引用发生短 hash 碰撞时仅延长新编号。回访只从已归档原文恢复；必须证据先统一形成，再构造候选。
-- `templates.py` 对完整 prompt 分词；保留证据原文的消息内字符 span、身份和来源。ByteTemplate 只用于模拟；HuggingFaceTemplate 固定 revision，每个候选只渲染一次、分词一次。与原生 apply_chat_template 分词结果的一致性放在 tokenizer 测试中验证。
+- `templates.py` 对完整 prompt 分词；保留证据原文的消息内字符 span、身份和来源。ByteTemplate 只用于模拟；HuggingFaceTemplate 固定 revision，每个候选只渲染一次；Qwen3 在已核实 AddedToken 边界按请求复用共同分词段，其他 tokenizer 沿用完整 prompt 编码。与原生 apply_chat_template 分词结果的一致性放在 tokenizer 测试中验证。
 - `candidates.py` 保留完整原始 QA。APPEND 只省略可用正文 span 证明仍在输入中的材料；历史同步、配置变化、冲突版本、恢复或超预算会使其不可行。REBUILD 从原始 QA 和共同证据重建。
 - `cost_model.py` 使用已完成历史估计输出长度，按 prefix/suffix/host-load/concurrency 查询标定点。未标定桶、未知 host 状态与不确定传输不能当作准确预测。
 - `planner.py` 先满足硬约束，再选择预计完整成本较低者；误差带仅作诊断，成本相同时才复用原生共享前缀锁观测排序 KV 工作集。正常配置使用原生实际预算观测，缺少执行成本支持时采用显式简单回退。`observe` 提供残差更新接口，默认运行冻结离线模型。
@@ -35,7 +35,7 @@ flowchart LR
 
 `sessions` 保存当前快照；`ledger_history` 保留每次提交与 P1 历史同步的审计副本。语义历史与执行消息、实际 input/output IDs 分开。证据文本另按内容 SHA256 存储。
 
-`attempts` 保存请求身份、选中计划、prepare 身份、epoch、完整结果及处理阶段。`request_id` 在同一业务会话内唯一；相同 ID 的不同请求报冲突。跨控制器重复 begin 不会获得执行权。状态只能前进，已选计划和已完成结果不能由旧对象覆盖。
+`attempts` 保存请求身份、选中计划、prepare 身份、epoch、完整结果及处理阶段。`request_id` 在同一业务会话内唯一；相同 ID 的不同请求报冲突。跨控制器重复 begin 不会获得执行权。状态只能前进，已选计划和已完成结果不能由旧对象覆盖。计划与新 epoch 在 prepare RPC 前一起落盘；prepare ACK 与提交标记在 generate RPC 前一起落盘，避免无外部调用间隔的重复持久化。
 
 一个事务同时写入新 QA、执行账本、当前 epoch、已提交 attempt 和旧 epoch 退役 outbox。事务内重新检查 attempt 阶段与 snapshot version。新版本提交前绝不退役旧当前 epoch。
 

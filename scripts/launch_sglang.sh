@@ -10,6 +10,7 @@ if [[ -f "$CHECKOUT/.contextkv-source-only" ]]; then
   exit 2
 fi
 export SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND=python
+export SGLANG_HICACHE_TMA_TRANSFER="${SGLANG_HICACHE_TMA_TRANSFER:-0}"
 export PYTHONPATH="$CHECKOUT/python${PYTHONPATH:+:$PYTHONPATH}"
 # Optional host admission uses inherited CONTEXTKV_HOST_ADMISSION=off|fixed|conditioned.
 # Off preserves native backup behavior and the previous cache configuration hash.
@@ -24,7 +25,7 @@ if [[ "${CONTEXTKV_ENABLE_HICACHE:-1}" == 1 ]]; then
   HICACHE_ARGS=(--enable-hierarchical-cache --hicache-host-memory-mode cache
     --hicache-size "${CONTEXTKV_HICACHE_GB:-16}" --hicache-write-policy "${CONTEXTKV_WRITE_POLICY:-write_through}"
     --hicache-io-backend "${CONTEXTKV_HICACHE_IO_BACKEND:-kernel}"
-    --hicache-mem-layout "${CONTEXTKV_HICACHE_LAYOUT:-page_first}")
+    --hicache-mem-layout "${CONTEXTKV_HICACHE_LAYOUT:-layer_first}")
 fi
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 exec python "$PROJECT_ROOT/engine_patches/contextkv_model_scope.py" \

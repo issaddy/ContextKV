@@ -1,6 +1,6 @@
 # 可执行的离线质量验收
 
-**2026-10-24 状态补记：** 本文主体记录早期123份P3盲审包及验收接口，后续决策顺序见[研究策略](../archive/research_strategy.md)。之后已完成[615维开发评分](../archive/dev_quality_validation.md)、[533答案2665维完整评分](../archive/b6_quality_validation.md)和[Qwen3四域318答案关键论断审查](../archive/qwen3_reference_validation.md)。完整模型评分已经存在；可靠性、统计资格与真实人工盲审仍是不同的未完成事项。
+当前真实结果统一见[数据与评价](../data_and_evaluation.md)。本页说明现有离线评分、来源绑定和独立冻结验收接口；自动评分、人工评审与统计资格分别记录。
 
 建包时，真实生成、完整 evidence audit、规则审核、MiniCheck、官方 evaluator 适配、HTTP judge 和人工盲审入口均已存在。旧 Q0/Q1/Q2 的 P1/P2 各 123 份盲审表及本批新增P3的123份表仍为空；该批当时没有付费API或远端judge调用。后续独立模型的实际运行不回填这些人工表，assistant案例检查也不作为人工评分。
 
@@ -10,7 +10,7 @@
 
 | 路线 | 能完成的工作 | 不能据此声称的结论 |
 |---|---|---|
-| 已有本地 Qwen2.5-7B OpenAI-compatible 服务 + `bench.judge` | 全可见证据、实际自身历史、五维 JSON 诊断；冻结 prompt/model/revision/temperature | 同生成权重自评不是独立质量验收；更换模型名/本地路径不能改变这个事实 |
+| 显式配置的本地 Qwen3 OpenAI-compatible 服务 + `bench.judge` | 全可见证据、实际自身历史、五维 JSON 诊断；冻结 prompt/model/revision/temperature | 同生成权重自评不是独立质量验收；更换模型名/本地路径不能改变这个事实 |
 | 已运行的 MiniCheck | 独立判别器检查指定 prose claim 与 source 的支持关系 | 未覆盖的代码、表格、整体正确性、回答充分性不能由 grounding 分数补齐；逐 claim 也不等于完整回答五维分数 |
 | 固定 IBM 官方 evaluator | 原 algorithmic、underspecified、IDK、RAGAS、RADBench 流程及官方输出 | “官方脚本运行成功”不等于正确、非劣或独立；使用同生成器作官方 judge 仍属自评 |
 | 独立人工盲审 | 全文、代码、条件/版本、引用、历史不一致与不可回答情况 | 当前空表和 assistant audit 不是已完成人工评分；5 个 dev 会话不是最终 heldout 证据 |

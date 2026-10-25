@@ -19,11 +19,11 @@ supplement = render_table_relations(existing_reference_id, tables)
 
 两者均为纯函数；无表时分别返回空元组、空字符串。调用者决定是否在当前输入附加 `supplement`，并对新增 tokens 使用现有候选预算和审计。它们不访问历史、答案、标签、模型或缓存，不创建 EvidenceKey，不改写 `EvidenceBlock.text`，也不计算新的内容指纹。
 
-共享候选入口已通过 `context.table_relations: true` 接通；原生 CLI 使用 `--table-relations`，matrix 两条执行路径继承共同的 base config。默认关闭。每轮对 required 证据提取一次并供两个候选共用，APPEND 即使复用已有正文，也会在当前消息附加该轮注释；新增长度仍受原共享预算约束。专项集成验证了默认逐字兼容、QA/正文跨度不变、Native 输入一致和哈希调用次数不增加。首次真实开关对照见[验证记录](../archive/table_relations_validation.md)，尚无总体质量或性能收益结论。
+共享候选入口已通过 `context.table_relations: true` 接通；原生 CLI 使用 `--table-relations`，matrix 两条执行路径继承共同的 base config。默认关闭。每轮对 required 证据提取一次并供两个候选共用，APPEND 即使复用已有正文，也会在当前消息附加该轮注释；新增长度仍受原共享预算约束。专项集成验证了默认逐字兼容、QA/正文跨度不变、Native 输入一致和哈希调用次数不增加。已有局部验证，尚无默认开启的整体收益结论。
 
-新增的 `context.table_annotation_style` 默认为 `all_rows`，保留原全行输出；设为 `focus_refs` 才使用问题相关行和原引用样式，而且仍须 `table_relations: true`。该轻量样式直接复用 CRAFT 的行文本构造函数，词法选择复用现有 BM25S 与纠正线索，所需依赖已属于 `contextkv[retrieval]`；默认关闭和全行样式不加载此可选依赖。接口、明确的局部验证与完整 MIT 归属见[focus 验证及配置](../archive/table_focus_validation.md)和[CRAFT notice](../third_party/CRAFT_NOTICE.md)。它不是后置答案验证器，也没有迁移 CRAFT 的 dense 重排。
+新增的 `context.table_annotation_style` 默认为 `all_rows`，保留原全行输出；设为 `focus_refs` 才使用问题相关行和原引用样式，而且仍须 `table_relations: true`。该轻量样式直接复用 CRAFT 的行文本构造函数，词法选择复用现有 BM25S 与纠正线索，所需依赖已属于 `contextkv[retrieval]`；默认关闭和全行样式不加载此可选依赖。完整 MIT 归属见[CRAFT notice](../third_party/CRAFT_NOTICE.md)。它不是后置答案验证器，也没有迁移 CRAFT 的 dense 重排。
 
-可选 `context.table_structure_mode: explicit` 已补无编号明确数量表头和有实际 Markdown 标题/缩进的父路径；默认 `legacy` 保留本节原两种格式。它没有推断真实扁平列表中丢失的缩进。全 41 轮覆盖、原文边界和未验证之处见[结构扩展验证](../archive/table_structure_validation.md)。
+可选 `context.table_structure_mode: explicit` 已补无编号明确数量表头和有实际 Markdown 标题/缩进的父路径；默认 `legacy` 保留本节原两种格式。它没有推断真实扁平列表中丢失的缩进。源码与合同见 `adapters/table_structure.py` 和相应测试。
 
 `SourceSpan(text, start, end)` 使用传入原段落的 Python Unicode 字符偏移，左闭右开，保证 `original[start:end] == text`，不是 UTF-8 字节偏移。`TableRelations` 保存表题、表头、整表跨度、关系与原注释；`TableRelation` 保存 `object/column/value/unit/row_span/notes/parent_path`，默认父路径为空。全部是不可变 dataclass，可用 `dataclasses.asdict` 留存审计。正文内空白、Markdown 转义、大小写和数值写法不作归一化；仅排除单元格两端的格式空白。
 
@@ -36,36 +36,4 @@ supplement = render_table_relations(existing_reference_id, tables)
 
 相邻、显式标记的 `Note:`、`Remark:`、中文注释或脚注只作为 `source note` 原文保留。只有行中与注释开头存在完全相同的 `†`、`‡`、单星或 `[^id]` 标记时，才建立该行的 `notes` 关联。没有标记的注释不变成所有行的共同限制条件。遇到普通叙述段落就停止搜集，不跨越章节追找脚注，因此真实例中远处 Frankfurt 的地域脚注不会被接到大小限制上。
 
-## 验证与实验
-
-`tests/test_table_relations.py` 覆盖真实扁平表、相同数值不同对象、显式总量行、多列 Markdown、非大小单位、源偏移、CRLF/中文/转义竖线、空单元格、脚注关联及不规则表回退。代码块不会作为表格证据解析。
-
-实验应固定检索配置、系统提示、生成模型与 revision、完整 QA、required 证据正文和输出预算，对比关闭/开启行关系注释；使用实际可见正文逐项检查对象、版本、条件和来源支持，同时统计新增 tokens、TTFT/完成时间及原候选动作变化。真实闭环生成历史可能随答案传播，不能把后续输入差异解释成单轮关系注释的独立因果效应。固定历史或保存输入的单轮对照可辅助定位，最终保留完整闭环验证。当前没有真实生成质量提升结论。
-
-## 2025–2026 后续方法筛选
-
-2026-10-24 核查范围包括 ACL/Findings 2025–2026、SURGeLLM 2026、ICLR 2025 的原始论文及论文链接的作者代码，关注不训练生成底座的结构表示、行选择、数值引用与选择性修订。下面是未迁入当前实现的机制，不是新增实验结果；与既有 TabRAG、FullCite 和对象适用性研究互补。
-
-| 方法及原始证据 | 原理、具体复用入口 | 相对当前 helper 的价值与边界 |
-|---|---|---|
-| **CRAFT，ACL 2026**；[论文 v2 §3/§7/Appendix C–D](https://arxiv.org/html/2505.14984v2)；作者仓库固定 `7c4be45bb292f4e050c4237b4141ccc9e91ebe30` | [MIT 源码](https://github.com/coral-lab-asu/CRAFT/blob/7c4be45bb292f4e050c4237b4141ccc9e91ebe30/LICENSE)中 [`build_row_texts`](https://github.com/coral-lab-asu/CRAFT/blob/7c4be45bb292f4e050c4237b4141ccc9e91ebe30/src/craft_tabqa/core/text.py)将表题和各列名附到行值，并保留 table_id/row_idx；[`DenseReranker._rerank_mini_table`](https://github.com/coral-lab-asu/CRAFT/blob/7c4be45bb292f4e050c4237b4141ccc9e91ebe30/src/craft_tabqa/retrieval/stage2_dense.py)按问题与行向量的相似度构造相关行子表，再编码排序 | 可复用小型行表示/排序逻辑，在现有 BGE 上为**辅助注释**选焦点行，完整 required 正文仍保留。需给其 row_meta 增加现有来源和字符跨度；其 `_clean` 只适合派生检索文字，不能覆盖原文。原方案使用额外生成描述/查询扩展，部分最终排序调用外部 embedding；OTT-QA 回答实验使用 gold passage，不能当完整开放检索或本项目多轮收益。不会直接搬入这些 oracle 输入或另建整套索引。此处 CRAFT 指 cascaded retrieval，非同名 counterfactual 论文 |
-| **TreeThinker / RealHiTBench，Findings ACL 2025**；[论文 §4 及限制](https://arxiv.org/html/2506.13405v1)；作者仓库固定 `5278fa224ce2b37e71fd73059107d146b4b428da` | [`Generate_Tree`](https://github.com/cspzyy/RealHiTBench/blob/5278fa224ce2b37e71fd73059107d146b4b428da/inference/answer_prompt_tree.py)显式表示行/列表头的层级、覆盖起止位置和父子包含关系，再把问题与表头树对齐。采用推理时流程，无需训练生成底座 | 当前 helper 不恢复多级或合并表头；可先在**固定来源本来保留 HTML/LaTeX 单元格跨度**的材料上构建带原文位置的 header path。不能从已有扁平段落凭空恢复消失的 colspan。上游默认多次模型调用增加时延，且部分提示假设问题必有答案，必须改成允许证据不足。README 声明代码 MIT、数据 CC BY-NC 4.0，但该固定树未发现独立 LICENSE 文件；本次只核查思想，尚未复制代码 |
-| **SMART，Findings ACL 2026**；[正式论文 §3.3–3.5、Appendix B/C、Limitations](https://aclanthology.org/2026.findings-acl.1474.pdf) | 将表头语义展开与操作执行分开；使用 SELECT、COMPUTE、SORT、INFER、ANSWER 的结构化步骤，外部计算器/排序器验证后提供修订反馈。正式 PDF 未确认可固定的公开源码/许可证，因此为原理适配入口 | 值得复用的是“先指定取哪些源单元格，再核算操作”，不是复制输出格式。可为操作数绑定现有 ref、row/value span，并检查单位；无需改底座权重。其正式实验使用 70B/72B、4096 输出预算，不能继承为当前 7B 的效果保证。论文明确验证器主要处理算术/排序，**不验证高层逻辑或文本关系**；算对 1+10 仍不能证明附件是否包含在某个文档上限内 |
-| **When LLMs Read Tables Carelessly，2026-06**；[作者论文 §3–5](https://arxiv.org/html/2606.32029v1)、[Amazon 作者页](https://www.amazon.science/publications/when-llms-read-tables-carelessly-measuring-and-reducing-data-referencing-errors) | 将错单元格/错列/伪造值与遗漏必要行分别评估，再用 critic 过滤候选或触发重新采样。可借鉴其“来源取值正确性独立于最终答案正确性”的分解 | 最贴近本例的是**逐 claim 的对象–列–值绑定及相关行覆盖检查**。论文不少过滤收益使用 Sonnet-3.7 加 gold answer 的上界评审与多候选采样；另有训练小 critic 的方案。没有将这些设置作为无训练在线模块直接复用，也未确认可下载官方 critic 权重。当前可用原表 tuples + 现有本地模型做不含 gold 的有限诊断，须单独检验误报和漏报 |
-| **Structured Self-Correction，SURGeLLM 2026**；[正式论文 §3、消融和附录](https://aclanthology.org/2026.surgellm-1.19.pdf)；作者仓库固定 `dd169866bf066b6935cd850b7a82d72f791545da` | [`prompts.py`](https://github.com/FarseenSh/table-self-correction/blob/dd169866bf066b6935cd850b7a82d72f791545da/experiments/src/prompts.py)分离单元格、计算、逻辑、完整性检查；[`evaluator.py`](https://github.com/FarseenSh/table-self-correction/blob/dd169866bf066b6935cd850b7a82d72f791545da/experiments/src/evaluator.py)分别统计发现错误、修复成功、误报和把正确答案改坏 | 可复用评测分解及单次选择性复查协议，避免只统计修改次数。论文观察到模型/任务相关的收益与过度纠正；不能从论文中推导当前 7B 必获益。README 的部分数字与最终论文不同，以正式论文为准，不借用其阈值作本项目门槛。README 声明 MIT，但固定树未见独立 LICENSE；当前未复制模板或评分代码，其短答案匹配也不能直接用于本项目开放式回答 |
-
-还核查了 [Table-Critic（ACL 2025）](https://aclanthology.org/2025.acl-long.853/) 的 Judge/Critic/Refiner/Curator 分工，以及 [StructRAG（ICLR 2025）](https://proceedings.iclr.cc/paper_files/paper/2025/file/5975754c7650dfee0682e06e1fec0522-Paper-Conference.pdf) 的动态结构路由。前者[固定仓库](https://github.com/Peiying-Yu/Table-Critic/tree/032cc7eb21513eeddcbebb10ed58f799a373929e)中只有部分第三方目录附许可，不能把它扩展成整个项目的许可；后者完整方案包含 DPO 路由训练。两者仍有机制利用价值，但已明确知道是一个短限额表时，先测试单次取值/范围检查比直接引入四代理循环或训练路由更能定位当前错误。它们不是被永久排除的研究路线。
-
-## 当前不足与优先实施路线
-
-literal helper 只解决输入表示的一部分：它与当前问题无关，不选择焦点行；只支持简单明确格式，缺少层次表头和跨段条件；不会证明产品/版本/限制对象相同；也不检查生成答案是否忠实使用这些行。模型仍可能照着正确表格写出错误的包含关系，普通 NLI 也可能只看到了相同数值。注释还会新增 tokens，APPEND 下每轮重复注释的代价应进入 B 的完整成本，不能假定它天然更省。
-
-**优先一：来源绑定的取值与关系核对。** 在已有完整 audit 上增加一个独立离线诊断入口：输入当前问题、真实历史、完整可见证据、初稿和 literal tuples；输出每个可检查的数值 claim 对应的原文 row/value/条件跨度、选取的对象、操作类型、结果及“不足以判定”的原因。不是只让模型说对/错。模型提出的跨度必须回指实际来源，复制值和显式计算可确定性复核；对象同义、隐含包含关系、跨版本适用性仍作为单独待验证判断，不能因为数字在表中出现就判支持。允许“表支持数值，但不支持新增范围/组合”这一中间结论。已有 MiniCheck 可作对照信号，不能用同一模型自评宣告修订有效。
-
-在冻结初稿上量化诊断后，再研究一次选择性修订：反馈具体的错取行、缺失行或无据范围，保存初稿与修订稿，仍保留完整 QA/证据，并允许选择不修订。线上检查不接收 reference 或未来轮答案。无需立刻增加新的 critic 权重；可以先接现有本地模型，同时将调用、等待、输出及提交耗时计入总响应。该入口是 DRE/SMART/SSC 的组合适配假设，尚未实现，不能称为这些论文的完整代码复现。
-
-**优先二：CRAFT 式问题相关行焦点。** 轻量词法对照已成为可选 `focus_refs` 样式，[12 次冻结探针](../archive/table_focus_validation.md)在两个开发历史中改善了目标对象/引用错误；既有 BGE 编码或 reranker 的行评分尚未接入。当前选择只调整新增注释，不删除源段落、不改变原 top5 和完整 QA，并保留原 span 和显式脚注关联。接续比较全行、词法焦点、BGE 焦点及明确条件闭包，同时拆解行选择与引用呈现的作用；三行小表的局部结果不能替代长表、相似对象或跨版本验证。
-
-**优先三：层次表头与可执行数值操作。** 在来源保有结构的材料上引入 TreeThinker 式 header path，将父级对象、版本、指标和单位随单元格带入派生表示；再借鉴 SMART，仅对明确要求计算或排序的问题使用带原单元格引用的操作。不能把“可计算”当作“有权合并这些对象”。来源只剩无分隔文本时，保留当前不猜测行为，后续通过同版本原始材料或公开元数据补结构，而非把今天网页状态回填固定旧快照。
-
-这三条路线可以分别消融：原文、literal 注释、问题相关行、取值/范围诊断、选择性修订及其组合。报告错→对、对→错、未修复、无法判断，按对象/条件/算术/遗漏/历史来源污染分类；同时报告回答完整性、拒答、引用支持、额外 tokens、完整响应与会话时间。开发集可继续用于机制探索和对照，最终 test 保持独立。原始开关对照无论正负都保留，它用来判断下一处瓶颈，不是结束 A 模块研究的门槛。
+当前该增强通过 `context.table_relations` 显式启用，默认关闭。它保留完整原文，仅补充可核验行列关系；相应 CPU 合同覆盖于 `tests/test_table_*.py`。历史局部生成改善不足以证明默认开启的整体收益。

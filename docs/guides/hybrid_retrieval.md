@@ -4,7 +4,7 @@
 
 ## 选择依据与具体复用
 
-当前 Cloud P3 的 BM25 基线提供了可检验的起点；真实答案审查同时发现 Cloudant 问题配到其他产品资料，以及引用可见但不支持当前论断的情况。前者需要改进检索，后者仍需 claim/source 支持检查，不能仅靠 reranker 解决。相关性与事实支持分别评价，见[支持评分适配](../archive/evidence_support_proposal.md)。
+当前 Cloud P3 的 BM25 基线提供了可检验的起点；真实答案审查同时发现 Cloudant 问题配到其他产品资料，以及引用可见但不支持当前论断的情况。前者需要改进检索，后者仍需 claim/source 支持检查，不能仅靠 reranker 解决。相关性与事实支持分别评价，见[质量评价](quality_acceptance.md)。
 
 | 机制 | 官方依据与复用入口 | 本项目适配与限制 |
 |---|---|---|
@@ -104,7 +104,7 @@ encoder/reranker 与 SGLang 共用 GPU 时，其他会话检索可能与生成�
 
 底层 `search_variants` / `search_current_topic` 接受 `rerank_query=None`；None 分别保留原 query/topic，显式字符串仅传给 reranker。输出及 fusion trace 记录实际 `rerank_query`；主链 trace 还记录 `rerank_query_mode`，即使后续 encoder/reranker 失败也保留已产生的 query resolution 原响应、耗时与 retrieval error，原异常继续向外抛出。`retrieval_elapsed_ms` 是包括锁等待、解析和排名的本地墙时，resolver 原有 `elapsed_ms` 仍只表示解析阶段，不能两者相加。
 
-本功能由[八方法冻结检索诊断](../archive/frozen_query_retrieval_validation.md)中的“候选50较好、重排top5退化”触发。它是可选工程能力，尚未证明新模式优于原设置；默认不变。ConvSearch 仍未接入在线 factory，本轮仅用其已冻结输出设计同41轮四臂重排试验。
+候选池召回和最终重排可能具有不同的查询需求；本接口允许显式分别配置，并保留共同候选与原文，实际用途按目标负载判断。
 
 ## 可证伪假设与后续改进
 

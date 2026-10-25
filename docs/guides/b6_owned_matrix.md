@@ -71,5 +71,3 @@ stock B0/B1的manifest只在实际服务验证后生成：revision为null，另�
 固定策略可以立即走此入口而不要求旧cost表；cost/shadow cost路径仍须真实同fingerprint/cache/sampling scope和hardware点。旧7B或不同recipe artifact不会因为GPU token cap相同而获得新模型校准资格；匹配失败在生成前拒绝，不暗中全回退。任何实际运行、评分和freeze必须绑定本次实现与声明，不能重写历史13格或跨模型沿用其资格。
 
 CPU合同覆盖scope factory、owned参数/实际runtime、native validator、quality模板、显式head_dim、B0/B1 flags、继承环境替换、资源/模型/recipe/cost不匹配零生成与失败cleanup。当前清理删除了旧默认/旧驱动相关测试，保留通用合同。
-
-随后已完成[8B最小真机验收](../archive/owned_local_scope_validation.md)：stock B1与patched Controller各两轮，共4次真实生成全部自然stop，Controller实际R→A，容量/身份/历史与恢复均留证。它关闭此配置的新入口功能缺口，不扩大到32B/P3/成本拟合、质量或性能结论。

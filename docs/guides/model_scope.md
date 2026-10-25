@@ -25,4 +25,4 @@ scope初始化解析一次，加载边界核文件/库存与tokenizer，原生gu
 
 `profiling.sglang_probe`与smoke/lifecycle/observation工具使用共享模板factory。decision-pairs freeze也复用它，不把metadata identity交给HF当revision；实际采集必须与冻结病例同scope。保留Measurement、离线拟合、历史JSON解析与不加载模型的候选政策复算，删除无生产消费者的旧manifest模板。
 
-当前模板仍使用原Qwen3 non-thinking渲染。历史assistant前导变化造成的前缀边界见[结构审计](../research/qwen3_candidate_opportunity.md)；未经明确新范围和验证不改变默认模板或复用不匹配KV。已有[有限GPU验收](../archive/qwen3_scope_gpu_validation.md)和[统一入口验收](../archive/owned_local_scope_validation.md)各自绑定原源码，本轮迁移不改写它们。
+当前使用 Qwen3 非思考模板；历史 assistant 前导可能改变真实 token 前缀，因此始终渲染完整输入。当前成本与实际对照见[数据与评价](../data_and_evaluation.md)。

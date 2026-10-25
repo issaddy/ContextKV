@@ -35,7 +35,7 @@ v0.9 wOOD使用其独立文档/训练文件，显式传`--source-format v0.9`、
 
 ## 按严格历史前缀构造研究样本
 
-`adapters.dialogue_examples`进一步将侧车投影为每个原agent轮次的下一发言实例，供来源阅读、历史条件与对话动作研究使用。实现吸取[ACT固定源码审查](../research/applicability_mechanism.md)中的未来目标泄漏反例，独立编写，未复制其训练器或构造假偏好。
+`adapters.dialogue_examples`进一步将侧车投影为每个原agent轮次的下一发言实例，供来源阅读、历史条件与对话动作研究使用。投影只使用目标之前的真实历史，标签与来源分离，避免未来目标泄漏。
 
 ```bash
 uv run python -m adapters.dialogue_examples \
@@ -80,4 +80,4 @@ OOD只能说明问题不适用于给定文档：例如在DMV材料下问VA事务
 
 [FaithDial/CHARP对照研究](../../runs/multiturn-grounding-alternatives/README.md)补充了另一约束：人工修订与history字段不保证模型需要利用历史；CHARP同知识、不同末问的成对设计更能隔离历史消歧。当前保留这些有效原理和数据接口，后续按真正的历史、条件及证据充分性问题设计机制；没有因适配成功就启动训练或重跑大矩阵。
 
-接续已进入[真实训练工程](../research/grounded_training.md)：完整single-document输入预算可容纳8K，但作者grounding也可能错指或遗漏；六条逐来源审查的起步样本已通过同一prepare入口，target/labels与来源历史分离。它们用于流程验证，不能替代有来源分组的训练/验证设计或证明8B语义效果。
+已有[可选训练/导出接口](../research/grounded_training.md)保留供复用，当前不推进训练；数据适配成功不代表语义质量收益。

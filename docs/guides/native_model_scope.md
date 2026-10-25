@@ -55,7 +55,3 @@ stock HTTP没有完整host allocator观测，因此host容量仍需要原生allo
 CPU合同使用真实 `NativeSGLangClient` + `httpx.MockTransport`、明确的合成scope/ByteTemplate。正式validator运行，未使用`test_mode`放行新路径。覆盖B0/B1 session定义与完整自有历史、共享recipe与唯一预算、8B/32B identity错配、32B显式head_dim128、错误actual路径/dummy/override/precision/PP/context/缺字段/池容量零生成拒绝，以及CLI和matrix的真实透传。旧default与stream/nonstream HTTP合同另保留。
 
 CPU测试没有加载权重。下述已完成的Qwen3有限真机验收仍保留原来源，不因当前清理重写为新实验。
-
-随后已完成一次[Qwen3-8B新B0实际入口检查](../archive/source_plan_diagnostic_validation.md)：同scope/显式采样，真实`--run-config`、SSE、cap64、合成五源，prompt/output IDs与请求配方核对通过。这是有限功能证据，不是B1新模型/HiCache、完整矩阵或性能结论；同一服务另外两次nonstream只验证计划grammar及其解除。研究Controller采样路径本轮未运行。
-
-随后[统一owned入口真机验收](../archive/owned_local_scope_validation.md)补齐8B新B1及研究Controller的共同scope/采样路径，各两轮实际P2历史。此前B0证据范围不变；新结果仍是有限功能检查。

@@ -51,12 +51,15 @@ def test_changed_missing_and_failed_tasks_are_retained_with_audit_gaps():
 def test_external_controller_audit_is_used_without_reducing_to_current_topk():
     data = saved_run()
     turn = data["report"]["turns"][0]
-    full = {"task_id": turn["task_id"], **turn["result"]}
+    full = {"task_id": turn["task_id"], **turn["result"], "citation_scope": []}
     del turn["result"]["visible_evidence_manifest"]
     del turn["result"]["audit_evidence"]
     rows, summary = make_packet(data, freeze_cohort(data), [full])
     assert rows[0]["visible_blocks"][0]["text"] == "Attachment 50 per account"
     assert summary["full_audit_without_missing_bodies"] == 1
+    assert rows[0]["rule_audit"]["unknown_citations"] == []
+    assert rows[0]["rule_audit"]["out_of_scope_citations"] == ["E_ab12"]
+    assert summary["out_of_scope_id_turns"] == 1
 
 
 def test_grouped_ids_remain_separate_from_original_strict_rule_and_semantic_support(tmp_path):

@@ -1,6 +1,6 @@
 # C：业务会话与版本感知的 host 备份准入
 
-2026-10-24。可选主流程已实现，默认关闭；固定源码应用、CPU 原生方法/action 顺序、HTTP 和恢复合同通过，[首轮GPU机制验收](../archive/host_admission_validation.md)已通过off/fixed两臂：备份过滤、后续补齐和host退役观测均成立，但即时回访多重算4,032 tokens、累计D2H相同。随后五种压力/身份设置也完成15次真实生成：条件触发、同业务去重与大池负例成立，但小池各策略实际D2H相同；完整负载收益尚待验证。当前补丁 SHA256 为 `0ed0295274411b9fe60415e7f48604937d84d3fc894eabd9e143b0560de7488f`。既有 epoch 退役结果不能替代本次新准入的验证。固定来源与获取摘要保存在 `runs/c-host-admission-review/sources/sources.json`。
+可选的 Host 写入准入已经接入原生 BackupKV，正常配置保持关闭。既有受控验证确认了过滤、后续补齐和业务身份处理，也观察到即时回访增加重算；尚无理由将它默认开启。当前源码身份以 `engine_patches/source_manifest.json` 和实际部署清单为准。
 
 ## 复用依据与实际接点
 
@@ -51,25 +51,3 @@ skip = enabled AND pressure AND N > 0 AND B + N > K
 本次反查未发现上述范围的新阻断。CPU 测试覆盖128+64页、完整/部分分配失败、零页重入、新 Req 补齐、首次业务身份、多 epoch/退休、默认旧 hash/wire、write_back/未知身份放行、其他 action 顺序和错误 ACK 恢复。CPU fake tensor 仅验证真实提取方法的控制流，不能证明 DMA、host allocator、IPC 或真实压力行为。
 
 `host_backup_admission` 保存实际 action 新页、Req/业务/epoch、压力分量、允许/跳过原因。metrics 分开报告 planned allowed、skipped 与 native-admitted 页；completed DMA bytes/duration 仍只来自原生 ACK。跳过 action 可能再次出现，累计 skipped tokens 不是唯一槽数或实测节省字节。淘汰窗口目前只观察 FULL backup 分配不足触发的 `evict_host`，不把 profiler 人为 pressure 的回收伪装成分配压力。事件使用服务端 monotonic；GPU kernel时间仅在原生ACK有CUDA事件时可用。
-
-## GPU 第一阶段：off/fixed 通路 fixture
-
-可执行入口 `runs/c-host-admission-review/run_fixture.py` 默认只输出计划；`--execute` 才启动本机独占服务。只占 GPU0/单端口，串行 off→fixed，每臂新进程，复用已有 server 启停与固定源码检查；finally 只停止自己创建的进程组。已有服务需操作者事先停止并在之后恢复，脚本不接管它。它没有成本 artifact、planner、数据集/qrels 或质量判分。
-
-固定模型/源码，GPU16384、page64、chunked-prefill8192、write_through、host size1GB、kernel/layer_first/TMA0。用合法非特殊 token ID 构造相同12288-token输入，输出仅1 token并ignore_eos，顺序如下：
-
-1. 专用 profiling cold reset，重新读取 restart；核实际 GPU/host 池、配置和业务能力。host 需足够容纳完整12288，否则此fixture失败，不改标签。
-2. prepare一个业务 epoch；首次生成期间读取quote/metrics原始快照，保存完整result/receipt；记录目标Req的allow128与skip64事件。off没有准入事件，预期走原生完整备份。
-3. settle后保存真实completed D2H、unique pool、quote；经已有 GPU pressure 回收设备副本，保留会话软引用。再次quote `输入+sentinel`：fixed预期host可恢复8192，off预期12288。
-4. 同epoch另一个Req重新生成原输入，检查receipt恢复/重算，settle和GPU回收后host前缀应补齐12288；这验证共享node未永久禁止备份。
-5. 完整结果后retire，检查ACK、终态以及retire本身不释放unique slots。无新的生成来验证过期guard；已有guard回归独立保留。
-
-阈值触发必须由实际events和prefix验证，不能仅凭配置宣称命中。pending状态短暂，若采样未命中，报告coverage不足；不能把未观测到pending当零延迟或失败。允许→pending→completed路径由CPU顺序合同、原始quote及ACK联合审核；不要求一个action对应一个DMA ACK，原生可能合并。失败保留原始快照/结果并非零退出，不跳过失败臂或重试生成。两臂输出并非质量任务，ignore_eos fixture也不等价真实EOS工作负载。
-
-## 第二阶段计划：conditioned 和容量
-
-固定源码 `hicache_size` 为整数字段、十进制GB。当前模型每token KV为57344 bytes、page64；1GB源码预期17472 host tokens。size=0比例模式在GPU16384、ratio0.5下源码预期8256 host tokens，运行时必须读取pool；追加实测已经分别确认8256与34880，结果见[验证记录](../archive/host_admission_validation.md)。[host pool 分配](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/pool_host/base.py)、[参数](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/arg_groups/fields/memory.py)。
-
-conditioned不在首个driver执行；追加的独立driver已按以下计划完成真实验证。在约8256 host池顺序生成不同业务的8192、8192-token路径，使原生备份分配实际淘汰并留下高占用；在60秒窗口内提交第三业务12288-token请求。必须先核近期eviction>0、占用≥.95、其他业务工作集>host，再检查该Req首128页允许/后64页跳过；如整节点淘汰或调度导致条件未成立，保留未覆盖结果，不人为填计数。再比较同一业务多epoch、退休旧epoch后工作集退出而物理占用不变，以及无压力允许超预算。
-
-小host/启用策略改变cache identity，旧大host成本artifact不适用。首轮只有固定动作机制验收；之后实际完成时长、host恢复、额外重算与完成DMA一起报告，降低D2H不能独立证明改善。完整闭环和质量验证另做，不以实现完成代替效果验证。

@@ -2,7 +2,7 @@
 
 基准为 SGLang `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。`0001-contextkv-protocol.patch` 是基于该提交真实源码生成的可应用补丁，覆盖 15 个源文件。`source_manifest.json` 保存审查文件 SHA256；`contextkv_runtime.py` 是补丁新增模块的同内容镜像，供 CPU 合同测试。准备脚本校验二者一致。
 
-已在 macOS 完成固定源码独立下载、原文件 hash 验证、`git apply --check`、应用和 Python 语法编译。协议与树视图有 CPU 单元测试。`verification_report.json` 只记录源码验证，不汇总 GPU 实测；H200 的 GPU-only/兼容 HiCache 功能冒烟与小规模标定已运行，范围和配置见下文。完整性能、质量结论仍须独立实验报告。
+已在 macOS 完成固定源码独立下载、原文件 hash 验证、`git apply --check`、应用和 Python 语法编译。协议与树视图有 CPU 单元测试。`verification_report.json` 只记录源码验证，不汇总 GPU 实测；当前 H200/Qwen3 联合运行及效果见[数据与评价](../docs/data_and_evaluation.md)。
 
 ## 实现范围
 
@@ -103,12 +103,11 @@ python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml \
 CONTEXTKV_ENABLE_PROFILING=1 CONTEXTKV_SAMPLE_POOL=1 \
   scripts/launch_sglang.sh --host 127.0.0.1 --port 30001
 python -m profiling.sglang_probe --config configs/qwen3_8b_scope.example.yaml --base-url http://127.0.0.1:30001 \
-  --output runs/calibration.jsonl --lengths 1024,4096,8192 \
-  --prefix-fractions 0,0.5,0.99 --outputs 128,512 --concurrency 1,4 \
-  --cache-states cold,gpu_ready,host_only --warmup 1 --repetitions 3
+  --output runs/calibration.jsonl --cases-file runs/selected-cost-cases.json \
+  --warmup 1 --repetitions 3
 ```
 
-配置中的 `model.scope_path` 与服务端 `CONTEXTKV_MODEL_SCOPE_PATH`必须指向同一显式Qwen3身份；客户端本地tokenizer与引擎必须一致。不要通过`--model-path`绕过scope或重用旧模型的成本产物。正式标定前先用 `--lengths 128 --prefix-fractions 0,0.5 --outputs 8 --concurrency 1 --repetitions 1` 冒烟。
+配置中的 `model.scope_path` 与服务端 `CONTEXTKV_MODEL_SCOPE_PATH`必须指向同一显式Qwen3身份；客户端本地tokenizer与引擎必须一致。不要通过`--model-path`绕过scope或重用旧模型的成本产物。已有成本范围直接复用；只有实际缺口才选择必要测点。
 
 `/context/profiling/prepare` 默认禁用，并仅在空闲专用实例接受操作。cold 调用原生 cache flush 并更新 restart identity；gpu_ready 由普通原生生成暖前缀并 settle 写入；host_only 在暖前缀后经原生 write ACK、软引用退役和 eviction 构造。每轮测量前后均在专用实例 settle 写 ACK，前游标排除暖缓存传输，后游标包含本轮生成写回；它不进入 server request 阶段耗时。客户端随后用只读报价核实**实际**前缀和页边界，容量/写策略不满足时停止，不能用标签伪称“冷/暖/host”。GPU-only 服务须省略 host_only。write_through_selective 若未保存 host 前缀也会显式失败，不能误记为 host 测量。
 
@@ -116,25 +115,13 @@ python -m profiling.sglang_probe --config configs/qwen3_8b_scope.example.yaml --
 
 输出包括原始 Measurement JSONL、同目录 `.telemetry.jsonl`（逐请求 receipt/timing 与 pool/DMA 事件）和 `.manifest.json`（指纹、配置、实际 pool、seed、case、完成状态）。专用合成标定请求设置 `ignore_eos=True` 以覆盖指定输出长度；所有记录仍采用实际输出 token 数，业务生成默认行为不变。DMA 缺少原生计时的事件保留在 telemetry，但不写入可标定样本。
 
-## H200 上已验证的 HiCache 兼容配置
+## 运行配置与原生观测
 
-最新只读观测补丁 `3aac1dfd…c1ac4b` 在此基础上增加实际 native ratio/clip、当前 running_batch 的预算成员与原生 offset 复算值，以及最近一次原生 match 的标量结果和服务端 monotonic 纳秒时点。该版本已完成 CPU 原源码/HTTP 合同与干净固定源码应用检查，**本次扩展尚未进行 GPU/IPC 验收**；下面已有实测不能自动算作新 hook 的运行验证。字段、O(active+waiting) 成本、None/过时观测语义和下一轮 probe 合同见[等待模型观测扩展](../docs/research/admission_wait_model.md#已实现的只读观测扩展等待下一轮-gpu-采样)。本次不改变原生调度或控制器预测策略。
+启动脚本默认 `kernel/layer_first/TMA=0`，与当前 H200/Qwen3 真机运行一致。显式环境变量仍可覆盖。早期 `page_first` 的 staged D2H 路径出现过进程 segfault，未隔离为单一上游/驱动原因，因此不再作为本项目默认值；本项目没有修改 CUDA kernel。
 
-只读工作量扩展补丁 `80147e2b…4476a5` 已在同一 H200 完成四方法两重复共 328 轮 16K 闭环及 8 次冻结输入生成，均成功；运行/等待摘要在实际请求进行中核对过。原始补丁 `69bf539f…76912` 的功能与受控生命周期记录继续保留。新阶段的范围、成本与负面结果见[工作量验证](../docs/archive/stage_workload_validation.md)，表格局部实验见[冻结历史验证](../docs/archive/table_relations_validation.md)。源码验证 JSON 仍只描述静态检查，不用于汇总 GPU 效果。
+报价复用实际 native ratio/clip、当前 running_batch 成员和原生 running offset；最近 match 只复制标量结果，不重复匹配。读取成本为 O(active+waiting)，缺失观测保留 None。它们已进入当前 `native_budget` 选择，字段及近似边界见[等待模型](../docs/research/admission_wait_model.md)。
 
-2026-10-23 的远端 H200 环境使用 driver 595.58.03、PyTorch 2.14.1+cu130 和固定 SGLang 源码。GPU-only 协议冒烟与多轮生成闭环已通过。原生 `kernel + page_first` 在 D2H staged 路径出现进程 segfault，栈经过 `transfer_hicache_all_layer_staged_lf_pf → staged_write_back → cudaMemcpyBatchAsync/cuMemcpyBatchAsync_v2`；尚未隔离到驱动、运行时或上游实现的单一原因，不能将其断定为驱动问题。
-
-复用原生配置的兼容路径已经通过 host 协议冒烟及 128-token、8-token 输出、c=1 的 cold/GPU-ready/host-only 小 grid：
-
-```bash
-CONTEXTKV_HICACHE_LAYOUT=layer_first CONTEXTKV_HICACHE_IO_BACKEND=kernel \
-SGLANG_HICACHE_TMA_TRANSFER=0 CONTEXTKV_ENABLE_PROFILING=1 \
-  scripts/launch_sglang.sh --host 127.0.0.1 --port 30001
-```
-
-固定 [MHA host pool](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/pool_host/mha.py) 只为 `page_first` 创建 staged D2H 路径；`layer_first` 绕开该路径。固定 [HiCache kernel dispatcher](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/kernels/ops/kvcache/hicache.py) 支持 `SGLANG_HICACHE_TMA_TRANSFER=0` 选择传统 register kernel。仅关闭 TMA **不会**关闭 page_first 的 staged D2H。这次没有修改任何 CUDA kernel。
-
-启动脚本默认值仍为原生 `kernel/page_first`；用 `CONTEXTKV_HICACHE_IO_BACKEND`、`CONTEXTKV_HICACHE_LAYOUT` 显式选择兼容组合。cache_config_hash 与 metrics.cache_config 保存实际 controller.io_backend、host pool.layout 和原生 TMA 环境开关；TMA 开关不代表每个 transfer 必然选用 TMA kernel。正式标定和全部对照策略须使用同一配置，不能混合不同 layout/backend/TMA 的样本。早期无 warmup 的 30 条小 grid 观测用于功能核验，正式成本标定应使用当前带 warmup 的入口重采样。用 `--runtime-manifest runs/runtime-manifest.json` 将 `profiling.runtime_manifest` 的只读采集结果原样绑定到标定 manifest.runtime_manifest，probe 不另行探测 GPU。
+源码核验以当前 `source_manifest.json` 与补丁为准，真实运行以各批次源码清单为准。旧补丁的阶段纪要不再混排为当前状态。
 
 ## C：受控生命周期归因验收
 
@@ -150,24 +137,17 @@ python -m engine_patches.lifecycle_probe --config configs/qwen3_8b_scope.example
 
 输出保存旧/新/共享路径的前后报价、两层 unique slot、retire ACK、真实原生 eviction 数量和 epoch 状态。只有新分支保留改善、旧分支保留降低、共享前缀存活、retire 本身未改变物理占用等证据一致，才标 `effect_observed`；否则报告 `no_effect_observed`，不预设收益。无法构造 host 副本（例如 selective 未准入）会明确报 fixture 不满足。GPU-only 服务指定 `--tiers gpu`。这是可归因的机制验收，不能外推一般时延、吞吐或回答质量收益。
 
-### H200 受控实测结果
+## 可选 Host 备份准入
 
-2026-10-23，补丁 `69bf539f582ad7065d1b16c6fa6efe348c3e69d9d4aec8a296f3206996b76912` 在上述 `kernel/layer_first/TMA=0` 环境完成实际 GPU 验收。runtime manifest、协议 smoke、带每 case 一次 warmup 的小 grid 均通过；小 grid 产生 30 条正式观测，warmup 不进入训练数据。
+`CONTEXTKV_HOST_ADMISSION=off|fixed|conditioned` 默认off。启用时将业务session映射到epoch，过滤请求触发的合法 BackupKV action；在原生分配、锁和DMA之前按压力与每请求累计新页额度判定。write_back淘汰路径和原生去重/补齐保持。具体机制与EfficientAgent归属见[Host准入说明](../docs/research/host_admission_design.md)。当前共同对照使用off，不能将可选准入的局部结果算作本轮收益。
 
-C 配对 fixture 使用 128-token 共享前缀、每个 epoch 各 128-token 独有后缀；**新 epoch 完成后再次触达旧 epoch**，使旧分支更近使用。这样普通 LRU 倾向保留旧分支，配对差异才能说明 soft reference 优先级与退役的作用，而不是把“旧分支本来更旧”误作机制收益。GPU 和 host 两层都观察到以下相同结果：
+## 可选准入诊断
 
-| 配对条件 | 施压后旧路径可用前缀 | 施压后新路径可用前缀 | 共享前缀 | 原生实际淘汰 |
-|---|---:|---:|---:|---:|
-| keep_old：保留旧引用 | 256 tokens | 128 tokens | 128 tokens | 128 tokens |
-| retire_old：退役旧引用 | 128 tokens | 256 tokens | 128 tokens | 128 tokens |
+同时启用 `CONTEXTKV_ENABLE_PROFILING=1`、`CONTEXTKV_ADMISSION_DIAGNOSTICS=1` 时，terminal事件保存原生 receive/首次forward/first-token/completion及有限预算摘要。真实加入 `can_run_list` 决定接受；`NO_TOKEN`也可能是加入后预算耗尽。正常服务默认关闭，诊断不更改原生调度和receipt。
 
-在两层 trial 中，retire ACK 前后 GPU/host unique pool 的变化均为 **0**；之后实际回收来自明确施加的 native eviction。新路径多保留 128 tokens，旧独有路径让出 128 tokens，共享路径仍然存在，因此该限定 fixture 报告 `effect_observed=true`。
+## 固定复用来源
 
-这验证的是“软引用退役改变原生淘汰选择，并为当前分支保留空间”的受控机制，**不证明一般工作负载上的吞吐、完成时间或质量收益**。本工具只在已验证完整新回答之后模拟业务 commit 边界；持久化、CAS、outbox、异常恢复等生产事务由 controller 的生命周期测试覆盖，该 GPU fixture 不能替代那些测试或故障注入。
-
-## 复用依据与后续验收
-
-本轮优先复用已有原生能力，没有另造 DMA 计时器、allocator 或 kernel：
+本项目复用已有原生能力，没有另造 DMA 计时器、allocator 或 kernel：
 
 | 固定来源 | 复用内容 |
 |---|---|
@@ -178,46 +158,3 @@ C 配对 fixture 使用 128-token 共享前缀、每个 epoch 各 128-token 独�
 | [allocator/base.py](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/allocator/base.py) · [memory_pool_host.py](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/memory_pool_host.py) | 唯一物理 pool capacity/free 计数 |
 
 这些审查源码的固定 hash 均纳入 `source_manifest.json`。prepare 脚本检查新增模块镜像、guard 顺序、native timing/ACK seams 与完整结果先发布后 HTTP 返回的路径。
-
-下一阶段 GPU 验收仍包括：真实进程 IPC/完整依赖导入、空/非空树、跨页部分命中、两会话共享前缀、三种 host 写策略 pending/ACK、split 与加载重叠、退役并发、断连/取消、重启、容量压力和持续运行；之后进行等预算基线/消融、P3 检索、质量评估与按会话聚类统计。纯 CUDA Prefill/Decode 内核分解和全分配器精确瞬时峰值仍不在当前测量合同内，需要时再通过 GPU profiler 扩展，不能从现有数据推断。
-
-
-## 原生请求身份的增量观测
-
-原生请求身份观测补丁 SHA256 为 `e004ca96d62a5786f303c465da140513c7213f13ff023407991ec162ef82d92c`。相对于前一观测版本，这次 runtime 只在 workload summary 中复制已有 `req.rid`；原生预算、匹配、锁和调度代码不变。旧 wire 缺 ID 仍可解码，只有可选 `native_budget` 等待模式要求可关联身份。该模式与真实 GPU 采样顺序见 [admission 模型](../docs/research/admission_wait_model.md#可选-native_budget-模式预留与服务分账)。
-
-e004 增量随后已用于真实 H200 的两组完整普通 EOS 41 轮观测/闭环，以及定向补采后的四组41轮配对对照；RID、实际 ratio/clip、预算公式、最近 match 与 receipt/stage 绑定均有原始记录。见[原生预算82轮验证](../docs/archive/native_budget_validation.md)和[定向标定及164轮对照](../docs/archive/native_budget_targeted_validation.md)。这些验证说明 e004 的实际观测/执行合同，不自动证明等待预测或决策收益。当前 `verification_report.json` 已对应下面新增 C 的0ed补丁；该新补丁仍未进行 GPU 验收。
-
-## 可选 C：业务会话与 epoch 感知的 host 备份准入
-
-当前增量补丁 SHA256 为 `0ed0295274411b9fe60415e7f48604937d84d3fc894eabd9e143b0560de7488f`。这次新增主流程接线与 CPU 合同；随后[首轮GPU机制验收](../docs/archive/host_admission_validation.md)通过off/fixed两臂，真实观察到128页准入/64页跳过及新请求补齐。即时回访增加重算、累计D2H相同；conditioned压力/身份与大池负例随后也通过15次生成，但小池各策略实际D2H相同，完整负载效果仍待验证。前面的e004结果保持其原实验归属。
-
-默认 `CONTEXTKV_HOST_ADMISSION=off`。此时原 `cache_config` 字典/hash、info/prepare 默认 wire 保持不变，旧 stage artifact 不因添加这个可选能力失配。`/context/metrics` 可独立展示策略配置和零/累计计数。显式启用例子：
-
-```bash
-CONTEXTKV_HOST_ADMISSION=conditioned \
-CONTEXTKV_HICACHE_LAYOUT=layer_first SGLANG_HICACHE_TMA_TRANSFER=0 \
-scripts/launch_sglang.sh --max-total-tokens 16384 --port 30000
-```
-
-支持 `off`、`fixed`、`conditioned`。起始配置为 threshold 8192 tokens（实际 page64 时 128 pages）、occupancy 0.95、activity/eviction window 60 s、prompt window 256；可分别通过 `CONTEXTKV_HOST_ADMISSION_THRESHOLD_TOKENS`、`CONTEXTKV_HOST_ADMISSION_OCCUPANCY_THRESHOLD`、`CONTEXTKV_HOST_ADMISSION_WINDOW_SECONDS`、`CONTEXTKV_HOST_ADMISSION_PROMPT_WINDOW` 设置。开启时这些配置和版本才进入 cache identity，故不同策略/容量不能沿用不匹配的标定范围。8192 来源是 EfficientAgent 默认 8×1024 的起始换算，**不是已验证最优值**。本项目将它适配为每个原生 Req 累计成功准入的 FULL 备份页预算（incremental request backup budget），不是上游整请求预先跳过规则；每个 action 的实际新页从已有 backup spec 计量。
-
-服务端只在开启时通告 `business_session_identity_supported`。控制器复用已有业务 session ID，在新 epoch 和准备恢复时透传；prepare 的可选字段和 ACK 保持幂等关联，不能用同一 epoch 重绑另一业务。正常执行与恢复共用 ACK 校验：sid、restart、operation、正 generation 和通告能力下的业务身份必须匹配，才持久化 generation；错 ACK 保留待恢复记录。旧 wire 缺身份、独立原生请求以及专用 profiler 未提供业务身份时仍走原生写入，不猜测业务归属。不要求更换 `contextkv-v1`：默认 wire 未扩字段，开启能力通过可选字段协商。
-
-首次原生 match 为请求记录一次已知 prompt 长度和业务活动；再次匹配/重入队列只更新原匹配观察，不重复计入均值。窗口内活跃任务按业务身份去重，engine epoch 数另报。原退役协议确认后，该 epoch 从未来工作集和相关 prompt 样本移除；RETIRING 且仍有 inflight 时保留，实际 host allocator 占用始终保留到原生释放。引擎 COMMITTED 不是 SQLite 提交事件。
-
-条件策略使用 `(活跃业务数−1)×近期平均prompt_tokens > 实际host容量`，且实际占用达到阈值、同窗口观察到备份空间不足引发的 host 淘汰，才约束该 Req 的累计备份预算；fixed 始终约束预算。在启用约束时，`该 Req 已成功准入页 + 本 action 新页 > 阈值页` 才跳过整 action。page64/chunk8192 下，首批 128 页可写，随后新增 64 页被跳过；没有压力时保留原生写入，即使该 Req 已超过预算。这里的工作集是启发式，不是共享前缀去重后的物理工作集证明。O(active) 标量窗口与现有 allocator 计数在 scheduler 同进程读取，不加内容 hash、背景线程或第二棵缓存树。
-
-真实接点为 `checkpoint_into_tree(req)` 的两次 insert 及 insert barrier 的整条 `BackupKV` action。仅对请求触发的 write_through / write_through_selective 过滤；write_back 淘汰保留原生。FULL backup specs 各构建一次并复用，读取已有 tensor 长度统计实际未备份页，在 host 分配、commit、新锁、pending、DMA 之前决定。跳过整条祖先链，保留其它 free/split action 原顺序；不永久标记共享 node，不取消已启动 DMA。以后允许的请求仍可通过原生构造器补齐祖先，已存在副本仍按原生 spec 去重。只有 host 分配、native commit 和 pending 跟踪成功后，才把实际新页记到 Req；分配失败不扣额度，祖先成功而后代失败只记成功祖先，重排队的零新页 spec 不重复扣。这里的成功准入仍可能等待 DMA，并非已完成备份；不改变原生部分失败时的返回值。
-
-`host_backup_admission` 事件记录允许/跳过原因、实际新页、业务/epoch/native request identity、容量/占用与窗口统计；metrics 累计 `considered_actions`、`allowed_actions`、`skipped_actions`、允许计划/跳过的新 token 数、成功准入的新 token/pages 与 allocation-evicted host tokens；计划允许和成功准入分开。**跳过数是计划省略，不是已经节省的 DMA 字节**；DMA 仍只在原生 ACK 完成后计量。动作可能重复触及同一尚未备份路径，因此也不把这些 token 累计当作唯一物理槽。
-
-本地测试覆盖业务/多 epoch、首次匹配去重、退休仍占槽、失败请求在 terminal 后退出工作集、默认旧 wire/hash、HTTP/控制器接线、整条共享祖先先跳过后补齐、原生去重、其它 action 顺序、write_back 不过滤及分配失败/淘汰计数。测试也覆盖 chunk8192 的累计预算、部分祖先分配成功/后代失败、零新页重入和新请求补齐。固定源码 patch apply/语法检查和这些 CPU 结果不能代替 GPU DMA/锁/恢复验收。下一步先以预声明的小阈值和小 host 固定动作验证通路，再比较起始 128-page 条件/固定规则、原生三写策略与版本消融；等待、重算、host 恢复、完成 DMA 与完整延迟共同判断效果。[设计与容量边界](../docs/research/host_admission_design.md)；[EfficientAgent 许可和适配归属](../docs/third_party/EFFICIENTAGENT_NOTICE.md)。
-
-## 可选原生 admission 诊断
-
-`CONTEXTKV_ENABLE_PROFILING=1` 与 `CONTEXTKV_ADMISSION_DIAGNOSTICS=1` 同时开启后，guarded 请求的 terminal event 保存原生 receive/首次 forward/first-token/completion 时间及实际访问 gate 的有限预算摘要。真实加入 `can_run_list` 决定接受结果；返回 `NO_TOKEN` 也可能表示加入后预算耗尽。默认关闭，旧 cache identity/receipt 不变。详见 [诊断合同与本地验证](../docs/research/native_admission_diagnostic.md)。本次增量尚待受控 GPU 验收，不覆盖此前补丁已完成的硬件证据。
-
-## Qwen3-only入口清理阶段的验证记录
-
-该阶段补丁 SHA256 为 `579324222b2c620aac06de6101f5203991c797c336ce5542306e72aafcd450ea`，上游固定 `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。当时利用已核验的本地上游原件完成全部原SHA检查、正向应用、反向check、15个patch文件语法检查和runtime/scope镜像一致性；没有下载或运行旧模型，没有远端/GPU操作。相关141项engine CPU合同、shell语法与Ruff通过，包括无scope拒绝、错误模型scope拒绝和真实shell参数转发。该记录只表示source-only，`gpu_runtime_tested=false`；本轮scope v2改动的源码与运行验证需单独记录，不能继承此前补丁的验证资格。
