@@ -138,6 +138,12 @@ def _mentioned(term: str, query: str) -> bool:
     return bool(term and re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", query, re.I))
 
 
+def _mentioned_version(version: str, query: str) -> bool:
+    """Match a literal revision, not a prefix such as v1 inside v1.1/v1-rc2."""
+    return bool(version and re.search(
+        r"(?<![\w.+-])" + re.escape(version) + r"(?!\w|[.\-+]\w)", query, re.I))
+
+
 # These are cues in the current question, not dataset annotations or gold labels.
 _REVISIT = re.compile(
     r"\b(previous(?:ly)?|earlier|above|aforementioned|that|those|same)\b|"
@@ -246,7 +252,7 @@ def resolve_required_evidence_with_reasons(query: str, current: Iterable[Evidenc
         # A version plus its named document is an explicit revisit, not a
         # similarity-based restoration of arbitrary historical evidence.
         names = (block.key.document_id, block.title)
-        if _mentioned(block.key.version,folded) and any(
+        if _mentioned_version(block.key.version,folded) and any(
                 _mentioned(name, folded) for name in names if name):
             reasons[block.key] = "explicit_document_version"
     for matches in anchor_matches.values():
@@ -256,7 +262,7 @@ def resolve_required_evidence_with_reasons(query: str, current: Iterable[Evidenc
         named = [block for block in matches if any(_mentioned(name, folded)
                  for name in (block.key.document_id, block.title) if name)]
         scoped = named or matches
-        versions = [block for block in scoped if _mentioned(block.key.version, folded)]
+        versions = [block for block in scoped if _mentioned_version(block.key.version, folded)]
         if versions:
             scoped = versions
         current_scopes = {(block.key.corpus_id, block.key.document_id, block.key.version)

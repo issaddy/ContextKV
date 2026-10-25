@@ -58,7 +58,7 @@ def test_contextual_rewrite_preserves_current_question_and_has_bounded_history_p
     messages, options = client.inputs[0]
     body = json.loads(messages[-1]["content"])
     assert body["current_question"] == query and len(body["prior_user_turns"]) == 2
-    assert body["prior_user_turns"][0]["prior_interpretation"]["query"] == "first accepted interpretation"
+    assert body["prior_user_turns"][0]["prior_interpretation"] == "first accepted interpretation"
     assert "PhantomStore" not in messages[-1]["content"] and "999" not in messages[-1]["content"]
     assert "opaque-id" not in messages[-1]["content"]
     assert options["response_format"]["json_schema"]["schema"]["properties"]["history_turns"]["items"]["enum"] == [1, 2]
@@ -91,20 +91,22 @@ def test_invalid_or_truncated_interpretation_uses_current_query_once(value, fini
     assert len(client.inputs) == 1
 
 
-def test_changed_condition_excludes_old_sources_but_stable_followup_can_append():
+@pytest.mark.parametrize("relation", ("condition_change", "correction", "standalone", "followup"))
+def test_intent_label_does_not_disable_cache_reuse_but_current_source_scope_excludes_old_condition(relation):
     shared = make_evidence("Atlas project common rules.", "base")
     a = make_evidence("Region A condition: students may apply.", "a")
     b = make_evidence("Region B condition: workers may apply.", "b")
     snap = SessionSnapshot("s")
     snap = committed(build_candidates(snap, "Region A conditions?", (shared, a))[0], snap,
                      "Region A conditions?", (shared, a))
-    intent = QueryContext("Atlas project Region B conditions?", "condition_change", (1,))
+    intent = QueryContext("Atlas project Region B conditions?", relation, (1,))
     append, rebuild = build_candidates(snap, "What about B?", (shared, b), query_context=intent)
-    assert append.reason == "intent_changed_with_stale_evidence" and not append.feasible
+    assert append.feasible and append.required_blocks == rebuild.required_blocks
     assert rebuild.required_blocks == {shared.key, b.key}
     assert snap.raw_history[0].assistant_text in [m.content for m in rebuild.messages]
     assert rebuild.messages[-1].content.endswith("\nQuestion:\nWhat about B?\n")
     assert intent.query in rebuild.messages[-1].content
+    assert a.key not in append.required_blocks and a.key in append.visible_blocks
     followup = QueryContext("Atlas project Region A conditions in detail?", "followup", (1,))
     assert build_candidates(snap, "More details?", (shared, a), query_context=followup)[0].feasible
 
@@ -120,6 +122,15 @@ def test_explicit_revision_replaces_retrieval_hit_without_mutating_archive():
     compare = build_candidates(snap, "Compare Atlas v1 and v2", (v2,))[0]
     assert compare.required_blocks == {v1.key, v2.key}
     assert snap.archive == (v1, v2)
+
+
+@pytest.mark.parametrize("revision", ("v1.1", "v1-rc2", "v1+build1"))
+def test_revision_prefix_does_not_select_the_wrong_archived_version(revision):
+    old = make_evidence("Original revision.", "Atlas", version="v1")
+    new = make_evidence("Requested revision.", "Atlas", version=revision)
+    snap = SessionSnapshot("s", archive=(old, new))
+    candidate = build_candidates(snap, f"Use Atlas {revision}.", (old, new))[0]
+    assert candidate.required_blocks == {new.key}
 
 
 def test_selected_revisit_restores_older_source_beyond_recent_history_window():

@@ -116,15 +116,13 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
             reason = "recovery_requires_rebuild"
         elif not allows_version_comparison(evidence_query, policy) and version_conflicts(visible, required_keys):
             reason = "invalid_visible_version"
-        elif (query_context is not None and query_context.relation not in {"followup", "revisit"}
-              and visible - required_keys):
-            # A changed/independent intent must not retain a stale source set.
-            # Stable follow-ups still compete on cost, using the same evidence.
-            reason = "intent_changed_with_stale_evidence"
         elif visible and not required_keys & visible:
             # No current source body would be reused. Carrying the old evidence
             # only adds an ineligible source set; rebuild keeps the actual QA.
             reason = "evidence_working_set_replaced"
+        # An intent label alone does not invalidate cached bodies. Current
+        # citation scope excludes superseded sources, versions are checked
+        # above, and B prices the extra context against rebuilding it.
         missing = tuple(block for block in required if block.key not in visible)
         current, spans = current_user_message(query, missing, references,
             message_index=len(execution.messages), reused=required_keys & visible,
