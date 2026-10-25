@@ -10,6 +10,8 @@
 
 下面旧分数和实验数值继续按原协议报告，不追认为新任务口径下的正确率，也不为口径澄清重新生成答案。后续比较先确定适用任务、内容要求、质量边界和服务预算，再一致应用到各方法。
 
+新报告将没有评分标为 `not_evaluated`，模拟评分标为 `simulation_only`；不再输出对每次运行都恒为 false 的 `performance_claims_validated`。`evaluation_scope` 说明单次观测或运行配置的范围，是否有跨方法收益由匹配的任务对照判断。数值、失败记录及正式配对验收工具的规则保持各自含义。
+
 当前HTTP对外完整返回；`bench.report`优先复用原件中保存的返回方式/SLO，旧原件未声明时默认`response_mode=buffered`：完整响应采用会话等权均值和P95，另列不含用户停顿的会话累计系统等待。内部引擎SSE的TTFT/TPOT不被当成外部HTTP体验。现有流水线时间仍不包含未采集的外部HTTP网络区间。
 
 Goodput改为`latency_slo_goodput_requests_per_second`，排除失败、截断、零输出及终态不明的完成请求。它只证明正常终态和时延达标，语义质量独立报告。缓冲返回没有已声明的完整响应期限时，goodput为`null`而非0；不按观察结果补选期限。旧的`slo_goodput_requests_per_second`留在旧原件中，新报告不再生成这一含糊字段。

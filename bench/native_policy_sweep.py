@@ -118,7 +118,7 @@ def native_manifest(info, runtime, pools, fingerprint, policy, source, expected_
                         "driver_cuda_torch_versions": runtime["driver_cuda_torch_versions"], **pools},
             "source_checkout": source, "example_only": False,
             "cache_state_protocol": "new_stock_server_skip_generation_warmup_empty_initial_KV",
-            "quality_evaluated": False, "performance_claims_validated": False}
+            "quality_evaluated": False, "evaluation_scope": "run_configuration"}
     result["model_scope"] = model_scope.manifest()
     from controller.sampling import request_sampling
     result["sampling_recipe"] = request_sampling(sampling)

@@ -158,7 +158,10 @@ def test_report_primary_quality_keeps_reference_eligibility_separate_from_semant
     summary = summarize_run(data)
     refs = summary["citation_validity"]
     assert refs["unknown_reference_task_ids"] == refs["out_of_scope_task_ids"] == ["s:1"]
-    assert summary["quality"]["status"] == "not_validated"
+    assert summary["quality"]["status"] == "not_evaluated"
+    assert summary["evaluation_scope"] == "single_run_observations"
+    assert "performance_claims_validated" not in summary
+    assert not summary["quality"]["quality_noninferiority_established"]
     text = markdown_report(summary)
     assert "完整响应 P95" in text and "会话等权" in text and "未测量/未配置" in text
     assert "引用可见性违规：1/1" in text and "本轮范围违规：1/1" in text

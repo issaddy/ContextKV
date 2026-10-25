@@ -198,7 +198,7 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=N
     dimensions = sorted({k for r in scored for k in r["scores"]})
     missing_quality = sorted(expected_quality.keys() - {r["task_id"] for r in scored})
     quality_simulated = source == "simulation" or any(r.get("generation_measurement_kind") == "simulation" for r in quality_rows)
-    quality_status = ("not_validated" if quality_simulated or not scored else
+    quality_status = ("not_evaluated" if not scored else "simulation_only" if quality_simulated else
                       "partially_evaluated" if missing_quality else "evaluated")
     pools = {**occupancy_integral(occupancy), "sample_count": len(occupancy),
              "sample_span_seconds": max(r["timestamp"] for r in occupancy) - min(r["timestamp"] for r in occupancy) if occupancy else None}
@@ -210,7 +210,7 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=N
         "semantic_quality_included": False,
         **{f"{tier}_slot_seconds_per_nontruncated_turn": pools[f"{tier}_slot_seconds"] / nontruncated if normalize else None
            for tier in ("gpu", "host")}}
-    return {"metric_schema_version": 2, "measurement_kind": source, "performance_claims_validated": False,
+    return {"metric_schema_version": 2, "measurement_kind": source, "evaluation_scope": "single_run_observations",
             "time_origin": report["time_origin"], "timing": summary,
             "decisions": decision_summary(turns),
             "cohort": {"scheduled_sessions": report["scheduled_sessions"], "arrived_sessions": report["arrived_sessions"],
@@ -239,7 +239,7 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=N
             "telemetry": telemetry_info,
             "quality": {"status": quality_status, "simulation_scores": quality_simulated,
                         "quality_noninferiority_established": False,
-                        "interpretation": "score_summary_only_use_quality_acceptance_for_provenance_and_scope",
+                        "interpretation": "task_scores_under_their_declared_rubric; comparative_claims_need_a_matched_task_protocol",
                         "expected_successful_tasks": len(expected_quality), "missing_scored_task_ids": missing_quality,
                         "scored_tasks": len(scored), "failed_tasks": sum(r.get("status") == "failed" for r in quality_rows),
                         "dimensions": {key: distribution(r["scores"][key] for r in scored if r["scores"].get(key) is not None) for key in dimensions},
@@ -320,7 +320,7 @@ def markdown_report(summary):
             value = quality["dimensions"].get(key)
             if value:
                 lines.append(f"| {label} | {number(value['mean'])} | {value['count']} |")
-        lines += ["", "这些分数不自动构成独立质量合格或非劣结论。"]
+        lines += ["", "分数按任务适用范围与评分口径解释；跨方法结论使用匹配的任务对照。"]
     refs = summary["citation_validity"]
     lines += ["", f"运行状态：{json.dumps(timing['statuses'])}；未完成依赖轮次：{summary['cohort']['unfinished_turns']}；"
         f"截断：{summary['truncated_answers']['count']}/{summary['truncated_answers']['observed_turns']}条有终态观测的回答。",
