@@ -1,5 +1,8 @@
 from dataclasses import asdict, replace
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -138,6 +141,34 @@ def test_conversational_source_guide_preserves_reranker_priority_independently_o
     refs={key:ref for ref,key in plan.reference_map}
     assert guide.index(refs[primary.key]) < guide.index(refs[secondary.key])
     assert plan.evidence_spans[0].key == secondary.key  # Stable body order still caches.
+
+
+def test_waiting_for_one_sessions_intent_does_not_block_another_sessions_retrieval():
+    from adapters.hybrid_retrieval import HybridRetriever
+    from adapters.mtrag import OnlineContext
+    entered, release = Event(), Event()
+    class Resolver:
+        def resolve(self, request, context):
+            if request.query == "slow":
+                entered.set()
+                assert release.wait(5)
+            return {"text":request.query}
+    class Dense:
+        manifest={"corpus_sha256":"same"}
+        def search(self, query, encoder, **kwargs):
+            return (OnlineContext("source",query),)
+    sparse=SimpleNamespace(manifest=Dense.manifest,corpus_snapshot_id="snapshot")
+    retriever=HybridRetriever(sparse,Dense(),object(),stage="dense",query_mode="conversational",resolver=Resolver())
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        slow=pool.submit(retriever.retrieve_turn,turn("slow"),prior_context=PriorContext())
+        try:
+            assert entered.wait(5)
+            fast=pool.submit(retriever.retrieve_turn,turn("fast"),prior_context=PriorContext())
+            assert fast.result(timeout=2).contexts[0].text == "fast"
+        finally:
+            release.set()
+        assert slow.result(timeout=2).contexts[0].text == "slow"
+    assert retriever.requests == 2
 
 
 @pytest.mark.parametrize("relation", ("condition_change", "correction", "standalone", "followup"))

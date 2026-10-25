@@ -354,7 +354,7 @@ class HybridRetriever:
             "encoder": self.encoder.manifest, "reranker": self.reranker.manifest if self.reranker else None,
             "configuration": self.source_config,
             "initialization_seconds": self.initialization_seconds,
-            "execution": "one loaded model pair per run; serialized retrieval, queue time included in P3 pipeline time",
+            "execution": "one loaded model pair per run; serialized encoder/reranker; independent intent HTTP outside that lock; all queue time included in P3 pipeline time",
             "completed_retrievals": self.requests,
             "model_usage": {name: {"texts_processed": model.texts_processed,
                 "token_limit_hits": model.token_limit_hits}
@@ -378,13 +378,15 @@ class HybridRetriever:
             raise ValueError("hybrid retrieval requires a P3 turn")
         started = time.perf_counter()
         view = user_topic_view(turn.user_questions) if self.query_mode == "user_topic" else None
+        if self.resolver is not None:
+            if prior_context is None:
+                raise ValueError("topic selector requires an explicit committed history context")
+            view = self.resolver.resolve(turn, prior_context)
         # run_sessions dispatches retrieval via to_thread. Serialize this model
-        # pair instead of allowing overlapping forwards and unbounded GPU batches.
+        # pair, but do not hold its lock while another service resolves intent.
+        # An unrelated session can retrieve during that HTTP wait. Shutdown
+        # drains complete retrieval workers before closing either client/model.
         with self._lock:
-            if self.resolver is not None:
-                if prior_context is None:
-                    raise ValueError("topic selector requires an explicit committed history context")
-                view = self.resolver.resolve(turn, prior_context)
             fusion_trace = None
             retrieval_error = None
             scoring_query = None

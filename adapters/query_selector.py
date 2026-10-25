@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import math
 import time
+from threading import Lock
 
 import httpx
 
@@ -68,6 +69,7 @@ class OpenAICompletionClient:
             raise ValueError("selector tokenizer must have a chat template")
         self.client = httpx.Client(timeout=config.timeout_seconds, transport=transport)
         self.calls = 0
+        self._input_lock = Lock()
 
     @property
     def manifest(self):
@@ -79,10 +81,14 @@ class OpenAICompletionClient:
 
     def complete(self, messages, *, response_format=None):
         started = time.perf_counter()
-        count = self.count_input_tokens(messages)
-        if count > self.config.max_input_tokens or count + self.config.max_new_tokens > self.config.context_window:
-            return CompletionResult("input_over_budget", input_tokens=count,
-                                    elapsed_ms=(time.perf_counter()-started)*1000)
+        # Tokenizer state/counters are local shared resources; the thread-safe
+        # HTTP client need not serialize independent sessions while awaiting LLMs.
+        with self._input_lock:
+            count = self.count_input_tokens(messages)
+            if count > self.config.max_input_tokens or count + self.config.max_new_tokens > self.config.context_window:
+                return CompletionResult("input_over_budget", input_tokens=count,
+                                        elapsed_ms=(time.perf_counter()-started)*1000)
+            self.calls += 1
         body = {"model": self.config.model, "messages": messages, "temperature": self.config.temperature,
                 "max_tokens": self.config.max_new_tokens, "stream": False,
                 "chat_template_kwargs": dict(self.config.chat_template_kwargs)}
@@ -93,7 +99,6 @@ class OpenAICompletionClient:
         base = self.config.base_url.rstrip("/")
         url = base + ("/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
         response = None
-        self.calls += 1
         try:
             response = self.client.post(url, json=body)
             response.raise_for_status()

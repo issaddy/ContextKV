@@ -117,7 +117,7 @@ class ConversationResolver:
                      response_format=response_format, excluded_unqualified_names=[e["text"] for e in excluded])
         if completion.status != "completed" or completion.finish_reason != "stop":
             trace["status"] = "failed"
-            return finish("incomplete_interpretation_use_current_query")
+            return finish("incomplete_interpretation_uses_existing_history_view")
         try:
             value = json.loads(completion.text)
             if set(value) != {"query", "relation", "history_turns"}:
@@ -141,7 +141,7 @@ class ConversationResolver:
                 trace["declared_relation"] = value["relation"]
         except (ValueError, TypeError, KeyError) as error:
             trace.update(status="failed", error=str(error))
-            return finish("invalid_interpretation_use_current_query")
+            return finish("invalid_interpretation_uses_existing_history_view")
         trace.update(text=resolved.query, status="resolved", context=asdict(resolved))
         if resolved.relation == "ambiguous":
             trace.update(text=retrieval_query(turn.user_questions), context=None)
