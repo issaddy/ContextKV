@@ -9,6 +9,8 @@
 | LightRSI / TokenPilot | [`9f0f193`，MIT](https://github.com/zjunlp/LightRSI/tree/9f0f19308a30445438779efbf3108a7d965a55c7) | 稳定前缀、计划与提交分离、生命周期门控原则；没有移植 TypeScript 运行时或摘要器 |
 | EfficientAgent | [`b21b12a`，Apache-2.0](https://github.com/KunmingSHAO/efficientagent_release/tree/b21b12a07a3ccf473c82acf00820b1aa2073044b) | 工作集压力与 Host 备份准入的可选适配；保留 SGLang 原生 BackupKV，默认关闭 |
 | BGE-M3 / BGE-reranker-v2-m3 | [M3 `5617a9f`](https://huggingface.co/BAAI/bge-m3/tree/5617a9f61b028005a4858fdac845db406aefb181) / [reranker `953dc6f`](https://huggingface.co/BAAI/bge-reranker-v2-m3/tree/953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e) | 固定权重及官方接口；BM25S、RRF 和重排组成可选真实检索链 |
+| CHIQ / HAConvDR | [CHIQ，EMNLP 2024](https://aclanthology.org/2024.emnlp-main.135/) / [HAConvDR，ACL Findings 2024](https://aclanthology.org/2024.findings-acl.792/) | 复用先解歧再改写、减少无关历史的原则；当前为单次条件调用的 Qwen3 意图解析，没有移植其训练或完整多阶段流程 |
+| UvA，SemEval 2026 Task 8 | [作者论文](https://arxiv.org/abs/2606.11945) | 多轮改写→检索→重排→回答的同场景参考；检索排名改善不能替代回答质量验证，不继承其比赛结果 |
 | Qwen3-Reranker-0.6B | [`fd9fb1d`，Apache-2.0](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/tree/fd9fb1d26c07223ced488065909faf522e29cc7d) | 官方模板及末位 yes/no 打分适配；已有同候选池对照，未替代 BGE 默认设置 |
 | MiniCheck | [官方代码 `b58b9fa`，Apache-2.0](https://github.com/Liyan06/MiniCheck/tree/b58b9fa69acbd1015ec970fa65dd752413a053d2) | 可选离线声明/来源支持评分；不作为在线正确性保证 |
 | CRAFT | [本地来源与 MIT 许可](../third_party/CRAFT_NOTICE.md) | 直接复用表格行文本函数，扩展 query 焦点与来源坐标；默认不启用额外表格注释 |
@@ -22,6 +24,8 @@ ContextPilot 的 `reorder`、`deduplicate` 会更新索引、seen_docs 和统计
 匹配前缀中的共有材料提前，剩余材料保持检索顺序，依赖使用稳定顺序。只有仍在当前候选中具有正文 span 的正确版本，才能用复用注释省略正文；“归档过”不等于当前可见。证据先于变化的问题出现，给原生前缀缓存留下实际机会。默认 `stable_key` 与可选 `contextpilot` 共用证据、预算和版本规则。
 
 本项目补充了稳定身份、版本冲突、条件依赖、明确回访、实际历史与执行账本分离，以及每轮相同的可引用范围。旧回答保留为历史，不自动获得当前证据资格。[FullCite](https://arxiv.org/html/2606.07130v1)区分来源归属、支持定位与 claim-citation 忠实性；本项目沿用这一区分，没有声称合法 ID 就能证明语义支持，也没有新增在线修订器。
+
+多轮意图解析将同一独立问题贯穿检索、来源组织和 A/R 规划，并随回答持久提交。历史名称需要原文支持，用户的修正与新条件优先；不把助手旧回答当新事实。意图关系用于解释当前任务，不能单凭一个关系标签宣布原生缓存失效。实现与开销边界见[多轮解析](source_grounded_query_resolution.md)。
 
 表格与 SDK 证据均是普通原文适配：显式行列、参数、初始化和依赖关系进入共同 A/R 输入，不私下为某个基线增加材料。使用见[表格关系](table_relations.md)、[SDK 证据](../guides/api_evidence.md)、[混合检索](../guides/hybrid_retrieval.md)。
 
