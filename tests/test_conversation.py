@@ -7,6 +7,7 @@ from adapters.conversation import ConversationResolver
 from adapters.mtrag import OnlineMessage, OnlineTurn
 from adapters.query_resolution import PriorContext, PriorSource, snapshot_context
 from adapters.query_selector import CompletionResult
+from adapters.retrieval import retrieval_query
 from controller.candidates import build_candidates
 from controller.evidence import make_evidence
 from controller.mock_engine import MockEngine
@@ -92,7 +93,7 @@ def test_invalid_or_truncated_interpretation_uses_current_query_once(value, fini
     original = turn("What about its limits?")
     client = Client(value, finish=finish)
     view = ConversationResolver(client).resolve(original, PriorContext())
-    assert view["status"] == "failed" and view["text"] == original.query and view["context"] is None
+    assert view["status"] == "failed" and view["text"] == retrieval_query(original.user_questions) and view["context"] is None
     assert len(client.inputs) == 1
 
 
@@ -102,6 +103,41 @@ def test_label_mismatch_does_not_discard_a_rewrite_with_valid_antecedents():
     view = ConversationResolver(client).resolve(turn("Use AtlasCloud", ("How do I create tables?",)), PriorContext())
     assert view["text"] == query and view["declared_relation"] == "standalone"
     assert view["context"]["relation"] == "followup"
+
+
+def test_ordinary_questions_reuse_the_existing_query_view_without_extra_generation():
+    client = Client(None)
+    original = turn("how can I improve query", ("Select query fails.", "query definition"))
+    view = ConversationResolver(client).resolve(original, PriorContext())
+    assert view["text"] == retrieval_query(original.user_questions)
+    assert not client.inputs and view["context"] is None
+
+
+def test_recent_interpreted_state_preserves_inherited_conditions_without_all_old_topics():
+    original = turn("And in region B?", ("old unrelated topic", "another topic", "Atlas v2 region A students?",
+                                         "What materials?", "What deadlines?"))
+    client = Client({"query":"Atlas v2 students in region B application deadlines?",
+                     "relation":"condition_change", "history_turns":[5]})
+    state = PriorContext(interpretations=(None, None, None, None,
+                         QueryContext("Atlas v2 region A students application deadlines?", "followup", (3, 4))))
+    view = ConversationResolver(client).resolve(original, state)
+    body=json.loads(client.inputs[0][0][-1]["content"])
+    assert [r["turn"] for r in body["prior_user_turns"]] == [3, 4, 5]
+    assert body["active_user_turn"] == 5
+    assert body["prior_user_turns"][-1]["prior_interpretation"] == state.interpretations[-1].query
+    assert view["context"]["history_turns"] == (5,)
+
+
+def test_conversational_source_guide_preserves_reranker_priority_independently_of_body_layout():
+    primary=make_evidence("PreferredProduct setup steps.", "z")
+    secondary=make_evidence("DifferentProduct setup steps.", "a")
+    plan=build_candidates(SessionSnapshot("s"), "How to set it up?", (primary, secondary),
+        query_context=QueryContext("PreferredProduct setup?", "followup", (1,)))[0]
+    text=plan.messages[-1].content
+    guide=text[text.index("Retrieval priority"):]
+    refs={key:ref for ref,key in plan.reference_map}
+    assert guide.index(refs[primary.key]) < guide.index(refs[secondary.key])
+    assert plan.evidence_spans[0].key == secondary.key  # Stable body order still caches.
 
 
 @pytest.mark.parametrize("relation", ("condition_change", "correction", "standalone", "followup"))

@@ -224,7 +224,8 @@ def render_evidence_relations(blocks: Iterable[EvidenceBlock],
 
 
 def current_source_guide(query: str, blocks: Iterable[EvidenceBlock],
-                         references: tuple[tuple[str, EvidenceKey], ...]) -> str:
+                         references: tuple[tuple[str, EvidenceKey], ...], *,
+                         retrieval_priority: tuple[EvidenceKey, ...] = ()) -> str:
     """Locate current sources near the question without moving cached bodies.
 
     IDF-weighted lexical overlap selects one original line per source. This is
@@ -238,6 +239,9 @@ def current_source_guide(query: str, blocks: Iterable[EvidenceBlock],
             "have", "has", "during", "keep", "about", "you", "your", "its"}
 
     blocks = tuple(sorted(blocks, key=lambda b: b.key))
+    if retrieval_priority:
+        rank = {key: index for index, key in enumerate(retrieval_priority)}
+        blocks = tuple(sorted(blocks, key=lambda b: rank.get(b.key, len(rank))))
     query_terms = terms(query)
     frequency = Counter(term for block in blocks for term in terms(block.text) & query_terms)
     weights = {term: math.log1p(len(blocks)/count) for term, count in frequency.items()}
@@ -254,7 +258,12 @@ def current_source_guide(query: str, blocks: Iterable[EvidenceBlock],
         rows.append(row)
     if not rows:
         return ""
-    return ("Current source guide: IDs and verbatim excerpts for locating evidence. "
+    priority = ""
+    if retrieval_priority:
+        from adapters.contextpilot import retrieval_order_annotation
+        available = {block.key for block in blocks}
+        priority = retrieval_order_annotation(by_key[k] for k in retrieval_priority if k in available) + "\n"
+    return (priority + "Current source guide: IDs and verbatim excerpts for locating evidence. "
             "Read the complete original bodies for conditions; an excerpt is not a complete answer.\n"
             + json.dumps(rows, ensure_ascii=False, separators=(",", ":")))
 
@@ -313,7 +322,9 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
                     + json.dumps(asdict(query_context), ensure_ascii=False, separators=(",", ":"))
                     + "\nThe current question overrides older assumptions. Keep product, population, region and version "
                     "conditions separate; use only applicable evidence. If the intended object remains ambiguous, "
-                    "ask for the missing distinction while answering any supported part.\n")
+                    "ask for the missing distinction while answering any supported part. "
+                    "For procedures, identify the applicable product before listing steps. Never join one product's "
+                    "package/repository with another product's configuration or artifacts.\n")
     content += f"\nQuestion:\n{query}\n"
     return Message("user", content), tuple(spans)
 
