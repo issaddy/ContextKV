@@ -1,5 +1,6 @@
 # Literal task continuation + history retrieval, without auxiliary generation.
-# Reuses one hybrid search/rerank; original questions/history remain intact.
+# One hybrid recall; explicit conditions may rerank the same candidate pool.
+# Original questions/history remain intact.
 # Optional context.layout=contextpilot separates cached body order and relevance.
 # The measured deployment uses generation GPU0 and retrieval GPU1.
 # Keep stable_key for the integrated path; ContextPilot is a separate layout choice.

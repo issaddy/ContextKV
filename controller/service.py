@@ -9,6 +9,7 @@ import time
 import uuid
 import statistics
 from typing import Awaitable, Callable
+from weakref import WeakValueDictionary
 
 from .candidates import CandidatePolicy, build_candidates
 from .cost_model import CostModel
@@ -90,12 +91,18 @@ class Controller:
         self._active_generations = 0
         self._postplan_control_ms = {action: deque(maxlen=32) for action in ("APPEND", "REBUILD")}
         self._calibration_identity = None
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._background: set[asyncio.Task] = set()
         self._retire_requested = False
 
     def _lock(self, session_id: str):
-        return self._locks.setdefault(session_id, asyncio.Lock())
+        # Holders and waiting coroutines keep the lock alive. Idle sessions do
+        # not need an in-memory lock; their state remains in the durable store.
+        lock = self._locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[session_id] = lock
+        return lock
 
     def _retire_background(self):
         self._retire_requested = True

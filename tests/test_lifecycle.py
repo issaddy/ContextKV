@@ -332,6 +332,41 @@ async def test_same_session_serial_across_concurrent_calls(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_session_locks_release_after_churn_and_cancelled_waiter(tmp_path, monkeypatch):
+    controller, store, engine = system(tmp_path)
+    entered, release = asyncio.Event(), asyncio.Event()
+    generate = engine.generate
+
+    async def paused_generate(**kwargs):
+        entered.set()
+        await release.wait()
+        return await generate(**kwargs)
+
+    monkeypatch.setattr(engine, "generate", paused_generate)
+    first = asyncio.create_task(controller.serve_turn("s", "first", request_id="1"))
+    await entered.wait()
+    cancelled = asyncio.create_task(controller.serve_turn("s", "cancelled", request_id="2"))
+    last = asyncio.create_task(controller.serve_turn("s", "last", request_id="3"))
+    await asyncio.sleep(0)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    assert len(controller._locks) == 1
+    release.set()
+    responses = await asyncio.gather(first, last)
+    assert [r.ledger_version for r in responses] == [1, 2]
+    assert [r.user_text for r in store.get_snapshot("s").raw_history] == ["first", "last"]
+    await controller.close_session("s")
+    for i in range(12):
+        session_id = f"completed-{i}"
+        await controller.serve_turn(session_id, "question", request_id="one")
+        await controller.close_session(session_id)
+    await controller.drain()
+    assert not controller._locks and not store.outbox()
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_bad_receipt_is_never_committed(tmp_path, monkeypatch):
     controller, store, engine = system(tmp_path)
     original = engine.generate
