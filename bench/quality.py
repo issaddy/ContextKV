@@ -128,7 +128,7 @@ def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Pat
                       visible_evidence_manifest: Sequence[Any], audit_evidence: Sequence[Any],
                       input_ids: Sequence[int], output_ids: Sequence[int],
                       branch_reason: str | None = None, measurement_kind: str | None = None,
-                      truncated: bool | None = None) -> None:
+                      truncated: bool | None = None, citation_scope: Sequence[str] | None = None) -> None:
     if Path(official_path).resolve() == Path(audit_path).resolve():
         raise ValueError("official and full audit outputs must be physically separate")
     full = {"task_id": turn.task_id, "conversation_id": turn.conversation_id, "turn": turn.turn,
@@ -138,6 +138,8 @@ def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Pat
             "visible_evidence_manifest": _jsonable(visible_evidence_manifest),
             "audit_evidence": _jsonable(audit_evidence), "input_ids": list(input_ids),
             "output_ids": list(output_ids), "actual_history": _jsonable(turn.history)}
+    if citation_scope is not None:
+        full["citation_scope"] = list(citation_scope)
     for path, record in ((official_path, official_record(turn, answer)), (audit_path, full)):
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)

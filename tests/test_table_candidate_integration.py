@@ -108,7 +108,7 @@ def test_focus_uses_current_query_without_removing_unselected_required_rows():
 
 
 @pytest.mark.parametrize("style", ["all_rows", "focus_refs"])
-def test_default_off_is_exact_legacy_message_and_token_output(monkeypatch, style):
+def test_default_off_preserves_shared_message_and_token_output(monkeypatch, style):
     table = make_evidence(TABLE, "table")
     snapshot = SessionSnapshot("s", raw_history=(TurnRecord(1, "Full prior question", "Full prior answer"),))
     def unexpected(_):
@@ -121,10 +121,11 @@ def test_default_off_is_exact_legacy_message_and_token_output(monkeypatch, style
     metadata = json.dumps({"id": ref, "corpus": table.key.corpus_id, "document": table.key.document_id,
         "passage": table.key.passage_id, "version": table.key.version, "source": table.source_uri,
         "title": table.title, "provenance": table.provenance}, ensure_ascii=False, separators=(",", ":"))
-    # Pre-extension user message layout, independent of the current formatter.
+    # Shared QA/citation layout, without any optional table annotations.
     expected = (Message("system", SYSTEM_PROMPT), Message("user", "Full prior question"),
         Message("assistant", "Full prior answer"), Message("user",
-        f"\nEvidence [{ref}] {metadata}\n<evidence_body>\n{TABLE}\n</evidence_body>\n\nQuestion:\nQuestion?\n"))
+        f"\nEvidence [{ref}] {metadata}\n<evidence_body>\n{TABLE}\n</evidence_body>\n"
+        f"\nCitations allowed for this answer: [{ref}].\n\nQuestion:\nQuestion?\n"))
     rendered = ByteTemplate().render(expected)
     assert implicit.messages == explicit.messages == expected
     assert implicit.input_ids == explicit.input_ids == rendered.input_ids

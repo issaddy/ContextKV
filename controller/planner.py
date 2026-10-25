@@ -8,12 +8,14 @@ from .cost_model import CostModel
 from .schema import CacheQuoteBatch, NoFeasiblePlan, Plan, PromptCandidate, SessionSnapshot
 
 
-COST_SELECTION_REASONS = frozenset({"cost_saving", "hysteresis", "native_kv_tie_break", "context_size_tie_break"})
+COST_SELECTION_REASONS = frozenset({"cost_saving", "expected_cost", "hysteresis", "native_kv_tie_break", "context_size_tie_break"})
 
 
 @dataclass(frozen=True)
 class PlannerKnobs:
     strategy: str = "cost"
+    # Retained for cost-gap diagnostics and existing configuration records.
+    # Per-arm timing error is not a switching cost or a paired regret bound.
     delta_abs: float = 0.0
     delta_rel: float = .05
     z: float = 1.0
@@ -65,7 +67,7 @@ def _fixed(append, rebuild, strategy, knobs, session, quotes=None):
 
 
 def _resource_tie_break(append, rebuild, quotes, observed, estimates):
-    """Rank a cost near-tie; do not reserve capacity or credit future retirement.
+    """Break an equal-cost tie; never reserve or credit future retirement.
 
     For a ready GPU prefix D, pinning its evictable part I makes the native
     FULL gate's candidate-dependent input demand n-D+I. The common requested
@@ -147,8 +149,9 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
     a, r = by_estimate[append.candidate_id], by_estimate[rebuild.candidate_id]
     saving = a.cost-r.cost
     margin = max(knobs.delta_abs,knobs.delta_rel*min(a.cost,r.cost),knobs.z*model.paired_error(a,r))
-    if abs(saving) > margin:
-        chosen, reason = (rebuild if saving > 0 else append), "cost_saving"
+    if saving:
+        chosen = rebuild if saving > 0 else append
+        reason = "cost_saving" if abs(saving) > margin else "expected_cost"
     else:
         chosen, reason = _resource_tie_break(append, rebuild, quotes, by_id, by_estimate)
     if chosen is rebuild and session.turns_since_rebuild < knobs.min_stable_turns:

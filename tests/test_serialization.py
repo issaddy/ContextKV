@@ -48,6 +48,14 @@ def test_decode_retains_existing_noncoercing_primitive_semantics(cls):
     assert decode(cls, None) is None
 
 
+@pytest.mark.parametrize("container", [tuple,list,set,frozenset])
+def test_primitive_containers_preserve_noncoercing_semantics(container):
+    values = [1, "not coerced", None, False]
+    annotation = tuple[int,...] if container is tuple else container[int]
+    assert decode(annotation, values) == container(values)
+    assert type(decode(annotation, values)) is container
+
+
 def test_unknown_fields_tuple_arity_and_ambiguous_union_still_fail():
     assert loads(Message, '{"role":"user","content":"first"}') == Message("user", "first")
     with pytest.raises(ValueError, match="Unknown fields for Message"):

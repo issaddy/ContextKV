@@ -110,7 +110,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         current, spans = current_user_message(query, missing, references,
             message_index=len(execution.messages), reused=required_keys & visible,
             layout=policy.layout, retrieval_priority=retrieval_priority, table_annotations=table_annotations,
-            evidence_relations=evidence_relations)
+            evidence_relations=evidence_relations, citation_scope=required_keys)
         prompts.append(("APPEND", execution.messages + (current,), execution.evidence_spans + spans,
                         visible | frozenset(span.key for span in spans), reason))
 
@@ -120,7 +120,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     current, spans = current_user_message(query, required, references,
                                          message_index=len(messages), layout=policy.layout,
                                          retrieval_priority=retrieval_priority, table_annotations=table_annotations,
-                                         evidence_relations=evidence_relations)
+                                         evidence_relations=evidence_relations, citation_scope=required_keys)
     messages.append(current)
     prompts.append(("REBUILD", tuple(messages), spans, frozenset(span.key for span in spans), None))
     conversations = tuple(prompt[1] for prompt in prompts)

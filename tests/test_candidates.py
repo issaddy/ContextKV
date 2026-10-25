@@ -70,6 +70,26 @@ def test_raw_history_is_complete_and_old_evidence_removed_on_rebuild():
     assert "OLD_FULL_EVIDENCE" not in "".join(m.content for m in rebuild.messages)
 
 
+def test_current_citation_scope_excludes_history_only_ids_for_both_actions():
+    old,new = make_evidence("Old evidence body","old"),make_evidence("Current body","new")
+    snapshot = SessionSnapshot("s")
+    first = build_candidates(snapshot,"First question",(old,))[0]
+    old_ref = next(ref for ref,key in first.reference_map if key == old.key)
+    answer = f"Original answer cites [{old_ref}]."
+    snapshot = committed(first,snapshot,"First question",(old,),answer)
+    candidates = build_candidates(snapshot,"New question",(new,))
+    for plan in candidates:
+        new_ref = next(ref for ref,key in plan.reference_map if key == new.key)
+        scope = plan.messages[-1].content.split("Citations allowed for this answer: ")[1].split("\n")[0]
+        assert new_ref in scope and old_ref not in scope
+        assert any(message.content == answer for message in plan.messages)
+    assert old.key in candidates[0].visible_blocks and old.key not in candidates[1].visible_blocks
+    # An explicit revisit restores the body and citation eligibility together.
+    for plan in build_candidates(snapshot,f"Revisit [{old_ref}]",(new,)):
+        assert old.key in plan.required_blocks <= plan.visible_blocks
+        assert old_ref in plan.messages[-1].content.split("Citations allowed for this answer: ")[1]
+
+
 def test_changed_version_or_content_makes_append_invalid():
     a = make_evidence("old config","api")
     new = make_evidence("new config","api",version="v2")

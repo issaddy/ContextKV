@@ -30,19 +30,26 @@ class MeasuredModel(CostModel):
                             error_ms=self.error,calibrated=self.calibrated)
 
 
-def test_cost_near_ties_prefer_compact_context_in_both_directions():
+def test_error_bands_do_not_reverse_expected_cost_ordering():
     a,r = candidate("APPEND",1000),candidate("REBUILD",500)
     snap = SessionSnapshot("s",turns_since_rebuild=2)
     model = MeasuredModel(a=100,r=90,error=6)
     plan = choose_plan((a,r),batch(a,r),model,snap)
-    assert plan.candidate == r and plan.reason == "context_size_tie_break"
+    assert plan.candidate == r and plan.reason == "expected_cost"
     model = MeasuredModel(a=90,r=100,error=6)
-    assert choose_plan((a,r),batch(a,r),model,snap).candidate == r
+    assert choose_plan((a,r),batch(a,r),model,snap).candidate == a
     model = MeasuredModel(a=100,r=50)
     assert choose_plan((a,r),batch(a,r),model,snap).candidate == r
-    # All existing margins identify a near-tie, not an APPEND entitlement.
-    assert choose_plan((a,r),batch(a,r),model,snap,PlannerKnobs(delta_abs=51)).reason == "context_size_tie_break"
-    assert choose_plan((a,r),batch(a,r),model,snap,PlannerKnobs(delta_rel=1.1)).reason == "context_size_tie_break"
+    # Existing margins describe the gap; they grant neither action priority.
+    assert choose_plan((a,r),batch(a,r),model,snap,PlannerKnobs(delta_abs=51)).reason == "expected_cost"
+    assert choose_plan((a,r),batch(a,r),model,snap,PlannerKnobs(delta_rel=1.1)).reason == "expected_cost"
+
+
+def test_warm_reuse_savings_are_not_discarded_for_a_small_input_reduction():
+    a,r = candidate("APPEND",4100),candidate("REBUILD",4000)
+    model = MeasuredModel(a=500,r=560,error=200)
+    plan = choose_plan((a,r),batch(a,r),model,SessionSnapshot("s"))
+    assert plan.candidate == a and plan.reason == "expected_cost"
 
 
 @pytest.mark.parametrize("lengths", [(1000,500),(500,1000)])
@@ -57,10 +64,10 @@ def test_clear_full_cost_savings_take_precedence_over_context_size(lengths,costs
         assert plan.switch_margin_ms == 2.5
 
 
-def test_shorter_append_is_not_replaced_in_a_cost_near_tie():
+def test_equal_cost_prefers_shorter_append():
     a,r = candidate("APPEND",500),candidate("REBUILD",1000)
     snap = SessionSnapshot("s")
-    assert choose_plan((a,r),batch(a,r),MeasuredModel(a=100,r=99,error=5),snap).candidate == a
+    assert choose_plan((a,r),batch(a,r),MeasuredModel(a=100,r=100,error=5),snap).candidate == a
 
 
 def test_native_tie_rank_credits_shared_hard_locks_not_merely_cached_prefixes():
@@ -69,7 +76,7 @@ def test_native_tie_rank_credits_shared_hard_locks_not_merely_cached_prefixes():
     quotes = replace(quoted,native_waiting_requests=(),quotes=(
         replace(quoted.quotes[0],ready_gpu_prefix_tokens=6000,evictable_gpu_prefix_tokens=0),
         replace(quoted.quotes[1],evictable_gpu_prefix_tokens=0)))
-    model,snap = MeasuredModel(a=100,r=99,error=5),SessionSnapshot("s")
+    model,snap = MeasuredModel(a=100,r=100,error=5),SessionSnapshot("s")
     shared = choose_plan((a,r),quotes,model,snap)
     assert shared.candidate == a and shared.reason == "native_kv_tie_break"
     # The same ready prefix, held only by a session soft reference, must be
@@ -89,7 +96,7 @@ def test_tie_rank_agrees_with_native_full_budget_for_shared_and_unshared_prefix(
         quotes = replace(original,native_waiting_requests=(),quotes=(
             replace(original.quotes[0],ready_gpu_prefix_tokens=6000,evictable_gpu_prefix_tokens=pinned),
             replace(original.quotes[1],evictable_gpu_prefix_tokens=0)))
-        plan = choose_plan((a,r),quotes,MeasuredModel(a=100,r=99,error=5),SessionSnapshot("s"))
+        plan = choose_plan((a,r),quotes,MeasuredModel(a=100,r=100,error=5),SessionSnapshot("s"))
         assert plan.candidate == expected
         accepted = {}
         for arm,quote in zip((a,r),quotes.quotes):
@@ -124,7 +131,7 @@ def test_tie_rank_uses_common_logical_basis_when_current_pin_cannot_be_used(chan
     else:
         from controller.schema import NativeRequestSummary
         quotes = replace(quotes,native_waiting_requests=(NativeRequestSummary(100,0,50,0,0,0),))
-    plan = choose_plan((a,r),quotes,MeasuredModel(a=100,r=99,error=5),SessionSnapshot("s"))
+    plan = choose_plan((a,r),quotes,MeasuredModel(a=100,r=100,error=5),SessionSnapshot("s"))
     assert plan.candidate == r and plan.reason == "context_size_tie_break"
 
 
@@ -155,7 +162,7 @@ def test_supported_net_savings_can_avoid_waiting_immediately_after_rebuild(since
     assert plan.reason == "cost_saving" and plan.candidate == r
     assert plan.predicted_saving_ms > plan.switch_margin_ms
     uncertain = choose_plan((a,r),batch(a,r),MeasuredModel(a=7539,r=7400,error=251),snap)
-    assert uncertain.reason == "context_size_tie_break" and uncertain.candidate == r
+    assert uncertain.reason == "expected_cost" and uncertain.candidate == r
 
 
 def test_uncalibrated_and_quote_failure_use_common_fixed_threshold():

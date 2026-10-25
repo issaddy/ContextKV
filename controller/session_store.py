@@ -111,6 +111,10 @@ class SessionStore:
         return loads(SessionSnapshot, row[0])
 
     def read_snapshot(self, session_id: str, corpus_snapshot_id: str = "demo-v1") -> SessionSnapshot:
+        with self._mutex:
+            row = self.db.execute("SELECT snapshot FROM sessions WHERE session_id=?", (session_id,)).fetchone()
+            if row is not None:
+                return loads(SessionSnapshot, row[0])
         with self._transaction():
             self.db.execute("INSERT OR IGNORE INTO sessions(session_id,version,snapshot) VALUES(?,?,?)",
                             (session_id, 0, dumps(SessionSnapshot(session_id, corpus_snapshot_id=corpus_snapshot_id))))
@@ -156,10 +160,12 @@ class SessionStore:
                 if previous.stage not in ("COMMITTED", "FAILED"):
                     raise PendingAttempt("This request already has an executing or unresolved owner")
                 return previous
-            snap = self._read(session_id)
-            if snap.version != expected_version:
+            row = self.db.execute("SELECT version,closed FROM sessions WHERE session_id=?", (session_id,)).fetchone()
+            if row is None:
+                raise KeyError(session_id)
+            if row["version"] != expected_version:
                 raise VersionConflict("Snapshot changed before begin_attempt")
-            if self.db.execute("SELECT closed FROM sessions WHERE session_id=?", (session_id,)).fetchone()[0]:
+            if row["closed"]:
                 raise StoreError("Session is closed")
             if self.pending_attempt(session_id):
                 raise PendingAttempt("Session has an unresolved attempt; recover it before another turn")
@@ -170,27 +176,67 @@ class SessionStore:
     def save_attempt(self, attempt: Attempt) -> Attempt:
         with self._transaction():
             old = self.get_attempt(attempt.attempt_id)
-            if old.stage in ("COMMITTED", "FAILED"):
-                raise StoreError("Terminal attempt is immutable")
-            if (old.session_id, old.request_id, old.request_hash, old.expected_version) != (attempt.session_id, attempt.request_id, attempt.request_hash, attempt.expected_version):
-                raise StoreError("Attempt identity is immutable")
-            allowed = {"STARTED": {"PLANNED"}, "PLANNED": {"PREPARED"},
-                       "PREPARING": {"PREPARING", "PREPARED"}, "PREPARED": {"SUBMITTED"},
-                       "SUBMITTED": {"RESULT_READY"}, "RESULT_READY": set()}
-            if attempt.stage not in allowed.get(old.stage, set()):
-                if attempt == old:
-                    return old
-                raise StoreError(f"Invalid or stale attempt transition {old.stage} -> {attempt.stage}")
-            if old.plan is not None and (attempt.plan != old.plan or attempt.evidence != old.evidence):
-                raise StoreError("A selected plan and its evidence are immutable")
-            if old.result is not None and attempt.result != old.result:
-                raise StoreError("A durable result is immutable")
-            if old.epoch is not None and attempt.epoch != old.epoch:
-                expected = replace(old.epoch, session_generation=attempt.epoch.session_generation) if attempt.epoch else None
-                if old.epoch.session_generation != 0 or expected != attempt.epoch:
-                    raise StoreError("Prepared epoch identity is immutable")
+            if not self._check_update(old, attempt):
+                return old
             self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (attempt.stage, dumps(attempt), attempt.attempt_id))
             return attempt
+
+    @staticmethod
+    def _check_update(old: Attempt, attempt: Attempt) -> bool:
+        if old.stage in ("COMMITTED", "FAILED"):
+            raise StoreError("Terminal attempt is immutable")
+        if (old.session_id, old.request_id, old.request_hash, old.expected_version) != (attempt.session_id, attempt.request_id, attempt.request_hash, attempt.expected_version):
+            raise StoreError("Attempt identity is immutable")
+        allowed = {"STARTED": {"PLANNED"}, "PLANNED": {"PREPARED"},
+                   "PREPARING": {"PREPARING", "PREPARED"}, "PREPARED": {"SUBMITTED"},
+                   "SUBMITTED": {"RESULT_READY"}, "RESULT_READY": set()}
+        if attempt.stage not in allowed.get(old.stage, set()):
+            if attempt == old:
+                return False
+            raise StoreError(f"Invalid or stale attempt transition {old.stage} -> {attempt.stage}")
+        if old.plan is not None and (attempt.plan != old.plan or attempt.evidence != old.evidence):
+            raise StoreError("A selected plan and its evidence are immutable")
+        if old.result is not None and attempt.result != old.result:
+            raise StoreError("A durable result is immutable")
+        if old.epoch is not None and attempt.epoch != old.epoch:
+            expected = replace(old.epoch, session_generation=attempt.epoch.session_generation) if attempt.epoch else None
+            if old.epoch.session_generation != 0 or expected != attempt.epoch:
+                raise StoreError("Prepared epoch identity is immutable")
+        return True
+
+    def _allocate_epoch(self, current: Attempt, restart_id: str, reason: str) -> Attempt:
+        snap = self._read(current.session_id)
+        self.db.execute("UPDATE sessions SET epoch_counter=epoch_counter+1 WHERE session_id=?", (current.session_id,))
+        number = self.db.execute("SELECT epoch_counter FROM sessions WHERE session_id=?", (current.session_id,)).fetchone()[0]
+        epoch = ContextEpoch(current.session_id, number, f"ctx-{uuid.uuid4().hex}", 0,
+                             snap.current_epoch.epoch_no if snap.current_epoch else None,
+                             reason=reason, engine_restart_id=restart_id)
+        updated = replace(current, stage="PREPARING", epoch=epoch, new_epoch=True)
+        self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (updated.stage, dumps(updated), updated.attempt_id))
+        return updated
+
+    def plan_new_epoch(self, attempt: Attempt, restart_id: str, reason: str) -> Attempt:
+        """Persist the chosen plan and epoch identity together, before prepare RPC."""
+        with self._transaction():
+            old = self.get_attempt(attempt.attempt_id)
+            if old.stage != "STARTED" or attempt.stage != "PLANNED":
+                raise StoreError("Only an unplanned attempt can prepare a new epoch")
+            self._check_update(old, attempt)
+            return self._allocate_epoch(attempt, restart_id, reason)
+
+    def submit_attempt(self, attempt: Attempt, epoch: ContextEpoch) -> Attempt:
+        """Persist the prepare ACK and submission barrier in one transaction.
+
+        No external action occurs between PREPARED and SUBMITTED. Historical
+        PREPARED records remain readable/recoverable through save_attempt.
+        """
+        with self._transaction():
+            prepared = replace(attempt, stage="PREPARED", epoch=epoch)
+            self._check_update(self.get_attempt(attempt.attempt_id), prepared)
+            submitted = replace(prepared, stage="SUBMITTED")
+            self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?",
+                            (submitted.stage, dumps(submitted), submitted.attempt_id))
+            return submitted
 
     def allocate_epoch(self, attempt: Attempt, restart_id: str, reason: str) -> Attempt:
         with self._transaction():
@@ -199,15 +245,7 @@ class SessionStore:
                 return current
             if current.stage != "PLANNED":
                 raise StoreError("Only a selected plan may prepare an epoch")
-            snap = self._read(current.session_id)
-            self.db.execute("UPDATE sessions SET epoch_counter=epoch_counter+1 WHERE session_id=?", (current.session_id,))
-            number = self.db.execute("SELECT epoch_counter FROM sessions WHERE session_id=?", (current.session_id,)).fetchone()[0]
-            epoch = ContextEpoch(current.session_id, number, f"ctx-{uuid.uuid4().hex}", 0,
-                                 snap.current_epoch.epoch_no if snap.current_epoch else None,
-                                 reason=reason, engine_restart_id=restart_id)
-            updated = replace(current, stage="PREPARING", epoch=epoch, new_epoch=True)
-            self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (updated.stage, dumps(updated), updated.attempt_id))
-            return updated
+            return self._allocate_epoch(current, restart_id, reason)
 
     def _archive_evidence(self, evidence: tuple[EvidenceBlock, ...]):
         """Persist evidence already validated when it entered candidate construction."""
@@ -240,10 +278,14 @@ class SessionStore:
             raise StoreError("Only a complete durable result can be committed")
         self._archive_evidence(attempt.evidence)
         with self._transaction():
-            attempt = self.get_attempt(attempt_id)
-            if attempt.stage == "COMMITTED":
+            # A RESULT_READY plan/result is immutable. Recheck the durable
+            # stage under the write transaction, without decoding it twice.
+            row = self.db.execute("SELECT stage FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+            if row is None:
+                raise KeyError(attempt_id)
+            if row["stage"] == "COMMITTED":
                 return self._read(attempt.session_id)
-            if attempt.stage != "RESULT_READY" or attempt.plan is None or attempt.result is None or attempt.epoch is None:
+            if row["stage"] != "RESULT_READY":
                 raise StoreError("Attempt changed before the commit transaction")
             snap = self._read(attempt.session_id)
             if snap.version != attempt.expected_version:

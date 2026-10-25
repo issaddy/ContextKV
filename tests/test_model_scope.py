@@ -35,8 +35,8 @@ def local_scope(tmp_path):
     record.update(model_path=str(directory), shards=1, shard_bytes=4, index_tensor_bytes=4,
                   source={"kind": "cpu_contract_fixture"})
     tokenizer = SimpleNamespace(chat_template="CPU template", split_special_tokens=False,
-                                backend_tokenizer=SimpleNamespace(to_str=lambda: "CPU tokenizer"))
-    record["tokenizer_hash"] = hashlib.sha256(b"CPU tokenizer").hexdigest()
+                                backend_tokenizer=SimpleNamespace(to_str=lambda: '{"fixture":"CPU tokenizer"}'))
+    record["tokenizer_hash"] = hashlib.sha256(b'{"fixture":"CPU tokenizer"}').hexdigest()
     record["template_hash"] = hashlib.sha256(json.dumps({"template": tokenizer.chat_template,
                                                         "enable_thinking": False}, sort_keys=True).encode()).hexdigest()
     (directory/"config.json").write_text(json.dumps(record["config"]))
@@ -236,7 +236,7 @@ def test_scope_conflicting_config_is_not_silently_overridden(local_scope, extra)
 def test_real_hf_template_adapter_checks_scope_without_a_second_tokenizer_serialization(local_scope, monkeypatch):
     from transformers import AutoTokenizer
     calls, serializations = [], []
-    local_scope.tokenizer.backend_tokenizer.to_str = lambda: (serializations.append(1) or "CPU tokenizer")
+    local_scope.tokenizer.backend_tokenizer.to_str = lambda: (serializations.append(1) or '{"fixture":"CPU tokenizer"}')
     monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda path, **kwargs:
                         (calls.append((path, kwargs)) or local_scope.tokenizer))
     model = ModelConfig(scope_path=str(local_scope.path))

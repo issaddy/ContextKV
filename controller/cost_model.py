@@ -170,13 +170,16 @@ class CostModel:
         self._decode_by_concurrency: dict[int, list[DecodePoint]] = {}
         for point in self._decode_valid_points:
             self._decode_by_concurrency.setdefault(point.concurrency, []).append(point)
-        self._decode_static = None
-        if self._decode_valid_points and all(p.context_start is None for p in self._decode_valid_points):
+        self._decode_static = self._decode_midpoints = None
+        self._decode_intervals = tuple(p for p in self._decode_valid_points if p.context_start is not None)
+        if self._decode_valid_points:
             cells = {(p.context_tokens, p.concurrency): (p.tpot_ms, p.error_ms) for p in self._decode_valid_points}
             samples = tuple((key, *value) for key, value in cells.items())
             axes = [sorted({coordinate[i] for coordinate in cells}) for i in range(2)]
             scales = [max(1, values[-1] - values[0]) for values in axes]
-            self._decode_static = (samples, (cells, axes, scales))
+            self._decode_midpoints = (samples, (cells, axes, scales))
+            if not self._decode_intervals:
+                self._decode_static = self._decode_midpoints
         # Fixed calibration makes (context length, concurrency) a pure lookup.
         # Mean/P90 workload scenarios and the two candidates repeatedly traverse
         # the same decode intervals. Cache derived values, not request contents.
@@ -374,6 +377,11 @@ class CostModel:
                     exact, distance = point, current_distance
         if exact is not None:
             return exact.tpot_ms, exact.error_ms, True
+        if not any(point.context_start <= context <= point.context_end for point in self._decode_intervals):
+            # Between measured intervals every coordinate is its fixed midpoint.
+            # Reuse that geometry instead of sorting/rebuilding it per token.
+            samples, prepared = self._decode_midpoints
+            return self._interpolate((context, concurrency), samples, prepared=prepared, max_distance=max_distance)
         # An observed mean TPOT covers the measured decode interval, not just
         # its midpoint. Preserve that support without extrapolating past it.
         cells = {}

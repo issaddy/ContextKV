@@ -49,6 +49,7 @@ def qwen(qwen3_tokenizer_template):
     return qwen3_tokenizer_template
 
 def test_special_boundary_batches_match_whole_native_encoding_for_unicode_and_literals(qwen):
+    assert qwen._batch_boundary == "<|im_start|>"
     pieces = ("e\u0301", "é", "中文", "👩🏽‍💻", "\r\n", "\t  ", "\u200d", "\u00a0",
               "<|im_start|>", "<|im_end|>", "<|endoftext|>", "<tool_call>", "</tool_call>",
               "<|im_sta", "rt|>", "<|fim_prefix|>", "'re", "12345", "\n\n", "<>|/", "a")
@@ -89,7 +90,8 @@ def test_whole_prompt_batch_and_render_override_keep_scalar_semantics(qwen):
     assert custom.render_many(conversations) == tuple(custom.render(messages) for messages in conversations)
 
 
-def test_changed_added_tokens_keep_whole_prompt_semantics(qwen, monkeypatch):
+@pytest.mark.parametrize("added", ["X<|im_start|>Y", "X<|im_"])
+def test_changed_added_tokens_keep_whole_prompt_semantics(qwen, monkeypatch, added):
     from tokenizers import AddedToken
     from transformers import AutoTokenizer
 
@@ -97,12 +99,14 @@ def test_changed_added_tokens_keep_whole_prompt_semantics(qwen, monkeypatch):
     conversations = ((Message("user", "X<|im_start|>Y"),),)
     qwen.tokenizer.split_special_tokens = True
     split = HuggingFaceTemplate("local", "fixed-revision", local_files_only=True)
+    assert split._batch_boundary is None
     assert split.fingerprint.tokenizer_hash == qwen.fingerprint.tokenizer_hash
     assert split.render_many(conversations) == tuple(split.render(m) for m in conversations)
 
     # Literal special-token text can belong to a longer AddedToken. Whole-prompt
     # batching must preserve the same extraction as scalar encoding.
     qwen.tokenizer.split_special_tokens = False
-    qwen.tokenizer.backend_tokenizer.add_tokens([AddedToken("X<|im_start|>Y", normalized=False)])
+    qwen.tokenizer.backend_tokenizer.add_tokens([AddedToken(added, normalized=False)])
     changed = HuggingFaceTemplate("local", "fixed-revision", local_files_only=True)
+    assert changed._batch_boundary is None
     assert changed.render_many(conversations) == tuple(changed.render(m) for m in conversations)

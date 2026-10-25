@@ -47,6 +47,10 @@ def decode(cls: Any, value: Any) -> Any:
                 raise ValueError("Invalid tuple length")
             return tuple(decode(t, v) for t, v in zip(args, value))
         element = args[0] if args else Any
+        # Primitive decoding is intentionally non-coercing. Reconstruct the
+        # container directly instead of dispatching once per stored token ID.
+        if element is Any or element in (str, int, float, bool):
+            return origin(value)
         return origin(decode(element, v) for v in value)
     if dataclasses.is_dataclass(cls):
         hints = _schema_hints(cls)

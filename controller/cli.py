@@ -145,7 +145,7 @@ async def benchmark(args, config):
                           input_ids=snapshot.execution.last_input_ids, output_ids=snapshot.execution.last_output_ids,
                           branch_reason=result.branch_reason,
                           measurement_kind="simulation" if config.engine.kind == "mock" else "hardware",
-                          truncated=result.truncated)
+                          truncated=result.truncated, citation_scope=result.citation_scope)
         except Exception as exc:
             # Serving and the runner have committed this answer. Preserve the
             # actual next-turn history; fail artifact delivery after saving the

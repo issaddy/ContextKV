@@ -30,7 +30,9 @@ answers are comparison material, not evidence of what the model could see. Score
 of correctness, groundedness, answerability, conditions_versions and citations from
 0 to 1, or null when genuinely unassessable. Check whether the answer respects version,
 scope, prerequisites and exceptions, and whether cited reference IDs exist and support
-the claims. Judge necessary abstention positively; do not equate verbosity with quality.
+the claims. When citation_scope is supplied, citations must also belong to that list;
+IDs mentioned only in earlier answers do not prove their source body is available.
+Judge necessary abstention positively; do not equate verbosity with quality.
 Also identify script_history_mismatch when the current scripted question presupposes
 something contradicted by this method's actual prior answers. Return only one JSON
 object with keys scores (the five dimensions), script_history_mismatch (boolean),
@@ -48,6 +50,7 @@ class JudgeConfig:
     api_key_env: str = "CONTEXTKV_JUDGE_API_KEY"
     max_tokens: int = 1536
     timeout_seconds: float = 120.0
+    enable_thinking: bool | None = None
 
     def __post_init__(self):
         if not all((self.provider, self.model, self.revision, self.base_url, self.prompt)):
@@ -72,6 +75,10 @@ def rule_audit(record: Mapping) -> dict:
         flags.append("empty_answer")
     if citations - available:
         flags.append("unknown_citations")
+    permitted = record.get("citation_scope")
+    out_of_scope = (citations & available) - set(permitted) if permitted is not None else set()
+    if out_of_scope:
+        flags.append("out_of_scope_citations")
     if record.get("truncated"):
         flags.append("truncated_answer")
     visible_keys = {json.dumps(s["key"], sort_keys=True) for s in record["visible_evidence_manifest"]}
@@ -81,13 +88,16 @@ def rule_audit(record: Mapping) -> dict:
     return {"task_id": record["task_id"], "flags": flags, "citation_count": len(citations),
             "citation_parser_version": CITATION_PARSER_VERSION,
             "strict_format_citation_count": len(strict_citations),
-            "unknown_citations": sorted(citations - available), "semantic_quality_score": None}
+            "unknown_citations": sorted(citations - available),
+            "out_of_scope_citations": sorted(out_of_scope), "semantic_quality_score": None}
 
 
 def judge_payload(record: Mapping, reference: Mapping | None = None) -> dict:
     # Explicit offline payload: full evidence is retained, with no top-k truncation.
     payload = {k: record[k] for k in ("task_id", "query", "answer", "actual_history",
                "retrieved_evidence", "visible_evidence_manifest", "audit_evidence")}
+    if "citation_scope" in record:
+        payload["citation_scope"] = record["citation_scope"]
     if reference is not None:
         payload["reference_targets"] = reference.get("targets", [])
     return payload
@@ -114,10 +124,15 @@ class OfflineJudge:
                    "max_tokens": self.config.max_tokens, "response_format": {"type": "json_object"},
                    "messages": [{"role": "system", "content": self.config.prompt},
                                 {"role": "user", "content": json.dumps(judge_payload(record, reference), ensure_ascii=False)}]}
+        if self.config.enable_thinking is not None:
+            payload["chat_template_kwargs"] = {"enable_thinking": self.config.enable_thinking}
         response = await self.client.post("chat/completions", json=payload)
         response.raise_for_status()
         raw = response.json()
-        result = json.loads(raw["choices"][0]["message"]["content"])
+        choice = raw["choices"][0]
+        if choice.get("finish_reason") != "stop":
+            raise ValueError(f"judge did not finish normally: {choice.get('finish_reason')}")
+        result = json.loads(choice["message"]["content"])
         scores = result["scores"]
         if set(scores) != set(DIMENSIONS) or any(v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 1) for v in scores.values()):
             raise ValueError("judge must return every score dimension as null or a number in [0,1]")

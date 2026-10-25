@@ -55,16 +55,17 @@ def test_actual_official_argument_names_and_no_secret_arguments():
         evaluator_command("/tmp/upstream", "generation", "a", "b", provider="openai", model="name")
 
 
-def test_judge_http_retains_all_visible_bodies_and_freezes_config():
+@pytest.mark.parametrize("thinking", [None,False])
+def test_judge_http_retains_all_visible_bodies_and_freezes_config(thinking):
     requests = []
     def respond(request):
         payload = json.loads(request.content)
         requests.append(payload)
         value = {"scores": {k: .8 for k in DIMENSIONS}, "script_history_mismatch": False,
                  "reason": "fake transport test only", "unsupported_claims": []}
-        return httpx.Response(200, json={"id": "fake", "model": "frozen", "choices": [{"message": {"content": json.dumps(value)}}]})
+        return httpx.Response(200, json={"id": "fake", "model": "frozen", "choices": [{"finish_reason":"stop","message": {"content": json.dumps(value)}}]})
     async def check():
-        judge = OfflineJudge(JudgeConfig("local", "frozen", "revision-1", "http://localhost/v1"),
+        judge = OfflineJudge(JudgeConfig("local", "frozen", "revision-1", "http://localhost/v1",enable_thinking=thinking),
                              transport=httpx.MockTransport(respond))
         try:
             record = audit_record() | {"input_ids": [11, 22, 33]}
@@ -79,6 +80,24 @@ def test_judge_http_retains_all_visible_bodies_and_freezes_config():
     evidence = json.loads(requests[0]["messages"][1]["content"])["audit_evidence"]
     assert len(evidence) == 12 and evidence[-1]["text"] == "Full original evidence 11"
     assert requests[0]["temperature"] == 0
+    if thinking is None:
+        assert "chat_template_kwargs" not in requests[0]
+    else:
+        assert requests[0]["chat_template_kwargs"] == {"enable_thinking":False}
+
+
+def test_truncated_judge_json_is_not_accepted_as_a_completed_grade():
+    value = {"scores":{k:.8 for k in DIMENSIONS},"reason":"syntactically valid but budget-limited"}
+    response = httpx.Response(200,json={"choices":[{"finish_reason":"length","message":{"content":json.dumps(value)}}]})
+    async def check():
+        judge = OfflineJudge(JudgeConfig("local","frozen","revision-1","http://localhost/v1"),
+                             transport=httpx.MockTransport(lambda request:response))
+        try:
+            with pytest.raises(ValueError,match="did not finish normally"):
+                await judge.evaluate(audit_record())
+        finally:
+            await judge.aclose()
+    asyncio.run(check())
 
 
 def test_rule_audit_flags_invalid_citation_without_inventing_quality():
@@ -96,9 +115,11 @@ def test_export_has_current_question_and_more_than_ten_visible_bodies(tmp_path):
     turn = online_turn(load_rows(FIXTURE)[0])
     export_evaluation(turn, "answer", official_path=tmp_path / "official.jsonl", audit_path=tmp_path / "audit.jsonl",
                       visible_evidence_manifest=record["visible_evidence_manifest"],
-                      audit_evidence=record["audit_evidence"], input_ids=[1], output_ids=[2], measurement_kind="simulation")
+                      audit_evidence=record["audit_evidence"], input_ids=[1], output_ids=[2], measurement_kind="simulation",
+                      citation_scope=("E_a",))
     audit = json.loads((tmp_path / "audit.jsonl").read_text())
     assert audit["query"] == turn.query and len(audit["audit_evidence"]) == 12
+    assert audit["citation_scope"] == ["E_a"]
     assert len(json.loads((tmp_path / "official.jsonl").read_text())["contexts"]) == 5
 
 

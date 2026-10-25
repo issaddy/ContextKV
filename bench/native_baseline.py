@@ -73,6 +73,7 @@ class NativeTurnResponse:
     branch_reason: str
     measurement_kind: str
     timing: ClientTiming | None = None
+    citation_scope: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -448,7 +449,8 @@ class NativeBaseline:
                 result.truncated, result.meta_info, result.raw_response, result.http_elapsed_ms,
                 candidate.evidence_spans, tuple(archive[k] for k in sorted(candidate.required_blocks)),
                 "reference_history_sync" if turn.protocol == "P1" and turn.history else "baseline_full_rebuild",
-                "fake_http_correctness" if self.test_mode else "native_hardware_unvalidated", timing)
+                "fake_http_correctness" if self.test_mode else "native_hardware_unvalidated", timing,
+                tuple(ref for ref,key in candidate.reference_map if key in candidate.required_blocks))
 
     async def close_all(self) -> tuple[NativeCloseDispatch, ...]:
         errors = []
@@ -557,7 +559,8 @@ async def _run(args):
                           visible_evidence_manifest=result.visible_evidence_manifest,
                           audit_evidence=result.audit_evidence, input_ids=result.input_ids,
                           output_ids=result.output_ids, branch_reason=result.branch_reason,
-                          measurement_kind="unvalidated_hardware_run", truncated=result.truncated)
+                          measurement_kind="unvalidated_hardware_run", truncated=result.truncated,
+                          citation_scope=result.citation_scope)
         except Exception as exc:
             # The answer already advanced both native and runner history.
             # An artifact failure must not cancel the remaining conversations.

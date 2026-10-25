@@ -96,6 +96,54 @@ async def test_idempotent_retry_and_conflict(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_coalesced_writes_preserve_durable_barriers_before_engine_calls(tmp_path,monkeypatch):
+    controller,store,engine = system(tmp_path,knobs=PlannerKnobs(strategy="always_append"))
+    observed = []
+    prepare,generate = engine.prepare,engine.generate
+    async def checked_prepare(*args,**kwargs):
+        attempt = store.pending_attempt("s")
+        assert attempt.stage == "PREPARING" and attempt.plan is not None
+        assert attempt.epoch.engine_session_id == args[0]
+        observed.append("prepare")
+        return await prepare(*args,**kwargs)
+    async def checked_generate(**kwargs):
+        attempt = store.get_attempt(kwargs["attempt_id"])
+        assert attempt.stage == "SUBMITTED"
+        assert attempt.epoch.session_generation == kwargs["expected_generation"]
+        assert attempt.plan.candidate.input_ids == kwargs["input_ids"]
+        observed.append("generate")
+        return await generate(**kwargs)
+    monkeypatch.setattr(engine,"prepare",checked_prepare)
+    monkeypatch.setattr(engine,"generate",checked_generate)
+    evidence = (make_evidence("Stable evidence","source"),)
+    await controller.serve_turn("s","first",evidence,request_id="1")
+    second = await controller.serve_turn("s","follow up",evidence,request_id="2")
+    replay = await controller.serve_turn("s","follow up",evidence,request_id="2")
+    assert second.action == "APPEND" and replay.idempotent_replay
+    assert observed == ["prepare","generate","generate"]
+    await controller.drain()
+
+
+def test_plan_and_epoch_allocation_roll_back_together(tmp_path,monkeypatch):
+    from controller.candidates import build_candidates
+    from controller.schema import Plan
+    store = SessionStore(tmp_path/"state.sqlite3")
+    snapshot = store.read_snapshot("s")
+    attempt = store.begin_attempt("s","one","hash","question",snapshot.version)
+    plan = Plan(build_candidates(snapshot,"question",())[0])
+    allocate = store._allocate_epoch
+    def fail_after_write(*args):
+        allocate(*args)
+        raise RuntimeError("injected transaction failure")
+    monkeypatch.setattr(store,"_allocate_epoch",fail_after_write)
+    with pytest.raises(RuntimeError,match="transaction failure"):
+        store.plan_new_epoch(replace(attempt,stage="PLANNED",plan=plan),"restart","initial")
+    assert store.get_attempt(attempt.attempt_id) == attempt
+    assert store.db.execute("SELECT epoch_counter FROM sessions WHERE session_id='s'").fetchone()[0] == 0
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_lost_success_response_recovers_without_regeneration(tmp_path):
     controller, store, engine = system(tmp_path)
     engine.drop_next_generate_response = True

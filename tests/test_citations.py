@@ -18,3 +18,18 @@ def test_unknown_group_member_is_audited_and_strict_count_is_preserved():
     assert result["flags"] == ["unknown_citations"]
     assert result["citation_parser_version"] == CITATION_PARSER_VERSION
     assert result["semantic_quality_score"] is None
+
+
+def test_visible_historical_body_is_not_current_citation_permission():
+    old,new = {"document_id":"old"},{"document_id":"current"}
+    record = {"task_id":"s:2","answer":"Prior claim [E_aa], current [E_bb].",
+        "visible_evidence_manifest":[{"key":old,"reference_id":"E_aa"},{"key":new,"reference_id":"E_bb"}],
+        "audit_evidence":[{"key":old},{"key":new}],"citation_scope":["E_bb"]}
+    result = rule_audit(record)
+    assert result["unknown_citations"] == []
+    assert result["out_of_scope_citations"] == ["E_aa"]
+    assert result["flags"] == ["out_of_scope_citations"]
+    # Explicitly restored/revisited evidence is permitted without relabelling it.
+    assert rule_audit(record | {"citation_scope":["E_aa","E_bb"]})["flags"] == []
+    assert rule_audit(record | {"citation_scope":[]})["out_of_scope_citations"] == ["E_aa","E_bb"]
+    assert rule_audit({k:v for k,v in record.items() if k != "citation_scope"})["flags"] == []

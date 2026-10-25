@@ -225,6 +225,8 @@ class NativeJudgeClient:
             if self.config.output_constraint is not None:
                 request["regex"] = SELENE_NUMERIC_REGEX
                 result["requested_regex"] = SELENE_NUMERIC_REGEX
+            if self.config.enable_thinking is not None:
+                request["chat_template_kwargs"] = {"enable_thinking": self.config.enable_thinking}
             response = await self.client.post("chat/completions", json=request)
             if response_format is not None or self.config.output_constraint is not None:
                 result.update(http_status=response.status_code, raw_http_response=response.text)

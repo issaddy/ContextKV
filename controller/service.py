@@ -65,6 +65,7 @@ class TurnResponse:
     branch_reason: str = ""
     retrieval_ms: float | None = None
     visible_evidence_manifest: tuple[EvidenceSpan, ...] = ()
+    citation_scope: tuple[str, ...] = ()
 
 
 class Controller:
@@ -167,7 +168,9 @@ class Controller:
                             result.server_ttft_ms, result.tpot_ms, result.timing_source,
                             result.finish_reason in {"length", "max_tokens"}, attempt.branch_reason,
                             retrieval_ms=attempt.retrieval_ms,
-                            visible_evidence_manifest=plan.candidate.evidence_spans)
+                            visible_evidence_manifest=plan.candidate.evidence_spans,
+                            citation_scope=tuple(ref for ref,key in plan.candidate.reference_map
+                                                 if key in plan.candidate.required_blocks))
 
     async def serve_turn(self, session_id: str, query: str, evidence: tuple[EvidenceBlock, ...] = (), *,
                          request_id: str | None = None, corpus_snapshot_id: str = "demo-v1",
@@ -302,24 +305,23 @@ class Controller:
                           "recovery" if planning_snap.force_new_epoch_for_recovery else
                           "initial" if snap.current_epoch is None else
                           (append_failure or plan.reason) if plan.candidate.action == "REBUILD" else "append")
-                attempt = self.store.save_attempt(replace(attempt, stage="PLANNED", evidence=evidence,
-                                                         plan=plan, branch_reason=reason,
-                                                         retrieval_priority=retrieval_priority,
-                                                         retrieval_ms=retrieval_ms))
+                planned = replace(attempt, stage="PLANNED", evidence=evidence,
+                                  plan=plan, branch_reason=reason,
+                                  retrieval_priority=retrieval_priority, retrieval_ms=retrieval_ms)
                 # No-C ablation keeps the native session across text rebuilds.
                 # History protocol changes and failed attempts still need safe recovery.
                 new_epoch = (snap.current_epoch is None or snap.history_sync_pending
                              or (plan.candidate.action == "REBUILD" and self.epoch_retirement)
                              or planning_snap.force_new_epoch_for_recovery)
                 if new_epoch:
-                    attempt = self.store.allocate_epoch(attempt, info.engine_restart_id, reason)
+                    attempt = self.store.plan_new_epoch(planned, info.engine_restart_id, reason)
                     ack = await self._prepare_epoch(attempt, info)
                     epoch = replace(attempt.epoch, session_generation=ack.session_generation)
                 else:
+                    attempt = self.store.save_attempt(planned)
                     epoch = snap.current_epoch
-                attempt = self.store.save_attempt(replace(attempt, stage="PREPARED", epoch=epoch))
+                attempt = self.store.submit_attempt(attempt, epoch)
                 self.events.emit("epoch_prepared", business_session_id=session_id, attempt_id=attempt.attempt_id, epoch=epoch)
-                attempt = self.store.save_attempt(replace(attempt, stage="SUBMITTED"))
                 self.events.emit("request_submitted", business_session_id=session_id, attempt_id=attempt.attempt_id,
                                  sampling_params={**self._sampling_params, "max_new_tokens": self.policy.max_new_tokens})
                 submitted = time.monotonic()
@@ -369,7 +371,7 @@ class Controller:
                 self.events.emit("attempt_failed", business_session_id=session_id, attempt_id=attempt.attempt_id, error=str(exc))
                 raise
             self._retire_background()
-            return self._response(self.store.get_attempt(attempt.attempt_id),
+            return self._response(replace(attempt, stage="COMMITTED"),
                                   elapsed_ms=(committed_at-arrived)*1000, timing=timing, control_ms=control_ms)
 
     async def recover(self, session_id: str, *, abandon: bool = False):
@@ -392,7 +394,7 @@ class Controller:
             committed = self.store.commit_turn_and_outbox(attempt.attempt_id)
             self.events.emit("attempt_recovered", attempt_id=attempt.attempt_id, ledger_version=committed.version)
             self._retire_background()
-            return self._response(self.store.get_attempt(attempt.attempt_id), replay=True)
+            return self._response(replace(attempt, stage="COMMITTED"), replay=True)
         if attempt.stage in ("STARTED", "PLANNED", "PREPARING", "PREPARED"):
             if not abandon:
                 raise PendingAttempt("Unfinished preparation: confirm old controller stopped, then recover with abandon=True")
