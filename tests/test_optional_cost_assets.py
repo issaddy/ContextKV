@@ -12,6 +12,7 @@ from controller.cost_model import CostModel, DecodePoint, LookupPoint
 from controller.output_length import OutputLengthModel
 from controller.schema import CacheQuote, ConfigFingerprint, CostEstimate, PromptCandidate
 from controller.serialization import dumps, loads
+from controller.templates import SYSTEM_PROMPT
 from profiling.decision_pairs import _model_and_knobs
 
 
@@ -33,7 +34,8 @@ def assets(tmp_path):
     CostModel([LookupPoint(0, 100, 1, 2.)],
         [DecodePoint(110, 1, 1., context_start=101, context_end=120)],
         default_output_tokens=5, p90_output_tokens=10, max_new_tokens=10,
-        prefill_estimator="positive_basis", positive_prefill=positive, uncertainty_mode="conditional").save(cost_path)
+        prefill_estimator="positive_basis", positive_prefill=positive, uncertainty_mode="conditional").save(
+            cost_path, metadata={"output_prior_system_prompt": SYSTEM_PROMPT})
     config = RunConfig(cost_model=CostSettings(artifact=str(cost_path), output_length_artifact=str(length_path)),
                        state_dir=str(tmp_path/"state"))
     config = replace(config, context=replace(config.context, max_new_tokens=10))

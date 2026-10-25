@@ -267,7 +267,8 @@ async def test_synthetic_clock_includes_retrieval_in_completion_not_control(tmp_
     assert response.complete_ms == pytest.approx(2550)
     assert response.ttft_ms == pytest.approx(2200)
     assert response.control_ms == pytest.approx(150)
-    assert observed_control == pytest.approx([0])
+    assert len(observed_control) == 1
+    assert observed_control[0] == pytest.approx({"APPEND": 0, "REBUILD": 0})
     assert response.timing.t_submit - response.timing.t_arrive == pytest.approx(2.1)
     assert response.timing.t_commit - response.timing.t_arrive == pytest.approx(2.55)
     await controller.aclose()

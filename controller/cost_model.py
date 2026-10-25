@@ -7,6 +7,7 @@ those estimates retain a separate eligibility flag and are not called calibrated
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, is_dataclass
+from collections import deque
 from bisect import bisect_left
 from functools import lru_cache
 from itertools import product
@@ -136,6 +137,7 @@ class CostModel:
         self.sampling_scope_report = None
         self._sampling_prior_override = None
         self._development_lengths = self.stage_model.get("development_output_lengths", {}).get("lengths", ())
+        self._observed_output_lengths = deque(maxlen=128)
         self.calibration_metadata: dict = {}
         self.calibration_scope_compatible: bool | None = None
         self.calibration_scope_report: dict | None = None
@@ -148,6 +150,11 @@ class CostModel:
         valid_prefill = [p for p in self.prefill_points if self._source_valid(p.source)]
         prefill_scope = self._prefill_scope(valid_prefill)
         scoped_prefill = [p for p in valid_prefill if p.scope == prefill_scope]
+        self._prefill_samples = tuple(((p.prefix_tokens, p.suffix_tokens, p.host_load_tokens, p.concurrency),
+                                      p.elapsed_ms, p.error_ms) for p in scoped_prefill)
+        self._prefill_geometry = self._geometry(self._prefill_samples)
+        self._idle_pre_forward_geometry = self._geometry(self._idle_pre_forward_samples)
+        self._prefill_includes_queue = any(p.scope == "first_token" for p in valid_prefill)
         lengths = [p.prefix_tokens+p.suffix_tokens for p in scoped_prefill]
         self._prefill_input_bounds = (min(lengths), max(lengths)) if lengths else None
         self._positive_geometry = None
@@ -234,6 +241,14 @@ class CostModel:
     def _source_valid(self, source: str) -> bool:
         return source == "hardware" or self.allow_mock_calibration
 
+    @staticmethod
+    def _geometry(samples):
+        if not samples:
+            return None
+        cells = {coordinates: (cost, error) for coordinates, cost, error in samples}
+        axes = [sorted({coordinate[i] for coordinate in cells}) for i in range(len(samples[0][0]))]
+        return cells, axes, [max(1, values[-1] - values[0]) for values in axes]
+
     def _interpolate(self, target, samples, *, prepared=None, max_distance=None):
         """Multilinear cells when available; bounded local interpolation otherwise.
 
@@ -317,17 +332,12 @@ class CostModel:
             sources_supported = bool(sources) and set(sources) <= allowed
             return estimate, error, (sources_supported and length_supported
                                      and self._positive_supported((prefix, suffix, load, concurrency)))
-        points = [p for p in self.prefill_points if self._source_valid(p.source)]
-        if not points:
+        if not self._prefill_samples:
             # Positive-coefficient structure captures long-prefix attention.
             estimate = .05 + .004*suffix + .0000002*(suffix*prefix+suffix*(suffix+1)/2) + .003*load
             return estimate, max(estimate, 1.0), False
-        # Never mix a whole server TTFT sample with a queue-excluding phase.
-        scope = self._prefill_scope(points)
-        points = [p for p in points if p.scope == scope]
         estimate, error, supported = self._interpolate((prefix, suffix, load, concurrency),
-            [((p.prefix_tokens, p.suffix_tokens, p.host_load_tokens, p.concurrency), p.elapsed_ms, p.error_ms)
-             for p in points])
+            self._prefill_samples, prepared=self._prefill_geometry)
         return estimate, error, supported and length_supported
 
     def _positive_supported(self, target):
@@ -418,7 +428,8 @@ class CostModel:
         forward, _, supported = self._prefill(prefix, input_tokens-prefix, loaded, concurrency,
                                               uncertainty_load=host_tokens)
         setup, _, setup_supported = self._interpolate(
-            (prefix, input_tokens-prefix, loaded), self._idle_pre_forward_samples)
+            (prefix, input_tokens-prefix, loaded), self._idle_pre_forward_samples,
+            prepared=self._idle_pre_forward_geometry)
         return setup+forward, supported and setup_supported
 
     def predict_native(self, candidate: PromptCandidate, quote: CacheQuote,
@@ -447,7 +458,7 @@ class CostModel:
                             loaded if self.include_host_cost else 0, concurrency, uncertainty_load=loaded)
         control_ms = control_ms if self.include_control_cost else 0.0
         # first_token observations already include the server-side queue.
-        if any(p.scope == "first_token" and self._source_valid(p.source) for p in self.prefill_points):
+        if self._prefill_includes_queue:
             queue_ms = 0.0
         decode = decode_error = risk_decode = 0.0
         for step in range(1, max(prior.mean_tokens,prior.p90_tokens) if self.include_decode_cost else 1):
@@ -468,10 +479,10 @@ class CostModel:
             from .admission import estimate_native_budget_wait, estimate_wait
             setup_ms, _, setup_supported = self._interpolate(
                 (prefix, max(0,n-prefix), loaded if self.include_host_cost else 0),
-                self._idle_pre_forward_samples)
+                self._idle_pre_forward_samples, prepared=self._idle_pre_forward_geometry)
             wait_args = dict(candidate_input_tokens=n, resident_gpu_tokens=max(0, prefix-loaded),
                 batch=batch, forward_fn=self._workload_forward, decode_fn=self._workload_decode,
-                development_lengths=self._development_lengths,
+                development_lengths=tuple(self._observed_output_lengths) or self._development_lengths,
                 idle_ms=setup_ms)
             if self.admission_estimator == "native_budget":
                 profile = self.calibration_metadata.get("profile_manifest") or {}
@@ -528,11 +539,22 @@ class CostModel:
         self._past_residuals = self._past_residuals[-128:]
         self._bias_ms += self.residual_alpha * (actual_elapsed_ms-predicted.cost)
 
+    def observe_output(self, output_tokens: int) -> None:
+        """Completed serving lengths for native wait forecasts, not timing fitting.
+
+        Keep capped completions too: these are served lengths, not estimates of
+        uncensored natural EOS length. Native admission still uses its requested
+        output reservation, independently of the empirical service distribution.
+        """
+        if output_tokens > 0:
+            self._observed_output_lengths.append(output_tokens)
+
     @property
     def effective_output_prior(self) -> tuple[int, int]:
         return self._sampling_prior_override or (self.default_output_tokens, self.p90_output_tokens)
 
-    def configure_sampling(self, sampling, *, fallback_mean: int, fallback_p90: int) -> dict:
+    def configure_sampling(self, sampling, *, fallback_mean: int, fallback_p90: int,
+                           system_prompt: str | None = None) -> dict:
         """Bind request policy once, without changing measured execution points.
 
         Server wall intervals include sampler work. Cross-recipe timing reuse is
@@ -550,11 +572,15 @@ class CostModel:
             value == recipe or value is None and legacy_compatible for value in timing_recipes)
         prior_recipe = bound_recipe(self.calibration_metadata.get("output_prior_sampling"))
         prior_matches = recipe == prior_recipe or prior_recipe is None and legacy_compatible
-        self._sampling_prior_override = None if prior_matches else (fallback_mean, fallback_p90)
+        prior_prompt = self.calibration_metadata.get("output_prior_system_prompt")
+        prompt_matches = system_prompt is None or prior_prompt == system_prompt
+        self._sampling_prior_override = None if prior_matches and prompt_matches else (fallback_mean, fallback_p90)
         lengths = self.stage_model.get("development_output_lengths", {})
         length_recipe = bound_recipe(lengths.get("sampling_recipe", self.calibration_metadata.get("output_prior_sampling")))
         lengths_match = recipe == length_recipe or length_recipe is None and legacy_compatible
-        self._development_lengths = lengths.get("lengths", ()) if lengths_match else ()
+        length_prompt_matches = system_prompt is None or lengths.get("system_prompt", prior_prompt) == system_prompt
+        self._development_lengths = lengths.get("lengths", ()) if lengths_match and length_prompt_matches else ()
+        self._observed_output_lengths.clear()
         self.sampling_scope_report = {
             "requested_sampling": request_sampling(sampling),
             "timing_recipes": [value.record() if value is not None else None for value in timing_recipes],
@@ -563,9 +589,12 @@ class CostModel:
             "timing_scope": "measured_server_wall_including_sampler; cross_recipe_unvalidated",
             "output_prior_recipe": prior_recipe.record() if prior_recipe is not None else None,
             "output_prior_status": ("legacy_unbound_compatibility" if prior_recipe is None else "matching_recipe")
-                if prior_matches else "configured_prior_fallback",
+                if prior_matches and prompt_matches else "configured_prior_fallback",
+            "output_prior_prompt_status": ("not_checked" if system_prompt is None else
+                "matching_prompt" if prompt_matches else "unbound_or_different_prompt"),
             "development_lengths_status": ("legacy_unbound_compatibility" if length_recipe is None else "matching_recipe")
-                if lengths_match else "disabled_recipe_mismatch",
+                if lengths_match and length_prompt_matches else
+                "disabled_recipe_mismatch" if not lengths_match else "disabled_prompt_mismatch",
             "legacy_missing_binding": "unknown; compatibility exception only for standard greedy serving",
         }
         return self.sampling_scope_report

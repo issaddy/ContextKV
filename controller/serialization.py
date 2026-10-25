@@ -29,7 +29,19 @@ def to_jsonable(value: Any) -> Any:
 
 
 def dumps(value: Any) -> str:
-    return json.dumps(to_jsonable(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    # Let the native JSON encoder traverse primitive containers (especially
+    # token IDs). Expanding the entire tree in Python repeated that traversal
+    # at every durable state transition and event write.
+    return json.dumps(value, default=_json_default, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False)
+
+
+def _json_default(value: Any) -> Any:
+    if dataclasses.is_dataclass(value):
+        return {f.name: getattr(value, f.name) for f in dataclasses.fields(value)}
+    if isinstance(value, (set, frozenset)):
+        return sorted(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def decode(cls: Any, value: Any) -> Any:

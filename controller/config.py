@@ -18,7 +18,7 @@ from .serialization import decode, dumps
 from .sampling import SamplingRecipe
 from .service import Controller
 from .session_store import SessionStore
-from .templates import ByteTemplate, HuggingFaceTemplate
+from .templates import SYSTEM_PROMPT, ByteTemplate, HuggingFaceTemplate
 
 
 @dataclass(frozen=True)
@@ -179,7 +179,8 @@ def create_controller(config: RunConfig) -> Controller:
         if bound != asdict(template.fingerprint) or not isinstance(cache_binding, str) or not cache_binding:
             raise ValueError("explicit model scope requires a cost artifact bound to its actual fingerprint and cache configuration")
     model.configure_sampling(config.sampling, fallback_mean=config.cost_model.default_output_tokens,
-                             fallback_p90=config.cost_model.p90_output_tokens)
+                             fallback_p90=config.cost_model.p90_output_tokens,
+                             system_prompt=SYSTEM_PROMPT if config.context.system_prompt is None else config.context.system_prompt)
     if config.cost_model.output_length_artifact:
         from .output_length import OutputLengthModel
         model.output_length_model = OutputLengthModel.load(config.cost_model.output_length_artifact,

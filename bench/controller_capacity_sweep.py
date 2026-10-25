@@ -66,10 +66,13 @@ def validate_runtime(group, runtime, *, expected_host_tokens=None, expected_hica
         model = CostModel.load(group["calibration"]["path"], max_new_tokens=1024,
                                **({"admission_estimator": estimator} if estimator else {}))
         from controller.sampling import SamplingRecipe
+        from controller.templates import SYSTEM_PROMPT
         sampling = group.get("config", {}).get("sampling")
+        prompt = group.get("config", {}).get("context", {}).get("system_prompt")
         model.configure_sampling(SamplingRecipe(**sampling) if sampling is not None else None,
                                  fallback_mean=options.get("default_output_tokens", 128),
-                                 fallback_p90=options.get("p90_output_tokens", 256))
+                                 fallback_p90=options.get("p90_output_tokens", 256),
+                                 system_prompt=SYSTEM_PROMPT if prompt is None else prompt)
         scope = model.check_calibration_scope(info)
         if scope["status"] != "matching_scope" or not model.sampling_scope_compatible:
             raise ValueError(f"Ours requires a newly bound cost artifact for this actual pool: {scope}")

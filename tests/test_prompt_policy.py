@@ -31,6 +31,12 @@ async def test_prompt_change_rebuilds_even_under_append_policy(tmp_path):
         assert current.execution.visible_blocks == {evidence[0].key}
         result = await controller.serve_turn("s", "Third question", evidence)
         assert result.action == "APPEND"
+        observed = tuple(controller.cost_model._observed_output_lengths)
+        assert len(observed) == 3
+        assert len(controller._postplan_control_ms["REBUILD"]) == 2
+        assert len(controller._postplan_control_ms["APPEND"]) == 1
+        await controller.serve_turn("s", "Third question", evidence, request_id=result.request_id)
+        assert tuple(controller.cost_model._observed_output_lengths) == observed
     finally:
         await controller.aclose()
         store.close()

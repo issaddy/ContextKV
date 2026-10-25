@@ -28,6 +28,7 @@ from controller.config import RunConfig, create_model_template
 from controller.cost_model import CostModel
 from controller.serialization import decode
 from controller.sampling import SamplingRecipe, request_sampling
+from controller.templates import SYSTEM_PROMPT
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -209,7 +210,8 @@ def fitted_scope(config, calibration, runtime):
             options[field] = getattr(config.cost_model, field)
     model = CostModel.load(calibration["path"], **options)
     model.configure_sampling(config.sampling, fallback_mean=config.cost_model.default_output_tokens,
-                             fallback_p90=config.cost_model.p90_output_tokens)
+                             fallback_p90=config.cost_model.p90_output_tokens,
+                             system_prompt=SYSTEM_PROMPT if config.context.system_prompt is None else config.context.system_prompt)
     scope = model.check_calibration_scope(runtime["engine"])
     if scope["status"] != "matching_scope" or not model.sampling_scope_compatible:
         raise ValueError(f"cost job needs an artifact bound to the actual engine configuration: {scope}")

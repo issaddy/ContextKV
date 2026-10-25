@@ -52,6 +52,18 @@ def test_warm_reuse_savings_are_not_discarded_for_a_small_input_reduction():
     assert plan.candidate == a and plan.reason == "expected_cost"
 
 
+def test_measured_action_control_cost_can_change_complete_cost_choice():
+    a, r = candidate("APPEND", 100), candidate("REBUILD", 100)
+    model = CostModel([LookupPoint(0, 100, 1, 10)],
+                      default_output_tokens=1, p90_output_tokens=1)
+    for costs, expected in (({"APPEND": 2, "REBUILD": 7}, a),
+                            ({"APPEND": 8, "REBUILD": 3}, r)):
+        plan = choose_plan((a, r), batch(a, r), model, SessionSnapshot("s"), control_ms=costs)
+        assert plan.candidate == expected
+        assert [e.control_ms for e in plan.predicted] == list(costs.values())
+        assert [e.cost for e in plan.predicted] == [10 + c for c in costs.values()]
+
+
 @pytest.mark.parametrize("lengths", [(1000,500),(500,1000)])
 @pytest.mark.parametrize("costs,expected", [((50,100),"APPEND"),((100,50),"REBUILD")])
 def test_clear_full_cost_savings_take_precedence_over_context_size(lengths,costs,expected):

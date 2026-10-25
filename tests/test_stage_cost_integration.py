@@ -126,6 +126,29 @@ def test_strict_ttft_behavior_ignores_new_workload_and_never_calls_wait(monkeypa
     assert not model(staged=False).predict_native(c, pressure, batch=batch([pressure])).calibrated
 
 
+def test_wait_forecast_uses_completed_service_lengths_without_changing_native_budget(monkeypatch):
+    calls = []
+
+    def forecast(**kwargs):
+        calls.append(kwargs)
+        return WaitEstimate(1, 1, True, "test")
+
+    monkeypatch.setattr("controller.admission.estimate_native_budget_wait", forecast)
+    estimator = model()
+    estimator.admission_estimator = "native_budget"
+    c = candidate()
+    q = quote(c)
+    native = batch([q])
+    estimator.predict_native(c, q, batch=native)
+    assert calls[-1]["development_lengths"] == [3, 4, 5, 10]
+    estimator.observe_output(2)
+    estimator.observe_output(8)
+    estimator.predict_native(c, q, batch=native)
+    assert calls[-1]["development_lengths"] == (2, 8)
+    assert calls[-1]["max_new_tokens"] == 10
+    assert calls[-1]["batch"] is native
+
+
 def test_explicit_mode_and_stage_scope_are_required_at_artifact_boundary():
     with pytest.raises(ValueError, match="explicit admission_estimator"):
         CostModel(stage_model=stage())

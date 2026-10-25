@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass, replace
 import hashlib
 import time
@@ -86,7 +87,7 @@ class Controller:
         self.online_calibration = online_calibration
         self._sampling_params = request_sampling(sampling)
         self._active_generations = 0
-        self._postplan_control_ms: list[float] = []
+        self._postplan_control_ms = {action: deque(maxlen=32) for action in ("APPEND", "REBUILD")}
         self._calibration_identity = None
         self._locks: dict[str, asyncio.Lock] = {}
         self._background: set[asyncio.Task] = set()
@@ -281,8 +282,15 @@ class Controller:
                 # The planner validates this batch once before selecting a candidate.
                 pressure = (max(1, quotes.active_requests + (quotes.queued_requests or 0) + 1) if quotes is not None
                             and quotes.active_requests is not None else max(1, self._active_generations + 1))
-                planning_control_ms = (time.monotonic()-entered)*1000 - (retrieval_ms or 0) + (
-                    statistics.mean(self._postplan_control_ms) if self._postplan_control_ms else 0)
+                spent_control_ms = (time.monotonic()-entered)*1000 - (retrieval_ms or 0)
+                observed = [value for values in self._postplan_control_ms.values() for value in values]
+                default_postplan = statistics.mean(observed) if observed else 0.0
+                # Preparation/serialization costs differ between retaining and
+                # replacing an epoch. Charge prior completed observations to
+                # their action instead of cancelling one common mean in A/R.
+                planning_control_ms = {action: spent_control_ms + (
+                    statistics.mean(values) if values else default_postplan)
+                    for action, values in self._postplan_control_ms.items()}
                 plan_started = time.monotonic()
                 plan = choose_plan(candidates, quotes, self.cost_model, planning_snap, self.knobs,
                                    concurrency=pressure, control_ms=planning_control_ms)
@@ -299,7 +307,8 @@ class Controller:
                                  turns_since_rebuild=planning_snap.turns_since_rebuild,
                                  min_stable_turns=self.knobs.min_stable_turns,
                                  execution_mode=plan.execution_mode, pressure_bucket=pressure,
-                                 observed_queued_requests=quotes.queued_requests if quotes else None)
+                                 observed_queued_requests=quotes.queued_requests if quotes else None,
+                                 prior_completed_length_samples=len(self.cost_model._observed_output_lengths))
                 append_failure = next((c.reason for c in candidates if c.action == "APPEND" and not c.feasible), None)
                 reason = ("reference_history_sync" if snap.history_sync_pending else
                           "recovery" if planning_snap.force_new_epoch_for_recovery else
@@ -345,8 +354,9 @@ class Controller:
                     submitted+result.last_token_ms/1000 if result.last_token_ms is not None else None,
                     response_done, committed_at, token_observation="chunk" if result.ttft_ms is not None else "none")
                 control_ms = ((submitted-entered) + (committed_at-response_done))*1000 - (retrieval_ms or 0)
-                self._postplan_control_ms.append(((submitted-plan_started)+(committed_at-response_done))*1000)
-                self._postplan_control_ms = self._postplan_control_ms[-32:]
+                self._postplan_control_ms[plan.candidate.action].append(
+                    ((submitted-plan_started)+(committed_at-response_done))*1000)
+                self.cost_model.observe_output(len(result.output_ids))
                 selected_estimate = next((e for e in plan.predicted if e.candidate_id == plan.candidate.candidate_id), None)
                 if (self.online_calibration and selected_estimate is not None and selected_estimate.calibrated
                         and result.server_elapsed_ms is not None and info.engine_kind == "sglang"):
@@ -392,6 +402,7 @@ class Controller:
                 await self.epochs.flush()
                 return None
             committed = self.store.commit_turn_and_outbox(attempt.attempt_id)
+            self.cost_model.observe_output(len(attempt.result.output_ids))
             self.events.emit("attempt_recovered", attempt_id=attempt.attempt_id, ledger_version=committed.version)
             self._retire_background()
             return self._response(replace(attempt, stage="COMMITTED"), replay=True)

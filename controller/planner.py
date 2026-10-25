@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from .cost_model import CostModel
 from .schema import CacheQuoteBatch, NoFeasiblePlan, Plan, PromptCandidate, SessionSnapshot
@@ -96,7 +96,8 @@ def _resource_tie_break(append, rebuild, quotes, observed, estimates):
 def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch | None,
                 model: CostModel, session: SessionSnapshot,
                 knobs: PlannerKnobs | None = None, *, concurrency: int | None = None,
-                control_ms: float = 0.0, queue_ms: float = 0.0) -> Plan | NoFeasiblePlan:
+                control_ms: float | Mapping[str, float] = 0.0,
+                queue_ms: float = 0.0) -> Plan | NoFeasiblePlan:
     knobs = knobs or PlannerKnobs()
     candidates = tuple(candidates)
     if any(c.snapshot_version != session.version for c in candidates):
@@ -140,7 +141,8 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
         return Plan(_fixed(append,rebuild,knobs.fallback_strategy,knobs,session), reason="quote_unavailable_fallback")
     estimates = tuple(model.predict_native(c,by_id[c.candidate_id],session,
                       batch=quotes,concurrency=concurrency or knobs.concurrency,
-                      control_ms=control_ms,queue_ms=queue_ms) for c in valid)
+                      control_ms=control_ms[c.action] if isinstance(control_ms, Mapping) else control_ms,
+                      queue_ms=queue_ms) for c in valid)
     if not all(e.calibrated if e.selection_eligible is None else e.selection_eligible for e in estimates):
         return Plan(_fixed(append,rebuild,knobs.fallback_strategy,knobs,session),
                     predicted=estimates, quote_seq=quotes.observed_seq,

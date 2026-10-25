@@ -134,6 +134,32 @@ def test_timing_and_development_lengths_require_their_own_matching_bindings():
     assert not model.sampling_scope_compatible and model._development_lengths == ()
 
 
+def test_new_answer_protocol_reuses_timings_without_old_length_distribution():
+    model = CostModel.from_measurements([row(), row(phase="decode", elapsed=6)],
+                                       default_output_tokens=900, p90_output_tokens=1024)
+    model.calibration_metadata = {"profile_manifest": {"sampling_recipe": RECIPE.record()},
+                                  "output_prior_sampling": RECIPE.record(),
+                                  "output_prior_system_prompt": "old verbose policy"}
+    model.stage_model = {"development_output_lengths": {"lengths": [800, 1000]}}
+    points = model.prefill_points, model.decode_points
+    report = model.configure_sampling(RECIPE, fallback_mean=128, fallback_p90=256,
+                                      system_prompt="current concise policy")
+    assert report["timing_compatible"]
+    assert model.effective_output_prior == (128, 256)
+    assert model._development_lengths == ()
+    assert report["development_lengths_status"] == "disabled_prompt_mismatch"
+    assert (model.prefill_points, model.decode_points) == points
+    model.observe_output(80)
+    model.observe_output(0)
+    model.observe_output(1024)  # capped completion is still a served length
+    assert list(model._observed_output_lengths) == [80, 1024]
+    model.configure_sampling(RECIPE, fallback_mean=128, fallback_p90=256,
+                             system_prompt="old verbose policy")
+    assert model.effective_output_prior == (900, 1024)
+    assert model._development_lengths == [800, 1000]
+    assert not model._observed_output_lengths
+
+
 def test_serving_and_pair_replay_apply_same_recipe_and_length_boundary(tmp_path):
     config, cost, length = assets(tmp_path)
     config = replace(config, sampling=RECIPE)

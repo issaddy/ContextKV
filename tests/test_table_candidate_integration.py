@@ -125,7 +125,9 @@ def test_default_off_preserves_shared_message_and_token_output(monkeypatch, styl
     expected = (Message("system", SYSTEM_PROMPT), Message("user", "Full prior question"),
         Message("assistant", "Full prior answer"), Message("user",
         f"\nEvidence [{ref}] {metadata}\n<evidence_body>\n{TABLE}\n</evidence_body>\n"
-        f"\nCitations allowed for this answer: [{ref}].\n\nQuestion:\nQuestion?\n"))
+        f"\nCitations allowed for this answer: [{ref}].\n"
+        "Use only these sources. Answer supported parts; identify any unsupported part separately.\n"
+        "\nQuestion:\nQuestion?\n"))
     rendered = ByteTemplate().render(expected)
     assert implicit.messages == explicit.messages == expected
     assert implicit.input_ids == explicit.input_ids == rendered.input_ids
