@@ -8,7 +8,7 @@ from .evidence import (EvidenceError, EvidencePolicy, allows_version_comparison,
                        evidence_index, resolve_required_evidence_with_reasons, version_conflicts)
 from .schema import EvidenceBlock, EvidenceKey, Message, PromptCandidate, SessionSnapshot
 from .templates import (SYSTEM_PROMPT, ByteTemplate, Template, current_user_message,
-                        longest_common_prefix, render_evidence_relations, verify_rendered_evidence)
+                        current_source_guide, longest_common_prefix, render_evidence_relations, verify_rendered_evidence)
 
 
 CandidatePolicy = EvidencePolicy
@@ -41,6 +41,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         existing_refs = (*existing_refs, *snapshot.execution.reference_map)
     references = assign_references(archive, existing_refs, prefix_length=policy.reference_prefix_length)
     evidence_relations = render_evidence_relations(required, references)
+    source_guide = current_source_guide(query, required, references)
     table_annotations = ""
     if policy.table_relations:
         from adapters.table_relations import extract_table_relations, render_table_relations
@@ -110,7 +111,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         current, spans = current_user_message(query, missing, references,
             message_index=len(execution.messages), reused=required_keys & visible,
             layout=policy.layout, retrieval_priority=retrieval_priority, table_annotations=table_annotations,
-            evidence_relations=evidence_relations, citation_scope=required_keys)
+            evidence_relations=evidence_relations, citation_scope=required_keys, source_guide=source_guide)
         prompts.append(("APPEND", execution.messages + (current,), execution.evidence_spans + spans,
                         visible | frozenset(span.key for span in spans), reason))
 
@@ -120,7 +121,8 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     current, spans = current_user_message(query, required, references,
                                          message_index=len(messages), layout=policy.layout,
                                          retrieval_priority=retrieval_priority, table_annotations=table_annotations,
-                                         evidence_relations=evidence_relations, citation_scope=required_keys)
+                                         evidence_relations=evidence_relations, citation_scope=required_keys,
+                                         source_guide=source_guide)
     messages.append(current)
     prompts.append(("REBUILD", tuple(messages), spans, frozenset(span.key for span in spans), None))
     conversations = tuple(prompt[1] for prompt in prompts)

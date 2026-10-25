@@ -90,6 +90,31 @@ def test_current_citation_scope_excludes_history_only_ids_for_both_actions():
         assert old_ref in plan.messages[-1].content.split("Citations allowed for this answer: ")[1]
 
 
+def test_current_source_navigation_is_shared_verbatim_and_keeps_cached_prefix():
+    import json
+    from controller.templates import current_source_guide
+    block = make_evidence("General physical activity.\nAccess to safe places to play is important for physical activity.\n"
+                          "Additional conditions remain in the full source.", "source", title="Community design")
+    old = make_evidence("Obsolete topic and citation.", "old")
+    snapshot = SessionSnapshot("s")
+    first = build_candidates(snapshot, "Original question", (old, block))[0]
+    snapshot = committed(first, snapshot, "Original question", (old, block))
+    query = "How to keep children safe during physical activity?"
+    append, rebuild = build_candidates(snapshot, query, (block,))
+    assert append.messages[:-1] == snapshot.execution.messages
+    guide = current_source_guide(query, (block,), append.reference_map)
+    assert guide in append.messages[-1].content and guide in rebuild.messages[-1].content
+    row, = json.loads(guide.split("\n", 1)[1])
+    start, end = row["chars"]
+    assert row["excerpt"] == block.text[start:end]
+    assert "safe places" in row["excerpt"]
+    assert row["id"] == next(ref for ref, key in append.reference_map if key == block.key)
+    assert old.key not in append.required_blocks and old.key in append.visible_blocks
+    for plan in (append, rebuild):
+        assert any(m.content[s.start:s.end] == block.text for s in plan.evidence_spans
+                   for m in (plan.messages[s.message_index],) if s.key == block.key)
+
+
 def test_changed_version_or_content_makes_append_invalid():
     a = make_evidence("old config","api")
     new = make_evidence("new config","api",version="v2")

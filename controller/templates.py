@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import Counter
 import hashlib
 import json
+import math
+import re
 from typing import Iterable, Protocol
 
 from .evidence import EvidenceError, evidence_index
@@ -18,6 +21,8 @@ SYSTEM_PROMPT = (
     "citation that is absent from the latest list. "
     "When evidence answers only part of the question, answer that supported part first, then state "
     "specifically what remains unknown. Do not refuse the whole question because one detail is missing. "
+    "General guidance can be useful even without guidance specific to the named group or product: "
+    "present it explicitly as general guidance and identify that limitation. "
     "Distinguish direct support from inference; do not invent steps or capabilities to fill gaps. "
     "Preserve relevant versions, conditions and exceptions. "
     "Complete the requested answer before optional detail. Avoid broad background, repeated "
@@ -205,12 +210,49 @@ def render_evidence_relations(blocks: Iterable[EvidenceBlock],
     return "Declared evidence metadata:\n" + json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
 
 
+def current_source_guide(query: str, blocks: Iterable[EvidenceBlock],
+                         references: tuple[tuple[str, EvidenceKey], ...]) -> str:
+    """Locate current sources near the question without moving cached bodies.
+
+    IDF-weighted lexical overlap selects one original line per source. This is
+    navigation, not evidence filtering or an entailment judgment; both candidates
+    keep complete bodies and receive the same guide. No model call or rewrite.
+    """
+    def terms(text):
+        return set(re.findall(r"[a-z0-9_]{3,}|[\u3400-\u9fff]", text.casefold())) - {
+            "the", "and", "for", "are", "was", "were", "with", "that", "this", "from",
+            "how", "what", "which", "when", "where", "does", "can", "could", "should",
+            "have", "has", "during", "keep", "about", "you", "your", "its"}
+
+    blocks = tuple(sorted(blocks, key=lambda b: b.key))
+    query_terms = terms(query)
+    frequency = Counter(term for block in blocks for term in terms(block.text) & query_terms)
+    weights = {term: math.log1p(len(blocks)/count) for term, count in frequency.items()}
+    by_key = {key: ref for ref, key in references}
+    rows = []
+    for block in blocks:
+        lines = list(re.finditer(r"[^\r\n]+", block.text))
+        best = max(lines, key=lambda line: sum(weights.get(term, 0) for term in terms(line.group())),
+                   default=None)
+        row = {"id": by_key[block.key], "title": block.title}
+        if best is not None and terms(best.group()) & query_terms:
+            start, end = best.start(), min(best.end(), best.start() + 360)
+            row.update(chars=[start, end], excerpt=block.text[start:end])
+        rows.append(row)
+    if not rows:
+        return ""
+    return ("Current source guide: IDs and verbatim excerpts for locating evidence. "
+            "Read the complete original bodies for conditions; an excerpt is not a complete answer.\n"
+            + json.dumps(rows, ensure_ascii=False, separators=(",", ":")))
+
+
 def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
                          references: tuple[tuple[str, EvidenceKey], ...], *,
                          message_index: int,
                          reused: Iterable[EvidenceKey] = (), layout: str = "stable_key",
                          retrieval_priority: Iterable[EvidenceKey] = (),
                          table_annotations: str = "", evidence_relations: str = "",
+                         source_guide: str = "",
                          citation_scope: Iterable[EvidenceKey] | None = None
                          ) -> tuple[Message, tuple[EvidenceSpan, ...]]:
     by_key = {key: reference for reference, key in references}
@@ -247,6 +289,8 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
         content += "\n" + table_annotations + "\n"
     if evidence_relations:
         content += "\n" + evidence_relations + "\n"
+    if source_guide:
+        content += "\n" + source_guide + "\n"
     ids = ", ".join(f"[{by_key[key]}]" for key in allowed) or "none"
     content += f"\nCitations allowed for this answer: {ids}.\n"
     content += "Use only these sources. Answer supported parts; identify any unsupported part separately.\n"
