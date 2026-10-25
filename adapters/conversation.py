@@ -74,17 +74,17 @@ def _literal_task_continuation(turn, context, fragment):
 
 
 class ConversationResolver:
-    def __init__(self, client):
+    def __init__(self, client=None):
         self.client = client
 
     @property
     def manifest(self):
         return {"version": VERSION, "system_prompt": SYSTEM,
                 "history": "latest three committed user turns and their interpreted questions; explicit revisits can read all user turns; compact source-qualified names",
-                "calls": "bare named qualifiers of an unresolved task use literal composition; other dependent questions use at most one model call",
+                "calls": "literal task composition first; other dependent questions use the optional model or the existing history view",
                 "self_contained_gate": "first turn, or named question/definition without dependency/correction cues; bare product fragments require interpretation",
                 "semantics": "derived intent, not factual evidence or a guarantee of correct resolution",
-                "transport": self.client.manifest}
+                "transport": self.client.manifest if self.client is not None else {"kind": "no_auxiliary_model"}}
 
     def resolve(self, turn, context):
         started = time.perf_counter()
@@ -111,6 +111,9 @@ class ConversationResolver:
         if not dependent:
             trace["text"] = retrieval_query(turn.user_questions)
             return finish("ordinary_question_uses_existing_history_view")
+        if self.client is None:
+            trace["text"] = retrieval_query(turn.user_questions)
+            return finish("contextual_history_view_without_auxiliary_model")
 
         history_window = len(turn.user_questions)-1 if _REVISIT.search(turn.query) else 3
         first = max(0, len(turn.user_questions)-1-history_window)
@@ -165,4 +168,5 @@ class ConversationResolver:
         return finish("conversational_interpretation")
 
     def close(self):
-        self.client.close()
+        if self.client is not None:
+            self.client.close()

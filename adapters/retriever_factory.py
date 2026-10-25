@@ -54,9 +54,10 @@ def load_retriever_config(path):
         raise ValueError("current_topic_rrf requires user_topic/source_topic/assistant_topic_unverified and hybrid/hybrid_rerank")
     if value.query_mode == "conversational":
         from adapters.query_selector import SelectorConfig
-        if value.selector is None or value.rerank_query_mode != "resolved":
-            raise ValueError("conversational retrieval needs selector configuration and resolved reranking")
-        SelectorConfig(**value.selector)
+        if value.rerank_query_mode != "resolved":
+            raise ValueError("conversational retrieval needs resolved reranking")
+        if value.selector is not None:
+            SelectorConfig(**value.selector)
     elif value.query_mode in SOURCE_MODES:
         from adapters.query_selector import SelectorConfig
         if value.query_fusion != "current_topic_rrf" or value.selector is None:
@@ -114,18 +115,18 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
                 reranker = LocalBGE(config.reranker_path, reranker=True, device=config.device, dtype=config.dtype,
                                    batch_size=config.batch_size, max_length=config.reranker_max_length)
                 cleanup.callback(reranker.close)
-            resolver = None
+            resolver, client = None, None
             if config.selector is not None:
-                from adapters.query_resolution import TopicResolver
                 from adapters.query_selector import OpenAICompletionClient, SelectorConfig
                 client = OpenAICompletionClient(SelectorConfig(**config.selector))
                 cleanup.callback(client.close)
-                if config.query_mode == "conversational":
-                    from adapters.conversation import ConversationResolver
-                    resolver = ConversationResolver(client)
-                else:
-                    resolver = TopicResolver(client, config.query_mode, history_turns=config.selector_history_turns,
-                                             schema_mode=config.selector_schema_mode)
+            if config.query_mode == "conversational":
+                from adapters.conversation import ConversationResolver
+                resolver = ConversationResolver(client)
+            elif client is not None:
+                from adapters.query_resolution import TopicResolver
+                resolver = TopicResolver(client, config.query_mode, history_turns=config.selector_history_turns,
+                                         schema_mode=config.selector_schema_mode)
             result = HybridRetriever(sparse, dense, encoder, reranker, query_mode=config.query_mode,
                 stage=config.stage, candidate_k=config.candidate_k, rerank_k=config.rerank_k, rrf_k=config.rrf_k,
                 query_fusion=config.query_fusion,

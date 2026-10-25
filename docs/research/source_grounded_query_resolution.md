@@ -2,7 +2,7 @@
 
 ## 当前多轮入口
 
-`query_mode: conversational` 通过 [`adapters/conversation.py`](../../adapters/conversation.py) 在已有检索 worker 内解析当前意图。配置见 [`configs/retriever_conversational.example.yaml`](../../configs/retriever_conversational.example.yaml)。复用同一个 Qwen3 服务、completion 客户端、BM25/BGE-M3/RRF/BGE-reranker；不训练模型，不增加检索服务或第二次重排。
+`query_mode: conversational` 通过 [`adapters/conversation.py`](../../adapters/conversation.py) 在已有检索 worker 内组织当前任务。配置见 [`configs/retriever_conversational.example.yaml`](../../configs/retriever_conversational.example.yaml)。`selector` 可省略：字面任务承接、完整具名问题和已有历史检索仍可运行，不加载辅助模型客户端；显式配置后才按需使用同一个 Qwen3 服务进行语义解析。两种配置复用同一条 BM25/BGE-M3/RRF/BGE-reranker 链，不增加第二次检索或重排。
 
 解析 HTTP 等待不持有 encoder/reranker 的锁；独立会话可以先检索，模型 forward 仍串行。共享 tokenizer 计数和调用计数仅持短锁，复用 httpx 的线程安全客户端。关闭前由现有 retrieval worker 排空机制等待所有请求，避免取消后继续访问已释放模型。
 
@@ -18,6 +18,7 @@
 
 - `QueryContext` 是派生意图：原用户问题和实际回答保持原样。独立检索问题同时用于召回、重排、证据解析和来源定位，生成提示保留原问题并提示当前条件优先。
 - 来源定位保留当前 reranker 排名，复用 ContextPilot 的检索优先级注释；正文仍可按缓存布局排列。低名次资料不因证据 ID 的字典顺序抢占定位表首位。
+- `context.layout: contextpilot` 下，即使未调用解析模型，也保留当前检索优先级。优先级注释只渲染一次，且仅包含当前可引用来源；被显式版本请求替换的检索版本不再出现在优先级列表中。
 - A/R 使用同一当前证据集合、意图和引用范围。意图标签或证据零交集本身不强制重建；实际历史前缀仍可能复用。正确版本、正文可见性和预算决定资格，B 按原生报价与实际成本比较；旧材料仅可留作历史，不获得当前引用资格。
 - 明确版本请求替换同一段落的其他检索版本；`v1` 不匹配 `v1.1` 或 `v1-rc2`。显式比较仍允许多版本并存。
 - 回访可以指向最近三轮之外的历史。模型选中多轮时，证据恢复对整个先行词集合做判定，不通过“最近一轮”偷偷选择不同对象；不能唯一确定的归档证据不自动恢复，仍保留当前真实检索结果。

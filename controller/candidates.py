@@ -51,7 +51,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     references = assign_references(archive, existing_refs, prefix_length=policy.reference_prefix_length)
     evidence_relations = render_evidence_relations(required, references)
     source_guide = current_source_guide(intent_query, required, references,
-                                      retrieval_priority=retrieval_priority if query_context is not None else ())
+        retrieval_priority=retrieval_priority if query_context is not None or policy.layout == "contextpilot" else ())
     table_annotations = ""
     if policy.table_relations:
         from adapters.table_relations import extract_table_relations, render_table_relations

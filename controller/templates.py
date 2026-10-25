@@ -258,12 +258,7 @@ def current_source_guide(query: str, blocks: Iterable[EvidenceBlock],
         rows.append(row)
     if not rows:
         return ""
-    priority = ""
-    if retrieval_priority:
-        from adapters.contextpilot import retrieval_order_annotation
-        available = {block.key for block in blocks}
-        priority = retrieval_order_annotation(by_key[k] for k in retrieval_priority if k in available) + "\n"
-    return (priority + "Current source guide: IDs and verbatim excerpts for locating evidence. "
+    return ("Current source guide: IDs and verbatim excerpts for locating evidence. "
             "Read the complete original bodies for conditions; an excerpt is not a complete answer.\n"
             + json.dumps(rows, ensure_ascii=False, separators=(",", ":")))
 
@@ -303,9 +298,9 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
         spans.append(EvidenceSpan(block.key, message_index, start, len(content),
                                  block.source_uri, block.provenance, ref))
         content += "\n</evidence_body>\n"
-    if layout == "contextpilot":
+    if layout == "contextpilot" or query_context is not None:
         from adapters.contextpilot import retrieval_order_annotation
-        priority = tuple(dict.fromkeys(retrieval_priority))
+        priority = tuple(dict.fromkeys(key for key in retrieval_priority if key in allowed))
         if priority:
             content += "\n" + retrieval_order_annotation(by_key[key] for key in priority) + "\n"
     if table_annotations:

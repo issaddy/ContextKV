@@ -140,6 +140,17 @@ def test_ordinary_questions_reuse_the_existing_query_view_without_extra_generati
     assert not client.inputs and view["context"] is None
 
 
+def test_conversational_resolution_can_run_without_an_auxiliary_model():
+    resolver = ConversationResolver()
+    original = turn("What about its limits?")
+    view = resolver.resolve(original, PriorContext())
+    assert view["text"] == retrieval_query(original.user_questions) and not view["model_called"]
+    task = turn("Use AtlasCloud", ("How do I create tables?",))
+    assert resolver.resolve(task, PriorContext())["reason"] == "literal_task_continuation"
+    assert resolver.manifest["transport"] == {"kind":"no_auxiliary_model"}
+    resolver.close()
+
+
 def test_recent_interpreted_state_preserves_inherited_conditions_without_all_old_topics():
     original = turn("And in region B?", ("old unrelated topic", "another topic", "Atlas v2 region A students?",
                                          "What materials?", "What deadlines?"))
@@ -155,16 +166,20 @@ def test_recent_interpreted_state_preserves_inherited_conditions_without_all_old
     assert view["context"]["history_turns"] == (5,)
 
 
-def test_conversational_source_guide_preserves_reranker_priority_independently_of_body_layout():
+@pytest.mark.parametrize("layout,with_intent", [("stable_key", True), ("contextpilot", False)])
+def test_source_guide_preserves_reranker_priority_independently_of_body_layout(layout, with_intent):
+    from controller.evidence import EvidencePolicy
     primary=make_evidence("PreferredProduct setup steps.", "z")
     secondary=make_evidence("DifferentProduct setup steps.", "a")
     plan=build_candidates(SessionSnapshot("s"), "How to set it up?", (primary, secondary),
-        query_context=QueryContext("PreferredProduct setup?", "followup", (1,)))[0]
+        policy=EvidencePolicy(layout=layout),
+        query_context=QueryContext("PreferredProduct setup?", "followup", (1,)) if with_intent else None)[0]
     text=plan.messages[-1].content
     guide=text[text.index("Retrieval priority"):]
     refs={key:ref for ref,key in plan.reference_map}
     assert guide.index(refs[primary.key]) < guide.index(refs[secondary.key])
-    assert plan.evidence_spans[0].key == secondary.key  # Stable body order still caches.
+    assert text.count("Retrieval priority (most relevant first)") == 1
+    assert plan.evidence_spans[0].key == (secondary.key if layout == "stable_key" else primary.key)
 
 
 def test_waiting_for_one_sessions_intent_does_not_block_another_sessions_retrieval():
@@ -215,14 +230,18 @@ def test_intent_label_does_not_disable_cache_reuse_but_current_source_scope_excl
     assert build_candidates(snap, "More details?", (shared, a), query_context=followup)[0].feasible
 
 
-def test_explicit_revision_replaces_retrieval_hit_without_mutating_archive():
+@pytest.mark.parametrize("layout", ("stable_key", "contextpilot"))
+def test_explicit_revision_replaces_retrieval_hit_without_mutating_archive(layout):
+    from controller.evidence import EvidencePolicy
     v1 = make_evidence("The original v1 limit is 10.", "Atlas", version="v1")
     v2 = make_evidence("The v2 limit is 20.", "Atlas", version="v2")
     snap = SessionSnapshot("s", archive=(v1, v2))
     for hits in ((v2,), (v1, v2)):
-        plan = build_candidates(snap, "Use Atlas v1", hits)[0]
+        plan = build_candidates(snap, "Use Atlas v1", hits, EvidencePolicy(layout=layout))[0]
         assert plan.required_blocks == {v1.key}
         assert v2.text not in plan.messages[-1].content
+        v2_ref = next(ref for ref, key in plan.reference_map if key == v2.key)
+        assert v2_ref not in plan.messages[-1].content
     compare = build_candidates(snap, "Compare Atlas v1 and v2", (v2,))[0]
     assert compare.required_blocks == {v1.key, v2.key}
     assert snap.archive == (v1, v2)

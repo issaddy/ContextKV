@@ -120,6 +120,28 @@ def test_conversational_factory_shares_one_query_with_retrieval_generation_and_s
         wrapper.close()
 
 
+def test_conversational_factory_uses_the_same_pipeline_without_a_model_client(retriever_config, monkeypatch):
+    from adapters import query_selector
+    from adapters.serving_retrieval import ServingRetriever
+    from controller.schema import SessionSnapshot, TurnRecord
+    value = yaml.safe_load(retriever_config.read_text())
+    value.update(query_mode="conversational", query_fusion="single")
+    retriever_config.write_text(yaml.safe_dump(value))
+    def unexpected_client(*args, **kwargs):
+        raise AssertionError("No auxiliary model was configured")
+    monkeypatch.setattr(query_selector, "OpenAICompletionClient", unexpected_client)
+    retriever = create_retriever("P3", config_path=retriever_config)
+    wrapper = ServingRetriever(retriever, corpus_id="fixture")
+    snapshot = SessionSnapshot("s", raw_history=(TurnRecord(1,"How do I create tables?","Actual response."),))
+    try:
+        selected = wrapper._retrieve(snapshot, "Use AtlasCloud", "request", time.monotonic())
+        assert selected.query_context.query == "How do I create tables?\nUse AtlasCloud"
+        assert retriever.encoder.inputs == retriever.reranker.inputs == [selected.query_context.query]
+        assert retriever.manifest["query_view"]["transport"]["kind"] == "no_auxiliary_model"
+    finally:
+        wrapper.close()
+
+
 def test_external_trace_sink_does_not_retain_service_history_or_change_ranking(retriever_config):
     value=yaml.safe_load(retriever_config.read_text())
     value['query_mode']='user_topic'
