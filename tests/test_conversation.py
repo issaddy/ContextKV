@@ -35,12 +35,19 @@ def turn(current, questions=("How does Atlas Cloud store documents?",)):
 def test_clear_topic_and_definition_skip_rewriting_and_discard_last_three_bag():
     client = Client(None)
     resolver = ConversationResolver(client)
-    for query in ("Use IBM Cloudant Query", "What is a data lake?"):
+    for query in ("How does IBM Cloudant Query work?", "What is a data lake?"):
         view = resolver.resolve(turn(query), PriorContext())
         assert view["text"] == query and not view["model_called"]
         assert view["context"] == asdict(QueryContext(query, "standalone"))
     assert resolver.resolve(turn("First question", ()), PriorContext())["context"] is None
     assert not client.inputs
+
+
+def test_named_fragment_can_complete_the_previous_task_instead_of_forcing_a_topic_switch():
+    client = Client({"query": "How do I create tables using AtlasCloud?",
+                     "relation": "condition_change", "history_turns": [1]})
+    view = ConversationResolver(client).resolve(turn("Use AtlasCloud", ("How do I create tables?",)), PriorContext())
+    assert view["text"] == "How do I create tables using AtlasCloud?" and view["model_called"]
 
 
 @pytest.mark.parametrize("query,relation,resolved", [

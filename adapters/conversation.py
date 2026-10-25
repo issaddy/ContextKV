@@ -23,6 +23,9 @@ _DEPENDENT = re.compile(
     r"my|our|if|not|without|with|using|via)\b|\b(?:what|how)\s+about\b|^\s*(?:and|also|then|for)\b|"
     r"它|这个|那个|前者|后者|之前|刚才|先前|最初|回到|如果|改成|换成|不是|我是说|呢[？?]?$", re.I)
 _DEFINITION = re.compile(r"^\s*(?:what\s+(?:is|are)\b|define\b|什么是|解释一下|介绍一下)", re.I)
+_QUESTION_FORM = re.compile(
+    r"^\s*(?:what|how|where|when|why|who|which|is|are|can|does|do)\b|"
+    r"^\s*(?:tell me about|explain)\b", re.I)
 SYSTEM = """Rewrite the current question as a short, self-contained search question. Do not answer it.
 First select only antecedent user turns that supply inherited objects, tasks or conditions.
 Do not select intervening turns about other topics merely because you read them.
@@ -57,7 +60,7 @@ class ConversationResolver:
         return {"version": VERSION, "system_prompt": SYSTEM,
                 "history": "all committed user turns; prior interpreted questions; compact source-qualified names by turn",
                 "calls": "one only for potentially context-dependent questions; no retries",
-                "self_contained_gate": "first turn, or explicit name/definition without dependency/correction cues",
+                "self_contained_gate": "first turn, or named question/definition without dependency/correction cues; bare product fragments require interpretation",
                 "semantics": "derived intent, not factual evidence or a guarantee of correct resolution",
                 "transport": self.client.manifest}
 
@@ -72,7 +75,8 @@ class ConversationResolver:
         if not turn.history:
             return finish("first_user_turn")
         dependent = _DEPENDENT.search(turn.query) or correction_cue(turn.query)
-        if not dependent and (named_user_spans(turn.query, include_single_title=True)
+        if not dependent and (_QUESTION_FORM.search(turn.query)
+                              and named_user_spans(turn.query, include_single_title=True)
                               or _DEFINITION.search(turn.query)):
             trace["context"] = asdict(QueryContext(turn.query, "standalone"))
             return finish("self_contained_current_question")
