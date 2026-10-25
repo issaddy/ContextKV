@@ -1,9 +1,7 @@
-# Conditional Qwen3 intent resolution on the existing local generation service.
-# Reuses one hybrid search/rerank; the original user question/history remain intact.
-# Opt-in: extra intent/generation cost has not yet beaten the delivered default path.
-# The selector block is optional. Omit it for literal task continuation + history
-# retrieval without auxiliary generation; context.layout=contextpilot can retain
-# per-turn relevance order separately from the cached evidence body order.
+# Literal task continuation + history retrieval, without auxiliary generation.
+# Reuses one hybrid search/rerank; original questions/history remain intact.
+# Optional context.layout=contextpilot separates cached body order and relevance.
+# The measured lightweight profile uses retrieval GPU1; set device for your host.
 schema_version: 1
 kind: hybrid
 stage: hybrid_rerank
@@ -22,13 +20,15 @@ rerank_k: 50
 rrf_k: 60
 cpu_threads: 1
 query_fusion: single
-selector:
-  base_url: http://127.0.0.1:30000
-  model: /media/ssd1/qwen3-8b
-  revision: local-snapshot:9e3a121da0ce4bba14a09f453123d3ca33caf62c3097ea54ee44ab29c8dbffd2
-  tokenizer_path: /media/ssd1/qwen3-8b
-  max_input_tokens: 8192
-  max_new_tokens: 192
-  context_window: 32768
-  timeout_seconds: 60
-  temperature: 0
+
+# Optional semantic resolution on the existing generation service:
+# selector:
+#   base_url: http://127.0.0.1:30000
+#   model: /media/ssd1/qwen3-8b
+#   revision: local-snapshot:9e3a121da0ce4bba14a09f453123d3ca33caf62c3097ea54ee44ab29c8dbffd2
+#   tokenizer_path: /media/ssd1/qwen3-8b
+#   max_input_tokens: 8192
+#   max_new_tokens: 192
+#   context_window: 32768
+#   timeout_seconds: 60
+#   temperature: 0

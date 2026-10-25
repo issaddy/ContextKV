@@ -46,7 +46,7 @@ python -m controller.cli --config configs/qwen3_8b_cost.yaml serve
 
 自动检索可复用 `--retriever-index data/cloud-bm25s --corpus-id mtrag`，或用 `--retriever-config` 选择已有 BM25/BGE/RRF/重排索引。可选 `--evidence-corpus` 提供版本、条件和原文关系。检索器启动时加载一次，正文与实际回答按原样保存。
 
-多轮指代、纠正、条件切换与回访的增强入口为 `--retriever-config configs/retriever_conversational.example.yaml`，当前为可选配置。它按需调用同一 Qwen3 服务，并贯穿检索、A/R 成本选择和会话提交；运行前按实际环境设置模型、索引与检索设备。机制和开销见[多轮意图解析](docs/research/source_grounded_query_resolution.md)，效果以[真实评价](docs/data_and_evaluation.md)中的具体负载为准。
+多轮增强入口为 `--retriever-config configs/retriever_conversational.example.yaml`。示例默认使用无辅助生成的任务承接与历史检索；需要语义解析时启用文件中的可选 `selector` 配置。两者贯穿同一检索、A/R 成本选择和提交链。已有 `context.layout: contextpilot` 可分开组织缓存正文顺序与当前检索优先级；运行前按环境设置索引和设备，实测使用生成 GPU0、检索 GPU1。机制与适用边界见[多轮意图解析](docs/research/source_grounded_query_resolution.md)和[真实评价](docs/data_and_evaluation.md)。
 
 首次准备数据与正常服务分开：
 
