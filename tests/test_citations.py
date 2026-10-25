@@ -1,6 +1,21 @@
 from bench.judge import CITATION_PARSER_VERSION, parse_citations, rule_audit
 
 
+def test_native_citation_grammar_allows_text_code_links_and_current_grouped_ids():
+    import re
+    from controller.templates import citation_regex
+    pattern = citation_regex(("E_aa", "E_bb"))
+    for value in ("", "中文 answer [E_aa].", "[E_aa, E_bb]", "[E_bb,\nE_aa]",
+                  "a[0] = [1, [2, 3]]; [Example](https://example.com)",
+                  "[[E_aa]]", "[", "[E", "[E[0]]", "[EFI]", "[E.example]", "line\nnext"):
+        assert re.fullmatch(pattern, value), value
+        assert parse_citations(value) <= {"E_aa", "E_bb"}
+    for value in ("[E_old]", "[[E_old]]", "[E[E_old]]", "[E_aa, E_old]", "[E_ab]", "[E_aa_]", "[E_aa"):
+        assert not re.fullmatch(pattern, value), value
+    assert not re.fullmatch(citation_regex(()), "[E_aa]")
+    assert re.fullmatch(citation_regex(()), "No supporting source. [Example](url)")
+
+
 def test_single_and_grouped_evidence_ids_without_numeric_or_bare_references():
     assert parse_citations("One [E_ab12], group [E_ab12, E_deadbeef].") == {"E_ab12", "E_deadbeef"}
     assert parse_citations("[1] [1, 2] [Source 1] bare E_ab12 https://example.com/E_ab12") == set()

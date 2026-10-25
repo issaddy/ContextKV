@@ -8,7 +8,7 @@ from controller.candidates import CandidatePolicy, build_candidates
 from controller.evidence import assign_references, make_evidence
 from controller.schema import ExecutionLedger, Message, SessionSnapshot, TurnRecord
 from controller.templates import (SYSTEM_PROMPT, ByteTemplate, current_user_message,
-                                  render_evidence_relations, verify_evidence_spans)
+                                  current_source_guide, render_evidence_relations, verify_evidence_spans)
 
 
 def relations(message):
@@ -134,11 +134,12 @@ def test_absent_metadata_keeps_existing_message_bytes_tokens_spans_and_hash():
     append, rebuild = build_candidates(snapshot, "Next question", (block,))
     template = ByteTemplate()
     assert render_evidence_relations((block,), snapshot.reference_map) == ""
+    guide = current_source_guide("Next question", (block,), snapshot.reference_map)
     current, spans = current_user_message("Next question", (), snapshot.reference_map,
-        message_index=len(snapshot.execution.messages), reused=(block.key,))
+        message_index=len(snapshot.execution.messages), reused=(block.key,), source_guide=guide)
     expected_append = snapshot.execution.messages + (current,)
     current_rebuild, rebuild_spans = current_user_message("Next question", (block,), snapshot.reference_map,
-                                                        message_index=3)
+                                                        message_index=3, source_guide=guide)
     expected_rebuild = (Message("system", SYSTEM_PROMPT), Message("user", "Earlier question"),
                         Message("assistant", "The actual earlier answer."), current_rebuild)
     for candidate, messages, expected_spans in (

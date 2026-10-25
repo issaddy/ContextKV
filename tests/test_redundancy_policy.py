@@ -122,7 +122,9 @@ async def test_control_profile_matches_policy_measurement_and_quote_use(tmp_path
     config = RunConfig(planner=PlannerKnobs(strategy=strategy, fallback_strategy="redundancy_threshold"))
     controller = Controller(SessionStore(tmp_path / "profile.sqlite3"), engine,
                             knobs=config.planner, policy=config.context)
-    await controller.serve_turn("s", "Previous question", (make_evidence("Old unrelated body", "old"),))
+    await controller.serve_turn("s", "Previous question", (make_evidence("Old unrelated body", "old"),
+        make_evidence("Request timeout is 30 seconds; connection timeout is 5 seconds.", "timeout")))
+    await controller.drain()
     observed = []
     original = engine.quote_batch
 

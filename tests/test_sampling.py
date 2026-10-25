@@ -78,16 +78,19 @@ def test_real_http_client_default_and_explicit_wire_share_one_budget(stream, rec
         engine = SGLangEngineClient("http://test", fp, sampling=recipe, stream=stream,
                                     transport=httpx.MockTransport(handler))
         try:
-            for cap, ignore in ((2, False), (3, True)):
+            for cap, ignore, citations in ((2, False, None), (3, True, None), (4, False, ("E_aa",))):
                 result = await engine.generate(input_ids=[1, 2], session_id="s", expected_generation=1,
-                    expected_restart_id="r", attempt_id="a", fingerprint=fp, max_new_tokens=cap, ignore_eos=ignore)
+                    expected_restart_id="r", attempt_id="a", fingerprint=fp, max_new_tokens=cap, ignore_eos=ignore,
+                    citation_ids=citations)
                 assert result.output_ids == (7,)
         finally:
             await engine.aclose()
     asyncio.run(scenario())
-    for body, cap, ignore in zip(requests, (2, 3), (False, True)):
+    from controller.templates import citation_regex
+    for body, cap, ignore, citations in zip(requests, (2, 3, 4), (False, True, False), (None, None, ("E_aa",))):
         assert body["sampling_params"] == {**request_sampling(recipe), "max_new_tokens": cap,
-                                           **({"ignore_eos": True} if ignore else {})}
+                                           **({"ignore_eos": True} if ignore else {}),
+                                           **({"regex": citation_regex(citations)} if citations is not None else {})}
         assert body["stream"] is stream
 
 

@@ -332,7 +332,9 @@ class Controller:
                 attempt = self.store.submit_attempt(attempt, epoch)
                 self.events.emit("epoch_prepared", business_session_id=session_id, attempt_id=attempt.attempt_id, epoch=epoch)
                 self.events.emit("request_submitted", business_session_id=session_id, attempt_id=attempt.attempt_id,
-                                 sampling_params={**self._sampling_params, "max_new_tokens": self.policy.max_new_tokens})
+                                 sampling_params={**self._sampling_params, "max_new_tokens": self.policy.max_new_tokens},
+                                 constrained_citation_ids=tuple(ref for ref, key in plan.candidate.reference_map
+                                                               if key in plan.candidate.required_blocks))
                 submitted = time.monotonic()
                 self._active_generations += 1
                 try:
@@ -340,7 +342,9 @@ class Controller:
                                                     expected_generation=epoch.session_generation,
                                                     expected_restart_id=epoch.engine_restart_id,
                                                     attempt_id=attempt.attempt_id, fingerprint=self.template.fingerprint,
-                                                    max_new_tokens=self.policy.max_new_tokens)
+                                                    max_new_tokens=self.policy.max_new_tokens,
+                                                    citation_ids=tuple(ref for ref, key in plan.candidate.reference_map
+                                                                       if key in plan.candidate.required_blocks))
                 finally:
                     self._active_generations -= 1
                 response_done = time.monotonic()

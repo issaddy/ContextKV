@@ -68,9 +68,12 @@ async def test_formal_scoped_native_preserves_definition_payload_full_history(lo
         session = OnlineSession(load_rows(FIXTURE)[:3])
         first = await service(session.current())
         session.commit(session.current().task_id, first.assistant_text)
-        await service(session.current())
+        second = await service(session.current())
         assert first.assistant_text in bytes(calls[1]["input_ids"]).decode()
-        assert all(p["sampling_params"] == {**RECIPE.record(), "max_new_tokens": 512} for p in calls)
+        from controller.templates import citation_regex
+        for p, result in zip(calls, (first, second)):
+            assert p["sampling_params"] == {**RECIPE.record(), "max_new_tokens": 512,
+                                            "regex": citation_regex(result.citation_scope)}
         assert all(("session_id" in p) is (baseline == "B1") for p in calls)
         assert not any(any("contextkv" in key for key in p) for p in calls)
         await service.close_all()
@@ -244,7 +247,9 @@ def test_run_config_cli_uses_real_scope_factory_and_recipe_without_test_mode(
     assert loaded == [(local_scope.scope.model_path, None, {"namespace_hash": "default", "local_files_only": True,
                                                             "model_identity": local_scope.scope.identity})]
     assert len(requests) == len(exports) == 6
-    assert all(r["sampling_params"] == {**RECIPE.record(), "max_new_tokens": 64} for r in requests)
+    assert all({k:v for k,v in r["sampling_params"].items() if k != "regex"}
+               == {**RECIPE.record(), "max_new_tokens": 64} for r in requests)
+    assert all(isinstance(r["sampling_params"]["regex"], str) for r in requests)
     payload = json.loads(next(output.glob("native-*.json")).read_text())
     assert payload["shared_configuration"]["sampling_recipe"] == RECIPE.record()
     assert payload["template_fingerprint"]["model_revision"] == local_scope.scope.identity

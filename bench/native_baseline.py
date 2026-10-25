@@ -30,6 +30,7 @@ from adapters.retriever_factory import create_retriever
 from bench.run_sessions import run_sessions
 from bench.quality import export_evaluation
 from controller.candidates import CandidatePolicy, build_candidates
+from controller.templates import citation_regex
 from controller.schema import ClientTiming, SessionSnapshot, TurnRecord
 from controller.sampling import SamplingRecipe, bound_recipe, request_sampling
 from controller.serialization import to_jsonable
@@ -209,7 +210,8 @@ class NativeSGLangClient:
 
     async def generate(self, input_ids: Sequence[int], *, max_new_tokens: int,
                        session_id: str | None = None, rid: str | None = None,
-                       json_schema: Mapping[str, Any] | None = None) -> NativeGeneration:
+                       json_schema: Mapping[str, Any] | None = None,
+                       citation_ids: Sequence[str] | None = None) -> NativeGeneration:
         if not input_ids or any(type(token) is not int or token < 0 for token in input_ids):
             raise ValueError("input_ids must be actual nonnegative integer token IDs")
         if max_new_tokens < 1:
@@ -218,11 +220,15 @@ class NativeSGLangClient:
                    "sampling_params": {**self._sampling_params, "max_new_tokens": max_new_tokens},
                    "return_prompt_token_ids": self.audit_prompt_ids}
         if json_schema is not None:
+            if citation_ids is not None:
+                raise ValueError("choose json_schema or citation constraints")
             if not isinstance(json_schema, Mapping):
                 raise ValueError("json_schema must be a schema object")
             # The native SamplingParams field is a JSON string. Compile/validate
             # its grammar in the existing engine; it applies to this call only.
             payload["sampling_params"]["json_schema"] = json.dumps(dict(json_schema), allow_nan=False)
+        if citation_ids is not None:
+            payload["sampling_params"]["regex"] = citation_regex(citation_ids)
         if session_id is not None:
             payload["session_id"] = session_id
         if rid is not None:
@@ -435,7 +441,9 @@ class NativeBaseline:
             if native_sid is not None:
                 self._native_sessions.add(native_sid)
             result = await self.client.generate(candidate.input_ids, max_new_tokens=self.policy.max_new_tokens,
-                                                session_id=native_sid, rid=f"{self.run_id}:{turn.task_id}")
+                                                session_id=native_sid, rid=f"{self.run_id}:{turn.task_id}",
+                                                citation_ids=tuple(ref for ref, key in candidate.reference_map
+                                                                   if key in candidate.required_blocks))
             # Candidate construction has already validated this turn's evidence.
             archive = {block.key: block for block in (*snapshot.archive, *retrieved)}
             record = TurnRecord(turn.turn, turn.query, result.text, result.output_ids,

@@ -52,7 +52,8 @@ async def test_cost_tie_compacts_evidence_and_retires_only_after_commit(tmp_path
     controller,store,engine = system(tmp_path,cost_model=model)
     old_evidence = make_evidence("Old material. "*200,"old")
     new_evidence = make_evidence("Current material.","new")
-    first = await controller.serve_turn("s","Summarize the old material.",(old_evidence,),request_id="1")
+    shared = make_evidence("Shared relevant condition.", "shared")
+    first = await controller.serve_turn("s","Summarize the old material.",(old_evidence,shared),request_id="1")
     old = store.read_snapshot("s").current_epoch
     retired = []
     original_retire = engine.retire
@@ -70,15 +71,15 @@ async def test_cost_tie_compacts_evidence_and_retires_only_after_commit(tmp_path
     if lost_response:
         engine.drop_next_generate_response = True
         with pytest.raises(UnknownOutcomeError):
-            await controller.serve_turn("s","Summarize the new material.",(new_evidence,),request_id="2")
+            await controller.serve_turn("s","Summarize the new material.",(new_evidence,shared),request_id="2")
         assert store.read_snapshot("s").current_epoch == old
         assert not retired and (await engine.status(engine_session_id=old.engine_session_id)).state != "RETIRED"
-    second = await controller.serve_turn("s","Summarize the new material.",(new_evidence,),request_id="2")
+    second = await controller.serve_turn("s","Summarize the new material.",(new_evidence,shared),request_id="2")
     snapshot = store.read_snapshot("s")
     assert second.action == "REBUILD" and second.reason == "context_size_tie_break"
     assert second.idempotent_replay == lost_response
     assert snapshot.raw_history[0].assistant_text == first.assistant_text
-    assert snapshot.execution.visible_blocks == frozenset((new_evidence.key,))
+    assert snapshot.execution.visible_blocks == frozenset((new_evidence.key,shared.key))
     await controller.drain()
     assert retired == [old.engine_session_id] and not store.outbox()
 

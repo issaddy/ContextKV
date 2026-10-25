@@ -16,6 +16,7 @@ from controller.schema import (CacheQuoteBatch, CompletionReceipt,
 from controller.serialization import decode
 from .sampling import SamplingRecipe, request_sampling
 from controller.templates import token_hash as token_hash
+from controller.templates import citation_regex
 
 PROTOCOL_VERSION = "contextkv-v1"
 SGLANG_COMMIT = "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b"
@@ -95,7 +96,8 @@ class Engine(Protocol):
                       *, business_session_id: str | None = None) -> PrepareAck: ...
     async def generate(self, *, input_ids: Sequence[int], session_id: str, expected_generation: int,
                        expected_restart_id: str, attempt_id: str, fingerprint: ConfigFingerprint,
-                       max_new_tokens: int = 128, ignore_eos: bool = False) -> GenerationResult: ...
+                       max_new_tokens: int = 128, ignore_eos: bool = False,
+                       citation_ids: Sequence[str] | None = None) -> GenerationResult: ...
     async def retire(self, engine_session_id: str, expected_generation: int, operation_id: str,
                      expected_restart_id: str, reason: str = "replaced") -> RetireAck: ...
     async def status(self, engine_session_id: str | None = None, attempt_id: str | None = None,
@@ -197,13 +199,15 @@ class SGLangEngineClient:
         return PrepareAck(**await self._post("/context/epoch/prepare", body))
 
     async def generate(self, *, input_ids, session_id, expected_generation, expected_restart_id,
-                       attempt_id, fingerprint, max_new_tokens=128, ignore_eos=False):
+                       attempt_id, fingerprint, max_new_tokens=128, ignore_eos=False, citation_ids=None):
         await self._ready()
         self._check_fingerprint(fingerprint)
         start = time.perf_counter()
         sampling = {**self._sampling_params, "max_new_tokens": max_new_tokens}
         if ignore_eos:
             sampling["ignore_eos"] = True
+        if citation_ids is not None:
+            sampling["regex"] = citation_regex(citation_ids)
         body = {
             "rid": attempt_id, "input_ids": list(input_ids), "session_id": session_id,
             "expected_generation": expected_generation, "expected_restart_id": expected_restart_id,

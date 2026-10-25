@@ -23,6 +23,7 @@ SYSTEM_PROMPT = (
     "specifically what remains unknown. Do not refuse the whole question because one detail is missing. "
     "General guidance can be useful even without guidance specific to the named group or product: "
     "present it explicitly as general guidance and identify that limitation. "
+    "For an unsupported part, state the gap without adding recommendations from memory. "
     "Distinguish direct support from inference; do not invent steps or capabilities to fill gaps. "
     "Preserve relevant versions, conditions and exceptions. "
     "Complete the requested answer before optional detail. Avoid broad background, repeated "
@@ -32,6 +33,18 @@ SYSTEM_PROMPT = (
 
 def token_hash(input_ids: Iterable[int]) -> str:
     return hashlib.sha256(json.dumps(list(input_ids), separators=(",", ":")).encode()).hexdigest()
+
+
+def citation_regex(references: Iterable[str]) -> str:
+    """Native constrained decoding for the reserved [E_...] citation syntax.
+
+    Ordinary text, code brackets and Markdown links remain free. A bracket
+    followed by E_ starts a citation and must contain allowed IDs. This checks
+    eligibility only: the model still has to ground the associated claims.
+    """
+    ids = "|".join(re.escape(ref) for ref in sorted(set(references)))
+    citation = rf"|(?:{ids})(?:\s*,\s*(?:{ids}))*\][^\[]*" if ids else ""
+    return rf"[^\[]*(?:\[(?:E?|[^E\[][^\[]*|E[^_\[][^\[]*{citation}))*"
 
 
 def longest_common_prefix(left: Iterable[int], right: Iterable[int]) -> int:
@@ -232,7 +245,7 @@ def current_source_guide(query: str, blocks: Iterable[EvidenceBlock],
     rows = []
     for block in blocks:
         lines = list(re.finditer(r"[^\r\n]+", block.text))
-        best = max(lines, key=lambda line: sum(weights.get(term, 0) for term in terms(line.group())),
+        best = max(lines, key=lambda line: sum(weights[term] for term in sorted(terms(line.group()) & query_terms)),
                    default=None)
         row = {"id": by_key[block.key], "title": block.title}
         if best is not None and terms(best.group()) & query_terms:

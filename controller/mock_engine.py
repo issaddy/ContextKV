@@ -251,7 +251,7 @@ class MockEngine:
                 self._event("free", tier="gpu", slots=1)
 
     async def generate(self, *, input_ids, session_id, expected_generation, expected_restart_id,
-                       attempt_id, fingerprint, max_new_tokens=128, ignore_eos=False):
+                       attempt_id, fingerprint, max_new_tokens=128, ignore_eos=False, citation_ids=None):
         started = time.perf_counter()
         ids = tuple(input_ids)
         input_hash = token_hash(ids)

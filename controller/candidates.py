@@ -107,6 +107,10 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
             reason = "recovery_requires_rebuild"
         elif not allows_version_comparison(query, policy) and version_conflicts(visible, required_keys):
             reason = "invalid_visible_version"
+        elif visible and not required_keys & visible:
+            # No current source body would be reused. Carrying the old evidence
+            # only adds an ineligible source set; rebuild keeps the actual QA.
+            reason = "evidence_working_set_replaced"
         missing = tuple(block for block in required if block.key not in visible)
         current, spans = current_user_message(query, missing, references,
             message_index=len(execution.messages), reused=required_keys & visible,

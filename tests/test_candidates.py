@@ -115,6 +115,17 @@ def test_current_source_navigation_is_shared_verbatim_and_keeps_cached_prefix():
                    for m in (plan.messages[s.message_index],) if s.key == block.key)
 
 
+def test_disjoint_evidence_rebuilds_but_partial_overlap_remains_a_cost_choice():
+    old, new = make_evidence("Old complete body", "old"), make_evidence("New complete body", "new")
+    snapshot = SessionSnapshot("s")
+    snapshot = committed(build_candidates(snapshot, "First", (old,))[0], snapshot, "First", (old,))
+    append, rebuild = build_candidates(snapshot, "Independent new question", (new,))
+    assert not append.feasible and append.reason == "evidence_working_set_replaced"
+    assert rebuild.feasible and rebuild.messages[2].content == snapshot.raw_history[0].assistant_text
+    append, rebuild = build_candidates(snapshot, "Followup", (old, new))
+    assert append.feasible and rebuild.feasible
+
+
 def test_changed_version_or_content_makes_append_invalid():
     a = make_evidence("old config","api")
     new = make_evidence("new config","api",version="v2")
