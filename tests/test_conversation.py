@@ -47,11 +47,28 @@ def test_clear_topic_and_definition_skip_rewriting_and_discard_last_three_bag():
     assert not client.inputs
 
 
-def test_named_fragment_can_complete_the_previous_task_instead_of_forcing_a_topic_switch():
-    client = Client({"query": "How do I create tables using AtlasCloud?",
-                     "relation": "condition_change", "history_turns": [1]})
-    view = ConversationResolver(client).resolve(turn("Use AtlasCloud", ("How do I create tables?",)), PriorContext())
-    assert view["text"] == "How do I create tables using AtlasCloud?" and view["model_called"]
+@pytest.mark.parametrize("task,qualifier", [
+    ("How do I create tables?", "Use AtlasCloud"),
+    ("how to create schema or tables?", "use IBM Cloudant Query"),
+    ("如何创建模式和表？", "使用 AtlasCloud"),
+])
+def test_named_fragment_preserves_the_task_without_an_extra_model_call(task, qualifier):
+    client = Client(None)
+    view = ConversationResolver(client).resolve(turn(qualifier, ("Earlier unrelated question", task)), PriorContext())
+    assert view["text"] == task + "\n" + qualifier
+    assert view["context"] == asdict(QueryContext(view["text"], "condition_change", (2,)))
+    assert not client.inputs and not view["model_called"]
+
+
+@pytest.mark.parametrize("task,current", [
+    ("How do I create tables with AtlasCloud?", "Use NovaCloud"),
+    ("How do I create tables?", "Use Python to parse this file instead"),
+    ("What is a data lake?", "Use AtlasCloud"),
+])
+def test_named_replacement_or_new_task_uses_semantic_interpretation(task, current):
+    client = Client({"query":"The actual resolved task", "relation":"followup", "history_turns":[1]})
+    view = ConversationResolver(client).resolve(turn(current, (task,)), PriorContext())
+    assert view["text"] == "The actual resolved task" and view["model_called"]
 
 
 @pytest.mark.parametrize("query,relation,resolved", [
@@ -103,9 +120,16 @@ def test_invalid_or_truncated_interpretation_uses_current_query_once(value, fini
 def test_label_mismatch_does_not_discard_a_rewrite_with_valid_antecedents():
     query = "How do I create tables using AtlasCloud?"
     client = Client({"query": query, "relation": "standalone", "history_turns": [1]})
-    view = ConversationResolver(client).resolve(turn("Use AtlasCloud", ("How do I create tables?",)), PriorContext())
+    view = ConversationResolver(client).resolve(turn("What about using AtlasCloud?", ("How do I create tables?",)), PriorContext())
     assert view["text"] == query and view["declared_relation"] == "standalone"
     assert view["context"]["relation"] == "followup"
+
+
+def test_extra_response_metadata_does_not_discard_a_valid_interpretation():
+    client = Client({"query":"AtlasCloud limits?", "relation":"followup", "history_turns":[1],
+                     "explanation":"Extra transport metadata is not part of the intent."})
+    view = ConversationResolver(client).resolve(turn("What about its limits?"), PriorContext())
+    assert view["context"] == asdict(QueryContext("AtlasCloud limits?", "followup", (1,)))
 
 
 def test_ordinary_questions_reuse_the_existing_query_view_without_extra_generation():
@@ -238,6 +262,36 @@ def test_multiple_selected_antecedents_do_not_restore_the_last_unrelated_source(
     intent = QueryContext("Atlas application material?", "revisit", (1, 2))
     for plan in build_candidates(snap, "Back to the first one?", (current,), query_context=intent):
         assert plan.required_blocks == {current.key}
+
+
+@pytest.mark.asyncio
+async def test_disjoint_append_commits_new_scope_then_version_change_retires_after_rebuild(tmp_path):
+    store, engine = SessionStore(tmp_path/'state.sqlite3'), MockEngine()
+    service = Controller(store, engine, knobs=PlannerKnobs(strategy="always_append"))
+    old = make_evidence("Old task evidence.", "old")
+    current = make_evidence("AtlasCloud table task evidence.", "current")
+    revised = make_evidence("Revised AtlasCloud task evidence.", "current", version="v2")
+    try:
+        first = await service.serve_turn("s", "How do I create tables?", (old,), request_id="one")
+        snapshot = store.get_snapshot("s")
+        original_epoch = snapshot.current_epoch
+        request = turn("Use AtlasCloud", (snapshot.raw_history[0].user_text,))
+        intent = QueryContext(**ConversationResolver(Client(None)).resolve(request, PriorContext())["context"])
+        second = await service.serve_turn("s", request.query, (current,), query_context=intent, request_id="two")
+        snapshot = store.get_snapshot("s")
+        assert second.action == "APPEND" and snapshot.current_epoch == original_epoch
+        assert set(snapshot.raw_history[-1].evidence_keys) == {current.key}
+        assert snapshot.raw_history[-1].query_context == intent
+        assert set(first.citation_scope).isdisjoint(second.citation_scope)
+        third = await service.serve_turn("s", "Use the revised conditions.", (revised,), request_id="three")
+        assert third.action == "REBUILD"
+        assert store.get_snapshot("s").current_epoch != original_epoch
+        await service.close_session("s")
+        assert not store.outbox("s")
+        assert store.db.execute("SELECT closed FROM sessions WHERE session_id='s'").fetchone()[0] == 1
+    finally:
+        await service.aclose()
+        store.close()
 
 
 @pytest.mark.asyncio

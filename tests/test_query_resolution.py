@@ -6,7 +6,8 @@ import pytest
 
 from adapters.mtrag import OnlineMessage, OnlineTurn
 from adapters.query_resolution import (PriorContext, PriorSource, TopicResolver, candidates,
-    controller_context_provider, native_context_provider, selection_response_format, snapshot_context)
+    controller_context_provider, native_context_provider, qualified_topic_names,
+    selection_response_format, snapshot_context)
 from adapters.query_selector import CompletionResult
 from controller.evidence import make_evidence
 from controller.mock_engine import MockEngine
@@ -71,6 +72,19 @@ def test_unverified_baseline_uses_same_selector_but_includes_unsupported_candida
     result = TopicResolver(client, "assistant_topic_unverified").resolve(turn, context)
     assert "PhantomStore" in result["text"] and not result["source_qualification_required"]
     assert not result["selected_entities"][0]["supports"]
+
+
+@pytest.mark.parametrize("source_turns", [(1,), (2,), (5,)])
+def test_compact_name_projection_matches_the_full_catalog_without_building_source_windows(monkeypatch, source_turns):
+    from adapters import query_resolution
+    turn, context = fixture()
+    context = replace(context, sources=tuple(replace(s, visible_turns=source_turns) for s in context.sources))
+    entities, _, rejected = candidates(turn, context, "source_topic")
+    expected = [{"text":e["text"], "turns": sorted({o["turn"] for o in e["history_occurrences"]})} for e in entities]
+    def no_windows(*args):
+        raise AssertionError("The compact route must not construct unused provenance windows")
+    monkeypatch.setattr(query_resolution, "_supports", no_windows)
+    assert qualified_topic_names(turn, context) == (expected, [e["text"] for e in rejected])
 
 
 def test_later_source_does_not_retroactively_ground_an_earlier_assistant_name():

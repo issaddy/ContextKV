@@ -108,27 +108,32 @@ def native_context_provider(baseline):
     return lambda turn: snapshot_context(turn, baseline.snapshots.get(turn.conversation_id))
 
 
-def _supports(name, turn_id, context):
-    supports = []
+def _source_matches(name, turn_id, context):
+    pattern = re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.I)
     for source in context.sources:
-        visible = tuple(n for n in source.visible_turns if n <= turn_id)
-        if not visible:
+        if not any(n <= turn_id for n in source.visible_turns):
             continue
         for field in ("title", "text"):
-            text = getattr(source.block, field)
-            match = re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", text, re.I)
+            match = pattern.search(getattr(source.block, field))
             if match:
-                a, b = match.span()
-                context_a, context_b = max(0, a-120), min(len(text), b+120)
-                supports.append({"key": asdict(source.block.key), "visible_turns": list(visible), "field": field,
-                    "span": asdict(SourceSpan(text[a:b], a, b)),
-                    "source_window": asdict(SourceSpan(text[context_a:context_b], context_a, context_b))})
+                yield source, field, match
                 break
+
+
+def _supports(name, turn_id, context):
+    supports = []
+    for source, field, match in _source_matches(name, turn_id, context):
+        text = getattr(source.block, field)
+        a, b = match.span()
+        context_a, context_b = max(0, a-120), min(len(text), b+120)
+        supports.append({"key": asdict(source.block.key),
+            "visible_turns": [n for n in source.visible_turns if n <= turn_id], "field": field,
+            "span": asdict(SourceSpan(text[a:b], a, b)),
+            "source_window": asdict(SourceSpan(text[context_a:context_b], context_a, context_b))})
     return supports
 
 
-def candidates(turn, context, mode, *, history_turns=3):
-    """Name spans are recall candidates, not a topic routing decision."""
+def _history_candidates(turn, history_turns):
     names, users = {}, []
     for index, message in enumerate(turn.history):
         if index < max(0, len(turn.history) - 2*history_turns):
@@ -146,8 +151,27 @@ def candidates(turn, context, mode, *, history_turns=3):
             item = names.setdefault(key, {"id": f"e{len(names)}", "history_occurrences": []})
             item.update(text=span["text"], history_turn=number, history_span=span)
             item["history_occurrences"].append({"turn": number, "span": span})
+    return names.values(), users
+
+
+def qualified_topic_names(turn, context, *, history_turns=3):
+    """Project names directly; do not build source windows discarded by CQR."""
+    names, _ = _history_candidates(turn, history_turns)
+    qualified, excluded = [], []
+    for item in names:
+        if next(_source_matches(item["text"], item["history_turn"], context), None) is None:
+            excluded.append(item["text"])
+        else:
+            qualified.append({"text": item["text"],
+                "turns": sorted({o["turn"] for o in item["history_occurrences"]})})
+    return qualified, excluded
+
+
+def candidates(turn, context, mode, *, history_turns=3):
+    """Name spans are recall candidates, not a topic routing decision."""
+    names, users = _history_candidates(turn, history_turns)
     entities, excluded = [], []
-    for item in names.values():
+    for item in names:
         item["supports"] = _supports(item["text"], item["history_turn"], context)
         if mode == "source_topic" and not item["supports"]:
             excluded.append(item)

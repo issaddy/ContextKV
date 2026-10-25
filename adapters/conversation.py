@@ -11,13 +11,13 @@ import json
 import re
 import time
 
-from adapters.query_resolution import candidates
+from adapters.query_resolution import qualified_topic_names
 from adapters.query_views import correction_cue, named_user_spans
 from adapters.retrieval import retrieval_query
 from controller.schema import QueryContext
 
 
-VERSION = "conversational-intent-v3"
+VERSION = "conversational-intent-v4"
 RELATIONS = ("standalone", "followup", "correction", "condition_change", "topic_switch", "revisit", "ambiguous")
 _DEPENDENT = re.compile(
     r"\b(?:it|its|this|that|these|those|they|them|same|previous|earlier|again|instead|otherwise|"
@@ -27,7 +27,8 @@ _DEFINITION = re.compile(r"^\s*(?:what\s+(?:is|are)\b|define\b|什么是|解释�
 _QUESTION_FORM = re.compile(
     r"^\s*(?:what|how|where|when|why|who|which|is|are|can|does|do)\b|"
     r"^\s*(?:tell me about|explain)\b", re.I)
-_FRAGMENT = re.compile(r"^\s*(?:use|using|with)\b|^\s*(?:用|改用|换成)", re.I)
+_FRAGMENT = re.compile(r"^\s*(?:use|using|with)\b|^\s*(?:使用|用|改用|换成)", re.I)
+_TASK = re.compile(r"^\s*how\b|^\s*(?:如何|怎么|怎样)", re.I)
 _REVISIT = re.compile(r"\b(?:first|original|earlier|previous|back to)\b|最初|最开始|回到|之前|先前|前者|后者", re.I)
 SYSTEM = """Rewrite the current question as a short, self-contained search question. Do not answer it.
 First select only antecedent user turns that supply inherited objects, tasks or conditions.
@@ -55,6 +56,23 @@ object generic when no unique product is identified. Prior interpretations are f
 Do not add facts, answers, code or recommendations. Return only the requested JSON."""
 
 
+def _literal_task_continuation(turn, context, fragment):
+    """A bare named tool/service can qualify the previous unresolved task.
+
+    Keep both user clauses verbatim. Replacing an already named object or
+    interpreting a complete new instruction stays on the existing model path.
+    """
+    target = turn.query[fragment.end():].strip().rstrip(".?!。！？")
+    spans = named_user_spans(target, include_single_title=True)
+    if len(spans) != 1 or (spans[0]["start"], spans[0]["end"]) != (0, len(target)):
+        return None
+    prior = context.interpretations[-1] if context.interpretations else None
+    task = prior.query if prior is not None else turn.user_questions[-2]
+    if not _TASK.search(task) or named_user_spans(task, include_single_title=True):
+        return None
+    return QueryContext(task + "\n" + turn.query, "condition_change", (len(turn.user_questions)-1,))
+
+
 class ConversationResolver:
     def __init__(self, client):
         self.client = client
@@ -63,7 +81,7 @@ class ConversationResolver:
     def manifest(self):
         return {"version": VERSION, "system_prompt": SYSTEM,
                 "history": "latest three committed user turns and their interpreted questions; explicit revisits can read all user turns; compact source-qualified names",
-                "calls": "one only for potentially context-dependent questions; no retries",
+                "calls": "bare named qualifiers of an unresolved task use literal composition; other dependent questions use at most one model call",
                 "self_contained_gate": "first turn, or named question/definition without dependency/correction cues; bare product fragments require interpretation",
                 "semantics": "derived intent, not factual evidence or a guarantee of correct resolution",
                 "transport": self.client.manifest}
@@ -80,7 +98,11 @@ class ConversationResolver:
 
         if not turn.history:
             return finish("first_user_turn")
-        dependent = _DEPENDENT.search(turn.query) or correction_cue(turn.query) or _FRAGMENT.search(turn.query)
+        fragment = _FRAGMENT.search(turn.query)
+        if fragment and (intent := _literal_task_continuation(turn, context, fragment)) is not None:
+            trace.update(text=intent.query, status="resolved", context=asdict(intent))
+            return finish("literal_task_continuation")
+        dependent = _DEPENDENT.search(turn.query) or correction_cue(turn.query) or fragment
         if not dependent and (_QUESTION_FORM.search(turn.query)
                               and named_user_spans(turn.query, include_single_title=True)
                               or _DEFINITION.search(turn.query)):
@@ -96,12 +118,7 @@ class ConversationResolver:
         for row, interpretation in zip(users, context.interpretations[first:]):
             if interpretation is not None:
                 row["prior_interpretation"] = interpretation.query
-        entities, _, excluded = candidates(turn, context, "source_topic", history_turns=history_window)
-        # Qualification already checked the original source. Repeating source
-        # IDs/windows for every name bloats retrieval input and distracts from
-        # the dialogue. Keep only names and their actual history occurrences.
-        names = [{"text": e["text"], "turns": sorted({o["turn"] for o in e["history_occurrences"]})}
-                 for e in entities]
+        names, excluded = qualified_topic_names(turn, context, history_turns=history_window)
         body = {"prior_user_turns": users, "active_user_turn": users[-1]["turn"],
                 "qualified_topic_names": names, "current_question": turn.query}
         schema = {"type": "object", "properties": {
@@ -114,18 +131,17 @@ class ConversationResolver:
         completion = self.client.complete([{"role": "system", "content": SYSTEM},
             {"role": "user", "content": json.dumps(body, ensure_ascii=False)}], response_format=response_format)
         trace.update(completion=asdict(completion), model_called=completion.status != "input_over_budget",
-                     response_format=response_format, excluded_unqualified_names=[e["text"] for e in excluded])
+                     response_format=response_format, excluded_unqualified_names=excluded)
         if completion.status != "completed" or completion.finish_reason != "stop":
             trace["status"] = "failed"
             return finish("incomplete_interpretation_uses_existing_history_view")
         try:
             value = json.loads(completion.text)
-            if set(value) != {"query", "relation", "history_turns"}:
-                raise ValueError("interpretation fields differ from the requested schema")
             if not isinstance(value["query"], str) or not value["query"].strip() or value["relation"] not in RELATIONS:
                 raise ValueError("invalid query or relation")
             ids = value["history_turns"]
-            if not isinstance(ids, list) or any(type(n) is not int or n not in {u["turn"] for u in users} for n in ids):
+            available_turns = {u["turn"] for u in users}
+            if not isinstance(ids, list) or any(type(n) is not int or n not in available_turns for n in ids):
                 raise ValueError("interpretation cites an unavailable user turn")
             relation = value["relation"]
             # Labels describe how a query was interpreted, not a hard gate on

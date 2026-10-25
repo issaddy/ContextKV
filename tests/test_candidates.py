@@ -115,13 +115,20 @@ def test_current_source_navigation_is_shared_verbatim_and_keeps_cached_prefix():
                    for m in (plan.messages[s.message_index],) if s.key == block.key)
 
 
-def test_disjoint_evidence_rebuilds_but_partial_overlap_remains_a_cost_choice():
+@pytest.mark.parametrize("costs,action", [((10, 30), "APPEND"), ((30, 10), "REBUILD")])
+def test_disjoint_evidence_keeps_both_options_and_selects_by_actual_cost(costs, action):
+    from controller.planner import choose_plan
+    from test_planner import MeasuredModel, batch
     old, new = make_evidence("Old complete body", "old"), make_evidence("New complete body", "new")
     snapshot = SessionSnapshot("s")
     snapshot = committed(build_candidates(snapshot, "First", (old,))[0], snapshot, "First", (old,))
     append, rebuild = build_candidates(snapshot, "Independent new question", (new,))
-    assert not append.feasible and append.reason == "evidence_working_set_replaced"
+    assert append.feasible and append.required_blocks == rebuild.required_blocks == {new.key}
+    assert append.theoretical_lcp > rebuild.theoretical_lcp
+    assert old.key not in append.required_blocks and old.key in append.visible_blocks
     assert rebuild.feasible and rebuild.messages[2].content == snapshot.raw_history[0].assistant_text
+    quotes = replace(batch(append, rebuild), fingerprint=append.fingerprint)
+    assert choose_plan((append, rebuild), quotes, MeasuredModel(*costs), snapshot).candidate.action == action
     append, rebuild = build_candidates(snapshot, "Followup", (old, new))
     assert append.feasible and rebuild.feasible
 

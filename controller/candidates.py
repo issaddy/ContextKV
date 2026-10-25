@@ -117,13 +117,11 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
             reason = "recovery_requires_rebuild"
         elif not allows_version_comparison(evidence_query, policy) and version_conflicts(visible, required_keys):
             reason = "invalid_visible_version"
-        elif visible and not required_keys & visible:
-            # No current source body would be reused. Carrying the old evidence
-            # only adds an ineligible source set; rebuild keeps the actual QA.
-            reason = "evidence_working_set_replaced"
         # An intent label alone does not invalidate cached bodies. Current
         # citation scope excludes superseded sources, versions are checked
-        # above, and B prices the extra context against rebuilding it.
+        # above, and B prices the extra context against rebuilding it. Even
+        # disjoint evidence can reuse a cached history prefix; overlap alone
+        # does not establish that rebuilding has lower execution cost.
         missing = tuple(block for block in required if block.key not in visible)
         current, spans = current_user_message(query, missing, references,
             message_index=len(execution.messages), reused=required_keys & visible,
