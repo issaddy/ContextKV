@@ -11,7 +11,8 @@ import pytest
 
 from adapters.mtrag import load_rows, online_turn
 from bench.blind_review import export_blind, import_ratings
-from bench.judge import DIMENSIONS, JudgeConfig, OfflineJudge, rule_audit
+from bench.judge import (DIMENSIONS, JudgeConfig, JudgeResponseError, OfflineJudge,
+                         parse_judge_response, rule_audit)
 from bench.official import evaluator_command, merge_offline_labels
 from bench.quality import export_evaluation, official_record
 from bench.report import paired_quality, summarize_run, telemetry_series
@@ -56,13 +57,16 @@ def test_actual_official_argument_names_and_no_secret_arguments():
 
 
 @pytest.mark.parametrize("thinking", [None,False])
-def test_judge_http_retains_all_visible_bodies_and_freezes_config(thinking):
+@pytest.mark.parametrize("flat", [False,True])
+def test_judge_http_retains_all_visible_bodies_and_freezes_config(thinking, flat):
     requests = []
     def respond(request):
         payload = json.loads(request.content)
         requests.append(payload)
         value = {"scores": {k: .8 for k in DIMENSIONS}, "script_history_mismatch": False,
                  "reason": "fake transport test only", "unsupported_claims": []}
+        if flat:
+            value.update(value.pop("scores"))
         return httpx.Response(200, json={"id": "fake", "model": "frozen", "choices": [{"finish_reason":"stop","message": {"content": json.dumps(value)}}]})
     async def check():
         judge = OfflineJudge(JudgeConfig("local", "frozen", "revision-1", "http://localhost/v1",enable_thinking=thinking),
@@ -75,6 +79,9 @@ def test_judge_http_retains_all_visible_bodies_and_freezes_config(thinking):
         assert result["generation_measurement_kind"] == "simulation"
         assert result["judge"]["revision"] == "revision-1"
         assert result["source"] == "offline_judge"
+        raw = json.loads(result["judge_response"]["choices"][0]["message"]["content"])
+        assert ("scores" not in raw) == flat
+        assert result["scores"] == {k:.8 for k in DIMENSIONS}
         assert result["query"] == record["query"] and result["input_hash"] == token_hash(record["input_ids"])
     asyncio.run(check())
     evidence = json.loads(requests[0]["messages"][1]["content"])["audit_evidence"]
@@ -98,6 +105,25 @@ def test_truncated_judge_json_is_not_accepted_as_a_completed_grade():
         finally:
             await judge.aclose()
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("values", [
+    {k:.8 for k in DIMENSIONS if k != "correctness"},
+    {k:True for k in DIMENSIONS}, {k:1.1 for k in DIMENSIONS},
+])
+def test_invalid_judge_values_retain_the_actual_response(values):
+    raw = {"choices":[{"finish_reason":"stop", "message":{"content":json.dumps(values)}}]}
+    with pytest.raises(JudgeResponseError) as caught:
+        parse_judge_response(raw)
+    assert caught.value.response is raw
+
+
+def test_score_metadata_does_not_invalidate_named_measurements():
+    scores = {k:None if k == "citations" else .75 for k in DIMENSIONS}
+    raw = {"choices":[{"finish_reason":"stop", "message":{"content":json.dumps(
+        {"scores":scores | {"note":"extra metadata"}, "reason":"task result"})}}]}
+    result, parsed = parse_judge_response(raw)
+    assert parsed == scores and result["reason"] == "task result"
 
 
 def test_rule_audit_flags_invalid_citation_without_inventing_quality():

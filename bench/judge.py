@@ -111,6 +111,31 @@ def evaluation_binding(record: Mapping) -> dict:
     return binding
 
 
+class JudgeResponseError(ValueError):
+    """Retain the received output so a parser repair does not require resampling."""
+    def __init__(self, message, response):
+        super().__init__(message)
+        self.response = response
+
+
+def parse_judge_response(raw):
+    try:
+        choice = raw["choices"][0]
+        if choice.get("finish_reason") != "stop":
+            raise ValueError(f"judge did not finish normally: {choice.get('finish_reason')}")
+        result = json.loads(choice["message"]["content"])
+        # Both common JSON layouts express the same named score dimensions.
+        # Missing/invalid values remain errors; no score is inferred or repaired.
+        values = result.get("scores", result)
+        scores = {key: values[key] for key in DIMENSIONS}
+        if any(v is not None and (isinstance(v, bool) or not isinstance(v, (int, float))
+                                 or not 0 <= v <= 1) for v in scores.values()):
+            raise ValueError("judge must return every score dimension as null or a number in [0,1]")
+        return result, scores
+    except (ValueError, KeyError, TypeError, IndexError, AttributeError) as error:
+        raise JudgeResponseError(str(error), raw) from error
+
+
 class OfflineJudge:
     def __init__(self, config: JudgeConfig, *, transport=None):
         self.config = config
@@ -129,19 +154,14 @@ class OfflineJudge:
         response = await self.client.post("chat/completions", json=payload)
         response.raise_for_status()
         raw = response.json()
-        choice = raw["choices"][0]
-        if choice.get("finish_reason") != "stop":
-            raise ValueError(f"judge did not finish normally: {choice.get('finish_reason')}")
-        result = json.loads(choice["message"]["content"])
-        scores = result["scores"]
-        if set(scores) != set(DIMENSIONS) or any(v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 1) for v in scores.values()):
-            raise ValueError("judge must return every score dimension as null or a number in [0,1]")
+        result, scores = parse_judge_response(raw)
         return {"task_id": record["task_id"], "conversation_id": record["conversation_id"],
                 "answer": record["answer"],
                 **evaluation_binding(record),
                 "scores": scores, "script_history_mismatch": result.get("script_history_mismatch"),
                 "reason": result.get("reason"), "unsupported_claims": result.get("unsupported_claims", []),
-                "judge": asdict(self.config), "api_response_id": raw.get("id"),
+                "judge": asdict(self.config), "judge_response": raw,
+                "api_response_id": raw.get("id"),
                 "served_model": raw.get("model"), "revision_provenance": "operator_declared",
                 "reference_targets_supplied": reference is not None,
                 "rule_audit": rule_audit(record), "source": "offline_judge",
@@ -169,6 +189,8 @@ async def evaluate_file(audit_path, config: JudgeConfig, output_path, *, referen
                               "answer": row["answer"], "status": "failed", "error": str(exc), "scores": None,
                               "source": "offline_judge", "judge": asdict(config),
                               "generation_measurement_kind": row.get("measurement_kind")}
+                    if isinstance(exc, JudgeResponseError):
+                        result["judge_response"] = exc.response
                 stream.write(json.dumps(result, ensure_ascii=False) + "\n")
                 stream.flush()
     finally:
