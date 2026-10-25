@@ -5,7 +5,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from adapters.hybrid_retrieval import DenseIndex, query_text, reciprocal_rank_fusion, search_variants
+from adapters.hybrid_retrieval import (DenseIndex, query_text, reciprocal_rank_fusion,
+                                      search_variants, select_condition_evidence)
 from adapters.mtrag import OnlineContext, json_hash, load_rows
 from adapters.retrieval import BM25SRetriever, load_beir_corpus
 from bench.retrieval_eval import evaluate_queries, prepare_queries, summarize
@@ -58,6 +59,40 @@ def test_rrf_duplicates_ties_and_formula():
     assert fused[0][1] == pytest.approx(1/61+1/62)
     with pytest.raises(ValueError, match="nonnegative"):
         reciprocal_rank_fusion([], k=-1)
+
+
+def test_condition_selection_keeps_the_task_anchor_displaced_by_plain_fusion():
+    primary = tuple(OnlineContext(f"p{i}", f"Original body {i}\nKeep complete.",
+                                  title=f"Source {i}", score=50-i) for i in range(50))
+    primary_ids = [c.document_id for c in primary]
+    condition_ids = primary_ids[2:] + primary_ids[1::-1]
+    plain = reciprocal_rank_fusion([primary_ids, condition_ids])
+    assert "p0" not in [pid for pid, _ in plain[:5]]
+    calls = []
+    class FocusReranker:
+        def score(self, query, pool):
+            calls.append((query, tuple(c.document_id for c in pool)))
+            return [50-condition_ids.index(c.document_id) for c in pool]
+    stage = {"contexts":primary,"rerank_query":"whole task with new condition",
+             "rerank_candidate_ids":primary_ids[::-1]}
+    selected, trace = select_condition_evidence(stage,"current condition",FocusReranker())
+    assert calls == [("current condition", tuple(primary_ids[::-1]))]
+    assert len(selected) == 5 and "p0" in [c.document_id for c in selected]
+    assert "p1" not in [c.document_id for c in selected]
+    assert trace["anchor_changed_selection"] and trace["extra_rerank_pairs"] == 50
+    originals = {c.document_id:c for c in primary}
+    for context in selected:
+        original = originals[context.document_id]
+        assert (context.text,context.title,context.source) == (original.text,original.title,original.source)
+    assert [c.score for c in selected] == sorted((c.score for c in selected),reverse=True)
+
+
+@pytest.mark.parametrize("condition,size", [(None,8),("whole task",8),("new condition",5)])
+def test_condition_selection_skips_redundant_scoring(condition,size):
+    primary = contexts()[:size]
+    reranker = Reranker()
+    selected, trace = select_condition_evidence({"contexts":primary,"rerank_query":"whole task"},condition,reranker)
+    assert selected == primary[:5] and trace is None and not reranker.calls
 
 
 def test_query_views_and_explicit_generated_history():

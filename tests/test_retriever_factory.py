@@ -120,12 +120,13 @@ def test_conversational_factory_shares_one_query_with_retrieval_generation_and_s
         wrapper.close()
 
 
-def test_conversational_factory_uses_the_same_pipeline_without_a_model_client(retriever_config, monkeypatch):
+@pytest.mark.parametrize("fusion", ["single", "current_topic_rrf"])
+def test_conversational_factory_uses_the_same_pipeline_without_a_model_client(retriever_config, monkeypatch, fusion):
     from adapters import query_selector
     from adapters.serving_retrieval import ServingRetriever
     from controller.schema import SessionSnapshot, TurnRecord
     value = yaml.safe_load(retriever_config.read_text())
-    value.update(query_mode="conversational", query_fusion="single")
+    value.update(query_mode="conversational", query_fusion=fusion)
     retriever_config.write_text(yaml.safe_dump(value))
     def unexpected_client(*args, **kwargs):
         raise AssertionError("No auxiliary model was configured")
@@ -136,9 +137,52 @@ def test_conversational_factory_uses_the_same_pipeline_without_a_model_client(re
     try:
         selected = wrapper._retrieve(snapshot, "Use AtlasCloud", "request", time.monotonic())
         assert selected.query_context.query == "How do I create tables?\nUse AtlasCloud"
-        assert retriever.encoder.inputs == retriever.reranker.inputs == [selected.query_context.query]
+        assert retriever.encoder.inputs == ([selected.query_context.query] if fusion == "single" else
+                                             ["Use AtlasCloud", selected.query_context.query])
+        assert retriever.reranker.inputs == [selected.query_context.query, "Use AtlasCloud"]
+        trace = retriever.manifest["query_view_traces"][0]["condition_evidence"]
+        assert trace["extra_rerank_pairs"] == 6
+        assert [key.document_id for key in selected.retrieval_priority] == trace["selected_ids"]
         assert retriever.manifest["query_view"]["transport"]["kind"] == "no_auxiliary_model"
     finally:
+        wrapper.close()
+
+
+@pytest.mark.asyncio
+async def test_condition_selection_commits_once_through_the_serving_pipeline(retriever_config, tmp_path):
+    from adapters.serving_retrieval import ServingRetriever
+    from controller.evidence import make_evidence
+    from controller.mock_engine import MockEngine
+    from controller.service import Controller
+    from controller.session_store import SessionStore
+    value = yaml.safe_load(retriever_config.read_text())
+    value.update(query_mode="conversational", query_fusion="single")
+    retriever_config.write_text(yaml.safe_dump(value))
+    retriever = create_retriever("P3", config_path=retriever_config)
+    wrapper = ServingRetriever(retriever, corpus_id="fixture")
+    store = SessionStore(tmp_path/"sessions.sqlite3")
+    service = Controller(store, MockEngine())
+    try:
+        await service.serve_turn("session", "How do I create tables?", (make_evidence("Prior evidence", "prior"),),
+                                 corpus_snapshot_id=wrapper.corpus_snapshot_id, request_id="first")
+        async def provider(snapshot):
+            return await wrapper.retrieve(snapshot, "Use AtlasCloud", "second")
+        response = await service.serve_turn("session", "Use AtlasCloud", evidence_provider=provider,
+                                            corpus_snapshot_id=wrapper.corpus_snapshot_id, request_id="second")
+        state = store.get_snapshot("session")
+        trace = retriever.manifest["query_view_traces"][0]["condition_evidence"]
+        assert {key.document_id for key in state.raw_history[-1].evidence_keys} == set(trace["selected_ids"])
+        assert state.raw_history[-1].query_context.query == "How do I create tables?\nUse AtlasCloud"
+        assert state.raw_history[-1].assistant_text == response.assistant_text
+        calls = list(retriever.reranker.inputs)
+        replay = await service.serve_turn("session", "Use AtlasCloud", evidence_provider=provider,
+                                          corpus_snapshot_id=wrapper.corpus_snapshot_id, request_id="second")
+        assert replay.assistant_text == response.assistant_text and retriever.reranker.inputs == calls
+        await service.close_session("session")
+        assert not store.outbox()
+    finally:
+        await service.aclose()
+        store.close()
         wrapper.close()
 
 

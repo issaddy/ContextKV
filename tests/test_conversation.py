@@ -57,6 +57,7 @@ def test_named_fragment_preserves_the_task_without_an_extra_model_call(task, qua
     view = ConversationResolver(client).resolve(turn(qualifier, ("Earlier unrelated question", task)), PriorContext())
     assert view["text"] == task + "\n" + qualifier
     assert view["context"] == asdict(QueryContext(view["text"], "condition_change", (2,)))
+    assert view["condition_query"] == qualifier
     assert not client.inputs and not view["model_called"]
 
 

@@ -67,6 +67,41 @@ def reciprocal_rank_fusion(rankings, *, k=60):
     return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
 
 
+def select_condition_evidence(stage, condition_query, reranker, *, top_k=5, rrf_k=60):
+    """Maximize fused rank score with the primary task's first passage retained.
+
+    Both views score the same pool. The primary anchor protects the original
+    task from query drift; it is not a guarantee of semantic support or complete
+    answer coverage. Ordinary/single-view ranking is unchanged.
+    """
+    primary = stage["contexts"]
+    if not condition_query or condition_query == stage["rerank_query"] or len(primary) <= top_k:
+        return primary[:top_k], None
+    by_id = {context.document_id: context for context in primary}
+    candidates = tuple(by_id[pid] for pid in stage["rerank_candidate_ids"])
+    started = time.perf_counter()
+    scores = reranker.score(condition_query, candidates)
+    if len(scores) != len(candidates):
+        raise ValueError("reranker scores must align with candidate passages")
+    condition_ids = [context.document_id for context, _ in sorted(zip(candidates, scores),
+                     key=lambda item: (-float(item[1]), item[0].document_id))]
+    primary_ids = [context.document_id for context in primary]
+    fused = reciprocal_rank_fusion([primary_ids, condition_ids], k=rrf_k)
+    anchor = primary_ids[0]
+    selected = {anchor, *[pid for pid, _ in fused if pid != anchor][:top_k-1]}
+    # Keep genuine fusion scores/order; do not invent a larger anchor score.
+    contexts = tuple(replace(by_id[pid], score=score) for pid, score in fused if pid in selected)
+    trace = {"strategy": "task_anchor_condition_rrf_v1", "condition_query": condition_query,
+        "primary_query": stage["rerank_query"], "primary_anchor": anchor,
+        "anchor_changed_selection": anchor not in {pid for pid, _ in fused[:top_k]},
+        "primary_ranked_ids": primary_ids, "condition_ranked_ids": condition_ids,
+        "selected_ids": [context.document_id for context in contexts],
+        "rrf_k": rrf_k, "extra_rerank_pairs": len(candidates),
+        "elapsed_ms": (time.perf_counter()-started)*1000,
+        "score_semantics": "RRF scores within the primary-anchor-constrained selection"}
+    return contexts, trace
+
+
 class LocalBGE:
     """Official Transformers-compatible checkpoints; explicit device/dtype/path."""
     def __init__(self, model_path, *, reranker=False, device="cpu", dtype="float32",
@@ -364,6 +399,14 @@ class HybridRetriever:
             manifest.update(query_view=user_topic_manifest(), query_view_traces=list(self.query_view_traces))
         if self.resolver is not None:
             manifest.update(query_view=self.resolver.manifest, query_view_traces=list(self.query_view_traces))
+        if self.query_mode == "conversational":
+            manifest["condition_evidence_selection"] = {
+                "strategy": "task_anchor_condition_rrf_v1",
+                "activation": "literal named task continuation with a distinct condition view",
+                "stage_enabled": self.stage == "hybrid_rerank",
+                "pool": "same primary rerank candidates; no additional index search",
+                "selection": "retain primary rank one; maximize equal RRF score in the remaining slots",
+                "extra_rerank_pairs_max": self.rerank_k, "rrf_k": self.rrf_k}
         if self.rerank_query_mode != "resolved":
             manifest["query_view_traces"] = list(self.query_view_traces)
         if self.rerank_query_mode == "user_topic":
@@ -388,6 +431,7 @@ class HybridRetriever:
         # drains complete retrieval workers before closing either client/model.
         with self._lock:
             fusion_trace = None
+            condition_trace = None
             retrieval_error = None
             scoring_query = None
             try:
@@ -410,6 +454,9 @@ class HybridRetriever:
                         candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
                         rerank_query=scoring_query)
                     contexts = stages[self.stage]["contexts"][:5]
+                if self.stage == "hybrid_rerank" and view is not None and view.get("condition_query"):
+                    contexts, condition_trace = select_condition_evidence(
+                        stages[self.stage], view["condition_query"], self.reranker, rrf_k=self.rrf_k)
                 self.requests += 1
             except Exception as exc:
                 retrieval_error = f"{type(exc).__name__}: {exc}"
@@ -425,6 +472,7 @@ class HybridRetriever:
                         # Full local wall interval, including lock wait and query resolution.
                         # The resolver's own elapsed_ms remains unchanged in view.
                         "retrieval_elapsed_ms": (time.perf_counter()-started)*1000,
+                        **({"condition_evidence": condition_trace} if condition_trace else {}),
                         **({"query_fusion_trace": fusion_trace} if fusion_trace else {})}
                     if self.trace_sink is None:
                         self.query_view_traces.append(trace)

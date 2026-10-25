@@ -2,7 +2,7 @@
 
 ## 当前多轮入口
 
-`query_mode: conversational` 通过 [`adapters/conversation.py`](../../adapters/conversation.py) 在已有检索 worker 内组织当前任务。配置见 [`configs/retriever_conversational.example.yaml`](../../configs/retriever_conversational.example.yaml)。`selector` 可省略：字面任务承接、完整具名问题和已有历史检索仍可运行，不加载辅助模型客户端；显式配置后才按需使用同一个 Qwen3 服务进行语义解析。两种配置复用同一条 BM25/BGE-M3/RRF/BGE-reranker 链，不增加第二次检索或重排。
+`query_mode: conversational` 通过 [`adapters/conversation.py`](../../adapters/conversation.py) 在已有检索 worker 内组织当前任务。配置见 [`configs/retriever_conversational.example.yaml`](../../configs/retriever_conversational.example.yaml)。`selector` 可省略：字面任务承接、完整具名问题和已有历史检索仍可运行，不加载辅助模型客户端；显式配置后才按需使用同一个 Qwen3 服务进行语义解析。两种配置复用同一条 BM25/BGE-M3/RRF/BGE-reranker 链。默认 single 模式只做一次索引召回；明确具名条件补充可在同一候选池追加一次条件评分，规则如下。
 
 解析 HTTP 等待不持有 encoder/reranker 的锁；独立会话可以先检索，模型 forward 仍串行。共享 tokenizer 计数和调用计数仅持短锁，复用 httpx 的线程安全客户端。关闭前由现有 retrieval worker 排空机制等待所有请求，避免取消后继续访问已释放模型。
 
@@ -14,9 +14,19 @@
 
 字面组合沿用会话查询扩展的基本思路：从历史补齐当前查询缺少的任务信息，而不要求每次都生成一个新句子。[QuReTeC](https://arxiv.org/abs/2005.11723) 以历史词项选择实现查询补全；这里采用明确片段的工程规则，没有引入其分类器或训练流程。是否有效以检索和最终任务结果评价，不以改写句式评分。
 
+### 保留主任务资料的条件排序
+
+对于已确认的字面任务承接，完整查询保留原任务和当前条件，当前用户原句另作条件视图。已有BGE先按完整查询评分原候选池，再在同一池上评分条件视图；不重新搜索索引，不生成新的查询或答案。
+
+复用[原始RRF](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)及现有k=60。选择五段时，在“包含完整任务排名第一的段落”的约束下最大化RRF分数和：先保留这一段，再取其余融合分数最高的四段，最终保留真实融合分数与顺序。该约束防止条件视图挤掉主任务资料入口；不会把排名第一等同于语义正确或全部事实已覆盖。
+
+普通轮次、相同查询视图、候选数量不超过返回预算时沿用原排序，没有额外评分。启用时只增加至多50个query/passage评分对，仍复用已加载的BGE。`condition_evidence`记录两份排名、保留段落、最终来源、额外对数和耗时，整体耗时进入P3检索计时。快路径last3保持原行为，不新增配置开关。
+
+这是基于现有融合器的受约束选择扩展，没有复现论文之外的收益保证。初始证据来自保存的真实候选回放：保留了Cloudant的schema说明，同时移除了另一产品的建表资料；实际回答验证和适用边界统一见数据与评价。
+
 ### A/B/C 的共同合同
 
-- `QueryContext` 是派生意图：原用户问题和实际回答保持原样。独立检索问题同时用于召回、重排、证据解析和来源定位，生成提示保留原问题并提示当前条件优先。
+- `QueryContext` 是派生意图：原用户问题和实际回答保持原样。独立检索问题同时用于召回、主任务评分、证据解析和来源定位，生成提示保留原问题并提示当前条件优先。
 - 来源定位保留当前 reranker 排名，复用 ContextPilot 的检索优先级注释；正文仍可按缓存布局排列。低名次资料不因证据 ID 的字典顺序抢占定位表首位。
 - `context.layout: contextpilot` 下，即使未调用解析模型，也保留当前检索优先级。优先级注释只渲染一次，且仅包含当前可引用来源；被显式版本请求替换的检索版本不再出现在优先级列表中。
 - A/R 使用同一当前证据集合、意图和引用范围。意图标签或证据零交集本身不强制重建；实际历史前缀仍可能复用。正确版本、正文可见性和预算决定资格，B 按原生报价与实际成本比较；旧材料仅可留作历史，不获得当前引用资格。
