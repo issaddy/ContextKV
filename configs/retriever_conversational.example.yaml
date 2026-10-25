@@ -1,5 +1,6 @@
 # Conditional Qwen3 intent resolution on the existing local generation service.
 # Reuses one hybrid search/rerank; the original user question/history remain intact.
+# Opt-in: extra intent/generation cost has not yet beaten the delivered default path.
 schema_version: 1
 kind: hybrid
 stage: hybrid_rerank

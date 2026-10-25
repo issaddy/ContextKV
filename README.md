@@ -4,7 +4,7 @@
 
 当前使用已有 Qwen3-8B/32B、固定 SGLang、单机单 GPU。Qwen2.5-7B 已退役。训练不属于运行前置。
 
-工程已有 CLI/HTTP、自动检索、多会话、幂等提交和恢复；最新六会话三方法对照完成 120/120 轮，全部自然结束。成本策略实际选择 8 次追加、32 次重建。整体优于强原生基线的结论尚未建立，场景收益与剩余问题见[结果对比](docs/data_and_evaluation.md)。
+工程已有 CLI/HTTP、自动检索、多会话、幂等提交和恢复。多轮意图现已贯穿检索、上下文组织与持久提交；既有默认路径保留，增强路径显式启用。其功能检查通过，但额外解析和回答长度仍有成本，不能替代默认路径已有的性能结果。场景收益与剩余问题见[结果对比](docs/data_and_evaluation.md)。
 
 ## 从哪里开始
 
@@ -46,7 +46,7 @@ python -m controller.cli --config configs/qwen3_8b_cost.yaml serve
 
 自动检索可复用 `--retriever-index data/cloud-bm25s --corpus-id mtrag`，或用 `--retriever-config` 选择已有 BM25/BGE/RRF/重排索引。可选 `--evidence-corpus` 提供版本、条件和原文关系。检索器启动时加载一次，正文与实际回答按原样保存。
 
-需要多轮指代、纠正、条件切换与回访时，使用 `--retriever-config configs/retriever_conversational.example.yaml`。该模式按需调用同一 Qwen3 服务解析意图，并贯穿检索、A/R 成本选择和会话提交；运行前按实际环境设置模型、索引与检索设备。机制和开销见[多轮意图解析](docs/research/source_grounded_query_resolution.md)，效果以[真实评价](docs/data_and_evaluation.md)中的具体负载为准。
+多轮指代、纠正、条件切换与回访的增强入口为 `--retriever-config configs/retriever_conversational.example.yaml`，当前为可选配置。它按需调用同一 Qwen3 服务，并贯穿检索、A/R 成本选择和会话提交；运行前按实际环境设置模型、索引与检索设备。机制和开销见[多轮意图解析](docs/research/source_grounded_query_resolution.md)，效果以[真实评价](docs/data_and_evaluation.md)中的具体负载为准。
 
 首次准备数据与正常服务分开：
 

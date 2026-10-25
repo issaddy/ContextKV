@@ -4,6 +4,8 @@
 
 `query_mode: conversational` 通过 [`adapters/conversation.py`](../../adapters/conversation.py) 在已有检索 worker 内解析当前意图。配置见 [`configs/retriever_conversational.example.yaml`](../../configs/retriever_conversational.example.yaml)。复用同一个 Qwen3 服务、completion 客户端、BM25/BGE-M3/RRF/BGE-reranker；不训练模型，不增加检索服务或第二次重排。
 
+解析 HTTP 等待不持有 encoder/reranker 的锁；独立会话可以先检索，模型 forward 仍串行。共享 tokenizer 计数和调用计数仅持短锁，复用 httpx 的线程安全客户端。关闭前由现有 retrieval worker 排空机制等待所有请求，避免取消后继续访问已释放模型。
+
 第一轮直接检索；无指代/纠正线索的完整具名问题或定义问题可跳过解析。普通无依赖线索的轮次沿用已有 last3 检索；显式指代、纠正、条件切换和产品片段最多调用一次模型，先选择历史先行词轮次，再区分延续、纠正、条件切换、话题切换、回访与歧义，最后形成独立检索问题。`用某产品` 等片段不能仅因含名称就绕过历史理解。普通解析输入为最近三个已提交用户问题及先前解析；明确回访可读取全部历史用户问题。历史名称须有原文来源；不复制 assistant 的数字、步骤、推荐或事实。名称仅携带历史位置，不反复附加来源窗口/长 ID；资格判断仍复用原来源索引。
 
 实现借鉴 [CHIQ](https://aclanthology.org/2024.emnlp-main.135/) 的先解歧再改写思路与 [HAConvDR](https://aclanthology.org/2024.findings-acl.792/) 的历史去噪动机，但采用单次无训练推理，不声称复现论文完整流程。旧 `current/last3` 等低成本模式仍可直接使用。辅助模型的调用量、输入/输出 tokens、耗时和失败均进入 retrieval manifest 与完整响应计时，不能只报告主生成耗时。
