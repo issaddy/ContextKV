@@ -24,7 +24,9 @@ _DEPENDENT = re.compile(
     r"它|这个|那个|前者|后者|之前|刚才|先前|最初|回到|如果|改成|换成|不是|我是说|呢[？?]?$", re.I)
 _DEFINITION = re.compile(r"^\s*(?:what\s+(?:is|are)\b|define\b|什么是|解释一下|介绍一下)", re.I)
 SYSTEM = """Rewrite the current question as a short, self-contained search question. Do not answer it.
-First select the prior user-turn numbers needed to understand it, then classify the relation,
+First select only antecedent user turns that supply inherited objects, tasks or conditions.
+Do not select intervening turns about other topics merely because you read them.
+Then classify the relation,
 then write the complete question, replacing pronouns and omitted objects with their referents.
 Relations:
 followup: continues the current topic or asks for more detail.

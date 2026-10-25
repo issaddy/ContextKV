@@ -148,6 +148,18 @@ def test_selected_revisit_restores_older_source_beyond_recent_history_window():
         assert old.text in candidate.messages[-1].content
 
 
+def test_multiple_selected_antecedents_do_not_restore_the_last_unrelated_source():
+    snap = SessionSnapshot("s")
+    for name in ("Atlas", "Nova"):
+        block = make_evidence(f"{name} application material.", name)
+        query = f"{name} requirements?"
+        snap = committed(build_candidates(snap, query, (block,))[-1], snap, query, (block,))
+    current = make_evidence("Atlas revised material.", "new")
+    intent = QueryContext("Atlas application material?", "revisit", (1, 2))
+    for plan in build_candidates(snap, "Back to the first one?", (current,), query_context=intent):
+        assert plan.required_blocks == {current.key}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lost_response", (False, True))
 async def test_interpretation_commits_with_answer_and_idempotent_replay_does_not_rewrite(tmp_path, lost_response):

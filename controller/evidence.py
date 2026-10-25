@@ -173,8 +173,14 @@ def _natural_revisits(query: str, archive: Mapping[EvidenceKey, EvidenceBlock],
     current_groups = {(k.corpus_id, k.document_id, k.passage_id) for k in current}
     history = (snapshot.raw_history[-policy.revisit_history_turns:] if revisit_turns is None else
                tuple(turn for ordinal, turn in enumerate(snapshot.raw_history, 1) if ordinal in revisit_turns))
-    for turn in reversed(history):
-        keys = [key for key in turn.evidence_keys if key in archive and
+    groups = [(str(turn.turn_id), turn.evidence_keys) for turn in reversed(history)]
+    if revisit_turns is not None and history:
+        # Explicitly selected turns form one antecedent set. Recency must not
+        # silently choose the last (possibly different) object from that set.
+        groups = [("+".join(str(t.turn_id) for t in history),
+                   tuple(dict.fromkeys(key for t in history for key in t.evidence_keys)))]
+    for turn_label, evidence_keys in groups:
+        keys = [key for key in evidence_keys if key in archive and
                 (prior_version or key in current or (key.corpus_id, key.document_id, key.passage_id)
                  not in current_groups)]
         if not keys:
@@ -183,7 +189,7 @@ def _natural_revisits(query: str, archive: Mapping[EvidenceKey, EvidenceBlock],
             previous = [key for key in keys if key not in current and
                         (key.corpus_id, key.document_id, key.passage_id) in current_groups]
             if len(previous) == 1:
-                return {previous[0]: f"natural_revisit:turn={turn.turn_id}:prior_revision"}
+                return {previous[0]: f"natural_revisit:turn={turn_label}:prior_revision"}
             if previous:
                 return {}
             continue
@@ -193,11 +199,11 @@ def _natural_revisits(query: str, archive: Mapping[EvidenceKey, EvidenceBlock],
             # Multiple passages from the same document/section can jointly state
             # a rule; the explicit corpus dependencies provide the rest.
             if len(matched) == 1:
-                return {matched[0]: f"natural_revisit:turn={turn.turn_id}:topic={','.join(topics)}"}
+                return {matched[0]: f"natural_revisit:turn={turn_label}:topic={','.join(topics)}"}
             if matched:
                 return {}
         elif len(keys) == 1:
-            return {keys[0]: f"natural_revisit:turn={turn.turn_id}:unique_antecedent"}
+            return {keys[0]: f"natural_revisit:turn={turn_label}:unique_antecedent"}
         else:
             return {}
     return {}
