@@ -4,7 +4,7 @@
 
 当前使用已有 Qwen3-8B/32B、固定 SGLang、单机单 GPU。Qwen2.5-7B 已退役。训练不属于运行前置。
 
-工程已有 CLI/HTTP、自动检索、多会话、幂等提交和恢复。多轮意图现已贯穿检索、上下文组织与持久提交；既有默认路径保留，增强路径显式启用。其功能检查通过，但额外解析和回答长度仍有成本，不能替代默认路径已有的性能结果。场景收益与剩余问题见[结果对比](docs/data_and_evaluation.md)。
+工程已有 CLI/HTTP、自动检索、多会话、幂等提交和恢复。任务承接、条件证据选择、成本决策与缓存退役已联合运行；多轮配置无需辅助生成模型。另保留已测last3快配置，两种入口的任务收益和完整代价见[结果对比](docs/data_and_evaluation.md)。
 
 ## 从哪里开始
 
@@ -40,14 +40,16 @@ CPU mock 演示用于协议和状态验证，无需模型。`configs/append.yaml
 export TOKENIZERS_PARALLELISM=false RAYON_NUM_THREADS=4
 export OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 MKL_NUM_THREADS=4
 python -m controller.cli --config configs/qwen3_8b_cost.yaml serve \
-  --retriever-config configs/retriever_hybrid.example.yaml --corpus-id mtrag
+  --retriever-config configs/retriever_conversational.example.yaml --corpus-id mtrag
 ```
 
 [8B 成本配置](configs/qwen3_8b_cost.yaml)随仓库提供原测量成本文件，适用 H200、16384 GPU 槽、54272 Host 槽、page64、write_through、共同非思考采样。普通单次重建入口为 [8B](configs/qwen3_8b_scope.example.yaml) / [32B](configs/qwen3_32b_scope.example.yaml)。32B 不使用 8B 的成本表。
 
 `POST /sessions/{id}/turns` 接收 query、request_id 和来源 evidence。配置检索器后，`POST /sessions/{id}/query` 只需问题和 request_id。两者共用完整历史、提交、重放、恢复及关闭机制；响应提供本轮可引用 ID 和实际可见来源。详见[HTTP 接口](docs/guides/http_retrieval.md)。
 
-上面的完整入口使用已实测的 last3 快路径和默认稳定布局。只接收外部 evidence 时可省略检索参数。自动检索也可复用 `--retriever-index data/cloud-bm25s --corpus-id mtrag`，或用 `--retriever-config` 选择已有 BM25/BGE/RRF/重排索引。可选 `--evidence-corpus` 提供版本、条件和原文关系。检索器启动时加载一次，正文与实际回答按原样保存。
+上面的入口用于需要任务承接和具名条件变化的多轮场景，保持默认稳定布局。已有两会话15轮中，关键任务信息和产品适用性得到改善，完整响应均值2.860秒；同负载last3快配置为2.160秒。重视已测响应效率、依赖关系较弱时可改用 `configs/retriever_hybrid.example.yaml`；这是明确的任务/成本取舍，不是所有负载的速度排序。
+
+只接收外部 evidence 时可省略检索参数。自动检索也可复用 `--retriever-index data/cloud-bm25s --corpus-id mtrag`，或用 `--retriever-config` 选择已有 BM25/BGE/RRF/重排索引。可选 `--evidence-corpus` 提供版本、条件和原文关系。检索器启动时加载一次，正文与实际回答按原样保存。
 
 多轮增强入口为 `--retriever-config configs/retriever_conversational.example.yaml`。示例默认使用无辅助生成的任务承接与历史检索；需要语义解析时启用文件中的可选 `selector` 配置。两者贯穿同一检索、A/R 成本选择和提交链。保持默认 `stable_key` 布局即可使用本次整合配置，额外布局不自动启用。已有 `context.layout: contextpilot` 可分开组织缓存正文顺序与当前检索优先级；运行前按环境设置索引和设备，实测使用生成 GPU0、检索 GPU1。机制与适用边界见[多轮意图解析](docs/research/source_grounded_query_resolution.md)和[真实评价](docs/data_and_evaluation.md)。
 

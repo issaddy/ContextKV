@@ -4,6 +4,8 @@
 
 控制器为单 Python 服务；SQLite WAL 是跨进程一致性的边界。每个业务会话有串行异步锁，数据库另有一个未决 attempt 的唯一索引。多会话可并发，部署默认一个 Uvicorn worker。无需数据库服务或 GPU 即可运行正确性演示。
 
+会话锁通过标准库弱引用登记，由持有者和等待中的协程维持生命周期；闲置后自动回收，不随已完成会话永久积累。持久历史和请求幂等仍由SQLite负责，无需锁过期参数或清理线程。
+
 ```mermaid
 flowchart LR
   Data[白名单当前问题与证据] --> Candidates[APPEND / REBUILD 纯候选]
