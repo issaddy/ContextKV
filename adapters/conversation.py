@@ -17,7 +17,7 @@ from adapters.retrieval import retrieval_query
 from controller.schema import QueryContext
 
 
-VERSION = "conversational-intent-v4"
+VERSION = "conversational-intent-v5"
 RELATIONS = ("standalone", "followup", "correction", "condition_change", "topic_switch", "revisit", "ambiguous")
 _DEPENDENT = re.compile(
     r"\b(?:it|its|this|that|these|those|they|them|same|previous|earlier|again|instead|otherwise|"
@@ -56,6 +56,24 @@ object generic when no unique product is identified. Prior interpretations are f
 Do not add facts, answers, code or recommendations. Return only the requested JSON."""
 
 
+def _history_query(turn, context):
+    """Use the latest committed interpretation in the existing recent window.
+
+    A resolved question already carries its inherited task and conditions. Do
+    not prepend the older raw conditions it replaced. Later raw utterances and
+    the current question remain verbatim, including corrections not yet resolved.
+    This is a retrieval view, not a new semantic interpretation to commit.
+    """
+    questions = turn.user_questions
+    first = max(0, len(questions) - 3)
+    for index in range(len(questions) - 2, first - 1, -1):
+        prior = context.interpretations[index] if index < len(context.interpretations) else None
+        if prior is not None and prior.relation != "ambiguous":
+            return "\n".join((prior.query, *questions[index + 1:])), tuple(
+                range(index + 1, len(questions)))
+    return retrieval_query(questions), tuple(range(first + 1, len(questions)))
+
+
 def _literal_task_continuation(turn, context, fragment):
     """A bare named tool/service can qualify the previous unresolved task.
 
@@ -81,7 +99,7 @@ class ConversationResolver:
     def manifest(self):
         return {"version": VERSION, "system_prompt": SYSTEM,
                 "history": "latest three committed user turns and their interpreted questions; explicit revisits can read all user turns; compact source-qualified names",
-                "calls": "literal task composition first; other dependent questions use the optional model or the existing history view",
+                "calls": "literal task composition first; other dependent questions use the optional model or recent history with its latest committed interpretation",
                 "self_contained_gate": "first turn, or named question/definition without dependency/correction cues; bare product fragments require interpretation",
                 "semantics": "derived intent, not factual evidence or a guarantee of correct resolution",
                 "transport": self.client.manifest if self.client is not None else {"kind": "no_auxiliary_model"}}
@@ -91,9 +109,9 @@ class ConversationResolver:
         trace = {"version": VERSION, "text": turn.query, "status": "unchanged", "model_called": False,
                  "snapshot_version": context.snapshot_version, "context": None}
 
-        def finish(reason):
-            if trace["status"] == "failed":
-                trace["text"] = retrieval_query(turn.user_questions)
+        def finish(reason, *, history_view=False):
+            if history_view or trace["status"] == "failed":
+                trace["text"], trace["history_view_turns"] = _history_query(turn, context)
             return {**trace, "reason": reason, "elapsed_ms": (time.perf_counter()-started)*1000}
 
         if not turn.history:
@@ -109,11 +127,9 @@ class ConversationResolver:
             trace["context"] = asdict(QueryContext(turn.query, "standalone"))
             return finish("self_contained_current_question")
         if not dependent:
-            trace["text"] = retrieval_query(turn.user_questions)
-            return finish("ordinary_question_uses_existing_history_view")
+            return finish("ordinary_question_uses_existing_history_view", history_view=True)
         if self.client is None:
-            trace["text"] = retrieval_query(turn.user_questions)
-            return finish("contextual_history_view_without_auxiliary_model")
+            return finish("contextual_history_view_without_auxiliary_model", history_view=True)
 
         history_window = len(turn.user_questions)-1 if _REVISIT.search(turn.query) else 3
         first = max(0, len(turn.user_questions)-1-history_window)
@@ -163,8 +179,8 @@ class ConversationResolver:
             return finish("invalid_interpretation_uses_existing_history_view")
         trace.update(text=resolved.query, status="resolved", context=asdict(resolved))
         if resolved.relation == "ambiguous":
-            trace.update(text=retrieval_query(turn.user_questions), context=None)
-            return finish("ambiguous_interpretation_uses_existing_history_view")
+            trace["context"] = None
+            return finish("ambiguous_interpretation_uses_existing_history_view", history_view=True)
         return finish("conversational_interpretation")
 
     def close(self):

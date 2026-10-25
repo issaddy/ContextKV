@@ -18,6 +18,24 @@ from bench.report import bind_quality_rows, paired_quality
 NATIVE_EVALUATOR_FIELDS = ("protocol", "base_model", "base_family", "na_policy", "context_window", "protocol_manifest")
 
 
+def evaluation_tasks(spec, tasks):
+    """One declared applicability map shared by both methods, never score filtering."""
+    dimensions = tuple(spec.get("dimensions", DIMENSIONS))
+    if not dimensions or len(set(dimensions)) != len(dimensions) or set(dimensions) - set(DIMENSIONS):
+        raise ValueError("dimensions must select unique supported quality dimensions")
+    declared = spec.get("task_scope", {})
+    if set(declared) - set(dimensions):
+        raise ValueError("task_scope must name declared quality dimensions")
+    selected = {}
+    for dimension in dimensions:
+        ids = declared.get(dimension, sorted(tasks))
+        if (not isinstance(ids, list) or not ids or len(set(ids)) != len(ids)
+                or set(ids) - tasks):
+            raise ValueError("task_scope needs nonempty unique task IDs from the paired cohort")
+        selected[dimension] = sorted(ids)
+    return dimensions, selected
+
+
 def evaluator_identity(row, generator):
     """Identity is recorded provenance, not remote weight attestation."""
     source = row.get("source")
@@ -103,10 +121,10 @@ def _read_method(spec):
         if not all(key in row and row[key] is not None for key in ("query", "input_hash")):
             unbound_scores.append(row["task_id"])
         values = row.get("scores")
-        if values is not None and (set(values) != set(DIMENSIONS) or any(
+        if values is not None and (set(values) - set(DIMENSIONS) or any(
                 v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not 0 <= v <= 1)
                 for v in values.values())):
-            raise ValueError("quality scores need all five dimensions, finite [0,1] values or null")
+            raise ValueError("quality scores need supported dimensions, finite [0,1] values or null")
     by_id = {r["task_id"]: r for r in scores}
     identities = {task: evaluator_identity(row, spec.get("generator", {})) for task, row in by_id.items()}
     observed = {payload.get("measurement_kind"), manifest.get("measurement_kind"),
@@ -147,6 +165,19 @@ def evaluate(spec):
     reference = methods[reference_name]
     if len(methods) < 2 or not reference["audit"]:
         raise ValueError("paired acceptance needs at least two nonempty methods")
+    declared_dimensions, task_scope = evaluation_tasks(spec, set(reference["audit"]))
+    evaluated_tasks = set().union(*task_scope.values())
+    for method in methods.values():
+        summary = method["summary"]
+        summary["all_score_coverage"] = summary["coverage"]
+        summary["coverage"] = {dimension: {
+            "expected": len(tasks),
+            "scored": sum((method["scores"].get(task, {}).get("scores") or {}).get(dimension) is not None for task in tasks),
+            "missing_task_ids": [task for task in tasks if (method["scores"].get(task, {}).get("scores") or {}).get(dimension) is None],
+        } for dimension, tasks in task_scope.items()}
+        summary["evaluator_kinds"] = dict(Counter(kind for task, (kind, _) in method["identities"].items()
+                                                 if task in evaluated_tasks))
+        summary["unbound_score_task_ids"] = sorted(set(summary["unbound_score_task_ids"]) & evaluated_tasks)
     cohort = sorted({r["conversation_id"] for r in reference["audit"].values()})
     split_verified = False
     split_digest = None
@@ -171,8 +202,10 @@ def evaluate(spec):
     if spec.get("frozen_protocol"):
         frozen = json.loads(Path(spec["frozen_protocol"]).read_text())
         if any(frozen.get(k) != value for k, value in {
-                "scope": scope, "reference": reference_name, "epsilon": epsilon, "dimensions": list(DIMENSIONS)}.items()):
+                "scope": scope, "reference": reference_name, "epsilon": epsilon, "dimensions": list(declared_dimensions)}.items()):
             raise ValueError("frozen quality protocol differs from requested comparison")
+        if evaluation_tasks(frozen, set(reference["audit"]))[1] != task_scope:
+            raise ValueError("frozen quality protocol has different task applicability")
         if not isinstance(frozen.get("evaluator"), dict) or "kind" not in frozen["evaluator"]:
             raise ValueError("frozen quality protocol must include its evaluator/rubric")
     comparisons = {}
@@ -207,7 +240,7 @@ def evaluate(spec):
             issues.append("generation_incomplete")
         matched = True
         kinds = set()
-        for task in candidate["audit"]:
+        for task in evaluated_tasks:
             a = candidate["identities"].get(task, ("unknown", None))
             b = reference["identities"].get(task, ("unknown", None))
             kinds.update((a[0], b[0]))
@@ -220,10 +253,12 @@ def evaluate(spec):
         if "unknown" in kinds:
             issues.append("unknown_evaluator_identity")
         if frozen and any(not frozen_evaluator_matches(frozen["evaluator"], row)
-                          for method in (candidate, reference) for row in method["scores"].values()):
+                          for method in (candidate, reference) for task, row in method["scores"].items()
+                          if task in evaluated_tasks):
             issues.append("frozen_evaluator_protocol_mismatch")
         dimensions = {}
-        for dimension in DIMENSIONS:
+        for dimension in declared_dimensions:
+            tasks = task_scope[dimension]
             missing_left = candidate["summary"]["coverage"][dimension]["missing_task_ids"]
             missing_right = reference["summary"]["coverage"][dimension]["missing_task_ids"]
             if missing_left or missing_right:
@@ -232,8 +267,10 @@ def evaluate(spec):
                 dimensions[dimension] = {"status": "not_validated_simulation"}
             else:
                 dimensions[dimension] = {"status": "complete", **paired_quality(
-                    list(candidate["scores"].values()), list(reference["scores"].values()), dimension=dimension,
+                    [candidate["scores"][task] for task in tasks],
+                    [reference["scores"][task] for task in tasks], dimension=dimension,
                     epsilon=epsilon, seed=spec.get("seed", 42), samples=spec.get("bootstrap_samples", 5000))}
+            dimensions[dimension]["expected_tasks"] = len(tasks)
         passed = all(row.get("decision") == "noninferior" for row in dimensions.values())
         eligible = passed and not issues
         comparisons[name] = {"reference": reference_name, "dimensions": dimensions, "evaluator_protocol_matched": matched,
@@ -241,7 +278,8 @@ def evaluate(spec):
                              "dev_quality_eligible": eligible if scope == "dev" else None,
                              "heldout_evaluator_noninferiority_established": eligible and scope == "heldout" and frozen is not None,
                              "quality_noninferiority_established": eligible and scope == "heldout" and frozen is not None and kinds == {"human_blind"}}
-    return {"schema_version": 1, "scope": scope, "epsilon": epsilon, "dimensions": list(DIMENSIONS),
+    return {"schema_version": 2, "scope": scope, "epsilon": epsilon, "dimensions": list(declared_dimensions),
+            "task_scope": task_scope, "quality_claim_scope": "declared_dimensions_and_tasks_only",
             "estimand": "paired_turn_mean_clustered_by_session", "reference": reference_name,
             "freeze_provenance": "operator_supplied_protocol_not_time_attestation" if frozen else "not_supplied",
             "frozen_protocol": spec.get("frozen_protocol"),

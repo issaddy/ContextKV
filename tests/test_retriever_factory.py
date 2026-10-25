@@ -142,6 +142,30 @@ def test_conversational_factory_uses_the_same_pipeline_without_a_model_client(re
         wrapper.close()
 
 
+def test_serving_retrieval_projects_committed_task_into_encoder_and_reranker(retriever_config):
+    from adapters.serving_retrieval import ServingRetriever
+    from controller.schema import QueryContext, SessionSnapshot, TurnRecord
+    value = yaml.safe_load(retriever_config.read_text())
+    value.update(query_mode="conversational", query_fusion="single")
+    retriever_config.write_text(yaml.safe_dump(value))
+    retriever = create_retriever("P3", config_path=retriever_config)
+    wrapper = ServingRetriever(retriever, corpus_id="fixture")
+    task = QueryContext("Atlas v2 region B graduate application?", "correction", (1,))
+    snapshot = SessionSnapshot("s", raw_history=(
+        TurnRecord(1, "Atlas v1 region A student application?", "Actual first answer."),
+        TurnRecord(2, "No, graduates in region B using v2.", "Actual corrected answer.", query_context=task),
+        TurnRecord(3, "What documents?", "Actual third answer.")))
+    try:
+        selected = wrapper._retrieve(snapshot, "And the deadline?", "next-request", time.monotonic())
+        query = task.query + "\nWhat documents?\nAnd the deadline?"
+        assert retriever.encoder.inputs == retriever.reranker.inputs == [query]
+        assert len(selected.evidence) == 5 and selected.query_context is None
+        assert retriever.manifest["query_view_traces"][0]["history_view_turns"] == (2, 3)
+        assert snapshot.raw_history[1].query_context == task
+    finally:
+        wrapper.close()
+
+
 def test_external_trace_sink_does_not_retain_service_history_or_change_ranking(retriever_config):
     value=yaml.safe_load(retriever_config.read_text())
     value['query_mode']='user_topic'

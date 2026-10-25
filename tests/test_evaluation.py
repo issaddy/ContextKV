@@ -154,7 +154,7 @@ def test_report_missing_token_telemetry_remains_missing_and_failures_count():
     assert result["cohort"]["unfinished_turns"] == 2
     assert result["timing"]["ttft_seconds"]["count"] == 0
     assert result["occupancy"]["gpu_peak_slots"] is None
-    assert result["transfers"] is None and result["quality"]["status"] == "not_validated"
+    assert result["transfers"] is None and result["quality"]["status"] == "not_evaluated"
     assert result["measurement_kind"] == "simulation"
 
 

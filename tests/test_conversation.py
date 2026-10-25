@@ -151,6 +151,45 @@ def test_conversational_resolution_can_run_without_an_auxiliary_model():
     resolver.close()
 
 
+@pytest.mark.parametrize("client", [None, Client({}, finish="length"),
+                                   Client({"query":"uncertain", "relation":"ambiguous", "history_turns":[3]})])
+def test_history_view_reuses_corrected_conditions_without_restoring_the_old_task(client):
+    original = turn("What about the deadline?", (
+        "Atlas v1 region A students application?",
+        "I meant v2 in region B, for graduates.",
+        "What documents do I need?"))
+    corrected = QueryContext("Atlas v2 region B graduate application requirements?", "correction", (1,))
+    context = PriorContext(interpretations=(None, corrected, None))
+    view = ConversationResolver(client).resolve(original, context)
+    assert view["text"] == corrected.query + "\nWhat documents do I need?\nWhat about the deadline?"
+    assert view["history_view_turns"] == (2, 3)
+    assert "region A" not in view["text"] and "v1" not in view["text"]
+    assert view["context"] is None  # A context view is not a resolved interpretation.
+    assert original.query == "What about the deadline?" and context.interpretations[1] == corrected
+
+
+def test_ordinary_history_view_starts_at_the_committed_new_topic():
+    original = turn("how to create schema or tables?", (
+        "Can I address my storage space limits? how can I add or delete storage?",
+        "what is Data lakes"))
+    context = PriorContext(interpretations=(None, QueryContext("what is Data lakes", "standalone")))
+    client = Client(None)
+    view = ConversationResolver(client).resolve(original, context)
+    assert view["text"] == "what is Data lakes\nhow to create schema or tables?"
+    assert view["history_view_turns"] == (2,)
+    assert view["context"] is None and not client.inputs
+
+
+def test_a_new_raw_correction_keeps_precedence_over_the_committed_interpretation():
+    original = turn("And what is the deadline?", (
+        "Application in region A?", "No, change to region B."))
+    context = PriorContext(interpretations=(QueryContext("Atlas graduate application in region A?", "followup"), None))
+    view = ConversationResolver().resolve(original, context)
+    assert view["text"].splitlines() == ["Atlas graduate application in region A?",
+                                        "No, change to region B.", original.query]
+    assert view["context"] is None
+
+
 def test_recent_interpreted_state_preserves_inherited_conditions_without_all_old_topics():
     original = turn("And in region B?", ("old unrelated topic", "another topic", "Atlas v2 region A students?",
                                          "What materials?", "What deadlines?"))

@@ -52,7 +52,8 @@ def edit_scores(spec, method, edit):
 
 def freeze_protocol(spec, tmp_path):
     frozen = tmp_path / "protocol.json"
-    frozen.write_text(json.dumps({"scope": spec["scope"], "reference": "reference", "epsilon": .01, "dimensions": list(DIMENSIONS),
+    frozen.write_text(json.dumps({"scope": spec["scope"], "reference": "reference", "epsilon": .01,
+                                 "dimensions": spec.get("dimensions", list(DIMENSIONS)), "task_scope": spec.get("task_scope", {}),
                                  "split_manifest": spec["split_manifest"], "cohort": ["s0", "s1", "s2"],
                                  "methods": {name: {k: v for k, v in value.items() if k != "scores"} for name, value in spec["methods"].items()},
                                  "evaluator": {"kind": "human_blind", "rubric_version": RUBRIC_VERSION, "aggregation": "single_reviewer"}}))
@@ -80,6 +81,77 @@ def test_missing_dimension_stays_missing_without_pairwise_deletion(tmp_path):
     assert result["dimensions"]["citations"]["candidate_missing"] == ["s0:1"]
     assert result["dimensions"]["correctness"]["status"] == "complete"
     assert not result["dev_quality_eligible"]
+
+
+def test_declared_task_dimensions_do_not_require_unrelated_citation_scores(tmp_path):
+    spec = setup_methods(tmp_path)
+    spec["dimensions"] = ["correctness", "groundedness", "conditions_versions"]
+    spec["task_scope"] = {"conditions_versions": ["s1:1", "s2:1"]}
+    for method in spec["methods"]:
+        edit_scores(spec, method, lambda rows: [r["scores"].update(
+            citations=None, conditions_versions=.8 if r["task_id"] in {"s1:1", "s2:1"} else None) for r in rows])
+        edit_scores(spec, method, lambda rows: [r["scores"].pop("answerability") for r in rows])
+    result = evaluate(spec)
+    assert result["dimensions"] == spec["dimensions"]
+    assert result["task_scope"]["correctness"] == ["s0:1", "s1:1", "s2:1"]
+    assert result["quality_claim_scope"] == "declared_dimensions_and_tasks_only"
+    comparison = result["comparisons"]["candidate"]
+    assert comparison["dev_quality_eligible"]
+    assert comparison["dimensions"]["conditions_versions"]["expected_tasks"] == 2
+    assert "citations" not in comparison["dimensions"]
+    assert result["methods"]["candidate"]["all_score_coverage"]["citations"]["missing_task_ids"] == ["s0:1", "s1:1", "s2:1"]
+
+
+def test_missing_score_on_an_applicable_task_remains_missing(tmp_path):
+    spec = setup_methods(tmp_path)
+    spec.update(dimensions=["correctness", "conditions_versions"], task_scope={"conditions_versions": ["s1:1"]})
+    edit_scores(spec, "candidate", lambda rows: rows[1]["scores"].update(conditions_versions=None))
+    result = evaluate(spec)["comparisons"]["candidate"]
+    assert result["dimensions"]["conditions_versions"]["candidate_missing"] == ["s1:1"]
+    assert not result["dev_quality_eligible"]
+
+
+def test_unrelated_tasks_need_no_scores_for_a_declared_subset_comparison(tmp_path):
+    spec = setup_methods(tmp_path)
+    spec.update(dimensions=["conditions_versions"], task_scope={"conditions_versions": ["s1:1", "s2:1"]})
+    for method in spec["methods"]:
+        edit_scores(spec, method, lambda rows: rows.pop(0))
+    result = evaluate(spec)
+    assert result["comparisons"]["candidate"]["dev_quality_eligible"]
+    assert result["methods"]["candidate"]["expected_tasks"] == 3
+    assert result["methods"]["candidate"]["coverage"]["conditions_versions"]["expected"] == 2
+    assert result["task_scope"] == spec["task_scope"]
+
+
+def test_applicability_is_shared_and_does_not_drop_a_low_score(tmp_path):
+    spec = setup_methods(tmp_path)
+    spec.update(dimensions=["correctness", "conditions_versions"], task_scope={"conditions_versions": ["s1:1"]})
+    edit_scores(spec, "candidate", lambda rows: rows[1]["scores"].update(conditions_versions=0))
+    result = evaluate(spec)["comparisons"]["candidate"]
+    assert result["dimensions"]["conditions_versions"]["difference"] == pytest.approx(-.8)
+    assert not result["dev_quality_eligible"]
+
+
+def test_heldout_applicability_is_frozen_with_dimensions_and_evaluator(tmp_path):
+    spec = setup_methods(tmp_path, heldout=True)
+    spec.update(scope="heldout", dimensions=["correctness", "conditions_versions"],
+                task_scope={"conditions_versions": ["s1:1", "s2:1"]})
+    freeze_protocol(spec, tmp_path)
+    assert evaluate(spec)["comparisons"]["candidate"]["quality_noninferiority_established"]
+    spec["task_scope"]["conditions_versions"] = ["s2:1"]
+    with pytest.raises(ValueError, match="task applicability"):
+        evaluate(spec)
+
+
+@pytest.mark.parametrize("selection", [
+    {"dimensions": []}, {"dimensions": ["correctness", "correctness"]},
+    {"task_scope": {"unknown": ["s0:1"]}}, {"task_scope": {"correctness": ["absent"]}},
+    {"task_scope": {"correctness": []}},
+])
+def test_task_protocol_identifies_real_dimensions_and_tasks(tmp_path, selection):
+    spec = setup_methods(tmp_path) | selection
+    with pytest.raises(ValueError, match="dimensions|task_scope"):
+        evaluate(spec)
 
 
 @pytest.mark.parametrize("method", ["candidate", "reference"])
