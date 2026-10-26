@@ -104,6 +104,20 @@ def test_first_request_initializes_compound_needs_then_changes_only_one_conditio
     assert next_task.requirements == ()
 
 
+def test_qualified_need_does_not_repeat_its_subject_or_attribute_values():
+    need = "Download Atlas CLI v4 for Linux x86-64 from private endpoints"
+    frame = TaskFrame("Atlas CLI", "Atlas CLI v4", "download",
+        (("version","v4"),("platform","Linux"),("architecture","x86-64"),("source","private")),
+        (need,"Installation procedure"))
+    assert frame_query(frame,requirement=need) == need
+    other = frame_query(frame,requirement="Installation procedure")
+    assert "Atlas CLI v4" in other and "platform: Linux" in other and "source: private" in other
+    # A nearby revision, or an unrelated substring, does not express this condition.
+    newer = replace(frame,requirements=("Download Atlas CLI v4.1",),target="")
+    assert "version: v4" in frame_query(newer)
+    assert newer.requirements == ("Download Atlas CLI v4.1",)
+
+
 def test_missing_state_initializes_all_conditions_before_using_later_patches():
     original = "Install Atlas CLI v4 on Linux x86-64 using a private download source."
     frame = {"task":"download package and installation steps", "topic":"Atlas CLI", "target":"installer",

@@ -107,11 +107,23 @@ claims into the frame or invent missing constraints. Return only the requested J
 
 
 def frame_query(frame, *, requirement=None):
-    """A single retrieval view with every retained field, without another generation."""
-    return "\n".join(dict.fromkeys(value for value in (
-        frame.topic, frame.target,
-        *((requirement,) if requirement is not None else frame.requirements or (frame.task,)),
-        *(value if name == "legacy" else f"{name}: {value}" for name, value in frame.conditions)) if value))
+    """Render each already expressed attribute once; never rewrite a need's text."""
+    needs = (requirement,) if requirement is not None else frame.requirements or (frame.task,)
+
+    def expressed(value, parts):
+        return bool(value and re.search(r"(?<![\w.+-])" + re.escape(value) + r"(?!\w|[.+-]\w)",
+                                        "\n".join(parts), re.I))
+
+    context = []
+    for value in dict.fromkeys((frame.topic, frame.target)):
+        if value and not expressed(value, needs) and not (
+                value != frame.target and expressed(value, (frame.target,))):
+            context.append(value)
+    parts = list(dict.fromkeys((*context, *needs)))
+    for name, value in frame.conditions:
+        if value and not expressed(value, parts):
+            parts.append(value if name == "legacy" else f"{name}: {value}")
+    return "\n".join(value for value in parts if value)
 
 
 def apply_frame_updates(base, updates, *, task_operation="keep", task_value="", requirements=()):

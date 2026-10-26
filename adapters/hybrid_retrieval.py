@@ -305,7 +305,8 @@ class DenseIndex:
 
 
 def search_requirements(query, requirements, sparse, dense, encoder, reranker, *, candidate_k=50,
-                        rerank_k=50, rrf_k=60, current_query=None, source_context=None, group_key=None):
+                        rerank_k=50, rrf_k=60, current_query=None, source_context=None,
+                        source_neighbors=None, group_key=None):
     """Retrieve complementary needs, then cover them in the same final budget.
 
     Subqueries come only from current committed/requested task state, not answer
@@ -320,6 +321,14 @@ def search_requirements(query, requirements, sparse, dense, encoder, reranker, *
     fused = reciprocal_rank_fusion([[c.document_id for c in rows]
         for pair in zip(sparse_rows, dense_rows) for rows in pair], k=rrf_k)
     candidates = tuple(replace(dense.by_id[pid], score=score) for pid, score in fused[:rerank_k])
+    recalled_ids = [c.document_id for c in candidates]
+    neighbors = source_neighbors(candidates) if source_neighbors is not None else ()
+    # Retrieval candidates belong to this indexed snapshot. Other metadata
+    # revisions/headers remain accessible through explicit evidence dependencies.
+    neighbor_ids = dict.fromkeys(c.document_id for c in neighbors if c.document_id not in recalled_ids
+        and c.document_id in dense.by_id and dense.by_id[c.document_id].text == c.text)
+    neighbors = tuple(dense.by_id[pid] for pid in neighbor_ids)
+    candidates += neighbors
     if source_context is not None:
         candidates = source_context(candidates)
     scores = reranker.score(query, candidates)
@@ -327,7 +336,7 @@ def search_requirements(query, requirements, sparse, dense, encoder, reranker, *
         raise ValueError("reranker scores must align with candidate passages")
     ranked = tuple(replace(c, score=float(score)) for c, score in sorted(zip(candidates, scores),
         key=lambda item: (-float(item[1]), item[0].document_id)))
-    primary, grouping = select_ranked_evidence(ranked, top_k=len(ranked), group_key=group_key)
+    primary, grouping = select_ranked_evidence(ranked, top_k=rerank_k, group_key=group_key)
     rankings = []
     for requirement in requirements:
         values = reranker.score(requirement, primary)
@@ -338,6 +347,7 @@ def search_requirements(query, requirements, sparse, dense, encoder, reranker, *
     contexts, selection = select_requirement_evidence(primary, rankings)
     trace = {"strategy": "task_requirement_coverage_v1", "query": query,
         "requirements": list(requirements), "retrieval_queries": queries,
+        "recalled_ids": recalled_ids, "neighbor_candidate_ids": [c.document_id for c in neighbors],
         "candidate_ids": [c.document_id for c in candidates],
         "primary_ranked_ids": [c.document_id for c in primary], "requirement_ranked_ids": rankings,
         "source_rankings": [{"query": q, "sparse": [c.document_id for c in s],
@@ -507,12 +517,14 @@ class HybridRetriever:
         self.selection_group = None
         self.source_window = source_window
         self.expand_source_window = None
+        self.source_neighbors = None
 
     def bind_corpus(self, corpus_index):
         """Share the generation metadata index with reranking, before serving starts."""
         self.source_context = corpus_index.contextualize
         self.selection_group = corpus_index.selection_group
         self.expand_source_window = corpus_index.source_window
+        self.source_neighbors = corpus_index.candidate_neighbors
 
     @property
     def manifest(self):
@@ -534,9 +546,9 @@ class HybridRetriever:
                 "extra_model_calls": 0},
             "requirement_selection": {"strategy": "task_requirement_coverage_v1",
                 "activation": "resolved compound task with at least two explicit information needs; hybrid_rerank",
-                "retrieval": "batched query encoding and equal RRF over full task and qualified needs",
+                "retrieval": "batched query encoding, equal RRF, and available same-source neighbors as scored candidates",
                 "selection": "primary task anchor plus diminishing-return coverage within five distinct groups",
-                "cost": "one additional search and rerank view per requirement; no extra interpretation call"},
+                "cost": "one search per view; score seed pool and immediate neighbors once, then each need on at most rerank_k groups; no extra interpretation call"},
             "candidate_k": self.candidate_k, "rerank_k": self.rerank_k, "rrf_k": self.rrf_k,
             "sparse": self.sparse.manifest, "dense": self.dense.manifest,
             "encoder": self.encoder.manifest, "reranker": self.reranker.manifest if self.reranker else None,
@@ -610,7 +622,8 @@ class HybridRetriever:
                         self.sparse, self.dense, self.encoder, self.reranker,
                         candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
                         current_query=turn.query if self.query_fusion == "current_topic_rrf" else None,
-                        source_context=self.source_context, group_key=self.selection_group)
+                        source_context=self.source_context, source_neighbors=self.source_neighbors,
+                        group_key=self.selection_group)
                 elif self.stage == "dense":
                     ranked = self.dense.search(query, self.encoder, top_k=self.candidate_k)
                 elif self.query_fusion == "current_topic_rrf":

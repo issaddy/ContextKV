@@ -193,9 +193,18 @@ class CorpusIndex:
         Offsets need not describe identical overlapping text: each passage keeps
         its own complete body and citation identity. Neighbors have no rank score.
         """
+        primary = self.retrieved_keys(contexts)
+        return self._source_neighbors(primary)
+
+    def candidate_neighbors(self, contexts):
+        """Expand only candidates with known metadata; unselected hits may lack it."""
+        primary = tuple(matches[0] for context in contexts
+                        if len(matches := self._context_matches(context)) == 1)
+        return self._source_neighbors(primary)
+
+    def _source_neighbors(self, primary):
         from adapters.mtrag import OnlineContext
 
-        primary = self.retrieved_keys(contexts)
         seen, result = set(primary), []
         for key in primary:
             for neighbor in self._neighbors.get(key, ()):

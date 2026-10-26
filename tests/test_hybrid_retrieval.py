@@ -1,13 +1,14 @@
 from dataclasses import asdict, replace
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from adapters.hybrid_retrieval import (DenseIndex, query_text, reciprocal_rank_fusion,
                                       search_variants, select_condition_evidence, select_ranked_evidence,
-                                      select_requirement_evidence)
+                                      select_requirement_evidence, search_requirements)
 from adapters.mtrag import OnlineContext, json_hash, load_rows
 from adapters.retrieval import BM25SRetriever, load_beir_corpus
 from bench.retrieval_eval import evaluate_queries, prepare_queries, summarize
@@ -28,6 +29,32 @@ def test_requirement_coverage_retains_complementary_sources_within_the_original_
     # Once all views are covered, remaining slots keep original relevance order.
     assert [c.document_id for c in chosen] == ["p0", "p1", "p2", "p6", "p7"]
     assert select_requirement_evidence(primary, [ids, ids])[0] == primary[:5]
+
+
+def test_source_neighbors_are_scored_before_selection_with_indexed_identity():
+    from adapters.corpus import CorpusIndex
+    seed = tuple(OnlineContext(pid, f"original {pid}") for pid in "abcde")
+    needed = OnlineContext("z", "the missing adjacent table row")
+    dense = SimpleNamespace(by_id={c.document_id:c for c in (*seed,needed)},
+        search_many=lambda queries, encoder, **kwargs: tuple(seed for _ in queries))
+    sparse = SimpleNamespace(retrieve=lambda *args, **kwargs: seed)
+    metadata=CorpusIndex.from_records([
+        {"_id":"a","text":seed[0].text,"document_id":"manual","span":[0,10]},
+        {"_id":"z","text":needed.text,"document_id":"manual","span":[10,20]},
+    ],corpus_id="c",snapshot_id="v1")
+    calls=[]
+    def score(query, contexts):
+        calls.append(tuple(contexts))
+        return [1000 if c.document_id=="z" else 0 for c in contexts]
+    def neighbors(contexts):
+        return (*metadata.candidate_neighbors(contexts),OnlineContext("a","different old revision"),
+                OnlineContext("unindexed","metadata-only dependency"))
+    chosen,trace=search_requirements("whole task",("part one","part two"),sparse,dense,object(),
+        SimpleNamespace(score=score),source_neighbors=neighbors,source_context=metadata.contextualize)
+    assert len(chosen)==5 and needed.document_id in {c.document_id for c in chosen}
+    assert trace["recalled_ids"]==list("abcde") and trace["neighbor_candidate_ids"]==["z"]
+    assert all({c.document_id for c in pool}==set("abcdez") for pool in calls)
+    assert all(next(c for c in pool if c.document_id=="a").text==seed[0].text for pool in calls)
 
 
 class Encoder:
