@@ -172,7 +172,7 @@ def test_qwen3_alias_reduces_real_input_and_preserves_append_prefix(qwen3_tokeni
     unshared, _ = build_candidates(snapshot, "Current", (expanded,), template=template)
     assert append.feasible and len(append.input_ids) < len(unshared.input_ids)
     assert append.theoretical_lcp == unshared.theoretical_lcp
-    assert append.theoretical_lcp >= len(first.input_ids)
+    assert BODY in template.tokenizer.decode(append.input_ids[:append.theoretical_lcp])
     limited = EvidencePolicy(max_total_model_tokens=len(append.input_ids) + 64, max_new_tokens=64)
     assert build_candidates(snapshot, "Current", (b,), limited, template)[0].feasible
     assert not build_candidates(snapshot, "Current", (expanded,), limited, template)[0].feasible
