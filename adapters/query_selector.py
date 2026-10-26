@@ -119,5 +119,12 @@ class OpenAICompletionClient:
             return_dict=False, **self.config.chat_template_kwargs)
         return len(ids)
 
+    def catalog_token_lengths(self, messages, documents):
+        """Pack whole source records with the same tokenizer and shared lock."""
+        with self._input_lock:
+            base = self.count_input_tokens(messages)
+            values = self.tokenizer(documents, add_special_tokens=False, return_attention_mask=False)["input_ids"] if documents else ()
+            return base, [len(tokens) for tokens in values]
+
     def close(self):
         self.client.close()

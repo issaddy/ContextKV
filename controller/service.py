@@ -201,6 +201,8 @@ class Controller:
         if query_context is not None:
             intent = {"query": query_context.query, "relation": query_context.relation,
                       "history_turns": query_context.history_turns}
+            if query_context.evidence_uses:
+                intent["evidence_uses"] = query_context.evidence_uses
             if query_context.task_frame is not None:
                 frame = asdict(query_context.task_frame)
                 if not query_context.task_frame.requirements:

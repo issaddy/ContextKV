@@ -29,6 +29,8 @@ def rerank_document(context: OnlineContext) -> str:
 
 def bind_corpus_context(retriever, corpus_index):
     """Bind the already loaded metadata before model ranking, when supported."""
+    if corpus_index is None and getattr(retriever, "evidence_selector", None) is not None:
+        raise ValueError("semantic evidence selection requires --evidence-corpus metadata")
     bind = getattr(retriever, "bind_corpus", None)
     if corpus_index is not None and bind is not None:
         bind(corpus_index)

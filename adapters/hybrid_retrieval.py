@@ -311,8 +311,9 @@ def search_requirements(query, requirements, sparse, dense, encoder, reranker, *
 
     Subqueries come only from current committed/requested task state, not answer
     guesses, qrels or corpus facts. Common conditions qualify every subquery.
-    One batched encode, equal-RRF candidate union, whole-task ranking, then one
-    score per requirement on that same distinct-content pool. No LLM reranker.
+    One batched encode, equal-RRF seed union, and indexed source neighbors.
+    Whole-task ranking bounds the distinct pool for requirement scoring.
+    Neighbors compete for the same five output slots. No LLM reranker.
     """
     started = time.perf_counter()
     queries = tuple(dict.fromkeys([query, *requirements, *([current_query] if current_query else [])]))
@@ -475,7 +476,7 @@ class HybridRetriever:
     def __init__(self, sparse, dense, encoder, reranker=None, *, query_mode="current",
                  stage="hybrid_rerank", candidate_k=50, rerank_k=50, rrf_k=60,
                  source_config=None, query_fusion="single", resolver=None, rerank_query_mode="resolved", trace_sink=None,
-                 source_window=False):
+                 source_window=False, evidence_selector=None):
         from adapters.query_resolution import SOURCE_MODES
         if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", *SOURCE_MODES}:
             raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
@@ -518,6 +519,10 @@ class HybridRetriever:
         self.source_window = source_window
         self.expand_source_window = None
         self.source_neighbors = None
+        self.source_keys = None
+        self.evidence_selector = evidence_selector
+        if evidence_selector is not None and source_window:
+            raise ValueError("semantic selection cannot add unselected output windows")
 
     def bind_corpus(self, corpus_index):
         """Share the generation metadata index with reranking, before serving starts."""
@@ -525,6 +530,7 @@ class HybridRetriever:
         self.selection_group = corpus_index.selection_group
         self.expand_source_window = corpus_index.source_window
         self.source_neighbors = corpus_index.candidate_neighbors
+        self.source_keys = corpus_index.retrieved_keys
 
     @property
     def manifest(self):
@@ -539,6 +545,7 @@ class HybridRetriever:
                 "selection": "one hop from ranked hits, complete originals, no invented rank or recursive expansion",
                 "budget": "shared A/R required evidence; normal exact-token feasibility and native admission apply",
                 "extra_model_calls": 0},
+            "semantic_evidence_selection": self.evidence_selector.manifest if self.evidence_selector else None,
             "evidence_selection": {"strategy": "ranked_exact_content_groups_v1",
                 "group": "exact title/body with known version, parent and dependency scope",
                 "source_identity": "highest ranked original representative; task anchor retained",
@@ -586,6 +593,8 @@ class HybridRetriever:
             raise ValueError("hybrid retrieval requires a P3 turn")
         if self.source_window and self.expand_source_window is None:
             raise ValueError("source_window requires --evidence-corpus metadata")
+        if self.evidence_selector is not None and self.source_keys is None:
+            raise ValueError("semantic evidence selection requires --evidence-corpus metadata")
         started = time.perf_counter()
         view = user_topic_view(turn.user_questions) if self.query_mode == "user_topic" else None
         if self.resolver is not None:
@@ -600,23 +609,17 @@ class HybridRetriever:
             from adapters.conversation import frame_query
             requirements = tuple(dict.fromkeys(frame_query(intent.task_frame, requirement=r)
                                                for r in intent.task_frame.requirements))
-        # run_sessions dispatches retrieval via to_thread. Serialize this model
-        # pair, but do not hold its lock while another service resolves intent.
-        # An unrelated session can retrieve during that HTTP wait. Shutdown
-        # drains complete retrieval workers before closing either client/model.
-        with self._lock:
-            fusion_trace = None
-            condition_trace = None
-            selection_trace = None
-            requirement_trace = None
-            supporting_contexts = ()
-            retrieval_error = None
-            scoring_query = None
-            try:
-                query = view["text"] if view else query_text(turn.user_questions, self.query_mode)
-                scoring_query = rerank_query_text(turn, query, self.rerank_query_mode)
-                if view is None and self.rerank_query_mode != "resolved":
-                    view = {"mode": self.query_mode, "text": query}
+        fusion_trace = condition_trace = selection_trace = requirement_trace = semantic_trace = None
+        supporting_contexts = ()
+        retrieval_error = scoring_query = None
+        try:
+            query = view["text"] if view else query_text(turn.user_questions, self.query_mode)
+            scoring_query = rerank_query_text(turn, query, self.rerank_query_mode)
+            if view is None and self.rerank_query_mode != "resolved":
+                view = {"mode": self.query_mode, "text": query}
+            # Only the local encoder/reranker pair is serialized. Both semantic
+            # HTTP operations run outside this lock; shutdown drains the worker.
+            with self._lock:
                 if requirements and self.stage == "hybrid_rerank":
                     contexts, requirement_trace = search_requirements(query, requirements,
                         self.sparse, self.dense, self.encoder, self.reranker,
@@ -624,6 +627,9 @@ class HybridRetriever:
                         current_query=turn.query if self.query_fusion == "current_topic_rrf" else None,
                         source_context=self.source_context, source_neighbors=self.source_neighbors,
                         group_key=self.selection_group)
+                    orders = [requirement_trace["primary_ranked_ids"], *requirement_trace["requirement_ranked_ids"]]
+                    ids = dict.fromkeys(pid for row in zip(*orders) for pid in row)
+                    ranked = tuple(self.dense.by_id[pid] for pid in ids)
                 elif self.stage == "dense":
                     ranked = self.dense.search(query, self.encoder, top_k=self.candidate_k)
                 elif self.query_fusion == "current_topic_rrf":
@@ -639,44 +645,47 @@ class HybridRetriever:
                         candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
                         rerank_query=scoring_query, source_context=self.source_context)
                     ranked = stages[self.stage]["contexts"]
-                if requirement_trace is not None:
-                    pass  # The compound task already selected its shared evidence set.
-                elif self.stage == "hybrid_rerank" and view is not None and view.get("condition_query"):
-                    contexts, condition_trace = select_condition_evidence(
-                        stages[self.stage], view["condition_query"], self.reranker, rrf_k=self.rrf_k,
-                        group_key=self.selection_group)
-                else:
-                    contexts, selection_trace = select_ranked_evidence(ranked, group_key=self.selection_group)
+                if requirement_trace is None:
+                    if self.stage == "hybrid_rerank" and view is not None and view.get("condition_query"):
+                        contexts, condition_trace = select_condition_evidence(
+                            stages[self.stage], view["condition_query"], self.reranker, rrf_k=self.rrf_k,
+                            group_key=self.selection_group)
+                    else:
+                        contexts, selection_trace = select_ranked_evidence(ranked, group_key=self.selection_group)
                 if self.source_window:
                     supporting_contexts = self.expand_source_window(contexts)
                 if view is None and (selection_trace is not None or self.source_window):
                     view = {"mode": self.query_mode, "text": query}
                 self.requests += 1
-            except Exception as exc:
-                retrieval_error = f"{type(exc).__name__}: {exc}"
-                raise
-            finally:
-                if view is not None:
-                    trace = {"task_id": turn.task_id, "conversation_id": turn.conversation_id,
-                        "turn": turn.turn, **view,
-                        "rerank_query_mode": self.rerank_query_mode,
-                        "rerank_query": scoring_query if self.stage == "hybrid_rerank" else None,
-                        "retrieval_status": "failed" if retrieval_error else "completed",
-                        "retrieval_error": retrieval_error,
-                        # Full local wall interval, including lock wait and query resolution.
-                        # The resolver's own elapsed_ms remains unchanged in view.
-                        "retrieval_elapsed_ms": (time.perf_counter()-started)*1000,
-                        **({"condition_evidence": condition_trace} if condition_trace else {}),
-                        **({"evidence_selection": selection_trace} if selection_trace else {}),
-                        **({"requirement_evidence": requirement_trace} if requirement_trace else {}),
-                        **({"source_window": {"primary_ids": [c.document_id for c in contexts],
-                            "supporting_ids": [c.document_id for c in supporting_contexts]}}
-                           if self.source_window and not retrieval_error else {}),
-                        **({"query_fusion_trace": fusion_trace} if fusion_trace else {})}
-                    if self.trace_sink is None:
-                        self.query_view_traces.append(trace)
-                    else:
-                        self.trace_sink(trace)
+            if self.evidence_selector is not None and intent is not None and intent.task_frame is not None:
+                contexts, intent, semantic_trace = self.evidence_selector.select(turn, intent, ranked, contexts,
+                    neighbors=self.source_neighbors, indexed=self.dense.by_id,
+                    contextualize=self.source_context, keys=self.source_keys)
+        except Exception as exc:
+            retrieval_error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            if view is not None:
+                trace = {"task_id": turn.task_id, "conversation_id": turn.conversation_id,
+                    "turn": turn.turn, **view,
+                    **({"context": asdict(intent)} if intent is not None else {}),
+                    "rerank_query_mode": self.rerank_query_mode,
+                    "rerank_query": scoring_query if self.stage == "hybrid_rerank" else None,
+                    "retrieval_status": "failed" if retrieval_error else "completed",
+                    "retrieval_error": retrieval_error,
+                    "retrieval_elapsed_ms": (time.perf_counter()-started)*1000,
+                    **({"condition_evidence": condition_trace} if condition_trace else {}),
+                    **({"evidence_selection": selection_trace} if selection_trace else {}),
+                    **({"requirement_evidence": requirement_trace} if requirement_trace else {}),
+                    **({"semantic_evidence": semantic_trace} if semantic_trace else {}),
+                    **({"source_window": {"primary_ids": [c.document_id for c in contexts],
+                        "supporting_ids": [c.document_id for c in supporting_contexts]}}
+                       if self.source_window and not retrieval_error else {}),
+                    **({"query_fusion_trace": fusion_trace} if fusion_trace else {})}
+                if self.trace_sink is None:
+                    self.query_view_traces.append(trace)
+                else:
+                    self.trace_sink(trace)
         return replace(turn, contexts=tuple(contexts), query_context=intent,
                        supporting_contexts=supporting_contexts)
 

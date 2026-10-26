@@ -236,7 +236,7 @@ def render_evidence_relations(blocks: Iterable[EvidenceBlock],
 
 def current_source_guide(query: str, blocks: Iterable[EvidenceBlock],
                          references: tuple[tuple[str, EvidenceKey], ...], *,
-                         retrieval_priority: tuple[EvidenceKey, ...] = ()) -> str:
+                         retrieval_priority: tuple[EvidenceKey, ...] = (), evidence_uses=()) -> str:
     """Locate current sources near the question without moving cached bodies.
 
     IDF-weighted lexical overlap selects one original line per source. This is
@@ -257,6 +257,7 @@ def current_source_guide(query: str, blocks: Iterable[EvidenceBlock],
     frequency = Counter(term for block in blocks for term in terms(block.text) & query_terms)
     weights = {term: math.log1p(len(blocks)/count) for term, count in frequency.items()}
     by_key = {key: ref for ref, key in references}
+    uses = {use.key: use for use in evidence_uses}
     rows = []
     for block in blocks:
         lines = list(re.finditer(r"[^\r\n]+", block.text))
@@ -267,7 +268,11 @@ def current_source_guide(query: str, blocks: Iterable[EvidenceBlock],
             row["title"] = block.title
         if block.parent_section is not None:
             row["section"] = block.parent_section
-        if best is not None and terms(best.group()) & query_terms:
+        if (use := uses.get(block.key)) is not None:
+            if not 0 <= use.start < use.end <= len(block.text):
+                raise EvidenceError("source reading guide must point into the original body")
+            row.update(for_needs=use.needs, chars=[use.start, use.end], excerpt=block.text[use.start:use.end])
+        elif best is not None and terms(best.group()) & query_terms:
             start, end = best.start(), min(best.end(), best.start() + 360)
             row.update(chars=[start, end], excerpt=block.text[start:end])
         rows.append(row)

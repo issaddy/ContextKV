@@ -87,6 +87,33 @@ def test_factory_loads_models_once_and_retrieves_only_user_questions(retriever_c
         retriever.retrieve_turn(replace(outputs[0], protocol="P1"))
 
 
+def test_semantic_factory_shares_the_interpreter_client_and_requires_bound_sources(retriever_config, monkeypatch):
+    from adapters import query_selector
+    from adapters.serving_retrieval import ServingRetriever
+    clients=[]
+    class Client:
+        manifest={"model":"fixture"}
+        def __init__(self,config):
+            self.config=config
+            self.closes=0
+            clients.append(self)
+        def close(self):
+            self.closes+=1
+    monkeypatch.setattr(query_selector,"OpenAICompletionClient",Client)
+    value=yaml.safe_load(retriever_config.read_text())
+    value.update(query_mode="conversational",evidence_selection="semantic",
+                 selector={"model":"fixture","revision":"fixed","base_url":"http://fixture"})
+    retriever_config.write_text(yaml.safe_dump(value))
+    retriever=create_retriever("P3",config_path=retriever_config)
+    try:
+        assert retriever.evidence_selector.client is retriever.resolver.client is clients[0]
+        with pytest.raises(ValueError,match="evidence-corpus"):
+            ServingRetriever(retriever,corpus_id="c")
+    finally:
+        retriever.close()
+    assert clients[0].closes==1
+
+
 @pytest.mark.asyncio
 async def test_distinct_content_selection_flows_through_serving_and_durable_replay(retriever_config, tmp_path):
     from adapters.serving_retrieval import ServingRetriever

@@ -37,6 +37,7 @@ class HybridRetrievalConfig:
     selector_schema_mode: str = "static_v1"
     rerank_query_mode: str = "resolved"
     source_window: bool = False
+    evidence_selection: str = "ranked"
 
 
 def load_retriever_config(path):
@@ -49,6 +50,12 @@ def load_retriever_config(path):
         raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
     if value.stage not in {"dense", "hybrid", "hybrid_rerank"}:
         raise ValueError("unknown retrieval stage")
+    if value.evidence_selection not in {"ranked", "semantic"}:
+        raise ValueError("evidence_selection must be ranked or semantic")
+    if value.evidence_selection == "semantic" and (
+            value.query_mode != "conversational" or value.selector is None or value.stage != "hybrid_rerank"
+            or value.source_window):
+        raise ValueError("semantic evidence selection requires conversational hybrid_rerank with selector and no output source_window")
     if value.query_fusion not in {"single", "current_topic_rrf"}:
         raise ValueError("unknown query fusion")
     if value.query_fusion == "current_topic_rrf" and (value.query_mode not in {"user_topic", "conversational", *SOURCE_MODES} or value.stage == "dense"):
@@ -128,11 +135,16 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
                 from adapters.query_resolution import TopicResolver
                 resolver = TopicResolver(client, config.query_mode, history_turns=config.selector_history_turns,
                                          schema_mode=config.selector_schema_mode)
+            evidence_selector = None
+            if config.evidence_selection == "semantic":
+                from adapters.evidence_selection import EvidenceSelector
+                evidence_selector = EvidenceSelector(client)
             result = HybridRetriever(sparse, dense, encoder, reranker, query_mode=config.query_mode,
                 stage=config.stage, candidate_k=config.candidate_k, rerank_k=config.rerank_k, rrf_k=config.rrf_k,
                 query_fusion=config.query_fusion,
                 rerank_query_mode=config.rerank_query_mode,
                 source_window=config.source_window,
+                evidence_selector=evidence_selector,
                 resolver=resolver, trace_sink=trace_sink,
                 source_config={"path": str(Path(config_path).resolve()), "resolved": asdict(config),
                                "relative_path_base": str(Path.cwd())})
