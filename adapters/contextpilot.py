@@ -26,12 +26,13 @@ def context_distance(left: tuple[EvidenceKey, ...], right: tuple[EvidenceKey, ..
 
 
 def committed_contexts(snapshot: SessionSnapshot) -> tuple[tuple[EvidenceKey, ...], ...]:
-    """Read actual committed body order, then older history when available."""
+    """Read committed source declaration order, then older history when available."""
     contexts = []
     if snapshot.execution:
         by_message: dict[int, list[EvidenceKey]] = defaultdict(list)
         for span in snapshot.execution.evidence_spans:
-            by_message[span.message_index].append(span.key)
+            index = span.message_index if span.alias_declaration is None else span.alias_declaration[0]
+            by_message[index].append(span.key)
         contexts.extend(tuple(keys) for _, keys in sorted(by_message.items()))
     actual_sets = {frozenset(context) for context in contexts}
     contexts.extend(turn.evidence_keys for turn in snapshot.raw_history

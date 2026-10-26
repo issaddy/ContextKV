@@ -47,7 +47,8 @@ def candidate_features(candidate: PromptCandidate, session: SessionSnapshot | No
         history_mean, lengths[-1] if lengths else 0,
         len(candidate.visible_blocks), len(candidate.required_blocks),
         len(candidate.visible_blocks - candidate.required_blocks),
-        sum(span.end - span.start for span in candidate.evidence_spans), len(question),
+        sum(end - start for _, start, end in {
+            (span.message_index, span.start, span.end) for span in candidate.evidence_spans}), len(question),
         float("how" in words), float(bool(words & {"steps", "explain", "detail", "example", "examples"})),
         rebuild * len(question), rebuild * history_mean,
     )

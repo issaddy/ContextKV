@@ -48,7 +48,7 @@ class EvidenceBlock:
 
 @dataclass(frozen=True)
 class EvidenceSpan:
-    """Body offsets within a message, with independently verifiable provenance."""
+    """Complete body location and provenance; aliases also locate their declaration."""
     key: EvidenceKey
     message_index: int
     start: int
@@ -56,9 +56,13 @@ class EvidenceSpan:
     source_uri: str
     provenance: tuple[str, ...]
     reference_id: str
+    body_reference_id: str | None = None
+    alias_declaration: tuple[int, int, int] | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "provenance")
+        if self.alias_declaration is not None:
+            _tuples(self, "alias_declaration")
 
 
 @dataclass(frozen=True)

@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 import re
-from typing import Iterable, Protocol
+from typing import Iterable, Mapping, Protocol
 
 from .evidence import EvidenceError, evidence_index
 from .schema import ConfigFingerprint, EvidenceBlock, EvidenceKey, EvidenceSpan, Message, QueryContext
@@ -194,13 +194,21 @@ class HuggingFaceTemplate:
 TemplateAdapter = ByteTemplate
 
 
-def _evidence_header(block: EvidenceBlock, reference: str) -> str:
-    metadata = json.dumps({"id": reference, "corpus": block.key.corpus_id,
+def _evidence_metadata(block: EvidenceBlock, reference: str) -> str:
+    return json.dumps({"id": reference, "corpus": block.key.corpus_id,
         "document": block.key.document_id, "passage": block.key.passage_id,
         "version": block.key.version, "source": block.source_uri,
         "title": block.title, "provenance": block.provenance},
         ensure_ascii=False, separators=(",", ":"))
-    return f"\nEvidence [{reference}] {metadata}\n<evidence_body>\n"
+
+
+def _evidence_header(block: EvidenceBlock, reference: str) -> str:
+    return f"\nEvidence [{reference}] {_evidence_metadata(block, reference)}\n<evidence_body>\n"
+
+
+def _evidence_alias(block: EvidenceBlock, reference: str, body_reference: str) -> str:
+    return (f"\nEvidence alias [{reference}] {_evidence_metadata(block, reference)}\n"
+            f"Its complete original body is identical to the body of [{body_reference}].\n")
 
 
 def render_evidence_relations(blocks: Iterable[EvidenceBlock],
@@ -279,7 +287,8 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
                          table_annotations: str = "", evidence_relations: str = "",
                          source_guide: str = "",
                          query_context: QueryContext | None = None,
-                         citation_scope: Iterable[EvidenceKey] | None = None
+                         citation_scope: Iterable[EvidenceKey] | None = None,
+                         visible_bodies: Mapping[str, EvidenceSpan] | None = None
                          ) -> tuple[Message, tuple[EvidenceSpan, ...]]:
     by_key = {key: reference for reference, key in references}
     blocks, reused = tuple(blocks), tuple(reused)
@@ -289,6 +298,10 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
     # evidence layout can actually share its causal token prefix across queries.
     content = ""
     spans: list[EvidenceSpan] = []
+    # Exact text equality only. A committed physical span is required for reuse;
+    # a matching archive entry or a previous answer is insufficient.
+    bodies = dict(visible_bodies or {})
+    has_aliases = False
     reused_ids = [by_key[key] for key in sorted(reused)]
     if reused_ids:
         if layout == "contextpilot":
@@ -299,12 +312,35 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
     ordered = blocks if layout == "contextpilot" else sorted(blocks, key=lambda b: b.key)
     for block in ordered:
         ref = by_key[block.key]
+        owner = bodies.get(block.text)
+        header = _evidence_header(block, ref)
+        if owner is not None:
+            if owner.reference_id == ref:
+                continue
+            body_ref = owner.body_reference_id or owner.reference_id
+            declaration = _evidence_alias(block, ref, body_ref)
+            note = ("\nEvidence aliases share original text only. Each source keeps its own "
+                    "identity, version, scope and declared dependencies.\n") if not has_aliases else ""
+            # Tiny bodies can be cheaper to repeat than to describe by alias.
+            # This uses actual serialized text lengths, not a tuned threshold;
+            # final input budgets/costs still use complete tokenizer IDs.
+            if len(note) + len(declaration) < len(header) + len(block.text) + len("\n</evidence_body>\n"):
+                content += note
+                has_aliases = True
+                start = len(content)
+                content += declaration
+                spans.append(EvidenceSpan(block.key, owner.message_index, owner.start, owner.end,
+                    block.source_uri, block.provenance, ref, body_ref,
+                    (message_index, start, len(content))))
+                continue
         # JSON prevents source metadata/newlines from changing field boundaries.
-        content += _evidence_header(block, ref)
+        content += header
         start = len(content)
         content += block.text
-        spans.append(EvidenceSpan(block.key, message_index, start, len(content),
-                                 block.source_uri, block.provenance, ref))
+        span = EvidenceSpan(block.key, message_index, start, len(content),
+                            block.source_uri, block.provenance, ref)
+        spans.append(span)
+        bodies.setdefault(block.text, span)
         content += "\n</evidence_body>\n"
     if layout == "contextpilot" or query_context is not None:
         from adapters.contextpilot import retrieval_order_annotation
@@ -361,6 +397,7 @@ def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSp
     ref_map = dict(references)
     visible: set[EvidenceKey] = set()
     occupied: dict[int, list[tuple[int, int]]] = {}
+    roots = {span.reference_id: span for span in spans if span.body_reference_id is None}
     for span in spans:
         block = archive.get(span.key)
         if block is None or not 0 <= span.message_index < len(messages):
@@ -376,15 +413,34 @@ def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSp
             raise EvidenceError("evidence provenance mismatch")
         if ref_map.get(span.reference_id) != span.key:
             raise EvidenceError("evidence reference mapping mismatch")
-        if not message.content[:span.start].endswith(_evidence_header(block, span.reference_id)):
-            raise EvidenceError("evidence identity/provenance header missing from prompt")
+        if span.body_reference_id is None:
+            if span.alias_declaration is not None:
+                raise EvidenceError("alias declaration requires a physical body reference")
+            if not message.content[:span.start].endswith(_evidence_header(block, span.reference_id)):
+                raise EvidenceError("evidence identity/provenance header missing from prompt")
+            for start, end in occupied.get(span.message_index, ()):
+                if span.start < end and start < span.end:
+                    raise EvidenceError("overlapping evidence body spans")
+            occupied.setdefault(span.message_index, []).append((span.start, span.end))
+        else:
+            owner = roots.get(span.body_reference_id)
+            if owner is None or (owner.message_index, owner.start, owner.end) != (span.message_index, span.start, span.end):
+                raise EvidenceError("evidence alias requires the referenced complete physical body")
+            if span.alias_declaration is None:
+                raise EvidenceError("evidence alias declaration missing")
+            index, start, end = span.alias_declaration
+            if (not 0 <= index < len(messages) or messages[index].role != "user"
+                    or not 0 <= start < end <= len(messages[index].content)
+                    or messages[index].content[start:end] != _evidence_alias(block, span.reference_id, span.body_reference_id)):
+                raise EvidenceError("evidence alias identity/provenance declaration mismatch")
         if not message.content[span.end:].startswith("\n</evidence_body>\n"):
             raise EvidenceError("evidence body delimiter missing from prompt")
-        for start, end in occupied.get(span.message_index, ()):
-            if span.start < end and start < span.end:
-                raise EvidenceError("overlapping evidence body spans")
-        occupied.setdefault(span.message_index, []).append((span.start, span.end))
         visible.add(span.key)
+    for span in spans:
+        if span.alias_declaration is not None:
+            index, start, end = span.alias_declaration
+            if any(start < body_end and body_start < end for body_start, body_end in occupied.get(index, ())):
+                raise EvidenceError("evidence alias declaration overlaps an original body")
     if rendered_text is not None:
         verify_rendered_evidence(messages, spans, rendered_text)
     return frozenset(visible)

@@ -75,15 +75,19 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         if measure_evidence_redundancy:
             # Count each complete body independently with the generation tokenizer.
             # This is a text redundancy proxy, not a prompt-token or KV subtraction.
-            # Reuse lengths only inside this build; still count every physical span.
+            # Alias identities share one physical span. A body used by any
+            # required source is required, even when its original owner is historical.
             total_body_tokens = nonrequired_body_tokens = 0
+            physical = {}
             for span in spans:
-                if span.key not in body_lengths:
-                    body = messages[span.message_index].content[span.start:span.end]
-                    body_lengths[span.key] = len(template.tokenizer.encode(body, add_special_tokens=False))
-                count = body_lengths[span.key]
+                physical.setdefault((span.message_index, span.start, span.end), set()).add(span.key)
+            for (index, start, end), keys in physical.items():
+                body = messages[index].content[start:end]
+                if body not in body_lengths:
+                    body_lengths[body] = len(template.tokenizer.encode(body, add_special_tokens=False))
+                count = body_lengths[body]
                 total_body_tokens += count
-                if span.key not in required_keys:
+                if not keys & required_keys:
                     nonrequired_body_tokens += count
         if not required_keys <= visible:
             reason = "required_evidence_not_visible"
@@ -123,11 +127,15 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         # disjoint evidence can reuse a cached history prefix; overlap alone
         # does not establish that rebuilding has lower execution cost.
         missing = tuple(block for block in required if block.key not in visible)
+        visible_bodies = {}
+        for span in execution.evidence_spans:
+            if span.body_reference_id is None and span.key in visible:
+                visible_bodies.setdefault(archive[span.key].text, span)
         current, spans = current_user_message(query, missing, references,
             message_index=len(execution.messages), reused=required_keys & visible,
             layout=policy.layout, retrieval_priority=retrieval_priority, table_annotations=table_annotations,
             evidence_relations=evidence_relations, citation_scope=required_keys, source_guide=source_guide,
-            query_context=query_context)
+            query_context=query_context, visible_bodies=visible_bodies)
         prompts.append(("APPEND", execution.messages + (current,), execution.evidence_spans + spans,
                         visible | frozenset(span.key for span in spans), reason))
 
