@@ -28,10 +28,13 @@ class Client:
         # Short task-only responses keep the existing resolver tests readable.
         # They still travel through the actual state-update protocol.
         if isinstance(value, dict) and "query" in value:
-            value = {**value, "updates": {"task": value["query"]}}
+            value = {**value, "task": {"operation":"replace", "value":value["query"]}, "updates":{}}
             del value["query"]
         if isinstance(value, dict):
-            value = {"resume_turn": 0, **value}
+            updates = dict(value.get("updates", {}))
+            task = ({"operation":"replace", "value":updates.pop("task")} if "task" in updates
+                    else {"operation":"keep", "value":""})
+            value = {"resume_turn": 0, "task":task, **value, "updates":updates}
         self.value, self.finish, self.inputs = value, finish, []
     def complete(self, messages, **kwargs):
         self.inputs.append((messages, kwargs))
@@ -45,55 +48,97 @@ def turn(current, questions=("How does Atlas Cloud store documents?",)):
 
 
 def test_attribute_correction_keeps_the_active_task_and_topic():
-    frame = TaskFrame("Atlas Store", "documents", "maximum size", "v2")
+    frame = TaskFrame("Atlas Store", "documents", "maximum size", (("version","v2"),))
     prior = QueryContext(frame_query(frame), "followup", (1,), frame)
     client = Client({"relation":"correction", "history_turns":[],
                      "updates":{"target":"attachments"}})
     request = turn("No, attachments.", ("What is the size limit?",))
     view = ConversationResolver(client).resolve(request, PriorContext(interpretations=(prior,)))
     intent = decode(QueryContext, view["context"])
-    assert intent.task_frame == TaskFrame("Atlas Store", "attachments", "maximum size", "v2")
+    assert intent.task_frame == replace(frame,target="attachments")
     assert intent.history_turns == (1,)  # An inherited state records its actual base.
     assert "maximum size" in view["text"] and "documents" not in view["text"]
     assert request.query == "No, attachments." and prior.task_frame == frame
     body = json.loads(client.inputs[0][0][-1]["content"])
-    assert body["active_turn"]["state"] == asdict(frame)
-    assert "prior_interpretation" not in body["active_turn"]  # Do not duplicate its rendering.
+    assert body["previous_turn"]["state"] == {**asdict(frame),"conditions":dict(frame.conditions)}
+    assert "prior_interpretation" not in body["previous_turn"]  # Do not duplicate its rendering.
 
 
 def test_a_new_information_need_keeps_the_topic_without_regenerating_it():
-    frame = TaskFrame("Atlas Store", "Basic and Pro plans", "compare plans", "")
+    frame = TaskFrame("Atlas Store", "Basic and Pro plans", "compare plans")
     prior = QueryContext(frame_query(frame), "followup", (1,), frame)
     client = Client({"relation":"followup", "history_turns":[1],
-                     "updates":{"target":"Basic plan","task":"suitability","conditions":"exploratory use"}})
+                     "updates":{"target":"Basic plan","task":"suitability","conditions":{"use":"exploration"}}})
     view = ConversationResolver(client).resolve(turn("Is Basic enough to explore?"),
                                                PriorContext(interpretations=(prior,)))
     intent = decode(QueryContext, view["context"])
     assert intent.task_frame.topic == "Atlas Store" and "compare plans" not in intent.query
-    assert intent.task_frame.task == "suitability" and intent.task_frame.conditions == "exploratory use"
+    assert intent.task_frame.task == "suitability" and intent.task_frame.conditions == (("use","exploration"),)
     assert len(client.inputs) == 1
 
 
 def test_condition_changes_and_removals_preserve_other_fields_across_languages():
-    original = TaskFrame("晨星计划", "应届生", "申请条件", "2025版，北京")
-    changed = apply_frame_updates(original, {"target":"毕业三年", "conditions":"2025版，上海"})
+    original = TaskFrame("晨星计划", "应届生", "申请条件", (("version","2025版"),("region","北京")))
+    changed = apply_frame_updates(original, {"target":"毕业三年", "conditions":{"region":"上海"}})
     assert changed.topic == original.topic and changed.task == original.task
     assert "北京" not in frame_query(changed) and "2025版" in frame_query(changed)
     unrestricted = apply_frame_updates(changed, {"conditions":None})
-    assert unrestricted.conditions == "" and unrestricted.target == "毕业三年"
+    assert unrestricted.conditions == () and unrestricted.target == "毕业三年"
+
+
+def test_named_condition_patch_preserves_version_when_connectivity_changes():
+    frame = TaskFrame("Atlas SDK","installation","steps",
+                      (("version","v4"),("platform","Linux"),("connectivity","offline")))
+    changed = apply_frame_updates(frame,{"conditions":{"connectivity":"online"}})
+    assert dict(changed.conditions) == {"version":"v4","platform":"Linux","connectivity":"online"}
+    assert dict(frame.conditions)["connectivity"] == "offline"
+    removed = apply_frame_updates(changed,{"conditions":{"connectivity":None}})
+    assert dict(removed.conditions) == {"version":"v4","platform":"Linux"}
+    assert "version: v4" in frame_query(removed) and "platform: Linux" in frame_query(removed)
+
+
+def test_explicit_task_operation_precedes_context_carryover():
+    frame = TaskFrame("Atlas Store","attachments","size limit")
+    prior = QueryContext(frame_query(frame),"followup",(1,),frame)
+    question = "How do I begin using Atlas Store?"
+    client = Client({"task":{"operation":"replace","value":"create a service instance"},
+                     "relation":"followup","history_turns":[1],"updates":{"target":None}})
+    view = ConversationResolver(client).resolve(turn(question),PriorContext(interpretations=(prior,)))
+    intent = decode(QueryContext,view["context"])
+    assert intent.task_frame == TaskFrame("Atlas Store","","create a service instance")
+    assert "size limit" not in view["text"] and "attachments" not in view["text"]
+    messages, options = client.inputs[0]
+    body = json.loads(messages[-1]["content"])
+    assert next(iter(body)) == "current_question" and body["current_question"] == question
+    schema = options["response_format"]["json_schema"]["schema"]
+    assert next(iter(schema["properties"])) == "task"
+    assert "task" not in schema["properties"]["updates"]["properties"]
+    kept = apply_frame_updates(frame,{"target":"images"},task_operation="keep",task_value="a different task")
+    assert kept.task == "size limit"
+
+
+def test_legacy_composite_condition_is_preserved_until_explicitly_split():
+    value = {"query":"Atlas installation", "relation":"followup", "history_turns":[1],
+             "task_frame":{"topic":"Atlas","target":"SDK","task":"installation","conditions":"v4; Linux; offline"}}
+    prior = decode(QueryContext,value)
+    assert prior.task_frame.conditions == (("legacy","v4; Linux; offline"),)
+    assert "v4; Linux; offline" in frame_query(prior.task_frame)
+    patched = apply_frame_updates(prior.task_frame,{"conditions":{
+        "legacy":None,"version":"v4","platform":"Linux","connectivity":"online"}})
+    assert dict(patched.conditions) == {"version":"v4","platform":"Linux","connectivity":"online"}
 
 
 def test_revisit_resumes_the_selected_task_state_instead_of_the_latest_topic():
-    old = TaskFrame("Atlas", "attachments", "maximum size", "v2")
-    latest = TaskFrame("Nova", "installation", "requirements", "Windows")
+    old = TaskFrame("Atlas", "attachments", "maximum size", (("version","v2"),))
+    latest = TaskFrame("Nova", "installation", "requirements", (("platform","Windows"),))
     history = ("Atlas file storage?", "And their limits?", "Explain Nova installation.")
     context = PriorContext(interpretations=(None, QueryContext(frame_query(old),"followup",(1,),old),
                                            QueryContext(frame_query(latest),"standalone",(),latest)))
     client = Client({"relation":"revisit","history_turns":[2],"resume_turn":2,
-                     "updates":{"conditions":"v3"}})
+                     "updates":{"conditions":{"version":"v3"}}})
     view = ConversationResolver(client).resolve(turn("Back to the earlier limit, for v3?",history), context)
     assert view["state_base_turn"] == 2 and view["context"]["history_turns"] == (2,)
-    assert decode(QueryContext,view["context"]).task_frame == replace(old,conditions="v3")
+    assert decode(QueryContext,view["context"]).task_frame == replace(old,conditions=(("version","v3"),))
     assert "Nova" not in view["text"] and "Windows" not in view["text"]
 
 
@@ -105,11 +150,11 @@ def test_legacy_interpretation_can_initialize_state_without_a_second_call():
                                                PriorContext(interpretations=(prior,)))
     assert decode(QueryContext,view["context"]).task_frame == TaskFrame("Atlas","attachments","upload method")
     assert view["state_base_turn"] is None and len(client.inputs) == 1
-    assert json.loads(client.inputs[0][0][-1]["content"])["active_turn"]["prior_interpretation"] == prior.query
+    assert json.loads(client.inputs[0][0][-1]["content"])["previous_turn"]["prior_interpretation"] == prior.query
 
 
 def test_persistent_task_state_does_not_duplicate_generation_or_change_candidate_tokens():
-    frame = TaskFrame("Atlas", "attachments", "size limit", "v2")
+    frame = TaskFrame("Atlas", "attachments", "size limit", (("version","v2"),))
     intent = QueryContext(frame_query(frame), "correction", (1,), frame)
     blocks = (make_evidence("Original attachment limits, including their conditions.","limits"),)
     snapshot = SessionSnapshot("s")
@@ -122,13 +167,16 @@ def test_persistent_task_state_does_not_duplicate_generation_or_change_candidate
 
 
 @pytest.mark.asyncio
-async def test_legacy_intent_request_identity_and_new_state_survive_persistence(tmp_path):
+@pytest.mark.parametrize("old_frame", (None, "", "v4; Linux; offline"))
+async def test_legacy_intent_request_identity_and_new_state_survive_persistence(tmp_path, old_frame):
     import hashlib
     from controller.serialization import dumps, loads
 
     legacy = {"query":"Atlas limits?", "relation":"followup", "history_turns":[1]}
+    if old_frame is not None:
+        legacy["task_frame"] = {"topic":"Atlas","target":"files","task":"size limit","conditions":old_frame}
     intent = loads(QueryContext,json.dumps(legacy))
-    assert intent.task_frame is None
+    assert (intent.task_frame is None) == (old_frame is None)
     store, engine = SessionStore(tmp_path/"state.sqlite3"), MockEngine()
     service = Controller(store,engine)
     evidence = (make_evidence("Original source.","one"),)
@@ -192,7 +240,7 @@ def test_contextual_rewrite_preserves_current_question_and_has_bounded_history_p
     assert view["context"]["history_turns"] == ((1,) if relation == "revisit" else (1, 2))
     messages, options = client.inputs[0]
     body = json.loads(messages[-1]["content"])
-    assert body["current_question"] == query and body["active_turn"]["turn"] == 2
+    assert body["current_question"] == query and body["previous_turn"]["turn"] == 2
     assert body["earlier_user_turns"][0]["prior_interpretation"] == "first accepted interpretation"
     assert "PhantomStore" not in messages[-1]["content"] and "999" not in messages[-1]["content"]
     assert "opaque-id" not in messages[-1]["content"]
@@ -226,7 +274,7 @@ def test_invalid_or_truncated_interpretation_uses_current_query_once(value, fini
 
 def test_standalone_state_resets_even_if_the_model_overselects_background_turns():
     current = "What is a data lake?"
-    previous = QueryContext("Atlas limits?", "followup", (1,), TaskFrame("Atlas", "files", "size limit", "v2"))
+    previous = QueryContext("Atlas limits?", "followup", (1,), TaskFrame("Atlas", "files", "size limit", (("version","v2"),)))
     client = Client({"query": current, "relation": "standalone", "history_turns": [1]})
     view = ConversationResolver(client).resolve(turn(current), PriorContext(interpretations=(previous,)))
     assert view["text"] == current and view["context"]["history_turns"] == ()
@@ -326,8 +374,8 @@ def test_recent_interpreted_state_preserves_inherited_conditions_without_all_old
     view = ConversationResolver(client).resolve(original, state)
     body=json.loads(client.inputs[0][0][-1]["content"])
     assert [r["turn"] for r in body["earlier_user_turns"]] == [3, 4]
-    assert body["active_turn"]["turn"] == 5
-    assert body["active_turn"]["prior_interpretation"] == state.interpretations[-1].query
+    assert body["previous_turn"]["turn"] == 5
+    assert body["previous_turn"]["prior_interpretation"] == state.interpretations[-1].query
     assert view["context"]["history_turns"] == (5,)
 
 
@@ -531,7 +579,7 @@ async def test_interpretation_commits_with_answer_and_idempotent_replay_does_not
     service = Controller(store, engine, knobs=PlannerKnobs(strategy="always_append"))
     evidence = make_evidence("A condition with its full original source.", "a")
     calls = []
-    frame = None if relation == "ambiguous" else TaskFrame("Atlas", "applicants", "eligibility", "v2, region B")
+    frame = None if relation == "ambiguous" else TaskFrame("Atlas", "applicants", "eligibility", (("version","v2"),("region","B")))
     intent = QueryContext("And region B?" if relation == "ambiguous" else frame_query(frame), relation, (1,), frame)
     async def provider(snapshot):
         calls.append(snapshot.version)

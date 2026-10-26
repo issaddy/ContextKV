@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import time
 import uuid
@@ -202,7 +202,15 @@ class Controller:
             intent = {"query": query_context.query, "relation": query_context.relation,
                       "history_turns": query_context.history_turns}
             if query_context.task_frame is not None:
-                intent["task_frame"] = query_context.task_frame
+                frame = asdict(query_context.task_frame)
+                conditions = query_context.task_frame.conditions
+                # Preserve explicit v9 request identities after reading their
+                # empty/composite conditions into the new immutable structure.
+                if not conditions:
+                    frame["conditions"] = ""
+                elif len(conditions) == 1 and conditions[0][0] == "legacy":
+                    frame["conditions"] = conditions[0][1]
+                intent["task_frame"] = frame
             content = (*content, intent)
         request_hash = hashlib.sha256(dumps(content).encode()).hexdigest()
         arrived = time.monotonic()

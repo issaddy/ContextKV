@@ -102,7 +102,7 @@ def test_conversational_factory_carries_resolution_or_ambiguity_into_serving(ret
         manifest = {"model":"fixture"}
         def complete(self, messages, **kwargs):
             calls.append(messages)
-            return CompletionResult("completed", json.dumps({"updates":{"task":"Atlas attachment limits?"},
+            return CompletionResult("completed", json.dumps({"task":{"operation":"replace","value":"Atlas attachment limits?"},"updates":{},
                 "relation":relation,"history_turns":[1],"resume_turn":0}), "stop")
         def close(self):
             pass
