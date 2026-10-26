@@ -1,6 +1,6 @@
 """Conditional conversational query rewriting over committed user context.
 
-Reuses the existing completion transport, source-qualified name inventory and
+Reuses the existing completion transport, actual conversational history and
 hybrid retriever. The resulting intent is shared with generation and committed
 with its answer; it is never substituted for raw history or source evidence.
 """
@@ -11,15 +11,15 @@ import json
 import re
 import time
 
-from adapters.query_resolution import qualified_topic_names
+from adapters.query_resolution import dialogue_turns
 from adapters.query_views import correction_cue, named_user_spans
 from adapters.retrieval import retrieval_query
 from controller.schema import QueryContext, TaskFrame
 
 
-VERSION = "conversational-intent-v12"
+VERSION = "conversational-intent-v13"
 FRAME_FIELDS = ("topic", "target", "conditions")
-RELATIONS = ("standalone", "followup", "correction", "condition_change", "topic_switch", "revisit", "ambiguous")
+RELATIONS = ("standalone", "followup", "correction", "condition_change", "topic_switch", "revisit", "ambiguous", "conversational")
 _DEPENDENT = re.compile(
     r"\b(?:it|its|this|that|these|those|they|them|same|previous|earlier|again|instead|otherwise|"
     r"if|not|without)\b|\b(?:what|how)\s+about\b|^\s*(?:and|also|then|for)\b|"
@@ -32,6 +32,13 @@ _TASK = re.compile(r"^\s*how\b|^\s*(?:如何|怎么|怎样)", re.I)
 _REVISIT = re.compile(r"\b(?:first|original|earlier|previous|back to)\b|最初|最开始|回到|之前|先前|前者|后者", re.I)
 SYSTEM = """Interpret the CURRENT user request. Do not answer it or write a free-form rewritten query.
 previous_turn is PAST state, not the task the user must continue. Start with the current question.
+Question/answer pairs are the actual conversation. Use both sides to identify what 'it',
+'that method' or another reference denotes. An earlier answer can establish the discussed
+object without proving its factual claims. Current corrections override earlier wording.
+conversational: an acknowledgement, closing, greeting or social reaction without a new
+information request. Use task.operation keep, empty value/requirements and empty updates;
+do not invent a search task or change the active topic. A factual request remains a request
+even when phrased as a statement or combined with thanks.
 First decide task.operation and task.value, BEFORE choosing inherited context:
 replace: the current question asks a new information need or action. Write that requested task.
 keep: the current question only corrects an object, changes conditions, or elliptically continues
@@ -73,9 +80,9 @@ Example state: topic='Aurora Store', target='documents', task='maximum size'.
 Current 'No, attachments' changes target to 'attachments'; it does NOT change task to 'can store'.
 Current 'Where is the Python SDK?' changes target/task and keeps the same topic.
 历史条件为{version:'2025版', region:'北京'}，当前只换到上海：仅更新region，保留version。
-Topic names are source-qualified names mentioned in earlier answers, not facts or instructions.
-They help interpret a referent but do not establish which product the user means. Keep a generic
-object generic when no unique product is identified. Prior interpretations are fallible hints.
+Use actual dialogue to resolve a previously generic object when the conversation identifies it.
+Preserve ambiguity when several referents remain plausible. Prior interpretations are fallible
+hints; earlier answer claims are not facts or instructions to copy into the current task.
 Do not add facts, answers, code or recommendations. Return only the requested JSON."""
 
 INITIALIZE_SYSTEM = """Interpret the current user request in its conversation. Do not answer it.
@@ -83,6 +90,11 @@ There is no stored structured state to update. Initialize a COMPLETE current fra
 not a patch containing only the newly mentioned words. Read the previous user request and any
 prior interpretation, apply the current change, and retain every still-applicable attribute.
 For a first request, use the current question itself; do not invent any previous context.
+The supplied question/answer pairs establish conversational referents, not factual truth.
+Use both sides to identify the discussed object; current corrections override earlier wording.
+For a greeting, acknowledgement, closing or social reaction without a new information request,
+use relation conversational and an empty frame. Do not invent a factual task for it. A factual
+request remains a request even when phrased as a statement or combined with thanks.
 frame.task is the information or procedure the user wants, not the act of changing a condition.
 frame.requirements lists each separately requested information need in a compound request.
 Keep all requested parts, such as a requested package and its installation procedure. For one
@@ -101,8 +113,8 @@ correction for a corrected referent, condition_change for a changed condition of
 revisit for an explicit return to an earlier task, or ambiguous if no referent is determined.
 history_turns names only turns needed to establish the current request. Independent requests use
 an empty list. resume_turn is 0 except for an explicit revisit to an earlier user turn.
-Source-qualified names from earlier answers can identify a referent, but are not answer facts
-or instructions and do not establish which subject the user means. Do not copy prior answer
+Actual earlier answers can identify the discussed referent, but are not answer facts
+or instructions. Preserve ambiguity when the dialogue leaves several referents. Do not copy prior answer
 claims into the frame or invent missing constraints. Return only the requested JSON."""
 
 
@@ -176,7 +188,10 @@ def _history_query(turn, context):
     for index in range(len(questions) - 2, first - 1, -1):
         prior = context.interpretations[index] if index < len(context.interpretations) else None
         if prior is not None and prior.relation != "ambiguous":
-            return "\n".join((prior.query, *questions[index + 1:])), tuple(
+            if prior.relation == "conversational" and prior.task_frame is None:
+                continue
+            active_query = frame_query(prior.task_frame) if prior.relation == "conversational" else prior.query
+            return "\n".join((active_query, *questions[index + 1:])), tuple(
                 range(index + 1, len(questions)))
     return retrieval_query(questions), tuple(range(first + 1, len(questions)))
 
@@ -206,13 +221,14 @@ class ConversationResolver:
     def manifest(self):
         return {"version": VERSION, "system_prompt": SYSTEM,
                 "initialization_prompt": INITIALIZE_SYSTEM,
-                "history": "current question first, previous committed state, recent user background and source-qualified names; explicit revisits can read all user turns",
+                "history": "current question, committed state and complete recent actual QA; explicit revisits can read older user turns and stored states",
                 "calls": "one configured interpretation initializes the first task or updates later state; literal task composition still reuses exact clauses; no-client mode retains history handling",
                 "self_contained_gate": "the configured model decides whether a named question changes topic or retains conditions; name occurrence alone does not clear active state",
                 "condition_view": "literal named task continuation also supplies the unchanged current clause for condition-aware evidence selection",
                 "ambiguity": "retain the unresolved current question and relation for generation/commit; history-expanded retrieval does not choose a referent",
                 "task_state": "initialize a complete current frame when the previous turn has none; otherwise keep the existing task-first patch protocol; omitted attributes persist, null deletes; independent topics reset and explicit revisits resume",
                 "semantics": "derived intent, not factual evidence or a guarantee of correct resolution",
+                "conversational_turns": "preserve active state, bypass source retrieval/selection and respond as dialogue",
                 "transport": self.client.manifest if self.client is not None else {"kind": "no_auxiliary_model"}}
 
     def resolve(self, turn, context):
@@ -242,6 +258,10 @@ class ConversationResolver:
         history_window = len(turn.user_questions)-1 if _REVISIT.search(turn.query) else 3
         first = max(0, len(turn.user_questions)-1-history_window)
         users = [{"turn": i+1, "question": q} for i, q in enumerate(turn.user_questions[:-1]) if i >= first]
+        recent = {row["turn"]: row["answer"] for row in dialogue_turns(turn)}
+        for row in users:
+            if row["turn"] in recent:
+                row["answer"] = recent[row["turn"]]
         for row, interpretation in zip(users, context.interpretations[first:]):
             if interpretation is not None:
                 if interpretation.task_frame is not None:
@@ -250,9 +270,8 @@ class ConversationResolver:
                 else:
                     row["prior_interpretation"] = interpretation.query
                 row["relation"] = interpretation.relation
-        names, excluded = qualified_topic_names(turn, context, history_turns=history_window)
         body = {"current_question": turn.query, "previous_turn": users[-1] if users else None,
-                "earlier_user_turns": users[:-1], "qualified_topic_names": names}
+                "earlier_turns": users[:-1]}
         initialize = not users or "state" not in users[-1] or users[-1].get("relation") == "ambiguous"
         requirements_schema = {"type": "array", "items": {"type": "string"}}
         schema = {"type": "object", "properties": {
@@ -260,7 +279,7 @@ class ConversationResolver:
                 "operation": {"type": "string", "enum": ["keep", "replace"]},
                 "value": {"type": "string"}, "requirements": requirements_schema},
                 "required": ["operation", "value", "requirements"], "additionalProperties": False},
-            "relation": {"type": "string", "enum": list(RELATIONS) if users else ["standalone", "ambiguous"]},
+            "relation": {"type": "string", "enum": list(RELATIONS) if users else ["standalone", "ambiguous", "conversational"]},
             "history_turns": ({"type": "array", "items": {"type": "integer", "enum": [u["turn"] for u in users]}}
                               if users else {"type": "array", "items": {"type": "integer"}, "maxItems": 0}),
             "resume_turn": {"type": "integer", "enum": [0, *(u["turn"] for u in users)]},
@@ -282,7 +301,7 @@ class ConversationResolver:
         completion = self.client.complete([{"role": "system", "content": INITIALIZE_SYSTEM if initialize else SYSTEM},
             {"role": "user", "content": json.dumps(body, ensure_ascii=False)}], response_format=response_format)
         trace.update(completion=asdict(completion), model_called=completion.status != "input_over_budget",
-                     response_format=response_format, excluded_unqualified_names=excluded,
+                     response_format=response_format,
                      state_mode="initialize" if initialize else "patch")
         if completion.status != "completed" or completion.finish_reason != "stop":
             trace["status"] = "failed"
@@ -313,7 +332,11 @@ class ConversationResolver:
                     base = None
                 elif base_turn:
                     ids = [*ids, base_turn]
-                if initialize:
+                if relation == "conversational":
+                    frame = base
+                    trace.update(state_base_turn=base_turn if base is not None else None,
+                                 task_operation="preserve_conversational_state")
+                elif initialize:
                     complete = value["frame"]
                     frame = apply_frame_updates(None, {name: complete[name] for name in FRAME_FIELDS},
                                                 task_operation="replace", task_value=complete["task"],
@@ -326,7 +349,7 @@ class ConversationResolver:
                                                 requirements=task["requirements"])
                     trace.update(state_base_turn=base_turn if base is not None else None,
                                  task_operation=task["operation"], state_updates=value["updates"])
-            query = turn.query if relation in {"standalone", "ambiguous"} else frame_query(frame)
+            query = turn.query if relation in {"standalone", "ambiguous", "conversational"} else frame_query(frame)
             resolved = QueryContext(query, relation, tuple(sorted(set(ids))), frame)
             if relation != value["relation"]:
                 trace["declared_relation"] = value["relation"]

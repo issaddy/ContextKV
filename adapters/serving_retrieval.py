@@ -35,7 +35,8 @@ class ServingRetriever:
         return {"corpus_id": self.corpus_id, "corpus_snapshot_id": self.corpus_snapshot_id,
                 "metadata_enabled": self.corpus_index is not None,
                 "history_source": "committed_raw_history",
-                "source_inventory_scope": "committed_required_keys",
+                "source_inventory_scope": ("committed_required_keys" if getattr(self.retriever, "requires_source_context", True)
+                                           else "not_requested"),
                 "retriever": self.retriever.manifest}
 
     async def retrieve(self, snapshot, query: str, request_id: str) -> EvidenceSelection:
@@ -49,7 +50,8 @@ class ServingRetriever:
                           self.corpus_id, query, history, (), "P3")
         try:
             if getattr(self.retriever, "requires_history_context", False):
-                retrieved = self.retriever.retrieve_turn(turn, prior_context=snapshot_context(turn, snapshot))
+                retrieved = self.retriever.retrieve_turn(turn, prior_context=snapshot_context(turn, snapshot,
+                    include_sources=getattr(self.retriever, "requires_source_context", True)))
             else:
                 retrieved = self.retriever.retrieve_turn(turn)
             if self.corpus_index is None:

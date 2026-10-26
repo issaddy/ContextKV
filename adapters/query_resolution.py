@@ -72,7 +72,20 @@ class PriorContext:
     interpretations: tuple[QueryContext | None, ...] = ()
 
 
-def snapshot_context(turn, snapshot):
+def dialogue_turns(turn, turn_ids=None):
+    """Literal completed QA for discourse resolution, not factual evidence.
+
+    Default to the existing recent three-turn window. Explicit turn IDs also
+    support older selected referents without copying unrelated answer history.
+    The caller's OnlineTurn already contains only permitted actual/P1 history.
+    """
+    count = len(turn.history) // 2
+    ids = range(max(1, count - 2), count + 1) if turn_ids is None else sorted(set(turn_ids))
+    return [{"turn": n, "question": turn.history[2*n-2].text,
+             "answer": turn.history[2*n-1].text} for n in ids if 1 <= n <= count]
+
+
+def snapshot_context(turn, snapshot, *, include_sources=True):
     """Project existing committed state; never create a session or use all archive."""
     if snapshot is None:
         if turn.history:
@@ -82,6 +95,10 @@ def snapshot_context(turn, snapshot):
     supplied = tuple((turn.history[i].text, turn.history[i+1].text) for i in range(0, len(turn.history), 2))
     if history != supplied:
         raise ValueError("retrieval history differs from committed snapshot")
+    interpretations = tuple(t.query_context for t in snapshot.raw_history)
+    if not include_sources:
+        return PriorContext(snapshot_version=snapshot.version, source_inventory_scope="not_requested",
+                            interpretations=interpretations)
     by_key = {b.key: b for b in snapshot.archive}
     seen = {}
     # Resolver user/entity IDs use positions in committed QA, not ledger CAS
@@ -91,21 +108,22 @@ def snapshot_context(turn, snapshot):
             seen.setdefault(key, []).append(ordinal)
     return PriorContext(tuple(PriorSource(by_key[k], tuple(turns)) for k, turns in seen.items() if k in by_key),
                         tuple(k for k in seen if k not in by_key), snapshot.version,
-                        interpretations=tuple(t.query_context for t in snapshot.raw_history))
+                        interpretations=interpretations)
 
 
-def controller_context_provider(store, run_prefix):
+def controller_context_provider(store, run_prefix, *, include_sources=True):
     def provide(turn):
         try:
             snapshot = store.get_snapshot(f"{run_prefix}:{turn.conversation_id}")
         except KeyError:
             snapshot = None
-        return snapshot_context(turn, snapshot)
+        return snapshot_context(turn, snapshot, include_sources=include_sources)
     return provide
 
 
-def native_context_provider(baseline):
-    return lambda turn: snapshot_context(turn, baseline.snapshots.get(turn.conversation_id))
+def native_context_provider(baseline, *, include_sources=True):
+    return lambda turn: snapshot_context(turn, baseline.snapshots.get(turn.conversation_id),
+                                        include_sources=include_sources)
 
 
 def _source_matches(name, turn_id, context):
@@ -152,19 +170,6 @@ def _history_candidates(turn, history_turns):
             item.update(text=span["text"], history_turn=number, history_span=span)
             item["history_occurrences"].append({"turn": number, "span": span})
     return names.values(), users
-
-
-def qualified_topic_names(turn, context, *, history_turns=3):
-    """Project names directly; do not build source windows discarded by CQR."""
-    names, _ = _history_candidates(turn, history_turns)
-    qualified, excluded = [], []
-    for item in names:
-        if next(_source_matches(item["text"], item["history_turn"], context), None) is None:
-            excluded.append(item["text"])
-        else:
-            qualified.append({"text": item["text"],
-                "turns": sorted({o["turn"] for o in item["history_occurrences"]})})
-    return qualified, excluded
 
 
 def candidates(turn, context, mode, *, history_turns=3):

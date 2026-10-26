@@ -514,6 +514,7 @@ class HybridRetriever:
         self.rerank_query_mode = rerank_query_mode
         self.resolver = resolver
         self.requires_history_context = query_mode in SOURCE_MODES or query_mode == "conversational"
+        self.requires_source_context = query_mode in SOURCE_MODES
         self.candidate_k, self.rerank_k, self.rrf_k = candidate_k, rerank_k, rrf_k
         self.source_config = source_config
         self._lock = Lock()
@@ -622,17 +623,22 @@ class HybridRetriever:
         from controller.schema import QueryContext
         from controller.serialization import decode
         intent = decode(QueryContext, view["context"]) if view is not None and view.get("context") is not None else None
+        conversational = intent is not None and intent.relation == "conversational"
         semantic_selection = self.evidence_selector is not None and intent is not None and intent.task_frame is not None
         requirements = ()
-        if intent is not None and intent.task_frame is not None and len(intent.task_frame.requirements) >= 2:
+        if not conversational and intent is not None and intent.task_frame is not None and len(intent.task_frame.requirements) >= 2:
             from adapters.conversation import frame_query
             requirements = tuple(dict.fromkeys(frame_query(intent.task_frame, requirement=r)
                                                for r in intent.task_frame.requirements))
         fusion_trace = condition_trace = selection_trace = requirement_trace = semantic_trace = None
+        contexts = ()
         supporting_contexts = ()
         retrieval_contexts = None
         retrieval_error = scoring_query = None
         try:
+            if conversational:
+                return replace(turn, contexts=(), query_context=intent,
+                               supporting_contexts=(), retrieval_contexts=None)
             query = view["text"] if view else query_text(turn.user_questions, self.query_mode)
             scoring_query = rerank_query_text(turn, query, self.rerank_query_mode)
             if view is None and self.rerank_query_mode != "resolved":
@@ -712,7 +718,8 @@ class HybridRetriever:
                     **({"context": asdict(intent)} if intent is not None else {}),
                     "rerank_query_mode": self.rerank_query_mode,
                     "rerank_query": scoring_query if self.stage == "hybrid_rerank" else None,
-                    "retrieval_status": "failed" if retrieval_error else "completed",
+                    "retrieval_status": ("failed" if retrieval_error else
+                                         "skipped_conversational" if conversational else "completed"),
                     "retrieval_error": retrieval_error,
                     "retrieval_elapsed_ms": (time.perf_counter()-started)*1000,
                     **({"condition_evidence": condition_trace} if condition_trace else {}),

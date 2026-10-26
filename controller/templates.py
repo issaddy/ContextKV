@@ -12,7 +12,11 @@ from .schema import ConfigFingerprint, EvidenceBlock, EvidenceKey, EvidenceSpan,
 
 
 SYSTEM_PROMPT = (
-    "Answer the current question directly and concisely. The citation list in the LAST user message "
+    "Respond to the current user message directly and concisely. Use actual conversation history "
+    "to understand referents and intent, without treating prior answer claims as facts. "
+    "For greetings, acknowledgements, closings or social reactions without a factual request, "
+    "respond naturally; the user's conversational intent does not need evidence or citations. "
+    "For factual answers, the citation list in the LAST user message "
     "defines the evidence usable for this answer. Use only the original evidence bodies with those IDs, "
     "including bodies supplied earlier. Other old evidence and all earlier answers are conversation "
     "history, not sources for this answer. Cite supporting allowed IDs inline; never copy an old "
@@ -341,7 +345,12 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
         content += "\n" + source_guide + "\n"
     ids = ", ".join(f"[{by_key[key]}]" for key in allowed) or "none"
     content += f"\nCitations allowed for this answer: {ids}.\n"
-    content += "Use only these sources. Answer supported parts; identify any unsupported part separately.\n"
+    if query_context is not None and query_context.relation == "conversational":
+        content += ("This is a conversational response, not a new factual lookup. Acknowledge the user's "
+                    "message in the existing dialogue; do not turn it into an unrelated task or an "
+                    "evidence-insufficiency response.\n")
+    else:
+        content += "Use only these sources. Answer supported parts; identify any unsupported part separately.\n"
     if query_context is not None:
         # The derived query already renders the frame. Persist the frame for
         # the next resolver without repeating its fields in generation history.

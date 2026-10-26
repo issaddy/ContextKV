@@ -111,7 +111,8 @@ async def benchmark(args, config):
     retrieval_context_provider = None
     if getattr(retriever, "requires_history_context", False):
         from adapters.query_resolution import controller_context_provider
-        retrieval_context_provider = controller_context_provider(service.store, run_prefix)
+        retrieval_context_provider = controller_context_provider(service.store, run_prefix,
+            include_sources=getattr(retriever, "requires_source_context", True))
     export_failures = []
     first_export_error = None
 

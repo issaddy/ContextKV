@@ -6,7 +6,7 @@ import pytest
 
 from adapters.mtrag import OnlineMessage, OnlineTurn
 from adapters.query_resolution import (PriorContext, PriorSource, TopicResolver, candidates,
-    controller_context_provider, native_context_provider, qualified_topic_names,
+    controller_context_provider, native_context_provider,
     selection_response_format, snapshot_context)
 from adapters.query_selector import CompletionResult
 from controller.evidence import make_evidence
@@ -74,17 +74,18 @@ def test_unverified_baseline_uses_same_selector_but_includes_unsupported_candida
     assert not result["selected_entities"][0]["supports"]
 
 
-@pytest.mark.parametrize("source_turns", [(1,), (2,), (5,)])
-def test_compact_name_projection_matches_the_full_catalog_without_building_source_windows(monkeypatch, source_turns):
-    from adapters import query_resolution
-    turn, context = fixture()
-    context = replace(context, sources=tuple(replace(s, visible_turns=source_turns) for s in context.sources))
-    entities, _, rejected = candidates(turn, context, "source_topic")
-    expected = [{"text":e["text"], "turns": sorted({o["turn"] for o in e["history_occurrences"]})} for e in entities]
-    def no_windows(*args):
-        raise AssertionError("The compact route must not construct unused provenance windows")
-    monkeypatch.setattr(query_resolution, "_supports", no_windows)
-    assert qualified_topic_names(turn, context) == (expected, [e["text"] for e in rejected])
+def test_dialogue_only_projection_does_not_read_source_inventory():
+    turn,_=fixture()
+    class Snapshot:
+        version=2
+        raw_history=tuple(TurnRecord(i//2+1,turn.history[i].text,turn.history[i+1].text)
+                          for i in range(0,len(turn.history),2))
+        @property
+        def archive(self):
+            raise AssertionError('Dialogue interpretation does not use archived source names')
+    result=snapshot_context(turn,Snapshot(),include_sources=False)
+    assert result.source_inventory_scope=='not_requested' and result.sources==()
+    assert result.snapshot_version==2 and result.interpretations==(None,None)
 
 
 def test_later_source_does_not_retroactively_ground_an_earlier_assistant_name():

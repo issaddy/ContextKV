@@ -169,3 +169,26 @@ def test_semantic_http_wait_does_not_hold_the_local_ranking_lock():
         finally:
             release.set()
         assert slow.result(timeout=2).contexts==contexts
+
+
+def test_selection_receives_actual_relevant_dialogue_and_accepts_partial_support():
+    from adapters.mtrag import OnlineMessage
+    corpus,contexts,intent,request=fixture_data()
+    history=tuple(m for n in range(1,8) for m in
+        (OnlineMessage('user',f'Question {n}'),OnlineMessage('assistant',f'Actual answer {n}\nWith object Atlas.')))
+    request=replace(request,turn=8,history=history,query='Return to the first one: package and latest version?')
+    intent=replace(intent,relation='revisit',history_turns=(1,),
+                   task_frame=replace(intent.task_frame,requirements=('download package','latest version')))
+    class PartialClient(Client):
+        def complete(self,messages,**kwargs):
+            self.calls.append((json.loads(messages[-1]['content']),kwargs))
+            return CompletionResult('completed',json.dumps({'selected_ids':[1]}),'stop',100)
+    client=PartialClient()
+    result,trace=EvidenceSelector(client).select(request,intent,contexts,contexts[:1],required_context={})
+    assert result==(contexts[1],) and trace['status']=='selected'
+    supplied=client.calls[0][0]['conversation']
+    assert [r['turn'] for r in supplied]==[1,5,6,7]
+    assert all(r['question']==history[2*r['turn']-2].text and r['answer']==history[2*r['turn']-1].text for r in supplied)
+    client.calls.clear()
+    EvidenceSelector(client).select(request,replace(intent,relation='topic_switch'),contexts,(),required_context={})
+    assert 'conversation' not in client.calls[0][0]

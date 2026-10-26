@@ -963,3 +963,84 @@ def test_factory_uses_original_document_windows_with_existing_serving_selection(
         assert retriever.manifest['source_window']['mode']=='original_document_paragraphs'
     finally:
         wrapper.close()
+
+
+@pytest.mark.asyncio
+async def test_conversational_turn_bypasses_source_work_and_keeps_state_for_resume(retriever_config,tmp_path,monkeypatch):
+    from adapters import query_selector
+    from adapters.conversation import frame_query
+    from adapters.corpus import CorpusIndex
+    from adapters.query_selector import CompletionResult
+    from adapters.serving_retrieval import ServingRetriever
+    from controller.mock_engine import MockEngine
+    from controller.schema import QueryContext,TaskFrame
+    from controller.service import Controller
+    from controller.session_store import SessionStore
+    calls=[]
+    class Client:
+        manifest={'model':'fixture'}
+        def __init__(self,config):
+            self.config=config
+        def catalog_token_lengths(self,messages,documents):
+            return 20,[len(d) for d in documents]
+        def complete(self,messages,**kwargs):
+            body=json.loads(messages[-1]['content'])
+            calls.append(body)
+            if 'documents' in body:
+                value={'selected_ids':[body['documents'][0]['id']]}
+            else:
+                social=body['current_question']=="Thanks, that's all."
+                value={'relation':'conversational' if social else 'condition_change',
+                    'history_turns':[] if social else [2],'resume_turn':0,
+                    'task':{'operation':'keep','value':'','requirements':[]},
+                    'updates':{} if social else {'conditions':{'platform':'Windows'}}}
+            return CompletionResult('completed',json.dumps(value),'stop')
+        def close(self):
+            pass
+    monkeypatch.setattr(query_selector,'OpenAICompletionClient',Client)
+    config=yaml.safe_load(retriever_config.read_text())
+    config.update(query_mode='conversational',evidence_selection='semantic',source_window=True,
+                  selector={'base_url':'http://fixture','model':'fixture','revision':'fixed'})
+    retriever_config.write_text(yaml.safe_dump(config))
+    retriever=create_retriever('P3',config_path=retriever_config)
+    rows=load_beir_corpus(FIXTURE.with_name('corpus_small.jsonl'))
+    corpus=CorpusIndex.from_records(({'_id':pid,**r} for pid,r in rows.items()),corpus_id='fixture',snapshot_id='fixture-v1')
+    serving=ServingRetriever(retriever,corpus_id='fixture',corpus_index=corpus)
+    store=SessionStore(tmp_path/'dialogue.sqlite3')
+    service=Controller(store,MockEngine())
+    frame=TaskFrame('Atlas SDK','installer','installation',(('version','v4'),('platform','Linux')))
+    intent=QueryContext(frame_query(frame),'standalone',task_frame=frame)
+    try:
+        await service.serve_turn('s','Install Atlas SDK v4 on Linux.',corpus.resolve(('a',)),
+                                 query_context=intent,request_id='first',corpus_snapshot_id='fixture-v1')
+        initial=store.get_snapshot('s')
+        async def acknowledge(snapshot):
+            return await serving.retrieve(snapshot,"Thanks, that's all.",'thanks')
+        response=await service.serve_turn('s',"Thanks, that's all.",evidence_provider=acknowledge,
+                                         request_id='thanks',corpus_snapshot_id='fixture-v1')
+        replay=await service.serve_turn('s',"Thanks, that's all.",evidence_provider=acknowledge,
+                                       request_id='thanks',corpus_snapshot_id='fixture-v1')
+        social=store.get_snapshot('s')
+        assert replay.idempotent_replay and replay.output_ids==response.output_ids and len(calls)==1
+        assert retriever.encoder.texts_processed==retriever.reranker.texts_processed==0
+        assert social.raw_history[:-1]==initial.raw_history and social.raw_history[-1].query_context.task_frame==frame
+        assert social.raw_history[-1].evidence_keys==() and response.citation_scope==()
+        assert retriever.query_view_traces[-1]['retrieval_status']=='skipped_conversational'
+        current=next(m.content for m in reversed(social.execution.messages) if m.role=='user')
+        assert 'not a new factual lookup' in current
+        async def resume(snapshot):
+            return await serving.retrieve(snapshot,'What changes on Windows?','resume')
+        await service.serve_turn('s','What changes on Windows?',evidence_provider=resume,
+                                 request_id='resume',corpus_snapshot_id='fixture-v1')
+        final=store.get_snapshot('s')
+        assert dict(final.raw_history[-1].query_context.task_frame.conditions)=={'version':'v4','platform':'Windows'}
+        assert calls[1]['previous_turn']['answer']==social.raw_history[-1].assistant_text
+        assert calls[1]['previous_turn']['state']['topic']=='Atlas SDK'
+        assert retriever.encoder.texts_processed>0 and retriever.requests==1
+        assert len(calls)==3  # Acknowledgement interpretation, resumed interpretation and source choice.
+        await service.close_session('s')
+        assert not store.outbox()
+    finally:
+        await service.aclose()
+        store.close()
+        serving.close()

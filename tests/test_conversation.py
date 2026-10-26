@@ -325,22 +325,23 @@ def test_contextual_rewrite_preserves_current_question_and_has_bounded_history_p
     messages, options = client.inputs[0]
     body = json.loads(messages[-1]["content"])
     assert body["current_question"] == query and body["previous_turn"]["turn"] == 2
-    assert body["earlier_user_turns"][0]["prior_interpretation"] == "first accepted interpretation"
-    assert "PhantomStore" not in messages[-1]["content"] and "999" not in messages[-1]["content"]
+    assert body["earlier_turns"][0]["prior_interpretation"] == "first accepted interpretation"
+    assert body["previous_turn"]["answer"] == original.history[-1].text
     assert "opaque-id" not in messages[-1]["content"]
     assert options["response_format"]["json_schema"]["schema"]["properties"]["history_turns"]["items"]["enum"] == [1, 2]
 
 
-def test_qualified_assistant_name_is_context_not_an_answer_fact():
+def test_actual_answer_supplies_discourse_context_without_name_or_fact_filtering():
     original = turn("What about its limits?")
     history = (original.history[0], OnlineMessage("assistant", "AtlasCloud holds 999 units. PhantomStore is better."))
     source = make_evidence("AtlasCloud is a document database.", "a")
     client = Client({"query": "AtlasCloud document limits?", "relation": "followup", "history_turns": [1]})
     view = ConversationResolver(client).resolve(replace(original, history=history), PriorContext((PriorSource(source, (1,)),)))
     body = json.loads(client.inputs[0][0][-1]["content"])
-    assert [e["text"] for e in body["qualified_topic_names"]] == ["AtlasCloud"]
-    assert "999" not in json.dumps(body) and "PhantomStore" not in json.dumps(body)
-    assert "PhantomStore" in view["excluded_unqualified_names"]
+    assert body["previous_turn"]["answer"] == history[-1].text
+    assert "qualified_topic_names" not in body
+    assert "excluded_unqualified_names" not in view
+    assert view["text"] == "AtlasCloud document limits?"  # No answer claims copied by the host.
 
 
 @pytest.mark.parametrize("value,finish", [
@@ -457,7 +458,7 @@ def test_recent_interpreted_state_preserves_inherited_conditions_without_all_old
                          QueryContext("Atlas v2 region A students application deadlines?", "followup", (3, 4))))
     view = ConversationResolver(client).resolve(original, state)
     body=json.loads(client.inputs[0][0][-1]["content"])
-    assert [r["turn"] for r in body["earlier_user_turns"]] == [3, 4]
+    assert [r["turn"] for r in body["earlier_turns"]] == [3, 4]
     assert body["previous_turn"]["turn"] == 5
     assert body["previous_turn"]["prior_interpretation"] == state.interpretations[-1].query
     assert view["context"]["history_turns"] == (5,)
@@ -689,3 +690,42 @@ async def test_interpretation_commits_with_answer_and_idempotent_replay_does_not
     finally:
         await service.aclose()
         store.close()
+
+
+def test_conversational_response_retains_active_task_without_turning_it_into_a_lookup():
+    frame=TaskFrame('Atlas SDK','installer','installation',(('version','v4'),('platform','Linux')))
+    prior=QueryContext(frame_query(frame),'standalone',task_frame=frame)
+    client=Client({'relation':'conversational','history_turns':[1],
+                   'task':{'operation':'replace','value':'search Google','requirements':[]},
+                   'updates':{'topic':'Google','conditions':None}})
+    request=turn("Thanks, I'll look elsewhere.",('Install Atlas SDK v4 on Linux.',))
+    view=ConversationResolver(client).resolve(request,PriorContext(interpretations=(prior,)))
+    intent=decode(QueryContext,view['context'])
+    assert intent==QueryContext(request.query,'conversational',(1,),frame)
+    assert view['task_operation']=='preserve_conversational_state'
+    assert view['text']==request.query and len(client.inputs)==1
+    continuation=turn('And on Windows?',('Install Atlas SDK v4 on Linux.',request.query))
+    fallback=ConversationResolver().resolve(continuation,PriorContext(interpretations=(prior,intent)))
+    assert 'Atlas SDK' in fallback['text'] and 'version: v4' in fallback['text']
+    assert "look elsewhere" not in fallback['text']
+
+
+def test_initial_greeting_has_no_invented_task_frame():
+    client=Client({'relation':'conversational','history_turns':[]})
+    request=turn('Hello.',())
+    view=ConversationResolver(client).resolve(request,PriorContext())
+    assert decode(QueryContext,view['context'])==QueryContext('Hello.','conversational')
+    schema=client.inputs[0][1]['response_format']['json_schema']['schema']
+    assert 'conversational' in schema['properties']['relation']['enum']
+
+
+def test_revisit_keeps_older_user_states_and_recent_verbatim_answers():
+    questions=tuple(f'Question {n}' for n in range(1,8))
+    request=turn('Back to the first topic.',questions)
+    client=Client({'query':'First topic','relation':'revisit','history_turns':[1],'resume_turn':1})
+    ConversationResolver(client).resolve(request,PriorContext())
+    body=json.loads(client.inputs[0][0][-1]['content'])
+    rows=[*body['earlier_turns'],body['previous_turn']]
+    assert [r['turn'] for r in rows]==list(range(1,8))
+    assert [r['turn'] for r in rows if 'answer' in r]==[5,6,7]
+    assert all(r['answer']==request.history[2*r['turn']-1].text for r in rows if 'answer' in r)
