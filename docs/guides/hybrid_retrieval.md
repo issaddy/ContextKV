@@ -1,6 +1,8 @@
 # 原始段落上的混合检索与重排序实验
 
-此分支直接改善模块 A 的证据相关性与完整性：复用固定 BGE 权重和官方 Transformers 接口，保留 BM25S，比较 dense、RRF 混合与 cross-encoder 重排序。它不改变默认在线检索，也不改变原文、段落边界、证据 ID、生成提示词或缓存策略。先在已有开发集做无需生成的检索实验，再通过共享可选入口进行真实 P3 闭环实验；开发集可用于选择与改进，最终 test 保持冻结。
+该入口支撑模块 A 的证据选择：复用固定 BGE 权重和官方 Transformers 接口，保留独立 BM25S 基线，提供 dense、RRF 混合与 cross-encoder 重排序。原文、段落边界与证据身份保持不变。当前多轮主线配置使用这一共享入口，开发数据用于改进，独立测试与开发结果分开报告。
+
+在线最终选择至多五个不同内容组，相同标题/正文不重复占名额；已知版本、父级范围和条件依赖参与分组，所选代表仍是原始来源。普通前五段中的不同正文保留，再从已有评分池补齐，不增加模型调用。显式条件融合保留主任务锚点。`search_variants`与离线`retrieval_eval`仍提供原始评分阶段，便于比较排序器；在线分组结果及新增材料另由`HybridRetriever`记录，不把原始排序报告冒充集成效果。
 
 ## 选择依据与具体复用
 
@@ -10,7 +12,7 @@
 |---|---|---|
 | BGE-M3 dense | [官方模型卡](https://huggingface.co/BAAI/bge-m3)提供多语言、长输入 dense 表征；本次只用 dense 分支。[固定 pooling 配置](https://huggingface.co/BAAI/bge-m3/blob/5617a9f61b028005a4858fdac845db406aefb181/1_Pooling/config.json)指定 CLS | `AutoModel` → CLS → L2 normalization；query 不加 BGE-v1.5 的检索指令。原始 `title + newline + text` 编码一次，1024 维 float32 memmap，精确内积检索。没有调用 M3 的 sparse/ColBERT 分支，不宣称复现其完整 ensemble |
 | BM25 + dense 的 RRF | [Cormack 等 SIGIR 2009 原文](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)给出按排名倒数融合的公式，避免直接混合不同量纲的分数 | 两路各取 50，等权 `sum(1/(60 + rank))`，ID 确定性破同分。公式为方法复用、本地纯函数实现；不复制第三方未明许可证代码，也不把 RRF 称为本项目创新 |
-| BGE-reranker-v2-m3 | [官方模型卡](https://huggingface.co/BAAI/bge-reranker-v2-m3)提供 `AutoModelForSequenceClassification` 与 query/passage 成对推理 | 对 RRF 前 50 重新排序，保留前 5；使用 raw logits 排名，不解释成校准的相关概率、支持概率或回答正确率 |
+| BGE-reranker-v2-m3 | [官方模型卡](https://huggingface.co/BAAI/bge-reranker-v2-m3)提供 `AutoModelForSequenceClassification` 与 query/passage 成对推理 | 对 RRF 前 50 重新排序，在线按内容组选择至多 5 段；raw logits 不解释成校准的相关概率、支持概率或回答正确率 |
 | 多轮 query 表征 | [IBM 固定检索任务说明](https://github.com/IBM/mt-rag-benchmark/blob/53fef6f5917c7e10c436f697e69a955dbc795d81/mtrag-human/retrieval_tasks/README.md)包含最后问题、全部用户问题和 rewrite 设置，其实验说明检索器与问题表征都值得比较 | 实现 current、last3、all_user；第四个可选视角显式读取冻结 P2/P3 actual_history。没有把数据集给出的 rewrite、参考 assistant、qrels 或未来轮次带入检索，也没有以拼接历史冒充学习式 query rewriting |
 
 选择 M3 的原因是可直接加载的 encoder/reranker 配套、长输入与多语言覆盖、官方调用简单，适合在现有 H200 上以较小工程改动测量收益。不是因模型更新年份断言其效果最强；若它的召回或排序收益不足，可以在同一原文、qrels 与查询视角下替换 encoder/reranker，继续比较较新的方法。原论文或模型榜单中的收益不转记为本项目结果。

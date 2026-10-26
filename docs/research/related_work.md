@@ -30,6 +30,10 @@ ContextPilot 的 `reorder`、`deduplicate` 会更新索引、seen_docs 和统计
 
 表格与 SDK 证据均是普通原文适配：显式行列、参数、初始化和依赖关系进入共同 A/R 输入，不私下为某个基线增加材料。使用见[表格关系](table_relations.md)、[SDK 证据](../guides/api_evidence.md)、[混合检索](../guides/hybrid_retrieval.md)。
 
+最终材料选择参考[Elasticsearch结果折叠](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/collapse-search-results)的最高排名组代表原则，在已有评分池内顺序选取不同内容组。组键为完整标题/正文，加上已知版本、父级范围和依赖；既有显式条件融合中的原任务锚点先保留，再填其余组。单视图分组保留原排名与前五段的不同内容组，空出的名额补入下一组。组不代表来源身份相等或独立佐证。无重复的普通轮次选择不变；新增材料适用性和输入代价仍需评价。将任务范围评分推广到所有补入轮次的检查未改善错产品材料，且会挤掉已覆盖的信息，该扩展已撤回；不为此继续调RRF权重。
+
+[MMR原论文](https://www.cs.cmu.edu/afs/cs/Web/People/jgc/publication/MMR_DiversityBased_Reranking_SIGIR_1998.pdf)将相关性与已选内容相似度作加权取舍；本次使用精确分组，不引入相似度权重调参。[2026年10月预印本](https://arxiv.org/html/2610.09412v1)进一步讨论冗余程度和所需证据数量对多样化收益的影响，但部分触发器使用标注中的证据需求，不能当作现成在线能力。[AdaPCR](https://arxiv.org/html/2507.04069v1)以候选片段组合和回答似然训练体现互补性；其额外检索与训练不在当前实现中。上述原理用于选择有实际缺口的改进，不继承论文收益或额外建立模型支线。
+
 ## B：复用引擎真实状态和标准成本建模
 
 原生报价负责实际 GPU/Host 前缀、共享硬锁和请求预算；控制器复用 lookup、阶段非负拟合、已完成历史的输出长度统计。容量预留依据引擎规则，服务时间依据经验长度，两者不混用。成本较低者被选中，误差只作诊断；没有为展示追加比例设置偏置。详见[联合原理](joint_optimization_model.md)、[原生等待估计](admission_wait_model.md)及[成本接口](../guides/stage_cost_model.md)。
