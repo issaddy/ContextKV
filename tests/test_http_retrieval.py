@@ -183,6 +183,9 @@ def test_index_and_metadata_loaded_once_at_startup(service, observed, tmp_path, 
     rows = [{'passage_id': key, **value, 'version': 'v2',
              **({'dependencies': ['header']} if key == 'a' else {})} for key, value in CORPUS.items()]
     rows.append({'passage_id': 'header', 'text': 'These settings apply to client version two.', 'version': 'v2'})
+    for row in rows:
+        row.pop('source', None)
+        row['url'] = f"https://example.org/manual/{row['passage_id']}"
     metadata = tmp_path/'metadata.jsonl'
     metadata.write_text(''.join(json.dumps(row)+'\n' for row in rows))
     from adapters import retriever_factory
@@ -203,6 +206,7 @@ def test_index_and_metadata_loaded_once_at_startup(service, observed, tmp_path, 
         manifest = response.json()['visible_evidence_manifest']
         assert any(s['key']['passage_id'] == 'header' for s in manifest)
         assert all(s['key']['corpus_id'] == 'manuals' and s['key']['version'] == 'v2' for s in manifest)
+        assert all(s['source_uri'] == f"https://example.org/manual/{s['key']['passage_id']}" for s in manifest)
         attempt = service.store.find_request('s', '1')
         assert len(attempt.retrieval_priority) == 5
         assert all(k.passage_id != 'header' for k in attempt.retrieval_priority)

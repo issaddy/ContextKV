@@ -17,7 +17,7 @@ from adapters.retrieval import retrieval_query
 from controller.schema import QueryContext
 
 
-VERSION = "conversational-intent-v6"
+VERSION = "conversational-intent-v7"
 RELATIONS = ("standalone", "followup", "correction", "condition_change", "topic_switch", "revisit", "ambiguous")
 _DEPENDENT = re.compile(
     r"\b(?:it|its|this|that|these|those|they|them|same|previous|earlier|again|instead|otherwise|"
@@ -102,6 +102,7 @@ class ConversationResolver:
                 "calls": "literal task composition first; other dependent questions use the optional model or recent history with its latest committed interpretation",
                 "self_contained_gate": "first turn, or named question/definition without dependency/correction cues; bare product fragments require interpretation",
                 "condition_view": "literal named task continuation also supplies the unchanged current clause for condition-aware evidence selection",
+                "ambiguity": "retain the unresolved current question and relation for generation/commit; history-expanded retrieval does not choose a referent",
                 "semantics": "derived intent, not factual evidence or a guarantee of correct resolution",
                 "transport": self.client.manifest if self.client is not None else {"kind": "no_auxiliary_model"}}
 
@@ -181,7 +182,7 @@ class ConversationResolver:
             return finish("invalid_interpretation_uses_existing_history_view")
         trace.update(text=resolved.query, status="resolved", context=asdict(resolved))
         if resolved.relation == "ambiguous":
-            trace["context"] = None
+            trace["status"] = "ambiguous"
             return finish("ambiguous_interpretation_uses_existing_history_view", history_view=True)
         return finish("conversational_interpretation")
 

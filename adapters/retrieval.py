@@ -84,9 +84,9 @@ def load_beir_corpus(path: str | Path) -> dict[str, dict[str, Any]]:
             raise ValueError(f"missing or duplicate passage ID {pid!r}")
         if not isinstance(row.get("text"), str):
             raise ValueError(f"passage {pid} has no original text")
-        corpus[pid] = {"document_id": pid, "title": str(row.get("title") or ""),
+        corpus[pid] = {"document_id": pid, "title": str(metadata.get("title") or ""),
                        "text": row["text"],
-                       "source": str(metadata.get("source_uri") or metadata.get("source") or "")}
+                       "source": str(metadata.get("source_uri") or metadata.get("source") or metadata.get("url") or "")}
     return corpus
 
 

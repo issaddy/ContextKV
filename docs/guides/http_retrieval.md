@@ -54,7 +54,7 @@ uv run --extra tokenizer --extra retrieval contextkv \
 
 `--retriever-config configs/retriever_hybrid.example.yaml`可替换`--retriever-index`使用已有BGE dense/RRF/rerank配置；两者互斥。BGE权重和其PyTorch运行环境必须预先可用，不在请求中下载。模型scope、系统提示、采样与输出预算均来自共享RunConfig；HTTP入口不会套用旧模型成本artifact或把工作配置当质量赢家。
 
-`--evidence-corpus`可选，读取原文、版本、条件/表头依赖的JSONL；`--corpus-id`是证据命名空间，默认`mtrag`，自有文档应明确填写。服务的corpus snapshot只取已加载retriever的manifest；请求不能任意指定snapshot。元数据必须能精确匹配原检索正文，条件闭包不会改写正文，也不给追加依赖编造检索排名。
+`--evidence-corpus`读取原文、来源、版本、条件/表头依赖的JSONL；`--corpus-id`是证据命名空间，默认`mtrag`，自有文档应明确填写。公开来源字段按`source_uri → source → url`读取，标题也支持metadata；不会复制答案标注。MTRAG已有索引可配合`--evidence-corpus data/mtrag-official/cloud.jsonl`恢复原始文档地址，正文和检索排名不变，无需重建向量。服务的corpus snapshot只取已加载retriever的manifest；请求不能任意指定snapshot。元数据必须能精确匹配原检索正文，条件闭包不会改写正文，也不给追加依赖编造检索排名。
 
 索引构建同时接受BEIR `_id`和元数据语料的`passage_id`；同一`document_id`下的不同片段保持独立，`source_uri`可来自顶层或metadata。缺少来源地址时，证据URI使用显式`corpus_id`命名空间。旧版本可能把自有语料的缺省来源错误写成`mtrag://…`；既有archive不会自动改写，同key的来源变更仍会被拒绝。此类旧状态应显式使用新会话/新state并固定正确source，不能静默迁移后宣称来源一直相同；默认MTRAG来源格式保持不变。
 

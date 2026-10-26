@@ -54,12 +54,12 @@ class CorpusIndex:
             text = row.get("text")
             if not passage_id or not document_id or not version or not isinstance(text, str) or not text:
                 raise EvidenceError("corpus rows require passage/document ID, version and original text")
-            source = str(metadata.get("source_uri") or metadata.get("source") or
+            source = str(metadata.get("source_uri") or metadata.get("source") or metadata.get("url") or
                          f"{corpus_id}://{snapshot_id}/{document_id}#{passage_id}")
             provenance = tuple(metadata.get("provenance") or (source, f"corpus_snapshot:{snapshot_id}"))
             block = make_evidence(text, document_id, corpus_id=corpus_id,
                 passage_id=passage_id, version=version, source_uri=source,
-                title=str(row.get("title") or ""), provenance=provenance,
+                title=str(metadata.get("title") or ""), provenance=provenance,
                 anchors=tuple(dict.fromkeys((*metadata.get("anchors", ()),
                                             *configuration_anchors(text)))))
             span = metadata.get("span")

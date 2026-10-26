@@ -87,7 +87,8 @@ def test_factory_loads_models_once_and_retrieves_only_user_questions(retriever_c
         retriever.retrieve_turn(replace(outputs[0], protocol="P1"))
 
 
-def test_conversational_factory_shares_one_query_with_retrieval_generation_and_serving(retriever_config, monkeypatch):
+@pytest.mark.parametrize("relation", ("correction", "ambiguous"))
+def test_conversational_factory_carries_resolution_or_ambiguity_into_serving(retriever_config, monkeypatch, relation):
     from adapters import query_selector
     from adapters.query_selector import CompletionResult
     from adapters.serving_retrieval import ServingRetriever
@@ -102,7 +103,7 @@ def test_conversational_factory_shares_one_query_with_retrieval_generation_and_s
         def complete(self, messages, **kwargs):
             calls.append(messages)
             return CompletionResult("completed", json.dumps({"query":"Atlas attachment limits?",
-                "relation":"correction","history_turns":[1]}), "stop")
+                "relation":relation,"history_turns":[1]}), "stop")
         def close(self):
             pass
     monkeypatch.setattr(query_selector, "OpenAICompletionClient", lambda _:Client())
@@ -112,10 +113,12 @@ def test_conversational_factory_shares_one_query_with_retrieval_generation_and_s
     snapshot = SessionSnapshot("s", raw_history=(TurnRecord(1,"Atlas document limits?","An actual response."),))
     try:
         selection = wrapper._retrieve(snapshot, "No, I meant attachments.", "request", time.monotonic())
-        assert selection.query_context == QueryContext("Atlas attachment limits?", "correction", (1,))
-        assert retriever.encoder.inputs == retriever.reranker.inputs == [selection.query_context.query]
+        expected_query = "No, I meant attachments." if relation == "ambiguous" else "Atlas attachment limits?"
+        assert selection.query_context == QueryContext(expected_query, relation, (1,))
+        search_query = "Atlas document limits?\nNo, I meant attachments." if relation == "ambiguous" else expected_query
+        assert retriever.encoder.inputs == retriever.reranker.inputs == [search_query]
         assert len(selection.evidence) == 5 and len(calls) == 1
-        assert retriever.manifest["query_view_traces"][0]["context"]["relation"] == "correction"
+        assert retriever.manifest["query_view_traces"][0]["context"]["relation"] == relation
     finally:
         wrapper.close()
 

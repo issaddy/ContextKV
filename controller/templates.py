@@ -251,14 +251,19 @@ def current_source_guide(query: str, blocks: Iterable[EvidenceBlock],
         lines = list(re.finditer(r"[^\r\n]+", block.text))
         best = max(lines, key=lambda line: sum(weights[term] for term in sorted(terms(line.group()) & query_terms)),
                    default=None)
-        row = {"id": by_key[block.key], "title": block.title}
+        row = {"id": by_key[block.key], "source": block.source_uri}
+        if block.title:
+            row["title"] = block.title
+        if block.parent_section is not None:
+            row["section"] = block.parent_section
         if best is not None and terms(best.group()) & query_terms:
             start, end = best.start(), min(best.end(), best.start() + 360)
             row.update(chars=[start, end], excerpt=block.text[start:end])
         rows.append(row)
     if not rows:
         return ""
-    return ("Current source guide: IDs and verbatim excerpts for locating evidence. "
+    return ("Current source guide: source addresses, titles and verbatim excerpts for locating evidence. "
+            "Keep each source's product, population, region and version scope when combining information. "
             "Read the complete original bodies for conditions; an excerpt is not a complete answer.\n"
             + json.dumps(rows, ensure_ascii=False, separators=(",", ":")))
 
@@ -320,6 +325,10 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
                     "ask for the missing distinction while answering any supported part. "
                     "For procedures, identify the applicable product before listing steps. Never join one product's "
                     "package/repository with another product's configuration or artifacts.\n")
+        if query_context.relation == "ambiguous":
+            content += ("The current referent is unresolved. State which distinction is missing; "
+                        "provide applicable shared information or clearly labeled alternatives. "
+                        "Do not choose a referent from retrieval rank or from a previous answer alone.\n")
     content += f"\nQuestion:\n{query}\n"
     return Message("user", content), tuple(spans)
 

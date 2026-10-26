@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from adapters.corpus import CorpusIndex
-from adapters.mtrag import OnlineContext
+from adapters.mtrag import OnlineContext, clean_context
 from adapters.retrieval import BM25SRetriever, load_beir_corpus, to_evidence
 from controller.evidence import EvidenceError, evidence_index
 
@@ -65,6 +65,34 @@ def test_explicit_fields_follow_corpus_index_precedence(tmp_path):
     index = CorpusIndex.from_records([row], corpus_id="custom", snapshot_id="snapshot")
     assert index.blocks[0].key.passage_id == "explicit"
     assert index.blocks[0].source_uri == corpus["explicit"]["source"]
+
+
+@pytest.mark.parametrize("nested", (False, True))
+def test_public_url_and_title_survive_each_input_boundary(tmp_path, nested):
+    public = {"url":"https://example.org/products/atlas/limits", "title":"Atlas limits"}
+    row = {"_id":"passage", "document_id":"passage", "text":"The limit is three requests.\n",
+           **({"metadata":public} if nested else public), "answer":"unused answer annotation"}
+    loaded = load_beir_corpus(write_corpus(tmp_path, [row]))["passage"]
+    online = clean_context(row)
+    indexed = CorpusIndex.from_records([row], corpus_id="manuals", snapshot_id="v1").blocks[0]
+    assert loaded["source"] == online.source == indexed.source_uri == public["url"]
+    assert loaded["title"] == online.title == indexed.title == public["title"]
+    assert loaded["text"] == online.text == indexed.text == row["text"]
+    assert "unused answer annotation" not in repr((loaded, online, indexed))
+
+
+def test_url_enrichment_reuses_existing_ranking_and_unchanged_original_bodies(tmp_path):
+    rows = [{"_id":str(i), "text":f"Atlas request limit {i}.",
+             "url":f"https://example.org/atlas/section-{i}"} for i in range(6)]
+    path = write_corpus(tmp_path, rows)
+    existing = BM25SRetriever({r["_id"]:{"text":r["text"]} for r in rows}, corpus_snapshot_id="v1")
+    restored = BM25SRetriever(load_beir_corpus(path), corpus_snapshot_id="v1")
+    before, after = existing.retrieve(["Atlas request"]), restored.retrieve(["Atlas request"])
+    assert [(c.document_id,c.text,c.score) for c in before] == [(c.document_id,c.text,c.score) for c in after]
+    metadata = CorpusIndex.from_jsonl(path, corpus_id="manuals", snapshot_id="v1")
+    enriched = metadata.enrich(before)
+    assert [(b.key.passage_id,b.text,b.source_uri) for b in enriched] == [
+        (c.document_id,c.text,c.source) for c in after]
 
 
 def test_beir_and_document_only_legacy_rows_keep_their_identity(tmp_path):

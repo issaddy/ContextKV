@@ -152,9 +152,9 @@ def test_conversational_resolution_can_run_without_an_auxiliary_model():
     resolver.close()
 
 
-@pytest.mark.parametrize("client", [None, Client({}, finish="length"),
-                                   Client({"query":"uncertain", "relation":"ambiguous", "history_turns":[3]})])
-def test_history_view_reuses_corrected_conditions_without_restoring_the_old_task(client):
+@pytest.mark.parametrize("client,ambiguous", [(None,False), (Client({}, finish="length"),False),
+    (Client({"query":"uncertain", "relation":"ambiguous", "history_turns":[3]}),True)])
+def test_history_view_reuses_corrected_conditions_without_restoring_the_old_task(client, ambiguous):
     original = turn("What about the deadline?", (
         "Atlas v1 region A students application?",
         "I meant v2 in region B, for graduates.",
@@ -165,7 +165,11 @@ def test_history_view_reuses_corrected_conditions_without_restoring_the_old_task
     assert view["text"] == corrected.query + "\nWhat documents do I need?\nWhat about the deadline?"
     assert view["history_view_turns"] == (2, 3)
     assert "region A" not in view["text"] and "v1" not in view["text"]
-    assert view["context"] is None  # A context view is not a resolved interpretation.
+    if ambiguous:
+        assert view["status"] == "ambiguous"
+        assert view["context"] == asdict(QueryContext(original.query,"ambiguous",(3,)))
+    else:
+        assert view["context"] is None  # A history view is not a resolved interpretation.
     assert original.query == "What about the deadline?" and context.interpretations[1] == corrected
 
 
@@ -222,6 +226,33 @@ def test_source_guide_preserves_reranker_priority_independently_of_body_layout(l
     assert plan.evidence_spans[0].key == (secondary.key if layout == "stable_key" else primary.key)
 
 
+def test_ambiguous_turn_keeps_source_context_in_both_append_and_rebuild():
+    blocks = tuple(make_evidence(f"{name} original limit information.", name,
+                   source_uri=f"https://example.org/{name}/limits", title=f"{name} limits")
+                   for name in ("Atlas", "Nova"))
+    blocks = (replace(blocks[0], parent_section="Atlas account settings"), blocks[1])
+    snapshot = SessionSnapshot("s")
+    first = build_candidates(snapshot,"Compare Atlas and Nova.",blocks)[0]
+    snapshot = committed(first,snapshot,"Compare Atlas and Nova.",blocks)
+    query = "How do I raise its limit?"
+    view = ConversationResolver(Client({"query":"Atlas limit", "relation":"ambiguous", "history_turns":[1]})).resolve(
+        turn(query,("Compare Atlas and Nova.",)),PriorContext())
+    intent = QueryContext(**view["context"])
+    plans = build_candidates(snapshot,query,blocks,query_context=intent)
+    assert {p.action for p in plans if p.feasible} == {"APPEND","REBUILD"}
+    for plan in plans:
+        message = plan.messages[-1].content
+        guide = json.loads(message.split("Current source guide:",1)[1].splitlines()[1])
+        assert {row["source"] for row in guide} == {b.source_uri for b in blocks}
+        assert next(row for row in guide if row["title"] == "Atlas limits")["section"] == "Atlas account settings"
+        assert '"relation":"ambiguous"' in message and "The current referent is unresolved" in message
+        assert '"query":"Atlas limit"' not in message
+        assert plan.required_blocks == {b.key for b in blocks}
+        assert [m.content for m in plan.messages if m.role == "assistant"] == [snapshot.raw_history[0].assistant_text]
+        for span in plan.evidence_spans:
+            assert plan.messages[span.message_index].content[span.start:span.end] == next(b.text for b in blocks if b.key == span.key)
+
+
 def test_waiting_for_one_sessions_intent_does_not_block_another_sessions_retrieval():
     from adapters.hybrid_retrieval import HybridRetriever
     from adapters.mtrag import OnlineContext
@@ -250,7 +281,7 @@ def test_waiting_for_one_sessions_intent_does_not_block_another_sessions_retriev
     assert retriever.requests == 2
 
 
-@pytest.mark.parametrize("relation", ("condition_change", "correction", "standalone", "followup"))
+@pytest.mark.parametrize("relation", ("condition_change", "correction", "standalone", "followup", "ambiguous"))
 def test_intent_label_does_not_disable_cache_reuse_but_current_source_scope_excludes_old_condition(relation):
     shared = make_evidence("Atlas project common rules.", "base")
     a = make_evidence("Region A condition: students may apply.", "a")
@@ -355,13 +386,14 @@ async def test_disjoint_append_commits_new_scope_then_version_change_retires_aft
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lost_response", (False, True))
-async def test_interpretation_commits_with_answer_and_idempotent_replay_does_not_rewrite(tmp_path, lost_response):
+@pytest.mark.parametrize("relation", ("condition_change", "ambiguous"))
+async def test_interpretation_commits_with_answer_and_idempotent_replay_does_not_rewrite(tmp_path, lost_response, relation):
     from controller.engine_client import UnknownOutcomeError
     store, engine = SessionStore(tmp_path/'state.sqlite3'), MockEngine()
     service = Controller(store, engine, knobs=PlannerKnobs(strategy="always_append"))
     evidence = make_evidence("A condition with its full original source.", "a")
     calls = []
-    intent = QueryContext("Atlas v2 region B condition?", "condition_change", (1,))
+    intent = QueryContext("And region B?" if relation == "ambiguous" else "Atlas v2 region B condition?", relation, (1,))
     async def provider(snapshot):
         calls.append(snapshot.version)
         return EvidenceSelection((evidence,), (evidence.key,), intent)

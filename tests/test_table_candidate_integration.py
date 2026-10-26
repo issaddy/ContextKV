@@ -146,12 +146,15 @@ def test_annotation_tokens_use_shared_overflow_without_trimming_qa_or_bodies(sty
         EvidencePolicy(table_relations=True, table_annotation_style=style))
     disabled = build_candidates(snapshot, "Current?", (table,))
     output_budget = 32
-    limit = min(len(c.input_ids) for c in enabled) + output_budget - 1
-    assert max(len(c.input_ids) for c in disabled) + output_budget <= limit
-    bounded = build_candidates(snapshot, "Current?", (table,),
-        EvidencePolicy(table_relations=True, table_annotation_style=style,
-                       max_new_tokens=output_budget, max_total_model_tokens=limit))
-    for full, candidate in zip(enabled, bounded):
+    # APPEND may exceed even the annotated REBUILD. Compare annotation cost
+    # within each action; no ordering between different prompt forms is assumed.
+    for base, full in zip(disabled, enabled):
+        limit = len(base.input_ids) + output_budget
+        assert len(full.input_ids) > len(base.input_ids)
+        bounded = build_candidates(snapshot, "Current?", (table,),
+            EvidencePolicy(table_relations=True, table_annotation_style=style,
+                           max_new_tokens=output_budget, max_total_model_tokens=limit))
+        candidate = next(c for c in bounded if c.action == full.action)
         assert not candidate.feasible and candidate.reason == "shared_context_policy_overflow"
         assert candidate.messages == full.messages and candidate.input_ids == full.input_ids
         assert candidate.evidence_spans == full.evidence_spans

@@ -108,8 +108,10 @@ def clean_context(context: Mapping[str, Any] | OnlineContext) -> OnlineContext:
     if isinstance(context, OnlineContext):
         return context
     score = context.get("score")
+    metadata = {**context.get("metadata", {}), **context}
     return OnlineContext(document_id=str(context["document_id"]), text=str(context["text"]),
-                         source=str(context.get("source") or ""), title=str(context.get("title") or ""),
+                         source=str(metadata.get("source_uri") or metadata.get("source") or metadata.get("url") or ""),
+                         title=str(metadata.get("title") or ""),
                          score=float(score) if score is not None else None)
 
 
