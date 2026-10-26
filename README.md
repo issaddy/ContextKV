@@ -48,7 +48,7 @@ CUDA_VISIBLE_DEVICES=0,1 python -m controller.cli --config configs/qwen3_8b_cost
 
 `POST /sessions/{id}/turns` 接收 query、request_id 和来源 evidence。配置检索器后，`POST /sessions/{id}/query` 只需问题和 request_id。两者共用完整历史、提交、重放、恢复及关闭机制；响应提供本轮可引用 ID 和实际可见来源。详见[HTTP 接口](docs/guides/http_retrieval.md)。
 
-上面的入口用于需要任务承接和条件变化的多轮场景，保持默认稳定布局，并从原始语料恢复文档来源地址。已有正文、索引和向量继续复用；公共元数据只在启动时加载，在现有同一次重排中提供来源和标题，再进入生成上下文。旧last3配置仍可作参照，新主线继续完善统一机制，不把两种配置的静态取舍作为最终结果。
+上面的入口用于需要任务承接和条件变化的多轮场景，保持默认稳定布局，并从原始语料恢复文档来源地址。已有正文、索引和向量继续复用；公共元数据只在启动时加载，在现有同一次重排中提供来源和标题，再进入生成上下文。旧last3配置保留用于复现已有比较；当前主线围绕任务、证据与成本的统一协同推进。
 
 只接收外部 evidence 时可省略检索参数。自动检索也可复用 `--retriever-index data/cloud-bm25s --corpus-id mtrag`，或用 `--retriever-config` 选择已有 BM25/BGE/RRF/重排索引。可选 `--evidence-corpus` 提供版本、条件和原文关系。检索器启动时加载一次，正文与实际回答按原样保存。
 
