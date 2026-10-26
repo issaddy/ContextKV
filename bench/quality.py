@@ -109,12 +109,10 @@ def _jsonable(value):
 def official_record(turn: OnlineTurn, answer: str) -> dict:
     """Official export uses current retrieval; full visible evidence is separate.
 
-    The external evaluator allows at most 10 contexts. We never truncate an audit
-    to pass that checker: current retrieval is <=5, and all visible/audit material
-    belongs in the companion full input record below.
+    Preserve the supplied source set. Published MTRAG-UN reference tasks can have
+    more contexts than the competition submission checker permits; that check
+    belongs to submission validation, not this lossless result export.
     """
-    if len(turn.contexts) > 10:
-        raise ValueError("official format permits <=10 contexts; export current retrieval separately")
     contexts = [{"document_id": c.document_id, "source": c.source, "score": c.score or 0.0,
                  "text": c.text, "title": c.title} for c in turn.contexts]
     messages = [{"speaker": "user" if m.speaker == "user" else "agent", "text": m.text} for m in turn.history]

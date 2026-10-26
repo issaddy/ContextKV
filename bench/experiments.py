@@ -53,6 +53,19 @@ def matrix_config(spec):
     return config
 
 
+def retrieval_settings(spec, method=None):
+    """Resolve the declared retrieval recipe for this physical execution."""
+    if method and method.get("retriever_config"):
+        return {"corpus": None, "retriever_index": None, "retriever_config": method["retriever_config"]}
+    return {key: spec.get(key) for key in ("corpus", "retriever_index", "retriever_config")}
+
+
+def needs_development_selection(spec, stage, frozen):
+    """Predeclared fixed methods need no artificial tuning run before a test."""
+    return stage == "dev_ablation" or (stage == "test" and (frozen is not None
+        or any(m.get("tune") or m.get("ablation_of") for m in spec["methods"])))
+
+
 def validate_matrix(spec, *, required_split="dev"):
     if spec.get("schema_version") != 1:
         raise ValueError("matrix schema_version must be 1")
@@ -66,7 +79,10 @@ def validate_matrix(spec, *, required_split="dev"):
                 or any(type(r) is not int or r < 1 for r in repetitions)
                 or len(set(repetitions)) != len(repetitions)):
             raise ValueError("repetitions must be distinct positive integer run IDs, separate from seeds")
-    if "P3" in spec["protocols"] and not (spec.get("corpus") or spec.get("retriever_index") or spec.get("retriever_config")):
+    scope = spec.get("comparison_scope", "execution")
+    if scope not in {"execution", "system"}:
+        raise ValueError("comparison_scope must be execution or system")
+    if "P3" in spec["protocols"] and any(not any(retrieval_settings(spec, method).values()) for method in spec["methods"]):
         raise ValueError("P3 requires corpus, retriever_index or retriever_config")
     if spec.get("retriever_config") and (spec.get("corpus") or spec.get("retriever_index")):
         raise ValueError("choose shared retriever_config or legacy corpus/retriever_index")
@@ -75,8 +91,8 @@ def validate_matrix(spec, *, required_split="dev"):
         raise ValueError("method IDs must be unique simple directory names")
     split = json.loads(Path(spec["split_manifest"]).read_text())
     dev, test = set(split["dev"]), set(split["test"])
-    if not dev or dev & test:
-        raise ValueError("development must be nonempty and disjoint from test conversations")
+    if dev & test:
+        raise ValueError("development and test conversations must be disjoint")
     if not split[required_split]:
         raise ValueError(f"requested {required_split} split contains no conversations")
     known = {r["conversation_id"] for r in load_rows(spec["input"])}
@@ -109,6 +125,8 @@ def validate_matrix(spec, *, required_split="dev"):
     shared_prompt = shared_context.system_prompt
     effective_shared_prompt = SYSTEM_PROMPT if shared_prompt is None else shared_prompt
     for method in spec["methods"]:
+        if method.get("retriever_config") and scope != "system":
+            raise ValueError("method retriever_config requires comparison_scope=system; execution comparisons share retrieval")
         if method.get("kind", "controller") not in {"controller", "native"}:
             raise ValueError("method kind must be controller or native")
         if method.get("server_profile") is not None and method["server_profile"] not in spec.get("server_profiles", {}):
@@ -134,9 +152,10 @@ def validate_matrix(spec, *, required_split="dev"):
                     raise ValueError("native model_path differs from the shared local model scope")
                 if native.get("local_files_only") is False:
                     raise ValueError("local model scope requires local_files_only")
-            if any(key in source for source in (method, overrides, native)
-                   for key in ("retriever_config", "retriever_index", "corpus")):
-                raise ValueError("retriever configuration must be shared at the matrix root")
+            if (any(key in source for source in (overrides, native)
+                    for key in ("retriever_config", "retriever_index", "corpus"))
+                    or any(key in method for key in ("retriever_index", "corpus"))):
+                raise ValueError("retriever configuration belongs at the matrix root or method.retriever_config for system comparison")
             if any(key in native for key in ("system_prompt", "system_prompt_file")):
                 raise ValueError("matrix prompts must be shared at the matrix root or base_config.context")
             candidate_prompt = overrides.get("context", {}).get("system_prompt", shared_prompt)
@@ -169,6 +188,8 @@ def validate_matrix(spec, *, required_split="dev"):
                 raise ValueError("matched ablations must inherit the parent server_profile")
             if method.get("tune") or method.get("b6_eligible") or "candidates" in method:
                 raise ValueError("ablations inherit the frozen parent candidate and do not participate in tuning/B6")
+            if method.get("retriever_config") and method["retriever_config"] != parent.get("retriever_config"):
+                raise ValueError("execution ablations inherit the parent's retriever_config")
     lifecycle = spec.get("lifecycle", {})
     command = lifecycle.get("before_job")
     if command is not None and (not isinstance(command, list) or not command or not all(isinstance(x, str) for x in command)):
@@ -211,6 +232,7 @@ def matrix_jobs(spec, *, split="dev", frozen=None, ablations_only=False):
                          "method": method["id"], "source_method": source_id, "kind": method.get("kind", "controller"),
                          "split": split, "candidate_index": index, "candidate_overrides": candidate,
                          "overrides": overrides,
+                         "retrieval": retrieval_settings(spec, parent if ablation_parent else method),
                          "native": native, "protocol": protocol,
                          "concurrency": concurrency, "seed": seed, "status": "not_run",
                          "ablation_of": ablation_parent})
@@ -263,6 +285,8 @@ def provenance(spec, *, implementation=None):
     if spec.get("retriever_config"):
         files.update(retriever_config_sources(spec["retriever_config"]))
     for method in spec["methods"]:
+        if method.get("retriever_config"):
+            files.update(retriever_config_sources(method["retriever_config"]))
         for candidate in method.get("candidates", [{}]):
             overrides = merge(method.get("overrides", {}), candidate)
             native = merge(method.get("native") or {}, overrides.get("native", {}))
@@ -571,8 +595,7 @@ async def execute_job(spec, job, directory, *, native_engine_manifest=None, veri
         completed.check_returncode()
     args = dict(input=spec["input"], domain=spec.get("domain", "cloud"),
                 split_manifest=spec["split_manifest"], split=job["split"], protocol=job["protocol"],
-                corpus=spec.get("corpus"), retriever_index=spec.get("retriever_index"),
-                retriever_config=spec.get("retriever_config"),
+                **job.get("retrieval", retrieval_settings(spec)),
                 evidence_corpus=spec.get("evidence_corpus"),
                 concurrency=job["concurrency"], seed=job["seed"], limit_sessions=spec.get("limit_sessions"),
                 think_time=spec.get("think_time", 0), arrival_rate=spec.get("arrival_rate"),
@@ -613,9 +636,10 @@ async def execute_job(spec, job, directory, *, native_engine_manifest=None, veri
     payload = json.loads(output.read_text())
     default_cache_state = "fresh_mock_instance" if payload.get("engine_kind") == "mock" else "unspecified_hardware"
     protocol = {"cache_state_protocol": lifecycle.get("cache_state_protocol", default_cache_state),
+                "comparison_scope": spec.get("comparison_scope", "execution"),
+                "retrieval": job.get("retrieval", retrieval_settings(spec)),
                 "before_job": hook, "warmup_input": lifecycle.get("warmup_input"),
-                "response_mode": spec.get("response_mode", "buffered"), "slo": spec.get("slo", {}),
-                "fair_hardware_comparison_established": False}
+                "response_mode": spec.get("response_mode", "buffered"), "slo": spec.get("slo", {})}
     if "repetition" in job:
         protocol["repetition"] = job["repetition"]
     payload["experiment_protocol"] = protocol
@@ -651,7 +675,7 @@ async def run_matrix(spec, output, *, stage="dev", frozen=None, executor=execute
                        frozen=frozen, ablations_only=stage == "dev_ablation")
     implementation = implementation_manifest()
     run_provenance = generation_provenance(spec, implementation=implementation)
-    if stage in {"test", "dev_ablation"}:
+    if needs_development_selection(spec, stage, frozen):
         if frozen is None or frozen["provenance"] != provenance(spec, implementation=implementation):
             raise ValueError("test and matched dev ablations require a frozen development selection of this exact dataset/config/split/implementation")
         if frozen["simulation_only"]:

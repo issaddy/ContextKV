@@ -51,7 +51,7 @@ RAYON_NUM_THREADS=4 .venv/bin/python -m bench.b6_joint_sweep \
 
 `test` 与 `dev_ablation` 不输出冒充dev冻结的模板。尤其ablation-only通常没有同次父run，必须随后绑定真实匹配父来源；本入口不补造参照或质量通过。完整 job/原始 audit/模型与服务器记录仍保存，heldout评分另走原 `quality_acceptance(scope=heldout)` 协议。
 
-每个job使用新owned进程，保留启动日志、实际runtime前后快照和结束状态。公共skip-generation-warmup约束不等于清除磁盘JIT缓存；原spec显式before-job hook仍由 `execute_job`执行并记录，初始空KV观测发生在该hook之前。父进程tokenizer/BGE资源按现有路径管理，不新增研究排名缓存。P3共同retriever_config透传原生/controller入口，retrieval排队/执行仍在pipeline计时内。
+每个job使用新owned进程，保留启动日志、实际runtime前后快照和结束状态。公共skip-generation-warmup约束不等于清除磁盘JIT缓存；原spec显式before-job hook仍由 `execute_job`执行并记录，初始空KV观测发生在该hook之前。父进程tokenizer/BGE资源按现有路径管理，不新增研究排名缓存。P3默认共享retriever_config以隔离执行机制；comparison_scope=system时允许method.retriever_config并将实际配方透传原生/controller入口，检索排队/执行仍计入pipeline。固定非调参配置可直接运行test；实际调参与匹配消融继续绑定冻结选择。
 
 本工具不停止/恢复外部大服务。操作者仍负责外层owned supervisor、GPU独占及原服务恢复；这里仅清理自己的process groups。默认plan、CPU fake-owned合同或一次硬件完成均不构成性能或质量胜出证明。
 

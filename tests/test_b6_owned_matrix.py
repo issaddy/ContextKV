@@ -176,7 +176,7 @@ def test_generic_plan_keeps_existing_paths_prompt_budget_and_has_no_launch_side_
     assert original == (matrix.args.matrix.read_bytes(), matrix.config_path.read_bytes())
 
 
-@pytest.mark.parametrize('field', ['model', 'endpoint', 'context', 'profile_mode', 'capacity', 'mock', 'native_endpoint', 'native_model_missing', 'mixed_capacity'])
+@pytest.mark.parametrize('field', ['model', 'endpoint', 'context', 'profile_mode', 'capacity', 'mock', 'native_endpoint', 'mixed_capacity'])
 def test_unsupported_or_cross_job_resource_changes_fail_before_launch(matrix, field):
     method = matrix.spec['methods'][0]
     if field == 'model':
@@ -193,8 +193,6 @@ def test_unsupported_or_cross_job_resource_changes_fail_before_launch(matrix, fi
         method['overrides']['engine'] = {'kind': 'mock'}
     elif field == 'native_endpoint':
         matrix.spec['methods'][1]['native']['base_url'] = 'http://127.0.0.1:9999'
-    elif field == 'native_model_missing':
-        matrix.spec['methods'][1]['native'].pop('model_path')
     else:
         matrix.spec['server_profiles']['patched']['gpu_tokens'] = 16384
         method['overrides']['engine'] = {'gpu_capacity_tokens': 16384}

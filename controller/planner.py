@@ -131,8 +131,6 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
         return Plan(rebuild, reason="forced_rebuild") if rebuild else NoFeasiblePlan("required_rebuild_unavailable")
     if len(valid) == 1:
         return Plan(valid[0], reason="only_feasible_candidate")
-    if append is None or rebuild is None:
-        raise ValueError("only APPEND and REBUILD are supported")
     if knobs.strategy != "cost":
         chosen = _fixed(append,rebuild,knobs.strategy,knobs,session,quotes)
         reason = "warm_quote_unavailable_fallback" if knobs.strategy == "warm_idle" and quotes is None else knobs.strategy

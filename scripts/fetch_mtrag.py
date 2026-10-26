@@ -9,43 +9,46 @@ import sys
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from adapters.mtrag import DATASET_SHA256, DATASET_URL, dataset_profile, load_rows, split_overlap, stratified_split
+from adapters.mtrag import (DATASET_COMMIT, DATASET_SHA256, DATASET_URL, MTRAG_UN_SHA256, MTRAG_UN_URL,
+                            dataset_profile, load_rows, split_overlap, stratified_split)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", default="data/mtrag")
-    parser.add_argument("--offline", action="store_true", help="Profile an existing RAG.jsonl without downloading")
+    parser.add_argument("--dataset", choices=("mtrag", "mtrag-un"), default="mtrag")
+    parser.add_argument("--output", help="Defaults to data/<dataset>")
+    parser.add_argument("--offline", action="store_true", help="Profile the existing pinned data without downloading")
     args = parser.parse_args(argv)
-    root = Path(args.output)
+    root = Path(args.output or "data/" + args.dataset)
     root.mkdir(parents=True, exist_ok=True)
-    target = root / "RAG.jsonl"
+    is_un = args.dataset == "mtrag-un"
+    url, expected_sha = (MTRAG_UN_URL, MTRAG_UN_SHA256) if is_un else (DATASET_URL, DATASET_SHA256)
+    target = root / ("reference.jsonl" if is_un else "RAG.jsonl")
     if not args.offline and not target.exists():
-        with urllib.request.urlopen(DATASET_URL, timeout=120) as response:
+        with urllib.request.urlopen(url, timeout=120) as response:
             content = response.read()
         temporary = target.with_suffix(".tmp")
         temporary.write_bytes(content)
         temporary.replace(target)
     actual_sha = sha256(target.read_bytes()).hexdigest()
-    if actual_sha != DATASET_SHA256:
-        raise ValueError(f"pinned RAG.jsonl SHA256 mismatch: {actual_sha}; expected {DATASET_SHA256}")
+    if actual_sha != expected_sha:
+        raise ValueError(f"pinned {target.name} SHA256 mismatch: {actual_sha}; expected {expected_sha}")
     rows = load_rows(target)
     report = dataset_profile(rows)
-    report["source_url"] = DATASET_URL
-    report["source_sha256"] = actual_sha
-    expected = {"all": {"tasks": 842, "sessions": 110, "adjacent_repeat": 657, "ever_repeat": 951},
-                "cloud": {"tasks": 205, "sessions": 26, "adjacent_repeat": 188, "ever_repeat": 277}}
-    for domain, fields in expected.items():
-        for field, value in fields.items():
-            if report[domain][field] != value:
-                raise ValueError(f"pinned data mismatch {domain}.{field}: {report[domain][field]} != {value}")
-    if report["reference_markers"] != 1053:
-        raise ValueError("pinned data reference-marker count differs from 1053")
-    manifest = stratified_split(rows, source_sha256=report["source_sha256"])
+    report.update(dataset=args.dataset, source_url=url, source_sha256=actual_sha,
+                  protocols=["P1"] if is_un else ["P1", "P2", "P3"])
+    # A file digest identifies the pinned release; derived counts are useful
+    # diagnostics, not another set of acceptance constants for the same bytes.
+    if is_un:
+        manifest = {"dataset_commit": DATASET_COMMIT, "source_sha256": actual_sha,
+                    "dev": [], "test": sorted({r["conversation_id"] for r in rows}),
+                    "scope": "published MTRAG-UN reference tasks; one selected turn per conversation"}
+    else:
+        manifest = stratified_split(rows, source_sha256=actual_sha)
     report["split_overlap"] = split_overlap(rows, manifest)
     for name, payload in (("profile.json", report), ("split_manifest.json", manifest)):
         path = root / name
-        if path.exists() and json.loads(path.read_text(encoding="utf-8")) != payload:
+        if name == "split_manifest.json" and path.exists() and json.loads(path.read_text(encoding="utf-8")) != payload:
             raise ValueError(f"refusing to replace frozen manifest/profile {path}; use a new output directory")
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2, ensure_ascii=False))

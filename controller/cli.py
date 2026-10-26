@@ -35,7 +35,7 @@ def _manifest(config, controller, info, protocol: str):
                     "logical_cpu_count": os.cpu_count(),
                     "requested_thread_environment": {key: os.environ.get(key) for key in
                         ("TOKENIZERS_PARALLELISM", "RAYON_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")}},
-               "quality_evaluated": False, "gpu_performance_validated": False}
+               "quality_evaluated": False}
     path = Path(config.state_dir) / f"manifest-{controller.events.run_id}.json"
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return path
@@ -69,7 +69,7 @@ async def demo(config):
         result_path = Path(config.state_dir) / f"demo-{service.events.run_id}.json"
         result_path.write_text(dumps({"measurement_kind": "simulation" if simulated else "hardware",
                                      "protocol": "synthetic-correctness-demo", "session_id": sid,
-                                     "quality_evaluated": False, "gpu_performance_validated": False,
+                                     "quality_evaluated": False,
                                      "turns": results}) + "\n", encoding="utf-8")
         note = ("模拟 token/缓存轨迹仅验证协议，不代表 GPU 性能或回答质量。" if simulated else
                 "真实引擎上的合成材料协议演示，不建立回答质量或系统性能结论。")

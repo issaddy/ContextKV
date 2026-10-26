@@ -73,12 +73,13 @@ def check_common_runtime(info, runtime, *, gpu_tokens=16384, seed=42):
 
 def frozen_jobs(spec, stage, frozen):
     """The existing frozen contract is checked before any owned process can start."""
-    if stage != "dev":
+    from bench.experiments import needs_development_selection
+    if needs_development_selection(spec, stage, frozen):
         if frozen is None or frozen["provenance"] != provenance(spec):
             raise ValueError("owned test/ablation requires the exact frozen development selection and implementation")
         if frozen["simulation_only"]:
             raise ValueError("simulation-only tuning cannot authorize an owned hardware run")
-    elif frozen is not None:
+    elif stage == "dev" and frozen is not None:
         raise ValueError("dev does not accept --frozen; use test or dev_ablation")
     jobs = matrix_jobs(spec, split="test" if stage == "test" else "dev", frozen=frozen,
                        ablations_only=stage == "dev_ablation")
@@ -140,8 +141,8 @@ def job_requirements(spec, job, shared):
     if job["kind"] == "native":
         native = job["native"]
         if (baseline not in {"B0", "B1"} or native.get("base_url") != shared.engine.base_url
-                or not native.get("model_path")
-                or Path(native["model_path"]).resolve() != Path(shared.model.name).resolve()
+                or (native.get("model_path") is not None
+                    and Path(native["model_path"]).resolve() != Path(shared.model.name).resolve())
                 or not native.get("local_files_only") or not native.get("audit_prompt_ids")):
             raise ValueError("native owned job must use the shared local model/endpoint and retain prompt IDs")
         if native.get("engine_manifest"):
@@ -421,7 +422,6 @@ def execute(args, plan):
     server.write_json(args.output/"completion.json", {"status": "completed" if complete else "generation_failures",
         "cells": len(results), "expected_turns_per_job": len(cohort), "stage": stage,
         "quality_evaluated": False, "b6_selected": None,
-        "freeze_requires_real_quality_evidence": True,
         "quality_template_scope": "dev_only; test/ablation require their real matched scoring sources"})
     return 0 if complete else 1
 

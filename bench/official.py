@@ -23,6 +23,8 @@ def merge_offline_labels(predictions: Sequence[Mapping], references: Sequence[Ma
     """Join labels after generation, retaining each method's own input and contexts."""
     reference = {r["task_id"]: r for r in references}
     result, seen = [], set()
+    def dialogue(messages):
+        return [(m["speaker"], m["text"]) for m in messages]
     for prediction in predictions:
         task_id = prediction["task_id"]
         if task_id in seen:
@@ -30,10 +32,12 @@ def merge_offline_labels(predictions: Sequence[Mapping], references: Sequence[Ma
         seen.add(task_id)
         source = reference[task_id]
         row = dict(prediction)
-        for key in ("targets", "enrichments"):
+        for key in ("targets", "enrichments", "answerability", "Answerability", "Question Type", "Multi-Turn"):
             if key in source:
                 row[key] = source[key]
-        row["evaluation_history_matches_reference"] = row["input"] == source["input"]
+        # Author/timestamp metadata is intentionally absent from model inputs.
+        # Compare the actual dialogue, not those offline metadata fields.
+        row["evaluation_history_matches_reference"] = dialogue(row["input"]) == dialogue(source["input"])
         result.append(row)
     return result
 

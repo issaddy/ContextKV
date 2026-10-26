@@ -19,6 +19,8 @@ from typing import Any, Iterable, Literal, Mapping, Sequence
 DATASET_COMMIT = "53fef6f5917c7e10c436f697e69a955dbc795d81"
 DATASET_SHA256 = "5d5201da9fabd072fd8f6b8d051bfaafa7ef031e76722a4920c66e94cede1873"
 DATASET_URL = f"https://raw.githubusercontent.com/IBM/mt-rag-benchmark/{DATASET_COMMIT}/mtrag-human/generation_tasks/RAG.jsonl"
+MTRAG_UN_URL = f"https://raw.githubusercontent.com/IBM/mt-rag-benchmark/{DATASET_COMMIT}/mtragun-human/generation_tasks/reference.jsonl"
+MTRAG_UN_SHA256 = "68053f709c928570718fd2c88455eccf974746f5bfa2206d7fd39b969acb21d4"
 CLOUD_COLLECTION = "mt-rag-ibmcloud-elser-512-100-20240502"
 Protocol = Literal["P1", "P2", "P3"]
 
@@ -135,8 +137,6 @@ def online_turn(row: Mapping[str, Any], protocol: Protocol = "P2",
         raise ValueError("allowed history must contain complete alternating user/assistant pairs")
     # P3 has no access to even the official current evidence: its retriever fills this separately.
     contexts = () if protocol == "P3" else tuple(clean_context(c) for c in row["contexts"])
-    if protocol != "P3" and len(contexts) != 5:
-        raise ValueError("fixed MTRAG protocol requires exactly five retrieved contexts")
     return OnlineTurn(str(row["conversation_id"]), str(row["task_id"]), int(row["turn"]),
                       str(row["Collection"]), question.text, history, contexts, protocol)
 
@@ -157,6 +157,8 @@ class OnlineSession:
         turns = [int(r["turn"]) for r in self.__rows]
         if len(set(turns)) != len(turns):
             raise ValueError("duplicate turn")
+        if protocol != "P1" and turns != list(range(1, len(turns) + 1)):
+            raise ValueError("generated-history protocols need every turn from 1; selected-turn benchmarks use P1")
         self.__position = 0
         self.__history: tuple[OnlineMessage, ...] = ()
         self.protocol = protocol
@@ -203,8 +205,6 @@ def profile_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         seen: set[tuple[str, str]] = set()
         for index, row in enumerate(turns):
             current = {_evidence_key(c) for c in row["contexts"]}
-            if len(current) != len(row["contexts"]) or len(current) != 5:
-                raise ValueError("profile requires five unique contexts per task")
             if index:
                 total += len(current)
                 adjacent += len(current & previous)
@@ -213,6 +213,7 @@ def profile_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             previous = current
             seen |= current
     return {"sessions": len(sessions), "tasks": len(rows), "max_turns": maximum,
+            "max_input_turn": max((int(row["turn"]) for row in rows), default=0),
             "current_blocks_after_first": total, "adjacent_repeat": adjacent,
             "ever_repeat": historical, "nonadjacent_revisit": revisit,
             "adjacent_ratio": adjacent / total if total else 0.0,
@@ -221,7 +222,7 @@ def profile_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 def dataset_profile(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {"dataset_commit": DATASET_COMMIT, "all": profile_rows(rows),
-            "cloud": profile_rows([r for r in rows if r["Collection"] == CLOUD_COLLECTION]),
+            "cloud": profile_rows([r for r in rows if r["Collection"] in {CLOUD_COLLECTION, "ibmcloud"}]),
             "reference_markers": sum("reference" in c for r in rows for c in r["contexts"])}
 
 

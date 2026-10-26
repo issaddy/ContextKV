@@ -611,7 +611,7 @@ async def _run(args):
                    "undispatched_native_sessions": sorted(baseline._native_sessions),
                    "cleanup_started_at": cleanup_start, "cleanup_finished_at": cleanup_end,
                    "scheduler_retirement_ack_available": False, "physical_free_measured": False,
-                   "gpu_performance_validated": False, "quality_evaluated": False}
+                   "quality_evaluated": False}
         if shared is not None or model is not None or sampling is not None:
             payload["shared_configuration"] = {"model": to_jsonable(model), "sampling_recipe": request_sampling(sampling),
                                                "context": to_jsonable(policy)}

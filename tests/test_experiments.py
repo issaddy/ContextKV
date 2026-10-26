@@ -386,7 +386,8 @@ def test_matrix_default_and_explicit_default_prompt_are_equivalent(tmp_path,expl
     assert len(matrix_jobs(value)) == 3
 
 
-def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tmp_path, monkeypatch, local_scope):
+@pytest.mark.parametrize("system_comparison", [False, True])
+def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tmp_path, monkeypatch, local_scope, system_comparison):
     import bench.experiments as experiments
     import bench.native_baseline as native_module
     import controller.cli as cli
@@ -406,7 +407,14 @@ def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tm
     value.update(protocols=["P3"], retriever_config=str(config), methods=[
         {"id":"B0","kind":"native","native":{"baseline":"B0","base_url":"http://fake.test",
             "engine_manifest":str(engine)}}, {"id":"full"}])
+    alternate = tmp_path/"alternate.json"
+    if system_comparison:
+        alternate.write_text(json.dumps({**config_body,"query_mode":"last3"}))
+        value['comparison_scope']='system'
+        value['methods'][1]['retriever_config']=str(alternate)
     before = generation_provenance(value)
+    if system_comparison:
+        assert str(alternate) in before['external_inputs']
     assert {str(config), str(tmp_path/"sparse/manifest.json"), str(tmp_path/"dense/manifest.json")} <= before["external_inputs"].keys()
     config_body["query_mode"] = "last3"
     config.write_text(json.dumps(config_body))
@@ -427,9 +435,9 @@ def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tm
         for job in matrix_jobs(value):
             await experiments.execute_job(value, job, tmp_path/job["job_id"])
     asyncio.run(scenario())
-    assert seen == [str(config), str(config)]
+    assert seen == [str(config), str(alternate if system_comparison else config)]
     value["methods"][0]["native"]["retriever_config"] = str(config)
-    with pytest.raises(ValueError, match="shared at the matrix root"):
+    with pytest.raises(ValueError, match="matrix root"):
         matrix_jobs(value)
 
 
@@ -463,3 +471,28 @@ def test_runtime_native_manifest_is_supplied_only_after_owned_server_validation(
         asyncio.run(experiments.execute_job(value, job, tmp_path/'wrong',
             native_engine_manifest=path, verified_server=record))
     assert len(seen) == 1
+
+
+def test_predeclared_fixed_test_needs_no_artificial_development_run(tmp_path):
+    value=spec(tmp_path)
+    value['methods']=[{'id':'fixed','overrides':{'planner':{'strategy':'always_rebuild'}}}]
+    Path(value['split_manifest']).write_text(json.dumps({'dev':[],'test':['session-b']}))
+    results=asyncio.run(run_matrix(value,tmp_path/'fixed-test',stage='test'))
+    assert len(results)==1 and results[0]['status']=='completed'
+    assert set(results[0]['summary']['latency_by_session'])=={'session-b'}
+    from bench.b6_joint_sweep import frozen_jobs
+    assert frozen_jobs(value,'test',None)==matrix_jobs(value,split='test')
+
+
+def test_system_comparison_binds_method_retrieval_and_execution_inherits_shared(tmp_path, monkeypatch):
+    from bench import experiments
+    value=spec(tmp_path)
+    value.update(comparison_scope='system',protocols=['P3'],methods=[{'id':'baseline'},
+        {'id':'complete','retriever_config':'different.yaml'}],retriever_config='shared.yaml')
+    monkeypatch.setattr(experiments,'retriever_config_sources',lambda path:())
+    jobs=matrix_jobs(value)
+    assert [j['retrieval']['retriever_config'] for j in jobs]==['shared.yaml','different.yaml']
+    assert jobs[1]['overrides']=={}
+    value['comparison_scope']='execution'
+    with pytest.raises(ValueError,match='comparison_scope=system'):
+        matrix_jobs(value)

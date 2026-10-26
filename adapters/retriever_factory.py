@@ -53,9 +53,8 @@ def load_retriever_config(path):
     if value.evidence_selection not in {"ranked", "semantic"}:
         raise ValueError("evidence_selection must be ranked or semantic")
     if value.evidence_selection == "semantic" and (
-            value.query_mode != "conversational" or value.selector is None or value.stage != "hybrid_rerank"
-            or value.source_window):
-        raise ValueError("semantic evidence selection requires conversational hybrid_rerank with selector and no output source_window")
+            value.query_mode != "conversational" or value.selector is None or value.source_window):
+        raise ValueError("semantic evidence selection requires conversational mode with selector and no output source_window")
     if value.query_fusion not in {"single", "current_topic_rrf"}:
         raise ValueError("unknown query fusion")
     if value.query_fusion == "current_topic_rrf" and (value.query_mode not in {"user_topic", "conversational", *SOURCE_MODES} or value.stage == "dense"):

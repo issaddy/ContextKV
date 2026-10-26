@@ -282,3 +282,15 @@ def test_report_uses_client_chunk_tpot_and_binds_quality_to_run_answers():
         summarize_run(payload, quality=[{**quality[0], "answer": "some other method's answer"}])
     with pytest.raises(ValueError, match="absent from"):
         summarize_run(payload, quality=[{**quality[0], "task_id": "another-run"}])
+
+
+def test_official_un_labels_are_joined_only_after_generation():
+    reference={'task_id':'un-1','input':[{'speaker':'user','text':'Current question',
+        'metadata':{'author_type':'human'}}],'contexts':[], 'targets':[{'text':'Reference answer'}],
+        'answerability':['UNDERSPECIFIED'],'Question Type':['Other'],'Multi-Turn':['Clarification']}
+    prediction={'task_id':'un-1','input':[{'speaker':'user','text':'Current question'}],
+                'contexts':[], 'predictions':[{'text':'Actual answer'}]}
+    result,=merge_offline_labels([prediction],[reference])
+    assert result['answerability']==['UNDERSPECIFIED']
+    assert result['evaluation_history_matches_reference']
+    assert result['predictions']==prediction['predictions'] and 'answerability' not in prediction

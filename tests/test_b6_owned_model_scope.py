@@ -213,3 +213,14 @@ def test_cost_binding_cannot_reuse_old_model_or_unbound_new_recipe(matrix, local
     assert sweep.execute(matrix.args, sweep.build_matrix_plan(matrix.args)) == int(binding != 'matching')
     assert len(seen) == int(binding == 'matching')
     assert len(launched) == len(stopped) == 1
+
+
+def test_owned_native_reuses_shared_model_path_without_duplicate_declaration(matrix, local_scope):
+    scoped_matrix(matrix,local_scope)
+    for method in matrix.spec['methods']:
+        if method.get('kind')=='native':
+            method['native'].pop('model_path')
+    owned_fixtures.write_spec(matrix)
+    plan=sweep.build_matrix_plan(matrix.args)
+    assert len(plan['jobs'])==3
+    assert plan['config']['model']['name']==str(local_scope.model_path)

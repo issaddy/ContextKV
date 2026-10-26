@@ -290,3 +290,21 @@ class DataTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_selected_turn_reference_benchmark_keeps_variable_original_contexts():
+    from copy import deepcopy
+    from bench.quality import official_record
+    row = deepcopy(load_rows(FIXTURE)[1])
+    for count in (0, 2, 12):
+        row['contexts'] = [{'document_id':f'd{i}','text':f'Original {i}'} for i in range(count)]
+        gate = OnlineSession([row], 'P1')
+        turn = gate.current()
+        assert turn.history[-1].text == 'REFERENCE ANSWER 1'
+        assert [c.text for c in turn.contexts] == [c['text'] for c in row['contexts']]
+        assert len(official_record(turn, 'Protocol fixture')['contexts']) == count
+        gate.commit(turn.task_id, 'Protocol fixture')
+        assert gate.done
+    for protocol in ('P2', 'P3'):
+        with unittest.TestCase().assertRaisesRegex(ValueError, 'selected-turn benchmarks use P1'):
+            OnlineSession([row], protocol)
