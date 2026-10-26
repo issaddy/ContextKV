@@ -49,13 +49,14 @@ python -m bench.b6_joint_sweep --matrix configs/benchmark_mtrag.yaml \
 
 确认本次研究问题需要生成对照后，在同一命令加`--execute`。不默认乘上并发、种子、重复或策略大矩阵；系统承载研究另按服务目标声明少量有意义负载点。
 
-MTRAG-UN可通过已有服务读取官方选定轮次：
+MTRAG-UN使用单个固定REBUILD方法作给定历史/来源的质量检查，复用相同执行器；不将它称为跨轮KV性能对照：
 
 ```bash
-python -m controller.cli --config configs/qwen3_8b_cost.yaml \
-  --state-dir runs/mtrag-un-eval benchmark --input data/mtrag-un/reference.jsonl \
-  --domain all --protocol P1 --split-manifest data/mtrag-un/split_manifest.json --split test
+python -m bench.b6_joint_sweep --matrix configs/benchmark_mtrag_un.yaml \
+  --stage test --output runs/mtrag-un-eval
 ```
+
+真实Qwen3分词检查：507个任务均满足32768模型窗口，输入中位数1757、最大25507 tokens，29个达到4K、5个达到16K。五个任务的完整输入加输出预留超过原16K GPU池，因此该质量配置声明32K池和固定重建，不套用16K成本表、不裁题；仍需生成与评分后才能报告质量。此处只有tokenizer和候选构造，没有模型权重加载或推理。
 
 所有给定历史和原文计入实际token预算，溢出显式记录，不改题或裁证据。官方竞赛format checker的十段上限与公开reference文件中部分任务不一致；提交校验和无损结果导出分开，不能为通过checker损坏测试数据。
 

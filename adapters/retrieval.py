@@ -61,8 +61,6 @@ async def run_retrieval_worker(operation, /, *args, **kwargs):
 def fixed_retrieve(turn: OnlineTurn) -> tuple[OnlineContext, ...]:
     if turn.protocol == "P3":
         raise ValueError("P3 requires real retrieval, not the official contexts")
-    if len(turn.contexts) != 5:
-        raise ValueError("fixed retrieval requires five contexts")
     return turn.contexts
 
 

@@ -300,6 +300,7 @@ def test_selected_turn_reference_benchmark_keeps_variable_original_contexts():
         row['contexts'] = [{'document_id':f'd{i}','text':f'Original {i}'} for i in range(count)]
         gate = OnlineSession([row], 'P1')
         turn = gate.current()
+        assert fixed_retrieve(turn) == turn.contexts
         assert turn.history[-1].text == 'REFERENCE ANSWER 1'
         assert [c.text for c in turn.contexts] == [c['text'] for c in row['contexts']]
         assert len(official_record(turn, 'Protocol fixture')['contexts']) == count

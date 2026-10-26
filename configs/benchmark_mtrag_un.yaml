@@ -1,0 +1,29 @@
+# Published MTRAG-UN selected-turn quality diagnostic, not a live-session speed comparison.
+# Real Qwen3 tokenization: all 507 tasks fit 32768 model tokens; five exceed the 16K pool.
+schema_version: 1
+comparison_scope: execution
+base_config: configs/qwen3_8b_scope.example.yaml
+input: data/mtrag-un/reference.jsonl
+domain: all
+split_manifest: data/mtrag-un/split_manifest.json
+protocols: [P1]
+concurrency: [1]
+seeds: [42]
+response_mode: buffered
+reference_method: ContextKV
+server_profiles:
+  patched:
+    kind: patched
+    checkout: vendor/sglang
+    write_policy: write_through
+    hicache: true
+    session_radix: true
+    gpu_tokens: 32768
+    hicache_gb: 8
+    mem_fraction_static: 0.8
+methods:
+  - id: ContextKV
+    server_profile: patched
+    overrides:
+      engine: {gpu_capacity_tokens: 32768}
+      planner: {strategy: always_rebuild}
