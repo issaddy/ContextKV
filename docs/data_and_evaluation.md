@@ -38,13 +38,13 @@ python scripts/fetch_mtrag.py --dataset mtrag-un
 
 下载器校验一次固定文件摘要，再生成统计；取消对同一文件额外硬编码任务数/重叠数作为准入门槛。已有原始文件可加`--offline`。官方标注和所有原文保持不变。
 
-`configs/benchmark_mtrag.yaml`是当前可执行的完整系统对照：Native B1使用已有last3混合检索，ContextKV使用conversational机制，共享同一Cloud语料和生成模型，固定两种方法，无参数搜索。当前已安装P3索引只覆盖Cloud：对应205个官方任务，既有test分区实际164轮/方法。其他领域需准备对应索引后才能计入P3全域结果；P1/P2已经能够读取全部四域。
+`configs/benchmark_mtrag.yaml`是当前可执行的完整系统对照：Native B1使用已有last3混合检索，NativeWithA在原生执行上使用与ContextKV相同的conversational机制，ContextKV使用完整A/B/C。三者共享Cloud语料、生成模型及回答协议，固定配置，无参数搜索。Native与ContextKV比较整体质量/成本；NativeWithA与ContextKV帮助分析执行/缓存收益，仍需核对各自实际历史和证据。当前已安装P3索引只覆盖Cloud：对应205个官方任务，既有test分区实际164轮/方法。其他领域需准备对应索引后才能计入P3全域结果；P1/P2已经能够读取全部四域。
 
 按[部署说明](deployment.md)准备固定引擎、索引、模型与32B解释服务后，先查看计划：
 
 ```bash
 python -m bench.b6_joint_sweep --matrix configs/benchmark_mtrag.yaml \
-  --stage test --output runs/mtrag-system-eval
+  --stage test --job-timeout 3600 --output runs/mtrag-system-eval
 ```
 
 确认本次研究问题需要生成对照后，在同一命令加`--execute`。不默认乘上并发、种子、重复或策略大矩阵；系统承载研究另按服务目标声明少量有意义负载点。
@@ -53,7 +53,7 @@ MTRAG-UN使用单个固定REBUILD方法作给定历史/来源的质量检查，�
 
 ```bash
 python -m bench.b6_joint_sweep --matrix configs/benchmark_mtrag_un.yaml \
-  --stage test --output runs/mtrag-un-eval
+  --stage test --job-timeout 3600 --output runs/mtrag-un-eval
 ```
 
 真实Qwen3分词检查：507个任务均满足32768模型窗口，输入中位数1757、最大25507 tokens，29个达到4K、5个达到16K。五个任务的完整输入加输出预留超过原16K GPU池，因此该质量配置声明32K池和固定重建，不套用16K成本表、不裁题；仍需生成与评分后才能报告质量。此处只有tokenizer和候选构造，没有模型权重加载或推理。
@@ -119,6 +119,10 @@ P3中GPU唯一KV积分/完成轮为Simple21712.97、ContextKV21635.63槽·秒；
 代码与运行记录进一步确认信息传递缺口：TaskFrame仍只有宽泛的“mobile SDK”，而当前选材请求不含实际对话中已使用的具体SDK对象；完整材料本身不能弥补丢失的指代关系。部分需求无资料时也出现全部不选，之后生成又加入无依据常识。下一步优先把真实对话对象、当前条件与有用的部分证据共同传入决策，并减少串行解析/选材重复工作；不调整本轮提示或重跑此会话。
 
 当前保留该组合及其工程能力，尚不默认全局开启。原始输入、实际历史、答案、官方任务标签关联、逐项来源审查和完整成本统一在`runs/reading-selection/`。手工来源审查为assistant review，不是独立质量分数；14次回答、14次解释、7次选材之外没有judge调用或追加生成。
+
+`ad95d3e`已补齐这项信息传递：解释器接收近期完整实际QA及已有状态，选材接收近期和所引用旧轮次的QA；历史用于指代而非事实授权。纯对话回应保留TaskFrame并跳过检索/选材，后续事实追问可恢复。选材协议明确允许保留部分需求的支持，回答协议区分事实答复与非事实对话回应。默认模式的名称筛选和无用来源目录遍历已删除。
+
+本阶段未追加模型实验。1698项本地检查及176项Linux检查通过；仅用Qwen3-32B tokenizer检查全部842个MT-RAG与507个MTRAG-UN给定历史输入：解析请求最大分别1446/1863 tokens，均未超过8192预算（MT-RAG另有1项沿用既有字面组合，无解析请求）。这证明输入原样传递和预算适配，不代表解释准确率或新版答案质量。记录在`runs/dialogue-context/`；此前生成结果仍绑定原测量版本。下一次按上述固定公开benchmark比较，不重跑已用于修改的开发会话。
 
 ## 原始记录与当前审查
 

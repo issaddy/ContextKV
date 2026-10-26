@@ -60,6 +60,8 @@ EfficientAgent 的 vLLM/LMCache connector 不能直接接到 SGLang。现有可�
 
 | 调研工作 | 可利用的原理 | 本项目取舍 |
 |---|---|---|
+| [CANARD，EMNLP 2019](https://aclanthology.org/D19-1605/) | 利用历史问答恢复省略与指代，不仅拼接旧问题 | 传递完整实际QA作为话语上下文，事实仍由当前来源支持；不引入训练 |
+| [uva-irlab-conv，SemEval 2026 Task 8](https://arxiv.org/html/2606.11945v1) | 改写压缩可能丢失约束，后续列表重排重新接收对话历史 | 在现有解释器和联合选材中补齐实际QA；按预算采用近期及显式相关轮次，未完整复现其全历史/检索骨干。其检索强、生成仍有不足的结果也支持分别评价证据排序与回答有效性 |
 | [Sufficient Context，ICLR 2025](https://arxiv.org/abs/2411.06037) | 区分相关材料与足以回答的材料，再分析生成错误 | 采用分层归因；不增加逐轮充分性judge或“一项不足就全部拒答”的闸门 |
 | [Contextual Retrieval](https://www.anthropic.com/research/contextual-retrieval) | 将片段放回文档范围再构造检索表示，减少切块丢失的条件 | 优先利用原章节、标题、父级范围；派生说明仅辅助检索，原文保持事实来源。需要验证后再决定是否重建索引 |
 | [QD-RAG，ACL SRW 2025](https://arxiv.org/abs/2507.00355) | 子问题召回、合并与已有重排 | 已复用；后续判断联合材料适用性，不能把更多子查询或排名覆盖当作答案收益 |
@@ -67,4 +69,4 @@ EfficientAgent 的 vLLM/LMCache connector 不能直接接到 SGLang。现有可�
 | [CMT-RAG，2026预印本](https://arxiv.org/abs/2607.26470) | 子任务与证据依赖共同构成可回访的记忆 | 参考显式依赖；现有状态/原文图可先复用，不直接引入另一个训练骨干或庞大会话DAG |
 | [SGLang Session Radix](https://docs.sglang.io/docs/advanced_features/session_radix_cache) / [HiCache](https://docs.sglang.io/docs/advanced_features/hicache_design) | 会话引用、原生淘汰与分层恢复；引用不是硬pin | 继续复用已验证的固定引擎；不为语义错误新增缓存策略或复制引擎管理器 |
 
-本轮先修正公开benchmark接入和系统/执行比较边界，使后续机制能被正确评价。公开数据选用及精确发布规模见[评价](../data_and_evaluation.md)。这些方法的来源、原理和成本进入技术决策，论文收益不会直接写成ContextKV收益。
+公开benchmark接入和系统/执行比较边界已统一；当前从实际QA、阅读材料和对话行为的接口补齐信息，而非继续增设来源资格闸门。公开数据选用及精确发布规模见[评价](../data_and_evaluation.md)。这些方法的来源、原理和成本进入技术决策，论文收益不会直接写成ContextKV收益。

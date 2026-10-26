@@ -1,4 +1,5 @@
-# Public MT-RAG end-to-end comparison. No tuning or synthetic questions.
+# Public MT-RAG: original RAG, the same A on native execution, and complete A/B/C.
+# This separates retrieval/quality gains from execution/cache effects without a sweep.
 # Current installed corpus/index assets cover Cloud (205 official tasks).
 # The frozen split determines the actual run cohort; no outcome-based selection.
 schema_version: 1
@@ -45,3 +46,12 @@ methods:
   - id: ContextKV
     server_profile: patched
     retriever_config: configs/retriever_conversational.example.yaml
+  - id: NativeWithA
+    kind: native
+    server_profile: stock
+    retriever_config: configs/retriever_conversational.example.yaml
+    native:
+      baseline: B1
+      base_url: http://127.0.0.1:30000
+      local_files_only: true
+      audit_prompt_ids: true
