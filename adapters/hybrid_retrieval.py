@@ -476,7 +476,7 @@ class HybridRetriever:
     def __init__(self, sparse, dense, encoder, reranker=None, *, query_mode="current",
                  stage="hybrid_rerank", candidate_k=50, rerank_k=50, rrf_k=60,
                  source_config=None, query_fusion="single", resolver=None, rerank_query_mode="resolved", trace_sink=None,
-                 source_window=False, evidence_selector=None):
+                 source_window=False, evidence_selector=None, source_documents=None):
         from adapters.query_resolution import SOURCE_MODES
         if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", *SOURCE_MODES}:
             raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
@@ -518,8 +518,11 @@ class HybridRetriever:
         self.selection_group = None
         self.source_window = source_window
         self.expand_source_window = None
+        self.read_source_documents = None
         self.source_neighbors = None
         self.evidence_selector = evidence_selector
+        self.source_documents = source_documents
+        self.document_window_counts = None
         if evidence_selector is not None and source_window:
             raise ValueError("semantic selection cannot add unselected output windows")
 
@@ -528,6 +531,9 @@ class HybridRetriever:
         self.source_context = corpus_index.contextualize
         self.selection_group = corpus_index.selection_group
         self.expand_source_window = corpus_index.source_window
+        if self.source_documents is not None:
+            self.read_source_documents = lambda contexts, documents=self.source_documents: corpus_index.reading_contexts(contexts, documents)
+            self.document_window_counts = corpus_index.document_window_counts
         self.source_neighbors = corpus_index.candidate_neighbors
 
     @property
@@ -538,9 +544,14 @@ class HybridRetriever:
             "rerank_query_mode": self.rerank_query_mode,
             "rerank_document_view": "source address, title and original body",
             "pre_rerank_metadata": self.source_context is not None,
-            "source_window": {"enabled": self.source_window, "radius": 1,
-                "scope": "same source/document/version/declared section; explicit span or MT-RAG ingestion order",
-                "selection": "one hop from ranked hits, complete originals, no invented rank or recursive expansion",
+            "source_window": {"enabled": self.source_window, "radius": None if self.source_documents is not None else 1,
+                "mode": "original_document_paragraphs" if self.source_documents is not None else "adjacent_passages",
+                "document_alignment_counts": dict(self.document_window_counts or {}),
+                "context_paragraphs_each_side": 2 if self.source_documents is not None else None,
+                "scope": ("matched original document and literal whitespace-aligned passage" if self.source_documents is not None
+                          else "same source/document/version/declared section; explicit span or MT-RAG ingestion order"),
+                "selection": ("merge literal paragraph windows and replace unscoped slices; retain raw ranking separately" if self.source_documents is not None
+                              else "one hop from ranked hits, complete originals, no invented rank or recursive expansion"),
                 "budget": "shared A/R required evidence; normal exact-token feasibility and native admission apply",
                 "extra_model_calls": 0},
             "semantic_evidence_selection": self.evidence_selector.manifest if self.evidence_selector else None,
@@ -609,6 +620,7 @@ class HybridRetriever:
                                                for r in intent.task_frame.requirements))
         fusion_trace = condition_trace = selection_trace = requirement_trace = semantic_trace = None
         supporting_contexts = ()
+        retrieval_contexts = None
         retrieval_error = scoring_query = None
         try:
             query = view["text"] if view else query_text(turn.user_questions, self.query_mode)
@@ -651,7 +663,13 @@ class HybridRetriever:
                     else:
                         contexts, selection_trace = select_ranked_evidence(ranked, group_key=self.selection_group)
                 if self.source_window:
-                    supporting_contexts = self.expand_source_window(contexts)
+                    if self.read_source_documents is not None:
+                        reading = self.read_source_documents(contexts)
+                        if reading != tuple(contexts):
+                            retrieval_contexts = tuple(contexts)
+                        contexts = reading
+                    else:
+                        supporting_contexts = self.expand_source_window(contexts)
                 if view is None and (selection_trace is not None or self.source_window):
                     view = {"mode": self.query_mode, "text": query}
                 self.requests += 1
@@ -676,7 +694,8 @@ class HybridRetriever:
                     **({"evidence_selection": selection_trace} if selection_trace else {}),
                     **({"requirement_evidence": requirement_trace} if requirement_trace else {}),
                     **({"semantic_evidence": semantic_trace} if semantic_trace else {}),
-                    **({"source_window": {"primary_ids": [c.document_id for c in contexts],
+                    **({"source_window": {"primary_ids": [c.document_id for c in (retrieval_contexts if retrieval_contexts is not None else contexts)],
+                        "reading_ids": [c.document_id for c in contexts],
                         "supporting_ids": [c.document_id for c in supporting_contexts]}}
                        if self.source_window and not retrieval_error else {}),
                     **({"query_fusion_trace": fusion_trace} if fusion_trace else {})}
@@ -685,7 +704,7 @@ class HybridRetriever:
                 else:
                     self.trace_sink(trace)
         return replace(turn, contexts=tuple(contexts), query_context=intent,
-                       supporting_contexts=supporting_contexts)
+                       supporting_contexts=supporting_contexts, retrieval_contexts=retrieval_contexts)
 
     def close(self):
         with self._lock:

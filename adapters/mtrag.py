@@ -64,6 +64,7 @@ class OnlineTurn:
     protocol: Protocol
     query_context: QueryContext | None = None
     supporting_contexts: tuple[OnlineContext, ...] = ()
+    retrieval_contexts: tuple[OnlineContext, ...] | None = None
 
     @property
     def question(self) -> str:

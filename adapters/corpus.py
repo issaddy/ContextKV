@@ -41,6 +41,9 @@ class CorpusIndex:
             group = (key.corpus_id, document, key.version, source, block.parent_section)
             groups.setdefault(group, []).append((start, key))
         self._neighbors = {}
+        self._source_document_ids = {key: value[0] for key, value in (source_positions or {}).items()}
+        self._document_windows = {}
+        self.document_window_counts = {}
         for members in groups.values():
             ordered = [key for _, key in sorted(members)]
             for index, key in enumerate(ordered):
@@ -195,6 +198,74 @@ class CorpusIndex:
         """
         primary = self.retrieved_keys(contexts)
         return self._source_neighbors(primary)
+
+    def document_windows(self, contexts, documents):
+        """Add literal source windows; retain the original ranked passages.
+
+        Alignment is memoized per finite corpus passage, not per query. This is
+        called in the retriever's serialized selection stage before publication.
+        """
+        from adapters.mtrag import OnlineContext
+        groups = {}
+        for key in self.retrieved_keys(contexts):
+            if key not in self._document_windows:
+                block = self._blocks[key]
+                window, reason = documents.window(self._source_document_ids.get(key, key.document_id), block.text)
+                self.document_window_counts[reason] = self.document_window_counts.get(reason, 0) + 1
+                self._document_windows[key] = window
+            window = self._document_windows[key]
+            if window is not None:
+                document, start, end = window
+                group = groups.setdefault((document.document_id, key.version), (document, []))
+                group[1].append((start, end))
+        result = []
+        for (_, version), (document, intervals) in groups.items():
+            merged = []
+            for start, end in sorted(set(intervals)):
+                if merged and start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+                else:
+                    merged.append((start, end))
+            for start, end in merged:
+                passage_id = f"source-window:{document.document_id}:{start}:{end}"
+                existing = [key for key in self._passages.get(passage_id, ()) if key.version == version]
+                if existing:
+                    support = self._blocks[existing[0]]
+                else:
+                    source = document.source or f"{self.corpus_id}://{self.snapshot_id}/{document.document_id}"
+                    support = replace(make_evidence(document.text[start:end], document.document_id,
+                        corpus_id=self.corpus_id, passage_id=passage_id, version=version,
+                        source_uri=source, title=document.title,
+                        provenance=(source, f"corpus_snapshot:{self.snapshot_id}",
+                                    f"original_document_span:{start}:{end}")), span=(start, end))
+                    self._blocks[support.key] = support
+                    self._passages.setdefault(passage_id, []).append(support.key)
+                result.append(OnlineContext(support.key.passage_id, support.text, support.source_uri, support.title))
+        return tuple(result)
+
+    def reading_contexts(self, contexts, documents):
+        """Read merged original windows instead of repeating their matched slices.
+
+        Explicit source structure keeps its existing dependency/section closure.
+        Raw ranking is returned separately by the retriever for evaluation/audit.
+        """
+        contexts = tuple(contexts)
+        keys = tuple(self._context_key(context) for context in contexts)
+        eligible = [context for context, key in zip(contexts, keys)
+                    if not self._blocks[key].dependencies and self._blocks[key].parent_section is None]
+        windows = self.document_windows(eligible, documents)
+        window_blocks = [(context, self._blocks[self._context_key(context)]) for context in windows]
+        result = {}
+        for context, key in zip(contexts, keys):
+            origin = self._document_windows.get(key)
+            block = self._blocks[key]
+            if origin is not None and not block.dependencies and block.parent_section is None:
+                document, start, end = origin
+                context, key = next((view, window.key) for view, window in window_blocks
+                               if window.key.document_id == document.document_id and window.key.version == key.version
+                               and window.span[0] <= start and window.span[1] >= end)
+            result.setdefault(key, context)
+        return tuple(result.values())
 
     def candidate_neighbors(self, contexts):
         """Expand only candidates with known metadata; unselected hits may lack it."""

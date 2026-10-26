@@ -90,6 +90,15 @@ def run_evaluator(checkout, mode, input_path, output_path, *, judge_revision=Non
         if not alias.exists():
             alias.symlink_to(root / "mtrag-human/retrieval_tasks", target_is_directory=True)
     Path(output_path).resolve().parent.mkdir(parents=True, exist_ok=True)
+    if mode == "retrieval":
+        rows = load_jsonl(input_path)
+        if any("retrieval_contexts" in row for row in rows):
+            # Context expansion is reading material, not another ranked hit.
+            projected = Path(str(output_path) + ".retrieval-input.jsonl")
+            projected.write_text("".join(json.dumps({**row,
+                "contexts": row.get("retrieval_contexts", row["contexts"])}, ensure_ascii=False) + "\n"
+                for row in rows))
+            input_path = projected
     command = evaluator_command(root, mode, input_path, output_path, **kwargs)
     env_command = [kwargs.get("python", sys.executable), "-c",
                    "import importlib.metadata as m,json,sys; print(json.dumps(dict(python=sys.version,packages=sorted([(d.metadata['Name'],d.version) for d in m.distributions()]))))"]

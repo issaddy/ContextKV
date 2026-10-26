@@ -294,3 +294,27 @@ def test_official_un_labels_are_joined_only_after_generation():
     assert result['answerability']==['UNDERSPECIFIED']
     assert result['evaluation_history_matches_reference']
     assert result['predictions']==prediction['predictions'] and 'answerability' not in prediction
+
+
+def test_official_retrieval_scores_ranked_hits_without_reading_expansion(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from adapters.mtrag import DATASET_COMMIT
+    from bench import official
+    root=tmp_path/'upstream'
+    root.mkdir()
+    (root/'contextkv-source.json').write_text(json.dumps({'commit':DATASET_COMMIT}))
+    ranked=[{'document_id':'original','text':'Retrieved original','score':2}]
+    rows=[{'task_id':'q','contexts':ranked+[{'document_id':'support','text':'Reading context','score':0}],
+           'retrieval_contexts':ranked}]
+    original=tmp_path/'answers.jsonl'
+    original.write_text(json.dumps(rows[0])+'\n')
+    captured=[]
+    monkeypatch.setattr(official.subprocess,'check_output',lambda *a,**kw:'{"python":"fixture","packages":[]}')
+    def run(command,**kwargs):
+        path=Path(command[command.index('--input_file')+1])
+        captured.append(json.loads(path.read_text()))
+        return SimpleNamespace(returncode=0,stdout='',stderr='',check_returncode=lambda:None)
+    monkeypatch.setattr(official.subprocess,'run',run)
+    official.run_evaluator(root,'retrieval',original,tmp_path/'scores.jsonl')
+    assert captured[0]['contexts']==ranked
+    assert json.loads(original.read_text())['contexts']==rows[0]['contexts']

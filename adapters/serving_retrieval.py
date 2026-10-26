@@ -72,7 +72,8 @@ class ServingRetriever:
                 request_id=request_id, snapshot_version=snapshot.version,
                 corpus_snapshot_id=self.corpus_snapshot_id,
                 retrieval_elapsed_ms=(time.monotonic()-started)*1000,
-                ranking=[{"passage_id": c.document_id, "score": c.score} for c in retrieved.contexts],
+                ranking=[{"passage_id": c.document_id, "score": c.score} for c in
+                         (retrieved.retrieval_contexts if retrieved.retrieval_contexts is not None else retrieved.contexts)],
                 retrieval_priority=priority, supplied_evidence_keys=tuple(b.key for b in blocks),
                 query_context=retrieved.query_context)
         return EvidenceSelection(blocks, priority, retrieved.query_context)

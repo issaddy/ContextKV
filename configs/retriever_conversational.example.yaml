@@ -26,6 +26,8 @@ query_fusion: single
 # Neighboring passages may cross procedures (for example pinned vs latest release).
 # Keep expansion explicit until it preserves task applicability and fits cost support.
 source_window: false
+# Optional original-document context, used only with source_window: true.
+# source_documents: data/mtrag-source-documents/cloud.jsonl.zip
 
 # Omit selector only when intentionally using the model-free history fallback.
 selector:

@@ -107,19 +107,25 @@ def _jsonable(value):
 
 
 def official_record(turn: OnlineTurn, answer: str) -> dict:
-    """Official export uses current retrieval; full visible evidence is separate.
+    """Export the current reading material and preserve raw retrieval separately.
 
     Preserve the supplied source set. Published MTRAG-UN reference tasks can have
     more contexts than the competition submission checker permits; that check
     belongs to submission validation, not this lossless result export.
     """
     contexts = [{"document_id": c.document_id, "source": c.source, "score": c.score or 0.0,
-                 "text": c.text, "title": c.title} for c in turn.contexts]
+                 "text": c.text, "title": c.title} for c in (*turn.contexts, *turn.supporting_contexts)]
     messages = [{"speaker": "user" if m.speaker == "user" else "agent", "text": m.text} for m in turn.history]
     messages.append({"speaker": "user", "text": turn.query})
-    return {"task_id": turn.task_id, "conversation_id": turn.conversation_id,
+    record = {"task_id": turn.task_id, "conversation_id": turn.conversation_id,
             "Collection": turn.collection, "input": messages,
             "contexts": contexts, "predictions": [{"text": answer}]}
+    if turn.retrieval_contexts is not None:
+        record["retrieval_contexts"] = [{"document_id": c.document_id, "source": c.source,
+            "score": c.score or 0.0, "text": c.text, "title": c.title} for c in turn.retrieval_contexts]
+    elif turn.supporting_contexts:
+        record["retrieval_contexts"] = contexts[:len(turn.contexts)]
+    return record
 
 
 def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Path, audit_path: str | Path,
@@ -132,7 +138,7 @@ def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Pat
     full = {"task_id": turn.task_id, "conversation_id": turn.conversation_id, "turn": turn.turn,
             "protocol": turn.protocol, "query": turn.query, "branch_reason": branch_reason, "answer": answer,
             "measurement_kind": measurement_kind, "truncated": truncated,
-            "retrieved_evidence": _jsonable(turn.contexts),
+            "retrieved_evidence": _jsonable(turn.retrieval_contexts if turn.retrieval_contexts is not None else turn.contexts),
             "visible_evidence_manifest": _jsonable(visible_evidence_manifest),
             "audit_evidence": _jsonable(audit_evidence), "input_ids": list(input_ids),
             "output_ids": list(output_ids), "actual_history": _jsonable(turn.history)}

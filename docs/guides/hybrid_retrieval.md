@@ -127,3 +127,11 @@ encoder/reranker 与 SGLang 共用 GPU 时，其他会话检索可能与生成�
 5. **质量增强能与缓存协同。** 在选定检索设置内部再共享证据比较布局/APPEND/REBUILD；同时单列检索增强前后完整系统成本。新增检索、重排、grounding 或修订开销全部计入，不把基线材料不同归因于缓存控制器。
 
 本次已通过原文保持、RRF 同分、真实 BM25 默认兼容、白名单/历史来源、标签后置分析、模型/语料对应、离线 CLI 和 41 轮 cohort 等测试。mock encoder/reranker 只验证数据合同，不能用于报告真实检索收益。真实模型实验完成后再填写各方法/会话结果及错误分析。
+
+### 从原始文档恢复阅读上下文
+
+在`source_window: true`下可提供`source_documents: data/mtrag-source-documents/cloud.jsonl.zip`，使用同一固定语料的原始document-level JSONL（或只含一个JSONL的zip）。记录包含`document_id/text`，可带`url/source_uri/title`。Cloud原件来自[固定上游版本](https://github.com/IBM/mt-rag-benchmark/tree/53fef6f5917c7e10c436f697e69a955dbc795d81/corpora/document_level)，不更换现有passage索引或向量。
+
+检索仍返回原始片段。阅读阶段通过文档身份和仅允许空白差异的字面匹配定位原文，补完整边界自然段并带上两侧各两个自然段；同源重叠窗口合并。实际模型读取原始窗口，原检索片段及分数另行记录，不将两者重复放进输入。已有完整片段、没有唯一对应原文的片段，以及有显式章节/依赖关系的来源保留原路径。窗口保留原文字符范围和来源，A/R共享同一阅读材料，实际tokens继续进入预算和B/C流程。
+
+原文只在启动时加载，片段定位按固定语料项复用，不增加LLM调用、索引搜索或重排。未提供source_documents时仍使用原有相邻检索片段窗口。生成评价包含实际阅读材料；检索评价从单独的retrieval_contexts投影原排名，不能把上下文扩展当作新的检索命中。该机制的质量和成本需按公开任务验证，默认配置尚未启用。

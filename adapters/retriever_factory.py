@@ -37,6 +37,7 @@ class HybridRetrievalConfig:
     selector_schema_mode: str = "static_v1"
     rerank_query_mode: str = "resolved"
     source_window: bool = False
+    source_documents: str | None = None
     evidence_selection: str = "ranked"
 
 
@@ -97,7 +98,8 @@ def retriever_config_sources(path):
     """Small provenance files for the existing experiment-boundary digest mechanism."""
     config = load_retriever_config(path)
     return (str(path), str(Path(config.sparse_index)/"manifest.json"),
-            str(Path(config.dense_index)/"manifest.json"))
+            str(Path(config.dense_index)/"manifest.json"),
+            *((config.source_documents,) if config.source_window and config.source_documents else ()))
 
 
 def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path=None, trace_sink=None):
@@ -138,11 +140,16 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
             if config.evidence_selection == "semantic":
                 from adapters.evidence_selection import EvidenceSelector
                 evidence_selector = EvidenceSelector(client)
+            documents = None
+            if config.source_window and config.source_documents:
+                from adapters.source_documents import SourceDocuments
+                documents = SourceDocuments.load(config.source_documents)
             result = HybridRetriever(sparse, dense, encoder, reranker, query_mode=config.query_mode,
                 stage=config.stage, candidate_k=config.candidate_k, rerank_k=config.rerank_k, rrf_k=config.rrf_k,
                 query_fusion=config.query_fusion,
                 rerank_query_mode=config.rerank_query_mode,
                 source_window=config.source_window,
+                source_documents=documents,
                 evidence_selector=evidence_selector,
                 resolver=resolver, trace_sink=trace_sink,
                 source_config={"path": str(Path(config_path).resolve()), "resolved": asdict(config),

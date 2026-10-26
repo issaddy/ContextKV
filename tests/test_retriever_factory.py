@@ -850,3 +850,32 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
             assert [t["model_called"] for t in traces] == [False, True, True]
             assert all(t["missing_source_keys"] == [] for t in traces)
             assert all(t["query_fusion_trace"]["duplicate_query_skipped"] for t in traces)
+
+
+def test_factory_uses_original_document_windows_with_existing_serving_selection(retriever_config, tmp_path):
+    from adapters.corpus import CorpusIndex
+    from adapters.serving_retrieval import ServingRetriever
+    from controller.schema import SessionSnapshot
+    import asyncio
+    document=tmp_path/'original.jsonl'
+    config=yaml.safe_load(retriever_config.read_text())
+    config.update(source_window=True,source_documents=str(document))
+    retriever_config.write_text(yaml.safe_dump(config))
+    originals=load_beir_corpus(FIXTURE.with_name("corpus_small.jsonl"))
+    documents=[{'document_id':pid,'text':f'Only for source {pid}.\n\n'+row['text']+'\n\nEnd.',
+                'url':row['source'],'title':row['title']} for pid,row in originals.items()]
+    document.write_text(''.join(json.dumps(row)+'\n' for row in documents))
+    retriever=create_retriever('P3',config_path=retriever_config)
+    rows=[{'passage_id':pid,'document_id':pid,'text':row['text'],'title':row['title'],
+           'source':row['source'],'span':[0,len(row['text'])]} for pid,row in originals.items()]
+    document_text={row['document_id']:row['text'] for row in documents}
+    corpus=CorpusIndex.from_records(rows,corpus_id='c',snapshot_id=retriever.corpus_snapshot_id)
+    wrapper=ServingRetriever(retriever,corpus_id='c',corpus_index=corpus)
+    try:
+        selected=asyncio.run(wrapper.retrieve(SessionSnapshot('s'),'query','q'))
+        assert len(selected.retrieval_priority)==5
+        windows=[b for b in selected.evidence if b.key.passage_id.startswith('source-window:')]
+        assert windows and all(b.text==document_text[b.key.document_id][b.span[0]:b.span[1]] for b in windows)
+        assert retriever.manifest['source_window']['mode']=='original_document_paragraphs'
+    finally:
+        wrapper.close()
