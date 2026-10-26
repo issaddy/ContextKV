@@ -138,6 +138,37 @@ def select_condition_evidence(stage, condition_query, reranker, *, top_k=5, rrf_
     return contexts, trace
 
 
+def select_requirement_evidence(primary, rankings, *, top_k=5):
+    """Greedy coverage of explicit information needs on a distinct-content pool.
+
+    F(S) = sum_j max_{d in S} 1/rank_j(d), including the whole-task ranking.
+    This nonnegative diminishing-return objective rewards complementarity,
+    without treating logits/ranks as calibrated support probabilities. Reserve
+    the primary task's first source, then maximize remaining marginal coverage.
+    Ties retain primary relevance order. Return original scores and identities.
+    """
+    primary = tuple(primary)
+    if not primary:
+        return (), {"selected_ids": [], "marginal_gains": []}
+    ids = [c.document_id for c in primary]
+    rows = [{pid: 1/rank for rank, pid in enumerate(ranking, 1)}
+            for ranking in (ids, *rankings)]
+    selected = {ids[0]}
+    covered = [row[ids[0]] for row in rows]
+    gains = [{"passage_id": ids[0], "gain": sum(covered), "reason": "primary_task_anchor"}]
+    while len(selected) < min(top_k, len(primary)):
+        remaining = [pid for pid in ids if pid not in selected]
+        def gain(pid):
+            return sum(max(0.0, row[pid]-best) for row, best in zip(rows, covered))
+        winner = max(remaining, key=gain)
+        gains.append({"passage_id": winner, "gain": gain(winner), "reason": "requirement_coverage"})
+        selected.add(winner)
+        covered = [max(best, row[winner]) for row, best in zip(rows, covered)]
+    return tuple(c for c in primary if c.document_id in selected), {
+        "selected_ids": [pid for pid in ids if pid in selected], "marginal_gains": gains,
+        "best_selected_rank_per_view": [round(1/value) for value in covered]}
+
+
 class LocalBGE:
     """Official Transformers-compatible checkpoints; explicit device/dtype/path."""
     def __init__(self, model_path, *, reranker=False, device="cpu", dtype="float32",
@@ -256,14 +287,67 @@ class DenseIndex:
         return cls(contexts, np.load(directory/"vectors.npy", mmap_mode="r", allow_pickle=False), manifest)
 
     def search(self, query, encoder, *, top_k=50):
+        return self.search_many([query], encoder, top_k=top_k)[0]
+
+    def search_many(self, queries, encoder, *, top_k=50):
+        """Encode the current task and its needs together; reuse the fixed vectors."""
         import numpy as np
         for field in ("model_id", "revision", "max_length", "pooling"):
             if self.manifest["encoder"].get(field) != encoder.manifest.get(field):
                 raise ValueError("query encoder differs from the saved dense index")
-        vector = encoder.encode([query])[0]
-        scores = np.asarray(self.vectors @ vector)
-        indices = deterministic_top_k(scores, top_k, np)
-        return tuple(replace(self.contexts[int(i)], score=float(scores[i])) for i in indices)
+        vectors = encoder.encode(list(queries))
+        result = []
+        for vector in vectors:
+            scores = np.asarray(self.vectors @ vector)
+            indices = deterministic_top_k(scores, top_k, np)
+            result.append(tuple(replace(self.contexts[int(i)], score=float(scores[i])) for i in indices))
+        return tuple(result)
+
+
+def search_requirements(query, requirements, sparse, dense, encoder, reranker, *, candidate_k=50,
+                        rerank_k=50, rrf_k=60, current_query=None, source_context=None, group_key=None):
+    """Retrieve complementary needs, then cover them in the same final budget.
+
+    Subqueries come only from current committed/requested task state, not answer
+    guesses, qrels or corpus facts. Common conditions qualify every subquery.
+    One batched encode, equal-RRF candidate union, whole-task ranking, then one
+    score per requirement on that same distinct-content pool. No LLM reranker.
+    """
+    started = time.perf_counter()
+    queries = tuple(dict.fromkeys([query, *requirements, *([current_query] if current_query else [])]))
+    dense_rows = dense.search_many(queries, encoder, top_k=candidate_k)
+    sparse_rows = [sparse.retrieve([q], top_k=candidate_k) for q in queries]
+    fused = reciprocal_rank_fusion([[c.document_id for c in rows]
+        for pair in zip(sparse_rows, dense_rows) for rows in pair], k=rrf_k)
+    candidates = tuple(replace(dense.by_id[pid], score=score) for pid, score in fused[:rerank_k])
+    if source_context is not None:
+        candidates = source_context(candidates)
+    scores = reranker.score(query, candidates)
+    if len(scores) != len(candidates):
+        raise ValueError("reranker scores must align with candidate passages")
+    ranked = tuple(replace(c, score=float(score)) for c, score in sorted(zip(candidates, scores),
+        key=lambda item: (-float(item[1]), item[0].document_id)))
+    primary, grouping = select_ranked_evidence(ranked, top_k=len(ranked), group_key=group_key)
+    rankings = []
+    for requirement in requirements:
+        values = reranker.score(requirement, primary)
+        if len(values) != len(primary):
+            raise ValueError("reranker scores must align with candidate passages")
+        rankings.append([c.document_id for c, _ in sorted(zip(primary, values),
+            key=lambda item: (-float(item[1]), item[0].document_id))])
+    contexts, selection = select_requirement_evidence(primary, rankings)
+    trace = {"strategy": "task_requirement_coverage_v1", "query": query,
+        "requirements": list(requirements), "retrieval_queries": queries,
+        "candidate_ids": [c.document_id for c in candidates],
+        "primary_ranked_ids": [c.document_id for c in primary], "requirement_ranked_ids": rankings,
+        "source_rankings": [{"query": q, "sparse": [c.document_id for c in s],
+            "dense": [c.document_id for c in d]} for q, s, d in zip(queries, sparse_rows, dense_rows)],
+        "evidence_selection": grouping, **selection,
+        "encoder_inputs": len(queries), "rerank_pairs": len(candidates)+len(primary)*len(requirements),
+        "elapsed_ms": (time.perf_counter()-started)*1000,
+        "objective": "sum of best reciprocal rank per information need, including full task; primary anchor retained",
+        "semantics": "rank coverage surrogate, not proof of evidence sufficiency or answer correctness"}
+    return contexts, trace
 
 
 def search_variants(query, sparse, dense, encoder, reranker=None, *, candidate_k=50, rerank_k=50, rrf_k=60,
@@ -448,6 +532,11 @@ class HybridRetriever:
                 "source_identity": "highest ranked original representative; task anchor retained",
                 "budget": "at most five groups from the existing scored pool",
                 "extra_model_calls": 0},
+            "requirement_selection": {"strategy": "task_requirement_coverage_v1",
+                "activation": "resolved compound task with at least two explicit information needs; hybrid_rerank",
+                "retrieval": "batched query encoding and equal RRF over full task and qualified needs",
+                "selection": "primary task anchor plus diminishing-return coverage within five distinct groups",
+                "cost": "one additional search and rerank view per requirement; no extra interpretation call"},
             "candidate_k": self.candidate_k, "rerank_k": self.rerank_k, "rrf_k": self.rrf_k,
             "sparse": self.sparse.manifest, "dense": self.dense.manifest,
             "encoder": self.encoder.manifest, "reranker": self.reranker.manifest if self.reranker else None,
@@ -491,6 +580,14 @@ class HybridRetriever:
             if prior_context is None:
                 raise ValueError("topic selector requires an explicit committed history context")
             view = self.resolver.resolve(turn, prior_context)
+        from controller.schema import QueryContext
+        from controller.serialization import decode
+        intent = decode(QueryContext, view["context"]) if view is not None and view.get("context") is not None else None
+        requirements = ()
+        if intent is not None and intent.task_frame is not None and len(intent.task_frame.requirements) >= 2:
+            from adapters.conversation import frame_query
+            requirements = tuple(dict.fromkeys(frame_query(intent.task_frame, requirement=r)
+                                               for r in intent.task_frame.requirements))
         # run_sessions dispatches retrieval via to_thread. Serialize this model
         # pair, but do not hold its lock while another service resolves intent.
         # An unrelated session can retrieve during that HTTP wait. Shutdown
@@ -499,6 +596,7 @@ class HybridRetriever:
             fusion_trace = None
             condition_trace = None
             selection_trace = None
+            requirement_trace = None
             supporting_contexts = ()
             retrieval_error = None
             scoring_query = None
@@ -507,7 +605,13 @@ class HybridRetriever:
                 scoring_query = rerank_query_text(turn, query, self.rerank_query_mode)
                 if view is None and self.rerank_query_mode != "resolved":
                     view = {"mode": self.query_mode, "text": query}
-                if self.stage == "dense":
+                if requirements and self.stage == "hybrid_rerank":
+                    contexts, requirement_trace = search_requirements(query, requirements,
+                        self.sparse, self.dense, self.encoder, self.reranker,
+                        candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
+                        current_query=turn.query if self.query_fusion == "current_topic_rrf" else None,
+                        source_context=self.source_context, group_key=self.selection_group)
+                elif self.stage == "dense":
                     ranked = self.dense.search(query, self.encoder, top_k=self.candidate_k)
                 elif self.query_fusion == "current_topic_rrf":
                     stages = search_current_topic(turn.query, query, self.sparse, self.dense, self.encoder,
@@ -522,7 +626,9 @@ class HybridRetriever:
                         candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
                         rerank_query=scoring_query, source_context=self.source_context)
                     ranked = stages[self.stage]["contexts"]
-                if self.stage == "hybrid_rerank" and view is not None and view.get("condition_query"):
+                if requirement_trace is not None:
+                    pass  # The compound task already selected its shared evidence set.
+                elif self.stage == "hybrid_rerank" and view is not None and view.get("condition_query"):
                     contexts, condition_trace = select_condition_evidence(
                         stages[self.stage], view["condition_query"], self.reranker, rrf_k=self.rrf_k,
                         group_key=self.selection_group)
@@ -549,6 +655,7 @@ class HybridRetriever:
                         "retrieval_elapsed_ms": (time.perf_counter()-started)*1000,
                         **({"condition_evidence": condition_trace} if condition_trace else {}),
                         **({"evidence_selection": selection_trace} if selection_trace else {}),
+                        **({"requirement_evidence": requirement_trace} if requirement_trace else {}),
                         **({"source_window": {"primary_ids": [c.document_id for c in contexts],
                             "supporting_ids": [c.document_id for c in supporting_contexts]}}
                            if self.source_window and not retrieval_error else {}),
@@ -557,9 +664,6 @@ class HybridRetriever:
                         self.query_view_traces.append(trace)
                     else:
                         self.trace_sink(trace)
-        from controller.schema import QueryContext
-        from controller.serialization import decode
-        intent = decode(QueryContext, view["context"]) if view is not None and view.get("context") is not None else None
         return replace(turn, contexts=tuple(contexts), query_context=intent,
                        supporting_contexts=supporting_contexts)
 

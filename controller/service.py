@@ -203,6 +203,8 @@ class Controller:
                       "history_turns": query_context.history_turns}
             if query_context.task_frame is not None:
                 frame = asdict(query_context.task_frame)
+                if not query_context.task_frame.requirements:
+                    frame.pop("requirements")  # Preserve existing explicit request identities.
                 conditions = query_context.task_frame.conditions
                 # Preserve explicit v9 request identities after reading their
                 # empty/composite conditions into the new immutable structure.

@@ -35,6 +35,7 @@ class Client:
             task = ({"operation":"replace", "value":updates.pop("task")} if "task" in updates
                     else {"operation":"keep", "value":""})
             value = {"resume_turn": 0, "task":task, **value, "updates":updates}
+            value["task"] = {"requirements": [], **value["task"]}
         self.value, self.finish, self.inputs = value, finish, []
     def complete(self, messages, **kwargs):
         self.inputs.append((messages, kwargs))
@@ -43,7 +44,9 @@ class Client:
                 and "frame" in kwargs["response_format"]["json_schema"]["schema"]["properties"]):
             updates = value.get("updates", {})
             frame = value.get("frame", {"task":value["task"]["value"],"topic":updates.get("topic", ""),
-                "target":updates.get("target", ""),"conditions":updates.get("conditions", {})})
+                "target":updates.get("target", ""),"conditions":updates.get("conditions", {}),
+                "requirements":value["task"]["requirements"]})
+            frame = {"requirements": [], **frame}
             value = {k:v for k,v in value.items() if k not in {"task","updates"}} | {"frame":frame}
         return CompletionResult("completed", json.dumps(value), self.finish, 100)
 
@@ -67,8 +70,38 @@ def test_attribute_correction_keeps_the_active_task_and_topic():
     assert "maximum size" in view["text"] and "documents" not in view["text"]
     assert request.query == "No, attachments." and prior.task_frame == frame
     body = json.loads(client.inputs[0][0][-1]["content"])
-    assert body["previous_turn"]["state"] == {**asdict(frame),"conditions":dict(frame.conditions)}
+    assert body["previous_turn"]["state"] == {**asdict(frame),"conditions":dict(frame.conditions),
+                                                "requirements":list(frame.requirements)}
     assert "prior_interpretation" not in body["previous_turn"]  # Do not duplicate its rendering.
+
+
+def test_first_request_initializes_compound_needs_then_changes_only_one_condition():
+    frame = {"topic":"Atlas CLI", "target":"", "task":"download and install",
+             "requirements":["download package", "installation procedure"],
+             "conditions":{"version":"v4", "platform":"Linux", "architecture":"x86-64"}}
+    client = Client({"frame":frame, "relation":"standalone", "history_turns":[]})
+    original = "Give the download package and installation procedure for Atlas CLI v4 on Linux x86-64."
+    view = ConversationResolver(client).resolve(turn(original,()), PriorContext())
+    initial = decode(QueryContext, view["context"])
+    assert view["model_called"] and view["state_mode"] == "initialize"
+    assert view["text"] == original and initial.history_turns == ()
+    assert initial.task_frame.requirements == ("download package", "installation procedure")
+    body = json.loads(client.inputs[0][0][-1]["content"])
+    schema = client.inputs[0][1]["response_format"]["json_schema"]["schema"]
+    assert body["previous_turn"] is None and schema["properties"]["history_turns"]["maxItems"] == 0
+    client.value = {"task":{"operation":"keep", "value":"", "requirements":[]},
+                    "updates":{"conditions":{"platform":"Windows"}},
+                    "relation":"condition_change", "history_turns":[1], "resume_turn":0}
+    changed = ConversationResolver(client).resolve(turn("Use Windows instead.",(original,)),
+        PriorContext(interpretations=(initial,)))
+    current = decode(QueryContext, changed["context"]).task_frame
+    assert current.requirements == initial.task_frame.requirements
+    assert dict(current.conditions) == {"version":"v4", "platform":"Windows", "architecture":"x86-64"}
+    for need in current.requirements:
+        query = frame_query(current, requirement=need)
+        assert need in query and "Windows" in query and "v4" in query and "Linux" not in query
+    next_task = apply_frame_updates(current,{},task_operation="replace",task_value="supported languages")
+    assert next_task.requirements == ()
 
 
 def test_missing_state_initializes_all_conditions_before_using_later_patches():
@@ -81,7 +114,7 @@ def test_missing_state_initializes_all_conditions_before_using_later_patches():
     assert view["state_mode"] == "initialize" and intent.task_frame.conditions == tuple(sorted(frame["conditions"].items()))
     assert intent.task_frame.task == frame["task"] and intent.task_frame.topic == "Atlas CLI"
     schema = client.inputs[0][1]["response_format"]["json_schema"]["schema"]
-    assert schema["properties"]["frame"]["required"] == ["task","topic","target","conditions"]
+    assert schema["properties"]["frame"]["required"] == ["task","topic","target","requirements","conditions"]
     assert "updates" not in schema["properties"]
     following = Client({"relation":"condition_change","history_turns":[2],
                         "updates":{"conditions":{"source":"public"}}})
@@ -204,7 +237,7 @@ def test_persistent_task_state_does_not_duplicate_generation_or_change_candidate
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("old_frame", (None, "", "v4; Linux; offline"))
+@pytest.mark.parametrize("old_frame", (None, "", "v4; Linux; offline", (("version","v4"),)))
 async def test_legacy_intent_request_identity_and_new_state_survive_persistence(tmp_path, old_frame):
     import hashlib
     from controller.serialization import dumps, loads

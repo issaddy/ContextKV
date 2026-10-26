@@ -1,5 +1,5 @@
 # Task-aware retrieval: Qwen3-8B generation, Qwen3-32B interpretation on port 30001.
-# First turns and literal task composition skip interpretation; other turns update task state.
+# Initialize the first task, including compound needs; later condition edits retain them.
 # Bind --evidence-corpus to use source context in the same reranking pass.
 # Original questions/history remain intact.
 # Optional context.layout=contextpilot separates cached body order and relevance.
@@ -34,7 +34,7 @@ selector:
   revision: local-snapshot:7442623e99dd0b456628ddc48805a4ea11249ee2ee66484b5d1ab44d2940beb8
   tokenizer_path: /media/ssd1/qwen3-32b
   max_input_tokens: 8192
-  max_new_tokens: 192
+  max_new_tokens: 384
   context_window: 32768
   timeout_seconds: 60
   temperature: 0

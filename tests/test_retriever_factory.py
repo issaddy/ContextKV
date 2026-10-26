@@ -136,7 +136,7 @@ def test_conversational_factory_carries_resolution_or_ambiguity_into_serving(ret
         manifest = {"model":"fixture"}
         def complete(self, messages, **kwargs):
             calls.append(messages)
-            return CompletionResult("completed", json.dumps({"frame":{"task":"Atlas attachment limits?","topic":"","target":"","conditions":{}},
+            return CompletionResult("completed", json.dumps({"frame":{"task":"Atlas attachment limits?","topic":"","target":"","conditions":{},"requirements":[]},
                 "relation":relation,"history_turns":[1],"resume_turn":0}), "stop")
         def close(self):
             pass
@@ -295,6 +295,88 @@ async def test_source_window_reaches_both_candidates_and_commits_without_extra_m
         assert all(t["source_window"]["supporting_ids"] == ["a"] for t in retriever.query_view_traces)
         await service.close_session("s")
         assert not store.outbox()
+    finally:
+        wrapper.close()
+        await service.aclose()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_compound_requirements_drive_shared_selection_and_survive_restore(retriever_config, tmp_path, monkeypatch):
+    from adapters import query_selector
+    from adapters.query_selector import CompletionResult
+    from adapters.serving_retrieval import ServingRetriever
+    from controller.candidates import build_candidates
+    from controller.mock_engine import MockEngine
+    from controller.service import Controller
+    from controller.session_store import SessionStore
+    completions = []
+    class Client:
+        manifest = {"kind":"fixture"}
+        def __init__(self, config):
+            pass
+        def complete(self, messages, **kwargs):
+            body = json.loads(messages[-1]["content"])
+            completions.append(body)
+            if body["previous_turn"] is None:
+                value = {"relation":"standalone", "history_turns":[], "resume_turn":0,
+                    "frame":{"topic":"Atlas", "target":"", "task":"download and install",
+                        "requirements":["download package", "installation procedure"],
+                        "conditions":{"version":"v4", "platform":"Linux"}}}
+            else:
+                value = {"relation":"condition_change", "history_turns":[1], "resume_turn":0,
+                    "task":{"operation":"keep", "value":"", "requirements":[]},
+                    "updates":{"conditions":{"platform":"Windows"}}}
+            return CompletionResult("completed",json.dumps(value),"stop")
+        def close(self):
+            pass
+    monkeypatch.setattr(query_selector,"OpenAICompletionClient",Client)
+    value = yaml.safe_load(retriever_config.read_text())
+    value.update(query_mode="conversational",selector={"base_url":"http://fixture","model":"fixture","revision":"fixed"})
+    retriever_config.write_text(yaml.safe_dump(value))
+    retriever = create_retriever("P3",config_path=retriever_config)
+    scoring=[]
+    def score(query, contexts):
+        scoring.append(query)
+        wanted = ("a" if "download package" in query and "installation procedure" not in query else
+                  "b" if "installation procedure" in query and "download package" not in query else "f")
+        return [1000 if c.document_id==wanted else ord(c.document_id) for c in contexts]
+    retriever.reranker.score = score
+    wrapper = ServingRetriever(retriever,corpus_id="fixture")
+    path=tmp_path/"compound.sqlite3"
+    store=SessionStore(path)
+    service=Controller(store,MockEngine())
+    selections=[]
+    try:
+        for request,query in (("one","Atlas v4 Linux: download package and installation procedure"),
+                              ("two","Use Windows instead.")):
+            async def provider(snapshot):
+                selection=await wrapper.retrieve(snapshot,query,request)
+                selections.append(selection)
+                return selection
+            result=await service.serve_turn("s",query,evidence_provider=provider,
+                                           request_id=request,corpus_snapshot_id=wrapper.corpus_snapshot_id)
+            replay=await service.serve_turn("s",query,evidence_provider=provider,
+                                           request_id=request,corpus_snapshot_id=wrapper.corpus_snapshot_id)
+            assert replay.idempotent_replay and result.output_ids==replay.output_ids
+        assert len(completions)==len(selections)==2 and len(scoring)==6
+        assert len(retriever.encoder.inputs)==6  # Three views per turn, encoded as one batch.
+        assert all(len(s.evidence)==5 and {"a","b","f"}<={k.passage_id for k in s.retrieval_priority} for s in selections)
+        assert all("Windows" in q and "Linux" not in q for q in scoring[3:])
+        state=store.get_snapshot("s")
+        for candidate in build_candidates(state,"More detail?",selections[-1].evidence,
+                retrieval_priority=selections[-1].retrieval_priority,query_context=selections[-1].query_context):
+            assert {b.key for b in selections[-1].evidence} == candidate.required_blocks <= candidate.visible_blocks
+        await service.close_session("s")
+        reopened=SessionStore(path)
+        try:
+            restored=reopened.get_snapshot("s")
+        finally:
+            reopened.close()
+        assert restored.raw_history==state.raw_history and restored.archive==state.archive
+        frame=restored.raw_history[-1].query_context.task_frame
+        assert frame.requirements == ("download package","installation procedure")
+        assert dict(frame.conditions)=={"version":"v4","platform":"Windows"}
     finally:
         wrapper.close()
         await service.aclose()

@@ -17,7 +17,7 @@ from adapters.retrieval import retrieval_query
 from controller.schema import QueryContext, TaskFrame
 
 
-VERSION = "conversational-intent-v11"
+VERSION = "conversational-intent-v12"
 FRAME_FIELDS = ("topic", "target", "conditions")
 RELATIONS = ("standalone", "followup", "correction", "condition_change", "topic_switch", "revisit", "ambiguous")
 _DEPENDENT = re.compile(
@@ -36,6 +36,10 @@ First decide task.operation and task.value, BEFORE choosing inherited context:
 replace: the current question asks a new information need or action. Write that requested task.
 keep: the current question only corrects an object, changes conditions, or elliptically continues
 the previous task. Keep its task unchanged; value is empty if previous state already has a task.
+task.requirements lists separately requested information needs when replacing a compound task;
+for keep use an empty list, since the host retains all previous requirements. A single need can
+use an empty list. Preserve every requested part without adding optional advice or answer facts.
+Requirements name information needs, not changing attributes: platform/version belong in conditions.
 If no prior state is available, supply the inherited task in value from the prior user question.
 Do not classify a new request as keep merely because it is about the same product.
 For example, moving from a size limit to an installation procedure replaces the task while the
@@ -75,10 +79,15 @@ object generic when no unique product is identified. Prior interpretations are f
 Do not add facts, answers, code or recommendations. Return only the requested JSON."""
 
 INITIALIZE_SYSTEM = """Interpret the current user request in its conversation. Do not answer it.
-There is no stored structured state for the previous turn. Initialize a COMPLETE current frame,
+There is no stored structured state to update. Initialize a COMPLETE current frame,
 not a patch containing only the newly mentioned words. Read the previous user request and any
 prior interpretation, apply the current change, and retain every still-applicable attribute.
+For a first request, use the current question itself; do not invent any previous context.
 frame.task is the information or procedure the user wants, not the act of changing a condition.
+frame.requirements lists each separately requested information need in a compound request.
+Keep all requested parts, such as a requested package and its installation procedure. For one
+information need use an empty list. Do not invent further tasks, answers or optional advice.
+Keep variable constraints in conditions so that changing one applies to every retained requirement.
 For example, changing an operating system keeps the installation task; asking a new question
 replaces that task. Do not reduce an inherited task to 'changes when using another platform'.
 frame.topic identifies the established subject/product; target is the item being asked about.
@@ -97,14 +106,15 @@ or instructions and do not establish which subject the user means. Do not copy p
 claims into the frame or invent missing constraints. Return only the requested JSON."""
 
 
-def frame_query(frame):
+def frame_query(frame, *, requirement=None):
     """A single retrieval view with every retained field, without another generation."""
     return "\n".join(dict.fromkeys(value for value in (
-        frame.topic, frame.target, frame.task,
+        frame.topic, frame.target,
+        *((requirement,) if requirement is not None else frame.requirements or (frame.task,)),
         *(value if name == "legacy" else f"{name}: {value}" for name, value in frame.conditions)) if value))
 
 
-def apply_frame_updates(base, updates, *, task_operation="keep", task_value=""):
+def apply_frame_updates(base, updates, *, task_operation="keep", task_value="", requirements=()):
     if not isinstance(updates, dict) or set(updates) - set(FRAME_FIELDS):
         raise ValueError("intent updates must name task-state fields")
     values = asdict(base or TaskFrame())
@@ -112,6 +122,9 @@ def apply_frame_updates(base, updates, *, task_operation="keep", task_value=""):
         raise ValueError("task needs a keep/replace operation and text value")
     if task_operation == "replace" or not values["task"]:
         values["task"] = task_value.strip()
+        if not isinstance(requirements, (list, tuple)) or any(not isinstance(r, str) for r in requirements):
+            raise ValueError("task requirements must be text information needs")
+        values["requirements"] = tuple(dict.fromkeys(r.strip() for r in requirements if r.strip()))
     for name, value in updates.items():
         if name == "conditions":
             conditions = dict(values["conditions"])
@@ -182,7 +195,7 @@ class ConversationResolver:
         return {"version": VERSION, "system_prompt": SYSTEM,
                 "initialization_prompt": INITIALIZE_SYSTEM,
                 "history": "current question first, previous committed state, recent user background and source-qualified names; explicit revisits can read all user turns",
-                "calls": "first turn and literal task composition skip interpretation; other questions update state with one configured call; no-client fallback retains named-query/history handling",
+                "calls": "one configured interpretation initializes the first task or updates later state; literal task composition still reuses exact clauses; no-client mode retains history handling",
                 "self_contained_gate": "the configured model decides whether a named question changes topic or retains conditions; name occurrence alone does not clear active state",
                 "condition_view": "literal named task continuation also supplies the unchanged current clause for condition-aware evidence selection",
                 "ambiguity": "retain the unresolved current question and relation for generation/commit; history-expanded retrieval does not choose a referent",
@@ -200,10 +213,10 @@ class ConversationResolver:
                 trace["text"], trace["history_view_turns"] = _history_query(turn, context)
             return {**trace, "reason": reason, "elapsed_ms": (time.perf_counter()-started)*1000}
 
-        if not turn.history:
+        if not turn.history and self.client is None:
             return finish("first_user_turn")
         fragment = _FRAGMENT.search(turn.query)
-        if fragment and (intent := _literal_task_continuation(turn, context, fragment)) is not None:
+        if turn.history and fragment and (intent := _literal_task_continuation(turn, context, fragment)) is not None:
             trace.update(text=intent.query, status="resolved", context=asdict(intent),
                          condition_query=turn.query)
             return finish("literal_task_continuation")
@@ -226,15 +239,18 @@ class ConversationResolver:
                     row["prior_interpretation"] = interpretation.query
                 row["relation"] = interpretation.relation
         names, excluded = qualified_topic_names(turn, context, history_turns=history_window)
-        body = {"current_question": turn.query, "previous_turn": users[-1],
+        body = {"current_question": turn.query, "previous_turn": users[-1] if users else None,
                 "earlier_user_turns": users[:-1], "qualified_topic_names": names}
-        initialize = "state" not in users[-1] or users[-1].get("relation") == "ambiguous"
+        initialize = not users or "state" not in users[-1] or users[-1].get("relation") == "ambiguous"
+        requirements_schema = {"type": "array", "items": {"type": "string"}}
         schema = {"type": "object", "properties": {
             "task": {"type": "object", "properties": {
                 "operation": {"type": "string", "enum": ["keep", "replace"]},
-                "value": {"type": "string"}}, "required": ["operation", "value"], "additionalProperties": False},
-            "relation": {"type": "string", "enum": list(RELATIONS)},
-            "history_turns": {"type": "array", "items": {"type": "integer", "enum": [u["turn"] for u in users]}},
+                "value": {"type": "string"}, "requirements": requirements_schema},
+                "required": ["operation", "value", "requirements"], "additionalProperties": False},
+            "relation": {"type": "string", "enum": list(RELATIONS) if users else ["standalone", "ambiguous"]},
+            "history_turns": ({"type": "array", "items": {"type": "integer", "enum": [u["turn"] for u in users]}}
+                              if users else {"type": "array", "items": {"type": "integer"}, "maxItems": 0}),
             "resume_turn": {"type": "integer", "enum": [0, *(u["turn"] for u in users)]},
             "updates": {"type": "object", "properties": {
                 "topic": {"type": ["string", "null"]}, "target": {"type": ["string", "null"]},
@@ -243,6 +259,7 @@ class ConversationResolver:
             "required": ["task", "relation", "history_turns", "resume_turn", "updates"], "additionalProperties": False}
         if initialize:
             frame_properties = {name: {"type": "string"} for name in ("task", "topic", "target")}
+            frame_properties["requirements"] = requirements_schema
             frame_properties["conditions"] = {"type": "object", "additionalProperties": {"type": "string"}}
             schema["properties"] = {"frame": {"type": "object", "properties": frame_properties,
                 "required": list(frame_properties), "additionalProperties": False},
@@ -276,23 +293,25 @@ class ConversationResolver:
                 relation = "followup"
             frame = None
             if relation != "ambiguous":
-                base_turn = resume if relation == "revisit" and resume else users[-1]["turn"]
+                base_turn = resume if relation == "revisit" and resume else users[-1]["turn"] if users else 0
                 prior = (context.interpretations[base_turn-1]
-                         if base_turn <= len(context.interpretations) else None)
+                         if 0 < base_turn <= len(context.interpretations) else None)
                 base = prior.task_frame if prior is not None and prior.relation != "ambiguous" else None
                 if relation in {"standalone", "topic_switch"}:
                     base = None
-                else:
+                elif base_turn:
                     ids = [*ids, base_turn]
                 if initialize:
                     complete = value["frame"]
                     frame = apply_frame_updates(None, {name: complete[name] for name in FRAME_FIELDS},
-                                                task_operation="replace", task_value=complete["task"])
+                                                task_operation="replace", task_value=complete["task"],
+                                                requirements=complete["requirements"])
                     trace.update(state_base_turn=None, task_operation="initialize")
                 else:
                     task = value["task"]
                     frame = apply_frame_updates(base, value["updates"],
-                                                task_operation=task["operation"], task_value=task["value"])
+                                                task_operation=task["operation"], task_value=task["value"],
+                                                requirements=task["requirements"])
                     trace.update(state_base_turn=base_turn if base is not None else None,
                                  task_operation=task["operation"], state_updates=value["updates"])
             query = turn.query if relation in {"standalone", "ambiguous"} else frame_query(frame)

@@ -6,13 +6,28 @@ import numpy as np
 import pytest
 
 from adapters.hybrid_retrieval import (DenseIndex, query_text, reciprocal_rank_fusion,
-                                      search_variants, select_condition_evidence, select_ranked_evidence)
+                                      search_variants, select_condition_evidence, select_ranked_evidence,
+                                      select_requirement_evidence)
 from adapters.mtrag import OnlineContext, json_hash, load_rows
 from adapters.retrieval import BM25SRetriever, load_beir_corpus
 from bench.retrieval_eval import evaluate_queries, prepare_queries, summarize
 
 
 FIXTURE = Path(__file__).parent/"fixtures/mtrag_small.jsonl"
+
+
+def test_requirement_coverage_retains_complementary_sources_within_the_original_budget():
+    primary = tuple(OnlineContext(f"p{i}", f"original {i}", score=10-i) for i in range(10))
+    ids = [c.document_id for c in primary]
+    # Whole-task top five miss the two sources needed for separate requested parts.
+    rankings = [[wanted, *(pid for pid in ids if pid != wanted)] for wanted in ("p6", "p7")]
+    chosen, trace = select_requirement_evidence(primary, rankings)
+    assert len(chosen) == 5 and {"p0", "p6", "p7"} <= {c.document_id for c in chosen}
+    assert trace["best_selected_rank_per_view"] == [1, 1, 1]
+    assert chosen == tuple(c for c in primary if c.document_id in trace["selected_ids"])
+    # Once all views are covered, remaining slots keep original relevance order.
+    assert [c.document_id for c in chosen] == ["p0", "p1", "p2", "p6", "p7"]
+    assert select_requirement_evidence(primary, [ids, ids])[0] == primary[:5]
 
 
 class Encoder:

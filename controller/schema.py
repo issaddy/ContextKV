@@ -78,9 +78,11 @@ class TaskFrame:
     target: str = ""
     task: str = ""
     conditions: tuple[tuple[str, str], ...] = ()
+    requirements: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "conditions", tuple(sorted((name, value) for name, value in self.conditions)))
+        _tuples(self, "requirements")
 
 
 @dataclass(frozen=True)
