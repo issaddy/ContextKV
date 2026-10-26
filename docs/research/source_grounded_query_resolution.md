@@ -2,7 +2,7 @@
 
 ## 当前多轮入口
 
-`query_mode: conversational` 通过 [`adapters/conversation.py`](../../adapters/conversation.py) 在已有检索 worker 内组织当前任务。主线示例 [`configs/retriever_conversational.example.yaml`](../../configs/retriever_conversational.example.yaml) 显式配置 `selector`，按需使用同一个 Qwen3 服务进行语义解析。省略它时保留字面任务承接与历史检索回退，不加载客户端。两者复用同一条 BM25/BGE-M3/RRF/BGE-reranker 链。默认 single 模式只做一次索引召回；明确具名条件补充可在同一候选池追加一次条件评分，规则如下。
+`query_mode: conversational`通过[`adapters/conversation.py`](../../adapters/conversation.py)在已有检索worker内组织当前任务。主线示例[`configs/retriever_conversational.example.yaml`](../../configs/retriever_conversational.example.yaml)显式配置独立32B `selector`，8B继续生成回答，部署与完整资源代价见[部署说明](../deployment.md#多轮检索服务)。省略selector时保留字面任务承接与历史检索回退。两者复用同一条BM25/BGE-M3/RRF/BGE-reranker链；默认single只做一次索引召回，明确具名条件补充可在同一候选池追加一次条件评分。
 
 解析 HTTP 等待不持有 encoder/reranker 的锁；独立会话可以先检索，模型 forward 仍串行。共享 tokenizer 计数和调用计数仅持短锁，复用 httpx 的线程安全客户端。关闭前由现有 retrieval worker 排空机制等待所有请求，避免取消后继续访问已释放模型。
 
@@ -20,7 +20,7 @@
 
 自由改写可能保留主题却换掉信息需求，也可能在新问题中省掉已经明确的对象。当前以`TaskFrame(topic, target, task, conditions)`分开记录主题、具体对象、请求的操作/信息及条件。字段值是开放文本，不建立产品或行业字典；它们描述用户请求，不是事实证据。
 
-单次解析首先输出`task.operation=keep/replace`及任务值，再给出关系、历史轮次、回访位置与上下文更新。输入把当前问题放在首位，并把历史状态明确命名为`previous_turn`。固定XGrammar按schema声明顺序约束输出，任务判断先于历史选择和状态补丁，不增加第二次生成。新信息需求可替换task并保留topic；属性纠正可以保留原task。
+已有完整状态时，单次解析首先输出`task.operation=keep/replace`及任务值，再给出关系、历史轮次、回访位置与上下文更新。没有完整状态或上一轮未决时，同一次调用改为完整frame初始化，要求task/topic/target/conditions均出现，不能把仅含“改成Windows”的局部补丁当作完整状态。初始化提示区分用户要完成的任务与本轮属性编辑；未改变的条件从实际用户历史继承。固定XGrammar约束结构，不能保证语义正确，不增加第二次生成。首轮和字面任务直接处理仍保留。
 
 `updates`单独修改topic、target和有名称的条件。条件不再是一段混合字符串，而是`version`、`platform`、`region`等开放名称和值；只提交变化的键，null删除该键，`conditions=null`清空条件。宿主保持每个未出现在补丁中的键不变，因此改变联网方式不需要模型重写并记住版本与平台。该局部更新约定参考[JSON Merge Patch](https://www.rfc-editor.org/info/rfc7396/)的保留/替换/删除语义，固定业务字段清空为缺省值，不提供通用HTTP PATCH接口。
 

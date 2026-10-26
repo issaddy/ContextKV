@@ -250,6 +250,57 @@ async def test_condition_selection_commits_once_through_the_serving_pipeline(ret
         wrapper.close()
 
 
+@pytest.mark.asyncio
+async def test_source_window_reaches_both_candidates_and_commits_without_extra_model_calls(retriever_config, tmp_path):
+    from adapters.corpus import CorpusIndex
+    from adapters.serving_retrieval import ServingRetriever
+    from controller.candidates import build_candidates
+    from controller.mock_engine import MockEngine
+    from controller.service import Controller
+    from controller.session_store import SessionStore
+    value = yaml.safe_load(retriever_config.read_text())
+    value["source_window"] = True
+    retriever_config.write_text(yaml.safe_dump(value))
+    retriever = create_retriever("P3", config_path=retriever_config)
+    rows = [{"_id": c.document_id, "text": c.text, "title": c.title,
+             "document_id": "manual", "span": [i*100, (i+1)*100]}
+            for i, c in enumerate(retriever.dense.contexts)]
+    index = CorpusIndex.from_records(rows, corpus_id="fixture", snapshot_id="fixture-v1")
+    wrapper = ServingRetriever(retriever, corpus_id="fixture", corpus_index=index)
+    store = SessionStore(tmp_path/"windows.sqlite3")
+    service = Controller(store, MockEngine())
+    captured = []
+    async def provider(snapshot):
+        selection = await wrapper.retrieve(snapshot, "question", "second" if snapshot.raw_history else "first")
+        captured.append(selection)
+        return selection
+    try:
+        for request in ("first", "second"):
+            response = await service.serve_turn("s", "question", evidence_provider=provider,
+                corpus_snapshot_id="fixture-v1", request_id=request)
+            selected = captured[-1]
+            assert [key.passage_id for key in selected.retrieval_priority] == list("fedcb")
+            assert len(selected.evidence) == 6
+            snapshot = store.get_snapshot("s")
+            candidates = build_candidates(snapshot, "follow up", selected.evidence,
+                retrieval_priority=selected.retrieval_priority)
+            assert {c.action for c in candidates} == {"APPEND", "REBUILD"}
+            assert all(len(c.required_blocks) == 6 and c.required_blocks <= c.visible_blocks for c in candidates)
+            replay = await service.serve_turn("s", "question", evidence_provider=provider,
+                corpus_snapshot_id="fixture-v1", request_id=request)
+            assert replay.idempotent_replay and replay.output_ids == response.output_ids
+        assert len(captured) == 2 and retriever.reranker.texts_processed == 12
+        assert len(retriever.encoder.inputs) == 2
+        assert len(snapshot.raw_history) == 2 and len(snapshot.archive) == 6
+        assert all(t["source_window"]["supporting_ids"] == ["a"] for t in retriever.query_view_traces)
+        await service.close_session("s")
+        assert not store.outbox()
+    finally:
+        wrapper.close()
+        await service.aclose()
+        store.close()
+
+
 def test_serving_retrieval_projects_committed_task_into_encoder_and_reranker(retriever_config):
     from adapters.serving_retrieval import ServingRetriever
     from controller.schema import QueryContext, SessionSnapshot, TurnRecord
@@ -600,6 +651,8 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
     value = yaml.safe_load(retriever_config.read_text())
     value["query_mode"] = query_mode
     value["query_fusion"] = fusion
+    window = query_mode == "current"
+    value["source_window"] = window
     selectors = []
     if query_mode in {"source_topic", "assistant_topic_unverified"}:
         from adapters import query_selector
@@ -638,6 +691,13 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
     run_config.write_text(yaml.safe_dump({"model":{"scope_path":str(local_scope.path)}}))
     common = [str(FIXTURE), "--protocol", "P3", "--domain", "all", "--limit-sessions", "1",
               "--retriever-config", str(retriever_config)]
+    if window:
+        corpus = tmp_path/"metadata.jsonl"
+        rows = [dict(row, document_id="manual", passage_id=pid, span=[i*100, (i+1)*100],
+                     source="https://example.org/manual")
+                for i, (pid, row) in enumerate(sorted(load_beir_corpus(FIXTURE.with_name("corpus_small.jsonl")).items()))]
+        corpus.write_text("".join(json.dumps(row)+"\n" for row in rows))
+        common += ["--evidence-corpus", str(corpus)]
     try:
         native_module.main(common+["--baseline", "B0", "--run-config",str(run_config),"--engine-manifest", str(engine), "--output", str(native_dir)])
         cli.main(["--state-dir", str(controller_dir), "bench"]+common)
@@ -654,6 +714,8 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
         turns = data["report"]["turns"]
         assert len(turns) == 3 and all(t["status"] == "success" for t in turns)
         assert all([c["document_id"] for c in t["online_turn"]["contexts"]] == list("fedcb") for t in turns)
+        if window:
+            assert all([c["document_id"] for c in t["online_turn"]["supporting_contexts"]] == ["a"] for t in turns)
         assert turns[1]["online_turn"]["history"][-1]["text"] == turns[0]["assistant_text"]
         assert "REFERENCE ANSWER" not in json.dumps(turns)
     assert native["retrieval"]["completed_retrievals"] == controller_manifest["retrieval"]["completed_retrievals"] == 3

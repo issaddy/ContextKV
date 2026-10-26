@@ -428,7 +428,8 @@ class NativeBaseline:
                 history = snapshot.raw_history
             snapshot = replace(snapshot, raw_history=history, execution=None)
             retrieval_priority = self.corpus_index.retrieved_keys(turn.contexts) if self.corpus_index else None
-            retrieved = (self.corpus_index.resolve(retrieval_priority) if self.corpus_index else
+            supporting = self.corpus_index.retrieved_keys(turn.supporting_contexts) if self.corpus_index else ()
+            retrieved = (self.corpus_index.resolve((*retrieval_priority, *supporting)) if self.corpus_index else
                          tuple(to_evidence(c, self.corpus_snapshot_id) for c in turn.contexts))
             # execution=None yields one REBUILD and still uses the same shared
             # current/explicit-revisit/dependency evidence selection and stable IDs.

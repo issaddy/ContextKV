@@ -2,7 +2,7 @@
 
 面向动态证据上下文的多轮文档与知识问答系统。在保留完整实际问答历史和来源身份的前提下，协调证据组织、APPEND/REBUILD 选择与原生 KV 生命周期，改善有限 GPU/Host 下的回答、性能和资源使用。
 
-当前使用已有 Qwen3-8B/32B、固定 SGLang、单机单 GPU。Qwen2.5-7B 已退役。训练不属于运行前置。
+当前使用已有 Qwen3-8B/32B、固定 SGLang、单机部署，每个生成/解释实例各用一张 GPU。Qwen2.5-7B 已退役。训练不属于运行前置。
 
 工程已有 CLI/HTTP、自动检索、多会话、幂等提交和恢复。新一轮主线是质量优先的统一A/B/C优化：补齐任务/条件理解、来源适用性与多资料覆盖，再降低完整执行成本。已有配置和测量作为比较基础，当前工作见[实现清单](docs/implementation_plan.md)，分版本结果见[结果对比](docs/data_and_evaluation.md)。
 
@@ -34,12 +34,12 @@ CPU mock 演示用于协议和状态验证，无需模型。`configs/append.yaml
 
 ## Qwen3 实际服务
 
-容器项目位于 `/home/relay/songjiayun/ContextKV`，已有模型位于 `/media/ssd1/qwen3-8b` 和 `/media/ssd1/qwen3-32b`。按[部署说明](docs/deployment.md)启动固定研究引擎后：
+容器项目位于 `/home/relay/songjiayun/ContextKV`，已有模型位于 `/media/ssd1/qwen3-8b` 和 `/media/ssd1/qwen3-32b`。按[部署说明](docs/deployment.md#多轮检索服务)启动8B生成和32B解释服务后：
 
 ```bash
 export TOKENIZERS_PARALLELISM=false RAYON_NUM_THREADS=4
 export OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 MKL_NUM_THREADS=4
-python -m controller.cli --config configs/qwen3_8b_cost.yaml serve \
+CUDA_VISIBLE_DEVICES=0,1 python -m controller.cli --config configs/qwen3_8b_cost.yaml serve \
   --retriever-config configs/retriever_conversational.example.yaml \
   --evidence-corpus data/mtrag-official/cloud.jsonl --corpus-id mtrag
 ```
@@ -52,7 +52,7 @@ python -m controller.cli --config configs/qwen3_8b_cost.yaml serve \
 
 只接收外部 evidence 时可省略检索参数。自动检索也可复用 `--retriever-index data/cloud-bm25s --corpus-id mtrag`，或用 `--retriever-config` 选择已有 BM25/BGE/RRF/重排索引。可选 `--evidence-corpus` 提供版本、条件和原文关系。检索器启动时加载一次，正文与实际回答按原样保存。
 
-多轮入口为 `--retriever-config configs/retriever_conversational.example.yaml`。示例通过 `selector` 显式复用同一 Qwen3 服务更新主题、具体对象、任务与条件，未修改的字段从已提交状态继承；首轮和明确的字面任务补充直接处理。省略 `selector` 可使用已有历史回退。所有轮次贯穿同一检索、A/R 成本选择和提交链，解析开销计入完整响应。保持默认 `stable_key` 布局即可使用；已有 `context.layout: contextpilot` 可分开组织缓存正文顺序与当前检索优先级。运行前按环境设置索引和设备，实测使用生成 GPU0、检索 GPU1。机制与适用边界见[多轮意图解析](docs/research/source_grounded_query_resolution.md)和[真实评价](docs/data_and_evaluation.md)。
+多轮入口为 `--retriever-config configs/retriever_conversational.example.yaml`。示例通过独立32B `selector`更新主题、具体对象、任务与条件：已有状态按字段继承，没有完整状态时用同一次调用初始化；首轮和明确的字面任务补充直接处理。省略`selector`可使用已有历史回退。`source_window`补入同源相邻原始段落，保持五个检索代表的排序与独立引用。所有轮次贯穿同一检索、A/R成本选择和提交链，解释和检索开销计入完整响应。默认`stable_key`布局可直接使用；已有`context.layout: contextpilot`可分开组织正文顺序与当前检索优先级。实测使用生成GPU0，32B解释与BGE检索共享GPU1，须计入两者驻留成本。机制与边界见[多轮意图解析](docs/research/source_grounded_query_resolution.md)和[真实评价](docs/data_and_evaluation.md)。
 
 首次准备数据与正常服务分开：
 

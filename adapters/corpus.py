@@ -27,12 +27,24 @@ def configuration_anchors(text: str) -> tuple[str, ...]:
 
 class CorpusIndex:
     """Public evidence metadata indexed once, with version-specific dependencies."""
-    def __init__(self, blocks: Iterable[EvidenceBlock], *, corpus_id: str, snapshot_id: str):
+    def __init__(self, blocks: Iterable[EvidenceBlock], *, corpus_id: str, snapshot_id: str,
+                 source_positions=None):
         self.corpus_id, self.snapshot_id = corpus_id, snapshot_id
         self._blocks = {block.key: block for block in blocks}
         self._passages: dict[str, list[EvidenceKey]] = {}
         for key in self._blocks:
             self._passages.setdefault(key.passage_id, []).append(key)
+        # Positions order original passages; they are never used to splice bodies.
+        groups = {}
+        for key, (document, start, source) in (source_positions or {}).items():
+            block = self._blocks[key]
+            group = (key.corpus_id, document, key.version, source, block.parent_section)
+            groups.setdefault(group, []).append((start, key))
+        self._neighbors = {}
+        for members in groups.values():
+            ordered = [key for _, key in sorted(members)]
+            for index, key in enumerate(ordered):
+                self._neighbors[key] = tuple(ordered[max(0, index-1):index] + ordered[index+1:index+2])
 
     @classmethod
     def from_jsonl(cls, path: str | Path, *, corpus_id: str, snapshot_id: str) -> CorpusIndex:
@@ -46,6 +58,7 @@ class CorpusIndex:
         blocks: dict[tuple[str, str, str, str], EvidenceBlock] = {}
         identities: dict[tuple[str, str, str], list[EvidenceKey]] = {}
         pending: dict[EvidenceKey, tuple[Any, ...]] = {}
+        positions = {}
         for row in records:
             metadata = {**row.get("metadata", {}), **row}
             passage_id = str(metadata.get("passage_id", metadata.get("_id", "")))
@@ -68,6 +81,15 @@ class CorpusIndex:
                 if len(span) != 2 or not 0 <= span[0] <= span[1]:
                     raise EvidenceError(f"invalid character span for {passage_id}")
             block = replace(block, span=span, parent_section=metadata.get("parent_section"))
+            source_identity = str(metadata.get("source_uri") or metadata.get("source") or metadata.get("url") or "")
+            if span is not None:
+                positions[block.key] = (document_id, span[0], source_identity)
+            elif snapshot_id.startswith("mtrag-"):
+                # MT-RAG passage-level IDs encode ingestion offsets. Preserve
+                # the existing evidence identity; only use the parent/order.
+                match = re.fullmatch(r"(.+)-(\d+)-(\d+)", passage_id)
+                if match:
+                    positions[block.key] = (match[1], int(match[2]), source_identity)
             identity = (corpus_id, document_id, passage_id, version)
             if identity in blocks:
                 raise EvidenceError(f"duplicate corpus passage/version: {identity}")
@@ -93,7 +115,7 @@ class CorpusIndex:
         resolved = [replace(block, dependencies=tuple(dict.fromkeys(
                     dependency_key(value, block.key) for value in pending[block.key])))
                     for block in blocks.values()]
-        return cls(resolved, corpus_id=corpus_id, snapshot_id=snapshot_id)
+        return cls(resolved, corpus_id=corpus_id, snapshot_id=snapshot_id, source_positions=positions)
 
     @property
     def blocks(self) -> tuple[EvidenceBlock, ...]:
@@ -162,6 +184,27 @@ class CorpusIndex:
         block = self._blocks[matches[0]]
         return (block.title, block.text, block.key.corpus_id, block.key.version,
                 block.parent_section, frozenset(block.dependencies))
+
+    def source_window(self, contexts):
+        """Add each hit's immediate original neighbors once, without recursive growth.
+
+        Windows stay within one source, document, version and declared section.
+        Explicit document/span metadata or MT-RAG ingestion IDs supply order.
+        Offsets need not describe identical overlapping text: each passage keeps
+        its own complete body and citation identity. Neighbors have no rank score.
+        """
+        from adapters.mtrag import OnlineContext
+
+        primary = self.retrieved_keys(contexts)
+        seen, result = set(primary), []
+        for key in primary:
+            for neighbor in self._neighbors.get(key, ()):
+                if neighbor in seen:
+                    continue
+                seen.add(neighbor)
+                block = self._blocks[neighbor]
+                result.append(OnlineContext(block.key.passage_id, block.text, block.source_uri, block.title))
+        return tuple(result)
 
     def resolve(self, passages: Iterable[str | EvidenceKey | EvidenceBlock]) -> tuple[EvidenceBlock, ...]:
         """Return requested passages plus complete explicit condition/header closure.

@@ -48,6 +48,36 @@ python -m controller.cli --config configs/qwen3_8b_cost.yaml serve
 
 服务变更后的必要协议检查可使用 `python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml --report runs/qwen3-smoke.json`。它会实际生成，只在引擎/模型变更需要确认时运行，不是每次文档或分析变更后的例行实验。CPU检查与真实运行边界见[引擎说明](../engine_patches/README.md)。
 
+## 多轮检索服务
+
+`retriever_conversational.example.yaml`使用独立32B解释服务保持多轮任务与变化条件，8B继续生成业务回答。两个服务复用同一固定引擎，各自使用自己的scope、tokenizer和缓存池。无需重新bootstrap或下载模型。在另一终端从项目根目录启动解释器；子shell中的设置不改变8B终端：
+
+```bash
+(
+  source .venv-sglang/bin/activate
+  export CUDA_VISIBLE_DEVICES=1
+  export CONTEXTKV_MODEL_SCOPE_PATH="$PWD/configs/model_scopes/qwen3-32b.local.json"
+  export CONTEXTKV_MODEL_PATH=/media/ssd1/qwen3-32b
+  export CONTEXTKV_FINGERPRINT_JSON="$(python -c 'import json; from dataclasses import asdict; from controller.config import load_config, create_model_template; print(json.dumps(asdict(create_model_template(load_config("configs/qwen3_32b_scope.example.yaml").model).fingerprint)))')"
+  CONTEXTKV_SAMPLE_POOL=1 CONTEXTKV_HICACHE_GB=8 \
+  bash scripts/launch_sglang.sh --host 127.0.0.1 --port 30001 \
+    --max-total-tokens 16384 --mem-fraction-static 0.65 --max-running-requests 8 \
+    --attention-backend fa3 --chunked-prefill-size 8192 --schedule-policy fcfs
+)
+```
+
+随后在控制器终端运行（线程设置沿用上文）：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 python -m controller.cli --config configs/qwen3_8b_cost.yaml serve \
+  --retriever-config configs/retriever_conversational.example.yaml \
+  --evidence-corpus data/mtrag-official/cloud.jsonl --corpus-id mtrag
+```
+
+实际拓扑为8B生成GPU0、32B解释与BGE检索共享GPU1。32B常驻进程在本次16K池配置下约70,008 MiB，解释等待计入完整响应；两个模型的KV池不能当成一个池汇总。此选择基于真实条件承接回答的改善，不意味着性能已改善。不能只启动30000就运行新的多轮示例。现有owned矩阵管理其声明的生成进程；单独使用该矩阵时，解释服务由操作者按上面命令启动并记录，两者分别关闭。
+
+示例同时启用`source_window: true`：五个检索代表保留排序，按原文位置补充同源相邻段落，无额外模型调用。必须提供`--evidence-corpus`；一般语料用`document_id`和`span`提供顺序，固定MT-RAG语料可使用已有passage ID中的顺序。原始段落分别引用，不按offset裁剪或拼接正文。扩展材料与显式依赖共同进入A/R，原有精确token预算和原生准入继续生效；窗口不是无限上下文方案。
+
 ## 分析和实验的边界
 
 正常服务不启用冷缓存标定。只有需要解决具体成本不确定性时，在独立服务显式设置 `CONTEXTKV_ENABLE_PROFILING=1` 并选定必要测点；该接口会改变缓存状态。旧7B或其他recipe的测量仍可只读分析，不能绑定到Qwen3执行。

@@ -142,6 +142,41 @@ def test_duplicate_passage_version_is_not_silently_overwritten():
                                  corpus_id="c", snapshot_id="v1")
 
 
+def test_source_windows_keep_originals_and_do_not_cross_source_version_or_section():
+    from adapters.mtrag import OnlineContext
+
+    rows = [{"_id": str(i), "document_id": "manual", "text": f"Original {i}",
+             "span": [i*10, i*10+10], "version": "v1", "url": "https://example.org/manual"}
+            for i in range(5)]
+    rows += [{**rows[2], "_id": "other-"+field, field: value}
+             for field, value in (("version", "v2"), ("url", "https://mirror.org/manual"),
+                                  ("parent_section", "another"), ("document_id", "different"))]
+    index = CorpusIndex.from_records(reversed(rows), corpus_id="c", snapshot_id="v1")
+    hits = (OnlineContext("2", "Original 2", score=9.0), OnlineContext("3", "Original 3", score=8.0))
+    support = index.source_window(hits)
+    assert [(c.document_id, c.text, c.score) for c in support] == [("1", "Original 1", None), ("4", "Original 4", None)]
+    assert "0" not in {c.document_id for c in support}  # One hop, not transitive closure.
+    candidates = build_candidates(SessionSnapshot("s"), "q", index.enrich((*hits, *support)),
+                                  retrieval_priority=index.retrieved_keys(hits))
+    assert len(candidates[0].required_blocks) == 4
+    assert candidates[0].required_blocks <= candidates[0].visible_blocks
+
+
+def test_mtrag_windows_use_offsets_only_for_order_not_for_text_stitching():
+    from adapters.mtrag import OnlineContext
+
+    rows = [{"_id": pid, "text": body, "url": "https://example.org/manual"}
+            for pid, body in (("doc-0-9", "LEFT"), ("doc-5-14", "MIDDLE"),
+                              ("doc-10-19", "RIGHT"), ("other-6-9", "OTHER"))]
+    index = CorpusIndex.from_records(rows, corpus_id="mtrag", snapshot_id="mtrag-fixed")
+    support = index.source_window((OnlineContext("doc-5-14", "MIDDLE"),))
+    assert [c.text for c in support] == ["LEFT", "RIGHT"]
+    assert [b.key.document_id for b in index.enrich(support)] == ["doc-0-9", "doc-10-19"]
+    # Unknown schemas do not turn arbitrary numeric suffixes into source relations.
+    other = CorpusIndex.from_records(rows, corpus_id="other", snapshot_id="snapshot")
+    assert other.source_window((OnlineContext("doc-5-14", "MIDDLE"),)) == ()
+
+
 def test_corpus_roundtrip_jsonl_and_dependency_cycle(tmp_path):
     rows = [{"passage_id": name, "text": name, "dependencies": [other]}
             for name, other in (("a", "b"), ("b", "a"))]

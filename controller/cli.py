@@ -123,7 +123,8 @@ async def benchmark(args, config):
         session_id = f"{run_prefix}:{turn.conversation_id}"
         if corpus_index:
             retrieval_priority = corpus_index.retrieved_keys(turn.contexts)
-            evidence = corpus_index.resolve(retrieval_priority)
+            supporting = corpus_index.retrieved_keys(turn.supporting_contexts)
+            evidence = corpus_index.resolve((*retrieval_priority, *supporting))
         else:
             evidence = tuple(to_evidence(c, corpus_snapshot) for c in turn.contexts)
             retrieval_priority = tuple(block.key for block in evidence)

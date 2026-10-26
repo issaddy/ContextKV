@@ -380,7 +380,8 @@ class HybridRetriever:
     """Shared P3 retrieval; source-qualified history resolution is explicit opt-in."""
     def __init__(self, sparse, dense, encoder, reranker=None, *, query_mode="current",
                  stage="hybrid_rerank", candidate_k=50, rerank_k=50, rrf_k=60,
-                 source_config=None, query_fusion="single", resolver=None, rerank_query_mode="resolved", trace_sink=None):
+                 source_config=None, query_fusion="single", resolver=None, rerank_query_mode="resolved", trace_sink=None,
+                 source_window=False):
         from adapters.query_resolution import SOURCE_MODES
         if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", *SOURCE_MODES}:
             raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
@@ -420,11 +421,14 @@ class HybridRetriever:
         self.trace_sink = trace_sink
         self.source_context = None
         self.selection_group = None
+        self.source_window = source_window
+        self.expand_source_window = None
 
     def bind_corpus(self, corpus_index):
         """Share the generation metadata index with reranking, before serving starts."""
         self.source_context = corpus_index.contextualize
         self.selection_group = corpus_index.selection_group
+        self.expand_source_window = corpus_index.source_window
 
     @property
     def manifest(self):
@@ -434,6 +438,11 @@ class HybridRetriever:
             "rerank_query_mode": self.rerank_query_mode,
             "rerank_document_view": "source address, title and original body",
             "pre_rerank_metadata": self.source_context is not None,
+            "source_window": {"enabled": self.source_window, "radius": 1,
+                "scope": "same source/document/version/declared section; explicit span or MT-RAG ingestion order",
+                "selection": "one hop from ranked hits, complete originals, no invented rank or recursive expansion",
+                "budget": "shared A/R required evidence; normal exact-token feasibility and native admission apply",
+                "extra_model_calls": 0},
             "evidence_selection": {"strategy": "ranked_exact_content_groups_v1",
                 "group": "exact title/body with known version, parent and dependency scope",
                 "source_identity": "highest ranked original representative; task anchor retained",
@@ -474,6 +483,8 @@ class HybridRetriever:
     def retrieve_turn(self, turn, *, prior_context=None):
         if turn.protocol != "P3":
             raise ValueError("hybrid retrieval requires a P3 turn")
+        if self.source_window and self.expand_source_window is None:
+            raise ValueError("source_window requires --evidence-corpus metadata")
         started = time.perf_counter()
         view = user_topic_view(turn.user_questions) if self.query_mode == "user_topic" else None
         if self.resolver is not None:
@@ -488,6 +499,7 @@ class HybridRetriever:
             fusion_trace = None
             condition_trace = None
             selection_trace = None
+            supporting_contexts = ()
             retrieval_error = None
             scoring_query = None
             try:
@@ -516,7 +528,9 @@ class HybridRetriever:
                         group_key=self.selection_group)
                 else:
                     contexts, selection_trace = select_ranked_evidence(ranked, group_key=self.selection_group)
-                if view is None and selection_trace is not None:
+                if self.source_window:
+                    supporting_contexts = self.expand_source_window(contexts)
+                if view is None and (selection_trace is not None or self.source_window):
                     view = {"mode": self.query_mode, "text": query}
                 self.requests += 1
             except Exception as exc:
@@ -535,6 +549,9 @@ class HybridRetriever:
                         "retrieval_elapsed_ms": (time.perf_counter()-started)*1000,
                         **({"condition_evidence": condition_trace} if condition_trace else {}),
                         **({"evidence_selection": selection_trace} if selection_trace else {}),
+                        **({"source_window": {"primary_ids": [c.document_id for c in contexts],
+                            "supporting_ids": [c.document_id for c in supporting_contexts]}}
+                           if self.source_window and not retrieval_error else {}),
                         **({"query_fusion_trace": fusion_trace} if fusion_trace else {})}
                     if self.trace_sink is None:
                         self.query_view_traces.append(trace)
@@ -543,7 +560,8 @@ class HybridRetriever:
         from controller.schema import QueryContext
         from controller.serialization import decode
         intent = decode(QueryContext, view["context"]) if view is not None and view.get("context") is not None else None
-        return replace(turn, contexts=tuple(contexts), query_context=intent)
+        return replace(turn, contexts=tuple(contexts), query_context=intent,
+                       supporting_contexts=supporting_contexts)
 
     def close(self):
         with self._lock:

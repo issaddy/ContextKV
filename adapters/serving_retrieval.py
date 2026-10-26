@@ -58,7 +58,8 @@ class ServingRetriever:
                 priority = tuple(b.key for b in blocks)
             else:
                 priority = self.corpus_index.retrieved_keys(retrieved.contexts)
-                blocks = self.corpus_index.resolve(priority)
+                supporting = self.corpus_index.retrieved_keys(retrieved.supporting_contexts)
+                blocks = self.corpus_index.resolve((*priority, *supporting))
         except Exception as error:
             if self.events is not None:
                 self.events.emit("retrieval_backend_failed", business_session_id=snapshot.session_id,

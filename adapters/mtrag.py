@@ -61,6 +61,7 @@ class OnlineTurn:
     contexts: tuple[OnlineContext, ...]
     protocol: Protocol
     query_context: QueryContext | None = None
+    supporting_contexts: tuple[OnlineContext, ...] = ()
 
     @property
     def question(self) -> str:

@@ -96,6 +96,14 @@ encoder/reranker 与 SGLang 共用 GPU 时，其他会话检索可能与生成�
 
 接线测试运行两种真实 CLI 路径（测试模型与 fake HTTP），验证相同前五、每轮实际生成历史、无参考答案进入查询、每 run 只加载一次、模型释放、矩阵来源绑定以及检索排队计时。这些测试仅说明合同正确；真实 P3 的回答质量与整体成本仍需独立测量。
 
+## 原始来源窗口
+
+主线conversational示例启用`source_window: true`。复用[ParentDocumentRetriever](https://reference.langchain.com/python/langchain-classic/retrievers/parent_document_retriever/ParentDocumentRetriever)的“小片段检索、较大范围阅读”原则及[LlamaIndex窗口检索](https://developers.llamaindex.ai/python/examples/node_postprocessor/metadatareplacementdemo/)的相邻上下文组织方法：原有索引与50段评分不变，五个内容组代表确定后，补入每个命中前后各一段原文。窗口在同一来源、文档、版本和已声明章节内建立，重叠命中只补一次，不沿补充段落继续扩张。
+
+一般语料以`document_id`、`span`提供顺序；固定MT-RAG snapshot使用原有`parent-start-end` passage ID。官方说明这些是[语料入库时的offset](https://github.com/IBM/mt-rag-benchmark/blob/53fef6f5917c7e10c436f697e69a955dbc795d81/corpora/README.md)，实际检查也发现不少相邻重叠正文不一致。因此offset只用于顺序，不能据此无损拼接全文。本实现保留每段完整正文、原始身份及独立引用，不引入合成段落或重新编码索引。
+
+`OnlineTurn.contexts`仍是原来的评分命中，`supporting_contexts`另存未评分的窗口原文。HTTP、控制器CLI和Native入口共同补齐显式依赖后交给A/R，只有原命中进入检索优先级，B按真实输入计价，C按既有事务保存和退役。配置需要`--evidence-corpus`，不增加解释、encoder或reranker调用。代价是更多输入和缓存占用，原有精确token预算与原生准入继续生效；当前没有宣称窗口必然改善全部任务或解决无限历史容量。实际质量检查统一记录在[数据与评价](../data_and_evaluation.md)。
+
 ## 可选的召回/重排查询分离
 
 共享配置新增 `rerank_query_mode`，仅在 `stage: hybrid_rerank` 生效：

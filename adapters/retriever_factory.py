@@ -36,6 +36,7 @@ class HybridRetrievalConfig:
     selector_history_turns: int = 3
     selector_schema_mode: str = "static_v1"
     rerank_query_mode: str = "resolved"
+    source_window: bool = False
 
 
 def load_retriever_config(path):
@@ -131,6 +132,7 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
                 stage=config.stage, candidate_k=config.candidate_k, rerank_k=config.rerank_k, rrf_k=config.rrf_k,
                 query_fusion=config.query_fusion,
                 rerank_query_mode=config.rerank_query_mode,
+                source_window=config.source_window,
                 resolver=resolver, trace_sink=trace_sink,
                 source_config={"path": str(Path(config_path).resolve()), "resolved": asdict(config),
                                "relative_path_base": str(Path.cwd())})
