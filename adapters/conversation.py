@@ -72,12 +72,6 @@ def frame_query(frame):
         frame.topic, frame.target, frame.task, frame.conditions) if value))
 
 
-def contextual_query(current_question, frame):
-    """State supplies omitted context but cannot erase the actual current task."""
-    context = frame_query(frame)
-    return current_question if context == current_question else current_question + "\nConversation context:\n" + context
-
-
 def apply_frame_updates(base, updates):
     if not isinstance(updates, dict) or set(updates) - set(FRAME_FIELDS):
         raise ValueError("intent updates must name task-state fields")
@@ -140,7 +134,6 @@ class ConversationResolver:
                 "condition_view": "literal named task continuation also supplies the unchanged current clause for condition-aware evidence selection",
                 "ambiguity": "retain the unresolved current question and relation for generation/commit; history-expanded retrieval does not choose a referent",
                 "task_state": "topic/target/task/conditions; omitted updates carry over, text replaces, null clears; independent topics reset; explicit revisits resume a selected turn",
-                "query_view": "verbatim current question followed by the derived state; state cannot replace or delete current wording",
                 "semantics": "derived intent, not factual evidence or a guarantee of correct resolution",
                 "transport": self.client.manifest if self.client is not None else {"kind": "no_auxiliary_model"}}
 
@@ -226,7 +219,7 @@ class ConversationResolver:
                 frame = apply_frame_updates(base, value["updates"])
                 trace.update(state_base_turn=base_turn if base is not None else None,
                              state_updates=value["updates"])
-            query = turn.query if relation in {"standalone", "ambiguous"} else contextual_query(turn.query, frame)
+            query = turn.query if relation in {"standalone", "ambiguous"} else frame_query(frame)
             resolved = QueryContext(query, relation, tuple(sorted(set(ids))), frame)
             if relation != value["relation"]:
                 trace["declared_relation"] = value["relation"]
