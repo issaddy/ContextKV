@@ -491,7 +491,8 @@ class HybridRetriever:
                     else:
                         self.trace_sink(trace)
         from controller.schema import QueryContext
-        intent = QueryContext(**view["context"]) if view is not None and view.get("context") is not None else None
+        from controller.serialization import decode
+        intent = decode(QueryContext, view["context"]) if view is not None and view.get("context") is not None else None
         return replace(turn, contexts=tuple(contexts), query_context=intent)
 
     def close(self):

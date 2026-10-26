@@ -68,11 +68,21 @@ class Message:
 
 
 @dataclass(frozen=True)
+class TaskFrame:
+    """Open-valued conversational state; describes a request, never answer facts."""
+    topic: str = ""
+    target: str = ""
+    task: str = ""
+    conditions: str = ""
+
+
+@dataclass(frozen=True)
 class QueryContext:
     """Derived conversational intent, never an evidence source or a raw QA edit."""
     query: str
     relation: str
     history_turns: tuple[int, ...] = ()
+    task_frame: TaskFrame | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "history_turns")

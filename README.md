@@ -52,7 +52,7 @@ python -m controller.cli --config configs/qwen3_8b_cost.yaml serve \
 
 只接收外部 evidence 时可省略检索参数。自动检索也可复用 `--retriever-index data/cloud-bm25s --corpus-id mtrag`，或用 `--retriever-config` 选择已有 BM25/BGE/RRF/重排索引。可选 `--evidence-corpus` 提供版本、条件和原文关系。检索器启动时加载一次，正文与实际回答按原样保存。
 
-多轮入口为 `--retriever-config configs/retriever_conversational.example.yaml`。示例通过 `selector` 显式复用同一 Qwen3 服务解释依赖历史的问题，包括没有代词的隐式追问；首轮、完整具名问题和明确的字面任务补充直接处理。省略 `selector` 可使用已有历史回退。所有轮次贯穿同一检索、A/R 成本选择和提交链，解析开销计入完整响应。保持默认 `stable_key` 布局即可使用；已有 `context.layout: contextpilot` 可分开组织缓存正文顺序与当前检索优先级。运行前按环境设置索引和设备，实测使用生成 GPU0、检索 GPU1。机制与适用边界见[多轮意图解析](docs/research/source_grounded_query_resolution.md)和[真实评价](docs/data_and_evaluation.md)。
+多轮入口为 `--retriever-config configs/retriever_conversational.example.yaml`。示例通过 `selector` 显式复用同一 Qwen3 服务更新主题、具体对象、任务与条件，未修改的字段从已提交状态继承；首轮和明确的字面任务补充直接处理。省略 `selector` 可使用已有历史回退。所有轮次贯穿同一检索、A/R 成本选择和提交链，解析开销计入完整响应。保持默认 `stable_key` 布局即可使用；已有 `context.layout: contextpilot` 可分开组织缓存正文顺序与当前检索优先级。运行前按环境设置索引和设备，实测使用生成 GPU0、检索 GPU1。机制与适用边界见[多轮意图解析](docs/research/source_grounded_query_resolution.md)和[真实评价](docs/data_and_evaluation.md)。
 
 首次准备数据与正常服务分开：
 

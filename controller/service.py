@@ -199,7 +199,11 @@ class Controller:
         content = (("retrieved_query", query, corpus_snapshot_id) if evidence_provider is not None else
                    (query, evidence, corpus_snapshot_id, reference_history, retrieval_priority))
         if query_context is not None:
-            content = (*content, query_context)
+            intent = {"query": query_context.query, "relation": query_context.relation,
+                      "history_turns": query_context.history_turns}
+            if query_context.task_frame is not None:
+                intent["task_frame"] = query_context.task_frame
+            content = (*content, intent)
         request_hash = hashlib.sha256(dumps(content).encode()).hexdigest()
         arrived = time.monotonic()
         async with self._lock(session_id):

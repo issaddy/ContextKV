@@ -1,5 +1,5 @@
 # Task-aware retrieval with conditional interpretation on the existing Qwen3 service.
-# First/named self-contained turns and literal task composition skip interpretation.
+# First turns and literal task composition skip interpretation; other turns update task state.
 # Bind --evidence-corpus to use source context in the same reranking pass.
 # Original questions/history remain intact.
 # Optional context.layout=contextpilot separates cached body order and relevance.

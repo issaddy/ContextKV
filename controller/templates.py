@@ -1,7 +1,7 @@
 """Fixed chat templates, actual token hashing, and body-span verification."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from collections import Counter
 import hashlib
 import json
@@ -321,8 +321,12 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
     content += f"\nCitations allowed for this answer: {ids}.\n"
     content += "Use only these sources. Answer supported parts; identify any unsupported part separately.\n"
     if query_context is not None:
+        # The derived query already renders the frame. Persist the frame for
+        # the next resolver without repeating its fields in generation history.
+        intent = {"query": query_context.query, "relation": query_context.relation,
+                  "history_turns": query_context.history_turns}
         content += ("\nCurrent conversational intent (a derived interpretation, not evidence):\n"
-                    + json.dumps(asdict(query_context), ensure_ascii=False, separators=(",", ":"))
+                    + json.dumps(intent, ensure_ascii=False, separators=(",", ":"))
                     + "\n")
         if query_context.relation == "ambiguous":
             content += ("The current referent is unresolved. State which distinction is missing; "

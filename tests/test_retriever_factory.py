@@ -92,7 +92,7 @@ def test_conversational_factory_carries_resolution_or_ambiguity_into_serving(ret
     from adapters import query_selector
     from adapters.query_selector import CompletionResult
     from adapters.serving_retrieval import ServingRetriever
-    from controller.schema import QueryContext, SessionSnapshot, TurnRecord
+    from controller.schema import QueryContext, SessionSnapshot, TaskFrame, TurnRecord
     value = yaml.safe_load(retriever_config.read_text())
     value.update(query_mode="conversational", query_fusion="single",
                  selector={"base_url":"http://fake","model":"fake","revision":"fixed"})
@@ -102,8 +102,8 @@ def test_conversational_factory_carries_resolution_or_ambiguity_into_serving(ret
         manifest = {"model":"fixture"}
         def complete(self, messages, **kwargs):
             calls.append(messages)
-            return CompletionResult("completed", json.dumps({"query":"Atlas attachment limits?",
-                "relation":relation,"history_turns":[1]}), "stop")
+            return CompletionResult("completed", json.dumps({"updates":{"task":"Atlas attachment limits?"},
+                "relation":relation,"history_turns":[1],"resume_turn":0}), "stop")
         def close(self):
             pass
     monkeypatch.setattr(query_selector, "OpenAICompletionClient", lambda _:Client())
@@ -114,7 +114,8 @@ def test_conversational_factory_carries_resolution_or_ambiguity_into_serving(ret
     try:
         selection = wrapper._retrieve(snapshot, "No, I meant attachments.", "request", time.monotonic())
         expected_query = "No, I meant attachments." if relation == "ambiguous" else "Atlas attachment limits?"
-        assert selection.query_context == QueryContext(expected_query, relation, (1,))
+        frame = None if relation == "ambiguous" else TaskFrame(task=expected_query)
+        assert selection.query_context == QueryContext(expected_query, relation, (1,), frame)
         search_query = "Atlas document limits?\nNo, I meant attachments." if relation == "ambiguous" else expected_query
         assert retriever.encoder.inputs == retriever.reranker.inputs == [search_query]
         assert len(selection.evidence) == 5 and len(calls) == 1
