@@ -32,6 +32,7 @@ flowchart LR
 - `schema.py` 定义 frozen dataclass，集合与消息使用不可变结构。`serialization.py` 按类型恢复 JSON，不使用 pickle；写入由原生 JSON 编码器遍历 token 容器，dataclass/集合只做浅层适配，保持原规范字节。
 - `evidence.py` 以 corpus/document/passage/version/SHA256 定义身份，稳定引用发生短 hash 碰撞时仅延长新编号。回访只从已归档原文恢复；必须证据先统一形成，再构造候选。
 - `templates.py` 对完整 prompt 分词；保留证据原文的消息内字符 span、身份和来源。ByteTemplate 只用于模拟；HuggingFaceTemplate 固定 revision，每个候选只渲染一次；Qwen3 在已核实 AddedToken 边界按请求复用共同分词段，其他 tokenizer 沿用完整 prompt 编码。与原生 apply_chat_template 分词结果的一致性放在 tokenizer 测试中验证。
+- 完全相同的正文可共享一个完整物理 span，各来源保留独立 ID、标题、地址、版本、依赖及本轮引用资格。别名显式指向已有正文，声明位置与正文位置一起提交；APPEND 可复用历史执行消息中的正文，只有归档或旧回答包含文本时不能共享。短正文若声明更长则照常展开；最终预算与报价始终使用实际完整 tokens。正文冗余和长度统计按物理区间计一次，ContextPilot 按来源声明所在轮次对齐。这里改变输入组织，不进行任意位置 KV 拼接，缓存匹配仍由 SGLang 处理。
 - `candidates.py` 保留完整原始 QA。APPEND 只省略可用正文 span 证明仍在输入中的材料；历史同步、配置变化、冲突版本、恢复或超预算可使其不可行。证据不相交时仍可能复用历史 token 前缀，故共同引用范围之外的旧材料不再直接触发重建，而由 B 根据原生报价比较保留旧上下文与重建的成本。
 - 当前消息包含共同的来源定位表：合法 ID、标题及按词项重合选出的原文片段/字符坐标。它不删除正文、不赋予额外来源资格、不证明语义支持；两种候选共享该表，真实新增 tokens 进入成本与预算。共享回答协议要求先回答有依据部分，再明确缺失内容。
 - `engine_client.py` 与原生对照共同复用 SGLang 的 XGrammar/regex 约束，只允许本轮合法 ID 出现在规范 `[E_…]` 引用中。没有第二次生成、事后替换引用或改写历史；引用覆盖与语义支持仍需独立检查。
