@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from adapters.conversation import ConversationResolver, apply_frame_updates, frame_query
+from adapters.conversation import ConversationResolver, apply_frame_updates, contextual_query, frame_query
 from adapters.mtrag import OnlineMessage, OnlineTurn
 from adapters.query_resolution import PriorContext, PriorSource, snapshot_context
 from adapters.query_selector import CompletionResult
@@ -55,6 +55,7 @@ def test_attribute_correction_keeps_the_active_task_and_topic():
     assert intent.task_frame == TaskFrame("Atlas Store", "attachments", "maximum size", "v2")
     assert intent.history_turns == (1,)  # An inherited state records its actual base.
     assert "maximum size" in view["text"] and "documents" not in view["text"]
+    assert view["text"].startswith(request.query)
     assert request.query == "No, attachments." and prior.task_frame == frame
     body = json.loads(client.inputs[0][0][-1]["content"])
     assert body["active_turn"]["state"] == asdict(frame)
@@ -106,6 +107,17 @@ def test_legacy_interpretation_can_initialize_state_without_a_second_call():
     assert decode(QueryContext,view["context"]).task_frame == TaskFrame("Atlas","attachments","upload method")
     assert view["state_base_turn"] is None and len(client.inputs) == 1
     assert json.loads(client.inputs[0][0][-1]["content"])["active_turn"]["prior_interpretation"] == prior.query
+
+
+def test_stale_derived_state_cannot_erase_the_current_information_need():
+    frame = TaskFrame("Atlas Store", "attachments", "file size limit")
+    prior = QueryContext(frame_query(frame), "followup", (1,), frame)
+    current = "How do I get started with Atlas Store from the catalog?"
+    client = Client({"relation":"followup","history_turns":[1],"updates":{}})
+    view = ConversationResolver(client).resolve(turn(current),PriorContext(interpretations=(prior,)))
+    assert view["text"].startswith(current + "\nConversation context:")
+    assert view["context"]["query"] == view["text"] and len(client.inputs) == 1
+    assert decode(QueryContext,view["context"]).task_frame == frame
 
 
 def test_persistent_task_state_does_not_duplicate_generation_or_change_candidate_tokens():
@@ -174,7 +186,7 @@ def test_named_fragment_preserves_the_task_without_an_extra_model_call(task, qua
 def test_named_replacement_or_new_task_uses_semantic_interpretation(task, current):
     client = Client({"query":"The actual resolved task", "relation":"followup", "history_turns":[1]})
     view = ConversationResolver(client).resolve(turn(current, (task,)), PriorContext())
-    assert view["text"] == "The actual resolved task" and view["model_called"]
+    assert view["text"] == contextual_query(current,TaskFrame(task="The actual resolved task")) and view["model_called"]
 
 
 @pytest.mark.parametrize("query,relation,resolved", [
@@ -188,7 +200,7 @@ def test_contextual_rewrite_preserves_current_question_and_has_bounded_history_p
     original = turn(query, ("Atlas Cloud v2 在地区 A 如何申请？", "What about support?"))
     context = PriorContext(interpretations=(QueryContext("first accepted interpretation", "standalone"), None))
     view = ConversationResolver(client).resolve(original, context)
-    assert view["text"] == resolved and original.query == query
+    assert view["text"] == contextual_query(query,TaskFrame(task=resolved)) and original.query == query
     assert view["context"]["history_turns"] == ((1,) if relation == "revisit" else (1, 2))
     messages, options = client.inputs[0]
     body = json.loads(messages[-1]["content"])
@@ -237,7 +249,8 @@ def test_extra_response_metadata_does_not_discard_a_valid_interpretation():
     client = Client({"query":"AtlasCloud limits?", "relation":"followup", "history_turns":[1],
                      "explanation":"Extra transport metadata is not part of the intent."})
     view = ConversationResolver(client).resolve(turn("What about its limits?"), PriorContext())
-    assert view["context"] == asdict(QueryContext("AtlasCloud limits?", "followup", (1,), TaskFrame(task="AtlasCloud limits?")))
+    frame = TaskFrame(task="AtlasCloud limits?")
+    assert view["context"] == asdict(QueryContext(contextual_query("What about its limits?",frame), "followup", (1,), frame))
 
 
 @pytest.mark.parametrize("question,interpreted", [
@@ -250,8 +263,9 @@ def test_implicit_followups_do_not_need_a_pronoun_to_receive_interpretation(ques
     client = Client({"query":interpreted,"relation":"followup","history_turns":[1]})
     original = turn(question)
     view = ConversationResolver(client).resolve(original, PriorContext())
-    assert len(client.inputs) == 1 and view["text"] == interpreted
-    assert view["context"] == asdict(QueryContext(interpreted,"followup",(1,),TaskFrame(task=interpreted)))
+    frame = TaskFrame(task=interpreted)
+    assert len(client.inputs) == 1 and view["text"] == contextual_query(question,frame)
+    assert view["context"] == asdict(QueryContext(view["text"],"followup",(1,),frame))
     assert original.query == question
 
 

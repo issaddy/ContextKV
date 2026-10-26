@@ -113,8 +113,9 @@ def test_conversational_factory_carries_resolution_or_ambiguity_into_serving(ret
     snapshot = SessionSnapshot("s", raw_history=(TurnRecord(1,"Atlas document limits?","An actual response."),))
     try:
         selection = wrapper._retrieve(snapshot, "No, I meant attachments.", "request", time.monotonic())
-        expected_query = "No, I meant attachments." if relation == "ambiguous" else "Atlas attachment limits?"
-        frame = None if relation == "ambiguous" else TaskFrame(task=expected_query)
+        from adapters.conversation import contextual_query
+        frame = None if relation == "ambiguous" else TaskFrame(task="Atlas attachment limits?")
+        expected_query = "No, I meant attachments." if frame is None else contextual_query("No, I meant attachments.",frame)
         assert selection.query_context == QueryContext(expected_query, relation, (1,), frame)
         search_query = "Atlas document limits?\nNo, I meant attachments." if relation == "ambiguous" else expected_query
         assert retriever.encoder.inputs == retriever.reranker.inputs == [search_query]
