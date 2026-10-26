@@ -53,7 +53,7 @@ def matrix_config(spec):
     return config
 
 
-def validate_matrix(spec):
+def validate_matrix(spec, *, required_split="dev"):
     if spec.get("schema_version") != 1:
         raise ValueError("matrix schema_version must be 1")
     if not spec.get("methods") or not set(spec.get("protocols", [])) <= {"P1", "P2", "P3"} or not spec.get("protocols"):
@@ -75,8 +75,10 @@ def validate_matrix(spec):
         raise ValueError("method IDs must be unique simple directory names")
     split = json.loads(Path(spec["split_manifest"]).read_text())
     dev, test = set(split["dev"]), set(split["test"])
-    if not dev or not test or dev & test:
-        raise ValueError("development and test must contain disjoint nonempty conversations")
+    if not dev or dev & test:
+        raise ValueError("development must be nonempty and disjoint from test conversations")
+    if not split[required_split]:
+        raise ValueError(f"requested {required_split} split contains no conversations")
     known = {r["conversation_id"] for r in load_rows(spec["input"])}
     if not (dev | test) <= known:
         raise ValueError("split manifest names conversations absent from the input")
@@ -177,7 +179,7 @@ def validate_matrix(spec):
 
 
 def matrix_jobs(spec, *, split="dev", frozen=None, ablations_only=False):
-    validate_matrix(spec)
+    validate_matrix(spec, required_split=split)
     jobs = []
     methods = list(spec["methods"])
     b6 = frozen.get("b6") if frozen is not None else None

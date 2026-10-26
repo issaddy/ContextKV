@@ -46,6 +46,20 @@ def test_matrix_rejects_unequal_budget_and_leaking_split(tmp_path):
         matrix_jobs(value)
 
 
+def test_development_only_check_needs_no_unused_test_cohort(tmp_path):
+    value = spec(tmp_path)
+    Path(value["split_manifest"]).write_text(json.dumps({"dev":["session-a"],"test":[]}))
+    results = asyncio.run(run_matrix(value,tmp_path/"dev-only"))
+    assert all(r["status"] == "completed" for r in results)
+    assert all(set(r["summary"]["latency_by_session"]) == {"session-a"} for r in results)
+    with pytest.raises(ValueError,match="requested test split contains no conversations"):
+        matrix_jobs(value,split="test")
+    # Overlapping or unknown IDs still fail before any workload runs.
+    Path(value["split_manifest"]).write_text(json.dumps({"dev":["absent"],"test":[]}))
+    with pytest.raises(ValueError,match="absent from the input"):
+        matrix_jobs(value)
+
+
 def test_local_tune_freeze_test_end_to_end(tmp_path):
     value = spec(tmp_path)
     results = asyncio.run(run_matrix(value, tmp_path / "dev"))
