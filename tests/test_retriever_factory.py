@@ -87,6 +87,40 @@ def test_factory_loads_models_once_and_retrieves_only_user_questions(retriever_c
         retriever.retrieve_turn(replace(outputs[0], protocol="P1"))
 
 
+@pytest.mark.asyncio
+async def test_distinct_content_selection_flows_through_serving_and_durable_replay(retriever_config, tmp_path):
+    from adapters.serving_retrieval import ServingRetriever
+    from controller.mock_engine import MockEngine
+    from controller.service import Controller
+    from controller.session_store import SessionStore
+
+    retriever = create_retriever("P3",config_path=retriever_config)
+    original = retriever.dense.by_id["f"]
+    retriever.dense.by_id["e"] = replace(original,document_id="e")
+    wrapper = ServingRetriever(retriever,corpus_id="fixture")
+    store = SessionStore(tmp_path/"distinct.sqlite3")
+    service = Controller(store,MockEngine())
+    try:
+        async def provider(snapshot):
+            return await wrapper.retrieve(snapshot,"Question", "request")
+        first = await service.serve_turn("s","Question",evidence_provider=provider,
+                    corpus_snapshot_id=wrapper.corpus_snapshot_id,request_id="request")
+        state = store.get_snapshot("s")
+        # Five distinct originals fit; the last candidate replaces the repeated body.
+        assert {key.passage_id for key in state.raw_history[0].evidence_keys} == set("fdcba")
+        trace = retriever.manifest["query_view_traces"][0]["evidence_selection"]
+        assert trace["selected_ids"] == list("fdcba")
+        assert len(retriever.encoder.inputs) == len(retriever.reranker.inputs) == 1
+        replay = await service.serve_turn("s","Question",evidence_provider=provider,
+                    corpus_snapshot_id=wrapper.corpus_snapshot_id,request_id="request")
+        assert replay.idempotent_replay and replay.output_ids == first.output_ids
+        assert len(retriever.reranker.inputs) == 1
+    finally:
+        await service.aclose()
+        wrapper.close()
+        store.close()
+
+
 @pytest.mark.parametrize("relation", ("correction", "ambiguous"))
 def test_conversational_factory_carries_resolution_or_ambiguity_into_serving(retriever_config, monkeypatch, relation):
     from adapters import query_selector

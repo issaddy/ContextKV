@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from adapters.hybrid_retrieval import (DenseIndex, query_text, reciprocal_rank_fusion,
-                                      search_variants, select_condition_evidence)
+                                      search_variants, select_condition_evidence, select_ranked_evidence)
 from adapters.mtrag import OnlineContext, json_hash, load_rows
 from adapters.retrieval import BM25SRetriever, load_beir_corpus
 from bench.retrieval_eval import evaluate_queries, prepare_queries, summarize
@@ -59,6 +59,38 @@ def test_rrf_duplicates_ties_and_formula():
     assert fused[0][1] == pytest.approx(1/61+1/62)
     with pytest.raises(ValueError, match="nonnegative"):
         reciprocal_rank_fusion([], k=-1)
+
+
+def test_ranked_selection_restores_distinct_content_without_rescoring_or_changing_sources():
+    ranked = tuple(OnlineContext(str(i), body, f"https://example.org/{i}", "Plan guide", score=10-i)
+                   for i, body in enumerate(("Capacity and size.", "Capacity and size.",
+                       "Capacity and size.", "Platform requirements.", "Billing terms.",
+                       "Recovery procedure.", "Connectivity options.")))
+    selected, trace = select_ranked_evidence(ranked)
+    assert selected == tuple(ranked[i] for i in (0, 3, 4, 5, 6))
+    assert trace["collapsed"] == [{"passage_id":str(i),"representative":"0"} for i in (1,2)]
+    # No text or relevance score changes, and clean pools retain their exact ranking.
+    assert select_ranked_evidence(selected) == (selected, None)
+    assert select_ranked_evidence(ranked[:3])[0] == ranked[:1]
+    distinct_title = replace(ranked[1], title="Different applicable product")
+    distinct_bytes = replace(ranked[2], text=ranked[2].text + " ")
+    assert select_ranked_evidence((ranked[0], distinct_title, distinct_bytes))[0] == (
+        ranked[0], distinct_title, distinct_bytes)
+
+
+def test_condition_task_anchor_is_reserved_even_when_its_copy_ranks_above_it():
+    primary = tuple(OnlineContext(f"p{i}", "Task body." if i in (0,1) else f"Original {i}",
+                                  title="Task guide") for i in range(7))
+    class Scorer:
+        def score(self, query, pool):
+            return [0 if c.document_id == "p0" else 20-int(c.document_id[1:]) for c in pool]
+    stage = {"contexts":primary, "rerank_query":"full task",
+             "rerank_candidate_ids":[c.document_id for c in primary]}
+    selected, trace = select_condition_evidence(stage,"new condition",Scorer())
+    assert "p0" in [c.document_id for c in selected] and "p1" not in [c.document_id for c in selected]
+    assert len(selected) == 5 and len({c.text for c in selected}) == 5
+    assert trace["extra_rerank_pairs"] == 7  # Existing condition pass only.
+    assert trace["evidence_selection"]["anchor"] == "p0"
 
 
 def test_condition_selection_keeps_the_task_anchor_displaced_by_plain_fusion():

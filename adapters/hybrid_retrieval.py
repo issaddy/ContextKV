@@ -67,16 +67,51 @@ def reciprocal_rank_fusion(rankings, *, k=60):
     return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
 
 
-def select_condition_evidence(stage, condition_query, reranker, *, top_k=5, rrf_k=60):
+def select_ranked_evidence(ranked, *, top_k=5, anchor=None, group_key=None):
+    """Select the highest-ranked representatives of distinct original content.
+
+    This is ranked result collapsing, not semantic similarity or score tuning.
+    A bound corpus adds version/dependency scope to the exact title/body key.
+    An explicit task anchor is reserved before the remaining groups are chosen.
+    Original sources/scores remain intact; no archive or evidence is deleted.
+    """
+    ranked = tuple(ranked)
+    group_key = group_key or (lambda context: (context.title, context.text))
+    selected, represented, collapsed = set(), {}, []
+    if anchor is not None:
+        context = next(context for context in ranked if context.document_id == anchor)
+        selected.add(anchor)
+        represented[group_key(context)] = anchor
+    for context in ranked:
+        if len(selected) >= top_k:
+            break
+        if context.document_id in selected:
+            continue
+        key = group_key(context)
+        if key in represented:
+            collapsed.append({"passage_id": context.document_id, "representative": represented[key]})
+            continue
+        selected.add(context.document_id)
+        represented[key] = context.document_id
+    result = tuple(context for context in ranked if context.document_id in selected)
+    trace = ({"strategy": "ranked_exact_content_groups_v1", "budget": top_k,
+              "original_top_ids": [c.document_id for c in ranked[:top_k]],
+              "selected_ids": [c.document_id for c in result], "collapsed": collapsed,
+              "anchor": anchor} if collapsed else None)
+    return result, trace
+
+
+def select_condition_evidence(stage, condition_query, reranker, *, top_k=5, rrf_k=60,
+                              group_key=None):
     """Maximize fused rank score with the primary task's first passage retained.
 
     Both views score the same pool. The primary anchor protects the original
     task from query drift; it is not a guarantee of semantic support or complete
-    answer coverage. Ordinary/single-view ranking is unchanged.
+    answer coverage. Final group selection is shared with ordinary retrieval.
     """
     primary = stage["contexts"]
     if not condition_query or condition_query == stage["rerank_query"] or len(primary) <= top_k:
-        return primary[:top_k], None
+        return select_ranked_evidence(primary, top_k=top_k, group_key=group_key)
     by_id = {context.document_id: context for context in primary}
     candidates = tuple(by_id[pid] for pid in stage["rerank_candidate_ids"])
     started = time.perf_counter()
@@ -88,14 +123,15 @@ def select_condition_evidence(stage, condition_query, reranker, *, top_k=5, rrf_
     primary_ids = [context.document_id for context in primary]
     fused = reciprocal_rank_fusion([primary_ids, condition_ids], k=rrf_k)
     anchor = primary_ids[0]
-    selected = {anchor, *[pid for pid, _ in fused if pid != anchor][:top_k-1]}
     # Keep genuine fusion scores/order; do not invent a larger anchor score.
-    contexts = tuple(replace(by_id[pid], score=score) for pid, score in fused if pid in selected)
+    ranked = tuple(replace(by_id[pid], score=score) for pid, score in fused)
+    contexts, selection = select_ranked_evidence(ranked, top_k=top_k, anchor=anchor, group_key=group_key)
     trace = {"strategy": "task_anchor_condition_rrf_v1", "condition_query": condition_query,
         "primary_query": stage["rerank_query"], "primary_anchor": anchor,
         "anchor_changed_selection": anchor not in {pid for pid, _ in fused[:top_k]},
         "primary_ranked_ids": primary_ids, "condition_ranked_ids": condition_ids,
         "selected_ids": [context.document_id for context in contexts],
+        **({"evidence_selection": selection} if selection else {}),
         "rrf_k": rrf_k, "extra_rerank_pairs": len(candidates),
         "elapsed_ms": (time.perf_counter()-started)*1000,
         "score_semantics": "RRF scores within the primary-anchor-constrained selection"}
@@ -383,10 +419,12 @@ class HybridRetriever:
         self.query_view_traces = []
         self.trace_sink = trace_sink
         self.source_context = None
+        self.selection_group = None
 
     def bind_corpus(self, corpus_index):
         """Share the generation metadata index with reranking, before serving starts."""
         self.source_context = corpus_index.contextualize
+        self.selection_group = corpus_index.selection_group
 
     @property
     def manifest(self):
@@ -396,6 +434,11 @@ class HybridRetriever:
             "rerank_query_mode": self.rerank_query_mode,
             "rerank_document_view": "source address, title and original body",
             "pre_rerank_metadata": self.source_context is not None,
+            "evidence_selection": {"strategy": "ranked_exact_content_groups_v1",
+                "group": "exact title/body with known version, parent and dependency scope",
+                "source_identity": "highest ranked original representative; task anchor retained",
+                "budget": "at most five groups from the existing scored pool",
+                "extra_model_calls": 0},
             "candidate_k": self.candidate_k, "rerank_k": self.rerank_k, "rrf_k": self.rrf_k,
             "sparse": self.sparse.manifest, "dense": self.dense.manifest,
             "encoder": self.encoder.manifest, "reranker": self.reranker.manifest if self.reranker else None,
@@ -417,9 +460,9 @@ class HybridRetriever:
                 "activation": "literal named task continuation with a distinct condition view",
                 "stage_enabled": self.stage == "hybrid_rerank",
                 "pool": "same primary rerank candidates; no additional index search",
-                "selection": "retain primary rank one; maximize equal RRF score in the remaining slots",
+                "selection": "retain primary rank one; highest equal RRF score from distinct content groups in remaining slots",
                 "extra_rerank_pairs_max": self.rerank_k, "rrf_k": self.rrf_k}
-        if self.rerank_query_mode != "resolved":
+        if self.rerank_query_mode != "resolved" or self.query_view_traces:
             manifest["query_view_traces"] = list(self.query_view_traces)
         if self.rerank_query_mode == "user_topic":
             manifest["rerank_query_view"] = user_topic_manifest()
@@ -444,6 +487,7 @@ class HybridRetriever:
         with self._lock:
             fusion_trace = None
             condition_trace = None
+            selection_trace = None
             retrieval_error = None
             scoring_query = None
             try:
@@ -452,23 +496,28 @@ class HybridRetriever:
                 if view is None and self.rerank_query_mode != "resolved":
                     view = {"mode": self.query_mode, "text": query}
                 if self.stage == "dense":
-                    contexts = self.dense.search(query, self.encoder, top_k=5)
+                    ranked = self.dense.search(query, self.encoder, top_k=self.candidate_k)
                 elif self.query_fusion == "current_topic_rrf":
                     stages = search_current_topic(turn.query, query, self.sparse, self.dense, self.encoder,
                         self.reranker if self.stage == "hybrid_rerank" else None,
                         candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
                         rerank_query=scoring_query, source_context=self.source_context)
-                    contexts = stages[self.stage]["contexts"][:5]
+                    ranked = stages[self.stage]["contexts"]
                     fusion_trace = stages[self.stage]["query_fusion_trace"]
                 else:
                     stages = search_variants(query, self.sparse, self.dense, self.encoder,
                         self.reranker if self.stage == "hybrid_rerank" else None,
                         candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
                         rerank_query=scoring_query, source_context=self.source_context)
-                    contexts = stages[self.stage]["contexts"][:5]
+                    ranked = stages[self.stage]["contexts"]
                 if self.stage == "hybrid_rerank" and view is not None and view.get("condition_query"):
                     contexts, condition_trace = select_condition_evidence(
-                        stages[self.stage], view["condition_query"], self.reranker, rrf_k=self.rrf_k)
+                        stages[self.stage], view["condition_query"], self.reranker, rrf_k=self.rrf_k,
+                        group_key=self.selection_group)
+                else:
+                    contexts, selection_trace = select_ranked_evidence(ranked, group_key=self.selection_group)
+                if view is None and selection_trace is not None:
+                    view = {"mode": self.query_mode, "text": query}
                 self.requests += 1
             except Exception as exc:
                 retrieval_error = f"{type(exc).__name__}: {exc}"
@@ -485,6 +534,7 @@ class HybridRetriever:
                         # The resolver's own elapsed_ms remains unchanged in view.
                         "retrieval_elapsed_ms": (time.perf_counter()-started)*1000,
                         **({"condition_evidence": condition_trace} if condition_trace else {}),
+                        **({"evidence_selection": selection_trace} if selection_trace else {}),
                         **({"query_fusion_trace": fusion_trace} if fusion_trace else {})}
                     if self.trace_sink is None:
                         self.query_view_traces.append(trace)

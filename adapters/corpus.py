@@ -150,6 +150,19 @@ class CorpusIndex:
             result.append(context)
         return tuple(result)
 
+    def selection_group(self, context):
+        """Exact content with declared applicability for retrieval slot allocation.
+
+        This does not merge source identities or establish independent corroboration.
+        Different revisions, parent scopes or condition dependencies remain separate.
+        """
+        matches = self._context_matches(context)
+        if len(matches) != 1:
+            return (context.document_id,)
+        block = self._blocks[matches[0]]
+        return (block.title, block.text, block.key.corpus_id, block.key.version,
+                block.parent_section, frozenset(block.dependencies))
+
     def resolve(self, passages: Iterable[str | EvidenceKey | EvidenceBlock]) -> tuple[EvidenceBlock, ...]:
         """Return requested passages plus complete explicit condition/header closure.
 

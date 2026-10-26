@@ -57,6 +57,28 @@ def test_reranking_context_uses_original_metadata_without_expanding_the_pool():
         index.enrich((mismatched,))
 
 
+def test_selection_groups_preserve_version_and_condition_scope():
+    from adapters.hybrid_retrieval import select_ranked_evidence
+    from adapters.mtrag import OnlineContext
+
+    rows = [{"_id":pid,"text":"Limit is three.","title":"Plan limits","version":version,
+             "dependencies":dependencies,"parent_section":parent}
+            for pid,version,dependencies,parent in (
+                ("a","v1",[],None),("copy","v1",[],None),("revision","v2",[],None),
+                ("conditional","v1",["condition"],None),("regional","v1",[],"East region"))]
+    rows += [{"_id":"condition","text":"Only when offline.","version":"v1"}]
+    index = CorpusIndex.from_records(rows,corpus_id="manual",snapshot_id="snapshot")
+    ranked = tuple(OnlineContext(row["_id"],row["text"],title=row["title"]) for row in rows[:-1])
+    selected, trace = select_ranked_evidence(ranked,group_key=index.selection_group)
+    assert [c.document_id for c in selected] == ["a","revision","conditional","regional"]
+    assert trace["collapsed"] == [{"passage_id":"copy","representative":"a"}]
+    # Condition closure remains available to both execution candidates after selection.
+    blocks = index.enrich(selected)
+    assert {b.key.passage_id for b in blocks} == {"a","revision","conditional","regional","condition"}
+    plan, = build_candidates(SessionSnapshot("s"),"Compare v1 and v2 limits",blocks)
+    assert plan.feasible and {b.key for b in blocks} == plan.required_blocks
+
+
 def test_corpus_dependency_resolves_exact_version_and_requires_explicit_ambiguity_choice():
     rows = [{"_id": passage, "version": version, "text": f"{passage} {version}",
              "dependencies": ["condition"] if passage == "value" else []}
