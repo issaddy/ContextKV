@@ -462,16 +462,29 @@ def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tm
 
 def test_runtime_native_manifest_is_supplied_only_after_owned_server_validation(tmp_path, monkeypatch, local_scope):
     from bench import experiments, native_baseline
+    from bench import native_metrics
     value = spec(tmp_path)
     base=tmp_path/'shared.json'
     base.write_text(json.dumps({'model':{'scope_path':str(local_scope.path)}}))
     value['base_config']=str(base)
-    value['server_profiles'] = {'stock': {'kind': 'stock', 'write_policy': 'write_back'}}
+    value['server_profiles'] = {'stock': {'kind': 'stock', 'write_policy': 'write_back',
+                                        'gpu_tokens': 16384, 'hicache': True}}
     value['methods'] = [{'id': 'B1', 'kind': 'native', 'server_profile': 'stock',
         'native': {'baseline': 'B1', 'base_url': 'http://fake.test', 'audit_prompt_ids': True}}]
     path = tmp_path/'observed-native.json'
     path.write_text('{"actual_runtime_fixture":true}')
     seen = []
+    sampling = []
+    class FakeSampler:
+        def __init__(self, *args, **kwargs):
+            sampling.append(kwargs)
+        async def start(self):
+            sampling.append('start')
+        async def stop(self):
+            sampling.append('stop')
+        def observation(self):
+            return {'samples': [], 'errors': [], 'source': 'fake_transport'}
+    monkeypatch.setattr(native_metrics, 'NativePoolSampler', FakeSampler)
     async def generate(args):
         seen.append(args.engine_manifest)
         (Path(args.output)/'native-fixture.json').write_text(json.dumps({'baseline': 'B1',
@@ -483,6 +496,8 @@ def test_runtime_native_manifest_is_supplied_only_after_owned_server_validation(
     record = {'status': 'running', 'server_profile': 'stock', 'profile': value['server_profiles']['stock']}
     result = asyncio.run(experiments.execute_job(value, job, tmp_path/'actual',
         native_engine_manifest=path, verified_server=record))
+    assert sampling[0]['gpu_capacity'] == 16384 and sampling[0]['initial_empty'] is False
+    assert sampling[1:] == ['start', 'stop']
     assert seen == [str(path)]
     assert result['native_engine_manifest'] == {'path': str(path), 'sha256': sha256(path.read_bytes()).hexdigest()}
     job['native']['engine_manifest'] = str(tmp_path/'another-declared.json')

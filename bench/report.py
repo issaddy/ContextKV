@@ -117,9 +117,16 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=N
     tpot_slo = recorded_slo.get("tpot_seconds", .1) if tpot_slo is None else tpot_slo
     complete_slo = recorded_slo.get("complete_seconds") if complete_slo is None else complete_slo
     sampled_occupancy, sampled_transfers, telemetry_info = telemetry_series(payload.get("telemetry", ()))
+    transfer_observed = telemetry_info.get("available")
+    report = _dict(payload.get("report", payload))
+    using_native_pools = "native_pool_observation" in payload and not occupancy
+    if using_native_pools:
+        from bench.native_metrics import pool_series
+        sampled_occupancy, pool_info = pool_series(payload["native_pool_observation"],
+                                                  report["started_at"], report["completed_at"])
+        telemetry_info = {**pool_info, "engine_events": telemetry_info}
     occupancy = occupancy or sampled_occupancy
     transfers = transfers or sampled_transfers
-    report = _dict(payload.get("report", payload))
     turns = report["turns"]
     timings = []
     actual_prefill, truncated, controls, engine_ms, server_ttft, server_tpot = [], [], [], [], [], []
@@ -202,9 +209,12 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=N
                       "partially_evaluated" if missing_quality else "evaluated")
     pools = {**occupancy_integral(occupancy), "sample_count": len(occupancy),
              "sample_span_seconds": max(r["timestamp"] for r in occupancy) - min(r["timestamp"] for r in occupancy) if occupancy else None}
+    if using_native_pools:
+        pools["measurement"] = "native_prometheus_sampled_unique_slots"
     nontruncated = sum(t.status == "success" and t.completed_at is not None
                       and t.truncated is False and t.output_tokens > 0 for t in timings)
-    normalize = nontruncated and pools["sample_span_seconds"] and not telemetry_info.get("events_truncated")
+    normalize = (nontruncated and pools["sample_span_seconds"] and not telemetry_info.get("events_truncated")
+                 and telemetry_info.get("complete_window_coverage", True))
     resource_efficiency = {"denominator": "nontruncated_completed_turns_including_drain",
         "completion_count": nontruncated, "measurement_span_seconds": pools["sample_span_seconds"],
         "semantic_quality_included": False,
@@ -235,7 +245,7 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=N
             # Occupancy timestamps may be engine-local. Integrate only within the
             # sample clock; never extrapolate to a client completion timestamp.
             "occupancy": pools, "resource_efficiency": resource_efficiency,
-            "transfers": transfer_totals(transfers) if transfers else (transfer_totals(()) if telemetry_info.get("available") else None),
+            "transfers": transfer_totals(transfers) if transfers else (transfer_totals(()) if transfer_observed else None),
             "telemetry": telemetry_info,
             "quality": {"status": quality_status, "simulation_scores": quality_simulated,
                         "quality_noninferiority_established": False,

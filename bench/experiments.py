@@ -260,7 +260,7 @@ def implementation_manifest():
     paths = set(controller) | set((root / "adapters").rglob("*.py"))
     paths.update(root / name for name in (
         "bench/experiments.py", "bench/native_baseline.py", "bench/run_sessions.py",
-        "bench/report.py", "bench/metrics.py", "bench/quality.py",
+        "bench/report.py", "bench/metrics.py", "bench/quality.py", "bench/native_metrics.py",
         "bench/quality_acceptance.py", "bench/judge.py",
         "bench/b6_joint_sweep.py", "bench/native_policy_sweep.py", "bench/controller_capacity_sweep.py",
         "profiling/common.py", "profiling/positive_prefill.py",
@@ -618,38 +618,58 @@ async def execute_job(spec, job, directory, *, native_engine_manifest=None, veri
                 arrival_window=spec.get("arrival_window"), drain_timeout=spec.get("drain_timeout"),
                 per_turn_timeout=spec.get("per_turn_timeout"))
     shared_config = matrix_config(spec)
-    if job["kind"] == "native":
-        from bench.native_baseline import _run
-        native = job["native"] or {}
-        declared_manifest = native.get("engine_manifest")
-        if (native_engine_manifest is not None and declared_manifest is not None
-                and Path(native_engine_manifest).resolve() != Path(declared_manifest).resolve()):
-            raise ValueError("runtime native manifest cannot replace a declared static manifest")
-        observed_manifest = native_engine_manifest or declared_manifest
-        if observed_manifest is None:
-            raise ValueError("native job requires a verified engine manifest from its owned-server executor")
-        args.update(baseline=native["baseline"], base_url=native["base_url"], engine_manifest=str(observed_manifest),
-                    model_path=native.get("model_path"),
-                    model_config=shared_config.model, sampling=shared_config.sampling,
-                    context_policy=shared_config.context,
-                    system_prompt=shared_config.context.system_prompt, system_prompt_file=None,
-                    table_relations=shared_config.context.table_relations,
-                    table_annotation_style=shared_config.context.table_annotation_style,
-                    table_structure_mode=shared_config.context.table_structure_mode,
-                    output=str(directory), context_length=native.get("context_length", shared_config.context.max_total_model_tokens),
-                    max_new_tokens=native.get("max_new_tokens", shared_config.context.max_new_tokens), local_files_only=native.get("local_files_only", False),
-                    audit_prompt_ids=native.get("audit_prompt_ids", False), no_stream=native.get("no_stream", False))
-        if job["overrides"]:
-            raise ValueError("native engine/write policies require distinct preconfigured servers, not controller overrides")
-        await _run(argparse.Namespace(**args))
-        output = next(directory.glob("native-*.json"))
-    else:
-        base = asdict(shared_config)
-        config = decode(RunConfig, merge(base, job["overrides"]))
-        config = decode(RunConfig, {**asdict(config), "state_dir": str(directory)})
-        await benchmark(argparse.Namespace(**args), config)
-        output = next(directory.glob("benchmark-*.json"))
+    sampler = None
+    if verified_server is not None:
+        from bench.native_metrics import NativePoolSampler
+        profile = verified_server["profile"]
+        sampler = NativePoolSampler(shared_config.engine.base_url,
+            gpu_capacity=profile["gpu_tokens"], host_enabled=profile["hicache"],
+            model=shared_config.model.name,
+            initial_empty=(verified_server.get("cache_state_protocol") == "fresh_process_empty_KV_no_generation_warmup"
+                           and not lifecycle.get("before_job")))
+    output = None
+    try:
+        if sampler is not None:
+            await sampler.start()
+        if job["kind"] == "native":
+            from bench.native_baseline import _run
+            native = job["native"] or {}
+            declared_manifest = native.get("engine_manifest")
+            if (native_engine_manifest is not None and declared_manifest is not None
+                    and Path(native_engine_manifest).resolve() != Path(declared_manifest).resolve()):
+                raise ValueError("runtime native manifest cannot replace a declared static manifest")
+            observed_manifest = native_engine_manifest or declared_manifest
+            if observed_manifest is None:
+                raise ValueError("native job requires a verified engine manifest from its owned-server executor")
+            args.update(baseline=native["baseline"], base_url=native["base_url"], engine_manifest=str(observed_manifest),
+                        model_path=native.get("model_path"),
+                        model_config=shared_config.model, sampling=shared_config.sampling,
+                        context_policy=shared_config.context,
+                        system_prompt=shared_config.context.system_prompt, system_prompt_file=None,
+                        table_relations=shared_config.context.table_relations,
+                        table_annotation_style=shared_config.context.table_annotation_style,
+                        table_structure_mode=shared_config.context.table_structure_mode,
+                        output=str(directory), context_length=native.get("context_length", shared_config.context.max_total_model_tokens),
+                        max_new_tokens=native.get("max_new_tokens", shared_config.context.max_new_tokens), local_files_only=native.get("local_files_only", False),
+                        audit_prompt_ids=native.get("audit_prompt_ids", False), no_stream=native.get("no_stream", False))
+            if job["overrides"]:
+                raise ValueError("native engine/write policies require distinct preconfigured servers, not controller overrides")
+            await _run(argparse.Namespace(**args))
+            output = next(directory.glob("native-*.json"))
+        else:
+            base = asdict(shared_config)
+            config = decode(RunConfig, merge(base, job["overrides"]))
+            config = decode(RunConfig, {**asdict(config), "state_dir": str(directory)})
+            await benchmark(argparse.Namespace(**args), config)
+            output = next(directory.glob("benchmark-*.json"))
+    finally:
+        if sampler is not None:
+            await sampler.stop()
+            if output is None:
+                (directory / "native-pool-observation.json").write_text(json.dumps(sampler.observation(), indent=2))
     payload = json.loads(output.read_text())
+    if sampler is not None:
+        payload["native_pool_observation"] = sampler.observation()
     default_cache_state = "fresh_mock_instance" if payload.get("engine_kind") == "mock" else "unspecified_hardware"
     protocol = {"cache_state_protocol": lifecycle.get("cache_state_protocol", default_cache_state),
                 "comparison_scope": spec.get("comparison_scope", "execution"),

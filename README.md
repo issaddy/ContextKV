@@ -24,7 +24,7 @@
 ## 本地运行
 
 ```bash
-uv sync --extra retrieval --extra calibration --locked
+uv sync --extra retrieval --extra calibration --extra evaluation --locked
 uv run contextkv --config configs/demo.yaml demo
 uv run pytest -q
 uv run ruff check controller adapters bench profiling tests scripts engine_patches
