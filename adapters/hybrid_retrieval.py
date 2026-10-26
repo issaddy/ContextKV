@@ -13,7 +13,7 @@ import time
 
 from .mtrag import OnlineContext, json_hash
 from .query_views import correction_query_mode, user_topic_manifest, user_topic_view
-from .retrieval import deterministic_top_k, retrieval_query
+from .retrieval import deterministic_top_k, rerank_document, retrieval_query
 
 
 ENCODER_ID = "BAAI/bge-m3"
@@ -155,7 +155,7 @@ class LocalBGE:
         if not self.reranker:
             raise ValueError("dense encoder is not a cross-encoder")
         # Raw logits provide a ranking, not a calibrated relevance probability.
-        return self._forward([(query, c.title+"\n"+c.text) for c in contexts])
+        return self._forward([(query, rerank_document(c)) for c in contexts])
 
     def close(self):
         """Release this process's model between matrix jobs; metadata stays readable."""
@@ -231,7 +231,7 @@ class DenseIndex:
 
 
 def search_variants(query, sparse, dense, encoder, reranker=None, *, candidate_k=50, rerank_k=50, rrf_k=60,
-                    rerank_query=None):
+                    rerank_query=None, source_context=None):
     """Return reusable stage outputs; no qrels or generated answer arguments."""
     if candidate_k < 5 or rerank_k < 5:
         raise ValueError("candidate/rerank budgets must cover the final top five")
@@ -255,6 +255,8 @@ def search_variants(query, sparse, dense, encoder, reranker=None, *, candidate_k
     if reranker is not None:
         started = time.perf_counter()
         candidates = contexts[:rerank_k]
+        if source_context is not None:
+            candidates = source_context(candidates)
         scoring_query = query if rerank_query is None else rerank_query
         scores = reranker.score(scoring_query, candidates)
         if len(scores) != len(candidates):
@@ -269,7 +271,7 @@ def search_variants(query, sparse, dense, encoder, reranker=None, *, candidate_k
 
 
 def search_current_topic(current_query, topic_query, sparse, dense, encoder, reranker=None, *,
-                         candidate_k=50, rerank_k=50, rrf_k=60, rerank_query=None):
+                         candidate_k=50, rerank_k=50, rrf_k=60, rerank_query=None, source_context=None):
     """One fixed equal-RRF pool, scored with topic unless explicitly overridden.
 
     Retain separate raw/topic retrieval when the texts differ. Fusion is one
@@ -285,7 +287,8 @@ def search_current_topic(current_query, topic_query, sparse, dense, encoder, rer
     if same_query:
         # Exact original path: one encode, sparse search, and (if requested) score.
         single = search_variants(topic_query, sparse, dense, encoder, reranker,
-            candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k, rerank_query=scoring_query)
+            candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k, rerank_query=scoring_query,
+            source_context=source_context)
         source_stages = [("shared_current_topic", topic_query, single)]
         selected_stages = {key: value for key, value in single.items() if key in {"hybrid", "hybrid_rerank"}}
         fusion_ms, additional_current_ms = 0.0, 0.0
@@ -304,6 +307,8 @@ def search_current_topic(current_query, topic_query, sparse, dense, encoder, rer
         additional_current_ms = raw["hybrid"]["elapsed_ms"]
         if reranker is not None:
             candidates = contexts[:rerank_k]
+            if source_context is not None:
+                candidates = source_context(candidates)
             scores = reranker.score(scoring_query, candidates)
             if len(scores) != len(candidates):
                 raise ValueError("reranker scores must align with candidate passages")
@@ -377,6 +382,11 @@ class HybridRetriever:
         self.initialization_seconds = None
         self.query_view_traces = []
         self.trace_sink = trace_sink
+        self.source_context = None
+
+    def bind_corpus(self, corpus_index):
+        """Share the generation metadata index with reranking, before serving starts."""
+        self.source_context = corpus_index.contextualize
 
     @property
     def manifest(self):
@@ -384,6 +394,8 @@ class HybridRetriever:
             "query_mode": self.query_mode, "stage": self.stage, "top_k": 5,
             "query_fusion": self.query_fusion,
             "rerank_query_mode": self.rerank_query_mode,
+            "rerank_document_view": "source address, title and original body",
+            "pre_rerank_metadata": self.source_context is not None,
             "candidate_k": self.candidate_k, "rerank_k": self.rerank_k, "rrf_k": self.rrf_k,
             "sparse": self.sparse.manifest, "dense": self.dense.manifest,
             "encoder": self.encoder.manifest, "reranker": self.reranker.manifest if self.reranker else None,
@@ -445,14 +457,14 @@ class HybridRetriever:
                     stages = search_current_topic(turn.query, query, self.sparse, self.dense, self.encoder,
                         self.reranker if self.stage == "hybrid_rerank" else None,
                         candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
-                        rerank_query=scoring_query)
+                        rerank_query=scoring_query, source_context=self.source_context)
                     contexts = stages[self.stage]["contexts"][:5]
                     fusion_trace = stages[self.stage]["query_fusion_trace"]
                 else:
                     stages = search_variants(query, self.sparse, self.dense, self.encoder,
                         self.reranker if self.stage == "hybrid_rerank" else None,
                         candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
-                        rerank_query=scoring_query)
+                        rerank_query=scoring_query, source_context=self.source_context)
                     contexts = stages[self.stage]["contexts"][:5]
                 if self.stage == "hybrid_rerank" and view is not None and view.get("condition_query"):
                     contexts, condition_trace = select_condition_evidence(

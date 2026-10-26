@@ -32,6 +32,31 @@ def test_corpus_conditions_headers_and_code_anchors_keep_original_text():
     assert "GOLD_SECRET" not in prompt and "ANSWER_SECRET" not in prompt
 
 
+def test_reranking_context_uses_original_metadata_without_expanding_the_pool():
+    from adapters.mtrag import OnlineContext
+    from adapters.retrieval import rerank_document
+
+    index = CorpusIndex.from_records([
+        {"_id":"value","text":"The limit is three requests.","title":"Atlas limits",
+         "url":"https://example.org/atlas/limits","dependencies":["condition"]},
+        {"_id":"condition","text":"Only the enterprise plan uses this limit."},
+    ],corpus_id="manuals",snapshot_id="v1")
+    original = (OnlineContext("value","The limit is three requests.",score=9),
+                OnlineContext("unannotated","An original candidate without metadata.",score=8))
+    scoped = index.contextualize(original)
+    assert len(scoped) == len(original)
+    assert [(c.document_id,c.text,c.score) for c in scoped] == [(c.document_id,c.text,c.score) for c in original]
+    assert scoped[0].source == "https://example.org/atlas/limits" and scoped[0].title == "Atlas limits"
+    assert scoped[1] is original[1] and original[0].source == ""
+    assert rerank_document(scoped[0]) == "Source: https://example.org/atlas/limits\nAtlas limits\nThe limit is three requests."
+    assert rerank_document(original[0]) == "\nThe limit is three requests."
+    assert {b.key.passage_id for b in index.enrich(scoped[:1])} == {"value","condition"}
+    mismatched = OnlineContext("value","A different version's text.")
+    assert index.contextualize((mismatched,)) == (mismatched,)
+    with pytest.raises(EvidenceError,match="exact retrieved body"):
+        index.enrich((mismatched,))
+
+
 def test_corpus_dependency_resolves_exact_version_and_requires_explicit_ambiguity_choice():
     rows = [{"_id": passage, "version": version, "text": f"{passage} {version}",
              "dependencies": ["condition"] if passage == "value" else []}

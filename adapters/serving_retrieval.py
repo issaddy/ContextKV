@@ -5,7 +5,7 @@ import time
 
 from adapters.mtrag import OnlineMessage, OnlineTurn
 from adapters.query_resolution import snapshot_context
-from adapters.retrieval import run_retrieval_worker, to_evidence
+from adapters.retrieval import bind_corpus_context, run_retrieval_worker, to_evidence
 from controller.service import EvidenceSelection
 
 
@@ -28,6 +28,7 @@ class ServingRetriever:
         self.retriever, self.corpus_index, self.events = retriever, corpus_index, events
         self.corpus_id = corpus_id
         self.corpus_snapshot_id = retriever.corpus_snapshot_id
+        bind_corpus_context(retriever, corpus_index)
 
     @property
     def manifest(self):

@@ -71,7 +71,7 @@ python -m bench.retrieval_eval evaluate \
 
 [`adapters/retriever_factory.py`](../../adapters/retriever_factory.py)同时供控制器 CLI 和原生 B0/B1 CLI 使用。两者新增相同的 `--retriever-config`，接受 JSON 或 YAML，示例为 [`configs/retriever_hybrid.example.yaml`](../../configs/retriever_hybrid.example.yaml)。与其他命令行路径一样，资产相对路径以工作目录为基准；run manifest 保存配置原文对应的解析字段、路径基准、两个索引 manifest 与模型信息。
 
-配置可选 `stage: dense / hybrid / hybrid_rerank` 和 `query_mode: current / last3 / all_user`。交付示例是已实测的 last3 + hybrid_rerank、候选 50、reranker 1024、BF16、检索 GPU1；控制器默认稳定布局。多轮任务承接另用 conversational 示例，不隐式加载辅助模型。未传新参数时，现有 `--retriever-index` 或 `--corpus` 行为保持不变。配置文件与旧参数不可同时指定，以免运行来源不明确。
+配置可选 `stage: dense / hybrid / hybrid_rerank` 和 `query_mode: current / last3 / all_user`。hybrid示例保留已实测的 last3 + hybrid_rerank、候选 50、reranker 1024、BF16、检索 GPU1；控制器默认稳定布局。多轮主线使用conversational示例，通过显式selector配置按需复用已有Qwen3服务。`--evidence-corpus`在现有重排前提供原始来源与标题，HTTP和两种CLI共用同一绑定。未传新参数时，现有 `--retriever-index` 或 `--corpus` 行为保持不变。配置文件与旧参数不可同时指定，以免运行来源不明确。
 
 ```bash
 export TOKENIZERS_PARALLELISM=false RAYON_NUM_THREADS=4

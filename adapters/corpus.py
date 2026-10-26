@@ -120,13 +120,35 @@ class CorpusIndex:
         keys = []
         for value in contexts:
             context = clean_context(value)
-            matches = [key for key in self._passages.get(context.document_id, ())
-                       if self._blocks[key].text == context.text]
-            if len(matches) != 1:
-                raise EvidenceError("metadata must match one exact retrieved body/version: "
-                                    + context.document_id)
-            keys.append(matches[0])
+            keys.append(self._context_key(context))
         return tuple(dict.fromkeys(keys))
+
+    def _context_matches(self, context):
+        return [key for key in self._passages.get(context.document_id, ())
+                if self._blocks[key].text == context.text]
+
+    def _context_key(self, context):
+        matches = self._context_matches(context)
+        if len(matches) != 1:
+            raise EvidenceError("metadata must match one exact retrieved body/version: "
+                                + context.document_id)
+        return matches[0]
+
+    def contextualize(self, contexts):
+        """Attach known source/title fields to a ranking pool without adding passages.
+
+        Partial or ambiguous metadata leaves candidates unannotated. Attaching a
+        source still requires one exact body/version match.
+        Generation resolves selected evidence and its dependencies separately.
+        """
+        result = []
+        for context in contexts:
+            matches = self._context_matches(context)
+            if len(matches) == 1:
+                block = self._blocks[matches[0]]
+                context = replace(context, source=block.source_uri, title=block.title)
+            result.append(context)
+        return tuple(result)
 
     def resolve(self, passages: Iterable[str | EvidenceKey | EvidenceBlock]) -> tuple[EvidenceBlock, ...]:
         """Return requested passages plus complete explicit condition/header closure.

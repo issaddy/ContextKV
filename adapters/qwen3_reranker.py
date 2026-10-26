@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .retrieval import rerank_document
+
 
 MODEL_ID = "Qwen/Qwen3-Reranker-0.6B"
 MODEL_REVISION = "fd9fb1d26c07223ced488065909faf522e29cc7d"
@@ -89,7 +91,7 @@ class LocalQwen3Reranker:
         scores, self.last_pairs = [], []
         for start in range(0, len(contexts), self.batch_size):
             batch = contexts[start:start+self.batch_size]
-            texts = [format_instruction(query, c.title+"\n"+c.text, self.instruction) for c in batch]
+            texts = [format_instruction(query, rerank_document(c), self.instruction) for c in batch]
             inputs, lengths = prepare_inputs(self.tokenizer, texts, self.prefix_tokens, self.suffix_tokens, self.max_length)
             inputs = {key: value.to(self.model.device) for key, value in inputs.items()}
             with self.torch.inference_mode():

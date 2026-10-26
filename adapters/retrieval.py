@@ -21,6 +21,19 @@ RETRIEVAL_CONFIG = {"implementation": "bm25s", "version": BM25S_VERSION,
                     "tie_break": "ascending_passage_id"}
 
 
+def rerank_document(context: OnlineContext) -> str:
+    """A scoring view with available source context; the original body is unchanged."""
+    body = context.title + "\n" + context.text
+    return f"Source: {context.source}\n{body}" if context.source else body
+
+
+def bind_corpus_context(retriever, corpus_index):
+    """Bind the already loaded metadata before model ranking, when supported."""
+    bind = getattr(retriever, "bind_corpus", None)
+    if corpus_index is not None and bind is not None:
+        bind(corpus_index)
+
+
 async def run_retrieval_worker(operation, /, *args, **kwargs):
     """Run one synchronous retrieval; cancellation drains it before returning.
 

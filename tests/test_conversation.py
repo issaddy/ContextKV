@@ -36,10 +36,10 @@ def turn(current, questions=("How does Atlas Cloud store documents?",)):
     return OnlineTurn("s", "opaque-id", len(questions)+1, "corpus", current, history, (), "P3")
 
 
-def test_clear_topic_and_definition_skip_rewriting_and_discard_last_three_bag():
+def test_named_self_contained_questions_skip_rewriting_and_discard_last_three_bag():
     client = Client(None)
     resolver = ConversationResolver(client)
-    for query in ("How does IBM Cloudant Query work?", "What is a data lake?"):
+    for query in ("How does IBM Cloudant Query work?", "What is AtlasCloud?"):
         view = resolver.resolve(turn(query), PriorContext())
         assert view["text"] == query and not view["model_called"]
         assert view["context"] == asdict(QueryContext(query, "standalone"))
@@ -133,12 +133,27 @@ def test_extra_response_metadata_does_not_discard_a_valid_interpretation():
     assert view["context"] == asdict(QueryContext("AtlasCloud limits?", "followup", (1,)))
 
 
-def test_ordinary_questions_reuse_the_existing_query_view_without_extra_generation():
-    client = Client(None)
-    original = turn("how can I improve query", ("Select query fails.", "query definition"))
+@pytest.mark.parametrize("question,interpreted", [
+    ("how can I improve query", "How can I improve the Atlas Cloud query?"),
+    ("Can I address my storage space limits?", "How can I manage Atlas Cloud storage limits?"),
+    ("What are the requirements?", "What are the Atlas Cloud requirements?"),
+    ("如何增加容量？", "如何增加 Atlas Cloud 的存储容量？"),
+])
+def test_implicit_followups_do_not_need_a_pronoun_to_receive_interpretation(question, interpreted):
+    client = Client({"query":interpreted,"relation":"followup","history_turns":[1]})
+    original = turn(question)
     view = ConversationResolver(client).resolve(original, PriorContext())
-    assert view["text"] == retrieval_query(original.user_questions)
-    assert not client.inputs and view["context"] is None
+    assert len(client.inputs) == 1 and view["text"] == interpreted
+    assert view["context"] == asdict(QueryContext(interpreted,"followup",(1,)))
+    assert original.query == question
+
+
+def test_generic_definition_can_be_resolved_as_a_new_topic():
+    question = "What is a data lake?"
+    client = Client({"query":question,"relation":"standalone","history_turns":[]})
+    view = ConversationResolver(client).resolve(turn(question), PriorContext())
+    assert len(client.inputs) == 1 and view["text"] == question
+    assert view["context"] == asdict(QueryContext(question,"standalone"))
 
 
 def test_conversational_resolution_can_run_without_an_auxiliary_model():
@@ -178,11 +193,10 @@ def test_ordinary_history_view_starts_at_the_committed_new_topic():
         "Can I address my storage space limits? how can I add or delete storage?",
         "what is Data lakes"))
     context = PriorContext(interpretations=(None, QueryContext("what is Data lakes", "standalone")))
-    client = Client(None)
-    view = ConversationResolver(client).resolve(original, context)
+    view = ConversationResolver().resolve(original, context)
     assert view["text"] == "what is Data lakes\nhow to create schema or tables?"
     assert view["history_view_turns"] == (2,)
-    assert view["context"] is None and not client.inputs
+    assert view["context"] is None and not view["model_called"]
 
 
 def test_a_new_raw_correction_keeps_precedence_over_the_committed_interpretation():
@@ -251,6 +265,23 @@ def test_ambiguous_turn_keeps_source_context_in_both_append_and_rebuild():
         assert [m.content for m in plan.messages if m.role == "assistant"] == [snapshot.raw_history[0].assistant_text]
         for span in plan.evidence_spans:
             assert plan.messages[span.message_index].content[span.start:span.end] == next(b.text for b in blocks if b.key == span.key)
+
+
+def test_shared_scope_policy_is_not_duplicated_in_each_interpreted_turn():
+    from controller.templates import SYSTEM_PROMPT
+    blocks = (make_evidence("Atlas original conditions.","atlas"),)
+    snapshot = SessionSnapshot("s")
+    intent = QueryContext("Atlas conditions?","standalone")
+    first = build_candidates(snapshot,"Atlas conditions?",blocks,query_context=intent)[0]
+    snapshot = committed(first,snapshot,"Atlas conditions?",blocks)
+    plans = build_candidates(snapshot,"And the limit?",blocks,
+        query_context=QueryContext("Atlas limit?","followup",(1,)))
+    rule = "If the intended object is unclear"
+    for plan in plans:
+        assert plan.messages[0].content == SYSTEM_PROMPT
+        assert sum(message.content.count(rule) for message in plan.messages) == 1
+        assert "Current conversational intent" in plan.messages[-1].content
+        assert '"query":"Atlas limit?"' in plan.messages[-1].content
 
 
 def test_waiting_for_one_sessions_intent_does_not_block_another_sessions_retrieval():

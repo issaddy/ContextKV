@@ -123,6 +123,32 @@ def test_conversational_factory_carries_resolution_or_ambiguity_into_serving(ret
         wrapper.close()
 
 
+def test_serving_shares_one_metadata_index_with_ranking_and_generation(retriever_config):
+    from adapters.corpus import CorpusIndex
+    from adapters.serving_retrieval import ServingRetriever
+    from controller.schema import SessionSnapshot
+
+    retriever = create_retriever("P3",config_path=retriever_config)
+    metadata = CorpusIndex.from_records([
+        {"_id":c.document_id,"text":c.text,"title":c.title,"url":f"https://example.org/guide/{c.document_id}"}
+        for c in retriever.dense.contexts],corpus_id="fixture",snapshot_id=retriever.corpus_snapshot_id)
+    wrapper = ServingRetriever(retriever,corpus_id="fixture",corpus_index=metadata)
+    scored = []
+    original_score = retriever.reranker.score
+    def score(query, contexts):
+        scored.extend(contexts)
+        return original_score(query,contexts)
+    retriever.reranker.score = score
+    try:
+        selected = wrapper._retrieve(SessionSnapshot("s"),"question","one",time.monotonic())
+        assert len(scored) == 6 and all(c.source.startswith("https://example.org/guide/") for c in scored)
+        assert all(b.source_uri == f"https://example.org/guide/{b.key.passage_id}" for b in selected.evidence)
+        assert retriever.manifest["pre_rerank_metadata"]
+        assert len(retriever.encoder.inputs) == len(retriever.reranker.inputs) == 1
+    finally:
+        wrapper.close()
+
+
 @pytest.mark.parametrize("fusion", ["single", "current_topic_rrf"])
 def test_conversational_factory_uses_the_same_pipeline_without_a_model_client(retriever_config, monkeypatch, fusion):
     from adapters import query_selector

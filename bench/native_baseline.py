@@ -538,6 +538,8 @@ async def _run(args):
         corpus_snapshot = retriever.corpus_snapshot_id
     corpus_index = (CorpusIndex.from_jsonl(args.evidence_corpus, corpus_id="mtrag", snapshot_id=corpus_snapshot)
                     if getattr(args, "evidence_corpus", None) else None)
+    from adapters.retrieval import bind_corpus_context
+    bind_corpus_context(retriever, corpus_index)
     client = NativeSGLangClient(args.base_url, audit_prompt_ids=args.audit_prompt_ids,
                                stream=not getattr(args, "no_stream", False),
                                sampling_params=request_sampling(sampling) if sampling is not None else None)

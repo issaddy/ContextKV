@@ -1,4 +1,4 @@
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 
@@ -138,6 +138,43 @@ def test_hybrid_rerank_uses_original_union_only(tmp_path):
     sparse.manifest["corpus_sha256"] = "different"
     with pytest.raises(ValueError, match="same original corpus"):
         search_variants("cat", sparse, dense, encoder)
+
+
+@pytest.mark.parametrize("fusion", ("single", "same_query", "two_queries"))
+def test_source_context_reaches_one_rerank_of_the_original_pool(tmp_path, fusion):
+    from adapters.corpus import CorpusIndex
+    from adapters.hybrid_retrieval import search_current_topic
+
+    original = tuple(replace(c, source="") for c in contexts())
+    metadata = CorpusIndex.from_records([
+        {"_id":c.document_id,"text":c.text,"title":c.title,"url":f"https://example.org/source/{c.document_id}"}
+        for c in original],corpus_id="fixture",snapshot_id="v1")
+    encoder, reranker, sparse = Encoder(), Reranker(), Sparse(original)
+    dense = DenseIndex.build(original, encoder, tmp_path/"dense", corpus_snapshot_id="fixture")
+    if fusion == "single":
+        stages = search_variants("cat",sparse,dense,encoder,reranker,
+            candidate_k=5,rerank_k=5,source_context=metadata.contextualize)
+    else:
+        stages = search_current_topic("cat", "cat" if fusion == "same_query" else "cat history",
+            sparse,dense,encoder,reranker,candidate_k=5,rerank_k=5,source_context=metadata.contextualize)
+    assert len(reranker.calls) == 1
+    scored = reranker.calls[0][1]
+    assert len(scored) == 5 and len(sparse.calls) == (2 if fusion == "two_queries" else 1)
+    assert all(c.source == f"https://example.org/source/{c.document_id}" for c in scored)
+    assert all(c.text == original[int(c.document_id)].text for c in scored)
+    assert all(c.source == "" for c in dense.contexts)  # Saved index representations are untouched.
+    assert [c.document_id for c in stages["hybrid_rerank"]["contexts"]] == [c.document_id for c in scored[::-1]]
+
+
+def test_bge_scores_the_source_view_without_mutating_passage_text():
+    from adapters.hybrid_retrieval import LocalBGE
+    model = object.__new__(LocalBGE)
+    model.reranker = True
+    model._forward = lambda pairs: pairs
+    context = OnlineContext("p","Original body.","https://example.org/atlas","Atlas guide")
+    assert model.score("Atlas question",(context,)) == [
+        ("Atlas question","Source: https://example.org/atlas\nAtlas guide\nOriginal body.")]
+    assert context.text == "Original body."
 
 
 def test_optional_bm25_budget_preserves_default_baseline():

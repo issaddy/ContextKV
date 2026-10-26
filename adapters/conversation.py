@@ -17,13 +17,12 @@ from adapters.retrieval import retrieval_query
 from controller.schema import QueryContext
 
 
-VERSION = "conversational-intent-v7"
+VERSION = "conversational-intent-v8"
 RELATIONS = ("standalone", "followup", "correction", "condition_change", "topic_switch", "revisit", "ambiguous")
 _DEPENDENT = re.compile(
     r"\b(?:it|its|this|that|these|those|they|them|same|previous|earlier|again|instead|otherwise|"
     r"if|not|without)\b|\b(?:what|how)\s+about\b|^\s*(?:and|also|then|for)\b|"
     r"它|这个|那个|前者|后者|之前|刚才|先前|最初|回到|如果|改成|换成|不是|我是说|呢[？?]?$", re.I)
-_DEFINITION = re.compile(r"^\s*(?:what\s+(?:is|are)\b|define\b|什么是|解释一下|介绍一下)", re.I)
 _QUESTION_FORM = re.compile(
     r"^\s*(?:what|how|where|when|why|who|which|is|are|can|does|do)\b|"
     r"^\s*(?:tell me about|explain)\b", re.I)
@@ -99,8 +98,8 @@ class ConversationResolver:
     def manifest(self):
         return {"version": VERSION, "system_prompt": SYSTEM,
                 "history": "latest three committed user turns and their interpreted questions; explicit revisits can read all user turns; compact source-qualified names",
-                "calls": "literal task composition first; other dependent questions use the optional model or recent history with its latest committed interpretation",
-                "self_contained_gate": "first turn, or named question/definition without dependency/correction cues; bare product fragments require interpretation",
+                "calls": "literal task composition and named self-contained questions first; other questions use the configured model, including implicit followups without pronouns; no-client fallback retains the recent history view",
+                "self_contained_gate": "first turn, or a complete named question without dependency/correction cues; a question form alone does not establish independence",
                 "condition_view": "literal named task continuation also supplies the unchanged current clause for condition-aware evidence selection",
                 "ambiguity": "retain the unresolved current question and relation for generation/commit; history-expanded retrieval does not choose a referent",
                 "semantics": "derived intent, not factual evidence or a guarantee of correct resolution",
@@ -124,13 +123,9 @@ class ConversationResolver:
                          condition_query=turn.query)
             return finish("literal_task_continuation")
         dependent = _DEPENDENT.search(turn.query) or correction_cue(turn.query) or fragment
-        if not dependent and (_QUESTION_FORM.search(turn.query)
-                              and named_user_spans(turn.query, include_single_title=True)
-                              or _DEFINITION.search(turn.query)):
+        if not dependent and _QUESTION_FORM.search(turn.query) and named_user_spans(turn.query, include_single_title=True):
             trace["context"] = asdict(QueryContext(turn.query, "standalone"))
             return finish("self_contained_current_question")
-        if not dependent:
-            return finish("ordinary_question_uses_existing_history_view", history_view=True)
         if self.client is None:
             return finish("contextual_history_view_without_auxiliary_model", history_view=True)
 

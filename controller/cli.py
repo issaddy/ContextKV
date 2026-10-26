@@ -81,7 +81,7 @@ async def demo(config):
 
 async def benchmark(args, config):
     from adapters.mtrag import CLOUD_COLLECTION, load_rows
-    from adapters.retrieval import to_evidence
+    from adapters.retrieval import bind_corpus_context, to_evidence
     from adapters.retriever_factory import create_retriever
     from bench.run_sessions import run_sessions
     from bench.quality import export_evaluation
@@ -105,6 +105,7 @@ async def benchmark(args, config):
         corpus_snapshot = retriever.corpus_snapshot_id
     corpus_index = (CorpusIndex.from_jsonl(args.evidence_corpus, corpus_id="mtrag", snapshot_id=corpus_snapshot)
                     if args.evidence_corpus else None)
+    bind_corpus_context(retriever, corpus_index)
     service = create_controller(config)
     run_prefix = service.events.run_id
     retrieval_context_provider = None
