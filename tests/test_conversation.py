@@ -210,7 +210,7 @@ def test_recent_interpreted_state_preserves_inherited_conditions_without_all_old
     assert view["context"]["history_turns"] == (5,)
 
 
-@pytest.mark.parametrize("layout,with_intent", [("stable_key", True), ("contextpilot", False)])
+@pytest.mark.parametrize("layout,with_intent", [("stable_key", True), ("stable_key", False), ("contextpilot", False)])
 def test_source_guide_preserves_reranker_priority_independently_of_body_layout(layout, with_intent):
     from controller.evidence import EvidencePolicy
     primary=make_evidence("PreferredProduct setup steps.", "z")
@@ -219,10 +219,10 @@ def test_source_guide_preserves_reranker_priority_independently_of_body_layout(l
         policy=EvidencePolicy(layout=layout),
         query_context=QueryContext("PreferredProduct setup?", "followup", (1,)) if with_intent else None)[0]
     text=plan.messages[-1].content
-    guide=text[text.index("Retrieval priority"):]
+    guide=json.loads(text.split("Current source guide:",1)[1].splitlines()[1])
     refs={key:ref for ref,key in plan.reference_map}
-    assert guide.index(refs[primary.key]) < guide.index(refs[secondary.key])
-    assert text.count("Retrieval priority (most relevant first)") == 1
+    assert [row["id"] for row in guide] == [refs[primary.key],refs[secondary.key]]
+    assert text.count("Retrieval priority (most relevant first)") == int(with_intent or layout == "contextpilot")
     assert plan.evidence_spans[0].key == (secondary.key if layout == "stable_key" else primary.key)
 
 
