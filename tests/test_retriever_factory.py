@@ -88,7 +88,8 @@ def test_factory_loads_models_once_and_retrieves_only_user_questions(retriever_c
 
 
 @pytest.mark.parametrize("stage", ["dense", "hybrid", "hybrid_rerank"])
-def test_semantic_factory_shares_the_interpreter_client_and_requires_bound_sources(retriever_config, monkeypatch, stage):
+@pytest.mark.parametrize("window", [False, True])
+def test_semantic_factory_shares_the_interpreter_client_and_requires_bound_sources(retriever_config, monkeypatch, stage, window):
     from adapters import query_selector
     from adapters.serving_retrieval import ServingRetriever
     clients=[]
@@ -102,7 +103,7 @@ def test_semantic_factory_shares_the_interpreter_client_and_requires_bound_sourc
             self.closes+=1
     monkeypatch.setattr(query_selector,"OpenAICompletionClient",Client)
     value=yaml.safe_load(retriever_config.read_text())
-    value.update(stage=stage,query_mode="conversational",evidence_selection="semantic",
+    value.update(stage=stage,query_mode="conversational",evidence_selection="semantic",source_window=window,
                  selector={"model":"fixture","revision":"fixed","base_url":"http://fixture"})
     retriever_config.write_text(yaml.safe_dump(value))
     retriever=create_retriever("P3",config_path=retriever_config)
@@ -114,6 +115,89 @@ def test_semantic_factory_shares_the_interpreter_client_and_requires_bound_sourc
     finally:
         retriever.close()
     assert clients[0].closes==1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['hybrid', 'hybrid_rerank'])
+async def test_complete_reading_choices_and_conditions_reach_both_candidates_without_redundant_scores(
+        retriever_config,tmp_path,monkeypatch,stage):
+    from adapters import query_selector
+    from adapters.corpus import CorpusIndex
+    from adapters.query_selector import CompletionResult
+    from adapters.serving_retrieval import ServingRetriever
+    from controller.candidates import build_candidates
+    from controller.mock_engine import MockEngine
+    from controller.service import Controller
+    from controller.session_store import SessionStore
+    catalogs=[]
+    class Client:
+        manifest={'model':'fixture'}
+        def __init__(self,config):
+            self.config=config
+        def catalog_token_lengths(self,messages,documents):
+            return 40,[len(d) for d in documents]
+        def complete(self,messages,**kwargs):
+            body=json.loads(messages[-1]['content'])
+            if 'documents' in body:
+                catalogs.append(body)
+                ids=[d['id'] for d in body['documents'] if d.get('required_context')]
+                ids.append(next(d['id'] for d in body['documents'] if not d.get('required_context')))
+                return CompletionResult('completed',json.dumps({'selected_ids':ids}),'stop')
+            value={'relation':'standalone','history_turns':[],'resume_turn':0,
+                'frame':{'topic':'Atlas','target':'','task':'download and install',
+                    'requirements':['download package','installation procedure'],
+                    'conditions':{'version':'v4','platform':'Windows'}}}
+            return CompletionResult('completed',json.dumps(value),'stop')
+        def close(self):
+            pass
+    monkeypatch.setattr(query_selector,'OpenAICompletionClient',Client)
+    source=load_beir_corpus(FIXTURE.with_name('corpus_small.jsonl'))
+    rows=[dict(row,passage_id=pid,document_id=pid,span=[0,len(row['text'])],
+               **({'dependencies':['condition']} if pid=='f' else {})) for pid,row in source.items()]
+    rows.append({'passage_id':'condition','document_id':'conditions','text':'Only for Windows v4.'})
+    corpus=CorpusIndex.from_records(rows,corpus_id='fixture',snapshot_id='fixture-v1')
+    original=tmp_path/'originals.jsonl'
+    original.write_text(''.join(json.dumps({'document_id':pid,'text':'Context before.\n\n'+row['text']+'\n\nContext after.'})+'\n'
+                               for pid,row in source.items()))
+    config=yaml.safe_load(retriever_config.read_text())
+    config.update(stage=stage,query_mode='conversational',evidence_selection='semantic',source_window=True,
+                  source_documents=str(original),selector={'base_url':'http://fixture','model':'fixture','revision':'fixed'})
+    retriever_config.write_text(yaml.safe_dump(config))
+    retriever=create_retriever('P3',config_path=retriever_config)
+    wrapper=ServingRetriever(retriever,corpus_id='fixture',corpus_index=corpus)
+    store=SessionStore(tmp_path/'reading.sqlite3')
+    service=Controller(store,MockEngine())
+    selected=[]
+    async def provider(snapshot):
+        selection=await wrapper.retrieve(snapshot,'Atlas Windows v4: download and install','one')
+        selected.append(selection)
+        return selection
+    try:
+        response=await service.serve_turn('s','Atlas Windows v4: download and install',evidence_provider=provider,
+            request_id='one',corpus_snapshot_id='fixture-v1')
+        replay=await service.serve_turn('s','Atlas Windows v4: download and install',evidence_provider=provider,
+            request_id='one',corpus_snapshot_id='fixture-v1')
+        assert replay.idempotent_replay and response.output_ids==replay.output_ids
+        assert len(catalogs)==len(selected)==1
+        documents=catalogs[0]['documents']
+        assert any('Context before.' in d['text'] for d in documents)
+        assert any(d.get('required_context',[{}])[0].get('text')=='Only for Windows v4.' for d in documents)
+        visible={d['text'] for d in documents}|{s['text'] for d in documents for s in d.get('required_context',[])}
+        blocks=selected[0].evidence
+        assert {b.text for b in blocks}<=visible and any(b.text=='Only for Windows v4.' for b in blocks)
+        assert any(b.key.passage_id.startswith('source-window:v1:') for b in blocks)
+        for candidate in build_candidates(store.get_snapshot('s'),'Continue',blocks):
+            assert candidate.required_blocks=={b.key for b in blocks}
+        trace=retriever.query_view_traces[-1]
+        assert trace['requirement_evidence']['requirement_ranked_ids']==[]
+        assert trace['requirement_evidence']['encoder_inputs']==3
+        assert len(retriever.reranker.inputs)==1 if retriever.reranker else trace['requirement_evidence']['rerank_pairs']==0
+        await service.close_session('s')
+        assert not store.outbox()
+    finally:
+        await service.aclose()
+        store.close()
+        wrapper.close()
 
 
 @pytest.mark.asyncio

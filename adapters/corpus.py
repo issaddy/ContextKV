@@ -274,6 +274,22 @@ class CorpusIndex:
                         if len(matches := self._context_matches(context)) == 1)
         return self._source_neighbors(primary)
 
+    def selection_support(self, contexts, *, neighbors=False):
+        """The exact context that selecting each reading unit will also require.
+
+        Resolve the same dependency closure used by generation. Optional adjacent
+        windows are evaluated with their hit, rather than appended after choice.
+        """
+        from adapters.mtrag import OnlineContext
+        result = {}
+        for context in contexts:
+            key = self._context_key(context)
+            adjacent = self.retrieved_keys(self._source_neighbors((key,))) if neighbors else ()
+            result[context.document_id] = tuple(
+                OnlineContext(b.key.passage_id, b.text, b.source_uri, b.title)
+                for b in self.resolve((key, *adjacent)) if b.key != key)
+        return result
+
     def _source_neighbors(self, primary):
         from adapters.mtrag import OnlineContext
 

@@ -7,7 +7,7 @@ from threading import Event
 import pytest
 
 from adapters.corpus import CorpusIndex
-from adapters.evidence_selection import EvidenceSelector
+from adapters.evidence_selection import EvidenceSelector, reading_catalog
 from adapters.mtrag import OnlineContext, OnlineTurn
 from adapters.query_resolution import PriorContext
 from adapters.query_selector import CompletionResult
@@ -51,8 +51,10 @@ def fixture_data():
 
 def select(client):
     corpus,contexts,intent,turn=fixture_data()
-    result=EvidenceSelector(client).select(turn,intent,contexts,contexts[:1],neighbors=lambda hits:(),
+    catalog,_=reading_catalog(contexts,neighbors=lambda hits:(),
         indexed={c.document_id:c for c in contexts},contextualize=corpus.contextualize)
+    result=EvidenceSelector(client).select(turn,intent,catalog,contexts[:1],
+        required_context=corpus.selection_support(catalog))
     return corpus,contexts,intent,result
 
 
@@ -105,6 +107,37 @@ def test_catalog_budget_does_not_cut_original_bodies_or_retry():
     _,original,intent,(contexts,trace)=select(client)
     assert contexts==original[:1]
     assert trace['catalog_count']==0 and not client.calls and not trace['model_called']
+
+
+def test_large_first_unit_does_not_hide_later_complete_applicable_material():
+    _,contexts,intent,turn=fixture_data()
+    catalog=(OnlineContext('large','Long unrelated source.'*1000),contexts[1])
+    client=Client(budget=600)
+    result,trace=EvidenceSelector(client).select(turn,intent,catalog,(),required_context={})
+    assert result==catalog[1:] and trace['catalog_ids']==['package']
+    assert trace['budget_skipped_ids']==['large']
+    body,schema=client.calls[0]
+    assert body['documents'][0]['id']==1 and body['documents'][0]['text']==contexts[1].text
+    assert schema['response_format']['json_schema']['schema']['properties']['selected_ids']['items']['enum']==[1]
+    assert dict(body['task']['conditions'])=={'version':'v4','platform':'Windows','source':'private'}
+
+
+def test_catalog_coalesces_identical_windows_without_chain_merging_other_choices():
+    from adapters.source_documents import SourceDocuments
+    text='\n\n'.join(f'Paragraph {i} original text.' for i in range(12))
+    raw=tuple(OnlineContext(f'p{i}',f'Paragraph {i} original text.') for i in (2,4,6,8))
+    raw+= (OnlineContext('p2-short','Paragraph 2'),)
+    corpus=CorpusIndex.from_records([{'passage_id':c.document_id,'document_id':'doc',
+        'span':[i,i+1],'text':c.text} for i,c in enumerate(raw)],corpus_id='c',snapshot_id='v1')
+    documents=SourceDocuments([{'document_id':'doc','text':text}])
+    catalog,origins=reading_catalog((*raw,raw[0]),neighbors=lambda _:(),
+        indexed={c.document_id:c for c in raw},contextualize=corpus.contextualize,
+        read=lambda contexts:corpus.reading_contexts(contexts,documents))
+    assert len(catalog)==4
+    assert all(len(c.text)<len(text) for c in catalog)
+    assert set(origins)=={c.document_id for c in catalog}
+    assert {hit.document_id for hits in origins.values() for hit in hits}=={c.document_id for c in raw}
+    assert max(map(len,origins.values()))==2
 
 
 def test_semantic_http_wait_does_not_hold_the_local_ranking_lock():

@@ -86,7 +86,7 @@ python -m controller.cli \
   --retriever-config configs/retriever_hybrid.example.yaml
 ```
 
-原生生成使用同一份配置：在已有、经过 manifest 核对的 B0/B1 命令中，将 `--retriever-index` 替换为 `--retriever-config configs/retriever_hybrid.example.yaml`，其余模型、提示词、1024 输出上限与资源条件保持一致。矩阵顶层同样支持 `retriever_config`；配置文件及两个索引 manifest 纳入既有 `external_inputs` provenance。矩阵不接受方法私有检索覆盖；要比较不同检索器，应创建明确的检索实验组，并在每组内共享设置比较控制器/原生方法。
+原生生成使用同一份配置：在已有、经过 manifest 核对的 B0/B1 命令中，将 `--retriever-index` 替换为 `--retriever-config configs/retriever_hybrid.example.yaml`，其余模型、提示词、1024 输出上限与资源条件保持一致。矩阵顶层支持共享`retriever_config`；`comparison_scope: system`也支持方法各自的检索配方，`execution`则共享配方隔离执行机制。配置文件及索引manifest纳入既有`external_inputs`，详见[统一评价](../data_and_evaluation.md)。
 
 `HybridRetriever.retrieve_turn`只接受 P3 的 `OnlineTurn`。current/last3/all_user/user_topic 从 `user_questions` 创建查询；显式 source_topic/assistant_topic_unverified 则使用实际历史和已提交来源投影，详见[来源主题解析](../research/source_grounded_query_resolution.md)。不读取参考 rewrite、qrels 或原始任务对象。P3 会话仍等当前答案提交后才进入下一轮；答案历史由原有 runner 生成，状态恢复、证据归档和提交语义不变。线上不开放离线 `generated_history` 视角。
 
@@ -135,3 +135,11 @@ encoder/reranker 与 SGLang 共用 GPU 时，其他会话检索可能与生成�
 检索仍返回原始片段。阅读阶段通过文档身份和仅允许空白差异的字面匹配定位原文，补完整边界自然段并带上两侧各两个自然段；同源重叠窗口合并。实际模型读取原始窗口，原检索片段及分数另行记录，不将两者重复放进输入。已有完整片段、没有唯一对应原文的片段，以及有显式章节/依赖关系的来源保留原路径。窗口保留原文字符范围和来源，A/R共享同一阅读材料，实际tokens继续进入预算和B/C流程。
 
 原文只在启动时加载，片段定位按固定语料项复用，不增加LLM调用、索引搜索或重排。未提供source_documents时仍使用原有相邻检索片段窗口。生成评价包含实际阅读材料；检索评价从单独的retrieval_contexts投影原排名，不能把上下文扩展当作新的检索命中。该机制的质量和成本需按公开任务验证，默认配置尚未启用。
+
+### 按当前任务选择完整阅读材料
+
+`evidence_selection: semantic`复用已有解释客户端，允许与`source_window`组合。候选阅读窗口及必要依赖在选择前准备，选择器同时看到完整原文、当前问题和结构化任务条件；选中后交给共同A/R的正文与依赖来自这份目录，不再额外扩张未选择的窗口。原文窗口按每个命中独立构造，相同窗口只占一项，避免大候选池经重叠连锁合并成整篇文档。
+
+完整候选及其依赖按实际分词预算装入目录，放不下的项跳过，继续考虑后续完整项。只允许选择已装入的ID；没有可用目录或调用失败时沿用原始排名回退，不截断原文或重试模型。派生窗口保留对应的原始检索片段，检索评价使用这些来源ID，阅读质量使用实际材料。
+
+复合需求仍使用批量编码和联合召回。启用联合语义选择时，取消重复的逐需求及条件重排；可使用`hybrid`直接提供候选，或`hybrid_rerank`保留一次主任务重排。选择HTTP仍在本地检索锁外执行，模型输出不改变事实正文。该组合为显式机制配置；默认配置及整体效果结论以[当前实现](../implementation_plan.md)和[评价记录](../data_and_evaluation.md)为准。

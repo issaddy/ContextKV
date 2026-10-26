@@ -306,14 +306,14 @@ class DenseIndex:
 
 def search_requirements(query, requirements, sparse, dense, encoder, reranker, *, candidate_k=50,
                         rerank_k=50, rrf_k=60, current_query=None, source_context=None,
-                        source_neighbors=None, group_key=None):
+                        source_neighbors=None, group_key=None, rank_coverage=True):
     """Retrieve complementary needs, then cover them in the same final budget.
 
     Subqueries come only from current committed/requested task state, not answer
     guesses, qrels or corpus facts. Common conditions qualify every subquery.
     One batched encode, equal-RRF seed union, and indexed source neighbors.
-    Whole-task ranking bounds the distinct pool for requirement scoring.
-    Neighbors compete for the same five output slots. No LLM reranker.
+    Whole-task ranking bounds the distinct pool. The joint semantic selector can
+    consume this pool directly, without repeated per-requirement scoring.
     """
     started = time.perf_counter()
     queries = tuple(dict.fromkeys([query, *requirements, *([current_query] if current_query else [])]))
@@ -332,21 +332,27 @@ def search_requirements(query, requirements, sparse, dense, encoder, reranker, *
     candidates += neighbors
     if source_context is not None:
         candidates = source_context(candidates)
-    scores = reranker.score(query, candidates)
-    if len(scores) != len(candidates):
-        raise ValueError("reranker scores must align with candidate passages")
-    ranked = tuple(replace(c, score=float(score)) for c, score in sorted(zip(candidates, scores),
-        key=lambda item: (-float(item[1]), item[0].document_id)))
+    ranked = candidates
+    if reranker is not None:
+        scores = reranker.score(query, candidates)
+        if len(scores) != len(candidates):
+            raise ValueError("reranker scores must align with candidate passages")
+        ranked = tuple(replace(c, score=float(score)) for c, score in sorted(zip(candidates, scores),
+            key=lambda item: (-float(item[1]), item[0].document_id)))
     primary, grouping = select_ranked_evidence(ranked, top_k=rerank_k, group_key=group_key)
     rankings = []
-    for requirement in requirements:
+    for requirement in requirements if rank_coverage and reranker is not None else ():
         values = reranker.score(requirement, primary)
         if len(values) != len(primary):
             raise ValueError("reranker scores must align with candidate passages")
         rankings.append([c.document_id for c, _ in sorted(zip(primary, values),
             key=lambda item: (-float(item[1]), item[0].document_id))])
-    contexts, selection = select_requirement_evidence(primary, rankings)
-    trace = {"strategy": "task_requirement_coverage_v1", "query": query,
+    if rankings:
+        contexts, selection = select_requirement_evidence(primary, rankings)
+    else:
+        contexts, _ = select_ranked_evidence(primary, group_key=group_key)
+        selection = {"selected_ids": [c.document_id for c in contexts]}
+    trace = {"strategy": "task_requirement_coverage_v1" if rankings else "task_requirement_pool_v1", "query": query,
         "requirements": list(requirements), "retrieval_queries": queries,
         "recalled_ids": recalled_ids, "neighbor_candidate_ids": [c.document_id for c in neighbors],
         "candidate_ids": [c.document_id for c in candidates],
@@ -354,9 +360,10 @@ def search_requirements(query, requirements, sparse, dense, encoder, reranker, *
         "source_rankings": [{"query": q, "sparse": [c.document_id for c in s],
             "dense": [c.document_id for c in d]} for q, s, d in zip(queries, sparse_rows, dense_rows)],
         "evidence_selection": grouping, **selection,
-        "encoder_inputs": len(queries), "rerank_pairs": len(candidates)+len(primary)*len(requirements),
+        "encoder_inputs": len(queries), "rerank_pairs": (len(candidates) if reranker is not None else 0)+len(primary)*len(rankings),
         "elapsed_ms": (time.perf_counter()-started)*1000,
-        "objective": "sum of best reciprocal rank per information need, including full task; primary anchor retained",
+        "objective": ("sum of best reciprocal rank per information need, including full task; primary anchor retained"
+                      if rankings else "joint requirement recall; final selection uses the prepared reading catalog"),
         "semantics": "rank coverage surrogate, not proof of evidence sufficiency or answer correctness"}
     return contexts, trace
 
@@ -520,11 +527,10 @@ class HybridRetriever:
         self.expand_source_window = None
         self.read_source_documents = None
         self.source_neighbors = None
+        self.selection_support = None
         self.evidence_selector = evidence_selector
         self.source_documents = source_documents
         self.document_window_counts = None
-        if evidence_selector is not None and source_window:
-            raise ValueError("semantic selection cannot add unselected output windows")
 
     def bind_corpus(self, corpus_index):
         """Share the generation metadata index with reranking, before serving starts."""
@@ -535,6 +541,7 @@ class HybridRetriever:
             self.read_source_documents = lambda contexts, documents=self.source_documents: corpus_index.reading_contexts(contexts, documents)
             self.document_window_counts = corpus_index.document_window_counts
         self.source_neighbors = corpus_index.candidate_neighbors
+        self.selection_support = corpus_index.selection_support
 
     @property
     def manifest(self):
@@ -552,6 +559,7 @@ class HybridRetriever:
                           else "same source/document/version/declared section; explicit span or MT-RAG ingestion order"),
                 "selection": ("merge literal paragraph windows and replace unscoped slices; retain raw ranking separately" if self.source_documents is not None
                               else "one hop from ranked hits, complete originals, no invented rank or recursive expansion"),
+                "semantic_selection": "prepare independent reading units and dependency closure before choice; no unselected output expansion",
                 "budget": "shared A/R required evidence; normal exact-token feasibility and native admission apply",
                 "extra_model_calls": 0},
             "semantic_evidence_selection": self.evidence_selector.manifest if self.evidence_selector else None,
@@ -561,10 +569,11 @@ class HybridRetriever:
                 "budget": "at most five groups from the existing scored pool",
                 "extra_model_calls": 0},
             "requirement_selection": {"strategy": "task_requirement_coverage_v1",
-                "activation": "resolved compound task with at least two explicit information needs; hybrid_rerank",
+                "activation": "resolved compound task with at least two explicit information needs; hybrid or hybrid_rerank",
                 "retrieval": "batched query encoding, equal RRF, and available same-source neighbors as scored candidates",
-                "selection": "primary task anchor plus diminishing-return coverage within five distinct groups",
-                "cost": "one search per view; score seed pool and immediate neighbors once, then each need on at most rerank_k groups; no extra interpretation call"},
+                "selection": ("joint task-conditioned selection of prepared reading units" if self.evidence_selector
+                              else "primary task anchor plus diminishing-return coverage within five distinct groups"),
+                "cost": "one batched encode and search per view; optional primary ranking; per-need scores only without joint semantic selection"},
             "candidate_k": self.candidate_k, "rerank_k": self.rerank_k, "rrf_k": self.rrf_k,
             "sparse": self.sparse.manifest, "dense": self.dense.manifest,
             "encoder": self.encoder.manifest, "reranker": self.reranker.manifest if self.reranker else None,
@@ -613,6 +622,7 @@ class HybridRetriever:
         from controller.schema import QueryContext
         from controller.serialization import decode
         intent = decode(QueryContext, view["context"]) if view is not None and view.get("context") is not None else None
+        semantic_selection = self.evidence_selector is not None and intent is not None and intent.task_frame is not None
         requirements = ()
         if intent is not None and intent.task_frame is not None and len(intent.task_frame.requirements) >= 2:
             from adapters.conversation import frame_query
@@ -630,13 +640,13 @@ class HybridRetriever:
             # Only the local encoder/reranker pair is serialized. Both semantic
             # HTTP operations run outside this lock; shutdown drains the worker.
             with self._lock:
-                if requirements and self.stage == "hybrid_rerank":
+                if requirements and self.stage in {"hybrid", "hybrid_rerank"}:
                     contexts, requirement_trace = search_requirements(query, requirements,
                         self.sparse, self.dense, self.encoder, self.reranker,
                         candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
                         current_query=turn.query if self.query_fusion == "current_topic_rrf" else None,
                         source_context=self.source_context, source_neighbors=self.source_neighbors,
-                        group_key=self.selection_group)
+                        group_key=self.selection_group, rank_coverage=not semantic_selection)
                     orders = [requirement_trace["primary_ranked_ids"], *requirement_trace["requirement_ranked_ids"]]
                     ids = dict.fromkeys(pid for row in zip(*orders) for pid in row)
                     ranked = tuple(self.dense.by_id[pid] for pid in ids)
@@ -656,13 +666,20 @@ class HybridRetriever:
                         rerank_query=scoring_query, source_context=self.source_context)
                     ranked = stages[self.stage]["contexts"]
                 if requirement_trace is None:
-                    if self.stage == "hybrid_rerank" and view is not None and view.get("condition_query"):
+                    if self.stage == "hybrid_rerank" and not semantic_selection and view is not None and view.get("condition_query"):
                         contexts, condition_trace = select_condition_evidence(
                             stages[self.stage], view["condition_query"], self.reranker, rrf_k=self.rrf_k,
                             group_key=self.selection_group)
                     else:
                         contexts, selection_trace = select_ranked_evidence(ranked, group_key=self.selection_group)
-                if self.source_window:
+                if semantic_selection:
+                    from adapters.evidence_selection import reading_catalog
+                    catalog, origins = reading_catalog(ranked, neighbors=self.source_neighbors,
+                        indexed=self.dense.by_id, contextualize=self.source_context,
+                        read=self.read_source_documents if self.source_window else None)
+                    required_context = self.selection_support(catalog,
+                        neighbors=self.source_window and self.read_source_documents is None)
+                elif self.source_window:
                     if self.read_source_documents is not None:
                         reading = self.read_source_documents(contexts)
                         if reading != tuple(contexts):
@@ -673,10 +690,18 @@ class HybridRetriever:
                 if view is None and (selection_trace is not None or self.source_window):
                     view = {"mode": self.query_mode, "text": query}
                 self.requests += 1
-            if self.evidence_selector is not None and intent is not None and intent.task_frame is not None:
-                contexts, semantic_trace = self.evidence_selector.select(turn, intent, ranked, contexts,
-                    neighbors=self.source_neighbors, indexed=self.dense.by_id,
-                    contextualize=self.source_context)
+            if semantic_selection:
+                contexts, semantic_trace = self.evidence_selector.select(turn, intent, catalog, contexts,
+                    required_context=required_context)
+                if semantic_trace["status"] == "selected":
+                    selected_ids = {c.document_id for c in contexts}
+                    supporting_contexts = tuple({s.document_id: s for c in contexts
+                        for s in required_context.get(c.document_id, ()) if s.document_id not in selected_ids}.values())
+                    selected_origins = tuple({hit.document_id: hit for c in contexts
+                        for hit in origins[c.document_id]}.values())
+                    semantic_trace["selected_origin_ids"] = [c.document_id for c in selected_origins]
+                    if selected_origins != tuple(contexts):
+                        retrieval_contexts = selected_origins
         except Exception as exc:
             retrieval_error = f"{type(exc).__name__}: {exc}"
             raise

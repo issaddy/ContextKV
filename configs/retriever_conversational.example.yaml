@@ -28,6 +28,9 @@ query_fusion: single
 source_window: false
 # Optional original-document context, used only with source_window: true.
 # source_documents: data/mtrag-source-documents/cloud.jsonl.zip
+# Optional joint choice of actual reading bodies and their required context.
+# Shares the interpreter client; includes one additional source-selection call.
+# evidence_selection: semantic
 
 # Omit selector only when intentionally using the model-free history fallback.
 selector:
