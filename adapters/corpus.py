@@ -227,7 +227,7 @@ class CorpusIndex:
                 else:
                     merged.append((start, end))
             for start, end in merged:
-                passage_id = f"source-window:{document.document_id}:{start}:{end}"
+                passage_id = f"source-window:v1:{document.document_id}:{start}:{end}"
                 existing = [key for key in self._passages.get(passage_id, ()) if key.version == version]
                 if existing:
                     support = self._blocks[existing[0]]
@@ -236,6 +236,7 @@ class CorpusIndex:
                     support = replace(make_evidence(document.text[start:end], document.document_id,
                         corpus_id=self.corpus_id, passage_id=passage_id, version=version,
                         source_uri=source, title=document.title,
+                        anchors=configuration_anchors(document.text[start:end]),
                         provenance=(source, f"corpus_snapshot:{self.snapshot_id}",
                                     f"original_document_span:{start}:{end}")), span=(start, end))
                     self._blocks[support.key] = support

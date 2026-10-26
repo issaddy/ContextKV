@@ -101,3 +101,34 @@ def test_reading_view_replaces_unscoped_slices_but_keeps_declared_dependencies()
     exported=official_record(turn,'Actual answer')
     assert [c['document_id'] for c in exported['retrieval_contexts']]==['plain','scoped']
     assert [c['document_id'] for c in exported['contexts']]==[c.document_id for c in reading]
+
+
+def test_shifted_retrieval_inside_one_paragraph_reuses_the_same_reading_prefix():
+    from test_candidates import committed
+    text='Introduction.\n\nFirst original sentence. Second original sentence.\n\nClosing context.'
+    documents=SourceDocuments([{'document_id':'doc','text':text}])
+    corpus=CorpusIndex.from_records([
+        {'passage_id':'a','document_id':'doc','text':'First original sentence.','span':[0,1]},
+        {'passage_id':'b','document_id':'doc','text':'Second original sentence.','span':[2,3]}],
+        corpus_id='c',snapshot_id='v1')
+    first=corpus.reading_contexts((OnlineContext('a','First original sentence.'),),documents)
+    second=corpus.reading_contexts((OnlineContext('b','Second original sentence.'),),documents)
+    assert first==second
+    blocks=corpus.enrich(first)
+    snapshot=SessionSnapshot('s')
+    initial,=build_candidates(snapshot,'First question',blocks)
+    snapshot=committed(initial,snapshot,'First question',blocks)
+    append,rebuild=build_candidates(snapshot,'Follow-up',corpus.enrich(second))
+    assert append.required_blocks==rebuild.required_blocks
+    assert append.messages[:-1]==snapshot.execution.messages
+    assert text not in append.messages[-1].content and text in rebuild.messages[-1].content
+
+
+def test_reading_window_retains_parameter_anchors_for_later_revisits():
+    documents=SourceDocuments([{'document_id':'doc','text':'Settings.\n\nSet `request_timeout` to 30 seconds.\n\nOther context.'}])
+    corpus=CorpusIndex.from_records([{'passage_id':'p','document_id':'doc','span':[0,1],
+        'text':'Set `request_timeout` to 30 seconds.'}],corpus_id='c',snapshot_id='v1')
+    reading=corpus.reading_contexts((OnlineContext('p','Set `request_timeout` to 30 seconds.'),),documents)
+    block,=corpus.enrich(reading)
+    assert block.anchors==('request_timeout',)
+    assert block.key.passage_id.startswith('source-window:v1:')
