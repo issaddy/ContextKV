@@ -28,16 +28,12 @@ class Client:
     def complete(self, messages, **kwargs):
         body=json.loads(messages[-1]['content'])
         self.calls.append((body,kwargs))
-        uses=[]
-        for doc in body['documents']:
-            for line,text in doc['lines']:
-                if 'Windows v4 private installer' in text:
-                    uses.append({'source':doc['id'],'needs':[0],'line':line})
-                if text=='Run the installer.':
-                    uses.append({'source':doc['id'],'needs':[1],'line':line})
+        selected = [doc['id'] for doc in body['documents']
+                    if 'Windows v4 private installer' in doc['text'] or 'Run the installer.' in doc['text']]
         if self.invalid:
-            uses[0]['source']=0  # A valid line ID attributed to a different source.
-        return CompletionResult('completed',json.dumps({'uses':uses}),'stop',100)
+            selected.append(len(body['documents']))
+        return CompletionResult('completed',json.dumps({'selected_ids':selected}),'stop',100)
+
 
 
 def fixture_data():
@@ -56,33 +52,34 @@ def fixture_data():
 def select(client):
     corpus,contexts,intent,turn=fixture_data()
     result=EvidenceSelector(client).select(turn,intent,contexts,contexts[:1],neighbors=lambda hits:(),
-        indexed={c.document_id:c for c in contexts},contextualize=corpus.contextualize,keys=corpus.retrieved_keys)
+        indexed={c.document_id:c for c in contexts},contextualize=corpus.contextualize)
     return corpus,contexts,intent,result
 
 
 @pytest.mark.asyncio
-async def test_semantic_sources_and_exact_reading_guides_reach_both_candidates_and_replay(tmp_path):
+async def test_selected_original_sources_reach_both_candidates_and_replay(tmp_path):
     client=Client()
-    corpus,original,intent,(contexts,planned,trace)=select(client)
+    corpus,original,intent,(contexts,trace)=select(client)
     assert [c.document_id for c in contexts]==['package','steps']
     assert trace['status']=='selected' and len(client.calls)==1
-    assert planned.task_frame==intent.task_frame and len(planned.evidence_uses)==2
+    supplied=client.calls[0][0]['documents']
+    assert [d['text'] for d in supplied]==[c.text for c in original]
     blocks=corpus.enrich(contexts)
-    for use,block in zip(planned.evidence_uses,blocks):
-        assert use.key==block.key and block.text[use.start:use.end] in ('Windows v4 private installer: ORIGINAL_URL','Run the installer.')
     store=SessionStore(tmp_path/'state.sqlite3')
     service=Controller(store,MockEngine())
     try:
-        response=await service.serve_turn('s','Question',blocks,query_context=planned,request_id='one',corpus_snapshot_id='v4')
+        response=await service.serve_turn('s','Question',blocks,query_context=intent,request_id='one',corpus_snapshot_id='v4')
         snapshot=store.get_snapshot('s')
-        assert snapshot.raw_history[-1].query_context==planned
-        for candidate in build_candidates(snapshot,'Continue',blocks,query_context=planned,
+        assert snapshot.raw_history[-1].query_context==intent
+        for candidate in build_candidates(snapshot,'Continue',blocks,query_context=intent,
                                            retrieval_priority=tuple(b.key for b in blocks)):
             assert candidate.required_blocks=={b.key for b in blocks} and candidate.required_blocks<=candidate.visible_blocks
             guide=json.loads(candidate.messages[-1].content.split('Current source guide:',1)[1].split('\n',1)[1].split('\n',1)[0])
-            assert [row['for_needs'] for row in guide]==[['download package'],['installation procedure']]
-            assert [row['excerpt'] for row in guide]==['Windows v4 private installer: ORIGINAL_URL','Run the installer.']
-        replay=await service.serve_turn('s','Question',blocks,query_context=planned,request_id='one',corpus_snapshot_id='v4')
+            assert len(guide)==2 and all('excerpt' not in row for row in guide)
+            for span in candidate.evidence_spans:
+                block=next(b for b in blocks if b.key==span.key)
+                assert candidate.messages[span.message_index].content[span.start:span.end]==block.text
+        replay=await service.serve_turn('s','Question',blocks,query_context=intent,request_id='one',corpus_snapshot_id='v4')
         assert replay.idempotent_replay and replay.output_ids==response.output_ids
         restored=SessionStore(tmp_path/'state.sqlite3')
         try:
@@ -96,17 +93,17 @@ async def test_semantic_sources_and_exact_reading_guides_reach_both_candidates_a
         store.close()
 
 
-def test_wrong_source_line_assignment_falls_back_without_inventing_a_quote():
+def test_out_of_catalog_selection_falls_back_without_retry():
     client=Client(invalid=True)
-    _,original,intent,(contexts,planned,trace)=select(client)
-    assert trace['status']=='failed' and contexts==original[:1] and planned==intent
-    assert not planned.evidence_uses and len(client.calls)==1
+    _,original,intent,(contexts,trace)=select(client)
+    assert trace['status']=='failed' and contexts==original[:1]
+    assert len(client.calls)==1
 
 
 def test_catalog_budget_does_not_cut_original_bodies_or_retry():
     client=Client(budget=21)
-    _,original,intent,(contexts,planned,trace)=select(client)
-    assert contexts==original[:1] and planned==intent
+    _,original,intent,(contexts,trace)=select(client)
+    assert contexts==original[:1]
     assert trace['catalog_count']==0 and not client.calls and not trace['model_called']
 
 
@@ -123,7 +120,7 @@ def test_semantic_http_wait_does_not_hold_the_local_ranking_lock():
             if turn.query=='slow':
                 entered.set()
                 assert release.wait(5)
-            return fallback,intent,{'status':'selected'}
+            return fallback,{'status':'selected'}
     dense=SimpleNamespace(manifest={'corpus_sha256':'same'},by_id={c.document_id:c for c in contexts},
         search=lambda *args,**kwargs:contexts)
     sparse=SimpleNamespace(manifest=dense.manifest,corpus_snapshot_id='v4')

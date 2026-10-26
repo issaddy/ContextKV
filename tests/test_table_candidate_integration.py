@@ -118,9 +118,8 @@ def test_default_off_preserves_shared_message_and_token_output(monkeypatch, styl
     explicit = build_candidates(snapshot, "Question?", (table,),
         EvidencePolicy(table_relations=False, table_annotation_style=style))[0]
     ref = next(ref for ref, key in implicit.reference_map if key == table.key)
-    metadata = json.dumps({"id": ref, "corpus": table.key.corpus_id, "document": table.key.document_id,
-        "passage": table.key.passage_id, "version": table.key.version, "source": table.source_uri,
-        "title": table.title, "provenance": table.provenance}, ensure_ascii=False, separators=(",", ":"))
+    metadata = json.dumps({"id": ref, "source": table.source_uri,
+        "source_revision": table.key.version}, ensure_ascii=False, separators=(",", ":"))
     # Shared QA/citation layout, without any optional table annotations.
     from controller.templates import current_source_guide
     guide = current_source_guide("Question?", (table,), implicit.reference_map)

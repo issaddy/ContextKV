@@ -519,7 +519,6 @@ class HybridRetriever:
         self.source_window = source_window
         self.expand_source_window = None
         self.source_neighbors = None
-        self.source_keys = None
         self.evidence_selector = evidence_selector
         if evidence_selector is not None and source_window:
             raise ValueError("semantic selection cannot add unselected output windows")
@@ -530,7 +529,6 @@ class HybridRetriever:
         self.selection_group = corpus_index.selection_group
         self.expand_source_window = corpus_index.source_window
         self.source_neighbors = corpus_index.candidate_neighbors
-        self.source_keys = corpus_index.retrieved_keys
 
     @property
     def manifest(self):
@@ -593,7 +591,7 @@ class HybridRetriever:
             raise ValueError("hybrid retrieval requires a P3 turn")
         if self.source_window and self.expand_source_window is None:
             raise ValueError("source_window requires --evidence-corpus metadata")
-        if self.evidence_selector is not None and self.source_keys is None:
+        if self.evidence_selector is not None and self.source_context is None:
             raise ValueError("semantic evidence selection requires --evidence-corpus metadata")
         started = time.perf_counter()
         view = user_topic_view(turn.user_questions) if self.query_mode == "user_topic" else None
@@ -658,9 +656,9 @@ class HybridRetriever:
                     view = {"mode": self.query_mode, "text": query}
                 self.requests += 1
             if self.evidence_selector is not None and intent is not None and intent.task_frame is not None:
-                contexts, intent, semantic_trace = self.evidence_selector.select(turn, intent, ranked, contexts,
+                contexts, semantic_trace = self.evidence_selector.select(turn, intent, ranked, contexts,
                     neighbors=self.source_neighbors, indexed=self.dense.by_id,
-                    contextualize=self.source_context, keys=self.source_keys)
+                    contextualize=self.source_context)
         except Exception as exc:
             retrieval_error = f"{type(exc).__name__}: {exc}"
             raise

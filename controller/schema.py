@@ -86,28 +86,15 @@ class TaskFrame:
 
 
 @dataclass(frozen=True)
-class EvidenceUse:
-    """A derived reading guide pointing into an unchanged original source."""
-    key: EvidenceKey
-    start: int
-    end: int
-    needs: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        _tuples(self, "needs")
-
-
-@dataclass(frozen=True)
 class QueryContext:
     """Derived conversational intent, never an evidence source or a raw QA edit."""
     query: str
     relation: str
     history_turns: tuple[int, ...] = ()
     task_frame: TaskFrame | None = None
-    evidence_uses: tuple[EvidenceUse, ...] = ()
 
     def __post_init__(self) -> None:
-        _tuples(self, "history_turns", "evidence_uses")
+        _tuples(self, "history_turns")
 
 
 @dataclass(frozen=True)

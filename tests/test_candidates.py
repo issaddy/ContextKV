@@ -105,9 +105,7 @@ def test_current_source_navigation_is_shared_verbatim_and_keeps_cached_prefix():
     guide = current_source_guide(query, (block,), append.reference_map)
     assert guide in append.messages[-1].content and guide in rebuild.messages[-1].content
     row, = json.loads(guide.split("\n", 1)[1])
-    start, end = row["chars"]
-    assert row["excerpt"] == block.text[start:end]
-    assert "safe places" in row["excerpt"]
+    assert row == {"id": row["id"], "source": block.source_uri, "title": "Community design"}
     assert row["id"] == next(ref for ref, key in append.reference_map if key == block.key)
     assert old.key not in append.required_blocks and old.key in append.visible_blocks
     for plan in (append, rebuild):
@@ -150,8 +148,8 @@ def test_explicit_version_comparison_restores_both_versions():
     snap = SessionSnapshot("s",archive=(old,))
     candidate = build_candidates(snap,"Compare api v1 and v2",(new,))[0]
     assert candidate.feasible and candidate.required_blocks == {old.key,new.key}
-    assert '"version":"v1"' in candidate.messages[-1].content
-    assert '"version":"v2"' in candidate.messages[-1].content
+    assert '"source_revision":"v1"' in candidate.messages[-1].content
+    assert '"source_revision":"v2"' in candidate.messages[-1].content
 
 
 @pytest.mark.parametrize("document_id,title,query,current_document", (
@@ -561,3 +559,25 @@ def test_evidence_before_question_preserves_real_token_prefix_across_queries(lay
     assert content.index(block.text) < content.index("Question:")
     assert longest_common_prefix(first.input_ids, second.input_ids) > len(block.text)
     assert first.input_hash != second.input_hash
+
+
+def test_compact_source_metadata_preserves_legacy_execution_and_original_spans(monkeypatch):
+    from controller import templates
+    block = make_evidence("Complete original source.\nIncluding its conditions.", "document",
+                          title="Original title", provenance="Recorded ingestion provenance")
+    metadata = templates._evidence_metadata
+    snapshot = SessionSnapshot("s")
+    with monkeypatch.context() as patch:
+        patch.setattr(templates, "_evidence_metadata",
+                      lambda block, reference, **kwargs: metadata(block, reference, legacy=True))
+        previous = build_candidates(snapshot, "Original", (block,))[0]
+    snapshot = committed(previous, snapshot, "Original", (block,))
+    append, rebuild = build_candidates(snapshot, "Continue", (block,))
+    assert append.messages[:-1] == snapshot.execution.messages
+    assert '"provenance"' in append.messages[1].content
+    assert '"provenance"' not in rebuild.messages[-1].content
+    assert '"source_revision":"v1"' in rebuild.messages[-1].content
+    assert len(rebuild.messages[-1].content) < len(previous.messages[-1].content)
+    for candidate in (append, rebuild):
+        assert verify_evidence_spans(candidate.messages, candidate.evidence_spans,
+                                     (block,), candidate.reference_map) == {block.key}

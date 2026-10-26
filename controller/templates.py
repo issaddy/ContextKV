@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections import Counter
 import hashlib
 import json
-import math
 import re
 from typing import Iterable, Mapping, Protocol
 
@@ -194,20 +192,27 @@ class HuggingFaceTemplate:
 TemplateAdapter = ByteTemplate
 
 
-def _evidence_metadata(block: EvidenceBlock, reference: str) -> str:
-    return json.dumps({"id": reference, "corpus": block.key.corpus_id,
-        "document": block.key.document_id, "passage": block.key.passage_id,
-        "version": block.key.version, "source": block.source_uri,
-        "title": block.title, "provenance": block.provenance},
-        ensure_ascii=False, separators=(",", ":"))
+def _evidence_metadata(block: EvidenceBlock, reference: str, *, legacy=False) -> str:
+    # The ledger/span retains the complete identity and provenance. The model
+    # only needs a stable citation ID and human-facing source information.
+    if legacy:
+        value = {"id": reference, "corpus": block.key.corpus_id,
+            "document": block.key.document_id, "passage": block.key.passage_id,
+            "version": block.key.version, "source": block.source_uri,
+            "title": block.title, "provenance": block.provenance}
+    else:
+        value = {"id": reference, "source": block.source_uri, "source_revision": block.key.version}
+        if block.title:
+            value["title"] = block.title
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _evidence_header(block: EvidenceBlock, reference: str) -> str:
-    return f"\nEvidence [{reference}] {_evidence_metadata(block, reference)}\n<evidence_body>\n"
+def _evidence_header(block: EvidenceBlock, reference: str, *, legacy=False) -> str:
+    return f"\nEvidence [{reference}] {_evidence_metadata(block, reference, legacy=legacy)}\n<evidence_body>\n"
 
 
-def _evidence_alias(block: EvidenceBlock, reference: str, body_reference: str) -> str:
-    return (f"\nEvidence alias [{reference}] {_evidence_metadata(block, reference)}\n"
+def _evidence_alias(block: EvidenceBlock, reference: str, body_reference: str, *, legacy=False) -> str:
+    return (f"\nEvidence alias [{reference}] {_evidence_metadata(block, reference, legacy=legacy)}\n"
             f"Its complete original body is identical to the body of [{body_reference}].\n")
 
 
@@ -236,52 +241,28 @@ def render_evidence_relations(blocks: Iterable[EvidenceBlock],
 
 def current_source_guide(query: str, blocks: Iterable[EvidenceBlock],
                          references: tuple[tuple[str, EvidenceKey], ...], *,
-                         retrieval_priority: tuple[EvidenceKey, ...] = (), evidence_uses=()) -> str:
-    """Locate current sources near the question without moving cached bodies.
+                         retrieval_priority: tuple[EvidenceKey, ...] = ()) -> str:
+    """Navigate current sources; do not turn lexical matches into reading advice.
 
-    IDF-weighted lexical overlap selects one original line per source. This is
-    navigation, not evidence filtering or an entailment judgment; both candidates
-    keep complete bodies and receive the same guide. No model call or rewrite.
+    Complete original bodies carry the facts and conditions. Model-facing
+    navigation contains source identities/titles, while full audit metadata
+    stays in the ledger. Both execution candidates share the same guide.
     """
-    def terms(text):
-        return set(re.findall(r"[a-z0-9_]{3,}|[\u3400-\u9fff]", text.casefold())) - {
-            "the", "and", "for", "are", "was", "were", "with", "that", "this", "from",
-            "how", "what", "which", "when", "where", "does", "can", "could", "should",
-            "have", "has", "during", "keep", "about", "you", "your", "its"}
-
     blocks = tuple(sorted(blocks, key=lambda b: b.key))
     if retrieval_priority:
         rank = {key: index for index, key in enumerate(retrieval_priority)}
         blocks = tuple(sorted(blocks, key=lambda b: rank.get(b.key, len(rank))))
-    query_terms = terms(query)
-    frequency = Counter(term for block in blocks for term in terms(block.text) & query_terms)
-    weights = {term: math.log1p(len(blocks)/count) for term, count in frequency.items()}
     by_key = {key: ref for ref, key in references}
-    uses = {use.key: use for use in evidence_uses}
     rows = []
     for block in blocks:
-        lines = list(re.finditer(r"[^\r\n]+", block.text))
-        best = max(lines, key=lambda line: sum(weights[term] for term in sorted(terms(line.group()) & query_terms)),
-                   default=None)
         row = {"id": by_key[block.key], "source": block.source_uri}
         if block.title:
             row["title"] = block.title
         if block.parent_section is not None:
             row["section"] = block.parent_section
-        if (use := uses.get(block.key)) is not None:
-            if not 0 <= use.start < use.end <= len(block.text):
-                raise EvidenceError("source reading guide must point into the original body")
-            row.update(for_needs=use.needs, chars=[use.start, use.end], excerpt=block.text[use.start:use.end])
-        elif best is not None and terms(best.group()) & query_terms:
-            start, end = best.start(), min(best.end(), best.start() + 360)
-            row.update(chars=[start, end], excerpt=block.text[start:end])
         rows.append(row)
-    if not rows:
-        return ""
-    return ("Current source guide: source addresses, titles and verbatim excerpts for locating evidence. "
-            "Keep each source's product, population, region and version scope when combining information. "
-            "Read the complete original bodies for conditions; an excerpt is not a complete answer.\n"
-            + json.dumps(rows, ensure_ascii=False, separators=(",", ":")))
+    return ("Current source guide: sources in retrieval priority order.\n"
+            + json.dumps(rows, ensure_ascii=False, separators=(",", ":"))) if rows else ""
 
 
 def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
@@ -421,7 +402,8 @@ def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSp
         if span.body_reference_id is None:
             if span.alias_declaration is not None:
                 raise EvidenceError("alias declaration requires a physical body reference")
-            if not message.content[:span.start].endswith(_evidence_header(block, span.reference_id)):
+            if not any(message.content[:span.start].endswith(_evidence_header(block, span.reference_id, legacy=legacy))
+                       for legacy in (False, True)):
                 raise EvidenceError("evidence identity/provenance header missing from prompt")
             for start, end in occupied.get(span.message_index, ()):
                 if span.start < end and start < span.end:
@@ -436,7 +418,8 @@ def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSp
             index, start, end = span.alias_declaration
             if (not 0 <= index < len(messages) or messages[index].role != "user"
                     or not 0 <= start < end <= len(messages[index].content)
-                    or messages[index].content[start:end] != _evidence_alias(block, span.reference_id, span.body_reference_id)):
+                    or not any(messages[index].content[start:end] == _evidence_alias(block, span.reference_id, span.body_reference_id, legacy=legacy)
+                               for legacy in (False, True))):
                 raise EvidenceError("evidence alias identity/provenance declaration mismatch")
         if not message.content[span.end:].startswith("\n</evidence_body>\n"):
             raise EvidenceError("evidence body delimiter missing from prompt")
