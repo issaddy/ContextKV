@@ -23,7 +23,9 @@ rerank_k: 50
 rrf_k: 60
 cpu_threads: 1
 query_fusion: single
-source_window: true
+# Neighboring passages may cross procedures (for example pinned vs latest release).
+# Keep expansion explicit until it preserves task applicability and fits cost support.
+source_window: false
 
 # Omit selector only when intentionally using the model-free history fallback.
 selector:

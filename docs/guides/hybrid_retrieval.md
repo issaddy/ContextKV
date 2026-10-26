@@ -98,7 +98,7 @@ encoder/reranker 与 SGLang 共用 GPU 时，其他会话检索可能与生成�
 
 ## 原始来源窗口
 
-主线conversational示例启用`source_window: true`。复用[ParentDocumentRetriever](https://reference.langchain.com/python/langchain-classic/retrievers/parent_document_retriever/ParentDocumentRetriever)的“小片段检索、较大范围阅读”原则及[LlamaIndex窗口检索](https://developers.llamaindex.ai/python/examples/node_postprocessor/metadatareplacementdemo/)的相邻上下文组织方法：原有索引与50段评分不变，五个内容组代表确定后，补入每个命中前后各一段原文。窗口在同一来源、文档、版本和已声明章节内建立，重叠命中只补一次，不沿补充段落继续扩张。
+`source_window: true`显式启用来源窗口。复用[ParentDocumentRetriever](https://reference.langchain.com/python/langchain-classic/retrievers/parent_document_retriever/ParentDocumentRetriever)的“小片段检索、较大范围阅读”原则及[LlamaIndex窗口检索](https://developers.llamaindex.ai/python/examples/node_postprocessor/metadatareplacementdemo/)的相邻上下文组织方法：原有索引与50段评分不变，五个内容组代表确定后，补入每个命中前后各一段原文。窗口在同一来源、文档、版本和已声明章节内建立，重叠命中只补一次，不沿补充段落继续扩张。当前示例关闭该项：实测能补齐遗漏包地址，但缺少章节边界的语料会把指定版本和最新版流程一起引入，尚未建立默认开启的净收益。这里保留可复用工程，不据此否定结构化窗口方法，也不继续调半径。
 
 一般语料以`document_id`、`span`提供顺序；固定MT-RAG snapshot使用原有`parent-start-end` passage ID。官方说明这些是[语料入库时的offset](https://github.com/IBM/mt-rag-benchmark/blob/53fef6f5917c7e10c436f697e69a955dbc795d81/corpora/README.md)，实际检查也发现不少相邻重叠正文不一致。因此offset只用于顺序，不能据此无损拼接全文。本实现保留每段完整正文、原始身份及独立引用，不引入合成段落或重新编码索引。
 
