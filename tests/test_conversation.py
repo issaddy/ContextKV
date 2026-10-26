@@ -38,7 +38,14 @@ class Client:
         self.value, self.finish, self.inputs = value, finish, []
     def complete(self, messages, **kwargs):
         self.inputs.append((messages, kwargs))
-        return CompletionResult("completed", json.dumps(self.value), self.finish, 100)
+        value = self.value
+        if (isinstance(value, dict)
+                and "frame" in kwargs["response_format"]["json_schema"]["schema"]["properties"]):
+            updates = value.get("updates", {})
+            frame = value.get("frame", {"task":value["task"]["value"],"topic":updates.get("topic", ""),
+                "target":updates.get("target", ""),"conditions":updates.get("conditions", {})})
+            value = {k:v for k,v in value.items() if k not in {"task","updates"}} | {"frame":frame}
+        return CompletionResult("completed", json.dumps(value), self.finish, 100)
 
 
 def turn(current, questions=("How does Atlas Cloud store documents?",)):
@@ -62,6 +69,36 @@ def test_attribute_correction_keeps_the_active_task_and_topic():
     body = json.loads(client.inputs[0][0][-1]["content"])
     assert body["previous_turn"]["state"] == {**asdict(frame),"conditions":dict(frame.conditions)}
     assert "prior_interpretation" not in body["previous_turn"]  # Do not duplicate its rendering.
+
+
+def test_missing_state_initializes_all_conditions_before_using_later_patches():
+    original = "Install Atlas CLI v4 on Linux x86-64 using a private download source."
+    frame = {"task":"download package and installation steps", "topic":"Atlas CLI", "target":"installer",
+             "conditions":{"version":"v4","platform":"Windows","architecture":"x86-64","source":"private"}}
+    client = Client({"frame":frame,"relation":"condition_change","history_turns":[1]})
+    view = ConversationResolver(client).resolve(turn("What changes on Windows?",(original,)),PriorContext())
+    intent = decode(QueryContext,view["context"])
+    assert view["state_mode"] == "initialize" and intent.task_frame.conditions == tuple(sorted(frame["conditions"].items()))
+    assert intent.task_frame.task == frame["task"] and intent.task_frame.topic == "Atlas CLI"
+    schema = client.inputs[0][1]["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["frame"]["required"] == ["task","topic","target","conditions"]
+    assert "updates" not in schema["properties"]
+    following = Client({"relation":"condition_change","history_turns":[2],
+                        "updates":{"conditions":{"source":"public"}}})
+    request = turn("Use the public source instead.",(original,"What changes on Windows?"))
+    changed = ConversationResolver(following).resolve(request,PriorContext(interpretations=(None,intent)))
+    assert changed["state_mode"] == "patch"
+    assert dict(decode(QueryContext,changed["context"]).task_frame.conditions) == {**frame["conditions"],"source":"public"}
+    assert following.inputs[0][0][0]["content"] != client.inputs[0][0][0]["content"]
+
+
+def test_initialization_does_not_accept_a_partial_frame_as_complete_state():
+    client = Client({"frame":{"task":"changes on Windows","conditions":{"platform":"Windows"}},
+                     "relation":"condition_change","history_turns":[1]})
+    request = turn("What changes on Windows?",("Install Atlas CLI v4 on Linux with private endpoints.",))
+    view = ConversationResolver(client).resolve(request,PriorContext())
+    assert view["status"] == "failed" and view["context"] is None
+    assert view["text"] == retrieval_query(request.user_questions) and len(client.inputs) == 1
 
 
 def test_a_new_information_need_keeps_the_topic_without_regenerating_it():
