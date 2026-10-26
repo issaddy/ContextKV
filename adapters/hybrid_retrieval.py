@@ -138,36 +138,6 @@ def select_condition_evidence(stage, condition_query, reranker, *, top_k=5, rrf_
     return contexts, trace
 
 
-def select_task_evidence(stage, reranker, *, query_context=None, condition_query=None,
-                         top_k=5, rrf_k=60, group_key=None):
-    """Coordinate content coverage with the committed task's applicability view.
-
-    Literal task qualifiers already use a second view. A distinct-content refill
-    can also expose broader candidates, so use the same scoped scoring when a
-    structured topic/condition exists. Both passes share the original pool.
-    """
-    selection = None
-    reason = "literal_task_condition"
-    if not condition_query:
-        selected, selection = select_ranked_evidence(stage["contexts"], top_k=top_k, group_key=group_key)
-        frame = query_context.task_frame if query_context is not None else None
-        if not selection or frame is None or not (frame.topic or frame.conditions):
-            return selected, selection, None
-        from adapters.conversation import frame_query
-        condition_query = frame_query(replace(frame, task=""))
-        reason = "distinct_content_with_task_scope"
-    if condition_query == stage["rerank_query"]:
-        if selection is None:
-            selected, selection = select_ranked_evidence(stage["contexts"], top_k=top_k, group_key=group_key)
-        return selected, selection, None
-    selected, trace = select_condition_evidence(stage, condition_query, reranker,
-        top_k=top_k, rrf_k=rrf_k, group_key=group_key)
-    if trace is not None:
-        trace = {**trace, "activation": reason,
-                 **({"trigger_selection": selection} if selection else {})}
-    return selected, trace.get("evidence_selection") if trace else None, trace
-
-
 class LocalBGE:
     """Official Transformers-compatible checkpoints; explicit device/dtype/path."""
     def __init__(self, model_path, *, reranker=False, device="cpu", dtype="float32",
@@ -487,7 +457,7 @@ class HybridRetriever:
         if self.query_mode == "conversational":
             manifest["condition_evidence_selection"] = {
                 "strategy": "task_anchor_condition_rrf_v1",
-                "activation": "literal named task continuation, or distinct-content refill with a structured topic/condition scope",
+                "activation": "literal named task continuation with a distinct condition view",
                 "stage_enabled": self.stage == "hybrid_rerank",
                 "pool": "same primary rerank candidates; no additional index search",
                 "selection": "retain primary rank one; highest equal RRF score from distinct content groups in remaining slots",
@@ -510,9 +480,6 @@ class HybridRetriever:
             if prior_context is None:
                 raise ValueError("topic selector requires an explicit committed history context")
             view = self.resolver.resolve(turn, prior_context)
-        from controller.schema import QueryContext
-        from controller.serialization import decode
-        intent = decode(QueryContext, view["context"]) if view is not None and view.get("context") is not None else None
         # run_sessions dispatches retrieval via to_thread. Serialize this model
         # pair, but do not hold its lock while another service resolves intent.
         # An unrelated session can retrieve during that HTTP wait. Shutdown
@@ -543,10 +510,9 @@ class HybridRetriever:
                         candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
                         rerank_query=scoring_query, source_context=self.source_context)
                     ranked = stages[self.stage]["contexts"]
-                if self.stage == "hybrid_rerank":
-                    contexts, selection_trace, condition_trace = select_task_evidence(
-                        stages[self.stage], self.reranker, query_context=intent,
-                        condition_query=view.get("condition_query") if view else None, rrf_k=self.rrf_k,
+                if self.stage == "hybrid_rerank" and view is not None and view.get("condition_query"):
+                    contexts, condition_trace = select_condition_evidence(
+                        stages[self.stage], view["condition_query"], self.reranker, rrf_k=self.rrf_k,
                         group_key=self.selection_group)
                 else:
                     contexts, selection_trace = select_ranked_evidence(ranked, group_key=self.selection_group)
@@ -574,6 +540,9 @@ class HybridRetriever:
                         self.query_view_traces.append(trace)
                     else:
                         self.trace_sink(trace)
+        from controller.schema import QueryContext
+        from controller.serialization import decode
+        intent = decode(QueryContext, view["context"]) if view is not None and view.get("context") is not None else None
         return replace(turn, contexts=tuple(contexts), query_context=intent)
 
     def close(self):

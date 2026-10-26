@@ -93,30 +93,6 @@ def test_condition_task_anchor_is_reserved_even_when_its_copy_ranks_above_it():
     assert trace["evidence_selection"]["anchor"] == "p0"
 
 
-def test_distinct_refill_scores_named_scope_once_and_keeps_all_conditions():
-    from adapters.hybrid_retrieval import select_task_evidence
-    from controller.schema import QueryContext, TaskFrame
-    primary = tuple(OnlineContext(f"p{i}", "Duplicate." if i < 2 else f"Original {i}",
-                                  title="Guide") for i in range(7))
-    stage = {"contexts":primary,"rerank_query":"full requested task and conditions",
-             "rerank_candidate_ids":[c.document_id for c in primary]}
-    intent = QueryContext("resolved task","condition_change",(1,),
-        TaskFrame("Atlas","installation","procedure",(("version","v4"),("platform","Linux"),("connectivity","online"))))
-    reranker = Reranker()
-    selected, _, trace = select_task_evidence(stage,reranker,query_context=intent)
-    query, pool = reranker.calls[0]
-    assert len(reranker.calls) == 1 and pool == primary
-    assert query == "Atlas\ninstallation\nconnectivity: online\nplatform: Linux\nversion: v4"
-    assert "procedure" not in query
-    assert len(selected) == 5 and "p0" in [c.document_id for c in selected]
-    assert trace["activation"] == "distinct_content_with_task_scope"
-    # A clean ranking or missing structured state does not create a scope pass.
-    clean = {**stage,"contexts":primary[1:]}
-    assert select_task_evidence(clean,reranker,query_context=intent)[0] == primary[1:6]
-    assert select_task_evidence(stage,reranker)[2] is None
-    assert len(reranker.calls) == 1
-
-
 def test_condition_selection_keeps_the_task_anchor_displaced_by_plain_fusion():
     primary = tuple(OnlineContext(f"p{i}", f"Original body {i}\nKeep complete.",
                                   title=f"Source {i}", score=50-i) for i in range(50))
