@@ -260,7 +260,7 @@ def implementation_manifest():
     paths = set(controller) | set((root / "adapters").rglob("*.py"))
     paths.update(root / name for name in (
         "bench/experiments.py", "bench/native_baseline.py", "bench/run_sessions.py",
-        "bench/report.py", "bench/metrics.py", "bench/quality.py", "bench/official.py",
+        "bench/report.py", "bench/metrics.py", "bench/quality.py",
         "bench/quality_acceptance.py", "bench/judge.py",
         "bench/b6_joint_sweep.py", "bench/native_policy_sweep.py", "bench/controller_capacity_sweep.py",
         "profiling/common.py", "profiling/positive_prefill.py",
@@ -310,6 +310,22 @@ def generation_provenance(spec, *, implementation=None):
     generation_spec.get("tuning", {}).pop("quality_eligible", None)
     generation_spec.get("tuning", {}).pop("quality_evidence", None)
     return provenance(generation_spec, implementation=implementation)
+
+
+def same_execution_provenance(recorded, current):
+    """Offline IBM scoring is not a generation dependency, including in old manifests.
+
+    Its own scoring receipt records the input, judge and evaluator identity.
+    All generation, reporting, selection and input bindings remain compared.
+    """
+    def execution(value):
+        if not value or "implementation" not in value:
+            return value
+        implementation = value["implementation"]
+        return {**value, "implementation": {**implementation, "files": {
+            path: digest for path, digest in implementation["files"].items()
+            if path != "bench/official.py"}}}
+    return execution(recorded) == execution(current)
 
 
 class QualityNotReady(ValueError):
@@ -514,7 +530,7 @@ def select_development(spec, results):
         raise ValueError("test results cannot enter development selection")
     implementation = implementation_manifest()
     expected_provenance = generation_provenance(spec, implementation=implementation)
-    if any(r.get("experiment_provenance") != expected_provenance for r in results):
+    if any(not same_execution_provenance(r.get("experiment_provenance"), expected_provenance) for r in results):
         raise ValueError("development results belong to different or unrecorded inputs/configuration/implementation; legacy unbound results require a new run")
     if any(r.get("controller_source_sha256") not in (None, implementation["controller_source_sha256"]) for r in results):
         raise ValueError("development run source manifest differs from its matrix implementation")
@@ -676,7 +692,7 @@ async def run_matrix(spec, output, *, stage="dev", frozen=None, executor=execute
     implementation = implementation_manifest()
     run_provenance = generation_provenance(spec, implementation=implementation)
     if needs_development_selection(spec, stage, frozen):
-        if frozen is None or frozen["provenance"] != provenance(spec, implementation=implementation):
+        if frozen is None or not same_execution_provenance(frozen["provenance"], provenance(spec, implementation=implementation)):
             raise ValueError("test and matched dev ablations require a frozen development selection of this exact dataset/config/split/implementation")
         if frozen["simulation_only"]:
             hardware = any(j["kind"] == "native" for j in jobs) or load_config(spec.get("base_config")).engine.kind != "mock"

@@ -106,7 +106,7 @@ def test_development_generation_identity_and_later_offline_quality_gate(tmp_path
 
 
 @pytest.mark.parametrize("relative", ["adapters/hybrid_retrieval.py", "adapters/query_views.py",
-    "controller/planner.py", "bench/run_sessions.py", "bench/report.py", "bench/quality.py", "bench/official.py",
+    "controller/planner.py", "bench/run_sessions.py", "bench/report.py", "bench/quality.py",
     "profiling/common.py", "bench/quality_acceptance.py", "bench/judge.py", "engine_patches/contextkv_model_scope.py",
     "adapters/assets/convsearch_r1/prompt.txt"])
 def test_freeze_rejects_old_results_after_execution_source_or_prompt_change(tmp_path, monkeypatch, relative):
@@ -135,6 +135,25 @@ def test_documentation_changes_do_not_invalidate_generation_identity(tmp_path, m
     assert select_development(value, results)["winners"]
     paths = results[0]["experiment_provenance"]["implementation"]["files"]
     assert not any(p.startswith(("docs/", "tests/")) or p == "README.md" for p in paths)
+
+
+def test_offline_official_grading_does_not_require_regenerating_answers(tmp_path, monkeypatch):
+    import bench.experiments as experiments
+    value = spec(tmp_path)
+    results = completed_results(value)
+    # Older manifests recorded this purely offline module as a generation input.
+    for result in results:
+        result["experiment_provenance"]["implementation"]["files"]["bench/official.py"] = "old-offline-code"
+    original = Path.read_bytes
+    target = Path(experiments.__file__).resolve().parent / "official.py"
+    def changed(path):
+        return original(path)+(b"\nnew offline HTTP scorer\n" if path.resolve() == target else b"")
+    monkeypatch.setattr(Path, "read_bytes", changed)
+    frozen = select_development(value, results)
+    assert frozen["winners"]
+    # Compatibility also applies at the frozen-run boundary.
+    frozen["provenance"]["implementation"]["files"]["bench/official.py"] = "old-offline-code"
+    assert experiments.same_execution_provenance(frozen["provenance"], experiments.provenance(value))
 
 
 def test_legacy_unbound_source_results_cannot_be_frozen_as_current_implementation(tmp_path):

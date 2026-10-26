@@ -6,7 +6,10 @@ is not a controller dependency. The adapter preserves upstream metric algorithms
 from __future__ import annotations
 
 import argparse
+from hashlib import sha256
+import importlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -114,9 +117,125 @@ def run_evaluator(checkout, mode, input_path, output_path, *, judge_revision=Non
     return receipt
 
 
+def create_http_judge(model, endpoint, *, max_tokens=2048, enable_thinking=None):
+    """Adapt the upstream string call and RAGAS interface to one cached HTTP client."""
+    from langchain_openai import ChatOpenAI
+    from ragas.llms import LangchainLLMWrapper
+
+    class OfficialJudge(LangchainLLMWrapper):
+        def __call__(self, prompt, **kwargs):
+            return self.langchain_llm.invoke(prompt, **kwargs)
+
+    extra = {} if enable_thinking is None else {
+        "chat_template_kwargs": {"enable_thinking": enable_thinking}}
+    client = ChatOpenAI(model=model, base_url=endpoint,
+        api_key=os.environ.get("OPENAI_API_KEY", "local"), temperature=0, top_p=1,
+        max_tokens=max_tokens, max_retries=0, timeout=180, cache=True, extra_body=extra)
+    judge = OfficialJudge(client)
+    # RAGAS otherwise changes the declared greedy sampler to temperature 0.01.
+    judge.bypass_temperature = True
+    return judge
+
+
+def score_http_stages(official, model, input_path, output_directory):
+    """Reuse upstream metric functions; atomically retain each completed stage."""
+    output = Path(output_directory)
+    output.mkdir(parents=True, exist_ok=True)
+    rows = load_jsonl(input_path)
+    task_ids = [row["task_id"] for row in rows]
+    if len(set(task_ids)) != len(task_ids):
+        raise ValueError("official scoring input contains duplicate task IDs")
+    has_underspecified = any("UNDERSPECIFIED" in row.get("answerability", row.get("Answerability", []))
+                            for row in rows)
+    stages = [("idk", official.run_idk_judge), ("rb_llm", official.run_radbench_judge),
+              ("rl_f", official.run_ragas_judges_local)]
+    if has_underspecified:
+        stages.append(("underspecified", lambda provider, name, inp, out:
+                       official.underspecified_eval(name, inp, out)))
+    previous = Path(input_path)
+    for name, operation in stages:
+        target = output / f"{name}.jsonl"
+        if not target.exists():
+            pending = target.with_suffix(".pending.jsonl")
+            operation("vllm", model, str(previous), str(pending))
+            scored_ids = [r["task_id"] for r in load_jsonl(pending)]
+            if sorted(scored_ids) != sorted(task_ids):
+                raise ValueError(f"official {name} output changed the task cohort")
+            pending.replace(target)
+        previous = target
+        (output / "progress.json").write_text(json.dumps({"completed_stage": name, "tasks": len(rows)})+"\n")
+    scored = load_jsonl(previous)
+    condition = official.get_idk_underspec_score if has_underspecified else official.get_idk_score
+    suffix = "_idk_underspecified" if has_underspecified else "_idk"
+    for row in scored:
+        for metric in ("RB_llm", "RL_F"):
+            row["metrics"][metric+suffix] = [condition(row, metric)]
+    target = output / "scores.jsonl"
+    pending = target.with_suffix(".pending.jsonl")
+    pending.write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in scored))
+    pending.replace(target)
+    return {"tasks": len(scored), "stages": [name for name, _ in stages],
+            "conditioned_suffix": suffix, "output": str(target)}
+
+
+def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_revision,
+                       endpoint, max_tokens=2048, enable_thinking=None):
+    """Offline official RB_llm/RL_F/IDK over frozen answers, with resumable HTTP calls.
+
+    Run in the isolated evaluator environment. This function does not start a
+    server, load weights, regenerate answers or alter official metric prompts.
+    """
+    root = Path(checkout).resolve()
+    source = json.loads((root / "contextkv-source.json").read_text())
+    if source["commit"] != DATASET_COMMIT:
+        raise ValueError("official source checkout is not the frozen MTRAG revision")
+    if not model or not judge_revision or not endpoint:
+        raise ValueError("HTTP scoring requires model, judge revision and endpoint")
+    output = Path(output_directory).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    identity = {"input_sha256": sha256(Path(input_path).read_bytes()).hexdigest(),
+                "source_commit": DATASET_COMMIT, "judge_model": model,
+                "judge_revision": judge_revision, "temperature": 0, "top_p": 1,
+                "max_tokens": max_tokens, "enable_thinking": enable_thinking}
+    identity_path = output / "identity.json"
+    if not identity_path.exists() and any(output.glob("*.jsonl")):
+        raise ValueError("existing scoring files have no bound identity; use a new directory")
+    if identity_path.exists() and json.loads(identity_path.read_text()) != identity:
+        raise ValueError("scoring directory belongs to different answers or judge settings; use a new directory")
+    identity_path.write_text(json.dumps(identity, indent=2)+"\n")
+    from importlib.metadata import distributions
+    environment = {"python": sys.version,
+                   "packages": sorted((d.metadata["Name"], d.version) for d in distributions())}
+    (output / "environment.json").write_text(json.dumps(environment, indent=2)+"\n")
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
+    os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
+    os.environ.setdefault("LANGSMITH_TRACING", "false")
+    from langchain_community.cache import SQLiteCache
+    from langchain_core.globals import set_llm_cache
+
+    set_llm_cache(SQLiteCache(database_path=str(output / "judge-cache.sqlite3")))
+    sys.path.insert(0, str(root / "scripts/evaluation"))
+    official = importlib.import_module("judge_wrapper")
+    loader = official.load_chat_openai_llm
+    official.load_chat_openai_llm = lambda name, max_new_tokens=None: create_http_judge(
+        name, endpoint, max_tokens=max_tokens, enable_thinking=enable_thinking)
+    try:
+        result = score_http_stages(official, model, input_path, output)
+    finally:
+        official.load_chat_openai_llm = loader
+    receipt = {**result, **identity, "status": "completed", "endpoint": endpoint,
+               "adapter_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
+               "backend": "OpenAI-compatible HTTP via the official vllm client branch",
+               "generation_answers_modified": False,
+               "scope": "Official raw and conditioned scores; judge limitations and P3 source/label changes need separate interpretation."}
+    (output / "completion.json").write_text(json.dumps(receipt, indent=2)+"\n")
+    return receipt
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["prepare", "check", "retrieval", "algorithmic", "generation"])
+    parser.add_argument("mode", choices=["prepare", "check", "retrieval", "algorithmic", "generation", "generation-http"])
     parser.add_argument("--checkout")
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
@@ -125,6 +244,9 @@ def main(argv=None):
     parser.add_argument("--provider", choices=["hf", "vllm"])
     parser.add_argument("--model")
     parser.add_argument("--judge-revision")
+    parser.add_argument("--endpoint", help="OpenAI-compatible /v1 URL for generation-http")
+    parser.add_argument("--max-tokens", type=int, default=2048, help="HTTP judge output budget")
+    parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args(argv)
     if args.mode == "prepare":
         if not args.references:
@@ -139,6 +261,12 @@ def main(argv=None):
         completed = check_format(args.checkout, args.input, args.output, python=args.python)
         print(completed.stdout)
         return completed.returncode
+    elif args.mode == "generation-http":
+        if not args.checkout or not args.model or not args.judge_revision or not args.endpoint:
+            parser.error("generation-http requires --checkout, --model, --judge-revision and --endpoint")
+        run_http_evaluator(args.checkout, args.input, args.output, model=args.model,
+            judge_revision=args.judge_revision, endpoint=args.endpoint,
+            max_tokens=args.max_tokens, enable_thinking=args.enable_thinking)
     else:
         if not args.checkout:
             parser.error("evaluation requires --checkout")

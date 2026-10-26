@@ -73,9 +73,9 @@ def check_common_runtime(info, runtime, *, gpu_tokens=16384, seed=42):
 
 def frozen_jobs(spec, stage, frozen):
     """The existing frozen contract is checked before any owned process can start."""
-    from bench.experiments import needs_development_selection
+    from bench.experiments import needs_development_selection, same_execution_provenance
     if needs_development_selection(spec, stage, frozen):
-        if frozen is None or frozen["provenance"] != provenance(spec):
+        if frozen is None or not same_execution_provenance(frozen["provenance"], provenance(spec)):
             raise ValueError("owned test/ablation requires the exact frozen development selection and implementation")
         if frozen["simulation_only"]:
             raise ValueError("simulation-only tuning cannot authorize an owned hardware run")

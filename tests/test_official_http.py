@@ -1,0 +1,93 @@
+"""Offline scoring must resume without repeating completed model work."""
+from copy import deepcopy
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from adapters.mtrag import DATASET_COMMIT
+from bench.official import load_jsonl, run_http_evaluator, score_http_stages
+
+
+def upstream(calls, *, fail=None):
+    def metric(name):
+        def run(provider, model, inp, out):
+            calls.append(name)
+            assert provider == "vllm" and model == "fixed-judge"
+            if name == fail:
+                raise RuntimeError("interrupted transport")
+            rows = load_jsonl(inp)
+            for row in rows:
+                row.setdefault("metrics", {})[name] = [0.5]
+            with open(out, "w") as stream:
+                stream.write("".join(json.dumps(row)+"\n" for row in rows))
+        return run
+    return SimpleNamespace(run_idk_judge=metric("idk_eval"),
+        run_radbench_judge=metric("RB_llm"), run_ragas_judges_local=metric("RL_F"),
+        underspecified_eval=lambda model, inp, out: metric("underspecified_eval")("vllm", model, inp, out),
+        get_idk_score=lambda row, name: row["metrics"][name][0],
+        get_idk_underspec_score=lambda row, name: row["metrics"][name][0])
+
+
+def predictions(path, label="ANSWERABLE"):
+    rows = [{"task_id": "conversation::1", "Answerability": [label],
+             "input": [{"speaker": "user", "text": "Original question"}],
+             "predictions": [{"text": "Original answer"}],
+             "contexts": [{"text": "Actual original evidence"}]}]
+    path.write_text("".join(json.dumps(row)+"\n" for row in rows))
+    return rows
+
+
+def test_resume_reuses_completed_stage_and_preserves_actual_answers(tmp_path):
+    source = tmp_path / "answers.jsonl"
+    original = predictions(source)
+    original_bytes = source.read_bytes()
+    calls = []
+    output = tmp_path / "scores"
+    with pytest.raises(RuntimeError, match="interrupted"):
+        score_http_stages(upstream(calls, fail="RB_llm"), "fixed-judge", source, output)
+    assert (output / "idk.jsonl").exists()
+    assert not (output / "rb_llm.jsonl").exists()
+    calls.clear()
+    result = score_http_stages(upstream(calls), "fixed-judge", source, output)
+    assert calls == ["RB_llm", "RL_F"]
+    scored = load_jsonl(result["output"])
+    assert {k: v for k, v in scored[0].items() if k != "metrics"} == original[0]
+    assert source.read_bytes() == original_bytes
+    calls.clear()
+    score_http_stages(upstream(calls), "fixed-judge", source, output)
+    assert calls == []
+
+
+def test_clarification_is_only_scored_when_the_cohort_requires_it(tmp_path):
+    source = tmp_path / "answers.jsonl"
+    predictions(source, "UNDERSPECIFIED")
+    calls = []
+    result = score_http_stages(upstream(calls), "fixed-judge", source, tmp_path / "scores")
+    assert calls == ["idk_eval", "RB_llm", "RL_F", "underspecified_eval"]
+    assert "RL_F_idk_underspecified" in load_jsonl(result["output"])[0]["metrics"]
+
+
+def test_changed_input_cannot_reuse_another_scoring_cache(tmp_path):
+    checkout = tmp_path / "upstream"
+    checkout.mkdir()
+    (checkout / "contextkv-source.json").write_text(json.dumps({"commit": DATASET_COMMIT}))
+    source = tmp_path / "answers.jsonl"
+    predictions(source)
+    output = tmp_path / "scores"
+    output.mkdir()
+    (output / "identity.json").write_text(json.dumps({"input_sha256": "another-answer-set"}))
+    with pytest.raises(ValueError, match="different answers or judge settings"):
+        run_http_evaluator(checkout, source, output, model="fixed-judge", judge_revision="frozen",
+                           endpoint="http://localhost:30002/v1")
+
+
+def test_upstream_dropped_tasks_are_not_committed_as_a_completed_stage(tmp_path):
+    source = tmp_path / "answers.jsonl"
+    predictions(source)
+    api = deepcopy(upstream([]))
+    api.run_idk_judge = lambda provider, model, inp, out: open(out, "w").close()
+    output = tmp_path / "scores"
+    with pytest.raises(ValueError, match="changed the task cohort"):
+        score_http_stages(api, "fixed-judge", source, output)
+    assert not (output / "idk.jsonl").exists()

@@ -61,7 +61,7 @@ python scripts/fetch_mtrag.py
 python -m adapters.prepare_data --cloud-corpus
 ```
 
-公开主benchmark使用MT-RAG，MTRAG-UN已接入选定轮次P1及可变数量原文；`configs/benchmark_mtrag.yaml`提供当前Cloud P3的Native/ContextKV完整系统比较。P1/P2可读取四域，其他域P3需准备对应索引。自构案例只用于缺陷诊断。P2 使用给定证据与实际生成历史，P3 加入真实检索。正式运行入口和方法匹配规则见[评价说明](docs/data_and_evaluation.md)、[原生基线](docs/guides/native_model_scope.md)、[显式矩阵](docs/guides/b6_owned_matrix.md)。已有数据、索引与标定直接复用。
+公开主benchmark使用MT-RAG，MTRAG-UN已接入选定轮次P1及可变数量原文；`configs/benchmark_mtrag.yaml`提供当前Cloud P3的Native/NativeWithA/ContextKV比较。固定公开比较已完成492次回答，官方质量评分进行中；当前完整响应均值未显示整体提速，来源复核保留了多轮检索收益及待修正的问题。P1/P2可读取四域，其他域P3需准备对应索引。自构案例只用于缺陷诊断。P2使用给定证据与实际生成历史，P3加入真实检索。结果、评分入口和复现口径见[评价说明](docs/data_and_evaluation.md)、[原生基线](docs/guides/native_model_scope.md)、[显式矩阵](docs/guides/b6_owned_matrix.md)。已有答案、索引与标定直接复用。
 
 ## 仓库职责
 
