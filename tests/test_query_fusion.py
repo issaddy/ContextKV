@@ -19,6 +19,7 @@ class Encoder:
 
 
 class Sparse:
+    corpus_snapshot_id = "synthetic-snapshot"
     manifest = {"corpus_sha256": "synthetic-shared-corpus"}
 
     def __init__(self, contexts):
@@ -38,10 +39,13 @@ class Dense:
         self.contexts, self.calls = contexts, []
 
     def search(self, query, encoder, *, top_k):
-        self.calls.append((query, top_k))
-        encoder.encode([query])
-        rows = self.contexts[:5] if query == "raw" else self.contexts[5:]
-        return rows[::-1][:top_k]
+        return self.search_many([query], encoder, top_k=top_k)[0]
+
+    def search_many(self, queries, encoder, *, top_k):
+        encoder.encode(list(queries))
+        self.calls.extend((query, top_k) for query in queries)
+        return [((self.contexts[:5] if query == "raw" else self.contexts[5:])[::-1][:top_k])
+                for query in queries]
 
 
 class Reranker:
@@ -87,7 +91,7 @@ def test_distinct_queries_one_four_list_rrf_and_all_new_pairs_use_topic():
     assert len(pool) == len({c.document_id for c in pool}) == 5
     assert set(c.document_id for c in pool).intersection(raw_ids)
     assert set(c.document_id for c in pool).intersection(topic_ids)
-    assert encoder.calls == [["raw"], ["topic"]]
+    assert encoder.calls == [["raw", "topic"]]
     assert sparse.calls == [(["raw"], 5), (["topic"], 5)]
     assert reranker.calls == [("topic", pool)]  # No raw logits or unscored new documents.
     assert actual["hybrid_rerank"]["contexts"] == tuple(replace(c, score=float(i)) for i, c in reversed(list(enumerate(pool))))
@@ -98,7 +102,7 @@ def test_distinct_queries_one_four_list_rrf_and_all_new_pairs_use_topic():
     assert trace["fused_union_candidates"] == 10 and trace["rerank_query"] == "topic"
     assert trace["source_queries"][0]["bm25_candidate_ids"] == raw_ids
     assert trace["source_queries"][1]["dense_candidate_ids"] == topic_ids[::-1]
-    assert trace["additional_current_retrieval_ms"] >= 0 and trace["rerank_ms"] >= 0
+    assert trace["additional_current_retrieval_ms"] is None and trace["rerank_ms"] >= 0
     assert not {"qrels", "labels", "targets", "answers"}.intersection(inspect.signature(search_current_topic).parameters)
 
 
@@ -119,7 +123,7 @@ def test_explicit_rerank_query_changes_only_scoring_not_raw_or_topic_recall(topi
         candidate_k=5, rerank_k=5, rerank_query="short scoring query")
     assert actual["hybrid"]["contexts"] == original["hybrid"]["contexts"]
     assert actual["hybrid_rerank"]["rerank_candidate_ids"] == original["hybrid_rerank"]["rerank_candidate_ids"]
-    assert encoder.calls == ([["raw"]] if topic == "raw" else [["raw"], ["topic"]])
+    assert encoder.calls == ([["raw"]] if topic == "raw" else [["raw", "topic"]])
     assert len(reranker.calls) == 1 and reranker.calls[0][0] == "short scoring query"
     assert len(reranker.calls[0][1]) == 5
     trace = actual["hybrid_rerank"]["query_fusion_trace"]
@@ -149,8 +153,66 @@ def test_offline_dual_stages_share_trace_and_keep_original_question():
     assert rows[-1]["query_fusion_trace"]["current_query"] == query.user_questions[-1]
     assert rows[-1]["query_fusion_trace"]["rerank_query"] == rows[-1]["query_text"]
     assert rows[-1]["rerank_candidate_ids"] == rows[0]["candidate_ids"][:5]
-    assert len(reranker.calls) == 1 and len(encoder.calls) == 2
+    assert len(reranker.calls) == 1 and len(encoder.calls) == 1
     assert rows[-1]["elapsed_ms"] >= rows[0]["elapsed_ms"] >= rows[0]["query_view_ms"]
     for modes in (("current",), ("user_topic", "current")):
         with pytest.raises(ValueError, match="only user_topic"):
             list(evaluate_queries([query], sparse, dense, encoder, modes=modes, query_fusion="current_topic_rrf"))
+
+
+def test_dialogue_views_preserve_original_need_and_bound_the_derived_family_vote():
+    from adapters.hybrid_retrieval import search_dialogue_views
+    sparse, dense, encoder, reranker = fixture()
+    pairs = []
+    def score_many(queries, contexts):
+        pairs.append((tuple(queries), tuple(contexts)))
+        # The literal question and each derived view favor opposite documents.
+        return [[-int(c.document_id) if q == "raw" else int(c.document_id) for c in contexts]
+                for q in queries]
+    reranker.score_many = score_many
+    ranked, trace = search_dialogue_views("raw", "topic", ("need one", "need two", "topic"),
+        sparse, dense, encoder, reranker, candidate_k=5, rerank_k=10)
+    assert encoder.calls == [["raw", "topic", "need one", "need two"]]
+    assert len(pairs) == 1 and len(pairs[0][1]) == 10
+    assert trace["query_weights"] == [1, 1/3, 1/3, 1/3]
+    assert trace["rerank_pairs"] == 40 and trace["encoder_batches"] == 1
+    assert {ranked[0].document_id, ranked[1].document_id} == {"0", "9"}
+    assert all(replace(c, score=None) == dense.by_id[c.document_id] for c in ranked)
+    # More identical derived views do not outvote the user's original question.
+    repeated, repeated_trace = search_dialogue_views("raw", "topic", ("topic", "topic"),
+        *fixture(), candidate_k=5, rerank_k=10)
+    assert repeated_trace["rerank_queries"] == ["raw", "topic"]
+    assert len(repeated) == 10
+
+
+def test_dialogue_identical_view_deduplicates_work_and_preserves_single_view_order():
+    from adapters.hybrid_retrieval import search_dialogue_views
+    sparse, dense, encoder, reranker = fixture()
+    ranked, trace = search_dialogue_views("raw", "raw", (), sparse, dense, encoder, reranker,
+                                         candidate_k=5, rerank_k=5)
+    expected = search_variants("raw", *fixture(), candidate_k=5, rerank_k=5)["hybrid_rerank"]["contexts"]
+    assert [c.document_id for c in ranked] == [c.document_id for c in expected]
+    assert encoder.calls == [["raw"]] and len(reranker.calls) == 1
+    assert trace["query_weights"] == [1] and trace["rerank_pairs"] == 5
+
+
+def test_dialogue_route_uses_literal_history_without_changing_committed_intent():
+    from types import SimpleNamespace
+    from adapters.hybrid_retrieval import HybridRetriever
+    from adapters.mtrag import OnlineMessage, OnlineTurn
+    from adapters.query_resolution import PriorContext
+    from controller.schema import QueryContext, TaskFrame
+    history = (OnlineMessage("user", "Define the API."), OnlineMessage("assistant", "Actual answer."))
+    turn = OnlineTurn("conversation", "task", 2, "corpus", "How do I create it?", history, (), "P3")
+    intent = QueryContext("definition of API", "followup", (1,), TaskFrame("API", "", "definition"))
+    resolver = SimpleNamespace(resolve=lambda *args: {"text": intent.query, "context": asdict(intent)})
+    sparse, dense, encoder, reranker = fixture()
+    retriever = HybridRetriever(sparse, dense, encoder, reranker, query_mode="conversational",
+                               query_fusion="dialogue_rrf", resolver=resolver, candidate_k=5, rerank_k=5)
+    result = retriever.retrieve_turn(turn, prior_context=PriorContext())
+    assert encoder.calls == [["Define the API.\nHow do I create it?", "definition of API"]]
+    assert result.query == turn.query and result.history == history and result.query_context == intent
+    trace = retriever.query_view_traces[-1]
+    assert trace["rerank_query"] is None and trace["rerank_query_mode"] == "dialogue_views"
+    assert trace["query_fusion_trace"]["rerank_queries"] == encoder.calls[0]
+    assert len(result.contexts) == 5

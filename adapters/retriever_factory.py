@@ -56,10 +56,12 @@ def load_retriever_config(path):
     if value.evidence_selection == "semantic" and (
             value.query_mode != "conversational" or value.selector is None):
         raise ValueError("semantic evidence selection requires conversational mode with selector")
-    if value.query_fusion not in {"single", "current_topic_rrf"}:
+    if value.query_fusion not in {"single", "current_topic_rrf", "dialogue_rrf"}:
         raise ValueError("unknown query fusion")
     if value.query_fusion == "current_topic_rrf" and (value.query_mode not in {"user_topic", "conversational", *SOURCE_MODES} or value.stage == "dense"):
         raise ValueError("current_topic_rrf requires user_topic/source_topic/assistant_topic_unverified and hybrid/hybrid_rerank")
+    if value.query_fusion == "dialogue_rrf" and (value.query_mode != "conversational" or value.stage == "dense"):
+        raise ValueError("dialogue_rrf requires conversational hybrid retrieval")
     if value.query_mode == "conversational":
         from adapters.query_selector import SelectorConfig
         if value.rerank_query_mode != "resolved":

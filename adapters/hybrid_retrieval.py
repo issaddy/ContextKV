@@ -56,14 +56,16 @@ def rerank_query_text(turn, resolved_query, mode="resolved"):
     raise ValueError("unknown rerank query mode")
 
 
-def reciprocal_rank_fusion(rankings, *, k=60):
-    """Equal-weight RRF; duplicate IDs cannot vote twice within one ranking."""
+def reciprocal_rank_fusion(rankings, *, k=60, weights=None):
+    """Rank fusion; duplicate IDs cannot vote twice within one ranking."""
     if k < 0:
         raise ValueError("RRF rank constant must be nonnegative")
+    rankings = tuple(rankings)
+    weights = (1.0,) * len(rankings) if weights is None else tuple(weights)
     scores = {}
-    for ranking in rankings:
+    for ranking, weight in zip(rankings, weights, strict=True):
         for rank, pid in enumerate(dict.fromkeys(ranking), 1):
-            scores[pid] = scores.get(pid, 0.0)+1/(k+rank)
+            scores[pid] = scores.get(pid, 0.0)+weight/(k+rank)
     return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
 
 
@@ -223,6 +225,15 @@ class LocalBGE:
             raise ValueError("dense encoder is not a cross-encoder")
         # Raw logits provide a ranking, not a calibrated relevance probability.
         return self._forward([(query, rerank_document(c)) for c in contexts])
+
+    def score_many(self, queries, contexts):
+        """Batch query/passage pairs across views using the same checkpoint API."""
+        if not self.reranker:
+            raise ValueError("dense encoder is not a cross-encoder")
+        queries, contexts = tuple(queries), tuple(contexts)
+        documents = [rerank_document(c) for c in contexts]
+        values = self._forward([(query, document) for query in queries for document in documents])
+        return values.reshape(len(queries), len(contexts))
 
     def close(self):
         """Release this process's model between matrix jobs; metadata stays readable."""
@@ -408,6 +419,82 @@ def search_variants(query, sparse, dense, encoder, reranker=None, *, candidate_k
     return stages
 
 
+def _recall_query_views(queries, sparse, dense, encoder, *, candidate_k, rrf_k, weights=None):
+    """One encoder batch and one fixed index per view; no generated answer input."""
+    started = time.perf_counter()
+    queries = tuple(queries)
+    weights = (1.0,) * len(queries) if weights is None else tuple(weights)
+    dense_rows = dense.search_many(queries, encoder, top_k=candidate_k)
+    dense_ms = (time.perf_counter() - started) * 1000
+    sparse_started = time.perf_counter()
+    sparse_rows = [sparse.retrieve([query], top_k=candidate_k) for query in queries]
+    sparse_ms = (time.perf_counter() - sparse_started) * 1000
+    fused = reciprocal_rank_fusion([[c.document_id for c in rows]
+        for pair in zip(sparse_rows, dense_rows, strict=True) for rows in pair], k=rrf_k,
+        weights=[weight for weight in weights for _ in range(2)])
+    return tuple(replace(dense.by_id[pid], score=score) for pid, score in fused), {
+        "source_queries": [{"query": query, "weight": weight,
+            "bm25_candidate_ids": [c.document_id for c in sparse_hits],
+            "dense_candidate_ids": [c.document_id for c in dense_hits]}
+            for query, weight, sparse_hits, dense_hits in zip(queries, weights, sparse_rows, dense_rows, strict=True)],
+        "dense_batch_ms": dense_ms, "sparse_ms": sparse_ms,
+        "elapsed_ms": (time.perf_counter() - started) * 1000, "encoder_batches": 1}
+
+
+def search_dialogue_views(literal_query, resolved_query, requirements, sparse, dense, encoder,
+                          reranker=None, *, candidate_k=50, rerank_k=50, rrf_k=60,
+                          source_context=None, source_neighbors=None):
+    """Keep literal conversation and derived needs through both retrieval stages.
+
+    The literal view and the distinct derived-view family each receive one
+    total vote. Splitting a task into more needs cannot multiply its family's
+    influence. Every view reranks the same bounded pool; final fusion uses
+    ranks, since cross-query logits are not calibrated probabilities.
+    """
+    started = time.perf_counter()
+    queries = tuple(dict.fromkeys((literal_query, resolved_query, *requirements)))
+    weights = (1.0,) if len(queries) == 1 else (1.0, *((1.0 / (len(queries)-1),) * (len(queries)-1)))
+    contexts, recall = _recall_query_views(queries, sparse, dense, encoder,
+        candidate_k=candidate_k, rrf_k=rrf_k, weights=weights)
+    candidates = contexts[:rerank_k]
+    seed_ids = {c.document_id for c in candidates}
+    # Compound tasks may reuse the existing one-hop original-source recall.
+    neighbors = source_neighbors(candidates) if requirements and source_neighbors is not None else ()
+    by_id = {c.document_id: c for c in candidates}
+    for neighbor in neighbors:
+        original = dense.by_id.get(neighbor.document_id)
+        if original is not None and original.text == neighbor.text:
+            by_id.setdefault(neighbor.document_id, original)
+    candidates = tuple(by_id.values())
+    if source_context is not None:
+        candidates = source_context(candidates)
+    rankings = []
+    ranked = contexts
+    if reranker is not None:
+        score_many = getattr(reranker, "score_many", None)
+        scores = (score_many(queries, candidates) if score_many is not None else
+                  [reranker.score(query, candidates) for query in queries])
+        for values in scores:
+            rankings.append([c.document_id for c, _ in sorted(zip(candidates, values, strict=True),
+                key=lambda pair: (-float(pair[1]), pair[0].document_id))])
+        fused = reciprocal_rank_fusion(rankings, k=rrf_k, weights=weights)
+        originals = {c.document_id: c for c in candidates}
+        ranked = tuple(replace(originals[pid], score=score) for pid, score in fused)
+    trace = {"strategy": "dialogue_rrf", "literal_query": literal_query,
+        "resolved_query": resolved_query, "requirements": list(requirements),
+        "query_weights": list(weights), "family_weighting": "literal 1; all other distinct views share 1",
+        "source_queries": recall["source_queries"], "encoder_batches": recall["encoder_batches"],
+        "recall_ms": recall["elapsed_ms"], "dense_batch_ms": recall["dense_batch_ms"],
+        "candidate_k_per_query_retriever": candidate_k, "rerank_k_seed_pool": rerank_k,
+        "neighbor_candidate_ids": [pid for pid in by_id if pid not in seed_ids],
+        "rerank_candidate_ids": [c.document_id for c in candidates] if reranker is not None else [],
+        "rerank_queries": list(queries) if reranker is not None else [],
+        "rerank_rankings": rankings, "rerank_pairs": len(queries)*len(candidates) if reranker is not None else 0,
+        "elapsed_ms": (time.perf_counter()-started)*1000,
+        "scope": "query-view fusion; original evidence bodies and task state unchanged"}
+    return ranked, trace
+
+
 def search_current_topic(current_query, topic_query, sparse, dense, encoder, reranker=None, *,
                          candidate_k=50, rerank_k=50, rrf_k=60, rerank_query=None, source_context=None):
     """One fixed equal-RRF pool, scored with topic unless explicitly overridden.
@@ -427,22 +514,27 @@ def search_current_topic(current_query, topic_query, sparse, dense, encoder, rer
         single = search_variants(topic_query, sparse, dense, encoder, reranker,
             candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k, rerank_query=scoring_query,
             source_context=source_context)
-        source_stages = [("shared_current_topic", topic_query, single)]
+        sparse_ids = [c.document_id for c in single["bm25"]["contexts"]]
+        dense_ids = [c.document_id for c in single["dense"]["contexts"]]
+        source_queries = [{"role": "shared_current_topic", "query": topic_query,
+            "bm25_candidate_ids": sparse_ids, "dense_candidate_ids": dense_ids,
+            "bm25_candidates": len(sparse_ids), "dense_candidates": len(dense_ids),
+            "per_query_union_candidates": len(set(sparse_ids) | set(dense_ids)),
+            "retrieval_ms": single["hybrid"]["elapsed_ms"]}]
         selected_stages = {key: value for key, value in single.items() if key in {"hybrid", "hybrid_rerank"}}
         fusion_ms, additional_current_ms = 0.0, 0.0
     else:
-        raw = search_variants(current_query, sparse, dense, encoder,
-            candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k)
-        topic = search_variants(topic_query, sparse, dense, encoder,
-            candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k)
-        source_stages = [("current", current_query, raw), ("topic", topic_query, topic)]
-        fusion_started = time.perf_counter()
-        fused = reciprocal_rank_fusion([[c.document_id for c in stages[stage]["contexts"]]
-            for _, _, stages in source_stages for stage in ("bm25", "dense")], k=rrf_k)
-        contexts = tuple(replace(dense.by_id[pid], score=score) for pid, score in fused)
-        fusion_ms = (time.perf_counter()-fusion_started)*1000
+        contexts, recall = _recall_query_views((current_query, topic_query), sparse, dense, encoder,
+            candidate_k=candidate_k, rrf_k=rrf_k)
+        source_queries = [{**row, "role": role,
+            "bm25_candidates": len(row["bm25_candidate_ids"]),
+            "dense_candidates": len(row["dense_candidate_ids"]),
+            "per_query_union_candidates": len(set(row["bm25_candidate_ids"]) | set(row["dense_candidate_ids"])),
+            "retrieval_ms": None}
+            for role, row in zip(("current", "topic"), recall["source_queries"], strict=True)]
+        fusion_ms = recall["elapsed_ms"]-recall["dense_batch_ms"]-recall["sparse_ms"]
         selected_stages = {"hybrid": {"contexts": contexts, "elapsed_ms": (time.perf_counter()-started)*1000}}
-        additional_current_ms = raw["hybrid"]["elapsed_ms"]
+        additional_current_ms = None  # Dense work is shared, not independently timed per query.
         if reranker is not None:
             candidates = contexts[:rerank_k]
             if source_context is not None:
@@ -458,15 +550,9 @@ def search_current_topic(current_query, topic_query, sparse, dense, encoder, rer
                 "rerank_candidate_ids": [c.document_id for c in candidates]}
     trace = {"strategy": "current_topic_rrf", "weights": "equal per unique query and retriever",
         "current_query": current_query, "topic_query": topic_query,
-        "retrieval_query_count": len(source_stages), "duplicate_query_skipped": same_query,
+        "retrieval_query_count": len(source_queries), "encoder_batches": 1, "duplicate_query_skipped": same_query,
         "candidate_k_per_query_retriever": candidate_k, "rerank_k_total": rerank_k, "rrf_k": rrf_k,
-        "source_queries": [{"role": role, "query": query,
-            "bm25_candidates": len(stages["bm25"]["contexts"]),
-            "dense_candidates": len(stages["dense"]["contexts"]),
-            "bm25_candidate_ids": [c.document_id for c in stages["bm25"]["contexts"]],
-            "dense_candidate_ids": [c.document_id for c in stages["dense"]["contexts"]],
-            "per_query_union_candidates": len(stages["hybrid"]["contexts"]),
-            "retrieval_ms": stages["hybrid"]["elapsed_ms"]} for role, query, stages in source_stages],
+        "source_queries": source_queries,
         "fused_union_candidates": len(selected_stages["hybrid"]["contexts"]),
         "additional_current_retrieval_ms": additional_current_ms, "cross_query_fusion_ms": fusion_ms}
     for stage, values in selected_stages.items():
@@ -489,10 +575,12 @@ class HybridRetriever:
             raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
         if stage not in {"dense", "hybrid", "hybrid_rerank"}:
             raise ValueError("unknown online retrieval stage")
-        if query_fusion not in {"single", "current_topic_rrf"}:
+        if query_fusion not in {"single", "current_topic_rrf", "dialogue_rrf"}:
             raise ValueError("unknown query fusion")
         if query_fusion == "current_topic_rrf" and (query_mode not in {"user_topic", "conversational", *SOURCE_MODES} or stage == "dense"):
             raise ValueError("current_topic_rrf requires user_topic/source_topic/assistant_topic_unverified and hybrid/hybrid_rerank")
+        if query_fusion == "dialogue_rrf" and (query_mode != "conversational" or stage == "dense"):
+            raise ValueError("dialogue_rrf requires conversational hybrid retrieval")
         if query_mode in SOURCE_MODES and (resolver is None or query_fusion != "current_topic_rrf"):
             raise ValueError("topic selector modes require resolver and current_topic_rrf")
         if query_mode == "conversational" and (resolver is None or rerank_query_mode != "resolved"):
@@ -549,7 +637,7 @@ class HybridRetriever:
         manifest = {"kind": "bge_hybrid", "corpus_snapshot_id": self.corpus_snapshot_id,
             "query_mode": self.query_mode, "stage": self.stage, "top_k": 5,
             "query_fusion": self.query_fusion,
-            "rerank_query_mode": self.rerank_query_mode,
+            "rerank_query_mode": "dialogue_views" if self.query_fusion == "dialogue_rrf" else self.rerank_query_mode,
             "rerank_document_view": "source address, title and original body",
             "pre_rerank_metadata": self.source_context is not None,
             "source_window": {"enabled": self.source_window, "radius": None if self.source_documents is not None else 1,
@@ -569,10 +657,12 @@ class HybridRetriever:
                 "source_identity": "highest ranked original representative; task anchor retained",
                 "budget": "at most five groups from the existing scored pool",
                 "extra_model_calls": 0},
-            "requirement_selection": {"strategy": "task_requirement_coverage_v1",
+            "requirement_selection": {"strategy": ("dialogue_view_rank_fusion_v1" if self.query_fusion == "dialogue_rrf"
+                                                      else "task_requirement_coverage_v1"),
                 "activation": "resolved compound task with at least two explicit information needs; hybrid or hybrid_rerank",
                 "retrieval": "batched query encoding, equal RRF, and available same-source neighbors as scored candidates",
                 "selection": ("joint task-conditioned selection of prepared reading units" if self.evidence_selector
+                              else "literal and derived-family rank fusion within five distinct groups" if self.query_fusion == "dialogue_rrf"
                               else "primary task anchor plus diminishing-return coverage within five distinct groups"),
                 "cost": "one batched encode and search per view; optional primary ranking; per-need scores only without joint semantic selection"},
             "candidate_k": self.candidate_k, "rerank_k": self.rerank_k, "rrf_k": self.rrf_k,
@@ -594,7 +684,7 @@ class HybridRetriever:
             manifest["condition_evidence_selection"] = {
                 "strategy": "task_anchor_condition_rrf_v1",
                 "activation": "literal named task continuation with a distinct condition view",
-                "stage_enabled": self.stage == "hybrid_rerank",
+                "stage_enabled": self.stage == "hybrid_rerank" and self.query_fusion != "dialogue_rrf",
                 "pool": "same primary rerank candidates; no additional index search",
                 "selection": "retain primary rank one; highest equal RRF score from distinct content groups in remaining slots",
                 "extra_rerank_pairs_max": self.rerank_k, "rrf_k": self.rrf_k}
@@ -646,7 +736,14 @@ class HybridRetriever:
             # Only the local encoder/reranker pair is serialized. Both semantic
             # HTTP operations run outside this lock; shutdown drains the worker.
             with self._lock:
-                if requirements and self.stage in {"hybrid", "hybrid_rerank"}:
+                if self.query_fusion == "dialogue_rrf":
+                    ranked, fusion_trace = search_dialogue_views(retrieval_query(turn.user_questions), query,
+                        requirements, self.sparse, self.dense, self.encoder,
+                        self.reranker if self.stage == "hybrid_rerank" else None,
+                        candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
+                        source_context=self.source_context, source_neighbors=self.source_neighbors)
+                    scoring_query = None  # Exact scoring views are recorded in fusion_trace.
+                elif requirements and self.stage in {"hybrid", "hybrid_rerank"}:
                     contexts, requirement_trace = search_requirements(query, requirements,
                         self.sparse, self.dense, self.encoder, self.reranker,
                         candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
@@ -672,7 +769,7 @@ class HybridRetriever:
                         rerank_query=scoring_query, source_context=self.source_context)
                     ranked = stages[self.stage]["contexts"]
                 if requirement_trace is None:
-                    if self.stage == "hybrid_rerank" and not semantic_selection and view is not None and view.get("condition_query"):
+                    if self.stage == "hybrid_rerank" and self.query_fusion != "dialogue_rrf" and not semantic_selection and view is not None and view.get("condition_query"):
                         contexts, condition_trace = select_condition_evidence(
                             stages[self.stage], view["condition_query"], self.reranker, rrf_k=self.rrf_k,
                             group_key=self.selection_group)
@@ -716,7 +813,7 @@ class HybridRetriever:
                 trace = {"task_id": turn.task_id, "conversation_id": turn.conversation_id,
                     "turn": turn.turn, **view,
                     **({"context": asdict(intent)} if intent is not None else {}),
-                    "rerank_query_mode": self.rerank_query_mode,
+                    "rerank_query_mode": "dialogue_views" if self.query_fusion == "dialogue_rrf" else self.rerank_query_mode,
                     "rerank_query": scoring_query if self.stage == "hybrid_rerank" else None,
                     "retrieval_status": ("failed" if retrieval_error else
                                          "skipped_conversational" if conversational else "completed"),
