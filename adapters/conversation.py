@@ -17,7 +17,7 @@ from adapters.retrieval import retrieval_query
 from controller.schema import QueryContext, TaskFrame
 
 
-VERSION = "conversational-intent-v13"
+VERSION = "conversational-intent-v15"
 FRAME_FIELDS = ("topic", "target", "conditions")
 RELATIONS = ("standalone", "followup", "correction", "condition_change", "topic_switch", "revisit", "ambiguous", "conversational")
 _DEPENDENT = re.compile(
@@ -176,6 +176,37 @@ def apply_frame_updates(base, updates, *, task_operation="keep", task_value="", 
     return frame
 
 
+def state_change_turns(interpretations):
+    """Locate changes to the current state in the already committed ledger.
+
+    A change location is bookkeeping, not proof that a model-derived value is
+    true. Keep each field's latest update/removal within the current topic so old
+    lookup text cannot hide a later removal. Independent topics and missing state
+    reset lineage; no second persistent state or session cache is used.
+    """
+    previous, origins = {}, {}
+    for number, intent in enumerate(interpretations, 1):
+        frame = intent.task_frame if intent is not None else None
+        if frame is None:
+            previous, origins = {}, {}
+            continue
+        if intent.relation in {"standalone", "topic_switch"}:
+            previous, origins = {}, {}
+        values = {(name,): getattr(frame, name) for name in ("topic", "target", "task", "requirements")
+                  if getattr(frame, name)}
+        values.update({("conditions", name): value for name, value in frame.conditions if value})
+        for path in previous.keys() - values.keys():
+            origins[path] = number
+        for path, value in values.items():
+            if previous.get(path) != value:
+                origins[path] = number
+        previous = values
+    result = {}
+    for path, number in origins.items():
+        result.setdefault(number, []).append(path)
+    return result
+
+
 def _history_query(turn, context):
     """Use the latest committed interpretation in the existing recent window.
 
@@ -222,7 +253,7 @@ class ConversationResolver:
     def manifest(self):
         return {"version": VERSION, "system_prompt": SYSTEM,
                 "initialization_prompt": INITIALIZE_SYSTEM,
-                "history": "current question, committed state and complete recent actual QA; explicit revisits can read older user turns and stored states",
+                "history": "current question, latest committed state and complete recent actual QA; older state-change questions with their preceding assistant message fit within the same input budget; explicit revisits retain their existing history view",
                 "calls": "one configured interpretation initializes the first task or updates later state; literal task composition still reuses exact clauses; no-client mode retains history handling",
                 "self_contained_gate": "the configured model decides whether a named question changes topic or retains conditions; name occurrence alone does not clear active state",
                 "condition_view": "literal named task continuation also supplies the unchanged current clause for condition-aware evidence selection",
@@ -230,7 +261,7 @@ class ConversationResolver:
                 "task_state": "initialize a complete current frame when the previous turn has none; otherwise keep the existing task-first patch protocol; omitted attributes persist, null deletes; independent topics reset and explicit revisits resume",
                 "task_projection": "whole task plus explicit needs; each requirement query keeps its topic, target and conditions",
                 "semantics": "derived intent, not factual evidence or a guarantee of correct resolution",
-                "conversational_turns": "preserve active state, bypass source retrieval/selection and respond as dialogue",
+                "conversational_turns": "preserve active state; ranked mode bypasses retrieval, joint mode discards recalled sources",
                 "transport": self.client.manifest if self.client is not None else {"kind": "no_auxiliary_model"}}
 
     def resolve(self, turn, context, *, evidence_documents=None):
@@ -257,24 +288,67 @@ class ConversationResolver:
                 return finish("self_contained_current_question")
             return finish("contextual_history_view_without_auxiliary_model", history_view=True)
 
-        history_window = len(turn.user_questions)-1 if _REVISIT.search(turn.query) else 3
-        first = max(0, len(turn.user_questions)-1-history_window)
-        users = [{"turn": i+1, "question": q} for i, q in enumerate(turn.user_questions[:-1]) if i >= first]
-        recent = {row["turn"]: row["answer"] for row in dialogue_turns(turn, [u["turn"] for u in users])}
-        for row in users:
-            if row["turn"] in recent:
-                row["answer"] = recent[row["turn"]]
-        for row, interpretation in zip(users, context.interpretations[first:]):
-            if interpretation is not None:
+        count = len(turn.user_questions)-1
+        revisiting = bool(_REVISIT.search(turn.query))
+        first = max(0, count - (count if revisiting else 3))
+        prior = context.interpretations[count-1] if 0 < count <= len(context.interpretations) else None
+        initialize = prior is None or prior.task_frame is None or prior.relation == "ambiguous"
+        changes = state_change_turns(context.interpretations[:count])
+        rows = dialogue_turns(turn, range(first+1, count+1))
+        users = []
+        for row in rows:
+            number = row["turn"]
+            interpretation = context.interpretations[number-1] if number <= len(context.interpretations) else None
+            # Ordinary updates need the current state once. Old snapshots remain
+            # available when initializing or explicitly resuming an earlier task.
+            if interpretation is not None and (number == count or initialize or revisiting):
                 if interpretation.task_frame is not None:
                     row["state"] = {**asdict(interpretation.task_frame),
                                     "conditions": dict(interpretation.task_frame.conditions)}
                 else:
                     row["prior_interpretation"] = interpretation.query
                 row["relation"] = interpretation.relation
+            users.append(row)
+        # State at user turn n precedes answer n. Read the actual antecedent
+        # assistant message, not the answer produced from that same state.
+        optional_history = [{"turn": number,
+            **({"preceding_answer": turn.history[2*number-3].text} if number > 1 else {}),
+            "question": turn.history[2*number-2].text, "state_fields_last_changed": paths}
+            for number, paths in sorted(changes.items()) if number <= first]
         body = {"current_question": turn.query, "previous_turn": users[-1] if users else None,
                 "earlier_turns": users[:-1]}
-        initialize = not users or "state" not in users[-1] or users[-1].get("relation") == "ambiguous"
+        system = INITIALIZE_SYSTEM if initialize else SYSTEM
+        if optional_history:
+            system += ("\nstate_fields_last_changed links fallible state fields to a past user turn. "
+                       "preceding_answer occurred BEFORE that question; the later answer is excluded from this lookup.")
+        if evidence_documents is not None:
+            from adapters.evidence_selection import SELECTION_SYSTEM
+            system += "\n\n" + SELECTION_SYSTEM
+            body = {"documents": [], **body}
+        if optional_history or evidence_documents is not None:
+            # One tokenizer batch packs whole history/source units. Required
+            # recent dialogue is never shortened to make an enrichment fit.
+            units = [*optional_history, *(evidence_documents or ())]
+            used, lengths = self.client.catalog_token_lengths([
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(body, ensure_ascii=False)}],
+                [json.dumps(unit, ensure_ascii=False) for unit in units])
+            skipped = []
+            for index, (unit, length) in enumerate(zip(units, lengths, strict=True)):
+                if used + length + 2 <= self.client.config.max_input_tokens:
+                    (users if index < len(optional_history) else body["documents"]).append(unit)
+                    used += length + 2
+                elif index < len(optional_history):
+                    skipped.append(unit["turn"])
+            users.sort(key=lambda row: row["turn"])
+            body["earlier_turns"] = users[:-1]
+            if optional_history:
+                trace["state_context"] = {"selected_turns": [u["turn"] for u in users if u["turn"] <= first],
+                                          "budget_skipped_turns": skipped}
+        if evidence_documents is not None:
+            available = [d["id"] for d in body["documents"]]
+            trace["source_selection"] = {"catalog_ids": available,
+                "budget_skipped_ids": [d["id"] for d in evidence_documents if d["id"] not in available]}
         requirements_schema = {"type": "array", "items": {"type": "string"}}
         schema = {"type": "object", "properties": {
             "task": {"type": "object", "properties": {
@@ -298,25 +372,10 @@ class ConversationResolver:
                 "required": list(frame_properties), "additionalProperties": False},
                 **{name: schema["properties"][name] for name in ("relation", "history_turns", "resume_turn")}}
             schema["required"] = list(schema["properties"])
-        system = INITIALIZE_SYSTEM if initialize else SYSTEM
         if evidence_documents is not None:
-            from adapters.evidence_selection import SELECTION_SYSTEM
-            system += "\n\n" + SELECTION_SYSTEM
-            body = {"documents": [], **body}
-            messages = [{"role": "system", "content": system},
-                        {"role": "user", "content": json.dumps(body, ensure_ascii=False)}]
-            used, lengths = self.client.catalog_token_lengths(messages,
-                [json.dumps(d, ensure_ascii=False) for d in evidence_documents])
-            for document, length in zip(evidence_documents, lengths, strict=True):
-                if used + length + 2 <= self.client.config.max_input_tokens:
-                    body["documents"].append(document)
-                    used += length + 2
-            available = [d["id"] for d in body["documents"]]
             schema["properties"]["selected_ids"] = {"type": "array", "maxItems": 5 if available else 0,
                 "items": {"type": "integer", **({"enum": available} if available else {})}}
             schema["required"] = [*schema["required"], "selected_ids"]
-            trace["source_selection"] = {"catalog_ids": available,
-                "budget_skipped_ids": [d["id"] for d in evidence_documents if d["id"] not in available]}
         response_format = {"type": "json_schema", "json_schema": {
             "name": "contextkv_conversational_intent", "strict": True, "schema": schema}}
         completion = self.client.complete([{"role": "system", "content": system},

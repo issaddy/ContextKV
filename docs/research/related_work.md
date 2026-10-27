@@ -11,6 +11,7 @@
 | BGE-M3 / BGE-reranker-v2-m3 | [M3 `5617a9f`](https://huggingface.co/BAAI/bge-m3/tree/5617a9f61b028005a4858fdac845db406aefb181) / [reranker `953dc6f`](https://huggingface.co/BAAI/bge-reranker-v2-m3/tree/953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e) | 固定权重及官方接口；BM25S、RRF 和重排组成可选真实检索链 |
 | CHIQ / HAConvDR | [CHIQ，EMNLP 2024](https://aclanthology.org/2024.emnlp-main.135/) / [HAConvDR，ACL Findings 2024](https://aclanthology.org/2024.findings-acl.792/) | 复用先解歧再改写、减少无关历史的原则；当前为单次条件调用的 Qwen3 意图解析，没有移植其训练或完整多阶段流程 |
 | SOM-DST | [ACL 2020论文](https://aclanthology.org/2020.acl-main.53/) / [作者实现](https://github.com/clovaai/som-dst) | 适配状态保留、更新、删除的机制；使用开放文本字段和已有Qwen3，不移植领域ontology或训练模型；操作预测与条件粒度仍需验证 |
+| Context-aware DST | [NAACL 2019论文](https://aclanthology.org/N19-1057/) | 复用按字段变化位置找回相关历史的原则；从已有账本恢复更新/清除位置，读取该用户消息及前一条助手消息。保留开放字段与现有Qwen3，不移植其训练编码器或门控模型；位置只是上下文线索，不是事实证明 |
 | UvA，SemEval 2026 Task 8 | [作者论文](https://arxiv.org/abs/2606.11945) | 多轮改写→检索→重排→回答的同场景参考；检索排名改善不能替代回答质量验证，不继承其比赛结果 |
 | Qwen3-Reranker-0.6B | [`fd9fb1d`，Apache-2.0](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/tree/fd9fb1d26c07223ced488065909faf522e29cc7d) | 官方模板及末位 yes/no 打分适配；已有同候选池对照，未替代 BGE 默认设置 |
 | MiniCheck | [官方代码 `b58b9fa`，Apache-2.0](https://github.com/Liyan06/MiniCheck/tree/b58b9fa69acbd1015ec970fa65dd752413a053d2) | 可选离线声明/来源支持评分；不作为在线正确性保证 |

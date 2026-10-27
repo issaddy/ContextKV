@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from adapters.conversation import ConversationResolver, apply_frame_updates, frame_query
+from adapters.conversation import ConversationResolver, apply_frame_updates, frame_query, state_change_turns
 from adapters.mtrag import OnlineMessage, OnlineTurn
 from adapters.query_resolution import PriorContext, PriorSource, snapshot_context
 from adapters.query_selector import CompletionResult
@@ -739,3 +739,95 @@ def test_revisit_keeps_older_user_states_and_their_actual_answers():
     rows=[*body['earlier_turns'],body['previous_turn']]
     assert [r['turn'] for r in rows]==list(range(1,8))
     assert all(r['answer']==request.history[2*r['turn']-1].text for r in rows)
+
+
+def state_context_fixture():
+    first = TaskFrame('Atlas', 'installer', 'installation',
+        (('version', 'v4'), ('platform', 'Linux'), ('source', 'private')))
+    windows = apply_frame_updates(first, {'conditions': {'platform': 'Windows'}})
+    frames = [first, windows,
+        replace(windows, task='verify the download'),
+        replace(windows, task='find the checksum', target='checksum'),
+        replace(windows, task='verify the signature', target='signature'),
+        replace(windows, task='find signature expiry', target='signature')]
+    context = PriorContext(interpretations=tuple(QueryContext(frame_query(f),
+        'standalone' if i == 0 else 'followup', task_frame=f) for i, f in enumerate(frames)))
+    request = turn('Use the public source now.', (
+        'Install Atlas v4 on Linux from the private source.', 'Use Windows instead.',
+        'How do I verify the download?', 'Where is the checksum?',
+        'How do I check its signature?', 'When does that signature expire?'))
+    return request, context
+
+
+class StateContextClient(Client):
+    def __init__(self, *, budget=10000, history_turns=(1, 2, 6), joint=False):
+        super().__init__({'relation': 'condition_change', 'history_turns': list(history_turns),
+            'updates': {'conditions': {'source': 'public'}},
+            **({'selected_ids': [3]} if joint else {})})
+        self.config = SimpleNamespace(max_input_tokens=budget)
+        self.packing_calls = []
+
+    def catalog_token_lengths(self, messages, units):
+        self.packing_calls.append((messages, units))
+        # A byte-token fixture isolates whole-unit packing from tokenizer models.
+        return 100, [len(unit.encode('utf-8')) for unit in units]
+
+
+def test_active_state_changes_restore_old_dialogue_without_repeating_old_states():
+    from controller.schema import Message, TurnRecord
+    request, context = state_context_fixture()
+    client = StateContextClient()
+    view = ConversationResolver(client).resolve(request, context)
+    body = json.loads(client.inputs[0][0][-1]['content'])
+    rows = [*body['earlier_turns'], body['previous_turn']]
+    assert [row['turn'] for row in rows] == [1, 2, 4, 5, 6]
+    assert view['state_context']['selected_turns'] == [1, 2]
+    assert [row['turn'] for row in rows if 'state' in row] == [6]
+    assert ['conditions', 'version'] in rows[0]['state_fields_last_changed']
+    assert ['conditions', 'platform'] in rows[1]['state_fields_last_changed']
+    assert all(row['question'] == request.history[2*row['turn']-2].text for row in rows)
+    assert 'answer' not in rows[0] and 'preceding_answer' not in rows[0]
+    assert rows[1]['preceding_answer'] == request.history[1].text and 'answer' not in rows[1]
+    assert all(row['answer'] == request.history[2*row['turn']-1].text for row in rows[2:])
+    intent = decode(QueryContext, view['context'])
+    assert dict(intent.task_frame.conditions) == {'version': 'v4', 'platform': 'Windows', 'source': 'public'}
+    assert intent.history_turns == (1, 2, 6) and len(client.inputs) == len(client.packing_calls) == 1
+    history = tuple(TurnRecord(i//2+1, request.history[i].text, request.history[i+1].text)
+                    for i in range(0, len(request.history), 2))
+    plan, = build_candidates(SessionSnapshot('s', raw_history=history, raw_history_version=len(history)),
+        request.query, (make_evidence('Original source body.', 'source'),), query_context=intent)
+    assert plan.messages[1:1+len(request.history)] == tuple(Message(m.role, m.text) for m in request.history)
+
+
+def test_history_and_source_enrichment_share_one_budget_without_truncating_turns():
+    request, context = state_context_fixture()
+    history = list(request.history)
+    history[1] = OnlineMessage('assistant', 'Complete long original answer. ' * 500)
+    request = replace(request, history=tuple(history))
+    client = StateContextClient(budget=700, history_turns=(1, 6), joint=True)
+    source = {'id': 3, 'text': 'Complete source for the current request.'}
+    view = ConversationResolver(client).resolve(request, context, evidence_documents=[source])
+    body = json.loads(client.inputs[0][0][-1]['content'])
+    assert view['state_context'] == {'selected_turns': [1], 'budget_skipped_turns': [2]}
+    assert [row['turn'] for row in body['earlier_turns']] == [1, 4, 5]
+    assert body['documents'] == [source] and view['source_selection']['selected_ids'] == [3]
+    assert len(client.packing_calls) == len(client.inputs) == 1
+    schema = client.inputs[0][1]['response_format']['json_schema']['schema']
+    assert schema['properties']['history_turns']['items']['enum'] == [1, 4, 5, 6]
+    assert all(row['answer'] == request.history[2*row['turn']-1].text for row in body['earlier_turns'][1:])
+    assert 'answer' not in body['earlier_turns'][0]  # Its own later response did not enter the state lookup.
+
+
+def test_state_lookup_retains_removal_context_and_resets_across_topics_and_state_gaps():
+    first = TaskFrame('Atlas', '', 'install', (('version', 'v4'), ('platform', 'Linux')))
+    other = replace(first, topic='Nova')
+    no_platform = replace(other, conditions=(('version', 'v4'),))
+    states = (QueryContext('', 'standalone', task_frame=first),
+              QueryContext('', 'topic_switch', task_frame=other),
+              QueryContext('', 'followup', task_frame=no_platform))
+    changes = state_change_turns(states)
+    assert set(changes) == {2, 3}  # Equal v4 in a different topic has its own change point.
+    assert ('conditions', 'platform') not in changes[2]
+    assert changes[3] == [('conditions', 'platform')]
+    assert state_change_turns((*states, None)) == {}
+    assert set(state_change_turns((*states, None, states[-1]))) == {5}
