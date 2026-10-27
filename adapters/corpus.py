@@ -3,8 +3,9 @@
 JSONL accepts BEIR ``_id/text/title`` rows or named ``passage_id/document_id``
 rows. Version, source, span, parent section, anchors, and dependency IDs may live
 under ``metadata``. Only those public fields are read; labels and answers are
-never copied. Optional ``source_lists`` retains author list layout around literal
-text; no source words are normalized, summarized or rewritten.
+never copied. ``source_lists`` retains author layout metadata; explicit
+``source_list_reading: true`` renders it around literal text at loading time.
+No source words are normalized, summarized or rewritten.
 """
 from __future__ import annotations
 
@@ -77,7 +78,8 @@ class CorpusIndex:
             source = str(metadata.get("source_uri") or metadata.get("source") or metadata.get("url") or
                          f"{corpus_id}://{snapshot_id}/{document_id}#{passage_id}")
             provenance = tuple(metadata.get("provenance") or (source, f"corpus_snapshot:{snapshot_id}"))
-            reading = render_source_lists(text, metadata.get("source_lists", ()))
+            reading = (render_source_lists(text, metadata.get("source_lists", ()))
+                       if metadata.get("source_list_reading") is True else text)
             if reading != text:
                 provenance += ("source_structure:author_list_spans_v1",)
             block = make_evidence(reading, document_id, corpus_id=corpus_id,

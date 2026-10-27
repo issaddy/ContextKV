@@ -239,6 +239,10 @@ def test_author_lists_keep_words_nesting_order_and_unusual_source_markup(tmp_pat
     assert load_beir_corpus(path)[passage['passage_id']]['text'] == text
     index = CorpusIndex.from_jsonl(path, corpus_id='manual', snapshot_id='author-v1')
     block, = index.resolve((passage['passage_id'],))
+    assert block.text == text  # Available structure does not force a model representation.
+    passage['metadata']['source_list_reading'] = True
+    index = CorpusIndex.from_records([passage], corpus_id='manual', snapshot_id='author-v1')
+    block, = index.resolve((passage['passage_id'],))
     assert block.text == reading and block.span == (0, len(text))
     assert block.key.content_sha256 == sha256(reading.encode()).hexdigest()
 

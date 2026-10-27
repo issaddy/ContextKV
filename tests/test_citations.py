@@ -1,5 +1,7 @@
 from bench.judge import CITATION_PARSER_VERSION, parse_citations, rule_audit
 
+import pytest
+
 
 def test_native_citation_grammar_allows_text_code_links_and_current_grouped_ids():
     import re
@@ -17,7 +19,7 @@ def test_native_citation_grammar_allows_text_code_links_and_current_grouped_ids(
 
 
 def test_single_and_grouped_evidence_ids_without_numeric_or_bare_references():
-    assert parse_citations("One [E_ab12], group [E_ab12, E_deadbeef].") == {"E_ab12", "E_deadbeef"}
+    assert parse_citations("One [E_ab12], group (E_ab12, E_deadbeef).") == {"E_ab12", "E_deadbeef"}
     assert parse_citations("[1] [1, 2] [Source 1] bare E_ab12 https://example.com/E_ab12") == set()
 
 
@@ -35,9 +37,10 @@ def test_unknown_group_member_is_audited_and_strict_count_is_preserved():
     assert result["semantic_quality_score"] is None
 
 
-def test_visible_historical_body_is_not_current_citation_permission():
+@pytest.mark.parametrize('opening,closing', [('[', ']'), ('(', ')')])
+def test_visible_historical_body_is_not_current_citation_permission(opening, closing):
     old,new = {"document_id":"old"},{"document_id":"current"}
-    record = {"task_id":"s:2","answer":"Prior claim [E_aa], current [E_bb].",
+    record = {"task_id":"s:2","answer":f"Prior claim {opening}E_aa{closing}, current {opening}E_bb{closing}.",
         "visible_evidence_manifest":[{"key":old,"reference_id":"E_aa"},{"key":new,"reference_id":"E_bb"}],
         "audit_evidence":[{"key":old},{"key":new}],"citation_scope":["E_bb"]}
     result = rule_audit(record)

@@ -16,6 +16,7 @@
 | MiniCheck | [官方代码 `b58b9fa`，Apache-2.0](https://github.com/Liyan06/MiniCheck/tree/b58b9fa69acbd1015ec970fa65dd752413a053d2) | 可选离线声明/来源支持评分；不作为在线正确性保证 |
 | CRAFT | [本地来源与 MIT 许可](../third_party/CRAFT_NOTICE.md) | 直接复用表格行文本函数，扩展 query 焦点与来源坐标；默认不启用额外表格注释 |
 | Docling | [文档层级](https://docling-project.github.io/docling/concepts/docling_document/) / [结构化分块与序列化](https://docling-project.github.io/docling/concepts/chunking/) | 采用保留原文层级、阅读顺序与来源坐标的原则；已有作者HTML时用标准库读取列表，不引入其转换/OCR流水线 |
+| CUB | [ACL 2026论文版本](https://arxiv.org/html/2505.16518v3) / [作者代码](https://github.com/copenlu/cmt-benchmark) | 复用正确、冲突与无关上下文分别分析的原则；增强证据依赖与抗无关材料干扰存在取舍，不能按一个成功案例引入注意力/对比解码。当前未移植解码算法或运行其矩阵 |
 
 ## A：从已见内容转为实际可见证据
 

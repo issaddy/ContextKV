@@ -231,7 +231,7 @@ def main(argv=None):
     manifest["source_reading"] = {"structure": "author_html_lists_anchored_to_original_text",
         "documents_with_lists": sum(bool(row["metadata"].get("source_lists")) for row in corpus),
         "retrieval_text": "unchanged literal text; existing search indices remain reusable",
-        "reading_text": "source list tags inserted once at corpus loading; no generated facts"}
+        "reading_text": "original text by default; source_list_reading=true opts into source list tags at corpus loading"}
     args.output.mkdir(parents=True, exist_ok=True)
     for name, rows in (("corpus.jsonl", corpus), ("supervision.jsonl", supervision)):
         (args.output / name).write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")

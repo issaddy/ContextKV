@@ -22,7 +22,7 @@ def test_source_lists_flow_through_selection_cache_and_current_quality_export(tm
         {'tag': 'li', 'start': 6, 'end': 8, 'children': []}]}]
     rows = [
         {'passage_id': 'choice', 'document_id': 'manual', 'text': text, 'span': [0, len(text)],
-         'metadata': {'source_lists': lists}, 'dependencies': ['condition']},
+         'metadata': {'source_lists': lists, 'source_list_reading': True}, 'dependencies': ['condition']},
         {'passage_id': 'condition', 'document_id': 'manual', 'text': 'Only if closed.', 'span': [9, 24]},
         {'passage_id': 'retired', 'document_id': 'old', 'text': 'Previously discussed evidence.'}]
     corpus = CorpusIndex.from_records(rows, corpus_id='manual', snapshot_id='v1')
@@ -67,7 +67,8 @@ def test_source_lists_flow_through_selection_cache_and_current_quality_export(tm
     assert len(json.loads(audit.read_text())['audit_evidence']) == 3
 
     # Same raw text with newly available layout is a changed physical body.
-    plain = CorpusIndex.from_records([{**r, 'metadata': {}} for r in rows], corpus_id='manual', snapshot_id='v1')
+    plain = CorpusIndex.from_records([{**r, 'metadata': {**r.get('metadata', {}), 'source_list_reading': False}}
+        for r in rows], corpus_id='manual', snapshot_id='v1')
     old = plain.enrich((raw,))
     first, = build_candidates(initial, 'Question', old)
     old_snapshot = committed(first, initial, 'Question', old)
