@@ -710,6 +710,17 @@ def test_conversational_response_retains_active_task_without_turning_it_into_a_l
     assert "look elsewhere" not in fallback['text']
 
 
+def test_whole_task_constraints_are_not_replaced_by_shorter_requirements():
+    frame = TaskFrame("Atlas CLI", "version 6.16", "Find changes other than image scheduling",
+                      (("platform", "Linux"),), ("version changes", "installation steps"))
+    query = frame_query(frame)
+    assert frame.task in query and all(need in query for need in frame.requirements)
+    assert "platform: Linux" in query and "Atlas CLI" in query
+    subquery = frame_query(frame, requirement="installation steps")
+    assert "installation steps" in subquery and "platform: Linux" in subquery
+    assert "version changes" not in subquery  # The per-need view still targets one need.
+
+
 def test_initial_greeting_has_no_invented_task_frame():
     client=Client({'relation':'conversational','history_turns':[]})
     request=turn('Hello.',())

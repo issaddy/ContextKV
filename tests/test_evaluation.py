@@ -23,6 +23,24 @@ from controller.templates import token_hash
 FIXTURE = Path(__file__).parent / "fixtures/mtrag_small.jsonl"
 
 
+def test_reference_overlap_aligns_ids_and_keeps_missing_answers_in_denominator():
+    from bench.quality import reference_overlap
+    references = [
+        {"task_id": "a", "conversation_id": "one", "Collection": "dmv", "targets": [{"text": "The red car"}]},
+        {"task_id": "b", "conversation_id": "one", "Collection": "dmv", "targets": [{"text": "blue bus"}]},
+        {"task_id": "c", "conversation_id": "two", "Collection": "ssa", "targets": [{"text": "Benefits"}]},
+    ]
+    predictions = [{"task_id": "c", "predictions": [{"text": "benefits!"}]},
+                   {"task_id": "a", "predictions": [{"text": "red"}]}]
+    result = reference_overlap(references, predictions)
+    assert result["missing_task_ids"] == ["b"]
+    assert result["mean_f1"] == pytest.approx((2 / 3 + 0 + 1) / 3)
+    assert result["conversation_mean_f1"]["one"] == pytest.approx(1 / 3)
+    assert result["domain_mean_f1"]["ssa"] == 1
+    with pytest.raises(ValueError):
+        reference_overlap(references, [*predictions, predictions[0]])
+
+
 def audit_record(n=12):
     def key(i):
         return {"document_id": str(i), "version": "v1"}

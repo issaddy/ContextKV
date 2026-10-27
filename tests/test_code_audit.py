@@ -11,8 +11,6 @@ curl https://example.invalid/db/_find \\
     record = audit_record({"task_id": "one", "answer": answer})
     assert record["invalid_json_payloads"] == 0
     assert record["blocks"][0]["checks"][0]["status"] == "valid_json_syntax"
-    assert record["commands_executed"] == 0
-    assert not record["semantic_quality_validated"]
     block = record["blocks"][0]
     assert answer[block["start"]:block["end"]] == block["content"]
 

@@ -23,7 +23,7 @@ import uuid
 
 import httpx
 
-from adapters.mtrag import CLOUD_COLLECTION, DATASET_COMMIT, OnlineTurn, load_rows
+from adapters.mtrag import CLOUD_COLLECTION, OnlineTurn, dataset_identity, load_rows
 from adapters.corpus import CorpusIndex
 from adapters.retrieval import to_evidence
 from adapters.retriever_factory import create_retriever
@@ -354,7 +354,7 @@ class NativeBaseline:
                  corpus_snapshot_id: str, policy: CandidatePolicy | None = None,
                  engine_manifest: Mapping[str, Any] | None = None, test_mode: bool = False,
                  run_id: str | None = None, corpus_index: CorpusIndex | None = None,
-                 model_scope=None, sampling: SamplingRecipe | None = None):
+                 model_scope=None, sampling: SamplingRecipe | None = None, corpus_id="mtrag"):
         if baseline not in {"B0", "B1"}:
             raise ValueError("native baseline must be B0 or B1")
         if not test_mode:
@@ -368,6 +368,7 @@ class NativeBaseline:
                 raise ValueError("native client sampling differs from declared shared configuration")
         self.baseline, self.client, self.template = baseline, client, template
         self.corpus_snapshot_id = corpus_snapshot_id
+        self.corpus_id = corpus_id
         self.policy = policy or CandidatePolicy()
         self.corpus_index = corpus_index
         if client.stream and (engine_manifest or {}).get("server", {}).get("incremental_streaming_output", False):
@@ -430,7 +431,7 @@ class NativeBaseline:
             retrieval_priority = self.corpus_index.retrieved_keys(turn.contexts) if self.corpus_index else None
             supporting = self.corpus_index.retrieved_keys(turn.supporting_contexts) if self.corpus_index else ()
             retrieved = (self.corpus_index.resolve((*retrieval_priority, *supporting)) if self.corpus_index else
-                         tuple(to_evidence(c, self.corpus_snapshot_id) for c in turn.contexts))
+                         tuple(to_evidence(c, self.corpus_snapshot_id, corpus_id=self.corpus_id) for c in turn.contexts))
             # execution=None yields one REBUILD and still uses the same shared
             # current/explicit-revisit/dependency evidence selection and stable IDs.
             candidates = build_candidates(snapshot, turn.query, retrieved, self.policy, self.template,
@@ -523,6 +524,7 @@ async def _run(args):
     scope = model.scope
     template = create_model_template(model)
     rows = load_rows(args.input)
+    dataset = dataset_identity(rows)
     if args.domain == "cloud":
         rows = [r for r in rows if r["Collection"] == CLOUD_COLLECTION]
     if args.split_manifest:
@@ -532,12 +534,13 @@ async def _run(args):
     if args.limit_sessions:
         selected = set(sorted({r["conversation_id"] for r in rows})[:args.limit_sessions])
         rows = [r for r in rows if r["conversation_id"] in selected]
-    corpus_snapshot = f"mtrag-{DATASET_COMMIT}"
+    corpus_snapshot = f"{dataset['name']}-{dataset['revision']}"
     retriever = create_retriever(args.protocol, config_path=getattr(args, "retriever_config", None),
-                                index_path=getattr(args, "retriever_index", None), corpus_path=args.corpus)
+                                index_path=getattr(args, "retriever_index", None), corpus_path=args.corpus,
+                                corpus_snapshot_id=corpus_snapshot)
     if retriever is not None:
         corpus_snapshot = retriever.corpus_snapshot_id
-    corpus_index = (CorpusIndex.from_jsonl(args.evidence_corpus, corpus_id="mtrag", snapshot_id=corpus_snapshot)
+    corpus_index = (CorpusIndex.from_jsonl(args.evidence_corpus, corpus_id=dataset["name"], snapshot_id=corpus_snapshot)
                     if getattr(args, "evidence_corpus", None) else None)
     from adapters.retrieval import bind_corpus_context
     bind_corpus_context(retriever, corpus_index)
@@ -546,7 +549,7 @@ async def _run(args):
                                sampling_params=request_sampling(sampling) if sampling is not None else None)
     baseline = NativeBaseline(args.baseline, client, template, policy=policy,
                               corpus_snapshot_id=corpus_snapshot, engine_manifest=manifest, corpus_index=corpus_index,
-                              model_scope=scope, sampling=sampling)
+                              model_scope=scope, sampling=sampling, corpus_id=dataset["name"])
     retrieval_context_provider = None
     if getattr(retriever, "requires_history_context", False):
         from adapters.query_resolution import native_context_provider
@@ -598,6 +601,7 @@ async def _run(args):
         cleanup_end = time.monotonic()
         await client.aclose()
         payload = {"baseline": args.baseline, "protocol": args.protocol, "run_id": baseline.run_id,
+                   "dataset": dataset,
                    "engine_manifest": manifest, "engine_manifest_sha256": sha256(manifest_path.read_bytes()).hexdigest(),
                    "engine_commit_provenance": "operator_manifest_not_remote_attestation",
                    "server_info": baseline.observed_server_info, "input_sha256": sha256(Path(args.input).read_bytes()).hexdigest(),

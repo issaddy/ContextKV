@@ -29,6 +29,14 @@ from controller.serialization import decode
 from controller.templates import SYSTEM_PROMPT
 
 
+# These transform offline files or grade saved answers. Their output artifacts
+# already participate in provenance; changing their code does not regenerate QA.
+OFFLINE_ONLY_SOURCES = frozenset({
+    "adapters/doc2dial.py", "adapters/dialogue_examples.py", "adapters/prepare_data.py",
+    "bench/official.py", "bench/quality_acceptance.py", "bench/judge.py",
+})
+
+
 def merge(base, overrides):
     result = deepcopy(base)
     for key, value in overrides.items():
@@ -261,7 +269,6 @@ def implementation_manifest():
     paths.update(root / name for name in (
         "bench/experiments.py", "bench/native_baseline.py", "bench/run_sessions.py",
         "bench/report.py", "bench/metrics.py", "bench/quality.py", "bench/native_metrics.py",
-        "bench/quality_acceptance.py", "bench/judge.py",
         "bench/b6_joint_sweep.py", "bench/native_policy_sweep.py", "bench/controller_capacity_sweep.py",
         "profiling/common.py", "profiling/positive_prefill.py",
         "engine_patches/contextkv_model_scope.py",
@@ -269,6 +276,7 @@ def implementation_manifest():
     paths.update(p for p in (root / "adapters/assets").rglob("*")
                  if p.suffix in {".txt", ".json", ".jinja", ".jinja2"}
                  and not p.name.upper().startswith(("LICENSE", "NOTICE")))
+    paths.difference_update(root / name for name in OFFLINE_ONLY_SOURCES)
     content = {p: p.read_bytes() for p in sorted(paths) if p.is_file()}
     return {"schema_version": 1, "scope": "local controller/adapters and matrix execution/report sources",
         "files": {str(p.relative_to(root)): sha256(data).hexdigest() for p, data in content.items()},
@@ -313,10 +321,10 @@ def generation_provenance(spec, *, implementation=None):
 
 
 def same_execution_provenance(recorded, current):
-    """Offline IBM scoring is not a generation dependency, including in old manifests.
+    """Offline preparation/grading code is not a generation dependency.
 
-    Its own scoring receipt records the input, judge and evaluator identity.
-    All generation, reporting, selection and input bindings remain compared.
+    Prepared input bytes, grading artifacts and protocols remain bound separately.
+    Generation, reporting, selection and input bindings remain compared.
     """
     def execution(value):
         if not value or "implementation" not in value:
@@ -324,7 +332,7 @@ def same_execution_provenance(recorded, current):
         implementation = value["implementation"]
         return {**value, "implementation": {**implementation, "files": {
             path: digest for path, digest in implementation["files"].items()
-            if path != "bench/official.py"}}}
+            if path not in OFFLINE_ONLY_SOURCES}}}
     return execution(recorded) == execution(current)
 
 

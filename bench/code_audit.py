@@ -90,8 +90,7 @@ def audit_record(record):
     return {"task_id": record["task_id"], "conversation_id": record.get("conversation_id"),
             "answer_truncated": record.get("truncated"), "blocks": blocks,
             "invalid_json_payloads": sum(check["status"] == "invalid_json" for block in blocks for check in block["checks"]),
-            "scope": "closed triple-backtick JSON or curl blocks only; no code execution or API validation",
-            "commands_executed": 0, "answer_modified": False, "semantic_quality_validated": False}
+            "scope": "closed triple-backtick JSON or curl blocks only; no code execution or API validation"}
 
 
 def main(argv=None):

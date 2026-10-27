@@ -76,3 +76,10 @@ EfficientAgent 的 vLLM/LMCache connector 不能直接接到 SGLang。现有可�
 解析解码直接复用固定SGLang的[NGRAM worker](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/speculative/ngram_worker.py)：CPU侧缓存已生成片段，目标模型对草稿运行验证，先应用语法mask再选取greedy目标token。本项目沿用其FA3/page64线性草稿能力，没有另建草稿模型或缓存器。[SuffixDecoding（NeurIPS 2025）](https://arxiv.org/abs/2411.04975)提供重复请求可利用片段复用的研究依据，当前采用的是引擎现成实现。已完成的有限诊断和部署参数见[评价](../data_and_evaluation.md#解释服务的原生解码优化)；原生验证不等于不同执行形状下保证浮点和输出逐字一致。
 
 [LLMs Get Lost In Multi-Turn Conversation（2025）](https://arxiv.org/abs/2505.06120)分析早期假设与旧答案依赖的累积影响，重述任务只能部分缓解。当前系统已有任务重建与历史非事实提示；本项目观察到的重复SDK错误同时跨越APPEND和REBUILD，与此类问题相符，但不据此宣称已证明具体因果。后续改进应针对任务/来源适用性及生成使用，不能把这些失败简化为缓存动作错误或继续堆叠拒答规则。
+
+
+## 任务投影与统一评测的补齐
+
+[TurnFlow（EMNLP Findings 2026）](https://aclanthology.org/2026.findings-emnlp.825/)强调需要分别检查需求状态的识别、修订与最终执行。沿这一问题分解，本轮代码检查定位到一个确定的信息传递缺口：`frame_query`在requirements非空时舍弃完整task，可能丢失“除此之外”等限定语。现保留完整任务及明确子需求，单项需求查询仍各自聚焦；这是既有状态到检索接口的修复，没有新增推理阶段，也未声称解决了所有多轮误解。
+
+[MultiDoc2Dial](https://aclanthology.org/2021.emnlp-main.498/)提供跨文档服务咨询，已复用作者语料、分区、对话和grounding，接到共同P3运行链；连续同角色发言的交流轮投影明确记录。[ChatRAG-Bench](https://huggingface.co/datasets/nvidia/ChatRAG-Bench)可补充给定历史下的多任务质量，[Loong](https://github.com/MozerWang/Loong)可补充确需多资料综合的长文本任务。它们按各自协议评价，公共数据不足的版本演化/资源竞争允许完整扩展，方法与评测不再局限于旧Cloud开发案例。公开覆盖、实现状态和新数据尚未评分的范围统一见[评价](../data_and_evaluation.md)。

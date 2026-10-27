@@ -104,7 +104,8 @@ def retriever_config_sources(path):
             *((config.source_documents,) if config.source_window and config.source_documents else ()))
 
 
-def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path=None, trace_sink=None):
+def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path=None, trace_sink=None,
+                     corpus_snapshot_id=None):
     if protocol != "P3":
         return None
     if config_path:
@@ -162,5 +163,6 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
     if index_path:
         return BM25SRetriever.load(index_path)
     if corpus_path:
-        return BM25SRetriever(load_beir_corpus(corpus_path), corpus_snapshot_id=f"mtrag-{DATASET_COMMIT}")
+        return BM25SRetriever(load_beir_corpus(corpus_path),
+                             corpus_snapshot_id=corpus_snapshot_id or f"mtrag-{DATASET_COMMIT}")
     raise ValueError("P3 requires --corpus, --retriever-index or --retriever-config")

@@ -107,7 +107,7 @@ def test_development_generation_identity_and_later_offline_quality_gate(tmp_path
 
 @pytest.mark.parametrize("relative", ["adapters/hybrid_retrieval.py", "adapters/query_views.py",
     "controller/planner.py", "bench/run_sessions.py", "bench/report.py", "bench/quality.py",
-    "profiling/common.py", "bench/quality_acceptance.py", "bench/judge.py", "engine_patches/contextkv_model_scope.py",
+    "profiling/common.py", "engine_patches/contextkv_model_scope.py",
     "adapters/assets/convsearch_r1/prompt.txt"])
 def test_freeze_rejects_old_results_after_execution_source_or_prompt_change(tmp_path, monkeypatch, relative):
     import bench.experiments as experiments
@@ -137,22 +137,24 @@ def test_documentation_changes_do_not_invalidate_generation_identity(tmp_path, m
     assert not any(p.startswith(("docs/", "tests/")) or p == "README.md" for p in paths)
 
 
-def test_offline_official_grading_does_not_require_regenerating_answers(tmp_path, monkeypatch):
+def test_offline_preparation_and_grading_do_not_require_regenerating_answers(tmp_path, monkeypatch):
     import bench.experiments as experiments
     value = spec(tmp_path)
     results = completed_results(value)
-    # Older manifests recorded this purely offline module as a generation input.
+    offline = {"bench/official.py", "bench/judge.py", "adapters/doc2dial.py"}
+    # Older manifests included these offline modules as generation inputs.
     for result in results:
-        result["experiment_provenance"]["implementation"]["files"]["bench/official.py"] = "old-offline-code"
+        result["experiment_provenance"]["implementation"]["files"].update(dict.fromkeys(offline, "old-offline-code"))
     original = Path.read_bytes
-    target = Path(experiments.__file__).resolve().parent / "official.py"
+    root = Path(experiments.__file__).resolve().parents[1]
+    targets = {root / path for path in offline}
     def changed(path):
-        return original(path)+(b"\nnew offline HTTP scorer\n" if path.resolve() == target else b"")
+        return original(path)+(b"\nnew offline implementation\n" if path.resolve() in targets else b"")
     monkeypatch.setattr(Path, "read_bytes", changed)
     frozen = select_development(value, results)
     assert frozen["winners"]
     # Compatibility also applies at the frozen-run boundary.
-    frozen["provenance"]["implementation"]["files"]["bench/official.py"] = "old-offline-code"
+    frozen["provenance"]["implementation"]["files"].update(dict.fromkeys(offline, "old-offline-code"))
     assert experiments.same_execution_provenance(frozen["provenance"], experiments.provenance(value))
 
 

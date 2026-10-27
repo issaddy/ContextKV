@@ -1,17 +1,62 @@
 """Offline-only quality evaluation, paired session statistics and audit exports."""
 from __future__ import annotations
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict, is_dataclass
 import csv
 import json
 import math
 from pathlib import Path
 import random
+import re
+import string
 from statistics import mean
 from typing import Any, Mapping, Sequence
 
 from adapters.mtrag import OnlineTurn
 from bench.metrics import percentile
+
+
+def reference_overlap(references, predictions):
+    """SQuAD-style answer F1/EM used by MultiDoc2Dial, aligned by task ID.
+
+    This lexical measure supplements task/source evaluation. Missing predictions
+    score zero and remain visible in coverage, as in the upstream evaluator.
+    See IBM/multidoc2dial scripts/sharedtask_eval.py at 2456a5609b447e1a12b716f4d658728f346f3041.
+    """
+    def normalize(text):
+        text = text.lower().translate(str.maketrans('', '', string.punctuation))
+        return re.sub(r"\b(a|an|the)\b", " ", text).split()
+
+    predictions = list(predictions)
+    answers = {row["task_id"]: row["predictions"][0]["text"] for row in predictions}
+    if len(answers) != len(predictions):
+        raise ValueError("duplicate prediction task ID")
+    scores, domains, sessions, missing = {}, defaultdict(list), defaultdict(list), []
+    for row in references:
+        tid = row["task_id"]
+        if tid in scores:
+            raise ValueError("duplicate reference task ID")
+        if tid not in answers:
+            missing.append(tid)
+        prediction = normalize(answers.get(tid, ""))
+        f1 = em = 0.0
+        for target in row["targets"]:
+            reference = normalize(target["text"])
+            overlap = sum((Counter(prediction) & Counter(reference)).values())
+            f1 = max(f1, 2 * overlap / (len(prediction) + len(reference)) if overlap else 0.0)
+            em = max(em, float(prediction == reference))
+        scores[tid] = {"f1": f1, "exact_match": em}
+        domains[row["Collection"]].append(f1)
+        sessions[row["conversation_id"]].append(f1)
+    if answers.keys() - scores.keys():
+        raise ValueError("predictions contain task IDs absent from references")
+    return {"metric": "squad_style_reference_overlap", "tasks": scores,
+        "requested_tasks": len(scores), "predicted_tasks": len(answers), "missing_task_ids": missing,
+        "mean_f1": mean(v["f1"] for v in scores.values()) if scores else None,
+        "mean_exact_match": mean(v["exact_match"] for v in scores.values()) if scores else None,
+        "domain_mean_f1": {domain: mean(values) for domain, values in domains.items()},
+        "conversation_mean_f1": {sid: mean(values) for sid, values in sessions.items()},
+        "scope": "lexical answer overlap on the declared exchange units; not semantic correctness or source faithfulness"}
 
 
 def paired_cluster_bootstrap(candidate: Mapping[str, Sequence[float]],
@@ -151,3 +196,16 @@ def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Pat
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Offline reference-overlap scoring of saved answers")
+    parser.add_argument("--references", required=True)
+    parser.add_argument("--predictions", required=True)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args()
+    def read_rows(path):
+        return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    report = reference_overlap(read_rows(args.references), read_rows(args.predictions))
+    Path(args.output).write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")

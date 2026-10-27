@@ -119,8 +119,9 @@ claims into the frame or invent missing constraints. Return only the requested J
 
 
 def frame_query(frame, *, requirement=None):
-    """Render each already expressed attribute once; never rewrite a need's text."""
-    needs = (requirement,) if requirement is not None else frame.requirements or (frame.task,)
+    """Preserve the whole task alongside explicit needs; qualify each subquery."""
+    needs = ((requirement,) if requirement is not None else
+             tuple(dict.fromkeys(value for value in (frame.task, *frame.requirements) if value)))
 
     def expressed(value, parts):
         return bool(value and re.search(r"(?<![\w.+-])" + re.escape(value) + r"(?!\w|[.+-]\w)",
@@ -227,6 +228,7 @@ class ConversationResolver:
                 "condition_view": "literal named task continuation also supplies the unchanged current clause for condition-aware evidence selection",
                 "ambiguity": "retain the unresolved current question and relation for generation/commit; history-expanded retrieval does not choose a referent",
                 "task_state": "initialize a complete current frame when the previous turn has none; otherwise keep the existing task-first patch protocol; omitted attributes persist, null deletes; independent topics reset and explicit revisits resume",
+                "task_projection": "whole task plus explicit needs; each requirement query keeps its topic, target and conditions",
                 "semantics": "derived intent, not factual evidence or a guarantee of correct resolution",
                 "conversational_turns": "preserve active state, bypass source retrieval/selection and respond as dialogue",
                 "transport": self.client.manifest if self.client is not None else {"kind": "no_auxiliary_model"}}

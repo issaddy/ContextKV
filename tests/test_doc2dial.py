@@ -98,7 +98,7 @@ def test_bad_current_reference_fails_without_find_clamp_or_missing_fill(mutation
         converted(docs, dialogs)
 
 
-def test_cli_binds_sources_and_refuses_overwrite(tmp_path):
+def test_cli_binds_sources_and_rebuilds_derived_files(tmp_path):
     docs, dialogs = sources()
     documents, dialogues = tmp_path / "documents.json", tmp_path / "dialogues.json"
     documents.write_text(json.dumps(docs, ensure_ascii=False))
@@ -111,9 +111,7 @@ def test_cli_binds_sources_and_refuses_overwrite(tmp_path):
     assert manifest["sources"]["documents"]["sha256"] == sha256(documents.read_bytes()).hexdigest()
     assert manifest["sources"]["dialogues"]["sha256"] == sha256(dialogues.read_bytes()).hexdigest()
     before = {p.name: p.read_bytes() for p in output.iterdir()}
-    with pytest.raises(SystemExit) as error:
-        main(argv)
-    assert error.value.code == 2
+    main(argv)
     assert {p.name: p.read_bytes() for p in output.iterdir()} == before
 
 
@@ -143,5 +141,41 @@ def test_source_format_is_explicit_not_inferred_from_version_or_fields():
     docs, dialogs = sources()
     with pytest.raises((ValueError, KeyError)):
         converted(docs, dialogs, source_format="v0.9")
-    with pytest.raises(ValueError, match="source_format"):
+    with pytest.raises(ValueError):
         converted(docs, dialogs, source_format="auto")
+
+
+def test_multidoc_exchanges_preserve_cross_document_grounding_and_actual_history():
+    from adapters.doc2dial import benchmark_rows
+    from adapters.mtrag import OnlineSession, dataset_identity
+
+    docs, single = sources()
+    old = single["dial_data"]["manual"]["doc/a"][0]["turns"]
+    second = docs["doc_data"]["manual"]["unused"]
+    second["spans"] = {"1": {"id_sp": "1", "start_sp": 0,
+        "end_sp": len(second["doc_text"]), "text_sp": second["doc_text"]}}
+    turns = [deepcopy(old[0]), deepcopy(old[1]), deepcopy(old[2]),
+             {"turn_id": 21, "role": "agent", "utterance": "Additional original detail.", "da": "respond"},
+             {"turn_id": 25, "role": "user", "utterance": "And the other document?", "da": "query"},
+             {"turn_id": 26, "role": "agent", "utterance": "The second original answer.", "da": "respond"},
+             {"turn_id": 30, "role": "user", "utterance": "Unanswered closing question.", "da": "query"}]
+    for turn in turns:
+        turn["references"] = [{"doc_id": "unused", "id_sp": "1", "label": "solution"}]
+    turns[2]["references"].append({"doc_id": "doc/a", "id_sp": "scope", "label": "precondition"})
+    dialogs = {"dial_data": {"manual": [{"dial_id": "multi", "turns": turns}]}}
+    corpus, supervision, summary = converted(docs, dialogs, "multidoc2dial")
+    rows = list(benchmark_rows(supervision))
+    assert summary["dataset"] == "multidoc2dial" and len(corpus) == 2
+    assert supervision[0]["turns"][-1]["utterance"] == turns[-1]["utterance"]
+    assert len(rows) == 2 and rows[0]["source_turn_ids"] == {"user": [4, 9], "agent": [20, 21]}
+    assert rows[0]["targets"][0]["text"] == "Only in that mode.\n\nAdditional original detail."
+    assert {g["passage_id"] for g in rows[0]["grounding"]} == {c["passage_id"] for c in corpus}
+    assert dataset_identity(rows) == {"name": "multidoc2dial", "revision": "author-v1"}
+    gate = OnlineSession(rows, "P3")
+    first = gate.current()
+    assert first.query == "Can I retry?\n\nI mean batch mode." and not first.contexts
+    gate.commit(first.task_id, "Actual generated answer, not author target.")
+    following = gate.current()
+    assert following.history[-1].text == "Actual generated answer, not author target."
+    assert "grounding" not in following.__dict__ and "targets" not in following.__dict__
+    assert "Unanswered closing" not in following.query

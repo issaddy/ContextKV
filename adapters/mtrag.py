@@ -98,6 +98,15 @@ def load_rows(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def dataset_identity(rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """Read an adapter's declared identity; legacy MT-RAG files keep theirs."""
+    legacy = {"name": "mtrag", "revision": DATASET_COMMIT, "commit": DATASET_COMMIT}
+    identity = dict(rows[0].get("dataset", legacy)) if rows else legacy
+    if any(row.get("dataset", legacy) != identity for row in rows):
+        raise ValueError("one benchmark job must use one dataset identity")
+    return identity
+
+
 def _message(message: Mapping[str, Any] | OnlineMessage) -> OnlineMessage:
     if isinstance(message, OnlineMessage):
         return message
@@ -222,7 +231,9 @@ def profile_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def dataset_profile(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    return {"dataset_commit": DATASET_COMMIT, "all": profile_rows(rows),
+    identity = ({"dataset": dataset_identity(rows)} if rows and "dataset" in rows[0]
+                else {"dataset_commit": DATASET_COMMIT})
+    return {**identity, "all": profile_rows(rows),
             "cloud": profile_rows([r for r in rows if r["Collection"] in {CLOUD_COLLECTION, "ibmcloud"}]),
             "reference_markers": sum("reference" in c for r in rows for c in r["contexts"])}
 
@@ -251,7 +262,9 @@ def stratified_split(rows: Sequence[Mapping[str, Any]], seed: int = 42,
         dev += ids[:count]
         test += ids[count:]
         strata[domain] = {"dev": sorted(ids[:count]), "test": sorted(ids[count:])}
-    value = {"dataset_commit": DATASET_COMMIT, "source_sha256": source_sha256, "seed": seed,
+    identity = ({"dataset": dataset_identity(rows)} if rows and "dataset" in rows[0]
+                else {"dataset_commit": DATASET_COMMIT})
+    value = {**identity, "source_sha256": source_sha256, "seed": seed,
              "dev_fraction": dev_fraction, "unit": "conversation", "dev": sorted(dev),
              "test": sorted(test), "strata": strata}
     value["manifest_sha256"] = json_hash(value)

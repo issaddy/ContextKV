@@ -80,7 +80,7 @@ async def demo(config):
 
 
 async def benchmark(args, config):
-    from adapters.mtrag import CLOUD_COLLECTION, load_rows
+    from adapters.mtrag import CLOUD_COLLECTION, dataset_identity, load_rows
     from adapters.retrieval import bind_corpus_context, to_evidence
     from adapters.retriever_factory import create_retriever
     from bench.run_sessions import run_sessions
@@ -89,6 +89,7 @@ async def benchmark(args, config):
     from adapters.corpus import CorpusIndex
 
     rows = load_rows(args.input)
+    dataset = dataset_identity(rows)
     if args.domain == "cloud":
         rows = [r for r in rows if r["Collection"] == CLOUD_COLLECTION]
     if args.split_manifest:
@@ -98,12 +99,13 @@ async def benchmark(args, config):
     if args.limit_sessions:
         ids = set(sorted({r["conversation_id"] for r in rows})[:args.limit_sessions])
         rows = [r for r in rows if r["conversation_id"] in ids]
-    corpus_snapshot = "mtrag-53fef6f5917c7e10c436f697e69a955dbc795d81"
+    corpus_snapshot = f"{dataset['name']}-{dataset['revision']}"
     retriever = create_retriever(args.protocol, config_path=getattr(args, "retriever_config", None),
-                                index_path=getattr(args, "retriever_index", None), corpus_path=getattr(args, "corpus", None))
+                                index_path=getattr(args, "retriever_index", None), corpus_path=getattr(args, "corpus", None),
+                                corpus_snapshot_id=corpus_snapshot)
     if retriever is not None:
         corpus_snapshot = retriever.corpus_snapshot_id
-    corpus_index = (CorpusIndex.from_jsonl(args.evidence_corpus, corpus_id="mtrag", snapshot_id=corpus_snapshot)
+    corpus_index = (CorpusIndex.from_jsonl(args.evidence_corpus, corpus_id=dataset["name"], snapshot_id=corpus_snapshot)
                     if args.evidence_corpus else None)
     bind_corpus_context(retriever, corpus_index)
     service = create_controller(config)
@@ -127,7 +129,7 @@ async def benchmark(args, config):
             supporting = corpus_index.retrieved_keys(turn.supporting_contexts)
             evidence = corpus_index.resolve((*retrieval_priority, *supporting))
         else:
-            evidence = tuple(to_evidence(c, corpus_snapshot) for c in turn.contexts)
+            evidence = tuple(to_evidence(c, corpus_snapshot, corpus_id=dataset["name"]) for c in turn.contexts)
             retrieval_priority = tuple(block.key for block in evidence)
         return await service.serve_turn(session_id, turn.query,
                     evidence, request_id=turn.task_id, corpus_snapshot_id=corpus_snapshot,
@@ -162,7 +164,7 @@ async def benchmark(args, config):
     try:
         manifest_path = _manifest(config, service, await service.engine.info(), args.protocol)
         manifest = json.loads(manifest_path.read_text())
-        manifest.update(dataset={"commit": "53fef6f5917c7e10c436f697e69a955dbc795d81",
+        manifest.update(dataset={**dataset,
                                  "input_sha256": hashlib.sha256(Path(args.input).read_bytes()).hexdigest(),
                                  "split_manifest_sha256": hashlib.sha256(Path(args.split_manifest).read_bytes()).hexdigest() if args.split_manifest else None,
                                  "domain": args.domain, "selected_sessions": sorted({r["conversation_id"] for r in rows})},
@@ -170,7 +172,7 @@ async def benchmark(args, config):
                                   "arrival_rate": args.arrival_rate, "arrival_window": args.arrival_window,
                                   "per_turn_timeout": args.per_turn_timeout, "drain_timeout": args.drain_timeout,
                                   "retriever_config": getattr(args, "retriever_config", None)},
-                        retrieval=retriever.manifest if retriever else {"kind": "official_fixed_top5"})
+                        retrieval=retriever.manifest if retriever else {"kind": "dataset_provided_contexts"})
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
         telemetry_before = await service.engine.metrics()
         report = await run_sessions(rows, handle, protocol=args.protocol, concurrency=args.concurrency,

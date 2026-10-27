@@ -1,83 +1,56 @@
-# Doc2Dial 原文与多轮监督适配
+# Doc2Dial / MultiDoc2Dial 数据与系统评测
 
-`adapters.doc2dial`将已经下载的作者文档与对话转为两个独立产物：可供现有检索器读取的完整原文语料，以及只供离线研究的原对话/grounding侧车。它不训练模型、不调用生成、不读取未来轮次作为在线输入，也不把新数据伪装成MTRAG。
+同一个`adapters.doc2dial`入口读取Doc2Dial v1/v0.9和MultiDoc2Dial作者格式，导出完整原文、原始对话/grounding；MultiDoc2Dial另生成可直接送入现有P3运行器的任务。正常运行不需要训练。
 
-## 原理与复用边界
+## MultiDoc2Dial：跨文档多轮公开补充
 
-[Doc2Dial](https://aclanthology.org/2020.emnlp-main.652/)提供有文档范围的多轮交互，包含条件查询、澄清及来源跨度。这比只有单轮引用格式更接近本项目的历史与适用条件问题。但其precondition/solution是作者说明中的模糊标注，不是完备逻辑规则或语义真值。[MultiDoc2Dial](https://aclanthology.org/2021.emnlp-main.498/)增加跨文档切换，同时排除了irrelevant场景；它的`respond_no_solution`也不能直接解释为整个语料无答案。
+[作者论文](https://aclanthology.org/2021.emnlp-main.498/)及[官方代码](https://github.com/IBM/multidoc2dial)提供DMV、SSA、VA、助学服务四域、488份文档。当前复用已有官方归档，SHA256为`f0c034c249663d7b3cb08b19cf2cc2c3d101372485be982621d4711931a1ce00`。原代码与数据各按发布源许可保留归属，第三方原始数据不打入Python发行包。
 
-本实现按真实文件格式适配，没有复制官方HF的RC预处理：后者会反转历史拼接、只取紧邻user→agent，并把不连续支持span扩成最小/最大边界包络。这里保留原角色、turn ID、顺序和每一个源范围，不合并发言、不补助手回答、不扩大引用。
+| 原分区 | 会话 | 原消息 | 系统问答轮 | 至少一次支持文档集合变化的会话 |
+|---|---:|---:|---:|---:|
+| validation → dev | 661 | 9195 | 4427 | 550 |
+| test | 661 | 8938 | 4335 | 523 |
 
-版本检查和源码/许可依据见[固定研究记录](../../runs/multiturn-grounding-research/README.md)。Doc2Dial官方数据卡标示CC-BY-3.0；代码许可与数据许可分开记录，不因MultiDoc代码为Apache便推定其所有数据如此。真实数据不随wheel分发，使用时保留作者归属及来源记录。
+这里的“系统问答轮”将连续user消息合为一次请求、连续agent消息合为一次参考回答，中间用两个换行连接；原文字不改写。原消息ID、角色、顺序、DA、references和逐span原文仍在`supervision.jsonl`，任务中的`source_turn_ids`可追溯分组。两个分区分别有22/12个无作者回答的末尾user组，保留在原对话中，不虚构参考答案。这个明确的会话分组协议适配现有服务轮次，结果不直接与作者按单个agent发言计算的榜单混用。
 
-## 可运行入口
-
-先准备作者的documents和**明确训练分区**。以下为已验证的本地路径；其他位置替换路径即可。core CLI不自动联网下载，也不覆盖旧输出：
-
-```bash
-uv run python -m adapters.doc2dial \
-  --documents runs/multiturn-grounding-research/data/doc2dial_v1.0.1--doc2dial_doc.json \
-  --dialogues runs/multiturn-grounding-research/data/doc2dial_v1.0.1--doc2dial_dial_train.json \
-  --dataset-version doc2dial-v1.0.1 --source-format v1 \
-  --source-uri https://doc2dial.github.io/file/doc2dial_v1.0.1.zip \
-  --split train --output runs/doc2dial-v1-prepared
-```
-
-v0.9 wOOD使用其独立文档/训练文件，显式传`--source-format v0.9`、`--dataset-version doc2dial-v0.9-wOOD`及另一个output。v1的`references`列表与v0.9的`reference`字典分别解析；后者每个span的多标签完整保存。两套对话有大量重叠，不能直接合并为独立训练样本；也不按文件名猜split或自动选择“最新版本”。
-
-输出：
-
-- `corpus.jsonl`：全部提供的完整`doc_text`，采用可逆的`[domain,doc_id]`身份；source为数据归档及文档fragment，version是数据发布版本，均不冒充原政府网页的有效版本。
-- `supervision.jsonl`：每个原对话的完整turn序列、原role/utterance/turn_id/DA、原reference容器及精确grounding范围。连续同role、空reference、多标签保持原样；不是可直接送模型的SFT messages或在线oracle输入。
-- `manifest.json`：格式、操作者声明的split、输入文件摘要和转换计数。摘要在文件边界计算一次，不增加请求期hash。
-
-只有实际引用到的span按Python Unicode字符半开区间验证一次并复用。错位或缺失引用明确失败，不用`find`取第一次、不clamp、不归一化。`text_sec`在真实数据中存在遗漏嵌套正文的情况，故不使用它替换原文或拼支持范围。标签不进入corpus，不生成静态dependencies，也不把空reference自动标成全语料无支持。
-
-## 按严格历史前缀构造研究样本
-
-`adapters.dialogue_examples`进一步将侧车投影为每个原agent轮次的下一发言实例，供来源阅读、历史条件与对话动作研究使用。投影只使用目标之前的真实历史，标签与来源分离，避免未来目标泄漏。
+准备官方文件后运行（validation分区将test替换为validation，输出改为dev）：
 
 ```bash
-uv run python -m adapters.dialogue_examples \
-  --supervision runs/doc2dial-v1-prepared/supervision.jsonl \
-  --output runs/doc2dial-v1-causal
+python -m adapters.doc2dial \
+  --documents data/multidoc2dial/source/multidoc2dial_doc.json \
+  --dialogues data/multidoc2dial/source/multidoc2dial_dial_test.json \
+  --dataset-version archive-f0c034c24966 --source-format multidoc2dial \
+  --source-uri https://doc2dial.github.io/multidoc2dial/file/multidoc2dial.zip \
+  --split test --output data/multidoc2dial/test
+python -m adapters.retrieval build \
+  --corpus data/multidoc2dial/test/corpus.jsonl --index data/multidoc2dial/bm25 \
+  --snapshot multidoc2dial-archive-f0c034c24966
 ```
 
-输出`examples.jsonl`和成功后的`manifest.json`，不覆盖已有目录。入口逐行读取、单遍计算原输入摘要；不重复哈希每个历史或目标。一个实例包含：
+全部488份文档参与检索，不按当前答案或grounding挑选语料。P3任务的`contexts`初始为空，生成时使用本方法实际历史和真实检索结果；targets、grounding与qrels只用于离线评价。文档ID采用可逆的`[domain,doc_id]`，发布版本标识语料快照，不冒充政策生效时间。
 
-- `input.turns`：严格位于目标之前的全部原始`turn_id/role/utterance`，没有目标、未来轮次或任何DA/grounding标签。原agent角色保持为agent，由后续具体模型适配显式转换。
-- `supervision`：目标原始turn，包括原文、DA、原`references`/`reference`容器和精确grounding；不推导“应该澄清”“无答案”或偏好真值。
-- `address`与数据字段：原conversation/target turn身份、dataset version、source format和split。
-- `task_scope`：单独声明`offline_given_document`及原passage身份。它不是检索结果，不进入`input`，不能在真实检索实验中用它偷选gold材料。
+输出包括`corpus.jsonl`、`supervision.jsonl`、`tasks.jsonl`、`qrels.tsv`、`split_manifest.json`和`manifest.json`。重复运行会刷新这些派生产物；已保存运行仍以原输入摘要和源版本追溯。参考span按原字符坐标读取，错误坐标仍明确报错，避免引用错段。
 
-连续同role不合并或丢弃：连续agent的后一个目标可看到前一个已观察agent发言。首轮agent可以有空前缀；末尾user不制造后续答案。每条样本保留独立的前缀视图，消费者修改一条不会改变源对话或后续样本。当前接口不直接序列化为SGLang请求，也不改变生产完整QA协议。
-
-两份已有train导出逐目标核对通过：v1有21998条实例，其中1567条紧随另一agent、167个对话以user结束；v0.9 wOOD有25126条实例，其中1977条紧随另一agent、139个对话以user结束。实例数不是独立训练单元数，不能随机逐轮切分或把两版本重叠对话当独立样本。验证保留于`runs/causal-dialogue-projection/`，没有模型调用，也没有因地址与因果合同通过就授予原target语义质量资格。
-
-## 接到已有检索与HTTP
+统一矩阵入口：
 
 ```bash
-uv run python -m adapters.retrieval build \
-  --corpus runs/doc2dial-v1-prepared/corpus.jsonl \
-  --index runs/doc2dial-v1-bm25 --snapshot doc2dial-v1.0.1
-uv run contextkv --config configs/demo.yaml --state-dir runs/doc2dial-demo-state serve \
-  --retriever-index runs/doc2dial-v1-bm25 \
-  --evidence-corpus runs/doc2dial-v1-prepared/corpus.jsonl --corpus-id doc2dial
+python -m bench.b6_joint_sweep --matrix configs/benchmark_multidoc2dial.yaml \
+  --stage test --job-timeout 3600 --output runs/multidoc2dial-system
 ```
 
-示例使用CPU mock；实际Qwen3改用对应scope和已经启动的引擎。HTTP只收到当前问题，检索器读取corpus；监督侧车不会加载。不得把ground-truth文档或reference spans送给检索器再称真实检索。完整文档较长时沿现有预算拒绝溢出，不静默裁掉正文。当前未为这些非交替对话扩展MTRAG的P1/P2/P3脚本gate。
+配置使用共同BM25和相同Qwen3/资源预算比较Native与ContextKV，复用现有生成、提交、退役、成本及资源采样链。它是固定检索配方的系统执行比较；研究完整任务感知检索时，沿用现有`comparison_scope: system`和`retriever_config`接口，使用同一新语料构建BM25/BGE索引即可，不另造运行器。计划确认有必要执行时加`--execute`；准备与CPU接线检查不算回答质量实测。
 
-## 实际验证与剩余问题
+保存答案的基础词项评分：
 
-| 分区 | 原文档 | 对话/轮次 | 精确引用出现次数 | 边界 |
-|---|---:|---:|---:|---|
-| v1.0.1 train | 488 | 3474 / 44149 | 63950 | 2222个对话有连续同role；该版本没有空引用轮次 |
-| v0.9 wOOD train | 488 | 3471 / 49972 | 102972 | 2772对OOD user/agent加431个no_solution，共5975个空引用轮次 |
+```bash
+python -m bench.quality --references data/multidoc2dial/test/tasks.jsonl \
+  --predictions SAVED-OFFICIAL.jsonl --output runs/multidoc2dial-overlap.json
+```
 
-独立逐条核对原role、文本、DA、reference容器、turn ID及字符范围通过；原始验证/测试对话未提取解析。v1完整488文档实际BM25建盘重载后，以固定首个用户问题取得5个完整文档，Qwen3输入5424tokens且可行；没有提供gold文档、标签或预期回答，0模型调用。这是接线证明，不是检索或回答质量评测。原件与复算脚本在`runs/doc2dial-integration/`。
+复用作者采用的SQuAD式F1/EM定义，按task ID关联，报告[0,1]分数、领域/会话均值和缺失任务；缺失回答计零。本文分组后的参考回答是完整交流轮，不能冒充原始agent-turn分数。F1只补充语义正确性、条件适用性和来源支持评价，不作为唯一质量门槛。检索使用文档级qrels，系统性能/资源沿用统一指标。
 
-OOD只能说明问题不适用于给定文档：例如在DMV材料下问VA事务，完整语料可能另有VA答案。真实target也有条件否定反转等噪声；地址正确不授予target语义资格。固定开发材料的有限字面重叠检查无命中，不代表全量去污染完成。
+## 原Doc2Dial能力
 
-[FaithDial/CHARP对照研究](../../runs/multiturn-grounding-alternatives/README.md)补充了另一约束：人工修订与history字段不保证模型需要利用历史；CHARP同知识、不同末问的成对设计更能隔离历史消歧。当前保留这些有效原理和数据接口，后续按真正的历史、条件及证据充分性问题设计机制；没有因适配成功就启动训练或重跑大矩阵。
+已有v1.0.1和v0.9 wOOD读取、完整语料导出及`adapters.dialogue_examples`严格前缀投影继续保留，可用于文档支撑对话研究。v1使用`references`列表，v0.9使用`reference`字典；每个原角色/原文和多标签保持原样。两版本有重叠，不混作独立样本。`respond_no_solution`或空reference只按原标注保留，不推断全语料不可答。
 
-已有[可选训练/导出接口](../research/grounded_training.md)保留供复用，当前不推进训练；数据适配成功不代表语义质量收益。
+示例入口仍为`python -m adapters.doc2dial --source-format v1 ...`和`python -m adapters.dialogue_examples --supervision ... --output ...`。这些离线原消息投影与上述系统问答轮是不同产物。历史验证记录在`runs/doc2dial-integration/`，本次公共分区与接线检查在`runs/benchmark-suite-review/`。
