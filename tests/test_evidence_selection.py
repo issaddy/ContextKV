@@ -7,6 +7,7 @@ from threading import Event
 import pytest
 
 from adapters.corpus import CorpusIndex
+from adapters.conversation import ConversationResolver
 from adapters.evidence_selection import EvidenceSelector, reading_catalog
 from adapters.mtrag import OnlineContext, OnlineTurn
 from adapters.query_resolution import PriorContext
@@ -32,7 +33,12 @@ class Client:
                     if 'Windows v4 private installer' in doc['text'] or 'Run the installer.' in doc['text']]
         if self.invalid:
             selected.append(len(body['documents']))
-        return CompletionResult('completed',json.dumps({'selected_ids':selected}),'stop',100)
+        value={'relation':'standalone','history_turns':[],'resume_turn':0,
+            'frame':{'topic':'Atlas','target':'','task':'package and installation',
+                     'conditions':{'version':'v4','platform':'Windows','source':'private'},
+                     'requirements':['download package','installation procedure']},
+            'selected_ids':selected}
+        return CompletionResult('completed',json.dumps(value),'stop',100)
 
 
 
@@ -53,7 +59,7 @@ def select(client):
     corpus,contexts,intent,turn=fixture_data()
     catalog,_=reading_catalog(contexts,neighbors=lambda hits:(),
         indexed={c.document_id:c for c in contexts},contextualize=corpus.contextualize)
-    result=EvidenceSelector(client).select(turn,intent,catalog,contexts[:1],
+    result=EvidenceSelector(ConversationResolver(client)).select(turn,PriorContext(),catalog,contexts[:1],
         required_context=corpus.selection_support(catalog))
     return corpus,contexts,intent,result
 
@@ -61,7 +67,7 @@ def select(client):
 @pytest.mark.asyncio
 async def test_selected_original_sources_reach_both_candidates_and_replay(tmp_path):
     client=Client()
-    corpus,original,intent,(contexts,trace)=select(client)
+    corpus,original,intent,(contexts,view,trace)=select(client)
     assert [c.document_id for c in contexts]==['package','steps']
     assert trace['status']=='selected' and len(client.calls)==1
     supplied=client.calls[0][0]['documents']
@@ -97,33 +103,34 @@ async def test_selected_original_sources_reach_both_candidates_and_replay(tmp_pa
 
 def test_out_of_catalog_selection_falls_back_without_retry():
     client=Client(invalid=True)
-    _,original,intent,(contexts,trace)=select(client)
+    _,original,intent,(contexts,view,trace)=select(client)
     assert trace['status']=='failed' and contexts==original[:1]
     assert len(client.calls)==1
 
 
 def test_catalog_budget_does_not_cut_original_bodies_or_retry():
     client=Client(budget=21)
-    _,original,intent,(contexts,trace)=select(client)
+    _,original,intent,(contexts,view,trace)=select(client)
     assert contexts==original[:1]
-    assert trace['catalog_count']==0 and not client.calls and not trace['model_called']
+    assert trace['catalog_count']==0 and len(client.calls)==1
+    assert client.calls[0][0]['documents']==[]  # Task interpretation still happens once.
 
 
 def test_large_first_unit_does_not_hide_later_complete_applicable_material():
     _,contexts,intent,turn=fixture_data()
     catalog=(OnlineContext('large','Long unrelated source.'*1000),contexts[1])
     client=Client(budget=600)
-    result,trace=EvidenceSelector(client).select(turn,intent,catalog,(),required_context={})
+    result,view,trace=EvidenceSelector(ConversationResolver(client)).select(turn,PriorContext(),catalog,(),required_context={})
     assert result==catalog[1:] and trace['catalog_ids']==['package']
     assert trace['budget_skipped_ids']==['large']
     body,schema=client.calls[0]
     assert body['documents'][0]['id']==1 and body['documents'][0]['text']==contexts[1].text
     assert schema['response_format']['json_schema']['schema']['properties']['selected_ids']['items']['enum']==[1]
-    assert dict(body['task']['conditions'])=={'version':'v4','platform':'Windows','source':'private'}
+    assert body['current_question']==turn.query and body['previous_turn'] is None
+    assert dict(view['context']['task_frame']['conditions'])=={'version':'v4','platform':'Windows','source':'private'}
 
 
 def test_selection_receives_declared_version_and_section_for_sources_and_dependencies():
-    from dataclasses import asdict
     from adapters.hybrid_retrieval import HybridRetriever
     rows = [
         {'_id':'package','text':'Run the installer.','title':'Installation','version':'v4',
@@ -141,9 +148,9 @@ def test_selection_receives_declared_version_and_section_for_sources_and_depende
     dense = SimpleNamespace(manifest={'corpus_sha256':'same'},by_id={c.document_id:c for c in contexts},
         search=lambda *args,**kwargs:contexts)
     sparse = SimpleNamespace(manifest=dense.manifest,corpus_snapshot_id=corpus.snapshot_id)
-    resolver = SimpleNamespace(resolve=lambda *args:{'text':turn.query,'context':asdict(intent)})
+    resolver = ConversationResolver(client)
     retriever = HybridRetriever(sparse,dense,object(),stage='dense',query_mode='conversational',
-        resolver=resolver,evidence_selector=EvidenceSelector(client))
+        resolver=resolver,evidence_selector=EvidenceSelector(resolver))
     retriever.bind_corpus(corpus)
     retriever.retrieve_turn(turn,prior_context=PriorContext())
     documents = client.calls[0][0]['documents']
@@ -180,15 +187,16 @@ def test_semantic_http_wait_does_not_hold_the_local_ranking_lock():
     entered,release=Event(),Event()
     corpus,contexts,intent,turn=fixture_data()
     class Resolver:
-        def resolve(self,turn,context):
-            from dataclasses import asdict
-            return {'text':turn.query,'context':asdict(replace(intent,task_frame=TaskFrame(task=turn.query)))}
+        def resolve(self,*args,**kwargs):
+            raise AssertionError('joint source planning must not run a preliminary interpretation')
     class Selector:
-        def select(self,turn,intent,ranked,fallback,**kwargs):
+        def select(self,turn,prior_context,ranked,fallback,**kwargs):
             if turn.query=='slow':
                 entered.set()
                 assert release.wait(5)
-            return fallback,{'status':'selected'}
+            from dataclasses import asdict
+            view={'text':turn.query,'context':asdict(replace(intent,task_frame=TaskFrame(task=turn.query)))}
+            return fallback,view,{'status':'selected'}
     dense=SimpleNamespace(manifest={'corpus_sha256':'same'},by_id={c.document_id:c for c in contexts},
         search=lambda *args,**kwargs:contexts)
     sparse=SimpleNamespace(manifest=dense.manifest,corpus_snapshot_id='v4')
@@ -206,28 +214,28 @@ def test_semantic_http_wait_does_not_hold_the_local_ranking_lock():
         assert slow.result(timeout=2).contexts==contexts
 
 
-def test_selection_receives_actual_relevant_dialogue_and_accepts_partial_support():
+def test_joint_selection_reads_actual_dialogue_before_deciding_scope_and_accepts_partial_support():
     from adapters.mtrag import OnlineMessage
-    corpus,contexts,intent,request=fixture_data()
+    _,contexts,intent,request=fixture_data()
     history=tuple(m for n in range(1,8) for m in
         (OnlineMessage('user',f'Question {n}'),OnlineMessage('assistant',f'Actual answer {n}\nWith object Atlas.')))
-    request=replace(request,turn=8,history=history,query='Return to the first one: package and latest version?')
-    intent=replace(intent,relation='revisit',history_turns=(1,),
-                   task_frame=replace(intent.task_frame,requirements=('download package','latest version')))
+    request=replace(request,turn=8,history=history,query='Back to the original Windows v4 package and installation.')
     class PartialClient(Client):
         def complete(self,messages,**kwargs):
-            self.calls.append((json.loads(messages[-1]['content']),kwargs))
-            return CompletionResult('completed',json.dumps({'selected_ids':[1]}),'stop',100)
+            result=super().complete(messages,**kwargs)
+            value=json.loads(result.text)
+            value['relation']='revisit'
+            value['resume_turn']=1
+            value['history_turns']=[1]
+            value['selected_ids']=[1]
+            return replace(result,text=json.dumps(value))
     client=PartialClient()
-    result,trace=EvidenceSelector(client).select(request,intent,contexts,contexts[:1],required_context={})
-    assert result==(contexts[1],) and trace['status']=='selected'
-    supplied=client.calls[0][0]['conversation']
-    assert [r['turn'] for r in supplied]==[1,5,6,7]
+    result,view,trace=EvidenceSelector(ConversationResolver(client)).select(
+        request,PriorContext(interpretations=(None,)*7),contexts,contexts[:1],required_context={})
+    assert result==(contexts[1],) and trace['status']=='selected' and len(client.calls)==1
+    body=client.calls[0][0]
+    supplied=[*body['earlier_turns'],body['previous_turn']]
+    assert {1,5,6,7} <= {r['turn'] for r in supplied}
     assert all(r['question']==history[2*r['turn']-2].text and r['answer']==history[2*r['turn']-1].text for r in supplied)
-    for relation in ('standalone', 'topic_switch'):
-        client.calls.clear()
-        # An upstream interpretation must not erase the actual referent-bearing QA.
-        EvidenceSelector(client).select(request,replace(intent,relation=relation,history_turns=()),contexts,(),required_context={})
-        supplied=client.calls[0][0]['conversation']
-        assert [r['turn'] for r in supplied]==[5,6,7]
-        assert all(r['question']==history[2*r['turn']-2].text and r['answer']==history[2*r['turn']-1].text for r in supplied)
+    assert view['context']['relation']=='revisit' and view['context']['history_turns']==(1,)
+    assert body['current_question']==request.query

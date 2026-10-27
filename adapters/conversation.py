@@ -233,7 +233,7 @@ class ConversationResolver:
                 "conversational_turns": "preserve active state, bypass source retrieval/selection and respond as dialogue",
                 "transport": self.client.manifest if self.client is not None else {"kind": "no_auxiliary_model"}}
 
-    def resolve(self, turn, context):
+    def resolve(self, turn, context, *, evidence_documents=None):
         started = time.perf_counter()
         trace = {"version": VERSION, "text": turn.query, "status": "unchanged", "model_called": False,
                  "snapshot_version": context.snapshot_version, "context": None}
@@ -246,7 +246,7 @@ class ConversationResolver:
         if not turn.history and self.client is None:
             return finish("first_user_turn")
         fragment = _FRAGMENT.search(turn.query)
-        if turn.history and fragment and (intent := _literal_task_continuation(turn, context, fragment)) is not None:
+        if evidence_documents is None and turn.history and fragment and (intent := _literal_task_continuation(turn, context, fragment)) is not None:
             trace.update(text=intent.query, status="resolved", context=asdict(intent),
                          condition_query=turn.query)
             return finish("literal_task_continuation")
@@ -260,7 +260,7 @@ class ConversationResolver:
         history_window = len(turn.user_questions)-1 if _REVISIT.search(turn.query) else 3
         first = max(0, len(turn.user_questions)-1-history_window)
         users = [{"turn": i+1, "question": q} for i, q in enumerate(turn.user_questions[:-1]) if i >= first]
-        recent = {row["turn"]: row["answer"] for row in dialogue_turns(turn)}
+        recent = {row["turn"]: row["answer"] for row in dialogue_turns(turn, [u["turn"] for u in users])}
         for row in users:
             if row["turn"] in recent:
                 row["answer"] = recent[row["turn"]]
@@ -298,9 +298,28 @@ class ConversationResolver:
                 "required": list(frame_properties), "additionalProperties": False},
                 **{name: schema["properties"][name] for name in ("relation", "history_turns", "resume_turn")}}
             schema["required"] = list(schema["properties"])
+        system = INITIALIZE_SYSTEM if initialize else SYSTEM
+        if evidence_documents is not None:
+            from adapters.evidence_selection import SELECTION_SYSTEM
+            system += "\n\n" + SELECTION_SYSTEM
+            body = {"documents": [], **body}
+            messages = [{"role": "system", "content": system},
+                        {"role": "user", "content": json.dumps(body, ensure_ascii=False)}]
+            used, lengths = self.client.catalog_token_lengths(messages,
+                [json.dumps(d, ensure_ascii=False) for d in evidence_documents])
+            for document, length in zip(evidence_documents, lengths, strict=True):
+                if used + length + 2 <= self.client.config.max_input_tokens:
+                    body["documents"].append(document)
+                    used += length + 2
+            available = [d["id"] for d in body["documents"]]
+            schema["properties"]["selected_ids"] = {"type": "array", "maxItems": 5 if available else 0,
+                "items": {"type": "integer", **({"enum": available} if available else {})}}
+            schema["required"] = [*schema["required"], "selected_ids"]
+            trace["source_selection"] = {"catalog_ids": available,
+                "budget_skipped_ids": [d["id"] for d in evidence_documents if d["id"] not in available]}
         response_format = {"type": "json_schema", "json_schema": {
             "name": "contextkv_conversational_intent", "strict": True, "schema": schema}}
-        completion = self.client.complete([{"role": "system", "content": INITIALIZE_SYSTEM if initialize else SYSTEM},
+        completion = self.client.complete([{"role": "system", "content": system},
             {"role": "user", "content": json.dumps(body, ensure_ascii=False)}], response_format=response_format)
         trace.update(completion=asdict(completion), model_called=completion.status != "input_over_budget",
                      response_format=response_format,
@@ -353,6 +372,13 @@ class ConversationResolver:
                                  task_operation=task["operation"], state_updates=value["updates"])
             query = turn.query if relation in {"standalone", "ambiguous", "conversational"} else frame_query(frame)
             resolved = QueryContext(query, relation, tuple(sorted(set(ids))), frame)
+            if evidence_documents is not None:
+                selected = value["selected_ids"]
+                if (not isinstance(selected, list) or len(selected) > 5
+                        or any(type(i) is not int or i not in available for i in selected)):
+                    raise ValueError("selection must contain at most five supplied source IDs")
+                trace["source_selection"]["selected_ids"] = ([] if relation == "conversational" else
+                                                             list(dict.fromkeys(selected)))
             if relation != value["relation"]:
                 trace["declared_relation"] = value["relation"]
         except (ValueError, TypeError, KeyError) as error:
@@ -362,7 +388,8 @@ class ConversationResolver:
         if resolved.relation == "ambiguous":
             trace["status"] = "ambiguous"
             return finish("ambiguous_interpretation_uses_existing_history_view", history_view=True)
-        return finish("conversational_interpretation")
+        return finish("joint_context_interpretation" if evidence_documents is not None else
+                      "conversational_interpretation")
 
     def close(self):
         if self.client is not None:

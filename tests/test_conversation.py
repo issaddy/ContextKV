@@ -730,7 +730,7 @@ def test_initial_greeting_has_no_invented_task_frame():
     assert 'conversational' in schema['properties']['relation']['enum']
 
 
-def test_revisit_keeps_older_user_states_and_recent_verbatim_answers():
+def test_revisit_keeps_older_user_states_and_their_actual_answers():
     questions=tuple(f'Question {n}' for n in range(1,8))
     request=turn('Back to the first topic.',questions)
     client=Client({'query':'First topic','relation':'revisit','history_turns':[1],'resume_turn':1})
@@ -738,5 +738,4 @@ def test_revisit_keeps_older_user_states_and_recent_verbatim_answers():
     body=json.loads(client.inputs[0][0][-1]['content'])
     rows=[*body['earlier_turns'],body['previous_turn']]
     assert [r['turn'] for r in rows]==list(range(1,8))
-    assert [r['turn'] for r in rows if 'answer' in r]==[5,6,7]
-    assert all(r['answer']==request.history[2*r['turn']-1].text for r in rows if 'answer' in r)
+    assert all(r['answer']==request.history[2*r['turn']-1].text for r in rows)

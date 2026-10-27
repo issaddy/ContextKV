@@ -50,7 +50,8 @@ def load_retriever_config(path):
     from adapters.query_resolution import SCHEMA_MODES, SOURCE_MODES
     validate_retrieval_options(query_mode=value.query_mode, stage=value.stage,
         query_fusion=value.query_fusion, rerank_query_mode=value.rerank_query_mode,
-        candidate_k=value.candidate_k, rerank_k=value.rerank_k, rrf_k=value.rrf_k)
+        candidate_k=value.candidate_k, rerank_k=value.rerank_k, rrf_k=value.rrf_k,
+        joint_selection=value.evidence_selection == "semantic")
     if value.evidence_selection not in {"ranked", "semantic"}:
         raise ValueError("evidence_selection must be ranked or semantic")
     if value.evidence_selection == "semantic" and (
@@ -128,7 +129,7 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
             evidence_selector = None
             if config.evidence_selection == "semantic":
                 from adapters.evidence_selection import EvidenceSelector
-                evidence_selector = EvidenceSelector(client)
+                evidence_selector = EvidenceSelector(resolver)
             documents = None
             if config.source_window and config.source_documents:
                 from adapters.source_documents import SourceDocuments

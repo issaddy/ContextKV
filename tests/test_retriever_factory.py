@@ -108,7 +108,8 @@ def test_semantic_factory_shares_the_interpreter_client_and_requires_bound_sourc
     retriever_config.write_text(yaml.safe_dump(value))
     retriever=create_retriever("P3",config_path=retriever_config)
     try:
-        assert retriever.evidence_selector.client is retriever.resolver.client is clients[0]
+        assert retriever.evidence_selector.resolver is retriever.resolver
+        assert retriever.resolver.client is clients[0]
         assert (retriever.reranker is None) == (stage != "hybrid_rerank")
         with pytest.raises(ValueError,match="evidence-corpus"):
             ServingRetriever(retriever,corpus_id="c")
@@ -138,15 +139,13 @@ async def test_complete_reading_choices_and_conditions_reach_both_candidates_wit
             return 40,[len(d) for d in documents]
         def complete(self,messages,**kwargs):
             body=json.loads(messages[-1]['content'])
-            if 'documents' in body:
-                catalogs.append(body)
-                ids=[d['id'] for d in body['documents'] if d.get('required_context')]
-                ids.append(next(d['id'] for d in body['documents'] if not d.get('required_context')))
-                return CompletionResult('completed',json.dumps({'selected_ids':ids}),'stop')
+            catalogs.append(body)
+            ids=[d['id'] for d in body['documents'] if d.get('required_context')]
+            ids.append(next(d['id'] for d in body['documents'] if not d.get('required_context')))
             value={'relation':'standalone','history_turns':[],'resume_turn':0,
                 'frame':{'topic':'Atlas','target':'','task':'download and install',
                     'requirements':['download package','installation procedure'],
-                    'conditions':{'version':'v4','platform':'Windows'}}}
+                    'conditions':{'version':'v4','platform':'Windows'}}, 'selected_ids':ids}
             return CompletionResult('completed',json.dumps(value),'stop')
         def close(self):
             pass
@@ -189,9 +188,12 @@ async def test_complete_reading_choices_and_conditions_reach_both_candidates_wit
         for candidate in build_candidates(store.get_snapshot('s'),'Continue',blocks):
             assert candidate.required_blocks=={b.key for b in blocks}
         trace=retriever.query_view_traces[-1]
-        assert trace['requirement_evidence']['requirement_ranked_ids']==[]
-        assert trace['requirement_evidence']['encoder_inputs']==3
-        assert len(retriever.reranker.inputs)==1 if retriever.reranker else trace['requirement_evidence']['rerank_pairs']==0
+        assert 'requirement_evidence' not in trace
+        assert len(retriever.encoder.inputs)==1
+        assert trace['semantic_evidence']['status']=='selected'
+        assert trace['context']['task_frame']['requirements']==('download package','installation procedure')
+        if retriever.reranker:
+            assert len(retriever.reranker.inputs)==1
         await service.close_session('s')
         assert not store.outbox()
     finally:
@@ -966,7 +968,7 @@ def test_factory_uses_original_document_windows_with_existing_serving_selection(
 
 
 @pytest.mark.asyncio
-async def test_conversational_turn_bypasses_source_work_and_keeps_state_for_resume(retriever_config,tmp_path,monkeypatch):
+async def test_joint_conversational_turn_keeps_state_and_uses_one_call_per_turn(retriever_config,tmp_path,monkeypatch):
     from adapters import query_selector
     from adapters.conversation import frame_query
     from adapters.corpus import CorpusIndex
@@ -986,14 +988,12 @@ async def test_conversational_turn_bypasses_source_work_and_keeps_state_for_resu
         def complete(self,messages,**kwargs):
             body=json.loads(messages[-1]['content'])
             calls.append(body)
-            if 'documents' in body:
-                value={'selected_ids':[body['documents'][0]['id']]}
-            else:
-                social=body['current_question']=="Thanks, that's all."
-                value={'relation':'conversational' if social else 'condition_change',
-                    'history_turns':[] if social else [2],'resume_turn':0,
-                    'task':{'operation':'keep','value':'','requirements':[]},
-                    'updates':{} if social else {'conditions':{'platform':'Windows'}}}
+            social=body['current_question']=="Thanks, that's all."
+            value={'relation':'conversational' if social else 'condition_change',
+                'history_turns':[] if social else [2],'resume_turn':0,
+                'task':{'operation':'keep','value':'','requirements':[]},
+                'updates':{} if social else {'conditions':{'platform':'Windows'}},
+                'selected_ids':[] if social else [body['documents'][0]['id']]}
             return CompletionResult('completed',json.dumps(value),'stop')
         def close(self):
             pass
@@ -1022,10 +1022,10 @@ async def test_conversational_turn_bypasses_source_work_and_keeps_state_for_resu
                                        request_id='thanks',corpus_snapshot_id='fixture-v1')
         social=store.get_snapshot('s')
         assert replay.idempotent_replay and replay.output_ids==response.output_ids and len(calls)==1
-        assert retriever.encoder.texts_processed==retriever.reranker.texts_processed==0
+        assert retriever.encoder.texts_processed>0  # Source recall precedes the joint decision.
         assert social.raw_history[:-1]==initial.raw_history and social.raw_history[-1].query_context.task_frame==frame
         assert social.raw_history[-1].evidence_keys==() and response.citation_scope==()
-        assert retriever.query_view_traces[-1]['retrieval_status']=='skipped_conversational'
+        assert retriever.query_view_traces[-1]['retrieval_status']=='completed_conversational'
         current=next(m.content for m in reversed(social.execution.messages) if m.role=='user')
         assert 'not a new factual lookup' in current
         async def resume(snapshot):
@@ -1036,8 +1036,8 @@ async def test_conversational_turn_bypasses_source_work_and_keeps_state_for_resu
         assert dict(final.raw_history[-1].query_context.task_frame.conditions)=={'version':'v4','platform':'Windows'}
         assert calls[1]['previous_turn']['answer']==social.raw_history[-1].assistant_text
         assert calls[1]['previous_turn']['state']['topic']=='Atlas SDK'
-        assert retriever.encoder.texts_processed>0 and retriever.requests==1
-        assert len(calls)==3  # Acknowledgement interpretation, resumed interpretation and source choice.
+        assert retriever.encoder.texts_processed>0 and retriever.requests==2
+        assert len(calls)==2  # One joint interpretation/selection per newly committed turn.
         await service.close_session('s')
         assert not store.outbox()
     finally:
