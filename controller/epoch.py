@@ -1,7 +1,7 @@
 """Retryable retirement happens strictly after the durable ledger transaction."""
 import asyncio
 
-from .engine_client import Engine, EngineError
+from .engine_client import Engine, EngineError, UnknownOutcomeError
 from .events import EventLog
 from .session_store import SessionStore
 
@@ -24,20 +24,18 @@ class EpochCoordinator:
                     if (ack.engine_session_id, ack.session_generation, ack.engine_restart_id, ack.operation_id) != (
                             op.engine_session_id, op.expected_generation, op.engine_restart_id, op.operation_id):
                         raise EngineError("RETIRE_ACK_MISMATCH")
-                    if ack.freed_gpu_tokens or ack.freed_host_tokens:
-                        raise EngineError("INVALID_RETIRE_ACCOUNTING", "retire_ref must not claim physical frees")
                     self.store.ack_retire(op.operation_id)
-                    self.events.emit("epoch_retire_acked", operation=op, physical_free_tokens=0)
+                    self.events.emit("epoch_retire_acked", operation=op, acknowledgement=ack,
+                                     physical_free_tokens=0)
                     acknowledged += 1
                 except EngineError as exc:
                     if exc.code == "STALE_RESTART":
                         self.store.ack_retire(op.operation_id)
                         self.events.emit("epoch_retire_acked", operation=op, reason="engine_restart_invalidated_reference", physical_free_tokens=0)
                         acknowledged += 1
-                    else:
+                    elif isinstance(exc, UnknownOutcomeError) or exc.code == "RETIRE_PENDING":
                         self.store.retire_failed(op.operation_id, str(exc))
                         self.events.emit("epoch_retire_retry", operation=op, error=str(exc))
-                except Exception as exc:
-                    self.store.retire_failed(op.operation_id, str(exc))
-                    self.events.emit("epoch_retire_retry", operation=op, error=str(exc))
+                    else:
+                        raise
         return acknowledged

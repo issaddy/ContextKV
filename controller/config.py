@@ -1,7 +1,7 @@
 """Validated run configuration and runtime assembly."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 from pathlib import Path
@@ -72,7 +72,6 @@ class AblationConfig:
     decode_cost: bool = True
     control_cost: bool = True
     epoch_retirement: bool = True
-    hysteresis: bool = True
 
 
 @dataclass(frozen=True)
@@ -186,8 +185,6 @@ def create_controller(config: RunConfig) -> Controller:
         model.output_length_model = OutputLengthModel.load(config.cost_model.output_length_artifact,
             expected_fingerprint=template.fingerprint, max_new_tokens=config.context.max_new_tokens, sampling=config.sampling,
             expected_priors=model.effective_output_prior)
-    knobs = config.planner if config.ablation.hysteresis else replace(config.planner,
-                delta_abs=0, delta_rel=0, z=0, min_stable_turns=0)
     engine = (MockEngine(fingerprint=template.fingerprint, gpu_capacity_tokens=config.engine.gpu_capacity_tokens,
                          host_capacity_tokens=config.engine.host_capacity_tokens, page_size=config.engine.page_size)
               if config.engine.kind == "mock" else
@@ -196,7 +193,7 @@ def create_controller(config: RunConfig) -> Controller:
                                  **({"model_scope": config.model.scope.manifest()} if config.model.scope else {})))
     state_dir = Path(config.state_dir)
     return Controller(SessionStore(state_dir / "sessions.sqlite3"), engine, template=template,
-                      policy=config.context, knobs=knobs, cost_model=model, shadow=config.shadow,
+                      policy=config.context, knobs=config.planner, cost_model=model, shadow=config.shadow,
                       epoch_retirement=config.ablation.epoch_retirement,
                       online_calibration=config.cost_model.online_calibration, sampling=config.sampling,
                       events=EventLog(state_dir / "events.jsonl", config_hash=config.config_hash,

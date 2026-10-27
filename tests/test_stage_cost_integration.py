@@ -244,7 +244,7 @@ def test_planner_uses_eligible_stage_estimates_without_relabeling_them_calibrate
         for c in candidates
     ]
     snapshot = SessionSnapshot("s", turns_since_rebuild=10)
-    knobs = PlannerKnobs(delta_rel=0, z=0, min_stable_turns=0, fallback_strategy="always_append")
+    knobs = PlannerKnobs(delta_rel=0, z=0, fallback_strategy="always_append")
     planned = choose_plan(candidates, batch(quotes), model(), snapshot, knobs)
     assert planned.reason == "cost_saving" and planned.candidate.action == "REBUILD"
     assert all(p.selection_eligible and not p.calibrated for p in planned.predicted)

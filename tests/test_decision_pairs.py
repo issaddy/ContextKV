@@ -309,7 +309,7 @@ def rescore_model(case, *, prefer="REBUILD"):
 def test_rescore_uses_only_frozen_history_and_quotes_and_keeps_all_measurements(tmp_path):
     case, row, info, _ = measured_pair(tmp_path)
     untouched = deepcopy(row)
-    knobs = PlannerKnobs(min_stable_turns=0, delta_rel=0, z=0)
+    knobs = PlannerKnobs(delta_rel=0, z=0)
     changed = deepcopy(row)
     for index, arm in enumerate(changed["observations"].values()):
         arm.update(server_elapsed_ms=99999-index, client_complete_ms=index, output_tokens=400-index)

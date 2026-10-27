@@ -48,12 +48,8 @@ methods:
       - planner: {warm_ratio: 0.25}
       - planner: {warm_ratio: 0.75}
   - id: Ours
-    tune: true
     overrides:
       planner: {strategy: cost}
-    candidates:
-      - planner: {delta_rel: 0.05, min_stable_turns: 1}
-      - planner: {delta_rel: 0.1, min_stable_turns: 2}
   - id: Ours_no_host_cost
     ablation_of: Ours
     overrides:
@@ -66,10 +62,6 @@ methods:
     ablation_of: Ours
     overrides:
       ablation: {control_cost: false}
-  - id: Ours_no_hysteresis
-    ablation_of: Ours
-    overrides:
-      ablation: {hysteresis: false}
   - id: A_B_no_retire
     ablation_of: Ours
     overrides:

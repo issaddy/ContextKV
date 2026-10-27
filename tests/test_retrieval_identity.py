@@ -16,6 +16,20 @@ def write_corpus(tmp_path, rows):
     return path
 
 
+def test_bm25_records_runtime_versions_without_a_second_package_lock(tmp_path, monkeypatch):
+    from adapters import retrieval
+
+    monkeypatch.setattr(retrieval, "version", lambda package: "compatible-build")
+    retriever = BM25SRetriever({"p": {"text": "atlas timeout"}}, corpus_snapshot_id="v1")
+    expected = retriever.retrieve(["atlas"])
+    retriever.save(tmp_path / "index")
+    monkeypatch.setattr(retrieval, "version", lambda package: "another-build")
+    restored = BM25SRetriever.load(tmp_path / "index")
+    assert restored.retrieve(["atlas"]) == expected
+    assert restored.manifest["version"] == "compatible-build"
+    assert restored.manifest["runtime_versions"]["version"] == "another-build"
+
+
 def test_custom_namespace_is_used_only_when_source_is_absent():
     missing = to_evidence(OnlineContext("p1", "original"), "snapshot", corpus_id="manuals")
     assert missing.key.corpus_id == "manuals"

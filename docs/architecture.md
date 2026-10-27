@@ -1,6 +1,6 @@
 # 实现与事务边界
 
-课题场景、A/B/C 的职责与当前推进顺序统一见[项目范围](project_scope.md)。本文描述现有工程接口；可选研究分支不自动成为主流程前置。
+课题场景、A/B/C 的职责与当前推进顺序统一见[项目范围](project_scope.md)。本文描述现有工程接口与状态流转。
 
 控制器为单 Python 服务；SQLite WAL 是跨进程一致性的边界。每个业务会话有串行异步锁，数据库另有一个未决 attempt 的唯一索引。多会话可并发，部署默认一个 Uvicorn worker。无需数据库服务或 GPU 即可运行正确性演示。
 
@@ -8,7 +8,7 @@
 
 ```mermaid
 flowchart LR
-  Data[白名单当前问题与证据] --> Candidates[APPEND / REBUILD 纯候选]
+  Data[当前问题与证据] --> Candidates[APPEND / REBUILD 纯候选]
   Store[(SQLite 双账本)] --> Candidates
   Candidates --> Quote[成本或warm/idle策略：同批只读报价]
   Candidates --> Fixed[固定策略跳过报价]
@@ -46,7 +46,7 @@ flowchart LR
 - `cost_model.py` 按 prefix/suffix/host-load/concurrency 复用固定耗时测量和插值结构。长度先验另外检查回答协议；未绑定或不同协议不沿用旧长度分布，使用配置先验及本会话已完成历史。等待预测优先使用本服务最近 128 个已提交输出的实际长度，容量预留继续使用原生预算。
 - `planner.py` 比较预计完整成本，追加/重建分别使用最近完成请求的控制耗时；误差带仅作诊断，相同成本才比较原生工作集。未支持范围使用既有回退。耗时模型默认冻结，`observe` 的可选残差更新与长度/控制耗时反馈分开，不需要训练。
 
-校验集中在数据进入、引擎响应和持久提交边界。新传入证据在候选入口校验一次内容 hash，内部共用证据索引并信任已提交的不可变账本；归档时不重复哈希或读回已有正文。报价身份由计划器统一校验，成本模型直接使用已校验的数据。保留用于证据身份、实际输入关联和请求幂等的 hash，以及 CAS、epoch 代际和完整回答提交约束；不为内部正常数据增加重复防御层。
+校验集中在数据进入、引擎响应和持久提交边界。新传入证据在候选入口校验一次内容 hash，内部共用证据索引并信任已提交的不可变账本；归档时不重复哈希或读回已有正文。报价身份由计划器统一校验，成本模型直接使用已校验的数据。候选构造负责快照、动作和共同证据，计划器直接使用其可行性结果。hash用于证据身份、输入关联和请求幂等；CAS与epoch代际维护提交一致性。
 
 ## 持久状态
 
@@ -54,9 +54,9 @@ flowchart LR
 
 `attempts` 保存请求身份、选中计划、prepare 身份、epoch、完整结果及处理阶段。`request_id` 在同一业务会话内唯一；相同 ID 的不同请求报冲突。跨控制器重复 begin 不会获得执行权。状态只能前进，已选计划和已完成结果不能由旧对象覆盖。计划与新 epoch 在 prepare RPC 前一起落盘；prepare ACK 与提交标记在 generate RPC 前一起落盘，避免无外部调用间隔的重复持久化。
 
-一个事务同时写入新 QA、执行账本、当前 epoch、已提交 attempt 和旧 epoch 退役 outbox。事务内重新检查 attempt 阶段与 snapshot version。新版本提交前绝不退役旧当前 epoch。
+一个事务同时写入新 QA、执行账本、当前 epoch、已提交 attempt 和旧 epoch 退役 outbox。事务内重新检查 attempt 阶段与 snapshot version。旧当前epoch在新版本提交后退役。
 
-多会话的后台退役通知合并到一个运行中的worker。慢退役期间新提交的outbox由下一轮快照继续处理，不为每个已完成请求积压一个等待锁的task；失败仍留在原持久outbox，由既有周期重试或显式drain处理。此处不改变原生淘汰策略，也不将减少控制器任务误报为释放GPU KV。
+多会话的后台退役通知合并到一个运行中的worker。慢退役期间新提交的outbox由下一轮快照继续处理，不为每个已完成请求积压一个等待锁的task；传输结果未知或退役尚未完成时，记录保留在outbox中等待重试。程序错误和协议身份错误正常抛出，后台任务结果由drain收取；已提交答案保持有效。缓存诊断计数保存在receipt/事件中，独立于回答提交和引用退役。
 
 引擎侧只保留有限的已退役epoch和终态操作记录，活动/在途记录不参与淘汰。过期后的退役重试以原生generation绑定确认旧引用是否仍存在，ACK不会删除较新的引用。原生缓存重置时同步更换研究restart标识；完整实际历史、幂等状态和待确认outbox继续由SQLite保存。保留窗口与原生机制见[引擎合同](../engine_patches/README.md#观测与恢复合同)。
 
@@ -80,7 +80,7 @@ Mock 与真实 SGLang 的 status 在有限窗口保留完整输出。真实补�
 
 Mock 模型为 CPU 确定性状态机，用于页边界、共享前缀、软引用、在途副本与故障注入测试。其 token slot 和耗时不能用于 GPU 性能结论。
 
-真实引擎必须匹配固定 SGLang commit 及研究协议能力，配置指纹同时覆盖模型、tokenizer、template、namespace 和 cache key。普通未补丁服务器不能冒充 epoch guard 支持者。原生 B0/B1 使用单独的基线通道。
+真实引擎采用固定SGLang及ContextKV协议，配置指纹覆盖模型、tokenizer、template、namespace和cache key。原生B0/B1使用对应基线通道。
 
 退役 ACK 表示软引用已撤销，物理 free 为零。真实分配、淘汰和传输仍走原生 admission、锁和完成边界。账本中逻辑 prompt 长度不能当作唯一物理占用。
 

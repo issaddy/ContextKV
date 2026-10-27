@@ -64,12 +64,7 @@ class NativePoolSampler:
             self.errors.append({"timestamp": time.monotonic(), "error": f"{type(error).__name__}: {error}"})
 
     async def start(self):
-        try:
-            import prometheus_client.parser  # noqa: F401
-        except ImportError:
-            self.errors.append({"timestamp": time.monotonic(),
-                                "error": "optional evaluation dependency prometheus-client is unavailable"})
-            return
+        import prometheus_client.parser  # noqa: F401
         # The owned executor supplies this only without a warmup/before-job hook.
         # Fresh gauges can be uninitialized; record the known state explicitly.
         if self.initial_empty:

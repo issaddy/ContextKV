@@ -104,12 +104,7 @@ def load_beir_corpus(path: str | Path) -> dict[str, dict[str, Any]]:
 
 
 class BM25SRetriever:
-    """Pinned CPU BM25, deterministic score ties, immutable original passages.
-
-    Keep retrieval in a separate environment from CUDA dependencies if necessary.
-    The default constructor enforces both frozen package versions. No silent
-    fallback to a different BM25 formula or tokenization is permitted.
-    """
+    """CPU BM25 with recorded library versions and deterministic score ties."""
     def __init__(self, corpus: Mapping[str, Mapping[str, Any]], *, corpus_snapshot_id: str,
                  cpu_threads: int = 1):
         self._initialize_runtime(cpu_threads)
@@ -120,7 +115,7 @@ class BM25SRetriever:
                               str(corpus[pid].get("source") or ""),
                               str(corpus[pid].get("title") or "")) for pid in self._ids)
         self.corpus_snapshot_id = corpus_snapshot_id
-        self.manifest = {**RETRIEVAL_CONFIG, "corpus_snapshot_id": corpus_snapshot_id,
+        self.manifest = {**RETRIEVAL_CONFIG, **self.runtime_versions, "corpus_snapshot_id": corpus_snapshot_id,
                          "corpus_sha256": json_hash([asdict(c) for c in self._contexts]),
                          "passage_order_sha256": json_hash(self._ids), "cpu_threads": cpu_threads,
                          "thread_environment": {k: os.environ[k] for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")}}
@@ -132,13 +127,6 @@ class BM25SRetriever:
     def _initialize_runtime(self, cpu_threads: int):
         if cpu_threads < 1:
             raise ValueError("cpu_threads must be positive")
-        for package, wanted in (("bm25s", BM25S_VERSION), ("numpy", NUMPY_VERSION)):
-            try:
-                installed = version(package)
-            except Exception as exc:
-                raise RuntimeError("P3 requires the retrieval extra: bm25s==0.3.15 numpy==2.3.5") from exc
-            if installed != wanted:
-                raise RuntimeError(f"{package} must be {wanted}; installed {installed}")
         # Record requested threading; callers should set these before importing BLAS.
         for variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
             if variable not in os.environ:
@@ -146,6 +134,7 @@ class BM25SRetriever:
         import bm25s
         import numpy as np
         self._bm25s, self._np = bm25s, np
+        self.runtime_versions = {"version": version("bm25s"), "numpy_version": version("numpy")}
 
     @classmethod
     def load(cls, directory: str | Path, *, cpu_threads: int = 1, mmap: bool = True):
@@ -155,7 +144,8 @@ class BM25SRetriever:
         """
         directory = Path(directory)
         manifest = json.loads((directory / "manifest.json").read_text())
-        if any(manifest.get(k) != v for k, v in RETRIEVAL_CONFIG.items()):
+        if any(manifest.get(k) != v for k, v in RETRIEVAL_CONFIG.items()
+               if k not in {"version", "numpy_version"}):
             raise ValueError("saved index uses a different retrieval configuration")
         for name, digest in manifest["files"].items():
             if sha256((directory / name).read_bytes()).hexdigest() != digest:
@@ -166,7 +156,8 @@ class BM25SRetriever:
                                  (directory / "passages.jsonl").read_text().splitlines() if line)
         result._ids = tuple(c.document_id for c in result._contexts)
         result.corpus_snapshot_id = manifest["corpus_snapshot_id"]
-        result.manifest = {**manifest, "cpu_threads": cpu_threads, "loaded_index": True,
+        result.manifest = {**manifest, "runtime_versions": result.runtime_versions,
+                           "cpu_threads": cpu_threads, "loaded_index": True,
                            "thread_environment": {k: os.environ[k] for k in
                            ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")}}
         result._index = result._bm25s.BM25.load(str(directory / "index"), mmap=mmap,

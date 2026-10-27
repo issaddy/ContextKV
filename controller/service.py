@@ -92,7 +92,7 @@ class Controller:
         self._postplan_control_ms = {action: deque(maxlen=32) for action in ("APPEND", "REBUILD")}
         self._calibration_identity = None
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
-        self._background: set[asyncio.Task] = set()
+        self._retire_task: asyncio.Task | None = None
         self._retire_requested = False
 
     def _lock(self, session_id: str):
@@ -106,11 +106,11 @@ class Controller:
 
     def _retire_background(self):
         self._retire_requested = True
-        if any(not task.done() for task in self._background):
-            return
-        task = asyncio.create_task(self._flush_retire_requests())
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
+        if self._retire_task is not None:
+            if not self._retire_task.done():
+                return
+            self._retire_task.result()
+        self._retire_task = asyncio.create_task(self._flush_retire_requests())
 
     async def _flush_retire_requests(self):
         # Coalesce turn notifications while one retirement is slow. A new
@@ -120,13 +120,15 @@ class Controller:
             await self.epochs.flush()
 
     async def drain(self):
-        if self._background:
-            await asyncio.gather(*tuple(self._background), return_exceptions=True)
+        if self._retire_task is not None:
+            task, self._retire_task = self._retire_task, None
+            await task
         await self.epochs.flush()
 
     async def aclose(self):
-        await self.drain()
-        if hasattr(self.engine, "aclose"):
+        try:
+            await self.drain()
+        finally:
             await self.engine.aclose()
 
     async def _prepare_epoch(self, attempt: Attempt, info: EngineInfo) -> PrepareAck:
@@ -158,9 +160,6 @@ class Controller:
             raise EngineError("INVALID_OUTPUT_IDS")
         if len(result.output_ids) > self.policy.max_new_tokens:
             raise EngineError("OUTPUT_BUDGET_EXCEEDED")
-        if any(value < 0 for value in (receipt.actual_device_hit_tokens, receipt.actual_host_loaded_tokens,
-                                      receipt.actual_prefill_tokens, receipt.inserted_cache_tokens)):
-            raise EngineError("INVALID_CACHE_METRICS")
 
     def _response(self, attempt: Attempt, *, elapsed_ms=None, replay=False,
                   timing: ClientTiming | None = None, control_ms=None) -> TurnResponse:
@@ -334,7 +333,6 @@ class Controller:
                                  action=plan.candidate.action, reason=plan.reason, predicted=plan.predicted,
                                  switch_margin_ms=plan.switch_margin_ms, predicted_saving_ms=plan.predicted_saving_ms,
                                  turns_since_rebuild=planning_snap.turns_since_rebuild,
-                                 min_stable_turns=self.knobs.min_stable_turns,
                                  execution_mode=plan.execution_mode, pressure_bucket=pressure,
                                  observed_queued_requests=quotes.queued_requests if quotes else None,
                                  prior_completed_length_samples=len(self.cost_model._observed_output_lengths))

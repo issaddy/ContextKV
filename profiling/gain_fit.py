@@ -28,7 +28,7 @@ from profiling import length_fit
 FEATURE_NAMES = ("prefill_gain_ms", "decode_gain_ms", "input_delta_tokens")
 ALPHAS = (.1, 1., 10., 100.)
 QUANTILES = (0., .5, .8, .9)
-GATES = ("configured", "no_margin", "no_stability", "no_margin_or_stability")
+GATES = ("configured", "no_margin")
 
 
 class SavedLengthPrior:
@@ -107,7 +107,6 @@ def prediction_features(case, quote, model, knobs):
     return {"features": features, "baseline_gain_ms": a.cost-r.cost,
         "baseline_action": plan.candidate.action, "baseline_reason": plan.reason,
         "margin_ms": plan.switch_margin_ms,
-        "stable": case.snapshot.turns_since_rebuild >= knobs.min_stable_turns,
         "eligible": plan.reason in COST_SELECTION_REASONS,
         "calibrated": a.calibrated and r.calibrated,
         "length_means": {action: estimate.predicted_output_tokens for action, estimate in estimates.items()}}
@@ -232,10 +231,9 @@ def one_sided_threshold(rows, quantile):
 def decide(row, gain_ms, threshold_ms=0., gate="configured"):
     if gate not in GATES:
         raise ValueError("unknown matched gate ablation")
-    margin = 0. if gate in {"no_margin", "no_margin_or_stability"} else (row["margin_ms"] or 0.)
-    stable = row["stable"] or gate in {"no_stability", "no_margin_or_stability"}
+    margin = 0. if gate == "no_margin" else (row["margin_ms"] or 0.)
     if row["eligible"]:
-        action = "REBUILD" if stable and gain_ms > margin+threshold_ms else "APPEND"
+        action = "REBUILD" if gain_ms > margin+threshold_ms else "APPEND"
         reason = "gain_saving" if action == "REBUILD" else "gain_gate"
     else:
         action, reason = row["baseline_action"], row["baseline_reason"]
@@ -324,11 +322,6 @@ def fit_exploration(features, *, families=FAMILIES, alphas=ALPHAS, quantiles=QUA
     for action in ("APPEND", "REBUILD"):
         values = [decide({**r, "eligible": False, "baseline_action": action, "baseline_reason": "fixed"}, 0.) for r in exemplar]
         fixed[action] = summarize(values)
-    stable_control = []
-    for row in exemplar:
-        action = ("REBUILD" if row["stable"] else "APPEND") if row["eligible"] else row["baseline_action"]
-        stable_control.append(decide({**row, "eligible": False, "baseline_action": action,
-                                      "baseline_reason": "stable_supported_rebuild_control"}, 0.))
     return records, {"schema_version": 1,
         "scope": "exploratory development nested session LOSO, not independent final test",
         "new_engine_requests": 0, "quality_evaluated": False, "online_policy_changed": False,
@@ -336,10 +329,9 @@ def fit_exploration(features, *, families=FAMILIES, alphas=ALPHAS, quantiles=QUA
         "target": "server_elapsed_ms APPEND minus REBUILD; actual measurements used only as labels/evaluation",
         "prior_scope": "shared 433/512-style frozen artifact prior reused; OOF isolates new residual fits, not original prior construction",
         "one_sided_scope": "training inner OOF empirical optimism threshold; no conformal or population guarantee",
-        "gate_scope": "original base-cost margin/stability preserved; matched ablations reuse the same selected fits/thresholds",
+        "gate_scope": "base-cost margin ablation reuses the same selected fits/thresholds",
         "alpha_grid": list(alphas), "quantile_grid": list(quantiles), "folds": folds,
-        "length_fit_audit": features.fit_audit, "variants": summaries, "fixed_actions": fixed,
-        "stable_supported_rebuild_control": summarize(stable_control)}
+        "length_fit_audit": features.fit_audit, "variants": summaries, "fixed_actions": fixed}
 
 
 def main(argv=None):

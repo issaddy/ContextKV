@@ -22,21 +22,17 @@ def snapshot_with_history():
         raw_history=(TurnRecord(1, "q1", "answer", output),), reference_map=first.reference_map), evidence
 
 
-def test_candidate_batch_matches_scalar_only_adapter_without_dropping_candidates():
+def test_candidate_batch_matches_scalar_rendering_without_dropping_candidates():
     reference = ByteTemplate()
 
-    class ScalarOnly:
-        fingerprint = reference.fingerprint
-        render = reference.render
-
-    class Batched(ScalarOnly):
+    class Batched(ByteTemplate):
         calls = []
         def render_many(self, messages):
             self.calls.append(messages)
             return tuple(self.render(m) for m in messages)
 
     snapshot, evidence = snapshot_with_history()
-    scalar = build_candidates(snapshot, "q2", evidence, template=ScalarOnly())
+    scalar = build_candidates(snapshot, "q2", evidence, template=reference)
     batcher = Batched()
     batched = build_candidates(snapshot, "q2", evidence, template=batcher)
     assert len(batcher.calls) == 1 and len(batcher.calls[0]) == 2

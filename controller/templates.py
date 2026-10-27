@@ -71,6 +71,7 @@ class RenderedPrompt:
 class Template(Protocol):
     fingerprint: ConfigFingerprint
     def render(self, messages: tuple[Message, ...]) -> RenderedPrompt: ...
+    def render_many(self, conversations: tuple[tuple[Message, ...], ...]) -> tuple[RenderedPrompt, ...]: ...
 
 
 class ByteTokenizer:

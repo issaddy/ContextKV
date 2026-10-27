@@ -19,10 +19,6 @@ class PlannerKnobs:
     delta_abs: float = 0.0
     delta_rel: float = .05
     z: float = 1.0
-    # Net savings already include the measured execution/control costs and an
-    # uncertainty margin. A fixed dwell time can veto avoiding native KV waits.
-    # Retain an explicit dwell option for reproducing older policies only.
-    min_stable_turns: int = 0
     fixed_token_threshold: int = 8192
     fallback_strategy: str = "fixed_threshold"
     concurrency: int = 1
@@ -34,7 +30,7 @@ class PlannerKnobs:
         supported = {"cost", "always_append", "always_rebuild", "fixed_threshold", "stable_layout", "normal_rag", "fixed_period", "warm_idle", "contextpilot", "redundancy_threshold"}
         if self.strategy not in supported or self.fallback_strategy not in supported - {"cost", "warm_idle"}:
             raise ValueError("unknown planner strategy or recursive fallback")
-        if min(self.delta_abs,self.delta_rel,self.z,self.min_stable_turns,self.fixed_token_threshold) < 0:
+        if min(self.delta_abs,self.delta_rel,self.z,self.fixed_token_threshold) < 0:
             raise ValueError("planner thresholds must be nonnegative")
         if self.period < 1 or not 0 <= self.warm_ratio <= 1:
             raise ValueError("period must be positive and warm_ratio must be in [0, 1]")
@@ -55,8 +51,6 @@ def _fixed(append, rebuild, strategy, knobs, session, quotes=None):
         ratio = append.nonrequired_evidence_body_tokens / max(1, append.evidence_body_tokens)
         return rebuild if ratio > knobs.redundancy_threshold else append
     if strategy == "warm_idle":
-        if quotes is None:
-            return _fixed(append,rebuild,knobs.fallback_strategy,knobs,session)
         quote = next(q for q in quotes.quotes if q.candidate_id == append.candidate_id)
         # GPU-ready only: pending transfers and merely recoverable host copies
         # cannot inflate the observed warm signal.  This is an adaptation of a
@@ -98,19 +92,11 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
                 knobs: PlannerKnobs | None = None, *, concurrency: int | None = None,
                 control_ms: float | Mapping[str, float] = 0.0,
                 queue_ms: float = 0.0) -> Plan | NoFeasiblePlan:
+    """Select builder-produced candidates; cost/warm comparisons receive a quote batch."""
     knobs = knobs or PlannerKnobs()
     candidates = tuple(candidates)
-    if any(c.snapshot_version != session.version for c in candidates):
-        raise ValueError("candidates do not share current snapshot")
-    if candidates and len({c.required_blocks for c in candidates}) != 1:
-        raise ValueError("candidates must use the same required evidence")
-    if any(c.corpus_snapshot_id != session.corpus_snapshot_id for c in candidates):
-        raise ValueError("candidates do not share current corpus snapshot")
-    if len({c.candidate_id for c in candidates}) != len(candidates):
-        raise ValueError("duplicate candidate identity")
-    if any(c.action not in {"APPEND", "REBUILD"} for c in candidates):
-        raise ValueError("only APPEND and REBUILD are supported")
-    valid = [c for c in candidates if c.feasible and c.required_blocks <= c.visible_blocks]
+    # build_candidates owns snapshot, evidence and action construction.
+    valid = [c for c in candidates if c.feasible]
     if not valid:
         return NoFeasiblePlan()
     if quotes is not None:
@@ -124,8 +110,6 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
             if candidate.fingerprint != quotes.fingerprint:
                 raise ValueError("quote/generation fingerprint mismatch")
     by_action = {c.action:c for c in valid}
-    if len(by_action) != len(valid):
-        raise ValueError("duplicate text action")
     append, rebuild = by_action.get("APPEND"), by_action.get("REBUILD")
     if session.must_rebuild or session.force_new_epoch_for_recovery or session.history_sync_pending:
         return Plan(rebuild, reason="forced_rebuild") if rebuild else NoFeasiblePlan("required_rebuild_unavailable")
@@ -133,10 +117,7 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
         return Plan(valid[0], reason="only_feasible_candidate")
     if knobs.strategy != "cost":
         chosen = _fixed(append,rebuild,knobs.strategy,knobs,session,quotes)
-        reason = "warm_quote_unavailable_fallback" if knobs.strategy == "warm_idle" and quotes is None else knobs.strategy
-        return Plan(chosen, reason=reason,quote_seq=quotes.observed_seq if quotes else None)
-    if quotes is None:
-        return Plan(_fixed(append,rebuild,knobs.fallback_strategy,knobs,session), reason="quote_unavailable_fallback")
+        return Plan(chosen, reason=knobs.strategy,quote_seq=quotes.observed_seq if quotes else None)
     estimates = tuple(model.predict_native(c,by_id[c.candidate_id],session,
                       batch=quotes,concurrency=concurrency or knobs.concurrency,
                       control_ms=control_ms[c.action] if isinstance(control_ms, Mapping) else control_ms,
@@ -154,8 +135,6 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
         reason = "cost_saving" if abs(saving) > margin else "expected_cost"
     else:
         chosen, reason = _resource_tie_break(append, rebuild, quotes, by_id, by_estimate)
-    if chosen is rebuild and session.turns_since_rebuild < knobs.min_stable_turns:
-        chosen, reason = append, "hysteresis"  # explicit legacy dwell only
     return Plan(chosen, predicted=estimates, quote_seq=quotes.observed_seq,
                 reason=reason,
                 switch_margin_ms=margin, predicted_saving_ms=saving)

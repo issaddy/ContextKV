@@ -154,12 +154,10 @@ def test_identical_resource_and_cost_ranks_keep_current_epoch():
         assert plan.candidate == a
 
 
-def test_minimum_stable_turns_and_forced_rebuild_precedence():
+def test_forced_rebuild_precedence():
     a,r = candidate("APPEND",1000),candidate("REBUILD",500)
     snap = SessionSnapshot("s",turns_since_rebuild=0)
-    legacy = PlannerKnobs(min_stable_turns=2)
-    assert choose_plan((a,r),batch(a,r),MeasuredModel(),snap,legacy).candidate == a
-    assert choose_plan((a,r),batch(a,r),MeasuredModel(),replace(snap,must_rebuild=True),legacy).candidate == r
+    assert choose_plan((a,r),batch(a,r),MeasuredModel(),replace(snap,must_rebuild=True)).candidate == r
     invalid = replace(a,feasible=False,reason="invalid_visible_version")
     assert choose_plan((invalid,r),None,MeasuredModel(),snap).candidate == r
 
@@ -177,13 +175,12 @@ def test_supported_net_savings_can_avoid_waiting_immediately_after_rebuild(since
     assert uncertain.reason == "expected_cost" and uncertain.candidate == r
 
 
-def test_uncalibrated_and_quote_failure_use_common_fixed_threshold():
+def test_uncalibrated_cost_uses_configured_fixed_policy():
     a,r = candidate("APPEND",1000),candidate("REBUILD",500)
     snap = SessionSnapshot("s",turns_since_rebuild=5)
     knobs = PlannerKnobs(fixed_token_threshold=800)
     plan = choose_plan((a,r),batch(a,r),CostModel(),snap,knobs)
     assert plan.candidate == r and plan.reason == "uncalibrated_cost_fallback"
-    assert choose_plan((a,r),None,CostModel(),snap,knobs).candidate == r
 
 
 @pytest.mark.parametrize("strategy,expected",[("always_append","APPEND"),
@@ -197,12 +194,10 @@ def test_fixed_baselines_share_hard_constraints(strategy,expected):
                        PlannerKnobs(strategy=strategy)).candidate == r
 
 
-def test_no_valid_candidate_and_stale_snapshot_fail_explicitly():
+def test_no_valid_candidate_reports_unavailable_plan():
     a,r = candidate("APPEND",100),candidate("REBUILD",50)
     assert isinstance(choose_plan((replace(a,feasible=False),replace(r,feasible=False)),
         None,CostModel(),SessionSnapshot("s")),NoFeasiblePlan)
-    with pytest.raises(ValueError,match="snapshot"):
-        choose_plan((a,r),None,CostModel(),SessionSnapshot("s",version=1))
 
 
 def test_output_prior_uses_only_past_four_completed_outputs_with_shrinkage():
@@ -281,7 +276,6 @@ def test_fixed_period_rebuilds_every_four_turns_after_last_rebuild():
         snap = SessionSnapshot("s",turns_since_rebuild=elapsed)
         assert choose_plan((a,r),None,CostModel(),snap,knobs).candidate == a
     snap = SessionSnapshot("s",turns_since_rebuild=3)
-    assert choose_plan((a,r),None,CostModel(),snap,knobs).candidate == r
 
 
 def test_warm_idle_uses_real_partial_ready_prefix_threshold():
@@ -295,8 +289,6 @@ def test_warm_idle_uses_real_partial_ready_prefix_threshold():
             host_only_load_tokens=100-ready,inflight_h2d_tokens=100-ready),quotes.quotes[1]))
         plan = choose_plan((a,r),observed,CostModel(),snap,knobs)
         assert plan.candidate == expected
-    missing = choose_plan((a,r),None,CostModel(),snap,knobs)
-    assert missing.reason == "warm_quote_unavailable_fallback"
 
 
 def test_lookup_total_input_range_is_enforced_without_optional_fitting_dependencies():

@@ -150,7 +150,5 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     messages.append(current)
     prompts.append(("REBUILD", tuple(messages), spans, frozenset(span.key for span in spans), None))
     conversations = tuple(prompt[1] for prompt in prompts)
-    render_many = getattr(template, "render_many", None)
-    rendered = (render_many(conversations) if render_many is not None else
-                tuple(template.render(messages) for messages in conversations))
+    rendered = template.render_many(conversations)
     return tuple(candidate(*prompt, output) for prompt, output in zip(prompts, rendered, strict=True))

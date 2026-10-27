@@ -18,13 +18,13 @@ export no_proxy="$NO_PROXY"
 export CONTEXTKV_FINGERPRINT_JSON="$(cat runs/fingerprint.json)"
 ```
 
-bootstrap只安装固定 SGLang commit `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b` 及其依赖，并通过现有scope核对用户已有文件、tokenizer和模板，不下载生成模型。改变本地模型目录须重新生成/核对scope，不能修改路径后沿用不匹配身份。实际HF loading revision为null，metadata identity不冒充权重内容验证。见[模型scope](guides/model_scope.md)。
+bootstrap只安装固定 SGLang commit `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b` 及其依赖，并通过现有scope核对用户已有文件、tokenizer和模板，不下载生成模型。更换模型目录时更新scope。实际HF loading revision为null，scope记录元数据身份。见[模型scope](guides/model_scope.md)。
 
 控制器的 `uv.lock` 与独立 `.venv-sglang` 分工不变；引擎依赖由固定上游pyproject定义。记录实际安装环境，不用CPU锁替代引擎依赖。
 
 ## 启动与使用
 
-下面是已有H200功能检查所用的一组明确资源参数，不是性能最优配置。启动前由操作者确认所用GPU与端口空闲；脚本不停止其他服务。
+下面采用已有H200功能检查的资源参数，运行时选择空闲GPU与端口。
 
 ```bash
 CONTEXTKV_HICACHE_GB=8 CONTEXTKV_HICACHE_LAYOUT=layer_first \
@@ -36,7 +36,7 @@ SGLANG_HICACHE_TMA_TRANSFER=0 bash scripts/launch_sglang.sh \
 
 真实运行配置为 `configs/qwen3_8b_scope.example.yaml`。在另一终端使用同一引擎环境启动 `controller.cli ... serve`，或按[项目入口](../README.md)运行P2/P3。32B须同时更换scope和共享配置，不共享8B的成本artifact。容量以实际服务池/分配记录为准，不以请求的比例或GB代替。
 
-仓库同时提供可直接装配的 `configs/qwen3_8b_cost.yaml`：使用 Qwen3-8B 实测 `configs/calibration/qwen3-8b-h200.json`、`native_budget` 等待估计和无固定轮数冷却的成本选择。它是本次已执行的配置，不代表已经优于原生或适用于其他硬件。加载该配置时，在上述引擎启动命令前设置 `export CONTEXTKV_SAMPLE_POOL=1`，与 artifact 的 cache configuration 保持一致；实际 GPU/Host 槽数应为 16384/54272。对照运行的完整 argv、线程设置、模型和环境记录保存在 `runs/mainline-delivery/delivery-run/servers/`。正常服务无需设置 `CONTEXTKV_ENABLE_PROFILING=1`。
+仓库同时提供可直接装配的 `configs/qwen3_8b_cost.yaml`：使用 Qwen3-8B 实测 `configs/calibration/qwen3-8b-h200.json`、`native_budget` 等待估计和无固定轮数冷却的成本选择。对应效果见[评价](data_and_evaluation.md)。加载该配置时，在上述引擎启动命令前设置 `export CONTEXTKV_SAMPLE_POOL=1`，与 artifact 的 cache configuration 保持一致；实际 GPU/Host 槽数应为 16384/54272。对照运行的完整 argv、线程设置、模型和环境记录保存在 `runs/mainline-delivery/delivery-run/servers/`。正常服务无需设置 `CONTEXTKV_ENABLE_PROFILING=1`。
 
 引擎就绪后，在项目根目录运行：
 
@@ -46,7 +46,7 @@ python -m controller.cli --config configs/qwen3_8b_cost.yaml serve
 
 该配置的状态目录是 `runs/contextkv-service`。成本文件随源码与 sdist 提供，不需要重新采集。对应采集来源、支持范围及本地公开副本见[阶段成本说明](guides/stage_cost_model.md)。
 
-服务变更后的必要协议检查可使用 `python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml --report runs/qwen3-smoke.json`。它会实际生成，只在引擎/模型变更需要确认时运行，不是每次文档或分析变更后的例行实验。CPU检查与真实运行边界见[引擎说明](../engine_patches/README.md)。
+服务变更后的必要协议检查可使用 `python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml --report runs/qwen3-smoke.json`。该命令实际生成回答，用于引擎或模型变更后的协议检查。CPU检查与真实运行边界见[引擎说明](../engine_patches/README.md)。
 
 ## 多轮检索服务
 
@@ -78,7 +78,7 @@ CUDA_VISIBLE_DEVICES=0,1 python -m controller.cli --config configs/qwen3_8b_cost
   --evidence-corpus data/mtrag-official/cloud.jsonl --corpus-id mtrag
 ```
 
-实际拓扑为8B生成GPU0、32B解释与BGE检索共享GPU1。32B常驻进程在本次16K池配置下约70,008 MiB，解释等待计入完整响应；两个模型的KV池不能当成一个池汇总。此选择基于真实条件承接回答的改善，不意味着性能已改善。不能只启动30000就运行新的多轮示例。现有owned矩阵管理其声明的生成进程；单独使用该矩阵时，解释服务由操作者按上面命令启动并记录，两者分别关闭。
+实际拓扑为8B生成GPU0、32B解释与BGE检索共享GPU1。32B常驻进程在本次16K池配置下约70,008 MiB，解释等待计入完整响应；两个模型的KV池不能当成一个池汇总。多轮示例同时连接30000生成端口和30001解释端口，完整延迟包含两者。现有owned矩阵管理其声明的生成进程；单独使用该矩阵时，解释服务由操作者按上面命令启动并记录，两者分别关闭。
 
 NGRAM辅助服务使用原生`/server_info`、`/metrics`观测；受控对照需要清空缓存时，在服务空闲后调用原生`/flush_cache`并确认成功。8B非推测生成的控制器继续使用既有研究接口。辅助观测缺失单独记录，不能覆盖已持久化完成的业务结果。
 

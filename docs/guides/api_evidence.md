@@ -34,7 +34,7 @@
 }
 ```
 
-包名、包版本、Git commit、tag和仓库路径都必须显式提供；不从安装说明的最低版本推定唯一目标版本。完整commit只约束声明的版本形式，**不会证明本地文件来自该commit**。构建器离线读取一次原文件SHA，manifest明确记录来源声明与本地字节；可提供 `expected_source_sha256` 与先前独立冻结的源文件核对。即使该检查通过，也不冒充远程Git验证。没有运行时重复hash、额外图存储或新增在线版本检查。
+包名、包版本、Git commit、tag和仓库路径都必须显式提供；不从安装说明的最低版本推定唯一目标版本。commit记录声明的源码版本。构建器离线读取一次原文件SHA，manifest明确记录来源声明与本地字节；可提供 `expected_source_sha256` 与先前独立冻结的源文件核对。该检查核对本地字节，运行时直接复用构建结果。
 
 输出包括 `records.jsonl`、`manifest.json` 和逐源原样复制的 `licenses/*-LICENSE.txt`。manifest保存原文件头、许可声明、输入规格、原文位置、未知项与来源身份状态。`license_id`来自规格声明，构建器不自动判定许可法律适用性。已有输出目录不覆盖。
 
@@ -81,7 +81,7 @@ uv run contextkv --config configs/demo.yaml --state-dir runs/sdk-demo-state serv
   --corpus-id official-sdk-preview
 ```
 
-以上路径指已冻结的本地研究产物，不随wheel发布；使用自己的包时替换路径和身份。示例生成器是CPU mock，实际Qwen3使用对应scope配置及已启动引擎。扩展索引和目标包/版本仍由调用方明确选择；不能把新增SDK材料带来的效果混入同材料缓存比较。
+以上路径指已冻结的本地研究产物，不随wheel发布；使用自己的包时替换路径和身份。示例生成器是CPU mock，实际Qwen3使用对应scope配置及已启动引擎。扩展索引和目标包/版本仍由调用方明确选择；新增SDK材料的效果按系统对照报告。
 
 ## 将已声明关系传入回答
 

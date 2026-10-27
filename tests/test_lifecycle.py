@@ -188,11 +188,58 @@ async def test_retire_failure_does_not_rollback_committed_answer(tmp_path):
     await controller.drain()
     engine.drop_next_retire_response = True
     await controller.serve_turn("s", "q2", evidence, request_id="2")
-    await asyncio.gather(*tuple(controller._background))
+    await controller._retire_task
     assert len(store.read_snapshot("s").raw_history) == 2
     assert len(store.outbox()) == 1
     await controller.drain()
     assert not store.outbox()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [TypeError("broken retire implementation"), EngineError("RETIRE_ACK_MISMATCH")])
+async def test_retirement_error_reaches_drain_and_preserves_committed_state(tmp_path, monkeypatch, error):
+    controller, store, engine = system(tmp_path, knobs=PlannerKnobs(strategy="always_rebuild"))
+    evidence = (make_evidence("A fact", "a"),)
+    await controller.serve_turn("s", "q", evidence, request_id="1")
+    await controller.drain()
+    original = engine.retire
+
+    async def broken_retire(*args):
+        raise error
+
+    monkeypatch.setattr(engine, "retire", broken_retire)
+    await controller.serve_turn("s", "q2", evidence, request_id="2")
+    with pytest.raises(type(error), match=str(error)):
+        await controller.drain()
+    assert len(store.get_snapshot("s").raw_history) == 2
+    assert len(store.outbox()) == 1
+    monkeypatch.setattr(engine, "retire", original)
+    await controller.aclose()
+    assert not store.outbox()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_cache_counters_do_not_veto_completed_answers_or_retirement(tmp_path, monkeypatch):
+    controller, store, engine = system(tmp_path, knobs=PlannerKnobs(strategy="always_rebuild"))
+    generate, retire = engine.generate, engine.retire
+
+    async def generate_with_diagnostic(**kwargs):
+        result = await generate(**kwargs)
+        return replace(result, receipt=replace(result.receipt, actual_prefill_tokens=-1))
+
+    async def retire_with_diagnostic(*args):
+        return replace(await retire(*args), freed_gpu_tokens=64)
+
+    monkeypatch.setattr(engine, "generate", generate_with_diagnostic)
+    monkeypatch.setattr(engine, "retire", retire_with_diagnostic)
+    await controller.serve_turn("s", "first", request_id="1")
+    response = await controller.serve_turn("s", "second", request_id="2")
+    assert response.receipt.actual_prefill_tokens == -1
+    assert len(store.get_snapshot("s").raw_history) == 2
+    await controller.aclose()
+    assert not store.outbox()
+    store.close()
 
 
 @pytest.mark.asyncio
@@ -226,9 +273,9 @@ async def test_slow_retirement_coalesces_turns_and_drains_new_outbox_entries(tmp
         # Generations and commits continue while the first retirement is held.
         await asyncio.gather(*(other_conversation(i) for i in range(6)))
         assert len(store.outbox()) == 7
-        assert len([task for task in controller._background if not task.done()]) == 1
+        assert not controller._retire_task.done()
         release.set()
-        await asyncio.gather(*tuple(controller._background))
+        await controller._retire_task
         # Entries committed after the first flush snapshot must be picked up
         # without a new request, periodic HTTP worker or explicit final drain.
         assert not store.outbox()

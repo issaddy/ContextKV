@@ -41,6 +41,10 @@ class _Epoch:
 
 class MockEngine:
     """Executable fault-injection model. Timing is CPU wall time, not GPU cost."""
+
+    async def aclose(self) -> None:
+        """The in-memory engine owns no external resources."""
+
     def __init__(self, fingerprint=None, *, gpu_capacity_tokens=65536,
                  host_capacity_tokens=131072, page_size=1,
                  response_text="模拟回答：请依据当前证据核对配置与适用版本。",

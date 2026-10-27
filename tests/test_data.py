@@ -208,8 +208,8 @@ class DataTests(unittest.TestCase):
     def test_p3_retrieval_generation_and_durable_commit_pipeline(self):
         from importlib.metadata import PackageNotFoundError, version
         try:
-            if version("bm25s") != "0.3.15" or version("numpy") != "2.3.5":
-                self.skipTest("pinned retrieval extra not installed")
+            version("bm25s")
+            version("numpy")
         except PackageNotFoundError:
             self.skipTest("optional retrieval extra not installed")
         import tempfile
@@ -253,8 +253,8 @@ class DataTests(unittest.TestCase):
     def test_bm25s_ties_and_original_text_when_extra_is_installed(self):
         from importlib.metadata import PackageNotFoundError, version
         try:
-            if version("bm25s") != "0.3.15" or version("numpy") != "2.3.5":
-                self.skipTest("pinned retrieval extra not installed")
+            version("bm25s")
+            version("numpy")
         except PackageNotFoundError:
             self.skipTest("optional retrieval extra not installed")
         corpus = load_beir_corpus(FIXTURE.with_name("corpus_small.jsonl"))

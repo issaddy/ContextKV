@@ -4,6 +4,5 @@ state_dir: runs/cost
 planner:
   strategy: cost
   delta_rel: 0.05
-  min_stable_turns: 0
   fallback_strategy: fixed_threshold
 # Synthetic estimates cannot enable measured-cost optimization.

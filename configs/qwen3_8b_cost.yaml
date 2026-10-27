@@ -15,7 +15,6 @@ context:
   max_new_tokens: 1024
 planner:
   strategy: cost
-  min_stable_turns: 0
 cost_model:
   artifact: configs/calibration/qwen3-8b-h200.json
   admission_estimator: native_budget

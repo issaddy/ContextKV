@@ -23,7 +23,7 @@ python -m profiling.decision_pairs freeze \
 - 源 manifest 中全部会话必须属于传入划分的 `dev`，且 split 文件 hash 必须和源运行一致；拒绝 `test`、P1 参考历史及未决运行。
 - 重新构造的原选中候选必须与保存的 `input_hash` 一致。旧代码/旧模板或缺失排名导致差异时记为 `source_candidate_changed`，不悄悄改输入。
 - 初始轮、强制恢复和不足两个可行候选的轮次记录跳过原因。
-- `stratified` 在完整可行池中按会话及距上次 REBUILD 的轮数（0、1、2+）分层，以固定 seed 打乱后轮转抽取；有足够名额时先覆盖各层，避免只取数据库最早的轮次而让滞回一直关闭。选样只读 pre-turn 状态，不按当前输出、实测收益或 oracle 动作挑案例。manifest 保留每个选中案例的历史轮次、版本年龄和两候选长度；当 limit 小于层数时不保证覆盖所有层。旧默认 `database_order` 保持可复算性。
+- `stratified` 在完整可行池中按会话及距上次 REBUILD 的轮数（0、1、2+）分层，以固定 seed 打乱后轮转抽取；有足够名额时先覆盖各层，覆盖不同上下文积累阶段。选样只读 pre-turn 状态，不按当前输出、实测收益或 oracle 动作挑案例。manifest 保留每个选中案例的历史轮次、版本年龄和两候选长度；当 limit 小于层数时不保证覆盖所有层。旧默认 `database_order` 保持可复算性。
 - `cases.jsonl` 保存两个完整候选、实际 token、pre-turn 快照及预热 token；旁边 `.manifest.json` 保存输入来源、划分、冻结文件 hash 与跳过记录。
 - 可冻结模拟数据以验证文件/协议流程，但后面的硬件收集命令拒绝将模拟 token 来源用于真实实验。
 
@@ -79,7 +79,7 @@ python -m profiling.decision_pairs analyze runs/decision-dev/pairs.jsonl \
 
 - 两候选都受标定支持的 pair 覆盖率、计划原因及回退数。
 - 标定 pair 上的 Δ 符号准确率；`tie-ms` 为事先选择的平局容差，不能看测试结果后调参。
-- 实际计划选中动作的 regret：`C(selected) − min(C(APPEND), C(REBUILD))`。预测方向正确但因滞回选择另一动作的情况仍如实计入。
+- 实际计划选中动作的 regret：`C(selected) − min(C(APPEND), C(REBUILD))`。按实际选中动作计算。
 - 各会话聚合及等会话权重的平均 regret；每个 pair 的预测差、实际差和双方输出长度均保留。
 - 失败/缺失计时数量，不把缺失补成零。
 

@@ -392,9 +392,7 @@ def _model_and_knobs(config, cases, artifact):
         model.output_length_model = OutputLengthModel.load(config.cost_model.output_length_artifact,
             expected_fingerprint=cases[0].candidates[0].fingerprint, max_new_tokens=cases[0].max_new_tokens, sampling=config.sampling,
             expected_priors=model.effective_output_prior)
-    knobs = config.planner if config.ablation.hysteresis else replace(
-        config.planner, delta_abs=0, delta_rel=0, z=0, min_stable_turns=0)
-    return model, knobs
+    return model, config.planner
 
 
 def rescore_pairs(rows, cases, model, knobs, engine_info):
