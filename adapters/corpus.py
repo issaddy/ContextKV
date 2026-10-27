@@ -188,6 +188,20 @@ class CorpusIndex:
         return (block.title, block.text, block.key.corpus_id, block.key.version,
                 block.parent_section, frozenset(block.dependencies))
 
+    def selection_record(self, context):
+        """Expose source applicability already declared by the corpus.
+
+        The collection snapshot is an indexing revision, not a product version.
+        Only a source version distinct from that default is presented as such.
+        """
+        block = self._blocks[self._context_key(context)]
+        record = {"source": block.source_uri, "title": block.title, "text": block.text}
+        if block.key.version != self.snapshot_id:
+            record["version"] = block.key.version
+        if block.parent_section is not None:
+            record["section"] = block.parent_section
+        return record
+
     def source_window(self, contexts):
         """Add each hit's immediate original neighbors once, without recursive growth.
 

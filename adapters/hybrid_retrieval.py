@@ -617,6 +617,7 @@ class HybridRetriever:
         self.read_source_documents = None
         self.source_neighbors = None
         self.selection_support = None
+        self.selection_record = None
         self.evidence_selector = evidence_selector
         self.source_documents = source_documents
         self.document_window_counts = None
@@ -631,6 +632,7 @@ class HybridRetriever:
             self.document_window_counts = corpus_index.document_window_counts
         self.source_neighbors = corpus_index.candidate_neighbors
         self.selection_support = corpus_index.selection_support
+        self.selection_record = corpus_index.selection_record
 
     @property
     def manifest(self):
@@ -798,7 +800,7 @@ class HybridRetriever:
                 self.requests += 1
             if semantic_selection:
                 contexts, semantic_trace = self.evidence_selector.select(turn, intent, catalog, contexts,
-                    required_context=required_context)
+                    required_context=required_context, source_record=self.selection_record)
                 if semantic_trace["status"] == "selected":
                     selected_ids = {c.document_id for c in contexts}
                     supporting_contexts = tuple({s.document_id: s for c in contexts

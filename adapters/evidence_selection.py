@@ -60,14 +60,15 @@ class EvidenceSelector:
 
     @property
     def manifest(self):
-        return {"strategy": "dialogue_scoped_reading_selection_v5", "system_prompt": SYSTEM,
+        return {"strategy": "dialogue_scoped_reading_selection_v6", "system_prompt": SYSTEM,
                 "calls": "one structured source selection after ranking; shared interpreter client",
                 "scope": "at most five complete reading units with required source context",
                 "catalog": "ranked hits and known neighbors, optional original windows, whole units within input budget",
                 "dialogue": "recent actual QA and selected older turns, including when the derived relation is independent",
+                "source_scope": "known source version and parent section accompany original bodies and dependencies",
                 "semantics": "source relevance and applicability selection; original bodies remain the factual authority"}
 
-    def select(self, turn, intent, catalog, fallback, *, required_context):
+    def select(self, turn, intent, catalog, fallback, *, required_context, source_record=None):
         started = time.perf_counter()
         frame = intent.task_frame
         needs = frame.requirements or (frame.task,)
@@ -85,6 +86,8 @@ class EvidenceSelector:
                     {"role": "user", "content": json.dumps(body, ensure_ascii=False, separators=(",", ":"))}]
 
         def record(context):
+            if source_record is not None:
+                return source_record(context)
             return {"source": context.source, "title": context.title, "text": context.text}
         documents = [{"id": i, **record(c),
             **({"required_context": [record(s) for s in required_context[c.document_id]]}

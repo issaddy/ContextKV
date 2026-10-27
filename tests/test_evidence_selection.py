@@ -122,6 +122,41 @@ def test_large_first_unit_does_not_hide_later_complete_applicable_material():
     assert dict(body['task']['conditions'])=={'version':'v4','platform':'Windows','source':'private'}
 
 
+def test_selection_receives_declared_version_and_section_for_sources_and_dependencies():
+    from dataclasses import asdict
+    from adapters.hybrid_retrieval import HybridRetriever
+    rows = [
+        {'_id':'package','text':'Run the installer.','title':'Installation','version':'v4',
+         'parent_section':'Windows offline','dependencies':['condition']},
+        {'_id':'new-package','text':'Run the installer.','title':'Installation','version':'v5',
+         'parent_section':'Windows online'},
+        {'_id':'condition','text':'Private package required.','version':'v4',
+         'parent_section':'Private distribution'},
+        {'_id':'general','text':'General guidance.'},
+    ]
+    corpus = CorpusIndex.from_records(rows,corpus_id='manual',snapshot_id='index-snapshot')
+    contexts = corpus.contextualize(tuple(OnlineContext(r['_id'],r['text']) for r in rows if r['_id']!='condition'))
+    _,_,intent,turn = fixture_data()
+    client = Client()
+    dense = SimpleNamespace(manifest={'corpus_sha256':'same'},by_id={c.document_id:c for c in contexts},
+        search=lambda *args,**kwargs:contexts)
+    sparse = SimpleNamespace(manifest=dense.manifest,corpus_snapshot_id=corpus.snapshot_id)
+    resolver = SimpleNamespace(resolve=lambda *args:{'text':turn.query,'context':asdict(intent)})
+    retriever = HybridRetriever(sparse,dense,object(),stage='dense',query_mode='conversational',
+        resolver=resolver,evidence_selector=EvidenceSelector(client))
+    retriever.bind_corpus(corpus)
+    retriever.retrieve_turn(turn,prior_context=PriorContext())
+    documents = client.calls[0][0]['documents']
+    assert [(d.get('version'),d.get('section')) for d in documents] == [
+        ('v4','Windows offline'),('v5','Windows online'),(None,None)]
+    assert documents[0]['text'] == documents[1]['text'] == 'Run the installer.'
+    dependency, = documents[0]['required_context']
+    assert dependency['version']=='v4' and dependency['section']=='Private distribution'
+    assert dependency['text']=='Private package required.'
+    assert all('index-snapshot' != d.get('version') for d in documents)
+    assert all('content_sha256' not in d and 'provenance' not in d for d in documents)
+
+
 def test_catalog_coalesces_identical_windows_without_chain_merging_other_choices():
     from adapters.source_documents import SourceDocuments
     text='\n\n'.join(f'Paragraph {i} original text.' for i in range(12))
