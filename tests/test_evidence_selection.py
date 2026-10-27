@@ -189,6 +189,10 @@ def test_selection_receives_actual_relevant_dialogue_and_accepts_partial_support
     supplied=client.calls[0][0]['conversation']
     assert [r['turn'] for r in supplied]==[1,5,6,7]
     assert all(r['question']==history[2*r['turn']-2].text and r['answer']==history[2*r['turn']-1].text for r in supplied)
-    client.calls.clear()
-    EvidenceSelector(client).select(request,replace(intent,relation='topic_switch'),contexts,(),required_context={})
-    assert 'conversation' not in client.calls[0][0]
+    for relation in ('standalone', 'topic_switch'):
+        client.calls.clear()
+        # An upstream interpretation must not erase the actual referent-bearing QA.
+        EvidenceSelector(client).select(request,replace(intent,relation=relation,history_turns=()),contexts,(),required_context={})
+        supplied=client.calls[0][0]['conversation']
+        assert [r['turn'] for r in supplied]==[5,6,7]
+        assert all(r['question']==history[2*r['turn']-2].text and r['answer']==history[2*r['turn']-1].text for r in supplied)

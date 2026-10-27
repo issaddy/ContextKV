@@ -60,10 +60,11 @@ class EvidenceSelector:
 
     @property
     def manifest(self):
-        return {"strategy": "dialogue_scoped_reading_selection_v4", "system_prompt": SYSTEM,
+        return {"strategy": "dialogue_scoped_reading_selection_v5", "system_prompt": SYSTEM,
                 "calls": "one structured source selection after ranking; shared interpreter client",
                 "scope": "at most five complete reading units with required source context",
                 "catalog": "ranked hits and known neighbors, optional original windows, whole units within input budget",
+                "dialogue": "recent actual QA and selected older turns, including when the derived relation is independent",
                 "semantics": "source relevance and applicability selection; original bodies remain the factual authority"}
 
     def select(self, turn, intent, catalog, fallback, *, required_context):
@@ -73,7 +74,9 @@ class EvidenceSelector:
         # Reusable original records precede the changing task for native prefix reuse.
         body = {"documents": [], "current_question": turn.query,
                 "resolved_request": intent.query, "task": asdict(frame)}
-        if intent.relation not in {"standalone", "topic_switch"}:
+        # A derived relation can be wrong. Source applicability still needs the
+        # actual dialogue; the current request remains authoritative in SYSTEM.
+        if turn.history:
             recent = [row["turn"] for row in dialogue_turns(turn)]
             body["conversation"] = dialogue_turns(turn, (*recent, *intent.history_turns))
 

@@ -659,12 +659,15 @@ class HybridRetriever:
                 "extra_model_calls": 0},
             "requirement_selection": {"strategy": ("dialogue_view_rank_fusion_v1" if self.query_fusion == "dialogue_rrf"
                                                       else "task_requirement_coverage_v1"),
-                "activation": "resolved compound task with at least two explicit information needs; hybrid or hybrid_rerank",
-                "retrieval": "batched query encoding, equal RRF, and available same-source neighbors as scored candidates",
+                "activation": ("conversational requests; distinct compound needs add derived views" if self.query_fusion == "dialogue_rrf"
+                               else "resolved compound task with at least two explicit information needs; hybrid or hybrid_rerank"),
+                "retrieval": ("batched query encoding, family-weighted RRF, and same-source neighbors for compound needs" if self.query_fusion == "dialogue_rrf"
+                              else "batched query encoding, equal RRF, and available same-source neighbors as scored candidates"),
                 "selection": ("joint task-conditioned selection of prepared reading units" if self.evidence_selector
                               else "literal and derived-family rank fusion within five distinct groups" if self.query_fusion == "dialogue_rrf"
                               else "primary task anchor plus diminishing-return coverage within five distinct groups"),
-                "cost": "one batched encode and search per view; optional primary ranking; per-need scores only without joint semantic selection"},
+                "cost": ("batched query encoding and same-pool scoring across views" if self.query_fusion == "dialogue_rrf"
+                         else "one batched encode and search per view; optional primary ranking; per-need scores only without joint semantic selection")},
             "candidate_k": self.candidate_k, "rerank_k": self.rerank_k, "rrf_k": self.rrf_k,
             "sparse": self.sparse.manifest, "dense": self.dense.manifest,
             "encoder": self.encoder.manifest, "reranker": self.reranker.manifest if self.reranker else None,
