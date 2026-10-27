@@ -3,7 +3,8 @@
 JSONL accepts BEIR ``_id/text/title`` rows or named ``passage_id/document_id``
 rows. Version, source, span, parent section, anchors, and dependency IDs may live
 under ``metadata``. Only those public fields are read; labels and answers are
-never copied. Text is neither normalized nor split, summarized or rewritten.
+never copied. Optional ``source_lists`` retains author list layout around literal
+text; no source words are normalized, summarized or rewritten.
 """
 from __future__ import annotations
 
@@ -15,6 +16,8 @@ from typing import Any, Iterable, Mapping
 
 from controller.evidence import EvidenceError, make_evidence
 from controller.schema import EvidenceBlock, EvidenceKey
+
+from adapters.source_structure import render_source_lists
 
 
 def configuration_anchors(text: str) -> tuple[str, ...]:
@@ -28,9 +31,10 @@ def configuration_anchors(text: str) -> tuple[str, ...]:
 class CorpusIndex:
     """Public evidence metadata indexed once, with version-specific dependencies."""
     def __init__(self, blocks: Iterable[EvidenceBlock], *, corpus_id: str, snapshot_id: str,
-                 source_positions=None):
+                 source_positions=None, retrieval_texts=None):
         self.corpus_id, self.snapshot_id = corpus_id, snapshot_id
         self._blocks = {block.key: block for block in blocks}
+        self._retrieval_texts = retrieval_texts or {}
         self._passages: dict[str, list[EvidenceKey]] = {}
         for key in self._blocks:
             self._passages.setdefault(key.passage_id, []).append(key)
@@ -61,7 +65,7 @@ class CorpusIndex:
         blocks: dict[tuple[str, str, str, str], EvidenceBlock] = {}
         identities: dict[tuple[str, str, str], list[EvidenceKey]] = {}
         pending: dict[EvidenceKey, tuple[Any, ...]] = {}
-        positions = {}
+        positions, retrieval_texts = {}, {}
         for row in records:
             metadata = {**row.get("metadata", {}), **row}
             passage_id = str(metadata.get("passage_id", metadata.get("_id", "")))
@@ -73,11 +77,16 @@ class CorpusIndex:
             source = str(metadata.get("source_uri") or metadata.get("source") or metadata.get("url") or
                          f"{corpus_id}://{snapshot_id}/{document_id}#{passage_id}")
             provenance = tuple(metadata.get("provenance") or (source, f"corpus_snapshot:{snapshot_id}"))
-            block = make_evidence(text, document_id, corpus_id=corpus_id,
+            reading = render_source_lists(text, metadata.get("source_lists", ()))
+            if reading != text:
+                provenance += ("source_structure:author_list_spans_v1",)
+            block = make_evidence(reading, document_id, corpus_id=corpus_id,
                 passage_id=passage_id, version=version, source_uri=source,
                 title=str(metadata.get("title") or ""), provenance=provenance,
                 anchors=tuple(dict.fromkeys((*metadata.get("anchors", ()),
                                             *configuration_anchors(text)))))
+            if reading != text:
+                retrieval_texts[block.key] = text
             span = metadata.get("span")
             if span is not None:
                 span = tuple(span)
@@ -118,14 +127,15 @@ class CorpusIndex:
         resolved = [replace(block, dependencies=tuple(dict.fromkeys(
                     dependency_key(value, block.key) for value in pending[block.key])))
                     for block in blocks.values()]
-        return cls(resolved, corpus_id=corpus_id, snapshot_id=snapshot_id, source_positions=positions)
+        return cls(resolved, corpus_id=corpus_id, snapshot_id=snapshot_id, source_positions=positions,
+                   retrieval_texts=retrieval_texts)
 
     @property
     def blocks(self) -> tuple[EvidenceBlock, ...]:
         return tuple(self._blocks.values())
 
     def enrich(self, contexts: Iterable[Any]) -> tuple[EvidenceBlock, ...]:
-        """Add metadata/conditions to retrieved OnlineContext rows without changing bodies.
+        """Resolve retrieved original text into its source reading body and conditions.
 
         Retrieval document IDs identify corpus passages. Distinct source document
         IDs and revision names come from this index. If two revisions have the
@@ -150,7 +160,7 @@ class CorpusIndex:
 
     def _context_matches(self, context):
         return [key for key in self._passages.get(context.document_id, ())
-                if self._blocks[key].text == context.text]
+                if self._blocks[key].text == context.text or self._retrieval_texts.get(key) == context.text]
 
     def _context_key(self, context):
         matches = self._context_matches(context)
@@ -224,7 +234,8 @@ class CorpusIndex:
         for key in self.retrieved_keys(contexts):
             if key not in self._document_windows:
                 block = self._blocks[key]
-                window, reason = documents.window(self._source_document_ids.get(key, key.document_id), block.text)
+                window, reason = documents.window(self._source_document_ids.get(key, key.document_id),
+                                                   self._retrieval_texts.get(key, block.text))
                 self.document_window_counts[reason] = self.document_window_counts.get(reason, 0) + 1
                 self._document_windows[key] = window
             window = self._document_windows[key]
@@ -266,15 +277,15 @@ class CorpusIndex:
         """
         contexts = tuple(contexts)
         keys = tuple(self._context_key(context) for context in contexts)
-        eligible = [context for context, key in zip(contexts, keys)
-                    if not self._blocks[key].dependencies and self._blocks[key].parent_section is None]
-        windows = self.document_windows(eligible, documents)
+        eligible = {key for key in keys if not self._blocks[key].dependencies
+                    and self._blocks[key].parent_section is None and key not in self._retrieval_texts}
+        windows = self.document_windows((context for context, key in zip(contexts, keys) if key in eligible),
+                                        documents)
         window_blocks = [(context, self._blocks[self._context_key(context)]) for context in windows]
         result = {}
         for context, key in zip(contexts, keys):
             origin = self._document_windows.get(key)
-            block = self._blocks[key]
-            if origin is not None and not block.dependencies and block.parent_section is None:
+            if origin is not None and key in eligible:
                 document, start, end = origin
                 context, key = next((view, window.key) for view, window in window_blocks
                                if window.key.document_id == document.document_id and window.key.version == key.version
@@ -314,7 +325,8 @@ class CorpusIndex:
                     continue
                 seen.add(neighbor)
                 block = self._blocks[neighbor]
-                result.append(OnlineContext(block.key.passage_id, block.text, block.source_uri, block.title))
+                result.append(OnlineContext(block.key.passage_id, self._retrieval_texts.get(neighbor, block.text),
+                                            block.source_uri, block.title))
         return tuple(result)
 
     def resolve(self, passages: Iterable[str | EvidenceKey | EvidenceBlock]) -> tuple[EvidenceBlock, ...]:

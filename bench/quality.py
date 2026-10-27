@@ -146,7 +146,25 @@ def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Pat
         full["citation_scope"] = list(citation_scope)
     if turn.query_context is not None:
         full["query_context"] = _jsonable(turn.query_context)
-    for path, record in ((official_path, official_record(turn, answer)), (audit_path, full)):
+    official = official_record(turn, answer)
+    if citation_scope is not None:
+        # Generation may read source layout, dependencies or restored evidence
+        # absent from the raw ranking rows. Score the actual current material.
+        allowed = set(citation_scope)
+        required = {tuple(sorted(span["key"].items())) for span in full["visible_evidence_manifest"]
+                    if span["reference_id"] in allowed}
+        ranked = {c.document_id: (i, c.score or 0.0)
+                  for i, c in enumerate((*turn.contexts, *turn.supporting_contexts))}
+        reading = [{"document_id": block["key"]["passage_id"], "source": block["source_uri"],
+                    "score": ranked.get(block["key"]["passage_id"], (0, 0.0))[1],
+                    "text": block["text"], "title": block["title"]}
+                   for block in full["audit_evidence"] if tuple(sorted(block["key"].items())) in required]
+        reading.sort(key=lambda c: ranked.get(c["document_id"], (len(ranked), 0))[0])
+        if reading != official["contexts"]:
+            official.setdefault("retrieval_contexts", [{"document_id": c.document_id, "source": c.source,
+                "score": c.score or 0.0, "text": c.text, "title": c.title} for c in turn.contexts])
+            official["contexts"] = reading
+    for path, record in ((official_path, official), (audit_path, full)):
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a", encoding="utf-8") as stream:

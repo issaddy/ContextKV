@@ -201,3 +201,57 @@ def test_structural_retrieval_preserves_full_original_text_and_parent_identity()
     index = CorpusIndex.from_records(rows, corpus_id="public", snapshot_id="snapshot")
     assert {b.key.document_id for b in index.blocks} == {"parent"}
     assert {b.parent_section for b in index.blocks} == {row["title"] for row in rows}
+
+
+def test_author_lists_keep_words_nesting_order_and_unusual_source_markup(tmp_path):
+    from adapters.doc2dial import structural_corpus
+    from adapters.source_structure import render_source_lists
+
+    docs, dialogs = sources()
+    doc = docs["doc_data"]["manual"]["doc/a"]
+    text = "Eligibility🙂\nClosed and:\nEnrolled; Leave; or Withdrew ≤120 days.\nExcept: Transfer; Teach-out."
+    parts = ["Eligibility🙂\nClosed and:\n", "Enrolled; ", "Leave; or ", "Withdrew ≤120 days.",
+             "\nExcept: ", "Transfer; ", "Teach-out."]
+    offset, spans = 0, {}
+    for i, part in enumerate(parts):
+        spans[str(i)] = {"id_sp": str(i), "start_sp": offset, "end_sp": offset + len(part),
+                        "text_sp": part, "id_sec": "eligibility", "title": "Eligibility", "parent_titles": []}
+        offset += len(part)
+    doc.update(doc_text=text, spans=spans, doc_html_ts='''<div text_id="0"></div><ul>
+        <li><u><u text_id="1"></u></u></li><li text_id="2"></li><li text_id="3"></li></ul>
+        <div text_id="4"></div><ul><ol start="3" type="a"><li text_id="5"></li>
+        <li value="7" text_id="6"></li></ol></ul>''')
+    for turn in dialogs["dial_data"]["manual"]["doc/a"][0]["turns"]:
+        turn["references"] = []
+    corpus, _, _ = converted(docs, dialogs)
+    passage = next(r for r in structural_corpus(docs, corpus) if r["document_id"] == corpus[0]["document_id"])
+    lists = passage["metadata"]["source_lists"]
+    reading = render_source_lists(text, lists)
+    assert '<li>\nLeave; or \n</li>' in reading
+    assert lists[1]['children'][0]['tag'] == 'ol'
+    assert '<ol start="3" type="a">' in reading and '<li value="7">' in reading
+    # This fixture has no literal HTML: removing only inserted wrappers recovers
+    # the exact original characters, including Unicode and punctuation.
+    import re
+    assert re.sub(r'\n</?(?:ul|ol|li)(?: [^>]*)?>\n', '', reading) == text
+    path = tmp_path / 'passages.jsonl'
+    path.write_text(json.dumps(passage, ensure_ascii=False) + '\n')
+    assert load_beir_corpus(path)[passage['passage_id']]['text'] == text
+    index = CorpusIndex.from_jsonl(path, corpus_id='manual', snapshot_id='author-v1')
+    block, = index.resolve((passage['passage_id'],))
+    assert block.text == reading and block.span == (0, len(text))
+    assert block.key.content_sha256 == sha256(reading.encode()).hexdigest()
+
+
+def test_section_boundary_does_not_turn_half_a_list_into_a_complete_one():
+    from adapters.source_structure import author_lists, render_source_lists, section_lists
+    text = 'First. Second: Nested.'
+    spans = {str(i): {'start_sp': a, 'end_sp': b, 'text_sp': text[a:b]}
+             for i, (a, b) in enumerate(((0, 6), (7, 14), (15, 22)))}
+    nodes = author_lists(text, '<ol><li text_id="0"></li><li><u text_id="1"></u>'
+        '<ul><li text_id="2"></li></ul></li></ol>', spans)
+    assert not section_lists(nodes, 0, 7)
+    second = section_lists(nodes, 7, len(text))
+    assert [n['tag'] for n in second] == ['ul']
+    reading = render_source_lists(text[7:], second)
+    assert reading.startswith('Second: ') and '<li>\nNested.\n</li>' in reading and '<ol>' not in reading

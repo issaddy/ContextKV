@@ -37,6 +37,10 @@ python -m bench.retrieval_eval build \
 
 `--sections`复用[作者结构化分段原则](https://github.com/IBM/multidoc2dial/blob/2456a5609b447e1a12b716f4d658728f346f3041/scripts/data_preprocessor.py)，按连续相同section ID或标题组织段落。输出`passages.jsonl`的4110段是原文连续切片；拼接后仍完整还原488篇文档。标题路径只辅助检索，不改写正文，也不读取grounding挑选段落。`passage_id`定位段落，`document_id`保留父文档；文档级qrels评价先按父ID折叠排名。
 
+作者提供`doc_html_ts`时，同次导入将列表嵌套和`text_id`对应的原文坐标写入`metadata.source_lists`。JSONL的`text`仍是原始切片，已有BM25/BGE索引可直接复用；`CorpusIndex`加载时一次性插入原作者的`ul/ol/li`结构，联合选材与生成使用同一阅读正文。列表中的“或”、前提和例外原话均保留，不自动推断逻辑标签。跨章节列表只保留本段完整的嵌套列表，不合并整篇文档或丢弃原话。
+
+这一处理采用[Docling结构化序列化](https://docling-project.github.io/docling/concepts/chunking/)的原则，直接利用现成HTML及坐标，不引入OCR、额外模型或转换依赖。格式化正文参与既有证据身份和实际token计量；引用和缓存不会误用旧的展平正文。质量导出以当前可引用的实际阅读材料为准，另存原始检索结果。
+
 为这一语料生成两份运行配置，模型与解释器设置复用现有入口：
 
 ```python

@@ -192,6 +192,9 @@ def test_rule_audit_flags_invalid_citation_without_inventing_quality():
 
 def test_export_has_current_question_and_more_than_ten_visible_bodies(tmp_path):
     record = audit_record()
+    for span, block in zip(record['visible_evidence_manifest'], record['audit_evidence']):
+        span['key']['passage_id'] = block['key']['passage_id'] = block['key']['document_id']
+        block.update(source_uri='source://original', title='Original source')
     turn = online_turn(load_rows(FIXTURE)[0])
     export_evaluation(turn, "answer", official_path=tmp_path / "official.jsonl", audit_path=tmp_path / "audit.jsonl",
                       visible_evidence_manifest=record["visible_evidence_manifest"],
@@ -200,7 +203,9 @@ def test_export_has_current_question_and_more_than_ten_visible_bodies(tmp_path):
     audit = json.loads((tmp_path / "audit.jsonl").read_text())
     assert audit["query"] == turn.query and len(audit["audit_evidence"]) == 12
     assert audit["citation_scope"] == ["E_a"]
-    assert len(json.loads((tmp_path / "official.jsonl").read_text())["contexts"]) == 5
+    official = json.loads((tmp_path / "official.jsonl").read_text())
+    assert [c['text'] for c in official['contexts']] == ['Full original evidence 10']
+    assert len(official['retrieval_contexts']) == 5
 
 
 def test_human_blinding_and_complete_ratings_roundtrip(tmp_path):

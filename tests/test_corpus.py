@@ -8,6 +8,74 @@ from controller.evidence import EvidenceError
 from controller.schema import SessionSnapshot
 
 
+def test_source_lists_flow_through_selection_cache_and_current_quality_export(tmp_path):
+    from adapters.evidence_selection import reading_catalog
+    from adapters.mtrag import OnlineContext, OnlineTurn
+    from adapters.source_documents import SourceDocuments
+    from bench.quality import export_evaluation
+    from controller.templates import verify_evidence_spans
+    from test_candidates import committed
+
+    text = 'A; or B.'
+    lists = [{'tag': 'ul', 'start': 0, 'end': len(text), 'children': [
+        {'tag': 'li', 'start': 0, 'end': 5, 'children': []},
+        {'tag': 'li', 'start': 6, 'end': 8, 'children': []}]}]
+    rows = [
+        {'passage_id': 'choice', 'document_id': 'manual', 'text': text, 'span': [0, len(text)],
+         'metadata': {'source_lists': lists}, 'dependencies': ['condition']},
+        {'passage_id': 'condition', 'document_id': 'manual', 'text': 'Only if closed.', 'span': [9, 24]},
+        {'passage_id': 'retired', 'document_id': 'old', 'text': 'Previously discussed evidence.'}]
+    corpus = CorpusIndex.from_records(rows, corpus_id='manual', snapshot_id='v1')
+    raw = OnlineContext('choice', text, score=9)
+    condition = OnlineContext('condition', 'Only if closed.')
+    catalog, origins = reading_catalog((condition,), neighbors=corpus.candidate_neighbors,
+        indexed={'choice': raw, 'condition': condition}, contextualize=corpus.contextualize)
+    assert {c.document_id for c in catalog} == {'choice', 'condition'}
+    assert origins['choice'][0].text == text  # Metadata did not drop the indexed neighbor.
+    selected, dependency = corpus.enrich((raw,))
+    assert corpus.selection_record(raw)['text'] == selected.text != raw.text
+    support = corpus.selection_support((raw,))['choice']
+    assert [c.text for c in support] == [dependency.text]
+    # A generic paragraph expansion must not discard an available source layout.
+    unscoped = CorpusIndex.from_records([{**rows[0], 'dependencies': []}], corpus_id='manual', snapshot_id='v1')
+    documents = SourceDocuments([{'document_id': 'manual', 'text': 'Context.\n\n' + text + '\n\nTail.'}])
+    assert unscoped.reading_contexts((raw,), documents) == (raw,)
+
+    retired, = corpus.resolve(('retired',))
+    initial = SessionSnapshot('s')
+    first, = build_candidates(initial, 'First question', (selected, dependency, retired))
+    snapshot = committed(first, initial, 'First question', (selected, dependency, retired))
+    append, rebuild = build_candidates(snapshot, 'Follow-up', (selected, dependency))
+    for candidate in (append, rebuild):
+        assert candidate.feasible and candidate.required_blocks == {selected.key, dependency.key}
+        assert verify_evidence_spans(candidate.messages, candidate.evidence_spans,
+            snapshot.archive, candidate.reference_map) == candidate.visible_blocks
+    assert selected.text not in append.messages[-1].content
+    assert sum(m.content.count(selected.text) for m in append.messages) == 1
+    assert selected.text in rebuild.messages[-1].content
+
+    official, audit = tmp_path/'official.jsonl', tmp_path/'audit.jsonl'
+    scope = tuple(ref for ref, key in append.reference_map if key in append.required_blocks)
+    turn = OnlineTurn('s', 'q', 2, 'manual', 'Follow-up', (), (raw,), 'P3')
+    export_evaluation(turn, 'Answer', official_path=official, audit_path=audit,
+        visible_evidence_manifest=append.evidence_spans, audit_evidence=snapshot.archive,
+        input_ids=append.input_ids, output_ids=(), citation_scope=scope)
+    row = json.loads(official.read_text())
+    assert [(c['document_id'], c['text']) for c in row['contexts']] == [
+        ('choice', selected.text), ('condition', dependency.text)]
+    assert row['retrieval_contexts'][0]['text'] == text
+    assert len(json.loads(audit.read_text())['audit_evidence']) == 3
+
+    # Same raw text with newly available layout is a changed physical body.
+    plain = CorpusIndex.from_records([{**r, 'metadata': {}} for r in rows], corpus_id='manual', snapshot_id='v1')
+    old = plain.enrich((raw,))
+    first, = build_candidates(initial, 'Question', old)
+    old_snapshot = committed(first, initial, 'Question', old)
+    append, rebuild = build_candidates(old_snapshot, 'Follow-up', (selected, dependency))
+    assert not append.feasible and append.reason == 'invalid_visible_version'
+    assert rebuild.feasible and selected.key.content_sha256 != old[0].key.content_sha256
+
+
 def test_corpus_conditions_headers_and_code_anchors_keep_original_text():
     rows = [
         {"_id": "heading", "text": "Parameter | limit", "metadata": {"version": "v2"}},
