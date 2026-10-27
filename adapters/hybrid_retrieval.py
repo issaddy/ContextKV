@@ -564,6 +564,30 @@ def search_current_topic(current_query, topic_query, sparse, dense, encoder, rer
     return selected_stages
 
 
+def validate_retrieval_options(*, query_mode, stage, query_fusion, rerank_query_mode,
+                               candidate_k, rerank_k, rrf_k):
+    """One contract for file-based configuration and direct construction."""
+    from adapters.query_resolution import SOURCE_MODES
+    if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", *SOURCE_MODES}:
+        raise ValueError(f"unknown online query_mode: {query_mode}")
+    if stage not in {"dense", "hybrid", "hybrid_rerank"}:
+        raise ValueError("unknown retrieval stage")
+    if query_fusion not in {"single", "current_topic_rrf", "dialogue_rrf"}:
+        raise ValueError("unknown query fusion")
+    if query_fusion == "current_topic_rrf" and (query_mode not in {"user_topic", "conversational", *SOURCE_MODES} or stage == "dense"):
+        raise ValueError("current_topic_rrf requires user_topic/conversational/source_topic/assistant_topic_unverified and hybrid/hybrid_rerank")
+    if query_fusion == "dialogue_rrf" and (query_mode != "conversational" or stage == "dense"):
+        raise ValueError("dialogue_rrf requires conversational hybrid retrieval")
+    if query_mode == "conversational" and rerank_query_mode != "resolved":
+        raise ValueError("conversational retrieval needs resolved reranking")
+    if rerank_query_mode not in {"resolved", "current", "user_topic"}:
+        raise ValueError("unknown rerank query mode")
+    if stage != "hybrid_rerank" and rerank_query_mode != "resolved":
+        raise ValueError("rerank_query_mode requires hybrid_rerank")
+    if candidate_k < 5 or rerank_k < 5 or rrf_k < 0:
+        raise ValueError("retrieval budgets must cover five passages and a nonnegative RRF constant")
+
+
 class HybridRetriever:
     """Shared P3 retrieval; source-qualified history resolution is explicit opt-in."""
     def __init__(self, sparse, dense, encoder, reranker=None, *, query_mode="current",
@@ -571,28 +595,14 @@ class HybridRetriever:
                  source_config=None, query_fusion="single", resolver=None, rerank_query_mode="resolved", trace_sink=None,
                  source_window=False, evidence_selector=None, source_documents=None):
         from adapters.query_resolution import SOURCE_MODES
-        if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", *SOURCE_MODES}:
-            raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
-        if stage not in {"dense", "hybrid", "hybrid_rerank"}:
-            raise ValueError("unknown online retrieval stage")
-        if query_fusion not in {"single", "current_topic_rrf", "dialogue_rrf"}:
-            raise ValueError("unknown query fusion")
-        if query_fusion == "current_topic_rrf" and (query_mode not in {"user_topic", "conversational", *SOURCE_MODES} or stage == "dense"):
-            raise ValueError("current_topic_rrf requires user_topic/source_topic/assistant_topic_unverified and hybrid/hybrid_rerank")
-        if query_fusion == "dialogue_rrf" and (query_mode != "conversational" or stage == "dense"):
-            raise ValueError("dialogue_rrf requires conversational hybrid retrieval")
+        validate_retrieval_options(query_mode=query_mode, stage=stage, query_fusion=query_fusion,
+            rerank_query_mode=rerank_query_mode, candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k)
         if query_mode in SOURCE_MODES and (resolver is None or query_fusion != "current_topic_rrf"):
             raise ValueError("topic selector modes require resolver and current_topic_rrf")
-        if query_mode == "conversational" and (resolver is None or rerank_query_mode != "resolved"):
-            raise ValueError("conversational retrieval needs resolver and resolved reranking")
+        if query_mode == "conversational" and resolver is None:
+            raise ValueError("conversational retrieval needs a resolver")
         if stage == "hybrid_rerank" and reranker is None:
             raise ValueError("hybrid_rerank requires a loaded reranker")
-        if rerank_query_mode not in {"resolved", "current", "user_topic"}:
-            raise ValueError("unknown rerank query mode")
-        if stage != "hybrid_rerank" and rerank_query_mode != "resolved":
-            raise ValueError("rerank_query_mode requires hybrid_rerank")
-        if candidate_k < 5 or rerank_k < 5 or rrf_k < 0:
-            raise ValueError("retrieval budgets must cover five passages and a nonnegative RRF constant")
         if sparse.manifest["corpus_sha256"] != dense.manifest["corpus_sha256"]:
             raise ValueError("sparse and dense stages must use the same original corpus")
         self.sparse, self.dense, self.encoder, self.reranker = sparse, dense, encoder, reranker

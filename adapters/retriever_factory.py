@@ -46,26 +46,18 @@ def load_retriever_config(path):
     value = HybridRetrievalConfig(**yaml.safe_load(Path(path).read_text(encoding="utf-8")))
     if value.schema_version != 1 or value.kind != "hybrid":
         raise ValueError("retriever config requires schema_version=1 and kind=hybrid")
+    from adapters.hybrid_retrieval import validate_retrieval_options
     from adapters.query_resolution import SCHEMA_MODES, SOURCE_MODES
-    if value.query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", *SOURCE_MODES}:
-        raise ValueError("online query_mode must use user questions: current/last3/all_user/correction_aware/user_topic")
-    if value.stage not in {"dense", "hybrid", "hybrid_rerank"}:
-        raise ValueError("unknown retrieval stage")
+    validate_retrieval_options(query_mode=value.query_mode, stage=value.stage,
+        query_fusion=value.query_fusion, rerank_query_mode=value.rerank_query_mode,
+        candidate_k=value.candidate_k, rerank_k=value.rerank_k, rrf_k=value.rrf_k)
     if value.evidence_selection not in {"ranked", "semantic"}:
         raise ValueError("evidence_selection must be ranked or semantic")
     if value.evidence_selection == "semantic" and (
             value.query_mode != "conversational" or value.selector is None):
         raise ValueError("semantic evidence selection requires conversational mode with selector")
-    if value.query_fusion not in {"single", "current_topic_rrf", "dialogue_rrf"}:
-        raise ValueError("unknown query fusion")
-    if value.query_fusion == "current_topic_rrf" and (value.query_mode not in {"user_topic", "conversational", *SOURCE_MODES} or value.stage == "dense"):
-        raise ValueError("current_topic_rrf requires user_topic/source_topic/assistant_topic_unverified and hybrid/hybrid_rerank")
-    if value.query_fusion == "dialogue_rrf" and (value.query_mode != "conversational" or value.stage == "dense"):
-        raise ValueError("dialogue_rrf requires conversational hybrid retrieval")
     if value.query_mode == "conversational":
         from adapters.query_selector import SelectorConfig
-        if value.rerank_query_mode != "resolved":
-            raise ValueError("conversational retrieval needs resolved reranking")
         if value.selector is not None:
             SelectorConfig(**value.selector)
     elif value.query_mode in SOURCE_MODES:
@@ -83,16 +75,10 @@ def load_retriever_config(path):
         raise ValueError("selector_schema_mode is only used by explicit topic selector modes")
     if value.stage == "hybrid_rerank" and not value.reranker_path:
         raise ValueError("hybrid_rerank requires reranker_path")
-    if value.rerank_query_mode not in {"resolved", "current", "user_topic"}:
-        raise ValueError("unknown rerank query mode")
-    if value.stage != "hybrid_rerank" and value.rerank_query_mode != "resolved":
-        raise ValueError("rerank_query_mode requires hybrid_rerank")
     if value.dtype not in {"float32", "float16", "bfloat16"}:
         raise ValueError("unsupported model dtype")
     if min(value.batch_size, value.encoder_max_length, value.reranker_max_length, value.cpu_threads) < 1:
         raise ValueError("batch size, token limits and CPU threads must be positive")
-    if value.candidate_k < 5 or value.rerank_k < 5 or value.rrf_k < 0:
-        raise ValueError("retrieval budgets must cover five passages and a nonnegative RRF constant")
     return value
 
 

@@ -71,7 +71,7 @@ EfficientAgent 的 vLLM/LMCache connector 不能直接接到 SGLang。现有可�
 
 公开benchmark接入和系统/执行比较边界已统一；当前从实际QA、阅读材料和对话行为的接口补齐信息，而非继续增设来源资格闸门。公开数据选用及精确发布规模见[评价](../data_and_evaluation.md)。这些方法的来源、原理和成本进入技术决策，论文收益不会直接写成ContextKV收益。
 
-公开主比较后补充核对了[ICR（EMNLP 2025）](https://aclanthology.org/2025.emnlp-main.496/)与[Dialogue-RAG（ACL 2025）](https://aclanthology.org/2025.acl-long.1191/)。前者交替澄清与改写，后者以节点连接补齐省略；可供研究对象保持与低成本改写，但目前未移植其模型或声称已验证收益。现有解析已占约1.85秒，增加多轮LLM澄清必须有相应质量价值，不能仅因检索指标好就进入默认流程。[MLPerf End-to-End RAG（2026-08）](https://mlcommons.org/2026/08/endtoend-inference/)则提供完整多模型流水线计量的参考，其FRAMES多跳任务不能替代本项目的真实多轮主benchmark；不为套用它重新跑一套实验。当前优先复用既有日志进行任务理解、资料充分性和生成使用的分层归因。
+公开主比较后补充核对了[ICR（EMNLP 2025）](https://aclanthology.org/2025.emnlp-main.496/)与[Dialogue-RAG（ACL 2025）](https://aclanthology.org/2025.acl-long.1191/)。前者交替澄清与改写，后者以节点连接补齐省略；可供研究对象保持与低成本改写，但目前未移植其模型或声称已验证收益。原Cloud主比较中解析占约1.85秒，增加多轮LLM澄清必须有相应质量价值，不能仅因检索指标好就进入默认流程。[MLPerf End-to-End RAG（2026-08）](https://mlcommons.org/2026/08/endtoend-inference/)则提供完整多模型流水线计量的参考，其FRAMES多跳任务不能替代本项目的真实多轮主benchmark；不为套用它重新跑一套实验。当前优先复用既有日志进行任务理解、资料充分性和生成使用的分层归因。
 
 解析解码直接复用固定SGLang的[NGRAM worker](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/speculative/ngram_worker.py)：CPU侧缓存已生成片段，目标模型对草稿运行验证，先应用语法mask再选取greedy目标token。本项目沿用其FA3/page64线性草稿能力，没有另建草稿模型或缓存器。[SuffixDecoding（NeurIPS 2025）](https://arxiv.org/abs/2411.04975)提供重复请求可利用片段复用的研究依据，当前采用的是引擎现成实现。已完成的有限诊断和部署参数见[评价](../data_and_evaluation.md#解释服务的原生解码优化)；原生验证不等于不同执行形状下保证浮点和输出逐字一致。
 
@@ -82,4 +82,12 @@ EfficientAgent 的 vLLM/LMCache connector 不能直接接到 SGLang。现有可�
 
 [TurnFlow（EMNLP Findings 2026）](https://aclanthology.org/2026.findings-emnlp.825/)强调需要分别检查需求状态的识别、修订与最终执行。沿这一问题分解，本轮代码检查定位到一个确定的信息传递缺口：`frame_query`在requirements非空时舍弃完整task，可能丢失“除此之外”等限定语。现保留完整任务及明确子需求，单项需求查询仍各自聚焦；这是既有状态到检索接口的修复，没有新增推理阶段，也未声称解决了所有多轮误解。
 
-[MultiDoc2Dial](https://aclanthology.org/2021.emnlp-main.498/)提供跨文档服务咨询，已复用作者语料、分区、对话和grounding，接到共同P3运行链；连续同角色发言的交流轮投影明确记录。[ChatRAG-Bench](https://huggingface.co/datasets/nvidia/ChatRAG-Bench)可补充给定历史下的多任务质量，[Loong](https://github.com/MozerWang/Loong)可补充确需多资料综合的长文本任务。它们按各自协议评价，公共数据不足的版本演化/资源竞争允许完整扩展，方法与评测不再局限于旧Cloud开发案例。公开覆盖、实现状态和新数据尚未评分的范围统一见[评价](../data_and_evaluation.md)。
+[MultiDoc2Dial](https://aclanthology.org/2021.emnlp-main.498/)提供跨文档服务咨询，已复用作者语料、分区、对话和grounding，接到共同P3运行链；连续同角色发言的交流轮投影明确记录。[ChatRAG-Bench](https://huggingface.co/datasets/nvidia/ChatRAG-Bench)可补充给定历史下的多任务质量，[Loong](https://github.com/MozerWang/Loong)可补充确需多资料综合的长文本任务。它们按各自协议评价，公共数据不足的版本演化/资源竞争允许完整扩展，方法与评测不再局限于旧Cloud开发案例。公开覆盖、实现状态和分版本实际评分统一见[评价](../data_and_evaluation.md)。
+
+## 结构证据与近期同场景方法
+
+MultiDoc2Dial接入进一步复用[作者的章节分组规则](https://github.com/IBM/multidoc2dial/blob/2456a5609b447e1a12b716f4d658728f346f3041/scripts/data_preprocessor.py)，相邻同节或同标题成组；本项目保留连续原文offset、完整正文与父级标题，而非用grounding答案选段。488篇全文导出4110段，均能逐字恢复原文；该语料的BGE重排窗口使用8192，避免无意截断章节条件。两组共同使用这一适配，不把预处理差异当ContextKV独占收益。
+
+本轮补充审阅[Howard-AI4PC（SemEval 2026）](https://aclanthology.org/2026.semeval-1.320/)和[AILS-NTUA（2026）](https://arxiv.org/html/2603.10524v1)：前者用混合检索、统一重排及贴近原文的回答组合，后者将原文证据定位与生成分解，并报告过检索反馈改写的负结果。可利用的是保留任务约束、区分召回缺口与选材/使用错误，以及原文定位；不直接叠加其多次改写、双候选及多judge流程。这里根据当前成本和反例作适配选择，不预设这些方法在本系统有效或无效。
+
+[CORAL论文与公开实现](https://github.com/RUC-NLPIR/CORAL)另外提供开放领域、主题切换和引用标注的统一任务，适合补充目前服务咨询与技术资料的覆盖。该数据是自动构建，不能替代真实用户交互；本轮只核对论文、格式及发布入口，没有另启一套生成实验。

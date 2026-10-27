@@ -609,7 +609,7 @@ def test_legacy_bm25_default_and_fixed_protocol_need_no_model(retriever_config):
     value = yaml.safe_load(retriever_config.read_text())
     value["query_mode"] = "generated_history"
     retriever_config.write_text(json.dumps(value))
-    with pytest.raises(ValueError, match="user questions"):
+    with pytest.raises(ValueError, match="query_mode"):
         create_retriever("P3", config_path=retriever_config)
 
 
