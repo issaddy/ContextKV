@@ -21,15 +21,36 @@ python -m adapters.doc2dial \
   --dialogues data/multidoc2dial/source/multidoc2dial_dial_test.json \
   --dataset-version archive-f0c034c24966 --source-format multidoc2dial \
   --source-uri https://doc2dial.github.io/multidoc2dial/file/multidoc2dial.zip \
-  --split test --output data/multidoc2dial/test
+  --split test --output data/multidoc2dial/test --sections
 python -m adapters.retrieval build \
-  --corpus data/multidoc2dial/test/corpus.jsonl --index data/multidoc2dial/bm25 \
-  --snapshot multidoc2dial-archive-f0c034c24966
+  --corpus data/multidoc2dial/test/passages.jsonl --index data/multidoc2dial/bm25-sections \
+  --snapshot multidoc2dial-archive-f0c034c24966-structure-v1
+python -m bench.retrieval_eval build \
+  --corpus data/multidoc2dial/test/passages.jsonl --output data/multidoc2dial/bge-m3-sections \
+  --snapshot multidoc2dial-archive-f0c034c24966-structure-v1 \
+  --encoder-path models/bge-m3 --device cuda:1 --dtype bfloat16 --encoder-max-length 8192
 ```
 
 全部488份文档参与检索，不按当前答案或grounding挑选语料。P3任务的`contexts`初始为空，生成时使用本方法实际历史和真实检索结果；targets、grounding与qrels只用于离线评价。文档ID采用可逆的`[domain,doc_id]`，发布版本标识语料快照，不冒充政策生效时间。
 
 输出包括`corpus.jsonl`、`supervision.jsonl`、`tasks.jsonl`、`qrels.tsv`、`split_manifest.json`和`manifest.json`。重复运行会刷新这些派生产物；已保存运行仍以原输入摘要和源版本追溯。参考span按原字符坐标读取，错误坐标仍明确报错，避免引用错段。
+
+`--sections`复用[作者结构化分段原则](https://github.com/IBM/multidoc2dial/blob/2456a5609b447e1a12b716f4d658728f346f3041/scripts/data_preprocessor.py)，按连续相同section ID或标题组织段落。输出`passages.jsonl`的4110段是原文连续切片；拼接后仍完整还原488篇文档。标题路径只辅助检索，不改写正文，也不读取grounding挑选段落。`passage_id`定位段落，`document_id`保留父文档；文档级qrels评价先按父ID折叠排名。
+
+为这一语料生成两份运行配置，模型与解释器设置复用现有入口：
+
+```python
+from pathlib import Path
+import yaml
+for name in ("hybrid", "conversational"):
+    cfg = yaml.safe_load(Path(f"configs/retriever_{name}.example.yaml").read_text())
+    cfg.update(sparse_index="data/multidoc2dial/bm25-sections",
+               dense_index="data/multidoc2dial/bge-m3-sections",
+               reranker_max_length=8192)
+    Path(f"data/multidoc2dial/retriever_{name}.yaml").write_text(yaml.safe_dump(cfg))
+```
+
+两个固定BGE检查点均支持8192；将评分预算设置为其支持长度，避免直接用原1024预算截断较长章节。编码器建索引只做一次，完整正文继续进入生成。全文BM25索引仍可作为简单对照使用。
 
 统一矩阵入口：
 
@@ -38,7 +59,7 @@ python -m bench.b6_joint_sweep --matrix configs/benchmark_multidoc2dial.yaml \
   --stage test --job-timeout 3600 --output runs/multidoc2dial-system
 ```
 
-配置使用共同BM25和相同Qwen3/资源预算比较Native与ContextKV，复用现有生成、提交、退役、成本及资源采样链。它是固定检索配方的系统执行比较；研究完整任务感知检索时，沿用现有`comparison_scope: system`和`retriever_config`接口，使用同一新语料构建BM25/BGE索引即可，不另造运行器。计划确认有必要执行时加`--execute`；准备与CPU接线检查不算回答质量实测。
+配置采用`comparison_scope: system`：Native使用last3混合检索，ContextKV使用现有会话任务解释及完整A/B/C；共享同一结构化语料、BM25/BGE/重排权重、生成模型和资源预算。解释、检索、生成与提交均计入完整响应；检索材料随各自实际历史变化，不能把全部差异单独归因于B/C。计划确认有必要执行时加`--execute`；准备与CPU接线检查不算回答质量实测。
 
 保存答案的基础词项评分：
 
@@ -47,7 +68,7 @@ python -m bench.official overlap --references data/multidoc2dial/test/tasks.json
   --input SAVED-OFFICIAL.jsonl --output runs/multidoc2dial-overlap.json
 ```
 
-复用作者采用的SQuAD式F1/EM定义，按task ID关联，报告[0,1]分数、领域/会话均值和缺失任务；缺失回答计零。本文分组后的参考回答是完整交流轮，不能冒充原始agent-turn分数。F1只补充语义正确性、条件适用性和来源支持评价，不作为唯一质量门槛。检索使用文档级qrels，系统性能/资源沿用统一指标。
+复用作者采用的SQuAD式F1/EM定义，按task ID关联，报告[0,1]分数、领域/会话均值和缺失任务；缺失回答计零。本文分组后的参考回答是完整交流轮，不能冒充原始agent-turn分数。F1只补充语义正确性、条件适用性和来源支持评价，不作为唯一质量门槛。检索使用文档级qrels，系统性能/资源沿用统一指标。需要参考答案与来源支持评分时，复用`bench.official generation-http`并加`--no-answerability-adjustment`，只运行原始RB_llm/RL_F；该数据没有MT-RAG式可答性标签，不补造标签或套用IDK调整。
 
 ## 原Doc2Dial能力
 

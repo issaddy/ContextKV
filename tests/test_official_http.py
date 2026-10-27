@@ -68,6 +68,20 @@ def test_clarification_is_only_scored_when_the_cohort_requires_it(tmp_path):
     assert "RL_F_idk_underspecified" in load_jsonl(result["output"])[0]["metrics"]
 
 
+def test_other_public_tasks_use_raw_quality_without_invented_answerability_labels(tmp_path):
+    source = tmp_path / "answers.jsonl"
+    rows = predictions(source)
+    del rows[0]["Answerability"]
+    source.write_text(json.dumps(rows[0]) + "\n")
+    calls = []
+    api = upstream(calls)
+    del api.run_idk_judge, api.get_idk_score, api.get_idk_underspec_score, api.underspecified_eval
+    result = score_http_stages(api, "fixed-judge", source, tmp_path / "raw-scores",
+                               answerability_adjustment=False)
+    assert calls == ["RB_llm", "RL_F"] and result["conditioned_suffix"] is None
+    assert load_jsonl(result["output"])[0]["metrics"] == {"RB_llm": [0.5], "RL_F": [0.5]}
+
+
 def test_changed_input_cannot_reuse_another_scoring_cache(tmp_path):
     checkout = tmp_path / "upstream"
     checkout.mkdir()

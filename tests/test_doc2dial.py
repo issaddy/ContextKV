@@ -179,3 +179,25 @@ def test_multidoc_exchanges_preserve_cross_document_grounding_and_actual_history
     assert following.history[-1].text == "Actual generated answer, not author target."
     assert "grounding" not in following.__dict__ and "targets" not in following.__dict__
     assert "Unanswered closing" not in following.query
+
+
+def test_structural_retrieval_preserves_full_original_text_and_parent_identity():
+    from adapters.doc2dial import structural_corpus
+    text = "Preamble.\n\nEligibility\nOnly residents qualify.\n\nDocuments\nBring identification.\nTail."
+    first, second = text.index("Eligibility"), text.index("Documents")
+    document = {"doc_text": text, "spans": {
+        "1": {"start_sp": first, "id_sec": "one", "title": "Eligibility", "parent_titles": [{"text": "Application"}]},
+        "2": {"start_sp": first + 12, "id_sec": "one", "title": "Eligibility", "parent_titles": [{"text": "Application"}]},
+        "3": {"start_sp": second, "id_sec": "two", "title": "Documents", "parent_titles": [{"text": "Application"}]}}}
+    original = {"passage_id": "parent", "document_id": "parent", "text": text,
+        "title": "Application", "source_uri": "source://public", "version": "v1",
+        "metadata": {"domain": "service", "source_document_id": "doc"}}
+    rows = list(structural_corpus({"doc_data": {"service": {"doc": document}}}, [original]))
+    assert len(rows) == 2 and ''.join(row["text"] for row in rows) == text
+    assert [row["span"] for row in rows] == [[0, second], [second, len(text)]]
+    assert all(row["text"] == text[slice(*row["span"])] for row in rows)
+    assert all(row["document_id"] == "parent" and row["source_uri"] == "source://public" for row in rows)
+    assert [row["title"] for row in rows] == ["Application / Eligibility", "Application / Documents"]
+    index = CorpusIndex.from_records(rows, corpus_id="public", snapshot_id="snapshot")
+    assert {b.key.document_id for b in index.blocks} == {"parent"}
+    assert {b.parent_section for b in index.blocks} == {row["title"] for row in rows}

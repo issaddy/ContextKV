@@ -1,8 +1,8 @@
 # Cross-document public-service conversations through the existing P3 system runner.
-# Shared BM25 over all 488 documents provides an execution comparison without an
-# extra model/index dependency. Task-aware hybrid retrieval can use the same corpus.
+# Both methods share the same author-structure corpus and BM25/BGE/reranker assets.
+# ContextKV adds the existing conversational task state and A/B/C execution.
 schema_version: 1
-comparison_scope: execution
+comparison_scope: system
 base_config: configs/qwen3_8b_cost.yaml
 input: data/multidoc2dial/test/tasks.jsonl
 domain: all
@@ -12,8 +12,8 @@ concurrency: [1]
 seeds: [42]
 response_mode: buffered
 reference_method: Native
-retriever_index: data/multidoc2dial/bm25
-evidence_corpus: data/multidoc2dial/test/corpus.jsonl
+retriever_config: data/multidoc2dial/retriever_hybrid.yaml
+evidence_corpus: data/multidoc2dial/test/passages.jsonl
 server_profiles:
   stock:
     kind: stock
@@ -44,3 +44,4 @@ methods:
       audit_prompt_ids: true
   - id: ContextKV
     server_profile: patched
+    retriever_config: data/multidoc2dial/retriever_conversational.yaml

@@ -169,6 +169,39 @@ def benchmark_rows(supervision):
             history = [*history, {"speaker": "user", "text": question}, {"speaker": "agent", "text": answer}]
 
 
+def structural_corpus(documents, corpus):
+    """Use the author's adjacent-section grouping, retaining literal source slices.
+
+    MultiDoc2Dial's split_text_section groups equal section IDs or adjacent equal
+    titles. We retain offsets/whitespace instead of joining annotated spans and
+    flattening them. Parent headings enrich the title, never the original body.
+    Source: IBM/multidoc2dial@2456a5609b447e1a12b716f4d658728f346f3041,
+    scripts/data_preprocessor.py. No dialogue annotations select these sections.
+    """
+    for row in corpus:
+        domain = row["metadata"]["domain"]
+        doc_id = row["metadata"]["source_document_id"]
+        document = documents["doc_data"][domain][doc_id]
+        spans = list(document["spans"].values())
+        groups = [(0, spans[0] if spans else None)]
+        for before, current in zip(spans, spans[1:]):
+            if before["id_sec"] != current["id_sec"] and before["title"].strip() != current["title"].strip():
+                start = current["start_sp"]
+                if not groups[-1][0] < start < len(row["text"]):
+                    raise ValueError(f"section boundaries must follow original text: {doc_id}")
+                groups.append((start, current))
+        for index, (start, span) in enumerate(groups):
+            end = groups[index + 1][0] if index + 1 < len(groups) else len(row["text"])
+            headings = list(dict.fromkeys(value for value in (
+                row["title"], *([p["text"] for p in span["parent_titles"]] if span else []),
+                span["title"] if span else "") if value))
+            section = " / ".join(headings)
+            yield {**row, "passage_id": _identity(domain, doc_id, "section", start, end),
+                "text": row["text"][start:end], "span": [start, end],
+                "title": section, "parent_section": section,
+                "metadata": {**row["metadata"], "retrieval_unit": "author_structure_literal_span"}}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--documents", type=Path, required=True)
@@ -178,9 +211,11 @@ def main(argv=None):
     parser.add_argument("--source-uri", required=True, help="Dataset/archive source; not an inferred government webpage")
     parser.add_argument("--split", required=True, help="Explicit source partition declaration, e.g. train")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--sections", action="store_true", help="Also export author-structure passages for hybrid retrieval")
     args = parser.parse_args(argv)
     raw_documents, raw_dialogues = args.documents.read_bytes(), args.dialogues.read_bytes()
-    corpus, supervision, manifest = convert(json.loads(raw_documents), json.loads(raw_dialogues),
+    documents = json.loads(raw_documents)
+    corpus, supervision, manifest = convert(documents, json.loads(raw_dialogues),
         dataset_version=args.dataset_version, source_uri=args.source_uri, split=args.split, source_format=args.source_format)
     manifest["sources"] = {
         "documents": {"path": str(args.documents.resolve()), "sha256": sha256(raw_documents).hexdigest()},
@@ -188,6 +223,13 @@ def main(argv=None):
     args.output.mkdir(parents=True, exist_ok=True)
     for name, rows in (("corpus.jsonl", corpus), ("supervision.jsonl", supervision)):
         (args.output / name).write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+    if args.sections:
+        passages = list(structural_corpus(documents, corpus))
+        (args.output / "passages.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in passages), encoding="utf-8")
+        manifest["retrieval_passages"] = {"strategy": "author_structure_literal_span",
+            "passages": len(passages), "documents": len(corpus),
+            "identity": "passage_id identifies a section; document_id retains the original parent",
+            "qrels_scope": "document-level qrels; collapse ranked passage IDs by their document_id before scoring"}
     if args.source_format == "multidoc2dial":
         rows = list(benchmark_rows(supervision))
         (args.output / "tasks.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
