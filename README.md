@@ -54,6 +54,8 @@ CUDA_VISIBLE_DEVICES=0,1 python -m controller.cli --config configs/qwen3_8b_cost
 
 多轮入口为 `--retriever-config configs/retriever_conversational.example.yaml`。示例通过独立32B `selector`更新主题、具体对象、任务与条件：从首轮建立任务与子需求，后续按字段继承，明确的字面任务补充直接组合；复合需求共享当前条件并联合检索。省略`selector`可使用已有历史回退。已实现的`source_window`可补入同源相邻原始段落，保留排名与独立引用；当前不默认扩大窗口，其适用范围见评价。所有轮次贯穿同一检索、A/R成本选择和提交链，解释和检索开销计入完整响应。默认`stable_key`布局可直接使用；已有`context.layout: contextpilot`可分开组织正文顺序与当前检索优先级。实测使用生成GPU0，32B解释与BGE检索共享GPU1，须计入两者驻留成本。机制与边界见[多轮意图解析](docs/research/source_grounded_query_resolution.md)和[真实评价](docs/data_and_evaluation.md)。
 
+32B解释服务的部署命令已采用原生NGRAM解码，复用当前模型验证输出片段；同输入诊断及首调用成本见[评价](docs/data_and_evaluation.md#解释服务的原生解码优化)。原公开主比较的全流程数字保持原样，后续服务按新配置运行。
+
 首次准备数据与正常服务分开：
 
 ```bash

@@ -72,3 +72,7 @@ EfficientAgent 的 vLLM/LMCache connector 不能直接接到 SGLang。现有可�
 公开benchmark接入和系统/执行比较边界已统一；当前从实际QA、阅读材料和对话行为的接口补齐信息，而非继续增设来源资格闸门。公开数据选用及精确发布规模见[评价](../data_and_evaluation.md)。这些方法的来源、原理和成本进入技术决策，论文收益不会直接写成ContextKV收益。
 
 公开主比较后补充核对了[ICR（EMNLP 2025）](https://aclanthology.org/2025.emnlp-main.496/)与[Dialogue-RAG（ACL 2025）](https://aclanthology.org/2025.acl-long.1191/)。前者交替澄清与改写，后者以节点连接补齐省略；可供研究对象保持与低成本改写，但目前未移植其模型或声称已验证收益。现有解析已占约1.85秒，增加多轮LLM澄清必须有相应质量价值，不能仅因检索指标好就进入默认流程。[MLPerf End-to-End RAG（2026-08）](https://mlcommons.org/2026/08/endtoend-inference/)则提供完整多模型流水线计量的参考，其FRAMES多跳任务不能替代本项目的真实多轮主benchmark；不为套用它重新跑一套实验。当前优先复用既有日志进行任务理解、资料充分性和生成使用的分层归因。
+
+解析解码直接复用固定SGLang的[NGRAM worker](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/speculative/ngram_worker.py)：CPU侧缓存已生成片段，目标模型对草稿运行验证，先应用语法mask再选取greedy目标token。本项目沿用其FA3/page64线性草稿能力，没有另建草稿模型或缓存器。[SuffixDecoding（NeurIPS 2025）](https://arxiv.org/abs/2411.04975)提供重复请求可利用片段复用的研究依据，当前采用的是引擎现成实现。已完成的有限诊断和部署参数见[评价](../data_and_evaluation.md#解释服务的原生解码优化)；原生验证不等于不同执行形状下保证浮点和输出逐字一致。
+
+[LLMs Get Lost In Multi-Turn Conversation（2025）](https://arxiv.org/abs/2505.06120)分析早期假设与旧答案依赖的累积影响，重述任务只能部分缓解。当前系统已有任务重建与历史非事实提示；本项目观察到的重复SDK错误同时跨越APPEND和REBUILD，与此类问题相符，但不据此宣称已证明具体因果。后续改进应针对任务/来源适用性及生成使用，不能把这些失败简化为缓存动作错误或继续堆叠拒答规则。

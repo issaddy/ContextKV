@@ -50,7 +50,7 @@ python -m controller.cli --config configs/qwen3_8b_cost.yaml serve
 
 ## 多轮检索服务
 
-`retriever_conversational.example.yaml`使用独立32B解释服务保持多轮任务与变化条件，8B继续生成业务回答。两个服务复用同一固定引擎，各自使用自己的scope、tokenizer和缓存池。无需重新bootstrap或下载模型。在另一终端从项目根目录启动解释器；子shell中的设置不改变8B终端：
+`retriever_conversational.example.yaml`使用独立32B解释服务保持多轮任务与变化条件，8B继续生成业务回答。两个服务复用同一固定引擎，各自使用自己的scope、tokenizer和缓存池。解释服务采用原生NGRAM输出片段草稿和目标模型/语法验证，直接沿用现有temperature=0的解析协议。无需重新bootstrap或下载模型。在另一终端从项目根目录启动解释器；子shell中的设置不改变8B终端：
 
 ```bash
 (
@@ -62,9 +62,13 @@ python -m controller.cli --config configs/qwen3_8b_cost.yaml serve
   CONTEXTKV_SAMPLE_POOL=1 CONTEXTKV_HICACHE_GB=8 \
   bash scripts/launch_sglang.sh --host 127.0.0.1 --port 30001 \
     --max-total-tokens 16384 --mem-fraction-static 0.65 --max-running-requests 8 \
-    --attention-backend fa3 --chunked-prefill-size 8192 --schedule-policy fcfs
+    --attention-backend fa3 --chunked-prefill-size 8192 --schedule-policy fcfs \
+    --speculative-algorithm NGRAM --speculative-ngram-max-bfs-breadth 1 \
+    --speculative-num-draft-tokens 12
 )
 ```
+
+这三项参数仅用于32B解释实例。宽度1适配固定引擎的FA3/page64路径；沿用原生启动warmup，不把`--skip-server-warmup`带入常规服务。有限同输入诊断已显示解析耗时改善，首次调用成本、两处非逐字一致输出及完整运行范围见[评价](data_and_evaluation.md#解释服务的原生解码优化)。公开主比较使用原来的非推测解释服务，其固定运行记录保持原样；8B生成与成本配置继续使用原执行方式。
 
 随后在控制器终端运行（线程设置沿用上文）：
 
