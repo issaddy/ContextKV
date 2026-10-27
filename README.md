@@ -18,10 +18,11 @@
 | 方法复用与课题增量 | [贡献说明](docs/research_contributions.md) |
 | 实际部署、配置和模型 | [部署](docs/deployment.md) |
 | 实验比较、指标与复现 | [数据与评价](docs/data_and_evaluation.md) |
+| 论文、方法与开源工作 | [参考文献清单](docs/references.md) |
 
 当前主评价聚焦回答质量、实际交付延迟、时延达标服务能力和资源效率；缓存命中与动作比例用于解释机制。当前HTTP完整返回，内部引擎TTFT不作为对外首字体验。
 
-这六份文档是项目主入口。`docs/guides/` 保存接口用法，`docs/research/` 保存方法说明，原始实验记录位于 `runs/`。
+这些文档是项目主入口。`docs/guides/` 保存接口用法，`docs/research/` 保存方法说明，原始实验记录位于 `runs/`。
 
 ## 本地运行
 
