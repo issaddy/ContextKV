@@ -82,6 +82,27 @@ def test_other_public_tasks_use_raw_quality_without_invented_answerability_label
     assert load_jsonl(result["output"])[0]["metrics"] == {"RB_llm": [0.5], "RL_F": [0.5]}
 
 
+@pytest.mark.parametrize("first,other,unused", [
+    ("RB_llm", "RL_F", "run_ragas_judges_local"),
+    ("RL_F", "RB_llm", "run_radbench_judge"),
+])
+def test_selected_metric_does_not_load_unrequested_judge_and_can_expand_without_repeating(tmp_path,first,other,unused):
+    source = tmp_path / "answers.jsonl"
+    predictions(source)
+    calls = []
+    api = upstream(calls)
+    delattr(api,unused)
+    output = tmp_path / "scores"
+    result = score_http_stages(api, "fixed-judge", source, output,
+                               answerability_adjustment=False, metrics=(first,))
+    assert calls == [first] and result["requested_metrics"] == [first]
+    assert load_jsonl(result["output"])[0]["metrics"] == {first: [0.5]}
+    calls.clear()
+    result = score_http_stages(upstream(calls), "fixed-judge", source, output, answerability_adjustment=False)
+    assert calls == [other]
+    assert load_jsonl(result["output"])[0]["metrics"] == {"RB_llm": [0.5], "RL_F": [0.5]}
+
+
 def test_changed_input_cannot_reuse_another_scoring_cache(tmp_path):
     checkout = tmp_path / "upstream"
     checkout.mkdir()

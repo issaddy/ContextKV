@@ -184,7 +184,8 @@ def create_http_judge(model, endpoint, *, max_tokens=2048, enable_thinking=None)
     return judge
 
 
-def score_http_stages(official, model, input_path, output_directory, *, answerability_adjustment=True):
+def score_http_stages(official, model, input_path, output_directory, *, answerability_adjustment=True,
+                      metrics=("RB_llm", "RL_F")):
     """Reuse upstream metric functions; atomically retain each completed stage."""
     output = Path(output_directory)
     output.mkdir(parents=True, exist_ok=True)
@@ -192,15 +193,21 @@ def score_http_stages(official, model, input_path, output_directory, *, answerab
     task_ids = [row["task_id"] for row in rows]
     if len(set(task_ids)) != len(task_ids):
         raise ValueError("official scoring input contains duplicate task IDs")
+    metrics = tuple(dict.fromkeys(metrics))
+    operations = {"RB_llm": ("rb_llm", "run_radbench_judge"),
+                  "RL_F": ("rl_f", "run_ragas_judges_local")}
+    if not metrics or not set(metrics) <= operations.keys():
+        raise ValueError("choose at least one of RB_llm and RL_F")
     has_underspecified = answerability_adjustment and any(
         "UNDERSPECIFIED" in row.get("answerability", row.get("Answerability", [])) for row in rows)
-    stages = [("idk", official.run_idk_judge)] if answerability_adjustment else []
-    stages += [("rb_llm", official.run_radbench_judge), ("rl_f", official.run_ragas_judges_local)]
+    stages = [("idk", "idk_eval", official.run_idk_judge)] if answerability_adjustment else []
+    stages += [(operations[metric][0], metric, getattr(official, operations[metric][1])) for metric in metrics]
     if has_underspecified:
-        stages.append(("underspecified", lambda provider, name, inp, out:
+        stages.append(("underspecified", "underspecified_eval", lambda provider, name, inp, out:
                        official.underspecified_eval(name, inp, out)))
     previous = Path(input_path)
-    for name, operation in stages:
+    scored_by_id = {row["task_id"]: row for row in rows}
+    for name, metric, operation in stages:
         target = output / f"{name}.jsonl"
         if not target.exists():
             pending = target.with_suffix(".pending.jsonl")
@@ -209,26 +216,31 @@ def score_http_stages(official, model, input_path, output_directory, *, answerab
             if sorted(scored_ids) != sorted(task_ids):
                 raise ValueError(f"official {name} output changed the task cohort")
             pending.replace(target)
+        # A completed stage may have been requested alone. Merge its own
+        # metric rather than assuming the last cached file contains all stages.
+        for row in load_jsonl(target):
+            scored_by_id[row["task_id"]].setdefault("metrics", {})[metric] = row["metrics"][metric]
         previous = target
         (output / "progress.json").write_text(json.dumps({"completed_stage": name, "tasks": len(rows)})+"\n")
-    scored = load_jsonl(previous)
+    scored = list(scored_by_id.values())
     suffix = None
     if answerability_adjustment:
         condition = official.get_idk_underspec_score if has_underspecified else official.get_idk_score
         suffix = "_idk_underspecified" if has_underspecified else "_idk"
         for row in scored:
-            for metric in ("RB_llm", "RL_F"):
+            for metric in metrics:
                 row["metrics"][metric+suffix] = [condition(row, metric)]
     target = output / "scores.jsonl"
     pending = target.with_suffix(".pending.jsonl")
     pending.write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in scored))
     pending.replace(target)
-    return {"tasks": len(scored), "stages": [name for name, _ in stages],
+    return {"tasks": len(scored), "stages": [name for name, _, _ in stages], "requested_metrics": list(metrics),
             "conditioned_suffix": suffix, "output": str(target)}
 
 
 def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_revision,
-                       endpoint, max_tokens=2048, enable_thinking=None, answerability_adjustment=True):
+                       endpoint, max_tokens=2048, enable_thinking=None, answerability_adjustment=True,
+                       metrics=("RB_llm", "RL_F")):
     """Offline official RB_llm/RL_F/IDK over frozen answers, with resumable HTTP calls.
 
     Run in the isolated evaluator environment. This function does not start a
@@ -273,7 +285,7 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
         name, endpoint, max_tokens=max_tokens, enable_thinking=enable_thinking)
     try:
         result = score_http_stages(official, model, input_path, output,
-                                   answerability_adjustment=answerability_adjustment)
+                                   answerability_adjustment=answerability_adjustment, metrics=metrics)
     finally:
         official.load_chat_openai_llm = loader
     receipt = {**result, **identity, "status": "completed", "endpoint": endpoint,
@@ -298,6 +310,8 @@ def main(argv=None):
     parser.add_argument("--judge-revision")
     parser.add_argument("--endpoint", help="OpenAI-compatible /v1 URL for generation-http")
     parser.add_argument("--max-tokens", type=int, default=2048, help="HTTP judge output budget")
+    parser.add_argument("--metrics", nargs="+", choices=["RB_llm", "RL_F"], default=["RB_llm", "RL_F"],
+                        help="HTTP metrics to execute; reuse existing completed stages")
     parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--answerability-adjustment", action=argparse.BooleanOptionalAction, default=True,
                         help="Disable for datasets without the MT-RAG answerability labels; score raw RB_llm and RL_F only")
@@ -328,7 +342,7 @@ def main(argv=None):
         run_http_evaluator(args.checkout, args.input, args.output, model=args.model,
             judge_revision=args.judge_revision, endpoint=args.endpoint,
             max_tokens=args.max_tokens, enable_thinking=args.enable_thinking,
-            answerability_adjustment=args.answerability_adjustment)
+            answerability_adjustment=args.answerability_adjustment, metrics=args.metrics)
     else:
         if not args.checkout:
             parser.error("evaluation requires --checkout")

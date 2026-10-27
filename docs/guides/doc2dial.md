@@ -68,7 +68,7 @@ python -m bench.official overlap --references data/multidoc2dial/test/tasks.json
   --input SAVED-OFFICIAL.jsonl --output runs/multidoc2dial-overlap.json
 ```
 
-复用作者采用的SQuAD式F1/EM定义，按task ID关联，报告[0,1]分数、领域/会话均值和缺失任务；缺失回答计零。本文分组后的参考回答是完整交流轮，不能冒充原始agent-turn分数。F1只补充语义正确性、条件适用性和来源支持评价，不作为唯一质量门槛。检索使用文档级qrels，系统性能/资源沿用统一指标。需要参考答案与来源支持评分时，复用`bench.official generation-http`并加`--no-answerability-adjustment`，只运行原始RB_llm/RL_F；该数据没有MT-RAG式可答性标签，不补造标签或套用IDK调整。
+复用作者采用的SQuAD式F1/EM定义，按task ID关联，报告[0,1]分数、领域/会话均值和缺失任务；缺失回答计零。本文分组后的参考回答是完整交流轮，不能冒充原始agent-turn分数。F1只补充语义正确性、条件适用性和来源支持评价，不作为唯一质量门槛。检索使用文档级qrels，系统性能/资源沿用统一指标。需要参考答案与来源支持评分时，复用`bench.official generation-http`并加`--no-answerability-adjustment`，只运行原始RB_llm/RL_F；该数据没有MT-RAG式可答性标签，不补造标签或套用IDK调整。针对开发决策可用`--metrics RB_llm`或`--metrics RL_F`只计算所需项；以后补充另一项时复用已完成阶段，不重生成回答。
 
 ## 原Doc2Dial能力
 
