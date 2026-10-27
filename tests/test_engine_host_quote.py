@@ -387,6 +387,7 @@ def test_runtime_quote_uses_native_array_limit_and_host_threshold(runtime,monkey
         token_to_kv_pool_allocator=SimpleNamespace(available_size=lambda:free_gpu,size=256),
         full_evictable_size=lambda:128,load_back_threshold=threshold)
     fingerprint = {"model_revision":"test"}
+    cache.session_refs = SimpleNamespace(_session_generations={},_closed_session_ids={})
     bridge = runtime.ContextKVRuntime(cache,fingerprint)
     ids = list(range(10))
     before = compact_state(tree)

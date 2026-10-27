@@ -226,6 +226,10 @@ RL_F原评分有11项因judge的2048-token输出上限而未完成。仅对这�
 
 ## 原始记录与当前审查
 
+`runs/lifecycle-metadata/`复用保存的主实验报价和事件完成B/C审查：143次双候选中仅1次成本回退，对应1570-token重建输入低于2414-token测点下界，未因此扩大标定。规划区间均值约1.74ms，完整控制开销52.59ms；这些是既有运行区间的描述，不是新提速结果。
+
+C的研究层此前永久保存退役epoch及操作记录。采用有限终态记录后，在服务器实际固定`UnifiedSessionRefTracker`、空树组件的CPU检查中，2万次关闭的研究epoch数从20000变为1024，操作记录从40000变为1024条终态回执且无活动操作；`tracemalloc`当前Python分配约17.87→3.75MB。原生关闭记录仍为8192条；这些是控制内存，不是GPU/Host KV收益或HTTP吞吐。旧generation拒绝、丢失退役ACK恢复、较新引用保留，以及原生reset导致generation数值复用时的restart隔离均通过。全过程未加载模型或生成回答，原公开质量与系统性能结论保持原口径。
+
 - 已有P2对照、模型/采样/引擎记录：`runs/mainline-delivery/delivery-evidence/delivery-run/`。
 - 已有P3对照及逐任务原文：`runs/mainline-delivery/closure/`；条件选材：`runs/mainline-delivery/condition-selection/`。
 - 正文共享与多轮状态：`runs/quality-first/exact-body/`、`task-operations/`；最新机制与诊断：`runs/quality-first/requirements/`。

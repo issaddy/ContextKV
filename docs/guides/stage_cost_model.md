@@ -7,6 +7,7 @@
 - 固定 SGLang、Qwen3-8B、BF16、GPU 16384 槽、实际 Host 54272 槽、page 64、FA3、chunk 8192、FCFS；HiCache 为 layer_first/kernel/write_through、TMA 关闭，`sample_pool=true`。
 - 20 个明确 case，覆盖选定冷/GPU/Host/mixed 前缀及并发 1/2；60 个正式请求、30 个预热请求、84 个前缀物化调用。并发 mixed 的页对齐与总工作集在执行前检查，未执行组合网格。
 - 采集 run ID 为 `452258dcb15a42bdbcd333878dd141fc`，共 256 条 measurement；拟合得到 20 个 forward 点和 14 个 decode 区间。原始 `profile.jsonl`、`profile.telemetry.jsonl`、`profile.manifest.json` 和 `runtime.json` 在 `runs/mainline-delivery/`。发行包中的 artifact 保留这些来源绑定，字节与原测量产物相同。
+- 测点的concurrency是准备时声明的请求批次大小，可能包含等待容量的成员；不能直接改称实际同一GPU批次的活跃请求数。改变在线并发特征前需先核对这一标定口径，不通过删掉queued计数来制造支持域改善。
 - artifact 保留 159 个历史开发输出长度（22 会话，均值 580/P90 1024），用于追溯旧协议。当前装配还检查 `output_prior_system_prompt`，及分布自己的 `system_prompt`；旧 artifact 未绑定当前回答协议，故不沿用该长度分布。耗时点继续复用，长度使用配置默认 128/256 和已完成会话历史，未回填待评估答案或质量标签。
 - whole-cell OOF 的 forward MAE 为 52.54 ms；留出支持域内 38/60 请求的 MAE 为 47.54 ms，经验 P99 绝对残差约 202.35 ms。这是插值支持诊断，不是策略净收益或统计覆盖保证。
 

@@ -363,10 +363,10 @@ index 0000000..3ac9b8e
 +    raise SystemExit(main())
 diff --git a/python/sglang/srt/managers/contextkv_runtime.py b/python/sglang/srt/managers/contextkv_runtime.py
 new file mode 100644
-index 0000000..8e8a496
+index 0000000..7f57027
 --- /dev/null
 +++ b/python/sglang/srt/managers/contextkv_runtime.py
-@@ -0,0 +1,915 @@
+@@ -0,0 +1,967 @@
 +"""Scheduler-owned ContextKV protocol, for the pinned SGLang Python backend.
 +
 +This module deliberately has no background thread or GPU synchronizations. It is
@@ -689,12 +689,15 @@ index 0000000..8e8a496
 +                 result_ttl_seconds=900, result_max_bytes=64 << 20, event_limit=4096,
 +                 transfer_tma_enabled=None, model_scope=None):
 +        self.cache = cache
++        self._native_generations = cache.session_refs._session_generations
 +        self.scheduler = scheduler
 +        self.fingerprint = fingerprint
 +        self.model_scope = model_scope
 +        self.restart_id = uuid.uuid4().hex
 +        self.epochs = {}
 +        self.operations = {}
++        self.retired_epochs = OrderedDict()
++        self.operation_receipts = OrderedDict()
 +        self.attempts = OrderedDict()
 +        self.receipt_limit = receipt_limit
 +        self.result_ttl_seconds = result_ttl_seconds
@@ -738,6 +741,16 @@ index 0000000..8e8a496
 +        if expected != self.restart_id:
 +            raise ContextKVError("STALE_RESTART")
 +
++    def _replace_after_cache_reset(self, scheduler):
++        """Native reset replaces its generation map and can reuse counter values."""
++        replacement = ContextKVRuntime(self.cache, self.fingerprint,
++            self.receipt_limit, scheduler=scheduler,
++            result_ttl_seconds=self.result_ttl_seconds, result_max_bytes=self.result_max_bytes,
++            event_limit=self.events.maxlen,
++            transfer_tma_enabled=self.cache_config["tma_transfer_enabled"], model_scope=self.model_scope)
++        scheduler.contextkv_runtime = replacement
++        return replacement
++
 +    def _fingerprint(self, value):
 +        if value != self.fingerprint:
 +            raise ContextKVError("FINGERPRINT_MISMATCH")
@@ -779,10 +792,12 @@ index 0000000..8e8a496
 +            if epoch["operation_id"] != op or epoch["state"] not in {"PREPARED", "COMMITTED"}:
 +                raise ContextKVError("EPOCH_CONFLICT")
 +        else:
-+            if op in self.operations:
++            if self._operation(op) is not None:
 +                raise ContextKVError("OPERATION_CONFLICT")
-+            # Never wrap an existing native session or reuse an ID.
-+            if sid in self.cache.session_refs._session_generations:
++            # Reuse the native bounded close guard. Once both histories expire,
++            # an explicit prepare gets a new native generation, never the old one.
++            if (sid in self.cache.session_refs._session_generations
++                    or sid in self.cache.session_refs._closed_session_ids):
 +                raise ContextKVError("EPOCH_CONFLICT")
 +            generation = self.cache.open_radix_session(sid)
 +            if generation is None:
@@ -895,25 +910,56 @@ index 0000000..8e8a496
 +        self.cache.release_radix_session(sid)
 +        epoch["state"] = "RETIRED"
 +        self.host_admission.retire(sid)
++        self._complete_operation(epoch["operation_id"])
++        for op in epoch.pop("retire_operations", ()):
++            self._complete_operation(op)
++        self.retired_epochs[sid] = None
++        while len(self.retired_epochs) > self.receipt_limit:
++            old, _ = self.retired_epochs.popitem(last=False)
++            del self.epochs[old]
 +        self._event("retire_ref", session_id=sid, freed_gpu_tokens=0, freed_host_tokens=0)
++
++    def _operation(self, operation_id):
++        return self.operations.get(operation_id) or self.operation_receipts.get(operation_id)
++
++    def _complete_operation(self, operation_id):
++        """Keep active operations until completion; bound only terminal receipts."""
++        self.operation_receipts[operation_id] = self.operations.pop(operation_id)
++        self.operation_receipts.move_to_end(operation_id)
++        while len(self.operation_receipts) > self.receipt_limit:
++            self.operation_receipts.popitem(last=False)
 +
 +    def retire(self, data):
 +        self._restart(data["expected_restart_id"])
 +        sid, generation, op = (data["engine_session_id"], data["expected_generation"], data["operation_id"])
 +        identity = ("retire", sid, generation)
-+        if op in self.operations and self.operations[op] != identity:
++        previous = self._operation(op)
++        if previous is not None and previous != identity:
 +            raise ContextKVError("OPERATION_CONFLICT")
 +        epoch = self.epochs.get(sid)
-+        if not epoch or epoch["generation"] != generation:
-+            raise ContextKVError("STALE_GENERATION")
 +        self.operations[op] = identity
-+        if epoch["state"] != "RETIRED":
++        if epoch is None or epoch["generation"] != generation:
++            native_generation = self.cache.session_refs._session_generations.get(sid)
++            # A lost retirement ACK can outlive the bounded metadata. Absence
++            # or a newer native incarnation proves this old reference is gone;
++            # acknowledge it without releasing or modifying the live incarnation.
++            if native_generation is not None and native_generation <= generation:
++                del self.operations[op]
++                raise ContextKVError("STALE_GENERATION")
++            self._complete_operation(op)
++            state = "RETIRED"
++        elif epoch["state"] != "RETIRED":
++            epoch.setdefault("retire_operations", set()).add(op)
 +            epoch["state"] = "RETIRING"
 +            if not epoch["inflight"]:
 +                self._release(sid, epoch)
++            state = epoch["state"]
++        else:
++            self._complete_operation(op)
++            state = "RETIRED"
 +        return dict(engine_session_id=sid, session_generation=generation,
-+            engine_restart_id=self.restart_id, operation_id=op, state=epoch["state"],
-+            acknowledged=epoch["state"] == "RETIRED", freed_gpu_tokens=0, freed_host_tokens=0)
++            engine_restart_id=self.restart_id, operation_id=op, state=state,
++            acknowledged=state == "RETIRED", freed_gpu_tokens=0, freed_host_tokens=0)
 +
 +    def status(self, data):
 +        if data.get("expected_restart_id") is not None:
@@ -927,8 +973,9 @@ index 0000000..8e8a496
 +                item["result"] = self.results[attempt][2]
 +            return item
 +        sid = data.get("engine_session_id")
-+        if sid is None and data.get("operation_id") in self.operations:
-+            sid = self.operations[data["operation_id"]][1]
++        operation = self._operation(data.get("operation_id"))
++        if sid is None and operation is not None:
++            sid = operation[1]
 +        epoch = self.epochs.get(sid)
 +        return dict(state=epoch["state"] if epoch else "UNKNOWN", engine_restart_id=self.restart_id,
 +                    engine_session_id=sid, session_generation=epoch["generation"] if epoch else None,
@@ -1155,6 +1202,11 @@ index 0000000..8e8a496
 +                    observed_time_ns=time.monotonic_ns(), clock="server_monotonic",
 +                    pool=self.pool_snapshot(), cache_config=self.cache_config,
 +                    admission_diagnostics_enabled=self.admission_diagnostics_enabled,
++                    control_metadata=dict(active_epochs=len(self.epochs)-len(self.retired_epochs),
++                        retained_retired_epochs=len(self.retired_epochs),
++                        active_operations=len(self.operations),
++                        retained_operation_receipts=len(self.operation_receipts),
++                        terminal_record_limit=self.receipt_limit),
 +                    host_admission=self.host_admission.snapshot(time.monotonic()),
 +                    **self.workload_snapshot(),
 +                    events=[e for e in self.events if e["seq"] > after],
@@ -1175,11 +1227,7 @@ index 0000000..8e8a496
 +                raise ContextKVError("ENGINE_BUSY")
 +            # flush invalidates native generations; replace the protocol owner
 +            # and restart identity too so no stale admission can succeed.
-+            replacement = ContextKVRuntime(self.cache, self.fingerprint,
-+                self.receipt_limit, scheduler=self.scheduler,
-+                result_ttl_seconds=self.result_ttl_seconds, result_max_bytes=self.result_max_bytes,
-+                transfer_tma_enabled=self.cache_config["tma_transfer_enabled"], model_scope=self.model_scope)
-+            self.scheduler.contextkv_runtime = replacement
++            replacement = self._replace_after_cache_reset(self.scheduler)
 +            return dict(mode=mode, info=replacement.info({}), pool=replacement.pool_snapshot())
 +        if mode == "settle":
 +            if self.cache.cache_controller is not None:
@@ -1233,12 +1281,16 @@ index 0000000..8e8a496
 +
 +def get_runtime(scheduler):
 +    runtime = getattr(scheduler, "contextkv_runtime", None)
-+    if runtime is not None:
-+        return runtime
++    cache = scheduler.tree_cache
++    if runtime is not None and runtime.cache is cache:
++        if runtime._native_generations is cache.session_refs._session_generations:
++            return runtime
++        # Native /flush_cache also resets generations. Rotate the existing
++        # restart fence before any control operation or guarded admission.
++        return runtime._replace_after_cache_reset(scheduler)
 +    from sglang.srt.runtime_context import get_parallel, get_model
 +    from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
 +    parallel = get_parallel()
-+    cache = scheduler.tree_cache
 +    if (parallel.tp_size != 1 or parallel.num_dp_ranks != 1 or parallel.pp_size != 1
 +            or not isinstance(cache, UnifiedRadixCache) or not cache.enable_session_radix_cache
 +            or cache._tree_core_backend != "python" or len(cache._components_tuple) != 1

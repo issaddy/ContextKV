@@ -11,7 +11,7 @@
 - `UnifiedTreeCore.peek_full_prefix` 只遍历匹配路径，返回连续 GPU ready、GPU/host recoverable、需新加载的 host-only、H2D pending、D2H pending。节点中间命中不 split；不触碰 LRU、引用、分配器、传输队列或 CUDA fence。
 - H2D 的 `contextkv_h2d_pending_id` 是新增观测字段，对所有原生写策略在提交加载时标记，节点 split 继承、原生加载 ACK 后清除。它不参与原生 admission、锁、淘汰决策。D2H 使用已有 `write_through_pending_id`；已发布地址但未完成传输的副本不计 ready。
 - NATIVE 加载预测参考原生 `load_back_threshold`；旧 `native_estimate_uncertain` 保留 pending 或瞬时 free GPU slot 不足的原语义，同时 `uncertainty_reasons` 区分 `inflight_transfer` 与 `capacity_pressure`。后者表示可能需要原生淘汰或等待，不表示缓存信息不可读取。报价不是预留，实际匹配、加载、排队与预算决定仍由原生路径执行。
-- prepare 同一 operation 幂等，不重开 native generation；生成在原生 `ensure_session_generation` 前同时验证 restart、registry 状态和当前 tracker generation。研究 epoch 禁止经原生 open/close 重新开启或绕过退役。
+- 活动 epoch 的 prepare 对同一 operation 幂等，不重开 native generation；生成在原生 `ensure_session_generation` 前同时验证 restart、registry 状态和当前 tracker generation。保留期内的关闭 ID 继续由原生关闭记录阻止重开。
 - retire 先阻止新请求，等待已接纳请求终态，再撤销 native 软引用并 ACK。软引用退役的 free 计数恒为零；缓存物理占用不会被假定已回收。原生已接纳请求在 RETIRING 期间可能先完成注册、再立即被退役撤销，因此 receipt 的 `session_ref_registered` 表示本次曾成功经过注册路径，不是 ACK 后仍持有引用的证明。
 - 终态 receipt 通过原生 customized-info 输出，包含真实 tracker 注册结果、cache inserted length 和 native 分层命中。实际 prefill 工作来自每次成功 worker forward 的 `extend_lens` 累计，覆盖 chunk/retraction 重算并排除 mixed batch 的 decode 行，不用 input-minus-hit 冒充真实执行工作。
 
@@ -82,7 +82,11 @@ v2的权重摘要仅在导出发布边界全量计算一次。启动时核对con
 
 `elapsed_ms` 是客户端提交至完整 HTTP 响应。默认累计 SSE 客户端通过首次非空 output_ids 和最后新增 token 的帧观察 `ttft_ms/last_token_ms`，重复累计帧不更新时刻。客户端 TPOT 由首末 chunk 间隔除以 N−1 计算，报告明确标为 chunk 观察；服务端 `tpot_ms` 仍是另一时间域的原生指标。可显式 `SGLangEngineClient(..., stream=False)` 使用非流式，此时两个客户端 token 时刻未知；专用 profiler 保持非流式。`queue_ms/prefill_ms/restore_prefill_ms` 也保持未知，不能将阶段墙时冒充独立 CUDA kernel 时间。成本标定使用 `phase=first_token, timing_scope=server_request` 联合阶段，在同一并发压力桶中比较，避免重复加排队或 H2D。
 
-完整最终文本和 token IDs 经过原生 detokenizer，终态响应之前通过一次 IPC 发布回 scheduler。guarded SSE 统一为累计输出，兼容原生 incremental streaming 开关。最后新增 token 先以不带 receipt/finish 标志的帧发送，再执行发布 IPC，最后发送重复累计 token 的完整终态 receipt 帧，避免将发布延迟算入最后 token 到达时刻。客户端只有收到终态 receipt 和 `[DONE]` 才返回结果；断帧、部分断连、缺少终态均走未知结果恢复，不能提交部分答案。`status` 在默认 900 秒 TTL、64 MiB 总结果预算、1024 个 attempt receipt 的范围内返回原样结果；通过 `CONTEXTKV_RESULT_TTL_SECONDS` 和 `CONTEXTKV_RESULT_MAX_BYTES` 调整。超限/过期、终态后发布前的进程崩溃仍可能只剩 receipt；控制器必须明确恢复或放弃，不能声称无限期 exactly-once。UNKNOWN 不是“未执行”证明。epoch 墓碑保持到引擎重启；专用 profiler 冷重置同时更换 restart identity。
+完整最终文本和 token IDs 经过原生 detokenizer，终态响应之前通过一次 IPC 发布回 scheduler。guarded SSE 统一为累计输出，兼容原生 incremental streaming 开关。最后新增 token 先以不带 receipt/finish 标志的帧发送，再执行发布 IPC，最后发送重复累计 token 的完整终态 receipt 帧，避免将发布延迟算入最后 token 到达时刻。客户端只有收到终态 receipt 和 `[DONE]` 才返回结果；断帧、部分断连、缺少终态均走未知结果恢复，不能提交部分答案。`status` 在默认 900 秒 TTL、64 MiB 总结果预算、1024 个 attempt receipt 的范围内返回原样结果；通过 `CONTEXTKV_RESULT_TTL_SECONDS` 和 `CONTEXTKV_RESULT_MAX_BYTES` 调整。超限/过期、终态后发布前的进程崩溃仍可能只剩 receipt；控制器必须明确恢复或放弃，不能声称无限期 exactly-once。UNKNOWN 不是“未执行”证明。
+
+研究层的退役 epoch 记录和终态操作回执各复用 `receipt_limit` 上限，默认1024；活动及仍在退役中的记录保留到完成。原生[会话追踪器](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/unified_cache/session_ref_tracker.py)另保留最近8192个关闭 ID。两处记录都过期后，显式 prepare 可以获得新的原生 generation，旧 generation 的请求仍被拒绝。迟到的退役重试在确认原生引用已不存在、或当前 incarnation 更新时可确认旧引用已解除，不能释放新引用，也不证明旧生成已完成。`control_metadata` 指标分别报告活动和保留的终态记录数量。
+
+原生 `/flush_cache` 会重建 generation 表并从头计数。`get_runtime` 以该表的对象身份检测重置，先更换研究 restart 标识和控制状态，再处理请求；不扫描缓存树或权重。专用 profiler 冷重置复用同一替换逻辑。这样旧请求即使遇到相同数值的 generation，也会被旧 restart 标识拒绝。
 
 ## 可执行的真机验收与标定入口
 

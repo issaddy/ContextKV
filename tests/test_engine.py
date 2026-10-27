@@ -1,5 +1,6 @@
 """Engine protocol invariants; GPU timings and model quality are not simulated."""
 import asyncio
+from collections import OrderedDict
 from dataclasses import asdict
 from types import SimpleNamespace
 
@@ -229,19 +230,168 @@ class FakeNativeCache:
     _tree_core_backend = "python"
     cache_controller = None
 
-    def __init__(self):
-        self.session_refs = SimpleNamespace(_session_generations={})
+    def __init__(self, closed_limit=8192):
+        self.session_refs = SimpleNamespace(_session_generations={},_closed_session_ids=OrderedDict())
+        self.closed_limit = closed_limit
         self.counter = 0
         self.released = []
 
     def open_radix_session(self, sid):
+        self.session_refs._closed_session_ids.pop(sid,None)
         self.counter += 1
         self.session_refs._session_generations[sid] = self.counter
         return self.counter
 
     def release_radix_session(self, sid):
         self.session_refs._session_generations.pop(sid, None)
+        self.session_refs._closed_session_ids[sid] = None
+        self.session_refs._closed_session_ids.move_to_end(sid)
+        while len(self.session_refs._closed_session_ids) > self.closed_limit:
+            self.session_refs._closed_session_ids.popitem(last=False)
         self.released.append(sid)
+
+
+def prepare_runtime_epoch(runtime, sid, operation=None):
+    return runtime.prepare(dict(engine_session_id=sid, operation_id=operation or 'prepare:'+sid,
+                                expected_restart_id=runtime.restart_id))
+
+
+def retire_runtime_epoch(runtime, prepared, operation=None):
+    return runtime.retire(dict(engine_session_id=prepared['engine_session_id'],
+        expected_generation=prepared['session_generation'],
+        operation_id=operation or 'retire:'+prepared['engine_session_id'],
+        expected_restart_id=runtime.restart_id))
+
+
+def test_terminal_metadata_is_bounded_without_pruning_active_or_retiring_epochs():
+    cache = FakeNativeCache(closed_limit=8)
+    runtime = ContextKVRuntime(cache, {}, receipt_limit=3)
+    live = prepare_runtime_epoch(runtime,'live')
+    pending = prepare_runtime_epoch(runtime,'pending')
+    runtime.epochs['pending']['inflight'].add('unfinished')
+    assert not retire_runtime_epoch(runtime,pending)['acknowledged']
+    for i in range(30):
+        prepared = prepare_runtime_epoch(runtime,f'closed-{i}')
+        assert retire_runtime_epoch(runtime,prepared)['acknowledged']
+        assert len(runtime.retired_epochs) <= 3
+        assert len(runtime.epochs) <= 5
+        assert len(runtime.operation_receipts) <= 3
+    # New operation IDs for an already closed epoch must not accumulate either.
+    for i in range(30):
+        assert retire_runtime_epoch(runtime,prepared,f'retry-{i}')['acknowledged']
+    assert set(runtime.operations) == {'prepare:live','prepare:pending','retire:pending'}
+    assert len(runtime.operation_receipts) == 3
+    assert runtime.status({'operation_id':'prepare:pending'})['state'] == 'RETIRING'
+    assert runtime.status({'engine_session_id':'live'})['state'] == 'PREPARED'
+    assert cache.session_refs._session_generations == {
+        'live':live['session_generation'],'pending':pending['session_generation']}
+    assert 'pending' not in cache.released
+    cache.token_to_kv_pool_allocator = SimpleNamespace(size=100,available_size=lambda:100)
+    assert runtime.metrics({})['control_metadata'] == {
+        'active_epochs':2,'retained_retired_epochs':3,'active_operations':3,
+        'retained_operation_receipts':3,'terminal_record_limit':3}
+
+
+def test_lost_retire_ack_recovers_after_metadata_expiry_without_touching_new_incarnation():
+    cache = FakeNativeCache(closed_limit=2)
+    runtime = ContextKVRuntime(cache, {}, receipt_limit=2)
+    old = prepare_runtime_epoch(runtime,'old')
+    original_ack = retire_runtime_epoch(runtime,old)
+    for i in range(5):
+        retire_runtime_epoch(runtime,prepare_runtime_epoch(runtime,str(i)))
+    assert 'old' not in runtime.epochs and 'old' not in cache.session_refs._closed_session_ids
+    assert runtime.status({'engine_session_id':'old'})['state']=='UNKNOWN'
+    releases = list(cache.released)
+    assert retire_runtime_epoch(runtime,old) == original_ack
+    assert cache.released == releases and 'old' not in cache.session_refs._session_generations
+
+    # Explicit preparation after native close-history expiry gets a fresh fence.
+    new = prepare_runtime_epoch(runtime,'old','new-operation')
+    assert new['session_generation'] > old['session_generation']
+    late = SimpleNamespace(session_id='old',expected_generation=old['session_generation'],
+        expected_restart_id=runtime.restart_id,contextkv_fingerprint={})
+    with pytest.raises(ContextKVError,match='STALE_GENERATION'):
+        runtime.admit(late,SimpleNamespace())
+    assert retire_runtime_epoch(runtime,old) == original_ack
+    assert cache.released == releases
+    assert cache.session_refs._session_generations['old'] == new['session_generation']
+    assert runtime.epochs['old']['state']=='PREPARED'
+    future = {**new,'session_generation':new['session_generation']+1}
+    with pytest.raises(ContextKVError,match='STALE_GENERATION'):
+        retire_runtime_epoch(runtime,future,'future-generation')
+    assert 'future-generation' not in runtime.operations
+
+
+def test_native_close_guard_survives_expiry_of_research_metadata():
+    cache = FakeNativeCache(closed_limit=8)
+    runtime = ContextKVRuntime(cache, {}, receipt_limit=1)
+    old = prepare_runtime_epoch(runtime,'old')
+    retire_runtime_epoch(runtime,old)
+    retire_runtime_epoch(runtime,prepare_runtime_epoch(runtime,'next'))
+    assert 'old' not in runtime.epochs and 'old' in cache.session_refs._closed_session_ids
+    generation = cache.counter
+    with pytest.raises(ContextKVError,match='EPOCH_CONFLICT'):
+        prepare_runtime_epoch(runtime,'old','another-operation')
+    assert cache.counter == generation
+
+
+def test_native_cache_reset_rotates_restart_before_reusing_generation_values():
+    from engine_patches.contextkv_runtime import get_runtime
+    cache = FakeNativeCache()
+    runtime = ContextKVRuntime(cache, {}, receipt_limit=2,event_limit=7)
+    scheduler = SimpleNamespace(tree_cache=cache,contextkv_runtime=runtime)
+    old = prepare_runtime_epoch(runtime,'same')
+    assert get_runtime(scheduler) is runtime
+    # Exact pinned reset behavior: a fresh generation dictionary and counter.
+    cache.session_refs._session_generations = {}
+    cache.session_refs._closed_session_ids = OrderedDict()
+    cache.counter = 0
+    replacement = get_runtime(scheduler)
+    assert replacement is scheduler.contextkv_runtime is cache.contextkv_runtime
+    assert replacement.restart_id != runtime.restart_id
+    assert replacement.receipt_limit==2 and replacement.events.maxlen==7
+    current = prepare_runtime_epoch(replacement,'same')
+    assert current['session_generation']==old['session_generation']
+    with pytest.raises(ContextKVError,match='STALE_RESTART'):
+        replacement.admit(SimpleNamespace(session_id='same',expected_restart_id=old['engine_restart_id'],
+            expected_generation=old['session_generation']),SimpleNamespace())
+    with pytest.raises(ContextKVError,match='STALE_RESTART'):
+        replacement.retire(dict(engine_session_id='same',expected_generation=old['session_generation'],
+            operation_id='late-retire',expected_restart_id=old['engine_restart_id']))
+    assert cache.session_refs._session_generations['same']==current['session_generation']
+
+
+def test_durable_outbox_can_acknowledge_expired_retirement_metadata(tmp_path):
+    from controller.engine_client import RetireAck
+    from controller.epoch import EpochCoordinator
+    from controller.events import EventLog
+    from controller.schema import ContextEpoch
+    from controller.session_store import SessionStore
+
+    async def scenario():
+        cache = FakeNativeCache(closed_limit=2)
+        runtime = ContextKVRuntime(cache, {}, receipt_limit=2)
+        old = prepare_runtime_epoch(runtime,'old')
+        store = SessionStore(tmp_path/'state.sqlite3')
+        store._enqueue('business',ContextEpoch('business',1,'old',old['session_generation'],
+            engine_restart_id=runtime.restart_id),'replaced',1)
+        retire_runtime_epoch(runtime,old)  # Successful release; ACK was lost.
+        for i in range(5):
+            retire_runtime_epoch(runtime,prepare_runtime_epoch(runtime,str(i)))
+
+        class Engine:
+            async def retire(self,sid,generation,operation,restart,reason):
+                return RetireAck(**runtime.retire(dict(engine_session_id=sid,
+                    expected_generation=generation,operation_id=operation,
+                    expected_restart_id=restart,reason=reason)))
+        try:
+            assert len(store.outbox())==1 and 'old' not in runtime.epochs
+            releases = list(cache.released)
+            assert await EpochCoordinator(store,Engine(),EventLog()).flush()==1
+            assert not store.outbox() and cache.released==releases
+        finally:
+            store.close()
+    run(scenario())
 
 
 @pytest.mark.parametrize("stream", [False, True])
