@@ -23,7 +23,7 @@ python -m profiling.decision_pairs freeze \
 - 源 manifest 中全部会话必须属于传入划分的 `dev`，且 split 文件 hash 必须和源运行一致；拒绝 `test`、P1 参考历史及未决运行。
 - 重新构造的原选中候选必须与保存的 `input_hash` 一致。旧代码/旧模板或缺失排名导致差异时记为 `source_candidate_changed`，不悄悄改输入。
 - 初始轮、强制恢复和不足两个可行候选的轮次记录跳过原因。
-- `stratified` 在完整可行池中按会话及距上次 REBUILD 的轮数（0、1、2+）分层，以固定 seed 打乱后轮转抽取；有足够名额时先覆盖各层，覆盖不同上下文积累阶段。选样只读 pre-turn 状态，不按当前输出、实测收益或 oracle 动作挑案例。manifest 保留每个选中案例的历史轮次、版本年龄和两候选长度；当 limit 小于层数时不保证覆盖所有层。旧默认 `database_order` 保持可复算性。
+- `stratified` 在完整可行池中按会话及距上次 REBUILD 的轮数（0、1、2+）分层，以固定 seed 打乱后轮转抽取；有足够名额时覆盖各层，以比较不同上下文积累阶段。选样只读 pre-turn 状态，不按当前输出、实测收益或 oracle 动作挑案例。manifest 保留每个选中案例的历史轮次、版本年龄和两候选长度；当 limit 小于层数时不保证覆盖所有层。旧默认 `database_order` 保持可复算性。
 - `cases.jsonl` 保存两个完整候选、实际 token、pre-turn 快照及预热 token；旁边 `.manifest.json` 保存输入来源、划分、冻结文件 hash 与跳过记录。
 - 可冻结模拟数据以验证文件/协议流程，但后面的硬件收集命令拒绝将模拟 token 来源用于真实实验。
 

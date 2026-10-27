@@ -19,11 +19,11 @@ class EpochCoordinator:
                 try:
                     ack = await self.engine.retire(op.engine_session_id, op.expected_generation,
                                                    op.operation_id, op.engine_restart_id, op.reason)
-                    if not ack.acknowledged or ack.state != "RETIRED":
-                        raise EngineError("RETIRE_PENDING")
                     if (ack.engine_session_id, ack.session_generation, ack.engine_restart_id, ack.operation_id) != (
                             op.engine_session_id, op.expected_generation, op.engine_restart_id, op.operation_id):
                         raise EngineError("RETIRE_ACK_MISMATCH")
+                    if not ack.acknowledged or ack.state != "RETIRED":
+                        raise EngineError("RETIRE_PENDING")
                     self.store.ack_retire(op.operation_id)
                     self.events.emit("epoch_retire_acked", operation=op, acknowledgement=ack,
                                      physical_free_tokens=0)

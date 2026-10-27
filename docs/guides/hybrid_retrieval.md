@@ -26,7 +26,7 @@
 
 ## 已实现接口与实验产物
 
-[`adapters/hybrid_retrieval.py`](../../adapters/hybrid_retrieval.py)提供 `LocalBGE`、`DenseIndex`、`reciprocal_rank_fusion`、`search_variants`；[`bench/retrieval_eval.py`](../../bench/retrieval_eval.py)是独立 `build/evaluate` 入口。BM25S 仅增加公开 `retrieve(..., top_k=5)` 参数，默认前五、分数、tokenization 和 tie-break 保持不变。
+[`adapters/hybrid_retrieval.py`](../../adapters/hybrid_retrieval.py)提供 `LocalBGE`、`DenseIndex`、`reciprocal_rank_fusion`、`search_variants`；[`bench/retrieval_eval.py`](../../bench/retrieval_eval.py)是独立 `build/evaluate` 入口。BM25S提供`retrieve(..., top_k=5)`。依赖安装由项目锁文件管理；索引保存时记录实际构建库版本，加载时另记`runtime_versions`，重新保存时更新构建版本。加载检查检索配方和文件内容，运行时不另加精确包版本门槛。
 
 `prepare_queries` 将原始 MTRAG 转成只含当前及先前用户问题的白名单对象。`evaluate_queries` 不接受 qrels 或参考答案。CLI 完成所有排名、写入检索结果后才打开 qrels 做离线分析；`generated_history` 还检查 task/query、P2/P3 来源与完整先前轮次，不能用 P1 参考答案作为“实际历史”。该视角是冻结历史下的离线检索实验，不等同采用新检索器后自然演化的闭环历史。
 

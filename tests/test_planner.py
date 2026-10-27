@@ -183,6 +183,13 @@ def test_uncalibrated_cost_uses_configured_fixed_policy():
     assert plan.candidate == r and plan.reason == "uncalibrated_cost_fallback"
 
 
+@pytest.mark.parametrize("strategy", ["cost", "warm_idle"])
+def test_quote_based_comparison_reports_missing_quote_without_changing_strategy(strategy):
+    a, r = candidate("APPEND", 1000), candidate("REBUILD", 500)
+    with pytest.raises(ValueError, match="requires a quote batch"):
+        choose_plan((a, r), None, CostModel(), SessionSnapshot("s"), PlannerKnobs(strategy=strategy))
+
+
 @pytest.mark.parametrize("strategy,expected",[("always_append","APPEND"),
     ("stable_layout","APPEND"),("always_rebuild","REBUILD"),("normal_rag","REBUILD")])
 def test_fixed_baselines_share_hard_constraints(strategy,expected):

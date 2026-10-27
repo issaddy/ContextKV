@@ -123,7 +123,7 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
     async def retries():
         while True:
             await asyncio.sleep(2)
-            await service.epochs.flush()
+            await service.drain()
 
     @asynccontextmanager
     async def lifespan(app):

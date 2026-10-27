@@ -107,10 +107,15 @@ class Controller:
     def _retire_background(self):
         self._retire_requested = True
         if self._retire_task is not None:
-            if not self._retire_task.done():
+            if (not self._retire_task.done() or self._retire_task.cancelled()
+                    or self._retire_task.exception() is not None):
                 return
-            self._retire_task.result()
         self._retire_task = asyncio.create_task(self._flush_retire_requests())
+        self._retire_task.add_done_callback(self._retire_finished)
+
+    def _retire_finished(self, task):
+        if not task.cancelled() and (error := task.exception()) is not None:
+            self.events.emit("epoch_retire_worker_failed", error=f"{type(error).__name__}: {error}")
 
     async def _flush_retire_requests(self):
         # Coalesce turn notifications while one retirement is slow. A new
@@ -121,8 +126,12 @@ class Controller:
 
     async def drain(self):
         if self._retire_task is not None:
-            task, self._retire_task = self._retire_task, None
-            await task
+            task = self._retire_task
+            try:
+                await task
+            finally:
+                if task.done() and self._retire_task is task:
+                    self._retire_task = None
         await self.epochs.flush()
 
     async def aclose(self):

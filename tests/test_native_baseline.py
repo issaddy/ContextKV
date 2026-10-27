@@ -194,8 +194,8 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
     async def test_p3_real_retrieval_to_native_http_and_generated_history(self):
         from importlib.metadata import PackageNotFoundError, version
         try:
-            if version("bm25s") != "0.3.15" or version("numpy") != "2.3.5":
-                self.skipTest("pinned retrieval extra not installed")
+            version("bm25s")
+            version("numpy")
         except PackageNotFoundError:
             self.skipTest("optional retrieval extra not installed")
         retriever = BM25SRetriever(load_beir_corpus(FIXTURE.with_name("corpus_small.jsonl")), corpus_snapshot_id="fixture-v1")

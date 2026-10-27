@@ -48,6 +48,12 @@ python -m controller.cli --config configs/qwen3_8b_cost.yaml serve
 
 服务变更后的必要协议检查可使用 `python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml --report runs/qwen3-smoke.json`。该命令实际生成回答，用于引擎或模型变更后的协议检查。CPU检查与真实运行边界见[引擎说明](../engine_patches/README.md)。
 
+## 清理版本的配置接口
+
+当前配置移除了`planner.min_stable_turns`与`ablation.hysteresis`；使用旧自定义YAML时删除这两项。`delta_abs/delta_rel/z`保留为成本差诊断参数，动作按预计完整成本选择。`fallback_strategy`仍用于成本模型未覆盖范围及显式shadow执行；缺报价直接报告接口错误。历史报告中的`hysteresis`仅在离线统计中读取。
+
+自定义模板实现`render_many`，自定义引擎实现`aclose`。ByteTemplate、HuggingFaceTemplate、MockEngine和SGLangEngineClient已统一实现这些接口。显式启动原生资源监控需要安装`evaluation`依赖组；缺少依赖时在运行入口报错并关闭客户端。
+
 ## 多轮检索服务
 
 `retriever_conversational.example.yaml`使用独立32B解释服务保持多轮任务与变化条件，8B继续生成业务回答。两个服务复用同一固定引擎，各自使用自己的scope、tokenizer和缓存池。解释服务采用原生NGRAM输出片段草稿和目标模型/语法验证，直接沿用现有temperature=0的解析协议。无需重新bootstrap或下载模型。在另一终端从项目根目录启动解释器；子shell中的设置不改变8B终端：

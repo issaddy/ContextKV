@@ -64,6 +64,28 @@ def test_decision_summary_separates_cost_selection_fallback_and_native_results()
     assert summarize_run(payload())["decisions"]["observed_turns"] == 0
 
 
+@pytest.mark.parametrize("field", ["actual_prefill_tokens", "actual_device_hit_tokens", "actual_host_loaded_tokens"])
+def test_invalid_cache_counter_is_diagnostic_without_changing_success_or_raw_result(field):
+    value = payload()
+    result = value["report"]["turns"][0]["result"]
+    result.update(input_tokens=10, receipt={"actual_prefill_tokens": 20,
+        "actual_device_hit_tokens": 0, "actual_host_loaded_tokens": 0})
+    result["receipt"][field] = -1
+    original = deepcopy(value)
+    summary = summarize_run(value)
+    assert value == original
+    assert summary["timing"]["statuses"] == {"success": 1}
+    assert summary["timing"]["turn_seconds"]["mean"] == 3
+    assert summary["receipt_work"]["invalid_counters"] == [{"task_id": "s:1", "values": {field: -1}}]
+    if field == "actual_prefill_tokens":
+        assert summary["actual_prefill_tokens"] == {"observed_turns": 0, "total": None}
+        assert summary["receipt_work"]["prefill_to_prompt_ratio"]["count"] == 0
+    else:
+        assert summary["actual_prefill_tokens"]["total"] == 20
+        assert summary["receipt_work"]["prefill_to_prompt_ratio"]["mean"] == 2
+        assert summary["receipt_work"]["cold_prefill_fraction"] is None
+
+
 @pytest.mark.parametrize("cli,expected", [([], {}),
     (["--complete-slo-seconds", "3"], {"complete_seconds": 3}),
     (["--response-mode", "streaming"], {"ttft_seconds": 2.0, "tpot_seconds": .1}),

@@ -12,10 +12,7 @@ from typing import Any, Mapping, Sequence
 
 from adapters.mtrag import OnlineContext, OnlineTurn, clean_context, json_hash
 
-BM25S_VERSION = "0.3.15"
-NUMPY_VERSION = "2.3.5"
-RETRIEVAL_CONFIG = {"implementation": "bm25s", "version": BM25S_VERSION,
-                    "numpy_version": NUMPY_VERSION, "method": "lucene", "k1": 1.5,
+RETRIEVAL_CONFIG = {"implementation": "bm25s", "method": "lucene", "k1": 1.5,
                     "b": .75, "backend": "numpy", "csc_backend": "numpy",
                     "stopwords": "en", "stemmer": None, "query_user_turns": 3, "top_k": 5,
                     "tie_break": "ascending_passage_id"}
@@ -144,8 +141,7 @@ class BM25SRetriever:
         """
         directory = Path(directory)
         manifest = json.loads((directory / "manifest.json").read_text())
-        if any(manifest.get(k) != v for k, v in RETRIEVAL_CONFIG.items()
-               if k not in {"version", "numpy_version"}):
+        if any(manifest.get(k) != v for k, v in RETRIEVAL_CONFIG.items()):
             raise ValueError("saved index uses a different retrieval configuration")
         for name, digest in manifest["files"].items():
             if sha256((directory / name).read_bytes()).hexdigest() != digest:
@@ -188,7 +184,8 @@ class BM25SRetriever:
         (directory / "passages.jsonl").write_text("\n".join(json.dumps(asdict(c), ensure_ascii=False) for c in self._contexts) + "\n", encoding="utf-8")
         files = {str(p.relative_to(directory)): sha256(p.read_bytes()).hexdigest()
                  for p in sorted(directory.rglob("*")) if p.is_file() and p.name != "manifest.json"}
-        (directory / "manifest.json").write_text(json.dumps({**self.manifest, "files": files}, indent=2), encoding="utf-8")
+        (directory / "manifest.json").write_text(json.dumps(
+            {**self.manifest, **self.runtime_versions, "files": files}, indent=2), encoding="utf-8")
 
 
 def deterministic_top_k(scores, k: int, np):

@@ -14,6 +14,9 @@ from bench.official import load_jsonl
 from bench.quality import paired_cluster_bootstrap
 from controller.planner import COST_SELECTION_REASONS
 
+# Saved runs from before the dwell-policy removal retain their original labels.
+RECORDED_COST_SELECTION_REASONS = COST_SELECTION_REASONS | {"hysteresis"}
+
 
 def _dict(value):
     return asdict(value) if is_dataclass(value) else value
@@ -61,7 +64,7 @@ def decision_summary(turns):
             continue
         actions[action] += 1
         reasons[reason] += 1
-        cost_choices += reason in COST_SELECTION_REASONS
+        cost_choices += reason in RECORDED_COST_SELECTION_REASONS
         fallbacks += reason.endswith("_fallback")
         estimate = _dict(result.get("prediction") or {})
         if estimate:
@@ -133,6 +136,7 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=N
     timing_sources = defaultdict(int)
     latency_pairs = defaultdict(list)
     receipt_rows, receipt_sessions, receipt_branches = [], defaultdict(list), defaultdict(list)
+    invalid_cache_counters = []
     citations = {"observed_turns": 0, "scope_observed_turns": 0,
                  "unknown_reference_task_ids": [], "out_of_scope_task_ids": []}
     for value in turns:
@@ -159,13 +163,20 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=N
         timings.append(item)
         if row["status"] == "success" and item.turn_seconds is not None:
             latency_pairs[row["conversation_id"]].append({"task_id": row["task_id"], "value": item.turn_seconds})
-        count = result.get("actual_prefill_tokens", receipt.get("actual_prefill_tokens"))
+        counts = {name: result.get(name, receipt.get(name)) for name in (
+            "actual_prefill_tokens", "actual_device_hit_tokens", "actual_host_loaded_tokens")}
+        invalid = {name: value for name, value in counts.items()
+                   if value is not None and (type(value) is not int or value < 0)}
+        if invalid:
+            invalid_cache_counters.append({"task_id": row["task_id"], "values": invalid})
+            counts.update(dict.fromkeys(invalid))
+        count = counts["actual_prefill_tokens"]
         if count is not None:
             actual_prefill.append(count)
         prompt_tokens = result.get("input_tokens")
         if receipt and count is not None and prompt_tokens and row["status"] == "success":
-            gpu = receipt.get("actual_device_hit_tokens")
-            host = receipt.get("actual_host_loaded_tokens")
+            gpu = counts["actual_device_hit_tokens"]
+            host = counts["actual_host_loaded_tokens"]
             observed = {"ratio": count / prompt_tokens, "ttft": item.ttft, "turn_seconds": item.turn_seconds,
                         "cold": (gpu + host == 0 and count >= prompt_tokens) if gpu is not None and host is not None else None}
             receipt_rows.append(observed)
@@ -237,6 +248,7 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=N
                                "timing_sources": dict(timing_sources), "end_to_end_client_timing": False},
             "actual_prefill_tokens": {"observed_turns": len(actual_prefill), "total": sum(actual_prefill) if actual_prefill else None},
             "receipt_work": {**receipt_summary(receipt_rows),
+                             "invalid_counters": invalid_cache_counters,
                              "cold_definition": "no_actual_gpu_or_host_hit_and_actual_prefill_at_least_prompt",
                              "by_session": {k: receipt_summary(v) for k, v in receipt_sessions.items()},
                              "by_branch": {k: receipt_summary(v) for k, v in receipt_branches.items()}},

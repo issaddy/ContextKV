@@ -8,7 +8,7 @@ from .cost_model import CostModel
 from .schema import CacheQuoteBatch, NoFeasiblePlan, Plan, PromptCandidate, SessionSnapshot
 
 
-COST_SELECTION_REASONS = frozenset({"cost_saving", "expected_cost", "hysteresis", "native_kv_tie_break", "context_size_tie_break"})
+COST_SELECTION_REASONS = frozenset({"cost_saving", "expected_cost", "native_kv_tie_break", "context_size_tie_break"})
 
 
 @dataclass(frozen=True)
@@ -115,6 +115,8 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
         return Plan(rebuild, reason="forced_rebuild") if rebuild else NoFeasiblePlan("required_rebuild_unavailable")
     if len(valid) == 1:
         return Plan(valid[0], reason="only_feasible_candidate")
+    if quotes is None and knobs.strategy in {"cost", "warm_idle"}:
+        raise ValueError(f"{knobs.strategy} comparison requires a quote batch")
     if knobs.strategy != "cost":
         chosen = _fixed(append,rebuild,knobs.strategy,knobs,session,quotes)
         return Plan(chosen, reason=knobs.strategy,quote_seq=quotes.observed_seq if quotes else None)

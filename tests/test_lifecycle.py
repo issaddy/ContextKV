@@ -198,7 +198,12 @@ async def test_retire_failure_does_not_rollback_committed_answer(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error", [TypeError("broken retire implementation"), EngineError("RETIRE_ACK_MISMATCH")])
 async def test_retirement_error_reaches_drain_and_preserves_committed_state(tmp_path, monkeypatch, error):
-    controller, store, engine = system(tmp_path, knobs=PlannerKnobs(strategy="always_rebuild"))
+    import json
+    from controller.events import EventLog
+
+    events = tmp_path / "events.jsonl"
+    controller, store, engine = system(tmp_path, knobs=PlannerKnobs(strategy="always_rebuild"),
+                                      events=EventLog(events))
     evidence = (make_evidence("A fact", "a"),)
     await controller.serve_turn("s", "q", evidence, request_id="1")
     await controller.drain()
@@ -209,12 +214,55 @@ async def test_retirement_error_reaches_drain_and_preserves_committed_state(tmp_
 
     monkeypatch.setattr(engine, "retire", broken_retire)
     await controller.serve_turn("s", "q2", evidence, request_id="2")
+    task = controller._retire_task
+    # A failure on an older retirement belongs to maintenance, not the next answer.
+    await asyncio.wait((task,))
+    following = await controller.serve_turn("s", "q3", evidence, request_id="3")
+    assert following.ledger_version == 3 and controller._retire_task is task
+    failures = [row for line in events.read_text().splitlines()
+                if (row := json.loads(line))["event"] == "epoch_retire_worker_failed"]
+    assert len(failures) == 1 and str(error) in failures[0]["error"]
     with pytest.raises(type(error), match=str(error)):
         await controller.drain()
-    assert len(store.get_snapshot("s").raw_history) == 2
-    assert len(store.outbox()) == 1
+    assert len(store.get_snapshot("s").raw_history) == 3
+    assert len(store.outbox()) == 2
     monkeypatch.setattr(engine, "retire", original)
     await controller.aclose()
+    assert not store.outbox()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_finishes_retirement_worker_before_closing_engine(tmp_path, monkeypatch):
+    controller, store, engine = system(tmp_path, knobs=PlannerKnobs(strategy="always_rebuild"))
+    await controller.serve_turn("s", "q1", request_id="1")
+    await controller.drain()
+    started, release = asyncio.Event(), asyncio.Event()
+    retire = engine.retire
+    closed = []
+
+    async def waiting_retire(*args):
+        started.set()
+        await release.wait()
+        return await retire(*args)
+
+    async def close_engine():
+        closed.append(worker.done())
+
+    monkeypatch.setattr(engine, "retire", waiting_retire)
+    monkeypatch.setattr(engine, "aclose", close_engine)
+    await controller.serve_turn("s", "q2", request_id="2")
+    await started.wait()
+    worker = controller._retire_task
+    closing = asyncio.create_task(controller.aclose())
+    await asyncio.sleep(0)
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert closed == [True] and worker.cancelled()
+    assert controller._retire_task is None and len(store.outbox()) == 1
+    release.set()
+    await controller.drain()
     assert not store.outbox()
     store.close()
 
@@ -263,6 +311,9 @@ async def test_slow_retirement_coalesces_turns_and_drains_new_outbox_entries(tmp
     try:
         await controller.serve_turn("initial", "q2", evidence, request_id="2")
         await asyncio.wait_for(started.wait(), timeout=1)
+        retiring = controller._retire_task
+        draining = asyncio.create_task(controller.drain())
+        await asyncio.sleep(0)
 
         async def other_conversation(index):
             session = f"peer-{index}"
@@ -273,9 +324,10 @@ async def test_slow_retirement_coalesces_turns_and_drains_new_outbox_entries(tmp
         # Generations and commits continue while the first retirement is held.
         await asyncio.gather(*(other_conversation(i) for i in range(6)))
         assert len(store.outbox()) == 7
+        assert controller._retire_task is retiring
         assert not controller._retire_task.done()
         release.set()
-        await controller._retire_task
+        await draining
         # Entries committed after the first flush snapshot must be picked up
         # without a new request, periodic HTTP worker or explicit final drain.
         assert not store.outbox()

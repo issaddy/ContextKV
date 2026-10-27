@@ -28,6 +28,10 @@ def test_bm25_records_runtime_versions_without_a_second_package_lock(tmp_path, m
     assert restored.retrieve(["atlas"]) == expected
     assert restored.manifest["version"] == "compatible-build"
     assert restored.manifest["runtime_versions"]["version"] == "another-build"
+    restored.save(tmp_path / "resaved")
+    manifest = json.loads((tmp_path / "resaved" / "manifest.json").read_text())
+    assert manifest["version"] == "another-build"
+    assert BM25SRetriever.load(tmp_path / "resaved").retrieve(["atlas"]) == expected
 
 
 def test_custom_namespace_is_used_only_when_source_is_absent():
