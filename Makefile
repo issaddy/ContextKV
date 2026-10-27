@@ -1,10 +1,10 @@
 .PHONY: install test lint demo serve data
 
 install:
-	uv sync --extra retrieval --extra calibration --locked
+	uv sync --extra retrieval --extra calibration --extra evaluation --locked
 
 test:
-	uv run --extra retrieval --extra calibration pytest -q
+	uv run --extra retrieval --extra calibration --extra evaluation pytest -q
 
 lint:
 	uv run ruff check controller adapters bench profiling tests scripts engine_patches
