@@ -24,7 +24,7 @@ FIXTURE = Path(__file__).parent / "fixtures/mtrag_small.jsonl"
 
 
 def test_reference_overlap_aligns_ids_and_keeps_missing_answers_in_denominator():
-    from bench.quality import reference_overlap
+    from bench.official import reference_overlap
     references = [
         {"task_id": "a", "conversation_id": "one", "Collection": "dmv", "targets": [{"text": "The red car"}]},
         {"task_id": "b", "conversation_id": "one", "Collection": "dmv", "targets": [{"text": "blue bus"}]},

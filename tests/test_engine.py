@@ -18,6 +18,23 @@ def candidate(ids, name="a"):
     return PromptCandidate(name, "APPEND", 0, (), tuple(ids), token_hash(ids), frozenset(), frozenset())
 
 
+def test_mock_slot_events_scale_with_operations_and_preserve_pool_totals():
+    async def check():
+        engine = MockEngine(gpu_capacity_tokens=12000, host_capacity_tokens=20000)
+        await engine.seed_cache(range(10000), tier="gpu")
+        await engine.seed_cache(range(10000), tier="gpu")  # Shared slots are not allocated twice.
+        await engine.seed_cache(range(10000), tier="host")
+        engine._admit(tuple(range(20000, 30000)))
+        await engine.seed_cache(range(20000, 30000), tier="gpu")
+        metrics = await engine.metrics()
+        assert metrics["pool"]["unique_gpu_tokens"] == 12000
+        assert metrics["pool"]["unique_host_tokens"] == 10000
+        assert [(e["event"], e["tier"], e["slots"]) for e in metrics["events"]] == [
+            ("alloc", "gpu", 10000), ("alloc", "host", 10000),
+            ("free", "gpu", 8000), ("alloc", "gpu", 10000)]
+    asyncio.run(check())
+
+
 def run(coro):
     return asyncio.run(coro)
 

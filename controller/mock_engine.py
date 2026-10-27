@@ -198,6 +198,7 @@ class MockEngine:
 
     def _store_ids(self, ids, *, gpu=False, host=False, h2d=False, d2h=False, session_id=None):
         parent = 0
+        allocated_gpu = allocated_host = 0
         for token in ids:
             index = self._children.get((parent, token))
             if index is None:
@@ -215,10 +216,15 @@ class MockEngine:
                 slot.refs.add(session_id)
             slot.touched = self._seq
             if not old_gpu and (gpu or h2d):
-                self._event("alloc", tier="gpu", slots=1)
+                allocated_gpu += 1
             if not old_host and (host or d2h):
-                self._event("alloc", tier="host", slots=1)
+                allocated_host += 1
             parent = index
+        # The locked operation is atomic to callers. One event per changed tier
+        # retains exact counts without a timestamp/dictionary for every token.
+        for tier, slots in (("gpu", allocated_gpu), ("host", allocated_host)):
+            if slots:
+                self._event("alloc", tier=tier, slots=slots)
 
     async def seed_cache(self, input_ids, *, tier="gpu", pending=False):
         """Test fixture insertion; does not participate in production planning."""
@@ -248,7 +254,7 @@ class MockEngine:
                 raise EngineError("CAPACITY_EXCEEDED")
             for _, _, i in evictable[:shortage]:
                 self._slots[i].gpu = False
-                self._event("free", tier="gpu", slots=1)
+            self._event("free", tier="gpu", slots=shortage)
 
     async def generate(self, *, input_ids, session_id, expected_generation, expected_restart_id,
                        attempt_id, fingerprint, max_new_tokens=128, ignore_eos=False, citation_ids=None):
@@ -379,7 +385,7 @@ class MockEngine:
                                epoch.generation, inflight=bool(epoch.inflight), terminal=epoch.state == "RETIRED")
 
     async def metrics(self, after_seq=0):
-        """Exact simulated slot events, explicitly distinguished from hardware."""
+        """Exact simulated slot counts at operation boundaries, not hardware timing."""
         async with self._lock:
             gpu, host = self._usage()
             return dict(engine_restart_id=self.engine_restart_id, observed_seq=self._seq,

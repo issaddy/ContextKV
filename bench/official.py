@@ -1,4 +1,4 @@
-"""Offline adapter for the pinned IBM evaluator; never imported by serving code.
+"""Offline reference scoring and pinned IBM evaluator adapter; no serving imports.
 
 Upstream dependencies are installed separately, since its vLLM/torch/ragas stack
 is not a controller dependency. The adapter preserves upstream metric algorithms.
@@ -6,10 +6,14 @@ is not a controller dependency. The adapter preserves upstream metric algorithms
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
 from hashlib import sha256
 import importlib
 import json
 import os
+import re
+from statistics import mean
+import string
 from pathlib import Path
 import subprocess
 import sys
@@ -20,6 +24,49 @@ from adapters.mtrag import DATASET_COMMIT
 
 def load_jsonl(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def reference_overlap(references, predictions):
+    """SQuAD-style answer F1/EM used by MultiDoc2Dial, aligned by task ID.
+
+    This lexical measure supplements task/source evaluation. Missing predictions
+    score zero and remain visible in coverage, as in the upstream evaluator.
+    See IBM/multidoc2dial scripts/sharedtask_eval.py at 2456a5609b447e1a12b716f4d658728f346f3041.
+    """
+    def normalize(text):
+        text = text.lower().translate(str.maketrans('', '', string.punctuation))
+        return re.sub(r"\b(a|an|the)\b", " ", text).split()
+
+    predictions = list(predictions)
+    answers = {row["task_id"]: row["predictions"][0]["text"] for row in predictions}
+    if len(answers) != len(predictions):
+        raise ValueError("duplicate prediction task ID")
+    scores, domains, sessions, missing = {}, defaultdict(list), defaultdict(list), []
+    for row in references:
+        tid = row["task_id"]
+        if tid in scores:
+            raise ValueError("duplicate reference task ID")
+        if tid not in answers:
+            missing.append(tid)
+        prediction = normalize(answers.get(tid, ""))
+        f1 = em = 0.0
+        for target in row["targets"]:
+            reference = normalize(target["text"])
+            overlap = sum((Counter(prediction) & Counter(reference)).values())
+            f1 = max(f1, 2 * overlap / (len(prediction) + len(reference)) if overlap else 0.0)
+            em = max(em, float(prediction == reference))
+        scores[tid] = {"f1": f1, "exact_match": em}
+        domains[row["Collection"]].append(f1)
+        sessions[row["conversation_id"]].append(f1)
+    if answers.keys() - scores.keys():
+        raise ValueError("predictions contain task IDs absent from references")
+    return {"metric": "squad_style_reference_overlap", "tasks": scores,
+        "requested_tasks": len(scores), "predicted_tasks": len(answers), "missing_task_ids": missing,
+        "mean_f1": mean(v["f1"] for v in scores.values()) if scores else None,
+        "mean_exact_match": mean(v["exact_match"] for v in scores.values()) if scores else None,
+        "domain_mean_f1": {domain: mean(values) for domain, values in domains.items()},
+        "conversation_mean_f1": {sid: mean(values) for sid, values in sessions.items()},
+        "scope": "lexical answer overlap on the declared exchange units; not semantic correctness or source faithfulness"}
 
 
 def merge_offline_labels(predictions: Sequence[Mapping], references: Sequence[Mapping]) -> list[dict]:
@@ -235,7 +282,7 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["prepare", "check", "retrieval", "algorithmic", "generation", "generation-http"])
+    parser.add_argument("mode", choices=["prepare", "check", "retrieval", "algorithmic", "generation", "generation-http", "overlap"])
     parser.add_argument("--checkout")
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
@@ -255,6 +302,13 @@ def main(argv=None):
         target = Path(args.output)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in result))
+    elif args.mode == "overlap":
+        if not args.references:
+            parser.error("overlap requires --references")
+        result = reference_overlap(load_jsonl(args.references), load_jsonl(args.input))
+        target = Path(args.output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     elif args.mode == "check":
         if not args.checkout:
             parser.error("check requires --checkout")

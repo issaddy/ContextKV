@@ -43,8 +43,8 @@ python -m bench.b6_joint_sweep --matrix configs/benchmark_multidoc2dial.yaml \
 保存答案的基础词项评分：
 
 ```bash
-python -m bench.quality --references data/multidoc2dial/test/tasks.jsonl \
-  --predictions SAVED-OFFICIAL.jsonl --output runs/multidoc2dial-overlap.json
+python -m bench.official overlap --references data/multidoc2dial/test/tasks.jsonl \
+  --input SAVED-OFFICIAL.jsonl --output runs/multidoc2dial-overlap.json
 ```
 
 复用作者采用的SQuAD式F1/EM定义，按task ID关联，报告[0,1]分数、领域/会话均值和缺失任务；缺失回答计零。本文分组后的参考回答是完整交流轮，不能冒充原始agent-turn分数。F1只补充语义正确性、条件适用性和来源支持评价，不作为唯一质量门槛。检索使用文档级qrels，系统性能/资源沿用统一指标。
