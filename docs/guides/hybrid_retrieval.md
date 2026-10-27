@@ -1,4 +1,4 @@
-# 原始段落上的混合检索与重排序实验
+# 混合检索配置与运行
 
 该入口支撑模块 A 的证据选择：复用固定 BGE 权重和官方 Transformers 接口，保留独立 BM25S 基线，提供 dense、RRF 混合与 cross-encoder 重排序。原文、段落边界与证据身份保持不变。当前多轮主线配置使用这一共享入口，开发数据用于改进，独立测试与开发结果分开报告。
 
@@ -15,12 +15,7 @@
 | BGE-reranker-v2-m3 | [官方模型卡](https://huggingface.co/BAAI/bge-reranker-v2-m3)提供 `AutoModelForSequenceClassification` 与 query/passage 成对推理 | 对 RRF 前 50 重新排序，在线按内容组选择至多 5 段；raw logits 不解释成校准的相关概率、支持概率或回答正确率 |
 | 多轮 query 表征 | [IBM 固定检索任务说明](https://github.com/IBM/mt-rag-benchmark/blob/53fef6f5917c7e10c436f697e69a955dbc795d81/mtrag-human/retrieval_tasks/README.md)包含最后问题、全部用户问题和 rewrite 设置，其实验说明检索器与问题表征都值得比较 | 实现 current、last3、all_user；第四个可选视角显式读取冻结 P2/P3 actual_history。没有把数据集给出的 rewrite、参考 assistant、qrels 或未来轮次带入检索，也没有以拼接历史冒充学习式 query rewriting |
 
-选择 M3 的原因是可直接加载的 encoder/reranker 配套、长输入与多语言覆盖、官方调用简单，适合在现有 H200 上以较小工程改动测量收益。不是因模型更新年份断言其效果最强；若它的召回或排序收益不足，可以在同一原文、qrels 与查询视角下替换 encoder/reranker，继续比较较新的方法。原论文或模型榜单中的收益不转记为本项目结果。
-
-固定模型与许可：
-
-- `BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181`，模型卡 MIT。
-- `BAAI/bge-reranker-v2-m3@953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e`，模型卡 Apache-2.0。
+方法适配关系见[机制与研究依据](../research_contributions.md)，实际质量和成本见[数据与评价](../data_and_evaluation.md)。
 
 运行只接受预先准备的本地目录，`local_files_only=True`，记录预期 revision、路径、device、dtype、软件版本、token cap 和 batch size。revision 来源明确标为 `operator_supplied_local_snapshot`，不伪称检查了全部模型文件的内容哈希。不安装 FlagEmbedding 整套依赖，不改项目 lockfile 或已有 torch 环境；复用官方兼容的 Transformers/torch 接口。
 
@@ -118,17 +113,7 @@ encoder/reranker 与 SGLang 共用 GPU 时，其他会话检索可能与生成�
 
 候选池召回和最终重排可能具有不同的查询需求；本接口允许显式分别配置，并保留共同候选与原文，实际用途按目标负载判断。
 
-## 可证伪假设与后续改进
-
-1. **召回互补。** dense/RRF 的候选池召回若没有高于 BM25，先查产品实体、追问、原始语料 ID、query 视角与相关性标签覆盖，不直接堆更强生成提示词。若召回改善但前五不改善，重点检查排序与重排器。
-2. **重排序有效。** 在相同候选池上，reranker 应提高前五相关性；若更差，保留负结果，检查多轮 query 噪声、长度触顶与产品版本混淆，再比较 current/last3/all_user 或有依据的 local rewrite。不得只报最优方法而丢失其他视角。
-3. **对话条件有效。** 多轮视角可补省略的实体，也可能累积过时主题；按追问与主题切换查看具体排名、按会话汇总。当前 5 会话适合探索，不把逐轮样本当成 41 个独立会话。
-4. **检索收益能转化为问答收益。** 选定设置后，在共享问题、语料、生成模型、提示词、1024 输出预算和资源条件下跑完整 P3；逐 claim 检查支持、版本/命令范围和不可回答行为。qrels 改善并不自动保证答案更正确，资料更丰富也可能让输出更长。
-5. **质量增强能与缓存协同。** 在选定检索设置内部再共享证据比较布局/APPEND/REBUILD；同时单列检索增强前后完整系统成本。新增检索、重排、grounding 或修订开销全部计入，不把基线材料不同归因于缓存控制器。
-
-本次已通过原文保持、RRF 同分、真实 BM25 默认兼容、白名单/历史来源、标签后置分析、模型/语料对应、离线 CLI 和 41 轮 cohort 等测试。mock encoder/reranker 只验证数据合同，不能用于报告真实检索收益。真实模型实验完成后再填写各方法/会话结果及错误分析。
-
-### 从原始文档恢复阅读上下文
+## 从原始文档恢复阅读上下文
 
 在`source_window: true`下可提供`source_documents: data/mtrag-source-documents/cloud.jsonl.zip`，使用同一固定语料的原始document-level JSONL（或只含一个JSONL的zip）。记录包含`document_id/text`，可带`url/source_uri/title`。Cloud原件来自[固定上游版本](https://github.com/IBM/mt-rag-benchmark/tree/53fef6f5917c7e10c436f697e69a955dbc795d81/corpora/document_level)，不更换现有passage索引或向量。
 
@@ -136,10 +121,6 @@ encoder/reranker 与 SGLang 共用 GPU 时，其他会话检索可能与生成�
 
 原文只在启动时加载，片段定位按固定语料项复用，不增加LLM调用、索引搜索或重排。未提供source_documents时仍使用原有相邻检索片段窗口。生成评价包含实际阅读材料；检索评价从单独的retrieval_contexts投影原排名，不能把上下文扩展当作新的检索命中。该机制的质量和成本需按公开任务验证，默认配置尚未启用。
 
-### 按当前任务选择完整阅读材料
+## 联合语义选材配置
 
-`evidence_selection: semantic`复用已有解释客户端，允许与`source_window`组合。候选阅读窗口及必要依赖在选择前准备，选择器同时看到完整原文、当前问题和结构化任务条件；选中后交给共同A/R的正文与依赖来自这份目录，不再额外扩张未选择的窗口。原文窗口按每个命中独立构造，相同窗口只占一项，避免大候选池经重叠连锁合并成整篇文档。
-
-完整候选及其依赖按实际分词预算装入目录，放不下的项跳过，继续考虑后续完整项。只允许选择已装入的ID；没有可用目录或调用失败时沿用原始排名回退，不截断原文或重试模型。派生窗口保留对应的原始检索片段，检索评价使用这些来源ID，阅读质量使用实际材料。
-
-复合需求仍使用批量编码和联合召回。启用联合语义选择时，取消重复的逐需求及条件重排；可使用`hybrid`直接提供候选，或`hybrid_rerank`保留一次主任务重排。选择HTTP仍在本地检索锁外执行，模型输出不改变事实正文。该组合为显式机制配置；默认配置及整体效果结论以[当前实现](../implementation_plan.md)和[评价记录](../data_and_evaluation.md)为准。
+`evidence_selection: semantic`使用同一解释客户端联合更新任务和选择来源，需要`query_mode: conversational`、selector及证据元数据。可与`source_window`和`source_documents`组合；`hybrid`直接提供候选，`hybrid_rerank`增加一次主任务重排。完整阅读目录、依赖、预算装入及无效输出处理见[联合决策机制](../research/source_grounded_query_resolution.md#一次调用的任务与来源联合决策)。默认仍为`ranked`，已有比较集中在[评价记录](../data_and_evaluation.md#一次联合任务与来源决策的开发比较)。

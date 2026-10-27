@@ -35,4 +35,4 @@ C 将选中布局映射到业务 epoch。新答案持久提交后解除旧 epoch
 
 资源积分按全局唯一槽位采样，不逐 epoch 累加共享祖先。闭环负载下，动作会改变下一轮到达时刻和实际历史；这种比较反映同一用户脚本的交互结果，不声称两臂经历完全相同的排队过程。机制归因应结合相同输入的局部证据，整体结论以共同负载为准。
 
-成熟依据包括 SGLang 原生准入与缓存机制、标准测量/插值、条件输出长度统计，以及成本感知缓存的大小与取回代价分析。[Landlord 作者论文](https://www.cs.ucr.edu/~neal/publication/Young02Online.pdf)可提供理论背景，但共享前缀、双层异步状态和变化的执行成本不满足其原假设，本实现不继承该竞争比。具体复用见[相关工作](related_work.md)，当前结果仅维护在[数据与评价](../data_and_evaluation.md)。
+成熟依据包括 SGLang 原生准入与缓存机制、标准测量/插值、条件输出长度统计，以及成本感知缓存的大小与取回代价分析。[Landlord 作者论文](https://www.cs.ucr.edu/~neal/publication/Young02Online.pdf)可提供理论背景，但共享前缀、双层异步状态和变化的执行成本不满足其原假设，本实现不继承该竞争比。具体复用见[机制与研究依据](../research_contributions.md)，当前结果仅维护在[数据与评价](../data_and_evaluation.md)。

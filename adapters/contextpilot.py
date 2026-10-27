@@ -1,7 +1,7 @@
 """Read-only ContextPilot principle adapter, without its mutable server pipeline.
 
 The overlap/position metric and matched-prefix alignment follow the published
-ContextPilot implementation pinned in docs/research/related_work.md. This is a small,
+ContextPilot implementation pinned in docs/research_contributions.md. This is a small,
 independent adaptation over committed evidence IDs; it does not reproduce their
 hierarchical clustering, batch scheduling or cross-session cache index.
 """

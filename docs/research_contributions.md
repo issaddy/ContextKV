@@ -1,26 +1,32 @@
-# 机制、复用与课题增量
+# 机制、研究依据与课题增量
 
-研究面向动态证据上下文的多轮文档与知识问答。阶段交付及暂停后保留事项统一见[收尾与实现状态](implementation_plan.md)；本文说明机制归属，不另列研究任务。
+本文说明各机制如何服务于ContextKV及其适配工作。完整论文和项目链接见[参考文献清单](references.md)，实际结果见[数据与评价](data_and_evaluation.md)，工程状态见[实现状态](implementation_plan.md)。
 
-| 模块 | 复用基础 | 本项目适配、优化或扩展 | 已有状态与待建立的结论 |
-|---|---|---|---|
-| A：证据与上下文组织 | BM25S、BGE、RRF/重排；会话消歧、选择性状态覆盖、按字段变化查找历史；父文档/窗口阅读；ContextPilot对齐与注释思想；SGLang原生约束解码 | 版本/可见性、双账本、依赖、共用A/R原文；任务/命名条件增量更新及因果上下文查找；状态原子提交；来源同池重排、任务锚点条件融合；精确正文共享、内容组选材、可选窗口与作者结构；实际可引用材料导出 | Cloud已测版本有质量收益，MultiDoc2Dial未建立整体优势。最新v15完成381条输入验证，尚未重测回答质量；语义支持按最终回答评价 |
-| B：实际成本决策 | SGLang 原生匹配/工作量/预算观测；lookup、历史长度统计及误差感知决策 | 同批 GPU/Host 报价；区分原生预算与服务长度；协议匹配先验、已完成长度和分动作控制成本反馈；不预支退役释放 | 最新公开P3已执行两种动作；早期开发点的响应收益保留，当前完整系统尚未净提速。解析、输出长度与控制成本分项记录，完整响应包含所有阶段 |
-| C：版本与资源协同 | Radix/HiCache、原生会话软引用与备份/淘汰；EfficientAgent 的工作集与 Host 准入原理 | 业务 epoch 到原生引用映射；提交后退役、共享引用、持久 outbox 和恢复；可选业务工作集准入 | 生命周期工程及受控资源作用已验证；同一目标负载中的服务收益与后续重算代价需要共同评价 |
-| 系统集成 | FastAPI、SQLite WAL/事务、原生 JSON 编码器、Transformers 模板和固定 SGLang | 检索→生成→提交→退役→反馈；跨层协议、故障恢复与可复算计量；减少重复容器遍历 | 主流程、部署与真实检索对照已完成；CPU 状态处理降低，质量与资源限制如实交付 |
+## 机制与复用关系
 
-## 如何界定贡献
+| 机制 | 主要依据与固定来源 | ContextKV的适配与扩展 |
+|---|---|---|
+| 上下文对齐与复用 | [ContextPilot `b4c8032`](https://github.com/EfficientContext/ContextPilot/tree/b4c80327f6cfae2286839413731fcb6f53578b2f)、[TokenPilot / LightRSI `9f0f193`](https://github.com/zjunlp/LightRSI/tree/9f0f19308a30445438779efbf3108a7d965a55c7) | 在不可变会话快照上计算重叠与位置距离；用实际正文可见性、版本及共同引用范围组织APPEND/REBUILD |
+| 多轮任务状态 | CHIQ、HAConvDR、QuReTeC、SOM-DST、Context-aware DST、JSON Merge Patch | 单次解释维护开放任务字段、需求和命名条件；保留/更新/删除原子提交，按状态变化位置找回因果历史 |
+| 检索、融合与选材 | [BGE-M3 `5617a9f`](https://huggingface.co/BAAI/bge-m3/tree/5617a9f61b028005a4858fdac845db406aefb181)、[BGE-reranker `953dc6f`](https://huggingface.co/BAAI/bge-reranker-v2-m3/tree/953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e)、BM25S、RRF、xQuAD、结果折叠 | 共享索引与评分池，保留主任务锚点，按需求覆盖选择不同内容组；可选联合任务/来源决策 |
+| 原文结构与范围 | Contextual Retrieval、ParentDocumentRetriever、Docling、SPIRE、[CRAFT](third_party/CRAFT_NOTICE.md)、TabRAG | 传递来源、章节、依赖与原文窗口；表格行列及作者列表保持来源坐标，实际阅读材料进入共同A/R |
+| 原生执行与完整成本 | [SGLang `3f36fc0`](https://github.com/sgl-project/sglang/tree/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b)、阶段测量/插值、经验输出长度、Landlord、WAIT/TIE等调度分析 | 同批GPU/Host只读报价；分开计算容量预留与服务长度；结合等待、恢复、Prefill、Decode及分动作控制开销选择方案 |
+| 缓存生命周期 | SGLang Radix/HiCache与会话软引用、[EfficientAgent `b21b12a`](https://github.com/KunmingSHAO/efficientagent_release/tree/b21b12a07a3ccf473c82acf00820b1aa2073044b) | 业务epoch映射原生引用，持久提交后退役；共享引用、outbox和重启恢复；可选业务工作集Host准入 |
+| 引用与输出 | SGLang XGrammar、原生NGRAM、FullCite、Lost in the Middle | 当前合法引用范围进入原生解码；完整原文与历史参与回答，解释服务复用原生片段草稿 |
+| 评价与工程 | MT-RAG/MultiDoc2Dial、原生基线、来源核验工具、FastAPI、SQLite事务 | 统一CLI/HTTP链路和P1/P2/P3协议，保存实际输入、回答、阶段成本与来源，支持恢复和离线复算 |
 
-直接使用的引擎、检索库和通用算法明确归于上游。课题工作量在于：理解其原理和适用条件，补齐动态证据、多轮历史与有限资源场景的缺口，并将各模块接成有效系统。方法适配、算法优化和跨模块系统机制均可形成贡献，不按论文数量或代码行数计算。
+## 关键适配
 
-课题贡献由场景适配、机制改进与系统协同共同体现。质量和资源要求下，更快完成、服务更多请求、以更少资源达到同等服务，或以合理成本改善质量，都具有应用价值。局部指标用于解释整体结果。
+**A：从已见内容到当前可见证据。** ContextPilot原索引操作会修改状态；本项目将对齐算法独立为纯候选构造。距离为`1 − overlap / max(context_lengths) + 0.001 × mean_shared_position_difference`，共有材料优先对齐，剩余材料保留检索顺序。精确正文共享、原文跨度和版本身份共同决定复用资格；归档记录用于回访恢复。
 
-先确认正确复用、实际启用和场景条件，再评价收益。现有正面结果与有价值的负结果都保留；未覆盖条件与算法失效分开，避免因少量局部观测否定成熟路线。
+**A：从查询改写到完整信息传递。** 当前问题、完整任务和子需求共同参与检索及选材，实际QA提供对话先行词，外部原文支持回答事实。研究中区分任务误解、材料不足、材料不适用和生成使用错误。实现细节见[多轮意图与证据机制](research/source_grounded_query_resolution.md)，配置见[混合检索](guides/hybrid_retrieval.md)。
 
-## 复用边界与资料
+**B：从局部Prefill收益到完整执行成本。** 成本模型复用真实阶段测量，容量依据原生预算，预计服务长度来自已完成历史。控制成本按动作记录；误差带描述预测差异，动作按预计完整成本选择。原理和公式见[联合决策](research/joint_optimization_model.md)，队列与容量记账见[等待估计](research/admission_wait_model.md)。
 
-- ContextPilot、TokenPilot、EfficientAgent 当前属于部分机制适配，未宣称完整移植作者系统或继承其论文收益。ReCAP 为 warm/idle 思想启发的简单对照，并非完整上下文图实现。
-- SGLang负责物理匹配、分配、锁、传输、调度与淘汰；ContextKV协调业务状态和引用生命周期。物理释放由引擎实际分配记录计量。
-- 训练工具和来源支持等可选研究保留复用价值，当前不作为核心交付前置。
-- [相关工作与固定来源](research/related_work.md)、[第三方许可](third_party/)、[联合问题建模](research/joint_optimization_model.md)提供方法依据。
-- 当前结果统一保存在[数据与评价](data_and_evaluation.md)；已清理历史页面可从 Git 追溯，原始运行证据仍保留。
+**C：从文本版本到原生引用生命周期。** 应用层管理业务版本和提交，SGLang管理物理匹配、锁、分配、传输与淘汰。EfficientAgent的工作集准入思想适配到原生BackupKV，并扩展为每请求累计成功准入页预算；实现见[Host准入](research/host_admission_design.md)。
+
+上述工作形成场景适配、算法优化与跨模块协同的课题工作量。各模块的默认配置和效果取舍由[实现状态](implementation_plan.md)及[评价记录](data_and_evaluation.md)维护。
+
+## 来源与许可
+
+表中的固定来源定位实际研究和适配版本；更多调研方法统一收录于[参考文献清单](references.md)。直接复制的函数、提示和资产保留对应NOTICE与许可证，见[第三方说明](third_party/)及各资产目录。模型、数据与代码分别保留发布来源。

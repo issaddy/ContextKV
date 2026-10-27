@@ -1,6 +1,6 @@
 # B 的阶段成本与运行配置
 
-`profiling.sglang_probe → profiling.fit → profiling.stage_fit → CostModel` 是唯一的采集、拟合和装配链。当前已产出 H200/Qwen3-8B 的 `configs/calibration/qwen3-8b-h200.json`；`configs/qwen3_8b_cost.yaml` 使用显式 `admission_estimator: native_budget`，并在容器通过装配及保存运行身份/采样绑定检查。完整系统结论维护在[当前实现清单](../implementation_plan.md)，本指南只说明成本机制和复现入口。
+`profiling.sglang_probe → profiling.fit → profiling.stage_fit → CostModel` 是唯一的采集、拟合和装配链。当前已产出 H200/Qwen3-8B 的 `configs/calibration/qwen3-8b-h200.json`；`configs/qwen3_8b_cost.yaml` 使用显式 `admission_estimator: native_budget`，并在容器通过装配及保存运行身份/采样绑定检查。完整系统结果统一见[数据与评价](../data_and_evaluation.md)，本指南维护成本标定、装配和复现接口。
 
 ## 当前实测范围
 

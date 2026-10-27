@@ -88,9 +88,7 @@ CUDA_VISIBLE_DEVICES=0,1 python -m controller.cli --config configs/qwen3_8b_cost
 
 NGRAM辅助服务使用原生`/server_info`、`/metrics`观测；受控对照需要清空缓存时，在服务空闲后调用原生`/flush_cache`并确认成功。8B非推测生成的控制器继续使用既有研究接口。辅助观测缺失单独记录，不能覆盖已持久化完成的业务结果。
 
-多轮解释从首轮初始化任务、条件与子需求，示例输出上限384 tokens。复合需求复用已有编码器、索引和重排器，额外查询与评分计入检索成本。可显式配置`evidence_selection: semantic`，在评分后用同一解释服务选择完整来源；需要conversational、selector与`--evidence-corpus`，不与`source_window`同时启用。来源选择可直接消费dense或hybrid候选，不强制先运行交叉编码器；现有默认仍为`ranked`。来源选择复用selector的输入预算（示例8192）；如需扩大目录，必须同时满足helper服务容量和输出预留，不能截断原文充数。
-
-可显式设置`source_window: true`，按原文位置补充同源相邻段落，无额外模型调用。必须提供`--evidence-corpus`；一般语料用`document_id`和`span`提供顺序，固定MT-RAG语料可使用已有passage ID中的顺序。原始段落分别引用，不按offset裁剪或拼接正文。扩展材料与显式依赖共同进入A/R，原有精确token预算和原生准入继续生效。本次窗口检查出现指定版本与最新版流程混用，并超出部分8B成本测点范围，所以示例保持`false`；已实现的窗口能力保留，但没有把它当作默认质量或性能改进。
+检索示例默认`conversational`、`single`和`ranked`；可选联合选材、来源窗口和原始文档阅读按[混合检索指南](guides/hybrid_retrieval.md)配置。`evidence_selection: semantic`可与`source_window`组合，使用同一selector预算和证据元数据。任务状态、条件继承及来源选择原理见[多轮机制](research/source_grounded_query_resolution.md)。
 
 ## 分析和实验的边界
 

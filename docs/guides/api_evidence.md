@@ -83,16 +83,8 @@ uv run contextkv --config configs/demo.yaml --state-dir runs/sdk-demo-state serv
 
 以上路径指已冻结的本地研究产物，不随wheel发布；使用自己的包时替换路径和身份。示例生成器是CPU mock，实际Qwen3使用对应scope配置及已启动引擎。扩展索引和目标包/版本仍由调用方明确选择；新增SDK材料的效果按系统对照报告。
 
-## 将已声明关系传入回答
+## 将关系传入回答
 
-之前闭包会补正文，但模板丢掉`dependencies`和`parent_section`。同一组原文只交换两条依赖边，就得到完全相同的输入IDs，生成器无法区分这些关系。现由共享候选构造器一次生成当前required材料的紧凑JSON注记，映射为稳定E_ID→dependency E_ID及原parent_section，A/R和原生基线共用。APPEND只追加当前关系，不修改旧正文或已提交spans；无关系元数据时输入逐字不变。
+共享候选构造器将当前required材料的依赖和parent_section渲染为稳定E_ID关联注记，A/R与原生基线共用。APPEND追加当前关系并保留旧正文及span；无关系元数据时沿用普通输入。关系表达语料声明的连接，实际注记token计入预算。
 
-generic依赖只表示语料声明的关联，不擅自升级为条件、事实蕴含或问题适用性。完整正文/QA、精确版本、已有闭包与预算约束继续成立；注记增加的tokens计入真实输入预算，不宣称减少prefill。未增加模型调用、状态表、策略开关或hash。
-
-冻结v2包的CPU桥接检查已通过：10个片段/2份源码全部读取，真实BM25建盘/重载后取得5个原排名结果并补1个依赖正文；3条依赖和3个parent_section进入实际Qwen3候选。原正文及spans通过，输入从同正文无关系的5829增为5950tokens（+121），0模型/GPU调用。记录在`runs/evidence-context-integration/sdk-v1/result.json`。此包仍没有后来新增的构造器材料，不能把关系可见称作代码可执行或回答质量改善。
-
-## 已完成验证
-
-`tests/test_api_evidence.py`覆盖无执行、装饰器/async、Unicode/CRLF原文与偏移、复杂签名/缺文档、显式和注解依赖、Literal/Annotated非类型内容、动态HTTP/嵌套作用域、继承/重载未知、版本/仓库歧义、未到达的依赖声明、离线源身份核对、许可复制与CLI退出码。与既有CorpusIndex测试合计26项通过。
-
-真实离线构建原件保留在 `runs/api-evidence-review/`。当前提取合同由 `tests/test_api_evidence.py` 覆盖；正文、span 和依赖完整不等于生成的代码必然正确。
+构建与桥接结果见[工程接线验证](../data_and_evaluation.md#工程接线验证)，原件位于`runs/api-evidence-review/`及`runs/evidence-context-integration/sdk-v1/`。提取与来源合同由`tests/test_api_evidence.py`覆盖。

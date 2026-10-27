@@ -48,4 +48,4 @@ A 的两个候选使用共同的当前证据和完整实际问答；B 选择预�
 
 研发围绕实际瓶颈推进：分析任务与来源、理解机制、实现协同、针对性验证。检索、证据选择、调度、成本学习、压缩和模型适配均可作为改进手段。训练工具是可选离线能力，正常服务直接使用已有模型。
 
-[实现状态](implementation_plan.md)记录交付和待办，[贡献说明](research_contributions.md)记录课题工作，[相关工作](research/related_work.md)记录方法依据与来源。
+[实现状态](implementation_plan.md)记录交付和待办，[贡献说明](research_contributions.md)记录课题工作，[参考文献清单](references.md)汇总论文与项目链接。

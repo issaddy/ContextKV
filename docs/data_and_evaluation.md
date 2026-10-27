@@ -102,6 +102,16 @@ python -m bench.report SAVED-RUN.json --output runs/summary.json
 
 该入口调用固定官方RB_llm、RAGAS RL_F、IDK和必要时的歧义评分；不另写评分公式。兼容旧式字符串调用，保持声明的greedy采样，使用LangChain SQLiteCache保存完整模型响应，各完成阶段原子落盘。相同输入和judge设置可续跑；不同答案/模型设置使用不同目录。评分代码改动不再强制重新生成主答案。本次隔离环境使用ragas 0.3.3、langchain 0.3.27、langchain-community 0.3.27和langchain-openai 0.3.29；完整依赖、原包装器与运行记录在`runs/public-main/`，未修改服务环境。
 
+## 工程接线验证
+
+| 检查 | 已有结果 | 原始记录 |
+|---|---|---|
+| Qwen3真实HTTP query，`c1cc617`，2026-10-24 | H200/Qwen3-8B、P3合成语料两轮，always_rebuild、非思考`.7/.8/20/0`、输出cap1024；两轮均stop，input为1039/1124、output为70/101。完整历史、六段原文、依赖、receipt、SQLite提交、r1重放和close后409通过；实际2次检索/生成 | `runs/remote-h200-http-qwen3/public-export-manifest.json`、`runs/http-qwen3-review/analysis-v2.json` |
+| SDK v2包到候选的CPU桥接 | 10片段/2份源码，BM25返回5段并补1段依赖；3条依赖及3个parent_section进入Qwen3候选，原文/span保留，输入5829→5950 tokens；无模型调用 | `runs/evidence-context-integration/sdk-v1/result.json` |
+| HTTP取消与关闭 | 真实Uvicorn CPU复现验证请求/检索线程先收尾，再关闭模型和SQLite；正常在途生成及close请求完成持久化 | `runs/runtime-shutdown-audit/README.md` |
+
+HTTP例中两个epoch退役ACK对应账本操作，close后GPU和Host各仍驻留2304 tokens，体现引用撤销与物理淘汰的区别。语义复核记录r2遗漏幂等限制及范围关联歧义，见`runs/http-qwen3-review/semantic.md`。这些记录用于工程接线检查，质量与性能比较使用下列对应任务和协议。
+
 ## 已有对照结果
 
 以下是保存的版本结果，不代表最新全部机制已经重新测量。
