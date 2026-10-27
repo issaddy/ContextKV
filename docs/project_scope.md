@@ -100,7 +100,7 @@ HTTP/CLI、检索适配器、SQLite、可观测性、故障恢复和评测是这
 
 ## 5. 当前状态与正确的推进顺序
 
-现有 `controller/service.py`、`candidates.py`、`planner.py`、`epoch.py`、Session Store 和固定引擎补丁已经打通主流程。已有 HTTP/CLI、检索、提交/恢复，当前 Qwen3 阶段成本与 A/B/C 已联合执行，**无需重新搭建一套系统**。通用示例保留 `always_rebuild`，实测成本配置位于 `configs/qwen3_8b_cost.yaml`。早期P3开发负载曾观测到响应收益；最新固定公开比较已完成492次回答，尚未体现净提速，质量评分进行中。多轮找回有效来源的收益、对象误判和旧回答错误延续均保留，具体结果见评价说明。
+现有 `controller/service.py`、`candidates.py`、`planner.py`、`epoch.py`、Session Store 和固定引擎补丁已经打通主流程。已有 HTTP/CLI、检索、提交/恢复，当前 Qwen3 阶段成本与 A/B/C 已联合执行，**无需重新搭建一套系统**。通用示例保留 `always_rebuild`，实测成本配置位于 `configs/qwen3_8b_cost.yaml`。早期P3开发负载曾观测到响应收益；最新固定公开比较的492次回答及评分已完成，参考答案相关评分和来源支持均值提高，完整响应尚未净提速。多轮找回有效来源的收益、对象误判和旧回答错误延续均保留，具体结果见评价说明。
 
 具体工作顺序只维护在[当前实现清单](implementation_plan.md)，本文不另列阶段计划。`guides/` 是使用说明，`research/` 是现有机制参考；旧计划和逐轮纪要已从当前文档树移除。
 
