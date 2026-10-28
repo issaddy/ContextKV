@@ -4,7 +4,6 @@
     "default_output_tokens": 580,
     "p90_output_tokens": 1024,
     "max_new_tokens": 512,
-    "paired_error_ms": 0.0,
     "max_normalized_distance": 0.5,
     "include_host_cost": true,
     "include_decode_cost": true,

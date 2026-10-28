@@ -197,27 +197,21 @@ class HuggingFaceTemplate:
 TemplateAdapter = ByteTemplate
 
 
-def _evidence_metadata(block: EvidenceBlock, reference: str, *, legacy=False) -> str:
+def _evidence_metadata(block: EvidenceBlock, reference: str) -> str:
     # The ledger/span retains the complete identity and provenance. The model
     # only needs a stable citation ID and human-facing source information.
-    if legacy:
-        value = {"id": reference, "corpus": block.key.corpus_id,
-            "document": block.key.document_id, "passage": block.key.passage_id,
-            "version": block.key.version, "source": block.source_uri,
-            "title": block.title, "provenance": block.provenance}
-    else:
-        value = {"id": reference, "source": block.source_uri, "source_revision": block.key.version}
-        if block.title:
-            value["title"] = block.title
+    value = {"id": reference, "source": block.source_uri, "source_revision": block.key.version}
+    if block.title:
+        value["title"] = block.title
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _evidence_header(block: EvidenceBlock, reference: str, *, legacy=False) -> str:
-    return f"\nEvidence [{reference}] {_evidence_metadata(block, reference, legacy=legacy)}\n<evidence_body>\n"
+def _evidence_header(block: EvidenceBlock, reference: str) -> str:
+    return f"\nEvidence [{reference}] {_evidence_metadata(block, reference)}\n<evidence_body>\n"
 
 
-def _evidence_alias(block: EvidenceBlock, reference: str, body_reference: str, *, legacy=False) -> str:
-    return (f"\nEvidence alias [{reference}] {_evidence_metadata(block, reference, legacy=legacy)}\n"
+def _evidence_alias(block: EvidenceBlock, reference: str, body_reference: str) -> str:
+    return (f"\nEvidence alias [{reference}] {_evidence_metadata(block, reference)}\n"
             f"Its complete original body is identical to the body of [{body_reference}].\n")
 
 
@@ -412,8 +406,7 @@ def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSp
         if span.body_reference_id is None:
             if span.alias_declaration is not None:
                 raise EvidenceError("alias declaration requires a physical body reference")
-            if not any(message.content[:span.start].endswith(_evidence_header(block, span.reference_id, legacy=legacy))
-                       for legacy in (False, True)):
+            if not message.content[:span.start].endswith(_evidence_header(block, span.reference_id)):
                 raise EvidenceError("evidence identity/provenance header missing from prompt")
             for start, end in occupied.get(span.message_index, ()):
                 if span.start < end and start < span.end:
@@ -428,8 +421,7 @@ def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSp
             index, start, end = span.alias_declaration
             if (not 0 <= index < len(messages) or messages[index].role != "user"
                     or not 0 <= start < end <= len(messages[index].content)
-                    or not any(messages[index].content[start:end] == _evidence_alias(block, span.reference_id, span.body_reference_id, legacy=legacy)
-                               for legacy in (False, True))):
+                    or messages[index].content[start:end] != _evidence_alias(block, span.reference_id, span.body_reference_id)):
                 raise EvidenceError("evidence alias identity/provenance declaration mismatch")
         if not message.content[span.end:].startswith("\n</evidence_body>\n"):
             raise EvidenceError("evidence body delimiter missing from prompt")

@@ -14,11 +14,6 @@ COST_SELECTION_REASONS = frozenset({"cost_saving", "expected_cost", "native_kv_t
 @dataclass(frozen=True)
 class PlannerKnobs:
     strategy: str = "cost"
-    # Retained for cost-gap diagnostics and existing configuration records.
-    # Per-arm timing error is not a switching cost or a paired regret bound.
-    delta_abs: float = 0.0
-    delta_rel: float = .05
-    z: float = 1.0
     fixed_token_threshold: int = 8192
     fallback_strategy: str = "fixed_threshold"
     concurrency: int = 1
@@ -30,7 +25,7 @@ class PlannerKnobs:
         supported = {"cost", "always_append", "always_rebuild", "fixed_threshold", "stable_layout", "normal_rag", "fixed_period", "warm_idle", "contextpilot", "redundancy_threshold"}
         if self.strategy not in supported or self.fallback_strategy not in supported - {"cost", "warm_idle"}:
             raise ValueError("unknown planner strategy or recursive fallback")
-        if min(self.delta_abs,self.delta_rel,self.z,self.fixed_token_threshold) < 0:
+        if self.fixed_token_threshold < 0:
             raise ValueError("planner thresholds must be nonnegative")
         if self.period < 1 or not 0 <= self.warm_ratio <= 1:
             raise ValueError("period must be positive and warm_ratio must be in [0, 1]")
@@ -131,12 +126,11 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
     by_estimate = {e.candidate_id:e for e in estimates}
     a, r = by_estimate[append.candidate_id], by_estimate[rebuild.candidate_id]
     saving = a.cost-r.cost
-    margin = max(knobs.delta_abs,knobs.delta_rel*min(a.cost,r.cost),knobs.z*model.paired_error(a,r))
     if saving:
         chosen = rebuild if saving > 0 else append
-        reason = "cost_saving" if abs(saving) > margin else "expected_cost"
+        reason = "cost_saving"
     else:
         chosen, reason = _resource_tie_break(append, rebuild, quotes, by_id, by_estimate)
     return Plan(chosen, predicted=estimates, quote_seq=quotes.observed_seq,
                 reason=reason,
-                switch_margin_ms=margin, predicted_saving_ms=saving)
+                predicted_saving_ms=saving)

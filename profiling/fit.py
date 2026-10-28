@@ -212,10 +212,7 @@ def fit(rows: list[dict], *, seed=42, holdout_fraction=.2, priors=None, allow_mo
                       requested_estimator=prefill_estimator, evaluated_estimator=validation_model.prefill_estimator)
     # Freeze all dev observations after reporting held-out support and error.
     model = fitted_model(rows)
-    controls = sorted(row["elapsed_ms"] for row in rows if row["phase"] == "control")
-    delta_abs = 2*controls[math.ceil(.95*len(controls))-1] if controls else None
     return model, {"split": "development", "validation": validation, "prefill_estimator": prefill_estimator,
-                   "delta_abs_2x_control_p95_ms": delta_abs,
                    "output_priors_source": "completed_development_outputs" if priors else "defaults_not_fitted",
                    "measurement_sources": sorted({row["source"] for row in rows})}
 

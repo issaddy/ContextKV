@@ -45,7 +45,7 @@ context:
 
 历史缺字段或空采样记录标为`unknown/legacy_unbound`，标准贪心按既有兼容规则加载旧artifact并保留来源状态。来源绑定完整的测量按实际配方比较；多组profile合并使用同一模型、缓存配置和采样配方。
 
-`length_fit`使用冻结pairs中的目标配方及对应共享先验拟合残差；`decision_pairs rescore`复用原采样条件下的已测输出。配方、来源及残差中心检查在加载或离线边界执行。`request_submitted`记录最终HTTP参数，流式与非流式共用同一payload。
+`length_fit`使用冻结pairs中的目标配方及对应共享先验拟合残差；`decision_pairs rescore`按完整生成协议复用已测输出。配方、来源及残差中心在加载或离线边界检查，流式与非流式共用同一请求构造。
 
 ## 相关入口
 

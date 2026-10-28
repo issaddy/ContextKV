@@ -32,7 +32,7 @@ P3 默认共用 retriever_config；`comparison_scope: system` 允许方法声明
 
 ## 评分与结果复用
 
-开发流程启用 `require_quality_evidence` 时生成 `quality-evidence.template.json` 与分块模板。模板列出实际 job、候选、重复和失败，关联同块参照；实际评分随后填写。test 与 dev_ablation 保存完整结果，使用匹配的参考运行进行离线比较。
+开发流程启用 `require_quality_evidence` 时生成 `quality-evidence.template.json` 与分块模板，统一使用 `schema_version: 2`，包括只有一个块的矩阵。模板列出实际 job、候选、重复和失败，关联同块参照；实际评分随后填写。test 与 dev_ablation 保存完整结果，使用匹配的参考运行进行离线比较。
 
 输入、实现、配置和评分来源随运行记录保存。固定测试复用已选择候选及声明的重复计划。当前运行使用实际模型身份，历史结果按原运行版本读取。
 
@@ -40,6 +40,6 @@ P3 默认共用 retriever_config；`comparison_scope: system` 允许方法声明
 
 ## 源码失效与归档位置
 
-源码摘要只保留溯源，不再分析 AST、维护依赖清单或强制源码全等。执行语义改变时更新方法声明中的 `revision`；它与数据、采样、预算等一起由已有配置摘要绑定。指标计算改变时更新 `bench.report.METRIC_SCHEMA_VERSION`，`freeze` 从内容摘要匹配的原始 run 重算后重新选择；展示文案改变不升级指标版本，也不使答案失效。协议版本由实现者明确维护，工具不猜测任意代码修改的语义。
+源码摘要供溯源。执行语义改变时更新方法的 `revision`，与数据、采样和预算一起绑定；指标计算改变时更新 `bench.report.METRIC_SCHEMA_VERSION`，`freeze` 从摘要匹配的原始 run 重算并重新选择；展示文案改变不使答案或指标失效。
 
 归档可以在矩阵和质量配置中声明 `path_map`，例如 `{"/old/results": "/archive/results"}`。它映射已保存评测声明中的文件或目录前缀，不重写原始回答、审计或冻结协议；读取后仍须匹配完成时保存的 SHA256。缺少摘要或内容变化不会因路径映射而放行。运行模型、索引和新任务输出位置仍由执行配置指定。

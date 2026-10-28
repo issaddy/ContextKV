@@ -35,21 +35,18 @@ def test_error_bands_do_not_reverse_expected_cost_ordering():
     snap = SessionSnapshot("s",turns_since_rebuild=2)
     model = MeasuredModel(a=100,r=90,error=6)
     plan = choose_plan((a,r),batch(a,r),model,snap)
-    assert plan.candidate == r and plan.reason == "expected_cost"
+    assert plan.candidate == r and plan.reason == "cost_saving"
     model = MeasuredModel(a=90,r=100,error=6)
     assert choose_plan((a,r),batch(a,r),model,snap).candidate == a
     model = MeasuredModel(a=100,r=50)
     assert choose_plan((a,r),batch(a,r),model,snap).candidate == r
-    # Existing margins describe the gap; they grant neither action priority.
-    assert choose_plan((a,r),batch(a,r),model,snap,PlannerKnobs(delta_abs=51)).reason == "expected_cost"
-    assert choose_plan((a,r),batch(a,r),model,snap,PlannerKnobs(delta_rel=1.1)).reason == "expected_cost"
 
 
 def test_warm_reuse_savings_are_not_discarded_for_a_small_input_reduction():
     a,r = candidate("APPEND",4100),candidate("REBUILD",4000)
     model = MeasuredModel(a=500,r=560,error=200)
     plan = choose_plan((a,r),batch(a,r),model,SessionSnapshot("s"))
-    assert plan.candidate == a and plan.reason == "expected_cost"
+    assert plan.candidate == a and plan.reason == "cost_saving"
 
 
 def test_measured_action_control_cost_can_change_complete_cost_choice():
@@ -73,7 +70,6 @@ def test_clear_full_cost_savings_take_precedence_over_context_size(lengths,costs
     for candidates in ((a,r),(r,a)):
         plan = choose_plan(candidates,batch(a,r),model,snap)
         assert plan.candidate.action == expected and plan.reason == "cost_saving"
-        assert plan.switch_margin_ms == 2.5
 
 
 def test_equal_cost_prefers_shorter_append():
@@ -170,9 +166,9 @@ def test_supported_net_savings_can_avoid_waiting_immediately_after_rebuild(since
     # cost/uncertainty decision favours R, regardless of the turn counter.
     plan = choose_plan((a,r),batch(a,r),MeasuredModel(a=7539,r=4529,error=251),snap)
     assert plan.reason == "cost_saving" and plan.candidate == r
-    assert plan.predicted_saving_ms > plan.switch_margin_ms
+    assert plan.predicted_saving_ms == 3010
     uncertain = choose_plan((a,r),batch(a,r),MeasuredModel(a=7539,r=7400,error=251),snap)
-    assert uncertain.reason == "expected_cost" and uncertain.candidate == r
+    assert uncertain.reason == "cost_saving" and uncertain.candidate == r
 
 
 def test_uncalibrated_cost_uses_configured_fixed_policy():

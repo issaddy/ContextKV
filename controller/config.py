@@ -84,7 +84,6 @@ class CostSettings:
     admission_estimator: str | None = None
     default_output_tokens: int = 128
     p90_output_tokens: int = 256
-    paired_error_ms: float = 0.0
     max_normalized_distance: float = .5
     online_calibration: bool = False
     residual_alpha: float = .1
@@ -226,6 +225,6 @@ def create_controller(config: RunConfig) -> Controller:
     return Controller(SessionStore(state_dir / "sessions.sqlite3"), engine, template=template,
                       policy=config.context, knobs=config.planner, cost_model=model, shadow=config.shadow,
                       epoch_retirement=config.ablation.epoch_retirement,
-                      online_calibration=config.cost_model.online_calibration, sampling=config.sampling,
+                      online_calibration=config.cost_model.online_calibration,
                       events=EventLog(state_dir / "events.jsonl", config_hash=config.config_hash,
                                       engine_kind=config.engine.kind))

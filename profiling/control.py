@@ -47,7 +47,6 @@ async def measure(config, *, samples: int = 100, warmup: int = 10, session_id: s
                 "clock": "client_monotonic", "samples": samples, "warmup": warmup,
                 "configuration": to_jsonable(config), "fingerprint": to_jsonable(controller.template.fingerprint),
                 "snapshot_version": snapshot.version, "summary": summary, "observations": rows,
-                "delta_abs_2x_p95_ms": 2 * summary["total_ms"]["p95"],
                 "scope": "candidate/template + policy-required quote + decision; excludes retrieval and persistence",
                 "hardware_generation_measured": False,
                 "note": "Mock engine quote timing cannot stand in for a remote SGLang RPC. Use representative saved sessions on the target system."}
@@ -72,7 +71,7 @@ def main(argv=None):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps({"output": str(target), "engine_kind": report["engine_kind"],
-                      "delta_abs_2x_p95_ms": report["delta_abs_2x_p95_ms"]}))
+                      "control_p95_ms": report["summary"]["total_ms"]["p95"]}))
 
 
 if __name__ == "__main__":

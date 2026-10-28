@@ -616,23 +616,16 @@ def test_evidence_before_question_preserves_real_token_prefix_across_queries(lay
     assert first.input_hash != second.input_hash
 
 
-def test_compact_source_metadata_preserves_legacy_execution_and_original_spans(monkeypatch):
-    from controller import templates
+def test_compact_source_metadata_preserves_execution_and_original_spans():
     block = make_evidence("Complete original source.\nIncluding its conditions.", "document",
                           title="Original title", provenance="Recorded ingestion provenance")
-    metadata = templates._evidence_metadata
     snapshot = SessionSnapshot("s")
-    with monkeypatch.context() as patch:
-        patch.setattr(templates, "_evidence_metadata",
-                      lambda block, reference, **kwargs: metadata(block, reference, legacy=True))
-        previous = build_candidates(snapshot, "Original", (block,))[0]
+    previous = build_candidates(snapshot, "Original", (block,))[0]
     snapshot = committed(previous, snapshot, "Original", (block,))
     append, rebuild = build_candidates(snapshot, "Continue", (block,))
     assert append.messages[:-1] == snapshot.execution.messages
-    assert '"provenance"' in append.messages[1].content
     assert '"provenance"' not in rebuild.messages[-1].content
     assert '"source_revision":"v1"' in rebuild.messages[-1].content
-    assert len(rebuild.messages[-1].content) < len(previous.messages[-1].content)
     for candidate in (append, rebuild):
         assert verify_evidence_spans(candidate.messages, candidate.evidence_spans,
                                      (block,), candidate.reference_map) == {block.key}

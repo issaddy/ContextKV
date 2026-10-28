@@ -6,7 +6,6 @@ from controller.candidates import build_candidates
 from controller.config import load_config
 from controller.cost_model import CostModel
 from controller.evidence import EvidencePolicy, make_evidence
-from controller.events import EventLog
 from controller.mock_engine import MockEngine
 from controller.planner import PlannerKnobs, choose_plan
 from controller.schema import ExecutionLedger, Message, SessionSnapshot, TurnRecord
@@ -84,24 +83,17 @@ def test_redundancy_threshold_is_a_fraction(threshold):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("strategy", ["redundancy_threshold", "cost"])
-async def test_controller_measures_explicit_policy_or_fallback_and_logs_body_counts(tmp_path, strategy):
+async def test_controller_measures_explicit_policy_or_fallback(tmp_path, strategy):
     engine = MockEngine()
     policy = EvidencePolicy()
-    events = EventLog(tmp_path / "events.jsonl")
     controller = Controller(SessionStore(tmp_path / "session.sqlite3"), engine, policy=policy,
         knobs=PlannerKnobs(strategy=strategy, fallback_strategy="redundancy_threshold",
-                           redundancy_threshold=.4), events=events)
+                           redundancy_threshold=.4))
     try:
         first = await controller.serve_turn("s", "Initial question", (make_evidence("a" * 80, "a"),))
         second = await controller.serve_turn("s", "Current question", (make_evidence("b" * 20, "b"),))
         assert first.action == second.action == "REBUILD"
         assert second.epoch_no > first.epoch_no
-        import json
-        rows = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
-        measured = [r for r in rows if r["event"] == "candidate_built" and r["action"] == "APPEND"]
-        assert len(measured) == 1
-        assert measured[0]["evidence_body_tokens"] == 100
-        assert measured[0]["nonrequired_evidence_body_tokens"] == 80
     finally:
         await controller.aclose()
 

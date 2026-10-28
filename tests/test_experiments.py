@@ -184,7 +184,7 @@ def test_output_length_artifact_contents_bind_generation_identity(tmp_path):
 
 def test_ablations_inherit_frozen_parent_and_do_not_consume_tuning_budget(tmp_path):
     value = spec(tmp_path)
-    value["methods"][0]["overrides"]["planner"]["delta_rel"] = .25
+    value["methods"][0]["overrides"]["planner"]["redundancy_threshold"] = .25
     value["methods"].append({"id": "B3_no_retire", "ablation_of": "B3",
                              "overrides": {"ablation": {"epoch_retirement": False}}})
     assert all(job["method"] != "B3_no_retire" for job in matrix_jobs(value))
@@ -198,7 +198,7 @@ def test_ablations_inherit_frozen_parent_and_do_not_consume_tuning_budget(tmp_pa
     assert child["candidate_index"] == parent["candidate_index"] == 1
     assert child["overrides"]["planner"] == parent["overrides"]["planner"]
     assert child["overrides"]["planner"]["fixed_token_threshold"] == 4000
-    assert child["overrides"]["planner"]["delta_rel"] == .25
+    assert child["overrides"]["planner"]["redundancy_threshold"] == .25
     assert child["overrides"]["ablation"]["epoch_retirement"] is False
     ablation_results = asyncio.run(run_matrix(value, tmp_path / "matched-dev", stage="dev_ablation", frozen=frozen))
     assert len(ablation_results) == 1 and ablation_results[0]["status"] == "completed"

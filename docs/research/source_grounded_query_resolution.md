@@ -4,11 +4,11 @@
 
 ## 一次解释，统一状态更新
 
-`query_mode: conversational` 在已有检索 worker 中调用 `ConversationResolver`。配置解释器时，每轮都经过同一结构化协议，包括 `Use AtlasCloud` 这样的短句；不再由字面拼接捷径截获，也不再触发一套专门的条件二次排序。
+`query_mode: conversational` 在检索 worker 中调用 `ConversationResolver`，每轮使用同一结构化状态协议。
 
 `TaskFrame` 保存 topic、target、task、命名 conditions 和复合 requirements。已有状态时，解释器先选择 `task.operation=keep/replace`，再给出关系和字段更新。keep 保留原任务与全部需求；replace 替换任务和需求。条件省略表示保留，null 表示删除；平台、版本等变化作用于全部需求。没有可用状态时，同一次调用初始化完整 frame。普通对话保留已确认状态，歧义不生成猜测状态。
 
-宿主负责确定性地应用更新，模型负责语义选择。这一职责划分参考 [SOM-DST](https://aclanthology.org/2020.acl-main.53/) 的选择性状态覆盖和 [JSON Merge Patch](https://www.rfc-editor.org/info/rfc7396/) 的保留、替换与删除约定。结构合法并不代表任务或条件理解正确。
+宿主应用更新，模型负责语义选择，参考 [SOM-DST](https://aclanthology.org/2020.acl-main.53/) 的选择性覆盖和 [JSON Merge Patch](https://www.rfc-editor.org/info/rfc7396/) 的更新约定。
 
 独立话题清空旧状态；普通追问从最近状态更新；明确回访从解释器选定的旧状态继续。QueryContext 随 attempt 固定，回答成功后与实际 QA 一起提交。恢复与幂等重放使用已保存结果，不重复解释。
 
@@ -16,7 +16,7 @@
 
 解释器读取最新状态、近期完整实际 QA，并按字段最近变化位置，在既有预算内补入较早用户原话及其前一条助手消息。普通更新只提供一份最新状态；初始化和明确回访读取所需旧状态。预算按完整历史项和原文单元分配，生成仍使用完整实际 QA。
 
-语义选择权集中在解释/检索层。`relation=revisit` 的 `history_turns` 明确指定恢复范围；证据层恢复这些轮次所关联的确切证据，不再凭同名参数、文档标题或主题词再次猜测对象。多个已选轮次保留各自证据，不暗中改选最近一轮。
+`relation=revisit` 的 `history_turns` 指定恢复范围；证据层只解析这些轮次关联的确切证据及其依赖。
 
 未配置解释器时，仅使用当前问题或最近用户问题的检索投影。解释失败时也使用该检索回退；窗口内有完整已提交解释时，后接最新原句。回退不制造 TaskFrame，也不自行授予历史来源引用资格。
 
@@ -36,14 +36,4 @@ APPEND 与 REBUILD 共用必需集合、任务和引用范围。APPEND 可以保
 
 可选 `dialogue_rrf` 让原始对话问题和派生解释共同召回、同池评分，再按视图家族融合；不增加解释调用。可选 `evidence_selection: semantic` 在一次解释中同时更新任务并选择完整原文来源。它们复用相同提交、引用和 A/R 协议，选择成本计入完整响应。
 
-## 服务与成本边界
-
-解释 HTTP 等待不持有 encoder/reranker 锁；模型 forward 沿用共享资源锁。关闭前等待已启动的检索 worker 结束，避免取消后访问已释放模型。输入超预算时不静默裁剪原始资料；传输或引擎结果未完成时不提交。达到输出上限的正常终态会提交实际返回内容并标记`truncated`，后续P3历史沿用该实际回答；它不计入非截断完成轮，不能视为回答已经完整。
-
-派生状态用于任务理解，实际回答事实由当前证据支持。来源可引用不等于能够支持声明，定位到用户原话也不等于该条件已经成立。辅助阶段是否值得保留，应同时看实际回答、完整响应和资源成本；已有取舍和实验依据均链接到[统一评价](../data_and_evaluation.md)。
-
-## 可选枚举主题入口
-
-`source_topic` 与 `assistant_topic_unverified` 使用 `TopicResolver`、同一 completion transport 和 `current_topic_rrf`。前者限定有来源支持的名称，后者允许助手中未验证名称，配置及结果始终标明此差别。`selector_schema_mode` 控制静态或实际目录枚举约束。它们不是默认多轮状态协议。
-
-在线主题目录来自历史已提交的 required keys；离线审查来自原 audit 的 visible material，两者范围不能直接混同。离线工具只读实际历史和来源，开发标签只用于调用后的评价。具体配置与原始实验入口见[检索指南](../guides/hybrid_retrieval.md)及[统一评价](../data_and_evaluation.md)。
+服务提交、恢复及生命周期见[架构](../architecture.md)；可选主题入口见[检索指南](../guides/hybrid_retrieval.md)。机制效果按任务理解、来源适用性、回答完整性及完整成本共同评价，记录统一维护在[数据与评价](../data_and_evaluation.md)。

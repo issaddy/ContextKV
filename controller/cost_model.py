@@ -74,7 +74,7 @@ class CostModel:
     def __init__(self, prefill_points: Iterable[LookupPoint] = (),
                  decode_points: Iterable[DecodePoint] = (), *,
                  default_output_tokens: int = 128, p90_output_tokens: int = 256,
-                 max_new_tokens: int = 512, paired_error_ms: float = 0.0,
+                 max_new_tokens: int = 512,
                  allow_mock_calibration: bool = False,
                  max_normalized_distance: float = .5,
                  include_host_cost: bool = True, include_decode_cost: bool = True,
@@ -87,7 +87,6 @@ class CostModel:
         self.default_output_tokens = default_output_tokens
         self.p90_output_tokens = p90_output_tokens
         self.max_new_tokens = max_new_tokens
-        self.paired_error_ms = paired_error_ms
         self.allow_mock_calibration = allow_mock_calibration
         self.max_normalized_distance = max_normalized_distance
         self.include_host_cost = include_host_cost
@@ -132,7 +131,6 @@ class CostModel:
                 sum(c["mean_ms"]*c["requests"] for c in cells)/sum(c["requests"] for c in cells), 0.)
                 for key, cells in groups.items())
         self._bias_ms = 0.0
-        self._past_residuals: list[float] = []
         self.sampling_scope_compatible = True
         self.sampling_scope_report = None
         self._sampling_prior_override = None
@@ -525,18 +523,9 @@ class CostModel:
             waiting_reason=wait.reason if wait else None,
             timing_components_supported=components_supported if self.stage_model else None)
 
-    def paired_error(self, append: CostEstimate, rebuild: CostEstimate) -> float:
-        # Online residuals are from completed prior requests. Without paired dev
-        # residuals use a conservative sum, not a confidence claim.
-        measured = (statistics.pstdev(self._past_residuals)
-                    if len(self._past_residuals) > 1 else 0.0)
-        return max(self.paired_error_ms, measured, append.error_ms+rebuild.error_ms)
-
     def observe(self, predicted: CostEstimate, actual_elapsed_ms: float) -> None:
         if not math.isfinite(actual_elapsed_ms) or actual_elapsed_ms < 0:
             raise ValueError("actual latency must be a finite nonnegative measurement")
-        self._past_residuals.append(actual_elapsed_ms-predicted.cost)
-        self._past_residuals = self._past_residuals[-128:]
         self._bias_ms += self.residual_alpha * (actual_elapsed_ms-predicted.cost)
 
     def observe_output(self, output_tokens: int) -> None:
@@ -630,7 +619,7 @@ class CostModel:
     def save(self, path: str | Path, *, metadata: Mapping | None = None) -> None:
         """Freeze fitted points and priors. Runtime residual adaptation is not persisted."""
         settings = {name: getattr(self, name) for name in (
-            "default_output_tokens", "p90_output_tokens", "max_new_tokens", "paired_error_ms",
+            "default_output_tokens", "p90_output_tokens", "max_new_tokens",
             "max_normalized_distance", "include_host_cost", "include_decode_cost", "include_control_cost", "residual_alpha", "prefill_estimator", "uncertainty_mode", "admission_estimator")}
         payload = {"version": 1, "settings": settings, "prefill_points": [asdict(p) for p in self.prefill_points],
                    "decode_points": [asdict(p) for p in self.decode_points],

@@ -52,7 +52,7 @@ def edit_scores(spec, method, edit):
 
 def freeze_protocol(spec, tmp_path):
     frozen = tmp_path / "protocol.json"
-    frozen.write_text(json.dumps({"scope": spec["scope"], "reference": "reference", "epsilon": .01,
+    frozen.write_text(json.dumps({"scope": spec["scope"], "reference": spec["reference"], "epsilon": .01,
                                  "dimensions": spec.get("dimensions", list(DIMENSIONS)), "task_scope": spec.get("task_scope", {}),
                                  "split_manifest": spec["split_manifest"], "cohort": ["s0", "s1", "s2"],
                                  "methods": {name: {k: v for k, v in value.items() if k != "scores"} for name, value in spec["methods"].items()},

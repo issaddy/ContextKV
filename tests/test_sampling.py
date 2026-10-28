@@ -185,22 +185,6 @@ def test_serving_and_pair_replay_apply_same_recipe_and_length_boundary(tmp_path)
     controller.store.close()
 
 
-def test_real_controller_submitted_event_records_budget_and_recipe(tmp_path):
-    config = RunConfig(state_dir=str(tmp_path), sampling=RECIPE)
-    controller = create_controller(config)
-    async def scenario():
-        try:
-            await controller.serve_turn("s", "question", ())
-        finally:
-            await controller.aclose()
-            controller.store.close()
-    asyncio.run(scenario())
-    rows = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
-    submitted = [row for row in rows if row["event"] == "request_submitted"]
-    assert len(submitted) == 1
-    assert submitted[0]["sampling_params"] == {**RECIPE.record(), "max_new_tokens": config.context.max_new_tokens}
-
-
 def test_profile_merge_refuses_different_recipe_and_binds_length_report_separately(tmp_path):
     from test_calibration_provenance import manifest
     paths = [tmp_path / "p1.json", tmp_path / "p2.json"]
@@ -332,17 +316,19 @@ def test_owned_cost_preflight_rejects_cross_recipe_before_generation(tmp_path):
 ])
 def test_offline_rescore_cannot_relabel_outcomes_with_new_recipe(tmp_path, monkeypatch, source_config, requested):
     from argparse import Namespace
+    from controller.generation import GenerationProtocol
     import profiling.decision_pairs as module
     frozen = {"cases_sha256": "same-frozen-inputs"}
     monkeypatch.setattr(module, "load_frozen", lambda _: ([], frozen))
     source, config, output = tmp_path / "pairs.jsonl", tmp_path / "config.json", tmp_path / "out.jsonl"
     source.with_suffix(".manifest.json").write_text(json.dumps({
-        "status": "complete", "split": "dev", "frozen": frozen, "config": source_config}))
+        "status": "complete", "split": "dev", "frozen": frozen,
+        "generation_protocol": GenerationProtocol.from_config(source_config).record() if source_config is not None else None}))
     config.write_text(json.dumps({"sampling": requested.record() if requested else None}))
     def forbidden(*args, **kwargs):
         pytest.fail("recipe mismatch must stop before model construction or any generation")
     monkeypatch.setattr(module, "_model_and_knobs", forbidden)
-    with pytest.raises(ValueError, match="cannot change the measured sampling recipe"):
+    with pytest.raises(ValueError, match="cannot change the measured generation protocol"):
         module.rescore_file(Namespace(cases="unused", input=str(source), output=str(output),
                                      config=str(config), cost_artifact="unused"))
     assert not output.exists()
@@ -398,7 +384,7 @@ def test_length_rescore_rejects_legacy_unconstrained_measurements_before_model_l
     def forbidden(*args, **kwargs):
         pytest.fail("unbound measured protocol must stop before loading the current length model")
     monkeypatch.setattr(module, "_model_and_knobs", forbidden)
-    with pytest.raises(ValueError, match="output-length rescoring needs pairs bound"):
+    with pytest.raises(ValueError, match="cannot change the measured generation protocol"):
         module.rescore_file(Namespace(cases="unused", input=str(source), output=str(output),
                                      config=str(config), cost_artifact="unused"))
     assert not output.exists()

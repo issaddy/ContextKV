@@ -461,28 +461,9 @@ def rescore_file(args):
     if any(path.exists() for path in targets):
         raise FileExistsError("rescored output already exists; choose a new output")
     config = load_config(args.config)
-    from controller.sampling import SamplingRecipe
-    source_config = source_manifest.get("config")
-    if source_config is None:
-        source_sampling = None
-        sampling_binding = "unknown_legacy_standard_greedy_compatibility"
-    else:
-        value = source_config.get("sampling")
-        source_sampling = SamplingRecipe(**value) if value is not None else SamplingRecipe()
-        sampling_binding = "source_run_configuration"
-    requested = config.sampling or SamplingRecipe()
-    if (source_sampling is None and requested != SamplingRecipe()
-            or source_sampling is not None and source_sampling != requested):
-        raise ValueError("offline rescoring cannot change the measured sampling recipe")
     protocol = GenerationProtocol.from_config(config)
-    if (source_config is not None and
-            GenerationProtocol.from_config(source_config).system_prompt != protocol.system_prompt):
-        raise ValueError("offline rescoring cannot change the measured system prompt")
-    source_protocol = source_manifest.get("generation_protocol")
-    if source_protocol is not None and source_protocol != protocol.record():
+    if source_manifest.get("generation_protocol") != protocol.record():
         raise ValueError("offline rescoring cannot change the measured generation protocol")
-    if config.cost_model.output_length_artifact and source_protocol is None:
-        raise ValueError("output-length rescoring needs pairs bound to the serving generation protocol")
     validate_candidate_protocol(cases, protocol)
     artifact = args.cost_artifact or config.cost_model.artifact
     if not artifact:
@@ -498,8 +479,7 @@ def rescore_file(args):
         "source_measurement_manifest": source_manifest,
         "frozen": frozen, "cases_path": str(Path(args.cases).resolve()),
         "config": asdict(config), "config_scope": "cost ablations and planner; candidates/budgets come from frozen cases",
-        "sampling_binding": sampling_binding,
-        "generation_protocol": source_protocol,
+        "generation_protocol": protocol.record(),
         "cost_artifact": str(Path(artifact).resolve()), "cost_artifact_sha256": sha256(Path(artifact).read_bytes()).hexdigest(),
         "output_length_artifact": config.cost_model.output_length_artifact,
         "output_length_artifact_sha256": sha256(Path(config.cost_model.output_length_artifact).read_bytes()).hexdigest()

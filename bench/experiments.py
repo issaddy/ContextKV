@@ -336,11 +336,9 @@ def quality_evidence_files(spec):
     mapping = spec.get("path_map", {})
     value = json.loads(Path(remap(path, mapping)).read_text())
     files = {str(path)}
-    configs = [value]
-    if value.get("schema_version") == 2:
-        paths = {block["quality_config"] for block in value["blocks"]}
-        files.update(paths)
-        configs = [json.loads(Path(remap(p, mapping)).read_text()) for p in paths]
+    paths = {block["quality_config"] for block in value["blocks"]}
+    files.update(paths)
+    configs = [json.loads(Path(remap(p, mapping)).read_text()) for p in paths]
     for config in configs:
         files.add(config.get("split_manifest"))
         files.add(config.get("frozen_protocol"))
@@ -361,7 +359,7 @@ def _quality_tasks(spec):
 
 
 def _evaluate_bound_quality(spec, by_name, value, reference, expected_tasks):
-    """Shared file/cohort/evaluator contract for legacy methods and block job IDs."""
+    """Bind actual job outputs, cohort and evaluator for one workload block."""
     from bench.quality_acceptance import evaluate
     original_value = value
     mapping = spec.get("path_map", {})
@@ -460,7 +458,7 @@ def _quality_gate_by_block(spec, results, evidence, expected_tasks):
         else:
             passed, report, block_complete, rejected = _evaluate_bound_quality(
                 spec, jobs, value, references[0], expected_tasks)
-            protocol = json.loads(Path(value["frozen_protocol"]).read_text())
+            protocol = json.loads(Path(remap(value["frozen_protocol"], spec.get("path_map", {}))).read_text())
             identity = {k: protocol.get(k) for k in ("evaluator", "dimensions", "epsilon")}
             if evaluator is not None and identity != evaluator:
                 raise ValueError("quality blocks must share the complete evaluator protocol, dimensions and epsilon")
@@ -488,29 +486,16 @@ def _quality_gate_by_block(spec, results, evidence, expected_tasks):
 
 
 def quality_gate_from_evidence(spec, results):
-    """Keep the legacy single-cell format; v2 explicitly binds all workload blocks."""
+    """All matrices use the same job-bound workload blocks."""
     tuning = spec["tuning"]
     if "quality_eligible" in tuning:
         raise ValueError("require_quality_evidence rejects a supplied boolean quality gate")
     if not tuning.get("quality_evidence"):
-        raise ValueError("require_quality_evidence needs the saved quality_acceptance config; no B6 is frozen")
+        raise ValueError("require_quality_evidence needs the saved quality blocks; no B6 is frozen")
     value = json.loads(Path(remap(tuning["quality_evidence"], spec.get("path_map", {}))).read_text())
-    expected_tasks = _quality_tasks(spec)
-    if value.get("schema_version") == 2:
-        return _quality_gate_by_block(spec, results, value, expected_tasks)
-    by_method = {row["method"]: row for row in results}
-    if len(by_method) != len(results) or any(row["candidate_index"] != 0 for row in results):
-        raise ValueError("legacy quality evidence supports one declared job per method; use schema_version=2 blocks")
-    passed, report, complete, unaccepted = _evaluate_bound_quality(
-        spec, by_method, value, tuning["quality_constraints"]["reference"], expected_tasks)
-    gate = {name: {"0": passed[name]} for name in by_method}
-    eligible = [m["id"] for m in spec["methods"] if m.get("b6_eligible") and gate[m["id"]]["0"]]
-    report["matrix_evidence_gate"] = {"all_required_evidence_complete": complete,
-        "unaccepted_evaluator_methods": unaccepted,
-        "eligible_b6_candidates_on_evaluator": eligible, "ready_to_freeze": complete and bool(eligible)}
-    if not complete or not eligible:
-        raise QualityNotReady(report)
-    return gate, report
+    if value.get("schema_version") != 2:
+        raise ValueError("quality evidence requires schema_version=2 workload blocks")
+    return _quality_gate_by_block(spec, results, value, _quality_tasks(spec))
 
 
 def select_development(spec, results):

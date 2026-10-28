@@ -394,7 +394,6 @@ class Plan:
     predicted: tuple[CostEstimate, ...] = ()
     quote_seq: int | None = None
     reason: str = ""
-    switch_margin_ms: float = 0.0
     predicted_saving_ms: float = 0.0
 
     def __post_init__(self) -> None:

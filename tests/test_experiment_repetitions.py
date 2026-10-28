@@ -39,7 +39,7 @@ def setup_blocks(tmp_path, *, reference_candidates=False, protocols=('P2',), con
     for number, job in enumerate(experiments.matrix_jobs(spec)):
         path = tmp_path/job['job_id']
         path.mkdir()
-        source = quality['methods'][job['method']]
+        source = quality['methods'][f"{job['method']}-c0-P2-n1-s42"]
         payload = read(source['run'])
         payload['experiment_protocol'] = {'repetition': job['repetition']}
         audits = [json.loads(line) for line in Path(source['audit']).read_text().splitlines()]
@@ -71,9 +71,6 @@ def setup_blocks(tmp_path, *, reference_candidates=False, protocols=('P2',), con
         value = {**quality, 'methods': methods,
                  'reference': next(name for name in methods if name.startswith('reference-'))}
         freeze_protocol(value, path)
-        protocol = read(value['frozen_protocol'])
-        protocol['reference'] = value['reference']
-        save(value['frozen_protocol'], protocol)
         save(path/'quality.json', value)
         blocks.append({**dict(zip(experiments.BLOCK_FIELDS, key)), 'quality_config': str(path/'quality.json')})
     evidence = {'schema_version': 2, 'blocks': blocks}

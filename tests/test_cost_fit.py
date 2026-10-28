@@ -84,7 +84,6 @@ def test_fit_holds_out_whole_cells_and_ignores_control_as_validation_target():
     validation = metadata["validation"]
     assert validation["training_cells"] == 2 and validation["heldout_cells"] == 1
     assert validation["samples"] == 3
-    assert metadata["delta_abs_2x_control_p95_ms"] == 8
     with pytest.raises(ValueError, match="no first-token"):
         fit([row(phase="control")])
     with pytest.raises(ValueError, match="one timing scope"):

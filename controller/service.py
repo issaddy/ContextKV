@@ -21,7 +21,6 @@ from .planner import PlannerKnobs, choose_plan
 from .schema import (ClientTiming, CompletionReceipt, CostEstimate, EvidenceBlock, EvidenceKey,
                      EvidenceSpan, GenerationResult, NoFeasiblePlan, QueryContext, SessionSnapshot, TurnRecord)
 from .serialization import dumps
-from .sampling import SamplingRecipe, request_sampling
 from .generation import candidate_request
 from .session_store import (Attempt, IdempotencyConflict, PendingAttempt, SessionStore, StoreError)
 from .templates import ByteTemplate
@@ -78,7 +77,7 @@ class Controller:
                  policy: CandidatePolicy | None = None, knobs: PlannerKnobs | None = None,
                  cost_model: CostModel | None = None, events: EventLog | None = None,
                  shadow: bool = False, epoch_retirement: bool = True,
-                 online_calibration: bool = False, sampling: SamplingRecipe | None = None):
+                 online_calibration: bool = False):
         self.store, self.engine = store, engine
         self.template = template or ByteTemplate()
         self.policy = policy or CandidatePolicy()
@@ -89,7 +88,6 @@ class Controller:
         self.shadow = shadow
         self.epoch_retirement = epoch_retirement
         self.online_calibration = online_calibration
-        self._sampling_params = request_sampling(sampling)
         self._active_generations = 0
         self._postplan_control_ms = {action: deque(maxlen=32) for action in ("APPEND", "REBUILD")}
         self._calibration_identity = None
@@ -268,10 +266,6 @@ class Controller:
                     evidence = tuple(selection.evidence)
                     retrieval_priority = tuple(selection.retrieval_priority)
                     query_context = selection.query_context
-                    self.events.emit("retrieval_finished", business_session_id=session_id,
-                                     attempt_id=attempt.attempt_id, retrieval_ms=retrieval_ms,
-                                     retrieval_priority=retrieval_priority,
-                                     selected_evidence_keys=tuple(b.key for b in evidence))
                 info = await self.engine.info()
                 if info.fingerprint != self.template.fingerprint:
                     raise EngineError("FINGERPRINT_MISMATCH")
@@ -282,21 +276,11 @@ class Controller:
                                                retrieval_priority=retrieval_priority,
                                                query_context=query_context,
                                                measure_evidence_redundancy=measure_redundancy)
-                for candidate in candidates:
-                    self.events.emit("candidate_built", business_session_id=session_id, attempt_id=attempt.attempt_id,
-                                     candidate_id=candidate.candidate_id, action=candidate.action,
-                                     input_hash=candidate.input_hash, input_tokens=len(candidate.input_ids),
-                                     theoretical_lcp=candidate.theoretical_lcp, feasible=candidate.feasible,
-                                     evidence_spans=candidate.evidence_spans, build_ms=candidate.build_ms,
-                                     evidence_body_tokens=candidate.evidence_body_tokens,
-                                     nonrequired_evidence_body_tokens=candidate.nonrequired_evidence_body_tokens)
                 valid = tuple(c for c in candidates if c.feasible)
                 if not valid:
                     raise ContextOverflow("shared_context_policy_overflow: required evidence and full QA exceed budget")
                 needs_quote = self.knobs.strategy in {"cost", "warm_idle"} and len(valid) > 1
                 quotes = await self.engine.quote_batch(valid, self.template.fingerprint) if needs_quote else None
-                if quotes is not None:
-                    self.events.emit("quote_observed", business_session_id=session_id, attempt_id=attempt.attempt_id, quote=quotes)
                 if quotes is not None and quotes.engine_restart_id != info.engine_restart_id:
                     # At most one re-quote after a restart; native admission remains authoritative.
                     info = await self.engine.info()
@@ -337,13 +321,6 @@ class Controller:
                     plan = choose_plan(candidates, quotes, self.cost_model, planning_snap,
                                        replace(self.knobs, strategy=self.knobs.fallback_strategy),
                                        concurrency=pressure, control_ms=planning_control_ms)
-                self.events.emit("plan_selected", business_session_id=session_id, attempt_id=attempt.attempt_id,
-                                 action=plan.candidate.action, reason=plan.reason, predicted=plan.predicted,
-                                 switch_margin_ms=plan.switch_margin_ms, predicted_saving_ms=plan.predicted_saving_ms,
-                                 turns_since_rebuild=planning_snap.turns_since_rebuild,
-                                 execution_mode=plan.execution_mode, pressure_bucket=pressure,
-                                 observed_queued_requests=quotes.queued_requests if quotes else None,
-                                 prior_completed_length_samples=len(self.cost_model._observed_output_lengths))
                 append_failure = next((c.reason for c in candidates if c.action == "APPEND" and not c.feasible), None)
                 reason = ("reference_history_sync" if snap.history_sync_pending else
                           "recovery" if planning_snap.force_new_epoch_for_recovery else
@@ -366,11 +343,7 @@ class Controller:
                     attempt = self.store.save_attempt(planned)
                     epoch = snap.current_epoch
                 attempt = self.store.submit_attempt(attempt, epoch)
-                self.events.emit("epoch_prepared", business_session_id=session_id, attempt_id=attempt.attempt_id, epoch=epoch)
                 generation = candidate_request(plan.candidate, self.policy.max_new_tokens)
-                self.events.emit("request_submitted", business_session_id=session_id, attempt_id=attempt.attempt_id,
-                                 sampling_params={**self._sampling_params, "max_new_tokens": self.policy.max_new_tokens},
-                                 constrained_citation_ids=generation["citation_ids"])
                 submitted = time.monotonic()
                 self._active_generations += 1
                 try:
@@ -411,11 +384,6 @@ class Controller:
                 if (self.online_calibration and selected_estimate is not None and selected_estimate.calibrated
                         and result.server_elapsed_ms is not None and info.engine_kind == "sglang"):
                     self.cost_model.observe(selected_estimate, result.server_elapsed_ms + control_ms)
-                self.events.emit("generation_finished", business_session_id=session_id, attempt_id=attempt.attempt_id,
-                                 receipt=result.receipt, output_tokens=len(result.output_ids),
-                                 client_timing=timing, server_ttft_ms=result.server_ttft_ms,
-                                 decode_ms=result.decode_ms, control_ms=control_ms,
-                                 timing_source=result.timing_source)
                 self.events.emit("ledger_committed", business_session_id=session_id, attempt_id=attempt.attempt_id,
                                  ledger_version=snapshot.version, epoch=epoch.epoch_no)
             except Exception as error:

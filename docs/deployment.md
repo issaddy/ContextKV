@@ -48,9 +48,9 @@ python -m controller.cli --config configs/qwen3_8b_cost.yaml serve
 
 引擎或模型变更后，可运行 `python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml --report runs/qwen3-smoke.json`，通过真实生成检查协议。具体检查项见[引擎说明](../engine_patches/README.md)。
 
-## 清理版本的配置接口
+## 配置接口
 
-当前配置移除了`planner.min_stable_turns`与`ablation.hysteresis`；使用旧自定义YAML时删除这两项。`delta_abs/delta_rel/z`保留为成本差诊断参数，动作按预计完整成本选择。`fallback_strategy`仍用于成本模型未覆盖范围及显式shadow执行；缺报价直接报告接口错误。历史报告中的`hysteresis`仅在离线统计中读取。
+动作按预计完整成本选择。`fallback_strategy`用于成本模型未覆盖范围及显式shadow执行；缺报价直接报告接口错误。配置字段以`controller/config.py`及对应策略类为准，过时参数不保留兼容入口。
 
 自定义模板实现`render_many`，自定义引擎实现`aclose`。ByteTemplate、HuggingFaceTemplate、MockEngine和SGLangEngineClient已统一实现这些接口。显式启动原生资源监控需要安装`evaluation`依赖组；缺少依赖时在运行入口报错并关闭客户端。
 

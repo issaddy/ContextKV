@@ -320,7 +320,7 @@ def rescore_model(case, *, prefer="REBUILD"):
 def test_rescore_uses_only_frozen_history_and_quotes_and_keeps_all_measurements(tmp_path):
     case, row, info, _ = measured_pair(tmp_path)
     untouched = deepcopy(row)
-    knobs = PlannerKnobs(delta_rel=0, z=0)
+    knobs = PlannerKnobs()
     changed = deepcopy(row)
     for index, arm in enumerate(changed["observations"].values()):
         arm.update(server_elapsed_ms=99999-index, client_complete_ms=index, output_tokens=400-index)
@@ -374,6 +374,7 @@ def test_rescore_preserves_failed_rows_and_calibration_scope_mismatch(tmp_path):
 
 
 def test_rescore_cli_records_source_identity_without_constructing_engine(tmp_path, monkeypatch):
+    from controller.generation import GenerationProtocol
     import profiling.decision_pairs as module
     case, row, info, inputs = measured_pair(tmp_path)
     cases_path = tmp_path/"cases.jsonl"
@@ -382,7 +383,8 @@ def test_rescore_cli_records_source_identity_without_constructing_engine(tmp_pat
     pairs.write_text(dumps(row)+"\n")
     original = pairs.read_bytes()
     source_manifest = {"split": "dev", "status": "complete", "frozen": frozen,
-                       "engine": asdict(info), "config": asdict(RunConfig())}
+                       "engine": asdict(info), "config": asdict(RunConfig()),
+                       "generation_protocol": GenerationProtocol.from_config(RunConfig()).record()}
     pairs.with_suffix(".manifest.json").write_text(json.dumps(source_manifest))
     config = tmp_path/"config.yaml"
     config.write_text(json.dumps(asdict(RunConfig())))

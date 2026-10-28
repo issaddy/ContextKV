@@ -9,6 +9,9 @@ import pytest
 from bench import experiments
 from test_quality_acceptance import edit_scores, freeze_protocol, setup_methods
 
+CANDIDATE = 'candidate-c0-P2-n1-s42'
+REFERENCE = 'reference-c0-P2-n1-s42'
+
 
 def setup_joint(tmp_path):
     quality = setup_methods(tmp_path)
@@ -23,7 +26,6 @@ def setup_joint(tmp_path):
         for row in values:
             row['protocol'] = 'P2'
         audit.write_text(''.join(json.dumps(row)+'\n' for row in values))
-    freeze_protocol(quality, tmp_path)
     data = tmp_path/'input.jsonl'
     data.write_text(''.join(json.dumps({'conversation_id': sid, 'task_id': f'{sid}:1', 'turn': 1,
         'Collection': 'synthetic', 'input': [{'speaker': 'user', 'text': 'Question?'}],
@@ -44,9 +46,15 @@ def setup_joint(tmp_path):
     for result in results:
         result['artifact_sha256'] = {key: sha256(Path(result[key]).read_bytes()).hexdigest()
                                     for key in ('raw_output', 'audit_output')}
+    quality['methods'] = {row['job_id']: quality['methods'][row['method']] for row in results}
+    quality['reference'] = REFERENCE
+    freeze_protocol(quality, tmp_path)
     path = tmp_path/'quality.json'
     path.write_text(json.dumps(quality))
-    spec['tuning']['quality_evidence'] = str(path)
+    evidence = tmp_path/'evidence.json'
+    evidence.write_text(json.dumps({'schema_version': 2, 'blocks': [{
+        'protocol': 'P2', 'concurrency': 1, 'seed': 42, 'repetition': 1, 'quality_config': str(path)}]}))
+    spec['tuning']['quality_evidence'] = str(evidence)
     return spec, results, quality
 
 
@@ -59,7 +67,7 @@ def test_real_files_gate_and_final_provenance_bind_offline_sources(tmp_path):
     assert not frozen['quality_noninferiority_established']
     bound = frozen['provenance']['external_inputs']
     for path in (spec['tuning']['quality_evidence'], quality['frozen_protocol'],
-                 quality['methods']['candidate']['scores'], quality['methods']['reference']['audit']):
+                 quality['methods'][CANDIDATE]['scores'], quality['methods'][REFERENCE]['audit']):
         assert bound[path] == sha256(Path(path).read_bytes()).hexdigest()
 
 
@@ -79,14 +87,14 @@ def test_required_evidence_cannot_be_replaced_by_eligibility_flags_or_other_scop
         del spec['tuning']['quality_evidence']
     else:
         if kind == 'wrong_reference':
-            quality['reference'] = 'candidate'
+            quality['reference'] = CANDIDATE
         elif kind == 'no_protocol':
             quality.pop('frozen_protocol')
         elif kind == 'heldout':
             quality['scope'] = 'heldout'
         else:
-            del quality['methods']['candidate']
-        Path(spec['tuning']['quality_evidence']).write_text(json.dumps(quality))
+            del quality['methods'][CANDIDATE]
+        (tmp_path/'quality.json').write_text(json.dumps(quality))
     with pytest.raises(ValueError):
         experiments.select_development(spec, results)
 
@@ -94,18 +102,18 @@ def test_required_evidence_cannot_be_replaced_by_eligibility_flags_or_other_scop
 @pytest.mark.parametrize('field', ['run', 'audit'])
 def test_quality_must_reference_actual_generated_path_not_a_relabelled_copy(tmp_path, field):
     spec, results, quality = setup_joint(tmp_path)
-    original = Path(quality['methods']['candidate'][field])
+    original = Path(quality['methods'][CANDIDATE][field])
     copy = tmp_path/'copy.jsonl'
     copy.write_bytes(original.read_bytes())
-    quality['methods']['candidate'][field] = str(copy)
-    Path(spec['tuning']['quality_evidence']).write_text(json.dumps(quality))
+    quality['methods'][CANDIDATE][field] = str(copy)
+    (tmp_path/'quality.json').write_text(json.dumps(quality))
     with pytest.raises(ValueError, match='actual generated artifact'):
         experiments.select_development(spec, results)
 
 
 def test_changed_completed_generation_bytes_cannot_be_graded_as_original(tmp_path):
     spec, results, quality = setup_joint(tmp_path)
-    run = Path(quality['methods']['candidate']['run'])
+    run = Path(quality['methods'][CANDIDATE]['run'])
     run.write_text(run.read_text()+'\n')
     with pytest.raises(ValueError, match='bytes differ'):
         experiments.select_development(spec, results)
@@ -128,7 +136,7 @@ def test_archive_relocation_uses_explicit_mapping_and_original_content_hashes(tm
     moved = experiments.select_development(spec, results)
     assert moved["winners"] == frozen["winners"]
     experiments.validate_frozen_selection(frozen["provenance"], experiments.provenance(spec))
-    audit = archive / Path(quality["methods"]["candidate"]["audit"]).name
+    audit = archive / Path(quality["methods"][CANDIDATE]["audit"]).name
     audit.write_text(audit.read_text() + "\n")
     with pytest.raises(ValueError, match="bytes differ"):
         experiments.select_development(spec, results)
@@ -138,14 +146,14 @@ def test_archive_relocation_uses_explicit_mapping_and_original_content_hashes(tm
 def test_incomplete_or_unqualified_scores_produce_readiness_not_b6(tmp_path, kind):
     spec, results, quality = setup_joint(tmp_path)
     if kind == 'missing_dimension':
-        edit_scores(quality, 'candidate', lambda values: values[0]['scores'].update(citations=None))
+        edit_scores(quality, CANDIDATE, lambda values: values[0]['scores'].update(citations=None))
     elif kind == 'noninferiority_failed':
-        edit_scores(quality, 'candidate', lambda values: [r.update(scores={k: 0 for k in r['scores']}) for r in values])
+        edit_scores(quality, CANDIDATE, lambda values: [r.update(scores={k: 0 for k in r['scores']}) for r in values])
     else:
-        edit_scores(quality, 'candidate', lambda values: [r.update(reviewer_id='different-reviewer') for r in values])
+        edit_scores(quality, CANDIDATE, lambda values: [r.update(reviewer_id='different-reviewer') for r in values])
     with pytest.raises(experiments.QualityNotReady) as error:
         experiments.select_development(spec, results)
-    assert error.value.report['comparisons']['candidate']['dev_quality_eligible'] is False
+    assert error.value.report['blocks'][0]['report']['comparisons'][CANDIDATE]['dev_quality_eligible'] is False
 
 
 def test_related_family_scores_remain_diagnostic_even_if_relative_scores_pass(tmp_path):
@@ -160,31 +168,31 @@ def test_related_family_scores_remain_diagnostic_even_if_relative_scores_pass(tm
     protocol['methods'] = {name: {k: v for k, v in value.items() if k != 'scores'} for name, value in quality['methods'].items()}
     protocol['evaluator'] = {'kind': 'offline_judge', 'judge': judge, 'reference_targets_supplied': False}
     Path(quality['frozen_protocol']).write_text(json.dumps(protocol))
-    Path(spec['tuning']['quality_evidence']).write_text(json.dumps(quality))
+    (tmp_path/'quality.json').write_text(json.dumps(quality))
     with pytest.raises(experiments.QualityNotReady) as error:
         experiments.select_development(spec, results)
     report = error.value.report
-    assert report['comparisons']['candidate']['all_dimensions_noninferior_on_evaluator']
-    assert report['matrix_evidence_gate']['unaccepted_evaluator_methods'] == ['candidate', 'reference']
+    assert report['blocks'][0]['report']['comparisons'][CANDIDATE]['all_dimensions_noninferior_on_evaluator']
+    assert report['matrix_evidence_gate']['unaccepted_evaluator_jobs'] == [CANDIDATE, REFERENCE]
     assert not report['matrix_evidence_gate']['ready_to_freeze']
 
 
 def test_cli_saves_incomplete_readiness_without_creating_frozen_file(tmp_path):
     import yaml
     spec, results, quality = setup_joint(tmp_path)
-    edit_scores(quality, 'candidate', lambda values: values[0]['scores'].update(citations=None))
+    edit_scores(quality, CANDIDATE, lambda values: values[0]['scores'].update(citations=None))
     config, recorded, output = tmp_path/'matrix.yaml', tmp_path/'results.jsonl', tmp_path/'new/frozen.json'
     config.write_text(yaml.safe_dump(spec))
     recorded.write_text(''.join(json.dumps(r)+'\n' for r in results))
     with pytest.raises(SystemExit, match='no B6 freeze'):
         experiments.main(['freeze', '--config', str(config), '--results', str(recorded), '--output', str(output)])
     assert not output.exists()
-    assert json.loads(output.with_suffix('.readiness.json').read_text())['comparisons']['candidate']['dev_quality_eligible'] is False
+    assert json.loads(output.with_suffix('.readiness.json').read_text())['blocks'][0]['report']['comparisons'][CANDIDATE]['dev_quality_eligible'] is False
 
 
 def test_complete_expected_cohort_and_job_protocol_are_required(tmp_path):
     spec, results, quality = setup_joint(tmp_path)
-    path = Path(quality['methods']['candidate']['run'])
+    path = Path(quality['methods'][CANDIDATE]['run'])
     payload = json.loads(path.read_text())
     payload['report']['turns'].pop()
     path.write_text(json.dumps(payload))
@@ -208,14 +216,16 @@ def test_completed_sidecar_and_owned_server_record_remain_file_bound(tmp_path, b
     row = results[0]
     if binding == 'run_manifest':
         row['run_manifest'] = str(sidecar)
-        quality['methods']['candidate']['manifest'] = str(sidecar)
+        quality['methods'][CANDIDATE]['manifest'] = str(sidecar)
     else:
+        spec['server_profiles'] = {'fixture_profile': {}}
+        spec['methods'][0]['server_profile'] = 'fixture_profile'
         row['server_profile'] = 'fixture_profile'
         row['server_execution'] = {'record': str(sidecar)}
-        quality['methods']['candidate']['server_record'] = str(sidecar)
+        quality['methods'][CANDIDATE]['server_record'] = str(sidecar)
     row['artifact_sha256'][binding] = sha256(sidecar.read_bytes()).hexdigest()
     freeze_protocol(quality, tmp_path)
-    Path(spec['tuning']['quality_evidence']).write_text(json.dumps(quality))
+    (tmp_path/'quality.json').write_text(json.dumps(quality))
     assert experiments.quality_gate_from_evidence(spec, results)[0]['candidate']['0']
     sidecar.write_text('{"changed":true}')
     with pytest.raises(ValueError, match='bytes differ|server record is not bound'):
