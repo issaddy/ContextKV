@@ -2,16 +2,11 @@
 
 `profiling.sglang_probe → profiling.fit → profiling.stage_fit → CostModel`负责采集、拟合和装配。H200/Qwen3-8B的成本文件为`configs/calibration/qwen3-8b-h200.json`；`configs/qwen3_8b_cost.yaml`使用`admission_estimator: native_budget`，已在容器完成装配与运行身份/采样绑定检查。完整系统结果见[数据与评价](../data_and_evaluation.md)。
 
-## 当前实测范围
+## 统一装配
 
-- 固定 SGLang、Qwen3-8B、BF16、GPU 16384 槽、实际 Host 54272 槽、page 64、FA3、chunk 8192、FCFS；HiCache 为 layer_first/kernel/write_through、TMA 关闭，`sample_pool=true`。
-- 20 个case，覆盖冷/GPU/Host/mixed前缀及并发1/2；60个正式请求、30个预热请求、84个前缀物化调用。并发mixed在执行前检查页对齐和总工作集。
-- 采集 run ID 为 `452258dcb15a42bdbcd333878dd141fc`，共 256 条 measurement；拟合得到 20 个 forward 点和 14 个 decode 区间。原始 `profile.jsonl`、`profile.telemetry.jsonl`、`profile.manifest.json` 和 `runtime.json` 在 `runs/mainline-delivery/`。发行包中的 artifact 保留这些来源绑定，字节与原测量产物相同。
-- 测点的concurrency是准备时声明的请求批次大小，包含其中等待容量的成员。在线特征与标定使用同一口径。
-- artifact 保留 159 个历史开发输出长度（22 会话，均值 580/P90 1024），用于追溯旧协议。当前装配还检查 `output_prior_system_prompt`，及分布自己的 `system_prompt`；旧 artifact 未绑定当前回答协议，故不沿用该长度分布。耗时点继续复用，长度使用配置默认 128/256 和已完成会话历史，未回填待评估答案或质量标签。
-- whole-cell OOF 的 forward MAE 为 52.54 ms；留出支持域内 38/60 请求的 MAE 为 47.54 ms，经验 P99 绝对残差约 202.35 ms。这些统计用于描述插值误差。
+`controller.cost_config.assemble_cost_model` 接收配置和已读取的 artifact/measurement，不创建引擎、数据库或目录。服务、成对采集/重放和长度拟合均使用它：artifact 提供已拟合设置，显式成本开关和估计器覆盖对应设置，最后统一解析采样、system prompt 与有效长度先验。文件读取由 `load_cost_model` 完成；调用方继续核对模型、缓存和数据身份。
 
-测点根据已有候选的提交前输入与前缀形状选择。原始case、选择记录和运行命令保存在同目录；本地公开副本位于`runs/mainline-delivery/remote/mainline-delivery/`。
+成本 artifact 的采集规模、拟合误差、历史长度分布和原始文件入口集中见[阶段成本标定记录](../data_and_evaluation.md#阶段成本标定记录)。耗时测点与输出长度先验分别检查适用范围，不因可复用时间测点而沿用不匹配的回答长度分布。
 
 ## 阶段边界与决策含义
 

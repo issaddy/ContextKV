@@ -36,7 +36,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     # Retain explicit source references even if a resolver expands their names.
     evidence_query = intent_query if query_context is None else (
         intent_query + " " + " ".join(re.findall(r"\bE_[a-zA-Z0-9]+\b", query)))
-    revisit_turns = (None if query_context is None else
+    revisit_turns = (() if query_context is None else
                      query_context.history_turns if query_context.relation == "revisit" else ())
     required, resolution = resolve_required_evidence_with_reasons(
         evidence_query, (block.key for block in retrieved), archive, snapshot, policy,

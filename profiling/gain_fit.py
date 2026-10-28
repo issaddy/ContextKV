@@ -28,7 +28,6 @@ from profiling import length_fit
 FEATURE_NAMES = ("prefill_gain_ms", "decode_gain_ms", "input_delta_tokens")
 ALPHAS = (.1, 1., 10., 100.)
 QUANTILES = (0., .5, .8, .9)
-GATES = ("configured", "no_margin")
 
 
 class SavedLengthPrior:
@@ -117,7 +116,7 @@ class NestedFeatures:
     def __init__(self, cases, lengths, pairs, model, knobs, validation=None):
         self.cases, self.lengths, self.pairs = cases, lengths, pairs
         self.model, self.knobs = model, knobs
-        self.priors = (model.default_output_tokens, model.p90_output_tokens)
+        self.priors = model.effective_output_prior
         self.sessions = frozenset(c.conversation_id for c in cases)
         self.saved = ({family: OOFLengthPrior(validation, family, cases) for family in FAMILIES}
                       if validation is not None else None)
@@ -228,18 +227,19 @@ def one_sided_threshold(rows, quantile):
             "confidence_guarantee": False}
 
 
-def decide(row, gain_ms, threshold_ms=0., gate="configured"):
-    if gate not in GATES:
-        raise ValueError("unknown matched gate ablation")
-    margin = 0. if gate == "no_margin" else (row["margin_ms"] or 0.)
-    if row["eligible"]:
-        action = "REBUILD" if gain_ms > margin+threshold_ms else "APPEND"
-        reason = "gain_saving" if action == "REBUILD" else "gain_gate"
+def decide(row, gain_ms, threshold_ms=0.):
+    # The serving margin is diagnostic. An empirical residual threshold is a
+    # separate candidate estimator; zero adjusted gain retains the native tie.
+    adjusted = gain_ms - threshold_ms
+    if row["eligible"] and adjusted != 0:
+        action = "REBUILD" if adjusted > 0 else "APPEND"
+        reason = "estimated_gain"
     else:
         action, reason = row["baseline_action"], row["baseline_reason"]
+
     actual = row["actual_gain_ms"]
     return {**row, "predicted_gain_ms": gain_ms, "one_sided_threshold_ms": threshold_ms,
-        "effective_margin_ms": margin+threshold_ms, "gate": gate, "selected_action": action, "reason": reason,
+        "decision_threshold_ms": threshold_ms, "selected_action": action, "reason": reason,
         "regret_ms": max(0., actual if action == "APPEND" else -actual),
         "false_rebuild_harm_ms": max(0., -actual) if action == "REBUILD" else 0.,
         "missed_rebuild_gain_ms": max(0., actual) if action == "APPEND" else 0.}
@@ -294,13 +294,12 @@ def fit_outer(features, family, heldout, *, alphas=ALPHAS, quantiles=QUANTILES):
     models = {kind: fit_gain(final_train, chosen["alpha"]) for kind, chosen in choices.items()}
     records = {}
     for kind in ("baseline", "ridge", "one_sided"):
-        for gate in GATES:
-            records[f"{family}-{kind}-{gate}"] = [decide(row,
-                row["baseline_gain_ms"] if kind == "baseline" else predict_gain(row, models[kind]),
-                0. if kind == "baseline" else choices[kind]["threshold_ms"], gate) for row in testing]
+        records[f"{family}-{kind}"] = [decide(row,
+            row["baseline_gain_ms"] if kind == "baseline" else predict_gain(row, models[kind]),
+            0. if kind == "baseline" else choices[kind]["threshold_ms"]) for row in testing]
     return records, {"family": family, "heldout_session": heldout,
         "training_sessions": sorted(training_sessions), "inner_folds": audits,
-        "selection_objective": "equal-session observed regret with original margin/stability; training inner validation only",
+        "selection_objective": "equal-session observed regret with serving cost-sign selection and native zero-gain tie; training inner validation only",
         "search": search, "chosen": choices, "models": models}
 
 
@@ -327,9 +326,9 @@ def fit_exploration(features, *, families=FAMILIES, alphas=ALPHAS, quantiles=QUA
         "new_engine_requests": 0, "quality_evaluated": False, "online_policy_changed": False,
         "feature_names": list(FEATURE_NAMES), "current_outcomes_are_features": False,
         "target": "server_elapsed_ms APPEND minus REBUILD; actual measurements used only as labels/evaluation",
-        "prior_scope": "shared 433/512-style frozen artifact prior reused; OOF isolates new residual fits, not original prior construction",
+        "prior_scope": "effective serving prior reused; OOF isolates new residual fits, not original prior construction",
         "one_sided_scope": "training inner OOF empirical optimism threshold; no conformal or population guarantee",
-        "gate_scope": "base-cost margin ablation reuses the same selected fits/thresholds",
+        "gate_scope": "serving cost-sign selection; optional empirical residual threshold is a separate estimator",
         "alpha_grid": list(alphas), "quantile_grid": list(quantiles), "folds": folds,
         "length_fit_audit": features.fit_audit, "variants": summaries, "fixed_actions": fixed}
 
@@ -371,8 +370,8 @@ def main(argv=None):
     for name, rows in records.items():
         (target/f"decision-{name}.jsonl").write_text("".join(json.dumps(row, allow_nan=False)+"\n" for row in rows))
     (target/"validation.json").write_text(json.dumps(report, indent=2, allow_nan=False)+"\n")
-    print(json.dumps({"output": str(target), "configured_regret_ms": {name: value["equal_session_mean_regret_ms"]
-        for name, value in report["variants"].items() if name.endswith("-configured")}}, indent=2))
+    print(json.dumps({"output": str(target), "regret_ms": {name: value["equal_session_mean_regret_ms"]
+        for name, value in report["variants"].items()}}, indent=2))
 
 
 if __name__ == "__main__":

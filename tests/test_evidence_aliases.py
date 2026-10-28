@@ -95,7 +95,7 @@ def test_equal_body_versions_still_require_explicit_comparison():
     snapshot = committed(build_candidates(snapshot, "First", (old,))[0], snapshot, "First", (old,))
     append, rebuild = build_candidates(snapshot, "Current version", (new,))
     assert not append.feasible and append.reason == "invalid_visible_version" and rebuild.feasible
-    for candidate in build_candidates(snapshot, "Compare api v1 and v2", (new,)):
+    for candidate in build_candidates(snapshot, "Compare api v1 and v2", (old, new)):
         verify(candidate, (old, new))
         assert candidate.required_blocks == {old.key, new.key} and candidate.feasible
         assert candidate.evidence_spans[-1].body_reference_id is not None

@@ -88,11 +88,11 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tuple(self.requests[-1][1]["input_ids"]),expected[0].input_ids)
         self.assertIn(prompt,bytes(result.input_ids).decode())
 
-    async def test_shared_explicit_revisit_policy_does_not_restore_a_conservative_only_block(self):
+    async def test_native_and_controller_do_not_guess_revisit_scope_without_interpretation(self):
         from adapters.mtrag import OnlineContext, OnlineMessage, OnlineTurn
         from bench.native_baseline import resolve_context_policy
         policy = resolve_context_policy(argparse.Namespace(context_policy=CandidatePolicy(
-            revisit_mode="explicit", revisit_history_turns=6, reference_prefix_length=6)))
+            reference_prefix_length=6)))
         baseline = NativeBaseline("B0", self.native, ByteTemplate(), policy=policy,
                                   corpus_snapshot_id="fixture-v1", test_mode=True)
         first = OnlineTurn("scope", "scope:1", 1, "fixture", "Tell me the timeout limit", (),
@@ -106,7 +106,7 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         shared = build_candidates(snapshot, second.query, evidence, policy, ByteTemplate())[0]
         old_default = build_candidates(snapshot, second.query, evidence, CandidatePolicy(), ByteTemplate())[0]
         assert {key.document_id for key in shared.required_blocks} == {"current"}
-        assert {key.document_id for key in old_default.required_blocks} == {"old", "current"}
+        assert {key.document_id for key in old_default.required_blocks} == {"current"}
         actual = await baseline(second)
         assert actual.input_ids == shared.input_ids
         assert {block.key.document_id for block in actual.audit_evidence} == {"current"}
@@ -328,7 +328,7 @@ def test_native_cli_prompt_file_preserves_body_in_policy_and_workload(tmp_path,m
     manifest = tmp_path/"engine.json"
     manifest.write_text("{}")
     context_config = tmp_path/"context.yaml"
-    context_config.write_text(f"model:\n  scope_path: {local_scope.path}\ncontext:\n  revisit_mode: explicit\n  revisit_history_turns: 6\n"
+    context_config.write_text(f"model:\n  scope_path: {local_scope.path}\ncontext:\n"
                               "  allow_version_comparison: true\n  reference_prefix_length: 6\n"
                               "  max_new_tokens: 123\n  table_relations: true\n"
                               "  table_annotation_style: focus_refs\n")
@@ -360,8 +360,7 @@ def test_native_cli_prompt_file_preserves_body_in_policy_and_workload(tmp_path,m
     assert payload["policy"]["system_prompt"] == raw.decode()
     assert payload["workload"]["system_prompt"] == raw.decode()
     assert payload["workload"]["system_prompt_file"] == str(prompt_file)
-    assert payload["policy"]["revisit_mode"] == "explicit"
-    assert payload["policy"]["revisit_history_turns"] == payload["policy"]["reference_prefix_length"] == 6
+    assert payload["policy"]["reference_prefix_length"] == 6
     assert payload["policy"]["allow_version_comparison"] is True
     assert payload["policy"]["max_new_tokens"] == 123
     assert payload["policy"]["table_relations"] is True

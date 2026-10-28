@@ -116,6 +116,26 @@ python -m bench.report SAVED-RUN.json --output runs/summary.json
 
 HTTP例中两个epoch退役ACK对应账本操作，close后GPU和Host各仍驻留2304 tokens，体现引用撤销与物理淘汰的区别。语义复核记录r2遗漏幂等限制及范围关联歧义，见`runs/http-qwen3-review/semantic.md`。这些记录用于工程接线检查，质量与性能比较使用下列对应任务和协议。
 
+### 机制收敛的工程验证：2026-10-28
+
+本轮全量回归 **1822 passed、16 skipped、17 subtests passed**，Ruff 和差异检查通过。验证覆盖统一短句状态更新、上游明确回访范围、线上/离线动作一致、纯成本装配、诊断故障隔离、正文引用重建，以及源码失效分类和归档路径映射。确定性解释响应只验证状态传递，不作为模型语义正确率。
+
+内容寻址复现使用10轮、每轮新增1006字证据。历史快照 archive 原本累计重复保存55330字正文，现为摘要引用；10份唯一证据正文共10060字存于 `text_blobs`。历史快照、重启后候选输入和冻结重放保持一致。整库仍保存提示、实际QA和token IDs，这不是整库压缩率或时延收益测量。
+
+旧短句捷径、词项回访规则、附属条件二次排序及 configured/no_margin 重复实验轴已删除。此前被短路的请求现在经过统一解释，同时省去该路径的额外条件评分；净时延、完整任务质量及服务能力尚需按当前协议真机比较。本轮没有新增GPU生成或性能实验。当前设计和配置入口见[实现状态](implementation_plan.md)。
+
+## 阶段成本标定记录
+
+- 固定 SGLang、Qwen3-8B、BF16、GPU 16384 槽、实际 Host 54272 槽、page 64、FA3、chunk 8192、FCFS；HiCache 为 layer_first/kernel/write_through、TMA 关闭，`sample_pool=true`。
+- 20 个case，覆盖冷/GPU/Host/mixed前缀及并发1/2；60个正式请求、30个预热请求、84个前缀物化调用。并发mixed在执行前检查页对齐和总工作集。
+- 采集 run ID 为 `452258dcb15a42bdbcd333878dd141fc`，共 256 条 measurement；拟合得到 20 个 forward 点和 14 个 decode 区间。原始 `profile.jsonl`、`profile.telemetry.jsonl`、`profile.manifest.json` 和 `runtime.json` 在 `runs/mainline-delivery/`。发行包中的 artifact 保留这些来源绑定，字节与原测量产物相同。
+- 测点的concurrency是准备时声明的请求批次大小，包含其中等待容量的成员。在线特征与标定使用同一口径。
+- artifact 保留 159 个历史开发输出长度（22 会话，均值 580/P90 1024），用于追溯旧协议。当前装配还检查 `output_prior_system_prompt`，及分布自己的 `system_prompt`；旧 artifact 未绑定当前回答协议，故不沿用该长度分布。耗时点继续复用，长度使用配置默认 128/256 和已完成会话历史，未回填待评估答案或质量标签。
+- whole-cell OOF 的 forward MAE 为 52.54 ms；留出支持域内 38/60 请求的 MAE 为 47.54 ms，经验 P99 绝对残差约 202.35 ms。这些统计用于描述插值误差。
+
+测点根据已有候选的提交前输入与前缀形状选择。原始case、选择记录和运行命令保存在同目录；本地公开副本位于`runs/mainline-delivery/remote/mainline-delivery/`。
+
+
 ## 已有对照结果
 
 以下结果分别对应各节注明的运行版本、配置与协议；最新机制的验证状态见[实现状态](implementation_plan.md)。

@@ -654,7 +654,10 @@ class CostModel:
 
     @classmethod
     def load(cls, path: str | Path, **overrides) -> "CostModel":
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        return cls.from_spec(json.loads(Path(path).read_text(encoding="utf-8")), **overrides)
+
+    @classmethod
+    def from_spec(cls, payload: Mapping, **overrides) -> "CostModel":
         if overrides.get("uncertainty_mode") is None:
             overrides.pop("uncertainty_mode", None)
         settings = {**payload["settings"], "positive_prefill": payload.get("positive_prefill"),

@@ -9,6 +9,7 @@ import sys
 
 import pytest
 from test_model_scope import local_scope as local_scope
+from test_retriever_factory import retriever_config as retriever_config
 
 from bench.experiments import generation_provenance, matrix_jobs, run_matrix, select_development
 
@@ -105,10 +106,8 @@ def test_development_generation_identity_and_later_offline_quality_gate(tmp_path
     assert frozen["winners"]["B3"]["candidate_index"] == 1
 
 
-@pytest.mark.parametrize("relative", ["adapters/hybrid_retrieval.py", "adapters/query_views.py",
-    "controller/planner.py", "bench/run_sessions.py", "bench/report.py", "bench/quality.py",
-    "profiling/common.py", "engine_patches/contextkv_model_scope.py",
-    "adapters/assets/convsearch_r1/prompt.txt"])
+@pytest.mark.parametrize("relative", ["controller/planner.py", "bench/run_sessions.py",
+    "engine_patches/contextkv_model_scope.py", "adapters/corpus.py"])
 def test_freeze_rejects_old_results_after_execution_source_or_prompt_change(tmp_path, monkeypatch, relative):
     import bench.experiments as experiments
     value = spec(tmp_path)
@@ -141,7 +140,7 @@ def test_offline_preparation_and_grading_do_not_require_regenerating_answers(tmp
     import bench.experiments as experiments
     value = spec(tmp_path)
     results = completed_results(value)
-    offline = {"bench/official.py", "bench/judge.py", "adapters/doc2dial.py"}
+    offline = {"adapters/doc2dial.py", "adapters/evidence_selection.py", "adapters/hybrid_retrieval.py"}
     # Older manifests included these offline modules as generation inputs.
     for result in results:
         result["experiment_provenance"]["implementation"]["files"].update(dict.fromkeys(offline, "old-offline-code"))
@@ -149,7 +148,7 @@ def test_offline_preparation_and_grading_do_not_require_regenerating_answers(tmp
     root = Path(experiments.__file__).resolve().parents[1]
     targets = {root / path for path in offline}
     def changed(path):
-        return original(path)+(b"\nnew offline implementation\n" if path.resolve() in targets else b"")
+        return original(path)+(b"\n# new offline implementation\n" if path.resolve() in targets else b"")
     monkeypatch.setattr(Path, "read_bytes", changed)
     frozen = select_development(value, results)
     assert frozen["winners"]
@@ -195,7 +194,7 @@ def test_frozen_test_is_rejected_before_executor_after_adapter_change(tmp_path, 
     original = experiments.implementation_manifest
     def changed():
         result = original()
-        result["files"]["adapters/hybrid_retrieval.py"] = "new-adapter-version"
+        result["files"]["adapters/corpus.py"] = "new-adapter-version"
         return result
     monkeypatch.setattr(experiments, "implementation_manifest", changed)
     async def forbidden(*args):
@@ -261,7 +260,7 @@ def test_matrix_shares_prompt_and_default_budget_between_native_and_controller(t
     value = spec(tmp_path)
     base = tmp_path/"base.yaml"
     base.write_text(yaml.safe_dump({"model":{"scope_path":str(local_scope.path)},"context":{"system_prompt":"base prompt", "max_new_tokens":1024,
-        "max_total_model_tokens":8192, "revisit_mode":"explicit", "revisit_history_turns":6,
+        "max_total_model_tokens":8192,
         "allow_version_comparison":True, "reference_prefix_length":6}}))
     value["base_config"] = str(base)
     expected = "base prompt"
@@ -305,8 +304,7 @@ def test_matrix_shares_prompt_and_default_budget_between_native_and_controller(t
     assert native_module.resolve_context_policy(seen["native"]) == seen["controller"].context
 
 
-@pytest.mark.parametrize("field,value", [("revisit_mode", "explicit"), ("revisit_history_turns", 6),
-    ("allow_version_comparison", True), ("reference_prefix_length", 6),
+@pytest.mark.parametrize("field,value", [("allow_version_comparison", True), ("reference_prefix_length", 6),
     ("max_total_model_tokens", 16384), ("max_new_tokens", 1024)])
 def test_matrix_rejects_method_specific_required_policy_or_budget(tmp_path, field, value):
     matrix = spec(tmp_path)
@@ -532,3 +530,63 @@ def test_system_comparison_binds_method_retrieval_and_execution_inherits_shared(
     value['comparison_scope']='execution'
     with pytest.raises(ValueError,match='comparison_scope=system'):
         matrix_jobs(value)
+
+
+@pytest.mark.parametrize("relative", ["bench/report_rendering.py", "adapters/conversation.py",
+    "adapters/source_documents.py", "adapters/assets/convsearch_r1/prompt.txt"])
+def test_display_and_disabled_branches_do_not_block_freeze_or_test(tmp_path, monkeypatch, relative):
+    import bench.experiments as experiments
+    value = spec(tmp_path)
+    results = completed_results(value)
+    frozen = select_development(value, results)
+    original = Path.read_bytes
+    target = Path(experiments.__file__).resolve().parents[1] / relative
+    monkeypatch.setattr(Path, "read_bytes", lambda p: original(p) + (b" changed" if p == target else b""))
+    assert select_development(value, results)["winners"]
+    observed = []
+    async def execute(spec, job, directory):
+        observed.append(job["job_id"])
+        return {**job, "status": "failed"}  # No model or unrelated summary fixture.
+    asyncio.run(run_matrix(value, tmp_path/"test-display", stage="test", frozen=frozen, executor=execute))
+    assert observed
+
+
+def test_metric_change_reuses_bound_raw_answers_and_requires_refreezing(tmp_path, monkeypatch):
+    import bench.experiments as experiments
+    value = spec(tmp_path)
+    results = asyncio.run(run_matrix(value, tmp_path/"metric-dev"))
+    frozen = select_development(value, results)
+    originals = {r["raw_output"]: Path(r["raw_output"]).read_bytes() for r in results}
+    original = Path.read_bytes
+    target = Path(experiments.__file__).resolve().parent / "metrics.py"
+    monkeypatch.setattr(Path, "read_bytes", lambda p: original(p) + (b" changed" if p == target else b""))
+    with pytest.raises(ValueError, match="recompute metrics and refreeze"):
+        asyncio.run(run_matrix(value, tmp_path/"stale-metrics", stage="test", frozen=frozen))
+    updated = select_development(value, results)
+    assert set(updated["metrics_recomputed_jobs"]) == {r["job_id"] for r in results}
+    assert all(Path(path).read_bytes() == raw for path, raw in originals.items())
+    assert updated["winners"] == frozen["winners"]
+
+
+@pytest.mark.parametrize("fusion", ["single", "dialogue_rrf"])
+def test_optional_algorithm_change_in_shared_module_only_invalidates_its_active_path(
+        tmp_path, monkeypatch, retriever_config, fusion):
+    import bench.experiments as experiments
+    import yaml
+    value = spec(tmp_path)
+    recipe = yaml.safe_load(retriever_config.read_text())
+    recipe.update(query_mode="conversational", query_fusion=fusion)
+    retriever_config.write_text(yaml.safe_dump(recipe))
+    value.update(protocols=["P3"], retriever_config=str(retriever_config))
+    results = completed_results(value)
+    original = Path.read_bytes
+    target = Path(experiments.__file__).resolve().parents[1] / "adapters/hybrid_retrieval.py"
+    def changed(path):
+        raw = original(path)
+        return raw.replace(b"family_weighting\": \"literal 1;", b"family_weighting\": \"changed 1;") if path == target else raw
+    monkeypatch.setattr(Path, "read_bytes", changed)
+    if fusion == "single":
+        assert select_development(value, results)["winners"]
+    else:
+        with pytest.raises(ValueError, match="implementation"):
+            select_development(value, results)

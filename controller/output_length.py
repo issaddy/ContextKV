@@ -108,7 +108,14 @@ class OutputLengthModel:
              max_new_tokens: int | None = None, sampling: SamplingRecipe | None = None,
              expected_priors: tuple[int, int] | None = None,
              expected_generation_protocol: dict | None = None) -> OutputLengthModel:
-        model = cls(json.loads(Path(path).read_text()))
+        return cls.from_spec(json.loads(Path(path).read_text()), expected_fingerprint=expected_fingerprint,
+            max_new_tokens=max_new_tokens, sampling=sampling, expected_priors=expected_priors,
+            expected_generation_protocol=expected_generation_protocol)
+
+    @classmethod
+    def from_spec(cls, specification, *, expected_fingerprint=None, max_new_tokens=None,
+                  sampling=None, expected_priors=None, expected_generation_protocol=None):
+        model = cls(specification)
         target = model.specification["target"]
         if expected_fingerprint is not None and target["fingerprint"] != asdict(expected_fingerprint):
             raise ValueError("output-length artifact target fingerprint differs from serving")

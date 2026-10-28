@@ -45,7 +45,7 @@ def test_ratio_counts_original_bodies_and_required_dependency_not_qa_or_prompt_d
     old = replace(make_evidence("中文", "old"), token_ids=(999,) * 90)
     condition = make_evidence("xy", "condition")
     current = make_evidence("ABCD", "current", dependencies=(condition.key,))
-    policy = EvidencePolicy(revisit_mode="explicit")
+    policy = EvidencePolicy()
     snapshot = committed_with_bodies((old, condition), template, policy)
     template.tokenizer.calls.clear()
     plain = build_candidates(snapshot, "Current question", (current,), policy, template)
@@ -86,7 +86,7 @@ def test_redundancy_threshold_is_a_fraction(threshold):
 @pytest.mark.parametrize("strategy", ["redundancy_threshold", "cost"])
 async def test_controller_measures_explicit_policy_or_fallback_and_logs_body_counts(tmp_path, strategy):
     engine = MockEngine()
-    policy = EvidencePolicy(revisit_mode="explicit")
+    policy = EvidencePolicy()
     events = EventLog(tmp_path / "events.jsonl")
     controller = Controller(SessionStore(tmp_path / "session.sqlite3"), engine, policy=policy,
         knobs=PlannerKnobs(strategy=strategy, fallback_strategy="redundancy_threshold",

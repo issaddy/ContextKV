@@ -3,14 +3,12 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import hashlib
-import json
 from pathlib import Path
 
 import yaml
 
 from .candidates import CandidatePolicy
-from .cost_model import CostModel
-from .generation import GenerationProtocol
+from .cost_config import load_cost_model
 from .engine_client import SGLangEngineClient
 from .events import EventLog
 from .mock_engine import MockEngine
@@ -154,37 +152,13 @@ def create_model_template(model: ModelConfig, *, model_path: str | None = None,
 def create_controller(config: RunConfig) -> Controller:
     template = (ByteTemplate(namespace_hash=config.model.namespace_hash) if config.engine.kind == "mock" else
                 create_model_template(config.model))
-    common = dict(max_new_tokens=config.context.max_new_tokens,
-                  include_host_cost=config.ablation.host_cost, include_decode_cost=config.ablation.decode_cost,
-                  include_control_cost=config.ablation.control_cost)
-    if config.cost_model.uncertainty_mode is not None:
-        common["uncertainty_mode"] = config.cost_model.uncertainty_mode
-    if config.cost_model.admission_estimator is not None:
-        common["admission_estimator"] = config.cost_model.admission_estimator
-    settings = dict(default_output_tokens=config.cost_model.default_output_tokens,
-                    p90_output_tokens=config.cost_model.p90_output_tokens,
-                    paired_error_ms=config.cost_model.paired_error_ms,
-                    max_normalized_distance=config.cost_model.max_normalized_distance,
-                    residual_alpha=config.cost_model.residual_alpha)
-    model = CostModel(**common, **settings)
-    if config.cost_model.artifact:
-        model = CostModel.load(config.cost_model.artifact, **common)
-    elif config.calibration_path:
-        rows = [json.loads(line) for line in Path(config.calibration_path).read_text().splitlines() if line.strip()]
-        model = CostModel.from_measurements(rows, **common, **settings)
+    model = load_cost_model(config, fingerprint=template.fingerprint)
     if config.model.scope is not None and (config.cost_model.artifact or config.calibration_path):
         manifest = model.calibration_metadata.get("profile_manifest") or {}
         bound = manifest.get("fingerprint") or manifest.get("engine", {}).get("fingerprint")
         cache_binding = manifest.get("engine", {}).get("cache_config_hash")
         if bound != asdict(template.fingerprint) or not isinstance(cache_binding, str) or not cache_binding:
             raise ValueError("explicit model scope requires a cost artifact bound to its actual fingerprint and cache configuration")
-    model.configure_for_run(config)
-    if config.cost_model.output_length_artifact:
-        from .output_length import OutputLengthModel
-        model.output_length_model = OutputLengthModel.load(config.cost_model.output_length_artifact,
-            expected_fingerprint=template.fingerprint, max_new_tokens=config.context.max_new_tokens, sampling=config.sampling,
-            expected_priors=model.effective_output_prior,
-            expected_generation_protocol=GenerationProtocol.from_config(config).record())
     engine = (MockEngine(fingerprint=template.fingerprint, gpu_capacity_tokens=config.engine.gpu_capacity_tokens,
                          host_capacity_tokens=config.engine.host_capacity_tokens, page_size=config.engine.page_size)
               if config.engine.kind == "mock" else

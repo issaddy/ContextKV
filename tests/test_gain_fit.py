@@ -64,8 +64,8 @@ def test_outer_heldout_timing_and_length_labels_cannot_change_its_fit_or_selecti
     assert changed_fold == fold
     for key in records:
         for old, new in zip(records[key], changed[key]):
-            assert {k: old[k] for k in ("features", "predicted_gain_ms", "effective_margin_ms", "length_means", "selected_action")} == {
-                k: new[k] for k in ("features", "predicted_gain_ms", "effective_margin_ms", "length_means", "selected_action")}
+            assert {k: old[k] for k in ("features", "predicted_gain_ms", "decision_threshold_ms", "length_means", "selected_action")} == {
+                k: new[k] for k in ("features", "predicted_gain_ms", "decision_threshold_ms", "length_means", "selected_action")}
     assert first.fit_audit == second.fit_audit
     assert all("s4" not in item["training_sessions"] for item in first.fit_audit)
     assert all(set(item["training_sessions"]).isdisjoint(item["testing_sessions"]) for item in first.fit_audit)
@@ -95,21 +95,34 @@ def test_one_sided_threshold_uses_case_cells_not_repeated_observation_count():
     assert one_sided_threshold(rows, 0.)["threshold_ms"] == 0.
 
 
-def test_matching_gate_ablations_preserve_unsupported_fallback():
+def test_diagnostic_margin_never_changes_gain_choice_or_unsupported_fallback():
     row = {"eligible": True, "margin_ms": 20., "baseline_action": "APPEND",
            "baseline_reason": "hysteresis", "actual_gain_ms": 100.}
-    assert decide(row, 25., 10.)["selected_action"] == "APPEND"
-    assert decide(row, 25., 10., "no_margin")["selected_action"] == "REBUILD"
+    assert decide(row, 25., 10.)["selected_action"] == "REBUILD"
+    assert decide(row, 10.)["selected_action"] == "REBUILD"
+    assert decide(dict(row, baseline_action="REBUILD"), 0.)["selected_action"] == "REBUILD"
     fallback = dict(row, eligible=False, baseline_reason="uncalibrated_cost_fallback")
-    decision = decide(fallback, 1e6, gate="no_margin")
+    decision = decide(fallback, 1e6)
     assert decision["selected_action"] == "APPEND" and decision["reason"] == "uncalibrated_cost_fallback"
+
+
+@pytest.mark.parametrize("gain", [-10., 0., 10.])
+def test_configured_baseline_matches_serving_even_below_margin(monkeypatch, gain):
+    from controller.schema import CostEstimate
+    cases, _, pairs, model, knobs = inputs()
+    monkeypatch.setattr(model, "predict_native", lambda candidate, *args, **kwargs:
+        CostEstimate(candidate.candidate_id, 50. + (gain if candidate.action == "APPEND" else 0.),
+                     calibrated=True))
+    row = prediction_features(cases[0], pairs[0]["quote"], model, replace(knobs, delta_abs=40.))
+    assert row["margin_ms"] == 40.
+    assert decide({**row, "actual_gain_ms": 0.}, row["baseline_gain_ms"])["selected_action"] == row["baseline_action"]
 
 
 def test_complete_replay_reports_fixed_baselines_without_fake_gain_coverage():
     cases, lengths, pairs, model, knobs = inputs()
     records, report = fit_exploration(NestedFeatures(cases, lengths, pairs, model, knobs),
         families=("shared_history",), alphas=(1.,), quantiles=(0., .8))
-    assert len(records) == 6 and all(len(rows) == 30 for rows in records.values())
+    assert len(records) == 3 and all(len(rows) == 30 for rows in records.values())
     for action, result in report["fixed_actions"].items():
         assert result["selected_actions"] == {action: 30}
         assert result["supported_gain_mae_ms"] is None

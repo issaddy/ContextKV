@@ -2,7 +2,7 @@
 
 该入口支撑模块 A 的证据选择：复用固定 BGE 权重和官方 Transformers 接口，保留独立 BM25S 基线，提供 dense、RRF 混合与 cross-encoder 重排序。原文、段落边界与证据身份保持不变。当前多轮主线配置使用这一共享入口，开发数据用于改进，独立测试与开发结果分开报告。
 
-在线最终选择至多五个不同内容组，相同标题/正文不重复占名额；已知版本、父级范围和条件依赖参与分组，所选代表仍是原始来源。普通前五段中的不同正文保留，再从已有评分池补齐，不增加模型调用。显式条件融合保留主任务锚点。`search_variants`与离线`retrieval_eval`提供原始评分阶段，便于比较排序器；在线分组结果及新增材料由`HybridRetriever`另行记录。
+在线最终选择至多五个不同内容组，相同标题/正文不重复占名额；已知版本、父级范围和条件依赖参与分组，所选代表仍是原始来源。普通前五段中的不同正文保留，再从已有评分池补齐，不增加模型调用。复合需求选择保留整体任务的首个正文组，条件通过统一状态投影进入各需求查询。`search_variants`与离线`retrieval_eval`提供原始评分阶段，便于比较排序器；在线分组结果及新增材料由`HybridRetriever`另行记录。
 
 ## 选择依据与具体复用
 
@@ -125,4 +125,4 @@ encoder/reranker与SGLang共用GPU时，检索和生成会竞争资源。检索�
 
 ## 联合语义选材配置
 
-`evidence_selection: semantic`使用同一解释客户端联合更新任务和选择来源，需要`query_mode: conversational`、selector及证据元数据。可与`source_window`和`source_documents`组合；`hybrid`直接提供候选，`hybrid_rerank`增加一次主任务重排。完整阅读目录、依赖、预算装入及无效输出处理见[联合决策机制](../research/source_grounded_query_resolution.md#一次调用的任务与来源联合决策)。默认仍为`ranked`，已有比较集中在[评价记录](../data_and_evaluation.md#一次联合任务与来源决策的开发比较)。
+`evidence_selection: semantic`使用同一解释客户端联合更新任务和选择来源，需要`query_mode: conversational`、selector及证据元数据。可与`source_window`和`source_documents`组合；`hybrid`直接提供候选，`hybrid_rerank`增加一次主任务重排。完整阅读目录、依赖、预算装入及无效输出处理见[联合决策机制](../research/source_grounded_query_resolution.md#复合需求与选材)。默认仍为`ranked`，已有比较集中在[评价记录](../data_and_evaluation.md#一次联合任务与来源决策的开发比较)。

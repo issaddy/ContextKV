@@ -30,7 +30,7 @@ flowchart LR
 ## 应用层与模块接口
 
 - `schema.py`定义不可变消息、证据、候选、报价和回执；`serialization.py`负责JSON持久化，直接复用原生编码器遍历token容器。
-- `evidence.py`以corpus/document/passage/version/SHA256关联来源。短引用碰撞时延长新编号；必需集合由当前检索、回访与依赖闭包共同形成。新增证据在入口检查正文，内部复用已提交账本。
+- `evidence.py`以corpus/document/passage/version/SHA256关联来源。短引用碰撞时延长新编号；必需集合来自当前选材、上游选定回访、显式引用和依赖闭包。下游不再按参数、标题或主题词重猜回访对象。新增证据在入口检查正文，内部复用已提交账本。
 - `templates.py`与`candidates.py`基于同一快照和当前证据构造完整APPEND/REBUILD。APPEND复用实际执行上下文中的正文，REBUILD使用完整实际QA重建；版本冲突、历史同步、配置变化、恢复及窗口预算决定可行性。
 - 相同正文可共享物理span，各来源保留独立ID、地址、版本、依赖与当前引用资格。短正文在别名说明更长时直接展开。引用位置、正文位置与来源映射一起提交；证据冗余按物理区间计一次。
 - 模板统一提供`render_many`。Qwen3在确定的AddedToken边界复用共同分词段，其他模板完整编码；最终token IDs进入预算和原生报价。当前来源导航、引用约束及任务条件由两候选共用。
@@ -40,11 +40,13 @@ flowchart LR
 
 ## 持久状态
 
-`sessions` 保存当前快照；`ledger_history` 保留每次提交与 P1 历史同步的审计副本。语义历史与执行消息、实际 input/output IDs 分开。证据文本另按内容 SHA256 存储。
+`sessions` 保存当前快照；`ledger_history` 保留每次提交与 P1 历史同步的版本引用。`text_blobs` 按 SHA256 保存唯一正文、提示消息及实际问答文本，archive、attempt 和执行账本通过 `$text` 引用重建，取消额外正文文件副本。引用和正文在同一 SQLite 事务中持久化；`load_record` 供在线恢复和只读冻结重放共用。实际 input/output IDs 保持原值。当前格式为 user_version=2；旧数据库不自动迁移，使用新的 state 目录，原实验库保持原样。
 
 `attempts` 保存请求身份、选中计划、prepare 身份、epoch、完整结果及处理阶段。`request_id` 在同一业务会话内唯一；相同 ID 的不同请求报冲突。数据库保证请求只有一个执行者，按阶段推进并保留已选计划和完整结果。计划与新 epoch 在 prepare RPC 前一起落盘；prepare ACK 与提交标记在 generate RPC 前一起落盘。
 
 一个事务同时写入新 QA、执行账本、当前 epoch、已提交 attempt 和旧 epoch 退役 outbox。事务内重新检查 attempt 阶段与 snapshot version。旧当前epoch在新版本提交后退役。
+
+EventLog 是非事务性诊断输出。序列化或写入失败通过独立错误报告暴露，不改变业务成功/失败；提交后的成本反馈和诊断位于业务异常处理之外，不能把 COMMITTED 记录标成 attempt_failed。研究评测文件的导出失败仍使该实验交付不完整，但不回滚已经提交的真实回答。
 
 多会话的后台退役通知合并到一个运行中的worker。慢退役期间新提交的outbox由下一轮快照继续处理，不为每个已完成请求积压一个等待锁的task；传输结果未知或退役尚未完成时，记录保留在outbox中等待重试。程序错误和协议身份错误写入`epoch_retire_worker_failed`事件，并由`drain`收取；后续已提交回答正常返回。`drain`等待期间保留同一worker引用，新的退役通知继续合并；取消关闭时先结束worker再关闭引擎。缓存诊断计数保存在receipt/事件中，离线报告将无效计数列入`receipt_work.invalid_counters`并排除其对应统计，回答状态保持原值。
 

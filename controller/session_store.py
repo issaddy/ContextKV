@@ -2,18 +2,18 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
-import os
+from dataclasses import dataclass, fields, is_dataclass, replace
+from hashlib import sha256
+import json
 from pathlib import Path
 import sqlite3
-import tempfile
 import threading
 import time
 import uuid
 
 from .schema import (ContextEpoch, EvidenceBlock, EvidenceKey, ExecutionLedger, GenerationResult, Message, QueryContext,
                      Plan, RetireOperation, SessionSnapshot, TurnRecord)
-from .serialization import dumps, loads
+from .serialization import decode, dumps, loads
 
 
 class StoreError(RuntimeError):
@@ -57,15 +57,34 @@ class Attempt:
 ACTIVE_STAGES = ("STARTED", "PLANNED", "PREPARING", "PREPARED", "SUBMITTED", "RESULT_READY")
 
 
+def load_record(connection, cls, payload):
+    """Reconstruct exact persisted text for serving, recovery and frozen replay."""
+    texts = {}
+
+    def resolve(value):
+        if set(value) == {"$text"}:
+            digest = value["$text"]
+            if digest not in texts:
+                row = connection.execute("SELECT text FROM text_blobs WHERE sha256=?", (digest,)).fetchone()
+                if row is None:
+                    raise StoreError(f"missing stored text: {digest}")
+                texts[digest] = row[0]
+            return texts[digest]
+        return value
+
+    return decode(cls, json.loads(payload, object_hook=resolve))
+
+
 class SessionStore:
-    def __init__(self, path: str | Path, evidence_dir: str | Path | None = None):
+    def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.evidence_dir = Path(evidence_dir or self.path.parent / "evidence")
-        self.evidence_dir.mkdir(parents=True, exist_ok=True)
         self._mutex = threading.RLock()
         self.db = sqlite3.connect(str(self.path), timeout=10, isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
+        if self.db.execute("PRAGMA user_version").fetchone()[0] not in (0, 2):
+            self.db.close()
+            raise StoreError("obsolete session database format; use a new state directory")
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
@@ -88,11 +107,40 @@ class SessionStore:
           CREATE TABLE IF NOT EXISTS ledger_history (
             session_id TEXT NOT NULL, version INTEGER NOT NULL, snapshot TEXT NOT NULL,
             PRIMARY KEY(session_id, version));
-          PRAGMA user_version=1;
+          CREATE TABLE IF NOT EXISTS text_blobs (
+            sha256 TEXT PRIMARY KEY, text TEXT NOT NULL);
+          PRAGMA user_version=2;
         """)
 
     def close(self):
         self.db.close()
+
+    def _dump(self, value):
+        """Text and its references are persisted in the same SQLite transaction.
+
+        Dataclass text fields share bodies across archives, attempts, prompt
+        messages and actual QA. Primitive token arrays keep native JSON encoding.
+        """
+        saved = set()
+
+        def encode(item):
+            if isinstance(item, (set, frozenset)):
+                return sorted(item)
+            if not is_dataclass(item):
+                raise TypeError(f"unsupported stored value: {type(item).__name__}")
+            result = {field.name: getattr(item, field.name) for field in fields(item)}
+            for name in ("text", "content", "user_text", "assistant_text", "query"):
+                text = result.get(name)
+                if isinstance(text, str) and text:
+                    digest = sha256(text.encode("utf-8")).hexdigest()
+                    if digest not in saved:
+                        self.db.execute("INSERT OR IGNORE INTO text_blobs VALUES(?,?)", (digest, text))
+                        saved.add(digest)
+                    result[name] = {"$text": digest}
+            return result
+
+        return json.dumps(value, default=encode, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), allow_nan=False)
 
     @contextmanager
     def _transaction(self):
@@ -109,16 +157,16 @@ class SessionStore:
         row = self.db.execute("SELECT snapshot FROM sessions WHERE session_id=?", (session_id,)).fetchone()
         if row is None:
             raise KeyError(session_id)
-        return loads(SessionSnapshot, row[0])
+        return load_record(self.db, SessionSnapshot, row[0])
 
     def read_snapshot(self, session_id: str, corpus_snapshot_id: str = "demo-v1") -> SessionSnapshot:
         with self._mutex:
             row = self.db.execute("SELECT snapshot FROM sessions WHERE session_id=?", (session_id,)).fetchone()
             if row is not None:
-                return loads(SessionSnapshot, row[0])
+                return load_record(self.db, SessionSnapshot, row[0])
         with self._transaction():
             self.db.execute("INSERT OR IGNORE INTO sessions(session_id,version,snapshot) VALUES(?,?,?)",
-                            (session_id, 0, dumps(SessionSnapshot(session_id, corpus_snapshot_id=corpus_snapshot_id))))
+                            (session_id, 0, self._dump(SessionSnapshot(session_id, corpus_snapshot_id=corpus_snapshot_id))))
             return self._read(session_id)
 
     def get_snapshot(self, session_id: str) -> SessionSnapshot:
@@ -127,7 +175,7 @@ class SessionStore:
             return self._read(session_id)
 
     def _write_snapshot(self, snapshot: SessionSnapshot, expected_version: int):
-        payload = dumps(snapshot)
+        payload = self._dump(snapshot)
         changed = self.db.execute("UPDATE sessions SET version=?,snapshot=? WHERE session_id=? AND version=?",
                                   (snapshot.version, payload, snapshot.session_id, expected_version)).rowcount
         if changed != 1:
@@ -139,17 +187,17 @@ class SessionStore:
             row = self.db.execute("SELECT payload FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
             if row is None:
                 raise KeyError(attempt_id)
-            return loads(Attempt, row[0])
+            return load_record(self.db, Attempt, row[0])
 
     def find_request(self, session_id: str, request_id: str) -> Attempt | None:
         with self._mutex:
             row = self.db.execute("SELECT payload FROM attempts WHERE session_id=? AND request_id=?", (session_id, request_id)).fetchone()
-            return loads(Attempt, row[0]) if row else None
+            return load_record(self.db, Attempt, row[0]) if row else None
 
     def pending_attempt(self, session_id: str) -> Attempt | None:
         with self._mutex:
             row = self.db.execute("SELECT payload FROM attempts WHERE session_id=? AND stage NOT IN ('COMMITTED','FAILED')", (session_id,)).fetchone()
-            return loads(Attempt, row[0]) if row else None
+            return load_record(self.db, Attempt, row[0]) if row else None
 
     def begin_attempt(self, session_id: str, request_id: str, request_hash: str,
                       query: str, expected_version: int) -> Attempt:
@@ -171,7 +219,7 @@ class SessionStore:
             if self.pending_attempt(session_id):
                 raise PendingAttempt("Session has an unresolved attempt; recover it before another turn")
             attempt = Attempt(uuid.uuid4().hex, session_id, request_id, request_hash, expected_version, query, created_ns=time.monotonic_ns())
-            self.db.execute("INSERT INTO attempts VALUES(?,?,?,?,?)", (attempt.attempt_id, session_id, request_id, attempt.stage, dumps(attempt)))
+            self.db.execute("INSERT INTO attempts VALUES(?,?,?,?,?)", (attempt.attempt_id, session_id, request_id, attempt.stage, self._dump(attempt)))
             return attempt
 
     def save_attempt(self, attempt: Attempt) -> Attempt:
@@ -179,7 +227,7 @@ class SessionStore:
             old = self.get_attempt(attempt.attempt_id)
             if not self._check_update(old, attempt):
                 return old
-            self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (attempt.stage, dumps(attempt), attempt.attempt_id))
+            self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (attempt.stage, self._dump(attempt), attempt.attempt_id))
             return attempt
 
     @staticmethod
@@ -214,7 +262,7 @@ class SessionStore:
                              snap.current_epoch.epoch_no if snap.current_epoch else None,
                              reason=reason, engine_restart_id=restart_id)
         updated = replace(current, stage="PREPARING", epoch=epoch, new_epoch=True)
-        self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (updated.stage, dumps(updated), updated.attempt_id))
+        self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (updated.stage, self._dump(updated), updated.attempt_id))
         return updated
 
     def plan_new_epoch(self, attempt: Attempt, restart_id: str, reason: str) -> Attempt:
@@ -237,7 +285,7 @@ class SessionStore:
             self._check_update(self.get_attempt(attempt.attempt_id), prepared)
             submitted = replace(prepared, stage="SUBMITTED")
             self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?",
-                            (submitted.stage, dumps(submitted), submitted.attempt_id))
+                            (submitted.stage, self._dump(submitted), submitted.attempt_id))
             return submitted
 
     def allocate_epoch(self, attempt: Attempt, restart_id: str, reason: str) -> Attempt:
@@ -248,23 +296,6 @@ class SessionStore:
             if current.stage != "PLANNED":
                 raise StoreError("Only a selected plan may prepare an epoch")
             return self._allocate_epoch(current, restart_id, reason)
-
-    def _archive_evidence(self, evidence: tuple[EvidenceBlock, ...]):
-        """Persist evidence already validated when it entered candidate construction."""
-        for block in evidence:
-            target = self.evidence_dir / f"{block.key.content_sha256}.txt"
-            if target.exists():
-                continue
-            fd, temp = tempfile.mkstemp(dir=self.evidence_dir)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    handle.write(block.text)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temp, target)
-            finally:
-                if os.path.exists(temp):
-                    os.unlink(temp)
 
     def _enqueue(self, session_id: str, epoch: ContextEpoch, reason: str, version: int):
         operation = RetireOperation(f"retire:{epoch.engine_session_id}", epoch.engine_session_id,
@@ -278,7 +309,6 @@ class SessionStore:
             return self.read_snapshot(attempt.session_id)
         if attempt.plan is None or attempt.epoch is None or attempt.result is None or attempt.stage != "RESULT_READY":
             raise StoreError("Only a complete durable result can be committed")
-        self._archive_evidence(attempt.evidence)
         with self._transaction():
             # A RESULT_READY plan/result is immutable. Recheck the durable
             # stage under the write transaction, without decoding it twice.
@@ -317,7 +347,7 @@ class SessionStore:
                               turns_since_rebuild=0 if candidate.action == "REBUILD" else snap.turns_since_rebuild + 1)
             self._write_snapshot(updated, snap.version)
             completed = replace(attempt, stage="COMMITTED")
-            self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (completed.stage, dumps(completed), attempt_id))
+            self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (completed.stage, self._dump(completed), attempt_id))
             if attempt.new_epoch and snap.current_epoch:
                 self._enqueue(snap.session_id, snap.current_epoch, epoch.reason, version)
             return updated
@@ -330,7 +360,7 @@ class SessionStore:
             if attempt.stage in ("COMMITTED", "FAILED"):
                 return
             updated = replace(attempt, stage="FAILED", error=error)
-            self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (updated.stage, dumps(updated), attempt_id))
+            self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (updated.stage, self._dump(updated), attempt_id))
             snap = self._read(attempt.session_id)
             if force_recovery:
                 self._write_snapshot(replace(snap, version=snap.version + 1, force_new_epoch_for_recovery=True), snap.version)

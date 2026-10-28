@@ -6,7 +6,7 @@ import pytest
 from controller.candidates import build_candidates
 from controller.evidence import (EvidenceError, EvidencePolicy, assign_references,
                                  make_evidence, select_shared_required_evidence)
-from controller.schema import ExecutionLedger, Message, SessionSnapshot, TurnRecord
+from controller.schema import ExecutionLedger, Message, QueryContext, SessionSnapshot, TurnRecord
 from controller.templates import SYSTEM_PROMPT, ByteTemplate, longest_common_prefix, token_hash, verify_evidence_spans
 
 
@@ -146,7 +146,7 @@ def test_changed_version_or_content_makes_append_invalid():
 def test_explicit_version_comparison_restores_both_versions():
     old,new = make_evidence("old","api"),make_evidence("new","api",version="v2")
     snap = SessionSnapshot("s",archive=(old,))
-    candidate = build_candidates(snap,"Compare api v1 and v2",(new,))[0]
+    candidate = build_candidates(snap,"Compare api v1 and v2",(old,new))[0]
     assert candidate.feasible and candidate.required_blocks == {old.key,new.key}
     assert '"source_revision":"v1"' in candidate.messages[-1].content
     assert '"source_revision":"v2"' in candidate.messages[-1].content
@@ -162,9 +162,9 @@ def test_explicit_version_revisit_does_not_match_part_of_another_document_name(
     current = make_evidence("Current requested source", current_document, version="v1")
     snapshot = SessionSnapshot("s", archive=(old,))
     candidate = build_candidates(snapshot, query, (current,),
-                                 EvidencePolicy(revisit_mode="explicit"))[0]
+                                 EvidencePolicy())[0]
     assert candidate.required_blocks == candidate.visible_blocks == {current.key}
-    assert dict(candidate.evidence_resolution) == {current.key: "explicit_document_version"}
+    assert dict(candidate.evidence_resolution) == {current.key: "current_retrieval"}
 
 
 def test_unrelated_version_name_does_not_create_false_conflict_during_rebuild():
@@ -175,7 +175,7 @@ def test_unrelated_version_name_does_not_create_false_conflict_during_rebuild():
     first = build_candidates(snapshot, "Initial API question", (old_api,))[0]
     snapshot = committed(first, snapshot, "Initial API question", (old_api,))
     append, rebuild = build_candidates(snapshot, "What is the rapid v1 retry interval?",
-                                       (new_api, rapid), EvidencePolicy(revisit_mode="explicit"))
+                                       (new_api, rapid), EvidencePolicy())
     assert append.required_blocks == rebuild.required_blocks == {new_api.key, rapid.key}
     assert not append.feasible and append.reason == "invalid_visible_version"
     assert rebuild.feasible and rebuild.visible_blocks == {new_api.key, rapid.key}
@@ -193,9 +193,9 @@ def test_explicit_document_version_revisit_preserves_literal_names(document_id, 
     old = make_evidence("Archived requested source", document_id, title=title, version="v1")
     unrelated = make_evidence("Other retrieved source", "other", version="v2")
     candidate = build_candidates(SessionSnapshot("s", archive=(old,)), query, (unrelated,),
-                                 EvidencePolicy(revisit_mode="explicit"))[0]
+                                 EvidencePolicy(explicit_keys=(old.key,)))[0]
     assert candidate.feasible and candidate.required_blocks == {old.key, unrelated.key}
-    assert dict(candidate.evidence_resolution)[old.key] == "explicit_document_version"
+    assert dict(candidate.evidence_resolution)[old.key] == "explicit_key"
 
 
 def test_reference_collision_extends_new_id_and_keeps_old_mapping(monkeypatch):
@@ -392,7 +392,7 @@ def test_shared_configuration_anchor_does_not_restore_unrelated_product():
     selected = build_candidates(snapshot, "What is connect_timeout?", (current,))[-1]
     assert selected.required_blocks == {current.key}
     explicit = build_candidates(snapshot, "What is alpha connect_timeout?", (current,))[-1]
-    assert explicit.required_blocks == {old.key, current.key}
+    assert explicit.required_blocks == {current.key}  # Names do not grant historical citation rights.
 
 
 def test_ambiguous_historical_anchor_requires_document_scope():
@@ -435,7 +435,7 @@ def test_anchor_respects_selected_revisit_turns_and_current_document_identity():
         assert candidate.required_blocks == {atlas.key, current.key}
     header = make_evidence("Settings for this source.", "Atlas", passage_id="header")
     candidate = build_candidates(snapshot, "What is --timeout?", (header,))[-1]
-    assert candidate.required_blocks == {atlas.key, header.key}
+    assert candidate.required_blocks == {header.key}
     revised_header = replace(header, key=replace(header.key, version="v2"))
     candidate = build_candidates(snapshot, "What is Atlas --timeout?", (revised_header,))[-1]
     assert candidate.required_blocks == {revised_header.key}
@@ -446,7 +446,7 @@ def test_anchor_respects_named_historical_version():
     new = make_evidence("timeout 30", "api", version="v2", anchors=("connect_timeout",))
     current = make_evidence("Deployment regions", "regions")
     candidate = build_candidates(SessionSnapshot("s", archive=(old, new)),
-                                 "What is api v2 connect_timeout?", (current,))[-1]
+                                 "What is api v2 connect_timeout?", (current,), EvidencePolicy(explicit_keys=(new.key,)))[-1]
     assert candidate.feasible and candidate.required_blocks == {current.key, new.key}
 
 
@@ -484,13 +484,14 @@ def test_natural_revisit_restores_recent_condition_after_rebuild():
                      snap, "怎样更换头像？", (other,))
     for layout in ("stable_key", "contextpilot"):
         candidates = build_candidates(snap, "前面提到的限制是什么？", (current,),
-                                      EvidencePolicy(layout=layout))
+                                      EvidencePolicy(layout=layout),
+                                      query_context=QueryContext("回访限制", "revisit", (1,)))
         for candidate in candidates:
             assert condition.key in candidate.required_blocks <= candidate.visible_blocks
             assert condition.text in candidate.messages[-1].content
-            assert dict(candidate.evidence_resolution)[condition.key].startswith("natural_revisit:")
+            assert dict(candidate.evidence_resolution)[condition.key].startswith("selected_revisit:")
     explicit_only = build_candidates(snap, "前面提到的限制是什么？", (current,),
-                                    EvidencePolicy(revisit_mode="explicit"))[-1]
+                                    EvidencePolicy())[-1]
     assert condition.key not in explicit_only.required_blocks
 
 
@@ -529,9 +530,10 @@ def test_explicit_prior_revision_revisit_uses_committed_identity(query):
     snap = SessionSnapshot("s")
     snap = committed(build_candidates(snap, "q", (old,))[0], snap, "q", (old,))
     snap = committed(build_candidates(snap, "latest", (new,))[-1], snap, "latest", (new,))
-    candidate = build_candidates(snap, query, (new,))[-1]
+    candidate = build_candidates(snap, query, (new,),
+        query_context=QueryContext(query, "revisit", (1,)))[-1]
     assert candidate.feasible and candidate.required_blocks == {old.key, new.key}
-    assert dict(candidate.evidence_resolution)[old.key].endswith(":prior_revision")
+    assert dict(candidate.evidence_resolution)[old.key]== "selected_revisit:turn=1"
 
 
 def test_contextpilot_layout_is_independent_pure_and_keeps_complete_history():

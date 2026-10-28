@@ -290,6 +290,7 @@ def test_corpus_roundtrip_jsonl_and_dependency_cycle(tmp_path):
 
 @pytest.mark.asyncio
 async def test_corpus_metadata_survives_service_commit_and_revisit(tmp_path):
+    from controller.schema import QueryContext
     from controller.mock_engine import MockEngine
     from controller.planner import PlannerKnobs
     from controller.service import Controller
@@ -305,7 +306,8 @@ async def test_corpus_metadata_survives_service_commit_and_revisit(tmp_path):
     try:
         await controller.serve_turn("s", "What is max_retries?", index.resolve(("row",)))
         await controller.serve_turn("s", "How do avatars work?", index.resolve(("other",)))
-        await controller.serve_turn("s", "What about that condition?", index.resolve(("other",)))
+        await controller.serve_turn("s", "What about that condition?", index.resolve(("other",)),
+            query_context=QueryContext("the first condition", "revisit", (1,)))
         snapshot = store.read_snapshot("s")
         condition = index.resolve(("condition",))[0]
         assert condition.key in snapshot.execution.visible_blocks

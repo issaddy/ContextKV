@@ -22,13 +22,12 @@ import uuid
 
 from controller.candidates import CandidatePolicy, build_candidates
 from controller.config import RunConfig, create_model_template, load_config
-from controller.cost_model import CostModel
 from controller.generation import GenerationProtocol, candidate_request, validate_candidate_protocol
 from controller.engine_client import EngineError, EngineInfo, SGLangEngineClient
 from controller.planner import PlannerKnobs, choose_plan
 from controller.schema import CacheQuoteBatch, NoFeasiblePlan, PromptCandidate, SessionSnapshot
 from controller.serialization import decode, dumps, loads
-from controller.session_store import Attempt
+from controller.session_store import Attempt, load_record
 from controller.templates import ByteTemplate
 
 
@@ -102,7 +101,7 @@ def freeze_cases(database, manifest, split, template, *, limit=None, selection="
             raise ValueError("finish or recover the source run before freezing decisions")
         rows = connection.execute("SELECT json_remove(payload,'$.result') FROM attempts WHERE stage='COMMITTED' ORDER BY rowid")
         for (payload,) in rows:
-            attempt = loads(Attempt, payload)
+            attempt = load_record(connection, Attempt, payload)
             if not attempt.session_id.startswith(prefix):
                 continue
             conversation = attempt.session_id[len(prefix):]
@@ -118,11 +117,12 @@ def freeze_cases(database, manifest, split, template, *, limit=None, selection="
                     raise ValueError("missing pre-turn ledger snapshot")
                 skipped.append({"attempt_id": attempt.attempt_id, "reason": "initial_turn_has_one_candidate"})
                 continue
-            snapshot = loads(SessionSnapshot, old[0])
+            snapshot = load_record(connection, SessionSnapshot, old[0])
             policy = (replace(policy_config, layout="contextpilot")
                       if planner.strategy == "contextpilot" else policy_config)
             candidates = build_candidates(snapshot, attempt.query, attempt.evidence, policy, template,
                                           retrieval_priority=attempt.retrieval_priority,
+                                          query_context=attempt.query_context,
                                           measure_evidence_redundancy="redundancy_threshold" in {
                                               planner.strategy, planner.fallback_strategy})
             original = next((c for c in candidates if c.action == attempt.plan.candidate.action), None)
@@ -372,30 +372,9 @@ def analyze_pairs(rows, *, time_field="server_elapsed_ms", tie_ms=1.0):
 
 
 def _model_and_knobs(config, cases, artifact):
-    common = dict(max_new_tokens=cases[0].max_new_tokens,
-                  include_host_cost=config.ablation.host_cost, include_decode_cost=config.ablation.decode_cost,
-                  include_control_cost=config.ablation.control_cost)
-    if config.cost_model.uncertainty_mode is not None:
-        common["uncertainty_mode"] = config.cost_model.uncertainty_mode
-    if config.cost_model.admission_estimator is not None:
-        common["admission_estimator"] = config.cost_model.admission_estimator
-    settings = asdict(config.cost_model)
-    for key in ("artifact", "online_calibration", "output_length_artifact", "uncertainty_mode", "admission_estimator"):
-        settings.pop(key)
-    if artifact:
-        model = CostModel.load(artifact, **common)
-    elif config.calibration_path:
-        rows = [json.loads(line) for line in Path(config.calibration_path).read_text().splitlines() if line]
-        model = CostModel.from_measurements(rows, **common, **settings)
-    else:
-        model = CostModel(**common, **settings)
-    model.configure_for_run(config)
-    if config.cost_model.output_length_artifact:
-        from controller.output_length import OutputLengthModel
-        model.output_length_model = OutputLengthModel.load(config.cost_model.output_length_artifact,
-            expected_fingerprint=cases[0].candidates[0].fingerprint, max_new_tokens=cases[0].max_new_tokens, sampling=config.sampling,
-            expected_priors=model.effective_output_prior,
-            expected_generation_protocol=GenerationProtocol.from_config(config).record())
+    from controller.cost_config import load_cost_model
+    model = load_cost_model(config, artifact_path=artifact,
+        fingerprint=cases[0].candidates[0].fingerprint, max_new_tokens=cases[0].max_new_tokens)
     return model, config.planner
 
 

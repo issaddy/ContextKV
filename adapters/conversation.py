@@ -17,7 +17,7 @@ from adapters.retrieval import retrieval_query
 from controller.schema import QueryContext, TaskFrame
 
 
-VERSION = "conversational-intent-v16"
+VERSION = "conversational-intent-v17"
 FRAME_FIELDS = ("topic", "target", "conditions")
 RELATIONS = ("standalone", "followup", "correction", "condition_change", "topic_switch", "revisit", "ambiguous", "conversational")
 _DEPENDENT = re.compile(
@@ -28,7 +28,6 @@ _QUESTION_FORM = re.compile(
     r"^\s*(?:what|how|where|when|why|who|which|is|are|can|does|do)\b|"
     r"^\s*(?:tell me about|explain)\b", re.I)
 _FRAGMENT = re.compile(r"^\s*(?:use|using|with)\b|^\s*(?:使用|用|改用|换成)", re.I)
-_TASK = re.compile(r"^\s*how\b|^\s*(?:如何|怎么|怎样)", re.I)
 _REVISIT = re.compile(r"\b(?:first|original|earlier|previous|back to)\b|最初|最开始|回到|之前|先前|前者|后者", re.I)
 SYSTEM = """Interpret the CURRENT user request. Do not answer it or write a free-form rewritten query.
 previous_turn is PAST state, not the task the user must continue. Start with the current question.
@@ -233,23 +232,6 @@ def _history_query(turn, context):
     return retrieval_query(questions), tuple(range(first + 1, len(questions)))
 
 
-def _literal_task_continuation(turn, context, fragment):
-    """A bare named tool/service can qualify the previous unresolved task.
-
-    Keep both user clauses verbatim. Replacing an already named object or
-    interpreting a complete new instruction stays on the existing model path.
-    """
-    target = turn.query[fragment.end():].strip().rstrip(".?!。！？")
-    spans = named_user_spans(target, include_single_title=True)
-    if len(spans) != 1 or (spans[0]["start"], spans[0]["end"]) != (0, len(target)):
-        return None
-    prior = context.interpretations[-1] if context.interpretations else None
-    task = prior.query if prior is not None else turn.user_questions[-2]
-    if not _TASK.search(task) or named_user_spans(task, include_single_title=True):
-        return None
-    return QueryContext(task + "\n" + turn.query, "condition_change", (len(turn.user_questions)-1,))
-
-
 class ConversationResolver:
     def __init__(self, client=None):
         self.client = client
@@ -259,9 +241,9 @@ class ConversationResolver:
         return {"version": VERSION, "system_prompt": SYSTEM,
                 "initialization_prompt": INITIALIZE_SYSTEM,
                 "history": "current question, latest committed state and complete recent actual QA; older state-change questions with their preceding assistant message fit within the same input budget; explicit revisits retain their existing history view",
-                "calls": "one configured interpretation initializes the first task or updates later state; literal task composition still reuses exact clauses; no-client mode retains history handling",
+                "calls": "one configured interpretation initializes or updates every turn, including short object/condition changes; no-client mode only projects history",
                 "self_contained_gate": "the configured model decides whether a named question changes topic or retains conditions; name occurrence alone does not clear active state",
-                "condition_view": "literal named task continuation also supplies the unchanged current clause for condition-aware evidence selection",
+                "condition_view": "structured condition updates retain the task and all requirements",
                 "ambiguity": "retain the unresolved current question and relation for generation/commit; history-expanded retrieval does not choose a referent",
                 "task_state": "initialize a complete current frame when the previous turn has none; otherwise keep the existing task-first patch protocol; omitted attributes persist, null deletes; independent topics reset and explicit revisits resume",
                 "task_projection": "whole task plus explicit needs; each requirement query keeps its topic, target and every named condition, including attributes whose values occur elsewhere",
@@ -282,10 +264,6 @@ class ConversationResolver:
         if not turn.history and self.client is None:
             return finish("first_user_turn")
         fragment = _FRAGMENT.search(turn.query)
-        if evidence_documents is None and turn.history and fragment and (intent := _literal_task_continuation(turn, context, fragment)) is not None:
-            trace.update(text=intent.query, status="resolved", context=asdict(intent),
-                         condition_query=turn.query)
-            return finish("literal_task_continuation")
         if self.client is None:
             dependent = _DEPENDENT.search(turn.query) or correction_cue(turn.query) or fragment
             if not dependent and _QUESTION_FORM.search(turn.query) and named_user_spans(turn.query, include_single_title=True):

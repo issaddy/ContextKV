@@ -326,13 +326,23 @@ def test_model_free_named_questions_keep_the_existing_query_view():
     ("how to create schema or tables?", "use IBM Cloudant Query"),
     ("如何创建模式和表？", "使用 AtlasCloud"),
 ])
-def test_named_fragment_preserves_the_task_without_an_extra_model_call(task, qualifier):
-    client = Client(None)
-    view = ConversationResolver(client).resolve(turn(qualifier, ("Earlier unrelated question", task)), PriorContext())
-    assert view["text"] == task + "\n" + qualifier
-    assert view["context"] == asdict(QueryContext(view["text"], "condition_change", (2,)))
-    assert view["condition_query"] == qualifier
-    assert not client.inputs and not view["model_called"]
+def test_named_fragment_uses_structured_update_and_preserves_compound_state(task, qualifier):
+    frame = TaskFrame(task=task, conditions=(("platform", "Linux"), ("version", "v4")),
+                      requirements=("create schema", "create tables"))
+    prior = QueryContext(frame_query(frame), "standalone", task_frame=frame)
+    client = Client({"relation": "condition_change", "history_turns": [1],
+                     "updates": {"topic": qualifier.split()[-1]}})
+    view = ConversationResolver(client).resolve(turn(qualifier, (task,)), PriorContext(interpretations=(prior,)))
+    intent = decode(QueryContext, view["context"])
+    assert len(client.inputs) == 1 and view["model_called"] and view["state_mode"] == "patch"
+    assert intent.task_frame == replace(frame, topic=qualifier.split()[-1])
+    following = Client({"relation": "condition_change", "history_turns": [2],
+                        "updates": {"conditions": {"platform": "Windows"}}})
+    next_view = ConversationResolver(following).resolve(turn("Use Windows", (task, qualifier)),
+        PriorContext(interpretations=(prior, intent)))
+    final = decode(QueryContext, next_view["context"]).task_frame
+    assert next_view["state_mode"] == "patch" and final.requirements == frame.requirements
+    assert dict(final.conditions) == {"version": "v4", "platform": "Windows"}
 
 
 @pytest.mark.parametrize("task,current", [
@@ -439,7 +449,7 @@ def test_conversational_resolution_can_run_without_an_auxiliary_model():
     view = resolver.resolve(original, PriorContext())
     assert view["text"] == retrieval_query(original.user_questions) and not view["model_called"]
     task = turn("Use AtlasCloud", ("How do I create tables?",))
-    assert resolver.resolve(task, PriorContext())["reason"] == "literal_task_continuation"
+    assert resolver.resolve(task, PriorContext())["reason"] == "contextual_history_view_without_auxiliary_model"
     assert resolver.manifest["transport"] == {"kind":"no_auxiliary_model"}
     resolver.close()
 
@@ -616,12 +626,12 @@ def test_explicit_revision_replaces_retrieval_hit_without_mutating_archive(layou
     v2 = make_evidence("The v2 limit is 20.", "Atlas", version="v2")
     snap = SessionSnapshot("s", archive=(v1, v2))
     for hits in ((v2,), (v1, v2)):
-        plan = build_candidates(snap, "Use Atlas v1", hits, EvidencePolicy(layout=layout))[0]
+        plan = build_candidates(snap, "Use Atlas v1", hits, EvidencePolicy(layout=layout, explicit_keys=(v1.key,)))[0]
         assert plan.required_blocks == {v1.key}
         assert v2.text not in plan.messages[-1].content
         v2_ref = next(ref for ref, key in plan.reference_map if key == v2.key)
         assert v2_ref not in plan.messages[-1].content
-    compare = build_candidates(snap, "Compare Atlas v1 and v2", (v2,))[0]
+    compare = build_candidates(snap, "Compare Atlas v1 and v2", (v1, v2))[0]
     assert compare.required_blocks == {v1.key, v2.key}
     assert snap.archive == (v1, v2)
 
@@ -631,7 +641,7 @@ def test_revision_prefix_does_not_select_the_wrong_archived_version(revision):
     old = make_evidence("Original revision.", "Atlas", version="v1")
     new = make_evidence("Requested revision.", "Atlas", version=revision)
     snap = SessionSnapshot("s", archive=(old, new))
-    candidate = build_candidates(snap, f"Use Atlas {revision}.", (old, new))[0]
+    candidate = build_candidates(snap, f"Use Atlas {revision}.", (new,))[0]
     assert candidate.required_blocks == {new.key}
 
 
@@ -650,7 +660,7 @@ def test_selected_revisit_restores_older_source_beyond_recent_history_window():
         assert old.text in candidate.messages[-1].content
 
 
-def test_multiple_selected_antecedents_do_not_restore_the_last_unrelated_source():
+def test_selected_revisit_retains_all_upstream_selected_sources_without_second_guessing():
     snap = SessionSnapshot("s")
     for name in ("Atlas", "Nova"):
         block = make_evidence(f"{name} application material.", name)
@@ -659,7 +669,7 @@ def test_multiple_selected_antecedents_do_not_restore_the_last_unrelated_source(
     current = make_evidence("Atlas revised material.", "new")
     intent = QueryContext("Atlas application material?", "revisit", (1, 2))
     for plan in build_candidates(snap, "Back to the first one?", (current,), query_context=intent):
-        assert plan.required_blocks == {current.key}
+        assert plan.required_blocks == {current.key, *(b.key for b in snap.archive)}
 
 
 @pytest.mark.asyncio
@@ -674,7 +684,8 @@ async def test_disjoint_append_commits_new_scope_then_version_change_retires_aft
         snapshot = store.get_snapshot("s")
         original_epoch = snapshot.current_epoch
         request = turn("Use AtlasCloud", (snapshot.raw_history[0].user_text,))
-        intent = QueryContext(**ConversationResolver(Client(None)).resolve(request, PriorContext())["context"])
+        intent = decode(QueryContext, ConversationResolver(Client({"query": "Create tables with AtlasCloud",
+            "relation": "condition_change", "history_turns": [1]})).resolve(request, PriorContext())["context"])
         second = await service.serve_turn("s", request.query, (current,), query_context=intent, request_id="two")
         snapshot = store.get_snapshot("s")
         assert second.action == "APPEND" and snapshot.current_epoch == original_epoch

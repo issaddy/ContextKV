@@ -111,6 +111,29 @@ def test_changed_completed_generation_bytes_cannot_be_graded_as_original(tmp_pat
         experiments.select_development(spec, results)
 
 
+def test_archive_relocation_uses_explicit_mapping_and_original_content_hashes(tmp_path):
+    import shutil
+    spec, results, quality = setup_joint(tmp_path)
+    frozen = experiments.select_development(spec, results)
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    inputs = experiments.quality_evidence_files(spec)
+    for name in inputs:
+        shutil.copy2(name, archive / Path(name).name)
+    spec["path_map"] = {str(tmp_path): str(archive)}
+    # Saved declarations still point at the original locations; no audit or
+    # frozen protocol is rewritten simply because the bundle moved.
+    for name in inputs - {spec["split_manifest"]}:
+        Path(name).unlink()
+    moved = experiments.select_development(spec, results)
+    assert moved["winners"] == frozen["winners"]
+    experiments.require_frozen_sources(frozen["provenance"], experiments.provenance(spec))
+    audit = archive / Path(quality["methods"]["candidate"]["audit"]).name
+    audit.write_text(audit.read_text() + "\n")
+    with pytest.raises(ValueError, match="bytes differ"):
+        experiments.select_development(spec, results)
+
+
 @pytest.mark.parametrize('kind', ['missing_dimension', 'noninferiority_failed', 'protocol_mismatch'])
 def test_incomplete_or_unqualified_scores_produce_readiness_not_b6(tmp_path, kind):
     spec, results, quality = setup_joint(tmp_path)

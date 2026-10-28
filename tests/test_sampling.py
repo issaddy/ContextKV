@@ -355,7 +355,8 @@ def test_offline_rescore_cannot_relabel_outcomes_with_new_recipe(tmp_path, monke
 def test_length_training_and_serving_use_same_recipe_fallback_center():
     from profiling.length_fit import training_priors
     from controller.templates import SYSTEM_PROMPT
-    baseline = {"settings": {"default_output_tokens": 433, "p90_output_tokens": 512}, "metadata": {}}
+    baseline = {"settings": {"default_output_tokens": 433, "p90_output_tokens": 512}, "metadata": {},
+                "prefill_points": [], "decode_points": []}
     config = {"sampling": RECIPE.record(), "cost_model": {"default_output_tokens": 128, "p90_output_tokens": 256}}
     fitted, binding = training_priors(baseline, config)
     serving = CostModel(default_output_tokens=433, p90_output_tokens=512)
@@ -368,7 +369,6 @@ def test_length_training_and_serving_use_same_recipe_fallback_center():
     assert training_priors(baseline, config)[0] == (128, 256)  # Missing prompt binding still falls back.
     baseline["metadata"]["output_prior_system_prompt"] = SYSTEM_PROMPT
     assert training_priors(baseline, config)[0] == (433, 512)
-    assert training_priors(baseline, None) == ((433, 512), {"status": "unknown_source_configuration_legacy_prior"})
 
 
 @pytest.mark.parametrize("recipe", [None, RECIPE])

@@ -11,6 +11,7 @@ import json
 import math
 from pathlib import Path
 
+from bench.artifact_paths import remap
 from bench.judge import DIMENSIONS, evaluation_binding
 from bench.official import load_jsonl
 from bench.report import bind_quality_rows, paired_quality
@@ -214,6 +215,8 @@ def _read_method(spec):
 
 
 def evaluate(spec):
+    mapping = spec.get("path_map", {})
+    spec = remap(spec, mapping)
     scope = spec["scope"]
     if scope not in {"dev", "heldout"}:
         raise ValueError("quality scope must be dev or heldout")
@@ -260,7 +263,7 @@ def evaluate(spec):
         method["summary"]["original_split_binding_verified"] = bool(split_digest and method["split_hashes"])
     frozen = None
     if spec.get("frozen_protocol"):
-        frozen = json.loads(Path(spec["frozen_protocol"]).read_text())
+        frozen = remap(json.loads(Path(spec["frozen_protocol"]).read_text()), mapping)
         if any(frozen.get(k) != value for k, value in {
                 "scope": scope, "reference": reference_name, "epsilon": epsilon, "dimensions": list(declared_dimensions)}.items()):
             raise ValueError("frozen quality protocol differs from requested comparison")

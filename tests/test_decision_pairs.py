@@ -20,7 +20,7 @@ from profiling.decision_pairs import (DecisionPairCollector, analyze_pairs, free
                                       load_frozen, main, rescore_pairs, select_cases, write_frozen)
 
 
-def source_run(tmp_path, *, layout="stable_key", strategy="always_append"):
+def source_run(tmp_path, *, layout="stable_key", strategy="always_append", intent=None):
     async def prepare():
         config = RunConfig()
         config = replace(config, context=replace(config.context, layout=layout),
@@ -34,7 +34,7 @@ def source_run(tmp_path, *, layout="stable_key", strategy="always_append"):
             await service.serve_turn("run:dev-session", "first query", (a,), request_id="first")
             engine.response_text = "CURRENT_ANSWER_MUST_NOT_BE_EXPORTED"
             await service.serve_turn("run:dev-session", "second query", (b, a), request_id="second",
-                                     retrieval_priority=(a.key, b.key))
+                                     retrieval_priority=(a.key, b.key), query_context=intent)
             await service.close_session("run:dev-session")
         finally:
             await service.aclose()
@@ -51,6 +51,17 @@ def source_run(tmp_path, *, layout="stable_key", strategy="always_append"):
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest))
     return tmp_path / "source.sqlite3", manifest, split, manifest_path, split_path
+
+
+def test_frozen_replay_reconstructs_content_addressed_text_and_structured_intent(tmp_path):
+    from controller.schema import QueryContext, TaskFrame
+    intent = QueryContext("Compare both sources on Linux", "revisit", (1,),
+                          TaskFrame(task="compare", conditions=(("platform", "Linux"),)))
+    database, manifest, split, _, _ = source_run(tmp_path, intent=intent)
+    cases, skipped = freeze_cases(database, manifest, split, ByteTemplate())
+    assert len(cases) == 1
+    assert all(row["reason"] == "initial_turn_has_one_candidate" for row in skipped)
+    assert all(intent.query in candidate.messages[-1].content for candidate in cases[0].candidates)
 
 
 @pytest.mark.parametrize("layout", ("stable_key", "contextpilot"))

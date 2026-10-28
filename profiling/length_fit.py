@@ -351,19 +351,10 @@ def fit_exploration(cases, *, priors=(433, 512)):
 
 
 def training_priors(baseline, source_configuration):
-    """Use the serving prior center for residuals, including recipe fallback.
-
-    Only prior settings/metadata are needed; timing points and stage simulation
-    are not loaded or changed by length fitting.
-    """
-    from controller.cost_model import CostModel
-    model = CostModel(default_output_tokens=baseline["settings"]["default_output_tokens"],
-                      p90_output_tokens=baseline["settings"]["p90_output_tokens"])
-    model.calibration_metadata = baseline.get("metadata", {})
-    if source_configuration is None:
-        return model.effective_output_prior, {"status": "unknown_source_configuration_legacy_prior"}
-    report = model.configure_for_run(source_configuration)
-    return model.effective_output_prior, report
+    """Resolve the residual center with the same pure assembly as serving."""
+    from controller.cost_config import assemble_cost_model
+    model = assemble_cost_model(source_configuration, artifact=baseline)
+    return model.effective_output_prior, model.sampling_scope_report
 
 
 def main(argv=None):

@@ -398,12 +398,25 @@ class Controller:
                 attempt = self.store.save_attempt(replace(attempt, stage="RESULT_READY", result=result))
                 self._validate(attempt, result)
                 snapshot = self.store.commit_turn_and_outbox(attempt.attempt_id)
-                committed_at = time.monotonic()
-                timing = ClientTiming(arrived, submitted,
-                    submitted+result.ttft_ms/1000 if result.ttft_ms is not None else None,
-                    submitted+result.last_token_ms/1000 if result.last_token_ms is not None else None,
-                    response_done, committed_at, token_observation="chunk" if result.ttft_ms is not None else "none")
-                control_ms = ((submitted-entered) + (committed_at-response_done))*1000 - (retrieval_ms or 0)
+            except BaseException as exc:
+                current = self.store.get_attempt(attempt.attempt_id)
+                if current.stage in ("STARTED", "PLANNED", "PREPARED"):
+                    self.store.fail_attempt(attempt.attempt_id, str(exc))
+                    self._retire_background()
+                else:
+                    # PREPARING can have a lost ACK. SUBMITTED can have a lost result.
+                    # RESULT_READY can have a failed CAS. None permit a blind retry.
+                    self.events.emit("attempt_recovery_required", business_session_id=session_id,
+                                     attempt_id=attempt.attempt_id, stage=current.stage, error=str(exc))
+                self.events.emit("attempt_failed", business_session_id=session_id, attempt_id=attempt.attempt_id, error=str(exc))
+                raise
+            committed_at = time.monotonic()
+            timing = ClientTiming(arrived, submitted,
+                submitted+result.ttft_ms/1000 if result.ttft_ms is not None else None,
+                submitted+result.last_token_ms/1000 if result.last_token_ms is not None else None,
+                response_done, committed_at, token_observation="chunk" if result.ttft_ms is not None else "none")
+            control_ms = ((submitted-entered) + (committed_at-response_done))*1000 - (retrieval_ms or 0)
+            try:
                 self._postplan_control_ms[plan.candidate.action].append(
                     ((submitted-plan_started)+(committed_at-response_done))*1000)
                 self.cost_model.observe_output(len(result.output_ids))
@@ -418,18 +431,8 @@ class Controller:
                                  timing_source=result.timing_source)
                 self.events.emit("ledger_committed", business_session_id=session_id, attempt_id=attempt.attempt_id,
                                  ledger_version=snapshot.version, epoch=epoch.epoch_no)
-            except BaseException as exc:
-                current = self.store.get_attempt(attempt.attempt_id)
-                if current.stage in ("STARTED", "PLANNED", "PREPARED"):
-                    self.store.fail_attempt(attempt.attempt_id, str(exc))
-                    self._retire_background()
-                else:
-                    # PREPARING can have a lost ACK. SUBMITTED can have a lost result.
-                    # RESULT_READY can have a failed CAS. None permit a blind retry.
-                    self.events.emit("attempt_recovery_required", business_session_id=session_id,
-                                     attempt_id=attempt.attempt_id, stage=current.stage, error=str(exc))
-                self.events.emit("attempt_failed", business_session_id=session_id, attempt_id=attempt.attempt_id, error=str(exc))
-                raise
+            except Exception as error:
+                self.events.report_error(error)
             self._retire_background()
             return self._response(replace(attempt, stage="COMMITTED"),
                                   elapsed_ms=(committed_at-arrived)*1000, timing=timing, control_ms=control_ms)

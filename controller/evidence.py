@@ -22,8 +22,6 @@ class EvidencePolicy:
     explicit_keys: tuple[EvidenceKey, ...] = ()
     reference_prefix_length: int = 10
     layout: str = "stable_key"
-    revisit_mode: str = "conservative"
-    revisit_history_turns: int = 3
     system_prompt: str | None = None
     table_relations: bool = False
     table_annotation_style: str = "all_rows"
@@ -34,10 +32,6 @@ class EvidencePolicy:
             raise ValueError("token budgets must be positive")
         if self.layout not in {"stable_key", "contextpilot"}:
             raise ValueError("layout must be stable_key or contextpilot")
-        if self.revisit_mode not in {"explicit", "conservative"}:
-            raise ValueError("revisit_mode must be explicit or conservative")
-        if self.revisit_history_turns < 1:
-            raise ValueError("revisit_history_turns must be positive")
         if self.system_prompt is not None and not self.system_prompt.strip():
             raise ValueError("system_prompt must be nonempty when provided")
         if self.table_annotation_style not in {"all_rows", "focus_refs"}:
@@ -132,83 +126,6 @@ def allows_version_comparison(query: str, policy: EvidencePolicy) -> bool:
         r"\b(compare|comparison|versus|vs\.?|difference)\b|对比|比较|差异|新旧", query, re.I))
 
 
-def _mentioned(term: str, query: str) -> bool:
-    if re.search(r"[\u3400-\u9fff]", term):
-        return term.casefold() in query.casefold()
-    return bool(term and re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", query, re.I))
-
-
-def _mentioned_version(version: str, query: str) -> bool:
-    """Match a literal revision, not a prefix such as v1 inside v1.1/v1-rc2."""
-    return bool(version and re.search(
-        r"(?<![\w.+-])" + re.escape(version) + r"(?!\w|[.\-+]\w)", query, re.I))
-
-
-# These are cues in the current question, not dataset annotations or gold labels.
-_REVISIT = re.compile(
-    r"\b(previous(?:ly)?|earlier|above|aforementioned|that|those|same)\b|"
-    r"前面|前文|之前|刚才|上述|那个|那些|这一|这个|这些|同一", re.I)
-_TOPICS = {
-    "condition": re.compile(r"\b(condition|restriction|limitation|limit|exception|only|unless)s?\b|"
-                            r"条件|限制|例外|仅当|仅限|除非", re.I),
-    "timeout": re.compile(r"\b(timeout|time-out|deadline)s?\b|超时", re.I),
-    "version": re.compile(r"\b(version|release|supported)s?\b|版本|支持", re.I),
-    "configuration": re.compile(r"\b(configuration|config|setting|parameter)s?\b|配置|参数", re.I),
-}
-
-
-def _natural_revisits(query: str, archive: Mapping[EvidenceKey, EvidenceBlock],
-                      snapshot: SessionSnapshot, policy: EvidencePolicy,
-                      current: set[EvidenceKey], revisit_turns: tuple[int, ...] | None = None) -> dict[EvidenceKey, str]:
-    """Resolve explicit anaphora only when a recent committed turn disambiguates it.
-
-    A semantic topic must occur in the evidence itself. Ties are left unresolved;
-    recency or a dataset's follow-up label alone is never enough to invent a match.
-    """
-    prior_version = bool(_PRIOR_VERSION.search(query))
-    if (policy.revisit_mode != "conservative" or revisit_turns == ()
-            or revisit_turns is None and not (_REVISIT.search(query) or prior_version)):
-        return {}
-    topics = [name for name, pattern in _TOPICS.items() if pattern.search(query)]
-    current_groups = {(k.corpus_id, k.document_id, k.passage_id) for k in current}
-    history = (snapshot.raw_history[-policy.revisit_history_turns:] if revisit_turns is None else
-               tuple(turn for ordinal, turn in enumerate(snapshot.raw_history, 1) if ordinal in revisit_turns))
-    groups = [(str(turn.turn_id), turn.evidence_keys) for turn in reversed(history)]
-    if revisit_turns is not None and history:
-        # Explicitly selected turns form one antecedent set. Recency must not
-        # silently choose the last (possibly different) object from that set.
-        groups = [("+".join(str(t.turn_id) for t in history),
-                   tuple(dict.fromkeys(key for t in history for key in t.evidence_keys)))]
-    for turn_label, evidence_keys in groups:
-        keys = [key for key in evidence_keys if key in archive and
-                (prior_version or key in current or (key.corpus_id, key.document_id, key.passage_id)
-                 not in current_groups)]
-        if not keys:
-            continue
-        if prior_version:
-            previous = [key for key in keys if key not in current and
-                        (key.corpus_id, key.document_id, key.passage_id) in current_groups]
-            if len(previous) == 1:
-                return {previous[0]: f"natural_revisit:turn={turn_label}:prior_revision"}
-            if previous:
-                return {}
-            continue
-        if topics:
-            matched = [key for key in keys if all(_TOPICS[topic].search(
-                archive[key].title + "\n" + archive[key].text) for topic in topics)]
-            # Multiple passages from the same document/section can jointly state
-            # a rule; the explicit corpus dependencies provide the rest.
-            if len(matched) == 1:
-                return {matched[0]: f"natural_revisit:turn={turn_label}:topic={','.join(topics)}"}
-            if matched:
-                return {}
-        elif len(keys) == 1:
-            return {keys[0]: f"natural_revisit:turn={turn_label}:unique_antecedent"}
-        else:
-            return {}
-    return {}
-
-
 def select_shared_required_evidence(query: str, retrieved: Iterable[EvidenceBlock],
                                    snapshot: SessionSnapshot,
                                    policy: EvidencePolicy | None = None
@@ -246,65 +163,19 @@ def resolve_required_evidence_with_reasons(query: str, current: Iterable[Evidenc
         if ref not in references:
             raise EvidenceError(f"unknown evidence reference: {ref}")
         reasons[references[ref]] = "explicit_reference:" + ref
-    folded = query.casefold()
-    current_groups = {(key.corpus_id,key.document_id,key.passage_id) for key in current}
-    revisits = _natural_revisits(query, archive, snapshot, policy, current, revisit_turns)
-    # An identifier names a field within an object, not the object itself. Current
-    # or explicit evidence can establish its object; historical recovery remains
-    # limited to the exact selected/resolved evidence, not every archived passage
-    # that happens to share its document identity.
-    object_scopes = {(key.corpus_id, key.document_id, key.version)
-                     for key in reasons}
-    current_scopes = {(key.corpus_id, key.document_id, key.version) for key in current}
-    current_documents = {(key.corpus_id, key.document_id) for key in current}
-    selected_history = (None if revisit_turns is None else {
-        key for ordinal, turn in enumerate(snapshot.raw_history, 1)
-        if ordinal in revisit_turns for key in turn.evidence_keys})
-    anchor_matches: dict[str, list[EvidenceBlock]] = {}
-    for block in archive.values():
-        group = (block.key.corpus_id,block.key.document_id,block.key.passage_id)
-        if block.key in current or group not in current_groups:
-            for anchor in block.anchors:
-                if _mentioned(anchor, folded):
-                    anchor_matches.setdefault(anchor, []).append(block)
-        # A version plus its named document is an explicit revisit, not a
-        # similarity-based restoration of arbitrary historical evidence.
-        names = (block.key.document_id, block.title)
-        if _mentioned_version(block.key.version,folded) and any(
-                _mentioned(name, folded) for name in names if name):
-            reasons[block.key] = "explicit_document_version"
-    for matches in anchor_matches.values():
-        # A configuration identifier can occur in unrelated products. Scope it
-        # using explicit source/version names or the current retrieval, rather
-        # than treating lexical agreement as proof of the same referent.
-        named = [block for block in matches if any(_mentioned(name, folded)
-                 for name in (block.key.document_id, block.title) if name)]
-        scoped = named or [block for block in matches if
-            (block.key.corpus_id, block.key.document_id, block.key.version) in object_scopes
-            or selected_history is not None and block.key in selected_history]
-        if not scoped:
-            continue
-        versions = [block for block in scoped if _mentioned_version(block.key.version, folded)]
-        if versions:
-            scoped = versions
-        if not versions:
-            scoped = [block for block in scoped if
-                      (block.key.corpus_id, block.key.document_id) not in current_documents or
-                      (block.key.corpus_id, block.key.document_id, block.key.version) in current_scopes]
-        if not named and len({(block.key.corpus_id, block.key.document_id)
-                              for block in scoped}) > 1:
-            continue
-        for block in scoped:
-            reasons.setdefault(block.key, "configuration_anchor")
-    for key, reason in revisits.items():
-        reasons.setdefault(key, reason)
+    # Interpretation owns historical scope. This layer resolves exact identities
+    # and dependencies; it does not infer an object from anchors or topic words.
+    for ordinal, turn in enumerate(snapshot.raw_history, 1):
+        if ordinal in (revisit_turns or ()):
+            for key in turn.evidence_keys:
+                reasons.setdefault(key, f"selected_revisit:turn={ordinal}")
     if not allows_version_comparison(query, policy):
         # An explicitly requested archived revision replaces a conflicting
         # retrieval hit for the SAME passage. Other documents and declared
         # dependencies remain subject to the existing visibility checks.
         explicit = {}
         for key, reason in reasons.items():
-            if reason == "explicit_document_version" or reason.startswith("explicit_reference:"):
+            if reason == "explicit_key" or reason.startswith(("explicit_reference:", "selected_revisit:")):
                 group = (key.corpus_id, key.document_id, key.passage_id)
                 explicit.setdefault(group, set()).add(key)
         for key in tuple(reasons):

@@ -315,20 +315,19 @@ def test_conversational_factory_uses_the_same_pipeline_without_a_model_client(re
     snapshot = SessionSnapshot("s", raw_history=(TurnRecord(1,"How do I create tables?","Actual response."),))
     try:
         selected = wrapper._retrieve(snapshot, "Use AtlasCloud", "request", time.monotonic())
-        assert selected.query_context.query == "How do I create tables?\nUse AtlasCloud"
-        assert retriever.encoder.inputs == ([selected.query_context.query] if fusion == "single" else
-                                             ["Use AtlasCloud", selected.query_context.query])
-        assert retriever.reranker.inputs == [selected.query_context.query, "Use AtlasCloud"]
-        trace = retriever.manifest["query_view_traces"][0]["condition_evidence"]
-        assert trace["extra_rerank_pairs"] == 6
-        assert [key.document_id for key in selected.retrieval_priority] == trace["selected_ids"]
+        assert selected.query_context is None
+        query = "How do I create tables?\nUse AtlasCloud"
+        assert retriever.encoder.inputs == ([query] if fusion == "single" else
+                                             ["Use AtlasCloud", query])
+        assert retriever.reranker.inputs == [query]
+        assert "condition_evidence_selection" not in retriever.manifest
         assert retriever.manifest["query_view"]["transport"]["kind"] == "no_auxiliary_model"
     finally:
         wrapper.close()
 
 
 @pytest.mark.asyncio
-async def test_condition_selection_commits_once_through_the_serving_pipeline(retriever_config, tmp_path):
+async def test_history_projection_commits_once_through_the_serving_pipeline(retriever_config, tmp_path):
     from adapters.serving_retrieval import ServingRetriever
     from controller.evidence import make_evidence
     from controller.mock_engine import MockEngine
@@ -349,9 +348,8 @@ async def test_condition_selection_commits_once_through_the_serving_pipeline(ret
         response = await service.serve_turn("session", "Use AtlasCloud", evidence_provider=provider,
                                             corpus_snapshot_id=wrapper.corpus_snapshot_id, request_id="second")
         state = store.get_snapshot("session")
-        trace = retriever.manifest["query_view_traces"][0]["condition_evidence"]
-        assert {key.document_id for key in state.raw_history[-1].evidence_keys} == set(trace["selected_ids"])
-        assert state.raw_history[-1].query_context.query == "How do I create tables?\nUse AtlasCloud"
+        assert state.raw_history[-1].evidence_keys
+        assert state.raw_history[-1].query_context is None
         assert state.raw_history[-1].assistant_text == response.assistant_text
         calls = list(retriever.reranker.inputs)
         replay = await service.serve_turn("session", "Use AtlasCloud", evidence_provider=provider,

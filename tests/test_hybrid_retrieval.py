@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from adapters.hybrid_retrieval import (DenseIndex, query_text, reciprocal_rank_fusion,
-                                      search_variants, select_condition_evidence, select_ranked_evidence,
+                                      search_variants, select_ranked_evidence,
                                       select_requirement_evidence, search_requirements)
 from adapters.mtrag import OnlineContext, json_hash, load_rows
 from adapters.retrieval import BM25SRetriever, load_beir_corpus
@@ -120,19 +120,6 @@ def test_ranked_selection_restores_distinct_content_without_rescoring_or_changin
         ranked[0], distinct_title, distinct_bytes)
 
 
-def test_condition_task_anchor_is_reserved_even_when_its_copy_ranks_above_it():
-    primary = tuple(OnlineContext(f"p{i}", "Task body." if i in (0,1) else f"Original {i}",
-                                  title="Task guide") for i in range(7))
-    class Scorer:
-        def score(self, query, pool):
-            return [0 if c.document_id == "p0" else 20-int(c.document_id[1:]) for c in pool]
-    stage = {"contexts":primary, "rerank_query":"full task",
-             "rerank_candidate_ids":[c.document_id for c in primary]}
-    selected, trace = select_condition_evidence(stage,"new condition",Scorer())
-    assert {"p0", "p1"} <= {c.document_id for c in selected}
-    assert len(selected) == 6 and len({c.text for c in selected}) == 5
-    assert trace["extra_rerank_pairs"] == 7  # Existing condition pass only.
-    assert trace["evidence_selection"]["anchor"] == "p0"
 
 
 def test_requirement_selection_spends_group_budget_once_and_keeps_each_selected_source():
@@ -146,38 +133,8 @@ def test_requirement_selection_spends_group_budget_once_and_keeps_each_selected_
     assert len(trace['marginal_gains']) == 2
 
 
-def test_condition_selection_keeps_the_task_anchor_displaced_by_plain_fusion():
-    primary = tuple(OnlineContext(f"p{i}", f"Original body {i}\nKeep complete.",
-                                  title=f"Source {i}", score=50-i) for i in range(50))
-    primary_ids = [c.document_id for c in primary]
-    condition_ids = primary_ids[2:] + primary_ids[1::-1]
-    plain = reciprocal_rank_fusion([primary_ids, condition_ids])
-    assert "p0" not in [pid for pid, _ in plain[:5]]
-    calls = []
-    class FocusReranker:
-        def score(self, query, pool):
-            calls.append((query, tuple(c.document_id for c in pool)))
-            return [50-condition_ids.index(c.document_id) for c in pool]
-    stage = {"contexts":primary,"rerank_query":"whole task with new condition",
-             "rerank_candidate_ids":primary_ids[::-1]}
-    selected, trace = select_condition_evidence(stage,"current condition",FocusReranker())
-    assert calls == [("current condition", tuple(primary_ids[::-1]))]
-    assert len(selected) == 5 and "p0" in [c.document_id for c in selected]
-    assert "p1" not in [c.document_id for c in selected]
-    assert trace["anchor_changed_selection"] and trace["extra_rerank_pairs"] == 50
-    originals = {c.document_id:c for c in primary}
-    for context in selected:
-        original = originals[context.document_id]
-        assert (context.text,context.title,context.source) == (original.text,original.title,original.source)
-    assert [c.score for c in selected] == sorted((c.score for c in selected),reverse=True)
 
 
-@pytest.mark.parametrize("condition,size", [(None,8),("whole task",8),("new condition",5)])
-def test_condition_selection_skips_redundant_scoring(condition,size):
-    primary = contexts()[:size]
-    reranker = Reranker()
-    selected, trace = select_condition_evidence({"contexts":primary,"rerank_query":"whole task"},condition,reranker)
-    assert selected == primary[:5] and trace is None and not reranker.calls
 
 
 def test_query_views_and_explicit_generated_history():

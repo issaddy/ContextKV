@@ -180,7 +180,9 @@ def test_evaluation_export_failure_keeps_committed_history_and_fails_artifact_de
         assert len(snapshots) == concurrency
         for session_id, snapshot, closed in snapshots:
             assert closed == 1
-            assert [turn['assistant_text'] for turn in json.loads(snapshot)['raw_history']] == [
+            from controller.session_store import load_record
+            from controller.schema import SessionSnapshot
+            assert [turn.assistant_text for turn in load_record(db, SessionSnapshot, snapshot).raw_history] == [
                 turn['assistant_text'] for turn in turns if session_id.endswith(':' + turn['conversation_id'])]
         assert db.execute("SELECT count(*) FROM attempts WHERE stage='COMMITTED'").fetchone()[0] == 3*concurrency
 
