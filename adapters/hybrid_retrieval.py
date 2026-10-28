@@ -568,7 +568,7 @@ def validate_retrieval_options(*, query_mode, stage, query_fusion, rerank_query_
                                candidate_k, rerank_k, rrf_k, joint_selection=False):
     """One contract for file-based configuration and direct construction."""
     from adapters.query_resolution import SOURCE_MODES
-    if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", *SOURCE_MODES}:
+    if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", "faithful", *SOURCE_MODES}:
         raise ValueError(f"unknown online query_mode: {query_mode}")
     if stage not in {"dense", "hybrid", "hybrid_rerank"}:
         raise ValueError("unknown retrieval stage")
@@ -578,7 +578,7 @@ def validate_retrieval_options(*, query_mode, stage, query_fusion, rerank_query_
         raise ValueError("current_topic_rrf requires user_topic/conversational/source_topic/assistant_topic_unverified and hybrid/hybrid_rerank")
     if query_fusion == "dialogue_rrf" and (query_mode != "conversational" or stage == "dense"):
         raise ValueError("dialogue_rrf requires conversational hybrid retrieval")
-    if query_mode == "conversational" and rerank_query_mode != "resolved":
+    if query_mode in {"conversational", "faithful"} and rerank_query_mode != "resolved":
         raise ValueError("conversational retrieval needs resolved reranking")
     if joint_selection and (query_mode != "conversational" or query_fusion != "single"):
         raise ValueError("joint semantic selection uses conversational mode and its own literal/state recall; query_fusion must be single")
@@ -612,7 +612,7 @@ class HybridRetriever:
             joint_selection=evidence_selector is not None)
         if query_mode in SOURCE_MODES and (resolver is None or query_fusion != "current_topic_rrf"):
             raise ValueError("topic selector modes require resolver and current_topic_rrf")
-        if query_mode == "conversational" and resolver is None:
+        if query_mode in {"conversational", "faithful"} and resolver is None:
             raise ValueError("conversational retrieval needs a resolver")
         if stage == "hybrid_rerank" and reranker is None:
             raise ValueError("hybrid_rerank requires a loaded reranker")
@@ -624,7 +624,7 @@ class HybridRetriever:
         self.query_fusion = query_fusion
         self.rerank_query_mode = rerank_query_mode
         self.resolver = resolver
-        self.requires_history_context = query_mode in SOURCE_MODES or query_mode == "conversational"
+        self.requires_history_context = query_mode in SOURCE_MODES or query_mode in {"conversational", "faithful"}
         self.requires_source_context = query_mode in SOURCE_MODES
         self.candidate_k, self.rerank_k, self.rrf_k = candidate_k, rerank_k, rrf_k
         self.source_config = source_config

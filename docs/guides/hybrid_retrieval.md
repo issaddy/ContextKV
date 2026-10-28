@@ -70,6 +70,8 @@ python -m bench.retrieval_eval evaluate \
 
 配置可选 `stage: dense / hybrid / hybrid_rerank` 和 `query_mode: current / last3 / all_user`。hybrid示例保留已实测的 last3 + hybrid_rerank、候选 50、reranker 1024、BF16、检索 GPU1；控制器默认稳定布局。多轮主线使用conversational示例，通过显式selector配置按需复用已有Qwen3服务。`--evidence-corpus`在现有重排前提供原始来源与标题，HTTP和两种CLI共用同一绑定。未传新参数时，现有 `--retriever-index` 或 `--corpus` 行为保持不变。配置文件与旧参数不可同时指定，以免运行来源不明确。
 
+实验性`query_mode: faithful`复用同一selector、检索器及生成链，使用`query_fusion: single`和`evidence_selection: ranked`。它直接读取全部历史用户原话，按预算从近到远补入完整助手消息，一次输出当前查询及引用历史轮次，不读取或递推派生TaskFrame。解析失败使用原last3用户查询；歧义保留原问题及ambiguous标记。可复制conversational配置并只修改query_mode使用；默认仍为conversational，完整系统效果待验证。
+
 ```bash
 export TOKENIZERS_PARALLELISM=false RAYON_NUM_THREADS=4
 export OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 MKL_NUM_THREADS=4
