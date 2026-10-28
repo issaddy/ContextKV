@@ -1,7 +1,8 @@
 """Offline Granite Guardian 4.1 native binary risk diagnostic.
 
-Uses complete visible documents and native token IDs, not the five-dimension
-judge schema. Official prompt wording is Apache-2.0; see the Granite notice.
+Uses complete documents and native token IDs, not the five-dimension judge
+schema. Evidence profiles distinguish legacy visibility from current authority.
+Official prompt wording is Apache-2.0; see the Granite notice.
 """
 from __future__ import annotations
 
@@ -18,11 +19,22 @@ import httpx
 from bench.judge import evaluation_binding, judge_payload, rule_audit
 from bench.native_baseline import NativeProtocolError, NativeSGLangClient
 from bench.official import load_jsonl
+from controller.schema import EvidenceBlock
+from controller.serialization import decode
+from controller.templates import _evidence_header
 
 
 MODEL_ID = "ibm-granite/granite-guardian-4.1-8b"
 MODEL_REVISION = "ab01ccca5dcfb80246369a086a4a87a29198f5af"
 SOURCE_REVISION = "0a4ec708fa916f3e9d7fc7e5b75dff836752f448"
+EVIDENCE_PROFILES = {
+    "visible_text_v1": "all visible original bodies; legacy diagnostic",
+    "current_text_v1": "complete original bodies whose IDs are in the current citation_scope",
+    "current_provenance_v1": (
+        "current citation_scope bodies with the generator's source/title/revision header; "
+        "original body text is unchanged"
+    ),
+}
 GROUNDEDNESS_CRITERION = (
     "A text is considered ungrounded or unfaithful if it includes information "
     "lacking support from, or directly contradicting, the provided document(s). "
@@ -84,6 +96,7 @@ class GraniteJudgeConfig:
     think: bool = False
     timeout_seconds: float = 120
     criterion_profile: str = "ungroundedness"
+    evidence_profile: str = "visible_text_v1"
 
     def __post_init__(self):
         if not all((self.base_url, self.model, self.revision)):
@@ -92,6 +105,8 @@ class GraniteJudgeConfig:
             raise ValueError("judge context, output budget and timeout must be positive")
         if self.criterion_profile not in CRITERION_PROFILES:
             raise ValueError("unknown Granite criterion_profile")
+        if self.evidence_profile not in EVIDENCE_PROFILES:
+            raise ValueError("unknown Granite evidence_profile")
 
 
 def guardian_block(*, think=False, criterion_profile="ungroundedness"):
@@ -111,18 +126,48 @@ def parse_score(text):
             "reasoning": match[1].strip() if match[1] is not None else None}
 
 
-def native_input(record: Mapping, *, think=False, criterion_profile="ungroundedness"):
+def native_input(record: Mapping, *, think=False, criterion_profile="ungroundedness",
+                 evidence_profile="visible_text_v1"):
+    if evidence_profile not in EVIDENCE_PROFILES:
+        raise ValueError("unknown Granite evidence_profile")
     payload = judge_payload(record)
     by_key = {json.dumps(block["key"], sort_keys=True): block for block in payload["audit_evidence"]}
+    current = evidence_profile != "visible_text_v1"
+    permitted = None
+    if current:
+        if "citation_scope" not in payload or not isinstance(payload["citation_scope"], (list, tuple)):
+            raise ValueError("current evidence profiles require an explicit citation_scope")
+        permitted = set(payload["citation_scope"])
+        if any(not isinstance(reference, str) for reference in permitted):
+            raise ValueError("citation_scope must contain reference ID strings")
+        visible_ids = {reference["reference_id"] for reference in payload["visible_evidence_manifest"]}
+        if permitted - visible_ids:
+            raise ValueError("allowed evidence has no visible source binding")
     documents, seen = [], set()
+    reference_keys = {}
     for reference in payload["visible_evidence_manifest"]:
+        if permitted is not None and reference["reference_id"] not in permitted:
+            continue
         key = json.dumps(reference["key"], sort_keys=True)
         identity = (key, reference["reference_id"])
         if identity in seen:
             continue
         if key not in by_key:
             raise ValueError("visible evidence is missing its complete original body")
-        documents.append({"doc_id": reference["reference_id"], "text": by_key[key]["text"]})
+        block = by_key[key]
+        if current:
+            previous = reference_keys.setdefault(reference["reference_id"], key)
+            if previous != key or any(
+                other != block for other in payload["audit_evidence"]
+                if json.dumps(other["key"], sort_keys=True) == key
+            ):
+                raise ValueError("current evidence has an ambiguous source binding")
+        body = block["text"]
+        if evidence_profile == "current_provenance_v1":
+            # Match generation's existing provenance, without adding inferred
+            # scope, a summary, retrieved targets, or evaluation labels.
+            body = _evidence_header(decode(EvidenceBlock, block), reference["reference_id"]) + body + "\n</evidence_body>\n"
+        documents.append({"doc_id": reference["reference_id"], "text": body})
         seen.add(identity)
     messages = []
     for message in payload["actual_history"]:
@@ -156,8 +201,10 @@ class GraniteJudge:
             "transport": "native /generate input_ids; no session_id; no second chat template",
             "temperature": 0, "risk_polarity": ("yes=ungroundedness_detected; no=not_detected"
                 if config.criterion_profile == "ungroundedness" else "yes=criterion_risk_detected; no=not_detected"),
-            "evidence_policy": "all visible original bodies via documents; prior assistant turns remain conversation only",
+            "evidence_policy": EVIDENCE_PROFILES[config.evidence_profile] + "; prior assistant turns remain conversation only",
             "quality_gate_eligible": False, "validation_status": "development_diagnostic"}
+        if config.evidence_profile != "visible_text_v1":
+            self.metadata["protocol"] += "/" + config.evidence_profile
 
     async def evaluate(self, record):
         result = {"task_id": record["task_id"], "conversation_id": record["conversation_id"],
@@ -168,7 +215,7 @@ class GraniteJudge:
         before = len(self.client.observations)
         try:
             messages, documents = native_input(record, think=self.config.think,
-                                               criterion_profile=self.config.criterion_profile)
+                criterion_profile=self.config.criterion_profile, evidence_profile=self.config.evidence_profile)
             result.update(messages=messages, documents=documents)
             if self.config.criterion_profile == "citation_binding_v1":
                 audit = rule_audit(record)

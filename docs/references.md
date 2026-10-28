@@ -164,6 +164,8 @@
 - [FActScore](https://arxiv.org/abs/2305.14251)：将长回答拆为原子事实并评价事实精确率。 [代码](https://github.com/shmsw25/FActScore)
 - [VeriScore](https://aclanthology.org/2024.findings-emnlp.552/)：围绕可核验声明评价长文本事实性。 [代码](https://github.com/Yixiao-Song/VeriScore)
 - [Granite Guardian](https://github.com/ibm-granite/granite-guardian)：提供包括groundedness在内的内容与来源一致性评价。
+- [Contextual Normalization（C-Norm）](https://arxiv.org/html/2510.13191v2)：以设定比例改写句内分隔符，通过模型注意力信号选择上下文格式。它需要针对生成模型校准；论文的句内空白替换不能直接用于本项目的代码、表格和原文跨度，须先验证内容和定位保持。尚未实现或宣称收益。
+- [CARE](https://arxiv.org/html/2509.13683v1)：通过SFT及GRPO训练生成器在推理中显式使用上下文证据，训练数据包含支持事实及离线生成的推理材料。可参考其证据一致性训练目标；若引入，须作为模型适配另做消融并记录训练、推理成本，不能直接归因于A/B/C，亦不要求在线大模型先写阅读计划。
 - [LettuceDetect](https://arxiv.org/abs/2607.00895)：对文档、代码和工具结果支撑的回答进行span级幻觉检测。 [代码](https://github.com/KRLabsOrg/LettuceDetect)
 - [RAG-Zeval](https://aclanthology.org/2025.emnlp-main.1267/)：结合结构化评审轨迹与排序强化学习评价RAG回答。
 - [ConsJudge](https://arxiv.org/abs/2502.18817)：利用多维判断一致性构造偏好数据并训练评价模型。 [代码](https://github.com/OpenBMB/ConsJudge)

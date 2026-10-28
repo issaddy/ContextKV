@@ -10,6 +10,9 @@ import pytest
 from bench.granite_judge import (CRITERION_PROFILES, GraniteJudge, GraniteJudgeConfig,
                                 guardian_block, native_input, parse_score)
 from bench.native_baseline import NativeSGLangClient
+from controller.schema import EvidenceBlock
+from controller.serialization import decode
+from controller.templates import _evidence_header
 
 
 class Tokenizer:
@@ -56,6 +59,75 @@ def test_native_input_preserves_roles_full_visible_source_and_last_answer():
     value["audit_evidence"] = value["audit_evidence"][:1]
     with pytest.raises(ValueError, match="complete original body"):
         native_input(value)
+
+
+def scoped_record():
+    value = record()
+    value["citation_scope"] = ["E_a"]
+    for block in value["audit_evidence"]:
+        block["key"]["content_sha256"] = "fixture-content-identity"
+        block.update(source_uri="https://example.org/program/" + block["key"]["document_id"],
+                     title='Program "A"\nEligibility')
+    for reference, block in zip(value["visible_evidence_manifest"], value["audit_evidence"]):
+        reference["key"] = block["key"]
+    return value
+
+
+def test_current_scope_excludes_retired_bodies_but_preserves_actual_history():
+    value = scoped_record()
+    messages, documents = native_input(value, evidence_profile="current_text_v1")
+    assert documents == [{"doc_id": "E_a", "text": value["audit_evidence"][0]["text"]}]
+    assert messages == native_input(value)[0]
+    assert len(native_input(value)[1]) == 2  # Explicit legacy profile remains reproducible.
+    value["citation_scope"] = []
+    assert native_input(value, evidence_profile="current_text_v1")[1] == []
+
+
+def test_current_provenance_matches_generation_and_preserves_original_body():
+    value = scoped_record()
+    before = deepcopy(value)
+    block = decode(EvidenceBlock, value["audit_evidence"][0])
+    messages, documents = native_input(value, evidence_profile="current_provenance_v1")
+    assert documents == [{"doc_id": "E_a", "text": _evidence_header(block, "E_a") + block.text + "\n</evidence_body>\n"}]
+    assert messages == native_input(value)[0] and value == before
+    assert 'Program \\"A\\"\\nEligibility' in documents[0]["text"]
+    assert "must not cross" not in json.dumps([messages, documents])
+
+
+@pytest.mark.parametrize("profile", ["current_text_v1", "current_provenance_v1"])
+@pytest.mark.parametrize("fault", ["missing_scope", "missing_binding", "missing_body", "id_collision", "body_collision"])
+def test_current_evidence_rejects_missing_or_ambiguous_authority(profile, fault):
+    value = scoped_record()
+    if fault == "missing_scope":
+        del value["citation_scope"]
+    elif fault == "missing_binding":
+        value["citation_scope"].append("E_not_visible")
+    elif fault == "missing_body":
+        value["audit_evidence"].pop(0)
+    elif fault == "id_collision":
+        value["visible_evidence_manifest"][1]["reference_id"] = "E_a"
+    else:
+        block = deepcopy(value["audit_evidence"][0])
+        block["text"] = "A conflicting body under the same exact key"
+        value["audit_evidence"].append(block)
+    with pytest.raises(ValueError):
+        native_input(value, evidence_profile=profile)
+
+
+def test_provenance_keeps_alias_source_identity_and_revision():
+    value = scoped_record()
+    value["citation_scope"] = ["E_a", "E_b"]
+    value["audit_evidence"][1]["text"] = value["audit_evidence"][0]["text"]
+    value["audit_evidence"][1]["key"]["version"] = "v2"
+    _, documents = native_input(value, evidence_profile="current_provenance_v1")
+    assert len(documents) == 2 and documents[0]["text"] != documents[1]["text"]
+    assert '"source_revision":"v2"' in documents[1]["text"]
+    config = GraniteJudgeConfig("http://fixture", 128, evidence_profile="current_provenance_v1")
+    judge = GraniteJudge(config, Tokenizer(), object())
+    assert judge.metadata["protocol"].endswith("/current_provenance_v1")
+    assert judge.metadata["quality_gate_eligible"] is False
+    with pytest.raises(ValueError, match="evidence_profile"):
+        GraniteJudgeConfig("http://fixture", 128, evidence_profile="unknown")
 
 
 @pytest.mark.parametrize("text,expected", [("<think>\n</think><score>yes</score>", True),
