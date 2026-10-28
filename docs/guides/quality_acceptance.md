@@ -74,6 +74,8 @@ python -m bench.blind_review aggregate \
 
 导入复用现有 task/conversation/query、实际答案与提示身份，核对评分属于本次回答。双方任务、当前问题和协议一致，允许各自产生不同真实历史与证据。完整 audit 覆盖全部成功回答。生成失败、截断和状态一致性作为工程指标单独报告。
 
+来源恢复或补充依赖材料后，`retrieved_evidence` 绑定运行保存的 `retrieval_contexts`（未单独保留时使用 `contexts`）；实际阅读材料沿用 `visible_evidence_manifest`、`audit_evidence` 和 `citation_scope` 绑定。原生与控制器结果都按原运行可见证据的内容哈希核对完整正文集合；即使原生结果和审计副本相同，也不能同时漏掉正文或保留与可见键不符的正文。更换检索结果、正文或引用范围，或删去原运行已经保存的对应字段，都不能通过验收；缺少原材料绑定的旧记录仅供诊断。
+
 各维在共同适用任务上计算配对会话bootstrap，保留缺分及统计不确定性。`dev_quality_eligible`记录该开发集、任务范围和evaluator下的结果。
 
 正式 `scope=heldout` 沿用原固定 `split_manifest` 和原运行的划分记录，并提供预先保存的 `frozen_protocol`：
@@ -81,5 +83,9 @@ python -m bench.blind_review aggregate \
 - `scope`、`reference`、`epsilon`、`dimensions` 与 `task_scope`；省略 `task_scope` 表示各维覆盖全部任务。
 - 精确 `cohort`、`split_manifest` 和 `methods`；方法声明去除 `scores` 与 `score_method`。
 - 相同 evaluator/rubric。人工声明 `kind=human_blind`、实际 `rubric_version` 和 `aggregation`；模型声明 `kind=offline_judge`、固定 judge 配置及 `reference_targets_supplied`。
+
+模型协议比较整个已记录 judge 配置，包含 `enable_thinking`、输出约束、上下文与输出预算、超时及原生评分规则；只有端点地址 `base_url` 和凭据变量名 `api_key_env` 不参与评分身份。冻结配置不能省略评分文件已经记录的行为参数。
+
+已有响应的 `served_model`（原生评分逐维读取）也参与配对身份：已知响应模型不同或一条记录混用多个模型不能通过；响应模型与生成模型同名仍算自评。冻结时已知响应模型默认应与 `judge.model` 一致；请求使用服务别名时，在 `evaluator.served_model` 显式冻结预期响应名称。旧评分缺失的响应身份不凭空补齐，显式冻结响应名称时必须有匹配记录。这些检查核对保存的声明与响应，不证明远端权重身份。
 
 冻结文件保存指标、适用集合和方法声明。独立模型评价与人工盲审分别输出，历史批次按原协议读取。

@@ -139,13 +139,46 @@ def test_selection_groups_preserve_version_and_condition_scope():
     index = CorpusIndex.from_records(rows,corpus_id="manual",snapshot_id="snapshot")
     ranked = tuple(OnlineContext(row["_id"],row["text"],title=row["title"]) for row in rows[:-1])
     selected, trace = select_ranked_evidence(ranked,group_key=index.selection_group)
-    assert [c.document_id for c in selected] == ["a","revision","conditional","regional"]
+    assert [c.document_id for c in selected] == ["a","copy","revision","conditional","regional"]
     assert trace["collapsed"] == [{"passage_id":"copy","representative":"a"}]
     # Condition closure remains available to both execution candidates after selection.
     blocks = index.enrich(selected)
-    assert {b.key.passage_id for b in blocks} == {"a","revision","conditional","regional","condition"}
+    assert {b.key.passage_id for b in blocks} == {"a","copy","revision","conditional","regional","condition"}
     plan, = build_candidates(SessionSnapshot("s"),"Compare v1 and v2 limits",blocks)
     assert plan.feasible and {b.key for b in blocks} == plan.required_blocks
+
+
+def test_ranked_groups_share_bodies_but_keep_only_retrieved_source_citation_rights():
+    from adapters.hybrid_retrieval import select_ranked_evidence
+    from adapters.mtrag import OnlineContext
+    from controller.templates import verify_evidence_spans
+    from test_candidates import committed
+
+    text = "The original instructions apply only to this deployment.\n" * 25
+    rows = [{"_id": name, "text": text, "title": "Deployment guide",
+             "source_uri": f"https://source/{name}"} for name in ("first", "second", "unretrieved")]
+    rows.append({"_id": "other", "text": "A separately ranked fact."})
+    index = CorpusIndex.from_records(rows, corpus_id="manual", snapshot_id="v1")
+    # The second identity comes after the one-group budget has already filled.
+    ranked = tuple(OnlineContext(row["_id"], row["text"], score=3-i)
+                   for i, row in enumerate((rows[0], rows[-1], rows[1])))
+    selected, _ = select_ranked_evidence(ranked, top_k=1, group_key=index.selection_group)
+    assert selected == (ranked[0], ranked[2])
+    blocks = index.enrich(selected)
+    expected = {block.key for block in blocks}
+    assert {key.passage_id for key in expected} == {"first", "second"}
+    before = SessionSnapshot("s")
+    initial, = build_candidates(before, "Compare the two sources", blocks[:1])
+    snapshot = committed(initial, before, "Compare the two sources", blocks[:1])
+    for candidate in build_candidates(snapshot, "Compare the two sources", blocks):
+        assert candidate.required_blocks == expected
+        assert verify_evidence_spans(candidate.messages, candidate.evidence_spans,
+                                     blocks, candidate.reference_map) == expected
+        spans = [span for span in candidate.evidence_spans if span.key in expected]
+        assert len({(span.message_index, span.start, span.end) for span in spans}) == 1
+        assert sum(message.content.count(text) for message in candidate.messages) == 1
+        assert sum(span.alias_declaration is not None for span in spans) == 1
+        assert all(key.passage_id != "unretrieved" for _, key in candidate.reference_map)
 
 
 def test_corpus_dependency_resolves_exact_version_and_requires_explicit_ambiguity_choice():

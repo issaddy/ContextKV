@@ -404,6 +404,43 @@ def test_ambiguous_historical_anchor_requires_document_scope():
     assert candidate.required_blocks == {current.key}
 
 
+@pytest.mark.parametrize("anchor", ["--timeout", "request_limit", "cache_size"])
+@pytest.mark.parametrize("relation", [None, "standalone", "followup"])
+def test_shared_identifier_never_restores_an_unidentified_historical_object(anchor, relation):
+    from controller.schema import QueryContext
+
+    old = make_evidence(f"Atlas {anchor} is 10.", "Atlas", anchors=(anchor,))
+    current = make_evidence("Beacon configuration reference.", "Beacon")
+    snapshot = SessionSnapshot("s")
+    snapshot = committed(build_candidates(snapshot, "Atlas settings?", (old,))[0],
+                         snapshot, "Atlas settings?", (old,))
+    query = f"What is Beacon {anchor}?"
+    context = None if relation is None else QueryContext(query, relation, (1,))
+    for candidate in build_candidates(snapshot, query, (current,), query_context=context):
+        assert candidate.required_blocks == {current.key}
+
+
+def test_anchor_respects_selected_revisit_turns_and_current_document_identity():
+    from controller.schema import QueryContext
+
+    atlas = make_evidence("Atlas --timeout is 10.", "Atlas", anchors=("--timeout",))
+    beacon = make_evidence("Beacon --timeout is 30.", "Beacon", anchors=("--timeout",))
+    snapshot = SessionSnapshot("s")
+    for block in (atlas, beacon):
+        query = f"Describe {block.key.document_id}."
+        snapshot = committed(build_candidates(snapshot, query, (block,))[-1], snapshot, query, (block,))
+    current = make_evidence("Current deployment information.", "regions")
+    context = QueryContext("What is --timeout?", "revisit", (1,))
+    for candidate in build_candidates(snapshot, "Return to the first setting", (current,), query_context=context):
+        assert candidate.required_blocks == {atlas.key, current.key}
+    header = make_evidence("Settings for this source.", "Atlas", passage_id="header")
+    candidate = build_candidates(snapshot, "What is --timeout?", (header,))[-1]
+    assert candidate.required_blocks == {atlas.key, header.key}
+    revised_header = replace(header, key=replace(header.key, version="v2"))
+    candidate = build_candidates(snapshot, "What is Atlas --timeout?", (revised_header,))[-1]
+    assert candidate.required_blocks == {revised_header.key}
+
+
 def test_anchor_respects_named_historical_version():
     old = make_evidence("timeout 10", "api", version="v1", anchors=("connect_timeout",))
     new = make_evidence("timeout 30", "api", version="v2", anchors=("connect_timeout",))
@@ -411,6 +448,22 @@ def test_anchor_respects_named_historical_version():
     candidate = build_candidates(SessionSnapshot("s", archive=(old, new)),
                                  "What is api v2 connect_timeout?", (current,))[-1]
     assert candidate.feasible and candidate.required_blocks == {current.key, new.key}
+
+
+def test_selected_history_does_not_expand_anchors_to_other_turns_of_the_same_document():
+    from controller.schema import QueryContext
+
+    first = make_evidence("Timeout value: --timeout is 10.", "Atlas", passage_id="setting",
+                          anchors=("--timeout",))
+    second = make_evidence("Timeout policy overview.", "Atlas", passage_id="overview")
+    snapshot = SessionSnapshot("s")
+    for block in (first, second):
+        snapshot = committed(build_candidates(snapshot, "Describe this source", (block,))[-1],
+                             snapshot, "Describe this source", (block,))
+    current = make_evidence("Deployment information.", "regions")
+    intent = QueryContext("What is --timeout?", "revisit", (2,))
+    for candidate in build_candidates(snapshot, "Return to that source", (current,), query_context=intent):
+        assert candidate.required_blocks == {second.key, current.key}
 
 
 def test_version_token_does_not_match_longer_version_substring():

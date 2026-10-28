@@ -109,11 +109,11 @@ def test_ranked_selection_restores_distinct_content_without_rescoring_or_changin
                        "Capacity and size.", "Platform requirements.", "Billing terms.",
                        "Recovery procedure.", "Connectivity options.")))
     selected, trace = select_ranked_evidence(ranked)
-    assert selected == tuple(ranked[i] for i in (0, 3, 4, 5, 6))
+    assert selected == ranked
     assert trace["collapsed"] == [{"passage_id":str(i),"representative":"0"} for i in (1,2)]
     # No text or relevance score changes, and clean pools retain their exact ranking.
-    assert select_ranked_evidence(selected) == (selected, None)
-    assert select_ranked_evidence(ranked[:3])[0] == ranked[:1]
+    assert select_ranked_evidence(selected) == (selected, trace)
+    assert select_ranked_evidence(ranked[:3])[0] == ranked[:3]
     distinct_title = replace(ranked[1], title="Different applicable product")
     distinct_bytes = replace(ranked[2], text=ranked[2].text + " ")
     assert select_ranked_evidence((ranked[0], distinct_title, distinct_bytes))[0] == (
@@ -129,10 +129,21 @@ def test_condition_task_anchor_is_reserved_even_when_its_copy_ranks_above_it():
     stage = {"contexts":primary, "rerank_query":"full task",
              "rerank_candidate_ids":[c.document_id for c in primary]}
     selected, trace = select_condition_evidence(stage,"new condition",Scorer())
-    assert "p0" in [c.document_id for c in selected] and "p1" not in [c.document_id for c in selected]
-    assert len(selected) == 5 and len({c.text for c in selected}) == 5
+    assert {"p0", "p1"} <= {c.document_id for c in selected}
+    assert len(selected) == 6 and len({c.text for c in selected}) == 5
     assert trace["extra_rerank_pairs"] == 7  # Existing condition pass only.
     assert trace["evidence_selection"]["anchor"] == "p0"
+
+
+def test_requirement_selection_spends_group_budget_once_and_keeps_each_selected_source():
+    from adapters.hybrid_retrieval import select_requirement_evidence
+
+    primary = (OnlineContext('a', 'Shared body.'), OnlineContext('copy', 'Shared body.'),
+               OnlineContext('b', 'Other fact.'), OnlineContext('c', 'Required procedure.'))
+    selected, trace = select_requirement_evidence(primary, [('c', 'copy', 'a', 'b')], top_k=2)
+    assert selected == (primary[0], primary[1], primary[3])
+    assert trace['selected_ids'] == ['a', 'copy', 'c']
+    assert len(trace['marginal_gains']) == 2
 
 
 def test_condition_selection_keeps_the_task_anchor_displaced_by_plain_fusion():

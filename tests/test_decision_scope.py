@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from controller.config import ModelConfig, RunConfig
+from controller.generation import GenerationProtocol
 from controller.templates import ByteTemplate
 from profiling import decision_pairs as pairs
 from test_decision_pairs import source_run
@@ -47,9 +48,12 @@ def test_freeze_cli_uses_shared_local_scope_factory(tmp_path, local_scope, monke
 def test_collection_rejects_foreign_frozen_model_before_engine(tmp_path, local_scope, monkeypatch):
     database, manifest, split, _, _ = source_run(tmp_path)
     cases, _ = pairs.freeze_cases(database, manifest, split, ByteTemplate())
-    monkeypatch.setattr(pairs, 'load_frozen', lambda _: (cases, {'source_measurement_kind': 'hardware'}))
+    frozen = {'source_measurement_kind': 'hardware',
+              'generation_protocol': GenerationProtocol.from_config(manifest['config']).record()}
+    monkeypatch.setattr(pairs, 'load_frozen', lambda _: (cases, frozen))
     monkeypatch.setattr(pairs, 'SGLangEngineClient', lambda *a, **kw: pytest.fail('created engine for foreign model'))
     config = tmp_path / 'config.json'
-    config.write_text(json.dumps({'engine': {'kind': 'sglang'}, 'model': {'scope_path': str(local_scope.path)}}))
+    config.write_text(json.dumps({'engine': {'kind': 'sglang'}, 'model': {'scope_path': str(local_scope.path)},
+                                 'context': manifest['config']['context'], 'sampling': manifest['config']['sampling']}))
     with pytest.raises(ValueError, match='fingerprint'):
         asyncio.run(pairs.collect(SimpleNamespace(cases='unused', config=str(config), cost_artifact=None)))

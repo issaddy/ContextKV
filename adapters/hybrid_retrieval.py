@@ -70,12 +70,14 @@ def reciprocal_rank_fusion(rankings, *, k=60, weights=None):
 
 
 def select_ranked_evidence(ranked, *, top_k=5, anchor=None, group_key=None):
-    """Select the highest-ranked representatives of distinct original content.
+    """Select distinct reading groups, retaining every retrieved source in them.
 
     This is ranked result collapsing, not semantic similarity or score tuning.
     A bound corpus adds version/dependency scope to the exact title/body key.
     An explicit task anchor is reserved before the remaining groups are chosen.
-    Original sources/scores remain intact; no archive or evidence is deleted.
+    Grouping budgets shared bodies, not citation identities. Only members of this
+    ranked pool can join a selected group; generation shares exact bodies using
+    its existing evidence aliases while preserving each source and score.
     """
     ranked = tuple(ranked)
     group_key = group_key or (lambda context: (context.title, context.text))
@@ -85,13 +87,14 @@ def select_ranked_evidence(ranked, *, top_k=5, anchor=None, group_key=None):
         selected.add(anchor)
         represented[group_key(context)] = anchor
     for context in ranked:
-        if len(selected) >= top_k:
-            break
         if context.document_id in selected:
             continue
         key = group_key(context)
         if key in represented:
             collapsed.append({"passage_id": context.document_id, "representative": represented[key]})
+            selected.add(context.document_id)
+            continue
+        if len(represented) >= top_k:
             continue
         selected.add(context.document_id)
         represented[key] = context.document_id
@@ -140,7 +143,7 @@ def select_condition_evidence(stage, condition_query, reranker, *, top_k=5, rrf_
     return contexts, trace
 
 
-def select_requirement_evidence(primary, rankings, *, top_k=5):
+def select_requirement_evidence(primary, rankings, *, top_k=5, group_key=None):
     """Greedy coverage of explicit information needs on a distinct-content pool.
 
     F(S) = sum_j max_{d in S} 1/rank_j(d), including the whole-task ranking.
@@ -153,21 +156,31 @@ def select_requirement_evidence(primary, rankings, *, top_k=5):
     if not primary:
         return (), {"selected_ids": [], "marginal_gains": []}
     ids = [c.document_id for c in primary]
-    rows = [{pid: 1/rank for rank, pid in enumerate(ranking, 1)}
-            for ranking in (ids, *rankings)]
+    group_key = group_key or (lambda context: (context.title, context.text))
+    representatives, groups = {}, {}
+    for context in primary:
+        representative = representatives.setdefault(group_key(context), context.document_id)
+        groups[context.document_id] = representative
+    rows = []
+    for ranking in (ids, *rankings):
+        row = {}
+        for rank, pid in enumerate(ranking, 1):
+            representative = groups[pid]
+            row[representative] = max(row.get(representative, 0.0), 1/rank)
+        rows.append(row)
     selected = {ids[0]}
     covered = [row[ids[0]] for row in rows]
     gains = [{"passage_id": ids[0], "gain": sum(covered), "reason": "primary_task_anchor"}]
-    while len(selected) < min(top_k, len(primary)):
-        remaining = [pid for pid in ids if pid not in selected]
+    while len(selected) < min(top_k, len(representatives)):
+        remaining = [pid for pid in representatives.values() if pid not in selected]
         def gain(pid):
             return sum(max(0.0, row[pid]-best) for row, best in zip(rows, covered))
         winner = max(remaining, key=gain)
         gains.append({"passage_id": winner, "gain": gain(winner), "reason": "requirement_coverage"})
         selected.add(winner)
         covered = [max(best, row[winner]) for row, best in zip(rows, covered)]
-    return tuple(c for c in primary if c.document_id in selected), {
-        "selected_ids": [pid for pid in ids if pid in selected], "marginal_gains": gains,
+    return tuple(c for c in primary if groups[c.document_id] in selected), {
+        "selected_ids": [pid for pid in ids if groups[pid] in selected], "marginal_gains": gains,
         "best_selected_rank_per_view": [round(1/value) for value in covered]}
 
 
@@ -359,7 +372,7 @@ def search_requirements(query, requirements, sparse, dense, encoder, reranker, *
         rankings.append([c.document_id for c, _ in sorted(zip(primary, values),
             key=lambda item: (-float(item[1]), item[0].document_id))])
     if rankings:
-        contexts, selection = select_requirement_evidence(primary, rankings)
+        contexts, selection = select_requirement_evidence(primary, rankings, group_key=group_key)
     else:
         contexts, _ = select_ranked_evidence(primary, group_key=group_key)
         selection = {"selected_ids": [c.document_id for c in contexts]}
@@ -669,7 +682,7 @@ class HybridRetriever:
                 "mode": "original_document_paragraphs" if self.source_documents is not None else "adjacent_passages",
                 "document_alignment_counts": dict(self.document_window_counts or {}),
                 "context_paragraphs_each_side": 2 if self.source_documents is not None else None,
-                "scope": ("matched original document and literal whitespace-aligned passage" if self.source_documents is not None
+                "scope": ("confirmed snapshot/version/source identity and literal whitespace-aligned passage" if self.source_documents is not None
                           else "same source/document/version/declared section; explicit span or MT-RAG ingestion order"),
                 "selection": ("merge literal paragraph windows and replace unscoped slices; retain raw ranking separately" if self.source_documents is not None
                               else "one hop from ranked hits, complete originals, no invented rank or recursive expansion"),
@@ -679,7 +692,7 @@ class HybridRetriever:
             "semantic_evidence_selection": self.evidence_selector.manifest if self.evidence_selector else None,
             "evidence_selection": {"strategy": "ranked_exact_content_groups_v1",
                 "group": "exact title/body with known version, parent and dependency scope",
-                "source_identity": "highest ranked original representative; task anchor retained",
+                "source_identity": "all retrieved members of selected groups; exact body aliases retain separate references",
                 "budget": "at most five groups from the existing scored pool",
                 "extra_model_calls": 0},
             "requirement_selection": {"strategy": ("dialogue_view_rank_fusion_v1" if self.query_fusion == "dialogue_rrf"

@@ -106,7 +106,8 @@ class OutputLengthModel:
     @classmethod
     def load(cls, path: str | Path, *, expected_fingerprint: ConfigFingerprint | None = None,
              max_new_tokens: int | None = None, sampling: SamplingRecipe | None = None,
-             expected_priors: tuple[int, int] | None = None) -> OutputLengthModel:
+             expected_priors: tuple[int, int] | None = None,
+             expected_generation_protocol: dict | None = None) -> OutputLengthModel:
         model = cls(json.loads(Path(path).read_text()))
         target = model.specification["target"]
         if expected_fingerprint is not None and target["fingerprint"] != asdict(expected_fingerprint):
@@ -129,8 +130,13 @@ class OutputLengthModel:
         if expected_priors is not None:
             if priors is not None and tuple(priors) != tuple(expected_priors):
                 raise ValueError("output-length artifact shared prior center differs from serving")
-            if priors is None and requested != SamplingRecipe():
-                raise ValueError("nonstandard sampling output-length artifact needs a bound shared prior center")
+            if priors is None and (requested != SamplingRecipe() or expected_generation_protocol is not None):
+                raise ValueError("output-length artifact needs a bound shared prior center")
+        if expected_generation_protocol is not None:
+            # A legacy config with system_prompt=None refers to that revision's
+            # default, not necessarily today's prompt or citation grammar.
+            if target.get("generation_protocol") != expected_generation_protocol:
+                raise ValueError("output-length artifact generation protocol differs or is unbound; refit from current protocol pairs")
         return model
 
     def save(self, path: str | Path) -> None:

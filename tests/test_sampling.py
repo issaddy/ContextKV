@@ -164,12 +164,14 @@ def test_new_answer_protocol_reuses_timings_without_old_length_distribution():
 
 
 def test_serving_and_pair_replay_apply_same_recipe_and_length_boundary(tmp_path):
+    from controller.generation import GenerationProtocol
     config, cost, length = assets(tmp_path)
     config = replace(config, sampling=RECIPE)
     with pytest.raises(ValueError, match="output-length artifact sampling"):
         create_controller(config)
     content = json.loads(length.read_text())
     content["target"]["sampling_recipe"] = RECIPE.record()
+    content["target"]["generation_protocol"] = GenerationProtocol.from_config(config).record()
     content["metadata"] = {"global_priors": [128, 256]}
     length.write_text(json.dumps(content))
     with pytest.raises(ValueError, match="sampling"):
@@ -352,16 +354,19 @@ def test_offline_rescore_cannot_relabel_outcomes_with_new_recipe(tmp_path, monke
 
 def test_length_training_and_serving_use_same_recipe_fallback_center():
     from profiling.length_fit import training_priors
+    from controller.templates import SYSTEM_PROMPT
     baseline = {"settings": {"default_output_tokens": 433, "p90_output_tokens": 512}, "metadata": {}}
     config = {"sampling": RECIPE.record(), "cost_model": {"default_output_tokens": 128, "p90_output_tokens": 256}}
     fitted, binding = training_priors(baseline, config)
     serving = CostModel(default_output_tokens=433, p90_output_tokens=512)
-    serving.configure_sampling(RECIPE, fallback_mean=128, fallback_p90=256)
+    serving.configure_for_run(config)
     assert fitted == serving.effective_output_prior == (128, 256)
     assert binding["output_prior_status"] == "configured_prior_fallback"
     # A matching empirical source keeps its center; missing source config does
     # not manufacture a new recipe binding for a legacy offline run.
     baseline["metadata"]["output_prior_sampling"] = RECIPE.record()
+    assert training_priors(baseline, config)[0] == (128, 256)  # Missing prompt binding still falls back.
+    baseline["metadata"]["output_prior_system_prompt"] = SYSTEM_PROMPT
     assert training_priors(baseline, config)[0] == (433, 512)
     assert training_priors(baseline, None) == ((433, 512), {"status": "unknown_source_configuration_legacy_prior"})
 
@@ -383,3 +388,21 @@ def test_learned_residual_center_is_checked_once_when_loading(tmp_path, recipe):
     else:
         with pytest.raises(ValueError, match="bound shared prior center"):
             OutputLengthModel.load(path, sampling=recipe, expected_priors=(128, 256))
+
+
+def test_length_rescore_rejects_legacy_unconstrained_measurements_before_model_load(tmp_path, monkeypatch):
+    from argparse import Namespace
+    import profiling.decision_pairs as module
+    frozen = {"cases_sha256": "same-frozen-inputs"}
+    monkeypatch.setattr(module, "load_frozen", lambda _: ([], frozen))
+    source, config, output = tmp_path / "pairs.jsonl", tmp_path / "config.json", tmp_path / "out.jsonl"
+    source.with_suffix(".manifest.json").write_text(json.dumps({
+        "status": "complete", "split": "dev", "frozen": frozen, "config": {}}))
+    config.write_text(json.dumps({"cost_model": {"output_length_artifact": "current-length-model.json"}}))
+    def forbidden(*args, **kwargs):
+        pytest.fail("unbound measured protocol must stop before loading the current length model")
+    monkeypatch.setattr(module, "_model_and_knobs", forbidden)
+    with pytest.raises(ValueError, match="output-length rescoring needs pairs bound"):
+        module.rescore_file(Namespace(cases="unused", input=str(source), output=str(output),
+                                     config=str(config), cost_artifact="unused"))
+    assert not output.exists()

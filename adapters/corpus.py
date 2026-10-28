@@ -32,10 +32,12 @@ def configuration_anchors(text: str) -> tuple[str, ...]:
 class CorpusIndex:
     """Public evidence metadata indexed once, with version-specific dependencies."""
     def __init__(self, blocks: Iterable[EvidenceBlock], *, corpus_id: str, snapshot_id: str,
-                 source_positions=None, retrieval_texts=None):
+                 source_positions=None, retrieval_texts=None, source_identities=None):
         self.corpus_id, self.snapshot_id = corpus_id, snapshot_id
         self._blocks = {block.key: block for block in blocks}
         self._retrieval_texts = retrieval_texts or {}
+        self._source_identities = ({key: block.source_uri for key, block in self._blocks.items()}
+                                   if source_identities is None else source_identities)
         self._passages: dict[str, list[EvidenceKey]] = {}
         for key in self._blocks:
             self._passages.setdefault(key.passage_id, []).append(key)
@@ -48,6 +50,7 @@ class CorpusIndex:
         self._neighbors = {}
         self._source_document_ids = {key: value[0] for key, value in (source_positions or {}).items()}
         self._document_windows = {}
+        self._window_documents = None
         self.document_window_counts = {}
         for members in groups.values():
             ordered = [key for _, key in sorted(members)]
@@ -66,7 +69,7 @@ class CorpusIndex:
         blocks: dict[tuple[str, str, str, str], EvidenceBlock] = {}
         identities: dict[tuple[str, str, str], list[EvidenceKey]] = {}
         pending: dict[EvidenceKey, tuple[Any, ...]] = {}
-        positions, retrieval_texts = {}, {}
+        positions, retrieval_texts, source_identities = {}, {}, {}
         for row in records:
             metadata = {**row.get("metadata", {}), **row}
             passage_id = str(metadata.get("passage_id", metadata.get("_id", "")))
@@ -96,6 +99,7 @@ class CorpusIndex:
                     raise EvidenceError(f"invalid character span for {passage_id}")
             block = replace(block, span=span, parent_section=metadata.get("parent_section"))
             source_identity = str(metadata.get("source_uri") or metadata.get("source") or metadata.get("url") or "")
+            source_identities[block.key] = source_identity
             if span is not None:
                 positions[block.key] = (document_id, span[0], source_identity)
             elif snapshot_id.startswith("mtrag-"):
@@ -130,7 +134,7 @@ class CorpusIndex:
                     dependency_key(value, block.key) for value in pending[block.key])))
                     for block in blocks.values()]
         return cls(resolved, corpus_id=corpus_id, snapshot_id=snapshot_id, source_positions=positions,
-                   retrieval_texts=retrieval_texts)
+                   retrieval_texts=retrieval_texts, source_identities=source_identities)
 
     @property
     def blocks(self) -> tuple[EvidenceBlock, ...]:
@@ -190,7 +194,8 @@ class CorpusIndex:
     def selection_group(self, context):
         """Exact content with declared applicability for retrieval slot allocation.
 
-        This does not merge source identities or establish independent corroboration.
+        This shares a reading slot, never source identities or corroboration.
+        Ranked selection retains each retrieved member for separate citations.
         Different revisions, parent scopes or condition dependencies remain separate.
         """
         matches = self._context_matches(context)
@@ -232,12 +237,17 @@ class CorpusIndex:
         called in the retriever's serialized selection stage before publication.
         """
         from adapters.mtrag import OnlineContext
+        if documents is not self._window_documents:
+            self._document_windows.clear()
+            self._window_documents = documents
         groups = {}
         for key in self.retrieved_keys(contexts):
             if key not in self._document_windows:
                 block = self._blocks[key]
                 window, reason = documents.window(self._source_document_ids.get(key, key.document_id),
-                                                   self._retrieval_texts.get(key, block.text))
+                    self._retrieval_texts.get(key, block.text), corpus_id=key.corpus_id,
+                    snapshot_id=self.snapshot_id, version=key.version,
+                    source=self._source_identities.get(key, ""))
                 self.document_window_counts[reason] = self.document_window_counts.get(reason, 0) + 1
                 self._document_windows[key] = window
             window = self._document_windows[key]
@@ -254,7 +264,7 @@ class CorpusIndex:
                 else:
                     merged.append((start, end))
             for start, end in merged:
-                passage_id = f"source-window:v1:{document.document_id}:{start}:{end}"
+                passage_id = f"source-window:v2:{document.document_id}:{document.identity_sha256}:{start}:{end}"
                 existing = [key for key in self._passages.get(passage_id, ()) if key.version == version]
                 if existing:
                     support = self._blocks[existing[0]]

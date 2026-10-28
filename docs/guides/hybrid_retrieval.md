@@ -115,11 +115,13 @@ encoder/reranker与SGLang共用GPU时，检索和生成会竞争资源。检索�
 
 ## 从原始文档恢复阅读上下文
 
-在`source_window: true`下可提供`source_documents: data/mtrag-source-documents/cloud.jsonl.zip`，使用同一固定语料的原始document-level JSONL（或只含一个JSONL的zip）。记录包含`document_id/text`，可带`url/source_uri/title`。Cloud原件来自[固定上游版本](https://github.com/IBM/mt-rag-benchmark/tree/53fef6f5917c7e10c436f697e69a955dbc795d81/corpora/document_level)，不更换现有passage索引或向量。
+在`source_window: true`下可提供`source_documents: data/mtrag-source-documents/cloud.jsonl.zip`，使用同一固定语料的原始document-level JSONL（或只含一个JSONL的zip）。记录包含`document_id/text/snapshot_id`，`snapshot_id`必须与证据索引一致；产品版本不同于快照名时还须声明准确的`version`。`corpus_id`如有声明必须一致；片段有明确`url/source_uri/source`时原文必须提供相同来源，片段没有明确来源地址时则须声明相同的`corpus_id`。字段也可放在`metadata`中。缺失身份声明的旧文件仍可加载，但保持原检索片段，不据共同句子推断原文版本。Cloud原件来自[固定上游版本](https://github.com/IBM/mt-rag-benchmark/tree/53fef6f5917c7e10c436f697e69a955dbc795d81/corpora/document_level)，不更换现有passage索引或向量。
 
 检索仍返回原始片段。阅读阶段通过文档身份和仅允许空白差异的字面匹配定位原文，补完整边界自然段并带上两侧各两个自然段；同源重叠窗口合并。实际模型读取原始窗口，原检索片段及分数另行记录，不将两者重复放进输入。已有完整片段、没有唯一对应原文的片段，以及有显式章节/依赖关系的来源保留原路径。窗口保留原文字符范围和来源，A/R共享同一阅读材料，实际tokens继续进入预算和B/C流程。
 
 原文在启动时加载，片段定位按固定语料项复用。未提供source_documents时使用相邻检索片段窗口。生成评价读取实际阅读材料，检索评价使用retrieval_contexts中的原排名。该选项默认关闭，质量与成本按公开任务验证。
+
+默认`ranked`选择至多五个正文及适用范围组，组内真正召回的来源均保留独立引用资格和原始分数；因此来源数量可以超过五个。相同正文由现有evidence alias共享，来源身份、版本、适用范围与依赖仍各自保留。不会从全语料补入同文但未召回的来源，也不把共享正文视作独立佐证。
 
 ## 联合语义选材配置
 

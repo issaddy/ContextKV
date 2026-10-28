@@ -553,6 +553,17 @@ class CostModel:
     def effective_output_prior(self) -> tuple[int, int]:
         return self._sampling_prior_override or (self.default_output_tokens, self.p90_output_tokens)
 
+    def configure_for_run(self, config) -> dict:
+        """Resolve the same effective prior at serving, replay and fit boundaries."""
+        from .generation import GenerationProtocol
+        config = asdict(config) if is_dataclass(config) else config
+        protocol = GenerationProtocol.from_config(config)
+        settings = config.get("cost_model") or {}
+        return self.configure_sampling(protocol.sampling,
+            fallback_mean=settings.get("default_output_tokens", 128),
+            fallback_p90=settings.get("p90_output_tokens", 256),
+            system_prompt=protocol.system_prompt)
+
     def configure_sampling(self, sampling, *, fallback_mean: int, fallback_p90: int,
                            system_prompt: str | None = None) -> dict:
         """Bind request policy once, without changing measured execution points.

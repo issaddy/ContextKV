@@ -46,6 +46,8 @@ python -m profiling.decision_pairs run \
 
 GPU-only服务使用`--cache-states cold,gpu_ready`。模型/tokenizer/template指纹与冻结输入匹配。省略成本文件时，按配置使用Measurement文件或未标定模型，并记录实际采用的固定策略。
 
+采集与线上共享候选生成接口：按各候选 `reference_map` 中的本轮 `required_blocks` 传入引用 allowlist，由同一个 SGLang client 启用 XGrammar regex；空 allowlist 也禁止生成保留引用语法。采集启动时核对冻结候选的实际 system prompt、源采样配方与输出上限。预热只用于物化缓存路径，继续使用不带引用约束的固定 1 token 请求。
+
 启动及每个pair开始时检查artifact的engine fingerprint/cache configuration。不匹配时保留诊断预测，标为未标定并执行固定策略；manifest和pair记录`calibration_scope`。旧artifact缺少绑定时标为`legacy_unbound`。GPU、驱动和拓扑按实际运行环境记录。
 
 每个 pair 的两个 arm 都执行以下独立流程：
@@ -114,6 +116,8 @@ python -m profiling.decision_pairs rescore \
 新 manifest 保存源 pairs/manifest 的路径与文件 hash、源采集完整清单、frozen 来源、替换 artifact、配置使用范围、标定 scope 和 `new_generations: 0`，用于文件级实验来源检查。原始采集文件与答案保持原样。
 
 重评分在同一批实测输出上比较决策模型，复用已有硬件测量和答案。模型使用独立阶段标定数据拟合；依据本批 dev regret 调整的结果记录为开发调试，泛化效果使用独立测试评价。
+
+`profiling.length_fit` 复用线上有效先验解析：当成本 artifact 的输出先验未绑定当前 system prompt 或采样配方时，拟合残差和线上预测都使用配置中的回退先验。新长度 artifact 绑定生成协议与该先验中心，线上及成对重放加载时要求两项绑定并核对一致性；旧未绑定长度模型只保留单独加载用于历史诊断。缺少协议绑定的旧 frozen bundle 需重新冻结；旧无引用约束 pairs 可继续用于历史诊断，但必须按当前协议重新采集后才能拟合新的线上长度模型，不能只补写 manifest 标记。
 
 ## 本地合同验证
 

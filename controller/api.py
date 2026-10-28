@@ -17,6 +17,8 @@ from .serialization import to_jsonable
 from .service import ContextOverflow, Controller
 from .session_store import StoreError
 
+RETIRE_RETRY_SECONDS = 2
+
 
 class EvidenceInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -85,6 +87,8 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
     requests_drained = asyncio.Event()
     requests_drained.set()
     stopping = False
+    retry_worker = None
+    retry_error = None
 
     class TrackRequests:
         """Track the ASGI request lifetime, including its cancellation cleanup."""
@@ -121,13 +125,27 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
             raise cancelled
 
     async def retries():
+        nonlocal retry_error
         while True:
-            await asyncio.sleep(2)
-            await service.drain()
+            await asyncio.sleep(RETIRE_RETRY_SECONDS)
+            try:
+                await service.drain()
+            except asyncio.CancelledError:
+                # Shutdown cancellation belongs to this worker. Cancellation of
+                # a previously awaited retirement task is a maintenance error.
+                if asyncio.current_task().cancelling():
+                    raise
+                retry_error = "retirement task cancelled"
+            except Exception as error:
+                # The durable outbox remains authoritative. Protocol/transport
+                # failures must not terminate the only periodic retry path.
+                retry_error = f"{type(error).__name__}: {error}"
+            else:
+                retry_error = None
 
     @asynccontextmanager
     async def lifespan(app):
-        nonlocal stopping
+        nonlocal stopping, retry_worker
         worker = loader = None
         try:
             info = await service.engine.info()
@@ -143,7 +161,7 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
             service.events.emit("service_started", engine=info, fingerprint=service.template.fingerprint,
                 configuration_source="run_config" if resolved_config is not None else "injected_controller",
                 config=resolved_config)
-            worker = asyncio.create_task(retries())
+            worker = retry_worker = asyncio.create_task(retries())
             app.state.ready = True
             yield
         finally:
@@ -199,9 +217,14 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
     async def health():
         info = await service.engine.info()
         adapter = app.state.retrieval
-        return {"status": "ok", "engine": to_jsonable(info),
+        running = retry_worker is not None and not retry_worker.done()
+        error = service.retirement_error or retry_error
+        healthy = app.state.ready and running and error is None
+        body = {"status": "ok" if healthy else "degraded", "engine": to_jsonable(info),
                 "pending_retire_operations": len(service.store.outbox()),
+                "retirement_maintenance": {"running": running, "error": error},
                 "retrieval": to_jsonable(adapter.manifest) if adapter is not None else None}
+        return JSONResponse(status_code=200 if healthy else 503, content=body)
 
     @app.post("/sessions/{session_id}/query")
     async def query(session_id: str, body: QueryInput):

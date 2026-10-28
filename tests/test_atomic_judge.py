@@ -93,6 +93,19 @@ async def test_pipeline_binds_answer_and_sources_without_leaking_offline_labels(
 
 
 @pytest.mark.asyncio
+async def test_thinking_behavior_is_recorded_with_the_actual_request():
+    record = audit("The cache limit is 8 MiB.")
+    transport = Responses(extraction(record["answer"]), checked())
+    client = AtomicJudgeClient(config(enable_thinking=False), transport=httpx.MockTransport(transport))
+    try:
+        result = await client.evaluate(record)
+    finally:
+        await client.aclose()
+    assert result["judge"]["enable_thinking"] is False
+    assert all(request["chat_template_kwargs"] == {"enable_thinking": False} for request in transport.requests)
+
+
+@pytest.mark.asyncio
 async def test_missing_citation_does_not_change_visible_fact_verdict():
     record=audit("The cache limit is 8 MiB.")
     result,requests=await run(record,extraction(record["answer"]),checked())

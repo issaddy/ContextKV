@@ -86,7 +86,7 @@ r1完成、又完成r2以后重放r1，仍返回r1原答案/IDs/来源。`retrie
 | 完整结果可恢复 | 同ID请求或`/recover`取得同一结果并只提交一次，不重新检索 |
 | 原生length终止 | 保留实际文本/IDs并标`truncated=true` |
 | 已close会话继续新请求 | 沿原StoreError返回409 |
-| 后台退役程序或协议错误 | 写入`epoch_retire_worker_failed`事件，已提交及后续回答保持正常；drain/关闭报告维护错误 |
+| 后台退役程序或协议错误 | 保留outbox及已提交回答，定时drain继续重试；维护异常期间health返回503，恢复后返回200 |
 
 未完成prepare的显式abandon是管理恢复动作，执行前确认原执行者已停止。客户端超时进入未知结果恢复。原样生成结果的恢复依赖引擎保留窗口；超出窗口或引擎重启后的状态处理见[架构](../architecture.md)。
 
@@ -99,7 +99,7 @@ curl -sS -X POST http://127.0.0.1:18080/sessions/demo/recover \
 
 ## 初始化与关闭
 
-应用启动时加载一次检索器和元数据，保存`service_started`、`retrieval_configured`及实际配置。`/health`提供engine信息、pending retire计数和检索manifest。
+应用启动时加载一次检索器和元数据，保存`service_started`、`retrieval_configured`及实际配置。`/health`提供engine信息、pending retire计数、检索manifest和`retirement_maintenance`的运行/错误状态。正常待确认的outbox不单独判定故障；维护任务异常或停止返回503与`degraded`，成功重试后清除错误。
 
 请求取消会先等待其检索线程结束，再释放会话锁；关闭期间新请求返回503 `SERVICE_SHUTTING_DOWN`。ASGI计数/Event等待已接受请求收尾，随后依次关闭检索器、引擎客户端及SQLite。原生未决生成通过持久attempt恢复，退役维护使用同一drain路径。状态协议见[架构](../architecture.md#故障恢复)。
 

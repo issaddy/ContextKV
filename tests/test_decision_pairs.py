@@ -393,3 +393,81 @@ def test_rescore_cli_records_source_identity_without_constructing_engine(tmp_pat
     assert pairs.read_bytes() == original
     with pytest.raises(FileExistsError):
         main(args)
+
+
+@pytest.mark.parametrize("empty_allowlist", [False, True])
+def test_replay_uses_serving_citation_grammar_on_real_client_wire(tmp_path, empty_allowlist):
+    import httpx
+    from controller.engine_client import SGLangEngineClient
+    from controller.sampling import SamplingRecipe
+    from controller.templates import citation_regex
+    from test_engine_streaming import frame, info
+
+    database, manifest, split, _, _ = source_run(tmp_path)
+    case = freeze_cases(database, manifest, split, ByteTemplate())[0][0]
+    stale = make_evidence("old body outside this turn", "old")
+    candidates = [replace(candidate,
+        reference_map=candidate.reference_map + (("E_old", stale.key),),
+        required_blocks=frozenset() if empty_allowlist else candidate.required_blocks)
+        for candidate in case.candidates]
+    requests = []
+    recipe = SamplingRecipe(.7, .8, 20, 0)
+
+    def handler(request):
+        body = json.loads(request.content)
+        if request.url.path == "/context/engine/info":
+            return httpx.Response(200, json=info(ByteTemplate().fingerprint))
+        if request.url.path == "/context/epoch/prepare":
+            return httpx.Response(200, json={"engine_session_id": body["engine_session_id"],
+                "session_generation": 1, "engine_restart_id": "r", "operation_id": body["operation_id"]})
+        if request.url.path == "/context/epoch/retire":
+            return httpx.Response(200, json={"engine_session_id": body["engine_session_id"],
+                "session_generation": 1, "engine_restart_id": "r", "operation_id": body["operation_id"]})
+        assert request.url.path == "/generate"
+        requests.append(body)
+        return httpx.Response(200, json=frame([7], "answer", terminal=True))
+
+    async def scenario():
+        engine = SGLangEngineClient("http://test", ByteTemplate().fingerprint,
+            transport=httpx.MockTransport(handler), sampling=recipe, stream=False)
+        try:
+            collector = DecisionPairCollector(engine, CostModel())
+            with pytest.raises(ValueError, match="answer replay requires a candidate"):
+                await collector.generate(case.warmup_input_ids, case.max_new_tokens)
+            assert not requests
+            await collector.generate(case.warmup_input_ids, 1, warmup=True)
+            for candidate in candidates:
+                await collector.generate(candidate.input_ids, case.max_new_tokens, candidate=candidate)
+        finally:
+            await engine.aclose()
+    asyncio.run(scenario())
+    assert requests[0]["sampling_params"] == {**recipe.record(), "max_new_tokens": 1, "ignore_eos": True}
+    for candidate, request in zip(candidates, requests[1:]):
+        allowed = tuple(ref for ref, key in candidate.reference_map if key in candidate.required_blocks)
+        assert request["input_ids"] == list(candidate.input_ids)
+        assert request["sampling_params"] == {**recipe.record(), "max_new_tokens": case.max_new_tokens,
+                                               "regex": citation_regex(allowed)}
+        assert "E_old" not in request["sampling_params"]["regex"]
+
+
+@pytest.mark.parametrize("mismatch", ["prompt", "sampling", "budget"])
+def test_collection_checks_frozen_generation_conditions_before_opening_engine(tmp_path, monkeypatch, mismatch):
+    from argparse import Namespace
+    from controller.generation import GenerationProtocol
+    from controller.sampling import SamplingRecipe
+    import profiling.decision_pairs as module
+    database, manifest, split, _, _ = source_run(tmp_path)
+    cases = freeze_cases(database, manifest, split, ByteTemplate())[0]
+    original = RunConfig()
+    frozen = {"source_measurement_kind": "hardware",
+              "generation_protocol": GenerationProtocol.from_config(original).record()}
+    config = (replace(original, sampling=SamplingRecipe(.7)) if mismatch == "sampling" else
+              replace(original, context=replace(original.context, **(
+                  {"system_prompt": "different policy"} if mismatch == "prompt" else {"max_new_tokens": 7}))))
+    monkeypatch.setattr(module, "load_frozen", lambda _: (cases, frozen))
+    monkeypatch.setattr(module, "load_config", lambda _: config)
+    def forbidden(*args, **kwargs):
+        pytest.fail("generation mismatch must fail before model/client construction")
+    monkeypatch.setattr(module, "_model_and_knobs", forbidden)
+    with pytest.raises(ValueError, match="system prompt|generation protocol|generation budget"):
+        asyncio.run(module.collect(Namespace(cases="unused", config="unused")))

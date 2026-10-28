@@ -149,7 +149,7 @@ class AtomicJudgeClient:
                 "output_mode": output_mode, "response_schema_manifest": schemas,
                 "meaning": "v2 prompts with constrained structure; syntax is not semantic validation"}
         used = ("provider", "model", "revision", "base_url", "temperature", "max_tokens", "timeout_seconds",
-                "api_key_env", "base_model", "base_family", "context_window")
+                "api_key_env", "base_model", "base_family", "context_window", "enable_thinking")
         configuration = asdict(config)
         self.metadata = {k: configuration[k] for k in used}
         self.metadata.update(protocol=self.protocol["version"], protocol_manifest=self.protocol,

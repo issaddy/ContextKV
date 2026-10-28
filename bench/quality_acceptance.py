@@ -15,7 +15,49 @@ from bench.judge import DIMENSIONS, evaluation_binding
 from bench.official import load_jsonl
 from bench.report import bind_quality_rows, paired_quality
 
-NATIVE_EVALUATOR_FIELDS = ("protocol", "base_model", "base_family", "na_policy", "context_window", "protocol_manifest")
+JUDGE_TRANSPORT_FIELDS = {"base_url", "api_key_env"}
+
+
+def judge_protocol(judge):
+    """Freeze all recorded scoring controls, including future adapter settings.
+
+    Endpoint locations and credential variable names are transport details; model
+    identity remains operator-declared. Everything else, including timeouts,
+    thinking, constrained output and full native rubrics, belongs to the protocol.
+    """
+    return {key: value for key, value in judge.items() if key not in JUDGE_TRANSPORT_FIELDS}
+
+
+def audit_material_bound(row, result, online):
+    """Reuse native bodies or controller content hashes without duplicating them."""
+    if "visible_evidence_manifest" in result and "audit_evidence" in row:
+        # Matching native result/audit copies can both omit or alter a body.
+        # Always bind the complete body set to the original visible keys;
+        # controller responses need not duplicate those bodies in the result.
+        expected = {json.dumps(span["key"], sort_keys=True)
+                    for span in result["visible_evidence_manifest"]}
+        actual = set()
+        for block in row["audit_evidence"]:
+            key = block["key"]
+            identity = json.dumps(key, sort_keys=True)
+            if identity in actual or sha256(block["text"].encode("utf-8")).hexdigest() != key.get("content_sha256"):
+                raise ValueError(f"audit evidence body differs from its original visible key: {row['task_id']}")
+            actual.add(identity)
+        if actual != expected:
+            raise ValueError(f"audit evidence bodies differ from the original visible material: {row['task_id']}")
+        return True
+    return not any((row.get("visible_evidence_manifest"), row.get("audit_evidence"),
+                    online.get("contexts"), online.get("supporting_contexts")))
+
+
+def served_models(row):
+    """Read response identities already retained by ordinary/native judges."""
+    values = [row.get("served_model"),
+              *(grade.get("served_model") for grade in (row.get("native_results") or {}).values())]
+    known = [value for value in values if value is not None]
+    if any(not isinstance(value, str) or not value.strip() for value in known):
+        raise ValueError("recorded served_model must be a nonempty model name")
+    return tuple(sorted(set(known)))
 
 
 def evaluation_tasks(spec, tasks):
@@ -49,11 +91,16 @@ def evaluator_identity(row, generator):
     judge = row.get("judge", {})
     if not all(judge.get(k) for k in ("model", "revision", "prompt", "provider")) or not all(generator.get(k) for k in ("model", "revision")):
         return "unknown", None
-    same = judge["model"] == generator["model"] or judge["revision"] == generator["revision"]
-    signature = ("offline_judge", *(judge.get(k) for k in ("provider", "model", "revision", "prompt", "temperature", "max_tokens")),
+    served = served_models(row)
+    same = (judge["model"] == generator["model"] or judge["revision"] == generator["revision"]
+            or generator["model"] in served)
+    if len(served) > 1:
+        # One row cannot assert a single evaluator when dimensions disagree.
+        return "self_judge" if same else "unknown", None
+    signature = ("offline_judge", json.dumps(judge_protocol(judge), sort_keys=True),
+                 served,
                  row.get("reference_targets_supplied"),
-                 json.dumps(row.get("task_requirements"), sort_keys=True),
-                 *(json.dumps(judge.get(k), sort_keys=True) for k in NATIVE_EVALUATOR_FIELDS))
+                 json.dumps(row.get("task_requirements"), sort_keys=True))
     related = bool(judge.get("base_family") and generator.get("base_family")
                    and judge["base_family"] == generator["base_family"])
     kind = "self_judge" if same else "related_model_family_declared" if related else "independent_model_declared"
@@ -67,10 +114,11 @@ def frozen_evaluator_matches(protocol, row):
                 and row.get("aggregation", "single_reviewer") == protocol.get("aggregation"))
     if protocol["kind"] == "offline_judge":
         required = ("provider", "model", "revision", "prompt", "temperature", "max_tokens")
+        served = served_models(row)
+        expected_model = protocol.get("served_model", protocol.get("judge", {}).get("model"))
         return (row.get("source") == "offline_judge" and all(k in protocol.get("judge", {}) for k in required)
-                and all(row.get("judge", {}).get(k) == protocol["judge"][k] for k in required)
-                and all(row.get("judge", {}).get(k) == protocol["judge"].get(k)
-                        for k in NATIVE_EVALUATOR_FIELDS)
+                and judge_protocol(row.get("judge", {})) == judge_protocol(protocol["judge"])
+                and (served == (expected_model,) if "served_model" in protocol else not served or served == (expected_model,))
                 and "reference_targets_supplied" in protocol
                 and row.get("reference_targets_supplied") == protocol["reference_targets_supplied"])
     raise ValueError("frozen evaluator kind must be human_blind or offline_judge")
@@ -94,11 +142,20 @@ def _read_method(spec):
         turn = expected[task]
         online, result = turn.get("online_turn") or {}, turn.get("result") or {}
         for audit_key, online_key in (("query", "query"), ("protocol", "protocol"),
-                                      ("actual_history", "history"), ("retrieved_evidence", "contexts")):
+                                      ("actual_history", "history")):
             if online_key in online and audit_key in row and row[audit_key] != online[online_key]:
                 raise ValueError(f"audit {audit_key} differs from the original online turn: {task}")
-        for key in ("input_ids", "output_ids", "visible_evidence_manifest", "audit_evidence"):
-            if key in result and key in row and row[key] != result[key]:
+        # Source restoration can expand the reading contexts after retrieval.
+        # Bind the ranking to its original rows, and the material actually read
+        # to the engine result below; neither is a substitute for the other.
+        retrieved = online.get("retrieval_contexts")
+        if retrieved is None:
+            retrieved = online.get("contexts")
+        if retrieved is not None and "retrieved_evidence" in row and row["retrieved_evidence"] != retrieved:
+            raise ValueError(f"audit retrieved_evidence differs from the original online turn: {task}")
+        material_fields = ("visible_evidence_manifest", "audit_evidence", "citation_scope")
+        for key in ("input_ids", "output_ids", *material_fields):
+            if key in result and (key not in row or row[key] != result[key]):
                 raise ValueError(f"audit {key} differs from the original run result: {task}")
         binding = evaluation_binding(row)
         recorded_hash = result.get("input_hash") or (result.get("receipt") or {}).get("input_hash")
@@ -106,7 +163,9 @@ def _read_method(spec):
             raise ValueError(f"audit input_ids differ from the original input_hash: {task}")
         if (not all(k in online for k in ("query", "protocol", "history", "contexts"))
                 or not all(k in row for k in ("query", "protocol", "actual_history", "retrieved_evidence"))
-                or "input_hash" not in binding or not (recorded_hash or "input_ids" in result)):
+                or "input_hash" not in binding or not (recorded_hash or "input_ids" in result)
+                or not audit_material_bound(row, result, online)
+                or "citation_scope" in row and "citation_scope" not in result):
             unbound_audits.append(task)
         bindings[task] = binding
     scores = load_jsonl(spec["scores"]) if spec.get("scores") else []

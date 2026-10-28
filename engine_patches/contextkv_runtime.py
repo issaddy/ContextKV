@@ -486,6 +486,7 @@ class ContextKVRuntime:
             self.attempts[attempt] = dict(state="REJECTED", engine_restart_id=self.restart_id,
                 engine_session_id=recv.session_id, session_generation=recv.expected_generation,
                 attempt_id=attempt, inflight=False, terminal=True, result=None, receipt=None)
+            self._prune_attempts()
 
     def finish(self, req):
         attempt = getattr(req, "contextkv_attempt_id", None)
@@ -513,6 +514,9 @@ class ContextKVRuntime:
         # A crash before that publication leaves a terminal receipt only.
         item.update(state="COMPLETED" if complete else "FAILED", terminal=True,
                     inflight=False, receipt=receipt)
+        # Retention follows terminal time: a long-running request must still
+        # publish its result after newer admission rejections have accumulated.
+        self.attempts.move_to_end(attempt)
         req.customized_info = dict(req.customized_info or {})
         req.customized_info["contextkv_receipt"] = [receipt]
         output_count = len(getattr(req, "output_ids", ()))
@@ -530,12 +534,15 @@ class ContextKVRuntime:
         elif complete and epoch["state"] == "PREPARED":
             epoch["state"] = "COMMITTED"
         self._prune_results()
-        for key in list(self.attempts):
-            if len(self.attempts) <= self.receipt_limit:
-                break
-            if self.attempts[key]["terminal"]:
-                del self.attempts[key]
-                self._drop_result(key)
+        self._prune_attempts()
+
+    def _prune_attempts(self):
+        # Both admission rejection and normal completion enter terminal state.
+        # Active attempts are retained independently of the terminal budget.
+        terminal = [key for key, item in self.attempts.items() if item["terminal"]]
+        for key in terminal[:max(0, len(terminal)-self.receipt_limit)]:
+            del self.attempts[key]
+            self._drop_result(key)
 
     def _release(self, sid, epoch):
         self.cache.release_radix_session(sid)

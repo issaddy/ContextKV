@@ -248,6 +248,18 @@ def resolve_required_evidence_with_reasons(query: str, current: Iterable[Evidenc
         reasons[references[ref]] = "explicit_reference:" + ref
     folded = query.casefold()
     current_groups = {(key.corpus_id,key.document_id,key.passage_id) for key in current}
+    revisits = _natural_revisits(query, archive, snapshot, policy, current, revisit_turns)
+    # An identifier names a field within an object, not the object itself. Current
+    # or explicit evidence can establish its object; historical recovery remains
+    # limited to the exact selected/resolved evidence, not every archived passage
+    # that happens to share its document identity.
+    object_scopes = {(key.corpus_id, key.document_id, key.version)
+                     for key in reasons}
+    current_scopes = {(key.corpus_id, key.document_id, key.version) for key in current}
+    current_documents = {(key.corpus_id, key.document_id) for key in current}
+    selected_history = (None if revisit_turns is None else {
+        key for ordinal, turn in enumerate(snapshot.raw_history, 1)
+        if ordinal in revisit_turns for key in turn.evidence_keys})
     anchor_matches: dict[str, list[EvidenceBlock]] = {}
     for block in archive.values():
         group = (block.key.corpus_id,block.key.document_id,block.key.passage_id)
@@ -267,21 +279,24 @@ def resolve_required_evidence_with_reasons(query: str, current: Iterable[Evidenc
         # than treating lexical agreement as proof of the same referent.
         named = [block for block in matches if any(_mentioned(name, folded)
                  for name in (block.key.document_id, block.title) if name)]
-        scoped = named or matches
+        scoped = named or [block for block in matches if
+            (block.key.corpus_id, block.key.document_id, block.key.version) in object_scopes
+            or selected_history is not None and block.key in selected_history]
+        if not scoped:
+            continue
         versions = [block for block in scoped if _mentioned_version(block.key.version, folded)]
         if versions:
             scoped = versions
-        current_scopes = {(block.key.corpus_id, block.key.document_id, block.key.version)
-                          for block in scoped if block.key in current}
-        if current_scopes and not versions:
+        if not versions:
             scoped = [block for block in scoped if
+                      (block.key.corpus_id, block.key.document_id) not in current_documents or
                       (block.key.corpus_id, block.key.document_id, block.key.version) in current_scopes]
-        elif not named and len({(block.key.corpus_id, block.key.document_id)
-                               for block in scoped}) > 1:
+        if not named and len({(block.key.corpus_id, block.key.document_id)
+                              for block in scoped}) > 1:
             continue
         for block in scoped:
             reasons.setdefault(block.key, "configuration_anchor")
-    for key, reason in _natural_revisits(query, archive, snapshot, policy, current, revisit_turns).items():
+    for key, reason in revisits.items():
         reasons.setdefault(key, reason)
     if not allows_version_comparison(query, policy):
         # An explicitly requested archived revision replaces a conflicting

@@ -17,6 +17,7 @@ import statistics
 
 from bench.metrics import percentile
 from controller.cost_model import output_length_prior
+from controller.generation import GenerationProtocol, validate_candidate_protocol
 from controller.output_length import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, OutputLengthModel, candidate_features
 from controller.schema import PromptCandidate, SessionSnapshot
 from controller.serialization import decode
@@ -356,17 +357,12 @@ def training_priors(baseline, source_configuration):
     are not loaded or changed by length fitting.
     """
     from controller.cost_model import CostModel
-    from controller.sampling import SamplingRecipe
     model = CostModel(default_output_tokens=baseline["settings"]["default_output_tokens"],
                       p90_output_tokens=baseline["settings"]["p90_output_tokens"])
     model.calibration_metadata = baseline.get("metadata", {})
     if source_configuration is None:
         return model.effective_output_prior, {"status": "unknown_source_configuration_legacy_prior"}
-    configured = source_configuration.get("sampling")
-    sampling = SamplingRecipe(**configured) if configured is not None else None
-    settings = source_configuration.get("cost_model") or {}
-    report = model.configure_sampling(sampling, fallback_mean=settings.get("default_output_tokens", 128),
-                                      fallback_p90=settings.get("p90_output_tokens", 256))
+    report = model.configure_for_run(source_configuration)
     return model.effective_output_prior, report
 
 
@@ -391,20 +387,33 @@ def main(argv=None):
         if path and Path(path).exists():
             raise FileExistsError(path)
     baseline = json.loads(paths["baseline_cost_artifact"].read_text())
-    source_configuration = json.loads(paths["pairs_manifest"].read_text()).get("config")
+    pairs_manifest = json.loads(paths["pairs_manifest"].read_text())
+    source_configuration = pairs_manifest.get("config")
+    if source_configuration is None:
+        raise ValueError("length fitting needs the measured generation configuration")
+    protocol = GenerationProtocol.from_config(source_configuration)
+    if pairs_manifest.get("generation_protocol") != protocol.record():
+        raise ValueError("length fitting needs pairs collected with the serving generation protocol; recollect legacy unconstrained pairs")
+    frozen_manifest = json.loads(paths["cases_manifest"].read_text())
+    cases_hash = sha256(paths["cases"].read_bytes()).hexdigest()
+    if (frozen_manifest.get("cases_sha256") != cases_hash or
+            pairs_manifest.get("frozen", {}).get("cases_sha256") != cases_hash or
+            frozen_manifest.get("generation_protocol") != protocol.record()):
+        raise ValueError("length labels must match the frozen inputs and generation protocol")
     priors, prior_binding = training_priors(baseline, source_configuration)
     cases, failures = build_cases(read_jsonl(paths["cases"]), read_jsonl(paths["pairs"]))
+    validate_candidate_protocol(cases, protocol)
     artifacts, report = fit_exploration(cases, priors=priors)
     provenance = {name: {"path": str(path.resolve()), "sha256": sha256(path.read_bytes()).hexdigest()}
                   for name, path in paths.items()}
     report.update(provenance=provenance, excluded_failures=failures, training_prior_sampling=prior_binding,
                   truncated_arms=sum(sum(c.truncated_counts.values()) for c in cases),
                   label_semantics="served tokens at frozen budget; truncation is not natural EOS length")
-    from controller.sampling import SamplingRecipe, request_sampling
+    from controller.sampling import request_sampling
+    for specification in artifacts.values():
+        specification["target"]["generation_protocol"] = protocol.record()
+        specification["target"]["sampling_recipe"] = request_sampling(protocol.sampling)
     for kind, path in (("candidate", args.output), ("action_only", args.action_output)):
-        if source_configuration is not None:
-            artifacts[kind]["target"]["sampling_recipe"] = request_sampling(SamplingRecipe(**source_configuration["sampling"])
-                if source_configuration.get("sampling") is not None else None)
         if path:
             artifacts[kind]["metadata"].update(provenance=provenance, excluded_failures=failures,
                                                truncated_arms=report["truncated_arms"],

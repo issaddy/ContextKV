@@ -23,6 +23,7 @@ import uuid
 from controller.candidates import CandidatePolicy, build_candidates
 from controller.config import RunConfig, create_model_template, load_config
 from controller.cost_model import CostModel
+from controller.generation import GenerationProtocol, candidate_request, validate_candidate_protocol
 from controller.engine_client import EngineError, EngineInfo, SGLangEngineClient
 from controller.planner import PlannerKnobs, choose_plan
 from controller.schema import CacheQuoteBatch, NoFeasiblePlan, PromptCandidate, SessionSnapshot
@@ -179,6 +180,7 @@ def write_frozen(database, manifest_path, split_path, output, template, *, limit
                 "split_manifest_sha256": split_hash, "source_run_id": manifest["run_id"],
                 "source_measurement_kind": manifest["measurement_kind"], "fingerprint": manifest["fingerprint"],
                 "source_protocol": manifest["protocol"], "source_database": str(Path(database).resolve()),
+                "generation_protocol": GenerationProtocol.from_config(manifest["config"]).record(),
                 "input_provenance": "committed_attempt_inputs_and_expected_version_ledger; current_result_excluded",
                 "warmup_provenance": "previous_execution_input_plus_actual_output_plus_one_common_sentinel"}
     target.with_suffix(".manifest.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -216,16 +218,20 @@ class DecisionPairCollector:
                     raise
                 await asyncio.sleep(.05)
 
-    async def generate(self, ids, max_new_tokens, *, warmup=False):
+    async def generate(self, ids, max_new_tokens, *, warmup=False, candidate=None):
+        if warmup == (candidate is not None):
+            raise ValueError("answer replay requires a candidate; raw tokens are only for cache warmup")
         info = await self.engine.info()
         sid, attempt = uuid.uuid4().hex, uuid.uuid4().hex
         ack = await self.engine.prepare(sid, uuid.uuid4().hex, info.engine_restart_id)
         try:
             started = time.perf_counter()
-            result = await self.engine.generate(input_ids=ids, session_id=sid,
+            generation = (candidate_request(candidate, max_new_tokens) if candidate is not None else
+                          {"input_ids": ids, "max_new_tokens": max_new_tokens})
+            result = await self.engine.generate(**generation, session_id=sid,
                 expected_generation=ack.session_generation, expected_restart_id=info.engine_restart_id,
                 attempt_id=attempt, fingerprint=info.fingerprint,
-                max_new_tokens=max_new_tokens, ignore_eos=warmup)
+                ignore_eos=warmup)
             return result, (time.perf_counter() - started) * 1000
         finally:
             await self.engine.retire(sid, ack.session_generation, uuid.uuid4().hex,
@@ -278,7 +284,7 @@ class DecisionPairCollector:
                 observations[candidate.action] = {"input_hash": candidate.input_hash,
                     "input_tokens": len(candidate.input_ids), "prediction": asdict(estimates[candidate.action]),
                     "quote": asdict(quote), "warmup": warmup}
-                result, duration = await self.generate(candidate.input_ids, case.max_new_tokens)
+                result, duration = await self.generate(candidate.input_ids, case.max_new_tokens, candidate=candidate)
                 observations[candidate.action].update({
                     "client_complete_ms": duration, "server_elapsed_ms": result.server_elapsed_ms,
                     "output_tokens": len(result.output_ids), "result": asdict(result)})
@@ -383,15 +389,13 @@ def _model_and_knobs(config, cases, artifact):
         model = CostModel.from_measurements(rows, **common, **settings)
     else:
         model = CostModel(**common, **settings)
-    from controller.templates import SYSTEM_PROMPT
-    model.configure_sampling(config.sampling, fallback_mean=config.cost_model.default_output_tokens,
-                             fallback_p90=config.cost_model.p90_output_tokens,
-                             system_prompt=SYSTEM_PROMPT if config.context.system_prompt is None else config.context.system_prompt)
+    model.configure_for_run(config)
     if config.cost_model.output_length_artifact:
         from controller.output_length import OutputLengthModel
         model.output_length_model = OutputLengthModel.load(config.cost_model.output_length_artifact,
             expected_fingerprint=cases[0].candidates[0].fingerprint, max_new_tokens=cases[0].max_new_tokens, sampling=config.sampling,
-            expected_priors=model.effective_output_prior)
+            expected_priors=model.effective_output_prior,
+            expected_generation_protocol=GenerationProtocol.from_config(config).record())
     return model, config.planner
 
 
@@ -491,6 +495,16 @@ def rescore_file(args):
     if (source_sampling is None and requested != SamplingRecipe()
             or source_sampling is not None and source_sampling != requested):
         raise ValueError("offline rescoring cannot change the measured sampling recipe")
+    protocol = GenerationProtocol.from_config(config)
+    if (source_config is not None and
+            GenerationProtocol.from_config(source_config).system_prompt != protocol.system_prompt):
+        raise ValueError("offline rescoring cannot change the measured system prompt")
+    source_protocol = source_manifest.get("generation_protocol")
+    if source_protocol is not None and source_protocol != protocol.record():
+        raise ValueError("offline rescoring cannot change the measured generation protocol")
+    if config.cost_model.output_length_artifact and source_protocol is None:
+        raise ValueError("output-length rescoring needs pairs bound to the serving generation protocol")
+    validate_candidate_protocol(cases, protocol)
     artifact = args.cost_artifact or config.cost_model.artifact
     if not artifact:
         raise ValueError("offline rescoring requires a frozen cost artifact")
@@ -506,6 +520,7 @@ def rescore_file(args):
         "frozen": frozen, "cases_path": str(Path(args.cases).resolve()),
         "config": asdict(config), "config_scope": "cost ablations and planner; candidates/budgets come from frozen cases",
         "sampling_binding": sampling_binding,
+        "generation_protocol": source_protocol,
         "cost_artifact": str(Path(artifact).resolve()), "cost_artifact_sha256": sha256(Path(artifact).read_bytes()).hexdigest(),
         "output_length_artifact": config.cost_model.output_length_artifact,
         "output_length_artifact_sha256": sha256(Path(config.cost_model.output_length_artifact).read_bytes()).hexdigest()
@@ -533,6 +548,12 @@ async def collect(args):
     if frozen["source_measurement_kind"] == "simulation":
         raise ValueError("hardware decision collection requires a source run with real model tokens")
     config = load_config(args.config)
+    protocol = GenerationProtocol.from_config(config)
+    validate_candidate_protocol(cases, protocol)
+    if frozen.get("generation_protocol") != protocol.record():
+        raise ValueError("frozen generation protocol differs or is unbound; freeze again with the source run configuration")
+    if any(case.max_new_tokens != config.context.max_new_tokens for case in cases):
+        raise ValueError("frozen generation budget differs from collection configuration")
     artifact = args.cost_artifact or config.cost_model.artifact
     model, knobs = _model_and_knobs(config, cases, artifact)
     fingerprint = cases[0].candidates[0].fingerprint
@@ -551,6 +572,7 @@ async def collect(args):
         raise FileExistsError("decision results already exist; choose a new output")
     metadata = {"schema_version": 1, "split": "dev", "status": "running", "frozen": frozen,
         "cache_states": args.cache_states, "repetitions": args.repetitions, "seed": args.seed,
+        "generation_protocol": protocol.record(),
         "config": asdict(config), "cost_artifact": artifact,
         "cost_artifact_sha256": sha256(Path(artifact).read_bytes()).hexdigest() if artifact else None,
         "output_length_artifact": config.cost_model.output_length_artifact,

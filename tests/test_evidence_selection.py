@@ -171,7 +171,7 @@ def test_catalog_coalesces_identical_windows_without_chain_merging_other_choices
     raw+= (OnlineContext('p2-short','Paragraph 2'),)
     corpus=CorpusIndex.from_records([{'passage_id':c.document_id,'document_id':'doc',
         'span':[i,i+1],'text':c.text} for i,c in enumerate(raw)],corpus_id='c',snapshot_id='v1')
-    documents=SourceDocuments([{'document_id':'doc','text':text}])
+    documents=SourceDocuments([{'document_id':'doc','text':text,'snapshot_id':'v1','corpus_id':'c'}])
     catalog,origins=reading_catalog((*raw,raw[0]),neighbors=lambda _:(),
         indexed={c.document_id:c for c in raw},contextualize=corpus.contextualize,
         read=lambda contexts:corpus.reading_contexts(contexts,documents))

@@ -1,5 +1,6 @@
 from dataclasses import replace
 import json
+import pytest
 
 from adapters.corpus import CorpusIndex
 from adapters.mtrag import OnlineContext, OnlineTurn
@@ -15,7 +16,7 @@ def test_original_paragraph_window_preserves_formatting_and_shared_candidate_sou
             'Only for this procedure, enable the flag.\n\nProcedure B\n\n'
             '1.  Download the package.\n2.  Run its installer.\n\nEnd of document.')
     passage = 'Only for this procedure, enable the flag.\n\nProcedure B\n\n1. Download the package.'
-    documents = SourceDocuments([{'document_id':'manual','text':text,'url':'https://source/manual'}])
+    documents = SourceDocuments([{'corpus_id':'c','snapshot_id':'v1','document_id':'manual','text':text,'url':'https://source/manual'}])
     corpus = CorpusIndex.from_records([{'passage_id':'part','document_id':'manual','text':passage,
         'span':[0,len(passage)],'url':'https://source/manual'}],corpus_id='c',snapshot_id='v1')
     context = OnlineContext('part',passage,score=.8)
@@ -33,7 +34,7 @@ def test_original_paragraph_window_preserves_formatting_and_shared_candidate_sou
 
 
 def test_alignment_does_not_guess_document_or_choose_an_ambiguous_occurrence():
-    documents=SourceDocuments([{'document_id':'doc','text':'Repeated.\n\nOther text.\n\nRepeated.'}])
+    documents=SourceDocuments([{'corpus_id':'c','snapshot_id':'v1','document_id':'doc','text':'Repeated.\n\nOther text.\n\nRepeated.'}])
     assert documents.window('absent','Repeated.')[1]=='document_unavailable'
     assert documents.window('doc','Changed original.')[1]=='passage_not_aligned'
     assert documents.window('doc','Repeated.')[1]=='ambiguous_alignment'
@@ -65,7 +66,7 @@ def test_source_documents_zip_and_plain_jsonl_load_the_same_originals(tmp_path):
 
 def test_overlapping_original_windows_merge_without_reordering_ranked_passages():
     text='\n\n'.join(f'Paragraph {i} contains original conditions.' for i in range(9))
-    documents=SourceDocuments([{'document_id':'manual','text':text}])
+    documents=SourceDocuments([{'corpus_id':'c','snapshot_id':'v1','document_id':'manual','text':text}])
     rows=[{'passage_id':f'p{i}','document_id':'manual','span':[i,i+1],
            'text':f'Paragraph {i} contains original conditions.'} for i in (3,4)]
     corpus=CorpusIndex.from_records(rows,corpus_id='c',snapshot_id='v1')
@@ -84,7 +85,7 @@ def test_overlapping_original_windows_merge_without_reordering_ranked_passages()
 
 
 def test_reading_view_replaces_unscoped_slices_but_keeps_declared_dependencies():
-    documents=SourceDocuments([{'document_id':'manual','text':'Context.\n\nPlain fact.\n\nScoped fact.\n\nEnd.'}])
+    documents=SourceDocuments([{'corpus_id':'c','snapshot_id':'v1','document_id':'manual','text':'Context.\n\nPlain fact.\n\nScoped fact.\n\nEnd.'}])
     corpus=CorpusIndex.from_records([
         {'passage_id':'plain','document_id':'manual','text':'Plain fact.','span':[0,1]},
         {'passage_id':'scoped','document_id':'manual','text':'Scoped fact.','span':[2,3],'dependencies':['condition']},
@@ -106,7 +107,7 @@ def test_reading_view_replaces_unscoped_slices_but_keeps_declared_dependencies()
 def test_shifted_retrieval_inside_one_paragraph_reuses_the_same_reading_prefix():
     from test_candidates import committed
     text='Introduction.\n\nFirst original sentence. Second original sentence.\n\nClosing context.'
-    documents=SourceDocuments([{'document_id':'doc','text':text}])
+    documents=SourceDocuments([{'corpus_id':'c','snapshot_id':'v1','document_id':'doc','text':text}])
     corpus=CorpusIndex.from_records([
         {'passage_id':'a','document_id':'doc','text':'First original sentence.','span':[0,1]},
         {'passage_id':'b','document_id':'doc','text':'Second original sentence.','span':[2,3]}],
@@ -125,10 +126,62 @@ def test_shifted_retrieval_inside_one_paragraph_reuses_the_same_reading_prefix()
 
 
 def test_reading_window_retains_parameter_anchors_for_later_revisits():
-    documents=SourceDocuments([{'document_id':'doc','text':'Settings.\n\nSet `request_timeout` to 30 seconds.\n\nOther context.'}])
+    documents=SourceDocuments([{'corpus_id':'c','snapshot_id':'v1','document_id':'doc','text':'Settings.\n\nSet `request_timeout` to 30 seconds.\n\nOther context.'}])
     corpus=CorpusIndex.from_records([{'passage_id':'p','document_id':'doc','span':[0,1],
         'text':'Set `request_timeout` to 30 seconds.'}],corpus_id='c',snapshot_id='v1')
     reading=corpus.reading_contexts((OnlineContext('p','Set `request_timeout` to 30 seconds.'),),documents)
     block,=corpus.enrich(reading)
     assert block.anchors==('request_timeout',)
-    assert block.key.passage_id.startswith('source-window:v1:')
+    assert block.key.passage_id.startswith('source-window:v2:')
+
+
+@pytest.mark.parametrize("metadata, reason", [
+    ({'version': 'v2', 'snapshot_id': 'snapshot'}, 'version_mismatch'),
+    ({'version': 'v1', 'snapshot_id': 'other-snapshot'}, 'snapshot_mismatch'),
+    ({'version': 'v1'}, 'snapshot_unconfirmed'),
+    ({'snapshot_id': 'snapshot'}, 'version_unconfirmed'),
+    ({'version': 'v1', 'snapshot_id': 'snapshot', 'source': 'https://other/manual'}, 'source_mismatch'),
+    ({'version': 'v1', 'snapshot_id': 'snapshot', 'source': ''}, 'source_unconfirmed'),
+    ({'version': 'v1', 'snapshot_id': 'snapshot', 'corpus_id': 'other'}, 'corpus_mismatch'),
+])
+def test_shared_sentence_cannot_relabel_a_different_or_unconfirmed_original(metadata, reason):
+    passage = 'This command enables the service.'
+    source = 'https://source/manual'
+    corpus = CorpusIndex.from_records([{'passage_id': 'part', 'document_id': 'manual',
+        'version': 'v1', 'text': passage, 'source': source}], corpus_id='c', snapshot_id='snapshot')
+    original = {'document_id': 'manual', 'text': 'New revision restriction.\n\n' + passage,
+                'source': source, **metadata}
+    documents = SourceDocuments([original])
+    context = OnlineContext('part', passage)
+    assert corpus.reading_contexts((context,), documents) == (context,)
+    block, = corpus.enrich((context,))
+    assert block.key.version == 'v1' and block.text == passage
+    assert corpus.document_window_counts == {reason: 1}
+    assert len(corpus.blocks) == 1
+
+
+def test_exact_original_identity_expands_and_a_different_document_set_is_revalidated():
+    passage = 'This command enables the service.'
+    source = 'https://source/manual'
+    corpus = CorpusIndex.from_records([{'passage_id': 'part', 'document_id': 'manual',
+        'version': 'v1', 'text': passage, 'source': source}], corpus_id='c', snapshot_id='snapshot')
+    row = {'document_id': 'manual', 'text': 'Original v1 restriction.\n\n' + passage,
+           'source': source, 'metadata': {'snapshot_id': 'snapshot', 'version': 'v1', 'corpus_id': 'c'}}
+    context = OnlineContext('part', passage)
+    reading, = corpus.reading_contexts((context,), SourceDocuments([row]))
+    block, = corpus.enrich((reading,))
+    assert block.text == row['text'] and block.key.version == 'v1' and block.source_uri == source
+    revised = SourceDocuments([{**row, 'version': 'v2', 'text': 'New v2 restriction.\n\n' + passage}])
+    assert corpus.reading_contexts((context,), revised) == (context,)
+
+
+def test_local_document_and_snapshot_names_need_a_corpus_identity_when_source_is_unknown():
+    passage = 'This command enables the service.'
+    corpus = CorpusIndex.from_records([{'passage_id': 'part', 'document_id': 'manual',
+        'text': passage}], corpus_id='c', snapshot_id='v1')
+    row = {'document_id': 'manual', 'snapshot_id': 'v1', 'text': 'Local restriction.\n\n' + passage}
+    context = OnlineContext('part', passage)
+    assert corpus.reading_contexts((context,), SourceDocuments([row])) == (context,)
+    assert corpus.document_window_counts == {'corpus_unconfirmed': 1}
+    reading, = corpus.reading_contexts((context,), SourceDocuments([{**row, 'corpus_id': 'c'}]))
+    assert corpus.enrich((reading,))[0].text == row['text']

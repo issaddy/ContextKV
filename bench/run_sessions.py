@@ -78,6 +78,9 @@ async def run_sessions(sessions: Mapping[str, Sequence[Mapping[str, Any]]] | Seq
     their first-turn response time includes that wait. No future turn is submitted
     until the preceding result is successfully committed by handler. Timing uses
     the local monotonic clock; no unaligned wall-clock subtraction is performed.
+    The per-turn deadline starts at turn arrival and covers retrieval context,
+    retrieval and generation. Cancellation drains owned work before returning;
+    publishing an already committed result is outside that deadline.
     """
     if concurrency < 1 or think_time < 0:
         raise ValueError("invalid concurrency or think_time")
@@ -132,17 +135,22 @@ async def run_sessions(sessions: Mapping[str, Sequence[Mapping[str, Any]]] | Seq
                     active = gate.current()
                     retrieval_done = None
                     try:
-                        if protocol == "P3":
-                            if retrieval_context_provider is None:
-                                active = await run_retrieval_worker(retriever.retrieve_turn, active)
-                            else:
-                                def retrieve():
-                                    context = retrieval_context_provider(active)
-                                    return retriever.retrieve_turn(active, prior_context=context)
-                                active = await run_retrieval_worker(retrieve)
-                        retrieval_done = time.monotonic()
-                        operation = handler(active)
-                        result = await asyncio.wait_for(operation, per_turn_timeout) if per_turn_timeout else await operation
+                        deadline = turn_arrive + per_turn_timeout if per_turn_timeout is not None else None
+                        # One deadline for the pipeline, rather than a fresh
+                        # generation budget after potentially slow retrieval.
+                        async with asyncio.timeout_at(deadline):
+                            if deadline is not None and time.monotonic() >= deadline:
+                                raise TimeoutError("turn deadline expired before execution")
+                            if protocol == "P3":
+                                if retrieval_context_provider is None:
+                                    active = await run_retrieval_worker(retriever.retrieve_turn, active)
+                                else:
+                                    def retrieve():
+                                        context = retrieval_context_provider(active)
+                                        return retriever.retrieve_turn(active, prior_context=context)
+                                    active = await run_retrieval_worker(retrieve)
+                            retrieval_done = time.monotonic()
+                            result = await handler(active)
                         if (isinstance(result, Mapping) and result.get("success") is False) or getattr(result, "success", True) is False:
                             raise RuntimeError("handler reported unsuccessful generation")
                         answer = _answer(result)

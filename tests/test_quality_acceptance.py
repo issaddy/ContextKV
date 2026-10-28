@@ -262,6 +262,91 @@ def test_same_answer_cannot_hide_changed_original_question_history_or_evidence(t
         evaluate(spec)
 
 
+def expanded_material_method(spec, tmp_path, *, native=True):
+    """Exercise the real exporter with a ranking snippet and restored source."""
+    from dataclasses import asdict
+    from adapters.mtrag import OnlineContext, OnlineTurn
+    from adapters.retrieval import to_evidence
+    from bench.quality import export_evaluation
+
+    path = Path(spec["methods"]["candidate"]["audit"])
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    original = OnlineContext("source", "retrieved snippet")
+    restored = OnlineContext("source", "Complete source including its conditions.")
+    supporting = OnlineContext("dependency", "Supporting definition.")
+    turn = OnlineTurn("s0", "s0:1", 1, "fixture", "Question?", (), (restored,), "P3",
+                      supporting_contexts=(supporting,), retrieval_contexts=(original,))
+    bodies = [asdict(to_evidence(c, "fixture")) for c in (restored, supporting)]
+    manifest = [{"reference_id": f"E_{i}", "key": block["key"]} for i, block in enumerate(bodies)]
+    exported = tmp_path / "expanded-audit.jsonl"
+    export_evaluation(turn, rows[0]["answer"], official_path=tmp_path / "expanded-official.jsonl",
+                      audit_path=exported, visible_evidence_manifest=manifest, audit_evidence=bodies,
+                      input_ids=rows[0]["input_ids"], output_ids=rows[0]["output_ids"],
+                      measurement_kind="hardware", citation_scope=("E_0", "E_1"))
+    rows[0] = json.loads(exported.read_text())
+    write_jsonl(path, rows)
+
+    def update(raw):
+        saved = raw["report"]["turns"][0]
+        saved["online_turn"] = asdict(turn)
+        saved["result"].update(visible_evidence_manifest=manifest, citation_scope=["E_0", "E_1"])
+        if native:
+            saved["result"]["audit_evidence"] = bodies
+    edit_run(spec, update)
+    return path
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_original_ranking_and_restored_reading_material_bind_separately(tmp_path, native):
+    spec = setup_methods(tmp_path)
+    expanded_material_method(spec, tmp_path, native=native)
+    assert evaluate(spec)["comparisons"]["candidate"]["dev_quality_eligible"]
+
+
+@pytest.mark.parametrize("native", [True, False])
+@pytest.mark.parametrize("tamper", ["retrieved_evidence", "audit_evidence", "visible_evidence_manifest", "citation_scope"])
+def test_restored_material_keeps_both_ranking_and_actual_citations_bound(tmp_path, native, tamper):
+    spec = setup_methods(tmp_path)
+    path = expanded_material_method(spec, tmp_path, native=native)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    if tamper == "retrieved_evidence":
+        rows[0][tamper][0]["text"] = "a different ranking"
+    elif tamper == "audit_evidence":
+        rows[0][tamper][0]["text"] = "a different source body"
+    else:
+        rows[0][tamper].pop()
+    write_jsonl(path, rows)
+    with pytest.raises(ValueError, match="original"):
+        evaluate(spec)
+
+
+@pytest.mark.parametrize("field", ["audit_evidence", "visible_evidence_manifest", "citation_scope"])
+def test_original_material_fields_cannot_be_omitted_from_audit(tmp_path, field):
+    spec = setup_methods(tmp_path)
+    path = expanded_material_method(spec, tmp_path)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[0].pop(field)
+    write_jsonl(path, rows)
+    with pytest.raises(ValueError, match="original run result"):
+        evaluate(spec)
+
+
+@pytest.mark.parametrize("tamper", ["missing_body", "changed_body"])
+def test_equal_native_result_and_audit_copies_must_still_match_visible_material(tmp_path, tamper):
+    spec = setup_methods(tmp_path)
+    path = expanded_material_method(spec, tmp_path)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    bodies = rows[0]["audit_evidence"]
+    if tamper == "missing_body":
+        bodies.pop()
+    else:
+        bodies[0]["text"] = "Both saved copies contain the same wrong body."
+    write_jsonl(path, rows)
+    edit_run(spec, lambda raw: raw["report"]["turns"][0]["result"].update(audit_evidence=bodies))
+    with pytest.raises(ValueError, match="original visible"):
+        evaluate(spec)
+
+
 @pytest.mark.parametrize("native_ids", [True, False])
 def test_audit_ids_match_native_ids_or_controller_receipt(tmp_path, native_ids):
     spec = setup_methods(tmp_path)
@@ -414,6 +499,81 @@ def test_native_frozen_protocol_cannot_omit_rubric_or_na_extension():
     assert frozen_evaluator_matches(frozen, row)
     row["judge"]["na_policy"] = "native_numeric_only"
     assert not frozen_evaluator_matches(frozen, row)
+
+
+@pytest.mark.parametrize("field,value", [("enable_thinking", True), ("output_constraint", "native_regex_v1"),
+                                        ("context_window", 2048), ("timeout_seconds", 5),
+                                        ("future_scoring_option", {"mode": "changed"})])
+def test_every_recorded_scoring_control_binds_paired_and_frozen_evaluators(tmp_path, field, value):
+    from dataclasses import asdict
+    from bench.quality_acceptance import frozen_evaluator_matches
+
+    spec = setup_methods(tmp_path, source="offline_judge")
+    judge = asdict(JudgeConfig("local", "Judge", "judge-weights", "http://localhost/v1"))
+    for method in spec["methods"]:
+        edit_scores(spec, method, lambda rows: [r.update(judge=judge, reference_targets_supplied=False) for r in rows])
+    frozen = {"kind": "offline_judge", "judge": judge, "reference_targets_supplied": False}
+    row = {"source": "offline_judge", "judge": judge, "reference_targets_supplied": False}
+    assert frozen_evaluator_matches(frozen, row)
+    assert evaluate(spec)["comparisons"]["candidate"]["dev_quality_eligible"]
+    edit_scores(spec, "candidate", lambda rows: rows[0]["judge"].update({field: value}))
+    blockers = evaluate(spec)["comparisons"]["candidate"]["acceptance_blockers"]
+    assert "missing_or_unmatched_evaluator_protocol" in blockers
+    assert not frozen_evaluator_matches(frozen, row | {"judge": judge | {field: value}})
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("changed_model", ["different-served-model", "Generator"])
+def test_response_model_drift_and_self_judging_cannot_hide_behind_a_configured_alias(tmp_path, native, changed_model):
+    from dataclasses import asdict
+
+    spec = setup_methods(tmp_path, source="offline_judge")
+    judge = asdict(JudgeConfig("local", "judge-alias", "judge-weights", "http://localhost/v1"))
+
+    def response_identity(model):
+        return ({"native_results": {dimension: {"served_model": model} for dimension in DIMENSIONS}}
+                if native else {"served_model": model})
+
+    for method in spec["methods"]:
+        edit_scores(spec, method, lambda rows: [r.update(judge=judge, **response_identity("actual-judge")) for r in rows])
+    assert evaluate(spec)["comparisons"]["candidate"]["dev_quality_eligible"]
+    edit_scores(spec, "candidate", lambda rows: rows[0].update(**response_identity(changed_model)))
+    result = evaluate(spec)["comparisons"]["candidate"]
+    assert not result["dev_quality_eligible"]
+    assert "missing_or_unmatched_evaluator_protocol" in result["acceptance_blockers"]
+    if changed_model == "Generator":
+        assert "generator_self_judging" in result["acceptance_blockers"]
+
+
+def test_native_dimensions_cannot_share_a_single_identity_when_models_differ(tmp_path):
+    from dataclasses import asdict
+
+    spec = setup_methods(tmp_path, source="offline_judge")
+    judge = asdict(JudgeConfig("local", "judge-alias", "judge-weights", "http://localhost/v1"))
+    grades = {dimension: {"served_model": "first" if dimension == "correctness" else "second"}
+              for dimension in DIMENSIONS}
+    for method in spec["methods"]:
+        edit_scores(spec, method, lambda rows: [r.update(judge=judge, native_results=grades) for r in rows])
+    result = evaluate(spec)["comparisons"]["candidate"]
+    assert not result["dev_quality_eligible"]
+    assert {"unknown_evaluator_identity", "missing_or_unmatched_evaluator_protocol"} <= set(result["acceptance_blockers"])
+
+
+def test_frozen_protocol_checks_recorded_response_identity_and_explicit_alias():
+    from dataclasses import asdict
+    from bench.quality_acceptance import frozen_evaluator_matches
+
+    judge = asdict(JudgeConfig("local", "judge-alias", "judge-weights", "http://localhost/v1"))
+    frozen = {"kind": "offline_judge", "judge": judge, "reference_targets_supplied": False}
+    row = {"source": "offline_judge", "judge": judge, "reference_targets_supplied": False}
+    assert frozen_evaluator_matches(frozen, row)  # Legacy missing response identity remains missing.
+    assert frozen_evaluator_matches(frozen, row | {"served_model": "judge-alias"})
+    assert not frozen_evaluator_matches(frozen, row | {"served_model": "actual-judge"})
+    frozen["served_model"] = "actual-judge"
+    assert frozen_evaluator_matches(frozen, row | {"served_model": "actual-judge"})
+    assert not frozen_evaluator_matches(frozen, row)
+    assert not frozen_evaluator_matches(frozen, row | {"native_results": {
+        "correctness": {"served_model": "actual-judge"}, "groundedness": {"served_model": "different"}}})
 
 
 def test_related_family_is_explicit_without_becoming_self_or_human_judging():

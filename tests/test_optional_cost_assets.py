@@ -9,6 +9,7 @@ import pytest
 from controller.cli import _manifest
 from controller.config import CostSettings, RunConfig, create_controller, load_config
 from controller.cost_model import CostModel, DecodePoint, LookupPoint
+from controller.generation import GenerationProtocol
 from controller.output_length import OutputLengthModel
 from controller.schema import CacheQuote, ConfigFingerprint, CostEstimate, PromptCandidate
 from controller.serialization import dumps, loads
@@ -19,11 +20,13 @@ from profiling.decision_pairs import _model_and_knobs
 def assets(tmp_path):
     fingerprint = ConfigFingerprint()
     length = {"schema_version": 1, "kind": "contextkv_output_length_ridge_v1", "model_kind": "action_only",
-        "target": {"fingerprint": asdict(fingerprint), "max_new_tokens": 10},
+        "target": {"fingerprint": asdict(fingerprint), "max_new_tokens": 10,
+                   "generation_protocol": GenerationProtocol.from_config(RunConfig()).record()},
         "feature_schema": {"version": 1, "names": ["is_rebuild"]},
         "regression": {"target_scale": "linear", "centers": [0], "scales": [1], "coefficients": [-2], "intercept": 0},
         "training_range": {"input_tokens": [50, 150]},
-        "uncertainty": {"absolute_error_p90_tokens": 30, "positive_residual_p90_tokens": 2}}
+        "uncertainty": {"absolute_error_p90_tokens": 30, "positive_residual_p90_tokens": 2},
+        "metadata": {"global_priors": [5, 10]}}
     length_path = tmp_path/"length.json"
     OutputLengthModel(length).save(length_path)
     positive = {"coefficients": [2., 0., 0., 0., 0., 0., 0., 0.], "fit_sources": ["hardware"],
@@ -97,4 +100,21 @@ def test_optional_asset_mismatch_fails_before_serving_state_is_created(tmp_path,
     length.write_text(json.dumps(content))
     with pytest.raises(ValueError, match=field):
         create_controller(config)
+    assert not (tmp_path/"state").exists()
+
+
+@pytest.mark.parametrize("missing", ["generation_protocol", "global_priors"])
+def test_unbound_legacy_length_artifact_cannot_enter_serving_or_pair_replay(tmp_path, missing):
+    config, cost, length = assets(tmp_path)
+    content = json.loads(length.read_text())
+    content["target" if missing == "generation_protocol" else "metadata"].pop(missing)
+    # A null source prompt cannot prove what an older default prompt contained.
+    content["metadata"]["source_configuration"] = asdict(config)
+    length.write_text(json.dumps(content))
+    OutputLengthModel.load(length)  # Historical diagnostics remain inspectable.
+    candidate = SimpleNamespace(fingerprint=ConfigFingerprint())
+    case = SimpleNamespace(max_new_tokens=10, candidates=(candidate,))
+    for assemble in (lambda: create_controller(config), lambda: _model_and_knobs(config, (case,), str(cost))):
+        with pytest.raises(ValueError, match="generation protocol|bound shared prior center"):
+            assemble()
     assert not (tmp_path/"state").exists()

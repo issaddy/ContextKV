@@ -468,6 +468,41 @@ def test_real_patch_runtime_checks_live_native_generation_not_only_registry():
         runtime.admit(recv, SimpleNamespace())
 
 
+def test_rejections_are_bounded_and_do_not_evict_active_or_newly_finished_results():
+    runtime = ContextKVRuntime(FakeNativeCache(), {}, receipt_limit=3)
+    prepared = prepare_runtime_epoch(runtime, "live")
+    recv = SimpleNamespace(session_id="live", expected_restart_id=runtime.restart_id,
+        expected_generation=prepared["session_generation"], contextkv_fingerprint={},
+        contextkv_attempt_id="live-attempt", rid="live-attempt", session_params=None,
+        lora_id=None, mm_inputs=None, input_embeds=None, return_logprob=False,
+        cache_salt=None, extra_key=None, input_ids=[1, 2])
+    req = SimpleNamespace()
+    runtime.admit(recv, req)
+    for index in range(20):
+        rejected = SimpleNamespace(**{**vars(recv), "rid": f"rejected-{index}",
+            "contextkv_attempt_id": f"rejected-{index}", "expected_generation": 0})
+        with pytest.raises(ContextKVError) as error:
+            runtime.admit(rejected, SimpleNamespace())
+        runtime.record_rejection(rejected, error.value)
+        assert len(runtime.attempts) <= 4  # Three terminal records plus one active request.
+        assert runtime.status({"attempt_id": "live-attempt"})["inflight"]
+    assert runtime.status({"attempt_id": "rejected-0"})["state"] == "UNKNOWN"
+    assert runtime.status({"attempt_id": "rejected-19"})["state"] == "REJECTED"
+    req.finished = lambda: True
+    req.finished_reason = SimpleNamespace(to_json=lambda: {"type": "stop"})
+    req.rid, req.session_id = "live-attempt", "live"
+    req.session_generation = prepared["session_generation"]
+    req.cached_tokens_device = req.cached_tokens_host = req.cached_tokens = 0
+    req.kv = SimpleNamespace(cache_inserted_len=2)
+    req.customized_info = None
+    req.output_ids = [3]
+    runtime.finish(req)
+    assert len(runtime.attempts) == 3
+    assert runtime.publish_result({"attempt_id": "live-attempt",
+                                   "response": {"text": "answer", "output_ids": [3]}})["stored"]
+    assert runtime.status({"attempt_id": "live-attempt"})["result"]["text"] == "answer"
+
+
 def test_real_patch_extend_counter_counts_chunk_and_retry_work_not_prompt_minus_hits():
     from engine_patches.contextkv_runtime import complete_extend_work, snapshot_extend_work
     req = SimpleNamespace(rid="r", contextkv_runtime=object(), contextkv_prefill_tokens=0)

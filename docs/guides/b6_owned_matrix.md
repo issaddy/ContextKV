@@ -26,7 +26,7 @@ Qwen3-8B/32B 共用 `create_model_template` 和 `LocalModelScope`。scope 记录
 - `warm_idle` 使用原生 quote；固定策略直接执行其配置。
 - 模型已测范围以外的请求记录实际固定策略选择，成本覆盖情况进入报告。
 
-任务来自 split/domain/limit_sessions：dev 和 dev_ablation 取开发分区，test 取测试分区。失败、截断和未完成任务保留在结果中。有失败时 CLI 返回非零状态。当前执行器支持既有到达、think-time 和超时配置，截窗负载的组合支持范围以参数检查为准。
+任务来自 split/domain/limit_sessions：dev 和 dev_ablation 取开发分区，test 取测试分区。失败、截断和未完成任务保留在结果中。有失败时 CLI 返回非零状态。当前执行器支持既有到达、think-time 和超时配置，截窗负载的组合支持范围以参数检查为准。逐轮deadline从该轮到达开始，P3包含解释/检索与生成；取消会等待已启动的同步检索安全结束，因此清理可晚于deadline。已提交结果的发布不再触发生成超时或重复记账。
 
 P3 默认共用 retriever_config；`comparison_scope: system` 允许方法声明各自的检索与意图机制。两类运行均计入检索排队与执行成本。共享32B解释服务按[部署说明](../deployment.md#多轮检索服务)启动，其进程与资源单独记录。
 

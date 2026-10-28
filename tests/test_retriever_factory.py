@@ -156,7 +156,7 @@ async def test_complete_reading_choices_and_conditions_reach_both_candidates_wit
     rows.append({'passage_id':'condition','document_id':'conditions','text':'Only for Windows v4.'})
     corpus=CorpusIndex.from_records(rows,corpus_id='fixture',snapshot_id='fixture-v1')
     original=tmp_path/'originals.jsonl'
-    original.write_text(''.join(json.dumps({'document_id':pid,'text':'Context before.\n\n'+row['text']+'\n\nContext after.'})+'\n'
+    original.write_text(''.join(json.dumps({'snapshot_id':'fixture-v1','source':row['source'],'document_id':pid,'text':'Context before.\n\n'+row['text']+'\n\nContext after.'})+'\n'
                                for pid,row in source.items()))
     config=yaml.safe_load(retriever_config.read_text())
     config.update(stage=stage,query_mode='conversational',evidence_selection='semantic',source_window=True,
@@ -184,7 +184,7 @@ async def test_complete_reading_choices_and_conditions_reach_both_candidates_wit
         visible={d['text'] for d in documents}|{s['text'] for d in documents for s in d.get('required_context',[])}
         blocks=selected[0].evidence
         assert {b.text for b in blocks}<=visible and any(b.text=='Only for Windows v4.' for b in blocks)
-        assert any(b.key.passage_id.startswith('source-window:v1:') for b in blocks)
+        assert any(b.key.passage_id.startswith('source-window:v2:') for b in blocks)
         for candidate in build_candidates(store.get_snapshot('s'),'Continue',blocks):
             assert candidate.required_blocks=={b.key for b in blocks}
         trace=retriever.query_view_traces[-1]
@@ -221,10 +221,10 @@ async def test_distinct_content_selection_flows_through_serving_and_durable_repl
         first = await service.serve_turn("s","Question",evidence_provider=provider,
                     corpus_snapshot_id=wrapper.corpus_snapshot_id,request_id="request")
         state = store.get_snapshot("s")
-        # Five distinct originals fit; the last candidate replaces the repeated body.
-        assert {key.passage_id for key in state.raw_history[0].evidence_keys} == set("fdcba")
+        # Five bodies fit, while both retrieved identities of the shared body remain.
+        assert {key.passage_id for key in state.raw_history[0].evidence_keys} == set("fedcba")
         trace = retriever.manifest["query_view_traces"][0]["evidence_selection"]
-        assert trace["selected_ids"] == list("fdcba")
+        assert trace["selected_ids"] == list("fedcba")
         assert len(retriever.encoder.inputs) == len(retriever.reranker.inputs) == 1
         replay = await service.serve_turn("s","Question",evidence_provider=provider,
                     corpus_snapshot_id=wrapper.corpus_snapshot_id,request_id="request")
@@ -949,7 +949,7 @@ def test_factory_uses_original_document_windows_with_existing_serving_selection(
     retriever_config.write_text(yaml.safe_dump(config))
     originals=load_beir_corpus(FIXTURE.with_name("corpus_small.jsonl"))
     documents=[{'document_id':pid,'text':f'Only for source {pid}.\n\n'+row['text']+'\n\nEnd.',
-                'url':row['source'],'title':row['title']} for pid,row in originals.items()]
+                'url':row['source'],'title':row['title'],'snapshot_id':'fixture-v1'} for pid,row in originals.items()]
     document.write_text(''.join(json.dumps(row)+'\n' for row in documents))
     retriever=create_retriever('P3',config_path=retriever_config)
     rows=[{'passage_id':pid,'document_id':pid,'text':row['text'],'title':row['title'],

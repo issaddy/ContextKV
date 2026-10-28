@@ -21,6 +21,7 @@ from .schema import (ClientTiming, CompletionReceipt, CostEstimate, EvidenceBloc
                      EvidenceSpan, GenerationResult, NoFeasiblePlan, QueryContext, SessionSnapshot, TurnRecord)
 from .serialization import dumps
 from .sampling import SamplingRecipe, request_sampling
+from .generation import candidate_request
 from .session_store import (Attempt, IdempotencyConflict, PendingAttempt, SessionStore, StoreError)
 from .templates import ByteTemplate
 
@@ -123,6 +124,17 @@ class Controller:
         while self._retire_requested:
             self._retire_requested = False
             await self.epochs.flush()
+
+    @property
+    def retirement_error(self) -> str | None:
+        """A failed maintenance task must not look healthy before its next drain."""
+        task = self._retire_task
+        if task is None or not task.done():
+            return None
+        if task.cancelled():
+            return "retirement task cancelled"
+        error = task.exception()
+        return f"{type(error).__name__}: {error}" if error is not None else None
 
     async def drain(self):
         if self._retire_task is not None:
@@ -368,20 +380,17 @@ class Controller:
                     epoch = snap.current_epoch
                 attempt = self.store.submit_attempt(attempt, epoch)
                 self.events.emit("epoch_prepared", business_session_id=session_id, attempt_id=attempt.attempt_id, epoch=epoch)
+                generation = candidate_request(plan.candidate, self.policy.max_new_tokens)
                 self.events.emit("request_submitted", business_session_id=session_id, attempt_id=attempt.attempt_id,
                                  sampling_params={**self._sampling_params, "max_new_tokens": self.policy.max_new_tokens},
-                                 constrained_citation_ids=tuple(ref for ref, key in plan.candidate.reference_map
-                                                               if key in plan.candidate.required_blocks))
+                                 constrained_citation_ids=generation["citation_ids"])
                 submitted = time.monotonic()
                 self._active_generations += 1
                 try:
-                    result = await self.engine.generate(input_ids=plan.candidate.input_ids, session_id=epoch.engine_session_id,
+                    result = await self.engine.generate(**generation, session_id=epoch.engine_session_id,
                                                     expected_generation=epoch.session_generation,
                                                     expected_restart_id=epoch.engine_restart_id,
-                                                    attempt_id=attempt.attempt_id, fingerprint=self.template.fingerprint,
-                                                    max_new_tokens=self.policy.max_new_tokens,
-                                                    citation_ids=tuple(ref for ref, key in plan.candidate.reference_map
-                                                                       if key in plan.candidate.required_blocks))
+                                                    attempt_id=attempt.attempt_id, fingerprint=self.template.fingerprint)
                 finally:
                     self._active_generations -= 1
                 response_done = time.monotonic()
