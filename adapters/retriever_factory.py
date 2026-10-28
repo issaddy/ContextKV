@@ -57,10 +57,8 @@ def load_retriever_config(path):
     if value.evidence_selection == "semantic" and (
             value.query_mode != "conversational" or value.selector is None):
         raise ValueError("semantic evidence selection requires conversational mode with selector")
-    if value.query_mode in {"conversational", "faithful"}:
+    if value.query_mode == "conversational":
         from adapters.query_selector import SelectorConfig
-        if value.query_mode == "faithful" and value.selector is None:
-            raise ValueError("faithful query resolution requires a selector")
         if value.selector is not None:
             SelectorConfig(**value.selector)
     elif value.query_mode in SOURCE_MODES:
@@ -124,9 +122,6 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
             if config.query_mode == "conversational":
                 from adapters.conversation import ConversationResolver
                 resolver = ConversationResolver(client)
-            elif config.query_mode == "faithful":
-                from adapters.faithful_query import FaithfulQueryResolver
-                resolver = FaithfulQueryResolver(client)
             elif client is not None:
                 from adapters.query_resolution import TopicResolver
                 resolver = TopicResolver(client, config.query_mode, history_turns=config.selector_history_turns,
