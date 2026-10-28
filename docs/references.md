@@ -67,13 +67,13 @@
 - [QuReTeC](https://arxiv.org/abs/2005.11723)：从历史中选择相关词项补全当前检索查询。
 - [CANARD](https://aclanthology.org/D19-1605/)：提供依赖历史的问题到独立问题的改写数据。
 - [Multi-View Reranking（MVR）](https://aclanthology.org/2020.findings-emnlp.354/)：组合多个查询视角与重排结果改善会话搜索。
-- [Faithful Query Resolution](https://arxiv.org/abs/2610.15034)：区分忠实意图解析与扩大检索覆盖的查询扩展。
+- [Faithful Query Resolution](https://arxiv.org/abs/2610.15034)：区分忠实意图解析与扩大检索覆盖的查询扩展；检索排序收益与交互回答效果分别验证。v1的融合比较同时改变查询集合和权重，不能单独归因于权重。
 - [ICR](https://aclanthology.org/2025.emnlp-main.496/)：交替生成澄清问题和查询改写以处理多重歧义。
 - [Dialogue-RAG](https://aclanthology.org/2025.acl-long.1191/)：通过话语节点连接恢复省略信息并改写查询。
 - [Learning Multi-Step Query Rewriting via Corpus Feedback](https://arxiv.org/abs/2610.10955)：利用检索反馈学习多步改写与停止策略。
 - [CompCQR](https://arxiv.org/abs/2609.14646)：组合改写、假设答案和对话组件进行会话检索。 [代码](https://github.com/YunahJang/CompCQR)
 - [ConvSearch-R1](https://aclanthology.org/2025.emnlp-main.1349/)：用推理与强化学习训练会话查询重构模型。 [代码](https://github.com/BeastyZ/ConvSearch-R1)
-- [SOM-DST](https://aclanthology.org/2020.acl-main.53/)：通过保留、更新和删除操作增量维护对话状态。 [代码](https://github.com/clovaai/som-dst)
+- [SOM-DST](https://aclanthology.org/2020.acl-main.53/)：通过保留、更新和删除操作增量维护对话状态；原文分析指出状态操作预测与真实操作之间的准确率差距，是进一步改进的方向。 [代码](https://github.com/clovaai/som-dst)
 - [Context-Aware Dialogue State Tracking](https://aclanthology.org/N19-1057/)：根据状态字段定位相关历史上下文。
 - [JSON Merge Patch（RFC 7396）](https://www.rfc-editor.org/info/rfc7396/)：通过局部字段更新及null删除表达状态补丁。
 - [ASK](https://aclanthology.org/2025.acl-industry.63/)：结合问题方面与检索结果选择任务型对话中的澄清。

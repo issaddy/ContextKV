@@ -17,7 +17,7 @@ from adapters.retrieval import retrieval_query
 from controller.schema import QueryContext, TaskFrame
 
 
-VERSION = "conversational-intent-v15"
+VERSION = "conversational-intent-v16"
 FRAME_FIELDS = ("topic", "target", "conditions")
 RELATIONS = ("standalone", "followup", "correction", "condition_change", "topic_switch", "revisit", "ambiguous", "conversational")
 _DEPENDENT = re.compile(
@@ -119,7 +119,12 @@ claims into the frame or invent missing constraints. Return only the requested J
 
 
 def frame_query(frame, *, requirement=None):
-    """Preserve the whole task alongside explicit needs; qualify each subquery."""
+    """Preserve the task and named constraints in each retrieval/generation view.
+
+    A value occurring elsewhere does not express its attribute: departure and
+    arrival can name the same place, and excluded/required can name the same
+    item. Only exact rendered lines are redundant for named conditions.
+    """
     needs = ((requirement,) if requirement is not None else
              tuple(dict.fromkeys(value for value in (frame.task, *frame.requirements) if value)))
 
@@ -134,9 +139,9 @@ def frame_query(frame, *, requirement=None):
             context.append(value)
     parts = list(dict.fromkeys((*context, *needs)))
     for name, value in frame.conditions:
-        if value and not expressed(value, parts):
+        if value and (name != "legacy" or not expressed(value, parts)):
             parts.append(value if name == "legacy" else f"{name}: {value}")
-    return "\n".join(value for value in parts if value)
+    return "\n".join(dict.fromkeys(value for value in parts if value))
 
 
 def apply_frame_updates(base, updates, *, task_operation="keep", task_value="", requirements=()):
@@ -259,7 +264,7 @@ class ConversationResolver:
                 "condition_view": "literal named task continuation also supplies the unchanged current clause for condition-aware evidence selection",
                 "ambiguity": "retain the unresolved current question and relation for generation/commit; history-expanded retrieval does not choose a referent",
                 "task_state": "initialize a complete current frame when the previous turn has none; otherwise keep the existing task-first patch protocol; omitted attributes persist, null deletes; independent topics reset and explicit revisits resume",
-                "task_projection": "whole task plus explicit needs; each requirement query keeps its topic, target and conditions",
+                "task_projection": "whole task plus explicit needs; each requirement query keeps its topic, target and every named condition, including attributes whose values occur elsewhere",
                 "semantics": "derived intent, not factual evidence or a guarantee of correct resolution",
                 "conversational_turns": "preserve active state; ranked mode bypasses retrieval, joint mode discards recalled sources",
                 "transport": self.client.manifest if self.client is not None else {"kind": "no_auxiliary_model"}}

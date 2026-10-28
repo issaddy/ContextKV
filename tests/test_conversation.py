@@ -104,18 +104,55 @@ def test_first_request_initializes_compound_needs_then_changes_only_one_conditio
     assert next_task.requirements == ()
 
 
-def test_qualified_need_does_not_repeat_its_subject_or_attribute_values():
+def test_qualified_need_keeps_named_conditions_even_when_their_values_occur_in_prose():
     need = "Download Atlas CLI v4 for Linux x86-64 from private endpoints"
     frame = TaskFrame("Atlas CLI", "Atlas CLI v4", "download",
         (("version","v4"),("platform","Linux"),("architecture","x86-64"),("source","private")),
         (need,"Installation procedure"))
-    assert frame_query(frame,requirement=need) == need
+    query = frame_query(frame,requirement=need)
+    assert query.splitlines()[0] == need
+    assert all(f"{name}: {value}" in query.splitlines() for name, value in frame.conditions)
+    assert "Atlas CLI" not in query.splitlines()  # Subject prose can still be shared.
     other = frame_query(frame,requirement="Installation procedure")
     assert "Atlas CLI v4" in other and "platform: Linux" in other and "source: private" in other
     # A nearby revision, or an unrelated substring, does not express this condition.
     newer = replace(frame,requirements=("Download Atlas CLI v4.1",),target="")
     assert "version: v4" in frame_query(newer)
     assert newer.requirements == ("Download Atlas CLI v4.1",)
+
+
+@pytest.mark.parametrize("conditions", [
+    (("departure", "Paris"), ("arrival", "Paris")),
+    (("has_license", "no"), ("has_passport", "no")),
+    (("excluded_region", "Paris"), ("destination", "London")),
+])
+def test_condition_projection_preserves_roles_and_negative_values_through_candidates(conditions):
+    frame = TaskFrame("Travel", "Paris", "Compare options", conditions,
+                      ("Eligibility", "Required documents"))
+    query = frame_query(frame)
+    for rendered in (query, *(frame_query(frame, requirement=r) for r in frame.requirements)):
+        assert all(f"{name}: {value}" in rendered.splitlines() for name, value in conditions)
+    # Different attribute bindings must not collapse into the same search input.
+    renamed = replace(frame, conditions=tuple((f"other_{name}", value) for name, value in conditions))
+    assert frame_query(renamed) != query
+    blocks = (make_evidence("Original travel rules and their exceptions.", "rules"),)
+    snapshot = SessionSnapshot("s")
+    snapshot = committed(build_candidates(snapshot, "Initial question", blocks)[0],
+                         snapshot, "Initial question", blocks)
+    intent = QueryContext(query, "condition_change", (1,), frame)
+    plans = build_candidates(snapshot, "What about these conditions?", blocks, query_context=intent)
+    assert {p.action for p in plans} == {"APPEND", "REBUILD"}
+    for plan in plans:
+        content = plan.messages[-1].content
+        assert all(f"{name}: {value}" in content for name, value in conditions)
+        assert plan.required_blocks == frozenset(b.key for b in blocks)
+
+
+def test_named_condition_deduplication_requires_the_complete_binding():
+    frame = TaskFrame("", "", "region: Paris", (("region", "Paris"), ("origin", "Paris")))
+    assert frame_query(frame).splitlines() == ["region: Paris", "origin: Paris"]
+    legacy = replace(frame, conditions=(("legacy", "Paris"),))
+    assert frame_query(legacy) == "region: Paris"
 
 
 def test_missing_state_initializes_all_conditions_before_using_later_patches():
