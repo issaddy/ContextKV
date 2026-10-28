@@ -100,6 +100,7 @@
 - [Late Chunking](https://arxiv.org/abs/2409.04701)：先编码长文档，再按片段聚合上下文相关向量。
 - [ContextualRetriever](https://aclanthology.org/2025.emnlp-main.602/)：学习带上下文信息的检索表示以改善会话搜索。
 - [LangChain ParentDocumentRetriever](https://reference.langchain.com/python/langchain-classic/retrievers/parent_document_retriever/ParentDocumentRetriever)：用小片段检索并返回更完整的父文档内容。
+- [H-RAG](https://arxiv.org/abs/2605.00631)：在多轮RAG中分离子片段检索与父文档上下文恢复；检索效果与完整回答效果分别评价。
 - [LlamaIndex Sentence Window Retrieval](https://developers.llamaindex.ai/python/examples/node_postprocessor/metadatareplacementdemo/)：在检索命中后恢复相邻句子窗口。
 - [Docling](https://docling-project.github.io/docling/concepts/docling_document/)：保留文档层级、阅读顺序和来源坐标的结构化解析与分块。
 - [SPIRE](https://arxiv.org/abs/2604.20849)：组织标题、父级结构及原文片段，保留证据的解释上下文。
@@ -117,6 +118,7 @@
 - [MADARA](https://arxiv.org/abs/2606.25191)：结合逐文档回答、隔离对照与聚合处理多来源信息。 [代码](https://github.com/js-lee-AI/MADARA)
 - [RECAST](https://arxiv.org/abs/2610.10507)：通过证据路由和关系计算构造回答所需上下文。
 - [DRAGged into Conflicts](https://arxiv.org/abs/2506.08500)：区分互补、时效、意见与错误信息等来源冲突。 [代码](https://github.com/google-research-datasets/rag_conflicts)
+- [When Knowledge Changes](https://arxiv.org/abs/2607.26843)：通过语料更新与变形测试检验RAG对无关变化的稳定性及对事实变化的响应，补充静态快照评价。
 - [AdaCAD](https://aclanthology.org/2025.naacl-long.581/)：根据上下文与模型知识的分布差异自适应调整对比解码。 [代码](https://github.com/HanNight/AdaCAD)
 - [CoCoA](https://arxiv.org/abs/2508.17670)：结合置信度和上下文信号调节知识冲突下的解码。 [代码](https://github.com/infusion-zero-edit/CoCoA)
 - [Self-RAG](https://github.com/AkariAsai/self-rag)：通过检索、支持性与效用反思组织生成过程。
