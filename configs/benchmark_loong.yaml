@@ -1,0 +1,26 @@
+# Independent long-document reading diagnostic. See docs/guides/loong.md.
+# The input-profile.json beside this input accounts for every over-budget task.
+schema_version: 1
+comparison_scope: execution
+base_config: configs/loong_input_profile.yaml
+input: data/loong/set1-v2/model32k/tasks.jsonl
+domain: all
+split_manifest: data/loong/set1-v2/model32k/split_manifest.json
+protocols: [P1]
+concurrency: [1]
+seeds: [42]
+response_mode: buffered
+reference_method: ContextKV
+server_profiles:
+  patched:
+    kind: patched
+    checkout: vendor/sglang
+    write_policy: write_through
+    hicache: true
+    session_radix: true
+    gpu_tokens: 32768
+    hicache_gb: 8
+    mem_fraction_static: 0.8
+methods:
+  - id: ContextKV
+    server_profile: patched

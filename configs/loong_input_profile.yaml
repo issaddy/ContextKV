@@ -1,0 +1,23 @@
+# Complete given-document P1 diagnostic, with room for requested structured lists.
+# This changes the declared output budget; it is not the 1024-token short-dialogue experiment.
+engine:
+  kind: sglang
+  base_url: http://127.0.0.1:30000
+  page_size: 64
+  gpu_capacity_tokens: 32768
+  timeout_seconds: 180
+  stream: true
+model:
+  scope_path: configs/model_scopes/qwen3-8b.local.json
+context:
+  max_total_model_tokens: 32768
+  max_new_tokens: 4096
+planner:
+  strategy: always_rebuild
+shadow: false
+state_dir: runs/loong-p1
+sampling:
+  temperature: 0
+  top_p: 1
+  top_k: -1
+  min_p: 0
