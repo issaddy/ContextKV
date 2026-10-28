@@ -12,7 +12,7 @@
   --output runs/api-evidence-local
 ```
 
-现有 `source_bundle.json` 是已冻结的本地开发材料，含Cloudant0.0.27、Watson7.0.0两份官方源码及10个公开符号；不是要求从网络下载新版本。规格结构如下，路径相对规格文件所在目录：
+现有`source_bundle.json`包含本地冻结的Cloudant0.0.27、Watson7.0.0官方源码及10个公开符号。规格结构如下，路径相对规格文件所在目录：
 
 ```json
 {
@@ -41,10 +41,10 @@
 ## 提取与未知范围
 
 - 函数/异步方法保留包括装饰器、签名、docstring与方法体的连续原文区间；类记录保留装饰器、类声明及完整类docstring，缺docstring时只保留声明。这些片段用于来源阅读。
-- 可显式选择公开类的`Client.__init__`，或将它作为操作符号的同文件依赖；初始化函数保留原始完整源码、声明参数与`initializer_of`。该接口补齐操作参数之外的初始化依赖。仅选择`Client`不会自动展开初始化代码，也不开放其他私有/dunder符号；继承而未在该类定义的初始化仍为未知。它不自动补齐外部认证库或证明整个示例可执行。
+- 可选择公开类自身声明的`Client.__init__`，或将其配置为操作符号的同文件依赖，保留完整源码、声明参数与`initializer_of`。单独选择`Client`提取类声明及docstring；继承的初始化、其他私有/dunder符号和外部库依赖均在当前提取范围之外。
 - `span` 是按源文件声明encoding解码后的Unicode字符偏移，半开区间；行号从1开始。CRLF、Unicode及原缩进保留。原文件字节SHA与文本字符偏移用途不同。
-- `api_source.signature`、`docstring`、HTTP原表达式均附原文span；签名按token定位，不重构格式。`required_declared_parameters`按原AST列出必需的声明参数，也包含声明中的 `self`；不是运行时绑定后的调用签名。
-- 只识别函数体中的语法形式 `*.prepare_request(method=..., url=...)`。直接字符串或同一函数体唯一、前序、无条件字符串赋值可以列出原字面值；动态format、属性、其他请求库、条件改写等保留unknown。它描述源码中的请求配置，不保证实际transport行为；装饰器、默认值、参数/返回注解和嵌套函数/class/lambda中的调用不算该方法体的请求。
+- `api_source.signature`、`docstring`和HTTP表达式附原文span；签名按token定位并保留原格式。`required_declared_parameters`按AST列出必需声明参数，包含声明中的`self`。
+- HTTP配置提取识别函数体中的`*.prepare_request(method=..., url=...)`。直接字符串及同一函数体内唯一、前序、无条件的字符串赋值记录原字面值；动态format、属性、其他请求库及条件改写记为unknown。遍历范围为当前函数体，跳过装饰器、默认值、注解及嵌套函数/class/lambda。
 - 请求的继承方法、导入属性或多次同名声明不会选一个猜测。它们记入 `unknown_symbols`。存在此类未解析请求时仍保存其余有效片段与manifest，CLI返回1；完整构建返回0。明确依赖指向缺失/歧义目标时，已有CorpusIndex验证拒绝发布该包。
 
 ## 依赖与现有证据入口

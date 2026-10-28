@@ -10,12 +10,12 @@
 - 批量报价使用同一个观察周期，对完整最终 token IDs 共用原生 `Req._compute_max_prefix_len` 与页对齐。native radix key 使用 `array('q')`，与真实树一致。
 - `UnifiedTreeCore.peek_full_prefix` 只遍历匹配路径，返回连续 GPU ready、GPU/host recoverable、需新加载的 host-only、H2D pending、D2H pending。节点中间命中不 split；不触碰 LRU、引用、分配器、传输队列或 CUDA fence。
 - H2D 的 `contextkv_h2d_pending_id` 是新增观测字段，对所有原生写策略在提交加载时标记，节点 split 继承、原生加载 ACK 后清除。它不参与原生 admission、锁、淘汰决策。D2H 使用已有 `write_through_pending_id`；已发布地址但未完成传输的副本不计 ready。
-- NATIVE 加载预测参考原生 `load_back_threshold`；旧 `native_estimate_uncertain` 保留 pending 或瞬时 free GPU slot 不足的原语义，同时 `uncertainty_reasons` 区分 `inflight_transfer` 与 `capacity_pressure`。后者表示可能需要原生淘汰或等待，不表示缓存信息不可读取。报价不是预留，实际匹配、加载、排队与预算决定仍由原生路径执行。
+- NATIVE加载预测参考原生`load_back_threshold`；`native_estimate_uncertain`表示pending或瞬时free GPU slot不足，`uncertainty_reasons`进一步区分`inflight_transfer`与`capacity_pressure`。报价提供状态快照，实际匹配、加载、排队和预算决定由原生路径执行。
 - 活动 epoch 的 prepare 对同一 operation 幂等，不重开 native generation；生成在原生 `ensure_session_generation` 前同时验证 restart、registry 状态和当前 tracker generation。保留期内的关闭 ID 继续由原生关闭记录阻止重开。
-- retire 先阻止新请求，等待已接纳请求终态，再撤销 native 软引用并 ACK。软引用退役的 free 计数恒为零；缓存物理占用不会被假定已回收。原生已接纳请求在 RETIRING 期间可能先完成注册、再立即被退役撤销，因此 receipt 的 `session_ref_registered` 表示本次曾成功经过注册路径，不是 ACK 后仍持有引用的证明。
+- retire先停止接收新请求，等待已接纳请求终态，再撤销native软引用并ACK，free计数为零。RETIRING期间的请求可以先完成注册，再由退役流程撤销；receipt的`session_ref_registered`记录本次注册事件。
 - 终态 receipt 通过原生 customized-info 输出，包含真实 tracker 注册结果、cache inserted length 和 native 分层命中。实际 prefill 工作来自每次成功 worker forward 的 `extend_lens` 累计，覆盖 chunk/retraction 重算并排除 mixed batch 的 decode 行。
 
-当前运行合同是显式 Qwen3 LocalModelScope、单 GPU、TP/DP/PP=1、Python TreeCore、dense FULL、单条累计 SSE 流式或非流式请求、无动态 LoRA、默认 cache key。LoRA可先离线导出为独立dense checkpoint，再用新scope走同一合同。旧Qwen2.5-7B下载/启动/runtime fallback已删除，不再支持该模型的新运行；历史源码/GPU记录只作已有机制证据，不能作为新模型校准。HiCache 的 cache 模式受支持，buffer-only、L3、外部 linker、SWA/Mamba、speculative、PD/PDMux 不在此补丁范围。HTTP client 必须先验证研究能力，绝不把 guard 字段直接提交给原生未补丁服务器。
+当前补丁支持Qwen3 LocalModelScope、单GPU、TP/DP/PP=1、Python TreeCore、dense FULL、默认cache key和HiCache cache模式，提供累计SSE及非流式请求。LoRA通过离线导出独立dense checkpoint后加载。动态LoRA、buffer-only、L3、外部linker、SWA/Mamba、speculative及PD/PDMux尚未适配。HTTP client先检查协议能力，再提交guard字段。
 
 ## 准备与启动
 
@@ -45,7 +45,7 @@ export CONTEXTKV_MODEL_SCOPE_PATH=configs/model_scopes/qwen3-8b.local.json
 scripts/bootstrap_sglang.sh
 source .venv-sglang/bin/activate
 export CONTEXTKV_FINGERPRINT_JSON="$(cat runs/fingerprint.json)"
-# 资源/兼容路径显式选择；例值不是最佳参数或显存可用保证。
+# H200资源参数示例，按实际设备配置容量。
 CONTEXTKV_HICACHE_GB=8 CONTEXTKV_HICACHE_LAYOUT=layer_first \
 SGLANG_HICACHE_TMA_TRANSFER=0 scripts/launch_sglang.sh \
   --host 127.0.0.1 --port 30000 --max-total-tokens 16384 --mem-fraction-static .8
@@ -53,32 +53,32 @@ SGLANG_HICACHE_TMA_TRANSFER=0 scripts/launch_sglang.sh \
 
 `bootstrap_sglang.sh`仅安装固定SGLang/项目依赖，然后通过共享`ModelConfig/create_model_template`验证已存在的scope快照、tokenizer和模板，保存指纹。它不调用snapshot_download，不创建旧模型目录；缺少scope或本地文件会明确失败。源码准备下载SGLang及依赖，模型使用已有本地文件。
 
-`launch_sglang.sh`必须设置`CONTEXTKV_MODEL_SCOPE_PATH`；仅有`CONTEXTKV_MODEL_PATH`不能启动。scope拥有实际model/tokenizer路径，HF loading revision为None，不接受尾部`--revision`或另一个model/tokenizer路径。可选`CONTEXTKV_MODEL_PATH`仅作为同scope路径一致性检查，不能作为fallback。scope按模型元数据标识本地快照，验证范围由`weight_content_verified`记录。
+`launch_sglang.sh`从`CONTEXTKV_MODEL_SCOPE_PATH`读取model/tokenizer路径，HF loading revision为None；冲突的`--revision`或model/tokenizer参数会报错。可选`CONTEXTKV_MODEL_PATH`用于核对scope路径。scope按模型元数据标识本地快照，验证范围由`weight_content_verified`记录。
 
 schema v1 `local_snapshot_metadata`保持原有config/分片库存身份和全部旧指纹。离线`python -m training.export`新增schema v2 `local_checkpoint_artifact`，将完成的LoRA产物合并到新的独立BF16 dense目录，按每个weight文件的`file/bytes/sha256`建立`local-checkpoint:`身份；同大小不同内容可区分，目录位置和来源注释不进入身份。发布后应保持目录不可变；控制器`model.scope_path`和引擎`CONTEXTKV_MODEL_SCOPE_PATH`指向同一新scope，重新生成fingerprint并使用独立state/engine，不继承基座KV和成本标定。stock/native基线复用该身份接口，无需动态LoRA缓存路径。完整命令见[训练与导出](../docs/research/grounded_training.md)。
 
-v2的权重摘要仅在导出发布边界全量计算一次。启动时核对config、实际文件名/大小与index；单文件`model.safetensors`无需index，只读取header长度及JSON offsets核对tensor字节数，不读或哈希tensor body。`weight_content_verified=false`明确当前内容未被启动时全量复验，发布摘要不能监控后续同尺寸文件改写。PEFT `safe_merge=True`只检查有限值，BF16舍入和实际回答效果另行验证。
+v2在导出时计算权重摘要。启动时核对config、文件名/大小与index；单文件`model.safetensors`读取header长度和JSON offsets核对tensor字节数。`weight_content_verified=false`表示启动检查覆盖元数据。PEFT `safe_merge=True`检查合并值的有限性，BF16舍入与回答效果通过导出模型验证。
 
-通过 `CONTEXTKV_ENABLE_HICACHE=0` 可运行GPU-only功能检查；`CONTEXTKV_HICACHE_GB`/`CONTEXTKV_PAGE_SIZE`设置容量与页大小，`CONTEXTKV_WRITE_POLICY`复用原生三写策略。scheduler的`get_runtime`首次初始化必须读取scope，验证实际模型设置、config/库存、tokenizer/template与fingerprint；缺scope返回`MODEL_SCOPE_REQUIRED`，不存在旧revision/config隐式支持。初始化后复用实例，不逐请求扫描/重新解析。纯CPU `ContextKVRuntime`协议容器使用无模型fixture测试缓存与事务机制。
+`CONTEXTKV_ENABLE_HICACHE=0`启用GPU-only；`CONTEXTKV_HICACHE_GB`/`CONTEXTKV_PAGE_SIZE`设置容量与页大小，`CONTEXTKV_WRITE_POLICY`选择原生写策略。scheduler的`get_runtime`在首次初始化时读取scope并核对模型配置、文件库存、tokenizer/template和fingerprint，缺scope返回`MODEL_SCOPE_REQUIRED`，之后复用实例。CPU `ContextKVRuntime`使用无模型fixture测试缓存与事务机制。
 
-当前scope仅支持已明确的dense Qwen3、BF16、无SWA/RoPE扩展；32B的head_dim使用显式128。缓存、事务、只读观测、DMA和原生admission逻辑保持，未为退役旧模型改动这些通用机制。
+当前scope支持dense Qwen3、BF16和原始RoPE配置；32B的head_dim使用配置值128。
 
 ## 观测与恢复合同
 
 `/context/metrics` 经相同 scheduler 控制面读取原生 allocator 的 `capacity − free`，返回 GPU/host 唯一物理占用和当前 running/waiting 请求数。它不扫描树，不按 session 引用重复计数。事件环最多保留 4096 条记录，`after_seq` 增量拉取，并通过 `events_truncated/dropped_before_seq` 显式暴露丢失区间。
 
-报价还返回 `gpu_capacity_tokens` 和原生 `full_evictable_size()` 的 `evictable_gpu_tokens`；两者都是 O(1) 计数。GPU 可淘汰量是 FULL device 未硬锁 token 总数，包含可能被当前候选命中的共享前缀。不能把它与候选 ready prefix 重复计算成 admission 保证。原生 [PrefillBudget](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/prefill_budget.py#L98-L113) 使用 free + evictable；[PrefillAdder](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/managers/schedule_policy.py#L1350-L1407) 再保护候选前缀并考虑已运行请求的剩余输出预算、页开销、chunk 和其他约束。这个补丁不模拟或修改它。Host 没有对应的精确 O(1) token 总计；`evictable_host_tokens=null` 明确未知，既不报假零，也不为报价扫描所有 host 节点。
+报价返回O(1)计数`gpu_capacity_tokens`及原生`full_evictable_size()`对应的`evictable_gpu_tokens`。后者包含FULL device未硬锁token及可能被候选命中的共享前缀。原生[PrefillBudget](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/prefill_budget.py#L98-L113)使用free + evictable，[PrefillAdder](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/managers/schedule_policy.py#L1350-L1407)保护候选前缀，再计入运行请求输出预算、页开销与chunk等需求。Host可淘汰总量缺少对应的O(1)观测，`evictable_host_tokens`返回null。
 
 报价与 metrics 的 `native_running_requests` / `native_waiting_requests` 只传出每个请求的 `input_tokens`、`generated_tokens`、`max_new_tokens`、`ignore_eos`、`kv_allocated_tokens`、`kv_committed_tokens` 和 `cache_protected_tokens`，没有文本或 token IDs；新增可选 `request_id` 直接复制既有原生 `req.rid`，供服务集合、预算集合和终态 receipt 精确关联，不创建新标识或内容 hash。输出预算取 native 已按上下文和池容量裁剪后的 `sampling_params.max_new_tokens`，已生成数只取 scheduler 当前已处理的 CPU 状态；不读取未来输出。[ReqKvInfo](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/managers/schedule_batch.py#L974-L987) 的三种 KV 数字是**逻辑序列边界**：树拥有 `[0, cache_protected_tokens)`，请求自有尾部位于其后；共享前缀、页边界和完成后的缓存插入都使其不能直接作为唯一物理占用或即将释放 slot 数。Overlap 时 committed 状态还可能落后已执行 forward。
 
-运行集合复用 native `collect_inflight_reqs()` 对 running/last/overlap batch 去重，纳入独立 chunked request，排除已结束请求；已回到 waiting 的请求只计 waiting。Running 摘要无顺序语义；waiting 保留当前列表顺序，但原生优先级、staging 和 admission 可改变实际执行顺序。读取成本为 O(active + waiting)，每个请求只读标量和数组长度，不遍历 token 内容、不维护新缓存、不处理 ACK、不改变锁和 LRU。没有 scheduler 时摘要为 `null`，已知空集合为 `[]`。这些观测可用于区分容量压力和传输未完成，尚不构成经过 GPU 验证的新等待预测模型。
+运行集合通过native `collect_inflight_reqs()`对running/last/overlap batch去重，纳入独立chunked request并排除已结束请求；回到waiting的请求归入waiting。Running摘要表示集合，waiting保留列表顺序；实际执行顺序由原生调度决定。读取成本为O(active + waiting)，每请求读取标量和数组长度。缺少scheduler时返回null，已知空集合返回`[]`。等待估计及验证状态见[等待模型](../docs/research/admission_wait_model.md)。
 
 - `request_terminal`：receipt 与原生完成时序。
-- `transfer`：在原生 HiCache ACK 已完成后复用 `num_bytes`、`start_event.elapsed_time(finish_event)`，输出 H2D/D2H 字节与 CUDA event 时间。计时不支持时为 `null`，不能将 CPU enqueue 时间替代它。该观察点不增加 CUDA 同步，不改变传输调度。
+- `transfer`：原生HiCache ACK完成后读取`num_bytes`和`start_event.elapsed_time(finish_event)`，记录H2D/D2H字节与CUDA event时间；计时不可用时为null。
 - `retire_ref`：软引用退役，free 为零。
 - `pool_snapshot`：仅 `CONTEXTKV_SAMPLE_POOL=1` 开启；每个 scheduler 边界用 O(1) allocator 计数采样，只有占用变化时写事件。用于计算 scheduler 边界的**采样峰值**与占用积分。
 
-生成结果中的 `server_ttft_ms` 为 scheduler 收到请求至原生首 token 完成，`server_elapsed_ms` 为收到至终态，`decode_ms` 为首 token 至终态，`tpot_ms` 为该段除以后续输出 token 数。`forward_to_first_token_ms` 单独表示原生 forward-entry 至首 token 完成。全部来自同一服务端 monotonic 时钟；原生 forward-entry 在部分 cache 准备之后，不能拿它精确拆出排队与恢复。
+`server_ttft_ms`为scheduler收到请求至首token完成，`server_elapsed_ms`为收到至终态，`decode_ms`为首token至终态，`tpot_ms`为该段除以后续token数。`forward_to_first_token_ms`从原生forward-entry开始计时；此前已完成部分cache准备，因此前置区间合并记录排队与恢复。全部使用同一服务端monotonic时钟。
 
 `elapsed_ms` 是客户端提交至完整 HTTP 响应。默认累计 SSE 客户端通过首次非空 output_ids 和最后新增 token 的帧观察 `ttft_ms/last_token_ms`，重复累计帧不更新时刻。客户端 TPOT 由首末 chunk 间隔除以 N−1 计算，报告明确标为 chunk 观察；服务端 `tpot_ms` 仍是另一时间域的原生指标。可显式 `SGLangEngineClient(..., stream=False)` 使用非流式，此时两个客户端 token 时刻未知；专用 profiler 保持非流式。`queue_ms/prefill_ms/restore_prefill_ms` 保持未知；当前记录提供联合阶段墙时。成本标定使用 `phase=first_token, timing_scope=server_request` 联合阶段，在同一并发压力桶中比较，避免重复加排队或 H2D。
 
@@ -90,7 +90,7 @@ v2的权重摘要仅在导出发布边界全量计算一次。启动时核对con
 
 ## 可执行的真机验收与标定入口
 
-工程验收先通过 CPU 合同和源码检查，再在已授权的 H200 环境运行以下入口。协议冒烟与小规模标定的通过，不代替正式基线、质量和容量实验。
+以下入口用于H200环境的协议检查、成本标定与缓存机制验证；系统比较见[数据与评价](../docs/data_and_evaluation.md)。
 
 先在正常研究服务器验证协议，不 flush 共享缓存：
 
@@ -99,7 +99,7 @@ python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml \
   --report runs/sglang-smoke.json
 ```
 
-该入口验证指纹与固定提交、prepare 幂等、真实生成 receipt/服务端时序、原样 status 结果恢复、重复只读报价、退役 ACK 及旧 epoch 拒绝。`smoke` 是功能验收，不是性能或质量结论。
+`smoke`验证指纹与固定提交、prepare幂等、生成receipt与服务端时序、status结果恢复、重复只读报价、退役ACK及旧epoch拒绝。
 
 成本标定需要另起**专用**引擎实例（端口和相应 config 的 `base_url` 一致）：
 
@@ -111,9 +111,9 @@ python -m profiling.sglang_probe --config configs/qwen3_8b_scope.example.yaml --
   --warmup 1 --repetitions 3
 ```
 
-配置中的 `model.scope_path` 与服务端 `CONTEXTKV_MODEL_SCOPE_PATH`必须指向同一显式Qwen3身份；客户端本地tokenizer与引擎必须一致。不要通过`--model-path`绕过scope或重用旧模型的成本产物。已有成本范围直接复用；只有实际缺口才选择必要测点。
+配置中的`model.scope_path`与服务端`CONTEXTKV_MODEL_SCOPE_PATH`指向同一Qwen3身份，客户端和引擎使用相同tokenizer。标定数据按该模型、缓存及采样配置装配，缺少所需测点时定向补采。
 
-`/context/profiling/prepare` 默认禁用，并仅在空闲专用实例接受操作。cold 调用原生 cache flush 并更新 restart identity；gpu_ready 由普通原生生成暖前缀并 settle 写入；host_only 在暖前缀后经原生 write ACK、软引用退役和 eviction 构造。每轮测量前后均在专用实例 settle 写 ACK，前游标排除暖缓存传输，后游标包含本轮生成写回；它不进入 server request 阶段耗时。客户端随后用只读报价核实**实际**前缀和页边界，容量/写策略不满足时停止，不能用标签伪称“冷/暖/host”。GPU-only 服务须省略 host_only。write_through_selective 若未保存 host 前缀也会显式失败，不能误记为 host 测量。
+`/context/profiling/prepare`默认关闭，启用后在空闲专用实例执行。cold调用原生cache flush并更新restart identity；gpu_ready通过原生生成建立前缀并等待写入完成；host_only随后执行write ACK确认、软引用退役和eviction。每轮测量前后等待写ACK，前后游标划定本轮传输范围，准备耗时单列。客户端通过quote核对前缀和页边界，容量或写策略不满足时报告准备失败。GPU-only省略host_only；write_through_selective需要实际保存host前缀。
 
 每个 cache/shape/concurrency case 默认先运行 `--warmup 1`：执行相同 prepare/probe，但只在 telemetry 标记 `warmup=true`，不写入 Measurement 训练行。随后正式 repetitions 标记 `warmup=false`；manifest 记录 warmup 数量。这样避免首执行 JIT/初始化开销直接污染成本表，仍保留全部暖机证据。
 
@@ -121,7 +121,7 @@ python -m profiling.sglang_probe --config configs/qwen3_8b_scope.example.yaml --
 
 ## 运行配置与原生观测
 
-启动脚本默认 `kernel/layer_first/TMA=0`，与当前 H200/Qwen3 真机运行一致。显式环境变量仍可覆盖。早期 `page_first` 的 staged D2H 路径出现过进程 segfault，未隔离为单一上游/驱动原因，因此不再作为本项目默认值；本项目没有修改 CUDA kernel。
+启动脚本默认`kernel/layer_first/TMA=0`，与H200/Qwen3运行配置一致，可用环境变量覆盖。早期`page_first`的staged D2H路径出现过segfault，原因尚未定位，因此默认采用layer_first。
 
 报价复用实际 native ratio/clip、当前 running_batch 成员和原生 running offset；最近 match 只复制标量结果，不重复匹配。读取成本为 O(active+waiting)，缺失观测保留 None。它们已进入当前 `native_budget` 选择，字段及近似边界见[等待模型](../docs/research/admission_wait_model.md)。
 
@@ -139,11 +139,11 @@ python -m engine_patches.lifecycle_probe --config configs/qwen3_8b_scope.example
 
 新增 `profile_prepare(mode="pressure", tier="gpu"|"host", tokens=N)` 仅在 profiler 开关与空闲检查通过后接受，调用 native `evict(EvictParams(...))` 或 `evict_host(N)`，**不释放任何 session 引用**。host trial 先通过相同 pressure 清除 GPU 副本并 settle 原生写入，继续保留两个 epoch 的引用，再单独施压 host。原生算法可能按整节点回收超过请求量，结果保留实际 native eviction counters 和唯一 pool 的前后差额。
 
-输出保存旧/新/共享路径的前后报价、两层 unique slot、retire ACK、真实原生 eviction 数量和 epoch 状态。只有新分支保留改善、旧分支保留降低、共享前缀存活、retire 本身未改变物理占用等证据一致，才标 `effect_observed`；否则报告 `no_effect_observed`，不预设收益。无法构造 host 副本（例如 selective 未准入）会明确报 fixture 不满足。GPU-only 服务指定 `--tiers gpu`。这是可归因的机制验收，不能外推一般时延、吞吐或回答质量收益。
+输出保存旧/新/共享路径的前后quote、两层unique slot、retire ACK、原生eviction数量和epoch状态。`effect_observed`要求新分支保留改善、旧分支保留降低、共享前缀存活，且retire本身保持物理占用；其余情况记为`no_effect_observed`。host副本构造失败时报告fixture不满足，GPU-only指定`--tiers gpu`。该工具评价引用退役对分支保留的作用。
 
 ## 可选 Host 备份准入
 
-`CONTEXTKV_HOST_ADMISSION=off|fixed|conditioned` 默认off。启用时将业务session映射到epoch，过滤请求触发的合法 BackupKV action；在原生分配、锁和DMA之前按压力与每请求累计新页额度判定。write_back淘汰路径和原生去重/补齐保持。具体机制与EfficientAgent归属见[Host准入说明](../docs/research/host_admission_design.md)。当前共同对照使用off，不能将可选准入的局部结果算作本轮收益。
+`CONTEXTKV_HOST_ADMISSION=off|fixed|conditioned`默认off，现有系统对照使用off。启用时将业务session映射到epoch，在原生分配、锁和DMA前按压力与每请求累计新页额度筛选BackupKV action；write_back淘汰和原生去重/补齐照常执行。具体机制及EfficientAgent适配见[Host准入说明](../docs/research/host_admission_design.md)。
 
 ## 可选准入诊断
 

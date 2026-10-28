@@ -1,26 +1,26 @@
 # B 的阶段成本与运行配置
 
-`profiling.sglang_probe → profiling.fit → profiling.stage_fit → CostModel` 是唯一的采集、拟合和装配链。当前已产出 H200/Qwen3-8B 的 `configs/calibration/qwen3-8b-h200.json`；`configs/qwen3_8b_cost.yaml` 使用显式 `admission_estimator: native_budget`，并在容器通过装配及保存运行身份/采样绑定检查。完整系统结果统一见[数据与评价](../data_and_evaluation.md)，本指南维护成本标定、装配和复现接口。
+`profiling.sglang_probe → profiling.fit → profiling.stage_fit → CostModel`负责采集、拟合和装配。H200/Qwen3-8B的成本文件为`configs/calibration/qwen3-8b-h200.json`；`configs/qwen3_8b_cost.yaml`使用`admission_estimator: native_budget`，已在容器完成装配与运行身份/采样绑定检查。完整系统结果见[数据与评价](../data_and_evaluation.md)。
 
 ## 当前实测范围
 
 - 固定 SGLang、Qwen3-8B、BF16、GPU 16384 槽、实际 Host 54272 槽、page 64、FA3、chunk 8192、FCFS；HiCache 为 layer_first/kernel/write_through、TMA 关闭，`sample_pool=true`。
-- 20 个明确 case，覆盖选定冷/GPU/Host/mixed 前缀及并发 1/2；60 个正式请求、30 个预热请求、84 个前缀物化调用。并发 mixed 的页对齐与总工作集在执行前检查，未执行组合网格。
+- 20 个case，覆盖冷/GPU/Host/mixed前缀及并发1/2；60个正式请求、30个预热请求、84个前缀物化调用。并发mixed在执行前检查页对齐和总工作集。
 - 采集 run ID 为 `452258dcb15a42bdbcd333878dd141fc`，共 256 条 measurement；拟合得到 20 个 forward 点和 14 个 decode 区间。原始 `profile.jsonl`、`profile.telemetry.jsonl`、`profile.manifest.json` 和 `runtime.json` 在 `runs/mainline-delivery/`。发行包中的 artifact 保留这些来源绑定，字节与原测量产物相同。
 - 测点的concurrency是准备时声明的请求批次大小，包含其中等待容量的成员。在线特征与标定使用同一口径。
 - artifact 保留 159 个历史开发输出长度（22 会话，均值 580/P90 1024），用于追溯旧协议。当前装配还检查 `output_prior_system_prompt`，及分布自己的 `system_prompt`；旧 artifact 未绑定当前回答协议，故不沿用该长度分布。耗时点继续复用，长度使用配置默认 128/256 和已完成会话历史，未回填待评估答案或质量标签。
 - whole-cell OOF 的 forward MAE 为 52.54 ms；留出支持域内 38/60 请求的 MAE 为 47.54 ms，经验 P99 绝对残差约 202.35 ms。这些统计用于描述插值误差。
 
-测点由已有候选的提交前输入/前缀形状选择，未按新答案或时延挑选。原始 case、选择记录和运行命令保存在同目录；本地公开副本位于 `runs/mainline-delivery/remote/mainline-delivery/`。旧模型 artifact 保留为历史证据，不用于当前运行，也不触发旧模型实验。
+测点根据已有候选的提交前输入与前缀形状选择。原始case、选择记录和运行命令保存在同目录；本地公开副本位于`runs/mainline-delivery/remote/mainline-delivery/`。
 
 ## 阶段边界与决策含义
 
-- `forward_first`：服务端 forward start 到首 token 的 wall interval，包含该阶段实际执行与调度交互，不称作 CUDA kernel 时间。
-- `pre_forward`：`server_ttft_ms - forward_to_first_token_ms`，是 admission/等待/恢复的联合前置区间，现有记录不将它伪拆成独立精确时间。
+- `forward_first`：服务端forward start到首token的墙时，包含执行与调度交互。
+- `pre_forward`：`server_ttft_ms - forward_to_first_token_ms`，包含admission、等待和恢复的联合前置区间。
 - `decode`：实测上下文区间内每个后续 token 的成本；首 token 已由 forward 计入。
 - 控制器本地候选构造、报价与提交开销另计，不和服务端 TTFT 重复累加。
 
-在线使用实测 forward/decode、c1 的单请求准备项，以及[原生工作量等待估计](../research/admission_wait_model.md)。同质 burst 的前置时间不能直接替代异质会话队列；`native_workload` 与 `native_budget` 都是显式解析估计，后者还使用原生预算观测。`selection_eligible` 表示允许该模式参与选择，`calibrated` 仍为 false，不将这两个字段混用。
+在线使用实测forward/decode、c1单请求准备项和[原生工作量等待估计](../research/admission_wait_model.md)。`native_workload`与`native_budget`以解析模型估计异质队列，后者使用原生预算观测。`selection_eligible`表示可参与选择，等待项的`calibrated`为false。
 
 无工作量快照、配置/采样不匹配、所需执行时间超支持域、在途传输或部分恢复时，沿用已有简单回退。经验时间误差覆盖 forward/decode；等待均值与 P90 的差描述两种风险情景。选择价值由完整闭环效果判断，单臂预测 MAE 用于定位问题。
 
@@ -43,15 +43,15 @@ total_ttft_reference, total_ttft_budget_reference
 development_output_lengths, validation
 ```
 
-特征使用准备时已知的 `(P,U,L,c)` 和实际声明容量/预算。执行中 GPU 前缀漂移到 Host 时保留记录，不删除不利样本，也不把事后恢复量填回已知特征。当前实际输出长度、未来队列顺序、耗时排序不入特征。
+预测特征使用准备时的`(P,U,L,c)`及声明容量/预算；执行中的前缀位置变化、实际恢复量、输出长度和耗时单独记录为结果。
 
-拟合先按 batch 均值、再对 batch 等权。同一 forward 特征单元的预算、重复和并发成员在 OOF 中保持同折。经验 P99 使用受支持留出残差，同时保留残差数、独立单元数及最大误差；不把相关请求数当作独立样本数。
+拟合先求batch均值，再对batch等权。同一forward特征单元的预算、重复和并发成员在OOF中保持同折。经验P99使用支持域内的留出残差，同时报告残差数、独立单元数及最大误差。
 
-`CostModel` 绑定实际 fingerprint、cache configuration 和采样 recipe；这些身份检查不等同于自动确认另一台 GPU 的硬件等价。运行硬件与环境来自对应 runtime manifest。更换模型、池配置或 recipe 后，应先判断现有范围能否复用，再决定是否需要定向补采。
+`CostModel`绑定fingerprint、cache configuration和采样recipe，runtime manifest记录测量硬件与环境。更换模型、设备、池配置或recipe时，按实际条件评估测量可复用范围，并对决策所需的缺口补采。
 
 ## 复现与必要补采
 
-已保存产物可以直接加载和离线复算，无需重启模型。只有实际决策遇到关键成本空白才补采，使用独立服务及 `CONTEXTKV_ENABLE_PROFILING=1`，因为准备接口会改变缓存状态。正常服务不启用冷缓存标定；本次成本配置的启动条件见[部署说明](../deployment.md)。
+已保存产物支持直接加载和离线复算。补采使用独立服务并设置`CONTEXTKV_ENABLE_PROFILING=1`；准备接口会改变缓存状态，正常服务保持关闭。启动条件见[部署说明](../deployment.md)。
 
 `--cases-file PATH` 接收有序 `PrefillCase` JSON 数组，每项包含 `prompt_tokens`、`prefix_tokens`、`output_tokens`、`concurrency`、`cache_state`；mixed 另含 `device_prefix_tokens`。它不与网格参数混用，执行前按真实页大小和上下文预算校验。manifest 的 `planned_generation_requests` 分别记录正式、预热、前缀准备和合计；失败时实际完成分母以 telemetry 为准。
 

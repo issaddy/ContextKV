@@ -12,6 +12,6 @@
 
 可选依赖通过`UV_PROJECT_ENVIRONMENT=.venv-training uv sync --extra training --locked`安装，与推理环境分开。准备输入的每条记录包含`id`、`split`、`messages`、`target`和`provenance`；来源审核与开发/测试划分由数据准备者负责。
 
-训练前缀直接复用`HuggingFaceTemplate.render`，历史/来源全部mask，仅目标及EOS参与loss，collator保留已有labels；不通过完整chat减prefix来猜目标边界。导出的权重拥有独立身份，按[模型scope接口](../guides/model_scope.md)与[部署入口](../deployment.md)读取，原基座KV和成本表不能直接混用于新权重。当前原生guard不提供动态LoRA切换。
+训练前缀复用`HuggingFaceTemplate.render`，历史与来源全部mask，目标及EOS参与loss，collator保留labels。导出权重使用独立模型身份、KV缓存与对应成本配置，按[模型scope接口](../guides/model_scope.md)和[部署入口](../deployment.md)加载为dense checkpoint。
 
 [RAFT](https://arxiv.org/abs/2403.10131)和[PA-RAG](https://aclanthology.org/2025.naacl-long.459/)提供证据抗干扰、完整性和来源偏好的研究参考。当前训练实验处于停止状态，工具保留供按需使用。

@@ -44,9 +44,9 @@ python -m profiling.decision_pairs run \
   --output runs/decision-dev/pairs.jsonl
 ```
 
-没有 host 时先使用 `--cache-states cold,gpu_ready`。模型/tokenizer/template 指纹必须和冻结输入一致。成本文件省略时，按配置使用 Measurement 文件或未标定模型，并明确记录回退；这种运行不证明成本选择有效。
+GPU-only服务使用`--cache-states cold,gpu_ready`。模型/tokenizer/template指纹与冻结输入匹配。省略成本文件时，按配置使用Measurement文件或未标定模型，并记录实际采用的固定策略。
 
-启动时及每个 pair 开始时，还会检查成本 artifact 绑定的 engine fingerprint/cache configuration。已知不匹配时保留诊断预测，但将其标为未标定并走固定回退策略；manifest 和每个 pair 均保留 `calibration_scope`。旧 artifact 缺失绑定信息时标为 `legacy_unbound`。配置一致本身不证明 GPU/驱动/拓扑相同。
+启动及每个pair开始时检查artifact的engine fingerprint/cache configuration。不匹配时保留诊断预测，标为未标定并执行固定策略；manifest和pair记录`calibration_scope`。旧artifact缺少绑定时标为`legacy_unbound`。GPU、驱动和拓扑按实际运行环境记录。
 
 每个 pair 的两个 arm 都执行以下独立流程：
 
@@ -57,9 +57,9 @@ python -m profiling.decision_pairs run \
 
 两臂之间重新执行上述流程，因此先执行的候选不会为另一候选留下 KV。发现其他请求在执行/排队、状态不符或两臂 cache shape 不一致时记录失败。若第二臂失败，第一臂已经得到的输出和报价仍保留；不把失败 pair 从失败统计中抹去。
 
-`cold/gpu_ready`还逐臂核对实际receipt的`device/host/prefill`是否等于该臂原生quote给出的`ready_gpu/0/input-ready_gpu`。quote已应用原生`n-1`和page边界，不再减一次；比较的是实际执行而非离线LCP。发现执行时转host、命中变化或重计算时，完整result保留并把pair标为失败，不能以准备时的状态名归为纯GPU结果。此约束只适用于本独占fixture；`host_only`仍允许原生准入选择重算而非全部恢复。
+`cold/gpu_ready`逐臂核对receipt的`device/host/prefill`与quote的`ready_gpu/0/input-ready_gpu`，quote已包含原生`n-1`及page处理。执行中出现host加载、命中变化或额外重算时，保存完整result并将pair标为失败。`host_only`记录原生准入实际选择的恢复或重算。
 
-这只是**并发 1、单条已提交历史路径的受控缓存准备**，不等于还原源运行中的其他会话、所有分支、LRU 顺序或真实并发物理快照。`host_only` 的原生加载是否被 admission 接受仍由实际报价和执行 receipt 记录，不能只因 host 有副本就假定全部被加载。
+该fixture以并发1恢复一条已提交历史路径，隔离比较两种布局的执行成本。源运行中的其他会话、分支和LRU状态属于另外的负载条件。`host_only`的恢复量以实际quote和receipt为准。
 
 ## 3. 比较差值与错误动作代价
 
@@ -121,4 +121,4 @@ python -m profiling.decision_pairs rescore \
 python -m pytest -q tests/test_decision_pairs.py
 ```
 
-CPU 测试覆盖只读冻结、当前答案排除、dev/test/P1 边界、B4 排名保持、候选漂移跳过、两臂独立重置/同历史预热、host 状态、部分失败留存和差值/regret 算法。重评分测试还验证修改当前输出/耗时不会改变预测和选择、错误 case/hash/shape 被拒绝、原行不被修改、失败行与来源标签保留、CLI 不创建 engine client。测试 double 的时间仅用于验证统计，不能作为硬件结果。
+CPU测试覆盖冻结输入、数据划分、B4排名、候选变化、两臂独立准备、Host状态、部分失败留存及差值/regret计算。重评分检查预测仅使用提交前信息、case/hash/shape匹配、源记录保留及纯离线执行；测试时间由double提供。

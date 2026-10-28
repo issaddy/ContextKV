@@ -8,7 +8,7 @@ EfficientAgent 固定 `b21b12a07a3ccf473c82acf00820b1aa2073044b`、Apache-2.0，
 
 固定 SGLang `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b` 的 FULL 备份链为 `checkpoint_into_tree(req) → insert → _apply_cache_actions → BackupKV → _execute_and_commit_kv_backup → _execute_kv_backup → cache_controller.write`。`FullComponent.build_hicache_transfers(BACKUP_HOST)` 返回 `None`，主 KV 写入不经过额外 PoolTransfer。判断位于整条 BackupKV action 的 host 分配、commit、新锁、pending 和 DMA 之前；分裂节点、释放设备槽及其他 action 原顺序保留。[原生缓存实现](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/unified_radix_cache.py)、[FULL 组件](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/unified_cache/components/full.py)。
 
-只过滤请求触发的 write_through/write_through_selective。write_back 淘汰路径保留原生；selective 仍先遵守原生命中次数门槛，研究策略不主动制造 BackupKV。决定以原生构造的完整祖先链为单位，避免备份缺口；共享 node 没有永久 skip 标记，后续新请求仍可补齐。研究 runtime 已限定 Python、dense FULL、TP/DP/PP=1、cache 模式，无 storage/linker/buffer/推测解码，不能外推到那些分支。
+准入策略筛选请求触发的write_through/write_through_selective，write_back保持原生流程，selective先检查原生命中次数。筛选单位为原生构造的完整祖先链；后续新请求可补齐曾跳过的共享node。支持配置为Python、dense FULL、TP/DP/PP=1及cache模式，其他引擎模式见[补丁说明](../../engine_patches/README.md)。
 
 ## 最终机制：每个 Req 的累计成功准入页预算
 
@@ -26,7 +26,7 @@ skip = enabled AND pressure AND N > 0 AND B + N > K
 
 `conditioned` 使用公式的后三项，`fixed` 始终施加额度，`off` 不进入过滤。逻辑工作集估计为 `(最近60秒活跃业务数−1)×最近最多256个请求的平均prompt_tokens`；活动和 prompt 样本在请求**第一次原生 match** 记录，同 Req 再匹配/重排队不重复采样。物理占用另由原生槽位观测，`host_hit_length` 记录本次 host 恢复长度。
 
-`N` 由本来要执行的 `build_backup_spec` 的 FULL device tensor 长度读取；每个 spec 构建一次并复用，不新增匹配、树遍历、GPU 同步或内容 hash。既有 host 副本的 native spec 长度为零。允许 action 后，只有每个节点的 host 分配、`commit_backup` 和 `_track_write_through_node` 成功，才将该节点的新页计入 Req 的 `B`；这表示 native 已提交备份，DMA 可能仍未完成。
+`N`读取已有`build_backup_spec`的FULL device tensor长度，每个spec构建一次并复用，已有host副本的spec长度为零。节点的host分配、`commit_backup`和`_track_write_through_node`成功后，新页计入Req的`B`；DMA完成另由ACK确认。
 
 - page64/chunk8192：首批128页可写；同 Req 的下一批4096 token/64页，在压力成立时整 action 跳过。
 - 分配失败不扣页。祖先成功、后代分配失败只记成功祖先，并保留原生失败返回0及 pending 路径。

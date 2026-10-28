@@ -1,6 +1,6 @@
 # Doc2Dial / MultiDoc2Dial 数据与系统评测
 
-同一个`adapters.doc2dial`入口读取Doc2Dial v1/v0.9和MultiDoc2Dial作者格式，导出完整原文、原始对话/grounding；MultiDoc2Dial另生成可直接送入现有P3运行器的任务。正常运行不需要训练。
+`adapters.doc2dial`读取Doc2Dial v1/v0.9和MultiDoc2Dial作者格式，导出完整原文、原始对话及grounding；MultiDoc2Dial另生成可直接送入P3运行器的任务。
 
 ## MultiDoc2Dial：跨文档多轮公开补充
 
@@ -63,7 +63,7 @@ python -m bench.b6_joint_sweep --matrix configs/benchmark_multidoc2dial.yaml \
   --stage test --job-timeout 3600 --output runs/multidoc2dial-system
 ```
 
-配置采用`comparison_scope: system`：Native使用last3混合检索，ContextKV使用现有会话任务解释及完整A/B/C；共享同一结构化语料、BM25/BGE/重排权重、生成模型和资源预算。解释、检索、生成与提交均计入完整响应；检索材料随各自实际历史变化，不能把全部差异单独归因于B/C。计划确认有必要执行时加`--execute`；准备与CPU接线检查不算回答质量实测。
+配置采用`comparison_scope: system`：Native使用last3混合检索，ContextKV使用会话任务解释及完整A/B/C；共享结构化语料、BM25/BGE/重排权重、生成模型和资源预算。各方法沿自身实际历史检索，比较包含选材与执行差异，完整响应涵盖解释、检索、生成和提交。加`--execute`运行计划，实际结果见[统一评价](../data_and_evaluation.md)。
 
 保存答案的基础词项评分：
 

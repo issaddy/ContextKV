@@ -6,7 +6,7 @@
 
 ## 选择依据与具体复用
 
-当前 Cloud P3 的 BM25 基线提供了可检验的起点；真实答案审查同时发现 Cloudant 问题配到其他产品资料，以及引用可见但不支持当前论断的情况。前者需要改进检索，后者仍需 claim/source 支持检查，不能仅靠 reranker 解决。相关性与事实支持分别评价，见[质量评价](quality_acceptance.md)。
+Cloud P3答案审查发现两类问题：检索混入其他产品资料，以及回答论断缺少来源支持。前者通过查询与重排改进，后者结合实际回答和来源评价，见[质量评价](quality_acceptance.md)。
 
 | 机制 | 官方依据与复用入口 | 本项目适配与限制 |
 |---|---|---|
@@ -23,7 +23,7 @@
 
 [`adapters/hybrid_retrieval.py`](../../adapters/hybrid_retrieval.py)提供 `LocalBGE`、`DenseIndex`、`reciprocal_rank_fusion`、`search_variants`；[`bench/retrieval_eval.py`](../../bench/retrieval_eval.py)是独立 `build/evaluate` 入口。BM25S提供`retrieve(..., top_k=5)`。依赖安装由项目锁文件管理；索引保存时记录实际构建库版本，加载时另记`runtime_versions`，重新保存时更新构建版本。加载检查检索配方和文件内容，运行时不另加精确包版本门槛。
 
-`prepare_queries` 将原始 MTRAG 转成只含当前及先前用户问题的白名单对象。`evaluate_queries` 不接受 qrels 或参考答案。CLI 完成所有排名、写入检索结果后才打开 qrels 做离线分析；`generated_history` 还检查 task/query、P2/P3 来源与完整先前轮次，不能用 P1 参考答案作为“实际历史”。该视角是冻结历史下的离线检索实验，不等同采用新检索器后自然演化的闭环历史。
+`prepare_queries`提取当前及先前用户问题，`evaluate_queries`生成排名，CLI保存结果后读取qrels评分。`generated_history`读取冻结的P2/P3实际历史，并核对task/query、来源和先前轮次，用于固定历史下的离线检索比较；闭环会话使用各方法实时生成的历史。
 
 输出目录保留三个文件：
 
@@ -31,7 +31,7 @@
 - `retrieval.jsonl`：每轮、每 query 视角、每阶段的前五原文、完整候选 ID/分数、rerank 输入集合、耗时。先前已完成行在失败时保留。
 - `summary.json`：每阶段 Recall/nDCG@5 和候选池指标、缺 qrels/无正例列表、按会话均值及耗时分布。
 
-阶段为 BM25、dense、hybrid、hybrid_rerank。共用已计算的 BM25/dense 结果以节约 GPU，不重复四次相同编码。因共用阶段、索引暖化且没有独立重复测量，耗时是**探索性顺序阶段墙时**，不是正式吞吐/尾延迟实验；模型/索引加载、生成和未来在线集成开销尚未包含。
+BM25、dense、hybrid、hybrid_rerank共用BM25/dense计算结果，按顺序记录各阶段墙时。该计时覆盖检索阶段，模型/索引加载、生成及完整系统吞吐另行测量。
 
 encoder 默认 8192 tokens。reranker API 默认 512，与模型卡的 Transformers 示例一致；固定模型 config 的 `max_position_embeddings=8194`。主线配置采用 1024，以容纳原段落与对话问题，也可按实际长度配置其他上限。`token_limit_hits` 统计达到配置上限的输入，包含刚好等长的情况。
 
@@ -87,7 +87,7 @@ python -m controller.cli \
 
 模型与索引每个 run 初始化一次，`initialization_seconds` 单列；逐轮复用同一模型实例。并发会话对这一模型对的调用以一把锁串行，锁排队也发生在 `t_arrive → t_retrieval_done` 之间。runner 已有的 `time_origin=pipeline_arrival` 以及 `max(t_response_done,t_commit)-t_arrive` 完整响应指标覆盖检索、融合、重排序、排队和生成，因此没有再加一份检索时间。模型初始化与结束释放在逐轮计时之外；run 结束显式删除本进程模型并释放本进程闲置 CUDA allocator，避免下一矩阵 job 残留检索模型显存。
 
-encoder/reranker 与 SGLang 共用 GPU 时，其他会话检索可能与生成竞争；这属于真实系统成本。当前锁只限制检索模型的并发，不阻断 SGLang。正式报告要同时给完整响应时延、检索阶段耗时、失败/未完成率、GPU 资源条件与检索模型驻留；已有空闲 GPU 成本标定不能自动当作新并发负载已验证。
+encoder/reranker与SGLang共用GPU时，检索和生成会竞争资源。检索模型锁限定其自身并发，SGLang独立运行。系统报告记录完整响应、检索耗时、失败/未完成率、GPU配置及检索模型驻留，并在目标并发负载下评价。
 
 接线测试运行两种真实 CLI 路径（测试模型与 fake HTTP），验证相同前五、每轮实际生成历史、无参考答案进入查询、每 run 只加载一次、模型释放、矩阵来源绑定以及检索排队计时。真实 P3 的回答质量与整体成本见[数据与评价](../data_and_evaluation.md)。
 
@@ -95,7 +95,7 @@ encoder/reranker 与 SGLang 共用 GPU 时，其他会话检索可能与生成�
 
 `source_window: true`显式启用来源窗口。复用[ParentDocumentRetriever](https://reference.langchain.com/python/langchain-classic/retrievers/parent_document_retriever/ParentDocumentRetriever)的“小片段检索、较大范围阅读”原则及[LlamaIndex窗口检索](https://developers.llamaindex.ai/python/examples/node_postprocessor/metadatareplacementdemo/)的相邻上下文组织方法：原有索引与50段评分不变，五个内容组代表确定后，补入每个命中前后各一段原文。窗口在同一来源、文档、版本和已声明章节内建立，重叠命中只补一次，不沿补充段落继续扩张。当前示例关闭该项：实测能补齐遗漏包地址，但缺少章节边界的语料会把指定版本和最新版流程一起引入，后续重点是版本和章节的适用范围。
 
-一般语料以`document_id`、`span`提供顺序；固定MT-RAG snapshot使用原有`parent-start-end` passage ID。官方说明这些是[语料入库时的offset](https://github.com/IBM/mt-rag-benchmark/blob/53fef6f5917c7e10c436f697e69a955dbc795d81/corpora/README.md)，实际检查也发现不少相邻重叠正文不一致。因此offset只用于顺序，不能据此无损拼接全文。本实现保留每段完整正文、原始身份及独立引用，不引入合成段落或重新编码索引。
+一般语料以`document_id`、`span`提供顺序；固定MT-RAG snapshot使用`parent-start-end` passage ID。官方将其定义为[语料入库时的offset](https://github.com/IBM/mt-rag-benchmark/blob/53fef6f5917c7e10c436f697e69a955dbc795d81/corpora/README.md)，部分相邻重叠正文存在差异。因此窗口按offset排序，各段保留完整正文、原身份和独立引用。
 
 `OnlineTurn.contexts`仍是原来的评分命中，`supporting_contexts`另存未评分的窗口原文。HTTP、控制器CLI和Native入口共同补齐显式依赖后交给A/R，只有原命中进入检索优先级，B按真实输入计价，C按既有事务保存和退役。配置需要`--evidence-corpus`，复用已有解释、encoder和reranker结果。新增输入和缓存占用计入精确token预算与原生准入。实际质量检查统一记录在[数据与评价](../data_and_evaluation.md)。
 
@@ -119,7 +119,7 @@ encoder/reranker 与 SGLang 共用 GPU 时，其他会话检索可能与生成�
 
 检索仍返回原始片段。阅读阶段通过文档身份和仅允许空白差异的字面匹配定位原文，补完整边界自然段并带上两侧各两个自然段；同源重叠窗口合并。实际模型读取原始窗口，原检索片段及分数另行记录，不将两者重复放进输入。已有完整片段、没有唯一对应原文的片段，以及有显式章节/依赖关系的来源保留原路径。窗口保留原文字符范围和来源，A/R共享同一阅读材料，实际tokens继续进入预算和B/C流程。
 
-原文只在启动时加载，片段定位按固定语料项复用，不增加LLM调用、索引搜索或重排。未提供source_documents时仍使用原有相邻检索片段窗口。生成评价包含实际阅读材料；检索评价从单独的retrieval_contexts投影原排名，不能把上下文扩展当作新的检索命中。该机制的质量和成本需按公开任务验证，默认配置尚未启用。
+原文在启动时加载，片段定位按固定语料项复用。未提供source_documents时使用相邻检索片段窗口。生成评价读取实际阅读材料，检索评价使用retrieval_contexts中的原排名。该选项默认关闭，质量与成本按公开任务验证。
 
 ## 联合语义选材配置
 

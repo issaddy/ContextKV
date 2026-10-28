@@ -2,7 +2,7 @@
 
 `POST /sessions/{session_id}/query`把当前问题交给已配置的检索器，再沿原Controller的会话锁、attempt、生成、持久提交与恢复流程执行。客户端只提交`query`和`request_id`；实际历史来自服务自己的已提交QA。原`/turns`供证据接口继续保留，不自动改变为检索模式。
 
-本入口复用BM25S/BGE检索factory、CorpusIndex和单次原生生成，没有上传/索引管理服务，不加载数据集参考答案或未来问题。当前CPU合同使用真实BM25与模拟引擎验证工程流程，不证明模型回答质量、GPU速度或成本策略优势。
+本入口连接已构建索引，复用BM25S/BGE检索factory、CorpusIndex和原生生成。CPU检查使用真实BM25与模拟引擎验证检索、提交和恢复；真实运行结果见[数据与评价](../data_and_evaluation.md)。
 
 ## 零GPU可运行示例
 
@@ -35,7 +35,7 @@ curl -sS -X POST http://127.0.0.1:18080/sessions/demo/query \
 curl -sS http://127.0.0.1:18080/sessions/demo
 ```
 
-两条请求也保存在`bench/examples/http-requests.json`。材料含明确的条件依赖，CorpusIndex会补入原文；模拟引擎只返回其协议测试文本，**不能把该文本当真实问答效果**。重复发送r1可验证幂等重放；最后用以下接口关闭会话：
+两条请求保存在`bench/examples/http-requests.json`。CorpusIndex补入材料中的条件依赖，模拟引擎返回协议测试文本。重复发送r1可验证幂等重放；最后关闭会话：
 
 ```bash
 curl -sS -X POST http://127.0.0.1:18080/sessions/demo/close
@@ -52,11 +52,11 @@ uv run --extra tokenizer --extra retrieval contextkv \
   --retriever-index data/cloud-bm25s --corpus-id mtrag
 ```
 
-`--retriever-config configs/retriever_hybrid.example.yaml`可替换`--retriever-index`使用已有BGE dense/RRF/rerank配置；两者互斥。BGE权重和其PyTorch运行环境必须预先可用，不在请求中下载。模型scope、系统提示、采样与输出预算均来自共享RunConfig；HTTP入口不会套用旧模型成本artifact或把工作配置当质量赢家。
+`--retriever-config configs/retriever_hybrid.example.yaml`可替换`--retriever-index`，使用BGE dense/RRF/rerank配置；两者互斥。启动前准备BGE权重及PyTorch环境。模型scope、系统提示、采样和输出预算来自共享RunConfig。
 
-`--evidence-corpus`读取原文、来源、版本、条件/表头依赖的JSONL；`--corpus-id`是证据命名空间，默认`mtrag`，自有文档应明确填写。公开来源字段按`source_uri → source → url`读取，标题也支持metadata；不会复制答案标注。MTRAG已有索引可配合`--evidence-corpus data/mtrag-official/cloud.jsonl`恢复原始文档地址，正文和检索排名不变，无需重建向量。服务的corpus snapshot只取已加载retriever的manifest；请求不能任意指定snapshot。元数据必须能精确匹配原检索正文，条件闭包不会改写正文，也不给追加依赖编造检索排名。
+`--evidence-corpus`读取原文、来源、版本及条件/表头依赖的JSONL；`--corpus-id`是证据命名空间，默认`mtrag`，自有文档填写自己的命名空间。来源字段按`source_uri → source → url`读取，标题支持metadata。MTRAG已有索引配合`--evidence-corpus data/mtrag-official/cloud.jsonl`可补齐原始文档地址，正文、排名和向量保持不变。corpus snapshot来自已加载retriever的manifest；元数据按检索正文精确匹配，依赖保留原文并单独记录。
 
-索引构建同时接受BEIR `_id`和元数据语料的`passage_id`；同一`document_id`下的不同片段保持独立，`source_uri`可来自顶层或metadata。缺少来源地址时，证据URI使用显式`corpus_id`命名空间。旧版本可能把自有语料的缺省来源错误写成`mtrag://…`；既有archive不会自动改写，同key的来源变更仍会被拒绝。此类旧状态应显式使用新会话/新state并固定正确source，不能静默迁移后宣称来源一直相同；默认MTRAG来源格式保持不变。
+索引构建接受BEIR `_id`和元数据语料的`passage_id`；同一`document_id`下的片段保持独立，`source_uri`可来自顶层或metadata。缺少地址时，证据URI使用`corpus_id`命名空间。旧版本若将自有语料来源写成`mtrag://…`，需设置正确source并使用新会话/新state；已有archive保持原样，同key来源变更会报冲突。
 
 ## 请求、结果与来源
 
@@ -74,7 +74,7 @@ r1完成、又完成r2以后重放r1，仍返回r1原答案/IDs/来源。`retrie
 
 ## 幂等、失败与恢复
 
-同一session的幂等检查、未决结果恢复、读取已提交历史、检索与提交处于同一Controller串行边界。检索采用现有worker线程和检索器资源约束，避免阻塞HTTP事件循环；不同业务会话仍可独立进行，不能把全局模型串行限制称为业务互斥。
+同一session的幂等检查、恢复、历史读取、检索和提交串行执行。检索运行于worker线程，不同会话可并行推进；encoder/reranker的模型调用按共享资源锁串行。
 
 | 情形 | HTTP / 状态语义 |
 |---|---|
@@ -95,7 +95,7 @@ curl -sS -X POST http://127.0.0.1:18080/sessions/demo/recover \
   -H 'Content-Type: application/json' -d '{"abandon":false}'
 ```
 
-新请求的完整服务时序包含会话排队和检索，控制/规划成本中不再重复计这段检索时间。外层HTTP响应当前是缓冲返回；引擎客户端内部SSE不等于HTTP调用者收到逐token stream，不虚构外层客户端TTFT。
+完整服务时序包含会话排队和检索，控制/规划成本单独计量。外层HTTP接口缓冲返回完整答案；引擎客户端内部使用SSE，记录引擎交互的首末token时间。
 
 ## 初始化与关闭
 

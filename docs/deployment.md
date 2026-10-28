@@ -1,6 +1,6 @@
 # Qwen3 Linux/NVIDIA 部署
 
-当前仅使用已有 Qwen3-8B/32B 本地快照。Qwen2.5-7B 已停用，旧下载、隐式启动和恢复入口已移除。用户容器项目目录为 `/home/relay/songjiayun/ContextKV`；模型位于 `/media/ssd1/qwen3-8b`、`/media/ssd1/qwen3-32b`。代理从私有运行环境继承，凭据不进入源码、示例或公开产物。
+当前部署使用 Qwen3-8B/32B 本地快照。容器项目目录为 `/home/relay/songjiayun/ContextKV`，模型位于 `/media/ssd1/qwen3-8b`、`/media/ssd1/qwen3-32b`。下载代理通过私有环境变量配置。
 
 ## 准备已有模型与固定引擎
 
@@ -18,9 +18,9 @@ export no_proxy="$NO_PROXY"
 export CONTEXTKV_FINGERPRINT_JSON="$(cat runs/fingerprint.json)"
 ```
 
-bootstrap只安装固定 SGLang commit `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b` 及其依赖，并通过现有scope核对用户已有文件、tokenizer和模板，不下载生成模型。更换模型目录时更新scope。实际HF loading revision为null，scope记录元数据身份。见[模型scope](guides/model_scope.md)。
+bootstrap安装固定 SGLang commit `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b` 及其依赖，通过scope核对已有模型文件、tokenizer和模板。更换模型目录时更新scope。实际HF loading revision为null，scope记录元数据身份。见[模型scope](guides/model_scope.md)。
 
-控制器的 `uv.lock` 与独立 `.venv-sglang` 分工不变；引擎依赖由固定上游pyproject定义。记录实际安装环境，不用CPU锁替代引擎依赖。
+控制器依赖由 `uv.lock` 管理；独立 `.venv-sglang` 按固定上游pyproject安装引擎依赖，并记录实际环境。
 
 ## 启动与使用
 
@@ -34,7 +34,7 @@ SGLANG_HICACHE_TMA_TRANSFER=0 bash scripts/launch_sglang.sh \
   --attention-backend fa3 --chunked-prefill-size 8192 --schedule-policy fcfs
 ```
 
-真实运行配置为 `configs/qwen3_8b_scope.example.yaml`。在另一终端使用同一引擎环境启动 `controller.cli ... serve`，或按[项目入口](../README.md)运行P2/P3。32B须同时更换scope和共享配置，不共享8B的成本artifact。容量以实际服务池/分配记录为准，不以请求的比例或GB代替。
+真实运行配置为 `configs/qwen3_8b_scope.example.yaml`。在另一终端使用同一引擎环境启动 `controller.cli ... serve`，或按[项目入口](../README.md)运行P2/P3。32B使用自身scope与共享配置；现有成本artifact对应8B。容量从服务池与分配记录读取。
 
 仓库同时提供可直接装配的 `configs/qwen3_8b_cost.yaml`：使用 Qwen3-8B 实测 `configs/calibration/qwen3-8b-h200.json`、`native_budget` 等待估计和无固定轮数冷却的成本选择。对应效果见[评价](data_and_evaluation.md)。加载该配置时，在上述引擎启动命令前设置 `export CONTEXTKV_SAMPLE_POOL=1`，与 artifact 的 cache configuration 保持一致；实际 GPU/Host 槽数应为 16384/54272。对照运行的完整 argv、线程设置、模型和环境记录保存在 `runs/mainline-delivery/delivery-run/servers/`。正常服务无需设置 `CONTEXTKV_ENABLE_PROFILING=1`。
 
@@ -46,7 +46,7 @@ python -m controller.cli --config configs/qwen3_8b_cost.yaml serve
 
 该配置的状态目录是 `runs/contextkv-service`。成本文件随源码与 sdist 提供，不需要重新采集。对应采集来源、支持范围及本地公开副本见[阶段成本说明](guides/stage_cost_model.md)。
 
-服务变更后的必要协议检查可使用 `python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml --report runs/qwen3-smoke.json`。该命令实际生成回答，用于引擎或模型变更后的协议检查。CPU检查与真实运行边界见[引擎说明](../engine_patches/README.md)。
+引擎或模型变更后，可运行 `python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml --report runs/qwen3-smoke.json`，通过真实生成检查协议。具体检查项见[引擎说明](../engine_patches/README.md)。
 
 ## 清理版本的配置接口
 
@@ -84,16 +84,16 @@ CUDA_VISIBLE_DEVICES=0,1 python -m controller.cli --config configs/qwen3_8b_cost
   --evidence-corpus data/mtrag-official/cloud.jsonl --corpus-id mtrag
 ```
 
-实际拓扑为8B生成GPU0、32B解释与BGE检索共享GPU1。32B常驻进程在本次16K池配置下约70,008 MiB，解释等待计入完整响应；两个模型的KV池不能当成一个池汇总。多轮示例同时连接30000生成端口和30001解释端口，完整延迟包含两者。现有owned矩阵管理其声明的生成进程；单独使用该矩阵时，解释服务由操作者按上面命令启动并记录，两者分别关闭。
+实际拓扑为8B生成GPU0、32B解释与BGE检索共享GPU1。32B常驻进程在本次16K池配置下约70,008 MiB，两个模型的KV池分别计量。多轮示例连接30000生成端口和30001解释端口，完整延迟包含两者。owned矩阵管理其声明的生成进程；解释服务按上面命令单独启动、记录和关闭。
 
-NGRAM辅助服务使用原生`/server_info`、`/metrics`观测；受控对照需要清空缓存时，在服务空闲后调用原生`/flush_cache`并确认成功。8B非推测生成的控制器继续使用既有研究接口。辅助观测缺失单独记录，不能覆盖已持久化完成的业务结果。
+NGRAM辅助服务使用原生`/server_info`、`/metrics`观测；受控对照需要清空缓存时，在服务空闲后调用原生`/flush_cache`并确认成功。8B非推测生成的控制器使用研究接口。辅助观测缺失与业务完成状态分别记录。
 
 检索示例默认`conversational`、`single`和`ranked`；可选联合选材、来源窗口和原始文档阅读按[混合检索指南](guides/hybrid_retrieval.md)配置。`evidence_selection: semantic`可与`source_window`组合，使用同一selector预算和证据元数据。任务状态、条件继承及来源选择原理见[多轮机制](research/source_grounded_query_resolution.md)。
 
 ## 分析和实验的边界
 
-正常服务不启用冷缓存标定。只有需要解决具体成本不确定性时，在独立服务显式设置 `CONTEXTKV_ENABLE_PROFILING=1` 并选定必要测点；该接口会改变缓存状态。旧7B或其他recipe的测量仍可只读分析，不能绑定到Qwen3执行。
+成本标定在独立服务设置 `CONTEXTKV_ENABLE_PROFILING=1` 后执行，准备接口会改变缓存状态。正常服务保持该接口关闭。测量复用按[阶段成本说明](guides/stage_cost_model.md)中的模型、缓存及采样配置匹配。
 
-原生B0/B1使用clean stock checkout；研究控制器使用patched checkout。优先让[owned显式矩阵](guides/b6_owned_matrix.md)管理各自进程、生成真实manifest并保留完整失败记录。该入口不恢复外部服务；后续supervisor也不得恢复已退役7B。默认plan不启动模型，`--execute`才执行所声明的有限任务。
+原生B0/B1使用clean stock checkout；研究控制器使用patched checkout。[owned显式矩阵](guides/b6_owned_matrix.md)管理自有进程，生成manifest并保存失败记录。默认plan展示执行计划，`--execute`运行计划中的任务。
 
-共享配置、原始输入/输出、源码、实际资源、失败及后续恢复信息一起保留。当前 Qwen3 成本、六会话 A/B/C 对照和适用范围见[数据与评价](data_and_evaluation.md)。每批保留实际源码身份，不将历史批次改写为最新版本证据。
+每批保存配置、原始输入/输出、源码版本、实际资源、失败及恢复信息。Qwen3成本和A/B/C对照结果见[数据与评价](data_and_evaluation.md)。

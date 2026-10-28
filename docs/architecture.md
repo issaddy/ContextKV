@@ -2,9 +2,9 @@
 
 课题场景、A/B/C 的职责与当前推进顺序统一见[项目范围](project_scope.md)。本文描述现有工程接口与状态流转。
 
-控制器为单 Python 服务；SQLite WAL 是跨进程一致性的边界。每个业务会话有串行异步锁，数据库另有一个未决 attempt 的唯一索引。多会话可并发，部署默认一个 Uvicorn worker。无需数据库服务或 GPU 即可运行正确性演示。
+控制器为单 Python 服务，使用 SQLite WAL 保存跨进程一致状态。每个业务会话有串行异步锁，数据库以唯一索引限制一个未决 attempt。多会话可并发，部署默认一个 Uvicorn worker；本地演示使用 SQLite 和 CPU mock。
 
-会话锁通过标准库弱引用登记，由持有者和等待中的协程维持生命周期；闲置后自动回收，不随已完成会话永久积累。持久历史和请求幂等仍由SQLite负责，无需锁过期参数或清理线程。
+会话锁通过标准库弱引用登记，由持有者和等待中的协程维持生命周期，闲置后自动回收。SQLite保存持久历史和请求幂等状态。
 
 ```mermaid
 flowchart LR
@@ -42,7 +42,7 @@ flowchart LR
 
 `sessions` 保存当前快照；`ledger_history` 保留每次提交与 P1 历史同步的审计副本。语义历史与执行消息、实际 input/output IDs 分开。证据文本另按内容 SHA256 存储。
 
-`attempts` 保存请求身份、选中计划、prepare 身份、epoch、完整结果及处理阶段。`request_id` 在同一业务会话内唯一；相同 ID 的不同请求报冲突。跨控制器重复 begin 不会获得执行权。状态只能前进，已选计划和已完成结果不能由旧对象覆盖。计划与新 epoch 在 prepare RPC 前一起落盘；prepare ACK 与提交标记在 generate RPC 前一起落盘，避免无外部调用间隔的重复持久化。
+`attempts` 保存请求身份、选中计划、prepare 身份、epoch、完整结果及处理阶段。`request_id` 在同一业务会话内唯一；相同 ID 的不同请求报冲突。数据库保证请求只有一个执行者，按阶段推进并保留已选计划和完整结果。计划与新 epoch 在 prepare RPC 前一起落盘；prepare ACK 与提交标记在 generate RPC 前一起落盘。
 
 一个事务同时写入新 QA、执行账本、当前 epoch、已提交 attempt 和旧 epoch 退役 outbox。事务内重新检查 attempt 阶段与 snapshot version。旧当前epoch在新版本提交后退役。
 
@@ -63,20 +63,20 @@ flowchart LR
 | APPEND 结果被放弃 | 标记下一轮强制新 epoch；恢复成功后才退役原 epoch |
 | 引擎重启 | 原始档案保留；旧实例引用失效，完整重建 |
 
-Mock 与真实 SGLang 的 status 在有限窗口保留完整输出。真实补丁在完整 HTTP 结果交付前将输出与 receipt 发布到有 TTL 和字节上限的恢复缓存；SSE 必须收到终态 receipt 和 `[DONE]` 才可提交。超过恢复窗口或引擎重启后，无法恢复完整结果时需要显式放弃已确认终态的结果并使用新 request ID 重试。该协议不提供跨引擎重启的 exactly-once 生成。未知或仍在途的状态不会被超时自动当作失败。
+Mock 与真实 SGLang 的 status 在有限窗口保留完整输出。真实补丁在完整 HTTP 结果交付前将输出与 receipt 发布到有 TTL 和字节上限的恢复缓存；SSE 收到终态 receipt 和 `[DONE]` 后提交。超过恢复窗口或引擎重启后，无法恢复完整结果时，显式放弃已确认终态的结果并使用新 request ID 重试。未知或仍在途的请求继续按恢复流程处理。
 
 准备阶段遗留 attempt 的 `--abandon` 是管理恢复操作，仅在旧控制器已经停止后使用。API定期调用同一drain路径收取后台结果并处理待退役操作，CLI退出前排空；outbox在进程重启后继续存在。
 
 ## 引擎与计量
 
-Mock 模型为 CPU 确定性状态机，用于页边界、共享前缀、软引用、在途副本与故障注入测试。其 token slot 和耗时不能用于 GPU 性能结论。
+Mock 模型为 CPU 确定性状态机，用于页边界、共享前缀、软引用、在途副本与故障注入测试。GPU 性能由真实引擎测量。
 
 真实引擎采用固定SGLang及ContextKV协议，配置指纹覆盖模型、tokenizer、template、namespace和cache key。原生B0/B1使用对应基线通道。
 
-退役 ACK 表示软引用已撤销，物理 free 为零。真实分配、淘汰和传输仍走原生 admission、锁和完成边界。账本中逻辑 prompt 长度不能当作唯一物理占用。
+退役 ACK 表示软引用已撤销，物理 free 为零。分配、淘汰和传输由原生 admission、锁和完成事件驱动。账本记录逻辑 prompt 长度，物理占用由原生 allocator 计数。
 
-研究客户端与原生基线默认使用 SSE，记录首个非空输出 chunk 和最后一个新增 token chunk，终态发布开销不计入末 token 时刻。完整响应和账本提交仍计入完成时间。非流式或恢复重放没有客户端首 token 观测，故 TTFT 保持未知；不能用服务端首 token 墙时填补客户端指标。
+研究客户端与原生基线默认使用 SSE，记录首个非空输出 chunk 和最后一个新增 token chunk。完整响应时间涵盖终态发布和账本提交。非流式或恢复重放的客户端 TTFT 记为未知；服务端时间单独记录。
 
 客户端单调时钟只计算端到端时序；服务端时钟只计算服务器阶段和全局唯一 slot 积分；CUDA event 在原生 ACK 完成点提供传输耗时。探针测得的 `first_token` 已包含服务器排队、恢复、Prefill，不重复累加同一段时间。占用峰值来自观测采样，并非瞬时分配器峰值；缺失数据与事件截断均保留标记。
 
-`ablation.epoch_retirement=false` 让文本 REBUILD 沿用原生 session，P1 历史同步和故障恢复仍创建新 epoch。成本分项消融使用冻结模型，不能再用总延迟残差把被移除的成本学回去。完整标定冻结、开发集选择和测试数据彼此分离。
+`ablation.epoch_retirement=false` 让文本 REBUILD 沿用原生 session，P1 历史同步和故障恢复仍创建新 epoch。成本分项消融使用冻结模型并关闭在线残差更新。标定、开发集选择和测试分别记录。
