@@ -11,9 +11,8 @@ import json
 import math
 from pathlib import Path
 
-from bench.artifact_paths import remap
 from bench.judge import DIMENSIONS, evaluation_binding
-from bench.official import load_jsonl
+from bench.official import load_jsonl, remap
 from bench.report import bind_quality_rows, paired_quality
 
 JUDGE_TRANSPORT_FIELDS = {"base_url", "api_key_env"}

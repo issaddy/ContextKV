@@ -151,8 +151,6 @@ def test_condition_projection_preserves_roles_and_negative_values_through_candid
 def test_named_condition_deduplication_requires_the_complete_binding():
     frame = TaskFrame("", "", "region: Paris", (("region", "Paris"), ("origin", "Paris")))
     assert frame_query(frame).splitlines() == ["region: Paris", "origin: Paris"]
-    legacy = replace(frame, conditions=(("legacy", "Paris"),))
-    assert frame_query(legacy) == "region: Paris"
 
 
 def test_missing_state_initializes_all_conditions_before_using_later_patches():
@@ -238,15 +236,6 @@ def test_explicit_task_operation_precedes_context_carryover():
     assert kept.task == "size limit"
 
 
-def test_legacy_composite_condition_is_preserved_until_explicitly_split():
-    value = {"query":"Atlas installation", "relation":"followup", "history_turns":[1],
-             "task_frame":{"topic":"Atlas","target":"SDK","task":"installation","conditions":"v4; Linux; offline"}}
-    prior = decode(QueryContext,value)
-    assert prior.task_frame.conditions == (("legacy","v4; Linux; offline"),)
-    assert "v4; Linux; offline" in frame_query(prior.task_frame)
-    patched = apply_frame_updates(prior.task_frame,{"conditions":{
-        "legacy":None,"version":"v4","platform":"Linux","connectivity":"online"}})
-    assert dict(patched.conditions) == {"version":"v4","platform":"Linux","connectivity":"online"}
 
 
 def test_revisit_resumes_the_selected_task_state_instead_of_the_latest_topic():
@@ -287,29 +276,6 @@ def test_persistent_task_state_does_not_duplicate_generation_or_change_candidate
     assert all('"task_frame"' not in p.messages[-1].content for p in stateful)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("old_frame", (None, "", "v4; Linux; offline", (("version","v4"),)))
-async def test_legacy_intent_request_identity_and_new_state_survive_persistence(tmp_path, old_frame):
-    import hashlib
-    from controller.serialization import dumps, loads
-
-    legacy = {"query":"Atlas limits?", "relation":"followup", "history_turns":[1]}
-    if old_frame is not None:
-        legacy["task_frame"] = {"topic":"Atlas","target":"files","task":"size limit","conditions":old_frame}
-    intent = loads(QueryContext,json.dumps(legacy))
-    assert (intent.task_frame is None) == (old_frame is None)
-    store, engine = SessionStore(tmp_path/"state.sqlite3"), MockEngine()
-    service = Controller(store,engine)
-    evidence = (make_evidence("Original source.","one"),)
-    try:
-        await service.serve_turn("s","A question",evidence,query_context=intent,request_id="legacy")
-        expected = hashlib.sha256(dumps(("A question",evidence,"demo-v1",None,None,legacy)).encode()).hexdigest()
-        assert store.find_request("s","legacy").request_hash == expected
-        replay = await service.serve_turn("s","A question",evidence,query_context=intent,request_id="legacy")
-        assert replay.idempotent_replay
-    finally:
-        await service.aclose()
-        store.close()
 
 
 def test_model_free_named_questions_keep_the_existing_query_view():

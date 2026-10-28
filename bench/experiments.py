@@ -23,9 +23,8 @@ import yaml
 
 from adapters.mtrag import load_rows
 from adapters.retriever_factory import retriever_config_sources
-from bench.report import markdown_report, paired_latency, summarize_run
-from bench.artifact_paths import remap
-from bench.source_scope import source_changes, source_dependencies, retrieval_units
+from bench.report import METRIC_SCHEMA_VERSION, markdown_report, paired_latency, summarize_run
+from bench.official import remap
 from controller.config import RunConfig, load_config
 from controller.serialization import decode
 from controller.templates import SYSTEM_PROMPT
@@ -258,7 +257,6 @@ def implementation_manifest():
     the remote engine or model files, whose existing manifests remain separate.
     """
     root = Path(__file__).resolve().parents[1]
-    controller = sorted((root / "controller").glob("*.py"))
     paths = {p for folder in ("controller", "adapters", "bench", "profiling", "engine_patches", "scripts")
              for p in (root / folder).rglob("*.py")}
     paths.add(root / "scripts/launch_sglang.sh")
@@ -266,11 +264,8 @@ def implementation_manifest():
                  if p.suffix in {".txt", ".json", ".jinja", ".jinja2"}
                  and not p.name.upper().startswith(("LICENSE", "NOTICE")))
     content = {p: p.read_bytes() for p in sorted(paths) if p.is_file()}
-    return {"schema_version": 1, "scope": "complete local execution and offline analysis sources; eligibility uses declared dependencies",
-        "files": {str(p.relative_to(root)): sha256(data).hexdigest() for p, data in content.items()},
-        "units": retrieval_units(content[root / "adapters/hybrid_retrieval.py"]),
-        # Match controller.cli's existing run manifest using these same reads.
-        "controller_source_sha256": sha256(b"".join(p.name.encode() + content[p] for p in controller)).hexdigest()}
+    return {"scope": "source at this operation; saved generation retains its own manifest",
+            "files": {str(p.relative_to(root)): sha256(data).hexdigest() for p, data in content.items()}}
 
 
 def provenance(spec, *, implementation=None):
@@ -299,7 +294,7 @@ def provenance(spec, *, implementation=None):
             "spec_sha256": sha256(json.dumps({k:v for k,v in spec.items() if k != "path_map"}, sort_keys=True).encode()).hexdigest(),
             "base_config_sha256": sha256(json.dumps(asdict(config), sort_keys=True).encode()).hexdigest(),
             "implementation": implementation,
-            "dependencies": source_dependencies(spec, config, {**implementation["files"], **implementation["units"]}),
+            "metric_schema_version": METRIC_SCHEMA_VERSION,
             "external_inputs": {str(path): sha256(Path(remap(path, spec.get("path_map", {}))).read_bytes()).hexdigest() for path in sorted(p for p in files if p)}}
 
 
@@ -312,18 +307,18 @@ def generation_provenance(spec, *, implementation=None):
 
 
 def same_execution_provenance(recorded, current):
-    """Only active generation dependencies and declared inputs invalidate QA."""
+    """Code digests trace the run; declared method revisions bind behavior."""
     def inputs(value):
-        return {key: item for key, item in (value or {}).items()
-                if key not in {"implementation", "dependencies"}}
-    return inputs(recorded) == inputs(current) and not source_changes(recorded, current)["generation"]
+        return {key: item for key, item in value.items()
+                if key not in {"implementation", "metric_schema_version"}}
+    return bool(recorded and recorded.get("implementation")) and inputs(recorded) == inputs(current)
 
 
-def require_frozen_sources(recorded, current):
+def validate_frozen_selection(recorded, current):
     if not same_execution_provenance(recorded, current):
-        raise ValueError("frozen development selection inputs/configuration/implementation changed: regenerate development answers")
-    if source_changes(recorded, current)["metrics"]:
-        raise ValueError("metric implementation changed: recompute metrics and refreeze the saved development answers")
+        raise ValueError("frozen development selection inputs/configuration changed: regenerate development answers")
+    if recorded["metric_schema_version"] != current["metric_schema_version"]:
+        raise ValueError("metric version changed: recompute metrics and refreeze the saved development answers")
 
 
 class QualityNotReady(ValueError):
@@ -535,19 +530,12 @@ def select_development(spec, results):
     expected_provenance = generation_provenance(spec, implementation=implementation)
     if any(not same_execution_provenance(r.get("experiment_provenance"), expected_provenance) for r in results):
         raise ValueError("development results belong to different or unrecorded inputs/configuration/implementation; legacy unbound results require a new run")
-    # The run hash checks source consistency within the recorded execution,
-    # not equality with unrelated changes in today's checkout.
-    refreshed = []
     for row in results:
-        original = row["experiment_provenance"]["implementation"]
-        if row.get("controller_source_sha256") not in (None, original["controller_source_sha256"]):
-            raise ValueError("development run source manifest differs from its matrix implementation")
-        if source_changes(row["experiment_provenance"], expected_provenance)["metrics"] and row["status"] == "completed":
-            path = Path(remap(row.get("raw_output"), spec.get("path_map", {}))) if row.get("raw_output") else None
-            if path is None or sha256(path.read_bytes()).hexdigest() != row.get("artifact_sha256", {}).get("raw_output"):
+        if row["status"] == "completed" and row["summary"].get("metric_schema_version") != METRIC_SCHEMA_VERSION:
+            path = Path(remap(row["raw_output"], spec.get("path_map", {})))
+            if sha256(path.read_bytes()).hexdigest() != row["artifact_sha256"]["raw_output"]:
                 raise ValueError("recompute metrics requires the content-bound original raw_output")
             indexed[row["job_id"]] = {**row, "summary": summarize_run(json.loads(path.read_text()))}
-            refreshed.append(row["job_id"])
     results = list(indexed.values())
     grouped = {}
     for job in expected:
@@ -584,7 +572,7 @@ def select_development(spec, results):
     b6 = min(simple, key=lambda name: (winners[name]["dev_mean_turn_seconds"], name)) if simple else None
     simulation = any(r["summary"]["measurement_kind"] == "simulation" for r in results if r.get("summary"))
     return {"schema_version": 1, "selection_split": "dev", "provenance": provenance(spec, implementation=implementation),
-            "winners": winners, "b6": b6, "metrics_recomputed_jobs": refreshed, "objective": "equal_cell_weight_mean_complete_turn_seconds",
+            "winners": winners, "b6": b6, "objective": "equal_cell_weight_mean_complete_turn_seconds",
             "simulation_only": simulation, "quality_gate_applied": bool(quality_gate),
             "quality_noninferiority_established": False,
             "quality_evidence_report": quality_report,
@@ -709,8 +697,6 @@ async def execute_job(spec, job, directory, *, native_engine_manifest=None, veri
     if job["kind"] == "controller":
         manifest_path = output.with_name(output.name.replace("benchmark-", "manifest-", 1))
         if manifest_path.is_file():
-            recorded = json.loads(manifest_path.read_text())
-            result["controller_source_sha256"] = recorded.get("controller_source_sha256")
             result["run_manifest"] = str(manifest_path)
     # Saved raw bytes support metric recomputation without new generation.
     result["artifact_sha256"] = {key: sha256(Path(result[key]).read_bytes()).hexdigest()
@@ -728,7 +714,7 @@ async def run_matrix(spec, output, *, stage="dev", frozen=None, executor=execute
     if needs_development_selection(spec, stage, frozen):
         if frozen is None:
             raise ValueError("test requires a frozen development selection")
-        require_frozen_sources(frozen["provenance"], provenance(spec, implementation=implementation))
+        validate_frozen_selection(frozen["provenance"], provenance(spec, implementation=implementation))
         if frozen["simulation_only"]:
             hardware = any(j["kind"] == "native" for j in jobs) or load_config(spec.get("base_config")).engine.kind != "mock"
             hardware |= any(j["overrides"].get("engine", {}).get("kind") == "sglang" for j in jobs)
@@ -743,8 +729,6 @@ async def run_matrix(spec, output, *, stage="dev", frozen=None, executor=execute
         for job in jobs:
             try:
                 result = await executor(spec, job, root / job["job_id"])
-                if result.get("controller_source_sha256") not in (None, implementation["controller_source_sha256"]):
-                    result.update(status="failed", error="run source manifest differs from the matrix startup implementation")
             except Exception as exc:
                 result = {**job, "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
                 hook_log = root / job["job_id"] / "before-job.json"

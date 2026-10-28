@@ -9,7 +9,6 @@ import sys
 
 import pytest
 from test_model_scope import local_scope as local_scope
-from test_retriever_factory import retriever_config as retriever_config
 
 from bench.experiments import generation_provenance, matrix_jobs, run_matrix, select_development
 
@@ -19,7 +18,7 @@ FIXTURE = Path(__file__).parent / "fixtures/mtrag_small.jsonl"
 def completed_results(value):
     identity = generation_provenance(value)
     return [{**job, "status": "completed", "experiment_provenance": identity,
-             "summary": {"measurement_kind": "simulation", "timing": {
+             "summary": {"metric_schema_version": 2, "measurement_kind": "simulation", "timing": {
                  "failure_fraction": 0, "turn_seconds": {"mean": 1}}, "cohort": {"unfinished_turns": 0}}}
             for job in matrix_jobs(value)]
 
@@ -84,7 +83,7 @@ def test_local_tune_freeze_test_end_to_end(tmp_path):
 def test_failure_cannot_win_by_dropping_hard_turns(tmp_path):
     value = spec(tmp_path)
     jobs = matrix_jobs(value)
-    result = [{**job, "status": "completed", "summary": {"measurement_kind": "simulation",
+    result = [{**job, "status": "completed", "summary": {"metric_schema_version": 2, "measurement_kind": "simulation",
               "timing": {"failure_fraction": .1 if job["candidate_index"] == 0 and job["method"] == "B3" else 0,
                          "turn_seconds": {"mean": 1 if job["candidate_index"] == 0 else 10}},
               "cohort": {"unfinished_turns": 0}}, "experiment_provenance": generation_provenance(value)} for job in jobs]
@@ -106,20 +105,6 @@ def test_development_generation_identity_and_later_offline_quality_gate(tmp_path
     assert frozen["winners"]["B3"]["candidate_index"] == 1
 
 
-@pytest.mark.parametrize("relative", ["controller/planner.py", "bench/run_sessions.py",
-    "engine_patches/contextkv_model_scope.py", "adapters/corpus.py"])
-def test_freeze_rejects_old_results_after_execution_source_or_prompt_change(tmp_path, monkeypatch, relative):
-    import bench.experiments as experiments
-    value = spec(tmp_path)
-    results = completed_results(value)
-    target = Path(experiments.__file__).resolve().parents[1]/relative
-    original = Path.read_bytes
-    # Observe changed file bytes without mutating shared repository files.
-    def changed(path):
-        return original(path)+(b"\nchanged implementation\n" if path.resolve() == target else b"")
-    monkeypatch.setattr(Path, "read_bytes", changed)
-    with pytest.raises(ValueError, match="implementation"):
-        select_development(value, results)
 
 
 def test_documentation_changes_do_not_invalidate_generation_identity(tmp_path, monkeypatch):
@@ -136,25 +121,6 @@ def test_documentation_changes_do_not_invalidate_generation_identity(tmp_path, m
     assert not any(p.startswith(("docs/", "tests/")) or p == "README.md" for p in paths)
 
 
-def test_offline_preparation_and_grading_do_not_require_regenerating_answers(tmp_path, monkeypatch):
-    import bench.experiments as experiments
-    value = spec(tmp_path)
-    results = completed_results(value)
-    offline = {"adapters/doc2dial.py", "adapters/evidence_selection.py", "adapters/hybrid_retrieval.py"}
-    # Older manifests included these offline modules as generation inputs.
-    for result in results:
-        result["experiment_provenance"]["implementation"]["files"].update(dict.fromkeys(offline, "old-offline-code"))
-    original = Path.read_bytes
-    root = Path(experiments.__file__).resolve().parents[1]
-    targets = {root / path for path in offline}
-    def changed(path):
-        return original(path)+(b"\n# new offline implementation\n" if path.resolve() in targets else b"")
-    monkeypatch.setattr(Path, "read_bytes", changed)
-    frozen = select_development(value, results)
-    assert frozen["winners"]
-    # Compatibility also applies at the frozen-run boundary.
-    frozen["provenance"]["implementation"]["files"].update(dict.fromkeys(offline, "old-offline-code"))
-    assert experiments.same_execution_provenance(frozen["provenance"], experiments.provenance(value))
 
 
 def test_legacy_unbound_source_results_cannot_be_frozen_as_current_implementation(tmp_path):
@@ -178,28 +144,18 @@ def test_matrix_reads_one_source_snapshot_and_reuses_existing_controller_run_man
     results = asyncio.run(run_matrix(value, tmp_path/"one-source-read"))
     assert len(calls) == 1  # three jobs, no extra implementation hash per job
     recorded = json.loads((tmp_path/"one-source-read/implementation-manifest.json").read_text())
-    assert all(r["controller_source_sha256"] == recorded["controller_source_sha256"] for r in results)
     assert all(r["experiment_provenance"]["implementation"] == recorded for r in results)
     select_development(value, results)
     assert len(calls) == 2  # one new snapshot for the whole selection boundary
-    results[0]["controller_source_sha256"] = "different-controller-run"
-    with pytest.raises(ValueError, match="run source manifest"):
-        select_development(value, results)
 
 
-def test_frozen_test_is_rejected_before_executor_after_adapter_change(tmp_path, monkeypatch):
-    import bench.experiments as experiments
+def test_changed_method_revision_requires_new_generation_before_test(tmp_path, monkeypatch):
     value = spec(tmp_path)
     frozen = select_development(value, completed_results(value))
-    original = experiments.implementation_manifest
-    def changed():
-        result = original()
-        result["files"]["adapters/corpus.py"] = "new-adapter-version"
-        return result
-    monkeypatch.setattr(experiments, "implementation_manifest", changed)
+    value["methods"][0]["revision"] = "changed-execution"
     async def forbidden(*args):
         pytest.fail("mismatched implementation must not start heldout execution")
-    with pytest.raises(ValueError, match="frozen development.*implementation"):
+    with pytest.raises(ValueError, match="frozen development.*configuration"):
         asyncio.run(run_matrix(value, tmp_path/"mismatched-test", stage="test", frozen=frozen, executor=forbidden))
     assert not (tmp_path/"mismatched-test").exists()
 
@@ -532,8 +488,7 @@ def test_system_comparison_binds_method_retrieval_and_execution_inherits_shared(
         matrix_jobs(value)
 
 
-@pytest.mark.parametrize("relative", ["bench/report_rendering.py", "adapters/conversation.py",
-    "adapters/source_documents.py", "adapters/assets/convsearch_r1/prompt.txt"])
+@pytest.mark.parametrize("relative", ["bench/report.py", "adapters/hybrid_retrieval.py"])
 def test_display_and_disabled_branches_do_not_block_freeze_or_test(tmp_path, monkeypatch, relative):
     import bench.experiments as experiments
     value = spec(tmp_path)
@@ -557,36 +512,12 @@ def test_metric_change_reuses_bound_raw_answers_and_requires_refreezing(tmp_path
     results = asyncio.run(run_matrix(value, tmp_path/"metric-dev"))
     frozen = select_development(value, results)
     originals = {r["raw_output"]: Path(r["raw_output"]).read_bytes() for r in results}
-    original = Path.read_bytes
-    target = Path(experiments.__file__).resolve().parent / "metrics.py"
-    monkeypatch.setattr(Path, "read_bytes", lambda p: original(p) + (b" changed" if p == target else b""))
+    import bench.report as report
+    monkeypatch.setattr(report, "METRIC_SCHEMA_VERSION", report.METRIC_SCHEMA_VERSION + 1)
+    monkeypatch.setattr(experiments, "METRIC_SCHEMA_VERSION", report.METRIC_SCHEMA_VERSION)
     with pytest.raises(ValueError, match="recompute metrics and refreeze"):
         asyncio.run(run_matrix(value, tmp_path/"stale-metrics", stage="test", frozen=frozen))
     updated = select_development(value, results)
-    assert set(updated["metrics_recomputed_jobs"]) == {r["job_id"] for r in results}
+    assert updated["provenance"]["metric_schema_version"] == report.METRIC_SCHEMA_VERSION
     assert all(Path(path).read_bytes() == raw for path, raw in originals.items())
     assert updated["winners"] == frozen["winners"]
-
-
-@pytest.mark.parametrize("fusion", ["single", "dialogue_rrf"])
-def test_optional_algorithm_change_in_shared_module_only_invalidates_its_active_path(
-        tmp_path, monkeypatch, retriever_config, fusion):
-    import bench.experiments as experiments
-    import yaml
-    value = spec(tmp_path)
-    recipe = yaml.safe_load(retriever_config.read_text())
-    recipe.update(query_mode="conversational", query_fusion=fusion)
-    retriever_config.write_text(yaml.safe_dump(recipe))
-    value.update(protocols=["P3"], retriever_config=str(retriever_config))
-    results = completed_results(value)
-    original = Path.read_bytes
-    target = Path(experiments.__file__).resolve().parents[1] / "adapters/hybrid_retrieval.py"
-    def changed(path):
-        raw = original(path)
-        return raw.replace(b"family_weighting\": \"literal 1;", b"family_weighting\": \"changed 1;") if path == target else raw
-    monkeypatch.setattr(Path, "read_bytes", changed)
-    if fusion == "single":
-        assert select_development(value, results)["winners"]
-    else:
-        with pytest.raises(ValueError, match="implementation"):
-            select_development(value, results)

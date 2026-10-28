@@ -7,8 +7,6 @@ import json
 import types
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
-from .schema import TaskFrame
-
 
 @cache
 def _schema_hints(cls):
@@ -67,11 +65,6 @@ def decode(cls: Any, value: Any) -> Any:
             return origin(value)
         return origin(decode(element, v) for v in value)
     if dataclasses.is_dataclass(cls):
-        if cls is TaskFrame and isinstance(value.get("conditions"), str):
-            # v9 stored one composite condition. Keep its exact content until
-            # the normal interpreter can split it; never guess attribute names.
-            legacy = value["conditions"]
-            value = {**value, "conditions": (("legacy", legacy),) if legacy else ()}
         hints = _schema_hints(cls)
         unknown = set(value) - set(hints)
         if unknown:

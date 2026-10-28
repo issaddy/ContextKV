@@ -38,7 +38,7 @@ def setup_joint(tmp_path):
     results = [{**job, 'status': 'completed', 'experiment_provenance': identity,
         'raw_output': quality['methods'][job['method']]['run'],
         'audit_output': quality['methods'][job['method']]['audit'],
-        'summary': {'measurement_kind': 'hardware_fixture_contract', 'timing': {'failure_fraction': 0,
+        'summary': {'metric_schema_version': 2, 'measurement_kind': 'hardware_fixture_contract', 'timing': {'failure_fraction': 0,
             'turn_seconds': {'mean': 1}}, 'cohort': {'unfinished_turns': 0}}}
         for job in experiments.matrix_jobs(spec)]
     for result in results:
@@ -127,7 +127,7 @@ def test_archive_relocation_uses_explicit_mapping_and_original_content_hashes(tm
         Path(name).unlink()
     moved = experiments.select_development(spec, results)
     assert moved["winners"] == frozen["winners"]
-    experiments.require_frozen_sources(frozen["provenance"], experiments.provenance(spec))
+    experiments.validate_frozen_selection(frozen["provenance"], experiments.provenance(spec))
     audit = archive / Path(quality["methods"]["candidate"]["audit"]).name
     audit.write_text(audit.read_text() + "\n")
     with pytest.raises(ValueError, match="bytes differ"):

@@ -352,7 +352,7 @@ def fit_exploration(cases, *, priors=(433, 512)):
 
 def training_priors(baseline, source_configuration):
     """Resolve the residual center with the same pure assembly as serving."""
-    from controller.cost_config import assemble_cost_model
+    from controller.config import assemble_cost_model
     model = assemble_cost_model(source_configuration, artifact=baseline)
     return model.effective_output_prior, model.sampling_scope_report
 

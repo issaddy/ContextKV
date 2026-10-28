@@ -144,7 +144,7 @@ def fake_hardware(fixture, monkeypatch, *, runtime_cache='cache-32', incomplete_
         path = directory/'synthetic-run.json'
         save(path, {'report': {'turns': turns}})
         return {**job, 'status': 'completed', 'raw_output': str(path), 'artifact_sha256': {},
-            'summary': {'measurement_kind': 'synthetic_process_contract', 'timing': {'failure_fraction': 0},
+            'summary': {'metric_schema_version': 2, 'measurement_kind': 'synthetic_process_contract', 'timing': {'failure_fraction': 0},
                         'cohort': {'unfinished_turns': int(job['job_id'] == incomplete_job)}}}
     monkeypatch.setattr(sweep, 'execute_job', execute)
     monkeypatch.setattr(experiments, 'paired_latency', lambda *a, **kw: {'status': 'not_measured_fixture'})

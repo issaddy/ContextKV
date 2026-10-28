@@ -2,14 +2,14 @@
 
 ## 当前版本与默认机制
 
-本地分支为 `codex/contextkv-engineering`，会话解释协议为 `conversational-intent-v17`。容器与安装包仍对应 `ad84c60`，本地后续修订尚未整体部署；交付文件身份以 `dist/delivery.json`、`dist/remote-delivery.json` 为准。
+本地分支为 `codex/contextkv-engineering`，会话解释协议为 `conversational-intent-v18`。容器与安装包仍对应 `ad84c60`，本地后续修订尚未整体部署；交付文件身份以 `dist/delivery.json`、`dist/remote-delivery.json` 为准。
 
 默认使用 Qwen3-8B 生成、独立 Qwen3-32B 非思考解释及原生 NGRAM；检索采用 `single` 融合、`ranked` 选材、原文阅读和 `stable_key` 布局。配置入口见[部署](deployment.md)与[检索指南](guides/hybrid_retrieval.md)。
 
 - **A**：每轮统一初始化或更新任务状态；上游决定回访轮次，下游按证据身份和依赖闭包构造共同 A/R 材料。正文共享保留各来源引用资格。
-- **B**：服务、成对实验和长度拟合共用纯成本装配。动作按有效完整成本选择，margin 仅作诊断；离线研究使用相同执行语义。
+- **B**：服务、成对实验和长度拟合共用纯成本装配。动作按有效完整成本选择，margin 仅作诊断；成对重放直接使用现行 planner，移除未采用的 gain_fit 搜索入口。
 - **C**：业务事务同时提交回答、执行账本与退役 outbox；诊断写入不决定业务成败。SQLite 内容寻址正文用于当前状态、历史快照和恢复。
-- **实验**：完整源码溯源与结果失效分开，区分重新生成、重算指标和展示变化；归档支持显式路径映射并核对内容摘要。
+- **实验**：源码摘要仅供溯源；方法 revision 绑定执行语义，指标版本决定重算，展示不影响有效性。归档按路径映射读取并核对内容摘要。
 
 机制详见[架构](architecture.md)、[多轮状态与证据](research/source_grounded_query_resolution.md)和[成本装配](guides/stage_cost_model.md)。实验数值、否决原型、验证结果和原始记录入口统一维护在[数据与评价](data_and_evaluation.md)。
 

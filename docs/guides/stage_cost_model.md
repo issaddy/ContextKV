@@ -4,7 +4,7 @@
 
 ## 统一装配
 
-`controller.cost_config.assemble_cost_model` 接收配置和已读取的 artifact/measurement，不创建引擎、数据库或目录。服务、成对采集/重放和长度拟合均使用它：artifact 提供已拟合设置，显式成本开关和估计器覆盖对应设置，最后统一解析采样、system prompt 与有效长度先验。文件读取由 `load_cost_model` 完成；调用方继续核对模型、缓存和数据身份。
+`controller.config.assemble_cost_model` 接收配置和已读取的 artifact/measurement，不创建引擎、数据库或目录。服务、成对采集/重放和长度拟合均使用它：artifact 提供已拟合设置，显式成本开关和估计器覆盖对应设置，最后统一解析采样、system prompt 与有效长度先验。文件读取由 `load_cost_model` 完成；调用方继续核对模型、缓存和数据身份。
 
 成本 artifact 的采集规模、拟合误差、历史长度分布和原始文件入口集中见[阶段成本标定记录](../data_and_evaluation.md#阶段成本标定记录)。耗时测点与输出长度先验分别检查适用范围，不因可复用时间测点而沿用不匹配的回答长度分布。
 

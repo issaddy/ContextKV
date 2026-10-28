@@ -62,7 +62,7 @@ def setup_blocks(tmp_path, *, reference_candidates=False, protocols=('P2',), con
             'raw_output': str(run), 'audit_output': str(audit_path),
             'artifact_sha256': {'raw_output': sha256(run.read_bytes()).hexdigest(),
                                 'audit_output': sha256(audit_path.read_bytes()).hexdigest()},
-            'summary': {'measurement_kind': 'synthetic_file_contract', 'cohort': {'unfinished_turns': 0},
+            'summary': {'metric_schema_version': 2, 'measurement_kind': 'synthetic_file_contract', 'cohort': {'unfinished_turns': 0},
                 'timing': {'failure_fraction': 0, 'turn_seconds': {'mean': job['candidate_index']+1}}}})
     blocks = []
     for index, (key, methods) in enumerate(groups.items()):
@@ -296,11 +296,12 @@ def test_frozen_selection_keeps_repeat_ids_and_changed_plan_cannot_reuse_it(tmp_
     assert not (tmp_path/'not-created').exists()
 
 
-def test_new_implementation_does_not_relabel_old_generation_as_same_source(tmp_path, monkeypatch):
+def test_refreezing_keeps_original_generation_provenance(tmp_path, monkeypatch):
     spec, results, _ = setup_blocks(tmp_path)
     implementation = experiments.implementation_manifest()
     implementation['files']['bench/experiments.py'] = 'older-implementation-digest'
     for row in results:
         row['experiment_provenance']['implementation'] = implementation
-    with pytest.raises(ValueError, match='different or unrecorded'):
-        experiments.select_development(spec, results)
+    frozen = experiments.select_development(spec, results)
+    assert all(row['experiment_provenance']['implementation'] == implementation for row in results)
+    assert frozen['provenance']['implementation'] != implementation  # Selection uses today's code.

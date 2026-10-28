@@ -17,7 +17,7 @@ from adapters.retrieval import retrieval_query
 from controller.schema import QueryContext, TaskFrame
 
 
-VERSION = "conversational-intent-v17"
+VERSION = "conversational-intent-v18"
 FRAME_FIELDS = ("topic", "target", "conditions")
 RELATIONS = ("standalone", "followup", "correction", "condition_change", "topic_switch", "revisit", "ambiguous", "conversational")
 _DEPENDENT = re.compile(
@@ -59,8 +59,6 @@ For conditions, provide only changed name/value pairs. Keep existing names; null
 named condition, while conditions=null removes all conditions. Do not copy unchanged values.
 Example: {version:'v4', platform:'Linux', connectivity:'offline'} changing to online updates
 only connectivity to 'online'; version and platform remain in host state automatically.
-A legacy condition is an old unsplit string: initialize named attributes from it and clear legacy
-in the same patch, retaining every still-applicable constraint.
 When task changes, clear old targets or conditions that no longer apply; keep relevant ones.
 If previous_turn has no state, initialize needed fields from its question/interpretation and history.
 For ordinary followups, resume_turn is 0: updates apply to previous_turn, not an older task.
@@ -138,8 +136,8 @@ def frame_query(frame, *, requirement=None):
             context.append(value)
     parts = list(dict.fromkeys((*context, *needs)))
     for name, value in frame.conditions:
-        if value and (name != "legacy" or not expressed(value, parts)):
-            parts.append(value if name == "legacy" else f"{name}: {value}")
+        if value:
+            parts.append(f"{name}: {value}")
     return "\n".join(dict.fromkeys(value for value in parts if value))
 
 

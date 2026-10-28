@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 import hashlib
+import logging
 import time
 import uuid
 import statistics
@@ -219,21 +220,7 @@ class Controller:
         content = (("retrieved_query", query, corpus_snapshot_id) if evidence_provider is not None else
                    (query, evidence, corpus_snapshot_id, reference_history, retrieval_priority))
         if query_context is not None:
-            intent = {"query": query_context.query, "relation": query_context.relation,
-                      "history_turns": query_context.history_turns}
-            if query_context.task_frame is not None:
-                frame = asdict(query_context.task_frame)
-                if not query_context.task_frame.requirements:
-                    frame.pop("requirements")  # Preserve existing explicit request identities.
-                conditions = query_context.task_frame.conditions
-                # Preserve explicit v9 request identities after reading their
-                # empty/composite conditions into the new immutable structure.
-                if not conditions:
-                    frame["conditions"] = ""
-                elif len(conditions) == 1 and conditions[0][0] == "legacy":
-                    frame["conditions"] = conditions[0][1]
-                intent["task_frame"] = frame
-            content = (*content, intent)
+            content = (*content, query_context)
         request_hash = hashlib.sha256(dumps(content).encode()).hexdigest()
         arrived = time.monotonic()
         async with self._lock(session_id):
@@ -432,7 +419,7 @@ class Controller:
                 self.events.emit("ledger_committed", business_session_id=session_id, attempt_id=attempt.attempt_id,
                                  ledger_version=snapshot.version, epoch=epoch.epoch_no)
             except Exception as error:
-                self.events.report_error(error)
+                logging.getLogger(__name__).error("Diagnostic output failed after commit: %s", error)
             self._retire_background()
             return self._response(replace(attempt, stage="COMMITTED"),
                                   elapsed_ms=(committed_at-arrived)*1000, timing=timing, control_ms=control_ms)

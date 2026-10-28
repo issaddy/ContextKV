@@ -3,7 +3,7 @@ from dataclasses import asdict, replace
 import json
 
 from controller.config import RunConfig
-from controller.cost_config import assemble_cost_model, load_cost_model
+from controller.config import assemble_cost_model, load_cost_model
 from controller.cost_model import CostModel
 from controller.schema import ConfigFingerprint
 from profiling.length_fit import training_priors

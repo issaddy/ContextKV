@@ -115,7 +115,7 @@ def fake_scoped_hardware(matrix, local_scope, monkeypatch, *, corrupt=None):
         rows = sweep.selected_cohort(spec, 'dev')
         path.write_text(json.dumps({'report': {'turns': [{'task_id': row['task_id'], 'status': 'success'} for row in rows]}}))
         return {**job, 'status': 'completed', 'raw_output': str(path), 'artifact_sha256': {},
-            'summary': {'measurement_kind': 'fake_process_contract', 'timing': {'failure_fraction': 0},
+            'summary': {'metric_schema_version': 2, 'measurement_kind': 'fake_process_contract', 'timing': {'failure_fraction': 0},
                         'cohort': {'unfinished_turns': 0}}}
     monkeypatch.setattr(sweep, 'execute_job', execute)
     monkeypatch.setattr(experiments, 'paired_latency', lambda *args, **kwargs: {'status': 'not_measured'})

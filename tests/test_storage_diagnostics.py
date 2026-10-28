@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -40,18 +41,11 @@ async def test_text_is_stored_once_and_all_historical_inputs_reconstruct(tmp_pat
     reopened.close()
 
 
-@pytest.mark.parametrize("stage", ["all_events", "ledger_committed", "post_commit_callback"])
+@pytest.mark.parametrize("stage", ["write", "post_commit_callback"])
 async def test_diagnostic_failure_cannot_fail_a_committed_answer_or_retirement(tmp_path, monkeypatch, caplog, stage):
     store = SessionStore(tmp_path / "sessions.sqlite3")
     events = EventLog(tmp_path / "events.jsonl")
     controller = Controller(store, MockEngine(), events=events)
-    original = events._write
-
-    def fail(event, fields):
-        if stage == "all_events" or event == stage:
-            raise OSError("diagnostic disk unavailable")
-        return original(event, fields)
-
     if stage == "post_commit_callback":
         emit = events.emit
         def broken_callback(event, **fields):
@@ -60,7 +54,12 @@ async def test_diagnostic_failure_cannot_fail_a_committed_answer_or_retirement(t
             return emit(event, **fields)
         monkeypatch.setattr(events, "emit", broken_callback)
     else:
-        monkeypatch.setattr(events, "_write", fail)
+        original = Path.open
+        def fail(path, *args, **kwargs):
+            if path == events.path:
+                raise OSError("diagnostic disk unavailable")
+            return original(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "open", fail)
     result = await controller.serve_turn("s", "question", request_id="one")
     assert result.assistant_text and store.find_request("s", "one").stage == "COMMITTED"
     replay = await controller.serve_turn("s", "question", request_id="one")

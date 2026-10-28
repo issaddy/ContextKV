@@ -359,8 +359,8 @@ def test_length_training_and_serving_use_same_recipe_fallback_center():
                 "prefill_points": [], "decode_points": []}
     config = {"sampling": RECIPE.record(), "cost_model": {"default_output_tokens": 128, "p90_output_tokens": 256}}
     fitted, binding = training_priors(baseline, config)
-    serving = CostModel(default_output_tokens=433, p90_output_tokens=512)
-    serving.configure_for_run(config)
+    from controller.config import assemble_cost_model
+    serving = assemble_cost_model(config, artifact=baseline)
     assert fitted == serving.effective_output_prior == (128, 256)
     assert binding["output_prior_status"] == "configured_prior_fallback"
     # A matching empirical source keeps its center; missing source config does

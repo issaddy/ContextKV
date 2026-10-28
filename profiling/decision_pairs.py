@@ -372,7 +372,7 @@ def analyze_pairs(rows, *, time_field="server_elapsed_ms", tie_ms=1.0):
 
 
 def _model_and_knobs(config, cases, artifact):
-    from controller.cost_config import load_cost_model
+    from controller.config import load_cost_model
     model = load_cost_model(config, artifact_path=artifact,
         fingerprint=cases[0].candidates[0].fingerprint, max_new_tokens=cases[0].max_new_tokens)
     return model, config.planner
