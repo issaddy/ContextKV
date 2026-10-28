@@ -109,8 +109,10 @@
 - [GLiNER2.5](https://fastino.ai/blog/gliner2-5-span-free-information-extraction)：通过边界预测和联合解码抽取实体及结构化字段。
 - [GLiNER-Relex](https://arxiv.org/abs/2605.10108)：在共享编码器上联合识别实体与实体间关系。 [代码](https://github.com/urchade/GLiNER)
 - [Sufficient Context](https://arxiv.org/abs/2411.06037)：区分检索相关性、材料充分性与生成阶段错误。
+- [S2G-RAG](https://aclanthology.org/2026.acl-long.1185/)：用训练后的充分性/缺口判断器指导迭代检索，并通过原文句子指针限制证据增长。其检索轮次不等同于用户多轮对话，仍需适配条件与版本变化。[代码](https://github.com/nianaaa/S2G-RAG)
 - [ExecutionRAG](https://arxiv.org/abs/2610.21184)：维护未解决子问题及其支持证据以减少检索偏移，并分析证据找回后仍存在的过早完成与拒答。
 - [Lost in the Middle](https://arxiv.org/abs/2307.03172)：研究信息位置对长上下文问答效果的影响。
+- [Evidence-based Generation for Long Context QA](https://arxiv.org/abs/2610.26951)：研究多资料长上下文的答案与正文证据联合正确性、来源结构及片段不连续标识；比较时需区分已含正确来源与开放语料检索的证据访问条件。
 - [CMT-RAG](https://arxiv.org/abs/2607.26470)：用互补记忆轨迹组织多轮多跳问答中的任务与证据依赖。
 - [MADARA](https://arxiv.org/abs/2606.25191)：结合逐文档回答、隔离对照与聚合处理多来源信息。 [代码](https://github.com/js-lee-AI/MADARA)
 - [RECAST](https://arxiv.org/abs/2610.10507)：通过证据路由和关系计算构造回答所需上下文。
