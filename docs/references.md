@@ -87,6 +87,7 @@
 - [MUDERN](https://arxiv.org/abs/2102.08633)：在开放检索条件下联合阅读材料与会话决策。 [代码](https://github.com/Yifan-Gao/open_retrieval_conversational_machine_reading)
 - [QD-RAG](https://arxiv.org/abs/2507.00355)：将复合问题分解为子查询，合并召回材料并重排。
 - [uva-irlab-conv](https://arxiv.org/abs/2606.11945)：组合会话改写、学习式稀疏检索与列表重排实现多轮RAG。
+- [5ting](https://arxiv.org/abs/2606.28737)：组合原问题与改写召回、LLM重排，并区分用于指代的历史与用于事实的检索资料。
 - [Howard University-AI4PC](https://aclanthology.org/2026.semeval-1.320/)：融合查询重构、稠密与词法检索以及统一重排。
 - [AILS-NTUA](https://arxiv.org/abs/2603.10524)：研究多轮RAG中的原文证据定位、改写与回答生成。
 - [Dawn](https://aclanthology.org/2026.semeval-1.363/)：将用户意图、可用事实与回答范围分解为独立控制信息。
@@ -108,6 +109,7 @@
 - [GLiNER2.5](https://fastino.ai/blog/gliner2-5-span-free-information-extraction)：通过边界预测和联合解码抽取实体及结构化字段。
 - [GLiNER-Relex](https://arxiv.org/abs/2605.10108)：在共享编码器上联合识别实体与实体间关系。 [代码](https://github.com/urchade/GLiNER)
 - [Sufficient Context](https://arxiv.org/abs/2411.06037)：区分检索相关性、材料充分性与生成阶段错误。
+- [ExecutionRAG](https://arxiv.org/abs/2610.21184)：维护未解决子问题及其支持证据以减少检索偏移，并分析证据找回后仍存在的过早完成与拒答。
 - [Lost in the Middle](https://arxiv.org/abs/2307.03172)：研究信息位置对长上下文问答效果的影响。
 - [CMT-RAG](https://arxiv.org/abs/2607.26470)：用互补记忆轨迹组织多轮多跳问答中的任务与证据依赖。
 - [MADARA](https://arxiv.org/abs/2606.25191)：结合逐文档回答、隔离对照与聚合处理多来源信息。 [代码](https://github.com/js-lee-AI/MADARA)
