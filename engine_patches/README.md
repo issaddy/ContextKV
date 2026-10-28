@@ -13,7 +13,7 @@
 - NATIVE 加载预测参考原生 `load_back_threshold`；旧 `native_estimate_uncertain` 保留 pending 或瞬时 free GPU slot 不足的原语义，同时 `uncertainty_reasons` 区分 `inflight_transfer` 与 `capacity_pressure`。后者表示可能需要原生淘汰或等待，不表示缓存信息不可读取。报价不是预留，实际匹配、加载、排队与预算决定仍由原生路径执行。
 - 活动 epoch 的 prepare 对同一 operation 幂等，不重开 native generation；生成在原生 `ensure_session_generation` 前同时验证 restart、registry 状态和当前 tracker generation。保留期内的关闭 ID 继续由原生关闭记录阻止重开。
 - retire 先阻止新请求，等待已接纳请求终态，再撤销 native 软引用并 ACK。软引用退役的 free 计数恒为零；缓存物理占用不会被假定已回收。原生已接纳请求在 RETIRING 期间可能先完成注册、再立即被退役撤销，因此 receipt 的 `session_ref_registered` 表示本次曾成功经过注册路径，不是 ACK 后仍持有引用的证明。
-- 终态 receipt 通过原生 customized-info 输出，包含真实 tracker 注册结果、cache inserted length 和 native 分层命中。实际 prefill 工作来自每次成功 worker forward 的 `extend_lens` 累计，覆盖 chunk/retraction 重算并排除 mixed batch 的 decode 行，不用 input-minus-hit 冒充真实执行工作。
+- 终态 receipt 通过原生 customized-info 输出，包含真实 tracker 注册结果、cache inserted length 和 native 分层命中。实际 prefill 工作来自每次成功 worker forward 的 `extend_lens` 累计，覆盖 chunk/retraction 重算并排除 mixed batch 的 decode 行。
 
 当前运行合同是显式 Qwen3 LocalModelScope、单 GPU、TP/DP/PP=1、Python TreeCore、dense FULL、单条累计 SSE 流式或非流式请求、无动态 LoRA、默认 cache key。LoRA可先离线导出为独立dense checkpoint，再用新scope走同一合同。旧Qwen2.5-7B下载/启动/runtime fallback已删除，不再支持该模型的新运行；历史源码/GPU记录只作已有机制证据，不能作为新模型校准。HiCache 的 cache 模式受支持，buffer-only、L3、外部 linker、SWA/Mamba、speculative、PD/PDMux 不在此补丁范围。HTTP client 必须先验证研究能力，绝不把 guard 字段直接提交给原生未补丁服务器。
 
@@ -51,15 +51,15 @@ SGLANG_HICACHE_TMA_TRANSFER=0 scripts/launch_sglang.sh \
   --host 127.0.0.1 --port 30000 --max-total-tokens 16384 --mem-fraction-static .8
 ```
 
-`bootstrap_sglang.sh`仅安装固定SGLang/项目依赖，然后通过共享`ModelConfig/create_model_template`验证已存在的scope快照、tokenizer和模板，保存指纹。它不调用snapshot_download，不创建旧模型目录；缺少scope或本地文件会明确失败。完整源码准备可以下载SGLang/依赖，不能被误读为下载模型权重。
+`bootstrap_sglang.sh`仅安装固定SGLang/项目依赖，然后通过共享`ModelConfig/create_model_template`验证已存在的scope快照、tokenizer和模板，保存指纹。它不调用snapshot_download，不创建旧模型目录；缺少scope或本地文件会明确失败。源码准备下载SGLang及依赖，模型使用已有本地文件。
 
-`launch_sglang.sh`必须设置`CONTEXTKV_MODEL_SCOPE_PATH`；仅有`CONTEXTKV_MODEL_PATH`不能启动。scope拥有实际model/tokenizer路径，HF loading revision为None，不接受尾部`--revision`或另一个model/tokenizer路径。可选`CONTEXTKV_MODEL_PATH`仅作为同scope路径一致性检查，不能作为fallback。scope不编造HF revision，也不声称启动时权重内容逐字验证。
+`launch_sglang.sh`必须设置`CONTEXTKV_MODEL_SCOPE_PATH`；仅有`CONTEXTKV_MODEL_PATH`不能启动。scope拥有实际model/tokenizer路径，HF loading revision为None，不接受尾部`--revision`或另一个model/tokenizer路径。可选`CONTEXTKV_MODEL_PATH`仅作为同scope路径一致性检查，不能作为fallback。scope按模型元数据标识本地快照，验证范围由`weight_content_verified`记录。
 
 schema v1 `local_snapshot_metadata`保持原有config/分片库存身份和全部旧指纹。离线`python -m training.export`新增schema v2 `local_checkpoint_artifact`，将完成的LoRA产物合并到新的独立BF16 dense目录，按每个weight文件的`file/bytes/sha256`建立`local-checkpoint:`身份；同大小不同内容可区分，目录位置和来源注释不进入身份。发布后应保持目录不可变；控制器`model.scope_path`和引擎`CONTEXTKV_MODEL_SCOPE_PATH`指向同一新scope，重新生成fingerprint并使用独立state/engine，不继承基座KV和成本标定。stock/native基线复用该身份接口，无需动态LoRA缓存路径。完整命令见[训练与导出](../docs/research/grounded_training.md)。
 
-v2的权重摘要仅在导出发布边界全量计算一次。启动时核对config、实际文件名/大小与index；单文件`model.safetensors`无需index，只读取header长度及JSON offsets核对tensor字节数，不读或哈希tensor body。`weight_content_verified=false`明确当前内容未被启动时全量复验，发布摘要不能监控后续同尺寸文件改写。PEFT `safe_merge=True`只检查有限值，BF16舍入和实际回答效果另行验证；本轮接口实现不等于8B质量或GPU验收。
+v2的权重摘要仅在导出发布边界全量计算一次。启动时核对config、实际文件名/大小与index；单文件`model.safetensors`无需index，只读取header长度及JSON offsets核对tensor字节数，不读或哈希tensor body。`weight_content_verified=false`明确当前内容未被启动时全量复验，发布摘要不能监控后续同尺寸文件改写。PEFT `safe_merge=True`只检查有限值，BF16舍入和实际回答效果另行验证。
 
-通过 `CONTEXTKV_ENABLE_HICACHE=0` 可运行GPU-only功能检查；`CONTEXTKV_HICACHE_GB`/`CONTEXTKV_PAGE_SIZE`设置容量与页大小，`CONTEXTKV_WRITE_POLICY`复用原生三写策略。scheduler的`get_runtime`首次初始化必须读取scope，验证实际模型设置、config/库存、tokenizer/template与fingerprint；缺scope返回`MODEL_SCOPE_REQUIRED`，不存在旧revision/config隐式支持。初始化后复用实例，不逐请求扫描/重新解析。纯CPU `ContextKVRuntime`协议容器仍可用无模型fixture测试缓存/事务机制，这不是可启动原生模型的后门。
+通过 `CONTEXTKV_ENABLE_HICACHE=0` 可运行GPU-only功能检查；`CONTEXTKV_HICACHE_GB`/`CONTEXTKV_PAGE_SIZE`设置容量与页大小，`CONTEXTKV_WRITE_POLICY`复用原生三写策略。scheduler的`get_runtime`首次初始化必须读取scope，验证实际模型设置、config/库存、tokenizer/template与fingerprint；缺scope返回`MODEL_SCOPE_REQUIRED`，不存在旧revision/config隐式支持。初始化后复用实例，不逐请求扫描/重新解析。纯CPU `ContextKVRuntime`协议容器使用无模型fixture测试缓存与事务机制。
 
 当前scope仅支持已明确的dense Qwen3、BF16、无SWA/RoPE扩展；32B的head_dim使用显式128。缓存、事务、只读观测、DMA和原生admission逻辑保持，未为退役旧模型改动这些通用机制。
 
@@ -76,13 +76,13 @@ v2的权重摘要仅在导出发布边界全量计算一次。启动时核对con
 - `request_terminal`：receipt 与原生完成时序。
 - `transfer`：在原生 HiCache ACK 已完成后复用 `num_bytes`、`start_event.elapsed_time(finish_event)`，输出 H2D/D2H 字节与 CUDA event 时间。计时不支持时为 `null`，不能将 CPU enqueue 时间替代它。该观察点不增加 CUDA 同步，不改变传输调度。
 - `retire_ref`：软引用退役，free 为零。
-- `pool_snapshot`：仅 `CONTEXTKV_SAMPLE_POOL=1` 开启；每个 scheduler 边界用 O(1) allocator 计数采样，只有占用变化时写事件。可计算**采样峰值**与占用积分，不能据此声称覆盖每个瞬时 alloc/free 峰值。
+- `pool_snapshot`：仅 `CONTEXTKV_SAMPLE_POOL=1` 开启；每个 scheduler 边界用 O(1) allocator 计数采样，只有占用变化时写事件。用于计算 scheduler 边界的**采样峰值**与占用积分。
 
 生成结果中的 `server_ttft_ms` 为 scheduler 收到请求至原生首 token 完成，`server_elapsed_ms` 为收到至终态，`decode_ms` 为首 token 至终态，`tpot_ms` 为该段除以后续输出 token 数。`forward_to_first_token_ms` 单独表示原生 forward-entry 至首 token 完成。全部来自同一服务端 monotonic 时钟；原生 forward-entry 在部分 cache 准备之后，不能拿它精确拆出排队与恢复。
 
-`elapsed_ms` 是客户端提交至完整 HTTP 响应。默认累计 SSE 客户端通过首次非空 output_ids 和最后新增 token 的帧观察 `ttft_ms/last_token_ms`，重复累计帧不更新时刻。客户端 TPOT 由首末 chunk 间隔除以 N−1 计算，报告明确标为 chunk 观察；服务端 `tpot_ms` 仍是另一时间域的原生指标。可显式 `SGLangEngineClient(..., stream=False)` 使用非流式，此时两个客户端 token 时刻未知；专用 profiler 保持非流式。`queue_ms/prefill_ms/restore_prefill_ms` 也保持未知，不能将阶段墙时冒充独立 CUDA kernel 时间。成本标定使用 `phase=first_token, timing_scope=server_request` 联合阶段，在同一并发压力桶中比较，避免重复加排队或 H2D。
+`elapsed_ms` 是客户端提交至完整 HTTP 响应。默认累计 SSE 客户端通过首次非空 output_ids 和最后新增 token 的帧观察 `ttft_ms/last_token_ms`，重复累计帧不更新时刻。客户端 TPOT 由首末 chunk 间隔除以 N−1 计算，报告明确标为 chunk 观察；服务端 `tpot_ms` 仍是另一时间域的原生指标。可显式 `SGLangEngineClient(..., stream=False)` 使用非流式，此时两个客户端 token 时刻未知；专用 profiler 保持非流式。`queue_ms/prefill_ms/restore_prefill_ms` 保持未知；当前记录提供联合阶段墙时。成本标定使用 `phase=first_token, timing_scope=server_request` 联合阶段，在同一并发压力桶中比较，避免重复加排队或 H2D。
 
-完整最终文本和 token IDs 经过原生 detokenizer，终态响应之前通过一次 IPC 发布回 scheduler。guarded SSE 统一为累计输出，兼容原生 incremental streaming 开关。最后新增 token 先以不带 receipt/finish 标志的帧发送，再执行发布 IPC，最后发送重复累计 token 的完整终态 receipt 帧，避免将发布延迟算入最后 token 到达时刻。客户端只有收到终态 receipt 和 `[DONE]` 才返回结果；断帧、部分断连、缺少终态均走未知结果恢复，不能提交部分答案。`status` 在默认 900 秒 TTL、64 MiB 总结果预算、1024 个 attempt receipt 的范围内返回原样结果；通过 `CONTEXTKV_RESULT_TTL_SECONDS` 和 `CONTEXTKV_RESULT_MAX_BYTES` 调整。超限/过期、终态后发布前的进程崩溃仍可能只剩 receipt；控制器必须明确恢复或放弃，不能声称无限期 exactly-once。UNKNOWN 不是“未执行”证明。
+完整最终文本和 token IDs 经过原生 detokenizer，终态响应之前通过一次 IPC 发布回 scheduler。guarded SSE 统一为累计输出，兼容原生 incremental streaming 开关。最后新增 token 先以不带 receipt/finish 标志的帧发送，再执行发布 IPC，最后发送重复累计 token 的完整终态 receipt 帧，避免将发布延迟算入最后 token 到达时刻。客户端只有收到终态 receipt 和 `[DONE]` 才返回结果；断帧、部分断连、缺少终态均走未知结果恢复，不能提交部分答案。`status` 在默认 900 秒 TTL、64 MiB 总结果预算、1024 个 attempt receipt 的范围内返回原样结果；通过 `CONTEXTKV_RESULT_TTL_SECONDS` 和 `CONTEXTKV_RESULT_MAX_BYTES` 调整。超限/过期、终态后发布前的进程崩溃可能只剩 receipt，此时按恢复协议处理；UNKNOWN 表示执行结果未知。
 
 研究层的退役 epoch 记录和终态操作回执各复用 `receipt_limit` 上限，默认1024；活动及仍在退役中的记录保留到完成。原生[会话追踪器](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/mem_cache/unified_cache/session_ref_tracker.py)另保留最近8192个关闭 ID。两处记录都过期后，显式 prepare 可以获得新的原生 generation，旧 generation 的请求仍被拒绝。迟到的退役重试在确认原生引用已不存在、或当前 incarnation 更新时可确认旧引用已解除，不能释放新引用，也不证明旧生成已完成。`control_metadata` 指标分别报告活动和保留的终态记录数量。
 

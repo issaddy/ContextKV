@@ -7,7 +7,7 @@
 两个情景分别执行相同过程：
 
 1. 以 `free_gpu + evictable_gpu` 为当前容量，先减去运行请求的预测剩余解码预留。负值表示该情景已有超订阅，并在 reason 标记。
-2. 当前物理 locked 数为 `capacity - free - evictable`。按各运行请求的 `kv_allocated_tokens` 比例分配这个单一总数，作为完成后容量可用的代理；不会将多个请求共享的逻辑前缀相加冒充物理容量。虚拟完成时归还该份额及先前扣除的解码预留。
+2. 当前物理 locked 数为 `capacity - free - evictable`。按各运行请求的 `kv_allocated_tokens` 比例分配这个单一总数，作为完成后容量可用的代理，共享前缀计入同一物理总量。虚拟完成时归还该份额及先前扣除的解码预留。
 3. 将当前 waiting 列表作为 FIFO 预测顺序。它没有逐请求缓存报价，因此 queued/retracted 请求按 `input + generated` 的完整 cold 输入及剩余输出预留估计。这是保守输入假设；不是原生最终执行顺序保证。
 4. 容量不足时推进到下一个虚拟完成事件，同时完成的请求一起更新容量和并发数。每个虚拟请求按开始时的并发数调用实测时间回调，服务期内固定该速率。此实现没有逐 token 模拟连续批次的速率变化。
 5. 候选需求为 `input - resident + predicted_output + min(resident, evictable_gpu)`，最后一项避免同时把候选自己的 resident 前缀算作可回收空间。待该需求可容纳，即得到开始 forward 前的预测等待，再加由成本模型传入的该候选 idle 准备项。
@@ -33,7 +33,7 @@ Idle 准备项按候选 `(P,U,L)`——可复用前缀、新计算后缀、host 
 
 ## 已实现的只读观测扩展
 
-研究补丁提供以下只读字段；当前交付成本配置使用 `native_budget`，较旧的 `strict` / `native_workload` 读取路径仍保留。旧 wire 缺字段时，schema 将其解码为 None；不会填零冒充已知状态。`/cache/quote` 与 metrics 共用同一个只读 workload snapshot，HTTP client 沿用已有一次共享 dataclass 解码，没有增加内容 hash 或请求缓存。
+研究补丁提供以下只读字段；当前交付成本配置使用 `native_budget`，较旧的 `strict` / `native_workload` 读取路径仍保留。旧 wire 缺字段时，schema 将其解码为 None，表示未知状态。`/cache/quote` 与 metrics 共用同一个只读 workload snapshot，HTTP client 复用一次共享 dataclass 解码。
 
 | 位置 / 字段 | 真实来源与语义 |
 |---|---|
@@ -60,13 +60,13 @@ Running 预算和旧服务工作量摘要使用不同成员集合，所以只在
 
 实现分开维护三类量：
 
-1. **total 容量账本。** 初始值为 `free + evictable − native_running_budget_tokens`。各服务请求完成时，只归还相同原生 `request_id` 对应的预算份额；其公式为 `min(max_new_tokens − generated_tokens, clip) × ratio`，ignore_eos 使用 1。预算列表内不属于服务集合的 finished/retracted 成员继续占着该份额，并记录 `unmatched_native_budget_held`，不为了预测可接纳而擅自删去。Overlap 服务成员若不在预算列表，不能凭空归还一份原生 offset。
+1. **total 容量账本。** 初始值为 `free + evictable − native_running_budget_tokens`。各服务请求完成时，只归还相同原生 `request_id` 对应的预算份额；其公式为 `min(max_new_tokens − generated_tokens, clip) × ratio`，ignore_eos 使用 1。预算列表内不属于服务集合的 finished/retracted 成员继续占着该份额，并记录 `unmatched_native_budget_held`。不在预算列表中的 Overlap 服务成员完成时，归还的原生预算份额为零。
 2. **current 容量账本。** 初始值为 `free + evictable`，不扣 running 输出 headroom。Queued 虚拟完整 prefill 的 current 需求为页取整后的完整输入加一页，total 另加完整 clipped 输出预算。候选 gate 用未驻留输入、声明 `max_new_tokens`（受实际 clip 限制）与一页开销，并保留原生严格 `< total` 及页分配 `<= min(current,total)` 边界。对重入 waiting 的请求，gate 使用剩余预算，但完整 prefill commit 使用原生完整预算，两者没有混同。
 3. **服务时间。** Running 的经验条件残余均值/P90、ignore_eos 余量及尾部回退仅决定完成时间，不再决定容量预留。Queued 每次首先定价准备与 forward，产生一个 token，随后才计剩余 decode；其 callback 分别接收 GPU/host 前缀，使用对应形状的 c1 准备项及实测 forward，不重叠叠加含队列的 TTFT。
 
 物理容量释放仍是显式代理：将单一 `capacity − free − evictable` 按当前服务请求的逻辑 allocated 长度归一化分配，完成后转为可用。它不是树的逐节点解锁模拟；无法识别最后一个共享锁。候选的已命中 GPU 前缀在初始及虚拟完成后都要保护，避免将同一前缀同时算作可回收空间与免费复用。完成后保护量使用“原 evictable 加累计虚拟释放”的上限代理，而不是宣称已知哪个请求释放了候选路径。无可解释的完成事件、仍被未知预算占据的空间或超出冷需求容量时，预测可返回 unsupported。
 
-Waiting 容量始终按完整 cold 输入估计；**最近一次 match 不抵扣容量**。服务均值情景可以使用 `last_native_match`，条件只是其输入形状等于当前 `input+generated` 且观测不晚于 quote；reason 明确写 `last_match_service_scenario_not_residency`。这不是新鲜度判定，也不承诺前缀仍驻留。另一情景用 cold forward 和经验 P90 服务长度，输出 `upper=max(mean,cold_p90)`；不是概率上界。缺失、未来时钟或输入形状不符的 saved match 使用明确 cold 情景。没有加入匹配调用、缓存树扫描、每轮 hash、额外 GPU 同步或持久预测状态。
+Waiting 容量始终按完整 cold 输入估计；**最近一次 match 不抵扣容量**。服务均值情景可以使用 `last_native_match`，条件是其输入形状等于当前 `input+generated` 且观测不晚于 quote；reason 记录为 `last_match_service_scenario_not_residency`。该记录用于构造服务时间情景，实际驻留以原生当前状态为准。另一情景用 cold forward 和经验 P90 服务长度，输出两种情景的较大值 `upper=max(mean,cold_p90)`。缺失、未来时钟或输入形状不符的 saved match 使用 cold 情景。计算复用现有快照。
 
 这个模型复用原生 FULL 页预算规则，但仍是 **FIFO、冻结当前 ratio、完整请求预留的有限事件近似**。真实引擎会逐 pass 过滤/合并批次，未完成 chunk 暂不加入最终输出 headroom，后续 ratio 会变化，cache match/淘汰和速率也会变化；本模式没有复刻这些过程。候选受当前缓存布局影响，virtual queued admission 后布局也未被精确重建。因此适用范围限于现有 FCFS、FULL、单 GPU、不混合 chunk 的配置。`capacity_risk` 保留原 P90 物理需求诊断语义，不是新 native gate 的判定结果；旧/新方法比较时不能将这两个量混称。
 

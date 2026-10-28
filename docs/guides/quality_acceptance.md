@@ -72,7 +72,7 @@ python -m bench.blind_review aggregate \
 
 ## 比较、冻结与工程边界
 
-导入复用现有 task/conversation/query、实际答案与提示身份，核对评分属于本次回答；不新增线上 hash。双方任务、当前问题和协议一致，允许各自产生不同真实历史与证据。完整 audit 仍覆盖全部成功回答。生成失败、截断和状态一致性另作工程检查，不与质量分数任意加权。
+导入复用现有 task/conversation/query、实际答案与提示身份，核对评分属于本次回答。双方任务、当前问题和协议一致，允许各自产生不同真实历史与证据。完整 audit 覆盖全部成功回答。生成失败、截断和状态一致性作为工程指标单独报告。
 
 各维在共同适用任务上计算配对会话bootstrap，保留缺分及统计不确定性。`dev_quality_eligible`记录该开发集、任务范围和evaluator下的结果。
 

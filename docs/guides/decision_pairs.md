@@ -85,7 +85,7 @@ python -m profiling.decision_pairs analyze runs/decision-dev/pairs.jsonl \
 
 默认服务端时间范围与标定联合首 token＋后续 Decode 更一致。客户端 `client_complete_ms` 从 generate 提交到完整响应，包含 HTTP/返回开销；不包含状态重置、预热、prepare、retire 或业务账本提交。所有候选共同控制成本在此诊断中设为 0，冻结模型不做在线残差更新，配置/模型文件及这一范围均写入 manifest。
 
-**该 regret 是受控 fixture 的时延诊断，不是质量约束的 oracle。** 两候选生成内容和长度可能不同，较短但错误的回答也可能更快。只有另行完成同任务质量评估后，才能将决策结果用于方法收益论证。文件只允许开发集调试；不得用测试集反事实结果继续挑阈值。
+该 regret 衡量受控 fixture 中的时延选择差距。两候选的生成内容和长度可能不同，方法收益结合同任务的回答质量评价。此入口用于开发集调试，测试配置预先冻结。
 
 ## 4. 在同一批真实输出上比较冻结成本模型
 
@@ -111,9 +111,9 @@ python -m profiling.decision_pairs rescore \
 
 输出新的 JSONL、manifest 和 summary，默认拒绝覆盖已有文件。每臂的实测时间、输出、receipt、warmup、报价和 hardware/simulation 来源保持原值；原选择、原因和预测保存在 `rescoring` 中。源失败行保留为失败并标记 `source_failure_preserved`，不会静默丢弃或变成成功。结果仍可用现有 `analyze` 选择 server/client 时间范围，summary 的逐 pair 明确记录 repetition。
 
-新 manifest 保存源 pairs/manifest 的路径与文件 hash、源采集完整清单、frozen 来源、替换 artifact、配置使用范围、标定 scope 和 `new_generations: 0`。这些是文件级实验来源检查，不在请求路径增加 hash。原始采集文件与答案不改写。
+新 manifest 保存源 pairs/manifest 的路径与文件 hash、源采集完整清单、frozen 来源、替换 artifact、配置使用范围、标定 scope 和 `new_generations: 0`，用于文件级实验来源检查。原始采集文件与答案保持原样。
 
-这允许在**完全相同的实测结果**上比较决策模型，节约 GPU 并消除重新采样答案的差异；它不是新质量实验，也不是另一套工作负载的硬件复测。模型仍应以独立阶段标定数据拟合；若看这批 dev regret 后调参，必须如实标为开发调试，不能再将同一批结果称为独立泛化证据。
+重评分在同一批实测输出上比较决策模型，复用已有硬件测量和答案。模型使用独立阶段标定数据拟合；依据本批 dev regret 调整的结果记录为开发调试，泛化效果使用独立测试评价。
 
 ## 本地合同验证
 

@@ -31,7 +31,7 @@ python -m bench.retrieval_eval build \
   --encoder-path models/bge-m3 --device cuda:1 --dtype bfloat16 --encoder-max-length 8192
 ```
 
-全部488份文档参与检索，不按当前答案或grounding挑选语料。P3任务的`contexts`初始为空，生成时使用本方法实际历史和真实检索结果；targets、grounding与qrels只用于离线评价。文档ID采用可逆的`[domain,doc_id]`，发布版本标识语料快照，不冒充政策生效时间。
+全部488份文档参与检索。P3任务的`contexts`初始为空，生成时使用本方法实际历史和真实检索结果；targets、grounding与qrels用于离线评价。文档ID采用可逆的`[domain,doc_id]`，发布版本标识语料快照。
 
 输出包括`corpus.jsonl`、`supervision.jsonl`、`tasks.jsonl`、`qrels.tsv`、`split_manifest.json`和`manifest.json`。重复运行会刷新这些派生产物；已保存运行仍以原输入摘要和源版本追溯。参考span按原字符坐标读取，错误坐标仍明确报错，避免引用错段。
 
@@ -72,7 +72,7 @@ python -m bench.official overlap --references data/multidoc2dial/test/tasks.json
   --input SAVED-OFFICIAL.jsonl --output runs/multidoc2dial-overlap.json
 ```
 
-复用作者采用的SQuAD式F1/EM定义，按task ID关联，报告[0,1]分数、领域/会话均值和缺失任务；缺失回答计零。本文分组后的参考回答是完整交流轮，不能冒充原始agent-turn分数。F1只补充语义正确性、条件适用性和来源支持评价，不作为唯一质量门槛。检索使用文档级qrels，系统性能/资源沿用统一指标。需要参考答案与来源支持评分时，复用`bench.official generation-http`并加`--no-answerability-adjustment`，只运行原始RB_llm/RL_F；该数据没有MT-RAG式可答性标签，不补造标签或套用IDK调整。针对开发决策可用`--metrics RB_llm`或`--metrics RL_F`只计算所需项；以后补充另一项时复用已完成阶段，不重生成回答。
+复用作者采用的SQuAD式F1/EM定义，按task ID关联，报告[0,1]分数、领域/会话均值和缺失任务；缺失回答计零。本文评分单元为分组后的完整交流轮，原始发布单元为agent-turn。F1作为辅助指标，与语义正确性、条件适用性和来源支持共同评价。检索使用文档级qrels，系统性能/资源沿用统一指标。需要参考答案与来源支持评分时，复用`bench.official generation-http`并加`--no-answerability-adjustment`，运行原始RB_llm/RL_F；该数据缺少MT-RAG式可答性标签，因此关闭IDK调整。针对开发决策可用`--metrics RB_llm`或`--metrics RL_F`计算所需项；补充另一项时复用已完成阶段和回答。
 
 ## 原Doc2Dial能力
 

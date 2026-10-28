@@ -10,25 +10,25 @@
 
 无客户端、失败或未决解析使用最近三条用户问题的既有投影。窗口内有已提交的完整解释时，从最近一次解释接上后续原始问题，避免重新引入它已替换的旧条件；明确新话题的解释同时形成边界。完整生成历史始终保留，不因查询窗口而删除。
 
-默认会话解释使用实际QA和已提交状态恢复指代，不执行原文支持判定；生成事实仍由本轮证据支持。下文的来源资格枚举接口另按需读取原文，它的名称出现检查也不能证明当前对象或任务已解释正确。
+默认会话解释使用实际QA和已提交状态恢复指代，生成事实由本轮证据支持。下文的来源资格枚举接口按需读取原文，检查候选名称的来源。
 
-实现借鉴 [CHIQ](https://aclanthology.org/2024.emnlp-main.135/) 的先解歧再改写思路与 [HAConvDR](https://aclanthology.org/2024.findings-acl.792/) 的历史去噪动机，但采用单次无训练推理，不声称复现论文完整流程。旧 `current/last3` 等低成本模式仍可直接使用。辅助模型的调用量、输入/输出 tokens、耗时和失败均进入 retrieval manifest 与完整响应计时，不能只报告主生成耗时。
+实现借鉴 [CHIQ](https://aclanthology.org/2024.emnlp-main.135/) 的先解歧再改写思路与 [HAConvDR](https://aclanthology.org/2024.findings-acl.792/) 的历史去噪动机，采用已有模型的单次推理。`current/last3` 等低成本模式也可直接使用。辅助模型的调用量、输入/输出 tokens、耗时和失败均进入 retrieval manifest 与完整响应计时。
 
-字面组合沿用会话查询扩展的基本思路：从历史补齐当前查询缺少的任务信息，而不要求每次都生成一个新句子。[QuReTeC](https://arxiv.org/abs/2005.11723) 以历史词项选择实现查询补全；这里采用明确片段的工程规则，没有引入其分类器或训练流程。是否有效以检索和最终任务结果评价，不以改写句式评分。
+字面组合从历史补齐当前查询缺少的任务信息，参考[QuReTeC](https://arxiv.org/abs/2005.11723)的历史词项选择思路，采用明确片段的工程规则。效果以检索和最终任务结果评价。
 
 ### 原问题与派生解释共同检索
 
 `query_fusion: dialogue_rrf`复用当前会话解释器，同时让最近三条原始用户问题参与召回与排序。实际QA、已提交任务状态和生成提示不改写，不增加LLM调用。原始问题视图占一份总权重，其余不同的完整解释/子需求视图共同占一份；更多子需求不会自动产生更多总票数。各视图的BM25/dense列表进入同一候选池，再分别对同一池做交叉编码评分并用同样权重融合排名，最后沿用五个不同内容组的选择及原文、依赖、A/B/C链路。
 
-该机制借鉴[MVR](https://aclanthology.org/2020.findings-emnlp.354/)分别重排再融合的思路；本实现使用已有BGE、原问题视图和RRF，未复现其CTS分类器、训练或分数求和。近期[Faithful Query Resolution](https://arxiv.org/abs/2610.15034)也区分请求保真与检索扩展；这里按视图家族归一权重，没有移植其模型或调节融合权重。查询编码和同池评分均可批处理，普通双查询入口也复用一次编码；批次耗时记录为共享成本，不伪分摊到单条查询。
+该机制借鉴[MVR](https://aclanthology.org/2020.findings-emnlp.354/)分别重排再融合的思路，使用已有BGE、原问题视图和RRF。近期[Faithful Query Resolution](https://arxiv.org/abs/2610.15034)也区分请求保真与检索扩展；本实现按视图家族归一权重。查询编码和同池评分均可批处理，普通双查询入口也复用一次编码；批次耗时记录为共享成本。
 
 当前默认仍为`single`。固定输入检索及一段完整公开会话的对照已完成：部分资料和回答适用性改善，也存在来源丢失、错领域材料及未支持的规则。融合机制保留为可用选项；结果与成本见[评价](../data_and_evaluation.md#原问题与派生解释的检索对照)。
 
 ### 当前任务的选择性更新
 
-自由改写可能保留主题却换掉信息需求，也可能省掉复合请求的一部分。当前`TaskFrame`分别记录topic、target、task、conditions和requirements：最后一项保存复合请求中分别需要回答的内容，条件单独保存，避免改地区或平台时丢掉仍需回答的部分。字段为开放文本，不建立产品或行业字典；它们描述用户请求，不是事实证据。
+自由改写可能保留主题却换掉信息需求，也可能省掉复合请求的一部分。当前`TaskFrame`分别记录topic、target、task、conditions和requirements：最后一项保存复合请求中分别需要回答的内容，条件单独保存，避免改地区或平台时丢掉仍需回答的部分。字段为描述用户请求的开放文本。
 
-已有完整状态时，单次解析首先输出`task.operation=keep/replace`、任务值和requirements，再给出关系与字段更新。keep由宿主保留整个原任务及需求列表；replace同时替换需求列表，单一需求可用空列表而沿用task。无状态或前轮未决时，同一次调用完整初始化，不能把“改成Windows”的补丁当成完整状态。首轮也初始化，从请求出现时保存需求和条件，避免到下一轮纠正时才回推。XGrammar约束结构，不保证语义正确；需求分解没有第二次LLM调用。示例输出上限384 tokens容纳完整状态，记录实际用量。
+已有完整状态时，单次解析首先输出`task.operation=keep/replace`、任务值和requirements，再给出关系与字段更新。keep由宿主保留整个原任务及需求列表；replace同时替换需求列表，单一需求可用空列表而沿用task。无状态或前轮未决时，同一次调用完整初始化。首轮即保存需求和条件，后续“改成Windows”等补丁更新已有状态。XGrammar约束输出结构，需求分解在同一次调用完成。示例输出上限384 tokens容纳完整状态，记录实际用量。
 
 `updates`单独修改topic、target和有名称的条件。条件不再是一段混合字符串，而是`version`、`platform`、`region`等开放名称和值；只提交变化的键，null删除该键，`conditions=null`清空条件。宿主保持每个未出现在补丁中的键不变，因此改变联网方式不需要模型重写并记住版本与平台。该局部更新约定参考[JSON Merge Patch](https://www.rfc-editor.org/info/rfc7396/)的保留/替换/删除语义，固定业务字段清空为缺省值，不提供通用HTTP PATCH接口。
 
@@ -36,9 +36,9 @@
 
 宿主应用更新并按主题、对象、任务、条件拼接一个检索视图，取消第二次自由改写机会，继续使用一次召回和既有重排。纠正附件类型时，未修改的大小限制任务保留；新的信息需求可以更新task/target而沿用topic。生成使用这一共同查询，frame本身不在提示中重复展开；它随QueryContext通过已有attempt/提交/恢复保存，未新增数据库或后台记忆服务。无frame的旧请求身份保持兼容。
 
-这是对[SOM-DST](https://aclanthology.org/2020.acl-main.53/)选择性覆盖状态机制的适配：保留、更新和删除操作将变化部分与持续状态分开。已检查[作者实现](https://github.com/clovaai/som-dst/blob/master/utils/data_utils.py)的操作应用方式；这里没有移植其领域ontology、训练模型或依赖。状态继承能防止被省略字段自动消失，但不能保证模型选对操作或字段含义，仍需检验最终检索与回答。
+这是对[SOM-DST](https://aclanthology.org/2020.acl-main.53/)选择性覆盖状态机制的适配：参考[作者实现](https://github.com/clovaai/som-dst/blob/master/utils/data_utils.py)，通过保留、更新和删除操作将变化部分与持续状态分开。宿主保留未修改字段，模型负责选择操作和解释字段含义，效果按最终检索与回答评价。
 
-近期[ICR](https://arxiv.org/abs/2509.05100)以澄清/改写轨迹、训练和结果融合处理多重歧义；[2026年多步语料反馈方法](https://arxiv.org/abs/2610.10955)学习改写、检索与停止策略。它们支持将语义操作显式化的方向，但包含训练或额外检索流程。本阶段先复用现有模型的一次状态更新，不加入这些完整链路或把论文收益视为本系统收益。
+近期[ICR](https://arxiv.org/abs/2509.05100)以澄清/改写轨迹、训练和结果融合处理多重歧义；[2026年多步语料反馈方法](https://arxiv.org/abs/2610.10955)学习改写、检索与停止策略。它们为显式语义操作提供研究参考。当前实现采用已有模型的一次状态更新。
 
 ### 因果历史与输入预算
 
@@ -56,7 +56,7 @@
 
 `F(S) = Σ_j max_{d∈S} 1/rank_j(d)`，其中j包含整体任务和各项需求。
 
-每项需求只计算已选集合中的最佳排名，重复覆盖的边际增益逐渐下降；同增益按整体相关性排序，返回原始分数和正文。对已固定的内容组代表及任务锚点，这是非负、单调的次模覆盖目标，可使用[经典基数约束贪心算法](https://pubsonline.informs.org/doi/10.1287/moor.3.3.177)。它是排名覆盖代理，不是经过校准的支持概率，更不证明答案正确；真实任务覆盖与适用条件仍按原文评价。
+每项需求只计算已选集合中的最佳排名，重复覆盖的边际增益逐渐下降；同增益按整体相关性排序，返回原始分数和正文。对已固定的内容组代表及任务锚点，这是非负、单调的次模覆盖目标，可使用[经典基数约束贪心算法](https://pubsonline.informs.org/doi/10.1287/moor.3.3.177)。该目标衡量排名覆盖，真实任务覆盖与适用条件按原文评价。
 
 `requirement_evidence`保留实际子查询、每路召回、候选及各需求排名、选择增益和模型工作量，保存排名即可重算选择。所选原文继续经过统一依赖、引用范围、A/R构造、真实token成本和提交/退役。旧frame默认requirements为空；空列表不改变旧显式请求身份，无数据库迁移。
 
@@ -66,21 +66,21 @@
 
 联合模型同时看到真实QA、上一轮状态以及候选的完整正文、版本、父章节和必要依赖；任务更新与选材在同一响应中决定。资料可以帮助理解术语和适用分支，但不能被当成用户已经声明的身份、条件或需求。当前问题优先，缺少某一项资料时仍允许选择其他需求的支持，歧义可保留不同备选来源。原文记录在预算内按完整单元装入，不裁正文、不补写来源内容；合法空选择保持为空，未完成或无效输出使用已有排名，不再追加模型调用。
 
-该改造借鉴[同场景的对话条件重排](https://arxiv.org/html/2606.11945v1)重新使用实际历史、避免查询压缩成为唯一信息入口的原则。当前采用既有BGE和Qwen3，不复制其检索模型、多阶段调用或比赛收益。排名路径仍保留复合需求逐项召回；联合路径在已有候选上同时判断需求与来源，是否改善覆盖和适用性需真实验证。
+该改造借鉴[同场景的对话条件重排](https://arxiv.org/html/2606.11945v1)使用实际历史的原则，采用既有BGE和Qwen3。排名路径保留复合需求逐项召回；联合路径在已有候选上同时判断需求与来源，效果见下述开发比较。
 
 回访较早话题时，解释器现在同时提供所读取旧用户轮次的真实回答，修复旧回答被限定为最近三轮而丢失先行词的缺口；普通窗口不变。完整原文与选定任务一起进入现有A/R规划、成功提交、恢复和退役。幂等重放不重复检索或联合决策。
 
-默认仍为`ranked`。v5/v6旧来源选择诊断按原版本保留在`runs/dialogue-retrieval/selection/`；当前v7已完成8个独立选定公开开发会话的配对比较：文档覆盖/排序改善，回答评分相近，辅助阅读成本使完整响应增加。保留这一替代原两阶段路径的能力，默认仍为排名路径；详细结果见[统一评价](../data_and_evaluation.md#一次联合任务与来源决策的开发比较)，不再围绕旧四题调提示或权重。
+默认仍为`ranked`。v5/v6旧来源选择诊断按原版本保留在`runs/dialogue-retrieval/selection/`；当前v7已完成8个独立选定公开开发会话的配对比较：文档覆盖/排序改善，回答评分相近，辅助阅读成本使完整响应增加。联合路径作为可选能力保留，详细结果见[统一评价](../data_and_evaluation.md#一次联合任务与来源决策的开发比较)。
 
 ### 保留主任务资料的条件排序
 
 对于已确认的字面任务承接，完整查询保留原任务和当前条件，当前用户原句另作条件视图。已有BGE先按完整查询评分原候选池，再在同一池上评分条件视图；不重新搜索索引，不生成新的查询或答案。
 
-复用[原始RRF](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)及现有k=60。选择五段时，在“包含完整任务排名第一的段落”的约束下最大化RRF分数和：先保留这一段，再取其余融合分数最高的四段，最终保留真实融合分数与顺序。该约束防止条件视图挤掉主任务资料入口；不会把排名第一等同于语义正确或全部事实已覆盖。
+复用[原始RRF](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)及现有k=60。选择五段时，在“包含完整任务排名第一的段落”的约束下最大化RRF分数和：先保留这一段，再取其余融合分数最高的四段，最终保留真实融合分数与顺序。这样保留主任务资料入口，同时引入当前条件的相关资料。
 
 普通轮次、相同查询视图、候选数量不超过返回预算时沿用原排序，没有额外评分。启用时只增加至多50个query/passage评分对，仍复用已加载的BGE。`condition_evidence`记录两份排名、保留段落、最终来源、额外对数和耗时，整体耗时进入P3检索计时。快路径last3保持原行为，不新增配置开关。
 
-这是基于现有融合器的受约束选择扩展，没有复现论文之外的收益保证。初始证据来自保存的真实候选回放：保留了Cloudant的schema说明，同时移除了另一产品的建表资料；实际回答验证和适用边界统一见数据与评价。
+初始候选回放保留了Cloudant的schema说明，同时移除了另一产品的建表资料；实际回答验证见[数据与评价](../data_and_evaluation.md)。
 
 ### A/B/C 的共同合同
 
@@ -89,8 +89,8 @@
 - `context.layout: contextpilot` 下，即使未调用解析模型，也保留当前检索优先级。优先级注释只渲染一次，且仅包含当前可引用来源；被显式版本请求替换的检索版本不再出现在优先级列表中。
 - A/R 使用同一当前证据集合、意图和引用范围。意图标签或证据零交集本身不强制重建；实际历史前缀仍可能复用。正确版本、正文可见性和预算决定资格，B 按原生报价与实际成本比较；旧材料仅可留作历史，不获得当前引用资格。
 - 明确版本请求替换同一段落的其他检索版本；`v1` 不匹配 `v1.1` 或 `v1-rc2`。显式比较仍允许多版本并存。
-- 回访可以指向最近三轮之外的历史。模型选中多轮时，证据恢复对整个先行词集合做判定，不通过“最近一轮”偷偷选择不同对象；不能唯一确定的归档证据不自动恢复，仍保留当前真实检索结果。
-- 解析结果随 PLANNED attempt 固定，回答成功后与原 QA、epoch/outbox 原子提交。无辅助模型、失败/未完成或歧义解析共用上述历史检索投影；已识别的歧义另以原始当前问题和`relation=ambiguous`传入生成并持久保存，不丢弃这个质量信号，也不把展开后的检索文本伪装成确定解释。未完成回答不进入下一轮历史；恢复或幂等重放不重复解析。
+- 回访可以指向最近三轮之外的历史。模型选中多轮时，证据恢复对整个先行词集合做判定；能够唯一确定的归档证据用于恢复，其余情况使用当前真实检索结果。
+- 解析结果随 PLANNED attempt 固定，回答成功后与原 QA、epoch/outbox 原子提交。无辅助模型、失败/未完成或歧义解析共用上述历史检索投影；已识别的歧义以原始当前问题和`relation=ambiguous`传入生成并持久保存。未完成回答不进入下一轮历史；恢复或幂等重放不重复解析。
 
 ### 来源上下文与未决指代
 
@@ -98,9 +98,9 @@
 
 来源定位表在当前问题附近显示地址、标题和章节，供模型结合完整正文判断适用性；没有从URL推断硬性产品标签或过滤证据。当前条件优先、必要澄清、操作步骤保持适用系统一致等通用规则集中在共享系统提示中，不再在每轮意图后重复。未决轮次仍保留具体歧义提示。系统提示改变时，现有A规则重建执行版本，C在新回答提交后退役旧引用。
 
-这一步采用[Contextual Retrieval](https://www.anthropic.com/research/contextual-retrieval)保留片段文档背景的思路，先利用已有原始元数据，没有实施其LLM生成的逐片段上下文。[Late Chunking](https://arxiv.org/html/2409.04701v3)在整段token编码后按片段mean pooling，当前BGE dense使用CLS，不能直接换池化后仍视为相同模型。[ContextualRetriever](https://aclanthology.org/2025.emnlp-main.602/)还涉及专门的上下文监督；这些路线保留为有依据的后续选择，本次不引入训练。
+这一步采用[Contextual Retrieval](https://www.anthropic.com/research/contextual-retrieval)保留片段文档背景的思路，使用已有原始元数据。后续可研究LLM生成片段上下文、[Late Chunking](https://arxiv.org/html/2409.04701v3)的整段编码后分片mean pooling，以及[ContextualRetriever](https://aclanthology.org/2025.emnlp-main.602/)的上下文监督。当前BGE dense使用CLS；采用其他池化方式时需要相应的编码适配与效果验证。
 
-[AsK](https://aclanthology.org/2025.acl-industry.63/)研究歧义下的澄清选择。当前先复用已有解析器输出的未决关系，提示说明缺失区分、提供有据共同信息或明确标注的备选方案；不增加歧义分类器或第二轮澄清生成。该状态进入共同候选与提交链，是语义提示而非质量证明，也不强制改变缓存动作。
+[AsK](https://aclanthology.org/2025.acl-industry.63/)研究歧义下的澄清选择。当前复用已有解析器输出的未决关系，提示说明缺失信息、提供有据共同信息或明确标注的备选方案。该状态进入共同候选与提交链，缓存动作由B按候选可行性和成本选择。
 
 元数据投影没有扩大历史窗口或添加模型调用；隐式追问解释会增加条件调用，其开销纳入完整运行。尚未产生完整解释的长指代链仍可能缺失较早对象，单次解释也可能发生偏差；应检查实际任务与证据，不能用历史窗口或格式合法性代替语义评估。
 
@@ -108,7 +108,7 @@
 
 ## 保留的枚举主题选择入口
 
-下面是仍有复用价值的 `source_topic` / `assistant_topic_unverified` 接口说明。它们不在本轮主线扩大实验或训练；`conversational` 复用其来源资格和 transport，使用上面的独立问题协议。
+`source_topic` / `assistant_topic_unverified` 提供枚举主题选择接口；`conversational` 复用其来源资格和 transport，使用上面的独立问题协议。
 
 ## 已实现的配置、状态与外部调用边界
 
@@ -118,17 +118,17 @@
 
 默认结构协议仍为`static_v1`。可显式设`selector_schema_mode: enum_v2`，把每次实际目录ID写入schema enum，空目录使用`maxItems: 0`；消息、候选提取、预算和历史窗口不改。v2协议身份与每次实际schema另存，语义效果按实际选择的来源另行评价。既有对照中 v2 减少了格式失败，语义选择错误仍存在，因此保持可选。
 
-配置使用 `query_mode: source_topic`、`query_fusion: current_topic_rrf`、`selector_history_turns`，以及 `selector` 下显式的本地服务、模型、revision、context_window 和输入/输出预算。无默认生成模型；已退役的 Qwen2.5-7B 示例移除。该可选路径尚未在当前 Qwen3 交付配置启用，不把旧模型的格式结果追认为新模型效果。
+配置使用 `query_mode: source_topic`、`query_fusion: current_topic_rrf`、`selector_history_turns`，以及 `selector` 下显式指定的本地服务、模型、revision、context_window 和输入/输出预算。该可选路径尚未在当前 Qwen3 交付配置启用。
 
 `tokenizer_path`和`tokenizer_revision`可显式配置；否则只从固定revision的本地缓存读取，`local_files_only=True`。请求model字符串需匹配服务的served-name；配置revision是操作者声明，不能当远端权重验证。temperature固定0，不做自动重试。模型输入使用固定chat template、`return_dict=False`计实际IDs长度；输入超过配置上限或输入＋输出预算超过context window时不发送HTTP，不截断。HTTP响应原文、usage、finish、错误、输入计数和调用耗时保留；`length`、非法JSON、未知/错类ID不得生成新query，保留原query及失败原因。
 
-模型只选择枚举entity/user-turn ID。宿主原样拼接当前问题及所选历史原span，不能接受模型自由生成的限额、建议或代码。候选按同一名字合并多次历史出现，完整history occurrences、EvidenceKey/版本、support/source-window字符偏移保留在trace。**模型只看到每个名字的一个明示支持摘录，不是完整历史证据**；同名出现在多源并不保证产品同一或指代正确。这些是待实测的语义能力，schema只解决外部格式/身份。
+模型选择枚举entity/user-turn ID，宿主原样拼接当前问题及所选历史原span。候选按同一名字合并多次历史出现，完整history occurrences、EvidenceKey/版本、support/source-window字符偏移保留在trace。模型输入为每个名字的一份明示支持摘录，schema约束候选身份；跨来源同名对象的指代效果按实际任务评价。
 
-`selector_history_turns=3`是当前可配置成本设置，取最近三个完整QA供selector并形成候选；trace记录省略的更早消息数。生成器仍接原完整QA。来源资格可以追溯全部已提交历史，因此近轮出现的Cloudant名称仍能链接第一轮真正可见的来源。该窗口不是方法的理论限制；可配置更多轮次，并与ConvSearch-R1作者full-history设置分别报告成本/覆盖，不能隐去窗口差异。
+`selector_history_turns=3`取最近三个完整QA供selector并形成候选；trace记录省略的更早消息数。生成器仍接原完整QA。来源资格可以追溯全部已提交历史，因此近轮出现的Cloudant名称仍能链接第一轮真正可见的来源。窗口长度可配置；与ConvSearch-R1作者full-history设置比较时，分别报告历史范围、成本和覆盖。
 
 ### 在线与离线来源集合的具体差别
 
-在线scope为`committed_required_keys`，来自各历史TurnRecord的required集合，**只是当时visible的保守子集**。离线`bench/source_topic_eval.py`从较早audit的`visible_evidence_manifest`重建来源，通常scope为`prior_audit_visible`。它不会声称两者对任意APPEND/optional material严格等价；真实差异的反例测试已覆盖。
+在线scope为`committed_required_keys`，来自各历史TurnRecord的required集合，是当时visible的子集。离线`bench/source_topic_eval.py`从较早audit的`visible_evidence_manifest`重建来源，通常scope为`prior_audit_visible`，可包含APPEND保留的其他可见材料。测试覆盖了两者的集合差异。
 
 若每个较早audit的visible原文/passage ID恰好等于当轮retrieved原文，则所有current retrieved必为required的已有合同能证明该形状等价，trace记`prior_audit_visible_equals_retrieved`。本次旧off的完整41轮全部满足该前提，每轮5/5；冻结driver显式核对它。缺失的较早正文不能用当前轮body补回当前query。两入口manifest/trace均记录scope，不改变TurnRecord语义、不新建状态。
 

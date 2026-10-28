@@ -40,7 +40,7 @@
 
 ## 提取与未知范围
 
-- 函数/异步方法保留包括装饰器、签名、docstring与方法体的连续原文区间；类记录保留装饰器、类声明及完整类docstring，缺docstring时只保留声明。不存在的文档不补写，类片段不承诺是独立可执行程序。
+- 函数/异步方法保留包括装饰器、签名、docstring与方法体的连续原文区间；类记录保留装饰器、类声明及完整类docstring，缺docstring时只保留声明。这些片段用于来源阅读。
 - 可显式选择公开类的`Client.__init__`，或将它作为操作符号的同文件依赖；初始化函数保留原始完整源码、声明参数与`initializer_of`。该接口补齐操作参数之外的初始化依赖。仅选择`Client`不会自动展开初始化代码，也不开放其他私有/dunder符号；继承而未在该类定义的初始化仍为未知。它不自动补齐外部认证库或证明整个示例可执行。
 - `span` 是按源文件声明encoding解码后的Unicode字符偏移，半开区间；行号从1开始。CRLF、Unicode及原缩进保留。原文件字节SHA与文本字符偏移用途不同。
 - `api_source.signature`、`docstring`、HTTP原表达式均附原文span；签名按token定位，不重构格式。`required_declared_parameters`按原AST列出必需的声明参数，也包含声明中的 `self`；不是运行时绑定后的调用签名。
@@ -49,9 +49,9 @@
 
 ## 依赖与现有证据入口
 
-依赖仅来自规格中的显式同文件公开符号关系，或原方法注解指向同文件实际声明。前向字符串类型可以解析，`Literal`值和`Annotated`说明文字不会变成类型依赖；外部类型/导入别名不自动展开。类docstring里的关系不靠自然语言猜测，可通过公开source-spec附原位置解释后显式配置。未被请求或闭包到达的owner不会应用其依赖；manifest保留全部 `declared_dependencies`，并将这些owner列为 `unapplied_dependency_owners`，不声称已验证其目标。
+依赖来自规格中的显式同文件公开符号关系，或原方法注解指向同文件实际声明。前向字符串类型可以解析，`Literal`值和`Annotated`说明文字不会变成类型依赖；外部类型/导入别名不自动展开。类docstring里的关系通过公开source-spec附原位置解释后显式配置。未被请求或闭包到达的owner，其依赖保持未应用、未验证；manifest保留全部 `declared_dependencies`，并将这些owner列为 `unapplied_dependency_owners`。
 
-例如真实 `CloudantV1.post_document` 的原注解包含 `Document`，自动加入该类；示例规格再按源码中 `_attachments` 序列化关系明确加入 `Attachment`、`Document.to_dict`。现有 `CorpusIndex.resolve` 得到四块原文。Watson的 `list_language_models` docstring明确返回 `LanguageModels`，该类型的docstring再指向 `LanguageModel`；开发规格将两步作为显式依赖保存，不宣称由类型注解自动推得。
+例如真实 `CloudantV1.post_document` 的原注解包含 `Document`，自动加入该类；示例规格再按源码中 `_attachments` 序列化关系明确加入 `Attachment`、`Document.to_dict`。现有 `CorpusIndex.resolve` 得到四块原文。Watson的 `list_language_models` docstring明确返回 `LanguageModels`，该类型的docstring再指向 `LanguageModel`；开发规格将这两步配置为显式依赖。
 
 每个record用普通 `passage_id`、固定 `version`、`text`、`span`、`source_uri`、`anchors`、`dependencies`、`provenance`。同包同路径同符号在不同版本中仍有不同EvidenceKey；裸passage ID跨版本歧义由既有CorpusIndex拒绝，调用方须选择确切key。不同仓库却共享同包/路径/符号和版本时，现有依赖查找会报告歧义，不悄悄绑定另一个仓库；调用方需分开构建有明确来源的包。新增 `api_source` 诊断信息留在records/manifest，CorpusIndex仍使用现有EvidenceBlock，不扩展核心schema。
 

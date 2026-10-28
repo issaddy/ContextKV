@@ -2,7 +2,7 @@
 
 该入口支撑模块 A 的证据选择：复用固定 BGE 权重和官方 Transformers 接口，保留独立 BM25S 基线，提供 dense、RRF 混合与 cross-encoder 重排序。原文、段落边界与证据身份保持不变。当前多轮主线配置使用这一共享入口，开发数据用于改进，独立测试与开发结果分开报告。
 
-在线最终选择至多五个不同内容组，相同标题/正文不重复占名额；已知版本、父级范围和条件依赖参与分组，所选代表仍是原始来源。普通前五段中的不同正文保留，再从已有评分池补齐，不增加模型调用。显式条件融合保留主任务锚点。`search_variants`与离线`retrieval_eval`仍提供原始评分阶段，便于比较排序器；在线分组结果及新增材料另由`HybridRetriever`记录，不把原始排序报告冒充集成效果。
+在线最终选择至多五个不同内容组，相同标题/正文不重复占名额；已知版本、父级范围和条件依赖参与分组，所选代表仍是原始来源。普通前五段中的不同正文保留，再从已有评分池补齐，不增加模型调用。显式条件融合保留主任务锚点。`search_variants`与离线`retrieval_eval`提供原始评分阶段，便于比较排序器；在线分组结果及新增材料由`HybridRetriever`另行记录。
 
 ## 选择依据与具体复用
 
@@ -10,14 +10,14 @@
 
 | 机制 | 官方依据与复用入口 | 本项目适配与限制 |
 |---|---|---|
-| BGE-M3 dense | [官方模型卡](https://huggingface.co/BAAI/bge-m3)提供多语言、长输入 dense 表征；本次只用 dense 分支。[固定 pooling 配置](https://huggingface.co/BAAI/bge-m3/blob/5617a9f61b028005a4858fdac845db406aefb181/1_Pooling/config.json)指定 CLS | `AutoModel` → CLS → L2 normalization；query 不加 BGE-v1.5 的检索指令。原始 `title + newline + text` 编码一次，1024 维 float32 memmap，精确内积检索。没有调用 M3 的 sparse/ColBERT 分支，不宣称复现其完整 ensemble |
-| BM25 + dense 的 RRF | [Cormack 等 SIGIR 2009 原文](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)给出按排名倒数融合的公式，避免直接混合不同量纲的分数 | 两路各取 50，等权 `sum(1/(60 + rank))`，ID 确定性破同分。公式为方法复用、本地纯函数实现；不复制第三方未明许可证代码，也不把 RRF 称为本项目创新 |
-| BGE-reranker-v2-m3 | [官方模型卡](https://huggingface.co/BAAI/bge-reranker-v2-m3)提供 `AutoModelForSequenceClassification` 与 query/passage 成对推理 | 对 RRF 前 50 重新排序，在线按内容组选择至多 5 段；raw logits 不解释成校准的相关概率、支持概率或回答正确率 |
-| 多轮 query 表征 | [IBM 固定检索任务说明](https://github.com/IBM/mt-rag-benchmark/blob/53fef6f5917c7e10c436f697e69a955dbc795d81/mtrag-human/retrieval_tasks/README.md)包含最后问题、全部用户问题和 rewrite 设置，其实验说明检索器与问题表征都值得比较 | 实现 current、last3、all_user；第四个可选视角显式读取冻结 P2/P3 actual_history。没有把数据集给出的 rewrite、参考 assistant、qrels 或未来轮次带入检索，也没有以拼接历史冒充学习式 query rewriting |
+| BGE-M3 dense | [官方模型卡](https://huggingface.co/BAAI/bge-m3)提供多语言、长输入 dense 表征；本次使用 dense 分支。[固定 pooling 配置](https://huggingface.co/BAAI/bge-m3/blob/5617a9f61b028005a4858fdac845db406aefb181/1_Pooling/config.json)指定 CLS | `AutoModel` → CLS → L2 normalization；query 直接编码。原始 `title + newline + text` 编码一次，1024 维 float32 memmap，精确内积检索 |
+| BM25 + dense 的 RRF | [Cormack 等 SIGIR 2009 原文](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)给出按排名倒数融合的公式，避免直接混合不同量纲的分数 | 两路各取 50，等权 `sum(1/(60 + rank))`，ID 确定性破同分；按论文公式实现为本地纯函数 |
+| BGE-reranker-v2-m3 | [官方模型卡](https://huggingface.co/BAAI/bge-reranker-v2-m3)提供 `AutoModelForSequenceClassification` 与 query/passage 成对推理 | 使用 raw logits 对 RRF 前 50 排序，在线按内容组选择至多 5 段 |
+| 多轮 query 表征 | [IBM 固定检索任务说明](https://github.com/IBM/mt-rag-benchmark/blob/53fef6f5917c7e10c436f697e69a955dbc795d81/mtrag-human/retrieval_tasks/README.md)包含最后问题、全部用户问题和 rewrite 设置，其实验说明检索器与问题表征都值得比较 | 实现 current、last3、all_user；第四个可选视角显式读取冻结 P2/P3 actual_history。检索输入取当前问题和已有实际历史，参考答案与 qrels 用于离线评分 |
 
 方法适配关系见[机制与研究依据](../research_contributions.md)，实际质量和成本见[数据与评价](../data_and_evaluation.md)。
 
-运行只接受预先准备的本地目录，`local_files_only=True`，记录预期 revision、路径、device、dtype、软件版本、token cap 和 batch size。revision 来源明确标为 `operator_supplied_local_snapshot`，不伪称检查了全部模型文件的内容哈希。不安装 FlagEmbedding 整套依赖，不改项目 lockfile 或已有 torch 环境；复用官方兼容的 Transformers/torch 接口。
+运行使用预先准备的本地目录，`local_files_only=True`，通过 Transformers/torch 接口加载。记录预期 revision、路径、device、dtype、软件版本、token cap 和 batch size；revision 来源标为 `operator_supplied_local_snapshot`，表示操作者声明的本地版本。
 
 ## 已实现接口与实验产物
 
@@ -33,9 +33,9 @@
 
 阶段为 BM25、dense、hybrid、hybrid_rerank。共用已计算的 BM25/dense 结果以节约 GPU，不重复四次相同编码。因共用阶段、索引暖化且没有独立重复测量，耗时是**探索性顺序阶段墙时**，不是正式吞吐/尾延迟实验；模型/索引加载、生成和未来在线集成开销尚未包含。
 
-encoder 默认 8192 tokens。reranker API 默认 512，与模型卡的 Transformers 示例一致；实验可显式选择 1024/2048 等长度。固定 reranker config 的 `max_position_embeddings=8194`，512 不是其硬容量限制。本次首轮建议 1024，以容纳原段落与对话问题；记录触顶数后再判断是否需要长输入对照。`token_limit_hits` 表示达到配置上限，可能包含刚好等长的输入，不伪称精确截断计数。
+encoder 默认 8192 tokens。reranker API 默认 512，与模型卡的 Transformers 示例一致；固定模型 config 的 `max_position_embeddings=8194`。主线配置采用 1024，以容纳原段落与对话问题，也可按实际长度配置其他上限。`token_limit_hits` 统计达到配置上限的输入，包含刚好等长的情况。
 
-构建时保留完整原始 passages，与 BM25 相同的语料摘要在加载/阶段边界核对一次；不逐请求重哈希语料或权重。每 4096 个 passage 打印一次进度及完成时进度，不增加恢复/检查点系统。72,442 × 1024 × float32 的 vectors 约 297 MB，查询使用 memory map 上的精确内积；当前规模无需额外 ANN 服务。
+构建时保留完整原始 passages，与 BM25 相同的语料摘要在加载/阶段边界核对一次。每 4096 个 passage 及完成时打印进度。72,442 × 1024 × float32 的 vectors 约 297 MB，查询使用 memory map 上的精确内积。
 
 ## 开发集运行方式
 
@@ -62,7 +62,7 @@ python -m bench.retrieval_eval evaluate \
 
 当前固定 Cloud dev 为 5 会话、41 轮。稀疏语料 snapshot 为 `mtrag-53fef6f5917c7e10c436f697e69a955dbc795d81`，原始 passage 数 72,442，语料摘要 `04fb31f7d4301aa2fd3d12c161cf06265a9bbf9f41e56116d90637f9d053afad`；实际 build manifest 必须与稀疏 manifest 对齐。使用 passage-level 文件，不能把文档级 ID 与带 chunk offsets 的 qrels 混用。
 
-省 GPU 的首轮只做上述检索，不生成 12 组答案。已有 BM25-only 可省略 dense/encoder/reranker 参数；固定真实历史视角可显式加 `--query-modes generated_history --history-audit <P2或P3完整audit.jsonl>`，并另存目录。正式性能实验再独立加载选定检索器，计入实际检索/重排成本和显存占用。
+上述命令执行检索评价。已有 BM25-only 可省略 dense/encoder/reranker 参数；固定真实历史视角可显式加 `--query-modes generated_history --history-audit <P2或P3完整audit.jsonl>`，并另存目录。系统性能实验独立加载选定检索器，计入实际检索/重排成本和显存占用。
 
 ## 共享 P3 生成入口
 
@@ -89,15 +89,15 @@ python -m controller.cli \
 
 encoder/reranker 与 SGLang 共用 GPU 时，其他会话检索可能与生成竞争；这属于真实系统成本。当前锁只限制检索模型的并发，不阻断 SGLang。正式报告要同时给完整响应时延、检索阶段耗时、失败/未完成率、GPU 资源条件与检索模型驻留；已有空闲 GPU 成本标定不能自动当作新并发负载已验证。
 
-接线测试运行两种真实 CLI 路径（测试模型与 fake HTTP），验证相同前五、每轮实际生成历史、无参考答案进入查询、每 run 只加载一次、模型释放、矩阵来源绑定以及检索排队计时。这些测试仅说明合同正确；真实 P3 的回答质量与整体成本仍需独立测量。
+接线测试运行两种真实 CLI 路径（测试模型与 fake HTTP），验证相同前五、每轮实际生成历史、无参考答案进入查询、每 run 只加载一次、模型释放、矩阵来源绑定以及检索排队计时。真实 P3 的回答质量与整体成本见[数据与评价](../data_and_evaluation.md)。
 
 ## 原始来源窗口
 
-`source_window: true`显式启用来源窗口。复用[ParentDocumentRetriever](https://reference.langchain.com/python/langchain-classic/retrievers/parent_document_retriever/ParentDocumentRetriever)的“小片段检索、较大范围阅读”原则及[LlamaIndex窗口检索](https://developers.llamaindex.ai/python/examples/node_postprocessor/metadatareplacementdemo/)的相邻上下文组织方法：原有索引与50段评分不变，五个内容组代表确定后，补入每个命中前后各一段原文。窗口在同一来源、文档、版本和已声明章节内建立，重叠命中只补一次，不沿补充段落继续扩张。当前示例关闭该项：实测能补齐遗漏包地址，但缺少章节边界的语料会把指定版本和最新版流程一起引入，尚未建立默认开启的净收益。这里保留可复用工程，不据此否定结构化窗口方法，也不继续调半径。
+`source_window: true`显式启用来源窗口。复用[ParentDocumentRetriever](https://reference.langchain.com/python/langchain-classic/retrievers/parent_document_retriever/ParentDocumentRetriever)的“小片段检索、较大范围阅读”原则及[LlamaIndex窗口检索](https://developers.llamaindex.ai/python/examples/node_postprocessor/metadatareplacementdemo/)的相邻上下文组织方法：原有索引与50段评分不变，五个内容组代表确定后，补入每个命中前后各一段原文。窗口在同一来源、文档、版本和已声明章节内建立，重叠命中只补一次，不沿补充段落继续扩张。当前示例关闭该项：实测能补齐遗漏包地址，但缺少章节边界的语料会把指定版本和最新版流程一起引入，后续重点是版本和章节的适用范围。
 
 一般语料以`document_id`、`span`提供顺序；固定MT-RAG snapshot使用原有`parent-start-end` passage ID。官方说明这些是[语料入库时的offset](https://github.com/IBM/mt-rag-benchmark/blob/53fef6f5917c7e10c436f697e69a955dbc795d81/corpora/README.md)，实际检查也发现不少相邻重叠正文不一致。因此offset只用于顺序，不能据此无损拼接全文。本实现保留每段完整正文、原始身份及独立引用，不引入合成段落或重新编码索引。
 
-`OnlineTurn.contexts`仍是原来的评分命中，`supporting_contexts`另存未评分的窗口原文。HTTP、控制器CLI和Native入口共同补齐显式依赖后交给A/R，只有原命中进入检索优先级，B按真实输入计价，C按既有事务保存和退役。配置需要`--evidence-corpus`，不增加解释、encoder或reranker调用。代价是更多输入和缓存占用，原有精确token预算与原生准入继续生效；当前没有宣称窗口必然改善全部任务或解决无限历史容量。实际质量检查统一记录在[数据与评价](../data_and_evaluation.md)。
+`OnlineTurn.contexts`仍是原来的评分命中，`supporting_contexts`另存未评分的窗口原文。HTTP、控制器CLI和Native入口共同补齐显式依赖后交给A/R，只有原命中进入检索优先级，B按真实输入计价，C按既有事务保存和退役。配置需要`--evidence-corpus`，复用已有解释、encoder和reranker结果。新增输入和缓存占用计入精确token预算与原生准入。实际质量检查统一记录在[数据与评价](../data_and_evaluation.md)。
 
 ## 可选的召回/重排查询分离
 

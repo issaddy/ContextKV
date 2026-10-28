@@ -68,9 +68,9 @@ uv run --extra tokenizer --extra retrieval contextkv \
 - `visible_evidence_manifest`：原attempt所选candidate的EvidenceSpan，含稳定ref、EvidenceKey、source_uri、provenance和该次输入消息内的正文位置。
 - `citation_scope`：本轮必需证据对应的允许引用ID；APPEND与REBUILD共用同一范围。APPEND中仍可见的旧材料不自动获得本轮引用资格，明确回访时正文与资格一起恢复。
 
-visible说明该次实际输入包含哪些正文，**不是答案实际引用清单，也不证明支持答案**。完整原文可从`GET /sessions/{id}`的archive按EvidenceKey回读；消息内位置属于这次attempt的输入，不能套到后续execution上。retrieval rank/score、返回材料与明确依赖记录在现有events；初始化时的`retrieval_configured`记录检索配置/来源manifest，不每请求重复hash索引或权重。
+visible记录该次实际输入中的正文；答案引用与来源支持另行评价。完整原文可从`GET /sessions/{id}`的archive按EvidenceKey回读；消息内位置对应这次attempt的输入。retrieval rank/score、返回材料与明确依赖记录在现有events；初始化时的`retrieval_configured`记录检索配置/来源manifest。
 
-r1完成、又完成r2以后重放r1，仍返回r1原答案/IDs/来源，不能取当前snapshot的最新来源。重放的`retrieval_ms`是原attempt的历史耗时，`complete_ms/timing`不伪造本次重放测量。它不会再次检索或生成。
+r1完成、又完成r2以后重放r1，仍返回r1原答案/IDs/来源。`retrieval_ms`保留原attempt的检索耗时，`complete_ms`与`timing`为null；重放直接读取已保存结果。
 
 ## 幂等、失败与恢复
 
@@ -84,11 +84,11 @@ r1完成、又完成r2以后重放r1，仍返回r1原答案/IDs/来源，不能�
 | 输入字段无效或全文超预算 | 422；正文/QA不被静默截掉 |
 | 引擎结果未知/仍在途 | 保留attempt；按现有409 pending或503引擎错误返回，不重发生成 |
 | 完整结果可恢复 | 同ID请求或`/recover`取得同一结果并只提交一次，不重新检索 |
-| 原生length终止 | 保留实际文本/IDs并标`truncated=true`，不冒充完整正常回答 |
+| 原生length终止 | 保留实际文本/IDs并标`truncated=true` |
 | 已close会话继续新请求 | 沿原StoreError返回409 |
 | 后台退役程序或协议错误 | 写入`epoch_retire_worker_failed`事件，已提交及后续回答保持正常；drain/关闭报告维护错误 |
 
-未完成prepare的显式abandon仍是管理恢复动作，必须先确认原执行者已停止；结果未知不能因为客户端超时就放弃并重采样。超出引擎结果保留窗口或引擎重启后的恢复沿已有合同，不承诺跨重启exactly-once生成。
+未完成prepare的显式abandon是管理恢复动作，执行前确认原执行者已停止。客户端超时进入未知结果恢复。原样生成结果的恢复依赖引擎保留窗口；超出窗口或引擎重启后的状态处理见[架构](../architecture.md)。
 
 ```bash
 curl -sS -X POST http://127.0.0.1:18080/sessions/demo/recover \
