@@ -75,6 +75,9 @@
 - [ConvSearch-R1](https://aclanthology.org/2025.emnlp-main.1349/)：用推理与强化学习训练会话查询重构模型。 [代码](https://github.com/BeastyZ/ConvSearch-R1)
 - [SOM-DST](https://aclanthology.org/2020.acl-main.53/)：通过保留、更新和删除操作增量维护对话状态；原文分析指出状态操作预测与真实操作之间的准确率差距，是进一步改进的方向。 [代码](https://github.com/clovaai/som-dst)
 - [Context-Aware Dialogue State Tracking](https://aclanthology.org/N19-1057/)：根据状态字段定位相关历史上下文。
+- [AgentMemGate](https://arxiv.org/abs/2610.07707)：在长期档案写入时区分推测、已发生事件和纠正，待确认计划单独保留；原实验采用固定档案字段及额外模型判定。
+- [Gated Memory](https://arxiv.org/abs/2610.11270)：在记忆形成阶段区分当前表达和参考历史，记录来源及条件范围；其长期记忆结果不直接代表任务问答收益。
+- [Reality Monitoring in Large Language Models](https://arxiv.org/abs/2607.23927)：研究模型区分用户提供内容与自身生成内容的能力，以及对话记忆结构对来源归属的影响。
 - [JSON Merge Patch（RFC 7396）](https://www.rfc-editor.org/info/rfc7396/)：通过局部字段更新及null删除表达状态补丁。
 - [ASK](https://aclanthology.org/2025.acl-industry.63/)：结合问题方面与检索结果选择任务型对话中的澄清。
 - [ACT / Learning to Clarify](https://arxiv.org/abs/2406.00222)：通过动作对比自训练学习回答与澄清策略。 [代码](https://github.com/google-research/google-research/tree/master/learning_to_clarify)
