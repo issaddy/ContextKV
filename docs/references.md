@@ -78,6 +78,8 @@
 - [AgentMemGate](https://arxiv.org/abs/2610.07707)：在长期档案写入时区分推测、已发生事件和纠正，待确认计划单独保留；原实验采用固定档案字段及额外模型判定。
 - [Gated Memory](https://arxiv.org/abs/2610.11270)：在记忆形成阶段区分当前表达和参考历史，记录来源及条件范围；其长期记忆结果不直接代表任务问答收益。
 - [Reality Monitoring in Large Language Models](https://arxiv.org/abs/2607.23927)：研究模型区分用户提供内容与自身生成内容的能力，以及对话记忆结构对来源归属的影响。
+- [Qwen3原生推理与SGLang部署](https://github.com/QwenLM/Qwen3/blob/main/docs/source/deployment/sglang.md)：说明按请求切换思考模式、解析推理内容及结构化输出；模式的质量收益和新增生成成本需要实测。
+- [SGLang推理模型的结构化输出](https://docs.sglang.io/docs/advanced_features/structured_outputs_for_reasoning_models)：通过reasoning parser区分推理段与受语法约束的答案段，提供原生执行能力。
 - [JSON Merge Patch（RFC 7396）](https://www.rfc-editor.org/info/rfc7396/)：通过局部字段更新及null删除表达状态补丁。
 - [ASK](https://aclanthology.org/2025.acl-industry.63/)：结合问题方面与检索结果选择任务型对话中的澄清。
 - [ACT / Learning to Clarify](https://arxiv.org/abs/2406.00222)：通过动作对比自训练学习回答与澄清策略。 [代码](https://github.com/google-research/google-research/tree/master/learning_to_clarify)
