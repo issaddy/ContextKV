@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from bench import native_policy_sweep as server
-from controller.cost_model import CostModel
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,13 +42,13 @@ def check_research_checkout(checkout):
             "verification": "read-only reverse-apply check of the current patch"}
 
 
-def validate_runtime(group, runtime, *, expected_host_tokens=None, expected_hicache_gb=16):
-    """Actual scheduler capacities and unchanged cost binding, before generation."""
-    capacity = group["requested_gpu_tokens"]
+def validate_runtime(capacity, runtime, *, write_policy="write_through",
+                     expected_host_tokens=None, expected_hicache_gb=16):
+    """Actual scheduler capacities and cache settings, before generation."""
     info, pool, cache = runtime["engine"], runtime["pool"], runtime["cache_config"]
     expected = {"gpu_capacity_tokens": capacity, "page_size": 64, "hicache": True,
         "host_memory_mode": "cache", "host_layout": "layer_first", "hicache_io_backend": "kernel",
-        "write_policy": group.get("server_environment", {}).get("CONTEXTKV_WRITE_POLICY", "write_through"),
+        "write_policy": write_policy,
         "tma_transfer_enabled": False, "sample_pool": True}
     mismatch = {key: {"expected": value, "observed": cache.get(key)} for key, value in expected.items()
                 if cache.get(key) != value}
@@ -59,24 +58,7 @@ def validate_runtime(group, runtime, *, expected_host_tokens=None, expected_hica
             or runtime["server_info"].get("hicache_size") != expected_hicache_gb
             or (expected_host_tokens is not None and pool["host_capacity_tokens"] != expected_host_tokens)):
         raise ValueError(f"actual research server pool/host settings differ from the sweep: {mismatch}")
-    scope = None
-    if group["cost_methods_requested"]:
-        options = group.get("config", {}).get("cost_model", {})
-        estimator = options.get("admission_estimator")
-        model = CostModel.load(group["calibration"]["path"], max_new_tokens=1024,
-                               **({"admission_estimator": estimator} if estimator else {}))
-        from controller.sampling import SamplingRecipe
-        from controller.templates import SYSTEM_PROMPT
-        sampling = group.get("config", {}).get("sampling")
-        prompt = group.get("config", {}).get("context", {}).get("system_prompt")
-        model.configure_sampling(SamplingRecipe(**sampling) if sampling is not None else None,
-                                 fallback_mean=options.get("default_output_tokens", 128),
-                                 fallback_p90=options.get("p90_output_tokens", 256),
-                                 system_prompt=SYSTEM_PROMPT if prompt is None else prompt)
-        scope = model.check_calibration_scope(info)
-        if scope["status"] != "matching_scope" or not model.sampling_scope_compatible:
-            raise ValueError(f"Ours requires a newly bound cost artifact for this actual pool: {scope}")
-    return {"pool": pool, "cache_config": cache, "calibration_scope": scope,
+    return {"pool": pool, "cache_config": cache,
             "gpu_hardware_equivalence_verified": False}
 
 

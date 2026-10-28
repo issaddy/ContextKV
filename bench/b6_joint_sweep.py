@@ -24,11 +24,10 @@ from bench import controller_capacity_sweep as research
 from bench import native_policy_sweep as server
 from bench.experiments import (execute_job, run_matrix, matrix_jobs, matrix_config,
                                merge, provenance)
-from controller.config import RunConfig, create_model_template
-from controller.cost_model import CostModel
+from controller.config import RunConfig, create_model_template, load_cost_model
+from controller.schema import ConfigFingerprint
 from controller.serialization import decode
 from controller.sampling import SamplingRecipe, request_sampling
-from controller.templates import SYSTEM_PROMPT
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -204,16 +203,8 @@ def job_server_command(port, capacity, *, mem_fraction_static):
 
 
 def fitted_scope(config, calibration, runtime):
-    options = {"max_new_tokens": config.context.max_new_tokens,
-        "include_host_cost": config.ablation.host_cost, "include_decode_cost": config.ablation.decode_cost,
-        "include_control_cost": config.ablation.control_cost}
-    for field in ("admission_estimator", "uncertainty_mode"):
-        if getattr(config.cost_model, field) is not None:
-            options[field] = getattr(config.cost_model, field)
-    model = CostModel.load(calibration["path"], **options)
-    model.configure_sampling(config.sampling, fallback_mean=config.cost_model.default_output_tokens,
-                             fallback_p90=config.cost_model.p90_output_tokens,
-                             system_prompt=SYSTEM_PROMPT if config.context.system_prompt is None else config.context.system_prompt)
+    model = load_cost_model(config, artifact_path=calibration["path"],
+                            fingerprint=decode(ConfigFingerprint, runtime["engine"]["fingerprint"]))
     scope = model.check_calibration_scope(runtime["engine"])
     if scope["status"] != "matching_scope" or not model.sampling_scope_compatible:
         raise ValueError(f"cost job needs an artifact bound to the actual engine configuration: {scope}")
@@ -335,8 +326,8 @@ def make_owned_executor(args, shared, sources, cohort, requirements):
                     shared.model.scope.verify_native_settings(SimpleNamespace(**runtime["server_info"]))
                     if runtime["server_info"].get("pp_size") != 1:
                         raise ValueError("owned local scope requires PP1")
-                    scope = research.validate_runtime({"requested_gpu_tokens": capacity, "cost_methods_requested": False,
-                        "server_environment": env}, runtime, expected_host_tokens=host_tokens,
+                    scope = research.validate_runtime(capacity, runtime, write_policy=profile["write_policy"],
+                        expected_host_tokens=host_tokens,
                         expected_hicache_gb=profile["hicache_gb"])
                     if runtime["engine"]["fingerprint"] != fingerprint:
                         raise ValueError("actual research tokenizer/template namespace differs from the shared fingerprint")

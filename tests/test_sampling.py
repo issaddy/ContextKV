@@ -318,17 +318,13 @@ def test_controller_only_matrix_allows_recipe_and_native_requires_shared_scope(t
     assert len(matrix_jobs(matrix)) == 4
 
 
-def test_both_owned_cost_preflights_reject_cross_recipe_before_generation(tmp_path):
-    from bench import b6_joint_sweep, controller_capacity_sweep
+def test_owned_cost_preflight_rejects_cross_recipe_before_generation(tmp_path):
+    from bench import b6_joint_sweep
     from test_controller_capacity_sweep import cost_artifact, runtime
     path = cost_artifact(tmp_path)
     config = replace(RunConfig(), sampling=RECIPE)
     with pytest.raises(ValueError, match="actual engine configuration"):
         b6_joint_sweep.fitted_scope(config, {"path": str(path)}, runtime())
-    group = {"requested_gpu_tokens": 16384, "cost_methods_requested": True,
-             "calibration": {"path": str(path)}, "config": {"sampling": RECIPE.record()}}
-    with pytest.raises(ValueError, match="newly bound"):
-        controller_capacity_sweep.validate_runtime(group, runtime())
 
 
 @pytest.mark.parametrize("source_config,requested", [
