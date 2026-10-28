@@ -64,15 +64,15 @@
 - [RankGPT](https://aclanthology.org/2023.emnlp-main.923/)：通过文档标识排序使用语言模型进行检索重排。
 - [CHIQ](https://aclanthology.org/2024.emnlp-main.135/)：增强对话历史理解，再生成适合检索的独立查询。 [代码](https://github.com/fengranMark/CHIQ)
 - [HAConvDR](https://aclanthology.org/2024.findings-acl.792/)：利用历史轮次的检索贡献学习会话检索表示。 [代码](https://github.com/fengranMark/HAConvDR)
-- [QuReTeC](https://arxiv.org/abs/2005.11723)：从历史中选择相关词项补全当前检索查询。
+- [QuReTeC](https://arxiv.org/abs/2005.11723)：从历史中选择相关词项补全当前检索查询。[作者代码](https://github.com/nickvosk/sigir2020-query-resolution)和[公开模型卡](https://huggingface.co/uva-irlab/quretec/blob/main/README.md)采用BERT-large词项分类及300-token序列；可研究可追溯的历史选择，但不能直接视为长历史、角色关系和条件作用域的完整解决方案。
 - [CANARD](https://aclanthology.org/D19-1605/)：提供依赖历史的问题到独立问题的改写数据。
 - [Multi-View Reranking（MVR）](https://aclanthology.org/2020.findings-emnlp.354/)：组合多个查询视角与重排结果改善会话搜索。
 - [Faithful Query Resolution](https://arxiv.org/abs/2610.15034)：区分忠实意图解析与扩大检索覆盖的查询扩展；检索排序收益与交互回答效果分别验证。v1的融合比较同时改变查询集合和权重，不能单独归因于权重。
 - [ICR](https://aclanthology.org/2025.emnlp-main.496/)：交替生成澄清问题和查询改写以处理多重歧义。
 - [Dialogue-RAG](https://aclanthology.org/2025.acl-long.1191/)：通过话语节点连接恢复省略信息并改写查询。
-- [Learning Multi-Step Query Rewriting via Corpus Feedback](https://arxiv.org/abs/2610.10955)：利用检索反馈学习多步改写与停止策略。
+- [Learning Multi-Step Query Rewriting via Corpus Feedback](https://arxiv.org/abs/2610.10955)：利用检索反馈学习多步改写与停止策略。v1采用训练后的Qwen3-4B、最多5步，每次反馈前5段各截至128 tokens；TopiOCQA中93%轨迹执行第5次改写。该结果支持研究检索反馈，不证明完整阅读或低延迟，不能把其片段截断直接用于本项目最终证据。
 - [CompCQR](https://arxiv.org/abs/2609.14646)：组合改写、假设答案和对话组件进行会话检索。 [代码](https://github.com/YunahJang/CompCQR)
-- [ConvSearch-R1](https://aclanthology.org/2025.emnlp-main.1349/)：用推理与强化学习训练会话查询重构模型。 [代码](https://github.com/BeastyZ/ConvSearch-R1)
+- [ConvSearch-R1](https://aclanthology.org/2025.emnlp-main.1349/)：用检索反馈、自蒸馏和强化学习训练会话查询重构模型。[代码](https://github.com/BeastyZ/ConvSearch-R1)提供3B权重；使用示例输出think及rewrite，预算为4096 tokens。示例改写还生成潜在答案信息，因此只能作为待验证检索投影，不能直接当作用户任务事实；模型较小不等于完整调用成本较低。
 - [SOM-DST](https://aclanthology.org/2020.acl-main.53/)：通过保留、更新和删除操作增量维护对话状态；原文分析指出状态操作预测与真实操作之间的准确率差距，是进一步改进的方向。 [代码](https://github.com/clovaai/som-dst)
 - [Context-Aware Dialogue State Tracking](https://aclanthology.org/N19-1057/)：根据状态字段定位相关历史上下文。
 - [AgentMemGate](https://arxiv.org/abs/2610.07707)：在长期档案写入时区分推测、已发生事件和纠正，待确认计划单独保留；原实验采用固定档案字段及额外模型判定。
