@@ -81,9 +81,14 @@ class OnlineTurn:
 
 def load_rows(path: str | Path) -> list[dict[str, Any]]:
     """Offline-only loader; do not hand these dictionaries to a planner."""
+    data = Path(path).read_bytes()
+    # Official files use descriptive string labels in `dataset`, not the
+    # canonical adapter identity mapping. Bind only the pinned file bytes;
+    # a copied label in an edited/custom file cannot assert this revision.
+    name = {DATASET_SHA256: "mtrag", MTRAG_UN_SHA256: "mtrag-un"}.get(sha256(data).hexdigest())
     rows = []
     seen = set()
-    for line_no, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+    for line_no, line in enumerate(data.decode("utf-8").splitlines(), 1):
         if not line.strip():
             continue
         row = json.loads(line)
@@ -94,6 +99,8 @@ def load_rows(path: str | Path) -> list[dict[str, Any]]:
         if identity in seen:
             raise ValueError(f"duplicate conversation/turn: {identity}")
         seen.add(identity)
+        if name is not None:
+            row["dataset"] = {"name": name, "revision": DATASET_COMMIT, "commit": DATASET_COMMIT}
         rows.append(row)
     return rows
 
@@ -101,7 +108,11 @@ def load_rows(path: str | Path) -> list[dict[str, Any]]:
 def dataset_identity(rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     """Read an adapter's declared identity; legacy MT-RAG files keep theirs."""
     legacy = {"name": "mtrag", "revision": DATASET_COMMIT, "commit": DATASET_COMMIT}
-    identity = dict(rows[0].get("dataset", legacy)) if rows else legacy
+    value = rows[0].get("dataset", legacy) if rows else legacy
+    if (not isinstance(value, Mapping)
+            or any(not isinstance(value.get(k), str) or not value[k].strip() for k in ("name", "revision"))):
+        raise ValueError("dataset identity requires name/revision metadata; use load_rows for pinned official files")
+    identity = dict(value)
     if any(row.get("dataset", legacy) != identity for row in rows):
         raise ValueError("one benchmark job must use one dataset identity")
     return identity

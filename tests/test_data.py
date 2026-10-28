@@ -4,15 +4,64 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import threading
+import tempfile
 import unittest
+from unittest.mock import patch
+from hashlib import sha256
 
 from adapters.mtrag import (OnlineMessage, OnlineSession, json_hash, load_rows,
-                            online_turn, profile_rows, stratified_split)
+                            online_turn, profile_rows, stratified_split, dataset_identity, DATASET_COMMIT)
 from adapters.retrieval import (BM25SRetriever, fixed_retrieve, load_beir_corpus,
                                 retrieval_query, to_evidence)
 from bench.run_sessions import run_sessions
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mtrag_small.jsonl"
+
+
+class DatasetIdentityTests(unittest.TestCase):
+    def test_pinned_author_labels_normalize_without_changing_serving_content(self):
+        for constant, label, name in [("DATASET_SHA256", "MT-RAG Authors (Internal)", "mtrag"),
+                                      ("MTRAG_UN_SHA256", "MT-RAG 2.0", "mtrag-un")]:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                row = load_rows(FIXTURE)[1]
+                row["dataset"] = label
+                data = (json.dumps(row) + "\n").encode()
+                path = Path(directory)/"tasks.jsonl"
+                path.write_bytes(data)
+                with patch("adapters.mtrag."+constant, sha256(data).hexdigest()):
+                    loaded = load_rows(path)
+                self.assertEqual(dataset_identity(loaded),
+                    {"name": name, "revision": DATASET_COMMIT, "commit": DATASET_COMMIT})
+                self.assertEqual(online_turn(loaded[0], "P1"), online_turn(row, "P1"))
+                self.assertEqual(path.read_bytes(), data)
+
+    def test_same_author_label_does_not_bind_an_edited_file_to_pinned_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            row = load_rows(FIXTURE)[0]
+            row["dataset"] = "MT-RAG 2.0"
+            data = (json.dumps(row) + "\n").encode()
+            path = Path(directory)/"tasks.jsonl"
+            path.write_bytes(data+b"\n")
+            with patch("adapters.mtrag.MTRAG_UN_SHA256", sha256(data).hexdigest()):
+                loaded = load_rows(path)
+            with self.assertRaisesRegex(ValueError, "name/revision"):
+                dataset_identity(loaded)
+
+    def test_declared_adapter_and_legacy_identity_contracts(self):
+        rows = load_rows(FIXTURE)
+        self.assertEqual(dataset_identity(rows)["name"], "mtrag")
+        identity = {"name": "another-adapter", "revision": "release-v2"}
+        for row in rows:
+            row["dataset"] = dict(identity)
+        self.assertEqual(dataset_identity(rows), identity)
+        rows[-1]["dataset"]["revision"] = "release-v3"
+        with self.assertRaisesRegex(ValueError, "one dataset"):
+            dataset_identity(rows)
+
+    def test_malformed_identity_fails_at_adapter_boundary(self):
+        for value in ["unverified label", None, {}, {"name": "x"}, {"name": 1, "revision": "v1"}]:
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "name/revision"):
+                dataset_identity([{"dataset": value}])
 
 
 class DataTests(unittest.TestCase):
