@@ -1,0 +1,19 @@
+# Optional trained query encoder; see docs/guides/hybrid_retrieval.md.
+schema_version: 1
+kind: hybrid
+stage: dense
+query_mode: dialogue
+sparse_index: data/cloud-bm25s
+dense_index: data/cloud-bge-m3
+encoder_path: models/bge-m3
+reranker_path: null
+device: cuda:1
+dtype: bfloat16
+batch_size: 16
+encoder_max_length: 8192
+candidate_k: 50
+cpu_threads: 1
+query_fusion: single
+source_window: false
+selector: null
+query_adapter_path: models/bge-m3-dialogue-query-v1

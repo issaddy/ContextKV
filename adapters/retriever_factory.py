@@ -37,6 +37,7 @@ class HybridRetrievalConfig:
     selector_schema_mode: str = "static_v1"
     rerank_query_mode: str = "resolved"
     source_window: bool = False
+    query_adapter_path: str | None = None
     source_documents: str | None = None
     evidence_selection: str = "ranked"
 
@@ -57,6 +58,10 @@ def load_retriever_config(path):
     if value.evidence_selection == "semantic" and (
             value.query_mode != "conversational" or value.selector is None):
         raise ValueError("semantic evidence selection requires conversational mode with selector")
+    if value.query_adapter_path and value.query_mode not in {"current", "dialogue"}:
+        raise ValueError("query adapters require their trained literal current/dialogue view")
+    if value.query_adapter_path and value.stage != "dense":
+        raise ValueError("query adapters currently require dense scoring")
     if value.query_mode == "conversational":
         from adapters.query_selector import SelectorConfig
         if value.selector is not None:
@@ -86,7 +91,11 @@ def load_retriever_config(path):
 def retriever_config_sources(path):
     """Small provenance files for the existing experiment-boundary digest mechanism."""
     config = load_retriever_config(path)
-    return (str(path), str(Path(config.sparse_index)/"manifest.json"),
+    adapter_sources = ()
+    if config.query_adapter_path:
+        root = Path(config.query_adapter_path)
+        adapter_sources = tuple(str(root/name) for name in ("query-adapter.json", "adapter/adapter_config.json", "adapter/adapter_model.safetensors"))
+    return (*adapter_sources, str(path), str(Path(config.sparse_index)/"manifest.json"),
             str(Path(config.dense_index)/"manifest.json"),
             *((config.source_documents,) if config.source_window and config.source_documents else ()))
 
@@ -107,8 +116,12 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
         # Failed startup closes the models/client already created on this path.
         with ExitStack() as cleanup:
             encoder = LocalBGE(config.encoder_path, device=config.device, dtype=config.dtype,
-                               batch_size=config.batch_size, max_length=config.encoder_max_length)
+                               batch_size=config.batch_size, max_length=config.encoder_max_length,
+                               query_adapter_path=config.query_adapter_path,
+                               normalize_float32=config.query_mode == "dialogue")
             cleanup.callback(encoder.close)
+            if config.query_adapter_path and encoder.manifest["query_adapter"]["query_mode"] != config.query_mode:
+                raise ValueError("query adapter input recipe differs from configured query_mode")
             reranker = None
             if config.stage == "hybrid_rerank":
                 reranker = LocalBGE(config.reranker_path, reranker=True, device=config.device, dtype=config.dtype,

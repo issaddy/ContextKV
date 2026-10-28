@@ -63,7 +63,7 @@
 - [AdaPCR](https://arxiv.org/abs/2507.04069)：根据多个片段的互补关系进行自适应组合检索。
 - [RankGPT](https://aclanthology.org/2023.emnlp-main.923/)：通过文档标识排序使用语言模型进行检索重排。
 - [CHIQ](https://aclanthology.org/2024.emnlp-main.135/)：增强对话历史理解，再生成适合检索的独立查询。 [代码](https://github.com/fengranMark/CHIQ)
-- [HAConvDR](https://aclanthology.org/2024.findings-acl.792/)：利用历史轮次的检索贡献学习会话检索表示。 [代码](https://github.com/fengranMark/HAConvDR)
+- [HAConvDR](https://aclanthology.org/2024.findings-acl.792/)：结合历史去噪和历史轮次实际检索贡献构造监督，训练会话稠密检索；重点处理长历史噪声与话题切换。 [代码](https://github.com/fengranMark/HAConvDR)。本项目的固定文档向量、查询侧LoRA试验仅参考会话检索学习方向，不是其算法复现。
 - [QuReTeC](https://arxiv.org/abs/2005.11723)：从历史中选择相关词项补全当前检索查询。[作者代码](https://github.com/nickvosk/sigir2020-query-resolution)和[公开模型卡](https://huggingface.co/uva-irlab/quretec/blob/main/README.md)采用BERT-large词项分类及300-token序列；可研究可追溯的历史选择，但不能直接视为长历史、角色关系和条件作用域的完整解决方案。
 - [CANARD](https://aclanthology.org/D19-1605/)：提供依赖历史的问题到独立问题的改写数据。
 - [Multi-View Reranking（MVR）](https://aclanthology.org/2020.findings-emnlp.354/)：组合多个查询视角与重排结果改善会话搜索。
@@ -98,7 +98,7 @@
 - [会话RAG中的历史信息利用研究](https://www.sciencedirect.com/science/article/pii/S0306457325003905)：研究历史搜索结果与对话信息的复用。
 - [Contextual Retrieval](https://www.anthropic.com/research/contextual-retrieval)：为片段补充文档背景以改善检索表示。
 - [Late Chunking](https://arxiv.org/abs/2409.04701)：先编码长文档，再按片段聚合上下文相关向量。
-- [ContextualRetriever](https://aclanthology.org/2025.emnlp-main.602/)：学习带上下文信息的检索表示以改善会话搜索。
+- [ContextualRetriever](https://aclanthology.org/2025.emnlp-main.602/)：在会话上下文中突出当前查询，通过改写意图监督和保留生成能力的训练学习检索表示，减少额外自回归改写。其训练和基座依赖必须单列；不能把普通BGE历史拼接或查询侧LoRA称为原方法复现，也不能将论文的检索时延视为本系统完整响应。
 - [LangChain ParentDocumentRetriever](https://reference.langchain.com/python/langchain-classic/retrievers/parent_document_retriever/ParentDocumentRetriever)：用小片段检索并返回更完整的父文档内容。
 - [H-RAG](https://arxiv.org/abs/2605.00631)：在多轮RAG中分离子片段检索与父文档上下文恢复；检索效果与完整回答效果分别评价。
 - [LlamaIndex Sentence Window Retrieval](https://developers.llamaindex.ai/python/examples/node_postprocessor/metadatareplacementdemo/)：在检索命中后恢复相邻句子窗口。

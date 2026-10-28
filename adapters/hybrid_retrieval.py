@@ -144,14 +144,27 @@ def select_requirement_evidence(primary, rankings, *, top_k=5, group_key=None):
 class LocalBGE:
     """Official Transformers-compatible checkpoints; explicit device/dtype/path."""
     def __init__(self, model_path, *, reranker=False, device="cpu", dtype="float32",
-                 batch_size=16, max_length=None):
+                 batch_size=16, max_length=None, query_adapter_path=None, normalize_float32=False):
         if batch_size < 1 or (max_length is not None and max_length < 1):
             raise ValueError("model batch size and token limit must be positive")
         import torch
         from importlib.metadata import version
         from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
         self.torch, self.batch_size, self.reranker = torch, batch_size, reranker
+        if reranker and (query_adapter_path or normalize_float32):
+            raise ValueError("query encoder adaptation is not a reranker option")
+        self.normalize_float32 = normalize_float32 or query_adapter_path is not None
         self.max_length = max_length if max_length is not None else (512 if reranker else 8192)
+        metadata = None
+        if query_adapter_path is not None:
+            from hashlib import sha256
+            from adapters.dialogue_query import load_query_adapter
+            from peft import PeftModel
+            metadata = load_query_adapter(query_adapter_path, {
+                "model_id": ENCODER_ID, "revision": ENCODER_REVISION,
+                "max_length": self.max_length,
+                "pooling": "CLS then L2 normalization; BGE-M3 needs no query instruction"},
+                base_config_sha256=sha256((Path(model_path)/"config.json").read_bytes()).hexdigest())
         self.tokenizer = AutoTokenizer.from_pretrained(str(model_path), local_files_only=True)
         loader = AutoModelForSequenceClassification if reranker else AutoModel
         self.model = loader.from_pretrained(str(model_path), local_files_only=True)
@@ -167,6 +180,22 @@ class LocalBGE:
             "implementation": "Transformers official checkpoint API",
             "pooling": None if reranker else "CLS then L2 normalization; BGE-M3 needs no query instruction"}
 
+        if self.normalize_float32:
+            document_encoder = {k: self.manifest[k] for k in ("model_id", "revision", "max_length", "pooling")}
+            self.manifest.update(document_encoder=document_encoder, pooling="CLS then FP32 L2 normalization")
+        if query_adapter_path is not None:
+            try:
+                self.model = PeftModel.from_pretrained(self.model,
+                    str(Path(query_adapter_path)/"adapter"),
+                    local_files_only=True, is_trainable=False).eval()
+            except BaseException:
+                self.close()
+                raise
+            self.manifest.update(model_id="contextkv/query-lora", revision="sha256:"+metadata["adapter_sha256"],
+                revision_provenance="verified query adapter with explicit frozen document-encoder compatibility",
+                query_adapter=metadata)
+            self.manifest["packages"]["peft"] = version("peft")
+
     def _forward(self, values):
         outputs = []
         for start in range(0, len(values), self.batch_size):
@@ -180,7 +209,9 @@ class LocalBGE:
             with self.torch.inference_mode():
                 result = self.model(**encoded, return_dict=True)
                 value = (result.logits.reshape(-1) if self.reranker else
-                         self.torch.nn.functional.normalize(result.last_hidden_state[:, 0], p=2, dim=1))
+                         self.torch.nn.functional.normalize(
+                             result.last_hidden_state[:, 0].float() if self.normalize_float32
+                             else result.last_hidden_state[:, 0], p=2, dim=1))
             outputs.append(value.float().cpu().numpy())
         import numpy as np
         return np.concatenate(outputs, axis=0) if outputs else np.array([])
@@ -227,6 +258,8 @@ class DenseIndex:
         import numpy as np
         if batch_size < 1:
             raise ValueError("index build batch size must be positive")
+        if encoder.manifest.get("document_encoder") is not None:
+            raise ValueError("build document vectors with the base document encoder, not a query view")
         contexts = tuple(sorted(contexts, key=lambda c: c.document_id))
         if not contexts:
             raise ValueError("dense corpus must not be empty")
@@ -274,7 +307,7 @@ class DenseIndex:
         """Encode the current task and its needs together; reuse the fixed vectors."""
         import numpy as np
         for field in ("model_id", "revision", "max_length", "pooling"):
-            if self.manifest["encoder"].get(field) != encoder.manifest.get(field):
+            if self.manifest["encoder"].get(field) != encoder.manifest.get("document_encoder", encoder.manifest).get(field):
                 raise ValueError("query encoder differs from the saved dense index")
         vectors = encoder.encode(list(queries))
         result = []
@@ -538,10 +571,12 @@ def validate_retrieval_options(*, query_mode, stage, query_fusion, rerank_query_
                                candidate_k, rerank_k, rrf_k, joint_selection=False):
     """One contract for file-based configuration and direct construction."""
     from adapters.query_resolution import SOURCE_MODES
-    if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", *SOURCE_MODES}:
+    if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", "dialogue", *SOURCE_MODES}:
         raise ValueError(f"unknown online query_mode: {query_mode}")
     if stage not in {"dense", "hybrid", "hybrid_rerank"}:
         raise ValueError("unknown retrieval stage")
+    if query_mode == "dialogue" and (stage != "dense" or query_fusion != "single"):
+        raise ValueError("literal dialogue retrieval requires dense single-query scoring")
     if query_fusion not in {"single", "current_topic_rrf", "dialogue_rrf"}:
         raise ValueError("unknown query fusion")
     if query_fusion == "current_topic_rrf" and (query_mode not in {"user_topic", "conversational", *SOURCE_MODES} or stage == "dense"):
@@ -584,6 +619,8 @@ class HybridRetriever:
             raise ValueError("topic selector modes require resolver and current_topic_rrf")
         if query_mode == "conversational" and resolver is None:
             raise ValueError("conversational retrieval needs a resolver")
+        if query_mode == "dialogue" and resolver is not None:
+            raise ValueError("literal dialogue retrieval does not use a resolver")
         if stage == "hybrid_rerank" and reranker is None:
             raise ValueError("hybrid_rerank requires a loaded reranker")
         if sparse.manifest["corpus_sha256"] != dense.manifest["corpus_sha256"]:
@@ -594,7 +631,7 @@ class HybridRetriever:
         self.query_fusion = query_fusion
         self.rerank_query_mode = rerank_query_mode
         self.resolver = resolver
-        self.requires_history_context = query_mode in SOURCE_MODES or query_mode == "conversational"
+        self.requires_history_context = query_mode in SOURCE_MODES or query_mode in {"conversational", "dialogue"}
         self.requires_source_context = query_mode in SOURCE_MODES
         self.candidate_k, self.rerank_k, self.rrf_k = candidate_k, rerank_k, rrf_k
         self.source_config = source_config
@@ -676,6 +713,10 @@ class HybridRetriever:
             "token_limit_note": "at configured token cap; includes possible exact-length inputs"}
         if self.query_mode == "user_topic":
             manifest.update(query_view=user_topic_manifest(), query_view_traces=list(self.query_view_traces))
+        if self.query_mode == "dialogue":
+            from adapters.dialogue_query import QUERY_VIEW_VERSION
+            manifest.update(query_view={"version": QUERY_VIEW_VERSION, "scope": "actual QA, current question first; retrieval input only"},
+                            query_view_traces=list(self.query_view_traces))
         if self.resolver is not None:
             manifest.update(query_view=self.resolver.manifest, query_view_traces=list(self.query_view_traces))
         if self.evidence_selector is not None:
@@ -703,6 +744,16 @@ class HybridRetriever:
             raise ValueError("semantic evidence selection requires --evidence-corpus metadata")
         started = time.perf_counter()
         view = user_topic_view(turn.user_questions) if self.query_mode == "user_topic" else None
+        if self.query_mode == "dialogue":
+            if prior_context is None:
+                raise ValueError("literal dialogue retrieval requires committed actual history context")
+            from adapters.dialogue_query import QUERY_VIEW_VERSION, query_view
+            with self._lock:
+                query, selection = query_view(turn.query, [asdict(m) for m in turn.history],
+                    self.encoder.tokenizer, limit=self.encoder.max_length)
+            view = {"mode": "dialogue", "version": QUERY_VIEW_VERSION, "text": query,
+                    "model_called": False, "status": "literal_view", "context": None,
+                    "history_view": selection, "semantics": "retrieval input only; no derived user facts or task state"}
         if self.resolver is not None:
             if prior_context is None:
                 raise ValueError("topic selector requires an explicit committed history context")

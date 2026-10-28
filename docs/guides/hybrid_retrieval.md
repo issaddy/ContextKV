@@ -126,3 +126,18 @@ encoder/reranker与SGLang共用GPU时，检索和生成会竞争资源。检索�
 ## 联合语义选材配置
 
 `evidence_selection: semantic`使用同一解释客户端联合更新任务和选择来源，需要`query_mode: conversational`、selector及证据元数据。可与`source_window`和`source_documents`组合；`hybrid`直接提供候选，`hybrid_rerank`增加一次主任务重排。完整阅读目录、依赖、预算装入及无效输出处理见[联合决策机制](../research/source_grounded_query_resolution.md#复合需求与选材)。默认仍为`ranked`，已有比较集中在[评价记录](../data_and_evaluation.md#一次联合任务与来源决策的开发比较)。
+
+
+## 可选的会话查询适配器
+
+[`configs/retriever_dialogue.example.yaml`](../../configs/retriever_dialogue.example.yaml)使用`query_mode: dialogue`、`stage: dense`和可选`query_adapter_path`。它把当前原问题放在首位，再按由近到远的顺序放入已经提交的实际问答，只用于查询编码；生成器仍收到原问题、完整实际历史和原始证据，`QueryContext`为空。该模式不调用任务解释器或重排模型，也不生成阅读计划。默认conversational配置保持不变。
+
+查询编码沿用BGE-M3的8192-token上限。超限时逐个移除最旧的完整问答，记录保留/移除轮次；当前问题本身超限则报错，不静默截断。省略仅发生在检索视图，不能据此宣称长历史条件已正确承接。实际历史只能从控制器已提交快照或P3 runner进入，参考回答和未来消息不能进入该视图。
+
+查询侧LoRA复用原文向量，不重建文档索引。加载时核对`query-adapter.json`的完成状态、schema、query_mode、基座配置摘要、文档encoder身份、FP32查询归一化及两份适配器文件的SHA256；文档索引仍核对原基座空间。查询适配器不能用于构建文档向量。schema 1的current/dialogue对应`literal-dialogue-query-v1`，训练代码摘要保留为来源记录；变更输入配方需重新验证适配器。
+
+依赖通过`uv sync --extra tokenizer --extra retrieval --extra query-adapter --locked`准备；PEFT固定为0.21.2。训练extra同步采用该版本，已有训练记录的环境身份保留。当前GPU工作区已准备`models/bge-m3-dialogue-query-v1`，其权重SHA256为`951804ff5bc23b18b4cc3772d30ed9775a956a5ef1676be39e77e30f6d5d6caf`，配套原文encoder为固定BGE-M3。示例使用Cloud索引，MultiDoc2Dial改为对应的稀疏/稠密索引和语料，不能更换文档编码空间。
+
+CLI、HTTP及原生P3共享已有`--retriever-config`入口，将其设为上述示例即可选择该组件。GPU实测使用独立目录`runs/query-encoder/integrated`及隔离依赖`runs/query-encoder/deps`，没有替换常规已安装交付。仅删除`query_adapter_path`得到的是未训练历史视图，Cloud对照明显下降，不应将它视为同等效果的简化部署。
+
+该权重仅由MultiDoc2Dial官方训练对话学习，属于有训练依赖的可选检索组件；没有微调8B回答模型。配方、数据摘要和固定实验脚本保存在`runs/query-encoder/`，结果见[查询侧会话检索对照](../data_and_evaluation.md#查询侧会话检索训练与完整系统对照)。这批结果支持继续验证，尚不能证明跨模型、长历史、来源版本更新或并发回访场景的收益。
