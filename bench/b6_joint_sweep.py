@@ -30,7 +30,6 @@ from controller.serialization import decode
 from controller.sampling import SamplingRecipe, request_sampling
 from controller.templates import SYSTEM_PROMPT
 from types import SimpleNamespace
-from bench.process_resources import ProcessResourceSampler, memory_summary
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMON_SERVER = {"attention_backend": "fa3", "chunked_prefill_size": 8192,
@@ -364,20 +363,8 @@ def make_owned_executor(args, shared, sources, cohort, requirements):
                     cache_state_protocol="fresh_process_empty_KV_no_generation_warmup",
                     jit_disk_cache_cleared=False, native_empty_state_basis="fresh owned process and skipped generation warmup")
                 server.write_json(support/"server.json", record)
-                resources = ProcessResourceSampler()
-                await resources.start()
-                try:
-                    result = await asyncio.wait_for(execute_job(spec, job, directory,
-                        native_engine_manifest=native_path, verified_server=record), timeout=args.job_timeout)
-                finally:
-                    await resources.stop()
-                    resource_path = support/"process-resources.json"
-                    server.write_json(resource_path, resources.observation())
-                workload = json.loads(Path(result["raw_output"]).read_text())["report"]
-                resource_summary = memory_summary(resources.observation(), workload.get("started_at"), workload.get("completed_at"))
-                server.write_json(support/"process-resource-summary.json", resource_summary)
-                result["process_resources"] = {"observation": str(resource_path), "summary": resource_summary}
-                result.setdefault("artifact_sha256", {})["process_resources"] = sha256(resource_path.read_bytes()).hexdigest()
+                result = await asyncio.wait_for(execute_job(spec, job, directory,
+                    native_engine_manifest=native_path, verified_server=record), timeout=args.job_timeout)
                 actual = json.loads(Path(result["raw_output"]).read_text())["report"]["turns"]
                 if {r["task_id"] for r in actual} - {r["task_id"] for r in cohort}:
                     raise ValueError("job generated tasks outside its declared cohort")
