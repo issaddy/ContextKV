@@ -160,6 +160,42 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(t.evidence_keys for t in baseline.snapshots["session-a"].raw_history))
         self.assertFalse(baseline.snapshots["session-a"].raw_history[0].assistant_output_ids)
 
+    async def test_p1_selected_turn_starts_with_author_history_and_keeps_commit_count(self):
+        baseline = self.baseline("B1")
+        gate = OnlineSession(self.rows[1:3], "P1")
+        second = gate.current()
+        result = await baseline(second)
+        self.assertIn("REFERENCE ANSWER 1", bytes(result.input_ids).decode())
+        self.assertEqual(baseline.snapshots["session-a"].version, 1)
+        self.assertEqual([r.turn_id for r in baseline.snapshots["session-a"].raw_history], [1, 2])
+        with self.assertRaisesRegex(NativeProtocolError, "increase"):
+            await baseline(second)
+        gate.commit(second.task_id, result.assistant_text)
+        third = await baseline(gate.current())
+        self.assertIn("REFERENCE ANSWER 2", bytes(third.input_ids).decode())
+        self.assertNotIn(result.assistant_text, bytes(third.input_ids).decode())
+        self.assertEqual(len([r for r in self.requests if r[0] == "/generate"]), 2)
+
+    async def test_p1_can_select_nonadjacent_turns_but_not_omit_reference_history(self):
+        baseline = self.baseline()
+        gate = OnlineSession([self.rows[0], self.rows[2]], "P1")
+        first = gate.current()
+        result = await baseline(first)
+        gate.commit(first.task_id, result.assistant_text)
+        third = gate.current()
+        with self.assertRaisesRegex(NativeProtocolError, "complete numbered"):
+            await baseline(replace(third, history=third.history[:2]))
+        await baseline(third)
+        self.assertEqual(baseline.snapshots["session-a"].version, 2)
+        self.assertEqual(baseline.snapshots["session-a"].raw_history[-1].turn_id, 3)
+
+    async def test_selected_turn_permission_does_not_leak_into_p2_or_p3(self):
+        selected = OnlineSession(self.rows[1:2], "P1").current()
+        for protocol in ("P2", "P3"):
+            with self.subTest(protocol=protocol), self.assertRaisesRegex(NativeProtocolError, "contiguous"):
+                await self.baseline()(replace(selected, protocol=protocol))
+        self.assertEqual(self.requests, [])
+
     async def test_explicit_revisit_uses_same_required_policy_and_restores_original(self):
         baseline = self.baseline()
         gate = OnlineSession(self.rows[:3])

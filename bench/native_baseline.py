@@ -412,7 +412,15 @@ class NativeBaseline:
         async with self._locks.setdefault(turn.conversation_id, asyncio.Lock()):
             snapshot = self.snapshots.get(turn.conversation_id, SessionSnapshot(
                 turn.conversation_id, corpus_snapshot_id=self.corpus_snapshot_id))
-            if turn.turn != snapshot.version + 1:
+            if turn.protocol == "P1":
+                # P1 can begin at a selected author-provided turn or skip to
+                # another selected turn. Its history is supplied explicitly,
+                # unlike the dependent generated-history P2/P3 protocols.
+                if turn.turn < 1 or len(turn.history) != 2*(turn.turn-1):
+                    raise NativeProtocolError("P1 requires complete numbered reference history")
+                if snapshot.raw_history and turn.turn <= snapshot.raw_history[-1].turn_id:
+                    raise NativeProtocolError("P1 selected turns must increase without replay")
+            elif turn.turn != snapshot.version + 1:
                 raise NativeProtocolError("native baseline requires serial, contiguous turns")
             history = tuple(TurnRecord(i // 2 + 1, turn.history[i].text, turn.history[i + 1].text)
                             for i in range(0, len(turn.history), 2))
