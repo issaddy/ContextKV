@@ -64,6 +64,7 @@
 - [RankGPT](https://aclanthology.org/2023.emnlp-main.923/)：通过文档标识排序使用语言模型进行检索重排。
 - [CHIQ](https://aclanthology.org/2024.emnlp-main.135/)：增强对话历史理解，再生成适合检索的独立查询。 [代码](https://github.com/fengranMark/CHIQ)
 - [HAConvDR](https://aclanthology.org/2024.findings-acl.792/)：结合历史去噪和历史轮次实际检索贡献构造监督，训练会话稠密检索；重点处理长历史噪声与话题切换。 [代码](https://github.com/fengranMark/HAConvDR)。本项目的固定文档向量、查询侧LoRA试验仅参考会话检索学习方向，不是其算法复现。
+- [ConvDR](https://arxiv.org/abs/2105.04166)：继承文档编码，用独立问题的教师向量和检索排序损失训练会话查询表示，省去在线生成改写。 [代码](https://github.com/thunlp/ConvDR)。本项目的BGE归一化向量、查询LoRA与辅助数据配方不同，相关试验仅借鉴离线意图监督，不能直接继承论文效果。
 - [QuReTeC](https://arxiv.org/abs/2005.11723)：从历史中选择相关词项补全当前检索查询。[作者代码](https://github.com/nickvosk/sigir2020-query-resolution)和[公开模型卡](https://huggingface.co/uva-irlab/quretec/blob/main/README.md)采用BERT-large词项分类及300-token序列；可研究可追溯的历史选择，但不能直接视为长历史、角色关系和条件作用域的完整解决方案。
 - [CANARD](https://aclanthology.org/D19-1605/)：提供依赖历史的问题到独立问题的改写数据。
 - [Multi-View Reranking（MVR）](https://aclanthology.org/2020.findings-emnlp.354/)：组合多个查询视角与重排结果改善会话搜索。
@@ -186,6 +187,7 @@
 - [MTRAG-UN](https://github.com/IBM/mt-rag-benchmark/tree/main/mtragun-human)：覆盖歧义、非独立问题、不可答和部分可答的多轮RAG挑战任务。
 - [Doc2Dial](https://aclanthology.org/2020.emnlp-main.652/)：提供带文档范围和支持跨度的目标导向对话。
 - [MultiDoc2Dial](https://aclanthology.org/2021.emnlp-main.498/)：提供跨文档切换与服务咨询场景的多轮问答。 [代码](https://github.com/IBM/multidoc2dial)
+- [QReCC](https://github.com/apple-aiml-research/ml-qrecc)：提供原始对话问题、独立改写、回答与来源；[发布数据](https://zenodo.org/records/5760304)使用CC BY-SA 3.0。当前仅取经过原始问答重建和监督检查的子集作离线查询表示辅助训练，不等同于完整QReCC检索或问答评价。
 - [ChatRAG-Bench](https://huggingface.co/datasets/nvidia/ChatRAG-Bench)：整合多种给定对话历史的检索增强问答任务。
 - [CORAL](https://github.com/RUC-NLPIR/CORAL)：提供知识密集、主题切换和引用标注的多轮问答数据。
 - [Loong](https://github.com/MozerWang/Loong)：评价长上下文中的多资料定位、比较、聚合与推理。
