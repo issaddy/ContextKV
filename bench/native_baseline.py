@@ -561,8 +561,7 @@ async def _run(args):
     retrieval_context_provider = None
     if getattr(retriever, "requires_history_context", False):
         from adapters.query_resolution import native_context_provider
-        retrieval_context_provider = native_context_provider(baseline,
-            include_sources=getattr(retriever, "requires_source_context", True))
+        retrieval_context_provider = native_context_provider(baseline)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     report = None

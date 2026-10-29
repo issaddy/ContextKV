@@ -11,7 +11,6 @@ import yaml
 from .candidates import CandidatePolicy
 from .cost_model import CostModel
 from .generation import GenerationProtocol
-from .output_length import OutputLengthModel
 from .engine_client import SGLangEngineClient
 from .events import EventLog
 from .mock_engine import MockEngine
@@ -79,9 +78,6 @@ class AblationConfig:
 @dataclass(frozen=True)
 class CostSettings:
     artifact: str | None = None
-    output_length_artifact: str | None = None
-    uncertainty_mode: str | None = None
-    admission_estimator: str | None = None
     default_output_tokens: int = 128
     p90_output_tokens: int = 256
     max_normalized_distance: float = .5
@@ -115,10 +111,6 @@ class RunConfig:
             raise ValueError("context budget exceeds the explicit model scope")
         if min(self.cost_model.default_output_tokens, self.cost_model.p90_output_tokens) < 1:
             raise ValueError("output priors must be positive")
-        if self.cost_model.uncertainty_mode not in (None, "global", "conditional"):
-            raise ValueError("uncertainty_mode must be global, conditional or null to use the artifact setting")
-        if self.cost_model.admission_estimator not in (None, "strict", "native_workload", "native_budget"):
-            raise ValueError("admission_estimator must be strict, native_workload or native_budget")
         if not 0 < self.cost_model.residual_alpha <= 1 or self.cost_model.max_normalized_distance < 0:
             raise ValueError("invalid cost model calibration parameters")
         if self.cost_model.online_calibration and not all((self.ablation.host_cost,
@@ -136,12 +128,12 @@ def load_config(path: str | Path | None = None) -> RunConfig:
     return decode(RunConfig, yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {})
 
 
-def assemble_cost_model(config, *, artifact=None, measurements=None, length_artifact=None,
-                        fingerprint=None, max_new_tokens=None):
+def assemble_cost_model(config, *, artifact=None, measurements=None,
+                        max_new_tokens=None):
     """Pure assembly from configuration and already-read artifact contents.
 
     Artifact fitted settings take precedence over unfitted defaults. Explicit
-    cost ablations/estimators and the effective generation policy apply last.
+    cost ablations and the effective generation policy apply last.
     Caller-specific model/cache identity checks remain at the caller boundary.
     """
     config = asdict(config) if is_dataclass(config) else config
@@ -151,11 +143,7 @@ def assemble_cost_model(config, *, artifact=None, measurements=None, length_arti
                  config.get("context", {}).get("max_new_tokens", 512),
                  **{f"include_{name}_cost": ablation.get(f"{name}_cost", True)
                     for name in ("host", "decode", "control")}}
-    for name in ("uncertainty_mode", "admission_estimator"):
-        value = settings.pop(name, None)
-        if value is not None:
-            overrides[name] = value
-    for name in ("artifact", "output_length_artifact", "online_calibration"):
+    for name in ("artifact", "online_calibration"):
         settings.pop(name, None)
     if artifact is not None:
         model = CostModel.from_spec(artifact, **overrides)
@@ -167,27 +155,20 @@ def assemble_cost_model(config, *, artifact=None, measurements=None, length_arti
     model.configure_sampling(protocol.sampling,
         fallback_mean=settings.get("default_output_tokens", 128),
         fallback_p90=settings.get("p90_output_tokens", 256), system_prompt=protocol.system_prompt)
-    if length_artifact is not None:
-        model.output_length_model = OutputLengthModel.from_spec(length_artifact,
-            expected_fingerprint=fingerprint, max_new_tokens=model.max_new_tokens,
-            sampling=protocol.sampling, expected_priors=model.effective_output_prior,
-            expected_generation_protocol=protocol.record())
     return model
 
 
-def load_cost_model(config, *, artifact_path=None, fingerprint=None, max_new_tokens=None):
+def load_cost_model(config, *, artifact_path=None, max_new_tokens=None):
     """Read declared files once, then use the same pure assembly everywhere."""
     config = asdict(config) if is_dataclass(config) else config
     settings = config.get("cost_model") or {}
     artifact_path = artifact_path or settings.get("artifact")
     calibration = config.get("calibration_path")
-    length_path = settings.get("output_length_artifact")
     return assemble_cost_model(config,
         artifact=json.loads(Path(artifact_path).read_text()) if artifact_path else None,
         measurements=[json.loads(line) for line in Path(calibration).read_text().splitlines()
                       if line.strip()] if calibration and not artifact_path else None,
-        length_artifact=json.loads(Path(length_path).read_text()) if length_path else None,
-        fingerprint=fingerprint, max_new_tokens=max_new_tokens)
+        max_new_tokens=max_new_tokens)
 
 
 def create_model_template(model: ModelConfig, *, model_path: str | None = None,
@@ -208,7 +189,7 @@ def create_model_template(model: ModelConfig, *, model_path: str | None = None,
 def create_controller(config: RunConfig) -> Controller:
     template = (ByteTemplate(namespace_hash=config.model.namespace_hash) if config.engine.kind == "mock" else
                 create_model_template(config.model))
-    model = load_cost_model(config, fingerprint=template.fingerprint)
+    model = load_cost_model(config)
     if config.model.scope is not None and (config.cost_model.artifact or config.calibration_path):
         manifest = model.calibration_metadata.get("profile_manifest") or {}
         bound = manifest.get("fingerprint") or manifest.get("engine", {}).get("fingerprint")

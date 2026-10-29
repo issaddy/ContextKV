@@ -7,7 +7,7 @@ name = "contextkv"
 version = "0.1.0"
 description = "Versioned evidence, cost-aware context planning and KV cache lifecycle research"
 readme = "README.md"
-license-files = ["docs/third_party/APACHE-2.0.txt", "docs/third_party/*NOTICE.md", "bench/assets/*/LICENSE*", "bench/assets/*/NOTICE*", "adapters/assets/*/LICENSE*", "adapters/assets/*/NOTICE*"]
+license-files = ["docs/third_party/APACHE-2.0.txt", "docs/third_party/*NOTICE.md", "bench/assets/loong/NOTICE.md"]
 requires-python = ">=3.11"
 dependencies = ["httpx>=0.28,<0.29", "PyYAML>=6,<7", "fastapi>=0.115,<1", "uvicorn>=0.34,<1"]
 
@@ -15,9 +15,7 @@ dependencies = ["httpx>=0.28,<0.29", "PyYAML>=6,<7", "fastapi>=0.115,<1", "uvico
 tokenizer = ["transformers==5.19.0", "tokenizers==0.23.2", "jinja2>=3.1,<4"]
 retrieval = ["bm25s==0.3.15", "numpy==2.3.5"]
 query-adapter = ["peft==0.21.2"]
-calibration = ["numpy==2.3.5", "scipy==1.17.1"]
 evaluation = ["jinja2>=3.1,<4", "prometheus-client>=0.21,<1"]
-training = ["transformers==5.19.0", "tokenizers==0.23.2", "peft==0.21.2", "accelerate==1.15.0", "torch>=2.6"]
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.11,<1"]
@@ -27,11 +25,10 @@ contextkv = "controller.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["controller*", "adapters*", "bench*", "profiling*", "engine_patches*", "training*"]
+include = ["controller*", "adapters*", "bench*", "profiling*", "engine_patches*"]
 
 [tool.setuptools.package-data]
-adapters = ["assets/convsearch_r1/*"]
-bench = ["assets/native_judge/*", "assets/grouse/*", "assets/atomic_judge/*", "assets/lettuce_judge/*", "assets/loong/*", "examples/*.json", "examples/*.jsonl", "examples/*.yaml"]
+bench = ["assets/loong/*", "examples/*.json", "examples/*.jsonl", "examples/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

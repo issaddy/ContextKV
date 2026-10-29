@@ -62,7 +62,7 @@ def test_metadata_identity_mismatch_rejected_at_configuration(real_index,corpus,
 
 
 @pytest.mark.asyncio
-async def test_worker_uses_complete_committed_history_and_only_committed_source_inventory():
+async def test_worker_uses_complete_committed_history_and_task_state():
     source=make_evidence('ORCHID supports requests.','visible')
     unseen=make_evidence('ARCHIVE_ONLY must not qualify a topic.','unseen')
     snapshot=SessionSnapshot('real-session',version=9,corpus_snapshot_id='snapshot',
@@ -86,7 +86,7 @@ async def test_worker_uses_complete_committed_history_and_only_committed_source_
     assert thread!=threading.get_ident() and turn.turn==2 and turn.task_id=='actual-request'
     assert turn.contexts==() and [m.text for m in turn.history]==['Original user?','Actual assistant with \n Unicode 文本.']
     assert turn.user_questions==('Original user?','Follow-up?')
-    assert [s.block.key for s in prior.sources]==[source.key] and prior.sources[0].visible_turns==(1,)
+    assert prior.snapshot_version == snapshot.version and prior.interpretations == (None,)
     assert selected.evidence[0].key.corpus_id=='manual' and selected.evidence[0].key.version=='snapshot'
     serving.close()
     assert inner.closed and snapshot.raw_history[0].turn_id==7

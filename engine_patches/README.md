@@ -38,26 +38,24 @@ Python TreeCore 运行合同可使用固定 [`python/setup.py`](https://github.c
 
 固定源码的 `python/pyproject.toml` 实际声明 `torch==2.14.1`、`transformers==5.19.0`、`tokenizers==0.23.2`；文件原 SHA256 `8a176848d601510b3557ece2cf9e37d3fd449f5eca2d469cf34d7078b103bc0c` 纳入 `source_manifest.json`；依赖的来源是同一固定提交的 `python/pyproject.toml`。已删旧模型专用 `model_manifest.json`，模型配置/库存身份直接复用 `configs/model_scopes/` 的显式本地记录，不维护第二套清单。这是一份明确依赖来源的安装入口，未在当前 macOS 环境验证整套 CUDA 构建。正式运行应冻结 Linux 环境包清单、驱动和编译器版本。
 
-使用用户已经提供的 Qwen3 权重，不下载任何生成模型。先声明一个已有 scope；例如8B配置指向 `/media/ssd1/qwen3-8b`，32B配置指向 `/media/ssd1/qwen3-32b`：
+默认使用已有的Qwen3-32B本地快照，先声明对应scope：
 
 ```bash
-export CONTEXTKV_MODEL_SCOPE_PATH=configs/model_scopes/qwen3-8b.local.json
+export CONTEXTKV_MODEL_SCOPE_PATH=configs/model_scopes/qwen3-32b.local.json
 scripts/bootstrap_sglang.sh
 source .venv-sglang/bin/activate
 export CONTEXTKV_FINGERPRINT_JSON="$(cat runs/fingerprint.json)"
 # H200资源参数示例，按实际设备配置容量。
-CONTEXTKV_HICACHE_GB=8 CONTEXTKV_HICACHE_LAYOUT=layer_first \
+CONTEXTKV_HICACHE_GB=16 CONTEXTKV_HICACHE_LAYOUT=layer_first \
 SGLANG_HICACHE_TMA_TRANSFER=0 scripts/launch_sglang.sh \
-  --host 127.0.0.1 --port 30000 --max-total-tokens 16384 --mem-fraction-static .8
+  --host 127.0.0.1 --port 30000 --max-total-tokens 32768 --mem-fraction-static .8
 ```
 
 `bootstrap_sglang.sh`仅安装固定SGLang/项目依赖，然后通过共享`ModelConfig/create_model_template`验证已存在的scope快照、tokenizer和模板，保存指纹。它不调用snapshot_download，不创建旧模型目录；缺少scope或本地文件会明确失败。源码准备下载SGLang及依赖，模型使用已有本地文件。
 
 `launch_sglang.sh`从`CONTEXTKV_MODEL_SCOPE_PATH`读取model/tokenizer路径，HF loading revision为None；冲突的`--revision`或model/tokenizer参数会报错。可选`CONTEXTKV_MODEL_PATH`用于核对scope路径。scope按模型元数据标识本地快照，验证范围由`weight_content_verified`记录。
 
-schema v1 `local_snapshot_metadata`保持原有config/分片库存身份和全部旧指纹。离线`python -m training.export`新增schema v2 `local_checkpoint_artifact`，将完成的LoRA产物合并到新的独立BF16 dense目录，按每个weight文件的`file/bytes/sha256`建立`local-checkpoint:`身份；同大小不同内容可区分，目录位置和来源注释不进入身份。发布后应保持目录不可变；控制器`model.scope_path`和引擎`CONTEXTKV_MODEL_SCOPE_PATH`指向同一新scope，重新生成fingerprint并使用独立state/engine，不继承基座KV和成本标定。stock/native基线复用该身份接口，无需动态LoRA缓存路径。完整命令见[训练与导出](../docs/research/grounded_training.md)。
 
-v2在导出时计算权重摘要。启动时核对config、文件名/大小与index；单文件`model.safetensors`读取header长度和JSON offsets核对tensor字节数。`weight_content_verified=false`表示启动检查覆盖元数据。PEFT `safe_merge=True`检查合并值的有限性，BF16舍入与回答效果通过导出模型验证。
 
 `CONTEXTKV_ENABLE_HICACHE=0`启用GPU-only；`CONTEXTKV_HICACHE_GB`/`CONTEXTKV_PAGE_SIZE`设置容量与页大小，`CONTEXTKV_WRITE_POLICY`选择原生写策略。scheduler的`get_runtime`在首次初始化时读取scope并核对模型配置、文件库存、tokenizer/template和fingerprint，缺scope返回`MODEL_SCOPE_REQUIRED`，之后复用实例。CPU `ContextKVRuntime`使用无模型fixture测试缓存与事务机制。
 
@@ -71,7 +69,7 @@ v2在导出时计算权重摘要。启动时核对config、文件名/大小与in
 
 报价与 metrics 的 `native_running_requests` / `native_waiting_requests` 只传出每个请求的 `input_tokens`、`generated_tokens`、`max_new_tokens`、`ignore_eos`、`kv_allocated_tokens`、`kv_committed_tokens` 和 `cache_protected_tokens`，没有文本或 token IDs；新增可选 `request_id` 直接复制既有原生 `req.rid`，供服务集合、预算集合和终态 receipt 精确关联，不创建新标识或内容 hash。输出预算取 native 已按上下文和池容量裁剪后的 `sampling_params.max_new_tokens`，已生成数只取 scheduler 当前已处理的 CPU 状态；不读取未来输出。[ReqKvInfo](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/managers/schedule_batch.py#L974-L987) 的三种 KV 数字是**逻辑序列边界**：树拥有 `[0, cache_protected_tokens)`，请求自有尾部位于其后；共享前缀、页边界和完成后的缓存插入都使其不能直接作为唯一物理占用或即将释放 slot 数。Overlap 时 committed 状态还可能落后已执行 forward。
 
-运行集合通过native `collect_inflight_reqs()`对running/last/overlap batch去重，纳入独立chunked request并排除已结束请求；回到waiting的请求归入waiting。Running摘要表示集合，waiting保留列表顺序；实际执行顺序由原生调度决定。读取成本为O(active + waiting)，每请求读取标量和数组长度。缺少scheduler时返回null，已知空集合返回`[]`。等待估计及验证状态见[等待模型](../docs/research/admission_wait_model.md)。
+运行集合通过native `collect_inflight_reqs()`对running/last/overlap batch去重，纳入独立chunked request并排除已结束请求；回到waiting的请求归入waiting。Running摘要表示集合，waiting保留列表顺序；实际执行顺序由原生调度决定。读取成本为O(active + waiting)，每请求读取标量和数组长度。缺少scheduler时返回null，已知空集合返回`[]`。等待估计及验证状态见[等待模型](../docs/guides/stage_cost_model.md)。
 
 - `request_terminal`：receipt 与原生完成时序。
 - `transfer`：原生HiCache ACK完成后读取`num_bytes`和`start_event.elapsed_time(finish_event)`，记录H2D/D2H字节与CUDA event时间；计时不可用时为null。
@@ -95,7 +93,7 @@ v2在导出时计算权重摘要。启动时核对config、文件名/大小与in
 先在正常研究服务器验证协议，不 flush 共享缓存：
 
 ```bash
-python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml \
+python -m engine_patches.smoke --config configs/qwen3_32b_scope.example.yaml \
   --report runs/sglang-smoke.json
 ```
 
@@ -106,7 +104,7 @@ python -m engine_patches.smoke --config configs/qwen3_8b_scope.example.yaml \
 ```bash
 CONTEXTKV_ENABLE_PROFILING=1 CONTEXTKV_SAMPLE_POOL=1 \
   scripts/launch_sglang.sh --host 127.0.0.1 --port 30001
-python -m profiling.sglang_probe --config configs/qwen3_8b_scope.example.yaml --base-url http://127.0.0.1:30001 \
+python -m profiling.sglang_probe --config configs/qwen3_32b_scope.example.yaml --base-url http://127.0.0.1:30001 \
   --output runs/calibration.jsonl --cases-file runs/selected-cost-cases.json \
   --warmup 1 --repetitions 3
 ```
@@ -123,14 +121,14 @@ python -m profiling.sglang_probe --config configs/qwen3_8b_scope.example.yaml --
 
 启动脚本默认`kernel/layer_first/TMA=0`，与H200/Qwen3运行配置一致，可用环境变量覆盖。早期`page_first`的staged D2H路径出现过segfault，原因尚未定位，因此默认采用layer_first。
 
-报价复用实际 native ratio/clip、当前 running_batch 成员和原生 running offset；最近 match 只复制标量结果，不重复匹配。读取成本为 O(active+waiting)，缺失观测保留 None。它们已进入当前 `native_budget` 选择，字段及近似边界见[等待模型](../docs/research/admission_wait_model.md)。
+报价复用实际 native ratio/clip、当前 running_batch 成员和原生 running offset；最近 match 只复制标量结果，不重复匹配。读取成本为 O(active+waiting)，缺失观测保留 None。它们已进入当前 `native_budget` 选择，字段及近似边界见[等待模型](../docs/guides/stage_cost_model.md)。
 
 源码核验以当前 `source_manifest.json` 与补丁为准，真实运行以各批次源码清单为准。旧补丁的阶段纪要不再混排为当前状态。
 
 ## C：受控生命周期归因验收
 
 ```bash
-python -m engine_patches.lifecycle_probe --config configs/qwen3_8b_scope.example.yaml \
+python -m engine_patches.lifecycle_probe --config configs/qwen3_32b_scope.example.yaml \
   --base-url http://127.0.0.1:30001 --tiers gpu,host \
   --shared-tokens 128 --branch-tokens 128 --report runs/lifecycle-paired.json
 ```
@@ -143,7 +141,7 @@ python -m engine_patches.lifecycle_probe --config configs/qwen3_8b_scope.example
 
 ## 可选 Host 备份准入
 
-`CONTEXTKV_HOST_ADMISSION=off|fixed|conditioned`默认off，现有系统对照使用off。启用时将业务session映射到epoch，在原生分配、锁和DMA前按压力与每请求累计新页额度筛选BackupKV action；write_back淘汰和原生去重/补齐照常执行。具体机制及EfficientAgent适配见[Host准入说明](../docs/research/host_admission_design.md)。
+`CONTEXTKV_HOST_ADMISSION=off|fixed|conditioned`默认off，现有系统对照使用off。启用时将业务session映射到epoch，在原生分配、锁和DMA前按压力与每请求累计新页额度筛选BackupKV action；write_back淘汰和原生去重/补齐照常执行。具体机制及EfficientAgent适配见[Host准入说明](README.md)。
 
 ## 可选准入诊断
 

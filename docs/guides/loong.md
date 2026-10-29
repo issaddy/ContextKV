@@ -40,7 +40,7 @@ python -m bench.input_profile --input data/loong/set1-v2/tasks.jsonl \
 
 预算核查输出完整可运行任务、对应划分和全部逐题长度/输入哈希；没有删除单题中的资料。原323题是场景覆盖分母，报告生成结果时仍须说明201题预算失败。这里的`test`仅是统一runner固定任务的运行入口，不宣称新增作者测试分区。
 
-201题中145题的输入已达到/超过32K，56题仅在加上4096输出预留后超限。已完成的122题基线和来源复核见[评价记录](../data_and_evaluation.md#loong完整长资料p1基线)。初次v1接入暴露了法律原始案名，108份回答及评分全部作废并保留记录；当前v2不得复用该批结果。
+201题中145题的输入已达到/超过32K，56题仅在加上4096输出预留后超限。已完成的122题基线和来源复核见[评价记录](../data_and_evaluation.md)。初次v1接入暴露了法律原始案名，108份回答及评分全部作废并保留记录；当前v2不得复用该批结果。
 
 ```bash
 python -m bench.b6_joint_sweep --matrix configs/benchmark_loong.yaml \

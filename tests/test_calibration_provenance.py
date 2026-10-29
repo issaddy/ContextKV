@@ -60,6 +60,43 @@ def test_single_manifest_legacy_unlinked_measurements_remain_supported(tmp_path)
     assert result["measurement_provenance"]["run_ids"] == []
 
 
+def test_development_prior_binds_model_and_literal_prompt(tmp_path):
+    fingerprint = asdict(ConfigFingerprint(model_revision="qwen3-32b"))
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({**manifest(), "fingerprint": fingerprint}))
+    measurements = tmp_path / "measurements.jsonl"
+    measurements.write_text("[]")
+    report = tmp_path / "development.json"
+    report.write_text(json.dumps({"fingerprint": fingerprint,
+                                  "system_prompt": "Use the current allowed sources.",
+                                  "sampling_recipe": {"temperature": 0}}))
+    metadata = measurement_provenance([], measurements, profile_manifest_path=profile,
+                                      development_report_path=report)
+    model = CostModel()
+    model.calibration_metadata = metadata
+    scope = model.configure_sampling(None, fallback_mean=64, fallback_p90=128,
+                                     system_prompt="Use the current allowed sources.")
+    assert metadata["output_prior_fingerprint"] == fingerprint
+    assert scope["output_prior_prompt_status"] == "matching_prompt"
+    assert scope["output_prior_status"] == "matching_recipe"
+    changed = model.configure_sampling(None, fallback_mean=64, fallback_p90=128,
+                                       system_prompt="Different generation policy.")
+    assert changed["output_prior_status"] == "configured_prior_fallback"
+
+
+def test_development_lengths_cannot_be_relabelled_as_another_model(tmp_path):
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps(manifest()))
+    measurements = tmp_path / "measurements.jsonl"
+    measurements.write_text("[]")
+    report = tmp_path / "development.json"
+    fingerprint = {**manifest()["fingerprint"], "model_revision": "different-model"}
+    report.write_text(json.dumps({"fingerprint": fingerprint}))
+    with pytest.raises(ValueError, match="different model fingerprints"):
+        measurement_provenance([], measurements, profile_manifest_path=profile,
+                               development_report_path=report)
+
+
 def test_multiple_same_configuration_manifests_are_preserved_and_scoped(tmp_path):
     first = manifest()
     second = {**manifest(), "run_id": "profile-2", "runtime_manifest": {"driver": "separately-recorded"}}

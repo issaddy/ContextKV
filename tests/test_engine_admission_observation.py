@@ -133,24 +133,3 @@ def test_unknown_match_is_not_zero_hit_and_legacy_batch_roundtrips():
     assert old.native_running_budget_requests is None
     assert old.native_waiting_requests[0].last_native_match is None
     assert loads(CacheQuoteBatch,dumps(old))==old
-
-
-def test_observation_fields_do_not_change_existing_wait_estimator(monkeypatch):
-    from controller.admission import estimate_wait
-    install_native_policy(monkeypatch)
-    running,waiting=Request(n=100,generated=10),Request(n=90,generated=0)
-    runtime=bridge([running],[waiting])
-    wire=dict(request_id="q",observed_seq=1,observed_time_ns=3000,engine_restart_id="r",
-        cache_config_hash="c",free_gpu_tokens=10,free_host_tokens=0,evictable_gpu_tokens=10,
-        gpu_capacity_tokens=400,quotes=[],**runtime.workload_snapshot())
-    observed=decode(CacheQuoteBatch,wire)
-    legacy=dataclasses.replace(observed,native_new_token_ratio=None,native_max_new_tokens_clip=None,
-        native_running_budget_tokens=None,native_running_budget_requests=None,
-        native_running_requests=tuple(dataclasses.replace(r,native_finished=None,last_native_match=None,request_id=None)
-                                      for r in observed.native_running_requests),
-        native_waiting_requests=tuple(dataclasses.replace(r,native_finished=None,last_native_match=None,request_id=None)
-                                      for r in observed.native_waiting_requests))
-    kwargs=dict(candidate_input_tokens=80,resident_gpu_tokens=0,output_mean=20,output_p90=30,
-        forward_fn=lambda n,p,c:(10,True),decode_fn=lambda ctx,steps,c:(steps,True),
-        development_lengths=(20,30),idle_ms=1)
-    assert estimate_wait(batch=observed,**kwargs)==estimate_wait(batch=legacy,**kwargs)

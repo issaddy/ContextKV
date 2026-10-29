@@ -8,7 +8,7 @@
 
 ```sh
 .venv/bin/python -m adapters.api_evidence \
-  --spec runs/api-evidence-review/source_bundle.json \
+  --spec SOURCE_BUNDLE.json \
   --output runs/api-evidence-local
 ```
 
@@ -61,7 +61,7 @@
 from adapters.corpus import CorpusIndex
 
 index = CorpusIndex.from_jsonl(
-    "runs/api-evidence-review/production-bundle-v2/records.jsonl",
+    "data/sdk-evidence/records.jsonl",
     corpus_id="official-sdk-preview",
     snapshot_id="cloudant-0.0.27-watson-7.0.0",
 )
@@ -72,12 +72,12 @@ blocks = index.resolve(("ibmcloudant:ibmcloudant/cloudant_v1.py#CloudantV1.post_
 
 ```bash
 uv run python -m adapters.retrieval build \
-  --corpus runs/api-evidence-review/production-bundle-v2/records.jsonl \
+  --corpus data/sdk-evidence/records.jsonl \
   --index runs/sdk-bm25 \
   --snapshot cloudant-0.0.27-watson-7.0.0
 uv run contextkv --config configs/demo.yaml --state-dir runs/sdk-demo-state serve \
   --retriever-index runs/sdk-bm25 \
-  --evidence-corpus runs/api-evidence-review/production-bundle-v2/records.jsonl \
+  --evidence-corpus data/sdk-evidence/records.jsonl \
   --corpus-id official-sdk-preview
 ```
 
@@ -87,4 +87,4 @@ uv run contextkv --config configs/demo.yaml --state-dir runs/sdk-demo-state serv
 
 共享候选构造器将当前required材料的依赖和parent_section渲染为稳定E_ID关联注记，A/R与原生基线共用。APPEND追加当前关系并保留旧正文及span；无关系元数据时沿用普通输入。关系表达语料声明的连接，实际注记token计入预算。
 
-构建与桥接结果见[工程接线验证](../data_and_evaluation.md#工程接线验证)，原件位于`runs/api-evidence-review/`及`runs/evidence-context-integration/sdk-v1/`。提取与来源合同由`tests/test_api_evidence.py`覆盖。
+提取与来源合同由`tests/test_api_evidence.py`覆盖；工程接线不替代实际问答质量验证。

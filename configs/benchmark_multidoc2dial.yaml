@@ -3,7 +3,7 @@
 # ContextKV adds the existing conversational task state and A/B/C execution.
 schema_version: 1
 comparison_scope: system
-base_config: configs/qwen3_8b_cost.yaml
+base_config: configs/qwen3_32b_cost.yaml
 input: data/multidoc2dial/test/tasks.jsonl
 domain: all
 split_manifest: data/multidoc2dial/test/split_manifest.json
@@ -21,8 +21,8 @@ server_profiles:
     write_policy: write_through
     hicache: true
     session_radix: true
-    gpu_tokens: 16384
-    hicache_gb: 8
+    gpu_tokens: 32768
+    hicache_gb: 16
     mem_fraction_static: 0.8
   patched:
     kind: patched
@@ -30,8 +30,8 @@ server_profiles:
     write_policy: write_through
     hicache: true
     session_radix: true
-    gpu_tokens: 16384
-    hicache_gb: 8
+    gpu_tokens: 32768
+    hicache_gb: 16
     mem_fraction_static: 0.8
 methods:
   - id: Native

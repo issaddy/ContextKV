@@ -1,12 +1,4 @@
-# Task-aware retrieval: Qwen3-8B generation, Qwen3-32B interpretation on port 30001.
-# Initialize the first task, including compound needs; later condition edits retain them.
-# Bind --evidence-corpus to use source context in the same reranking pass.
-# Original questions/history remain intact.
-# Optional context.layout=contextpilot separates cached body order and relevance.
-# The measured deployment uses generation GPU0 and interpretation/retrieval GPU1.
-# Launch the interpreter with the native NGRAM parameters in docs/deployment.md.
-# These client settings do not change the server's decoding mode.
-# Keep stable_key for the integrated path; ContextPilot is a separate layout choice.
+# Qwen3-32B task interpretation; shared BM25S/BGE retrieval and reranking.
 schema_version: 1
 kind: hybrid
 stage: hybrid_rerank
@@ -25,18 +17,8 @@ rerank_k: 50
 rrf_k: 60
 cpu_threads: 1
 query_fusion: single
-# Neighboring passages may cross procedures (for example pinned vs latest release).
-# Keep expansion explicit until it preserves task applicability and fits cost support.
 source_window: false
-# Optional original-document context, used only with source_window: true.
-# Originals must bind corpus_id, the actual index snapshot_id, source and version.
-# The published raw Cloud archive lacks this binding; see docs/guides/hybrid_retrieval.md.
-# source_documents: path/to/verified-originals.jsonl.zip
-# Optional joint choice of actual reading bodies and their required context.
-# Interprets the current task and selects sources together in one helper call, after initial recall.
-# evidence_selection: semantic
 
-# Omit selector only when intentionally using the model-free history fallback.
 selector:
   base_url: http://127.0.0.1:30001
   model: /media/ssd1/qwen3-32b

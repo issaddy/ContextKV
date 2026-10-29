@@ -124,12 +124,13 @@ def test_scope_and_recipe_cannot_be_relabelled(local_scope, corruption):
                        model_scope=scope, sampling=recipe)
 
 
-def test_explicit_qwen3_32b_head_dim_and_cross_model_identity(local_scope):
+def test_explicit_qwen3_32b_head_dim_and_cross_checkpoint_identity(local_scope):
     from engine_patches.contextkv_model_scope import load_model_scope
     template, manifest, _ = contract(local_scope)
     assert local_scope.scope.manifest()["record"]["config"]["head_dim"] == 128
     assert not validate_engine_manifest(manifest, "B0", template, model_scope=local_scope.scope, sampling=RECIPE)
-    other = load_model_scope(Path(__file__).parents[1] / "configs/model_scopes/qwen3-8b.local.json")
+    other = load_model_scope(Path(__file__).parents[1] / "configs/model_scopes/qwen3-32b.local.json")
+    assert other.identity != local_scope.scope.identity
     assert validate_engine_manifest(manifest, "B0", template, model_scope=other, sampling=RECIPE)
 
 

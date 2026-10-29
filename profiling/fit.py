@@ -60,9 +60,19 @@ def measurement_provenance(rows, measurements_path, *, profile_manifest_path=Non
     if manifest_files:
         files["profile_manifest"] = {key: manifest_files[0][key] for key in ("path", "sha256")}
         files["profile_manifests"] = manifest_files
-    prior_binding = ({"output_prior_sampling":
-                      json.loads(Path(development_report_path).read_text()).get("sampling_recipe")}
-                     if development_report_path else {})
+    prior_binding = {}
+    if development_report_path:
+        report = json.loads(Path(development_report_path).read_text())
+        prior_binding["output_prior_sampling"] = report.get("sampling_recipe")
+        if "system_prompt" in report:
+            prior_binding["output_prior_system_prompt"] = report["system_prompt"]
+        if "fingerprint" in report:
+            fingerprint = report["fingerprint"]
+            for entry in manifests:
+                measured = entry.get("fingerprint") or entry.get("engine", {}).get("fingerprint")
+                if measured != fingerprint:
+                    raise ValueError("development outputs and timing profile use different model fingerprints")
+            prior_binding["output_prior_fingerprint"] = fingerprint
     return {**prior_binding, "profile_manifest": manifest, "profile_manifests": manifests,
             "measurement_provenance": {"binding_status": binding, "run_ids": run_ids,
                 "sampling_recipe_binding": "explicit" if recipes and all(r is not None for r in recipes) else "unknown_legacy_unbound",
@@ -163,7 +173,7 @@ def evaluate(model: CostModel, rows: list[dict]) -> dict:
             "aggregation": "mixed_phase_diagnostic" if len(by_phase) > 1 else "single_phase_observation_weighted"}
 
 
-def fit(rows: list[dict], *, seed=42, holdout_fraction=.2, priors=None, allow_mock=False, prefill_estimator="lookup"):
+def fit(rows: list[dict], *, seed=42, holdout_fraction=.2, priors=None, allow_mock=False):
     if not 0 < holdout_fraction < 1:
         raise ValueError("holdout fraction must be between 0 and 1")
     allowed = {"hardware", "mock"} if allow_mock else {"hardware"}
@@ -176,8 +186,6 @@ def fit(rows: list[dict], *, seed=42, holdout_fraction=.2, priors=None, allow_mo
               or (row["phase"] == "decode" and row.get("output_tokens", 0) > 1)]
     if not fitted:
         raise ValueError("no first-token, prefill or decode calibration observations")
-    if prefill_estimator == "positive_basis" and not any(row["phase"] != "decode" for row in fitted):
-        raise ValueError("positive_basis requires first-token or prefill observations")
     validate_timing_scopes(fitted)
     # Hold out complete cells, not repeats of a cell that training already saw.
     groups = {}
@@ -192,27 +200,16 @@ def fit(rows: list[dict], *, seed=42, holdout_fraction=.2, priors=None, allow_mo
     held = [row for key in cells[:count] for row in groups[key]]
     training = [row for key in cells[count:] for row in groups[key]]
     settings = {} if priors is None else {"default_output_tokens": priors[0], "p90_output_tokens": priors[1]}
-    if prefill_estimator not in {"lookup", "positive_basis"}:
-        raise ValueError("prefill_estimator must be lookup or positive_basis")
-
     def fitted_model(observations):
-        extra = {}
-        if prefill_estimator == "positive_basis" and any(row["phase"] in {"prefill", "restore_prefill", "first_token"} for row in observations):
-            from profiling.positive_prefill import fit_positive_prefill
-            # Outer heldout cells never enter this inner OOF error calibration.
-            extra = {"prefill_estimator": "positive_basis", "positive_prefill": fit_positive_prefill(observations)}
-        return CostModel.from_measurements(observations, allow_mock=allow_mock, **settings, **extra)
+        return CostModel.from_measurements(observations, allow_mock=allow_mock, **settings)
 
     validation_model = fitted_model(training)
     validation = evaluate(validation_model, held)
-    validation_status = ("insufficient_independent_cells" if not held else
-                         "insufficient_estimator_training_cells" if validation_model.prefill_estimator != prefill_estimator else "evaluated")
     validation.update(seed=seed, training_cells=len(cells)-count, heldout_cells=count,
-                      status=validation_status,
-                      requested_estimator=prefill_estimator, evaluated_estimator=validation_model.prefill_estimator)
+                      status="evaluated" if held else "insufficient_independent_cells")
     # Freeze all dev observations after reporting held-out support and error.
     model = fitted_model(rows)
-    return model, {"split": "development", "validation": validation, "prefill_estimator": prefill_estimator,
+    return model, {"split": "development", "validation": validation, "prefill_estimator": "lookup",
                    "output_priors_source": "completed_development_outputs" if priors else "defaults_not_fitted",
                    "measurement_sources": sorted({row["source"] for row in rows})}
 
@@ -224,8 +221,6 @@ def main(argv=None):
     parser.add_argument("--development-report")
     parser.add_argument("--profile-manifest", action="append",
                         help="bind an original profiler manifest; repeat for runs with identical engine/cache configuration")
-    parser.add_argument("--prefill-estimator", choices=["lookup", "positive_basis"], default="lookup",
-                        help="positive_basis is opt-in and requires the calibration extra for offline fitting")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--holdout-fraction", type=float, default=.2)
     parser.add_argument("--allow-mock", action="store_true", help="diagnostics only; artifact remains marked mock")
@@ -233,7 +228,7 @@ def main(argv=None):
     rows = [asdict(row) for row in load_measurements(args.measurements)]
     priors = output_priors(json.loads(Path(args.development_report).read_text())) if args.development_report else None
     model, metadata = fit(rows, seed=args.seed, holdout_fraction=args.holdout_fraction,
-                          priors=priors, allow_mock=args.allow_mock, prefill_estimator=args.prefill_estimator)
+                          priors=priors, allow_mock=args.allow_mock)
     metadata.update(measurement_provenance(rows, args.measurements, profile_manifest_path=args.profile_manifest,
                                            development_report_path=args.development_report))
     model.save(args.output, metadata=metadata)

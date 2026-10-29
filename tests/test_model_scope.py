@@ -52,18 +52,14 @@ def local_scope(tmp_path):
                            tokenizer=tokenizer, fingerprint=fingerprint)
 
 
-def test_actual_qwen3_records_have_distinct_local_identity_and_explicit_head_dimension():
-    small = scopes.load_model_scope(ROOT/"configs/model_scopes/qwen3-8b.local.json")
+def test_actual_qwen3_32b_record_has_explicit_head_dimension():
     large = scopes.load_model_scope(ROOT/"configs/model_scopes/qwen3-32b.local.json")
-    assert small.identity != large.identity
-    for scope in (small, large):
-        record = scope.manifest()["record"]
-        assert scope.identity.startswith("local-snapshot:") and record["hf_revision"] is None
-        assert record["weight_content_verified"] is False and record["config"]["head_dim"] == 128
-        assert scope.context_limit == 40960
+    record = large.manifest()["record"]
+    assert large.identity.startswith("local-snapshot:") and record["hf_revision"] is None
+    assert record["weight_content_verified"] is False and record["config"]["head_dim"] == 128
+    assert large.context_limit == 40960
     config = large.manifest()["record"]["config"]
     assert config["hidden_size"] // config["num_attention_heads"] == 80
-    assert small.identity == "local-snapshot:9e3a121da0ce4bba14a09f453123d3ca33caf62c3097ea54ee44ab29c8dbffd2"
     assert large.identity == "local-snapshot:7442623e99dd0b456628ddc48805a4ea11249ee2ee66484b5d1ab44d2940beb8"
 
 

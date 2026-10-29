@@ -7,7 +7,6 @@ from adapters.contextpilot import committed_contexts
 from controller.candidates import build_candidates
 from controller.evidence import EvidenceError, EvidencePolicy, make_evidence
 from controller.mock_engine import MockEngine
-from controller.output_length import candidate_features
 from controller.planner import PlannerKnobs
 from controller.schema import EvidenceSpan, SessionSnapshot
 from controller.serialization import dumps, loads, to_jsonable
@@ -46,7 +45,6 @@ def test_rebuild_shares_only_the_body_while_preserving_sources_and_dependencies(
     assert all(b.source_uri in candidate.messages[-1].content for b in (a, b))
     assert '"dependencies"' in candidate.messages[-1].content
     assert candidate.evidence_body_tokens == len((BODY + condition.text).encode())
-    assert candidate_features(candidate, None)["evidence_body_chars"] == len(BODY + condition.text)
 
 
 def test_append_reuses_visible_body_under_new_source_scope_without_a_chain():

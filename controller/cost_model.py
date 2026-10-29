@@ -1,9 +1,4 @@
-"""Measured lookup costs with explicit calibration and historical output priors.
-
-The default planner requires calibrated costs. An explicitly selected native
-workload estimator can compare measured execution with analytical waiting;
-those estimates retain a separate eligibility flag and are not called calibrated.
-"""
+"""Measured prefill/decode costs, completed-output priors and native-budget waiting."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, is_dataclass
@@ -49,13 +44,6 @@ class OutputPrior:
     p90_tokens: int
 
 
-def positive_prefill_features(prefix, suffix, load, concurrency):
-    """Eight nonnegative runtime terms; fitting dependencies stay offline."""
-    base = (1.0, float(suffix), float(suffix*prefix + suffix*suffix/2), float(load))
-    pressure = max(0, concurrency-1)
-    return base + tuple(pressure*value for value in base)
-
-
 def output_length_prior(session: SessionSnapshot | None, *, global_mean: int = 128,
                         global_p90: int = 256, max_new_tokens: int = 512,
                         window: int = 4, shrinkage: float = 2.0) -> OutputPrior:
@@ -79,9 +67,7 @@ class CostModel:
                  max_normalized_distance: float = .5,
                  include_host_cost: bool = True, include_decode_cost: bool = True,
                  include_control_cost: bool = True, residual_alpha: float = .1,
-                 prefill_estimator: str = "lookup", positive_prefill: Mapping | None = None,
-                 uncertainty_mode: str | None = None, output_length_model=None,
-                 stage_model: Mapping | None = None, admission_estimator: str = "strict") -> None:
+                 stage_model: Mapping | None = None) -> None:
         self.prefill_points = tuple(prefill_points)
         self.decode_points = tuple(decode_points)
         self.default_output_tokens = default_output_tokens
@@ -93,24 +79,7 @@ class CostModel:
         self.include_decode_cost = include_decode_cost
         self.include_control_cost = include_control_cost
         self.residual_alpha = residual_alpha
-        if prefill_estimator not in {"lookup", "positive_basis"}:
-            raise ValueError("prefill_estimator must be lookup or positive_basis")
-        self.prefill_estimator = prefill_estimator
-        self.positive_prefill = dict(positive_prefill or {})
-        self.uncertainty_mode = (self.positive_prefill.get("uncertainty_mode", "global")
-                                 if uncertainty_mode is None else uncertainty_mode)
-        if self.uncertainty_mode not in {"global", "conditional"}:
-            raise ValueError("uncertainty_mode must be global or conditional")
-        self.output_length_model = output_length_model
         self.stage_model = dict(stage_model or {})
-        self.admission_estimator = admission_estimator
-        if admission_estimator not in {"strict", "native_workload", "native_budget"}:
-            raise ValueError("unknown admission estimator")
-        if self.stage_model and admission_estimator not in {"native_workload", "native_budget"}:
-            raise ValueError("forward-stage artifact needs explicit admission_estimator=native_workload or native_budget")
-        # An unfitted model is constructed before loading a configured artifact.
-        if admission_estimator in {"native_workload", "native_budget"} and self.prefill_points and not self.stage_model:
-            raise ValueError("native workload estimators need a forward-stage artifact; total TTFT would double-count waiting")
         if not self.stage_model and any(p.scope == "forward_first" for p in self.prefill_points):
             raise ValueError("forward_first points require a stage model for pre-forward waiting")
         self._idle_pre_forward_samples = ()
@@ -155,20 +124,6 @@ class CostModel:
         self._prefill_includes_queue = any(p.scope == "first_token" for p in valid_prefill)
         lengths = [p.prefix_tokens+p.suffix_tokens for p in scoped_prefill]
         self._prefill_input_bounds = (min(lengths), max(lengths)) if lengths else None
-        self._positive_geometry = None
-        if prefill_estimator == "positive_basis":
-            coefficients = self.positive_prefill.get("coefficients", ())
-            if len(coefficients) != 8 or any(not math.isfinite(x) or x < 0 for x in coefficients):
-                raise ValueError("positive prefill requires eight finite nonnegative fitted coefficients")
-            for name in ("error_p95_ms", "error_p99_ms"):
-                value = self.positive_prefill.get(name)
-                if value is not None and (not math.isfinite(value) or value < 0):
-                    raise ValueError("positive prefill errors must be nonnegative finite values")
-            cells = {(p.prefix_tokens, p.suffix_tokens, p.host_load_tokens, p.concurrency) for p in scoped_prefill}
-            if cells:
-                axes = [sorted({coordinate[i] for coordinate in cells}) for i in range(4)]
-                scales = [max(1, values[-1]-values[0]) for values in axes]
-                self._positive_geometry = (cells, axes, scales)
         # Calibration points are fixed for this model's lifetime. Compile their
         # geometry once instead of rebuilding/sorting it for each output token.
         self._decode_valid_points = tuple(p for p in self.decode_points if self._source_valid(p.source))
@@ -295,71 +250,20 @@ class CostModel:
         limit = self.max_normalized_distance if max_distance is None else max_distance
         return cost, error, nearby[0][0] <= limit
 
-    def _positive_error(self, concurrency, load):
-        error = self.positive_prefill.get("error_p99_ms")
-        if self.uncertainty_mode == "conditional":
-            table = self.positive_prefill.get("conditional_uncertainty", {})
-            minimum = table.get("minimum_feature_cells", 20)
-            host_load = load > 0
-            for level in (host_load, None):
-                for row in table.get("strata", ()):
-                    if (row["concurrency"] == concurrency and row["host_load"] is level
-                            and host_load in row["host_load_states"] and row["feature_cells"] >= minimum):
-                        return row["error_p99_ms"]
-        return error
 
     def _prefill(self, prefix: int, suffix: int, load: int,
-                 concurrency: int, *, uncertainty_load: int | None = None) -> tuple[float, float, bool]:
-        # Separate P/U axis bounds can admit unmeasured total lengths. Both
-        # estimators keep diagnostic values but require the observed n range.
+                 concurrency: int) -> tuple[float, float, bool]:
+        # The measured total-input range also bounds the separate prefix/suffix axes.
         bounds = self._prefill_input_bounds
         length_supported = bounds is not None and bounds[0] <= prefix+suffix <= bounds[1]
-        if self.prefill_estimator == "positive_basis":
-            estimate = sum(a*b for a, b in zip(positive_prefill_features(prefix, suffix, load, concurrency),
-                                               self.positive_prefill["coefficients"]))
-            sufficient = self.positive_prefill.get("uncertainty_sufficient") is True
-            error = self._positive_error(concurrency, load if uncertainty_load is None else uncertainty_load)
-            if not sufficient or error is None:
-                return estimate, max(estimate, error or 0), False
-            sources = self.positive_prefill.get("fit_sources")
-            if sources is None:
-                # Older positive artifacts may carry source provenance only in
-                # the enclosing fit metadata. Missing provenance is not hardware.
-                sources = self.calibration_metadata.get("measurement_sources")
-            allowed = {"hardware", "mock"} if self.allow_mock_calibration else {"hardware"}
-            sources_supported = bool(sources) and set(sources) <= allowed
-            return estimate, error, (sources_supported and length_supported
-                                     and self._positive_supported((prefix, suffix, load, concurrency)))
         if not self._prefill_samples:
-            # Positive-coefficient structure captures long-prefix attention.
+            # Unfitted diagnostics do not authorize a cost-based choice.
             estimate = .05 + .004*suffix + .0000002*(suffix*prefix+suffix*(suffix+1)/2) + .003*load
             return estimate, max(estimate, 1.0), False
         estimate, error, supported = self._interpolate((prefix, suffix, load, concurrency),
             self._prefill_samples, prepared=self._prefill_geometry)
         return estimate, error, supported and length_supported
 
-    def _positive_supported(self, target):
-        """Preserve lookup geometry; _prefill also enforces the common n range.
-
-        Only fixed geometry is consulted. Cost prediction is the eight-term dot
-        product; this guard needs no neighbor cost interpolation or sorting.
-        """
-        if self._positive_geometry is None:
-            return False
-        cells, axes, scales = self._positive_geometry
-        if target in cells:
-            return True
-        if not all(values[0] <= value <= values[-1] for value, values in zip(target, axes)):
-            return False
-        bounds = []
-        for value, values in zip(target, axes):
-            index = bisect_left(values, value)
-            bounds.append((values[index] if values[index] == value else values[index-1], values[index]))
-        corners = product(*(tuple(dict.fromkeys(pair)) for pair in bounds))
-        if all(corner in cells for corner in corners):
-            return True
-        return min(sum(abs(a-b)/s for a, b, s in zip(coordinates, target, scales))
-                   for coordinates in cells) <= self.max_normalized_distance
 
     def _decode(self, context: int, concurrency: int) -> tuple[float,float,bool]:
         return self._decode_cached(context, concurrency, self.max_normalized_distance)
@@ -423,8 +327,7 @@ class CostModel:
     def _queued_workload_forward(self, input_tokens, device_tokens, host_tokens, concurrency):
         prefix = min(max(0, input_tokens-1), device_tokens+host_tokens)
         loaded = host_tokens if self.include_host_cost else 0
-        forward, _, supported = self._prefill(prefix, input_tokens-prefix, loaded, concurrency,
-                                              uncertainty_load=host_tokens)
+        forward, _, supported = self._prefill(prefix, input_tokens-prefix, loaded, concurrency)
         setup, _, setup_supported = self._interpolate(
             (prefix, input_tokens-prefix, loaded), self._idle_pre_forward_samples,
             prepared=self._idle_pre_forward_geometry)
@@ -438,11 +341,6 @@ class CostModel:
         mean, p90 = self.effective_output_prior
         prior = output_length_prior(session, global_mean=mean,
             global_p90=p90, max_new_tokens=self.max_new_tokens)
-        length_prediction = None
-        if self.output_length_model is not None:
-            length_prediction = self.output_length_model.predict_prior(
-                candidate, session, self.max_new_tokens, prior)
-            prior = OutputPrior(length_prediction.mean_tokens, length_prediction.p90_tokens)
         n = len(candidate.input_ids)
         loaded = max(0, min(quote.host_only_load_tokens, quote.native_load_estimate))
         # A GPU-resident segment can follow a host-only gap. Once every missing
@@ -453,7 +351,7 @@ class CostModel:
         prefix = min(quote.match_limit, quote.recoverable_prefix_tokens if full_restore
                      else quote.ready_gpu_prefix_tokens)
         joint, joint_error, calibrated = self._prefill(prefix, max(0,n-prefix),
-                            loaded if self.include_host_cost else 0, concurrency, uncertainty_load=loaded)
+                            loaded if self.include_host_cost else 0, concurrency)
         control_ms = control_ms if self.include_control_cost else 0.0
         # first_token observations already include the server-side queue.
         if self._prefill_includes_queue:
@@ -474,7 +372,7 @@ class CostModel:
             calibrated = False
         wait, selection_eligible = None, None
         if self.stage_model:
-            from .admission import estimate_native_budget_wait, estimate_wait
+            from .admission import estimate_native_budget_wait
             setup_ms, _, setup_supported = self._interpolate(
                 (prefix, max(0,n-prefix), loaded if self.include_host_cost else 0),
                 self._idle_pre_forward_samples, prepared=self._idle_pre_forward_geometry)
@@ -482,20 +380,17 @@ class CostModel:
                 batch=batch, forward_fn=self._workload_forward, decode_fn=self._workload_decode,
                 development_lengths=tuple(self._observed_output_lengths) or self._development_lengths,
                 idle_ms=setup_ms)
-            if self.admission_estimator == "native_budget":
-                profile = self.calibration_metadata.get("profile_manifest") or {}
-                # This observation describes only the current contiguous GPU
-                # match, not resident tails after a host gap or future unlocks.
-                initial_pin = (quote.evictable_gpu_prefix_tokens
-                    if not quote.host_only_load_tokens
-                    and not quote.inflight_h2d_tokens and not quote.inflight_d2h_tokens
-                    and wait_args["resident_gpu_tokens"] == quote.ready_gpu_prefix_tokens
-                    else None)
-                wait = estimate_native_budget_wait(**wait_args, max_new_tokens=self.max_new_tokens,
-                    page_size=(profile.get("cache_config") or {}).get("page_size"),
-                    queued_forward_fn=self._queued_workload_forward, initial_pinned_tokens=initial_pin)
-            else:
-                wait = estimate_wait(**wait_args, output_mean=prior.mean_tokens, output_p90=prior.p90_tokens)
+            profile = self.calibration_metadata.get("profile_manifest") or {}
+            # This observation describes only the current contiguous GPU
+            # match, not resident tails after a host gap or future unlocks.
+            initial_pin = (quote.evictable_gpu_prefix_tokens
+                if not quote.host_only_load_tokens
+                and not quote.inflight_h2d_tokens and not quote.inflight_d2h_tokens
+                and wait_args["resident_gpu_tokens"] == quote.ready_gpu_prefix_tokens
+                else None)
+            wait = estimate_native_budget_wait(**wait_args, max_new_tokens=self.max_new_tokens,
+                page_size=(profile.get("cache_config") or {}).get("page_size"),
+                queued_forward_fn=self._queued_workload_forward, initial_pinned_tokens=initial_pin)
             queue_ms = wait.mean_ms
             reasons = set(quote.uncertainty_reasons)
             known_native_state = (not quote.inflight_h2d_tokens and not quote.inflight_d2h_tokens
@@ -505,7 +400,7 @@ class CostModel:
                 and setup_supported and wait.supported and known_native_state and not partial_restore
                 and batch is not None and batch.host_quote_supported)
             # Empirical forward/decode support is not calibration of the new
-            # heterogeneous workload forecast. Selection is explicit and opt-in.
+            # heterogeneous workload forecast.
             calibrated = False
         cost = max(0.0, control_ms + queue_ms + joint + decode + self._bias_ms)
         capacity_risk = batch is not None and (n-prefix+loaded+prior.p90_tokens >
@@ -513,11 +408,6 @@ class CostModel:
         return CostEstimate(candidate.candidate_id, cost, control_ms, queue_ms, joint,
             decode, joint_error+decode_error, prior.mean_tokens, prior.p90_tokens,
             max(0.0, control_ms+(wait.upper_ms if wait else queue_ms)+joint+risk_decode+self._bias_ms), calibrated, capacity_risk,
-            # Length residuals have a different meaning from timing errors.
-            # Keep them diagnostic; mean/p90 affect expected/risk decode cost.
-            output_length_error_tokens=length_prediction.error_tokens if length_prediction else None,
-            output_length_model=length_prediction.model_kind if length_prediction else "shared",
-            output_length_in_range=length_prediction.within_training_range if length_prediction else None,
             selection_eligible=selection_eligible, waiting_estimate_kind=wait.model_kind if wait else None,
             waiting_upper_ms=wait.upper_ms if wait else None,
             waiting_reason=wait.reason if wait else None,
@@ -620,11 +510,10 @@ class CostModel:
         """Freeze fitted points and priors. Runtime residual adaptation is not persisted."""
         settings = {name: getattr(self, name) for name in (
             "default_output_tokens", "p90_output_tokens", "max_new_tokens",
-            "max_normalized_distance", "include_host_cost", "include_decode_cost", "include_control_cost", "residual_alpha", "prefill_estimator", "uncertainty_mode", "admission_estimator")}
+            "max_normalized_distance", "include_host_cost", "include_decode_cost", "include_control_cost", "residual_alpha")}
         payload = {"version": 1, "settings": settings, "prefill_points": [asdict(p) for p in self.prefill_points],
                    "decode_points": [asdict(p) for p in self.decode_points],
                    "metadata": dict(self.calibration_metadata if metadata is None else metadata),
-                   "positive_prefill": self.positive_prefill or None,
                    "stage_model": self.stage_model or None}
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -636,14 +525,8 @@ class CostModel:
 
     @classmethod
     def from_spec(cls, payload: Mapping, **overrides) -> "CostModel":
-        if overrides.get("uncertainty_mode") is None:
-            overrides.pop("uncertainty_mode", None)
-        settings = {**payload["settings"], "positive_prefill": payload.get("positive_prefill"),
-                    "stage_model": payload.get("stage_model"), **overrides}
+        settings = {**payload["settings"], "stage_model": payload.get("stage_model"), **overrides}
         model = cls((LookupPoint(**p) for p in payload["prefill_points"]),
                     (DecodePoint(**p) for p in payload["decode_points"]), **settings)
         model.calibration_metadata = payload.get("metadata", {})
         return model
-
-
-PiecewiseCostModel = CostModel

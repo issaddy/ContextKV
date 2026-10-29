@@ -19,7 +19,7 @@ server_profiles:
     hicache: true
     session_radix: true
     gpu_tokens: 32768
-    hicache_gb: 8
+    hicache_gb: 16
     mem_fraction_static: 0.8
 methods:
   - id: ContextKV

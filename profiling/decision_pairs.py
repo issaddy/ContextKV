@@ -374,7 +374,7 @@ def analyze_pairs(rows, *, time_field="server_elapsed_ms", tie_ms=1.0):
 def _model_and_knobs(config, cases, artifact):
     from controller.config import load_cost_model
     model = load_cost_model(config, artifact_path=artifact,
-        fingerprint=cases[0].candidates[0].fingerprint, max_new_tokens=cases[0].max_new_tokens)
+        max_new_tokens=cases[0].max_new_tokens)
     return model, config.planner
 
 
@@ -481,10 +481,6 @@ def rescore_file(args):
         "config": asdict(config), "config_scope": "cost ablations and planner; candidates/budgets come from frozen cases",
         "generation_protocol": protocol.record(),
         "cost_artifact": str(Path(artifact).resolve()), "cost_artifact_sha256": sha256(Path(artifact).read_bytes()).hexdigest(),
-        "output_length_artifact": config.cost_model.output_length_artifact,
-        "output_length_artifact_sha256": sha256(Path(config.cost_model.output_length_artifact).read_bytes()).hexdigest()
-            if config.cost_model.output_length_artifact else None,
-        "output_length_training_metadata": model.output_length_model.metadata if model.output_length_model else None,
         "engine": source_manifest["engine"], "calibration_scope": model.calibration_scope_report,
         "measurement_source_counts": dict(Counter(row.get("measurement_source", "not_recorded") for row in records)),
         "new_generations": 0, "new_engine_requests": 0, "online_model_updates": False,
@@ -534,9 +530,6 @@ async def collect(args):
         "generation_protocol": protocol.record(),
         "config": asdict(config), "cost_artifact": artifact,
         "cost_artifact_sha256": sha256(Path(artifact).read_bytes()).hexdigest() if artifact else None,
-        "output_length_artifact": config.cost_model.output_length_artifact,
-        "output_length_artifact_sha256": sha256(Path(config.cost_model.output_length_artifact).read_bytes()).hexdigest()
-            if config.cost_model.output_length_artifact else None,
         "quality_evaluated": False, "fixtures_destructive_on_isolated_server": True,
         "online_model_updates": False, "pressure_concurrency": 1,
         "client_complete_scope": "generate_submit_to_complete_response; excludes fixture,prepare,retire,ledger_commit"}

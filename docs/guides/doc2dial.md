@@ -78,4 +78,4 @@ python -m bench.official overlap --references data/multidoc2dial/test/tasks.json
 
 已有v1.0.1和v0.9 wOOD读取、完整语料导出及`adapters.dialogue_examples`严格前缀投影继续保留，可用于文档支撑对话研究。v1使用`references`列表，v0.9使用`reference`字典；每个原角色/原文和多标签保持原样。两版本有重叠，不混作独立样本。`respond_no_solution`或空reference只按原标注保留，不推断全语料不可答。
 
-示例入口仍为`python -m adapters.doc2dial --source-format v1 ...`和`python -m adapters.dialogue_examples --supervision ... --output ...`。这些离线原消息投影与上述系统问答轮是不同产物。历史验证记录在`runs/doc2dial-integration/`，本次公共分区与接线检查在`runs/benchmark-suite-review/`。
+示例入口仍为`python -m adapters.doc2dial --source-format v1 ...`和`python -m adapters.dialogue_examples --supervision ... --output ...`。这些离线原消息投影与上述系统问答轮是不同产物。

@@ -1,0 +1,26 @@
+# Default real-model execution: Qwen3-32B, non-thinking, measured H200 costs.
+engine:
+  kind: sglang
+  base_url: http://127.0.0.1:30000
+  page_size: 64
+  timeout_seconds: 180
+  gpu_capacity_tokens: 32768
+  host_capacity_tokens: 61056
+  stream: true
+model:
+  scope_path: configs/model_scopes/qwen3-32b.local.json
+context:
+  max_total_model_tokens: 32768
+  max_new_tokens: 1024
+planner:
+  strategy: cost
+  fallback_strategy: always_rebuild
+shadow: false
+state_dir: runs/qwen3-32b
+sampling:
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  min_p: 0
+cost_model:
+  artifact: configs/calibration/qwen3-32b-h200.json

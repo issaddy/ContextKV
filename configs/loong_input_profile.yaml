@@ -8,7 +8,7 @@ engine:
   timeout_seconds: 180
   stream: true
 model:
-  scope_path: configs/model_scopes/qwen3-8b.local.json
+  scope_path: configs/model_scopes/qwen3-32b.local.json
 context:
   max_total_model_tokens: 32768
   max_new_tokens: 4096

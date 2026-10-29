@@ -45,30 +45,8 @@ def feature_cell(row):
     return (*features(row), row["gpu_capacity_tokens"])
 
 
-def load_bound_rows(compact_path, measurements_path, manifests):
-    """Restore batch IDs by original request order, checking exact saved labels.
-
-    Compact repetition is absent in the existing export. The pinned collector
-    writes one first_token measurement per request in gather input order; matching
-    all recorded quantities recovers its persisted (run_id, repetition), without
-    sorting by TTFT or using request index as a predictor.
-    """
-    path = Path(compact_path)
-    content = path.read_bytes()
-    compact = [json.loads(line) for line in content.decode("utf-8").splitlines() if line.strip()]
-    return _bind_stage_rows(compact, measurements_path, manifests, source_key="stage_compact",
-        source_info={"path": str(path.resolve()), "sha256": sha256(content).hexdigest()})
-
-
 def load_bound_telemetry(telemetry_paths, measurements_path, manifests):
-    """Read native collector records without an external compact conversion.
-
-    Each supplied group identifies one original telemetry/manifest pair. Native
-    request timings stay labels; prepared cache state comes only from its case.
-    New telemetry carries the original batch repetition, checked against the
-    separately persisted measurements. Historical files lacking that identity
-    remain readable through the original compact interface.
-    """
+    """Join native request telemetry to its measured batches and source manifests."""
     if set(telemetry_paths) != set(manifests):
         raise ValueError("telemetry groups and supplied profile manifests must match")
     records, files = [], []
@@ -101,11 +79,10 @@ def load_bound_telemetry(telemetry_paths, measurements_path, manifests):
                 "actual_host_loaded_tokens": receipt["actual_host_loaded_tokens"],
                 "actual_prefill_tokens": receipt["actual_prefill_tokens"]})
     return _bind_stage_rows(records, measurements_path, manifests, source_key="stage_telemetry",
-                            source_info={"files": files}, explicit_identity=True)
+                            source_info={"files": files})
 
 
-def _bind_stage_rows(compact, measurements_path, manifests, *, source_key, source_info,
-                     explicit_identity=False):
+def _bind_stage_rows(records, measurements_path, manifests, *, source_key, source_info):
     measurements = [asdict(row) for row in load_measurements(measurements_path)]
     provenance = measurement_provenance(measurements, measurements_path,
                                        profile_manifest_path=list(manifests.values()))
@@ -118,27 +95,27 @@ def _bind_stage_rows(compact, measurements_path, manifests, *, source_key, sourc
             if row["source"] != "hardware" or row.get("timing_scope") != "server_request":
                 raise ValueError("stage labels require hardware server-request TTFT measurements")
             grouped[row["run_id"]].append(row)
-    if {row["group"] for row in compact} != set(manifest_rows):
+    if {row["group"] for row in records} != set(manifest_rows):
         raise ValueError("stage request groups and supplied profile manifests must match")
     positions = defaultdict(int)
     rows, batches = [], defaultdict(list)
-    for record in compact:
+    for record in records:
         manifest = manifest_rows[record["group"]]
         run_id = manifest["run_id"]
-        if explicit_identity and record["run_id"] != run_id:
+        if record["run_id"] != run_id:
             raise ValueError("native telemetry run_id differs from its profile manifest")
         if record["warmup"]:
             continue
         position = positions[run_id]
         if position >= len(grouped[run_id]):
-            raise ValueError("compact contains more formal requests than original measurements")
+            raise ValueError("telemetry contains more formal requests than original measurements")
         observed = grouped[run_id][position]
         positions[run_id] += 1
-        if explicit_identity and record["repetition"] != observed["repetition"]:
+        if record["repetition"] != observed["repetition"]:
             raise ValueError("native telemetry repetition differs from original measurements")
         case = record["case"]
         if case not in manifest.get("cases",[]):
-            raise ValueError("compact fixture is absent from its original profile manifest")
+            raise ValueError("telemetry fixture is absent from its original profile manifest")
         fixture = PrefillCase(**case)
         prepared_device, prepared_host = fixture.prefix_split()
         if (fixture.cache_state == "mixed" and
@@ -150,7 +127,7 @@ def _bind_stage_rows(compact, measurements_path, manifests, *, source_key, sourc
                     "output_tokens": record["output_tokens"], "cache_state": case["cache_state"],
                     "elapsed_ms": record["server_ttft_ms"]}
         if any(observed.get(key) != value for key, value in expected.items()):
-            raise ValueError("compact request order/labels differ from original first_token measurements")
+            raise ValueError("telemetry request order/labels differ from original first_token measurements")
         if not isinstance(observed.get("repetition"), int):
             raise ValueError("original measurements must preserve batch repetition")
         if prefix != case["prefix_tokens"] or record["actual_prefill_tokens"] != case["prompt_tokens"]-prefix:
@@ -171,7 +148,7 @@ def _bind_stage_rows(compact, measurements_path, manifests, *, source_key, sourc
         rows.append(row)
         batches[row["batch_id"]].append(row)
     if any(positions[run_id] != len(values) for run_id, values in grouped.items()):
-        raise ValueError("compact does not cover every formal first_token measurement")
+        raise ValueError("telemetry does not cover every formal first_token measurement")
     for batch in batches.values():
         concurrency = batch[0]["concurrency"]
         if (len(batch) != concurrency or {r["request_index"] for r in batch} != set(range(concurrency))
@@ -181,7 +158,7 @@ def _bind_stage_rows(compact, measurements_path, manifests, *, source_key, sourc
     if len(capacities) != 1:
         raise ValueError("fit one physical pool configuration at a time")
     provenance[source_key] = {**source_info,
-        "warmup_requests_excluded": sum(bool(row["warmup"]) for row in compact),
+        "warmup_requests_excluded": sum(bool(row["warmup"]) for row in records),
         "formal_requests": len(rows), "batches": len(batches),
         "prepared_vs_actual_host_load_changed_requests": sum(r["host_load_tokens"] != r["actual_host_loaded_tokens"] for r in rows),
         "groups": {group: {
@@ -190,9 +167,7 @@ def _bind_stage_rows(compact, measurements_path, manifests, *, source_key, sourc
             "prepared_vs_actual_host_load_changed_requests": sum(r["host_load_tokens"] != r["actual_host_loaded_tokens"]
                                                                   for r in rows if r["group"] == group)}
             for group in manifest_rows},
-        "batch_binding": ("explicit_telemetry_run_id_repetition_and_original_first_token_order_and_exact_fields"
-                          if explicit_identity else
-                          "original_first_token_order_and_exact_fields_to_run_id_repetition")}
+        "batch_binding": "explicit_telemetry_run_id_repetition_and_original_first_token_order_and_exact_fields"}
     return rows, provenance
 
 
@@ -312,33 +287,20 @@ def fit_artifact(rows, provenance, base_artifact, *, folds=5, seed=42, developme
     validation = validate(rows,folds=folds,seed=seed)
     forward = fit_cells(rows,"forward_ms")
     waiting = fit_cells(rows,"pre_forward_ms",budget=True)
-    total = fit_cells(rows,"total_ttft_ms")
-    total_budget = fit_cells(rows,"total_ttft_ms",budget=True)
     heldout = [r for r in validation["predictions"].get("forward_first",[]) if r["supported"]]
     errors = [abs(r["predicted_ms"]-r["actual_ms"]) for r in heldout]
     error = quantile(errors,.99)
     model = deepcopy(base)
-    model["settings"]["prefill_estimator"] = "lookup"
-    model["positive_prefill"] = None
     model["prefill_points"] = [{"prefix_tokens":cell["features"][0],"suffix_tokens":cell["features"][1],
         "host_load_tokens":cell["features"][2],"concurrency":cell["features"][3],"elapsed_ms":cell["mean_ms"],
         "error_ms":error if error is not None else cell["mean_ms"],"source":"hardware","scope":"forward_first"} for cell in forward]
-    model["stage_model"] = {"version":1,"waiting_calibration_scope":"homogeneous_burst_only",
-        "label_definitions":{"forward_first":"server forward_start to first token; wall interval, not CUDA",
-                             "pre_forward":"server_ttft minus forward_first; joint admission/wait/restore interval"},
-        "forward":{"features":list(FORWARD_FEATURES),"cells":forward,
-                   "error_source":"supported whole-cell OOF request absolute error empirical P99" if errors else "no_supported_OOF_residuals_use_point_cost",
-                   "oof_residuals":len(errors),"independent_feature_cells":len({tuple(r['feature_cell']) for r in heldout}),
-                   "empirical_error_p95_ms":quantile(errors,.95),"empirical_error_p99_ms":error,
-                   "empirical_error_max_ms":max(errors) if errors else None,"confidence_coverage_guarantee":False},
-        "pre_forward":{"features":list(WAITING_FEATURES),"cells":waiting,"online_heterogeneous_queue_calibrated":False,
-                       "upper_quantiles_meaning":"empirical observed homogeneous burst spread, not a hard upper bound"},
-        "total_ttft_reference":{"features":list(FORWARD_FEATURES),"cells":total},
-        "total_ttft_budget_reference":{"features":list(WAITING_FEATURES),"cells":total_budget},
-        "validation":{k:v for k,v in validation.items() if k!='predictions'},
-        "feature_timing":"prepared prefix/host fixture before request submission; realized restores are not features",
-        "excluded_features":["request_index","TTFT_rank","actual_output_tokens","actual_host_loaded_tokens","actual_future_queue_order"],
-        "gpu_capacity_tokens":rows[0]["gpu_capacity_tokens"]}
+    model["stage_model"] = {
+        "version": 1, "waiting_calibration_scope": "homogeneous_burst_only",
+        "pre_forward": {"features": list(WAITING_FEATURES),
+            "cells": [{k: cell[k] for k in ("features", "mean_ms", "requests")}
+                      for cell in waiting if cell["features"][3] == 1],
+            "online_heterogeneous_queue_calibrated": False},
+        "gpu_capacity_tokens": rows[0]["gpu_capacity_tokens"]}
     frozen_lengths = (base.get("stage_model") or {}).get("development_output_lengths")
     if frozen_lengths:
         # Refining a stage artifact must preserve its already bound empirical
@@ -371,21 +333,34 @@ def fit_artifact(rows, provenance, base_artifact, *, folds=5, seed=42, developme
     # The base artifact remains separately bound below. Its old stage source
     # must not appear to be an additional input to this fit.
     base_metadata = {key: value for key, value in base.get("metadata",{}).items()
-                     if key not in {"stage_compact", "stage_telemetry"}}
+                     if key not in {"stage_telemetry"}}
     model["metadata"] = {**base_metadata,**provenance,
-        "prefill_estimator":"lookup", "validation":{k:v for k,v in validation.items() if k!='predictions'},
+        "prefill_estimator":"lookup", "validation":{"metrics":validation["metrics"]},
         "stage_fit":{"source":"hardware","formal_requests":len(rows),"batches":len({r['batch_id'] for r in rows}),
+                     "forward_error_p99_ms":error,"oof_residuals":len(errors),
                      "base_artifact":{"path":str(Path(base_artifact).resolve()),"sha256":sha256(Path(base_artifact).read_bytes()).hexdigest()},
                      "decode_and_output_priors":"copied unchanged from bound base artifact",
                      "online_heterogeneous_waiting_validation":False}}
+    # Runtime needs identity, sampling and page size. Full manifests, validation
+    # predictions and unused comparison tables stay with the original run files.
+    for key in ("profile_manifest", "profile_manifests"):
+        profiles = model["metadata"].get(key)
+        if not profiles:
+            continue
+        compact = [{name: value for name, value in profile.items() if name in
+                    {"run_id", "source", "status", "fingerprint", "cache_config", "sampling_recipe"}}
+                   | {"engine": {name: value for name, value in profile.get("engine", {}).items()
+                                 if name in {"fingerprint", "cache_config_hash"}}}
+                   for profile in (profiles if isinstance(profiles, list) else [profiles])]
+        model["metadata"][key] = compact if isinstance(profiles, list) else compact[0]
+    if len(model["metadata"].get("profile_manifests", [])) == 1:
+        model["metadata"].pop("profile_manifests")
     return model, validation
 
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    stage_input=parser.add_mutually_exclusive_group(required=True)
-    stage_input.add_argument("--compact",help="historical compact stage JSONL")
-    stage_input.add_argument("--telemetry",action="append",metavar="GROUP=PATH",
+    parser.add_argument("--telemetry",required=True,action="append",metavar="GROUP=PATH",
                              help="native SGLangProbe telemetry with explicit batch repetition")
     parser.add_argument("--measurements",required=True)
     parser.add_argument("--profile-manifest",required=True,action="append",metavar="GROUP=PATH")
@@ -405,16 +380,13 @@ def main(argv=None):
     paths=[Path(args.output),Path(args.validation)]
     if paths[0].resolve()==paths[1].resolve() or any(path.exists() for path in paths):
         parser.error("use distinct new artifact/validation paths; existing results are preserved")
-    if args.telemetry:
-        telemetry={}
-        for item in args.telemetry:
-            group,path=item.split("=",1)
-            if group in telemetry:
-                parser.error("telemetry group must be unique")
-            telemetry[group]=path
-        rows,provenance=load_bound_telemetry(telemetry,args.measurements,manifests)
-    else:
-        rows,provenance=load_bound_rows(args.compact,args.measurements,manifests)
+    telemetry={}
+    for item in args.telemetry:
+        group,path=item.split("=",1)
+        if group in telemetry:
+            parser.error("telemetry group must be unique")
+        telemetry[group]=path
+    rows,provenance=load_bound_telemetry(telemetry,args.measurements,manifests)
     model,validation=fit_artifact(rows,provenance,args.base_artifact,folds=args.folds,seed=args.seed,
                                   development_report=args.development_report)
     for path,value in zip(paths,(model,validation)):

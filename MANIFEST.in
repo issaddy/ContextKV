@@ -1,9 +1,9 @@
-include README.md Makefile uv.lock .python-version llm_qa_context_kv_technical_plan.md
+include README.md Makefile uv.lock .python-version
 recursive-include configs *.yaml *.json
 recursive-include docs *.md
 recursive-include docs/third_party *.txt
 recursive-include scripts *.py *.sh
 recursive-include engine_patches *.py *.patch *.json *.md SGLANG_LICENSE
-recursive-include tests *.py *.json *.jsonl *.txt
+recursive-include tests *.py *.json *.jsonl
 recursive-include .github *.yml
 global-exclude __pycache__ *.py[cod]

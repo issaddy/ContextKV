@@ -1,215 +1,55 @@
+# 参考工作
+
+保留当前机制的来源及与下一步瓶颈直接相关的工作。实现适配见[架构](architecture.md)，运行效果见[数据与评价](data_and_evaluation.md)。
+
+## 当前机制依据
+
 - [SGLang](https://github.com/sgl-project/sglang)：结构化生成、前缀缓存和高性能大模型推理服务。
 - [Session-Aware Radix Cache](https://docs.sglang.io/docs/advanced_features/session_radix_cache)：通过会话软引用管理可复用前缀的缓存生命周期。
 - [HiCache](https://docs.sglang.io/docs/advanced_features/hicache_design)：GPU、Host及存储层之间的分层KV缓存管理。
 - [SGLang NGRAM Worker](https://github.com/sgl-project/sglang/blob/3f36fc08331f64cd63c4fbbdf39cc402f38bb38b/python/sglang/srt/speculative/ngram_worker.py)：利用历史输出片段构造草稿并由目标模型验证。
-- [ContextPilot](https://arxiv.org/abs/2511.03475)：通过上下文索引、重排、去重和注释促进长上下文复用。 [代码](https://github.com/EfficientContext/ContextPilot)
-- [TokenPilot / LightRSI](https://arxiv.org/abs/2606.17016)：结合稳定前缀与上下文生命周期清理降低多轮执行成本。 [代码](https://github.com/zjunlp/LightRSI)
-- [EfficientAgent](https://arxiv.org/abs/2609.33762)：分析并发工作集、KV卸载和Host备份准入。 [代码](https://github.com/KunmingSHAO/efficientagent_release)
-- [ReCAP](https://arxiv.org/abs/2609.40118)：利用持久上下文图组织记忆压缩与缓存兼容更新。 [代码](https://github.com/UCSB-NLP-Chang/ReCAP)
-- [RAGCache](https://arxiv.org/abs/2404.12457)：采用知识树和前缀感知缓存策略加速RAG推理。
-- [CacheBlend](https://arxiv.org/abs/2405.16444)：通过选择性重算融合不同文档片段的KV缓存。
-- [Cache-Craft](https://arxiv.org/abs/2502.15734)：管理可复用文档块缓存，并通过局部修复适配新的上下文。
-- [Cache-Aware Prompt Compression（CAPC）](https://arxiv.org/abs/2607.15516)：联合建模提示压缩、缓存命中与API调用成本。
-- [Don’t Break the Cache](https://arxiv.org/abs/2601.06007)：评估长程智能体任务中的提示缓存边界与内容组织。
-- [CacheSmith](https://arxiv.org/abs/2610.18925)：在延迟目标下根据转移成本选择KV复用与局部修复方案。
-- [SmoothAgent](https://arxiv.org/abs/2607.00151)：通过前瞻上下文处理、KV准备和调度协同降低长程智能体延迟。 [代码](https://github.com/PanZaifeng/SmoothAgent)
-- [Cache Engineering for Agents（AKV）](https://arxiv.org/abs/2610.28577)：通过drop、重定位和分段恢复支持上下文编辑后的缓存复用。 [代码](https://github.com/thu-nics/AKV)
-- [Context Language Models / Suffix Cache Reuse](https://arxiv.org/abs/2609.37725)：研究模型编辑上下文及编辑后后缀KV的复用。 [代码](https://github.com/facebookresearch/context-language-models)
-- [Budgeted Cache Repair](https://arxiv.org/abs/2610.02233)：在计算预算内修复跨上下文复用的近似KV缓存。
-- [CacheScout](https://arxiv.org/abs/2608.14624)：学习智能体执行转移以安排KV保护、淘汰和预取。
-- [SpecCache](https://aclanthology.org/2026.acl-long.859/)：利用推测模型信号选择RAG缓存复用中的关键重算位置。
-- [Grounded Cache Routing](https://arxiv.org/abs/2605.27494)：结合问题、证据、版本和支持关系判断答案缓存的可复用性。 [代码](https://github.com/syedhumarahim/grounded-cache-router)
-- [Continuum](https://arxiv.org/abs/2511.02230)：用KV保留时间与程序级调度优化多轮智能体服务。 [代码](https://github.com/Hanchenli/vllm-continuum)
-- [KVFlow](https://arxiv.org/abs/2507.07400)：根据智能体工作流依赖和调用距离管理前缀保护与预取。 [代码](https://github.com/PanZaifeng/KVFlow)
-- [KVRouting / RLT / LBGR](https://github.com/fzwark/KVRouting)：研究前缀树上的随机标记淘汰和缓存感知请求路由。
-- [Marconi](https://github.com/ruipeterpan/marconi)：面向混合架构语言模型设计价值与内存成本感知的前缀缓存。
-- [AsymCache / Multi-Segment Attention](https://arxiv.org/abs/2606.02964)：通过多段注意力支持非连续KV管理与复用。
-- [Practical Online KV Cache Compaction for LLM Agents](https://arxiv.org/abs/2608.00902)：比较在线token淘汰、注意力匹配与代理查询的压缩效果。
-- [RR-Evict](https://arxiv.org/abs/2609.32278)：面向智能体负载进行细粒度前缀缓存淘汰。
-- [When Fancy Eviction Fails](https://arxiv.org/abs/2609.28870)：分析会话时序、重算代价与前缀缓存替换策略。
-- [LMCache](https://docs.lmcache.ai/)：提供跨层KV存储、卸载、传输和缓存融合组件。
-- [vLLM / PagedAttention](https://github.com/vllm-project/vllm)：通过分页KV管理与连续批处理提供大模型推理服务。
-- [XGrammar](https://github.com/mlc-ai/xgrammar)：使用语法和正则约束高效生成结构化输出。
-- [SuffixDecoding](https://arxiv.org/abs/2411.04975)：复用已有输出后缀作为推测解码草稿。
-- [Sarathi-Serve](https://www.usenix.org/conference/osdi24/presentation/agrawal)：利用分块Prefill和批处理调度协调吞吐与延迟。
-- [Online Scheduling for LLM Inference with KV Cache Constraints](https://arxiv.org/abs/2502.07115)：将解码过程中的内存增长纳入在线调度模型。
-- [WAIT / Nested WAIT](https://arxiv.org/abs/2504.11320)：借助流体模型与动态内存需求安排推理请求。
-- [Tail-Aware Scheduling / UniBoost](https://arxiv.org/abs/2606.18431)：联合输出长度、阶段特征和KV压力优化尾延迟。
-- [TIE](https://arxiv.org/abs/2604.00499)：用输出长度分布与不确定性信息进行推理调度。 [代码](https://github.com/Hyzheng-code/TIE)
-- [SSJF](https://arxiv.org/abs/2404.08509)：通过外部代理模型预测序列长度并安排请求顺序。 [代码](https://github.com/James-QiuHaoran/LLM-serving-with-proxy-models)
-- [Efficient LLM Scheduling by Learning to Rank](https://arxiv.org/abs/2408.15792)：直接学习输出长度次序以改善推理调度。 [代码](https://github.com/hao-ai-lab/vllm-ltr)
-- [PARS / Ranking Before Serving](https://arxiv.org/abs/2510.03243)：使用成对排序模型预测请求执行顺序。
-- [ELIS](https://arxiv.org/abs/2505.09142)：迭代预测剩余回答长度并更新调度决策。
-- [EGTP / PLP / ForeLen](https://arxiv.org/abs/2602.11812)：利用熵引导表示预测输出长度，并区分静态与生成中预测任务。 [代码](https://github.com/xiehuanyi/LP_Bench)
-- [Landlord](https://www.cs.ucr.edu/~neal/publication/Young02Online.pdf)：结合对象大小和取回成本进行在线缓存替换。
-- [Conformal Risk Control](https://research.google/pubs/conformal-risk-control/)：通过校准数据控制预测系统的期望损失。
-- [Sample-Conditional Coverage in Split-Conformal Prediction](https://proceedings.neurips.cc/paper_files/paper/2025/hash/7d83f9e9462c417e208d55e83a5058a8-Abstract-Conference.html)：研究分割保形预测的样本条件覆盖性质。
-- [Common Random Numbers](https://pubsonline.informs.org/doi/10.1287/mnsc.34.1.65)：利用配对随机性和协方差改善仿真实验比较精度。
-- [Grouped Cross-Validation](https://scikit-learn.org/stable/modules/cross_validation.html#cross-validation-iterators-for-grouped-data)：按会话或样本组划分训练与验证数据。
-- [Non-Negative Least Squares（NNLS）](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.nnls.html)：在系数非负约束下拟合执行成本等加性模型。
-- [Ridge Regression](https://scikit-learn.org/stable/modules/linear_model.html#ridge-regression-and-classification)：用L2正则化估计长度与成本残差。
+- [ContextPilot](https://arxiv.org/abs/2511.03475)：通过上下文索引、重排、去重和注释促进长上下文复用。
+- [TokenPilot / LightRSI](https://arxiv.org/abs/2606.17016)：结合稳定前缀与上下文生命周期清理降低多轮执行成本。
+- [EfficientAgent](https://arxiv.org/abs/2609.33762)：分析并发工作集、KV卸载和Host备份准入。
 - [BM25S](https://github.com/xhluca/bm25s)：提供基于稀疏矩阵的高效BM25检索。
 - [BGE-M3](https://huggingface.co/BAAI/bge-m3)：提供多语言、多粒度的文本检索表示。
 - [BGE-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3)：对查询与候选文档进行交叉编码相关性打分。
-- [Qwen3 Embedding / Qwen3-Reranker](https://arxiv.org/abs/2506.05176)：基于Qwen3构建文本嵌入与相关性重排模型。 [代码](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B)
-- [Querit-Reranker](https://arxiv.org/abs/2606.19037)：通过目标分布适配、软标签和模型合并训练紧凑多语言重排器。
-- [Sentence Transformers Cross-Encoder](https://www.sbert.net/docs/cross_encoder/pretrained_models.html)：提供查询与文档联合编码的重排模型及接口。
 - [Reciprocal Rank Fusion（RRF）](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)：依据名次倒数融合多个检索结果列表。
-- [Maximal Marginal Relevance（MMR）](https://www.cs.cmu.edu/afs/cs/Web/People/jgc/publication/MMR_DiversityBased_Reranking_SIGIR_1998.pdf)：在查询相关性与已选材料冗余之间进行权衡。
 - [xQuAD](https://terrierteam.dcs.gla.ac.uk/publications/ecir2010_rodrygo_div.pdf)：通过查询方面覆盖实现搜索结果多样化。
-- [次模函数最大化的贪心近似](https://pubsonline.informs.org/doi/10.1287/moor.3.3.177)：以边际增益递减组织有限预算下的覆盖选择。
-- [Elasticsearch Result Collapsing](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/collapse-search-results)：按组保留高排名代表，减少重复结果占据检索名额。
-- [Finding the Right Balance: Relevance and Diversity in LLM Retrieval](https://arxiv.org/abs/2610.09412)：分析候选冗余和证据需求对检索多样化收益的影响。
-- [AdaPCR](https://arxiv.org/abs/2507.04069)：根据多个片段的互补关系进行自适应组合检索。
-- [RankGPT](https://aclanthology.org/2023.emnlp-main.923/)：通过文档标识排序使用语言模型进行检索重排。
-- [CHIQ](https://aclanthology.org/2024.emnlp-main.135/)：增强对话历史理解，再生成适合检索的独立查询。 [代码](https://github.com/fengranMark/CHIQ)
-- [HAConvDR](https://aclanthology.org/2024.findings-acl.792/)：结合历史去噪和历史轮次实际检索贡献构造监督，训练会话稠密检索；重点处理长历史噪声与话题切换。 [代码](https://github.com/fengranMark/HAConvDR)。本项目的固定文档向量、查询侧LoRA试验仅参考会话检索学习方向，不是其算法复现。
-- [ConvDR](https://arxiv.org/abs/2105.04166)：继承文档编码，用独立问题的教师向量和检索排序损失训练会话查询表示，省去在线生成改写。 [代码](https://github.com/thunlp/ConvDR)。本项目的BGE归一化向量、查询LoRA与辅助数据配方不同，相关试验仅借鉴离线意图监督，不能直接继承论文效果。
-- [QuReTeC](https://arxiv.org/abs/2005.11723)：从历史中选择相关词项补全当前检索查询。[作者代码](https://github.com/nickvosk/sigir2020-query-resolution)和[公开模型卡](https://huggingface.co/uva-irlab/quretec/blob/main/README.md)采用BERT-large词项分类及300-token序列；可研究可追溯的历史选择，但不能直接视为长历史、角色关系和条件作用域的完整解决方案。
-- [CANARD](https://aclanthology.org/D19-1605/)：提供依赖历史的问题到独立问题的改写数据。
-- [Multi-View Reranking（MVR）](https://aclanthology.org/2020.findings-emnlp.354/)：组合多个查询视角与重排结果改善会话搜索。
-- [Faithful Query Resolution](https://arxiv.org/abs/2610.15034)：区分忠实意图解析与扩大检索覆盖的查询扩展；检索排序收益与交互回答效果分别验证。v1的融合比较同时改变查询集合和权重，不能单独归因于权重。
-- [ICR](https://aclanthology.org/2025.emnlp-main.496/)：交替生成澄清问题和查询改写以处理多重歧义。
-- [Dialogue-RAG](https://aclanthology.org/2025.acl-long.1191/)：通过话语节点连接恢复省略信息并改写查询。
-- [Learning Multi-Step Query Rewriting via Corpus Feedback](https://arxiv.org/abs/2610.10955)：利用检索反馈学习多步改写与停止策略。v1采用训练后的Qwen3-4B、最多5步，每次反馈前5段各截至128 tokens；TopiOCQA中93%轨迹执行第5次改写。该结果支持研究检索反馈，不证明完整阅读或低延迟，不能把其片段截断直接用于本项目最终证据。
-- [CompCQR](https://arxiv.org/abs/2609.14646)：组合改写、假设答案和对话组件进行会话检索。 [代码](https://github.com/YunahJang/CompCQR)
-- [ConvSearch-R1](https://aclanthology.org/2025.emnlp-main.1349/)：用检索反馈、自蒸馏和强化学习训练会话查询重构模型。[代码](https://github.com/BeastyZ/ConvSearch-R1)提供3B权重；使用示例输出think及rewrite，预算为4096 tokens。示例改写还生成潜在答案信息，因此只能作为待验证检索投影，不能直接当作用户任务事实；模型较小不等于完整调用成本较低。
-- [SOM-DST](https://aclanthology.org/2020.acl-main.53/)：通过保留、更新和删除操作增量维护对话状态；原文分析指出状态操作预测与真实操作之间的准确率差距，是进一步改进的方向。 [代码](https://github.com/clovaai/som-dst)
+- [SOM-DST](https://aclanthology.org/2020.acl-main.53/)：通过保留、更新和删除操作增量维护对话状态；原文分析指出状态操作预测与真实操作之间的准确率差距，是进一步改进的方向。
 - [Context-Aware Dialogue State Tracking](https://aclanthology.org/N19-1057/)：根据状态字段定位相关历史上下文。
-- [AgentMemGate](https://arxiv.org/abs/2610.07707)：在长期档案写入时区分推测、已发生事件和纠正，待确认计划单独保留；原实验采用固定档案字段及额外模型判定。
-- [Gated Memory](https://arxiv.org/abs/2610.11270)：在记忆形成阶段区分当前表达和参考历史，记录来源及条件范围；其长期记忆结果不直接代表任务问答收益。
-- [Reality Monitoring in Large Language Models](https://arxiv.org/abs/2607.23927)：研究模型区分用户提供内容与自身生成内容的能力，以及对话记忆结构对来源归属的影响。
-- [Qwen3原生推理与SGLang部署](https://github.com/QwenLM/Qwen3/blob/main/docs/source/deployment/sglang.md)：说明按请求切换思考模式、解析推理内容及结构化输出；模式的质量收益和新增生成成本需要实测。
-- [SGLang推理模型的结构化输出](https://docs.sglang.io/docs/advanced_features/structured_outputs_for_reasoning_models)：通过reasoning parser区分推理段与受语法约束的答案段，提供原生执行能力。
-- [JSON Merge Patch（RFC 7396）](https://www.rfc-editor.org/info/rfc7396/)：通过局部字段更新及null删除表达状态补丁。
-- [ASK](https://aclanthology.org/2025.acl-industry.63/)：结合问题方面与检索结果选择任务型对话中的澄清。
-- [ACT / Learning to Clarify](https://arxiv.org/abs/2406.00222)：通过动作对比自训练学习回答与澄清策略。 [代码](https://github.com/google-research/google-research/tree/master/learning_to_clarify)
-- [DISCERN](https://aclanthology.org/2020.emnlp-main.191/)：结合文档结构与对话反馈进行条件推理和追问。 [代码](https://github.com/Yifan-Gao/Discern)
-- [MUDERN](https://arxiv.org/abs/2102.08633)：在开放检索条件下联合阅读材料与会话决策。 [代码](https://github.com/Yifan-Gao/open_retrieval_conversational_machine_reading)
-- [QD-RAG](https://arxiv.org/abs/2507.00355)：将复合问题分解为子查询，合并召回材料并重排。
-- [uva-irlab-conv](https://arxiv.org/abs/2606.11945)：组合会话改写、学习式稀疏检索与列表重排实现多轮RAG。
-- [5ting](https://arxiv.org/abs/2606.28737)：组合原问题与改写召回、LLM重排，并区分用于指代的历史与用于事实的检索资料。
-- [Howard University-AI4PC](https://aclanthology.org/2026.semeval-1.320/)：融合查询重构、稠密与词法检索以及统一重排。
-- [AILS-NTUA](https://arxiv.org/abs/2603.10524)：研究多轮RAG中的原文证据定位、改写与回答生成。
-- [Dawn](https://aclanthology.org/2026.semeval-1.363/)：将用户意图、可用事实与回答范围分解为独立控制信息。
-- [Sifei](https://aclanthology.org/2026.semeval-1.32/)：结合原问题、独立改写、混合检索和BGE重排。
-- [JCT](https://aclanthology.org/2026.semeval-1.173/)：利用小型改写模型和历史双路径检索构建多轮RAG。 [代码](https://github.com/TalFarhan/mt-rag-task-a)
-- [Lost in Conversation or Lost in Translation?](https://arxiv.org/abs/2609.36700)：区分多轮RAG中的查询失真与证据综合失败。
-- [LLMs Get Lost In Multi-Turn Conversation](https://arxiv.org/abs/2505.06120)：分析早期假设和历史答案依赖造成的多轮能力退化。
-- [会话RAG中的历史信息利用研究](https://www.sciencedirect.com/science/article/pii/S0306457325003905)：研究历史搜索结果与对话信息的复用。
 - [Contextual Retrieval](https://www.anthropic.com/research/contextual-retrieval)：为片段补充文档背景以改善检索表示。
-- [Late Chunking](https://arxiv.org/abs/2409.04701)：先编码长文档，再按片段聚合上下文相关向量。
-- [ContextualRetriever](https://aclanthology.org/2025.emnlp-main.602/)：在会话上下文中突出当前查询，通过改写意图监督和保留生成能力的训练学习检索表示，减少额外自回归改写。其训练和基座依赖必须单列；不能把普通BGE历史拼接或查询侧LoRA称为原方法复现，也不能将论文的检索时延视为本系统完整响应。
-- [LangChain ParentDocumentRetriever](https://reference.langchain.com/python/langchain-classic/retrievers/parent_document_retriever/ParentDocumentRetriever)：用小片段检索并返回更完整的父文档内容。
-- [HiChunk](https://aclanthology.org/2026.acl-long.1372/)：离线学习文档层级，并按子片段覆盖、多个命中和剩余预算向父级合并。本文的原页读取试验只验证原文上下文恢复，不是该训练及Auto-Merge算法的复现。 [代码](https://github.com/TencentCloudADP/hichunk)
-- [UMG/UMGP-RAG](https://arxiv.org/abs/2606.13550)：按不同检索器、片段粒度的分数分布熵融合候选，再提升至父片段并去重；分布集中度不是来源正确性或证据充分性的校准概率。
-- [SproutRAG](https://arxiv.org/abs/2606.18381)：联合训练句子表示与注意力聚合，构造多粒度原文树并进行束搜索；复用前需要核查训练权重、非连续原文的表示、重排成本及完整生成时延。已读公开实现`25e16aa`：示例默认MiniLM，文档编码截断至配置长度并跳过未编码片段，不能把运行默认示例当成论文的1.3B/CLaRa训练结果复现。论文不构成本项目多轮或版本变化效果的证明。 [代码](https://github.com/AmirAbaskohi/SproutRAG)
-- [MacRAG](https://arxiv.org/abs/2505.06569)：离线摘要与细粒度索引结合，检索时恢复父块、邻块及文档上下文；需要区分摘要索引、原文恢复和多步生成的各自收益与成本。 [代码](https://github.com/Leezekun/MacRAG)
-- [H-RAG](https://arxiv.org/abs/2605.00631)：在多轮RAG中分离子片段检索与父文档上下文恢复；检索效果与完整回答效果分别评价。
-- [LlamaIndex Sentence Window Retrieval](https://developers.llamaindex.ai/python/examples/node_postprocessor/metadatareplacementdemo/)：在检索命中后恢复相邻句子窗口。
 - [Docling](https://docling-project.github.io/docling/concepts/docling_document/)：保留文档层级、阅读顺序和来源坐标的结构化解析与分块。
 - [SPIRE](https://arxiv.org/abs/2604.20849)：组织标题、父级结构及原文片段，保留证据的解释上下文。
-- [LongRefiner](https://aclanthology.org/2025.acl-long.176/)：通过文档结构化和分层选择精炼长上下文材料。 [代码](https://github.com/ignorejjj/LongRefiner)
-- [EXIT](https://aclanthology.org/2025.findings-acl.253/)：利用完整父段上下文进行抽取式证据压缩。 [代码](https://github.com/ThisIsHwang/EXIT)
-- [GLiNER2](https://aclanthology.org/2025.emnlp-demos.10/)：用schema驱动的编码器统一结构化信息抽取任务。 [代码](https://github.com/fastino-ai/GLiNER2)
-- [GLiNER2.5](https://fastino.ai/blog/gliner2-5-span-free-information-extraction)：通过边界预测和联合解码抽取实体及结构化字段。
-- [GLiNER-Relex](https://arxiv.org/abs/2605.10108)：在共享编码器上联合识别实体与实体间关系。 [代码](https://github.com/urchade/GLiNER)
+- [CRAFT](https://arxiv.org/abs/2505.14984)：通过级联检索、表格行表示和相关行选择处理表格问答。
+- [TabRAG](https://arxiv.org/abs/2511.06582)：将表格单元格、行列、单位和区域关系组织为检索表示。
+- [WAIT / Nested WAIT](https://arxiv.org/abs/2504.11320)：借助流体模型与动态内存需求安排推理请求。
+- [Landlord](https://www.cs.ucr.edu/~neal/publication/Young02Online.pdf)：结合对象大小和取回成本进行在线缓存替换。
+- [XGrammar](https://github.com/mlc-ai/xgrammar)：使用语法和正则约束高效生成结构化输出。
+
+- [JSON Merge Patch](https://www.rfc-editor.org/info/rfc7396/)：以省略、赋值和空值表达保留、更新与删除。
+- [ParentDocumentRetriever](https://reference.langchain.com/python/langchain-classic/retrievers/parent_document_retriever/ParentDocumentRetriever)：以子片段召回并恢复父级阅读上下文。
+
+## 需求、充分性与回答使用的后续参考
+
 - [Sufficient Context](https://arxiv.org/abs/2411.06037)：区分检索相关性、材料充分性与生成阶段错误。
-- [S2G-RAG](https://aclanthology.org/2026.acl-long.1185/)：用训练后的充分性/缺口判断器指导迭代检索，并通过原文句子指针限制证据增长。其检索轮次不等同于用户多轮对话，仍需适配条件与版本变化。[代码](https://github.com/nianaaa/S2G-RAG)
+- [Faithful Query Resolution](https://arxiv.org/abs/2610.15034)：区分忠实意图解析与扩大检索覆盖的查询扩展；检索排序收益与交互回答效果分别验证。
+- [S2G-RAG](https://aclanthology.org/2026.acl-long.1185/)：用训练后的充分性/缺口判断器指导迭代检索，并通过原文句子指针限制证据增长。
 - [ExecutionRAG](https://arxiv.org/abs/2610.21184)：维护未解决子问题及其支持证据以减少检索偏移，并分析证据找回后仍存在的过早完成与拒答。
-- [Lost in the Middle](https://arxiv.org/abs/2307.03172)：研究信息位置对长上下文问答效果的影响。
 - [Evidence-based Generation for Long Context QA](https://arxiv.org/abs/2610.26951)：研究多资料长上下文的答案与正文证据联合正确性、来源结构及片段不连续标识；比较时需区分已含正确来源与开放语料检索的证据访问条件。
-- [CMT-RAG](https://arxiv.org/abs/2607.26470)：用互补记忆轨迹组织多轮多跳问答中的任务与证据依赖。
-- [MADARA](https://arxiv.org/abs/2606.25191)：结合逐文档回答、隔离对照与聚合处理多来源信息。 [代码](https://github.com/js-lee-AI/MADARA)
-- [RECAST](https://arxiv.org/abs/2610.10507)：通过证据路由和关系计算构造回答所需上下文。
-- [DRAGged into Conflicts](https://arxiv.org/abs/2506.08500)：区分互补、时效、意见与错误信息等来源冲突。 [代码](https://github.com/google-research-datasets/rag_conflicts)
+- [Lost in the Middle](https://arxiv.org/abs/2307.03172)：研究信息位置对长上下文问答效果的影响。
+- [ContextualRetriever](https://aclanthology.org/2025.emnlp-main.602/)：在会话上下文中突出当前查询，通过改写意图监督和保留生成能力的训练学习检索表示，减少额外自回归改写。
+- [HAConvDR](https://aclanthology.org/2024.findings-acl.792/)：结合历史去噪和历史轮次实际检索贡献构造监督，训练会话稠密检索；重点处理长历史噪声与话题切换。
+- [ConvDR](https://arxiv.org/abs/2105.04166)：继承文档编码，用独立问题的教师向量和检索排序损失训练会话查询表示，省去在线生成改写。
+- [DRAGged into Conflicts](https://arxiv.org/abs/2506.08500)：区分互补、时效、意见与错误信息等来源冲突。
 - [When Knowledge Changes](https://arxiv.org/abs/2607.26843)：通过语料更新与变形测试检验RAG对无关变化的稳定性及对事实变化的响应，补充静态快照评价。
-- [AdaCAD](https://aclanthology.org/2025.naacl-long.581/)：根据上下文与模型知识的分布差异自适应调整对比解码。 [代码](https://github.com/HanNight/AdaCAD)
-- [CoCoA](https://arxiv.org/abs/2508.17670)：结合置信度和上下文信号调节知识冲突下的解码。 [代码](https://github.com/infusion-zero-edit/CoCoA)
-- [Self-RAG](https://github.com/AkariAsai/self-rag)：通过检索、支持性与效用反思组织生成过程。
-- [CRAG](https://arxiv.org/abs/2401.15884)：根据检索质量评估选择材料处理与纠错动作。 [代码](https://github.com/HuskyInSalt/CRAG)
-- [StructRAG](https://proceedings.iclr.cc/paper_files/paper/2025/hash/5975754c7650dfee0682e06e1fec0522-Abstract-Conference.html)：按任务将材料转换为适合推理的结构化表示。 [代码](https://github.com/icip-cas/StructRAG)
-- [TabRAG](https://arxiv.org/abs/2511.06582)：将表格单元格、行列、单位和区域关系组织为检索表示。 [代码](https://github.com/jacobyhsi/TabRAG)
-- [CRAFT](https://arxiv.org/abs/2505.14984)：通过级联检索、表格行表示和相关行选择处理表格问答。 [代码](https://github.com/coral-lab-asu/CRAFT)
-- [RealHiTBench / TreeThinker](https://arxiv.org/abs/2506.13405)：评估复杂层级表格，并以树结构组织多级表头。 [代码](https://github.com/cspzyy/RealHiTBench)
-- [SMART](https://aclanthology.org/2026.findings-acl.1474/)：结合语义表头展开与伪代码式操作完成复杂表格推理。
-- [When LLMs Read Tables Carelessly](https://arxiv.org/abs/2606.32029)：分别衡量错单元格、错列、伪造值与遗漏行等引用错误。
-- [Structured Self-Correction for Table Reasoning](https://aclanthology.org/2026.surgellm-1.19/)：分离单元格、计算、逻辑和完整性检查来修正表格回答。 [代码](https://github.com/FarseenSh/table-self-correction)
-- [Table-Critic](https://aclanthology.org/2025.acl-long.853/)：用多智能体批评与修订协作改善表格推理。 [代码](https://github.com/Peiying-Yu/Table-Critic)
-- [FACTS](https://aclanthology.org/2026.findings-acl.453/)：将表格查询、具名结果与模板渲染分离。 [代码](https://github.com/BorealisAI/FACTS)
-- [Atomic Reasoning / SciAtomicBench](https://arxiv.org/abs/2506.06972)：将科学表格声明核验分解为结构、实体和数值操作。 [代码](https://github.com/CelestineZYJ/SciAtomicBench)
-- [Q-REAS / EQUATE](https://aclanthology.org/K19-1033/)：通过实体、单位和数量关系评价自然语言中的定量推理。 [代码](https://github.com/AbhilashaRavichander/EQUATE)
-- [Pint](https://pint.readthedocs.io/en/0.25.2/getting/tutorial.html)：提供物理量、单位注册和单位换算。 [代码](https://github.com/hgrecco/pint)
-- [SymPy](https://docs.sympy.org/latest/modules/sets.html)：提供符号计算、精确数值与区间集合运算。
-- [DocPrompting](https://github.com/shuyanzhou/docprompting)：检索API文档辅助代码生成。
-- [When LLMs Meet API Documentation](https://arxiv.org/abs/2503.15231)：研究API说明、参数和使用示例对代码生成的作用。
-- [WAPIIBench中的RAG与约束解码](https://arxiv.org/abs/2607.05936)：结合OpenAPI材料检索和规范约束减少接口调用错误。 [代码](https://github.com/stg-tud/WAPIIBench)
-- [DyCoder / DyRetriever](https://arxiv.org/abs/2608.01927)：按需探索局部依赖图以支持仓库级代码生成。 [代码](https://github.com/ZJU-CTAG/DyCoder)
-- [IBM Cloudant Python SDK](https://github.com/IBM/cloudant-python-sdk)：提供Cloudant接口签名、参数及初始化方式的源码依据。
-- [IBM Watson Python SDK](https://github.com/watson-developer-cloud/python-sdk)：提供Watson服务调用和认证初始化的源码依据。
-- [Attribute First, then Generate（AFTG）](https://aclanthology.org/2024.acl-long.182/)：先确定来源高亮和支持组，再生成可局部归因的文本。 [代码](https://github.com/lovodkin93/attribute-first-then-generate)
-- [ReClaim](https://aclanthology.org/2025.findings-naacl.55/)：交替生成参考片段与回答声明，并约束引用内容。 [代码](https://github.com/pdxthree/ReClaim)
-- [Joint Constraint Aggregation（JCA）](https://arxiv.org/abs/2610.27114)：按共同问题要求检查候选，并聚合约束支持进行选择。 [代码](https://github.com/jenhsia/joint_constraint_aggregation)
-- [CAGE](https://arxiv.org/abs/2607.24236)：用答案单元与支持文档之间的图关系生成细粒度引用。
-- [FullCite](https://arxiv.org/abs/2606.07130)：通过结构化内联引用关联文档、支持片段和回答声明。
-- [ALCE](https://github.com/princeton-nlp/ALCE)：提供带引用回答的生成框架与引用质量评价。
-- [LongCite](https://aclanthology.org/2025.findings-acl.264/)：通过粗到细的数据构建训练长上下文细粒度归因能力。 [代码](https://github.com/THUDM/LongCite)
-- [SelfCite](https://github.com/facebookresearch/SelfCite)：利用上下文消融信号进行来源归因的自监督对齐。
-- [How Do LLMs Cite?](https://arxiv.org/abs/2606.28358)：从模型内部机制分析RAG回答中的来源归因。
-- [MIRAGE](https://aclanthology.org/2024.emnlp-main.347/)：利用模型内部信号定位回答所依赖的上下文。 [代码](https://github.com/Betswish/MIRAGE)
-- [Attribution-Guided Decoding（AGD）](https://proceedings.iclr.cc/paper_files/paper/2026/hash/da30215ee52c1daaaaddada8137cfd0b-Abstract-Conference.html)：利用指定上下文区域的归因信号引导token选择。 [代码](https://github.com/piotr-komorowski/AGD)
-- [LiR³AG](https://ojs.aaai.org/index.php/AAAI/article/view/40270)：用轻量重排与推理策略组织检索增强生成。 [代码](https://github.com/WinstonCHEN1/LiR3AG)
-- [RARR](https://aclanthology.org/2023.acl-long.910/)：检索核对生成内容并进行尽量保留原稿的修订。 [代码](https://github.com/anthonywchen/RARR)
-- [Claimify](https://aclanthology.org/2025.acl-long.348/)：结合上下文消歧与完整性检查抽取可核验声明。
-- [VeriTrail](https://arxiv.org/abs/2505.21786)：沿多阶段生成链追踪来源支持与错误传播。
-- [Microsoft Eval Recipes](https://github.com/microsoft/eval-recipes)：提供Claimify、VeriTrail等声明抽取和归因评估工具。
-- [Deceptive Grounding](https://arxiv.org/abs/2607.09349)：分析内容有来源但归属错误实体的证据使用问题。
-- [MiniCheck](https://arxiv.org/abs/2404.10774)：通过文档与声明配对进行高效来源支持判断。 [代码](https://github.com/Liyan06/MiniCheck)
-- [RefChecker](https://github.com/amazon-science/RefChecker)：结合声明抽取、支持检查和聚合进行细粒度事实评价。
-- [FActScore](https://arxiv.org/abs/2305.14251)：将长回答拆为原子事实并评价事实精确率。 [代码](https://github.com/shmsw25/FActScore)
-- [VeriScore](https://aclanthology.org/2024.findings-emnlp.552/)：围绕可核验声明评价长文本事实性。 [代码](https://github.com/Yixiao-Song/VeriScore)
-- [Granite Guardian](https://github.com/ibm-granite/granite-guardian)：提供包括groundedness在内的内容与来源一致性评价。
-- [Contextual Normalization（C-Norm）](https://arxiv.org/html/2510.13191v2)：以设定比例改写句内分隔符，通过模型注意力信号选择上下文格式。它需要针对生成模型校准；论文的句内空白替换不能直接用于本项目的代码、表格和原文跨度，须先验证内容和定位保持。尚未实现或宣称收益。
-- [CARE](https://arxiv.org/html/2509.13683v1)：通过SFT及GRPO训练生成器在推理中显式使用上下文证据，训练数据包含支持事实及离线生成的推理材料。可参考其证据一致性训练目标；若引入，须作为模型适配另做消融并记录训练、推理成本，不能直接归因于A/B/C，亦不要求在线大模型先写阅读计划。
-- [LettuceDetect](https://arxiv.org/abs/2607.00895)：对文档、代码和工具结果支撑的回答进行span级幻觉检测。 [代码](https://github.com/KRLabsOrg/LettuceDetect)
-- [RAG-Zeval](https://aclanthology.org/2025.emnlp-main.1267/)：结合结构化评审轨迹与排序强化学习评价RAG回答。
-- [ConsJudge](https://arxiv.org/abs/2502.18817)：利用多维判断一致性构造偏好数据并训练评价模型。 [代码](https://github.com/OpenBMB/ConsJudge)
-- [Autorubric](https://arxiv.org/abs/2603.00077)：提供基于rubric的分维评价、聚合与一致性分析。 [代码](https://github.com/delip/autorubric)
-- [PReMISE](https://arxiv.org/abs/2605.30803)：将政策与偏好rubric视为评价模型的测量规范。
-- [Atla Selene Mini](https://arxiv.org/abs/2501.17195)：提供通用rubric驱动的直接与成对评价模型。 [代码](https://github.com/atla-ai/selene-mini)
-- [Prometheus 2](https://arxiv.org/abs/2405.01535)：支持直接评分与相对比较的开源评价模型。 [代码](https://github.com/prometheus-eval/prometheus-eval)
-- [M-Prometheus](https://arxiv.org/abs/2504.04953)：将开源语言模型评价扩展到多语言任务。
-- [RAGAS](https://github.com/vibrantlabsai/ragas)：提供来源忠实性、回答相关性等RAG自动评价指标。
-- [RAGBench](https://arxiv.org/abs/2407.11005)：提供带可解释标注的检索增强生成评价数据与指标。
-- [GroUSE](https://aclanthology.org/2025.coling-main.304/)：用grounded问答中的具体失败类型评价自动评审器。 [代码](https://github.com/illuin-tech/grouse)
-- [Auto-Judge](https://trec-auto-judge.cs.unh.edu/)：提供跨任务自动评审、人工参照与可复现元评测流程。 [代码](https://github.com/trec-auto-judge/auto-judge-starter-kit)
-- [MT-RAG](https://arxiv.org/abs/2501.03468)：提供多领域、多轮对话的检索增强问答基准。 [代码](https://github.com/IBM/mt-rag-benchmark)
+
+## 评价数据
+
+- [MT-RAG](https://arxiv.org/abs/2501.03468)：提供多领域、多轮对话的检索增强问答基准。
 - [MTRAG-UN](https://github.com/IBM/mt-rag-benchmark/tree/main/mtragun-human)：覆盖歧义、非独立问题、不可答和部分可答的多轮RAG挑战任务。
+- [MultiDoc2Dial](https://aclanthology.org/2021.emnlp-main.498/)：提供跨文档切换与服务咨询场景的多轮问答。
 - [Doc2Dial](https://aclanthology.org/2020.emnlp-main.652/)：提供带文档范围和支持跨度的目标导向对话。
-- [MultiDoc2Dial](https://aclanthology.org/2021.emnlp-main.498/)：提供跨文档切换与服务咨询场景的多轮问答。 [代码](https://github.com/IBM/multidoc2dial)
-- [QReCC](https://github.com/apple-aiml-research/ml-qrecc)：提供原始对话问题、独立改写、回答与来源；[发布数据](https://zenodo.org/records/5760304)使用CC BY-SA 3.0。当前仅取经过原始问答重建和监督检查的子集作离线查询表示辅助训练，不等同于完整QReCC检索或问答评价。
-- [ChatRAG-Bench](https://huggingface.co/datasets/nvidia/ChatRAG-Bench)：整合多种给定对话历史的检索增强问答任务。
-- [CORAL](https://github.com/RUC-NLPIR/CORAL)：提供知识密集、主题切换和引用标注的多轮问答数据。
 - [Loong](https://github.com/MozerWang/Loong)：评价长上下文中的多资料定位、比较、聚合与推理。
-- [Context Utilisation Benchmark（CUB）](https://arxiv.org/abs/2505.16518)：在正确、冲突和无关材料下评价模型的上下文利用。 [代码](https://github.com/copenlu/cmt-benchmark)
-- [LongTableBench](https://aclanthology.org/2025.findings-emnlp.638/)：评价长上下文、多表和多格式表格推理。
-- [TurnFlow](https://aclanthology.org/2026.findings-emnlp.825/)：通过场景驱动的用户模拟评价多轮需求状态理解与执行。
 - [LongMemEval](https://github.com/xiaowu0162/LongMemEval)：评价长期会话记忆、时间推理与知识更新。
-- [MLPerf End-to-End RAG](https://mlcommons.org/2026/08/endtoend-inference/)：提供包含检索及多个模型阶段的端到端推理计量参考。
-- [RAFT](https://arxiv.org/abs/2403.10131)：通过领域资料与干扰文档训练检索增强问答能力。 [代码](https://github.com/ShishirPatil/gorilla/tree/main/raft)
-- [PA-RAG](https://aclanthology.org/2025.naacl-long.459/)：通过多视角偏好优化改善证据忠实性、完整性和抗干扰能力。 [代码](https://github.com/wujwyi/PA-RAG)
-- [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory)：提供语言模型监督微调、适配器训练和导出工具。
-- [LoRA / PEFT](https://huggingface.co/docs/peft/main/en/conceptual_guides/lora)：用低秩参数更新进行高效适配，并支持权重合并。 [代码](https://github.com/huggingface/peft)
-- [Qwen3](https://arxiv.org/abs/2505.09388)：提供思考与非思考模式融合的语言模型及推理接口。 [代码](https://github.com/QwenLM/Qwen3)
-- [Qwen2.5 Technical Report](https://arxiv.org/abs/2412.15115)：介绍Qwen2.5系列模型训练、指令能力与结构化信息处理。
-- [Hugging Face Transformers](https://github.com/huggingface/transformers)：提供模型加载、分词模板、生成和训练接口。
-- [Hugging Face Tokenizers](https://github.com/huggingface/tokenizers)：提供高效分词及特殊token边界处理。
-- [PyTorch](https://pytorch.org/)：提供模型计算、自动微分和GPU执行基础。
-- [NumPy](https://numpy.org/)：提供向量计算、索引处理与离线拟合基础。
-- [SciPy](https://scipy.org/)：提供数值优化、统计和科学计算工具。
-- [FastAPI](https://fastapi.tiangolo.com/)：提供请求模型、HTTP接口和应用生命周期管理。
-- [SQLite WAL](https://www.sqlite.org/wal.html)：通过事务和预写日志维护会话状态、提交与恢复。
-- [HTTPX](https://www.python-httpx.org/)：提供同步、异步HTTP请求及流式传输接口。
-- [Prometheus](https://prometheus.io/)：通过指标采集与时间序列观测记录系统资源状态。
-- [LangChain](https://github.com/langchain-ai/langchain)：提供模型调用适配、检索组件和持久化响应缓存。
-- [Bootstrap](https://doi.org/10.1214/aos/1176344552)：通过重采样估计统计量的不确定性。
+- [CORAL](https://github.com/RUC-NLPIR/CORAL)：提供知识密集、主题切换和引用标注的多轮问答数据。

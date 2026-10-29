@@ -25,7 +25,6 @@ from bench import native_policy_sweep as server
 from bench.experiments import (execute_job, run_matrix, matrix_jobs, matrix_config,
                                merge, provenance)
 from controller.config import RunConfig, create_model_template, load_cost_model
-from controller.schema import ConfigFingerprint
 from controller.serialization import decode
 from controller.sampling import SamplingRecipe, request_sampling
 from types import SimpleNamespace
@@ -203,8 +202,7 @@ def job_server_command(port, capacity, *, mem_fraction_static):
 
 
 def fitted_scope(config, calibration, runtime):
-    model = load_cost_model(config, artifact_path=calibration["path"],
-                            fingerprint=decode(ConfigFingerprint, runtime["engine"]["fingerprint"]))
+    model = load_cost_model(config, artifact_path=calibration["path"])
     scope = model.check_calibration_scope(runtime["engine"])
     if scope["status"] != "matching_scope" or not model.sampling_scope_compatible:
         raise ValueError(f"cost job needs an artifact bound to the actual engine configuration: {scope}")

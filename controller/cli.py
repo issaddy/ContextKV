@@ -29,8 +29,6 @@ def _manifest(config, controller, info, protocol: str):
                "controller_source_sha256": source_hash,
                "cost_model_artifact_sha256": hashlib.sha256(Path(config.cost_model.artifact).read_bytes()).hexdigest()
                     if config.cost_model.artifact else None,
-               "output_length_artifact_sha256": hashlib.sha256(Path(config.cost_model.output_length_artifact).read_bytes()).hexdigest()
-                    if config.cost_model.output_length_artifact else None,
                "runtime": {"python": sys.version, "platform": platform.platform(), "machine": platform.machine(),
                     "logical_cpu_count": os.cpu_count(),
                     "requested_thread_environment": {key: os.environ.get(key) for key in
@@ -113,8 +111,7 @@ async def benchmark(args, config):
     retrieval_context_provider = None
     if getattr(retriever, "requires_history_context", False):
         from adapters.query_resolution import controller_context_provider
-        retrieval_context_provider = controller_context_provider(service.store, run_prefix,
-            include_sources=getattr(retriever, "requires_source_context", True))
+        retrieval_context_provider = controller_context_provider(service.store, run_prefix)
     export_failures = []
     first_export_error = None
 

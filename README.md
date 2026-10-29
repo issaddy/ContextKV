@@ -1,65 +1,56 @@
 # ContextKV
 
-**面向资源受限多轮文档问答的上下文管理与KV缓存协同优化研究。**
+**面向资源受限、多资料、长上下文和证据动态变化的多轮问答。**
 
-面向多资料、长上下文、证据随交互变化且GPU/Host资源受限的多轮问答，协调任务与证据组织（A）、完整成本决策（B）和原生KV生命周期（C），优先提高回答质量，再改善性能与资源效率。工程基于Qwen3与SGLang，提供CLI/HTTP、自动检索、多会话、幂等提交和恢复。研究边界和纠偏依据见[项目范围](docs/project_scope.md)。
+用户会连续追问、纠正条件、切换话题和回访材料；资料也会更新。ContextKV维护当前任务与适用证据，在共同材料上选择追加或重建上下文，并协调原生KV引用的生命周期。目标是提高任务完成质量，同时改善完整响应、服务能力和GPU/Host资源效率。
 
-## 文档导航
+默认使用 **Qwen3-32B非思考模式**进行实现和真实模型测试，生成与任务解释均使用32B；BM25S、BGE承担检索与重排。课题机制不以模型规模分工作为前提，但实际效果与成本会受模型影响，机制对照固定模型和采样条件。
 
-| 阅读目的 | 文档职责与入口 |
-|---|---|
-| 明确课题目标 | [项目范围](docs/project_scope.md)：场景、需求、模块职责和评价指标 |
-| 查看交付与待办 | [实现状态](docs/implementation_plan.md)：本地/容器版本、验证、产物和未完成项 |
-| 理解整体工程 | [架构](docs/architecture.md)：跨模块接口、状态、事务与恢复 |
-| 理解课题工作 | [机制与研究依据](docs/research_contributions.md)：复用关系和适配增量 |
-| 启动真实服务 | [部署](docs/deployment.md)：环境、进程、设备、命令与配置迁移 |
-| 查看实验 | [数据与评价](docs/data_and_evaluation.md)：benchmark、比较协议和分版本结果 |
-| 查找参考工作 | [参考文献清单](docs/references.md)：论文、方法和项目的简述与链接 |
+## 架构
 
-机制细节与使用步骤分别维护在`docs/research/`和`docs/guides/`：
+| 模块 | 职责 | 主要实现 |
+|---|---|---|
+| A：任务与证据 | 更新任务、对象、条件和子需求，检索与选材，在同一证据集合上构造APPEND/REBUILD | `adapters/conversation.py`、`hybrid_retrieval.py`；`controller/evidence.py`、`candidates.py` |
+| B：成本决策 | 结合原生缓存报价、实测阶段成本、输出长度和容量等待选择执行方案 | `controller/planner.py`、`cost_model.py`、`admission.py` |
+| C：KV生命周期 | 业务epoch关联原生会话，提交新结果后退役旧引用，支持恢复 | `controller/service.py`、`session_store.py`；`engine_patches/` |
 
-| 主题 | 设计与使用入口 |
-|---|---|
-| 多轮检索 | [任务与证据机制](docs/research/source_grounded_query_resolution.md)、[混合检索配置](docs/guides/hybrid_retrieval.md) |
-| 数据与结构材料 | [Doc2Dial/MultiDoc2Dial](docs/guides/doc2dial.md)、[SDK证据包](docs/guides/api_evidence.md)、[表格关系](docs/research/table_relations.md) |
-| 成本与决策 | [联合模型](docs/research/joint_optimization_model.md)、[等待估计](docs/research/admission_wait_model.md)、[阶段成本](docs/guides/stage_cost_model.md)、[成对验证](docs/guides/decision_pairs.md)、[冗余基线](docs/guides/redundancy_baseline.md) |
-| 缓存与服务 | [Host准入](docs/research/host_admission_design.md)、[SGLang补丁](engine_patches/README.md)、[HTTP接口](docs/guides/http_retrieval.md) |
-| 模型与对照 | [模型身份与采样](docs/guides/model_scope.md)、[原生基线](docs/guides/native_model_scope.md)、[服务器矩阵](docs/guides/b6_owned_matrix.md) |
-| 离线工具 | [质量比较](docs/guides/quality_acceptance.md)、[训练与导出](docs/research/grounded_training.md) |
+SGLang负责物理KV匹配、分配、传输与淘汰。CLI、HTTP和离线评测复用同一装配、生成与提交协议，详细调用链见[架构](docs/architecture.md)。
 
-## 本地运行
+## 运行
+
+CPU演示用于检查协议和状态：
 
 ```bash
-uv sync --extra retrieval --extra calibration --extra evaluation --locked
+uv sync --extra retrieval --extra evaluation --locked
 uv run contextkv --config configs/demo.yaml demo
+```
+
+按[部署说明](docs/deployment.md)启动生成和任务解释服务后，运行多轮检索接口：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 python -m controller.cli --config configs/qwen3_32b_cost.yaml serve   --retriever-config configs/retriever_conversational.example.yaml   --evidence-corpus data/mtrag-official/cloud.jsonl --corpus-id mtrag
+```
+
+默认检索为`conversational + single + ranked`，布局为`stable_key`。`POST /sessions/{id}/query`接收问题，`/turns`接受显式证据；示例见[HTTP接口](docs/guides/http_retrieval.md)。
+
+## 文档
+
+| 内容 | 入口 |
+|---|---|
+| A/B/C调用链、状态和复用依据 | [架构](docs/architecture.md) |
+| 环境、模型和服务启动 | [部署](docs/deployment.md) |
+| 公开任务、比较协议、当前结果与待办 | [数据与评价](docs/data_and_evaluation.md) |
+| 相关论文与实现 | [参考工作](docs/references.md) |
+| 使用细节 | [检索](docs/guides/hybrid_retrieval.md)、[成本标定](docs/guides/stage_cost_model.md)、[HTTP](docs/guides/http_retrieval.md) |
+| 数据接入 | [MultiDoc2Dial](docs/guides/doc2dial.md)、[Loong](docs/guides/loong.md)、[SDK证据](docs/guides/api_evidence.md)、[表格关系](docs/research/table_relations.md) |
+
+## 开发
+
+改动围绕当前需求、条件和来源适用范围、证据充分性及回答落实展开。持续出现的瓶颈需要比较相关论文与实现，再决定机制调整；依据实际回答和完整成本保留方案。测试覆盖模块行为、接口和状态一致性，不固定实现细节。废弃实现及其专属测试一起删除，历史实验通过Git和压缩原始记录追溯。
+
+```bash
 uv run pytest -q
 uv run ruff check controller adapters bench profiling tests scripts engine_patches
 ```
 
-CPU mock演示用于协议和状态验证。首次准备MT-RAG数据可执行`python scripts/fetch_mtrag.py`和`python -m adapters.prepare_data --cloud-corpus`。
-
-## Qwen3服务入口
-
-容器项目位于`/home/relay/songjiayun/ContextKV`，已有模型位于`/media/ssd1/qwen3-8b`和`/media/ssd1/qwen3-32b`。按[部署说明](docs/deployment.md#多轮检索服务)启动8B生成与32B解释服务后：
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1 python -m controller.cli --config configs/qwen3_8b_cost.yaml serve \
-  --retriever-config configs/retriever_conversational.example.yaml \
-  --evidence-corpus data/mtrag-official/cloud.jsonl --corpus-id mtrag
-```
-
-配置检索器后，`POST /sessions/{id}/query`接收问题和request ID；`POST /sessions/{id}/turns`用于直接提供证据。请求示例及恢复操作见[HTTP指南](docs/guides/http_retrieval.md)。
-
-## 仓库职责
-
-| 目录 | 用途 |
-|---|---|
-| `controller/` | A/B/C核心、事务、API与CLI |
-| `adapters/` | 数据、检索、重排及原文结构适配 |
-| `engine_patches/` | 固定SGLang的观测、代际关联、完成回执与引用退役 |
-| `profiling/`、`bench/`、`tests/` | 标定、基线、评价与正确性检查 |
-| `configs/`、`scripts/` | 配置、成本数据及部署工具 |
-| `training/` | 可选离线训练与导出工具 |
-| `docs/` | 项目文档和[第三方许可说明](docs/third_party/) |
-| `data/`、`runs/`、`vendor/` | Git忽略的数据、原始运行记录和第三方检查树 |
-| `.venv/`、`dist/` | 本地依赖和构建产物 |
+`controller/`是运行核心，`adapters/`接入资料与检索，`engine_patches/`适配固定SGLang，`profiling/`与`bench/`提供标定和评价。`data/`、`models/`、`runs/`、`vendor/`和构建产物不入Git；复制资产的许可保留在[第三方说明](docs/third_party/)。

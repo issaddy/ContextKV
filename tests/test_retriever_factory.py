@@ -560,9 +560,9 @@ def test_failed_factory_closes_only_successfully_constructed_owned_models(retrie
 
 
 def test_factory_closes_selector_client_if_resolver_initialization_fails(retriever_config,monkeypatch):
-    from adapters import query_resolution, query_selector
+    from adapters import conversation, query_selector
     value=yaml.safe_load(retriever_config.read_text())
-    value.update(query_mode='source_topic',query_fusion='current_topic_rrf',
+    value.update(query_mode='conversational',
                  selector={'base_url':'http://fake','model':'fake','revision':'fixed'})
     retriever_config.write_text(yaml.safe_dump(value))
     closed=[]
@@ -574,7 +574,7 @@ def test_factory_closes_selector_client_if_resolver_initialization_fails(retriev
     def fail(*args,**kwargs):
         raise RuntimeError('resolver construction failed')
     monkeypatch.setattr(query_selector,'OpenAICompletionClient',Client)
-    monkeypatch.setattr(query_resolution,'TopicResolver',fail)
+    monkeypatch.setattr(conversation,'ConversationResolver',fail)
     with pytest.raises(RuntimeError,match='resolver construction failed'):
         create_retriever('P3',config_path=retriever_config)
     assert closed==[True] and all(model.closed for model in LocalModelFixture.instances)
@@ -627,85 +627,8 @@ def test_dense_stage_does_not_load_or_call_reranker(retriever_config, monkeypatc
     assert retriever.encoder.inputs[-1] == "session-a question 1\nsession-a question 2"
 
 
-def test_optional_enum_schema_is_wired_once_and_rejected_on_unused_modes(retriever_config, monkeypatch):
-    from adapters import query_selector
-    class NoNetworkClient:
-        manifest = {"model": "fake"}
-        def __init__(self, config):
-            self.config = config
-        def close(self):
-            pass
-    monkeypatch.setattr(query_selector, "OpenAICompletionClient", NoNetworkClient)
-    value = yaml.safe_load(retriever_config.read_text())
-    value.update(query_mode="source_topic", query_fusion="current_topic_rrf", selector_schema_mode="enum_v2",
-                 selector={"base_url": "http://fake", "model": "fake", "revision": "fixed"})
-    retriever_config.write_text(yaml.safe_dump(value))
-    retriever = create_retriever("P3", config_path=retriever_config)
-    assert retriever.resolver.schema_mode == "enum_v2"
-    assert retriever.resolver.manifest["version"] == "source-topic-selector-enum-v2"
-    value.update(query_mode="current", query_fusion="single", selector=None)
-    retriever_config.write_text(yaml.safe_dump(value))
-    with pytest.raises(ValueError, match="only used"):
-        load_retriever_config(retriever_config)
 
 
-@pytest.mark.parametrize("selector_failed", [False, True])
-@pytest.mark.parametrize("failed_stage", ["encode", "score"])
-def test_query_resolution_trace_survives_downstream_retrieval_failure(
-        retriever_config, monkeypatch, selector_failed, failed_stage):
-    from adapters import query_selector
-    from adapters.mtrag import OnlineMessage
-    from adapters.query_resolution import PriorContext
-    from adapters.query_selector import CompletionResult
-
-    raw = {"error": "selector unavailable"} if selector_failed else {"raw": "completed selection"}
-
-    class Selector:
-        manifest = {"model": "fake-selector"}
-
-        def __init__(self, config):
-            pass
-
-        def complete(self, messages, **kwargs):
-            return CompletionResult("failed" if selector_failed else "completed",
-                json.dumps({"status": "unchanged", "entity_ids": [], "user_turn_ids": []}),
-                None if selector_failed else "stop", raw_response=raw, elapsed_ms=7.5)
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(query_selector, "OpenAICompletionClient", Selector)
-    value = yaml.safe_load(retriever_config.read_text())
-    value.update(query_mode="source_topic", query_fusion="current_topic_rrf",
-                 selector={"base_url": "http://fake", "model": "fake", "revision": "fixed"})
-    retriever_config.write_text(yaml.safe_dump(value))
-    retriever = create_retriever("P3", config_path=retriever_config)
-    original = OnlineSession(load_rows(FIXTURE)[:3], "P3").current()
-    turn = replace(original, turn=2, history=(OnlineMessage("user", "Earlier question"),
-                                            OnlineMessage("assistant", "Earlier actual answer")))
-    error = RuntimeError("original model failure")
-
-    def fail(*args, **kwargs):
-        raise error
-
-    model = retriever.encoder if failed_stage == "encode" else retriever.reranker
-    monkeypatch.setattr(model, failed_stage, fail)
-    try:
-        with pytest.raises(RuntimeError) as observed:
-            retriever.retrieve_turn(turn, prior_context=PriorContext())
-        assert observed.value is error
-        assert retriever.requests == 0
-        trace, = retriever.manifest["query_view_traces"]
-        assert trace["completion"]["raw_response"] == raw
-        assert trace["completion"]["elapsed_ms"] == 7.5
-        assert trace["status"] == ("failed" if selector_failed else "unchanged")
-        assert trace["text"] == turn.query
-        assert trace["retrieval_status"] == "failed"
-        assert trace["retrieval_error"] == "RuntimeError: original model failure"
-        assert trace["retrieval_elapsed_ms"] >= trace["elapsed_ms"] >= 0
-        assert "query_fusion_trace" not in trace
-    finally:
-        retriever.close()
 
 
 @pytest.mark.parametrize("fusion", ["single", "current_topic_rrf"])
@@ -835,9 +758,7 @@ def test_offline_cli_dual_uses_shared_models_then_opens_qrels(retriever_config, 
 
 
 @pytest.mark.parametrize("query_mode,fusion", [("current", "single"), ("user_topic", "single"),
-                                               ("user_topic", "current_topic_rrf"),
-                                               ("source_topic", "current_topic_rrf"),
-                                               ("assistant_topic_unverified", "current_topic_rrf")])
+                                               ("user_topic", "current_topic_rrf")])
 def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retriever_config, tmp_path, monkeypatch, query_mode, fusion, local_scope):
     import bench.native_baseline as native_module
     import controller.cli as cli
@@ -848,23 +769,6 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
     value["query_fusion"] = fusion
     window = query_mode == "current"
     value["source_window"] = window
-    selectors = []
-    if query_mode in {"source_topic", "assistant_topic_unverified"}:
-        from adapters import query_selector
-        from adapters.query_selector import CompletionResult
-        class Selector:
-            manifest = {"model": "fake-selector", "revision": "fixture"}
-            def __init__(self, config):
-                self.inputs, self.closed = [], False
-                selectors.append(self)
-            def complete(self, messages, **kwargs):
-                self.inputs.append(json.loads(messages[-1]["content"]))
-                return CompletionResult("completed", json.dumps({"status": "unchanged", "entity_ids": [],
-                                                                  "user_turn_ids": []}), "stop")
-            def close(self):
-                self.closed = True
-        monkeypatch.setattr(query_selector, "OpenAICompletionClient", Selector)
-        value["selector"] = {"base_url": "http://fake", "model": "fake", "revision": "fixed"}
     retriever_config.write_text(yaml.safe_dump(value))
 
     def respond(request):
@@ -914,11 +818,6 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
         assert turns[1]["online_turn"]["history"][-1]["text"] == turns[0]["assistant_text"]
         assert "REFERENCE ANSWER" not in json.dumps(turns)
     assert native["retrieval"]["completed_retrievals"] == controller_manifest["retrieval"]["completed_retrievals"] == 3
-    if selectors:
-        assert len(selectors) == 2 and all(s.closed and len(s.inputs) == 2 for s in selectors)
-        for selector in selectors:
-            assert [len(body["actual_history"]) for body in selector.inputs] == [2, 4]
-            assert "REFERENCE ANSWER" not in json.dumps(selector.inputs)
     for manifest in (native["retrieval"], controller_manifest["retrieval"]):
         assert manifest["query_mode"] == query_mode
         assert manifest["query_fusion"] == fusion
@@ -928,12 +827,6 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
             if fusion == "current_topic_rrf":
                 assert all(v["query_fusion_trace"]["duplicate_query_skipped"] for v in manifest["query_view_traces"])
                 assert manifest["model_usage"]["encoder"]["texts_processed"] == 3
-        if query_mode in {"source_topic", "assistant_topic_unverified"}:
-            traces = manifest["query_view_traces"]
-            assert [t["snapshot_version"] for t in traces] == [None, 1, 2]
-            assert [t["model_called"] for t in traces] == [False, True, True]
-            assert all(t["missing_source_keys"] == [] for t in traces)
-            assert all(t["query_fusion_trace"]["duplicate_query_skipped"] for t in traces)
 
 
 def test_factory_uses_original_document_windows_with_existing_serving_selection(retriever_config, tmp_path):

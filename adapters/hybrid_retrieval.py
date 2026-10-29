@@ -570,8 +570,7 @@ def search_current_topic(current_query, topic_query, sparse, dense, encoder, rer
 def validate_retrieval_options(*, query_mode, stage, query_fusion, rerank_query_mode,
                                candidate_k, rerank_k, rrf_k, joint_selection=False):
     """One contract for file-based configuration and direct construction."""
-    from adapters.query_resolution import SOURCE_MODES
-    if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", "dialogue", *SOURCE_MODES}:
+    if query_mode not in {"current", "last3", "all_user", "correction_aware", "user_topic", "conversational", "dialogue"}:
         raise ValueError(f"unknown online query_mode: {query_mode}")
     if stage not in {"dense", "hybrid", "hybrid_rerank"}:
         raise ValueError("unknown retrieval stage")
@@ -579,8 +578,8 @@ def validate_retrieval_options(*, query_mode, stage, query_fusion, rerank_query_
         raise ValueError("literal dialogue retrieval requires dense single-query scoring")
     if query_fusion not in {"single", "current_topic_rrf", "dialogue_rrf"}:
         raise ValueError("unknown query fusion")
-    if query_fusion == "current_topic_rrf" and (query_mode not in {"user_topic", "conversational", *SOURCE_MODES} or stage == "dense"):
-        raise ValueError("current_topic_rrf requires user_topic/conversational/source_topic/assistant_topic_unverified and hybrid/hybrid_rerank")
+    if query_fusion == "current_topic_rrf" and (query_mode not in {"user_topic", "conversational"} or stage == "dense"):
+        raise ValueError("current_topic_rrf requires user_topic/conversational and hybrid/hybrid_rerank")
     if query_fusion == "dialogue_rrf" and (query_mode != "conversational" or stage == "dense"):
         raise ValueError("dialogue_rrf requires conversational hybrid retrieval")
     if query_mode == "conversational" and rerank_query_mode != "resolved":
@@ -606,17 +605,14 @@ def joint_recall_queries(turn, prior_context):
 
 
 class HybridRetriever:
-    """Shared P3 retrieval; source-qualified history resolution is explicit opt-in."""
+    """Shared P3 retrieval with current, dialogue and task-state query views."""
     def __init__(self, sparse, dense, encoder, reranker=None, *, query_mode="current",
                  stage="hybrid_rerank", candidate_k=50, rerank_k=50, rrf_k=60,
                  source_config=None, query_fusion="single", resolver=None, rerank_query_mode="resolved", trace_sink=None,
                  source_window=False, evidence_selector=None, source_documents=None):
-        from adapters.query_resolution import SOURCE_MODES
         validate_retrieval_options(query_mode=query_mode, stage=stage, query_fusion=query_fusion,
             rerank_query_mode=rerank_query_mode, candidate_k=candidate_k, rerank_k=rerank_k, rrf_k=rrf_k,
             joint_selection=evidence_selector is not None)
-        if query_mode in SOURCE_MODES and (resolver is None or query_fusion != "current_topic_rrf"):
-            raise ValueError("topic selector modes require resolver and current_topic_rrf")
         if query_mode == "conversational" and resolver is None:
             raise ValueError("conversational retrieval needs a resolver")
         if query_mode == "dialogue" and resolver is not None:
@@ -631,8 +627,7 @@ class HybridRetriever:
         self.query_fusion = query_fusion
         self.rerank_query_mode = rerank_query_mode
         self.resolver = resolver
-        self.requires_history_context = query_mode in SOURCE_MODES or query_mode in {"conversational", "dialogue"}
-        self.requires_source_context = query_mode in SOURCE_MODES
+        self.requires_history_context = query_mode in {"conversational", "dialogue"}
         self.candidate_k, self.rerank_k, self.rrf_k = candidate_k, rerank_k, rrf_k
         self.source_config = source_config
         self._lock = Lock()

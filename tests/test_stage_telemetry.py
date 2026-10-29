@@ -55,7 +55,7 @@ def test_native_collector_records_original_batch_identity_and_preserves_prepared
     source = provenance["stage_telemetry"]
     assert source["warmup_requests_excluded"] == 3
     assert source["prepared_vs_actual_host_load_changed_requests"] == 4
-    assert source["files"][0]["group"] == "group" and "stage_compact" not in provenance
+    assert source["files"][0]["group"] == "group"
 
 
 @pytest.mark.parametrize("mutation, message", [
@@ -99,12 +99,11 @@ def test_native_stage_input_rejects_unbound_or_incomplete_observations(native_in
         load_bound_telemetry(paths, measurements, manifests)
 
 
-def test_native_telemetry_cli_fits_without_compact_conversion(native_inputs, tmp_path):
+def test_native_telemetry_cli_fits_current_stage_model(native_inputs, tmp_path):
     paths, measurements, manifests = native_inputs
     base = tmp_path / "base.json"
     manifest = json.loads(manifests["group"].read_text())
-    CostModel().save(base, metadata={"profile_manifest": manifest,
-                                   "stage_compact": {"path": "prior-stage-source"}})
+    CostModel().save(base, metadata={"profile_manifest": manifest})
     artifact, validation = tmp_path / "stage.json", tmp_path / "validation.json"
     main(["--telemetry", f"group={paths['group']}", "--measurements", str(measurements),
           "--profile-manifest", f"group={manifests['group']}", "--base-artifact", str(base),
@@ -112,7 +111,6 @@ def test_native_telemetry_cli_fits_without_compact_conversion(native_inputs, tmp
     model = json.loads(artifact.read_text())
     assert model["metadata"]["stage_fit"]["formal_requests"] == 6
     assert model["metadata"]["stage_telemetry"]["files"][0]["path"] == str(paths["group"].resolve())
-    assert "stage_compact" not in model["metadata"]
     assert len(model["prefill_points"]) == 2
     assert all(point["scope"] == "forward_first" for point in model["prefill_points"])
     assert validation.is_file()

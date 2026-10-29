@@ -33,8 +33,6 @@ class HybridRetrievalConfig:
     rrf_k: int = 60
     cpu_threads: int = 1
     selector: dict | None = None
-    selector_history_turns: int = 3
-    selector_schema_mode: str = "static_v1"
     rerank_query_mode: str = "resolved"
     source_window: bool = False
     query_adapter_path: str | None = None
@@ -48,7 +46,6 @@ def load_retriever_config(path):
     if value.schema_version != 1 or value.kind != "hybrid":
         raise ValueError("retriever config requires schema_version=1 and kind=hybrid")
     from adapters.hybrid_retrieval import validate_retrieval_options
-    from adapters.query_resolution import SCHEMA_MODES, SOURCE_MODES
     validate_retrieval_options(query_mode=value.query_mode, stage=value.stage,
         query_fusion=value.query_fusion, rerank_query_mode=value.rerank_query_mode,
         candidate_k=value.candidate_k, rerank_k=value.rerank_k, rrf_k=value.rrf_k,
@@ -66,19 +63,8 @@ def load_retriever_config(path):
         from adapters.query_selector import SelectorConfig
         if value.selector is not None:
             SelectorConfig(**value.selector)
-    elif value.query_mode in SOURCE_MODES:
-        from adapters.query_selector import SelectorConfig
-        if value.query_fusion != "current_topic_rrf" or value.selector is None:
-            raise ValueError("topic selector modes require selector config and current_topic_rrf")
-        SelectorConfig(**value.selector)
-        if value.selector_history_turns < 1:
-            raise ValueError("selector_history_turns must be positive")
-        if value.selector_schema_mode not in SCHEMA_MODES:
-            raise ValueError("unknown selector schema mode")
     elif value.selector is not None:
-        raise ValueError("selector config is only used by explicit topic selector modes")
-    elif value.selector_schema_mode != "static_v1":
-        raise ValueError("selector_schema_mode is only used by explicit topic selector modes")
+        raise ValueError("selector config requires conversational mode")
     if value.stage == "hybrid_rerank" and not value.reranker_path:
         raise ValueError("hybrid_rerank requires reranker_path")
     if value.dtype not in {"float32", "float16", "bfloat16"}:
@@ -135,10 +121,6 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
             if config.query_mode == "conversational":
                 from adapters.conversation import ConversationResolver
                 resolver = ConversationResolver(client)
-            elif client is not None:
-                from adapters.query_resolution import TopicResolver
-                resolver = TopicResolver(client, config.query_mode, history_turns=config.selector_history_turns,
-                                         schema_mode=config.selector_schema_mode)
             evidence_selector = None
             if config.evidence_selection == "semantic":
                 from adapters.evidence_selection import EvidenceSelector

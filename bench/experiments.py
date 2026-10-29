@@ -271,7 +271,7 @@ def implementation_manifest():
 def provenance(spec, *, implementation=None):
     config = matrix_config(spec)
     files = {spec.get("system_prompt_file"), spec.get("corpus"), spec.get("evidence_corpus"), spec.get("lifecycle", {}).get("warmup_input"), config.calibration_path,
-             config.cost_model.artifact, config.cost_model.output_length_artifact}
+             config.cost_model.artifact}
     if spec.get("retriever_index"):
         files.add(str(Path(spec["retriever_index"]) / "manifest.json"))
     if spec.get("retriever_config"):
@@ -285,7 +285,6 @@ def provenance(spec, *, implementation=None):
             files.add(native.get("engine_manifest"))
             files.add(overrides.get("calibration_path"))
             files.add(overrides.get("cost_model", {}).get("artifact"))
-            files.add(overrides.get("cost_model", {}).get("output_length_artifact"))
     files.update(quality_evidence_files(spec))
     implementation = implementation if implementation is not None else implementation_manifest()
     return {"input_sha256": sha256(Path(spec["input"]).read_bytes()).hexdigest(),

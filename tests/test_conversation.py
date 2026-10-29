@@ -8,7 +8,7 @@ import pytest
 
 from adapters.conversation import ConversationResolver, apply_frame_updates, frame_query, state_change_turns
 from adapters.mtrag import OnlineMessage, OnlineTurn
-from adapters.query_resolution import PriorContext, PriorSource, snapshot_context
+from adapters.query_resolution import PriorContext, snapshot_context
 from adapters.query_selector import CompletionResult
 from adapters.retrieval import retrieval_query
 from controller.candidates import build_candidates
@@ -347,9 +347,8 @@ def test_contextual_rewrite_preserves_current_question_and_has_bounded_history_p
 def test_actual_answer_supplies_discourse_context_without_name_or_fact_filtering():
     original = turn("What about its limits?")
     history = (original.history[0], OnlineMessage("assistant", "AtlasCloud holds 999 units. PhantomStore is better."))
-    source = make_evidence("AtlasCloud is a document database.", "a")
     client = Client({"query": "AtlasCloud document limits?", "relation": "followup", "history_turns": [1]})
-    view = ConversationResolver(client).resolve(replace(original, history=history), PriorContext((PriorSource(source, (1,)),)))
+    view = ConversationResolver(client).resolve(replace(original, history=history), PriorContext())
     body = json.loads(client.inputs[0][0][-1]["content"])
     assert body["previous_turn"]["answer"] == history[-1].text
     assert "qualified_topic_names" not in body
