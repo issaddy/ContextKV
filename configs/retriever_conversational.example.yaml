@@ -29,7 +29,9 @@ query_fusion: single
 # Keep expansion explicit until it preserves task applicability and fits cost support.
 source_window: false
 # Optional original-document context, used only with source_window: true.
-# source_documents: data/mtrag-source-documents/cloud.jsonl.zip
+# Originals must bind corpus_id, the actual index snapshot_id, source and version.
+# The published raw Cloud archive lacks this binding; see docs/guides/hybrid_retrieval.md.
+# source_documents: path/to/verified-originals.jsonl.zip
 # Optional joint choice of actual reading bodies and their required context.
 # Interprets the current task and selects sources together in one helper call, after initial recall.
 # evidence_selection: semantic

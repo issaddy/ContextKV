@@ -99,6 +99,10 @@ encoder/reranker与SGLang共用GPU时，检索和生成会竞争资源。检索�
 
 `OnlineTurn.contexts`仍是原来的评分命中，`supporting_contexts`另存未评分的窗口原文。HTTP、控制器CLI和Native入口共同补齐显式依赖后交给A/R，只有原命中进入检索优先级，B按真实输入计价，C按既有事务保存和退役。配置需要`--evidence-corpus`，复用已有解释、encoder和reranker结果。新增输入和缓存占用计入精确token预算与原生准入。实际质量检查统一记录在[数据与评价](../data_and_evaluation.md)。
 
+同时配置`source_documents`时，读取匹配的原始文档，完成命中边界段落并保留前后各两段；合并重叠窗口后替换对应片段，原排名存入`retrieval_contexts`。带显式章节或依赖的片段保留原有闭包。JSONL或单JSONL的ZIP记录需要`document_id`、`text`，并以`corpus_id`、`snapshot_id`、`version`及`source_uri`/`source`/`url`绑定身份。`snapshot_id`须对应实际检索索引，不一定等于资料业务版本；仅在两者相同时可省略独立`version`。相同句子不能证明来源或版本相同，身份不明或字面不匹配时保留原命中。
+
+发布方的Cloud原始文档ZIP没有上述快照绑定，不能直接把示例路径视为已验证的阅读输入。应先核对发布文件哈希和索引映射，再准备带身份的原文记录。本轮父文档实验同样曾因MultiDoc业务版本与结构化索引快照混淆而未生效，修正经过4110条映射核验；整份父文档及其预算选择目前只在隔离原型中，尚未进入共享配置，见[实验记录](../data_and_evaluation.md#原始父文档补全条件覆盖与完整成本)。
+
 ## 可选的召回/重排查询分离
 
 共享配置新增 `rerank_query_mode`，仅在 `stage: hybrid_rerank` 生效：

@@ -100,6 +100,10 @@
 - [Late Chunking](https://arxiv.org/abs/2409.04701)：先编码长文档，再按片段聚合上下文相关向量。
 - [ContextualRetriever](https://aclanthology.org/2025.emnlp-main.602/)：在会话上下文中突出当前查询，通过改写意图监督和保留生成能力的训练学习检索表示，减少额外自回归改写。其训练和基座依赖必须单列；不能把普通BGE历史拼接或查询侧LoRA称为原方法复现，也不能将论文的检索时延视为本系统完整响应。
 - [LangChain ParentDocumentRetriever](https://reference.langchain.com/python/langchain-classic/retrievers/parent_document_retriever/ParentDocumentRetriever)：用小片段检索并返回更完整的父文档内容。
+- [HiChunk](https://aclanthology.org/2026.acl-long.1372/)：离线学习文档层级，并按子片段覆盖、多个命中和剩余预算向父级合并。本文的原页读取试验只验证原文上下文恢复，不是该训练及Auto-Merge算法的复现。 [代码](https://github.com/TencentCloudADP/hichunk)
+- [UMG/UMGP-RAG](https://arxiv.org/abs/2606.13550)：按不同检索器、片段粒度的分数分布熵融合候选，再提升至父片段并去重；分布集中度不是来源正确性或证据充分性的校准概率。
+- [SproutRAG](https://arxiv.org/abs/2606.18381)：联合训练句子表示与注意力聚合，构造多粒度原文树并进行束搜索；复用前需要核查训练权重、非连续原文的表示、重排成本及完整生成时延。已读公开实现`25e16aa`：示例默认MiniLM，文档编码截断至配置长度并跳过未编码片段，不能把运行默认示例当成论文的1.3B/CLaRa训练结果复现。论文不构成本项目多轮或版本变化效果的证明。 [代码](https://github.com/AmirAbaskohi/SproutRAG)
+- [MacRAG](https://arxiv.org/abs/2505.06569)：离线摘要与细粒度索引结合，检索时恢复父块、邻块及文档上下文；需要区分摘要索引、原文恢复和多步生成的各自收益与成本。 [代码](https://github.com/Leezekun/MacRAG)
 - [H-RAG](https://arxiv.org/abs/2605.00631)：在多轮RAG中分离子片段检索与父文档上下文恢复；检索效果与完整回答效果分别评价。
 - [LlamaIndex Sentence Window Retrieval](https://developers.llamaindex.ai/python/examples/node_postprocessor/metadatareplacementdemo/)：在检索命中后恢复相邻句子窗口。
 - [Docling](https://docling-project.github.io/docling/concepts/docling_document/)：保留文档层级、阅读顺序和来源坐标的结构化解析与分块。
