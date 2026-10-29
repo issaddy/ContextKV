@@ -9,7 +9,7 @@ import pytest
 from test_model_scope import local_scope as local_scope
 
 import adapters.table_relations as relations
-from adapters.mtrag import OnlineContext, OnlineTurn
+from controller.schema import OnlineContext, OnlineTurn
 from adapters.retrieval import to_evidence
 from controller.candidates import build_candidates
 from controller.evidence import EvidencePolicy, make_evidence
@@ -219,7 +219,7 @@ async def test_native_and_controller_share_table_annotated_input_exactly(style, 
 async def test_matrix_inherits_shared_table_policy_for_both_paths(tmp_path, monkeypatch, enabled, style, structure, local_scope):
     import bench.experiments as experiments
     import bench.native_baseline as native_module
-    import controller.cli as cli
+    import bench.run_sessions as cli
     split, manifest = tmp_path / "split.json", tmp_path / "engine.json"
     split.write_text(json.dumps({"dev": ["session-a"], "test": ["session-b"]}))
     manifest.write_text("{}")

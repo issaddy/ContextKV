@@ -20,8 +20,6 @@ import zipfile
 
 
 COMMIT = "6d2115b8b48a3d19412ccb52a0c9c4ee37869af4"
-QUESTIONS_SHA256 = "cd640d3ca0e41d3638153506e3caee109850b30de0a4e829862232a2b6302da8"
-DOCUMENTS_SHA256 = "ceb75be50f7f114f231e3a8069b51457745ea7db151c017f00de33d0789ab4cc"
 QUESTIONS_URL = f"https://raw.githubusercontent.com/MozerWang/Loong/{COMMIT}/data/loong.jsonl"
 DOCUMENTS_URL = "https://alibaba-research.oss-cn-beijing.aliyuncs.com/loong/doc.zip"
 PROTOCOL = "loong-complete-allowed-documents-p1-v2"
@@ -115,7 +113,7 @@ class Documents:
                 "source": self.source_uri + "#" + address,
                 "metadata": {"original_document": document, "archive_member": path,
                              "published_position": position, "author_title": title,
-                             "reading_mode": mode, "body_sha256": sha256(body.encode()).hexdigest()}}
+                             "reading_mode": mode}}
 
 
 def task(row, documents, *, revision):
@@ -156,16 +154,12 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--length-set", type=int, nargs="+", choices=(1, 2, 3, 4))
     args = parser.parse_args(argv)
-    hashes = {name: sha256(path.read_bytes()).hexdigest()
-              for name, path in (("questions", args.questions), ("documents", args.documents))}
-    if hashes != {"questions": QUESTIONS_SHA256, "documents": DOCUMENTS_SHA256}:
-        raise ValueError("Loong input differs from the pinned questions/document archive")
     rows = [json.loads(s) for s in args.questions.read_text(encoding="utf-8").splitlines() if s.strip()]
     if len({r["id"] for r in rows}) != len(rows):
         raise ValueError("duplicate published task IDs")
     selected = [r for r in rows if not args.length_set or r["set"] in args.length_set]
     args.output.mkdir(parents=True, exist_ok=True)
-    revision = COMMIT + ":documents-" + DOCUMENTS_SHA256 + ":" + PROTOCOL
+    revision = COMMIT + ":" + PROTOCOL
     errors, ids, counts = [], [], Counter()
     with Documents(args.documents) as documents, (args.output/"tasks.jsonl").open("w", encoding="utf-8") as output:
         for row in selected:
@@ -179,7 +173,7 @@ def main(argv=None):
             ids.append(row["id"])
             counts[row["type"]] += 1
     manifest = {"status": "partial_source_resolution" if errors else "completed", "protocol": PROTOCOL,
-                "upstream_commit": COMMIT, "sources": hashes, "published_tasks": len(rows),
+                "upstream_commit": COMMIT, "sources": {"questions": str(args.questions.resolve()), "documents": str(args.documents.resolve())}, "published_tasks": len(rows),
                 "requested_tasks": len(selected), "exported_tasks": len(ids), "unresolved_tasks": len(errors),
                 "length_sets": args.length_set, "domains": dict(counts), "model_calls": 0,
                 "document_order": "published list order, including repeated occurrences; no runtime shuffle",

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from adapters.corpus import CorpusIndex
-from adapters.mtrag import OnlineContext
+from controller.schema import OnlineContext
 from adapters.retrieval import BM25SRetriever
 from adapters.retriever_factory import create_retriever
 from adapters.serving_retrieval import ServingRetriever, ServingRetrievalError
@@ -133,7 +133,7 @@ async def test_cancelled_worker_before_hybrid_lock_finishes_before_model_close(m
             actions.append('close')
 
     class Dense:
-        manifest = {'corpus_sha256': 'same-original-corpus'}
+        manifest = {'corpus_snapshot_id': 'same-original-corpus'}
 
         def search(self, query, encoder, *, top_k):
             assert not encoder.closed, 'cancelled worker used a closed model'

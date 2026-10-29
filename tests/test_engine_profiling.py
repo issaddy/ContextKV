@@ -6,7 +6,7 @@ import pytest
 from test_model_scope import local_scope as local_scope
 
 from controller.engine_client import EngineError
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from profiling.prefill import PrefillCase, load_cases
 from profiling.sglang_probe import SGLangProbe
 
@@ -74,7 +74,7 @@ def test_collector_does_not_retry_configuration_errors():
 
 
 def test_smoke_contract_checks_result_replay_and_rejection():
-    from engine_patches.smoke import verify
+    from profiling.smoke import verify
     class AcceptanceDouble(ProtocolDouble):
         async def generate(self, **kwargs):
             try:
@@ -176,7 +176,6 @@ def test_default_case_record_stays_compatible_and_mixed_pages_are_checked():
         with pytest.raises(ValueError,match="page size"):
             await SGLangProbe(ProtocolDouble(page_size=4),range(20)).prepare(PrefillCase(12,8,4,1,"mixed",2))
     asyncio.run(scenario())
-
 
 
 def test_failed_case_manifest_counts_rows_already_written(tmp_path,monkeypatch,local_scope):

@@ -34,7 +34,7 @@
 }
 ```
 
-包名、包版本、Git commit、tag和仓库路径都必须显式提供；不从安装说明的最低版本推定唯一目标版本。commit记录声明的源码版本。构建器离线读取一次原文件SHA，manifest明确记录来源声明与本地字节；可提供 `expected_source_sha256` 与先前独立冻结的源文件核对。该检查核对本地字节，运行时直接复用构建结果。
+包名、包版本、Git commit、tag和仓库路径都必须显式提供；不从安装说明的最低版本推定唯一目标版本。commit记录声明的源码版本，manifest保留源文件位置与原文跨度；运行时复用提取结果。
 
 输出包括 `records.jsonl`、`manifest.json` 和逐源原样复制的 `licenses/*-LICENSE.txt`。manifest保存原文件头、许可声明、输入规格、原文位置、未知项与来源身份状态。`license_id`来自规格声明，构建器不自动判定许可法律适用性。已有输出目录不覆盖。
 
@@ -42,7 +42,7 @@
 
 - 函数/异步方法保留包括装饰器、签名、docstring与方法体的连续原文区间；类记录保留装饰器、类声明及完整类docstring，缺docstring时只保留声明。这些片段用于来源阅读。
 - 可选择公开类自身声明的`Client.__init__`，或将其配置为操作符号的同文件依赖，保留完整源码、声明参数与`initializer_of`。单独选择`Client`提取类声明及docstring；继承的初始化、其他私有/dunder符号和外部库依赖均在当前提取范围之外。
-- `span` 是按源文件声明encoding解码后的Unicode字符偏移，半开区间；行号从1开始。CRLF、Unicode及原缩进保留。原文件字节SHA与文本字符偏移用途不同。
+- `span` 是按源文件声明encoding解码后的Unicode字符偏移，半开区间；行号从1开始。CRLF、Unicode及原缩进保留。
 - `api_source.signature`、`docstring`和HTTP表达式附原文span；签名按token定位并保留原格式。`required_declared_parameters`按AST列出必需声明参数，包含声明中的`self`。
 - HTTP配置提取识别函数体中的`*.prepare_request(method=..., url=...)`。直接字符串及同一函数体内唯一、前序、无条件的字符串赋值记录原字面值；动态format、属性、其他请求库及条件改写记为unknown。遍历范围为当前函数体，跳过装饰器、默认值、注解及嵌套函数/class/lambda。
 - 请求的继承方法、导入属性或多次同名声明不会选一个猜测。它们记入 `unknown_symbols`。存在此类未解析请求时仍保存其余有效片段与manifest，CLI返回1；完整构建返回0。明确依赖指向缺失/歧义目标时，已有CorpusIndex验证拒绝发布该包。

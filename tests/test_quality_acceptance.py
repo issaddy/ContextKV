@@ -1,5 +1,4 @@
 import json
-from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -25,7 +24,7 @@ def setup_methods(tmp_path, *, source="human_blind", simulation=False, heldout=F
                    "input_ids": [10+i, 20 if name == "candidate" else 30], "output_ids": [1, 2],
                    "actual_history": [], "audit_evidence": [], "retrieved_evidence": [], "visible_evidence_manifest": []}
                   for i in range(3)]
-        run = {"workload": {"split": "test" if heldout else "dev"}, "split_manifest_sha256": sha256(split.read_bytes()).hexdigest(),
+        run = {"workload": {"split": "test" if heldout else "dev"},
                "report": {"turns": [{"task_id": r["task_id"], "conversation_id": r["conversation_id"],
                                     "online_turn": {"query": r["query"], "protocol": "P3", "history": [], "contexts": []},
                                     "result": {"input_ids": r["input_ids"], "input_hash": token_hash(r["input_ids"]), "output_ids": [1, 2]},
@@ -240,15 +239,13 @@ def test_original_simulation_flags_cannot_be_hidden_by_hardware_audit(tmp_path, 
     assert not result["quality_noninferiority_established"]
 
 
-@pytest.mark.parametrize("field", ["workload", "digest"])
-def test_original_split_declaration_and_digest_must_match(tmp_path, field):
+@pytest.mark.parametrize("field", ["workload"])
+def test_original_split_declaration_matches_cohort(tmp_path, field):
     spec = setup_methods(tmp_path, heldout=True)
     spec["scope"] = "heldout"
     freeze_protocol(spec, tmp_path)
     if field == "workload":
         edit_run(spec, lambda value: value["workload"].update(split="dev"))
-    else:
-        edit_run(spec, lambda value: value.update(split_manifest_sha256="another frozen split"))
     with pytest.raises(ValueError, match="original run"):
         evaluate(spec)
 
@@ -265,7 +262,7 @@ def test_same_answer_cannot_hide_changed_original_question_history_or_evidence(t
 def expanded_material_method(spec, tmp_path, *, native=True):
     """Exercise the real exporter with a ranking snippet and restored source."""
     from dataclasses import asdict
-    from adapters.mtrag import OnlineContext, OnlineTurn
+    from controller.schema import OnlineContext, OnlineTurn
     from adapters.retrieval import to_evidence
     from bench.quality import export_evaluation
 
@@ -367,10 +364,9 @@ def test_legacy_missing_original_scope_or_score_input_is_diagnostic_only(tmp_pat
     spec = setup_methods(tmp_path, heldout=True)
     spec["scope"] = "heldout"
     freeze_protocol(spec, tmp_path)
-    edit_run(spec, lambda raw: raw.pop("split_manifest_sha256"))
     edit_scores(spec, "candidate", lambda rows: rows[0].pop("input_hash"))
     result = evaluate(spec)["comparisons"]["candidate"]
-    assert set(result["acceptance_blockers"]) >= {"original_run_split_unbound", "score_input_binding_missing"}
+    assert set(result["acceptance_blockers"]) >= {"score_input_binding_missing"}
     assert not result["quality_noninferiority_established"]
 
 
@@ -381,20 +377,19 @@ def test_scores_cannot_move_between_prompts_with_same_answer(tmp_path):
         evaluate(spec)
 
 
-def test_controller_sidecar_reuses_original_split_digest_and_receipt(tmp_path):
+def test_controller_sidecar_reuses_original_split_and_receipt(tmp_path):
     spec = setup_methods(tmp_path, heldout=True)
     spec["scope"] = "heldout"
     for method in spec["methods"].values():
         path = Path(method["run"])
         raw = json.loads(path.read_text())
-        digest = raw.pop("split_manifest_sha256")
         raw.pop("workload")
         for turn in raw["report"]["turns"]:
             turn["result"].pop("input_ids")
             turn["result"]["receipt"] = {"input_hash": turn["result"].pop("input_hash")}
         path.write_text(json.dumps(raw))
         sidecar = path.with_suffix(".manifest.json")
-        sidecar.write_text(json.dumps({"dataset": {"split_manifest_sha256": digest}}))
+        sidecar.write_text(json.dumps({"dataset": {"split": "test"}}))
         method["manifest"] = str(sidecar)
     freeze_protocol(spec, tmp_path)
     assert evaluate(spec)["comparisons"]["candidate"]["quality_noninferiority_established"]

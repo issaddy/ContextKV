@@ -1,10 +1,10 @@
 """Retrieval uses the committed dialogue snapshot without mutating it."""
 from dataclasses import replace
 import pytest
-from adapters.mtrag import OnlineMessage, OnlineTurn
-from adapters.query_resolution import PriorContext, snapshot_context, controller_context_provider
+from controller.schema import OnlineMessage, OnlineTurn
+from adapters.conversation import PriorContext, snapshot_context, controller_context_provider
 from controller.evidence import make_evidence
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from controller.planner import PlannerKnobs
 from controller.schema import TurnRecord
 from controller.service import Controller

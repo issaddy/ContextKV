@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
-from hashlib import sha256
 import json
 import subprocess
 from types import SimpleNamespace
@@ -39,7 +38,7 @@ def test_fit_preserves_profile_manifest_sampling_ranges_and_input_identity(tmp_p
     assert metadata["profile_manifests"] == [manifest()]
     binding = metadata["measurement_provenance"]
     assert binding["binding_status"] == "run_id_matched"
-    assert binding["files"]["measurements"]["sha256"] == sha256(measurements.read_bytes()).hexdigest()
+    assert binding["files"]["measurements"]["path"] == str(measurements.resolve())
     assert binding["sampling"]["first_token"]["ranges"]["prompt_tokens"] == {"min": 100, "max": 300}
     assert binding["cross_configuration_validation"] is False
     loaded.save(tmp_path / "roundtrip.json")
@@ -120,7 +119,7 @@ def test_multiple_same_configuration_manifests_are_preserved_and_scoped(tmp_path
     assert provenance["binding_status"] == "run_id_matched"
     assert provenance["run_ids"] == ["profile-1", "profile-2"]
     assert provenance["files"]["profile_manifests"] == [
-        {"run_id": entry["run_id"], "path": str(path.resolve()), "sha256": sha256(path.read_bytes()).hexdigest()}
+        {"run_id": entry["run_id"], "path": str(path.resolve())}
         for entry, path in zip((first, second), paths)]
     report = model.check_calibration_scope({"fingerprint": first["fingerprint"], "cache_config_hash": "cache-A"})
     assert report["status"] == "matching_scope"

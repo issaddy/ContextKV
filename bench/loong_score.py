@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
-from hashlib import sha256
 from importlib.resources import files
 import json
 from pathlib import Path
@@ -56,8 +55,7 @@ def score_answer(reference, prediction, client):
     value = (parse_score(completion.text) if completion.status == "completed" and
              completion.finish_reason == "stop" and isinstance(completion.text, str) else None)
     return {**base, "status": "scored" if value is not None else "unscored", "score": value,
-            "prompt_sha256": sha256(prompt.encode()).hexdigest(),
-            "answer_sha256": sha256(prediction.encode()).hexdigest(), "completion": asdict(completion)}
+            "completion": asdict(completion)}
 
 
 def summarize(rows):
@@ -104,9 +102,8 @@ def main(argv=None):
               "by_level": {str(n): summarize([r for r in results if r["level"] == n])
                            for n in sorted({r["level"] for r in results})},
               "protocol": "loong-reference-rubric-local-judge-v1", "upstream_commit": COMMIT,
-              "rubric_sha256": sha256(RUBRIC.encode()).hexdigest(),
-              "references_sha256": sha256(args.references.read_bytes()).hexdigest(),
-              "predictions_sha256": sha256(args.predictions.read_bytes()).hexdigest(),
+              "references": str(args.references.resolve()),
+              "predictions": str(args.predictions.resolve()),
               "judge": client.manifest, "workers": args.workers, "answer_regeneration": False,
               "adaptations": "Configured local judge/budgets, one call per answer, explicit missing/truncated grades, unique in-range bracket score; original rubric and question/reference construction retained",
               "scope": "Reference accuracy/completeness diagnostic; no source-groundedness guarantee or comparability to the original GPT-4 leaderboard"}

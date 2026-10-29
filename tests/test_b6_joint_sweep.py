@@ -16,7 +16,7 @@ def test_removed_automatic_matrix_cannot_start_from_only_a_model_path(tmp_path, 
 
 @pytest.mark.parametrize('verified', [None, {'status': 'running', 'server_profile': 'other', 'profile': {}}])
 def test_generic_executor_rejects_owned_profile_before_generation_or_output(tmp_path, monkeypatch, verified):
-    from controller import cli
+    from bench import run_sessions as cli
     async def forbidden(*a):
         pytest.fail('unverified profile reached generation')
     monkeypatch.setattr(cli, 'benchmark', forbidden)

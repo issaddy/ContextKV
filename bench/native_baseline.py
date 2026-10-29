@@ -10,7 +10,6 @@ import argparse
 import asyncio
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
-from hashlib import sha256
 import json
 import math
 import os
@@ -23,7 +22,8 @@ import uuid
 
 import httpx
 
-from adapters.mtrag import CLOUD_COLLECTION, OnlineTurn, dataset_identity, load_rows
+from adapters.mtrag import CLOUD_COLLECTION, dataset_identity, load_rows
+from controller.schema import OnlineTurn
 from adapters.corpus import CorpusIndex
 from adapters.retrieval import to_evidence
 from adapters.retriever_factory import create_retriever
@@ -560,7 +560,7 @@ async def _run(args):
                               model_scope=scope, sampling=sampling, corpus_id=dataset["name"])
     retrieval_context_provider = None
     if getattr(retriever, "requires_history_context", False):
-        from adapters.query_resolution import native_context_provider
+        from adapters.conversation import native_context_provider
         retrieval_context_provider = native_context_provider(baseline)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -609,10 +609,10 @@ async def _run(args):
         await client.aclose()
         payload = {"baseline": args.baseline, "protocol": args.protocol, "run_id": baseline.run_id,
                    "dataset": dataset,
-                   "engine_manifest": manifest, "engine_manifest_sha256": sha256(manifest_path.read_bytes()).hexdigest(),
+                   "engine_manifest": manifest,
                    "engine_commit_provenance": "operator_manifest_not_remote_attestation",
-                   "server_info": baseline.observed_server_info, "input_sha256": sha256(Path(args.input).read_bytes()).hexdigest(),
-                   "split_manifest_sha256": sha256(Path(args.split_manifest).read_bytes()).hexdigest() if args.split_manifest else None,
+                   "server_info": baseline.observed_server_info, "input": str(Path(args.input).resolve()),
+                   "split_manifest": args.split_manifest, "split": args.split,
                    "template_fingerprint": asdict(template.fingerprint), "policy": asdict(policy),
                    "retrieval": None if retriever is None else retriever.manifest,
                    "workload": vars(args), "report": report, "native_http_observations": client.observations,

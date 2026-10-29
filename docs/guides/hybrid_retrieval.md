@@ -15,7 +15,7 @@ BGE-M3使用CLS向量与L2归一化，文档索引为float32内积检索；重�
 
 ```bash
 python -m bench.retrieval_eval build   --corpus data/mtrag-official/cloud.jsonl --output data/cloud-bge-m3   --encoder-path models/bge-m3 --device cuda:0 --dtype bfloat16 --batch-size 16
-python -m controller.cli --config configs/qwen3_32b_cost.yaml   --state-dir runs/cloud-dev bench data/mtrag/RAG.jsonl --protocol P3 --domain cloud   --split-manifest configs/mtrag_split_manifest.json --split dev   --retriever-config configs/retriever_conversational.example.yaml   --evidence-corpus data/mtrag-official/cloud.jsonl
+python -m bench.run_sessions --config configs/qwen3_32b_cost.yaml   --state-dir runs/cloud-dev run data/mtrag/RAG.jsonl --protocol P3 --domain cloud   --split-manifest configs/mtrag_split_manifest.json --split dev   --retriever-config configs/retriever_conversational.example.yaml   --evidence-corpus data/mtrag-official/cloud.jsonl
 ```
 
 先按[部署](../deployment.md)启动生成和解释服务。Cloud使用72,442条原始passages；MultiDoc2Dial使用其完整4110段语料和对应索引。稀疏/稠密索引共享资料快照。配置中的路径相对工作目录，运行manifest记录实际模型、配置和索引身份。

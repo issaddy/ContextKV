@@ -15,7 +15,8 @@ from statistics import mean
 import time
 
 from adapters.hybrid_retrieval import DenseIndex, LocalBGE, query_text, search_current_topic, search_variants
-from adapters.mtrag import CLOUD_COLLECTION, DATASET_COMMIT, OnlineContext, load_rows
+from adapters.mtrag import CLOUD_COLLECTION, DATASET_COMMIT, load_rows
+from controller.schema import OnlineContext
 from adapters.retrieval import BM25SRetriever, load_beir_corpus
 from adapters.query_views import user_topic_manifest, user_topic_view
 from bench.metrics import percentile

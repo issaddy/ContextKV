@@ -1,6 +1,6 @@
 # 完整成本与标定
 
-B使用`profiling.sglang_probe → profiling.fit → profiling.stage_fit → CostModel`。当前成本文件对应H200、Qwen3-32B、32768个GPU KV槽位和16GB Host配置，原始数据与验证范围见[评价记录](../data_and_evaluation.md)。
+B在线加载`CostModel`及其数据；`profiling.sglang_probe → profiling.fit → profiling.stage_fit`是生成这些数据的离线工具链。当前成本文件对应H200、Qwen3-32B、32768个GPU KV槽位和16GB Host配置，原始数据与验证范围见[评价记录](../data_and_evaluation.md)。
 
 ## 决策
 

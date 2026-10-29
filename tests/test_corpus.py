@@ -10,7 +10,7 @@ from controller.schema import SessionSnapshot
 
 def test_source_lists_flow_through_selection_cache_and_current_quality_export(tmp_path):
     from adapters.evidence_selection import reading_catalog
-    from adapters.mtrag import OnlineContext, OnlineTurn
+    from controller.schema import OnlineContext, OnlineTurn
     from adapters.source_documents import SourceDocuments
     from bench.quality import export_evaluation
     from controller.templates import verify_evidence_spans
@@ -102,7 +102,7 @@ def test_corpus_conditions_headers_and_code_anchors_keep_original_text():
 
 
 def test_reranking_context_uses_original_metadata_without_expanding_the_pool():
-    from adapters.mtrag import OnlineContext
+    from controller.schema import OnlineContext
     from adapters.retrieval import rerank_document
 
     index = CorpusIndex.from_records([
@@ -128,7 +128,7 @@ def test_reranking_context_uses_original_metadata_without_expanding_the_pool():
 
 def test_selection_groups_preserve_version_and_condition_scope():
     from adapters.hybrid_retrieval import select_ranked_evidence
-    from adapters.mtrag import OnlineContext
+    from controller.schema import OnlineContext
 
     rows = [{"_id":pid,"text":"Limit is three.","title":"Plan limits","version":version,
              "dependencies":dependencies,"parent_section":parent}
@@ -150,7 +150,7 @@ def test_selection_groups_preserve_version_and_condition_scope():
 
 def test_ranked_groups_share_bodies_but_keep_only_retrieved_source_citation_rights():
     from adapters.hybrid_retrieval import select_ranked_evidence
-    from adapters.mtrag import OnlineContext
+    from controller.schema import OnlineContext
     from controller.templates import verify_evidence_spans
     from test_candidates import committed
 
@@ -201,7 +201,7 @@ def test_missing_condition_is_reported_at_corpus_boundary():
 
 
 def test_enrich_preserves_retrieved_bodies_with_separate_document_and_passage_identity():
-    from adapters.mtrag import OnlineContext
+    from controller.schema import OnlineContext
 
     index = CorpusIndex.from_records([
         {"_id": "passage", "document_id": "document", "version": "v2", "text": "original",
@@ -216,7 +216,7 @@ def test_enrich_preserves_retrieved_bodies_with_separate_document_and_passage_id
 
 
 def test_contextpilot_annotation_ranks_retrieved_passages_without_supporting_conditions():
-    from adapters.mtrag import OnlineContext
+    from controller.schema import OnlineContext
     from controller.evidence import EvidencePolicy
 
     index = CorpusIndex.from_records([
@@ -245,7 +245,7 @@ def test_duplicate_passage_version_is_not_silently_overwritten():
 
 
 def test_source_windows_keep_originals_and_do_not_cross_source_version_or_section():
-    from adapters.mtrag import OnlineContext
+    from controller.schema import OnlineContext
 
     rows = [{"_id": str(i), "document_id": "manual", "text": f"Original {i}",
              "span": [i*10, i*10+10], "version": "v1", "url": "https://example.org/manual"}
@@ -265,7 +265,7 @@ def test_source_windows_keep_originals_and_do_not_cross_source_version_or_sectio
 
 
 def test_mtrag_windows_use_offsets_only_for_order_not_for_text_stitching():
-    from adapters.mtrag import OnlineContext
+    from controller.schema import OnlineContext
 
     rows = [{"_id": pid, "text": body, "url": "https://example.org/manual"}
             for pid, body in (("doc-0-9", "LEFT"), ("doc-5-14", "MIDDLE"),
@@ -291,7 +291,7 @@ def test_corpus_roundtrip_jsonl_and_dependency_cycle(tmp_path):
 @pytest.mark.asyncio
 async def test_corpus_metadata_survives_service_commit_and_revisit(tmp_path):
     from controller.schema import QueryContext
-    from controller.mock_engine import MockEngine
+    from bench.mock_engine import MockEngine
     from controller.planner import PlannerKnobs
     from controller.service import Controller
     from controller.session_store import SessionStore

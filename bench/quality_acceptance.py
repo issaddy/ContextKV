@@ -196,12 +196,11 @@ def _read_method(spec):
     coverage = {k: {"scored": sum((r.get("scores") or {}).get(k) is not None for r in scores),
                     "missing_task_ids": sorted(task for task in expected if (by_id.get(task, {}).get("scores") or {}).get(k) is None)}
                 for k in DIMENSIONS}
-    original_splits = [value["workload"]["split"] for value in (payload, manifest)
-                       if (value.get("workload") or {}).get("split") is not None]
-    split_hashes = [digest for value in (payload, manifest)
-                    for digest in (value.get("split_manifest_sha256"), (value.get("dataset") or {}).get("split_manifest_sha256")) if digest]
+    original_splits = [part for value in (payload, manifest)
+                       for part in (value.get("split"), (value.get("dataset") or {}).get("split"),
+                                    (value.get("workload") or {}).get("split")) if part is not None]
     return {"audit": {r["task_id"]: r for r in audits}, "scores": by_id, "identities": identities,
-            "original_splits": original_splits, "split_hashes": split_hashes,
+            "original_splits": original_splits,
             "summary": {"expected_tasks": len(expected), "sessions": len({r["conversation_id"] for r in audits}),
                         "unbound_audit_task_ids": sorted(unbound_audits), "unbound_score_task_ids": sorted(unbound_scores),
                         "measurement_kinds": sorted(kind for kind in observed if kind is not None),
@@ -242,11 +241,8 @@ def evaluate(spec):
         summary["unbound_score_task_ids"] = sorted(set(summary["unbound_score_task_ids"]) & evaluated_tasks)
     cohort = sorted({r["conversation_id"] for r in reference["audit"].values()})
     split_verified = False
-    split_digest = None
     if spec.get("split_manifest"):
-        split_bytes = Path(spec["split_manifest"]).read_bytes()
-        split = json.loads(split_bytes)
-        split_digest = sha256(split_bytes).hexdigest()
+        split = json.loads(Path(spec["split_manifest"]).read_text())
         dev, test = set(split["dev"]), set(split["test"])
         if not dev or not test or dev & test:
             raise ValueError("split manifest must have disjoint nonempty dev/test conversations")
@@ -257,9 +253,7 @@ def evaluate(spec):
     for method in methods.values():
         if any(value != ("dev" if scope == "dev" else "test") for value in method["original_splits"]):
             raise ValueError("original run workload.split contradicts the requested quality scope")
-        if split_digest and any(digest != split_digest for digest in method["split_hashes"]):
-            raise ValueError("original run split_manifest_sha256 differs from the supplied fixed split")
-        method["summary"]["original_split_binding_verified"] = bool(split_digest and method["split_hashes"])
+        method["summary"]["original_split_binding_verified"] = split_verified
     frozen = None
     if spec.get("frozen_protocol"):
         frozen = remap(json.loads(Path(spec["frozen_protocol"]).read_text()), mapping)

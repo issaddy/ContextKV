@@ -10,7 +10,7 @@ import random
 from statistics import mean
 from typing import Any, Mapping, Sequence
 
-from adapters.mtrag import OnlineTurn
+from controller.schema import OnlineTurn
 from bench.metrics import percentile
 
 

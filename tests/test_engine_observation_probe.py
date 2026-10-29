@@ -6,7 +6,7 @@ import pytest
 
 from controller.engine_client import EngineError, EngineInfo, EpochStatus, PrepareAck, RetireAck
 from controller.schema import CacheQuoteBatch, CompletionReceipt, ConfigFingerprint, GenerationResult, NativePrefixMatch, NativeRequestSummary
-from engine_patches.observation_probe import ObservationProbe, verify_snapshot
+from profiling.observation_probe import ObservationProbe, verify_snapshot
 
 
 def snapshot(*,waiting=(),running=()):

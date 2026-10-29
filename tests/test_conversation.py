@@ -7,13 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 from adapters.conversation import ConversationResolver, apply_frame_updates, frame_query, state_change_turns
-from adapters.mtrag import OnlineMessage, OnlineTurn
-from adapters.query_resolution import PriorContext, snapshot_context
+from controller.schema import OnlineMessage, OnlineTurn
+from adapters.conversation import PriorContext, snapshot_context
 from adapters.query_selector import CompletionResult
 from adapters.retrieval import retrieval_query
 from controller.candidates import build_candidates
 from controller.evidence import make_evidence
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from controller.planner import PlannerKnobs
 from controller.schema import QueryContext, SessionSnapshot, TaskFrame
 from controller.serialization import decode
@@ -236,8 +236,6 @@ def test_explicit_task_operation_precedes_context_carryover():
     assert kept.task == "size limit"
 
 
-
-
 def test_revisit_resumes_the_selected_task_state_instead_of_the_latest_topic():
     old = TaskFrame("Atlas", "attachments", "maximum size", (("version","v2"),))
     latest = TaskFrame("Nova", "installation", "requirements", (("platform","Windows"),))
@@ -274,8 +272,6 @@ def test_persistent_task_state_does_not_duplicate_generation_or_change_candidate
     stateful = build_candidates(snapshot,"No, attachments.",blocks,query_context=intent)
     assert [p.input_ids for p in stateful] == [p.input_ids for p in plain]
     assert all('"task_frame"' not in p.messages[-1].content for p in stateful)
-
-
 
 
 def test_model_free_named_questions_keep_the_existing_query_view():
@@ -538,7 +534,7 @@ def test_shared_scope_policy_is_not_duplicated_in_each_interpreted_turn():
 
 def test_waiting_for_one_sessions_intent_does_not_block_another_sessions_retrieval():
     from adapters.hybrid_retrieval import HybridRetriever
-    from adapters.mtrag import OnlineContext
+    from controller.schema import OnlineContext
     entered, release = Event(), Event()
     class Resolver:
         def resolve(self, request, context):
@@ -547,7 +543,7 @@ def test_waiting_for_one_sessions_intent_does_not_block_another_sessions_retriev
                 assert release.wait(5)
             return {"text":request.query}
     class Dense:
-        manifest={"corpus_sha256":"same"}
+        manifest={"corpus_snapshot_id":"same"}
         def search(self, query, encoder, **kwargs):
             return (OnlineContext("source",query),)
     sparse=SimpleNamespace(manifest=Dense.manifest,corpus_snapshot_id="snapshot")

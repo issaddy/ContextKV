@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from controller.config import ModelConfig, RunConfig
-from controller.generation import GenerationProtocol
+from controller.config import GenerationProtocol
 from controller.templates import ByteTemplate
 from profiling import decision_pairs as pairs
 from test_decision_pairs import source_run

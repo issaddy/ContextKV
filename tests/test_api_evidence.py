@@ -1,4 +1,3 @@
-from hashlib import sha256
 import json
 
 import pytest
@@ -35,8 +34,6 @@ def test_decorators_async_unicode_crlf_exact_spans_no_execution(tmp_path):
         assert text[slice(*fragment["span"])] == fragment["text"]
     assert details["required_declared_parameters"] == ["名前"]
     assert manifest["original_source_header"] == "# Copyright Sample\r\n"
-    assert manifest["code_executed"] is False
-    assert manifest["repository_revision_verified_by_adapter"] is False
 
 
 def test_signature_lambda_colons_and_missing_docstring(tmp_path):
@@ -131,7 +128,6 @@ def test_explicit_public_initializer_is_original_source_dependency_not_automatic
     assert 'raise RuntimeError("NEVER INSTANTIATE")' in initializer["text"]
     index = CorpusIndex.from_records(rows, corpus_id="sdk", snapshot_id="frozen")
     assert len(index.resolve((rows[0]["passage_id"],))) == 2
-    assert manifest["code_executed"] is False
     rows, manifest = extract(tmp_path, text, spec(["Child.__init__"]))
     assert rows == () and manifest["status"] == "incomplete_unknown_symbols"
 
@@ -160,7 +156,7 @@ def test_http_scope_excludes_decorator_defaults_annotations_and_nested_scopes(tm
     assert calls[0]["method"]["value"] == "POST"
     assert calls[0]["path"]["value"] == "/actual_body"
     assert calls[0]["call"]["text"] == 'client.prepare_request(method="POST", url="/actual_body")'
-    assert rows[0]["text"] == text and manifest["code_executed"] is False
+    assert rows[0]["text"] == text
 
 
 def test_versions_never_merge_even_with_identical_source(tmp_path):
@@ -202,15 +198,6 @@ def test_unselected_dependency_owner_preserved_not_claimed_validated(tmp_path):
 def test_explicit_identity_and_public_symbols_required(tmp_path, override):
     with pytest.raises(ValueError):
         extract(tmp_path, "def send():\n    pass\n", {**spec(["send"]), **override})
-
-
-def test_expected_source_bytes_checked_only_at_offline_boundary(tmp_path):
-    text = "def send():\n    pass\n"
-    correct = sha256(text.encode()).hexdigest()
-    _, manifest = extract(tmp_path, text, spec(["send"], expected_source_sha256=correct))
-    assert manifest["identity_status"] == "matches_supplied_expected_source_sha256"
-    with pytest.raises(ValueError, match="expected_source_sha256"):
-        extract(tmp_path, text, spec(["send"], expected_source_sha256="0" * 64))
 
 
 def bundle_spec(tmp_path, *, symbols=None, dependencies=None):

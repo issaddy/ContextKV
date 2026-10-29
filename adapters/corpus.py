@@ -156,7 +156,7 @@ class CorpusIndex:
         hashing the bodies again. Duplicate retrieved passages keep their first
         rank; no supporting passage receives an invented retrieval rank.
         """
-        from adapters.mtrag import clean_context
+        from adapters.retrieval import clean_context
 
         keys = []
         for value in contexts:
@@ -236,7 +236,7 @@ class CorpusIndex:
         Alignment is memoized per finite corpus passage, not per query. This is
         called in the retriever's serialized selection stage before publication.
         """
-        from adapters.mtrag import OnlineContext
+        from controller.schema import OnlineContext
         if documents is not self._window_documents:
             self._document_windows.clear()
             self._window_documents = documents
@@ -264,7 +264,7 @@ class CorpusIndex:
                 else:
                     merged.append((start, end))
             for start, end in merged:
-                passage_id = f"source-window:v2:{document.document_id}:{document.identity_sha256}:{start}:{end}"
+                passage_id = f"source-window:v2:{document.document_id}:{start}:{end}"
                 existing = [key for key in self._passages.get(passage_id, ()) if key.version == version]
                 if existing:
                     support = self._blocks[existing[0]]
@@ -317,7 +317,7 @@ class CorpusIndex:
         Resolve the same dependency closure used by generation. Optional adjacent
         windows are evaluated with their hit, rather than appended after choice.
         """
-        from adapters.mtrag import OnlineContext
+        from controller.schema import OnlineContext
         result = {}
         for context in contexts:
             key = self._context_key(context)
@@ -328,7 +328,7 @@ class CorpusIndex:
         return result
 
     def _source_neighbors(self, primary):
-        from adapters.mtrag import OnlineContext
+        from controller.schema import OnlineContext
 
         seen, result = set(primary), []
         for key in primary:

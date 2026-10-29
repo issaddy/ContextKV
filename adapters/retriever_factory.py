@@ -8,7 +8,6 @@ import time
 
 import yaml
 
-from adapters.mtrag import DATASET_COMMIT
 from adapters.retrieval import BM25SRetriever, load_beir_corpus
 
 
@@ -74,18 +73,6 @@ def load_retriever_config(path):
     return value
 
 
-def retriever_config_sources(path):
-    """Small provenance files for the existing experiment-boundary digest mechanism."""
-    config = load_retriever_config(path)
-    adapter_sources = ()
-    if config.query_adapter_path:
-        root = Path(config.query_adapter_path)
-        adapter_sources = tuple(str(root/name) for name in ("query-adapter.json", "adapter/adapter_config.json", "adapter/adapter_model.safetensors"))
-    return (*adapter_sources, str(path), str(Path(config.sparse_index)/"manifest.json"),
-            str(Path(config.dense_index)/"manifest.json"),
-            *((config.source_documents,) if config.source_window and config.source_documents else ()))
-
-
 def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path=None, trace_sink=None,
                      corpus_snapshot_id=None):
     if protocol != "P3":
@@ -146,5 +133,5 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
         return BM25SRetriever.load(index_path)
     if corpus_path:
         return BM25SRetriever(load_beir_corpus(corpus_path),
-                             corpus_snapshot_id=corpus_snapshot_id or f"mtrag-{DATASET_COMMIT}")
+                             corpus_snapshot_id=corpus_snapshot_id or Path(corpus_path).stem)
     raise ValueError("P3 requires --corpus, --retriever-index or --retriever-config")

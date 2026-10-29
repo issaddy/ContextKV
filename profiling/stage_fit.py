@@ -10,7 +10,6 @@ import argparse
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import asdict
-from hashlib import sha256
 import json
 import math
 from pathlib import Path
@@ -20,7 +19,7 @@ from statistics import mean
 from controller.cost_model import CostModel
 from controller.sampling import bound_recipe
 from profiling.common import load_measurements
-from profiling.fit import measurement_provenance
+from profiling.fit import measurement_provenance, output_priors
 from profiling.prefill import PrefillCase
 
 FORWARD_FEATURES = ("prefix_tokens", "suffix_tokens", "host_load_tokens", "concurrency")
@@ -53,7 +52,7 @@ def load_bound_telemetry(telemetry_paths, measurements_path, manifests):
     for group, source in telemetry_paths.items():
         path = Path(source)
         content = path.read_bytes()
-        files.append({"group": group, "path": str(path.resolve()), "sha256": sha256(content).hexdigest()})
+        files.append({"group": group, "path": str(path.resolve())})
         for line in content.decode("utf-8").splitlines():
             if not line.strip():
                 continue
@@ -302,44 +301,37 @@ def fit_artifact(rows, provenance, base_artifact, *, folds=5, seed=42, developme
             "online_heterogeneous_queue_calibrated": False},
         "gpu_capacity_tokens": rows[0]["gpu_capacity_tokens"]}
     frozen_lengths = (base.get("stage_model") or {}).get("development_output_lengths")
-    if frozen_lengths:
-        # Refining a stage artifact must preserve its already bound empirical
-        # prior. Its measurement provenance now describes stage profiling, so
-        # the original report binding lives with the distribution itself.
-        if (development_report and sha256(Path(development_report).read_bytes()).hexdigest()
-                != frozen_lengths["source"]["sha256"]):
-            raise ValueError("development outputs must match the report already bound to the base artifact")
-        model["stage_model"]["development_output_lengths"] = deepcopy(frozen_lengths)
-    elif development_report:
-        report_bytes = Path(development_report).read_bytes()
-        digest = sha256(report_bytes).hexdigest()
-        bound = base.get("metadata",{}).get("measurement_provenance",{}).get("files",{}).get("development_report")
-        if not bound or digest != bound.get("sha256"):
-            raise ValueError("development outputs must match the report already bound to the base artifact")
-        report = json.loads(report_bytes)
-        turns = report.get("report",report).get("turns",[])
-        completed = [row for row in turns if row.get("status")=="success"]
+    prior_metadata = {}
+    if development_report:
+        report = json.loads(Path(development_report).read_text())
+        fingerprint = manifest.get("fingerprint") or manifest.get("engine", {}).get("fingerprint")
+        if report.get("fingerprint") is not None and report["fingerprint"] != fingerprint:
+            raise ValueError("development outputs and timing profile use different model fingerprints")
+        turns = report.get("report", report).get("turns", [])
+        completed = [row for row in turns if row.get("status") == "success"]
         lengths = [row["result"]["output_tokens"] for row in completed]
-        if not lengths or any(type(length) is not int or length<=0 for length in lengths):
-            raise ValueError("development report has no valid completed output lengths")
+        mean, p90 = output_priors(report)
+        model["settings"].update(default_output_tokens=mean, p90_output_tokens=p90)
+        prior_metadata = {"output_prior_sampling": report.get("sampling_recipe"),
+                          "output_prior_system_prompt": report.get("system_prompt"),
+                          "output_prior_fingerprint": report.get("fingerprint")}
         model["stage_model"]["development_output_lengths"] = {
-            "sampling_recipe": base.get("metadata", {}).get("output_prior_sampling"),
-            "lengths":lengths,"source":{"path":str(Path(development_report).resolve()),"sha256":digest,
-                                         "binding":"matches_original_base_artifact_development_report"},
-            "tasks":len(lengths),"sessions":len({r['conversation_id'] for r in completed}),
-            "truncated_outputs":sum(bool(r['result'].get('truncated')) for r in completed),
-            "interpretation":"empirical completed development service lengths, including capped outputs; not natural uncensored lengths",
-            "tail_fallback":"beyond observed survivors use known remaining output budget; label fallback"}
+            "sampling_recipe": report.get("sampling_recipe"), "system_prompt": report.get("system_prompt"),
+            "lengths": lengths, "source": {"path": str(Path(development_report).resolve())},
+            "tasks": len(lengths), "sessions": len({row['conversation_id'] for row in completed}),
+            "truncated_outputs": sum(bool(row['result'].get('truncated')) for row in completed)}
+    elif frozen_lengths:
+        model["stage_model"]["development_output_lengths"] = deepcopy(frozen_lengths)
     # The base artifact remains separately bound below. Its old stage source
     # must not appear to be an additional input to this fit.
     base_metadata = {key: value for key, value in base.get("metadata",{}).items()
                      if key not in {"stage_telemetry"}}
-    model["metadata"] = {**base_metadata,**provenance,
+    model["metadata"] = {**base_metadata, **provenance, **prior_metadata,
         "prefill_estimator":"lookup", "validation":{"metrics":validation["metrics"]},
         "stage_fit":{"source":"hardware","formal_requests":len(rows),"batches":len({r['batch_id'] for r in rows}),
                      "forward_error_p99_ms":error,"oof_residuals":len(errors),
-                     "base_artifact":{"path":str(Path(base_artifact).resolve()),"sha256":sha256(Path(base_artifact).read_bytes()).hexdigest()},
-                     "decode_and_output_priors":"copied unchanged from bound base artifact",
+                     "base_artifact":{"path":str(Path(base_artifact).resolve())},
+                     "decode_source":"base artifact",
                      "online_heterogeneous_waiting_validation":False}}
     # Runtime needs identity, sampling and page size. Full manifests, validation
     # predictions and unused comparison tables stay with the original run files.
@@ -365,7 +357,7 @@ def main(argv=None):
     parser.add_argument("--measurements",required=True)
     parser.add_argument("--profile-manifest",required=True,action="append",metavar="GROUP=PATH")
     parser.add_argument("--base-artifact",required=True)
-    parser.add_argument("--development-report",help="optional completed-output report already SHA-bound in base artifact")
+    parser.add_argument("--development-report",help="completed development outputs for the output-length prior")
     parser.add_argument("--output",required=True)
     parser.add_argument("--validation",required=True)
     parser.add_argument("--folds",type=int,default=5)

@@ -6,7 +6,7 @@ import json
 import pytest
 
 from bench import native_policy_sweep as sweep
-from test_model_scope import local_scope as local_scope, checkpoint_fixture
+from test_model_scope import local_scope as local_scope
 
 
 @pytest.mark.parametrize('module',['bench.native_policy_sweep','bench.controller_capacity_sweep'])
@@ -35,10 +35,7 @@ def test_pool_size_comes_from_actual_server_and_startup_log():
         sweep.pool_measurements({"max_total_num_tokens": 16384}, "server ready", MODEL_CONFIG, 16384)
 
 
-@pytest.mark.parametrize("checkpoint", [False, True])
-def test_native_manifest_binds_requested_pool_and_observed_policy(local_scope, tmp_path, checkpoint):
-    if checkpoint:
-        local_scope = checkpoint_fixture(local_scope, tmp_path)
+def test_native_manifest_binds_requested_pool_and_observed_policy(local_scope):
     info = {"enable_session_radix_cache": True, "enable_hierarchical_cache": True,
             "disable_radix_cache": False, "tp_size": 1, "dp_size": 1, "page_size": 64,
             "context_length": 32768, "incremental_streaming_output": False,

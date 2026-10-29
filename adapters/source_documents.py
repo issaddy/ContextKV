@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
-from functools import cached_property
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -26,12 +24,6 @@ class SourceDocument:
     corpus_id: str = ""
     snapshot_id: str = ""
     version: str = ""
-
-    @cached_property
-    def identity_sha256(self):
-        value = (self.corpus_id, self.snapshot_id, self.version, self.document_id,
-                 self.source, self.title, self.text)
-        return hashlib.sha256(json.dumps(value, ensure_ascii=False).encode('utf-8')).hexdigest()
 
 
 def paragraph_spans(text):

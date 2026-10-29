@@ -5,7 +5,7 @@ import pytest
 
 from controller.config import AblationConfig, CostSettings, RunConfig
 from controller.evidence import make_evidence
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from controller.planner import PlannerKnobs
 from controller.service import Controller
 from controller.session_store import SessionStore

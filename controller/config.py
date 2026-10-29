@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, is_dataclass
-import hashlib
 import json
 from pathlib import Path
 
@@ -10,17 +9,34 @@ import yaml
 
 from .candidates import CandidatePolicy
 from .cost_model import CostModel
-from .generation import GenerationProtocol
 from .engine_client import SGLangEngineClient
 from .events import EventLog
-from .mock_engine import MockEngine
 from .planner import PlannerKnobs
-from .serialization import decode, dumps
+from .serialization import decode
 from .sampling import SamplingRecipe
 from .service import Controller
 from .session_store import SessionStore
-from .templates import ByteTemplate, HuggingFaceTemplate
+from .templates import ByteTemplate, HuggingFaceTemplate, SYSTEM_PROMPT
 
+
+@dataclass(frozen=True)
+class GenerationProtocol:
+    system_prompt: str
+    sampling: SamplingRecipe | None = None
+
+    @classmethod
+    def from_config(cls, config):
+        # Read only request policy: archived model paths need not still exist.
+        config = asdict(config) if is_dataclass(config) else config
+        prompt = (config.get("context") or {}).get("system_prompt")
+        sampling = config.get("sampling")
+        return cls(SYSTEM_PROMPT if prompt is None else prompt,
+                   SamplingRecipe(**sampling) if sampling is not None else None)
+
+    def record(self):
+        return {"version": 1, "system_prompt": self.system_prompt,
+                "sampling_recipe": (self.sampling or SamplingRecipe()).record(),
+                "citation_constraint": "required_reference_map_v1"}
 
 @dataclass(frozen=True)
 class EngineConfig:
@@ -117,10 +133,6 @@ class RunConfig:
                 self.ablation.decode_cost, self.ablation.control_cost)):
             raise ValueError("cost-term ablations require frozen calibration; total residuals would restore excluded costs")
 
-    @property
-    def config_hash(self):
-        return hashlib.sha256(dumps(self).encode()).hexdigest()
-
 
 def load_config(path: str | Path | None = None) -> RunConfig:
     if path is None:
@@ -187,6 +199,8 @@ def create_model_template(model: ModelConfig, *, model_path: str | None = None,
 
 
 def create_controller(config: RunConfig) -> Controller:
+    if config.engine.kind == "mock":
+        from bench.mock_engine import MockEngine
     template = (ByteTemplate(namespace_hash=config.model.namespace_hash) if config.engine.kind == "mock" else
                 create_model_template(config.model))
     model = load_cost_model(config)
@@ -207,5 +221,5 @@ def create_controller(config: RunConfig) -> Controller:
                       policy=config.context, knobs=config.planner, cost_model=model, shadow=config.shadow,
                       epoch_retirement=config.ablation.epoch_retirement,
                       online_calibration=config.cost_model.online_calibration,
-                      events=EventLog(state_dir / "events.jsonl", config_hash=config.config_hash,
+                      events=EventLog(state_dir / "events.jsonl",
                                       engine_kind=config.engine.kind))

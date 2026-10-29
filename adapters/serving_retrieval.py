@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import time
 
-from adapters.mtrag import OnlineMessage, OnlineTurn
-from adapters.query_resolution import snapshot_context
+from controller.schema import OnlineMessage, OnlineTurn
+from adapters.conversation import snapshot_context
 from adapters.retrieval import bind_corpus_context, run_retrieval_worker, to_evidence
 from controller.service import EvidenceSelection
 

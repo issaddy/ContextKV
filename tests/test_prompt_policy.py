@@ -3,9 +3,9 @@ from dataclasses import replace
 import pytest
 
 from controller.candidates import CandidatePolicy
-from controller.cli import main
+from bench.run_sessions import main
 from controller.evidence import make_evidence
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from controller.planner import PlannerKnobs
 from controller.service import Controller
 from controller.session_store import SessionStore
@@ -44,7 +44,7 @@ async def test_prompt_change_rebuilds_even_under_append_policy(tmp_path):
 
 @pytest.mark.parametrize("use_file", (False, True))
 def test_cli_prompt_override_retains_exact_content_and_config_provenance(tmp_path, monkeypatch, use_file):
-    from controller import cli
+    from bench import run_sessions as cli
     text = "Custom prompt, with exact line endings.\r\nSecond line.\r\n"
     prompt = tmp_path / "prompt.txt"
     prompt.write_text(text)
@@ -56,4 +56,4 @@ def test_cli_prompt_override_retains_exact_content_and_config_provenance(tmp_pat
     option = ["--system-prompt-file", str(prompt)] if use_file else ["--system-prompt", text]
     main([*option, "demo"])
     assert captured[0].context.system_prompt == text
-    assert captured[0].config_hash != replace(captured[0], context=CandidatePolicy()).config_hash
+    assert captured[0].context.system_prompt != CandidatePolicy().system_prompt

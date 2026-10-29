@@ -434,3 +434,14 @@ def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSp
     if rendered_text is not None:
         verify_rendered_evidence(messages, spans, rendered_text)
     return frozenset(visible)
+
+
+def candidate_request(candidate, max_new_tokens):
+    """Use exactly the required IDs, including an empty constrained allowlist.
+
+    An empty tuple forbids reserved citation IDs; None disables the grammar.
+    Warmup requests intentionally do not use this answer-generation interface.
+    """
+    return {"input_ids": candidate.input_ids, "max_new_tokens": max_new_tokens,
+            "citation_ids": tuple(ref for ref, key in candidate.reference_map
+                                  if key in candidate.required_blocks)}

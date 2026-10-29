@@ -11,7 +11,7 @@ from pathlib import Path
 from threading import Lock
 import time
 
-from .mtrag import OnlineContext, json_hash
+from controller.schema import OnlineContext
 from .query_views import correction_query_mode, user_topic_manifest, user_topic_view
 from .retrieval import deterministic_top_k, rerank_document, retrieval_query
 
@@ -157,14 +157,12 @@ class LocalBGE:
         self.max_length = max_length if max_length is not None else (512 if reranker else 8192)
         metadata = None
         if query_adapter_path is not None:
-            from hashlib import sha256
             from adapters.dialogue_query import load_query_adapter
             from peft import PeftModel
             metadata = load_query_adapter(query_adapter_path, {
                 "model_id": ENCODER_ID, "revision": ENCODER_REVISION,
                 "max_length": self.max_length,
-                "pooling": "CLS then L2 normalization; BGE-M3 needs no query instruction"},
-                base_config_sha256=sha256((Path(model_path)/"config.json").read_bytes()).hexdigest())
+                "pooling": "CLS then L2 normalization; BGE-M3 needs no query instruction"})
         self.tokenizer = AutoTokenizer.from_pretrained(str(model_path), local_files_only=True)
         loader = AutoModelForSequenceClassification if reranker else AutoModel
         self.model = loader.from_pretrained(str(model_path), local_files_only=True)
@@ -266,7 +264,6 @@ class DenseIndex:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=False)
         manifest = {"schema_version": 1, "status": "building", "corpus_snapshot_id": corpus_snapshot_id,
-            "corpus_sha256": json_hash([asdict(c) for c in contexts]),
             "passages": len(contexts), "encoder": encoder.manifest,
             "search": "exact normalized inner product", "passage_order": "ascending_document_id"}
         target = directory/"manifest.json"
@@ -295,6 +292,7 @@ class DenseIndex:
         import numpy as np
         directory = Path(directory)
         manifest = json.loads((directory/"manifest.json").read_text())
+        manifest.pop("corpus_sha256", None)
         if manifest["status"] != "complete":
             raise ValueError("dense index build has not completed")
         contexts = [OnlineContext(**json.loads(line)) for line in (directory/"passages.jsonl").read_text().splitlines() if line]
@@ -387,7 +385,7 @@ def search_variants(query, sparse, dense, encoder, reranker=None, *, candidate_k
     """Return reusable stage outputs; no qrels or generated answer arguments."""
     if candidate_k < 5 or rerank_k < 5:
         raise ValueError("candidate/rerank budgets must cover the final top five")
-    if dense is not None and sparse.manifest["corpus_sha256"] != dense.manifest["corpus_sha256"]:
+    if dense is not None and sparse.manifest["corpus_snapshot_id"] != dense.manifest["corpus_snapshot_id"]:
         raise ValueError("sparse and dense stages must use the same original corpus")
     started = time.perf_counter()
     sparse_rows = sparse.retrieve([query], top_k=candidate_k)
@@ -619,7 +617,7 @@ class HybridRetriever:
             raise ValueError("literal dialogue retrieval does not use a resolver")
         if stage == "hybrid_rerank" and reranker is None:
             raise ValueError("hybrid_rerank requires a loaded reranker")
-        if sparse.manifest["corpus_sha256"] != dense.manifest["corpus_sha256"]:
+        if sparse.manifest["corpus_snapshot_id"] != dense.manifest["corpus_snapshot_id"]:
             raise ValueError("sparse and dense stages must use the same original corpus")
         self.sparse, self.dense, self.encoder, self.reranker = sparse, dense, encoder, reranker
         self.corpus_snapshot_id = sparse.corpus_snapshot_id

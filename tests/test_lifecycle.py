@@ -6,7 +6,7 @@ import pytest
 from controller.candidates import CandidatePolicy
 from controller.engine_client import EngineError, UnknownOutcomeError
 from controller.evidence import make_evidence
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from controller.planner import PlannerKnobs
 from controller.schema import TurnRecord
 from controller.service import ContextOverflow, Controller

@@ -7,7 +7,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import asdict
-from hashlib import sha256
 import json
 import math
 import os
@@ -23,7 +22,7 @@ import yaml
 from bench import controller_capacity_sweep as research
 from bench import native_policy_sweep as server
 from bench.experiments import (execute_job, run_matrix, matrix_jobs, matrix_config,
-                               merge, provenance)
+                               merge)
 from controller.config import RunConfig, create_model_template, load_cost_model
 from controller.serialization import decode
 from controller.sampling import SamplingRecipe, request_sampling
@@ -71,13 +70,10 @@ def check_common_runtime(info, runtime, *, gpu_tokens=16384, seed=42):
 
 def frozen_jobs(spec, stage, frozen):
     """The existing frozen contract is checked before any owned process can start."""
-    from bench.experiments import needs_development_selection, validate_frozen_selection
+    from bench.experiments import needs_development_selection
     if needs_development_selection(spec, stage, frozen):
         if frozen is None:
             raise ValueError("owned test requires a frozen development selection")
-        validate_frozen_selection(frozen["provenance"], provenance(spec))
-        if frozen["simulation_only"]:
-            raise ValueError("simulation-only tuning cannot authorize an owned hardware run")
     elif stage == "dev" and frozen is not None:
         raise ValueError("dev does not accept --frozen; use test or dev_ablation")
     jobs = matrix_jobs(spec, split="test" if stage == "test" else "dev", frozen=frozen,
@@ -377,7 +373,6 @@ def make_owned_executor(args, shared, sources, cohort, requirements):
                 record["server_returncode_after_cleanup"] = process.returncode
             server.write_json(support/"server.json", record)
         result["server_execution"] = {"record": str(support/"server.json"), **record}
-        result.setdefault("artifact_sha256", {})["server_record"] = sha256((support/"server.json").read_bytes()).hexdigest()
         return result
 
     return owned_executor

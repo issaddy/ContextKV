@@ -291,9 +291,9 @@ def test_owned_cost_preflight_rejects_cross_recipe_before_generation(tmp_path):
 ])
 def test_offline_rescore_cannot_relabel_outcomes_with_new_recipe(tmp_path, monkeypatch, source_config, requested):
     from argparse import Namespace
-    from controller.generation import GenerationProtocol
+    from controller.config import GenerationProtocol
     import profiling.decision_pairs as module
-    frozen = {"cases_sha256": "same-frozen-inputs"}
+    frozen = {"source_run_id": "same-source-run"}
     monkeypatch.setattr(module, "load_frozen", lambda _: ([], frozen))
     source, config, output = tmp_path / "pairs.jsonl", tmp_path / "config.json", tmp_path / "out.jsonl"
     source.with_suffix(".manifest.json").write_text(json.dumps({

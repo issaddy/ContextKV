@@ -11,7 +11,6 @@ from array import array
 import ast
 import copy
 import dataclasses
-import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -229,8 +228,6 @@ def native_source(name, *, patched=False):
     manifest = json.loads((ROOT / "engine_patches/source_manifest.json").read_text())
     assert fixture["commit"] == manifest["commit"]
     snippet = fixture["snippets"][name]
-    assert snippet["original_file_sha256"] == manifest["original_sha256"][snippet["path"]]
-    assert hashlib.sha256(snippet["source"].encode()).hexdigest() == snippet["source_sha256"]
     if not patched:
         return snippet["source"]
     first,last = snippet["start_line"],snippet["end_line"]

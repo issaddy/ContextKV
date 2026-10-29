@@ -6,7 +6,7 @@ import pytest
 from controller.candidates import build_candidates
 from controller.events import EventLog
 from controller.evidence import make_evidence
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from controller.schema import SessionSnapshot
 from controller.service import Controller
 from controller.session_store import SessionStore, load_record

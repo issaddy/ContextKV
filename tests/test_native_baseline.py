@@ -89,7 +89,7 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(prompt,bytes(result.input_ids).decode())
 
     async def test_native_and_controller_do_not_guess_revisit_scope_without_interpretation(self):
-        from adapters.mtrag import OnlineContext, OnlineMessage, OnlineTurn
+        from controller.schema import OnlineContext, OnlineMessage, OnlineTurn
         from bench.native_baseline import resolve_context_policy
         policy = resolve_context_policy(argparse.Namespace(context_policy=CandidatePolicy(
             reference_prefix_length=6)))
@@ -376,12 +376,12 @@ def test_native_cli_prompt_file_preserves_body_in_policy_and_workload(tmp_path,m
 
 
 def test_controller_cli_failure_is_nonzero_and_keeps_report(tmp_path):
-    from controller.cli import main
+    from bench.run_sessions import main
     config = tmp_path/"small.yaml"
     config.write_text("context:\n  max_total_model_tokens: 200\n  max_new_tokens: 64\n")
     output = tmp_path/"failed-controller"
     with pytest.raises(SystemExit) as caught:
-        main(["--config",str(config), "--state-dir",str(output), "bench",str(FIXTURE),
+        main(["--config",str(config), "--state-dir",str(output), "run",str(FIXTURE),
               "--domain","all", "--limit-sessions","1"])
     assert caught.value.code == 1
     report = json.loads(next(output.glob("benchmark-*.json")).read_text())["report"]

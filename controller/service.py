@@ -14,16 +14,14 @@ from weakref import WeakValueDictionary
 
 from .candidates import CandidatePolicy, build_candidates
 from .cost_model import CostModel
-from .engine_client import Engine, EngineError, EngineInfo, PrepareAck
-from .epoch import EpochCoordinator
+from .engine_client import Engine, EngineError, EngineInfo, PrepareAck, UnknownOutcomeError
 from .events import EventLog
 from .planner import PlannerKnobs, choose_plan
 from .schema import (ClientTiming, CompletionReceipt, CostEstimate, EvidenceBlock, EvidenceKey,
                      EvidenceSpan, GenerationResult, NoFeasiblePlan, QueryContext, SessionSnapshot, TurnRecord)
 from .serialization import dumps
-from .generation import candidate_request
 from .session_store import (Attempt, IdempotencyConflict, PendingAttempt, SessionStore, StoreError)
-from .templates import ByteTemplate
+from .templates import ByteTemplate, candidate_request
 
 
 class ContextOverflow(ValueError):
@@ -84,7 +82,7 @@ class Controller:
         self.knobs = knobs or PlannerKnobs()
         self.cost_model = cost_model or CostModel(max_new_tokens=self.policy.max_new_tokens)
         self.events = events or EventLog()
-        self.epochs = EpochCoordinator(store, engine, self.events)
+        self._retire_lock = asyncio.Lock()
         self.shadow = shadow
         self.epoch_retirement = epoch_retirement
         self.online_calibration = online_calibration
@@ -104,6 +102,35 @@ class Controller:
             self._locks[session_id] = lock
         return lock
 
+    async def _flush_retirements(self, session_id: str | None = None) -> int:
+        acknowledged = 0
+        async with self._retire_lock:
+            for op in self.store.outbox(session_id):
+                self.events.emit("epoch_retire_requested", operation=op)
+                try:
+                    ack = await self.engine.retire(op.engine_session_id, op.expected_generation,
+                                                   op.operation_id, op.engine_restart_id, op.reason)
+                    if (ack.engine_session_id, ack.session_generation, ack.engine_restart_id, ack.operation_id) != (
+                            op.engine_session_id, op.expected_generation, op.engine_restart_id, op.operation_id):
+                        raise EngineError("RETIRE_ACK_MISMATCH")
+                    if not ack.acknowledged or ack.state != "RETIRED":
+                        raise EngineError("RETIRE_PENDING")
+                    self.store.ack_retire(op.operation_id)
+                    self.events.emit("epoch_retire_acked", operation=op, acknowledgement=ack,
+                                     physical_free_tokens=0)
+                    acknowledged += 1
+                except EngineError as exc:
+                    if exc.code == "STALE_RESTART":
+                        self.store.ack_retire(op.operation_id)
+                        self.events.emit("epoch_retire_acked", operation=op, reason="engine_restart_invalidated_reference", physical_free_tokens=0)
+                        acknowledged += 1
+                    elif isinstance(exc, UnknownOutcomeError) or exc.code == "RETIRE_PENDING":
+                        self.store.retire_failed(op.operation_id, str(exc))
+                        self.events.emit("epoch_retire_retry", operation=op, error=str(exc))
+                    else:
+                        raise
+        return acknowledged
+
     def _retire_background(self):
         self._retire_requested = True
         if self._retire_task is not None:
@@ -122,7 +149,7 @@ class Controller:
         # commit during flush still triggers a fresh durable-outbox snapshot.
         while self._retire_requested:
             self._retire_requested = False
-            await self.epochs.flush()
+            await self._flush_retirements()
 
     @property
     def retirement_error(self) -> str | None:
@@ -143,7 +170,7 @@ class Controller:
             finally:
                 if task.done() and self._retire_task is task:
                     self._retire_task = None
-        await self.epochs.flush()
+        await self._flush_retirements()
 
     async def aclose(self):
         try:
@@ -407,7 +434,7 @@ class Controller:
                 if not abandon:
                     raise PendingAttempt("Stored result is invalid; explicit abandonment required")
                 self.store.fail_attempt(attempt.attempt_id, "invalid_completed_result", force_recovery=True)
-                await self.epochs.flush()
+                await self._flush_retirements()
                 return None
             committed = self.store.commit_turn_and_outbox(attempt.attempt_id)
             self.cost_model.observe_output(len(attempt.result.output_ids))
@@ -426,7 +453,7 @@ class Controller:
                     if exc.code != "STALE_RESTART":
                         raise
             self.store.fail_attempt(attempt.attempt_id, "explicit_pre_submit_abandonment")
-            await self.epochs.flush()
+            await self._flush_retirements()
             return None
         try:
             status = await self.engine.status(engine_session_id=attempt.epoch.engine_session_id,
@@ -445,10 +472,10 @@ class Controller:
         if not abandon and status.state not in ("FAILED", "CANCELLED", "RETIRED", "REJECTED"):
             raise PendingAttempt("Completed result is unavailable; explicit abandonment required")
         self.store.fail_attempt(attempt.attempt_id, f"terminal_engine_state:{status.state}", force_recovery=True)
-        await self.epochs.flush()
+        await self._flush_retirements()
         return None
 
     async def close_session(self, session_id: str):
         async with self._lock(session_id):
             self.store.close_session(session_id)
-        await self.epochs.flush(session_id)
+        await self._flush_retirements(session_id)

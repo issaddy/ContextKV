@@ -6,9 +6,9 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from engine_patches.contextkv_runtime import ContextKVRuntime, ContextKVError
-from engine_patches.lifecycle_probe import LifecycleProbe
+from profiling.lifecycle_probe import LifecycleProbe
 from test_engine import FakeNativeCache
 
 

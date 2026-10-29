@@ -403,3 +403,56 @@ SelectedPlan = Plan
 @dataclass(frozen=True)
 class NoFeasiblePlan:
     reason: str = "shared_context_policy_overflow"
+
+
+@dataclass(frozen=True)
+class OnlineMessage:
+    speaker: str
+    text: str
+
+    @property
+    def role(self) -> str:
+        return "user" if self.speaker == "user" else "assistant"
+
+    @property
+    def content(self) -> str:
+        return self.text
+
+@dataclass(frozen=True)
+class OnlineContext:
+    document_id: str
+    text: str
+    source: str = ""
+    title: str = ""
+    score: float | None = None
+
+    @property
+    def content_sha256(self) -> str:
+        from .evidence import content_hash
+        return content_hash(self.text)
+
+@dataclass(frozen=True)
+class OnlineTurn:
+    conversation_id: str
+    task_id: str
+    turn: int
+    collection: str
+    query: str
+    history: tuple[OnlineMessage, ...]
+    contexts: tuple[OnlineContext, ...]
+    protocol: str
+    query_context: QueryContext | None = None
+    supporting_contexts: tuple[OnlineContext, ...] = ()
+    retrieval_contexts: tuple[OnlineContext, ...] | None = None
+
+    @property
+    def question(self) -> str:
+        return self.query
+
+    @property
+    def user_questions(self) -> tuple[str, ...]:
+        return tuple(x.text for x in self.history if x.speaker == "user") + (self.query,)
+
+    @property
+    def branch_reason(self) -> str | None:
+        return "reference_history_sync" if self.protocol == "P1" and self.history else None

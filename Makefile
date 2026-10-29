@@ -10,7 +10,7 @@ lint:
 	uv run ruff check controller adapters bench profiling tests scripts engine_patches
 
 demo:
-	uv run contextkv --config configs/demo.yaml demo
+	uv run python -m bench.run_sessions --config configs/demo.yaml demo
 
 serve:
 	uv run contextkv --config configs/qwen3_32b_cost.yaml serve

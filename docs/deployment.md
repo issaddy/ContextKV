@@ -29,7 +29,7 @@ SGLANG_HICACHE_TMA_TRANSFER=0 bash scripts/launch_sglang.sh \
 在另一终端使用同一环境：
 
 ```bash
-python -m engine_patches.smoke --config configs/qwen3_32b_scope.example.yaml \
+python -m profiling.smoke --config configs/qwen3_32b_scope.example.yaml \
   --report runs/qwen3-32b-smoke.json
 python -m controller.cli --config configs/qwen3_32b_cost.yaml serve
 ```

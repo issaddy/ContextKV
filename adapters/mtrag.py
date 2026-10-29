@@ -6,10 +6,10 @@ never copy official assistant messages or annotations into online objects.
 """
 from __future__ import annotations
 
-from controller.schema import QueryContext
+from controller.schema import OnlineMessage, OnlineTurn
+from adapters.retrieval import clean_context
 
 from collections import defaultdict
-from dataclasses import dataclass
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -23,60 +23,6 @@ MTRAG_UN_URL = f"https://raw.githubusercontent.com/IBM/mt-rag-benchmark/{DATASET
 MTRAG_UN_SHA256 = "68053f709c928570718fd2c88455eccf974746f5bfa2206d7fd39b969acb21d4"
 CLOUD_COLLECTION = "mt-rag-ibmcloud-elser-512-100-20240502"
 Protocol = Literal["P1", "P2", "P3"]
-
-
-@dataclass(frozen=True)
-class OnlineMessage:
-    speaker: str
-    text: str
-
-    @property
-    def role(self) -> str:
-        return "user" if self.speaker == "user" else "assistant"
-
-    @property
-    def content(self) -> str:
-        return self.text
-
-
-@dataclass(frozen=True)
-class OnlineContext:
-    document_id: str
-    text: str
-    source: str = ""
-    title: str = ""
-    score: float | None = None
-
-    @property
-    def content_sha256(self) -> str:
-        return sha256(self.text.encode("utf-8")).hexdigest()
-
-
-@dataclass(frozen=True)
-class OnlineTurn:
-    conversation_id: str
-    task_id: str
-    turn: int
-    collection: str
-    query: str
-    history: tuple[OnlineMessage, ...]
-    contexts: tuple[OnlineContext, ...]
-    protocol: Protocol
-    query_context: QueryContext | None = None
-    supporting_contexts: tuple[OnlineContext, ...] = ()
-    retrieval_contexts: tuple[OnlineContext, ...] | None = None
-
-    @property
-    def question(self) -> str:
-        return self.query
-
-    @property
-    def user_questions(self) -> tuple[str, ...]:
-        return tuple(x.text for x in self.history if x.speaker == "user") + (self.query,)
-
-    @property
-    def branch_reason(self) -> str | None:
-        return "reference_history_sync" if self.protocol == "P1" and self.history else None
 
 
 def load_rows(path: str | Path) -> list[dict[str, Any]]:
@@ -126,17 +72,6 @@ def _message(message: Mapping[str, Any] | OnlineMessage) -> OnlineMessage:
     if speaker not in {"user", "assistant"}:
         raise ValueError(f"unsupported MTRAG speaker {speaker!r}")
     return OnlineMessage(speaker, str(message.get("text", message.get("content", ""))))
-
-
-def clean_context(context: Mapping[str, Any] | OnlineContext) -> OnlineContext:
-    if isinstance(context, OnlineContext):
-        return context
-    score = context.get("score")
-    metadata = {**context.get("metadata", {}), **context}
-    return OnlineContext(document_id=str(context["document_id"]), text=str(context["text"]),
-                         source=str(metadata.get("source_uri") or metadata.get("source") or metadata.get("url") or ""),
-                         title=str(metadata.get("title") or ""),
-                         score=float(score) if score is not None else None)
 
 
 def online_turn(row: Mapping[str, Any], protocol: Protocol = "P2",

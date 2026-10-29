@@ -9,7 +9,7 @@ import pytest
 
 from controller.engine_client import (EngineError, SGLangEngineClient, UnknownOutcomeError,
                                       SGLANG_COMMIT, token_hash)
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from controller.schema import ConfigFingerprint, NativePrefixMatch, NativeRequestSummary, PromptCandidate
 from engine_patches.contextkv_runtime import ContextKVError, ContextKVRuntime
 
@@ -380,7 +380,7 @@ def test_native_cache_reset_rotates_restart_before_reusing_generation_values():
 
 def test_durable_outbox_can_acknowledge_expired_retirement_metadata(tmp_path):
     from controller.engine_client import RetireAck
-    from controller.epoch import EpochCoordinator
+    from controller.service import Controller
     from controller.events import EventLog
     from controller.schema import ContextEpoch
     from controller.session_store import SessionStore
@@ -404,7 +404,8 @@ def test_durable_outbox_can_acknowledge_expired_retirement_metadata(tmp_path):
         try:
             assert len(store.outbox())==1 and 'old' not in runtime.epochs
             releases = list(cache.released)
-            assert await EpochCoordinator(store,Engine(),EventLog()).flush()==1
+            await Controller(store, Engine(), events=EventLog()).drain()
+            assert not store.outbox()
             assert not store.outbox() and cache.released==releases
         finally:
             store.close()

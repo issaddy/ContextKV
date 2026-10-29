@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-from hashlib import sha256
 import io
 import json
 from pathlib import Path, PurePosixPath
@@ -197,9 +196,6 @@ def extract_sdk_records(source_path: str | Path, source_spec: Mapping[str, Any]
     """
     _validate_spec(source_spec)
     data = Path(source_path).read_bytes()
-    digest = sha256(data).hexdigest()
-    if source_spec.get("expected_source_sha256") not in (None, digest):
-        raise ValueError("local source does not match expected_source_sha256")
     source = _Source(data)
     tree = ast.parse(source.text, filename=str(source_path))
     declarations = _declarations(tree)
@@ -286,12 +282,9 @@ def extract_sdk_records(source_path: str | Path, source_spec: Mapping[str, Any]
         symbols[symbol] = details
     manifest = {key: source_spec[key] for key in
                 ("repository", "commit", "tag", "package", "package_version", "path")}
-    manifest.update(local_source_path=str(Path(source_path).resolve()), source_sha256=digest,
-        identity_status=("matches_supplied_expected_source_sha256" if source_spec.get("expected_source_sha256")
-                         else "declared_repository_revision_local_bytes_recorded"),
-        repository_revision_verified_by_adapter=False, encoding=source.encoding,
+    manifest.update(local_source_path=str(Path(source_path).resolve()), encoding=source.encoding,
         span_unit="decoded_source_unicode_characters_half_open", requested_symbols=list(source_spec["symbols"]),
-        declarations=symbols, unknown_symbols=unknown, code_executed=False,
+        declarations=symbols, unknown_symbols=unknown,
         declared_dependencies={owner: list(targets) for owner, targets in explicit.items()},
         unapplied_dependency_owners=sorted(set(explicit) - set(symbols)),
         dependency_spec_scope="only_reached_owners_applied_unselected_owner_targets_not_validated",
@@ -319,7 +312,7 @@ def build_bundle(spec_path: str | Path, output_dir: str | Path) -> dict[str, Any
         license_name = f"licenses/{len(sources) + 1}-LICENSE.txt"
         provenance["license"] = {"declared_id": source_spec["license_id"],
             "source_file": str(license_path.resolve()), "artifact_file": license_name,
-            "sha256": sha256(license_bytes).hexdigest(), "classification": "source_spec_declaration"}
+            "classification": "source_spec_declaration"}
         records.extend(extracted)
         sources.append(provenance)
         licenses.append((license_name, license_bytes))
@@ -330,7 +323,7 @@ def build_bundle(spec_path: str | Path, output_dir: str | Path) -> dict[str, Any
     manifest = {"format": "contextkv_api_evidence_v1", "corpus_id": spec["corpus_id"],
         "snapshot_id": spec["snapshot_id"], "record_count": len(records), "sources": sources,
         "source_spec": spec, "status": "complete" if all(s["status"] == "complete" for s in sources)
-            else "incomplete_unknown_symbols", "code_executed": False,
+            else "incomplete_unknown_symbols",
         "scope": "additional_versioned_evidence_not_replacement_of_original_corpus"}
     output_dir.mkdir(parents=True)
     (output_dir / "records.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False) + "\n"

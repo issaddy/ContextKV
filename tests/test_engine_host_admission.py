@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from controller.engine_client import SGLangEngineClient
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from controller.planner import PlannerKnobs
 from controller.schema import ConfigFingerprint
 from controller.service import Controller

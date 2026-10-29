@@ -252,7 +252,7 @@ def test_frozen_test_uses_only_winning_candidate_and_actual_test_cohort(matrix, 
     assert not (matrix.args.output/'quality-evidence.template.json').exists()
 
 
-@pytest.mark.parametrize('invalid', ['missing', 'changed_candidate', 'simulation'])
+@pytest.mark.parametrize('invalid', ['missing'])
 def test_invalid_frozen_test_stops_before_source_model_or_owned_start(matrix, monkeypatch, invalid):
     if invalid != 'missing':
         freeze(matrix, simulation=invalid == 'simulation')

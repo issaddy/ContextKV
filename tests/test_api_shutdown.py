@@ -6,7 +6,7 @@ from threading import Event
 import httpx
 import pytest
 
-from adapters.mtrag import OnlineContext
+from controller.schema import OnlineContext
 from adapters.serving_retrieval import ServingRetriever
 from controller.api import create_app
 from controller.config import RunConfig, create_controller

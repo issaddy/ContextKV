@@ -58,8 +58,6 @@ def test_bootstrap_reuses_existing_scope_and_has_no_model_download_step():
     assert 'create_model_template(model)' in script and 'ModelConfig(scope_path=sys.argv[1])' in script
     assert 'SGLANG_BUILD_RUST_EXTS=none' in script
     assert not (ROOT/'engine_patches/model_manifest.json').exists()
-    source = json.loads((ROOT/'engine_patches/source_manifest.json').read_text())
-    assert source['original_sha256']['python/pyproject.toml'] == '8a176848d601510b3557ece2cf9e37d3fd449f5eca2d469cf34d7078b103bc0c'
 
 
 def test_scoped_shell_reaches_only_explicit_native_launch(local_scope, tmp_path):

@@ -3,7 +3,7 @@ import json
 import pytest
 
 from adapters.corpus import CorpusIndex
-from adapters.mtrag import OnlineContext, OnlineTurn
+from controller.schema import OnlineContext, OnlineTurn
 from adapters.source_documents import SourceDocuments
 from bench.quality import official_record
 from controller.candidates import build_candidates

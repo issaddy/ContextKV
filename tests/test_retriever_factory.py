@@ -11,7 +11,8 @@ import yaml
 from test_model_scope import local_scope as local_scope
 
 from adapters.hybrid_retrieval import DenseIndex
-from adapters.mtrag import OnlineContext, OnlineSession, load_rows
+from adapters.mtrag import OnlineSession, load_rows
+from controller.schema import OnlineContext
 from adapters.retrieval import BM25SRetriever, load_beir_corpus
 from adapters.retriever_factory import create_retriever, load_retriever_config
 from bench.run_sessions import run_sessions
@@ -127,7 +128,7 @@ async def test_complete_reading_choices_and_conditions_reach_both_candidates_wit
     from adapters.query_selector import CompletionResult
     from adapters.serving_retrieval import ServingRetriever
     from controller.candidates import build_candidates
-    from controller.mock_engine import MockEngine
+    from bench.mock_engine import MockEngine
     from controller.service import Controller
     from controller.session_store import SessionStore
     catalogs=[]
@@ -205,7 +206,7 @@ async def test_complete_reading_choices_and_conditions_reach_both_candidates_wit
 @pytest.mark.asyncio
 async def test_distinct_content_selection_flows_through_serving_and_durable_replay(retriever_config, tmp_path):
     from adapters.serving_retrieval import ServingRetriever
-    from controller.mock_engine import MockEngine
+    from bench.mock_engine import MockEngine
     from controller.service import Controller
     from controller.session_store import SessionStore
 
@@ -330,7 +331,7 @@ def test_conversational_factory_uses_the_same_pipeline_without_a_model_client(re
 async def test_history_projection_commits_once_through_the_serving_pipeline(retriever_config, tmp_path):
     from adapters.serving_retrieval import ServingRetriever
     from controller.evidence import make_evidence
-    from controller.mock_engine import MockEngine
+    from bench.mock_engine import MockEngine
     from controller.service import Controller
     from controller.session_store import SessionStore
     value = yaml.safe_load(retriever_config.read_text())
@@ -368,7 +369,7 @@ async def test_source_window_reaches_both_candidates_and_commits_without_extra_m
     from adapters.corpus import CorpusIndex
     from adapters.serving_retrieval import ServingRetriever
     from controller.candidates import build_candidates
-    from controller.mock_engine import MockEngine
+    from bench.mock_engine import MockEngine
     from controller.service import Controller
     from controller.session_store import SessionStore
     value = yaml.safe_load(retriever_config.read_text())
@@ -420,7 +421,7 @@ async def test_compound_requirements_drive_shared_selection_and_survive_restore(
     from adapters.query_selector import CompletionResult
     from adapters.serving_retrieval import ServingRetriever
     from controller.candidates import build_candidates
-    from controller.mock_engine import MockEngine
+    from bench.mock_engine import MockEngine
     from controller.service import Controller
     from controller.session_store import SessionStore
     completions = []
@@ -627,13 +628,9 @@ def test_dense_stage_does_not_load_or_call_reranker(retriever_config, monkeypatc
     assert retriever.encoder.inputs[-1] == "session-a question 1\nsession-a question 2"
 
 
-
-
-
-
 @pytest.mark.parametrize("fusion", ["single", "current_topic_rrf"])
 def test_optional_user_topic_query_is_shared_with_encoder_reranker_and_manifest(retriever_config, fusion):
-    from adapters.mtrag import OnlineMessage
+    from controller.schema import OnlineMessage
     value = yaml.safe_load(retriever_config.read_text())
     value["query_mode"] = "user_topic"
     value["query_fusion"] = fusion
@@ -669,7 +666,7 @@ def test_optional_user_topic_query_is_shared_with_encoder_reranker_and_manifest(
     ("current", "single", "user_topic"), ("user_topic", "single", "resolved")])
 def test_factory_separates_recall_and_rerank_views_without_changing_generation_input(
         retriever_config, query_mode, fusion, rerank_mode):
-    from adapters.mtrag import OnlineMessage
+    from controller.schema import OnlineMessage
     value = yaml.safe_load(retriever_config.read_text())
     value.update(query_mode=query_mode, query_fusion=fusion, rerank_query_mode=rerank_mode)
     retriever_config.write_text(yaml.safe_dump(value))
@@ -761,7 +758,7 @@ def test_offline_cli_dual_uses_shared_models_then_opens_qrels(retriever_config, 
                                                ("user_topic", "current_topic_rrf")])
 def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retriever_config, tmp_path, monkeypatch, query_mode, fusion, local_scope):
     import bench.native_baseline as native_module
-    import controller.cli as cli
+    import bench.run_sessions as cli
     from controller.templates import ByteTemplate
 
     value = yaml.safe_load(retriever_config.read_text())
@@ -799,7 +796,7 @@ def test_both_real_cli_paths_share_retriever_and_persist_generated_history(retri
         common += ["--evidence-corpus", str(corpus)]
     try:
         native_module.main(common+["--baseline", "B0", "--run-config",str(run_config),"--engine-manifest", str(engine), "--output", str(native_dir)])
-        cli.main(["--state-dir", str(controller_dir), "bench"]+common)
+        cli.main(["--config", "configs/demo.yaml", "--state-dir", str(controller_dir), "run"]+common)
     finally:
         asyncio.run(http.aclose())
     native = json.loads((native_dir/"native-B0-hybrid-test.json").read_text())
@@ -865,7 +862,7 @@ async def test_joint_conversational_turn_keeps_state_and_uses_one_call_per_turn(
     from adapters.corpus import CorpusIndex
     from adapters.query_selector import CompletionResult
     from adapters.serving_retrieval import ServingRetriever
-    from controller.mock_engine import MockEngine
+    from bench.mock_engine import MockEngine
     from controller.schema import QueryContext,TaskFrame
     from controller.service import Controller
     from controller.session_store import SessionStore

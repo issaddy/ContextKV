@@ -9,11 +9,11 @@ import pytest
 from adapters.corpus import CorpusIndex
 from adapters.conversation import ConversationResolver
 from adapters.evidence_selection import EvidenceSelector, reading_catalog
-from adapters.mtrag import OnlineContext, OnlineTurn
-from adapters.query_resolution import PriorContext
+from controller.schema import OnlineContext, OnlineTurn
+from adapters.conversation import PriorContext
 from adapters.query_selector import CompletionResult
 from controller.candidates import build_candidates
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from controller.schema import QueryContext, TaskFrame
 from controller.service import Controller
 from controller.session_store import SessionStore
@@ -39,7 +39,6 @@ class Client:
                      'requirements':['download package','installation procedure']},
             'selected_ids':selected}
         return CompletionResult('completed',json.dumps(value),'stop',100)
-
 
 
 def fixture_data():
@@ -145,7 +144,7 @@ def test_selection_receives_declared_version_and_section_for_sources_and_depende
     contexts = corpus.contextualize(tuple(OnlineContext(r['_id'],r['text']) for r in rows if r['_id']!='condition'))
     _,_,intent,turn = fixture_data()
     client = Client()
-    dense = SimpleNamespace(manifest={'corpus_sha256':'same'},by_id={c.document_id:c for c in contexts},
+    dense = SimpleNamespace(manifest={'corpus_snapshot_id':'same'},by_id={c.document_id:c for c in contexts},
         search=lambda *args,**kwargs:contexts)
     sparse = SimpleNamespace(manifest=dense.manifest,corpus_snapshot_id=corpus.snapshot_id)
     resolver = ConversationResolver(client)
@@ -197,7 +196,7 @@ def test_semantic_http_wait_does_not_hold_the_local_ranking_lock():
             from dataclasses import asdict
             view={'text':turn.query,'context':asdict(replace(intent,task_frame=TaskFrame(task=turn.query)))}
             return fallback,view,{'status':'selected'}
-    dense=SimpleNamespace(manifest={'corpus_sha256':'same'},by_id={c.document_id:c for c in contexts},
+    dense=SimpleNamespace(manifest={'corpus_snapshot_id':'same'},by_id={c.document_id:c for c in contexts},
         search=lambda *args,**kwargs:contexts)
     sparse=SimpleNamespace(manifest=dense.manifest,corpus_snapshot_id='v4')
     retriever=HybridRetriever(sparse,dense,object(),stage='dense',query_mode='conversational',
@@ -215,7 +214,7 @@ def test_semantic_http_wait_does_not_hold_the_local_ranking_lock():
 
 
 def test_joint_selection_reads_actual_dialogue_before_deciding_scope_and_accepts_partial_support():
-    from adapters.mtrag import OnlineMessage
+    from controller.schema import OnlineMessage
     _,contexts,intent,request=fixture_data()
     history=tuple(m for n in range(1,8) for m in
         (OnlineMessage('user',f'Question {n}'),OnlineMessage('assistant',f'Actual answer {n}\nWith object Atlas.')))

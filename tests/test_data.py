@@ -9,8 +9,8 @@ import unittest
 from unittest.mock import patch
 from hashlib import sha256
 
-from adapters.mtrag import (OnlineMessage, OnlineSession, json_hash, load_rows,
-                            online_turn, profile_rows, stratified_split, dataset_identity, DATASET_COMMIT)
+from adapters.mtrag import OnlineSession, json_hash, load_rows, online_turn, profile_rows, stratified_split, dataset_identity, DATASET_COMMIT
+from controller.schema import OnlineMessage
 from adapters.retrieval import (BM25SRetriever, fixed_retrieve, load_beir_corpus,
                                 retrieval_query, to_evidence)
 from bench.run_sessions import run_sessions

@@ -10,7 +10,7 @@ curl -fL https://raw.githubusercontent.com/MozerWang/Loong/6d2115b8b48a3d19412cc
 curl -fL https://alibaba-research.oss-cn-beijing.aliyuncs.com/loong/doc.zip -o data/loong/source/doc.zip
 ```
 
-转换器校验问题文件SHA256 `cd640d3ca0e41d3638153506e3caee109850b30de0a4e829862232a2b6302da8`和资料归档SHA256 `ceb75be50f7f114f231e3a8069b51457745ea7db151c017f00de33d0789ab4cc`。归档直接读取，无需解压；其未设置UTF-8标记的中文ZIP文件名按实际UTF-8编码处理。
+转换器直接读取所声明的问题文件与资料归档，无需解压；中文ZIP文件名按实际UTF-8编码处理。
 
 ```bash
 python -m adapters.loong --questions data/loong/source/loong.jsonl \

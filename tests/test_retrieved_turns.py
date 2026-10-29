@@ -7,7 +7,7 @@ import pytest
 
 from controller.engine_client import UnknownOutcomeError
 from controller.evidence import make_evidence
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from controller import service as service_module
 from controller.service import Controller, EvidenceSelection
 from controller.session_store import IdempotencyConflict, PendingAttempt, SessionStore, StoreError

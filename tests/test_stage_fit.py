@@ -1,6 +1,5 @@
 from copy import deepcopy
 from dataclasses import asdict
-from hashlib import sha256
 import json
 
 import pytest
@@ -69,7 +68,7 @@ def make_base(tmp_path,report=None):
     manifest={"run_id":"run","engine":{"fingerprint":asdict(ConfigFingerprint()),"cache_config_hash":"cache"}}
     metadata={"profile_manifest":manifest}
     if report:
-        metadata["measurement_provenance"]={"files":{"development_report":{"sha256":sha256(report.read_bytes()).hexdigest()}}}
+        metadata["measurement_provenance"]={"files":{"development_report":{"path":str(report.resolve())}}}
     base=tmp_path/"base.json"
     CostModel(default_output_tokens=33,p90_output_tokens=55).save(base,metadata=metadata)
     return base,{"profile_manifest":manifest}
@@ -90,7 +89,7 @@ def test_artifact_keeps_decode_prior_and_uses_actual_oof_errors_without_cell_gat
     assert artifact["metadata"]["validation"]["metrics"]==validation["metrics"]
 
 
-def test_development_length_distribution_must_match_bound_completed_report(tmp_path):
+def test_development_length_distribution_uses_completed_report(tmp_path):
     report=tmp_path/"dev.json"
     report.write_text(json.dumps({"report":{"turns":[{"status":"success","conversation_id":"s", "result":{"output_tokens":37,"truncated":True}},
                                                         {"status":"failed","conversation_id":"s","result":{"output_tokens":999}}]}}))
@@ -99,7 +98,7 @@ def test_development_length_distribution_must_match_bound_completed_report(tmp_p
     distribution=artifact["stage_model"]["development_output_lengths"]
     assert distribution["lengths"]==[37] and distribution["truncated_outputs"]==1
     report.write_text('{}')
-    with pytest.raises(ValueError,match="already bound"):
+    with pytest.raises(ValueError,match="no completed output lengths"):
         fit_artifact(examples(),provenance,base,development_report=report)
 
 
@@ -123,5 +122,5 @@ def test_refitting_stage_base_preserves_frozen_empirical_prior(tmp_path, supply_
     assert refined["settings"] == first["settings"]
     assert refined["stage_model"]["development_output_lengths"] is not first["stage_model"]["development_output_lengths"]
     report.write_text('{}')
-    with pytest.raises(ValueError, match="already bound"):
+    with pytest.raises(ValueError, match="no completed output lengths"):
         fit_artifact(examples(), provenance, stage_base, development_report=report)

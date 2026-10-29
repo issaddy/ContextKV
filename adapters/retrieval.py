@@ -3,20 +3,29 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, replace
-from hashlib import sha256
 from importlib.metadata import version
 import json
 import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from adapters.mtrag import OnlineContext, OnlineTurn, clean_context, json_hash
+from controller.schema import OnlineContext, OnlineTurn
 
 RETRIEVAL_CONFIG = {"implementation": "bm25s", "method": "lucene", "k1": 1.5,
                     "b": .75, "backend": "numpy", "csc_backend": "numpy",
                     "stopwords": "en", "stemmer": None, "query_user_turns": 3, "top_k": 5,
                     "tie_break": "ascending_passage_id"}
 
+
+def clean_context(context: Mapping[str, Any] | OnlineContext) -> OnlineContext:
+    if isinstance(context, OnlineContext):
+        return context
+    score = context.get("score")
+    metadata = {**context.get("metadata", {}), **context}
+    return OnlineContext(document_id=str(context["document_id"]), text=str(context["text"]),
+                         source=str(metadata.get("source_uri") or metadata.get("source") or metadata.get("url") or ""),
+                         title=str(metadata.get("title") or ""),
+                         score=float(score) if score is not None else None)
 
 def rerank_document(context: OnlineContext) -> str:
     """A scoring view with available source context; the original body is unchanged."""
@@ -113,8 +122,7 @@ class BM25SRetriever:
                               str(corpus[pid].get("title") or "")) for pid in self._ids)
         self.corpus_snapshot_id = corpus_snapshot_id
         self.manifest = {**RETRIEVAL_CONFIG, **self.runtime_versions, "corpus_snapshot_id": corpus_snapshot_id,
-                         "corpus_sha256": json_hash([asdict(c) for c in self._contexts]),
-                         "passage_order_sha256": json_hash(self._ids), "cpu_threads": cpu_threads,
+                         "cpu_threads": cpu_threads,
                          "thread_environment": {k: os.environ[k] for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")}}
         texts = [c.title + "\n" + c.text for c in self._contexts]
         tokens = self._bm25s.tokenize(texts, stopwords="en", stemmer=None, return_ids=False, show_progress=False)
@@ -135,24 +143,19 @@ class BM25SRetriever:
 
     @classmethod
     def load(cls, directory: str | Path, *, cpu_threads: int = 1, mmap: bool = True):
-        """Load the saved index without retokenizing/rebuilding its fixed corpus.
-
-        File digests are checked once at this persistence boundary, never per query.
-        """
+        """Load saved passage metadata and BM25 arrays directly."""
         directory = Path(directory)
         manifest = json.loads((directory / "manifest.json").read_text())
         if any(manifest.get(k) != v for k, v in RETRIEVAL_CONFIG.items()):
             raise ValueError("saved index uses a different retrieval configuration")
-        for name, digest in manifest["files"].items():
-            if sha256((directory / name).read_bytes()).hexdigest() != digest:
-                raise ValueError(f"saved index file changed: {name}")
         result = cls.__new__(cls)
         result._initialize_runtime(cpu_threads)
         result._contexts = tuple(OnlineContext(**json.loads(line)) for line in
                                  (directory / "passages.jsonl").read_text().splitlines() if line)
         result._ids = tuple(c.document_id for c in result._contexts)
         result.corpus_snapshot_id = manifest["corpus_snapshot_id"]
-        result.manifest = {**manifest, "runtime_versions": result.runtime_versions,
+        result.manifest = {**{k: v for k, v in manifest.items() if k not in {"files", "passage_order_sha256", "corpus_sha256"}},
+                           "runtime_versions": result.runtime_versions,
                            "cpu_threads": cpu_threads, "loaded_index": True,
                            "thread_environment": {k: os.environ[k] for k in
                            ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")}}
@@ -182,10 +185,8 @@ class BM25SRetriever:
         directory.mkdir(parents=True, exist_ok=True)
         self._index.save(str(directory / "index"))
         (directory / "passages.jsonl").write_text("\n".join(json.dumps(asdict(c), ensure_ascii=False) for c in self._contexts) + "\n", encoding="utf-8")
-        files = {str(p.relative_to(directory)): sha256(p.read_bytes()).hexdigest()
-                 for p in sorted(directory.rglob("*")) if p.is_file() and p.name != "manifest.json"}
         (directory / "manifest.json").write_text(json.dumps(
-            {**self.manifest, **self.runtime_versions, "files": files}, indent=2), encoding="utf-8")
+            {**self.manifest, **self.runtime_versions}, indent=2), encoding="utf-8")
 
 
 def deterministic_top_k(scores, k: int, np):

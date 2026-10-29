@@ -11,4 +11,4 @@ jobs:
       - run: uv sync --extra retrieval --extra evaluation --locked
       - run: uv run --extra retrieval --extra evaluation pytest -q
       - run: uv run ruff check controller adapters bench profiling tests scripts engine_patches
-      - run: uv run contextkv --config configs/demo.yaml demo
+      - run: uv run python -m bench.run_sessions --config configs/demo.yaml demo

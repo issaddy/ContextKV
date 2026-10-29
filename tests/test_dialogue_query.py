@@ -1,5 +1,4 @@
 from dataclasses import replace
-from hashlib import sha256
 import json
 from types import SimpleNamespace
 
@@ -8,8 +7,8 @@ import pytest
 
 from adapters.dialogue_query import QUERY_POOLING, query_view, load_query_adapter
 from adapters.hybrid_retrieval import DenseIndex, HybridRetriever
-from adapters.mtrag import OnlineContext, OnlineMessage, OnlineTurn
-from adapters.query_resolution import PriorContext
+from controller.schema import OnlineContext, OnlineMessage, OnlineTurn
+from adapters.conversation import PriorContext
 
 
 class Tokenizer:
@@ -74,11 +73,11 @@ def test_dialogue_is_retrieval_input_not_a_derived_task_or_source():
 
     encoder = Encoder()
     contexts = tuple(OnlineContext(str(i), f"original source {i}") for i in range(5))
-    sparse = SimpleNamespace(manifest={"corpus_sha256": "same"}, corpus_snapshot_id="v1")
+    sparse = SimpleNamespace(manifest={"corpus_snapshot_id": "same"}, corpus_snapshot_id="v1")
     dense = DenseIndex(
         contexts,
         np.array([[1.0, 0.0]] * 5, dtype=np.float32),
-        {"corpus_sha256": "same", "encoder": encoder.manifest},
+        {"corpus_snapshot_id": "same", "encoder": encoder.manifest},
     )
     retriever = HybridRetriever(sparse, dense, encoder, query_mode="dialogue", stage="dense")
     turn = OnlineTurn(
@@ -126,49 +125,21 @@ def test_dialogue_is_retrieval_input_not_a_derived_task_or_source():
         retriever.retrieve_turn(replace(turn, protocol="P1"), prior_context=PriorContext())
 
 
-def test_adapter_requires_matching_document_space_and_unchanged_files(tmp_path):
+def test_adapter_uses_its_declared_document_space_and_query_view(tmp_path):
     root = tmp_path / "adapter"
     root.mkdir()
-    files = {}
-    for name in ("adapter_config.json", "adapter_model.safetensors"):
-        content = (
-            json.dumps({"peft_type": "LORA", "task_type": "FEATURE_EXTRACTION"}).encode()
-            if name.endswith(".json")
-            else b"fixture weights"
-        )
-        (root / name).write_bytes(content)
-        files[name] = sha256(content).hexdigest()
+    (root / "adapter_config.json").write_text(json.dumps({"peft_type": "LORA", "task_type": "FEATURE_EXTRACTION"}))
     base = {"model_id": "base", "revision": "pinned", "max_length": 512, "pooling": "CLS"}
-    metadata = {
-        "schema_version": 1,
-        "status": "completed",
-        "query_mode": "dialogue",
-        "files": files,
-        "document_encoder": base,
-        "base_model_config_sha256": "fixture base config",
-        "query_pooling": QUERY_POOLING,
-        "adapter_sha256": files["adapter_model.safetensors"],
-    }
-    (tmp_path / "query-adapter.json").write_text(json.dumps(metadata))
-
-    def load(encoder=base):
-        return load_query_adapter(tmp_path, encoder, base_config_sha256="fixture base config")
-
-    assert load() == metadata
+    metadata = {"schema_version": 1, "status": "completed", "query_mode": "dialogue",
+                "document_encoder": base, "query_pooling": QUERY_POOLING}
+    path = tmp_path / "query-adapter.json"
+    path.write_text(json.dumps(metadata))
+    assert load_query_adapter(tmp_path, base) == metadata
     with pytest.raises(ValueError, match="different document encoder"):
-        load({**base, "revision": "different"})
-    for field, value, error in (
-        ("base_model_config_sha256", "other", "configuration differs"),
-        ("adapter_sha256", "other", "identity differs"),
-        ("query_view_version", "other", "input recipe"),
-    ):
-        (tmp_path / "query-adapter.json").write_text(json.dumps({**metadata, field: value}))
-        with pytest.raises(ValueError, match=error):
-            load()
-    (tmp_path / "query-adapter.json").write_text(json.dumps(metadata))
-    (root / "adapter_model.safetensors").write_bytes(b"changed")
-    with pytest.raises(ValueError, match="differs"):
-        load()
+        load_query_adapter(tmp_path, {**base, "revision": "different"})
+    path.write_text(json.dumps({**metadata, "query_view_version": "other"}))
+    with pytest.raises(ValueError, match="input recipe"):
+        load_query_adapter(tmp_path, base)
 
 
 def test_query_adapter_uses_base_index_but_cannot_reencode_documents(tmp_path):

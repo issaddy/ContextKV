@@ -6,7 +6,7 @@ import pytest
 from adapters.contextpilot import committed_contexts
 from controller.candidates import build_candidates
 from controller.evidence import EvidenceError, EvidencePolicy, make_evidence
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from controller.planner import PlannerKnobs
 from controller.schema import EvidenceSpan, SessionSnapshot
 from controller.serialization import dumps, loads, to_jsonable

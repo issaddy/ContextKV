@@ -6,7 +6,7 @@ from controller.candidates import build_candidates
 from controller.config import load_config
 from controller.cost_model import CostModel
 from controller.evidence import EvidencePolicy, make_evidence
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from controller.planner import PlannerKnobs, choose_plan
 from controller.schema import ExecutionLedger, Message, SessionSnapshot, TurnRecord
 from controller.service import Controller

@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
@@ -32,8 +31,7 @@ def local_scope(tmp_path):
     record = json.loads((ROOT/"configs/model_scopes/qwen3-32b.local.json").read_text())
     directory = tmp_path/"local model"
     directory.mkdir()
-    record.update(model_path=str(directory), shards=1, shard_bytes=4, index_tensor_bytes=4,
-                  source={"kind": "cpu_contract_fixture"})
+    record.update(model_path=str(directory), revision="cpu-qwen-fixture")
     tokenizer = SimpleNamespace(chat_template="CPU template", split_special_tokens=False,
                                 backend_tokenizer=SimpleNamespace(to_str=lambda: '{"fixture":"CPU tokenizer"}'))
     record["tokenizer_hash"] = hashlib.sha256(b'{"fixture":"CPU tokenizer"}').hexdigest()
@@ -56,136 +54,11 @@ def test_actual_qwen3_32b_record_has_explicit_head_dimension():
     large = scopes.load_model_scope(ROOT/"configs/model_scopes/qwen3-32b.local.json")
     record = large.manifest()["record"]
     assert large.identity.startswith("local-snapshot:") and record["hf_revision"] is None
-    assert record["weight_content_verified"] is False and record["config"]["head_dim"] == 128
+    assert record["config"]["head_dim"] == 128
     assert large.context_limit == 40960
     config = large.manifest()["record"]["config"]
     assert config["hidden_size"] // config["num_attention_heads"] == 80
     assert large.identity == "local-snapshot:7442623e99dd0b456628ddc48805a4ea11249ee2ee66484b5d1ab44d2940beb8"
-
-
-def checkpoint_fixture(local_scope, path, payload=b"aaaa"):
-    header = json.dumps({"weight": {"dtype": "U8", "shape": [len(payload)],
-                                     "data_offsets": [0, len(payload)]}}).encode()
-    directory = path/"checkpoint"
-    directory.mkdir(parents=True)
-    raw = len(header).to_bytes(8, "little") + header + payload
-    (directory/"model.safetensors").write_bytes(raw)
-    (directory/"config.json").write_text(json.dumps(local_scope.record["config"]))
-    record = scopes.scope_record_from_checkpoint(model_path=directory, config=local_scope.record["config"],
-        tokenizer_hash=local_scope.fingerprint.tokenizer_hash, template_hash=local_scope.fingerprint.template_hash,
-        index_tensor_bytes=len(payload), weight_files=[{"file": "model.safetensors", "bytes": len(raw),
-            "sha256": hashlib.sha256(raw).hexdigest()}], source={"base_identity": local_scope.scope.identity})
-    scope_path = path/"scope.json"
-    scope_path.write_text(json.dumps(record))
-    scope = scopes.load_model_scope(scope_path)
-    fingerprint = replace(local_scope.fingerprint, model_revision=scope.identity)
-    return SimpleNamespace(path=scope_path, scope=scope, record=record, model_path=directory,
-                           tokenizer=local_scope.tokenizer, fingerprint=fingerprint)
-
-
-def test_published_weight_contents_bind_identity_even_with_equal_size(local_scope, tmp_path):
-    first = checkpoint_fixture(local_scope, tmp_path/"first", b"aaaa")
-    second = checkpoint_fixture(local_scope, tmp_path/"second", b"bbbb")
-    assert first.record["canonical_config_sha256"] == second.record["canonical_config_sha256"]
-    assert first.record["shard_bytes"] == second.record["shard_bytes"]
-    assert first.scope.identity != second.scope.identity != local_scope.scope.identity
-    for item in (first, second):
-        assert item.scope.identity.startswith("local-checkpoint:")
-        assert item.record["identity_kind"] == "local_checkpoint_artifact"
-        assert item.record["weight_content_verified"] is False
-        item.scope.verify_files()
-        item.scope.verify_fingerprint(asdict(item.fingerprint))
-        with pytest.raises(ValueError, match="fingerprint differ"):
-            item.scope.verify_fingerprint(asdict(local_scope.fingerprint))
-
-
-def test_published_checkpoint_path_and_provenance_do_not_change_identity(local_scope, tmp_path):
-    fixture = checkpoint_fixture(local_scope, tmp_path/"first")
-    directory = tmp_path/"moved"
-    shutil.copytree(fixture.model_path, directory)
-    record = {**fixture.record, "model_path": str(directory), "source": {"note": "copied artifact"}}
-    path = tmp_path/"moved-scope.json"
-    path.write_text(json.dumps(record))
-    moved = scopes.load_model_scope(path)
-    assert moved.identity == fixture.scope.identity
-    moved.verify_files()
-    with pytest.raises(ValueError, match="running model path differs"):
-        fixture.scope.verify_files(directory)
-
-
-def test_publication_digest_does_not_claim_startup_content_verification(local_scope, tmp_path):
-    fixture = checkpoint_fixture(local_scope, tmp_path)
-    # Equal-sized payload mutations require explicit republication/content audit;
-    # normal startup only validates the recorded metadata and file inventory.
-    file = fixture.model_path/"model.safetensors"
-    raw = file.read_bytes()
-    file.write_bytes(raw[:-4] + b"bbbb")
-    fixture.scope.verify_files()
-    assert fixture.scope.manifest()["record"]["weight_content_verified"] is False
-    record = {**fixture.record, "weight_content_verified": True}
-    with pytest.raises(ValueError, match="currently verified weight contents"):
-        scopes.LocalModelScope(record, source_path=fixture.path, source_sha256="fixture")
-
-
-@pytest.mark.parametrize("change", ["tensor_bytes", "header_length", "offset_gap", "truncated", "extra_file"])
-def test_single_checkpoint_inventory_and_header_are_checked(local_scope, tmp_path, change):
-    fixture = checkpoint_fixture(local_scope, tmp_path)
-    path = fixture.model_path/"model.safetensors"
-    if change == "tensor_bytes":
-        record = {**fixture.record, "index_tensor_bytes": 3}
-        fixture.scope = scopes.LocalModelScope(record, source_path=fixture.path, source_sha256="fixture")
-    elif change == "header_length":
-        raw = path.read_bytes()
-        path.write_bytes((len(raw) + 1).to_bytes(8, "little") + raw[8:])
-    elif change == "offset_gap":
-        path.write_bytes(path.read_bytes().replace(b'"data_offsets": [0, 4]', b'"data_offsets": [1, 4]'))
-    elif change == "truncated":
-        path.write_bytes(path.read_bytes()[:-1])
-    else:
-        (fixture.model_path/"old.safetensors").write_bytes(b"old")
-    with pytest.raises(ValueError, match="inventory|header|gaps"):
-        fixture.scope.verify_files()
-
-
-def test_sharded_checkpoint_file_order_is_canonical_and_index_matches(local_scope, tmp_path):
-    fixture = checkpoint_fixture(local_scope, tmp_path)
-    first = fixture.record["weight_files"][0]
-    second = {**first, "file": "model-00002.safetensors"}
-    shutil.copyfile(fixture.model_path/first["file"], fixture.model_path/second["file"])
-    record = {**fixture.record, "index_tensor_bytes": 8, "shards": 2,
-              "shard_bytes": 2*first["bytes"], "weight_files": [first, second]}
-    scope = scopes.LocalModelScope(record, source_path=fixture.path, source_sha256="fixture")
-    reordered = scopes.LocalModelScope({**record, "weight_files": [second, first]},
-                                      source_path="elsewhere", source_sha256="other")
-    assert scope.identity == reordered.identity
-    with pytest.raises(ValueError, match="requires a safetensors index"):
-        scope.verify_files()
-    index = fixture.model_path/"model.safetensors.index.json"
-    data = {"metadata": {"total_size": 8}, "weight_map": {"one": first["file"], "two": second["file"]}}
-    index.write_text(json.dumps(data))
-    scope.verify_files()
-    data["weight_map"]["two"] = "undeclared.safetensors"
-    index.write_text(json.dumps(data))
-    with pytest.raises(ValueError, match="index names differ"):
-        scope.verify_files()
-
-
-@pytest.mark.parametrize("change", ["duplicate", "parent_path", "bad_sha", "wrong_size", "summary"])
-def test_invalid_published_checkpoint_manifest_is_rejected(local_scope, tmp_path, change):
-    fixture = checkpoint_fixture(local_scope, tmp_path)
-    record = fixture.record
-    if change == "duplicate":
-        record["weight_files"] *= 2
-    elif change == "parent_path":
-        record["weight_files"][0]["file"] = "../model.safetensors"
-    elif change == "bad_sha":
-        record["weight_files"][0]["sha256"] = "not-a-content-digest"
-    elif change == "wrong_size":
-        record["weight_files"][0]["bytes"] = 0
-    else:
-        record["shard_bytes"] += 1
-    with pytest.raises(ValueError, match="checkpoint"):
-        scopes.LocalModelScope(record, source_path=fixture.path, source_sha256="fixture")
 
 
 def test_cpu_default_has_no_model_and_generic_runtime_cache_identity_stays_unchanged(local_scope, monkeypatch):
@@ -216,7 +89,7 @@ def test_scope_config_resolves_once_without_faking_hf_revision(local_scope, monk
     assert model.name == str(local_scope.model_path) and model.revision == local_scope.scope.identity
     assert model.local_files_only is True
     config = RunConfig(engine=EngineConfig(kind="sglang"), model=model)
-    assert config.model.revision.startswith("local-snapshot:")
+    assert config.model.revision == local_scope.scope.identity
     assert "_model_scope" not in asdict(config)["model"]
     assert loads(RunConfig, dumps(config)).model.revision == model.revision
     with pytest.raises(ValueError, match="context budget"):
@@ -244,15 +117,12 @@ def test_real_hf_template_adapter_checks_scope_without_a_second_tokenizer_serial
         create_model_template(model, model_path=str(local_scope.path.parent))
 
 
-def test_changed_local_config_or_inventory_and_wrong_tokenizer_are_rejected(local_scope):
+def test_model_configuration_and_tokenizer_match_the_declared_revision(local_scope):
     local_scope.scope.verify_files()
     local_scope.scope.verify_tokenizer(local_scope.tokenizer)
     local_scope.tokenizer.chat_template += " changed"
     with pytest.raises(ValueError, match="tokenizer/nonthinking"):
         local_scope.scope.verify_tokenizer(local_scope.tokenizer)
-    (local_scope.model_path/"model.safetensors").write_bytes(b"changed size")
-    with pytest.raises(ValueError, match="inventory"):
-        local_scope.scope.verify_files()
     (local_scope.model_path/"config.json").write_text('{}')
     with pytest.raises(ValueError, match="config differs"):
         local_scope.scope.verify_files()
@@ -444,42 +314,3 @@ def test_probe_manifest_binds_explicit_scope_without_changing_measurement_schema
     assert manifest["fingerprint"]["model_revision"] == local_scope.scope.identity
     assert manifest["cases"] == [{"prompt_tokens": 8, "prefix_tokens": 0, "output_tokens": 4,
                                    "concurrency": 1, "cache_state": "cold"}]
-
-
-def test_published_checkpoint_native_guard_and_http_reject_base_identity(local_scope, tmp_path, monkeypatch):
-    fixture = checkpoint_fixture(local_scope, tmp_path)
-    scheduler, _ = install_native_environment(monkeypatch, fixture)
-    owner = native.get_runtime(scheduler)
-    assert owner.info({})["model_scope"] == fixture.scope.manifest()
-    async def scenario():
-        transport = httpx.MockTransport(lambda request: httpx.Response(200, json=owner.info({})))
-        client = SGLangEngineClient("http://test", fixture.fingerprint, transport=transport,
-                                   model_scope=fixture.scope.manifest())
-        try:
-            assert (await client.info()).fingerprint.model_revision == fixture.scope.identity
-        finally:
-            await client.aclose()
-        client = SGLangEngineClient("http://test", local_scope.fingerprint, transport=transport,
-                                   model_scope=local_scope.scope.manifest())
-        try:
-            with pytest.raises(EngineError) as caught:
-                await client.info()
-            assert caught.value.code == "FINGERPRINT_MISMATCH"
-        finally:
-            await client.aclose()
-    asyncio.run(scenario())
-
-
-def test_published_checkpoint_rejects_base_model_cost_artifact(local_scope, tmp_path, monkeypatch):
-    fixture = checkpoint_fixture(local_scope, tmp_path)
-    monkeypatch.setattr("controller.config.create_model_template", lambda *a, **kw:
-                        SimpleNamespace(fingerprint=fixture.fingerprint))
-    artifact = tmp_path/"base-cost.json"
-    CostModel().save(artifact, metadata={"profile_manifest": {
-        "fingerprint": asdict(local_scope.fingerprint), "engine": {"cache_config_hash": "fixture-cache"}}})
-    monkeypatch.setattr("controller.config.SGLangEngineClient", lambda *a, **kw: pytest.fail("engine created"))
-    config = RunConfig(engine=EngineConfig(kind="sglang"), model=ModelConfig(scope_path=str(fixture.path)),
-                       cost_model=CostSettings(artifact=str(artifact)), state_dir=str(tmp_path/"state"))
-    assert config.model.revision == fixture.scope.identity
-    with pytest.raises(ValueError, match="bound to its actual fingerprint"):
-        create_controller(config)

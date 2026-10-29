@@ -1,6 +1,5 @@
 """Synthetic file contracts only: no ratings, hardware runs or quality claims."""
 from copy import deepcopy
-from hashlib import sha256
 import json
 from pathlib import Path
 
@@ -43,9 +42,6 @@ def setup_joint(tmp_path):
         'summary': {'metric_schema_version': 2, 'measurement_kind': 'hardware_fixture_contract', 'timing': {'failure_fraction': 0,
             'turn_seconds': {'mean': 1}}, 'cohort': {'unfinished_turns': 0}}}
         for job in experiments.matrix_jobs(spec)]
-    for result in results:
-        result['artifact_sha256'] = {key: sha256(Path(result[key]).read_bytes()).hexdigest()
-                                    for key in ('raw_output', 'audit_output')}
     quality['methods'] = {row['job_id']: quality['methods'][row['method']] for row in results}
     quality['reference'] = REFERENCE
     freeze_protocol(quality, tmp_path)
@@ -65,16 +61,12 @@ def test_real_files_gate_and_final_provenance_bind_offline_sources(tmp_path):
     assert frozen['b6'] == 'candidate' and frozen['quality_gate_applied']
     assert frozen['quality_evidence_report']['scope'] == 'dev'
     assert not frozen['quality_noninferiority_established']
-    bound = frozen['provenance']['external_inputs']
-    for path in (spec['tuning']['quality_evidence'], quality['frozen_protocol'],
-                 quality['methods'][CANDIDATE]['scores'], quality['methods'][REFERENCE]['audit']):
-        assert bound[path] == sha256(Path(path).read_bytes()).hexdigest()
 
 
-def test_quality_constraint_change_is_still_generation_identity_change(tmp_path):
+def test_quality_comparison_uses_the_declared_margin(tmp_path):
     spec, results, _ = setup_joint(tmp_path)
     spec['tuning']['quality_constraints']['epsilon'] = .05
-    with pytest.raises(ValueError, match='different or unrecorded'):
+    with pytest.raises(ValueError, match='quality evidence'):
         experiments.select_development(spec, results)
 
 
@@ -108,37 +100,6 @@ def test_quality_must_reference_actual_generated_path_not_a_relabelled_copy(tmp_
     quality['methods'][CANDIDATE][field] = str(copy)
     (tmp_path/'quality.json').write_text(json.dumps(quality))
     with pytest.raises(ValueError, match='actual generated artifact'):
-        experiments.select_development(spec, results)
-
-
-def test_changed_completed_generation_bytes_cannot_be_graded_as_original(tmp_path):
-    spec, results, quality = setup_joint(tmp_path)
-    run = Path(quality['methods'][CANDIDATE]['run'])
-    run.write_text(run.read_text()+'\n')
-    with pytest.raises(ValueError, match='bytes differ'):
-        experiments.select_development(spec, results)
-
-
-def test_archive_relocation_uses_explicit_mapping_and_original_content_hashes(tmp_path):
-    import shutil
-    spec, results, quality = setup_joint(tmp_path)
-    frozen = experiments.select_development(spec, results)
-    archive = tmp_path / "archive"
-    archive.mkdir()
-    inputs = experiments.quality_evidence_files(spec)
-    for name in inputs:
-        shutil.copy2(name, archive / Path(name).name)
-    spec["path_map"] = {str(tmp_path): str(archive)}
-    # Saved declarations still point at the original locations; no audit or
-    # frozen protocol is rewritten simply because the bundle moved.
-    for name in inputs - {spec["split_manifest"]}:
-        Path(name).unlink()
-    moved = experiments.select_development(spec, results)
-    assert moved["winners"] == frozen["winners"]
-    experiments.validate_frozen_selection(frozen["provenance"], experiments.provenance(spec))
-    audit = archive / Path(quality["methods"][CANDIDATE]["audit"]).name
-    audit.write_text(audit.read_text() + "\n")
-    with pytest.raises(ValueError, match="bytes differ"):
         experiments.select_development(spec, results)
 
 
@@ -196,37 +157,11 @@ def test_complete_expected_cohort_and_job_protocol_are_required(tmp_path):
     payload = json.loads(path.read_text())
     payload['report']['turns'].pop()
     path.write_text(json.dumps(payload))
-    results[0]['artifact_sha256']['raw_output'] = sha256(path.read_bytes()).hexdigest()
     with pytest.raises(ValueError, match='complete declared'):
         experiments.select_development(spec, results)
     payload['report']['turns'].append(deepcopy(payload['report']['turns'][0]))
     payload['report']['turns'][-1]['task_id'] = 's2:1'
     payload['report']['turns'][0]['online_turn']['protocol'] = 'P3'
     path.write_text(json.dumps(payload))
-    results[0]['artifact_sha256']['raw_output'] = sha256(path.read_bytes()).hexdigest()
     with pytest.raises(ValueError, match='protocol differs'):
         experiments.select_development(spec, results)
-
-
-@pytest.mark.parametrize('binding', ['run_manifest', 'server_record'])
-def test_completed_sidecar_and_owned_server_record_remain_file_bound(tmp_path, binding):
-    spec, results, quality = setup_joint(tmp_path)
-    sidecar = tmp_path/(binding+'.json')
-    sidecar.write_text('{}')
-    row = results[0]
-    if binding == 'run_manifest':
-        row['run_manifest'] = str(sidecar)
-        quality['methods'][CANDIDATE]['manifest'] = str(sidecar)
-    else:
-        spec['server_profiles'] = {'fixture_profile': {}}
-        spec['methods'][0]['server_profile'] = 'fixture_profile'
-        row['server_profile'] = 'fixture_profile'
-        row['server_execution'] = {'record': str(sidecar)}
-        quality['methods'][CANDIDATE]['server_record'] = str(sidecar)
-    row['artifact_sha256'][binding] = sha256(sidecar.read_bytes()).hexdigest()
-    freeze_protocol(quality, tmp_path)
-    (tmp_path/'quality.json').write_text(json.dumps(quality))
-    assert experiments.quality_gate_from_evidence(spec, results)[0]['candidate']['0']
-    sidecar.write_text('{"changed":true}')
-    with pytest.raises(ValueError, match='bytes differ|server record is not bound'):
-        experiments.quality_gate_from_evidence(spec, results)

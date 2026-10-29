@@ -11,7 +11,6 @@ import asyncio
 from collections import Counter, defaultdict
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
-from hashlib import sha256
 import json
 from pathlib import Path
 import random
@@ -22,7 +21,8 @@ import uuid
 
 from controller.candidates import CandidatePolicy, build_candidates
 from controller.config import RunConfig, create_model_template, load_config
-from controller.generation import GenerationProtocol, candidate_request, validate_candidate_protocol
+from controller.config import GenerationProtocol
+from controller.templates import candidate_request
 from controller.engine_client import EngineError, EngineInfo, SGLangEngineClient
 from controller.planner import PlannerKnobs, choose_plan
 from controller.schema import CacheQuoteBatch, NoFeasiblePlan, PromptCandidate, SessionSnapshot
@@ -30,6 +30,14 @@ from controller.serialization import decode, dumps, loads
 from controller.session_store import Attempt, load_record
 from controller.templates import ByteTemplate
 
+
+def validate_candidate_protocol(cases, protocol):
+    """The config must describe the actual frozen prompt, not just its metadata."""
+    for case in cases:
+        for candidate in case.candidates:
+            prompts = [message.content for message in candidate.messages if message.role == "system"]
+            if prompts != [protocol.system_prompt]:
+                raise ValueError("frozen candidate system prompt differs from generation configuration")
 
 @dataclass(frozen=True)
 class DecisionCase:
@@ -151,11 +159,8 @@ def freeze_cases(database, manifest, split, template, *, limit=None, selection="
 def write_frozen(database, manifest_path, split_path, output, template, *, limit=None,
                  selection="database_order", seed=42):
     manifest = json.loads(Path(manifest_path).read_text())
-    split_bytes = Path(split_path).read_bytes()
-    split_hash = sha256(split_bytes).hexdigest()
-    if manifest.get("dataset", {}).get("split_manifest_sha256") != split_hash:
-        raise ValueError("source run must use this exact frozen development/test split")
-    cases, skipped = freeze_cases(database, manifest, json.loads(split_bytes), template,
+    split = json.loads(Path(split_path).read_text())
+    cases, skipped = freeze_cases(database, manifest, split, template,
                                   limit=limit, selection=selection, seed=seed)
     if not cases:
         raise ValueError(f"no unchanged two-candidate development cases: {skipped}")
@@ -174,10 +179,8 @@ def write_frozen(database, manifest_path, split_path, output, template, *, limit
                     "prior_turns": len(case.snapshot.raw_history),
                     "turns_since_rebuild": case.snapshot.turns_since_rebuild,
                     "input_tokens": {c.action: len(c.input_ids) for c in case.candidates}} for case in cases],
-                "cases_sha256": sha256(payload.encode()).hexdigest(),
                 "source_manifest": str(Path(manifest_path).resolve()),
-                "source_manifest_sha256": sha256(Path(manifest_path).read_bytes()).hexdigest(),
-                "split_manifest_sha256": split_hash, "source_run_id": manifest["run_id"],
+                "split_manifest": str(Path(split_path).resolve()), "source_run_id": manifest["run_id"],
                 "source_measurement_kind": manifest["measurement_kind"], "fingerprint": manifest["fingerprint"],
                 "source_protocol": manifest["protocol"], "source_database": str(Path(database).resolve()),
                 "generation_protocol": GenerationProtocol.from_config(manifest["config"]).record(),
@@ -191,8 +194,8 @@ def load_frozen(path):
     source = Path(path)
     payload = source.read_bytes()
     metadata = json.loads(source.with_suffix(".manifest.json").read_text())
-    if metadata.get("split") != "dev" or metadata["cases_sha256"] != sha256(payload).hexdigest():
-        raise ValueError("decision cases must be an unchanged frozen development bundle")
+    if metadata.get("split") != "dev":
+        raise ValueError("decision fitting uses development cases")
     return tuple(loads(DecisionCase, line) for line in payload.decode().splitlines() if line), metadata
 
 
@@ -454,7 +457,7 @@ def rescore_file(args):
     if source_manifest.get("status") not in {"complete", "complete_with_failures"}:
         raise ValueError("finish source pair collection before offline rescoring")
     if (source_manifest.get("split") != "dev"
-            or source_manifest["frozen"]["cases_sha256"] != frozen["cases_sha256"]):
+            or source_manifest["frozen"].get("source_run_id") != frozen.get("source_run_id")):
         raise ValueError("saved pairs were not collected from this frozen development bundle")
     output = Path(args.output)
     targets = (output, output.with_suffix(".manifest.json"), output.with_suffix(".summary.json"))
@@ -473,14 +476,13 @@ def rescore_file(args):
     records = rescore_pairs(rows, cases, model, knobs, source_manifest["engine"])
     metadata = {"schema_version": 1, "split": "dev", "operation": "offline_rescore",
         "status": "complete_with_failures" if any(row["status"] != "completed" for row in records) else "complete",
-        "source_pairs": str(source_path.resolve()), "source_pairs_sha256": sha256(source_path.read_bytes()).hexdigest(),
+        "source_pairs": str(source_path.resolve()),
         "source_manifest": str(source_manifest_path.resolve()),
-        "source_manifest_sha256": sha256(source_manifest_path.read_bytes()).hexdigest(),
         "source_measurement_manifest": source_manifest,
         "frozen": frozen, "cases_path": str(Path(args.cases).resolve()),
         "config": asdict(config), "config_scope": "cost ablations and planner; candidates/budgets come from frozen cases",
         "generation_protocol": protocol.record(),
-        "cost_artifact": str(Path(artifact).resolve()), "cost_artifact_sha256": sha256(Path(artifact).read_bytes()).hexdigest(),
+        "cost_artifact": str(Path(artifact).resolve()),
         "engine": source_manifest["engine"], "calibration_scope": model.calibration_scope_report,
         "measurement_source_counts": dict(Counter(row.get("measurement_source", "not_recorded") for row in records)),
         "new_generations": 0, "new_engine_requests": 0, "online_model_updates": False,
@@ -529,7 +531,6 @@ async def collect(args):
         "cache_states": args.cache_states, "repetitions": args.repetitions, "seed": args.seed,
         "generation_protocol": protocol.record(),
         "config": asdict(config), "cost_artifact": artifact,
-        "cost_artifact_sha256": sha256(Path(artifact).read_bytes()).hexdigest() if artifact else None,
         "quality_evaluated": False, "fixtures_destructive_on_isolated_server": True,
         "online_model_updates": False, "pressure_concurrency": 1,
         "client_complete_scope": "generate_submit_to_complete_response; excludes fixture,prepare,retire,ledger_commit"}

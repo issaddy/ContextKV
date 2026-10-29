@@ -19,7 +19,7 @@ flowchart LR
 
 `adapters/conversation.py`用一次结构化解释维护`TaskFrame`：任务、主题、对象、命名条件和子需求。保留任务时承接已有需求；替换任务时更新需求。条件省略表示保留，空值表示删除。解释器读取实际问答和已有状态，明确回访时选择对应旧轮次；结果与回答一同提交。
 
-`adapters/query_resolution.py`只投影已提交历史与任务状态。`hybrid_retrieval.py`复用BM25S、BGE-M3、RRF和BGE重排；主任务及子需求进入同一评分流程。默认按不同内容组选择材料，复合任务保留主任务首组，再按需求排名覆盖增加材料。来源窗口、原文结构和声明依赖由`corpus.py`等适配器提供。配置见[检索](guides/hybrid_retrieval.md)。
+`controller/schema.py`定义共享请求和证据类型；已提交历史与任务状态由`conversation.py`投影。`hybrid_retrieval.py`复用BM25S、BGE-M3、RRF和BGE重排；主任务及子需求进入同一评分流程。默认按不同内容组选择材料，复合任务保留主任务首组，再按需求排名覆盖增加材料。来源窗口、原文结构和声明依赖由`corpus.py`等适配器提供。配置见[检索](guides/hybrid_retrieval.md)。
 
 `controller/evidence.py`以资料库、文档、片段、版本和正文摘要标识证据。当前检索、显式回访、指定引用和依赖共同确定本轮材料及引用范围；同文来源保留独立身份并共享正文。
 
@@ -45,6 +45,14 @@ flowchart LR
 | 引擎重启 | 保留实际历史和证据，以新epoch重建 |
 
 身份、完整结果与事务检查集中在接口和提交边界。日志、统计和离线导出独立于回答提交。HTTP部署及管理恢复入口见[接口](guides/http_retrieval.md)。
+
+## 工具与运行边界
+
+`controller/`、运行时资料/检索适配和SGLang桥接构成服务链路。共享请求类型定义在`schema.py`，在线检索不依赖MT-RAG任务读取器。退役处理由`Controller`管理，生成配置与输入装配分别归入`config.py`和`templates.py`。
+
+`bench/`提供评测、结果分析和CPU模拟后端；`profiling/`采集成本、拟合及运行探针；`scripts/`准备环境和数据；`tests/`验证行为。它们不作为课题机制模块。标定结果是B的输入数据，测试结果保存在`runs/`。
+
+配置、源码、索引文件和实验结果不通过层层文件hash控制运行或复算。正文摘要用于共享和版本识别，token与分词指纹用于原生缓存匹配；模型配置直接比较，检索索引使用声明的资料快照。
 
 ## 复用与适配
 

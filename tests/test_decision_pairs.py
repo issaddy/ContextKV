@@ -1,7 +1,6 @@
 import asyncio
 from copy import deepcopy
 from dataclasses import asdict, replace
-from hashlib import sha256
 import json
 
 import pytest
@@ -10,7 +9,7 @@ from controller.config import RunConfig
 from controller.cost_model import CostModel, DecodePoint, LookupPoint
 from controller.engine_client import EngineError
 from controller.evidence import make_evidence
-from controller.mock_engine import MockEngine
+from bench.mock_engine import MockEngine
 from controller.planner import PlannerKnobs
 from controller.serialization import dumps
 from controller.service import Controller
@@ -47,7 +46,7 @@ def source_run(tmp_path, *, layout="stable_key", strategy="always_append", inten
     manifest = {"run_id": "run", "protocol": "P2", "measurement_kind": "simulation",
                 "config": asdict(config), "fingerprint": asdict(ByteTemplate().fingerprint),
                 "dataset": {"selected_sessions": ["dev-session"],
-                            "split_manifest_sha256": sha256(split_path.read_bytes()).hexdigest()}}
+                            "split_manifest": str(split_path), "split": "dev"}}
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest))
     return tmp_path / "source.sqlite3", manifest, split, manifest_path, split_path
@@ -374,7 +373,7 @@ def test_rescore_preserves_failed_rows_and_calibration_scope_mismatch(tmp_path):
 
 
 def test_rescore_cli_records_source_identity_without_constructing_engine(tmp_path, monkeypatch):
-    from controller.generation import GenerationProtocol
+    from controller.config import GenerationProtocol
     import profiling.decision_pairs as module
     case, row, info, inputs = measured_pair(tmp_path)
     cases_path = tmp_path/"cases.jsonl"
@@ -398,8 +397,8 @@ def test_rescore_cli_records_source_identity_without_constructing_engine(tmp_pat
             "--cost-artifact", str(artifact), "--output", str(output)]
     main(args)
     metadata = json.loads(output.with_suffix(".manifest.json").read_text())
-    assert metadata["source_pairs_sha256"] == sha256(original).hexdigest()
-    assert metadata["source_manifest_sha256"] == sha256(pairs.with_suffix(".manifest.json").read_bytes()).hexdigest()
+    assert metadata["source_pairs"] == str(pairs.resolve())
+    assert metadata["source_manifest"] == str(pairs.with_suffix(".manifest.json").resolve())
     assert metadata["measurement_source_counts"] == {"simulation": 1}
     assert metadata["new_generations"] == metadata["new_engine_requests"] == 0
     assert not metadata["current_outcomes_used_for_selection"]
@@ -466,7 +465,7 @@ def test_replay_uses_serving_citation_grammar_on_real_client_wire(tmp_path, empt
 @pytest.mark.parametrize("mismatch", ["prompt", "sampling", "budget"])
 def test_collection_checks_frozen_generation_conditions_before_opening_engine(tmp_path, monkeypatch, mismatch):
     from argparse import Namespace
-    from controller.generation import GenerationProtocol
+    from controller.config import GenerationProtocol
     from controller.sampling import SamplingRecipe
     import profiling.decision_pairs as module
     database, manifest, split, _, _ = source_run(tmp_path)

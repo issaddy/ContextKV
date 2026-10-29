@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from adapters.hybrid_retrieval import reciprocal_rank_fusion, search_current_topic, search_variants
-from adapters.mtrag import OnlineContext
+from controller.schema import OnlineContext
 from bench.retrieval_eval import RetrievalQuery, evaluate_queries
 
 
@@ -20,7 +20,7 @@ class Encoder:
 
 class Sparse:
     corpus_snapshot_id = "synthetic-snapshot"
-    manifest = {"corpus_sha256": "synthetic-shared-corpus"}
+    manifest = {"corpus_snapshot_id": "synthetic-shared-corpus"}
 
     def __init__(self, contexts):
         self.contexts, self.calls = contexts, []
@@ -199,8 +199,8 @@ def test_dialogue_identical_view_deduplicates_work_and_preserves_single_view_ord
 def test_dialogue_route_uses_literal_history_without_changing_committed_intent():
     from types import SimpleNamespace
     from adapters.hybrid_retrieval import HybridRetriever
-    from adapters.mtrag import OnlineMessage, OnlineTurn
-    from adapters.query_resolution import PriorContext
+    from controller.schema import OnlineMessage, OnlineTurn
+    from adapters.conversation import PriorContext
     from controller.schema import QueryContext, TaskFrame
     history = (OnlineMessage("user", "Define the API."), OnlineMessage("assistant", "Actual answer."))
     turn = OnlineTurn("conversation", "task", 2, "corpus", "How do I create it?", history, (), "P3")

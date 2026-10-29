@@ -9,7 +9,8 @@ import pytest
 from adapters.hybrid_retrieval import (DenseIndex, query_text, reciprocal_rank_fusion,
                                       search_variants, select_ranked_evidence,
                                       select_requirement_evidence, search_requirements)
-from adapters.mtrag import OnlineContext, json_hash, load_rows
+from adapters.mtrag import load_rows
+from controller.schema import OnlineContext
 from adapters.retrieval import BM25SRetriever, load_beir_corpus
 from bench.retrieval_eval import evaluate_queries, prepare_queries, summarize
 
@@ -73,7 +74,7 @@ class Encoder:
 class Sparse:
     def __init__(self, contexts):
         self.contexts = contexts
-        self.manifest = {"corpus_sha256": json_hash([asdict(c) for c in contexts])}
+        self.manifest = {"corpus_snapshot_id": "fixture"}
         self.calls = []
 
     def retrieve(self, questions, *, top_k=5):
@@ -120,8 +121,6 @@ def test_ranked_selection_restores_distinct_content_without_rescoring_or_changin
         ranked[0], distinct_title, distinct_bytes)
 
 
-
-
 def test_requirement_selection_spends_group_budget_once_and_keeps_each_selected_source():
     from adapters.hybrid_retrieval import select_requirement_evidence
 
@@ -131,10 +130,6 @@ def test_requirement_selection_spends_group_budget_once_and_keeps_each_selected_
     assert selected == (primary[0], primary[1], primary[3])
     assert trace['selected_ids'] == ['a', 'copy', 'c']
     assert len(trace['marginal_gains']) == 2
-
-
-
-
 
 
 def test_query_views_and_explicit_generated_history():
@@ -154,7 +149,7 @@ def test_dense_persistence_exact_scores_and_original_text(tmp_path):
     index = DenseIndex.build(reversed(original), encoder, tmp_path/"dense", corpus_snapshot_id="fixture", batch_size=3)
     restored = DenseIndex.load(tmp_path/"dense")
     assert restored.contexts == original
-    assert restored.manifest["corpus_sha256"] == Sparse(original).manifest["corpus_sha256"]
+    assert restored.manifest["corpus_snapshot_id"] == Sparse(original).manifest["corpus_snapshot_id"]
     assert restored.manifest["dimensions"] == 2
     assert np.array_equal(index.vectors, restored.vectors)
     ranked = restored.search("cat query", encoder, top_k=5)
@@ -177,7 +172,7 @@ def test_hybrid_rerank_uses_original_union_only(tmp_path):
     assert reranker.calls[0] == ("cat", candidates)
     assert [c.document_id for c in stages["hybrid_rerank"]["contexts"]] == [c.document_id for c in candidates[::-1]]
     assert all(c.text == original[int(c.document_id)].text for c in stages["hybrid_rerank"]["contexts"])
-    sparse.manifest["corpus_sha256"] = "different"
+    sparse.manifest["corpus_snapshot_id"] = "different"
     with pytest.raises(ValueError, match="same original corpus"):
         search_variants("cat", sparse, dense, encoder)
 

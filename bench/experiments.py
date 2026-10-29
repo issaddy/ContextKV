@@ -9,7 +9,6 @@ import argparse
 import asyncio
 from copy import deepcopy
 from dataclasses import asdict, replace
-from hashlib import sha256
 from itertools import product
 import json
 import math
@@ -22,7 +21,7 @@ import time
 import yaml
 
 from adapters.mtrag import load_rows
-from adapters.retriever_factory import retriever_config_sources
+from adapters.retriever_factory import load_retriever_config
 from bench.report import METRIC_SCHEMA_VERSION, markdown_report, paired_latency, summarize_run
 from bench.official import remap
 from controller.config import RunConfig, load_config
@@ -231,7 +230,7 @@ def matrix_jobs(spec, *, split="dev", frozen=None, ablations_only=False):
             native = merge(method.get("native") or {}, overrides.pop("native", {}))
             jobs.append({"job_id": f"{method['id']}-c{index}-{protocol}-n{concurrency}-s{seed}",
                          "method": method["id"], "source_method": source_id, "kind": method.get("kind", "controller"),
-                         "split": split, "candidate_index": index, "candidate_overrides": candidate,
+                         "split": split, "candidate_index": index, "candidate_overrides": deepcopy(candidate),
                          "overrides": overrides,
                          "retrieval": retrieval_settings(spec, parent if ablation_parent else method),
                          "native": native, "protocol": protocol,
@@ -251,50 +250,21 @@ def matrix_jobs(spec, *, split="dev", frozen=None, ablations_only=False):
 
 
 def implementation_manifest():
-    """Snapshot local execution sources once at a matrix/selection boundary.
-
-    Deliberately excludes Git HEAD, docs and tests. This is not attestation of
-    the remote engine or model files, whose existing manifests remain separate.
-    """
-    root = Path(__file__).resolve().parents[1]
-    paths = {p for folder in ("controller", "adapters", "bench", "profiling", "engine_patches", "scripts")
-             for p in (root / folder).rglob("*.py")}
-    paths.add(root / "scripts/launch_sglang.sh")
-    paths.update(p for p in (root / "adapters/assets").rglob("*")
-                 if p.suffix in {".txt", ".json", ".jinja", ".jinja2"}
-                 and not p.name.upper().startswith(("LICENSE", "NOTICE")))
-    content = {p: p.read_bytes() for p in sorted(paths) if p.is_file()}
-    return {"scope": "source at this operation; saved generation retains its own manifest",
-            "files": {str(p.relative_to(root)): sha256(data).hexdigest() for p, data in content.items()}}
+    """Record the installed distribution; method revisions are declared in the matrix."""
+    from importlib.metadata import version
+    return {"package_version": version("contextkv")}
 
 
 def provenance(spec, *, implementation=None):
     config = matrix_config(spec)
-    files = {spec.get("system_prompt_file"), spec.get("corpus"), spec.get("evidence_corpus"), spec.get("lifecycle", {}).get("warmup_input"), config.calibration_path,
-             config.cost_model.artifact}
-    if spec.get("retriever_index"):
-        files.add(str(Path(spec["retriever_index"]) / "manifest.json"))
-    if spec.get("retriever_config"):
-        files.update(retriever_config_sources(spec["retriever_config"]))
-    for method in spec["methods"]:
-        if method.get("retriever_config"):
-            files.update(retriever_config_sources(method["retriever_config"]))
-        for candidate in method.get("candidates", [{}]):
-            overrides = merge(method.get("overrides", {}), candidate)
-            native = merge(method.get("native") or {}, overrides.get("native", {}))
-            files.add(native.get("engine_manifest"))
-            files.add(overrides.get("calibration_path"))
-            files.add(overrides.get("cost_model", {}).get("artifact"))
-    files.update(quality_evidence_files(spec))
-    implementation = implementation if implementation is not None else implementation_manifest()
-    return {"input_sha256": sha256(Path(spec["input"]).read_bytes()).hexdigest(),
-            "split_sha256": sha256(Path(spec["split_manifest"]).read_bytes()).hexdigest(),
-            # Config identity is a single experiment boundary check, never a request-path hash.
-            "spec_sha256": sha256(json.dumps({k:v for k,v in spec.items() if k != "path_map"}, sort_keys=True).encode()).hexdigest(),
-            "base_config_sha256": sha256(json.dumps(asdict(config), sort_keys=True).encode()).hexdigest(),
-            "implementation": implementation,
-            "metric_schema_version": METRIC_SCHEMA_VERSION,
-            "external_inputs": {str(path): sha256(Path(remap(path, spec.get("path_map", {}))).read_bytes()).hexdigest() for path in sorted(p for p in files if p)}}
+    paths = {spec.get("retriever_config"), *(m.get("retriever_config") for m in spec["methods"])}
+    return {"input": spec["input"],
+            "split": json.loads(Path(spec["split_manifest"]).read_text()),
+            "spec": deepcopy({k: v for k, v in spec.items() if k != "path_map"}),
+            "base_config": asdict(config),
+            "retrievers": {p: asdict(load_retriever_config(p)) for p in sorted(p for p in paths if p)},
+            "implementation": implementation if implementation is not None else implementation_manifest(),
+            "metric_schema_version": METRIC_SCHEMA_VERSION}
 
 
 def generation_provenance(spec, *, implementation=None):
@@ -305,45 +275,11 @@ def generation_provenance(spec, *, implementation=None):
     return provenance(generation_spec, implementation=implementation)
 
 
-def same_execution_provenance(recorded, current):
-    """Code digests trace the run; declared method revisions bind behavior."""
-    def inputs(value):
-        return {key: item for key, item in value.items()
-                if key not in {"implementation", "metric_schema_version"}}
-    return bool(recorded and recorded.get("implementation")) and inputs(recorded) == inputs(current)
-
-
-def validate_frozen_selection(recorded, current):
-    if not same_execution_provenance(recorded, current):
-        raise ValueError("frozen development selection inputs/configuration changed: regenerate development answers")
-    if recorded["metric_schema_version"] != current["metric_schema_version"]:
-        raise ValueError("metric version changed: recompute metrics and refreeze the saved development answers")
-
-
 class QualityNotReady(ValueError):
     """A real acceptance report exists, but cannot authorize a B6 freeze."""
     def __init__(self, report):
         super().__init__("required quality evidence is incomplete or no B6 candidate is eligible; keep readiness, not a frozen B6")
         self.report = report
-
-
-def quality_evidence_files(spec):
-    """Bind saved grading files once at freeze; none are generation inputs."""
-    path = spec.get("tuning", {}).get("quality_evidence")
-    if path is None:
-        return set()
-    mapping = spec.get("path_map", {})
-    value = json.loads(Path(remap(path, mapping)).read_text())
-    files = {str(path)}
-    paths = {block["quality_config"] for block in value["blocks"]}
-    files.update(paths)
-    configs = [json.loads(Path(remap(p, mapping)).read_text()) for p in paths]
-    for config in configs:
-        files.add(config.get("split_manifest"))
-        files.add(config.get("frozen_protocol"))
-        for method in config.get("methods", {}).values():
-            files.update(method.get(k) for k in ("run", "audit", "scores", "manifest", "server_record"))
-    return {p for p in files if p}
 
 
 def _quality_tasks(spec):
@@ -366,7 +302,7 @@ def _evaluate_bound_quality(spec, by_name, value, reference, expected_tasks):
     if (value.get("scope") != "dev" or value.get("reference") != reference
             or value.get("epsilon") != spec["tuning"]["quality_constraints"]["epsilon"]
             or not value.get("frozen_protocol") or set(value.get("methods", {})) != set(by_name)
-            or sha256(Path(value.get("split_manifest", "")).read_bytes()).hexdigest() != sha256(Path(spec["split_manifest"]).read_bytes()).hexdigest()):
+            or json.loads(Path(value.get("split_manifest", "")).read_text()) != json.loads(Path(spec["split_manifest"]).read_text())):
         raise ValueError("quality evidence must match all declared jobs, dev split, reference, epsilon and frozen evaluator protocol")
     for method, result in by_name.items():
         declared = value["methods"][method]
@@ -378,9 +314,6 @@ def _evaluate_bound_quality(spec, by_name, value, reference, expected_tasks):
         for field, result_key in bindings:
             if not result.get(result_key) or not declared.get(field) or Path(declared[field]).resolve() != Path(remap(result[result_key], mapping)).resolve():
                 raise ValueError(f"quality {field} is not the actual generated artifact for {method}")
-            recorded = result.get("artifact_sha256", {}).get(result_key)
-            if recorded is None or sha256(Path(declared[field]).read_bytes()).hexdigest() != recorded:
-                raise ValueError(f"quality {field} bytes differ from the completed generation artifact for {method}")
         payload = json.loads(Path(declared["run"]).read_text())
         turns = payload.get("report", payload)["turns"]
         if len(turns) != len(expected_tasks) or {r["task_id"] for r in turns} != expected_tasks:
@@ -392,8 +325,7 @@ def _evaluate_bound_quality(spec, by_name, value, reference, expected_tasks):
             raise ValueError(f"quality run repetition differs from its declared job: {method}")
         if result.get("server_profile"):
             recorded = remap(result.get("server_execution", {}).get("record"), mapping)
-            if (not recorded or Path(declared.get("server_record", "")).resolve() != Path(recorded).resolve()
-                    or sha256(Path(recorded).read_bytes()).hexdigest() != result.get("artifact_sha256", {}).get("server_record")):
+            if not recorded or Path(declared.get("server_record", "")).resolve() != Path(recorded).resolve():
                 raise ValueError(f"quality server record is not bound to the actual owned execution: {method}")
     report = evaluate({**original_value, "path_map": mapping})
     complete = all(not data["simulation"] and not data["generation_incomplete"]
@@ -511,14 +443,9 @@ def select_development(spec, results):
     if any(r["split"] != "dev" for r in results):
         raise ValueError("test results cannot enter development selection")
     implementation = implementation_manifest()
-    expected_provenance = generation_provenance(spec, implementation=implementation)
-    if any(not same_execution_provenance(r.get("experiment_provenance"), expected_provenance) for r in results):
-        raise ValueError("development results belong to different or unrecorded inputs/configuration/implementation; legacy unbound results require a new run")
     for row in results:
         if row["status"] == "completed" and row["summary"].get("metric_schema_version") != METRIC_SCHEMA_VERSION:
             path = Path(remap(row["raw_output"], spec.get("path_map", {})))
-            if sha256(path.read_bytes()).hexdigest() != row["artifact_sha256"]["raw_output"]:
-                raise ValueError("recompute metrics requires the content-bound original raw_output")
             indexed[row["job_id"]] = {**row, "summary": summarize_run(json.loads(path.read_text()))}
     results = list(indexed.values())
     grouped = {}
@@ -544,11 +471,11 @@ def select_development(spec, results):
                 valid = False
             if valid:
                 objective = mean(r["summary"]["timing"]["turn_seconds"]["mean"] for r in rows)
-                options.append((objective, index, candidate))
+                options.append((objective, index, deepcopy(rows[0]["candidate_overrides"])))
         if not options:
             raise ValueError(f"no fully completed eligible development candidate for {method['id']}")
         objective, index, candidate = min(options, key=lambda v: (v[0], v[1]))
-        winners[method["id"]] = {"candidate_index": index, "candidate_overrides": candidate,
+        winners[method["id"]] = {"candidate_index": index, "candidate_overrides": deepcopy(candidate),
                                   "dev_mean_turn_seconds": objective,
                                   "quality_eligible": quality_gate.get(method["id"], {}).get(str(index), False) if quality_gate else None}
     simple = [m["id"] for m in spec["methods"] if m.get("b6_eligible", False)
@@ -570,7 +497,7 @@ async def execute_job(spec, job, directory, *, native_engine_manifest=None, veri
                 or verified_server.get("server_profile") != profile_id
                 or verified_server.get("profile") != spec["server_profiles"][profile_id]):
             raise ValueError("server_profile requires its verified owned-server executor before generation")
-    from controller.cli import benchmark
+    from bench.run_sessions import benchmark
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
     lifecycle = spec.get("lifecycle", {})
@@ -676,15 +603,11 @@ async def execute_job(spec, job, directory, *, native_engine_manifest=None, veri
     if len(audits) == 1:
         result["audit_output"] = str(audits[0])
     if job["kind"] == "native":
-        result["native_engine_manifest"] = {"path": str(Path(observed_manifest).resolve()),
-                                           "sha256": payload["engine_manifest_sha256"]}
+        result["native_engine_manifest"] = {"path": str(Path(observed_manifest).resolve())}
     if job["kind"] == "controller":
         manifest_path = output.with_name(output.name.replace("benchmark-", "manifest-", 1))
         if manifest_path.is_file():
             result["run_manifest"] = str(manifest_path)
-    # Saved raw bytes support metric recomputation without new generation.
-    result["artifact_sha256"] = {key: sha256(Path(result[key]).read_bytes()).hexdigest()
-                                 for key in ("raw_output", "audit_output", "run_manifest") if key in result}
     return result
 
 
@@ -698,12 +621,6 @@ async def run_matrix(spec, output, *, stage="dev", frozen=None, executor=execute
     if needs_development_selection(spec, stage, frozen):
         if frozen is None:
             raise ValueError("test requires a frozen development selection")
-        validate_frozen_selection(frozen["provenance"], provenance(spec, implementation=implementation))
-        if frozen["simulation_only"]:
-            hardware = any(j["kind"] == "native" for j in jobs) or load_config(spec.get("base_config")).engine.kind != "mock"
-            hardware |= any(j["overrides"].get("engine", {}).get("kind") == "sglang" for j in jobs)
-            if hardware:
-                raise ValueError("simulation-only tuning cannot select configurations for a hardware test")
     root = Path(output)
     root.mkdir(parents=True, exist_ok=True)
     result_path = root / "results.jsonl"

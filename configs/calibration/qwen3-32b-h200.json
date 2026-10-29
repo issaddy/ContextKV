@@ -1987,18 +1987,15 @@
       "sampling_recipe_binding": "explicit",
       "files": {
         "measurements": {
-          "path": "/home/relay/songjiayun/ContextKV/runs/qwen32-default/profile.jsonl",
-          "sha256": "b45e602f1128815a14c192839ad8f048adb26d411c8c24dc3a30f4a6c66d9c5c"
+          "path": "/home/relay/songjiayun/ContextKV/runs/qwen32-default/profile.jsonl"
         },
         "profile_manifest": {
-          "path": "/home/relay/songjiayun/ContextKV/runs/qwen32-default/profile.manifest.json",
-          "sha256": "4833a7db2abb3d116280e5119351e782061eaf8fabe747eebeaa2c007436ce82"
+          "path": "/home/relay/songjiayun/ContextKV/runs/qwen32-default/profile.manifest.json"
         },
         "profile_manifests": [
           {
             "run_id": "258c7ef6a1014cb0ad12f80eee179bd3",
-            "path": "/home/relay/songjiayun/ContextKV/runs/qwen32-default/profile.manifest.json",
-            "sha256": "4833a7db2abb3d116280e5119351e782061eaf8fabe747eebeaa2c007436ce82"
+            "path": "/home/relay/songjiayun/ContextKV/runs/qwen32-default/profile.manifest.json"
           }
         ]
       },
@@ -2156,8 +2153,7 @@
       "files": [
         {
           "group": "selected",
-          "path": "/home/relay/songjiayun/ContextKV/runs/qwen32-default/profile.telemetry.jsonl",
-          "sha256": "3f88096f329809c16ab5d4baaa08ed21522ee5223e0967ee65ee2c4e64918b71"
+          "path": "/home/relay/songjiayun/ContextKV/runs/qwen32-default/profile.telemetry.jsonl"
         }
       ],
       "warmup_requests_excluded": 657,
@@ -2183,8 +2179,7 @@
       "forward_error_p99_ms": 791.2421040132751,
       "oof_residuals": 1308,
       "base_artifact": {
-        "path": "/home/relay/songjiayun/ContextKV/runs/qwen32-default/cost-lookup.json",
-        "sha256": "597f1f7510c7c04e7c120c33af6290d4cd5c075f5d5fa7da6310e283ccc34003"
+        "path": "/home/relay/songjiayun/ContextKV/runs/qwen32-default/cost-lookup.json"
       },
       "decode_and_output_priors": "copied unchanged from bound base artifact",
       "online_heterogeneous_waiting_validation": false
@@ -2854,7 +2849,6 @@
       ],
       "source": {
         "path": "/home/relay/songjiayun/ContextKV/runs/qwen32-default/development-lengths.json",
-        "sha256": "1fca2094fc4af3515a87b91a98a6159c55dbef645e2e42ce515548684bce1618",
         "binding": "matches_original_base_artifact_development_report"
       },
       "tasks": 96,

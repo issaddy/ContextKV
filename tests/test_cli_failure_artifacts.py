@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from controller import cli
+from bench import run_sessions as cli
 from controller.config import create_controller
 
 FIXTURE = Path(__file__).parent / 'fixtures/mtrag_small.jsonl'
@@ -23,7 +23,7 @@ class FailedRetriever:
             raise RuntimeError('controlled retrieval failure before serving')
         # Use the fixture's public contexts, not its reference answer.
         from dataclasses import replace
-        from adapters.mtrag import clean_context
+        from adapters.retrieval import clean_context
         row = next(json.loads(line) for line in FIXTURE.read_text().splitlines()
                    if json.loads(line)['task_id'] == turn.task_id)
         return replace(turn, contexts=tuple(clean_context(c) for c in row['contexts']))
@@ -39,7 +39,9 @@ def raw_output(tmp_path):
 
 
 def arguments(tmp_path, protocol):
-    return ['--state-dir', str(tmp_path), 'bench', str(FIXTURE), '--domain', 'all',
+    config = tmp_path / 'config.yaml'
+    config.write_text('engine: {kind: mock}\n')
+    return ['--config', str(config), '--state-dir', str(tmp_path), 'run', str(FIXTURE), '--domain', 'all',
             '--limit-sessions', '1', '--protocol', protocol]
 
 

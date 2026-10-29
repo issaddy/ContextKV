@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
-from hashlib import sha256
 import json
 import math
 from pathlib import Path
@@ -52,13 +51,12 @@ def measurement_provenance(rows, measurements_path, *, profile_manifest_path=Non
         binding = "run_id_matched" if run_ids and all(r.get("run_id") for r in rows) else "operator_declared_unlinked"
     paths = {"measurements": measurements_path,
              "development_report": development_report_path}
-    files = {name: {"path": str(Path(path).resolve()), "sha256": sha256(Path(path).read_bytes()).hexdigest()}
+    files = {name: {"path": str(Path(path).resolve())}
              for name, path in paths.items() if path}
-    manifest_files = [{"run_id": entry.get("run_id"), "path": str(Path(path).resolve()),
-                       "sha256": sha256(Path(path).read_bytes()).hexdigest()}
+    manifest_files = [{"run_id": entry.get("run_id"), "path": str(Path(path).resolve())}
                       for entry, path in zip(manifests, manifest_paths)]
     if manifest_files:
-        files["profile_manifest"] = {key: manifest_files[0][key] for key in ("path", "sha256")}
+        files["profile_manifest"] = {key: manifest_files[0][key] for key in ("path",)}
         files["profile_manifests"] = manifest_files
     prior_binding = {}
     if development_report_path:

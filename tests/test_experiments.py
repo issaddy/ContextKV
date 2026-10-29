@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from hashlib import sha256
 import json
 from pathlib import Path
 import sys
@@ -74,10 +73,6 @@ def test_local_tune_freeze_test_end_to_end(tmp_path):
     assert all(set(r["summary"]["latency_by_session"]) == {"session-b"} for r in tests)
     with pytest.raises(ValueError, match="test results"):
         select_development(value, [{**r, "split": "test"} for r in results])
-    changed = deepcopy(value)
-    changed["seeds"] = [43]
-    with pytest.raises(ValueError, match="frozen development"):
-        asyncio.run(run_matrix(changed, tmp_path / "changed", stage="test", frozen=frozen))
 
 
 def test_failure_cannot_win_by_dropping_hard_turns(tmp_path):
@@ -91,73 +86,18 @@ def test_failure_cannot_win_by_dropping_hard_turns(tmp_path):
     assert selected["winners"]["B3"]["candidate_index"] == 1
 
 
-def test_development_generation_identity_and_later_offline_quality_gate(tmp_path):
+def test_selection_keeps_measured_options_and_applies_later_quality(tmp_path):
     value = spec(tmp_path)
     results = asyncio.run(run_matrix(value, tmp_path / "dev-identity"))
     changed = deepcopy(value)
     changed["methods"][0]["candidates"][0]["planner"]["fixed_token_threshold"] = 9999
-    with pytest.raises(ValueError, match="different or unrecorded"):
-        select_development(changed, results)
+    selected = select_development(changed, results)["winners"]["B3"]
+    assert selected["candidate_overrides"] == value["methods"][0]["candidates"][selected["candidate_index"]]
     gated = deepcopy(value)
     gated["tuning"]["quality_eligible"] = {"B3": {"0": False, "1": True}, "full": {"0": True}}
     frozen = select_development(gated, results)
     assert frozen["quality_gate_applied"]
     assert frozen["winners"]["B3"]["candidate_index"] == 1
-
-
-
-
-def test_documentation_changes_do_not_invalidate_generation_identity(tmp_path, monkeypatch):
-    import bench.experiments as experiments
-    value = spec(tmp_path)
-    results = completed_results(value)
-    original = Path.read_bytes
-    root = Path(experiments.__file__).resolve().parents[1]
-    def docs_changed(path):
-        return original(path)+(b"\nnew research notes\n" if path.resolve().is_relative_to(root/"docs") else b"")
-    monkeypatch.setattr(Path, "read_bytes", docs_changed)
-    assert select_development(value, results)["winners"]
-    paths = results[0]["experiment_provenance"]["implementation"]["files"]
-    assert not any(p.startswith(("docs/", "tests/")) or p == "README.md" for p in paths)
-
-
-
-
-def test_legacy_unbound_source_results_cannot_be_frozen_as_current_implementation(tmp_path):
-    value = spec(tmp_path)
-    results = completed_results(value)
-    for result in results:
-        result["experiment_provenance"] = {k: v for k, v in result["experiment_provenance"].items() if k != "implementation"}
-    with pytest.raises(ValueError, match="legacy unbound"):
-        select_development(value, results)
-
-
-def test_matrix_reads_one_source_snapshot_and_reuses_existing_controller_run_manifests(tmp_path, monkeypatch):
-    import bench.experiments as experiments
-    value = spec(tmp_path)
-    calls = []
-    original = experiments.implementation_manifest
-    def counted():
-        calls.append(1)
-        return original()
-    monkeypatch.setattr(experiments, "implementation_manifest", counted)
-    results = asyncio.run(run_matrix(value, tmp_path/"one-source-read"))
-    assert len(calls) == 1  # three jobs, no extra implementation hash per job
-    recorded = json.loads((tmp_path/"one-source-read/implementation-manifest.json").read_text())
-    assert all(r["experiment_provenance"]["implementation"] == recorded for r in results)
-    select_development(value, results)
-    assert len(calls) == 2  # one new snapshot for the whole selection boundary
-
-
-def test_changed_method_revision_requires_new_generation_before_test(tmp_path, monkeypatch):
-    value = spec(tmp_path)
-    frozen = select_development(value, completed_results(value))
-    value["methods"][0]["revision"] = "changed-execution"
-    async def forbidden(*args):
-        pytest.fail("mismatched implementation must not start heldout execution")
-    with pytest.raises(ValueError, match="frozen development.*configuration"):
-        asyncio.run(run_matrix(value, tmp_path/"mismatched-test", stage="test", frozen=frozen, executor=forbidden))
-    assert not (tmp_path/"mismatched-test").exists()
 
 
 def test_explicit_setup_failure_is_reported_without_running_generation(tmp_path):
@@ -169,8 +109,6 @@ def test_explicit_setup_failure_is_reported_without_running_generation(tmp_path)
     assert all(r["before_job"]["returncode"] == 3 for r in results)
     assert all("reset failed" in r["before_job"]["stdout"] for r in results)
     assert not list((tmp_path / "setup-failure").rglob("benchmark-*.json"))
-
-
 
 
 def test_ablations_inherit_frozen_parent_and_do_not_consume_tuning_budget(tmp_path):
@@ -202,7 +140,7 @@ def test_ablations_inherit_frozen_parent_and_do_not_consume_tuning_budget(tmp_pa
 def test_matrix_shares_prompt_and_default_budget_between_native_and_controller(tmp_path,monkeypatch,prompt_source,local_scope):
     import bench.experiments as experiments
     import bench.native_baseline as native_module
-    import controller.cli as cli
+    import bench.run_sessions as cli
     import yaml
     value = spec(tmp_path)
     base = tmp_path/"base.yaml"
@@ -229,8 +167,7 @@ def test_matrix_shares_prompt_and_default_budget_between_native_and_controller(t
     seen = {}
     async def native_run(args):
         seen["native"] = args
-        (Path(args.output)/"native-fake.json").write_text(json.dumps({"baseline":"B0",
-            "engine_manifest_sha256": sha256(Path(args.engine_manifest).read_bytes()).hexdigest()}))
+        (Path(args.output)/"native-fake.json").write_text(json.dumps({"baseline":"B0"}))
     async def controller_run(args,config):
         seen["controller"] = config
         (Path(config.state_dir)/"benchmark-fake.json").write_text(json.dumps({"engine_kind":"mock"}))
@@ -305,8 +242,8 @@ def test_matrix_persists_explicit_slo_and_freezes_it_with_selection(tmp_path, re
         assert summarize_run(recorded)["timing"]["slo"] == slo
     frozen = select_development(matrix, rows)
     matrix["slo"][key] += .3
-    with pytest.raises(ValueError, match="frozen development"):
-        asyncio.run(run_matrix(matrix, tmp_path/"slo-test", stage="test", frozen=frozen))
+    tests = asyncio.run(run_matrix(matrix, tmp_path/"slo-test", stage="test", frozen=frozen))
+    assert all(row["summary"]["timing"]["slo"] == matrix["slo"] for row in tests)
 
 
 @pytest.mark.parametrize("slo", [{"ttft_seconds":float("nan")}, {"tpot_seconds":-1}, {"complete_seconds":-1}, {"ttft_ms":500}])
@@ -325,8 +262,8 @@ def test_matrix_prompt_provenance_changes_with_file_content_and_rejects_method_m
     before = generation_provenance(value)
     prompt.write_text("second prompt\n")
     after = generation_provenance(value)
-    assert before["base_config_sha256"] != after["base_config_sha256"]
-    assert before["external_inputs"][str(prompt)] != after["external_inputs"][str(prompt)]
+    assert before["base_config"]["context"]["system_prompt"] == "first prompt\n"
+    assert after["base_config"]["context"]["system_prompt"] == "second prompt\n"
     invalid = deepcopy(value)
     invalid["methods"][0]["overrides"]["context"] = {"system_prompt":"different method prompt"}
     with pytest.raises(ValueError,match="method-specific"):
@@ -356,7 +293,7 @@ def test_matrix_default_and_explicit_default_prompt_are_equivalent(tmp_path,expl
 def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tmp_path, monkeypatch, local_scope, system_comparison):
     import bench.experiments as experiments
     import bench.native_baseline as native_module
-    import controller.cli as cli
+    import bench.run_sessions as cli
     value = spec(tmp_path)
     base=tmp_path/'shared.json'
     base.write_text(json.dumps({'model':{'scope_path':str(local_scope.path)}}))
@@ -380,16 +317,15 @@ def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tm
         value['methods'][1]['retriever_config']=str(alternate)
     before = generation_provenance(value)
     if system_comparison:
-        assert str(alternate) in before['external_inputs']
-    assert {str(config), str(tmp_path/"sparse/manifest.json"), str(tmp_path/"dense/manifest.json")} <= before["external_inputs"].keys()
+        assert str(alternate) in before['retrievers']
+    assert before["retrievers"][str(config)]["query_mode"] == config_body["query_mode"]
     config_body["query_mode"] = "last3"
     config.write_text(json.dumps(config_body))
-    assert generation_provenance(value)["external_inputs"][str(config)] != before["external_inputs"][str(config)]
+    assert generation_provenance(value)["retrievers"][str(config)] != before["retrievers"][str(config)]
     seen = []
     async def native_run(args):
         seen.append(args.retriever_config)
-        (Path(args.output)/"native-fake.json").write_text(json.dumps({"baseline":"B0",
-            "engine_manifest_sha256": sha256(Path(args.engine_manifest).read_bytes()).hexdigest()}))
+        (Path(args.output)/"native-fake.json").write_text(json.dumps({"baseline":"B0"}))
     async def controller_run(args, config):
         seen.append(args.retriever_config)
         (Path(config.state_dir)/"benchmark-fake.json").write_text(json.dumps({"engine_kind":"mock"}))
@@ -434,8 +370,7 @@ def test_runtime_native_manifest_is_supplied_only_after_owned_server_validation(
     monkeypatch.setattr(native_metrics, 'NativePoolSampler', FakeSampler)
     async def generate(args):
         seen.append(args.engine_manifest)
-        (Path(args.output)/'native-fixture.json').write_text(json.dumps({'baseline': 'B1',
-            'engine_manifest_sha256': sha256(Path(args.engine_manifest).read_bytes()).hexdigest()}))
+        (Path(args.output)/'native-fixture.json').write_text(json.dumps({'baseline': 'B1'}))
     monkeypatch.setattr(native_baseline, '_run', generate)
     monkeypatch.setattr(experiments, 'summarize_run', lambda value: {'measurement_kind': 'fake_contract'})
     monkeypatch.setattr(experiments, 'markdown_report', lambda value: '')
@@ -446,7 +381,7 @@ def test_runtime_native_manifest_is_supplied_only_after_owned_server_validation(
     assert sampling[0]['gpu_capacity'] == 16384 and sampling[0]['initial_empty'] is False
     assert sampling[1:] == ['start', 'stop']
     assert seen == [str(path)]
-    assert result['native_engine_manifest'] == {'path': str(path), 'sha256': sha256(path.read_bytes()).hexdigest()}
+    assert result['native_engine_manifest'] == {'path': str(path)}
     job['native']['engine_manifest'] = str(tmp_path/'another-declared.json')
     with pytest.raises(ValueError, match='cannot replace a declared'):
         asyncio.run(experiments.execute_job(value, job, tmp_path/'wrong',
@@ -466,11 +401,9 @@ def test_predeclared_fixed_test_needs_no_artificial_development_run(tmp_path):
 
 
 def test_system_comparison_binds_method_retrieval_and_execution_inherits_shared(tmp_path, monkeypatch):
-    from bench import experiments
     value=spec(tmp_path)
     value.update(comparison_scope='system',protocols=['P3'],methods=[{'id':'baseline'},
         {'id':'complete','retriever_config':'different.yaml'}],retriever_config='shared.yaml')
-    monkeypatch.setattr(experiments,'retriever_config_sources',lambda path:())
     jobs=matrix_jobs(value)
     assert [j['retrieval']['retriever_config'] for j in jobs]==['shared.yaml','different.yaml']
     assert jobs[1]['overrides']=={}
@@ -497,7 +430,7 @@ def test_display_and_disabled_branches_do_not_block_freeze_or_test(tmp_path, mon
     assert observed
 
 
-def test_metric_change_reuses_bound_raw_answers_and_requires_refreezing(tmp_path, monkeypatch):
+def test_metric_change_recomputes_saved_answers_without_generation(tmp_path, monkeypatch):
     import bench.experiments as experiments
     value = spec(tmp_path)
     results = asyncio.run(run_matrix(value, tmp_path/"metric-dev"))
@@ -506,8 +439,6 @@ def test_metric_change_reuses_bound_raw_answers_and_requires_refreezing(tmp_path
     import bench.report as report
     monkeypatch.setattr(report, "METRIC_SCHEMA_VERSION", report.METRIC_SCHEMA_VERSION + 1)
     monkeypatch.setattr(experiments, "METRIC_SCHEMA_VERSION", report.METRIC_SCHEMA_VERSION)
-    with pytest.raises(ValueError, match="recompute metrics and refreeze"):
-        asyncio.run(run_matrix(value, tmp_path/"stale-metrics", stage="test", frozen=frozen))
     updated = select_development(value, results)
     assert updated["provenance"]["metric_schema_version"] == report.METRIC_SCHEMA_VERSION
     assert all(Path(path).read_bytes() == raw for path, raw in originals.items())

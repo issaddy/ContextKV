@@ -5,7 +5,8 @@ from dataclasses import replace
 import pytest
 
 from adapters.corpus import CorpusIndex
-from adapters.mtrag import OnlineContext, clean_context
+from controller.schema import OnlineContext
+from adapters.retrieval import clean_context
 from adapters.retrieval import BM25SRetriever, load_beir_corpus, to_evidence
 from controller.evidence import EvidenceError, evidence_index
 

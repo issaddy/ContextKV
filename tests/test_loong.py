@@ -1,7 +1,6 @@
 """Author-format fixtures verify input fidelity, source resolution and label isolation."""
 from copy import deepcopy
 from dataclasses import asdict
-from hashlib import sha256
 import json
 import struct
 import zipfile
@@ -47,7 +46,6 @@ def test_complete_sources_order_and_structured_answers_survive_p1_boundary(tmp_p
     for c, name in zip(result["contexts"], row["doc"]):
         body = originals[name]
         assert c["text"] == body.split("\n")[0].strip("#").strip()+"\n"+body+"\n\n"
-        assert c["metadata"]["body_sha256"] == sha256(body.encode()).hexdigest()
     assert json.loads(result["targets"][0]["text"]) == row["answer"] == result["reference_value"]
     assert row["question"] in result["input"][0]["text"]  # Braces were not re-expanded.
     turn = online_turn(result, "P1")
@@ -142,14 +140,12 @@ def test_missing_document_rejects_whole_task_instead_of_dropping_a_source(tmp_pa
         loong.task(example(), docs, revision="fixture-v1")
 
 
-def test_cli_records_unresolved_tasks_and_pinned_sources(tmp_path, monkeypatch):
+def test_cli_records_unresolved_tasks_and_declared_sources(tmp_path):
     path = archive(tmp_path, {"paper/first.md": "# First\nOriginal"})
     rows = [example(id="complete", doc=["first.md"], answer=["First"]),
             example(id="missing", doc=["missing.md"]), example(id="unselected", set=2)]
     questions = tmp_path/"questions.jsonl"
     questions.write_text("".join(json.dumps(r)+"\n" for r in rows))
-    monkeypatch.setattr(loong, "QUESTIONS_SHA256", sha256(questions.read_bytes()).hexdigest())
-    monkeypatch.setattr(loong, "DOCUMENTS_SHA256", sha256(path.read_bytes()).hexdigest())
     output = tmp_path/"output"
     args = ["--questions", str(questions), "--documents", str(path), "--output", str(output), "--length-set", "1"]
     manifest = loong.main(args)
@@ -161,5 +157,4 @@ def test_cli_records_unresolved_tasks_and_pinned_sources(tmp_path, monkeypatch):
     assert issues["task_id"] == "missing" and issues["candidates"] == []
     assert json.loads((output/"split_manifest.json").read_text())["test"] == ["complete"]
     questions.write_text(questions.read_text()+"\n")
-    with pytest.raises(ValueError, match="pinned"):
-        loong.main(args)
+    assert loong.main(args)["exported_tasks"] == 1
