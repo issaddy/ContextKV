@@ -25,6 +25,8 @@ SGLANG_BUILD_RUST_EXTS=none python -m pip install -e vendor/sglang/python
 
 固定版本的`python/pyproject.toml`提供依赖约束。启动命令、Qwen3-32B配置和设备分配统一见[部署](../docs/deployment.md)。当前运行环境使用单GPU、BF16和Python TreeCore；主生成执行完整KV生命周期，辅助任务解释实例使用原生NGRAM。
 
+集成也支持原生NGRAM的FULL token缓存，使解释与生成可共享一个32B实例及Radix/HiCache。业务epoch、完成回执和引用退役沿用同一流程；NGRAM执行参数进入现有运行配置标识，供阶段成本标定使用。隔离验证已完成追加命中及资料版本更新后的新epoch提交和旧引用退役；完整会话质量与资源结果见评价记录。
+
 仅检查补丁应用与语法：
 
 ```bash

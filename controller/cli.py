@@ -11,7 +11,7 @@ from .serialization import dumps, to_jsonable
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="contextkv", description="ContextKV service and session management")
-    parser.add_argument("--config", default="configs/qwen3_32b_cost.yaml", help="YAML configuration")
+    parser.add_argument("--config", default="configs/qwen3_32b.yaml", help="YAML configuration")
     parser.add_argument("--state-dir", help="Override persistent output directory")
     prompt = parser.add_mutually_exclusive_group()
     prompt.add_argument("--system-prompt", help="Override context.system_prompt for this run")

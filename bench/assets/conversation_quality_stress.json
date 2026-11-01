@@ -1,0 +1,72 @@
+{
+  "name": "conversation-quality-stress",
+  "revision": "2026-10-30-v2",
+  "description": "Fictional documents and multi-turn requests for scope, revision, coverage, partial answers and revisits. References and source labels are offline only.",
+  "documents": [
+    {"id": "sora-v1-linux", "version": "1.0", "title": "SoraCast 1.0 Linux upload", "text": "SoraCast version 1.0 on Linux accepts an uploaded file up to 256 MB."},
+    {"id": "sora-v2-linux", "version": "2.0", "title": "SoraCast 2.0 Linux upload", "text": "SoraCast version 2.0 on Linux accepts an uploaded file up to 640 MB."},
+    {"id": "sora-v2-windows", "version": "2.0", "title": "SoraCast 2.0 Windows upload", "text": "SoraCast version 2.0 on Windows accepts an uploaded file up to 400 MB."},
+    {"id": "sora-v1-retry", "version": "1.0", "title": "SoraCast 1.0 retry policy", "text": "In SoraCast version 1.0, an idempotent upload may be retried at most once. Never retry an authentication failure."},
+    {"id": "sora-v2-retry", "version": "2.0", "title": "SoraCast 2.0 retry policy", "text": "In SoraCast version 2.0, an idempotent upload may be retried at most three times. Never retry an authentication failure."},
+    {"id": "sora-dashboard", "version": "2.0", "title": "SoraCast dashboard", "text": "The SoraCast 2.0 dashboard shows upload activity for the last 24 hours."},
+    {"id": "lark-eu", "version": "2026", "title": "Larkbox business retention in the EU", "text": "For Larkbox business accounts in the EU region, deleted objects are retained for 14 days."},
+    {"id": "lark-us", "version": "2026", "title": "Larkbox business retention in the US", "text": "For Larkbox business accounts in the US region, deleted objects are retained for 30 days."},
+    {"id": "lark-us-free", "version": "2026", "title": "Larkbox free retention in the US", "text": "For Larkbox free accounts in the US region, deleted objects are retained for 7 days. Free accounts cannot restore deleted objects."},
+    {"id": "lark-restore", "version": "2026", "title": "Larkbox restoration permissions", "text": "For Larkbox business accounts, a workspace owner can restore a retained deleted object through the console. Ordinary workspace members cannot restore it."},
+    {"id": "lark-sharing", "version": "2026", "title": "Larkbox sharing", "text": "Larkbox workspace owners may invite other members to a workspace."},
+    {"id": "nova-2025", "version": "2025", "title": "Nova 2025 European student travel grant", "text": "The Nova 2025 travel grant for students in Europe has a cap of 1200 euros per trip. Applications require an invoice and proof of enrollment."},
+    {"id": "nova-2026", "version": "2026", "title": "Nova 2026 European student travel grant", "text": "The Nova 2026 travel grant for students in Europe has a cap of 1500 euros per trip. Applications require an invoice and proof of enrollment."},
+    {"id": "nova-eligibility", "version": "2026", "title": "Nova 2026 travel grant eligibility", "text": "The Nova 2026 travel grant is available to enrolled students. Staff members are not eligible for this grant."},
+    {"id": "nova-event", "version": "2026", "title": "Nova conference registration", "text": "Registration for Nova conference days closes on 20 March 2026."},
+    {"id": "kestrel-berlin-day", "version": "2026", "title": "Kestrel Berlin day pass", "text": "A Kestrel Berlin day pass costs 18 credits and is valid until 3 a.m. the following day."},
+    {"id": "kestrel-prague-day", "version": "2026", "title": "Kestrel Prague day pass", "text": "A Kestrel Prague day pass costs 24 credits and is valid until midnight on the day of purchase."},
+    {"id": "kestrel-children", "version": "2026", "title": "Kestrel children fare", "text": "Children under six travel without a Kestrel ticket in both Berlin and Prague."},
+    {"id": "kestrel-weekly", "version": "2026", "title": "Kestrel Berlin weekly pass", "text": "A Kestrel Berlin weekly pass costs 70 credits and is valid for seven consecutive days."}
+  ],
+  "sessions": [
+    {"id": "sora", "split": "dev", "turns": [
+      {"question": "For SoraCast 2.0 on Linux, what is the maximum upload size and what are the retry conditions?", "reference": "The maximum is 640 MB. An idempotent upload may be retried up to three times; authentication failures must not be retried.", "support": ["sora-v2-linux", "sora-v2-retry"], "tags": ["compound", "conditions"]},
+      {"question": "What if I use Windows instead?", "reference": "For SoraCast 2.0 on Windows the maximum upload size is 400 MB. Idempotent uploads may be retried up to three times, but authentication failures must not be retried.", "support": ["sora-v2-windows", "sora-v2-retry"], "tags": ["condition_change", "compound"]},
+      {"question": "How did that work in version 1.0 on Linux?", "reference": "In SoraCast 1.0 on Linux the maximum upload size is 256 MB. Idempotent uploads may be retried once, and authentication failures must not be retried.", "support": ["sora-v1-linux", "sora-v1-retry"], "tags": ["version", "condition_change"]},
+      {"question": "Is there a published SoraCast 2.0 upload limit for macOS?", "reference": "The supplied documents do not state a SoraCast 2.0 upload limit for macOS.", "support": [], "tags": ["unanswerable", "applicability"]},
+      {"question": "Go back to the Windows case we discussed. Can a failed login be retried?", "reference": "No. SoraCast 2.0 authentication failures must not be retried.", "support": ["sora-v2-retry"], "tags": ["revisit", "exception"]}
+    ]},
+    {"id": "lark", "split": "dev", "turns": [
+      {"question": "For Larkbox business in the EU, how long are deleted objects retained, and can customers restore them?", "reference": "Deleted objects are retained for 14 days. A workspace owner can restore a retained object through the console; ordinary members cannot.", "support": ["lark-eu", "lark-restore"], "tags": ["compound", "conditions"]},
+      {"question": "What if we use the US region instead?", "reference": "For a Larkbox business account in the US, retention is 30 days. A workspace owner can restore a retained object through the console; ordinary members cannot.", "support": ["lark-us", "lark-restore"], "tags": ["condition_change", "compound"]},
+      {"question": "How about a free account in the US?", "reference": "For a Larkbox free account in the US, retention is 7 days and deleted objects cannot be restored.", "support": ["lark-us-free"], "tags": ["condition_change", "exception"]},
+      {"question": "And for Canada?", "reference": "The supplied documents do not state the retention or restoration policy for Canada.", "support": [], "tags": ["unanswerable", "condition_change"]},
+      {"question": "Return to the EU business setup. Can a regular workspace member restore the object?", "reference": "No. A workspace owner, not an ordinary workspace member, may restore a retained deleted object.", "support": ["lark-restore"], "tags": ["revisit", "exception"]}
+    ]},
+    {"id": "nova", "split": "test", "turns": [
+      {"question": "For the Nova 2025 European student travel grant, what is the award cap and which documents are required?", "reference": "The cap is 1200 euros per trip. An invoice and proof of enrollment are required.", "support": ["nova-2025"], "tags": ["compound", "version"]},
+      {"question": "What changes for 2026, and are both documents still required?", "reference": "The cap becomes 1500 euros per trip. Both an invoice and proof of enrollment are still required.", "support": ["nova-2026"], "tags": ["version", "compound"]},
+      {"question": "What if I am staff rather than a student?", "reference": "Staff members are not eligible for the Nova 2026 student travel grant.", "support": ["nova-eligibility"], "tags": ["condition_change", "exception"]},
+      {"question": "Switch topics: when does registration for Nova conference days close?", "reference": "Registration closes on 20 March 2026.", "support": ["nova-event"], "tags": ["topic_switch"]},
+      {"question": "Go back to the 2026 European student grant. Is its cap per trip or per year?", "reference": "The 1500-euro cap is per trip.", "support": ["nova-2026"], "tags": ["revisit", "version"]}
+    ]},
+    {"id": "kestrel", "split": "test", "turns": [
+      {"question": "For the Kestrel Berlin day pass, what are the price, validity and refund rules?", "reference": "The pass costs 18 credits and is valid until 3 a.m. the following day. The supplied documents do not specify a refund rule.", "support": ["kestrel-berlin-day"], "tags": ["compound", "partial_answer"]},
+      {"question": "How about the day pass in Prague?", "reference": "The Prague day pass costs 24 credits and is valid until midnight on the day of purchase. The supplied documents do not specify a refund rule.", "support": ["kestrel-prague-day"], "tags": ["condition_change", "partial_answer"]},
+      {"question": "Do children need a ticket there?", "reference": "Children under six travel without a Kestrel ticket in Prague. The supplied documents do not specify the rule for older children.", "support": ["kestrel-children"], "tags": ["conditions", "partial_answer"]},
+      {"question": "Switching to the Berlin weekly pass, what is its price and validity?", "reference": "The Berlin weekly pass costs 70 credits and is valid for seven consecutive days.", "support": ["kestrel-weekly"], "tags": ["topic_switch", "compound"]},
+      {"question": "Back to the Prague day pass: is it refundable?", "reference": "The supplied documents do not specify whether the Prague day pass is refundable.", "support": [], "tags": ["revisit", "unanswerable"]}
+    ]},
+    {"id": "sora-focus", "split": "dev", "turns": [
+      {"question": "For SoraCast 2.0 on Linux, what is the maximum upload size and what are the retry conditions?", "reference": "The maximum is 640 MB. An idempotent upload may be retried up to three times; authentication failures must not be retried.", "support": ["sora-v2-linux", "sora-v2-retry"], "tags": ["compound", "conditions"]},
+      {"question": "For the same version and platform, explain only the retry conditions.", "reference": "An idempotent upload may be retried up to three times; authentication failures must not be retried.", "support": ["sora-v2-retry"], "tags": ["scope_narrowing", "conditions"]}
+    ]},
+    {"id": "lark-focus", "split": "dev", "turns": [
+      {"question": "For Larkbox business in the EU, how long are deleted objects retained, and who can restore them?", "reference": "Deleted objects are retained for 14 days. A workspace owner can restore a retained object through the console; ordinary members cannot.", "support": ["lark-eu", "lark-restore"], "tags": ["compound", "conditions"]},
+      {"question": "For that same plan and region, tell me only who may restore an object.", "reference": "A workspace owner can restore a retained object through the console; ordinary members cannot.", "support": ["lark-restore"], "tags": ["scope_narrowing", "conditions"]}
+    ]},
+    {"id": "nova-focus", "split": "test", "turns": [
+      {"question": "For the Nova 2026 European student travel grant, what is the award cap and which documents are required?", "reference": "The cap is 1500 euros per trip. An invoice and proof of enrollment are required.", "support": ["nova-2026"], "tags": ["compound", "version"]},
+      {"question": "For that same grant, list only the required documents; leave out the award cap.", "reference": "The required documents are an invoice and proof of enrollment.", "support": ["nova-2026"], "tags": ["scope_narrowing", "version"]}
+    ]},
+    {"id": "kestrel-focus", "split": "test", "turns": [
+      {"question": "For the Kestrel Berlin day pass, what are the price and validity?", "reference": "The pass costs 18 credits and is valid until 3 a.m. the following day.", "support": ["kestrel-berlin-day"], "tags": ["compound", "conditions"]},
+      {"question": "In Prague instead, tell me only how long the day pass is valid.", "reference": "The Prague day pass is valid until midnight on the day of purchase.", "support": ["kestrel-prague-day"], "tags": ["scope_narrowing", "condition_change"]}
+    ]}
+  ]
+}

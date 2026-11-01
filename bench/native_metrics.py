@@ -108,7 +108,8 @@ def pool_series(observation, start, end):
         series.insert(0, {**before[-1], "timestamp": start})
     if after and series:
         series.append({**series[-1], "timestamp": end})
-    gaps = [b["timestamp"]-a["timestamp"] for a,b in zip(samples,samples[1:])]
+    # Initialization may block sampling before the request window starts.
+    gaps = [b["timestamp"]-a["timestamp"] for a,b in zip(series,series[1:])]
     return series, {"available": len(series) >= 2, "source": "native_prometheus",
                     "clock": "client_monotonic", "measurement": observation["measurement"],
                     "interval_seconds": observation["interval_seconds"],

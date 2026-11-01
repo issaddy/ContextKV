@@ -42,6 +42,14 @@ def test_series_clips_to_request_window_and_does_not_backfill_from_future():
     assert partial[0]["timestamp"]==2 and not info["complete_window_coverage"]
 
 
+def test_scrape_gap_only_covers_the_integrated_window():
+    samples = [{"timestamp": t, "gpu_slots": 1, "host_slots": 2}
+               for t in (0, 30, 30.4, 30.8, 31.2, 60)]
+    _, info = pool_series(observation(samples), 30.2, 31)
+    assert info["complete_window_coverage"]
+    assert info["max_scrape_gap_seconds"] == pytest.approx(.4)
+
+
 def test_http_observation_failure_does_not_abort_work_and_sampler_closes():
     requests=[]
     def respond(request):

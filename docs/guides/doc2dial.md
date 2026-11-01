@@ -37,26 +37,38 @@ python -m bench.retrieval_eval build \
 
 `--sections`复用[作者结构化分段原则](https://github.com/IBM/multidoc2dial/blob/2456a5609b447e1a12b716f4d658728f346f3041/scripts/data_preprocessor.py)，按连续相同section ID或标题组织段落。输出`passages.jsonl`的4110段是原文连续切片；拼接后仍完整还原488篇文档。标题路径只辅助检索，不改写正文，也不读取grounding挑选段落。`passage_id`定位段落，`document_id`保留父文档；文档级qrels评价先按父ID折叠排名。
 
+使用`bench.retrieval_eval evaluate`评价这些章节排名时，传入`--qrels-parent-corpus data/multidoc2dial/test/passages.jsonl`。工具在离线读取标注后按原顺序折叠父文档，再计算文档级Recall/nDCG；未知片段ID会报错。原始章节排名保留在运行记录中，文档命中不代表已找回该文档内的支持跨度。
+
 作者提供`doc_html_ts`时，同次导入将列表嵌套和`text_id`对应的原文坐标写入`metadata.source_lists`。JSONL的`text`仍是原始切片，已有BM25/BGE索引可直接复用。默认直接使用原文；显式设置`metadata.source_list_reading: true`时，`CorpusIndex`加载阶段插入作者的`ul/ol/li`结构，联合选材与生成使用同一阅读正文。列表中的“或”、前提和例外原话均保留，不自动推断逻辑标签。跨章节列表只保留本段完整的嵌套列表，不合并整篇文档或丢弃原话。
 
 这一处理采用[Docling结构化序列化](https://docling-project.github.io/docling/concepts/chunking/)的原则，直接利用现成HTML及坐标，不引入OCR、额外模型或转换依赖。格式化正文参与既有证据身份和实际token计量；引用和缓存不会误用旧的展平正文。质量导出以当前可引用的实际阅读材料为准，另存原始检索结果。公开输入配对诊断未显示HTML标记的净收益，因此结构数据的保留与是否注入模型分开处理，结果见[统一评价](../data_and_evaluation.md)。
 
-为这一语料生成两份运行配置，模型与解释器设置复用现有入口：
+为这一语料生成推荐的实际历史检索配置，以及既有比较配置：
 
 ```python
 from pathlib import Path
 import yaml
-for name in ("hybrid", "conversational"):
+for name in ("dialogue", "hybrid", "conversational"):
     cfg = yaml.safe_load(Path(f"configs/retriever_{name}.example.yaml").read_text())
     cfg.update(sparse_index="data/multidoc2dial/bm25-sections",
-               dense_index="data/multidoc2dial/bge-m3-sections",
-               reranker_max_length=8192)
+               dense_index="data/multidoc2dial/bge-m3-sections")
+    if name != "dialogue":
+        cfg["reranker_max_length"] = 8192
     Path(f"data/multidoc2dial/retriever_{name}.yaml").write_text(yaml.safe_dump(cfg))
 ```
 
 两个固定BGE检查点均支持8192；将评分预算设置为其支持长度，避免直接用原1024预算截断较长章节。编码器建索引只做一次，完整正文继续进入生成。全文BM25索引仍可作为简单对照使用。
 
-统一矩阵入口：
+按[部署说明](../deployment.md)启动固定32B原生NGRAM服务后，推荐链路可直接运行：
+
+```bash
+python -m bench.run_sessions --config configs/qwen3_32b.yaml \
+  --state-dir runs/multidoc-history run data/multidoc2dial/test/tasks.jsonl \
+  --protocol P3 --retriever-config data/multidoc2dial/retriever_dialogue.yaml \
+  --evidence-corpus data/multidoc2dial/test/passages.jsonl
+```
+
+它使用已有查询适配器、实际QA稠密检索和每轮重建。原文向量、引用身份及持久化生命周期共用现有实现。以下矩阵保留任务解释与成本策略的历史比较配方，运行时须记录实际解码/解释服务及成本标定配置：
 
 ```bash
 python -m bench.b6_joint_sweep --matrix configs/benchmark_multidoc2dial.yaml \

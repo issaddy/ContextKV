@@ -523,6 +523,53 @@ def test_natural_revisit_does_not_restore_superseded_version():
     assert candidate.required_blocks == {new.key} and candidate.feasible
 
 
+def test_revisit_keeps_conflicting_current_and_historical_sources_with_origins():
+    old = make_evidence("Previous limit: 10 seconds.", "api", version="old")
+    new = make_evidence("Current limit: 25 seconds.", "api", version="new")
+    snapshot = SessionSnapshot("s")
+    snapshot = committed(build_candidates(snapshot, "What was the limit?", (old,))[0],
+                         snapshot, "What was the limit?", (old,))
+    query = "Return to the limit question: what applies now?"
+    append, rebuild = build_candidates(snapshot, query, (new,),
+                                       query_context=QueryContext(query, "revisit", (1,)))
+    assert append.feasible and rebuild.feasible
+    assert append.required_blocks == rebuild.required_blocks == {old.key, new.key}
+    for candidate in (append, rebuild):
+        assert candidate.required_blocks <= candidate.visible_blocks
+        origins = dict(candidate.evidence_resolution)
+        assert origins == {old.key: "selected_revisit:turn=1", new.key: "current_retrieval"}
+        assert '"origin": "selected_revisit:turn=1"' in candidate.messages[-1].content
+        assert '"origin": "current_retrieval"' in candidate.messages[-1].content
+        assert "retrieval does not by itself establish applicability" in candidate.messages[-1].content
+
+
+def test_exact_reference_overrides_revisited_and_retrieved_revision():
+    old = make_evidence("Old limit.", "api", version="old")
+    new = make_evidence("New limit.", "api", version="new")
+    snapshot = SessionSnapshot("s")
+    snapshot = committed(build_candidates(snapshot, "Original", (old,))[0],
+                         snapshot, "Original", (old,))
+    ref = next(ref for ref, key in snapshot.reference_map if key == old.key)
+    query = f"What does [{ref}] say?"
+    for candidate in build_candidates(snapshot, query, (new,),
+                                      query_context=QueryContext(query, "revisit", (1,))):
+        assert candidate.required_blocks == {old.key}
+        assert dict(candidate.evidence_resolution)[old.key] == f"explicit_reference:{ref}"
+        assert "Evidence origin metadata" not in candidate.messages[-1].content
+
+
+def test_revisit_does_not_permit_conflicting_current_retrievals():
+    old = make_evidence("Old limit.", "api", version="old")
+    newer = make_evidence("New limit.", "api", version="new")
+    other = make_evidence("Other limit.", "api", version="other")
+    snapshot = SessionSnapshot("s", raw_history=(TurnRecord(1, "Earlier", "Answer", (),
+                               evidence_keys=(old.key,)),), raw_history_version=1, archive=(old,))
+    query = "Return to the limit question."
+    with pytest.raises(EvidenceError, match="conflicting versions"):
+        build_candidates(snapshot, query, (newer, other),
+                         query_context=QueryContext(query, "revisit", (1,)))
+
+
 @pytest.mark.parametrize("query", ("旧版本是否也适用？", "Does the previous version also support this?"))
 def test_explicit_prior_revision_revisit_uses_committed_identity(query):
     old = make_evidence("Only enterprise plans", "api", version="v1")

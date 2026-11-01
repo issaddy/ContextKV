@@ -1,4 +1,5 @@
-# Default real-model execution: Qwen3-32B, non-thinking, measured H200 costs.
+# Optional cost-choice comparison: bind measured costs to the actual decoder/resource profile.
+# Recommended runtime defaults are in qwen3_32b.yaml.
 engine:
   kind: sglang
   base_url: http://127.0.0.1:30000

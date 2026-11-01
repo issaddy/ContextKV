@@ -8,7 +8,9 @@ as unfinished, never executed with invented history.
 from __future__ import annotations
 import asyncio
 import argparse
+import hashlib
 import json
+import math
 import os
 import platform
 from pathlib import Path
@@ -27,6 +29,23 @@ from controller.config import create_controller, load_config
 from controller.evidence import make_evidence
 from controller.schema import TurnRecord
 from controller.serialization import dumps, to_jsonable
+
+
+def load_think_time_plan(path, *, expected_sha256=None):
+    """Read a frozen per-task gap plan; its digest binds both system arms."""
+    if path is None:
+        if expected_sha256 is not None:
+            raise ValueError("expected a frozen think-time plan")
+        return None, None
+    source = Path(path)
+    payload = source.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise ValueError("think-time plan changed after matrix provenance was fixed")
+    plan = json.loads(payload)
+    if not isinstance(plan, dict) or plan.get("schema_version") != 1 or not isinstance(plan.get("gaps_after_task"), dict):
+        raise ValueError("think-time plan needs schema_version 1 and gaps_after_task")
+    return plan["gaps_after_task"], {"path": str(source.resolve()), "sha256": digest}
 
 
 @dataclass(frozen=True)
@@ -59,6 +78,7 @@ class RunReport:
     timed_out_sessions: tuple[str, ...]
     session_makespans: tuple[tuple[str, float], ...]
     time_origin: str
+    concurrency_scope: str = "session"
 
     @property
     def drain_seconds(self) -> float:
@@ -77,7 +97,9 @@ def _answer(result: Any) -> str:
 
 async def run_sessions(sessions: Mapping[str, Sequence[Mapping[str, Any]]] | Sequence[Mapping[str, Any]],
                        handler: Callable[[OnlineTurn], Awaitable[Any]], *, protocol: Protocol = "P2",
-                       concurrency: int = 1, think_time: float = 0.0, arrival_rate: float | None = None,
+                       concurrency: int = 1, concurrency_scope: str = "session",
+                       think_time: float = 0.0, arrival_rate: float | None = None,
+                       think_time_by_task: Mapping[str, float] | None = None,
                        seed: int = 42, arrival_window: float | None = None,
                        drain_timeout: float | None = None, per_turn_timeout: float | None = None,
                        retriever: Any | None = None,
@@ -85,17 +107,21 @@ async def run_sessions(sessions: Mapping[str, Sequence[Mapping[str, Any]]] | Seq
                        on_result: Callable[[TurnRunResult], Any] | None = None) -> RunReport:
     """Run a fixed cohort or Poisson session arrivals, then drain all arrived work.
 
-    concurrency bounds active sessions, including their think time. For open-loop
-    load, arrivals continue independently while excess sessions wait for a slot;
-    their first-turn response time includes that wait. No future turn is submitted
-    until the preceding result is successfully committed by handler. Timing uses
-    the local monotonic clock; no unaligned wall-clock subtraction is performed.
-    The per-turn deadline starts at turn arrival and covers retrieval context,
-    retrieval and generation. Cancellation drains owned work before returning;
-    publishing an already committed result is outside that deadline.
+    In session scope, concurrency bounds active sessions including think time;
+    in turn scope it bounds active retrieval/generation pipelines and a thinking
+    session releases its slot. A per-task plan specifies the gap after each
+    committed non-final turn. Open-loop arrivals use their scheduled monotonic
+    timestamps, including event-loop delay and queueing in response time. In
+    closed-loop session scope, a session arrives when its slot becomes available.
+    No future turn is submitted until the preceding result is committed. The
+    per-turn deadline includes admission, retrieval and generation. Cancellation
+    drains owned work before returning; publishing a committed result is outside
+    that deadline.
     """
     if concurrency < 1 or think_time < 0:
         raise ValueError("invalid concurrency or think_time")
+    if concurrency_scope not in {"session", "turn"}:
+        raise ValueError("concurrency_scope must be session or turn")
     for name, value in (("arrival_rate", arrival_rate), ("arrival_window", arrival_window),
                         ("drain_timeout", drain_timeout), ("per_turn_timeout", per_turn_timeout)):
         if value is not None and value <= 0:
@@ -105,6 +131,17 @@ async def run_sessions(sessions: Mapping[str, Sequence[Mapping[str, Any]]] | Seq
     grouped = dict(sessions) if isinstance(sessions, Mapping) else group_sessions(sessions)
     if any(str(sid) != str(turns[0]["conversation_id"]) for sid, turns in grouped.items() if turns):
         raise ValueError("session key must equal conversation_id")
+    if think_time_by_task is not None:
+        think_time_by_task = dict(think_time_by_task)
+        if think_time != 0:
+            raise ValueError("choose a fixed think_time or a per-task plan")
+        expected = [str(row["task_id"]) for turns in grouped.values()
+                    for row in sorted(turns, key=lambda value: int(value["turn"]))[:-1]]
+        if len(expected) != len(set(expected)) or set(think_time_by_task) != set(expected):
+            raise ValueError("think-time plan must cover every non-final task exactly")
+        if any(type(value) not in (int, float) or not math.isfinite(value) or value < 0
+               for value in think_time_by_task.values()):
+            raise ValueError("think-time plan gaps must be finite nonnegative numbers")
     ids = sorted(grouped)
     rng = random.Random(seed)
     rng.shuffle(ids)
@@ -136,21 +173,50 @@ async def run_sessions(sessions: Mapping[str, Sequence[Mapping[str, Any]]] | Seq
         unfinished[sid] = gate.remaining
         await asyncio.sleep(max(0.0, started + delay - time.monotonic()))
         arrived.add(sid)
-        session_arrive = time.monotonic()
+        session_arrive = (started + delay if arrival_rate is not None or concurrency_scope == "turn"
+                          else time.monotonic())
         active: OnlineTurn | None = None
         turn_arrive = session_arrive
+        session_slot = False
         try:
-            async with semaphore:
-                if arrival_rate is None:
-                    session_arrive = turn_arrive = time.monotonic()
-                while not gate.done:
+            if concurrency_scope == "session":
+                # A closed-loop session has no arrival until admitted. In open
+                # loop, however, the first request's deadline includes this wait.
+                if arrival_rate is not None:
                     active = gate.current()
-                    retrieval_done = None
+                    queue_deadline = (turn_arrive + per_turn_timeout if per_turn_timeout is not None else None)
                     try:
-                        deadline = turn_arrive + per_turn_timeout if per_turn_timeout is not None else None
-                        # One deadline for the pipeline, rather than a fresh
-                        # generation budget after potentially slow retrieval.
-                        async with asyncio.timeout_at(deadline):
+                        async with asyncio.timeout_at(queue_deadline):
+                            await semaphore.acquire()
+                        session_slot = True
+                    except TimeoutError as exc:
+                        failed = TurnRunResult(sid, active.task_id, active.turn, protocol, "timeout",
+                                               turn_arrive, time.monotonic(), error=f"{type(exc).__name__}: {exc}",
+                                               online_turn=active)
+                        unfinished[sid] = max(0, gate.remaining - 1)
+                        active = None
+                        await publish(failed)
+                        makespans[sid] = time.monotonic() - session_arrive
+                        return
+                    active = None
+                else:
+                    await semaphore.acquire()
+                    session_slot = True
+                    session_arrive = turn_arrive = time.monotonic()
+            while not gate.done:
+                active = gate.current()
+                retrieval_done = None
+                try:
+                    deadline = turn_arrive + per_turn_timeout if per_turn_timeout is not None else None
+                    # Admission, retrieval and generation share the same budget.
+                    async with asyncio.timeout_at(deadline):
+                        if deadline is not None and time.monotonic() >= deadline:
+                            raise TimeoutError("turn deadline expired before execution")
+                        turn_slot = False
+                        try:
+                            if concurrency_scope == "turn":
+                                await semaphore.acquire()
+                                turn_slot = True
                             if deadline is not None and time.monotonic() >= deadline:
                                 raise TimeoutError("turn deadline expired before execution")
                             if protocol == "P3":
@@ -163,31 +229,35 @@ async def run_sessions(sessions: Mapping[str, Sequence[Mapping[str, Any]]] | Seq
                                     active = await run_retrieval_worker(retrieve)
                             retrieval_done = time.monotonic()
                             result = await handler(active)
-                        if (isinstance(result, Mapping) and result.get("success") is False) or getattr(result, "success", True) is False:
-                            raise RuntimeError("handler reported unsuccessful generation")
-                        answer = _answer(result)
-                        gate.commit(active.task_id, answer)
-                        unfinished[sid] = gate.remaining
-                        completed = TurnRunResult(sid, active.task_id, active.turn, protocol, "success",
-                                                  turn_arrive, time.monotonic(), answer, result=result,
-                                                  online_turn=active, t_retrieval_done=retrieval_done)
-                    except Exception as exc:
-                        status = "timeout" if isinstance(exc, TimeoutError) else "failed"
-                        failed = TurnRunResult(sid, active.task_id, active.turn, protocol, status,
-                                               turn_arrive, time.monotonic(), error=f"{type(exc).__name__}: {exc}",
-                                               online_turn=active, t_retrieval_done=retrieval_done)
-                        # The failed task is accounted separately from dependent unfinished work.
-                        unfinished[sid] = max(0, gate.remaining - 1)
-                        active = None
-                        await publish(failed)
-                        break
-                    # A sink failure must not reclassify an already committed generation.
+                        finally:
+                            if turn_slot:
+                                semaphore.release()
+                    if (isinstance(result, Mapping) and result.get("success") is False) or getattr(result, "success", True) is False:
+                        raise RuntimeError("handler reported unsuccessful generation")
+                    answer = _answer(result)
+                    gate.commit(active.task_id, answer)
+                    unfinished[sid] = gate.remaining
+                    completed = TurnRunResult(sid, active.task_id, active.turn, protocol, "success",
+                                              turn_arrive, time.monotonic(), answer, result=result,
+                                              online_turn=active, t_retrieval_done=retrieval_done)
+                except Exception as exc:
+                    status = "timeout" if isinstance(exc, TimeoutError) else "failed"
+                    failed = TurnRunResult(sid, active.task_id, active.turn, protocol, status,
+                                           turn_arrive, time.monotonic(), error=f"{type(exc).__name__}: {exc}",
+                                           online_turn=active, t_retrieval_done=retrieval_done)
+                    # The failed task is accounted separately from dependent unfinished work.
+                    unfinished[sid] = max(0, gate.remaining - 1)
                     active = None
-                    await publish(completed)
-                    if not gate.done:
-                        await asyncio.sleep(think_time)
-                        turn_arrive = time.monotonic()
-                makespans[sid] = time.monotonic() - session_arrive
+                    await publish(failed)
+                    break
+                # A sink failure must not reclassify an already committed generation.
+                active = None
+                await publish(completed)
+                if not gate.done:
+                    gap = think_time if think_time_by_task is None else think_time_by_task[completed.task_id]
+                    turn_arrive = completed.t_done + gap
+                    await asyncio.sleep(max(0.0, turn_arrive - time.monotonic()))
+            makespans[sid] = time.monotonic() - session_arrive
         except asyncio.CancelledError:
             timed_out.add(sid)
             if active is not None:
@@ -196,6 +266,9 @@ async def run_sessions(sessions: Mapping[str, Sequence[Mapping[str, Any]]] | Seq
                 unfinished[sid] = max(0, gate.remaining - 1)
             makespans[sid] = time.monotonic() - session_arrive
             raise
+        finally:
+            if session_slot:
+                semaphore.release()
 
     tasks = [asyncio.create_task(one_session(sid, delay)) for sid, delay in offsets]
     try:
@@ -228,7 +301,7 @@ async def run_sessions(sessions: Mapping[str, Sequence[Mapping[str, Any]]] | Seq
                      started, arrival_end, completed, tuple(sorted(results, key=lambda r: (r.conversation_id, r.turn))),
                      len(offsets), len(arrived), sum(unfinished.values()), tuple(sorted(timed_out)),
                      tuple(sorted(makespans.items())),
-                     "pipeline_arrival" if protocol == "P3" else "fixed_retrieval_input_ready")
+                     "pipeline_arrival" if protocol == "P3" else "fixed_retrieval_input_ready", concurrency_scope)
 
 
 def _manifest(config, controller, info, protocol: str):
@@ -301,6 +374,8 @@ async def benchmark(args, config):
     if args.limit_sessions:
         ids = set(sorted({r["conversation_id"] for r in rows})[:args.limit_sessions])
         rows = [r for r in rows if r["conversation_id"] in ids]
+    think_time_by_task, think_time_plan = load_think_time_plan(getattr(args, "think_time_plan", None),
+        expected_sha256=getattr(args, "expected_think_time_plan_sha256", None))
     corpus_snapshot = f"{dataset['name']}-{dataset['revision']}"
     retriever = create_retriever(args.protocol, config_path=getattr(args, "retriever_config", None),
                                 index_path=getattr(args, "retriever_index", None), corpus_path=getattr(args, "corpus", None),
@@ -369,7 +444,10 @@ async def benchmark(args, config):
                                  "input": str(Path(args.input).resolve()),
                                  "split_manifest": args.split_manifest, "split": args.split,
                                  "domain": args.domain, "selected_sessions": sorted({r["conversation_id"] for r in rows})},
-                        workload={"seed": args.seed, "concurrency": args.concurrency, "think_time": args.think_time,
+                        workload={"seed": args.seed, "concurrency": args.concurrency,
+                                  "concurrency_scope": getattr(args, "concurrency_scope", "session"),
+                                  "think_time": args.think_time,
+                                  "think_time_plan": think_time_plan,
                                   "arrival_rate": args.arrival_rate, "arrival_window": args.arrival_window,
                                   "per_turn_timeout": args.per_turn_timeout, "drain_timeout": args.drain_timeout,
                                   "retriever_config": getattr(args, "retriever_config", None)},
@@ -377,7 +455,9 @@ async def benchmark(args, config):
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
         telemetry_before = await service.engine.metrics()
         report = await run_sessions(rows, handle, protocol=args.protocol, concurrency=args.concurrency,
-                                    think_time=args.think_time, arrival_rate=args.arrival_rate,
+                                    concurrency_scope=getattr(args, "concurrency_scope", "session"),
+                                    think_time=args.think_time, think_time_by_task=think_time_by_task,
+                                    arrival_rate=args.arrival_rate,
                                     seed=args.seed, retriever=retriever, drain_timeout=args.drain_timeout,
                                     retrieval_context_provider=retrieval_context_provider,
                                     arrival_window=args.arrival_window, per_turn_timeout=args.per_turn_timeout,
@@ -466,7 +546,10 @@ def main(argv=None):
     bench.add_argument("--retriever-config", help="Optional shared P3 hybrid retriever YAML/JSON")
     bench.add_argument("--evidence-corpus", help="Original passages with version/condition/header metadata")
     bench.add_argument("--concurrency", type=int, default=1)
+    bench.add_argument("--concurrency-scope", choices=["session", "turn"], default="session",
+                       help="bound sessions including think time, or active turn pipelines")
     bench.add_argument("--think-time", type=float, default=0)
+    bench.add_argument("--think-time-plan", help="JSON plan of seconds after each non-final task")
     bench.add_argument("--arrival-rate", type=float)
     bench.add_argument("--arrival-window", type=float)
     bench.add_argument("--per-turn-timeout", type=float)

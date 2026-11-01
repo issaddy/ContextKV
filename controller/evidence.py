@@ -1,7 +1,7 @@
 """Exact evidence identity, immutable references and explicit revisit recovery."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
@@ -69,6 +69,19 @@ def validate_block(block: EvidenceBlock) -> None:
         raise EvidenceError("invalid corpus span")
 
 
+def merge_evidence_block(prior: EvidenceBlock, incoming: EvidenceBlock) -> EvidenceBlock:
+    """Preserve snapshot provenance for an otherwise identical source revision."""
+    if prior == incoming:
+        return prior
+    if prior.key != incoming.key or replace(prior, provenance=()) != replace(incoming, provenance=()):
+        raise EvidenceError("same identity has inconsistent source/provenance metadata")
+    prior_source = tuple(value for value in prior.provenance if not value.startswith("corpus_snapshot:"))
+    incoming_source = tuple(value for value in incoming.provenance if not value.startswith("corpus_snapshot:"))
+    if prior_source != incoming_source:
+        raise EvidenceError("same identity has inconsistent source/provenance metadata")
+    return replace(prior, provenance=tuple(dict.fromkeys((*prior.provenance, *incoming.provenance))))
+
+
 def evidence_index(blocks: Iterable[EvidenceBlock], *,
                    committed: Iterable[EvidenceBlock] = ()) -> dict[EvidenceKey, EvidenceBlock]:
     """Validate incoming evidence once and extend a trusted committed archive."""
@@ -76,9 +89,7 @@ def evidence_index(blocks: Iterable[EvidenceBlock], *,
     for block in blocks:
         validate_block(block)
         prior = result.get(block.key)
-        if prior is not None and prior != block:
-            raise EvidenceError("same identity has inconsistent source/provenance metadata")
-        result[block.key] = block
+        result[block.key] = merge_evidence_block(prior, block) if prior is not None else block
     return result
 
 
@@ -170,17 +181,17 @@ def resolve_required_evidence_with_reasons(query: str, current: Iterable[Evidenc
             for key in turn.evidence_keys:
                 reasons.setdefault(key, f"selected_revisit:turn={ordinal}")
     if not allows_version_comparison(query, policy):
-        # An explicitly requested archived revision replaces a conflicting
-        # retrieval hit for the SAME passage. Other documents and declared
-        # dependencies remain subject to the existing visibility checks.
+        # Only an exact source request establishes which revision the user
+        # wants. A revisit identifies earlier conversational material, not
+        # whether its revision still applies to the current question.
         explicit = {}
         for key, reason in reasons.items():
-            if reason == "explicit_key" or reason.startswith(("explicit_reference:", "selected_revisit:")):
+            if reason == "explicit_key" or reason.startswith("explicit_reference:"):
                 group = (key.corpus_id, key.document_id, key.passage_id)
                 explicit.setdefault(group, set()).add(key)
         for key in tuple(reasons):
             choices = explicit.get((key.corpus_id, key.document_id, key.passage_id), ())
-            if reasons[key] == "current_retrieval" and len(choices) == 1 and key not in choices:
+            if len(choices) == 1 and key not in choices:
                 del reasons[key]
     required = set(reasons)
     pending = list(required)
@@ -194,9 +205,21 @@ def resolve_required_evidence_with_reasons(query: str, current: Iterable[Evidenc
                 reasons[dependency] = "dependency_of:" + key.passage_id
                 pending.append(dependency)
     selected = tuple(archive[key] for key in sorted(required))
-    if not allows_version_comparison(query, policy) and version_conflicts(
-            (b.key for b in selected), (b.key for b in selected)):
-        raise EvidenceError("required evidence contains conflicting versions; explicit comparison required")
+    if not allows_version_comparison(query, policy):
+        groups: dict[tuple[str, str, str], list[EvidenceKey]] = {}
+        for key in required:
+            groups.setdefault((key.corpus_id, key.document_id, key.passage_id), []).append(key)
+        for keys in groups.values():
+            if len(keys) < 2:
+                continue
+            origins = [reasons[key] for key in keys]
+            # Keep a conflicting current hit and selected historical source
+            # together for the answerer to resolve. Do not generalize this to
+            # multiple retrieval revisions or conflicting dependencies.
+            if (origins.count("current_retrieval") != 1 or
+                    not all(origin == "current_retrieval" or origin.startswith("selected_revisit:")
+                            for origin in origins)):
+                raise EvidenceError("required evidence contains conflicting versions; explicit comparison required")
     return selected, tuple(sorted(reasons.items()))
 
 

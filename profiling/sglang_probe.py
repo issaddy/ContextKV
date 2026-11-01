@@ -25,12 +25,18 @@ from profiling.transfers import from_completed_events
 
 
 class SGLangProbe:
-    def __init__(self, engine: SGLangEngineClient, token_ids, *, seed=42, telemetry_path=None):
+    """Recorded prompt maps use total length including the one-token concurrency nonce."""
+    def __init__(self, engine: SGLangEngineClient, token_ids, *, seed=42, telemetry_path=None,
+                 prompt_inputs=None, citation_scopes=None, ignore_eos=True):
         self.engine = engine
         self.tokens = tuple(token_ids)
         if len(set(self.tokens)) < 2:
             raise ValueError("supply at least two distinct valid non-special model token IDs")
         self.seed = seed
+        self.prompt_inputs = prompt_inputs
+        self.citation_scopes = citation_scopes
+        self._active_citations = None
+        self.ignore_eos = ignore_eos
         self.telemetry_path = Path(telemetry_path) if telemetry_path else None
         self.run_id = uuid.uuid4().hex
         self.repetition = 0
@@ -64,7 +70,8 @@ class SGLangProbe:
             return await self.engine.generate(input_ids=ids, session_id=sid,
                 expected_generation=prepared.session_generation,
                 expected_restart_id=info.engine_restart_id, attempt_id=attempt,
-                fingerprint=self.engine.fingerprint, max_new_tokens=output_tokens, ignore_eos=True)
+                fingerprint=self.engine.fingerprint, max_new_tokens=output_tokens, ignore_eos=self.ignore_eos,
+                citation_ids=self._active_citations)
         finally:
             # A retirement closes admission even when the request failed.
             await self.engine.retire(sid, prepared.session_generation,
@@ -91,8 +98,12 @@ class SGLangProbe:
         if case.concurrency > len(set(self.tokens)):
             raise ValueError("token vocabulary too small for distinct concurrent prefixes")
         leaders = rng.sample(list(dict.fromkeys(self.tokens)), case.concurrency)
-        self._inputs = tuple(tuple([leader] + [rng.choice(self.tokens)
-                              for _ in range(case.prompt_tokens-1)]) for leader in leaders)
+        self._active_citations = (self.citation_scopes[case.prompt_tokens]
+                                 if self.citation_scopes is not None else None)
+        tails = ([self.prompt_inputs[case.prompt_tokens]] * case.concurrency
+                 if self.prompt_inputs is not None else
+                 [[rng.choice(self.tokens) for _ in range(case.prompt_tokens-1)] for _ in leaders])
+        self._inputs = tuple((leader, *tail) for leader, tail in zip(leaders, tails, strict=True))
         if case.prefix_tokens:
             warms = []
             for ids in self._inputs:

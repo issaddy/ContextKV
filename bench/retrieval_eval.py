@@ -20,7 +20,7 @@ from controller.schema import OnlineContext
 from adapters.retrieval import BM25SRetriever, load_beir_corpus
 from adapters.query_views import user_topic_manifest, user_topic_view
 from bench.metrics import percentile
-from bench.quality import load_qrels, retrieval_quality
+from bench.quality import collapse_passage_ranking, load_passage_parents, load_qrels, retrieval_quality
 
 
 @dataclass(frozen=True)
@@ -106,7 +106,7 @@ def evaluate_queries(queries, sparse, dense=None, encoder=None, reranker=None, *
                     "elapsed_ms": view_ms+values["elapsed_ms"]}
 
 
-def summarize(rows, qrels, *, candidate_k=50):
+def summarize(rows, qrels, *, candidate_k=50, passage_parents=None):
     """Post-hoc qrels analysis, with missing labels explicit and sessions retained."""
     by_method = defaultdict(list)
     for row in rows:
@@ -116,6 +116,9 @@ def summarize(rows, qrels, *, candidate_k=50):
         retrieved = {r["task_id"]: r["candidate_ids"] for r in items}
         if len(retrieved) != len(items):
             raise ValueError("duplicate task in retrieval method")
+        if passage_parents is not None:
+            retrieved = {task_id: collapse_passage_ranking(ids, passage_parents)
+                         for task_id, ids in retrieved.items()}
         quality = retrieval_quality(retrieved, qrels, k=5)
         pool = retrieval_quality(retrieved, qrels, k=candidate_k)
         sessions = defaultdict(list)
@@ -130,6 +133,7 @@ def summarize(rows, qrels, *, candidate_k=50):
             "elapsed_ms": {"mean": mean(latencies), "p50": percentile(latencies, .5),
                            "p95": percentile(latencies, .95)}}
     return {"schema_version": 1, "methods": methods,
+        "qrels_granularity": "parent_document" if passage_parents is not None else "retrieved_id",
         "answer_quality_evaluated": False,
         "timing_scope": "query-view formation plus sequential stage wall time; excludes model/index loading and answer generation; "
                         "shared stages are reused, not an independent latency benchmark",
@@ -159,6 +163,7 @@ def main(argv=None):
     evaluate.add_argument("--reranker-path")
     evaluate.add_argument("--reranker-max-length", type=int, default=512)
     evaluate.add_argument("--qrels", required=True)
+    evaluate.add_argument("--qrels-parent-corpus", help="JSONL with passage_id/document_id; collapse ranked passages before document-level qrels scoring")
     evaluate.add_argument("--output", required=True)
     evaluate.add_argument("--query-modes", nargs="+", choices=["current", "last3", "all_user", "correction_aware", "user_topic", "generated_history"], default=["last3"])
     evaluate.add_argument("--history-audit")
@@ -229,8 +234,12 @@ def main(argv=None):
                 stream.write(json.dumps(row, ensure_ascii=False)+"\n")
                 stream.flush()
         # Ranking is finished before the qrels are opened, including missing-label accounting.
-        summary = summarize(results, load_qrels(args.qrels), candidate_k=args.candidate_k)
+        parents = load_passage_parents(args.qrels_parent_corpus) if args.qrels_parent_corpus else None
+        summary = summarize(results, load_qrels(args.qrels), candidate_k=args.candidate_k,
+                            passage_parents=parents)
         manifest["sources"]["qrels"] = file_source(args.qrels)
+        if args.qrels_parent_corpus:
+            manifest["sources"]["qrels_parent_corpus"] = str(Path(args.qrels_parent_corpus).resolve())
         (output/"summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2)+"\n")
         manifest["status"] = "complete"
     except Exception as exc:

@@ -234,7 +234,8 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=N
         **{f"{tier}_slot_seconds_per_nontruncated_turn": pools[f"{tier}_slot_seconds"] / nontruncated if normalize else None
            for tier in ("gpu", "host")}}
     return {"metric_schema_version": METRIC_SCHEMA_VERSION, "measurement_kind": source, "evaluation_scope": "single_run_observations",
-            "time_origin": report["time_origin"], "timing": summary,
+            "time_origin": report["time_origin"], "concurrency_scope": report.get("concurrency_scope", "session"),
+            "timing": summary,
             "decisions": decision_summary(turns),
             "cohort": {"scheduled_sessions": report["scheduled_sessions"], "arrived_sessions": report["arrived_sessions"],
                        "unfinished_turns": report["unfinished_turns"], "timed_out_sessions": report["timed_out_sessions"],
@@ -332,7 +333,8 @@ def markdown_report(summary):
                      summary["resource_efficiency"][f"{tier}_slot_seconds_per_nontruncated_turn"]))
     lines = ["# ContextKV 目标场景评价", "",
         f"指标版本：2；测量类型：{summary['measurement_kind']}；返回方式：{timing['response_mode']}。",
-        f"时间起点：{summary['time_origin']}；声明SLO：{json.dumps(timing['slo'])}。", "",
+        f"时间起点：{summary['time_origin']}；并发口径：{summary.get('concurrency_scope', 'session')}；"
+        f"声明SLO：{json.dumps(timing['slo'])}。", "",
         "| 主要服务指标 | 数值 |", "|---|---:|",
         *(f"| {label} | {number(value)} |" for label, value in rows), "",
         f"质量评价状态：{summary['quality']['status']}。语义质量独立评价，不计入上述goodput。"]

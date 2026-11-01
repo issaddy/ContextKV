@@ -1,10 +1,10 @@
 # Qwen3-32B部署
 
-默认生成、任务解释和真实模型测试使用本地Qwen3-32B非思考模式。容器项目为`/home/relay/songjiayun/ContextKV`，模型为`/media/ssd1/qwen3-32b`。BGE/BM25保持检索职责。
+推荐方案使用一个Qwen3-32B非思考、原生NGRAM服务。查询适配后的BGE负责实际历史稠密检索，每轮把当前原文与实际QA重建后生成；原生Radix/HiCache继续匹配共同前缀，控制器保留事务提交、epoch和引用退役。容器项目为`/home/relay/songjiayun/ContextKV`，模型为`/media/ssd1/qwen3-32b`。
 
-## 准备与启动生成服务
+## 准备与启动
 
-在项目根目录准备固定引擎和模型身份：
+首次配置时，在项目根目录准备固定引擎、查询适配器依赖与模型身份；已准备好的GPU工作区可省略bootstrap命令：
 
 ```bash
 export CONTEXTKV_MODEL_SCOPE_PATH="$PWD/configs/model_scopes/qwen3-32b.local.json"
@@ -20,45 +20,34 @@ export CONTEXTKV_SAMPLE_POOL=1
 CONTEXTKV_HICACHE_GB=16 CONTEXTKV_HICACHE_LAYOUT=layer_first \
 SGLANG_HICACHE_TMA_TRANSFER=0 bash scripts/launch_sglang.sh \
   --host 127.0.0.1 --port 30000 --max-total-tokens 32768 \
-  --mem-fraction-static 0.8 --max-running-requests 8 \
-  --attention-backend fa3 --chunked-prefill-size 8192 --schedule-policy fcfs
+  --mem-fraction-static 0.65 --max-running-requests 8 \
+  --attention-backend fa3 --chunked-prefill-size 8192 --schedule-policy fcfs \
+  --speculative-algorithm NGRAM --speculative-ngram-max-bfs-breadth 1 \
+  --speculative-num-draft-tokens 12
 ```
 
-固定SGLang提交为`3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。模型目录、tokenizer和模板必须与scope一致；实际HF loading revision为null，scope保留本地快照身份。模型或资源改变后重新核对[身份与采样](deployment.md)和[成本适用范围](guides/stage_cost_model.md)。业务生成保持非推测解码，辅助服务的NGRAM设置不复制到C生命周期路径。
-
-在另一终端使用同一环境：
-
-```bash
-python -m profiling.smoke --config configs/qwen3_32b_scope.example.yaml \
-  --report runs/qwen3-32b-smoke.json
-python -m controller.cli --config configs/qwen3_32b_cost.yaml serve
-```
-
-`qwen3_32b_cost.yaml`加载当前32B实测成本；`qwen3_32b_scope.example.yaml`保留固定REBUILD，供新环境启动和补采。模型scope绑定本地配置、分词器和模板；更换模型目录时先用`python -m engine_patches.contextkv_model_scope --help`查看检查入口。真实资源以引擎报告为准，当前16GB Host对应61056个KV槽位。正常服务关闭`CONTEXTKV_ENABLE_PROFILING`。
+SGLang固定为`3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。补丁支持FULL模型的普通解码和原生NGRAM；实际解码参数进入缓存配置与成本适用范围。保持原生startup warmup，`/health`就绪后再开始测量。性能对照只在其自有空闲服务上清空缓存；运行中的业务缓存按原生生命周期管理。
 
 ## 多轮检索服务
 
-任务解释使用另一个32B实例，生成GPU0、解释与BGE检索共享GPU1。两实例使用独立缓存池，完整响应计入全部在线调用。在另一终端启动解释服务：
+同一环境的另一终端运行：
 
 ```bash
-(
-  source .venv-sglang/bin/activate
-  export CUDA_VISIBLE_DEVICES=1
-  export CONTEXTKV_MODEL_SCOPE_PATH="$PWD/configs/model_scopes/qwen3-32b.local.json"
-  export CONTEXTKV_MODEL_PATH=/media/ssd1/qwen3-32b
-  export CONTEXTKV_FINGERPRINT_JSON="$(python -c 'import json; from dataclasses import asdict; from controller.config import load_config, create_model_template; print(json.dumps(asdict(create_model_template(load_config("configs/qwen3_32b_scope.example.yaml").model).fingerprint)))')"
-  CONTEXTKV_SAMPLE_POOL=1 CONTEXTKV_HICACHE_GB=8 \
-  bash scripts/launch_sglang.sh --host 127.0.0.1 --port 30001 \
-    --max-total-tokens 16384 --mem-fraction-static 0.65 --max-running-requests 8 \
-    --attention-backend fa3 --chunked-prefill-size 8192 --schedule-policy fcfs \
-    --speculative-algorithm NGRAM --speculative-ngram-max-bfs-breadth 1 \
-    --speculative-num-draft-tokens 12
-)
-CUDA_VISIBLE_DEVICES=0,1 python -m controller.cli --config configs/qwen3_32b_cost.yaml serve \
-  --retriever-config configs/retriever_conversational.example.yaml \
+CUDA_VISIBLE_DEVICES=0 python -m controller.cli serve \
+  --retriever-config configs/retriever_dialogue.example.yaml \
   --evidence-corpus data/mtrag-official/cloud.jsonl --corpus-id mtrag
 ```
 
-NGRAM仅用于任务解释实例，由原生目标模型和语法验证。保持启动warmup；需要清空辅助缓存时，先确认服务空闲，再使用原生`/flush_cache`。生成端使用研究接口维护业务epoch和退役状态。
+CLI默认加载`configs/qwen3_32b.yaml`：固定32B、32K窗口、1024输出预算、每轮REBUILD。它使用已提交实际历史、当前原始证据和原生缓存，不需要成本标定或额外解释调用。BGE权重、Cloud索引及`models/bge-m3-dialogue-query-v1`按[检索指南](guides/hybrid_retrieval.md)准备。已评测查询适配器在GPU工作区可用，本地备份为`runs/recipe-validation-20261101/query-adapter-used.tar.gz`；恢复归档可得到同名`models/`目录。它是训练资产，不能以未训练BGE视作等价替代。
 
-检索默认`conversational`、`single`和`ranked`，配置见[检索指南](guides/hybrid_retrieval.md)。HTTP请求、幂等和恢复见[接口指南](guides/http_retrieval.md)。原生B0/B1对照使用clean stock checkout，研究控制器使用patched checkout；[owned矩阵](data_and_evaluation.md)只管理其声明的进程，解释服务需单独记录和关闭。
+当前GPU工作区已将PEFT 0.21.2与Accelerate 1.15.0装入`.venv-sglang`，标准`runs/fingerprint.json`已生成；Dense5的CLI/HTTP运行不需要实验用`PYTHONPATH`。正式环境验证与依赖记录在`runs/closeout-20261101/clean-runtime-results.tar.gz`。
+
+模型目录、tokenizer和模板与scope保持一致。当前16 GiB Host在本环境对应61056个原生槽位，实际容量以引擎报告为准。正常服务关闭`CONTEXTKV_ENABLE_PROFILING`。`qwen3_32b_scope.example.yaml`继续用于独立启动探针；`qwen3_32b_cost.yaml`保留成本策略对照，使用前按[成本指南](guides/stage_cost_model.md)绑定匹配当前解码与资源配置的实测数据。
+
+## 可选任务解释
+
+需要结构化任务状态或自然回访历史来源时，可配置32B解释器。它可共享上述NGRAM服务：在对应检索配置中设置`selector.base_url: http://127.0.0.1:30000`和`device: cuda:0`。`query_mode: dialogue`保留实际QA检索视图；`query_mode: conversational`让解释结果驱动检索。解释调用和选材的完整开销随该配置计入评价。
+
+现有`retriever_conversational.example.yaml`保留独立解释实例的30001端口配置。使用该配置时，在GPU1上以同一模型、原生NGRAM、16K槽位和8 GiB Host启动30001服务；共享部署则修改上述两个字段。推荐默认方案省略`selector`；显式来源引用、资料快照迁移及引用退役继续由共同证据和控制器处理，结构化回访能力由解释配置提供。
+
+HTTP请求与恢复见[接口指南](guides/http_retrieval.md)。原生stock与patched对照的模型、采样和缓存预算分别记录；实验只管理自己启动的进程。当前推荐方案的质量、完整响应与GPU/Host结果见[数据与评价](data_and_evaluation.md)。

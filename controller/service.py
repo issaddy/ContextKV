@@ -20,7 +20,7 @@ from .planner import PlannerKnobs, choose_plan
 from .schema import (ClientTiming, CompletionReceipt, CostEstimate, EvidenceBlock, EvidenceKey,
                      EvidenceSpan, GenerationResult, NoFeasiblePlan, QueryContext, SessionSnapshot, TurnRecord)
 from .serialization import dumps
-from .session_store import (Attempt, IdempotencyConflict, PendingAttempt, SessionStore, StoreError)
+from .session_store import (Attempt, IdempotencyConflict, PendingAttempt, SessionStore, StoreError, VersionConflict)
 from .templates import ByteTemplate, candidate_request
 
 
@@ -232,13 +232,16 @@ class Controller:
                          reference_history: tuple[TurnRecord, ...] | None = None,
                          retrieval_priority: tuple[EvidenceKey, ...] | None = None,
                          query_context: QueryContext | None = None,
-                         evidence_provider: Callable[[SessionSnapshot], Awaitable[EvidenceSelection]] | None = None) -> TurnResponse:
+                         evidence_provider: Callable[[SessionSnapshot], Awaitable[EvidenceSelection]] | None = None,
+                         from_corpus_snapshot_id: str | None = None) -> TurnResponse:
         if not session_id or not query.strip():
             raise ValueError("session_id and query must be nonempty")
         evidence = tuple(evidence)
         if evidence_provider is not None and (evidence or reference_history is not None or retrieval_priority is not None
                                              or query_context is not None):
             raise ValueError("retrieved queries cannot also supply evidence, reference history or retrieval priority")
+        if from_corpus_snapshot_id is not None and (evidence_provider is None or not from_corpus_snapshot_id.strip()):
+            raise ValueError("a source snapshot transition requires a retrieved query and nonempty prior snapshot")
         request_id = request_id or uuid.uuid4().hex
         # Query identity is stable before retrieval. A retry returns the original
         # attempt rather than re-retrieving against newer history or rankings.
@@ -253,7 +256,15 @@ class Controller:
             self.events.emit("turn_received", business_session_id=session_id, request_id=request_id)
             previous = self.store.find_request(session_id, request_id)
             if previous:
-                if previous.request_hash != request_hash:
+                matches = previous.request_hash == request_hash
+                if not matches and evidence_provider is not None:
+                    # A committed retry belongs to the snapshot it originally
+                    # read, even when this worker now serves a newer index.
+                    original_snapshot = (previous.plan.candidate.corpus_snapshot_id if previous.plan is not None
+                                         else self.store.get_snapshot(session_id).corpus_snapshot_id)
+                    original = ("retrieved_query", query, original_snapshot)
+                    matches = previous.request_hash == hashlib.sha256(dumps(original).encode()).hexdigest()
+                if not matches:
                     raise IdempotencyConflict("request_id reused with different content")
                 if previous.stage == "COMMITTED":
                     return self._response(previous, replay=True)
@@ -266,13 +277,19 @@ class Controller:
                     return self._response(previous, replay=True)
                 if previous and previous.stage == "FAILED":
                     raise StoreError("Recovered terminal failure; use a new request_id")
-            snap = self.store.read_snapshot(session_id, corpus_snapshot_id)
-            if snap.corpus_snapshot_id != corpus_snapshot_id:
-                raise ValueError("Session corpus snapshot is fixed; start a new session for another snapshot")
+            snap = (self.store.get_snapshot(session_id) if from_corpus_snapshot_id is not None
+                    else self.store.read_snapshot(session_id, corpus_snapshot_id))
+            if from_corpus_snapshot_id is not None and from_corpus_snapshot_id != snap.corpus_snapshot_id:
+                raise VersionConflict("Session corpus snapshot changed before the requested transition")
+            migrating = snap.corpus_snapshot_id != corpus_snapshot_id
+            if migrating and from_corpus_snapshot_id is None:
+                raise ValueError("Session corpus snapshot differs; explicitly provide its current snapshot to transition")
             if reference_history is not None:
                 snap = self.store.sync_history(session_id, reference_history, snap.version)
                 self.events.emit("reference_history_sync", business_session_id=session_id,
                                  raw_history_version=snap.raw_history_version, pending=snap.history_sync_pending)
+            working_snap = (replace(snap, corpus_snapshot_id=corpus_snapshot_id, must_rebuild=True)
+                            if migrating else snap)
             attempt = self.store.begin_attempt(session_id, request_id, request_hash, query, snap.version)
             if attempt.stage == "COMMITTED":
                 return self._response(attempt, replay=True)
@@ -283,7 +300,7 @@ class Controller:
                 if evidence_provider is not None:
                     retrieval_started = time.monotonic()
                     try:
-                        selection = await evidence_provider(snap)
+                        selection = await evidence_provider(working_snap)
                     except BaseException as exc:
                         self.events.emit("retrieval_failed", business_session_id=session_id,
                                          attempt_id=attempt.attempt_id, error=str(exc),
@@ -297,7 +314,8 @@ class Controller:
                 if info.fingerprint != self.template.fingerprint:
                     raise EngineError("FINGERPRINT_MISMATCH")
                 recovery = snap.current_epoch is not None and snap.current_epoch.engine_restart_id != info.engine_restart_id
-                planning_snap = replace(snap, force_new_epoch_for_recovery=True, must_rebuild=True) if recovery else snap
+                planning_snap = (replace(working_snap, force_new_epoch_for_recovery=True, must_rebuild=True)
+                                 if recovery else working_snap)
                 measure_redundancy = "redundancy_threshold" in {self.knobs.strategy, self.knobs.fallback_strategy}
                 candidates = build_candidates(planning_snap, query, evidence, self.policy, self.template,
                                                retrieval_priority=retrieval_priority,
@@ -311,7 +329,7 @@ class Controller:
                 if quotes is not None and quotes.engine_restart_id != info.engine_restart_id:
                     # At most one re-quote after a restart; native admission remains authoritative.
                     info = await self.engine.info()
-                    planning_snap = replace(snap, force_new_epoch_for_recovery=True, must_rebuild=True)
+                    planning_snap = replace(working_snap, force_new_epoch_for_recovery=True, must_rebuild=True)
                     candidates = build_candidates(planning_snap, query, evidence, self.policy, self.template,
                                                    retrieval_priority=retrieval_priority,
                                                    query_context=query_context,
@@ -349,7 +367,8 @@ class Controller:
                                        replace(self.knobs, strategy=self.knobs.fallback_strategy),
                                        concurrency=pressure, control_ms=planning_control_ms)
                 append_failure = next((c.reason for c in candidates if c.action == "APPEND" and not c.feasible), None)
-                reason = ("reference_history_sync" if snap.history_sync_pending else
+                reason = ("corpus_snapshot_change" if migrating else
+                          "reference_history_sync" if snap.history_sync_pending else
                           "recovery" if planning_snap.force_new_epoch_for_recovery else
                           "initial" if snap.current_epoch is None else
                           (append_failure or plan.reason) if plan.candidate.action == "REBUILD" else "append")
@@ -361,7 +380,7 @@ class Controller:
                 # History protocol changes and failed attempts still need safe recovery.
                 new_epoch = (snap.current_epoch is None or snap.history_sync_pending
                              or (plan.candidate.action == "REBUILD" and self.epoch_retirement)
-                             or planning_snap.force_new_epoch_for_recovery)
+                             or planning_snap.force_new_epoch_for_recovery or migrating)
                 if new_epoch:
                     attempt = self.store.plan_new_epoch(planned, info.engine_restart_id, reason)
                     ack = await self._prepare_epoch(attempt, info)

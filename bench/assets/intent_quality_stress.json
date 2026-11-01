@@ -1,0 +1,21 @@
+{
+  "description": "Offline intent rubric for the 16 followups of four existing fictional stress sessions. Score requested task and applicable conditions separately; this is not source or answer ground truth.",
+  "cases": {
+    "kestrel<::>2": "Kestrel Prague day pass: price, validity and refund rules.",
+    "kestrel<::>3": "Kestrel Prague: ticket requirements for children.",
+    "kestrel<::>4": "Kestrel Berlin weekly pass: price and validity.",
+    "kestrel<::>5": "Kestrel Prague day pass: whether it can be refunded.",
+    "lark<::>2": "Larkbox US business account: deleted-object retention duration and whether restoration is allowed.",
+    "lark<::>3": "Larkbox US free account: deleted-object retention duration and whether restoration is allowed.",
+    "lark<::>4": "Larkbox Canada free account: deleted-object retention duration and whether restoration is allowed.",
+    "lark<::>5": "Larkbox EU business account: whether a regular workspace member can restore a deleted object.",
+    "nova<::>2": "Nova 2026 European student travel grant: changes from 2025 and whether both previously discussed documents remain required.",
+    "nova<::>3": "Nova 2026 European student travel grant: eligibility for staff rather than students.",
+    "nova<::>4": "Nova conference days: registration deadline.",
+    "nova<::>5": "Nova 2026 European student travel grant: whether the award cap is per trip or per year.",
+    "sora<::>2": "SoraCast 2.0 on Windows: maximum upload size and retry conditions.",
+    "sora<::>3": "SoraCast 1.0 on Linux: maximum upload size and retry conditions.",
+    "sora<::>4": "SoraCast 2.0 on macOS: published upload limit.",
+    "sora<::>5": "SoraCast 2.0 on Windows: whether a failed login can be retried."
+  }
+}

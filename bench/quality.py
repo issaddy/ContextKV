@@ -70,6 +70,33 @@ def load_qrels(path: str | Path) -> dict[str, dict[str, float]]:
     return dict(qrels)
 
 
+def load_passage_parents(path: str | Path) -> dict[str, str]:
+    """Read an explicit passage-to-document mapping for document-level qrels."""
+    parents = {}
+    with Path(path).open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            passage, document = row.get("passage_id"), row.get("document_id")
+            if not isinstance(passage, str) or not passage or not isinstance(document, str) or not document:
+                raise ValueError("parent corpus needs passage_id and document_id strings")
+            if passage in parents:
+                raise ValueError(f"duplicate passage ID in parent corpus: {passage}")
+            parents[passage] = document
+    if not parents:
+        raise ValueError("parent corpus must not be empty")
+    return parents
+
+
+def collapse_passage_ranking(passages: Sequence[str], parents: Mapping[str, str]) -> list[str]:
+    """Keep the first occurrence of each parent in a passage ranking."""
+    missing = set(passages) - parents.keys()
+    if missing:
+        raise ValueError(f"ranked passage IDs missing from parent corpus: {sorted(missing)}")
+    return list(dict.fromkeys(parents[passage] for passage in passages))
+
+
 def retrieval_quality(retrieved: Mapping[str, Sequence[str]], qrels: Mapping[str, Mapping[str, float]], k: int = 5) -> dict:
     """Recall and graded nDCG; unlabelled generation tasks are explicitly missing."""
     if k < 1:

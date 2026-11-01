@@ -5,7 +5,8 @@ import tempfile
 import unittest
 from adapters.mtrag import load_rows, online_turn
 from bench.metrics import TurnTiming, occupancy_integral, summarize_timings, transfer_totals
-from bench.quality import export_evaluation, paired_cluster_bootstrap, retrieval_quality
+from bench.quality import (collapse_passage_ranking, export_evaluation, load_passage_parents,
+                           paired_cluster_bootstrap, retrieval_quality)
 from profiling.common import Measurement, summarize_measurements
 from profiling.prefill import calibration_grid
 from profiling.transfers import from_completed_events
@@ -45,6 +46,18 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(quality["mean_ndcg"], 1)
         self.assertEqual(quality["missing_qrels_task_ids"], ["missing"])
         self.assertEqual(quality["evaluated_tasks"], 1)
+
+    def test_document_qrels_collapse_sections_before_the_rank_cutoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'passages.jsonl'
+            path.write_text(''.join(json.dumps({'passage_id': passage, 'document_id': document}) + '\n'
+                for passage, document in [('a1', 'a'), ('a2', 'a'), ('b1', 'b'), ('c1', 'c')]))
+            parents = load_passage_parents(path)
+            ranking = collapse_passage_ranking(['a1', 'a2', 'b1', 'c1'], parents)
+            self.assertEqual(ranking, ['a', 'b', 'c'])
+            self.assertEqual(retrieval_quality({'q': ranking}, {'q': {'b': 1}}, k=2)['mean_recall'], 1)
+            with self.assertRaisesRegex(ValueError, 'missing from parent corpus'):
+                collapse_passage_ranking(['unknown'], parents)
 
     def test_official_export_does_not_truncate_audit(self):
         row = load_rows(Path(__file__).parent / "fixtures/mtrag_small.jsonl")[0]

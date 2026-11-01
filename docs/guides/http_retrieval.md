@@ -1,6 +1,6 @@
 # HTTP问题检索与多轮提交
 
-`POST /sessions/{session_id}/query`把当前问题交给已配置的检索器，再沿原Controller的会话锁、attempt、生成、持久提交与恢复流程执行。客户端只提交`query`和`request_id`；实际历史来自服务自己的已提交QA。原`/turns`供证据接口继续保留，不自动改变为检索模式。
+`POST /sessions/{session_id}/query`把当前问题交给已配置的检索器，再沿原Controller的会话锁、attempt、生成、持久提交与恢复流程执行。客户端提交`query`和`request_id`，需要跨索引延续会话时还可显式提供旧快照ID；实际历史来自服务自己的已提交QA。原`/turns`供证据接口继续保留，不自动改变为检索模式。
 
 本入口连接已构建索引，复用BM25S/BGE检索factory、CorpusIndex和原生生成。CPU检查使用真实BM25与模拟引擎验证检索、提交和恢复；真实运行结果见[数据与评价](../data_and_evaluation.md)。
 
@@ -46,13 +46,14 @@ curl -sS -X POST http://127.0.0.1:18080/sessions/demo/close
 先按[部署说明](../deployment.md)启动与显式scope一致的研究SGLang服务，再使用同一入口：
 
 ```bash
-uv run --extra tokenizer --extra retrieval contextkv \
-  --config configs/qwen3_32b_cost.yaml \
+uv run --extra tokenizer --extra retrieval --extra query-adapter contextkv \
+  --config configs/qwen3_32b.yaml \
   --state-dir runs/http-qwen3-state serve \
-  --retriever-index data/cloud-bm25s --corpus-id mtrag
+  --retriever-config configs/retriever_dialogue.example.yaml \
+  --evidence-corpus data/mtrag-official/cloud.jsonl --corpus-id mtrag
 ```
 
-`--retriever-config configs/retriever_hybrid.example.yaml`可替换`--retriever-index`，使用BGE dense/RRF/rerank配置；两者互斥。启动前准备BGE权重及PyTorch环境。模型scope、系统提示、采样和输出预算来自共享RunConfig。
+最终推荐配置使用已评测的实际QA查询适配器与BGE稠密检索，选择五个独立正文组。设置`stage: hybrid`可恢复BM25/BGE融合对照。`--retriever-index data/cloud-bm25s`可作为简单BM25对照；它与`--retriever-config`互斥。启动前准备BGE权重及PyTorch环境。模型scope、系统提示、采样和输出预算来自共享RunConfig。
 
 `--evidence-corpus`读取原文、来源、版本及条件/表头依赖的JSONL；`--corpus-id`是证据命名空间，默认`mtrag`，自有文档填写自己的命名空间。来源字段按`source_uri → source → url`读取，标题支持metadata。MTRAG已有索引配合`--evidence-corpus data/mtrag-official/cloud.jsonl`可补齐原始文档地址，正文、排名和向量保持不变。corpus snapshot来自已加载retriever的manifest；元数据按检索正文精确匹配，依赖保留原文并单独记录。
 
@@ -60,7 +61,17 @@ uv run --extra tokenizer --extra retrieval contextkv \
 
 ## 请求、结果与来源
 
-新query请求只接受两个非空字段，拒绝`history`、`evidence`、`targets`、`reference`、`corpus_snapshot_id`等额外输入。没有配置检索器或应用未就绪时返回503与`RETRIEVAL_NOT_READY`，不会静默以空材料生成。
+新query请求接受`query`、`request_id`和可选的`from_corpus_snapshot_id`，拒绝`history`、`evidence`、`targets`、`reference`、`corpus_snapshot_id`等额外输入。目标快照始终来自已加载检索器，客户端不能用该字段选择目标。没有配置检索器或应用未就绪时返回503与`RETRIEVAL_NOT_READY`，不会静默以空材料生成。
+
+更新索引后，启动绑定新索引的服务，先从`GET /sessions/{id}`查看会话当前的`corpus_snapshot_id`，再用新request ID提交，例如：
+
+```bash
+curl -sS -X POST http://127.0.0.1:18080/sessions/demo/query \
+  -H 'Content-Type: application/json' \
+  -d '{"request_id":"r3","query":"What is the current timeout?","from_corpus_snapshot_id":"synthetic-http-retrieval-v1"}'
+```
+
+旧标识必须与会话当前快照相同，否则返回409；目标不同时，省略该字段返回422。生成成功后才提交新快照并安排旧epoch退役；失败和未决结果保持旧快照。已提交请求跨索引重试仍重放原结果，想以新索引重新回答须使用新request ID。索引由服务启动时加载，无热更新；发布者必须为不同内容提供不可变且不同的快照ID。
 
 响应沿用`TurnResponse`，包括原生`assistant_text/output_ids`、request/attempt/ledger版本、动作、真实receipt和`truncated`，另增加：
 
@@ -80,6 +91,8 @@ r1完成、又完成r2以后重放r1，仍返回r1原答案/IDs/来源。`retrie
 |---|---|
 | 同ID同query已经COMMITTED | 返回原结果，`idempotent_replay=true`；检索/生成次数不增加 |
 | 同ID不同query或供证据/检索模式冲突 | 409，原答案与历史不变 |
+| 新索引与会话快照不同 | 缺少旧快照前置条件返回422；旧标识已变化返回409；提交成功后切换并退役旧epoch |
+| 用旧快照前置条件迁移不存在的会话 | 404，不创建空会话 |
 | 检索后端/元数据匹配失败 | 503 `RETRIEVAL_FAILED`，attempt为FAILED；不新增QA、不prepare/generate。显式新ID才重试 |
 | 输入字段无效或全文超预算 | 422；正文/QA不被静默截掉 |
 | 引擎结果未知/仍在途 | 保留attempt；按现有409 pending或503引擎错误返回，不重发生成 |

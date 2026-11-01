@@ -381,14 +381,14 @@ def search_requirements(query, requirements, sparse, dense, encoder, reranker, *
 
 
 def search_variants(query, sparse, dense, encoder, reranker=None, *, candidate_k=50, rerank_k=50, rrf_k=60,
-                    rerank_query=None, source_context=None):
+                    rerank_query=None, source_context=None, sparse_query=None):
     """Return reusable stage outputs; no qrels or generated answer arguments."""
     if candidate_k < 5 or rerank_k < 5:
         raise ValueError("candidate/rerank budgets must cover the final top five")
     if dense is not None and sparse.manifest["corpus_snapshot_id"] != dense.manifest["corpus_snapshot_id"]:
         raise ValueError("sparse and dense stages must use the same original corpus")
     started = time.perf_counter()
-    sparse_rows = sparse.retrieve([query], top_k=candidate_k)
+    sparse_rows = sparse.retrieve([query if sparse_query is None else sparse_query], top_k=candidate_k)
     sparse_ms = (time.perf_counter()-started)*1000
     stages = {"bm25": {"contexts": sparse_rows, "elapsed_ms": sparse_ms}}
     if dense is None:
@@ -572,8 +572,8 @@ def validate_retrieval_options(*, query_mode, stage, query_fusion, rerank_query_
         raise ValueError(f"unknown online query_mode: {query_mode}")
     if stage not in {"dense", "hybrid", "hybrid_rerank"}:
         raise ValueError("unknown retrieval stage")
-    if query_mode == "dialogue" and (stage != "dense" or query_fusion != "single"):
-        raise ValueError("literal dialogue retrieval requires dense single-query scoring")
+    if query_mode == "dialogue" and query_fusion != "single":
+        raise ValueError("literal dialogue retrieval uses single-view scoring")
     if query_fusion not in {"single", "current_topic_rrf", "dialogue_rrf"}:
         raise ValueError("unknown query fusion")
     if query_fusion == "current_topic_rrf" and (query_mode not in {"user_topic", "conversational"} or stage == "dense"):
@@ -613,8 +613,6 @@ class HybridRetriever:
             joint_selection=evidence_selector is not None)
         if query_mode == "conversational" and resolver is None:
             raise ValueError("conversational retrieval needs a resolver")
-        if query_mode == "dialogue" and resolver is not None:
-            raise ValueError("literal dialogue retrieval does not use a resolver")
         if stage == "hybrid_rerank" and reranker is None:
             raise ValueError("hybrid_rerank requires a loaded reranker")
         if sparse.manifest["corpus_snapshot_id"] != dense.manifest["corpus_snapshot_id"]:
@@ -662,7 +660,8 @@ class HybridRetriever:
         manifest = {"kind": "bge_hybrid", "corpus_snapshot_id": self.corpus_snapshot_id,
             "query_mode": self.query_mode, "stage": self.stage, "top_k": 5,
             "query_fusion": self.query_fusion,
-            "rerank_query_mode": "dialogue_views" if self.query_fusion == "dialogue_rrf" else self.rerank_query_mode,
+            "rerank_query_mode": ("literal_history" if self.query_mode == "dialogue" else
+                                  "dialogue_views" if self.query_fusion == "dialogue_rrf" else self.rerank_query_mode),
             "rerank_document_view": "source address, title and original body",
             "pre_rerank_metadata": self.source_context is not None,
             "source_window": {"enabled": self.source_window, "radius": None if self.source_documents is not None else 1,
@@ -710,8 +709,17 @@ class HybridRetriever:
             from adapters.dialogue_query import QUERY_VIEW_VERSION
             manifest.update(query_view={"version": QUERY_VIEW_VERSION, "scope": "actual QA, current question first; retrieval input only"},
                             query_view_traces=list(self.query_view_traces))
+            manifest["requirement_selection"] = {"strategy": "ranked_exact_content_groups_v1",
+                "activation": "literal dialogue ranking; task requirements stay in the separate interpretation"}
+            if self.stage in {"hybrid", "hybrid_rerank"}:
+                manifest["query_view"]["sparse_scope"] = "current and up to two previous user questions"
+            if self.stage == "hybrid_rerank":
+                manifest["query_view"]["rerank_query_target_tokens"] = self.reranker.max_length // 2
         if self.resolver is not None:
-            manifest.update(query_view=self.resolver.manifest, query_view_traces=list(self.query_view_traces))
+            manifest["task_interpretation"] = self.resolver.manifest
+            if self.query_mode != "dialogue":
+                manifest["query_view"] = self.resolver.manifest
+            manifest["query_view_traces"] = list(self.query_view_traces)
         if self.evidence_selector is not None:
             manifest.update(query_fusion="literal_and_committed_state_recall", rerank_query_mode="literal_history",
                 requirement_selection={"strategy": "joint_task_and_evidence",
@@ -737,6 +745,11 @@ class HybridRetriever:
             raise ValueError("semantic evidence selection requires --evidence-corpus metadata")
         started = time.perf_counter()
         view = user_topic_view(turn.user_questions) if self.query_mode == "user_topic" else None
+        if self.resolver is not None:
+            if prior_context is None:
+                raise ValueError("topic selector requires an explicit committed history context")
+            if self.evidence_selector is None:
+                view = self.resolver.resolve(turn, prior_context)
         if self.query_mode == "dialogue":
             if prior_context is None:
                 raise ValueError("literal dialogue retrieval requires committed actual history context")
@@ -744,21 +757,17 @@ class HybridRetriever:
             with self._lock:
                 query, selection = query_view(turn.query, [asdict(m) for m in turn.history],
                     self.encoder.tokenizer, limit=self.encoder.max_length)
-            view = {"mode": "dialogue", "version": QUERY_VIEW_VERSION, "text": query,
-                    "model_called": False, "status": "literal_view", "context": None,
-                    "history_view": selection, "semantics": "retrieval input only; no derived user facts or task state"}
-        if self.resolver is not None:
-            if prior_context is None:
-                raise ValueError("topic selector requires an explicit committed history context")
-            if self.evidence_selector is None:
-                view = self.resolver.resolve(turn, prior_context)
+            interpretation = view or {"model_called": False, "status": "literal_view", "context": None}
+            view = {**interpretation, "mode": "dialogue", "version": QUERY_VIEW_VERSION, "text": query,
+                    "resolved_query": interpretation.get("text"),
+                    "history_view": selection, "semantics": "literal QA retrieval view; task interpretation retained separately"}
         from controller.schema import QueryContext
         from controller.serialization import decode
         intent = decode(QueryContext, view["context"]) if view is not None and view.get("context") is not None else None
         conversational = intent is not None and intent.relation == "conversational"
         semantic_selection = self.evidence_selector is not None
         requirements = ()
-        if not conversational and intent is not None and intent.task_frame is not None and len(intent.task_frame.requirements) >= 2:
+        if self.query_mode != "dialogue" and not conversational and intent is not None and intent.task_frame is not None and len(intent.task_frame.requirements) >= 2:
             from adapters.conversation import frame_query
             requirements = tuple(dict.fromkeys(frame_query(intent.task_frame, requirement=r)
                                                for r in intent.task_frame.requirements))
@@ -779,6 +788,14 @@ class HybridRetriever:
             # Only the local encoder/reranker pair is serialized. Both semantic
             # HTTP operations run outside this lock; shutdown drains the worker.
             with self._lock:
+                if self.query_mode == "dialogue" and self.stage == "hybrid_rerank":
+                    from adapters.dialogue_query import query_view
+                    current_tokens = self.reranker.tokenizer(turn.query,
+                        add_special_tokens=True, truncation=False)["input_ids"]
+                    scoring_query, rerank_history = query_view(turn.query,
+                        [asdict(m) for m in turn.history], self.reranker.tokenizer,
+                        limit=max(len(current_tokens), self.reranker.max_length // 2))
+                    view["rerank_history_view"] = rerank_history
                 if semantic_selection:
                     literal, state = joint_recall_queries(turn, prior_context)
                     query = scoring_query = literal
@@ -828,10 +845,13 @@ class HybridRetriever:
                     ranked = stages[self.stage]["contexts"]
                     fusion_trace = stages[self.stage]["query_fusion_trace"]
                 else:
+                    sparse_query = retrieval_query(turn.user_questions) if self.query_mode == "dialogue" else None
                     stages = search_variants(query, self.sparse, self.dense, self.encoder,
                         self.reranker if self.stage == "hybrid_rerank" else None,
                         candidate_k=self.candidate_k, rerank_k=self.rerank_k, rrf_k=self.rrf_k,
-                        rerank_query=scoring_query, source_context=self.source_context)
+                        rerank_query=scoring_query, source_context=self.source_context, sparse_query=sparse_query)
+                    if sparse_query is not None:
+                        view["sparse_query"] = sparse_query
                     ranked = stages[self.stage]["contexts"]
                 if requirement_trace is None:
                     contexts, selection_trace = select_ranked_evidence(ranked, group_key=self.selection_group)
@@ -877,7 +897,7 @@ class HybridRetriever:
                 trace = {"task_id": turn.task_id, "conversation_id": turn.conversation_id,
                     "turn": turn.turn, **view,
                     **({"context": asdict(intent)} if intent is not None else {}),
-                    "rerank_query_mode": ("literal_history" if semantic_selection else
+                    "rerank_query_mode": ("literal_history" if semantic_selection or self.query_mode == "dialogue" else
                                           "dialogue_views" if self.query_fusion == "dialogue_rrf" else self.rerank_query_mode),
                     "rerank_query": scoring_query if self.stage == "hybrid_rerank" else None,
                     "retrieval_status": ("failed" if retrieval_error else

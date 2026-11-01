@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import re
+import json
 from typing import Iterable
 
 from .evidence import (EvidenceError, EvidencePolicy, allows_version_comparison, assign_references,
@@ -52,6 +53,18 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     evidence_relations = render_evidence_relations(required, references)
     source_guide = current_source_guide(intent_query, required, references,
                                       retrieval_priority=retrieval_priority)
+    groups: dict[tuple[str, str, str], list[str]] = {}
+    for key, reason in resolution:
+        groups.setdefault((key.corpus_id, key.document_id, key.passage_id), []).append(reason)
+    has_revisit_conflict = any("current_retrieval" in origins and
+        any(origin.startswith("selected_revisit:") for origin in origins)
+        for origins in groups.values())
+    origin_guide = ""
+    if has_revisit_conflict:
+        by_key = {key: ref for ref, key in references}
+        origins = [{"id": by_key[key], "origin": reason} for key, reason in resolution]
+        origin_guide = ("Evidence origin metadata (retrieval does not by itself establish applicability): "
+                        + json.dumps(origins, ensure_ascii=False))
     table_annotations = ""
     if policy.table_relations:
         from adapters.table_relations import extract_table_relations, render_table_relations
@@ -119,7 +132,8 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
             reason = "system_prompt_changed"
         elif snapshot.force_new_epoch_for_recovery or snapshot.must_rebuild:
             reason = "recovery_requires_rebuild"
-        elif not allows_version_comparison(evidence_query, policy) and version_conflicts(visible, required_keys):
+        elif not allows_version_comparison(evidence_query, policy) and version_conflicts(
+                visible - required_keys, required_keys):
             reason = "invalid_visible_version"
         # An intent label alone does not invalidate cached bodies. Current
         # citation scope excludes superseded sources, versions are checked
@@ -135,7 +149,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
             message_index=len(execution.messages), reused=required_keys & visible,
             layout=policy.layout, retrieval_priority=retrieval_priority, table_annotations=table_annotations,
             evidence_relations=evidence_relations, citation_scope=required_keys, source_guide=source_guide,
-            query_context=query_context, visible_bodies=visible_bodies)
+            query_context=query_context, visible_bodies=visible_bodies, origin_guide=origin_guide)
         prompts.append(("APPEND", execution.messages + (current,), execution.evidence_spans + spans,
                         visible | frozenset(span.key for span in spans), reason))
 
@@ -146,7 +160,8 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
                                          message_index=len(messages), layout=policy.layout,
                                          retrieval_priority=retrieval_priority, table_annotations=table_annotations,
                                          evidence_relations=evidence_relations, citation_scope=required_keys,
-                                         source_guide=source_guide, query_context=query_context)
+                                         source_guide=source_guide, query_context=query_context,
+                                         origin_guide=origin_guide)
     messages.append(current)
     prompts.append(("REBUILD", tuple(messages), spans, frozenset(span.key for span in spans), None))
     conversations = tuple(prompt[1] for prompt in prompts)

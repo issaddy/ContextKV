@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,27 @@ import test_model_scope as fixtures
 
 local_scope = fixtures.local_scope
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_native_ngram_shares_full_cache_and_binds_its_execution_profile(local_scope, monkeypatch):
+    ordinary, _ = fixtures.install_native_environment(monkeypatch, local_scope)
+    normal = native.get_runtime(ordinary)
+    observed = []
+    for drafts in (6, 12):
+        scheduler, settings = fixtures.install_native_environment(monkeypatch, local_scope)
+        scheduler.spec_algorithm = SimpleNamespace(is_none=lambda: False, is_ngram=lambda: True)
+        settings.speculative_algorithm = 'NGRAM'
+        settings.speculative_num_draft_tokens = drafts
+        settings.speculative_ngram_max_bfs_breadth = 1
+        runtime = native.get_runtime(scheduler)
+        assert runtime.cache is scheduler.tree_cache
+        assert runtime.cache_config['decoder']['speculative_num_draft_tokens'] == drafts
+        observed.append(runtime.info({})['cache_config_hash'])
+        scheduler.tree_cache.session_refs._session_generations = {}
+        replacement = native.get_runtime(scheduler)
+        assert replacement.info({})['cache_config_hash'] == observed[-1]
+        assert replacement.restart_id != runtime.restart_id
+    assert len(set([normal.info({})['cache_config_hash'], *observed])) == 3
 
 
 def test_native_scheduler_requires_explicit_scope_even_with_valid_old_style_fingerprint(local_scope, monkeypatch):

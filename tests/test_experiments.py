@@ -22,6 +22,37 @@ def completed_results(value):
             for job in matrix_jobs(value)]
 
 
+def test_generation_provenance_binds_think_time_plan_contents(tmp_path):
+    value = spec(tmp_path)
+    plan = tmp_path / 'pacing.json'
+    plan.write_text(json.dumps({'schema_version': 1, 'gaps_after_task': {'turn': 12}}))
+    value['think_time_plan'] = str(plan)
+    before = generation_provenance(value)['think_time_plan']['sha256']
+    plan.write_text(json.dumps({'schema_version': 1, 'gaps_after_task': {'turn': 124}}))
+    assert generation_provenance(value)['think_time_plan']['sha256'] != before
+
+
+def test_matrix_rejects_pacing_plan_changed_between_arms(tmp_path):
+    from bench.run_sessions import load_think_time_plan
+
+    value = spec(tmp_path)
+    value['methods'] = [{'id': 'one'}, {'id': 'two'}]
+    value['reference_method'] = 'one'
+    value.pop('tuning')
+    plan = tmp_path / 'pacing.json'
+    plan.write_text(json.dumps({'schema_version': 1, 'gaps_after_task': {'turn': 12}}))
+    value['think_time_plan'] = str(plan)
+
+    async def executor(specification, job, directory):
+        load_think_time_plan(specification['think_time_plan'], expected_sha256=job['think_time_plan_sha256'])
+        plan.write_text(json.dumps({'schema_version': 1, 'gaps_after_task': {'turn': 124}}))
+        return {**job, 'status': 'completed', 'summary': {}}
+
+    results = asyncio.run(run_matrix(value, tmp_path / 'pacing-matrix', executor=executor))
+    assert [result['status'] for result in results] == ['completed', 'failed']
+    assert 'changed after matrix provenance' in results[1]['error']
+
+
 def spec(tmp_path):
     split = tmp_path / "split.json"
     split.write_text(json.dumps({"dev": ["session-a"], "test": ["session-b"]}))
@@ -307,6 +338,10 @@ def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tm
     config.write_text(json.dumps(config_body))
     engine = tmp_path/"engine.json"
     engine.write_text("{}")
+    pacing = tmp_path/"pacing.json"
+    pacing.write_text(json.dumps({"schema_version": 1, "gaps_after_task": {}}))
+    value['think_time_plan'] = str(pacing)
+    value['concurrency_scope'] = 'turn'
     value.update(protocols=["P3"], retriever_config=str(config), methods=[
         {"id":"B0","kind":"native","native":{"baseline":"B0","base_url":"http://fake.test",
             "engine_manifest":str(engine)}}, {"id":"full"}])
@@ -322,12 +357,16 @@ def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tm
     config_body["query_mode"] = "last3"
     config.write_text(json.dumps(config_body))
     assert generation_provenance(value)["retrievers"][str(config)] != before["retrievers"][str(config)]
-    seen = []
+    seen, seen_plans, seen_scopes = [], [], []
     async def native_run(args):
         seen.append(args.retriever_config)
+        seen_plans.append(args.think_time_plan)
+        seen_scopes.append(args.concurrency_scope)
         (Path(args.output)/"native-fake.json").write_text(json.dumps({"baseline":"B0"}))
     async def controller_run(args, config):
         seen.append(args.retriever_config)
+        seen_plans.append(args.think_time_plan)
+        seen_scopes.append(args.concurrency_scope)
         (Path(config.state_dir)/"benchmark-fake.json").write_text(json.dumps({"engine_kind":"mock"}))
     monkeypatch.setattr(native_module, "_run", native_run)
     monkeypatch.setattr(cli, "benchmark", controller_run)
@@ -338,6 +377,12 @@ def test_matrix_shared_retriever_config_binds_assets_and_both_execution_paths(tm
             await experiments.execute_job(value, job, tmp_path/job["job_id"])
     asyncio.run(scenario())
     assert seen == [str(config), str(alternate if system_comparison else config)]
+    assert seen_plans == [str(pacing), str(pacing)]
+    assert seen_scopes == ['turn', 'turn']
+    value['concurrency_scope'] = 'invalid'
+    with pytest.raises(ValueError, match='concurrency_scope'):
+        matrix_jobs(value)
+    value['concurrency_scope'] = 'turn'
     value["methods"][0]["native"]["retriever_config"] = str(config)
     with pytest.raises(ValueError, match="matrix root"):
         matrix_jobs(value)

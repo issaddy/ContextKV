@@ -27,7 +27,7 @@ from controller.schema import OnlineTurn
 from adapters.corpus import CorpusIndex
 from adapters.retrieval import to_evidence
 from adapters.retriever_factory import create_retriever
-from bench.run_sessions import run_sessions
+from bench.run_sessions import load_think_time_plan, run_sessions
 from bench.quality import export_evaluation
 from controller.candidates import CandidatePolicy, build_candidates
 from controller.templates import citation_regex
@@ -542,6 +542,8 @@ async def _run(args):
     if args.limit_sessions:
         selected = set(sorted({r["conversation_id"] for r in rows})[:args.limit_sessions])
         rows = [r for r in rows if r["conversation_id"] in selected]
+    think_time_by_task, think_time_plan = load_think_time_plan(getattr(args, "think_time_plan", None),
+        expected_sha256=getattr(args, "expected_think_time_plan_sha256", None))
     corpus_snapshot = f"{dataset['name']}-{dataset['revision']}"
     retriever = create_retriever(args.protocol, config_path=getattr(args, "retriever_config", None),
                                 index_path=getattr(args, "retriever_index", None), corpus_path=args.corpus,
@@ -594,7 +596,9 @@ async def _run(args):
     try:
         await baseline.verify_server()
         report = await run_sessions(rows, baseline, protocol=args.protocol, concurrency=args.concurrency,
-                                    think_time=args.think_time, arrival_rate=args.arrival_rate,
+                                    concurrency_scope=getattr(args, "concurrency_scope", "session"),
+                                    think_time=args.think_time, think_time_by_task=think_time_by_task,
+                                    arrival_rate=args.arrival_rate,
                                     arrival_window=args.arrival_window, drain_timeout=args.drain_timeout,
                                     per_turn_timeout=args.per_turn_timeout, retriever=retriever, seed=args.seed,
                                     retrieval_context_provider=retrieval_context_provider,
@@ -615,7 +619,8 @@ async def _run(args):
                    "split_manifest": args.split_manifest, "split": args.split,
                    "template_fingerprint": asdict(template.fingerprint), "policy": asdict(policy),
                    "retrieval": None if retriever is None else retriever.manifest,
-                   "workload": vars(args), "report": report, "native_http_observations": client.observations,
+                   "workload": {**vars(args), "think_time_plan_provenance": think_time_plan},
+                   "report": report, "native_http_observations": client.observations,
                    "evaluation_export": {"status": "failed" if export_failures else "completed", "failures": export_failures},
                    "client_requested_thread_environment": {key: os.environ.get(key) for key in
                        ("TOKENIZERS_PARALLELISM", "RAYON_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")},
@@ -670,7 +675,10 @@ def main(argv=None):
     parser.add_argument("--output", default="runs/native")
     parser.add_argument("--limit-sessions", type=int)
     parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--concurrency-scope", choices=["session", "turn"], default="session",
+                        help="bound sessions including think time, or active turn pipelines")
     parser.add_argument("--think-time", type=float, default=0)
+    parser.add_argument("--think-time-plan", help="JSON plan of seconds after each non-final task")
     parser.add_argument("--arrival-rate", type=float)
     parser.add_argument("--arrival-window", type=float)
     parser.add_argument("--drain-timeout", type=float)

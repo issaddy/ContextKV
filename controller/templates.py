@@ -271,6 +271,7 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
                          retrieval_priority: Iterable[EvidenceKey] = (),
                          table_annotations: str = "", evidence_relations: str = "",
                          source_guide: str = "",
+                         origin_guide: str = "",
                          query_context: QueryContext | None = None,
                          citation_scope: Iterable[EvidenceKey] | None = None,
                          visible_bodies: Mapping[str, EvidenceSpan] | None = None
@@ -358,6 +359,8 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
             content += ("The current referent is unresolved. State which distinction is missing; "
                         "provide applicable shared information or clearly labeled alternatives. "
                         "Do not choose a referent from retrieval rank or from a previous answer alone.\n")
+    if origin_guide:
+        content += "\n" + origin_guide + "\n"
     content += f"\nQuestion:\n{query}\n"
     return Message("user", content), tuple(spans)
 

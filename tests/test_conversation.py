@@ -250,6 +250,23 @@ def test_revisit_resumes_the_selected_task_state_instead_of_the_latest_topic():
     assert "Nova" not in view["text"] and "Windows" not in view["text"]
 
 
+def test_revisit_without_a_selected_turn_does_not_inherit_the_latest_task():
+    old = TaskFrame('SQL', '', 'troubleshoot SELECT')
+    latest = TaskFrame('WebSocket', '', 'handle phone failures', (('secure', 'required'),))
+    context = PriorContext(interpretations=(QueryContext(frame_query(old), 'standalone', task_frame=old),
+                                           QueryContext(frame_query(latest), 'topic_switch', task_frame=latest)))
+    question = 'Going back to the first question, what should I try on Linux?'
+    # This is the actual shape returned by 32B in the long-session diagnostic.
+    client = Client({'task': {'operation': 'replace', 'value': 'what should I try on Linux?',
+                              'requirements': ['what should I try on Linux?']},
+                     'relation': 'revisit', 'history_turns': [2], 'resume_turn': 0,
+                     'updates': {'topic': 'WebSocket', 'conditions': {'secure': 'required'}}})
+    view = ConversationResolver(client).resolve(turn(question, ('SQL issue?', 'Phone failures?')), context)
+    assert view['status'] == 'ambiguous' and view['reason'] == 'revisit_without_target'
+    assert view['text'] == question and view['declared_relation'] == 'revisit'
+    assert decode(QueryContext, view['context']) == QueryContext(question, 'ambiguous', ())
+
+
 def test_legacy_interpretation_can_initialize_state_without_a_second_call():
     prior = QueryContext("Atlas attachment maximum size?","followup",(1,))
     client = Client({"relation":"followup","history_turns":[1],
@@ -748,6 +765,95 @@ def test_revisit_keeps_older_user_states_and_their_actual_answers():
     rows=[*body['earlier_turns'],body['previous_turn']]
     assert [r['turn'] for r in rows]==list(range(1,8))
     assert all(r['answer']==request.history[2*r['turn']-1].text for r in rows)
+
+
+class BudgetClient(Client):
+    def __init__(self, value, budget):
+        super().__init__(value)
+        self.config = SimpleNamespace(max_input_tokens=budget)
+
+    def catalog_token_lengths(self, messages, units):
+        # A byte-token fixture exercises the actual serialized message budget.
+        return (sum(len(message['content'].encode()) for message in messages),
+                [len(unit.encode()) for unit in units])
+
+    def complete(self, messages, **kwargs):
+        tokens, _ = self.catalog_token_lengths(messages, [])
+        if tokens > self.config.max_input_tokens:
+            return CompletionResult('input_over_budget', input_tokens=tokens)
+        return super().complete(messages, **kwargs)
+
+
+def long_revisit():
+    questions = tuple(f'Question {n} about topic {n}' for n in range(1, 13))
+    request = turn('Back to the first topic, but use Windows.', questions)
+    history = tuple(OnlineMessage(message.speaker,
+        f'Complete original answer {index // 2 + 1}: ' + 'details ' * 300)
+        if index % 2 else message for index, message in enumerate(request.history))
+    first = TaskFrame('Atlas', 'installer', 'installation',
+                      (('version', 'v4'), ('platform', 'Linux')))
+    frames = [first, *(TaskFrame(f'Topic {n}', '', 'other task') for n in range(2, 13))]
+    context = PriorContext(interpretations=tuple(QueryContext(frame_query(frame), 'standalone',
+                                                               task_frame=frame) for frame in frames))
+    return replace(request, history=history), context, first
+
+
+def test_long_revisit_fits_whole_turns_and_resumes_the_original_state():
+    request, context, first = long_revisit()
+    client = BudgetClient({'relation': 'revisit', 'history_turns': [1], 'resume_turn': 1,
+                           'updates': {'conditions': {'platform': 'Windows'}}}, 14000)
+    view = ConversationResolver(client).resolve(request, context)
+    messages, options = client.inputs[0]
+    body = json.loads(messages[-1]['content'])
+    rows = [*body['earlier_turns'], body['previous_turn']]
+    assert view['status'] == 'resolved' and view['state_base_turn'] == 1
+    assert next(reversed(body)) == 'current_question'
+    assert decode(QueryContext, view['context']).task_frame == replace(
+        first, conditions=(('version', 'v4'), ('platform', 'Windows')))
+    assert rows[0]['turn'] == 1 and rows[-1]['turn'] == 12
+    assert [row['answer'] for row in rows[-3:]] == [request.history[2*n-1].text for n in (10, 11, 12)]
+    assert view['history_budget']['answer_omitted_turns']
+    for row in rows:
+        assert row['question'] == request.history[2*row['turn']-2].text
+        assert ('answer' not in row and row['answer_omitted_for_budget']) or (
+            row['answer'] == request.history[2*row['turn']-1].text)
+    assert client.catalog_token_lengths(messages, [])[0] <= client.config.max_input_tokens
+    schema = options['response_format']['json_schema']['schema']
+    assert schema['properties']['resume_turn']['enum'] == [0, *view['history_budget']['selected_turns']]
+
+
+def test_long_revisit_with_joint_selection_reserves_room_for_original_evidence():
+    request, context, _ = long_revisit()
+    client = BudgetClient({'relation': 'revisit', 'history_turns': [1], 'resume_turn': 1,
+                           'selected_ids': [0], 'updates': {}}, 14500)
+    document = {'id': 0, 'text': 'Original source for the first task. ' * 20}
+    view = ConversationResolver(client).resolve(request, context, evidence_documents=[document])
+    body = json.loads(client.inputs[0][0][-1]['content'])
+    assert view['status'] == 'resolved' and view['source_selection']['selected_ids'] == [0]
+    assert body['documents'] == [document]
+    assert view['history_budget']['reserved_source_tokens'] > 0
+    assert client.catalog_token_lengths(client.inputs[0][0], [])[0] <= client.config.max_input_tokens
+
+
+def test_revisit_exposes_only_turns_that_fit_when_even_the_compact_history_is_too_long():
+    request, context, first = long_revisit()
+    # Repeat complete turns to model several topic changes over a long session.
+    history = request.history * 6
+    contexts = context.interpretations * 6
+    request = replace(request, history=history, turn=len(history)//2 + 1)
+    context = replace(context, interpretations=contexts)
+    client = BudgetClient({'relation': 'revisit', 'history_turns': [1], 'resume_turn': 1,
+                           'updates': {'conditions': {'platform': 'Windows'}}}, 14000)
+    view = ConversationResolver(client).resolve(request, context)
+    body = json.loads(client.inputs[0][0][-1]['content'])
+    kept = [row['turn'] for row in (*body['earlier_turns'], body['previous_turn'])]
+    assert view['status'] == 'resolved' and view['history_budget']['omitted_turns']
+    assert kept[0] == 1 and kept[-1] == len(history)//2
+    assert set(kept).isdisjoint(view['history_budget']['omitted_turns'])
+    assert decode(QueryContext, view['context']).task_frame == replace(
+        first, conditions=(('version', 'v4'), ('platform', 'Windows')))
+    schema = client.inputs[0][1]['response_format']['json_schema']['schema']
+    assert schema['properties']['resume_turn']['enum'] == [0, *kept]
 
 
 def state_context_fixture():

@@ -271,6 +271,16 @@ def test_offline_analysis_has_missing_coverage_and_session_metrics():
     assert before == json.dumps(rows, sort_keys=True)
 
 
+def test_offline_summary_accepts_document_level_qrels_for_section_rankings():
+    rows = [{'task_id': 'q', 'conversation_id': 's', 'method': 'hybrid', 'elapsed_ms': 1,
+             'candidate_ids': ['p1', 'p2', 'p3', 'p4', 'p5', 'p6']}]
+    parents = {'p1': 'a', 'p2': 'a', 'p3': 'b', 'p4': 'c', 'p5': 'd', 'p6': 'e'}
+    summary = summarize(rows, {'q': {'e': 1}}, candidate_k=6, passage_parents=parents)
+    assert summary['qrels_granularity'] == 'parent_document'
+    assert summary['methods']['hybrid']['top5']['mean_recall'] == 1
+    assert rows[0]['candidate_ids'] == ['p1', 'p2', 'p3', 'p4', 'p5', 'p6']
+
+
 def test_offline_user_topic_preserves_query_source_trace_and_cost():
     from bench.retrieval_eval import RetrievalQuery
     item = RetrievalQuery("arbitrary", "session", 2,

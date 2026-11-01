@@ -56,14 +56,12 @@ def load_retriever_config(path):
         raise ValueError("semantic evidence selection requires conversational mode with selector")
     if value.query_adapter_path and value.query_mode not in {"current", "dialogue"}:
         raise ValueError("query adapters require their trained literal current/dialogue view")
-    if value.query_adapter_path and value.stage != "dense":
-        raise ValueError("query adapters currently require dense scoring")
-    if value.query_mode == "conversational":
+    if value.query_mode in {"conversational", "dialogue"}:
         from adapters.query_selector import SelectorConfig
         if value.selector is not None:
             SelectorConfig(**value.selector)
     elif value.selector is not None:
-        raise ValueError("selector config requires conversational mode")
+        raise ValueError("selector config requires conversational or dialogue mode")
     if value.stage == "hybrid_rerank" and not value.reranker_path:
         raise ValueError("hybrid_rerank requires reranker_path")
     if value.dtype not in {"float32", "float16", "bfloat16"}:
@@ -105,7 +103,7 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
                 from adapters.query_selector import OpenAICompletionClient, SelectorConfig
                 client = OpenAICompletionClient(SelectorConfig(**config.selector))
                 cleanup.callback(client.close)
-            if config.query_mode == "conversational":
+            if config.query_mode == "conversational" or client is not None:
                 from adapters.conversation import ConversationResolver
                 resolver = ConversationResolver(client)
             evidence_selector = None

@@ -73,6 +73,8 @@ def validate_matrix(spec, *, required_split="dev"):
         raise ValueError("methods and valid protocols are required")
     if any(c < 1 for c in spec["concurrency"]) or not spec["concurrency"] or not spec["seeds"]:
         raise ValueError("nonempty positive concurrency and seeds are required")
+    if spec.get("concurrency_scope", "session") not in {"session", "turn"}:
+        raise ValueError("concurrency_scope must be session or turn")
     if "repetitions" in spec:
         repetitions = spec["repetitions"]
         if (not isinstance(repetitions, list) or not repetitions
@@ -258,13 +260,17 @@ def implementation_manifest():
 def provenance(spec, *, implementation=None):
     config = matrix_config(spec)
     paths = {spec.get("retriever_config"), *(m.get("retriever_config") for m in spec["methods"])}
-    return {"input": spec["input"],
+    result = {"input": spec["input"],
             "split": json.loads(Path(spec["split_manifest"]).read_text()),
             "spec": deepcopy({k: v for k, v in spec.items() if k != "path_map"}),
             "base_config": asdict(config),
             "retrievers": {p: asdict(load_retriever_config(p)) for p in sorted(p for p in paths if p)},
             "implementation": implementation if implementation is not None else implementation_manifest(),
             "metric_schema_version": METRIC_SCHEMA_VERSION}
+    if spec.get("think_time_plan"):
+        from bench.run_sessions import load_think_time_plan
+        _, result["think_time_plan"] = load_think_time_plan(spec["think_time_plan"])
+    return result
 
 
 def generation_provenance(spec, *, implementation=None):
@@ -527,8 +533,11 @@ async def execute_job(spec, job, directory, *, native_engine_manifest=None, veri
                 split_manifest=spec["split_manifest"], split=job["split"], protocol=job["protocol"],
                 **job.get("retrieval", retrieval_settings(spec)),
                 evidence_corpus=spec.get("evidence_corpus"),
-                concurrency=job["concurrency"], seed=job["seed"], limit_sessions=spec.get("limit_sessions"),
-                think_time=spec.get("think_time", 0), arrival_rate=spec.get("arrival_rate"),
+                concurrency=job["concurrency"], concurrency_scope=spec.get("concurrency_scope", "session"),
+                seed=job["seed"], limit_sessions=spec.get("limit_sessions"),
+                think_time=spec.get("think_time", 0), think_time_plan=spec.get("think_time_plan"),
+                expected_think_time_plan_sha256=job.get("think_time_plan_sha256"),
+                arrival_rate=spec.get("arrival_rate"),
                 arrival_window=spec.get("arrival_window"), drain_timeout=spec.get("drain_timeout"),
                 per_turn_timeout=spec.get("per_turn_timeout"))
     shared_config = matrix_config(spec)
@@ -587,6 +596,7 @@ async def execute_job(spec, job, directory, *, native_engine_manifest=None, veri
     default_cache_state = "fresh_mock_instance" if payload.get("engine_kind") == "mock" else "unspecified_hardware"
     protocol = {"cache_state_protocol": lifecycle.get("cache_state_protocol", default_cache_state),
                 "comparison_scope": spec.get("comparison_scope", "execution"),
+                "concurrency_scope": spec.get("concurrency_scope", "session"),
                 "retrieval": job.get("retrieval", retrieval_settings(spec)),
                 "before_job": hook, "warmup_input": lifecycle.get("warmup_input"),
                 "response_mode": spec.get("response_mode", "buffered"), "slo": spec.get("slo", {})}
@@ -618,6 +628,9 @@ async def run_matrix(spec, output, *, stage="dev", frozen=None, executor=execute
                        frozen=frozen, ablations_only=stage == "dev_ablation")
     implementation = implementation_manifest()
     run_provenance = generation_provenance(spec, implementation=implementation)
+    if "think_time_plan" in run_provenance:
+        for job in jobs:
+            job["think_time_plan_sha256"] = run_provenance["think_time_plan"]["sha256"]
     if needs_development_selection(spec, stage, frozen):
         if frozen is None:
             raise ValueError("test requires a frozen development selection")

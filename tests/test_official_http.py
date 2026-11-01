@@ -24,6 +24,8 @@ def upstream(calls, *, fail=None):
         return run
     return SimpleNamespace(run_idk_judge=metric("idk_eval"),
         run_radbench_judge=metric("RB_llm"), run_ragas_judges_local=metric("RL_F"),
+        extract_conversation=lambda messages: str(messages),
+        split_conversation=lambda text: ("", text),
         underspecified_eval=lambda model, inp, out: metric("underspecified_eval")("vllm", model, inp, out),
         get_idk_score=lambda row, name: row["metrics"][name][0],
         get_idk_underspec_score=lambda row, name: row["metrics"][name][0])
@@ -51,12 +53,14 @@ def test_resume_reuses_completed_stage_and_preserves_actual_answers(tmp_path):
     calls.clear()
     result = score_http_stages(upstream(calls), "fixed-judge", source, output)
     assert calls == ["RB_llm", "RL_F"]
+    assert result["reused_stages"] == ["idk"]
     scored = load_jsonl(result["output"])
     assert {k: v for k, v in scored[0].items() if k != "metrics"} == original[0]
     assert source.read_bytes() == original_bytes
     calls.clear()
-    score_http_stages(upstream(calls), "fixed-judge", source, output)
+    result = score_http_stages(upstream(calls), "fixed-judge", source, output)
     assert calls == []
+    assert result["reused_stages"] == ["idk", "rb_llm", "rl_f"]
 
 
 def test_clarification_is_only_scored_when_the_cohort_requires_it(tmp_path):
@@ -126,3 +130,38 @@ def test_upstream_dropped_tasks_are_not_committed_as_a_completed_stage(tmp_path)
     with pytest.raises(ValueError, match="changed the task cohort"):
         score_http_stages(api, "fixed-judge", source, output)
     assert not (output / "idk.jsonl").exists()
+
+
+def test_radbench_receives_complete_multiline_questions_and_actual_message_history(tmp_path):
+    source = tmp_path / "answers.jsonl"
+    rows = [
+        {"task_id": "initial", "input": [{"speaker": "user", "text": "Help with credit.\n\nWhere can I download the documents?"}]},
+        {"task_id": "followup", "input": [
+            {"speaker": "user", "text": "Explain the forms.\nInclude costs."},
+            {"speaker": "agent", "text": "The form has two fields:\nuser: account owner\nNo fee is stated."},
+            {"speaker": "user", "text": "What changes for a student?\nAnd for an employee?"},
+        ]},
+    ]
+    source.write_text("".join(json.dumps(row)+"\n" for row in rows))
+    api = upstream([])
+    original = api.extract_conversation, api.split_conversation
+    observed = []
+
+    def score(provider, model, inp, out):
+        values = load_jsonl(inp)
+        for row in values:
+            observed.append(api.split_conversation(api.extract_conversation(row["input"])))
+            row["metrics"] = {"RB_llm": [0.9]}
+        with open(out, "w") as stream:
+            stream.write("".join(json.dumps(row)+"\n" for row in values))
+
+    api.run_radbench_judge = score
+    score_http_stages(api, "fixed-judge", source, tmp_path / "scores",
+                      answerability_adjustment=False, metrics=("RB_llm",))
+    assert observed == [
+        ("", "Help with credit.\n\nWhere can I download the documents?"),
+        ("user: Explain the forms.\nInclude costs.\nagent: The form has two fields:\nuser: account owner\nNo fee is stated.",
+         "What changes for a student?\nAnd for an employee?"),
+    ]
+    assert (api.extract_conversation, api.split_conversation) == original
+    assert [row["input"] for row in load_jsonl(source)] == [row["input"] for row in rows]

@@ -16,7 +16,7 @@ fi
 # The fixed source owns torch/CUDA/kernel requirements. This environment is
 # separate from the controller's locked CPU development environment.
 SGLANG_BUILD_RUST_EXTS=none uv pip install --python "$ENV_DIR/bin/python" \
-  -e "$CHECKOUT/python" -e '.[tokenizer,retrieval]'
+  -e "$CHECKOUT/python" -e '.[tokenizer,retrieval,query-adapter]'
 mkdir -p runs
 uv pip freeze --python "$ENV_DIR/bin/python" > runs/engine-environment.txt
 "$ENV_DIR/bin/python" - "$CONTEXTKV_MODEL_SCOPE_PATH" <<'PY_SCOPE'

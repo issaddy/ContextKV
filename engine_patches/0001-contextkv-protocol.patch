@@ -208,10 +208,10 @@ new file mode 100644
 +    raise SystemExit(main())
 diff --git a/python/sglang/srt/managers/contextkv_runtime.py b/python/sglang/srt/managers/contextkv_runtime.py
 new file mode 100644
-index 0000000..048cc8d
+index 0000000..098a287
 --- /dev/null
 +++ b/python/sglang/srt/managers/contextkv_runtime.py
-@@ -0,0 +1,974 @@
+@@ -0,0 +1,988 @@
 +"""Scheduler-owned ContextKV protocol, for the pinned SGLang Python backend.
 +
 +This module deliberately has no background thread or GPU synchronizations. It is
@@ -532,12 +532,13 @@ index 0000000..048cc8d
 +class ContextKVRuntime:
 +    def __init__(self, cache, fingerprint, receipt_limit=1024, *, scheduler=None,
 +                 result_ttl_seconds=900, result_max_bytes=64 << 20, event_limit=4096,
-+                 transfer_tma_enabled=None, model_scope=None):
++                 transfer_tma_enabled=None, model_scope=None, decoder_settings=None):
 +        self.cache = cache
 +        self._native_generations = cache.session_refs._session_generations
 +        self.scheduler = scheduler
 +        self.fingerprint = fingerprint
 +        self.model_scope = model_scope
++        self.decoder_settings = decoder_settings
 +        self.restart_id = uuid.uuid4().hex
 +        self.epochs = {}
 +        self.operations = {}
@@ -579,6 +580,8 @@ index 0000000..048cc8d
 +                  "sample_pool": self.sample_pool_enabled}
 +        if self.host_admission.mode != "off":
 +            config["host_admission"] = self.host_admission.config()
++        if self.decoder_settings is not None:
++            config["decoder"] = self.decoder_settings
 +        self.cache_config = config
 +        self.cache_config_hash = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
 +
@@ -592,7 +595,8 @@ index 0000000..048cc8d
 +            self.receipt_limit, scheduler=scheduler,
 +            result_ttl_seconds=self.result_ttl_seconds, result_max_bytes=self.result_max_bytes,
 +            event_limit=self.events.maxlen,
-+            transfer_tma_enabled=self.cache_config["tma_transfer_enabled"], model_scope=self.model_scope)
++            transfer_tma_enabled=self.cache_config["tma_transfer_enabled"], model_scope=self.model_scope,
++            decoder_settings=self.decoder_settings)
 +        scheduler.contextkv_runtime = replacement
 +        return replacement
 +
@@ -1149,7 +1153,8 @@ index 0000000..048cc8d
 +            or cache.tree_core.is_eagle or cache.enable_storage or cache.linker is not None
 +            or cache.buffer_pipeline is not None
 +            or scheduler.dllm_config is not None
-+            or scheduler.rust_server is not None or not scheduler.spec_algorithm.is_none()
++            or scheduler.rust_server is not None
++            or not (scheduler.spec_algorithm.is_none() or scheduler.spec_algorithm.is_ngram())
 +            or scheduler.enable_pdmux or scheduler.disaggregation_mode.value != "null"):
 +
 +        raise ContextKVError("UNSUPPORTED_ENGINE", "requires Python, dense FULL, TP/DP/PP=1, session cache")
@@ -1180,8 +1185,17 @@ index 0000000..048cc8d
 +    except (AssertionError, AttributeError, OSError, ValueError) as exc:
 +        raise ContextKVError("FINGERPRINT_MISMATCH", "running model config/revision/tokenizer/template differs") from exc
 +    from sglang.srt.environ import envs
++    # NGRAM uses the same FULL token cache. Its execution costs are bound to
++    # the native decoder settings through the existing calibration identity.
++    decoder_settings = None
++    if not scheduler.spec_algorithm.is_none():
++        decoder_settings = {name: value for name, value in vars(get_server_args()).items()
++            if name.startswith("speculative_ngram_") or name in {
++                "speculative_algorithm", "speculative_num_draft_tokens",
++                "speculative_accept_threshold_single", "speculative_accept_threshold_acc",
++                "speculative_adaptive_config"}}
 +    scheduler.contextkv_runtime = ContextKVRuntime(cache, fp, scheduler=scheduler,
-+        model_scope=model_scope,
++        model_scope=model_scope, decoder_settings=decoder_settings,
 +        transfer_tma_enabled=envs.SGLANG_HICACHE_TMA_TRANSFER.get(),
 +        result_ttl_seconds=float(os.environ.get("CONTEXTKV_RESULT_TTL_SECONDS", "900")),
 +        result_max_bytes=int(os.environ.get("CONTEXTKV_RESULT_MAX_BYTES", str(64 << 20))))

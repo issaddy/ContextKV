@@ -16,7 +16,7 @@ from adapters.retrieval import retrieval_query
 from controller.schema import QueryContext, TaskFrame
 
 
-VERSION = "conversational-intent-v18"
+VERSION = "conversational-intent-v19"
 FRAME_FIELDS = ("topic", "target", "conditions")
 RELATIONS = ("standalone", "followup", "correction", "condition_change", "topic_switch", "revisit", "ambiguous", "conversational")
 _DEPENDENT = re.compile(
@@ -229,6 +229,112 @@ def _history_query(turn, context):
     return retrieval_query(questions), tuple(range(first + 1, len(questions)))
 
 
+def _bound_revisit_history(client, system, body, users, *, evidence_documents=None):
+    """Fit a revisit without replacing complete answers with invented summaries.
+
+    Short histories are unchanged. For an oversized history, retain recent QA,
+    then whole older user questions and their committed states. Restore complete
+    older answers when they fit; omitted answers and turns remain explicit.
+    """
+    if not users or not hasattr(client, "catalog_token_lengths") or not hasattr(client, "config"):
+        return system, body, users, None
+    budget = client.config.max_input_tokens
+
+    def messages(current):
+        return [{"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(current, ensure_ascii=False)}]
+
+    def count(rows, documents=()):
+        current = {**body, "previous_turn": rows[-1], "earlier_turns": rows[:-1]}
+        if evidence_documents is not None:
+            current["documents"] = list(documents)
+        return client.catalog_token_lengths(messages(current), [])[0]
+
+    original_tokens = count(users)
+    if original_tokens <= budget:
+        return system, body, users, None
+
+    system += ("\nSome older turns or answers are omitted to fit the input budget. "
+               "A retained state is a fallible hint; if omitted history leaves a referent unresolved, "
+               "preserve the ambiguity instead of inventing it.")
+    # Keep the live request next to the model's response after a long history;
+    # the unmodified short-history layout remains unchanged.
+    body = {**{key: value for key, value in body.items() if key != "current_question"},
+            "history_omitted_for_budget": True, "current_question": body["current_question"]}
+
+    def compact(row):
+        return {**{key: value for key, value in row.items() if key != "answer"},
+                "answer_omitted_for_budget": True}
+
+    recent = [dict(row) for row in users[-3:]]
+    for index in range(len(recent)):
+        if count(recent) <= budget:
+            break
+        recent[index] = compact(recent[index])
+    while len(recent) > 1 and count(recent) > budget:
+        recent.pop(0)
+
+    # A joint source selector must still have room to read at least one actual
+    # source when one can fit beside the recent dialogue. The regular source
+    # packer makes the final choice; no document is inserted here.
+    reserve = 0
+    base = count(recent)
+    if evidence_documents is not None and base <= budget:
+        for document in evidence_documents:
+            with_source = count(recent, (document,))
+            if with_source <= budget:
+                reserve = with_source - base + 4
+                break
+
+    older = users[:-3]
+    priority = older[:1] + list(reversed(older[1:]))
+    selected = list(recent)
+    compact_rows = [compact(row) for row in priority]
+    current = {**body, "previous_turn": recent[-1], "earlier_turns": recent[:-1]}
+    units = [*compact_rows, *(priority if evidence_documents is None else ())]
+    used, lengths = client.catalog_token_lengths(messages(current),
+        [json.dumps(row, ensure_ascii=False) for row in units])
+    added = []
+    for row, length in zip(compact_rows, lengths, strict=False):
+        # An array separator and token-boundary changes are checked exactly
+        # below; this margin keeps the usual case to one additional count.
+        if used + length + 4 + reserve <= budget:
+            selected.append(row)
+            added.append(row["turn"])
+            used += length + 4
+    selected.sort(key=lambda item: item["turn"])
+    while added and count(selected) + reserve > budget:
+        last = added.pop()
+        selected = [row for row in selected if row["turn"] != last]
+
+    # For interpretation-only calls, use remaining space for complete original
+    # answers. Joint selection spends that space on the source catalog instead.
+    if evidence_documents is None:
+        used = count(selected)
+        selected_ids = {row["turn"] for row in selected}
+        restored = []
+        compact_lengths = lengths[:len(priority)]
+        full_lengths = lengths[len(priority):]
+        for row, compact_length, full_length in zip(priority, compact_lengths, full_lengths, strict=True):
+            delta = max(0, full_length - compact_length) + 4
+            if row["turn"] in selected_ids and used + delta <= budget:
+                selected = [row if item["turn"] == row["turn"] else item for item in selected]
+                restored.append(row["turn"])
+                used += delta
+        while restored and count(selected) > budget:
+            last = restored.pop()
+            selected = [compact(row) if row["turn"] == last else row for row in selected]
+
+    body["previous_turn"], body["earlier_turns"] = selected[-1], selected[:-1]
+    selected_ids = {row["turn"] for row in selected}
+    trace = {"original_input_tokens": original_tokens,
+             "selected_turns": [row["turn"] for row in selected],
+             "omitted_turns": [row["turn"] for row in users if row["turn"] not in selected_ids],
+             "answer_omitted_turns": [row["turn"] for row in selected if row.get("answer_omitted_for_budget")],
+             "reserved_source_tokens": reserve}
+    return system, body, selected, trace
+
+
 class ConversationResolver:
     def __init__(self, client=None):
         self.client = client
@@ -237,7 +343,7 @@ class ConversationResolver:
     def manifest(self):
         return {"version": VERSION, "system_prompt": SYSTEM,
                 "initialization_prompt": INITIALIZE_SYSTEM,
-                "history": "current question, latest committed state and complete recent actual QA; older state-change questions with their preceding assistant message fit within the same input budget; explicit revisits retain their existing history view",
+                "history": "current question, latest committed state and complete recent actual QA; older state-change questions with their preceding assistant message fit within the same input budget; oversized revisits preserve recent QA and budgeted original older questions, states and whole answers",
                 "calls": "one configured interpretation initializes or updates every turn, including short object/condition changes; no-client mode only projects history",
                 "self_contained_gate": "the configured model decides whether a named question changes topic or retains conditions; name occurrence alone does not clear active state",
                 "condition_view": "structured condition updates retain the task and all requirements",
@@ -305,6 +411,11 @@ class ConversationResolver:
             from adapters.evidence_selection import SELECTION_SYSTEM
             system += "\n\n" + SELECTION_SYSTEM
             body = {"documents": [], **body}
+        if revisiting:
+            system, body, users, history_budget = _bound_revisit_history(
+                self.client, system, body, users, evidence_documents=evidence_documents)
+            if history_budget is not None:
+                trace["history_budget"] = history_budget
         if optional_history or evidence_documents is not None:
             # One tokenizer batch packs whole history/source units. Required
             # recent dialogue is never shortened to make an enrichment fit.
@@ -381,7 +492,11 @@ class ConversationResolver:
             if relation in {"standalone", "topic_switch"}:
                 ids = []
             elif relation == "revisit" and not resume:
-                relation = "followup"
+                # A declared return without a target cannot inherit the latest
+                # task: doing so silently converts an unresolved reference into
+                # an unrelated follow-up.
+                relation, ids = "ambiguous", []
+                trace["unresolved_revisit"] = True
             frame = None
             if relation != "ambiguous":
                 base_turn = resume if relation == "revisit" and resume else users[-1]["turn"] if users else 0
@@ -426,6 +541,8 @@ class ConversationResolver:
         trace.update(text=resolved.query, status="resolved", context=asdict(resolved))
         if resolved.relation == "ambiguous":
             trace["status"] = "ambiguous"
+            if trace.get("unresolved_revisit"):
+                return finish("revisit_without_target")
             return finish("ambiguous_interpretation_uses_existing_history_view", history_view=True)
         return finish("joint_context_interpretation" if evidence_documents is not None else
                       "conversational_interpretation")

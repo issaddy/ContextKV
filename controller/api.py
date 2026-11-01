@@ -50,6 +50,7 @@ class QueryInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: str = Field(min_length=1)
     request_id: str = Field(min_length=1)
+    from_corpus_snapshot_id: str | None = Field(default=None, min_length=1)
 
 
 def _load_retrieval(service, *, retriever_index, retriever_config, evidence_corpus, corpus_id):
@@ -232,10 +233,16 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
         if not app.state.ready or adapter is None:
             return JSONResponse(status_code=503, content={"code": "RETRIEVAL_NOT_READY",
                 "detail": "query retrieval is not configured or not ready"})
+        if body.from_corpus_snapshot_id is not None:
+            try:
+                service.store.get_snapshot(session_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="session not found") from exc
         try:
             return to_jsonable(await service.serve_turn(session_id, body.query,
                 request_id=body.request_id, corpus_snapshot_id=adapter.corpus_snapshot_id,
-                evidence_provider=lambda snapshot: adapter.retrieve(snapshot, body.query, body.request_id)))
+                evidence_provider=lambda snapshot: adapter.retrieve(snapshot, body.query, body.request_id),
+                from_corpus_snapshot_id=body.from_corpus_snapshot_id))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

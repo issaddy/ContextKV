@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 from hashlib import sha256
+from functools import partial
 import importlib
 import json
 import os
@@ -196,6 +197,22 @@ def create_http_judge(model, endpoint, *, max_tokens=2048, enable_thinking=None)
     return judge
 
 
+def _conversation_fields(messages):
+    """Keep message boundaries when the current question itself contains newlines."""
+    previous = "\n".join(f"{m['speaker']}: {m['text']}" for m in messages[:-1])
+    return previous, messages[-1]["text"]
+
+
+def _structured_radbench(official, operation, *args):
+    extract, split = official.extract_conversation, official.split_conversation
+    official.extract_conversation = lambda messages: messages
+    official.split_conversation = _conversation_fields
+    try:
+        return operation(*args)
+    finally:
+        official.extract_conversation, official.split_conversation = extract, split
+
+
 def score_http_stages(official, model, input_path, output_directory, *, answerability_adjustment=True,
                       metrics=("RB_llm", "RL_F")):
     """Reuse upstream metric functions; atomically retain each completed stage."""
@@ -213,15 +230,23 @@ def score_http_stages(official, model, input_path, output_directory, *, answerab
     has_underspecified = answerability_adjustment and any(
         "UNDERSPECIFIED" in row.get("answerability", row.get("Answerability", [])) for row in rows)
     stages = [("idk", "idk_eval", official.run_idk_judge)] if answerability_adjustment else []
-    stages += [(operations[metric][0], metric, getattr(official, operations[metric][1])) for metric in metrics]
+    for metric in metrics:
+        name, function = operations[metric]
+        operation = getattr(official, function)
+        if metric == "RB_llm":
+            operation = partial(_structured_radbench, official, operation)
+        stages.append((name, metric, operation))
     if has_underspecified:
         stages.append(("underspecified", "underspecified_eval", lambda provider, name, inp, out:
                        official.underspecified_eval(name, inp, out)))
     previous = Path(input_path)
     scored_by_id = {row["task_id"]: row for row in rows}
+    reused_stages = []
     for name, metric, operation in stages:
         target = output / f"{name}.jsonl"
-        if not target.exists():
+        if target.exists():
+            reused_stages.append(name)
+        else:
             pending = target.with_suffix(".pending.jsonl")
             operation("vllm", model, str(previous), str(pending))
             scored_ids = [r["task_id"] for r in load_jsonl(pending)]
@@ -246,7 +271,8 @@ def score_http_stages(official, model, input_path, output_directory, *, answerab
     pending = target.with_suffix(".pending.jsonl")
     pending.write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in scored))
     pending.replace(target)
-    return {"tasks": len(scored), "stages": [name for name, _, _ in stages], "requested_metrics": list(metrics),
+    return {"tasks": len(scored), "stages": [name for name, _, _ in stages], "reused_stages": reused_stages,
+            "requested_metrics": list(metrics),
             "conditioned_suffix": suffix, "output": str(target)}
 
 
@@ -269,7 +295,8 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     identity = {"input_sha256": sha256(Path(input_path).read_bytes()).hexdigest(),
                 "source_commit": DATASET_COMMIT, "judge_model": model,
                 "judge_revision": judge_revision, "temperature": 0, "top_p": 1,
-                "max_tokens": max_tokens, "enable_thinking": enable_thinking}
+                "max_tokens": max_tokens, "enable_thinking": enable_thinking,
+                "conversation_format": "structured_message_boundaries_v1"}
     if not answerability_adjustment:
         identity["answerability_adjustment"] = False
     identity_path = output / "identity.json"
@@ -301,6 +328,7 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     finally:
         official.load_chat_openai_llm = loader
     receipt = {**result, **identity, "status": "completed", "endpoint": endpoint,
+               "endpoint_scope": "current invocation; reused stages may have run on a different endpoint",
                "adapter_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
                "backend": "OpenAI-compatible HTTP via the official vllm client branch",
                "generation_answers_modified": False,

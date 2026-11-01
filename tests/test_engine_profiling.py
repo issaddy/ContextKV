@@ -35,6 +35,25 @@ class ProtocolDouble(MockEngine):
                        timing_source="sglang_server_monotonic")
 
 
+def test_collector_keeps_recorded_prompt_and_measures_natural_completion():
+    class Recorded(ProtocolDouble):
+        async def generate(self, **kwargs):
+            assert kwargs['ignore_eos'] is False
+            assert kwargs['citation_ids'] == ('E_source',)
+            return await super().generate(**kwargs)
+    async def scenario():
+        original = tuple(range(100, 107))
+        probe = SGLangProbe(Recorded(response_text='abcd'), range(10),
+            prompt_inputs={len(original)+1: original}, citation_scopes={8: ('E_source',)}, ignore_eos=False)
+        case = PrefillCase(8, 0, 16, 2, 'cold')
+        await probe.prepare(case)
+        assert all(ids[1:] == original for ids in probe._inputs)
+        assert probe._inputs[0][0] != probe._inputs[1][0]
+        rows = await probe.probe(case)
+        assert all(row.prompt_tokens == 8 and row.output_tokens == 4 for row in rows)
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("cache_state,prefix", [("cold",0),("gpu_ready",4),("host_only",4)])
 def test_collector_prepares_verified_cache_shapes_and_records_native_fields(cache_state, prefix, tmp_path):
     async def scenario():

@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 
+from .evidence import merge_evidence_block
 from .schema import (ContextEpoch, EvidenceBlock, EvidenceKey, ExecutionLedger, GenerationResult, Message, QueryContext,
                      Plan, RetireOperation, SessionSnapshot, TurnRecord)
 from .serialization import decode, dumps, loads
@@ -325,6 +326,10 @@ class SessionStore:
             candidate, result, epoch = attempt.plan.candidate, attempt.result, attempt.epoch
             if not result.generation_complete or not result.receipt.generation_complete:
                 raise StoreError("Partial output cannot become semantic history")
+            if (candidate.corpus_snapshot_id != snap.corpus_snapshot_id
+                    and (candidate.action != "REBUILD" or not attempt.new_epoch
+                         or attempt.branch_reason != "corpus_snapshot_change")):
+                raise StoreError("Corpus snapshot transition requires its own rebuilt epoch")
             version = snap.version + 1
             history_version = snap.raw_history_version + 1
             turn = TurnRecord(len(snap.raw_history) + 1, attempt.query, result.text, result.output_ids,
@@ -337,10 +342,13 @@ class SessionStore:
                                      candidate.corpus_snapshot_id, candidate.evidence_spans,
                                      candidate.reference_map, result.receipt.inserted_cache_tokens)
             archive = {b.key: b for b in snap.archive}
-            archive.update({b.key: b for b in attempt.evidence})
+            for block in attempt.evidence:
+                prior = archive.get(block.key)
+                archive[block.key] = merge_evidence_block(prior, block) if prior is not None else block
             updated = replace(snap, version=version, raw_history=snap.raw_history + (turn,),
                               raw_history_version=history_version, execution=ledger,
                               archive=tuple(archive[k] for k in sorted(archive)),
+                              corpus_snapshot_id=candidate.corpus_snapshot_id,
                               current_epoch=replace(epoch, state="COMMITTED"), history_sync_pending=False,
                               force_new_epoch_for_recovery=False, must_rebuild=False,
                               reference_map=candidate.reference_map,

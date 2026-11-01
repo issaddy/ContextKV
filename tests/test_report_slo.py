@@ -37,6 +37,15 @@ def test_buffered_default_needs_declared_deadline_and_keeps_engine_ttft_diagnost
     assert strict["timing"]["turn_seconds"] == result["timing"]["turn_seconds"]
 
 
+def test_report_preserves_the_concurrency_scope_and_defaults_old_runs():
+    data = payload()
+    assert summarize_run(data)["concurrency_scope"] == "session"
+    data["report"]["concurrency_scope"] = "turn"
+    result = summarize_run(data)
+    assert result["concurrency_scope"] == "turn"
+    assert "并发口径：turn" in markdown_report(result)
+
+
 def test_decision_summary_separates_cost_selection_fallback_and_native_results():
     cases = [
         ("REBUILD", "only_feasible_candidate", None),
