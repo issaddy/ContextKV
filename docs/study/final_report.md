@@ -1,150 +1,140 @@
-# ContextKV 最终报告（结果登记稿）
+# ContextKV 最终结果登记
 
-更新日期：2026-11-03。评审基线：`7388008f56ec7176668321d00f69bd2f07639f0a`。
-本稿登记主 agent 在指定 `sjy-0518` 容器报告的实际结果；待填项由对应原始产物补齐。
-容器项目根为 `/home/relay/songjiayun/ContextKV/runs/study-20261102/project`，下文产物路径均相对该目录。
+更新于 2026-11-03，登记截至 06:50 已确认的容器产物。评审基线为
+`7388008f56ec7176668321d00f69bd2f07639f0a`。数据、模型、日志和结果保留在指定主机的
+`sjy-0518` 容器；本文路径沿用各批次 manifest。最终源码与配置 SHA 由交付提交和冻结记录固定。
 
-## 已完成的训练与冻结诊断
+任务状态、条件修正、历史、版本与来源目录已经接入集合搜索和 READ/REDUCE/ANSWER。
+运行时持久化真实步骤、原生回执和一次 QA 提交。当前 B 开发比较选择 B3，C 开发选择 native；
+reader 与 A 策略的公开最终选择由最终批次 `frozen.json` 登记。
 
-R1、R2 reader LoRA 和 R1 绑定的 P1 prototype22 已完成训练。冻结实际历史的
-P0/P1 × R0/R1 四格在共同 13 个状态上的工程主分依次为
-0.9231、0.9462、0.9615、0.9769。P0_R0 的第 14 个状态发生预算失败，其他三格完成 14/14。
-这组结果来自相同实际 TaskState、候选池与历史的受控开发诊断；公开开发和测试结果在后表单独登记。
+## 数据与模型
 
-| Reader | 实际训练数据 | 输入 / 监督 token | 训练墙钟 | 训练证据 |
-|---|---|---|---|---|
-| R0 | 保留原 Qwen3-32B BF16 权重 | 无本轮训练 | — | 原模型 scope 与运行配置保留 |
-| R1 v1 | 1773 train examples，1544 个 native train turn；另 19 validation；总样本 1559 ANSWER＋233 READ | 7,800,825 / 355,628 | 1,405,076.37 ms；56 optimizer steps | LoRA、合并权重、manifest、连续物理采样已按训练入口保存 |
-| R2 | 2264 个采样后的 train examples＝1773 parent＋153 课程×3＋4 个新 P1 样本×8；1544 个实际 native train turn | 10,759,242 / 597,099 | 1,952,039.975 ms；71 optimizer steps | 从 R1 adapter 继续，实际四 GPU `0,4,6,7` 训练、合并和服务启动完成 |
+训练原始轨迹为 `task-a/turns.jsonl` 的 10004 轮、1539 会话，配套 SQLite 保存实际生成历史与检索原文。
+R1、R2 reader LoRA 和绑定 R1 的 P1 prototype22 均已完成训练；R0 保留原 Qwen3-32B BF16 权重。
 
-R1 训练分区持出 loss 为 `0.1608121544`。R2 的持出 loss 为 `0.157603919506073`。
-两轮训练都保留实际历史、来源原文坐标、目标复核与排除清单；原 validation 文件由 mix 入口原样复制。
-R2 的 2264 是显式过采样后的训练例数，不是 2264 个独立 turn。
+| Reader | train / validation | 输入 / 监督 token | optimizer steps | 同步训练墙钟 ms | validation loss |
+|---|---|---:|---:|---:|---:|
+| R1 v1 | 1773 / 19；1544 个实际 native train turn | 7,800,825 / 355,628 | 56 | 1,405,076.37 | 0.1608121544 |
+| R2 | 2264 个采样例 / 原 19；1544 个实际 native train turn | 10,759,242 / 597,099 | 71 | 1,952,039.975 | 0.157603919506073 |
 
-| 资产名 | checkpoint identity | 容器产物 |
+R2 从 R1 adapter 继续训练，使用 GPU `0,4,6,7`。2264 个采样例由 1773 个 parent、
+153 个课程样本各 3 份、4 个新 P1 实际历史样本各 8 份组成。原 validation 文件保持原样；loss 对应训练分区持出集。
+
+| 资产 | identity / 绑定 | 容器目录 |
 |---|---|---|
 | R1 v1 | `contextkv-reader-r1:1eec232b42b67721374c0400b354081842b54c965a20c441b17b4d82a33c567b` | `models/study-reader-r1/`、`models/study-reader-r1-merged/` |
 | R2 | `contextkv-reader-r1:7521b3cffa58df5c0973b361f12d9138bcf358c6404a1b6b6a4c6b440f62e768` | `models/study-reader-r2/`、`models/study-reader-r2-merged/` |
-| P0 | 实际 prefix 支持资产；具体 identity 读其 manifest | `models/study-support-actual-prefix/` |
-| P1 prototype22 | 22 个真实候选答案 / 5 个训练状态；绑定 R1 v1 | `models/study-support-r1-prototype22/` |
+| P0 | actual-prefix 支持资产 | `models/study-support-actual-prefix/` |
+| P1 prototype22 | 22 个真实候选答案、5 个训练状态；绑定 R1 v1 | `models/study-support-r1-prototype22/` |
 
-R2 的 identity 字符串由现有 reader driver 生成，前缀仍为 `contextkv-reader-r1:`；
-报告与配置用独立名称 R2 和完整 digest 区分。P1×R0、P1×R2 均保留跨 reader 迁移标记。
-最近实际健康报告：R2 `30006/GPU4`、原 R1 v1 `30004/GPU6` 均为 HTTP 200。
-完整训练、数据和许可产物清单见 [training_assets.json](training_assets.json)。
+R2 沿用 driver 的 identity 前缀，以逻辑名称和完整 digest 区分。P1×R0、P1×R2 登记为跨 reader 迁移。
+数据 split、目标复核、排除清单、采样倍率、adapter、合并权重、许可与配置路径见
+[training_assets.json](training_assets.json)。
 
-## A：同历史四格
+## A：固定实际历史的四格
 
-原始目录：`b/fourgrid-prototype22/frozen/`。每格包含实际 generation、audit、reference、
-steps/attempts 与离线评分记录。主分为 `project_condition_version_score`。
+原始目录为 `b/fourgrid-prototype22/frozen/`。四格共用实际 TaskState、候选池和历史，
+主分为 `project_condition_version_score`。
 
-| 方法 | 完成 QA / 预定状态 | 共同评分状态 | 主分 | 相对 P0_R0（百分点） |
+| 方法 | 完成 QA / 预定状态 | 共同评分状态 | 主分 | 相对 P0_R0 的百分点差 |
 |---|---:|---:|---:|---:|
 | P0_R0 | 13 / 14 | 13 | 0.9230769231 | 0 |
 | P0_R1 v1 | 14 / 14 | 13 | 0.9461538462 | +2.3077 |
 | P1_R0 | 14 / 14 | 13 | 0.9615384615 | +3.8462 |
 | P1_R1 v1 | 14 / 14 | 13 | 0.9769230769 | +5.3846 |
 
-同 reader 的 P1−P0 分别为 R0 **+3.8462**、R1 v1 **+3.0769** 个百分点。
-各格的在线总 token、GPU/Host GiB·s、完整响应 P95 与逐项错误数待从该批成本及评分产物填入。
-预算失败的原 attempt、原始步骤与已发生费用保留；共同集表不把该题补成零分或成功。
+同 reader 的 P1−P0 分别为 R0 +3.8462、R1 v1 +3.0769 个百分点。P0_R0 的第 14 个状态为预算失败，
+原 attempt、步骤和费用保留。早期 sixgrid-v1 共同 12 状态的 E0/inferred 分数为 R0 0.8708、R1 v1 0.7333；
+两批按各自输入和运行版本独立登记。自身 P3、R2 与公开对照的完成数、评分分母和成本引用最终 A 批次报告。
 
-| 后续对照 | 状态 | 产物 / 待填 |
-|---|---|---|
-| P0/P1×R2 冻结实际历史 | 待实际运行/评分 | 使用独立 R2 run config 和 identity |
-| 各方法自身 P3 开发历史 | 待汇总 | 实际问题/回答、终态失败、会话后继跳过与费用逐条登记 |
-| P1 自身训练 P3 → R2 | 已得到 4 个有效新样本，按 8 倍混入 R2 | `runs/study/reader-r2-data/new-p1-runtime/` |
+## B：真实增益与滚动选择
 
-早期 sixgrid-v1 的共同 12 状态 E0/inferred 为 R0 0.8708、R1 v1 0.7333；
-这批早期诊断没有显示首轮 reader 改善。它与本表的状态/运行版本分开报告。
+早期 v3 真实反事实采集包含 train 8、dev 4 个状态，176 次模型调用、721867 ms。
+当前 READ prompt 对应 `models/study-plan-gain-r0-bridge-v4.json`；
+成本资产为 `models/study-plan-r0-bridge-v3-execution.json` 与
+`models/study-plan-r0-bridge-v3-native/native-assets.json`。
 
-## B、C 与联合决策
+| 当前滚动开发方法 | 共同 QA | RB_llm |
+|---|---:|---:|
+| B3 | 6 | 0.800000 |
+| S3，λ=0 | 6 | 0.633333 |
+| S3，λ=1e-5 | 6 | 0.566667 |
 
-| 项目 | 已实测 | 尚待登记的结果 |
-|---|---|---|
-| B v3 真实反事实收益拟合 | 8 个 train 状态、4 个 dev 状态，176 次 model call，721867 ms，fit 完成 | reader/checkpoint 绑定、持出误差、实际滚动决策质量与成本 |
-| C 原生前缀机制 | 固定 token 配对已执行；完整 READ/ANSWER/REDUCE 成本采集与拟合已推进 | 最终成本资产、留存/TTL/压力实验与未来复用价值结果 |
-| 更新 B × 更新 C | 入口与合同已实现 | 四格实际完成数、共同题集质量、完整成本与相对当前候选的收益 |
+该开发比较选择 B3。S3 两档与 B6 继续按预登记测试方案执行。
+滚动策略结合真实 native quote、完整阶段时窗与物理成本；统计预测保留观测范围、预测区间及外推标记。
+ANSWER 使用选择完成后的 remaining-control，已支付控制与后续成本分开入账。
 
-固定 token 的 C 配对中，GPU 组多命中 128 token、少回载 128 token，响应约少 10.4 ms；
-Host 组多命中 128 token、少重算 128 token、多回载 128 token，响应约多 17.0 ms。
-实际 READ/REDUCE/ANSWER 与负载实验另列，避免将该局部配对直接外推为在线收益。
+## C：独立前缀与价值消融
 
-## 公开 cohort、开发冻结与测试
+稳定来源前缀按实际执行输入确定，端点按 page size 向下对齐。独立 owner 跨业务 epoch 保留，
+记录 TTL、GPU/Host 原生 soft refs、释放与重启核对。原生命中收益、共享页边际逻辑容量和连续物理积分分别登记。
 
-当前声明五个公开开发候选：`P0_R0`、`P1_R0`、`P1_R1`、`P0_R2`、`P1_R2`。
-R0/R1 分支已运行，分数与完成数待主 agent 汇总；R2 分支排在成本/收益阶段之后。
-开发选择记录、最终入选配置、source/weights SHA 与冻结时间待实际 freeze 产物填入。
+固定 token 资格探针中，GPU 组增加 128 个命中 token、少回载 128 token，响应约减少 10.4 ms；
+Host 组增加 128 个命中 token、少重算 128 token、多回载 128 token，响应约增加 17.0 ms。
 
-| 数据轨道 | 开发 cohort | 测试 cohort | 已完成数据准备 | 质量结果 |
-|---|---|---|---|---|
-| MultiDoc2Dial | 15 turn / 2 conversation | 预定 2 conversation；turn 数读冻结 manifest | 实际 native split 与完整实际历史 | 待填 |
-| 2WikiMultihopQA | 40 条 | 互斥 40 条 project-heldout | 作者官方镜像有标签 dev 共 12576 条，固定 hash 40/40 | 待填官方 answer EM/F1、support/evidence/joint 与完成率 |
-| Loong / 长文 | 2 个独立训练来源构造的 long_dev | 公开 set1 固定 hash 4 题 | 4 题的全部 17 个原文实例已获取 | 待填 0–100 rubric、完成率、全部 READ/REDUCE/ANSWER 成本 |
+当前语义轨迹为 `runs/study/c-current-r0-g5-v4/`，已真实重采 train 7、dev 14 轮，
+完成 4 个固定 token/DAG 配对窗口，train/dev 各 2，TTL 为 15 秒。输入、采样和输出预算一致性证明、
+目标再访问、其他来源与控制成本、整窗 `Native−Retain` 差保存在各 `paired-rows.jsonl`。
 
-2Wiki 的 40/40 来自官方有标签 dev 的项目划分，保留全部原始段落和 distractors。
-其 source、cohort 和评分协议分别存于
-`data/2wikimultihopqa/source/source_manifest.json`、
-`data/2wikimultihopqa/cohort40/cohort_manifest.json`、`study_spec.yaml`。
+| train-only 拟合规则 | dev 预测覆盖 | dev MAE ms | dev 正收益留存动作 |
+|---|---:|---:|---:|
+| 完整特征 | 0 / 2 | 未覆盖 | — |
+| prior_access_count | 0 / 2 | 未覆盖 | — |
+| scope / TTL | 2 / 2 | 4452.695606 | 0 |
 
-Loong 的选择仅按 `sha256(canonical_json([42,"loong","test",original_id]))` 排序取 set1 前 4 题，
-没有按参考答案选择题目或文档。实际域分布为 **1 paper、2 legal、1 financial**，
-**17 个原文实例全部保留**；Range 导出墙钟 **61,392 ms**。
-官方 ZIP HEAD 大小 `33,915,268` bytes，ETag `872F4FCE1127BB930A41D7ECEC293562-4`。
-此次只获取中央目录和所需完整成员，不记为整 ZIP 下载或全 323 题覆盖。
-导出入口产物为 `data/loong/set1-cohort4/{tasks.jsonl,cohort_manifest.json,study_spec.yaml}`；
-逐段 Range、ETag、CRC 和成员 SHA 由其 `source/` 原始回执保存，实际输出目录由主 agent 最终核对。
+开发选择保留 native。粗化将预测覆盖提高到 2/2，本批净价值判断选择不增加留存。
+三个资产及其 train 来源均保留；模型训练发生在 GPU5，GPU3 联合运行的实际 scope 与动作由每步 `evidence_prefix` 记录。
 
-| 冻结/评分项 | 结果 |
-|---|---|
-| 公共开发逐方法质量、完成/评分分母 | 待填 |
-| 预定权重与开发约束验收 | 待冻结 manifest 填入 |
-| 入选方法 / 冻结时间 / 源码提交 / 资产与配置 SHA | 待填 |
-| 公开测试逐题指标与共同集对照 | 待填 |
-| 同物理容量并发、停顿、切题、资料回访负载 | 待填 |
-| 消融：任务状态、组合、效用、ANSWER plan、READ、成本 | 待填 |
+## 自身 P3 联合与容量
 
-## 机制结果与错误保留
+`runs/study/capacity-r0-joint-v1/` 的 8 个 job 已完成，共 56 QA。
+并发 1 包含 B6/S3×native/value 四格，各 2 QA；并发 4、8 分别使用 4、8 个真实客户端，各运行两种 native 方法。
+首轮同时到达，第二轮在自身首答提交后停顿 30 秒，再按自身回答形成条件纠正 P3。
 
-早期 R1 长文运行的实际 REDUCE 为 36 条、655000 g，最终 ANSWER 却给出 3 条、6 kg；
-同代码早期 R0 为 36 条、596000 g，最终同为 3 条、6 kg。新 balanced R0 已实际得到
-36 条、666000 g，最终 36 条、666 kg；匹配 R2 结果待填。
-多跳任务此前停在 Institute→Arbor，没有完成 1997 的三来源链；新配置结果待填。
-原始错误答案、claim 来源、最终输入与计算结果均保留，未改写成期望值。
+| 并发 8 方法 | 完成 QA | 完整响应 P95 ms |
+|---|---:|---:|
+| B6_native | 16 / 16 | 113811.5896 |
+| S3_native | 16 / 16 | 94399.0444 |
 
-Task/READ 明确预算终态与单题 judge 坏 JSON 分开登记：前者保留已付费模型调用、
-0 QA 和后继跳过；后者保留原 judge 响应、token/时间、失败状态与缺失指标，继续其他题。
-基础设施错误保留 failed cell/stage，调度继续独立方法与数据集，最终状态仍为失败或部分失败。
+该负载点 S3 的 P95 减少 19412.5452 ms，下降 17.0567%。全部 c1 四格、c4/c8 的实际到达、吞吐、
+prefill、回载、Need/source 覆盖和批次费用见 `workflow.json` 与 `jobs/*/capacity-summary.json`。
+此批为两轮容量协议；完整七轮五场景 P3 另批登记。联合四格允许自身回答、分支和 DAG 变化。
 
-## 完整成本登记
+## 公开多跳、长文与最终批次
 
-| 阶段 | 已知 token / 时间 | 物理积分、调用账本与待填项 |
-|---|---|---|
-| 数据导出 / 构造 / prepare | CPU 阶段 GPU 设备列表为空 | 各 data 目录的 `*_cost*.json`、`*_physical_resources*.json` |
-| 教师复核 / 课程配对 | 逐次原始调用与接受/排除结果已留存 | `review_calls.jsonl`；实际 input/output tokens、GPU/Host GiB·s 待汇总 |
-| R1 train | 7,800,825 输入；1,405,076.37 ms | `models/study-reader-r1/{training_cost.json,train_cost*.json,train_physical_resources*.json}` |
-| R2 train | 10,759,242 输入、597,099 监督；1,952,039.975 ms | `models/study-reader-r2/` 中同名逐 rank、连续物理与阶段账本；积分待填 |
-| 验证 / checkpoint / merge | 与 train 分开保存 | 各模型目录的阶段窗口、merge 成本；待汇总 |
-| 在线 A/B/C 与 reader | 辅助、READ、REDUCE、ANSWER 和失败调用全部计入 | 各 attempt/StepRecord/native receipt/batch measurement segments；待汇总 |
-| 离线评分 | 单独于在线生成 | `scoring/` 的 judge 原响应、token/耗时、物理观察与 scoring-stages；待汇总 |
+2WikiMultihopQA 原始有标签 dev 共 12576 条，固定 hash 形成互斥 40/40 开发与 project-heldout cohort，
+保留全部原文与 distractors。全文 V4 使用相同 8192 body 预算与 32K 模型窗口，预算内直接回答、超预算执行 READ。
+该批采用同输入 reader 对照，P0/P1 策略头不参与证据选择。
 
-训练 CUDA 同步墙钟与连续 GPU/Host 积分分别保留；不将 torch 峰值显存当作完整成本。
-首个 QA 源码提交为 `edb20e7`；最终交付提交与冻结后的必要验证结果待填。
+| 全文 V4 开发 reader | 完成 QA | 已有字段评分 | answer F1 |
+|---|---:|---:|---:|
+| R0 | 12 / 12 | 12 / 12 | 59.259 |
+| R1 v1 | 12 / 12 | 10 / 12 | 49.167 |
 
-## 交付核对
+F1 按各自已有评分分母登记；字段失败、原始答案与费用保存在对应评分目录。
+Loong set1 测试预选 4 题，包含 1 paper、2 legal、1 financial，全部 17 个原文实例保留；
+样本选择与导出回执见 `data/loong/set1-cohort4/{cohort_manifest.json,study_spec.yaml,source/}`。
+受控 balanced R0 长文已得到 36 条、666000 g，最终回答为 36 条、666 kg；
+早期 READ 数值错误与 ANSWER 忽略全范围结果的运行保留在机制审计中。
 
-- 代码与配置：最终源码提交、运行配置、Task/READ 协议、冻结预算与设备映射。
-- 数据与资产：[training_assets.json](training_assets.json)，包含实际 split、原文坐标、目标来源、采样倍率、checkpoint 和许可来源。
-- 结果与审计：逐题答案、来源、步骤、原生回执、评分失败、质量分母与共同集。
-- 费用与取舍：训练采集、训练、验证/merge、在线辅助/reader、失败与评分各自独立记账。
-- 待填写的最终结论：公开开发/测试质量、完整成本、负载与消融完成后据冻结产物填入。
+最终公开候选为 P0_R0、P1_R0、P1_R1、P0_R2、P1_R2。R2 开发后启动公开测试；
+全批逐轨质量、评分覆盖、实际选择和测试状态引用 `bench.a_final_batch` 最终批次的
+`frozen.json`、`report/public_summaries.json`、`report/paired_comparisons.json`、`report/artifact_inventory.json`。
+MultiDoc2Dial 的预定开发为 15 turn / 2 conversation，长文开发为 2 个独立训练来源案例；
+最终输入 ID 与资产 SHA 以该批 cohort/freeze manifest 为准。
 
-## 最终批次登记（06:50）
+## 完整成本与交付索引
 
-完整负载批次 `runs/study/capacity-r0-joint-v1` 已结束，预定 56 QA。8 并发下 B6_native 和 S3_native 均完成 16/16，完整响应 P95 分别为 113811.5896 ms 和 94399.0444 ms，后者低 17.0567%。其他格及质量由最终只读索引按原产物导出。
+各阶段保存真实采集、训练、验证、merge、在线辅助模型、READ/REDUCE/ANSWER、失败调用及离线评分费用。
+R1/R2 的 `training_cost*.json`、逐 rank 步骤、`train_physical_resources*.json` 和 `merge_cost*.json` 与模型资产共同保留。
+容量总成本在 `capacity-cost.json`；请求份额和嵌套批次积分由去重总账索引，观察缺口保留为 unknown。
 
-B 的当前 READ prompt 真实收益资产为 `models/study-plan-gain-r0-bridge-v4.json`，执行与 native 成本资产为 `models/study-plan-r0-bridge-v3-execution.json`、`models/study-plan-r0-bridge-v3-native/native-assets.json`。滚动开发共同 6 QA 中 B3 / S3 λ0 / S3 λ1e-5 的 RB_llm 分别为 0.8 / 0.633333 / 0.566667，开发冻结保留 B3；两档 S3 和 B6 在另行预登记的测试对照中继续评估。
+最终汇总使用 `profiling.final_study_index` 读取已有评分和 manifest，生成 `final-index.json/md`；
+`profiling.study_cost_ledger` 将同一时间轴的物理卡/PID 样本合并为唯一积分。
+完整成本数值与采样覆盖引用最终 `full-cost-ledger.json`，费用口径见
+[cost_retention_report.md](cost_retention_report.md)。
 
-C 当前固定 token/DAG 数据为 `runs/study/c-current-r0-g5-v4`，共 4 个配对窗口，train/dev 各 2。完整特征和 count-only 的 dev 覆盖均为 0/2；scope-only 为 2/2，MAE 为 4452.695606 ms，开发策略未选择正收益留存动作。此开发样本支持继续使用 native incumbent。
-
-公开多跳 V4 保留全部原文和 distractors；仅在同一 8192 body 预算及实际 32K 模型窗口允许时直接回答，超预算维持 READ。此时 P0/P1 的证据策略头不参与选择，明确视为同输入 reader 对照。12 题开发：R0 完成和字段评分均为 12/12，答案 F1 59.26；R1 完成 12/12、字段评分 10/12，F1 49.17。原始全文答案指标、字段失败与费用独立保存。
+首个 QA 源码提交为 `edb20e7`。交付索引登记最终源码、运行配置、训练数据清单、两套 reader 资产、
+策略资产、冻结 manifest、逐题结果、原生回执和成本来源。当前机制取舍为：B3 保留开发质量优势，native 保留 C 开发选择，
+S3 在已测八并发容量点具有更低 P95；公开质量与最终配置以最终批次产物登记。

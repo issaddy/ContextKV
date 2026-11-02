@@ -79,8 +79,6 @@ def prepare(args):
     prompt = FINAL_LINE_SYSTEM_PROMPT if args.answer_projection == "final_line" else ANSWER_SYSTEM_PROMPT
     version = ("V4_all_supplied_originals_when_actual_budget_fits" if args.provided_full_direct else
         "V3_final_line_format_ablation" if args.answer_projection == "final_line" else "V2_short_answer_and_read_budget")
-    if args.provided_full_direct:
-        version = "V4_provided_full_direct_when_fits_reader_baseline"
     cohorts, sources, counts = {"dev": {}, "test": {}}, {}, {}
     for name, spec in matrix["datasets"].items():
         for split in ("dev", "test"):
@@ -113,8 +111,6 @@ def prepare(args):
     matrix["cohorts"] = cohorts
     matrix["study_config"] = str(output/"study.yaml")
     matrix["datasets"]["twowiki"].update(reuse_provider=True, answer_system_prompt=prompt)
-    if args.provided_full_direct:
-        matrix["datasets"]["twowiki"].setdefault("selection", {})["provided_full_direct_when_fits"] = True
     if args.answer_projection == "final_line":
         matrix["datasets"]["twowiki"]["answer_projection"] = "final_line"
     if args.provided_full_direct:
@@ -201,7 +197,6 @@ def main(argv=None):
     parser.add_argument("--dev-twowiki-count", type=int, default=12)
     parser.add_argument("--answer-projection", choices=("none", "final_line"), default="none")
     parser.add_argument("--reuse-loong", action="store_true")
-    parser.add_argument("--provided-full-direct", action="store_true")
     parser.add_argument("--provided-full-direct", action="store_true")
     parser.add_argument("--collect", action="store_true")
     args = parser.parse_args(argv)

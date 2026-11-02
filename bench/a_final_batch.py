@@ -193,6 +193,10 @@ def run_batch(args):
         for item in frozen["readers"].values():
             if file_digest(item["run_config"]) != item["run_config_sha256"]:
                 raise ValueError("reader identity/profile changed after development freeze")
+        if args.methods:
+            if set(args.methods)-set(methods):
+                raise ValueError("test worker must use a subset of frozen test methods")
+            methods = [method for method in methods if method in args.methods]
     else:
         methods = args.methods or json.loads((root/"schedule.json").read_text())["public_development_methods"]
     datasets = args.datasets or list(matrix["datasets"])
@@ -274,9 +278,29 @@ def report(args):
     return {"report_directory": str(root/"report")}
 
 
+def collect(args):
+    root, _, matrix = bundle(args.output, args.split)
+    methods = (json.loads((root/"frozen.json").read_text())["test_methods"] if args.split == "test"
+               else json.loads((root/"schedule.json").read_text())["public_development_methods"])
+    result, sources = [], []
+    for method in methods:
+        for dataset in matrix["datasets"]:
+            directory = root/args.split/method/dataset
+            aggregate = directory/"results.scored.jsonl"
+            paths = [aggregate] if aggregate.exists() else sorted(directory.glob("*/results.scored.jsonl"))
+            for path in paths:
+                result.extend(rows(path))
+                sources.append({"method": method, "dataset": dataset, "path": str(path.resolve()),
+                                "sha256": file_digest(path)})
+    write_rows(root/args.split/"results.scored.jsonl", result)
+    write(root/args.split/"collection_manifest.json", {"rows": len(result), "sources": sources,
+        "generation_or_scoring_executed": False, "created_unix_ns": time.time_ns()})
+    return {"split": args.split, "collected": len(result), "source_files": len(sources)}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "diagnose", "run", "cell", "score-cell", "freeze", "report"))
+    parser.add_argument("command", choices=("prepare", "diagnose", "run", "cell", "score-cell", "freeze", "collect", "report"))
     parser.add_argument("--config", default="configs/a_final_batch.yaml")
     parser.add_argument("--output", required=True)
     parser.add_argument("--policy-asset", default="models/study-support-r1-prototype22")
@@ -295,7 +319,8 @@ def main(argv=None):
         result = asyncio.run(cell(args) if args.command == "cell" else score_cell(args))
         print(json.dumps({"result_rows": len(result)} if isinstance(result, list) else result))
     else:
-        result = {"prepare": prepare, "diagnose": diagnose, "run": run_batch, "freeze": freeze, "report": report}[args.command](args)
+        result = {"prepare": prepare, "diagnose": diagnose, "run": run_batch, "freeze": freeze,
+                  "collect": collect, "report": report}[args.command](args)
         print(json.dumps(result, ensure_ascii=False))
         if args.command == "run" and result["failed_stages"]:
             raise SystemExit(1)
