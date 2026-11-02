@@ -4,13 +4,12 @@ import asyncio
 from dataclasses import asdict
 import json
 import subprocess
-from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from controller.cost_model import CostModel, LookupPoint
-from controller.schema import CacheQuote, ConfigFingerprint
+from controller.schema import CacheQuote, ConfigFingerprint, PromptCandidate
 from profiling.common import Measurement
 from profiling.fit import main as fit_main, measurement_provenance
 from profiling.runtime_manifest import collect_local_runtime, collect_server
@@ -174,7 +173,8 @@ def test_multiple_manifests_reject_configuration_conflicts(tmp_path, mismatch):
 def test_known_engine_config_mismatch_disables_only_calibrated_selection():
     model = CostModel([LookupPoint(0, 100, 1, 2)], default_output_tokens=1, p90_output_tokens=1)
     model.calibration_metadata = {"profile_manifest": manifest()}
-    candidate = SimpleNamespace(input_ids=(1,)*100, candidate_id="test")
+    candidate = PromptCandidate("test", "REBUILD", 0, (), (1,)*100, "unused",
+                                frozenset(), frozenset())
     quote = CacheQuote("test", "unused", 100, 99)
     info = {"cache_config_hash": "cache-A", "fingerprint": asdict(ConfigFingerprint())}
     report = model.check_calibration_scope(info)

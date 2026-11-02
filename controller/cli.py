@@ -23,6 +23,7 @@ def main(argv=None):
     retrieval = serve.add_mutually_exclusive_group()
     retrieval.add_argument("--retriever-index", help="Frozen BM25S index for HTTP query retrieval")
     retrieval.add_argument("--retriever-config", help="Shared hybrid retriever YAML/JSON for HTTP queries")
+    retrieval.add_argument("--study-config", help="Task/support/reading study configuration")
     serve.add_argument("--evidence-corpus", help="Optional original version/condition metadata JSONL")
     serve.add_argument("--corpus-id", default="mtrag", help="Evidence corpus namespace; snapshot comes from the index")
     inspect = sub.add_parser("inspect", help="Read a persisted session")
@@ -47,7 +48,8 @@ def main(argv=None):
         if args.evidence_corpus and not (args.retriever_index or args.retriever_config):
             parser.error("--evidence-corpus requires --retriever-index or --retriever-config")
         uvicorn.run(create_app(config=config, retriever_index=args.retriever_index,
-            retriever_config=args.retriever_config, evidence_corpus=args.evidence_corpus,
+            retriever_config=args.retriever_config, study_config=args.study_config,
+            evidence_corpus=args.evidence_corpus,
             corpus_id=args.corpus_id), host=args.host, port=args.port)
     else:
         service = create_controller(config)

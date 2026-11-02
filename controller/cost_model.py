@@ -67,7 +67,8 @@ class CostModel:
                  max_normalized_distance: float = .5,
                  include_host_cost: bool = True, include_decode_cost: bool = True,
                  include_control_cost: bool = True, residual_alpha: float = .1,
-                 stage_model: Mapping | None = None) -> None:
+                 stage_model: Mapping | None = None,
+                 step_output_priors: Mapping | None = None) -> None:
         self.prefill_points = tuple(prefill_points)
         self.decode_points = tuple(decode_points)
         self.default_output_tokens = default_output_tokens
@@ -80,6 +81,8 @@ class CostModel:
         self.include_control_cost = include_control_cost
         self.residual_alpha = residual_alpha
         self.stage_model = dict(stage_model or {})
+        self.step_output_priors = dict(step_output_priors or {})
+        self.step_models = {}
         if not self.stage_model and any(p.scope == "forward_first" for p in self.prefill_points):
             raise ValueError("forward_first points require a stage model for pre-forward waiting")
         self._idle_pre_forward_samples = ()
@@ -338,9 +341,23 @@ class CostModel:
                        batch: CacheQuoteBatch | None = None, concurrency: int = 1,
                        control_ms: float = 0.0, queue_ms: float = 0.0) -> CostEstimate:
         # Candidate/quote identity is checked by the planner at the batch boundary.
+        if candidate.generation_kind in self.step_models:
+            return self.step_models[candidate.generation_kind].predict_native(
+                candidate, quote, session,
+                batch=batch, concurrency=concurrency, control_ms=control_ms, queue_ms=queue_ms)
         mean, p90 = self.effective_output_prior
-        prior = output_length_prior(session, global_mean=mean,
-            global_p90=p90, max_new_tokens=self.max_new_tokens)
+        output_budget = candidate.output_budget or self.max_new_tokens
+        step_profile = self.step_output_priors.get(f"{candidate.generation_kind}:{output_budget}",
+            self.step_output_priors.get(candidate.generation_kind))
+        step_prior_known = (candidate.generation_kind == "ANSWER" or step_profile is not None
+            and self.calibration_metadata.get("generation_kind") == candidate.generation_kind)
+        if step_profile is not None:
+            mean, p90 = step_profile["mean_tokens"], step_profile["p90_tokens"]
+            control_ms += step_profile.get("mean_control_ms", 0.0)
+        elif candidate.generation_kind != "ANSWER":
+            mean = p90 = output_budget
+        prior = output_length_prior(session if candidate.generation_kind == "ANSWER" else None, global_mean=mean,
+            global_p90=p90, max_new_tokens=output_budget)
         n = len(candidate.input_ids)
         loaded = max(0, min(quote.host_only_load_tokens, quote.native_load_estimate))
         # A GPU-resident segment can follow a host-only gap. Once every missing
@@ -367,7 +384,8 @@ class CostModel:
             calibrated = calibrated and step_calibrated
         components_supported = (calibrated and self.calibration_scope_compatible is not False
                                 and self.sampling_scope_compatible)
-        calibrated = components_supported and not quote.native_estimate_uncertain and not partial_restore
+        calibrated = (components_supported and not quote.native_estimate_uncertain and not partial_restore
+                      and step_prior_known and candidate.cost_prediction_eligible)
         if batch is not None and not batch.host_quote_supported:
             calibrated = False
         wait, selection_eligible = None, None
@@ -388,7 +406,7 @@ class CostModel:
                 and not quote.inflight_h2d_tokens and not quote.inflight_d2h_tokens
                 and wait_args["resident_gpu_tokens"] == quote.ready_gpu_prefix_tokens
                 else None)
-            wait = estimate_native_budget_wait(**wait_args, max_new_tokens=self.max_new_tokens,
+            wait = estimate_native_budget_wait(**wait_args, max_new_tokens=output_budget,
                 page_size=(profile.get("cache_config") or {}).get("page_size"),
                 queued_forward_fn=self._queued_workload_forward, initial_pinned_tokens=initial_pin)
             queue_ms = wait.mean_ms
@@ -398,10 +416,12 @@ class CostModel:
                 and (not quote.native_estimate_uncertain or reasons == {"capacity_pressure"}))
             selection_eligible = bool(components_supported and self.calibration_scope_compatible is True
                 and setup_supported and wait.supported and known_native_state and not partial_restore
-                and batch is not None and batch.host_quote_supported)
+                and batch is not None and batch.host_quote_supported and step_prior_known
+                and candidate.cost_prediction_eligible)
             # Empirical forward/decode support is not calibration of the new
             # heterogeneous workload forecast.
             calibrated = False
+        control_ms += candidate.predicted_read_ms + candidate.auxiliary_ms
         cost = max(0.0, control_ms + queue_ms + joint + decode + self._bias_ms)
         capacity_risk = batch is not None and (n-prefix+loaded+prior.p90_tokens >
                             batch.free_gpu_tokens+batch.evictable_gpu_tokens)
@@ -504,20 +524,27 @@ class CostModel:
             "measurement_binding": self.calibration_metadata.get("measurement_provenance", {}).get("binding_status", "not_provided")}
         if self.sampling_scope_report is not None:
             self.calibration_scope_report["sampling"] = self.sampling_scope_report
+        self.calibration_scope_report["step_profiles"] = {
+            kind: model.check_calibration_scope(info) for kind, model in self.step_models.items()}
         return self.calibration_scope_report
 
     def save(self, path: str | Path, *, metadata: Mapping | None = None) -> None:
         """Freeze fitted points and priors. Runtime residual adaptation is not persisted."""
-        settings = {name: getattr(self, name) for name in (
-            "default_output_tokens", "p90_output_tokens", "max_new_tokens",
-            "max_normalized_distance", "include_host_cost", "include_decode_cost", "include_control_cost", "residual_alpha")}
-        payload = {"version": 1, "settings": settings, "prefill_points": [asdict(p) for p in self.prefill_points],
-                   "decode_points": [asdict(p) for p in self.decode_points],
-                   "metadata": dict(self.calibration_metadata if metadata is None else metadata),
-                   "stage_model": self.stage_model or None}
+        payload = self.to_spec(metadata=metadata)
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    def to_spec(self, *, metadata=None):
+        settings = {name: getattr(self, name) for name in (
+            "default_output_tokens", "p90_output_tokens", "max_new_tokens",
+            "max_normalized_distance", "include_host_cost", "include_decode_cost", "include_control_cost", "residual_alpha",
+            "step_output_priors")}
+        return {"version": 1, "settings": settings, "prefill_points": [asdict(p) for p in self.prefill_points],
+                   "decode_points": [asdict(p) for p in self.decode_points],
+                   "metadata": dict(self.calibration_metadata if metadata is None else metadata),
+                   "stage_model": self.stage_model or None,
+                   "step_models": {kind: model.to_spec() for kind, model in self.step_models.items()}}
 
     @classmethod
     def load(cls, path: str | Path, **overrides) -> "CostModel":
@@ -529,4 +556,5 @@ class CostModel:
         model = cls((LookupPoint(**p) for p in payload["prefill_points"]),
                     (DecodePoint(**p) for p in payload["decode_points"]), **settings)
         model.calibration_metadata = payload.get("metadata", {})
+        model.step_models = {kind: cls.from_spec(spec) for kind, spec in payload.get("step_models", {}).items()}
         return model

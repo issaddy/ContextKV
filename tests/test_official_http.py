@@ -6,7 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from adapters.mtrag import DATASET_COMMIT
-from bench.official import load_jsonl, run_http_evaluator, score_http_stages
+from bench.official import (RAGAS_SCHEMA_MARKER, load_jsonl, run_http_evaluator,
+                            score_http_stages, with_ragas_output_schema)
 
 
 def upstream(calls, *, fail=None):
@@ -165,3 +166,24 @@ def test_radbench_receives_complete_multiline_questions_and_actual_message_histo
     ]
     assert (api.extract_conversation, api.split_conversation) == original
     assert [row["input"] for row in load_jsonl(source)] == [row["input"] for row in rows]
+
+
+def test_ragas_transport_uses_original_output_schema_and_preserves_prompt_and_sampler():
+    schema = {"title": "NLIStatementOutput", "type": "object", "properties": {
+        "statements": {"type": "array", "items": {"type": "object", "properties": {
+            "statement": {"type": "string"}, "reason": {"type": "string"},
+            "verdict": {"type": "integer"}}, "required": ["statement", "reason", "verdict"]}}},
+        "required": ["statements"]}
+    prompt = "Judge the statements.\n"+RAGAS_SCHEMA_MARKER+json.dumps(schema)+(
+        "Do not use single quotes.\ninput: {\"context\":\"Original evidence.\",\"statements\":[\"Fact.\"]}")
+    payload = {"messages": [{"role": "user", "content": prompt}],
+               "temperature": 0, "top_p": 1, "max_completion_tokens": 2048}
+    structured = with_ragas_output_schema(payload)
+    assert structured["response_format"]["json_schema"]["schema"] == schema
+    assert {key: value for key, value in structured.items() if key != "response_format"} == payload
+    assert "response_format" not in payload
+
+
+def test_non_ragas_rubric_keeps_its_existing_transport():
+    payload = {"messages": [{"role": "user", "content": "Assess the answer. Return rating [[1]] to [[10]]."}]}
+    assert with_ragas_output_schema(payload) is payload

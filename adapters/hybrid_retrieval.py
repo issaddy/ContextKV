@@ -169,6 +169,7 @@ class LocalBGE:
         self.model.to(device=device, dtype=getattr(torch, dtype)).eval()
         self.token_limit_hits = 0
         self.texts_processed = 0
+        self.usage = {"calls": 0, "texts": 0, "input_tokens": 0, "output_tokens": 0, "elapsed_ms": 0.0}
         self.manifest = {"model_id": RERANKER_ID if reranker else ENCODER_ID,
             "revision": RERANKER_REVISION if reranker else ENCODER_REVISION,
             "model_path": str(Path(model_path).resolve()), "revision_provenance": "operator_supplied_local_snapshot",
@@ -195,6 +196,9 @@ class LocalBGE:
             self.manifest["packages"]["peft"] = version("peft")
 
     def _forward(self, values):
+        if self.model.device.type == "cuda":
+            self.torch.cuda.synchronize(self.model.device)
+        started = time.perf_counter()
         outputs = []
         for start in range(0, len(values), self.batch_size):
             batch = values[start:start+self.batch_size]
@@ -203,6 +207,7 @@ class LocalBGE:
             lengths = encoded["attention_mask"].sum(dim=1)
             self.token_limit_hits += int((lengths >= self.max_length).sum())
             self.texts_processed += len(batch)
+            self.usage["input_tokens"] += int(lengths.sum())
             encoded = {name: value.to(self.model.device) for name, value in encoded.items()}
             with self.torch.inference_mode():
                 result = self.model(**encoded, return_dict=True)
@@ -212,6 +217,11 @@ class LocalBGE:
                              else result.last_hidden_state[:, 0], p=2, dim=1))
             outputs.append(value.float().cpu().numpy())
         import numpy as np
+        if self.model.device.type == "cuda":
+            self.torch.cuda.synchronize(self.model.device)
+        self.usage["elapsed_ms"] += (time.perf_counter()-started)*1000
+        self.usage["calls"] += 1
+        self.usage["texts"] += len(values)
         return np.concatenate(outputs, axis=0) if outputs else np.array([])
 
     def encode(self, texts):
@@ -735,6 +745,17 @@ class HybridRetriever:
             manifest.pop("query_view_traces", None)
             manifest["query_view_trace_storage"] = "external_sink"
         return manifest
+
+    def candidate_search(self, query, *, top_k=50):
+        """Return the ranked pool before the final five-body selection."""
+        with self._lock:
+            if self.stage == "dense":
+                return self.dense.search(query, self.encoder, top_k=top_k)
+            stages = search_variants(query, self.sparse, self.dense, self.encoder,
+                self.reranker if self.stage == "hybrid_rerank" else None,
+                candidate_k=max(5, top_k), rerank_k=max(5, top_k), rrf_k=self.rrf_k,
+                source_context=self.source_context)
+            return stages[self.stage]["contexts"][:top_k]
 
     def retrieve_turn(self, turn, *, prior_context=None):
         if turn.protocol != "P3":

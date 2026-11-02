@@ -32,9 +32,11 @@ def configuration_anchors(text: str) -> tuple[str, ...]:
 class CorpusIndex:
     """Public evidence metadata indexed once, with version-specific dependencies."""
     def __init__(self, blocks: Iterable[EvidenceBlock], *, corpus_id: str, snapshot_id: str,
-                 source_positions=None, retrieval_texts=None, source_identities=None):
+                 source_positions=None, retrieval_texts=None, source_identities=None,
+                 source_metadata=None):
         self.corpus_id, self.snapshot_id = corpus_id, snapshot_id
         self._blocks = {block.key: block for block in blocks}
+        self.source_metadata = source_metadata or {}
         self._retrieval_texts = retrieval_texts or {}
         self._source_identities = ({key: block.source_uri for key, block in self._blocks.items()}
                                    if source_identities is None else source_identities)
@@ -69,7 +71,7 @@ class CorpusIndex:
         blocks: dict[tuple[str, str, str, str], EvidenceBlock] = {}
         identities: dict[tuple[str, str, str], list[EvidenceKey]] = {}
         pending: dict[EvidenceKey, tuple[Any, ...]] = {}
-        positions, retrieval_texts, source_identities = {}, {}, {}
+        positions, retrieval_texts, source_identities, source_metadata = {}, {}, {}, {}
         for row in records:
             metadata = {**row.get("metadata", {}), **row}
             passage_id = str(metadata.get("passage_id", metadata.get("_id", "")))
@@ -98,6 +100,9 @@ class CorpusIndex:
                 if len(span) != 2 or not 0 <= span[0] <= span[1]:
                     raise EvidenceError(f"invalid character span for {passage_id}")
             block = replace(block, span=span, parent_section=metadata.get("parent_section"))
+            source_metadata[block.key] = {name: metadata[name] for name in (
+                "document_family", "valid_from", "valid_to", "published_at", "applicability",
+                "table_id", "heading", "current", "version_order") if name in metadata}
             source_identity = str(metadata.get("source_uri") or metadata.get("source") or metadata.get("url") or "")
             source_identities[block.key] = source_identity
             if span is not None:
@@ -134,7 +139,8 @@ class CorpusIndex:
                     dependency_key(value, block.key) for value in pending[block.key])))
                     for block in blocks.values()]
         return cls(resolved, corpus_id=corpus_id, snapshot_id=snapshot_id, source_positions=positions,
-                   retrieval_texts=retrieval_texts, source_identities=source_identities)
+                   retrieval_texts=retrieval_texts, source_identities=source_identities,
+                   source_metadata=source_metadata)
 
     @property
     def blocks(self) -> tuple[EvidenceBlock, ...]:

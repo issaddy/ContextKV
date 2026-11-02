@@ -174,6 +174,20 @@ def token_hash(ids):
     return hashlib.sha256(json.dumps(list(ids), separators=(",", ":")).encode()).hexdigest()
 
 
+def executed_prefix_hashes(ids, page_size):
+    """Hash actual prompt page boundaries without retaining prompt token arrays."""
+    digest = hashlib.sha256(b"[")
+    boundaries = {}
+    for position, token in enumerate(ids, 1):
+        digest.update(("," if position > 1 else "").encode())
+        digest.update(str(int(token)).encode())
+        if position % page_size == 0:
+            page_digest = digest.copy()
+            page_digest.update(b"]")
+            boundaries[position] = page_digest.hexdigest()
+    return boundaries
+
+
 def peek_full_prefix(tree, key, full_component_type=0):
     """Pure FULL-only tree walk; counts matched fragments without splitting.
 
@@ -331,6 +345,8 @@ class ContextKVRuntime:
         self.retired_epochs = OrderedDict()
         self.operation_receipts = OrderedDict()
         self.attempts = OrderedDict()
+        self.executed_prefixes = {}
+        self.prefix_owners = {}
         self.receipt_limit = receipt_limit
         self.result_ttl_seconds = result_ttl_seconds
         self.result_max_bytes = result_max_bytes
@@ -370,6 +386,8 @@ class ContextKVRuntime:
             config["decoder"] = self.decoder_settings
         self.cache_config = config
         self.cache_config_hash = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+        self.prefix_scope_hash = hashlib.sha256(json.dumps([self.fingerprint, self.cache_config_hash],
+            sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def _restart(self, expected):
         if expected != self.restart_id:
@@ -391,7 +409,8 @@ class ContextKVRuntime:
             raise ContextKVError("FINGERPRINT_MISMATCH")
 
     def dispatch(self, action, data):
-        if action not in {"info", "quote", "prepare", "retire", "status", "publish_result", "metrics", "profile_prepare"}:
+        if action not in {"info", "quote", "prepare", "retire", "status", "publish_result", "metrics", "profile_prepare",
+                          "retain_prefix", "release_prefix", "prefix_status"}:
             raise ContextKVError("UNKNOWN_OPERATION")
         return getattr(self, action)(data)
 
@@ -403,7 +422,8 @@ class ContextKVRuntime:
                     fingerprint=self.fingerprint, sglang_commit=COMMIT,
                     metrics_supported=True, result_replay_supported=True,
                     result_ttl_seconds=self.result_ttl_seconds,
-                    profiling_enabled=self.profiling_enabled, streaming_generation_supported=True)
+                    profiling_enabled=self.profiling_enabled, streaming_generation_supported=True,
+                    evidence_prefix_retention_supported=True)
         if self.host_admission.mode != "off":
             info["business_session_identity_supported"] = True
         if self.admission_diagnostics_enabled:
@@ -475,6 +495,7 @@ class ContextKVRuntime:
                     attempt_id=attempt, inflight=True, terminal=False,
                     result=None, receipt=None)
         self.attempts[attempt] = item
+        self.executed_prefixes[attempt] = executed_prefix_hashes(recv.input_ids, self.cache.page_size)
         epoch["inflight"].add(attempt)
         req.contextkv_runtime = self
         req.contextkv_attempt_id = attempt
@@ -546,7 +567,156 @@ class ContextKVRuntime:
         terminal = [key for key, item in self.attempts.items() if item["terminal"]]
         for key in terminal[:max(0, len(terminal)-self.receipt_limit)]:
             del self.attempts[key]
+            self.executed_prefixes.pop(key, None)
             self._drop_result(key)
+
+    def _executed_prefix(self, data):
+        self._restart(data["expected_restart_id"])
+        self._fingerprint(data["fingerprint"])
+        attempt = data["attempt_id"]
+        executed = self.attempts[attempt]
+        if executed["state"] != "COMPLETED" or not executed["receipt"]["generation_complete"]:
+            raise ContextKVError("PREFIX_REQUIRES_COMPLETED_EXECUTION")
+        ids = data["input_ids"]
+        boundary = len(ids) // self.cache.page_size * self.cache.page_size
+        if boundary == 0:
+            raise ContextKVError("PREFIX_BELOW_PAGE_SIZE")
+        ids = array("q", ids[:boundary])
+        path_hash = token_hash(ids)
+        if self.executed_prefixes[attempt].get(boundary) != path_hash:
+            raise ContextKVError("PREFIX_NOT_EXECUTED")
+        return ids
+
+    def retain_prefix(self, data):
+        """Register an executed causal prefix as an independent native soft owner."""
+        from sglang.srt.mem_cache.base_prefix_cache import MatchPrefixParams
+        from sglang.srt.mem_cache.radix_cache import RadixKey
+        owner_id = data["owner_id"]
+        owner = self.prefix_owners.get(owner_id)
+        if owner is None:
+            ids = self._executed_prefix(data)
+            attempt = data["attempt_id"]
+        else:
+            # The independent owner carries its original executed-path proof
+            # beyond the bounded business-attempt receipt history.
+            self._restart(data["expected_restart_id"])
+            self._fingerprint(data["fingerprint"])
+            boundary = len(data["input_ids"]) // self.cache.page_size * self.cache.page_size
+            ids = array("q", data["input_ids"][:boundary])
+            attempt = owner["source_attempt_id"]
+        boundary, path_hash = len(ids), token_hash(ids)
+        ttl = float(data["ttl_seconds"])
+        if not math.isfinite(ttl) or ttl <= 0:
+            raise ContextKVError("INVALID_PREFIX_TTL")
+        if not isinstance(owner_id, str) or not owner_id:
+            raise ContextKVError("INVALID_ID")
+        sources = data["sources"]
+        identity = path_hash, json.dumps(sources, sort_keys=True, separators=(",", ":"))
+        if owner is not None:
+            if owner["identity"] != identity:
+                raise ContextKVError("PREFIX_OWNER_CONFLICT")
+        # This is an intentional mutating match, unlike /cache/quote. It creates
+        # a page-aligned native split and applies pending-transfer relocation.
+        result = self.cache.tree_core.match_prefix(MatchPrefixParams(key=RadixKey(ids)))
+        self.cache._apply_cache_actions(result.cache_actions)
+        node = self.cache.tree_core.node_by_id(result.best_match_node)
+        length, current = 0, node
+        while current is not self.cache.tree_core.root_node:
+            length += len(current.key)
+            current = current.parent
+        if length != boundary:
+            raise ContextKVError("PREFIX_NOT_RESIDENT")
+        sid = "contextkv:prefix:" + owner_id
+        if owner is None and (sid in self.cache.session_refs._session_generations or sid in self.epochs):
+            raise ContextKVError("PREFIX_OWNER_CONFLICT")
+        generation = owner["generation"] if owner is not None else self.cache.open_radix_session(sid)
+        for component in self.cache.session_refs.components:
+            component.register_session_leaf(sid, node)
+        owner = self.prefix_owners[owner_id] = dict(identity=identity, input_ids=ids,
+            path_hash=path_hash, boundary_tokens=boundary, source_attempt_id=attempt,
+            sources=sources, native_session_id=sid, generation=generation,
+            expires_at=time.monotonic()+ttl)
+        receipt = self._prefix_receipt(owner_id, owner)
+        self._event("retain_prefix", **receipt)
+        return receipt
+
+    def _prefix_receipt(self, owner_id, owner):
+        from sglang.srt.mem_cache.radix_cache import RadixKey
+        tree = self.cache.tree_core
+        ids = owner["input_ids"]
+        key = RadixKey(ids)
+        view = tree.peek_full_prefix(key)
+        page_hashes = executed_prefix_hashes(ids, self.cache.page_size)
+        gpu_pages, host_pages, referenced_pages = [], [], []
+        current, position = tree.root_node, 0
+        while len(key):
+            child = current.children.get(key.child_key(self.cache.page_size))
+            if child is None:
+                break
+            matched = child.key.match(key, page_size=self.cache.page_size)
+            if matched == 0:
+                break
+            full = child.component_data[0]
+            for end in range(position+self.cache.page_size, position+matched+1, self.cache.page_size):
+                page_id = self.prefix_scope_hash + ":" + page_hashes[end]
+                if full.value is not None and child.contextkv_h2d_pending_id is None:
+                    gpu_pages.append(page_id)
+                if full.host_value is not None and child.write_through_pending_id is None:
+                    host_pages.append(page_id)
+                if full.session_ref:
+                    referenced_pages.append(page_id)
+            position += matched
+            if matched < len(child.key):
+                break
+            current, key = child, key[matched:]
+        sid = owner["native_session_id"]
+        reference_present = any(component._session_leaves.get(sid)
+                                for component in self.cache.session_refs.components)
+        return dict(owner_id=owner_id, native_session_id=sid,
+            session_generation=owner["generation"], engine_restart_id=self.restart_id,
+            cache_config_hash=self.cache_config_hash, fingerprint=self.fingerprint,
+            cache_scope_hash=self.prefix_scope_hash,
+            source_attempt_id=owner["source_attempt_id"], sources=owner["sources"],
+            prefix_hash=owner["path_hash"], boundary_tokens=owner["boundary_tokens"],
+            page_size=self.cache.page_size, expires_at=owner["expires_at"],
+            clock="server_monotonic", state="RETAINED", reference_present=reference_present,
+            gpu_page_ids=gpu_pages, host_page_ids=host_pages,
+            referenced_page_ids=referenced_pages, residency=view,
+            pool=self.pool_snapshot(), workload=self.workload_snapshot(),
+            protection="native_session_soft_priority_both_tiers")
+
+    def release_prefix(self, data):
+        self._restart(data["expected_restart_id"])
+        owner_id = data["owner_id"]
+        owner = self.prefix_owners.pop(owner_id, None)
+        if owner is not None:
+            self.cache.release_radix_session(owner["native_session_id"])
+        receipt = dict(owner_id=owner_id, engine_restart_id=self.restart_id,
+            state="RELEASED", acknowledged=True, freed_gpu_tokens=0, freed_host_tokens=0)
+        self._event("release_prefix", **receipt)
+        return receipt
+
+    def expire_prefixes(self):
+        now = time.monotonic()
+        for owner_id, owner in tuple(self.prefix_owners.items()):
+            if now >= owner["expires_at"]:
+                self.release_prefix(dict(owner_id=owner_id, expected_restart_id=self.restart_id))
+
+    def prefix_status(self, data):
+        self._restart(data["expected_restart_id"])
+        if "input_ids" in data:
+            ids = self._executed_prefix(data)
+            receipt = self._prefix_receipt(None, dict(input_ids=ids, native_session_id=None,
+                generation=None, source_attempt_id=data["attempt_id"], sources=data["sources"],
+                path_hash=token_hash(ids), boundary_tokens=len(ids), expires_at=None))
+            return {**receipt, "state": "OBSERVED", "protection": "none"}
+        owner_id = data.get("owner_id")
+        if owner_id is not None:
+            owner = self.prefix_owners.get(owner_id)
+            return self._prefix_receipt(owner_id, owner) if owner is not None else dict(
+                owner_id=owner_id, state="RELEASED", engine_restart_id=self.restart_id)
+        return dict(engine_restart_id=self.restart_id,
+            prefixes=[self._prefix_receipt(key, owner) for key, owner in self.prefix_owners.items()])
 
     def _release(self, sid, epoch):
         self.cache.release_radix_session(sid)
@@ -829,7 +999,8 @@ class ContextKVRuntime:
                     page_size=self.cache.page_size)
 
     def observe_pool(self):
-        """Optional O(1) scheduler-boundary samples, not an allocator event log."""
+        """Expire independent refs, then optionally sample the scheduler pool."""
+        self.expire_prefixes()
         if not self.sample_pool_enabled:
             return
         current = self.pool_snapshot()
@@ -971,15 +1142,17 @@ def get_runtime(scheduler):
     except (AssertionError, AttributeError, OSError, ValueError) as exc:
         raise ContextKVError("FINGERPRINT_MISMATCH", "running model config/revision/tokenizer/template differs") from exc
     from sglang.srt.environ import envs
-    # NGRAM uses the same FULL token cache. Its execution costs are bound to
-    # the native decoder settings through the existing calibration identity.
-    decoder_settings = None
+    # Structured JSON and speculative decoding both change measured execution
+    # and output lengths, so bind them to the calibration identity.
+    resolved_args = get_server_args().resolved_dict()
+    decoder_settings = {name: value for name, value in resolved_args.items()
+                        if name.startswith("constrained_json_") or name == "grammar_backend"}
     if not scheduler.spec_algorithm.is_none():
-        decoder_settings = {name: value for name, value in vars(get_server_args()).items()
+        decoder_settings.update({name: value for name, value in resolved_args.items()
             if name.startswith("speculative_ngram_") or name in {
                 "speculative_algorithm", "speculative_num_draft_tokens",
                 "speculative_accept_threshold_single", "speculative_accept_threshold_acc",
-                "speculative_adaptive_config"}}
+                "speculative_adaptive_config"}})
     scheduler.contextkv_runtime = ContextKVRuntime(cache, fp, scheduler=scheduler,
         model_scope=model_scope, decoder_settings=decoder_settings,
         transfer_tma_enabled=envs.SGLANG_HICACHE_TMA_TRANSFER.get(),

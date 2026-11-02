@@ -1,0 +1,380 @@
+"""Finite complete-plan gain selection with two-step execution lookahead.
+
+The logical state is the existing ReadingOutcome.  Native quotes price known
+inputs; future inputs require an explicitly supplied profile forecast.  The
+policy is enabled only with a reader-bound gain model trained on actual answers.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from itertools import product
+from typing import Mapping, NamedTuple, Protocol
+
+from .context_schema import ContextPlan, ReadTask, ReadingOutcome
+from .cost_model import CostModel
+from .evidence_planner import _passages
+from .reading import step_generation_kind
+from .schema import CacheQuoteBatch, PromptCandidate, SessionSnapshot
+
+
+PLAN_KINDS = ("direct_answer", "complementary_evidence", "multihop", "scope_scan")
+FEATURE_NAMES = (*PLAN_KINDS, "needs", "conditions", "version_comparison", "open_needs",
+    "unmet_answer_points", "existing_claims", "completed_steps", "read_steps", "reduce_steps",
+    "evidence_units", "source_passages", "dependencies", "source_versions", "required_coverage",
+    "planned_coverage", "input_budget_tokens", "output_budget_tokens")
+
+
+@dataclass(frozen=True)
+class PlanStep:
+    task: ReadTask
+    variants: tuple[PromptCandidate, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlanCandidate:
+    plan_id: str
+    semantic_kind: str
+    context_plan: ContextPlan
+    steps: tuple[PlanStep, ...]
+    reader_checkpoint: str
+    unmet_answer_points: tuple[str, ...] = ()
+    required_coverage: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CompleteCost:
+    latency_ms: float
+    gpu_gib_ms: float
+    host_gib_ms: float
+    input_tokens: int
+    output_tokens: int
+    gpu_peak_gib: float = 0.0
+    host_peak_gib: float = 0.0
+
+    def __add__(self, other):
+        return CompleteCost(self.latency_ms+other.latency_ms, self.gpu_gib_ms+other.gpu_gib_ms,
+            self.host_gib_ms+other.host_gib_ms, self.input_tokens+other.input_tokens,
+            self.output_tokens+other.output_tokens, max(self.gpu_peak_gib, other.gpu_peak_gib),
+            max(self.host_peak_gib, other.host_peak_gib))
+
+
+ZERO_COST = CompleteCost(0.0, 0.0, 0.0, 0, 0)
+
+
+@dataclass(frozen=True)
+class ResourceForecast:
+    """C's physical-occupancy prediction for this exact native quote/candidate."""
+    gpu_gib_ms: float
+    host_gib_ms: float
+    gpu_peak_gib: float
+    host_peak_gib: float
+    calibration_id: str
+    quote_seq: int
+    prefix_ids: tuple[str, ...]
+    calibrated: bool
+
+
+@dataclass(frozen=True)
+class StepForecast:
+    context_action: str
+    output_budget: int
+    cost: CompleteCost
+    calibration_id: str
+    calibrated: bool
+    scope: str = "future_input_profile"
+    candidate: PromptCandidate | None = None
+    prefix_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class NativePlanningState:
+    reader_checkpoint: str
+    reader_profile_id: str
+    snapshot: SessionSnapshot
+    quotes: CacheQuoteBatch
+    cost_model: CostModel
+    resources: Mapping[str, ResourceForecast]
+    future: Mapping[tuple[str, str], tuple[StepForecast, ...]]
+    paid_cost: CompleteCost
+
+
+@dataclass(frozen=True)
+class PolicyLimits:
+    max_plan_candidates: int = 4
+    max_gpu_gib_ms: float | None = None
+    max_host_gib_ms: float | None = None
+    max_gpu_peak_gib: float | None = None
+    max_host_peak_gib: float | None = None
+
+
+class GainModel(Protocol):
+    reader_checkpoint: str
+    reader_profile_id: str
+    asset_id: str
+
+    def predict(self, features: Mapping[str, float]) -> float: ...
+
+
+@dataclass(frozen=True)
+class PlanEvaluation:
+    plan_id: str
+    predicted_delta_q: float | None
+    objective: float | None
+    cost: CompleteCost | None
+    feasible: bool
+    reason: str
+    lookahead: tuple[tuple[str, str, int], ...] = ()
+    forecast_sources: tuple[str, ...] = ()
+    gain_asset: str = ""
+
+
+@dataclass(frozen=True)
+class NextStep:
+    plan_id: str
+    task: ReadTask
+    candidate: PromptCandidate
+    reusable_prefix_ids: tuple[str, ...]
+
+
+class Decision(NamedTuple):
+    next_step: NextStep
+    context_action: str
+    output_budget: int
+
+
+def _completed_steps(plan, state):
+    """A repeated step ID is reusable only for the same actual reading task."""
+    if (plan.context_plan.task_state != state.plan.task_state or
+            plan.context_plan.reading_mode != state.plan.reading_mode or
+            plan.context_plan.read_layout != state.plan.read_layout or
+            plan.context_plan.read_packing != state.plan.read_packing):
+        return set()
+    executed = {task.step_id: task for task in state.plan.steps}
+    executed.update({record.step_id: record.task for record in state.steps})
+    results = {result.step_id for result in state.results}
+    old_units = {unit.unit_id: unit for unit in state.plan.selected_set.selected_units}
+    new_units = {unit.unit_id: unit for unit in plan.context_plan.selected_set.selected_units}
+    completed = set()
+    for step in plan.steps:
+        task = step.task
+        old = executed.get(task.step_id)
+        if task.step_id not in results or old is None:
+            continue
+        if replace(old, input_budget=0, output_budget=0) != replace(task, input_budget=0, output_budget=0):
+            continue
+        if any(identity not in old_units or identity not in new_units or
+               old_units[identity].source_spans != new_units[identity].source_spans or
+               old_units[identity].text != new_units[identity].text for identity in task.input_unit_ids):
+            continue
+        completed.add(task.step_id)
+    predecessors = {step.task.step_id: set(step.task.predecessor_step_ids) for step in plan.steps}
+    while any(not predecessors[identity] <= completed for identity in completed):
+        completed = {identity for identity in completed if predecessors[identity] <= completed}
+    return completed
+
+
+def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=None):
+    """Structure and current state only; oracle scores never enter features."""
+    completed = _completed_steps(plan, state)
+    remaining = [step.task for step in plan.steps if step.task.step_id not in completed]
+    units = plan.context_plan.selected_set.selected_units
+    coverage = set(plan.required_coverage)
+    if state.plan.coverage_scope == "all_supplied_documents":
+        coverage.update(state.plan.coverage_units)
+    budgets = output_budgets or {}
+    values = {name: float(plan.semantic_kind == name) for name in PLAN_KINDS}
+    values.update(needs=len(state.plan.task_state.needs), conditions=len(state.plan.task_state.conditions),
+        version_comparison=float(state.plan.task_state.version_intent.mode == "compare"),
+        open_needs=len(state.open_needs), unmet_answer_points=len(plan.unmet_answer_points),
+        existing_claims=len(state.claims), completed_steps=len(completed),
+        read_steps=sum(task.kind == "READ" for task in remaining),
+        reduce_steps=sum(task.kind == "REDUCE" for task in remaining), evidence_units=len(units),
+        source_passages=len(_passages(units)), dependencies=sum(len(unit.dependencies) for unit in units),
+        source_versions=len({span.source_key.version for unit in units for span in unit.source_spans}),
+        required_coverage=len(coverage), planned_coverage=len({unit_id for task in remaining
+            if task.kind == "READ" for unit_id in task.input_unit_ids}),
+        input_budget_tokens=sum(task.input_budget for task in remaining),
+        output_budget_tokens=sum(budgets.get(task.step_id, task.output_budget) for task in remaining))
+    return {name: float(values[name]) for name in FEATURE_NAMES}
+
+
+def complete_plan(context_plan, answer_variants, *, semantic_kind, reader_checkpoint,
+                  step_variants=None, unmet_answer_points=()):
+    """Adapt A's existing complete ContextPlan/DAG; append its terminal ANSWER."""
+    variants = step_variants or {}
+    tasks = tuple(PlanStep(task, tuple(variants.get(task.step_id, ()))) for task in context_plan.steps)
+    answer = ReadTask("answer:"+context_plan.plan_id, "ANSWER",
+        tuple(need.need_id for need in context_plan.task_state.needs),
+        predecessor_step_ids=tuple(task.step_id for task in context_plan.steps),
+        input_budget=context_plan.budget.window_tokens-context_plan.budget.output_tokens,
+        output_budget=context_plan.budget.output_tokens, operation="answer")
+    return PlanCandidate(context_plan.plan_id, semantic_kind, context_plan,
+        (*tasks, PlanStep(answer, tuple(answer_variants))), reader_checkpoint,
+        tuple(unmet_answer_points), context_plan.coverage_units if
+        context_plan.coverage_scope == "all_supplied_documents" else ())
+
+
+class PlanPolicy:
+    def __init__(self, gain_model: GainModel, *, limits=PolicyLimits()):
+        if gain_model is None:
+            raise ValueError("plan-gain policy is not enabled without a reader-bound trained gain asset")
+        self.gain_model, self.limits = gain_model, limits
+        self.last_evaluations = ()
+
+    def _penalty(self, cost, budget):
+        return (budget.lambda_time*cost.latency_ms+budget.lambda_gpu*cost.gpu_gib_ms
+                +budget.lambda_host*cost.host_gib_ms)
+
+    def _schedule(self, plan, completed):
+        remaining = list(plan.steps)
+        result, available = [], set(completed)
+        while remaining:
+            ready = next((step for step in remaining if step.task.step_id in available or
+                          set(step.task.predecessor_step_ids) <= available), None)
+            if ready is None:
+                raise ValueError(f"{plan.plan_id} is not a complete executable DAG")
+            remaining.remove(ready)
+            if ready.task.step_id not in available:
+                result.append(ready)
+                available.add(ready.task.step_id)
+        return result
+
+    def _options(self, plan, step, completed, native, reusable_prefixes):
+        if not step.variants or not set(step.task.predecessor_step_ids) <= completed:
+            return tuple(option for option in native.future.get((plan.plan_id, step.task.step_id), ())
+                if self._within_step_budget(plan, step, option.cost.input_tokens, option.output_budget))
+        quotes = {quote.candidate_id: quote for quote in native.quotes.quotes}
+        result = []
+        for candidate in step.variants:
+            if not candidate.feasible:
+                continue
+            quote = quotes[candidate.candidate_id]
+            if (quote.input_hash != candidate.input_hash or quote.input_len != len(candidate.input_ids)
+                    or candidate.fingerprint != native.quotes.fingerprint):
+                raise ValueError("plan quote does not bind the actual compiled input")
+            resource = native.resources[candidate.candidate_id]
+            if resource.quote_seq != native.quotes.observed_seq:
+                raise ValueError("resource forecast and native quote use different observations")
+            if not set(resource.prefix_ids) <= set(reusable_prefixes.get(candidate.candidate_id, ())):
+                raise ValueError("resource forecast names unavailable reusable prefixes")
+            output = candidate.output_budget or step.task.output_budget
+            expected_kind = step_generation_kind(step.task.kind, step.task.operation, plan.context_plan.reading_mode)
+            if candidate.generation_kind != expected_kind:
+                raise ValueError("compiled candidate generation kind differs from its plan step")
+            if not self._within_step_budget(plan, step, len(candidate.input_ids), output):
+                continue
+            # Preparation and completed reading are already in paid_cost.  Each
+            # native forecast here prices only its own remaining execution.
+            measured = native.cost_model.predict_native(replace(candidate, predicted_read_ms=0.0,
+                auxiliary_ms=0.0), quote, native.snapshot, batch=native.quotes,
+                concurrency=native.quotes.active_requests+1)
+            eligible = measured.calibrated if measured.selection_eligible is None else measured.selection_eligible
+            result.append(StepForecast(candidate.action, output,
+                CompleteCost(measured.cost, resource.gpu_gib_ms, resource.host_gib_ms,
+                    len(candidate.input_ids), output, resource.gpu_peak_gib, resource.host_peak_gib),
+                resource.calibration_id, bool(eligible and resource.calibrated), "native_quote",
+                candidate, resource.prefix_ids))
+        return tuple(result)
+
+    def _within_step_budget(self, plan, step, inputs, output):
+        budget = plan.context_plan.budget
+        output_valid = (output == budget.output_tokens if step.task.kind == "ANSWER" else
+                        output <= min(step.task.output_budget, budget.read_output_tokens))
+        return output_valid and inputs <= step.task.input_budget and inputs+output <= budget.window_tokens
+
+    def _constraint(self, cost, budget):
+        limits = self.limits
+        checks = ((budget.max_complete_ms, cost.latency_ms, "complete_latency_budget"),
+            (budget.max_total_tokens, cost.input_tokens+cost.output_tokens, "cumulative_token_budget"),
+            (limits.max_gpu_gib_ms, cost.gpu_gib_ms, "gpu_integral_budget"),
+            (limits.max_host_gib_ms, cost.host_gib_ms, "host_integral_budget"),
+            (limits.max_gpu_peak_gib, cost.gpu_peak_gib, "gpu_capacity_budget"),
+            (limits.max_host_peak_gib, cost.host_peak_gib, "host_capacity_budget"))
+        return next((reason for limit, value, reason in checks if limit is not None and value > limit), None)
+
+    def choose(self, plans, state: ReadingOutcome, native: NativePlanningState, reusable_prefixes):
+        plans = tuple(plans)
+        if len(plans) > self.limits.max_plan_candidates:
+            raise ValueError("A must supply the configured finite number of complete plans")
+        if (native.reader_checkpoint != self.gain_model.reader_checkpoint or
+                native.reader_profile_id != self.gain_model.reader_profile_id):
+            raise ValueError("plan gain asset belongs to a different reader checkpoint/profile")
+        covered = {unit_id for result in state.results for unit_id in result.covered_units}
+        required = set(state.plan.coverage_units) if state.plan.coverage_scope == "all_supplied_documents" else set()
+        evaluations, decisions = [], []
+        for plan in plans:
+            if plan.reader_checkpoint != native.reader_checkpoint:
+                raise ValueError("candidate plan belongs to a different reader checkpoint")
+            if plan.semantic_kind not in PLAN_KINDS or sum(step.task.kind == "ANSWER" for step in plan.steps) != 1:
+                raise ValueError("a semantic plan must have a supported kind and one terminal ANSWER")
+            completed = _completed_steps(plan, state)
+            tasks = {step.task.step_id: step.task for step in plan.steps}
+            if len(tasks) != len(plan.steps):
+                raise ValueError("a semantic plan has unique execution step IDs")
+            answer = next(task for task in tasks.values() if task.kind == "ANSWER")
+            pending, ancestors = list(answer.predecessor_step_ids), set()
+            while pending:
+                step_id = pending.pop()
+                if step_id not in ancestors:
+                    ancestors.add(step_id)
+                    if step_id in tasks:
+                        pending.extend(tasks[step_id].predecessor_step_ids)
+            if not set(tasks)-{answer.step_id} <= ancestors:
+                raise ValueError("every planned reading/reduction step must lead to the terminal ANSWER")
+            ordered = self._schedule(plan, completed)
+            if not ordered or ordered[-1].task.kind != "ANSWER":
+                raise ValueError("a semantic plan must complete with ANSWER")
+            planned_coverage = {unit_id for step in ordered if step.task.kind == "READ"
+                                for unit_id in step.task.input_unit_ids}
+            reason = None
+            if not (required | set(plan.required_coverage)) <= covered | planned_coverage:
+                reason = "required_scope_uncovered"
+            elif plan.semantic_kind == "direct_answer" and any(step.task.kind != "ANSWER" for step in ordered):
+                raise ValueError("direct_answer contains only its terminal ANSWER")
+            elif (plan.semantic_kind != "scope_scan" and
+                    plan.context_plan.selected_set.token_cost > state.plan.budget.body_tokens):
+                reason = "evidence_body_budget"
+            elif (state.plan.budget.max_passages is not None and len(_passages(
+                    plan.context_plan.selected_set.selected_units)) > state.plan.budget.max_passages):
+                reason = "original_passage_budget"
+            if reason:
+                evaluations.append(PlanEvaluation(plan.plan_id, None, None, None, False, reason))
+                continue
+            options = [tuple(option for option in self._options(plan, step, completed, native, reusable_prefixes)
+                             if option.calibrated) for step in ordered]
+            if not options[0] or any(option.candidate is None for option in options[0]):
+                evaluations.append(PlanEvaluation(plan.plan_id, None, None, None, False, "next_step_not_compiled"))
+                continue
+            if any(not choices for choices in options):
+                evaluations.append(PlanEvaluation(plan.plan_id, None, None, None, False, "unmeasured_complete_cost"))
+                continue
+            # Branch only over the next two executions. The complete remaining
+            # tail is still charged using each step's supplied profile forecast.
+            depth = min(2, len(ordered))
+            tail = tuple(min(choices, key=lambda option: self._penalty(option.cost, state.plan.budget))
+                         for choices in options[depth:])
+            for prefix in product(*options[:depth]):
+                route = (*prefix, *tail)
+                cost = native.paid_cost
+                for option in route:
+                    cost += option.cost
+                reason = self._constraint(cost, state.plan.budget)
+                budgets = {step.task.step_id: option.output_budget for step, option in zip(ordered, route, strict=True)}
+                gain = (0.0 if plan.semantic_kind == "direct_answer" else self.gain_model.predict(
+                    plan_features(plan, state, output_budgets=budgets)))
+                objective = gain-self._penalty(cost, state.plan.budget)
+                evaluation = PlanEvaluation(plan.plan_id, gain, objective, cost, reason is None,
+                    reason or "reader_bound_complete_plan_gain", tuple((step.task.step_id,
+                        option.context_action, option.output_budget) for step, option in zip(ordered[:depth], prefix, strict=True)),
+                    tuple(option.scope+":"+option.calibration_id for option in route), self.gain_model.asset_id)
+                evaluations.append(evaluation)
+                if reason is None:
+                    first = route[0]
+                    task = replace(ordered[0].task, output_budget=first.output_budget)
+                    decisions.append((evaluation, Decision(NextStep(plan.plan_id, task,
+                        first.candidate, first.prefix_ids), first.context_action, first.output_budget)))
+        self.last_evaluations = tuple(evaluations)
+        if not decisions:
+            raise ValueError("no complete plan satisfies coverage, budgets and measured execution forecasts")
+        return max(decisions, key=lambda item: (item[0].objective, -item[0].cost.latency_ms,
+            -item[0].cost.gpu_gib_ms, -item[0].cost.host_gib_ms, item[0].plan_id))[1]

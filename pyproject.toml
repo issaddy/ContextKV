@@ -25,7 +25,7 @@ contextkv = "controller.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["controller*", "adapters*", "bench*", "profiling*", "engine_patches*"]
+include = ["controller*", "adapters*", "bench*", "profiling*", "engine_patches*", "training*"]
 
 [tool.setuptools.package-data]
 bench = ["assets/loong/*", "examples/*.json", "examples/*.jsonl", "examples/*.yaml"]

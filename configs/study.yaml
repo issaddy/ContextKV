@@ -1,0 +1,114 @@
+study:
+  baseline_commit: 7388008f56ec7176668321d00f69bd2f07639f0a
+  reader: qwen3_32b_nonthinking
+  strategy: B7
+  output_dir: runs/study
+  seed: 42
+  learning: false
+generation:
+  run_config: configs/qwen3_32b.yaml
+  teacher_url: http://127.0.0.1:30000
+assets:
+  versionqa:
+    recorded_cache: runs/evidence-study-20261030
+scoring:
+  python: .venv-eval/bin/python
+  official_checkout: data/mtrag-official
+  max_tokens: 2048
+  ragas_json_schema: true
+task_model:
+  mode: teacher
+  base: BAAI/bge-m3
+  base_path: models/bge-m3
+  asset: models/study-task
+  document_encoder: frozen
+  device: cuda:1
+  history_unit_tokens: 384
+  history_candidates: 16
+  lora_rank: 16
+support_model:
+  mode: teacher
+  base: BAAI/bge-reranker-v2-m3
+  base_path: models/bge-reranker-v2-m3
+  asset: models/study-support
+  preference_asset: models/study-support-preference
+  device: cuda:2
+  single_candidates_per_need: 24
+  bridge_candidates_per_need: 6
+  triple_seed_pairs: 2
+  triple_successors_per_pair: 3
+retrieval:
+  config_path: configs/study_multidoc_retriever.yaml
+  corpus_path: data/multidoc2dial/test/passages.jsonl
+  corpus_id: multidoc2dial
+  snapshot_id: multidoc2dial-archive-f0c034c24966-sections-v1
+  current_top_k: 50
+  per_need_top_k: 20
+  archive_top_k: 12
+  primary_pool_size: 96
+selection:
+  utility: support_coverage
+  beam_width: 4
+  max_actions: 12
+  retained_sets: 3
+  initial_gap_search_rounds: 1
+  body_tokens: 8192
+  body_budget_grid: [2048, 4096, 8192]
+  layouts: [existing, need_order, stable_evidence]
+reading:
+  enabled: true
+  numeric_need_isolation: true
+  input_target_tokens: 12288
+  output_tokens: 2048
+  output_tokens_per_fact: 64
+  output_budget_options: [512, 1024, 2048, 4096, 8192]
+  coverage_mode: selected_sources
+  coverage_modes: [selected_sources, all_supplied_documents]
+  reduction_operations: [union, compare, count, sum, group, infer]
+execution:
+  cache_start: cold
+  window_tokens: 32768
+  history_tokens: 8192
+  output_tokens: 1024
+  max_steps: 512
+  max_total_tokens: 4194304
+  actions: [REBUILD, APPEND]
+  complete_cost: true
+  step_records: true
+  lambda_time: 0.00001
+  lambda_gpu: 0.0
+  lambda_host: 0.0
+training:
+  enabled: false
+  data_dir: runs/study/data
+  multidoc_source: data/multidoc2dial/source
+  reader_config: configs/qwen3_32b.yaml
+  retriever_config: configs/study_multidoc_retriever.yaml
+  retriever_overrides:
+    query_adapter_path: models/bge-m3-dialogue-query-v1
+  evidence_corpus: data/multidoc2dial/test/passages.jsonl
+  rollout_paths: []
+  teacher_urls: [http://127.0.0.1:30002, http://127.0.0.1:30003]
+  teacher_concurrency: 8
+  task_output: models/study-task
+  task_labels: runs/study/data/task_labels.jsonl
+  support_labels: runs/study/data/support_labels.jsonl
+  support_teacher_labels: runs/study/data/support_teacher_labels.jsonl
+  support_output: models/study-support
+  preference_output: models/study-support-preference
+  preferences: runs/study/data/preferences.jsonl
+  device: cuda:0
+  dtype: bfloat16
+  epochs: 1
+  adapter_lr: 0.0002
+  head_lr: 0.0001
+  min_rollout_conversations: 1000
+  min_rollout_turns: 10000
+  preference_turns: 2000
+  integration_turns: 200
+  preference_candidate_types: [relevance, direct, complementary, redundant, wrong_condition_version, deleted_premise]
+  reward_weights:
+    necessary_points: 0.35
+    grounding: 0.25
+    conditions_versions: 0.2
+    task_score: 0.2

@@ -1,0 +1,112 @@
+{
+  "status": "transfers_stopped_by_user_instruction",
+  "automatic_transfers_authorized": false,
+  "remote_host": "public-ge108-wlf3-hangu-5.idchb2az3.hb2.kwaidc.com",
+  "container": "sjy-0518",
+  "local_process_check": {
+    "command": "pgrep -fl '^.*python /tmp/contextkv_transfer_(stream|raw).py '",
+    "result": "no matching processes",
+    "exit_code": 1
+  },
+  "stopped_owned_processes": [
+    {
+      "location": "local",
+      "pid": 34198,
+      "role": "canonical streaming model archive sender",
+      "exit_code": 143
+    },
+    {
+      "location": "sjy-0518",
+      "pid": 175960,
+      "role": "canonical streaming model archive receiver",
+      "signal": "SIGTERM"
+    }
+  ],
+  "completed_before_withdrawal": [
+    {
+      "direction": "local_to_designated_container",
+      "source": "/tmp/contextkv-eval-wheels.tar.gz",
+      "destination": "/tmp/contextkv-eval-wheels.tar.gz",
+      "purpose": "public official algorithmic metric dependencies",
+      "status": "completed_and_installed_in_isolated_venv_eval"
+    },
+    {
+      "direction": "local_to_designated_container",
+      "source": "/tmp/contextkv-c-latest.tar.gz",
+      "destination": "/tmp/contextkv-c-latest.tar.gz",
+      "purpose": "C runtime code and shared schema snapshot",
+      "status": "completed_and_extracted_to_study_project"
+    },
+    {
+      "direction": "local_to_designated_container",
+      "source": "/tmp/contextkv-c-abi.tar.gz",
+      "destination": "/tmp/contextkv-c-abi.tar.gz",
+      "purpose": "C runtime plus parent-authorized shared ABI snapshot",
+      "status": "completed_extracted_and_C_ABI_READY_checked"
+    },
+    {
+      "direction": "local_to_designated_container",
+      "source": "/tmp/contextkv-c-abi.tar.gz",
+      "destination": "/tmp/contextkv-raw-test.tar.gz",
+      "purpose": "small transfer channel verification",
+      "status": "completed_not_extracted"
+    }
+  ],
+  "partial_or_not_started": [
+    {
+      "direction": "local_to_designated_container",
+      "source": "/tmp/contextkv-deberta-metrics.tar",
+      "destination": "/tmp/contextkv-deberta-metrics.tar",
+      "purpose": "public Microsoft DeBERTa and official metric scripts for RB_alg",
+      "status": "stopped_partial",
+      "last_observed_size": "106 MiB",
+      "final_partial_size": "unmeasured_target_TTY_unresponsive"
+    },
+    {
+      "direction": "local_to_designated_container",
+      "source": "/tmp/contextkv-deberta-metrics.tar",
+      "destination": "/tmp/contextkv-deberta-metrics-raw.tar",
+      "purpose": "public Microsoft DeBERTa and official metric scripts for RB_alg",
+      "status": "payload_not_sent_nested_SSH_prompt_timeout"
+    }
+  ],
+  "public_downloads": [
+    {
+      "direction": "public_Hugging_Face_to_local",
+      "repo": "microsoft/deberta-xlarge-mnli",
+      "revision": "5b07a9086c1dbb79981ff7b05b4d1ad83b3af51c",
+      "destination": "/tmp/contextkv-hf-assets/models--microsoft--deberta-xlarge-mnli",
+      "status": "completed",
+      "download_elapsed_ms": 2669544.944375
+    },
+    {
+      "direction": "public_Hugging_Face_to_local",
+      "destination": "/tmp/contextkv-eval-metrics",
+      "status": "completed",
+      "repos": [
+        "evaluate-metric/bertscore@4c18f1c7d175f111e097194635a63ac25346a819",
+        "evaluate-metric/rouge@1bc20e7e9df922e5dfb597c31a4ea8467a89caff"
+      ]
+    }
+  ],
+  "local_archives": [
+    {
+      "path": "/tmp/contextkv-deberta-metrics.tar",
+      "bytes": 3040894464
+    },
+    {
+      "path": "/tmp/contextkv-c-abi.tar.gz",
+      "bytes": 72641
+    },
+    {
+      "path": "/tmp/contextkv-c-latest.tar.gz",
+      "bytes": 49197
+    },
+    {
+      "path": "/tmp/contextkv-eval-wheels.tar.gz",
+      "bytes": 17377068
+    }
+  ],
+  "preservation": "No source, completed artifact or partial target file was deleted.",
+  "next_transfer_requirement": "List concrete files, direction, source and target paths, purpose; obtain explicit user confirmation before transferring."
+}

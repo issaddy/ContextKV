@@ -1,0 +1,452 @@
+"""Execute durable reading steps inside one outer user attempt."""
+from __future__ import annotations
+
+from dataclasses import replace
+import time
+
+from .claim_graph import ClaimGraph
+from .context_schema import ReadResult, ReadingOutcome, StepRecord
+from .engine_client import EngineError
+from .reading import (advance_read_plan, build_read_plan, output_schema, parse_read_result,
+                      step_generation_kind, step_messages)
+from .reduction import reduce_claims
+from .schema import ContextEpoch, PromptCandidate
+from .serialization import to_jsonable
+from .session_store import ReadingProgress
+from .templates import step_request
+
+
+class ReadingBudgetExceeded(ValueError):
+    pass
+
+
+class OnlineTokenBudgetUnmeasured(ValueError):
+    pass
+
+
+def auxiliary_tokens(usage):
+    if usage is None or usage["input_tokens"] is None or usage["output_tokens"] is None:
+        return None
+    return usage["input_tokens"]+usage["output_tokens"]
+
+
+def require_online_tokens(limit, spent, reserve, phase):
+    if limit is None:
+        return
+    if spent is None:
+        raise OnlineTokenBudgetUnmeasured(f"{phase}: online token budget requires measured auxiliary and reader usage")
+    if spent+reserve > limit:
+        raise ReadingBudgetExceeded(f"{phase}: online token allocation {limit} cannot admit {reserve} after {spent} spent")
+
+
+def step_token_spend(stage, record):
+    if stage == "SUBMITTED":
+        return None
+    if stage in {"RESULT_READY", "COMPLETE"}:
+        return len(record.input_ids)+len(record.output_ids)
+    return 0
+
+
+def merge_auxiliary_usage(*records):
+    """Sum observed calls; a missing component leaves that total unmeasured."""
+    fields = ("input_tokens", "output_tokens", "compute_ms")
+    result = {name: (sum(record[name] for record in records)
+                    if all(record is not None and record[name] is not None for record in records)
+                    else None) for name in fields}
+    result["models"] = [model for record in records if record is not None
+                        for model in record.get("models", ())]
+    result["components"] = list(records)
+    return result
+
+
+class ReadingExecutor:
+    def __init__(self, store, engine, template, *, extend_open_needs=None, events=None,
+                 request_arrived=None, observe_prefix=None):
+        self.store, self.engine, self.template = store, engine, template
+        self.extend_open_needs = extend_open_needs
+        self.events = events
+        self.request_arrived = request_arrived
+        self.observe_prefix = observe_prefix
+
+    async def _observe_prefix(self, plan, task, units, rendered, record):
+        if self.observe_prefix is None or task.kind != "READ" or plan.read_layout != "source_first":
+            return record
+        started = time.monotonic()
+        receipt = await self.observe_prefix(plan, task, units, rendered, record)
+        record = replace(record, metrics={**record.metrics, "evidence_prefix": receipt,
+            "prefix_control_ms": (time.monotonic()-started)*1000})
+        self.store.save_execution_step(record, "COMPLETE")
+        return record
+
+    async def _retire_step(self, record):
+        epoch = record.engine_epoch
+        operation_id = f"retire:{epoch.engine_session_id}"
+        ack = await self.engine.retire(epoch.engine_session_id, epoch.session_generation,
+            operation_id, epoch.engine_restart_id, "reading_step_complete")
+        if not ack.acknowledged:
+            raise EngineError("READ_RETIRE_PENDING", record.step_id)
+        self.store.ack_retire(operation_id)
+
+    async def _generate_step(self, attempt_id, snapshot, plan, task, units, claims):
+        step_started = time.monotonic()
+        identity = f"{attempt_id}:{task.step_id}"
+        messages = step_messages(plan, task, units, claims, snapshot)
+        rendered = self.template.render(messages)
+        if len(rendered.input_ids) > task.input_budget:
+            raise ReadingBudgetExceeded(f"{task.step_id} input exceeds {task.input_budget}")
+        if len(rendered.input_ids) + task.output_budget > plan.budget.window_tokens:
+            raise ReadingBudgetExceeded(f"{task.step_id} exceeds the model window")
+        persisted = self.store.execution_step(attempt_id, task.step_id)
+        generation = None
+        if persisted is None:
+            info = await self.engine.info()
+            epoch = ContextEpoch(snapshot.session_id, 0, f"step-{identity}", 0,
+                                 reason=task.kind.lower(), engine_restart_id=info.engine_restart_id)
+            record = StepRecord(attempt_id, task.step_id, task, epoch, messages, rendered.input_ids)
+            record = replace(record, metrics={"generation_kind":
+                step_generation_kind(task.kind, task.operation, plan.reading_mode)})
+            self.store.save_execution_step(record, "PLANNED")
+            stage = "PLANNED"
+        else:
+            stage, record, generation = persisted
+            epoch = record.engine_epoch
+            if record.task != task or record.input_ids != rendered.input_ids:
+                raise ValueError("persisted step input differs from the reading plan")
+            if stage == "COMPLETE":
+                record = await self._observe_prefix(plan, task, units, rendered, record)
+                await self._retire_step(record)
+                return record
+        if stage == "PLANNED":
+            info = await self.engine.info()
+            prepared_at = time.monotonic()
+            ack = await self.engine.prepare(epoch.engine_session_id, f"prepare:{identity}",
+                epoch.engine_restart_id,
+                **({"business_session_id": snapshot.session_id}
+                   if info.business_session_identity_supported else {}))
+            epoch = replace(epoch, session_generation=ack.session_generation)
+            record = replace(record, engine_epoch=epoch,
+                             metrics={**record.metrics, "prepare_ms": (time.monotonic()-prepared_at)*1000})
+            self.store.save_execution_step(record, "PREPARED")
+            stage = "PREPARED"
+        if stage == "SUBMITTED":
+            status = await self.engine.status(engine_session_id=epoch.engine_session_id,
+                attempt_id=identity, expected_restart_id=epoch.engine_restart_id)
+            if status.result is None:
+                if status.terminal and status.state in {"FAILED", "CANCELLED", "REJECTED", "RETIRED"}:
+                    raise EngineError("READ_STEP_FAILED", status.state)
+                raise EngineError("READ_STEP_OUTCOME_PENDING", status.state)
+            generation = status.result
+        elif stage == "PREPARED":
+            candidate = PromptCandidate(identity, "REBUILD", snapshot.version,
+                messages, rendered.input_ids, rendered.input_hash, frozenset(), frozenset(),
+                fingerprint=self.template.fingerprint, corpus_snapshot_id=snapshot.corpus_snapshot_id,
+                context_plan_id=plan.plan_id, evidence_set_id=plan.selected_set.set_id,
+                output_budget=task.output_budget,
+                generation_kind=step_generation_kind(task.kind, task.operation, plan.reading_mode))
+            quote_started = time.monotonic()
+            quote = await self.engine.quote_batch((candidate,), self.template.fingerprint)
+            record = replace(record, metrics={**record.metrics,
+                "quote_ms": (time.monotonic()-quote_started)*1000,
+                "cache_quote": to_jsonable(quote),
+                "active_requests": quote.active_requests, "queued_requests": quote.queued_requests,
+                "cache_config_hash": quote.cache_config_hash})
+            self.store.save_execution_step(record, "PREPARED")
+            if quote.engine_restart_id != epoch.engine_restart_id:
+                raise EngineError("READ_STEP_QUOTE_RESTART")
+            submitted = time.monotonic()
+            record = replace(record, metrics={**record.metrics,
+                "submitted_from_arrival_ms": (submitted-self.request_arrived)*1000
+                    if self.request_arrived is not None else None})
+            self.store.save_execution_step(record, "SUBMITTED")
+            generation = await self.engine.generate(**step_request(rendered, task),
+                session_id=epoch.engine_session_id, expected_generation=epoch.session_generation,
+                expected_restart_id=epoch.engine_restart_id, attempt_id=identity,
+                fingerprint=self.template.fingerprint)
+        if generation is not None:
+            metrics = {**record.metrics,
+                "elapsed_ms": generation.elapsed_ms, "ttft_ms": generation.ttft_ms,
+                "last_token_ms": generation.last_token_ms,
+                "queue_ms": generation.queue_ms, "prefill_ms": generation.prefill_ms,
+                "decode_ms": generation.decode_ms,
+                "forward_to_first_token_ms": generation.forward_to_first_token_ms,
+                "server_elapsed_ms": generation.server_elapsed_ms,
+                "actual_device_hit_tokens": generation.receipt.actual_device_hit_tokens,
+                "actual_host_loaded_tokens": generation.receipt.actual_host_loaded_tokens,
+                "actual_prefill_tokens": generation.receipt.actual_prefill_tokens,
+                "finish_reason": generation.finish_reason}
+            if (metrics.get("submitted_from_arrival_ms") is not None
+                    and generation.ttft_ms is not None):
+                metrics["first_token_from_arrival_ms"] = metrics["submitted_from_arrival_ms"]+generation.ttft_ms
+            record = replace(record, output_ids=generation.output_ids,
+                receipt=generation.receipt, metrics=metrics,
+                result=ReadResult(task.step_id, raw_output=generation.text,
+                    input_tokens=len(rendered.input_ids), output_tokens=len(generation.output_ids)))
+            self.store.save_execution_step(record, "RESULT_READY", generation)
+            receipt = generation.receipt
+            if (receipt.rid, receipt.attempt_id, receipt.engine_session_id,
+                    receipt.session_generation, receipt.engine_restart_id, receipt.input_hash) != (
+                    identity, identity, epoch.engine_session_id, epoch.session_generation,
+                    epoch.engine_restart_id, rendered.input_hash):
+                raise EngineError("READ_STEP_RECEIPT_MISMATCH")
+            if not generation.generation_complete or not receipt.generation_complete:
+                raise EngineError("READ_STEP_INCOMPLETE")
+            if generation.finish_reason in {"length", "max_tokens"}:
+                raise EngineError("READ_STEP_OUTPUT_TRUNCATED", task.step_id)
+            parse_started = time.monotonic()
+            result = parse_read_result(task, generation.text, units, claims,
+                elapsed_ms=generation.elapsed_ms or 0, input_tokens=len(rendered.input_ids),
+                output_tokens=len(generation.output_ids))
+            record = replace(record, result=result,
+                             metrics={**record.metrics, "parse_ms": (time.monotonic()-parse_started)*1000})
+            self.store.save_execution_step(record, "COMPLETE")
+            record = await self._observe_prefix(plan, task, units, rendered, record)
+            retire_started = time.monotonic()
+            await self._retire_step(record)
+            record = replace(record, metrics={**record.metrics,
+                "retire_ms": (time.monotonic()-retire_started)*1000,
+                "step_wall_ms": (time.monotonic()-step_started)*1000})
+            self.store.save_execution_step(record, "COMPLETE")
+            if self.events is not None:
+                self.events.emit("reading_step_complete", attempt_id=attempt_id, step=record)
+        return record
+
+    async def execute_reads(self, attempt_id, snapshot, plan, *, initial_auxiliary_usage=None):
+        from .evidence_planner import _passages, close_dependencies
+        if (plan.budget.max_passages is not None
+                and len(_passages(plan.selected_set.selected_units)) > plan.budget.max_passages):
+            raise ReadingBudgetExceeded("initial plan exceeds the original passage allocation")
+        self.store.save_context_plan(attempt_id, plan)
+        units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+        graph, results, records, coverage = ClaimGraph(), [], [], []
+        covered_unit_ids = set()
+        progress = self.store.reading_progress(attempt_id)
+        expanded = set(progress.expanded) if progress is not None else set()
+        blocked_open_needs = {(need.need_id, need.missing_relation, need.bound_entities): need
+                             for need in progress.blocked_open_needs} if progress is not None else {}
+        gap_auxiliary_usage = (progress.auxiliary_usage if progress is not None else
+            {"input_tokens": 0, "output_tokens": 0, "compute_ms": 0.0, "models": []})
+        initial_tokens = (0 if initial_auxiliary_usage is None else auxiliary_tokens(initial_auxiliary_usage))
+        reader_spend = {record.step_id: step_token_spend(stage, record)
+                       for stage, record in self.store.execution_steps_with_stage(attempt_id)}
+        started = time.monotonic()
+
+        def refresh_usage():
+            nonlocal plan
+            extra_tokens = auxiliary_tokens(gap_auxiliary_usage)
+            spent = (initial_tokens+extra_tokens+sum(reader_spend.values())
+                if initial_tokens is not None and extra_tokens is not None
+                and all(value is not None for value in reader_spend.values()) else None)
+            plan = replace(plan, online_tokens_spent=spent)
+            self.store.save_context_plan(attempt_id, plan)
+            return spent
+
+        refresh_usage()
+
+        def accept(record, selected_units=()):
+            nonlocal plan
+            result = record.result
+            for claim in result.claims:
+                graph.add(claim)
+            results.append(result)
+            records.append(record)
+            for unit in selected_units:
+                if unit.unit_id in covered_unit_ids:
+                    continue
+                covered_unit_ids.add(unit.unit_id)
+                for document_id in dict.fromkeys(span.source_key.document_id for span in unit.source_spans):
+                    coverage.append((plan.coverage_scope, document_id, unit.unit_id, record.step_id))
+            if record.step_id not in {step.step_id for step in plan.steps}:
+                plan = replace(plan, steps=plan.steps+(record.task,))
+
+        async def run_model(task, selected_units, selected_claims, depth=0):
+            task = replace(task, input_claim_ids=tuple(claim.claim_id for claim in selected_claims),
+                output_schema=output_schema(task, selected_units, selected_claims,
+                    reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
+            rendered = self.template.render(step_messages(plan, task, selected_units,
+                                                          selected_claims, snapshot))
+            if len(rendered.input_ids) > task.input_budget and task.kind == "REDUCE":
+                packs, pack = [], []
+                for claim in selected_claims:
+                    trial = tuple((*pack, claim))
+                    trial_task = replace(task, step_id=f"{task.step_id}:layer:{depth}:part:{len(packs)}")
+                    size = len(self.template.render(step_messages(plan, trial_task, (), trial, snapshot)).input_ids)
+                    if pack and size > task.input_budget:
+                        packs.append(tuple(pack))
+                        pack = []
+                    pack.append(claim)
+                if pack:
+                    packs.append(tuple(pack))
+                if len(packs) < 2:
+                    raise ReadingBudgetExceeded("one claim exceeds the reduction input allocation")
+                reduced = []
+                predecessors = []
+                for index, pack in enumerate(packs):
+                    child = replace(task, step_id=f"{task.step_id}:layer:{depth}:part:{index}")
+                    result = await run_model(child, (), pack, depth+1)
+                    reduced.extend(result.claims)
+                    predecessors.append(result.step_id)
+                return await run_model(replace(task, predecessor_step_ids=tuple(predecessors)),
+                                       (), tuple(reduced), depth+1)
+            if len(records) + 1 >= plan.budget.max_steps:
+                raise ReadingBudgetExceeded("reading exhausted the request step allocation")
+            persisted = self.store.execution_step(attempt_id, task.step_id)
+            if persisted is None or persisted[0] in {"PLANNED", "PREPARED"}:
+                require_online_tokens(plan.budget.max_total_tokens, refresh_usage(),
+                    len(rendered.input_ids)+task.output_budget, task.kind)
+            try:
+                record = await self._generate_step(attempt_id, snapshot, plan, task,
+                                                   selected_units, selected_claims)
+            finally:
+                saved = self.store.execution_step(attempt_id, task.step_id)
+                if saved is not None:
+                    reader_spend[task.step_id] = step_token_spend(saved[0], saved[1])
+                    refresh_usage()
+            accept(record, selected_units)
+            return record.result
+
+        while True:
+            ready = advance_read_plan(plan, tuple(results))
+            if not ready or all(task.kind == "REDUCE" for task in ready):
+                open_needs = tuple(need for result in results for need in result.open_needs
+                                   if (need.need_id, need.missing_relation, need.bound_entities) not in expanded)
+                if open_needs and self.extend_open_needs is not None:
+                    require_online_tokens(plan.budget.max_total_tokens, refresh_usage(), 1, "OpenNeed")
+                    gap_started = time.monotonic()
+                    extension_pool = await self.extend_open_needs(plan, open_needs, tuple(graph.claims.values()))
+                    gap_elapsed = (time.monotonic()-gap_started)*1000
+                    from .context_schema import EvidencePool
+                    if isinstance(extension_pool, EvidencePool):
+                        new_units = extension_pool.units
+                        gap_auxiliary_usage = merge_auxiliary_usage(gap_auxiliary_usage,
+                                                                    extension_pool.auxiliary_usage)
+                        phases = extension_pool.auxiliary_ms or (("control", gap_elapsed),)
+                        source_blocks = tuple({block.key: block for block in
+                            (*plan.selected_set.source_blocks, *extension_pool.source_blocks)}.values())
+                    else:
+                        new_units = tuple(extension_pool)
+                        gap_auxiliary_usage = merge_auxiliary_usage(gap_auxiliary_usage, None)
+                        phases = (("control", gap_elapsed),)
+                        source_blocks = plan.selected_set.source_blocks
+                    phase_id = len(expanded)
+                    plan = replace(plan, auxiliary_ms=(*plan.auxiliary_ms,
+                        *((f"gap:{phase_id}:{name}", value) for name, value in phases)))
+                    expanded.update((need.need_id, need.missing_relation, need.bound_entities) for need in open_needs)
+                    refresh_usage()
+                    self.store.save_reading_progress(attempt_id, plan, ReadingProgress(
+                        tuple(sorted(expanded)), tuple(blocked_open_needs.values()), gap_auxiliary_usage))
+                    require_online_tokens(plan.budget.max_total_tokens, plan.online_tokens_spent, 1, "OpenNeed result")
+                    combined = {**{unit.unit_id: unit for unit in new_units}, **units}
+                    closure = close_dependencies(tuple(unit.unit_id for unit in new_units
+                                                        if unit.unit_id not in units), combined)
+                    novel = tuple(unit for unit in closure if unit.unit_id not in units)
+                    if (plan.budget.max_passages is not None and len(_passages(
+                            (*units.values(), *novel))) > plan.budget.max_passages):
+                        blocked_open_needs.update(((need.need_id, need.missing_relation,
+                                                    need.bound_entities), need) for need in open_needs)
+                        if self.events is not None:
+                            self.events.emit("reading_gap_budget_stop", attempt_id=attempt_id,
+                                reason="original_passage_budget", open_needs=open_needs,
+                                max_passages=plan.budget.max_passages)
+                        novel = ()
+                    if novel:
+                        parents = tuple(dict.fromkeys(parent for need in open_needs
+                                                       for parent in need.parent_claim_ids))
+                        extension = build_read_plan(plan.task_state,
+                            replace(plan.selected_set, selected_units=closure), plan.coverage_scope,
+                            plan.budget, template=self.template, snapshot=snapshot,
+                            input_claims=tuple(graph.claims[parent] for parent in parents),
+                            reading_mode=plan.reading_mode, separate_needs=plan.separate_needs,
+                            numeric_identity=plan.numeric_identity, read_layout=plan.read_layout,
+                            read_packing=plan.read_packing)
+                        prefix = f"hop:{len(expanded)}:"
+                        extension_units = {unit.unit_id: unit for unit in extension.selected_set.selected_units}
+                        steps = []
+                        for step in extension.steps:
+                            step = replace(step, step_id=prefix+step.step_id,
+                                input_claim_ids=parents, predecessor_step_ids=tuple(dict.fromkeys(
+                                    parent.rsplit(":claim:", 1)[0] for parent in parents)))
+                            steps.append(replace(step, output_schema=output_schema(step,
+                                tuple(extension_units[unit_id] for unit_id in step.input_unit_ids),
+                                tuple(graph.claims[parent] for parent in parents),
+                                reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity)))
+                        steps = tuple(steps)
+                        units.update((unit.unit_id, unit) for unit in extension.selected_set.selected_units)
+                        selected_set = replace(plan.selected_set, selected_units=tuple(units.values()),
+                                               source_blocks=source_blocks)
+                        if isinstance(extension_pool, EvidencePool) and extension_pool.selected_set is not None:
+                            updated_set = extension_pool.selected_set
+                            gaps = {need.need_id for need in open_needs}
+                            support = tuple(item for item in selected_set.need_support if item.need_id not in gaps)
+                            support += tuple(item for item in updated_set.need_support if item.need_id in gaps)
+                            selected_set = replace(selected_set, need_support=support,
+                                quality_prediction=updated_set.quality_prediction,
+                                disposition=updated_set.disposition)
+                        plan = replace(plan, steps=plan.steps+steps,
+                            coverage_units=tuple(dict.fromkeys((*plan.coverage_units, *extension.coverage_units))),
+                            selected_set=selected_set)
+                        self.store.save_reading_progress(attempt_id, plan, ReadingProgress(
+                            tuple(sorted(expanded)), tuple(blocked_open_needs.values()), gap_auxiliary_usage))
+                        continue
+                    self.store.save_reading_progress(attempt_id, plan, ReadingProgress(
+                        tuple(sorted(expanded)), tuple(blocked_open_needs.values()), gap_auxiliary_usage))
+                if not ready:
+                    break
+            for task in ready:
+                if task.step_id in {result.step_id for result in results}:
+                    continue
+                if len(records) + 1 >= plan.budget.max_steps:
+                    raise ReadingBudgetExceeded("reading exhausted the request step allocation")
+                if (plan.budget.max_complete_ms is not None
+                        and (time.monotonic()-started)*1000 > plan.budget.max_complete_ms):
+                    raise ReadingBudgetExceeded("reading exhausted the complete-time allocation")
+                selected_units = tuple(units[unit_id] for unit_id in task.input_unit_ids)
+                selected_claims = tuple(graph.claims[claim_id] for claim_id in task.input_claim_ids)
+                if (plan.reading_mode == "typed_reduce" and task.kind == "REDUCE"
+                        and task.operation in {"union", "count", "sum", "group"}):
+                    tick = time.monotonic()
+                    try:
+                        claim = reduce_claims(task.operation, selected_claims,
+                            claim_id=f"{task.step_id}:claim:0", need_id=task.need_ids[0])
+                    except ValueError as exc:
+                        self.store.save_execution_step(StepRecord(attempt_id, task.step_id, task,
+                            metrics={"cpu_reduce_ms": (time.monotonic()-tick)*1000,
+                                     "error": str(exc)}), "FAILED")
+                        raise
+                    result = ReadResult(task.step_id, (claim,), elapsed_ms=(time.monotonic()-tick)*1000)
+                    record = StepRecord(attempt_id, task.step_id, task, result=result,
+                                        metrics={"cpu_reduce_ms": result.elapsed_ms})
+                    self.store.save_execution_step(record, "COMPLETE")
+                    accept(record, selected_units)
+                else:
+                    await run_model(task, selected_units, selected_claims)
+            self.store.save_context_plan(attempt_id, plan)
+        covered = {row[2] for row in coverage}
+        if plan.coverage_scope == "all_supplied_documents" and covered != set(plan.coverage_units):
+            raise ValueError("full-document coverage is incomplete")
+        unresolved = tuple(need for index, result in enumerate(results) for need in result.open_needs
+            if not any(need.need_id in later.support for later in results[index+1:]))
+        unresolved = tuple({(need.need_id, need.missing_relation, need.bound_entities): need
+                            for need in (*unresolved, *blocked_open_needs.values())}.values())
+        disposition = plan.selected_set.disposition
+        if unresolved:
+            disposition = "partial" if graph.claims else "retrieval_gap"
+        answer_plan = graph.answer_plan(plan.task_state, disposition)
+        support_spans = {need.need_id: tuple({span.span_id: span
+            for support in plan.selected_set.need_support if support.need_id == need.need_id
+            for span in support.source_spans}.values()) for need in plan.task_state.needs
+            if any(support.need_id == need.need_id for support in plan.selected_set.need_support)}
+        planned_points = {point.need_id: point for point in plan.answer_plan.points}
+        points = []
+        for point in answer_plan.points:
+            if point.claim_ids:
+                points.append(point)
+            elif point.need_id in support_spans:
+                points.append(replace(point, source_spans=support_spans[point.need_id]))
+            elif point.need_id in planned_points:
+                points.append(replace(point, source_spans=planned_points[point.need_id].source_spans))
+            else:
+                points.append(point)
+        plan = replace(plan, answer_plan=replace(answer_plan, points=tuple(points)))
+        self.store.save_context_plan(attempt_id, plan)
+        return ReadingOutcome(plan, tuple(results), tuple(records), tuple(graph.claims.values()),
+                              tuple(coverage), unresolved, auxiliary_usage=gap_auxiliary_usage)

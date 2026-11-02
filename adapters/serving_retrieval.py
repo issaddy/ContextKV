@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 
 from controller.schema import OnlineMessage, OnlineTurn
+from controller.context_schema import RetrievalState
 from adapters.conversation import snapshot_context
 from adapters.retrieval import bind_corpus_context, run_retrieval_worker, to_evidence
 from controller.service import EvidenceSelection
@@ -29,6 +30,42 @@ class ServingRetriever:
         self.corpus_id = corpus_id
         self.corpus_snapshot_id = retriever.corpus_snapshot_id
         bind_corpus_context(retriever, corpus_index)
+        self.source_directory = None
+
+    def configure_study(self, task_interpreter, tokenizer, *, profile=None, reference_date=None):
+        from adapters.evidence_pool import SourceDirectory
+        self.source_directory = SourceDirectory(self.corpus_index, self.candidate_search, tokenizer,
+            task_interpreter=task_interpreter, profile=profile, reference_date=reference_date,
+            archive_encoder=task_interpreter.history_index.encode)
+        return self.source_directory
+
+    def retrieval_state(self, snapshot):
+        if self.source_directory is not None:
+            from adapters.history_state import retrieval_state
+            return retrieval_state(snapshot, self.source_directory)
+        return RetrievalState(snapshot.version, snapshot.raw_history,
+            tuple(row.query_context.task_state for row in snapshot.raw_history
+                  if row.query_context is not None and row.query_context.task_state is not None),
+            tuple(block.key for block in snapshot.archive), self.source_directory)
+
+    def candidate_search(self, query, *, top_k=50):
+        return self.retriever.candidate_search(query, top_k=top_k)
+
+    def source_fetch(self, keys):
+        return self.corpus_index.resolve(keys)
+
+    def archive_lookup(self, snapshot, keys):
+        archive = {block.key: block for block in snapshot.archive}
+        return tuple(archive[key] for key in keys)
+
+    def retrieve_pool(self, snapshot, query, request_id):
+        history = tuple(message for row in snapshot.raw_history for message in (
+            OnlineMessage("user", row.user_text), OnlineMessage("assistant", row.assistant_text)))
+        turn = OnlineTurn(snapshot.session_id, request_id, len(snapshot.raw_history)+1,
+                          self.corpus_id, query, history, (), "P3")
+        memory = self.retrieval_state(snapshot)
+        state = self.source_directory.task_interpreter.interpret(turn, memory)
+        return state, self.source_directory.retrieve_pool(state, memory), memory
 
     @property
     def manifest(self):

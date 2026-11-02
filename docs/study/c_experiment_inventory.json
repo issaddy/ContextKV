@@ -1,0 +1,165 @@
+{
+  "observation_scope": "Results observed before the user stopped remote access and file transfers; no subsequent remote check.",
+  "remote_host": "public-ge108-wlf3-hangu-5.idchb2az3.hb2.kwaidc.com",
+  "container": "sjy-0518",
+  "baseline": {
+    "source_commit": "7388008f56ec7176668321d00f69bd2f07639f0a",
+    "strategy": "original Dense5",
+    "reader": "fixed Qwen3-32B nonthinking",
+    "reader_port": 30000,
+    "cohort": "original fixed 32 MultiDoc conversations / 3 Cloud conversations; actual history; original query adapter",
+    "multidoc": {
+      "completed": 206,
+      "failed": 0,
+      "benchmark": "/home/relay/songjiayun/ContextKV/runs/study-20261102/baseline/multidoc/benchmark-94ae4253f8c0475f805e948791d4dfb7.json",
+      "RB_llm": 0.8449029126213592,
+      "cohort_overlap_F1": 0.1981171173242095
+    },
+    "cloud": {
+      "completed": 21,
+      "failed": 0,
+      "benchmark": "/home/relay/songjiayun/ContextKV/runs/study-20261102/baseline/cloud/benchmark-4a9122f9b176422cbd67d6c1da3c44bb.json",
+      "RB_llm_raw": 0.7285714285714285,
+      "RB_llm_original_IDK_adjusted": 0.6714285714285715,
+      "cohort_overlap_F1": 0.2910824408454437
+    },
+    "cost_scope": "Native completion receipts, stages and cache observations retained; continuous GPU/PSS integrals were not sampled in this original baseline run."
+  },
+  "faithfulness": {
+    "original_profile": {
+      "directory": "/home/relay/songjiayun/ContextKV/runs/study-20261102/baseline/scores",
+      "cloud_numeric": 15,
+      "cloud_undefined": 6,
+      "multidoc_numeric": 183,
+      "multidoc_undefined": 23,
+      "undefined_reason": "Cloud raw audit: invalid JSON/types/missing fields from NLI or statement generator; all stop, no length termination; failed profile retained."
+    },
+    "uniform_structured_profile": {
+      "directory": "/home/relay/songjiayun/ContextKV/runs/study-20261102/baseline/scores-structured",
+      "transport": "actual original prompt Pydantic schema through native JSON sampling; every cohort input used this profile",
+      "cloud_numeric": 21,
+      "cloud_undefined": 0,
+      "cloud_mean": 0.8788560645714286,
+      "multidoc_numeric": 197,
+      "multidoc_undefined": 9,
+      "multidoc_undefined_reason": "9 empty statement-generator lists; all stop, no repair; zero metric denominator remains undefined."
+    },
+    "aggregation": "No null-to-zero substitution or silent denominator change."
+  },
+  "algorithmic": {
+    "status": "incomplete",
+    "reason": "Official dependencies installed in isolated eval venv; public model transfer stopped; full RB_alg not executed.",
+    "model": "microsoft/deberta-xlarge-mnli",
+    "model_revision": "5b07a9086c1dbb79981ff7b05b4d1ad83b3af51c"
+  },
+  "controlled_mechanisms": {
+    "input_origin": "controlled task and support annotations; this batch does not establish automatic task/support model accuracy",
+    "first_pair": {
+      "directory": "/home/relay/songjiayun/ContextKV/runs/study-20261102/mechanisms-first",
+      "READ": 1,
+      "ANSWER": 1,
+      "input_tokens": 1591,
+      "output_tokens": 319,
+      "qa_increment": 1,
+      "version_increment": 1,
+      "physical_cost": "not continuously sampled",
+      "complete_ms_rounded": 4055
+    },
+    "first_fullcost": {
+      "directory": "/home/relay/songjiayun/ContextKV/runs/study-20261102/mechanisms-fullcost",
+      "status": "failed_long_CPU_reduction",
+      "reason": "Generic entity shipment caused conflicting quantities; preceding pair/correction artifacts and raw samplers retained."
+    },
+    "v2": {
+      "directory": "/home/relay/songjiayun/ContextKV/runs/study-20261102/mechanisms-fullcost-v2",
+      "status": "failed_before_generation",
+      "reason": "Wrong launch config then deployment ABI missing CostModel.step_models; no QA commit."
+    },
+    "v3": {
+      "directory": "/home/relay/songjiayun/ContextKV/runs/study-20261102/mechanisms-fullcost-v3",
+      "background_offline_training": true,
+      "samplers": [
+        "native-pool-observation.json",
+        "physical-resource-observation.json"
+      ],
+      "status": "3_completed_1_failed",
+      "records": [
+        {
+          "case": "pair",
+          "input_tokens": 1648,
+          "output_tokens": 327,
+          "quality": "correct eligibility and Windows W-7 with square source references"
+        },
+        {
+          "case": "correction",
+          "input_tokens": 1721,
+          "output_tokens": 463,
+          "quality": "correct Linux command and L-9 with square source references"
+        },
+        {
+          "case": "long",
+          "source_tokens": 77312,
+          "READ": 12,
+          "CPU_REDUCE": 2,
+          "ANSWER": 1,
+          "input_tokens": 83859,
+          "output_tokens": 8211,
+          "qa_increment": 1,
+          "version_increment": 1,
+          "expected": {
+            "count": 36,
+            "mass_kg": 666
+          },
+          "actual": {
+            "count": 37,
+            "mass_kg": 513
+          },
+          "quality": "incorrect; inconsistent entity labels, omitted/misassigned need facts, one numeric extraction error; root source references also incomplete in that compiler snapshot"
+        },
+        {
+          "case": "multihop",
+          "status": "failed_second_READ_parse",
+          "input_tokens": 1016,
+          "output_tokens": 455,
+          "reason": "OpenNeed used read:0 prefix instead of hop step prefix; later local schema now restricts exact allowed IDs."
+        }
+      ]
+    },
+    "local_followup_only": [
+      "Stronger literal identifier/numeric preservation and per-need extraction prompt",
+      "OpenNeed parent ID pattern bound to exact step ID and known predecessor claims",
+      "Final compiler source slices and root citation aliases (parent-owned)",
+      "Single fixed reader endpoint provider mechanism script",
+      "Durable gap progress and auxiliary usage across response recovery",
+      "Separate native READ/REDUCE measurement exporter"
+    ],
+    "rerun_status": "Not run after local fixes because remote access and transfers are stopped by user."
+  },
+  "last_observed_owned_services": [
+    {
+      "gpu": 0,
+      "port": 30000,
+      "pid": 119861,
+      "role": "reader/offline baseline judge"
+    },
+    {
+      "gpu": 3,
+      "port": 30001,
+      "pid": 119862,
+      "role": "offline teacher"
+    },
+    {
+      "gpu": 4,
+      "port": 30002,
+      "pid": 131995,
+      "role": "offline teacher2"
+    },
+    {
+      "gpu": 5,
+      "port": 30003,
+      "pid": 131996,
+      "role": "offline teacher3"
+    }
+  ],
+  "service_state": "Last observed, not current health. Parent coordinates later retirement; no remote kill or polling after user instruction."
+}

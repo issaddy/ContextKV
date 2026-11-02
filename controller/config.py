@@ -99,6 +99,8 @@ class CostSettings:
     max_normalized_distance: float = .5
     online_calibration: bool = False
     residual_alpha: float = .1
+    step_output_priors: dict = field(default_factory=dict)
+    step_artifacts: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,7 @@ class RunConfig:
     calibration_path: str | None = None
     shadow: bool = False
     sampling: SamplingRecipe | None = None
+    prefix_retention: dict = field(default_factory=lambda: {"mode": "native"})
 
     def __post_init__(self):
         if self.engine.kind not in ("mock", "sglang"):
@@ -140,6 +143,23 @@ def load_config(path: str | Path | None = None) -> RunConfig:
     return decode(RunConfig, yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {})
 
 
+def apply_study_config(config: RunConfig, study):
+    """Use the same execution domain for HTTP serving and study evaluation."""
+    from dataclasses import replace
+    from .candidates import PLAN_SYSTEM_PROMPT
+    execution = study["execution"]
+    strategy = study["study"]["strategy"]
+    artifact = execution.get("cost_artifact", config.cost_model.artifact)
+    return replace(config, context=replace(config.context,
+        max_total_model_tokens=execution["window_tokens"], max_new_tokens=execution["output_tokens"],
+        system_prompt=config.context.system_prompt or (None if strategy == "B0" else PLAN_SYSTEM_PROMPT)),
+        planner=replace(config.planner, strategy="cost" if strategy == "B7" else "always_rebuild",
+            lambda_time=execution["lambda_time"], lambda_gpu=execution["lambda_gpu"],
+            lambda_host=execution["lambda_host"]),
+        cost_model=replace(config.cost_model, artifact=artifact),
+        prefix_retention=execution.get("prefix_retention", config.prefix_retention))
+
+
 def assemble_cost_model(config, *, artifact=None, measurements=None,
                         max_new_tokens=None):
     """Pure assembly from configuration and already-read artifact contents.
@@ -155,8 +175,10 @@ def assemble_cost_model(config, *, artifact=None, measurements=None,
                  config.get("context", {}).get("max_new_tokens", 512),
                  **{f"include_{name}_cost": ablation.get(f"{name}_cost", True)
                     for name in ("host", "decode", "control")}}
-    for name in ("artifact", "online_calibration"):
+    for name in ("artifact", "online_calibration", "step_artifacts"):
         settings.pop(name, None)
+    if settings.get("step_output_priors"):
+        overrides["step_output_priors"] = settings.pop("step_output_priors")
     if artifact is not None:
         model = CostModel.from_spec(artifact, **overrides)
     elif measurements is not None:
@@ -176,11 +198,25 @@ def load_cost_model(config, *, artifact_path=None, max_new_tokens=None):
     settings = config.get("cost_model") or {}
     artifact_path = artifact_path or settings.get("artifact")
     calibration = config.get("calibration_path")
-    return assemble_cost_model(config,
+    model = assemble_cost_model(config,
         artifact=json.loads(Path(artifact_path).read_text()) if artifact_path else None,
         measurements=[json.loads(line) for line in Path(calibration).read_text().splitlines()
                       if line.strip()] if calibration and not artifact_path else None,
         max_new_tokens=max_new_tokens)
+    if settings.get("step_artifacts") or model.step_models:
+        from .reading import (READ_SYSTEM, COVERAGE_READ_SYSTEM, REDUCE_SYSTEM,
+                              SUMMARY_READ_SYSTEM, SUMMARY_REDUCE_SYSTEM)
+        prompts = {"READ": READ_SYSTEM, "REDUCE": REDUCE_SYSTEM,
+                   "READ_COVERAGE": COVERAGE_READ_SYSTEM,
+                   "READ_SUMMARY": SUMMARY_READ_SYSTEM, "REDUCE_SUMMARY": SUMMARY_REDUCE_SYSTEM}
+        for kind, path in settings.get("step_artifacts", {}).items():
+            model.step_models[kind] = CostModel.load(path, include_host_cost=model.include_host_cost,
+                include_decode_cost=model.include_decode_cost, include_control_cost=model.include_control_cost)
+        for kind, child in model.step_models.items():
+            child.configure_sampling(GenerationProtocol.from_config(config).sampling,
+                fallback_mean=child.default_output_tokens, fallback_p90=child.p90_output_tokens,
+                system_prompt=prompts[kind])
+    return model
 
 
 def create_model_template(model: ModelConfig, *, model_path: str | None = None,
@@ -221,5 +257,6 @@ def create_controller(config: RunConfig) -> Controller:
                       policy=config.context, knobs=config.planner, cost_model=model, shadow=config.shadow,
                       epoch_retirement=config.ablation.epoch_retirement,
                       online_calibration=config.cost_model.online_calibration,
+                      prefix_settings=config.prefix_retention,
                       events=EventLog(state_dir / "events.jsonl",
                                       engine_kind=config.engine.kind))

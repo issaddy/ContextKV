@@ -143,6 +143,7 @@ def install_native_environment(monkeypatch, fixture):
         dtype="bfloat16", kv_cache_dtype="bfloat16", quantization=None, load_format="auto",
         json_model_override_args="{}", context_length=32768)
     context.get_model = lambda: settings
+    settings.resolved_dict = lambda: vars(settings)
     context.get_server_args = lambda: settings
     context.get_parallel = lambda: SimpleNamespace(tp_size=1, num_dp_ranks=1, pp_size=1)
     environment = ModuleType("sglang.srt.environ")

@@ -37,6 +37,18 @@ def test_native_ngram_shares_full_cache_and_binds_its_execution_profile(local_sc
     assert len(set([normal.info({})['cache_config_hash'], *observed])) == 3
 
 
+def test_json_whitespace_configuration_has_independent_calibration_identity(local_scope, monkeypatch):
+    identities = []
+    for compact in (False, True):
+        scheduler, settings = fixtures.install_native_environment(monkeypatch, local_scope)
+        settings.grammar_backend = "xgrammar"
+        settings.constrained_json_disable_any_whitespace = compact
+        runtime = native.get_runtime(scheduler)
+        assert runtime.cache_config["decoder"]["constrained_json_disable_any_whitespace"] == compact
+        identities.append(runtime.info({})["cache_config_hash"])
+    assert identities[0] != identities[1]
+
+
 def test_native_scheduler_requires_explicit_scope_even_with_valid_old_style_fingerprint(local_scope, monkeypatch):
     scheduler, settings = fixtures.install_native_environment(monkeypatch, local_scope)
     monkeypatch.delenv('CONTEXTKV_MODEL_SCOPE_PATH')

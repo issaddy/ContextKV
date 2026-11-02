@@ -390,7 +390,8 @@ def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSp
     ref_map = dict(references)
     visible: set[EvidenceKey] = set()
     occupied: dict[int, list[tuple[int, int]]] = {}
-    roots = {span.reference_id: span for span in spans if span.body_reference_id is None}
+    roots = {(span.reference_id, span.message_index, span.start, span.end): span
+             for span in spans if span.body_reference_id is None}
     for span in spans:
         block = archive.get(span.key)
         if block is None or not 0 <= span.message_index < len(messages):
@@ -400,7 +401,10 @@ def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSp
             raise EvidenceError("evidence body must have original user-payload provenance")
         if not 0 <= span.start < span.end <= len(message.content):
             raise EvidenceError("evidence body span outside message")
-        if message.content[span.start:span.end] != block.text:
+        base = block.span[0] if block.span else 0
+        source_text = (block.text if span.source_start is None else
+                       block.text[span.source_start-base:span.source_end-base])
+        if message.content[span.start:span.end] != source_text:
             raise EvidenceError("evidence span does not contain the complete original body")
         if span.source_uri != block.source_uri or span.provenance != block.provenance:
             raise EvidenceError("evidence provenance mismatch")
@@ -416,7 +420,7 @@ def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSp
                     raise EvidenceError("overlapping evidence body spans")
             occupied.setdefault(span.message_index, []).append((span.start, span.end))
         else:
-            owner = roots.get(span.body_reference_id)
+            owner = roots.get((span.body_reference_id, span.message_index, span.start, span.end))
             if owner is None or (owner.message_index, owner.start, owner.end) != (span.message_index, span.start, span.end):
                 raise EvidenceError("evidence alias requires the referenced complete physical body")
             if span.alias_declaration is None:
@@ -445,6 +449,13 @@ def candidate_request(candidate, max_new_tokens):
     An empty tuple forbids reserved citation IDs; None disables the grammar.
     Warmup requests intentionally do not use this answer-generation interface.
     """
-    return {"input_ids": candidate.input_ids, "max_new_tokens": max_new_tokens,
+    return {"input_ids": candidate.input_ids,
+            "max_new_tokens": candidate.output_budget or max_new_tokens,
             "citation_ids": tuple(ref for ref, key in candidate.reference_map
                                   if key in candidate.required_blocks)}
+
+
+def step_request(rendered, task):
+    """READ/REDUCE use their JSON schema and output allocation."""
+    return {"input_ids": rendered.input_ids, "max_new_tokens": task.output_budget,
+            "response_schema": task.output_schema}

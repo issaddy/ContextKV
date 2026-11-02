@@ -1,0 +1,550 @@
+"""Prepare, run, freeze and report the task-driven evidence/reading study."""
+from __future__ import annotations
+
+import argparse
+import asyncio
+from collections import Counter
+from dataclasses import replace
+import json
+from pathlib import Path
+import random
+import time
+import uuid
+from urllib.parse import urlparse
+
+import yaml
+
+from adapters.mtrag import load_rows
+from bench.quality import export_evaluation
+from bench.study_metrics import paired_comparisons, select_development, summarize_methods
+from controller.config import apply_study_config, create_controller, load_config
+from controller.schema import OnlineContext, OnlineMessage, OnlineTurn, TurnRecord
+from controller.serialization import dumps, to_jsonable
+
+
+BASELINE = "7388008f56ec7176668321d00f69bd2f07639f0a"
+
+
+def read_jsonl(path):
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def write_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(to_jsonable(value), ensure_ascii=False, indent=2)+"\n")
+
+
+def write_jsonl(path, rows):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(dumps(row)+"\n" for row in rows))
+
+
+def save_measurement_segment(directory, segment_id, *, physical, native, batch):
+    """A resumed execution preserves all earlier raw observations and idle cost."""
+    directory = Path(directory)
+    segment = directory/"measurements"/segment_id
+    segment.mkdir(parents=True, exist_ok=False)
+    for name, value in (("physical_resources", physical), ("native_resources", native), ("batch_cost", batch)):
+        write_json(segment/f"{name}.json", value)
+    write_json(directory/"measurement_segments.json", {"schema_version": 1,
+        "segments": [str(path.relative_to(directory)) for path in sorted((directory/"measurements").iterdir())
+                     if (path/"batch_cost.json").exists()]})
+    return segment
+
+
+def merge_config(base, overrides):
+    result = dict(base)
+    for name, value in overrides.items():
+        result[name] = (merge_config(result.get(name, {}), value) if isinstance(value, dict)
+                        else value)
+    return result
+
+
+def dataset_rows(spec, split):
+    path = spec["inputs"][split] if "inputs" in spec else spec["input"]
+    rows = load_rows(path)
+    if "split_manifest" in spec:
+        allowed = set(json.loads(Path(spec["split_manifest"]).read_text())[split])
+        rows = [row for row in rows if row["conversation_id"] in allowed]
+    if "domain" in spec:
+        rows = [row for row in rows if row["Collection"] == spec["domain"]]
+    if split == "dev" and "dev_conversations" in spec:
+        identities = sorted({row["conversation_id"] for row in rows})
+        selected = set(random.Random(spec["dev_seed"]).sample(identities, spec["dev_conversations"]))
+        rows = [row for row in rows if row["conversation_id"] in selected]
+    return rows
+
+
+def declare_cohorts(matrix, *, splits=("dev", "test"), datasets=None):
+    matrix = merge_config(matrix, {})
+    cohorts = dict(matrix.get("cohorts", {}))
+    for split in splits:
+        cohorts[split] = {name: [row["task_id"] for row in dataset_rows(spec, split)]
+            for name, spec in matrix["datasets"].items()
+            if (datasets is None or name in datasets) and not (split == "dev" and spec.get("evaluation_only"))}
+    matrix["cohorts"] = cohorts
+    return matrix
+
+
+def prepare(config, matrix=None):
+    from training.task_data import build_task_data
+    from training.support_data import build_support_examples
+    from training.reading_data import build_reading_data
+
+    output = Path(config["study"]["output_dir"])
+    output.mkdir(parents=True, exist_ok=True)
+    task_data = build_task_data(config)
+    data_dir = Path(config["training"]["data_dir"])
+    support_data = (build_support_examples(data_dir/"original_train_turns.jsonl",
+        data_dir/"sources.jsonl", data_dir/"reference_candidates", max_turns=10000)
+        if config["training"].get("enabled", True) else {"status": "not_requested"})
+    reading_data = build_reading_data(config)
+    from bench.study_assets import prepare_public_assets
+    evaluation_assets = prepare_public_assets(config)
+    baseline = {"commit": BASELINE,
+        "query_adapter": "models/bge-m3-dialogue-query-v1",
+        "generation_config": "configs/qwen3_32b.yaml",
+        "retrieval_config": "configs/study_multidoc_retriever.yaml",
+        "strategy": "Dense5_REBUILD_native_Radix_HiCache",
+        "fresh_results": "runs/study-20261102/baseline",
+        "archived_results": "runs/dense-final-validation-20261101",
+        "baseline_unit_checks": {"passed": 1433, "skipped": 7,
+            "source": "isolated git archive of baseline commit",
+            "log": "/tmp/contextkv-baseline-isolated-pytest.txt"}}
+    write_json(output/"baseline.json", baseline)
+    write_json(output/"effective_config.json", config)
+    manifest = {"baseline": baseline, "task_data": task_data, "support_data": support_data,
+        "reading_data": reading_data, "evaluation_assets": evaluation_assets,
+        "learning": config["study"].get("learning", True), "configured_assets": {
+            "task": config["task_model"]["asset"], "support": config["support_model"]["asset"],
+            "preference": config["support_model"]["preference_asset"]}}
+    if matrix is not None:
+        from bench.study_jobs import development_variants
+        write_json(output/"development_jobs.json", development_variants(matrix))
+        # Evaluation assets are inventoried independently from training builders.
+        manifest["datasets"] = {name: {"split_kind": spec["split_kind"],
+            "primary_metric": spec["primary_metric"], "weight": spec["weight"],
+            "paths": spec.get("inputs", {"input": spec.get("input")})}
+            for name, spec in matrix["datasets"].items()}
+    write_json(output/"prepare_manifest.json", manifest)
+    return manifest
+
+
+def method_config(config, method, dataset, split):
+    retrieval = {name: dataset[key] for name, key in (
+        ("corpus_path", "corpus_path"), ("config_path", "retriever_config"),
+        ("corpus_id", "corpus_id")) if key in dataset}
+    value = merge_config(config, {"study": {"strategy": method["strategy"]},
+        "retrieval": retrieval, "reading": {"coverage_mode": dataset.get("coverage_mode", "selected_sources")},
+        "selection": {"max_passages": dataset.get("max_passages")}})
+    value = merge_config(value, {"retrieval": dataset.get("retrieval_by_split", {}).get(split, {})})
+    return merge_config(value, method.get("overrides", {}))
+
+
+async def run_dataset(config, matrix, method, dataset_name, split, directory, *, concurrency=1,
+                      limit_conversations=None, workload=None, question_fn=None):
+    from adapters.study_retrieval import create_study_retriever
+    from controller.evidence import make_evidence
+    from bench.native_metrics import NativePoolSampler, pool_series
+    from bench.metrics import occupancy_integral
+    from bench.study_resources import (StudyResourceSampler, attribute_physical,
+        integrate_physical, listening_processes)
+    from bench.study_workloads import WorkloadDispatcher
+
+    spec = matrix["datasets"][dataset_name]
+    if workload is not None:
+        concurrency = workload.concurrency
+    config = method_config(config, method, spec, split)
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    segment_id = uuid.uuid4().hex
+    run = load_config(config["generation"]["run_config"])
+    run = replace(apply_study_config(run, config), state_dir=str(directory/"state"))
+    service = create_controller(run)
+    provider_started = time.monotonic()
+    provider = await asyncio.to_thread(create_study_retriever, config, service.template)
+    initialization_ms = (time.monotonic()-provider_started)*1000
+    engine_info = await service.engine.info()
+    cache_protocol = config["execution"].get("cache_start", "observed")
+    cache_start = (await service.engine.profile_prepare("cold") if cache_protocol == "cold" else None)
+    engine_info = await service.engine.info()
+    allocator = await service.engine.metrics()
+    source_rows = dataset_rows(spec, split)
+    grouped = {}
+    for number, row in enumerate(source_rows):
+        grouped.setdefault(row["conversation_id"], []).append((number, row))
+    conversations = sorted(grouped)
+    if limit_conversations is not None:
+        conversations = conversations[:limit_conversations]
+    expected = [row["task_id"] for sid in conversations for _, row in grouped[sid]]
+    if workload is not None and set(workload.dispatch_order) != set(expected):
+        raise ValueError("workload and dataset must contain exactly the same task IDs")
+    generation_manifest = {"config": config, "method": method, "measurement_segment_id": segment_id,
+        "dataset": dataset_name, "split": split, "task_ids": expected,
+        "concurrency": concurrency, "retrieval": provider.manifest,
+        "concurrency_scope": "request",
+        "workload": to_jsonable(workload), "answer_driven_policy": question_fn is not None,
+        "cache_start_protocol": cache_protocol, "cache_start_record": cache_start,
+        "auxiliary_initialization_ms": initialization_ms,
+        "engine": engine_info, "allocator_initial": allocator,
+        "model": run.model, "generation_protocol": run.sampling,
+        "measurement_kind": "hardware" if run.engine.kind == "sglang" else "simulation"}
+    write_json(directory/"generation_manifest.json", generation_manifest)
+    (directory/"records").mkdir(exist_ok=True)
+    old_records = {row["task_id"]: row for path in (directory/"records").glob("*.json")
+                   for row in [json.loads(path.read_text())]}
+    results, windows = dict(old_records), {}
+    semaphore = asyncio.Semaphore(concurrency)
+    resource_settings = matrix["resources"]
+    ports = [urlparse(run.engine.base_url).port]
+    if config["task_model"].get("mode") == "teacher" or config["support_model"].get("mode") == "teacher":
+        ports.append(urlparse(config["generation"]["teacher_url"]).port)
+    process_ids = (*listening_processes(ports), *resource_settings.get("process_ids", ()))
+    devices = list(resource_settings["gpu_devices"])
+    physical = StudyResourceSampler(devices, process_ids)
+    native = NativePoolSampler(run.engine.base_url, gpu_capacity=allocator["pool"]["gpu_capacity_tokens"],
+        host_enabled=allocator["pool"]["host_capacity_tokens"] > 0, model=run.model.name)
+    await physical.start()
+    await native.start()
+    measured_start = time.monotonic()
+    dispatcher = WorkloadDispatcher(workload) if workload is not None else None
+    if dispatcher is not None:
+        dispatcher.restore_completed(results.keys())
+
+    async def one_turn(sid, number, row, arrival=None, workload_arrival=None):
+        session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
+        start = time.monotonic() if arrival is None else arrival
+        query = row["input"][-1]["text"]
+        before = service.store.read_snapshot(session_id, provider.corpus_snapshot_id)
+        protocol = spec.get("protocol", "P3")
+        if protocol == "P1" and not before.raw_history:
+            given = row["input"][:-1]
+            reference_history = tuple(TurnRecord(index//2+1,
+                given[index]["text"], given[index+1]["text"]) for index in range(0, len(given), 2))
+            before = service.store.sync_history(session_id, reference_history, before.version)
+        decision = question_fn(row, before.raw_history) if question_fn is not None else None
+        if decision is not None:
+            query = decision.question
+        history = tuple(message for turn in before.raw_history for message in (
+            OnlineMessage("user", turn.user_text), OnlineMessage("assistant", turn.assistant_text)))
+        request_id = row["task_id"]
+        if (row.get("coverage_mode") or spec.get("supplied_documents",
+                dataset_name in {"loong", "long_dev", "multihop_dev"})):
+            supplied = tuple(make_evidence(context["text"], context["document_id"],
+                corpus_id=dataset_name, passage_id=context["document_id"],
+                version=context.get("version", "v1"),
+                source_uri=context.get("source") or f"{dataset_name}://{context['document_id']}",
+                title=context.get("title", "")) for context in row["contexts"])
+            metadata = {block.key: {key: context[key] for key in (
+                "document_family", "valid_from", "valid_to", "published_at", "applicability",
+                "table_id", "heading", "current", "version_order") if key in context}
+                for block, context in zip(supplied, row["contexts"], strict=True)}
+            async def retrieve(snapshot):
+                return await provider.retrieve_supplied(snapshot, query, request_id, supplied,
+                    source_metadata=metadata, coverage_scope=row.get("coverage_mode",
+                        spec.get("coverage_mode", "selected_sources")))
+        else:
+            async def retrieve(snapshot):
+                return await provider.retrieve(snapshot, query, request_id)
+        async def extend(plan, open_needs, claims):
+            return await provider.extend_for_plan(before, plan, open_needs, claims)
+        response = await service.serve_turn(session_id, query, request_id=request_id,
+            corpus_snapshot_id=provider.corpus_snapshot_id, evidence_provider=retrieve,
+            open_need_provider=extend)
+        end = time.monotonic()
+        attempt = service.store.get_attempt(response.attempt_id)
+        snapshot = service.store.get_snapshot(session_id)
+        blocks = {block.key: block for block in snapshot.archive}
+        selected = tuple(blocks[key] for key in sorted(attempt.plan.candidate.required_blocks))
+        turn = OnlineTurn(sid, request_id, row["turn"], row["Collection"], query, history,
+            tuple(OnlineContext(block.key.passage_id, block.text, block.source_uri,
+                                block.title) for block in selected), protocol,
+            query_context=attempt.query_context)
+        export_evaluation(turn, response.assistant_text, official_path=directory/"official.jsonl",
+            audit_path=directory/"audit.jsonl", visible_evidence_manifest=response.visible_evidence_manifest,
+            audit_evidence=tuple(blocks.values()), input_ids=attempt.plan.candidate.input_ids,
+            output_ids=response.output_ids, truncated=response.truncated,
+            citation_scope=response.citation_scope, measurement_kind="hardware")
+        trace = provider.traces.pop((session_id, request_id), {})
+        internal_ms = [step["elapsed_ms"] for step in response.step_metrics if "elapsed_ms" in step]
+        model_work_ms = (response.engine_elapsed_ms+sum(internal_ms)
+                         if response.engine_elapsed_ms is not None
+                         and all(value is not None for value in internal_ms) else None)
+        cost = {"complete_ms": (end-start)*1000,
+            "total_input_tokens": response.total_input_tokens,
+            "total_output_tokens": response.total_output_tokens,
+            "reader_input_tokens": response.reader_input_tokens,
+            "reader_output_tokens": response.reader_output_tokens,
+            "auxiliary_input_tokens": response.auxiliary_input_tokens,
+            "auxiliary_output_tokens": response.auxiliary_output_tokens,
+            "auxiliary_ms": response.auxiliary_model_ms,
+            "gpu_capacity_tokens": allocator["pool"]["gpu_capacity_tokens"],
+            "host_capacity_tokens": allocator["pool"]["host_capacity_tokens"],
+            "actual_prefill_tokens": response.total_prefill_tokens,
+            "actual_device_hit_tokens": response.total_device_hit_tokens,
+            "actual_host_loaded_tokens": response.total_host_loaded_tokens,
+            "online_compute_ms": (model_work_ms+response.auxiliary_model_ms
+                if model_work_ms is not None and response.auxiliary_model_ms is not None else None),
+            "online_compute_basis": "summed generation service elapsed and measured auxiliary pipeline time",
+            "gpu_gib_seconds": None, "host_gib_seconds": None}
+        value = {"method": method["id"], "dataset": dataset_name, "split": split,
+            "task_id": request_id, "conversation_id": sid, "turn": row["turn"],
+            "status": "completed", "question": query, "actual_history": to_jsonable(before.raw_history),
+            "history_origin": "author_reference_import" if protocol == "P1" else "model_actual",
+            "answer": response.assistant_text, "response": to_jsonable(response),
+            "task_state": trace.get("task_state"), "candidate_pool": trace.get("pool"),
+            "planning_trace": trace, "context_plan": to_jsonable(attempt.context_plan),
+            "reading_outcome": to_jsonable(attempt.reading_outcome), "metrics": {}, "cost": cost,
+            "request_window": [start, end], "record_number": number,
+            "measurement_segment_id": segment_id,
+            "generation_dir": str(directory.resolve())}
+        value["workload_arrival"] = workload_arrival
+        value["question_policy"] = to_jsonable(decision)
+        results[request_id] = value
+        windows[request_id] = (start, end)
+        write_json(directory/"records"/f"{number:06d}.json", value)
+        print(dumps({"method": method["id"], "dataset": dataset_name, "task": request_id,
+                     "complete_ms": response.complete_ms}), flush=True)
+
+    async def conversation(sid):
+        session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
+        for number, row in sorted(grouped[sid], key=lambda item: item[1]["turn"]):
+            if row["task_id"] in results:
+                continue
+            snapshot = service.store.read_snapshot(session_id, provider.corpus_snapshot_id)
+            workload_arrival = (await dispatcher.wait_turn(row, snapshot.raw_history)
+                                if dispatcher is not None else None)
+            arrival = time.monotonic() if dispatcher is not None else None
+            async with semaphore:
+                await one_turn(sid, number, row, arrival, workload_arrival)
+            if dispatcher is not None:
+                dispatcher.complete_turn(row["task_id"])
+        await service.close_session(session_id)
+
+    from bench.async_diagnostics import install_from_env, study_wait_state
+    async_dump = install_from_env(state_provider=lambda: study_wait_state(service, provider))
+    try:
+        async with asyncio.TaskGroup() as group:
+            for sid in conversations:
+                group.create_task(conversation(sid), name=f"study:{method['id']}:{dataset_name}:{split}:{sid}")
+    finally:
+        measured_end = time.monotonic()
+        await native.stop()
+        await physical.stop()
+        observation = native.observation()
+        memory_costs = attribute_physical(physical.samples, windows)
+        for task_id, window in windows.items():
+            results[task_id]["cost"].update(memory_costs[task_id])
+            raw_window = integrate_physical(physical.samples, *window)
+            results[task_id]["cost"].update({name: raw_window[name]
+                for name in ("gpu_peak_gib", "host_peak_gib")})
+            series, metadata = pool_series(observation, *window)
+            results[task_id]["native_resource_window"] = {**occupancy_integral(series), **metadata}
+            write_json(directory/"records"/f"{results[task_id]['record_number']:06d}.json", results[task_id])
+        segment = save_measurement_segment(directory, segment_id,
+            physical=physical.observation(), native=observation, batch={"start": measured_start, "end": measured_end,
+            "physical": integrate_physical(physical.samples, measured_start, measured_end),
+            "attribution": "physical interval occupancy divided across concurrently active requests",
+            "idle_cost": "included in batch physical integral, retained outside per-request attribution"})
+        write_json(segment/"generation_manifest.json", generation_manifest)
+        ordered = [results[key] for key in expected if key in results]
+        write_jsonl(directory/"results.unscored.jsonl", ordered)
+        references = []
+        for row in source_rows:
+            record = results.get(row["task_id"])
+            decision = record["question_policy"] if record is not None else None
+            if decision is None:
+                references.append(row)
+                continue
+            metadata = decision["metadata"]
+            actual = [message for turn in record["actual_history"] for message in (
+                {"speaker": "user", "text": turn["user_text"]},
+                {"speaker": "assistant", "text": turn["assistant_text"]})]
+            references.append({**row, "input": [*actual, {"speaker": "user", "text": record["question"]}],
+                "goal_conditions": metadata["goal_conditions"],
+                "offline_reference": metadata["offline_reference"],
+                "goal_id": decision["goal_id"], "policy_protocol": metadata["protocol"]})
+        write_jsonl(directory/"references.jsonl", references)
+        provider.close()
+        await service.aclose()
+        if async_dump is not None:
+            async_dump.close()
+        service.store.close()
+    return ordered
+
+
+async def evaluate(config, matrix, output, *, split, frozen=None, methods=None, datasets=None,
+                   concurrency=1, limit_conversations=None, score=True, workload=None, question_fn=None):
+    from bench.study_scoring import score_dataset
+
+    output = Path(output)
+    write_json(output/"effective_config.json", config)
+    selected_methods = matrix["methods"]
+    if frozen is not None:
+        selected_methods = frozen["test_methods"]
+    if methods is not None:
+        selected_methods = [m for m in selected_methods if m["id"] in methods]
+    results = []
+    for method in selected_methods:
+        for name, dataset in matrix["datasets"].items():
+            if split == "dev" and dataset.get("evaluation_only"):
+                continue
+            if datasets is not None and name not in datasets:
+                continue
+            directory = output/method["id"]/name
+            rows = await run_dataset(config, matrix, method, name, split, directory,
+                concurrency=concurrency, limit_conversations=limit_conversations,
+                workload=workload, question_fn=question_fn)
+            if score:
+                rows = await score_dataset(config, dataset, rows, directory)
+            results.extend(rows)
+            write_jsonl(output/"results.jsonl", results)
+    return results
+
+
+def freeze(config, matrix, rows, path):
+    selected = select_development(matrix, rows)
+    method = next(m for m in matrix["methods"] if m["id"] == selected["method"])
+    test_ids = [*matrix["selection"]["test_comparators"], method["id"]]
+    by_id = {m["id"]: m for m in matrix["methods"]}
+    test_methods = [by_id[identity] for identity in dict.fromkeys(test_ids)]
+    matrix = declare_cohorts(matrix, splits=("test",))
+    frozen = {"schema_version": 1, "baseline_commit": BASELINE, "method_spec": method,
+        "test_methods": test_methods,
+        "selected": selected, "matrix": matrix, "config": config,
+        "learning": config["study"].get("learning", True),
+        "assets": {"task_backend": config["task_model"]["mode"],
+                   "support_backend": config["support_model"]["mode"],
+                   "task": (config["task_model"]["asset"]
+                            if config["task_model"]["mode"] == "trained" else None),
+                   "support": (config["support_model"]["asset"]
+                               if config["support_model"]["mode"] == "trained" else None)},
+        "development_results": str(Path(path).parent/"dev"/"results.jsonl")}
+    write_json(path, frozen)
+    return frozen
+
+
+def report(frozen, rows, directory):
+    directory = Path(directory)
+    summaries = summarize_methods(frozen["matrix"], rows, split="test")
+    paired = paired_comparisons(frozen["matrix"], rows)
+    write_json(directory/"summaries.json", summaries)
+    write_json(directory/"paired_intervals.json", paired)
+    text = ["# ContextKV 任务状态驱动证据规划与预算化阅读", "",
+            f"评审基线：`{BASELINE}`。冻结方案：`{frozen['method_spec']['id']}`。", "",
+            f"新增训练：{frozen['learning']}。任务后端：{frozen['assets']['task_backend']}；"
+            f"支持后端：{frozen['assets']['support_backend']}。", "",
+            "| 方法 | 工程 Q | 状态 |", "|---|---:|---|"]
+    for method, summary in summaries.items():
+        text.append(f"| {method} | {summary.get('quality')} | {summary.get('eligible')} |")
+    text += ["", "## 原始指标与题集", "",
+        "| 方法 | 轨道 | 预定 | 完成 | 主指标成功评分 | 主指标 | 原始分数 |",
+        "|---|---|---:|---:|---:|---|---:|"]
+    for method, summary in summaries.items():
+        for name, track in summary["datasets"].items():
+            text.append(f"| {method} | {name} | {track['planned']} | {track['completed']} | "
+                f"{track['scored']} | {track['primary_metric']} | {track['primary_score']} |")
+    text += ["", "## 完整在线成本", "",
+        "| 方法 | 平均响应 ms | P95 ms | 全模型输入 | 全模型输出 | 辅助输入 | 辅助输出 | GPU GiB·s | Host GiB·s |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    for method, summary in summaries.items():
+        cost = summary["cost"]
+        fields = ("mean_complete_ms", "p95_complete_ms", "total_input_tokens", "total_output_tokens",
+                  "auxiliary_input_tokens", "auxiliary_output_tokens", "gpu_gib_seconds", "host_gib_seconds")
+        text.append("| "+method+" | "+" | ".join(str(cost[field]) for field in fields)+" |")
+    mechanism = {}
+    for method in summaries:
+        selected = [row for row in rows if row["method"] == method]
+        responses = [row["response"] for row in selected]
+        mechanism[method] = {"actions": dict(Counter(response["action"] for response in responses)),
+            "read_steps": sum(response["read_count"] for response in responses),
+            "reduce_steps": sum(response["reduce_count"] for response in responses),
+            "truncated_answers": sum(response["truncated"] for response in responses),
+            "error_attribution": dict(Counter(row.get("error_attribution", "unannotated") for row in selected))}
+    write_json(directory/"mechanisms.json", mechanism)
+    text += ["", "## 机制与误差", "",
+        "逐题步骤、实际动作、截断及人工错误归因计数保存在 `mechanisms.json`。", "",
+        "| 方法 | READ | REDUCE | 动作计数 | 截断 |", "|---|---:|---:|---|---:|"]
+    for method, value in mechanism.items():
+        text.append(f"| {method} | {value['read_steps']} | {value['reduce_steps']} | "
+                    f"{value['actions']} | {value['truncated_answers']} |")
+    text += ["", "## 配对比较与开发消融", "",
+        "`paired_intervals.json` 按会话或文档任务重采样，保留原始指标单位及成本差。"
+        "等成本标记同时要求计算量与完整响应落入预定匹配区间。", "",
+        "冻结文件保存全部开发方案的质量、完整成本、预算资格与最终选择。"
+        "GPU/Host 物理积分按并发请求分摊，空闲保留占用在各 `measurements/*/batch_cost.json` 中记录。", "",
+        "评分模型调用成本保存在每组 `scoring/manifest.json`，与在线系统成本分开。", ""]
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory/"report.md").write_text("\n".join(text))
+    return {"report": str((directory/"report.md").resolve()), "summaries": summaries,
+            "paired_intervals": paired}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("prepare", "workloads", "rollout", "evaluate", "freeze", "report"))
+    parser.add_argument("--config", default="configs/study.yaml")
+    parser.add_argument("--matrix", default="configs/study_matrix.yaml")
+    parser.add_argument("--split", choices=("train", "dev", "test"), default="dev")
+    parser.add_argument("--frozen")
+    parser.add_argument("--results")
+    parser.add_argument("--output")
+    parser.add_argument("--methods", nargs="+")
+    parser.add_argument("--datasets", nargs="+")
+    parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--limit-conversations", type=int)
+    parser.add_argument("--limit-turns", type=int)
+    parser.add_argument("--unscored", action="store_true")
+    parser.add_argument("--workload-plan")
+    parser.add_argument("--goal-policy")
+    args = parser.parse_args(argv)
+    config = yaml.safe_load(Path(args.config).read_text())
+    matrix = yaml.safe_load(Path(args.matrix).read_text())
+    root = Path(config["study"]["output_dir"])
+    if args.command == "prepare":
+        result = prepare(config, matrix)
+    elif args.command == "workloads":
+        from bench.study_workloads import prepare_workloads
+        result = prepare_workloads(config, matrix)
+    elif args.command == "rollout":
+        from training.task_rollout import run_actual_rollouts
+        result = asyncio.run(run_actual_rollouts(config, min_conversations=config["training"]["min_rollout_conversations"],
+            min_turns=config["training"]["min_rollout_turns"], limit_turns=args.limit_turns,
+            concurrency=args.concurrency))
+    elif args.command == "evaluate":
+        from bench.study_workloads import read_workload_manifest, load_goal_policy
+        workload = read_workload_manifest(args.workload_plan) if args.workload_plan else None
+        goal_policy = (load_goal_policy(args.goal_policy,
+            expected_sha256=workload.goal_policy_sha256 if workload else None) if args.goal_policy else None)
+        frozen = json.loads(Path(args.frozen).read_text()) if args.frozen else None
+        if frozen:
+            config, matrix = frozen["config"], frozen["matrix"]
+        else:
+            if args.split == "dev" and matrix["selection"].get("include_ablations", False):
+                from bench.study_jobs import development_variants
+                matrix = {**matrix, "methods": development_variants(matrix)}
+            matrix = declare_cohorts(matrix, splits=(args.split,), datasets=args.datasets)
+        output = Path(args.output or root/args.split)
+        write_json(output/"matrix.json", matrix)
+        result = asyncio.run(evaluate(config, matrix, output, split=args.split, frozen=frozen,
+            methods=args.methods, datasets=args.datasets, concurrency=args.concurrency,
+            limit_conversations=args.limit_conversations, score=not args.unscored,
+            workload=workload, question_fn=goal_policy.question_fn if goal_policy else None))
+        result = {"rows": len(result), "output": str(output.resolve())}
+    elif args.command == "freeze":
+        rows = read_jsonl(args.results)
+        recorded = Path(args.results).parent/"matrix.json"
+        matrix = json.loads(recorded.read_text())
+        config = json.loads((Path(args.results).parent/"effective_config.json").read_text())
+        result = freeze(config, matrix, rows, args.output or root/"frozen.json")
+    else:
+        frozen = json.loads(Path(args.frozen).read_text())
+        rows = read_jsonl(args.results or root/"test"/"results.jsonl")
+        result = report(frozen, rows, args.output or root/"report")
+    print(dumps(result))
+
+
+if __name__ == "__main__":
+    main()

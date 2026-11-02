@@ -1,0 +1,11 @@
+reader_curriculum:
+  parent_training_config: configs/reader_r1.yaml
+  source_data_dir: runs/study/reader-r1-data
+  output_dir: runs/study/reader-curriculum-round2
+  reader_output_dir: models/study-reader-r1-curriculum-round2
+  reader_merged_dir: models/study-reader-r1-curriculum-round2-merged
+  initial_adapter: models/study-reader-r1/adapter
+  maximum_numeric_pairs: 128
+  numeric_delta: 7
+  maximum_constructed_cases: 8
+  constructed_excerpt_characters: 1200

@@ -8,7 +8,7 @@ from .cost_model import CostModel
 from .schema import CacheQuoteBatch, NoFeasiblePlan, Plan, PromptCandidate, SessionSnapshot
 
 
-COST_SELECTION_REASONS = frozenset({"cost_saving", "expected_cost", "native_kv_tie_break", "context_size_tie_break"})
+COST_SELECTION_REASONS = frozenset({"cost_saving", "expected_cost", "native_kv_tie_break", "context_size_tie_break", "quality_complete_cost"})
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,10 @@ class PlannerKnobs:
     period: int = 4
     warm_ratio: float = .5
     redundancy_threshold: float = .4
+    lambda_time: float = 1.0
+    lambda_gpu: float = 0.0
+    lambda_host: float = 0.0
+    max_complete_ms: float | None = None
 
     def __post_init__(self) -> None:
         supported = {"cost", "always_append", "always_rebuild", "fixed_threshold", "stable_layout", "normal_rag", "fixed_period", "warm_idle", "contextpilot", "redundancy_threshold"}
@@ -104,33 +108,66 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
                 raise ValueError("quote does not describe candidate input")
             if candidate.fingerprint != quotes.fingerprint:
                 raise ValueError("quote/generation fingerprint mismatch")
-    by_action = {c.action:c for c in valid}
-    append, rebuild = by_action.get("APPEND"), by_action.get("REBUILD")
-    if session.must_rebuild or session.force_new_epoch_for_recovery or session.history_sync_pending:
-        return Plan(rebuild, reason="forced_rebuild") if rebuild else NoFeasiblePlan("required_rebuild_unavailable")
+    forced = session.must_rebuild or session.force_new_epoch_for_recovery or session.history_sync_pending
+    if forced:
+        valid = [c for c in valid if c.action == "REBUILD"]
+        if not valid:
+            return NoFeasiblePlan("required_rebuild_unavailable")
     if len(valid) == 1:
         return Plan(valid[0], reason="only_feasible_candidate")
     if quotes is None and knobs.strategy in {"cost", "warm_idle"}:
         raise ValueError(f"{knobs.strategy} comparison requires a quote batch")
+    def fixed_choice(strategy):
+        groups = {}
+        for candidate in valid:
+            group = (candidate.context_plan_id, candidate.evidence_set_id,
+                     candidate.working_history_id, candidate.layout_id)
+            groups.setdefault(group, {})[candidate.action] = candidate
+        selected = []
+        for actions in groups.values():
+            if len(actions) == 1:
+                selected.append(next(iter(actions.values())))
+            else:
+                selected.append(_fixed(actions.get("APPEND"), actions.get("REBUILD"),
+                                       strategy, knobs, session, quotes))
+        return min(selected, key=lambda c: (-c.quality_prediction, len(c.input_ids), c.candidate_id))
+
     if knobs.strategy != "cost":
-        chosen = _fixed(append,rebuild,knobs.strategy,knobs,session,quotes)
-        return Plan(chosen, reason=knobs.strategy,quote_seq=quotes.observed_seq if quotes else None)
+        chosen = fixed_choice("always_rebuild" if forced else knobs.strategy)
+        return Plan(chosen, reason="forced_rebuild" if forced else knobs.strategy,
+                    quote_seq=quotes.observed_seq if quotes else None)
     estimates = tuple(model.predict_native(c,by_id[c.candidate_id],session,
                       batch=quotes,concurrency=concurrency or knobs.concurrency,
-                      control_ms=control_ms[c.action] if isinstance(control_ms, Mapping) else control_ms,
+                      control_ms=(control_ms[c.candidate_id] if c.candidate_id in control_ms else
+                                  control_ms[c.action]) if isinstance(control_ms, Mapping) else control_ms,
                       queue_ms=queue_ms) for c in valid)
     if not all(e.calibrated if e.selection_eligible is None else e.selection_eligible for e in estimates):
-        return Plan(_fixed(append,rebuild,knobs.fallback_strategy,knobs,session),
+        return Plan(fixed_choice(knobs.fallback_strategy),
                     predicted=estimates, quote_seq=quotes.observed_seq,
                     reason="uncalibrated_cost_fallback")
     by_estimate = {e.candidate_id:e for e in estimates}
-    a, r = by_estimate[append.candidate_id], by_estimate[rebuild.candidate_id]
-    saving = a.cost-r.cost
-    if saving:
-        chosen = rebuild if saving > 0 else append
-        reason = "cost_saving"
-    else:
+    eligible = [c for c in valid if knobs.max_complete_ms is None or
+                by_estimate[c.candidate_id].cost <= knobs.max_complete_ms]
+    if not eligible:
+        return NoFeasiblePlan("complete_latency_budget")
+
+    def objective(candidate):
+        return (candidate.quality_prediction - knobs.lambda_time*by_estimate[candidate.candidate_id].cost
+                - knobs.lambda_gpu*candidate.predicted_gpu_gib_ms
+                - knobs.lambda_host*candidate.predicted_host_gib_ms)
+
+    best = max(objective(c) for c in eligible)
+    tied = [c for c in eligible if objective(c) == best]
+    chosen = min(tied, key=lambda c: (len(c.input_ids), c.action == "REBUILD", c.candidate_id))
+    reason = "quality_complete_cost" if any(c.context_plan_id for c in valid) else "cost_saving"
+    if len(tied) == 2 and {c.action for c in tied} == {"APPEND", "REBUILD"}:
+        append = next(c for c in tied if c.action == "APPEND")
+        rebuild = next(c for c in tied if c.action == "REBUILD")
         chosen, reason = _resource_tie_break(append, rebuild, quotes, by_id, by_estimate)
+    saving = max(e.cost for e in estimates) - by_estimate[chosen.candidate_id].cost
+    if len(valid) == 2 and {c.action for c in valid} == {"APPEND", "REBUILD"}:
+        saving = (next(by_estimate[c.candidate_id].cost for c in valid if c.action == "APPEND")
+                  - next(by_estimate[c.candidate_id].cost for c in valid if c.action == "REBUILD"))
     return Plan(chosen, predicted=estimates, quote_seq=quotes.observed_seq,
                 reason=reason,
                 predicted_saving_ms=saving)

@@ -175,6 +175,9 @@ class BM25SRetriever:
         order = deterministic_top_k(scores, top_k, self._np)
         return tuple(replace(self._contexts[int(i)], score=float(scores[i])) for i in order)
 
+    def candidate_search(self, query, *, top_k=50):
+        return self.retrieve([query], top_k=top_k)
+
     def retrieve_turn(self, turn: OnlineTurn) -> OnlineTurn:
         if turn.protocol != "P3":
             raise ValueError("real retrieval requires a P3 turn")

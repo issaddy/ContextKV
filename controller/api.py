@@ -53,7 +53,13 @@ class QueryInput(BaseModel):
     from_corpus_snapshot_id: str | None = Field(default=None, min_length=1)
 
 
-def _load_retrieval(service, *, retriever_index, retriever_config, evidence_corpus, corpus_id):
+def _load_retrieval(service, *, retriever_index, retriever_config, evidence_corpus, corpus_id,
+                    study_config=None):
+    if study_config is not None:
+        import yaml
+        from pathlib import Path
+        from adapters.study_retrieval import create_study_retriever
+        return create_study_retriever(yaml.safe_load(Path(study_config).read_text()), service.template)
     from adapters.corpus import CorpusIndex
     from adapters.retriever_factory import create_retriever
 
@@ -72,10 +78,10 @@ def _load_retrieval(service, *, retriever_index, retriever_config, evidence_corp
 def create_app(controller: Controller | None = None, config: RunConfig | None = None, *,
                retrieval: ServingRetriever | None = None, retriever_index: str | None = None,
                retriever_config: str | None = None, evidence_corpus: str | None = None,
-               corpus_id: str = "mtrag") -> FastAPI:
-    if retriever_index and retriever_config:
-        raise ValueError("choose retriever_index or retriever_config")
-    configured = bool(retriever_index or retriever_config)
+               corpus_id: str = "mtrag", study_config: str | None = None) -> FastAPI:
+    if sum(bool(x) for x in (retriever_index, retriever_config, study_config)) > 1:
+        raise ValueError("choose one retrieval configuration")
+    configured = bool(retriever_index or retriever_config or study_config)
     if retrieval is not None and (configured or evidence_corpus):
         raise ValueError("choose an existing serving retriever or retrieval configuration")
     if evidence_corpus and not configured:
@@ -83,6 +89,11 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
     if not corpus_id.strip():
         raise ValueError("corpus_id must be nonempty")
     resolved_config = (config or RunConfig()) if controller is None else None
+    if study_config is not None and resolved_config is not None:
+        import yaml
+        from pathlib import Path
+        from .config import apply_study_config
+        resolved_config = apply_study_config(resolved_config, yaml.safe_load(Path(study_config).read_text()))
     service = controller if controller is not None else create_controller(resolved_config)
     active_requests = 0
     requests_drained = asyncio.Event()
@@ -155,7 +166,7 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
             if configured:
                 loader = asyncio.create_task(asyncio.to_thread(_load_retrieval, service,
                     retriever_index=retriever_index, retriever_config=retriever_config,
-                    evidence_corpus=evidence_corpus, corpus_id=corpus_id))
+                    evidence_corpus=evidence_corpus, corpus_id=corpus_id, study_config=study_config))
                 app.state.retrieval = await asyncio.shield(loader)
             if app.state.retrieval is not None:
                 service.events.emit("retrieval_configured", retrieval=app.state.retrieval.manifest)
@@ -238,10 +249,18 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
                 service.store.get_snapshot(session_id)
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail="session not found") from exc
+        from adapters.study_retrieval import StudyEvidenceProvider
+        open_need_provider = None
+        if isinstance(adapter, StudyEvidenceProvider):
+            async def extend(plan, open_needs, claims):
+                snapshot = service.store.get_snapshot(session_id)
+                return await adapter.extend_for_plan(snapshot, plan, open_needs, claims)
+            open_need_provider = extend
         try:
             return to_jsonable(await service.serve_turn(session_id, body.query,
                 request_id=body.request_id, corpus_snapshot_id=adapter.corpus_snapshot_id,
                 evidence_provider=lambda snapshot: adapter.retrieve(snapshot, body.query, body.request_id),
+                open_need_provider=open_need_provider,
                 from_corpus_snapshot_id=body.from_corpus_snapshot_id))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

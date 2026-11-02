@@ -22,6 +22,7 @@ from .schema import (ClientTiming, CompletionReceipt, CostEstimate, EvidenceBloc
 from .serialization import dumps
 from .session_store import (Attempt, IdempotencyConflict, PendingAttempt, SessionStore, StoreError, VersionConflict)
 from .templates import ByteTemplate, candidate_request
+from .context_schema import ContextPlan
 
 
 class ContextOverflow(ValueError):
@@ -34,6 +35,9 @@ class EvidenceSelection:
     evidence: tuple[EvidenceBlock, ...]
     retrieval_priority: tuple[EvidenceKey, ...]
     query_context: QueryContext | None = None
+    context_plans: tuple[ContextPlan, ...] = ()
+    open_need_provider: Callable | None = None
+    auxiliary_usage: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,24 @@ class TurnResponse:
     retrieval_ms: float | None = None
     visible_evidence_manifest: tuple[EvidenceSpan, ...] = ()
     citation_scope: tuple[str, ...] = ()
+    read_count: int = 0
+    reduce_count: int = 0
+    total_input_tokens: int | None = 0
+    total_output_tokens: int | None = 0
+    auxiliary_model_ms: float | None = 0.0
+    internal_first_token_ms: float | None = None
+    step_metrics: tuple[dict, ...] = ()
+    reading_ms: float = 0.0
+    total_device_hit_tokens: int = 0
+    total_host_loaded_tokens: int = 0
+    total_prefill_tokens: int = 0
+    reader_input_tokens: int = 0
+    reader_output_tokens: int = 0
+    auxiliary_input_tokens: int | None = 0
+    auxiliary_output_tokens: int | None = 0
+    auxiliary_usage: dict | None = None
+    online_token_budget_limit: int | None = None
+    online_token_budget_verified: bool | None = None
 
 
 class Controller:
@@ -75,7 +97,7 @@ class Controller:
                  policy: CandidatePolicy | None = None, knobs: PlannerKnobs | None = None,
                  cost_model: CostModel | None = None, events: EventLog | None = None,
                  shadow: bool = False, epoch_retirement: bool = True,
-                 online_calibration: bool = False):
+                 online_calibration: bool = False, extend_open_needs=None, prefix_settings=None):
         self.store, self.engine = store, engine
         self.template = template or ByteTemplate()
         self.policy = policy or CandidatePolicy()
@@ -86,6 +108,11 @@ class Controller:
         self.shadow = shadow
         self.epoch_retirement = epoch_retirement
         self.online_calibration = online_calibration
+        self.extend_open_needs = extend_open_needs
+        self.observe_prefix = None
+        if prefix_settings is not None and prefix_settings["mode"] != "native":
+            from .prefix_retention import PrefixReadObserver
+            self.observe_prefix = PrefixReadObserver(store, engine, self.template, prefix_settings)
         self._active_generations = 0
         self._postplan_control_ms = {action: deque(maxlen=32) for action in ("APPEND", "REBUILD")}
         self._calibration_identity = None
@@ -205,7 +232,7 @@ class Controller:
             raise EngineError("RECEIPT_IDENTITY_MISMATCH")
         if any(not isinstance(token, int) or isinstance(token, bool) or token < 0 for token in result.output_ids):
             raise EngineError("INVALID_OUTPUT_IDS")
-        if len(result.output_ids) > self.policy.max_new_tokens:
+        if len(result.output_ids) > (candidate.output_budget or self.policy.max_new_tokens):
             raise EngineError("OUTPUT_BUDGET_EXCEEDED")
 
     def _response(self, attempt: Attempt, *, elapsed_ms=None, replay=False,
@@ -214,6 +241,21 @@ class Controller:
         receipt = result.receipt
         prediction = next((e for e in plan.predicted if e.candidate_id == plan.candidate.candidate_id), None)
         ttft = (timing.t_first-timing.t_arrive)*1000 if timing and timing.t_first is not None else None
+        steps = attempt.reading_outcome.steps if attempt.reading_outcome else ()
+        metrics = tuple({"step_id": step.step_id, "kind": step.task.kind,
+                         "input_tokens": len(step.input_ids), "output_tokens": len(step.output_ids),
+                         **step.metrics} for step in steps)
+        internal_first = next((step.metrics["first_token_from_arrival_ms"] for step in steps
+                               if step.metrics.get("first_token_from_arrival_ms") is not None), None)
+        reader_input = len(plan.candidate.input_ids)+sum(len(step.input_ids) for step in steps)
+        reader_output = len(result.output_ids)+sum(len(step.output_ids) for step in steps)
+        auxiliary_input = attempt.auxiliary_usage["input_tokens"] if attempt.auxiliary_usage is not None else 0
+        auxiliary_output = attempt.auxiliary_usage["output_tokens"] if attempt.auxiliary_usage is not None else 0
+        total_input = reader_input+auxiliary_input if auxiliary_input is not None else None
+        total_output = reader_output+auxiliary_output if auxiliary_output is not None else None
+        token_limit = attempt.context_plan.budget.max_total_tokens if attempt.context_plan else None
+        budget_verified = (total_input+total_output <= token_limit
+            if token_limit is not None and total_input is not None and total_output is not None else None)
         return TurnResponse(attempt.session_id, attempt.request_id, attempt.attempt_id, result.text,
                             plan.candidate.action, plan.reason, epoch.epoch_no, attempt.expected_version + 1,
                             result.output_ids, len(plan.candidate.input_ids), len(result.output_ids),
@@ -225,18 +267,41 @@ class Controller:
                             retrieval_ms=attempt.retrieval_ms,
                             visible_evidence_manifest=plan.candidate.evidence_spans,
                             citation_scope=tuple(ref for ref,key in plan.candidate.reference_map
-                                                 if key in plan.candidate.required_blocks))
+                                                 if key in plan.candidate.required_blocks),
+                            read_count=sum(step.task.kind == "READ" for step in steps),
+                            reduce_count=sum(step.task.kind == "REDUCE" for step in steps),
+                            total_input_tokens=total_input,
+                            total_output_tokens=total_output,
+                            auxiliary_model_ms=(attempt.auxiliary_usage["compute_ms"] if attempt.auxiliary_usage is not None
+                                else sum(value for _, value in attempt.context_plan.auxiliary_ms)
+                                if attempt.context_plan else 0),
+                            internal_first_token_ms=internal_first, step_metrics=metrics,
+                            reading_ms=attempt.reading_elapsed_ms,
+                            total_device_hit_tokens=receipt.actual_device_hit_tokens+sum(
+                                step.metrics.get("actual_device_hit_tokens", 0) for step in steps),
+                            total_host_loaded_tokens=receipt.actual_host_loaded_tokens+sum(
+                                step.metrics.get("actual_host_loaded_tokens", 0) for step in steps),
+                            total_prefill_tokens=receipt.actual_prefill_tokens+sum(
+                                step.metrics.get("actual_prefill_tokens", 0) for step in steps),
+                            reader_input_tokens=reader_input, reader_output_tokens=reader_output,
+                            auxiliary_input_tokens=auxiliary_input, auxiliary_output_tokens=auxiliary_output,
+                            auxiliary_usage=attempt.auxiliary_usage,
+                            online_token_budget_limit=token_limit, online_token_budget_verified=budget_verified)
 
     async def serve_turn(self, session_id: str, query: str, evidence: tuple[EvidenceBlock, ...] = (), *,
                          request_id: str | None = None, corpus_snapshot_id: str = "demo-v1",
                          reference_history: tuple[TurnRecord, ...] | None = None,
                          retrieval_priority: tuple[EvidenceKey, ...] | None = None,
                          query_context: QueryContext | None = None,
+                         context_plans: tuple[ContextPlan, ...] = (),
+                         open_need_provider: Callable | None = None,
+                         auxiliary_usage: dict | None = None,
                          evidence_provider: Callable[[SessionSnapshot], Awaitable[EvidenceSelection]] | None = None,
                          from_corpus_snapshot_id: str | None = None) -> TurnResponse:
         if not session_id or not query.strip():
             raise ValueError("session_id and query must be nonempty")
         evidence = tuple(evidence)
+        context_plans = tuple(context_plans)
         if evidence_provider is not None and (evidence or reference_history is not None or retrieval_priority is not None
                                              or query_context is not None):
             raise ValueError("retrieved queries cannot also supply evidence, reference history or retrieval priority")
@@ -249,12 +314,15 @@ class Controller:
                    (query, evidence, corpus_snapshot_id, reference_history, retrieval_priority))
         if query_context is not None:
             content = (*content, query_context)
+        if context_plans:
+            content = (*content, context_plans)
         request_hash = hashlib.sha256(dumps(content).encode()).hexdigest()
         arrived = time.monotonic()
         async with self._lock(session_id):
             entered = time.monotonic()
             self.events.emit("turn_received", business_session_id=session_id, request_id=request_id)
             previous = self.store.find_request(session_id, request_id)
+            resume_context_plan = None
             if previous:
                 matches = previous.request_hash == request_hash
                 if not matches and evidence_provider is not None:
@@ -270,7 +338,9 @@ class Controller:
                     return self._response(previous, replay=True)
                 if previous.stage == "FAILED":
                     raise StoreError("Previous attempt failed; use a new request_id for an explicit retry")
-            if self.store.pending_attempt(session_id):
+                if previous.stage == "STARTED":
+                    resume_context_plan = self.store.context_plan(previous.attempt_id)
+            if self.store.pending_attempt(session_id) and resume_context_plan is None:
                 await self._recover(session_id)
                 previous = self.store.find_request(session_id, request_id)
                 if previous and previous.stage == "COMMITTED":
@@ -290,14 +360,26 @@ class Controller:
                                  raw_history_version=snap.raw_history_version, pending=snap.history_sync_pending)
             working_snap = (replace(snap, corpus_snapshot_id=corpus_snapshot_id, must_rebuild=True)
                             if migrating else snap)
-            attempt = self.store.begin_attempt(session_id, request_id, request_hash, query, snap.version)
+            attempt = previous if resume_context_plan is not None else self.store.begin_attempt(
+                session_id, request_id, request_hash, query, snap.version)
             if attempt.stage == "COMMITTED":
                 return self._response(attempt, replay=True)
             if attempt.stage == "FAILED":
                 raise StoreError("Previous attempt failed; use a new request_id")
             retrieval_ms = None
+            retrieval_segment_ms = 0.0
+            reading_elapsed_ms = 0.0
+            reading_segment_ms = 0.0
+            reading_outcome = None
             try:
-                if evidence_provider is not None:
+                if resume_context_plan is not None:
+                    context_plans = (resume_context_plan,)
+                    evidence = resume_context_plan.selected_set.source_blocks
+                    query_context = QueryContext(resume_context_plan.task_state.query or query,
+                        "task_state", task_state=resume_context_plan.task_state)
+                    retrieval_ms = attempt.retrieval_ms
+                    auxiliary_usage = attempt.auxiliary_usage
+                elif evidence_provider is not None:
                     retrieval_started = time.monotonic()
                     try:
                         selection = await evidence_provider(working_snap)
@@ -307,20 +389,54 @@ class Controller:
                                          retrieval_ms=(time.monotonic()-retrieval_started)*1000)
                         raise
                     retrieval_ms = (time.monotonic()-retrieval_started)*1000
+                    retrieval_segment_ms = retrieval_ms
                     evidence = tuple(selection.evidence)
                     retrieval_priority = tuple(selection.retrieval_priority)
                     query_context = selection.query_context
+                    context_plans = selection.context_plans
+                    open_need_provider = selection.open_need_provider
+                    auxiliary_usage = (selection.auxiliary_usage if selection.auxiliary_usage is not None
+                        else {"input_tokens": None, "output_tokens": None, "compute_ms": None, "models": []})
+                    attempt = self.store.save_retrieval(attempt.attempt_id, evidence=evidence,
+                        retrieval_priority=retrieval_priority, query_context=query_context,
+                        retrieval_ms=retrieval_ms, auxiliary_usage=auxiliary_usage)
+                elif auxiliary_usage is not None:
+                    attempt = self.store.save_retrieval(attempt.attempt_id, evidence=evidence,
+                        retrieval_priority=retrieval_priority, query_context=query_context,
+                        retrieval_ms=retrieval_ms, auxiliary_usage=auxiliary_usage)
                 info = await self.engine.info()
                 if info.fingerprint != self.template.fingerprint:
                     raise EngineError("FINGERPRINT_MISMATCH")
+                identity = (info.engine_restart_id, info.cache_config_hash)
+                if (identity != self._calibration_identity
+                        and (self.cost_model.prefill_points or self.cost_model.decode_points
+                             or self.cost_model.step_models)):
+                    scope = self.cost_model.check_calibration_scope(info)
+                    self.events.emit("cost_calibration_scope", **scope)
+                    self._calibration_identity = identity
                 recovery = snap.current_epoch is not None and snap.current_epoch.engine_restart_id != info.engine_restart_id
                 planning_snap = (replace(working_snap, force_new_epoch_for_recovery=True, must_rebuild=True)
                                  if recovery else working_snap)
+                if context_plans and self.knobs.strategy == "cost":
+                    from .context_cost import quote_read_costs
+                    completed_steps = tuple(record for stage, record in
+                        self.store.execution_steps_with_stage(attempt.attempt_id) if stage == "COMPLETE")
+                    context_plans, read_cost_trace = await quote_read_costs(context_plans,
+                        planning_snap, self.template, self.engine, self.cost_model, completed_steps=completed_steps)
+                    self.events.emit("reading_plan_cost_quotes", attempt_id=attempt.attempt_id,
+                                     trace=read_cost_trace)
                 measure_redundancy = "redundancy_threshold" in {self.knobs.strategy, self.knobs.fallback_strategy}
-                candidates = build_candidates(planning_snap, query, evidence, self.policy, self.template,
-                                               retrieval_priority=retrieval_priority,
-                                               query_context=query_context,
-                                               measure_evidence_redundancy=measure_redundancy)
+                def compile_candidates(snapshot, plans, outcome=None):
+                    if plans:
+                        from .candidates import build_plan_candidates
+                        return tuple(candidate for context_plan in plans for candidate in
+                            build_plan_candidates(snapshot, query, context_plan, self.template,
+                                                  policy=self.policy, outcome=outcome))
+                    return build_candidates(snapshot, query, evidence, self.policy, self.template,
+                        retrieval_priority=retrieval_priority, query_context=query_context,
+                        measure_evidence_redundancy=measure_redundancy)
+
+                candidates = compile_candidates(planning_snap, context_plans)
                 valid = tuple(c for c in candidates if c.feasible)
                 if not valid:
                     raise ContextOverflow("shared_context_policy_overflow: required evidence and full QA exceed budget")
@@ -330,24 +446,15 @@ class Controller:
                     # At most one re-quote after a restart; native admission remains authoritative.
                     info = await self.engine.info()
                     planning_snap = replace(working_snap, force_new_epoch_for_recovery=True, must_rebuild=True)
-                    candidates = build_candidates(planning_snap, query, evidence, self.policy, self.template,
-                                                   retrieval_priority=retrieval_priority,
-                                                   query_context=query_context,
-                                                   measure_evidence_redundancy=measure_redundancy)
+                    candidates = compile_candidates(planning_snap, context_plans)
                     valid = tuple(c for c in candidates if c.feasible)
                     quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
                     if quotes.engine_restart_id != info.engine_restart_id:
                         raise EngineError("UNSTABLE_RESTART")
-                identity = (info.engine_restart_id, info.cache_config_hash)
-                if (identity != self._calibration_identity
-                        and (self.cost_model.prefill_points or self.cost_model.decode_points)):
-                    scope = self.cost_model.check_calibration_scope(info)
-                    self.events.emit("cost_calibration_scope", **scope)
-                    self._calibration_identity = identity
                 # The planner validates this batch once before selecting a candidate.
                 pressure = (max(1, quotes.active_requests + (quotes.queued_requests or 0) + 1) if quotes is not None
                             and quotes.active_requests is not None else max(1, self._active_generations + 1))
-                spent_control_ms = (time.monotonic()-entered)*1000 - (retrieval_ms or 0)
+                spent_control_ms = (time.monotonic()-entered)*1000 - retrieval_segment_ms
                 observed = [value for values in self._postplan_control_ms.values() for value in values]
                 default_postplan = statistics.mean(observed) if observed else 0.0
                 # Preparation/serialization costs differ between retaining and
@@ -366,6 +473,67 @@ class Controller:
                     plan = choose_plan(candidates, quotes, self.cost_model, planning_snap,
                                        replace(self.knobs, strategy=self.knobs.fallback_strategy),
                                        concurrency=pressure, control_ms=planning_control_ms)
+                selected_context_plan = None
+                if context_plans:
+                    from .execution import ReadingExecutor, merge_auxiliary_usage, require_online_tokens
+                    selected_context_plan = next(context_plan for context_plan in context_plans
+                        if context_plan.plan_id == plan.candidate.context_plan_id)
+                    reading_started = time.monotonic()
+                    executor = ReadingExecutor(self.store, self.engine, self.template,
+                        extend_open_needs=open_need_provider or self.extend_open_needs, events=self.events,
+                        request_arrived=arrived, observe_prefix=self.observe_prefix)
+                    try:
+                        reading_outcome = await executor.execute_reads(attempt.attempt_id, planning_snap,
+                            selected_context_plan, initial_auxiliary_usage=auxiliary_usage)
+                    finally:
+                        reading_segment_ms = (time.monotonic()-reading_started)*1000
+                        reading_elapsed_ms = self.store.add_reading_elapsed(attempt.attempt_id,
+                            reading_segment_ms)
+                    gap_auxiliary_ms = sum(value for name, value in reading_outcome.plan.auxiliary_ms
+                                           if name.startswith("gap:"))
+                    selected_context_plan = replace(reading_outcome.plan,
+                        predicted_cost_ms=reading_elapsed_ms-gap_auxiliary_ms)
+                    reading_outcome = replace(reading_outcome, plan=selected_context_plan)
+                    auxiliary_usage = merge_auxiliary_usage(auxiliary_usage if auxiliary_usage is not None
+                        else {"input_tokens": 0, "output_tokens": 0, "compute_ms": 0.0, "models": []},
+                        reading_outcome.auxiliary_usage)
+                    self.store.save_context_plan(attempt.attempt_id, selected_context_plan)
+                    info = await self.engine.info()
+                    if (planning_snap.current_epoch is not None
+                            and planning_snap.current_epoch.engine_restart_id != info.engine_restart_id):
+                        planning_snap = replace(planning_snap, force_new_epoch_for_recovery=True,
+                                                must_rebuild=True)
+                    candidates = compile_candidates(planning_snap, (selected_context_plan,), reading_outcome)
+                    valid = tuple(candidate for candidate in candidates if candidate.feasible)
+                    if not valid:
+                        raise ContextOverflow("ANSWER plan exceeds the context allocation")
+                    quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
+                    if quotes.engine_restart_id != info.engine_restart_id:
+                        raise EngineError("UNSTABLE_RESTART")
+                    pressure = (max(1, quotes.active_requests+(quotes.queued_requests or 0)+1)
+                        if quotes.active_requests is not None else max(1, self._active_generations+1))
+                    plan = choose_plan(candidates, quotes, self.cost_model, planning_snap, self.knobs,
+                                       concurrency=pressure, control_ms=planning_control_ms)
+                    if isinstance(plan, NoFeasiblePlan):
+                        raise ContextOverflow(plan.reason)
+                    require_online_tokens(selected_context_plan.budget.max_total_tokens,
+                        selected_context_plan.online_tokens_spent,
+                        len(plan.candidate.input_ids)+plan.candidate.output_budget, "ANSWER")
+                    query_context = QueryContext(selected_context_plan.task_state.query or query,
+                        "task_state", task_state=selected_context_plan.task_state)
+                    selected_sources = {span.source_key for unit in selected_context_plan.selected_set.selected_units
+                                        for span in unit.source_spans}
+                    blocks = {block.key: block for block in (*planning_snap.archive, *evidence,
+                        *selected_context_plan.selected_set.source_blocks)}
+                    evidence = tuple(blocks[key] for key in sorted(selected_sources))
+                    points = tuple(replace(point, citation_ids=tuple(ref for ref, key in plan.candidate.reference_map
+                        if key in plan.candidate.required_blocks
+                        and any(span.source_key == key for span in point.source_spans)))
+                        for point in selected_context_plan.answer_plan.points)
+                    selected_context_plan = replace(selected_context_plan,
+                        answer_plan=replace(selected_context_plan.answer_plan, points=points))
+                    reading_outcome = replace(reading_outcome, plan=selected_context_plan)
+                    self.store.save_context_plan(attempt.attempt_id, selected_context_plan)
                 append_failure = next((c.reason for c in candidates if c.action == "APPEND" and not c.feasible), None)
                 reason = ("corpus_snapshot_change" if migrating else
                           "reference_history_sync" if snap.history_sync_pending else
@@ -375,7 +543,9 @@ class Controller:
                 planned = replace(attempt, stage="PLANNED", evidence=evidence,
                                   plan=plan, branch_reason=reason,
                                   retrieval_priority=retrieval_priority, retrieval_ms=retrieval_ms,
-                                  query_context=query_context)
+                                  query_context=query_context, context_plan=selected_context_plan,
+                                  reading_outcome=reading_outcome, reading_elapsed_ms=reading_elapsed_ms,
+                                  auxiliary_usage=auxiliary_usage)
                 # No-C ablation keeps the native session across text rebuilds.
                 # History protocol changes and failed attempts still need safe recovery.
                 new_epoch = (snap.current_epoch is None or snap.history_sync_pending
@@ -406,7 +576,14 @@ class Controller:
                 snapshot = self.store.commit_turn_and_outbox(attempt.attempt_id)
             except BaseException as exc:
                 current = self.store.get_attempt(attempt.attempt_id)
-                if current.stage in ("STARTED", "PLANNED", "PREPARED"):
+                reading_pending = (current.stage == "STARTED"
+                    and self.store.context_plan(attempt.attempt_id) is not None
+                    and (isinstance(exc, (UnknownOutcomeError, asyncio.CancelledError))
+                         or isinstance(exc, EngineError) and exc.code == "READ_STEP_OUTCOME_PENDING"))
+                if reading_pending:
+                    self.events.emit("reading_recovery_required", business_session_id=session_id,
+                                     attempt_id=attempt.attempt_id, error=str(exc))
+                elif current.stage in ("STARTED", "PLANNED", "PREPARED"):
                     self.store.fail_attempt(attempt.attempt_id, str(exc))
                     self._retire_background()
                 else:
@@ -421,15 +598,17 @@ class Controller:
                 submitted+result.ttft_ms/1000 if result.ttft_ms is not None else None,
                 submitted+result.last_token_ms/1000 if result.last_token_ms is not None else None,
                 response_done, committed_at, token_observation="chunk" if result.ttft_ms is not None else "none")
-            control_ms = ((submitted-entered) + (committed_at-response_done))*1000 - (retrieval_ms or 0)
+            control_ms = ((submitted-entered) + (committed_at-response_done))*1000 - retrieval_segment_ms - reading_segment_ms
             try:
                 self._postplan_control_ms[plan.candidate.action].append(
-                    ((submitted-plan_started)+(committed_at-response_done))*1000)
+                    ((submitted-plan_started)+(committed_at-response_done))*1000-reading_segment_ms)
                 self.cost_model.observe_output(len(result.output_ids))
                 selected_estimate = next((e for e in plan.predicted if e.candidate_id == plan.candidate.candidate_id), None)
                 if (self.online_calibration and selected_estimate is not None and selected_estimate.calibrated
                         and result.server_elapsed_ms is not None and info.engine_kind == "sglang"):
-                    self.cost_model.observe(selected_estimate, result.server_elapsed_ms + control_ms)
+                    observed_total = (result.server_elapsed_ms+control_ms
+                        +plan.candidate.predicted_read_ms+plan.candidate.auxiliary_ms)
+                    self.cost_model.observe(selected_estimate, observed_total)
                 self.events.emit("ledger_committed", business_session_id=session_id, attempt_id=attempt.attempt_id,
                                  ledger_version=snapshot.version, epoch=epoch.epoch_no)
             except Exception as error:

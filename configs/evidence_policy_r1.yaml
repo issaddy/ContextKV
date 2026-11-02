@@ -1,0 +1,47 @@
+base_study_config: configs/study.yaml
+evidence_policy_training:
+  reader_manifest: models/study-reader-r1/reader_manifest.json
+  reader_profile_id: qwen3-r1-source-first-32k-nonthinking
+  run_config: models/study-reader-r1/r1_run_config.yaml
+  output_dir: runs/study/reader-bound-preferences
+  parent_support_asset: models/study-support-actual-prefix
+  output_asset: models/study-support-r1
+  gpu_devices: [1, 2, 4, 6]
+  scorer_identity:
+    kind: frozen_qwen3_32b_actual_history_source_judge
+    rubric: necessary_points_grounding_conditions_versions_task_v1
+    reader_checkpoint: local-snapshot:7442623e99dd0b456628ddc48805a4ea11249ee2ee66484b5d1ab44d2940beb8
+    score_range: [0, 1]
+  reward_weights: {necessary_points: 0.3, grounding: 0.2, conditions_versions: 0.2, task_score: 0.3}
+  minimum_reward_difference: 0.01
+  collection:
+    turns_path: runs/study/data/task_labels.jsonl
+    turns: 200
+    device: cuda:6
+    encoder_device: cuda:1
+    dense_index: data/multidoc2dial/bge-m3-sections
+    encoder_path: models/bge-m3
+    query_adapter_path: models/bge-m3-dialogue-query-v1
+    judge_base_url: http://127.0.0.1:30001
+    body_budget: 4096
+    output_budget: 1024
+    reading: true
+    read_layout: source_first
+  optimizer:
+    device: cuda:6
+    physical_gpu_devices: [6]
+    epochs: 3
+    learning_rate: 0.0001
+    seed: 42
+  next_round:
+    questions_path: runs/study/data/original_train_turns.jsonl
+    matrix_path: configs/study_matrix.yaml
+    concurrency: 4
+    dataset:
+      corpus_id: multidoc2dial
+      retriever_config: configs/study_multidoc_retriever.yaml
+      protocol: P3
+    reader_training_config: configs/reader_r1.yaml
+    reader_output_dir: models/study-reader-r1-round2
+    reader_merged_dir: models/study-reader-r1-round2-merged
+    reader_data_dir: runs/study/reader-r1-round2-data

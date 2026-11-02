@@ -1,0 +1,100 @@
+schema_version: 1
+study_config: configs/study.yaml
+baseline_commit: 7388008f56ec7176668321d00f69bd2f07639f0a
+seed: 42
+protocol: P3
+selection:
+  development_weights: {multidoc2dial: 0.30, mtrag: 0.25, versionqa: 0.20, loong: 0.25}
+  near_equal_quality: 0.002
+  equal_cost_relative_tolerance: 0.05
+  bootstrap_samples: 5000
+  objective: continuous_quality
+  include_ablations: true
+  lambda_time_grid: [0.0, 0.000001, 0.00001, 0.0001]
+  test_comparators: [B0, Btoken, B3, B6, Lmap]
+resources:
+  gpu_capacity_tokens: 32768
+  host_capacity_tokens: 61056
+  gpu_devices: [0, 1]
+  p95_complete_ms: 120000
+  max_online_tokens: 200000000
+  concurrency: [1, 4, 8]
+datasets:
+  multidoc2dial:
+    inputs:
+      dev: data/multidoc2dial/dev/tasks.jsonl
+      test: data/multidoc2dial/test/tasks.jsonl
+    corpus_path: data/multidoc2dial/test/passages.jsonl
+    retriever_config: configs/study_multidoc_retriever.yaml
+    split_kind: native
+    dev_conversations: 32
+    dev_seed: 42
+    primary_metric: RB_llm
+    normalization: 1.0
+    weight: 0.25
+  mtrag:
+    input: data/mtrag/RAG.jsonl
+    split_manifest: data/mtrag/split_manifest.json
+    corpus_path: data/mtrag-official/cloud.jsonl
+    corpus_id: mtrag
+    retriever_config: configs/retriever_dialogue.example.yaml
+    domain: mt-rag-ibmcloud-elser-512-100-20240502
+    split_kind: project_conversation
+    primary_metric: mtrageval_harmonic
+    normalization: 1.0
+    max_passages: 10
+    weight: 0.2
+  mtrag_un:
+    input: data/mtrag-un/reference.jsonl
+    split_manifest: data/mtrag-un/split_manifest.json
+    protocol: P1
+    supplied_documents: true
+    evaluation_only: true
+    split_kind: project_selected_turn_reference_diagnostic
+    primary_metric: mtrageval_harmonic
+    normalization: 1.0
+    max_passages: 10
+    weight: 0.15
+  versionqa:
+    inputs:
+      dev: runs/study/evaluation/version_dev/tasks.jsonl
+      test: runs/study/evaluation/versionqa/references.jsonl
+    split_kind: independent_family_dev_and_public_test
+    retrieval_by_split:
+      test:
+        corpus_path: runs/study/evaluation/versionqa/corpus.jsonl
+        corpus_id: versionqa
+        config_path: configs/study_versionqa_retriever.yaml
+    primary_metric: project_condition_version_score
+    scoring:
+      project_weights: {correctness: 0.5, conditions_versions: 0.5}
+    normalization: 1.0
+    weight: 0.15
+  loong:
+    inputs:
+      dev: runs/study/evaluation/long_dev/tasks.jsonl
+      test: data/loong/set1-v2/tasks.jsonl
+    common_subset: data/loong/set1-v2/model32k/tasks.jsonl
+    split_kind: independent_training_sources_dev_and_public_test
+    coverage_mode: all_supplied_documents
+    primary_metric: loong_reference_score
+    normalization: 100.0
+    weight: 0.25
+methods:
+  - {id: B0, strategy: B0, description: Dense5_REBUILD}
+  - {id: Btoken, strategy: Btoken, description: relevance_token_budget}
+  - {id: B1, strategy: B1, description: task_history_version}
+  - {id: B2, strategy: B2, description: applicable_single_support}
+  - {id: B3, strategy: B3, description: single_pair_triple_search}
+  - {id: B5, strategy: B5, description: answer_plan}
+  - {id: B6, strategy: B6, description: coverage_READ_REDUCE_multihop}
+  - {id: B7, strategy: B7, description: native_KV_complete_cost_no_new_training}
+  - {id: Lmap, strategy: Lmap, description: full_scope_map_reduce}
+ablations:
+  support_orders: [[1], [1, 2], [1, 2, 3]]
+  reading: [coverage_only, claims, typed_reduce]
+  layouts: [existing, need_order, stable_evidence]
+  output_tokens: [512, 1024, 2048]
+  body_tokens: [2048, 4096, 8192]
+  workloads: [concurrent, pauses, topic_switch, source_revisit]
+  cache: [identical_tokens_native, identical_semantics_actions]

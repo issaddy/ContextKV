@@ -12,9 +12,11 @@ import time
 import uuid
 
 from .evidence import merge_evidence_block
-from .schema import (ContextEpoch, EvidenceBlock, EvidenceKey, ExecutionLedger, GenerationResult, Message, QueryContext,
+from .schema import (CompletionReceipt, ContextEpoch, EvidenceBlock, EvidenceKey, ExecutionLedger, GenerationResult, Message, QueryContext,
                      Plan, RetireOperation, SessionSnapshot, TurnRecord)
 from .serialization import decode, dumps, loads
+from .context_schema import ContextPlan, OpenNeed, ReadingOutcome, StepRecord
+from .prefix_retention import PrefixOwnerRecord
 
 
 class StoreError(RuntimeError):
@@ -53,9 +55,20 @@ class Attempt:
     retrieval_priority: tuple[EvidenceKey, ...] | None = None
     retrieval_ms: float | None = None
     query_context: QueryContext | None = None
+    context_plan: ContextPlan | None = None
+    reading_outcome: ReadingOutcome | None = None
+    reading_elapsed_ms: float = 0.0
+    auxiliary_usage: dict | None = None
 
 
 ACTIVE_STAGES = ("STARTED", "PLANNED", "PREPARING", "PREPARED", "SUBMITTED", "RESULT_READY")
+
+
+@dataclass(frozen=True)
+class ReadingProgress:
+    expanded: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
+    blocked_open_needs: tuple[OpenNeed, ...] = ()
+    auxiliary_usage: dict | None = None
 
 
 def load_record(connection, cls, payload):
@@ -110,6 +123,27 @@ class SessionStore:
             PRIMARY KEY(session_id, version));
           CREATE TABLE IF NOT EXISTS text_blobs (
             sha256 TEXT PRIMARY KEY, text TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS turn_plans (
+            attempt_id TEXT PRIMARY KEY REFERENCES attempts(attempt_id), plan TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS execution_steps (
+            attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id), step_id TEXT NOT NULL,
+            stage TEXT NOT NULL, payload TEXT NOT NULL, generation TEXT,
+            PRIMARY KEY(attempt_id,step_id));
+          CREATE TABLE IF NOT EXISTS reading_progress (
+            attempt_id TEXT PRIMARY KEY REFERENCES attempts(attempt_id), payload TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS prefix_owners (
+            owner_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, stage TEXT NOT NULL,
+            engine_restart_id TEXT NOT NULL, payload TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS prefix_owners_by_session ON prefix_owners(session_id,stage);
+          CREATE TABLE IF NOT EXISTS prefix_owner_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id TEXT NOT NULL,
+            event TEXT NOT NULL, payload TEXT NOT NULL, created_ns INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS prefix_accesses (
+            access_id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id TEXT NOT NULL,
+            session_id TEXT NOT NULL, native_attempt_id TEXT NOT NULL,
+            observed_ns INTEGER NOT NULL, payload TEXT NOT NULL,
+            UNIQUE(owner_id,native_attempt_id));
+          CREATE INDEX IF NOT EXISTS prefix_accesses_by_owner ON prefix_accesses(owner_id,access_id);
           PRAGMA user_version=2;
         """)
 
@@ -231,6 +265,150 @@ class SessionStore:
             self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (attempt.stage, self._dump(attempt), attempt.attempt_id))
             return attempt
 
+    def save_context_plan(self, attempt_id: str, context_plan: ContextPlan):
+        with self._transaction():
+            self.db.execute("INSERT INTO turn_plans VALUES(?,?) ON CONFLICT(attempt_id) "
+                            "DO UPDATE SET plan=excluded.plan",
+                            (attempt_id, self._dump(context_plan)))
+
+    def save_reading_progress(self, attempt_id, context_plan, progress):
+        """Persist the completed gap work and its resulting plan atomically."""
+        with self._transaction():
+            self.db.execute("INSERT INTO turn_plans VALUES(?,?) ON CONFLICT(attempt_id) "
+                            "DO UPDATE SET plan=excluded.plan", (attempt_id, self._dump(context_plan)))
+            self.db.execute("INSERT INTO reading_progress VALUES(?,?) ON CONFLICT(attempt_id) "
+                            "DO UPDATE SET payload=excluded.payload", (attempt_id, self._dump(progress)))
+
+    def reading_progress(self, attempt_id):
+        with self._mutex:
+            row = self.db.execute("SELECT payload FROM reading_progress WHERE attempt_id=?", (attempt_id,)).fetchone()
+            return load_record(self.db, ReadingProgress, row[0]) if row else None
+
+    def save_prefix_owner(self, record: PrefixOwnerRecord, event: str, *, details=None):
+        """A prefix record survives request completion and business epoch retire."""
+        with self._transaction():
+            previous = self.prefix_owner(record.owner_id)
+            if previous is not None and (previous.prefix_input_ids, previous.sources,
+                    previous.fingerprint) != (record.prefix_input_ids, record.sources, record.fingerprint):
+                raise IdempotencyConflict("prefix owner reused for another causal source path")
+            payload = self._dump(record)
+            self.db.execute("INSERT INTO prefix_owners VALUES(?,?,?,?,?) ON CONFLICT(owner_id) "
+                "DO UPDATE SET session_id=excluded.session_id,stage=excluded.stage,"
+                "engine_restart_id=excluded.engine_restart_id,payload=excluded.payload",
+                (record.owner_id, record.session_id, record.stage, record.receipt.engine_restart_id, payload))
+            self.db.execute("INSERT INTO prefix_owner_events(owner_id,event,payload,created_ns) VALUES(?,?,?,?)",
+                (record.owner_id, event, self._dump({"record": record, "details": details}), time.monotonic_ns()))
+
+    def prefix_owner(self, owner_id):
+        with self._mutex:
+            row = self.db.execute("SELECT payload FROM prefix_owners WHERE owner_id=?", (owner_id,)).fetchone()
+            return load_record(self.db, PrefixOwnerRecord, row[0]) if row else None
+
+    def prefix_owners(self, session_id=None, *, active_only=False):
+        with self._mutex:
+            where, params = [], []
+            if session_id is not None:
+                where.append("session_id=?")
+                params.append(session_id)
+            if active_only:
+                where.append("stage IN ('RETAINING','RETAINED','RELEASING')")
+            sql = "SELECT payload FROM prefix_owners" + (" WHERE "+" AND ".join(where) if where else "")
+            return tuple(load_record(self.db, PrefixOwnerRecord, row[0]) for row in
+                         self.db.execute(sql+" ORDER BY rowid", params))
+
+    def prefix_owner_events(self, owner_id):
+        with self._mutex:
+            return tuple({"event_id": row["event_id"], "event": row["event"],
+                "created_ns": row["created_ns"], **load_record(self.db, dict, row["payload"])} for row in
+                self.db.execute("SELECT event_id,event,payload,created_ns FROM prefix_owner_events "
+                                "WHERE owner_id=? ORDER BY event_id", (owner_id,)))
+
+    def record_prefix_access(self, *, owner_id, session_id, native_attempt_id, observed_ns, payload):
+        """A recovered COMPLETE step is the same access, not another READ."""
+        with self._transaction():
+            self.db.execute("INSERT INTO prefix_accesses(owner_id,session_id,native_attempt_id,observed_ns,payload) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(owner_id,native_attempt_id) DO NOTHING",
+                (owner_id, session_id, native_attempt_id, observed_ns, self._dump(payload)))
+
+    def prefix_accesses(self, owner_id=None, *, session_id=None):
+        with self._mutex:
+            where, params = [], []
+            if owner_id is not None:
+                where.append("owner_id=?")
+                params.append(owner_id)
+            if session_id is not None:
+                where.append("session_id=?")
+                params.append(session_id)
+            sql = "SELECT * FROM prefix_accesses" + (" WHERE "+" AND ".join(where) if where else "")
+            return tuple({"access_id": row["access_id"], "owner_id": row["owner_id"],
+                "session_id": row["session_id"], "native_attempt_id": row["native_attempt_id"],
+                "observed_ns": row["observed_ns"], "payload": load_record(self.db, dict, row["payload"])}
+                for row in self.db.execute(sql+" ORDER BY access_id", params))
+
+    def add_reading_elapsed(self, attempt_id, elapsed_ms):
+        """Accumulate measured execution segments across transport retries."""
+        with self._transaction():
+            attempt = self.get_attempt(attempt_id)
+            updated = replace(attempt, reading_elapsed_ms=attempt.reading_elapsed_ms+elapsed_ms)
+            self.db.execute("UPDATE attempts SET payload=? WHERE attempt_id=?",
+                            (self._dump(updated), attempt_id))
+            return updated.reading_elapsed_ms
+
+    def save_retrieval(self, attempt_id, *, evidence, retrieval_priority, query_context,
+                       retrieval_ms, auxiliary_usage):
+        """Persist completed auxiliary work before the first reading generation."""
+        with self._transaction():
+            attempt = self.get_attempt(attempt_id)
+            if attempt.stage != "STARTED":
+                raise StoreError("retrieval belongs to the unplanned request stage")
+            updated = replace(attempt, evidence=tuple(evidence), retrieval_priority=retrieval_priority,
+                query_context=query_context, retrieval_ms=retrieval_ms, auxiliary_usage=auxiliary_usage)
+            self.db.execute("UPDATE attempts SET payload=? WHERE attempt_id=?",
+                            (self._dump(updated), attempt_id))
+            return updated
+
+    def context_plan(self, attempt_id: str) -> ContextPlan | None:
+        with self._mutex:
+            row = self.db.execute("SELECT plan FROM turn_plans WHERE attempt_id=?",
+                                  (attempt_id,)).fetchone()
+            return load_record(self.db, ContextPlan, row[0]) if row else None
+
+    def save_execution_step(self, record: StepRecord, stage: str, generation=None):
+        with self._transaction():
+            self.db.execute("INSERT INTO execution_steps VALUES(?,?,?,?,?) "
+                "ON CONFLICT(attempt_id,step_id) DO UPDATE SET stage=excluded.stage, "
+                "payload=excluded.payload, generation=COALESCE(excluded.generation,generation)",
+                (record.attempt_id, record.step_id, stage, self._dump(record),
+                 self._dump(generation) if generation is not None else None))
+            if generation is not None:
+                self._enqueue(record.engine_epoch.business_session_id, record.engine_epoch,
+                              "reading_step_complete", self.get_attempt(record.attempt_id).expected_version)
+
+    def execution_steps(self, attempt_id: str):
+        with self._mutex:
+            return tuple(load_record(self.db, StepRecord, row[0]) for row in
+                         self.db.execute("SELECT payload FROM execution_steps WHERE attempt_id=? "
+                                         "ORDER BY rowid", (attempt_id,)))
+
+    def execution_steps_with_stage(self, attempt_id):
+        with self._mutex:
+            return tuple((row["stage"], load_record(self.db, StepRecord, row["payload"])) for row in
+                self.db.execute("SELECT stage,payload FROM execution_steps WHERE attempt_id=? ORDER BY rowid",
+                                (attempt_id,)))
+
+    def execution_step(self, attempt_id: str, step_id: str):
+        with self._mutex:
+            row = self.db.execute("SELECT stage,payload,generation FROM execution_steps "
+                                  "WHERE attempt_id=? AND step_id=?", (attempt_id, step_id)).fetchone()
+            if row is None:
+                return None
+            record = load_record(self.db, StepRecord, row["payload"])
+            record = replace(record, engine_epoch=decode(ContextEpoch, record.engine_epoch),
+                             input_messages=tuple(decode(Message, message) for message in record.input_messages),
+                             receipt=decode(CompletionReceipt, record.receipt) if record.receipt is not None else None)
+            generation = load_record(self.db, GenerationResult, row["generation"]) if row["generation"] else None
+            return row["stage"], record, generation
+
     @staticmethod
     def _check_update(old: Attempt, attempt: Attempt) -> bool:
         if old.stage in ("COMMITTED", "FAILED"):
@@ -330,10 +508,28 @@ class SessionStore:
                     and (candidate.action != "REBUILD" or not attempt.new_epoch
                          or attempt.branch_reason != "corpus_snapshot_change")):
                 raise StoreError("Corpus snapshot transition requires its own rebuilt epoch")
+            if attempt.context_plan is not None:
+                steps = attempt.reading_outcome.steps if attempt.reading_outcome is not None else ()
+                reader_tokens = (len(candidate.input_ids)+len(result.output_ids)
+                    +sum(len(step.input_ids)+len(step.output_ids) for step in steps))
+                auxiliary = attempt.auxiliary_usage
+                auxiliary_tokens = (0 if auxiliary is None else
+                    auxiliary["input_tokens"]+auxiliary["output_tokens"]
+                    if auxiliary["input_tokens"] is not None and auxiliary["output_tokens"] is not None else None)
+                context_plan = replace(attempt.context_plan,
+                    online_tokens_spent=reader_tokens+auxiliary_tokens if auxiliary_tokens is not None else None)
+                attempt = replace(attempt, context_plan=context_plan,
+                    reading_outcome=replace(attempt.reading_outcome, plan=context_plan)
+                        if attempt.reading_outcome is not None else None)
+                self.db.execute("INSERT INTO turn_plans VALUES(?,?) ON CONFLICT(attempt_id) "
+                                "DO UPDATE SET plan=excluded.plan", (attempt_id, self._dump(context_plan)))
             version = snap.version + 1
             history_version = snap.raw_history_version + 1
             turn = TurnRecord(len(snap.raw_history) + 1, attempt.query, result.text, result.output_ids,
-                              result.finish_reason, tuple(sorted(candidate.required_blocks)), attempt.query_context)
+                              result.finish_reason, tuple(sorted(candidate.required_blocks)), attempt.query_context,
+                              attempt.context_plan.selected_set if attempt.context_plan else None,
+                              candidate.need_support,
+                              attempt.context_plan.answer_plan if attempt.context_plan else None)
             ledger = ExecutionLedger(epoch.epoch_no, epoch.engine_session_id, history_version,
                                      candidate.messages + (Message("assistant", result.text),),
                                      candidate.input_ids, result.output_ids, candidate.visible_blocks,

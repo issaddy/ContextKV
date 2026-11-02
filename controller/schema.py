@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .context_schema import (EvidenceKey, EvidenceBlock, TaskState, EvidenceSet, SupportBundle,
+                             AnswerPlan)
+
 
 def _tuples(instance, *names: str) -> None:
     for name in names:
@@ -16,34 +19,6 @@ def _tuples(instance, *names: str) -> None:
 def _references(instance) -> None:
     object.__setattr__(instance, "reference_map",
                        tuple((str(ref), key) for ref, key in instance.reference_map))
-
-
-@dataclass(frozen=True, order=True)
-class EvidenceKey:
-    corpus_id: str
-    document_id: str
-    passage_id: str
-    version: str
-    content_sha256: str
-
-
-@dataclass(frozen=True)
-class EvidenceBlock:
-    key: EvidenceKey
-    source_uri: str
-    title: str
-    text: str
-    token_ids: tuple[int, ...] = ()
-    span: tuple[int, int] | None = None
-    parent_section: str | None = None
-    provenance: tuple[str, ...] = ()
-    dependencies: tuple[EvidenceKey, ...] = ()
-    anchors: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        _tuples(self, "token_ids", "provenance", "dependencies", "anchors")
-        if self.span is not None:
-            object.__setattr__(self, "span", tuple(self.span))
 
 
 @dataclass(frozen=True)
@@ -58,6 +33,8 @@ class EvidenceSpan:
     reference_id: str
     body_reference_id: str | None = None
     alias_declaration: tuple[int, int, int] | None = None
+    source_start: int | None = None
+    source_end: int | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "provenance")
@@ -92,6 +69,7 @@ class QueryContext:
     relation: str
     history_turns: tuple[int, ...] = ()
     task_frame: TaskFrame | None = None
+    task_state: TaskState | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "history_turns")
@@ -106,6 +84,9 @@ class TurnRecord:
     finish_reason: str = "stop"
     evidence_keys: tuple[EvidenceKey, ...] = ()
     query_context: QueryContext | None = None
+    evidence_set: EvidenceSet | None = None
+    need_support: tuple[SupportBundle, ...] = ()
+    answer_plan: AnswerPlan | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "assistant_output_ids", "evidence_keys")
@@ -196,6 +177,19 @@ class PromptCandidate:
     evidence_resolution: tuple[tuple[EvidenceKey, str], ...] = ()
     evidence_body_tokens: int | None = None
     nonrequired_evidence_body_tokens: int | None = None
+    context_plan_id: str = ""
+    evidence_set_id: str = ""
+    working_history_id: str = ""
+    layout_id: str = "existing"
+    quality_prediction: float = 0.0
+    need_support: tuple[SupportBundle, ...] = ()
+    output_budget: int | None = None
+    predicted_read_ms: float = 0.0
+    auxiliary_ms: float = 0.0
+    predicted_gpu_gib_ms: float = 0.0
+    predicted_host_gib_ms: float = 0.0
+    generation_kind: str = "ANSWER"
+    cost_prediction_eligible: bool = True
 
     def __post_init__(self) -> None:
         _tuples(self, "messages", "input_ids", "evidence_spans", "evidence_resolution")

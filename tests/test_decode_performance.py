@@ -2,7 +2,6 @@
 from dataclasses import asdict
 from itertools import product
 import random
-from types import SimpleNamespace
 
 import pytest
 
@@ -105,7 +104,9 @@ def test_full_prediction_preserves_cost_risk_uncertainty_and_support(intervals):
                                      (513, 3, 16, 32), (4096, 1, 3, 4)):
         settings = dict(default_output_tokens=mean, p90_output_tokens=p90)
         model, legacy = CostModel(prefill, points, **settings), LegacyCostModel(prefill, points, **settings)
-        candidate = SimpleNamespace(input_ids=(1,)*n, candidate_id="prediction")
+        from controller.schema import PromptCandidate
+        candidate = PromptCandidate("prediction", "REBUILD", 0, (), (1,)*n, "unused",
+                                    frozenset(), frozenset())
         quote = CacheQuote("prediction", "unused", n, n-1)
         actual = asdict(model.predict_native(candidate, quote, concurrency=concurrency, control_ms=1.5, queue_ms=2))
         expected = asdict(legacy.predict_native(candidate, quote, concurrency=concurrency, control_ms=1.5, queue_ms=2))

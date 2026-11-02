@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "observation_date": "2026-11-02",
+  "evidence_source": "Main-agent reports from the designated sjy-0518 container; A performed local source/documentation work only.",
+  "remote_host": "public-ge108-wlf3-hangu-5.idchb2az3.hb2.kwaidc.com",
+  "container": "sjy-0518",
+  "project": "/home/relay/songjiayun/ContextKV/runs/study-20261102/project",
+  "incumbent": {
+    "status": "candidate_profiles_not_yet_selected_on_matched_development_cohort",
+    "historical_reference_commit": "7388008f56ec7176668321d00f69bd2f07639f0a",
+    "current_strongest_selected": false
+  },
+  "native_training_rollout": {
+    "actual_turns": 10004,
+    "actual_conversations": 1539,
+    "partition": "native_multidoc2dial_train",
+    "path": "/home/relay/songjiayun/ContextKV/runs/study-20261102/task-a/turns.jsonl",
+    "state_db": "/home/relay/songjiayun/ContextKV/runs/study-20261102/task-a/state/sessions.sqlite3",
+    "history_origin": "actual generated R0 QA; authored/reference history was not substituted"
+  },
+  "reader_r1": {
+    "code_implemented": true,
+    "training_completed": true,
+    "reader_id": "contextkv-reader-r1:1eec232b42b67721374c0400b354081842b54c965a20c441b17b4d82a33c567b",
+    "base": "Qwen3-32B BF16, original R0 retained",
+    "adaptation": "LoRA",
+    "optimizer_steps": 56,
+    "training_model_input_tokens": 7800825,
+    "training_wall_ms": 1405076.37,
+    "reviewed_examples_total": 1792,
+    "reviewed_examples_by_phase_total": {"ANSWER": 1559, "READ": 233},
+    "train_examples": 1773,
+    "train_distinct_turns": 1544,
+    "validation_examples": 19,
+    "validation_origin": "heldout from native training partition; not public benchmark dev/test",
+    "validation_loss": 0.1608121544,
+    "merged": true,
+    "serving_last_report": {"port": 30004, "gpu": 4, "state": "ready_reported_by_main_agent"},
+    "driver_artifacts": {
+      "data_manifest": "runs/study/reader-r1-data/data_manifest.json",
+      "review_calls": "runs/study/reader-r1-data/review_calls.jsonl",
+      "adapter": "models/study-reader-r1/adapter",
+      "reader_manifest": "models/study-reader-r1/reader_manifest.json",
+      "model_scope": "models/study-reader-r1/model_scope.json",
+      "merged_weights": "models/study-reader-r1-merged",
+      "run_config": "models/study-reader-r1/r1_run_config.yaml",
+      "token_and_cuda_cost": "models/study-reader-r1/training_cost.json",
+      "phase_physical_cost": "models/study-reader-r1/train_cost.json",
+      "validation_loss": "models/study-reader-r1/evaluation/train_partition_holdout_loss.json"
+    },
+    "artifact_paths_basis": "configured training driver paths; artifacts remain in container and were not transferred to A",
+    "physical_cost_values_copied_to_this_inventory": false,
+    "qa_heldout_improvement_measured": false,
+    "benchmark_improvement_established": false
+  },
+  "reader_r1_controlled_mechanisms": {
+    "execution": "all_four_completed_reported_by_main_agent",
+    "literal_audit": "pending_offline_artifact_audit",
+    "pair_and_correction": {"generation": "expected form terms observed", "source_and_citation_audit": "pending"},
+    "long": {
+      "READ": 24, "REDUCE": 2, "QA": 1,
+      "derived_count": 36, "derived_mass_g": 655000,
+      "final_answer_count": 3, "final_answer_mass_kg": 6,
+      "expected_count": 36, "expected_mass_kg": 666,
+      "reported_coverage_entries": 24, "reported_open_needs": 7,
+      "quality_status": "failed",
+      "computed_lines_and_root_claims_present_in_final_prompt": true,
+      "matched_R0": {"derived_count": 36, "derived_mass_g": 596000, "final_answer_count": 3, "final_answer_mass_kg": 6},
+      "diagnosis": "READ mass extraction error plus ANSWER choosing representative excerpt quantities over full-scope computed conclusions; shared failure, not a pure R1 regression"
+    },
+    "multihop": {
+      "reported_progress": "Institute to Arbor",
+      "expected_year": 1997,
+      "expected_year_produced": false,
+      "quality_status": "failed"
+    },
+    "repair_applied": false,
+    "matched_r0_run": "same-code long result observed on GPU5; full paired mechanism audit pending",
+    "conclusion": "R1 trained on the small actual distribution is insufficient for these controlled long/multihop cases; no improvement claim."
+  },
+  "other_assets": {
+    "support_actual_prefix": {"path": "models/study-support-actual-prefix", "trained_asset_reported": true, "current_R1_P1_asset": false},
+    "legacy_prefix12_preferences": {"trained_asset_reported": true, "reusable_as_current_R1_rewards": false},
+    "task_heads": {"training_entry_implemented": true, "current_trained_asset_audit": "not_recorded_in_this_inventory"},
+    "reader_bound_P1": {"code_implemented": true, "current_R1_collection_completed": false, "trained": false, "heldout_gain_established": false},
+    "reader_curriculum_round2": {"code_implemented": true, "targets_actually_generated": false, "trained": false},
+    "plan_gain": {"code_implemented": true, "trained_current_reader_asset": false}
+  },
+  "last_reported_service_roles": [
+    {"role": "R1", "port": 30004, "gpu": 4},
+    {"role": "comparable_latest_engine_R0", "port": 30005, "gpu": 5},
+    {"role": "frozen_offline_R0_judge", "port": 30001, "gpu": 2, "state": "idle_reported"},
+    {"role": "C_service", "port": 30002, "gpu": 3}
+  ],
+  "p1_worker_mapping": {
+    "device_visibility": "all physical GPUs in original order",
+    "query_and_task_embedding": "cuda:1",
+    "support_and_utility": "cuda:6",
+    "collection_physical_gpu_devices": [1, 2, 4, 6],
+    "utility_training_physical_gpu_devices": [6]
+  },
+  "evaluation_runtime": {
+    "isolated_env": ".venv-eval",
+    "core_versions": {"evaluate": "0.4.6", "transformers": "4.57.6", "huggingface-hub": "0.36.0", "datasets": "3.6.0", "bert-score": "0.3.13"},
+    "main_runtime_transformers": "5.19.0",
+    "mnli_model": "microsoft/deberta-xlarge-mnli",
+    "mnli_revision": "5b07a9086c1dbb79981ff7b05b4d1ad83b3af51c",
+    "artifact_transport": "model downloaded directly in designated container; no model transport",
+    "isolation": "whole-online-environment .pth disabled; only torch/nvidia/triton shared by explicit links",
+    "smoke": {"status": "actual_pass", "input": "one identical sentence pair", "BERTScore_F1": 1, "ROUGE_1": 1, "ROUGE_2": 1, "ROUGE_L": 1, "ROUGE_Lsum": 1},
+    "benchmark_RB_alg_scores_available": false
+  },
+  "required_remaining_evidence": [
+    "complete E0/E1/E2 by R0/R1 six-grid and verified task-binding replacement",
+    "current-R1 actual candidate answers and rewards, trained P1, P0/P1 by R0/R1 frozen-history and own-P3 comparison",
+    "long and multihop literal/source/claim-chain acceptance on current code",
+    "official QA heldout and benchmark scores; training holdout loss is not a substitute",
+    "new B/C independent and joint quality-cost experiments",
+    "development selection, frozen test configuration, load experiments and ablations"
+  ]
+}

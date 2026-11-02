@@ -49,6 +49,7 @@ class EngineInfo:
     result_ttl_seconds: float | None = None
     profiling_enabled: bool = False
     streaming_generation_supported: bool = False
+    evidence_prefix_retention_supported: bool = False
     business_session_identity_supported: bool = False
     admission_diagnostics_enabled: bool = False
     model_scope: dict | None = None
@@ -98,7 +99,8 @@ class Engine(Protocol):
     async def generate(self, *, input_ids: Sequence[int], session_id: str, expected_generation: int,
                        expected_restart_id: str, attempt_id: str, fingerprint: ConfigFingerprint,
                        max_new_tokens: int = 128, ignore_eos: bool = False,
-                       citation_ids: Sequence[str] | None = None) -> GenerationResult: ...
+                       citation_ids: Sequence[str] | None = None,
+                       response_schema: dict | None = None) -> GenerationResult: ...
     async def retire(self, engine_session_id: str, expected_generation: int, operation_id: str,
                      expected_restart_id: str, reason: str = "replaced") -> RetireAck: ...
     async def status(self, engine_session_id: str | None = None, attempt_id: str | None = None,
@@ -200,14 +202,19 @@ class SGLangEngineClient:
         return PrepareAck(**await self._post("/context/epoch/prepare", body))
 
     async def generate(self, *, input_ids, session_id, expected_generation, expected_restart_id,
-                       attempt_id, fingerprint, max_new_tokens=128, ignore_eos=False, citation_ids=None):
+                       attempt_id, fingerprint, max_new_tokens=128, ignore_eos=False, citation_ids=None,
+                       response_schema=None):
         await self._ready()
         self._check_fingerprint(fingerprint)
         start = time.perf_counter()
         sampling = {**self._sampling_params, "max_new_tokens": max_new_tokens}
         if ignore_eos:
             sampling["ignore_eos"] = True
-        if citation_ids is not None:
+        if response_schema is not None and citation_ids is not None:
+            raise ValueError("a step uses one output constraint")
+        if response_schema is not None:
+            sampling["json_schema"] = json.dumps(response_schema, ensure_ascii=False)
+        elif citation_ids is not None:
             sampling["regex"] = citation_regex(citation_ids)
         body = {
             "rid": attempt_id, "input_ids": list(input_ids), "session_id": session_id,

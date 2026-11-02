@@ -584,15 +584,21 @@ def snapshot_context(turn, snapshot):
     return PriorContext(snapshot.version, tuple(t.query_context for t in snapshot.raw_history))
 
 
-def controller_context_provider(store, run_prefix):
+def controller_context_provider(store, run_prefix, *, source_index=None):
     def provide(turn):
         try:
             snapshot = store.get_snapshot(f"{run_prefix}:{turn.conversation_id}")
         except KeyError:
             snapshot = None
+        if source_index is not None:
+            from adapters.history_state import retrieval_state
+            return retrieval_state(snapshot, source_index)
         return snapshot_context(turn, snapshot)
     return provide
 
 
-def native_context_provider(baseline):
+def native_context_provider(baseline, *, source_index=None):
+    if source_index is not None:
+        from adapters.history_state import retrieval_state
+        return lambda turn: retrieval_state(baseline.snapshots.get(turn.conversation_id), source_index)
     return lambda turn: snapshot_context(turn, baseline.snapshots.get(turn.conversation_id))
