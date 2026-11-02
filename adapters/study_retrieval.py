@@ -457,6 +457,9 @@ class StudyEvidenceProvider:
     def _select_gap(self, snapshot, memory, plan, open_needs, claims, parent_trace):
         started = time.perf_counter()
         with self._lock:
+            usage_before = {id(model): dict(model.usage) for _, model in self._usage_sources()
+                            if hasattr(model, "usage")}
+            source_started = time.perf_counter()
             if memory is None:
                 restore_source_metadata(self.directory, plan.selected_set.selected_units)
                 self.directory.add_archive(plan.selected_set.source_blocks)
@@ -465,9 +468,10 @@ class StudyEvidenceProvider:
                 parent_trace = self.traces.setdefault((snapshot.session_id, plan.task_state.task_id),
                     {"task_state": to_jsonable(plan.task_state), "resumed_from_plan": plan.plan_id})
             if plan.coverage_scope == "all_supplied_documents":
-                return self.directory.full_scope(plan.task_state.source_scope)
-            usage_before = {id(model): dict(model.usage) for _, model in self._usage_sources()
-                            if hasattr(model, "usage")}
+                pool = self.directory.full_scope(plan.task_state.source_scope)
+                phases = (("source_directory", (time.perf_counter()-source_started)*1000),)
+                return replace(pool, auxiliary_ms=phases,
+                               auxiliary_usage=self._auxiliary_usage(usage_before, phases))
             state = plan.task_state
             gaps = {need.need_id for need in open_needs}
             state = replace(state, needs=tuple(need for need in state.needs if need.need_id in gaps))
