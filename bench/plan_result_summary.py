@@ -15,7 +15,7 @@ import yaml
 
 from bench.plan_prediction_audit import audit_directory, summaries as prediction_summaries
 from bench.study import read_jsonl, write_json, write_jsonl
-from bench.study_metrics import _cost_summary, _metric, _primary, _scored, _track_specs
+from bench.study_metrics import _cost_summary, _metric, _number, _primary, _scored, _track_specs
 
 
 def fingerprint(value):
@@ -210,6 +210,135 @@ def batch_ledger(rows):
     return result
 
 
+def measured_budget(row, dimension):
+    cost = row.get("cost", {})
+    if dimension == "all_online_tokens":
+        values = [_number(cost.get(name)) for name in ("total_input_tokens", "total_output_tokens")]
+        return sum(values) if all(value is not None and value >= 0 for value in values) else None
+    value = _number(cost.get(dimension))
+    return value if value is not None and value >= 0 else None
+
+
+def ordered_requests(rows):
+    """Use observed request starts, then verify recorded per-stream ordering."""
+    if not rows:
+        return [], {"status": "not_comparable", "reason": "no_common_saved_requests"}
+    windows = [row.get("request_window") for row in rows]
+    if all(window is not None and len(window) == 2 and _number(window[0]) is not None
+           and _number(window[1]) is not None and window[0] < window[1] for window in windows):
+        if len({window[0] for window in windows}) != len(rows):
+            return [], {"status": "not_comparable", "reason": "tied_observed_request_start_times"}
+        ordered = sorted(rows, key=lambda row: row["request_window"][0])
+        basis = "actual request_window start; record_number per producer and turn order verified"
+    elif all(_number(row.get("record_number")) is not None for row in rows) and len({
+            row["record_number"] for row in rows}) == len(rows):
+        ordered = sorted(rows, key=lambda row: row["record_number"])
+        basis = "unique recorded request numbers; turn order verified"
+    elif (len({row["conversation_id"] for row in rows}) == 1
+          and all(_number(row.get("turn")) is not None for row in rows)
+          and len({row["turn"] for row in rows}) == len(rows)):
+        ordered = sorted(rows, key=lambda row: row["turn"])
+        basis = "single conversation with unique actual turn numbers"
+    else:
+        return [], {"status": "not_comparable", "reason": "saved_request_order_not_identifiable"}
+    turns, records = {}, {}
+    for row in ordered:
+        turn, record = _number(row.get("turn")), _number(row.get("record_number"))
+        conversation = row["conversation_id"]
+        producer = row.get("generation_dir") or "single_saved_stream"
+        if turn is None or turn <= turns.get(conversation, float("-inf")):
+            return [], {"status": "not_comparable", "reason": "missing_or_nonincreasing_actual_turns"}
+        if record is not None and record <= records.get(producer, float("-inf")):
+            return [], {"status": "not_comparable", "reason": "record_number_conflicts_with_actual_request_order"}
+        turns[conversation] = turn
+        if record is not None:
+            records[producer] = record
+    return ordered, {"status": "verified", "basis": basis,
+                     "task_ids": [str(row["task_id"]) for row in ordered]}
+
+
+def prefix_quality(rows, spec, denominator):
+    answered = [row for row in rows if completed(row)]
+    graded = [row for row in answered if _scored(row, spec)]
+    return {"processed_request_count": len(rows), "completed": len(answered),
+        "scored_denominator": len(graded), "cohort_denominator": denominator,
+        "completed_coverage": len(answered)/denominator if denominator else None,
+        "scored_coverage": len(graded)/denominator if denominator else None,
+        "original_primary_metric": spec["primary_metric"], "original_primary": _primary(graded, spec),
+        "task_ids": [str(row["task_id"]) for row in rows],
+        "completed_task_ids": [str(row["task_id"]) for row in answered],
+        "scored_task_ids": [str(row["task_id"]) for row in graded],
+        "known_cost": {name: {"total": (sum(values) if all(value is not None for value in values) else None),
+            "observed_sum": sum(value for value in values if value is not None),
+            "measured_requests": sum(value is not None for value in values)}
+            for name in ("all_online_tokens", "online_compute_ms", "gpu_gib_seconds")
+            for values in [[measured_budget(row, name) for row in rows]]}}
+
+
+def budget_curves(matrix, index, methods, split, datasets):
+    specs = _track_specs(matrix, split)
+    if datasets is not None:
+        specs = {name: spec for name, spec in specs.items() if name in datasets}
+    report = {"format": "contextkv_observed_prefix_budget_curves_v1", "split": split, "methods": methods,
+        "fractions": [.25, .5, .75, 1.0], "datasets": {},
+        "interpretation": "observed common-request-prefix quality plus coverage; not FLOPs, full-benchmark quality or pair-matched quality unless separately reported",
+        "history_protocol": "actual saved histories retained; P3 answers/history may differ by method; no frozen-history substitution",
+        "cost_scope": "saved measured costs of common requests only; excluded noncommon work and batch/idle integrals are outside these curves and remain in original ledgers",
+        "online_compute_basis": "saved online_compute_ms, the measured sum of model service and auxiliary elapsed; not FLOPs",
+        "physical_basis": "optional saved per-request attributed GPU GiB seconds; no batch physical integral is added"}
+    declared = matrix.get("cohorts", {}).get(split, {})
+    for dataset, spec in specs.items():
+        available = {method: {key[2]: row for key, row in index.items()
+            if key[0] == method and key[1] == dataset
+            and (dataset not in declared or key[2] in set(map(str, declared[dataset])))} for method in methods}
+        common = set.intersection(*(set(available[method]) for method in methods))
+        ordered, verification = {}, {}
+        for method in methods:
+            ordered[method], verification[method] = ordered_requests([available[method][identity] for identity in common])
+        entry = {"cohort": "common saved task IDs including unanswered/unscored requests; no quality filtering",
+            "task_ids": sorted(common), "cohort_denominator": len(common), "order_verification": verification,
+            "excluded_noncommon_task_ids": {method: sorted(set(available[method])-common) for method in methods}, "axes": {}}
+        report["datasets"][dataset] = entry
+        if any(item["status"] != "verified" for item in verification.values()) or len({
+                tuple(item.get("task_ids", ())) for item in verification.values()}) != 1:
+            entry.update(status="not_comparable", reason="request_order_missing_or_differs_between_declared_methods")
+            continue
+        entry["status"] = "verified_common_order"
+        for dimension in ("all_online_tokens", "online_compute_ms", "gpu_gib_seconds"):
+            values = {method: [measured_budget(row, dimension) for row in ordered[method]] for method in methods}
+            missing = {method: [str(row["task_id"]) for row, value in zip(ordered[method], values[method], strict=True)
+                                if value is None] for method in methods}
+            axis = {"missing_measurement_task_ids": missing, "points": []}
+            entry["axes"][dimension] = axis
+            if any(missing.values()):
+                axis.update(status="not_comparable", reason="not_every_declared_method_has_a_fully_measured_total")
+                continue
+            totals = {method: sum(costs) for method, costs in values.items()}
+            minimum = min(totals.values())
+            axis.update(status="fully_measured", measured_totals=totals, minimum_fully_measured_total=minimum)
+            for fraction in report["fractions"]:
+                budget, prefixes, methods_at_budget = minimum*fraction, {}, {}
+                for method in methods:
+                    spent, prefix = 0.0, []
+                    for row, cost in zip(ordered[method], values[method], strict=True):
+                        if spent+cost > budget:
+                            break
+                        spent += cost
+                        prefix.append(row)
+                    prefixes[method] = prefix
+                    methods_at_budget[method] = {**prefix_quality(prefix, spec, len(common)),
+                        "accumulated_budget_cost": spent, "unused_budget": budget-spent}
+                common_prefix = set.intersection(*({str(row["task_id"]) for row in prefixes[method]} for method in methods))
+                paired_scored = set.intersection(*({str(row["task_id"]) for row in prefixes[method]
+                    if completed(row) and _scored(row, spec)} for method in methods))
+                axis["points"].append({"fraction": fraction, "shared_budget": budget, "methods": methods_at_budget,
+                    "common_prefix_task_ids": sorted(common_prefix), "common_scored_prefix_task_ids": sorted(paired_scored),
+                    "paired_scored_primary": {method: {"denominator": len(paired_scored),
+                        "original_primary_metric": spec["primary_metric"], "original_primary": _primary([
+                            row for row in prefixes[method] if str(row["task_id"]) in paired_scored], spec)} for method in methods}})
+    return report
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--matrix", required=True)
@@ -231,9 +360,11 @@ def main(argv=None):
         selection="prespecified method IDs; test results never select lambda or rewrite frozen configuration",
         physical_cost_scope="saved online per-request attribution; whole segment physical ledgers retained separately",
         missing_values="missing scores, costs or predictions remain null")
+    summary["budget_curves"] = {"path": "budget-curves.json", "scope": "observed common request prefixes and coverage; original common-QA comparison unchanged"}
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=False)
     write_json(output/"summary.json", summary)
+    write_json(output/"budget-curves.json", budget_curves(matrix, index, args.methods, args.split, args.datasets))
     write_jsonl(output/"common-qa.jsonl", qa)
     write_jsonl(output/"prediction-errors.jsonl", predictions)
     write_json(output/"batch-ledger.json", batch_ledger([{"generation_dir": directory}
@@ -250,6 +381,7 @@ def main(argv=None):
                      f"共同评分 {len(track['common_scored_task_ids'])}；同问题 {len(track['same_question_task_ids'])}；"
                      f"同问题和冻结实际历史 {len(track['same_frozen_input_task_ids'])}。", ""])
     text.extend(["预测误差见 `summary.json.prediction_audit`：逐 kind 的 count/MAE/bias/RMSE，实测与预测不混称。",
+                 "`budget-curves.json` 按固定实际请求前缀报告相同累计在线 token/计算时间预算的质量与覆盖；不是 FLOPs 或完整 benchmark 分数。",
                  "完整测量段费用含失败与空闲，另存 `batch-ledger.json`，不与请求归因积分叠加。", ""])
     (output/"report.md").write_text("\n".join(text))
     print(json.dumps({"output": str(output.resolve()), "common_qa": len(qa), "ambiguous_tasks": len(ambiguous)}, ensure_ascii=False))

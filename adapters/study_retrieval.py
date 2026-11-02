@@ -467,11 +467,6 @@ class StudyEvidenceProvider:
             if parent_trace is None:
                 parent_trace = self.traces.setdefault((snapshot.session_id, plan.task_state.task_id),
                     {"task_state": to_jsonable(plan.task_state), "resumed_from_plan": plan.plan_id})
-            if plan.coverage_scope == "all_supplied_documents":
-                pool = self.directory.full_scope(plan.task_state.source_scope)
-                phases = (("source_directory", (time.perf_counter()-source_started)*1000),)
-                return replace(pool, auxiliary_ms=phases,
-                               auxiliary_usage=self._auxiliary_usage(usage_before, phases))
             state = plan.task_state
             gaps = {need.need_id for need in open_needs}
             state = replace(state, needs=tuple(need for need in state.needs if need.need_id in gaps))
@@ -497,11 +492,20 @@ class StudyEvidenceProvider:
             fresh_pool = (self.directory.full_scope(state.source_scope) if state.source_scope
                           else self.directory.retrieve_gap_pool(state, memory, open_needs))
             fresh_units = tuple(unit for unit in fresh_pool.units if not already_read(unit))
-            phases = (("retrieval", fresh_pool.retrieval_ms),)
+            phases = (("source_directory", (time.perf_counter()-source_started)*1000),) if state.source_scope else (
+                ("retrieval", fresh_pool.retrieval_ms),)
             if not fresh_units:
                 usage = self._auxiliary_usage(usage_before, phases)
                 return replace(fresh_pool, units=(), source_blocks=(), auxiliary_ms=phases,
                                auxiliary_usage=usage)
+            if plan.coverage_scope == "all_supplied_documents":
+                by_id = {unit.unit_id: unit for unit in (*previous, *fresh_pool.units)}
+                material = close_dependencies(tuple(unit.unit_id for unit in fresh_units), by_id)
+                source_keys = {span.source_key for unit in material for span in unit.source_spans}
+                blocks = tuple(block for block in fresh_pool.source_blocks if block.key in source_keys)
+                phases = (("source_directory", (time.perf_counter()-source_started)*1000),)
+                return replace(fresh_pool, units=material, source_blocks=blocks, auxiliary_ms=phases,
+                               auxiliary_usage=self._auxiliary_usage(usage_before, phases))
             old_ids = {unit.unit_id for unit in previous}
             recalled = tuple(replace(unit, need_ids=()) if already_read(unit) and unit.unit_id not in old_ids
                              else unit for unit in fresh_pool.units)
