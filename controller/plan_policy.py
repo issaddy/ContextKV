@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from itertools import product
+import math
 from typing import Mapping, NamedTuple, Protocol
 
 from .context_schema import ContextPlan, ReadTask, ReadingOutcome
@@ -22,6 +23,10 @@ FEATURE_NAMES = (*PLAN_KINDS, "needs", "conditions", "version_comparison", "open
     "unmet_answer_points", "existing_claims", "completed_steps", "read_steps", "reduce_steps",
     "evidence_units", "source_passages", "dependencies", "source_versions", "required_coverage",
     "planned_coverage", "input_budget_tokens", "output_budget_tokens")
+
+
+class NoCompletePlan(ValueError):
+    """All evaluated complete routes were infeasible; evaluations are retained."""
 
 
 @dataclass(frozen=True)
@@ -85,6 +90,43 @@ class StepForecast:
     scope: str = "future_input_profile"
     candidate: PromptCandidate | None = None
     prefix_ids: tuple[str, ...] = ()
+    selection_eligible: bool | None = None
+
+
+def native_selection_cost(estimate, timing_model, candidate, batch, admission, profile):
+    """Distinguish empirical calibration from bound statistical selection."""
+    original = estimate.calibrated if estimate.selection_eligible is None else estimate.selection_eligible
+    if original:
+        return estimate.cost, {"selection_eligible": True, "kind": "native_quote",
+                               "calibrated": estimate.calibrated}
+    metadata = timing_model.calibration_metadata
+    if (timing_model.calibration_scope_compatible is not True or not timing_model.sampling_scope_compatible
+            or metadata.get("generation_kind") != candidate.generation_kind
+            or metadata.get("output_prior_system_prompt") != candidate.messages[0].content
+            or candidate.fingerprint != batch.fingerprint or profile is None):
+        return None, {"selection_eligible": False, "kind": "native_statistical_scope_mismatch", "calibrated": False}
+    capacity, page, clip = admission["gpu_capacity_tokens"], admission["page_size"], admission["native_max_new_tokens_clip"]
+    output = candidate.output_budget or timing_model.max_new_tokens
+    gate = len(candidate.input_ids)+min(output, clip)+page
+    if gate >= capacity or not 0 <= batch.active_requests <= 8:
+        return None, {"selection_eligible": False, "kind": "native_hard_capacity_exceeded",
+                      "native_gate_tokens": gate, "gpu_capacity_tokens": capacity, "calibrated": False}
+    values = [value for value in (estimate.cost, estimate.risk_cost)
+              if math.isfinite(value) and value > 0]
+    if candidate.generation_kind != "ANSWER":
+        values.append(profile["phase_envelope_latency_ms"])
+    if not values:
+        return None, {"selection_eligible": False, "kind": "native_nonfinite_service_prediction", "calibrated": False}
+    service = max(values)
+    pending = batch.active_requests+batch.queued_requests
+    queue = pending*max(service, admission["profile_service_envelope_ms"])
+    total = service+queue
+    return total, {"selection_eligible": True, "kind": "native_statistical_extrapolation", "calibrated": False,
+        "native_mean_ms": estimate.cost, "native_risk_ms": estimate.risk_cost,
+        "service_envelope_ms": service, "statistical_queue_ms": queue,
+        "queue_basis": "observed_idle_no_queue" if pending == 0 else "observed pending requests times empirical service upper envelope; statistical serial waiting proxy",
+        "native_active_requests": batch.active_requests, "native_queued_requests": batch.queued_requests,
+        "native_gate_tokens": gate, "gpu_capacity_tokens": capacity, "remaining_prediction_ms": total}
 
 
 @dataclass(frozen=True)
@@ -223,6 +265,7 @@ class PlanPolicy:
             raise ValueError("plan-gain policy is not enabled without a reader-bound trained gain asset")
         self.gain_model, self.limits = gain_model, limits
         self.last_evaluations = ()
+        self.last_option_diagnostics = {}
 
     def _penalty(self, cost, budget):
         return (budget.lambda_time*cost.latency_ms+budget.lambda_gpu*cost.gpu_gib_ms
@@ -249,7 +292,11 @@ class PlanPolicy:
         quotes = {quote.candidate_id: quote for quote in native.quotes.quotes}
         result = []
         for candidate in step.variants:
+            diagnostic = {"candidate_id": candidate.candidate_id, "plan_id": plan.plan_id,
+                          "step_id": step.task.step_id}
+            self.last_option_diagnostics[candidate.candidate_id] = diagnostic
             if not candidate.feasible:
+                diagnostic["reason"] = "compiled_input_output_infeasible"
                 continue
             quote = quotes[candidate.candidate_id]
             if (quote.input_hash != candidate.input_hash or quote.input_len != len(candidate.input_ids)
@@ -257,6 +304,7 @@ class PlanPolicy:
                 raise ValueError("plan quote does not bind the actual compiled input")
             resource = native.resources.get(candidate.candidate_id)
             if resource is None:
+                diagnostic["reason"] = "physical_profile_unavailable"
                 continue
             if resource.quote_seq != native.quotes.observed_seq:
                 raise ValueError("resource forecast and native quote use different observations")
@@ -267,11 +315,13 @@ class PlanPolicy:
             if candidate.generation_kind != expected_kind:
                 raise ValueError("compiled candidate generation kind differs from its plan step")
             if not self._within_step_budget(plan, step, len(candidate.input_ids), output):
+                diagnostic["reason"] = "output_reservation_or_step_context_budget"
                 continue
             timing_model = native.cost_model.step_models.get(expected_kind, native.cost_model)
             metadata = timing_model.calibration_metadata
             if (metadata.get("generation_kind") != expected_kind or
                     metadata.get("output_prior_system_prompt") != candidate.messages[0].content):
+                diagnostic["reason"] = "timing_kind_or_prompt_scope_mismatch"
                 continue
             control_adjustment = 0.0
             scope = "native_quote"
@@ -279,6 +329,7 @@ class PlanPolicy:
                 prior = timing_model.step_output_priors.get(f"ANSWER:{output}")
                 if (prior is None or "mean_remaining_control_ms" not in prior or
                         "rolling_proposals_compilation_start" not in metadata.get("step_control_scope", ())):
+                    diagnostic["reason"] = "answer_remaining_control_or_start_scope_missing"
                     continue
                 # The actual selection head is already in paid_cost. Replace
                 # this profile's full control term by its measured remaining
@@ -290,12 +341,32 @@ class PlanPolicy:
             measured = native.cost_model.predict_native(replace(candidate, predicted_read_ms=0.0,
                 auxiliary_ms=0.0), quote, native.snapshot, batch=native.quotes,
                 concurrency=native.quotes.active_requests+1, control_ms=control_adjustment)
-            eligible = measured.calibrated if measured.selection_eligible is None else measured.selection_eligible
+            profiles = (native.paid_observation or {}).get("execution_profile_predictions", {})
+            profile = profiles.get(candidate.candidate_id)
+            selected_cost, selection = native_selection_cost(measured, timing_model, candidate, native.quotes,
+                (native.paid_observation or {}).get("native_admission", {}), profile)
+            eligible = selection["selection_eligible"] and resource.calibrated
+            if selection["kind"] == "native_statistical_extrapolation":
+                scope = "native_statistical_extrapolation"
+            gpu, host = resource.gpu_gib_ms, resource.host_gib_ms
+            if selection["kind"] == "native_statistical_extrapolation":
+                if expected_kind == "ANSWER":
+                    rates = profile["conditional_remaining_resources"]
+                    gpu, host = rates["mean_gpu_gib"]*selected_cost, rates["mean_host_gib"]*selected_cost
+                else:
+                    gpu = max(gpu, profile["mean_gpu_gib"]*selected_cost)
+                    host = max(host, profile["mean_host_gib"]*selected_cost)
+            diagnostic.update(reason="eligible" if eligible and resource.calibrated
+                              else "native_timing_prediction_not_selection_eligible",
+                              estimate=measured, native_scope=timing_model.calibration_scope_report,
+                              sampling_scope=timing_model.sampling_scope_report, selection=selection)
+            if selected_cost is None:
+                continue
             result.append(StepForecast(candidate.action, output,
-                CompleteCost(measured.cost, resource.gpu_gib_ms, resource.host_gib_ms,
+                CompleteCost(selected_cost, gpu, host,
                     len(candidate.input_ids), output, resource.gpu_peak_gib, resource.host_peak_gib),
-                resource.calibration_id, bool(eligible and resource.calibrated), scope,
-                candidate, resource.prefix_ids))
+                resource.calibration_id, bool(measured.calibrated and resource.calibrated), scope,
+                candidate, resource.prefix_ids, bool(eligible)))
         return tuple(result)
 
     def _within_step_budget(self, plan, step, inputs, output):
@@ -316,6 +387,7 @@ class PlanPolicy:
         return next((reason for limit, value, reason in checks if limit is not None and value > limit), None)
 
     def choose(self, plans, state: ReadingOutcome, native: NativePlanningState, reusable_prefixes):
+        self.last_option_diagnostics = {}
         plans = tuple(plans)
         if len(plans) > self.limits.max_plan_candidates:
             raise ValueError("A must supply the configured finite number of complete plans")
@@ -364,11 +436,12 @@ class PlanPolicy:
                 evaluations.append(PlanEvaluation(plan.plan_id, None, None, None, False, reason))
                 continue
             options = [tuple(option for option in self._options(plan, step, completed, native, reusable_prefixes,
-                future_execution=index > 0) if option.calibrated) for index, step in enumerate(ordered)]
+                future_execution=index > 0) if (option.calibrated if option.selection_eligible is None
+                                               else option.selection_eligible)) for index, step in enumerate(ordered)]
             cpu_step = (ordered[0].task.kind == "REDUCE" and plan.context_plan.reading_mode == "typed_reduce"
                 and ordered[0].task.operation in {"union", "count", "sum", "group"})
             if not options[0] or any(option.candidate is None and not (
-                    cpu_step and option.scope == "cpu_profile") for option in options[0]):
+                    cpu_step and option.scope in {"cpu_profile", "cpu_empirical_bin_prediction"}) for option in options[0]):
                 evaluations.append(PlanEvaluation(plan.plan_id, None, None, None, False, "next_step_not_compiled"))
                 continue
             if any(not choices for choices in options):
@@ -404,6 +477,6 @@ class PlanPolicy:
                         first.candidate, first.prefix_ids), first.context_action, first.output_budget)))
         self.last_evaluations = tuple(evaluations)
         if not decisions:
-            raise ValueError("no complete plan satisfies coverage, budgets and measured execution forecasts")
+            raise NoCompletePlan("no complete plan satisfies coverage, budgets and measured execution forecasts")
         return max(decisions, key=lambda item: (item[0].objective, -item[0].cost.latency_ms,
             -item[0].cost.gpu_gib_ms, -item[0].cost.host_gib_ms, item[0].plan_id))[1]

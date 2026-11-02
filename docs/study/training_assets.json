@@ -1,0 +1,254 @@
+{
+  "schema_version": 1,
+  "observation_date": "2026-11-03",
+  "evidence_source": "Actual sjy-0518 results reported by the main agent; local documentation inventory",
+  "container_project_root": "/home/relay/songjiayun/ContextKV/runs/study-20261102/project",
+  "path_semantics": "Paths below are relative to container_project_root unless absolute; driver artifact names are preserved",
+  "R0": {
+    "logical_name": "R0",
+    "status": "retained_original_Qwen3_32B_BF16",
+    "scope": "configs/model_scopes/qwen3-32b.local.json",
+    "run_config": "configs/qwen3_32b.yaml",
+    "actual_base_revision": "local-snapshot:7442623e99dd0b456628ddc48805a4ea11249ee2ee66484b5d1ab44d2940beb8",
+    "modified_by_reader_training": false
+  },
+  "native_rollout": {
+    "partition": "native_multidoc2dial_train",
+    "actual_turns": 10004,
+    "actual_conversations": 1539,
+    "turns_path": "/home/relay/songjiayun/ContextKV/runs/study-20261102/task-a/turns.jsonl",
+    "state_db": "/home/relay/songjiayun/ContextKV/runs/study-20261102/task-a/state/sessions.sqlite3",
+    "history_origin": "actual generated history; no author reference answer substitution",
+    "supervision_filter": "teacher-reviewed correctness and original-source support; raw R0 answers are not automatically accepted",
+    "public_dev_test_gold_used_for_training": false
+  },
+  "R1_v1": {
+    "logical_name": "R1_v1",
+    "status": "trained_merged_serving",
+    "reader_id": "contextkv-reader-r1:1eec232b42b67721374c0400b354081842b54c965a20c441b17b4d82a33c567b",
+    "dtype": "bfloat16",
+    "adaptation": "LoRA",
+    "training_config": "configs/reader_r1.yaml",
+    "optimizer_steps": 56,
+    "training_model_input_tokens": 7800825,
+    "training_supervised_tokens": 355628,
+    "training_cuda_synchronized_wall_ms": 1405076.37,
+    "train_examples": 1773,
+    "train_actual_native_turns": 1544,
+    "validation_examples": 19,
+    "total_reviewed_examples": 1792,
+    "total_reviewed_by_phase": {
+      "ANSWER": 1559,
+      "READ": 233
+    },
+    "validation_loss": 0.1608121544,
+    "validation_scope": "native training-partition conversation holdout, not QA benchmark evaluation",
+    "data_dir": "runs/study/reader-r1-data",
+    "model_dir": "models/study-reader-r1",
+    "merged_model_dir": "models/study-reader-r1-merged",
+    "adapter": "models/study-reader-r1/adapter",
+    "reader_manifest": "models/study-reader-r1/reader_manifest.json",
+    "model_scope": "models/study-reader-r1/model_scope.json",
+    "run_config": "models/study-reader-r1/r1_run_config.yaml",
+    "latest_service_report": {
+      "port": 30004,
+      "physical_gpu": 6,
+      "health_status": 200
+    }
+  },
+  "P0": {
+    "status": "existing_actual_prefix_asset",
+    "asset": "models/study-support-actual-prefix",
+    "manifest": "models/study-support-actual-prefix/support-model.json",
+    "heads": "models/study-support-actual-prefix/heads.pt",
+    "asset_sha256": null,
+    "asset_sha256_status": "fill_from_frozen_configuration"
+  },
+  "P1_prototype22": {
+    "status": "trained",
+    "asset": "models/study-support-r1-prototype22",
+    "manifest": "models/study-support-r1-prototype22/support-model.json",
+    "heads": "models/study-support-r1-prototype22/heads.pt",
+    "initial_asset": "models/study-support-actual-prefix",
+    "actual_candidate_answers": 22,
+    "actual_training_states": 5,
+    "reader_binding": "contextkv-reader-r1:1eec232b42b67721374c0400b354081842b54c965a20c441b17b4d82a33c567b",
+    "cross_reader_evaluation_cells": [
+      "P1_R0",
+      "P1_R2"
+    ],
+    "asset_sha256": null,
+    "asset_sha256_status": "fill_from_frozen_configuration"
+  },
+  "R2": {
+    "logical_name": "R2",
+    "status": "trained_merged_serving",
+    "reader_id": "contextkv-reader-r1:7521b3cffa58df5c0973b361f12d9138bcf358c6404a1b6b6a4c6b440f62e768",
+    "identity_note": "Existing driver prefix remains contextkv-reader-r1; logical round and full digest distinguish R2",
+    "initial_adapter": "models/study-reader-r1/adapter",
+    "initial_reader_id": "contextkv-reader-r1:1eec232b42b67721374c0400b354081842b54c965a20c441b17b4d82a33c567b",
+    "dtype": "bfloat16",
+    "adaptation": "LoRA continuation",
+    "physical_training_gpus_reported": [
+      0,
+      4,
+      6,
+      7
+    ],
+    "optimizer_steps": 71,
+    "training_model_input_tokens": 10759242,
+    "training_supervised_tokens": 597099,
+    "training_cuda_synchronized_wall_ms": 1952039.975,
+    "train_sampled_examples": 2264,
+    "actual_native_training_turns": 1544,
+    "mix": {
+      "frozen_parent": {
+        "sampled": 1773,
+        "repetitions": 1
+      },
+      "reviewed_curriculum": {
+        "unique_new": 153,
+        "sampled": 459,
+        "repetitions": 3
+      },
+      "new_P1_actual_history": {
+        "unique_new": 4,
+        "sampled": 32,
+        "repetitions": 8
+      },
+      "deduplication": "exact messages plus target_text; original IDs and all source origins retained",
+      "sampling_order": "new P1, curriculum, parent",
+      "minimum_actual_native_turns": 1000,
+      "validation_policy": "copy unchanged frozen parent validation bytes",
+      "validation_file_sha256": null,
+      "validation_file_sha256_status": "fill_from_data_manifest"
+    },
+    "mix_config": "configs/reader_mix_r2.yaml",
+    "data_dir": "runs/study/reader-r2-data/mixed",
+    "training_config": "runs/study/reader-r2-data/mixed/reader_r2_training.yaml",
+    "parent_data_dir": "runs/study/reader-r1-data",
+    "curriculum_data_dir": "runs/study/reader-curriculum-round2",
+    "new_P1_data_dir": "runs/study/reader-r2-data/new-p1-runtime",
+    "model_dir": "models/study-reader-r2",
+    "merged_model_dir": "models/study-reader-r2-merged",
+    "adapter": "models/study-reader-r2/adapter",
+    "reader_manifest": "models/study-reader-r2/reader_manifest.json",
+    "model_scope": "models/study-reader-r2/model_scope.json",
+    "run_config": "models/study-reader-r2/r1_run_config.yaml",
+    "run_config_filename_note": "Driver filename retained; its model scope binds the R2 digest",
+    "validation_loss": 0.157603919506073,
+    "latest_service_report": {
+      "port": 30006,
+      "physical_gpu": 4,
+      "health_status": 200
+    },
+    "public_quality_result": null,
+    "public_quality_status": "pending"
+  },
+  "data_and_review_artifact_contract": {
+    "prepared_data": [
+      "train.jsonl",
+      "validation.jsonl",
+      "data_manifest.json"
+    ],
+    "new_target_review": [
+      "traces.jsonl",
+      "reviews.jsonl",
+      "review_calls.jsonl"
+    ],
+    "source_audit": "Per-example original message/prompt hashes, actual history, reader identity, target_origin/quality and original source coordinates",
+    "curriculum_audit": "Control/changed source hashes, pair IDs and newly generated/reviewed targets; not old answers copied onto modified sources",
+    "excluded_targets": [
+      "input_over_budget",
+      "teacher_target_truncated",
+      "quality_or_source_support_rejected"
+    ],
+    "unknown_failures": "raw failure and paid cost retained; not accepted as supervised targets"
+  },
+  "per_reader_model_artifact_contract": {
+    "identity": [
+      "reader_manifest.json",
+      "reader_manifest.<adapter_digest>.json",
+      "model_scope.json",
+      "r1_run_config.yaml"
+    ],
+    "training": [
+      "adapter/",
+      "effective_training_config.json",
+      "training_steps.rank*.jsonl",
+      "training_cost.json",
+      "training_cost.<invocation_id>.json"
+    ],
+    "physical": [
+      "train_cost*.json",
+      "train_physical_resources*.json",
+      "merge_cost*.json",
+      "merge_physical_resources*.json"
+    ],
+    "validation": [
+      "evaluation/train_partition_holdout_loss.json"
+    ],
+    "licenses_and_source": [
+      "BASE_MODEL_CARD.md",
+      "LICENSE",
+      "BASE_NOTICE"
+    ],
+    "licenses_verification_status": "fill actual present files, base revision and SHA from container asset manifests",
+    "physical_integral_totals": null,
+    "physical_integral_totals_status": "pending aggregation from continuous sampler artifacts; torch peak memory is separate"
+  },
+  "frozen_fourgrid_R1_v1": {
+    "root": "b/fourgrid-prototype22/frozen",
+    "metric": "project_condition_version_score",
+    "comparison_scope": "same actual E0 task state, candidate pool and actual history",
+    "common_states": 13,
+    "planned_states_per_method": 14,
+    "results": {
+      "P0_R0": {
+        "completed_QA": 13,
+        "terminal_budget_failures": 1,
+        "common_primary_score": 0.9230769231
+      },
+      "P0_R1": {
+        "completed_QA": 14,
+        "terminal_budget_failures": 0,
+        "common_primary_score": 0.9461538462
+      },
+      "P1_R0": {
+        "completed_QA": 14,
+        "terminal_budget_failures": 0,
+        "common_primary_score": 0.9615384615
+      },
+      "P1_R1": {
+        "completed_QA": 14,
+        "terminal_budget_failures": 0,
+        "common_primary_score": 0.9769230769
+      }
+    },
+    "public_benchmark_result": false,
+    "full_cost_comparison": null
+  },
+  "final_evaluation_pending": {
+    "public_development_methods": [
+      "P0_R0",
+      "P1_R0",
+      "P1_R1",
+      "P0_R2",
+      "P1_R2"
+    ],
+    "development_cohorts": {
+      "multidoc2dial": {
+        "turns": 15,
+        "conversations": 2
+      },
+      "twowiki": 40,
+      "long_dev": 2
+    },
+    "R0_R1_development_generation_reported": true,
+    "R2_development_generation_reported": true,
+    "source_and_asset_freeze_manifest": null,
+    "selected_method": null,
+    "public_test_scores": null,
+    "load_and_ablation_results": null
+  }
+}

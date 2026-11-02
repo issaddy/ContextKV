@@ -360,6 +360,7 @@ class WorkloadDispatcher:
         self._condition = asyncio.Condition()
         self._next = 0
         self.arrivals = {}
+        self.cancelled = {}
         self.restored_task_ids = ()
 
     def restore_completed(self, task_ids):
@@ -372,7 +373,8 @@ class WorkloadDispatcher:
 
     def _skip_completed_ordinals(self):
         order = self.manifest.dispatch_order
-        while self._next < len(order) and self._completed[order[self._next]].is_set():
+        while self._next < len(order) and (self._completed[order[self._next]].is_set()
+                                          or order[self._next] in self.cancelled):
             self._next += 1
 
     async def wait_turn(self, row, actual_history):
@@ -384,7 +386,9 @@ class WorkloadDispatcher:
             planned = self._completion_times[turn.release_after_task_id]+turn.think_time_seconds
         await asyncio.sleep(max(0.0, self.origin+planned-time.monotonic()))
         async with self._condition:
-            await self._condition.wait_for(lambda: turn.dispatch_index == self._next)
+            independent = self.manifest.dispatch_semantics == "independent_clients_after_own_prior_commit"
+            if not independent:
+                await self._condition.wait_for(lambda: turn.dispatch_index == self._next)
             arrival = time.monotonic()-self.origin
             value = {"task_id": turn.task_id, "dispatch_index": turn.dispatch_index,
                 "release_after_task_id": turn.release_after_task_id,
@@ -395,10 +399,21 @@ class WorkloadDispatcher:
                 "resume_pause_basis": "configured pause reapplied from segment origin" if self.restored_task_ids else None,
                 "committed_history_turns": len(actual_history)}
             self.arrivals[turn.task_id] = value
-            self._next += 1
+            if not independent:
+                self._next += 1
             self._skip_completed_ordinals()
             self._condition.notify_all()
             return value
+
+    async def cancel_conversation(self, conversation_id, reason):
+        """Remove unsubmitted ordinals after a failed client, without commits."""
+        async with self._condition:
+            for turn in self.manifest.turns:
+                if (turn.conversation_id == conversation_id and turn.task_id not in self.arrivals
+                        and not self._completed[turn.task_id].is_set()):
+                    self.cancelled[turn.task_id] = {"reason": reason, "completed": False}
+            self._skip_completed_ordinals()
+            self._condition.notify_all()
 
     def complete_turn(self, task_id):
         self._completion_times[task_id] = time.monotonic()-self.origin

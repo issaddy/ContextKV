@@ -65,7 +65,7 @@ class SourceLedger(SessionStore):
             return tuple(self.get_attempt(identity) for identity in identities)
         suffix, parameters = ("", ()) if limit is None else (" LIMIT ?", (limit,))
         return tuple(self.get_attempt(row[0]) for row in self.db.execute(
-            "SELECT a.attempt_id FROM attempts a JOIN turn_plans p ON p.attempt_id=a.attempt_id "
+            "SELECT a.attempt_id FROM attempts a "
             "WHERE a.stage='COMMITTED' ORDER BY a.rowid"+suffix, parameters))
 
     def before(self, attempt):
@@ -99,7 +99,7 @@ def source_records(path, *, store=None, attempt_ids=None):
                     continue
             else:
                 required = {"task_id", "conversation_id", "question", "actual_history", "snapshot_id",
-                            "rollout_policy", "committed_turn", "answer", "response", "split"}
+                            "rollout_policy", "answer", "response", "split"}
                 if not required <= row.keys() or row["rollout_policy"] != "dense5_rebuild_qwen3_32b_nonthinking":
                     raise ValueError("source without status is not the actual native training rollout contract")
             identity = row["response"]["attempt_id"]
@@ -115,11 +115,13 @@ def source_records(path, *, store=None, attempt_ids=None):
                 if actual.query != row["question"] or actual.result.text != row["answer"]:
                     raise ValueError("native training rollout text differs from its linked SQLite Attempt")
                 corpus_ids = sorted({block.key.corpus_id for block in actual.evidence})
-                row = {**row, "status": "completed", "dataset": "+".join(corpus_ids),
+                row = {**row, "status": "completed", "dataset": row["dataset"] if "dataset" in row else "+".join(corpus_ids),
                     "source_status_derivation": dict(contract="training.task_rollout.run_actual_rollouts",
                         state_database=str(store.path), source_record_path=str(Path(path).resolve()),
                         source_record_sha256=digest(row), stage=actual.stage,
-                        native_receipt=to_jsonable(receipt), corpus_ids=corpus_ids)}
+                        native_receipt=to_jsonable(receipt),
+                        native_fingerprint=to_jsonable(actual.plan.candidate.fingerprint),
+                        corpus_ids=corpus_ids)}
             records[identity] = row
             if attempt_ids is not None and records.keys() >= attempt_ids:
                 break

@@ -75,9 +75,11 @@ def configure(args, root):
             "overrides": {"generation": {"run_config": str(run_path.resolve())},
                 "execution": {"plan_gain": settings, "lambda_time": weight,
                               "cost_artifact": native["base_artifact"]}}})
+    methods.sort(key=lambda method: method.get("comparison") != "actual_reader_bound_plan_gain")
     matrix = merge_config(matrix, {"methods": methods, "selection": {
         "include_ablations": False, "test_comparators": args.baselines}})
     matrix["resources"]["gpu_devices"] = settings["gpu_devices"]
+    matrix["resources"]["process_ids"] = settings["process_ids"]
     config_path = root/"study.yaml"
     config_path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
     provenance = {"files": {name: snapshot_file(path) for name, path in (

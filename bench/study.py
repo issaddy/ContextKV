@@ -5,6 +5,7 @@ import argparse
 import asyncio
 from collections import Counter
 from dataclasses import replace
+import hashlib
 import json
 from pathlib import Path
 import random
@@ -57,7 +58,7 @@ def save_measurement_segment(directory, segment_id, *, physical, native, batch):
 def merge_config(base, overrides):
     result = dict(base)
     for name, value in overrides.items():
-        result[name] = (merge_config(result.get(name, {}), value) if isinstance(value, dict)
+        result[name] = (merge_config(result[name] if isinstance(result.get(name), dict) else {}, value) if isinstance(value, dict)
                         else value)
     return result
 
@@ -136,9 +137,13 @@ def method_config(config, method, dataset, split):
     retrieval = {name: dataset[key] for name, key in (
         ("corpus_path", "corpus_path"), ("config_path", "retriever_config"),
         ("corpus_id", "corpus_id")) if key in dataset}
+    reading = dict(dataset.get("reading", {}))
+    reading["coverage_mode"] = dataset.get("coverage_mode", reading.get("coverage_mode", "selected_sources"))
+    selection = dict(dataset.get("selection", {}))
+    selection["max_passages"] = dataset.get("max_passages", selection.get("max_passages"))
     value = merge_config(config, {"study": {"strategy": method["strategy"]},
-        "retrieval": retrieval, "reading": {"coverage_mode": dataset.get("coverage_mode", "selected_sources")},
-        "selection": {"max_passages": dataset.get("max_passages")}})
+        "retrieval": retrieval, "reading": reading,
+        "selection": selection})
     value = merge_config(value, {"retrieval": dataset.get("retrieval_by_split", {}).get(split, {})})
     return merge_config(value, method.get("overrides", {}))
 
@@ -154,6 +159,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     from bench.study_workloads import WorkloadDispatcher
 
     spec = matrix["datasets"][dataset_name]
+    reuse_provider = spec.get("reuse_provider", False)
+    continue_conversation_failures = spec.get("continue_conversation_failures", False)
     if workload is not None:
         concurrency = workload.concurrency
     config = method_config(config, method, spec, split)
@@ -169,7 +176,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     initialization_ms = (time.monotonic()-provider_started)*1000
     engine_info = await service.engine.info()
     cache_protocol = config["execution"].get("cache_start", "observed")
-    cache_start = (await service.engine.profile_prepare("cold") if cache_protocol == "cold" else None)
+    cache_start = (await service.engine.profile_prepare("cold")
+                   if cache_protocol == "cold" and not reuse_provider else None)
     engine_info = await service.engine.info()
     allocator = await service.engine.metrics()
     source_rows = dataset_rows(spec, split)
@@ -179,6 +187,9 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     conversations = sorted(grouped)
     if limit_conversations is not None:
         conversations = conversations[:limit_conversations]
+    if reuse_provider and (concurrency != 1 or workload is not None
+            or any(len(grouped[sid]) != 1 or grouped[sid][0][1]["turn"] != 1 for sid in conversations)):
+        raise ValueError("reuse_provider requires serial independent one-turn conversations")
     expected = [row["task_id"] for sid in conversations for _, row in grouped[sid]]
     if workload is not None and set(workload.dispatch_order) != set(expected):
         raise ValueError("workload and dataset must contain exactly the same task IDs")
@@ -188,6 +199,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         "concurrency_scope": "request",
         "workload": to_jsonable(workload), "answer_driven_policy": question_fn is not None,
         "cache_start_protocol": cache_protocol, "cache_start_record": cache_start,
+        "reuse_provider": reuse_provider, "conversation_cache_boundary": "cold" if reuse_provider else None,
         "auxiliary_initialization_ms": initialization_ms,
         "engine": engine_info, "allocator_initial": allocator,
         "model": run.model, "generation_protocol": run.sampling,
@@ -196,7 +208,10 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     (directory/"records").mkdir(exist_ok=True)
     old_records = {row["task_id"]: row for path in (directory/"records").glob("*.json")
                    for row in [json.loads(path.read_text())]}
-    results, windows = dict(old_records), {}
+    results, windows, request_starts = dict(old_records), {}, {}
+    failures = {row["conversation_id"]: row
+        for path in (directory/"terminal_read_failures").glob("*.json")
+        for row in [json.loads(path.read_text())]} if reuse_provider else {}
     semaphore = asyncio.Semaphore(concurrency)
     resource_settings = matrix["resources"]
     ports = [urlparse(run.engine.base_url).port]
@@ -217,6 +232,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     async def one_turn(sid, number, row, arrival=None, workload_arrival=None):
         session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
         start = time.monotonic() if arrival is None else arrival
+        request_starts[row["task_id"]] = start
         query = row["input"][-1]["text"]
         before = service.store.read_snapshot(session_id, provider.corpus_snapshot_id)
         protocol = spec.get("protocol", "P3")
@@ -324,12 +340,82 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 dispatcher.complete_turn(row["task_id"])
         await service.close_session(session_id)
 
+    async def isolated_conversation(sid):
+        client_started = time.monotonic()
+        try:
+            await conversation(sid)
+        except Exception as error:
+            if dispatcher is not None:
+                await dispatcher.cancel_conversation(sid, str(error))
+            ordered_rows = sorted(grouped[sid], key=lambda item: item[1]["turn"])
+            row = next((row for _, row in ordered_rows if row["task_id"] not in results), ordered_rows[-1][1])
+            session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
+            attempt = service.store.find_request(session_id, row["task_id"])
+            failure = dict(conversation_id=sid, task_id=row["task_id"], session_id=session_id,
+                error_type=type(error).__name__, error=str(error),
+                request_window=[request_starts[row["task_id"]] if row["task_id"] in request_starts else client_started,
+                                time.monotonic()],
+                failure_window_scope="failed_request_wall" if row["task_id"] in request_starts else "client_before_submission",
+                measurement_segment_id=segment_id,
+                attempt=to_jsonable(attempt),
+                execution_steps=[to_jsonable(step) for step in service.store.execution_steps(attempt.attempt_id)]
+                    if attempt is not None else [],
+                blocked_task_ids=[value["task_id"] for _, value in ordered_rows
+                    if value["task_id"] not in results and value["task_id"] != row["task_id"]])
+            failures[sid] = failure
+            write_json(directory/"failed_conversations"/(str(row["turn"])+"-"+hashlib.sha256(sid.encode()).hexdigest()[:20]+".json"), failure)
+            try:
+                await service.close_session(session_id)
+            except Exception as cleanup_error:
+                failure["cleanup_error"] = {"type": type(cleanup_error).__name__, "message": str(cleanup_error)}
+
     from bench.async_diagnostics import install_from_env, study_wait_state
     async_dump = install_from_env(state_provider=lambda: study_wait_state(service, provider))
     try:
-        async with asyncio.TaskGroup() as group:
+        if reuse_provider:
+            from bench.evidence_policy_comparison import (persist_p3_failure,
+                terminal_budget_text, terminal_model_budget)
+            from training.reader_data import digest
             for sid in conversations:
-                group.create_task(conversation(sid), name=f"study:{method['id']}:{dataset_name}:{split}:{sid}")
+                number, row = grouped[sid][0]
+                if row["task_id"] in results or sid in failures:
+                    continue
+                session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
+                previous = service.store.find_request(session_id, row["task_id"])
+                if previous is not None and previous.stage == "FAILED":
+                    if not terminal_budget_text(previous.error):
+                        raise ValueError(f"unrecognized prior failed attempt: {previous.error}")
+                    if sid not in failures:
+                        failures[sid] = persist_p3_failure(directory, sid, previous.error, session_id=session_id)
+                    await service.close_session(session_id)
+                    continue
+                boundary_start = time.monotonic()
+                cold = await service.engine.profile_prepare("cold")
+                write_json(directory/"cold_boundaries"/(digest(sid)[:20]+f".{segment_id}.json"),
+                    {"conversation_id": sid, "measurement_segment_id": segment_id,
+                     "window": [boundary_start, time.monotonic()], "receipt": cold})
+                request_start = time.monotonic()
+                try:
+                    await conversation(sid)
+                except Exception as error:
+                    if isinstance(error, ExceptionGroup):
+                        _, unknown = error.split(terminal_model_budget)
+                        if unknown is not None:
+                            raise unknown
+                    elif not terminal_model_budget(error):
+                        raise
+                    failure = persist_p3_failure(directory, sid, str(error), session_id=session_id)
+                    failure.update(request_window=[request_start, time.monotonic()],
+                        measurement_segment_id=segment_id)
+                    failures[sid] = failure
+                    write_json(directory/"terminal_read_failures"/(digest(sid)[:20]+".json"), failure)
+                    await service.close_session(session_id)
+        elif continue_conversation_failures:
+            await asyncio.gather(*(isolated_conversation(sid) for sid in conversations))
+        else:
+            async with asyncio.TaskGroup() as group:
+                for sid in conversations:
+                    group.create_task(conversation(sid), name=f"study:{method['id']}:{dataset_name}:{split}:{sid}")
     finally:
         measured_end = time.monotonic()
         await native.stop()
@@ -350,6 +436,20 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             "attribution": "physical interval occupancy divided across concurrently active requests",
             "idle_cost": "included in batch physical integral, retained outside per-request attribution"})
         write_json(segment/"generation_manifest.json", generation_manifest)
+        if reuse_provider or continue_conversation_failures:
+            for failure in failures.values():
+                if failure.get("measurement_segment_id") == segment_id:
+                    window = failure["request_window"]
+                    failure["cost"] = {"complete_ms": (window[1]-window[0])*1000,
+                        **integrate_physical(physical.samples, *window)}
+                failure_key = (digest(failure["conversation_id"]) if reuse_provider else
+                               hashlib.sha256(failure["conversation_id"].encode()).hexdigest())
+                write_json(directory/"terminal_read_failures"/(failure_key[:20]+".json"), failure)
+            write_json(directory/"failed_conversations.json", list(failures.values()))
+        if continue_conversation_failures and dispatcher is not None:
+            write_json(directory/"workload_dispatch.json", dict(origin=dispatcher.origin,
+                clock="client_monotonic", actual_arrivals=dispatcher.arrivals, cancelled=dispatcher.cancelled,
+                independent_clients=workload.dispatch_semantics == "independent_clients_after_own_prior_commit"))
         ordered = [results[key] for key in expected if key in results]
         write_jsonl(directory/"results.unscored.jsonl", ordered)
         references = []

@@ -159,7 +159,8 @@ async def score_cell(args):
             if args.dataset == "twowiki":
                 from bench.public_multihop import score
                 source_dir = matrix["datasets"]["twowiki"]["scoring"]["source_dir"]
-                score(source_dir, matrix["datasets"]["twowiki"]["inputs"][args.split], part)
+                score(source_dir, matrix["datasets"]["twowiki"]["inputs"][args.split], part,
+                    projection=matrix["datasets"]["twowiki"].get("answer_projection"))
                 current = rows(part/"results.scored.jsonl")
             else:
                 current = await score_dataset(config, matrix["datasets"][args.dataset], values, part)
@@ -242,10 +243,12 @@ def freeze(args):
     for name, path in config["policy_comparison"]["policies"].items():
         policies[name] = {"asset": path, "heads_sha256": file_digest(Path(path)/"heads.pt"),
                           "manifest_sha256": file_digest(Path(path)/"support-model.json")}
+    reader_specs = {**config["policy_comparison"]["readers"],
+                    **config["policy_comparison"].get("cell_readers", {})}
     frozen = {"selected_method": method, "selection_status": status, "selected": selected, "development_summaries": summaries,
         "test_methods": list(dict.fromkeys(("P0_R0", method))), "config": config, "matrix": matrix, "policies": policies,
         "readers": {name: {"run_config": item["run_config"], "run_config_sha256": file_digest(item["run_config"])}
-                    for name, item in config["policy_comparison"]["readers"].items()},
+                    for name, item in reader_specs.items()},
         "dev_results_sha256": file_digest(root/"dev"/"results.scored.jsonl"),
         "cohort_manifest_sha256": file_digest(root/"cohort_manifest.json"), "frozen_unix_ns": time.time_ns(),
         "test_cohorts": matrix["cohorts"]["test"], "test_selection_uses_test_answers": False,

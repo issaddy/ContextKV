@@ -32,7 +32,7 @@ C 的 `reusable_prefixes` 是候选 ID 到真实 prefix IDs 的映射。`Resourc
 
 `controller.plan_profiles` 仅在实际测量范围内提供资源和未来阶段成本。未来模型输入使用声明的输入上限，未来缓存命中按零复用状态查表；测量未达到该上限时，完整成本不可用。CPU REDUCE 的 profile 同时绑定实际 operation 与 claim 数量范围。execution 资产存在已绑定实际 tokenizer/原生必需字段协议的 `claim_capacity` 时，未来模型前驱按 `claim_count_ceiling` 计算输出 claim 上界；已完成前驱使用真实 claim 数，未来确定性 CPU 前驱按真实实现的单个输出 claim 计上界。没有容量证明时保留输出 token 数的保守上界。`profiling.plan_cost_fit` 从完整阶段窗口及物理采样构建资产，保留覆盖范围和排除记录。
 
-`rolling_plan_decision` 记录状态、全部候选的收益和成本、native quote、已支付 token/延迟/物理积分、未来阶段 profile、最终决策及实际物理边界样本。最终 ANSWER 的 `answer_phase_window` 同时写入 fresh `TurnResponse` 与 `ledger_committed` 事件，保留实际开始定义、commit 时间与响应控制尾部终点；幂等与恢复回放不创建新的测量窗口。固定策略从最终回答编译开始计阶段窗口，rolling 从最后一轮候选编译开始；两者的 profile 分开。rolling 当前 ANSWER 资源预测扣除同一阶段已进入 paid 账本的实测积分，扣减窗口、边界样本和逐候选明细均保留。
+`rolling_plan_decision` 记录状态、全部候选的收益和成本、native quote、已支付 token/延迟/物理积分、未来阶段 profile、最终决策及实际物理边界样本；`rolling_plan_no_complete` 在无可行完整计划时保留已算出的评价、逐候选排除原因与原生状态。最终 ANSWER 的 `answer_phase_window` 同时写入 fresh `TurnResponse` 与 `ledger_committed` 事件，保留实际开始定义、commit 时间与响应控制尾部终点；幂等与恢复回放不创建新的测量窗口。固定策略从最终回答编译开始计阶段窗口，rolling 从最后一轮候选编译开始；两者的 profile 分开。rolling 当前 ANSWER 将已付决策头保留在 paid 中，独立预测原生剩余 prefill/decode/queue 与实测剩余控制时间。GPU/Host 剩余积分为该剩余时间乘同 row 实测平均驻留 GiB，标记 `empirical_mean_residency_remaining_estimate`，不以旧完整阶段总量减去已付开销。
 
 `python -m training.collect_plan_gains --pairs <pairs.jsonl> --output <new-gains.jsonl>` 可导入已生成、已评分的直接回答与候选回答。每个 packet 保存现有 `PlanCandidate/ReadingOutcome/SessionSnapshot`，指定原始指标及有协议出处的归一化规则，并指向两个完整 run JSON。run 必须在执行前记录 `frozen_state_key`、真实 reader/profile、实际 plan ID、分区及最终执行预算。导入器核对真实回执与所有成本，保留原始 run、评分、文件 hash 和来源清单；它不执行回答或评分，也不把六格尚未评分的输出当收益数据。
 

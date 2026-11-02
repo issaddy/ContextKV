@@ -1,0 +1,316 @@
+"""Two-turn own-history P3 capacity jobs: 1/4/8 clients, two fixed methods."""
+from __future__ import annotations
+
+import argparse
+import asyncio
+from collections import Counter
+from copy import deepcopy
+from dataclasses import replace
+from datetime import datetime
+import hashlib
+import json
+from pathlib import Path
+import resource
+import sys
+import time
+from types import SimpleNamespace
+
+import yaml
+
+from bench.metrics import occupancy_integral
+from bench.native_metrics import NativePoolSampler, pool_series
+from bench.rolling_study_workflow import configure
+from bench.study import merge_config, read_jsonl, write_json, write_jsonl
+from bench.study_metrics import _quantile
+from bench.study_resources import StudyResourceSampler, integrate_physical
+from bench.study_workloads import freeze_workload, load_goal_policy
+
+
+def snapshot(path):
+    path = Path(path).resolve()
+    return dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+
+
+def prepare(args, root):
+    source_path = Path(args.source_manifest).resolve()
+    source = json.loads(source_path.read_text())
+    source_matrix = yaml.safe_load(Path(source["diagnostic_matrix_path"]).read_text())
+    settings = yaml.safe_load(Path(args.config).read_text())
+    settings = merge_config(settings, {
+        "support_model": {"mode": "trained", "asset": args.parent_policy_asset,
+                          "preference_asset": args.parent_policy_asset},
+        "selection": {"utility": "learned"},
+        "reading": {"layout": "source_first", "packing": "source_windows"},
+        "execution": {"prefix_retention": {"mode": "native"}}})
+    parent = root/"parent-P0-study.yaml"
+    parent.write_text(yaml.safe_dump(settings, sort_keys=False))
+    scope = SimpleNamespace(config=str(parent), matrix=args.matrix or source["diagnostic_matrix_path"],
+        execution_profile=args.execution_profile, native_assets=args.native_assets, gain_asset=args.gain_asset,
+        reader_profile_id=args.reader_profile_id, sampling_interval=args.sampling_interval,
+        read_outputs=args.read_outputs, baselines=["B6"], rolling_id="S3",
+        lambda_time=(args.lambda_time if args.lambda_time is not None else settings["execution"]["lambda_time"],),
+        failure_unit="client", dev_conversations_per_track=None, test_conversations_per_track=None)
+    config, matrix, config_path = configure(scope, root)
+    config["execution"].update(cache_start="cold", prefix_retention={"mode": "native"})
+    config["reading"].update(layout="source_first", packing="source_windows")
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+    methods = []
+    for method in matrix["methods"]:
+        value = deepcopy(method)
+        value["original_method_id"] = value["id"]
+        value["id"] = "B6_native" if value["strategy"] == "B6" else "S3_native"
+        value["overrides"] = merge_config(value.get("overrides", {}), {
+            "reading": {"layout": "source_first", "packing": "source_windows"},
+            "execution": {"cache_start": "cold", "prefix_retention": {"mode": "native"}}})
+        if args.value_model is not None and value["strategy"] == "B7":
+            value["overrides"]["execution"]["plan_gain"]["prefix_directory"] = True
+        methods.append(value)
+    value_policy = None
+    if args.value_model is not None:
+        value_policy = dict(mode="value", model_path=str(Path(args.value_model).resolve()), horizon_seconds=15,
+            gpu_budget_tokens=8192, host_budget_tokens=16384, lambda_gpu=0.0, lambda_host=0.0)
+        for method in tuple(methods):
+            value = deepcopy(method)
+            value["id"] = method["id"].removesuffix("_native")+"_value"
+            value["overrides"]["execution"]["prefix_retention"] = deepcopy(value_policy)
+            methods.append(value)
+    matrix["methods"] = methods
+    matrix["resources"].update(gpu_capacity_tokens=32768, host_capacity_tokens=61056)
+    policy_path = Path(source["goal_policy_path"]).resolve()
+    policy = load_goal_policy(policy_path, expected_sha256=source["goal_policy_sha256"])
+    originals = read_jsonl(source["tasks_path"])
+    grouped = {}
+    for row in originals:
+        if row["turn"] in (1, 2):
+            grouped.setdefault(row["conversation_id"], {})[row["turn"]] = row
+    clients = sorted(grouped)
+    plans = []
+    for concurrency in (1, 4, 8):
+        rows = []
+        for index in range(concurrency):
+            original_id = clients[index % len(clients)]
+            original = grouped[original_id]
+            client = f"capacity-c{concurrency}-client{index:02d}"
+            if original[1]["goal_graph_id"] not in policy.graphs:
+                raise ValueError("actual source goal policy is missing the frozen client graph")
+            for turn in (1, 2):
+                rows.append({**deepcopy(original[turn]), "conversation_id": client,
+                    "task_id": client+":"+str(turn),
+                    "capacity_replica_of": original[turn]["task_id"],
+                    "capacity_scope": "first two source turns only; original graph/source/family/version unchanged"})
+        directory = root/"inputs"/f"c{concurrency}"
+        task_path, workload_path = directory/"tasks.jsonl", directory/"workload.json"
+        write_jsonl(task_path, rows)
+        frozen = freeze_workload(rows, name=f"capacity-c{concurrency}-first2-pause30",
+            concurrency=concurrency, think_time_seconds=30,
+            goal_policy_sha256=source["goal_policy_sha256"])
+        frozen = replace(frozen, dispatch_semantics="independent_clients_after_own_prior_commit")
+        frozen.write(workload_path)
+        job_matrix = deepcopy(matrix)
+        source_spec = source_matrix["datasets"][source["dataset"]]
+        source_spec = {name: value for name, value in source_spec.items() if name not in {
+            "input", "inputs", "split_manifest", "dev_conversations", "dev_seed", "reuse_provider"}}
+        source_spec.update(inputs={"dev": str(task_path.resolve())}, protocol="P3",
+            supplied_documents=True, goal_policy=str(policy_path), continue_conversation_failures=True,
+            diagnostic_only=True, include_in_public_quality_aggregate=False)
+        job_matrix["datasets"] = {"dynamic_goal_dev": source_spec}
+        job_matrix["cohorts"] = {"dev": {"dynamic_goal_dev": [row["task_id"] for row in rows]}}
+        job_matrix["selection"].update(include_ablations=False, development_weights={"dynamic_goal_dev": 1.0})
+        matrix_path = directory/"matrix.yaml"
+        matrix_path.write_text(yaml.safe_dump(job_matrix, sort_keys=False))
+        order = ("S3_native", "B6_native") if concurrency == 4 else ("B6_native", "S3_native")
+        if concurrency == 1 and args.value_model is not None:
+            order += ("B6_value", "S3_value")
+        for method in order:
+            plans.append(dict(name=f"c{concurrency}-"+method, concurrency=concurrency,
+                clients=concurrency, requested_qa=2*concurrency, method=method,
+                tasks=str(task_path), matrix=str(matrix_path), workload=str(workload_path),
+                goal_policy=str(policy_path), output=str(root/"jobs"/(f"c{concurrency}-"+method)/"generation")))
+    per_method = Counter()
+    for job in plans:
+        per_method[job["method"]] += job["requested_qa"]
+    manifest = dict(format="contextkv_two_turn_capacity_plan_v1", scope="two-turn P3 capacity only; not the full seven-turn/five-scenario experiment",
+        source_manifest=snapshot(source_path), source_tasks=snapshot(source["tasks_path"]),
+        source_goal_policy=snapshot(policy_path), source_config=snapshot(args.config),
+        parent_P0_asset=str(Path(args.parent_policy_asset).resolve()),
+        parent_P0_heads=snapshot(Path(args.parent_policy_asset)/"heads.pt"),
+        reader_profile_id=args.reader_profile_id, assets={name: snapshot(path) for name, path in (
+            ("gain", args.gain_asset), ("execution", args.execution_profile), ("native", args.native_assets))},
+        first_arrivals="all clients planned at dispatcher time zero; actual scheduler drift recorded",
+        second_arrivals="own first QA commit + 30 seconds; own actual answer selects graph branch",
+        client_replication="sorted frozen source conversations cycled to exactly 1/4/8 independent clients; original source metadata retained",
+        methods=[method["id"] for method in methods], requested_qa=sum(job["requested_qa"] for job in plans),
+        per_method_requested_qa=dict(per_method),
+        value_asset=snapshot(args.value_model) if args.value_model is not None else None,
+        value_policy=value_policy,
+        joint_scope=("concurrency1 four cells each execute own P3 and may choose different DAGs; separate fixed-token C experiments remain unchanged"
+                     if args.value_model is not None else None),
+        cache_boundary="one cold boundary per method/concurrency job; never cold between clients/turns",
+        question_protocol="P3 own committed generated QA; no authored/other-method answer imported",
+        scoring="capacity/completion/Need-source coverage only; no public quality aggregate", jobs=plans,
+        config=str(config_path))
+    write_json(root/"capacity-plan.json", manifest)
+    return manifest
+
+
+def summarize_job(job):
+    directory = Path(job["output"])/job["method"]/"dynamic_goal_dev"
+    records = [json.loads(path.read_text()) for path in sorted((directory/"records").glob("*.json"))]
+    failures_path = directory/"failed_conversations.json"
+    failures = json.loads(failures_path.read_text()) if failures_path.exists() else []
+    dispatch_path = directory/"workload_dispatch.json"
+    dispatch = json.loads(dispatch_path.read_text()) if dispatch_path.exists() else None
+    arrivals = ([dispatch["origin"]+row["actual_arrival_seconds"] for row in dispatch["actual_arrivals"].values()]
+                if dispatch is not None else [])
+    ends = [row["request_window"][1] for row in records]+[row["request_window"][1] for row in failures]
+    elapsed = max(ends)-min(arrivals) if arrivals and ends else None
+    latencies = [row["cost"]["complete_ms"] for row in records]
+    traces, batch_costs = [], []
+    for path in sorted((directory/"measurements").glob("*/batch_cost.json")):
+        cost = json.loads(path.read_text())
+        native = json.loads((path.parent/"native_resources.json").read_text())
+        series, coverage = pool_series(native, cost["start"], cost["end"])
+        batch_costs.append(dict(path=str(path), **cost,
+            native_resource_window={**occupancy_integral(series), **coverage}))
+    needs, supported, units, covered, open_needs = 0, 0, 0, 0, 0
+    for row in records:
+        outcome = row["reading_outcome"]
+        if outcome is None:
+            continue
+        need_ids = {item["need_id"] for item in outcome["plan"]["task_state"]["needs"]}
+        support = {need for result in outcome["results"] for need in result["support"]}
+        unit_ids = {item["unit_id"] for item in outcome["plan"]["selected_set"]["selected_units"]}
+        covered_units = {item[2] for item in outcome["coverage"]}
+        needs, supported = needs+len(need_ids), supported+len(need_ids & support)
+        units, covered = units+len(unit_ids), covered+len(unit_ids & covered_units)
+        open_needs += len(outcome["open_needs"])
+    for row in records:
+        arrival = row["workload_arrival"]
+        traces.append(dict(task_id=row["task_id"], conversation_id=row["conversation_id"], turn=row["turn"],
+            actual_arrival=dispatch["origin"]+arrival["actual_arrival_seconds"] if dispatch is not None else None,
+            planned_arrival_seconds=arrival["planned_arrival_seconds"], complete=row["request_window"][1],
+            latency_ms=row["cost"]["complete_ms"], goal_id=row["question_policy"]["goal_id"],
+            branch=row["question_policy"]["branch"], prior_qa_turns=len(row["actual_history"]),
+            prefill_tokens=row["cost"]["actual_prefill_tokens"],
+            device_hit_tokens=row["cost"]["actual_device_hit_tokens"],
+            host_reload_tokens=row["cost"]["actual_host_loaded_tokens"]))
+    return dict(job=job["name"], method=job["method"], concurrency=job["concurrency"],
+        clients=job["clients"], requested_qa=job["requested_qa"], completed_qa=len(records),
+        submitted_qa=len(arrivals), failed_clients=len(failures),
+        completed_qa_coverage=len(records)/job["requested_qa"],
+        throughput_qa_per_second=len(records)/elapsed if elapsed is not None and elapsed > 0 else None,
+        makespan_seconds_including_pause=elapsed, p95_complete_ms=_quantile(latencies, .95),
+        successful_qa_tokens={name: (sum(row["cost"][name] for row in records)
+            if all(row["cost"][name] is not None for row in records) else None) for name in (
+            "total_input_tokens", "total_output_tokens", "actual_prefill_tokens",
+            "actual_device_hit_tokens", "actual_host_loaded_tokens")},
+        failure_cost_scope="actual failed Attempt and StepRecords + full batch physical/native sampler; successful QA token sums do not include missing failure/auxiliary tokens",
+        failed_clients_detail=failures, actual_arrival_completion=traces,
+        need_support=dict(required=needs, supported=supported, open=open_needs,
+            coverage=supported/needs if needs else None),
+        source_unit_read_coverage=dict(selected=units, read=covered, coverage=covered/units if units else None),
+        batch_costs=batch_costs,
+        performance_scope="observed completed responses; failure coverage reported separately; shared physical batch counted once, not sum of request shares")
+
+
+async def run(args):
+    root = Path(args.output).resolve()
+    root.mkdir(parents=True, exist_ok=False)
+    cpu_start = time.process_time()
+    plan = prepare(args, root)
+    if args.prepare_only:
+        print(json.dumps({"status": "prepared", "qa": plan["requested_qa"], "plan": str(root/"capacity-plan.json")}))
+        return plan
+    execution = json.loads(Path(args.execution_profile).read_text())
+    scope = execution["resource_scope"]
+    physical = StudyResourceSampler(tuple(scope["gpu_devices"]), tuple(scope["process_roots"]), interval=args.sampling_interval)
+    native = NativePoolSampler(scope["native_endpoint"], gpu_capacity=32768, host_enabled=True, model="Qwen3-32B")
+    await physical.start()
+    await native.start()
+    started = time.monotonic()
+    deadline = datetime.fromisoformat(args.deadline).timestamp() if args.deadline else None
+    child_start = resource.getrusage(resource.RUSAGE_CHILDREN)
+    state = dict(format="contextkv_two_turn_capacity_workflow_v1", scope=plan["scope"],
+        status="running", requested_qa=plan["requested_qa"], jobs=[], results=[])
+    try:
+        for job in plan["jobs"]:
+            if deadline is not None and time.time() >= deadline:
+                state["jobs"].append({**job, "status": "not_started_deadline"})
+                continue
+            command = [args.python or sys.executable, "-m", "bench.study", "evaluate", "--config", plan["config"],
+                "--matrix", job["matrix"], "--split", "dev", "--methods", job["method"],
+                "--datasets", "dynamic_goal_dev", "--concurrency", str(job["concurrency"]),
+                "--workload-plan", job["workload"], "--goal-policy", job["goal_policy"],
+                "--unscored", "--output", job["output"]]
+            directory = root/"jobs"/job["name"]
+            directory.mkdir(parents=True, exist_ok=True)
+            record = {**job, "command": command, "status": "running", "started_s": time.monotonic()}
+            state["jobs"].append(record)
+            write_json(root/"workflow.json", state)
+            with (directory/"process.log").open("wb") as log:
+                process = await asyncio.create_subprocess_exec(*command, cwd=Path(args.project_root).resolve(),
+                    stdout=log, stderr=asyncio.subprocess.STDOUT)
+                record["pid"] = process.pid
+                write_json(root/"workflow.json", state)
+                try:
+                    code = await asyncio.wait_for(process.wait(), max(.1, deadline-time.time())) if deadline else await process.wait()
+                except TimeoutError:
+                    process.terminate()
+                    code = await process.wait()
+                    record["deadline_terminated"] = True
+            record.update(returncode=code, ended_s=time.monotonic(),
+                          status="completed" if code == 0 else "failed_with_existing_raw_preserved")
+            summary = summarize_job(job)
+            write_json(directory/"capacity-summary.json", summary)
+            state["results"].append(summary)
+            write_json(root/"workflow.json", state)
+            print(json.dumps({"job": job["name"], "status": record["status"],
+                "completed": summary["completed_qa"], "requested": job["requested_qa"],
+                "p95_ms": summary["p95_complete_ms"]}), flush=True)
+    finally:
+        end = time.monotonic()
+        await native.stop()
+        await physical.stop()
+        child_end = resource.getrusage(resource.RUSAGE_CHILDREN)
+        series, coverage = pool_series(native.observation(), started, end)
+        write_json(root/"capacity-cost.json", dict(format="contextkv_two_turn_capacity_cost_v1",
+            source="hardware", resource_window=dict(start=started, end=end),
+            resource_scope=scope, physical_observation=physical.observation(),
+            physical_cost=integrate_physical(physical.samples, started, end),
+            native_observation=native.observation(), native_cost={**occupancy_integral(series), **coverage},
+            controller_cpu_seconds=time.process_time()-cpu_start,
+            child_cpu_seconds=child_end.ru_utime+child_end.ru_stime-child_start.ru_utime-child_start.ru_stime,
+            cost_scope="full sequential capacity jobs including child provider initialization, pauses, failed requests and idle gaps; nested per-job/response shares are not added"))
+        counts = Counter()
+        for row in state["results"]:
+            counts[row["method"]] += row["completed_qa"]
+        state.update(status="finished_with_actual_coverage", completed_by_method=dict(counts),
+            performance_scope=plan["scope"], full_cost=str(root/"capacity-cost.json"))
+        write_json(root/"workflow.json", state)
+    return state
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True, help="Actual parent-P0 G3 study configuration")
+    parser.add_argument("--source-manifest", required=True)
+    parser.add_argument("--matrix")
+    parser.add_argument("--parent-policy-asset", required=True)
+    parser.add_argument("--gain-asset", required=True)
+    parser.add_argument("--execution-profile", required=True)
+    parser.add_argument("--native-assets", required=True)
+    parser.add_argument("--value-model", help="Add valueC B6/S3 cells at concurrency1 only, keeping native-only 4/8-client loads")
+    parser.add_argument("--reader-profile-id", required=True)
+    parser.add_argument("--lambda-time", type=float)
+    parser.add_argument("--read-outputs", type=lambda value: tuple(map(int, value.split(","))), default=(2048,))
+    parser.add_argument("--sampling-interval", type=float, default=.5)
+    parser.add_argument("--project-root", default=".")
+    parser.add_argument("--python")
+    parser.add_argument("--deadline", default="2026-11-03T08:20:00+08:00")
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--output", required=True)
+    return asyncio.run(run(parser.parse_args(argv)))
+
+
+if __name__ == "__main__":
+    main()

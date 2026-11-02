@@ -18,7 +18,7 @@ from adapters.support_model import SetPrediction, SupportModel, SupportProfile
 from controller.candidates import CandidatePolicy, build_plan_candidates
 from controller.context_budget import resolve_text, working_history_messages
 from controller.context_schema import (AnswerPlan, AnswerPoint, ContextBudget, ContextPlan,
-    EvidenceSet, Need, SupportScores, TaskState, TextRef)
+    EvidenceSet, EvidenceUnit, Need, ReadingOutcome, SourceSpan, SupportScores, TaskState, TextRef)
 from controller.evidence_planner import (BudgetedEvidencePlanner, SearchProfile, _passages,
     close_dependencies, render_unit_union, unresolved_needs)
 from controller.reading import build_read_plan
@@ -194,12 +194,35 @@ class StudyEvidenceProvider:
             if supplied_blocks is not None:
                 state = replace(state, source_scope=tuple(block.key for block in supplied_blocks))
                 pool = self.directory.full_scope(state.source_scope)
-                pool = self._rank_supplied(state, snapshot, pool)
             else:
                 pool = self.directory.retrieve_pool(state, memory)
             selection = self.config.get("selection", {})
             policy = CandidatePolicy(max_total_model_tokens=self.budget.window_tokens,
                                      max_new_tokens=self.budget.output_tokens)
+            direct_trace = None
+            if (selection.get("provided_full_direct_when_fits", False)
+                    and supplied_blocks is not None and not snapshot.raw_history and state.current_turn_id == 1):
+                direct_started = time.perf_counter()
+                direct, direct_trace = self._provided_full_direct(snapshot, query, state, pool, policy)
+                if direct is not None:
+                    auxiliary += (("provided_full_direct", (time.perf_counter()-direct_started)*1000),)
+                    direct = replace(direct, auxiliary_ms=auxiliary)
+                    usage = self._auxiliary_usage(usage_baseline, auxiliary)
+                    self.traces[snapshot.session_id, request_id] = {
+                        "task_state": to_jsonable(state),
+                        "pool": to_jsonable(replace(pool, units=direct.selected_set.selected_units)),
+                        "context_plans": to_jsonable((direct,)), "provided_full_direct": direct_trace,
+                        "support_scores": to_jsonable(SupportScores()), "search_trace": (),
+                        "selection_policy_heads_used": False, "auxiliary_usage": usage,
+                        "task_metrics": self.directory.task_interpreter.last_metrics
+                            if self.strategy not in {"B0", "Btoken"} else None,
+                        "planning_ms": (time.perf_counter()-started)*1000}
+                    context = QueryContext(state.query or query, "task_state", task_state=state)
+                    return EvidenceSelection(direct.selected_set.source_blocks,
+                        tuple(block.key for block in direct.selected_set.source_blocks), context,
+                        (direct,), auxiliary_usage=usage)
+            if supplied_blocks is not None:
+                pool = self._rank_supplied(state, snapshot, pool)
 
             def measure_context(state, units):
                 source_keys = {span.source_key for unit in units for span in unit.source_spans}
@@ -321,6 +344,7 @@ class StudyEvidenceProvider:
             auxiliary += (("candidate_quality", candidate_quality_ms),)
             plans = [replace(plan, auxiliary_ms=auxiliary) for plan in plans]
             trace = {"task_state": to_jsonable(state), "pool": to_jsonable(pool),
+                "provided_full_direct": direct_trace,
                 "support_scores": to_jsonable(scores), "search_trace": search_trace,
                 "support_schedule": to_jsonable(support_model.last_schedule) if support_model else (),
                 "selection_utility": self._utility_mode(),
@@ -344,6 +368,52 @@ class StudyEvidenceProvider:
             return EvidenceSelection(selected_blocks, tuple(block.key for block in selected_blocks), context,
                                      tuple(plans), open_need_provider=extend,
                                      auxiliary_usage=trace["auxiliary_usage"])
+
+    def _provided_full_direct(self, snapshot, query, state, pool, policy):
+        """Compile every supplied original verbatim; admission failure keeps the READ path."""
+        from adapters.evidence_pool import unit_identity
+        from controller.config import load_config
+        units = []
+        for block in pool.source_blocks:
+            base = block.span[0] if block.span else 0
+            identity = unit_identity(block.key, base, base+len(block.text))
+            metadata = self.directory.corpus_index.source_metadata.get(block.key, {})
+            units.append(EvidenceUnit(identity,
+                (SourceSpan("span:"+identity, block.key, base, base+len(block.text)),), block.text,
+                heading=block.title, applicability=tuple(sorted(metadata.get("applicability", {}).items())),
+                body_tokens=len(self.template.tokenizer.encode(block.text, add_special_tokens=False)),
+                document_family=metadata.get("document_family", block.key.document_id),
+                valid_from=metadata.get("valid_from"), valid_to=metadata.get("valid_to"),
+                published_at=metadata.get("published_at"), original_passage_ids=(block.key.passage_id,),
+                version_order=tuple(metadata.get("version_order") or ()), current=metadata.get("current")))
+        units = tuple(units)
+        body_tokens = len(self.template.tokenizer.encode(render_unit_union(units), add_special_tokens=False))
+        trace = {"enabled": True, "body_tokens": body_tokens, "body_budget": self.budget.body_tokens,
+            "supplied_originals": len(pool.source_blocks), "gold_used": False,
+            "comparison_scope": "all supplied originals; policy heads bypassed; reader comparison",
+            "unit_scope": "one exact full Unicode span per original block, including whitespace"}
+        if body_tokens > self.budget.body_tokens or (self.budget.max_passages is not None
+                and len(_passages(units)) > self.budget.max_passages):
+            return None, {**trace, "selected": False, "reason": "full_originals_exceed_body_or_passage_budget"}
+        selected = EvidenceSet(state.task_id+":provided_full_direct", units, token_cost=body_tokens,
+                               source_blocks=pool.source_blocks)
+        plan = ContextPlan(state.task_id+":provided_full_direct", state, selected,
+            steps=(), budget=self.budget, layouts=("existing",),
+            answer_plan=AnswerPlan(tuple(AnswerPoint(need.need_id) for need in state.needs), "answer"))
+        run = load_config(self.config["generation"]["run_config"])
+        policy = replace(policy, system_prompt=run.context.system_prompt)
+        candidates = build_plan_candidates(snapshot, query, plan, self.template, policy=policy,
+                                            outcome=ReadingOutcome(plan), layouts=("existing",))
+        feasible = tuple(candidate for candidate in candidates if candidate.action == "REBUILD" and candidate.feasible
+            and all(any(span.key == block.key and span.source_start == (block.span[0] if block.span else 0)
+                and span.source_end == (block.span[0] if block.span else 0)+len(block.text)
+                and candidate.messages[span.message_index].content[span.start:span.end] == block.text
+                for span in candidate.evidence_spans) for block in pool.source_blocks))
+        trace.update(actual_input_tokens=[len(candidate.input_ids) for candidate in candidates],
+                     output_tokens=self.budget.output_tokens, window_tokens=self.budget.window_tokens)
+        if not feasible:
+            return None, {**trace, "selected": False, "reason": "complete_original_prompt_exceeds_actual_window"}
+        return plan, {**trace, "selected": True, "reason": "complete_original_prompt_fits", "READ_steps": 0}
 
     def _relevance_set(self, state, pool, measure_context):
         by_id = {unit.unit_id: unit for unit in pool.units}

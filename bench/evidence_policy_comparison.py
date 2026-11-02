@@ -75,7 +75,7 @@ def recorded_terminal_budget(directory):
 def cell_config(config, policy, reader):
     settings = config["policy_comparison"]
     asset = settings["policies"][policy]
-    reader_spec = settings["readers"][reader]
+    reader_spec = settings.get("cell_readers", {}).get(policy+"_"+reader, settings["readers"][reader])
     run_path = reader_spec["run_config"]
     actual = merge_config(config, {"generation": {"run_config": run_path,
         "teacher_url": settings["teacher_url"], "helper_run_config": settings["helper_run_config"]},
@@ -297,10 +297,24 @@ async def own_p3_cell(config, matrix, dataset, split, output, *, policy, reader,
     # run_dataset uses the reader's explicit base URL through this scoped config.
     reader_run = yaml.safe_load(Path(reader_spec["run_config"]).read_text())
     reader_run["engine"]["base_url"] = reader_spec["base_url"]
+    if "answer_system_prompt" in spec:
+        reader_run.setdefault("context", {})["system_prompt"] = spec["answer_system_prompt"]
     run_path = output/"reader_run.yaml"
     run_path.write_text(yaml.safe_dump(reader_run, sort_keys=False))
     actual["generation"]["run_config"] = str(run_path)
     collected, failed = [], []
+    if spec.get("reuse_provider", False):
+        task_path = output/"tasks.jsonl"
+        write_rows(task_path, [row for conversation in identities for row in grouped[conversation]])
+        shared_matrix = merge_config(local_matrix, {"datasets": {dataset: {"inputs": {split: str(task_path)}}}})
+        collected = await run_dataset(actual, shared_matrix, {"id": policy+"_"+reader, "strategy": "B7"},
+            dataset, split, output, concurrency=1, question_fn=goal_policy.question_fn if goal_policy else None)
+        failed = [json.loads(path.read_text()) for path in sorted((output/"terminal_read_failures").glob("*.json"))]
+        write_json(output/"manifest.json", {"policy_identity": identity,
+            "history_protocol": "independent own-history P3 sessions; provider reused; cold boundary per conversation",
+            "requested_conversations": identities, "completed_turns": len(collected),
+            "failed_conversations": failed, "reuse_provider": True})
+        return collected
     for conversation in identities:
         directory = output/digest(conversation)[:20]
         directory.mkdir(parents=True, exist_ok=True)
@@ -343,7 +357,7 @@ async def own_p3_cell(config, matrix, dataset, split, output, *, policy, reader,
     return collected
 
 
-def persist_p3_failure(directory, conversation, error, *, teacher_ledger=None):
+def persist_p3_failure(directory, conversation, error, *, teacher_ledger=None, session_id=None):
     import sqlite3
     from controller.context_schema import StepRecord
     from controller.schema import SessionSnapshot
@@ -351,6 +365,8 @@ def persist_p3_failure(directory, conversation, error, *, teacher_ledger=None):
     connection = sqlite3.connect(f"file:{(directory/'state'/'sessions.sqlite3').resolve()}?mode=ro", uri=True)
     attempts = [load_record(connection, Attempt, payload) for payload, in connection.execute(
         "SELECT payload FROM attempts WHERE stage='FAILED'")]
+    if session_id is not None:
+        attempts = [attempt for attempt in attempts if attempt.session_id == session_id]
     records = []
     for attempt in attempts:
         steps = [{"stage": stage, "record": to_jsonable(load_record(connection, StepRecord, payload))}
@@ -368,7 +384,9 @@ def persist_p3_failure(directory, conversation, error, *, teacher_ledger=None):
     connection.close()
     failure = {"conversation_id": conversation, "error": error, "generation_dir": str(directory),
         "descendants": "not generated after uncommitted failed turn", "failed_attempts": records}
-    write_json(directory/"terminal_read_failures.json", failure)
+    target = (directory/"terminal_read_failures"/(digest(conversation)[:20]+".json")
+              if session_id is not None else directory/"terminal_read_failures.json")
+    write_json(target, failure)
     return failure
 
 

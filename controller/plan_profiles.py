@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
 
 from .execution import auxiliary_tokens
-from .plan_policy import CompleteCost, NativePlanningState, ResourceForecast, StepForecast
+from .plan_policy import (CompleteCost, NativePlanningState, ResourceForecast, StepForecast,
+                          native_selection_cost)
 from .reading import (READ_SYSTEM, COVERAGE_READ_SYSTEM, REDUCE_SYSTEM,
                       SUMMARY_READ_SYSTEM, SUMMARY_REDUCE_SYSTEM, step_generation_kind)
 from .schema import ConfigFingerprint
@@ -43,6 +45,13 @@ def _profile_prediction(row, inputs):
     return {"profile_id": row["profile_id"], "input_value": inputs,
         "observed_input_range": observed, "prediction_bin": _prediction_range(row),
         "within_observed_input_range": observed[0] <= inputs <= observed[1],
+        "source_profile_ids": row.get("source_profile_ids", [row["profile_id"]]),
+        "observed_cache_ranges": row.get("observed_cache_ranges"),
+        "queried_cache_state": row.get("queried_cache_state"),
+        "concurrency_inference": row.get("concurrency_inference"),
+        "phase_envelope_latency_ms": row["latency_ms"],
+        "mean_gpu_gib": row["gpu_gib_ms"]/row["latency_ms"],
+        "mean_host_gib": row["host_gib_ms"]/row["latency_ms"],
         "cost_basis": "empirical_profile_prediction; not a new measured phase"}
 
 
@@ -100,22 +109,39 @@ class ExecutionProfiles:
 
     def row(self, kind, action, inputs, output, concurrency, ready, host, prompt, *, operation=None,
             start_definition=None):
-        if ready is None or host is None:
+        if not 1 <= concurrency <= 8:
             return None
         prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
         matching = [row for row in self.data["rows"]
             if row["generation_kind"] == kind and row["context_action"] == action
             and row["output_budget"] == output
             and _prediction_range(row)[0] <= inputs <= _prediction_range(row)[1]
-            and row["concurrency_range"][0] <= concurrency <= row["concurrency_range"][1]
-            and row["ready_gpu_range"][0] <= ready <= row["ready_gpu_range"][1]
-            and row["host_load_range"][0] <= host <= row["host_load_range"][1]
             and (kind != "CPU_REDUCE" or row["operation"] == operation)
             and (start_definition is None or row["start_definition"] == start_definition)
             and row["system_prompt_sha256"] == prompt_hash]
         if not matching:
             return None
-        return min(matching, key=lambda row: (_prediction_range(row)[1]-_prediction_range(row)[0], row["profile_id"]))
+        narrowest = min(matching, key=lambda row: (
+            _prediction_range(row)[1]-_prediction_range(row)[0], _prediction_range(row), row["profile_id"]))
+        matching = [row for row in matching if _prediction_range(row) == _prediction_range(narrowest)]
+        observed_q = max(row["concurrency_range"][1] for row in matching)
+        multiplier = max(1.0, concurrency/observed_q)
+        sources = sorted(row["profile_id"] for row in matching)
+        identity = "envelope:"+hashlib.sha256(json.dumps(sources).encode()).hexdigest()[:24]
+        envelope = {**narrowest, "profile_id": identity,
+            **{key: max(row[key] for row in matching)*multiplier
+               for key in ("latency_ms", "gpu_gib_ms", "host_gib_ms")},
+            **{key: max(row[key] for row in matching) for key in ("gpu_peak_gib", "host_peak_gib")},
+            "source_profile_ids": sources, "prediction_estimate": True,
+            "observed_cache_ranges": [{"profile_id": row["profile_id"],
+                "ready_gpu_range": row["ready_gpu_range"], "host_load_range": row["host_load_range"],
+                "concurrency_range": row["concurrency_range"]} for row in matching],
+            "queried_cache_state": {"ready_gpu_tokens": ready, "host_load_tokens": host,
+                                    "concurrency": concurrency},
+            "concurrency_inference": {"observed_max": observed_q, "requested": concurrency,
+                "duration_multiplier": multiplier,
+                "basis": "componentwise measured cache-state envelope; linear duration extrapolation beyond observed concurrency through declared engine concurrency 8; fixed allocated memory peaks"}}
+        return envelope
 
 
 class PhysicalPaidCost:
@@ -224,12 +250,20 @@ class ProfiledNativeObserver:
         self.profiles.bind(quotes, self.reader_checkpoint, self.reader_profile_id)
         by_id = {quote.candidate_id: quote for quote in quotes.quotes}
         concurrency = quotes.active_requests+1
+        metrics = await engine.metrics()
+        admission = {"gpu_capacity_tokens": metrics["pool"]["gpu_capacity_tokens"],
+            "page_size": metrics["pool"]["page_size"],
+            "native_max_new_tokens_clip": quotes.native_max_new_tokens_clip,
+            "profile_service_envelope_ms": max(row["latency_ms"] for row in self.profiles.data["rows"]),
+            "basis": "actual native quote workload/clip and actual engine physical token pool"}
         paid = await self.paid.observe(arrived, state, auxiliary_usage)
         overlap = self.paid.window(selection_started, self.paid.last_observation["end"])
         overlap_record = {"start": selection_started, "end": self.paid.last_observation["end"],
             "clock": "client_monotonic", "start_definition": "rolling_proposals_compilation_start",
             "physical": overlap, "samples": self.paid.window_samples(selection_started,
-                self.paid.last_observation["end"]), "subtracted_from_current_answer_resources": {}}
+                self.paid.last_observation["end"]),
+            "paid_prefix_handling": "already charged in paid_cost; conditional remaining forecast is independent of sunk head",
+            "conditional_remaining_resource_forecasts": {}}
         resources, reusable, estimates = {}, {}, {}
         # A real prefix directory is optional; native quote hits remain in the
         # quote itself. No directory means no independently attributed prefix.
@@ -251,15 +285,32 @@ class ProfiledNativeObserver:
                 estimates[candidate.candidate_id] = _profile_prediction(row, len(candidate.input_ids))
                 gpu, host = row["gpu_gib_ms"], row["host_gib_ms"]
                 if candidate.generation_kind == "ANSWER":
-                    # The final phase starts before compiling/quoting choices.
-                    # That prefix of the phase has already entered paid_cost.
-                    gpu -= overlap["gpu_gib_seconds"]*1000
-                    host -= overlap["host_gib_seconds"]*1000
-                    if gpu < 0 or host < 0:
+                    timing = cost_model.step_models.get("ANSWER", cost_model)
+                    prior = timing.step_output_priors.get(f"ANSWER:{candidate.output_budget}")
+                    if (prior is None or "mean_remaining_control_ms" not in prior or
+                            timing.calibration_metadata.get("generation_kind") != "ANSWER" or
+                            timing.calibration_metadata.get("output_prior_system_prompt") != candidate.messages[0].content or
+                            "rolling_proposals_compilation_start" not in timing.calibration_metadata.get("step_control_scope", ())):
+                        estimates[candidate.candidate_id].update(
+                            unavailable_reason="answer_conditional_remaining_timing_binding_missing")
                         continue
-                    overlap_record["subtracted_from_current_answer_resources"][candidate.candidate_id] = {
-                        "profile_id": row["profile_id"], "gpu_gib_ms": overlap["gpu_gib_seconds"]*1000,
-                        "host_gib_ms": overlap["host_gib_seconds"]*1000}
+                    remaining = cost_model.predict_native(replace(candidate, predicted_read_ms=0.0,
+                        auxiliary_ms=0.0), quote, snapshot, batch=quotes, concurrency=concurrency,
+                        control_ms=prior["mean_remaining_control_ms"]-prior["mean_control_ms"])
+                    remaining_ms, selection = native_selection_cost(remaining, timing, candidate, quotes,
+                        admission, estimates[candidate.candidate_id])
+                    if remaining_ms is None:
+                        estimates[candidate.candidate_id]["unavailable_reason"] = selection
+                        continue
+                    mean_gpu, mean_host = row["gpu_gib_ms"]/row["latency_ms"], row["host_gib_ms"]/row["latency_ms"]
+                    gpu, host = remaining_ms*mean_gpu, remaining_ms*mean_host
+                    prediction = {"method": "empirical_mean_residency_remaining_estimate",
+                        "profile_id": row["profile_id"], "native_remaining_estimate": remaining,
+                        "remaining_latency_ms": remaining_ms, "selection": selection, "mean_gpu_gib": mean_gpu,
+                        "mean_host_gib": mean_host, "gpu_gib_ms": gpu, "host_gib_ms": host,
+                        "paid_head_subtracted": False}
+                    estimates[candidate.candidate_id]["conditional_remaining_resources"] = prediction
+                    overlap_record["conditional_remaining_resource_forecasts"][candidate.candidate_id] = prediction
                 resources[candidate.candidate_id] = ResourceForecast(
                     gpu, host, row["gpu_peak_gib"], row["host_peak_gib"],
                     row["profile_id"], quotes.observed_seq,
@@ -300,6 +351,7 @@ class ProfiledNativeObserver:
         return NativePlanningState(self.reader_checkpoint, self.reader_profile_id, snapshot, quotes,
             cost_model, resources, future, paid, {**self.paid.last_observation,
                 "current_answer_phase_overlap": overlap_record,
+                "native_admission": admission,
                 "execution_profile_predictions": estimates}), reusable
 
 

@@ -352,6 +352,7 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
                          input_claim_ids=tuple(claim.claim_id for claim in input_claims))
     source_units = {unit.unit_id: unit for unit in evidence_set.selected_units}
     dependency_ids = {dependency for unit in source_units.values() for dependency in unit.dependencies}
+    packs, pack, assigned = [], [], set()
 
     def pack_closure(units):
         from .evidence_planner import close_dependencies
@@ -359,7 +360,8 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
         return close_dependencies(tuple(unit.unit_id for unit in units), lookup)
 
     def input_size(units):
-        return len(template.render(step_messages(plan, prototype, pack_closure(units), input_claims,
+        task = replace(prototype, step_id=f"{_step_prefix}read:{len(packs)}")
+        return len(template.render(step_messages(plan, task, pack_closure(units), input_claims,
                                                  snapshot=snapshot)).input_ids)
 
     def output_size(units):
@@ -370,12 +372,41 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
     def fits(units):
         return input_size(units) <= maximum and output_size(units) <= budget.read_output_tokens
 
-    units = []
+    def window_identity(unit):
+        return tuple(sorted({span.source_key for span in unit.source_spans}))
+
+    def finish_pack():
+        nonlocal pack
+        if len(packs)+2 > budget.max_steps:
+            raise ValueError("full coverage exceeds the request step allocation")
+        closed = pack_closure(tuple(pack))
+        packs.append(closed)
+        assigned.update(member.unit_id for member in closed)
+        pack = []
+
+    # Final IDs and the actual next step index are known while measuring.
+    # A split is emitted into that step immediately; no later renaming or
+    # repacking can make its previously measured input longer.
     for unit in evidence_set.selected_units:
+        if unit.unit_id in assigned:
+            continue
+        if pack and read_packing == "source_windows" and window_identity(pack[0]) != window_identity(unit):
+            finish_pack()
+            if unit.unit_id in assigned:
+                continue
         remaining, sequence = unit, 0
-        if unit.unit_id in dependency_ids and not fits((unit,)):
-            raise ValueError("READ dependency closure needs finer original units or predecessor facts")
-        while not fits((remaining,)):
+        while True:
+            final = (_split_unit(remaining, len(remaining.text), sequence) if sequence else remaining)
+            if fits(tuple((*pack, final))):
+                pack.append(final)
+                break
+            if pack:
+                finish_pack()
+                if sequence == 0 and unit.unit_id in assigned:
+                    break
+                continue
+            if unit.unit_id in dependency_ids:
+                raise ValueError("READ dependency closure needs finer original units or predecessor facts")
             low, high = 0, len(remaining.text)
             while low < high:
                 middle = (low+high+1)//2
@@ -385,33 +416,17 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
                     high = middle-1
             if low == 0:
                 raise ValueError("one READ fact and task exceed the input/output allocation")
-            piece = _split_unit(remaining, low, sequence)
-            units.append(piece)
+            pack.append(_split_unit(remaining, low, sequence))
+            finish_pack()
+            if low == len(remaining.text):
+                break
             remaining = replace(remaining, text=remaining.text[low:],
                 source_spans=tuple(replace(span, start=span.start+low)
                                    for span in remaining.source_spans))
             sequence += 1
-        units.append(replace(remaining, unit_id=f"{unit.unit_id}:{sequence}",
-                     source_spans=tuple(replace(span, span_id=f"{span.span_id}:{sequence}")
-                                        for span in remaining.source_spans)) if sequence else remaining)
-    packs, pack, assigned = [], [], set()
-    def window_identity(unit):
-        return tuple(sorted({span.source_key for span in unit.source_spans}))
-
-    for unit in units:
-        if unit.unit_id in assigned:
-            continue
-        if pack and (not fits(tuple(pack+[unit])) or
-                (read_packing == "source_windows" and window_identity(pack[0]) != window_identity(unit))):
-            closed = pack_closure(tuple(pack))
-            packs.append(closed)
-            assigned.update(member.unit_id for member in closed)
-            pack = []
-            if unit.unit_id in assigned:
-                continue
-        pack.append(unit)
     if pack:
-        packs.append(pack_closure(tuple(pack)))
+        finish_pack()
+    units = tuple({unit.unit_id: unit for closed in packs for unit in closed}.values())
     steps = []
     for index, pack in enumerate(packs):
         task = replace(prototype, step_id=f"{_step_prefix}read:{index}",
@@ -420,7 +435,7 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
             reading_mode=reading_mode, numeric_identity=numeric_identity)))
     if len(steps) + 1 > budget.max_steps:
         raise ValueError("full coverage exceeds the request step allocation")
-    return replace(plan, selected_set=replace(evidence_set, selected_units=tuple(units)),
+    return replace(plan, selected_set=replace(evidence_set, selected_units=units),
                    steps=tuple(steps), coverage_units=tuple(unit.unit_id for unit in units))
 
 

@@ -14,6 +14,8 @@ import json
 from pathlib import Path
 import time
 
+import yaml
+
 from controller.candidates import build_plan_candidates
 from controller.config import create_controller, load_config
 from controller.engine_client import EngineError
@@ -206,9 +208,10 @@ def pack_original_sources(bank, question, *, template, snapshot, policy, phase, 
 
 class FixedChoiceCostProbe:
     """Execute the real rolling terminal compiler/quote with an explicit choice."""
-    def __init__(self, reader_checkpoint, target, proposal_count):
+    def __init__(self, reader_checkpoint, target, proposal_count, *, output_tokens_per_fact=64):
         self.reader_checkpoint, self.target, self.proposal_count = reader_checkpoint, target, proposal_count
         self.output_budgets = (2048,)
+        self.output_tokens_per_fact = output_tokens_per_fact
         self.native = self
 
     def bind_resident_models(self, manifest):
@@ -265,7 +268,10 @@ async def collect(args):
             resource_process_roots=args.resource_process_roots) as accounting:
         service = create_controller(config)
         resident_provider = None
+        output_tokens_per_fact = 64
         if args.study_config is not None:
+            study_config = yaml.safe_load(Path(args.study_config).read_text())
+            output_tokens_per_fact = study_config.get("reading", {}).get("output_tokens_per_fact", 64)
             resident_provider, accounting.resident_model_manifest = await asyncio.to_thread(
                 load_resident_provider, args.study_config, service.template)
             accounting.record_resident_models(args.study_config, accounting.resident_model_manifest)
@@ -302,7 +308,8 @@ async def collect(args):
                 if cache_state == "cold":
                     await service.engine.profile_prepare("cold")
                 service.rolling_policy = (FixedChoiceCostProbe(service.template.fingerprint.model_revision,
-                    actual_target, args.proposal_count) if phase == "ANSWER" else None)
+                    actual_target, args.proposal_count, output_tokens_per_fact=output_tokens_per_fact)
+                    if phase == "ANSWER" else None)
                 if service.rolling_policy is not None:
                     service.rolling_policy.bind_resident_models(accounting.resident_model_manifest)
                 cursor = len(recorder.calls)

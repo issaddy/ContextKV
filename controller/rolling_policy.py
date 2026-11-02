@@ -12,7 +12,7 @@ import time
 
 from .claim_graph import ClaimGraph
 from .context_schema import ReadTask, ReadingOutcome
-from .plan_policy import (PlanPolicy, PlanStep,
+from .plan_policy import (NoCompletePlan, PlanPolicy, PlanStep,
                           _completed_steps, complete_plan)
 from .reading import output_schema, read_output_reservation, step_generation_kind, step_messages
 from .schema import Plan, PromptCandidate
@@ -240,10 +240,30 @@ class RollingPlanRuntime:
                 raise ValueError("semantic alternatives must share the current actual task binding")
             native, reusable = await self.native.observe(plans, state, snapshot, engine, cost_model,
                 arrived, auxiliary_usage, selection_started=selection_started)
-            decision = self.policy.choose(plans, state, native, reusable)
+            try:
+                decision = self.policy.choose(plans, state, native, reusable)
+            except NoCompletePlan:
+                events.emit("rolling_plan_no_complete", attempt_id=attempt_id,
+                    observed_at_ms=(time.monotonic()-arrived)*1000,
+                    state_steps=tuple(record.step_id for record in state.steps),
+                    paid_cost=native.paid_cost, evaluations=self.policy.last_evaluations,
+                    option_diagnostics=self.policy.last_option_diagnostics,
+                    quote=native.quotes, physical_paid_observation=native.paid_observation,
+                    current_resource_forecasts=native.resources,
+                    future_step_forecasts=tuple({"plan_id": key[0], "step_id": key[1], "choices": value}
+                        for key, value in native.future.items()),
+                    candidate_steps=tuple({"plan_id": plan.plan_id, "steps": tuple({
+                        "task": step.task, "output_reservation": step.output_reservation,
+                        "variants": tuple({"candidate_id": candidate.candidate_id,
+                            "generation_kind": candidate.generation_kind,
+                            "input_tokens": len(candidate.input_ids), "output_budget": candidate.output_budget,
+                            "feasible": candidate.feasible} for candidate in step.variants)}
+                        for step in plan.steps)} for plan in plans))
+                raise
             audit = {"observed_at_ms": (time.monotonic()-arrived)*1000,
                 "state_steps": tuple(record.step_id for record in state.steps),
                 "paid_cost": native.paid_cost, "evaluations": self.policy.last_evaluations,
+                "option_diagnostics": self.policy.last_option_diagnostics,
                 "decision": decision, "quote": native.quotes,
                 "physical_paid_observation": native.paid_observation,
                 "current_resource_forecasts": native.resources,
