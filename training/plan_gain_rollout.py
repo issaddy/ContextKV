@@ -1,0 +1,758 @@
+"""Generate actual reader-bound direct/counterfactual gain supervision.
+
+All plans and frozen state keys are written before execution. Each experimental
+branch uses Controller.serve_turn, fixed semantic choices, real READ/REDUCE and
+one terminal QA. The shared four-component judge scores the actual answers.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+from collections import Counter
+from dataclasses import replace
+import hashlib
+import inspect
+import json
+from pathlib import Path
+import threading
+import time
+import sys
+from urllib.parse import urlsplit
+
+from controller.context_schema import EvidenceSet, EvidenceUnit, ReadingOutcome, SourceSpan, TaskState
+from controller.schema import QueryContext, SessionSnapshot, TurnRecord
+from controller.serialization import decode, to_jsonable
+from training.collect_plan_gains import collect_pair
+from training.plan_gain_protocol import (AuditedTaskInterpreter, EmptyPlannedPremise,
+    FixedCounterfactualRuntime, PlannedReductionConflict, build_counterfactual_plans)
+from training.train_plan_gain import actual_history, working_state_key
+
+
+COMPONENTS = ("necessary_points", "grounding", "conditions_versions", "task_score")
+DEFAULT_WEIGHTS = {"necessary_points": .3, "grounding": .2, "conditions_versions": .2, "task_score": .3}
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(to_jsonable(value), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def write(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(to_jsonable(value), ensure_ascii=False, indent=2, allow_nan=False)+"\n")
+
+
+def append(path, value):
+    with Path(path).open("a") as stream:
+        stream.write(json.dumps(to_jsonable(value), ensure_ascii=False, allow_nan=False)+"\n")
+
+
+def read_rows(path):
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+class GenerationLimitReached(ValueError):
+    pass
+
+
+class CompletedJudgeTruncated(ValueError):
+    pass
+
+
+class CompletedSupportTruncated(ValueError):
+    pass
+
+
+class JudgeWindowUnavailable(ValueError):
+    pass
+
+
+class GenerationBudget:
+    """One shared count for support, actual reader and offline judge calls."""
+    def __init__(self, maximum, journal):
+        self.maximum, self.journal = maximum, Path(journal)
+        self.tickets = []
+        self.lock = threading.Lock()
+
+    @property
+    def remaining(self):
+        return self.maximum-len(self.tickets)
+
+    def claim(self, role, identity, inputs):
+        with self.lock:
+            if len(self.tickets) == self.maximum:
+                raise GenerationLimitReached("declared total model-generation allocation exhausted")
+            ticket = {"index": len(self.tickets), "role": role, "identity": identity,
+                "started": time.monotonic(), "input_tokens": len(inputs), "status": "submitted"}
+            self.tickets.append(ticket)
+            append(self.journal, ticket)
+            return ticket
+
+    def finish(self, ticket, *, output_tokens=None, error=None):
+        with self.lock:
+            ticket.update(completed=time.monotonic(), output_tokens=output_tokens,
+                          status="completed" if error is None else "unresolved", error=error)
+            append(self.journal, ticket)
+
+
+class BudgetedSyncClient:
+    def __init__(self, client, budget, path):
+        self.client, self.budget, self.path = client, budget, Path(path)
+    def post(self, path, **kwargs):
+        if path != "/generate":
+            return self.client.post(path, **kwargs)
+        ticket = self.budget.claim("support", "support:"+str(len(self.budget.tickets)), kwargs["json"]["input_ids"])
+        append(self.path, {"ticket": ticket["index"], "status": "submitted", "request": kwargs["json"]})
+        try:
+            result = self.client.post(path, **kwargs)
+            result.raise_for_status()
+        except BaseException as error:
+            self.budget.finish(ticket, error=f"{type(error).__name__}: {error}")
+            append(self.path, {"ticket": ticket["index"], "status": "unresolved", "error": str(error)})
+            raise
+        self.budget.finish(ticket, output_tokens=result.json()["meta_info"].get("completion_tokens"))
+        append(self.path, {"ticket": ticket["index"], "status": "completed", "response": result.json()})
+        reason = result.json()["meta_info"].get("finish_reason")
+        reason = reason.get("type") if isinstance(reason, dict) else reason
+        if reason in {"length", "max_tokens"}:
+            raise CompletedSupportTruncated("actual candidate-support teacher reached its output limit")
+        return result
+    def close(self):
+        self.client.close()
+
+
+class JudgeJournal:
+    def __init__(self, client, budget, path):
+        self.client, self.budget, self.path = client, budget, Path(path)
+    async def post(self, path, **kwargs):
+        if path != "/generate":
+            return await self.client.post(path, **kwargs)
+        payload = kwargs["json"]
+        ticket = self.budget.claim("judge", "judge:"+str(len(self.budget.tickets)), payload["input_ids"])
+        append(self.path, {"ticket": ticket["index"], "status": "submitted", "request": payload})
+        try:
+            result = await self.client.post(path, **kwargs)
+            result.raise_for_status()
+        except BaseException as error:
+            self.budget.finish(ticket, error=f"{type(error).__name__}: {error}")
+            append(self.path, {"ticket": ticket["index"], "status": "unresolved", "error": str(error)})
+            raise
+        raw = result.json()
+        self.budget.finish(ticket, output_tokens=raw["meta_info"].get("completion_tokens"))
+        append(self.path, {"ticket": ticket["index"], "status": "completed", "response": raw})
+        finish = raw["meta_info"].get("finish_reason")
+        finish = finish.get("type") if isinstance(finish, dict) else finish
+        if finish in {"length", "max_tokens"}:
+            raise CompletedJudgeTruncated("actual fixed judge reached its output limit")
+        return result
+
+
+def bounded_engine(engine, budget, wire_path):
+    from profiling.retention_trace import RecordingEngine
+    class BoundedReader(RecordingEngine):
+        async def generate(self, **kwargs):
+            ticket = budget.claim("reader", kwargs["attempt_id"], kwargs["input_ids"])
+            try:
+                result = await super().generate(**kwargs)
+            except BaseException as error:
+                budget.finish(ticket, error=f"{type(error).__name__}: {error}")
+                raise
+            else:
+                budget.finish(ticket, output_tokens=len(result.output_ids))
+                return result
+            finally:
+                write(wire_path, self.calls)
+    return BoundedReader(engine)
+
+
+def audited_cohort(labels, sources, *, split, limit, seed, dev_fraction):
+    from training.train_evidence_policy import qualify_collection_rows
+    eligible, excluded = qualify_collection_rows(labels, sources)
+    unique = {row["task_id"] for row in labels}
+    if len(unique) != len(labels):
+        raise ValueError("gain source labels must contain unique actual task IDs")
+    assignments = {row["conversation_id"]: ("dev" if int(digest([seed, row["conversation_id"]])[:16], 16)/2**64
+                   < dev_fraction else "train") for row in labels}
+    selected = []
+    for row in eligible:
+        if assignments[row["conversation_id"]] != split:
+            continue
+        if row["script_history_mismatch"] is not False or "simulation" in row["rollout_policy"]:
+            excluded.append({"task_id": row["task_id"], "reason": "history_not_audited_actual_model_rollout"})
+            continue
+        if row["turn"] != len(row["actual_history"])+1:
+            excluded.append({"task_id": row["task_id"], "reason": "current_turn_not_next_actual_qa"})
+            continue
+        selected.append(row)
+    selected = selected[:limit]
+    if not selected:
+        raise ValueError("no audited native-training actual-history turns in the declared gain cohort")
+    return selected, {"split": split, "source_partition": "train", "partition_seed": seed,
+        "dev_fraction": dev_fraction, "allocation_unit": "conversation_id", "assignments": assignments,
+        "planned_task_ids": [row["task_id"] for row in selected], "exclusions": excluded,
+        "source_label_sha256": digest(labels), "source_originals_sha256": digest(sources)}
+
+
+def create_audited_provider(config, template):
+    from adapters.study_retrieval import create_study_retriever
+    provider = create_study_retriever(config, template)
+    original = provider.directory.task_interpreter
+    interpreter = AuditedTaskInterpreter(original.history_index)
+    interpreter.model = original.model
+    interpreter.original_interpreter = original
+    provider.directory.task_interpreter = interpreter
+    return provider, interpreter
+
+
+class ResourceWindows:
+    """Separate online and offline-judge physical windows with raw boundaries."""
+    def __init__(self, online, judge):
+        self.online, self.judge = online, judge
+    async def start(self):
+        await self.online.start()
+        await self.judge.start()
+    async def close(self):
+        await self.online.stop()
+        await self.judge.stop()
+    async def finish(self, role, start, end):
+        from bench.study_resources import integrate_physical
+        sampler = self.online if role == "online" else self.judge
+        sampler.samples.append(await asyncio.to_thread(sampler.sample, sampler.gpu_devices, sampler.process_ids))
+        cost = integrate_physical(sampler.samples, start, end)
+        if not cost["complete_window_coverage"]:
+            raise ValueError("counterfactual physical costs require actual window boundaries")
+        return {**cost, "window": {"start": start, "end": end, "clock": "client_monotonic"},
+            "resource_scope": {"gpu_devices": sampler.gpu_devices, "process_roots": sampler.process_ids,
+                               "host_basis": sampler.observation()["host_basis"]}}
+
+
+def judge_sources(base, scope_material, row, sources, *, corpus_id):
+    from controller.evidence import make_evidence
+    by_source = {source["source_id"]: source for source in sources}
+    units = {unit.unit_id: unit for unit in base.selected_set.selected_units}
+    if scope_material is not None:
+        units.update((unit.unit_id, unit) for unit in scope_material.selected_units)
+    for number, witness in enumerate(row["verified_grounding"]):
+        source = by_source[witness["passage_id"]]
+        if source["text"][witness["start"]:witness["end"]] != witness["quote"]:
+            raise ValueError("offline judge witness differs from the audited training original")
+        block = make_evidence(source["text"], source["source_id"], corpus_id=corpus_id,
+            version=source["version"], source_uri=source["source_uri"])
+        span = SourceSpan("judge-witness:"+str(number), block.key, witness["start"], witness["end"])
+        units[span.span_id] = EvidenceUnit(span.span_id, (span,), witness["quote"])
+    return EvidenceSet("offline-judge-material", tuple(units.values()))
+
+
+def planned_model_calls(plan):
+    return sum(step.task.kind == "ANSWER" or not (step.task.kind == "REDUCE"
+        and plan.context_plan.reading_mode == "typed_reduce" and step.task.operation in {"count", "sum", "group", "union"})
+        for step in plan.steps)
+
+
+def preparation_usage(provider, before, budget, ticket_start):
+    observed = provider._auxiliary_usage(before, ())
+    calls = [ticket for ticket in budget.tickets[ticket_start:] if ticket["role"] == "support"]
+    models = ([row for row in observed["models"] if "support_utility" not in row["roles"]]
+              if calls else observed["models"])
+    if calls:
+        complete = all(ticket["status"] == "completed" and ticket["output_tokens"] is not None for ticket in calls)
+        models.append({"roles": ["support_utility"],
+            "input_tokens": sum(ticket["input_tokens"] for ticket in calls) if complete else None,
+            "output_tokens": sum(ticket["output_tokens"] for ticket in calls) if complete else None,
+            "compute_ms": sum((ticket["completed"]-ticket["started"])*1000 for ticket in calls) if complete else None,
+            "compute_scope": "actual client support-call elapsed including transport"})
+    return {**{name: sum(row[name] for row in models) if all(row[name] is not None for row in models) else None
+               for name in ("input_tokens", "output_tokens", "compute_ms")}, "models": models}
+
+
+async def retire_completed_failed_steps(service, attempt_id):
+    acknowledgements = []
+    for stage, record in service.store.execution_steps_with_stage(attempt_id):
+        if stage == "COMPLETE":
+            continue
+        _, typed, _ = service.store.execution_step(attempt_id, record.step_id)
+        if typed.receipt is None or not typed.receipt.generation_complete:
+            continue
+        epoch = typed.engine_epoch
+        ack = await service.engine.retire(epoch.engine_session_id, epoch.session_generation,
+            "gain-completed-failure:"+attempt_id+":"+typed.step_id, epoch.engine_restart_id,
+            "actual_counterfactual_completed_failed_step")
+        if not ack.acknowledged:
+            raise ValueError("failed counterfactual completed native step has no retirement acknowledgement")
+        acknowledgements.append(to_jsonable(ack))
+    return acknowledgements
+
+
+async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, binding, preparation,
+                         resources, cache_start, generation_budget):
+    from controller.execution import ReadingBudgetExceeded
+    from controller.engine_client import EngineError
+    case_dir = Path(case_dir)
+    case_dir.mkdir(parents=True)
+    state_key = working_state_key(frozen, snapshot)
+    registration = {"registered_at": time.monotonic(), "frozen_state_key": state_key,
+        "plan_candidate": to_jsonable(plan), "working_state": to_jsonable(frozen), "snapshot": to_jsonable(snapshot),
+        "source_task_id": row["task_id"], "source_native_partition": row["split"], **binding}
+    write(case_dir/"before.json", registration)
+    session = "gain:"+digest([row["task_id"], plan.plan_id, binding["reader_checkpoint"]])[:24]
+    before = service.store.read_snapshot(session, row["snapshot_id"])
+    before = service.store.sync_history(session, snapshot.raw_history, before.version)
+    service.rolling_policy = FixedCounterfactualRuntime(plan)
+    service.bind_resident_models(binding["resident_model_manifest"])
+    if generation_budget.remaining < planned_model_calls(plan)+1:
+        write(case_dir/"not-run.json", {"status": "generation_budget_unavailable", "registered": registration})
+        return None
+    if cache_start == "cold":
+        await service.engine.profile_prepare("cold")
+    response = None
+    failure = None
+    cleanup = []
+    started = time.monotonic()
+    call_cursor = len(service.engine.calls)
+    try:
+        response = await service.serve_turn(session, row["question"], plan.context_plan.selected_set.source_blocks,
+            request_id="counterfactual", corpus_snapshot_id=row["snapshot_id"],
+            context_plans=(plan.context_plan,), query_context=QueryContext(
+                plan.context_plan.task_state.query or row["question"], "frozen_audited_task",
+                task_state=plan.context_plan.task_state))
+    except (EngineError, ReadingBudgetExceeded, EmptyPlannedPremise, PlannedReductionConflict, GenerationLimitReached) as error:
+        failure = {"type": type(error).__name__, "message": str(error)}
+        if isinstance(error, EngineError) and error.code != "READ_STEP_OUTPUT_TRUNCATED":
+            raise
+        attempt = service.store.find_request(session, "counterfactual")
+        cleanup = await retire_completed_failed_steps(service, attempt.attempt_id)
+    finally:
+        active = sys.exc_info()[1]
+        if active is not None:
+            failure = {"type": type(active).__name__, "message": str(active)}
+        await service.close_session(session)
+        ended = time.monotonic()
+        physical = await resources.finish("online", started, ended)
+        attempt = service.store.find_request(session, "counterfactual")
+        steps = (() if attempt is None else tuple(service.store.execution_step(attempt.attempt_id, step.step_id)[1]
+                 for step in service.store.execution_steps(attempt.attempt_id)))
+        after = service.store.get_snapshot(session)
+        actual_budgets = {step.step_id: step.task.output_budget for step in steps}
+        if response is not None:
+            actual_budgets["ANSWER"] = attempt.plan.candidate.output_budget
+        calls = service.engine.calls[call_cursor:]
+        input_tokens = sum(len(call["request"]["input_ids"]) for call in calls)
+        output_tokens = (sum(len(call["result"]["output_ids"]) for call in calls)
+                         if all("result" in call for call in calls) else None)
+        execution = {"complete_ms": (ended-started)*1000, **physical,
+            "total_input_tokens": input_tokens, "total_output_tokens": output_tokens,
+            "scope": "actual branch serving and confirmed session retirement"}
+        full_cost = {**execution, "scope": "shared_preparation_plus_actual_branch_execution",
+            "complete_ms": execution["complete_ms"]+preparation["complete_ms"],
+            **{name: execution[name]+preparation[name] for name in ("gpu_gib_seconds", "host_gib_seconds")},
+            "total_input_tokens": execution["total_input_tokens"]+preparation["input_tokens"]
+                if preparation["input_tokens"] is not None else None,
+            "total_output_tokens": execution["total_output_tokens"]+preparation["output_tokens"]
+                if output_tokens is not None and preparation["output_tokens"] is not None else None,
+            "shared_preparation_cost_id": preparation["shared_cost_id"]}
+        output = {"task_id": row["task_id"], "conversation_id": row["conversation_id"],
+            "question": row["question"], "actual_history": actual_history(snapshot),
+            "history_origin": "frozen_actual_rollout", "source_rollout_policy": row["rollout_policy"],
+            "history_reader_checkpoint": row.get("reader_checkpoint"),
+            "frozen_state_key": state_key, "plan_id": plan.plan_id, "semantic_kind": plan.semantic_kind,
+            "registered_plan_path": str((case_dir/"before.json").resolve()),
+            "status": "completed" if response else "failed", "failure": failure,
+            "metrics": {}, "scoring": {"status": "missing", "identity": binding["scorer_identity"]},
+            "answer": response.assistant_text if response else None, "response": to_jsonable(response),
+            "steps": to_jsonable(steps), "attempt": to_jsonable(attempt), "cost": full_cost,
+            "actual_branch_execution_cost": execution, "executed_output_budgets": actual_budgets,
+            "qa_increment": len(after.raw_history)-len(before.raw_history), "cleanup": cleanup,
+            "actual_native_calls": calls,
+            "comparison_budget": binding["comparison_budget"], **binding}
+        write(case_dir/"run.json", output)
+    if response is not None and output["qa_increment"] != 1:
+        raise ValueError("counterfactual branch did not commit exactly one current QA")
+    if response is None and output["qa_increment"] != 0:
+        raise ValueError("failed counterfactual branch committed a QA")
+    if response is not None and (attempt.plan.candidate.context_plan_id != plan.plan_id
+            or set(actual_budgets)-{"ANSWER"} != {step.task.step_id for step in plan.steps if step.task.kind != "ANSWER"}):
+        raise ValueError("actual branch execution differs from its pre-registered complete DAG")
+    return output
+
+
+def verify_actual_history(rows, rollouts):
+    actual = {(row["conversation_id"], row["turn"]): row for row in rollouts}
+    for row in rows:
+        for turn in row["actual_history"]:
+            source = actual[row["conversation_id"], turn["turn_id"]]
+            receipt = source["response"]["receipt"]
+            if (source["question"] != turn["user_text"] or source["answer"] != turn["assistant_text"]
+                    or "simulation" in source["rollout_policy"] or not receipt["generation_complete"]
+                    or not receipt["input_hash"]):
+                raise ValueError("frozen assistant history differs from its actual completed source rollout")
+
+
+async def score_branch(judge, template, row, material, branch, *, path, identity, weights,
+                       resources, judge_window, expected_fingerprint):
+    from training.preference_rollout import _judge
+    base_client = judge.client
+    before = await base_client.post("/context/engine/info", json={})
+    before.raise_for_status()
+    if before.json()["fingerprint"] != expected_fingerprint:
+        raise ValueError("fixed gain scorer changed checkpoint/tokenizer before scoring")
+    # Determine the actual prompt size at the recorded HTTP call, including the
+    # actual generated answer. An oversize prompt is unscored, never truncated.
+    class WindowedJudge:
+        async def post(self, endpoint, **kwargs):
+            if len(kwargs["json"]["input_ids"])+1024 > judge_window:
+                raise JudgeWindowUnavailable("fixed counterfactual judge prompt exceeds its declared model window")
+            return await judge.post(endpoint, **kwargs)
+    start = time.monotonic()
+    judged = record = None
+    try:
+        judged, record = await _judge(WindowedJudge(), template, row, material, branch["answer"])
+        after = await base_client.post("/context/engine/info", json={})
+        after.raise_for_status()
+        if after.json()["fingerprint"] != expected_fingerprint:
+            raise ValueError("fixed gain scorer changed checkpoint/tokenizer during scoring")
+    finally:
+        end = time.monotonic()
+        physical = await resources.finish("judge", start, end)
+        write(Path(path).with_name("judge.json"), {"quality_components": judged, "call": record,
+            "physical_cost": physical, "scorer_identity": identity,
+            "scope": "offline_judge_separate_from_online_answer_cost"})
+    if set(weights) != set(COMPONENTS) or abs(sum(weights.values())-1) > 1e-9:
+        raise ValueError("counterfactual quality uses four declared normalized component weights")
+    for name in COMPONENTS:
+        if not isinstance(judged[name], (int, float)) or not 0 <= judged[name] <= 1:
+            raise ValueError("actual judge component is outside its declared normalized scale")
+    quality = sum(weights[name]*judged[name] for name in COMPONENTS)
+    branch.update(metrics={"plan_gain_quality": quality}, quality_components=judged,
+        scoring={"status": "scored", "identity": identity, "judge_cost": {**record, **physical},
+                 "raw_output_path": str(Path(path).with_name("judge.json").resolve())})
+    write(path, branch)
+    return branch
+
+
+async def collect(config, settings, *, controller=None, provider=None, interpreter=None,
+                  resources=None, judge_client=None, judge_template=None, accounting=None):
+    """Bounded actual collection; injected dependencies are protocol-test seams."""
+    import httpx
+    from bench.study_resources import StudyResourceSampler, listening_processes
+    from controller.config import (GenerationProtocol, apply_study_config, create_controller,
+                                   create_model_template, load_config)
+    from controller.context_schema import RetrievalState
+    from controller.schema import OnlineTurn
+    from profiling.retention_capture_cost import CaptureRunAccounting
+    from training.preference_rollout import _judge
+
+    output = Path(settings["output_dir"])
+    output.mkdir(parents=True, exist_ok=False)
+    started = time.monotonic()
+    labels, source_rows = read_rows(settings["task_labels"]), read_rows(settings["sources"])
+    selected, cohort = audited_cohort(labels, source_rows, split=settings["split"], limit=len(labels),
+        seed=settings["partition_seed"], dev_fraction=settings["dev_fraction"])
+    verify_actual_history(selected, read_rows(settings["actual_rollouts"]))
+    validator = AuditedTaskInterpreter(None)
+    valid, invalid = [], []
+    for row in selected:
+        history = tuple(decode(TurnRecord, turn) for turn in row["actual_history"])
+        state = decode(TaskState, row["task_state"])
+        validator.bind(row, state)
+        try:
+            validator.interpret(OnlineTurn(row["conversation_id"], row["task_id"], row["turn"],
+                "training", row["question"], (), (), "P3"), RetrievalState(0, history))
+        except ValueError as error:
+            invalid.append({"task_id": row["task_id"], "reason": "invalid_audited_task_binding", "error": str(error)})
+        else:
+            valid.append(row)
+    valid = valid[:settings["limit_tasks"]]
+    cohort["task_ref_exclusions"] = invalid
+    cohort["planned_task_ids"] = [row["task_id"] for row in valid]
+    write(output/"cohort.json", cohort)
+    if not valid:
+        raise ValueError("no unchanged audited task binding remains for actual gain collection")
+    run = load_config(settings["run_config"])
+    run = replace(apply_study_config(run, config), state_dir=str(output/"state"), plan_gain=None,
+        prefix_retention={"mode": "native"}, planner=replace(run.planner, strategy="always_rebuild"))
+    if settings.get("reader_base_url"):
+        run = replace(run, engine=replace(run.engine, base_url=settings["reader_base_url"]))
+    if run.engine.kind != "sglang" and controller is None:
+        raise ValueError("gain supervision collection requires a scoped real SGLang reader")
+    judge_run = load_config(settings["judge_config"])
+    judge_url = settings["judge_base_url"]
+    weights = settings.get("quality_weights", DEFAULT_WEIGHTS)
+    budget = GenerationBudget(settings["max_generations"], output/"all-model-calls.jsonl")
+    ports = {urlsplit(run.engine.base_url).port, urlsplit(judge_url).port,
+             urlsplit(config["generation"]["teacher_url"]).port}
+    if accounting is None:
+        class GainEntryAccounting(CaptureRunAccounting):
+            async def __aexit__(self, error_type, error, traceback):
+                result = await super().__aexit__(error_type, error, traceback)
+                path = self.output/"capture-entry.json"
+                entry = json.loads(path.read_text())
+                entry.update(format="contextkv_actual_plan_gain_collection_cost_v1",
+                    scope="actual candidate preparation, counterfactual READ/REDUCE/ANSWER, judging and cleanup",
+                    actual_collection_manifest="manifest.json", all_models_call_journal="all-model-calls.jsonl",
+                    quality_training_scope="actual answer counterfactuals; not C retention value training")
+                write(path, entry)
+                return result
+        accounting = GainEntryAccounting(run, output, settings["online_gpu_devices"][0],
+            resource_gpu_devices=sorted(set((*settings["online_gpu_devices"], *settings["judge_gpu_devices"]))),
+            resource_process_roots=tuple(sorted(set((*listening_processes(ports), *settings["extra_process_roots"])))))
+    if resources is None:
+        online_roots = listening_processes((urlsplit(run.engine.base_url).port,
+                                           urlsplit(config["generation"]["teacher_url"]).port))
+        judge_roots = listening_processes((urlsplit(judge_url).port,))
+        resources = ResourceWindows(StudyResourceSampler(settings["online_gpu_devices"],
+            tuple(sorted(set((*online_roots, *settings["extra_process_roots"])))), interval=.5),
+            StudyResourceSampler(settings["judge_gpu_devices"], judge_roots, interval=.5))
+    own_controller, own_provider, own_judge = controller is None, provider is None, judge_client is None
+    all_runs, all_pairs, preparations, unavailable = [], [], [], []
+    status, stop_reason = "completed", None
+    active_error = None
+    async with accounting:
+        await resources.start()
+        try:
+            if own_controller:
+                controller = create_controller(run)
+            info = await controller.engine.info()
+            if info.fingerprint != controller.template.fingerprint:
+                raise ValueError("actual reader identity differs from the scoped collection template")
+            reader_checkpoint = info.fingerprint.model_revision
+            recorder = bounded_engine(controller.engine, budget, output/"reader-wire.json")
+            controller.engine = recorder
+            accounting.calls = recorder.calls
+            if own_provider:
+                provider, interpreter = await asyncio.to_thread(create_audited_provider, config, controller.template)
+            if not isinstance(interpreter, AuditedTaskInterpreter):
+                raise ValueError("gain preparation requires the unchanged audited-state interpreter")
+            accounting.resident_model_manifest = to_jsonable(provider.manifest)
+            if own_provider:
+                accounting.record_resident_models(settings["study_config"], provider.manifest)
+            from adapters.teacher_support import TeacherSupportBackend
+            support_engine_info = None
+            if isinstance(provider.support_backend, TeacherSupportBackend):
+                provider.support_backend.client = BudgetedSyncClient(provider.support_backend.client, budget,
+                    output/"support-wire.jsonl")
+                provider.support_backend.record_path = output/"support-calls.jsonl"
+                support_info = await asyncio.to_thread(provider.support_backend.client.post,
+                    "/context/engine/info", json={})
+                support_info.raise_for_status()
+                support_engine_info = support_info.json()
+            if own_judge:
+                judge_client = httpx.AsyncClient(base_url=judge_url, timeout=600)
+            if judge_template is None:
+                judge_template = create_model_template(judge_run.model)
+            judge_info_result = await judge_client.post("/context/engine/info", json={})
+            judge_info_result.raise_for_status()
+            judge_info = judge_info_result.json()
+            if judge_info["fingerprint"] != to_jsonable(judge_template.fingerprint):
+                raise ValueError("fixed scorer actual checkpoint differs from its scoped tokenizer/model")
+            if own_judge and judge_info["fingerprint"]["model_revision"] != judge_run.model.revision:
+                raise ValueError("fixed scorer does not match its explicit reader checkpoint")
+            scorer = {"kind": "frozen_four_component_actual_answer_judge",
+                "reader_checkpoint": judge_info["fingerprint"]["model_revision"],
+                "fingerprint": judge_info["fingerprint"], "weights": weights,
+                "implementation_sha256": hashlib.sha256(inspect.getsource(_judge).encode()).hexdigest(),
+                "request_sampling": {"temperature": 0, "max_new_tokens": 1024},
+                "metric": "plan_gain_quality", "score_range": [0, 1]}
+            journal_judge = JudgeJournal(judge_client, budget, output/"judge-wire.jsonl")
+            common_binding = {"reader_checkpoint": reader_checkpoint,
+                "reader_profile_id": settings["reader_profile_id"], "scorer_identity": scorer,
+                "split": settings["split"], "measurement_kind": "hardware" if info.engine_kind == "sglang" else "simulation",
+                "resident_model_manifest": to_jsonable(provider.manifest),
+                "task_state_source": "frozen_audited_actual"}
+            write(output/"binding.json", {**common_binding, "reader_engine_info": info,
+                "support_engine_info": support_engine_info,
+                "scorer_engine_info": judge_info, "generation_protocol": GenerationProtocol.from_config(run).record(),
+                "source_files": {name: {"path": str(Path(settings[name]).resolve()),
+                    "sha256": hashlib.sha256(Path(settings[name]).read_bytes()).hexdigest()}
+                    for name in ("task_labels", "actual_rollouts", "sources", "run_config", "judge_config")},
+                "configuration": config, "collection_settings": settings,
+                "task_inference": "frozen audited training labels; no new task-teacher inference"})
+            for number, row in enumerate(valid):
+                if budget.remaining < 2:
+                    status, stop_reason = "generation_budget_exhausted", "no_preparation_and_answer_allocation"
+                    break
+                task_dir = output/"tasks"/f"{number:05d}"
+                task_dir.mkdir(parents=True)
+                history = tuple(decode(TurnRecord, turn) for turn in row["actual_history"])
+                state = decode(TaskState, row["task_state"])
+                snap = SessionSnapshot("gain-preparation:"+row["task_id"], raw_history=history,
+                                       corpus_snapshot_id=row["snapshot_id"])
+                interpreter.bind(row, state)
+                tick = time.monotonic()
+                preparation = None
+                ticket_start = len(budget.tickets)
+                plans = ()
+                usage_before = {id(model): dict(model.usage) for _, model in provider._usage_sources()
+                                if hasattr(model, "usage")}
+                try:
+                    selection = await provider.retrieve(snap, row["question"], row["task_id"])
+                    base = selection.context_plans[0]
+                    if base.task_state != state:
+                        raise ValueError("A candidate preparation changed the audited current task state")
+                    trace = provider.traces[snap.session_id, row["task_id"]]
+                    scope_material = None
+                    if settings["scope_scan"] and state.source_scope:
+                        scope_pool = provider.directory.full_scope(state.source_scope)
+                        scope_material = EvidenceSet("gain-explicit-scope", scope_pool.units,
+                                                     source_blocks=scope_pool.source_blocks)
+                    plans, omitted = build_counterfactual_plans(base, snap, controller.template,
+                        reader_checkpoint=reader_checkpoint, read_outputs=settings["read_outputs"],
+                        scope_material=scope_material)
+                    unavailable.extend({"task_id": row["task_id"], **reason} for reason in omitted)
+                    frozen = ReadingOutcome(base, auxiliary_usage={"input_tokens": 0,
+                        "output_tokens": 0, "compute_ms": 0.0, "models": []})
+                    material = judge_sources(base, scope_material, row, source_rows,
+                                             corpus_id=config["retrieval"]["corpus_id"])
+                    write(task_dir/"registered-family.json", {"registered_at": time.monotonic(),
+                        "model_calls_before_branch_execution": len(budget.tickets),
+                        "working_state": frozen, "snapshot": snap, "frozen_state_key": working_state_key(frozen, snap),
+                        "candidate_plans": plans, "unavailable": omitted,
+                        "offline_judge_material": material, "offline_reference": row["reference_answer"],
+                        "preparation_trace": trace, "source_task": row})
+                except (CompletedSupportTruncated, json.JSONDecodeError) as error:
+                    unavailable.append({"task_id": row["task_id"], "reason": "completed_preparation_model_failed",
+                                        "error": str(error)})
+                    write(task_dir/"preparation-failure.json", {"type": type(error).__name__, "error": str(error)})
+                finally:
+                    ended = time.monotonic()
+                    physical = await resources.finish("online", tick, ended)
+                    usage = preparation_usage(provider, usage_before, budget, ticket_start)
+                    preparation = {"shared_cost_id": "gain-preparation:"+digest([row["task_id"], tick]),
+                        "task_id": row["task_id"], "complete_ms": (ended-tick)*1000, **physical, **usage,
+                        "scope": "one actual candidate-family preparation; counted once in collection total",
+                        "source_label_costs": {"task_teacher": row.get("teacher_metrics"),
+                                               "grounding_review": row.get("verification_metrics")}}
+                    preparations.append(preparation)
+                    write(task_dir/"preparation-cost.json", preparation)
+                if not plans:
+                    continue
+                comparison = {"body_tokens": base.budget.body_tokens,
+                    "answer_output_tokens": base.budget.output_tokens, "window_tokens": base.budget.window_tokens,
+                    "read_output_budget_grid": settings["read_outputs"],
+                    "reference_state": "same frozen original material/actual history; direct has zero new READ"}
+                binding = {**common_binding, "comparison_budget": comparison}
+                baseline = None
+                for branch_number, plan in enumerate(plans):
+                    branch_dir = task_dir/f"branch-{branch_number:02d}"
+                    packet = {"plan_candidate": to_jsonable(plan), "working_state": to_jsonable(frozen),
+                        "snapshot": to_jsonable(snap), "metric": "plan_gain_quality",
+                        "normalization": {"scale": 1, "offset": 0,
+                            "protocol_source": "four normalized components weighted by fixed scorer_identity.weights"},
+                        "scorer_identity": scorer, "comparison_budget": comparison,
+                        "direct_run": str((task_dir/"branch-00"/"run.json").resolve()),
+                        "candidate_run": str((branch_dir/"run.json").resolve()),
+                        "frozen_state_key": working_state_key(frozen, snap), "registered_at": time.monotonic()}
+                    write(task_dir/f"pair-{branch_number:02d}.before.json", packet)
+                    result = await execute_branch(controller, plan, frozen, snap, row, case_dir=branch_dir,
+                        binding=binding, preparation=preparation, resources=resources,
+                        cache_start=settings["cache_start"], generation_budget=budget)
+                    if result is None:
+                        unavailable.append({"task_id": row["task_id"], "plan_id": plan.plan_id,
+                            "reason": "next_complete_branch_unaffordable", "remaining_calls": budget.remaining})
+                        status, stop_reason = "generation_budget_limited", "some_predeclared_branches_unaffordable"
+                        continue
+                    all_runs.append(result)
+                    if result["status"] != "completed":
+                        continue
+                    try:
+                        result = await score_branch(journal_judge, judge_template, row, material, result,
+                            path=branch_dir/"run.json", identity=scorer, weights=weights, resources=resources,
+                            judge_window=judge_run.context.max_total_model_tokens,
+                            expected_fingerprint=judge_info["fingerprint"])
+                    except (CompletedJudgeTruncated, JudgeWindowUnavailable, json.JSONDecodeError) as error:
+                        result["scoring"].update(status="failed", error=str(error),
+                                                 raw_output_path=str(branch_dir/"judge.json"))
+                        write(branch_dir/"run.json", result)
+                        continue
+                    if plan.semantic_kind == "direct_answer":
+                        if result["response"]["read_count"] != 0:
+                            raise ValueError("gain direct baseline executed a READ")
+                        baseline = result
+                    elif baseline is not None and common_binding["measurement_kind"] == "hardware":
+                        pair = collect_pair(packet, baseline, result)
+                        pair["preparation_cost_id"] = preparation["shared_cost_id"]
+                        append(output/"gains.jsonl", pair)
+                        append(output/"pairs.jsonl", packet)
+                        all_pairs.append(pair)
+                write(output/"progress.json", {"tasks_prepared": len(preparations), "runs": len(all_runs),
+                    "pairs": len(all_pairs), "generations": len(budget.tickets), "status": status})
+                if budget.remaining < 2:
+                    status, stop_reason = "generation_budget_exhausted", "no_complete_reader_and_judge_allocation"
+                    break
+        except GenerationLimitReached as error:
+            status, stop_reason = "generation_budget_exhausted", str(error)
+        finally:
+            active_error = sys.exc_info()[1]
+            if active_error is not None:
+                status = "failed"
+            if own_provider and provider is not None:
+                await asyncio.to_thread(provider.close)
+            if own_controller and controller is not None:
+                await controller.aclose()
+                controller.store.close()
+            if own_judge and judge_client is not None:
+                await judge_client.aclose()
+            await resources.close()
+            write(output/"phase-resources.json", {"online": resources.online.observation(),
+                                                   "judge": resources.judge.observation()})
+            write(output/"manifest.json", {"schema_version": 1, "status": status,
+                "error": str(active_error) if active_error is not None else stop_reason,
+                "scope": "actual reader-bound counterfactual supervision collection",
+                "elapsed_ms": (time.monotonic()-started)*1000, "planned_tasks": cohort["planned_task_ids"],
+                "tasks_prepared": len(preparations), "actual_runs": len(all_runs), "actual_gain_pairs": len(all_pairs),
+                "run_statuses": dict(Counter(row["status"] for row in all_runs)),
+                "semantic_families": dict(Counter(row["semantic_kind"] for row in all_runs)),
+                "unavailable": unavailable, "generations": {"limit": budget.maximum, "actual_calls": len(budget.tickets),
+                    "roles": dict(Counter(ticket["role"] for ticket in budget.tickets)),
+                    "unresolved": [ticket for ticket in budget.tickets if ticket["status"] != "completed"]},
+                "shared_preparations": preparations, "outputs": {"gains": str(output/"gains.jsonl"),
+                    "pairs": str(output/"pairs.jsonl"), "raw_reader": str(output/"reader-wire.json"),
+                    "raw_support": str(output/"support-wire.jsonl"),
+                    "raw_judge": str(output/"judge-wire.jsonl"), "all_calls": str(output/"all-model-calls.jsonl")},
+                "cost_accounting": "entry physical/native totals count shared preparation once; each branch also records full hypothetical response cost with shared preparation ID; offline judge remains separate"})
+    entry_path = output/"capture-entry.json"
+    if entry_path.exists():
+        entry = json.loads(entry_path.read_text())
+        entry.update(format="contextkv_actual_plan_gain_collection_cost_v1",
+            scope="actual candidate preparation, counterfactual READ/REDUCE/ANSWER, offline judging and cleanup",
+            actual_collection_manifest="manifest.json", all_models_call_journal="all-model-calls.jsonl",
+            quality_training_scope="reader-bound actual answer counterfactuals; not C retention value training")
+        write(entry_path, entry)
+    return json.loads((output/"manifest.json").read_text())
+
+
+def main(argv=None):
+    import yaml
+    def integers(value):
+        return tuple(map(int, value.split(",")))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--study-config", required=True)
+    parser.add_argument("--run-config", required=True)
+    parser.add_argument("--reader-profile-id", required=True)
+    parser.add_argument("--reader-base-url")
+    parser.add_argument("--judge-config", required=True)
+    parser.add_argument("--judge-base-url", required=True)
+    parser.add_argument("--task-labels", required=True)
+    parser.add_argument("--actual-rollouts", required=True)
+    parser.add_argument("--sources", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--split", choices=("train", "dev"), required=True)
+    parser.add_argument("--limit-tasks", type=int, default=8)
+    parser.add_argument("--partition-seed", default="plan-gain-native-train-v1")
+    parser.add_argument("--dev-fraction", type=float, default=.2)
+    parser.add_argument("--read-outputs", type=integers, default=(512, 1024, 2048))
+    parser.add_argument("--max-generations", type=int, default=256)
+    parser.add_argument("--online-gpu-devices", type=integers, required=True)
+    parser.add_argument("--judge-gpu-devices", type=integers, required=True)
+    parser.add_argument("--extra-process-roots", type=integers, default=())
+    parser.add_argument("--cache-start", choices=("cold", "observed"), default="observed")
+    parser.add_argument("--scope-scan", action=argparse.BooleanOptionalAction, default=True)
+    args = parser.parse_args(argv)
+    if args.limit_tasks < 1 or args.max_generations < 1 or not 0 < args.dev_fraction < 1 or any(
+            output < 1 for output in args.read_outputs):
+        raise ValueError("collection bounds, output allocations and conversation holdout must be positive")
+    config = yaml.safe_load(Path(args.study_config).read_text())
+    print(json.dumps(asyncio.run(collect(config, vars(args))), ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

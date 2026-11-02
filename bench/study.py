@@ -165,6 +165,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     service = create_controller(run)
     provider_started = time.monotonic()
     provider = await asyncio.to_thread(create_study_retriever, config, service.template)
+    service.bind_resident_models(provider.manifest)
     initialization_ms = (time.monotonic()-provider_started)*1000
     engine_info = await service.engine.info()
     cache_protocol = config["execution"].get("cache_start", "observed")

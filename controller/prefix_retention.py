@@ -48,8 +48,15 @@ class RetentionRequest:
     def from_receipt(cls, receipt, forecast):
         if receipt["cache_scope_hash"] != forecast.cache_scope_hash:
             raise ValueError("retention forecast differs from the executing reader/cache scope")
-        return cls(receipt["owner_id"], forecast, frozenset(receipt["gpu_page_ids"]),
-                   frozenset(receipt["host_page_ids"]), receipt["page_size"])
+        # Fit normalizes future tier residency by the full eligible token path.
+        # A currently Host-only page can occupy GPU again within this horizon.
+        # These are logical protection capacities; the receipt retains the exact
+        # presently ready replica sets for physical-residency observations.
+        path = frozenset(receipt["gpu_page_ids"]) | frozenset(receipt["host_page_ids"])
+        if len(path)*receipt["page_size"] != receipt["boundary_tokens"]:
+            raise ValueError("retention needs the full recoverable causal page path")
+        host = path if receipt["pool"]["host_capacity_tokens"] else frozenset()
+        return cls(receipt["owner_id"], forecast, path, host, receipt["page_size"])
 
 
 @dataclass(frozen=True)
@@ -82,6 +89,8 @@ def allocate_retention(requests, *, gpu_budget_tokens, host_budget_tokens,
         for request in requests.values():
             gpu = len(request.gpu_page_ids-gpu_pages)*request.page_size
             host = len(request.host_page_ids-host_pages)*request.page_size
+            if not gpu and not host:
+                continue  # Another chosen owner already gives this entire path soft protection.
             if ((len(gpu_pages | request.gpu_page_ids)*request.page_size > gpu_budget_tokens)
                     or (len(host_pages | request.host_page_ids)*request.page_size > host_budget_tokens)):
                 continue
@@ -102,6 +111,13 @@ def allocate_retention(requests, *, gpu_budget_tokens, host_budget_tokens,
         host_pages.update(selected.host_page_ids)
         choices.append(choice)
     return tuple(choices)
+
+
+def retainable_prefix(receipt):
+    residency = receipt["residency"]
+    return (receipt["boundary_tokens"] > 0
+        and residency["recoverable_prefix_tokens"] >= receipt["boundary_tokens"]
+        and not residency["inflight_h2d_tokens"] and not residency["inflight_d2h_tokens"])
 
 
 class EmpiricalRetentionModel:
@@ -441,7 +457,8 @@ class PrefixReadObserver:
         forecast = self._forecast(features, scope)
         requests, records = [], {}
         forecasts, feature_rows = {current["owner_id"]: forecast}, {current["owner_id"]: features}
-        if forecast is not None:
+        feasible = {current["owner_id"]: retainable_prefix(inspected)}
+        if forecast is not None and feasible[current["owner_id"]]:
             requests.append(RetentionRequest.from_receipt(inspected, forecast))
         status = await self.runtime.status(inspected["engine_restart_id"])
         native = {row["owner_id"]: row for row in status["prefixes"]}
@@ -463,7 +480,8 @@ class PrefixReadObserver:
                 host_load_tokens=native[old.owner_id]["residency"]["host_only_load_tokens"])
             old_forecast = self._forecast(old_features, scope)
             forecasts[old.owner_id], feature_rows[old.owner_id] = old_forecast, old_features
-            if old_forecast is not None:
+            feasible[old.owner_id] = retainable_prefix(native[old.owner_id])
+            if old_forecast is not None and feasible[old.owner_id]:
                 requests.append(RetentionRequest.from_receipt(native[old.owner_id], old_forecast))
                 records[old.owner_id] = old
         choices = allocate_retention(requests, gpu_budget_tokens=self.settings["gpu_budget_tokens"],
@@ -475,10 +493,12 @@ class PrefixReadObserver:
                 await self.owners.release(owner_id, reason="nonpositive_or_uncalibrated_marginal_value")
         current_ack = {**inspected, "state": "UNRETAINED", "policy": "value",
             "policy_choice": {"calibrated": forecast is not None, "features": features,
+                              "action_feasible": feasible[current["owner_id"]],
                               "feature_bucket": self.model.feature_bucket(features),
                               "model_digest": self.model_digest}}
         for owner_id, choice in selected.items():
             policy_choice = {**asdict(choice), "model_digest": self.model_digest,
+                "capacity_basis": "full eligible causal page paths per tier; ready physical replicas remain in native receipt",
                 "raw_features": feature_rows[owner_id],
                 "feature_bucket": self.model.feature_bucket(feature_rows[owner_id]),
                 "forecast": asdict(forecasts[owner_id])}
@@ -493,6 +513,7 @@ class PrefixReadObserver:
                     policy="paired_native_value", policy_choice=policy_choice)
         return {**current_ack, "retention_choices": [asdict(choice) for choice in choices],
             "retention_candidates": [{"owner_id": owner_id,
+                "action_feasible": feasible[owner_id],
                 "raw_features": feature_rows[owner_id],
                 "feature_bucket": self.model.feature_bucket(feature_rows[owner_id]),
                 "forecast": asdict(prediction) if prediction is not None else None}

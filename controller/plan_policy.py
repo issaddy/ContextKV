@@ -28,6 +28,7 @@ FEATURE_NAMES = (*PLAN_KINDS, "needs", "conditions", "version_comparison", "open
 class PlanStep:
     task: ReadTask
     variants: tuple[PromptCandidate, ...] = ()
+    output_reservation: int = 0
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,7 @@ class NativePlanningState:
     resources: Mapping[str, ResourceForecast]
     future: Mapping[tuple[str, str], tuple[StepForecast, ...]]
     paid_cost: CompleteCost
+    paid_observation: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -132,7 +134,7 @@ class PlanEvaluation:
 class NextStep:
     plan_id: str
     task: ReadTask
-    candidate: PromptCandidate
+    candidate: PromptCandidate | None
     reusable_prefix_ids: tuple[str, ...]
 
 
@@ -160,7 +162,8 @@ def _completed_steps(plan, state):
         old = executed.get(task.step_id)
         if task.step_id not in results or old is None:
             continue
-        if replace(old, input_budget=0, output_budget=0) != replace(task, input_budget=0, output_budget=0):
+        if replace(old, input_budget=0, output_budget=0, output_schema={}) != replace(
+                task, input_budget=0, output_budget=0, output_schema={}):
             continue
         if any(identity not in old_units or identity not in new_units or
                old_units[identity].source_spans != new_units[identity].source_spans or
@@ -239,8 +242,8 @@ class PlanPolicy:
                 available.add(ready.task.step_id)
         return result
 
-    def _options(self, plan, step, completed, native, reusable_prefixes):
-        if not step.variants or not set(step.task.predecessor_step_ids) <= completed:
+    def _options(self, plan, step, completed, native, reusable_prefixes, *, future_execution=False):
+        if future_execution or not step.variants or not set(step.task.predecessor_step_ids) <= completed:
             return tuple(option for option in native.future.get((plan.plan_id, step.task.step_id), ())
                 if self._within_step_budget(plan, step, option.cost.input_tokens, option.output_budget))
         quotes = {quote.candidate_id: quote for quote in native.quotes.quotes}
@@ -252,7 +255,9 @@ class PlanPolicy:
             if (quote.input_hash != candidate.input_hash or quote.input_len != len(candidate.input_ids)
                     or candidate.fingerprint != native.quotes.fingerprint):
                 raise ValueError("plan quote does not bind the actual compiled input")
-            resource = native.resources[candidate.candidate_id]
+            resource = native.resources.get(candidate.candidate_id)
+            if resource is None:
+                continue
             if resource.quote_seq != native.quotes.observed_seq:
                 raise ValueError("resource forecast and native quote use different observations")
             if not set(resource.prefix_ids) <= set(reusable_prefixes.get(candidate.candidate_id, ())):
@@ -263,16 +268,33 @@ class PlanPolicy:
                 raise ValueError("compiled candidate generation kind differs from its plan step")
             if not self._within_step_budget(plan, step, len(candidate.input_ids), output):
                 continue
+            timing_model = native.cost_model.step_models.get(expected_kind, native.cost_model)
+            metadata = timing_model.calibration_metadata
+            if (metadata.get("generation_kind") != expected_kind or
+                    metadata.get("output_prior_system_prompt") != candidate.messages[0].content):
+                continue
+            control_adjustment = 0.0
+            scope = "native_quote"
+            if expected_kind == "ANSWER":
+                prior = timing_model.step_output_priors.get(f"ANSWER:{output}")
+                if (prior is None or "mean_remaining_control_ms" not in prior or
+                        "rolling_proposals_compilation_start" not in metadata.get("step_control_scope", ())):
+                    continue
+                # The actual selection head is already in paid_cost. Replace
+                # this profile's full control term by its measured remaining
+                # prepare/commit tail; READ starts inside its executor instead.
+                control_adjustment = prior["mean_remaining_control_ms"]-prior["mean_control_ms"]
+                scope = "native_quote_actual_remaining_answer_control"
             # Preparation and completed reading are already in paid_cost.  Each
             # native forecast here prices only its own remaining execution.
             measured = native.cost_model.predict_native(replace(candidate, predicted_read_ms=0.0,
                 auxiliary_ms=0.0), quote, native.snapshot, batch=native.quotes,
-                concurrency=native.quotes.active_requests+1)
+                concurrency=native.quotes.active_requests+1, control_ms=control_adjustment)
             eligible = measured.calibrated if measured.selection_eligible is None else measured.selection_eligible
             result.append(StepForecast(candidate.action, output,
                 CompleteCost(measured.cost, resource.gpu_gib_ms, resource.host_gib_ms,
                     len(candidate.input_ids), output, resource.gpu_peak_gib, resource.host_peak_gib),
-                resource.calibration_id, bool(eligible and resource.calibrated), "native_quote",
+                resource.calibration_id, bool(eligible and resource.calibrated), scope,
                 candidate, resource.prefix_ids))
         return tuple(result)
 
@@ -280,7 +302,8 @@ class PlanPolicy:
         budget = plan.context_plan.budget
         output_valid = (output == budget.output_tokens if step.task.kind == "ANSWER" else
                         output <= min(step.task.output_budget, budget.read_output_tokens))
-        return output_valid and inputs <= step.task.input_budget and inputs+output <= budget.window_tokens
+        return (output_valid and output >= step.output_reservation
+                and inputs <= step.task.input_budget and inputs+output <= budget.window_tokens)
 
     def _constraint(self, cost, budget):
         limits = self.limits
@@ -340,13 +363,19 @@ class PlanPolicy:
             if reason:
                 evaluations.append(PlanEvaluation(plan.plan_id, None, None, None, False, reason))
                 continue
-            options = [tuple(option for option in self._options(plan, step, completed, native, reusable_prefixes)
-                             if option.calibrated) for step in ordered]
-            if not options[0] or any(option.candidate is None for option in options[0]):
+            options = [tuple(option for option in self._options(plan, step, completed, native, reusable_prefixes,
+                future_execution=index > 0) if option.calibrated) for index, step in enumerate(ordered)]
+            cpu_step = (ordered[0].task.kind == "REDUCE" and plan.context_plan.reading_mode == "typed_reduce"
+                and ordered[0].task.operation in {"union", "count", "sum", "group"})
+            if not options[0] or any(option.candidate is None and not (
+                    cpu_step and option.scope == "cpu_profile") for option in options[0]):
                 evaluations.append(PlanEvaluation(plan.plan_id, None, None, None, False, "next_step_not_compiled"))
                 continue
             if any(not choices for choices in options):
                 evaluations.append(PlanEvaluation(plan.plan_id, None, None, None, False, "unmeasured_complete_cost"))
+                continue
+            if len(state.steps)+len(ordered) > state.plan.budget.max_steps:
+                evaluations.append(PlanEvaluation(plan.plan_id, None, None, None, False, "cumulative_step_budget"))
                 continue
             # Branch only over the next two executions. The complete remaining
             # tail is still charged using each step's supplied profile forecast.

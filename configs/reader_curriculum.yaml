@@ -9,3 +9,5 @@ reader_curriculum:
   numeric_delta: 7
   maximum_constructed_cases: 8
   constructed_excerpt_characters: 1200
+  maximum_computed_cases: 8
+  computed_excerpt_characters: 256

@@ -24,19 +24,20 @@ from bench.metrics import occupancy_integral
 from bench.native_metrics import NativePoolSampler, pool_series
 from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
 from controller.config import create_controller, create_model_template, load_config
-from controller.context_schema import ContextPlan, EvidenceClaim, ReadTask
-from controller.engine_client import SGLangEngineClient
+from controller.context_schema import ContextBudget, ContextPlan, EvidenceClaim, EvidenceSet, Need, ReadTask, TaskState, TextRef
+from controller.engine_client import EngineError, SGLangEngineClient
 from controller.prefix_retention import EmpiricalRetentionModel, PrefixReadObserver, PrefixRuntimeClient
 from controller.reading import (build_read_plan, parse_read_result, stable_prefix_input_ids,
                                 stable_prefix_messages, stable_source_payload)
 from controller.reduction import reduce_claims
 from controller.sampling import SamplingRecipe, request_sampling
-from controller.schema import ConfigFingerprint, SessionSnapshot, TurnRecord
+from controller.schema import ConfigFingerprint, PromptCandidate, SessionSnapshot, TurnRecord
 from controller.serialization import decode, to_jsonable
 from controller.session_store import SessionStore, load_record
 from controller.templates import candidate_request, step_request, token_hash
 from controller.templates import ByteTokenizer, longest_common_prefix
 from engine_patches.contextkv_runtime import executed_prefix_hashes
+from profiling.retention_capture_cost import CaptureRunAccounting, load_resident_provider
 
 
 def digest(value):
@@ -58,12 +59,14 @@ class SourceLedger(SessionStore):
                                  check_same_thread=False)
         self.db.row_factory = sqlite3.Row
 
-    def committed_attempts(self, selected=()):
+    def committed_attempts(self, selected=(), *, limit=None):
         if selected:
-            return tuple(self.get_attempt(identity) for identity in selected)
+            identities = selected if limit is None else selected[:limit]
+            return tuple(self.get_attempt(identity) for identity in identities)
+        suffix, parameters = ("", ()) if limit is None else (" LIMIT ?", (limit,))
         return tuple(self.get_attempt(row[0]) for row in self.db.execute(
             "SELECT a.attempt_id FROM attempts a JOIN turn_plans p ON p.attempt_id=a.attempt_id "
-            "WHERE a.stage='COMMITTED' ORDER BY a.rowid"))
+            "WHERE a.stage='COMMITTED' ORDER BY a.rowid"+suffix, parameters))
 
     def before(self, attempt):
         return before_snapshot(self, attempt)
@@ -82,11 +85,45 @@ def recorded_request(call):
         "input_ids", "max_new_tokens", "ignore_eos", "citation_ids", "response_schema"}}
 
 
-def source_records(path):
+def source_records(path, *, store=None, attempt_ids=None):
     if path is None:
         return {}
-    rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
-    return {row["response"]["attempt_id"]: row for row in rows if row["status"] == "completed"}
+    records = {}
+    with Path(path).open() as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if "status" in row:
+                if row["status"] != "completed":
+                    continue
+            else:
+                required = {"task_id", "conversation_id", "question", "actual_history", "snapshot_id",
+                            "rollout_policy", "committed_turn", "answer", "response", "split"}
+                if not required <= row.keys() or row["rollout_policy"] != "dense5_rebuild_qwen3_32b_nonthinking":
+                    raise ValueError("source without status is not the actual native training rollout contract")
+            identity = row["response"]["attempt_id"]
+            if attempt_ids is not None and identity not in attempt_ids:
+                continue
+            if "status" not in row:
+                if store is None:
+                    raise ValueError("native training rollout status must be derived from its actual SQLite Attempt")
+                actual = store.get_attempt(identity)
+                receipt = actual.result.receipt if actual.result is not None else None
+                if actual.stage != "COMMITTED" or receipt is None or not receipt.generation_complete:
+                    raise ValueError("native training rollout lacks a COMMITTED Attempt and complete native receipt")
+                if actual.query != row["question"] or actual.result.text != row["answer"]:
+                    raise ValueError("native training rollout text differs from its linked SQLite Attempt")
+                corpus_ids = sorted({block.key.corpus_id for block in actual.evidence})
+                row = {**row, "status": "completed", "dataset": "+".join(corpus_ids),
+                    "source_status_derivation": dict(contract="training.task_rollout.run_actual_rollouts",
+                        state_database=str(store.path), source_record_path=str(Path(path).resolve()),
+                        source_record_sha256=digest(row), stage=actual.stage,
+                        native_receipt=to_jsonable(receipt), corpus_ids=corpus_ids)}
+            records[identity] = row
+            if attempt_ids is not None and records.keys() >= attempt_ids:
+                break
+    return records
 
 
 def source_token_ranges(template, rendered, messages, units):
@@ -162,6 +199,8 @@ def annotated_generation(plan, step, template):
         input_ids=list(step.input_ids), input_hash=step.receipt.input_hash,
         original_output_ids=list(step.output_ids), original_receipt=to_jsonable(step.receipt),
         original_epoch=to_jsonable(step.engine_epoch), request=to_jsonable(step_request(rendered, step.task)),
+        system_prompt=step.input_messages[0].content, context_action="REBUILD",
+        original_cache_quote=step.metrics["cache_quote"], phase_window=step.metrics.get("phase_window"),
         prefix_input_ids=[], sources=[], task_state=to_jsonable(plan.task_state),
         fingerprint=step.metrics["cache_quote"]["fingerprint"],
         original_cache_config_hash=step.metrics["cache_quote"]["cache_config_hash"])
@@ -226,6 +265,7 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
         event["step_id"] for event in events], input_ids=list(final.input_ids), input_hash=final.input_hash,
         original_output_ids=list(attempt.result.output_ids), original_receipt=to_jsonable(attempt.result.receipt),
         original_epoch=to_jsonable(attempt.epoch), request=to_jsonable(request),
+        system_prompt=final.messages[0].content, context_action=final.action,
         sampling=recorded["sampling"] if recorded else dict(sampling),
         sampling_evidence="captured_generation_wire" if recorded else "declared_original_run_config",
         fingerprint=asdict(template.fingerprint),
@@ -249,14 +289,37 @@ class RecordingEngine:
     """Capture the actual client sampling recipe and every submitted input."""
     def __init__(self, engine):
         self.engine, self.calls = engine, []
+        self.pending_quotes = {}
     def __getattr__(self, name):
         return getattr(self.engine, name)
+    async def quote_batch(self, candidates, fingerprint):
+        batch = await self.engine.quote_batch(candidates, fingerprint)
+        self.pending_quotes.update({quote.input_hash: (batch, quote.candidate_id) for quote in batch.quotes})
+        return batch
     async def generate(self, **kwargs):
+        hashed = token_hash(kwargs["input_ids"])
+        if hashed not in self.pending_quotes:
+            candidate = PromptCandidate("capture:"+kwargs["attempt_id"], "REBUILD", 0, (),
+                tuple(kwargs["input_ids"]), hashed, frozenset(), frozenset(),
+                fingerprint=self.fingerprint, output_budget=kwargs["max_new_tokens"])
+            await self.quote_batch((candidate,), self.fingerprint)
+            quote_origin = "capture_pre_generation_quote"
+        else:
+            quote_origin = "actual_controller_quote"
+        batch, candidate_id = self.pending_quotes[hashed]
+        self.pending_quotes.clear()
         row = dict(started_s=time.monotonic(), sampling=dict(self.engine._sampling_params),
-                   request=to_jsonable(kwargs))
+                   request=to_jsonable(kwargs), state="SUBMITTED", cache_quote=to_jsonable(batch),
+                   quote_candidate_id=candidate_id, quote_origin=quote_origin)
         self.calls.append(row)
-        result = await self.engine.generate(**kwargs)
-        row.update(completed_s=time.monotonic(), receipt=to_jsonable(result.receipt), result=to_jsonable(result))
+        try:
+            result = await self.engine.generate(**kwargs)
+        except BaseException as error:
+            row.update(completed_s=time.monotonic(), state="FAILED_UNRESOLVED",
+                       error=dict(type=type(error).__name__, message=str(error)))
+            raise
+        row.update(completed_s=time.monotonic(), state="COMPLETE",
+                   receipt=to_jsonable(result.receipt), result=to_jsonable(result))
         return result
 
 
@@ -285,7 +348,7 @@ class CapturePrefixObserver:
                     observed_ns=now, policy="capture_observation_only", training_origin="canonical_native_READ")
 
 
-def make_trace(turns, *, config, source_db, captured):
+def make_trace(turns, *, config, source_db, captured, case_outcomes=()):
     model_events = [event for turn in turns for event in turn["events"] if event["kind"] != "CPU_REDUCE"]
     hashes = [event["input_hash"] for event in model_events]
     for event in model_events:
@@ -296,6 +359,9 @@ def make_trace(turns, *, config, source_db, captured):
     return dict(format="contextkv_source_first_trace_v2", source="hardware",
         scope="fixed_recorded_reading_dag", training_eligible=eligible,
         layout="source_first", captured_generation_wire=captured,
+        unexported_pressure_intervals=[dict(start=case["native_window"]["start"],
+            end=case["native_window"]["end"], reason=case["reason"])
+            for case in case_outcomes if "native_window" in case],
         source_database=str(Path(source_db).resolve()), config=to_jsonable(config),
         fingerprint=model_events[0]["fingerprint"] if model_events else None,
         turns=turns, input_hashes=hashes, input_dag_digest=digest([
@@ -305,47 +371,128 @@ def make_trace(turns, *, config, source_db, captured):
         output_scope="original output budgets and sampling; new output lengths may differ")
 
 
+async def completed_capture_failure(service, recorder, cursor, error):
+    """Retire completed capped READs, retaining their actual wire and cost."""
+    if error.code != "READ_STEP_OUTPUT_TRUNCATED":
+        raise error
+    calls = recorder.calls[cursor:]
+    if not calls or any(not call.get("receipt", {}).get("generation_complete") for call in calls):
+        raise error
+    cleanup = []
+    for call in calls:
+        request = call["request"]
+        ack = await service.engine.retire(request["session_id"], request["expected_generation"],
+            "capture-completed-failure:"+request["attempt_id"], request["expected_restart_id"],
+            "completed_truncated_source_capture")
+        if not ack.acknowledged:
+            raise ValueError("completed capture failure retirement pending")
+        cleanup.append(to_jsonable(ack))
+    return dict(status="completed_native_failed_phase", reason=str(error), cleanup=cleanup,
+                native_window=dict(start=min(call["started_s"] for call in calls),
+                                   end=max(call["completed_s"] for call in calls)),
+                actual_native_receipts=[call["receipt"] for call in calls])
+
+
+def replan_actual_retrieval(attempt, snapshot, service, args):
+    """New canonical READ from actual archived retrieval, never an old READ label."""
+    from adapters.corpus import CorpusIndex
+    from adapters.evidence_pool import SourceDirectory
+    if not attempt.evidence:
+        return None
+    corpus = CorpusIndex(attempt.evidence, corpus_id=attempt.evidence[0].key.corpus_id,
+                         snapshot_id=snapshot.corpus_snapshot_id)
+    directory = SourceDirectory(corpus, None, service.template.tokenizer)
+    pool = directory.full_scope(tuple(block.key for block in attempt.evidence))
+    evidence = EvidenceSet("actual-capture:"+attempt.attempt_id, pool.units, source_blocks=pool.source_blocks)
+    state = attempt.query_context.task_state if attempt.query_context is not None else None
+    if state is None:
+        history = snapshot.raw_history
+        refs = tuple(TextRef(turn.turn_id, role, 0, len(text)) for turn in history
+            for role, text in (("user", turn.user_text), ("assistant", turn.assistant_text)))
+        turn_id = history[-1].turn_id+1 if history else 0
+        state = TaskState(attempt.attempt_id, attempt.query, working_history=refs,
+            needs=(Need("question", anchor_spans=(TextRef(turn_id, "user", 0, len(attempt.query)),)),),
+            current_turn_id=turn_id)
+    budget = ContextBudget(window_tokens=service.policy.max_total_model_tokens, body_tokens=8192,
+        read_input_tokens=args.read_input_budget, read_output_tokens=args.read_output_budget, max_steps=512)
+    return build_read_plan(state, evidence, "all_supplied_documents", budget,
+        template=service.template, snapshot=snapshot, read_layout="source_first", read_packing=args.read_packing)
+
+
 async def capture(args):
     config = load_config(args.config)
     config = replace(config, engine=replace(config.engine, base_url=args.base_url),
         state_dir=str(Path(args.output_dir)/"state"), prefix_retention={"mode": "native"})
-    service = create_controller(config)
-    service.observe_prefix = CapturePrefixObserver(service.engine, service.template)
-    recorder = RecordingEngine(service.engine)
-    service.engine = recorder
-    source = SourceLedger(args.state_db)
-    metadata = source_records(args.records)
-    turns = []
-    try:
-        for old in source.committed_attempts(args.attempt_id)[:args.max_capture_turns]:
-            before = source.before(old)
-            current = service.store.read_snapshot(old.session_id, before.corpus_snapshot_id)
-            service.store.sync_history(old.session_id, before.raw_history, current.version)
-            snapshot = service.store.get_snapshot(old.session_id)
-            original = old.reading_outcome.plan
-            plan = build_read_plan(original.task_state, original.selected_set, original.coverage_scope,
-                original.budget, template=service.template, snapshot=snapshot,
-                reading_mode=original.reading_mode, separate_needs=original.separate_needs,
-                numeric_identity=original.numeric_identity, read_layout="source_first", read_packing=args.read_packing)
-            cursor = len(recorder.calls)
-            response = await service.serve_turn(old.session_id, old.query, context_plans=(plan,),
-                corpus_snapshot_id=before.corpus_snapshot_id, request_id="source-first:"+old.request_id)
-            actual = service.store.get_attempt(response.attempt_id)
-            meta = {**metadata.get(old.attempt_id, {}), "response": to_jsonable(response),
-                    "max_new_tokens": config.context.max_new_tokens,
-                    "source_attempt_id": old.attempt_id, "scope": "study" if old.attempt_id in metadata else "unpartitioned_capture"}
-            turn = export_attempt(service.store, actual, service.template, request_sampling(config.sampling),
-                                  meta, recorded_calls=recorder.calls[cursor:])
-            turns.append(turn)
-            write_json(Path(args.output_dir)/"capture-trace.json", make_trace(turns, config=config,
-                source_db=args.state_db, captured=True))
-            print(json.dumps({"captured": len(turns), "events": len(turn["events"]), "request_id": old.request_id}), flush=True)
-    finally:
-        write_json(Path(args.output_dir)/"capture-wire.json", recorder.calls)
-        await service.aclose()
-        service.store.close()
-        source.close()
-    return make_trace(turns, config=config, source_db=args.state_db, captured=True)
+    async with CaptureRunAccounting(config, args.output_dir, args.gpu_device,
+            resource_gpu_devices=args.resource_gpu_devices,
+            resource_process_roots=args.resource_process_roots) as accounting:
+        service = create_controller(config)
+        resident_provider = None
+        if args.study_config is not None:
+            resident_provider, accounting.resident_model_manifest = await asyncio.to_thread(
+                load_resident_provider, args.study_config, service.template)
+            accounting.record_resident_models(args.study_config, accounting.resident_model_manifest)
+        service.observe_prefix = CapturePrefixObserver(service.engine, service.template)
+        recorder = RecordingEngine(service.engine)
+        service.engine = recorder
+        accounting.calls = recorder.calls
+        source = SourceLedger(args.state_db)
+        selected = source.committed_attempts(args.attempt_id, limit=args.max_capture_turns)
+        metadata = source_records(args.records, store=source, attempt_ids={old.attempt_id for old in selected})
+        turns, cases = [], []
+        accounting.case_outcomes = cases
+        try:
+            for old in selected:
+                before = source.before(old)
+                current = service.store.read_snapshot(old.session_id, before.corpus_snapshot_id)
+                service.store.sync_history(old.session_id, before.raw_history, current.version)
+                snapshot = service.store.get_snapshot(old.session_id)
+                original = old.reading_outcome.plan if old.reading_outcome is not None else old.context_plan
+                if original is None:
+                    plan = replan_actual_retrieval(old, snapshot, service, args)
+                    if plan is None:
+                        cases.append(dict(source_attempt_id=old.attempt_id,
+                            status="source_plan_unavailable", reason="actual attempt has no retrieved original sources"))
+                        continue
+                else:
+                    plan = build_read_plan(original.task_state, original.selected_set, original.coverage_scope,
+                        original.budget, template=service.template, snapshot=snapshot,
+                        reading_mode=original.reading_mode, separate_needs=original.separate_needs,
+                        numeric_identity=original.numeric_identity, read_layout="source_first", read_packing=args.read_packing)
+                accounting.current_source = dict(source_attempt_id=old.attempt_id, request_id=old.request_id,
+                    dataset=metadata.get(old.attempt_id, {}).get("dataset"), split=metadata.get(old.attempt_id, {}).get("split"))
+                cursor = len(recorder.calls)
+                try:
+                    response = await service.serve_turn(old.session_id, old.query, context_plans=(plan,),
+                        corpus_snapshot_id=before.corpus_snapshot_id, request_id="source-first:"+old.request_id)
+                except EngineError as error:
+                    failure = await completed_capture_failure(service, recorder, cursor, error)
+                    cases.append({**accounting.current_source, **failure})
+                    write_json(Path(args.output_dir)/"capture-cases.json", cases)
+                    continue
+                actual = service.store.get_attempt(response.attempt_id)
+                meta = {**metadata.get(old.attempt_id, {}), "response": to_jsonable(response),
+                        "max_new_tokens": config.context.max_new_tokens,
+                        "capture_origin": "replanned_actual_retrieval" if original is None else "persisted_actual_plan_recaptured_current_protocol",
+                        "source_attempt_id": old.attempt_id, "scope": "study" if old.attempt_id in metadata else "unpartitioned_capture"}
+                turn = export_attempt(service.store, actual, service.template, request_sampling(config.sampling),
+                                      meta, recorded_calls=recorder.calls[cursor:])
+                turns.append(turn)
+                cases.append({**accounting.current_source, "status": "committed", "attempt_id": actual.attempt_id})
+                write_json(Path(args.output_dir)/"capture-cases.json", cases)
+                write_json(Path(args.output_dir)/"capture-trace.json", make_trace(turns, config=config,
+                    source_db=args.state_db, captured=True, case_outcomes=cases))
+                print(json.dumps({"captured": len(turns), "events": len(turn["events"]), "request_id": old.request_id}), flush=True)
+        finally:
+            if turns:
+                write_json(Path(args.output_dir)/"capture-trace.json", make_trace(turns, config=config,
+                    source_db=args.state_db, captured=True, case_outcomes=cases))
+            write_json(Path(args.output_dir)/"capture-wire.json", recorder.calls)
+            await service.aclose()
+            service.store.close()
+            source.close()
+    return {**make_trace(turns, config=config, source_db=args.state_db, captured=True),
+            "entry_accounting": accounting.entry_manifest}
 
 
 async def capture_reader_traces(args):
@@ -357,54 +504,78 @@ async def capture_reader_traces(args):
     config = load_config(args.config)
     config = replace(config, engine=replace(config.engine, base_url=args.base_url),
         state_dir=str(Path(args.output_dir)/"state"), prefix_retention={"mode": "native"})
-    service = create_controller(config)
-    service.observe_prefix = CapturePrefixObserver(service.engine, service.template)
-    recorder = RecordingEngine(service.engine)
-    service.engine = recorder
-    turns, seen = [], set()
-    try:
-        for line in Path(args.reader_traces).read_text().splitlines():
-            item = json.loads(line)
-            if item["phase"] != "READ":
-                continue
-            original = decode(ContextPlan, item["context_plan"])
-            identity = item["attempt_id"], original.plan_id
-            if identity in seen:
-                continue
-            seen.add(identity)
-            if len(turns) >= args.max_capture_turns:
-                break
-            history = tuple(decode(TurnRecord, row) for row in item["actual_history"])
-            session_id = "canonical:"+item["conversation_id"]+":"+original.selected_set.set_id
-            snapshot = service.store.read_snapshot(session_id, item["snapshot_id"])
-            service.store.sync_history(session_id, history, snapshot.version)
-            snapshot = service.store.get_snapshot(session_id)
-            plan = build_read_plan(original.task_state, original.selected_set, original.coverage_scope,
-                original.budget, template=service.template, snapshot=snapshot,
-                reading_mode=original.reading_mode, separate_needs=original.separate_needs,
-                numeric_identity=original.numeric_identity, read_layout="source_first", read_packing=args.read_packing)
-            cursor = len(recorder.calls)
-            response = await service.serve_turn(session_id, item["question"], context_plans=(plan,),
-                corpus_snapshot_id=item["snapshot_id"], request_id=digest(identity))
-            attempt = service.store.get_attempt(response.attempt_id)
-            metadata = dict(dataset=original.selected_set.source_blocks[0].key.corpus_id,
-                split=item["split"], source_partition=item["source_partition"],
-                response=to_jsonable(response), scope="study", max_new_tokens=config.context.max_new_tokens,
-                source_example_id=item["example_id"], source_trace_origin=item["trace_origin"],
-                source_mutations=item.get("source_mutations", []),
-                capture_origin="actual_retrieval_recaptured_canonical_native_source_first")
-            turn = export_attempt(service.store, attempt, service.template, request_sampling(config.sampling),
-                metadata, recorded_calls=recorder.calls[cursor:])
-            turns.append(turn)
-            write_json(Path(args.output_dir)/"capture-trace.json", make_trace(turns, config=config,
-                source_db=args.reader_traces, captured=True))
-            print(json.dumps({"captured": len(turns), "events": len(turn["events"]),
-                "origin": "canonical_native_source_first"}), flush=True)
-    finally:
-        write_json(Path(args.output_dir)/"capture-wire.json", recorder.calls)
-        await service.aclose()
-        service.store.close()
-    return make_trace(turns, config=config, source_db=args.reader_traces, captured=True)
+    async with CaptureRunAccounting(config, args.output_dir, args.gpu_device,
+            resource_gpu_devices=args.resource_gpu_devices,
+            resource_process_roots=args.resource_process_roots) as accounting:
+        service = create_controller(config)
+        resident_provider = None
+        if args.study_config is not None:
+            resident_provider, accounting.resident_model_manifest = await asyncio.to_thread(
+                load_resident_provider, args.study_config, service.template)
+            accounting.record_resident_models(args.study_config, accounting.resident_model_manifest)
+        service.observe_prefix = CapturePrefixObserver(service.engine, service.template)
+        recorder = RecordingEngine(service.engine)
+        service.engine = recorder
+        accounting.calls = recorder.calls
+        turns, seen, cases = [], set(), []
+        accounting.case_outcomes = cases
+        try:
+            for line in Path(args.reader_traces).read_text().splitlines():
+                item = json.loads(line)
+                if item["phase"] != "READ":
+                    continue
+                original = decode(ContextPlan, item["context_plan"])
+                identity = item["attempt_id"], original.plan_id
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                if len(cases) >= args.max_capture_turns:
+                    break
+                history = tuple(decode(TurnRecord, row) for row in item["actual_history"])
+                session_id = "canonical:"+item["conversation_id"]+":"+original.selected_set.set_id
+                snapshot = service.store.read_snapshot(session_id, item["snapshot_id"])
+                service.store.sync_history(session_id, history, snapshot.version)
+                snapshot = service.store.get_snapshot(session_id)
+                plan = build_read_plan(original.task_state, original.selected_set, original.coverage_scope,
+                    original.budget, template=service.template, snapshot=snapshot,
+                    reading_mode=original.reading_mode, separate_needs=original.separate_needs,
+                    numeric_identity=original.numeric_identity, read_layout="source_first", read_packing=args.read_packing)
+                accounting.current_source = dict(source_attempt_id=item["attempt_id"], example_id=item["example_id"],
+                    split=item["split"], source_partition=item["source_partition"])
+                cursor = len(recorder.calls)
+                try:
+                    response = await service.serve_turn(session_id, item["question"], context_plans=(plan,),
+                        corpus_snapshot_id=item["snapshot_id"], request_id=digest(identity))
+                except EngineError as error:
+                    failure = await completed_capture_failure(service, recorder, cursor, error)
+                    cases.append({**accounting.current_source, **failure})
+                    write_json(Path(args.output_dir)/"capture-cases.json", cases)
+                    continue
+                attempt = service.store.get_attempt(response.attempt_id)
+                metadata = dict(dataset=original.selected_set.source_blocks[0].key.corpus_id,
+                    split=item["split"], source_partition=item["source_partition"],
+                    response=to_jsonable(response), scope="study", max_new_tokens=config.context.max_new_tokens,
+                    source_example_id=item["example_id"], source_trace_origin=item["trace_origin"],
+                    source_mutations=item.get("source_mutations", []),
+                    capture_origin="actual_retrieval_recaptured_canonical_native_source_first")
+                turn = export_attempt(service.store, attempt, service.template, request_sampling(config.sampling),
+                    metadata, recorded_calls=recorder.calls[cursor:])
+                turns.append(turn)
+                cases.append({**accounting.current_source, "status": "committed", "attempt_id": attempt.attempt_id})
+                write_json(Path(args.output_dir)/"capture-cases.json", cases)
+                write_json(Path(args.output_dir)/"capture-trace.json", make_trace(turns, config=config,
+                    source_db=args.reader_traces, captured=True, case_outcomes=cases))
+                print(json.dumps({"captured": len(turns), "events": len(turn["events"]),
+                    "origin": "canonical_native_source_first"}), flush=True)
+        finally:
+            if turns:
+                write_json(Path(args.output_dir)/"capture-trace.json", make_trace(turns, config=config,
+                    source_db=args.reader_traces, captured=True, case_outcomes=cases))
+            write_json(Path(args.output_dir)/"capture-wire.json", recorder.calls)
+            await service.aclose()
+            service.store.close()
+    return {**make_trace(turns, config=config, source_db=args.reader_traces, captured=True),
+            "entry_accounting": accounting.entry_manifest}
 
 
 class PrefixPageSampler:
@@ -760,6 +931,15 @@ def choose_windows(trace, *, horizon_seconds, max_candidates, history_steps, max
         for source_index, source_turn, source_event in targets:
             begin = min(first, source_index)
             window = turns[begin:last+1]
+            window_start = min(item["source_started_s"] for value in window for item in value["events"]
+                               if item["kind"] != "CPU_REDUCE")
+            window_end = max(item["source_completed_s"] for value in window for item in value["events"]
+                             if item["kind"] != "CPU_REDUCE")
+            if any(gap["start"] < window_end and gap["end"] > window_start
+                   for gap in trace.get("unexported_pressure_intervals", ())):
+                omitted.append(dict(event_id=event_id(turn, event), source_event_id=event_id(source_turn, source_event),
+                    reason="completed_failed_native_pressure_has_no_canonical_DAG; window_not_replayed"))
+                continue
             steps = sum(len(item["events"]) for item in window)
             if steps > max_replay_steps:
                 omitted.append(dict(event_id=event_id(turn, event), source_event_id=event_id(source_turn, source_event),
@@ -963,11 +1143,12 @@ def fit(args):
 def export(args):
     config = load_config(args.config)
     template = create_model_template(config.model)
-    records = source_records(args.records)
     store = SourceLedger(args.state_db)
+    selected = store.committed_attempts(args.attempt_id, limit=args.max_capture_turns)
+    records = source_records(args.records, store=store, attempt_ids={attempt.attempt_id for attempt in selected})
     turns = []
     try:
-        for attempt in store.committed_attempts(args.attempt_id)[:args.max_capture_turns]:
+        for attempt in selected:
             metadata = {**records.get(attempt.attempt_id, {}), "max_new_tokens": config.context.max_new_tokens}
             if "response" not in metadata:
                 raise ValueError("export needs the original study record with actual client timing")
@@ -997,7 +1178,13 @@ def main():
         else:
             sub.add_argument("--base-url", required=True, help="Dedicated canonical native reader service")
             sub.add_argument("--output-dir", required=True)
+            sub.add_argument("--gpu-device", type=int, required=True)
+            sub.add_argument("--resource-gpu-devices", type=lambda value: tuple(map(int, value.split(","))))
+            sub.add_argument("--resource-process-roots", type=lambda value: tuple(map(int, value.split(","))), default=())
+            sub.add_argument("--study-config", help="Actually load and keep the same resident retrieval/task/support assets")
             sub.add_argument("--read-packing", choices=("mixed", "source_windows"), default="source_windows")
+            sub.add_argument("--read-input-budget", type=int, default=12288)
+            sub.add_argument("--read-output-budget", type=int, default=2048)
     sub = commands.add_parser("replay")
     sub.add_argument("--trace", required=True)
     sub.add_argument("--config", required=True)

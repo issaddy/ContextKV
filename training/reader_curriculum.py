@@ -1,7 +1,7 @@
 """Grounded reader pairs from reviewed native training retrievals.
 
 The parent reader cohort is read-only. Numeric edits change literal original
-coordinates; source-position variants change layout only. Every resulting READ
+coordinates; source-position variants change layout only. Every resulting READ/ANSWER
 target is generated and reviewed afresh in the separate curriculum directory.
 """
 from __future__ import annotations
@@ -203,7 +203,12 @@ def build_curriculum(config, *, template=None):
     constructed_reads, constructed = constructed_pairs(parent_rows, template,
         maximum_cases=settings.get("maximum_constructed_cases", 8),
         excerpt_characters=settings.get("constructed_excerpt_characters", 1200))
+    from training.reader_computed_curriculum import computed_answer_pairs
+    computed_answers, computed_pairs = computed_answer_pairs(parent_rows, template,
+        maximum_cases=settings.get("maximum_computed_cases", 0),
+        excerpt_characters=settings.get("computed_excerpt_characters", 256))
     pairs.extend(constructed)
+    pairs.extend(computed_pairs)
     positional = []
     for row in reads:
         if row["source_mutations"]:
@@ -211,7 +216,7 @@ def build_curriculum(config, *, template=None):
         variants, skipped = position_variants(row, template)
         positional.extend(variants)
         exclusions.extend(skipped)
-    all_traces = [*reads, *positional, *constructed_reads]
+    all_traces = [*reads, *positional, *constructed_reads, *computed_answers]
     by_id = {row["example_id"]: row for row in all_traces}
     for pair in pairs:
         pair["control_prompt_hashes"] = [by_id[identity]["prompt_token_hash"] for identity in pair["control_example_ids"]]
@@ -223,6 +228,7 @@ def build_curriculum(config, *, template=None):
     manifest = {"schema_version": 1, "namespace": "native_train_curriculum_round2",
         "numeric_pairs": sum(pair["kind"] == "numeric_literal" for pair in pairs),
         "constructed_pairs": dict(Counter(pair["kind"] for pair in constructed)), "constructed_read_inputs": len(constructed_reads),
+        "computed_answer_pairs": len(computed_pairs), "computed_answer_inputs": len(computed_answers),
         "read_inputs": len(reads), "position_inputs": len(positional), "augment": augment,
         "source_train_path": str((source/"train.jsonl").resolve()), "source_train_sha256": file_digest(source/"train.jsonl"),
         "exclusions": dict(Counter(row["reason"] for row in exclusions)), "public_dev_test_sources_read": [],
@@ -242,6 +248,10 @@ def audit_curriculum(config):
     records, approved_ids = [], set()
     for pair in rows(destination/"pairs.prepared.jsonl"):
         old, new = quantity_key(pair["original_quantity"]), quantity_key(pair["changed_quantity"])
+        required_control = pair.get("all_control_example_ids", pair["control_example_ids"])
+        required_changed = pair.get("all_changed_example_ids", pair["changed_example_ids"])
+        required_ids = tuple(dict.fromkeys((*required_control, *required_changed)))
+        step_statuses = {key: reviews[key]["status"] if key in reviews else "missing_review" for key in required_ids}
         controls = [reviews[key] for key in pair["control_example_ids"] if key in reviews and reviews[key]["status"] == "accepted"]
         changed = [reviews[key] for key in pair["changed_example_ids"] if key in reviews and reviews[key]["status"] == "accepted"]
         control_values = {value for review in controls for value in reviewed_quantities(review, traces[review["example_id"]])}
@@ -263,23 +273,39 @@ def audit_curriculum(config):
                 "spurious_record_window_gap" if any(target["open_needs"] or any(claim["followups"]
                     for claim in target["claims"]) for target in (*control_targets, *changed_targets))
                 else "source_sensitive_change_verified")
-        if status == "source_sensitive_change_verified" and pair["kind"] not in {"numeric_literal", "record_presence"}:
+        computed_checks = None
+        if pair["kind"] == "computed_full_scope_answer" and controls and changed:
+            from training.reader_computed_curriculum import computed_target_check
+            computed_checks = {"control": [computed_target_check(review, count=pair["expected_count"], mass_kg=old[0])
+                for review in controls], "changed": [computed_target_check(review, count=pair["expected_count"], mass_kg=new[0])
+                for review in changed]}
+            verified = all(check["full_scope_count_verified"] and check["full_scope_mass_verified"]
+                for checks in computed_checks.values() for check in checks)
+            status = "source_sensitive_change_verified" if verified else "computed_scope_totals_not_reproduced"
+        if status == "source_sensitive_change_verified" and pair["kind"] not in {"numeric_literal", "record_presence", "computed_full_scope_answer"}:
             if control_values != {old}:
                 status = "constructed_control_includes_unrequested_quantities"
             elif changed_values != {new}:
                 status = "constructed_target_includes_unrequested_quantities"
-        for review in (*controls, *changed):
+        for key in required_ids:
+            if key not in reviews or reviews[key]["status"] != "accepted":
+                continue
+            review = reviews[key]
             trace = traces[review["example_id"]]
             if (review["prompt_token_hash"] != trace["prompt_token_hash"] or
-                    review["actual_history_sha256"] != pair["actual_history_sha256"]):
+                    review["actual_history_sha256"] != pair["actual_history_sha256"] or
+                    review["reader_identity"] != trace["reader_identity"]):
                 raise ValueError("curriculum teacher target is not bound to its unchanged actual history and new prompt")
+        if any(step_statuses[key] != "accepted" for key in required_control):
+            status = "incomplete_accepted_control_steps"
+        elif any(step_statuses[key] != "accepted" for key in required_changed):
+            status = "incomplete_accepted_changed_steps"
         if status == "source_sensitive_change_verified":
-            approved_ids.update(review["example_id"] for review in (*controls, *changed))
-            for key in (*pair.get("all_control_example_ids", ()), *pair.get("all_changed_example_ids", ())):
-                if key in reviews and reviews[key]["status"] == "accepted":
-                    approved_ids.add(key)
+            approved_ids.update(required_ids)
         records.append({**pair, "pair_check": status, "fresh_control_targets": controls,
-                        "fresh_changed_targets": changed, "changed_target_was_not_copied": status == "source_sensitive_change_verified"})
+                        "fresh_changed_targets": changed, "computed_target_checks": computed_checks,
+                        "fresh_step_review_statuses": step_statuses,
+                        "changed_target_was_not_copied": status == "source_sensitive_change_verified"})
     position_checks = []
     for trace in traces.values():
         if "control_example_id" in trace:
@@ -307,7 +333,9 @@ def audit_curriculum(config):
     combined = [*parent, *augmented, *validation]
     write_rows(destination/"train.jsonl", [*parent, *augmented])
     write_rows(destination/"validation.jsonl", validation)
-    prepared.update(training_turns=len({row["task_id"] for row in (*parent, *augmented)}),
+    prepared.update(evidence_kind="reviewed_native_train_and_declared_constructed_curriculum",
+        fresh_teacher_step_policy="all planned paired steps accepted with exact prompt/history/reader binding, including empty windows",
+        training_turns=len({row["task_id"] for row in (*parent, *augmented)}),
         examples=len(parent)+len(augmented)+len(validation),
         turns=len({row["task_id"] for row in combined}),
         phases=dict(Counter(row["phase"] for row in combined)),

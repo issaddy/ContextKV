@@ -18,7 +18,7 @@ from test_study_retrieval import OffsetBytes
 from training.reading_data import build_reading_data
 
 
-def constructed_inputs(tmp_path):
+def constructed_inputs(tmp_path, *, topic_request="summary"):
     data = tmp_path/"data"
     data.mkdir()
     (data/"sources.jsonl").write_text("".join(json.dumps({"source_id": f"train-{number}",
@@ -27,7 +27,8 @@ def constructed_inputs(tmp_path):
     build_reading_data({"study": {"output_dir": str(output)}, "training": {"data_dir": str(data),
         "version_dev_families": 2, "long_dev_cases": 0, "multihop_dev_cases": 0}})
     version = output/"evaluation/version_dev"
-    manifest = prepare_workloads({"study": {"output_dir": str(output)}, "workloads": {"conversations": 1}}, {
+    manifest = prepare_workloads({"study": {"output_dir": str(output)},
+        "workloads": {"conversations": 1, "topic_request": topic_request}}, {
         "datasets": {"versionqa": {"inputs": {"dev": str(version/"tasks.jsonl")}}},
         "selection": {}, "methods": [{"id": "E0", "strategy": "B7"}]})
     dynamic = read_jsonl(manifest["tasks_path"])
@@ -109,6 +110,22 @@ def test_version_comparison_is_one_joint_witness_and_platform_removal_keeps_both
     assert revisited["verified_task_state"]["task_id"] == corrected["verified_task_state"]["task_id"]
     assert all(span["source_key"]["version"] == "2024" for row in revisited["annotations"]["requirements"]
         for witness in row["alternatives"] for span in witness["spans"])
+
+
+def test_scoped_topic_lookup_has_complete_literal_oracle_without_question_answer_leakage(tmp_path):
+    inputs = constructed_inputs(tmp_path, topic_request="allowance_lookup")
+    packets, manifest = build(inputs)
+    assert manifest["reviewed"] == 7 and manifest["review_incomplete"] == 0
+    topic = next(packet for packet in packets if packet["goal_id"] == "topic_switch")
+    assert topic["scope_review"]["complete"]
+    assert topic["verified_task_state"]["needs"][0]["operation"] == "lookup"
+    assert topic["verified_task_state"]["version_intent"]["version_ids"] == ["2024"]
+    assert topic["goal_conditions"]["PLATFORM"] == "Windows"
+    target = next(row for row in inputs[3] if row["source_spans"][0]["source_id"] ==
+        topic["scope_review"]["applicable_source_keys"][0]["document_id"])
+    assert str(target["source_spans"][0]["value"]) not in topic["e0_plan"]["task_state"]["raw_question"]
+    prepared = prepare_packet(topic, inputs[4], DiagnosisProtocol(100000))
+    assert prepared["diagnosis"].e2[0].missing_requirements == ()
 
 
 @pytest.mark.parametrize("corruption", ("history", "quote", "test_reference", "test_rollout"))

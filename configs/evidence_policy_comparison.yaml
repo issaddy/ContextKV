@@ -1,0 +1,20 @@
+base_study_config: configs/study.yaml
+policy_comparison:
+  policies:
+    P0: models/study-support-actual-prefix
+    P1: models/study-support-r1
+  readers:
+    R0:
+      run_config: configs/qwen3_32b.yaml
+      base_url: http://127.0.0.1:30005
+      gpu_devices: [5]
+    R1:
+      run_config: models/study-reader-r1/r1_run_config.yaml
+      base_url: http://127.0.0.1:30004
+      gpu_devices: [4]
+  teacher_url: http://127.0.0.1:30001
+  helper_run_config: configs/qwen3_32b.yaml
+  shared_gpu_devices: [1, 2]
+  frozen_shared_gpu_devices: [1]
+  encoder_device: cuda:1
+  support_device: cuda:1

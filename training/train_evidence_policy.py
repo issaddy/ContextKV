@@ -69,7 +69,7 @@ def qualify_collection_rows(label_rows, source_rows):
             else:
                 reason = "missing_actual_span_origin"
                 break
-            if not 0 <= ref["start"] <= ref["end"] <= len(text):
+            if not 0 <= ref["start"] < ref["end"] <= len(text):
                 reason = "span_outside_actual_message"
                 break
         pending = [need["need_id"] for need in state["needs"]]
@@ -237,8 +237,18 @@ async def collect_r1_preferences(config, *, limit=None):
         (directory/f"collection_physical.{stamp}.json").write_text(observation)
         (directory/f"collection_cost.{stamp}.json").write_text(json.dumps({"binding": binding,
             "start": started, "end": ended, "physical": integrate_physical(sampler.samples, started, ended)}, indent=2)+"\n")
-    samples = sorted((sample for path in directory.glob("collection_physical.*.json")
-                      for sample in json.loads(path.read_text())["samples"]), key=lambda sample: sample["timestamp"])
+    attach_collection_costs(directory, binding)
+    return {**result, "binding": binding, "cohort_directory": str(directory)}
+
+
+def attach_collection_costs(directory, binding):
+    """Finish saved successes and failed-case accounting after a partial batch."""
+    from bench.study_resources import integrate_physical
+    directory = Path(directory)
+    physical_paths = sorted(directory.glob("collection_physical.*.json"))
+    cost_paths = sorted(directory.glob("collection_cost.*.json"))
+    samples = sorted((sample for path in physical_paths for sample in json.loads(path.read_text())["samples"]),
+                     key=lambda sample: sample["timestamp"])
     rewards = rows(directory/"rewards.jsonl")
     for row in rewards:
         if "cost" not in row:
@@ -249,13 +259,21 @@ async def collect_r1_preferences(config, *, limit=None):
                 "gpu_gib_seconds": physical["gpu_gib_seconds"], "host_gib_seconds": physical["host_gib_seconds"]}
         validate_reward(row, binding)
     write_rows(directory/"rewards.jsonl", rewards)
-    return {**result, "binding": binding, "cohort_directory": str(directory)}
+    failure_path = directory/"failed_cases.jsonl"
+    if failure_path.exists():
+        failures = rows(failure_path)
+        for row in failures:
+            if row["request_window"] is not None:
+                row["physical_cost"] = integrate_physical(samples, *row["request_window"])
+            row["batch_cost_paths"] = [str(path) for path in cost_paths]
+        write_rows(failure_path, failures)
+    return rewards
 
 
 def prepare_preferences(config):
     settings, binding = config["evidence_policy_training"], reader_binding(config)
     directory = cohort_directory(config)
-    rewards = rows(directory/"rewards.jsonl")
+    rewards = attach_collection_costs(directory, binding)
     pairs = build_reader_bound_pairs(rewards, binding=binding, weights=settings["reward_weights"],
                                     minimum_difference=settings["minimum_reward_difference"])
     write_rows(directory/"preferences.jsonl", pairs)
@@ -311,12 +329,18 @@ async def rollout_next_round(config, *, limit_conversations=None):
     require_policy_reader_binding(settings["output_asset"], reader_checkpoint=binding["reader_checkpoint"],
                                   reader_profile_id=binding["reader_profile_id"])
     next_round = settings["next_round"]
+    if limit_conversations is None:
+        limit_conversations = next_round["conversations"]
     policy = json.loads((Path(settings["output_asset"])/"support-model.json").read_text())
     directory = cohort_directory(config)/"next_reader_rollout"/policy["policy_checkpoint"].split(":")[-1][:20]
     directory.mkdir(parents=True, exist_ok=True)
     questions = rows(next_round["questions_path"])
     if any(row["split"] != "train" for row in questions):
         raise ValueError("the next reader round must use actual native training conversations")
+    reader_config = yaml.safe_load(Path(next_round["reader_training_config"]).read_text())
+    parent_data_dir = reader_config["reader_training"]["data"]["output_dir"]
+    parent_conversations = {row["conversation_id"] for row in rows(Path(parent_data_dir)/"train.jsonl")}
+    questions = [row for row in questions if row["conversation_id"] in parent_conversations]
     tasks = [{"dataset": {"name": "reader_policy_train", "revision": "native-training-questions"},
         "task_id": row["task_id"], "conversation_id": row["conversation_id"], "turn": row["turn"],
         "Collection": "reader_policy_train/native", "split": "train",
@@ -345,38 +369,92 @@ async def rollout_next_round(config, *, limit_conversations=None):
     matrix["datasets"] = {"reader_policy_train": spec}
     matrix["resources"]["gpu_devices"] = settings["gpu_devices"]
     actual = merge_config(config, {"generation": {"run_config": settings["run_config"],
-        "teacher_url": settings["collection"]["judge_base_url"]},
+        "teacher_url": settings["collection"]["judge_base_url"],
+        "helper_run_config": settings["helper_run_config"]},
         "selection": {"utility": "learned"},
-        "reading": {"layout": settings["collection"]["read_layout"]},
+        "reading": {"layout": settings["collection"]["read_layout"], "packing": settings["collection"]["read_packing"]},
         "task_model": {"device": settings["collection"]["encoder_device"]},
         "support_model": {"mode": "trained", "asset": settings["output_asset"],
-            "device": settings["optimizer"]["device"], "preference_asset": settings["output_asset"]}})
-    results = await run_dataset(actual, matrix, {"id": "P1_R1_train", "strategy": "B7"},
-        "reader_policy_train", "train", directory, concurrency=next_round["concurrency"],
-        limit_conversations=limit_conversations)
-    generation = json.loads((directory/"generation_manifest.json").read_text())
-    snapshot_id = generation["retrieval"]["retrieval"]["corpus_snapshot_id"]
-    turns = [{**row, "split": "train", "snapshot_id": snapshot_id, "rollout_policy": "P1_R1_actual_history",
-              "reader_checkpoint": binding["reader_checkpoint"], "reader_profile_id": binding["reader_profile_id"]}
-             for row in results]
+            "device": settings["collection"]["device"], "preference_asset": settings["output_asset"]}})
+    from controller.engine_client import EngineError
+    from bench.evidence_policy_comparison import persist_p3_failure, recorded_terminal_budget, terminal_model_budget
+    conversations = sorted({row["conversation_id"] for row in tasks})[:limit_conversations]
+    turns, rollout_specs, failed = [], [], []
+    for conversation in conversations:
+        part = directory/"conversations"/digest(conversation)[:20]
+        part.mkdir(parents=True, exist_ok=True)
+        part_tasks = part/"questions.jsonl"
+        write_rows(part_tasks, [row for row in tasks if row["conversation_id"] == conversation])
+        local_matrix = merge_config(matrix, {"datasets": {"reader_policy_train": {"inputs": {"train": str(part_tasks)}}}})
+        teacher_ledger = actual.get("task_model", {}).get("teacher_record_path",
+            str(Path(actual.get("study", {}).get("output_dir", "runs/study"))/"task_teacher_calls.jsonl"))
+        recorded = recorded_terminal_budget(part)
+        try:
+            if recorded:
+                results = rows(part/"results.unscored.jsonl")
+                failed.append(persist_p3_failure(part, conversation, "; ".join(recorded), teacher_ledger=teacher_ledger))
+            else:
+                results = await run_dataset(actual, local_matrix, {"id": "P1_R1_train", "strategy": "B7"},
+                    "reader_policy_train", "train", part, concurrency=next_round["concurrency"])
+        except ExceptionGroup as group:
+            known, unknown = group.split(terminal_model_budget)
+            if unknown is not None:
+                raise unknown
+            results = rows(part/"results.unscored.jsonl")
+            failed.append(persist_p3_failure(part, conversation, str(known), teacher_ledger=teacher_ledger))
+        except EngineError as exc:
+            if exc.code != "READ_STEP_OUTPUT_TRUNCATED":
+                raise
+            results = rows(part/"results.unscored.jsonl")
+            failed.append(persist_p3_failure(part, conversation, str(exc), teacher_ledger=teacher_ledger))
+        except RuntimeError as exc:
+            if not terminal_model_budget(exc):
+                raise
+            results = rows(part/"results.unscored.jsonl")
+            failed.append(persist_p3_failure(part, conversation, str(exc), teacher_ledger=teacher_ledger))
+        except ValueError as exc:
+            if not terminal_model_budget(exc):
+                raise
+            results = rows(part/"results.unscored.jsonl")
+            failed.append(persist_p3_failure(part, conversation, str(exc), teacher_ledger=teacher_ledger))
+        generation = json.loads((part/"generation_manifest.json").read_text())
+        snapshot_id = generation["retrieval"]["retrieval"]["corpus_snapshot_id"]
+        actual_turns = [{**row, "split": "train", "snapshot_id": snapshot_id, "rollout_policy": "P1_R1_actual_history",
+            "reader_checkpoint": binding["reader_checkpoint"], "reader_profile_id": binding["reader_profile_id"]} for row in results]
+        turn_path = part/"turns.jsonl"
+        write_rows(turn_path, actual_turns)
+        turns.extend(actual_turns)
+        rollout_specs.append({"turns_path": str(turn_path.resolve()),
+            "state_db": str((part/"state"/"sessions.sqlite3").resolve()),
+            "source_partition": "native_multidoc2dial_train", "split": "train",
+            "reader_identity": binding["reader_checkpoint"], "read_protocol_version": 2})
     write_rows(directory/"turns.jsonl", turns)
-    reader_config = yaml.safe_load(Path(next_round["reader_training_config"]).read_text())
     reader = reader_config["reader_training"]
     reader.update(initial_adapter=str(Path(settings["reader_manifest"]).parent/"adapter"),
         output_dir=next_round["reader_output_dir"], merged_model_dir=next_round["reader_merged_dir"])
-    reader["data"].update(output_dir=next_round["reader_data_dir"], rollouts=[{
-        "turns_path": str((directory/"turns.jsonl").resolve()),
-        "state_db": str((directory/"state"/"sessions.sqlite3").resolve()),
-        "source_partition": "native_multidoc2dial_train", "split": "train",
-        "reader_identity": binding["reader_checkpoint"], "read_protocol_version": 2}])
+    reader["data"].update(output_dir=next_round["reader_data_dir"], rollouts=rollout_specs,
+        export_turns=None, retrieved_read_turns=0, validation_fraction=0)
+    review_path = directory/"reader_p1_review.yaml"
+    review_path.write_text(yaml.safe_dump(reader_config, sort_keys=False))
+    mix_config = yaml.safe_load(Path(next_round["reader_mix_config"]).read_text())
+    mix_config["reader_mix"].update(reader_manifest=settings["reader_manifest"], parent_data_dir=parent_data_dir,
+        new_p1_data_dir=next_round["reader_data_dir"], reader_output_dir=next_round["reader_output_dir"],
+        reader_merged_dir=next_round["reader_merged_dir"])
+    mix_path = directory/"reader_mix.yaml"
+    mix_path.write_text(yaml.safe_dump(mix_config, sort_keys=False))
+    from training.reader_mix import stage_configs
+    _, mixed = stage_configs(mix_config, reader_config)
     next_path = directory/"reader_next_round.yaml"
-    next_path.write_text(yaml.safe_dump(reader_config, sort_keys=False))
+    next_path.write_text(yaml.safe_dump(mixed, sort_keys=False))
     manifest = {"reader_binding": binding, "planner_asset": settings["output_asset"],
         "planner_checkpoint": policy["policy_checkpoint"],
         "actual_turns": len(turns), "actual_conversations": len({row["conversation_id"] for row in turns}),
+        "requested_conversations": conversations, "failed_conversations": failed,
         "history_policy": "P3 along this P1/R1 pair's own committed answers",
         "next_reader_config": str(next_path.resolve()),
-        "next_steps": ["export", "review", "prepare", "train"],
+        "new_P1_review_config": str(review_path.resolve()), "reader_mix_config": str(mix_path.resolve()),
+        "next_steps": [f"python -m training.reader_mix all --config {mix_path} --p1-config {review_path}",
+                       f"python -m training.train_reader train --config {next_path}"],
         "supervision": "fresh actual-history/prompt-bound target review required for the new reader round"}
     (directory/"alternation_manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
     return manifest

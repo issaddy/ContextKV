@@ -221,13 +221,19 @@ def build_plan_candidates(snapshot, query, plan, template, *, policy=None, outco
 
         prioritized = sorted(units, key=lambda u: (
             not any(supports_point(u, point) for point in answer_plan.points), -u.retrieval_score, u.unit_id))
-        representatives = {unit.unit_id: unit for point in answer_plan.points
-            for unit in prioritized if supports_point(unit, point)}
-        # Reserve one key original unit for each answer point before background
-        # material. Multiple needs can share the same physical original.
-        representative_ids = tuple(dict.fromkeys(next((unit.unit_id for unit in prioritized
-            if supports_point(unit, point)), None) for point in answer_plan.points))
-        representatives = tuple(representatives[uid] for uid in representative_ids if uid is not None)
+        # A derived answer point can join many originals. Share the excerpt
+        # allocation across its source paths before filling background text.
+        representatives, represented = [], set()
+        for point in answer_plan.points:
+            for source_key in dict.fromkeys(span.source_key for span in point.source_spans):
+                if source_key in represented:
+                    continue
+                unit = next((unit for unit in prioritized if supports_point(unit, point)
+                    and any(span.source_key == source_key for span in unit.source_spans)), None)
+                if unit is not None:
+                    representatives.append(unit)
+                    represented.update(span.source_key for span in unit.source_spans)
+        representative_ids = tuple(unit.unit_id for unit in representatives)
         final_units = []
 
         def add_excerpt(unit, ceiling):

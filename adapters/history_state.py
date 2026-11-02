@@ -57,6 +57,40 @@ def validate_task_refs(prediction, turn, memory):
         text_ref_text(ref, sources, field=field)
 
 
+def owned_text_ref_definitions(owners):
+    """Each owner permits two unordered, included Unicode character indices."""
+    branches = [{"type": "object", "properties": {
+        "turn_id": {"type": "integer", "const": identity},
+        "speaker": {"type": "string", "const": speaker},
+        "boundary_chars": {"type": "array", "minItems": 2, "maxItems": 2,
+            "items": {"type": "integer", "minimum": 0, "maximum": len(text)-1}}},
+        "required": ["turn_id", "speaker", "boundary_chars"], "additionalProperties": False}
+        for (identity, speaker), text in owners.items() if text]
+    return {"TextRef": {"anyOf": branches} if branches else False}
+
+
+def boundary_ref_value(ref):
+    first, second = ref["boundary_chars"]
+    return {"turn_id": ref["turn_id"], "speaker": ref["speaker"],
+            "start": min(first, second), "end": max(first, second)+1}
+
+
+def decode_boundary_task_refs(value):
+    """Translate the declared online wire into the unchanged persisted contract."""
+    value["history_spans"] = [boundary_ref_value(ref) for ref in value["history_spans"]]
+    for condition in value["conditions"].values():
+        for name in ("key_span", "predicate_span"):
+            condition[name] = None if condition[name] is None else boundary_ref_value(condition[name])
+        condition["value_spans"] = [boundary_ref_value(ref) for ref in condition["value_spans"]]
+    for event in value["condition_removals"]:
+        event["predicate_span"] = boundary_ref_value(event["predicate_span"])
+    for need in value["needs"].values():
+        for name in ("anchor_spans", "subject_refs"):
+            need[name] = [boundary_ref_value(ref) for ref in need[name]]
+    value["version_intent"]["time_refs"] = [boundary_ref_value(ref) for ref in value["version_intent"]["time_refs"]]
+    return value
+
+
 def active_ref_text(ref, memory, turn, excluded):
     text = history_text(ref, memory, turn)
     intervals = sorted((max(ref.start, old.start)-ref.start, min(ref.end, old.end)-ref.start)
@@ -248,7 +282,7 @@ class TeacherTaskModel:
 
     @property
     def manifest(self):
-        return {"kind": "qwen3_32b_task_span_teacher", "wire_schema": "owned_task_graph_v3_message_refs",
+        return {"kind": "qwen3_32b_task_span_teacher", "wire_schema": "owned_task_graph_v6_included_boundary_chars",
                 "transport": self.client.manifest}
 
     def predict(self, turn, windows, memory):
@@ -304,14 +338,8 @@ class TeacherTaskModel:
         owners = text_ref_sources(memory.committed_history, current_turn_id=turn.turn, current_user_text=turn.query)
         body["text_ref_sources"] = [{"turn_id": identity, "speaker": speaker, "characters": len(text)}
             for (identity, speaker), text in owners.items()]
-        ref_schema = {"anyOf": [{"type": "object", "properties": {
-            "turn_id": {"type": "integer", "const": identity},
-            "speaker": {"type": "string", "const": speaker},
-            "start": {"type": "integer", "minimum": 0, "maximum": len(text)-1},
-            "end": {"type": "integer", "minimum": 1, "maximum": len(text)}},
-            "required": ["turn_id", "speaker", "start", "end"], "additionalProperties": False}
-            for (identity, speaker), text in owners.items() if text]}
-        definitions = {"TextRef": ref_schema}
+        body["wire_schema"] = self.manifest["wire_schema"]
+        definitions = owned_text_ref_definitions(owners)
         ref_schema = {"$ref": "#/$defs/TextRef"}
         refs = {"type": "array", "maxItems": 16, "items": ref_schema}
         definitions["TextRefs"] = refs
@@ -401,12 +429,15 @@ class TeacherTaskModel:
                                  "additionalProperties": False})
         schema = {"type": "object", "anyOf": branches, "$defs": definitions}
         self.last_response_schema = schema
-        system = ("Interpret the current task using literal half-open Unicode character spans in the supplied actual QA. "
-                  "History text starts at ref.start in its original message. Open values must point to original spans. "
+        system = ("Interpret the current task using literal Unicode character positions in the supplied actual QA. "
+                  "Output TextRefs use boundary_chars:[i,j], two INCLUDED character indices in the original message. "
+                  "Order is irrelevant: they denote original_text[min(i,j):max(i,j)+1]. Equal indices select one character. "
+                  "These are not an exclusive end or a length. For a half-open interval [start,end), emit [start,end-1]. "
+                  "Input history/prior-state ledger refs still use half-open start/end; output refs must use boundary_chars. "
+                  "History text starts at its input ref.start in the original message. Open values point to original text. "
                   "TextRefs may name only a listed text_ref_sources message: the current turn has a user message only. "
-                  "Never invent turn 0, future turns or a current assistant message. start must be less than end. "
+                  "Each included index is between zero and characters-1. Never invent turn 0, future turns or a current assistant message. "
                   "Use null for an absent key_span or predicate_span, and empty arrays when no references apply; "
-                  "do not create dummy or zero-width spans. "
                   "Keep the active object and needs for followups. For a correction emit REPLACE linked to prior condition IDs. "
                   "Represent every distinct requested answer point as a need, including related points requested together; "
                   "choose the operation for each point and preserve its question anchors. "
@@ -439,6 +470,7 @@ class TeacherTaskModel:
             self.record_path.parent.mkdir(parents=True, exist_ok=True)
             with self.record_path.open("a", encoding="utf-8") as sink:
                 sink.write(json.dumps({"task_id": turn.task_id, "status": completion.status,
+                    "wire_schema": self.manifest["wire_schema"],
                     "finish_reason": completion.finish_reason, "input_tokens": completion.input_tokens,
                     "usage": completion.usage, "elapsed_ms": completion.elapsed_ms,
                     "raw_output": completion.text, "error": completion.error,
@@ -453,7 +485,7 @@ class TeacherTaskModel:
         self.usage["output_tokens"] += completion.usage["completion_tokens"]
         self.usage["elapsed_ms"] += completion.elapsed_ms
         self.last_raw_output = completion.text
-        value = json.loads(completion.text)
+        value = decode_boundary_task_refs(json.loads(completion.text))
         removals = value.pop("condition_removals")
         value["conditions"] = [{"condition_id": key, **value["conditions"][key]}
             for key in tuple(current_conditions)[:len(value["conditions"])]]

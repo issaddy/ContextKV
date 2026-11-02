@@ -22,7 +22,8 @@ R1 通过独立运行配置载入；默认配置尚未因训练完成而切换�
 
 新版指导将 reader LoRA 与计划器联合训练、反事实质量增益驱动的滚动决策、
 稳定证据前缀独立所有权列为主线。训练数据/LoRA 与收益策略入口已实现，
-R1 已完成真实训练、合并与服务启动；R1 绑定的 P1 效用资产和收益模型资产尚未训练。
+R1 已完成真实训练、合并与服务启动；R1绑定的P1 prototype22已训练，B v3也已完成真实反事实采集与拟合。
+两者的在线质量收益仍待对应评分；R2当前是混合数据与新P1目标复核阶段。
 TaskState、ContextPlan、EvidenceSet、
 ReadResult/ReadingOutcome 共同表达统一逻辑状态，不再建立平行 AnswerState 副本。
 
@@ -32,13 +33,15 @@ ReadResult/ReadingOutcome 共同表达统一逻辑状态，不再建立平行 An
 |---|---|---|
 | 任务、历史、条件与版本 | `adapters/history_state.py`、`evidence_pool.py` | 原文坐标、有限指针、条件更新和历史来源目录的本地测试 |
 | 单段、组合支持与集合搜索 | `adapters/support_model.py`、`teacher_support.py`、`controller/evidence_planner.py` | single/pair/triple、依赖闭包、真实 tokenizer 预算与多集合测试 |
-| READ/REDUCE/ANSWER | `controller/reading.py`、`execution.py`、`reduction.py` | 组合证据与条件纠正已实际生成；长文和多跳尚未通过最新真实验收 |
+| READ/REDUCE/ANSWER | `controller/reading.py`、`execution.py`、`reduction.py` | R0新balanced长文全范围答36/666；多跳仍失败，R1尚缺匹配复跑 |
 | 原生运行时 | `controller/service.py`、`session_store.py` | 步骤恢复、持久化、一次 QA 提交与成本累计测试 |
 | 多候选与 KV 成本 | `controller/candidates.py`、`planner.py`、`context_cost.py` | 同动作多集合、三个布局、合法 APPEND、逐步骤报价与输出 profile 测试 |
 | 实验编排 | `bench/study.py`、`study_metrics.py`、`study_scoring.py` | 连续质量选择、公开原始指标、完整队列/生成/辅助开销和物理积分接口 |
-| Reader LoRA | `training/reader_data.py`、`train_reader.py` | R1 真实训练完成；训练与 heldout loss 见下文，QA 效果另行评测 |
-| R1 绑定的计划器交替训练 | `training/train_evidence_policy.py` | 原生回答、分量奖赏、P1 utility、下一轮自身 P3 入口已实现；尚未产生当前 R1 的 P1 资产 |
-| 来源配对 curriculum | `training/reader_curriculum.py`、`reader_constructed_curriculum.py` | 数字、条件、版本、位置、三跳与空记录窗口构造及审计代码已实现；真实生成与 round2 训练尚未完成 |
+| Reader LoRA | `training/reader_data.py`、`train_reader.py` | R1 真实训练完成；构造型开发共同12状态E0/inferred为R0 0.8708、R1 0.7333，首轮未提升 |
+| R1 绑定的计划器交替训练 | `training/train_evidence_policy.py`、`a_workflow.py` | prototype22已用22答案/5状态训练；四格各14状态生成完成、待评分；自身训练P3与新目标复核已推进 |
+| 来源配对 curriculum | `training/reader_curriculum.py`、`reader_constructed_curriculum.py`、`reader_computed_curriculum.py`、`reader_mix.py` | 已审课程新增153样本，含parent共1945样本；配置课程3倍、新P1 8倍采样，R2尚未报告训练完成 |
+| B 收益拟合 | `training/collect_plan_gains.py`、`train_plan_gain.py` | v3 train8/dev4真实176次model call、721867ms，已fit；滚动运行收益待验 |
+| 受控机制离线审计 | `bench/audit_reading_mechanisms.py` | 分别核对执行、原文/claim来源、REDUCE量值和最终ANSWER；代码与本地测试完成，实际报告待容器运行 |
 
 上述是已实现的接口与局部验证，不代表全量质量、性能和研究验收完成。
 
@@ -95,6 +98,36 @@ R1 训练数据共 1792 个已复核样本（1559 ANSWER、233 READ），其中�
 LoRA 已合并并启动服务，R0 原权重保留。训练分区持出 loss 为
 `0.1608121544`；该数值不是 QA benchmark 提升。
 当前小规模实际分布上的 R1 仍未解决上述长文和多跳受控任务，尚无回答质量改善结论。
+
+随后新balanced配置的R0长文已实际得到REDUCE 36条/666000g，最终ANSWER 36条/666kg，完整来源范围通过；
+多跳仍失败。该配置与上面的早期R1失败运行不同，需要匹配R1复跑后才能做reader归因。
+
+sixgrid-v1 已实际评分152格，16格缺失；主表使用排除2个泛topic后共同的12个构造型动态状态。
+工程主分 `project_condition_version_score` 的 E0/inferred 为R0 0.8708、R1 0.7333；
+E1/inferred和E2/inferred两reader均为1.0000。同候选池oracle选材的差距为R0约12.9、R1约26.7个百分点，
+说明这批状态的实际证据选集仍有明显改进空间。首轮LoRA没有提升，R0保留为较强当前候选。
+verified各格及缺失范围见[六格诊断](reader_diagnosis.md)；这些结果不代表公开benchmark或已选出最强Incumbent。
+
+后续P1 prototype22已训练，资产为`models/study-support-r1-prototype22`，监督来自22个真实候选答案、5个训练状态。
+P0/P1 × R0/R1 冻结实际历史四格均已完成14状态生成，共56个状态格；当前尚待score，不能据生成完成判定P1提升。
+P1自身训练P3首会话完成5条QA后遇到Task教师`completed/length`，已记终态模型预算失败、跳过后继并保留已付费用；
+第二会话最新观测为首轮尚未提交QA，CPU在temporal来源过滤停留约13分钟，reader/helper在该观测时均空闲。
+已交付按文档族/版本索引、调用内只计算一次temporal结果的补丁；root安排中止旧计算并按同数据重启。
+新P1目标复核与R2训练完成仍待实际报告。已有QA复用，原失败没有修补或重试。
+
+课程审计完成后保留新增153个样本，加上parent的1773训练样本和19验证样本，共1945个样本，真实训练轮数仍为1544。
+R2混合配置对课程显式重复3份、新P1样本重复8份，从实际R1 adapter初始化，保留原验证文件。
+这些是已审数据和采样设置；新P1复核、实际混合计数、R2训练及质量结果仍分别记录。
+
+B v3已在8个训练状态和4个开发状态完成176次真实model call，采集墙钟721867ms，并完成fit。
+C已进入完整READ/ANSWER/REDUCE真实成本采集和拟合阶段。两项的最终在线/独立联合效果尚未据此成立。
+
+公开多跳数据已在指定容器下载并转换：作者官方镜像2WikiMultihopQA的12576条有标签dev，按固定hash选40条开发样本和40条互斥project-heldout样本。
+这不是官方隐藏test，也没有全量覆盖。原始上下文含distractors进入阅读路径，gold答案、支持句和关系只用于离线评分；
+来源revision、内容SHA、cohort IDs和原文句跨度由`bench.public_multihop`保存。
+镜像身份见[作者数据卡](https://huggingface.co/datasets/xanhho/2WikiMultihopQA/blob/612bc5039a457880d9e7d84c3b0a4cf154b70e4f/README.md)，
+格式与原始评估器见[官方仓库](https://github.com/Alab-NII/2wikimultihop)。
+`bench.a_final_batch`提供声明子集、开发冻结、公开评分与报告入口；目前不把入口代码记为公开结果完成。
 数据、模型、成本及评测状态见 [A 实验清单](a_experiment_inventory.json)。
 隔离评分依赖与 P1 首批采集前置条件见 [R1/P1 运行清单](reader_policy_readiness.md)。
 
@@ -102,8 +135,8 @@ C 的固定 token/受控压力原生配对已真实执行：GPU 组额外命中 
 减少 128 token Host 回载，实测响应减少约 10.4 ms；Host 组额外命中 128 token，
 减少 128 token 重算、增加 128 token 回载，实测响应增加约 17.0 ms。
 此结果只证明独立前缀 owner 的机制和两层取舍，尚无长期价值策略或答案质量收益结论。
-后续 C2 固定 DAG 的实际配对已执行；net-value 拟合仍是 pilot，尚未观察未来复用，
-因此也没有价值策略效果结论。
+后续 C2 固定 DAG 的实际配对已执行；当前C完整阶段成本采集和拟合正在推进，
+固定DAG配对与成本fit均不能代替未来复用价值策略的效果证据。
 实际语义 READ 资格脚本首轮在输出审计的反序列化处失败，已修正后待复跑。
 
 早期批次的题数、原始目录和评分缺失原因见
@@ -112,16 +145,15 @@ C 的固定 token/受控压力原生配对已真实执行：GPU 组额外命中 
 
 ## 验证与下一批验收
 
-主 agent 最近报告完整回归 1689 passed，发生在当前引用所有权修订之前；
-随后引用/资源 focused 回归为 28 passed。后续局部测试不能替代最后合并快照的完整回归。
-当前分支为
-`codex/answer-quality`，改动尚未形成新的 Git 提交。
+首个 QA 提交为`edb20e7`（当时1701 passed）；主agent随后报告过1761项完整回归。
+按09:00截止要求，后续仅运行必要管线smoke、编译检查与原生契约资格，不再反复扩大测试。
+当前新增管线代码和生成完成状态分别登记，未以旧回归或模型训练代替当前质量评分。
 
-先完成长文与多跳受控复跑，再运行自动任务解析、支持评分、集合选择、READ、
-ANSWER 的真实贯通。之后才能冻结开发配置、开展等成本比较与负载实验。
-E1/E2 原文 witness 选择器、六格真实执行器和任务绑定替换入口已经实现；
-六格诊断、计划器 × 阅读器四格实验、收益驱动决策 × 前缀保留四格实验尚未形成
-完整的真实结果；正式 QA heldout、R1 长文/多跳通过验收与独立效果消融仍缺失。
+自动任务解析、支持评分、集合选择、READ/ANSWER的实际训练P3已产生结果与明确失败；
+长文/多跳、开发评分、公开cohort准备按截止时间并行推进。
+六格已完成上述共同12状态的真实评分，两个泛topic的E1/E2仍待精确范围审核。
+计划器 × 阅读器四格各14状态已生成、待评分；收益驱动决策 × 前缀保留四格仍缺完整质量/成本结论；
+正式 QA heldout、R1 长文/多跳通过验收与独立效果消融仍缺失。
 
 ## 实验协议与机制取舍
 

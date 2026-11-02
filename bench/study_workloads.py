@@ -112,8 +112,10 @@ def load_goal_policy(path, *, expected_sha256=None):
     return GoalGraphPolicy(graphs)
 
 
-def build_goal_graph_dataset(version_rows, *, max_conversations=None):
+def build_goal_graph_dataset(version_rows, *, max_conversations=None, topic_request="summary"):
     """Use public constructed-dev questions/metadata; never read their targets."""
+    if topic_request not in {"summary", "allowance_lookup"}:
+        raise ValueError("topic_request must be summary or allowance_lookup")
     first = {row["conversation_id"]: row for row in version_rows if row["turn"] == 1}
     all_conversations = sorted(first)
     conversations = all_conversations
@@ -126,9 +128,17 @@ def build_goal_graph_dataset(version_rows, *, max_conversations=None):
         versions = sorted({(doc["valid_from"], doc["version"]) for doc in own})
         old, current = versions[0][1], versions[-1][1]
         other = first[all_conversations[(index+1) % len(all_conversations)]]
-        topic = other["contexts"][0]
+        topic = (max(other["contexts"], key=lambda doc: (
+            doc["valid_from"], doc["version"], doc["applicability"]["PLATFORM"]))
+            if topic_request == "allowance_lookup" else other["contexts"][0])
         topic_question = (f"Switch to the supplied source titled {topic['title']!r}. "
-                          "Describe the subject of that source in one paragraph.")
+            + (f"Under policy version {topic['version']}, what filing allowance does it specify "
+               f"for {topic['applicability']['PLATFORM']}?" if topic_request == "allowance_lookup" else
+               "Describe the subject of that source in one paragraph."))
+        topic_conditions = (("TOPIC", topic["document_family"]),)
+        if topic_request == "allowance_lookup":
+            topic_conditions += (("PLATFORM", topic["applicability"]["PLATFORM"]),
+                                 ("VERSION", topic["version"]), ("REQUEST_KIND", topic_request))
         graph_id = f"dynamic-goal:{conversation}"
         conditions = (("PLATFORM", "Linux"),)
         nodes = (
@@ -154,7 +164,7 @@ def build_goal_graph_dataset(version_rows, *, max_conversations=None):
             GoalNode("remove_platform", "Remove the platform restriction. Under the current policy, give the allowance for every supplied platform.", (
                 GoalEdge("platform_restriction_removed", "topic_switch"),), (("PLATFORM", "removed"), ("VERSION", "current"))),
             GoalNode("topic_switch", topic_question, (GoalEdge("topic_answer_received", "source_revisit"),),
-                (("TOPIC", topic["document_family"]),)),
+                topic_conditions),
             GoalNode("source_revisit", "Return to the original program. Restore Linux and the current policy: what is its allowance?", (),
                 (*conditions, ("VERSION", "current"))),
         )
@@ -162,7 +172,8 @@ def build_goal_graph_dataset(version_rows, *, max_conversations=None):
         graph = GoalGraph(graph_id, "current_windows", nodes, 7, tuple(documents))
         graphs.append(graph)
         for turn in range(1, graph.turns+1):
-            rows.append({"dataset": {"name": "dynamic_goal_dev", "revision": "goal-graph-v1"},
+            rows.append({"dataset": {"name": "dynamic_goal_dev", "revision":
+                "goal-graph-v2-allowance-topic" if topic_request == "allowance_lookup" else "goal-graph-v1"},
                 "conversation_id": graph_id, "task_id": f"{graph_id}:{turn}", "turn": turn,
                 "Collection": "dynamic_goal_dev/constructed_dev", "split": "dev", "goal_graph_id": graph_id,
                 "input": [{"speaker": "user", "text": nodes[0].question if turn == 1 else ""}],
@@ -262,7 +273,8 @@ def prepare_workloads(config, matrix):
     source = Path(matrix["datasets"]["versionqa"]["inputs"]["dev"])
     original = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
     policy, rows = build_goal_graph_dataset(original,
-        max_conversations=config.get("workloads", {}).get("conversations"))
+        max_conversations=config.get("workloads", {}).get("conversations"),
+        topic_request=config.get("workloads", {}).get("topic_request", "summary"))
     by_conversation = {}
     for row in original:
         by_conversation.setdefault(row["conversation_id"], {})[row["turn"]] = row
@@ -277,7 +289,11 @@ def prepare_workloads(config, matrix):
         for node in graph.nodes:
             if node.goal_id == "topic_switch":
                 family = dict(node.conditions)["TOPIC"]
-                source_doc = next(doc for row in original for doc in row["contexts"] if doc["document_family"] == family)
+                conditions = dict(node.conditions)
+                source_doc = next(doc for row in original for doc in row["contexts"]
+                    if doc["document_family"] == family and (conditions.get("REQUEST_KIND") != "allowance_lookup" or
+                    (doc["version"] == conditions["VERSION"] and
+                     doc["applicability"]["PLATFORM"] == conditions["PLATFORM"])))
                 reference = {"source_document_ids": [source_doc["document_id"]], "source_text": source_doc["text"],
                              "origin": "public constructed-dev source text"}
             else:
@@ -318,6 +334,7 @@ def prepare_workloads(config, matrix):
     matrix_path = arrivals/"diagnostic_matrix.yaml"
     matrix_path.write_text(yaml.safe_dump(diagnostic, allow_unicode=True, sort_keys=False))
     manifest = {"schema_version": 1, "dataset": "dynamic_goal_dev", "split": "dev",
+        "topic_request": config.get("workloads", {}).get("topic_request", "summary"),
         "conversations": len(policy.graphs), "turns": len(rows), "turns_per_conversation": 7,
         "tasks_path": str(tasks_path.resolve()), "goal_policy_path": str(graphs_path.resolve()),
         "goal_policy_sha256": goal_policy_sha256,

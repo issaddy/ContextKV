@@ -4,7 +4,7 @@ R1 已真实训练并合并，当前 reader checkpoint 为
 `contextkv-reader-r1:1eec232b42b67721374c0400b354081842b54c965a20c441b17b4d82a33c567b`。
 训练数据为 1773 个样本、1544 个训练 turn；另有 19 个训练分区持出样本。
 56 step、7,800,825 input token、1,405,076.37 ms 和 heldout loss
-`0.1608121544` 属于训练证据。正式 QA heldout 与六格质量对照尚未完成。
+`0.1608121544` 属于训练证据。sixgrid-v1共同12状态已评分，E0下R1尚无提升；正式QA heldout仍缺。
 原始数据、权重、日志和结果均留在 `sjy-0518`。
 
 ## 已确认与仍缺的证据
@@ -16,8 +16,8 @@ R1 已真实训练并合并，当前 reader checkpoint 为
 | 同代码 R0 长文 | REDUCE=36条/596000g，ANSWER同为3条/6kg | 完整配对审计与其他格的质量指标；不能称纯R1退化 |
 | R1 多跳 | 执行结束，推进到Institute→Arbor | 最终1997与三来源链未通过 |
 | pair/correction | 已生成预期表单词项 | literal/source/citation离线审计 |
-| P1 utility | 采集、配对、训练和下一轮P3入口已实现 | 当前R1实际偏好、训练资产和持出收益 |
-| round2 curriculum | 独立native/constructed_train配对构造与审计代码 | fresh teacher标签、round2训练和效果评估 |
+| P1 utility | prototype22已训练：22真实答案/5训练状态；冻结四格各14状态生成完成 | 四格score、完整P3开发对照与持出收益 |
+| round2 curriculum | 审计完成、新增153样本；parent1773train+19validation后共1945，课程配置3x | 新P1目标和实际mix计数、R2训练与效果 |
 | Incumbent | 当前可运行候选和历史Dense5参考 | 同一开发cohort的选型；尚未宣布最强配置 |
 
 ## P1 采集的数据与资产前置条件
@@ -50,20 +50,20 @@ Need前驱闭包和环、actual-history审核状态，以及verified grounding�
 | R1 READ/ANSWER | 30004，GPU4 | collection包含GPU4 |
 | 冻结judge | 30001，GPU2 | collection包含GPU2；不使用六格比较R0的GPU5 |
 | BGE query、后继P3的task/history embedding | `cuda:1` | collection包含GPU1 |
-| 支持、utility推理 | `cuda:6` | collection包含GPU6 |
+| 支持、utility推理 | `cuda:1` | collection包含GPU1 |
 | P1 utility训练 | `cuda:6` | 仅GPU6；不计其他驻留reader |
 
 这些配置要求设备编号保持物理原序。可显式使用
 `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`；不能设单卡可见性后继续使用`cuda:6`。
-GPU3留给C服务，GPU5留给匹配R0诊断。P1 collection连续采样集合为`[1,2,4,6]`，
+GPU5用于匹配R0诊断。P1 collection连续采样集合为`[1,2,4]`，
 进程PSS包括采集进程与reader/judge服务进程组；utility训练只采本进程组和GPU6。
 
 建议先审计8个真实状态，首个状态执行全部可用干预以检查I/O和计量，
-再扩到同一审计文件的8个状态。默认最多6类：relevance、direct_support、
+原型已完成22答案/5状态，截止阶段下一采集上限为32合格状态。最多6类：relevance、direct_support、
 complementary、redundant、真实wrong_condition_version、deleted_premise。
 缺少真实条件/版本冲突来源时该类跳过并记录，不改写背景材料冒充负例。
-正文4096、最终输出1024、source-first READ保持不变；最多48个候选回答及其judge，
-READ/REDUCE数量按真实计划另计。这是小规模训练采集检查，不是持出效果结论。
+正文4096、最终输出1024、source-first/source-window READ保持不变；
+READ/REDUCE数量按真实计划另计。这是小规模训练采集，不是持出效果结论。
 
 ```bash
 python -m training.train_evidence_policy audit --config configs/evidence_policy_r1.yaml --limit 8
@@ -77,8 +77,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m training.train_evidence_policy tr
 
 训练前核对：真实质量分量已生成、同题actual history/正文与输出预算一致、
 存在非零偏好、相同input hash已排除、原生回执和物理/token成本齐全。
-输出为独立`models/study-support-r1`，保留P0。P1训练后再执行`rollout`，
-由其自身P3回答产生下一轮reader数据；该步骤尚未实际完成。
+已有原型输出为独立`models/study-support-r1-prototype22`，保留P0。
+自身训练P3首会话已有5QA，随后Task length终态保留；第二会话最新观测是首轮CPU temporal热点，无新QA。
+补丁已交付，重启后的新P1复核和R2训练仍待实际完成。R2只从真实R1 adapter继续，parent不重标、原验证集保留。
 
 ## 隔离的官方指标环境
 

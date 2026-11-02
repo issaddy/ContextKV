@@ -116,6 +116,7 @@ class RunConfig:
     shadow: bool = False
     sampling: SamplingRecipe | None = None
     prefix_retention: dict = field(default_factory=lambda: {"mode": "native"})
+    plan_gain: dict | None = None
 
     def __post_init__(self):
         if self.engine.kind not in ("mock", "sglang"):
@@ -135,6 +136,12 @@ class RunConfig:
         if self.cost_model.online_calibration and not all((self.ablation.host_cost,
                 self.ablation.decode_cost, self.ablation.control_cost)):
             raise ValueError("cost-term ablations require frozen calibration; total residuals would restore excluded costs")
+        if self.plan_gain is not None:
+            if self.plan_gain["mode"] != "rolling_gain" or self.shadow:
+                raise ValueError("plan_gain enables reader-bound rolling execution without shadow fallback")
+            for name in ("gain_asset", "execution_profile_asset", "reader_checkpoint", "reader_profile_id"):
+                if not self.plan_gain[name]:
+                    raise ValueError(f"rolling plan policy requires explicit {name}")
 
 
 def load_config(path: str | Path | None = None) -> RunConfig:
@@ -157,7 +164,8 @@ def apply_study_config(config: RunConfig, study):
             lambda_time=execution["lambda_time"], lambda_gpu=execution["lambda_gpu"],
             lambda_host=execution["lambda_host"]),
         cost_model=replace(config.cost_model, artifact=artifact),
-        prefix_retention=execution.get("prefix_retention", config.prefix_retention))
+        prefix_retention=execution.get("prefix_retention", config.prefix_retention),
+        plan_gain=execution.get("plan_gain", config.plan_gain))
 
 
 def assemble_cost_model(config, *, artifact=None, measurements=None,
@@ -253,10 +261,21 @@ def create_controller(config: RunConfig) -> Controller:
                                  timeout=config.engine.timeout_seconds, stream=config.engine.stream, sampling=config.sampling,
                                  **({"model_scope": config.model.scope.manifest()} if config.model.scope else {})))
     state_dir = Path(config.state_dir)
-    return Controller(SessionStore(state_dir / "sessions.sqlite3"), engine, template=template,
+    store = SessionStore(state_dir / "sessions.sqlite3")
+    rolling = None
+    if config.plan_gain is not None:
+        from .plan_profiles import load_rolling_runtime
+        from .candidates import PLAN_SYSTEM_PROMPT
+        from .sampling import request_sampling
+        rolling = load_rolling_runtime(config.plan_gain, template=template, store=store,
+            sampling=request_sampling(config.sampling),
+            answer_system_prompt=config.context.system_prompt or PLAN_SYSTEM_PROMPT,
+            engine_base_url=config.engine.base_url)
+    return Controller(store, engine, template=template,
                       policy=config.context, knobs=config.planner, cost_model=model, shadow=config.shadow,
                       epoch_retirement=config.ablation.epoch_retirement,
                       online_calibration=config.cost_model.online_calibration,
                       prefix_settings=config.prefix_retention,
+                      rolling_policy=rolling,
                       events=EventLog(state_dir / "events.jsonl",
                                       engine_kind=config.engine.kind))

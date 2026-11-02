@@ -40,16 +40,20 @@ def physical_sample(gpu_devices, process_ids):
         "--format=csv,noheader,nounits"], text=True)
     devices = [{"index": int(row[0]), "uuid": row[1].strip(), "memory_mib": float(row[2])}
                for row in csv.reader(io.StringIO(output)) if int(row[0]) in gpu_devices]
-    pss = []
+    pss, exited = [], []
     for pid in descendants((*process_ids, os.getpid())):
         path = Path(f"/proc/{pid}/smaps_rollup")
-        if path.exists():
-            fields = dict(line.split(":", 1) for line in path.read_text().splitlines() if ":" in line)
-            pss.append({"pid": pid, "pss_kib": int(fields["Pss"].split()[0])})
+        try:
+            contents = path.read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            exited.append(pid)
+            continue
+        fields = dict(line.split(":", 1) for line in contents.splitlines() if ":" in line)
+        pss.append({"pid": pid, "pss_kib": int(fields["Pss"].split()[0])})
     return {"timestamp": (before+time.monotonic())/2,
         "gpu_gib": sum(row["memory_mib"] for row in devices)/1024,
         "host_gib": sum(row["pss_kib"] for row in pss)/(1024**2),
-        "devices": devices, "process_pss": pss}
+        "devices": devices, "process_pss": pss, "exited_before_pss_read": exited}
 
 
 def integrate_physical(samples, start, end):

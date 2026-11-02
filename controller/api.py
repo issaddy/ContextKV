@@ -169,6 +169,7 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
                     evidence_corpus=evidence_corpus, corpus_id=corpus_id, study_config=study_config))
                 app.state.retrieval = await asyncio.shield(loader)
             if app.state.retrieval is not None:
+                service.bind_resident_models(app.state.retrieval.manifest)
                 service.events.emit("retrieval_configured", retrieval=app.state.retrieval.manifest)
             service.events.emit("service_started", engine=info, fingerprint=service.template.fingerprint,
                 configuration_source="run_config" if resolved_config is not None else "injected_controller",

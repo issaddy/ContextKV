@@ -12,13 +12,38 @@ from controller.planner import PlannerKnobs
 from controller.prefix_retention import EmpiricalRetentionModel
 from controller.reading import build_read_plan
 from controller.reading import step_messages
-from controller.schema import CompletionReceipt, ContextEpoch, Message
+from controller.schema import CompletionReceipt, ContextEpoch, Message, PromptCandidate
 from controller.serialization import to_jsonable
 from controller.service import Controller
 from controller.session_store import SessionStore
 from controller.templates import ByteTemplate, token_hash
-from profiling.retention_trace import (SourceLedger, choose_windows, event_id, export_attempt,
+from profiling.retention_trace import (RecordingEngine, SourceLedger, choose_windows, event_id, export_attempt,
     integrate_prefix_residency, marginal_page_counts, reuse_pages, source_token_ranges, verify_trace, window_trace)
+
+
+@pytest.mark.asyncio
+async def test_capture_binds_actual_quote_once_and_never_reuses_a_previous_generation_snapshot():
+    engine = MockEngine(response_text="fixture")
+    engine._sampling_params = {"temperature": 0}
+    recorder = RecordingEngine(engine)
+    ids = (1, 2, 3)
+    candidate = PromptCandidate("known", "REBUILD", 0, (), ids, token_hash(ids),
+        frozenset(), frozenset(), fingerprint=engine.fingerprint, output_budget=10)
+    info = await engine.info()
+    first = await engine.prepare("first", "prepare1", info.engine_restart_id)
+    quote = await recorder.quote_batch((candidate,), engine.fingerprint)
+    await recorder.generate(input_ids=ids, max_new_tokens=10, session_id="first",
+        expected_generation=first.session_generation, expected_restart_id=info.engine_restart_id,
+        attempt_id="one", fingerprint=engine.fingerprint)
+    assert recorder.calls[0]["cache_quote"]["request_id"] == quote.request_id
+    assert recorder.calls[0]["quote_origin"] == "actual_controller_quote"
+    second = await engine.prepare("second", "prepare2", info.engine_restart_id)
+    await recorder.generate(input_ids=ids, max_new_tokens=10, session_id="second",
+        expected_generation=second.session_generation, expected_restart_id=info.engine_restart_id,
+        attempt_id="two", fingerprint=engine.fingerprint)
+    assert recorder.calls[1]["quote_origin"] == "capture_pre_generation_quote"
+    assert recorder.calls[1]["cache_quote"]["request_id"] != quote.request_id
+    assert recorder.calls[1]["cache_quote"]["quotes"][0]["ready_gpu_prefix_tokens"] > 0
 
 
 def simple_trace(turns=10):

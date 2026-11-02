@@ -278,6 +278,7 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
             return
         async with semaphore:
             structured = trace["phase"] != "ANSWER"
+            step_id = trace["step_id"] if structured else None
             target = trace["output_schema"] if structured else {"type": "string"}
             schema = {"type": "object", "properties": {"target": target,
                 "quality": {"type": "number", "minimum": 0, "maximum": 1},
@@ -307,7 +308,7 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
             ledger.flush()
             if result.status == "input_over_budget":
                 sink.write(json.dumps({"example_id": trace["example_id"], "task_id": trace["task_id"],
-                    "step_id": trace["step_id"], "status": "input_over_budget", "exclusion_reason": "review_input_over_budget",
+                    "phase": trace["phase"], "step_id": step_id, "status": "input_over_budget", "exclusion_reason": "review_input_over_budget",
                     "actual_history_sha256": trace["actual_history_sha256"], "prompt_token_hash": trace["prompt_token_hash"],
                     "reader_identity": trace["reader_identity"], "review_input_tokens": result.input_tokens,
                     "review_input_budget": review["max_input_tokens"], "model_request_executed": False,
@@ -317,7 +318,7 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
                 return
             if result.status == "completed" and result.finish_reason == "length":
                 sink.write(json.dumps({"example_id": trace["example_id"], "task_id": trace["task_id"],
-                    "step_id": trace["step_id"], "status": "teacher_target_truncated",
+                    "phase": trace["phase"], "step_id": step_id, "status": "teacher_target_truncated",
                     "exclusion_reason": "teacher_target_truncated", "target_origin": "truncated_output_not_a_training_target",
                     "actual_history_sha256": trace["actual_history_sha256"], "prompt_token_hash": trace["prompt_token_hash"],
                     "reader_identity": trace["reader_identity"], "raw_output": result.text,
@@ -333,7 +334,7 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
             target_tokens = len(clients[index % len(clients)].tokenizer.encode(target_text, add_special_tokens=False))+1
             accepted = (value["quality"] >= data["minimum_quality"] and value["source_support_verified"]
                         and value["correct_task_binding"] and target_tokens <= output_budget)
-            record = {"example_id": trace["example_id"], "task_id": trace["task_id"], "step_id": trace["step_id"],
+            record = {"example_id": trace["example_id"], "task_id": trace["task_id"], "phase": trace["phase"], "step_id": step_id,
                 "status": "accepted" if accepted else "rejected", "target_origin": "teacher_corrected_actual_runtime",
                 "target_text": target_text, "target_tokens_including_eos": target_tokens, "target_output_budget": output_budget,
                 "quality": value["quality"], "source_support_verified": value["source_support_verified"],

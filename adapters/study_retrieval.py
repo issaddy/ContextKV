@@ -54,10 +54,11 @@ def study_budget(config):
 
 class StudyEvidenceProvider:
     def __init__(self, config, template, serving, directory, *, support_backend=None,
-                 frozen_history=None, task_model=None, teacher_client=None):
+                 frozen_history=None, task_model=None, teacher_client=None, helper_engine_info=None):
         self.config, self.template, self.serving, self.directory = config, template, serving, directory
         self.support_backend, self.frozen_history = support_backend, frozen_history
         self.task_model, self.teacher_client = task_model, teacher_client
+        self.helper_engine_info = helper_engine_info
         self.strategy = config.get("study", {}).get("strategy", "B7")
         self.budget = study_budget(config)
         self.corpus_snapshot_id = serving.corpus_snapshot_id
@@ -68,7 +69,9 @@ class StudyEvidenceProvider:
     def manifest(self):
         return {"strategy": self.strategy, "retrieval": self.serving.manifest,
                 "budget": to_jsonable(self.budget), "task_model": getattr(self.task_model, "manifest", None),
+                "history_encoder": getattr(self.frozen_history, "manifest", None),
                 "support_model": getattr(self.support_backend, "manifest", None),
+                "helper_engine_info": self.helper_engine_info,
                 "selection_utility": self._utility_mode(),
                 "rerank_retained_sets": self.config.get("selection", {}).get("rerank_retained_sets", False),
                 "coverage_mode": self.config.get("reading", {}).get("coverage_mode", "selected_sources")}
@@ -237,6 +240,8 @@ class StudyEvidenceProvider:
                     gaps = unresolved_needs(state, evidence_sets[0])
                     if not gaps:
                         break
+                    if supplied_blocks is not None:
+                        break
                     pool = self.directory.extend_open_needs(state, memory, pool, gaps)
                     scores = support_model.score_support(state, pool)
                     support_ms += scores.scoring_ms
@@ -268,8 +273,9 @@ class StudyEvidenceProvider:
                             output_tokens_per_fact=None if self.strategy == "Lmap" else
                                 self.config.get("reading", {}).get("output_tokens_per_fact", 64),
                             reading_mode=self.config.get("reading", {}).get("mode", "typed_reduce"),
-                            separate_needs=self.config.get("reading", {}).get("numeric_need_isolation", False)
-                                and any(need.operation in {"count", "sum"} for need in state.needs),
+                            separate_needs=self.config.get("reading", {}).get("need_isolation", False)
+                                or (self.config.get("reading", {}).get("numeric_need_isolation", False)
+                                    and any(need.operation in {"count", "sum"} for need in state.needs)),
                             numeric_identity=self.config.get("reading", {}).get("numeric_identity", "names"),
                             read_layout=self.config.get("reading", {}).get("layout", "task_first"),
                             read_packing=self.config.get("reading", {}).get("packing", "source_windows"
@@ -414,7 +420,8 @@ class StudyEvidenceProvider:
                         return False
                 return True
 
-            fresh_pool = self.directory.retrieve_gap_pool(state, memory, open_needs)
+            fresh_pool = (self.directory.full_scope(state.source_scope) if state.source_scope
+                          else self.directory.retrieve_gap_pool(state, memory, open_needs))
             fresh_units = tuple(unit for unit in fresh_pool.units if not already_read(unit))
             phases = (("retrieval", fresh_pool.retrieval_ms),)
             if not fresh_units:
@@ -503,17 +510,34 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
     serving = ServingRetriever(retriever, corpus_id=retrieval["corpus_id"], corpus_index=corpus)
     task_config, support_config = config.get("task_model", {}), config.get("support_model", {})
     task_model = teacher_client = None
+    helper = helper_info = None
+    teacher_task = strategy not in {"B0", "Btoken"} and task_interpreter is None and task_config.get("mode", "trained") == "teacher"
+    teacher_support = strategy not in {"B0", "Btoken", "B1"} and support_backend is None and support_config.get("mode", "trained") == "teacher"
+    if teacher_task or teacher_support:
+        import httpx
+        from controller.config import load_config
+        generation = config.get("generation", {})
+        helper = load_config(generation.get("helper_run_config", generation.get("run_config", "configs/qwen3_32b.yaml")))
+        endpoint = generation.get("teacher_url", "http://127.0.0.1:30001").rstrip("/").removesuffix("/v1")
+        with httpx.Client(timeout=30) as client:
+            response = client.post(endpoint+"/context/engine/info", json={})
+            response.raise_for_status()
+            helper_info = response.json()
+        fingerprint = helper_info["fingerprint"]
+        if fingerprint["model_revision"] != helper.model.revision:
+            raise ValueError("actual helper checkpoint differs from generation.helper_run_config")
+        if any(fingerprint[name] != getattr(template.fingerprint, name) for name in ("tokenizer_hash", "template_hash")):
+            raise ValueError("helper tokenizer/template differs from the supplied token-counting template")
     if strategy not in {"B0", "Btoken"} and task_interpreter is None:
         from adapters.hybrid_retrieval import LocalBGE
         frozen_history = frozen_history or LocalBGE(task_config.get("base_path", "models/bge-m3"),
             device=task_config.get("device", "cuda:1"), dtype="bfloat16", max_length=8192)
         if task_config.get("mode", "trained") == "teacher":
             from adapters.query_selector import OpenAICompletionClient, SelectorConfig
-            from controller.config import load_config
-            reader = load_config(config.get("generation", {}).get("run_config", "configs/qwen3_32b.yaml"))
             teacher_client = OpenAICompletionClient(SelectorConfig(
                 config.get("generation", {}).get("teacher_url", "http://127.0.0.1:30001"),
-                reader.model.name, reader.model.revision, max_input_tokens=24576, max_new_tokens=4096),
+                helper.model.name, helper.model.revision, max_input_tokens=24576,
+                max_new_tokens=task_config.get("max_output_tokens", 4096)),
                 tokenizer=template.tokenizer)
             task_model = TeacherTaskModel(teacher_client, record_path=task_config.get("teacher_record_path",
                 str(Path(config.get("study", {}).get("output_dir", "runs/study"))/"task_teacher_calls.jsonl")))
@@ -541,10 +565,11 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
             support_backend = TeacherSupportBackend(config.get("generation", {}).get("teacher_url",
                 "http://127.0.0.1:30001"), template, batch_size=support_config.get("batch_size", 8),
                 record_path=support_config.get("teacher_record_path"))
+            support_backend.manifest.update(helper_model_revision=helper.model.revision, helper_engine_info=helper_info)
         else:
             from training.support_model import TrainedSupportBackend
             asset = support_config.get("preference_asset", support_config["asset"]) if strategy in {"B4", "B5", "B6", "B7", "Lmap"} else support_config["asset"]
             support_backend = TrainedSupportBackend.load(asset, device=support_config.get("device", "cuda:2"),
                                                          batch_size=support_config.get("batch_size", 8))
     return StudyEvidenceProvider(config, template, serving, directory, support_backend=support_backend,
-        frozen_history=frozen_history, task_model=task_model, teacher_client=teacher_client)
+        frozen_history=frozen_history, task_model=task_model, teacher_client=teacher_client, helper_engine_info=helper_info)

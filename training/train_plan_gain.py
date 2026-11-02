@@ -33,6 +33,9 @@ def actual_history(snapshot: SessionSnapshot):
 def working_state_key(state: ReadingOutcome, snapshot: SessionSnapshot):
     return _digest({"task_state": state.plan.task_state, "results": state.results,
         "claims": state.claims, "coverage": state.coverage, "open_needs": state.open_needs,
+        "available_sources": tuple((unit.unit_id, unit.text, unit.source_spans, unit.dependencies)
+            for unit in state.plan.selected_set.selected_units),
+        "coverage_scope": state.plan.coverage_scope, "required_scope": state.plan.coverage_units,
         "actual_history": actual_history(snapshot)})
 
 

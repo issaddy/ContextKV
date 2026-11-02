@@ -7,7 +7,7 @@ import sys
 import pytest
 
 from controller.prefix_retention import (EmpiricalRetentionModel, PrefixForecast,
-    RetentionRequest, allocate_retention)
+    RetentionRequest, allocate_retention, retainable_prefix)
 from engine_patches.contextkv_runtime import (ContextKVError, ContextKVRuntime,
     executed_prefix_hashes, token_hash)
 
@@ -204,6 +204,25 @@ def test_shared_pages_are_charged_once_and_native_hits_have_no_added_value():
     assert [row.marginal_gpu_tokens for row in chosen] == [128, 64]
     assert all(row.expected_saved_ms == 72 for row in chosen)
     assert all(row.evidence_digest == forecast.evidence_digest for row in chosen)
+
+
+def test_host_only_path_keeps_future_gpu_opportunity_cost_and_shared_protection_once():
+    forecast = PrefixForecast(10, 1, 100, 20, 2, 1, "scope", "real-paired-proof")
+    observed = dict(owner_id="host-only", cache_scope_hash="scope", boundary_tokens=128,
+        page_size=64, gpu_page_ids=[], host_page_ids=["root", "source"],
+        pool={"host_capacity_tokens": 1024}, residency={"recoverable_prefix_tokens": 128,
+            "inflight_h2d_tokens": 0, "inflight_d2h_tokens": 0})
+    request = RetentionRequest.from_receipt(observed, forecast)
+    assert request.gpu_page_ids == request.host_page_ids == frozenset({"root", "source"})
+    assert retainable_prefix(observed)
+    assert not retainable_prefix({**observed, "residency": {**observed["residency"], "recoverable_prefix_tokens": 64}})
+    chosen = allocate_retention((request, replace(request, owner_id="same-path")),
+        gpu_budget_tokens=128, host_budget_tokens=128, lambda_gpu=.1, lambda_host=.1)
+    assert len(chosen) == 1 and chosen[0].extra_gpu_token_seconds == 256
+    assert chosen[0].extra_host_token_seconds == 128 and chosen[0].value == pytest.approx(41.6)
+    gpu_only = RetentionRequest.from_receipt({**observed, "pool": {"host_capacity_tokens": 0},
+        "gpu_page_ids": observed["host_page_ids"], "host_page_ids": []}, forecast)
+    assert not gpu_only.host_page_ids and gpu_only.gpu_page_ids == request.gpu_page_ids
 
 
 def test_empirical_value_requires_fixed_paths_and_same_cache_recipe():

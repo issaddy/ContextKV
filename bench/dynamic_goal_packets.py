@@ -115,7 +115,7 @@ def _verified_state(goal, conditions, documents, leaves, history, question, grap
         requirements = (("verified:comparison", "compare"),)
     elif goal == "remove_platform":
         requirements = tuple(("verified:allowance:"+doc["applicability"]["PLATFORM"], "lookup") for doc in documents)
-    elif goal == "topic_switch":
+    elif goal == "topic_switch" and conditions.get("REQUEST_KIND") != "allowance_lookup":
         requirements = (("verified:topic_summary", "summarize"),)
     else:
         requirements = (("verified:allowance", "lookup"),)
@@ -194,7 +194,8 @@ def build_packets(records, dynamic_tasks, version_tasks, version_references, tok
                 raise ValueError("reviewed fact and applicable version/platform metadata disagree")
             witnesses.append(SourceSpan(leaf["span_id"], block.key, leaf["start"], leaf["end"]))
             reviewed.append(reference_records[leaf["source_id"], leaf["start"], leaf["end"]])
-        incomplete = goal == "topic_switch" or {leaf["source_id"] for leaf in selected_leaves} != set(by_id)
+        incomplete = ((goal == "topic_switch" and conditions.get("REQUEST_KIND") != "allowance_lookup")
+            or {leaf["source_id"] for leaf in selected_leaves} != set(by_id))
         verified = _verified_state(goal, conditions, documents, selected_leaves,
             record["actual_history"], record["question"], metadata["graph_id"])
         verified = replace(verified, source_scope=tuple(by_id[doc["document_id"]].key for doc in documents))

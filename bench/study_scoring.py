@@ -199,18 +199,21 @@ async def _loong_scores(config, spec, directory, settings):
 
 
 async def _version_scores(config, spec, directory, settings):
-    from bench.judge import JudgeConfig, OfflineJudge
+    from bench.judge import JudgeConfig, JudgeResponseError, OfflineJudge, evaluation_binding
     generation = directory.parent
     audits = load_jsonl(generation/"audit.jsonl")
     references = {row["task_id"]: row for row in load_jsonl(generation/"references.jsonl")}
     declared = _judge_config(config, settings)
     judge_config = JudgeConfig(**declared)
     judge = OfflineJudge(judge_config)
-    records = []
     target = directory/"version.project-scores.jsonl"
+    records = load_jsonl(target) if target.exists() else []
+    finished = {str(record["task_id"]) for record in records}
     try:
-        with target.open("x") as output:
+        with target.open("a") as output:
             for audit in audits:
+                if str(audit["task_id"]) in finished:
+                    continue
                 started = time.perf_counter()
                 reference = references[audit["task_id"]]
                 offline_reference = reference.get("offline_reference")
@@ -218,10 +221,19 @@ async def _version_scores(config, spec, directory, settings):
                     targets = (offline_reference.get("targets", offline_reference)
                                if isinstance(offline_reference, dict) else offline_reference)
                     reference = {**reference, "targets": targets}
-                record = await judge.evaluate(audit, reference=reference,
-                    requirements=reference.get("goal_conditions"))
+                try:
+                    record = await judge.evaluate(audit, reference=reference,
+                        requirements=reference.get("goal_conditions"))
+                except JudgeResponseError as error:
+                    record = {"task_id": audit["task_id"], "conversation_id": audit["conversation_id"],
+                        **evaluation_binding(audit), "answer": audit["answer"],
+                        "status": "failed", "error": str(error), "scores": None,
+                        "source": "offline_judge", "judge": asdict(judge_config),
+                        "judge_response": error.response, "task_requirements": reference.get("goal_conditions"),
+                        "generation_measurement_kind": audit.get("measurement_kind")}
                 record["judge_cost"] = {**_usage_cost(record), "elapsed_ms": (time.perf_counter()-started)*1000}
                 records.append(record)
+                finished.add(str(audit["task_id"]))
                 output.write(json.dumps(record, ensure_ascii=False)+"\n")
                 output.flush()
     finally:
@@ -440,14 +452,16 @@ async def score_dataset(config, dataset_spec, rows, generation_dir):
                    if "RB_agg" in metrics and "RB_alg" in metrics else {})
         updated.append({**row, "metrics": {**row.get("metrics", {}), **metrics},
             "scoring": {"identity": identity, "raw_outputs": outputs,
-                "status": "scored" if dataset_spec["primary_metric"] in metrics or (
+                "status": "failed" if record is not None and record.get("status") == "failed" else "scored" if dataset_spec["primary_metric"] in metrics or (
                     dataset_spec["primary_metric"] == "mtrageval_harmonic" and all(
                         name in metrics for name in ("RL_F", "RB_llm", "RB_alg"))) else "missing",
+                "error": record.get("error") if record is not None else None,
                 "metric_aliases": aliases, "judge_cost": _usage_cost(record) if record else None,
                 "shared_scoring_cost_manifest": str(directory/"manifest.json")}})
     manifest = {"identity": identity, "primary_metric": dataset_spec["primary_metric"],
         "requested": len(rows), "score_records": len(records),
         "scored": sum(row["scoring"]["status"] == "scored" for row in updated),
+        "failed_task_ids": [row["task_id"] for row in updated if row["scoring"]["status"] == "failed"],
         "missing_task_ids": [row["task_id"] for row in updated if row["scoring"]["status"] != "scored"],
         "raw_outputs": outputs, "judge_cost": judge_cost,
         "wall_elapsed_ms": (time.perf_counter()-started)*1000,

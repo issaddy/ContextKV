@@ -12,6 +12,7 @@ from adapters.support_model import SupportModel, SupportProfile
 from controller.context_schema import (ContextBudget, ContextPlan, EvidenceSet,
     RetrievalState, TaskState)
 from controller.context_budget import resolve_text
+from controller.engine_client import EngineError
 from controller.evidence_planner import (BudgetedEvidencePlanner, close_dependencies,
     render_selection)
 from controller.schema import Message, QueryContext, SessionSnapshot, TurnRecord
@@ -159,6 +160,44 @@ def _sum_known(values):
     return sum(values) if all(value is not None for value in values) else None
 
 
+def failed_read_candidate(controller, row, category, settings, output_dir, *, request_window=None):
+    """Retain a paid terminal READ truncation without producing a quality label."""
+    session = json.dumps(["preference", row["task_id"], category], separators=(",", ":"))
+    attempt = controller.store.find_request(session, "answer")
+    if attempt.stage != "FAILED" or attempt.error.partition(":")[0] != "READ_STEP_OUTPUT_TRUNCATED":
+        raise ValueError(f"candidate is not a terminal READ truncation: {attempt.stage}/{attempt.error}")
+    records = controller.store.execution_steps_with_stage(attempt.attempt_id)
+    paid = [record for _, record in records if record.receipt is not None]
+    snapshot = controller.store.get_snapshot(session)
+    qa_increment = len(snapshot.raw_history)-len(row["actual_history"])
+    if qa_increment != 0:
+        raise ValueError("failed READ candidate has committed a new QA")
+    return {"task_id": row["task_id"], "category": category, "split": "train", "status": "failed",
+        "failure_code": "READ_STEP_OUTPUT_TRUNCATED", "attempt_id": attempt.attempt_id,
+        "reader_checkpoint": settings.get("reader_checkpoint"), "reader_profile_id": settings.get("reader_profile_id"),
+        "scorer_identity": settings.get("scorer_identity"), "question": row["question"],
+        "actual_history": row["actual_history"], "history_origin": "frozen_actual_rollout",
+        "qa_increment": qa_increment, "version_increment": snapshot.version-attempt.expected_version,
+        "quality": None, "quality_components": None, "request_window": request_window,
+        "window_origin": "current_measured_request" if request_window is not None else "unrecorded_previous_invocation",
+        "attempt": to_jsonable(attempt), "context_plan": to_jsonable(controller.store.context_plan(attempt.attempt_id)),
+        "step_records": [{"stage": stage, "record": to_jsonable(record)} for stage, record in records],
+        "phase_cost": {"complete_ms": (request_window[1]-request_window[0])*1000 if request_window is not None else None,
+            "reader_input_tokens": sum(len(record.input_ids) for record in paid),
+            "reader_output_tokens": sum(len(record.output_ids) for record in paid),
+            "model_elapsed_ms": _sum_known([record.metrics.get("elapsed_ms") for record in paid]),
+            "cpu_reduce_ms": sum(record.metrics.get("cpu_reduce_ms", 0) for _, record in records),
+            "initial_auxiliary_usage": attempt.auxiliary_usage},
+        "physical_cost": None,
+        "original_batch_cost_paths": [str(path) for path in sorted(Path(output_dir).glob("collection_cost.*.json"))],
+        "training_target": False, "retry_executed": False}
+
+
+def append_record(path, row):
+    with path.open("a", encoding="utf-8") as output:
+        output.write(json.dumps(row, ensure_ascii=False)+"\n")
+
+
 async def _judge(client, template, row, evidence_set, answer):
     components = ("necessary_points", "grounding", "conditions_versions", "task_score")
     schema = {"type": "object", "properties": {
@@ -217,19 +256,40 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
             key: value for key, value in config.get("support_model", {}).items()
             if key in SupportProfile.__dataclass_fields__}))
     budget = ContextBudget(body_tokens=settings.get("body_budget", 4096),
-        output_tokens=settings.get("output_budget", 1024))
+        output_tokens=settings.get("output_budget", 1024),
+        read_input_tokens=settings.get("read_input_tokens", 12288),
+        read_output_tokens=settings.get("read_output_tokens", 2048),
+        max_steps=settings.get("max_steps", 64))
     rewards_path = output_dir/"rewards.jsonl"
     existing = [json.loads(line) for line in rewards_path.read_text().splitlines() if line] if rewards_path.exists() else []
     completed = {(row["task_id"], row["category"]) for row in existing}
     categories = ("relevance", "direct_support", "complementary", "redundant",
                   "wrong_condition_version", "deleted_premise")
-    skipped, collected = [], list(existing)
+    failures_path = output_dir/"failed_cases.jsonl"
+    failures = [json.loads(line) for line in failures_path.read_text().splitlines() if line] if failures_path.exists() else []
+    completed.update((row["task_id"], row["category"]) for row in failures)
+    skipped_path = output_dir/"skipped_cases.jsonl"
+    skipped = [json.loads(line) for line in skipped_path.read_text().splitlines() if line] if skipped_path.exists() else []
+    completed.update((row["task_id"], row["category"]) for row in skipped)
+    for row in rows:
+        for category in categories:
+            session = json.dumps(["preference", row["task_id"], category], separators=(",", ":"))
+            previous = controller.store.find_request(session, "answer")
+            if (row["task_id"], category) not in completed and previous is not None and previous.stage == "FAILED":
+                failure = failed_read_candidate(controller, row, category, settings, output_dir)
+                append_record(failures_path, failure)
+                failures.append(failure)
+                completed.add((row["task_id"], category))
+                await controller.close_session(session)
+    collected = list(existing)
     preparations_path = output_dir/"preparations.jsonl"
     preparations = ([json.loads(line) for line in preparations_path.read_text().splitlines() if line]
                     if preparations_path.exists() else [])
     started = time.perf_counter()
     async with httpx.AsyncClient(base_url=settings.get("judge_base_url", config.get("generation", {}).get("teacher_url", "http://127.0.0.1:30001")), timeout=180) as judge:
         for task_index, row in enumerate(rows):
+            if all((row["task_id"], category) in completed for category in categories):
+                continue
             preparation_started = time.perf_counter()
             support_before = dict(model.backend.usage)
             retrieval_before = _encoder_usage(encoder)
@@ -283,8 +343,11 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                     continue
                 selected = sets[category]
                 if selected is None:
-                    skipped.append({"task_id": row["task_id"], "category": category,
-                                    "reason": "no_matching_source_intervention"})
+                    skipped_case = {"task_id": row["task_id"], "category": category,
+                                    "reason": "no_matching_source_intervention"}
+                    append_record(skipped_path, skipped_case)
+                    skipped.append(skipped_case)
+                    completed.add((row["task_id"], category))
                     continue
                 session_id = json.dumps(["preference", row["task_id"], category], separators=(",", ":"))
                 plan = ContextPlan(f"{session_id}:plan", state, selected, budget=budget,
@@ -293,15 +356,30 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                     from controller.reading import build_read_plan
                     plan = build_read_plan(state, selected, "selected_sources", budget,
                         template=controller.template, snapshot=snapshot,
-                        read_layout=settings.get("read_layout", "source_first"))
+                        read_layout=settings.get("read_layout", "source_first"),
+                        read_packing=settings.get("read_packing", "mixed"),
+                        separate_needs=settings.get("separate_needs", False))
                 generation_started = time.monotonic()
-                response = await controller.serve_turn(session_id, row["question"],
-                    selected.source_blocks, request_id="answer", corpus_snapshot_id=row["snapshot_id"],
-                    reference_history=history, context_plans=(plan,),
-                    query_context=QueryContext(state.query or state.raw_question, "task", task_state=state),
-                    auxiliary_usage={**preparation, "charge_scope": "once_per_candidate_family"}
-                        if charge_preparation else {"input_tokens": 0, "output_tokens": 0,
-                            "compute_ms": 0.0, "models": [], "shared_preparation_cost_id": preparation["shared_cost_id"]})
+                try:
+                    response = await controller.serve_turn(session_id, row["question"],
+                        selected.source_blocks, request_id="answer", corpus_snapshot_id=row["snapshot_id"],
+                        reference_history=history, context_plans=(plan,),
+                        query_context=QueryContext(state.query or state.raw_question, "task", task_state=state),
+                        auxiliary_usage={**preparation, "charge_scope": "once_per_candidate_family"}
+                            if charge_preparation else {"input_tokens": 0, "output_tokens": 0,
+                                "compute_ms": 0.0, "models": [], "shared_preparation_cost_id": preparation["shared_cost_id"]})
+                except EngineError as exc:
+                    if exc.code != "READ_STEP_OUTPUT_TRUNCATED":
+                        raise
+                    generation_ended = time.monotonic()
+                    failure = failed_read_candidate(controller, row, category, settings, output_dir,
+                        request_window=[generation_started, generation_ended])
+                    append_record(failures_path, failure)
+                    failures.append(failure)
+                    completed.add((row["task_id"], category))
+                    charge_preparation = False
+                    await controller.close_session(session_id)
+                    continue
                 generation_ended = time.monotonic()
                 charge_preparation = False
                 actual_candidate = controller.store.get_attempt(response.attempt_id).plan.candidate
@@ -379,7 +457,8 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
     manifest = {"turns_path": str(labels_path), "planned_turns": len(rows), "answers": len(collected),
         "tasks_with_answers": len({row["task_id"] for row in collected}),
         "categories": {name: sum(row["category"] == name for row in collected) for name in categories},
-        "skipped": skipped, "legal_actions": ["REBUILD"],
+        "skipped": skipped, "failed_candidates": len(failures), "failure_codes": {
+            "READ_STEP_OUTPUT_TRUNCATED": len(failures)}, "legal_actions": ["REBUILD"],
         "elapsed_ms": (time.perf_counter()-started)*1000,
         "reader_input_tokens": sum(row["reader_input_tokens"] for row in collected),
         "reader_output_tokens": sum(row["reader_output_tokens"] for row in collected),
@@ -389,7 +468,8 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
         "judge_input_tokens": sum(row["judge_record"]["input_tokens"] for row in collected),
         "judge_output_tokens": _sum_known([row["judge_record"].get("output_tokens") for row in collected]),
         "support_usage": model.backend.usage, "pairs": pair_manifest,
-        "outputs": {"rewards": str(rewards_path), "preferences": str(preferences_path)}}
+        "outputs": {"rewards": str(rewards_path), "preferences": str(preferences_path),
+                    "failed_cases": str(failures_path), "skipped_cases": str(skipped_path)}}
     (output_dir/"manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
     model.close()
     return manifest

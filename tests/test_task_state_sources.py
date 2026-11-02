@@ -213,7 +213,7 @@ def test_teacher_short_pointers_decode_to_stable_ids_and_canonical_catalogue_ver
             body = json.loads(messages[-1]["content"])
             schema = response_format["json_schema"]["schema"]
             seen.update(body=body, schema=schema)
-            ref = {"turn_id": 2, "speaker": "user", "start": 0, "end": 5}
+            ref = {"turn_id": 2, "speaker": "user", "boundary_chars": [0, 4]}
             version = next(item["version_id"] for item in body["source_versions"] if item["literal_version"] == "v1")
             output = {"relation": "correction", "resume_task_id": "S0", "history_spans": [],
                 "conditions": {"c0": {"key_span": ref, "value_spans": [ref],
@@ -271,7 +271,7 @@ def test_owned_need_graph_survives_fifth_to_sixth_turn_with_current_predecessors
         def complete(self, messages, *, response_format):
             body = json.loads(messages[-1]["content"])
             captured[body["turn_id"]] = (body, response_format["json_schema"]["schema"])
-            ref = {"turn_id": body["turn_id"], "speaker": "user", "start": 0, "end": len(body["question"])}
+            ref = {"turn_id": body["turn_id"], "speaker": "user", "boundary_chars": [0, len(body["question"])-1]}
             base = {"anchor_spans": [ref], "subject_refs": [], "operation": "lookup", "condition_ids": [],
                     "predecessor_need_ids": [], "scope": "selected_sources"}
             needs = {"n0": base}
@@ -303,6 +303,8 @@ def test_owned_need_graph_survives_fifth_to_sixth_turn_with_current_predecessors
         properties = schema["$defs"][owned["properties"][f"n{index}"]["$ref"].rsplit("/", 1)[1]]["properties"]
         allowed = schema["$defs"][properties["predecessor_need_ids"]["$ref"].rsplit("/", 1)[1]]["items"]["enum"]
         assert all(key not in allowed for key in tuple(f"n{i}" for i in range(index, 8)))
+    assert not any(name.startswith("Span_") for name in schema["$defs"])
+    assert len(schema["$defs"]["TextRef"]["anyOf"]) == len(body["text_ref_sources"])
     assert len(json.dumps(schema)) < 150000
 
 

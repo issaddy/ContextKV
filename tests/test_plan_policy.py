@@ -6,7 +6,7 @@ from controller.context_schema import ReadResult, ReadTask, ReadingOutcome
 from controller.cost_model import CostModel
 from controller.plan_policy import (CompleteCost, NativePlanningState, PlanPolicy,
     PolicyLimits, ResourceForecast, StepForecast, complete_plan)
-from controller.schema import CacheQuote, CacheQuoteBatch, CostEstimate, PromptCandidate, SessionSnapshot
+from controller.schema import CacheQuote, CacheQuoteBatch, CostEstimate, Message, PromptCandidate, SessionSnapshot
 from test_context_planning import context_plan
 
 
@@ -21,6 +21,7 @@ class SpecifiedGainFixture:
 
 class QuotedCostFixture(CostModel):
     def __init__(self, costs):
+        super().__init__()
         self.costs = costs
         self.calls = []
     def predict_native(self, candidate, quote, *args, **kwargs):
@@ -29,8 +30,21 @@ class QuotedCostFixture(CostModel):
 
 
 def prompt(name, *, action="REBUILD", output=64, kind="ANSWER", tokens=16):
-    return PromptCandidate(name, action, 0, (), (1,)*tokens, "hash:"+name,
+    return PromptCandidate(name, action, 0, (Message("system", kind+" fixture system"),), (1,)*tokens, "hash:"+name,
         frozenset(), frozenset(), output_budget=output, generation_kind=kind)
+
+
+def bind_fixture_timing(model, candidates):
+    """Explicit protocol bindings for specified test costs, not real profiles."""
+    for candidate in candidates:
+        kind = candidate.generation_kind
+        child = model if kind == "ANSWER" else model.step_models.setdefault(kind, CostModel())
+        child.calibration_metadata = {"generation_kind": kind,
+            "output_prior_system_prompt": candidate.messages[0].content,
+            "step_control_scope": ["rolling_proposals_compilation_start"]}
+        child.step_output_priors[f"{kind}:{candidate.output_budget}"] = {
+            "mean_tokens": 1, "p90_tokens": 1, "mean_control_ms": 0,
+            "mean_remaining_control_ms": 0}
 
 
 def make_plans(*, two_reads=False, scope=False):
@@ -68,6 +82,7 @@ def native(plans, *, latency=None, future_latency=10, paid=CompleteCost(5, 10, 2
         CompleteCost(future_latency, 100, 20, 16, 64, 2, 1), "future-fixture", True),)
         for plan in plans for step in plan.steps}
     model = QuotedCostFixture({c.candidate_id: (latency or {}).get(c.candidate_id, 10) for c in candidates})
+    bind_fixture_timing(model, candidates)
     return NativePlanningState("reader-fixture", "profile-fixture", SessionSnapshot("s"),
         batch, model, resources, future, paid)
 
@@ -209,3 +224,16 @@ def test_policy_requires_reader_bound_gain_asset_and_rejects_stale_native_quotes
     machine.resources["direct-answer"] = replace(machine.resources["direct-answer"], quote_seq=8)
     with pytest.raises(ValueError, match="different observations"):
         policy.choose((direct,), ReadingOutcome(base), machine, {})
+
+
+def test_later_ready_step_uses_future_profile_not_current_quote_cache_savings():
+    base, direct, plan = make_plans(two_reads=True)
+    second = replace(plan.steps[1], task=replace(plan.steps[1].task, predecessor_step_ids=()))
+    plan = replace(plan, steps=(plan.steps[0], second, plan.steps[-1]))
+    machine = native((direct, plan), latency={"read0": 1, "read1": 1}, future_latency=400)
+    policy = PlanPolicy(SpecifiedGainFixture())
+    selected = policy.choose((direct, plan), ReadingOutcome(base), machine, {})
+    assert selected.next_step.plan_id == direct.plan_id
+    row = next(row for row in policy.last_evaluations if row.plan_id == plan.plan_id)
+    assert row.cost.latency_ms == 806
+    assert all(call.candidate_id != "read1" for call in machine.cost_model.calls)

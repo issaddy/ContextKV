@@ -12,6 +12,9 @@ from controller.context_schema import EvidencePool, EvidenceUnit, SourceSpan
 from adapters.table_relations import extract_table_relations
 
 
+_TEMPORAL_UNSET = object()
+
+
 @dataclass(frozen=True)
 class PoolProfile:
     current_top_k: int = 50
@@ -37,7 +40,9 @@ class SourceDirectory:
         self.profile = profile or PoolProfile()
         self._units = {}
         self._blocks = {b.key: b for b in corpus_index.blocks}
+        self._family_members, self._family_by_key, self._version_members = {}, {}, {}
         for block in corpus_index.blocks:
+            self._index_family(block.key)
             self._units[block.key] = self._split(block)
         self._unit_metadata = {key: dict(corpus_index.source_metadata.get(key, {})) for key in self._units}
         for key, units in tuple(self._units.items()):
@@ -46,6 +51,17 @@ class SourceDirectory:
             self._units[key] = tuple(replace(unit, dependencies=tuple(dict.fromkeys(
                 (*unit.dependencies, *dependency_ids)))) for unit in units)
         self.units_by_id = {unit.unit_id: unit for units in self._units.values() for unit in units}
+
+    def _index_family(self, key):
+        family = self.corpus_index.source_metadata.get(key, {}).get("document_family", key.document_id)
+        if key in self._family_by_key and self._family_by_key[key] != family:
+            previous = self._family_members[self._family_by_key[key]]
+            del previous[key]
+            if not previous:
+                del self._family_members[self._family_by_key[key]]
+        self._family_by_key[key] = family
+        self._family_members.setdefault(family, {})[key] = None
+        self._version_members.setdefault(key.version, {})[key] = None
 
     def _split(self, block):
         metadata = self.corpus_index.source_metadata.get(block.key, {})
@@ -117,6 +133,7 @@ class SourceDirectory:
             metadata = self.corpus_index.source_metadata.get(block.key, {})
             if block.key not in self._blocks or self._unit_metadata[block.key] != metadata:
                 self._blocks[block.key] = block
+                self._index_family(block.key)
                 self._units[block.key] = self._split(block)
                 self._unit_metadata[block.key] = dict(metadata)
         for block in blocks:
@@ -164,18 +181,25 @@ class SourceDirectory:
             elif prior is not None and prior.version_intent.version_ids:
                 keys = [key for key in keys if key.version in prior.version_intent.version_ids]
             anchors.extend(keys)
-        anchors.extend(key for key in self._blocks if key.version in intent.version_ids)
+        anchors.extend(key for version in intent.version_ids for key in self._version_members.get(version, ()))
+        if not anchors:
+            return set()
+        anchors_by_family = {}
+        for key in anchors:
+            family = metadata.get(key, {}).get("document_family", key.document_id)
+            anchors_by_family.setdefault(family, []).append(key)
         families = set(intent.document_families)
         if anchors:
             families.update(metadata.get(key, {}).get("document_family", key.document_id) for key in anchors)
         if not families:
-            families = {metadata.get(key, {}).get("document_family", key.document_id) for key in self._blocks}
+            families = set(self._family_members)
         selected = set()
         for family in families:
-            members = [key for key in self._blocks if metadata.get(key, {}).get("document_family", key.document_id) == family]
-            starts = [metadata[key]["valid_from"] for key in anchors if key in members
+            members = self._family_members.get(family, {})
+            family_anchors = anchors_by_family.get(family, ())
+            starts = [metadata[key]["valid_from"] for key in family_anchors if key in members
                       and metadata.get(key, {}).get("valid_from") is not None]
-            orders = [tuple(metadata[key]["version_order"]) for key in anchors if key in members
+            orders = [tuple(metadata[key]["version_order"]) for key in family_anchors if key in members
                       and metadata.get(key, {}).get("version_order")]
             axis = "valid_from" if starts or not orders else "version_order"
             anchor_values = starts or orders
@@ -197,7 +221,7 @@ class SourceDirectory:
                 metadata.get(key, {}).get("document_family", key.document_id), key.version) in anchored_versions)
         return selected
 
-    def _applicable(self, key, state, memory):
+    def _applicable(self, key, state, memory, *, temporal_sources=_TEMPORAL_UNSET):
         intent = state.version_intent
         metadata = self.corpus_index.source_metadata.get(key, {})
         family = metadata.get("document_family", key.document_id)
@@ -205,7 +229,8 @@ class SourceDirectory:
             return False
         if intent.resolved_version_ids:
             return key.version in intent.resolved_version_ids
-        temporal_sources = self._temporal_sources(state, memory)
+        if temporal_sources is _TEMPORAL_UNSET:
+            temporal_sources = self._temporal_sources(state, memory)
         if temporal_sources is not None:
             return key in temporal_sources
         if intent.mode == "explicit":
@@ -233,12 +258,13 @@ class SourceDirectory:
         started = time.perf_counter()
         profile = self.profile
         streams, trace = [], []
+        temporal = None if state.version_intent.resolved_version_ids else self._temporal_sources(state, memory)
 
         def recall(query, top_k, origin, need_id=""):
             contexts = self.candidate_search(query, top_k=top_k)
             keys = self.corpus_index.retrieved_keys(contexts)
             hits = [(key, float(context.score or 0.0), need_id) for key, context in zip(keys, contexts, strict=True)
-                    if self._applicable(key, state, memory)]
+                    if self._applicable(key, state, memory, temporal_sources=temporal)]
             trace.append({"origin": origin, "need_id": need_id, "query": query,
                           "retrieved": len(contexts), "applicable": len(hits)})
             return hits
@@ -269,11 +295,11 @@ class SourceDirectory:
                           else history_text(ref, memory)
                           for condition in state.conditions for ref in condition.value_spans)
             streams.append(recall("\n".join(pieces), profile.per_need_top_k, "need", need.need_id))
-        archive = [key for key in memory.archive_source_keys if self._applicable(key, state, memory)]
+        archive = [key for key in memory.archive_source_keys if self._applicable(key, state, memory, temporal_sources=temporal)]
         archive = self.archive_search(state.query or state.raw_question, archive, top_k=profile.archive_top_k)
         streams.append([(key, 0.0, "") for key in archive])
         explicit = [key for key in self._blocks if key.version in state.version_intent.version_ids
-                    and self._applicable(key, state, memory)]
+                    and self._applicable(key, state, memory, temporal_sources=temporal)]
         streams.append([(key, 0.0, "") for key in (*state.source_scope, *explicit)])
         selected, scores, needs = [], {}, {}
         # Round robin reserves each need and archive a place before filling the pool.
@@ -306,11 +332,13 @@ class SourceDirectory:
     def retrieve_gap_pool(self, state, memory, open_needs):
         started = time.perf_counter()
         units, blocks, trace = {}, {}, []
+        temporal = None if state.version_intent.resolved_version_ids else self._temporal_sources(state, memory)
         for need in open_needs:
             query = self.open_need_query(state, need)
             contexts = self.candidate_search(query, top_k=self.profile.per_need_top_k)
             scored = {key: float(context.score) for key, context in zip(
-                self.corpus_index.retrieved_keys(contexts), contexts, strict=True) if self._applicable(key, state, memory)}
+                self.corpus_index.retrieved_keys(contexts), contexts, strict=True)
+                if self._applicable(key, state, memory, temporal_sources=temporal)}
             keys = tuple(scored)
             for block in self.source_fetch(keys):
                 blocks[block.key] = block

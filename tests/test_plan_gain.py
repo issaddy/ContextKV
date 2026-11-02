@@ -109,3 +109,17 @@ def test_portable_gain_asset_predicts_and_loads_only_its_bound_reader(tmp_path):
     assert loaded.predict(plan_features(plan, state)) == pytest.approx(.1)
     with pytest.raises(ValueError, match="measured reader"):
         PlanGainModel.load(path, reader_checkpoint="new-reader", reader_profile_id="profile-fixture")
+
+
+def test_frozen_gain_state_binds_available_original_material_and_required_scope():
+    _, state, snapshot, _, _ = observed_pair()
+    unit = state.plan.selected_set.selected_units[0]
+    altered = replace(state, plan=replace(state.plan, selected_set=replace(state.plan.selected_set,
+        selected_units=(replace(unit, text="a different original passage"),))))
+    assert working_state_key(altered, snapshot) != working_state_key(state, snapshot)
+    altered = replace(state, plan=replace(state.plan, coverage_scope="all_supplied_documents",
+                                         coverage_units=(unit.unit_id,)))
+    assert working_state_key(altered, snapshot) != working_state_key(state, snapshot)
+    # A budget is a comparison protocol, not another conversation split key.
+    altered = replace(state, plan=replace(state.plan, budget=replace(state.plan.budget, output_tokens=128)))
+    assert working_state_key(altered, snapshot) == working_state_key(state, snapshot)

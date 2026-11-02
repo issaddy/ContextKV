@@ -580,7 +580,7 @@ async def test_truncated_read_keeps_raw_result_without_coverage_or_user_commit(t
     state = TaskState("t", "Question", needs=(Need("n"),))
     plan = build_read_plan(state, EvidenceSet("s", (unit,), source_blocks=(block,)),
                            "all_supplied_documents", ContextBudget(read_output_tokens=64),
-                           template=ByteTemplate())
+                           template=ByteTemplate(), output_tokens_per_fact=None)
     engine = ScriptedReadingEngine([read_output(fact("a"))])
     store = SessionStore(tmp_path/"state.db")
     controller = Controller(store, engine, knobs=PlannerKnobs(strategy="always_rebuild"))
@@ -654,7 +654,13 @@ def test_enumeration_and_group_roots_retain_values_in_final_answer_window(tmp_pa
     candidates = build_plan_candidates(SessionSnapshot("s"), state.raw_question, plan,
                                         ByteTemplate(), outcome=outcome)
     for candidate in candidates:
-        assert candidate.feasible and len(candidate.required_blocks) < len(blocks)
+        assert candidate.feasible
+        originals = {block.key: block for block in blocks}
+        assert candidate.required_blocks <= originals.keys()
+        assert any(span.source_end-span.source_start < len(originals[span.key].text)
+                   for span in candidate.evidence_spans)
+        assert verify_evidence_spans(candidate.messages, candidate.evidence_spans,
+            blocks, candidate.reference_map) == candidate.required_blocks
         prompt = candidate.messages[-1].content
         assert all(value in prompt for value in ("Archivist", "1997", "Curator"))
         assert "read:0:claim:" not in prompt
@@ -688,6 +694,22 @@ async def test_dense_rows_are_packed_for_output_capacity_before_reading(tmp_path
     assert outcome.claims[-1].value == 24
     assert len(outcome.coverage) == 24
     assert all(step.metrics["finish_reason"] == "stop" for step in outcome.steps if step.task.kind == "READ")
+
+
+@pytest.mark.parametrize("operation", ("lookup", "infer"))
+def test_lookup_and_inference_reserve_wire_output_for_each_need_and_source(operation):
+    materialized = [material(f"Entity {index} is supported by Council {index}.", f"source{index}")
+                    for index in range(8)]
+    blocks, units = zip(*materialized)
+    state = TaskState("t", "Resolve each relationship.",
+        needs=tuple(Need(f"need{index}", operation=operation) for index in range(3)))
+    selected = EvidenceSet("s", units, source_blocks=blocks)
+    budget = ContextBudget(read_output_tokens=1500)
+    bounded = build_read_plan(state, selected, "selected_sources", budget, template=ByteTemplate())
+    unreserved = build_read_plan(state, selected, "selected_sources", budget,
+        template=ByteTemplate(), output_tokens_per_fact=None)
+    assert len(bounded.steps) > len(unreserved.steps)
+    assert {identity for task in bounded.steps for identity in task.input_unit_ids} == {unit.unit_id for unit in units}
 
 
 @pytest.mark.asyncio

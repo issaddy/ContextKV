@@ -90,6 +90,7 @@ class TurnResponse:
     auxiliary_usage: dict | None = None
     online_token_budget_limit: int | None = None
     online_token_budget_verified: bool | None = None
+    answer_phase_window: dict | None = None
 
 
 class Controller:
@@ -97,7 +98,8 @@ class Controller:
                  policy: CandidatePolicy | None = None, knobs: PlannerKnobs | None = None,
                  cost_model: CostModel | None = None, events: EventLog | None = None,
                  shadow: bool = False, epoch_retirement: bool = True,
-                 online_calibration: bool = False, extend_open_needs=None, prefix_settings=None):
+                 online_calibration: bool = False, extend_open_needs=None, prefix_settings=None,
+                 rolling_policy=None):
         self.store, self.engine = store, engine
         self.template = template or ByteTemplate()
         self.policy = policy or CandidatePolicy()
@@ -109,6 +111,7 @@ class Controller:
         self.epoch_retirement = epoch_retirement
         self.online_calibration = online_calibration
         self.extend_open_needs = extend_open_needs
+        self.rolling_policy = rolling_policy
         self.observe_prefix = None
         if prefix_settings is not None and prefix_settings["mode"] != "native":
             from .prefix_retention import PrefixReadObserver
@@ -128,6 +131,11 @@ class Controller:
             lock = asyncio.Lock()
             self._locks[session_id] = lock
         return lock
+
+    def bind_resident_models(self, manifest):
+        """Bind actual loaded retrieval models before enabling resource pricing."""
+        if self.rolling_policy is not None:
+            self.rolling_policy.bind_resident_models(manifest)
 
     async def _flush_retirements(self, session_id: str | None = None) -> int:
         acknowledged = 0
@@ -203,7 +211,11 @@ class Controller:
         try:
             await self.drain()
         finally:
-            await self.engine.aclose()
+            try:
+                if self.rolling_policy is not None:
+                    await self.rolling_policy.aclose()
+            finally:
+                await self.engine.aclose()
 
     async def _prepare_epoch(self, attempt: Attempt, info: EngineInfo) -> PrepareAck:
         epoch, operation_id = attempt.epoch, f"prepare:{attempt.attempt_id}"
@@ -236,7 +248,7 @@ class Controller:
             raise EngineError("OUTPUT_BUDGET_EXCEEDED")
 
     def _response(self, attempt: Attempt, *, elapsed_ms=None, replay=False,
-                  timing: ClientTiming | None = None, control_ms=None) -> TurnResponse:
+                  timing: ClientTiming | None = None, control_ms=None, answer_phase_window=None) -> TurnResponse:
         result, plan, epoch = attempt.result, attempt.plan, attempt.epoch
         receipt = result.receipt
         prediction = next((e for e in plan.predicted if e.candidate_id == plan.candidate.candidate_id), None)
@@ -286,7 +298,8 @@ class Controller:
                             reader_input_tokens=reader_input, reader_output_tokens=reader_output,
                             auxiliary_input_tokens=auxiliary_input, auxiliary_output_tokens=auxiliary_output,
                             auxiliary_usage=attempt.auxiliary_usage,
-                            online_token_budget_limit=token_limit, online_token_budget_verified=budget_verified)
+                            online_token_budget_limit=token_limit, online_token_budget_verified=budget_verified,
+                            answer_phase_window=answer_phase_window)
 
     async def serve_turn(self, session_id: str, query: str, evidence: tuple[EvidenceBlock, ...] = (), *,
                          request_id: str | None = None, corpus_snapshot_id: str = "demo-v1",
@@ -317,6 +330,8 @@ class Controller:
         if context_plans:
             content = (*content, context_plans)
         request_hash = hashlib.sha256(dumps(content).encode()).hexdigest()
+        if self.rolling_policy is not None:
+            await self.rolling_policy.start()
         arrived = time.monotonic()
         async with self._lock(session_id):
             entered = time.monotonic()
@@ -417,7 +432,7 @@ class Controller:
                 recovery = snap.current_epoch is not None and snap.current_epoch.engine_restart_id != info.engine_restart_id
                 planning_snap = (replace(working_snap, force_new_epoch_for_recovery=True, must_rebuild=True)
                                  if recovery else working_snap)
-                if context_plans and self.knobs.strategy == "cost":
+                if context_plans and self.knobs.strategy == "cost" and self.rolling_policy is None:
                     from .context_cost import quote_read_costs
                     completed_steps = tuple(record for stage, record in
                         self.store.execution_steps_with_stage(attempt.attempt_id) if stage == "COMPLETE")
@@ -436,13 +451,37 @@ class Controller:
                         retrieval_priority=retrieval_priority, query_context=query_context,
                         measure_evidence_redundancy=measure_redundancy)
 
-                candidates = compile_candidates(planning_snap, context_plans)
+                rolling_result = None
+                answer_phase_started = time.monotonic()
+                if self.rolling_policy is not None:
+                    if not context_plans:
+                        raise ValueError("rolling plan policy requires explicit semantic ContextPlans")
+                    from .execution import ReadingExecutor
+                    executor = ReadingExecutor(self.store, self.engine, self.template,
+                        events=self.events, request_arrived=arrived, observe_prefix=self.observe_prefix)
+                    reading_started = time.monotonic()
+                    try:
+                        rolling_result = await self.rolling_policy.run(attempt.attempt_id, planning_snap,
+                            context_plans, executor, self.engine, self.template, self.cost_model,
+                            compile_candidates, arrived=arrived, auxiliary_usage=auxiliary_usage, events=self.events,
+                            open_need_provider=open_need_provider or self.extend_open_needs)
+                    finally:
+                        reading_segment_ms = (time.monotonic()-reading_started)*1000
+                        reading_elapsed_ms = self.store.add_reading_elapsed(attempt.attempt_id, reading_segment_ms)
+                    reading_outcome = rolling_result.outcome
+                    context_plans = (reading_outcome.plan,)
+                    answer_phase_started = rolling_result.answer_phase_started
+                candidates = ((rolling_result.plan.candidate,) if rolling_result is not None else
+                              compile_candidates(planning_snap, context_plans))
                 valid = tuple(c for c in candidates if c.feasible)
                 if not valid:
                     raise ContextOverflow("shared_context_policy_overflow: required evidence and full QA exceed budget")
                 needs_quote = self.knobs.strategy in {"cost", "warm_idle"} and len(valid) > 1
-                quotes = await self.engine.quote_batch(valid, self.template.fingerprint) if needs_quote else None
+                quotes = (rolling_result.quotes if rolling_result is not None else
+                          await self.engine.quote_batch(valid, self.template.fingerprint) if needs_quote else None)
                 if quotes is not None and quotes.engine_restart_id != info.engine_restart_id:
+                    if rolling_result is not None:
+                        raise EngineError("ROLLING_QUOTE_RESTART_CHANGED")
                     # At most one re-quote after a restart; native admission remains authoritative.
                     info = await self.engine.info()
                     planning_snap = replace(working_snap, force_new_epoch_for_recovery=True, must_rebuild=True)
@@ -464,11 +503,12 @@ class Controller:
                     statistics.mean(values) if values else default_postplan)
                     for action, values in self._postplan_control_ms.items()}
                 plan_started = time.monotonic()
-                plan = choose_plan(candidates, quotes, self.cost_model, planning_snap, self.knobs,
-                                   concurrency=pressure, control_ms=planning_control_ms)
+                plan = (rolling_result.plan if rolling_result is not None else
+                        choose_plan(candidates, quotes, self.cost_model, planning_snap, self.knobs,
+                                   concurrency=pressure, control_ms=planning_control_ms))
                 if isinstance(plan, NoFeasiblePlan):
                     raise ContextOverflow(plan.reason)
-                if self.shadow:
+                if self.shadow and rolling_result is None:
                     self.events.emit("shadow_plan", business_session_id=session_id, attempt_id=attempt.attempt_id, plan=plan)
                     plan = choose_plan(candidates, quotes, self.cost_model, planning_snap,
                                        replace(self.knobs, strategy=self.knobs.fallback_strategy),
@@ -478,17 +518,18 @@ class Controller:
                     from .execution import ReadingExecutor, merge_auxiliary_usage, require_online_tokens
                     selected_context_plan = next(context_plan for context_plan in context_plans
                         if context_plan.plan_id == plan.candidate.context_plan_id)
-                    reading_started = time.monotonic()
-                    executor = ReadingExecutor(self.store, self.engine, self.template,
-                        extend_open_needs=open_need_provider or self.extend_open_needs, events=self.events,
-                        request_arrived=arrived, observe_prefix=self.observe_prefix)
-                    try:
-                        reading_outcome = await executor.execute_reads(attempt.attempt_id, planning_snap,
-                            selected_context_plan, initial_auxiliary_usage=auxiliary_usage)
-                    finally:
-                        reading_segment_ms = (time.monotonic()-reading_started)*1000
-                        reading_elapsed_ms = self.store.add_reading_elapsed(attempt.attempt_id,
-                            reading_segment_ms)
+                    if rolling_result is None:
+                        reading_started = time.monotonic()
+                        executor = ReadingExecutor(self.store, self.engine, self.template,
+                            extend_open_needs=open_need_provider or self.extend_open_needs, events=self.events,
+                            request_arrived=arrived, observe_prefix=self.observe_prefix)
+                        try:
+                            reading_outcome = await executor.execute_reads(attempt.attempt_id, planning_snap,
+                                selected_context_plan, initial_auxiliary_usage=auxiliary_usage)
+                        finally:
+                            reading_segment_ms = (time.monotonic()-reading_started)*1000
+                            reading_elapsed_ms = self.store.add_reading_elapsed(attempt.attempt_id,
+                                reading_segment_ms)
                     gap_auxiliary_ms = sum(value for name, value in reading_outcome.plan.auxiliary_ms
                                            if name.startswith("gap:"))
                     selected_context_plan = replace(reading_outcome.plan,
@@ -503,19 +544,21 @@ class Controller:
                             and planning_snap.current_epoch.engine_restart_id != info.engine_restart_id):
                         planning_snap = replace(planning_snap, force_new_epoch_for_recovery=True,
                                                 must_rebuild=True)
-                    candidates = compile_candidates(planning_snap, (selected_context_plan,), reading_outcome)
-                    valid = tuple(candidate for candidate in candidates if candidate.feasible)
-                    if not valid:
-                        raise ContextOverflow("ANSWER plan exceeds the context allocation")
-                    quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
-                    if quotes.engine_restart_id != info.engine_restart_id:
-                        raise EngineError("UNSTABLE_RESTART")
-                    pressure = (max(1, quotes.active_requests+(quotes.queued_requests or 0)+1)
-                        if quotes.active_requests is not None else max(1, self._active_generations+1))
-                    plan = choose_plan(candidates, quotes, self.cost_model, planning_snap, self.knobs,
-                                       concurrency=pressure, control_ms=planning_control_ms)
-                    if isinstance(plan, NoFeasiblePlan):
-                        raise ContextOverflow(plan.reason)
+                    if rolling_result is None:
+                        answer_phase_started = time.monotonic()
+                        candidates = compile_candidates(planning_snap, (selected_context_plan,), reading_outcome)
+                        valid = tuple(candidate for candidate in candidates if candidate.feasible)
+                        if not valid:
+                            raise ContextOverflow("ANSWER plan exceeds the context allocation")
+                        quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
+                        if quotes.engine_restart_id != info.engine_restart_id:
+                            raise EngineError("UNSTABLE_RESTART")
+                        pressure = (max(1, quotes.active_requests+(quotes.queued_requests or 0)+1)
+                            if quotes.active_requests is not None else max(1, self._active_generations+1))
+                        plan = choose_plan(candidates, quotes, self.cost_model, planning_snap, self.knobs,
+                                           concurrency=pressure, control_ms=planning_control_ms)
+                        if isinstance(plan, NoFeasiblePlan):
+                            raise ContextOverflow(plan.reason)
                     require_online_tokens(selected_context_plan.budget.max_total_tokens,
                         selected_context_plan.online_tokens_spent,
                         len(plan.candidate.input_ids)+plan.candidate.output_budget, "ANSWER")
@@ -599,9 +642,11 @@ class Controller:
                 submitted+result.last_token_ms/1000 if result.last_token_ms is not None else None,
                 response_done, committed_at, token_observation="chunk" if result.ttft_ms is not None else "none")
             control_ms = ((submitted-entered) + (committed_at-response_done))*1000 - retrieval_segment_ms - reading_segment_ms
+            answer_phase_window = None
             try:
                 self._postplan_control_ms[plan.candidate.action].append(
-                    ((submitted-plan_started)+(committed_at-response_done))*1000-reading_segment_ms)
+                    ((submitted-plan_started)+(committed_at-response_done))*1000
+                    -(reading_segment_ms if rolling_result is None else 0.0))
                 self.cost_model.observe_output(len(result.output_ids))
                 selected_estimate = next((e for e in plan.predicted if e.candidate_id == plan.candidate.candidate_id), None)
                 if (self.online_calibration and selected_estimate is not None and selected_estimate.calibrated
@@ -609,13 +654,21 @@ class Controller:
                     observed_total = (result.server_elapsed_ms+control_ms
                         +plan.candidate.predicted_read_ms+plan.candidate.auxiliary_ms)
                     self.cost_model.observe(selected_estimate, observed_total)
+                answer_phase_window = {"start": answer_phase_started, "end": time.monotonic(),
+                                     "commit_at": committed_at,
+                                     "clock": "client_monotonic", "scope": "answer_until_commit",
+                                     "start_definition": ("rolling_proposals_compilation_start" if rolling_result
+                                                          else "final_answer_compilation_start"),
+                                     "end_definition": "response_tail_control_complete_before_audit_write"}
                 self.events.emit("ledger_committed", business_session_id=session_id, attempt_id=attempt.attempt_id,
-                                 ledger_version=snapshot.version, epoch=epoch.epoch_no)
+                                 ledger_version=snapshot.version, epoch=epoch.epoch_no,
+                                 answer_phase_window=answer_phase_window)
             except Exception as error:
                 logging.getLogger(__name__).error("Diagnostic output failed after commit: %s", error)
             self._retire_background()
             return self._response(replace(attempt, stage="COMMITTED"),
-                                  elapsed_ms=(committed_at-arrived)*1000, timing=timing, control_ms=control_ms)
+                                  elapsed_ms=(committed_at-arrived)*1000, timing=timing, control_ms=control_ms,
+                                  answer_phase_window=answer_phase_window)
 
     async def recover(self, session_id: str, *, abandon: bool = False):
         async with self._lock(session_id):

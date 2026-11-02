@@ -194,17 +194,18 @@ async def test_review_input_over_budget_is_a_costed_exclusion_and_other_samples_
     monkeypatch.setattr("adapters.query_selector.OpenAICompletionClient", Client)
     monkeypatch.setattr("engine_patches.contextkv_model_scope.load_model_scope", lambda path:
         SimpleNamespace(model_path="/fixture", identity="fixture-r0", manifest=lambda: {"fixture": True}))
-    traces = [{"example_id": identity, "task_id": identity, "step_id": "ANSWER", "phase": "ANSWER",
+    traces = [{"example_id": identity, "task_id": identity, "phase": "ANSWER",
         "question": question, "actual_history": [], "actual_history_sha256": history_digest([]),
         "prompt_token_hash": identity, "messages": [{"role": "user", "content": question}],
         "task_state": None, "original_sources": [], "actual_output": "Old output", "reader_identity": "R0",
         "read_protocol_version": None, "split": "train", "conversation_id": identity}
         for identity, question in (("over", "Over budget"), ("length", "Truncated"), ("good", "Normal"))]
     write_rows(tmp_path/"traces.jsonl", traces)
-    result = await review_reader_traces({"reader_training": {"base_scope": "fixture",
+    config = {"reader_training": {"base_scope": "fixture",
         "data": {"output_dir": str(tmp_path), "minimum_quality": .85, "read_protocol_versions": [2]},
         "review": {"base_urls": ["http://fixture"], "max_input_tokens": 30000,
-            "max_output_tokens": 2000, "context_window": 32768, "timeout_seconds": 30}}}, concurrency=2)
+            "max_output_tokens": 2000, "context_window": 32768, "timeout_seconds": 30}}}
+    result = await review_reader_traces(config, concurrency=2)
     assert result["status_counts"] == {"input_over_budget": 1, "teacher_target_truncated": 1, "accepted": 1}
     assert result["reviewed_examples"] == 1
     ledger = {row["example_id"]: row for row in rows(tmp_path/"review_calls.jsonl")}
@@ -214,6 +215,12 @@ async def test_review_input_over_budget_is_a_costed_exclusion_and_other_samples_
     saved = {row["example_id"]: row for row in rows(tmp_path/"reviews.jsonl")}
     assert saved["length"]["raw_output"] == '{"target":"unfinished'
     assert "target_text" not in saved["length"]
+    assert all(row["step_id"] is None and row["phase"] == "ANSWER" for row in saved.values())
+    paid_calls = (tmp_path/"review_calls.jsonl").read_bytes()
+    saved_targets = (tmp_path/"reviews.jsonl").read_bytes()
+    await review_reader_traces(config, concurrency=2)
+    assert (tmp_path/"review_calls.jsonl").read_bytes() == paid_calls
+    assert (tmp_path/"reviews.jsonl").read_bytes() == saved_targets
     prepared = prepare_reader_data({"reader_training": {"data": {"output_dir": str(tmp_path),
         "minimum_quality": .85, "read_protocol_versions": [2], "validation_fraction": 0, "split_seed": 42}}})
     assert prepared["selection_exclusions"] == {"review_input_over_budget": 1, "teacher_target_truncated": 1}
