@@ -14,13 +14,14 @@ from .templates import ByteTemplate
 
 
 READ_PROTOCOL_VERSION = 4
+SHARED_NUMERIC_PROTOCOL_VERSION = 5
 CLAIM_WIRE_FIELDS = {"need_id": "n", "text": "t", "entity": "e", "relation": "r",
     "value": "v", "unit": "u", "conditions": "c", "span_ids": "s",
     "parent_claim_ids": "p", "followups": "f"}
 GAP_WIRE_FIELDS = {"need_id": "n", "missing_relation": "r", "bound_entities": "e",
     "temporal_scope": "t", "parent_claim_ids": "p"}
 SHORT_WIRE_SYSTEM = (
-    " Return format_version 4 JSON using fact_protocol aliases. A regular claim has "
+    " Return format_version {version} JSON using fact_protocol aliases. A regular claim has "
     "n=need alias, t=complete atomic fact text, e=entity, r=relation, v=value, u=unit, "
     "c=condition aliases, s=source aliases, p=input parent aliases, f=followups. "
     "Conditions are defined once in the task and referenced through c; source versions "
@@ -50,7 +51,10 @@ READ_SYSTEM = (
 )
 
 SHARED_NUMERIC_READ_SYSTEM = (
-    "Read the supplied original sources and return format_version 4 JSON. "
+    "Read the supplied original sources. In each numeric fact, choose the cited source aliases "
+    "in s first. Then copy into t the shortest complete original fact from the cited source, "
+    "showing the qualifying record and any requested quantity. Fill the remaining fields from "
+    "that excerpt. "
     "Extract each atomic entity/quantity fact once in facts, with its applicable need aliases in n. "
     "Use g for its supplied population scope, e for the literal unique record ID or full name, "
     "r for the source relation, v for the original numeric magnitude, u for its original unit, "
@@ -126,11 +130,12 @@ NUMERIC_POPULATION_SYSTEM = (
 SHARED_NUMERIC_POPULATION_EXAMPLE = (
     ' Example only, unrelated to the current sources. g0 groups n0 (count Shipment records) '
     'and n1 (sum their weights). Source s0 says "Shipment record SHIP-7: weight 3 kg." '
-    'Return {"format_version":4,"claims":[],"facts":[{"g":"g0","n":["n0","n1"],'
-    '"e":"SHIP-7","r":"weight","v":"3","u":"kg","s":["s0"],"p":[]}],'
+    'Return {"format_version":5,"claims":[],"facts":[{"s":["s0"],'
+    '"t":"Shipment record SHIP-7: weight 3 kg.","g":"g0","n":["n0","n1"],'
+    '"e":"SHIP-7","r":"weight","v":"3","u":"kg","p":[]}],'
     '"support":["n0","n1"],"conflicts":[],"open_needs":[]}. '
     'If s0 instead says only "Facility note: the scale supports 50 kg," '
-    'return {"format_version":4,"claims":[],"facts":[],"support":[],"conflicts":[],"open_needs":[]}.'
+    'return {"format_version":5,"claims":[],"facts":[],"support":[],"conflicts":[],"open_needs":[]}.'
 )
 
 
@@ -140,6 +145,11 @@ def step_generation_kind(kind, operation="extract", reading_mode="typed_reduce")
     if kind == "READ" and reading_mode == "coverage_only":
         return "READ_COVERAGE"
     return kind
+
+
+def _read_protocol_version(task):
+    return (SHARED_NUMERIC_PROTOCOL_VERSION if task.kind == "READ" and task.shared_numeric_scopes
+            else READ_PROTOCOL_VERSION)
 
 
 def _string_array(values=None):
@@ -209,7 +219,7 @@ def short_read_schema(task, schema, units, claims):
         row["properties"] = {names[name]: value for name, value in row["properties"].items()}
         row["required"] = [names[name] for name in row["required"]]
     schema["properties"]["support"] = _string_array(tuple(needs))
-    schema["properties"]["format_version"]["const"] = READ_PROTOCOL_VERSION
+    schema["properties"]["format_version"]["const"] = _read_protocol_version(task)
     return schema
 
 
@@ -225,9 +235,10 @@ def shared_numeric_schema(task, schema, units, claims, numeric_identity):
     literals = tuple(dict.fromkeys(match.group() for unit in units
                                   for match in re.finditer(number, unit.text)))
     properties = {
+        "s": {**_string_array(tuple(sources)), "minItems": 1},
+        "t": {"type": "string"},
         "g": {}, "n": {}, "e": {"type": "string"}, "r": {"type": "string"},
         "v": {}, "u": {"type": "string"},
-        "s": {**_string_array(tuple(sources)), "minItems": 1},
         "p": _string_array(tuple(parents))}
     if numeric_identity == "source_ids":
         identifiers = source_identifiers(units)
@@ -239,7 +250,7 @@ def shared_numeric_schema(task, schema, units, claims, numeric_identity):
         aliases = tuple(alias for alias, identity in needs.items() if identity in views)
         count_aliases = tuple(alias for alias, identity in needs.items() if views.get(identity) == "count")
         common = {"type": "object", "additionalProperties": False,
-                  "required": ["g", "n", "e", "r", "v", "u", "s", "p"]}
+                  "required": list(properties)}
         if literals:
             branches.append({**common, "properties": {**properties,
                 "g": {"type": "string", "const": scope.scope_id},
@@ -250,7 +261,6 @@ def shared_numeric_schema(task, schema, units, claims, numeric_identity):
                 "g": {"type": "string", "const": scope.scope_id},
                 "n": {**_string_array(count_aliases), "minItems": 1},
                 "v": {"type": "null"}, "u": {"type": "string", "const": ""}}})
-    schema["properties"]["format_version"]["const"] = 3
     schema["properties"]["facts"] = {"type": "array", "items": {"anyOf": branches}}
     if not branches:
         schema["properties"]["facts"] = {"type": "array", "items": {"type": "object"}, "maxItems": 0}
@@ -413,7 +423,7 @@ def step_system(plan, task):
         system = BRIDGE_READ_SYSTEM
     else:
         system = READ_SYSTEM if task.kind == "READ" else REDUCE_SYSTEM
-    system += SHORT_WIRE_SYSTEM
+    system += SHORT_WIRE_SYSTEM.format(version=_read_protocol_version(task))
     return system+CONCLUSION_BUDGET_SYSTEM if plan.answer_allocation is not None else system
 
 
@@ -455,7 +465,7 @@ def stable_prefix_messages(plan, task, units):
         sources = _numeric_source_payload(task, units)
         citation = "Cite the source span aliases shown here directly in s. Document metadata is defined at first use."
         extraction = SHARED_NUMERIC_READ_SYSTEM if task.shared_numeric_scopes else READ_SYSTEM
-        system += " "+extraction+NUMERIC_POPULATION_SYSTEM+SHORT_WIRE_SYSTEM
+        system += " "+extraction+NUMERIC_POPULATION_SYSTEM+SHORT_WIRE_SYSTEM.format(version=_read_protocol_version(task))
         if task.shared_numeric_scopes:
             system += SHARED_NUMERIC_POPULATION_EXAMPLE
     else:
@@ -503,7 +513,7 @@ def step_messages(plan, task, units, claims=(), snapshot=None):
     payload["output_schema"] = visible_output_schema(output_schema(task, units, claims,
         reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
     needs, sources, parents = numeric_aliases(task, units, claims)
-    payload["fact_protocol"] = {"format_version": READ_PROTOCOL_VERSION,
+    payload["fact_protocol"] = {"format_version": _read_protocol_version(task),
         "needs": needs, "sources": sources, "parents": parents,
         "conditions": condition_aliases(task, claims), "scopes": to_jsonable(task.shared_numeric_scopes)}
     if (task.kind == "READ" and (task.operation in {"count", "sum"} or task.shared_numeric_scopes)
@@ -547,7 +557,7 @@ def read_output_reservation(state, task, units, tokenizer, *, dependency_ids=(),
     encode = tokenizer.encode
     aliases, sources, _ = numeric_aliases(task, units)
     condition_refs = {identity: alias for alias, identity in condition_aliases(task).items()}
-    envelope = {"format_version": READ_PROTOCOL_VERSION, "claims": [],
+    envelope = {"format_version": _read_protocol_version(task), "claims": [],
                 "support": tuple(aliases), "conflicts": [], "open_needs": []}
     if task.shared_numeric_scopes:
         envelope["facts"] = []
@@ -556,14 +566,16 @@ def read_output_reservation(state, task, units, tokenizer, *, dependency_ids=(),
         if unit.unit_id in dependency_ids:
             continue
         if task.shared_numeric_scopes:
+            entries = max(1, len({line for line in unit.text.splitlines() if line.strip()}))
+            excerpt_tokens = min(len(encode(unit.text, add_special_tokens=False)),
+                                 entries*output_tokens_per_fact)
             for scope in task.shared_numeric_scopes:
-                entries = max(1, len({line for line in unit.text.splitlines() if line.strip()}))
-                fact = {"g": scope.scope_id, "n": [alias for alias, identity in aliases.items()
-                        if identity in scope.need_ids], "e": "", "r": "", "v": None,
-                        "u": "", "s": [alias for alias, identity in sources.items()
-                            if identity in {span.span_id for span in unit.source_spans}], "p": []}
+                fact = {"s": [alias for alias, identity in sources.items()
+                            if identity in {span.span_id for span in unit.source_spans}],
+                        "t": "", "g": scope.scope_id, "n": [alias for alias, identity in aliases.items()
+                            if identity in scope.need_ids], "e": "", "r": "", "v": None, "u": "", "p": []}
                 total += entries*(len(encode(json.dumps(fact), add_special_tokens=False))
-                                  +output_tokens_per_fact+1)
+                                  +output_tokens_per_fact+1)+excerpt_tokens
         for need in needs:
             if need.need_id in shared_ids:
                 continue
@@ -791,7 +803,7 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
     span_units = {span.span_id: unit for unit in units for span in unit.source_spans}
     units_by_id = {unit.unit_id: unit for unit in units}
     parents = {claim.claim_id: claim for claim in claims}
-    if wire_version == READ_PROTOCOL_VERSION:
+    if wire_version in {READ_PROTOCOL_VERSION, SHARED_NUMERIC_PROTOCOL_VERSION}:
         aliases, source_aliases, parent_aliases = numeric_aliases(task, units, claims)
         conditions = condition_aliases(task, claims)
 
@@ -814,7 +826,8 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
         data = {**data, "claims": values, "support": [aliases[identity] for identity in data["support"]],
                 "open_needs": [gap(value) for value in data["open_needs"]]}
     values = list(data["claims"])
-    if wire_version == 3 or (wire_version == READ_PROTOCOL_VERSION and task.shared_numeric_scopes):
+    if wire_version in {3, SHARED_NUMERIC_PROTOCOL_VERSION} or (
+            wire_version == READ_PROTOCOL_VERSION and task.shared_numeric_scopes):
         aliases, source_aliases, parent_aliases = numeric_aliases(task, units, claims)
         scopes = {scope.scope_id: scope for scope in task.shared_numeric_scopes}
         for fact in data["facts"]:
@@ -823,7 +836,8 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
             if not set(memberships) <= set(scope.need_ids):
                 raise ValueError("numeric fact membership is outside its population scope")
             values.append({"need_id": memberships[0], "shared_need_ids": memberships[1:],
-                "text": "", "entity": fact["e"], "relation": fact["r"], "value": fact["v"],
+                "text": fact["t"] if wire_version == SHARED_NUMERIC_PROTOCOL_VERSION else "",
+                "entity": fact["e"], "relation": fact["r"], "value": fact["v"],
                 "unit": fact["u"], "conditions": scope.condition_ids,
                 "span_ids": [source_aliases[alias] for alias in fact["s"]],
                 "parent_claim_ids": [parent_aliases[alias] for alias in fact["p"]], "followups": []})
@@ -845,7 +859,7 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
                 for span in parent.source_spans:
                     claim_spans[span.span_id] = span
         claim_id = f"{task.step_id}:claim:{index}"
-        if wire_version in {2, 3, READ_PROTOCOL_VERSION}:
+        if wire_version in {2, 3, READ_PROTOCOL_VERSION, SHARED_NUMERIC_PROTOCOL_VERSION}:
             source_versions = sorted({span.source_key.version for span in (
                 (spans[sid] for sid in value["span_ids"]) if task.kind == "READ" else claim_spans.values())})
             version = source_versions[0] if len(source_versions) == 1 else json.dumps(source_versions,
@@ -863,7 +877,8 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
     open_needs = tuple(OpenNeed(value["need_id"], value["missing_relation"],
         tuple(value["bound_entities"]), value["temporal_scope"],
         tuple(value["parent_claim_ids"])) for value in data["open_needs"])
-    known_claims = set(parents) if wire_version in {2, 3, READ_PROTOCOL_VERSION} else {*parents, *(claim.claim_id for claim in parsed)}
+    known_claims = (set(parents) if wire_version in {2, 3, READ_PROTOCOL_VERSION, SHARED_NUMERIC_PROTOCOL_VERSION}
+                    else {*parents, *(claim.claim_id for claim in parsed)})
     for need in open_needs:
         if need.need_id not in task.need_ids or not set(need.parent_claim_ids) <= known_claims:
             raise ValueError("open_need references a claim outside this step")
