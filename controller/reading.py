@@ -113,6 +113,7 @@ SOURCE_SYSTEM = (
 )
 NUMERIC_POPULATION_SYSTEM = (
     " Use the following task to identify the requested population, active conditions and quantity relation. "
+    "Evaluate each Need's subject independently and include its alias only if the row establishes that Need. "
     "Emit a numeric row only when its cited source establishes that the entity qualifies for that "
     "population. For a requested quantity, the entity, magnitude and unit must be linked in the "
     "same cited source. Do not combine an entity from one source with a number or unit from another. "
@@ -147,18 +148,15 @@ def source_identifiers(units):
 
 
 def numeric_read_scopes(state, units):
-    """Share extraction only across identical task and source populations."""
+    """Group compatible source and condition scopes; each row selects its Need views."""
     groups = {}
     for need in state.needs:
         if need.operation not in {"count", "sum"}:
             continue
         sources = tuple(unit.unit_id for unit in units
                         if not unit.need_ids or need.need_id in unit.need_ids)
-        key = (need.subject_refs, tuple(sorted(need.condition_ids)), need.predecessor_need_ids,
-               need.scope, sources)
+        key = (tuple(sorted(need.condition_ids)), need.predecessor_need_ids, need.scope, sources)
         groups.setdefault(key, []).append(need)
-    if not any(len(needs) > 1 for needs in groups.values()):
-        return ()
     return tuple(NumericReadScope(f"g{index}", tuple(need.need_id for need in needs),
                                  needs[0].condition_ids, tuple(need.operation for need in needs))
                  for index, needs in enumerate(groups.values()))
@@ -560,7 +558,7 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
             plans.append(build_read_plan(replace(state, needs=(need,)),
                 replace(evidence_set, selected_units=units), coverage_scope, budget, template=template,
                 snapshot=snapshot, input_claims=input_claims, output_tokens_per_fact=output_tokens_per_fact,
-                reading_mode=reading_mode, numeric_identity=numeric_identity,
+                reading_mode=reading_mode, separate_needs=True, numeric_identity=numeric_identity,
                 read_layout=read_layout, read_packing=read_packing,
                 answer_system_prompt=answer_system_prompt, _step_prefix=prefix))
         steps = tuple(step for item in plans for step in item.steps)
@@ -580,7 +578,7 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
                          output_budget=output_budget,
                          input_claim_ids=tuple(claim.claim_id for claim in input_claims),
                          shared_numeric_scopes=numeric_read_scopes(state, evidence_set.selected_units)
-                            if reading_mode == "typed_reduce" else (),
+                            if reading_mode == "typed_reduce" and not separate_needs else (),
                          condition_ids=tuple(dict.fromkeys((*(condition.condition_id for condition in state.conditions),
                              *(identity for need in state.needs for identity in need.condition_ids)))),
                          retained_conclusion_tokens=tuple((need.need_id, budget.window_tokens)
