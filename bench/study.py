@@ -369,8 +369,6 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             except Exception as cleanup_error:
                 failure["cleanup_error"] = {"type": type(cleanup_error).__name__, "message": str(cleanup_error)}
 
-    from bench.async_diagnostics import install_from_env, study_wait_state
-    async_dump = install_from_env(state_provider=lambda: study_wait_state(service, provider))
     try:
         if reuse_provider:
             from bench.evidence_policy_comparison import (persist_p3_failure,
@@ -470,8 +468,6 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         write_jsonl(directory/"references.jsonl", references)
         provider.close()
         await service.aclose()
-        if async_dump is not None:
-            async_dump.close()
         service.store.close()
     return ordered
 

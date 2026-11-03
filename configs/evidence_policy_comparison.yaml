@@ -9,7 +9,7 @@ policy_comparison:
       base_url: http://127.0.0.1:30005
       gpu_devices: [5]
     R1:
-      run_config: models/study-reader-r1/r1_run_config.yaml
+      run_config: models/study-reader/answer/r1_run_config.yaml
       base_url: http://127.0.0.1:30004
       gpu_devices: [4]
   teacher_url: http://127.0.0.1:30001

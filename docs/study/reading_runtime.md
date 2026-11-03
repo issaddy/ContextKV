@@ -67,18 +67,9 @@ coverage_only 使用独立 READ_COVERAGE profile。生成前 quote 提供 active
 三个阶段使用同一时钟并精确加总；原生 decode 继续保留在旁账。缺失客户端末
 token 观测的旧记录留在 step-ledger，不补为估算校准点。
 
-`bench.provider_mechanisms` 在小型受控来源目录上运行实际 Task/Support 推理、
-BM25 检索、B3 coverage utility、READ 和 ANSWER。默认这些在线生成调用共用一个
-固定阅读器端点及 GPU，历史使用冻结 BGE；记录实际历史、组合支持评分与完整成本。
-HTTP query 和机制脚本显式注入 `extend_for_plan`，重启后从持久计划与当前提交
-快照恢复后续 gap 检索。最终 AnswerPlan 保留完整 source spans，并将 citation_ids
-绑定到实际最终候选允许引用的来源。
+当前机制入口为 `bench.reading_mechanisms`，从实际 READ/REDUCE/ANSWER 账本检查
+共享数值阅读、完整来源谱系、有限归约及完整成本。HTTP query 通过 `extend_for_plan`
+接入 gap 检索；最终 AnswerPlan 的 source spans 和 citation_ids 绑定实际最终候选。
 
-协议和覆盖检查：
-
-```bash
-python -m pytest tests/test_reading_runtime.py tests/test_lifecycle.py tests/test_engine.py -q
-```
-
-这些测试使用脚本引擎验证状态、预算、谱系和原生 HTTP 请求体。冻结 Qwen3-32B
-的逐题输出、质量与成本由 study 实验单独记录。
+CPU 核心冒烟由 `tests/test_reading_runtime.py`、`test_shared_numeric_reading.py` 和
+`test_conclusion_allocation.py` 保留。实际模型质量和成本由 study 实验记录。

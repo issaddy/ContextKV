@@ -1,8 +1,0 @@
-engine:
-  kind: mock
-state_dir: runs/warm-idle
-planner:
-  strategy: warm_idle
-  warm_ratio: 0.5
-  fallback_strategy: fixed_threshold
-# Principle-level warm/idle adaptation; not a reproduction of ReCAP graph memory.

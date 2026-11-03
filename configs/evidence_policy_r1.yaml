@@ -1,8 +1,8 @@
 base_study_config: configs/study.yaml
 evidence_policy_training:
-  reader_manifest: models/study-reader-r1/reader_manifest.json
-  reader_profile_id: qwen3-r1-source-first-windows-32k-nonthinking
-  run_config: models/study-reader-r1/r1_run_config.yaml
+  reader_manifest: models/study-reader/answer/reader_manifest.json
+  reader_profile_id: qwen3-reader-source-first-windows-32k-nonthinking
+  run_config: models/study-reader/answer/r1_run_config.yaml
   helper_run_config: configs/qwen3_32b.yaml
   output_dir: runs/study/reader-bound-preferences
   parent_support_asset: models/study-support-actual-prefix
@@ -38,17 +38,3 @@ evidence_policy_training:
     epochs: 3
     learning_rate: 0.0001
     seed: 42
-  next_round:
-    conversations: 2
-    questions_path: runs/study/data/original_train_turns.jsonl
-    matrix_path: configs/study_matrix.yaml
-    concurrency: 4
-    dataset:
-      corpus_id: multidoc2dial
-      retriever_config: configs/study_multidoc_retriever.yaml
-      protocol: P3
-    reader_training_config: configs/reader_r1.yaml
-    reader_mix_config: configs/reader_mix_r2.yaml
-    reader_output_dir: models/study-reader-r2
-    reader_merged_dir: models/study-reader-r2-merged
-    reader_data_dir: runs/study/reader-r2-data/new-p1-runtime

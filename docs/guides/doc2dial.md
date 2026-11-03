@@ -68,14 +68,7 @@ python -m bench.run_sessions --config configs/qwen3_32b.yaml \
   --evidence-corpus data/multidoc2dial/test/passages.jsonl
 ```
 
-它使用已有查询适配器、实际QA稠密检索和每轮重建。原文向量、引用身份及持久化生命周期共用现有实现。以下矩阵保留任务解释与成本策略的历史比较配方，运行时须记录实际解码/解释服务及成本标定配置：
-
-```bash
-python -m bench.b6_joint_sweep --matrix configs/benchmark_multidoc2dial.yaml \
-  --stage test --job-timeout 3600 --output runs/multidoc2dial-system
-```
-
-配置采用`comparison_scope: system`：Native使用last3混合检索，ContextKV使用会话任务解释及完整A/B/C；共享结构化语料、BM25/BGE/重排权重、生成模型和资源预算。各方法沿自身实际历史检索，比较包含选材与执行差异，完整响应涵盖解释、检索、生成和提交。加`--execute`运行计划，实际结果见[统一评价](../data_and_evaluation.md)。
+它使用已有查询适配器、实际 QA 检索和每轮重建。P0/P1 与 reader 四格及自身 P3 的当前入口见[运行手册](../study/final_runbook.md)。
 
 保存答案的基础词项评分：
 

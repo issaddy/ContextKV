@@ -1,8 +1,8 @@
 reader_training:
   base_scope: configs/model_scopes/qwen3-32b.local.json
   r0_run_config: configs/qwen3_32b.yaml
-  output_dir: models/study-reader-r1
-  merged_model_dir: models/study-reader-r1-merged
+  output_dir: models/study-reader
+  merged_model_dir: models/study-reader-merged
   r1_base_url: http://127.0.0.1:30004
   seed: 42
   resource_sample_seconds: 0.5
@@ -27,22 +27,16 @@ reader_training:
     warmup_ratio: 0.03
     max_grad_norm: 1.0
   data:
-    output_dir: runs/study/reader-r1-data
-    minimum_train_turns: 1000
-    export_turns: 2000
-    retrieved_read_turns: 256
+    output_dir: runs/study/reader-data
+    minimum_train_turns: 200
+    export_turns: null
     answer_output_tokens: 1024
     minimum_quality: 0.85
-    read_protocol_versions: [2]
+    read_protocol_versions: [2, 3]
+    require_independent_review: true
     validation_fraction: 0.03
     split_seed: 42
-    rollouts:
-      - turns_path: /home/relay/songjiayun/ContextKV/runs/study-20261102/task-a/turns.jsonl
-        state_db: /home/relay/songjiayun/ContextKV/runs/study-20261102/task-a/state/sessions.sqlite3
-        source_partition: native_multidoc2dial_train
-        split: train
-        reader_identity: local-snapshot:7442623e99dd0b456628ddc48805a4ea11249ee2ee66484b5d1ab44d2940beb8
-        read_protocol_version: 1
+    rollouts: []
   review:
     base_urls: [http://127.0.0.1:30001]
     gpu_devices: [2]

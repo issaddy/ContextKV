@@ -16,7 +16,7 @@ import time
 import yaml
 
 from controller.templates import token_hash
-from training.reader_data import (augment_retrieved_reads, export_reader_traces, prepare_reader_data,
+from training.reader_data import (export_reader_traces, prepare_reader_data,
                                   review_reader_traces, rows, write_rows)
 
 
@@ -275,7 +275,7 @@ async def measured_command(config, command, function, *, asynchronous=False):
         from urllib.parse import urlparse
         devices = settings["review"]["gpu_devices"]
         processes.extend(listening_processes([urlparse(url).port for url in settings["review"]["base_urls"]]))
-    elif command in {"export", "prepare", "augment-reads"}:
+    elif command in {"export", "prepare"}:
         devices = []
     else:
         devices = physical_device_ids()
@@ -312,7 +312,7 @@ async def measured_command(config, command, function, *, asynchronous=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("export", "augment-reads", "review", "prepare", "train", "merge"))
+    parser.add_argument("command", choices=("export", "review", "prepare", "train", "merge"))
     parser.add_argument("--config", default="configs/reader_r1.yaml")
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--resume-from-checkpoint")
@@ -322,8 +322,6 @@ def main(argv=None):
     config = yaml.safe_load(Path(args.config).read_text())
     if args.command == "export":
         operation = partial(export_reader_traces, config)
-    elif args.command == "augment-reads":
-        operation = partial(augment_retrieved_reads, config)
     elif args.command == "review":
         operation = partial(review_reader_traces, config, limit_turns=args.limit_turns, concurrency=args.concurrency)
     elif args.command == "prepare":

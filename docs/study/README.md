@@ -1,26 +1,19 @@
 # ContextKV 课题索引
 
-当前审查基线为 `702ebe9`；原始实施任务书保存在 [task_spec.md](task_spec.md)。
-
-## 单一状态入口
-
-| 内容 | 文档 |
+| 内容 | 入口 |
 |---|---|
-| 当前机制 | [架构](../architecture.md) |
-| 最新已运行实验、训练规模与批次位置 | [final_report.md](final_report.md) |
-| 本轮根因、代码修正和后续实现任务 | [review_20261103.md](review_20261103.md) |
-| 既有模型与新训练目标的接续 | [reader_policy_readiness.md](reader_policy_readiness.md) |
-| 运行与产物命令 | [final_runbook.md](final_runbook.md) |
+| 实施任务与研究边界 | [task_spec.md](task_spec.md) |
+| 当前执行机制 | [架构](../architecture.md)、[reading_runtime.md](reading_runtime.md) |
+| 根因与实现要求 | [review_20261103.md](review_20261103.md) |
+| 当前运行入口 | [final_runbook.md](final_runbook.md) |
+| 当前重评数值 | [reference_20261103.json](reference_20261103.json)、[budget_loop_20261103.json](budget_loop_20261103.json) |
 
-R1、R2 和 P1 prototype22 均已完成实际训练。B 开发选择为 B3，C 开发选择为 native。公开开发候选均未达到当时的 P95 条件，实验冻结使用 P0R0；这一记录见封存报告。
+当前实现围绕完整结论预算与来源链、共享数值阅读、有限归约、实际历史和目标可见性、
+B 显式动作收益、C Native/TTL 前缀保护，以及全部声明任务的官方评分和完整成本账本。
+历史一次性批次脚本、旧 sweep 配方及重复状态快照已清理；旧代码和旧文档可从 Git 历史追溯。
 
-本轮新增的评分修正改变了 MTRAGEval 条件分量和 2Wiki 官方分母，已有结果需按相同声明题目离线重评。归约与训练协议修正需要新的实际运行和训练资产；原始实验记录继续保存原数值。
-
-## 实施入口
-
-- A：`adapters/history_state.py`、`evidence_pool.py`、`support_model.py`、`controller/evidence_planner.py`、`training/`。
-- B：`controller/reading.py`、`execution.py`、`claim_graph.py`、`plan_policy.py`、`plan_profiles.py`、`rolling_policy.py`。
-- C：`controller/prefix_retention.py`、`prefix_view.py`、`engine_patches/`。
-- 评价：`bench/study.py`、`study_metrics.py`、`study_scoring.py`、`public_multihop.py`。
-
-数据、权重与原始运行产物保存在既有实验环境 `sjy-0518`，具体路径和模型身份以封存报告及各资产 manifest 为准。
+A 入口是 `training.a_workflow`、`training.preference_rollout` 和
+`bench.evidence_policy_comparison`；B 入口是 `training.plan_gain_rollout`、
+`training.plan_gain_completion` 和 `bench.rolling_study_workflow`；C 入口是
+`profiling.retention_trace` 和 `bench.capacity_workflow`。所有训练、评分和成本记录
+绑定各自实际 reader 与来源。

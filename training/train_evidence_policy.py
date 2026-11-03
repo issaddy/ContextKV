@@ -1,6 +1,6 @@
-"""Alternate reader-bound actual-answer preferences and existing utility training.
+"""Train evidence utility on actual answers bound to the current trained reader.
 
-R1 is explicit: a checkpoint/profile gets its own generation cohort and asset.
+A checkpoint/profile gets its own generation cohort and asset.
 The original support encoder/heads remain P0; only the existing graph utility and
 answer-disposition heads are optimized by train_set_utility.
 """
@@ -322,144 +322,6 @@ def require_policy_reader_binding(asset_path, *, reader_checkpoint, reader_profi
     return binding
 
 
-async def rollout_next_round(config, *, limit_conversations=None):
-    """Run P1/R1 along its own actual answers, then hand those traces to reader SFT."""
-    from bench.study import merge_config, run_dataset
-    settings, binding = config["evidence_policy_training"], reader_binding(config)
-    require_policy_reader_binding(settings["output_asset"], reader_checkpoint=binding["reader_checkpoint"],
-                                  reader_profile_id=binding["reader_profile_id"])
-    next_round = settings["next_round"]
-    if limit_conversations is None:
-        limit_conversations = next_round["conversations"]
-    policy = json.loads((Path(settings["output_asset"])/"support-model.json").read_text())
-    directory = cohort_directory(config)/"next_reader_rollout"/policy["policy_checkpoint"].split(":")[-1][:20]
-    directory.mkdir(parents=True, exist_ok=True)
-    questions = rows(next_round["questions_path"])
-    if any(row["split"] != "train" for row in questions):
-        raise ValueError("the next reader round must use actual native training conversations")
-    reader_config = yaml.safe_load(Path(next_round["reader_training_config"]).read_text())
-    parent_data_dir = reader_config["reader_training"]["data"]["output_dir"]
-    parent_conversations = {row["conversation_id"] for row in rows(Path(parent_data_dir)/"train.jsonl")}
-    questions = [row for row in questions if row["conversation_id"] in parent_conversations]
-    tasks = [{"dataset": {"name": "reader_policy_train", "revision": "native-training-questions"},
-        "task_id": row["task_id"], "conversation_id": row["conversation_id"], "turn": row["turn"],
-        "Collection": "reader_policy_train/native", "split": "train",
-        "input": [{"speaker": "user", "text": row["question"]}], "contexts": [],
-        "targets": [{"text": row["reference_answer"]}]} for row in questions]
-    tasks_path = directory/"questions.jsonl"
-    write_rows(tasks_path, tasks)
-    matrix = yaml.safe_load(Path(next_round["matrix_path"]).read_text())
-    from adapters.doc2dial import convert, structural_corpus
-    original = Path(config["training"]["multidoc_source"])
-    documents = json.loads((original/"multidoc2dial_doc.json").read_text())
-    corpus, _, _ = convert(documents, json.loads((original/"multidoc2dial_dial_train.json").read_text()),
-        dataset_version="archive-f0c034c24966", source_uri="https://doc2dial.github.io/multidoc2dial/",
-        split="train", source_format="multidoc2dial")
-    corpus_path = directory/"train_passages.jsonl"
-    write_rows(corpus_path, structural_corpus(documents, corpus))
-    spec = {**next_round["dataset"], "inputs": {"train": str(tasks_path)},
-        "corpus_path": str(corpus_path),
-        "split_kind": "native_train_actual_rollout", "weight": 0,
-        "primary_metric": "project_condition_version_score", "normalization": 1.0}
-    retrieval_recipe = yaml.safe_load(Path(spec["retriever_config"]).read_text())
-    retrieval_recipe["device"] = settings["collection"]["encoder_device"]
-    retrieval_path = directory/"retriever.yaml"
-    retrieval_path.write_text(yaml.safe_dump(retrieval_recipe, sort_keys=False))
-    spec["retriever_config"] = str(retrieval_path)
-    matrix["datasets"] = {"reader_policy_train": spec}
-    matrix["resources"]["gpu_devices"] = settings["gpu_devices"]
-    actual = merge_config(config, {"generation": {"run_config": settings["run_config"],
-        "teacher_url": settings["collection"]["judge_base_url"],
-        "helper_run_config": settings["helper_run_config"]},
-        "selection": {"utility": "learned"},
-        "reading": {"layout": settings["collection"]["read_layout"], "packing": settings["collection"]["read_packing"]},
-        "task_model": {"device": settings["collection"]["encoder_device"]},
-        "support_model": {"mode": "trained", "asset": settings["output_asset"],
-            "device": settings["collection"]["device"], "preference_asset": settings["output_asset"]}})
-    from controller.engine_client import EngineError
-    from bench.evidence_policy_comparison import persist_p3_failure, recorded_terminal_budget, terminal_model_budget
-    conversations = sorted({row["conversation_id"] for row in tasks})[:limit_conversations]
-    turns, rollout_specs, failed = [], [], []
-    for conversation in conversations:
-        part = directory/"conversations"/digest(conversation)[:20]
-        part.mkdir(parents=True, exist_ok=True)
-        part_tasks = part/"questions.jsonl"
-        write_rows(part_tasks, [row for row in tasks if row["conversation_id"] == conversation])
-        local_matrix = merge_config(matrix, {"datasets": {"reader_policy_train": {"inputs": {"train": str(part_tasks)}}}})
-        teacher_ledger = actual.get("task_model", {}).get("teacher_record_path",
-            str(Path(actual.get("study", {}).get("output_dir", "runs/study"))/"task_teacher_calls.jsonl"))
-        recorded = recorded_terminal_budget(part)
-        try:
-            if recorded:
-                results = rows(part/"results.unscored.jsonl")
-                failed.append(persist_p3_failure(part, conversation, "; ".join(recorded), teacher_ledger=teacher_ledger))
-            else:
-                results = await run_dataset(actual, local_matrix, {"id": "P1_R1_train", "strategy": "B7"},
-                    "reader_policy_train", "train", part, concurrency=next_round["concurrency"])
-        except ExceptionGroup as group:
-            known, unknown = group.split(terminal_model_budget)
-            if unknown is not None:
-                raise unknown
-            results = rows(part/"results.unscored.jsonl")
-            failed.append(persist_p3_failure(part, conversation, str(known), teacher_ledger=teacher_ledger))
-        except EngineError as exc:
-            if exc.code != "READ_STEP_OUTPUT_TRUNCATED":
-                raise
-            results = rows(part/"results.unscored.jsonl")
-            failed.append(persist_p3_failure(part, conversation, str(exc), teacher_ledger=teacher_ledger))
-        except RuntimeError as exc:
-            if not terminal_model_budget(exc):
-                raise
-            results = rows(part/"results.unscored.jsonl")
-            failed.append(persist_p3_failure(part, conversation, str(exc), teacher_ledger=teacher_ledger))
-        except ValueError as exc:
-            if not terminal_model_budget(exc):
-                raise
-            results = rows(part/"results.unscored.jsonl")
-            failed.append(persist_p3_failure(part, conversation, str(exc), teacher_ledger=teacher_ledger))
-        generation = json.loads((part/"generation_manifest.json").read_text())
-        snapshot_id = generation["retrieval"]["retrieval"]["corpus_snapshot_id"]
-        actual_turns = [{**row, "split": "train", "snapshot_id": snapshot_id, "rollout_policy": "P1_R1_actual_history",
-            "reader_checkpoint": binding["reader_checkpoint"], "reader_profile_id": binding["reader_profile_id"]} for row in results]
-        turn_path = part/"turns.jsonl"
-        write_rows(turn_path, actual_turns)
-        turns.extend(actual_turns)
-        rollout_specs.append({"turns_path": str(turn_path.resolve()),
-            "state_db": str((part/"state"/"sessions.sqlite3").resolve()),
-            "source_partition": "native_multidoc2dial_train", "split": "train",
-            "reader_identity": binding["reader_checkpoint"], "read_protocol_version": 2})
-    write_rows(directory/"turns.jsonl", turns)
-    reader = reader_config["reader_training"]
-    reader.update(initial_adapter=str(Path(settings["reader_manifest"]).parent/"adapter"),
-        output_dir=next_round["reader_output_dir"], merged_model_dir=next_round["reader_merged_dir"])
-    reader["data"].update(output_dir=next_round["reader_data_dir"], rollouts=rollout_specs,
-        export_turns=None, retrieved_read_turns=0, validation_fraction=0)
-    review_path = directory/"reader_p1_review.yaml"
-    review_path.write_text(yaml.safe_dump(reader_config, sort_keys=False))
-    mix_config = yaml.safe_load(Path(next_round["reader_mix_config"]).read_text())
-    mix_config["reader_mix"].update(reader_manifest=settings["reader_manifest"], parent_data_dir=parent_data_dir,
-        new_p1_data_dir=next_round["reader_data_dir"], reader_output_dir=next_round["reader_output_dir"],
-        reader_merged_dir=next_round["reader_merged_dir"])
-    mix_path = directory/"reader_mix.yaml"
-    mix_path.write_text(yaml.safe_dump(mix_config, sort_keys=False))
-    from training.reader_mix import stage_configs
-    _, mixed = stage_configs(mix_config, reader_config)
-    next_path = directory/"reader_next_round.yaml"
-    next_path.write_text(yaml.safe_dump(mixed, sort_keys=False))
-    manifest = {"reader_binding": binding, "planner_asset": settings["output_asset"],
-        "planner_checkpoint": policy["policy_checkpoint"],
-        "actual_turns": len(turns), "actual_conversations": len({row["conversation_id"] for row in turns}),
-        "requested_conversations": conversations, "failed_conversations": failed,
-        "history_policy": "P3 along this P1/R1 pair's own committed answers",
-        "next_reader_config": str(next_path.resolve()),
-        "new_P1_review_config": str(review_path.resolve()), "reader_mix_config": str(mix_path.resolve()),
-        "next_steps": [f"python -m training.reader_mix all --config {mix_path} --p1-config {review_path}",
-                       f"python -m training.train_reader train --config {next_path}"],
-        "supervision": "fresh actual-history/prompt-bound target review required for the new reader round"}
-    (directory/"alternation_manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
-    return manifest
-
-
 async def measured_policy_training(config):
     from bench.study_resources import StudyResourceSampler, integrate_physical
     import os
@@ -483,7 +345,7 @@ async def measured_policy_training(config):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("audit", "collect", "prepare", "train", "rollout"))
+    parser.add_argument("command", choices=("audit", "collect", "prepare", "train"))
     parser.add_argument("--config", required=True)
     parser.add_argument("--limit", type=int)
     args = parser.parse_args(argv)
@@ -497,8 +359,6 @@ def main(argv=None):
         result = asyncio.run(collect_r1_preferences(config, limit=args.limit))
     elif args.command == "prepare":
         result = prepare_preferences(config)
-    elif args.command == "rollout":
-        result = asyncio.run(rollout_next_round(config, limit_conversations=args.limit))
     else:
         result = asyncio.run(measured_policy_training(config))
     print(json.dumps(result, ensure_ascii=False, indent=2))
