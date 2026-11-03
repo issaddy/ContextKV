@@ -270,7 +270,7 @@ def output_schema(task, units=(), claims=(), *, reading_mode="typed_reduce", num
         schema["properties"]["open_needs"]["items"]["properties"]["parent_claim_ids"]["minItems"] = 1
         schema["properties"]["open_needs"]["items"]["properties"]["parent_claim_ids"]["items"]["pattern"] = (
             "^(?:"+"|".join(map(re.escape, parent_ids))+")$")
-    else:
+    elif task.kind != "READ":
         schema["properties"]["open_needs"]["maxItems"] = 0
     if task.kind == "READ" and task.operation == "sum" and not literals:
         schema["properties"]["claims"]["maxItems"] = 0

@@ -233,7 +233,7 @@ def test_structured_numeric_ids_come_from_original_body_and_versions_are_control
     properties = schema["properties"]["claims"]["items"]["properties"]
     assert properties["entity"]["enum"] == ["R31"]
     assert "version" not in properties
-    assert schema["properties"]["open_needs"]["maxItems"] == 0
+    assert schema["properties"]["open_needs"]["items"]["properties"]["parent_claim_ids"]["maxItems"] == 0
     value = fact("row", "R31", "32000", "g")
     del value["version"]
     value["followups"] = [{"need_id": "n", "missing_relation": "destination",
@@ -332,6 +332,55 @@ async def test_open_need_adds_another_read_and_claim_parent_chain(tmp_path):
     assert not outcome.open_needs
     assert outcome.plan.answer_plan.points[0].claim_ids == (outcome.claims[-1].claim_id,)
     assert {span.span_id for span in outcome.plan.answer_plan.points[0].source_spans} == {"a", "b"}
+
+
+@pytest.mark.asyncio
+async def test_empty_typed_read_can_request_a_question_only_gap_without_inventing_a_fact(tmp_path):
+    import jsonschema
+    from controller.reading import output_schema
+    first, unit_a = material("The office serves lunch at noon.", "a")
+    second, unit_b = material("Acme was established in 2001.", "b")
+    state = TaskState("t", "When was Acme established?", needs=(Need("n"),))
+    plan = build_read_plan(state, EvidenceSet("s", (unit_a,), source_blocks=(first,)),
+        "selected_sources", ContextBudget(), template=ByteTemplate())
+    gap = {"need_id": "n", "missing_relation": "establishment year", "bound_entities": ["Acme"],
+           "temporal_scope": "", "parent_claim_ids": []}
+    empty = {"format_version": 2, **read_output(support=(), open_needs=(gap,))}
+    schema = output_schema(plan.steps[0], (unit_a,))
+    jsonschema.validate(empty, schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(empty, output_schema(plan.steps[0], (unit_a,), reading_mode="coverage_only"))
+    extracted = fact("b", "Acme", "2001")
+    del extracted["version"]
+    extracted["followups"] = []
+
+    class ValidatingEngine(ScriptedReadingEngine):
+        async def generate(self, *, response_schema=None, **kwargs):
+            result = await super().generate(response_schema=response_schema, **kwargs)
+            if response_schema is not None:
+                jsonschema.validate(json.loads(result.text), response_schema)
+            return result
+
+    engine = ValidatingEngine([empty, {"format_version": 2, **read_output(extracted)}])
+    requested = []
+
+    async def extend(current, needs, claims):
+        requested.extend(needs)
+        assert claims == () and needs[0].parent_claim_ids == ()
+        return EvidencePool((unit_b,), source_blocks=(second,), auxiliary_usage={
+            "input_tokens": 0, "output_tokens": 0, "compute_ms": 0.0, "models": []})
+
+    store = SessionStore(tmp_path/"state.db")
+    snapshot = store.read_snapshot("s")
+    attempt = store.begin_attempt("s", "r", "hash", state.raw_question, 0)
+    outcome = await ReadingExecutor(store, engine, ByteTemplate(), extend_open_needs=extend).execute_reads(
+        attempt.attempt_id, snapshot, plan)
+    assert len(requested) == 1 and len(outcome.results) == 2
+    assert outcome.results[0].claims == ()
+    assert len(outcome.claims) == 1 and outcome.claims[0].parent_claim_ids == ()
+    assert outcome.claims[0].source_spans == unit_b.source_spans
+    assert not outcome.open_needs
+    assert {block.key for block in outcome.plan.selected_set.source_blocks} == {first.key, second.key}
 
 
 @pytest.mark.asyncio
