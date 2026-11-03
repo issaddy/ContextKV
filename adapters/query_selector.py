@@ -79,18 +79,19 @@ class OpenAICompletionClient:
                 "chat_template": self.tokenizer.chat_template, "http_calls": self.calls,
                 "input_policy": "count complete messages; no truncation"}
 
-    def complete(self, messages, *, response_format=None):
+    def complete(self, messages, *, response_format=None, max_new_tokens=None):
         started = time.perf_counter()
+        output_budget = self.config.max_new_tokens if max_new_tokens is None else max_new_tokens
         # Tokenizer state/counters are local shared resources; the thread-safe
         # HTTP client need not serialize independent sessions while awaiting LLMs.
         with self._input_lock:
             count = self.count_input_tokens(messages)
-            if count > self.config.max_input_tokens or count + self.config.max_new_tokens > self.config.context_window:
+            if count > self.config.max_input_tokens or count + output_budget > self.config.context_window:
                 return CompletionResult("input_over_budget", input_tokens=count,
                                         elapsed_ms=(time.perf_counter()-started)*1000)
             self.calls += 1
         body = {"model": self.config.model, "messages": messages, "temperature": self.config.temperature,
-                "max_tokens": self.config.max_new_tokens, "stream": False,
+                "max_tokens": output_budget, "stream": False,
                 "chat_template_kwargs": dict(self.config.chat_template_kwargs)}
         if self.config.top_p is not None:
             body["top_p"] = self.config.top_p

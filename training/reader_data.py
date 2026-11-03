@@ -15,6 +15,9 @@ from controller.session_store import Attempt, load_record
 from controller.templates import token_hash
 
 
+
+REVIEW_PROTOCOL = "visible_target_independent_review_v3"
+
 def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
         separators=(",", ":")).encode()).hexdigest()
@@ -188,24 +191,22 @@ async def review_reader_trace(trace, client, *, minimum_quality, reviewer_identi
     common = {"example_id": trace["example_id"], "task_id": trace["task_id"],
         "phase": trace["phase"], "step_id": trace["step_id"] if structured else None,
         "actual_history_sha256": trace["actual_history_sha256"],
-        "prompt_token_hash": trace["prompt_token_hash"], "reader_identity": trace["reader_identity"]}
+        "prompt_token_hash": trace["prompt_token_hash"], "reader_identity": trace["reader_identity"],
+        "review_protocol": REVIEW_PROTOCOL}
     for key in ("original_example_id", "original_attempt_id", "source_asset_id", "source_traces", "source_reviews"):
         if key in trace:
             common[key] = trace[key]
     assessment = {"quality": {"type": "number", "minimum": 0, "maximum": 1},
         "source_support_verified": {"type": "boolean"}, "correct_task_binding": {"type": "boolean"}}
-    target_properties = {"target": trace["output_schema"] if structured else {"type": "string"}}
-    target_schema = {"type": "object", "properties": target_properties,
-                     "required": list(target_properties), "additionalProperties": False}
-
-    async def complete(stage, system, body, schema):
-        result = await asyncio.to_thread(client.complete,
-            [{"role": "system", "content": system},
-             {"role": "user", "content": json.dumps(body, ensure_ascii=False)}],
-            response_format={"type": "json_schema", "json_schema": {
-                "name": "reader_"+stage, "strict": True, "schema": schema}})
+    async def complete(stage, messages, schema=None, *, output_budget=None):
+        limit = client.config.max_new_tokens if output_budget is None else output_budget
+        response_format = ({"type": "json_schema", "json_schema": {
+            "name": "reader_"+stage, "strict": True, "schema": schema}} if schema is not None else None)
+        result = await asyncio.to_thread(client.complete, messages,
+            response_format=response_format, max_new_tokens=limit)
         executed = result.status != "input_over_budget"
-        record_call({"example_id": trace["example_id"], "stage": stage, **asdict(result),
+        record_call({"example_id": trace["example_id"], "stage": stage, "review_protocol": REVIEW_PROTOCOL,
+            "teacher_messages_sha256": digest(messages), "max_new_tokens": limit, **asdict(result),
             "model_request_executed": executed, "model_input_tokens": result.input_tokens if executed else 0,
             "model_output_tokens": (result.usage.get("completion_tokens")
                 if result.usage is not None else None) if executed else 0})
@@ -229,22 +230,30 @@ async def review_reader_trace(trace, client, *, minimum_quality, reviewer_identi
             raise RuntimeError(f"reader {stage} unfinished for {trace['example_id']}: {result.status}/{result.finish_reason}")
         return None
 
-    target_system = ("Produce a high-quality supervised continuation for the exact recorded online messages. "
-        "Those messages contain all factual inputs available to the reader. Use their original sources, "
-        "visible Reading conclusions and actual conversation context to answer the current task. "
-        "Follow their active conditions, versions, READ JSON contract and ANSWER citation rules. "
-        "For READ, emit source-grounded facts under their exact need IDs; a window without a new fact has claims=[]. "
-        "Use followups for missing source relations required by the current need. "
-        "For ANSWER, give the supported answer completely and concisely within the supplied output budget. "
-        "Return the requested target fields.")
     body = reader_target_body(trace, answer_output_tokens=answer_output_tokens)
     if fixed_target_text is None:
-        result = await complete("target", target_system, body, target_schema)
+        instruction = ("Complete the task in the preceding messages with the actual assistant continuation. "
+            "Use only the facts, sources, Reading conclusions and conversation visible in those messages. "
+            "Recheck extraction, reasoning, quantities, units, conditions and versions before responding. "
+            "Perform the requested task fully; do not output a phase label, placeholder, schema description "
+            "or an object wrapping the continuation in a target field. "
+            f"Your entire continuation must fit {body['target_output_budget_tokens']} output tokens. ")
+        schema = trace["output_schema"] if structured else None
+        if structured:
+            instruction += ("Return the complete structured step result as one JSON object matching the schema below, "
+                "using the exact Need/source/parent IDs from the preceding messages. Empty claims/facts are valid "
+                "only when this visible window contains no relevant fact for the active Needs. Output schema:\n"+
+                json.dumps(schema, ensure_ascii=False))
+        else:
+            instruction += ("Return the supported final answer directly, including the required conclusions and "
+                "citations under the original response rules. Be concise and omit unrequested examples.")
+        messages = [*trace["messages"], {"role": "user", "content": instruction}]
+        result = await complete("target", messages, schema, output_budget=body["target_output_budget_tokens"])
         terminal = terminal_record(result, "target")
         if terminal is not None:
             return terminal
-        value = json.loads(result.text)
-        target_text = json.dumps(value["target"], ensure_ascii=False, separators=(",", ":")) if structured else value["target"]
+        target_text = (json.dumps(json.loads(result.text), ensure_ascii=False, separators=(",", ":"))
+                       if structured else result.text)
     else:
         target_text = fixed_target_text
     target_tokens = len(client.tokenizer.encode(target_text, add_special_tokens=False))+1
@@ -265,9 +274,16 @@ async def review_reader_trace(trace, client, *, minimum_quality, reviewer_identi
         "deduplication, arithmetic, bridge relations and source-parent chains. When no observed step establishes "
         "upstream attribution, leave upstream_errors empty. A correct fact found "
         "only in the verification evidence does not establish visible_prompt_support. Assess task binding, "
-        "conditions, versions, completeness and allowed citations for the fixed target.")
-    result = await complete("review", review_system, reader_review_body(trace,
-        answer_output_tokens=answer_output_tokens, target_text=target_text, reading_steps=reading_steps), review_schema)
+        "conditions, versions, completeness and allowed citations for the fixed target. quality evaluates whether "
+        "the continuation actually performs the requested extraction, reasoning or final answering for this phase's "
+        "visible task/window. A phase name, placeholder, literal generic answer or empty shell is not a complete "
+        "continuation. Structurally valid empty claims/facts are incomplete when relevant visible facts are present. "
+        "Do not reward JSON validity alone. Return the assessment object matching output_schema.")
+    verification = reader_review_body(trace, answer_output_tokens=answer_output_tokens,
+        target_text=target_text, reading_steps=reading_steps)
+    verification["output_schema"] = review_schema
+    result = await complete("review", [{"role": "system", "content": review_system},
+        {"role": "user", "content": json.dumps(verification, ensure_ascii=False)}], review_schema)
     terminal = terminal_record(result, "review")
     if terminal is not None:
         return {**terminal, "target_text": target_text}
@@ -284,7 +300,6 @@ async def review_reader_trace(trace, client, *, minimum_quality, reviewer_identi
         "read_protocol_version": trace["read_protocol_version"],
         "quality_measurement": "independent assessment of fixed target against complete original sources",
         "visible_prompt_support": value["visible_prompt_support"], "upstream_errors": value["upstream_errors"],
-        "review_protocol": "visible_target_independent_review_v2",
         "target_sha256": digest(target_text)}
     return record
 
@@ -324,7 +339,7 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
                 if target[key] != trace[key]:
                     raise ValueError(f"fixed target {key} differs from trace: {trace['example_id']}")
     path = root/"reviews.jsonl"
-    done = {row["example_id"] for row in rows(path)} if path.exists() else set()
+    done = {row["example_id"] for row in rows(path) if row.get("review_protocol") == REVIEW_PROTOCOL} if path.exists() else set()
     sink = path.open("a", encoding="utf-8")
     ledger = (root/"review_calls.jsonl").open("a", encoding="utf-8")
     semaphore = asyncio.Semaphore(concurrency)
@@ -356,11 +371,11 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
         ledger.close()
         for client in clients:
             client.close()
-    saved = rows(path)
-    manifest = {"processed_examples": len(saved),
-        "reviewed_examples": sum(row["status"] in {"accepted", "rejected"} for row in saved),
+    saved = {row["example_id"]: row for row in rows(path) if row.get("review_protocol") == REVIEW_PROTOCOL}
+    manifest = {"review_protocol": REVIEW_PROTOCOL, "processed_examples": len(saved),
+        "reviewed_examples": sum(row["status"] in {"accepted", "rejected"} for row in saved.values()),
         "requested_examples": len(trace_rows),
-        "status_counts": dict(Counter(row["status"] for row in saved)),
+        "status_counts": dict(Counter(row["status"] for row in saved.values())),
         "elapsed_ms": (time.monotonic()-started)*1000, "reviews_path": str(path.resolve()),
         "cost_ledger": str((root/"review_calls.jsonl").resolve()), "reviewer": scope.manifest()}
     (root/"review_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
@@ -370,7 +385,8 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
 def prepare_reader_data(config):
     settings = config["reader_training"]["data"]
     root = Path(settings["output_dir"])
-    reviews = {row["example_id"]: row for row in rows(settings.get("reviews_path", root/"reviews.jsonl"))}
+    reviews = {row["example_id"]: row for row in rows(settings.get("reviews_path", root/"reviews.jsonl"))
+               if row.get("review_protocol") == REVIEW_PROTOCOL}
     selected, excluded = [], []
     cohort = None
     if settings.get("cohort_manifest"):
@@ -387,8 +403,6 @@ def prepare_reader_data(config):
             "review_input_over_budget" if review["status"] == "input_over_budget" else
             "teacher_target_truncated" if review["status"] == "teacher_target_truncated" else
             "review_rejected" if review["status"] != "accepted" else
-            "independent_review_required" if settings.get("require_independent_review", False) and
-                review.get("review_protocol") != "visible_target_independent_review_v2" else
             "insufficient_quality" if review["quality"] < settings["minimum_quality"] else
             "unsupported_target" if not review["source_support_verified"] or not review["correct_task_binding"] else
             "hidden_information_target" if review.get("visible_prompt_support") is False else
@@ -480,7 +494,7 @@ def audit_reader_targets(config):
                     if review[name] != trace[name]:
                         findings.append(name+"_mismatch")
                 independent = review.get("review_protocol") in {
-                    "visible_target_independent_review_v1", "visible_target_independent_review_v2"}
+                    "visible_target_independent_review_v1", "visible_target_independent_review_v2", REVIEW_PROTOCOL}
                 counts["independently_reviewed" if independent else "needs_independent_review"] += 1
                 if "visible_prompt_support" not in review:
                     findings.append("visibility_unverified")
