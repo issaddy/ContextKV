@@ -80,7 +80,7 @@ class PrefixForecast:
 
     @property
     def saved_ms(self):
-        return self.target_saved_ms+self.expected_collateral_saved_ms-self.retention_control_ms
+        return self.target_saved_ms-self.retention_control_ms
 
 
 @dataclass(frozen=True)
@@ -135,13 +135,11 @@ def allocate_retention(requests, *, gpu_budget_tokens, host_budget_tokens,
     gpu_leases = {page: (float("inf"), 0) for page in gpu_pages}
     host_leases = {page: (float("inf"), 0) for page in host_pages}
     covered_events = {}
-    covered_collateral = {}
 
     def cover(request):
         forecast = request.forecast
         event = request.reuse_event_key or request.owner_id
         covered_events[event] = max(covered_events.get(event, 0), forecast.target_saved_ms)
-        covered_collateral[request.owner_id] = forecast.expected_collateral_saved_ms
         for pages, leases, seconds in ((request.gpu_page_ids, gpu_leases, forecast.extra_gpu_seconds_per_page),
                                       (request.host_page_ids, host_leases, forecast.extra_host_seconds_per_page)):
             for page in pages:
@@ -180,8 +178,7 @@ def allocate_retention(requests, *, gpu_budget_tokens, host_budget_tokens,
             # retain/renew call, outside the shared event's gross coverage.
             target = forecast.target_saved_ms
             target -= min(max(target, 0), covered_events.get(event, 0))
-            saved = (target+forecast.expected_collateral_saved_ms
-                     -covered_collateral.get(request.owner_id, 0)-forecast.retention_control_ms)
+            saved = target-forecast.retention_control_ms
             value = saved-lambda_gpu*gpu_integral-lambda_host*host_integral
             if value > 0:
                 choice = RetentionChoice(request.owner_id, forecast.horizon_seconds,
@@ -327,7 +324,7 @@ class EmpiricalRetentionModel:
 
     def to_dict(self):
         return {"kind": "paired_native_retention_v4", "feature_schema": self.feature_schema,
-                "value_basis": "full affected-response window Native-Retain; target, collateral and first control separated without double charging",
+                "value_basis": "next source-demand READ saving minus retain control; full-window collateral is measured separately, not added per owner",
                 "bin_convention": "left_closed_right_open; None is missing",
                 "forecasts": {key: asdict(value) for key, value in self.forecasts.items()}}
 
