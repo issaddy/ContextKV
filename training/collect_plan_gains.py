@@ -76,11 +76,58 @@ def collect_pair(packet, direct_row, candidate_row):
     return record
 
 
+def export_observed_packets(observations, actual_turns, output):
+    """Resolve runtime attempt IDs against actual served turns, never stable TaskState IDs."""
+    tasks = {}
+    for row in actual_turns:
+        response = row.get("response")
+        if response is None:
+            continue
+        attempt = response["attempt_id"]
+        if attempt in tasks and tasks[attempt] != row["task_id"]:
+            raise ValueError("one actual attempt maps to different task IDs")
+        tasks[attempt] = row["task_id"]
+    packets, excluded, seen = [], [], set()
+    for observation in observations:
+        identity = observation["observation_id"]
+        if identity in seen:
+            continue
+        seen.add(identity)
+        attempt = observation["attempt_id"]
+        if attempt not in tasks:
+            excluded.append({"observation_id": identity, "attempt_id": attempt, "reason": "no_actual_turn_attempt_mapping"})
+            continue
+        if observation["decision_mode"] == "mandatory_coverage":
+            excluded.append({"observation_id": identity, "attempt_id": attempt,
+                             "reason": "mandatory_source_coverage_incomplete"})
+            continue
+        packets.append({**observation, "task_id": tasks[attempt]})
+    path = Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x") as stream:
+        for packet in packets:
+            stream.write(json.dumps(packet, ensure_ascii=False, allow_nan=False)+"\n")
+    manifest = {"schema_version": 1, "scope": "observed decision packets mapped through actual response.attempt_id",
+        "packets": len(packets), "excluded": excluded, "output": str(path.resolve())}
+    Path(str(path)+".manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
+    return manifest
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pairs", required=True, help="JSONL packets naming direct_run and candidate_run JSON files")
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--pairs", help="JSONL packets naming direct_run and candidate_run JSON files")
+    source_group.add_argument("--observations", help="Runtime observed-state JSONL with attempt/request IDs")
+    parser.add_argument("--actual-turns", help="Actual served-turn JSONL containing task_id and response.attempt_id")
     parser.add_argument("--output", required=True, help="New JSONL gain data file")
     args = parser.parse_args(argv)
+    if args.observations:
+        if not args.actual_turns:
+            parser.error("--observations requires --actual-turns")
+        def read(path):
+            return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+        export_observed_packets(read(args.observations), read(args.actual_turns), args.output)
+        return
     source = Path(args.pairs)
     packets = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
     rows = []

@@ -403,6 +403,9 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
         if response is not None:
             actual_budgets["ANSWER"] = attempt.plan.candidate.output_budget
         calls = service.engine.calls[call_cursor:]
+        native_finished = all(call.get("receipt", {}).get("generation_complete") for call in calls)
+        terminal_failure = (failure is not None and active is None and attempt is not None
+                            and attempt.stage == "FAILED" and native_finished)
         action_counts = {"READ": sum(step.task.kind == "READ" for step in steps),
             "REDUCE": sum(step.task.kind == "REDUCE" for step in steps),
             "GAP_RETRIEVAL": runtime.new_action_counts["GAP_RETRIEVAL"],
@@ -439,6 +442,10 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
             "frozen_state_key": state_key, "plan_id": plan.plan_id, "semantic_kind": plan.semantic_kind,
             "registered_plan_path": str((case_dir/"before.json").resolve()),
             "status": "completed" if response else "failed", "failure": failure,
+            "termination": {"terminal": terminal_failure or response is not None,
+                "user_paused": isinstance(active, (asyncio.CancelledError, KeyboardInterrupt)),
+                "native_calls_finished": native_finished,
+                "reason": failure["type"] if terminal_failure else "committed_QA" if response else None},
             "metrics": {}, "scoring": {"status": "missing", "identity": binding["scorer_identity"]},
             "answer": response.assistant_text if response else None, "response": to_jsonable(response),
             "steps": to_jsonable(steps), "attempt": to_jsonable(attempt), "cost": full_cost,

@@ -406,7 +406,12 @@ class PlanPolicy:
             (limits.max_host_peak_gib, cost.host_peak_gib, "host_capacity_budget"))
         return next((reason for limit, value, reason in checks if limit is not None and value > limit), None)
 
-    def choose(self, plans, state: ReadingOutcome, native: NativePlanningState, reusable_prefixes):
+    def choose_observed_actions(self, plans, state, native, reusable_prefixes):
+        from .action_policy import choose_observed_action
+        return choose_observed_action(self, plans, state, native, reusable_prefixes)
+
+    def choose(self, plans, state: ReadingOutcome, native: NativePlanningState, reusable_prefixes, *,
+               mandatory_coverage=False):
         self.last_option_diagnostics = {}
         plans = tuple(plans)
         if len(plans) > self.limits.max_plan_candidates:
@@ -481,11 +486,11 @@ class PlanPolicy:
                     cost += option.cost
                 reason = self._constraint(cost, state.plan.budget)
                 budgets = {step.task.step_id: option.output_budget for step, option in zip(ordered, route, strict=True)}
-                gain = (0.0 if plan.semantic_kind == "direct_answer" else self.gain_model.predict(
+                gain = (0.0 if mandatory_coverage or plan.semantic_kind == "direct_answer" else self.gain_model.predict(
                     plan_features(plan, state, output_budgets=budgets)))
                 objective = gain-self._penalty(cost, state.plan.budget)
                 evaluation = PlanEvaluation(plan.plan_id, gain, objective, cost, reason is None,
-                    reason or "reader_bound_complete_plan_gain", tuple((step.task.step_id,
+                    reason or ("mandatory_source_coverage" if mandatory_coverage else "reader_bound_complete_plan_gain"), tuple((step.task.step_id,
                         option.context_action, option.output_budget) for step, option in zip(ordered[:depth], prefix, strict=True)),
                     tuple(option.scope+":"+option.calibration_id for option in route), self.gain_model.asset_id)
                 evaluations.append(evaluation)

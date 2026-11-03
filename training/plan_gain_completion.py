@@ -10,14 +10,16 @@ import argparse
 from collections import Counter
 import hashlib
 import json
+import math
 from pathlib import Path
 import time
 
 from controller.context_schema import ReadingOutcome
-from controller.plan_policy import FEATURE_NAMES, PlanCandidate, plan_features
+from controller.plan_policy import PlanCandidate, plan_features
 from controller.schema import SessionSnapshot
 from controller.serialization import decode
-from training.train_plan_gain import PlanGainModel, working_state_key
+from training.train_plan_gain import (COST_FIELDS, PlanGainModel, _fit_features, _ridge,
+    actual_history, fit_cost_heads, working_state_key)
 
 
 RULE = "terminal_no_committed_QA_has_utility_0; committed_QA_uses_actual_fixed_judge_Q; raw_missing_Q_remains_null"
@@ -48,6 +50,39 @@ def _size(intervals):
     return result
 
 
+def _native_finished(call):
+    receipt = call.get("receipt")
+    if receipt is not None and receipt.get("generation_complete") is True:
+        return True
+    terminal = call.get("terminal_status")
+    return (terminal is not None and terminal.get("terminal") is True and terminal.get("inflight") is False
+            and terminal.get("state") in {"FAILED", "CANCELLED", "RETIRED", "REJECTED"})
+
+
+def _measured(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _completion(run, *, observed):
+    termination = run.get("termination", {})
+    if termination.get("user_paused") is True or run["status"] in {"paused", "unresolved"}:
+        return None, "paused_or_unresolved"
+    calls = run["actual_native_calls"]
+    if not all(_native_finished(call) for call in calls):
+        return None, "native_outcome_unresolved"
+    if run["attempt"] is None:
+        return None, "no_native_attempt"
+    if run["qa_increment"] == 1 and run["attempt"]["stage"] == "COMMITTED" and calls:
+        return 1, "committed_QA"
+    if run["qa_increment"] == 0 and run["attempt"]["stage"] == "FAILED":
+        if observed and not (termination.get("terminal") is True and termination.get("user_paused") is False
+                and termination.get("native_calls_finished") is True and termination.get("reason")
+):
+            return None, "terminal_failure_not_confirmed"
+        return 0, "confirmed_terminal_no_QA"
+    return None, "attempt_not_terminal"
+
+
 def completion_record(before, run):
     planned = decode(PlanCandidate, before["plan_candidate"])
     state = decode(ReadingOutcome, before["working_state"])
@@ -58,15 +93,44 @@ def completion_record(before, run):
         raise ValueError("completion labels require the actual pre-execution plan/state registration")
     if run["measurement_kind"] != "hardware" or run["split"] not in {"train", "dev"}:
         raise ValueError("completion supervision uses actual hardware train/development branches")
-    if any(run[name] != before[name] for name in ("reader_checkpoint", "reader_profile_id", "split", "scorer_identity")):
+    if (any(run[name] != before[name] for name in ("reader_checkpoint", "reader_profile_id", "split", "scorer_identity"))
+            or planned.reader_checkpoint != run["reader_checkpoint"]):
         raise ValueError("completion branch reader/partition/scorer differs from its pre-registration")
+    if (run["question"] != state.plan.task_state.raw_question or run["actual_history"] != actual_history(snapshot)
+            or run["history_origin"] not in {"frozen_actual_rollout", "model_actual"}):
+        raise ValueError("completion branch differs from its actual frozen question/history")
     if run["qa_increment"] not in {0, 1}:
         raise ValueError("completion branch did not retain the one-current-QA protocol")
-    calls_complete = all(call.get("receipt", {}).get("generation_complete") for call in run["actual_native_calls"])
-    terminal = run["attempt"]["stage"] in {"COMMITTED", "FAILED"} and calls_complete
-    complete = int(run["qa_increment"] == 1) if terminal else None
-    quality = run["metrics"].get("plan_gain_quality") if run["scoring"]["status"] == "scored" else None
-    necessary = run.get("quality_components", {}).get("necessary_points")
+    observed = before.get("observed_state_binding")
+    if observed != run.get("observed_state_binding"):
+        raise ValueError("completion branch changed its observed paid/native state")
+    if observed is not None and (observed["state_key"] != key or observed["actual_history"] != actual_history(snapshot)
+            or observed["reader_checkpoint"] != run["reader_checkpoint"]
+            or observed["reader_profile_id"] != run["reader_profile_id"]):
+        raise ValueError("observed completion binding differs from its actual frozen state")
+    complete, reason = _completion(run, observed=observed is not None)
+    if observed is not None:
+        counts = run["new_action_counts"]
+        allowed = {"READ": 0, "REDUCE": 0, "GAP_RETRIEVAL": 0, "ANSWER": 1}
+        if planned.semantic_kind != "direct_answer":
+            action = {"read_once": "READ", "reduce_once": "REDUCE", "gap_retrieval": "GAP_RETRIEVAL"}[planned.semantic_kind]
+            allowed[action] = 1
+        if any(counts[name] != count for name, count in allowed.items() if name != "ANSWER"):
+            complete, reason = None, "registered_action_not_executed"
+        if counts["ANSWER"] not in ({1} if complete == 1 or planned.semantic_kind == "direct_answer" else {0, 1}):
+            complete, reason = None, "new_answer_count_mismatch"
+        new_ids = set(run["new_step_ids"])
+        if not new_ids <= {step["step_id"] for step in run["steps"]}:
+            raise ValueError("observed completion names unavailable new physical steps")
+        for kind in ("READ", "REDUCE"):
+            if counts[kind] != sum(step["task"]["kind"] == kind and step["step_id"] in new_ids for step in run["steps"]):
+                raise ValueError("observed new action count differs from its actual new step IDs")
+    quality = (run["metrics"].get("plan_gain_quality") if run["qa_increment"] == 1
+               and run["scoring"]["status"] == "scored" else None)
+    if quality is not None and (not _measured(quality) or not 0 <= quality <= 1
+            or run["scoring"]["identity"] != run["scorer_identity"]):
+        raise ValueError("completion raw quality requires its actual normalized fixed scorer")
+    necessary = (run.get("quality_components", {}).get("necessary_points") if quality is not None else None)
     utility = 0.0 if complete == 0 else quality if complete == 1 else None
     effective_coverage = 0.0 if complete == 0 else necessary if complete == 1 else None
     units = {unit.unit_id: unit for unit in planned.context_plan.selected_set.selected_units}
@@ -81,18 +145,77 @@ def completion_record(before, run):
                 for span in units[identity].source_spans:
                     covered.setdefault(str(span.source_key), []).append((span.start, span.end))
     required_chars, covered_chars = _size(required), _size(covered)
-    return {"schema_version": 1, "source": "actual_plan_completion", "record_id": digest([
+    return {"schema_version": 2, "source": "actual_plan_completion", "record_id": digest([
             key, run["plan_id"], run["actual_native_calls"], run["qa_increment"]]),
         "state_key": key, "task_id": run["task_id"], "conversation_id": run["conversation_id"],
         "plan_id": planned.plan_id, "semantic_kind": planned.semantic_kind,
+        "collection_mode": "observed_actions" if observed is not None else "whole_plan",
         "reader_checkpoint": run["reader_checkpoint"], "reader_profile_id": run["reader_profile_id"],
-        "split": run["split"], "scorer_identity": run["scorer_identity"],
-        "completion": complete, "raw_judge_Q": quality, "final_required_point_coverage": necessary,
+        "split": run["split"], "scorer_identity": run["scorer_identity"], "observed_state_binding": observed,
+        "completion": complete, "completion_reason": reason,
+        "raw_judge_Q": quality, "final_required_point_coverage": necessary,
         "effective_utility": utility, "effective_final_coverage": effective_coverage,
         "utility_rule": RULE, "read_source_char_fraction": covered_chars/required_chars if required_chars else None,
         "read_original_characters": covered_chars, "required_original_characters": required_chars,
         "features": plan_features(planned, state),
         "pre_registration": before, "actual_run": run}
+
+
+def _cost_targets(base, candidate):
+    """Retain null per dimension; subtract only two actually known costs."""
+    direct = base["actual_run"]["actual_branch_execution_cost"]
+    action = candidate["actual_run"]["actual_branch_execution_cost"]
+    total_direct, total_action = base["actual_run"]["cost"], candidate["actual_run"]["cost"]
+    branch, baseline, delta = {}, {}, {}
+    for name in COST_FIELDS:
+        left, right = direct[name], action[name]
+        for value in (left, right, total_direct[name], total_action[name]):
+            if value is not None and (not _measured(value) or value < 0):
+                raise ValueError("completion costs must be observed nonnegative values or unknown")
+        baseline[name], branch[name] = left, right
+        delta[name] = right-left if left is not None and right is not None else None
+        if (delta[name] is not None and total_direct[name] is not None and total_action[name] is not None
+                and not math.isclose(delta[name], total_action[name]-total_direct[name], rel_tol=1e-9, abs_tol=1e-9)):
+            raise ValueError("completion paired costs do not share paid state and preparation")
+    return {"branch_complete_cost": branch, "direct_complete_cost": baseline, "incremental_complete_cost": delta}
+
+
+def effective_pair(base, candidate):
+    for name in ("state_key", "task_id", "conversation_id", "reader_checkpoint", "reader_profile_id", "split",
+                 "scorer_identity", "observed_state_binding"):
+        if base[name] != candidate[name]:
+            raise ValueError(f"effective branches differ in {name}")
+    for name in ("comparison_budget", "paid_cost"):
+        if base["actual_run"].get(name) != candidate["actual_run"].get(name):
+            raise ValueError(f"effective counterfactuals differ in {name}")
+    if (base["actual_run"]["cost"]["shared_preparation_cost_id"]
+            != candidate["actual_run"]["cost"]["shared_preparation_cost_id"]):
+        raise ValueError("effective counterfactuals differ in shared preparation")
+    observed = candidate["observed_state_binding"] is not None
+    if base["semantic_kind"] != "direct_answer":
+        raise ValueError("effective baseline must be direct ANSWER")
+    if observed:
+        if base["actual_run"]["new_action_counts"] != {"READ": 0, "REDUCE": 0, "GAP_RETRIEVAL": 0, "ANSWER": 1}:
+            raise ValueError("effective observed direct must have zero newly executed reading actions")
+    elif base["actual_run"]["steps"]:
+        raise ValueError("effective whole-plan direct must have zero READ/REDUCE steps")
+    if base["effective_utility"] is None or candidate["effective_utility"] is None:
+        return None
+    result = {"schema_version": 2, "source": "actual_completion_weighted_counterfactual",
+        "record_id": digest([base["record_id"], candidate["record_id"]]),
+        **{key: candidate[key] for key in ("state_key", "task_id", "conversation_id", "plan_id",
+            "semantic_kind", "reader_checkpoint", "reader_profile_id", "split", "scorer_identity", "features",
+            "collection_mode", "observed_state_binding")},
+        "utility_rule": RULE, "no_answer_utility": 0.0,
+        "raw_Q_direct": base["raw_judge_Q"], "raw_Q_counterfactual": candidate["raw_judge_Q"],
+        "utility_direct": base["effective_utility"], "utility_counterfactual": candidate["effective_utility"],
+        "effective_delta_q": candidate["effective_utility"]-base["effective_utility"],
+        "completion_direct": base["completion"], "completion_counterfactual": candidate["completion"],
+        "direct_features": base["features"], "direct": base, "counterfactual": candidate}
+    if observed:
+        result["cost_targets"] = _cost_targets(base, candidate)
+        result["incremental_complete_cost"] = result["cost_targets"]["incremental_complete_cost"]
+    return result
 
 
 def finalize(collection, output):
@@ -113,33 +236,34 @@ def finalize(collection, output):
                 "run_sha256": hashlib.sha256(run_path.read_bytes()).hexdigest()}
             completed.append(record)
             labelled.append(record)
-        direct = [record for record in labelled if record["semantic_kind"] == "direct_answer"]
-        if not direct:
-            continue
-        if len(direct) != 1 or direct[0]["actual_run"]["steps"]:
-            raise ValueError("effective gain baseline must be the unique zero-READ direct branch")
-        base = direct[0]
-        for candidate in labelled:
-            if candidate is base or base["effective_utility"] is None or candidate["effective_utility"] is None:
+        groups = {}
+        for record in labelled:
+            group = digest([record[name] for name in ("state_key", "conversation_id", "reader_checkpoint",
+                "reader_profile_id", "split", "scorer_identity", "observed_state_binding")])
+            groups.setdefault(group, []).append(record)
+        for members in groups.values():
+            direct = {record["record_id"]: record for record in members if record["semantic_kind"] == "direct_answer"}
+            if not direct:
                 continue
-            if base["actual_run"]["comparison_budget"] != candidate["actual_run"]["comparison_budget"]:
-                raise ValueError("effective counterfactuals use the same declared comparison budgets")
-            effective.append({"schema_version": 1, "source": "actual_completion_weighted_counterfactual",
-                "record_id": digest([base["record_id"], candidate["record_id"]]),
-                **{key: candidate[key] for key in ("state_key", "task_id", "conversation_id", "plan_id",
-                    "semantic_kind", "reader_checkpoint", "reader_profile_id", "split", "scorer_identity", "features")},
-                "utility_rule": RULE, "no_answer_utility": 0.0,
-                "raw_Q_direct": base["raw_judge_Q"], "raw_Q_counterfactual": candidate["raw_judge_Q"],
-                "utility_direct": base["effective_utility"], "utility_counterfactual": candidate["effective_utility"],
-                "effective_delta_q": candidate["effective_utility"]-base["effective_utility"],
-                "completion_direct": base["completion"], "completion_counterfactual": candidate["completion"],
-                "direct": base, "counterfactual": candidate})
+            if len(direct) != 1:
+                raise ValueError("effective gain baseline must be the unique direct branch at this frozen decision state")
+            base = next(iter(direct.values()))
+            for candidate in members:
+                if candidate["semantic_kind"] == "direct_answer":
+                    continue
+                paired = effective_pair(base, candidate)
+                if paired is not None:
+                    effective.append(paired)
     write_rows(target/"completion.jsonl", completed)
     write_rows(target/"effective-gains.jsonl", effective)
     manifest = {"source_collection": str(source.resolve()), "utility_rule": RULE,
         "completion_records": len(completed), "effective_gain_records": len(effective),
         "completion_counts": dict(Counter(str(record["completion"]) for record in completed)),
         "raw_quality_missing": sum(record["raw_judge_Q"] is None for record in completed),
+        "collection_modes": dict(Counter(record["collection_mode"] for record in completed)),
+        "completion_reasons": dict(Counter(record["completion_reason"] for record in completed)),
+        "cost_labelled_actions": sum("cost_targets" in row and all(
+            value is not None for values in row["cost_targets"].values() for value in values.values()) for row in effective),
         "raw_quality_policy": "missing raw judge Q preserved; zero is only the predeclared no-QA operational utility",
         "reader_bindings": sorted({(record["reader_checkpoint"], record["reader_profile_id"]) for record in completed})}
     (target/"manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
@@ -155,31 +279,62 @@ def fit_effective(training, *, ridge=1.0, path=None):
     if len(binding) != 1:
         raise ValueError("effective gain asset binds one actual reader/profile/scorer")
     for row in training:
-        if row["effective_delta_q"] != row["utility_counterfactual"]-row["utility_direct"]:
-            raise ValueError("effective target differs from the observed branch utilities")
-        for name in ("direct", "counterfactual"):
-            branch = row[name]
-            observed = completion_record(branch["pre_registration"], branch["actual_run"])
-            if observed["effective_utility"] != branch["effective_utility"] or observed["raw_judge_Q"] != branch["raw_judge_Q"]:
-                raise ValueError("effective utility differs from actual completion/raw judge evidence")
+        branches = {name: completion_record(row[name]["pre_registration"], row[name]["actual_run"])
+                    for name in ("direct", "counterfactual")}
+        expected = effective_pair(branches["direct"], branches["counterfactual"])
+        fields = ("state_key", "conversation_id", "semantic_kind", "reader_checkpoint", "reader_profile_id", "split",
+                  "scorer_identity", "features", "raw_Q_direct", "raw_Q_counterfactual", "utility_direct",
+                  "utility_counterfactual", "effective_delta_q", "direct_features", "observed_state_binding")
+        if expected is None or any(row[name] != expected[name] for name in fields):
+            raise ValueError("effective target/features differ from the actual fixed-state branch evidence")
+        if expected.get("cost_targets") != row.get("cost_targets"):
+            raise ValueError("effective cost labels differ from the paired actual paid branch costs")
     started = time.perf_counter()
-    x = np.asarray([[row["features"][name] for name in FEATURE_NAMES] for row in training], dtype=np.float64)
+    names = _fit_features(training)
+    samples, direct_seen, cost_kinds = [], set(), set()
+    cost_record_ids = []
+    for row in training:
+        if row["observed_state_binding"] is None:
+            continue
+        costs = row["cost_targets"]
+        if all(value is not None for target in ("branch_complete_cost", "incremental_complete_cost")
+               for value in costs[target].values()):
+            samples.append((row["features"], costs["branch_complete_cost"], costs["incremental_complete_cost"]))
+            cost_kinds.add(row["semantic_kind"])
+            cost_record_ids.append(row["record_id"])
+        key = digest([row["state_key"], row["conversation_id"], row["direct"]["actual_run"]["actual_native_calls"]])
+        if key not in direct_seen and all(value is not None for value in costs["direct_complete_cost"].values()):
+            direct_seen.add(key)
+            samples.append((row["direct_features"], costs["direct_complete_cost"], {name: 0.0 for name in COST_FIELDS}))
+    normalization = [row["features"] for row in training]+[sample[0] for sample in samples if sample[0]["direct_answer"] > .5]
+    all_x = np.asarray([[features[name] for name in names] for features in normalization], dtype=np.float64)
+    x = np.asarray([[row["features"][name] for name in names] for row in training], dtype=np.float64)
     y = np.asarray([row["effective_delta_q"] for row in training], dtype=np.float64)
-    center, scale = x.mean(axis=0), x.std(axis=0)
+    center, scale = all_x.mean(axis=0), all_x.std(axis=0)
     scale[scale == 0] = 1.0
-    z, intercept = (x-center)/scale, float(y.mean())
-    coefficients = np.linalg.solve(z.T@z+ridge*np.eye(z.shape[1]), z.T@(y-intercept))
+    coefficients, intercept = _ridge((x-center)/scale, y, ridge)
+    cost_models, cost_mse = fit_cost_heads(samples, names, center, scale, ridge=ridge)
+    cost_provenance = ({"source": "actual_observed_terminal_branch_and_paired_direct_costs",
+        "training_samples": len(samples), "action_samples": len(samples)-len(direct_seen),
+        "unique_direct_samples": len(direct_seen), "record_ids": cost_record_ids,
+        "trained_semantic_kinds": sorted({"direct_answer", *cost_kinds}), "cost_fields": COST_FIELDS,
+        "branch_scope": "actual new action through committed ANSWER or confirmed terminal no-QA failure; excludes common paid state/preparation/cleanup",
+        "incremental_scope": "signed_actual_action_branch_minus_direct_branch",
+        "unknown_cost_policy": "retained null; no unknown dimension is used as a measured sample",
+        "training_mse": cost_mse} if cost_models else {})
     return PlanGainModel(training[0]["reader_checkpoint"], training[0]["reader_profile_id"],
-        "effective-plan-gain:"+digest(training), FEATURE_NAMES, tuple(center.tolist()), tuple(scale.tolist()),
-        tuple(coefficients.tolist()), intercept,
+        "effective-plan-gain:"+digest(training), names, tuple(center.tolist()), tuple(scale.tolist()),
+        tuple(coefficients.tolist()), float(intercept),
         {"label": LABEL, "utility_rule": RULE, "no_answer_utility": 0.0, "raw_missing_quality_preserved": True,
          "training_split": "train", "training_records": len(training), "counterfactual_runs_retained": True,
          "input_sha256": digest(training), "input_path": str(Path(path).resolve()) if path else None,
          "training_state_keys": sorted({row["state_key"] for row in training}),
          "training_conversations": sorted({row["conversation_id"] for row in training}),
          "scorer_identity": training[0]["scorer_identity"], "ridge": ridge,
+         "trained_semantic_kinds": sorted({row["semantic_kind"] for row in training}),
+         "direct_baseline_identity": any(row["observed_state_binding"] is not None for row in training),
          "completion_counts": dict(Counter(str(row["completion_counterfactual"]) for row in training)),
-         "fit_elapsed_ms": (time.perf_counter()-started)*1000})
+         "fit_elapsed_ms": (time.perf_counter()-started)*1000}, cost_models, cost_provenance)
 
 
 def main(argv=None):

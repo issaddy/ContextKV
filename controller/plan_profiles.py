@@ -340,6 +340,9 @@ class ProfiledNativeObserver:
         for plan in plans:
             for step in plan.steps:
                 task = step.task
+                if task.kind == "GAP":
+                    future[plan.plan_id, task.step_id] = ()
+                    continue
                 cpu = (plan.context_plan.reading_mode == "typed_reduce" and task.kind == "REDUCE"
                        and task.operation in {"union", "count", "sum", "group"})
                 kind = "CPU_REDUCE" if cpu else step_generation_kind(task.kind, task.operation,
@@ -402,4 +405,6 @@ def load_rolling_runtime(settings, *, template, store, sampling, answer_system_p
         store=store if settings.get("prefix_directory", False) else None)
     return RollingPlanRuntime(model, observer, reader_checkpoint=checkpoint, reader_profile_id=profile,
         output_budgets=settings["output_budgets"], limits=PolicyLimits(**settings.get("limits", {})),
-        output_tokens_per_fact=settings.get("output_tokens_per_fact", 64))
+        output_tokens_per_fact=settings.get("output_tokens_per_fact", 64),
+        mode=settings.get("mode", "whole_plan"), observation_path=settings.get("observation_path"),
+        gap_retriever_identity=settings.get("gap_retriever_identity"), gap_limits=settings.get("gap_limits"))

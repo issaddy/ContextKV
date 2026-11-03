@@ -5,11 +5,13 @@ PlanPolicy, predict gain, or claim calibrated execution costs.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 import time
 
 from adapters.history_state import validate_task_refs
-from controller.context_schema import EvidencePool, OpenNeed, ReadingOutcome, ReadTask
+from controller.action_proposals import (GapRetrievalRequest as GapRetrievalRequest,
+    build_observed_action_plans as build_observed_action_plans, gap_query as gap_query)
+from controller.context_schema import EvidencePool, ReadingOutcome, ReadTask
 from controller.context_budget import bind_answer_window
 from controller.plan_policy import CompleteCost, complete_plan
 from controller.reading import build_read_plan
@@ -31,18 +33,6 @@ class ObservedActionFailure(ValueError):
     pass
 
 
-@dataclass(frozen=True)
-class GapRetrievalRequest:
-    open_needs: tuple[OpenNeed, ...]
-    query: str
-    retriever_identity: dict
-    limits: dict
-
-
-def gap_query(state, open_needs):
-    from adapters.evidence_pool import SourceDirectory
-    return "\n\n".join(SourceDirectory.open_need_query(state, need) for need in open_needs)
-
 
 def observed_state_binding(state, snapshot, *, paid_cost, native_condition,
                            reader_checkpoint, reader_profile_id, paid_observation=None):
@@ -55,62 +45,6 @@ def observed_state_binding(state, snapshot, *, paid_cost, native_condition,
     return binding
 
 
-def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint,
-                                gap_request=None, answer_system_prompt=None):
-    """Register at most one ready READ, one current-basis REDUCE and one GAP."""
-    base = bind_answer_window(frozen.plan, template, snapshot, answer_system_prompt,
-                             preserve_step_ids=tuple(record.step_id for record in frozen.steps))
-    covered = {unit for result in frozen.results for unit in result.covered_units}
-    if base.coverage_scope == "all_supplied_documents" and not set(base.coverage_units) <= covered:
-        return (), ({"family": "direct_answer", "reason": "mandatory_source_coverage_incomplete"},)
-    historic = tuple(record.task for record in frozen.steps)
-    from training.train_plan_gain import working_state_key
-    identity = working_state_key(frozen, snapshot)[:16]
-    completed = {result.step_id for result in frozen.results}
-    completed.update(result.reduction.step_id for result in frozen.results if result.reduction is not None)
-    branches = []
-
-    def add(kind, tasks):
-        plan = replace(base, plan_id=base.plan_id+":observed:"+identity+":"+kind, steps=(*historic, *tasks))
-        branches.append(complete_plan(plan, (), semantic_kind=kind, reader_checkpoint=reader_checkpoint))
-
-    add("direct_answer", ())
-    ready = tuple(task for task in base.steps if task.kind == "READ" and task.step_id not in completed
-                  and set(task.predecessor_step_ids) <= completed)
-    if ready:
-        add("read_once", ready[:1])
-    for need in base.task_state.needs:
-        if need.operation not in {"enumerate", "count", "sum", "group", "compare", "infer"}:
-            continue
-        claims = tuple(claim for claim in frozen.claims if claim.kind == "extract" and claim.serves(need.need_id))
-        if not claims:
-            continue
-        inputs = tuple(claim.claim_id for claim in claims)
-        operation = "union" if need.operation == "enumerate" else need.operation
-        if any(result.reduction is not None and need.need_id in result.reduction.need_ids
-               and result.reduction.operation == operation
-               and set(inputs) <= set(result.reduction.basis_claim_ids) for result in frozen.results):
-            continue
-        task = ReadTask("observed:reduce:"+need.need_id+":"+identity, "REDUCE", (need.need_id,),
-            input_claim_ids=inputs, reduction_basis_claim_ids=inputs,
-            predecessor_step_ids=tuple(dict.fromkeys(claim.rsplit(":claim:", 1)[0] for claim in inputs)),
-            input_budget=base.budget.window_tokens-base.budget.read_output_tokens,
-            output_budget=base.budget.read_output_tokens,
-            operation=operation,
-            retained_conclusion_tokens=tuple((identity, tokens) for identity, tokens
-                in base.answer_allocation.need_tokens if identity == need.need_id))
-        add("reduce_once", (task,))
-        break
-    if gap_request is not None:
-        if not gap_request.open_needs or not set(gap_request.open_needs) <= set(frozen.open_needs):
-            raise ValueError("registered GAP relations must belong to the frozen observed state")
-        if gap_request.query != gap_query(base.task_state, gap_request.open_needs):
-            raise ValueError("registered GAP query differs from the frozen task")
-        if not gap_request.retriever_identity or any(gap_request.limits[name] < 1
-                                                   for name in ("max_units", "max_passages")):
-            raise ValueError("registered GAP requires retriever identity and positive limits")
-        add("gap_retrieval", ())
-    return tuple(branches), ()
 
 
 class AuditedTaskInterpreter:
@@ -340,7 +274,9 @@ class FixedCounterfactualRuntime:
             if task.kind == "REDUCE":
                 parents = tuple(claim for claim in parents if any(claim.serves(need) for need in task.need_ids)
                                 and claim.kind == "extract")
-            if task.predecessor_step_ids and not parents:
+            if task.predecessor_step_ids and not parents and any(
+                    previous.task.step_id in task.predecessor_step_ids and previous.task.kind != "GAP"
+                    for previous in self.planned.steps):
                 raise EmptyPlannedPremise("planned predecessor produced no factual input: "+task.step_id)
             task = replace(task, input_claim_ids=tuple(claim.claim_id for claim in parents))
             plan = replace(plan, steps=tuple(task if old.step_id == task.step_id else old for old in plan.steps))

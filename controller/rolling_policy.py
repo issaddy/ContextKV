@@ -8,16 +8,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
+from pathlib import Path
 import time
 
 from .claim_graph import ClaimGraph
-from .context_schema import ReadTask, ReadingOutcome
+from .context_schema import EvidencePool, ReadResult, ReadTask, ReadingOutcome, StepRecord
 from .plan_policy import (NoCompletePlan, PlanPolicy, PlanStep,
                           _completed_steps, complete_plan)
 from .reading import (output_schema, read_output_reservation, step_generation_kind,
                       step_messages, unresolved_needs)
 from .schema import Plan, PromptCandidate
-from .serialization import dumps
+from .serialization import decode, dumps, to_jsonable
 
 
 ZERO_AUX = {"input_tokens": 0, "output_tokens": 0, "compute_ms": 0.0, "models": []}
@@ -137,7 +138,8 @@ class RollingPlanRuntime:
     it must return existing ContextPlan values and report its auxiliary usage.
     """
     def __init__(self, gain_model, native, *, reader_checkpoint, reader_profile_id,
-                 output_budgets, limits=None, replan=None, output_tokens_per_fact=64):
+                 output_budgets, limits=None, replan=None, output_tokens_per_fact=64,
+                 mode="whole_plan", observation_path=None, gap_retriever_identity=None, gap_limits=None):
         from .plan_policy import PolicyLimits
         self.policy = PlanPolicy(gain_model, limits=limits or PolicyLimits())
         if (reader_checkpoint, reader_profile_id) != (gain_model.reader_checkpoint, gain_model.reader_profile_id):
@@ -145,6 +147,13 @@ class RollingPlanRuntime:
         self.reader_checkpoint, self.reader_profile_id = reader_checkpoint, reader_profile_id
         self.native, self.output_budgets, self.replan = native, tuple(output_budgets), replan
         self.output_tokens_per_fact = output_tokens_per_fact
+        if mode not in {"whole_plan", "observed_actions"}:
+            raise ValueError("rolling mode must be whole_plan or observed_actions")
+        if mode == "observed_actions" and replan is not None:
+            raise ValueError("observed actions use selected GAP retrieval instead of automatic replanning")
+        self.mode = mode
+        self.observation_path = None if observation_path is None else Path(observation_path)
+        self.gap_retriever_identity, self.gap_limits = gap_retriever_identity, gap_limits
         if not self.output_budgets or any(value < 1 for value in self.output_budgets):
             raise ValueError("rolling READ output budgets must be declared positive choices")
 
@@ -156,6 +165,168 @@ class RollingPlanRuntime:
 
     async def aclose(self):
         await self.native.aclose()
+
+    @staticmethod
+    def _mandatory_coverage(state):
+        return (state.plan.coverage_scope == "all_supplied_documents" and not set(state.plan.coverage_units) <=
+                {identity for result in state.results for identity in result.covered_units})
+
+    def _gap_request(self, state, expanded, provider):
+        from .action_proposals import GapRetrievalRequest, gap_key, gap_query
+        if (provider is None or state.plan.coverage_scope == "all_supplied_documents"
+                or self.gap_retriever_identity is None or self.gap_limits is None):
+            return None
+        needs = tuple(need for need in state.open_needs if gap_key(need) not in expanded)
+        return (GapRetrievalRequest(needs, gap_query(state.plan.task_state, needs),
+                self.gap_retriever_identity, self.gap_limits) if needs else None)
+
+    def _observe_state(self, attempt_id, executor, state, snapshot, native, gap_request, mandatory):
+        if self.observation_path is None:
+            return
+        attempt = executor.store.get_attempt(attempt_id)
+        packet = {"schema_version": 1, "attempt_id": attempt_id, "request_id": attempt.request_id,
+            "working_state": state, "snapshot": snapshot, "paid_cost": native.paid_cost,
+            "native_condition": native.quotes, "paid_observation": native.paid_observation,
+            "reader_checkpoint": native.reader_checkpoint, "reader_profile_id": native.reader_profile_id,
+            "gap_request": gap_request, "decision_mode": "mandatory_coverage" if mandatory else self.mode}
+        packet["observation_id"] = f"{attempt_id}:{native.quotes.engine_restart_id}:{native.quotes.observed_seq}:{len(state.steps)}"
+        self.observation_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.observation_path.open("a") as stream:
+            stream.write(dumps(packet)+"\n")
+
+    def action_proposals(self, catalog, state, snapshot, template, compile_answers, gap_request):
+        from .action_proposals import build_observed_action_plans
+        base = _with_observed_sources(catalog, state)
+        plans, _ = build_observed_action_plans(replace(state, plan=base), snapshot, template,
+            reader_checkpoint=self.reader_checkpoint, gap_request=gap_request, include_gap_step=True)
+        result = []
+        for plan in plans:
+            completed = _completed_steps(plan, state)
+            units = {unit.unit_id: unit for unit in plan.context_plan.selected_set.selected_units}
+            dependencies = {identity for unit in units.values() for identity in unit.dependencies}
+            steps = []
+            for step in plan.steps:
+                task, variants = step.task, ()
+                reservation = read_output_reservation(plan.context_plan.task_state, task,
+                    tuple(units[identity] for identity in task.input_unit_ids), template.tokenizer,
+                    dependency_ids=dependencies, output_tokens_per_fact=self.output_tokens_per_fact,
+                    reading_mode=plan.context_plan.reading_mode)
+                if task.step_id not in completed and set(task.predecessor_step_ids) <= completed:
+                    if task.kind == "ANSWER":
+                        variants = compile_answers(snapshot, (plan.context_plan,), replace(state, plan=plan.context_plan))
+                    elif task.kind != "GAP" and not (task.kind == "REDUCE"
+                            and plan.context_plan.reading_mode == "typed_reduce"
+                            and task.operation in {"union", "count", "sum", "group"}):
+                        outputs = tuple(value for value in self.output_budgets if reservation <= value <= task.output_budget)
+                        variants = compile_step(plan.context_plan, task, state, snapshot, template, outputs=outputs)
+                steps.append(PlanStep(task, variants, reservation))
+            result.append(replace(plan, steps=tuple(steps), unmet_answer_points=tuple(
+                need.need_id for need in base.task_state.needs if not any(claim.serves(need.need_id) for claim in state.claims))))
+        return tuple(result)
+
+    @staticmethod
+    def _gap_usage(executor, attempt_id):
+        from .execution import merge_auxiliary_usage
+        usage = [record.metrics["auxiliary_usage"] for stage, record in
+            executor.store.execution_steps_with_stage(attempt_id)
+            if record.task.kind == "GAP" and stage in {"RESULT_READY", "COMPLETE"}]
+        return merge_auxiliary_usage(dict(ZERO_AUX), *usage)
+
+    async def _finish_gap(self, record, pool, state, snapshot, template, executor, expanded, events):
+        from .action_proposals import GapRetrievalRequest
+        from .context_budget import bind_answer_window
+        from .evidence_planner import _passages, close_dependencies
+        from .execution import ReadingBudgetExceeded
+        from .reading import build_read_plan
+        from .session_store import ReadingProgress
+        request = decode(GapRetrievalRequest, record.metrics["gap_request"])
+        if (len(pool.units) > request.limits["max_units"]
+                or len(_passages(pool.units)) > request.limits["max_passages"]):
+            raise ReadingBudgetExceeded("selected GAP result exceeds its registered retrieval limits")
+        old = state.plan
+        units = {unit.unit_id: unit for unit in (*old.selected_set.selected_units, *pool.units)}
+        closure = close_dependencies(tuple(unit.unit_id for unit in pool.units), units)
+        read_ids = {identity for result in state.results for identity in result.covered_units}
+        novel = tuple(unit for unit in closure if unit.unit_id not in read_ids)
+        if old.budget.max_passages is not None and len(_passages(tuple(units.values()))) > old.budget.max_passages:
+            raise ReadingBudgetExceeded("selected GAP exceeds the cumulative original passage allocation")
+        blocks = tuple({block.key: block for block in (*old.selected_set.source_blocks, *pool.source_blocks)}.values())
+        supports = old.selected_set.need_support
+        if pool.selected_set is not None:
+            needs = {need.need_id for need in request.open_needs}
+            supports = tuple(value for value in supports if value.need_id not in needs)+tuple(
+                value for value in pool.selected_set.need_support if value.need_id in needs)
+        selected = replace(pool.selected_set or old.selected_set, selected_units=tuple(units.values()),
+                           source_blocks=blocks, need_support=supports)
+        completed = {result.step_id for result in state.results}
+        pending = tuple(task for task in old.steps if task.step_id not in completed | {record.step_id})
+        fresh = ()
+        added_coverage = ()
+        if novel:
+            claims = {claim.claim_id: claim for claim in state.claims}
+            parents = tuple(dict.fromkeys(parent for need in request.open_needs for parent in need.parent_claim_ids))
+            gap = build_read_plan(old.task_state, replace(selected, selected_units=closure), old.coverage_scope,
+                old.budget, template=template, snapshot=snapshot, input_claims=tuple(claims[parent] for parent in parents),
+                reading_mode=old.reading_mode, separate_needs=old.separate_needs,
+                numeric_identity=old.numeric_identity, read_layout=old.read_layout, read_packing=old.read_packing,
+                answer_system_prompt=old.answer_system_prompt)
+            fresh = tuple(replace(task, step_id="gapread:"+record.step_id+":"+task.step_id, input_claim_ids=parents,
+                predecessor_step_ids=tuple(dict.fromkeys((record.step_id, *(parent.rsplit(":claim:", 1)[0]
+                    for parent in parents))))) for task in gap.steps)
+            added_coverage = gap.coverage_units
+            selected = replace(selected, selected_units=tuple({**{unit.unit_id: unit for unit in old.selected_set.selected_units},
+                **{unit.unit_id: unit for unit in gap.selected_set.selected_units}}.values()))
+        complete = record
+        records = (*state.steps, complete)
+        plan = replace(old, selected_set=selected, steps=(*tuple(item.task for item in records), *fresh, *pending),
+            coverage_units=tuple(dict.fromkeys((*old.coverage_units, *added_coverage))), answer_allocation=None,
+            auxiliary_ms=(*tuple(value for value in old.auxiliary_ms if value[0] != "gap:"+record.step_id),
+                          ("gap:"+record.step_id, record.result.elapsed_ms)))
+        plan = namespace_plan(bind_answer_window(plan, template, snapshot,
+            preserve_step_ids=tuple(item.step_id for item in records)))
+        # Preserve the returned tool material in the existing step ledger for restart recovery.
+        usage = self._gap_usage(executor, record.attempt_id)
+        state = replace(state, plan=plan, steps=(*state.steps, complete),
+                        results=(*state.results, complete.result), auxiliary_usage=usage)
+        state = replace(state, plan=_with_observed_sources(plan, state))
+        executor.store.save_reading_progress(record.attempt_id, state.plan,
+            ReadingProgress(tuple(sorted(expanded)), (), usage))
+        executor.store.save_execution_step(complete, "COMPLETE")
+        events.emit("rolling_gap_complete", attempt_id=record.attempt_id, step=complete,
+                    returned_unit_ids=tuple(unit.unit_id for unit in pool.units))
+        return state
+
+    async def _run_gap(self, attempt_id, task, request, state, snapshot, template, executor, expanded,
+                       provider, events, arrived):
+        from .action_proposals import gap_key
+        from .evidence_planner import _passages, close_dependencies
+        from .execution import require_online_tokens
+        from .session_store import ReadingProgress
+        tick = time.monotonic()
+        require_online_tokens(state.plan.budget.max_total_tokens, state.plan.online_tokens_spent, 1, "selected GAP")
+        record = StepRecord(attempt_id, task.step_id, task, result=ReadResult(task.step_id),
+            metrics={"gap_request": to_jsonable(request), "request_arrived_monotonic": arrived,
+                     "phase_started_monotonic": tick})
+        executor.store.save_execution_step(record, "SUBMITTED")
+        expanded.update(gap_key(need) for need in request.open_needs)
+        executor.store.save_reading_progress(attempt_id, state.plan,
+            ReadingProgress(tuple(sorted(expanded)), (), state.auxiliary_usage))
+        events.emit("rolling_gap_selected", attempt_id=attempt_id, request=request, step_id=task.step_id)
+        read_ids = tuple(dict.fromkeys(identity for result in state.results for identity in result.covered_units))
+        units = {unit.unit_id: unit for unit in state.plan.selected_set.selected_units}
+        read_units = close_dependencies(read_ids, units)
+        cap = len(_passages(read_units))+request.limits["max_passages"]
+        if state.plan.budget.max_passages is not None:
+            cap = min(cap, state.plan.budget.max_passages)
+        read_base = replace(state.plan, selected_set=replace(state.plan.selected_set, selected_units=read_units),
+                            budget=replace(state.plan.budget, max_passages=cap))
+        pool = await provider(read_base, request.open_needs, state.claims)
+        ended = time.monotonic()
+        record = replace(record, result=ReadResult(task.step_id, raw_output=dumps(pool), elapsed_ms=(ended-tick)*1000),
+            metrics={**record.metrics, "auxiliary_usage": pool.auxiliary_usage,
+                "phase_window": {"start": tick, "end": ended, "clock": "client_monotonic", "scope": "gap_retrieval"}})
+        executor.store.save_execution_step(record, "RESULT_READY")
+        return await self._finish_gap(record, pool, state, snapshot, template, executor, expanded, events)
 
     def proposals(self, context_plans, state, snapshot, template, compile_answers):
         plans = []
@@ -215,6 +386,9 @@ class RollingPlanRuntime:
             raise ValueError("rolling execution reserves one finite candidate for direct ANSWER")
         saved = tuple(executor.store.execution_step(attempt_id, record.step_id)
                       for record in executor.store.execution_steps(attempt_id))
+        if self.mode == "observed_actions" and saved:
+            catalog = executor.store.context_plan(attempt_id)
+            context_plans = (namespace_plan(catalog),)
         records = tuple(record for stage, record, _ in saved if stage == "COMPLETE")
         graph = ClaimGraph(claim for record in records for claim in record.result.claims)
         coverage = tuple((context_plans[0].coverage_scope, span.source_key.document_id,
@@ -227,6 +401,8 @@ class RollingPlanRuntime:
             tuple(graph.claims.values()), coverage,
             unresolved_needs(tuple(record.result for record in records)),
             auxiliary_usage=progress.auxiliary_usage if progress is not None else dict(ZERO_AUX))
+        if self.mode == "observed_actions":
+            state = replace(state, auxiliary_usage=self._gap_usage(executor, attempt_id))
         if saved:
             arrivals = {record.metrics["request_arrived_monotonic"] for _, record, _ in saved}
             if len(arrivals) != 1 or None in arrivals:
@@ -235,6 +411,8 @@ class RollingPlanRuntime:
             executor.request_arrived = arrived
             for stage, record, _ in saved:
                 if stage != "COMPLETE":
+                    if self.mode == "observed_actions" and record.task.kind == "GAP":
+                        raise ValueError("selected GAP was already submitted; it will not be paid again")
                     variants = compile_step(state.plan, record.task, state, snapshot, template,
                                             outputs=(record.task.output_budget,))
                     state = await executor.execute_one(attempt_id, snapshot, state.plan, record.task, state,
@@ -242,15 +420,23 @@ class RollingPlanRuntime:
         decisions = []
         while True:
             selection_started = time.monotonic()
-            plans = self.proposals(context_plans, state, snapshot, template, compile_answers)
+            mandatory = self._mandatory_coverage(state)
+            gap_request = self._gap_request(state, expanded, open_need_provider)
+            plans = (self.action_proposals(context_plans[0], state, snapshot, template,
+                compile_answers, gap_request) if self.mode == "observed_actions" and not mandatory else
+                self.proposals(context_plans, state, snapshot, template, compile_answers))
             if len(plans) > self.policy.limits.max_plan_candidates:
                 raise ValueError("rolling proposals exceed the configured finite candidate set")
             if any(plan.context_plan.task_state != state.plan.task_state for plan in plans):
                 raise ValueError("semantic alternatives must share the current actual task binding")
             native, reusable = await self.native.observe(plans, state, snapshot, engine, cost_model,
                 arrived, auxiliary_usage, selection_started=selection_started)
+            self._observe_state(attempt_id, executor, state, snapshot, native, gap_request, mandatory)
             try:
-                decision = self.policy.choose(plans, state, native, reusable)
+                decision = (self.policy.choose_observed_actions(plans, state, native, reusable)
+                    if self.mode == "observed_actions" and not mandatory else
+                    self.policy.choose(plans, state, native, reusable,
+                        mandatory_coverage=self.mode == "observed_actions" and mandatory))
             except NoCompletePlan:
                 events.emit("rolling_plan_no_complete", attempt_id=attempt_id,
                     observed_at_ms=(time.monotonic()-arrived)*1000,
@@ -270,6 +456,8 @@ class RollingPlanRuntime:
                         for step in plan.steps)} for plan in plans))
                 raise
             audit = {"observed_at_ms": (time.monotonic()-arrived)*1000,
+                "decision_mode": "mandatory_coverage" if mandatory else self.mode,
+                "gap_request": gap_request,
                 "state_steps": tuple(record.step_id for record in state.steps),
                 "paid_cost": native.paid_cost, "evaluations": self.policy.last_evaluations,
                 "option_diagnostics": self.policy.last_option_diagnostics,
@@ -296,10 +484,25 @@ class RollingPlanRuntime:
                     auxiliary_ms=0.0), quote, snapshot, batch=native.quotes,
                     concurrency=native.quotes.active_requests+1)
                 selected = Plan(candidate, predicted=(estimate,), quote_seq=native.quotes.observed_seq,
-                                reason="rolling_plan_gain")
+                    reason="rolling_observed_action_gain_cost" if self.mode == "observed_actions" else "rolling_plan_gain")
                 return RollingResult(outcome, selected, native.quotes, tuple(decisions), selection_started)
-            state = await executor.execute_one(attempt_id, snapshot, plan, decision.next_step.task, state,
+            if self.mode == "observed_actions" and decision.next_step.task.kind == "GAP":
+                catalog = _with_observed_sources(context_plans[0], state)
+                catalog = replace(catalog, online_tokens_spent=native.paid_cost.input_tokens+native.paid_cost.output_tokens)
+                state = await self._run_gap(attempt_id, decision.next_step.task, gap_request,
+                    replace(state, plan=catalog), snapshot, template, executor, expanded,
+                    open_need_provider, events, arrived)
+                context_plans = (state.plan,)
+                continue
+            execution_plan = _with_observed_sources(context_plans[0], state) if self.mode == "observed_actions" else plan
+            state = await executor.execute_one(attempt_id, snapshot, execution_plan, decision.next_step.task, state,
                 initial_auxiliary_usage=auxiliary_usage, candidate=decision.next_step.candidate)
+            if self.mode == "observed_actions":
+                from .session_store import ReadingProgress
+                context_plans = (state.plan,)
+                executor.store.save_reading_progress(attempt_id, state.plan,
+                    ReadingProgress(tuple(sorted(expanded)), (), state.auxiliary_usage))
+                continue
             if self.replan is not None:
                 context_plans, usage = await self.replan(context_plans, state, snapshot)
                 context_plans = tuple(namespace_plan(plan) for plan in context_plans)
@@ -312,7 +515,6 @@ class RollingPlanRuntime:
                 needs = tuple(need for need in state.open_needs
                     if (need.need_id, need.missing_relation, need.bound_entities, need.temporal_scope) not in expanded)
                 if needs:
-                    from .context_schema import EvidencePool
                     from .evidence_planner import close_dependencies
                     from .execution import merge_auxiliary_usage, require_online_tokens
                     from .reading import build_read_plan

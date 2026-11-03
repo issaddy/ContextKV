@@ -297,6 +297,25 @@ def _ridge(z, y, ridge):
     return coefficients, y_mean-x_mean@coefficients
 
 
+
+def fit_cost_heads(samples, feature_names, center, scale, *, ridge=1.0):
+    """Fit the existing two complete-cost targets from fully observed samples."""
+    import numpy as np
+    if not samples:
+        return {}, {}
+    cost_x = np.asarray([[sample[0][name] for name in feature_names] for sample in samples], dtype=np.float64)
+    cost_y = np.asarray([[sample[index][name] for index in (1, 2) for name in COST_FIELDS]
+                         for sample in samples], dtype=np.float64)
+    cost_z = (cost_x-center)/scale
+    weights, bias = _ridge(cost_z, cost_y, ridge)
+    errors = np.mean((cost_z@weights+bias-cost_y)**2, axis=0)
+    models = {target: {name: {"coefficients": weights[:, index*len(COST_FIELDS)+column].tolist(),
+        "intercept": float(bias[index*len(COST_FIELDS)+column])} for column, name in enumerate(COST_FIELDS)}
+        for index, target in enumerate(COST_TARGETS)}
+    mse = {target: {name: float(errors[index*len(COST_FIELDS)+column]) for column, name in enumerate(COST_FIELDS)}
+           for index, target in enumerate(COST_TARGETS)}
+    return models, mse
+
 def fit_gain(rows, *, ridge=1.0, input_path=None):
     """Closed-form regression; called only by the explicit training command."""
     import numpy as np
@@ -316,16 +335,7 @@ def fit_gain(rows, *, ridge=1.0, input_path=None):
     predicted = np.clip(intercept+z@coefficients, -1, 1)
     cost_models, cost_provenance = {}, {}
     if cost_samples:
-        cost_x = np.asarray([[sample[0][name] for name in names] for sample in cost_samples], dtype=np.float64)
-        cost_y = np.asarray([[sample[index][name] for index in (1, 2) for name in COST_FIELDS]
-                             for sample in cost_samples], dtype=np.float64)
-        cost_z = (cost_x-center)/scale
-        weights, bias = _ridge(cost_z, cost_y, ridge)
-        errors = np.mean((cost_z@weights+bias-cost_y)**2, axis=0)
-        for index, target in enumerate(COST_TARGETS):
-            cost_models[target] = {name: {"coefficients": weights[:, index*len(COST_FIELDS)+column].tolist(),
-                "intercept": float(bias[index*len(COST_FIELDS)+column])}
-                for column, name in enumerate(COST_FIELDS)}
+        cost_models, cost_mse = fit_cost_heads(cost_samples, names, center, scale, ridge=ridge)
         cost_provenance = {"source": "actual_observed_action_and_paired_direct_complete_response_costs",
             "training_samples": len(cost_samples), "action_samples": len(cost_samples)-direct_count,
             "unique_direct_samples": direct_count,
@@ -334,8 +344,7 @@ def fit_gain(rows, *, ridge=1.0, input_path=None):
                 if row.get("observed_state_binding") is not None)}),
             "cost_fields": COST_FIELDS, "branch_scope": "new_action_and_complete_ANSWER_excludes_paid_preparation_cleanup",
             "incremental_scope": "signed_action_plus_ANSWER_minus_direct_ANSWER",
-            "training_mse": {target: {name: float(errors[index*len(COST_FIELDS)+column])
-                for column, name in enumerate(COST_FIELDS)} for index, target in enumerate(COST_TARGETS)}}
+            "training_mse": cost_mse}
     digest = _digest(rows)
     return PlanGainModel(reader, profile, "plan-gain:"+digest, names,
         tuple(center.tolist()), tuple(scale.tolist()), tuple(coefficients.tolist()), float(intercept),
