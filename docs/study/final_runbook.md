@@ -141,3 +141,9 @@ done
 ```
 
 索引只使用已有数值指标与 caller 标注的 cohort；不同版本、公开轨道、构造诊断、容量数据保持独立。尚无最终评分、冻结或完整物理窗口的项目保持 missing/null 或列入未匹配清单，不能由训练 loss、字段投影成功率、成本预测或另一轨道分数代填。原始产物及权重继续保留在指定容器。
+
+
+最终成本另有两本独立 token 索引：`runs/study/final-native-usage-index.json` 从只读 SQLite 核对原生回执，
+`runs/study/final-api-cost-index.json` 核对实际 API 响应。它们与训练前向、请求辅助编码器和物理积分分别保留。
+最后模型服务已停止；复现时在原指定容器按相应启动配置启动服务，并重新采集当前进程/设备范围的成本配置。
+最终统一入口为 `runs/study/final-index-v1/final-index.json` 与同目录 Markdown。

@@ -24,7 +24,7 @@
   },
   "R1_v1": {
     "logical_name": "R1_v1",
-    "status": "trained_merged_serving",
+    "status": "trained_merged_assets_retained",
     "reader_id": "contextkv-reader-r1:1eec232b42b67721374c0400b354081842b54c965a20c441b17b4d82a33c567b",
     "dtype": "bfloat16",
     "adaptation": "LoRA",
@@ -53,16 +53,45 @@
     "latest_service_report": {
       "port": 30004,
       "physical_gpu": 6,
-      "health_status": 200
-    }
+      "pid": 133486,
+      "status": "stopped_after_all_R1_experiments",
+      "last_observed_health_status": 200,
+      "assets_retained": true
+    },
+    "own_P3_goal_reference": {
+      "protocol": "goal_reference_correctness_conditions_v1",
+      "recorded_QA": {
+        "P0_R1": 8,
+        "P1_R1": 12
+      },
+      "scored_QA": {
+        "P0_R1": 8,
+        "P1_R1": 12
+      },
+      "global_common_tasks": 8,
+      "common_scores": {
+        "P0_R1": 0.93125,
+        "P1_R1": 0.8375
+      },
+      "groundedness_scored": false
+    },
+    "full_source_wiki_V4_development": {
+      "completed_QA": 12,
+      "planned_QA": 12,
+      "valid_field_scores": 10,
+      "answer_F1": 49.167
+    },
+    "reader_manifest_sha256": "e05904db13035e8254fd23d3d3e1f202f587e85c6ede5f1d4bf9b9f84a73fd78",
+    "validation_file_sha256": "42ad952cb612fac96f1efd791227d7dc87dc9c54d1706c5e4fa488e0cbcecfa6",
+    "final_serving_status": "stopped after experiments"
   },
   "P0": {
     "status": "existing_actual_prefix_asset",
     "asset": "models/study-support-actual-prefix",
     "manifest": "models/study-support-actual-prefix/support-model.json",
     "heads": "models/study-support-actual-prefix/heads.pt",
-    "asset_sha256": null,
-    "asset_sha256_status": "fill_from_frozen_configuration"
+    "heads_sha256": "19e99b24285ab13108a4c04c1917b75fe7841e97f97942b0282e75b2205bfd02",
+    "manifest_sha256": "a9fef3fb671d0306362d84396917d2b0ae871fc895c3f109e8b82810c6499eb2"
   },
   "P1_prototype22": {
     "status": "trained",
@@ -77,12 +106,12 @@
       "P1_R0",
       "P1_R2"
     ],
-    "asset_sha256": null,
-    "asset_sha256_status": "fill_from_frozen_configuration"
+    "heads_sha256": "c4532ea1d9afb98a4a05e9a5a925878293bd25b95b30596149ca38641a58840e",
+    "manifest_sha256": "e3561e7fecbd29b6e4b1e937ef86f8291ffb0b79119119837d57c4a67f8df99a"
   },
   "R2": {
     "logical_name": "R2",
-    "status": "trained_merged_serving",
+    "status": "trained_merged_assets_retained",
     "reader_id": "contextkv-reader-r1:7521b3cffa58df5c0973b361f12d9138bcf358c6404a1b6b6a4c6b440f62e768",
     "identity_note": "Existing driver prefix remains contextkv-reader-r1; logical round and full digest distinguish R2",
     "initial_adapter": "models/study-reader-r1/adapter",
@@ -120,8 +149,9 @@
       "sampling_order": "new P1, curriculum, parent",
       "minimum_actual_native_turns": 1000,
       "validation_policy": "copy unchanged frozen parent validation bytes",
-      "validation_file_sha256": null,
-      "validation_file_sha256_status": "fill_from_data_manifest"
+      "validation_file_sha256": "42ad952cb612fac96f1efd791227d7dc87dc9c54d1706c5e4fa488e0cbcecfa6",
+      "validation_file_sha256_status": "actual byte SHA equals the frozen parent validation file",
+      "validation_file_sha256_reference": "runs/study/reader-r2-data/mixed/data_manifest.json"
     },
     "mix_config": "configs/reader_mix_r2.yaml",
     "data_dir": "runs/study/reader-r2-data/mixed",
@@ -140,10 +170,38 @@
     "latest_service_report": {
       "port": 30006,
       "physical_gpu": 4,
-      "health_status": 200
+      "last_observed_health_status": 200,
+      "status": "teardown_started_after_all_model_batches_finished"
     },
-    "public_quality_result": null,
-    "public_quality_status": "pending"
+    "public_quality_result": {
+      "source_batch": "runs/study/a-public-final-v4",
+      "multidoc2dial": {
+        "planned_QA": 13,
+        "completed_QA": 6,
+        "scored_QA": 6,
+        "RB_llm": 0.3666667
+      },
+      "twowiki": {
+        "planned_QA": 40,
+        "completed_QA": 40,
+        "valid_field_scores": 37,
+        "independent_answer_F1": 60.2110352,
+        "exact_common_with_R0": 34,
+        "common_answer_F1": 62.58259714,
+        "common_R0_answer_F1": 55.61247576,
+        "common_delta_percentage_points": 6.97012138
+      },
+      "loong": {
+        "planned_QA": 4,
+        "completed_QA": 2,
+        "scored_QA": 2,
+        "mean_rubric_score": 30
+      },
+      "post_test_method_selection": false
+    },
+    "public_quality_status": "main_frozen_V4_test_results_reported",
+    "reader_manifest_sha256": "0974d406fb72fd8672ce12a11d78d112a28d53e8301a9d1947280c2e24a4f214",
+    "final_serving_status": "stopped after experiments"
   },
   "data_and_review_artifact_contract": {
     "prepared_data": [
@@ -188,17 +246,31 @@
     "validation": [
       "evaluation/train_partition_holdout_loss.json"
     ],
-    "licenses_and_source": [
-      "BASE_MODEL_CARD.md",
-      "LICENSE",
-      "BASE_NOTICE"
-    ],
-    "licenses_verification_status": "fill actual present files, base revision and SHA from container asset manifests",
+    "licenses_verification_status": "actual adapter-directory inventory: all three listed files absent; base weights provenance retained",
     "physical_integral_totals": null,
-    "physical_integral_totals_status": "pending aggregation from continuous sampler artifacts; torch peak memory is separate"
+    "physical_integral_totals_status": "read final unique physical ledger; overlapping stages counted once and unobserved intervals retained",
+    "physical_integral_totals_reference": "runs/study/repro-final/full-cost-ledger.json",
+    "adapter_license_inventory": {
+      "R1_v1": {
+        "directory": "models/study-reader-r1/adapter",
+        "BASE_MODEL_CARD.md": false,
+        "LICENSE": false,
+        "BASE_NOTICE": false
+      },
+      "R2": {
+        "directory": "models/study-reader-r2/adapter",
+        "BASE_MODEL_CARD.md": false,
+        "LICENSE": false,
+        "BASE_NOTICE": false
+      }
+    },
+    "base_weights_provenance": {
+      "scope": "configs/model_scopes/qwen3-32b.local.json",
+      "actual_base_revision": "local-snapshot:7442623e99dd0b456628ddc48805a4ea11249ee2ee66484b5d1ab44d2940beb8"
+    }
   },
   "frozen_fourgrid_R1_v1": {
-    "root": "b/fourgrid-prototype22/frozen",
+    "root": "../fourgrid-prototype22/frozen",
     "metric": "project_condition_version_score",
     "comparison_scope": "same actual E0 task state, candidate pool and actual history",
     "common_states": 13,
@@ -228,7 +300,8 @@
     "public_benchmark_result": false,
     "full_cost_comparison": null
   },
-  "final_evaluation_pending": {
+  "source_freeze_commit": "487ce5d",
+  "final_evaluation": {
     "public_development_methods": [
       "P0_R0",
       "P1_R0",
@@ -246,9 +319,350 @@
     },
     "R0_R1_development_generation_reported": true,
     "R2_development_generation_reported": true,
-    "source_and_asset_freeze_manifest": null,
-    "selected_method": null,
-    "public_test_scores": null,
-    "load_and_ablation_results": null
+    "source_and_asset_freeze_manifest": "runs/study/a-public-final-v4/frozen.json",
+    "selected_method": "P0_R0",
+    "public_test_scores": {
+      "source_batch": "runs/study/a-public-final-v4",
+      "multidoc2dial": {
+        "planned_QA_per_reader": 13,
+        "R0": {
+          "completed_QA": 6,
+          "scored_QA": 6,
+          "RB_llm": 0.65
+        },
+        "R2": {
+          "completed_QA": 6,
+          "scored_QA": 6,
+          "RB_llm": 0.3666667
+        }
+      },
+      "twowiki": {
+        "planned_QA_per_reader": 40,
+        "R0": {
+          "completed_QA": 40,
+          "valid_field_scores": 37,
+          "independent_answer_F1": 53.8060588
+        },
+        "R2": {
+          "completed_QA": 40,
+          "valid_field_scores": 37,
+          "independent_answer_F1": 60.2110352
+        },
+        "exact_common": {
+          "tasks": 34,
+          "R0_answer_F1": 55.61247576,
+          "R2_answer_F1": 62.58259714,
+          "R2_minus_R0_percentage_points": 6.97012138
+        }
+      },
+      "loong": {
+        "planned_QA_per_reader": 4,
+        "R0": {
+          "completed_QA": 1,
+          "scored_QA": 1,
+          "mean_rubric_score": 30
+        },
+        "R2": {
+          "completed_QA": 2,
+          "scored_QA": 2,
+          "mean_rubric_score": 30
+        }
+      }
+    },
+    "load_and_ablation_results": {
+      "capacity_batch": "runs/study/capacity-r0-joint-v1",
+      "jobs_completed": 8,
+      "completed_QA": 56,
+      "scored_QA": 55,
+      "requested_QA": 56,
+      "scope": "two-turn own-answer P3; clients1/4/8; second request after own first commit plus30seconds",
+      "cells": [
+        {
+          "concurrency": 1,
+          "method": "B6_native",
+          "completed_QA": 2,
+          "scored_QA": 2,
+          "reported_score_mean": 1.0
+        },
+        {
+          "concurrency": 1,
+          "method": "B6_value",
+          "completed_QA": 2,
+          "scored_QA": 2,
+          "reported_score_mean": 0.95
+        },
+        {
+          "concurrency": 1,
+          "method": "S3_native",
+          "completed_QA": 2,
+          "scored_QA": 2,
+          "reported_score_mean": 1.0
+        },
+        {
+          "concurrency": 1,
+          "method": "S3_value",
+          "completed_QA": 2,
+          "scored_QA": 2,
+          "reported_score_mean": 1.0
+        },
+        {
+          "concurrency": 4,
+          "method": "B6_native",
+          "completed_QA": 8,
+          "scored_QA": 8,
+          "reported_score_mean": 0.9625
+        },
+        {
+          "concurrency": 4,
+          "method": "S3_native",
+          "completed_QA": 8,
+          "scored_QA": 7,
+          "reported_score_mean": 0.985714
+        },
+        {
+          "concurrency": 8,
+          "method": "B6_native",
+          "completed_QA": 16,
+          "scored_QA": 16,
+          "reported_score_mean": 0.940625,
+          "p95_complete_ms": 113811.5896
+        },
+        {
+          "concurrency": 8,
+          "method": "S3_native",
+          "completed_QA": 16,
+          "scored_QA": 16,
+          "reported_score_mean": 0.90625,
+          "p95_complete_ms": 94399.0444
+        }
+      ],
+      "long_budget_ablation": {
+        "scope": "separate batches, each with original completion denominator and actual TaskStates; no post-test method selection",
+        "window_tokens": 32768,
+        "main_frozen": {
+          "budget_pair": "4K/8K",
+          "planned_QA_per_reader": 4,
+          "R0": {
+            "completed_and_scored": 1,
+            "mean_score": 30
+          },
+          "R2": {
+            "completed_and_scored": 2,
+            "mean_score": 30
+          }
+        },
+        "v1_old_code": {
+          "budget_pair": "12K/8K",
+          "planned_QA_per_reader": 4,
+          "R0": {
+            "completed_and_scored": 3,
+            "mean_score": 53.3333
+          },
+          "R2": {
+            "completed_and_scored": 4,
+            "mean_score": 25
+          }
+        },
+        "v2_current_code": {
+          "budget_pair": "12K/8K",
+          "source_commit": "6ff46fc",
+          "planned_QA_per_reader": 4,
+          "R0": {
+            "completed_and_scored": 4,
+            "mean_score": 38.75
+          },
+          "R2": {
+            "completed_and_scored": 3,
+            "mean_score": 41.0,
+            "failed_READ": {
+              "steps": 311,
+              "spent_tokens": 4177440,
+              "next_request_tokens": 20296,
+              "total_budget_tokens": 4194304
+            }
+          }
+        }
+      }
+    },
+    "source_freeze_commit": "487ce5d",
+    "selection_kind": "operational_incumbent_retained_no_eligible_development_candidate",
+    "development_eligible": false,
+    "development_weights": {
+      "multidoc2dial": 0.5,
+      "twowiki": 0.5
+    },
+    "development_summary": {
+      "R0": {
+        "Q": 0.642963,
+        "p95_complete_ms": 135177
+      },
+      "R2": {
+        "Q": 0.615185,
+        "p95_complete_ms": 170321
+      }
+    },
+    "eligibility_failure": "P95 constraint",
+    "post_test_method_selection": false,
+    "own_P3_old_code_goal_reference": {
+      "source_root": "runs/study/a-own-p3-final/scoring",
+      "protocol": "goal_reference_correctness_conditions_v1",
+      "declared_QA_per_method": 14,
+      "source_QA": {
+        "P0_R0": 14,
+        "P0_R1": 8,
+        "P1_R0": 11,
+        "P1_R1": 12
+      },
+      "scored_QA": {
+        "P0_R0": 14,
+        "P0_R1": 8,
+        "P1_R0": 11,
+        "P1_R1": 12
+      },
+      "exact_common_tasks": 8,
+      "common_scores": {
+        "P0_R0": 0.9375,
+        "P0_R1": 0.93125,
+        "P1_R0": 1.0,
+        "P1_R1": 0.8375
+      },
+      "dimensions": [
+        "correctness",
+        "conditions_versions"
+      ],
+      "null_dimensions": [
+        "groundedness",
+        "answerability",
+        "citations"
+      ]
+    },
+    "own_P3_current_code_R0_R2": {
+      "source_root": "runs/study/a-own-p3-current-r2-final/p3",
+      "score_report": "runs/study/a-own-p3-current-r2-final/goal-reference-scoring/comparison_report.json",
+      "protocol": "goal_reference_correctness_conditions_v1",
+      "status": "generation_and_reference_scoring_finished",
+      "declared_QA_per_method": 14,
+      "exact_common_tasks": 8,
+      "results": {
+        "P0_R0": {
+          "recorded_QA": 11,
+          "scored_QA": 11,
+          "common_mean": 0.8125,
+          "all_scored_mean": 0.863636
+        },
+        "P1_R0": {
+          "recorded_QA": 11,
+          "scored_QA": 11,
+          "common_mean": 0.73125,
+          "all_scored_mean": 0.804545
+        },
+        "P0_R2": {
+          "recorded_QA": 12,
+          "scored_QA": 12,
+          "common_mean": 0.90625,
+          "all_scored_mean": 0.854167
+        },
+        "P1_R2": {
+          "recorded_QA": 14,
+          "scored_QA": 14,
+          "common_mean": 0.74375,
+          "all_scored_mean": 0.782143
+        }
+      },
+      "reader_R2_at_P0_delta_percentage_points": 9.375,
+      "joint_P1_R2_vs_P0_R0_delta_percentage_points": -6.875,
+      "null_dimensions": [
+        "groundedness",
+        "answerability",
+        "citations"
+      ],
+      "run_source_commit": "6ff46fc",
+      "R0_native_service": 3,
+      "R2_native_service": 4
+    },
+    "independent_B3_public_test": {
+      "source_root": "runs/study/incumbent-b3-public-final-v1",
+      "selection_origin": "prior frozen development RB_llm0.8 before test",
+      "post_test_selection": false,
+      "planned_QA": 13,
+      "completed_QA": 13,
+      "scored_QA": 13,
+      "RB_llm": 0.5230769231,
+      "mean_complete_ms": 56275.347,
+      "p95_complete_ms": 78036.13,
+      "all_online_models_tokens": 2242604,
+      "request_attributed_gpu_gib_seconds": 129416.704,
+      "request_attributed_host_gib_seconds": 39326.432,
+      "physical_scope": "request-attributed occupancy; full unique study physical cost is separately indexed"
+    }
+  },
+  "cost_model_assets": {
+    "R0": {
+      "execution": "models/study-plan-r0-bridge-v3-execution.json",
+      "native": "models/study-plan-r0-bridge-v3-native/native-assets.json"
+    },
+    "R2": {
+      "execution": "models/study-plan-r2-bridge-v3-execution.json",
+      "profiles": 54,
+      "generation_kinds": [
+        "READ",
+        "REDUCE",
+        "ANSWER",
+        "CPU_REDUCE"
+      ],
+      "native": "models/study-plan-r2-bridge-v3-native/native-assets.json"
+    }
+  },
+  "integration_followups": {
+    "41491a4": "actual auxiliary gap usage",
+    "6ff46fc": "SourceSpan original-coordinate geometry deduplication after Need namespacing",
+    "original_frozen_failures_preserved": true
+  },
+  "current_controlled_mechanisms": {
+    "R0_v3": {
+      "pair": "passed",
+      "condition_correction": "passed",
+      "long_literal_audit": "failed",
+      "multihop_literal_audit": "failed"
+    },
+    "R2_v1": {
+      "pair": "passed",
+      "condition_correction": "passed",
+      "long_literal_audit": "failed",
+      "multihop_literal_audit": "failed"
+    },
+    "historical_R0_v2_balanced_long": {
+      "count": 36,
+      "mass_kg": 666,
+      "classification": "archived single passing run"
+    }
+  },
+  "artifact_location_policy": {
+    "models": "designated sjy-0518 container",
+    "data": "designated sjy-0518 container",
+    "results": "designated sjy-0518 container",
+    "file_transfers_for_this_documentation_update": false
+  },
+  "final_runtime_source_commit": "6ff46fc",
+  "model_batches_finished_at": "2026-11-03 08:27 Asia/Shanghai",
+  "service_lifecycle": "all task-started model services stopped; no remaining owned workers required force-kill; assets retained",
+  "final_readonly_analysis_commit": "7b3e4f1",
+  "final_cost_records": {
+    "physical_ledger": "runs/study/full-cost-ledger.json",
+    "observed_gpu_gib_seconds": 10120861.988516044,
+    "observed_process_pss_gib_seconds": 2307280.1306276913,
+    "whole_eight_gpu_timeline_complete": false,
+    "unknown_gpu_time_union_seconds": 25533.534883780405,
+    "native_usage_index": "runs/study/final-native-usage-index.json",
+    "native_unique_completed_calls": 17180,
+    "native_input_tokens": 68354498,
+    "native_output_tokens": 3066658,
+    "native_conflicts": 0,
+    "native_inventory_items": 422,
+    "api_usage_index": "runs/study/final-api-cost-index.json",
+    "api_unique_measured_responses": 3046,
+    "api_input_tokens": 25227835,
+    "api_output_tokens": 1142775,
+    "aggregation": "native/API/training and all-online auxiliary categories retained separately; no overlapping sum"
   }
 }
