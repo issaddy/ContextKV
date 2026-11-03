@@ -24,7 +24,8 @@ from controller.schema import QueryContext, SessionSnapshot, TurnRecord
 from controller.serialization import decode, to_jsonable
 from training.collect_plan_gains import collect_pair
 from training.plan_gain_protocol import (AuditedTaskInterpreter, EmptyPlannedPremise,
-    FixedCounterfactualRuntime, PlannedReductionConflict, build_counterfactual_plans)
+    FixedCounterfactualRuntime, GapRetrievalRequest, ObservedActionFailure, PlannedReductionConflict,
+    build_counterfactual_plans, build_observed_action_plans, observed_state_binding)
 from training.train_plan_gain import actual_history, working_state_key
 
 
@@ -49,6 +50,43 @@ def append(path, value):
 
 def read_rows(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def gap_retriever_identity(config):
+    return {"implementation": "StudyEvidenceProvider.extend_for_plan", "study_config_sha256": digest(config)}
+
+
+def observed_rows(rows, packets):
+    """Bind collected decision packets to the audited actual task/history cohort."""
+    from controller.plan_policy import CompleteCost
+    by_task = {row["task_id"]: row for row in rows}
+    result = []
+    for packet in packets:
+        if packet["task_id"] not in by_task:
+            continue
+        row = by_task[packet["task_id"]]
+        state = decode(ReadingOutcome, packet["working_state"])
+        snapshot = decode(SessionSnapshot, packet["snapshot"])
+        expected = [{name: turn[name] for name in ("turn_id", "user_text", "assistant_text")}
+                    for turn in row["actual_history"]]
+        if (actual_history(snapshot) != expected or state.plan.task_state.current_turn_id != row["turn"]
+                or state.plan.task_state.raw_question != row["question"]):
+            raise ValueError("observed state differs from the audited actual task/history")
+        from controller.context_schema import RetrievalState
+        from controller.schema import OnlineTurn
+        interpreter = AuditedTaskInterpreter(None)
+        interpreter.bind(row, state.plan.task_state)
+        interpreter.interpret(OnlineTurn(row["conversation_id"], row["task_id"], row["turn"], "training",
+            row["question"], (), (), "P3"), RetrievalState(0, snapshot.raw_history))
+        if not packet["native_condition"]:
+            raise ValueError("observed state requires its recorded native condition")
+        paid = decode(CompleteCost, packet["paid_cost"])
+        binding = observed_state_binding(state, snapshot, paid_cost=paid,
+            native_condition=packet["native_condition"], reader_checkpoint=packet["reader_checkpoint"],
+            reader_profile_id=packet["reader_profile_id"], paid_observation=packet.get("paid_observation"))
+        result.append({**row, "task_state": to_jsonable(state.plan.task_state),
+                       "observed_packet": packet, "observed_binding": binding})
+    return result
 
 
 class GenerationLimitReached(ValueError):
@@ -284,22 +322,39 @@ async def retire_completed_failed_steps(service, attempt_id):
 
 
 async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, binding, preparation,
-                         resources, cache_start, generation_budget):
+                         resources, cache_start, generation_budget, observed=None,
+                         gap_request=None, gap_provider=None):
     from controller.execution import ReadingBudgetExceeded
     from controller.engine_client import EngineError
     case_dir = Path(case_dir)
     case_dir.mkdir(parents=True)
     state_key = working_state_key(frozen, snapshot)
+    if observed is not None and (observed["state_key"] != state_key
+            or observed["actual_history"] != actual_history(snapshot)
+            or observed["reader_checkpoint"] != binding["reader_checkpoint"]
+            or observed["reader_profile_id"] != binding["reader_profile_id"]):
+        raise ValueError("observed branch differs from its frozen reader/history binding")
     registration = {"registered_at": time.monotonic(), "frozen_state_key": state_key,
         "plan_candidate": to_jsonable(plan), "working_state": to_jsonable(frozen), "snapshot": to_jsonable(snapshot),
-        "source_task_id": row["task_id"], "source_native_partition": row["split"], **binding}
+        "source_task_id": row["task_id"], "source_native_partition": row["split"],
+        "observed_state_binding": observed, "gap_request": gap_request if plan.semantic_kind == "gap_retrieval" else None,
+        **binding}
     write(case_dir/"before.json", registration)
-    session = "gain:"+digest([row["task_id"], plan.plan_id, binding["reader_checkpoint"]])[:24]
+    session = "gain:"+digest([row["task_id"], plan.plan_id, binding["reader_checkpoint"], observed])[:24]
     before = service.store.read_snapshot(session, row["snapshot_id"])
     before = service.store.sync_history(session, snapshot.raw_history, before.version)
-    service.rolling_policy = FixedCounterfactualRuntime(plan)
+    from controller.plan_policy import CompleteCost
+    paid = None if observed is None else decode(CompleteCost, observed["paid_cost"])
+    runtime = FixedCounterfactualRuntime(plan, initial_state=frozen if observed is not None else None,
+        paid_cost=paid, gap_request=gap_request, gap_provider=gap_provider,
+        initial_snapshot=snapshot if observed is not None else None)
+    service.rolling_policy = runtime
     service.bind_resident_models(binding["resident_model_manifest"])
-    if generation_budget.remaining < planned_model_calls(plan)+1:
+    completed = {result.step_id for result in frozen.results} if observed is not None else set()
+    required_calls = sum(step.task.step_id not in completed and (step.task.kind == "ANSWER" or not (
+        step.task.kind == "REDUCE" and plan.context_plan.reading_mode == "typed_reduce"
+        and step.task.operation in {"count", "sum", "group", "union"})) for step in plan.steps)
+    if generation_budget.remaining < required_calls+1:
         write(case_dir/"not-run.json", {"status": "generation_budget_unavailable", "registered": registration})
         return None
     if cache_start == "cold":
@@ -308,14 +363,21 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
     failure = None
     cleanup = []
     started = time.monotonic()
+    response_finished = None
     call_cursor = len(service.engine.calls)
     try:
-        response = await service.serve_turn(session, row["question"], plan.context_plan.selected_set.source_blocks,
+        material = plan.context_plan.selected_set.source_blocks
+        if observed is not None:
+            material = tuple({block.key: block for block in (*snapshot.archive, *material)}.values())
+        response = await service.serve_turn(session, row["question"], material,
             request_id="counterfactual", corpus_snapshot_id=row["snapshot_id"],
             context_plans=(plan.context_plan,), query_context=QueryContext(
                 plan.context_plan.task_state.query or row["question"], "frozen_audited_task",
                 task_state=plan.context_plan.task_state))
-    except (EngineError, ReadingBudgetExceeded, EmptyPlannedPremise, PlannedReductionConflict, GenerationLimitReached) as error:
+        response_finished = time.monotonic()
+    except (EngineError, ReadingBudgetExceeded, EmptyPlannedPremise, PlannedReductionConflict,
+            ObservedActionFailure, GenerationLimitReached) as error:
+        response_finished = time.monotonic()
         failure = {"type": type(error).__name__, "message": str(error)}
         if isinstance(error, EngineError) and error.code != "READ_STEP_OUTPUT_TRUNCATED":
             raise
@@ -325,9 +387,14 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
         active = sys.exc_info()[1]
         if active is not None:
             failure = {"type": type(active).__name__, "message": str(active)}
+        if response_finished is None:
+            response_finished = time.monotonic()
         await service.close_session(session)
         ended = time.monotonic()
-        physical = await resources.finish("online", started, ended)
+        physical = await resources.finish("online", started, response_finished)
+        cleanup_cost = {"complete_ms": (ended-response_finished)*1000,
+            **await resources.finish("online", response_finished, ended),
+            "scope": "branch session retirement after response completion; collection cost only"}
         attempt = service.store.find_request(session, "counterfactual")
         steps = (() if attempt is None else tuple(service.store.execution_step(attempt.attempt_id, step.step_id)[1]
                  for step in service.store.execution_steps(attempt.attempt_id)))
@@ -336,19 +403,34 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
         if response is not None:
             actual_budgets["ANSWER"] = attempt.plan.candidate.output_budget
         calls = service.engine.calls[call_cursor:]
+        action_counts = {"READ": sum(step.task.kind == "READ" for step in steps),
+            "REDUCE": sum(step.task.kind == "REDUCE" for step in steps),
+            "GAP_RETRIEVAL": runtime.new_action_counts["GAP_RETRIEVAL"],
+            "ANSWER": sum(call["request"].get("response_schema") is None for call in calls)}
         input_tokens = sum(len(call["request"]["input_ids"]) for call in calls)
         output_tokens = (sum(len(call["result"]["output_ids"]) for call in calls)
                          if all("result" in call for call in calls) else None)
-        execution = {"complete_ms": (ended-started)*1000, **physical,
-            "total_input_tokens": input_tokens, "total_output_tokens": output_tokens,
-            "scope": "actual branch serving and confirmed session retirement"}
+        auxiliary = runtime.new_auxiliary_usage
+        auxiliary_input = None if auxiliary is None else auxiliary["input_tokens"]
+        auxiliary_output = None if auxiliary is None else auxiliary["output_tokens"]
+        execution = {"complete_ms": (response_finished-started)*1000, **physical,
+            "total_input_tokens": input_tokens+auxiliary_input if auxiliary_input is not None else None,
+            "total_output_tokens": output_tokens+auxiliary_output
+                if output_tokens is not None and auxiliary_output is not None else None,
+            "scope": "new action and complete ANSWER through response commit"}
+        prior = ({"complete_ms": 0, "gpu_gib_seconds": 0, "host_gib_seconds": 0,
+                  "total_input_tokens": 0, "total_output_tokens": 0} if paid is None else {
+            "complete_ms": paid.latency_ms, "gpu_gib_seconds": paid.gpu_gib_ms/1000,
+            "host_gib_seconds": paid.host_gib_ms/1000, "total_input_tokens": paid.input_tokens,
+            "total_output_tokens": paid.output_tokens})
         full_cost = {**execution, "scope": "shared_preparation_plus_actual_branch_execution",
-            "complete_ms": execution["complete_ms"]+preparation["complete_ms"],
-            **{name: execution[name]+preparation[name] for name in ("gpu_gib_seconds", "host_gib_seconds")},
-            "total_input_tokens": execution["total_input_tokens"]+preparation["input_tokens"]
-                if preparation["input_tokens"] is not None else None,
-            "total_output_tokens": execution["total_output_tokens"]+preparation["output_tokens"]
-                if output_tokens is not None and preparation["output_tokens"] is not None else None,
+            "complete_ms": prior["complete_ms"]+execution["complete_ms"]+preparation["complete_ms"],
+            **{name: prior[name]+execution[name]+preparation[name]
+               for name in ("gpu_gib_seconds", "host_gib_seconds")},
+            "total_input_tokens": prior["total_input_tokens"]+execution["total_input_tokens"]+preparation["input_tokens"]
+                if preparation["input_tokens"] is not None and execution["total_input_tokens"] is not None else None,
+            "total_output_tokens": prior["total_output_tokens"]+execution["total_output_tokens"]+preparation["output_tokens"]
+                if execution["total_output_tokens"] is not None and preparation["output_tokens"] is not None else None,
             "shared_preparation_cost_id": preparation["shared_cost_id"]}
         output = {"task_id": row["task_id"], "conversation_id": row["conversation_id"],
             "question": row["question"], "actual_history": actual_history(snapshot),
@@ -361,6 +443,9 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
             "answer": response.assistant_text if response else None, "response": to_jsonable(response),
             "steps": to_jsonable(steps), "attempt": to_jsonable(attempt), "cost": full_cost,
             "actual_branch_execution_cost": execution, "executed_output_budgets": actual_budgets,
+            "paid_cost": prior, "cleanup_cost": cleanup_cost, "observed_state_binding": observed,
+            "new_step_ids": tuple(step.step_id for step in steps), "new_action_counts": action_counts,
+            "gap_result": to_jsonable(runtime.gap_result),
             "qa_increment": len(after.raw_history)-len(before.raw_history), "cleanup": cleanup,
             "actual_native_calls": calls,
             "comparison_budget": binding["comparison_budget"], **binding}
@@ -370,7 +455,8 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
     if response is None and output["qa_increment"] != 0:
         raise ValueError("failed counterfactual branch committed a QA")
     if response is not None and (attempt.plan.candidate.context_plan_id != plan.plan_id
-            or set(actual_budgets)-{"ANSWER"} != {step.task.step_id for step in plan.steps if step.task.kind != "ANSWER"}):
+            or set(actual_budgets)-{"ANSWER"} != {step.task.step_id for step in plan.steps
+                if step.task.kind != "ANSWER" and step.task.step_id not in completed}):
         raise ValueError("actual branch execution differs from its pre-registered complete DAG")
     return output
 
@@ -461,7 +547,13 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
             invalid.append({"task_id": row["task_id"], "reason": "invalid_audited_task_binding", "error": str(error)})
         else:
             valid.append(row)
-    valid = valid[:settings["limit_tasks"]]
+    mode = settings.get("mode", "whole_plan")
+    if mode == "observed_actions":
+        valid = observed_rows(valid, read_rows(settings["observed_states"]))[:settings["limit_tasks"]]
+    elif mode == "whole_plan":
+        valid = valid[:settings["limit_tasks"]]
+    else:
+        raise ValueError("gain collection mode must be whole_plan or observed_actions")
     cohort["task_ref_exclusions"] = invalid
     cohort["planned_task_ids"] = [row["task_id"] for row in valid]
     write(output/"cohort.json", cohort)
@@ -557,7 +649,8 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 "reader_profile_id": settings["reader_profile_id"], "scorer_identity": scorer,
                 "split": settings["split"], "measurement_kind": "hardware" if info.engine_kind == "sglang" else "simulation",
                 "resident_model_manifest": to_jsonable(provider.manifest),
-                "task_state_source": "frozen_audited_actual"}
+                "task_state_source": "frozen_audited_actual", "collection_mode": mode,
+                "counterfactual_cache_start": settings["cache_start"]}
             write(output/"binding.json", {**common_binding, "reader_engine_info": info,
                 "support_engine_info": support_engine_info,
                 "scorer_engine_info": judge_info, "generation_protocol": GenerationProtocol.from_config(run).record(),
@@ -583,28 +676,47 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 plans = ()
                 usage_before = {id(model): dict(model.usage) for _, model in provider._usage_sources()
                                 if hasattr(model, "usage")}
+                observed, gap_request = None, None
                 try:
-                    selection = await provider.retrieve(snap, row["question"], row["task_id"])
-                    base = selection.context_plans[0]
-                    if base.task_state != state:
-                        raise ValueError("A candidate preparation changed the audited current task state")
-                    trace = provider.traces[snap.session_id, row["task_id"]]
-                    scope_material = None
-                    if settings["scope_scan"] and state.source_scope:
-                        scope_pool = provider.directory.full_scope(state.source_scope)
-                        scope_material = EvidenceSet("gain-explicit-scope", scope_pool.units,
-                                                     source_blocks=scope_pool.source_blocks)
-                    plans, omitted = build_counterfactual_plans(base, snap, controller.template,
-                        reader_checkpoint=reader_checkpoint, read_outputs=settings["read_outputs"],
-                        scope_material=scope_material)
+                    if mode == "observed_actions":
+                        packet = row["observed_packet"]
+                        observed = row["observed_binding"]
+                        if (observed["reader_checkpoint"] != reader_checkpoint
+                                or observed["reader_profile_id"] != settings["reader_profile_id"]):
+                            raise ValueError("observed state belongs to a different actual reader checkpoint/profile")
+                        frozen = decode(ReadingOutcome, packet["working_state"])
+                        snap = decode(SessionSnapshot, packet["snapshot"])
+                        base = frozen.plan
+                        gap_request = decode(GapRetrievalRequest, packet["gap_request"]) if packet.get("gap_request") else None
+                        if gap_request is not None and gap_request.retriever_identity != gap_retriever_identity(config):
+                            raise ValueError("registered GAP retriever differs from the actual collection configuration")
+                        plans, omitted = build_observed_action_plans(frozen, snap, controller.template,
+                            reader_checkpoint=reader_checkpoint, gap_request=gap_request,
+                            answer_system_prompt=controller.policy.system_prompt)
+                        trace, scope_material = {"source": "recorded_observed_state", "binding": observed}, None
+                    else:
+                        selection = await provider.retrieve(snap, row["question"], row["task_id"])
+                        base = selection.context_plans[0]
+                        if base.task_state != state:
+                            raise ValueError("A candidate preparation changed the audited current task state")
+                        trace = provider.traces[snap.session_id, row["task_id"]]
+                        scope_material = None
+                        if settings["scope_scan"] and state.source_scope:
+                            scope_pool = provider.directory.full_scope(state.source_scope)
+                            scope_material = EvidenceSet("gain-explicit-scope", scope_pool.units,
+                                                         source_blocks=scope_pool.source_blocks)
+                        plans, omitted = build_counterfactual_plans(base, snap, controller.template,
+                            reader_checkpoint=reader_checkpoint, read_outputs=settings["read_outputs"],
+                            scope_material=scope_material, answer_system_prompt=controller.policy.system_prompt)
+                        frozen = ReadingOutcome(base, auxiliary_usage={"input_tokens": 0,
+                            "output_tokens": 0, "compute_ms": 0.0, "models": []})
                     unavailable.extend({"task_id": row["task_id"], **reason} for reason in omitted)
-                    frozen = ReadingOutcome(base, auxiliary_usage={"input_tokens": 0,
-                        "output_tokens": 0, "compute_ms": 0.0, "models": []})
                     material = judge_sources(base, scope_material, row, source_rows,
                                              corpus_id=config["retrieval"]["corpus_id"])
                     write(task_dir/"registered-family.json", {"registered_at": time.monotonic(),
                         "model_calls_before_branch_execution": len(budget.tickets),
                         "working_state": frozen, "snapshot": snap, "frozen_state_key": working_state_key(frozen, snap),
+                        "observed_state_binding": observed, "gap_request": gap_request,
                         "candidate_plans": plans, "unavailable": omitted,
                         "offline_judge_material": material, "offline_reference": row["reference_answer"],
                         "preparation_trace": trace, "source_task": row})
@@ -627,9 +739,19 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                     continue
                 comparison = {"body_tokens": base.budget.body_tokens,
                     "answer_output_tokens": base.budget.output_tokens, "window_tokens": base.budget.window_tokens,
-                    "read_output_budget_grid": settings["read_outputs"],
+                    "read_output_budget_grid": settings["read_outputs"] if mode == "whole_plan" else None,
+                    "action_protocol": "whole_registered_plan" if mode == "whole_plan" else "one_registered_action_then_ANSWER",
                     "reference_state": "same frozen original material/actual history; direct has zero new READ"}
                 binding = {**common_binding, "comparison_budget": comparison}
+                async def retrieve_gap(plan, request, claims):
+                    if request.retriever_identity != gap_retriever_identity(config):
+                        raise ValueError("GAP request is not bound to this actual retriever")
+                    from controller.evidence_planner import _passages
+                    cap = len(_passages(plan.selected_set.selected_units))+request.limits["max_passages"]
+                    if plan.budget.max_passages is not None:
+                        cap = min(cap, plan.budget.max_passages)
+                    return await provider.extend_for_plan(snap, replace(plan, budget=replace(plan.budget,
+                        max_passages=cap)), request.open_needs, claims)
                 baseline = None
                 for branch_number, plan in enumerate(plans):
                     branch_dir = task_dir/f"branch-{branch_number:02d}"
@@ -644,7 +766,8 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                     write(task_dir/f"pair-{branch_number:02d}.before.json", packet)
                     result = await execute_branch(controller, plan, frozen, snap, row, case_dir=branch_dir,
                         binding=binding, preparation=preparation, resources=resources,
-                        cache_start=settings["cache_start"], generation_budget=budget)
+                        cache_start=settings["cache_start"], generation_budget=budget, observed=observed,
+                        gap_request=gap_request, gap_provider=retrieve_gap)
                     if result is None:
                         unavailable.append({"task_id": row["task_id"], "plan_id": plan.plan_id,
                             "reason": "next_complete_branch_unaffordable", "remaining_calls": budget.remaining})
@@ -664,7 +787,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                         write(branch_dir/"run.json", result)
                         continue
                     if plan.semantic_kind == "direct_answer":
-                        if result["response"]["read_count"] != 0:
+                        if result["new_action_counts"]["READ"] != 0:
                             raise ValueError("gain direct baseline executed a READ")
                         baseline = result
                     elif baseline is not None and common_binding["measurement_kind"] == "hardware":
@@ -694,7 +817,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
             await resources.close()
             write(output/"phase-resources.json", {"online": resources.online.observation(),
                                                    "judge": resources.judge.observation()})
-            write(output/"manifest.json", {"schema_version": 1, "status": status,
+            write(output/"manifest.json", {"schema_version": 1, "status": status, "collection_mode": mode,
                 "error": str(active_error) if active_error is not None else stop_reason,
                 "scope": "actual reader-bound counterfactual supervision collection",
                 "elapsed_ms": (time.monotonic()-started)*1000, "planned_tasks": cohort["planned_task_ids"],
@@ -746,7 +869,11 @@ def main(argv=None):
     parser.add_argument("--extra-process-roots", type=integers, default=())
     parser.add_argument("--cache-start", choices=("cold", "observed"), default="observed")
     parser.add_argument("--scope-scan", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--mode", choices=("whole_plan", "observed_actions"), default="whole_plan")
+    parser.add_argument("--observed-states", help="Registered observed-state JSONL packets for observed_actions mode")
     args = parser.parse_args(argv)
+    if args.mode == "observed_actions" and not args.observed_states:
+        parser.error("observed_actions requires --observed-states")
     if args.limit_tasks < 1 or args.max_generations < 1 or not 0 < args.dev_fraction < 1 or any(
             output < 1 for output in args.read_outputs):
         raise ValueError("collection bounds, output allocations and conversation holdout must be positive")

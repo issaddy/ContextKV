@@ -40,8 +40,12 @@ def served_branch(row, *, semantic_kind, plan_id, metric, normalization, scorer_
     budgets["ANSWER"] = candidate["output_budget"]
     if row["executed_output_budgets"] != budgets:
         raise ValueError("gain output budgets differ from the actual executed steps")
-    if row["response"]["read_count"] != sum(step["task"]["kind"] == "READ" for step in row["steps"]):
+    observed = row.get("observed_state_binding")
+    reads = row["new_action_counts"]["READ"] if observed is not None else row["response"]["read_count"]
+    if reads != sum(step["task"]["kind"] == "READ" for step in row["steps"]):
         raise ValueError("gain READ count differs from the actual executed steps")
+    if observed is not None and set(row["new_step_ids"]) != {step["step_id"] for step in row["steps"]}:
+        raise ValueError("observed action IDs differ from the actual newly executed steps")
     receipts = [step["receipt"] for step in row["steps"] if step["receipt"] is not None]
     receipts.append(attempt["result"]["receipt"])
     return {"question": row["question"], "actual_history": row["actual_history"],
@@ -50,7 +54,11 @@ def served_branch(row, *, semantic_kind, plan_id, metric, normalization, scorer_
         "comparison_budget": comparison_budget, "answer": row["answer"], "quality": quality,
         "scorer_identity": scorer_identity, "native_receipts": receipts, "cost": row["cost"],
         "measurement_kind": row["measurement_kind"], "history_origin": row["history_origin"],
-        "semantic_kind": semantic_kind, "plan_id": plan_id, "read_count": row["response"]["read_count"],
+        "semantic_kind": semantic_kind, "plan_id": plan_id, "read_count": reads,
+        "observed_state_binding": observed,
+        "new_action_counts": row.get("new_action_counts"),
+        "new_step_ids": row.get("new_step_ids"),
+        "remaining_cost": row.get("actual_branch_execution_cost"),
         "raw_metric": {"name": metric, "value": raw, "normalization": normalization},
         "output_budgets": row["executed_output_budgets"], "source_run": row}
 
@@ -63,7 +71,8 @@ def collect_pair(packet, direct_row, candidate_row):
     direct = served_branch(direct_row, semantic_kind="direct_answer", plan_id=direct_row["plan_id"], **shared)
     candidate = served_branch(candidate_row, semantic_kind=plan.semantic_kind, plan_id=plan.plan_id, **shared)
     record = build_gain_record(plan, state, snapshot, direct, candidate)
-    record["collection_protocol"] = "recorded_frozen_state_actual_served_answers_v1"
+    record["collection_protocol"] = ("observed_single_action_actual_final_answers_v1"
+        if direct["observed_state_binding"] is not None else "recorded_frozen_state_actual_served_answers_v1")
     return record
 
 

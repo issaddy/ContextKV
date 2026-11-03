@@ -18,11 +18,16 @@ from .reading import step_generation_kind
 from .schema import CacheQuoteBatch, PromptCandidate, SessionSnapshot
 
 
-PLAN_KINDS = ("direct_answer", "complementary_evidence", "multihop", "scope_scan")
-FEATURE_NAMES = (*PLAN_KINDS, "needs", "conditions", "version_comparison", "open_needs",
+LEGACY_PLAN_KINDS = ("direct_answer", "complementary_evidence", "multihop", "scope_scan")
+PLAN_KINDS = (*LEGACY_PLAN_KINDS, "read_once", "reduce_once", "gap_retrieval")
+STRUCTURAL_FEATURE_NAMES = ("needs", "conditions", "version_comparison", "open_needs",
     "unmet_answer_points", "existing_claims", "completed_steps", "read_steps", "reduce_steps",
     "evidence_units", "source_passages", "dependencies", "source_versions", "required_coverage",
     "planned_coverage", "input_budget_tokens", "output_budget_tokens")
+LEGACY_FEATURE_NAMES = (*LEGACY_PLAN_KINDS, *STRUCTURAL_FEATURE_NAMES)
+ACTION_SIZE_FEATURE_NAMES = ("planned_read_chars", "reduce_input_claim_chars", "existing_claim_chars",
+                             "working_history_chars", "answer_body_tokens")
+FEATURE_NAMES = (*PLAN_KINDS, *STRUCTURAL_FEATURE_NAMES, *ACTION_SIZE_FEATURE_NAMES)
 
 
 class NoCompletePlan(ValueError):
@@ -223,6 +228,12 @@ def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=
     completed = _completed_steps(plan, state)
     remaining = [step.task for step in plan.steps if step.task.step_id not in completed]
     units = plan.context_plan.selected_set.selected_units
+    by_unit = {unit.unit_id: unit for unit in units}
+    by_claim = {claim.claim_id: claim for claim in state.claims}
+
+    def claim_chars(claim):
+        return sum(len(value) for value in (claim.text, claim.entity, claim.relation, claim.unit,
+                   str(claim.value) if claim.value is not None else ""))
     coverage = set(plan.required_coverage)
     if state.plan.coverage_scope == "all_supplied_documents":
         coverage.update(state.plan.coverage_units)
@@ -239,7 +250,16 @@ def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=
         required_coverage=len(coverage), planned_coverage=len({unit_id for task in remaining
             if task.kind == "READ" for unit_id in task.input_unit_ids}),
         input_budget_tokens=sum(task.input_budget for task in remaining),
-        output_budget_tokens=sum(budgets.get(task.step_id, task.output_budget) for task in remaining))
+        output_budget_tokens=sum(budgets.get(task.step_id,
+            budgets.get("ANSWER", task.output_budget) if task.kind == "ANSWER" else task.output_budget)
+            for task in remaining),
+        planned_read_chars=sum(len(by_unit[identity].text) for task in remaining if task.kind == "READ"
+                               for identity in task.input_unit_ids),
+        reduce_input_claim_chars=sum(claim_chars(by_claim[identity]) for task in remaining if task.kind == "REDUCE"
+                                     for identity in task.input_claim_ids if identity in by_claim),
+        existing_claim_chars=sum(claim_chars(claim) for claim in state.claims),
+        working_history_chars=sum(ref.end-ref.start for ref in state.plan.task_state.working_history),
+        answer_body_tokens=plan.context_plan.budget.body_tokens)
     return {name: float(values[name]) for name in FEATURE_NAMES}
 
 

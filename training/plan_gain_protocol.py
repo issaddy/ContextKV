@@ -5,12 +5,13 @@ PlanPolicy, predict gain, or claim calibrated execution costs.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import time
 
 from adapters.history_state import validate_task_refs
-from controller.context_schema import ReadingOutcome, ReadTask
-from controller.plan_policy import complete_plan
+from controller.context_schema import EvidencePool, OpenNeed, ReadingOutcome, ReadTask
+from controller.context_budget import bind_answer_window
+from controller.plan_policy import CompleteCost, complete_plan
 from controller.reading import build_read_plan
 from controller.rolling_policy import (RollingResult, ZERO_AUX, _reduction_tasks,
                                        compile_step, namespace_plan)
@@ -24,6 +25,92 @@ class EmptyPlannedPremise(ValueError):
 
 class PlannedReductionConflict(ValueError):
     pass
+
+
+class ObservedActionFailure(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class GapRetrievalRequest:
+    open_needs: tuple[OpenNeed, ...]
+    query: str
+    retriever_identity: dict
+    limits: dict
+
+
+def gap_query(state, open_needs):
+    from adapters.evidence_pool import SourceDirectory
+    return "\n\n".join(SourceDirectory.open_need_query(state, need) for need in open_needs)
+
+
+def observed_state_binding(state, snapshot, *, paid_cost, native_condition,
+                           reader_checkpoint, reader_profile_id, paid_observation=None):
+    from training.train_plan_gain import actual_history, working_state_key
+    binding = {"state_key": working_state_key(state, snapshot), "actual_history": actual_history(snapshot),
+        "reader_checkpoint": reader_checkpoint, "reader_profile_id": reader_profile_id,
+        "paid_cost": to_jsonable(paid_cost), "native_condition": to_jsonable(native_condition)}
+    if paid_observation is not None:
+        binding["paid_observation"] = to_jsonable(paid_observation)
+    return binding
+
+
+def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint,
+                                gap_request=None, answer_system_prompt=None):
+    """Register at most one ready READ, one current-basis REDUCE and one GAP."""
+    base = bind_answer_window(frozen.plan, template, snapshot, answer_system_prompt,
+                             preserve_step_ids=tuple(record.step_id for record in frozen.steps))
+    covered = {unit for result in frozen.results for unit in result.covered_units}
+    if base.coverage_scope == "all_supplied_documents" and not set(base.coverage_units) <= covered:
+        return (), ({"family": "direct_answer", "reason": "mandatory_source_coverage_incomplete"},)
+    historic = tuple(record.task for record in frozen.steps)
+    from training.train_plan_gain import working_state_key
+    identity = working_state_key(frozen, snapshot)[:16]
+    completed = {result.step_id for result in frozen.results}
+    completed.update(result.reduction.step_id for result in frozen.results if result.reduction is not None)
+    branches = []
+
+    def add(kind, tasks):
+        plan = replace(base, plan_id=base.plan_id+":observed:"+identity+":"+kind, steps=(*historic, *tasks))
+        branches.append(complete_plan(plan, (), semantic_kind=kind, reader_checkpoint=reader_checkpoint))
+
+    add("direct_answer", ())
+    ready = tuple(task for task in base.steps if task.kind == "READ" and task.step_id not in completed
+                  and set(task.predecessor_step_ids) <= completed)
+    if ready:
+        add("read_once", ready[:1])
+    for need in base.task_state.needs:
+        if need.operation not in {"enumerate", "count", "sum", "group", "compare", "infer"}:
+            continue
+        claims = tuple(claim for claim in frozen.claims if claim.kind == "extract" and claim.serves(need.need_id))
+        if not claims:
+            continue
+        inputs = tuple(claim.claim_id for claim in claims)
+        operation = "union" if need.operation == "enumerate" else need.operation
+        if any(result.reduction is not None and need.need_id in result.reduction.need_ids
+               and result.reduction.operation == operation
+               and set(inputs) <= set(result.reduction.basis_claim_ids) for result in frozen.results):
+            continue
+        task = ReadTask("observed:reduce:"+need.need_id+":"+identity, "REDUCE", (need.need_id,),
+            input_claim_ids=inputs, reduction_basis_claim_ids=inputs,
+            predecessor_step_ids=tuple(dict.fromkeys(claim.rsplit(":claim:", 1)[0] for claim in inputs)),
+            input_budget=base.budget.window_tokens-base.budget.read_output_tokens,
+            output_budget=base.budget.read_output_tokens,
+            operation=operation,
+            retained_conclusion_tokens=tuple((identity, tokens) for identity, tokens
+                in base.answer_allocation.need_tokens if identity == need.need_id))
+        add("reduce_once", (task,))
+        break
+    if gap_request is not None:
+        if not gap_request.open_needs or not set(gap_request.open_needs) <= set(frozen.open_needs):
+            raise ValueError("registered GAP relations must belong to the frozen observed state")
+        if gap_request.query != gap_query(base.task_state, gap_request.open_needs):
+            raise ValueError("registered GAP query differs from the frozen task")
+        if not gap_request.retriever_identity or any(gap_request.limits[name] < 1
+                                                   for name in ("max_units", "max_passages")):
+            raise ValueError("registered GAP requires retriever identity and positive limits")
+        add("gap_retrieval", ())
+    return tuple(branches), ()
 
 
 class AuditedTaskInterpreter:
@@ -62,7 +149,8 @@ def read_geometry(base, budget, template, snapshot, *, separate_needs=None):
         template=template, snapshot=snapshot, output_tokens_per_fact=64,
         reading_mode=base.reading_mode,
         separate_needs=base.separate_needs if separate_needs is None else separate_needs,
-        numeric_identity=base.numeric_identity, read_layout=base.read_layout, read_packing=base.read_packing)
+        numeric_identity=base.numeric_identity, read_layout=base.read_layout, read_packing=base.read_packing,
+        answer_system_prompt=base.answer_system_prompt)
     return replace(plan, answer_plan=base.answer_plan)
 
 
@@ -113,10 +201,11 @@ def complete_predeclared(plan, *, semantic_kind, reader_checkpoint):
 
 
 def build_counterfactual_plans(base, snapshot, template, *, reader_checkpoint, read_outputs,
-                               scope_material=None):
+                               scope_material=None, answer_system_prompt=None):
     """Each output budget repacks the original material before registration."""
     if not base.selected_set.selected_units:
         return (), ({"family": "complementary_evidence", "reason": "no_selected_original_material"},)
+    base = bind_answer_window(base, template, snapshot, answer_system_prompt)
     direct = replace(base, plan_id=base.plan_id+":gain-direct", steps=(),
                      coverage_scope="selected_sources", coverage_units=())
     proposals = [complete_predeclared(direct, semantic_kind="direct_answer", reader_checkpoint=reader_checkpoint)]
@@ -154,10 +243,19 @@ def build_counterfactual_plans(base, snapshot, template, *, reader_checkpoint, r
 
 class FixedCounterfactualRuntime:
     """Execute one pre-registered semantic plan; bind only generated fact IDs."""
-    def __init__(self, planned, *, action="REBUILD", layout="existing"):
+    def __init__(self, planned, *, action="REBUILD", layout="existing", initial_state=None,
+                 paid_cost: CompleteCost | None = None, gap_request=None, gap_provider=None,
+                 initial_snapshot=None):
         self.planned, self.action, self.layout = planned, action, layout
         self.native = self
         self.decisions = []
+        self.initial_state, self.paid_cost = initial_state, paid_cost
+        self.initial_snapshot = initial_snapshot
+        self.gap_request, self.gap_provider = gap_request, gap_provider
+        self.gap_result = None
+        self.new_auxiliary_usage = dict(ZERO_AUX)
+        self.new_step_ids = ()
+        self.new_action_counts = {"READ": 0, "REDUCE": 0, "GAP_RETRIEVAL": 0, "ANSWER": 0}
 
     def bind_resident_models(self, manifest):
         self.resident_model_manifest = manifest
@@ -172,9 +270,63 @@ class FixedCounterfactualRuntime:
                   cost_model, compile_answers, *, arrived, auxiliary_usage, events, open_need_provider=None):
         if context_plans != (self.planned.context_plan,):
             raise ValueError("experimental branch differs from its pre-registered complete plan")
+        if self.initial_snapshot is not None:
+            snapshot = replace(snapshot, archive=self.initial_snapshot.archive,
+                               reference_map=self.initial_snapshot.reference_map)
         plan = self.planned.context_plan
-        state = ReadingOutcome(plan, auxiliary_usage=dict(ZERO_AUX))
-        pending = [step.task for step in self.planned.steps if step.task.kind != "ANSWER"]
+        state = (ReadingOutcome(plan, auxiliary_usage=dict(ZERO_AUX)) if self.initial_state is None
+                 else replace(self.initial_state, plan=plan))
+        completed = {result.step_id for result in state.results}
+        pending = [step.task for step in self.planned.steps if step.task.kind != "ANSWER"
+                   and step.task.step_id not in completed]
+        observed = self.initial_state is not None
+        if observed:
+            from controller.execution import auxiliary_tokens, ReadingBudgetExceeded
+            measured = sum(len(record.input_ids)+len(record.output_ids) for record in state.steps)
+            prior_aux = auxiliary_tokens(state.auxiliary_usage)
+            paid_tokens = self.paid_cost.input_tokens+self.paid_cost.output_tokens
+            initial_auxiliary = paid_tokens-measured-prior_aux
+            if initial_auxiliary < 0:
+                raise ValueError("observed paid tokens omit already completed reading/auxiliary work")
+            auxiliary_usage = {"input_tokens": initial_auxiliary, "output_tokens": 0,
+                               "compute_ms": 0, "models": []}
+            plan = replace(plan, online_tokens_spent=paid_tokens)
+            state = replace(state, plan=plan)
+            if plan.budget.max_complete_ms is not None and self.paid_cost.latency_ms >= plan.budget.max_complete_ms:
+                raise ReadingBudgetExceeded("observed paid latency exhausts the complete request allocation")
+            expected = 1 if self.planned.semantic_kind in {"read_once", "reduce_once"} else 0
+            if len(pending) != expected:
+                raise ValueError("observed branch must contain exactly its registered new action")
+        if self.planned.semantic_kind == "gap_retrieval":
+            from controller.evidence_planner import _passages, close_dependencies
+            from controller.execution import auxiliary_tokens, merge_auxiliary_usage
+            tick = time.monotonic()
+            self.new_action_counts["GAP_RETRIEVAL"] = 1
+            pool = await self.gap_provider(plan, self.gap_request, state.claims)
+            elapsed = (time.monotonic()-tick)*1000
+            if not isinstance(pool, EvidencePool):
+                raise TypeError("GAP action requires measured EvidencePool material")
+            self.new_auxiliary_usage = pool.auxiliary_usage
+            self.gap_result = {"request": self.gap_request, "pool": pool, "elapsed_ms": elapsed}
+            if auxiliary_tokens(pool.auxiliary_usage) is None:
+                raise ObservedActionFailure("actual GAP auxiliary token cost is unmeasured")
+            if (len(pool.units) > self.gap_request.limits["max_units"]
+                    or len(_passages(pool.units)) > self.gap_request.limits["max_passages"]):
+                raise ObservedActionFailure("actual GAP material exceeds its registered retrieval limits")
+            units = {unit.unit_id: unit for unit in (*plan.selected_set.selected_units, *pool.units)}
+            closure = close_dependencies(tuple(units), units)
+            if plan.budget.max_passages is not None and len(_passages(closure)) > plan.budget.max_passages:
+                raise ObservedActionFailure("actual GAP material exceeds the cumulative passage allocation")
+            blocks = tuple({block.key: block for block in (*plan.selected_set.source_blocks,
+                                                           *pool.source_blocks)}.values())
+            selected = replace(pool.selected_set or plan.selected_set, selected_units=closure, source_blocks=blocks)
+            plan = bind_answer_window(replace(plan, selected_set=selected, answer_allocation=None), template,
+                                      snapshot, preserve_step_ids=tuple(record.step_id for record in state.steps))
+            usage = merge_auxiliary_usage(state.auxiliary_usage, pool.auxiliary_usage)
+            state = replace(state, plan=plan, auxiliary_usage=usage)
+            plan = replace(plan, online_tokens_spent=plan.online_tokens_spent+auxiliary_tokens(pool.auxiliary_usage))
+            state = replace(state, plan=plan)
+            events.emit("plan_gain_experimental_gap", attempt_id=attempt_id, **self.gap_result)
         records = []
         while pending:
             completed = {result.step_id for result in state.results}
@@ -186,7 +338,7 @@ class FixedCounterfactualRuntime:
             parents = tuple(claim for result in state.results if result.step_id in task.predecessor_step_ids
                             for claim in result.claims)
             if task.kind == "REDUCE":
-                parents = tuple(claim for claim in parents if claim.need_id in task.need_ids
+                parents = tuple(claim for claim in parents if any(claim.serves(need) for need in task.need_ids)
                                 and claim.kind == "extract")
             if task.predecessor_step_ids and not parents:
                 raise EmptyPlannedPremise("planned predecessor produced no factual input: "+task.step_id)
@@ -211,10 +363,15 @@ class FixedCounterfactualRuntime:
                     raise
                 raise PlannedReductionConflict(str(error)) from error
             plan = state.plan
+            self.new_step_ids = (*self.new_step_ids, task.step_id)
+            self.new_action_counts[task.kind] += 1
         if plan.coverage_scope == "all_supplied_documents" and not set(plan.coverage_units) <= {
                 unit for result in state.results for unit in result.covered_units}:
             raise ValueError("predeclared scope scan did not complete its original scope")
         phase_started = time.monotonic()
+        if (observed and plan.budget.max_complete_ms is not None
+                and self.paid_cost.latency_ms+(phase_started-arrived)*1000 > plan.budget.max_complete_ms):
+            raise ReadingBudgetExceeded("observed paid state plus action exhausts the complete request allocation")
         candidates = compile_answers(snapshot, (plan,), state)
         matching = [candidate for candidate in candidates if candidate.feasible
                     and candidate.action == self.action and candidate.layout_id == self.layout]
@@ -226,5 +383,6 @@ class FixedCounterfactualRuntime:
             planned_plan_id=self.planned.plan_id, actual_input_hash=candidate.input_hash,
             actual_quote=quotes, selection="predeclared_experimental_branch", gain_prediction=None)
         self.decisions = records
+        self.new_action_counts["ANSWER"] = 1
         return RollingResult(state, Plan(candidate, quote_seq=quotes.observed_seq,
             reason="actual_counterfactual_fixed_plan"), quotes, tuple(records), phase_started)
