@@ -23,6 +23,9 @@ from training.reader_data import digest, file_digest, rows, write_rows
 from training.task_data import select_cohort_rows
 
 
+from training.preference_rollout import P1_REWARDS, P1_RUBRIC
+
+
 def reader_binding(config):
     from controller.config import load_config
     from training.preference_rollout import query_encoder_binding
@@ -32,14 +35,17 @@ def reader_binding(config):
     return {"reader_checkpoint": run.model.revision, "reader_profile_id": settings["reader_profile_id"],
         "reader_scope": str(scope_path.resolve()), "reader_scope_sha256": file_digest(scope_path),
         "query_encoder": query_encoder_binding(settings["collection"]),
-        "scorer_identity": settings["scorer_identity"]}
+        "scorer_identity": {**settings["scorer_identity"], "rubric": P1_RUBRIC}}
 
 
 def cohort_directory(config, *, split=None):
     binding = reader_binding(config)
     settings = config["evidence_policy_training"]
     collection = settings["collection"]
-    identity = digest([binding, file_digest(collection["cohort_manifest"])])[:20]
+    if collection.get("existing_cohort_dir"):
+        return Path(collection["existing_cohort_dir"])
+    generation_binding = {key: value for key, value in binding.items() if key != "scorer_identity"}
+    identity = digest([generation_binding, file_digest(collection["cohort_manifest"])])[:20]
     return Path(settings["output_dir"])/identity/(split or collection["cohort_split"])
 
 
@@ -194,10 +200,11 @@ def build_reader_bound_pairs(reward_rows, *, binding, weights, minimum_differenc
     return result
 
 
-async def collect_fixed_reader_preferences(config, *, limit=None):
+async def collect_fixed_reader_preferences(config, *, limit=None, rescore=False):
     from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
-    from controller.config import create_controller, load_config
-    from training.preference_rollout import collect_preferences
+    from controller.config import create_controller, create_model_template, load_config
+    from controller.session_store import Attempt, load_record
+    from training.preference_rollout import collect_preferences, rescore_saved_answers
     settings, binding = config["evidence_policy_training"], reader_binding(config)
     directory = cohort_directory(config)
     directory.mkdir(parents=True, exist_ok=True)
@@ -205,18 +212,22 @@ async def collect_fixed_reader_preferences(config, *, limit=None):
     if run.model.revision != binding["reader_checkpoint"] or run.engine.kind != "sglang":
         raise ValueError("preference collection must use the fixed reader checkpoint and scoped SGLang profile")
     binding_path = directory/"collection_binding.json"
-    bound = {**binding, "run_config_sha256": file_digest(settings["run_config"]),
+    bound = {**{key: value for key, value in binding.items() if key != "scorer_identity"}, "run_config_sha256": file_digest(settings["run_config"]),
         "cohort_manifest_sha256": file_digest(settings["collection"]["cohort_manifest"]),
         "cohort_split": settings["collection"]["cohort_split"]}
-    if binding_path.exists() and json.loads(binding_path.read_text())["binding"] != bound:
-        raise ValueError("existing candidate cohort belongs to a different reader/profile/scorer")
-    if (directory/"rewards.jsonl").exists() and not binding_path.exists():
-        raise ValueError("existing unbound rewards cannot be relabelled as the fixed reader")
-    controller = create_controller(replace(run, state_dir=str(directory/"runtime"),
-        planner=replace(run.planner, strategy="always_rebuild")))
-    info = await controller.engine.info()
-    if info.fingerprint.model_revision != binding["reader_checkpoint"] or info.engine_kind != "sglang":
-        raise ValueError("active native reader does not match the fixed reader identity")
+    if binding_path.exists():
+        previous = json.loads(binding_path.read_text())["binding"]
+        if {key: value for key, value in previous.items() if key != "scorer_identity"} != bound:
+            raise ValueError("existing candidate cohort belongs to a different generation binding")
+    elif rescore or (directory/"turns.jsonl").exists():
+        raise ValueError("saved answers require their original generation binding")
+    controller = None
+    if not rescore:
+        controller = create_controller(replace(run, state_dir=str(directory/"runtime"),
+            planner=replace(run.planner, strategy="always_rebuild")))
+        info = await controller.engine.info()
+        if info.fingerprint.model_revision != binding["reader_checkpoint"] or info.engine_kind != "sglang":
+            raise ValueError("active native reader does not match the fixed reader identity")
     import httpx
     async with httpx.AsyncClient(base_url=settings["collection"]["judge_base_url"], timeout=30) as judge:
         response = await judge.post("/context/engine/info", json={})
@@ -224,30 +235,51 @@ async def collect_fixed_reader_preferences(config, *, limit=None):
         judge_info = response.json()
     if judge_info["fingerprint"]["model_revision"] != binding["scorer_identity"]["reader_checkpoint"]:
         raise ValueError("actual scorer checkpoint differs from the fixed preference rubric identity")
-    binding_path.write_text(json.dumps({"binding": bound, "engine_info": asdict(info),
-                                       "scorer_engine_info": judge_info}, indent=2)+"\n")
+    if not binding_path.exists():
+        binding_path.write_text(json.dumps({"binding": bound, "engine_info": asdict(info)}, indent=2)+"\n")
     preferences = {**config.get("preferences", {}), **settings["collection"],
         "support_asset": settings["parent_support_asset"],
         "run_config": settings["run_config"], "output_dir": str(directory),
         "preferences_path": str(directory/"collector_preferences.jsonl"), **binding}
     actual = {**config, "preferences": preferences}
-    ports = [urlparse(run.engine.base_url).port, urlparse(preferences["judge_base_url"]).port]
+    ports = [urlparse(preferences["judge_base_url"]).port]
+    if not rescore:
+        ports.append(urlparse(run.engine.base_url).port)
     sampler = StudyResourceSampler(settings["gpu_devices"], listening_processes(ports))
     await sampler.start()
     started = time.monotonic()
     try:
-        result = await collect_preferences(actual, controller=controller, limit=limit)
+        if rescore:
+            import sqlite3
+            db_path = (directory/"runtime"/"sessions.sqlite3").resolve()
+            db = sqlite3.connect(db_path.as_uri()+"?mode=ro", uri=True)
+            def get_attempt(attempt_id):
+                payload, = db.execute("SELECT payload FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+                return load_record(db, Attempt, payload)
+            try:
+                labels = {row["task_id"]: row for row in rows(preferences["turns_path"])}
+                async with httpx.AsyncClient(base_url=preferences["judge_base_url"], timeout=180) as judge:
+                    scored, calls = await rescore_saved_answers(judge, create_model_template(run.model), get_attempt,
+                        labels, directory, preferences, binding["query_encoder"])
+                result = {"scored_answers": len(scored), "unscored_answers": len(calls)-len(scored)}
+            finally:
+                db.close()
+        else:
+            result = await collect_preferences(actual, controller=controller, limit=limit)
     finally:
         ended = time.monotonic()
         await sampler.stop()
-        await controller.aclose()
-        controller.store.close()
+        if controller is not None:
+            await controller.aclose()
+            controller.store.close()
         stamp = time.time_ns()
         observation = json.dumps(sampler.observation(), indent=2)+"\n"
-        (directory/f"collection_physical.{stamp}.json").write_text(observation)
-        (directory/f"collection_cost.{stamp}.json").write_text(json.dumps({"binding": binding,
+        phase = "rescore" if rescore else "collection"
+        (directory/f"{phase}_physical.{stamp}.json").write_text(observation)
+        (directory/f"{phase}_cost.{stamp}.json").write_text(json.dumps({"binding": binding, "scorer_engine_info": judge_info,
             "start": started, "end": ended, "physical": integrate_physical(sampler.samples, started, ended)}, indent=2)+"\n")
-    attach_collection_costs(directory, binding)
+    if (directory/P1_REWARDS).exists():
+        attach_collection_costs(directory, binding)
     return {**result, "binding": binding, "cohort_directory": str(directory)}
 
 
@@ -259,7 +291,7 @@ def attach_collection_costs(directory, binding):
     cost_paths = sorted(directory.glob("collection_cost.*.json"))
     samples = sorted((sample for path in physical_paths for sample in json.loads(path.read_text())["samples"]),
                      key=lambda sample: sample["timestamp"])
-    rewards = rows(directory/"rewards.jsonl")
+    rewards = rows(directory/P1_REWARDS)
     turn_path, failure_path = directory/"turns.jsonl", directory/"failed_cases.jsonl"
     turns = rows(turn_path) if turn_path.exists() else []
     failures = rows(failure_path) if failure_path.exists() else []
@@ -286,7 +318,7 @@ def attach_collection_costs(directory, binding):
         row["cost"] = {"complete_ms": row["response"]["complete_ms"],
             "total_input_tokens": row["input_total_tokens"], "total_output_tokens": row["output_total_tokens"],
             **share, "attribution": attribution}
-    write_rows(directory/"rewards.jsonl", rewards)
+    write_rows(directory/P1_REWARDS, rewards)
     for row in failures:
         share = attach(row, row["attempt_id"])
         row["physical_cost"] = share if row["request_window"] is not None else None
@@ -307,7 +339,7 @@ def prepare_preferences(config):
     write_rows(directory/"preferences.jsonl", pairs)
     manifest = {"binding": binding, "cohort_split": split, "answers": len(rewards), "pairs": len(pairs),
         "tasks": len({row["task_id"] for row in pairs}), "reward_weights": settings["reward_weights"],
-        "source_rewards_sha256": file_digest(directory/"rewards.jsonl"),
+        "source_rewards_sha256": file_digest(directory/P1_REWARDS),
         "reader_condition": "fixed checkpoint/profile; candidate answers are executed and scored under this binding"}
     (directory/"preference_manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
     return manifest
@@ -374,7 +406,7 @@ async def measured_policy_training(config):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("audit", "collect", "prepare", "train"))
+    parser.add_argument("command", choices=("audit", "collect", "rescore", "prepare", "train"))
     parser.add_argument("--config", required=True)
     parser.add_argument("--limit", type=int)
     args = parser.parse_args(argv)
@@ -384,8 +416,8 @@ def main(argv=None):
         config = merge_config(yaml.safe_load(Path(config["base_study_config"]).read_text()), config)
     if args.command == "audit":
         result = audit_collection_inputs(config, limit=args.limit or 8)
-    elif args.command == "collect":
-        result = asyncio.run(collect_fixed_reader_preferences(config, limit=args.limit))
+    elif args.command in {"collect", "rescore"}:
+        result = asyncio.run(collect_fixed_reader_preferences(config, limit=args.limit, rescore=args.command == "rescore"))
     elif args.command == "prepare":
         result = prepare_preferences(config)
     else:

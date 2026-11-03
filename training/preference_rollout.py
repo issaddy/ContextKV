@@ -441,33 +441,171 @@ def append_record(path, row):
         output.write(json.dumps(row, ensure_ascii=False)+"\n")
 
 
-async def _judge(client, template, row, evidence_set, answer):
+async def _judge(client, template, row, evidence_set, answer, *, journal=None, saved=None):
     components = ("necessary_points", "grounding", "conditions_versions", "task_score")
     schema = {"type": "object", "properties": {
         **{name: {"type": "number", "minimum": 0, "maximum": 1} for name in components},
         "disposition": {"type": "string", "enum": ["answer", "partial", "retrieval_gap", "unanswerable", "underspecified"]},
         "rationale": {"type": "string"}}, "required": [*components, "disposition", "rationale"],
         "additionalProperties": False}
+    if journal is not None:
+        schema["properties"].pop("rationale")
+        schema["required"].remove("rationale")
+        for name in components:
+            schema["properties"][name] = {"type": "number", "enum": [i/20 for i in range(21)]}
+        if saved is not None:
+            return parse_judge_record(saved, schema), saved
+    actual_history = [{name: turn[name] for name in ("turn_id", "user_text", "assistant_text")}
+                      for turn in row["actual_history"]]
     messages = (Message("system", "Evaluate the actual answer against the current question, actual history, "
         "active conditions, original sources and offline reference. Judge each required point and all "
         "condition/version constraints. Reference answers may describe a different author history; "
         "the supplied actual history and current task determine this request. Return the requested JSON."),
-        Message("user", json.dumps({"question": row["question"], "actual_history": row["actual_history"],
+        Message("user", json.dumps({"question": row["question"], "actual_history": actual_history,
             "task_state": row["task_state"], "reference_answer": row.get("reference_answer"),
             "offline_corpus_has_answer": row.get("corpus_has_answer"),
             "offline_scope_complete": row.get("oracle_scope_complete", False),
-            "original_sources": to_jsonable(evidence_set.selected_units), "answer": answer}, ensure_ascii=False)))
+            "original_sources": to_jsonable(evidence_set.selected_units), "answer": answer,
+            **({"output_schema": schema} if journal is not None else {})}, ensure_ascii=False)))
     rendered = template.render(messages)
     started = time.perf_counter()
     response = await client.post("/generate", json={"input_ids": list(rendered.input_ids), "stream": False,
-        "sampling_params": {"temperature": 0, "max_new_tokens": 1024,
+        "sampling_params": {"temperature": 0, "max_new_tokens": 256 if journal is not None else 1024,
                             "json_schema": json.dumps(schema)}})
     response.raise_for_status()
     raw = response.json()
-    judged = json.loads(raw["text"])
-    return judged, {"raw_output": raw["text"], "meta_info": raw["meta_info"],
+    record = {"raw_output": raw["text"], "meta_info": raw["meta_info"],
         "input_tokens": len(rendered.input_ids), "output_tokens": raw["meta_info"].get("completion_tokens"),
         "elapsed_ms": (time.perf_counter()-started)*1000}
+    if journal is not None:
+        journal(record)
+        return parse_judge_record(record, schema), record
+    return json.loads(raw["text"]), record
+
+
+
+def parse_judge_record(record, schema):
+    reason = record["meta_info"].get("finish_reason")
+    if (reason.get("type") if isinstance(reason, dict) else reason) == "length":
+        return None
+    try:
+        result = json.loads(record["raw_output"])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(result, dict) or set(result) != set(schema["required"]):
+        return None
+    for key, rule in schema["properties"].items():
+        value = result[key]
+        if type(value) not in ((int, float) if rule["type"] == "number" else (str,)) or value not in rule["enum"]:
+            return None
+    return result
+
+
+P1_REWARDS = "rewards.v2.jsonl"
+P1_RUBRIC = "necessary_points_grounding_conditions_versions_task_v2"
+
+
+def saved_rows(path):
+    return [json.loads(line) for line in path.read_text().splitlines() if line] if path.exists() else []
+
+
+def reward_template(turn, row, get_attempt, settings, query_binding):
+    from adapters.support_model import query_view
+    from controller.context_schema import EvidencePool, SupportScores
+    response = turn["response"]
+    candidate = get_attempt(response["attempt_id"]).plan.candidate
+    state = decode(TaskState, row["task_state"])
+    selected = decode(EvidenceSet, turn["evidence_set"])
+    payload = json.loads(Path(turn["candidate_pool_path"]).read_text())
+    pool = decode(EvidencePool, payload["pool"])
+    scores = decode(SupportScores, payload["support_scores"])
+    units = {unit.unit_id: unit for unit in pool.units}
+    selected_ids = {unit.unit_id for unit in selected.selected_units}
+    supports = [item for item in (*scores.singles, *scores.bundles) if set(item.unit_ids) <= selected_ids]
+    history = tuple(decode(TurnRecord, item) for item in turn["actual_history"])
+    snapshot = SessionSnapshot(turn["conversation_id"], raw_history=history)
+    needs = {need.need_id: need for need in state.needs}
+    def resolve(ref):
+        return resolve_text(ref, state, snapshot)
+    return {**turn, "split": turn["cohort_split"], "task_state": row["task_state"],
+        "history_id": json.dumps(turn["actual_history"], ensure_ascii=False, sort_keys=True),
+        "query_encoder": query_binding, "history_origin": "frozen_actual_rollout", "measurement_kind": "hardware",
+        "reader_model": "qwen3_32b_nonthinking", "input_hash": candidate.input_hash,
+        "action": response["action"], "layout": candidate.layout_id,
+        "body_budget": settings.get("body_budget", 4096), "output_budget": candidate.output_budget,
+        "support_model_asset": settings["support_asset"],
+        "units": to_jsonable(selected.selected_units), "supports": to_jsonable(supports),
+        "support_inputs": [{"need_id": item.need_id,
+            "query": query_view(state, needs[item.need_id], resolve),
+            "units": to_jsonable(tuple(units[uid] for uid in item.unit_ids)),
+            "dependencies": to_jsonable(tuple(unit for unit in close_dependencies(item.unit_ids, units)
+                                             if unit.unit_id not in item.unit_ids))} for item in supports],
+        "input_tokens": response["input_tokens"], "input_total_tokens": response["total_input_tokens"],
+        "output_total_tokens": response["total_output_tokens"],
+        "condition_version_interventions": [
+            {"unit_id": unit.unit_id, "reasons": reasons}
+            for unit, reasons in condition_version_mismatches(state, selected.selected_units, resolve)],
+        "corpus_has_answer": row.get("corpus_has_answer"),
+        "oracle_scope_complete": row.get("oracle_scope_complete", False)}
+
+
+async def score_saved_answer(judge, template, row, reward, directory, scorer, calls):
+    attempt_id = reward["response"]["attempt_id"]
+    def journal(record):
+        reason = record["meta_info"].get("finish_reason")
+        finish = reason.get("type") if isinstance(reason, dict) else reason
+        entry = {**record, "attempt_id": attempt_id, "scorer_identity": scorer,
+                 "status": "unscored" if finish == "length" else "received"}
+        append_record(directory/"judge_calls.jsonl", entry)
+        calls[attempt_id] = entry
+    selected = decode(EvidenceSet, reward["evidence_set"])
+    judged, record = await _judge(judge, template, row, selected, reward["answer"],
+                                  journal=journal, saved=calls.get(attempt_id))
+    if judged is None:
+        return None
+    dispositions = {support.disposition for support in selected.need_support}
+    support_disposition = ("complete" if dispositions == {"complete"} else
+        "partial" if "partial" in dispositions or "complete" in dispositions else "background")
+    labels, origin = answer_state_supervision({"answer_disposition": judged["disposition"],
+        "disposition": support_disposition, "quality": None}, corpus_has_answer=row.get("corpus_has_answer"),
+        scope_complete=row.get("oracle_scope_complete", False))
+    result = {**reward, "scorer_identity": scorer,
+        "quality_components": {name: judged[name] for name in ("necessary_points", "grounding", "conditions_versions", "task_score")},
+        "raw_judge_disposition": judged["disposition"], "disposition": labels["answer_disposition"],
+        "disposition_supervision_origin": origin, "judge_record": record}
+    append_record(directory/P1_REWARDS, result)
+    return result
+
+
+async def rescore_saved_answers(judge, template, get_attempt, labels, directory, settings, query_binding):
+    scorer = settings["scorer_identity"]
+    calls = {row["attempt_id"]: row for row in saved_rows(directory/"judge_calls.jsonl") if row["scorer_identity"] == scorer}
+    (directory/P1_REWARDS).touch(exist_ok=True)
+    existing = saved_rows(directory/P1_REWARDS)
+    if any(row["scorer_identity"] != scorer for row in existing):
+        raise ValueError("existing v2 rewards belong to a different scorer")
+    scored = {row["response"]["attempt_id"] for row in existing}
+    templates = {row["response"]["attempt_id"]: row for name in ("rewards.jsonl", "reward_templates.jsonl")
+                 for row in saved_rows(directory/name)}
+    semaphore = asyncio.Semaphore(settings.get("candidate_concurrency", 4))
+    async def score(turn):
+        async with semaphore:
+            identity = turn["response"]["attempt_id"]
+            row = labels[turn["task_id"]]
+            reward = templates.get(identity)
+            if reward is None:
+                reward = reward_template(turn, row, get_attempt, settings, query_binding)
+                append_record(directory/"reward_templates.jsonl", reward)
+            result = await score_saved_answer(judge, template, row, reward, directory, scorer, calls)
+            if result is not None:
+                existing.append(result)
+    async with asyncio.TaskGroup() as group:
+        for turn in saved_rows(directory/"turns.jsonl"):
+            identity = turn["response"]["attempt_id"]
+            if identity not in scored:
+                scored.add(identity)
+                group.create_task(score(turn))
+    return existing, calls
 
 
 async def collect_preferences(config, *, controller=None, directory=None, limit=None):
@@ -546,15 +684,14 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
         read_input_tokens=settings.get("read_input_tokens", 12288),
         read_output_tokens=settings.get("read_output_tokens", 2048),
         max_steps=settings.get("max_steps", 64), max_total_tokens=settings.get("max_total_tokens", 4194304))
-    rewards_path = output_dir/"rewards.jsonl"
+    rewards_path = output_dir/P1_REWARDS
     existing = [json.loads(line) for line in rewards_path.read_text().splitlines() if line] if rewards_path.exists() else []
     actual_turns_path = output_dir/"turns.jsonl"
     actual_turns = [json.loads(line) for line in actual_turns_path.read_text().splitlines() if line] if actual_turns_path.exists() else []
     if settings.get("reader_data_only", False):
         actual_turns_path.touch(exist_ok=True)
     completed = {(row["task_id"], row["category"]) for row in existing}
-    if settings.get("reader_data_only", False):
-        completed.update((row["task_id"], row["category"]) for row in actual_turns)
+    completed.update((row["task_id"], row["category"]) for row in actual_turns)
     categories = ("relevance", "direct_support", "complementary", "redundant",
                   "wrong_condition_version", "deleted_premise")
     failures_path = output_dir/"failed_cases.jsonl"
@@ -585,6 +722,10 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                           if identity in {row["task_id"] for row in rows}}
     started = time.perf_counter()
     async with httpx.AsyncClient(base_url=settings.get("judge_base_url", config.get("generation", {}).get("teacher_url", "http://127.0.0.1:30001")), timeout=180) as judge:
+        if not settings.get("reader_data_only", False) and not settings.get("candidate_preparation_only", False):
+            labels = {item["task_id"]: item for item in saved_rows(labels_path)}
+            collected, judge_calls = await rescore_saved_answers(judge, controller.template, controller.store.get_attempt,
+                labels, output_dir, {**settings, "support_asset": asset}, query_binding)
         for task_index, row in enumerate(rows):
             expected_categories = tuple(saved_families[row["task_id"]]["evidence_sets"]) if row["task_id"] in saved_families else categories
             if all((row["task_id"], category) in completed for category in expected_categories):
@@ -674,7 +815,6 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                 if settings.get("candidate_preparation_only", False) or not family["ready"]:
                     model.release_task(state.task_id)
                     continue
-            history_id = json.dumps(row["actual_history"], ensure_ascii=False, sort_keys=True)
             jobs = []
             for category in active_categories:
                 if (row["task_id"], category) in completed:
@@ -756,7 +896,6 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                         await controller.close_session(session_id)
                         return
                     generation_ended = time.monotonic()
-                    actual_candidate = controller.store.get_attempt(response.attempt_id).plan.candidate
                     actual_turn = {"task_id": row["task_id"], "conversation_id": row["conversation_id"],
                         "turn": row["turn"], "snapshot_id": row["snapshot_id"], "split": "train",
                         "cohort_split": settings["cohort_split"],
@@ -784,74 +923,19 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                         completed.add((row["task_id"], category))
                         await controller.close_session(session_id)
                         return
-                    judged, judge_record = await _judge(judge, controller.template, row, selected, response.assistant_text)
-                    dispositions = {support.disposition for support in selected.need_support}
-                    support_disposition = ("complete" if dispositions == {"complete"} else
-                                           "partial" if "partial" in dispositions or "complete" in dispositions else "background")
-                    answer_labels, answer_origin = answer_state_supervision({
-                        "answer_disposition": judged["disposition"], "disposition": support_disposition,
-                        "quality": None}, corpus_has_answer=row.get("corpus_has_answer"),
-                        scope_complete=row.get("oracle_scope_complete", False))
-                    support_rows = tuple(s for s in (*scores.singles, *scores.bundles)
-                        if set(s.unit_ids) <= {u.unit_id for u in selected.selected_units})
-                    from adapters.support_model import query_view
-                    need_by_id = {need.need_id: need for need in state.needs}
-                    all_units = {unit.unit_id: unit for unit in pool.units}
-                    support_inputs = [{"need_id": support.need_id,
-                        "query": query_view(state, need_by_id[support.need_id], model.resolve),
-                        "units": to_jsonable(tuple(all_units[uid] for uid in support.unit_ids)),
-                        "dependencies": to_jsonable(tuple(unit for unit in close_dependencies(support.unit_ids, all_units)
-                                                         if unit.unit_id not in support.unit_ids))}
-                        for support in support_rows]
-                    result = {"task_id": row["task_id"], "split": settings["cohort_split"], "history_id": history_id,
-                        "query_encoder": query_binding,
-                        "conversation_id": row["conversation_id"], "turn": row["turn"], "snapshot_id": row["snapshot_id"],
-                        "cohort_split": settings["cohort_split"],
-                        "cohort_manifest_sha256": file_digest(settings["cohort_manifest"]),
-                        "actual_history": row["actual_history"], "question": row["question"],
-                        "history_origin": "frozen_actual_rollout", "measurement_kind": "hardware",
-                        "reader_checkpoint": settings.get("reader_checkpoint"),
-                        "reader_profile_id": settings.get("reader_profile_id"),
-                        "scorer_identity": settings.get("scorer_identity"),
-                        "request_window": [generation_started, generation_ended],
-                        "body_budget": budget.body_tokens, "output_budget": budget.output_tokens,
-                        "category": category, "action": response.action, "layout": actual_candidate.layout_id,
-                        "task_state": to_jsonable(state), "units": to_jsonable(selected.selected_units),
-                        "support_model_asset": str(asset),
-                        "supports": to_jsonable(support_rows), "support_inputs": support_inputs,
-                        "answer": response.assistant_text, "reader_model": "qwen3_32b_nonthinking",
-                        "quality_components": {name: judged[name] for name in (
-                            "necessary_points", "grounding", "conditions_versions", "task_score")},
-                        "disposition": answer_labels["answer_disposition"],
-                        "raw_judge_disposition": judged["disposition"],
-                        "disposition_supervision_origin": answer_origin,
-                        "corpus_has_answer": row.get("corpus_has_answer"),
-                        "oracle_scope_complete": row.get("oracle_scope_complete", False),
-                        "judge_record": judge_record,
-                        "condition_version_interventions": [
-                            {"unit_id": unit.unit_id, "reasons": reasons}
-                            for unit, reasons in condition_version_mismatches(state, selected.selected_units, model.resolve)],
-                        "response": to_jsonable(response), "input_tokens": response.input_tokens,
-                        "input_hash": actual_candidate.input_hash,
-                        "reader_input_tokens": response.reader_input_tokens,
-                        "reader_output_tokens": response.reader_output_tokens,
-                        "input_total_tokens": response.total_input_tokens, "output_total_tokens": response.total_output_tokens,
-                        "shared_preparation_cost": preparation,
-                        "preparation_charged": charge_preparation,
-                        "candidate_concurrency": settings.get("candidate_concurrency", 4),
-                        "preparation_charge_candidate": charged_category,
-                        "comparable_cost": {"complete_ms": response.complete_ms+preparation["wall_ms"]
-                                if response.complete_ms is not None else None,
+                    reward = reward_template(actual_turn, row, controller.store.get_attempt, {**settings, "support_asset": asset}, query_binding)
+                    reward.update(shared_preparation_cost=preparation,
+                        comparable_cost={"complete_ms": response.complete_ms+preparation["wall_ms"]
+                            if response.complete_ms is not None else None,
                             "input_tokens": _sum_known([response.reader_input_tokens, preparation["input_tokens"]]),
                             "output_tokens": _sum_known([response.reader_output_tokens, preparation["output_tokens"]]),
                             "scope": "reader_plus_shared_preparation_attributed_equally"},
-                        "support_usage": dict(model.backend.usage), "candidate_pool_path": str(pool_path),
-                        "evidence_set": to_jsonable(selected)}
-                    if recovery is not None:
-                        result["collection_recovery"] = actual_turn["collection_recovery"]
-                    with rewards_path.open("a") as output:
-                        output.write(json.dumps(result, ensure_ascii=False)+"\n")
-                    collected.append(result)
+                        support_usage=dict(model.backend.usage))
+                    append_record(output_dir/"reward_templates.jsonl", reward)
+                    result = await score_saved_answer(judge, controller.template, row, reward, output_dir,
+                                                      settings["scorer_identity"], judge_calls)
+                    if result is not None:
+                        collected.append(result)
                     completed.add((row["task_id"], category))
                     await controller.close_session(session_id)
 
