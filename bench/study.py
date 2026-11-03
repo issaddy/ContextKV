@@ -5,7 +5,6 @@ import argparse
 import asyncio
 from collections import Counter
 from dataclasses import replace
-import hashlib
 import json
 from pathlib import Path
 import random
@@ -352,13 +351,11 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                                 time.monotonic()],
                 failure_window_scope="failed_request_wall" if row["task_id"] in request_starts else "client_before_submission",
                 measurement_segment_id=segment_id,
-                attempt=to_jsonable(attempt),
-                execution_steps=[to_jsonable(step) for step in service.store.execution_steps(attempt.attempt_id)]
-                    if attempt is not None else [],
+                attempt_id=attempt.attempt_id if attempt is not None else None,
+                state_db=str((directory/"state"/"sessions.sqlite3").resolve()),
                 blocked_task_ids=[value["task_id"] for _, value in ordered_rows
                     if value["task_id"] not in results and value["task_id"] != row["task_id"]])
             failures[sid] = failure
-            write_json(directory/"failed_conversations"/(str(row["turn"])+"-"+hashlib.sha256(sid.encode()).hexdigest()[:20]+".json"), failure)
             try:
                 await service.close_session(session_id)
             except Exception as cleanup_error:
@@ -379,7 +376,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                     if not terminal_budget_text(previous.error):
                         raise ValueError(f"unrecognized prior failed attempt: {previous.error}")
                     if sid not in failures:
-                        failures[sid] = persist_p3_failure(directory, sid, previous.error, session_id=session_id)
+                        failures[sid] = persist_p3_failure(directory, sid, row["task_id"], session_id,
+                            previous, previous.error)
                     await service.close_session(session_id)
                     continue
                 boundary_start = time.monotonic()
@@ -397,7 +395,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                             raise unknown
                     elif not terminal_model_budget(error):
                         raise
-                    failure = persist_p3_failure(directory, sid, str(error), session_id=session_id)
+                    attempt = service.store.find_request(session_id, row["task_id"])
+                    failure = persist_p3_failure(directory, sid, row["task_id"], session_id, attempt, str(error))
                     failure.update(request_window=[request_start, time.monotonic()],
                         measurement_segment_id=segment_id)
                     failures[sid] = failure
@@ -414,12 +413,14 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         await native.stop()
         await physical.stop()
         observation = native.observation()
-        memory_costs = attribute_physical(physical.samples, windows)
+        failure_windows = {("failure", sid): failure["request_window"]
+            for sid, failure in failures.items() if failure.get("measurement_segment_id") == segment_id}
+        memory_costs = attribute_physical(physical.samples, {**windows, **failure_windows})
         for task_id, window in windows.items():
-            results[task_id]["cost"].update(memory_costs[task_id])
             raw_window = integrate_physical(physical.samples, *window)
-            results[task_id]["cost"].update({name: raw_window[name]
-                for name in ("gpu_peak_gib", "host_peak_gib")})
+            results[task_id]["cost"].update(memory_costs[task_id], **{name: raw_window.get(name)
+                for name in ("gpu_peak_gib", "host_peak_gib", "complete_window_coverage")})
+            results[task_id]["physical_window"] = raw_window
             series, metadata = pool_series(observation, *window)
             results[task_id]["native_resource_window"] = {**occupancy_integral(series), **metadata}
             write_json(directory/"records"/f"{results[task_id]['record_number']:06d}.json", results[task_id])
@@ -430,14 +431,18 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             "idle_cost": "included in batch physical integral, retained outside per-request attribution"})
         write_json(segment/"generation_manifest.json", generation_manifest)
         if reuse_provider or continue_conversation_failures:
-            for failure in failures.values():
-                if failure.get("measurement_segment_id") == segment_id:
-                    window = failure["request_window"]
-                    failure["cost"] = {"complete_ms": (window[1]-window[0])*1000,
-                        **integrate_physical(physical.samples, *window)}
-                failure_key = (digest(failure["conversation_id"]) if reuse_provider else
-                               hashlib.sha256(failure["conversation_id"].encode()).hexdigest())
-                write_json(directory/"terminal_read_failures"/(failure_key[:20]+".json"), failure)
+            for sid, failure in failures.items():
+                key = ("failure", sid)
+                if key in failure_windows:
+                    window = failure_windows[key]
+                    raw_window = integrate_physical(physical.samples, *window)
+                    failure["cost"] = {"complete_ms": (window[1]-window[0])*1000, **memory_costs[key],
+                        **{name: raw_window.get(name) for name in
+                           ("gpu_peak_gib", "host_peak_gib", "complete_window_coverage")}}
+                    failure["physical_window"] = raw_window
+                if reuse_provider:
+                    failure_key = digest(failure["conversation_id"])[:20]
+                    write_json(directory/"terminal_read_failures"/(failure_key+".json"), failure)
             write_json(directory/"failed_conversations.json", list(failures.values()))
         if continue_conversation_failures and dispatcher is not None:
             write_json(directory/"workload_dispatch.json", dict(origin=dispatcher.origin,

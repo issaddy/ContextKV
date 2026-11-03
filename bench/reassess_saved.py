@@ -37,10 +37,15 @@ def condition_saved(rows, spec, checkout, output):
     updated, sources = [], []
     for index, (directory, group) in enumerate(groups.items()):
         root = Path(directory)/"scoring"
-        paths = (root/"official/scores.jsonl", root/"official.algorithmic.jsonl")
+        scoring = group[0].get("scoring") or {}
+        if "component_completion" in (scoring.get("identity") or {}):
+            paths = (Path(scoring["raw_outputs"][0]),)
+        else:
+            paths = (root/"official/scores.jsonl", root/"official.algorithmic.jsonl")
         records = {row["task_id"]: row for row in load_jsonl(paths[0])}
-        for row in load_jsonl(paths[1]):
-            records[row["task_id"]]["metrics"].update(row["metrics"])
+        for path in paths[1:]:
+            for row in load_jsonl(path):
+                records[row["task_id"]]["metrics"].update(row["metrics"])
         condition_metrics(rules, list(records.values()), ("RL_F", "RB_llm", "RB_agg"))
         target = output/f"conditioned-{index}.jsonl"
         write_rows(target, records.values())

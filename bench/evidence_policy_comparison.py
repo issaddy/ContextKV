@@ -393,6 +393,7 @@ async def own_p3_cell(config, matrix, dataset, split, output, *, policy, protoco
         "history_protocol": "each conversation advances sequentially on its own committed answers",
         "concurrency": concurrency, "cache_start_protocol": "cold_once_per_method_dataset",
         "task_ids": declared_ids, "scheduled_task_ids": scheduled_ids,
+        "tasks_path": str(task_path.resolve()),
         "requested_conversations": identities}
     write_json(output/"manifest.json", manifest)
     collected = await run_dataset(actual, local_matrix, cell_method(policy, protocol),
@@ -401,41 +402,18 @@ async def own_p3_cell(config, matrix, dataset, split, output, *, policy, protoco
     failed = json.loads((output/"failed_conversations.json").read_text())
     manifest.update(status="completed", completed_turns=len(collected),
         missing_execution_task_ids=sorted(set(declared_ids)-{row["task_id"] for row in collected}),
-        failed_conversations=failed)
+        failed_conversation_count=len(failed),
+        failed_conversations_path=str((output/"failed_conversations.json").resolve()),
+        state_db=str((output/"state"/"sessions.sqlite3").resolve()))
     write_json(output/"manifest.json", manifest)
     return collected
 
 
-def persist_p3_failure(directory, conversation, error, *, teacher_ledger=None, session_id=None):
-    import sqlite3
-    from controller.context_schema import StepRecord
-    from controller.schema import SessionSnapshot
-    from controller.session_store import Attempt, load_record
-    connection = sqlite3.connect(f"file:{(directory/'state'/'sessions.sqlite3').resolve()}?mode=ro", uri=True)
-    attempts = [load_record(connection, Attempt, payload) for payload, in connection.execute(
-        "SELECT payload FROM attempts WHERE stage='FAILED'")]
-    if session_id is not None:
-        attempts = [attempt for attempt in attempts if attempt.session_id == session_id]
-    records = []
-    for attempt in attempts:
-        steps = [{"stage": stage, "record": to_jsonable(load_record(connection, StepRecord, payload))}
-            for stage, payload in connection.execute("SELECT stage,payload FROM execution_steps WHERE attempt_id=? ORDER BY rowid",
-                                                     (attempt.attempt_id,))]
-        snapshot = load_record(connection, SessionSnapshot, connection.execute(
-            "SELECT snapshot FROM sessions WHERE session_id=?", (attempt.session_id,)).fetchone()[0])
-        helper_calls = ([row for row in rows(teacher_ledger) if row["task_id"] == attempt.request_id]
-                        if teacher_ledger is not None and Path(teacher_ledger).exists() else [])
-        records.append({"attempt": to_jsonable(attempt), "step_records": steps, "quality": None,
-            "failure_category": "terminal_model_budget", "qa_increment": snapshot.version-attempt.expected_version,
-            "request_window": None, "batch_cost_directory": str(directory),
-            "helper_calls_raw": helper_calls, "helper_calls_source": str(teacher_ledger) if teacher_ledger is not None else None,
-            "helper_call_attribution": "raw same-task records retained; no invented unique-call cost for a prior window"})
-    connection.close()
-    failure = {"conversation_id": conversation, "error": error, "generation_dir": str(directory),
-        "descendants": "not generated after uncommitted failed turn", "failed_attempts": records}
-    target = (directory/"terminal_read_failures"/(digest(conversation)[:20]+".json")
-              if session_id is not None else directory/"terminal_read_failures.json")
-    write_json(target, failure)
+def persist_p3_failure(directory, conversation, task_id, session_id, attempt, error):
+    failure = {"conversation_id": conversation, "task_id": task_id, "session_id": session_id,
+        "error": error, "attempt_id": attempt.attempt_id if attempt is not None else None,
+        "blocked_task_ids": [], "state_db": str((directory/"state"/"sessions.sqlite3").resolve())}
+    write_json(directory/"terminal_read_failures"/(digest(conversation)[:20]+".json"), failure)
     return failure
 
 
