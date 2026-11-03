@@ -1,8 +1,10 @@
 """BGE-M3 query LoRA with history, span, condition-pointer and task heads."""
 from __future__ import annotations
 
+from collections import Counter
 import json
 from pathlib import Path
+import random
 import time
 
 from adapters.history_state import HistoryIndex, TaskPrediction
@@ -35,7 +37,7 @@ def encode_task(tokenizer, turn, windows, memory):
         encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
         begin = len(ids)
         ids.extend(encoded["input_ids"])
-        refs.extend(TextRef(ref.turn_id, ref.speaker, ref.start+start, ref.start+end)
+        refs.extend(TextRef(ref.turn_id, ref.speaker, ref.start+start, ref.start+end) if start < end else None
                     for start, end in encoded["offset_mapping"])
         ranges.append((begin, len(ids), ref))
         ids.append(tokenizer.sep_token_id)
@@ -54,7 +56,8 @@ def encode_task(tokenizer, turn, windows, memory):
     version_turn_ids = [row.turn_id for row in memory.committed_history]
     version_turn_positions = [[i for i, ref in enumerate(refs) if ref is not None and ref.turn_id == turn_id]
                               for turn_id in version_turn_ids]
-    return {"input_ids": ids, "refs": refs, "ranges": ranges,
+    return {"input_ids": ids, "refs": refs, "ranges": ranges, "text_groups": groups,
+            "current_turn_id": turn.turn,
             "prior_conditions": prior_conditions, "condition_positions": condition_positions,
             "prior_tasks": memory.prior_task_states, "task_positions": task_positions,
             "version_turn_ids": version_turn_ids, "version_turn_positions": version_turn_positions}
@@ -78,6 +81,8 @@ def task_targets(encoded, prediction):
                         targets[name][i] = value
 
     for begin, end, ref in encoded["ranges"]:
+        if ref.turn_id == encoded["current_turn_id"]:
+            continue
         selected = any(ref.turn_id == chosen.turn_id and ref.speaker == chosen.speaker
                        and ref.start < chosen.end and chosen.start < ref.end for chosen in prediction.history_spans)
         targets["history"][begin:end] = [int(selected)]*(end-begin)
@@ -179,19 +184,21 @@ def decode_prediction(encoded, output, turn):
                     and float(output["history"][0, begin:end].softmax(-1)[:, 1].mean()) >= .5)
     subjects = tuple(ref for kind, ref, _ in spans if kind == "SUBJECT")
     conditions = []
-    keys = [(ref, i) for kind, ref, i in spans
-            if kind == "CONDITION_KEY" and ref.turn_id == turn.turn]
+    keys = [(ref, i) for kind, ref, i in spans if kind == "CONDITION_KEY"]
     removal_keys = [(ref, i) for ref, i in keys if UPDATES[int(output["update"][0, i].argmax())] == "REMOVE"]
     active_keys = [(ref, i) for ref, i in keys if (ref, i) not in removal_keys]
+    groups = {i: (ref, []) for ref, i in active_keys}
     for kind, ref, i in spans:
-        if kind != "CONDITION_VALUE" or ref.turn_id != turn.turn:
+        if kind != "CONDITION_VALUE":
             continue
-        update = UPDATES[int(output["update"][0, i].argmax())]
-        relation_type = CONDITION_RELATIONS[int(output["condition_relation"][0, i].argmax())]
-        target = int(output["pointer"][0, i].argmax())
+        key, anchor = min(active_keys, key=lambda item: abs(item[1]-i)) if active_keys else (ref, i)
+        groups.setdefault(anchor, (key, []))[1].append(ref)
+    for anchor, (key, values) in groups.items():
+        update = UPDATES[int(output["update"][0, anchor].argmax())]
+        relation_type = CONDITION_RELATIONS[int(output["condition_relation"][0, anchor].argmax())]
+        target = int(output["pointer"][0, anchor].argmax())
         targets = (encoded["prior_conditions"][target-1].condition_id,) if target else ()
-        key = min(active_keys, key=lambda item: abs(item[1]-i))[0] if active_keys else ref
-        conditions.append(Condition(f"t{turn.turn}:c{len(conditions)}", key, (ref,), relation_type, key,
+        conditions.append(Condition(f"t{turn.turn}:c{len(conditions)}", key, tuple(values), relation_type, key,
                                     targets, targets if update == "REPLACE" else (), update))
     for ref, i in removal_keys:
         target = int(output["pointer"][0, i].argmax())
@@ -201,13 +208,25 @@ def decode_prediction(encoded, output, turn):
         relation_type = CONDITION_RELATIONS[int(output["condition_relation"][0, i].argmax())]
         conditions.append(Condition(f"t{turn.turn}:c{len(conditions)}", relation_type=relation_type,
                                     predicate_span=ref, target_refs=targets, update="REMOVE"))
-    needs = tuple(Need(f"t{turn.turn}:n{j}", (ref,), OPERATIONS[int(output["operation"][0, i].argmax())],
+    def span_positions(span):
+        return [i for i, ref in enumerate(encoded["refs"]) if ref is not None
+                and ref.turn_id == span.turn_id and ref.speaker == span.speaker
+                and ref.start < span.end and span.start < ref.end]
+
+    needs = tuple(Need(f"t{turn.turn}:n{j}", (ref,),
+                       OPERATIONS[int(output["operation"][0, span_positions(ref)].mean(0).argmax())],
                        subjects, tuple(c.condition_id for c in conditions if c.update not in {"REMOVE", "KEEP"}))
-                  for j, (kind, ref, i) in enumerate(spans) if kind == "NEED" and ref.turn_id == turn.turn)
+                  for j, (kind, ref, i) in enumerate(spans) if kind == "NEED")
     times = tuple(ref for kind, ref, _ in spans if kind == "TIME")
     resume = int(output["resume"][0].argmax())
     resume_id = encoded["prior_tasks"][resume-1].task_id if resume and relation == "revisit" else ""
-    version_ids = tuple(turn.query[ref.start:ref.end] for condition in conditions if condition.relation_type == "VERSION"
+    def span_text(span):
+        owner, text = next((ref, text) for ref, text in encoded["text_groups"]
+                          if ref.turn_id == span.turn_id and ref.speaker == span.speaker
+                          and ref.start <= span.start and span.end <= ref.end)
+        return text[span.start-owner.start:span.end-owner.start]
+
+    version_ids = tuple(span_text(ref) for condition in conditions if condition.relation_type == "VERSION"
                         for ref in condition.value_spans)
     version_pointer = int(output["version_pointer"][0].argmax())
     source_turns = (encoded["version_turn_ids"][version_pointer-1],) if version_pointer else ()
@@ -325,6 +344,13 @@ def train_task(config):
                                settings["cohort_manifest"], "train")
     if not labels:
         raise ValueError("task training requires actual-history teacher labels")
+    conversations = {}
+    for row in labels:
+        conversations.setdefault(row["conversation_id"], []).append(row)
+    for session in conversations.values():
+        session.sort(key=lambda row: row["turn"])
+    conversation_ids = list(conversations)
+    order = random.Random(settings.get("seed", 42))
     loss_weights = {name: float(settings.get("task_loss_weights", {}).get(name, 1.0))
         for name in ("retrieval", "history", "span", "update", "condition_relation", "pointer",
                      "operation", "relation", "version", "temporal_relation", "version_pointer", "resume")}
@@ -337,12 +363,14 @@ def train_task(config):
         {"params": adapter_params, "lr": settings.get("adapter_lr", 2e-4)},
         {"params": head_params, "lr": settings.get("head_lr", 1e-4)}], weight_decay=.01)
     logs, vectors = [], {}
+    span_counts = {kind: Counter() for kind in SPAN_KINDS}
     training_usage = {"task_input_tokens": 0, "history_input_tokens": 0,
                       "document_input_tokens": 0, "query_input_tokens": 0}
     started = time.perf_counter()
     for epoch in range(settings.get("epochs", 1)):
         prior_states = {}
-        for row in labels:
+        order.shuffle(conversation_ids)
+        for row in (row for identity in conversation_ids for row in conversations[identity]):
             history = tuple(decode(TurnRecord, value) for value in row["actual_history"])
             memory = RetrievalState(len(history), history, tuple(prior_states.get(row["conversation_id"], ())))
             turn = OnlineTurn(row["conversation_id"], row["task_id"], row["turn"], row["snapshot_id"], row["question"], (), (), "P3")
@@ -372,8 +400,18 @@ def train_task(config):
                     target = target.unsqueeze(0)
                 elif not (target != -100).any():
                     continue
-                classes = 3 if name == "span" else scores[name].shape[-1]
-                losses[name] = F.cross_entropy(scores[name].reshape(-1, classes), target.reshape(-1))
+                if name == "span":
+                    token_losses = F.cross_entropy(scores[name].reshape(-1, 3), target.reshape(-1),
+                                                  reduction="none").reshape(target.shape)
+                    channel_losses = []
+                    for channel, kind in enumerate(SPAN_KINDS):
+                        span_counts[kind].update(value[channel] for value in values if value[channel] != -100)
+                        channel_losses.append(torch.stack([
+                            token_losses[:, channel][target[:, channel] == label].mean()
+                            for label in (0, 1, 2) if (target[:, channel] == label).any()]).mean())
+                    losses[name] = torch.stack(channel_losses).mean()
+                else:
+                    losses[name] = F.cross_entropy(scores[name].reshape(-1, scores[name].shape[-1]), target.reshape(-1))
             grounding = row.get("verified_grounding", ())
             if grounding:
                 positives = tuple(dict.fromkeys(span["passage_id"] for span in grounding))
@@ -432,6 +470,11 @@ def train_task(config):
                   "history": [0, 1], "condition_pointer": "prior condition IDs", "task_pointer": "prior task IDs",
                   "temporal_relation": TEMPORAL_RELATIONS, "version_turn_pointer": "actual committed turn IDs"},
         "span_scheme": "parallel BIO channels per span kind; nested need/subject/condition spans retained",
+        "span_loss": "equal mean across channels and the BIO classes present in each channel; special and zero-width tokens masked",
+        "span_supervision_tokens": {kind: {name: counts[label] for label, name in enumerate(("O", "B", "I"))}
+                                    for kind, counts in span_counts.items()},
+        "training_order": "seeded conversation shuffle per epoch; ascending turns within each conversation",
+        "history_supervision": "selected historical windows only; current question masked",
         "training_config": settings}
     (output/"task-model.json").write_text(json.dumps(manifest, indent=2)+"\n")
     (output/"losses.jsonl").write_text("".join(json.dumps(row)+"\n" for row in logs))
