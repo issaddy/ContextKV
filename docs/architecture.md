@@ -25,7 +25,7 @@ flowchart TD
 
 `adapters/evidence_pool.py` 建立原文坐标、版本和依赖目录，合并当前检索、历史来源和缺口召回。同一原文命中多个 Need 时合并需求归属，保留最高召回分。`support_model.py` 计算单段与组合支持；`evidence_planner.py` 在正文预算及依赖闭包内组织候选集合。P1 的训练奖励来自绑定 reader 的实际回答差异。
 
-reader 训练沿用 `traces → reviews → prepare → train`。READ、REDUCE、ANSWER 的目标生成均只接收实际运行 messages；独立核验读取完整原文和步骤结论，评价固定目标的来源正确性、可见输入支持和任务绑定。上游 READ/REDUCE 错误登记到原步骤，用于相应课程。两个教师阶段分别计量。
+reader 训练沿用 `traces → reviews → prepare → train`。READ、REDUCE、ANSWER 的目标生成均只接收实际运行 messages；独立核验读取完整原文和步骤结论，评价固定目标的来源正确性、可见输入支持和任务绑定。上游错误登记到原步骤，两个教师阶段分别计量。训练关闭中间 checkpoint 保存，只输出最终 reader adapter、tokenizer、身份 manifest 和实际训练成本；新协议 reader 的重训与评价尚未完成。
 
 ## B：有限阅读、有效结论和收益选择
 
@@ -52,11 +52,9 @@ GAP 仅在选中后执行并进入步骤账本；返回的新来源与原事实�
 
 ## C：独立来源前缀与相对 native 的保留价值
 
-`prefix_view.py` 使用完整因果 token 路径识别可复用来源前缀；`prefix_retention.py` 为来源建立独立 owner。业务 READ epoch 结束后，来源 owner 可按期限继续保护同一路径。
+`prefix_view.py` 按完整因果 token 路径识别来源前缀，`prefix_retention.py` 在业务 READ epoch 结束后以独立 owner 继续保护。Radix/HiCache 负责物理页匹配、迁移与淘汰；策略读取当前 active 保护集合，比较保留、延长或释放带来的边际净收益，共享因果页只收一次新增容量和驻留成本。预测使用访问间隔、GPU/Host 当前驻留与回载、两层容量压力、活动和排队请求数；已付控制成本不再次收取，原生已有的命中也不重复记作保护收益。
 
-原生 Radix/HiCache 负责页匹配、分配、迁移与淘汰。owner 改变可淘汰性；退役解除引用，物理页按原生状态回收。多个 owner 共享的因果页在容量分配时只计一次。
-
-当前经验模型使用同输入、同 DAG、同外部压力窗口的 native/retain 配对差值学习净节省。下一阶段集中改进需求到达时间、native 未来驻留、TTL 选择，以及相对已保护集合的新增收益，见 [审查路线](study/review_20261103.md#c来源前缀保留)。
+C 配对重放为 Native、TTL15、TTL60、TTL180 使用同一请求序列、DAG、外部压力和至少 180 秒的共同观察窗；保护期限独立于观察长度。实际原文页需求与原生回执分别记录无重访、GPU 命中、Host 回载和重算，混合访问保留各类页数，空闲驻留持续计费。每个窗口只执行一次 Native，再分别与三个 TTL 作差。active 集合边际估值、状态特征和多 TTL 入口已实现；新协议的原生实测、价值模型拟合及开发选择尚未完成。
 
 ## 提交、评价与成本
 
