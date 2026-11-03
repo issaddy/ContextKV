@@ -25,11 +25,13 @@ from training.task_data import select_cohort_rows
 
 def reader_binding(config):
     from controller.config import load_config
+    from training.preference_rollout import query_encoder_binding
     settings = config["evidence_policy_training"]
     run = load_config(settings["run_config"])
     scope_path = Path(run.model.scope_path)
     return {"reader_checkpoint": run.model.revision, "reader_profile_id": settings["reader_profile_id"],
         "reader_scope": str(scope_path.resolve()), "reader_scope_sha256": file_digest(scope_path),
+        "query_encoder": query_encoder_binding(settings["collection"]),
         "scorer_identity": settings["scorer_identity"]}
 
 
@@ -143,7 +145,7 @@ def validate_reward(row, binding):
         raise ValueError("utility supervision requires native-training actual hardware answers")
     if row["history_origin"] not in {"model_actual", "frozen_actual_rollout"}:
         raise ValueError("utility supervision requires actual generated history")
-    for name in ("reader_checkpoint", "reader_profile_id", "scorer_identity"):
+    for name in ("reader_checkpoint", "reader_profile_id", "scorer_identity", "query_encoder"):
         if row[name] != binding[name]:
             raise ValueError(f"candidate reward belongs to a different {name}")
     history = [{key: turn[key] for key in ("turn_id", "user_text", "assistant_text")}
@@ -317,7 +319,7 @@ def train_evidence_policy(config):
     directory = cohort_directory(config, split="train")
     pairs = select_cohort_rows(rows(directory/"preferences.jsonl"), settings["collection"]["cohort_manifest"], "train")
     for pair in pairs:
-        for name in ("reader_checkpoint", "reader_profile_id", "scorer_identity"):
+        for name in ("reader_checkpoint", "reader_profile_id", "scorer_identity", "query_encoder"):
             if pair[name] != binding[name]:
                 raise ValueError(f"preference training data use a different {name}")
         for side in ("preferred", "dispreferred"):

@@ -12,11 +12,19 @@ RB_AGG_ALIAS_SOURCE = "data/mtrag-official/scripts/evaluation/run_algorithmic.py
 MTRAGEVAL_RANKING_SOURCE = "https://ibm.github.io/mt-rag-benchmark/MTRAGEval/#-leaderboard-ranking"
 
 
+def split_metric_spec(spec, split):
+    """Resolve a preregistered split's metric without changing its task cohort."""
+    override = spec.get("metric_by_split", {}).get(split, {})
+    return {**spec, **override,
+        "scoring": {**spec.get("scoring", {}), **override.get("scoring", {})}}
+
+
 def _track_specs(matrix, split):
     development = matrix.get("selection", {}).get("development_weights")
     if split == "dev" and development is not None:
-        return {name: {**matrix["datasets"][name], "weight": weight} for name, weight in development.items()}
-    return matrix["datasets"]
+        return {name: {**split_metric_spec(matrix["datasets"][name], split), "weight": weight}
+                for name, weight in development.items()}
+    return {name: split_metric_spec(spec, split) for name, spec in matrix["datasets"].items()}
 
 
 def _number(value):

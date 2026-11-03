@@ -209,7 +209,8 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
     native = NativePoolSampler(run.engine.base_url, gpu_capacity=allocator["pool"]["gpu_capacity_tokens"],
         host_enabled=allocator["pool"]["host_capacity_tokens"] > 0, model=run.model.name)
     await native.start()
-    sources = {row["task_id"]: row for row in dataset_rows(spec, split)}
+    sources = {row["task_id"]: row for row in dataset_rows(spec, split,
+        task_ids=matrix.get("cohorts", {}).get(split, {}).get(dataset))}
     results = {row["task_id"]: row for path in (directory/"records").glob("*.json") for row in [json.loads(path.read_text())]}
     windows = {}
     try:
@@ -337,9 +338,12 @@ async def own_p3_cell(config, matrix, dataset, split, output, *, policy, protoco
     if spec.get("protocol", "P3") != "P3":
         raise ValueError("own-history comparison requires P3, not imported authored history")
     grouped = {}
-    for row in dataset_rows(spec, split):
+    source_rows = dataset_rows(spec, split, task_ids=matrix.get("cohorts", {}).get(split, {}).get(dataset))
+    declared_ids = [row["task_id"] for row in source_rows]
+    for row in source_rows:
         grouped.setdefault(row["conversation_id"], []).append(row)
     identities = sorted(grouped)[:limit_conversations]
+    scheduled_ids = [row["task_id"] for conversation in identities for row in grouped[conversation]]
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     local_matrix = merge_config(matrix, {"resources": {"gpu_devices": sorted(set(
@@ -357,14 +361,19 @@ async def own_p3_cell(config, matrix, dataset, split, output, *, policy, protoco
     collected, failed = [], []
     if spec.get("reuse_provider", False):
         task_path = output/"tasks.jsonl"
-        write_rows(task_path, [row for conversation in identities for row in grouped[conversation]])
-        shared_matrix = merge_config(local_matrix, {"datasets": {dataset: {"inputs": {split: str(task_path)}}}})
+        write_rows(task_path, source_rows)
+        shared_matrix = merge_config(local_matrix, {
+            "datasets": {dataset: {"inputs": {split: str(task_path)}}},
+            "cohorts": {split: {dataset: declared_ids}}})
         collected = await run_dataset(actual, shared_matrix, cell_method(policy, protocol),
-            dataset, split, output, concurrency=1, question_fn=goal_policy.question_fn if goal_policy else None)
+            dataset, split, output, concurrency=1, limit_conversations=limit_conversations,
+            question_fn=goal_policy.question_fn if goal_policy else None)
         failed = [json.loads(path.read_text()) for path in sorted((output/"terminal_read_failures").glob("*.json"))]
         write_json(output/"manifest.json", {"policy_identity": identity,
             "history_protocol": "independent own-history P3 sessions; provider reused; cold boundary per conversation",
             "requested_conversations": identities, "completed_turns": len(collected),
+            "task_ids": declared_ids, "scheduled_task_ids": scheduled_ids,
+            "missing_execution_task_ids": sorted(set(declared_ids)-{row["task_id"] for row in collected}),
             "failed_conversations": failed, "reuse_provider": True})
         return collected
     for conversation in identities:
@@ -372,7 +381,9 @@ async def own_p3_cell(config, matrix, dataset, split, output, *, policy, protoco
         directory.mkdir(parents=True, exist_ok=True)
         task_path = directory/"tasks.jsonl"
         write_rows(task_path, grouped[conversation])
-        one_matrix = merge_config(local_matrix, {"datasets": {dataset: {"inputs": {split: str(task_path)}}}})
+        one_matrix = merge_config(local_matrix, {
+            "datasets": {dataset: {"inputs": {split: str(task_path)}}},
+            "cohorts": {split: {dataset: [row["task_id"] for row in grouped[conversation]]}}})
         recorded = recorded_terminal_budget(directory)
         if recorded:
             collected.extend(rows(directory/"results.unscored.jsonl"))
@@ -405,6 +416,8 @@ async def own_p3_cell(config, matrix, dataset, split, output, *, policy, protoco
             failed.append(persist_p3_failure(directory, conversation, str(known)))
     write_rows(output/"results.unscored.jsonl", collected)
     write_json(output/"manifest.json", {"policy_identity": identity, "history_protocol": "P3 along each pair's own committed answers",
+        "task_ids": declared_ids, "scheduled_task_ids": scheduled_ids,
+        "missing_execution_task_ids": sorted(set(declared_ids)-{row["task_id"] for row in collected}),
         "requested_conversations": identities, "completed_turns": len(collected), "failed_conversations": failed})
     return collected
 
@@ -463,6 +476,7 @@ async def compare(config, matrix, *, dataset, split, output, phase, frozen_recor
                 result.append({"cell": cell, "phase": "p3", "observed_records": len(selected)})
     write_json(Path(output)/"comparison_manifest.json", {"cells": result, "quality": "unscored; score saved actual outputs separately",
         "comparison_axes": {"evidence_planner": ["P0", "P1"], "read_protocol": list(READING_PROTOCOLS)},
+        "declared_cohorts": matrix.get("cohorts", {}).get(split, {}),
         "paired_contrasts_baseline_candidate": CELL_CONTRASTS,
         "reading_protocols": READING_PROTOCOLS, "read_protocol_version": READ_PROTOCOL_VERSION,
         "fixed_reader": fixed_reader_identity(config["policy_comparison"]["reader"]),

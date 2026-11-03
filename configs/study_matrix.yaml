@@ -79,6 +79,14 @@ datasets:
     coverage_mode: all_supplied_documents
     primary_metric: loong_reference_score
     normalization: 100.0
+    metric_by_split:
+      dev:
+        primary_metric: project_condition_version_score
+        normalization: 1.0
+        scoring:
+          project_weights: {correctness: 1.0}
+          project_track: constructed_long_dev_correctness
+          project_reference_only: true
     weight: 0.25
 methods:
   - {id: B0, strategy: B0, description: Dense5_REBUILD}

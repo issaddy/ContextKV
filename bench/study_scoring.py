@@ -16,7 +16,7 @@ import time
 import httpx
 
 from bench.official import load_jsonl, merge_offline_labels
-from bench.study_metrics import RB_AGG_ALIAS_SOURCE, _metric, _required
+from bench.study_metrics import RB_AGG_ALIAS_SOURCE, _metric, _required, split_metric_spec
 
 
 def _write(path, rows):
@@ -230,9 +230,14 @@ async def _version_scores(config, spec, directory, settings):
                     targets = (offline_reference.get("targets", offline_reference)
                                if isinstance(offline_reference, dict) else offline_reference)
                     reference = {**reference, "targets": targets}
+                judged_audit = audit
+                requirements = reference.get("goal_conditions")
+                if settings.get("project_reference_only", False):
+                    judged_audit = {**audit, "retrieved_evidence": [], "audit_evidence": [],
+                        "visible_evidence_manifest": [], "citation_scope": []}
+                    requirements = {"requirement": audit["query"], "dimensions": list(settings["project_weights"])}
                 try:
-                    record = await judge.evaluate(audit, reference=reference,
-                        requirements=reference.get("goal_conditions"))
+                    record = await judge.evaluate(judged_audit, reference=reference, requirements=requirements)
                 except JudgeResponseError as error:
                     record = {"task_id": audit["task_id"], "conversation_id": audit["conversation_id"],
                         **evaluation_binding(audit), "answer": audit["answer"],
@@ -251,6 +256,12 @@ async def _version_scores(config, spec, directory, settings):
     identity = {"protocol": "contextkv_project_condition_version_rubric", "judge": asdict(judge_config),
         "primary_formula": weights, "metric_source": "bench.judge.OfflineJudge",
         "score_range": [0, 1]}
+    if "project_track" in settings:
+        identity.update(evaluation_track=settings["project_track"], official_benchmark_metric=False)
+    if settings.get("project_reference_only", False):
+        identity.update(judge_view="fixed question, actual answer/history and reference targets only",
+            reference_source="references.jsonl:targets", source_support_metric=False,
+            original_full_audit=str(generation/"audit.jsonl"))
     if any("goal_conditions" in reference for reference in references.values()):
         identity.update(evaluation_track="answer_driven_dynamic_goal",
                         public_benchmark_quality_aggregate=False,
@@ -426,10 +437,16 @@ def _record_metrics(record, spec, settings):
     return metrics
 
 
-async def score_dataset(config, dataset_spec, rows, generation_dir, *, expected_task_ids=None):
+async def score_dataset(config, dataset_spec, rows, generation_dir, *, expected_task_ids=None, split=None):
     """Add benchmark metrics and a separate scoring ledger to saved result rows."""
     directory = Path(generation_dir)/"scoring"
     directory.mkdir(parents=True, exist_ok=True)
+    generation_manifest = Path(generation_dir)/"generation_manifest.json"
+    declaration = json.loads(generation_manifest.read_text()) if generation_manifest.exists() else {}
+    split = split or declaration.get("split") or next((row["split"] for row in rows if "split" in row), None)
+    dataset_spec = split_metric_spec(dataset_spec, split)
+    if expected_task_ids is None and declaration:
+        expected_task_ids = declaration["task_ids" if "task_ids" in declaration else "expected_tasks"]
     declared = expected_task_ids is not None
     expected = list(expected_task_ids) if declared else [row["task_id"] for row in rows]
     settings = _settings(config, dataset_spec)
@@ -473,15 +490,18 @@ async def score_dataset(config, dataset_spec, rows, generation_dir, *, expected_
                 "error": record.get("error") if record is not None else None,
                 "metric_aliases": aliases, "judge_cost": _usage_cost(record) if record else None,
                 "shared_scoring_cost_manifest": str(directory/"manifest.json")}})
-    manifest = {"identity": identity, "primary_metric": dataset_spec["primary_metric"],
+    executed_ids = {row["task_id"] for row in rows}
+    scored_ids = {row["task_id"] for row in updated if row["scoring"]["status"] == "scored"}
+    manifest = {"identity": identity, "primary_metric": dataset_spec["primary_metric"], "split": split,
+        "normalization": dataset_spec.get("normalization", 1.0),
         "requested": len(expected), "cohort_declared": declared, "task_ids": expected,
-        "generated_answers": len(rows), "score_records": len(records),
+        "generated_answers": sum(row["status"] == "completed" for row in rows), "score_records": len(records),
         "scored": sum(row["scoring"]["status"] == "scored" for row in updated),
         "failed_task_ids": [row["task_id"] for row in updated if row["scoring"]["status"] == "failed"],
         "missing_execution_task_ids": [task_id for task_id in expected
-            if task_id not in {row["task_id"] for row in rows}],
+            if task_id not in executed_ids],
         "missing_task_ids": [task_id for task_id in expected
-            if task_id not in {row["task_id"] for row in updated if row["scoring"]["status"] == "scored"}],
+            if task_id not in scored_ids],
         "raw_outputs": outputs, "judge_cost": judge_cost,
         "wall_elapsed_ms": (time.perf_counter()-started)*1000,
         "cost_scope": "offline_scoring_separate_from_online_answer_cost"}
@@ -503,7 +523,7 @@ def main(argv=None):
     parser.add_argument("--matrix", required=True)
     parser.add_argument("--config")
     parser.add_argument("--dataset", required=True)
-    parser.add_argument("--split", choices=("train", "dev", "test"), default="dev")
+    parser.add_argument("--split", choices=("train", "dev", "test"))
     parser.add_argument("--generation-dir", required=True)
     parser.add_argument("--rows")
     args = parser.parse_args(argv)
@@ -511,7 +531,7 @@ def main(argv=None):
     config = yaml.safe_load(Path(args.config or matrix["study_config"]).read_text())
     rows = load_jsonl(args.rows or Path(args.generation_dir)/"results.unscored.jsonl")
     asyncio.run(score_dataset(config, matrix["datasets"][args.dataset], rows, args.generation_dir,
-        expected_task_ids=matrix.get("cohorts", {}).get(args.split, {}).get(args.dataset)))
+        expected_task_ids=matrix.get("cohorts", {}).get(args.split, {}).get(args.dataset), split=args.split))
     print((Path(args.generation_dir)/"scoring/manifest.json").read_text())
 
 

@@ -1,0 +1,27 @@
+base_study_config: configs/study.yaml
+task_model:
+  initial_adapter_path: models/bge-m3-dialogue-query-v1
+support_model:
+  device: cuda:0
+training:
+  cohort_manifest: runs/study/budget-loop-20261103/reader-cohorts/full/cohort_manifest.json
+  data_dir: runs/study/data
+  task_labels: runs/study/budget-loop-20261103/task-labels/task_labels.jsonl
+  task_eval_labels: runs/study/budget-loop-20261103/task-labels/dev_task_labels.jsonl
+  task_source_paths: [runs/study/data/sources.jsonl]
+  task_output: models/study-task-budget-loop
+  task_eval_output: runs/study/budget-loop-20261103/task-evaluation
+  support_data_dir: runs/study/budget-loop-20261103/auxiliary-support
+  support_teacher_labels: runs/study/budget-loop-20261103/auxiliary-support/teacher_labels.jsonl
+  support_labels: runs/study/budget-loop-20261103/auxiliary-support/support_labels.jsonl
+  support_parent_asset: models/study-support-actual-prefix
+  support_output: models/study-support-budget-loop
+  reader_config: configs/qwen3_32b.yaml
+  teacher_urls: [http://127.0.0.1:30001]
+  teacher_concurrency: 4
+  min_rollout_turns: 200
+  epochs: 1
+  device: cuda:0
+  dtype: bfloat16
+  support_batch_size: 1
+  support_encoder_lr: 0.00001

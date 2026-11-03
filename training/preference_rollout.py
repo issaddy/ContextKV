@@ -229,6 +229,20 @@ def load_candidate_family(saved, row, state, budget, cohort_path):
     sets = {category: decode(EvidenceSet, evidence) for category, evidence in saved["evidence_sets"].items()}
     return pool, scores, sets, path
 
+def query_encoder_binding(settings):
+    """Identify the actual task-query asset or unchanged P0 query adapter."""
+    if settings.get("task_asset"):
+        path = Path(settings["task_asset"]).resolve()
+        names = ("task-model.json", "task-heads.pt", "adapter/adapter_config.json", "adapter/adapter_model.safetensors")
+        kind = "trained_task_query"
+    else:
+        path = Path(settings.get("query_adapter_path", "models/bge-m3-dialogue-query-v1")).resolve()
+        names = ("query-adapter.json", "adapter/adapter_config.json", "adapter/adapter_model.safetensors")
+        kind = "p0_query_adapter"
+    return {"kind": kind, "asset_path": str(path),
+            "files_sha256": {name: file_digest(path/name) for name in names}}
+
+
 def build_directory(config, tokenizer):
     from adapters.corpus import CorpusIndex
     from adapters.doc2dial import structural_corpus
@@ -252,11 +266,16 @@ def build_directory(config, tokenizer):
     index = CorpusIndex.from_records(records, corpus_id="multidoc2dial",
         snapshot_id="multidoc2dial-train-archive-f0c034c24966")
     dense = DenseIndex.load(settings.get("dense_index", "data/multidoc2dial/bge-m3-sections"))
-    encoder = LocalBGE(settings.get("encoder_path", "models/bge-m3"),
-        device=settings.get("encoder_device", settings.get("device", config.get("support_model", {}).get("device", "cuda:2"))),
-        dtype="bfloat16", batch_size=16,
-        query_adapter_path=settings.get("query_adapter_path", "models/bge-m3-dialogue-query-v1"),
-        normalize_float32=True)
+    device = settings.get("encoder_device", settings.get("device", config.get("support_model", {}).get("device", "cuda:2")))
+    if settings.get("task_asset"):
+        from training.task_model import TaskModel
+        encoder = TaskModel(settings["task_asset"], base_path=settings.get("encoder_path", "models/bge-m3"),
+                            device=device)
+    else:
+        encoder = LocalBGE(settings.get("encoder_path", "models/bge-m3"), device=device,
+            dtype="bfloat16", batch_size=16,
+            query_adapter_path=settings.get("query_adapter_path", "models/bge-m3-dialogue-query-v1"),
+            normalize_float32=True)
     directory = SourceDirectory(index, lambda query, top_k: dense.search(query, encoder, top_k=top_k),
         tokenizer, profile=PoolProfile(**{key: value for key, value in config.get("retrieval", {}).items()
                                          if key in PoolProfile.__dataclass_fields__}))
@@ -457,6 +476,7 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
     from controller.config import create_controller, load_config
     settings = config.get("preferences", {})
     training = config.get("training", {})
+    query_binding = query_encoder_binding(settings)
     data_dir = Path(training.get("data_dir", "runs/study/data"))
     output_dir = Path(settings.get("output_dir", Path(config.get("study", {}).get("output_dir", "runs/study"))/"preferences"))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -497,6 +517,7 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
         binding = {"reader_checkpoint": settings["reader_checkpoint"],
             "reader_profile_id": settings["reader_profile_id"],
             "cohort_manifest_sha256": file_digest(settings["cohort_manifest"]),
+            "query_encoder": query_binding,
             "reader_data_only": settings.get("reader_data_only", False)}
         binding_path = output_dir/"reader_collection_binding.json"
         if binding_path.exists() and json.loads(binding_path.read_text()) != binding:
@@ -785,6 +806,7 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                                                          if unit.unit_id not in support.unit_ids))}
                         for support in support_rows]
                     result = {"task_id": row["task_id"], "split": settings["cohort_split"], "history_id": history_id,
+                        "query_encoder": query_binding,
                         "conversation_id": row["conversation_id"], "turn": row["turn"], "snapshot_id": row["snapshot_id"],
                         "cohort_split": settings["cohort_split"],
                         "cohort_manifest_sha256": file_digest(settings["cohort_manifest"]),
@@ -876,6 +898,7 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
         'turns_path': str(labels_path),
         'reader_data_only': settings.get("reader_data_only", False),
         'candidate_concurrency': settings.get("candidate_concurrency", 4),
+        'query_encoder': query_binding,
         'physical_cost_scope': "collection device/process window counted once; concurrent branch request windows may overlap",
         'actual_turns_path': str(actual_turns_path.resolve()),
         'skipped': skipped,

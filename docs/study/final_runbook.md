@@ -43,6 +43,20 @@ python -m bench.reading_mechanisms --config ACTUAL-RUN.yaml \
   --output-dir NEW-OUTPUT/isolated
 ```
 
+辅助训练复用现有核验标签与 BGE 资产，配置 `configs/auxiliary_training.yaml`。
+运行时以 `CUDA_VISIBLE_DEVICES` 选择物理设备，配置内使用该进程的 `cuda:0`：
+
+```bash
+python -m training.train_models --config configs/auxiliary_training.yaml --stage task
+python -m training.train_models --config configs/auxiliary_training.yaml --stage task-eval
+python -m training.build_examples --config configs/auxiliary_training.yaml
+python -m training.train_models --config configs/auxiliary_training.yaml --stage support
+```
+
+`build_examples` 使用固定 Qwen 服务生成支持关系标签。P1 采集将
+`collection.task_asset` 设为实际训练后的 task 资产、`parent_support_asset` 设为实际 support 资产，
+按同一 manifest 分别采集 train/dev；查询资产身份随奖励保存。
+
 固定模型协议审计与四格比较示例：
 
 ```bash
@@ -58,10 +72,13 @@ python -m training.a_workflow compare --comparison-config COMPARISON.yaml \
 旧 Qwen LoRA/合并模型已退出活动入口，既往已付费用列为弃用支出，不进入受控改进结果。
 
 正式主验收沿用 `study_matrix.yaml` 既有四数据集的 development_weights 和指标。
-先固定完整声明题目 manifest，再在相同清单上重跑 baseline 与候选；辅助学习的
+已从既有 `runs/study/cohorts.json` 固定 350 题、77 会话至 `runs/study/formal-dev-queue.matrix.json`，
+运行及评分直接使用其中 IDs，再在相同清单上重跑 baseline 与候选；辅助学习的
 200/40 划分不能替代正式开发队列。既有 a-public-dev 27 题、dynamic 14 题和 B 的
 6 题仅为阶段参照，当前尚无统一主验收队列的完整实测参照。默认关闭大型消融 sweep，
 保留 B0/Btoken/B3/B6/B7/Lmap 对照入口和 c1/c4 资源配置。
+20 道 constructed long_dev 仅按参考正确性评分（correctness=1，归一化为 1）；
+公开 Loong test 保留官方 loong_reference_score/100，二者通过 metric_by_split 明确区分。
 
 C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观察窗。`replay` 与
 `retention_pair_workflow` 默认固定 Native、TTL15、TTL60、TTL180 四臂；

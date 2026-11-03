@@ -169,5 +169,32 @@
       "study-support-actual-prefix"
     ],
     "qwen_path": "/data/models/qwen3-32b"
+  },
+  "formal_development_queue": {
+    "manifest": "runs/study/formal-dev-queue.matrix.json",
+    "sha256": "d10cd63f5a41400a04c5ba5d17c57d1ce496c1647dafad1a095f742404891cce",
+    "declared_tasks": 350,
+    "declared_sessions": 77,
+    "datasets": {
+      "multidoc2dial": 209,
+      "mtrag": 41,
+      "versionqa": 80,
+      "loong": 20
+    },
+    "weights": {
+      "multidoc2dial": 0.3,
+      "mtrag": 0.25,
+      "versionqa": 0.2,
+      "loong": 0.25
+    },
+    "baseline_status": "pending complete same-hardware fixed-model run",
+    "long_dev_scoring": {
+      "track": "constructed_long_dev_correctness",
+      "primary_metric": "project_condition_version_score",
+      "normalization": 1,
+      "reference_only": true,
+      "correctness_weight": 1,
+      "official_loong_test_unchanged": true
+    }
   }
 }
