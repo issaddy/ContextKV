@@ -338,14 +338,15 @@ class TrainedSupportBackend:
 
 def _save(network, tokenizer, directory, metadata, *, encoder_source=None, parent_asset=None):
     import torch
-    import shutil
+    import os
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     if encoder_source is None:
         network.encoder.save_pretrained(directory/"encoder", safe_serialization=True)
+        tokenizer.save_pretrained(directory/"encoder")
     else:
-        shutil.copytree(encoder_source, directory/"encoder", dirs_exist_ok=True)
-    tokenizer.save_pretrained(directory/"encoder")
+        (directory/"encoder").symlink_to(os.path.relpath(Path(encoder_source).resolve(), directory.resolve()),
+                                        target_is_directory=True)
     torch.save({key: value.cpu() for key, value in network.state_dict().items()
                 if not key.startswith("encoder.")}, directory/"heads.pt")
     (directory/"support-model.json").write_text(json.dumps(metadata, ensure_ascii=False,
