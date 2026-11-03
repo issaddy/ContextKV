@@ -313,6 +313,8 @@ class TrainedSupportBackend:
         started = time.perf_counter()
         tensors = _graph_inputs(state, units, supports, self.embeddings,
                                self.torch, self.device)
+        if self.manifest.get("utility_input_scope") == "evidence_set_only":
+            context = (0.0,)*8
         with self.torch.inference_mode():
             quality, answer = self.network.set_forward(*tensors,
                 self.torch.tensor(context, dtype=self.torch.float32, device=self.device))
@@ -536,13 +538,7 @@ cached once before optimizing the graph and disposition heads.
             units = tuple(decode(EvidenceUnit, u) for u in item["units"])
             supports = tuple(decode(SupportBundle, s) for s in item["supports"])
             graph = _graph_inputs(state, units, supports, backend.embeddings, torch, device)
-            context = torch.tensor((float(item.get("action", "REBUILD") == "APPEND"),
-                float(item.get("layout", "existing") == "existing"),
-                float(item.get("layout", "existing") == "need_order"),
-                float(item.get("layout", "existing") == "stable_evidence"),
-                item.get("old_body_tokens", 0)/32768, item.get("history_tokens", 0)/8192,
-                item.get("input_tokens", 0)/32768, item.get("output_budget", 0)/8192),
-                dtype=torch.float32, device=device)
+            context = torch.zeros(8, dtype=torch.float32, device=device)
             entry = ((*graph, context), ANSWER_CLASSES.index(item["disposition"])
                      if item["disposition"] is not None else None)
             candidate_graphs[candidate_id] = entry
@@ -576,7 +572,8 @@ cached once before optimizing the graph and disposition heads.
             losses.append(float(loss.detach()))
     if device.startswith("cuda"):
         torch.cuda.synchronize(device)
-    metadata = {**backend.manifest, "parent_support_asset": str(asset_path), "utility_training": {
+    metadata = {**backend.manifest, "parent_support_asset": str(asset_path),
+        "utility_input_scope": "evidence_set_only", "utility_training": {
         "preferences_path": str(preferences_path), "pairs": len(rows), "epochs": epochs,
         "seed": seed, "learning_rate": learning_rate, "losses": losses,
         "synthetic_fixture_count": sum(bool(row.get("synthetic_fixture")) for row in rows),

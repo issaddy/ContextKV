@@ -117,6 +117,7 @@ dependencies = [
 [package.optional-dependencies]
 evaluation = [
     { name = "jinja2" },
+    { name = "jsonschema" },
     { name = "prometheus-client" },
 ]
 query-adapter = [
@@ -147,6 +148,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28,<0.29" },
     { name = "jinja2", marker = "extra == 'evaluation'", specifier = ">=3.1,<4" },
     { name = "jinja2", marker = "extra == 'tokenizer'", specifier = ">=3.1,<4" },
+    { name = "jsonschema", marker = "extra == 'evaluation'", specifier = ">=4,<5" },
     { name = "numpy", marker = "extra == 'retrieval'", specifier = "==2.3.5" },
     { name = "peft", marker = "extra == 'query-adapter'", specifier = "==0.21.2" },
     { name = "prometheus-client", marker = "extra == 'evaluation'", specifier = ">=0.21,<1" },
