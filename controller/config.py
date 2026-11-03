@@ -138,7 +138,7 @@ class RunConfig:
                 self.ablation.decode_cost, self.ablation.control_cost)):
             raise ValueError("cost-term ablations require frozen calibration; total residuals would restore excluded costs")
         if self.plan_gain is not None:
-            if self.plan_gain["mode"] != "rolling_gain" or self.shadow:
+            if self.plan_gain["mode"] not in {"rolling_gain", "whole_plan", "observed_actions"} or self.shadow:
                 raise ValueError("plan_gain enables reader-bound rolling execution without shadow fallback")
             for name in ("gain_asset", "execution_profile_asset", "reader_checkpoint", "reader_profile_id"):
                 if not self.plan_gain[name]:
@@ -269,7 +269,10 @@ def create_controller(config: RunConfig) -> Controller:
         from .plan_profiles import load_rolling_runtime
         from .candidates import PLAN_SYSTEM_PROMPT
         from .sampling import request_sampling
-        rolling = load_rolling_runtime(config.plan_gain, template=template, store=store,
+        settings = config.plan_gain
+        if settings["mode"] == "rolling_gain":
+            settings = {**settings, "mode": "whole_plan"}
+        rolling = load_rolling_runtime(settings, template=template, store=store,
             sampling=request_sampling(config.sampling),
             answer_system_prompt=config.context.system_prompt or PLAN_SYSTEM_PROMPT,
             engine_base_url=config.engine.base_url)

@@ -1,4 +1,4 @@
-"""Two-turn own-history P3 capacity jobs: 1/4/8 clients, two fixed methods."""
+"""Two-turn own-history P3 capacity jobs for fixed and learned B under C policies."""
 from __future__ import annotations
 
 import argparse
@@ -62,12 +62,16 @@ def prepare(args, root):
         value["overrides"] = merge_config(value.get("overrides", {}), {
             "reading": {"layout": "source_first", "packing": "source_windows"},
             "execution": {"cache_start": "cold", "prefix_retention": {"mode": "native"}}})
-        if args.value_model is not None and value["strategy"] == "B7":
-            value["overrides"]["execution"]["plan_gain"]["prefix_directory"] = True
+        if value["strategy"] == "B7":
+            gain = value["overrides"]["execution"]["plan_gain"]
+            gain["mode"] = args.gain_mode
+            if args.value_model is not None:
+                gain["prefix_directory"] = True
         methods.append(value)
     value_policy = None
     if args.value_model is not None:
-        value_policy = dict(mode="value", model_path=str(Path(args.value_model).resolve()), horizon_seconds=15,
+        value_policy = dict(mode="value", model_path=str(Path(args.value_model).resolve()),
+            horizon_seconds_choices=[15, 60, 180],
             gpu_budget_tokens=8192, host_budget_tokens=16384, lambda_gpu=0.0, lambda_host=0.0)
         for method in tuple(methods):
             value = deepcopy(method)
@@ -85,7 +89,7 @@ def prepare(args, root):
             grouped.setdefault(row["conversation_id"], {})[row["turn"]] = row
     clients = sorted(grouped)
     plans = []
-    for concurrency in (1, 4, 8):
+    for concurrency in args.concurrency:
         rows = []
         for index in range(concurrency):
             original_id = clients[index % len(clients)]
@@ -119,7 +123,7 @@ def prepare(args, root):
         matrix_path = directory/"matrix.yaml"
         matrix_path.write_text(yaml.safe_dump(job_matrix, sort_keys=False))
         order = ("S3_native", "B6_native") if concurrency == 4 else ("B6_native", "S3_native")
-        if concurrency == 1 and args.value_model is not None:
+        if args.value_model is not None:
             order += ("B6_value", "S3_value")
         for method in order:
             plans.append(dict(name=f"c{concurrency}-"+method, concurrency=concurrency,
@@ -138,12 +142,13 @@ def prepare(args, root):
             ("gain", args.gain_asset), ("execution", args.execution_profile), ("native", args.native_assets))},
         first_arrivals="all clients planned at dispatcher time zero; actual scheduler drift recorded",
         second_arrivals="own first QA commit + 30 seconds; own actual answer selects graph branch",
-        client_replication="sorted frozen source conversations cycled to exactly 1/4/8 independent clients; original source metadata retained",
+        client_replication="sorted frozen source conversations cycled to each declared client count; original source metadata retained",
         methods=[method["id"] for method in methods], requested_qa=sum(job["requested_qa"] for job in plans),
         per_method_requested_qa=dict(per_method),
         value_asset=snapshot(args.value_model) if args.value_model is not None else None,
         value_policy=value_policy,
-        joint_scope=("concurrency1 four cells each execute own P3 and may choose different DAGs; separate fixed-token C experiments remain unchanged"
+        gain_mode=args.gain_mode, concurrency=args.concurrency,
+        joint_scope=("four cells per declared concurrency, each executes own P3 and may choose different DAGs"
                      if args.value_model is not None else None),
         cache_boundary="one cold boundary per method/concurrency job; never cold between clients/turns",
         question_protocol="P3 own committed generated QA; no authored/other-method answer imported",
@@ -299,14 +304,16 @@ def main(argv=None):
     parser.add_argument("--gain-asset", required=True)
     parser.add_argument("--execution-profile", required=True)
     parser.add_argument("--native-assets", required=True)
-    parser.add_argument("--value-model", help="Add valueC B6/S3 cells at concurrency1 only, keeping native-only 4/8-client loads")
+    parser.add_argument("--value-model", help="Add value-C B6/S3 cells at each declared concurrency")
+    parser.add_argument("--concurrency", type=int, nargs="+", choices=(1, 4, 8), default=[1, 4])
+    parser.add_argument("--gain-mode", choices=("observed_actions", "whole_plan"), default="observed_actions")
     parser.add_argument("--reader-profile-id", required=True)
     parser.add_argument("--lambda-time", type=float)
     parser.add_argument("--read-outputs", type=lambda value: tuple(map(int, value.split(","))), default=(2048,))
     parser.add_argument("--sampling-interval", type=float, default=.5)
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--python")
-    parser.add_argument("--deadline", default="2026-11-03T08:20:00+08:00")
+    parser.add_argument("--deadline")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--output", required=True)
     return asyncio.run(run(parser.parse_args(argv)))

@@ -457,6 +457,7 @@ class PrefixReadObserver:
         self.store, self.engine, self.template, self.settings = store, engine, template, settings
         self.owners = PrefixObserver(store, engine)
         self.runtime = self.owners.runtime
+        self._allocation_lock = asyncio.Lock()
         if settings["mode"] not in {"fixed_ttl", "value"}:
             raise ValueError("prefix callback requires fixed_ttl or value mode")
         self.model = None
@@ -578,7 +579,10 @@ class PrefixReadObserver:
                 policy="fixed_ttl_mechanism", policy_choice=choice)
         ranges, _ = source_token_ranges(self.template, rendered, stable_prefix_messages(plan, task, units), units)
         event = source_demand_event_key(prefix_ids, ranges, inspected["page_size"], inspected["cache_scope_hash"])
-        return await self._allocate_value(plan, arguments, inspected, features, now, event)
+        # The owner lock protects individual operations; allocation needs one
+        # consistent protected set through all releases and retains.
+        async with self._allocation_lock:
+            return await self._allocate_value(plan, arguments, inspected, features, time.monotonic_ns(), event)
 
     async def _allocate_value(self, plan, current, inspected, features, now, event_key):
         scope, current_id = inspected["cache_scope_hash"], current["owner_id"]
