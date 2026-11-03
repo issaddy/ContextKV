@@ -28,6 +28,18 @@ def unit_identity(key, start, end):
     return f"{key.corpus_id}:{key.document_id}:{key.passage_id}:{key.version}:{start}:{end}"
 
 
+def merge_retrieved_units(*groups):
+    """Keep every need that recalled a source unit and its strongest retrieval score."""
+    merged = {}
+    for group in groups:
+        for unit in group:
+            previous = merged.get(unit.unit_id)
+            merged[unit.unit_id] = unit if previous is None else replace(unit,
+                need_ids=tuple(dict.fromkeys((*previous.need_ids, *unit.need_ids))),
+                retrieval_score=max(previous.retrieval_score, unit.retrieval_score))
+    return tuple(merged.values())
+
+
 class SourceDirectory:
     """Original source metadata remains distinct for each version and identity."""
     def __init__(self, corpus_index, search, tokenizer, *, task_interpreter=None,
@@ -331,7 +343,7 @@ class SourceDirectory:
 
     def retrieve_gap_pool(self, state, memory, open_needs):
         started = time.perf_counter()
-        units, blocks, trace = {}, {}, []
+        units, blocks, trace = [], {}, []
         temporal = None if state.version_intent.resolved_version_ids else self._temporal_sources(state, memory)
         for need in open_needs:
             query = self.open_need_query(state, need)
@@ -343,20 +355,20 @@ class SourceDirectory:
             for block in self.source_fetch(keys):
                 blocks[block.key] = block
                 for unit in self._units[block.key]:
-                    units[unit.unit_id] = replace(unit, need_ids=(need.need_id,),
-                        retrieval_score=scored.get(block.key, unit.retrieval_score))
+                    units.append(replace(unit, need_ids=(need.need_id,),
+                        retrieval_score=scored.get(block.key, unit.retrieval_score)))
             trace.append({"origin": "open_need", "query": query, "need_id": need.need_id,
                           "parent_claim_ids": need.parent_claim_ids,
                           "sources": [{"passage_id": key.passage_id, "version": key.version, "score": score}
                                       for key, score in scored.items()]})
-        return EvidencePool(tuple(units.values()), tuple(blocks.values()), "selected_sources",
+        return EvidencePool(merge_retrieved_units(units), tuple(blocks.values()), "selected_sources",
                             (time.perf_counter()-started)*1000, tuple(trace))
 
     def extend_open_needs(self, state, memory, pool, open_needs):
         extension = self.retrieve_gap_pool(state, memory, open_needs)
-        units = {unit.unit_id: unit for unit in (*pool.units, *extension.units)}
+        units = merge_retrieved_units(pool.units, extension.units)
         blocks = {block.key: block for block in (*pool.source_blocks, *extension.source_blocks)}
-        return EvidencePool(tuple(units.values()), tuple(blocks.values()), pool.scope_id,
+        return EvidencePool(units, tuple(blocks.values()), pool.scope_id,
                             pool.retrieval_ms+extension.retrieval_ms, (*pool.trace, *extension.trace))
 
 

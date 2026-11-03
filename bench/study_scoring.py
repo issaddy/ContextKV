@@ -16,7 +16,7 @@ import time
 import httpx
 
 from bench.official import load_jsonl, merge_offline_labels
-from bench.study_metrics import RB_AGG_ALIAS_SOURCE
+from bench.study_metrics import RB_AGG_ALIAS_SOURCE, _metric, _required
 
 
 def _write(path, rows):
@@ -142,6 +142,8 @@ async def _official_scores(config, spec, directory, settings):
             "--metrics", *metrics]
         if primary != "mtrageval_harmonic":
             command.append("--no-answerability-adjustment")
+        if settings.get("ragas_json_schema", False):
+            command.append("--ragas-json-schema")
         receipt = await _command(command, directory, "official-generation")
     records = load_jsonl(target/"scores.jsonl")
     raw_outputs = [str(target/"scores.jsonl"), str(journal), str(target/"identity.json"),
@@ -156,6 +158,13 @@ async def _official_scores(config, spec, directory, settings):
         for row in records:
             row["metrics"] = {**row["metrics"], **algorithmic_rows[row["task_id"]]["metrics"]}
         raw_outputs.extend([str(algorithmic), str(directory/"official-algorithmic.execution.json")])
+        combined, conditioned = directory/"official.all-components.jsonl", directory/"official.conditioned.jsonl"
+        _write(combined, records)
+        await _command([python, "-m", "bench.official", "condition", "--checkout", checkout,
+            "--input", str(combined), "--output", str(conditioned),
+            "--metrics", "RL_F", "RB_llm", "RB_agg"], directory, "official-condition")
+        records = load_jsonl(conditioned)
+        raw_outputs.extend([str(combined), str(conditioned), str(directory/"official-condition.execution.json")])
     identity = {"protocol": "pinned_mtrag_official_http", "judge": judge,
         "official_source": json.loads((Path(checkout)/"contextkv-source.json").read_text()),
         "requested_metrics": metrics, "answerability_adjustment": primary == "mtrageval_harmonic",
@@ -402,8 +411,10 @@ def _record_metrics(record, spec, settings):
 
     metrics = {key: value for key, value in (record.get("metrics") or {}).items() if observed(value)}
     primary = spec["primary_metric"]
-    if primary == "mtrageval_harmonic" and "RB_agg" in metrics:
-        metrics["RB_alg"] = metrics["RB_agg"]
+    if primary == "mtrageval_harmonic":
+        for suffix in ("", "_idk", "_idk_underspecified"):
+            if "RB_agg"+suffix in metrics:
+                metrics["RB_alg"+suffix] = metrics["RB_agg"+suffix]
     if primary == "loong_reference_score" and observed(record.get("score")):
         metrics[primary] = record["score"]
     if primary == "project_condition_version_score" and record.get("scores") is not None:
@@ -448,13 +459,15 @@ async def score_dataset(config, dataset_spec, rows, generation_dir):
     for row in rows:
         record = by_id.get(str(row["task_id"]))
         metrics = _record_metrics(record, dataset_spec, settings) if record is not None else {}
-        aliases = ({"RB_alg": {"from": "RB_agg", "source": RB_AGG_ALIAS_SOURCE}}
-                   if "RB_agg" in metrics and "RB_alg" in metrics else {})
-        updated.append({**row, "metrics": {**row.get("metrics", {}), **metrics},
+        observed_metrics = {**row.get("metrics", {}), **metrics}
+        has_primary = all(_metric({"metrics": observed_metrics}, name, dataset_spec)[0] is not None
+                          for name in _required(dataset_spec))
+        aliases = {"RB_alg"+suffix: {"from": "RB_agg"+suffix, "source": RB_AGG_ALIAS_SOURCE}
+                   for suffix in ("", "_idk", "_idk_underspecified")
+                   if "RB_agg"+suffix in metrics and "RB_alg"+suffix in metrics}
+        updated.append({**row, "metrics": observed_metrics,
             "scoring": {"identity": identity, "raw_outputs": outputs,
-                "status": "failed" if record is not None and record.get("status") == "failed" else "scored" if dataset_spec["primary_metric"] in metrics or (
-                    dataset_spec["primary_metric"] == "mtrageval_harmonic" and all(
-                        name in metrics for name in ("RL_F", "RB_llm", "RB_alg"))) else "missing",
+                "status": "failed" if record is not None and record.get("status") == "failed" else "scored" if has_primary else "missing",
                 "error": record.get("error") if record is not None else None,
                 "metric_aliases": aliases, "judge_cost": _usage_cost(record) if record else None,
                 "shared_scoring_cost_manifest": str(directory/"manifest.json")}})

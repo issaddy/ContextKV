@@ -208,7 +208,7 @@ def test_frozen_query_and_history_usage_counts_each_model_delta_once(tmp_path, s
 @pytest.mark.asyncio
 async def test_supplied_scope_is_per_request_and_does_not_read_the_dataset_catalog(tmp_path):
     provider, _ = make_provider(tmp_path)
-    first = make_evidence("Only source A", "supplied-a", corpus_id="manual", version="v2")
+    first = make_evidence("Only source A\nAdditional source A", "supplied-a", corpus_id="manual", version="v2")
     second = make_evidence("Only source B", "supplied-b", corpus_id="manual", version="v2")
     snapshot = SessionSnapshot("s", corpus_snapshot_id="v2")
     metadata = {first.key: {"document_family": "provided-policy", "valid_from": "2020-01-01",
@@ -225,7 +225,15 @@ async def test_supplied_scope_is_per_request_and_does_not_read_the_dataset_catal
     assert unit.document_family == "provided-policy" and unit.valid_from == "2020-01-01"
     assert unit.applicability == (("PLATFORM", "Linux"),) and unit.table_id == "table"
     extension = await one.open_need_provider(one.context_plans[0], (OpenNeed("apply", "missing"),), ())
+    assert extension.units == () and extension.source_blocks == ()
+    # Gap selection carries the originals already consumed by preceding READs.
+    plan = one.context_plans[0]
+    partial = replace(plan, selected_set=replace(plan.selected_set, selected_units=(unit,)),
+                      steps=(), coverage_units=(unit.unit_id,))
+    extension = await one.open_need_provider(partial, (OpenNeed("apply", "missing"),), ())
     assert tuple(block.key for block in extension.source_blocks) == (first.key,)
+    assert tuple(unit.text for unit in extension.units) == ("Additional source A",)
+    assert extension.units[0].source_spans[0].start == len("Only source A\n")
     fresh, _ = make_provider(tmp_path)
     saved = replace(snapshot, raw_history=(TurnRecord(1, "Read", "Answer", evidence_set=one.context_plans[0].selected_set),),
                     archive=(first,))
@@ -240,7 +248,7 @@ async def test_supplied_scope_is_per_request_and_does_not_read_the_dataset_catal
 @pytest.mark.asyncio
 async def test_persisted_plan_resumes_scoped_reading_without_task_or_support_replay(tmp_path):
     original, _ = make_provider(tmp_path)
-    block = make_evidence("Archived Linux allowance", "old-linux", corpus_id="manual", version="v1")
+    block = make_evidence("Archived Linux allowance\nArchived filing procedure", "old-linux", corpus_id="manual", version="v1")
     selection = await original.retrieve_supplied(SessionSnapshot("resume", corpus_snapshot_id="v2"),
         "Read the supplied policy", "request", (block,), source_metadata={block.key: {
             "document_family": "policy", "applicability": {"PLATFORM": "Linux"}, "current": False}})
@@ -253,7 +261,17 @@ async def test_persisted_plan_resumes_scoped_reading_without_task_or_support_rep
     recovered.support_backend.predict = no_replay
     extension = await recovered.extend_for_plan(SessionSnapshot("resume", corpus_snapshot_id="v2"),
         plan, (OpenNeed("apply", "missing"),), ())
+    assert extension.units == () and extension.source_blocks == ()
+    restored = recovered.directory.full_scope(plan.task_state.source_scope)
+    assert restored.units[0].document_family == "policy"
+    assert restored.units[0].applicability == (("PLATFORM", "Linux"),)
+    read_unit = plan.selected_set.selected_units[0]
+    partial = replace(plan, selected_set=replace(plan.selected_set, selected_units=(read_unit,)),
+                      steps=(), coverage_units=(read_unit.unit_id,))
+    extension = await recovered.extend_for_plan(SessionSnapshot("resume", corpus_snapshot_id="v2"),
+        partial, (OpenNeed("apply", "missing"),), ())
     assert tuple(item.key for item in extension.source_blocks) == (block.key,)
+    assert tuple(unit.text for unit in extension.units) == ("Archived filing procedure",)
     assert extension.units[0].document_family == "policy"
     assert extension.units[0].applicability == (("PLATFORM", "Linux"),)
     assert recovered.traces["resume", "request"]["resumed_from_plan"] == plan.plan_id

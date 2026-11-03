@@ -181,13 +181,17 @@ async def test_review_input_over_budget_is_a_costed_exclusion_and_other_samples_
             pass
         def complete(self, messages, *, response_format):
             body = json.loads(messages[-1]["content"])
-            if body["question"] == "Over budget":
+            stage = response_format["json_schema"]["name"]
+            question = body["messages"][-1]["content"] if stage == "reader_target" else body["question"]
+            if question == "Over budget":
                 return CompletionResult("input_over_budget", input_tokens=40000, elapsed_ms=3)
-            if body["question"] == "Truncated":
+            if question == "Truncated":
                 return CompletionResult("completed", '{"target":"unfinished', "length", 200,
                                         {"completion_tokens": 2000}, elapsed_ms=9)
-            return CompletionResult("completed", json.dumps({"target": "Correct sourced answer", "quality": .95,
-                "source_support_verified": True, "correct_task_binding": True}), "stop", 100,
+            value = ({"target": "Correct sourced answer"} if stage == "reader_target" else
+                {"quality": .95, "source_support_verified": True, "correct_task_binding": True,
+                 "visible_prompt_support": True, "upstream_errors": []})
+            return CompletionResult("completed", json.dumps(value), "stop", 100,
                 {"completion_tokens": 20}, elapsed_ms=4)
         def close(self):
             pass
@@ -209,6 +213,7 @@ async def test_review_input_over_budget_is_a_costed_exclusion_and_other_samples_
     assert result["status_counts"] == {"input_over_budget": 1, "teacher_target_truncated": 1, "accepted": 1}
     assert result["reviewed_examples"] == 1
     ledger = {row["example_id"]: row for row in rows(tmp_path/"review_calls.jsonl")}
+    assert [row["stage"] for row in rows(tmp_path/"review_calls.jsonl") if row["example_id"] == "good"] == ["target", "review"]
     assert ledger["over"]["model_input_tokens"] == ledger["over"]["model_output_tokens"] == 0
     assert ledger["over"]["input_tokens"] == 40000
     assert ledger["length"]["model_input_tokens"] == 200 and ledger["length"]["model_output_tokens"] == 2000

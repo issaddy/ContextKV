@@ -136,8 +136,12 @@ def test_two_step_lookahead_compares_joint_output_budget_choices():
     assert max(choices, key=lambda row: row.objective).lookahead[-1][-1] == 128
 
 
-def test_full_scope_is_a_hard_constraint_and_read_completion_allows_direct_answer():
+def test_full_scope_completion_allows_a_budgeted_answer_from_a_large_read_archive():
     base, direct, scan = make_plans(scope=True)
+    archive = replace(base.selected_set, token_cost=base.budget.body_tokens*4)
+    base = replace(base, selected_set=archive)
+    direct = replace(direct, context_plan=replace(direct.context_plan, selected_set=archive))
+    scan = replace(scan, context_plan=replace(scan.context_plan, selected_set=archive))
     policy = PlanPolicy(SpecifiedGainFixture())
     decision = policy.choose((direct, scan), ReadingOutcome(base), native((direct, scan)), {})
     assert decision.next_step.plan_id == scan.plan_id
@@ -145,6 +149,7 @@ def test_full_scope_is_a_hard_constraint_and_read_completion_allows_direct_answe
     done = ReadingOutcome(scan.context_plan, results=(ReadResult("read:0", covered_units=("u",)),))
     next_direct = policy.choose((direct,), done, native((direct,)), {})
     assert next_direct.next_step.task.kind == "ANSWER"
+    assert policy.last_evaluations[0].cost.input_tokens == 2+len(next_direct.next_step.candidate.input_ids)
 
 
 def test_rolls_forward_after_real_read_result_and_requotes_the_next_step():

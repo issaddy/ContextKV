@@ -35,7 +35,16 @@ def _quantile(values, probability):
 
 
 def _metric(row, name, spec):
-    source = spec.get("metric_sources", {}).get(name, name)
+    configured = spec.get("metric_sources", {})
+    if spec["primary_metric"] == "mtrageval_harmonic" and name not in configured:
+        bases = (name, "RB_agg") if name == "RB_alg" else (name,)
+        for suffix in ("_idk_underspecified", "_idk"):
+            for base in bases:
+                source = base+suffix
+                if source in row["metrics"]:
+                    return _number(row["metrics"][source]), source
+        return None, name+"_idk"
+    source = configured.get(name, name)
     if source in row["metrics"]:
         return _number(row["metrics"][source]), source
     if name == "RB_alg" and source == "RB_alg" and "RB_agg" in row["metrics"]:
@@ -147,7 +156,8 @@ def summarize_methods(matrix, rows, split="dev"):
                 "primary_metric": spec["primary_metric"], "primary_score": primary,
                 "normalized_score": primary/spec.get("normalization", 1.0) if primary is not None else None,
                 "metric_source_alias_counts": dict(aliases),
-                "alias_provenance": {"RB_agg": RB_AGG_ALIAS_SOURCE} if "RB_agg" in aliases else {},
+                "alias_provenance": {source: RB_AGG_ALIAS_SOURCE for source in aliases
+                                     if source.startswith("RB_agg")},
                 "ranking_definition": MTRAGEVAL_RANKING_SOURCE if spec["primary_metric"] == "mtrageval_harmonic" else None}
             if not declared:
                 reasons.append("cohort_not_declared:"+name)
@@ -197,17 +207,31 @@ def paired_comparisons(matrix, rows, baseline="B0", split="test", *, samples=Non
     confidence = selection.get("confidence", .95)
     rows = [row for row in rows if row["split"] == split]
     specs = _track_specs(matrix, split)
+    cohorts = matrix.get("cohorts", {}).get(split, {})
     methods = sorted({row["method"] for row in rows}-{baseline})
     output = []
     for method in methods:
         overall = []
         for dataset, spec in specs.items():
+            declared = dataset in cohorts
+            expected = ({str(task_id) for task_id in cohorts[dataset]} if declared else {
+                str(row["task_id"]) for row in rows
+                if row["dataset"] == dataset and row["method"] in {baseline, method}})
             left = {str(row["task_id"]): row for row in rows if row["method"] == baseline
-                    and row["dataset"] == dataset and _scored(row, spec)}
+                    and row["dataset"] == dataset and str(row["task_id"]) in expected and _scored(row, spec)}
             right = {str(row["task_id"]): row for row in rows if row["method"] == method
-                     and row["dataset"] == dataset and _scored(row, spec)}
+                     and row["dataset"] == dataset and str(row["task_id"]) in expected and _scored(row, spec)}
             common = sorted(left.keys() & right.keys())
+            complete_cohort = declared and bool(expected) and set(common) == expected
+            coverage = {"cohort_declared": declared, "planned_tasks": len(expected) if declared else None,
+                "paired_tasks": len(common), "paired_task_ids": common, "complete_cohort": complete_cohort,
+                "comparison_scope": "declared_cohort" if complete_cohort else "common_scored_subset",
+                "baseline_unscored_task_ids": sorted(expected-left.keys()),
+                "method_unscored_task_ids": sorted(expected-right.keys()),
+                "both_unscored_task_ids": sorted(expected-(left.keys() | right.keys()))}
             if not common:
+                output.append({"method": method, "baseline": baseline, "dataset": dataset,
+                    **coverage, "score_difference": None, "score_interval": None})
                 continue
             clusters = defaultdict(list)
             for task_id in common:
@@ -233,7 +257,7 @@ def paired_comparisons(matrix, rows, baseline="B0", split="test", *, samples=Non
                     "interval": _interval(cost_values, confidence) if len(keys) >= 2 else None} if len(cost_values) == samples else None
             result = {"method": method, "baseline": baseline, "dataset": dataset,
                 "quality_track": "development_selection" if split == "dev" else "final_evaluation",
-                "paired_tasks": len(common), "clusters": len(keys), "score_difference": estimated,
+                **coverage, "clusters": len(keys), "score_difference": estimated,
                 "score_interval": _interval(draws, confidence) if len(keys) >= 2 else None,
                 "confidence": confidence,
                 "bootstrap_samples": samples, "resampling_unit": "conversation_or_document",
@@ -253,10 +277,14 @@ def paired_comparisons(matrix, rows, baseline="B0", split="test", *, samples=Non
             result["equal_cost_relative_tolerance"] = tolerance
             output.append(result)
             weight = spec["weight"]/spec.get("normalization", 1.0)
-            overall.append((dataset, estimated*weight, [draw*weight for draw in draws], len(keys)))
+            overall.append((dataset, estimated*weight, [draw*weight for draw in draws], len(keys), complete_cohort))
         if len(overall) == len(specs):
             draws = [sum(component[2][index] for component in overall) for index in range(samples)]
-            output.append({"method": method, "baseline": baseline, "dataset": "engineering_Q",
+            complete_cohort = all(component[4] for component in overall)
+            output.append({"method": method, "baseline": baseline,
+                "dataset": "engineering_Q" if complete_cohort else "engineering_Q_common_scored",
+                "complete_cohort": complete_cohort,
+                "comparison_scope": "declared_cohort" if complete_cohort else "common_scored_subset",
                 "quality_track": "development_selection" if split == "dev" else "final_evaluation",
                 "track_weights": {name: spec["weight"] for name, spec in specs.items()},
                 "score_difference": sum(component[1] for component in overall),

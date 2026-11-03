@@ -35,9 +35,43 @@ def test_execution_profile_matches_actual_prompt_output_and_native_geometry():
     assert profiles.row("READ", "REBUILD", 500, 128, 1, 20, 0, READ_SYSTEM)["profile_id"] == "explicit-unit-fixture"
     assert profiles.row("READ", "REBUILD", 501, 128, 1, 20, 0, READ_SYSTEM) is None
     assert profiles.row("READ", "REBUILD", 500, 64, 1, 20, 0, READ_SYSTEM) is None
-    assert profiles.row("READ", "REBUILD", 500, 128, 2, 20, 0, READ_SYSTEM) is None
-    assert profiles.row("READ", "REBUILD", 500, 128, 1, 20, 1, READ_SYSTEM) is None
     assert profiles.row("READ", "REBUILD", 500, 128, 1, 20, 0, "a different system prompt") is None
+
+
+@pytest.mark.parametrize("concurrency,ready,host,expected", (
+    (1, 0, 0, "cold"), (1, 400, 0, "gpu"),
+    (1, 0, 400, "host"), (2, 400, 0, "gpu-concurrent"),
+))
+def test_current_cache_and_concurrency_select_their_measured_costs(concurrency, ready, host, expected):
+    data = profile_data()
+    base = data["rows"][0]
+    states = (("cold", [0, 0], [0, 0], [1, 1], 100),
+              ("gpu", [400, 500], [0, 0], [1, 1], 20),
+              ("host", [0, 0], [400, 500], [1, 1], 60),
+              ("gpu-concurrent", [400, 500], [0, 0], [2, 2], 30))
+    data["rows"] = [{**base, "profile_id": name, "ready_gpu_range": gpu_range,
+        "host_load_range": host_range, "concurrency_range": concurrent_range,
+        "latency_ms": duration, "gpu_gib_ms": duration*10, "host_gib_ms": duration*2}
+        for name, gpu_range, host_range, concurrent_range, duration in states]
+    profiles = ExecutionProfiles(data)
+    row = profiles.row("READ", "REBUILD", 500, 128, concurrency, ready, host, READ_SYSTEM)
+    measured = next(item for item in data["rows"] if item["profile_id"] == expected)
+    assert row["profile_id"] == expected
+    assert (row["latency_ms"], row["gpu_gib_ms"], row["host_gib_ms"]) == (
+        measured["latency_ms"], measured["gpu_gib_ms"], measured["host_gib_ms"])
+    assert row["source_profile_ids"] == [expected]
+    assert row["cache_conditioning"] == "measured_cache_and_concurrency_ranges"
+
+
+def test_unobserved_geometry_keeps_the_explicit_empirical_envelope():
+    profiles = ExecutionProfiles(profile_data())
+    concurrency = profiles.row("READ", "REBUILD", 500, 128, 2, 20, 0, READ_SYSTEM)
+    host = profiles.row("READ", "REBUILD", 500, 128, 1, 20, 1, READ_SYSTEM)
+    assert concurrency["cache_conditioning"] == host["cache_conditioning"] == "cache_state_envelope"
+    assert concurrency["latency_ms"] == 200
+    assert concurrency["concurrency_inference"]["duration_multiplier"] == 2
+    assert host["latency_ms"] == 100
+    assert host["queried_cache_state"]["host_load_tokens"] == 1
 
 
 def test_profile_cannot_bind_different_reader_cache_or_unobserved_rows():

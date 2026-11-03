@@ -33,13 +33,3 @@ def development_variants(matrix):
     for weight in matrix["selection"].get("lambda_time_grid", ()):
         add("B7", "lambda"+str(weight), {"execution": {"lambda_time": weight}}, "quality_cost_curve")
     return methods
-
-
-def workload_profiles(matrix, method):
-    return [{"id": f"{method['id']}-{kind}-c{concurrency}", "method": deepcopy(method),
-             "workload": kind, "concurrency": concurrency,
-             "input_identity": "fixed_token_sequence" if kind == "identical_tokens_native"
-                               else "fixed_semantic_plan" if kind == "identical_semantics_actions"
-                               else "fixed_question_sequence_and_think_times"}
-            for kind in (*matrix["ablations"]["workloads"], *matrix["ablations"]["cache"])
-            for concurrency in matrix["resources"]["concurrency"]]

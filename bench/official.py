@@ -238,6 +238,18 @@ def _structured_radbench(official, operation, *args):
         official.extract_conversation, official.split_conversation = extract, split
 
 
+def condition_metrics(official, rows, metrics):
+    """Apply the pinned author's answerability rule to every metric component."""
+    has_underspecified = any(
+        "UNDERSPECIFIED" in row.get("answerability", row.get("Answerability", [])) for row in rows)
+    condition = official.get_idk_underspec_score if has_underspecified else official.get_idk_score
+    suffix = "_idk_underspecified" if has_underspecified else "_idk"
+    for row in rows:
+        for metric in metrics:
+            row["metrics"][metric+suffix] = [condition(row, metric)]
+    return suffix
+
+
 def score_http_stages(official, model, input_path, output_directory, *, answerability_adjustment=True,
                       metrics=("RB_llm", "RL_F")):
     """Reuse upstream metric functions; atomically retain each completed stage."""
@@ -287,11 +299,7 @@ def score_http_stages(official, model, input_path, output_directory, *, answerab
     scored = list(scored_by_id.values())
     suffix = None
     if answerability_adjustment:
-        condition = official.get_idk_underspec_score if has_underspecified else official.get_idk_score
-        suffix = "_idk_underspecified" if has_underspecified else "_idk"
-        for row in scored:
-            for metric in metrics:
-                row["metrics"][metric+suffix] = [condition(row, metric)]
+        suffix = condition_metrics(official, scored, metrics)
     target = output / "scores.jsonl"
     pending = target.with_suffix(".pending.jsonl")
     pending.write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in scored))
@@ -367,7 +375,7 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["prepare", "check", "retrieval", "algorithmic", "generation", "generation-http", "overlap"])
+    parser.add_argument("mode", choices=["prepare", "check", "retrieval", "algorithmic", "generation", "generation-http", "condition", "overlap"])
     parser.add_argument("--checkout")
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
@@ -378,8 +386,8 @@ def main(argv=None):
     parser.add_argument("--judge-revision")
     parser.add_argument("--endpoint", help="OpenAI-compatible /v1 URL for generation-http")
     parser.add_argument("--max-tokens", type=int, default=2048, help="HTTP judge output budget")
-    parser.add_argument("--metrics", nargs="+", choices=["RB_llm", "RL_F"], default=["RB_llm", "RL_F"],
-                        help="HTTP metrics to execute; reuse existing completed stages")
+    parser.add_argument("--metrics", nargs="+", choices=["RB_llm", "RL_F", "RB_agg"], default=["RB_llm", "RL_F"],
+                        help="Metrics to generate or condition; RB_agg is supplied by the algorithmic stage")
     parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--ragas-json-schema", action="store_true",
                         help="Constrain RAGAS output with its original prompt's Pydantic JSON schema")
@@ -393,6 +401,14 @@ def main(argv=None):
         target = Path(args.output)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in result))
+    elif args.mode == "condition":
+        sys.path.insert(0, str(Path(args.checkout).resolve()/"scripts/evaluation"))
+        official = importlib.import_module("judge_wrapper")
+        result = load_jsonl(args.input)
+        condition_metrics(official, result, args.metrics)
+        target = Path(args.output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in result))
     elif args.mode == "overlap":
         if not args.references:
             parser.error("overlap requires --references")

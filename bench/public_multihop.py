@@ -179,7 +179,11 @@ def score(source_dir, tasks_path, generation_dir, *, projection=None):
     results = rows(root/"results.unscored.jsonl")
     output = root/"scoring"/"2wiki"
     output.mkdir(parents=True, exist_ok=True)
-    predictions, gold, individual = {"answer": {}, "sp": {}, "evidence": {}}, [], {}
+    predictions, individual = {"answer": {}, "sp": {}, "evidence": {}}, {}
+    gold = [{"_id": task["offline_reference"]["original_id"],
+             **{name: task["offline_reference"][name]
+                for name in ("answer", "supporting_facts", "evidences")}}
+            for task in tasks.values()]
     projection_records, raw_scores = {}, []
     import runpy
     evaluator = runpy.run_path(str(Path(source_dir)/"evaluate.original.py"))
@@ -210,10 +214,9 @@ def score(source_dir, tasks_path, generation_dir, *, projection=None):
         predicted_evidence = [[claim["entity"], claim["relation"], str(claim["value"])] for claim in claims
                               if claim["kind"] != "derived" and claim["entity"] and claim["relation"] and claim["value"] is not None]
         predictions["answer"][original], predictions["sp"][original], predictions["evidence"][original] = answer, predicted_sp, predicted_evidence
-        gold.append({"_id": original, **{name: reference[name] for name in ("answer", "supporting_facts", "evidences")}})
         individual[row["task_id"]] = {"2wiki_answer_em": float(evaluator["exact_match_score"](answer, reference["answer"]))*100,
             "2wiki_answer_f1": evaluator["f1_score"](answer, reference["answer"])[0]*100}
-    prediction_path, gold_path = output/"predictions.json", output/"gold.completed.json"
+    prediction_path, gold_path = output/"predictions.json", output/"gold.json"
     prediction_path.write_text(json.dumps(predictions, ensure_ascii=False)+"\n")
     gold_path.write_text(json.dumps(gold, ensure_ascii=False)+"\n")
     started = time.monotonic()
@@ -222,20 +225,31 @@ def score(source_dir, tasks_path, generation_dir, *, projection=None):
         completed = subprocess.run([sys.executable, str(Path(source_dir)/"evaluate.original.py"),
             str(prediction_path), str(gold_path)], capture_output=True, text=True, check=True)
         (output/"official.stdout.json").write_text(completed.stdout)
-        official = json.loads(completed.stdout)
+        # The author evaluator prints missing-prediction lines before its JSON.
+        # It keeps every gold task in N, so those answers contribute zero.
+        official = json.loads(completed.stdout[completed.stdout.index("{"):])
     write_rows(output/"raw_full_answer.scores.jsonl", raw_scores)
     write_rows(output/"answer_projection.jsonl", projection_records.values())
-    scored = [{**row, "metrics": {**row.get("metrics", {}), **individual.get(row["task_id"], {})},
-        "scoring": {"status": "scored" if row["task_id"] in individual else "failed",
+    raw_by_id = {row["task_id"]: row for row in raw_scores}
+    scored = [{**row, "metrics": {**row.get("metrics", {}), **individual.get(row["task_id"],
+                    {"2wiki_answer_em": 0.0, "2wiki_answer_f1": 0.0})},
+        "scoring": {"status": "scored",
             "source": "official 2Wiki answer normalization/EM/F1", "cost_scope": "offline CPU scoring",
+            "answer_prediction": "provided" if row["task_id"] in individual else "missing",
+            "missing_prediction_rule": "author evaluator retains every gold task in its denominator",
             "answer_projection": projection, "projection_record": projection_records.get(row["task_id"]),
             "error": projection_records.get(row["task_id"], {}).get("error"),
-            "raw_full_answer_metrics": next(value for value in raw_scores if value["task_id"] == row["task_id"]),
+            "raw_full_answer_metrics": raw_by_id.get(row["task_id"]),
             "raw_outputs": [str(output/"answer_projection.jsonl"), str(output/"raw_full_answer.scores.jsonl")]}}
-        for row in results if row["status"] == "completed"]
+        for row in results]
     write_rows(root/"results.scored.jsonl", scored)
-    manifest = {"metric": "official 2Wiki original answer/sp/evidence/joint metrics", "scored": len(individual),
-        "planned": len(tasks), "missing_task_ids": sorted(set(tasks)-set(individual)),
+    manifest = {"metric": "official 2Wiki original answer/sp/evidence/joint metrics", "scored": len(gold),
+        "planned": len(tasks), "valid_answer_predictions": len(individual),
+        "missing_prediction_task_ids": sorted(set(tasks)-set(individual)),
+        "missing_generation_task_ids": sorted(set(tasks)-{row["task_id"] for row in results}),
+        "valid_prediction_metrics": {"count": len(individual),
+            **{name: sum(value[name] for value in individual.values())/len(individual) if individual else None
+               for name in ("2wiki_answer_em", "2wiki_answer_f1")}},
         "answer_projection": projection or "citation_markup_only",
         "projection_contract": "one exact terminal Final answer: line; original Unicode field then citation removal; no semantic or gold-guided extraction"
             if projection else "remove only E_ citation markup",
@@ -246,10 +260,10 @@ def score(source_dir, tasks_path, generation_dir, *, projection=None):
         "raw_full_answer_normalization": "full original answer with only E_ citation markup removed; official EM/F1",
         "support_projection": "original sentence overlap of actual claim source spans; no gold sentence selection",
         "raw_answers": str(root/"results.unscored.jsonl"), "official": official,
-        "official_execution": "executed_on_valid_projection_subset" if gold else "not_executed_no_valid_projection",
+        "official_execution": "executed_on_declared_cohort" if gold else "not_executed_empty_cohort",
         "source_script_sha256": file_digest(Path(source_dir)/"evaluate.original.py"),
         "wall_ms": (time.monotonic()-started)*1000, "model_calls": 0,
-        "scope": "observed completed subset; missing/failed cases are not assigned a fabricated quality value"}
+        "scope": "author evaluator on all declared gold tasks; valid-projection and raw-answer means are separate diagnostics"}
     (output/"manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
     return manifest
 

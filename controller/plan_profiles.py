@@ -48,6 +48,7 @@ def _profile_prediction(row, inputs):
         "source_profile_ids": row.get("source_profile_ids", [row["profile_id"]]),
         "observed_cache_ranges": row.get("observed_cache_ranges"),
         "queried_cache_state": row.get("queried_cache_state"),
+        "cache_conditioning": row["cache_conditioning"],
         "concurrency_inference": row.get("concurrency_inference"),
         "phase_envelope_latency_ms": row["latency_ms"],
         "mean_gpu_gib": row["gpu_gib_ms"]/row["latency_ms"],
@@ -121,26 +122,47 @@ class ExecutionProfiles:
             and row["system_prompt_sha256"] == prompt_hash]
         if not matching:
             return None
-        narrowest = min(matching, key=lambda row: (
-            _prediction_range(row)[1]-_prediction_range(row)[0], _prediction_range(row), row["profile_id"]))
-        matching = [row for row in matching if _prediction_range(row) == _prediction_range(narrowest)]
+        observed = [row for row in matching
+            if row["ready_gpu_range"][0] <= ready <= row["ready_gpu_range"][1]
+            and row["host_load_range"][0] <= host <= row["host_load_range"][1]
+            and row["concurrency_range"][0] <= concurrency <= row["concurrency_range"][1]]
+        if observed:
+            def geometry(row):
+                return (_prediction_range(row), row["ready_gpu_range"],
+                        row["host_load_range"], row["concurrency_range"])
+
+            narrowest = min(observed, key=lambda row: (
+                tuple(bounds[1]-bounds[0] for bounds in geometry(row)), row["profile_id"]))
+            matching = [row for row in observed if geometry(row) == geometry(narrowest)]
+        else:
+            narrowest = min(matching, key=lambda row: (
+                _prediction_range(row)[1]-_prediction_range(row)[0], _prediction_range(row), row["profile_id"]))
+            matching = [row for row in matching if _prediction_range(row) == _prediction_range(narrowest)]
         observed_q = max(row["concurrency_range"][1] for row in matching)
         multiplier = max(1.0, concurrency/observed_q)
         sources = sorted(row["profile_id"] for row in matching)
-        identity = "envelope:"+hashlib.sha256(json.dumps(sources).encode()).hexdigest()[:24]
+        identity = (sources[0] if len(sources) == 1 else
+                    "envelope:"+hashlib.sha256(json.dumps(sources).encode()).hexdigest()[:24])
         envelope = {**narrowest, "profile_id": identity,
+            "input_range": [min(row["input_range"][0] for row in matching),
+                            max(row["input_range"][1] for row in matching)],
+            "observed_input_range": [min(row.get("observed_input_range", row["input_range"])[0] for row in matching),
+                                     max(row.get("observed_input_range", row["input_range"])[1] for row in matching)],
             **{key: max(row[key] for row in matching)*multiplier
                for key in ("latency_ms", "gpu_gib_ms", "host_gib_ms")},
             **{key: max(row[key] for row in matching) for key in ("gpu_peak_gib", "host_peak_gib")},
             "source_profile_ids": sources, "prediction_estimate": True,
+            "cache_conditioning": "measured_cache_and_concurrency_ranges" if observed else "cache_state_envelope",
             "observed_cache_ranges": [{"profile_id": row["profile_id"],
+                "observed_input_range": row.get("observed_input_range", row["input_range"]),
                 "ready_gpu_range": row["ready_gpu_range"], "host_load_range": row["host_load_range"],
                 "concurrency_range": row["concurrency_range"]} for row in matching],
             "queried_cache_state": {"ready_gpu_tokens": ready, "host_load_tokens": host,
                                     "concurrency": concurrency},
             "concurrency_inference": {"observed_max": observed_q, "requested": concurrency,
                 "duration_multiplier": multiplier,
-                "basis": "componentwise measured cache-state envelope; linear duration extrapolation beyond observed concurrency through declared engine concurrency 8; fixed allocated memory peaks"}}
+                "basis": ("measured cache and concurrency range" if observed else
+                    "componentwise measured cache-state envelope; linear duration extrapolation beyond observed concurrency through declared engine concurrency 8; fixed allocated memory peaks")}}
         return envelope
 
 

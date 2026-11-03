@@ -215,6 +215,18 @@ class ReadTask:
     output_budget: int = 2048
     output_schema: dict[str, Any] = field(default_factory=dict)
     operation: str = "extract"
+    reduction_basis_claim_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReductionState:
+    """Completed logical reduction, independently of its physical model calls."""
+    step_id: str
+    need_ids: tuple[str, ...]
+    operation: str
+    basis_claim_ids: tuple[str, ...]
+    frontier_claim_ids: tuple[str, ...]
+    mode: str
 
 
 @dataclass(frozen=True)
@@ -229,6 +241,7 @@ class ReadResult:
     elapsed_ms: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
+    reduction: ReductionState | None = None
 
 
 @dataclass(frozen=True)

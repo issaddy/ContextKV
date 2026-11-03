@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -19,19 +20,90 @@ def row(task_id):
 @pytest.mark.asyncio
 async def test_import_official_components_keeps_raw_algorithmic_alias_and_online_cost(tmp_path):
     source = tmp_path/"source.jsonl"
-    write_scores(source, [{"task_id": "a", "metrics": {"RL_F": [.8], "RB_llm": [.7], "RB_agg": [.6]}}])
+    write_scores(source, [{"task_id": "a", "metrics": {"RL_F": [.8], "RB_llm": [.7], "RB_agg": [.6],
+        "RL_F_idk": [0], "RB_llm_idk": [0], "RB_agg_idk": [0]}}])
     initial = row("a")
     spec = {"primary_metric": "mtrageval_harmonic", "scoring": {
         "scores_path": str(source), "identity": {"protocol": "explicit_test_scorer"}}}
     result = await score_dataset({}, spec, [initial], tmp_path/"generation")
     assert result[0]["metrics"]["RB_agg"] == [.6]
     assert result[0]["metrics"]["RB_alg"] == [.6]
+    assert result[0]["metrics"]["RB_alg_idk"] == [0]
     assert result[0]["scoring"]["status"] == "scored"
     assert result[0]["scoring"]["metric_aliases"]["RB_alg"]["from"] == "RB_agg"
+    assert result[0]["scoring"]["metric_aliases"]["RB_alg_idk"]["from"] == "RB_agg_idk"
     assert result[0]["cost"] == initial["cost"]
     assert initial["metrics"] == {}
     manifest = json.loads((tmp_path/"generation/scoring/manifest.json").read_text())
     assert manifest["judge_cost"]["unknown_input_token_records"] == 1
+
+
+@pytest.mark.asyncio
+async def test_raw_only_mtrag_scores_remain_diagnostic_until_official_conditioning(tmp_path):
+    source = tmp_path/"raw.jsonl"
+    write_scores(source, [{"task_id": "a", "metrics": {"RL_F": [.8], "RB_llm": [.7], "RB_agg": [.6]}}])
+    spec = {"primary_metric": "mtrageval_harmonic", "scoring": {
+        "scores_path": str(source), "identity": {"protocol": "explicit_test_scorer"}}}
+    result = await score_dataset({}, spec, [row("a")], tmp_path/"generation")
+    assert result[0]["scoring"]["status"] == "missing"
+    assert result[0]["metrics"]["RB_alg"] == [.6]
+
+
+@pytest.mark.asyncio
+async def test_official_pipeline_conditions_algorithmic_component_after_merging(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from bench import study_scoring
+
+    generation = tmp_path/"generation"
+    directory = generation/"scoring"
+    directory.mkdir(parents=True)
+    checkout = tmp_path/"official-source"
+    checkout.mkdir()
+    (checkout/"contextkv-source.json").write_text(json.dumps({"commit": "pinned-fixture"}))
+    prediction = {"task_id": "a", "input": [{"speaker": "user", "text": "Question"}],
+                  "predictions": [{"text": "Answer"}], "contexts": []}
+    write_scores(generation/"official.jsonl", [prediction])
+    write_scores(generation/"references.jsonl", [{**prediction, "Answerability": ["UNANSWERABLE"],
+                                                "targets": [{"text": "No supported answer"}]}])
+    commands = []
+
+    @contextmanager
+    def no_http(endpoint, journal):
+        yield endpoint, []
+
+    async def execute(arguments, workdir, label):
+        commands.append((arguments, label))
+        source = study_scoring.load_jsonl(arguments[arguments.index("--input")+1])
+        destination = Path(arguments[arguments.index("--output")+1])
+        if label == "official-generation":
+            destination.mkdir()
+            source[0]["metrics"] = {"RL_F": [.8], "RB_llm": [.7], "idk_eval": [0],
+                                    "RL_F_idk": [0], "RB_llm_idk": [0]}
+            write_scores(destination/"scores.jsonl", source)
+        elif label == "official-algorithmic":
+            source[0]["metrics"] = {"RB_agg": [.6]}
+            write_scores(destination, source)
+        else:
+            assert label == "official-condition"
+            assert arguments[arguments.index("--metrics")+1:] == ["RL_F", "RB_llm", "RB_agg"]
+            assert source[0]["metrics"]["idk_eval"] == [0]
+            assert source[0]["metrics"]["RB_agg"] == [.6]
+            source[0]["metrics"]["RB_agg_idk"] = [0]
+            write_scores(destination, source)
+        return {"elapsed_ms": 1}
+
+    monkeypatch.setattr(study_scoring, "record_judge_http", no_http)
+    monkeypatch.setattr(study_scoring, "_command", execute)
+    spec = {"primary_metric": "mtrageval_harmonic"}
+    settings = {"official_checkout": str(checkout), "ragas_json_schema": True,
+                "judge": {"model": "fixture", "revision": "v1", "base_url": "http://judge.test/v1"}}
+    records, identity, outputs, _ = await study_scoring._official_scores({}, spec, directory, settings)
+    assert [label for _, label in commands] == ["official-generation", "official-algorithmic", "official-condition"]
+    assert "--ragas-json-schema" in commands[0][0]
+    assert records[0]["metrics"]["RB_agg"] == [.6]
+    assert records[0]["metrics"]["RB_agg_idk"] == [0]
+    assert identity["answerability_adjustment"]
+    assert str(directory/"official.conditioned.jsonl") in outputs
 
 
 @pytest.mark.asyncio
