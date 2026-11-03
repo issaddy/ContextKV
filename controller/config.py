@@ -117,6 +117,7 @@ class RunConfig:
     sampling: SamplingRecipe | None = None
     prefix_retention: dict = field(default_factory=lambda: {"mode": "native"})
     plan_gain: dict | None = None
+    state_observation: dict | None = None
 
     def __post_init__(self):
         if self.engine.kind not in ("mock", "sglang"):
@@ -165,7 +166,8 @@ def apply_study_config(config: RunConfig, study):
             lambda_host=execution["lambda_host"]),
         cost_model=replace(config.cost_model, artifact=artifact),
         prefix_retention=execution.get("prefix_retention", config.prefix_retention),
-        plan_gain=execution.get("plan_gain", config.plan_gain))
+        plan_gain=execution.get("plan_gain", config.plan_gain),
+        state_observation=execution.get("state_observation", config.state_observation))
 
 
 def assemble_cost_model(config, *, artifact=None, measurements=None,
@@ -271,11 +273,16 @@ def create_controller(config: RunConfig) -> Controller:
             sampling=request_sampling(config.sampling),
             answer_system_prompt=config.context.system_prompt or PLAN_SYSTEM_PROMPT,
             engine_base_url=config.engine.base_url)
+    state_observer = None
+    if config.state_observation is not None:
+        from .plan_profiles import load_fixed_reading_observer
+        state_observer = load_fixed_reading_observer(config.state_observation, template=template)
     return Controller(store, engine, template=template,
                       policy=config.context, knobs=config.planner, cost_model=model, shadow=config.shadow,
                       epoch_retirement=config.ablation.epoch_retirement,
                       online_calibration=config.cost_model.online_calibration,
                       prefix_settings=config.prefix_retention,
                       rolling_policy=rolling,
+                      state_observer=state_observer,
                       events=EventLog(state_dir / "events.jsonl",
                                       engine_kind=config.engine.kind))

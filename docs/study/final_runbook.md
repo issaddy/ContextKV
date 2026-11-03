@@ -25,6 +25,11 @@ P1 支持策略配置为 `configs/evidence_policy_fixed_qwen.yaml`。
 `runs/study/budget-loop-20261103/reader-cohorts/full/cohort_manifest.json`。
 task/support 配置必填 `training.cohort_manifest`；P1 采集必填
 `collection.cohort_manifest` 和 `cohort_split`，开发采集显式选择 `dev`。
+B 固定流程观测使用 `execution.state_observation`，从真实请求开始计量并记录 READ/REDUCE 决策状态；
+不加载 gain 模型，不从旧 SQLite 补造物理状态。A 冻结后显式启用。
+`training.collect_plan_gains --observations OBS --actual-turns TURNS --output PACKETS`
+导出后，`training.plan_gain_workflow --mode observed_actions --observed-states PACKETS`
+沿用源 cohort 身份。每个源 task 保留各合法动作首次可配对的观测，不按未来质量选点。
 B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
 `--cohort-manifest` 指向同一文件；不再使用 `--partition-seed` 或 `--dev-fraction`
 重新划分状态，实际采集数量从声明分区内选择并单独记录。

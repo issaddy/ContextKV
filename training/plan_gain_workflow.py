@@ -22,7 +22,10 @@ async def workflow(config, settings):
     frozen = root/"inputs"
     frozen.mkdir()
     provenance = {}
-    for name in ("task_labels", "actual_rollouts", "sources", "cohort_manifest"):
+    inputs = ("task_labels", "actual_rollouts", "sources", "cohort_manifest")
+    if settings.get("mode", "whole_plan") == "observed_actions":
+        inputs += ("observed_states",)
+    for name in inputs:
         original = Path(settings[name]).resolve()
         target = frozen/(name+original.suffix)
         shutil.copyfile(original, target)
@@ -38,6 +41,7 @@ async def workflow(config, settings):
     await sampler.start()
     started = time.monotonic()
     result = {"status": "running", "cohorts": {}, "source_files": provenance,
+        "collection_mode": settings.get("mode", "whole_plan"),
         "reader_profile_id": settings["reader_profile_id"], "cohort_manifest": settings["cohort_manifest"],
         "train_states": settings["train_states"], "dev_states": settings["dev_states"],
         "model_generation_limit": settings["max_generations"]}
@@ -89,7 +93,11 @@ def main(argv=None):
     parser.add_argument("--extra-process-roots", type=integers, default=())
     parser.add_argument("--cache-start", choices=("observed", "cold"), default="observed")
     parser.add_argument("--scope-scan", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--mode", choices=("whole_plan", "observed_actions"), default="whole_plan")
+    parser.add_argument("--observed-states", help="Actual observed-state packets; snapshotted with the cohort inputs")
     args = parser.parse_args(argv)
+    if args.mode == "observed_actions" and not args.observed_states:
+        parser.error("observed_actions requires --observed-states")
     if min(args.train_states, args.dev_states) < 1 or args.max_generations < 4:
         raise ValueError("actual train/dev state counts and total generation allocation must be positive")
     config = yaml.safe_load(Path(args.study_config).read_text())

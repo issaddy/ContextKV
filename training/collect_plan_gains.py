@@ -85,9 +85,10 @@ def export_observed_packets(observations, actual_turns, output):
         if response is None:
             continue
         attempt = response["attempt_id"]
-        if attempt in tasks and tasks[attempt] != row["task_id"]:
-            raise ValueError("one actual attempt maps to different task IDs")
-        tasks[attempt] = row["task_id"]
+        binding = {name: row[name] for name in ("task_id", "cohort_split", "cohort_manifest_sha256")}
+        if attempt in tasks and tasks[attempt] != binding:
+            raise ValueError("one actual attempt maps to different task/cohort identities")
+        tasks[attempt] = binding
     packets, excluded, seen = [], [], set()
     for observation in observations:
         identity = observation["observation_id"]
@@ -102,14 +103,20 @@ def export_observed_packets(observations, actual_turns, output):
             excluded.append({"observation_id": identity, "attempt_id": attempt,
                              "reason": "mandatory_source_coverage_incomplete"})
             continue
-        packets.append({**observation, "task_id": tasks[attempt]})
+        binding = tasks[attempt]
+        if any(name in observation and observation[name] != value for name, value in binding.items()):
+            raise ValueError("observed packet differs from its actual turn's task/cohort identity")
+        packets.append({**observation, **binding})
     path = Path(output)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x") as stream:
         for packet in packets:
             stream.write(json.dumps(packet, ensure_ascii=False, allow_nan=False)+"\n")
     manifest = {"schema_version": 1, "scope": "observed decision packets mapped through actual response.attempt_id",
-        "packets": len(packets), "excluded": excluded, "output": str(path.resolve())}
+        "packets": len(packets), "excluded": excluded, "output": str(path.resolve()),
+        "cohort_bindings": [{"cohort_split": split, "cohort_manifest_sha256": identity}
+            for split, identity in sorted({(packet["cohort_split"], packet["cohort_manifest_sha256"])
+                                          for packet in packets})]}
     Path(str(path)+".manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
     return manifest
 

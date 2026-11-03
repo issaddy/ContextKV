@@ -61,12 +61,13 @@ def merge_auxiliary_usage(*records):
 
 class ReadingExecutor:
     def __init__(self, store, engine, template, *, extend_open_needs=None, events=None,
-                 request_arrived=None, observe_prefix=None):
+                 request_arrived=None, observe_prefix=None, observe_state=None):
         self.store, self.engine, self.template = store, engine, template
         self.extend_open_needs = extend_open_needs
         self.events = events
         self.request_arrived = request_arrived
         self.observe_prefix = observe_prefix
+        self.observe_state = observe_state
 
     async def execute_one(self, attempt_id, snapshot, plan, task, state, *,
                           initial_auxiliary_usage=None, candidate=None):
@@ -302,6 +303,8 @@ class ReadingExecutor:
 
     async def execute_reads(self, attempt_id, snapshot, plan, *, initial_auxiliary_usage=None):
         from .evidence_planner import _passages, close_dependencies
+        if self.observe_state is not None and self.store.execution_steps(attempt_id):
+            raise ValueError("fixed state observation requires a newly executed attempt, not saved post-step state")
         if (plan.budget.max_passages is not None
                 and len(_passages(plan.selected_set.selected_units)) > plan.budget.max_passages):
             raise ReadingBudgetExceeded("initial plan exceeds the original passage allocation")
@@ -459,6 +462,13 @@ class ReadingExecutor:
             frontier = tuple(claim for claims, _, _ in bundles for claim in claims)
             complete_reduction(task, basis, frontier, "merged" if len(bundles) == 1 else "forest")
 
+        async def observe_current():
+            if self.observe_state is not None:
+                state = ReadingOutcome(plan, tuple(results), tuple(records), tuple(graph.claims.values()),
+                    tuple(coverage), unresolved_needs(results), auxiliary_usage=gap_auxiliary_usage)
+                await self.observe_state(state, expanded)
+
+        await observe_current()
         while True:
             ready = advance_read_plan(plan, tuple(results))
             if not ready or all(task.kind == "REDUCE" for task in ready):
@@ -600,6 +610,7 @@ class ReadingExecutor:
                     await run_reduction(task, selected_claims)
                 else:
                     await run_model(task, selected_units, selected_claims)
+                await observe_current()
             self.store.save_context_plan(attempt_id, plan)
         covered = {row[2] for row in coverage}
         if plan.coverage_scope == "all_supplied_documents" and covered != set(plan.coverage_units):

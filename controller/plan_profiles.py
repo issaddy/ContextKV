@@ -408,3 +408,13 @@ def load_rolling_runtime(settings, *, template, store, sampling, answer_system_p
         output_tokens_per_fact=settings.get("output_tokens_per_fact", 64),
         mode=settings.get("mode", "whole_plan"), observation_path=settings.get("observation_path"),
         gap_retriever_identity=settings.get("gap_retriever_identity"), gap_limits=settings.get("gap_limits"))
+
+
+def load_fixed_reading_observer(settings, *, template):
+    from bench.study_resources import StudyResourceSampler
+    from .rolling_policy import FixedReadingObserver
+    if settings["reader_checkpoint"] != template.fingerprint.model_revision:
+        raise ValueError("fixed reading observations must bind the actual reader checkpoint")
+    paid = PhysicalPaidCost(StudyResourceSampler(tuple(settings["gpu_devices"]), tuple(settings["process_ids"]),
+                                               interval=settings["sampling_interval_seconds"]))
+    return FixedReadingObserver(settings, paid, template.fingerprint)

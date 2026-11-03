@@ -180,7 +180,7 @@ class RollingPlanRuntime:
         return (GapRetrievalRequest(needs, gap_query(state.plan.task_state, needs),
                 self.gap_retriever_identity, self.gap_limits) if needs else None)
 
-    def _observe_state(self, attempt_id, executor, state, snapshot, native, gap_request, mandatory):
+    def _observe_state(self, attempt_id, executor, state, snapshot, native, gap_request, mandatory, *, metadata=None):
         if self.observation_path is None:
             return
         attempt = executor.store.get_attempt(attempt_id)
@@ -190,6 +190,7 @@ class RollingPlanRuntime:
             "reader_checkpoint": native.reader_checkpoint, "reader_profile_id": native.reader_profile_id,
             "gap_request": gap_request, "decision_mode": "mandatory_coverage" if mandatory else self.mode}
         packet["observation_id"] = f"{attempt_id}:{native.quotes.engine_restart_id}:{native.quotes.observed_seq}:{len(state.steps)}"
+        packet.update(metadata or {})
         self.observation_path.parent.mkdir(parents=True, exist_ok=True)
         with self.observation_path.open("a") as stream:
             stream.write(dumps(packet)+"\n")
@@ -577,3 +578,60 @@ class RollingPlanRuntime:
                         gap = namespace_plan(gap)
                         context_plans = (gap, *tuple(item for item in context_plans
                             if item.plan_id != state.plan.plan_id)[:self.policy.limits.max_plan_candidates-2])
+
+
+class FixedReadingObserver:
+    """Capture real fixed-plan decision states without choosing an action."""
+    mode = "fixed_reading"
+
+    def __init__(self, settings, paid, fingerprint):
+        self.paid, self.fingerprint = paid, fingerprint
+        self.reader_checkpoint = settings["reader_checkpoint"]
+        self.reader_profile_id = settings["reader_profile_id"]
+        self.observation_path = Path(settings["observation_path"])
+        self.output_budgets = tuple(settings["output_budgets"])
+        self.output_tokens_per_fact = settings.get("output_tokens_per_fact", 64)
+        self.gap_limits = settings["gap_limits"]
+        self.gap_retriever_identity = None
+        self.cohort = {"cohort_split": settings["cohort_split"],
+            "cohort_manifest_sha256": hashlib.sha256(Path(settings["cohort_manifest"]).read_bytes()).hexdigest()}
+
+    def bind_resident_models(self, manifest):
+        from .resident_models import resident_model_digest
+        self.gap_retriever_identity = {"implementation": "StudyEvidenceProvider.extend_for_plan",
+            "resident_model_manifest_digest": resident_model_digest(manifest)}
+
+    async def start(self):
+        await self.paid.start()
+
+    async def aclose(self):
+        await self.paid.aclose()
+
+    async def observe(self, attempt_id, executor, state, snapshot, engine, cost_model, compile_answers,
+                      *, arrived, auxiliary_usage, expanded, startup_ms):
+        from .plan_policy import NativePlanningState
+        started = time.monotonic()
+        mandatory = RollingPlanRuntime._mandatory_coverage(state)
+        gap = RollingPlanRuntime._gap_request(self, state, expanded, executor.extend_open_needs)
+        plans = (() if mandatory else RollingPlanRuntime.action_proposals(self, state.plan, state,
+            snapshot, executor.template, compile_answers, gap))
+        candidates = tuple(candidate for plan in plans for step in plan.steps for candidate in step.variants
+                           if candidate.feasible)
+        quote_started = time.monotonic()
+        quotes = await engine.quote_batch(candidates, self.fingerprint)
+        quote_ended = time.monotonic()
+        paid = await self.paid.observe(arrived, state, auxiliary_usage)
+        native = NativePlanningState(self.reader_checkpoint, self.reader_profile_id, snapshot, quotes,
+            cost_model, {}, {}, paid, self.paid.last_observation)
+        RollingPlanRuntime._observe_state(self, attempt_id, executor, state, snapshot, native, gap, mandatory,
+            metadata={**self.cohort, "decision_seq": len(state.steps),
+                "resident_model_manifest_digest": (self.gap_retriever_identity["resident_model_manifest_digest"]
+                    if self.gap_retriever_identity is not None else None),
+                "after_step_id": state.steps[-1].step_id if state.steps else None,
+                "after_step_kind": state.steps[-1].task.kind if state.steps else None,
+                "legal_actions": [plan.semantic_kind for plan in plans],
+                "observation_overhead": {"clock": "client_monotonic", "start": started,
+                    "pre_arrival_startup_ms": startup_ms,
+                    "quote_start": quote_started, "quote_end": quote_ended,
+                    "paid_window_end": self.paid.last_observation["end"],
+                    "handling": "startup is in the outer request/collection window; decision capture through paid_window_end is in paid_cost; serialization is in subsequent paid windows and full request cost"}})

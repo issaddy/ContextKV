@@ -1,7 +1,7 @@
 {
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
-  "gpu_status": "stopped_for_fixed_model_scope_review",
+  "gpu_status": "running_full_reference_and_reader_bound_P1_collection",
   "evidence_scope": "Controlled fixed-Qwen mechanisms and actual candidate collection; protocol comparison and final full-development acceptance remain pending.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
@@ -187,7 +187,7 @@
       "versionqa": 0.2,
       "loong": 0.25
     },
-    "baseline_status": "pending complete same-hardware fixed-model run",
+    "baseline_status": "running",
     "long_dev_scoring": {
       "track": "constructed_long_dev_correctness",
       "primary_metric": "project_condition_version_score",
@@ -195,6 +195,88 @@
       "reference_only": true,
       "correctness_weight": 1,
       "official_loong_test_unchanged": true
-    }
+    },
+    "baseline_method": "P0_task_first_isolated",
+    "concurrency": 4,
+    "cache_start": "cold_once_per_method_dataset",
+    "artifact": "runs/study/budget-loop-20261103/formal-dev-c4"
+  },
+  "source_snapshots": {
+    "baseline": "e3bf734",
+    "candidate": "bbd10b4",
+    "baseline_directory": "runs/study-20261103-budget-loop/source",
+    "candidate_directory": "runs/study-20261103-budget-loop/candidate-source",
+    "shared_assets": [
+      "data",
+      "models",
+      "runs",
+      "vendor"
+    ]
+  },
+  "auxiliary_training": {
+    "task_model": {
+      "asset": "models/study-task-budget-loop",
+      "train_states": 181,
+      "declared_dev_states": 40,
+      "evaluated_dev_states": 36,
+      "epochs": 3,
+      "steps": 543,
+      "model_input_tokens": 646983,
+      "complete_ms": 82831.93854242563,
+      "document_vectors": "reused frozen section index; no document encoder updates",
+      "query_gradient": "retrieval loss only; task-head inputs detached",
+      "P0_recall_at_20": 0.8611111111111112,
+      "trained_recall_at_20": 0.8611111111111112,
+      "P0_recall_at_50": 0.9166666666666666,
+      "trained_recall_at_50": 0.9166666666666666,
+      "recall_metric": "macro original-source gold-character coverage by union of retrieved sections",
+      "task_heads_deployed": false,
+      "head_need_character_f1": 0.24937842228224275,
+      "head_operation_accuracy": 0.0,
+      "deployment": "use trained query encoder; keep task interpretation fixed; no retrieval improvement claim from tied coverage"
+    },
+    "support_model": {
+      "asset": "models/study-support-budget-loop",
+      "train_examples": 1140,
+      "epochs": 1,
+      "model_input_tokens": 1579669,
+      "complete_ms": 228630.5397003889
+    },
+    "support_supervision": {
+      "states": 217,
+      "examples": 1358,
+      "arities": {
+        "1": 627,
+        "2": 679,
+        "3": 52
+      },
+      "input_tokens": 2111175,
+      "output_tokens": 125431,
+      "wall_ms": 216147.3683528602,
+      "teacher": "frozen Qwen3-32B"
+    },
+    "artifacts": "runs/study/budget-loop-20261103/auxiliary-training"
+  },
+  "P1_reward_pilot": {
+    "train_states": 12,
+    "dev_states": 4,
+    "actual_candidates": 96,
+    "scored_answers": 95,
+    "failed_candidates": 1,
+    "train_scored_answers": 71,
+    "dev_scored_answers": 24,
+    "train_pair_count": 53,
+    "reader_input_tokens": 2705692,
+    "reader_output_tokens": 214455,
+    "train_elapsed_ms": 845195.7591678947,
+    "dev_elapsed_ms": 394441.01740047336,
+    "cost_scope": "reader tokens only here; auxiliary, judge and physical ledgers remain separately recorded",
+    "full_collection_status": "running on accepted 181 train / 36 dev within declared 200 / 40; pilot rows reused",
+    "artifact": "runs/study/budget-loop-20261103/p1-rewards/collection/abe4111aa70ddeeed0aa"
+  },
+  "B_observation_entry": {
+    "implementation": "capture actual fixed-plan decision states without loading a gain model",
+    "status": "implemented; real B capture awaits frozen P1",
+    "cohort": "original full200/40 manifest; unique source states counted before observation/action selection"
   }
 }

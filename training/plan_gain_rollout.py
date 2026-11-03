@@ -52,20 +52,38 @@ def read_rows(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
 
-def gap_retriever_identity(config):
-    return {"implementation": "StudyEvidenceProvider.extend_for_plan", "study_config_sha256": digest(config)}
+def gap_retriever_identity(manifest):
+    from controller.resident_models import resident_model_digest
+    return {"implementation": "StudyEvidenceProvider.extend_for_plan",
+            "resident_model_manifest_digest": resident_model_digest(manifest)}
 
 
-def observed_rows(rows, packets):
-    """Bind collected decision packets to the audited actual task/history cohort."""
+def observed_rows(rows, packets, *, selection=None):
+    """Keep each task's first legal decision for every non-ANSWER action."""
     from controller.plan_policy import CompleteCost
+    kinds = ("read_once", "reduce_once", "gap_retrieval")
     by_task = {row["task_id"]: row for row in rows}
-    result = []
+    chosen, skipped, seen = {}, Counter(), set()
+    observed_tasks = set()
     for packet in packets:
-        if packet["task_id"] not in by_task:
+        identity, task_id = packet["observation_id"], packet["task_id"]
+        if identity in seen:
+            skipped["duplicate_observation"] += 1
             continue
-        row = by_task[packet["task_id"]]
+        seen.add(identity)
+        if task_id not in by_task:
+            skipped["outside_requested_members"] += 1
+            continue
+        row = by_task[task_id]
+        if any(packet[name] != row[name] for name in ("cohort_split", "cohort_manifest_sha256")):
+            raise ValueError("observed state belongs to a different registered cohort identity")
         state = decode(ReadingOutcome, packet["working_state"])
+        if packet["decision_mode"] == "mandatory_coverage":
+            skipped["mandatory_source_coverage_incomplete"] += 1
+            continue
+        if not state.steps:
+            skipped["empty_observed_state"] += 1
+            continue
         snapshot = decode(SessionSnapshot, packet["snapshot"])
         expected = [{name: turn[name] for name in ("turn_id", "user_text", "assistant_text")}
                     for turn in row["actual_history"]]
@@ -76,16 +94,56 @@ def observed_rows(rows, packets):
         from controller.schema import OnlineTurn
         interpreter = AuditedTaskInterpreter(None)
         interpreter.bind(row, state.plan.task_state)
-        interpreter.interpret(OnlineTurn(row["conversation_id"], row["task_id"], row["turn"], "training",
+        interpreter.interpret(OnlineTurn(row["conversation_id"], task_id, row["turn"], "training",
             row["question"], (), (), "P3"), RetrievalState(0, snapshot.raw_history))
         if not packet["native_condition"]:
             raise ValueError("observed state requires its recorded native condition")
+        if "direct_answer" not in packet["legal_actions"]:
+            skipped["no_legal_direct_pair"] += 1
+            continue
+        observed_tasks.add(task_id)
         paid = decode(CompleteCost, packet["paid_cost"])
         binding = observed_state_binding(state, snapshot, paid_cost=paid,
             native_condition=packet["native_condition"], reader_checkpoint=packet["reader_checkpoint"],
             reader_profile_id=packet["reader_profile_id"], paid_observation=packet.get("paid_observation"))
-        result.append({**row, "task_state": to_jsonable(state.plan.task_state),
-                       "observed_packet": packet, "observed_binding": binding})
+        binding.update(observation_id=identity, cohort_split=packet["cohort_split"],
+            cohort_manifest_sha256=packet["cohort_manifest_sha256"],
+            resident_model_manifest_digest=packet["resident_model_manifest_digest"])
+        key = (packet["decision_seq"], packet["native_condition"]["observed_time_ns"], identity)
+        candidate = {**row, "task_state": to_jsonable(state.plan.task_state),
+                     "observed_packet": packet, "observed_binding": binding}
+        for kind in kinds:
+            if kind not in packet["legal_actions"]:
+                continue
+            action = task_id, kind
+            if action in chosen:
+                skipped["additional_legal_observation_for_action"] += 1
+            if action not in chosen or key < chosen[action][0]:
+                chosen[action] = key, candidate
+    result, coverage, missing = [], {}, []
+    for row in rows:
+        task_id = row["task_id"]
+        decisions = {}
+        for kind in kinds:
+            if (task_id, kind) not in chosen:
+                missing.append({"task_id": task_id, "family": kind, "reason": "no_legal_observation"})
+                continue
+            _, candidate = chosen[task_id, kind]
+            identity = candidate["observed_packet"]["observation_id"]
+            if identity not in decisions:
+                decisions[identity] = {**candidate, "observed_action_kinds": []}
+            decisions[identity]["observed_action_kinds"].append(kind)
+            coverage.setdefault(kind, []).append(task_id)
+        result.extend(sorted(decisions.values(), key=lambda value: (
+            value["observed_packet"]["decision_seq"], value["observed_packet"]["observation_id"])))
+    if selection is not None:
+        selection.update(rule="first legal decision_seq/native observed time/observation_id per unique task and action; no future outcomes",
+            selected=[{"task_id": row["task_id"], "observation_id": row["observed_packet"]["observation_id"],
+                       "actions": row["observed_action_kinds"]} for row in result],
+            observed_task_ids=[row["task_id"] for row in rows if row["task_id"] in observed_tasks],
+            missing_observation_task_ids=[row["task_id"] for row in rows if row["task_id"] not in observed_tasks],
+            action_coverage={kind: coverage.get(kind, []) for kind in kinds},
+            unavailable_actions=missing, skipped_observations=dict(skipped))
     return result
 
 
@@ -206,7 +264,20 @@ def bounded_engine(engine, budget, wire_path):
 def audited_cohort(labels, sources, *, split, limit, cohort_manifest):
     from training.train_evidence_policy import qualify_collection_rows
     from training.task_data import select_cohort_rows
-    from training.reader_data import file_digest
+    from training.reader_data import file_digest, history_digest
+    manifest = json.loads(Path(cohort_manifest).read_text())
+    manifest_hash = file_digest(cohort_manifest)
+    members = {member["task_id"]: member for member in manifest["members"] if member["split"] == split}
+    for row in labels:
+        if row["task_id"] not in members:
+            continue
+        member = members[row["task_id"]]
+        if (row["conversation_id"] != member["conversation_id"] or row["turn"] != member["turn"]
+                or history_digest(row["actual_history"]) != member["actual_history_sha256"]):
+            raise ValueError("gain label differs from the registered actual task/history member")
+        if any(name in row and row[name] != value for name, value in (
+                ("cohort_split", split), ("cohort_manifest_sha256", manifest_hash))):
+            raise ValueError("gain labels retain a different source cohort identity")
     labels = select_cohort_rows(labels, cohort_manifest, split)
     eligible, excluded = qualify_collection_rows(labels, sources)
     unique = {row["task_id"] for row in labels}
@@ -221,12 +292,13 @@ def audited_cohort(labels, sources, *, split, limit, cohort_manifest):
             excluded.append({"task_id": row["task_id"], "reason": "current_turn_not_next_actual_qa"})
             continue
         selected.append(row)
-    selected = selected[:limit]
-    if not selected:
-        raise ValueError("no audited native-training actual-history turns in the declared gain cohort")
+    by_task = {row["task_id"]: row for row in selected}
+    selected = [by_task[identity] for identity in members if identity in by_task][:limit]
     return selected, {"split": split, "source_partition": "train",
-        "cohort_manifest": str(Path(cohort_manifest).resolve()), "cohort_manifest_sha256": file_digest(cohort_manifest),
+        "cohort_manifest": str(Path(cohort_manifest).resolve()), "cohort_manifest_sha256": manifest_hash,
         "allocation_unit": "registered conversation_id",
+        "declared_task_ids": list(members),
+        "missing_label_task_ids": [identity for identity in members if identity not in unique],
         "planned_task_ids": [row["task_id"] for row in selected], "exclusions": excluded,
         "source_label_sha256": digest(labels), "source_originals_sha256": digest(sources)}
 
@@ -554,15 +626,27 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
             invalid.append({"task_id": row["task_id"], "reason": "invalid_audited_task_binding", "error": str(error)})
         else:
             valid.append(row)
+    requested = cohort["declared_task_ids"][:settings["limit_tasks"]]
+    eligible = {row["task_id"]: row for row in valid}
+    valid = [eligible[identity] for identity in requested if identity in eligible]
     mode = settings.get("mode", "whole_plan")
+    observation_selection = {}
     if mode == "observed_actions":
-        valid = observed_rows(valid, read_rows(settings["observed_states"]))[:settings["limit_tasks"]]
-    elif mode == "whole_plan":
-        valid = valid[:settings["limit_tasks"]]
-    else:
+        valid = observed_rows(valid, read_rows(settings["observed_states"]), selection=observation_selection)
+    elif mode != "whole_plan":
         raise ValueError("gain collection mode must be whole_plan or observed_actions")
     cohort["task_ref_exclusions"] = invalid
-    cohort["planned_task_ids"] = [row["task_id"] for row in valid]
+    cohort["requested_task_ids"] = requested
+    cohort["missing_eligible_label_task_ids"] = [identity for identity in requested if identity not in eligible]
+    cohort["planned_task_ids"] = list(dict.fromkeys(row["task_id"] for row in valid))
+    cohort["missing_task_ids"] = [identity for identity in requested if identity not in cohort["planned_task_ids"]]
+    if mode == "observed_actions":
+        observation_selection["unavailable_actions"].extend(
+            {"task_id": identity, "family": kind, "reason": "no_eligible_registered_label"}
+            for identity in requested if identity not in eligible
+            for kind in ("read_once", "reduce_once", "gap_retrieval"))
+        cohort["observation_selection"] = observation_selection
+        cohort["planned_observations"] = len(valid)
     write(output/"cohort.json", cohort)
     if not valid:
         raise ValueError("no unchanged audited task binding remains for actual gain collection")
@@ -665,7 +749,8 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 "scorer_engine_info": judge_info, "generation_protocol": GenerationProtocol.from_config(run).record(),
                 "source_files": {name: {"path": str(Path(settings[name]).resolve()),
                     "sha256": hashlib.sha256(Path(settings[name]).read_bytes()).hexdigest()}
-                    for name in ("task_labels", "actual_rollouts", "sources", "run_config", "judge_config")},
+                    for name in ("task_labels", "actual_rollouts", "sources", "run_config", "judge_config", "cohort_manifest")
+                        + (("observed_states",) if mode == "observed_actions" else ())},
                 "configuration": config, "collection_settings": settings,
                 "task_inference": "frozen audited training labels; no new task-teacher inference"})
             for number, row in enumerate(valid):
@@ -696,12 +781,23 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                         frozen = decode(ReadingOutcome, packet["working_state"])
                         snap = decode(SessionSnapshot, packet["snapshot"])
                         base = frozen.plan
+                        actual_resident = gap_retriever_identity(provider.manifest)["resident_model_manifest_digest"]
+                        if packet["resident_model_manifest_digest"] != actual_resident:
+                            raise ValueError("observed state belongs to different frozen A resident assets")
                         gap_request = decode(GapRetrievalRequest, packet["gap_request"]) if packet.get("gap_request") else None
-                        if gap_request is not None and gap_request.retriever_identity != gap_retriever_identity(config):
+                        if gap_request is not None and gap_request.retriever_identity != gap_retriever_identity(provider.manifest):
                             raise ValueError("registered GAP retriever differs from the actual collection configuration")
                         plans, omitted = build_observed_action_plans(frozen, snap, controller.template,
                             reader_checkpoint=reader_checkpoint, gap_request=gap_request,
                             answer_system_prompt=controller.policy.system_prompt)
+                        available = {plan.semantic_kind for plan in plans}
+                        reasons = {"read_once": "no_ready_unread_source_step",
+                            "reduce_once": "no_unreduced_extract_basis_for_requested_operation",
+                            "gap_retrieval": "no_registered_gap_request"}
+                        omitted = (*omitted, *({"family": kind, "reason": reason}
+                            for kind, reason in reasons.items() if kind not in available))
+                        plans = tuple(plan for plan in plans if plan.semantic_kind == "direct_answer"
+                                      or plan.semantic_kind in row["observed_action_kinds"])
                         trace, scope_material = {"source": "recorded_observed_state", "binding": observed}, None
                     else:
                         selection = await provider.retrieve(snap, row["question"], row["task_id"])
@@ -753,7 +849,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                     "reference_state": "same frozen original material/actual history; direct has zero new READ"}
                 binding = {**common_binding, "comparison_budget": comparison}
                 async def retrieve_gap(plan, request, claims):
-                    if request.retriever_identity != gap_retriever_identity(config):
+                    if request.retriever_identity != gap_retriever_identity(provider.manifest):
                         raise ValueError("GAP request is not bound to this actual retriever")
                     from controller.evidence_planner import _passages
                     cap = len(_passages(plan.selected_set.selected_units))+request.limits["max_passages"]
@@ -830,7 +926,14 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 "error": str(active_error) if active_error is not None else stop_reason,
                 "scope": "actual reader-bound counterfactual supervision collection",
                 "elapsed_ms": (time.monotonic()-started)*1000, "planned_tasks": cohort["planned_task_ids"],
+                "cohort": cohort,
                 "tasks_prepared": len(preparations), "actual_runs": len(all_runs), "actual_gain_pairs": len(all_pairs),
+                "actual_observations": len({row["observed_state_binding"]["observation_id"] for row in all_runs
+                                            if row["observed_state_binding"] is not None}),
+                "actual_action_task_ids": {kind: sorted({row["task_id"] for row in all_runs
+                    if row["semantic_kind"] == kind and row["new_action_counts"][action] == 1})
+                    for kind, action in (("read_once", "READ"), ("reduce_once", "REDUCE"),
+                                         ("gap_retrieval", "GAP_RETRIEVAL"))},
                 "run_statuses": dict(Counter(row["status"] for row in all_runs)),
                 "semantic_families": dict(Counter(row["semantic_kind"] for row in all_runs)),
                 "unavailable": unavailable, "generations": {"limit": budget.maximum, "actual_calls": len(budget.tickets),

@@ -99,7 +99,7 @@ class Controller:
                  cost_model: CostModel | None = None, events: EventLog | None = None,
                  shadow: bool = False, epoch_retirement: bool = True,
                  online_calibration: bool = False, extend_open_needs=None, prefix_settings=None,
-                 rolling_policy=None):
+                 rolling_policy=None, state_observer=None):
         self.store, self.engine = store, engine
         self.template = template or ByteTemplate()
         self.policy = policy or CandidatePolicy()
@@ -112,6 +112,7 @@ class Controller:
         self.online_calibration = online_calibration
         self.extend_open_needs = extend_open_needs
         self.rolling_policy = rolling_policy
+        self.state_observer = state_observer
         self.observe_prefix = None
         if prefix_settings is not None and prefix_settings["mode"] != "native":
             from .prefix_retention import PrefixReadObserver
@@ -136,6 +137,8 @@ class Controller:
         """Bind actual loaded retrieval models before enabling resource pricing."""
         if self.rolling_policy is not None:
             self.rolling_policy.bind_resident_models(manifest)
+        if self.state_observer is not None:
+            self.state_observer.bind_resident_models(manifest)
 
     async def _flush_retirements(self, session_id: str | None = None) -> int:
         acknowledged = 0
@@ -214,6 +217,8 @@ class Controller:
             try:
                 if self.rolling_policy is not None:
                     await self.rolling_policy.aclose()
+                if self.state_observer is not None:
+                    await self.state_observer.aclose()
             finally:
                 await self.engine.aclose()
 
@@ -332,6 +337,10 @@ class Controller:
         request_hash = hashlib.sha256(dumps(content).encode()).hexdigest()
         if self.rolling_policy is not None:
             await self.rolling_policy.start()
+        if self.state_observer is not None:
+            observation_startup = time.monotonic()
+            await self.state_observer.start()
+            observation_startup_ms = (time.monotonic()-observation_startup)*1000
         arrived = time.monotonic()
         async with self._lock(session_id):
             entered = time.monotonic()
@@ -527,9 +536,14 @@ class Controller:
                         if context_plan.plan_id == plan.candidate.context_plan_id)
                     if rolling_result is None:
                         reading_started = time.monotonic()
+                        async def observe_fixed_state(state, expanded):
+                            await self.state_observer.observe(attempt.attempt_id, executor, state, planning_snap,
+                                self.engine, self.cost_model, compile_candidates, arrived=arrived,
+                                auxiliary_usage=auxiliary_usage, expanded=expanded, startup_ms=observation_startup_ms)
                         executor = ReadingExecutor(self.store, self.engine, self.template,
                             extend_open_needs=open_need_provider or self.extend_open_needs, events=self.events,
-                            request_arrived=arrived, observe_prefix=self.observe_prefix)
+                            request_arrived=arrived, observe_prefix=self.observe_prefix,
+                            observe_state=observe_fixed_state if self.state_observer is not None else None)
                         try:
                             reading_outcome = await executor.execute_reads(attempt.attempt_id, planning_snap,
                                 selected_context_plan, initial_auxiliary_usage=auxiliary_usage)
