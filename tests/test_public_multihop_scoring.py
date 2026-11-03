@@ -30,7 +30,8 @@ def cohort(tmp_path):
 
 def test_official_denominator_includes_format_generation_and_absent_predictions(tmp_path, monkeypatch):
     source, task_path, generation, original = cohort(tmp_path)
-    exact = lambda answer, reference: float(answer == reference)
+    def exact(answer, reference):
+        return float(answer == reference)
     monkeypatch.setattr("runpy.run_path", lambda path: {
         "exact_match_score": exact, "f1_score": lambda answer, reference: (exact(answer, reference), 0, 0)})
     executions = []
