@@ -10,8 +10,7 @@ from pathlib import Path
 from .execution import auxiliary_tokens
 from .plan_policy import (CompleteCost, NativePlanningState, ResourceForecast, StepForecast,
                           native_selection_cost)
-from .reading import (READ_SYSTEM, COVERAGE_READ_SYSTEM, REDUCE_SYSTEM,
-                      SUMMARY_READ_SYSTEM, SUMMARY_REDUCE_SYSTEM, step_generation_kind)
+from .reading import SOURCE_SYSTEM, step_generation_kind, step_system
 from .schema import ConfigFingerprint
 from .serialization import decode
 
@@ -337,9 +336,6 @@ class ProfiledNativeObserver:
                     gpu, host, row["gpu_peak_gib"], row["host_peak_gib"],
                     row["profile_id"], quotes.observed_seq,
                     tuple(reusable.get(candidate.candidate_id, ())), True)
-        prompts = {"READ": READ_SYSTEM, "READ_COVERAGE": COVERAGE_READ_SYSTEM, "REDUCE": REDUCE_SYSTEM,
-            "READ_SUMMARY": SUMMARY_READ_SYSTEM, "REDUCE_SUMMARY": SUMMARY_REDUCE_SYSTEM,
-            "ANSWER": self.answer_system_prompt, "CPU_REDUCE": ""}
         future = {}
         for plan in plans:
             for step in plan.steps:
@@ -348,6 +344,9 @@ class ProfiledNativeObserver:
                        and task.operation in {"union", "count", "sum", "group"})
                 kind = "CPU_REDUCE" if cpu else step_generation_kind(task.kind, task.operation,
                                                                      plan.context_plan.reading_mode)
+                prompt = ("" if cpu else self.answer_system_prompt if task.kind == "ANSWER" else
+                    SOURCE_SYSTEM if task.kind == "READ" and plan.context_plan.read_layout == "source_first"
+                    else step_system(plan.context_plan, task))
                 outputs = (0,) if cpu else (task.output_budget,) if task.kind == "ANSWER" else tuple(
                     output for output in self.profiles.data["output_budgets"] if output <= task.output_budget)
                 choices = []
@@ -358,7 +357,7 @@ class ProfiledNativeObserver:
                     known_inputs = [len(candidate.input_ids) for candidate in step.variants if candidate.feasible]
                     input_ceiling = max(known_inputs) if known_inputs else task.input_budget
                     row = self.profiles.row(kind, "CPU" if cpu else "REBUILD",
-                        claims_ceiling if cpu else input_ceiling, output, concurrency, 0, 0, prompts[kind],
+                        claims_ceiling if cpu else input_ceiling, output, concurrency, 0, 0, prompt,
                         operation=task.operation if cpu else None,
                         start_definition="rolling_proposals_compilation_start" if task.kind == "ANSWER" else None)
                     if row is not None:
