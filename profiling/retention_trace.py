@@ -884,13 +884,15 @@ def choose_windows(trace, *, horizon_seconds, max_candidates, history_steps, max
     """Select bounded contiguous windows; never remove intervening pressure."""
     turns = sorted(trace["turns"], key=lambda turn: min(event["source_started_s"]
         for event in turn["events"] if event["kind"] != "CPU_REDUCE"))
-    read_events = [(index, turn, event) for index, turn in enumerate(turns)
-                   for event in turn["events"] if event["kind"] == "READ"]
+    read_events = sorted(((index, turn, event) for index, turn in enumerate(turns)
+                          for event in turn["events"] if event["kind"] == "READ"),
+                         key=lambda item: item[2]["source_completed_s"])
     candidates, omitted, known = [], [], defaultdict(dict)
     for index, turn, event in read_events:
         signature = digest(event["prefix_input_ids"])
         known[turn["session_id"]][signature] = (index, turn, event)
-        targets = sorted(known[turn["session_id"]].values(), key=lambda item: item[2]["source_started_s"], reverse=True)
+        targets = sorted(known[turn["session_id"]].values(),
+                         key=lambda item: item[2]["source_completed_s"], reverse=True)
         targets = targets[:max_prefixes_per_decision]
         first = index
         count = sum(len(item["events"]) for item in turns[first:index])

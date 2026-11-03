@@ -1,7 +1,7 @@
 {
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
-  "gpu_status": "P1 fixed-history A40 cells, B train observations, and remaining formal P3 cells running",
+  "gpu_status": "Set-only P1 utility training; P0 shared MultiDoc2Dial awaiting scoring and MTRAG started",
   "evidence_scope": "The 350-task development reference is scored. Candidate full-development quality and P95 acceptance remain open.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
@@ -112,6 +112,7 @@
     "aggregation": "Native/API/auxiliary token indexes and physical integrals are separate; do not sum overlapping ledgers."
   },
   "pending": [
+    "Validate corrected set-only P1 and freeze A only after acceptance",
     "Run matched full-development protocol/planner cells",
     "Run planner x protocol fixed-history cells and own-history P3",
     "Fit B from paired actual actions and complete native/value joint experiment",
@@ -262,6 +263,13 @@
       "status": "launched",
       "launch": "runs/study/budget-loop-20261103/formal-dev-c4-grounded/launch.json",
       "first_P0_long_protocol": "pre-selection wire5; excluded from final new-protocol P0 long result"
+    },
+    "reference_native_usage": {
+      "calls": 2487,
+      "tokens": 11941836,
+      "planned_not_submitted": 1,
+      "planned_not_submitted_model_tokens": 0,
+      "preparatory_physical_cost_retained": true
     }
   },
   "source_snapshots": {
@@ -341,7 +349,7 @@
   },
   "B_observation_entry": {
     "implementation": "capture actual fixed-plan decision states without loading a gain model",
-    "status": "train observations running",
+    "status": "115 completed old-P1 capture states retained as cost evidence; B pairing has not run",
     "cohort": "original full200/40 manifest; unique source states counted before observation/action selection",
     "cost_model": {
       "schema": "pre_action_native_absolute_v1",
@@ -351,7 +359,7 @@
       "actual_signed_differences": "diagnostic labels; not the new online cost head target",
       "status": "implemented, not yet fitted or evaluated"
     },
-    "automatic_driver_launch": "runs/study/budget-loop-20261103/b-workflow-dispatch/launch.json"
+    "eligible_for_new_P1_training": false
   },
   "P1_scoring": {
     "rubric": "necessary_points_grounding_conditions_versions_task_v2",
@@ -377,7 +385,7 @@
       "accepted_states": 181,
       "answers": 1065
     },
-    "utility_training_status": "completed",
+    "utility_training_status": "old P1 rejected after fixed-history evaluation",
     "utility_training": {
       "pairs": 1400,
       "states_with_preferences": 147,
@@ -388,6 +396,15 @@
       "full_stage_elapsed_seconds_approx": 4752.76,
       "head_optimizer_elapsed_ms": 32512,
       "cost_scope": "The 32512 ms elapsed_ms covers head optimization only."
+    },
+    "set_only_retraining": {
+      "status": "running; validation pending",
+      "asset": "models/study-support-fixed-qwen-set-only",
+      "pairs": 1400,
+      "states_with_preferences": 147,
+      "epochs": 3,
+      "feature_scope": "evidence_set_only; zero context features in training and inference",
+      "fixed_leak": "actual post-READ lengths previously entered utility training"
     }
   },
   "fixed_history_attribution": {
@@ -398,8 +415,7 @@
     "retrieval": "each P0/P1 planner executes its own query encoder and retrieval",
     "model": "fixed Qwen3-32B",
     "P0_status": "scored",
-    "P1_status": "task-first cell running; shared cell queued",
-    "B_dev_observations": "captured during P1_source_first_shared only",
+    "P1_status": "old P1 rejected; A remains unfrozen",
     "artifact": "runs/study/budget-loop-20261103/fixed-history-40",
     "judge_output_cap": 8192,
     "P0_task_first_isolated": {
@@ -412,13 +428,21 @@
     },
     "difference_percentage_points": 0.5,
     "acceptance_status": "diagnostic only; target not reached",
-    "four_cell_report_launch": "runs/study/budget-loop-20261103/fixed-history-40/four-cell-report-launch.json"
+    "four_cell_report_launch": "runs/study/budget-loop-20261103/fixed-history-40/four-cell-report-launch.json",
+    "old_P1_task_first_isolated": {
+      "answered": 36,
+      "RB_llm_full_denominator": 0.5175
+    },
+    "old_P1_source_first_shared": {
+      "answered": 35,
+      "RB_llm_full_denominator": 0.4325
+    }
   },
   "continuation": {
     "P1": "runs/study/budget-loop-20261103/p1-rewards/after-collection-stages.json",
     "full_protocol_queue": "runs/study/budget-loop-20261103/formal-dev-c4-grounded/launch.json",
     "B_train_capture": "runs/study/budget-loop-20261103/b-observations",
-    "status": "P1 utility trained. P1 A40, B train observations, and remaining formal P3 cells running. Full-queue +5 percentage-point improvement remains unestablished."
+    "status": "A remains unfrozen. Set-only utility validation remains pending. Per-Need long20 scored; P0 shared MultiDoc2Dial 205/209 answered, scoring pending; MTRAG started. B/C and full-queue quality/P95 acceptance remain open."
   },
   "failure_artifact_cleanup": {
     "redundant_bytes_removed": 1684181419,
@@ -458,10 +482,47 @@
       "final_answer_delivered": false
     },
     "P0_full_long20_c4": {
-      "status": "waiting for P1 A40 to release GPU4",
+      "status": "superseded by per-Need long20 run",
       "launch": "runs/study/budget-loop-20261103/numeric-selected-p3-c4/launch.json",
       "role": "replace the pre-selection P0 long component"
     },
     "scope": "numeric selection and CPU aggregation only; no final ANSWER generation"
+  },
+  "numeric_exact_long_reassessment": {
+    "protocol": "constructed_numeric_exact_v1",
+    "saved_answers_rescored": 21,
+    "extractor_input": "actual question and answer only",
+    "comparison": "exact integer count and Decimal total with credits and consistent result",
+    "pre_selection_formal_long": {
+      "declared": 20,
+      "answered": 16,
+      "correct": 7,
+      "full_denominator_quality": 0.35
+    },
+    "current_per_need_long20": {
+      "artifact": "runs/study/budget-loop-20261103/numeric-selected-p3-c4",
+      "generation_returncode": 0,
+      "scoring_returncode": 0,
+      "declared": 20,
+      "answered": 15,
+      "joint_exact_correct": 11,
+      "full_denominator_quality": 0.55,
+      "failure_counts": {
+        "read_output_truncated": 1,
+        "incompatible_unit": 3,
+        "conflicting_quantity": 1
+      },
+      "case_002_final_answer": {
+        "count": 35,
+        "total_credits": 595,
+        "correct": false
+      }
+    },
+    "case_002_per_need_selection": {
+      "total_credits": 630,
+      "parents": 35,
+      "correct": true,
+      "scope": "local replay of frozen earlier READs; no new final ANSWER"
+    }
   }
 }

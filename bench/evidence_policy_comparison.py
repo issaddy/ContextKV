@@ -170,9 +170,11 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
     identity["allocation"] = allocation_identity(actual)
     audited = actual["policy_comparison"].get("audited_history")
     export_answers = not audited or split != "train"
-    observation = actual["execution"].pop("state_observation", None)
-    if not audited or (policy, protocol) != ("P1", "source_first_shared"):
-        observation = None
+    observation = dict(actual["execution"].pop("state_observation", None) or {})
+    if observation:
+        observed_cell = observation.pop("cell")
+        if not audited or observed_cell != cell_method(policy, protocol)["id"]:
+            observation = None
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     (directory/"records").mkdir(exist_ok=True)

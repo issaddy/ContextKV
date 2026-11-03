@@ -83,8 +83,8 @@ def paid_execution_index(rows, roots, destination):
     """Include steps of failed and interrupted attempts, even without a result row."""
     from profiling.native_usage_index import index
 
-    directories = {Path(row["generation_dir"]) for row in rows if row.get("generation_dir")}
-    directories.update(path.parent.parent for root in roots
+    directories = {Path(row["generation_dir"]).resolve() for row in rows if row.get("generation_dir")}
+    directories.update(path.parent.parent.resolve() for root in roots
         for path in Path(root).glob("**/state/sessions.sqlite3"))
     databases = sorted(str(path/"state/sessions.sqlite3") for path in directories)
     native = index(databases)
