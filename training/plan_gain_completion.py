@@ -15,8 +15,8 @@ from pathlib import Path
 import time
 
 from controller.context_schema import ReadingOutcome
-from controller.plan_policy import PlanCandidate, plan_features
-from controller.schema import SessionSnapshot
+from controller.plan_policy import NATIVE_COST_SCHEMA, PlanCandidate, plan_cost_features, plan_features
+from controller.schema import CacheQuoteBatch, SessionSnapshot
 from controller.serialization import decode
 from training.train_plan_gain import (COST_FIELDS, PlanGainModel, _fit_features, _ridge,
     actual_history, fit_cost_heads, working_state_key)
@@ -145,6 +145,13 @@ def completion_record(before, run):
                 for span in units[identity].source_spans:
                     covered.setdefault(str(span.source_key), []).append((span.start, span.end))
     required_chars, covered_chars = _size(required), _size(covered)
+    cost_features = None
+    if observed is not None and (native := run.get("pre_action_quote")) is not None:
+        batch = decode(CacheQuoteBatch, native["batch"])
+        first = (None if native["candidate_id"] is None else
+                 next(quote for quote in batch.quotes if quote.candidate_id == native["candidate_id"]))
+        cost_features = plan_cost_features(plan_features(planned, state,
+            output_budgets=run["executed_output_budgets"]), batch, first)
     return {"schema_version": 2, "source": "actual_plan_completion", "record_id": digest([
             key, run["plan_id"], run["actual_native_calls"], run["qa_increment"]]),
         "state_key": key, "task_id": run["task_id"], "conversation_id": run["conversation_id"],
@@ -159,7 +166,7 @@ def completion_record(before, run):
         "effective_utility": utility, "effective_final_coverage": effective_coverage,
         "utility_rule": RULE, "read_source_char_fraction": covered_chars/required_chars if required_chars else None,
         "read_original_characters": covered_chars, "required_original_characters": required_chars,
-        "features": plan_features(planned, state),
+        "features": plan_features(planned, state), "cost_features": cost_features,
         "pre_registration": before, "actual_run": run}
 
 
@@ -280,6 +287,8 @@ def fit_effective(training, *, ridge=1.0, path=None):
     binding = {(row["reader_checkpoint"], row["reader_profile_id"], digest(row["scorer_identity"])) for row in training}
     if len(binding) != 1:
         raise ValueError("effective gain asset binds one actual reader/profile/scorer")
+    samples, direct_seen, cost_kinds, cache_scopes = [], set(), set(), set()
+    cost_record_ids = []
     for row in training:
         branches = {name: completion_record(row[name]["pre_registration"], row[name]["actual_run"])
                     for name in ("direct", "counterfactual")}
@@ -291,39 +300,45 @@ def fit_effective(training, *, ridge=1.0, path=None):
             raise ValueError("effective target/features differ from the actual fixed-state branch evidence")
         if expected.get("cost_targets") != row.get("cost_targets"):
             raise ValueError("effective cost labels differ from the paired actual paid branch costs")
-    started = time.perf_counter()
-    names = _fit_features(training)
-    samples, direct_seen, cost_kinds = [], set(), set()
-    cost_record_ids = []
-    for row in training:
         if row["observed_state_binding"] is None:
             continue
         costs = row["cost_targets"]
-        if all(value is not None for target in ("branch_complete_cost", "incremental_complete_cost")
-               for value in costs[target].values()):
-            samples.append((row["features"], costs["branch_complete_cost"], costs["incremental_complete_cost"]))
-            cost_kinds.add(row["semantic_kind"])
-            cost_record_ids.append(row["record_id"])
-        key = digest([row["state_key"], row["conversation_id"], row["direct"]["actual_run"]["actual_native_calls"]])
-        if key not in direct_seen and all(value is not None for value in costs["direct_complete_cost"].values()):
-            direct_seen.add(key)
-            samples.append((row["direct_features"], costs["direct_complete_cost"], {name: 0.0 for name in COST_FIELDS}))
-    normalization = [row["features"] for row in training]+[sample[0] for sample in samples if sample[0]["direct_answer"] > .5]
-    all_x = np.asarray([[features[name] for name in names] for features in normalization], dtype=np.float64)
+        for side, target in (("direct", "direct_complete_cost"), ("counterfactual", "branch_complete_cost")):
+            branch = branches[side]
+            if branch["cost_features"] is None or any(value is None for value in costs[target].values()):
+                continue
+            if side == "direct":
+                if branch["record_id"] in direct_seen:
+                    continue
+                direct_seen.add(branch["record_id"])
+            samples.append((branch["cost_features"], costs[target]))
+            cost_kinds.add(branch["semantic_kind"])
+            cost_record_ids.append(branch["record_id"])
+            cache_scopes.add(branch["actual_run"]["counterfactual_cache_start"])
+    started = time.perf_counter()
+    names = _fit_features(training)
     x = np.asarray([[row["features"][name] for name in names] for row in training], dtype=np.float64)
     y = np.asarray([row["effective_delta_q"] for row in training], dtype=np.float64)
-    center, scale = all_x.mean(axis=0), all_x.std(axis=0)
+    center, scale = x.mean(axis=0), x.std(axis=0)
     scale[scale == 0] = 1.0
     coefficients, intercept = _ridge((x-center)/scale, y, ridge)
-    cost_models, cost_mse = fit_cost_heads(samples, names, center, scale, ridge=ridge)
-    cost_provenance = ({"source": "actual_observed_terminal_branch_and_paired_direct_costs",
-        "training_samples": len(samples), "action_samples": len(samples)-len(direct_seen),
-        "unique_direct_samples": len(direct_seen), "record_ids": cost_record_ids,
-        "trained_semantic_kinds": sorted({"direct_answer", *cost_kinds}), "cost_fields": COST_FIELDS,
-        "branch_scope": "actual new action through committed ANSWER or confirmed terminal no-QA failure; excludes common paid state/preparation/cleanup",
-        "incremental_scope": "signed_actual_action_branch_minus_direct_branch",
-        "unknown_cost_policy": "retained null; no unknown dimension is used as a measured sample",
-        "training_mse": cost_mse} if cost_models else {})
+    cost_models, cost_provenance = {}, {}
+    if samples:
+        cost_names = tuple(samples[0][0])
+        cost_x = np.asarray([[features[name] for name in cost_names] for features, _ in samples], dtype=np.float64)
+        cost_center, cost_scale = cost_x.mean(axis=0), cost_x.std(axis=0)
+        cost_scale[cost_scale == 0] = 1.0
+        cost_models, cost_mse = fit_cost_heads(samples, cost_names, cost_center, cost_scale,
+            ridge=ridge, targets=("branch_complete_cost",))
+        cost_provenance = {"source": "actual_observed_terminal_branch_and_paired_direct_costs",
+            "feature_schema": NATIVE_COST_SCHEMA, "feature_names": cost_names,
+            "center": cost_center.tolist(), "scale": cost_scale.tolist(),
+            "training_cache_starts": sorted(cache_scopes), "training_samples": len(samples),
+            "action_samples": len(samples)-len(direct_seen), "unique_direct_samples": len(direct_seen),
+            "record_ids": cost_record_ids, "trained_semantic_kinds": sorted(cost_kinds), "cost_fields": COST_FIELDS,
+            "branch_scope": "actual new action through committed ANSWER or confirmed terminal no-QA failure; excludes common paid state/preparation/cleanup",
+            "incremental_scope": "same_observation_predicted_action_absolute_minus_direct_absolute",
+            "training_mse": cost_mse}
     return PlanGainModel(training[0]["reader_checkpoint"], training[0]["reader_profile_id"],
         "effective-plan-gain:"+digest(training), names, tuple(center.tolist()), tuple(scale.tolist()),
         tuple(coefficients.tolist()), float(intercept),

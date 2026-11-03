@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from .plan_policy import (CompleteCost, Decision, NextStep, NoCompletePlan, PlanEvaluation,
-                          _completed_steps, plan_features)
+from .plan_policy import (NATIVE_COST_SCHEMA, CompleteCost, Decision, NextStep, NoCompletePlan, PlanEvaluation,
+                          _completed_steps, plan_cost_features, plan_features)
 from .reading import step_generation_kind
 from .evidence_planner import _passages
 
@@ -23,6 +23,8 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes):
     if (native.reader_checkpoint, native.reader_profile_id) != (model.reader_checkpoint, model.reader_profile_id):
         raise ValueError("observed action asset belongs to a different reader checkpoint/profile")
     quotes = {quote.candidate_id: quote for quote in native.quotes.quotes}
+    native_cost = model.cost_provenance.get("feature_schema") == NATIVE_COST_SCHEMA
+    direct_prediction = None
     evaluations, decisions = [], []
     policy.last_option_diagnostics = {}
     for plan in plans:
@@ -102,19 +104,26 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes):
                 reason = "cumulative_step_budget"
             reason = reason or policy._constraint(native.paid_cost+current, state.plan.budget)
             features = plan_features(plan, state, output_budgets={task.step_id: output})
-            predicted = model.predict_costs(features)
+            cost_features = (plan_cost_features(features, native.quotes, quote if candidate is not None else None)
+                             if native_cost else features)
+            predicted = model.predict_costs(cost_features)
+            if native_cost and plan.semantic_kind == "direct_answer":
+                direct_prediction = predicted["branch_complete_cost"]
             branch = regression_cost(predicted["branch_complete_cost"])
             branch = replace(branch, gpu_peak_gib=max(cost.gpu_peak_gib for cost in peaks),
                              host_peak_gib=max(cost.host_peak_gib for cost in peaks))
             cumulative = native.paid_cost+branch
             reason = reason or policy._constraint(cumulative, state.plan.budget)
             gain = 0.0 if plan.semantic_kind == "direct_answer" else model.predict(features)
-            delta = regression_cost(predicted["incremental_complete_cost"])
-            objective = gain-policy._penalty(delta, state.plan.budget)
+            # All native costs share the same DIRECT offset, applied once below.
+            cost = branch if native_cost else regression_cost(predicted["incremental_complete_cost"])
+            objective = gain-policy._penalty(cost, state.plan.budget)
             key = candidate.candidate_id if candidate is not None else task.step_id
             policy.last_option_diagnostics[key] = {"plan_id": plan.plan_id, "features": features,
+                "cost_features": cost_features,
                 "cost_source": "observed_action_paired_run_regression", "predicted_costs": predicted,
-                "native_quote_role": "actual_known_input_admission_and_audit", "reason": reason or "eligible"}
+                "native_quote_role": "pre_action_cost_features" if native_cost else "actual_known_input_admission_and_audit",
+                "reason": reason or "eligible"}
             evaluation = PlanEvaluation(plan.plan_id, gain, objective, cumulative, reason is None,
                 reason or "reader_bound_observed_action_regression", ((task.step_id,
                     "GAP" if task.kind == "GAP" else "CPU" if cpu else candidate.action, output),),
@@ -125,6 +134,18 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes):
                 prefixes = () if candidate is None else tuple(reusable_prefixes.get(candidate.candidate_id, ()))
                 decisions.append((evaluation, Decision(NextStep(plan.plan_id, replace(task, output_budget=output),
                     candidate, prefixes), action, output)))
+    if native_cost:
+        if direct_prediction is None:
+            policy.last_evaluations = tuple(evaluations)
+            raise NoCompletePlan("native action deltas require a DIRECT quote in the same observation")
+        offset = policy._penalty(regression_cost(direct_prediction), state.plan.budget)
+        evaluations = [replace(row, objective=row.objective+offset) if row.objective is not None else row
+                       for row in evaluations]
+        decisions = [(replace(row, objective=row.objective+offset), decision) for row, decision in decisions]
+        for diagnostic in policy.last_option_diagnostics.values():
+            predicted = diagnostic["predicted_costs"]
+            predicted["incremental_complete_cost"] = {
+                name: value-direct_prediction[name] for name, value in predicted["branch_complete_cost"].items()}
     policy.last_evaluations = tuple(evaluations)
     if not decisions:
         raise NoCompletePlan("no observed action satisfies its measured training scope and cumulative budgets")

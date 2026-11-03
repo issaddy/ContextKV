@@ -187,6 +187,7 @@ class FixedCounterfactualRuntime:
         self.initial_snapshot = initial_snapshot
         self.gap_request, self.gap_provider = gap_request, gap_provider
         self.gap_result = None
+        self.pre_action_quote = None
         self.new_auxiliary_usage = dict(ZERO_AUX)
         self.new_step_ids = ()
         self.new_action_counts = {"READ": 0, "REDUCE": 0, "GAP_RETRIEVAL": 0, "ANSWER": 0}
@@ -234,6 +235,7 @@ class FixedCounterfactualRuntime:
         if self.planned.semantic_kind == "gap_retrieval":
             from controller.evidence_planner import _passages, close_dependencies
             from controller.execution import auxiliary_tokens, merge_auxiliary_usage
+            self.pre_action_quote = {"batch": await engine.quote_batch((), template.fingerprint), "candidate_id": None}
             tick = time.monotonic()
             self.new_action_counts["GAP_RETRIEVAL"] = 1
             pool = await self.gap_provider(plan, self.gap_request, state.claims)
@@ -286,6 +288,10 @@ class FixedCounterfactualRuntime:
                 from controller.execution import ReadingBudgetExceeded
                 raise ReadingBudgetExceeded("actual generated facts exceed the pre-registered execution window")
             quote = None if cpu else await engine.quote_batch(variants, template.fingerprint)
+            if observed:
+                self.pre_action_quote = {
+                    "batch": await engine.quote_batch((), template.fingerprint) if cpu else quote,
+                    "candidate_id": None if cpu else variants[0].candidate_id}
             record = {"step_id": task.step_id, "fact_binding": task.input_claim_ids,
                 "actual_quote": to_jsonable(quote), "selection": "predeclared_experimental_branch",
                 "gain_prediction": None, "calibration_claim": None}
@@ -315,6 +321,8 @@ class FixedCounterfactualRuntime:
             raise ValueError("predeclared terminal action/layout has no unique feasible actual input")
         candidate = matching[0]
         quotes = await engine.quote_batch((candidate,), template.fingerprint)
+        if observed and self.planned.semantic_kind == "direct_answer":
+            self.pre_action_quote = {"batch": quotes, "candidate_id": candidate.candidate_id}
         events.emit("plan_gain_experimental_answer", attempt_id=attempt_id,
             planned_plan_id=self.planned.plan_id, actual_input_hash=candidate.input_hash,
             actual_quote=quotes, selection="predeclared_experimental_branch", gain_prediction=None)

@@ -263,6 +263,24 @@ def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=
     return {name: float(values[name]) for name in FEATURE_NAMES}
 
 
+NATIVE_COST_SCHEMA = "pre_action_native_absolute_v1"
+
+
+def plan_cost_features(features, batch, first_quote):
+    """Add only the native state visible before the first action."""
+    return {**features,
+        "free_gpu_tokens": batch.free_gpu_tokens,
+        "free_host_tokens": batch.free_host_tokens,
+        "gpu_occupied_fraction": 1-batch.free_gpu_tokens/batch.gpu_capacity_tokens,
+        "evictable_gpu_tokens": batch.evictable_gpu_tokens,
+        "active_requests": batch.active_requests,
+        "queued_requests": batch.queued_requests,
+        "has_first_quote": float(first_quote is not None),
+        "first_input_tokens": first_quote.input_len if first_quote is not None else 0,
+        "first_ready_gpu_tokens": first_quote.ready_gpu_prefix_tokens if first_quote is not None else 0,
+        "first_host_load_tokens": first_quote.host_only_load_tokens if first_quote is not None else 0}
+
+
 def complete_plan(context_plan, answer_variants, *, semantic_kind, reader_checkpoint,
                   step_variants=None, unmet_answer_points=()):
     """Adapt A's existing complete ContextPlan/DAG; append its terminal ANSWER."""

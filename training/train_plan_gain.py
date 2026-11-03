@@ -14,7 +14,7 @@ import math
 from pathlib import Path
 import time
 
-from controller.plan_policy import (FEATURE_NAMES, LEGACY_FEATURE_NAMES, LEGACY_PLAN_KINDS,
+from controller.plan_policy import (FEATURE_NAMES, LEGACY_FEATURE_NAMES, LEGACY_PLAN_KINDS, NATIVE_COST_SCHEMA,
                                      PLAN_KINDS, PlanCandidate, complete_plan, plan_features)
 from controller.context_schema import ReadingOutcome
 from controller.schema import SessionSnapshot
@@ -184,10 +184,17 @@ class PlanGainModel:
         return min(1.0, max(-1.0, value))
 
     def predict_costs(self, features):
-        """Return future branch costs and signed differences in the recorded COST_FIELDS units."""
+        """Predict the cost targets declared by this asset."""
         if not self.cost_models:
             raise ValueError("asset has no measured observed-action complete-cost heads")
         self._check_action(features, costs=True)
+        if self.cost_provenance.get("feature_schema") == NATIVE_COST_SCHEMA:
+            names = self.cost_provenance["feature_names"]
+            center, scale = self.cost_provenance["center"], self.cost_provenance["scale"]
+            return {"branch_complete_cost": {name: max(0.0, head["intercept"]+sum(
+                coefficient*(features[key]-mean)/deviation for key, mean, deviation, coefficient in
+                zip(names, center, scale, head["coefficients"], strict=True)))
+                for name, head in self.cost_models["branch_complete_cost"].items()}}
         result = {}
         for target in COST_TARGETS:
             result[target] = {}
@@ -202,7 +209,9 @@ class PlanGainModel:
     def save(self, path):
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps({"schema_version": 2, "model_type": "reader_bound_plan_gain_cost_ridge",
+        native = self.cost_provenance.get("feature_schema") == NATIVE_COST_SCHEMA
+        target.write_text(json.dumps({"schema_version": 3 if native else 2,
+            "model_type": "reader_bound_plan_gain_cost_ridge",
             **asdict(self)}, ensure_ascii=False, indent=2)+"\n")
 
     @classmethod
@@ -210,8 +219,11 @@ class PlanGainModel:
         data = json.loads(Path(path).read_text())
         schema, kind = data.pop("schema_version"), data.pop("model_type")
         if (schema, kind) not in {(1, "reader_bound_plan_gain_ridge"),
-                                  (2, "reader_bound_plan_gain_cost_ridge")}:
+                                  (2, "reader_bound_plan_gain_cost_ridge"),
+                                  (3, "reader_bound_plan_gain_cost_ridge")}:
             raise ValueError("unsupported plan gain asset schema")
+        if schema == 3 and data["cost_provenance"]["feature_schema"] != NATIVE_COST_SCHEMA:
+            raise ValueError("unsupported native cost feature schema")
         if data["reader_checkpoint"] != reader_checkpoint or data["reader_profile_id"] != reader_profile_id:
             raise ValueError("gain asset requires its measured reader checkpoint and runtime profile")
         if (len(set(data["feature_names"])) != len(data["feature_names"])
@@ -299,22 +311,22 @@ def _ridge(z, y, ridge):
 
 
 
-def fit_cost_heads(samples, feature_names, center, scale, *, ridge=1.0):
-    """Fit the existing two complete-cost targets from fully observed samples."""
+def fit_cost_heads(samples, feature_names, center, scale, *, ridge=1.0, targets=COST_TARGETS):
+    """Fit complete-cost targets from fully observed samples."""
     import numpy as np
     if not samples:
         return {}, {}
     cost_x = np.asarray([[sample[0][name] for name in feature_names] for sample in samples], dtype=np.float64)
-    cost_y = np.asarray([[sample[index][name] for index in (1, 2) for name in COST_FIELDS]
+    cost_y = np.asarray([[sample[index][name] for index in range(1, 1+len(targets)) for name in COST_FIELDS]
                          for sample in samples], dtype=np.float64)
     cost_z = (cost_x-center)/scale
     weights, bias = _ridge(cost_z, cost_y, ridge)
     errors = np.mean((cost_z@weights+bias-cost_y)**2, axis=0)
     models = {target: {name: {"coefficients": weights[:, index*len(COST_FIELDS)+column].tolist(),
         "intercept": float(bias[index*len(COST_FIELDS)+column])} for column, name in enumerate(COST_FIELDS)}
-        for index, target in enumerate(COST_TARGETS)}
+        for index, target in enumerate(targets)}
     mse = {target: {name: float(errors[index*len(COST_FIELDS)+column]) for column, name in enumerate(COST_FIELDS)}
-           for index, target in enumerate(COST_TARGETS)}
+           for index, target in enumerate(targets)}
     return models, mse
 
 def fit_gain(rows, *, ridge=1.0, input_path=None):

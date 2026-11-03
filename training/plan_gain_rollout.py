@@ -523,6 +523,7 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
             "steps": to_jsonable(steps), "attempt": to_jsonable(attempt), "cost": full_cost,
             "actual_branch_execution_cost": execution, "executed_output_budgets": actual_budgets,
             "paid_cost": prior, "cleanup_cost": cleanup_cost, "observed_state_binding": observed,
+            "pre_action_quote": to_jsonable(runtime.pre_action_quote),
             "new_step_ids": tuple(step.step_id for step in steps), "new_action_counts": action_counts,
             "gap_result": to_jsonable(runtime.gap_result),
             "qa_increment": len(after.raw_history)-len(before.raw_history), "cleanup": cleanup,
