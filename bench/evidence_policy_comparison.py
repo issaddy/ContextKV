@@ -152,7 +152,8 @@ def frozen_reference(source, actual):
     return reference
 
 
-async def frozen_cell(config, matrix, dataset, split, records, directory, *, policy, protocol):
+async def frozen_cell(config, matrix, dataset, split, records, directory, *, policy, protocol,
+                      expected_task_ids=None):
     from adapters.study_retrieval import create_study_retriever
     from bench.native_metrics import NativePoolSampler, pool_series
     from bench.metrics import occupancy_integral
@@ -164,19 +165,23 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
     spec = matrix["datasets"][dataset]
     actual = method_config(actual, cell_method(policy, protocol), spec, split)
     identity["allocation"] = allocation_identity(actual)
-    observation = actual["execution"].get("state_observation")
+    audited = actual["policy_comparison"].get("audited_history")
+    export_answers = not audited or split != "train"
+    observation = actual["execution"].pop("state_observation", None)
+    if not audited or (policy, protocol) != ("P1", "source_first_shared"):
+        observation = None
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     (directory/"records").mkdir(exist_ok=True)
     devices = sorted(set((*actual["policy_comparison"]["frozen_shared_gpu_devices"], *reader_spec["gpu_devices"])))
     ports = [urlparse(reader_spec["base_url"]).port]
-    if observation and actual["task_model"]["mode"] == "teacher":
+    if audited and actual["task_model"]["mode"] == "teacher":
         ports.append(urlparse(actual["generation"]["teacher_url"]).port)
     process_ids = sorted(set((*listening_processes(ports), *matrix["resources"].get("process_ids", ()))))
     if observation:
-        execution = {key: value for key, value in actual["execution"].items() if key != "state_observation"}
-        write_json(directory/"frozen_a_study_config.json", {**actual, "execution": execution})
+        write_json(directory/"frozen_a_study_config.json", actual)
         actual["execution"]["state_observation"] = {**observation,
+            "cohort_manifest": audited["cohort_manifest"], "cohort_split": audited["cohort_split"],
             "observation_path": str(directory/"observations.jsonl"),
             "reader_checkpoint": identity["fixed_reader"]["checkpoint"],
             "reader_profile_id": reader_spec["profile_id"], "gpu_devices": devices, "process_ids": process_ids}
@@ -194,7 +199,7 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
     from adapters.history_state import HistoryIndex
     from adapters.hybrid_retrieval import LocalBGE
     from training.plan_gain_protocol import AuditedTaskInterpreter
-    if observation:
+    if audited:
         from training.plan_gain_rollout import create_audited_provider
         provider, interpreter = await asyncio.to_thread(create_audited_provider, actual, service.template)
     else:
@@ -214,7 +219,7 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
     native = NativePoolSampler(run.engine.base_url, gpu_capacity=allocator["pool"]["gpu_capacity_tokens"],
         host_enabled=allocator["pool"]["host_capacity_tokens"] > 0, model=run.model.name)
     await native.start()
-    sources = {row["task_id"]: row for row in (records if observation else dataset_rows(spec, split,
+    sources = {row["task_id"]: row for row in (records if not export_answers else dataset_rows(spec, split,
         task_ids=matrix.get("cohorts", {}).get(split, {}).get(dataset)))}
     results = {row["task_id"]: row for path in (directory/"records").glob("*.json") for row in [json.loads(path.read_text())]}
     windows = {}
@@ -228,9 +233,9 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
             history = decode(tuple[TurnRecord, ...], frozen["actual_history"])
             before = service.store.read_snapshot(session, provider.corpus_snapshot_id)
             before = service.store.sync_history(session, history, before.version)
-            if observation:
+            if audited:
                 task_state = decode(TaskState, frozen["task_state"])
-                frozen_origin = {"task_origin": "audited_full_cohort", "pool_origin": "live_P1_retrieval"}
+                frozen_origin = {"task_origin": "audited_full_cohort", "pool_origin": "live_cell_retrieval"}
                 frozen_pool_hash = None
             else:
                 original, frozen_pool, frozen_origin = frozen_inputs(frozen)
@@ -293,13 +298,13 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
                 "cost": {"complete_ms": (window[1]-window[0])*1000 if window is not None else None,
                     "total_input_tokens": response.total_input_tokens if response else None,
                     "total_output_tokens": response.total_output_tokens if response else None}, "metrics": {}}
-            if observation:
+            if audited:
                 value.update(cohort_split=frozen["cohort_split"], cohort_manifest_sha256=frozen["cohort_manifest_sha256"])
             if window is not None:
                 windows[task_id] = window
             results[task_id] = value
             write_json(directory/"records"/f"{index:06}.json", value)
-            if response and not observation:
+            if response and export_answers:
                 blocks = {block.key: block for block in committed.archive}
                 selected = [blocks[key] for key in sorted(attempt.plan.candidate.required_blocks)]
                 online = OnlineTurn(frozen["conversation_id"], task_id, frozen["turn"], source["Collection"], query,
@@ -336,11 +341,13 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
         write_rows(directory/"failed_cases.jsonl", [row for row in ordered if row["status"] == "failed"])
         write_rows(directory/"references.jsonl", [row["reference"] for row in ordered])
         write_json(directory/"generation_manifest.json", {"policy_identity": identity, "config": actual,
-            "expected_tasks": [row["task_id"] for row in records], "completed": sum(row["status"] == "completed" for row in ordered),
+            "expected_tasks": expected_task_ids if expected_task_ids is not None else [row["task_id"] for row in records],
+            "scheduled_task_ids": [row["task_id"] for row in records],
+            "completed": sum(row["status"] == "completed" for row in ordered),
             "failed": sum(row["status"] == "failed" for row in ordered),
-            "history_protocol": "audited actual QA" if observation else "same frozen actual QA for all four cells",
+            "history_protocol": "fixed_actual_history_live_retrieval" if audited else "same frozen actual QA for all four cells",
             "engine": info, "provider": provider.manifest, "reference_used_online": False,
-            "retrieval_protocol": "live_P1" if observation else "frozen_pool"})
+            "retrieval_protocol": "live_cell_retrieval" if audited else "frozen_pool"})
     return ordered
 
 
@@ -350,6 +357,7 @@ async def own_p3_cell(config, matrix, dataset, split, output, *, policy, protoco
     spec = matrix["datasets"][dataset]
     actual = method_config(actual, cell_method(policy, protocol), spec, split)
     actual["execution"]["cache_start"] = "cold"
+    actual["execution"].pop("state_observation", None)
     identity["allocation"] = allocation_identity(actual)
     concurrency = config["policy_comparison"]["concurrency"]
     identity["concurrency"] = concurrency
@@ -433,16 +441,18 @@ def persist_p3_failure(directory, conversation, error, *, teacher_ledger=None, s
 
 async def compare(config, matrix, *, dataset, split, output, phase, frozen_records=None,
                   goal_policy=None, limit_states=None, limit_conversations=None, cells=None):
-    observation = config["execution"].get("state_observation")
+    audited = config["policy_comparison"].get("audited_history") if phase in {"frozen", "both"} else None
     records = rows(frozen_records) if phase in {"frozen", "both"} else []
-    if observation:
-        if phase != "frozen" or set(cells or ()) != {"P1_source_first_shared"} or split != observation["cohort_split"]:
-            raise ValueError("capture requires frozen P1_source_first_shared and the declared cohort split")
+    expected_task_ids = None
+    if audited:
+        if split != audited["cohort_split"]:
+            raise ValueError("audited history must use its declared cohort split")
         from training.plan_gain_rollout import audited_cohort, verify_actual_history
         records, cohort = audited_cohort(records, rows(Path(config["training"]["data_dir"])/"sources.jsonl"),
-            split=split, limit=len(records), cohort_manifest=observation["cohort_manifest"])
-        verify_actual_history(records, rows(observation["actual_rollouts"]))
-        requested = cohort["declared_task_ids"][:limit_states]
+            split=split, limit=len(records), cohort_manifest=audited["cohort_manifest"])
+        verify_actual_history(records, rows(audited["actual_rollouts"]))
+        expected_task_ids = cohort["declared_task_ids"]
+        requested = expected_task_ids[:limit_states]
         by_task = {row["task_id"]: row for row in records}
         records = [by_task[task_id] for task_id in requested if task_id in by_task]
         write_json(Path(output)/"capture_cohort.json", {**cohort, "requested_task_ids": requested,
@@ -450,7 +460,7 @@ async def compare(config, matrix, *, dataset, split, output, phase, frozen_recor
             "missing_task_ids": [task_id for task_id in requested if task_id not in by_task]})
     else:
         records = records[:limit_states]
-    if not observation and any(row["status"] != "completed" for row in records):
+    if not audited and any(row["status"] != "completed" for row in records):
         raise ValueError("frozen comparison states must come from completed actual QA records")
     result = []
     for policy in ("P0", "P1"):
@@ -460,14 +470,16 @@ async def compare(config, matrix, *, dataset, split, output, phase, frozen_recor
                 continue
             if phase in {"frozen", "both"}:
                 selected = await frozen_cell(config, matrix, dataset, split, records, Path(output)/"frozen"/cell,
-                                             policy=policy, protocol=protocol)
+                                             policy=policy, protocol=protocol, expected_task_ids=expected_task_ids)
                 result.append({"cell": cell, "phase": "frozen", "observed_records": len(selected)})
             if phase in {"p3", "both"}:
                 selected = await own_p3_cell(config, matrix, dataset, split, Path(output)/"p3"/cell,
                     policy=policy, protocol=protocol, goal_policy=goal_policy, limit_conversations=limit_conversations)
                 result.append({"cell": cell, "phase": "p3", "observed_records": len(selected)})
     write_json(Path(output)/"comparison_manifest.json", {"cells": result, "quality": "unscored; score saved actual outputs separately",
-        "purpose": "B_observation_capture" if observation else "A_factorial_comparison",
+        "purpose": "B_observation_capture" if audited and split == "train" else "A_factorial_comparison",
+        "frozen_protocol": "fixed_actual_history_live_retrieval" if audited else "frozen_pool",
+        "declared_frozen_states": len(expected_task_ids) if audited else len(records),
         "comparison_axes": {"evidence_planner": ["P0", "P1"], "read_protocol": list(READING_PROTOCOLS)},
         "declared_cohorts": matrix.get("cohorts", {}).get(split, {}),
         "paired_contrasts_baseline_candidate": CELL_CONTRASTS,
