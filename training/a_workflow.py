@@ -11,7 +11,10 @@ import time
 import yaml
 
 from bench.study import merge_config
-from training.reader_data import file_digest
+from training.reader_data import audit_reader_targets, file_digest
+from training.reader_curriculum import prepare_stage_cohorts
+from training.task_data import prepare_cohort_task_labels
+from training.reader_stage_workflow import prepare_reader_stage, prepare_reader_phases
 from training.train_evidence_policy import cohort_directory, require_policy_reader_binding, reader_binding
 
 
@@ -97,10 +100,11 @@ def comparison_workflow(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("data", "compare"))
+    parser.add_argument("command", choices=("data", "compare", "audit", "cohort", "prepare-labels", "reader-stage", "reader-prepare"))
     parser.add_argument("--policy-asset", default="models/study-support-r1-prototype22")
     parser.add_argument("--policy-config", default="configs/evidence_policy_r1.yaml")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--config", help="reader audit, cohort or task_cohort_labeling configuration")
     parser.add_argument("--conversations", type=int, default=2)
     parser.add_argument("--review-concurrency", type=int, default=8)
     parser.add_argument("--comparison-config", default="configs/evidence_policy_comparison.yaml")
@@ -114,7 +118,24 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == "compare" and args.matrix is None:
         parser.error("compare requires --matrix")
-    if args.command == "data":
+    if args.command in {"audit", "cohort", "prepare-labels", "reader-stage", "reader-prepare"}:
+        if args.config is None:
+            parser.error("audit/cohort/prepare-labels requires --config")
+        config = yaml.safe_load(Path(args.config).read_text())
+        if args.command == "audit":
+            config["reader_training"]["data"]["output_dir"] = args.output
+            result = audit_reader_targets(config)
+        elif args.command in {"reader-stage", "reader-prepare"}:
+            config["reader_stage"]["output_dir"] = args.output
+            result = prepare_reader_stage(config) if args.command == "reader-stage" else prepare_reader_phases(config)
+        elif args.command == "prepare-labels":
+            config["task_cohort_labeling"]["output_dir"] = args.output
+            result = prepare_cohort_task_labels(config)
+        else:
+            config["reader_stage_cohort"]["output_dir"] = args.output
+            result = prepare_stage_cohorts(config)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif args.command == "data":
         data_workflow(args)
     else:
         comparison_workflow(args)
