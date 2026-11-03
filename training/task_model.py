@@ -89,6 +89,11 @@ def task_targets(encoded, prediction):
         pointer = condition_ids.index(condition.target_refs[0])+1 if condition.target_refs else 0
         values = {"update": UPDATES.index(condition.update),
                   "condition_relation": CONDITION_RELATIONS.index(condition.relation_type), "pointer": pointer}
+        if condition.update == "REMOVE":
+            anchors = ((condition.predicate_span,) if condition.predicate_span is not None else
+                       (condition.key_span,) if condition.key_span is not None else condition.value_spans)
+            assign(anchors, "CONDITION_KEY", values)
+            continue
         if condition.key_span is not None:
             assign((condition.key_span,), "CONDITION_KEY", values)
         assign(condition.value_spans, "CONDITION_VALUE", values)
@@ -173,7 +178,10 @@ def decode_prediction(encoded, output, turn):
                     and float(output["history"][0, begin:end].softmax(-1)[:, 1].mean()) >= .5)
     subjects = tuple(ref for kind, ref, _ in spans if kind == "SUBJECT")
     conditions = []
-    keys = [(ref, i) for kind, ref, i in spans if kind == "CONDITION_KEY"]
+    keys = [(ref, i) for kind, ref, i in spans
+            if kind == "CONDITION_KEY" and ref.turn_id == turn.turn]
+    removal_keys = [(ref, i) for ref, i in keys if UPDATES[int(output["update"][0, i].argmax())] == "REMOVE"]
+    active_keys = [(ref, i) for ref, i in keys if (ref, i) not in removal_keys]
     for kind, ref, i in spans:
         if kind != "CONDITION_VALUE" or ref.turn_id != turn.turn:
             continue
@@ -181,11 +189,19 @@ def decode_prediction(encoded, output, turn):
         relation_type = CONDITION_RELATIONS[int(output["condition_relation"][0, i].argmax())]
         target = int(output["pointer"][0, i].argmax())
         targets = (encoded["prior_conditions"][target-1].condition_id,) if target else ()
-        key = min(keys, key=lambda item: abs(item[1]-i))[0] if keys else ref
+        key = min(active_keys, key=lambda item: abs(item[1]-i))[0] if active_keys else ref
         conditions.append(Condition(f"t{turn.turn}:c{len(conditions)}", key, (ref,), relation_type, key,
                                     targets, targets if update == "REPLACE" else (), update))
+    for ref, i in removal_keys:
+        target = int(output["pointer"][0, i].argmax())
+        targets = (encoded["prior_conditions"][target-1].condition_id,) if target else ()
+        if any(condition.update == "REMOVE" and condition.target_refs == targets for condition in conditions):
+            continue
+        relation_type = CONDITION_RELATIONS[int(output["condition_relation"][0, i].argmax())]
+        conditions.append(Condition(f"t{turn.turn}:c{len(conditions)}", relation_type=relation_type,
+                                    predicate_span=ref, target_refs=targets, update="REMOVE"))
     needs = tuple(Need(f"t{turn.turn}:n{j}", (ref,), OPERATIONS[int(output["operation"][0, i].argmax())],
-                       subjects, tuple(c.condition_id for c in conditions))
+                       subjects, tuple(c.condition_id for c in conditions if c.update not in {"REMOVE", "KEEP"}))
                   for j, (kind, ref, i) in enumerate(spans) if kind == "NEED" and ref.turn_id == turn.turn)
     times = tuple(ref for kind, ref, _ in spans if kind == "TIME")
     resume = int(output["resume"][0].argmax())

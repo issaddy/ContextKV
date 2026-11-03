@@ -4,11 +4,11 @@ from __future__ import annotations
 from dataclasses import replace
 import time
 
-from .claim_graph import ClaimGraph
-from .context_schema import ReadResult, ReadingOutcome, StepRecord
+from .claim_graph import ClaimGraph, claim_frontier
+from .context_schema import ReadResult, ReadingOutcome, ReductionState, StepRecord
 from .engine_client import EngineError
 from .reading import (advance_read_plan, build_read_plan, output_schema, parse_read_result,
-                      step_generation_kind, step_messages)
+                      step_generation_kind, step_messages, unresolved_needs)
 from .reduction import reduce_claims
 from .schema import ContextEpoch, PromptCandidate
 from .serialization import to_jsonable
@@ -121,17 +121,21 @@ class ReadingExecutor:
             require_online_tokens(plan.budget.max_total_tokens, tokens,
                 len(rendered.input_ids)+task.output_budget, task.kind)
             record = await self._generate_step(attempt_id, snapshot, plan, task, selected_units, selected_claims)
+        if task.kind == "REDUCE":
+            frontier = claim_frontier(selected_claims, record.result.claims)
+            record = replace(record, result=replace(record.result, reduction=ReductionState(
+                task.step_id, task.need_ids, task.operation, task.input_claim_ids,
+                tuple(claim.claim_id for claim in frontier), "merged")))
+            self.store.save_execution_step(record, "COMPLETE")
         graph = ClaimGraph(state.claims)
         for claim in record.result.claims:
             graph.add(claim)
         coverage = (*state.coverage, *((plan.coverage_scope, span.source_key.document_id,
             unit.unit_id, task.step_id) for unit in selected_units for span in unit.source_spans))
         results = (*state.results, record.result)
-        unresolved = tuple({(need.need_id, need.missing_relation, need.bound_entities): need
-            for index, result in enumerate(results) for need in result.open_needs
-            if not any(need.need_id in later.support for later in results[index+1:])}.values())
+        unresolved = unresolved_needs(results)
         disposition = ("partial" if graph.claims else "retrieval_gap") if unresolved else plan.selected_set.disposition
-        answer_plan = graph.answer_plan(plan.task_state, disposition)
+        answer_plan = graph.answer_plan(plan.task_state, disposition, results)
         prior = {point.need_id: point for point in plan.answer_plan.points}
         answer_plan = replace(answer_plan, points=tuple(point if point.claim_ids or point.need_id not in prior
             else replace(point, source_spans=prior[point.need_id].source_spans) for point in answer_plan.points))
@@ -303,10 +307,11 @@ class ReadingExecutor:
         self.store.save_context_plan(attempt_id, plan)
         units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
         graph, results, records, coverage = ClaimGraph(), [], [], []
+        record_indices = {}
         covered_unit_ids = set()
         progress = self.store.reading_progress(attempt_id)
         expanded = set(progress.expanded) if progress is not None else set()
-        blocked_open_needs = {(need.need_id, need.missing_relation, need.bound_entities): need
+        blocked_open_needs = {(need.need_id, need.missing_relation, need.bound_entities, need.temporal_scope): need
                              for need in progress.blocked_open_needs} if progress is not None else {}
         gap_auxiliary_usage = (progress.auxiliary_usage if progress is not None else
             {"input_tokens": 0, "output_tokens": 0, "compute_ms": 0.0, "models": []})
@@ -332,8 +337,13 @@ class ReadingExecutor:
             result = record.result
             for claim in result.claims:
                 graph.add(claim)
-            results.append(result)
-            records.append(record)
+            if record.step_id in record_indices:
+                index = record_indices[record.step_id]
+                results[index], records[index] = result, record
+            else:
+                record_indices[record.step_id] = len(records)
+                results.append(result)
+                records.append(record)
             for unit in selected_units:
                 if unit.unit_id in covered_unit_ids:
                     continue
@@ -343,35 +353,12 @@ class ReadingExecutor:
             if record.step_id not in {step.step_id for step in plan.steps}:
                 plan = replace(plan, steps=plan.steps+(record.task,))
 
-        async def run_model(task, selected_units, selected_claims, depth=0):
+        async def run_model(task, selected_units, selected_claims):
             task = replace(task, input_claim_ids=tuple(claim.claim_id for claim in selected_claims),
                 output_schema=output_schema(task, selected_units, selected_claims,
                     reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
             rendered = self.template.render(step_messages(plan, task, selected_units,
                                                           selected_claims, snapshot))
-            if len(rendered.input_ids) > task.input_budget and task.kind == "REDUCE":
-                packs, pack = [], []
-                for claim in selected_claims:
-                    trial = tuple((*pack, claim))
-                    trial_task = replace(task, step_id=f"{task.step_id}:layer:{depth}:part:{len(packs)}")
-                    size = len(self.template.render(step_messages(plan, trial_task, (), trial, snapshot)).input_ids)
-                    if pack and size > task.input_budget:
-                        packs.append(tuple(pack))
-                        pack = []
-                    pack.append(claim)
-                if pack:
-                    packs.append(tuple(pack))
-                if len(packs) < 2:
-                    raise ReadingBudgetExceeded("one claim exceeds the reduction input allocation")
-                reduced = []
-                predecessors = []
-                for index, pack in enumerate(packs):
-                    child = replace(task, step_id=f"{task.step_id}:layer:{depth}:part:{index}")
-                    result = await run_model(child, (), pack, depth+1)
-                    reduced.extend(result.claims)
-                    predecessors.append(result.step_id)
-                return await run_model(replace(task, predecessor_step_ids=tuple(predecessors)),
-                                       (), tuple(reduced), depth+1)
             if len(records) + 1 >= plan.budget.max_steps:
                 raise ReadingBudgetExceeded("reading exhausted the request step allocation")
             persisted = self.store.execution_step(attempt_id, task.step_id)
@@ -389,11 +376,89 @@ class ReadingExecutor:
             accept(record, selected_units)
             return record.result
 
+        def complete_reduction(task, basis, frontier, mode):
+            completion = ReductionState(task.step_id, task.need_ids, task.operation,
+                tuple(claim.claim_id for claim in basis),
+                tuple(claim.claim_id for claim in frontier), mode)
+            record = records[-1]
+            record = replace(record, result=replace(record.result, reduction=completion))
+            records[-1], results[-1] = record, record.result
+            self.store.save_execution_step(record, "COMPLETE")
+
+        async def run_reduction(task, selected_claims):
+            """Reduce source partitions, then merge whole result bundles.
+
+            A merge consumes at least two bundles. N initial calls therefore
+            admit at most N-1 merge calls; unmerged roots remain in the answer.
+            """
+            basis = selected_claims
+
+            def size(current_task, claims):
+                return len(self.template.render(step_messages(
+                    plan, current_task, (), claims, snapshot)).input_ids)
+
+            if size(task, basis) <= task.input_budget:
+                result = await run_model(task, (), basis)
+                complete_reduction(task, basis, claim_frontier(basis, result.claims), "merged")
+                return
+            packs, pack = [], []
+            for claim in basis:
+                child = replace(task, step_id=f"{task.step_id}:part:0:{len(packs)}",
+                                reduction_basis_claim_ids=())
+                if pack and size(child, (*pack, claim)) > task.input_budget:
+                    packs.append(tuple(pack))
+                    pack = []
+                    child = replace(task, step_id=f"{task.step_id}:part:0:{len(packs)}",
+                                    reduction_basis_claim_ids=())
+                if size(child, (*pack, claim)) > task.input_budget:
+                    raise ReadingBudgetExceeded("one claim exceeds the reduction input allocation")
+                pack.append(claim)
+            if pack:
+                packs.append(tuple(pack))
+            bundles = []
+            for index, pack in enumerate(packs):
+                child = replace(task, step_id=f"{task.step_id}:part:0:{index}",
+                                reduction_basis_claim_ids=())
+                result = await run_model(child, (), pack)
+                bundles.append((claim_frontier(pack, result.claims), (result.step_id,)))
+            level = 1
+            while len(bundles) > 1:
+                groups, group = [], []
+                for bundle in bundles:
+                    child = replace(task, step_id=f"{task.step_id}:merge:{level}:{len(groups)}",
+                                    reduction_basis_claim_ids=())
+                    trial = tuple(claim for item in (*group, bundle) for claim in item[0])
+                    if group and size(child, trial) > task.input_budget:
+                        groups.append(tuple(group))
+                        group = []
+                    group.append(bundle)
+                if group:
+                    groups.append(tuple(group))
+                if len(groups) == len(bundles):
+                    break
+                merged = []
+                for index, group in enumerate(groups):
+                    if len(group) == 1:
+                        merged.append(group[0])
+                        continue
+                    claims = tuple(claim for item in group for claim in item[0])
+                    predecessors = tuple(identity for item in group for identity in item[1])
+                    child = replace(task,
+                        step_id=task.step_id if len(groups) == 1 else f"{task.step_id}:merge:{level}:{index}",
+                        predecessor_step_ids=predecessors,
+                        reduction_basis_claim_ids=task.reduction_basis_claim_ids if len(groups) == 1 else ())
+                    result = await run_model(child, (), claims)
+                    merged.append((claim_frontier(claims, result.claims), (result.step_id,)))
+                bundles = merged
+                level += 1
+            frontier = tuple(claim for claims, _ in bundles for claim in claims)
+            complete_reduction(task, basis, frontier, "merged" if len(bundles) == 1 else "forest")
+
         while True:
             ready = advance_read_plan(plan, tuple(results))
             if not ready or all(task.kind == "REDUCE" for task in ready):
-                open_needs = tuple(need for result in results for need in result.open_needs
-                                   if (need.need_id, need.missing_relation, need.bound_entities) not in expanded)
+                open_needs = tuple(need for need in unresolved_needs(results)
+                    if (need.need_id, need.missing_relation, need.bound_entities, need.temporal_scope) not in expanded)
                 if open_needs and self.extend_open_needs is not None:
                     require_online_tokens(plan.budget.max_total_tokens, refresh_usage(), 1, "OpenNeed")
                     gap_started = time.monotonic()
@@ -415,7 +480,8 @@ class ReadingExecutor:
                     phase_id = len(expanded)
                     plan = replace(plan, auxiliary_ms=(*plan.auxiliary_ms,
                         *((f"gap:{phase_id}:{name}", value) for name, value in phases)))
-                    expanded.update((need.need_id, need.missing_relation, need.bound_entities) for need in open_needs)
+                    expanded.update((need.need_id, need.missing_relation, need.bound_entities,
+                                     need.temporal_scope) for need in open_needs)
                     refresh_usage()
                     self.store.save_reading_progress(attempt_id, plan, ReadingProgress(
                         tuple(sorted(expanded)), tuple(blocked_open_needs.values()), gap_auxiliary_usage))
@@ -427,7 +493,7 @@ class ReadingExecutor:
                     if (plan.budget.max_passages is not None and len(_passages(
                             (*units.values(), *novel))) > plan.budget.max_passages):
                         blocked_open_needs.update(((need.need_id, need.missing_relation,
-                                                    need.bound_entities), need) for need in open_needs)
+                            need.bound_entities, need.temporal_scope), need) for need in open_needs)
                         if self.events is not None:
                             self.events.emit("reading_gap_budget_stop", attempt_id=attempt_id,
                                 reason="original_passage_budget", open_needs=open_needs,
@@ -486,6 +552,20 @@ class ReadingExecutor:
                     raise ReadingBudgetExceeded("reading exhausted the complete-time allocation")
                 selected_units = tuple(units[unit_id] for unit_id in task.input_unit_ids)
                 selected_claims = tuple(graph.claims[claim_id] for claim_id in task.input_claim_ids)
+                persisted = self.store.execution_step(attempt_id, task.step_id)
+                if persisted is not None and persisted[0] == "COMPLETE":
+                    if persisted[1].engine_epoch is None:
+                        accept(persisted[1], selected_units)
+                        if task.reduction_basis_claim_ids and persisted[1].result.reduction is None:
+                            basis = tuple(graph.claims[identity] for identity in task.reduction_basis_claim_ids)
+                            complete_reduction(task, basis,
+                                claim_frontier(basis, persisted[1].result.claims), "merged")
+                    elif task.reduction_basis_claim_ids and persisted[1].result.reduction is None:
+                        basis = tuple(graph.claims[identity] for identity in task.reduction_basis_claim_ids)
+                        await run_reduction(task, basis)
+                    else:
+                        await run_model(task, selected_units, selected_claims)
+                    continue
                 if (plan.reading_mode == "typed_reduce" and task.kind == "REDUCE"
                         and task.operation in {"union", "count", "sum", "group"}):
                     tick = time.monotonic()
@@ -507,20 +587,20 @@ class ReadingExecutor:
                                                 "clock": "client_monotonic", "scope": "step_wall"}})
                     self.store.save_execution_step(record, "COMPLETE")
                     accept(record, selected_units)
+                    complete_reduction(task, selected_claims, (claim,), "merged")
+                elif task.kind == "REDUCE":
+                    await run_reduction(task, selected_claims)
                 else:
                     await run_model(task, selected_units, selected_claims)
             self.store.save_context_plan(attempt_id, plan)
         covered = {row[2] for row in coverage}
         if plan.coverage_scope == "all_supplied_documents" and covered != set(plan.coverage_units):
             raise ValueError("full-document coverage is incomplete")
-        unresolved = tuple(need for index, result in enumerate(results) for need in result.open_needs
-            if not any(need.need_id in later.support for later in results[index+1:]))
-        unresolved = tuple({(need.need_id, need.missing_relation, need.bound_entities): need
-                            for need in (*unresolved, *blocked_open_needs.values())}.values())
+        unresolved = unresolved_needs(results)
         disposition = plan.selected_set.disposition
         if unresolved:
             disposition = "partial" if graph.claims else "retrieval_gap"
-        answer_plan = graph.answer_plan(plan.task_state, disposition)
+        answer_plan = graph.answer_plan(plan.task_state, disposition, results)
         support_spans = {need.need_id: tuple({span.span_id: span
             for support in plan.selected_set.need_support if support.need_id == need.need_id
             for span in support.source_spans}.values()) for need in plan.task_state.needs

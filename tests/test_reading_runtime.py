@@ -266,8 +266,9 @@ async def test_full_coverage_reads_every_pack_and_count_runs_on_cpu(tmp_path):
     second, unit_b = material("Beta\n"*120, "b")
     state = TaskState("t", "Count all entities.", needs=(Need("n", operation="count"),))
     selected = EvidenceSet("s", (unit_a, unit_b), source_blocks=(first, second))
-    budget = ContextBudget(read_input_tokens=3500, read_output_tokens=1024)
-    plan = build_read_plan(state, selected, "all_supplied_documents", budget, template=ByteTemplate())
+    budget = ContextBudget(read_input_tokens=7000, read_output_tokens=1024)
+    plan = build_read_plan(state, selected, "all_supplied_documents", budget, template=ByteTemplate(),
+                           read_packing="source_windows")
     assert len(plan.steps) == 2
     engine = ScriptedReadingEngine([read_output(fact("a", "Alpha")), read_output(fact("b", "Beta"))])
     store = SessionStore(tmp_path/"state.db")
@@ -286,7 +287,7 @@ def test_oversized_source_is_split_with_exact_unicode_coordinates():
     state = TaskState("t", "List all", needs=(Need("n"),))
     selected = EvidenceSet("s", (unit,), source_blocks=(block,))
     plan = build_read_plan(state, selected, "all_supplied_documents",
-        ContextBudget(read_input_tokens=3200), template=ByteTemplate())
+        ContextBudget(read_input_tokens=6000), template=ByteTemplate())
     pieces = plan.selected_set.selected_units
     assert len(pieces) > 1
     assert "".join(piece.text for piece in pieces) == block.text

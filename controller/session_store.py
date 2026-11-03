@@ -66,7 +66,7 @@ ACTIVE_STAGES = ("STARTED", "PLANNED", "PREPARING", "PREPARED", "SUBMITTED", "RE
 
 @dataclass(frozen=True)
 class ReadingProgress:
-    expanded: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
+    expanded: tuple[tuple[str, str, tuple[str, ...], str], ...] = ()
     blocked_open_needs: tuple[OpenNeed, ...] = ()
     auxiliary_usage: dict | None = None
 

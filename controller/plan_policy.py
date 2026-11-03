@@ -426,15 +426,14 @@ class PlanPolicy:
                 reason = "required_scope_uncovered"
             elif plan.semantic_kind == "direct_answer" and any(step.task.kind != "ANSWER" for step in ordered):
                 raise ValueError("direct_answer contains only its terminal ANSWER")
-            elif (plan.semantic_kind != "scope_scan" and
-                    plan.context_plan.selected_set.token_cost > state.plan.budget.body_tokens):
-                reason = "evidence_body_budget"
             elif (state.plan.budget.max_passages is not None and len(_passages(
                     plan.context_plan.selected_set.selected_units)) > state.plan.budget.max_passages):
                 reason = "original_passage_budget"
             if reason:
                 evaluations.append(PlanEvaluation(plan.plan_id, None, None, None, False, reason))
                 continue
+            # selected_set retains the source archive across READs. Context limits
+            # apply to each compiled READ/ANSWER window, including its output.
             options = [tuple(option for option in self._options(plan, step, completed, native, reusable_prefixes,
                 future_execution=index > 0) if (option.calibrated if option.selection_eligible is None
                                                else option.selection_eligible)) for index, step in enumerate(ordered)]

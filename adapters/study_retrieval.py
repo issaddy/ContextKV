@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from adapters.corpus import CorpusIndex
-from adapters.evidence_pool import PoolProfile, SourceDirectory
+from adapters.evidence_pool import PoolProfile, SourceDirectory, merge_retrieved_units
 from adapters.history_state import HistoryIndex, TaskInterpreter, TeacherTaskModel, restore_source_metadata
 from adapters.retrieval import run_retrieval_worker
 from adapters.retriever_factory import create_retriever
@@ -509,7 +509,7 @@ class StudyEvidenceProvider:
             old_ids = {unit.unit_id for unit in previous}
             recalled = tuple(replace(unit, need_ids=()) if already_read(unit) and unit.unit_id not in old_ids
                              else unit for unit in fresh_pool.units)
-            units = tuple({unit.unit_id: unit for unit in (*recalled, *previous)}.values())
+            units = merge_retrieved_units(recalled, previous)
             blocks = tuple({block.key: block for block in
                 (*plan.selected_set.source_blocks, *fresh_pool.source_blocks)}.values())
             context_pool = replace(fresh_pool, units=units, source_blocks=blocks)

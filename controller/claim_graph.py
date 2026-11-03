@@ -40,19 +40,40 @@ class ClaimGraph:
                 spans[span.span_id] = span
         return tuple(spans.values())
 
-    def answer_plan(self, state, disposition="answer"):
-        parents = {parent for claim in self.claims.values() for parent in claim.parent_claim_ids}
+    def answer_plan(self, state, disposition="answer", results=()):
+        reductions = tuple(result.reduction for result in results if result.reduction is not None)
+        active = tuple(reduction for index, reduction in enumerate(reductions)
+            if not any(reduction.need_ids == later.need_ids and reduction.operation == later.operation
+                and set(reduction.basis_claim_ids) <= set(later.basis_claim_ids)
+                for later in reductions[index+1:]))
+        managed = {identity for reduction in reductions
+                   for identity in (*reduction.basis_claim_ids, *reduction.frontier_claim_ids)}
+        frontier = {identity for reduction in active for identity in reduction.frontier_claim_ids}
+        completed_claims = set()
+        todo = [identity for reduction in reductions for identity in reduction.frontier_claim_ids]
+        while todo:
+            identity = todo.pop()
+            if identity not in completed_claims:
+                completed_claims.add(identity)
+                todo.extend(self.claims[identity].parent_claim_ids)
+        pending = {claim.claim_id for result in results for claim in result.claims
+                   if claim.kind == "derived" and claim.claim_id not in completed_claims}
+        parents = {parent for claim in self.claims.values() if claim.claim_id not in pending
+                   for parent in claim.parent_claim_ids}
         points = []
         for need in state.needs:
             selected = tuple(claim for claim in self.claims.values()
-                             if claim.need_id == need.need_id and claim.claim_id not in parents)
-            derived = tuple(claim for claim in selected if claim.kind == "derived")
-            if derived:
-                final_step = derived[-1].claim_id.rsplit(":claim:", 1)[0]
-                selected = tuple(claim for claim in derived
-                                 if claim.claim_id.rsplit(":claim:", 1)[0] == final_step)
+                if claim.need_id == need.need_id and (claim.claim_id in frontier
+                    or claim.claim_id not in parents | managed | pending))
             spans = {span.span_id: span for claim in selected
                      for span in self.source_spans(claim.claim_id)}
             points.append(AnswerPoint(need.need_id, tuple(c.claim_id for c in selected),
                                       tuple(spans.values())))
         return AnswerPlan(tuple(points), disposition)
+
+
+def claim_frontier(inputs, outputs):
+    """Retain independent conclusions and inputs not consumed by a conclusion."""
+    claims = (*inputs, *outputs)
+    parents = {parent for claim in claims for parent in claim.parent_claim_ids}
+    return tuple(claim for claim in claims if claim.claim_id not in parents)

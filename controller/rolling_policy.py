@@ -14,7 +14,8 @@ from .claim_graph import ClaimGraph
 from .context_schema import ReadTask, ReadingOutcome
 from .plan_policy import (NoCompletePlan, PlanPolicy, PlanStep,
                           _completed_steps, complete_plan)
-from .reading import output_schema, read_output_reservation, step_generation_kind, step_messages
+from .reading import (output_schema, read_output_reservation, step_generation_kind,
+                      step_messages, unresolved_needs)
 from .schema import Plan, PromptCandidate
 from .serialization import dumps
 
@@ -92,7 +93,7 @@ def _with_observed_sources(plan, state):
                    else plan.selected_set.disposition)
     return replace(plan, selected_set=replace(plan.selected_set, selected_units=tuple(units.values()),
         source_blocks=tuple(blocks.values())), answer_plan=ClaimGraph(state.claims).answer_plan(
-            plan.task_state, disposition) if state.claims else replace(plan.answer_plan, disposition=disposition))
+            plan.task_state, disposition, state.results) if state.claims else replace(plan.answer_plan, disposition=disposition))
 
 
 def compile_step(plan, task, state, snapshot, template, *, outputs):
@@ -216,7 +217,7 @@ class RollingPlanRuntime:
         expanded = set(progress.expanded) if progress is not None else set()
         state = ReadingOutcome(context_plans[0], tuple(record.result for record in records), records,
             tuple(graph.claims.values()), coverage,
-            tuple(need for record in records for need in record.result.open_needs),
+            unresolved_needs(tuple(record.result for record in records)),
             auxiliary_usage=progress.auxiliary_usage if progress is not None else dict(ZERO_AUX))
         if saved:
             arrivals = {record.metrics["request_arrived_monotonic"] for _, record, _ in saved}
@@ -301,7 +302,7 @@ class RollingPlanRuntime:
                     ReadingProgress(tuple(sorted(expanded)), (), state.auxiliary_usage))
             elif open_need_provider is not None and state.plan.coverage_scope != "all_supplied_documents":
                 needs = tuple(need for need in state.open_needs
-                    if (need.need_id, need.missing_relation, need.bound_entities) not in expanded)
+                    if (need.need_id, need.missing_relation, need.bound_entities, need.temporal_scope) not in expanded)
                 if needs:
                     from .context_schema import EvidencePool
                     from .evidence_planner import close_dependencies
@@ -325,7 +326,8 @@ class RollingPlanRuntime:
                     if not isinstance(pool, EvidencePool):
                         raise TypeError("rolling gap proposals require EvidencePool with real auxiliary usage")
                     elapsed = (time.monotonic()-tick)*1000
-                    expanded.update((need.need_id, need.missing_relation, need.bound_entities) for need in needs)
+                    expanded.update((need.need_id, need.missing_relation, need.bound_entities,
+                                     need.temporal_scope) for need in needs)
                     state = replace(state, auxiliary_usage=merge_auxiliary_usage(state.auxiliary_usage,
                                                                                 pool.auxiliary_usage))
                     phases = pool.auxiliary_ms or (("control", elapsed),)

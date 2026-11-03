@@ -18,6 +18,7 @@ def test_reader_mix_keeps_frozen_parent_and_holdout_and_prioritizes_reviewed_act
     def example(identity, *, task=None, conversation="train", partition="native_multidoc2dial_train", phase="ANSWER"):
         return {"example_id": identity, "task_id": task or identity, "conversation_id": conversation,
             "split": "train", "data_split": "train", "source_partition": partition, "phase": phase,
+            "messages": [{"role": "user", "content": f"Native training question {identity}"}],
             "supervision": {"status": "accepted"}, "target_text": "Reviewed fixture target",
             "actual_history": [], "actual_history_sha256": history_digest([]), "prompt_token_hash": identity,
             "reader_identity": reader_id, "read_protocol_version": 2 if phase == "READ" else None}

@@ -51,13 +51,24 @@ def condition_version_mismatches(state, units, resolve):
     return tuple(result)
 
 
+def remove_premise(units, premise_id):
+    """Remove a premise and the source units whose meaning depends on it."""
+    removed = {premise_id}
+    while True:
+        dependents = {unit.unit_id for unit in units
+                      if removed.intersection(unit.dependencies)} - removed
+        if not dependents:
+            return tuple(unit for unit in units if unit.unit_id not in removed)
+        removed.update(dependents)
+
+
 def candidate_sets(state, pool, scores, model, tokenizer, budget):
     by_id = {unit.unit_id: unit for unit in pool.units}
     all_supports = (*scores.singles, *scores.bundles)
 
-    def make(label, units, *, closure=True):
+    def make(label, units):
         ids = tuple(dict.fromkeys(unit.unit_id for unit in units))
-        selected = close_dependencies(ids, by_id) if closure else tuple(by_id[uid] for uid in ids)
+        selected = close_dependencies(ids, by_id)
         body = len(tokenizer.encode(render_selection(selected), add_special_tokens=False))
         if body > budget.body_tokens:
             return None
@@ -98,8 +109,8 @@ def candidate_sets(state, pool, scores, model, tokenizer, budget):
         wrong = None
     removals = []
     for removed in complementary.selected_units:
-        remaining = tuple(unit for unit in complementary.selected_units if unit.unit_id != removed.unit_id)
-        changed = make("deleted_premise", remaining, closure=False)
+        remaining = remove_premise(complementary.selected_units, removed.unit_id)
+        changed = make("deleted_premise", remaining)
         if changed is not None:
             removals.append(changed)
     deleted = min(removals, key=lambda item: item.quality_prediction) if removals else None

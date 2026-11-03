@@ -65,17 +65,26 @@ def test_missing_absolute_windows_quotes_boundaries_and_concurrent_steps_are_unq
         qualified(replay_answer)
 
 
-def test_fit_matches_reader_prompt_sampling_and_only_observed_feature_support():
+def test_fit_preserves_reader_prompt_sampling_and_observed_support_with_explicit_prediction_bins():
     events = [qualified(phase(inputs=1100, start=1, end=2)), qualified(phase(inputs=1300, start=1, end=3)),
               qualified(phase(inputs=1100, ready=64))]
     asset = fit_profiles(events, reader_checkpoint="reader-R0", reader_profile_id="dev-profile", split="dev")
     profiles = ExecutionProfiles(asset)
     row = profiles.row("READ", "REBUILD", 1200, 128, 1, 0, 0, "actual system")
     assert row["input_range"] == [1100, 1300] and row["latency_ms"] == 2000
+    assert row["observed_input_range"] == [1100, 1300] and row["prediction_bin"] == [1024, 2047]
     assert row["gpu_gib_ms"] == 8000 and row["ready_gpu_range"] == [0, 0]
+    assert row["cache_conditioning"] == "measured_cache_and_concurrency_ranges"
+    warm = profiles.row("READ", "REBUILD", 1200, 128, 1, 64, 0, "actual system")
+    assert warm["observed_input_range"] == [1100, 1100] and warm["ready_gpu_range"] == [64, 64]
     assert profiles.row("READ", "REBUILD", 2048, 128, 1, 0, 0, "actual system") is None
-    assert profiles.row("READ", "REBUILD", 1200, 128, 2, 0, 0, "actual system") is None
-    assert profiles.row("READ", "REBUILD", 1200, 128, 1, 32, 0, "actual system") is None
+    concurrent = profiles.row("READ", "REBUILD", 1200, 128, 2, 0, 0, "actual system")
+    unobserved_hit = profiles.row("READ", "REBUILD", 1200, 128, 1, 32, 0, "actual system")
+    assert concurrent["cache_conditioning"] == unobserved_hit["cache_conditioning"] == "cache_state_envelope"
+    assert concurrent["concurrency_inference"]["duration_multiplier"] == 2
+    assert unobserved_hit["observed_input_range"] == [1100, 1300]
+    assert {tuple(item["observed_input_range"]) for item in unobserved_hit["observed_cache_ranges"]} == {
+        (1100, 1300), (1100, 1100)}
     assert profiles.row("READ", "REBUILD", 1200, 128, 1, 0, 0, "different prompt") is None
     assert asset["coverage"]["missing_full_tail_kinds"] == ["ANSWER"]
     changed = deepcopy(events[0])

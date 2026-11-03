@@ -439,10 +439,32 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
                    steps=tuple(steps), coverage_units=tuple(unit.unit_id for unit in units))
 
 
+def unresolved_needs(results):
+    """Keep gaps until a later step establishes the terminal need.
+
+    Repeated observations of the same relation share one retrieval request and
+    retain all of their parent claims. Temporal scopes are distinct requests.
+    """
+    last_support = {need_id: index for index, result in enumerate(results)
+                    for need_id in result.support}
+    pending = {}
+    for index, result in enumerate(results):
+        for need in result.open_needs:
+            if last_support.get(need.need_id, -1) > index:
+                continue
+            key = (need.need_id, need.missing_relation, need.bound_entities, need.temporal_scope)
+            if key in pending:
+                need = replace(need, parent_claim_ids=tuple(dict.fromkeys(
+                    (*pending[key].parent_claim_ids, *need.parent_claim_ids))))
+            pending[key] = need
+    return tuple(pending.values())
+
+
 def advance_read_plan(plan, results, budget=None):
     """READ completion unlocks one typed reduction per requested operation."""
     budget = budget or plan.budget
     completed = {result.step_id for result in results}
+    completed.update(result.reduction.step_id for result in results if result.reduction is not None)
     pending = tuple(step for step in plan.steps if step.step_id not in completed
                     and set(step.predecessor_step_ids) <= completed)
     if pending:
@@ -467,6 +489,7 @@ def advance_read_plan(plan, results, budget=None):
         operation = "summarize" if summarize else "union" if need.operation == "enumerate" else need.operation
         task = ReadTask(step_id, "REDUCE", (need.need_id,),
                         input_claim_ids=tuple(claim.claim_id for claim in inputs),
+                        reduction_basis_claim_ids=tuple(claim.claim_id for claim in inputs),
                         predecessor_step_ids=read_ids,
                         input_budget=budget.window_tokens-budget.read_output_tokens,
                         output_budget=budget.read_output_tokens, operation=operation)
