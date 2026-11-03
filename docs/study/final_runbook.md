@@ -83,8 +83,28 @@ python -m training.a_workflow compare --comparison-config COMPARISON.yaml \
 正式主验收沿用 `study_matrix.yaml` 既有四数据集的 development_weights 和指标。
 已从既有 `runs/study/cohorts.json` 固定 350 题、77 会话至 `runs/study/formal-dev-queue.matrix.json`，
 运行及评分直接使用其中 IDs，再在相同清单上重跑 baseline 与候选；辅助学习的
-200/40 划分不能替代正式开发队列。既有 a-public-dev 27 题、dynamic 14 题和 B 的
-6 题仅为阶段参照，当前尚无统一主验收队列的完整实测参照。默认关闭大型消融 sweep，
+200/40 划分用于辅助训练。正式 c4 参照已评分，350 题交付 300 个答案，全队列
+Q 为 0.44509019347880296。报告位于
+`runs/study/budget-loop-20261103/formal-dev-c4/reference-final/report.json`。
+
+| 开发轨道 | 答案 / 声明题数 | 全队列 Q | 权重 |
+|---|---:|---:|---:|
+| MultiDoc2Dial | 183 / 209 | 0.5822966507177033 | 0.30 |
+| MTRAG | 41 / 41 | 0.32660479305396806 | 0.25 |
+| VersionQA | 76 / 80 | 0.94375 | 0.20 |
+| Constructed long | 0 / 20 | 0 | 0.25 |
+
+固定历史 40 题中，P0 隔离协议交付 32 个答案，RB_llm 为 0.605。共享协议交付 34 个答案，
+RB_llm 为 0.610。两臂沿用相同的 judge 8192 输出上限和 40 题分母，差值为 0.5 个百分点，
+尚未达到质量目标。P1 train 采集 1065 个答案，200 个声明状态中 181 个有效。dev 采集
+206 个答案，40 个声明状态中 36 个有效。效用训练仍在运行。
+
+numeric-compact-v7 首个真实长文请求完成 74 步，耗时 227838.13 ms。reader 输入和输出为
+268290 和 11149 token，全部在线输入和输出为 381899 和 11797 token。实际答案为 67 项、
+1010 credits，参考值为 45 项、1035 credits。该记录确认请求通过窗口并交付，数值正确性仍未解决。
+已清理 938035695 字节重复失败产物，原始账本保留。
+
+默认关闭大型消融 sweep，
 保留 B0/Btoken/B3/B6/B7/Lmap 对照入口和 c1/c4 资源配置。
 20 道 constructed long_dev 仅按参考正确性评分（correctness=1，归一化为 1）；
 公开 Loong test 保留官方 loong_reference_score/100，二者通过 metric_by_split 明确区分。

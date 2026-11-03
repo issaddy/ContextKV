@@ -1,8 +1,8 @@
 {
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
-  "gpu_status": "running_full_reference_scoring_and_resumed_P1_collection",
-  "evidence_scope": "Controlled fixed-Qwen mechanisms and actual candidate collection; protocol comparison and final full-development acceptance remain pending.",
+  "gpu_status": "P1 auxiliary utility training running",
+  "evidence_scope": "The 350-task development reference is scored. Candidate full-development quality and P95 acceptance remain open.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
     "layout": "source_first",
@@ -112,9 +112,9 @@
     "aggregation": "Native/API/auxiliary token indexes and physical integrals are separate; do not sum overlapping ledgers."
   },
   "pending": [
-    "Finish full development baseline scoring and run the matched protocol/planner cells",
-    "Finish full P1 candidate collection and fit only auxiliary set-utility heads",
-    "Collect frozen-Qwen P1 rewards, planner x protocol four cells and own-history P3",
+    "Run matched full-development protocol/planner cells",
+    "Finish P1 auxiliary utility training",
+    "Run planner x protocol fixed-history cells and own-history P3",
     "Fit B from paired actual actions and complete native/value joint experiment",
     "Native/TTL15/TTL60/TTL180 paired windows, concurrency 1 and 4",
     "Full-queue quality/P95 acceptance"
@@ -187,7 +187,7 @@
       "versionqa": 0.2,
       "loong": 0.25
     },
-    "baseline_status": "running",
+    "baseline_status": "scored_over_declared_queue",
     "long_dev_scoring": {
       "track": "constructed_long_dev_correctness",
       "primary_metric": "project_condition_version_score",
@@ -241,6 +241,12 @@
         "completed_subset_quality": 0.993421052631579,
         "failed_tasks": 4,
         "failure": "fixed task interpreter HTTP ReadTimeout at 60 seconds"
+      },
+      "loong": {
+        "declared": 20,
+        "answered": 0,
+        "scored": 0,
+        "full_denominator_quality": 0
       }
     },
     "latency_acceptance_status": "not established: incomplete responses and overlapping auxiliary/scorer load on the shared teacher are retained in the run ledger",
@@ -249,7 +255,10 @@
       "multidoc2dial",
       "mtrag",
       "versionqa"
-    ]
+    ],
+    "answered": 300,
+    "full_denominator_quality": 0.44509019347880296,
+    "report": "runs/study/budget-loop-20261103/formal-dev-c4/reference-final/report.json"
   },
   "source_snapshots": {
     "baseline": "e3bf734",
@@ -323,7 +332,7 @@
     "train_elapsed_ms": 845195.7591678947,
     "dev_elapsed_ms": 394441.01740047336,
     "cost_scope": "reader tokens only here; auxiliary, judge and physical ledgers remain separately recorded",
-    "full_collection_status": "dev generation complete: 206 answers / 216 candidates across 36 accepted of 40 declared states; train resumed with saved answers and interrupted-cost ledger",
+    "full_collection_status": "train 1065 answers across 181 accepted of 200 declared states; dev 206 answers across 36 accepted of 40; utility training running",
     "artifact": "runs/study/budget-loop-20261103/p1-rewards/collection/abe4111aa70ddeeed0aa"
   },
   "B_observation_entry": {
@@ -357,7 +366,13 @@
       "failed_candidates": 10,
       "pending_candidates": 0,
       "training_pairs": 0
-    }
+    },
+    "train_collected": {
+      "declared_states": 200,
+      "accepted_states": 181,
+      "answers": 1065
+    },
+    "utility_training_status": "running"
   },
   "fixed_history_attribution": {
     "declared_states": 40,
@@ -366,15 +381,48 @@
     "task_state": "same audited state and actual QA in each cell",
     "retrieval": "each P0/P1 planner executes its own query encoder and retrieval",
     "model": "fixed Qwen3-32B",
-    "P0_status": "running",
+    "P0_status": "scored",
     "P1_status": "queued after full utility training",
     "B_dev_observations": "captured during P1_source_first_shared only",
-    "artifact": "runs/study/budget-loop-20261103/fixed-history-40"
+    "artifact": "runs/study/budget-loop-20261103/fixed-history-40",
+    "judge_output_cap": 8192,
+    "P0_task_first_isolated": {
+      "answered": 32,
+      "RB_llm_full_denominator": 0.605
+    },
+    "P0_source_first_shared": {
+      "answered": 34,
+      "RB_llm_full_denominator": 0.61
+    },
+    "difference_percentage_points": 0.5,
+    "acceptance_status": "diagnostic only; target not reached"
   },
   "continuation": {
     "P1": "runs/study/budget-loop-20261103/p1-rewards/after-collection-stages.json",
     "full_protocol_queue": "runs/study/budget-loop-20261103/formal-dev-c4/shared-stages.json",
     "B_train_capture": "runs/study/budget-loop-20261103/b-observations",
-    "status": "collect then prepare/train utility heads; freeze the resulting A asset; parallel P1 attribution and real B state capture; C and final acceptance not completed"
+    "status": "P1 collection complete and utility training running; P1 attribution, real B state capture, C and final acceptance remain open"
+  },
+  "failure_artifact_cleanup": {
+    "redundant_bytes_removed": 938035695,
+    "original_ledger_retained": true
+  },
+  "numeric_compact_v7_first_long": {
+    "status": "delivered",
+    "answer": {
+      "count": 67,
+      "total_credits": 1010
+    },
+    "reference": {
+      "count": 45,
+      "total_credits": 1035
+    },
+    "steps": 74,
+    "reader_input_tokens": 268290,
+    "reader_output_tokens": 11149,
+    "all_online_input_tokens": 381899,
+    "all_online_output_tokens": 11797,
+    "complete_ms": 227838.13,
+    "finding": "The request completed within the window protocol. Numeric correctness remains unresolved."
   }
 }
