@@ -9,7 +9,7 @@ evidence_policy_training:
   gpu_devices: [1, 2, 4]
   scorer_identity:
     kind: frozen_qwen3_32b_actual_history_source_judge
-    rubric: necessary_points_grounding_conditions_versions_task_v1
+    rubric: necessary_points_grounding_conditions_versions_task_v2
     reader_checkpoint: local-snapshot:7442623e99dd0b456628ddc48805a4ea11249ee2ee66484b5d1ab44d2940beb8
     score_range: [0, 1]
   reward_weights: {necessary_points: 0.3, grounding: 0.2, conditions_versions: 0.2, task_score: 0.3}

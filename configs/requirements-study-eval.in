@@ -11,3 +11,4 @@ ragas==0.3.3
 langchain-openai==0.3.33
 langchain-community==0.3.27
 rouge-score==0.1.2
+kernels==0.10.0

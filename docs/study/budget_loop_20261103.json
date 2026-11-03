@@ -1,7 +1,7 @@
 {
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
-  "gpu_status": "running_full_reference_and_reader_bound_P1_collection",
+  "gpu_status": "running_full_reference_scoring_and_resumed_P1_collection",
   "evidence_scope": "Controlled fixed-Qwen mechanisms and actual candidate collection; protocol comparison and final full-development acceptance remain pending.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
@@ -112,8 +112,8 @@
     "aggregation": "Native/API/auxiliary token indexes and physical integrals are separate; do not sum overlapping ledgers."
   },
   "pending": [
-    "Freeze full main development queue and rerun comparable fixed-model baseline",
-    "Complete auxiliary supervision and train A using the same session split",
+    "Finish full development baseline scoring and run the matched protocol/planner cells",
+    "Finish full P1 candidate collection and fit only auxiliary set-utility heads",
     "Collect frozen-Qwen P1 rewards, planner x protocol four cells and own-history P3",
     "Fit B from paired actual actions and complete native/value joint experiment",
     "Native/TTL15/TTL60/TTL180 paired windows, concurrency 1 and 4",
@@ -199,11 +199,33 @@
     "baseline_method": "P0_task_first_isolated",
     "concurrency": 4,
     "cache_start": "cold_once_per_method_dataset",
-    "artifact": "runs/study/budget-loop-20261103/formal-dev-c4"
+    "artifact": "runs/study/budget-loop-20261103/formal-dev-c4",
+    "completed_datasets": {
+      "multidoc2dial": {
+        "declared": 209,
+        "answered": 183,
+        "generation_failures": 8,
+        "blocked_or_failed_tasks": 26
+      },
+      "mtrag": {
+        "declared": 41,
+        "answered": 41
+      },
+      "versionqa": {
+        "declared": 80,
+        "answered": 76,
+        "scored": 76,
+        "full_denominator_quality": 0.94375,
+        "completed_subset_quality": 0.993421052631579,
+        "failed_tasks": 4,
+        "failure": "fixed task interpreter HTTP ReadTimeout at 60 seconds"
+      }
+    },
+    "latency_acceptance_status": "not established: incomplete responses and overlapping auxiliary/scorer load on the shared teacher are retained in the run ledger"
   },
   "source_snapshots": {
     "baseline": "e3bf734",
-    "candidate": "bbd10b4",
+    "candidate": "60b4ab6",
     "baseline_directory": "runs/study-20261103-budget-loop/source",
     "candidate_directory": "runs/study-20261103-budget-loop/candidate-source",
     "shared_assets": [
@@ -211,7 +233,8 @@
       "models",
       "runs",
       "vendor"
-    ]
+    ],
+    "P1_generation_protocol": "bbd10b4 generation retained; 60b4ab6 changes bounded grading and saved-answer reuse"
   },
   "auxiliary_training": {
     "task_model": {
@@ -271,12 +294,23 @@
     "train_elapsed_ms": 845195.7591678947,
     "dev_elapsed_ms": 394441.01740047336,
     "cost_scope": "reader tokens only here; auxiliary, judge and physical ledgers remain separately recorded",
-    "full_collection_status": "running on accepted 181 train / 36 dev within declared 200 / 40; pilot rows reused",
+    "full_collection_status": "dev generation complete: 206 answers / 216 candidates across 36 accepted of 40 declared states; train resumed with saved answers and interrupted-cost ledger",
     "artifact": "runs/study/budget-loop-20261103/p1-rewards/collection/abe4111aa70ddeeed0aa"
   },
   "B_observation_entry": {
     "implementation": "capture actual fixed-plan decision states without loading a gain model",
     "status": "implemented; real B capture awaits frozen P1",
     "cohort": "original full200/40 manifest; unique source states counted before observation/action selection"
+  },
+  "P1_scoring": {
+    "rubric": "necessary_points_grounding_conditions_versions_task_v2",
+    "response": "four bounded score fields and disposition; raw usage persisted before parse",
+    "saved_answers_rescored": 376,
+    "train_saved_answers_rescored": 170,
+    "dev_saved_answers_rescored": 206,
+    "rescore_failures": 0,
+    "old_unreceipted_score_cost": "unknown; legacy-score-receipt-gap.json",
+    "generation_reuse": "saved answers reused, old interrupted submissions retained, only pending candidates generated",
+    "artifact": "runs/study/budget-loop-20261103/p1-rewards/collection/abe4111aa70ddeeed0aa"
   }
 }

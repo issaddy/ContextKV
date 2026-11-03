@@ -15,6 +15,7 @@ import yaml
 from bench.study import dataset_rows, merge_config, method_config, run_dataset
 from controller.reading import READ_PROTOCOL_VERSION
 from controller.serialization import decode, to_jsonable
+from controller.context_schema import TaskState
 from controller.schema import OnlineContext, OnlineMessage, OnlineTurn, TurnRecord
 from training.reader_data import digest, file_digest, rows, write_rows
 
@@ -163,9 +164,22 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
     spec = matrix["datasets"][dataset]
     actual = method_config(actual, cell_method(policy, protocol), spec, split)
     identity["allocation"] = allocation_identity(actual)
+    observation = actual["execution"].get("state_observation")
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     (directory/"records").mkdir(exist_ok=True)
+    devices = sorted(set((*actual["policy_comparison"]["frozen_shared_gpu_devices"], *reader_spec["gpu_devices"])))
+    ports = [urlparse(reader_spec["base_url"]).port]
+    if observation and actual["task_model"]["mode"] == "teacher":
+        ports.append(urlparse(actual["generation"]["teacher_url"]).port)
+    process_ids = sorted(set((*listening_processes(ports), *matrix["resources"].get("process_ids", ()))))
+    if observation:
+        execution = {key: value for key, value in actual["execution"].items() if key != "state_observation"}
+        write_json(directory/"frozen_a_study_config.json", {**actual, "execution": execution})
+        actual["execution"]["state_observation"] = {**observation,
+            "observation_path": str(directory/"observations.jsonl"),
+            "reader_checkpoint": identity["fixed_reader"]["checkpoint"],
+            "reader_profile_id": reader_spec["profile_id"], "gpu_devices": devices, "process_ids": process_ids}
     run = apply_study_config(load_config(reader_spec["run_config"]), actual)
     run = replace(run, state_dir=str(directory/"state"),
         engine=replace(run.engine, base_url=reader_spec["base_url"]),
@@ -174,19 +188,21 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
         run = replace(run, context=replace(run.context, system_prompt=spec["answer_system_prompt"]))
     identity["generation_protocol"] = GenerationProtocol.from_config(run).record()
     service = create_controller(run)
-    devices = sorted(set((*actual["policy_comparison"]["frozen_shared_gpu_devices"], *reader_spec["gpu_devices"])))
-    ports = [urlparse(run.engine.base_url).port]
-    physical = StudyResourceSampler(devices, listening_processes(ports))
+    physical = StudyResourceSampler(devices, process_ids)
     await physical.start()
     started = time.monotonic()
     from adapters.history_state import HistoryIndex
     from adapters.hybrid_retrieval import LocalBGE
     from training.plan_gain_protocol import AuditedTaskInterpreter
-    frozen_history = await asyncio.to_thread(LocalBGE, actual["task_model"].get("base_path", "models/bge-m3"),
-        device=actual["policy_comparison"]["encoder_device"], dtype="bfloat16", max_length=8192)
-    interpreter = AuditedTaskInterpreter(HistoryIndex(frozen_history.tokenizer, frozen_history.encode))
-    provider = await asyncio.to_thread(create_study_retriever, actual, service.template,
-        task_interpreter=interpreter, frozen_history=frozen_history)
+    if observation:
+        from training.plan_gain_rollout import create_audited_provider
+        provider, interpreter = await asyncio.to_thread(create_audited_provider, actual, service.template)
+    else:
+        frozen_history = await asyncio.to_thread(LocalBGE, actual["task_model"].get("base_path", "models/bge-m3"),
+            device=actual["policy_comparison"]["encoder_device"], dtype="bfloat16", max_length=8192)
+        interpreter = AuditedTaskInterpreter(HistoryIndex(frozen_history.tokenizer, frozen_history.encode))
+        provider = await asyncio.to_thread(create_study_retriever, actual, service.template,
+            task_interpreter=interpreter, frozen_history=frozen_history)
     service.bind_resident_models(provider.manifest)
     initialization_ms = (time.monotonic()-started)*1000
     info = await service.engine.info()
@@ -198,8 +214,8 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
     native = NativePoolSampler(run.engine.base_url, gpu_capacity=allocator["pool"]["gpu_capacity_tokens"],
         host_enabled=allocator["pool"]["host_capacity_tokens"] > 0, model=run.model.name)
     await native.start()
-    sources = {row["task_id"]: row for row in dataset_rows(spec, split,
-        task_ids=matrix.get("cohorts", {}).get(split, {}).get(dataset))}
+    sources = {row["task_id"]: row for row in (records if observation else dataset_rows(spec, split,
+        task_ids=matrix.get("cohorts", {}).get(split, {}).get(dataset)))}
     results = {row["task_id"]: row for path in (directory/"records").glob("*.json") for row in [json.loads(path.read_text())]}
     windows = {}
     try:
@@ -212,18 +228,25 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
             history = decode(tuple[TurnRecord, ...], frozen["actual_history"])
             before = service.store.read_snapshot(session, provider.corpus_snapshot_id)
             before = service.store.sync_history(session, history, before.version)
-            original, frozen_pool, frozen_origin = frozen_inputs(frozen)
-            interpreter.bind(frozen, original.task_state)
-            provider.budget = original.budget
-            provider.config["reading"].update(enabled=any(step.kind == "READ" for step in original.steps),
-                coverage_mode=original.coverage_scope)
-            provider.config["selection"]["initial_gap_search_rounds"] = 0
-            from adapters.history_state import restore_source_metadata
-            restore_source_metadata(provider.directory, frozen_pool.units)
-            provider.directory.add_archive(frozen_pool.source_blocks)
-            fixed_pool = replace(frozen_pool, retrieval_ms=0, auxiliary_ms=(), auxiliary_usage=None)
-            provider.directory.retrieve_pool = lambda state, memory: fixed_pool
-            provider.directory.retrieve_gap_pool = lambda state, memory, needs: fixed_pool
+            if observation:
+                task_state = decode(TaskState, frozen["task_state"])
+                frozen_origin = {"task_origin": "audited_full_cohort", "pool_origin": "live_P1_retrieval"}
+                frozen_pool_hash = None
+            else:
+                original, frozen_pool, frozen_origin = frozen_inputs(frozen)
+                task_state = original.task_state
+                frozen_pool_hash = digest(to_jsonable(frozen_pool))
+                provider.budget = original.budget
+                provider.config["reading"].update(enabled=any(step.kind == "READ" for step in original.steps),
+                    coverage_mode=original.coverage_scope)
+                provider.config["selection"]["initial_gap_search_rounds"] = 0
+                from adapters.history_state import restore_source_metadata
+                restore_source_metadata(provider.directory, frozen_pool.units)
+                provider.directory.add_archive(frozen_pool.source_blocks)
+                fixed_pool = replace(frozen_pool, retrieval_ms=0, auxiliary_ms=(), auxiliary_usage=None)
+                provider.directory.retrieve_pool = lambda state, memory: fixed_pool
+                provider.directory.retrieve_gap_pool = lambda state, memory, needs: fixed_pool
+            interpreter.bind(frozen, task_state)
             async def retrieve(snapshot):
                 return await provider.retrieve(snapshot, query, task_id)
             async def extend(plan, needs, claims):
@@ -258,8 +281,8 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
                 "method": policy+"_"+protocol, "read_protocol": protocol, "policy_identity": identity,
                 "measurement_kind": "hardware" if run.engine.kind == "sglang" else "simulation",
                 "question": query, "actual_history": frozen["actual_history"], "history_origin": "frozen_actual_rollout",
-                "frozen_input_origin": frozen_origin, "frozen_task_state": to_jsonable(original.task_state),
-                "frozen_candidate_pool_sha256": digest(to_jsonable(frozen_pool)),
+                "frozen_input_origin": frozen_origin, "frozen_task_state": to_jsonable(task_state),
+                "frozen_candidate_pool_sha256": frozen_pool_hash,
                 "original_preparation_usage": frozen.get("planning_trace", {}).get("auxiliary_usage"),
                 "answer": response.assistant_text if response else None, "response": to_jsonable(response),
                 "qa_increment": len(committed.raw_history)-len(history),
@@ -270,11 +293,13 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
                 "cost": {"complete_ms": (window[1]-window[0])*1000 if window is not None else None,
                     "total_input_tokens": response.total_input_tokens if response else None,
                     "total_output_tokens": response.total_output_tokens if response else None}, "metrics": {}}
+            if observation:
+                value.update(cohort_split=frozen["cohort_split"], cohort_manifest_sha256=frozen["cohort_manifest_sha256"])
             if window is not None:
                 windows[task_id] = window
             results[task_id] = value
             write_json(directory/"records"/f"{index:06}.json", value)
-            if response:
+            if response and not observation:
                 blocks = {block.key: block for block in committed.archive}
                 selected = [blocks[key] for key in sorted(attempt.plan.candidate.required_blocks)]
                 online = OnlineTurn(frozen["conversation_id"], task_id, frozen["turn"], source["Collection"], query,
@@ -312,8 +337,10 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
         write_rows(directory/"references.jsonl", [row["reference"] for row in ordered])
         write_json(directory/"generation_manifest.json", {"policy_identity": identity, "config": actual,
             "expected_tasks": [row["task_id"] for row in records], "completed": sum(row["status"] == "completed" for row in ordered),
-            "failed": sum(row["status"] == "failed" for row in ordered), "history_protocol": "same frozen actual QA for all four cells",
-            "engine": info, "provider": provider.manifest, "reference_used_online": False})
+            "failed": sum(row["status"] == "failed" for row in ordered),
+            "history_protocol": "audited actual QA" if observation else "same frozen actual QA for all four cells",
+            "engine": info, "provider": provider.manifest, "reference_used_online": False,
+            "retrieval_protocol": "live_P1" if observation else "frozen_pool"})
     return ordered
 
 
@@ -406,8 +433,24 @@ def persist_p3_failure(directory, conversation, error, *, teacher_ledger=None, s
 
 async def compare(config, matrix, *, dataset, split, output, phase, frozen_records=None,
                   goal_policy=None, limit_states=None, limit_conversations=None, cells=None):
-    records = rows(frozen_records)[:limit_states] if phase in {"frozen", "both"} else []
-    if any(row["status"] != "completed" for row in records):
+    observation = config["execution"].get("state_observation")
+    records = rows(frozen_records) if phase in {"frozen", "both"} else []
+    if observation:
+        if phase != "frozen" or set(cells or ()) != {"P1_source_first_shared"} or split != observation["cohort_split"]:
+            raise ValueError("capture requires frozen P1_source_first_shared and the declared cohort split")
+        from training.plan_gain_rollout import audited_cohort, verify_actual_history
+        records, cohort = audited_cohort(records, rows(Path(config["training"]["data_dir"])/"sources.jsonl"),
+            split=split, limit=len(records), cohort_manifest=observation["cohort_manifest"])
+        verify_actual_history(records, rows(observation["actual_rollouts"]))
+        requested = cohort["declared_task_ids"][:limit_states]
+        by_task = {row["task_id"]: row for row in records}
+        records = [by_task[task_id] for task_id in requested if task_id in by_task]
+        write_json(Path(output)/"capture_cohort.json", {**cohort, "requested_task_ids": requested,
+            "scheduled_task_ids": [row["task_id"] for row in records],
+            "missing_task_ids": [task_id for task_id in requested if task_id not in by_task]})
+    else:
+        records = records[:limit_states]
+    if not observation and any(row["status"] != "completed" for row in records):
         raise ValueError("frozen comparison states must come from completed actual QA records")
     result = []
     for policy in ("P0", "P1"):
@@ -424,6 +467,7 @@ async def compare(config, matrix, *, dataset, split, output, phase, frozen_recor
                     policy=policy, protocol=protocol, goal_policy=goal_policy, limit_conversations=limit_conversations)
                 result.append({"cell": cell, "phase": "p3", "observed_records": len(selected)})
     write_json(Path(output)/"comparison_manifest.json", {"cells": result, "quality": "unscored; score saved actual outputs separately",
+        "purpose": "B_observation_capture" if observation else "A_factorial_comparison",
         "comparison_axes": {"evidence_planner": ["P0", "P1"], "read_protocol": list(READING_PROTOCOLS)},
         "declared_cohorts": matrix.get("cohorts", {}).get(split, {}),
         "paired_contrasts_baseline_candidate": CELL_CONTRASTS,

@@ -170,31 +170,46 @@ def validate_reward(row, binding):
             raise ValueError("reader-bound utility data retain full physical and token costs")
 
 
+def parent_support_binding(settings):
+    path = Path(settings["parent_support_asset"]).resolve()
+    files = [path/"support-model.json", path/"heads.pt",
+             *sorted(file for file in (path/"encoder").rglob("*") if file.is_file())]
+    return {"path": str(path), "files_sha256": {str(file.relative_to(path)): file_digest(file) for file in files}}
+
+
 def build_reader_bound_pairs(reward_rows, *, binding, weights, minimum_difference=0.01):
-    """Only compare actual answers sharing reader, scorer, history and budgets."""
+    """Rank distinct actual inputs by observed answer quality at equal budgets."""
     grouped = {}
     for row in reward_rows:
         validate_reward(row, binding)
         key = (row["task_id"], digest(row["actual_history"]), row["body_budget"], row["output_budget"])
         grouped.setdefault(key, []).append(row)
+
+    def utility(row):
+        return sum(weights[name]*row["quality_components"][name] for name in weights)
+
     result = []
     for key, group in grouped.items():
-        ranked = sorted(group, key=lambda row: sum(weights[name]*row["quality_components"][name]
-                                                   for name in weights), reverse=True)
+        ranked = sorted(group, key=utility, reverse=True)
         for preferred, dispreferred in combinations(ranked, 2):
             if preferred["input_hash"] == dispreferred["input_hash"]:
                 continue
-            difference = sum(weights[name]*(preferred["quality_components"][name]-dispreferred["quality_components"][name])
-                             for name in weights)
+            difference = utility(preferred)-utility(dispreferred)
             if difference < minimum_difference:
                 continue
             if preferred["task_state"] != dispreferred["task_state"]:
                 raise ValueError("utility interventions must keep the same resolved task state")
+            incremental_cost = {name: preferred["cost"][name]-dispreferred["cost"][name]
+                for name in ("complete_ms", "gpu_gib_seconds", "host_gib_seconds")}
+            incremental_cost.update({name: preferred[name]-dispreferred[name]
+                for name in ("reader_input_tokens", "reader_output_tokens")})
             result.append({"task_id": key[0], "split": "train", "label_origin": "actual_reader_answers",
                 "conversation_id": preferred["conversation_id"], "cohort_split": preferred["cohort_split"],
                 "cohort_manifest_sha256": preferred["cohort_manifest_sha256"],
                 "task_state": preferred["task_state"], "preferred": preferred, "dispreferred": dispreferred,
-                **binding, "reward_weights": weights, "reward_difference": difference,
+                **binding, "reward_weights": weights,
+                "quality_difference": difference, "incremental_request_cost": incremental_cost,
+                "reward_difference": difference,
                 "comparison_budget": {"body_tokens": key[2], "answer_output_tokens": key[3]},
                 "actual_history_sha256": key[1]})
     return result
@@ -330,17 +345,52 @@ def attach_collection_costs(directory, binding):
 def prepare_preferences(config):
     settings, binding = config["evidence_policy_training"], reader_binding(config)
     directory = cohort_directory(config)
+    collection = settings["collection"]
+    split = collection["cohort_split"]
+    cohort_path = Path(collection["cohort_manifest"])
+    cohort_hash = file_digest(cohort_path)
+    members = {row["task_id"]: row for row in json.loads(cohort_path.read_text())["members"] if row["split"] == split}
     rewards = attach_collection_costs(directory, binding)
-    split = settings["collection"]["cohort_split"]
-    rewards = select_cohort_rows(rewards, settings["collection"]["cohort_manifest"], split)
-    pairs = (build_reader_bound_pairs(rewards, binding=binding, weights=settings["reward_weights"],
+    parent = parent_support_binding(settings)
+    for row in rewards:
+        if (row["cohort_split"] != split or row["cohort_manifest_sha256"] != cohort_hash
+                or row["task_id"] not in members or row["conversation_id"] != members[row["task_id"]]["conversation_id"]):
+            raise ValueError("reward is outside the registered collection partition")
+        if Path(row["support_model_asset"]).resolve() != Path(parent["path"]):
+            raise ValueError("reward used a different parent support asset")
+    cost_fields = ("complete_ms", "gpu_gib_seconds", "host_gib_seconds", "total_input_tokens", "total_output_tokens")
+    measured = [row for row in rewards if all(row["cost"][key] is not None for key in cost_fields)]
+    pairs = (build_reader_bound_pairs(measured, binding=binding, weights=settings["reward_weights"],
                                      minimum_difference=settings["minimum_reward_difference"])
              if split == "train" else [])
     write_rows(directory/"preferences.jsonl", pairs)
-    manifest = {"binding": binding, "cohort_split": split, "answers": len(rewards), "pairs": len(pairs),
-        "tasks": len({row["task_id"] for row in pairs}), "reward_weights": settings["reward_weights"],
+
+    def candidates(rows_):
+        return {(row["task_id"], row["category"]) for row in rows_ if row["task_id"] in members}
+
+    from training.preference_rollout import saved_rows
+    families = {row["task_id"]: row for row in saved_rows(directory/"candidate_families.jsonl") if row["task_id"] in members}
+    declared = {(identity, category) for identity, family in families.items() for category in family["evidence_sets"]}
+    turns = saved_rows(directory/"turns.jsonl")
+    failed_rows = saved_rows(directory/"failed_cases.jsonl")
+    answered = candidates(turns)
+    scored = candidates(rewards)
+    failed = candidates(failed_rows)-answered
+    skipped = candidates(saved_rows(directory/"skipped_cases.jsonl"))-answered-failed
+    manifest = {"binding": binding, "parent_support_binding": parent,
+        "cohort_split": split, "cohort_manifest_sha256": cohort_hash,
+        "declared_states": len(members), "states_without_candidate_family": sorted(set(members)-families.keys()),
+        "registered_candidates": len(declared), "answered_candidates": len(answered),
+        "scored_candidates": len(scored), "unscored_answers": len(answered-scored),
+        "failed_candidates": len(failed), "skipped_candidates": len(skipped),
+        "recorded_failed_attempts": len({row["attempt_id"] for row in failed_rows if row["task_id"] in members}),
+        "pending_registered_candidates": len(declared-answered-failed-skipped),
+        "scored_answers_without_measured_cost": len(rewards)-len(measured),
+        "answers": len(rewards), "pairs": len(pairs), "paired_states": len({row["task_id"] for row in pairs}),
+        "reward_weights": settings["reward_weights"],
+        "cost_scope": "observed candidate request cost; shared preparation and offline scorer costs stay in collection ledgers",
         "source_rewards_sha256": file_digest(directory/P1_REWARDS),
-        "reader_condition": "fixed checkpoint/profile; candidate answers are executed and scored under this binding"}
+        "preferences_sha256": file_digest(directory/"preferences.jsonl")}
     (directory/"preference_manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
     return manifest
 
@@ -348,7 +398,11 @@ def prepare_preferences(config):
 def train_evidence_policy(config):
     from training.support_model import train_set_utility
     settings, binding = config["evidence_policy_training"], reader_binding(config)
+    if settings["collection"]["cohort_split"] != "train":
+        raise ValueError("P1 fitting requires the registered train collection")
     directory = cohort_directory(config, split="train")
+    prepared = json.loads((directory/"preference_manifest.json").read_text())
+    parent = prepared["parent_support_binding"]
     pairs = select_cohort_rows(rows(directory/"preferences.jsonl"), settings["collection"]["cohort_manifest"], "train")
     for pair in pairs:
         for name in ("reader_checkpoint", "reader_profile_id", "scorer_identity", "query_encoder"):
@@ -356,16 +410,17 @@ def train_evidence_policy(config):
                 raise ValueError(f"preference training data use a different {name}")
         for side in ("preferred", "dispreferred"):
             validate_reward(pair[side], binding)
-    if Path(settings["output_asset"]).resolve() == Path(settings["parent_support_asset"]).resolve():
+    if Path(settings["output_asset"]).resolve() == Path(parent["path"]):
         raise ValueError("P1 asset must retain the P0 support asset as a separate checkpoint")
     optimizer = settings["optimizer"]
-    train_set_utility(directory/"preferences.jsonl", settings["parent_support_asset"],
+    train_set_utility(directory/"preferences.jsonl", parent["path"],
         settings["output_asset"], cohort_manifest=settings["collection"]["cohort_manifest"],
         device=optimizer["device"], epochs=optimizer["epochs"],
         learning_rate=optimizer["learning_rate"], seed=optimizer["seed"])
     path = Path(settings["output_asset"])/"support-model.json"
     metadata = json.loads(path.read_text())
-    metadata.update(reader_binding=binding, policy_stage="P1_reader_bound_actual_answer_utility",
+    metadata.update(reader_binding=binding, parent_support_binding=parent,
+        preference_objective={"reward_weights": prepared["reward_weights"]}, policy_stage="P1_reader_bound_actual_answer_utility",
         policy_checkpoint="contextkv-evidence-p1:"+file_digest(Path(settings["output_asset"])/"heads.pt"),
         training_preferences_sha256=file_digest(directory/"preferences.jsonl"),
         evaluation_evidence="separate planner x reading-protocol frozen-history and P3 runs under fixed Qwen; no quality claim from training loss")
