@@ -209,7 +209,19 @@
       },
       "mtrag": {
         "declared": 41,
-        "answered": 41
+        "answered": 41,
+        "scored": 40,
+        "full_denominator_quality": null,
+        "quality_bounds": [
+          0.32660479305396806,
+          0.33091407889531727
+        ],
+        "missing_score_components": {
+          "b4614daadceeecb400f7baf0aa48dcb8<::>3": [
+            "RL_F"
+          ]
+        },
+        "missing_score_reason": "official factuality JSON reached the fixed 2048 output cap; no synthetic replacement"
       },
       "versionqa": {
         "declared": 80,
@@ -225,7 +237,7 @@
   },
   "source_snapshots": {
     "baseline": "e3bf734",
-    "candidate": "60b4ab6",
+    "candidate": "0c297a4",
     "baseline_directory": "runs/study-20261103-budget-loop/source",
     "candidate_directory": "runs/study-20261103-budget-loop/candidate-source",
     "shared_assets": [
@@ -278,7 +290,8 @@
       "wall_ms": 216147.3683528602,
       "teacher": "frozen Qwen3-32B"
     },
-    "artifacts": "runs/study/budget-loop-20261103/auxiliary-training"
+    "artifacts": "runs/study/budget-loop-20261103/auxiliary-training",
+    "support_utility_storage": "P1 head asset links the frozen parent encoder; encoder weights and tokenizer are not copied or modified"
   },
   "P1_reward_pilot": {
     "train_states": 12,
@@ -311,6 +324,33 @@
     "rescore_failures": 0,
     "old_unreceipted_score_cost": "unknown; legacy-score-receipt-gap.json",
     "generation_reuse": "saved answers reused, old interrupted submissions retained, only pending candidates generated",
-    "artifact": "runs/study/budget-loop-20261103/p1-rewards/collection/abe4111aa70ddeeed0aa"
+    "artifact": "runs/study/budget-loop-20261103/p1-rewards/collection/abe4111aa70ddeeed0aa",
+    "heldout_prepared": {
+      "declared_states": 40,
+      "accepted_states": 36,
+      "registered_candidates": 216,
+      "answers_scored_with_measured_cost": 206,
+      "failed_candidates": 10,
+      "pending_candidates": 0,
+      "training_pairs": 0
+    }
+  },
+  "fixed_history_attribution": {
+    "declared_states": 40,
+    "accepted_states": 36,
+    "protocol": "fixed_actual_history_live_retrieval",
+    "task_state": "same audited state and actual QA in each cell",
+    "retrieval": "each P0/P1 planner executes its own query encoder and retrieval",
+    "model": "fixed Qwen3-32B",
+    "P0_status": "running",
+    "P1_status": "queued after full utility training",
+    "B_dev_observations": "captured during P1_source_first_shared only",
+    "artifact": "runs/study/budget-loop-20261103/fixed-history-40"
+  },
+  "continuation": {
+    "P1": "runs/study/budget-loop-20261103/p1-rewards/after-collection-stages.json",
+    "full_protocol_queue": "runs/study/budget-loop-20261103/formal-dev-c4/shared-stages.json",
+    "B_train_capture": "runs/study/budget-loop-20261103/b-observations",
+    "status": "collect then prepare/train utility heads; freeze the resulting A asset; parallel P1 attribution and real B state capture; C and final acceptance not completed"
   }
 }
