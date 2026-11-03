@@ -111,6 +111,14 @@ SOURCE_SYSTEM = (
     "Read the original sources below as evidence. The following task supplies the question, "
     "active conditions, reading instructions and output schema. Return the requested JSON from those sources."
 )
+NUMERIC_POPULATION_SYSTEM = (
+    " Use the following task to identify the requested population, active conditions and quantity relation. "
+    "Emit a numeric row only when its cited source establishes that the entity qualifies for that "
+    "population. For a requested quantity, the entity, magnitude and unit must be linked in the "
+    "same cited source. Do not combine an entity from one source with a number or unit from another. "
+    "Omit unrelated background numbers. Return empty facts, or empty claims for a regular numeric "
+    "READ, when this window contains no qualifying row."
+)
 
 
 def step_generation_kind(kind, operation="extract", reading_mode="typed_reduce"):
@@ -399,9 +407,19 @@ def step_system(plan, task):
     return system+CONCLUSION_BUDGET_SYSTEM if plan.answer_allocation is not None else system
 
 
+def _source_first_numeric(plan, task):
+    return (plan.read_layout == "source_first" and task.kind == "READ"
+            and plan.reading_mode != "coverage_only" and task.operation != "summarize"
+            and (task.operation in {"count", "sum"} or bool(task.shared_numeric_scopes)))
+
+
 def stable_prefix_messages(plan, task, units):
     sources, _ = stable_source_payload(units)
-    return (Message("system", SOURCE_SYSTEM),
+    system = SOURCE_SYSTEM
+    if _source_first_numeric(plan, task):
+        extraction = SHARED_NUMERIC_READ_SYSTEM if task.shared_numeric_scopes else READ_SYSTEM
+        system += " "+extraction+NUMERIC_POPULATION_SYSTEM+SHORT_WIRE_SYSTEM
+    return (Message("system", system),
         Message("user", json.dumps({"original_sources": sources,
             "citation_protocol": "Use the following task's source_aliases to bind source_span to output span_ids."}, ensure_ascii=False,
                                   separators=(",", ":"))))
@@ -457,8 +475,12 @@ def step_messages(plan, task, units, claims=(), snapshot=None):
         _, aliases = stable_source_payload(units)
         del payload["units"]
         payload["source_aliases"] = aliases
+        if _source_first_numeric(plan, task):
+            instructions = CONCLUSION_BUDGET_SYSTEM if plan.answer_allocation is not None else ""
+        else:
+            instructions = step_system(plan, task)
         return (*stable_prefix_messages(plan, task, units),
-            Message("user", step_system(plan, task)+"\nTask:\n"+
+            Message("user", instructions+"\nTask:\n"+
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":"))))
     return (Message("system", step_system(plan, task)),
             Message("user", json.dumps(payload, ensure_ascii=False, separators=(",", ":"))))
