@@ -105,6 +105,7 @@ training:
   epochs: 1
   adapter_lr: 0.0002
   head_lr: 0.0001
+  min_rollout_conversations: 31
   min_rollout_turns: 200
   preference_turns: 200
   integration_turns: 200

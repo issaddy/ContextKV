@@ -55,11 +55,13 @@ def study_budget(config):
 
 class StudyEvidenceProvider:
     def __init__(self, config, template, serving, directory, *, support_backend=None,
-                 frozen_history=None, task_model=None, teacher_client=None, helper_engine_info=None):
+                 frozen_history=None, task_model=None, teacher_client=None, helper_engine_info=None,
+                 query_encoder_identity=None):
         self.config, self.template, self.serving, self.directory = config, template, serving, directory
         self.support_backend, self.frozen_history = support_backend, frozen_history
         self.task_model, self.teacher_client = task_model, teacher_client
         self.helper_engine_info = helper_engine_info
+        self.query_encoder_identity = query_encoder_identity
         self.strategy = config.get("study", {}).get("strategy", "B7")
         self.budget = study_budget(config)
         run_config = config.get("generation", {}).get("run_config")
@@ -73,6 +75,7 @@ class StudyEvidenceProvider:
         return {"strategy": self.strategy, "retrieval": self.serving.manifest,
                 "budget": to_jsonable(self.budget), "task_model": getattr(self.task_model, "manifest", None),
                 "history_encoder": getattr(self.frozen_history, "manifest", None),
+                "query_encoder_binding": self.query_encoder_identity,
                 "support_model": getattr(self.support_backend, "manifest", None),
                 "helper_engine_info": self.helper_engine_info,
                 "selection_utility": self._utility_mode(),
@@ -572,7 +575,10 @@ class StudyEvidenceProvider:
                 selected_set=chosen)
 
     def close(self):
+        query_encoder = self.serving.retriever.encoder
         self.serving.close()
+        if self.task_model is not None and self.task_model is not query_encoder and self.teacher_client is None:
+            self.task_model.close()
         if self.frozen_history is not None:
             self.frozen_history.close()
         if self.teacher_client is not None:
@@ -592,7 +598,7 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
                                    snapshot_id=retriever.corpus_snapshot_id)
     serving = ServingRetriever(retriever, corpus_id=retrieval["corpus_id"], corpus_index=corpus)
     task_config, support_config = config.get("task_model", {}), config.get("support_model", {})
-    task_model = teacher_client = None
+    task_model = teacher_client = query_encoder_identity = None
     helper = helper_info = None
     teacher_task = strategy not in {"B0", "Btoken"} and task_interpreter is None and task_config.get("mode", "trained") == "teacher"
     teacher_support = strategy not in {"B0", "Btoken", "B1"} and support_backend is None and support_config.get("mode", "trained") == "teacher"
@@ -634,6 +640,15 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
         task_interpreter = TaskInterpreter(task_model, HistoryIndex(frozen_history.tokenizer, frozen_history.encode,
             unit_tokens=task_config.get("history_unit_tokens", 384), candidates=task_config.get("history_candidates", 16),
             view_tokens=task_config.get("history_view_tokens", 8192)))
+    if retrieval.get("task_query_asset"):
+        from training.task_model import TaskModel
+        from training.preference_rollout import query_encoder_binding
+        query_encoder_identity = query_encoder_binding({"task_asset": retrieval["task_query_asset"]})
+        previous_encoder = retriever.encoder
+        retriever.encoder = TaskModel(retrieval["task_query_asset"], base_path=task_config.get("base_path"),
+                                      device=task_config.get("device", "cuda:1"))
+        if previous_encoder is not task_model:
+            previous_encoder.close()
     profile = PoolProfile(retrieval.get("current_top_k", 50), retrieval.get("per_need_top_k", 20),
         retrieval.get("archive_top_k", 12), retrieval.get("primary_pool_size", 96))
     if task_interpreter is not None:
@@ -655,4 +670,5 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
             support_backend = TrainedSupportBackend.load(asset, device=support_config.get("device", "cuda:2"),
                                                          batch_size=support_config.get("batch_size", 8))
     return StudyEvidenceProvider(config, template, serving, directory, support_backend=support_backend,
-        frozen_history=frozen_history, task_model=task_model, teacher_client=teacher_client, helper_engine_info=helper_info)
+        frozen_history=frozen_history, task_model=task_model, teacher_client=teacher_client, helper_engine_info=helper_info,
+        query_encoder_identity=query_encoder_identity)

@@ -1,8 +1,12 @@
 base_study_config: configs/study.yaml
 policy_comparison:
+  concurrency: 4
   policies:
     P0: models/study-support-actual-prefix
     P1: models/study-support-fixed-qwen
+  query_assets:
+    P0: null
+    P1: models/study-task-budget-loop
   reader:
     run_config: configs/qwen3_32b.yaml
     base_url: http://127.0.0.1:30005

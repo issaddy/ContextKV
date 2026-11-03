@@ -54,25 +54,6 @@ def terminal_model_budget(error):
             or type(error) is ValueError and str(error) in READ_ALLOCATION_ERRORS)
 
 
-def recorded_terminal_budget(directory):
-    import sqlite3
-    from controller.session_store import Attempt, load_record
-    database = directory/"state"/"sessions.sqlite3"
-    if not database.exists():
-        return []
-    connection = sqlite3.connect(f"file:{database.resolve()}?mode=ro", uri=True)
-    failed = [load_record(connection, Attempt, payload) for payload, in connection.execute(
-        "SELECT payload FROM attempts WHERE stage='FAILED'")]
-    connection.close()
-    known = []
-    for attempt in failed:
-        if terminal_budget_text(attempt.error):
-            known.append(attempt.error)
-        else:
-            raise ValueError(f"unrecognized prior failed attempt: {attempt.error}")
-    return known
-
-
 READING_PROTOCOLS = {
     "task_first_isolated": {"layout": "task_first", "numeric_need_isolation": True},
     "source_first_shared": {"layout": "source_first", "numeric_need_isolation": False},
@@ -116,9 +97,11 @@ def cell_config(config, policy, protocol):
     asset, reader_spec = settings["policies"][policy], settings["reader"]
     run_path = reader_spec["run_config"]
     fixed_reader = fixed_reader_identity(reader_spec)
+    query_asset = settings["query_assets"][policy]
     actual = merge_config(config, {"generation": {"run_config": run_path,
         "teacher_url": settings["teacher_url"], "helper_run_config": settings["helper_run_config"]},
         "task_model": {"device": settings["encoder_device"]},
+        "retrieval": {"task_query_asset": query_asset},
         "support_model": {"mode": "trained", "asset": asset, "preference_asset": asset,
             "device": settings["support_device"]}, "selection": {"utility": "learned"},
         "execution": {"prefix_retention": {"mode": "native"}, "plan_gain": None},
@@ -128,13 +111,19 @@ def cell_config(config, policy, protocol):
         "reading": READING_PROTOCOLS[protocol], "read_protocol_version": READ_PROTOCOL_VERSION,
         "policy_asset": asset, "policy_heads_sha256": file_digest(Path(asset)/"heads.pt"),
         "policy_checkpoint": metadata.get("policy_checkpoint"),
+        "query_asset": query_asset,
         "reader_binding_used_for_policy_training": metadata.get("reader_binding"),
         "fixed_reader": fixed_reader,
         "evaluation_scope": "evidence planner x read protocol; fixed model weights and common total budgets"}
     if policy == "P1":
         from training.train_evidence_policy import require_policy_reader_binding
-        require_policy_reader_binding(asset, reader_checkpoint=fixed_reader["checkpoint"],
-                                      reader_profile_id=reader_spec["profile_id"])
+        from training.preference_rollout import query_encoder_binding
+        binding = require_policy_reader_binding(asset, reader_checkpoint=fixed_reader["checkpoint"],
+                                               reader_profile_id=reader_spec["profile_id"])
+        query_identity = query_encoder_binding({"task_asset": query_asset})
+        if binding["query_encoder"] != query_identity:
+            raise ValueError("P1 comparison query asset differs from the actual policy-training query encoder")
+        identity["query_encoder"] = query_identity
         identity["policy_protocol_evaluation"] = {
             "training_read_protocol": settings["p1_training_read_protocol"],
             "evaluation_read_protocol": protocol,
@@ -330,25 +319,32 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
 
 async def own_p3_cell(config, matrix, dataset, split, output, *, policy, protocol, goal_policy=None, limit_conversations=None):
     from controller.config import GenerationProtocol, apply_study_config, load_config
-    from controller.engine_client import EngineError
     actual, reader_spec, identity = cell_config(config, policy, protocol)
     spec = matrix["datasets"][dataset]
     actual = method_config(actual, cell_method(policy, protocol), spec, split)
+    actual["execution"]["cache_start"] = "cold"
     identity["allocation"] = allocation_identity(actual)
+    concurrency = config["policy_comparison"]["concurrency"]
+    identity["concurrency"] = concurrency
     if spec.get("protocol", "P3") != "P3":
         raise ValueError("own-history comparison requires P3, not imported authored history")
-    grouped = {}
     source_rows = dataset_rows(spec, split, task_ids=matrix.get("cohorts", {}).get(split, {}).get(dataset))
     declared_ids = [row["task_id"] for row in source_rows]
+    grouped = {}
     for row in source_rows:
         grouped.setdefault(row["conversation_id"], []).append(row)
     identities = sorted(grouped)[:limit_conversations]
     scheduled_ids = [row["task_id"] for conversation in identities for row in grouped[conversation]]
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    local_matrix = merge_config(matrix, {"resources": {"gpu_devices": sorted(set(
-        (*config["policy_comparison"]["shared_gpu_devices"], *reader_spec["gpu_devices"])))}})
-    # run_dataset uses the reader's explicit base URL through this scoped config.
+    task_path = output/"tasks.jsonl"
+    write_rows(task_path, source_rows)
+    local_matrix = merge_config(matrix, {
+        "resources": {"gpu_devices": sorted(set(
+            (*config["policy_comparison"]["shared_gpu_devices"], *reader_spec["gpu_devices"])))},
+        "datasets": {dataset: {"inputs": {split: str(task_path)},
+            "reuse_provider": False, "continue_conversation_failures": True}},
+        "cohorts": {split: {dataset: declared_ids}}})
     reader_run = yaml.safe_load(Path(reader_spec["run_config"]).read_text())
     reader_run["engine"]["base_url"] = reader_spec["base_url"]
     if "answer_system_prompt" in spec:
@@ -358,67 +354,20 @@ async def own_p3_cell(config, matrix, dataset, split, output, *, policy, protoco
     actual["generation"]["run_config"] = str(run_path)
     identity["generation_protocol"] = GenerationProtocol.from_config(
         apply_study_config(load_config(run_path), actual)).record()
-    collected, failed = [], []
-    if spec.get("reuse_provider", False):
-        task_path = output/"tasks.jsonl"
-        write_rows(task_path, source_rows)
-        shared_matrix = merge_config(local_matrix, {
-            "datasets": {dataset: {"inputs": {split: str(task_path)}}},
-            "cohorts": {split: {dataset: declared_ids}}})
-        collected = await run_dataset(actual, shared_matrix, cell_method(policy, protocol),
-            dataset, split, output, concurrency=1, limit_conversations=limit_conversations,
-            question_fn=goal_policy.question_fn if goal_policy else None)
-        failed = [json.loads(path.read_text()) for path in sorted((output/"terminal_read_failures").glob("*.json"))]
-        write_json(output/"manifest.json", {"policy_identity": identity,
-            "history_protocol": "independent own-history P3 sessions; provider reused; cold boundary per conversation",
-            "requested_conversations": identities, "completed_turns": len(collected),
-            "task_ids": declared_ids, "scheduled_task_ids": scheduled_ids,
-            "missing_execution_task_ids": sorted(set(declared_ids)-{row["task_id"] for row in collected}),
-            "failed_conversations": failed, "reuse_provider": True})
-        return collected
-    for conversation in identities:
-        directory = output/digest(conversation)[:20]
-        directory.mkdir(parents=True, exist_ok=True)
-        task_path = directory/"tasks.jsonl"
-        write_rows(task_path, grouped[conversation])
-        one_matrix = merge_config(local_matrix, {
-            "datasets": {dataset: {"inputs": {split: str(task_path)}}},
-            "cohorts": {split: {dataset: [row["task_id"] for row in grouped[conversation]]}}})
-        recorded = recorded_terminal_budget(directory)
-        if recorded:
-            collected.extend(rows(directory/"results.unscored.jsonl"))
-            failed.append(persist_p3_failure(directory, conversation, "; ".join(recorded)))
-            continue
-        try:
-            result = await run_dataset(actual, one_matrix, cell_method(policy, protocol),
-                dataset, split, directory, concurrency=1, question_fn=goal_policy.question_fn if goal_policy else None)
-            collected.extend(result)
-        except EngineError as exc:
-            if exc.code != "READ_STEP_OUTPUT_TRUNCATED":
-                raise
-            collected.extend(rows(directory/"results.unscored.jsonl"))
-            failed.append(persist_p3_failure(directory, conversation, str(exc)))
-        except RuntimeError as exc:
-            if not terminal_model_budget(exc):
-                raise
-            collected.extend(rows(directory/"results.unscored.jsonl"))
-            failed.append(persist_p3_failure(directory, conversation, str(exc)))
-        except ValueError as exc:
-            if not terminal_model_budget(exc):
-                raise
-            collected.extend(rows(directory/"results.unscored.jsonl"))
-            failed.append(persist_p3_failure(directory, conversation, str(exc)))
-        except ExceptionGroup as group:
-            known, unknown = group.split(terminal_model_budget)
-            if unknown is not None:
-                raise unknown
-            collected.extend(rows(directory/"results.unscored.jsonl"))
-            failed.append(persist_p3_failure(directory, conversation, str(known)))
-    write_rows(output/"results.unscored.jsonl", collected)
-    write_json(output/"manifest.json", {"policy_identity": identity, "history_protocol": "P3 along each pair's own committed answers",
+    manifest = {"status": "running", "policy_identity": identity,
+        "history_protocol": "each conversation advances sequentially on its own committed answers",
+        "concurrency": concurrency, "cache_start_protocol": "cold_once_per_method_dataset",
         "task_ids": declared_ids, "scheduled_task_ids": scheduled_ids,
-        "missing_execution_task_ids": sorted(set(declared_ids)-{row["task_id"] for row in collected}),
-        "requested_conversations": identities, "completed_turns": len(collected), "failed_conversations": failed})
+        "requested_conversations": identities}
+    write_json(output/"manifest.json", manifest)
+    collected = await run_dataset(actual, local_matrix, cell_method(policy, protocol),
+        dataset, split, output, concurrency=concurrency, limit_conversations=limit_conversations,
+        question_fn=goal_policy.question_fn if goal_policy else None)
+    failed = json.loads((output/"failed_conversations.json").read_text())
+    manifest.update(status="completed", completed_turns=len(collected),
+        missing_execution_task_ids=sorted(set(declared_ids)-{row["task_id"] for row in collected}),
+        failed_conversations=failed)
+    write_json(output/"manifest.json", manifest)
     return collected
 
 
@@ -479,10 +428,12 @@ async def compare(config, matrix, *, dataset, split, output, phase, frozen_recor
         "declared_cohorts": matrix.get("cohorts", {}).get(split, {}),
         "paired_contrasts_baseline_candidate": CELL_CONTRASTS,
         "reading_protocols": READING_PROTOCOLS, "read_protocol_version": READ_PROTOCOL_VERSION,
+        "query_assets": config["policy_comparison"]["query_assets"],
         "fixed_reader": fixed_reader_identity(config["policy_comparison"]["reader"]),
         "common_allocation": allocation_identity(method_config(config,
             {"id": "common", "strategy": "B7"}, matrix["datasets"][dataset], split)),
         "cache_policy": "native", "plan_gain_enabled": False,
+        "own_p3_concurrency": config["policy_comparison"]["concurrency"], "frozen_concurrency": 1,
         "frozen_records": str(frozen_records) if frozen_records else None,
         "frozen_records_sha256": file_digest(frozen_records) if frozen_records else None,
         "planned_frozen_states": len(records), "dataset": dataset, "split": split})
