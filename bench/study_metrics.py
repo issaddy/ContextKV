@@ -94,6 +94,62 @@ def _cost_summary(rows):
     return result
 
 
+def declared_queue_summary(rows, spec, task_ids):
+    """Delivered quality over the declared queue, with all paid requests retained.
+
+    Requests without a completed answer deliver zero quality. A completed answer
+    without a score remains unknown; its possible range is reported separately.
+    This queue measure accompanies the original benchmark and scored-subset means.
+    """
+    expected = set(map(str, task_ids))
+    selected = [row for row in rows if str(row["task_id"]) in expected]
+    by_id = {str(row["task_id"]): row for row in selected}
+    if len(by_id) != len(selected):
+        raise ValueError("a declared queue requires one saved execution per task")
+    completed = [row for row in selected if row["status"] == "completed"]
+    scored = [row for row in completed if _scored(row, spec)]
+    unknown = [row for row in completed if not _scored(row, spec)]
+    maximum = spec.get("normalization", 1.0)
+    components = {}
+    for name in _required(spec):
+        values = [_metric(row, name, spec)[0] for row in completed]
+        observed = [value for value in values if value is not None]
+        missing = len(values)-len(observed)
+        components[name] = {"observed_count": len(observed), "unscored_answers": missing,
+            "bounds": [(sum(observed)+fill*missing)/len(expected)
+                       for fill in (0, maximum)] if expected else [None, None]}
+
+    def aggregate(index):
+        values = [value["bounds"][index] for value in components.values()]
+        if not expected:
+            return None
+        if spec["primary_metric"] == "mtrageval_harmonic":
+            return 0.0 if 0 in values else len(values)/sum(1/value for value in values)
+        return values[0]
+
+    paid = {}
+    for name in ("total_input_tokens", "total_output_tokens", "gpu_gib_seconds",
+                 "host_gib_seconds", "online_compute_ms", "auxiliary_input_tokens",
+                 "auxiliary_output_tokens"):
+        observed = [(row, _number(row.get("cost", {}).get(name))) for row in selected]
+        measured = [(row, value) for row, value in observed if value is not None]
+        paid[name] = {"observed_total": sum(value for _, value in measured),
+            "failed_request_total": sum(value for row, value in measured if row["status"] != "completed"),
+            "measured_requests": len(measured),
+            "unmeasured_task_ids": [str(row["task_id"]) for row, value in observed if value is None]}
+    return {"declared": len(expected), "recorded": len(selected), "completed": len(completed),
+        "scored": len(scored), "completion_rate": len(completed)/len(expected) if expected else None,
+        "missing_execution_task_ids": sorted(expected-by_id.keys()),
+        "failed_task_ids": [str(row["task_id"]) for row in selected if row["status"] != "completed"],
+        "unscored_answer_task_ids": [str(row["task_id"]) for row in unknown],
+        "queue_primary_score": aggregate(0) if not unknown else None,
+        "queue_score_bounds": [aggregate(0), aggregate(1)], "components": components,
+        "scored_subset_primary": _primary(scored, spec), "cost": _cost_summary(selected),
+        "paid_cost": paid,
+        "quality_rule": "declared task denominator; no completed answer contributes zero; unscored completed answers remain unknown",
+        "cost_rule": "all saved requests including failures; observed totals retain unmeasured task IDs"}
+
+
 def _budget_reasons(matrix, cost):
     limits = matrix.get("resources", {})
     reasons = []

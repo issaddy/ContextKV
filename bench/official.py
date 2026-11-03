@@ -6,6 +6,7 @@ is not a controller dependency. The adapter preserves upstream metric algorithms
 from __future__ import annotations
 
 import argparse
+import ast
 from collections import Counter, defaultdict
 from hashlib import sha256
 from functools import partial
@@ -19,6 +20,7 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Mapping, Sequence
+from types import SimpleNamespace
 
 from adapters.mtrag import DATASET_COMMIT
 
@@ -238,6 +240,18 @@ def _structured_radbench(official, operation, *args):
         official.extract_conversation, official.split_conversation = extract, split
 
 
+def load_conditioning_rules(checkout):
+    """Load the pinned author's pure scoring rules without its model dependencies."""
+    path = Path(checkout)/"scripts/evaluation/judge_wrapper.py"
+    names = {"_get_answerability", "get_idk_score", "get_idk_underspec_score"}
+    source = ast.parse(path.read_text(), filename=str(path))
+    functions = ast.Module(body=[node for node in source.body
+        if isinstance(node, ast.FunctionDef) and node.name in names], type_ignores=[])
+    namespace = {}
+    exec(compile(functions, str(path), "exec"), namespace)
+    return SimpleNamespace(**{name: namespace[name] for name in names})
+
+
 def condition_metrics(official, rows, metrics):
     """Apply the pinned author's answerability rule to every metric component."""
     has_underspecified = any(
@@ -402,8 +416,7 @@ def main(argv=None):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in result))
     elif args.mode == "condition":
-        sys.path.insert(0, str(Path(args.checkout).resolve()/"scripts/evaluation"))
-        official = importlib.import_module("judge_wrapper")
+        official = load_conditioning_rules(args.checkout)
         result = load_jsonl(args.input)
         condition_metrics(official, result, args.metrics)
         target = Path(args.output)

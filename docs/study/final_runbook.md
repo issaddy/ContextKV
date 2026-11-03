@@ -147,3 +147,42 @@ done
 `runs/study/final-api-cost-index.json` 核对实际 API 响应。它们与训练前向、请求辅助编码器和物理积分分别保留。
 最后模型服务已停止；复现时在原指定容器按相应启动配置启动服务，并重新采集当前进程/设备范围的成本配置。
 最终统一入口为 `runs/study/final-index-v1/final-index.json` 与同目录 Markdown。
+
+## 2026-11-03 接续：完整队列参照
+
+接续源码位于同一容器的
+`/home/relay/songjiayun/ContextKV/runs/study-20261103-budget-loop/source`，
+从 `85f4ed4` 建立 `codex/context-budget-loop`。`data`、`models`、`runs`、`vendor`
+和 Python 环境链接到既有资产。重评结果为 `runs/study/reference-20261103/`；
+仓库保留可读数值索引 [reference_20261103.json](reference_20261103.json)。
+
+| 参照 | 完整队列 | 得分 |
+|---|---:|---:|
+| B 开发 B3 | 6/6 | 0.800000 |
+| B 开发 S3 λ0 / λ1e-5 | 各 6/6 | 0.633333 / 0.566667 |
+| 公开开发 P0_R0 | 27/27 | 加权 0.642963 |
+| 固定历史 P0_R0 / P1_R1 | 13/14、14/14 | 0.857143 / 0.978571 |
+| 各自 P3 P0_R0 / P1_R2 | 11/14、14/14 | 0.678571 / 0.782143 |
+
+完整队列交付质量以声明题数为分母，没有完成回答的题贡献零；完成但未评分的答案保留未知区间。
+原指标、共同完成子集和实际历史匹配另列。已有 2Wiki 测试答案用作者 evaluator 重评，
+40 题分母下 R0/R2 F1 为 49.770604 / 55.695208；测试结果不改变开发参照。
+
+`bench.reassess_saved` 只读取已有答案和评分，不调用模型。2Wiki 重跑作者 CPU evaluator；
+MT-RAG 用已保存 judge/algorithmic 分量运行作者条件化函数。示例：
+
+```bash
+.venv-sglang/bin/python -m bench.reassess_saved \
+  --matrix runs/study/rolling-r0-bridge-final-v4/dev/matrix.json \
+  --rows runs/study/rolling-r0-bridge-final-v4/dev/results.jsonl \
+  --output runs/study/repro-reference/b-dev \
+  --split dev --baseline B3 --history-protocol own_p3 \
+  --execution-root B3=runs/study/rolling-r0-bridge-final-v4/jobs/dev-B3-multidoc2dial-00000 \
+  --execution-root S3-lambda0=runs/study/rolling-r0-bridge-final-v4/jobs/dev-S3-lambda0-multidoc2dial-00000 \
+  --execution-root S3-lambda1e-05=runs/study/rolling-r0-bridge-final-v4/jobs/dev-S3-lambda1e-05-multidoc2dial-00000 \
+  --cost-asset runs/study/full-cost-ledger.json
+```
+
+每个方法的 `costs/<method>/native.json` 从全部声明执行目录的 SQLite 提取原生步骤回执，
+包括没有最终结果行的中断请求。报告同时保存全部请求行成本、缺失测量项目和物理批次文件；
+原生 token、全在线模型 token 与物理积分保持各自口径。重评过程中未产生新的模型调用。
