@@ -53,25 +53,29 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
                   and set(task.predecessor_step_ids) <= completed)
     if ready:
         add("read_once", ready[:1])
-    selector = numeric_selection_task(base, frozen.results, frozen.claims)
-    selector_id = numeric_selection_step_id(base)
-    selection = next((result for result in reversed(frozen.results) if selector_id is not None
-                      and (result.step_id == selector_id or
-                           (result.reduction is not None and result.reduction.step_id == selector_id))), None)
     shared_needs = {need_id for task in base.steps if task.kind == "READ"
                     for scope in task.shared_numeric_scopes for need_id in scope.need_ids}
-    same_selection = {record.step_id for record in frozen.steps
-                      if selection is not None and selection.step_id in record.task.predecessor_step_ids}
-    if selector is not None:
-        add("reduce_once", (selector,))
+    selector = None
+    for need in base.task_state.needs:
+        if need.need_id in shared_needs:
+            selector = numeric_selection_task(base, frozen.results, frozen.claims, need_id=need.need_id)
+            if selector is not None:
+                add("reduce_once", (selector,))
+                break
     for need in (() if selector is not None else base.task_state.needs):
         if need.operation not in {"enumerate", "count", "sum", "group", "compare", "infer"}:
             continue
         shared_numeric = need.need_id in shared_needs
         if shared_numeric:
+            selector_id = numeric_selection_step_id(base, need.need_id)
+            selection = next((result for result in reversed(frozen.results)
+                if result.step_id == selector_id or
+                (result.reduction is not None and result.reduction.step_id == selector_id)), None)
             if selection is None:
                 continue
             claims = numeric_reduction_inputs(base, need.need_id, frozen.results)
+            same_selection = {record.step_id for record in frozen.steps
+                              if selection.step_id in record.task.predecessor_step_ids}
         else:
             claims = tuple(claim for claim in frozen.claims if claim.kind == "extract" and claim.serves(need.need_id))
             if not claims:

@@ -65,26 +65,26 @@ def _reduction_tasks(plan, state):
     completed.update(result.reduction.step_id for result in state.results if result.reduction is not None)
     shared_needs = {need_id for task in plan.steps if task.kind == "READ"
                     for scope in task.shared_numeric_scopes for need_id in scope.need_ids}
-    selector_id = numeric_selection_step_id(plan)
-    selection = next((result for result in reversed(state.results) if selector_id is not None
-                      and (result.step_id == selector_id or
-                           (result.reduction is not None and result.reduction.step_id == selector_id))), None)
-    selector = numeric_selection_task(plan, state.results, state.claims)
     planned_ids = {task.step_id for task in plan.steps}
     tasks = []
-    if selector is not None and selector.step_id not in planned_ids:
-        tasks.append(selector)
-    if selection is not None:
-        tasks.extend(record.task for record in state.steps
-                     if record.step_id not in planned_ids and record.task.operation == "numeric_select"
-                     and (record.step_id == selection.step_id or record.step_id.startswith(selector_id+":part:")))
     for need in plan.task_state.needs:
         if not summarize and need.operation not in {"enumerate", "compare", "count", "sum", "group", "infer"}:
             continue
         shared_numeric = need.need_id in shared_needs
-        if shared_numeric and selection is None:
-            continue
-        predecessors = (*read_ids, selection.step_id) if shared_numeric else read_ids
+        if shared_numeric:
+            selector_id = numeric_selection_step_id(plan, need.need_id)
+            selector = numeric_selection_task(plan, state.results, state.claims, need_id=need.need_id)
+            if selector is not None and selector.step_id not in planned_ids:
+                tasks.append(selector)
+            selection = next((result for result in reversed(state.results)
+                if result.step_id == selector_id or
+                (result.reduction is not None and result.reduction.step_id == selector_id)), None)
+            if selection is None:
+                continue
+            tasks.extend(record.task for record in state.steps
+                if record.step_id not in planned_ids and record.task.operation == "numeric_select"
+                and (record.step_id == selection.step_id or record.step_id.startswith(selector_id+":part:")))
+        predecessors = (selection.step_id,) if shared_numeric else read_ids
         if any(task.kind == "REDUCE" and need.need_id in task.need_ids
                and task.predecessor_step_ids == predecessors for task in plan.steps):
             continue

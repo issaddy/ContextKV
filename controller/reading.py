@@ -794,28 +794,31 @@ def _numeric_read_views(plan):
             tuple(need.need_id for need in plan.task_state.needs if need.need_id in scoped))
 
 
-def numeric_selection_step_id(plan):
+def numeric_selection_step_id(plan, need_id):
     read_ids, need_ids = _numeric_read_views(plan)
-    return "select_numeric:"+sha256(json.dumps(read_ids).encode()).hexdigest()[:16] if need_ids else None
+    if need_id not in need_ids:
+        return None
+    identity = sha256(json.dumps((read_ids, need_id)).encode()).hexdigest()[:16]
+    return f"select_numeric:{identity}"
 
 
-def numeric_selection_task(plan, results, claims=None):
-    """Select shared numeric evidence once for the complete current READ set."""
+def numeric_selection_task(plan, results, claims=None, *, need_id):
+    """Select evidence for one Need over the complete current READ set."""
     read_ids, need_ids = _numeric_read_views(plan)
-    step_id = numeric_selection_step_id(plan)
+    step_id = numeric_selection_step_id(plan, need_id)
     completed = {result.step_id for result in results}
     completed.update(result.reduction.step_id for result in results if result.reduction is not None)
     if step_id is None or step_id in completed or not set(read_ids) <= completed:
         return None
     extracted = tuple(claim for result in results if result.step_id in read_ids
                       for claim in result.claims if claim.kind == "extract"
-                      and any(claim.serves(need_id) for need_id in need_ids))
+                      and any(claim.serves(shared_id) for shared_id in need_ids))
     if claims is not None:
         basis_ids = {claim.claim_id for claim in extracted}
         extracted = tuple(claim for claim in claims if claim.claim_id in basis_ids)
     basis = tuple(claim.claim_id for claim in extracted)
     output_budget = plan.budget.read_output_tokens
-    task = ReadTask(step_id, "REDUCE", need_ids, input_claim_ids=basis,
+    task = ReadTask(step_id, "REDUCE", (need_id,), input_claim_ids=basis,
         reduction_basis_claim_ids=basis, predecessor_step_ids=read_ids,
         input_budget=plan.budget.window_tokens-output_budget, output_budget=output_budget,
         operation="numeric_select")
@@ -827,7 +830,7 @@ def numeric_reduction_inputs(plan, need_id, results):
     if need_id not in need_ids:
         return tuple(claim for result in results for claim in result.claims
                      if claim.kind == "extract" and claim.serves(need_id))
-    selector_id = numeric_selection_step_id(plan)
+    selector_id = numeric_selection_step_id(plan, need_id)
     selection = next((result for result in reversed(results) if result.step_id == selector_id
                       or (result.reduction is not None and result.reduction.step_id == selector_id)), None)
     if selection is None:
@@ -849,21 +852,22 @@ def advance_read_plan(plan, results, budget=None):
         return pending
     if plan.reading_mode == "coverage_only":
         return ()
-    selector = numeric_selection_task(plan, results)
-    if selector is not None:
-        return (selector,)
     read_ids, numeric_need_ids = _numeric_read_views(plan)
-    selector_id = numeric_selection_step_id(plan)
+    selectors = tuple(selector for need_id in numeric_need_ids
+                      if (selector := numeric_selection_task(plan, results, need_id=need_id)) is not None)
+    if selectors:
+        return selectors
     summarize = bool(read_ids) and all(step.operation == "summarize"
                                       for step in plan.steps if step.kind == "READ")
     reductions = []
     for need in plan.task_state.needs:
         if not summarize and need.operation not in {"enumerate", "compare", "count", "sum", "group", "infer"}:
             continue
-        step_id = f"reduce:{need.need_id}:{selector_id if need.need_id in numeric_need_ids else len(read_ids)}"
+        selector_id = numeric_selection_step_id(plan, need.need_id)
+        step_id = f"reduce:{need.need_id}:{selector_id if selector_id is not None else len(read_ids)}"
         if step_id in completed:
             continue
-        selected_numeric = need.need_id in numeric_need_ids and selector_id in completed
+        selected_numeric = selector_id is not None and selector_id in completed
         inputs = numeric_reduction_inputs(plan, need.need_id, results)
         if not inputs and not selected_numeric:
             continue
