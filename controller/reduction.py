@@ -21,6 +21,8 @@ UNIT_FACTORS = {
     "美元": ("USD", Decimal(1)), "USD": ("USD", Decimal(1)),
     "元": ("CNY", Decimal(1)), "CNY": ("CNY", Decimal(1)),
     "万元": ("CNY", Decimal(10000)),
+    "credit": ("credit", Decimal(1)), "credits": ("credit", Decimal(1)),
+    "Credit": ("credit", Decimal(1)), "Credits": ("credit", Decimal(1)),
 }
 
 
