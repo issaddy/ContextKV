@@ -96,7 +96,10 @@ NUMERIC_SELECT_SYSTEM = (
     "Select the parent facts that establish each numeric Need under the question and active conditions. "
     "Use the original excerpts to check population membership and the requested quantity. "
     "Exclude background rows, even when they contain an identifier or number. Evaluate each Need "
-    "separately. Return format_version 6 JSON with one parent-alias array per Need in views. "
+    "separately. When the requested amounts refer to the counted population, both views use that "
+    "same eligibility rule: the sum may omit missing quantities but cannot add unrelated entities. "
+    "A sum parent must state the requested property in a compatible measurement unit. "
+    "Return format_version 6 JSON with one parent-alias array per Need in views. "
     "Include every qualifying parent once per applicable view, or an empty array when none qualifies. "
     "Return only aliases. The controller preserves the original facts and computes count and sum."
 )

@@ -1,7 +1,7 @@
 {
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
-  "gpu_status": "P1 auxiliary utility training running",
+  "gpu_status": "P1 fixed-history A40 cells, B train observations, and remaining formal P3 cells running",
   "evidence_scope": "The 350-task development reference is scored. Candidate full-development quality and P95 acceptance remain open.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
@@ -113,7 +113,6 @@
   },
   "pending": [
     "Run matched full-development protocol/planner cells",
-    "Finish P1 auxiliary utility training",
     "Run planner x protocol fixed-history cells and own-history P3",
     "Fit B from paired actual actions and complete native/value joint experiment",
     "Native/TTL15/TTL60/TTL180 paired windows, concurrency 1 and 4",
@@ -258,7 +257,12 @@
     ],
     "answered": 300,
     "full_denominator_quality": 0.44509019347880296,
-    "report": "runs/study/budget-loop-20261103/formal-dev-c4/reference-final/report.json"
+    "report": "runs/study/budget-loop-20261103/formal-dev-c4/reference-final/report.json",
+    "remaining_three_p3_cells": {
+      "status": "launched",
+      "launch": "runs/study/budget-loop-20261103/formal-dev-c4-grounded/launch.json",
+      "first_P0_long_protocol": "pre-selection wire5; excluded from final new-protocol P0 long result"
+    }
   },
   "source_snapshots": {
     "baseline": "e3bf734",
@@ -332,12 +336,12 @@
     "train_elapsed_ms": 845195.7591678947,
     "dev_elapsed_ms": 394441.01740047336,
     "cost_scope": "reader tokens only here; auxiliary, judge and physical ledgers remain separately recorded",
-    "full_collection_status": "train 1065 answers across 181 accepted of 200 declared states; dev 206 answers across 36 accepted of 40; utility training running",
+    "full_collection_status": "train 1065 answers across 181 accepted of 200 declared states; dev 206 answers across 36 accepted of 40; utility training completed",
     "artifact": "runs/study/budget-loop-20261103/p1-rewards/collection/abe4111aa70ddeeed0aa"
   },
   "B_observation_entry": {
     "implementation": "capture actual fixed-plan decision states without loading a gain model",
-    "status": "implemented; real B capture awaits frozen P1",
+    "status": "train observations running",
     "cohort": "original full200/40 manifest; unique source states counted before observation/action selection",
     "cost_model": {
       "schema": "pre_action_native_absolute_v1",
@@ -346,7 +350,8 @@
       "online_increment": "action absolute cost minus DIRECT absolute cost under the same current observation",
       "actual_signed_differences": "diagnostic labels; not the new online cost head target",
       "status": "implemented, not yet fitted or evaluated"
-    }
+    },
+    "automatic_driver_launch": "runs/study/budget-loop-20261103/b-workflow-dispatch/launch.json"
   },
   "P1_scoring": {
     "rubric": "necessary_points_grounding_conditions_versions_task_v2",
@@ -372,7 +377,18 @@
       "accepted_states": 181,
       "answers": 1065
     },
-    "utility_training_status": "running"
+    "utility_training_status": "completed",
+    "utility_training": {
+      "pairs": 1400,
+      "states_with_preferences": 147,
+      "accepted_states": 181,
+      "declared_states": 200,
+      "epochs": 3,
+      "checkpoint": "c00df91f26aa9b74e3d7b7dcc747fc5ecb201617769e5599629293c3ac131522",
+      "full_stage_elapsed_seconds_approx": 4752.76,
+      "head_optimizer_elapsed_ms": 32512,
+      "cost_scope": "The 32512 ms elapsed_ms covers head optimization only."
+    }
   },
   "fixed_history_attribution": {
     "declared_states": 40,
@@ -382,7 +398,7 @@
     "retrieval": "each P0/P1 planner executes its own query encoder and retrieval",
     "model": "fixed Qwen3-32B",
     "P0_status": "scored",
-    "P1_status": "queued after full utility training",
+    "P1_status": "task-first cell running; shared cell queued",
     "B_dev_observations": "captured during P1_source_first_shared only",
     "artifact": "runs/study/budget-loop-20261103/fixed-history-40",
     "judge_output_cap": 8192,
@@ -395,16 +411,17 @@
       "RB_llm_full_denominator": 0.61
     },
     "difference_percentage_points": 0.5,
-    "acceptance_status": "diagnostic only; target not reached"
+    "acceptance_status": "diagnostic only; target not reached",
+    "four_cell_report_launch": "runs/study/budget-loop-20261103/fixed-history-40/four-cell-report-launch.json"
   },
   "continuation": {
     "P1": "runs/study/budget-loop-20261103/p1-rewards/after-collection-stages.json",
-    "full_protocol_queue": "runs/study/budget-loop-20261103/formal-dev-c4/shared-stages.json",
+    "full_protocol_queue": "runs/study/budget-loop-20261103/formal-dev-c4-grounded/launch.json",
     "B_train_capture": "runs/study/budget-loop-20261103/b-observations",
-    "status": "P1 collection complete and utility training running; P1 attribution, real B state capture, C and final acceptance remain open"
+    "status": "P1 utility trained. P1 A40, B train observations, and remaining formal P3 cells running. Full-queue +5 percentage-point improvement remains unestablished."
   },
   "failure_artifact_cleanup": {
-    "redundant_bytes_removed": 938035695,
+    "redundant_bytes_removed": 1684181419,
     "original_ledger_retained": true
   },
   "numeric_compact_v7_first_long": {
@@ -424,5 +441,27 @@
     "all_online_output_tokens": 11797,
     "complete_ms": 227838.13,
     "finding": "The request completed within the window protocol. Numeric correctness remains unresolved."
+  },
+  "numeric_select_wire6_frozen_read_replay": {
+    "000": {
+      "count": 45,
+      "total_credits": 1035,
+      "correct": true
+    },
+    "001": {
+      "count": 41,
+      "total_credits": 861,
+      "correct": true
+    },
+    "002": {
+      "status": "sum failed after selecting blank-unit and USD rows",
+      "final_answer_delivered": false
+    },
+    "P0_full_long20_c4": {
+      "status": "waiting for P1 A40 to release GPU4",
+      "launch": "runs/study/budget-loop-20261103/numeric-selected-p3-c4/launch.json",
+      "role": "replace the pre-selection P0 long component"
+    },
+    "scope": "numeric selection and CPU aggregation only; no final ANSWER generation"
   }
 }
