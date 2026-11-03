@@ -79,20 +79,21 @@ class OpenAICompletionClient:
                 "chat_template": self.tokenizer.chat_template, "http_calls": self.calls,
                 "input_policy": "count complete messages; no truncation"}
 
-    def complete(self, messages, *, response_format=None, max_new_tokens=None):
+    def complete(self, messages, *, response_format=None, max_new_tokens=None, chat_template_kwargs=None):
         started = time.perf_counter()
         output_budget = self.config.max_new_tokens if max_new_tokens is None else max_new_tokens
+        template_kwargs = self.config.chat_template_kwargs if chat_template_kwargs is None else chat_template_kwargs
         # Tokenizer state/counters are local shared resources; the thread-safe
         # HTTP client need not serialize independent sessions while awaiting LLMs.
         with self._input_lock:
-            count = self.count_input_tokens(messages)
+            count = self.count_input_tokens(messages, chat_template_kwargs=template_kwargs)
             if count > self.config.max_input_tokens or count + output_budget > self.config.context_window:
                 return CompletionResult("input_over_budget", input_tokens=count,
                                         elapsed_ms=(time.perf_counter()-started)*1000)
             self.calls += 1
         body = {"model": self.config.model, "messages": messages, "temperature": self.config.temperature,
                 "max_tokens": output_budget, "stream": False,
-                "chat_template_kwargs": dict(self.config.chat_template_kwargs)}
+                "chat_template_kwargs": dict(template_kwargs)}
         if self.config.top_p is not None:
             body["top_p"] = self.config.top_p
         if response_format is not None:
@@ -115,9 +116,10 @@ class OpenAICompletionClient:
                 raw_response=response.text if response is not None else None,
                 elapsed_ms=(time.perf_counter()-started)*1000, error=f"{type(exc).__name__}: {exc}")
 
-    def count_input_tokens(self, messages):
+    def count_input_tokens(self, messages, *, chat_template_kwargs=None):
+        template_kwargs = self.config.chat_template_kwargs if chat_template_kwargs is None else chat_template_kwargs
         ids = self.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True,
-            return_dict=False, **self.config.chat_template_kwargs)
+            return_dict=False, **template_kwargs)
         return len(ids)
 
     def catalog_token_lengths(self, messages, documents):

@@ -16,7 +16,7 @@ from controller.templates import token_hash
 
 
 
-REVIEW_PROTOCOL = "visible_target_independent_review_v5"
+REVIEW_PROTOCOL = "visible_target_independent_review_v6"
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -206,10 +206,12 @@ async def review_reader_trace(trace, client, *, minimum_quality, reviewer_identi
         response_format = ({"type": "json_schema", "json_schema": {
             "name": "reader_"+stage, "strict": True, "schema": schema}} if schema is not None else None)
         result = await asyncio.to_thread(client.complete, messages,
-            response_format=response_format, max_new_tokens=limit)
+            response_format=response_format, max_new_tokens=limit,
+            chat_template_kwargs={"enable_thinking": stage == "review"})
         executed = result.status != "input_over_budget"
         record_call({"example_id": trace["example_id"], "stage": stage, "review_protocol": REVIEW_PROTOCOL,
-            "teacher_messages_sha256": digest(messages), "max_new_tokens": limit, **asdict(result),
+            "teacher_messages_sha256": digest(messages), "max_new_tokens": limit,
+            "enable_thinking": stage == "review", **asdict(result),
             "model_request_executed": executed, "model_input_tokens": result.input_tokens if executed else 0,
             "model_output_tokens": (result.usage.get("completion_tokens")
                 if result.usage is not None else None) if executed else 0})
@@ -363,7 +365,7 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
                     raise ValueError(f"fixed target {key} differs from trace: {trace['example_id']}")
     path = root/"reviews.jsonl"
     prior_targets = {row["example_id"]: row for row in rows(path)
-        if row.get("review_protocol") in {"visible_target_independent_review_v3", "visible_target_independent_review_v4"}
+        if row.get("review_protocol") == "visible_target_independent_review_v5"
         and "target_text" in row} if path.exists() else {}
     done = {row["example_id"] for row in rows(path) if row.get("review_protocol") == REVIEW_PROTOCOL} if path.exists() else set()
     sink = path.open("a", encoding="utf-8")
