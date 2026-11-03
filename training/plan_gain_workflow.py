@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
-import shutil
 import time
 from urllib.parse import urlsplit
 
@@ -19,19 +18,16 @@ async def workflow(config, settings):
     from controller.config import load_config
     root = Path(settings["output_dir"])
     root.mkdir(parents=True, exist_ok=False)
-    frozen = root/"inputs"
-    frozen.mkdir()
     provenance = {}
     inputs = ("task_labels", "actual_rollouts", "sources", "cohort_manifest")
     if settings.get("mode", "whole_plan") == "observed_actions":
         inputs += ("observed_states",)
     for name in inputs:
         original = Path(settings[name]).resolve()
-        target = frozen/(name+original.suffix)
-        shutil.copyfile(original, target)
-        provenance[name] = {"original": str(original), "snapshot": str(target.resolve()),
-            "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
-        settings[name] = str(target.resolve())
+        with original.open("rb") as source:
+            source_hash = hashlib.file_digest(source, "sha256").hexdigest()
+        provenance[name] = {"path": str(original), "sha256": source_hash}
+        settings[name] = str(original)
     write(root/"input-manifest.json", provenance)
     run = load_config(settings["run_config"])
     reader_url = settings.get("reader_base_url") or run.engine.base_url
@@ -94,7 +90,7 @@ def main(argv=None):
     parser.add_argument("--cache-start", choices=("observed", "cold"), default="observed")
     parser.add_argument("--scope-scan", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--mode", choices=("whole_plan", "observed_actions"), default="whole_plan")
-    parser.add_argument("--observed-states", help="Actual observed-state packets; snapshotted with the cohort inputs")
+    parser.add_argument("--observed-states", help="Actual observed-state packets registered with the cohort inputs")
     args = parser.parse_args(argv)
     if args.mode == "observed_actions" and not args.observed_states:
         parser.error("observed_actions requires --observed-states")
