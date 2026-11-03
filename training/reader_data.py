@@ -16,7 +16,7 @@ from controller.templates import token_hash
 
 
 
-REVIEW_PROTOCOL = "visible_target_independent_review_v3"
+REVIEW_PROTOCOL = "visible_target_independent_review_v4"
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -258,30 +258,42 @@ async def review_reader_trace(trace, client, *, minimum_quality, reviewer_identi
         target_text = fixed_target_text
     target_tokens = len(client.tokenizer.encode(target_text, add_special_tokens=False))+1
     review_properties = {**assessment, "visible_prompt_support": {"type": "boolean"},
+        "reason": {"type": "string", "maxLength": 512},
         "upstream_errors": {"type": "array", "items": {"type": "object", "properties": {
             "phase": {"type": "string", "enum": ["READ", "REDUCE"]},
             "step_id": {"type": "string"}, "reason": {"type": "string"}},
             "required": ["phase", "step_id", "reason"], "additionalProperties": False}}}
     review_schema = {"type": "object", "properties": review_properties,
         "required": list(review_properties), "additionalProperties": False}
-    review_system = ("Evaluate the supplied fixed target_text for the exact recorded reader prompt. "
-        "Return assessments only; the target remains unchanged. visible_prompt_support means its factual "
-        "claims follow from original sources or Reading conclusions inside messages. Additional original_sources "
-        "and additional_actual_history are verification evidence only. Evaluate source_support_verified "
-        "against those full originals independently of visible_prompt_support. If a visible reading conclusion "
-        "is wrong, record the responsible observed READ or REDUCE step in upstream_errors using reading_steps. "
-        "For READ inspect entities, quantities, units, conditions and scope; for REDUCE inspect "
-        "deduplication, arithmetic, bridge relations and source-parent chains. When no observed step establishes "
-        "upstream attribution, leave upstream_errors empty. A correct fact found "
-        "only in the verification evidence does not establish visible_prompt_support. Assess task binding, "
-        "conditions, versions, completeness and allowed citations for the fixed target. quality evaluates whether "
-        "the continuation actually performs the requested extraction, reasoning or final answering for this phase's "
-        "visible task/window. A phase name, placeholder, literal generic answer or empty shell is not a complete "
-        "continuation. Structurally valid empty claims/facts are incomplete when relevant visible facts are present. "
-        "Do not reward JSON validity alone. Return the assessment object matching output_schema.")
+    phase_review = {
+        "READ": ("Assess only atomic facts this CURRENT visible source window can contribute to its active Needs. "
+            "Do not require an answer to the whole question or facts located elsewhere in full originals. An irrelevant "
+            "document window, an isolated heading, or text such as a delivery-method heading without a relevant relation "
+            "can correctly yield empty claims/facts/support/conflicts/open_needs. If no relevant visible fact is omitted "
+            "and no unsupported assertion is made, this empty extraction is correct: source_support_verified, "
+            "visible_prompt_support and correct_task_binding can all be true and quality high. Absence of a claim is "
+            "not hallucination. Respect step_output_schema: never penalize missing followups/open_needs when the schema "
+            "forbids them. Judge completeness against this window, not the entire source archive."),
+        "REDUCE": ("Assess only reasoning over the claims supplied in the CURRENT visible reduction input. Check "
+            "arithmetic, units, deduplication, conditions and parent/source chains. Do not demand facts missing from "
+            "those input claims merely because they occur elsewhere in complete originals. Full originals verify "
+            "asserted facts independently; observed upstream extraction mistakes belong in upstream_errors."),
+        "ANSWER": ("Assess whether the fixed final answer uses the visible evidence/conclusions to address the whole "
+            "current question, with the requested conditions, coverage, values and citations. A phase label, generic "
+            "placeholder or empty shell is not a complete final answer.")}[trace["phase"]]
+    review_system = ("Independently assess the fixed target_text for the exact recorded reader messages. Return "
+        "assessments only and do not rewrite the target. "+phase_review+" visible_prompt_support means every asserted "
+        "fact follows from the exact messages; source_support_verified checks those assertions against complete "
+        "original_sources independently. Extra originals/history are verification evidence, never additional required "
+        "content for a READ window or REDUCE input. When an observed READ/REDUCE caused an error, identify it using "
+        "reading_steps in upstream_errors; do not invent attribution. Give a short reason for the lowest score or any "
+        "false assessment, or explain why a valid empty extraction is appropriate. Return the object matching "
+        "review_output_schema.")
     verification = reader_review_body(trace, answer_output_tokens=answer_output_tokens,
         target_text=target_text, reading_steps=reading_steps)
-    verification["output_schema"] = review_schema
+    verification["review_output_schema"] = review_schema
+    if structured:
+        verification["step_output_schema"] = trace["output_schema"]
     result = await complete("review", [{"role": "system", "content": review_system},
         {"role": "user", "content": json.dumps(verification, ensure_ascii=False)}], review_schema)
     terminal = terminal_record(result, "review")
@@ -295,7 +307,8 @@ async def review_reader_trace(trace, client, *, minimum_quality, reviewer_identi
         "target_origin": "teacher_visible_runtime_prompt" if fixed_target_text is None else "fixed_existing_target_audit",
         "target_text": target_text,
         "target_tokens_including_eos": target_tokens, "target_output_budget": body["target_output_budget_tokens"],
-        "quality": value["quality"], "source_support_verified": value["source_support_verified"],
+        "quality": value["quality"], "reason": value["reason"],
+        "source_support_verified": value["source_support_verified"],
         "correct_task_binding": value["correct_task_binding"], "reviewer_identity": reviewer_identity,
         "read_protocol_version": trace["read_protocol_version"],
         "quality_measurement": "independent assessment of fixed target against complete original sources",
@@ -339,6 +352,8 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
                 if target[key] != trace[key]:
                     raise ValueError(f"fixed target {key} differs from trace: {trace['example_id']}")
     path = root/"reviews.jsonl"
+    prior_targets = {row["example_id"]: row for row in rows(path)
+        if row.get("review_protocol") == "visible_target_independent_review_v3" and "target_text" in row} if path.exists() else {}
     done = {row["example_id"] for row in rows(path) if row.get("review_protocol") == REVIEW_PROTOCOL} if path.exists() else set()
     sink = path.open("a", encoding="utf-8")
     ledger = (root/"review_calls.jsonl").open("a", encoding="utf-8")
@@ -358,8 +373,8 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
                 review_input_budget=review["max_input_tokens"], record_call=record_call,
                 answer_output_tokens=data.get("answer_output_tokens", 1024),
                 reading_steps=reading_steps.get(trace.get("attempt_id"), ()),
-                fixed_target_text=fixed_targets[trace["example_id"]]["target_text"]
-                    if fixed_targets is not None else None)
+                fixed_target_text=(fixed_targets[trace["example_id"]]["target_text"] if fixed_targets is not None
+                    else prior_targets[trace["example_id"]]["target_text"] if trace["example_id"] in prior_targets else None))
             sink.write(json.dumps(record, ensure_ascii=False)+"\n")
             sink.flush()
     try:
@@ -417,6 +432,21 @@ def prepare_reader_data(config):
             "data_split": ("validation" if cohort[trace["task_id"]]["split"] == "dev" else "train")
                 if cohort is not None else "validation" if int(digest([settings["split_seed"], trace["conversation_id"]])[:8], 16)
                 /16**8 < settings["validation_fraction"] else "train"})
+    accepted_count = len(selected)
+    unique = {}
+    for row in selected:
+        key = (row["data_split"], row["phase"], row["prompt_token_hash"])
+        if key not in unique:
+            unique[key] = {**row, "source_example_ids": [row["example_id"]], "attempt_ids": [row["attempt_id"]]}
+            continue
+        kept = unique[key]
+        examples = [*kept["source_example_ids"], row["example_id"]]
+        attempts = list(dict.fromkeys((*kept["attempt_ids"], row["attempt_id"])))
+        if row["quality"] > kept["quality"]:
+            unique[key] = {**row, "source_example_ids": examples, "attempt_ids": attempts}
+        else:
+            kept.update(source_example_ids=examples, attempt_ids=attempts)
+    selected = list(unique.values())
     for split in ("train", "validation"):
         write_rows(root/f"{split}.jsonl", [row for row in selected if row["data_split"] == split])
     write_rows(root/"selection_exclusions.jsonl", excluded)
@@ -424,6 +454,8 @@ def prepare_reader_data(config):
                            for split in ("train", "validation")} for phase in ("READ", "REDUCE", "ANSWER")}
     manifest = {"schema_version": 1, "evidence_kind": "reviewed_actual_training_partition_reader_data",
         "turns": len({row["task_id"] for row in selected}), "examples": len(selected),
+        "accepted_before_deduplication": accepted_count, "duplicate_prompt_examples": accepted_count-len(selected),
+        "deduplication": "data_split, phase, prompt_token_hash; highest independent quality, first on ties",
         "training_turns": len({row["task_id"] for row in selected if row["data_split"] == "train"}),
         "data_splits": dict(Counter(row["data_split"] for row in selected)),
         "phase_splits": phase_counts,
@@ -494,7 +526,7 @@ def audit_reader_targets(config):
                     if review[name] != trace[name]:
                         findings.append(name+"_mismatch")
                 independent = review.get("review_protocol") in {
-                    "visible_target_independent_review_v1", "visible_target_independent_review_v2", REVIEW_PROTOCOL}
+                    "visible_target_independent_review_v1", "visible_target_independent_review_v2", "visible_target_independent_review_v3", REVIEW_PROTOCOL}
                 counts["independently_reviewed" if independent else "needs_independent_review"] += 1
                 if "visible_prompt_support" not in review:
                     findings.append("visibility_unverified")
