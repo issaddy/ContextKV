@@ -29,7 +29,9 @@ def verify_grounding(row, state, memory, client, *, record_path=None):
     refs = [ref for condition in state.conditions for ref in condition.value_spans]
     active_conditions = [state.raw_question[ref.start:ref.end] if ref.turn_id == state.current_turn_id
                          else history_text(ref, memory) for ref in refs]
-    body = {"question": row["question"], "actual_history": row["actual_history"],
+    body = {"question": row["question"], "actual_history": [
+        {name: turn[name] for name in ("turn_id", "user_text", "assistant_text")}
+        for turn in row["actual_history"]],
         "task_state": to_jsonable(state), "need_semantics_version": TASK_NEED_SEMANTICS_VERSION,
         "author_reference_history": row.get("reference_history", []),
         "task_query": state.query, "active_conditions": active_conditions,

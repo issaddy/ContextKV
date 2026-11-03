@@ -232,6 +232,12 @@ async def review_reader_trace(trace, client, *, minimum_quality, reviewer_identi
                 "raw_output": result.text, "finish_reason": result.finish_reason,
                 "input_tokens": result.input_tokens, "usage": result.usage,
                 "elapsed_ms": result.elapsed_ms, "model_request_executed": True}
+        if result.status == "completed" and not result.text.strip():
+            return {**common, "status": "teacher_"+stage+"_empty",
+                "exclusion_reason": "teacher_returned_no_final_output", "review_stage": stage,
+                "target_origin": "not_generated" if stage == "target" else "visible_prompt_target_awaiting_review",
+                "input_tokens": result.input_tokens, "usage": result.usage,
+                "elapsed_ms": result.elapsed_ms, "model_request_executed": True}
         if result.status != "completed" or result.finish_reason != "stop":
             raise RuntimeError(f"reader {stage} unfinished for {trace['example_id']}: {result.status}/{result.finish_reason}")
         return None
@@ -366,8 +372,18 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
                     raise ValueError(f"fixed target {key} differs from trace: {trace['example_id']}")
     path = root/"reviews.jsonl"
     prior_targets = {row["example_id"]: row for row in rows(path)
-        if row.get("review_protocol") == "visible_target_independent_review_v5"
+        if row.get("review_protocol") in {"visible_target_independent_review_v5", REVIEW_PROTOCOL}
         and "target_text" in row} if path.exists() else {}
+    calls_path = root/"review_calls.jsonl"
+    generated_targets = {row["example_id"]: row["text"] for row in rows(calls_path)
+        if row.get("review_protocol") == REVIEW_PROTOCOL and row["stage"] == "target"
+        and row["status"] == "completed" and row["finish_reason"] == "stop" and row["text"]} if calls_path.exists() else {}
+    for trace in trace_rows:
+        identity = trace["example_id"]
+        if identity in generated_targets and identity not in prior_targets:
+            value = generated_targets[identity]
+            prior_targets[identity] = {"target_text": json.dumps(json.loads(value), ensure_ascii=False,
+                separators=(",", ":")) if trace["phase"] != "ANSWER" else value}
     done = {row["example_id"] for row in rows(path) if row.get("review_protocol") == REVIEW_PROTOCOL} if path.exists() else set()
     sink = path.open("a", encoding="utf-8")
     ledger = (root/"review_calls.jsonl").open("a", encoding="utf-8")
