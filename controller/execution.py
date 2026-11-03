@@ -16,6 +16,31 @@ from .session_store import ReadingProgress
 from .templates import step_request
 
 
+def reduction_basis_ids(task, inputs, results):
+    if task.operation in {"count", "sum"}:
+        for result in reversed(results):
+            selection = result.reduction
+            if (selection is not None and selection.operation == "numeric_select"
+                    and {selection.step_id, result.step_id}.intersection(task.predecessor_step_ids)):
+                return selection.basis_claim_ids
+    return tuple(claim.claim_id for claim in inputs)
+
+
+def aggregate_numeric_view(task, inputs, plan, results):
+    claim = reduce_claims(task.operation, inputs,
+        claim_id=f"{task.step_id}:claim:0", need_id=task.need_ids[0])
+    if not inputs and task.operation in {"count", "sum"}:
+        selections = [result.reduction for result in results if result.reduction is not None
+                      and result.reduction.operation == "numeric_select"
+                      and {result.reduction.step_id, result.step_id}.intersection(task.predecessor_step_ids)]
+        if selections:
+            # The empty view is proved by the completed selection over the read scope.
+            claim = replace(claim, parent_claim_ids=selections[-1].basis_claim_ids,
+                source_spans=tuple(dict.fromkeys(span for unit in plan.selected_set.selected_units
+                                                 for span in unit.source_spans)))
+    return claim
+
+
 class ReadingBudgetExceeded(ValueError):
     pass
 
@@ -81,7 +106,9 @@ class ReadingExecutor:
             raise ValueError("execute_one requires a selected READ or REDUCE")
         if task.step_id in {record.step_id for record in state.steps}:
             raise ValueError("the selected logical step has already completed")
-        if not set(task.predecessor_step_ids) <= {result.step_id for result in state.results}:
+        completed = {result.step_id for result in state.results}
+        completed.update(result.reduction.step_id for result in state.results if result.reduction is not None)
+        if not set(task.predecessor_step_ids) <= completed:
             raise ValueError("the selected logical step has unfinished predecessors")
         if len(state.steps)+2 > plan.budget.max_steps:
             raise ReadingBudgetExceeded("selected step leaves no terminal ANSWER allocation")
@@ -97,8 +124,7 @@ class ReadingExecutor:
         if cpu:
             tick = time.monotonic()
             native_workload = await self.engine.metrics()
-            claim = reduce_claims(task.operation, selected_claims,
-                claim_id=f"{task.step_id}:claim:0", need_id=task.need_ids[0])
+            claim = aggregate_numeric_view(task, selected_claims, plan, state.results)
             ended = time.monotonic()
             result = ReadResult(task.step_id, (claim,), elapsed_ms=(ended-tick)*1000)
             record = StepRecord(attempt_id, task.step_id, task, result=result,
@@ -123,9 +149,10 @@ class ReadingExecutor:
                 len(rendered.input_ids)+task.output_budget, task.kind)
             record = await self._generate_step(attempt_id, snapshot, plan, task, selected_units, selected_claims)
         if task.kind == "REDUCE":
-            frontier = claim_frontier(selected_claims, record.result.claims)
+            frontier = (record.result.claims if task.operation == "numeric_select"
+                        else claim_frontier(selected_claims, record.result.claims))
             record = replace(record, result=replace(record.result, reduction=ReductionState(
-                task.step_id, task.need_ids, task.operation, task.input_claim_ids,
+                task.step_id, task.need_ids, task.operation, reduction_basis_ids(task, selected_claims, state.results),
                 tuple(claim.claim_id for claim in frontier), "merged")))
             self.store.save_execution_step(record, "COMPLETE")
         graph = ClaimGraph(state.claims)
@@ -382,7 +409,7 @@ class ReadingExecutor:
 
         def complete_reduction(task, basis, frontier, mode):
             completion = ReductionState(task.step_id, task.need_ids, task.operation,
-                tuple(claim.claim_id for claim in basis),
+                reduction_basis_ids(task, basis, results),
                 tuple(claim.claim_id for claim in frontier), mode)
             record = records[-1]
             record = replace(record, result=replace(record.result, reduction=completion))
@@ -403,7 +430,9 @@ class ReadingExecutor:
 
             if size(task, basis) <= task.input_budget:
                 result = await run_model(task, (), basis)
-                complete_reduction(task, basis, claim_frontier(basis, result.claims), "merged")
+                frontier = (result.claims if task.operation == "numeric_select"
+                            else claim_frontier(basis, result.claims))
+                complete_reduction(task, basis, frontier, "selected" if task.operation == "numeric_select" else "merged")
                 return
             packs, pack = [], []
             for claim in basis:
@@ -426,7 +455,12 @@ class ReadingExecutor:
                 child = replace(task, step_id=f"{task.step_id}:part:0:{index}",
                                 reduction_basis_claim_ids=(), retained_conclusion_tokens=targets[index])
                 result = await run_model(child, (), pack)
-                bundles.append((claim_frontier(pack, result.claims), (result.step_id,), targets[index]))
+                frontier = (result.claims if task.operation == "numeric_select"
+                            else claim_frontier(pack, result.claims))
+                bundles.append((frontier, (result.step_id,), targets[index]))
+            if task.operation == "numeric_select":
+                complete_reduction(task, basis, tuple(claim for bundle in bundles for claim in bundle[0]), "selected")
+                return
             level = 1
             while len(bundles) > 1:
                 groups, group = [], []
@@ -589,8 +623,7 @@ class ReadingExecutor:
                     tick = time.monotonic()
                     native_workload = await self.engine.metrics()
                     try:
-                        claim = reduce_claims(task.operation, selected_claims,
-                            claim_id=f"{task.step_id}:claim:0", need_id=task.need_ids[0])
+                        claim = aggregate_numeric_view(task, selected_claims, plan, results)
                     except ValueError as exc:
                         self.store.save_execution_step(StepRecord(attempt_id, task.step_id, task,
                             metrics={"cpu_reduce_ms": (time.monotonic()-tick)*1000,

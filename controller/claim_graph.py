@@ -17,7 +17,7 @@ class ClaimGraph:
             return
         for parent in claim.parent_claim_ids:
             self.claims[parent]
-        if claim.kind == "derived" and not claim.parent_claim_ids:
+        if claim.kind == "derived" and not claim.parent_claim_ids and not claim.source_spans:
             raise ValueError("a derived claim requires its inputs")
         if claim.kind == "extract" and not claim.source_spans:
             raise ValueError("an extracted claim requires original spans")
@@ -66,7 +66,7 @@ class ClaimGraph:
                        if claim.claim_id not in pending and claim.serves(need.need_id)
                        for parent in claim.parent_claim_ids}
             selected = tuple(claim for claim in self.claims.values()
-                if claim.serves(need.need_id) and (claim.claim_id in frontier
+                if claim.serves(need.need_id) and (claim.claim_id in frontier-parents
                     or claim.claim_id not in parents | managed | pending))
             spans = {span.span_id: span for claim in selected
                      for span in self.source_spans(claim.claim_id)}

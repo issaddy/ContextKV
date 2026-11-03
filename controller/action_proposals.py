@@ -7,6 +7,7 @@ import hashlib
 from .context_budget import bind_answer_window
 from .context_schema import OpenNeed, ReadTask
 from .plan_policy import complete_plan
+from .reading import numeric_reduction_inputs, numeric_selection_step_id, numeric_selection_task
 from .serialization import dumps
 
 
@@ -52,21 +53,42 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
                   and set(task.predecessor_step_ids) <= completed)
     if ready:
         add("read_once", ready[:1])
-    for need in base.task_state.needs:
+    selector = numeric_selection_task(base, frozen.results, frozen.claims)
+    selector_id = numeric_selection_step_id(base)
+    selection = next((result for result in reversed(frozen.results) if selector_id is not None
+                      and (result.step_id == selector_id or
+                           (result.reduction is not None and result.reduction.step_id == selector_id))), None)
+    shared_needs = {need_id for task in base.steps if task.kind == "READ"
+                    for scope in task.shared_numeric_scopes for need_id in scope.need_ids}
+    same_selection = {record.step_id for record in frozen.steps
+                      if selection is not None and selection.step_id in record.task.predecessor_step_ids}
+    if selector is not None:
+        add("reduce_once", (selector,))
+    for need in (() if selector is not None else base.task_state.needs):
         if need.operation not in {"enumerate", "count", "sum", "group", "compare", "infer"}:
             continue
-        claims = tuple(claim for claim in frozen.claims if claim.kind == "extract" and claim.serves(need.need_id))
-        if not claims:
-            continue
+        shared_numeric = need.need_id in shared_needs
+        if shared_numeric:
+            if selection is None:
+                continue
+            claims = numeric_reduction_inputs(base, need.need_id, frozen.results)
+        else:
+            claims = tuple(claim for claim in frozen.claims if claim.kind == "extract" and claim.serves(need.need_id))
+            if not claims:
+                continue
         inputs = tuple(claim.claim_id for claim in claims)
         operation = "union" if need.operation == "enumerate" else need.operation
         if any(result.reduction is not None and need.need_id in result.reduction.need_ids
                and result.reduction.operation == operation
-               and set(inputs) <= set(result.reduction.basis_claim_ids) for result in frozen.results):
+               and (result.step_id in same_selection if shared_numeric
+                    else set(inputs) <= set(result.reduction.basis_claim_ids))
+               for result in frozen.results):
             continue
+        predecessors = (selection.step_id,) if shared_numeric else tuple(
+            dict.fromkeys(claim.rsplit(":claim:", 1)[0] for claim in inputs))
         task = ReadTask("policy:observed:reduce:"+need.need_id+":"+identity, "REDUCE", (need.need_id,),
             input_claim_ids=inputs, reduction_basis_claim_ids=inputs,
-            predecessor_step_ids=tuple(dict.fromkeys(claim.rsplit(":claim:", 1)[0] for claim in inputs)),
+            predecessor_step_ids=predecessors,
             input_budget=base.budget.window_tokens-base.budget.read_output_tokens,
             output_budget=base.budget.read_output_tokens,
             operation=operation,

@@ -26,12 +26,13 @@ ZERO_AUX = {"input_tokens": 0, "output_tokens": 0, "compute_ms": 0.0, "models": 
 
 def namespace_plan(plan):
     """Content identity prevents read:0 from aliasing another plan's input."""
-    if plan.steps and all(task.step_id.startswith("policy:") for task in plan.steps):
+    if plan.steps and all(task.step_id.startswith("policy:") or task.operation == "numeric_select"
+                          for task in plan.steps):
         return plan
     units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
     mapped, tasks = {}, []
     for task in plan.steps:
-        if task.step_id.startswith("policy:"):
+        if task.step_id.startswith("policy:") or task.operation == "numeric_select":
             mapped[task.step_id] = task.step_id
             tasks.append(task)
             continue
@@ -51,31 +52,56 @@ def namespace_plan(plan):
 
 
 def _reduction_tasks(plan, state):
-    """Declare the complete reduction tail before its READ facts exist."""
+    """Declare reductions, waiting for the selected frontier of shared numeric views."""
+    from .reading import numeric_reduction_inputs, numeric_selection_step_id, numeric_selection_task
+
     if plan.reading_mode == "coverage_only":
         return ()
     read_ids = tuple(task.step_id for task in plan.steps if task.kind == "READ")
     if not read_ids:
         return ()
     summarize = all(task.operation == "summarize" for task in plan.steps if task.kind == "READ")
+    completed = {result.step_id for result in state.results}
+    completed.update(result.reduction.step_id for result in state.results if result.reduction is not None)
+    shared_needs = {need_id for task in plan.steps if task.kind == "READ"
+                    for scope in task.shared_numeric_scopes for need_id in scope.need_ids}
+    selector_id = numeric_selection_step_id(plan)
+    selection = next((result for result in reversed(state.results) if selector_id is not None
+                      and (result.step_id == selector_id or
+                           (result.reduction is not None and result.reduction.step_id == selector_id))), None)
+    selector = numeric_selection_task(plan, state.results, state.claims)
+    planned_ids = {task.step_id for task in plan.steps}
     tasks = []
+    if selector is not None and selector.step_id not in planned_ids:
+        tasks.append(selector)
+    if selection is not None:
+        tasks.extend(record.task for record in state.steps
+                     if record.step_id not in planned_ids and record.task.operation == "numeric_select"
+                     and (record.step_id == selection.step_id or record.step_id.startswith(selector_id+":part:")))
     for need in plan.task_state.needs:
         if not summarize and need.operation not in {"enumerate", "compare", "count", "sum", "group", "infer"}:
             continue
+        shared_numeric = need.need_id in shared_needs
+        if shared_numeric and selection is None:
+            continue
+        predecessors = (*read_ids, selection.step_id) if shared_numeric else read_ids
         if any(task.kind == "REDUCE" and need.need_id in task.need_ids
-               and task.predecessor_step_ids == read_ids for task in plan.steps):
+               and task.predecessor_step_ids == predecessors for task in plan.steps):
             continue
         operation = "summarize" if summarize else "union" if need.operation == "enumerate" else need.operation
         identity = hashlib.sha256(dumps((read_ids, need.need_id, operation)).encode()).hexdigest()[:24]
-        claims = tuple(claim.claim_id for claim in state.claims
-                       if claim.serves(need.need_id) and claim.kind == "extract"
-                       and claim.claim_id.rsplit(":claim:", 1)[0] in read_ids)
-        if set(read_ids) <= {result.step_id for result in state.results} and not claims:
+        if shared_numeric:
+            claims = tuple(claim.claim_id for claim in numeric_reduction_inputs(plan, need.need_id, state.results))
+        else:
+            claims = tuple(claim.claim_id for claim in state.claims
+                           if claim.serves(need.need_id) and claim.kind == "extract"
+                           and claim.claim_id.rsplit(":claim:", 1)[0] in read_ids)
+        if not shared_numeric and set(read_ids) <= completed and not claims:
             continue
         from .context_budget import reduction_output_budget
         output_budget = reduction_output_budget(plan, need.need_id)
         tasks.append(ReadTask("policy:reduce:"+identity, "REDUCE", (need.need_id,),
-            input_claim_ids=claims, predecessor_step_ids=read_ids,
+            input_claim_ids=claims, predecessor_step_ids=predecessors,
             input_budget=plan.budget.window_tokens-output_budget,
             output_budget=output_budget, operation=operation,
             retained_conclusion_tokens=tuple((identity, tokens) for identity, tokens

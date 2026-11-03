@@ -15,6 +15,7 @@ from .templates import ByteTemplate
 
 READ_PROTOCOL_VERSION = 4
 SHARED_NUMERIC_PROTOCOL_VERSION = 5
+NUMERIC_SELECT_PROTOCOL_VERSION = 6
 CLAIM_WIRE_FIELDS = {"need_id": "n", "text": "t", "entity": "e", "relation": "r",
     "value": "v", "unit": "u", "conditions": "c", "span_ids": "s",
     "parent_claim_ids": "p", "followups": "f"}
@@ -90,6 +91,14 @@ REDUCE_SYSTEM = (
     "Each derived claim names the input parent_claim_ids used. Preserve conflicting conditions "
     "and versions. Only input claims provide facts. Attach a new conclusion's missing relations "
     "to its followups; top-level open_needs refer to supplied input claims."
+)
+NUMERIC_SELECT_SYSTEM = (
+    "Select the parent facts that establish each numeric Need under the question and active conditions. "
+    "Use the original excerpts to check population membership and the requested quantity. "
+    "Exclude background rows, even when they contain an identifier or number. Evaluate each Need "
+    "separately. Return format_version 6 JSON with one parent-alias array per Need in views. "
+    "Include every qualifying parent once per applicable view, or an empty array when none qualifies. "
+    "Return only aliases. The controller preserves the original facts and computes count and sum."
 )
 SUMMARY_READ_SYSTEM = (
     "Summarize the supplied document window for the question. Retain the main information and "
@@ -269,6 +278,15 @@ def shared_numeric_schema(task, schema, units, claims, numeric_identity):
 
 
 def output_schema(task, units=(), claims=(), *, reading_mode="typed_reduce", numeric_identity="names"):
+    if task.operation == "numeric_select":
+        needs, _, _ = numeric_aliases(task, (), claims)
+        views = {alias: _string_array(tuple(f"p{index}" for index, claim in enumerate(claims)
+                                           if claim.serves(need_id))) for alias, need_id in needs.items()}
+        return {"type": "object", "additionalProperties": False,
+                "properties": {"format_version": {"type": "integer", "const": NUMERIC_SELECT_PROTOCOL_VERSION},
+                    "views": {"type": "object", "additionalProperties": False,
+                              "properties": views, "required": list(views)}},
+                "required": ["format_version", "views"]}
     span_ids = tuple(dict.fromkeys(span.span_id for unit in units for span in unit.source_spans))
     parent_ids = tuple(claim.claim_id for claim in claims)
     fact = {
@@ -490,6 +508,19 @@ def stable_prefix_input_ids(template, plan, task, units, rendered):
 
 def step_messages(plan, task, units, claims=(), snapshot=None):
     state = plan.task_state
+    if task.operation == "numeric_select":
+        aliases, _, _ = numeric_aliases(task, (), claims)
+        needs = {need.need_id: need for need in state.needs}
+        payload = {"question": state.raw_question, "conditions": state.conditions,
+            "history": history_view(state, snapshot) if snapshot is not None else [],
+            "needs": {alias: needs[identity] for alias, identity in aliases.items()},
+            "parents": {f"p{index}": {"excerpt": claim.text, "conditions": claim.conditions,
+                                    "version": claim.version, "entity": claim.entity,
+                                    "relation": claim.relation, "value": claim.value, "unit": claim.unit}
+                        for index, claim in enumerate(claims)},
+            "output_schema": visible_output_schema(output_schema(task, claims=claims))}
+        return (Message("system", NUMERIC_SELECT_SYSTEM),
+                Message("user", json.dumps(to_jsonable(payload), ensure_ascii=False, separators=(",", ":"))))
     payload = {"question": state.raw_question,
                "task": {"task_id": state.task_id, "conditions": to_jsonable(state.conditions),
                         "needs": to_jsonable(tuple(need for need in state.needs if need.need_id in task.need_ids)),
@@ -753,6 +784,57 @@ def unresolved_needs(results):
     return tuple(pending.values())
 
 
+def _numeric_read_views(plan):
+    reads = tuple(task for task in plan.steps if task.kind == "READ")
+    scoped = {identity for task in reads for scope in task.shared_numeric_scopes for identity in scope.need_ids}
+    return (tuple(task.step_id for task in reads),
+            tuple(need.need_id for need in plan.task_state.needs if need.need_id in scoped))
+
+
+def numeric_selection_step_id(plan):
+    read_ids, need_ids = _numeric_read_views(plan)
+    return "select_numeric:"+sha256(json.dumps(read_ids).encode()).hexdigest()[:16] if need_ids else None
+
+
+def numeric_selection_task(plan, results, claims=None):
+    """Select shared numeric evidence once for the complete current READ set."""
+    read_ids, need_ids = _numeric_read_views(plan)
+    step_id = numeric_selection_step_id(plan)
+    completed = {result.step_id for result in results}
+    completed.update(result.reduction.step_id for result in results if result.reduction is not None)
+    if step_id is None or step_id in completed or not set(read_ids) <= completed:
+        return None
+    extracted = tuple(claim for result in results if result.step_id in read_ids
+                      for claim in result.claims if claim.kind == "extract"
+                      and any(claim.serves(need_id) for need_id in need_ids))
+    if claims is not None:
+        basis_ids = {claim.claim_id for claim in extracted}
+        extracted = tuple(claim for claim in claims if claim.claim_id in basis_ids)
+    basis = tuple(claim.claim_id for claim in extracted)
+    output_budget = plan.budget.read_output_tokens
+    task = ReadTask(step_id, "REDUCE", need_ids, input_claim_ids=basis,
+        reduction_basis_claim_ids=basis, predecessor_step_ids=read_ids,
+        input_budget=plan.budget.window_tokens-output_budget, output_budget=output_budget,
+        operation="numeric_select")
+    return replace(task, output_schema=output_schema(task, claims=extracted))
+
+
+def numeric_reduction_inputs(plan, need_id, results):
+    _, need_ids = _numeric_read_views(plan)
+    if need_id not in need_ids:
+        return tuple(claim for result in results for claim in result.claims
+                     if claim.kind == "extract" and claim.serves(need_id))
+    selector_id = numeric_selection_step_id(plan)
+    selection = next((result for result in reversed(results) if result.step_id == selector_id
+                      or (result.reduction is not None and result.reduction.step_id == selector_id)), None)
+    if selection is None:
+        return ()
+    frontier = (set(selection.reduction.frontier_claim_ids) if selection.reduction is not None
+                else {claim.claim_id for claim in selection.claims})
+    return tuple(claim for result in results for claim in result.claims
+                 if claim.claim_id in frontier and claim.serves(need_id))
+
+
 def advance_read_plan(plan, results, budget=None):
     """READ completion unlocks one typed reduction per requested operation."""
     budget = budget or plan.budget
@@ -764,20 +846,23 @@ def advance_read_plan(plan, results, budget=None):
         return pending
     if plan.reading_mode == "coverage_only":
         return ()
-    read_ids = tuple(step.step_id for step in plan.steps if step.kind == "READ")
+    selector = numeric_selection_task(plan, results)
+    if selector is not None:
+        return (selector,)
+    read_ids, numeric_need_ids = _numeric_read_views(plan)
+    selector_id = numeric_selection_step_id(plan)
     summarize = bool(read_ids) and all(step.operation == "summarize"
                                       for step in plan.steps if step.kind == "READ")
-    claims = tuple(claim for result in results for claim in result.claims)
     reductions = []
     for need in plan.task_state.needs:
         if not summarize and need.operation not in {"enumerate", "compare", "count", "sum", "group", "infer"}:
             continue
-        step_id = f"reduce:{need.need_id}:{len(read_ids)}"
+        step_id = f"reduce:{need.need_id}:{selector_id if need.need_id in numeric_need_ids else len(read_ids)}"
         if step_id in completed:
             continue
-        inputs = tuple(claim for claim in claims if claim.serves(need.need_id)
-                       and claim.kind == "extract")
-        if not inputs:
+        selected_numeric = need.need_id in numeric_need_ids and selector_id in completed
+        inputs = numeric_reduction_inputs(plan, need.need_id, results)
+        if not inputs and not selected_numeric:
             continue
         operation = "summarize" if summarize else "union" if need.operation == "enumerate" else need.operation
         from .context_budget import reduction_output_budget
@@ -785,7 +870,7 @@ def advance_read_plan(plan, results, budget=None):
         task = ReadTask(step_id, "REDUCE", (need.need_id,),
                         input_claim_ids=tuple(claim.claim_id for claim in inputs),
                         reduction_basis_claim_ids=tuple(claim.claim_id for claim in inputs),
-                        predecessor_step_ids=read_ids,
+                        predecessor_step_ids=(selector_id,) if selected_numeric else read_ids,
                         input_budget=budget.window_tokens-output_budget,
                         output_budget=output_budget, operation=operation,
                         retained_conclusion_tokens=tuple((identity, tokens) for identity, tokens
@@ -799,6 +884,18 @@ def advance_read_plan(plan, results, budget=None):
 def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_tokens=0, output_tokens=0):
     data = json.loads(text)
     wire_version = data.get("format_version", 1)
+    if wire_version == NUMERIC_SELECT_PROTOCOL_VERSION:
+        needs, _, parents = numeric_aliases(task, (), claims)
+        by_id = {claim.claim_id: claim for claim in claims}
+        selected = []
+        for alias, need_id in needs.items():
+            for parent_alias in dict.fromkeys(data["views"][alias]):
+                parent = by_id[parents[parent_alias]]
+                selected.append(replace(parent, claim_id=f"{task.step_id}:claim:{len(selected)}",
+                    need_id=need_id, kind="derived", operation="numeric_select",
+                    parent_claim_ids=(parent.claim_id,), shared_need_ids=()))
+        return ReadResult(task.step_id, tuple(selected), raw_output=text, elapsed_ms=elapsed_ms,
+                          input_tokens=input_tokens, output_tokens=output_tokens)
     spans = {span.span_id: span for unit in units for span in unit.source_spans}
     span_units = {span.span_id: unit for unit in units for span in unit.source_spans}
     units_by_id = {unit.unit_id: unit for unit in units}

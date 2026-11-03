@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import yaml
 
 from bench.study import dataset_rows, merge_config, method_config, run_dataset
-from controller.reading import READ_PROTOCOL_VERSION, SHARED_NUMERIC_PROTOCOL_VERSION
+from controller.reading import READ_PROTOCOL_VERSION, SHARED_NUMERIC_PROTOCOL_VERSION, NUMERIC_SELECT_PROTOCOL_VERSION
 from controller.serialization import decode, to_jsonable
 from controller.context_schema import TaskState
 from controller.schema import OnlineContext, OnlineMessage, OnlineTurn, TurnRecord
@@ -111,6 +111,7 @@ def cell_config(config, policy, protocol):
     identity = {"policy": policy, "read_protocol": protocol,
         "reading": READING_PROTOCOLS[protocol], "read_protocol_version": READ_PROTOCOL_VERSION,
         "shared_numeric_protocol_version": SHARED_NUMERIC_PROTOCOL_VERSION,
+        "numeric_selection_protocol_version": NUMERIC_SELECT_PROTOCOL_VERSION,
         "policy_asset": asset, "policy_heads_sha256": file_digest(Path(asset)/"heads.pt"),
         "policy_checkpoint": metadata.get("policy_checkpoint"),
         "query_asset": query_asset,
@@ -464,6 +465,7 @@ async def compare(config, matrix, *, dataset, split, output, phase, frozen_recor
         "paired_contrasts_baseline_candidate": CELL_CONTRASTS,
         "reading_protocols": READING_PROTOCOLS, "read_protocol_version": READ_PROTOCOL_VERSION,
         "shared_numeric_protocol_version": SHARED_NUMERIC_PROTOCOL_VERSION,
+        "numeric_selection_protocol_version": NUMERIC_SELECT_PROTOCOL_VERSION,
         "query_assets": config["policy_comparison"]["query_assets"],
         "fixed_reader": fixed_reader_identity(config["policy_comparison"]["reader"]),
         "common_allocation": allocation_identity(method_config(config,
