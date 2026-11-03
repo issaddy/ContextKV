@@ -27,9 +27,13 @@ task/support 配置必填 `training.cohort_manifest`；P1 采集必填
 `collection.cohort_manifest` 和 `cohort_split`，开发采集显式选择 `dev`。
 B 固定流程观测使用 `execution.state_observation`，从真实请求开始计量并记录 READ/REDUCE 决策状态；
 不加载 gain 模型，不从旧 SQLite 补造物理状态。A 冻结后显式启用。
+四格固定历史入口设置 `policy_comparison.audited_history:{cohort_manifest,cohort_split,actual_rollouts}`，
+各规划器对同一审核任务与真实 QA 执行自己的检索。P1 source-first 格可同时写 B 观测；原候选池重放入口另留作隔离对照。
 `training.collect_plan_gains --observations OBS --actual-turns TURNS --output PACKETS`
 导出后，`training.plan_gain_workflow --mode observed_actions --observed-states PACKETS`
 沿用源 cohort 身份。每个源 task 保留各合法动作首次可配对的观测，不按未来质量选点。
+`observed_actions` 沿用源动作的输出份额，不扫描 `read-outputs`；当前 181/36 个有效状态的生成预算上限设为 3041，声明分母仍为 200/40。
+新成本拟合读取各分支 `run.json.pre_action_quote`，质量与成本分别归一化；`cold` 数据只能说明冷启动费用，`observed` 保留实际分支起点，不声称恢复源缓存。
 B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
 `--cohort-manifest` 指向同一文件；不再使用 `--partition-seed` 或 `--dev-fraction`
 重新划分状态，实际采集数量从声明分区内选择并单独记录。

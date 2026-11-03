@@ -134,10 +134,7 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes):
                 prefixes = () if candidate is None else tuple(reusable_prefixes.get(candidate.candidate_id, ()))
                 decisions.append((evaluation, Decision(NextStep(plan.plan_id, replace(task, output_budget=output),
                     candidate, prefixes), action, output)))
-    if native_cost:
-        if direct_prediction is None:
-            policy.last_evaluations = tuple(evaluations)
-            raise NoCompletePlan("native action deltas require a DIRECT quote in the same observation")
+    if native_cost and direct_prediction is not None:
         offset = policy._penalty(regression_cost(direct_prediction), state.plan.budget)
         evaluations = [replace(row, objective=row.objective+offset) if row.objective is not None else row
                        for row in evaluations]

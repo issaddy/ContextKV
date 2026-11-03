@@ -205,23 +205,33 @@
         "declared": 209,
         "answered": 183,
         "generation_failures": 8,
-        "blocked_or_failed_tasks": 26
+        "blocked_or_failed_tasks": 26,
+        "scored": 183,
+        "full_denominator_quality": 0.5822966507177033
       },
       "mtrag": {
         "declared": 41,
         "answered": 41,
-        "scored": 40,
-        "full_denominator_quality": null,
+        "scored": 41,
+        "full_denominator_quality": 0.32660479305396806,
         "quality_bounds": [
           0.32660479305396806,
-          0.33091407889531727
+          0.32660479305396806
         ],
-        "missing_score_components": {
-          "b4614daadceeecb400f7baf0aa48dcb8<::>3": [
-            "RL_F"
-          ]
-        },
-        "missing_score_reason": "official factuality JSON reached the fixed 2048 output cap; no synthetic replacement"
+        "RL_F_completion": {
+          "task_id": "b4614daadceeecb400f7baf0aa48dcb8<::>3",
+          "metric": 0.0,
+          "original_call_output_cap": 2048,
+          "completion_output_cap": 8192,
+          "completed_http_calls": 2,
+          "finish_reasons": [
+            "stop",
+            "stop"
+          ],
+          "original_answers_and_rubric_unchanged": true,
+          "conditioning": "rerun using pinned official rules over all 41 rows",
+          "artifact": "runs/study/budget-loop-20261103/formal-dev-c4/mtrag/p3/P0_task_first_isolated/scoring/rlf-completion"
+        }
       },
       "versionqa": {
         "declared": 80,
@@ -233,11 +243,17 @@
         "failure": "fixed task interpreter HTTP ReadTimeout at 60 seconds"
       }
     },
-    "latency_acceptance_status": "not established: incomplete responses and overlapping auxiliary/scorer load on the shared teacher are retained in the run ledger"
+    "latency_acceptance_status": "not established: incomplete responses and overlapping auxiliary/scorer load on the shared teacher are retained in the run ledger",
+    "shared_protocol_order": [
+      "loong",
+      "multidoc2dial",
+      "mtrag",
+      "versionqa"
+    ]
   },
   "source_snapshots": {
     "baseline": "e3bf734",
-    "candidate": "0c297a4",
+    "candidate": "c82c6ac",
     "baseline_directory": "runs/study-20261103-budget-loop/source",
     "candidate_directory": "runs/study-20261103-budget-loop/candidate-source",
     "shared_assets": [
@@ -313,7 +329,15 @@
   "B_observation_entry": {
     "implementation": "capture actual fixed-plan decision states without loading a gain model",
     "status": "implemented; real B capture awaits frozen P1",
-    "cohort": "original full200/40 manifest; unique source states counted before observation/action selection"
+    "cohort": "original full200/40 manifest; unique source states counted before observation/action selection",
+    "cost_model": {
+      "schema": "pre_action_native_absolute_v1",
+      "features": "pre-action GPU/Host free tokens, occupancy, evictable tokens, active/queued requests, and compiled first-action input/GPU-ready/Host-load tokens",
+      "fitting": "absolute branch costs from actual pre-action quotes; quality features unchanged",
+      "online_increment": "action absolute cost minus DIRECT absolute cost under the same current observation",
+      "actual_signed_differences": "diagnostic labels; not the new online cost head target",
+      "status": "implemented, not yet fitted or evaluated"
+    }
   },
   "P1_scoring": {
     "rubric": "necessary_points_grounding_conditions_versions_task_v2",
