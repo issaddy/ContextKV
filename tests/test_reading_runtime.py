@@ -168,7 +168,7 @@ async def test_gap_auxiliary_spend_stops_followup_generation_and_retains_cost(tm
     plan = build_read_plan(state, EvidenceSet("s", (unit,), source_blocks=(block,)),
         "selected_sources", ContextBudget(max_total_tokens=20000), template=ByteTemplate())
     reading = read_output(fact("a", entity="Alpha"), support=(), open_needs=({"need_id": "n",
-        "missing_relation": "Beta parent", "bound_entities": ["Beta"], "temporal_scope": [],
+        "missing_relation": "Beta parent", "bound_entities": ["Beta"], "temporal_scope": "current",
         "parent_claim_ids": ["read:0:claim:0"]},))
     engine = ScriptedReadingEngine([reading])
     store = SessionStore(tmp_path/"state.db")
