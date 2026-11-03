@@ -86,6 +86,7 @@ class BudgetedEvidencePlanner:
         frontier = [frozenset()]
         visited, retained, trace = set(), {}, []
         candidate_cache = {}
+        measurement_cache = {}
 
         def evaluate(ids):
             ordered = tuple(sorted(ids, key=lambda uid: (-by_id[uid].retrieval_score, uid)))
@@ -93,16 +94,26 @@ class BudgetedEvidencePlanner:
             closed_ids = frozenset(u.unit_id for u in units)
             if closed_ids in candidate_cache:
                 return candidate_cache[closed_ids]
-            body_tokens = (self.measure_body(units) if self.measure_body is not None else
-                           len(self.tokenizer.encode(render_unit_union(units), add_special_tokens=False)))
-            if body_tokens > budget.body_tokens:
-                return None
-            if budget.max_passages is not None and len(_passages(units)-self.passage_exclusions) > budget.max_passages:
-                return None
-            if self.measure_context is not None:
-                input_tokens = self.measure_context(state, units)
-                if input_tokens + budget.output_tokens > budget.window_tokens:
+            measurement_key = tuple(unit.unit_id for unit in units)
+            if measurement_key in measurement_cache:
+                body_tokens = measurement_cache[measurement_key]
+                if body_tokens is None:
                     return None
+            else:
+                body_tokens = (self.measure_body(units) if self.measure_body is not None else
+                               len(self.tokenizer.encode(render_unit_union(units), add_special_tokens=False)))
+                if body_tokens > budget.body_tokens:
+                    measurement_cache[measurement_key] = None
+                    return None
+                if budget.max_passages is not None and len(_passages(units)-self.passage_exclusions) > budget.max_passages:
+                    measurement_cache[measurement_key] = None
+                    return None
+                if self.measure_context is not None:
+                    input_tokens = self.measure_context(state, units)
+                    if input_tokens + budget.output_tokens > budget.window_tokens:
+                        measurement_cache[measurement_key] = None
+                        return None
+                measurement_cache[measurement_key] = body_tokens
             available = tuple(s for s in supports if set(s.unit_ids) <= closed_ids)
             best = tuple(max((s for s in available if s.need_id == need.need_id),
                             key=lambda s: s.joint_support*s.applicability)

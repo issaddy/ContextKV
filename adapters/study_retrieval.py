@@ -235,7 +235,8 @@ class StudyEvidenceProvider:
                 blocks = tuple(block for block in pool.source_blocks if block.key in source_keys)
                 evidence_set = EvidenceSet("measurement", units, source_blocks=blocks)
                 plan = ContextPlan("measurement", state, evidence_set, budget=self.budget)
-                candidates = build_plan_candidates(snapshot, query, plan, self.template, policy=policy, layouts=("existing",))
+                candidates = build_plan_candidates(snapshot, query, plan, self.template, policy=policy,
+                    layouts=("existing",), actions=("REBUILD",))
                 return next(len(candidate.input_ids) for candidate in candidates if candidate.action == "REBUILD")
 
             scores = SupportScores()

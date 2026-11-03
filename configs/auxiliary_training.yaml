@@ -9,6 +9,8 @@ training:
   task_labels: runs/study/budget-loop-20261103/task-labels/task_labels.jsonl
   task_eval_labels: runs/study/budget-loop-20261103/task-labels/dev_task_labels.jsonl
   task_source_paths: [runs/study/data/sources.jsonl]
+  task_dense_index: data/multidoc2dial/bge-m3-sections
+  adapter_lr: 0.00001
   task_output: models/study-task-budget-loop
   task_eval_output: runs/study/budget-loop-20261103/task-evaluation
   support_data_dir: runs/study/budget-loop-20261103/auxiliary-support

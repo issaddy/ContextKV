@@ -187,7 +187,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
 
 
 def build_plan_candidates(snapshot, query, plan, template, *, policy=None, outcome=None,
-                          layouts=None):
+                          layouts=None, actions=("REBUILD", "APPEND")):
     """Compile each legal action/layout for one semantic evidence plan."""
     from .context_budget import (append_legal, measure_window, task_instruction,
                                  working_history_messages, evidence_interval_covered, _covers)
@@ -353,7 +353,7 @@ def build_plan_candidates(snapshot, query, plan, template, *, policy=None, outco
             (blocks[key].span[0], blocks[key].span[0]+len(blocks[key].text))
             if blocks[key].span else (0, len(blocks[key].text)), intervals))
 
-    candidates = []
+    prompts = []
     for layout in layouts:
         if layout == "existing":
             ordered = units
@@ -373,11 +373,13 @@ def build_plan_candidates(snapshot, query, plan, template, *, policy=None, outco
             ordered = tuple(sorted(units, key=stable_rank))
         else:
             raise ValueError(f"unknown plan layout: {layout}")
-        current, spans = compile_user(ordered, len(history)+1)
-        variants = [("REBUILD", (system, *history, current), spans, visible_originals(spans), None)]
-        legal, reason = append_legal(snapshot, state, required,
-                                    tuple(span for unit in units for span in unit.source_spans))
-        if snapshot.execution is not None:
+        variants = []
+        if "REBUILD" in actions:
+            current, spans = compile_user(ordered, len(history)+1)
+            variants.append(("REBUILD", (system, *history, current), spans, visible_originals(spans), None))
+        if snapshot.execution is not None and "APPEND" in actions:
+            legal, reason = append_legal(snapshot, state, required,
+                                        tuple(span for unit in units for span in unit.source_spans))
             execution = snapshot.execution
             missing = tuple(u for u in ordered if any(not evidence_interval_covered(snapshot, s)
                                                        for s in u.source_spans))
@@ -385,40 +387,42 @@ def build_plan_candidates(snapshot, query, plan, template, *, policy=None, outco
             variants.append(("APPEND", (*execution.messages, current),
                 (*execution.evidence_spans, *new_spans), visible_originals((*execution.evidence_spans, *new_spans)),
                 None if legal else reason))
-        for action, messages, spans, visible, reason in variants:
-            rendered = template.render(messages)
-            window = measure_window(template, messages, plan.budget, rendered, history=history)
-            if not window.feasible:
-                reason = "context_window_budget"
-            if window.history_tokens > plan.budget.history_tokens:
-                reason = "working_history_budget"
-            if (action == "APPEND" and (snapshot.must_rebuild or snapshot.force_new_epoch_for_recovery
-                    or snapshot.history_sync_pending)):
-                reason = "required_rebuild"
-            if action == "APPEND":
-                if (snapshot.execution.template_hash != template.fingerprint.template_hash
-                        or snapshot.execution.model_revision != template.fingerprint.model_revision):
-                    reason = "configuration_changed"
-                elif snapshot.execution.messages[:1] != (system,):
-                    reason = "system_prompt_changed"
-                elif snapshot.execution.history_version != snapshot.raw_history_version:
-                    reason = "history_sync_requires_rebuild"
-            candidates.append(PromptCandidate(
-                candidate_id=dumps([plan.plan_id, selected.set_id, history_id, layout, action]),
-                action=action, snapshot_version=snapshot.version, messages=messages,
-                input_ids=rendered.input_ids, input_hash=rendered.input_hash,
-                visible_blocks=visible, required_blocks=required,
-                build_ms=(time.perf_counter()-started)*1000, feasible=reason is None, reason=reason,
-                evidence_spans=spans, reference_map=references,
-                theoretical_lcp=longest_common_prefix(rendered.input_ids, previous),
-                corpus_snapshot_id=snapshot.corpus_snapshot_id, fingerprint=template.fingerprint,
-                context_plan_id=plan.plan_id, evidence_set_id=selected.set_id,
-                working_history_id=history_id, layout_id=layout,
-                quality_prediction=next((quality for candidate_action, candidate_layout, quality
-                    in plan.candidate_qualities if candidate_action == action and candidate_layout == layout),
-                    selected.quality_prediction),
-                need_support=selected.need_support,
-                output_budget=plan.budget.output_tokens, predicted_read_ms=plan.predicted_cost_ms,
-                auxiliary_ms=sum(value for _, value in plan.auxiliary_ms),
-                cost_prediction_eligible=plan.cost_prediction_eligible if outcome is None else True))
+        prompts.extend((layout, *variant) for variant in variants)
+    rendered_prompts = template.render_many(tuple(prompt[2] for prompt in prompts))
+    candidates = []
+    for (layout, action, messages, spans, visible, reason), rendered in zip(prompts, rendered_prompts, strict=True):
+        window = measure_window(template, messages, plan.budget, rendered, history=history)
+        if not window.feasible:
+            reason = "context_window_budget"
+        if window.history_tokens > plan.budget.history_tokens:
+            reason = "working_history_budget"
+        if (action == "APPEND" and (snapshot.must_rebuild or snapshot.force_new_epoch_for_recovery
+                or snapshot.history_sync_pending)):
+            reason = "required_rebuild"
+        if action == "APPEND":
+            if (snapshot.execution.template_hash != template.fingerprint.template_hash
+                    or snapshot.execution.model_revision != template.fingerprint.model_revision):
+                reason = "configuration_changed"
+            elif snapshot.execution.messages[:1] != (system,):
+                reason = "system_prompt_changed"
+            elif snapshot.execution.history_version != snapshot.raw_history_version:
+                reason = "history_sync_requires_rebuild"
+        candidates.append(PromptCandidate(
+            candidate_id=dumps([plan.plan_id, selected.set_id, history_id, layout, action]),
+            action=action, snapshot_version=snapshot.version, messages=messages,
+            input_ids=rendered.input_ids, input_hash=rendered.input_hash,
+            visible_blocks=visible, required_blocks=required,
+            build_ms=(time.perf_counter()-started)*1000, feasible=reason is None, reason=reason,
+            evidence_spans=spans, reference_map=references,
+            theoretical_lcp=longest_common_prefix(rendered.input_ids, previous),
+            corpus_snapshot_id=snapshot.corpus_snapshot_id, fingerprint=template.fingerprint,
+            context_plan_id=plan.plan_id, evidence_set_id=selected.set_id,
+            working_history_id=history_id, layout_id=layout,
+            quality_prediction=next((quality for candidate_action, candidate_layout, quality
+                in plan.candidate_qualities if candidate_action == action and candidate_layout == layout),
+                selected.quality_prediction),
+            need_support=selected.need_support,
+            output_budget=plan.budget.output_tokens, predicted_read_ms=plan.predicted_cost_ms,
+            auxiliary_ms=sum(value for _, value in plan.auxiliary_ms),
+            cost_prediction_eligible=plan.cost_prediction_eligible if outcome is None else True))
     return tuple(candidates)
