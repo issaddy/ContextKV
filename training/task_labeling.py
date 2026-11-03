@@ -60,6 +60,7 @@ def verify_grounding(row, state, memory, client, *, record_path=None):
         for name in ("source_support_verified",):
             schema["properties"][name] = {"type": "boolean"}
             schema["required"].append(name)
+    body["output_schema"] = schema
     completion = client.complete([{"role": "system", "content":
         "Review original source quotes against the current task resolved from ACTUAL assistant history. "
         "Mark script_history_mismatch if the authored next question presumes an object/condition/version not established "
@@ -77,7 +78,8 @@ def verify_grounding(row, state, memory, client, *, record_path=None):
         "unlike the generation wire's included boundary_chars. The current turn owns only the current user "
         "question; earlier assistant answers can identify conversation intent but are not source facts. "
         "Author reference history never establishes actual intent. Explain each Need's operation/scope judgment "
-        "and the history-reference judgment. Return assessments only; do not rewrite the fixed TaskState.\n\n"+
+        "and the history-reference judgment. Return the assessment JSON matching output_schema; "
+        "do not rewrite the fixed TaskState.\n\n"+
         TASK_NEED_SEMANTICS}, {"role": "user", "content": json.dumps(body, ensure_ascii=False)}],
         response_format={"type": "json_schema", "json_schema": {
             "name": "actual_history_grounding_review", "strict": True, "schema": schema}},
@@ -91,6 +93,9 @@ def verify_grounding(row, state, memory, client, *, record_path=None):
                 "usage": completion.usage, "elapsed_ms": completion.elapsed_ms,
                 "raw_output": completion.text, "error": completion.error,
                 "raw_response": completion.raw_response}, ensure_ascii=False)+"\n")
+    if (completion.status == "input_over_budget" or
+            completion.status == "completed" and (completion.finish_reason == "length" or not completion.text.strip())):
+        return None
     if completion.status != "completed" or completion.finish_reason != "stop":
         raise RuntimeError(f"grounding review {row['task_id']} unfinished: {completion.status}/{completion.finish_reason}: {completion.error}")
     reviewed = json.loads(completion.text)
@@ -196,6 +201,12 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
                     state = replace(state, source_scope=tuple(decode(EvidenceKey, key) for key in row["source_scope"]))
                 verification = await run_retrieval_worker(verify_grounding, row, state, memory, client,
                     record_path=call_paths["grounding"])
+                if verification is None:
+                    with (output.parent/"task_label_rejections.jsonl").open("a", encoding="utf-8") as rejected:
+                        rejected.write(json.dumps({"task_id": row["task_id"], "invocation_id": invocation,
+                            "task_state": to_jsonable(state), "review_status": "no_complete_judgment",
+                            "call_journal": str(call_paths["grounding"])}, ensure_ascii=False)+"\n")
+                    continue
                 accepted = verification["correct_task_binding"] and verification["need_semantics_verified"]
                 if cohort is not None:
                     accepted = accepted and verification["source_support_verified"]
