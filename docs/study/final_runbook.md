@@ -221,3 +221,7 @@ source-first 布局、R0、预算与原生 JSON 空白上限下的共享／隔�
 40 dev，按会话隔离；pilot 为 12 train、4 dev。`reader-audit/` 登记原有 872 READ、
 2021 ANSWER 轨迹及缺失的 REDUCE 轨迹。pilot 的独立任务核验通过 15/16 状态，
 1 个真实历史任务绑定失败状态及 32 次教师调用的完整费用保存在 `task-labels-pilot/`。
+随后采集发现其 16 个 Need 全部标为 `lookup/all_supplied_documents`，包括过程问题；
+操作与范围定义原先只存在于解码约束中。采集在完成 34 个候选答案后中断，
+`reader-pilot/collection/train/interruption.json` 索引全部实际步骤、辅助成本及完整物理采样。
+下一批在相同状态上采用可见操作／范围语义，并独立核验固定标签。

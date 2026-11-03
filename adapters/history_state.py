@@ -273,6 +273,36 @@ def retrieval_state(snapshot, source_index):
         tuple(block.key for block in snapshot.archive), source_index)
 
 
+
+TASK_NEED_SEMANTICS_VERSION = "task_need_semantics_v1"
+TASK_NEED_SEMANTICS = (
+    "Need operation semantics:\n"
+    "- lookup: retrieve a directly stated fact or relation answering a requested point.\n"
+    "- procedure: identify the actions, prerequisites and ordered steps for carrying out a task. "
+    "Requests for required actions or how to complete a process request a procedure, "
+    "even when one relevant source states the answer directly.\n"
+    "- enumerate: list the requested entities, items or alternatives; use procedure when the requested items "
+    "are actions for accomplishing a task.\n"
+    "- infer: connect multiple factual relations or premises to derive the requested answer; "
+    "a multi-step procedure alone is not infer.\n"
+    "- compare: establish requested similarities, differences or ordering between subjects or versions.\n"
+    "- count: compute the number of distinct matching entities or records in the requested range.\n"
+    "- sum: add the requested quantities, respecting units and the requested matching range.\n"
+    "- group: partition or aggregate the requested items by the requested grouping keys.\n"
+    "Choose each Need's operation from the user's requested result, not from how many documents exist "
+    "or whether a reader could retrieve the answer. Keep separately requested results as separate Needs.\n"
+    "Need scope semantics (independent of operation):\n"
+    "- selected_sources: answer from relevant selected sources. This is the ordinary scope for lookup, "
+    "procedure and other requests without a demand to cover the complete supplied source range.\n"
+    "- all_supplied_documents: the user requires exhaustive coverage across the complete supplied source "
+    "range, for example counting every matching record in a supplied ledger or listing matches across "
+    "every provided document. The complete range may be established in unchanged actual conversation history.\n"
+    "Multiple available documents do not establish all_supplied_documents. Asking for all required steps "
+    "of a procedure does not by itself demand a scan of all supplied documents. Do not infer exhaustive "
+    "source scope from operation=enumerate/count/sum alone. Do not expand a previously selected task's "
+    "scope without a current or inherited actual user request for the complete source range."
+)
+
 class TeacherTaskModel:
     """Structured Qwen teacher for data collection and first integration runs."""
     def __init__(self, client, *, record_path=None):
@@ -283,6 +313,7 @@ class TeacherTaskModel:
     @property
     def manifest(self):
         return {"kind": "qwen3_32b_task_span_teacher", "wire_schema": "owned_task_graph_v6_included_boundary_chars",
+                "need_semantics_version": TASK_NEED_SEMANTICS_VERSION,
                 "transport": self.client.manifest}
 
     def predict(self, turn, windows, memory):
@@ -339,6 +370,7 @@ class TeacherTaskModel:
         body["text_ref_sources"] = [{"turn_id": identity, "speaker": speaker, "characters": len(text)}
             for (identity, speaker), text in owners.items()]
         body["wire_schema"] = self.manifest["wire_schema"]
+        body["need_semantics_version"] = TASK_NEED_SEMANTICS_VERSION
         definitions = owned_text_ref_definitions(owners)
         ref_schema = {"$ref": "#/$defs/TextRef"}
         refs = {"type": "array", "maxItems": 16, "items": ref_schema}
@@ -461,7 +493,7 @@ class TeacherTaskModel:
                   "and reference_date to select the final applicable resolved_version_ids; never invent unknown dates. "
                   "resolved_version_ids are the final selected versions, while version_ids/source_turns may identify "
                   "anchors for before/after. Preserve the user's temporal_relation and original time_refs. "
-                  "When dates are unknown, leave date-based resolved_version_ids empty.")
+                  "When dates are unknown, leave date-based resolved_version_ids empty.\n\n"+TASK_NEED_SEMANTICS)
         completion = self.client.complete([{"role": "system", "content": system},
             {"role": "user", "content": json.dumps(body, ensure_ascii=False)}],
             response_format={"type": "json_schema", "json_schema": {
@@ -471,6 +503,7 @@ class TeacherTaskModel:
             with self.record_path.open("a", encoding="utf-8") as sink:
                 sink.write(json.dumps({"task_id": turn.task_id, "status": completion.status,
                     "wire_schema": self.manifest["wire_schema"],
+                    "need_semantics_version": TASK_NEED_SEMANTICS_VERSION,
                     "finish_reason": completion.finish_reason, "input_tokens": completion.input_tokens,
                     "usage": completion.usage, "elapsed_ms": completion.elapsed_ms,
                     "raw_output": completion.text, "error": completion.error,

@@ -256,7 +256,7 @@ async def test_cohort_label_preparation_uses_actual_sqlite_sources_and_rejects_m
     assert rows(tmp_path/"labels"/"label_reuse_exclusions.jsonl")[0]["reason"] == "existing_label_not_bound_to_registered_actual_state"
 
 
-def mock_task_label_teacher(monkeypatch, *, truncated=False, source_valid=True):
+def mock_task_label_teacher(monkeypatch, *, truncated=False, source_valid=True, operation_valid=True):
     import numpy as np
     from adapters.query_selector import CompletionResult
     from test_task_state_sources import Characters
@@ -302,7 +302,11 @@ def mock_task_label_teacher(monkeypatch, *, truncated=False, source_valid=True):
                 assert body["task_state"]["raw_question"] == body["question"]
                 assert body["grounding_original_sources"][0]["text"] == "Allowance: 12 credits."
                 value = {"script_history_mismatch": False, "applicable_grounding_indices": [0],
-                    "correct_task_binding": True, "source_support_verified": source_valid}
+                    "correct_task_binding": True, "source_support_verified": source_valid,
+                    "need_checks": {need["need_id"]: {"operation_correct": operation_valid, "scope_correct": True,
+                        "reason": "Fixture question asks a directly stated fact from relevant sources."}
+                        for need in body["task_state"]["needs"]},
+                    "history_references_correct": True, "history_reference_reason": "Current user anchor is owned."}
             return CompletionResult("completed", json.dumps(value), "stop", 20, {"completion_tokens": 30}, elapsed_ms=5)
 
         def close(self):
@@ -373,3 +377,16 @@ async def test_source_rejected_task_state_does_not_become_a_cohort_label(tmp_pat
     assert manifest["teacher_calls"] == 2 and manifest["teacher_output_tokens"] == 60
     assert rows(tmp_path/"task_labels.jsonl") == []
     assert rows(tmp_path/"task_label_rejections.jsonl")[0]["source_support_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_task_label_operation_rejection_overrides_generic_binding_true(tmp_path, monkeypatch):
+    from training.task_labeling import label_rollouts
+    mock_task_label_teacher(monkeypatch, operation_valid=False)
+    manifest = await label_rollouts(task_label_run_config(tmp_path), concurrency=1)
+    assert manifest["status"] == "incomplete" and manifest["pending_labels"] == 1
+    assert manifest["teacher_calls"] == 2
+    rejected = rows(tmp_path/"task_label_rejections.jsonl")[0]
+    assert rejected["correct_task_binding"] and not rejected["need_semantics_verified"]
+    assert rejected["task_state"]["needs"][0]["operation"] == "lookup"
+    assert rows(tmp_path/"task_labels.jsonl") == []
