@@ -90,6 +90,7 @@ def paid_execution_index(rows, roots, destination):
     native = index(databases)
     write(destination, native)
     return {"path": str(destination), **native["totals"], "by_kind": native["by_kind"],
+        "confirmed_pre_submission_steps": len(native["pre_submission_steps"]),
         "unmeasured_inventory": native["inventory_reasons"],
         "physical_batch_files": sorted({str(path) for directory in directories
             for pattern in ("batch_cost.*.json", "measurements/*/batch_cost.json")

@@ -39,7 +39,7 @@ def index(patterns):
         paths.update(found)
         if not found:
             unmatched.append(pattern)
-    sources, inventory, identities = [], [], {}
+    sources, inventory, identities, pre_submission = [], [], {}, []
 
     def receipt_record(receipt, inputs, outputs, kind, location):
         value = asdict(receipt) if is_dataclass(receipt) else receipt
@@ -84,6 +84,7 @@ def index(patterns):
             connection = sqlite3.connect(path.as_uri()+"?mode=ro", uri=True)
             connection.row_factory = sqlite3.Row
             connection.execute("BEGIN")
+            user_version = connection.execute("PRAGMA user_version").fetchone()[0]
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             for table, contract in (("attempts", Attempt), ("execution_steps", StepRecord)):
                 provenance["rows_scanned"][table] = 0
@@ -110,6 +111,11 @@ def index(patterns):
                                        record.result.output_ids, "ANSWER", location)
                     else:
                         location["step_id"] = record.step_id
+                        if (user_version == 2 and raw["stage"] in {"PLANNED", "PREPARED"}
+                                and record.receipt is None and record.result is None and not record.output_ids):
+                            pre_submission.append({**location, "kind": record.task.kind,
+                                "native_model_input_tokens": 0, "native_model_output_tokens": 0})
+                            continue
                         if record.receipt is None and "cpu_reduce_ms" in record.metrics:
                             inventory.append({**location, "kind": "CPU", "reason": "cpu_step_has_no_native_receipt_excluded"})
                             continue
@@ -133,6 +139,8 @@ def index(patterns):
     kinds = sorted({"ANSWER", "READ", "REDUCE"} | {row["kind"] for row in accepted})
     return {"format": "contextkv_sqlite_native_usage_index_v1", "patterns": patterns, "unmatched_patterns": unmatched,
         "sources": sources, "unique_calls": accepted, "conflicts_excluded": conflicts, "unmeasured_inventory": inventory,
+        "pre_submission_steps": pre_submission,
+        "pre_submission_rule": "SessionStore v2 durably saves SUBMITTED before native generation. PLANNED/PREPARED with no receipt, result or output establish zero native model tokens only; control, prepare and physical costs are separate.",
         "totals": totals(accepted), "by_kind": {kind: totals(row for row in accepted if row["kind"] == kind) for kind in kinds},
         "CPU": {"logical_rows_excluded": sum(row.get("kind") == "CPU" for row in inventory),
                 "native_token_usage": "not applicable; CPU steps have no native receipt"},
