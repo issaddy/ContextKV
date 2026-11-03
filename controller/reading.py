@@ -123,6 +123,15 @@ NUMERIC_POPULATION_SYSTEM = (
     "Omit unrelated background numbers. Return empty facts, or empty claims for a regular numeric "
     "READ, when this window contains no qualifying row."
 )
+SHARED_NUMERIC_POPULATION_EXAMPLE = (
+    ' Example only, unrelated to the current sources. g0 groups n0 (count Shipment records) '
+    'and n1 (sum their weights). Source s0 says "Shipment record SHIP-7: weight 3 kg." '
+    'Return {"format_version":4,"claims":[],"facts":[{"g":"g0","n":["n0","n1"],'
+    '"e":"SHIP-7","r":"weight","v":"3","u":"kg","s":["s0"],"p":[]}],'
+    '"support":["n0","n1"],"conflicts":[],"open_needs":[]}. '
+    'If s0 instead says only "Facility note: the scale supports 50 kg," '
+    'return {"format_version":4,"claims":[],"facts":[],"support":[],"conflicts":[],"open_needs":[]}.'
+)
 
 
 def step_generation_kind(kind, operation="extract", reading_mode="typed_reduce"):
@@ -447,6 +456,8 @@ def stable_prefix_messages(plan, task, units):
         citation = "Cite the source span aliases shown here directly in s. Document metadata is defined at first use."
         extraction = SHARED_NUMERIC_READ_SYSTEM if task.shared_numeric_scopes else READ_SYSTEM
         system += " "+extraction+NUMERIC_POPULATION_SYSTEM+SHORT_WIRE_SYSTEM
+        if task.shared_numeric_scopes:
+            system += SHARED_NUMERIC_POPULATION_EXAMPLE
     else:
         sources, _ = stable_source_payload(units)
         citation = "Use the following task's source_aliases to bind source_span to output span_ids."

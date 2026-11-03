@@ -553,7 +553,22 @@ class TeacherTaskModel:
                   "and reference_date to select the final applicable resolved_version_ids; never invent unknown dates. "
                   "resolved_version_ids are the final selected versions, while version_ids/source_turns may identify "
                   "anchors for before/after. Preserve the user's temporal_relation and original time_refs. "
-                  "When dates are unknown, leave date-based resolved_version_ids empty.\n\n"+TASK_NEED_SEMANTICS)
+                  "When dates are unknown, leave date-based resolved_version_ids empty.\n\n"
+                  "Example current question window w0: [0]Report [1]the [2]distance [3]in "
+                  "[4]kilometers [5]and [6]the [7]duration [8]in [9]minutes[10].\n"
+                  'Example output: {"relation":"standalone","history_spans":[],"resume_task_id":"",'
+                  '"version_intent":{"mode":"current","temporal_relation":"at","document_families":[],'
+                  '"version_ids":[],"resolved_version_ids":[],"time_refs":[],"source_turns":[]},'
+                  '"conditions":{},"condition_removals":[],"needs":{'
+                  '"n0":{"anchor_spans":[{"window_id":"w0","boundary_tokens":[2,4]}],'
+                  '"subject_refs":[],"operation":"lookup","condition_ids":[],"predecessor_need_ids":[],'
+                  '"scope":"selected_sources"},'
+                  '"n1":{"anchor_spans":[{"window_id":"w0","boundary_tokens":[7,9]}],'
+                  '"subject_refs":[],"operation":"lookup","condition_ids":[],"predecessor_need_ids":[],'
+                  '"scope":"selected_sources"}}}\n'
+                  "Here both units specify the requested results. A user request for a named edition supplies "
+                  "a VERSION restriction; a user request for the rule in force on a specified date supplies "
+                  "as_of intent with a reference to that date.\n\n"+TASK_NEED_SEMANTICS)
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": json.dumps(body, ensure_ascii=False)}]
         completion = self.client.complete(messages, response_format={"type": "json_schema", "json_schema": {
