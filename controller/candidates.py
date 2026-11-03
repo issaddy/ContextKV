@@ -28,7 +28,8 @@ PLAN_SYSTEM_PROMPT = (
     "Use working history to resolve the user's referents and preserve the active object, "
     "platform, time and version. Cite allowed source "
     "IDs inline in square brackets exactly as [E_...]. State the supported answer and any "
-    "remaining information gap concisely."
+    "remaining information gap concisely. State the requested results directly; quote or enumerate "
+    "example source rows only when the question asks for them."
 )
 
 
@@ -189,7 +190,7 @@ def build_plan_candidates(snapshot, query, plan, template, *, policy=None, outco
                           layouts=None):
     """Compile each legal action/layout for one semantic evidence plan."""
     from .context_budget import (append_legal, measure_window, task_instruction,
-                                 working_history_messages, evidence_interval_covered)
+                                 working_history_messages, evidence_interval_covered, _covers)
     from .schema import EvidenceSpan
     from .serialization import dumps
     from .templates import _evidence_alias, _evidence_header
@@ -198,102 +199,34 @@ def build_plan_candidates(snapshot, query, plan, template, *, policy=None, outco
     layouts = plan.layouts if layouts is None else layouts
     started = time.perf_counter()
     state, selected = plan.task_state, plan.selected_set
+    claims = () if outcome is None else outcome.claims
+    answer_plan = plan.answer_plan if outcome is None else outcome.plan.answer_plan
     blocks = {b.key: b for b in (*snapshot.archive, *selected.source_blocks)}
     units = selected.selected_units
     required = frozenset(span.source_key for unit in units for span in unit.source_spans)
-    references = assign_references(blocks, snapshot.reference_map)
+    source_keys = {*blocks, *(span.source_key for unit in units for span in unit.source_spans),
+                   *(span.source_key for point in answer_plan.points for span in point.source_spans)}
+    references = assign_references(source_keys, snapshot.reference_map)
     by_key = {key: ref for ref, key in references}
     history = working_history_messages(state, snapshot)
     history_id = dumps(state.working_history)
-    system = Message("system", PLAN_SYSTEM_PROMPT if policy.system_prompt is None else policy.system_prompt)
+    system_text = plan.answer_system_prompt if policy.system_prompt is None else policy.system_prompt
+    system = Message("system", PLAN_SYSTEM_PROMPT if system_text is None else system_text)
     previous = (() if snapshot.execution is None else
                 snapshot.execution.last_input_ids + snapshot.execution.last_output_ids)
-    claims = () if outcome is None else outcome.claims
-    answer_plan = plan.answer_plan if outcome is None else outcome.plan.answer_plan
     final_claim_ids = {cid for point in answer_plan.points for cid in point.claim_ids}
-    # Full-scope reading retains every source in the step graph. The final window
-    # carries root conclusions and a budgeted set of original supporting units.
-    if plan.coverage_scope == "all_supplied_documents" or outcome is not None:
-        from .evidence_planner import render_selection
-        def supports_point(unit, point):
-            return any(source.source_key == leaf.source_key and source.start < leaf.end
-                       and leaf.start < source.end for source in unit.source_spans for leaf in point.source_spans)
-
-        prioritized = sorted(units, key=lambda u: (
-            not any(supports_point(u, point) for point in answer_plan.points), -u.retrieval_score, u.unit_id))
-        # A derived answer point can join many originals. Share the excerpt
-        # allocation across its source paths before filling background text.
-        representatives, represented = [], set()
-        for point in answer_plan.points:
-            for source_key in dict.fromkeys(span.source_key for span in point.source_spans):
-                if source_key in represented:
-                    continue
-                unit = next((unit for unit in prioritized if supports_point(unit, point)
-                    and any(span.source_key == source_key for span in unit.source_spans)), None)
-                if unit is not None:
-                    representatives.append(unit)
-                    represented.update(span.source_key for span in unit.source_spans)
-        representative_ids = tuple(unit.unit_id for unit in representatives)
-        final_units = []
-
-        def add_excerpt(unit, ceiling):
-            def size(proposed):
-                return len(template.tokenizer.encode(render_selection(proposed), add_special_tokens=False))
-            if size((*final_units, unit)) <= ceiling:
-                final_units.append(unit)
-                return
-            anchors = [unit.text.find(text) for claim in claims
-                if any(span.source_key == source.source_key for span in claim.source_spans
-                       for source in unit.source_spans)
-                for text in (claim.text, claim.entity) if text]
-            start = next((position for position in anchors if position >= 0), 0)
-            low, high = 0, len(unit.text)-start
-            while low < high:
-                middle = (low+high+1)//2
-                excerpt = replace(unit, text=unit.text[start:start+middle], source_spans=tuple(
-                    replace(span, start=span.start+start, end=span.start+start+middle)
-                    for span in unit.source_spans))
-                if size((*final_units, excerpt)) <= ceiling:
-                    low = middle
-                else:
-                    high = middle-1
-            if low:
-                final_units.append(replace(unit, text=unit.text[start:start+low], source_spans=tuple(
-                    replace(span, start=span.start+start, end=span.start+start+low)
-                    for span in unit.source_spans)))
-
-        for index, unit in enumerate(representatives):
-            add_excerpt(unit, plan.budget.body_tokens*(index+1)//len(representatives))
-        for unit in prioritized:
-            if unit.unit_id in representative_ids:
-                continue
-            if any(supports_point(unit, point) for point in answer_plan.points) or not final_units:
-                add_excerpt(unit, plan.budget.body_tokens)
-            elif len(template.tokenizer.encode(render_selection((*final_units, unit)), add_special_tokens=False)) <= plan.budget.body_tokens:
-                final_units.append(unit)
-        units = tuple(final_units)
-        required = frozenset(s.source_key for u in units for s in u.source_spans)
-
     from .claim_graph import ClaimGraph
     graph = ClaimGraph(claims)
-    def source_links(spans):
-        keys = {span.source_key for span in spans}
-        return {"key_source_ids": tuple(by_key[key] for key in sorted(keys & required)),
-                "total_source_count": len(keys)}
-    compact_claims = [{"claim_id": c.claim_id, "need_id": c.need_id, "text": c.text,
-        "value": c.value, "unit": c.unit, "entity": c.entity, "relation": c.relation,
-        "conditions": c.conditions, "version": c.version, "operation": c.operation,
-        **source_links(graph.source_spans(c.claim_id))}
-        for c in claims if c.claim_id in final_claim_ids]
-    compact_answer = {"disposition": answer_plan.disposition, "points": [
-        {"need_id": p.need_id, "claim_ids": p.claim_ids, **source_links(p.source_spans)}
-        for p in answer_plan.points]}
+    conclusion_keys = frozenset(span.source_key for point in answer_plan.points for span in point.source_spans)
+    conclusions = graph.conclusion_table(answer_plan, references)
+    if outcome is not None:
+        conclusions["open_needs"] = outcome.open_needs
     computed = "\n".join(f"{claim.need_id}: {claim.operation} = {claim.value} {claim.unit}; "
         f"original sources = {len({span.source_key for span in graph.source_spans(claim.claim_id)})}."
         for claim in claims if claim.claim_id in final_claim_ids and claim.kind == "derived"
         and claim.operation in {"count", "sum"})
     context = ("\nCurrent task and active conditions:\n" + task_instruction(state, snapshot)
-        + "\nAnswer plan:\n" + dumps(compact_answer) + "\nReading conclusions:\n" + dumps(compact_claims)
+        + "\nReading conclusions (shared scopes and complete source paths):\n" + dumps(conclusions)
         + "\nComputed results for the complete reading scope:\n" + computed)
 
     def compile_user(ordered, message_index, reused=frozenset()):
@@ -325,14 +258,100 @@ def build_plan_candidates(snapshot, query, plan, template, *, policy=None, outco
                 spans.append(EvidenceSpan(block.key, message_index, start, end,
                     block.source_uri, block.provenance, ref,
                     source_start=source.start, source_end=source.end))
-        content += "\nSource spans: " + dumps(tuple(s for u in ordered for s in u.source_spans))
+        content += "\nSource spans [citation_id,start,end]: " + dumps(tuple(
+            (by_key[span.source_key], span.start, span.end) for unit in ordered for span in unit.source_spans))
         if reused:
             content += "\nPreviously supplied sources: " + ", ".join(by_key[k] for k in sorted(reused))
         content += context
+        allowed = (conclusion_keys | {span.source_key for unit in ordered for span in unit.source_spans}
+                   | (reused & required))
         content += "\nCitations allowed for this answer: " + (
-            ", ".join(f"[{by_key[k]}]" for k in sorted(required)) or "none") + ".\n"
+            ", ".join(f"[{by_key[k]}]" for k in sorted(allowed)) or "none") + ".\n"
         content += f"\nQuestion:\n{query}\n"
         return Message("user", content), tuple(spans)
+
+    # Full-scope reading retains every source in the step graph. The final window
+    # carries root conclusions and a budgeted set of original supporting units.
+    if plan.coverage_scope == "all_supplied_documents" or outcome is not None:
+        empty, _ = compile_user((), len(history)+1)
+        fixed_input_tokens = len(template.render((system, *history, empty)).input_ids)
+        excerpt_budget = min(plan.budget.body_tokens,
+            max(0, plan.budget.window_tokens-plan.budget.output_tokens-fixed_input_tokens))
+
+        def excerpt_tokens(proposed):
+            message, _ = compile_user(proposed, len(history)+1)
+            return len(template.render((system, *history, message)).input_ids)-fixed_input_tokens
+
+        def supports_point(unit, point):
+            return any(source.source_key == leaf.source_key and source.start < leaf.end
+                       and leaf.start < source.end for source in unit.source_spans for leaf in point.source_spans)
+
+        prioritized = sorted(units, key=lambda u: (
+            not any(supports_point(u, point) for point in answer_plan.points), -u.retrieval_score, u.unit_id))
+        # A derived answer point can join many originals. Share the excerpt
+        # allocation across its source paths before filling background text.
+        representatives, represented = [], set()
+        for point in answer_plan.points:
+            for source_key in dict.fromkeys(span.source_key for span in point.source_spans):
+                if source_key in represented:
+                    continue
+                unit = next((unit for unit in prioritized if supports_point(unit, point)
+                    and any(span.source_key == source_key for span in unit.source_spans)), None)
+                if unit is not None:
+                    representatives.append(unit)
+                    represented.update(span.source_key for span in unit.source_spans)
+        representative_ids = tuple(unit.unit_id for unit in representatives)
+        final_units = []
+
+        def add_excerpt(unit, ceiling):
+            def size(proposed):
+                return excerpt_tokens(proposed)
+            if size((*final_units, unit)) <= ceiling:
+                final_units.append(unit)
+                return
+            anchors = [unit.text.find(text) for claim in claims
+                if any(span.source_key == source.source_key for span in claim.source_spans
+                       for source in unit.source_spans)
+                for text in (claim.text, claim.entity) if text]
+            start = next((position for position in anchors if position >= 0), 0)
+            low, high = 0, len(unit.text)-start
+            while low < high:
+                middle = (low+high+1)//2
+                excerpt = replace(unit, text=unit.text[start:start+middle], source_spans=tuple(
+                    replace(span, start=span.start+start, end=span.start+start+middle)
+                    for span in unit.source_spans))
+                if size((*final_units, excerpt)) <= ceiling:
+                    low = middle
+                else:
+                    high = middle-1
+            if low:
+                final_units.append(replace(unit, text=unit.text[start:start+low], source_spans=tuple(
+                    replace(span, start=span.start+start, end=span.start+start+low)
+                    for span in unit.source_spans)))
+
+        for index, unit in enumerate(representatives):
+            add_excerpt(unit, excerpt_budget*(index+1)//len(representatives))
+        for unit in prioritized:
+            if unit.unit_id in representative_ids:
+                continue
+            if any(supports_point(unit, point) for point in answer_plan.points) or not final_units:
+                add_excerpt(unit, excerpt_budget)
+            elif excerpt_tokens((*final_units, unit)) <= excerpt_budget:
+                final_units.append(unit)
+        units = tuple(final_units)
+        required = conclusion_keys | frozenset(s.source_key for u in units for s in u.source_spans)
+
+    def visible_originals(spans):
+        ranges = {}
+        for span in spans:
+            block = blocks[span.key]
+            base = block.span[0] if block.span else 0
+            interval = ((base, base+len(block.text)) if span.source_start is None else
+                        (span.source_start, span.source_end))
+            ranges.setdefault(span.key, []).append(interval)
+        return frozenset(key for key, intervals in ranges.items() if _covers(
+            (blocks[key].span[0], blocks[key].span[0]+len(blocks[key].text))
+            if blocks[key].span else (0, len(blocks[key].text)), intervals))
 
     candidates = []
     for layout in layouts:
@@ -355,7 +374,7 @@ def build_plan_candidates(snapshot, query, plan, template, *, policy=None, outco
         else:
             raise ValueError(f"unknown plan layout: {layout}")
         current, spans = compile_user(ordered, len(history)+1)
-        variants = [("REBUILD", (system, *history, current), spans, required, None)]
+        variants = [("REBUILD", (system, *history, current), spans, visible_originals(spans), None)]
         legal, reason = append_legal(snapshot, state, required,
                                     tuple(span for unit in units for span in unit.source_spans))
         if snapshot.execution is not None:
@@ -364,7 +383,7 @@ def build_plan_candidates(snapshot, query, plan, template, *, policy=None, outco
                                                        for s in u.source_spans))
             current, new_spans = compile_user(missing, len(execution.messages), execution.visible_blocks)
             variants.append(("APPEND", (*execution.messages, current),
-                (*execution.evidence_spans, *new_spans), execution.visible_blocks | required,
+                (*execution.evidence_spans, *new_spans), visible_originals((*execution.evidence_spans, *new_spans)),
                 None if legal else reason))
         for action, messages, spans, visible, reason in variants:
             rendered = template.render(messages)

@@ -57,7 +57,9 @@ selection:
   layouts: [existing, need_order, stable_evidence]
 reading:
   enabled: true
-  numeric_need_isolation: true
+  numeric_need_isolation: false
+  layout: source_first
+  packing: source_windows
   input_target_tokens: 12288
   output_tokens: 2048
   output_tokens_per_fact: 64

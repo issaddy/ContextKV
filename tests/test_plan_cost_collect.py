@@ -25,10 +25,11 @@ def test_target_is_actual_rendered_tokens_and_every_character_keeps_original_coo
     template = ByteTemplate()
     controller = Controller(SessionStore(":memory:"), MockEngine(), template=template)
     bank = source_bank()
+    target = 6000 if phase == "READ" else 5000
     plan, proof = pack_original_sources(bank, "What does the original say?", template=template,
-        snapshot=SessionSnapshot("session"), policy=controller.policy, phase=phase, target=5000,
+        snapshot=SessionSnapshot("session"), policy=controller.policy, phase=phase, target=target,
         read_output=512, answer_output=512, window=12000, max_renders=96)
-    assert proof["exact_input_tokens"] == 5000 and proof["renders"] <= 96
+    assert proof["exact_input_tokens"] == target and proof["renders"] <= 96
     for unit in plan.selected_set.selected_units:
         span = unit.source_spans[0]
         assert unit.text == bank[0][1].text[span.start:span.end]

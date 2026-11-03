@@ -4,10 +4,10 @@
 
 ```bash
 sudo -n nerdctl --namespace default exec -it sjy-0518 bash
-cd /home/relay/songjiayun/ContextKV/runs/study-20261102/project
+cd /home/relay/songjiayun/ContextKV/runs/study-20261103-budget-loop/source
 ```
 
-权重、原始数据、实际历史、SQLite、评分和连续采样原地读取；本手册不安排模型传输、容器创建或服务重启。执行环境为 `.venv-sglang/bin/python`，官方评分依赖按已存 study 配置使用。源码提交及源码 SHA、模型 scope、run config SHA 和实际引擎 fingerprint 分别登记，容器父仓库的 HEAD 不替代解包源码身份。
+权重、原始数据、实际历史、SQLite、评分和连续采样通过符号链接复用 `study-20261102/project` 资产。执行环境为 `.venv-sglang/bin/python`，官方评分依赖按已存 study 配置使用。源码提交及源码 SHA、模型 scope、run config SHA 和实际引擎 fingerprint 分别登记。
 
 ## 固定入口与资产
 
@@ -145,7 +145,7 @@ done
 
 最终成本另有两本独立 token 索引：`runs/study/final-native-usage-index.json` 从只读 SQLite 核对原生回执，
 `runs/study/final-api-cost-index.json` 核对实际 API 响应。它们与训练前向、请求辅助编码器和物理积分分别保留。
-最后模型服务已停止；复现时在原指定容器按相应启动配置启动服务，并重新采集当前进程/设备范围的成本配置。
+2026-11-02 封存时模型服务已停止；接续服务配置及当前采样见下文。
 最终统一入口为 `runs/study/final-index-v1/final-index.json` 与同目录 Markdown。
 
 ## 2026-11-03 接续：完整队列参照
@@ -186,3 +186,38 @@ MT-RAG 用已保存 judge/algorithmic 分量运行作者条件化函数。示例
 每个方法的 `costs/<method>/native.json` 从全部声明执行目录的 SQLite 提取原生步骤回执，
 包括没有最终结果行的中断请求。报告同时保存全部请求行成本、缺失测量项目和物理批次文件；
 原生 token、全在线模型 token 与物理积分保持各自口径。重评过程中未产生新的模型调用。
+
+
+## 2026-11-03 接续：结论预算与共享阅读
+
+实际产物位于 `runs/study/budget-loop-20261103/`。`phase2-paired.json` 保存相同
+source-first 布局、R0、预算与原生 JSON 空白上限下的共享／隔离对照；
+`phase2-answer-window.json` 从真实 SQLite attempt 核验完整结论及来源路径进入最终输入。
+
+| 长文计数／求和 | 共享事实 | Need 隔离 |
+|---|---:|---:|
+| READ / CPU REDUCE | 12 / 2 | 24 / 2 |
+| 全部输入 token | 102,563 | 195,001 |
+| 全部输出 token | 5,705 | 8,579 |
+| 完整响应 ms | 28,945.97 | 53,135.30 |
+| 计算结论 | 36 条、666 kg | 36 条、666 kg |
+| ANSWER 输入 / 输出预算 | 5,147 / 1,024 | 5,147 / 1,024 |
+
+共享方案的最终回答正确报告上述总量，同时列举额外原文数值，严格唯一数值审计标为
+`failed_or_ambiguous`；隔离方案通过该审计。原始回答和全部已付试验保留，受控夹具结果与完整开发队列评价分别记录。
+多跳在 `source-first-v2-mechanisms/` 中以 3 READ、1 REDUCE 得到 1997，
+完整三来源证明进入 892 token 的最终输入；条件修正和版本任务见 `source-first-v2-full/`。
+
+```bash
+.venv-sglang/bin/python -m bench.reading_mechanisms   --config runs/study/budget-loop-20261103/r0-run.yaml   --read-layout source_first --cases pair correction long multihop   --output-dir runs/study/repro-budget-loop/shared
+.venv-sglang/bin/python -m bench.reading_mechanisms   --config runs/study/budget-loop-20261103/r0-run.yaml   --read-layout source_first --numeric-need-isolation --cases long   --output-dir runs/study/repro-budget-loop/isolated
+```
+
+原生服务使用 `servers/r0-g0-bounded/launch.json`，`CONTEXTKV_JSON_FORMAT=bounded`
+把原生受约束 JSON 的连续空白上限设为 16；`compact` 和原生默认格式仍可重放。
+连续设备／进程采样位于 `observer/`，各试验目录另有自身物理与原生页观察窗口。
+
+训练队列见 `reader-cohorts/{pilot,full}/cohort_manifest.json`：完整队列为 200 train、
+40 dev，按会话隔离；pilot 为 12 train、4 dev。`reader-audit/` 登记原有 872 READ、
+2021 ANSWER 轨迹及缺失的 REDUCE 轨迹。pilot 的独立任务核验通过 15/16 状态，
+1 个真实历史任务绑定失败状态及 32 次教师调用的完整费用保存在 `task-labels-pilot/`。

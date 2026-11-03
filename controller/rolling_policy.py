@@ -39,7 +39,7 @@ def namespace_plan(plan):
             prefix, separator, suffix = claim_id.rpartition(":claim:")
             claims.append(mapped.get(prefix, prefix)+separator+suffix if separator else claim_id)
         identity = hashlib.sha256(dumps((plan.task_state, plan.reading_mode, plan.read_layout,
-            plan.read_packing, task.kind, task.operation, task.need_ids,
+            plan.read_packing, task.kind, task.operation, task.need_ids, task.shared_numeric_scopes,
             tuple(replace(units[key], retrieval_score=0.0, need_ids=()) for key in task.input_unit_ids), tuple(claims),
             tuple(mapped[key] for key in task.predecessor_step_ids))).encode()).hexdigest()[:24]
         mapped[task.step_id] = "policy:"+identity
@@ -67,14 +67,19 @@ def _reduction_tasks(plan, state):
         operation = "summarize" if summarize else "union" if need.operation == "enumerate" else need.operation
         identity = hashlib.sha256(dumps((read_ids, need.need_id, operation)).encode()).hexdigest()[:24]
         claims = tuple(claim.claim_id for claim in state.claims
-                       if claim.need_id == need.need_id and claim.kind == "extract"
+                       if claim.serves(need.need_id) and claim.kind == "extract"
                        and claim.claim_id.rsplit(":claim:", 1)[0] in read_ids)
         if set(read_ids) <= {result.step_id for result in state.results} and not claims:
             continue
+        from .context_budget import reduction_output_budget
+        output_budget = reduction_output_budget(plan, need.need_id)
         tasks.append(ReadTask("policy:reduce:"+identity, "REDUCE", (need.need_id,),
             input_claim_ids=claims, predecessor_step_ids=read_ids,
-            input_budget=plan.budget.window_tokens-plan.budget.read_output_tokens,
-            output_budget=plan.budget.read_output_tokens, operation=operation))
+            input_budget=plan.budget.window_tokens-output_budget,
+            output_budget=output_budget, operation=operation,
+            retained_conclusion_tokens=tuple((identity, tokens) for identity, tokens
+                in plan.answer_allocation.need_tokens if identity == need.need_id)
+                if plan.answer_allocation is not None else ()))
     return tuple(tasks)
 
 
@@ -156,6 +161,9 @@ class RollingPlanRuntime:
         plans = []
         for original in context_plans:
             plan = _with_observed_sources(original, state)
+            from .context_budget import bind_answer_window
+            plan = bind_answer_window(plan, template, snapshot,
+                preserve_step_ids=tuple(record.step_id for record in state.steps))
             from .evidence_planner import render_selection
             plan = replace(plan, selected_set=replace(plan.selected_set, token_cost=len(template.tokenizer.encode(
                 render_selection(plan.selected_set.selected_units), add_special_tokens=False))))
@@ -190,7 +198,7 @@ class RollingPlanRuntime:
                 steps.append(PlanStep(task, variants, reservation))
             plans.append(replace(candidate, steps=tuple(steps), unmet_answer_points=tuple(
                 need.need_id for need in plan.task_state.needs
-                if not any(claim.need_id == need.need_id for claim in state.claims))))
+                if not any(claim.serves(need.need_id) for claim in state.claims))))
         # Direct ANSWER is an explicit stop action from the same observed state.
         # Full-range feasibility is checked against state.plan.coverage_units.
         if not any(plan.semantic_kind == "direct_answer" for plan in plans):
@@ -352,7 +360,8 @@ class RollingPlanRuntime:
                             input_claims=tuple(claims[parent] for parent in parents),
                             reading_mode=state.plan.reading_mode, separate_needs=state.plan.separate_needs,
                             numeric_identity=state.plan.numeric_identity, read_layout=state.plan.read_layout,
-                            read_packing=state.plan.read_packing)
+                            read_packing=state.plan.read_packing,
+                            answer_system_prompt=state.plan.answer_system_prompt)
                         predecessors = tuple(dict.fromkeys(parent.rsplit(":claim:", 1)[0] for parent in parents))
                         gap = replace(gap, plan_id=f"gap:{len(expanded)}:{state.plan.plan_id}",
                             steps=tuple(record.task for record in state.steps)+tuple(replace(task,
@@ -360,6 +369,9 @@ class RollingPlanRuntime:
                             selected_set=replace(selected, selected_units=tuple({**previous,
                                 **{unit.unit_id: unit for unit in gap.selected_set.selected_units}}.values())),
                             auxiliary_ms=state.plan.auxiliary_ms)
+                        from .context_budget import bind_answer_window
+                        gap = bind_answer_window(replace(gap, answer_allocation=None), template, snapshot,
+                            preserve_step_ids=tuple(record.step_id for record in state.steps))
                         gap = namespace_plan(gap)
                         context_plans = (gap, *tuple(item for item in context_plans
                             if item.plan_id != state.plan.plan_id)[:self.policy.limits.max_plan_candidates-2])

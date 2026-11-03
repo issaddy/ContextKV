@@ -38,7 +38,7 @@ def aligned_claims(claims):
 
 def reduce_claims(operation, claims, *, claim_id, need_id):
     """Count unique entities and sum one aligned value per entity/condition/version."""
-    claims = tuple(claim for claim in claims if claim.need_id == need_id)
+    claims = tuple(claim for claim in claims if claim.serves(need_id))
     groups = aligned_claims(claims)
     parents = tuple(claim.claim_id for claim in claims)
     spans = {span.span_id: span for claim in claims for span in claim.source_spans}

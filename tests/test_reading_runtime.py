@@ -448,10 +448,11 @@ async def test_derived_answer_keeps_all_leaf_spans_and_only_final_legal_citation
     response = await controller.serve_turn("s", state.raw_question, request_id="one", context_plans=(plan,))
     point = controller.store.get_snapshot("s").raw_history[0].answer_plan.points[0]
     assert {span.span_id for span in point.source_spans} == {"a", "b"}
-    assert len(point.citation_ids) == 1 and point.citation_ids == response.citation_scope
+    assert len(point.citation_ids) == 2 and point.citation_ids == response.citation_scope
     final = controller.store.get_attempt(response.attempt_id).plan.candidate
     assert {dict(final.reference_map)[ref] for ref in point.citation_ids} == final.required_blocks
-    assert len(final.required_blocks) < len({span.source_key for span in point.source_spans})
+    assert final.required_blocks == {span.source_key for span in point.source_spans}
+    assert len({span.key for span in final.evidence_spans}) < len(final.required_blocks)
     await controller.drain()
 
 
@@ -565,12 +566,12 @@ async def test_hierarchical_reduce_keeps_all_source_leaves_within_each_window(tm
     for candidate in candidates:
         assert candidate.feasible
         assert len(candidate.input_ids)+candidate.output_budget <= budget.window_tokens
-        assert 0 < len(candidate.required_blocks) < 100
-        assert {span.key for span in candidate.evidence_spans} == candidate.required_blocks
+        assert len(candidate.required_blocks) == 100
+        assert {span.key for span in candidate.evidence_spans} < candidate.required_blocks
         verify_evidence_spans(candidate.messages, candidate.evidence_spans, blocks,
                               candidate.reference_map)
         content = candidate.messages[-1].content
-        assert point.claim_ids[0] in content
+        assert '"claim_ids":["c0"]' in content
         assert "parent_claim_ids" not in content
     assert len(outcome.plan.answer_plan.points[0].source_spans) == 100
 

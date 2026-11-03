@@ -135,7 +135,8 @@ def long_audit(row, outcome, plan, claims, sources):
     for claim in claims:
         if claim["kind"] != "derived":
             ids = {value.upper() for value in re.findall(r"(?<![A-Za-z0-9])S\d+(?![A-Za-z0-9])", claim["entity"], re.I)}
-            extracted[claim["need_id"]].update(ids)
+            for need_id in (claim["need_id"], *claim.get("shared_need_ids", ())):
+                extracted[need_id].update(ids)
             normalized = mass_g(claim["value"], claim["unit"])
             if normalized is not None:
                 expected = {decimal(record["mass_g"]) for record in ledger["registrations"] if record["entity"] in ids}

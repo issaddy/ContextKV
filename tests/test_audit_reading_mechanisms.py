@@ -63,6 +63,17 @@ def test_source_dedup_and_final_unit_normalization_are_literal_only():
         "count: count = 36; original sources = 12.", "mass: sum = 655000 g; original sources = 12."]
 
 
+def test_shared_extraction_is_audited_in_each_served_need():
+    source = material("register", "Approved shipment S00: mass 1 kg.")
+    claim = EvidenceClaim("read:0", "count", "extract", entity="S00", value="1", unit="kg",
+        source_spans=(source[2],), shared_need_ids=("mass",))
+    row = artifact("long", [source], [claim], "One shipment.",
+        {"distinct_shipments": 1, "mass_kg": 1})
+    quality = audit_case(row)["quality"]
+    assert quality["extracted_literal_record_ids_by_need"] == {"count": ["S00"], "mass": ["S00"]}
+    assert len(quality["extracted_mass_claims"]) == 1
+
+
 def test_multihop_year_and_grounded_three_source_lineage_are_independent():
     material_ = (material("institute-parent", "Meridian Institute is governed by the Arbor Council."),
         material("parent-fund", "Arbor Council is supported by the Silver Fund."),

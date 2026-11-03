@@ -18,6 +18,12 @@ export PYTHONPATH="$CHECKOUT/python${PYTHONPATH:+:$PYTHONPATH}"
 # ready and pending copies without touching transfer queues or native locks.
 HICACHE_ARGS=()
 SESSION_ARGS=()
+JSON_ARGS=()
+if [[ "${CONTEXTKV_JSON_FORMAT:-bounded}" == bounded ]]; then
+  JSON_ARGS=(--constrained-json-max-whitespace-cnt 16)
+elif [[ "${CONTEXTKV_JSON_FORMAT:-bounded}" == compact ]]; then
+  JSON_ARGS=(--constrained-json-disable-any-whitespace)
+fi
 if [[ "${CONTEXTKV_ENABLE_SESSION_RADIX:-1}" == 1 ]]; then
   SESSION_ARGS=(--enable-session-radix-cache)
 fi
@@ -32,4 +38,5 @@ exec python "$PROJECT_ROOT/engine_patches/contextkv_model_scope.py" \
   --scope "$CONTEXTKV_MODEL_SCOPE_PATH" --launch \
   --tp 1 --dtype bfloat16 --kv-cache-dtype bfloat16 --context-length 32768 \
   --page-size "${CONTEXTKV_PAGE_SIZE:-64}" ${SESSION_ARGS[@]+"${SESSION_ARGS[@]}"} \
-  --enable-metrics ${HICACHE_ARGS[@]+"${HICACHE_ARGS[@]}"} "$@"
+  --enable-metrics ${HICACHE_ARGS[@]+"${HICACHE_ARGS[@]}"} \
+  ${JSON_ARGS[@]+"${JSON_ARGS[@]}"} "$@"

@@ -432,6 +432,13 @@ class Controller:
                 recovery = snap.current_epoch is not None and snap.current_epoch.engine_restart_id != info.engine_restart_id
                 planning_snap = (replace(working_snap, force_new_epoch_for_recovery=True, must_rebuild=True)
                                  if recovery else working_snap)
+                if context_plans:
+                    from .context_budget import bind_answer_window
+                    recorded_ids = tuple(record.step_id for record in
+                                         self.store.execution_steps(attempt.attempt_id))
+                    context_plans = tuple(bind_answer_window(context_plan, self.template, planning_snap,
+                        self.policy.system_prompt, preserve_step_ids=recorded_ids)
+                        for context_plan in context_plans)
                 if context_plans and self.knobs.strategy == "cost" and self.rolling_policy is None:
                     from .context_cost import quote_read_costs
                     completed_steps = tuple(record for stage, record in

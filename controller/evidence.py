@@ -32,8 +32,6 @@ class EvidencePolicy:
             raise ValueError("token budgets must be positive")
         if self.layout not in {"stable_key", "contextpilot"}:
             raise ValueError("layout must be stable_key or contextpilot")
-        if self.system_prompt is not None and not self.system_prompt.strip():
-            raise ValueError("system_prompt must be nonempty when provided")
         if self.table_annotation_style not in {"all_rows", "focus_refs"}:
             raise ValueError("table_annotation_style must be all_rows or focus_refs")
         if self.table_structure_mode not in {"legacy", "explicit"}:

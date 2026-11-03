@@ -46,9 +46,6 @@ class ClaimGraph:
             if not any(reduction.need_ids == later.need_ids and reduction.operation == later.operation
                 and set(reduction.basis_claim_ids) <= set(later.basis_claim_ids)
                 for later in reductions[index+1:]))
-        managed = {identity for reduction in reductions
-                   for identity in (*reduction.basis_claim_ids, *reduction.frontier_claim_ids)}
-        frontier = {identity for reduction in active for identity in reduction.frontier_claim_ids}
         completed_claims = set()
         todo = [identity for reduction in reductions for identity in reduction.frontier_claim_ids]
         while todo:
@@ -58,18 +55,56 @@ class ClaimGraph:
                 todo.extend(self.claims[identity].parent_claim_ids)
         pending = {claim.claim_id for result in results for claim in result.claims
                    if claim.kind == "derived" and claim.claim_id not in completed_claims}
-        parents = {parent for claim in self.claims.values() if claim.claim_id not in pending
-                   for parent in claim.parent_claim_ids}
         points = []
         for need in state.needs:
+            need_reductions = tuple(item for item in reductions if need.need_id in item.need_ids)
+            managed = {identity for item in need_reductions
+                       for identity in (*item.basis_claim_ids, *item.frontier_claim_ids)}
+            frontier = {identity for item in active if need.need_id in item.need_ids
+                        for identity in item.frontier_claim_ids}
+            parents = {parent for claim in self.claims.values()
+                       if claim.claim_id not in pending and claim.serves(need.need_id)
+                       for parent in claim.parent_claim_ids}
             selected = tuple(claim for claim in self.claims.values()
-                if claim.need_id == need.need_id and (claim.claim_id in frontier
+                if claim.serves(need.need_id) and (claim.claim_id in frontier
                     or claim.claim_id not in parents | managed | pending))
             spans = {span.span_id: span for claim in selected
                      for span in self.source_spans(claim.claim_id)}
             points.append(AnswerPoint(need.need_id, tuple(c.claim_id for c in selected),
                                       tuple(spans.values())))
         return AnswerPlan(tuple(points), disposition)
+
+    def conclusion_table(self, answer_plan, references):
+        """Encode every answer root and its complete source path with shared scopes."""
+        by_key = {key: reference for reference, key in references}
+        roots = tuple(dict.fromkeys(identity for point in answer_plan.points
+                                    for identity in point.claim_ids))
+        aliases = {identity: f"c{index}" for index, identity in enumerate(roots)}
+        spans, paths, scopes, facts = {}, {}, {}, []
+        for identity in roots:
+            claim = self.claims[identity]
+            source_ids = []
+            for span in self.source_spans(identity):
+                coordinates = by_key[span.source_key], span.start, span.end
+                source_ids.append(spans.setdefault(coordinates, f"s{len(spans)}"))
+            path = tuple(dict.fromkeys(source_ids))
+            path_id = paths.setdefault(path, f"p{len(paths)}")
+            scope = (claim.need_id, claim.conditions, claim.version, claim.operation, claim.kind,
+                     claim.shared_need_ids)
+            scope_id = scopes.setdefault(scope, f"g{len(scopes)}")
+            facts.append([aliases[identity], scope_id, claim.text, claim.entity,
+                          claim.relation, claim.value, claim.unit, path_id])
+        return {"fact_columns": ["id", "scope", "text", "entity", "relation", "value", "unit", "sources"],
+            "scope_columns": ["need_id", "conditions", "version", "operation", "kind", "shared_need_ids"],
+            "scopes": {alias: value for value, alias in scopes.items()},
+            "source_columns": ["citation_id", "start", "end"],
+            "sources": {alias: value for value, alias in spans.items()},
+            "source_paths": {alias: value for value, alias in paths.items()},
+            "facts": facts,
+            "answer_plan": {"disposition": answer_plan.disposition,
+                "points": [{"need_id": point.need_id,
+                    "claim_ids": [aliases[identity] for identity in point.claim_ids]}
+                    for point in answer_plan.points]}}
 
 
 def claim_frontier(inputs, outputs):

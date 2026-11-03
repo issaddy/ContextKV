@@ -144,6 +144,19 @@ class ReadingSemantics(unittest.IsolatedAsyncioTestCase):
         replay = await executor.execute_reads(attempt.attempt_id, snapshot, outcome.plan)
         self.assertEqual(len(executor.engine.calls), before)
         self.assertEqual(replay.plan.answer_plan, outcome.plan.answer_plan)
+        from controller.candidates import build_plan_candidates
+        candidates = build_plan_candidates(snapshot, outcome.plan.task_state.raw_question,
+            outcome.plan, ByteTemplate(), outcome=outcome)
+        self.assertTrue(all(candidate.feasible for candidate in candidates))
+        for candidate in candidates:
+            content = candidate.messages[-1].content
+            table = json.loads(content.split(
+                "Reading conclusions (shared scopes and complete source paths):\n")[1].split(
+                "\nComputed results")[0])
+            self.assertEqual(len(table["facts"]), 100)
+            self.assertEqual(len(table["sources"]), 100)
+            self.assertEqual(len(table["answer_plan"]["points"][0]["claim_ids"]), 100)
+            self.assertLessEqual(len(candidate.input_ids)+budget.output_tokens, budget.window_tokens)
 
 
 class ReductionFrontierSemantics(unittest.TestCase):

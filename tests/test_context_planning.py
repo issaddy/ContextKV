@@ -173,8 +173,18 @@ def test_large_read_unit_keeps_budgeted_original_and_root_citation():
         assert verify_evidence_spans(candidate.messages, candidate.evidence_spans,
                                     (block, background), candidate.reference_map) == {block.key}
         allowed = candidate_request(candidate, 1024)["citation_ids"]
-        assert allowed and f'"key_source_ids":["{allowed[0]}"]' in candidate.messages[-1].content
+        assert allowed and f'["{allowed[0]}",0,{len(block.text)}]' in candidate.messages[-1].content
         assert leaf.claim_id not in candidate.messages[-1].content
+        assert candidate.visible_blocks == frozenset()
+
+
+def test_explicit_empty_answer_system_is_preserved():
+    from controller.candidates import CandidatePolicy
+    plan, _ = context_plan()
+    plan = replace(plan, answer_system_prompt="A different task policy")
+    candidate = build_plan_candidates(SessionSnapshot("s"), "How?", plan, ByteTemplate(),
+        policy=CandidatePolicy(system_prompt=""))[0]
+    assert candidate.messages[0].content == ""
 
 
 def test_derived_answer_excerpt_budget_is_shared_across_original_sources_before_background():

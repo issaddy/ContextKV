@@ -33,7 +33,7 @@ def test_source_prefix_survives_need_step_and_runtime_alias_changes():
     assert prefix == template.render(right).input_ids[:len(prefix)]
     assert unit.text in bytes(prefix).decode()
     assert "Count records" not in bytes(prefix).decode()
-    aliases = json.loads(right[2].content)["source_aliases"]
+    aliases = json.loads(right[2].content.split("\nTask:\n", 1)[1])["source_aliases"]
     assert aliases[0]["spans"][0]["span_id"] == "need:1:span"
 
 
@@ -46,6 +46,21 @@ def test_source_version_and_original_offsets_change_prefix_identity():
     shifted = replace(original, source_spans=(replace(original.source_spans[0], start=1),))
     assert first[1] != step_messages(plan(shifted), task, (shifted,))[1]
     assert template.render(first).input_ids != template.render(second).input_ids
+
+
+def test_source_prefix_is_shared_across_numeric_and_multihop_operations():
+    unit = material()
+    selected = EvidenceSet("selected", (unit,))
+    numeric = build_read_plan(TaskState("numeric", "Count records and sum mass", needs=(
+        Need("count", operation="count"), Need("sum", operation="sum"))), selected,
+        "selected_sources", ContextBudget(), read_layout="source_first")
+    bridge = build_read_plan(TaskState("bridge", "Follow the record's supplier relation", needs=(
+        Need("supplier", operation="infer"),)), selected, "selected_sources", ContextBudget(),
+        read_layout="source_first")
+    left = step_messages(numeric, numeric.steps[0], numeric.selected_set.selected_units)
+    right = step_messages(bridge, bridge.steps[0], bridge.selected_set.selected_units)
+    assert left[:2] == right[:2]
+    assert left[-1].content.split("\nTask:\n", 1)[0] != right[-1].content.split("\nTask:\n", 1)[0]
 
 
 def test_source_windows_do_not_mix_arbitrary_documents_within_one_cached_read():

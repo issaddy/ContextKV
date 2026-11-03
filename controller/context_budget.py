@@ -1,7 +1,7 @@
 """Compile task-selected original history and account complete model windows."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 
 from .schema import Message
@@ -65,6 +65,95 @@ def measure_window(template, messages, budget, rendered, *, history=(), source_t
     return WindowCost(len(rendered.input_ids), budget.output_tokens,
         sum(len(encode(m.content, add_special_tokens=False)) for m in history),
         len(encode(source_text, add_special_tokens=False)), budget.window_tokens)
+
+
+def allocate_answer_window(plan, template, snapshot):
+    """Reserve the actual final envelope before admitting reading output."""
+    from .candidates import build_plan_candidates
+    from .context_schema import (AnswerPlan, AnswerPoint, AnswerWindowAllocation,
+                                 EvidenceClaim, ReadingOutcome)
+    from .schema import SessionSnapshot
+
+    empty = replace(plan, selected_set=replace(plan.selected_set, selected_units=()),
+        coverage_scope="selected_sources", answer_plan=AnswerPlan(tuple(
+            AnswerPoint(need.need_id) for need in plan.task_state.needs)))
+    snapshot = snapshot or SessionSnapshot("allocation")
+    candidate = build_plan_candidates(snapshot,
+        plan.task_state.raw_question, empty, template, layouts=("existing",))[0]
+    if candidate.reason == "working_history_budget":
+        raise ValueError("actual working history exceeds the ANSWER history allocation")
+    fixed = len(candidate.input_ids)
+    spans = tuple(dict.fromkeys(span for unit in plan.selected_set.selected_units for span in unit.source_spans))
+    claims = tuple(EvidenceClaim(f"allocation:{index}", need.need_id, "extract",
+        conditions=need.condition_ids, source_spans=spans)
+        for index, need in enumerate(plan.task_state.needs) if spans)
+    source_plan = replace(empty, answer_plan=AnswerPlan(tuple(AnswerPoint(need.need_id,
+        (f"allocation:{index}",) if spans else (), spans)
+        for index, need in enumerate(plan.task_state.needs))))
+    source_candidate = build_plan_candidates(snapshot, plan.task_state.raw_question, source_plan,
+        template, layouts=("existing",), outcome=ReadingOutcome(source_plan, claims=claims))[0]
+    metadata = len(source_candidate.input_ids)-fixed
+    remaining = plan.budget.window_tokens-plan.budget.output_tokens-fixed-metadata
+    if remaining <= 0:
+        raise ValueError("system, task, history, complete source metadata and ANSWER output exhaust the conclusion window")
+    count = len(plan.task_state.needs)
+    shares = tuple((need.need_id, remaining//count+(index < remaining%count))
+                   for index, need in enumerate(plan.task_state.needs))
+    return AnswerWindowAllocation(fixed, remaining, plan.budget.read_output_tokens, shares, metadata)
+
+
+def split_conclusion_tokens(shares, count):
+    """Partition a retained target; merging partitions adds these same shares."""
+    return tuple(tuple((need, tokens//count+(index < tokens%count)) for need, tokens in shares)
+                 for index in range(count))
+
+
+def merge_conclusion_tokens(partitions):
+    totals = {}
+    for shares in partitions:
+        for need, tokens in shares:
+            totals[need] = totals.get(need, 0)+tokens
+    return tuple(totals.items())
+
+
+def bind_answer_window(plan, template, snapshot, system_prompt=None, *, preserve_step_ids=()):
+    """Bind one final envelope and partition retained targets without repacking sources."""
+    system_prompt = plan.answer_system_prompt if system_prompt is None else system_prompt
+    bound = replace(plan, answer_system_prompt=system_prompt)
+    allocation = allocate_answer_window(bound, template, snapshot)
+    if (plan.answer_allocation == allocation and plan.answer_system_prompt == system_prompt
+            and all(task.retained_conclusion_tokens for task in plan.steps if task.kind == "READ")):
+        return plan
+    plan = bound
+    reads = tuple(task for task in plan.steps if task.kind == "READ")
+    preserved = set(preserve_step_ids)
+    assigned = {task.step_id: list(task.retained_conclusion_tokens) if task.step_id in preserved else []
+                for task in reads}
+    for need, tokens in allocation.need_tokens:
+        spent = sum(dict(task.retained_conclusion_tokens).get(need, 0)
+                    for task in reads if task.step_id in preserved)
+        owners = tuple(task for task in reads if need in task.need_ids and task.step_id not in preserved)
+        tokens = max(0, tokens-spent)
+        for task, share in zip(owners, split_conclusion_tokens(((need, tokens),), len(owners))):
+            assigned[task.step_id].extend(share)
+    reducible = {need.need_id for need in plan.task_state.needs
+                 if need.operation in {"enumerate", "compare", "count", "sum", "group", "infer"}}
+    steps = []
+    for task in plan.steps:
+        if task.step_id not in preserved:
+            if task.kind == "READ":
+                task = replace(task, retained_conclusion_tokens=tuple(assigned[task.step_id]),
+                    requires_reduction=task.operation == "summarize" or bool(reducible.intersection(task.need_ids)))
+            elif task.kind == "REDUCE":
+                task = replace(task, retained_conclusion_tokens=tuple((need, tokens)
+                    for need, tokens in allocation.need_tokens if need in task.need_ids))
+        steps.append(task)
+    return replace(plan, answer_allocation=allocation, steps=tuple(steps))
+
+
+def reduction_output_budget(plan, need_id):
+    """Response space includes lineage; final content targets are stored on each task."""
+    return plan.budget.read_output_tokens
 
 
 def _covers(interval, ranges):

@@ -16,6 +16,7 @@ from adapters.retriever_factory import create_retriever
 from adapters.serving_retrieval import ServingRetriever
 from adapters.support_model import SetPrediction, SupportModel, SupportProfile
 from controller.candidates import CandidatePolicy, build_plan_candidates
+from controller.config import load_config
 from controller.context_budget import resolve_text, working_history_messages
 from controller.context_schema import (AnswerPlan, AnswerPoint, ContextBudget, ContextPlan,
     EvidenceSet, EvidenceUnit, Need, ReadingOutcome, SourceSpan, SupportScores, TaskState, TextRef)
@@ -61,6 +62,8 @@ class StudyEvidenceProvider:
         self.helper_engine_info = helper_engine_info
         self.strategy = config.get("study", {}).get("strategy", "B7")
         self.budget = study_budget(config)
+        run_config = config.get("generation", {}).get("run_config")
+        self.answer_system_prompt = load_config(run_config).context.system_prompt if run_config else None
         self.corpus_snapshot_id = serving.corpus_snapshot_id
         self.traces = {}
         self._lock = threading.Lock()
@@ -301,12 +304,14 @@ class StudyEvidenceProvider:
                                     and any(need.operation in {"count", "sum"} for need in state.needs)),
                             numeric_identity=self.config.get("reading", {}).get("numeric_identity", "names"),
                             read_layout=self.config.get("reading", {}).get("layout", "task_first"),
+                            answer_system_prompt=self.answer_system_prompt,
                             read_packing=self.config.get("reading", {}).get("packing", "source_windows"
                                 if self.config.get("reading", {}).get("layout") == "source_first" else "mixed"))
                         if reading else ContextPlan(f"{request_id}:{selected.set_id}", state, selected,
                             coverage, budget=self.budget))
                 if self.strategy == "Lmap":
-                    plan = replace(plan, steps=tuple(replace(step, operation="summarize")
+                    plan = replace(plan, steps=tuple(replace(step, operation="summarize", shared_numeric_scopes=(),
+                        requires_reduction=True)
                         if step.kind == "READ" else step for step in plan.steps))
                 plan = replace(plan, layouts=tuple(selection.get("layouts", ("existing", "need_order", "stable_evidence"))))
                 if self.strategy in {"B5", "B6", "B7", "Lmap"}:

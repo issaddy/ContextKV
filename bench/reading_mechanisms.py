@@ -76,6 +76,7 @@ def save_measurements(output_dir, rows, sampler, physical, start, end, config,
 
 async def run(config_path, output_dir, *, base_url=None, gpu_device=0,
               background_offline_training=False,
+              numeric_need_isolation=False, read_layout="task_first",
               cases=("pair", "correction", "long", "multihop")):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -110,7 +111,10 @@ async def run(config_path, output_dir, *, base_url=None, gpu_device=0,
         evidence_set = fixture_set(state, material, name=f"{case}:set")
         plan = build_read_plan(state, evidence_set, scope, budget,
             template=service.template, snapshot=snapshot,
-            separate_needs=any(need.operation in {"count", "sum"} for need in state.needs),
+            separate_needs=numeric_need_isolation and any(need.operation in {"count", "sum"} for need in state.needs),
+            read_layout=read_layout,
+            read_packing="source_windows" if read_layout == "source_first" else "mixed",
+            answer_system_prompt=config.context.system_prompt,
             numeric_identity="source_ids" if case == "long" else "names")
         source_tokens = sum(len(service.template.tokenizer.encode(block.text,
             add_special_tokens=False)) for block in evidence_set.source_blocks)
@@ -123,6 +127,7 @@ async def run(config_path, output_dir, *, base_url=None, gpu_device=0,
             "background_offline_training": background_offline_training,
             "experiment_role": "controlled_mechanism_execution",
             "measurement_kind": "hardware" if config.engine.kind == "sglang" else "simulation",
+            "numeric_need_isolation": numeric_need_isolation, "read_layout": read_layout,
             "model": "qwen3_32b_nonthinking" if config.engine.kind == "sglang" else "mock",
             "question": state.raw_question, "actual_history": to_jsonable(snapshot.raw_history),
             "task_state": to_jsonable(state), "sources": to_jsonable(evidence_set.source_blocks),
@@ -247,12 +252,15 @@ def main(argv=None):
     parser.add_argument("--base-url")
     parser.add_argument("--gpu-device", type=int, default=0)
     parser.add_argument("--background-offline-training", action="store_true")
+    parser.add_argument("--numeric-need-isolation", action="store_true")
+    parser.add_argument("--read-layout", choices=("task_first", "source_first"), default="task_first")
     parser.add_argument("--cases", nargs="+", choices=("pair", "correction", "long", "multihop"),
                         default=["pair", "correction", "long", "multihop"])
     args = parser.parse_args(argv)
     print(json.dumps(asyncio.run(run(args.config, args.output_dir,
         base_url=args.base_url, gpu_device=args.gpu_device,
         background_offline_training=args.background_offline_training,
+        numeric_need_isolation=args.numeric_need_isolation, read_layout=args.read_layout,
         cases=args.cases)), ensure_ascii=False, indent=2))
 
 

@@ -188,6 +188,7 @@ class ReadingExecutor:
             record = StepRecord(attempt_id, task.step_id, task, epoch, messages, rendered.input_ids)
             record = replace(record, metrics={"generation_kind":
                 step_generation_kind(task.kind, task.operation, plan.reading_mode),
+                "read_protocol_version": task.output_schema["properties"]["format_version"]["const"],
                 "request_arrived_monotonic": self.request_arrived,
                 "phase_started_monotonic": step_started})
             self.store.save_execution_step(record, "PLANNED")
@@ -415,12 +416,14 @@ class ReadingExecutor:
                 pack.append(claim)
             if pack:
                 packs.append(tuple(pack))
+            from .context_budget import merge_conclusion_tokens, split_conclusion_tokens
+            targets = split_conclusion_tokens(task.retained_conclusion_tokens, len(packs))
             bundles = []
             for index, pack in enumerate(packs):
                 child = replace(task, step_id=f"{task.step_id}:part:0:{index}",
-                                reduction_basis_claim_ids=())
+                                reduction_basis_claim_ids=(), retained_conclusion_tokens=targets[index])
                 result = await run_model(child, (), pack)
-                bundles.append((claim_frontier(pack, result.claims), (result.step_id,)))
+                bundles.append((claim_frontier(pack, result.claims), (result.step_id,), targets[index]))
             level = 1
             while len(bundles) > 1:
                 groups, group = [], []
@@ -446,12 +449,14 @@ class ReadingExecutor:
                     child = replace(task,
                         step_id=task.step_id if len(groups) == 1 else f"{task.step_id}:merge:{level}:{index}",
                         predecessor_step_ids=predecessors,
-                        reduction_basis_claim_ids=task.reduction_basis_claim_ids if len(groups) == 1 else ())
+                        reduction_basis_claim_ids=task.reduction_basis_claim_ids if len(groups) == 1 else (),
+                        retained_conclusion_tokens=merge_conclusion_tokens(item[2] for item in group))
                     result = await run_model(child, (), claims)
-                    merged.append((claim_frontier(claims, result.claims), (result.step_id,)))
+                    merged.append((claim_frontier(claims, result.claims), (result.step_id,),
+                                   child.retained_conclusion_tokens))
                 bundles = merged
                 level += 1
-            frontier = tuple(claim for claims, _ in bundles for claim in claims)
+            frontier = tuple(claim for claims, _, _ in bundles for claim in claims)
             complete_reduction(task, basis, frontier, "merged" if len(bundles) == 1 else "forest")
 
         while True:
@@ -503,12 +508,12 @@ class ReadingExecutor:
                         parents = tuple(dict.fromkeys(parent for need in open_needs
                                                        for parent in need.parent_claim_ids))
                         extension = build_read_plan(plan.task_state,
-                            replace(plan.selected_set, selected_units=closure), plan.coverage_scope,
+                            replace(plan.selected_set, selected_units=closure, source_blocks=source_blocks), plan.coverage_scope,
                             plan.budget, template=self.template, snapshot=snapshot,
                             input_claims=tuple(graph.claims[parent] for parent in parents),
                             reading_mode=plan.reading_mode, separate_needs=plan.separate_needs,
                             numeric_identity=plan.numeric_identity, read_layout=plan.read_layout,
-                            read_packing=plan.read_packing)
+                            read_packing=plan.read_packing, answer_system_prompt=plan.answer_system_prompt)
                         prefix = f"hop:{len(expanded)}:"
                         extension_units = {unit.unit_id: unit for unit in extension.selected_set.selected_units}
                         steps = []
@@ -535,6 +540,9 @@ class ReadingExecutor:
                         plan = replace(plan, steps=plan.steps+steps,
                             coverage_units=tuple(dict.fromkeys((*plan.coverage_units, *extension.coverage_units))),
                             selected_set=selected_set)
+                        from .context_budget import bind_answer_window
+                        plan = bind_answer_window(replace(plan, answer_allocation=None), self.template,
+                            snapshot, preserve_step_ids=tuple(record.step_id for record in records))
                         self.store.save_reading_progress(attempt_id, plan, ReadingProgress(
                             tuple(sorted(expanded)), tuple(blocked_open_needs.values()), gap_auxiliary_usage))
                         continue
