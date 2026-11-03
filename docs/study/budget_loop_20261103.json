@@ -1,7 +1,7 @@
 {
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
-  "gpu_status": "Set-only P1 utility training; P0 shared MultiDoc2Dial awaiting scoring and MTRAG started",
+  "gpu_status": "Set-only P1 utility training; P0 shared MultiDoc2Dial scored and MTRAG running",
   "evidence_scope": "The 350-task development reference is scored. Candidate full-development quality and P95 acceptance remain open.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
@@ -270,6 +270,15 @@
       "planned_not_submitted": 1,
       "planned_not_submitted_model_tokens": 0,
       "preparatory_physical_cost_retained": true
+    },
+    "candidate_P0_multidoc2dial": {
+      "declared": 209,
+      "answered": 205,
+      "scored": 205,
+      "queue_quality": 0.6626794258373205,
+      "reference_quality": 0.5822966507177033,
+      "protocol_audit": "runs/study/budget-loop-20261103/formal-dev-c4-grounded/P0-multidoc2dial-protocol-audit.json",
+      "effective_protocol": "607e02d; one single-Need numeric selection, before generic unit/population prompt clarification; pre-freeze comparison"
     }
   },
   "source_snapshots": {
@@ -441,12 +450,14 @@
   "continuation": {
     "P1": "runs/study/budget-loop-20261103/p1-rewards/after-collection-stages.json",
     "full_protocol_queue": "runs/study/budget-loop-20261103/formal-dev-c4-grounded/launch.json",
-    "B_train_capture": "runs/study/budget-loop-20261103/b-observations",
-    "status": "A remains unfrozen. Set-only utility validation remains pending. Per-Need long20 scored; P0 shared MultiDoc2Dial 205/209 answered, scoring pending; MTRAG started. B/C and full-queue quality/P95 acceptance remain open."
+    "B_train_capture": "runs/study/budget-loop-20261103/selected-a-followthrough/launch.json",
+    "status": "Await corrected P1 shared Q40, select P1 if >= 0.61 else P0, then capture new selected-A observations and pair B; corrected P1 isolated A40 follows B. Full350 P3 and C/joint experiments continue.",
+    "selection_rule": "full declared40 quality; Qwen3-32B weights fixed"
   },
   "failure_artifact_cleanup": {
-    "redundant_bytes_removed": 1684181419,
-    "original_ledger_retained": true
+    "redundant_bytes_removed": 2702556916,
+    "original_ledger_retained": true,
+    "fixed_history_duplicate_cleanup": "runs/study/budget-loop-20261103/fixed-history-40/duplicate-cleanup.json"
   },
   "numeric_compact_v7_first_long": {
     "status": "delivered",

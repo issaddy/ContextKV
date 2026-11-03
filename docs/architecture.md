@@ -23,7 +23,7 @@ flowchart TD
 
 `adapters/history_state.py` 将实际会话解释为任务操作。条件撤销以谓词锚点和目标条件表达；`training/task_model.py` 使用现有 span/update/pointer 通道学习该操作。条件变更进入后续 Need、检索查询和回答条件。
 
-`adapters/evidence_pool.py` 建立原文坐标、版本和依赖目录，合并当前检索、历史来源和缺口召回。同一原文命中多个 Need 时合并需求归属，保留最高召回分。`support_model.py` 计算单段与组合支持；`evidence_planner.py` 在正文预算及依赖闭包内组织候选集合。P1 的训练奖励来自绑定 reader 的实际回答差异。
+`adapters/evidence_pool.py` 建立原文坐标、版本和依赖目录，合并当前检索、历史来源和缺口召回。同一原文命中多个 Need 时合并需求归属，保留最高召回分。`support_model.py` 计算单段与组合支持；`evidence_planner.py` 在正文预算及依赖闭包内组织候选集合。P1 的训练奖励来自绑定 reader 的实际回答差异。标记为 `evidence_set_only` 的 utility 资产在训练和推理时都使用同一输入范围，即任务状态、证据单元与支持图。动作、布局和执行上下文特征均置零。
 
 Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 只导出实际 READ/REDUCE/ANSWER traces，并用完整原文独立核验可见输入支持、来源和任务绑定，不生成 SFT 数据或保存 reader adapter。P0/P1 规划器分别与 `task_first + numeric_need_isolation`、`source_first + 共享提取` 组成四格；先固定实际输入定位协议贡献，再沿各格自己的真实历史运行 P3。既往 LoRA 的已付调用和训练费用只列为弃用支出，不计入改进结果。
 
@@ -31,9 +31,11 @@ Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 只导出实际 
 
 先从实际 ANSWER 窗口扣除系统、任务、工作历史、输出和来源元数据，再把可用结论份额分到 Need、READ 分片和有限 REDUCE 节点。生成输出上限与最终保留份额分别记录。READ 的完整输出结构同时出现在可见消息和原生 JSON 约束中。
 
-READ 按实际 tokenizer 的输入容量与结构化输出容量打包。同来源、条件、版本下的 count/sum 共享一次实体／量值提取，分别建立运算视图；`numeric_need_isolation` 保留为对照。来源前缀使用固定系统消息，任务阅读指令放在来源之后的任务消息正文，供不同操作复用同一因果前缀。缺口由 `unresolved_needs` 统一计算：后续步骤完成终端 Need 后，早期缺口关闭；不同时间范围分别检索，相同关系合并父结论。
+READ 按实际 tokenizer 的输入容量与结构化输出容量打包。同来源、条件、版本下的 count/sum 共享一次实体／量值提取。Wire 5 的数值事实包含原文短摘录，并用短 ID 引用来源、条件、Need 和父事实。`numeric_need_isolation` 保留为对照。来源前缀使用固定系统消息，任务阅读指令放在来源之后的任务消息正文，供不同操作复用同一因果前缀。缺口由 `unresolved_needs` 统一计算：后续步骤完成终端 Need 后，早期缺口关闭；不同时间范围分别检索，相同关系合并父结论。
 
-REDUCE 有两条计算路径：
+共享数值 READ 全部完成后，每个数值 Need 各声明一次显式 `numeric_select` REDUCE。Wire 6 的输出只列出选中的原事实父 ID，量值、实体、单位和来源沿用原事实。CPU 随后按各自 Need 的选中结果执行 count 或 sum。
+
+归约计算分两类。
 
 - `union/count/sum/group` 使用 CPU 的实体、条件、版本对齐与量纲换算，直接保留原始事实的父链。
 - `summarize/compare/infer` 使用模型。超窗输入先分成 N 包，每包执行一次；随后只合并至少两个完整结果 bundle，因此最多再执行 N−1 个合并节点。不能继续合并的各根结论组成 forest，整体进入后续回答规划。
@@ -55,7 +57,7 @@ GAP 仅在选中后执行并进入步骤账本；返回的新来源与原事实�
 
 `prefix_view.py` 按完整因果 token 路径识别来源前缀，`prefix_retention.py` 在业务 READ epoch 结束后以独立 owner 继续保护。Radix/HiCache 负责物理页匹配、迁移与淘汰；策略读取当前 active 保护集合，比较保留、延长或释放带来的边际净收益，共享因果页只收一次新增容量和驻留成本。预测使用访问间隔、GPU/Host 当前驻留与回载、两层容量压力、活动和排队请求数；已付控制成本不再次收取，原生已有的命中也不重复记作保护收益。
 
-C 配对重放为 Native、TTL15、TTL60、TTL180 使用同一请求序列、DAG、外部压力和至少 180 秒的共同观察窗；保护期限独立于观察长度。实际原文页需求与原生回执分别记录无重访、GPU 命中、Host 回载和重算，混合访问保留各类页数，空闲驻留持续计费。每个窗口只执行一次 Native，再分别与三个 TTL 作差。active 集合边际估值、状态特征和多 TTL 入口已实现；新协议的原生实测、价值模型拟合及开发选择尚未完成。
+C 配对重放为 Native、TTL15、TTL60、TTL180 使用同一请求序列、DAG、外部压力和至少 180 秒的共同观察窗。并发窗口按 READ 实际完成顺序登记可选前缀，重放沿用记录中的请求到达间隔。保护期限独立于观察长度。实际原文页需求与原生回执分别记录无重访、GPU 命中、Host 回载和重算，混合访问保留各类页数，空闲驻留持续计费。每个窗口只执行一次 Native，再分别与三个 TTL 作差。active 集合边际估值、状态特征和多 TTL 入口已实现；新协议的原生实测、价值模型拟合及开发选择尚未完成。
 
 ## 提交、评价与成本
 
