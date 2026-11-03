@@ -123,7 +123,7 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
     rows = list(read_jsonl(turns_path))
     if limit is not None:
         rows = rows[:limit]
-    cohort_path = settings.get("task_label_cohort_manifest")
+    cohort_path = settings.get("cohort_manifest")
     cohort = json.loads(Path(cohort_path).read_text()) if cohort_path else None
     if cohort is not None:
         members = {member["task_id"]: member for member in cohort["members"]}

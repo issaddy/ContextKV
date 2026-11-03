@@ -2,26 +2,27 @@
 
 面向资源受限多轮文档问答的上下文管理与 KV 缓存协同优化研究。
 
+Qwen3-32B 权重与解码参数冻结，不做微调或合并模型。
+
 系统在实际问答历史、条件与版本基础上选择原文，按固定窗口和累计成本执行
 READ/REDUCE/ANSWER，并基于原生缓存状态决定来源前缀保护。最终结论保留完整来源链，
 数值需求共享阅读，确定性运算在 CPU 完成；模型归约按有限分片执行。
 
 | 主线 | 当前入口 |
 |---|---|
-| A：实际历史、选材与 reader | `training.a_workflow`、`training.preference_rollout`、`bench.evidence_policy_comparison` |
+| A：实际历史、选材与阅读协议 | `training.a_workflow`、`training.preference_rollout`、`bench.evidence_policy_comparison` |
 | B：显式阅读动作与完整成本 | `controller.action_policy`、`controller.rolling_policy`、`training.plan_gain_rollout`、`training.plan_gain_completion` |
 | C：原生缓存与来源前缀保护 | `controller.prefix_retention`、`profiling.retention_trace`、`bench.capacity_workflow` |
 | 评价与总成本 | `bench.study_scoring`、`bench.reassess_saved`、`profiling.study_cost_ledger` |
 
 保留共享数值阅读 / `numeric_need_isolation`、显式动作 / `whole_plan` 固定计划、
-Native / 固定 TTL，以及 P0/P1 × R0/新 reader 的真实对照。四格先使用冻结实际输入，
-随后沿各自真实生成历史执行 P3。质量使用全部声明任务的官方分母，失败与未完成任务的
+Native / 固定 TTL，以及 P0/P1 规划器 × 阅读协议 的真实对照。四格先使用冻结实际输入，
+协议对照为 `task_first + numeric_need_isolation` 与 `source_first + 共享提取`，随后沿各自真实生成历史执行 P3。质量使用全部声明任务的官方分母，失败与未完成任务的
 已付调用、辅助计算和物理驻留费用一起记录。
 
 ```bash
 uv sync --extra retrieval --extra evaluation --extra tokenizer --locked
 uv run python -m bench.run_sessions --config configs/demo.yaml demo
-uv run pytest -q
 uv run ruff check controller adapters bench profiling tests scripts engine_patches training
 ```
 

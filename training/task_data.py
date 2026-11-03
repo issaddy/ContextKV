@@ -27,6 +27,17 @@ def read_jsonl(path):
         yield from (json.loads(line) for line in source if line.strip())
 
 
+def select_cohort_rows(values, manifest_path, split):
+    """Select registered states from one session-disjoint cohort partition."""
+    from training.reader_data import file_digest
+    members = {member["task_id"]: member for member in
+        json.loads(Path(manifest_path).read_text())["members"] if member["split"] == split}
+    manifest_hash = file_digest(manifest_path)
+    return [{**row, "cohort_split": split, "cohort_manifest_sha256": manifest_hash}
+            for row in values if row["task_id"] in members
+            and row["conversation_id"] == members[row["task_id"]]["conversation_id"]]
+
+
 def build_task_data(config):
     settings = config.get("training", {})
     root = Path(settings.get("data_dir", "runs/study/data"))
@@ -196,7 +207,7 @@ def prepare_cohort_task_labels(config):
     effective = deepcopy(config)
     training = effective.setdefault("training", {})
     training.update(data_dir=str(output), task_labels=str(labels_path),
-        task_label_turns=str(turns_path), task_label_cohort_manifest=str(cohort_path.resolve()))
+        task_label_turns=str(turns_path), cohort_manifest=str(cohort_path.resolve()))
     config_path = output/"task_labeling.yaml"
     config_path.write_text(yaml.safe_dump(effective, sort_keys=False))
     manifest = {"schema_version": 1, "cohort_manifest": str(cohort_path.resolve()),
@@ -209,6 +220,6 @@ def prepare_cohort_task_labels(config):
         "state_db": str(database), "turns_path": str(turns_path), "labels_path": str(labels_path),
         "labeling_config": str(config_path),
         "labeling_command": [sys.executable, "-m", "training.task_labeling", "--config", str(config_path)],
-        "model_requests": 0, "support_supervision": "build_examples support stages use completed train_task_labels.jsonl only"}
+        "model_requests": 0, "support_supervision": "support candidates retain cohort_split; fitting uses manifest train states only"}
     (output/"cohort_label_preparation.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
     return manifest

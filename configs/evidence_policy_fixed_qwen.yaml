@@ -1,12 +1,11 @@
 base_study_config: configs/study.yaml
 evidence_policy_training:
-  reader_manifest: models/study-reader/answer/reader_manifest.json
-  reader_profile_id: qwen3-reader-source-first-windows-32k-nonthinking
-  run_config: models/study-reader/answer/r1_run_config.yaml
+  reader_profile_id: qwen3-32b-frozen-source-first-shared
+  run_config: configs/qwen3_32b.yaml
   helper_run_config: configs/qwen3_32b.yaml
-  output_dir: runs/study/reader-bound-preferences
+  output_dir: runs/study/fixed-qwen-preferences
   parent_support_asset: models/study-support-actual-prefix
-  output_asset: models/study-support-r1
+  output_asset: models/study-support-fixed-qwen
   gpu_devices: [1, 2, 4]
   scorer_identity:
     kind: frozen_qwen3_32b_actual_history_source_judge
@@ -16,8 +15,10 @@ evidence_policy_training:
   reward_weights: {necessary_points: 0.3, grounding: 0.2, conditions_versions: 0.2, task_score: 0.3}
   minimum_reward_difference: 0.01
   collection:
+    cohort_manifest: runs/study/budget-loop-20261103/reader-cohorts/full/cohort_manifest.json
+    cohort_split: train
     turns_path: runs/study/data/task_labels.jsonl
-    turns: 32
+    turns: 200
     device: cuda:1
     encoder_device: cuda:1
     dense_index: data/multidoc2dial/bge-m3-sections

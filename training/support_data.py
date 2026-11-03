@@ -12,6 +12,7 @@ import uuid
 from controller.context_schema import EvidenceKey, EvidenceUnit, OpenNeed, SourceSpan, TaskState
 from controller.schema import Message
 from controller.serialization import decode
+from training.task_data import select_cohort_rows
 
 
 def _read(path):
@@ -48,7 +49,7 @@ def answer_state_supervision(raw_labels, *, corpus_has_answer=None, scope_comple
     return labels, origin
 
 
-def build_support_examples(turns_path, sources_path, output_dir, *,
+def build_support_examples(turns_path, sources_path, output_dir, *, cohort_manifest,
                            teacher_labels_path=None, max_turns=None, tokenizer=None):
     """Build member-deletion groups from original training span supervision.
 
@@ -56,14 +57,15 @@ Author grounding identifies candidate source locations. Entailment,
 applicability and answerability labels come from the separate teacher pass.
 Reference histories retain that name; rollout histories retain their policy.
 """
-    turns = _read(turns_path)
+    recorded_turns = _read(turns_path)
+    turns = [*select_cohort_rows(recorded_turns, cohort_manifest, "train")[:max_turns],
+             *select_cohort_rows(recorded_turns, cohort_manifest, "dev")]
     sources = _read(sources_path)
     by_id = {row["source_id"]: row for row in sources}
     directory = Path(output_dir)
     candidates, task_count = [], 0
     source_ids = list(by_id)
-    for turn in turns[:max_turns]:
-        assert turn["split"] == "train"
+    for turn in turns:
         gold, seen = [], set()
         for grounding in turn["grounding"]:
             source_id = grounding["passage_id"]
@@ -127,7 +129,9 @@ Reference histories retain that name; rollout histories retain their policy.
                     if "task_state" in turn else f"{turn['task_id']}::support::{group_index}")
                 candidates.append({"example_id": example_id,
                     "task_id": turn["task_id"], "conversation_id": turn["conversation_id"],
-                    "split": "train", "need_id": need_id, "query": query,
+                    "split": turn["split"], "cohort_split": turn["cohort_split"],
+                    "cohort_manifest_sha256": turn["cohort_manifest_sha256"],
+                    "need_id": need_id, "query": query,
                     "units": [asdict(unit) for unit in units], "dependencies": [],
                     "arity": size, "group_kind": group_kind, "history_kind": history_key,
                     "rollout_policy": turn.get("rollout_policy"),
@@ -155,7 +159,10 @@ Reference histories retain that name; rollout histories retain their policy.
     _write(directory/"support_labels.jsonl", labeled)
     manifest = {"turns_path": str(turns_path), "sources_path": str(sources_path),
         "teacher_labels_path": str(teacher_labels_path) if teacher_labels_path else None,
-        "train_tasks": task_count, "candidate_examples": len(candidates),
+        "tasks": task_count, "candidate_examples": len(candidates),
+        "cohort_manifest": str(Path(cohort_manifest).resolve()),
+        "cohort_splits": {split: len({row["task_id"] for row in candidates if row["cohort_split"] == split})
+                          for split in ("train", "dev")},
         "labeled_examples": len(labeled),
         "arities": {str(size): sum(row["arity"] == size for row in candidates) for size in (1, 2, 3)},
         "history_kinds": {kind: sum(row["history_kind"] == kind for row in candidates)
@@ -329,12 +336,11 @@ def annotate_support_parallel(examples_path, output_path, *, template, base_urls
     return manifest
 
 
-def build_preference_pairs(rewards_path, output_path, *, weights):
+def build_preference_pairs(rewards_path, output_path, *, weights, cohort_manifest):
     """Pair actual reader answers at the same question/history/body budget."""
-    rewards = _read(rewards_path)
+    rewards = select_cohort_rows(_read(rewards_path), cohort_manifest, "train")
     groups = {}
     for row in rewards:
-        assert row["split"] == "train"
         assert row["reader_model"] == "qwen3_32b_nonthinking"
         key = (row["task_id"], row["history_id"], row["body_budget"], row["output_budget"])
         groups.setdefault(key, []).append(row)
@@ -353,6 +359,8 @@ def build_preference_pairs(rewards_path, output_path, *, weights):
             if high == low:
                 continue
             pairs.append({"task_id": key[0], "split": "train",
+                "conversation_id": preferred["conversation_id"], "cohort_split": "train",
+                "cohort_manifest_sha256": preferred["cohort_manifest_sha256"],
                 "task_state": preferred["task_state"], "label_origin": "actual_reader_answers",
                 "preferred": preferred, "dispreferred": dispreferred,
                 "reward_weights": weights, "reward_difference": high-low})

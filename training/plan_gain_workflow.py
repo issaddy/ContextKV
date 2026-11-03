@@ -22,9 +22,9 @@ async def workflow(config, settings):
     frozen = root/"inputs"
     frozen.mkdir()
     provenance = {}
-    for name in ("task_labels", "actual_rollouts", "sources"):
+    for name in ("task_labels", "actual_rollouts", "sources", "cohort_manifest"):
         original = Path(settings[name]).resolve()
-        target = frozen/(name+".jsonl")
+        target = frozen/(name+original.suffix)
         shutil.copyfile(original, target)
         provenance[name] = {"original": str(original), "snapshot": str(target.resolve()),
             "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
@@ -38,7 +38,7 @@ async def workflow(config, settings):
     await sampler.start()
     started = time.monotonic()
     result = {"status": "running", "cohorts": {}, "source_files": provenance,
-        "reader_profile_id": settings["reader_profile_id"], "partition_seed": settings["partition_seed"],
+        "reader_profile_id": settings["reader_profile_id"], "cohort_manifest": settings["cohort_manifest"],
         "train_states": settings["train_states"], "dev_states": settings["dev_states"],
         "model_generation_limit": settings["max_generations"]}
     used = 0
@@ -76,14 +76,12 @@ def main(argv=None):
         return tuple(map(int, value.split(",")))
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("study-config", "run-config", "reader-profile-id", "judge-config", "judge-base-url",
-                 "task-labels", "actual-rollouts", "sources", "output-dir"):
+                 "task-labels", "actual-rollouts", "sources", "cohort-manifest", "output-dir"):
         parser.add_argument("--"+name, required=True)
     parser.add_argument("--reader-base-url")
     parser.add_argument("--asset")
     parser.add_argument("--train-states", type=int, default=8)
     parser.add_argument("--dev-states", type=int, default=4)
-    parser.add_argument("--partition-seed", default="plan-gain-native-train-v1")
-    parser.add_argument("--dev-fraction", type=float, default=.2)
     parser.add_argument("--read-outputs", type=integers, default=(512, 1024, 2048))
     parser.add_argument("--max-generations", type=int, default=1536)
     parser.add_argument("--online-gpu-devices", type=integers, required=True)
@@ -92,7 +90,7 @@ def main(argv=None):
     parser.add_argument("--cache-start", choices=("observed", "cold"), default="observed")
     parser.add_argument("--scope-scan", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args(argv)
-    if min(args.train_states, args.dev_states) < 1 or args.max_generations < 4 or not 0 < args.dev_fraction < 1:
+    if min(args.train_states, args.dev_states) < 1 or args.max_generations < 4:
         raise ValueError("actual train/dev state counts and total generation allocation must be positive")
     config = yaml.safe_load(Path(args.study_config).read_text())
     print(json.dumps(asyncio.run(workflow(config, vars(args))), ensure_ascii=False))

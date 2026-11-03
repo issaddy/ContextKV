@@ -1,4 +1,4 @@
-"""Train evidence utility on actual answers bound to the current trained reader.
+"""Train evidence utility on actual answers bound to the fixed reader.
 
 A checkpoint/profile gets its own generation cohort and asset.
 The original support encoder/heads remain P0; only the existing graph utility and
@@ -20,23 +20,25 @@ from urllib.parse import urlparse
 import yaml
 
 from training.reader_data import digest, file_digest, rows, write_rows
+from training.task_data import select_cohort_rows
 
 
 def reader_binding(config):
+    from controller.config import load_config
     settings = config["evidence_policy_training"]
-    manifest_path = Path(settings["reader_manifest"])
-    manifest = json.loads(manifest_path.read_text())
-    checkpoint = manifest["reader_id"]
-    if manifest["status"] != "trained" or not checkpoint.startswith("contextkv-reader-r1:"):
-        raise ValueError("evidence-policy training requires an explicitly trained R1 checkpoint")
-    return {"reader_checkpoint": checkpoint, "reader_profile_id": settings["reader_profile_id"],
-        "reader_manifest": str(manifest_path.resolve()), "reader_manifest_sha256": file_digest(manifest_path),
+    run = load_config(settings["run_config"])
+    scope_path = Path(run.model.scope_path)
+    return {"reader_checkpoint": run.model.revision, "reader_profile_id": settings["reader_profile_id"],
+        "reader_scope": str(scope_path.resolve()), "reader_scope_sha256": file_digest(scope_path),
         "scorer_identity": settings["scorer_identity"]}
 
 
-def cohort_directory(config):
+def cohort_directory(config, *, split=None):
     binding = reader_binding(config)
-    return Path(config["evidence_policy_training"]["output_dir"])/digest(binding)[:20]
+    settings = config["evidence_policy_training"]
+    collection = settings["collection"]
+    identity = digest([binding, file_digest(collection["cohort_manifest"])])[:20]
+    return Path(settings["output_dir"])/identity/(split or collection["cohort_split"])
 
 
 def qualify_collection_rows(label_rows, source_rows):
@@ -111,6 +113,8 @@ def audit_collection_inputs(config, *, limit=8):
     labels_path = Path(settings["collection"]["turns_path"])
     sources_path = Path(config["training"]["data_dir"])/"sources.jsonl"
     selected, excluded = qualify_collection_rows(rows(labels_path), rows(sources_path))
+    selected = select_cohort_rows(selected, settings["collection"]["cohort_manifest"],
+                                 settings["collection"]["cohort_split"])
     selected = selected[:limit]
     directory = cohort_directory(config)
     directory.mkdir(parents=True, exist_ok=True)
@@ -179,6 +183,8 @@ def build_reader_bound_pairs(reward_rows, *, binding, weights, minimum_differenc
             if preferred["task_state"] != dispreferred["task_state"]:
                 raise ValueError("utility interventions must keep the same resolved task state")
             result.append({"task_id": key[0], "split": "train", "label_origin": "actual_reader_answers",
+                "conversation_id": preferred["conversation_id"], "cohort_split": preferred["cohort_split"],
+                "cohort_manifest_sha256": preferred["cohort_manifest_sha256"],
                 "task_state": preferred["task_state"], "preferred": preferred, "dispreferred": dispreferred,
                 **binding, "reward_weights": weights, "reward_difference": difference,
                 "comparison_budget": {"body_tokens": key[2], "answer_output_tokens": key[3]},
@@ -186,7 +192,7 @@ def build_reader_bound_pairs(reward_rows, *, binding, weights, minimum_differenc
     return result
 
 
-async def collect_r1_preferences(config, *, limit=None):
+async def collect_fixed_reader_preferences(config, *, limit=None):
     from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
     from controller.config import create_controller, load_config
     from training.preference_rollout import collect_preferences
@@ -195,18 +201,20 @@ async def collect_r1_preferences(config, *, limit=None):
     directory.mkdir(parents=True, exist_ok=True)
     run = load_config(settings["run_config"])
     if run.model.revision != binding["reader_checkpoint"] or run.engine.kind != "sglang":
-        raise ValueError("R1 preference collection must use its real merged checkpoint and scoped SGLang profile")
+        raise ValueError("preference collection must use the fixed reader checkpoint and scoped SGLang profile")
     binding_path = directory/"collection_binding.json"
-    bound = {**binding, "run_config_sha256": file_digest(settings["run_config"])}
+    bound = {**binding, "run_config_sha256": file_digest(settings["run_config"]),
+        "cohort_manifest_sha256": file_digest(settings["collection"]["cohort_manifest"]),
+        "cohort_split": settings["collection"]["cohort_split"]}
     if binding_path.exists() and json.loads(binding_path.read_text())["binding"] != bound:
         raise ValueError("existing candidate cohort belongs to a different reader/profile/scorer")
     if (directory/"rewards.jsonl").exists() and not binding_path.exists():
-        raise ValueError("existing unbound rewards cannot be relabelled as current R1")
+        raise ValueError("existing unbound rewards cannot be relabelled as the fixed reader")
     controller = create_controller(replace(run, state_dir=str(directory/"runtime"),
         planner=replace(run.planner, strategy="always_rebuild")))
     info = await controller.engine.info()
     if info.fingerprint.model_revision != binding["reader_checkpoint"] or info.engine_kind != "sglang":
-        raise ValueError("active native reader does not match the trained R1 identity")
+        raise ValueError("active native reader does not match the fixed reader identity")
     import httpx
     async with httpx.AsyncClient(base_url=settings["collection"]["judge_base_url"], timeout=30) as judge:
         response = await judge.post("/context/engine/info", json={})
@@ -289,13 +297,16 @@ def prepare_preferences(config):
     settings, binding = config["evidence_policy_training"], reader_binding(config)
     directory = cohort_directory(config)
     rewards = attach_collection_costs(directory, binding)
-    pairs = build_reader_bound_pairs(rewards, binding=binding, weights=settings["reward_weights"],
-                                    minimum_difference=settings["minimum_reward_difference"])
+    split = settings["collection"]["cohort_split"]
+    rewards = select_cohort_rows(rewards, settings["collection"]["cohort_manifest"], split)
+    pairs = (build_reader_bound_pairs(rewards, binding=binding, weights=settings["reward_weights"],
+                                     minimum_difference=settings["minimum_reward_difference"])
+             if split == "train" else [])
     write_rows(directory/"preferences.jsonl", pairs)
-    manifest = {"binding": binding, "training_split": "train", "answers": len(rewards), "pairs": len(pairs),
+    manifest = {"binding": binding, "cohort_split": split, "answers": len(rewards), "pairs": len(pairs),
         "tasks": len({row["task_id"] for row in pairs}), "reward_weights": settings["reward_weights"],
         "source_rewards_sha256": file_digest(directory/"rewards.jsonl"),
-        "reader_updates": "new checkpoint/profile requires newly executed and scored candidate answers"}
+        "reader_condition": "fixed checkpoint/profile; candidate answers are executed and scored under this binding"}
     (directory/"preference_manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
     return manifest
 
@@ -303,8 +314,8 @@ def prepare_preferences(config):
 def train_evidence_policy(config):
     from training.support_model import train_set_utility
     settings, binding = config["evidence_policy_training"], reader_binding(config)
-    directory = cohort_directory(config)
-    pairs = rows(directory/"preferences.jsonl")
+    directory = cohort_directory(config, split="train")
+    pairs = select_cohort_rows(rows(directory/"preferences.jsonl"), settings["collection"]["cohort_manifest"], "train")
     for pair in pairs:
         for name in ("reader_checkpoint", "reader_profile_id", "scorer_identity"):
             if pair[name] != binding[name]:
@@ -315,14 +326,15 @@ def train_evidence_policy(config):
         raise ValueError("P1 asset must retain the P0 support asset as a separate checkpoint")
     optimizer = settings["optimizer"]
     train_set_utility(directory/"preferences.jsonl", settings["parent_support_asset"],
-        settings["output_asset"], device=optimizer["device"], epochs=optimizer["epochs"],
+        settings["output_asset"], cohort_manifest=settings["collection"]["cohort_manifest"],
+        device=optimizer["device"], epochs=optimizer["epochs"],
         learning_rate=optimizer["learning_rate"], seed=optimizer["seed"])
     path = Path(settings["output_asset"])/"support-model.json"
     metadata = json.loads(path.read_text())
     metadata.update(reader_binding=binding, policy_stage="P1_reader_bound_actual_answer_utility",
         policy_checkpoint="contextkv-evidence-p1:"+file_digest(Path(settings["output_asset"])/"heads.pt"),
         training_preferences_sha256=file_digest(directory/"preferences.jsonl"),
-        evaluation_evidence="separate P0/P1 x R0/R1 frozen-history and P3 runs; no quality claim from training loss")
+        evaluation_evidence="separate planner x reading-protocol frozen-history and P3 runs under fixed Qwen; no quality claim from training loss")
     path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2)+"\n")
     return metadata
 
@@ -371,7 +383,7 @@ def main(argv=None):
     if args.command == "audit":
         result = audit_collection_inputs(config, limit=args.limit or 8)
     elif args.command == "collect":
-        result = asyncio.run(collect_r1_preferences(config, limit=args.limit))
+        result = asyncio.run(collect_fixed_reader_preferences(config, limit=args.limit))
     elif args.command == "prepare":
         result = prepare_preferences(config)
     else:

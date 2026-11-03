@@ -19,13 +19,13 @@ flowchart TD
 
 `TaskState` 表达当前任务、Need、条件更新、版本意图和工作历史。`EvidenceSet` 保存来源单元及必要依赖；`ContextPlan` 保存阅读步骤和预算；`ReadResult/ReadingOutcome` 保存实际结论、来源、覆盖和步骤成本。原文档案、最终模型窗口和物理 KV 是三个不同对象，分别由来源目录、上下文编译器和原生引擎维护。
 
-## A：任务、证据与 reader 共同优化
+## A：任务、证据与固定模型阅读协议
 
 `adapters/history_state.py` 将实际会话解释为任务操作。条件撤销以谓词锚点和目标条件表达；`training/task_model.py` 使用现有 span/update/pointer 通道学习该操作。条件变更进入后续 Need、检索查询和回答条件。
 
 `adapters/evidence_pool.py` 建立原文坐标、版本和依赖目录，合并当前检索、历史来源和缺口召回。同一原文命中多个 Need 时合并需求归属，保留最高召回分。`support_model.py` 计算单段与组合支持；`evidence_planner.py` 在正文预算及依赖闭包内组织候选集合。P1 的训练奖励来自绑定 reader 的实际回答差异。
 
-reader 训练沿用 `traces → reviews → prepare → train`。READ、REDUCE、ANSWER 的目标生成均只接收实际运行 messages；独立核验读取完整原文和步骤结论，评价固定目标的来源正确性、可见输入支持和任务绑定。上游错误登记到原步骤，两个教师阶段分别计量。训练关闭中间 checkpoint 保存，只输出最终 reader adapter、tokenizer、身份 manifest 和实际训练成本；新协议 reader 的重训与评价尚未完成。
+Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 只导出实际 READ/REDUCE/ANSWER traces，并用完整原文独立核验可见输入支持、来源和任务绑定，不生成 SFT 数据或保存 reader adapter。P0/P1 规划器分别与 `task_first + numeric_need_isolation`、`source_first + 共享提取` 组成四格；先固定实际输入定位协议贡献，再沿各格自己的真实历史运行 P3。既往 LoRA 的已付调用和训练费用只列为弃用支出，不计入改进结果。
 
 ## B：有限阅读、有效结论和收益选择
 

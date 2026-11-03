@@ -1,15 +1,14 @@
 # 当前课题运行入口
 
-运行使用明确配置的模型、端点、reader 身份与原生缓存配置。主机目录、GPU、服务端口和
+运行冻结同一 Qwen3-32B 模型权重与解码参数，显式配置端点、协议身份与原生缓存。主机目录、GPU、服务端口和
 输出目录由本次运行配置声明；不复用旧批次的固定路径或截止时间。
 
 | 任务 | 当前入口 | 必须保留的对照与产物 |
 |---|---|---|
 | 结论预算、共享数值与有限归约 | `bench.reading_mechanisms` | 共享阅读 / `--numeric-need-isolation`；实际 messages、完整来源叶子与阶段账本 |
 | 原生来源前缀机制 | `bench.prefix_read_mechanisms` | 实际 READ epoch、前缀身份与 owner 观察 |
-| Reader 审计、会话队列及训练准备 | `training.a_workflow` 的 `audit`、`cohort`、`prepare-labels`、`reader-stage`、`reader-prepare` | 实际 messages 生成目标，完整原文独立核验；READ/REDUCE/ANSWER 分阶段 |
-| Reader 训练 | `training.train_reader` | reader/checkpoint、来源分区、训练 token 与成本 |
-| P0/P1 × R0/新 reader | `training.a_workflow compare`、`bench.evidence_policy_comparison` | 冻结实际输入四格、各自真实 P3、实际来源与历史 |
+| 阅读协议审计与会话队列 | `training.reader_audit` 的 `export`、`review`；`training.a_workflow` 的 `audit`、`cohort`、`prepare-labels` | 实际 messages 与完整原文独立核验，无 SFT 输出 |
+| P0/P1 规划器 × 阅读协议 | `training.a_workflow compare`、`bench.evidence_policy_comparison` | task_first+隔离数值 / source_first+共享提取；固定实际输入四格与各自真实 P3 |
 | 证据策略真实候选收益 | `training.preference_rollout` | 实际最终回答、官方质量与完整成本；绑定当前 reader |
 | B 动作收益 | `training.plan_gain_rollout`、`training.plan_gain_completion`、`training.collect_plan_gains` | DIRECT/READ/REDUCE/GAP 的真实增量执行、当前完整状态、独立最终答案与成对费用 |
 | B 训练与滚动比较 | `training.plan_gain_workflow`、`bench.rolling_study_workflow` | 显式动作与 `whole_plan` 固定计划对照分别登记；保留已付成本与绝对分支预算 |
@@ -19,6 +18,16 @@
 | 全成本账本 | `profiling.study_cost_ledger` | 原始调用/采样引用、窗口并集、共享份额与未知覆盖 |
 
 配置入口为 `configs/study.yaml`、`study_matrix.yaml`、`evidence_policy_comparison.yaml`；
+P1 支持策略配置为 `configs/evidence_policy_fixed_qwen.yaml`。
+审计配置为 `configs/reader_audit.yaml` 的 `reader_audit:{base_scope,data,review,resource_sample_seconds}`。
+会话队列使用 `evidence_cohort`；P1 支持策略直接绑定固定生成配置。
+辅助学习的 200 train / 40 dev 状态统一使用
+`runs/study/budget-loop-20261103/reader-cohorts/full/cohort_manifest.json`。
+task/support 配置必填 `training.cohort_manifest`；P1 采集必填
+`collection.cohort_manifest` 和 `cohort_split`，开发采集显式选择 `dev`。
+B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
+`--cohort-manifest` 指向同一文件；不再使用 `--partition-seed` 或 `--dev-fraction`
+重新划分状态，实际采集数量从声明分区内选择并单独记录。
 模型 scope 位于 `configs/model_scopes/`。Reader、策略身份、来源与费用由本次阶段
 manifest 记录。当前数值入口为 [reference_20261103.json](reference_20261103.json)
 和 [budget_loop_20261103.json](budget_loop_20261103.json)。
@@ -34,17 +43,25 @@ python -m bench.reading_mechanisms --config ACTUAL-RUN.yaml \
   --output-dir NEW-OUTPUT/isolated
 ```
 
-Reader 准备与四格比较示例：
+固定模型协议审计与四格比较示例：
 
 ```bash
-python -m training.a_workflow reader-prepare --config READER-STAGE.yaml --output NEW-OUTPUT/reader
+python -m training.reader_audit export --config ACTUAL-AUDIT.yaml
+python -m training.reader_audit review --config ACTUAL-AUDIT.yaml
 python -m training.a_workflow compare --comparison-config COMPARISON.yaml \
   --policy-asset CURRENT-P1-ASSET --matrix MATRIX.yaml --dataset DATASET \
   --split dev --phase both --output NEW-OUTPUT/comparison
 ```
 
 所有实验按运行前声明的 cohort、reader 身份和资源范围读取结果。质量未测得时保留未知，
-完成子集另外报告；训练 loss、输入投影成功率、预测成本和容量观测不能替代正式答案评分。
+完成子集另外报告；输入投影成功率、预测成本和容量观测不能替代正式答案评分。
+旧 Qwen LoRA/合并模型已退出活动入口，既往已付费用列为弃用支出，不进入受控改进结果。
+
+正式主验收沿用 `study_matrix.yaml` 既有四数据集的 development_weights 和指标。
+先固定完整声明题目 manifest，再在相同清单上重跑 baseline 与候选；辅助学习的
+200/40 划分不能替代正式开发队列。既有 a-public-dev 27 题、dynamic 14 题和 B 的
+6 题仅为阶段参照，当前尚无统一主验收队列的完整实测参照。默认关闭大型消融 sweep，
+保留 B0/Btoken/B3/B6/B7/Lmap 对照入口和 c1/c4 资源配置。
 
 C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观察窗。`replay` 与
 `retention_pair_workflow` 默认固定 Native、TTL15、TTL60、TTL180 四臂；

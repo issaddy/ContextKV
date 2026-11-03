@@ -1,4 +1,4 @@
-"""Reader SFT data from actual training-partition controller attempts."""
+"""Audit exact native reader traces and independently verify protocol outputs."""
 from __future__ import annotations
 
 import asyncio
@@ -47,7 +47,7 @@ def history_digest(history):
 
 
 def export_reader_traces(config):
-    settings = config["reader_training"]
+    settings = config["reader_audit"]
     output = Path(settings["data"]["output_dir"])
     traces, excluded, sources = [], [], []
     cohort_path = settings["data"].get("cohort_manifest")
@@ -55,7 +55,7 @@ def export_reader_traces(config):
                if cohort_path else None)
     for spec in settings["data"]["rollouts"]:
         if spec["split"] != "train":
-            raise ValueError("reader training traces must retain the native training partition")
+            raise ValueError("reader audit traces must retain the native training partition")
         database = Path(spec["state_db"]).resolve()
         connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -339,7 +339,7 @@ async def review_reader_trace(trace, client, *, minimum_quality, reviewer_identi
 async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
     from adapters.query_selector import OpenAICompletionClient, SelectorConfig
     from engine_patches.contextkv_model_scope import load_model_scope
-    settings = config["reader_training"]
+    settings = config["reader_audit"]
     data, review = settings["data"], settings["review"]
     root = Path(data["output_dir"])
     trace_rows = rows(root/"traces.jsonl")
@@ -427,79 +427,6 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
     return manifest
 
 
-def prepare_reader_data(config):
-    settings = config["reader_training"]["data"]
-    root = Path(settings["output_dir"])
-    reviews = {row["example_id"]: row for row in rows(settings.get("reviews_path", root/"reviews.jsonl"))
-               if row.get("review_protocol") == REVIEW_PROTOCOL}
-    selected, excluded = [], []
-    cohort = None
-    if settings.get("cohort_manifest"):
-        cohort = {row["task_id"]: row for row in json.loads(Path(settings["cohort_manifest"]).read_text())["members"]}
-    for trace in rows(root/"traces.jsonl"):
-        review = reviews.get(trace["example_id"])
-        reason = ("not_native_train" if trace["split"] != "train" else
-            "outside_stage_cohort" if cohort is not None and trace["task_id"] not in cohort else
-            "cohort_history_mismatch" if cohort is not None and (
-                trace["conversation_id"] != cohort[trace["task_id"]]["conversation_id"] or
-                trace["actual_history_sha256"] != cohort[trace["task_id"]]["actual_history_sha256"]) else
-            "old_read_protocol" if trace["phase"] != "ANSWER" and trace["read_protocol_version"] not in settings["read_protocol_versions"] else
-            "missing_review" if review is None else
-            "review_input_over_budget" if review["status"] == "input_over_budget" else
-            "teacher_target_truncated" if review["status"] == "teacher_target_truncated" else
-            "review_rejected" if review["status"] != "accepted" else
-            "insufficient_quality" if review["quality"] < settings["minimum_quality"] else
-            "unsupported_target" if not review["source_support_verified"] or not review["correct_task_binding"] else
-            "hidden_information_target" if review.get("visible_prompt_support") is False else
-            "actual_history_binding_mismatch" if review["actual_history_sha256"] != trace["actual_history_sha256"] else
-            "prompt_binding_mismatch" if review["prompt_token_hash"] != trace["prompt_token_hash"] else
-            "reader_binding_mismatch" if review["reader_identity"] != trace["reader_identity"] else None)
-        if reason is not None:
-            excluded.append({"example_id": trace["example_id"], "task_id": trace["task_id"], "reason": reason})
-            continue
-        selected.append({**trace, "target_text": review["target_text"], "target_origin": review["target_origin"],
-            "quality": review["quality"], "supervision": review,
-            "data_split": ("validation" if cohort[trace["task_id"]]["split"] == "dev" else "train")
-                if cohort is not None else "validation" if int(digest([settings["split_seed"], trace["conversation_id"]])[:8], 16)
-                /16**8 < settings["validation_fraction"] else "train"})
-    accepted_count = len(selected)
-    unique = {}
-    for row in selected:
-        key = (row["data_split"], row["phase"], row["prompt_token_hash"])
-        if key not in unique:
-            unique[key] = {**row, "source_example_ids": [row["example_id"]], "attempt_ids": [row["attempt_id"]]}
-            continue
-        kept = unique[key]
-        examples = [*kept["source_example_ids"], row["example_id"]]
-        attempts = list(dict.fromkeys((*kept["attempt_ids"], row["attempt_id"])))
-        if row["quality"] > kept["quality"]:
-            unique[key] = {**row, "source_example_ids": examples, "attempt_ids": attempts}
-        else:
-            kept.update(source_example_ids=examples, attempt_ids=attempts)
-    selected = list(unique.values())
-    for split in ("train", "validation"):
-        write_rows(root/f"{split}.jsonl", [row for row in selected if row["data_split"] == split])
-    write_rows(root/"selection_exclusions.jsonl", excluded)
-    phase_counts = {phase: {split: sum(row["phase"] == phase and row["data_split"] == split for row in selected)
-                           for split in ("train", "validation")} for phase in ("READ", "REDUCE", "ANSWER")}
-    manifest = {"schema_version": 1, "evidence_kind": "reviewed_actual_training_partition_reader_data",
-        "turns": len({row["task_id"] for row in selected}), "examples": len(selected),
-        "accepted_before_deduplication": accepted_count, "duplicate_prompt_examples": accepted_count-len(selected),
-        "deduplication": "data_split, phase, prompt_token_hash; highest independent quality, first on ties",
-        "training_turns": len({row["task_id"] for row in selected if row["data_split"] == "train"}),
-        "data_splits": dict(Counter(row["data_split"] for row in selected)),
-        "phase_splits": phase_counts,
-        "phases": dict(Counter(row["phase"] for row in selected)), "target_origins": dict(Counter(row["target_origin"] for row in selected)),
-        "read_protocol_versions": settings["read_protocol_versions"], "review_filter": settings,
-        "cohort_manifest_sha256": file_digest(settings["cohort_manifest"]) if cohort is not None else None,
-        "source_traces_sha256": file_digest(root/"traces.jsonl"),
-        "reviews_sha256": file_digest(settings.get("reviews_path", root/"reviews.jsonl")),
-        "selection_exclusions": dict(Counter(row["reason"] for row in excluded)),
-        "validation_origin": "conversation-disjoint heldout from training partition; no official dev/test",
-        "evaluation_results": "separate artifacts; no answer quality improvement inferred from dataset preparation"}
-    (root/"data_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
-    return manifest
-
 
 def audit_reader_targets(config):
     """Inventory saved targets without generating, rewriting or judging any text.
@@ -507,7 +434,7 @@ def audit_reader_targets(config):
     The output is a separate traces/reviews workspace. Its fixed_targets_path can
     be passed to review_reader_traces to independently verify the old targets.
     """
-    settings = config["reader_training"]["data"]
+    settings = config["reader_audit"]["data"]
     output = Path(settings["output_dir"])
     output.mkdir(parents=True, exist_ok=True)
     inventory, frozen, traces, upstream, sources = [], {}, {}, [], []

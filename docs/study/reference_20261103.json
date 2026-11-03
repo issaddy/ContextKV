@@ -972,5 +972,13 @@
     "public": "P0_R0",
     "fixed_history": "P0_R0",
     "own_p3": "P0_R0"
-  }
+  },
+  "controlled_condition": {
+    "reader": "fixed Qwen3-32B",
+    "model_weights": "frozen",
+    "decoding_parameters": "fixed",
+    "current_comparison": "planner × reading protocol; task_first isolated vs source_first shared",
+    "old_qwen_lora_costs": "abandoned expenditure only; excluded from improvement results"
+  },
+  "historical_identity_status": "Historical method labels alone do not establish whether Qwen weights changed. Current controlled comparison eligibility requires actual model scope, weights and decoding manifests; no inference is made from R1/R2 labels."
 }

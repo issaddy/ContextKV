@@ -1,8 +1,8 @@
 {
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
-  "gpu_status": "paused_by_user",
-  "evidence_scope": "Controlled mechanisms and partial training pilot; final full-development acceptance remains pending.",
+  "gpu_status": "stopped_for_fixed_model_scope_review",
+  "evidence_scope": "Controlled fixed-Qwen mechanisms and actual candidate collection; protocol comparison and final full-development acceptance remain pending.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
     "layout": "source_first",
@@ -54,33 +54,26 @@
     "dev_sessions": 7,
     "pilot_train_states": 12,
     "pilot_dev_states": 4,
-    "manifest": "runs/study/budget-loop-20261103/reader-cohorts/full/cohort_manifest.json"
+    "manifest": "runs/study/budget-loop-20261103/reader-cohorts/full/cohort_manifest.json",
+    "purpose": "Frozen-Qwen planner/protocol evaluation and P1 evidence supervision; not Qwen SFT",
+    "accepted_train_labels": 181,
+    "accepted_dev_labels": 36,
+    "pending_labels": 23
   },
   "pilot_v2": {
     "declared_states": 16,
     "accepted_task_labels": 15,
     "train_labels": 11,
     "dev_labels": 4,
-    "need_operations": {
-      "lookup": 11,
-      "procedure": 4,
-      "enumerate": 1
-    },
-    "need_scopes": {
-      "selected_sources": 16
-    },
-    "completed_candidate_answers": 39,
-    "states_with_answers": 7,
-    "interrupted_attempts": 1,
-    "exported_read_traces": 233,
-    "exported_reduce_traces": 0,
-    "exported_answer_traces": 39,
-    "empty_read_extractions": 144,
-    "quality_review": "pending; empty extraction count is structural, not a quality verdict",
-    "completed_native_calls": 272,
-    "completed_native_tokens": 831917,
+    "real_candidates": 90,
+    "completed_candidate_answers": 80,
+    "read_truncations": 10,
+    "known_reader_input_tokens": 1908156,
+    "known_reader_output_tokens": 175153,
+    "complete_reader_tokens": null,
     "submitted_read_without_receipt": 1,
-    "artifact": "runs/study/budget-loop-20261103/reader-pilot-v2/collection/train/runtime/sessions.sqlite3"
+    "hardware_comparability": "First 39 train answers used hangu-5; remaining train and dev used hangu-7. Not a hardware-matched latency comparison.",
+    "artifact": "runs/study/budget-loop-20261103/reader-pilot-v2/collection"
   },
   "cost_indexes_at_gpu_pause": {
     "native": {
@@ -119,10 +112,62 @@
     "aggregation": "Native/API/auxiliary token indexes and physical integrals are separate; do not sum overlapping ledgers."
   },
   "pending": [
-    "Complete pilot target generation, independent full-source review and reader SFT",
-    "Expand real reader training to200train/40dev and recollect P1 rewards",
-    "Native observed-action gains, planner×reader four cells and own-history P3",
-    "Native/TTL15/TTL60/TTL180 paired windows and B×C concurrency1/4",
-    "Complete development-queue quality/P95 acceptance"
-  ]
+    "Freeze full main development queue and rerun comparable fixed-model baseline",
+    "Complete auxiliary supervision and train A using the same session split",
+    "Collect frozen-Qwen P1 rewards, planner x protocol four cells and own-history P3",
+    "Fit B from paired actual actions and complete native/value joint experiment",
+    "Native/TTL15/TTL60/TTL180 paired windows, concurrency 1 and 4",
+    "Full-queue quality/P95 acceptance"
+  ],
+  "controlled_condition": {
+    "reader": "frozen Qwen3-32B BF16",
+    "model_weights": "unchanged",
+    "decoding_parameters": "Fixed sampling/thinking and final ANSWER cap; READ/REDUCE shares allocated within the common total budget",
+    "comparison": "planner P0/P1 × task_first+numeric_need_isolation/source_first+shared extraction",
+    "qwen_lora_status": "deprecated; paid costs retained as abandoned expenditure, excluded from improvement results"
+  },
+  "compact_protocol_pilot": {
+    "declared_states": 16,
+    "accepted_task_labels": 15,
+    "real_candidates": 90,
+    "candidate_denominator_complete": false,
+    "reason": "One of 12 declared train states has no accepted label or constructed candidate family.",
+    "completed_candidate_answers": 89,
+    "read_truncations": 1,
+    "input_tokens": 2237669,
+    "output_tokens": 127445,
+    "quality_scored_answers": 0,
+    "common_60_train_answers": {
+      "full_id_input_tokens": 1432285,
+      "full_id_output_tokens": 106374,
+      "compact_input_tokens": 1539526,
+      "compact_output_tokens": 69002,
+      "result": "Output tokens decreased; total tokens increased by 4.5%. No total-cost improvement claim."
+    },
+    "artifact": "runs/study/budget-loop-20261103/reader-pilot/collection"
+  },
+  "protocol_audit": {
+    "requested_examples": 640,
+    "accepted": 429,
+    "rejected": 189,
+    "target_truncated": 3,
+    "review_input_over_budget": 19,
+    "purpose": "Protocol diagnosis only; no Qwen SFT",
+    "cost_coverage": "Some cancelled review calls lack individual receipts; physical observation and known API receipts retained.",
+    "artifact": "runs/study/budget-loop-20261103/reader-pilot/reader-data/review_manifest.json"
+  },
+  "scope_cleanup": {
+    "removed_bytes": 1484408693,
+    "removed_qwen_adapters": 2,
+    "base_model_modified": false,
+    "adapters_ever_served": false,
+    "retained_training_cost_files": 10,
+    "cost_manifest": "runs/study/budget-loop-20261103/costs/abandoned-qwen-tuning/manifest.json",
+    "active_model_assets": [
+      "bge-m3",
+      "bge-m3-dialogue-query-v1",
+      "study-support-actual-prefix"
+    ],
+    "qwen_path": "/data/models/qwen3-32b"
+  }
 }

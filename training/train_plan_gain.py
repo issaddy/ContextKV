@@ -123,6 +123,7 @@ def build_gain_record(plan: PlanCandidate, state: ReadingOutcome, snapshot: Sess
     record = {"schema_version": 1, "record_id": _digest([expected_state, plan.plan_id,
             direct["native_receipts"], counterfactual["native_receipts"]]),
         "source": "actual_answer_counterfactual", "split": direct["split"],
+        "cohort_split": direct["cohort_split"], "cohort_manifest_sha256": direct["cohort_manifest_sha256"],
         "state_key": expected_state, "actual_history_sha256": _digest(expected_history),
         "reader_checkpoint": direct["reader_checkpoint"], "reader_profile_id": direct["reader_profile_id"],
         "scorer_identity": direct["scorer_identity"], "comparison_budget": direct["comparison_budget"],

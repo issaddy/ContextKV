@@ -462,26 +462,24 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
     output_dir.mkdir(parents=True, exist_ok=True)
     labels_path = Path(settings.get("turns_path", training.get("task_labels", data_dir/"task_labels.jsonl")))
     rows = [json.loads(line) for line in labels_path.read_text().splitlines() if line]
-    cohort = None
-    if settings.get("cohort_manifest"):
-        cohort_path = Path(settings["cohort_manifest"])
-        cohort = json.loads(cohort_path.read_text())
-        cohort_split = settings.get("cohort_split", "train")
-        members = {item["task_id"]: item for item in cohort["members"] if item["split"] == cohort_split}
-        if "eligible_task_ids" in settings:
-            eligible = set(settings["eligible_task_ids"])
-            if not eligible <= set(members):
-                raise ValueError("eligible task labels include states outside the registered cohort split")
-            members = {identity: member for identity, member in members.items() if identity in eligible}
-        rows = [row for row in rows if row["task_id"] in members]
-        for row in rows:
-            member = members[row["task_id"]]
-            if (row["conversation_id"] != member["conversation_id"] or
-                    history_digest(row["actual_history"]) != member["actual_history_sha256"]):
-                raise ValueError(f"candidate state differs from declared cohort: {row['task_id']}")
-        if set(members) != {row["task_id"] for row in rows}:
-            raise ValueError("candidate turns do not contain every declared cohort state")
-    rows = rows[:limit or (len(rows) if cohort else settings.get("turns", training.get("preference_turns", 200)))]
+    cohort_path = Path(settings["cohort_manifest"])
+    cohort = json.loads(cohort_path.read_text())
+    cohort_split = settings["cohort_split"]
+    members = {item["task_id"]: item for item in cohort["members"] if item["split"] == cohort_split}
+    if "eligible_task_ids" in settings:
+        eligible = set(settings["eligible_task_ids"])
+        if not eligible <= set(members):
+            raise ValueError("eligible task labels include states outside the registered cohort split")
+        members = {identity: member for identity, member in members.items() if identity in eligible}
+    rows = [row for row in rows if row["task_id"] in members]
+    for row in rows:
+        member = members[row["task_id"]]
+        if (row["conversation_id"] != member["conversation_id"] or
+                history_digest(row["actual_history"]) != member["actual_history_sha256"]):
+            raise ValueError(f"candidate state differs from declared cohort: {row['task_id']}")
+    if set(members) != {row["task_id"] for row in rows}:
+        raise ValueError("candidate turns do not contain every declared cohort state")
+    rows = rows[:limit or len(rows)]
     assert rows and all(row["split"] == "train" and "actual_history" in row for row in rows)
     if settings.get("state_db"):
         rows = bind_saved_turns(rows, settings["state_db"])
@@ -498,7 +496,7 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
             raise ValueError("active reader differs from the declared candidate collection checkpoint")
         binding = {"reader_checkpoint": settings["reader_checkpoint"],
             "reader_profile_id": settings["reader_profile_id"],
-            "cohort_manifest_sha256": file_digest(settings["cohort_manifest"]) if cohort else None,
+            "cohort_manifest_sha256": file_digest(settings["cohort_manifest"]),
             "reader_data_only": settings.get("reader_data_only", False)}
         binding_path = output_dir/"reader_collection_binding.json"
         if binding_path.exists() and json.loads(binding_path.read_text()) != binding:
@@ -742,8 +740,8 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                     actual_candidate = controller.store.get_attempt(response.attempt_id).plan.candidate
                     actual_turn = {"task_id": row["task_id"], "conversation_id": row["conversation_id"],
                         "turn": row["turn"], "snapshot_id": row["snapshot_id"], "split": "train",
-                        "cohort_split": settings.get("cohort_split", "train") if cohort else None,
-                        "cohort_manifest_sha256": file_digest(settings["cohort_manifest"]) if cohort else None,
+                        "cohort_split": settings["cohort_split"],
+                        "cohort_manifest_sha256": file_digest(settings["cohort_manifest"]),
                         "actual_history": row["actual_history"], "question": row["question"],
                         "category": category, "response": to_jsonable(response), "answer": response.assistant_text,
                         "reader_checkpoint": settings.get("reader_checkpoint"),
@@ -786,10 +784,10 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                         "dependencies": to_jsonable(tuple(unit for unit in close_dependencies(support.unit_ids, all_units)
                                                          if unit.unit_id not in support.unit_ids))}
                         for support in support_rows]
-                    result = {"task_id": row["task_id"], "split": settings.get("cohort_split", "train") if cohort else "train", "history_id": history_id,
+                    result = {"task_id": row["task_id"], "split": settings["cohort_split"], "history_id": history_id,
                         "conversation_id": row["conversation_id"], "turn": row["turn"], "snapshot_id": row["snapshot_id"],
-                        "cohort_split": settings.get("cohort_split", "train") if cohort else None,
-                        "cohort_manifest_sha256": file_digest(settings["cohort_manifest"]) if cohort else None,
+                        "cohort_split": settings["cohort_split"],
+                        "cohort_manifest_sha256": file_digest(settings["cohort_manifest"]),
                         "actual_history": row["actual_history"], "question": row["question"],
                         "history_origin": "frozen_actual_rollout", "measurement_kind": "hardware",
                         "reader_checkpoint": settings.get("reader_checkpoint"),
@@ -850,30 +848,31 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
         "necessary_points": .3, "grounding": .2, "conditions_versions": .2, "task_score": .3}))
     preferences_path = Path(settings.get("preferences_path", training.get("preferences", output_dir/"preferences.jsonl")))
     if settings.get("reader_data_only", False):
-        pair_manifest = {"pairs": 0, "reason": "reader_training_precedes_policy_reward_recollection"}
+        pair_manifest = {"pairs": 0, "reason": "reader_protocol_audit_only"}
     elif settings.get("candidate_preparation_only", False):
         pair_manifest = {"pairs": 0, "reason": "candidate_preparation_only"}
     elif not collected:
         pair_manifest = {"pairs": 0, "reason": "no_actual_reader_answers"}
-    elif cohort is not None and settings.get("cohort_split", "train") == "dev":
+    elif settings["cohort_split"] == "dev":
         pair_manifest = {"pairs": 0, "reason": "heldout_dev_rewards_do_not_enter_policy_training"}
     else:
-        pair_manifest = build_preference_pairs(rewards_path, preferences_path, weights=weights)
+        pair_manifest = build_preference_pairs(rewards_path, preferences_path, weights=weights,
+                                               cohort_manifest=settings["cohort_manifest"])
     interrupted_by_attempt = {entry["old_attempt_id"]: entry["cost"] for entry in resume_routes.values()}
     if resume_proof:
         interrupted_by_attempt.update((entry["old_attempt_id"], entry["cost"])
             for entry in resume_proof["inherited_interrupted_costs"])
     statistics = collection_manifest_statistics(actual_turns=actual_turns, collected=collected,
         failures=failures, interrupted_by_attempt=interrupted_by_attempt, cohort=cohort,
-        cohort_split=settings.get("cohort_split", "train"),
+        cohort_split=settings["cohort_split"],
         labels=[json.loads(line) for line in labels_path.read_text().splitlines() if line],
         candidate_families={**saved_families, **candidate_families}, planned_rows=rows, categories=categories)
     manifest = {**statistics,
         'cohort_manifest': settings.get("cohort_manifest"),
         'collection_recovery': resume_proof,
-        'cohort_split': settings.get("cohort_split") if cohort else None,
+        'cohort_split': settings["cohort_split"],
         'candidate_preparation_only': settings.get("candidate_preparation_only", False),
-        'candidate_families_path': str((output_dir/"candidate_families.jsonl").resolve()) if cohort else None,
+        'candidate_families_path': str((output_dir/"candidate_families.jsonl").resolve()),
         'turns_path': str(labels_path),
         'reader_data_only': settings.get("reader_data_only", False),
         'candidate_concurrency': settings.get("candidate_concurrency", 4),

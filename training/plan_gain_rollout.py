@@ -203,18 +203,17 @@ def bounded_engine(engine, budget, wire_path):
     return BoundedReader(engine)
 
 
-def audited_cohort(labels, sources, *, split, limit, seed, dev_fraction):
+def audited_cohort(labels, sources, *, split, limit, cohort_manifest):
     from training.train_evidence_policy import qualify_collection_rows
+    from training.task_data import select_cohort_rows
+    from training.reader_data import file_digest
+    labels = select_cohort_rows(labels, cohort_manifest, split)
     eligible, excluded = qualify_collection_rows(labels, sources)
     unique = {row["task_id"] for row in labels}
     if len(unique) != len(labels):
         raise ValueError("gain source labels must contain unique actual task IDs")
-    assignments = {row["conversation_id"]: ("dev" if int(digest([seed, row["conversation_id"]])[:16], 16)/2**64
-                   < dev_fraction else "train") for row in labels}
     selected = []
     for row in eligible:
-        if assignments[row["conversation_id"]] != split:
-            continue
         if row["script_history_mismatch"] is not False or "simulation" in row["rollout_policy"]:
             excluded.append({"task_id": row["task_id"], "reason": "history_not_audited_actual_model_rollout"})
             continue
@@ -225,8 +224,9 @@ def audited_cohort(labels, sources, *, split, limit, seed, dev_fraction):
     selected = selected[:limit]
     if not selected:
         raise ValueError("no audited native-training actual-history turns in the declared gain cohort")
-    return selected, {"split": split, "source_partition": "train", "partition_seed": seed,
-        "dev_fraction": dev_fraction, "allocation_unit": "conversation_id", "assignments": assignments,
+    return selected, {"split": split, "source_partition": "train",
+        "cohort_manifest": str(Path(cohort_manifest).resolve()), "cohort_manifest_sha256": file_digest(cohort_manifest),
+        "allocation_unit": "registered conversation_id",
         "planned_task_ids": [row["task_id"] for row in selected], "exclusions": excluded,
         "source_label_sha256": digest(labels), "source_originals_sha256": digest(sources)}
 
@@ -539,7 +539,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
     started = time.monotonic()
     labels, source_rows = read_rows(settings["task_labels"]), read_rows(settings["sources"])
     selected, cohort = audited_cohort(labels, source_rows, split=settings["split"], limit=len(labels),
-        seed=settings["partition_seed"], dev_fraction=settings["dev_fraction"])
+        cohort_manifest=settings["cohort_manifest"])
     verify_actual_history(selected, read_rows(settings["actual_rollouts"]))
     validator = AuditedTaskInterpreter(None)
     valid, invalid = [], []
@@ -654,7 +654,9 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
             journal_judge = JudgeJournal(judge_client, budget, output/"judge-wire.jsonl")
             common_binding = {"reader_checkpoint": reader_checkpoint,
                 "reader_profile_id": settings["reader_profile_id"], "scorer_identity": scorer,
-                "split": settings["split"], "measurement_kind": "hardware" if info.engine_kind == "sglang" else "simulation",
+                "split": settings["split"], "cohort_split": row["cohort_split"],
+                "cohort_manifest_sha256": row["cohort_manifest_sha256"],
+                "measurement_kind": "hardware" if info.engine_kind == "sglang" else "simulation",
                 "resident_model_manifest": to_jsonable(provider.manifest),
                 "task_state_source": "frozen_audited_actual", "collection_mode": mode,
                 "counterfactual_cache_start": settings["cache_start"]}
@@ -862,13 +864,12 @@ def main(argv=None):
     parser.add_argument("--judge-config", required=True)
     parser.add_argument("--judge-base-url", required=True)
     parser.add_argument("--task-labels", required=True)
+    parser.add_argument("--cohort-manifest", required=True)
     parser.add_argument("--actual-rollouts", required=True)
     parser.add_argument("--sources", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--split", choices=("train", "dev"), required=True)
     parser.add_argument("--limit-tasks", type=int, default=8)
-    parser.add_argument("--partition-seed", default="plan-gain-native-train-v1")
-    parser.add_argument("--dev-fraction", type=float, default=.2)
     parser.add_argument("--read-outputs", type=integers, default=(512, 1024, 2048))
     parser.add_argument("--max-generations", type=int, default=256)
     parser.add_argument("--online-gpu-devices", type=integers, required=True)
@@ -881,7 +882,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.mode == "observed_actions" and not args.observed_states:
         parser.error("observed_actions requires --observed-states")
-    if args.limit_tasks < 1 or args.max_generations < 1 or not 0 < args.dev_fraction < 1 or any(
+    if args.limit_tasks < 1 or args.max_generations < 1 or any(
             output < 1 for output in args.read_outputs):
         raise ValueError("collection bounds, output allocations and conversation holdout must be positive")
     config = yaml.safe_load(Path(args.study_config).read_text())

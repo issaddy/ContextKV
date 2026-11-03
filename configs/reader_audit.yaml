@@ -1,0 +1,17 @@
+reader_audit:
+  base_scope: configs/model_scopes/qwen3-32b.local.json
+  resource_sample_seconds: 0.5
+  data:
+    cohort_manifest: runs/study/budget-loop-20261103/reader-cohorts/full/cohort_manifest.json
+    output_dir: runs/study/reader-audit
+    answer_output_tokens: 1024
+    minimum_quality: 0.85
+    read_protocol_versions: [2, 3, 4]
+    rollouts: []
+  review:
+    base_urls: [http://127.0.0.1:30001]
+    gpu_devices: [2]
+    context_window: 32768
+    max_input_tokens: 26624
+    max_output_tokens: 6144
+    timeout_seconds: 600

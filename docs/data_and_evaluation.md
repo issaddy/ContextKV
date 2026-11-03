@@ -36,7 +36,9 @@ P2/P3从首轮连续运行。参考答案、qrels和支持标注用于离线评�
 
 ## 当前评价入口
 
-P0/P1 × R0/新 reader 先比较冻结输入，再比较各自真实生成历史的 P3。
+固定同一 Qwen3-32B 权重和解码参数，P0/P1 规划器 × 阅读协议先比较冻结输入，
+再比较各自真实生成历史的 P3。协议分别为 `task_first + numeric_need_isolation`
+和 `source_first + 共享提取`，不比较不同 Qwen 权重。
 `bench.study_scoring` 调用官方评分，`bench.reassess_saved` 对已存答案离线重评；
 `bench.study_metrics.declared_queue_summary` 使用全部声明题目作为分母，失败、未启动、
 截断及未评分条目保留，所有已付计算成本计入账本。

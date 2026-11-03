@@ -426,10 +426,12 @@ def _record_metrics(record, spec, settings):
     return metrics
 
 
-async def score_dataset(config, dataset_spec, rows, generation_dir):
+async def score_dataset(config, dataset_spec, rows, generation_dir, *, expected_task_ids=None):
     """Add benchmark metrics and a separate scoring ledger to saved result rows."""
     directory = Path(generation_dir)/"scoring"
     directory.mkdir(parents=True, exist_ok=True)
+    declared = expected_task_ids is not None
+    expected = list(expected_task_ids) if declared else [row["task_id"] for row in rows]
     settings = _settings(config, dataset_spec)
     scores_path = settings.get("scores_path", dataset_spec.get("scores_path"))
     started = time.perf_counter()
@@ -472,10 +474,14 @@ async def score_dataset(config, dataset_spec, rows, generation_dir):
                 "metric_aliases": aliases, "judge_cost": _usage_cost(record) if record else None,
                 "shared_scoring_cost_manifest": str(directory/"manifest.json")}})
     manifest = {"identity": identity, "primary_metric": dataset_spec["primary_metric"],
-        "requested": len(rows), "score_records": len(records),
+        "requested": len(expected), "cohort_declared": declared, "task_ids": expected,
+        "generated_answers": len(rows), "score_records": len(records),
         "scored": sum(row["scoring"]["status"] == "scored" for row in updated),
         "failed_task_ids": [row["task_id"] for row in updated if row["scoring"]["status"] == "failed"],
-        "missing_task_ids": [row["task_id"] for row in updated if row["scoring"]["status"] != "scored"],
+        "missing_execution_task_ids": [task_id for task_id in expected
+            if task_id not in {row["task_id"] for row in rows}],
+        "missing_task_ids": [task_id for task_id in expected
+            if task_id not in {row["task_id"] for row in updated if row["scoring"]["status"] == "scored"}],
         "raw_outputs": outputs, "judge_cost": judge_cost,
         "wall_elapsed_ms": (time.perf_counter()-started)*1000,
         "cost_scope": "offline_scoring_separate_from_online_answer_cost"}
@@ -497,13 +503,15 @@ def main(argv=None):
     parser.add_argument("--matrix", required=True)
     parser.add_argument("--config")
     parser.add_argument("--dataset", required=True)
+    parser.add_argument("--split", choices=("train", "dev", "test"), default="dev")
     parser.add_argument("--generation-dir", required=True)
     parser.add_argument("--rows")
     args = parser.parse_args(argv)
     matrix = yaml.safe_load(Path(args.matrix).read_text())
     config = yaml.safe_load(Path(args.config or matrix["study_config"]).read_text())
     rows = load_jsonl(args.rows or Path(args.generation_dir)/"results.unscored.jsonl")
-    asyncio.run(score_dataset(config, matrix["datasets"][args.dataset], rows, args.generation_dir))
+    asyncio.run(score_dataset(config, matrix["datasets"][args.dataset], rows, args.generation_dir,
+        expected_task_ids=matrix.get("cohorts", {}).get(args.split, {}).get(args.dataset)))
     print((Path(args.generation_dir)/"scoring/manifest.json").read_text())
 
 

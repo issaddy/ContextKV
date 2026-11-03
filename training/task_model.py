@@ -9,7 +9,7 @@ from adapters.history_state import HistoryIndex, TaskPrediction
 from controller.context_schema import Condition, Need, RetrievalState, TextRef, VersionIntent
 from controller.schema import OnlineTurn, TurnRecord
 from controller.serialization import decode
-from training.task_data import read_jsonl
+from training.task_data import read_jsonl, select_cohort_rows
 
 
 RELATIONS = ("standalone", "followup", "correction", "revisit", "topic_switch")
@@ -320,10 +320,10 @@ def train_task(config):
         Path(settings.get("data_dir", "runs/study/data"))/"sources.jsonl",))]
     sources = {row["source_id"]: row["text"] for path in source_paths for row in read_jsonl(path)}
     labels_paths = [Path(path) for path in settings.get("task_label_paths", (labels_path,))]
-    labels = [row for path in labels_paths for row in read_jsonl(path)]
+    labels = select_cohort_rows((row for path in labels_paths for row in read_jsonl(path)),
+                               settings["cohort_manifest"], "train")
     if not labels:
         raise ValueError("task training requires actual-history teacher labels")
-    assert all(row["split"] == "train" for row in labels)
     loss_weights = {name: float(settings.get("task_loss_weights", {}).get(name, 1.0))
         for name in ("retrieval", "history", "span", "update", "condition_relation", "pointer",
                      "operation", "relation", "version", "temporal_relation", "version_pointer", "resume")}
@@ -461,7 +461,7 @@ def evaluate_task(config):
             return 1.0
         return 2*len(predicted & expected)/max(1, len(predicted)+len(expected))
 
-    for row in read_jsonl(settings["task_eval_labels"]):
+    for row in select_cohort_rows(read_jsonl(settings["task_eval_labels"]), settings["cohort_manifest"], "dev"):
         history = tuple(decode(TurnRecord, value) for value in row["actual_history"])
         memory = RetrievalState(len(history), history, tuple(prior.get(row["conversation_id"], ())))
         turn = OnlineTurn(row["conversation_id"], row["task_id"], row["turn"], row["snapshot_id"], row["question"], (), (), "P3")
@@ -482,7 +482,8 @@ def evaluate_task(config):
             "condition_update_f1": f1(condition_items(predicted), condition_items(expected)),
             "operation_accuracy": float(tuple(n.operation for n in predicted.needs) == tuple(n.operation for n in expected.needs)),
             "resume_accuracy": float(predicted.resume_task_id == expected.resume_task_id)}
-        rows.append({"task_id": row["task_id"], "split": row["split"], "question": row["question"],
+        rows.append({"task_id": row["task_id"], "split": row["split"], "cohort_split": row["cohort_split"],
+                     "cohort_manifest_sha256": row["cohort_manifest_sha256"], "question": row["question"],
                      "actual_history": row["actual_history"], "metrics": metrics,
                      "prediction": to_jsonable(predicted), "expected": to_jsonable(expected)})
         prior.setdefault(row["conversation_id"], []).append(decode(TaskState, row["task_state"]))

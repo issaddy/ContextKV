@@ -23,7 +23,7 @@ from controller.schema import OnlineContext, OnlineMessage, OnlineTurn, TurnReco
 from controller.serialization import dumps, to_jsonable
 
 
-BASELINE = "7388008f56ec7176668321d00f69bd2f07639f0a"
+BASELINE = "85f4ed4b1bc84de657691153d74e81a5ae9b4341"
 
 
 def read_jsonl(path):
@@ -63,9 +63,12 @@ def merge_config(base, overrides):
     return result
 
 
-def dataset_rows(spec, split):
+def dataset_rows(spec, split, task_ids=None):
     path = spec["inputs"][split] if "inputs" in spec else spec["input"]
     rows = load_rows(path)
+    if task_ids is not None:
+        by_id = {row["task_id"]: row for row in rows}
+        return [by_id[task_id] for task_id in task_ids]
     if "split_manifest" in spec:
         allowed = set(json.loads(Path(spec["split_manifest"]).read_text())[split])
         rows = [row for row in rows if row["conversation_id"] in allowed]
@@ -82,25 +85,20 @@ def declare_cohorts(matrix, *, splits=("dev", "test"), datasets=None):
     matrix = merge_config(matrix, {})
     cohorts = dict(matrix.get("cohorts", {}))
     for split in splits:
-        cohorts[split] = {name: [row["task_id"] for row in dataset_rows(spec, split)]
+        cohorts[split] = {**cohorts.get(split, {}), **{name: [row["task_id"] for row in dataset_rows(spec, split)]
             for name, spec in matrix["datasets"].items()
-            if (datasets is None or name in datasets) and not (split == "dev" and spec.get("evaluation_only"))}
+            if (datasets is None or name in datasets) and not (split == "dev" and spec.get("evaluation_only"))}}
     matrix["cohorts"] = cohorts
     return matrix
 
 
 def prepare(config, matrix=None):
     from training.task_data import build_task_data
-    from training.support_data import build_support_examples
     from training.reading_data import build_reading_data
 
     output = Path(config["study"]["output_dir"])
     output.mkdir(parents=True, exist_ok=True)
     task_data = build_task_data(config)
-    data_dir = Path(config["training"]["data_dir"])
-    support_data = (build_support_examples(data_dir/"original_train_turns.jsonl",
-        data_dir/"sources.jsonl", data_dir/"reference_candidates", max_turns=10000)
-        if config["training"].get("enabled", True) else {"status": "not_requested"})
     reading_data = build_reading_data(config)
     from bench.study_assets import prepare_public_assets
     evaluation_assets = prepare_public_assets(config)
@@ -108,15 +106,10 @@ def prepare(config, matrix=None):
         "query_adapter": "models/bge-m3-dialogue-query-v1",
         "generation_config": "configs/qwen3_32b.yaml",
         "retrieval_config": "configs/study_multidoc_retriever.yaml",
-        "strategy": "Dense5_REBUILD_native_Radix_HiCache",
-        "fresh_results": "runs/study-20261102/baseline",
-        "archived_results": "runs/dense-final-validation-20261101",
-        "baseline_unit_checks": {"passed": 1433, "skipped": 7,
-            "source": "isolated git archive of baseline commit",
-            "log": "/tmp/contextkv-baseline-isolated-pytest.txt"}}
+        "strategy": "Dense5_REBUILD_native_Radix_HiCache"}
     write_json(output/"baseline.json", baseline)
     write_json(output/"effective_config.json", config)
-    manifest = {"baseline": baseline, "task_data": task_data, "support_data": support_data,
+    manifest = {"baseline": baseline, "task_data": task_data,
         "reading_data": reading_data, "evaluation_assets": evaluation_assets,
         "learning": config["study"].get("learning", True), "configured_assets": {
             "task": config["task_model"]["asset"], "support": config["support_model"]["asset"],
@@ -159,6 +152,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     from bench.study_workloads import WorkloadDispatcher
 
     spec = matrix["datasets"][dataset_name]
+    declared_tasks = matrix.get("cohorts", {}).get(split, {}).get(dataset_name)
+    source_rows = dataset_rows(spec, split, task_ids=declared_tasks)
     reuse_provider = spec.get("reuse_provider", False)
     continue_conversation_failures = spec.get("continue_conversation_failures", False)
     if workload is not None:
@@ -180,7 +175,6 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                    if cache_protocol == "cold" and not reuse_provider else None)
     engine_info = await service.engine.info()
     allocator = await service.engine.metrics()
-    source_rows = dataset_rows(spec, split)
     grouped = {}
     for number, row in enumerate(source_rows):
         grouped.setdefault(row["conversation_id"], []).append((number, row))
@@ -194,7 +188,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     if workload is not None and set(workload.dispatch_order) != set(expected):
         raise ValueError("workload and dataset must contain exactly the same task IDs")
     generation_manifest = {"config": config, "method": method, "measurement_segment_id": segment_id,
-        "dataset": dataset_name, "split": split, "task_ids": expected,
+        "dataset": dataset_name, "split": split, "task_ids": [row["task_id"] for row in source_rows],
+        "scheduled_task_ids": expected, "cohort_declared": declared_tasks is not None,
         "concurrency": concurrency, "retrieval": provider.manifest,
         "concurrency_scope": "request",
         "workload": to_jsonable(workload), "answer_driven_policy": question_fn is not None,
@@ -495,7 +490,8 @@ async def evaluate(config, matrix, output, *, split, frozen=None, methods=None, 
                 concurrency=concurrency, limit_conversations=limit_conversations,
                 workload=workload, question_fn=question_fn)
             if score:
-                rows = await score_dataset(config, dataset, rows, directory)
+                rows = await score_dataset(config, dataset, rows, directory,
+                    expected_task_ids=matrix.get("cohorts", {}).get(split, {}).get(name))
             results.extend(rows)
             write_jsonl(output/"results.jsonl", results)
     return results
@@ -507,7 +503,8 @@ def freeze(config, matrix, rows, path):
     test_ids = [*matrix["selection"]["test_comparators"], method["id"]]
     by_id = {m["id"]: m for m in matrix["methods"]}
     test_methods = [by_id[identity] for identity in dict.fromkeys(test_ids)]
-    matrix = declare_cohorts(matrix, splits=("test",))
+    missing = [name for name in matrix["datasets"] if name not in matrix.get("cohorts", {}).get("test", {})]
+    matrix = declare_cohorts(matrix, splits=("test",), datasets=missing)
     frozen = {"schema_version": 1, "baseline_commit": BASELINE, "method_spec": method,
         "test_methods": test_methods,
         "selected": selected, "matrix": matrix, "config": config,
@@ -581,7 +578,7 @@ def report(frozen, rows, directory):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "workloads", "rollout", "evaluate", "freeze", "report"))
+    parser.add_argument("command", choices=("prepare", "cohorts", "workloads", "rollout", "evaluate", "freeze", "report"))
     parser.add_argument("--config", default="configs/study.yaml")
     parser.add_argument("--matrix", default="configs/study_matrix.yaml")
     parser.add_argument("--split", choices=("train", "dev", "test"), default="dev")
@@ -596,12 +593,24 @@ def main(argv=None):
     parser.add_argument("--unscored", action="store_true")
     parser.add_argument("--workload-plan")
     parser.add_argument("--goal-policy")
+    parser.add_argument("--cohorts", help="Existing split/dataset task-ID manifest to bind into the matrix")
     args = parser.parse_args(argv)
     config = yaml.safe_load(Path(args.config).read_text())
     matrix = yaml.safe_load(Path(args.matrix).read_text())
+    if args.cohorts:
+        matrix["cohorts"] = json.loads(Path(args.cohorts).read_text())
     root = Path(config["study"]["output_dir"])
     if args.command == "prepare":
         result = prepare(config, matrix)
+    elif args.command == "cohorts":
+        missing = [name for name in matrix["datasets"]
+            if (args.datasets is None or name in args.datasets)
+            and name not in matrix.get("cohorts", {}).get(args.split, {})]
+        matrix = declare_cohorts(matrix, splits=(args.split,), datasets=missing)
+        target = Path(args.output or root/"matrix.cohorts.json")
+        write_json(target, matrix)
+        result = {"matrix": str(target.resolve()), "split": args.split,
+            "tasks": {name: len(identities) for name, identities in matrix["cohorts"][args.split].items()}}
     elif args.command == "workloads":
         from bench.study_workloads import prepare_workloads
         result = prepare_workloads(config, matrix)
@@ -622,7 +631,10 @@ def main(argv=None):
             if args.split == "dev" and matrix["selection"].get("include_ablations", False):
                 from bench.study_jobs import development_variants
                 matrix = {**matrix, "methods": development_variants(matrix)}
-            matrix = declare_cohorts(matrix, splits=(args.split,), datasets=args.datasets)
+            missing = [name for name in matrix["datasets"]
+                if (args.datasets is None or name in args.datasets)
+                and name not in matrix.get("cohorts", {}).get(args.split, {})]
+            matrix = declare_cohorts(matrix, splits=(args.split,), datasets=missing)
         output = Path(args.output or root/args.split)
         write_json(output/"matrix.json", matrix)
         result = asyncio.run(evaluate(config, matrix, output, split=args.split, frozen=frozen,

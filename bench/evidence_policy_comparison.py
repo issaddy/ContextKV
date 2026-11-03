@@ -1,4 +1,4 @@
-"""P0/P1 × R0/R1 on frozen actual history and each pair's own P3 history."""
+"""Evidence planner × reading protocol with fixed Qwen weights and actual P3 history."""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import yaml
 
 from bench.study import dataset_rows, merge_config, method_config, run_dataset
+from controller.reading import READ_PROTOCOL_VERSION
 from controller.serialization import decode, to_jsonable
 from controller.schema import OnlineContext, OnlineMessage, OnlineTurn, TurnRecord
 from training.reader_data import digest, file_digest, rows, write_rows
@@ -72,31 +73,73 @@ def recorded_terminal_budget(directory):
     return known
 
 
-def cell_config(config, policy, reader):
-    settings = config["policy_comparison"]
-    asset = settings["policies"][policy]
-    reader_spec = settings.get("cell_readers", {}).get(policy+"_"+reader, settings["readers"][reader])
+READING_PROTOCOLS = {
+    "task_first_isolated": {"layout": "task_first", "numeric_need_isolation": True},
+    "source_first_shared": {"layout": "source_first", "numeric_need_isolation": False},
+}
+CELL_METHODS = tuple(policy+"_"+protocol for policy in ("P0", "P1") for protocol in READING_PROTOCOLS)
+CELL_CONTRASTS = {
+    "planner_at_task_first_isolated": ["P0_task_first_isolated", "P1_task_first_isolated"],
+    "planner_at_source_first_shared": ["P0_source_first_shared", "P1_source_first_shared"],
+    "protocol_at_P0": ["P0_task_first_isolated", "P0_source_first_shared"],
+    "protocol_at_P1": ["P1_task_first_isolated", "P1_source_first_shared"],
+}
+
+
+def cell_method(policy, protocol):
+    return {"id": policy+"_"+protocol, "strategy": "B7",
+        "overrides": {"reading": READING_PROTOCOLS[protocol]}}
+
+
+def allocation_identity(config):
+    return {"execution": {name: config["execution"][name] for name in (
+        "window_tokens", "history_tokens", "output_tokens", "max_steps", "max_total_tokens")},
+        "reading_targets_and_options": {name: config["reading"][name] for name in (
+            "input_target_tokens", "output_tokens", "output_tokens_per_fact", "output_budget_options")},
+        "output_allocation": "shared total limits; READ/REDUCE output shares may be redistributed by the existing allocator"}
+
+
+def fixed_reader_identity(reader_spec):
+    from controller.config import load_config
+    from controller.sampling import SamplingRecipe
     run_path = reader_spec["run_config"]
+    run = load_config(run_path)
+    return {"run_config": run_path, "run_config_sha256": file_digest(run_path),
+        "checkpoint": run.model.revision, "profile_id": reader_spec["profile_id"],
+        "scope_sha256": file_digest(run.model.scope_path),
+        "dtype": run.model.scope.manifest()["record"]["config"]["torch_dtype"],
+        "sampling": (run.sampling or SamplingRecipe()).record(), "weights_updated": False}
+
+
+def cell_config(config, policy, protocol):
+    settings = config["policy_comparison"]
+    asset, reader_spec = settings["policies"][policy], settings["reader"]
+    run_path = reader_spec["run_config"]
+    fixed_reader = fixed_reader_identity(reader_spec)
     actual = merge_config(config, {"generation": {"run_config": run_path,
         "teacher_url": settings["teacher_url"], "helper_run_config": settings["helper_run_config"]},
         "task_model": {"device": settings["encoder_device"]},
         "support_model": {"mode": "trained", "asset": asset, "preference_asset": asset,
             "device": settings["support_device"]}, "selection": {"utility": "learned"},
         "execution": {"prefix_retention": {"mode": "native"}, "plan_gain": None},
-        "reading": {"layout": "source_first", "packing": "source_windows"}})
+        "reading": READING_PROTOCOLS[protocol]})
     metadata = json.loads((Path(asset)/"support-model.json").read_text())
-    identity = {"policy": policy, "reader": reader, "policy_asset": asset,
-        "policy_heads_sha256": file_digest(Path(asset)/"heads.pt"),
+    identity = {"policy": policy, "read_protocol": protocol,
+        "reading": READING_PROTOCOLS[protocol], "read_protocol_version": READ_PROTOCOL_VERSION,
+        "policy_asset": asset, "policy_heads_sha256": file_digest(Path(asset)/"heads.pt"),
         "policy_checkpoint": metadata.get("policy_checkpoint"),
         "reader_binding_used_for_policy_training": metadata.get("reader_binding"),
-        "reader_run_config_sha256": file_digest(run_path),
-        "evaluation_scope": "actual-prefix utility before/after reader-bound preferences; not strongest Incumbent selection"}
+        "fixed_reader": fixed_reader,
+        "evaluation_scope": "evidence planner x read protocol; fixed model weights and common total budgets"}
     if policy == "P1":
         from training.train_evidence_policy import require_policy_reader_binding
-        trained = metadata["reader_binding"]
-        require_policy_reader_binding(asset, reader_checkpoint=trained["reader_checkpoint"],
-                                      reader_profile_id=trained["reader_profile_id"])
-        identity["cross_reader_transfer_cell"] = reader != "R1"
+        require_policy_reader_binding(asset, reader_checkpoint=fixed_reader["checkpoint"],
+                                      reader_profile_id=reader_spec["profile_id"])
+        identity["policy_protocol_evaluation"] = {
+            "training_read_protocol": settings["p1_training_read_protocol"],
+            "evaluation_read_protocol": protocol,
+            "cross_protocol_transfer": protocol != settings["p1_training_read_protocol"],
+            "reader_checkpoint_and_profile_unchanged": True}
     return actual, reader_spec, identity
 
 
@@ -119,17 +162,18 @@ def frozen_reference(source, actual):
     return reference
 
 
-async def frozen_cell(config, matrix, dataset, split, records, directory, *, policy, reader):
+async def frozen_cell(config, matrix, dataset, split, records, directory, *, policy, protocol):
     from adapters.study_retrieval import create_study_retriever
     from bench.native_metrics import NativePoolSampler, pool_series
     from bench.metrics import occupancy_integral
     from bench.quality import export_evaluation
     from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
-    from controller.config import apply_study_config, create_controller, load_config
+    from controller.config import GenerationProtocol, apply_study_config, create_controller, load_config
     from controller.engine_client import EngineError
-    actual, reader_spec, identity = cell_config(config, policy, reader)
+    actual, reader_spec, identity = cell_config(config, policy, protocol)
     spec = matrix["datasets"][dataset]
-    actual = method_config(actual, {"id": policy+"_"+reader, "strategy": "B7"}, spec, split)
+    actual = method_config(actual, cell_method(policy, protocol), spec, split)
+    identity["allocation"] = allocation_identity(actual)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     (directory/"records").mkdir(exist_ok=True)
@@ -137,6 +181,9 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
     run = replace(run, state_dir=str(directory/"state"),
         engine=replace(run.engine, base_url=reader_spec["base_url"]),
         planner=replace(run.planner, strategy="always_rebuild"), prefix_retention={"mode": "native"})
+    if "answer_system_prompt" in spec:
+        run = replace(run, context=replace(run.context, system_prompt=spec["answer_system_prompt"]))
+    identity["generation_protocol"] = GenerationProtocol.from_config(run).record()
     service = create_controller(run)
     devices = sorted(set((*actual["policy_comparison"]["frozen_shared_gpu_devices"], *reader_spec["gpu_devices"])))
     ports = [urlparse(run.engine.base_url).port]
@@ -171,7 +218,7 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
             if task_id in results:
                 continue
             source = sources[task_id]
-            session = "policy-frozen:"+policy+":"+reader+":"+digest(task_id)[:20]
+            session = "policy-frozen:"+policy+":"+protocol+":"+digest(task_id)[:20]
             history = decode(tuple[TurnRecord, ...], frozen["actual_history"])
             before = service.store.read_snapshot(session, provider.corpus_snapshot_id)
             before = service.store.sync_history(session, history, before.version)
@@ -218,7 +265,7 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
             steps = service.store.execution_steps_with_stage(attempt.attempt_id)
             value = {"task_id": task_id, "conversation_id": frozen["conversation_id"], "turn": frozen["turn"],
                 "status": status, "error": error, "dataset": dataset, "split": split,
-                "method": policy+"_"+reader, "policy_identity": identity,
+                "method": policy+"_"+protocol, "read_protocol": protocol, "policy_identity": identity,
                 "measurement_kind": "hardware" if run.engine.kind == "sglang" else "simulation",
                 "question": query, "actual_history": frozen["actual_history"], "history_origin": "frozen_actual_rollout",
                 "frozen_input_origin": frozen_origin, "frozen_task_state": to_jsonable(original.task_state),
@@ -280,10 +327,13 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
     return ordered
 
 
-async def own_p3_cell(config, matrix, dataset, split, output, *, policy, reader, goal_policy=None, limit_conversations=None):
+async def own_p3_cell(config, matrix, dataset, split, output, *, policy, protocol, goal_policy=None, limit_conversations=None):
+    from controller.config import GenerationProtocol, apply_study_config, load_config
     from controller.engine_client import EngineError
-    actual, reader_spec, identity = cell_config(config, policy, reader)
+    actual, reader_spec, identity = cell_config(config, policy, protocol)
     spec = matrix["datasets"][dataset]
+    actual = method_config(actual, cell_method(policy, protocol), spec, split)
+    identity["allocation"] = allocation_identity(actual)
     if spec.get("protocol", "P3") != "P3":
         raise ValueError("own-history comparison requires P3, not imported authored history")
     grouped = {}
@@ -302,12 +352,14 @@ async def own_p3_cell(config, matrix, dataset, split, output, *, policy, reader,
     run_path = output/"reader_run.yaml"
     run_path.write_text(yaml.safe_dump(reader_run, sort_keys=False))
     actual["generation"]["run_config"] = str(run_path)
+    identity["generation_protocol"] = GenerationProtocol.from_config(
+        apply_study_config(load_config(run_path), actual)).record()
     collected, failed = [], []
     if spec.get("reuse_provider", False):
         task_path = output/"tasks.jsonl"
         write_rows(task_path, [row for conversation in identities for row in grouped[conversation]])
         shared_matrix = merge_config(local_matrix, {"datasets": {dataset: {"inputs": {split: str(task_path)}}}})
-        collected = await run_dataset(actual, shared_matrix, {"id": policy+"_"+reader, "strategy": "B7"},
+        collected = await run_dataset(actual, shared_matrix, cell_method(policy, protocol),
             dataset, split, output, concurrency=1, question_fn=goal_policy.question_fn if goal_policy else None)
         failed = [json.loads(path.read_text()) for path in sorted((output/"terminal_read_failures").glob("*.json"))]
         write_json(output/"manifest.json", {"policy_identity": identity,
@@ -327,7 +379,7 @@ async def own_p3_cell(config, matrix, dataset, split, output, *, policy, reader,
             failed.append(persist_p3_failure(directory, conversation, "; ".join(recorded)))
             continue
         try:
-            result = await run_dataset(actual, one_matrix, {"id": policy+"_"+reader, "strategy": "B7"},
+            result = await run_dataset(actual, one_matrix, cell_method(policy, protocol),
                 dataset, split, directory, concurrency=1, question_fn=goal_policy.question_fn if goal_policy else None)
             collected.extend(result)
         except EngineError as exc:
@@ -397,19 +449,26 @@ async def compare(config, matrix, *, dataset, split, output, phase, frozen_recor
         raise ValueError("frozen comparison states must come from completed actual QA records")
     result = []
     for policy in ("P0", "P1"):
-        for reader in ("R0", "R1"):
-            cell = policy+"_"+reader
+        for protocol in READING_PROTOCOLS:
+            cell = policy+"_"+protocol
             if cells is not None and cell not in cells:
                 continue
             if phase in {"frozen", "both"}:
                 selected = await frozen_cell(config, matrix, dataset, split, records, Path(output)/"frozen"/cell,
-                                             policy=policy, reader=reader)
+                                             policy=policy, protocol=protocol)
                 result.append({"cell": cell, "phase": "frozen", "observed_records": len(selected)})
             if phase in {"p3", "both"}:
                 selected = await own_p3_cell(config, matrix, dataset, split, Path(output)/"p3"/cell,
-                    policy=policy, reader=reader, goal_policy=goal_policy, limit_conversations=limit_conversations)
+                    policy=policy, protocol=protocol, goal_policy=goal_policy, limit_conversations=limit_conversations)
                 result.append({"cell": cell, "phase": "p3", "observed_records": len(selected)})
     write_json(Path(output)/"comparison_manifest.json", {"cells": result, "quality": "unscored; score saved actual outputs separately",
+        "comparison_axes": {"evidence_planner": ["P0", "P1"], "read_protocol": list(READING_PROTOCOLS)},
+        "paired_contrasts_baseline_candidate": CELL_CONTRASTS,
+        "reading_protocols": READING_PROTOCOLS, "read_protocol_version": READ_PROTOCOL_VERSION,
+        "fixed_reader": fixed_reader_identity(config["policy_comparison"]["reader"]),
+        "common_allocation": allocation_identity(method_config(config,
+            {"id": "common", "strategy": "B7"}, matrix["datasets"][dataset], split)),
+        "cache_policy": "native", "plan_gain_enabled": False,
         "frozen_records": str(frozen_records) if frozen_records else None,
         "frozen_records_sha256": file_digest(frozen_records) if frozen_records else None,
         "planned_frozen_states": len(records), "dataset": dataset, "split": split})
@@ -428,7 +487,7 @@ def main(argv=None):
     parser.add_argument("--goal-policy")
     parser.add_argument("--limit-states", type=int)
     parser.add_argument("--limit-conversations", type=int)
-    parser.add_argument("--cells", nargs="+", choices=("P0_R0", "P0_R1", "P1_R0", "P1_R1"))
+    parser.add_argument("--cells", nargs="+", choices=CELL_METHODS)
     args = parser.parse_args(argv)
     if args.phase in {"frozen", "both"} and args.records is None:
         parser.error("--records is required for frozen actual-history comparison")

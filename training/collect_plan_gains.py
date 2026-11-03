@@ -51,6 +51,7 @@ def served_branch(row, *, semantic_kind, plan_id, metric, normalization, scorer_
     return {"question": row["question"], "actual_history": row["actual_history"],
         "state_key": row["frozen_state_key"], "reader_checkpoint": row["reader_checkpoint"],
         "reader_profile_id": row["reader_profile_id"], "split": row["split"],
+        "cohort_split": row["cohort_split"], "cohort_manifest_sha256": row["cohort_manifest_sha256"],
         "comparison_budget": comparison_budget, "answer": row["answer"], "quality": quality,
         "scorer_identity": scorer_identity, "native_receipts": receipts, "cost": row["cost"],
         "measurement_kind": row["measurement_kind"], "history_origin": row["history_origin"],

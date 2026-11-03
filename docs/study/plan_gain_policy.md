@@ -22,7 +22,7 @@ C 的 `reusable_prefixes` 是候选 ID 到真实 prefix IDs 的映射。`Resourc
 
 `training.train_plan_gain.build_gain_record` 只接收已经真实生成和评分的直接 ANSWER 与反事实回答。两者共享问题、实际 QA 历史、逻辑状态、reader checkpoint/profile、比较预算、数据分区与评分器；原始回答、原生回执、评分和全过程成本完整保留。监督标签精确等于 `quality_counterfactual - quality_direct`，不从支持分、来源规则或参考答案生成。
 
-`train_plan_gain` 的显式训练入口拟合标准化线性 ridge 回归，保存 JSON 权重、训练状态清单、数据摘要、评分器及 reader 绑定；开发状态独立评估，测试答案不能进入收益监督。reader 更新后必须形成对应的新收益数据和资产。没有已训练且绑定当前 reader 的收益资产时，不启用该策略，现有固定策略继续作为对照。该收益策略的启用状态由实际反事实数据和模型资产 manifest 记录。
+`train_plan_gain` 的显式训练入口拟合标准化线性 ridge 回归，保存 JSON 权重、训练状态清单、数据摘要、评分器及 reader 绑定；开发状态独立评估，测试答案不能进入收益监督。Qwen3-32B 权重与解码固定；阅读协议变化后，按协议身份分别采集对应的收益数据和资产。没有已训练且绑定当前 reader 的收益资产时，不启用该策略，现有固定策略继续作为对照。该收益策略的启用状态由实际反事实数据和模型资产 manifest 记录。
 
 实际运行入口为 `Controller(..., rolling_policy=RollingPlanRuntime(...))`，配置入口为 `RunConfig.plan_gain`。默认值为 `None`。启用参数包含 `mode: rolling_gain`、实际 `reader_checkpoint` 与 `reader_profile_id`、`gain_asset`、`execution_profile_asset`、内部 READ 的 `output_budgets`、物理采样的 `gpu_devices/process_ids/sampling_interval_seconds`，以及可选 `limits`。资产加载核对真实模型 fingerprint、cache configuration、采样配方、评分训练分区与来源。该路径当前比较 READ 输出预算，最终 ANSWER 使用声明的回答预算。
 

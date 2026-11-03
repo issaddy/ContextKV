@@ -1,4 +1,4 @@
-"""Session-disjoint native reader cohorts for the actual trace/review pipeline."""
+"""Session-disjoint native state cohorts for fixed-reader evidence-policy training."""
 from __future__ import annotations
 
 import json
@@ -7,13 +7,13 @@ from pathlib import Path
 from training.reader_data import digest, file_digest, history_digest, rows, write_rows
 
 
-def prepare_stage_cohorts(config):
+def prepare_evidence_cohorts(config):
     """Select saved actual states using their declared session partition.
 
     Candidate construction stays in preference_rollout, where the native source
     directory and support model are already loaded. No reward is needed here.
     """
-    settings = config["reader_stage_cohort"]
+    settings = config["evidence_cohort"]
     output = Path(settings["output_dir"])
     output.mkdir(parents=True, exist_ok=True)
     states, sources, sessions = {}, [], {"train": set(), "dev": set()}
@@ -35,14 +35,6 @@ def prepare_stage_cohorts(config):
             states[key] = state
             sessions[split].add(state["conversation_id"])
     declared_dev = set(sessions["dev"])
-    exposure = []
-    exposed_sessions = set()
-    for path in settings.get("reader_train_paths", ()):
-        values = rows(path)
-        seen = {value["conversation_id"] for value in values}
-        exposed_sessions.update(seen)
-        exposure.append({"path": str(Path(path).resolve()), "sha256": file_digest(path),
-                         "training_sessions": len(seen)})
     for path in settings.get("dev_session_paths", ()):
         values = rows(path)
         declared_dev.update(value["conversation_id"] for value in values)
@@ -52,20 +44,14 @@ def prepare_stage_cohorts(config):
     deterministic_dev = {session for session in sessions["train"]
         if int(digest([split_seed, session])[:8], 16)/16**8 < fraction}
     dev_sessions = declared_dev | deterministic_dev
-    excluded = []
     eligible = {"train": [], "dev": []}
     for (split, _), state in states.items():
         session = state["conversation_id"]
         target = "dev" if split == "dev" or session in dev_sessions else "train"
-        if target == "dev" and session in exposed_sessions:
-            excluded.append({"task_id": state["task_id"], "conversation_id": session,
-                             "reason": "heldout_session_seen_by_existing_reader_training"})
-            continue
         eligible[target].append(state)
     for split in eligible:
         eligible[split].sort(key=lambda state: (
             digest([settings.get("seed", 42), state["conversation_id"]]), state["turn"], state["task_id"]))
-    write_rows(output/"cohort_exclusions.jsonl", excluded)
     full_counts = settings.get("full", {"train": 200, "dev": 40})
     pilot_counts = settings.get("pilot", {"train": 12, "dev": 4})
     manifests = {}
@@ -87,17 +73,14 @@ def prepare_stage_cohorts(config):
         manifest = {"schema_version": 1, "cohort": name, "sources": sources, "splits": splits,
             "members": members, "minimum_candidates_per_state": 4, "maximum_candidates_per_state": 6,
             "candidate_status": "pending_real_source_pool_construction_and_reader_rollout",
-            "reader_training_precedes_policy_reward_recollection": True,
+            "reader_condition": "fixed checkpoint and profile; optimize evidence policy only",
             "excluded_train_states_in_dev_sessions": sum(
                 state["conversation_id"] in dev_sessions for (split, _), state in states.items() if split == "train"),
-            "reader_training_exposure": exposure,
-            "heldout_training_exposure_exclusions": len(excluded),
             "session_split": {"split_seed": split_seed, "validation_fraction": fraction,
                 "declared_dev_sessions": len(declared_dev), "deterministic_dev_sessions": len(deterministic_dev)}}
         path = directory/"cohort_manifest.json"
         path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
         manifests[name] = str(path.resolve())
-    result = {"cohorts": manifests, "sources": sources,
-        "heldout_training_exposure_exclusions": len(excluded), "model_requests": 0}
-    (output/"stage_cohorts_manifest.json").write_text(json.dumps(result, indent=2)+"\n")
+    result = {"cohorts": manifests, "sources": sources, "model_requests": 0}
+    (output/"evidence_cohorts_manifest.json").write_text(json.dumps(result, indent=2)+"\n")
     return result

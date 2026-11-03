@@ -68,7 +68,7 @@ python -m bench.run_sessions --config configs/qwen3_32b.yaml \
   --evidence-corpus data/multidoc2dial/test/passages.jsonl
 ```
 
-它使用已有查询适配器、实际 QA 检索和每轮重建。P0/P1 与 reader 四格及自身 P3 的当前入口见[运行手册](../study/final_runbook.md)。
+它使用已有查询适配器、实际 QA 检索和每轮重建。固定 Qwen3-32B 下 P0/P1 规划器 × 阅读协议四格及自身 P3 的当前入口见[运行手册](../study/final_runbook.md)。
 
 保存答案的基础词项评分：
 

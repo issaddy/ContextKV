@@ -15,6 +15,7 @@ import time
 from adapters.support_model import SetPrediction, SupportPrediction
 from controller.context_schema import SourceSpan
 from controller.serialization import decode
+from training.task_data import select_cohort_rows
 
 
 SUPPORT_CLASSES = ("complete", "partial", "background", "contradict")
@@ -214,14 +215,15 @@ class TrainedSupportBackend:
                                    for parameter in network.parameters())}
 
     @classmethod
-    def load(cls, path, *, device, batch_size=8, encoder_dtype=None):
+    def load(cls, path, *, device, batch_size=8, encoder_dtype=None, encoder_autocast_dtype="float32"):
         import torch
         from transformers import AutoModel, AutoTokenizer
         path = Path(path)
         manifest = json.loads((path/"support-model.json").read_text())
         tokenizer = AutoTokenizer.from_pretrained(path/"encoder", local_files_only=True)
         encoder = AutoModel.from_pretrained(path/"encoder", local_files_only=True)
-        network = create_network(encoder, graph_width=manifest["graph_width"])
+        network = create_network(encoder, graph_width=manifest["graph_width"],
+                                 encoder_autocast_dtype=encoder_autocast_dtype)
         weights = torch.load(path/"heads.pt", map_location="cpu", weights_only=True)
         for name, module in network.named_children():
             if name != "encoder":
@@ -334,7 +336,7 @@ class TrainedSupportBackend:
                 self.torch.cuda.empty_cache()
 
 
-def _save(network, tokenizer, directory, metadata, *, encoder_source=None):
+def _save(network, tokenizer, directory, metadata, *, encoder_source=None, parent_asset=None):
     import torch
     import shutil
     directory = Path(directory)
@@ -348,27 +350,25 @@ def _save(network, tokenizer, directory, metadata, *, encoder_source=None):
                 if not key.startswith("encoder.")}, directory/"heads.pt")
     (directory/"support-model.json").write_text(json.dumps(metadata, ensure_ascii=False,
                                                          indent=2)+"\n")
-    preserve_asset_sources(directory, parent_asset=Path(encoder_source).parent if encoder_source is not None else None)
+    preserve_asset_sources(directory, parent_asset=parent_asset or (Path(encoder_source).parent if encoder_source is not None else None))
 
 
-def train_support(examples_path, base_path, output_dir, *, device="cuda:0", epochs=1,
+def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, device="cuda:0", epochs=1,
                   batch_size=4, learning_rate=1e-4, encoder_learning_rate=1e-5,
-                  max_length=8192, graph_width=128, seed=42,
-                  encoder_autocast_dtype="float32", inference_encoder_dtype="float32",
-                  base_model_id="BAAI/bge-reranker-v2-m3"):
-    """Optimize explicitly labeled support examples, including span supervision."""
+                  max_length=8192, seed=42,
+                  encoder_autocast_dtype="float32", inference_encoder_dtype="float32"):
+    """Continue the saved encoder and heads on reviewed support supervision."""
+    complete_started = time.perf_counter()
     import torch
-    from transformers import AutoModel, AutoTokenizer
     from adapters.support_model import SupportInput
     from controller.context_schema import EvidenceUnit
     torch.manual_seed(seed)
-    tokenizer = AutoTokenizer.from_pretrained(base_path, local_files_only=True)
-    encoder = AutoModel.from_pretrained(base_path, local_files_only=True)
-    network = create_network(encoder, graph_width=graph_width,
-                             encoder_autocast_dtype=encoder_autocast_dtype).to(device)
-    examples = [json.loads(line) for line in Path(examples_path).read_text().splitlines() if line]
+    backend = TrainedSupportBackend.load(parent_asset, device=device, batch_size=batch_size,
+        encoder_dtype="float32", encoder_autocast_dtype=encoder_autocast_dtype)
+    network, tokenizer = backend.network, backend.tokenizer
+    examples = select_cohort_rows((json.loads(line) for line in Path(examples_path).read_text().splitlines() if line),
+                                 cohort_manifest, "train")
     assert examples
-    assert all(example["split"] == "train" for example in examples)
     assert all(example["label_origin"] != "pending_teacher" for example in examples)
     fitting, oversized = [], []
     for row in examples:
@@ -464,14 +464,12 @@ def train_support(examples_path, base_path, output_dir, *, device="cuda:0", epoc
             losses.append(float(loss.detach()))
     if device.startswith("cuda"):
         torch.cuda.synchronize(device)
-    metadata = {"asset_type": "contextkv_support_utility", "base": base_model_id,
-        "base_path": str(base_path), "graph_width": graph_width, "max_length": max_length,
+    metadata = {**backend.manifest, "parent_support_asset": str(parent_asset), "max_length": max_length,
         "training_encoder_autocast_dtype": encoder_autocast_dtype,
         "training_parameter_dtypes": sorted({str(parameter.dtype) for parameter in network.parameters()}),
         "optimizer_state_dtypes": sorted({str(value.dtype) for state in optimizer.state.values()
                                            for value in state.values() if isinstance(value, torch.Tensor)}),
         "inference_encoder_dtype": inference_encoder_dtype, "inference_head_dtype": "float32",
-        "base_provenance": _base_provenance(base_path, base_model_id),
         "training_partition": {"split": "train", "examples": len(examples),
             "history_origins": dict(Counter(row.get("history_kind", "explicit_training_fixture") for row in examples))},
         "packages": {name: version(name) for name in ("torch", "transformers", "tokenizers")},
@@ -482,16 +480,22 @@ def train_support(examples_path, base_path, output_dir, *, device="cuda:0", epoc
             "label_origins": dict(Counter(row["label_origin"] for row in examples)),
             "oversized_examples": oversized,
             "losses": losses, "input_tokens": token_count,
+            "model_setup_ms": (started-complete_started)*1000,
             "elapsed_ms": (time.perf_counter()-started)*1000},
         "utility_training": {"stage": "support_supervision",
             "examples": sum(row["labels"]["quality"] is not None for row in examples),
             "answer_state_examples": sum(row["labels"]["answer_disposition"] is not None for row in examples),
             "answer_state_origins": dict(Counter(row.get("disposition_supervision_origin", "explicit_labels") for row in examples))}}
-    _save(network, tokenizer, output_dir, metadata)
+    save_started = time.perf_counter()
+    _save(network, tokenizer, output_dir, metadata, parent_asset=parent_asset)
+    metadata = json.loads((Path(output_dir)/"support-model.json").read_text())
+    metadata["save_ms"] = (time.perf_counter()-save_started)*1000
+    metadata["complete_ms"] = (time.perf_counter()-complete_started)*1000
+    (Path(output_dir)/"support-model.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2)+"\n")
     return metadata
 
 
-def train_set_utility(preferences_path, asset_path, output_dir, *, device="cuda:0",
+def train_set_utility(preferences_path, asset_path, output_dir, *, cohort_manifest, device="cuda:0",
                       epochs=3, learning_rate=1e-4, seed=42):
     """Learn pairwise actual-answer utility on cached cross-encoder graph nodes.
 
@@ -504,10 +508,10 @@ cached once before optimizing the graph and disposition heads.
     from controller.context_schema import EvidenceUnit, SupportBundle, TaskState
     torch.manual_seed(seed)
     backend = TrainedSupportBackend.load(asset_path, device=device)
-    rows = [json.loads(line) for line in Path(preferences_path).read_text().splitlines() if line]
+    rows = select_cohort_rows((json.loads(line) for line in Path(preferences_path).read_text().splitlines() if line),
+                             cohort_manifest, "train")
     assert rows
-    assert all(row["split"] == "train" and row["label_origin"] == "actual_reader_answers"
-               for row in rows)
+    assert all(row["label_origin"] == "actual_reader_answers" for row in rows)
     graph_pairs = []
     for row in rows:
         state = decode(TaskState, row["task_state"])

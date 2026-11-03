@@ -8,9 +8,11 @@
 | 当前运行入口 | [final_runbook.md](final_runbook.md) |
 | 当前重评数值 | [reference_20261103.json](reference_20261103.json)、[budget_loop_20261103.json](budget_loop_20261103.json) |
 
-当前实现围绕完整结论预算与来源链、共享数值阅读、有限归约、实际历史和目标可见性、
+当前实现围绕完整结论预算与来源链、共享数值阅读、有限归约、实际历史和阅读协议可见性、
 B 显式动作收益、C Native/TTL 前缀保护，以及全部声明任务的官方评分和完整成本账本。
 历史一次性批次脚本、旧 sweep 配方及重复状态快照已清理；旧代码和旧文档可从 Git 历史追溯。
+
+Qwen3-32B 权重与解码恒定；P0/P1 规划器与 task_first+隔离数值、source_first+共享数值两种协议组成四格。只审计实际阅读记录，不微调生成模型。
 
 A 入口是 `training.a_workflow`、`training.preference_rollout` 和
 `bench.evidence_policy_comparison`；B 入口是 `training.plan_gain_rollout`、

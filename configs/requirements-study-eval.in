@@ -1,5 +1,5 @@
 # Observed core pins for the isolated official-metric environment.
-# Main reader/serving/training keeps transformers==5.19.0.
+# Main frozen reader/serving keeps transformers==5.19.0.
 # Complete resolved pip-freeze and shared torch/CUDA identities stay with the
 # container experiment manifest; this file does not replace that full lock.
 evaluate==0.4.6
