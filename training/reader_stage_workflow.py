@@ -94,6 +94,9 @@ def prepare_reader_stage(config):
         "available_splits": available, "excluded_states": exclusions,
         "reader_training_config": str(training_path), "reader_stage_config": str(stage_config),
         "commands": commands, "model_requests": 0,
+        "recovery_entry": {split: [sys.executable, "-m", "training.preference_rollout", "--config", path,
+            "--prepare-resume", "--pause-receipt", "<saved_gpu_pause_receipt.json>", "--confirmed-stopped"]
+            for split, path in collection_configs.items()},
         "policy_rewards": "recollect with the trained reader after these reader stages complete"}
     (output/"reader_stage_manifest.json").write_text(json.dumps(result, ensure_ascii=False, indent=2)+"\n")
     return result

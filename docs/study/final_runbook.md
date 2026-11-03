@@ -1,5 +1,7 @@
 # 最终复现与产物读取手册
 
+当前状态：用户已暂停 GPU 使用，CPU 离线审查和代码工作继续。
+
 所有运行命令位于既存主机 `public-ge108-wlf3-hangu-5.idchb2az3.hb2.kwaidc.com` 的 `sjy-0518` 容器。项目根目录为：
 
 ```bash
@@ -234,3 +236,17 @@ CPU 导出的 `reader-pilot-v2/partial-cpu-audit/` 包含 233 READ、39 ANSWER�
 
 当前数值索引为 [budget_loop_20261103.json](budget_loop_20261103.json)。
 `cpu-cost-audit/` 分别索引原生回执、API 响应和去重后的物理采样，保留连续观察前的未知区间。
+
+此次中断已在 CPU 上登记为 `reader-pilot-v2/recovery-gpu-pause/resume_manifest.json`：
+39 个完成候选保持原样，一个中断候选关联旧 STARTED/SUBMITTED 账本和独立重试会话。
+`resume_collection.yaml` 保留候选池、任务、历史和预算；恢复时验证原生服务的 restart 已更换。
+只有用户恢复 GPU 使用后才执行该配置。未知旧费用保持未知，新的完整请求成本另记。
+
+为其他已确认停止的采集准备恢复配置时，CPU 入口为：
+
+```bash
+CUDA_VISIBLE_DEVICES='' .venv-sglang/bin/python -m training.preference_rollout \
+  --config runs/study/budget-loop-20261103/reader-pilot-v2/train_collection.yaml \
+  --prepare-resume --pause-receipt runs/study/budget-loop-20261103/gpu_pause.json \
+  --confirmed-stopped --resume-output runs/study/repro-resume-preparation
+```

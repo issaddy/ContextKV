@@ -282,10 +282,11 @@ def _sum_known(values):
     return sum(values) if all(value is not None for value in values) else None
 
 
-def failed_read_candidate(controller, row, category, settings, output_dir, *, request_window=None):
+def failed_read_candidate(controller, row, category, settings, output_dir, *, request_window=None,
+                          session_id=None, request_id="answer"):
     """Retain a paid terminal READ truncation without producing a quality label."""
-    session = json.dumps(["preference", row["task_id"], category], separators=(",", ":"))
-    attempt = controller.store.find_request(session, "answer")
+    session = session_id or json.dumps(["preference", row["task_id"], category], separators=(",", ":"))
+    attempt = controller.store.find_request(session, request_id)
     if attempt.stage != "FAILED" or attempt.error.partition(":")[0] != "READ_STEP_OUTPUT_TRUNCATED":
         raise ValueError(f"candidate is not a terminal READ truncation: {attempt.stage}/{attempt.error}")
     records = controller.store.execution_steps_with_stage(attempt.attempt_id)
@@ -405,6 +406,10 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
         if binding_path.exists() and json.loads(binding_path.read_text()) != binding:
             raise ValueError("existing candidate collection belongs to a different reader or cohort")
         binding_path.write_text(json.dumps(binding, indent=2)+"\n")
+    from training.collection_recovery import candidate_key, validate_collection_resume
+    resume_proof, resume_routes = await validate_collection_resume(settings, controller)
+    if resume_proof:
+        append_record(output_dir/"resume_checks.jsonl", resume_proof)
     encoder = None
     if directory is None:
         directory, encoder = build_directory(config, controller.template.tokenizer)
@@ -517,8 +522,14 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                 sets, family = real_candidate_family(state, pool, sets,
                     minimum=cohort["minimum_candidates_per_state"], maximum=cohort["maximum_candidates_per_state"])
                 active_categories = tuple(sets)
-            support_usage = _usage_delta(support_before, model.backend.usage)
-            retrieval_usage = _usage_delta(retrieval_before, _encoder_usage(encoder))
+            if reused_family:
+                # Frozen-family replay executes no support or retrieval model.
+                # Unknown costs on the stopped old attempt remain in its ledger.
+                support_usage = {"input_tokens": 0, "output_tokens": 0, "compute_ms": 0.0}
+                retrieval_usage = {"input_tokens": 0, "output_tokens": 0, "compute_ms": 0.0}
+            else:
+                support_usage = _usage_delta(support_before, model.backend.usage)
+                retrieval_usage = _usage_delta(retrieval_before, _encoder_usage(encoder))
             preparation = {"shared_cost_id": row["task_id"]+":prep:"+uuid.uuid4().hex[:12],
                 "task_id": row["task_id"], "wall_ms": (time.perf_counter()-preparation_started)*1000,
                 "scope": "training_candidate_family_preparation",
@@ -561,7 +572,15 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                     skipped.append(skipped_case)
                     completed.add((row["task_id"], category))
                     continue
-                session_id = json.dumps(["preference", row["task_id"], category], separators=(",", ":"))
+                recovery = resume_routes.get(candidate_key(row["task_id"], category))
+                if recovery is not None:
+                    if (digest(saved_families[row["task_id"]]) != recovery["candidate_family_sha256"] or
+                            digest(to_jsonable(selected)) != recovery["evidence_set_sha256"]):
+                        raise ValueError("resumed candidate differs from the interrupted real evidence family")
+                    session_id, request_id = recovery["retry_session_id"], recovery["retry_request_id"]
+                else:
+                    session_id = json.dumps(["preference", row["task_id"], category], separators=(",", ":"))
+                    request_id = "answer"
                 plan = ContextPlan(f"{session_id}:plan", state, selected, budget=budget,
                     auxiliary_ms=(("retrieval", pool.retrieval_ms), ("support", scores.scoring_ms)))
                 if settings.get("reading", False):
@@ -575,9 +594,14 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                         numeric_identity=settings.get("numeric_identity", "names"),
                         output_tokens_per_fact=settings.get("output_tokens_per_fact", 64),
                         answer_system_prompt=settings.get("answer_system_prompt"))
-                previous = controller.store.find_request(session_id, "answer")
+                previous = controller.store.find_request(session_id, request_id)
+                if previous is not None and previous.stage not in {"FAILED", "COMMITTED"} and recovery is None:
+                    raise ValueError("candidate has an interrupted native attempt; prepare an explicit collector resume manifest")
                 if previous is not None and previous.stage == "FAILED":
-                    failure = failed_read_candidate(controller, row, category, settings, output_dir)
+                    failure = failed_read_candidate(controller, row, category, settings, output_dir,
+                        session_id=session_id, request_id=request_id)
+                    if recovery:
+                        failure["collection_recovery"] = {**resume_proof, "old_attempt_id": recovery["old_attempt_id"]}
                     append_record(failures_path, failure)
                     failures.append(failure)
                     completed.add((row["task_id"], category))
@@ -586,7 +610,7 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                 generation_started = time.monotonic()
                 try:
                     response = await controller.serve_turn(session_id, row["question"],
-                        selected.source_blocks, request_id="answer", corpus_snapshot_id=row["snapshot_id"],
+                        selected.source_blocks, request_id=request_id, corpus_snapshot_id=row["snapshot_id"],
                         reference_history=history, context_plans=(plan,),
                         query_context=QueryContext(state.query or state.raw_question, "task", task_state=state),
                         auxiliary_usage={**preparation, "charge_scope": "once_per_candidate_family"}
@@ -597,7 +621,9 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                         raise
                     generation_ended = time.monotonic()
                     failure = failed_read_candidate(controller, row, category, settings, output_dir,
-                        request_window=[generation_started, generation_ended])
+                        request_window=[generation_started, generation_ended], session_id=session_id, request_id=request_id)
+                    if recovery:
+                        failure["collection_recovery"] = {**resume_proof, "old_attempt_id": recovery["old_attempt_id"]}
                     append_record(failures_path, failure)
                     failures.append(failure)
                     completed.add((row["task_id"], category))
@@ -619,6 +645,11 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                     "evidence_set": to_jsonable(selected), "candidate_pool_path": str(pool_path),
                     "reader_input_tokens": response.reader_input_tokens,
                     "reader_output_tokens": response.reader_output_tokens}
+                if recovery is not None:
+                    actual_turn["collection_recovery"] = {**resume_proof, "old_attempt_id": recovery["old_attempt_id"],
+                        "old_session_id": recovery["old_session_id"], "retry_session_id": session_id,
+                        "retry_request_id": request_id, "old_cost": recovery["cost"],
+                        "aggregate_budget_verified": False}
                 if (row["task_id"], category) not in {(item["task_id"], item["category"]) for item in actual_turns}:
                     append_record(actual_turns_path, actual_turn)
                     actual_turns.append(actual_turn)
@@ -685,6 +716,8 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                         "scope": "reader_plus_shared_preparation_attributed_equally"},
                     "support_usage": dict(model.backend.usage), "candidate_pool_path": str(pool_path),
                     "evidence_set": to_jsonable(selected)}
+                if recovery is not None:
+                    result["collection_recovery"] = actual_turn["collection_recovery"]
                 with rewards_path.open("a") as output:
                     output.write(json.dumps(result, ensure_ascii=False)+"\n")
                 collected.append(result)
@@ -709,7 +742,25 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
         pair_manifest = {"pairs": 0, "reason": "heldout_dev_rewards_do_not_enter_policy_training"}
     else:
         pair_manifest = build_preference_pairs(rewards_path, preferences_path, weights=weights)
+    interrupted_by_attempt = {entry["old_attempt_id"]: entry["cost"] for entry in resume_routes.values()}
+    if resume_proof:
+        interrupted_by_attempt.update((entry["old_attempt_id"], entry["cost"])
+            for entry in resume_proof["inherited_interrupted_costs"])
+    for turn in actual_turns:
+        if "collection_recovery" in turn:
+            old = turn["collection_recovery"]
+            interrupted_by_attempt[old["old_attempt_id"]] = old["old_cost"]
+            interrupted_by_attempt.update((entry["old_attempt_id"], entry["cost"])
+                for entry in old["inherited_interrupted_costs"])
+    interrupted_costs = list(interrupted_by_attempt.values())
     manifest = {"cohort_manifest": settings.get("cohort_manifest"),
+        "collection_recovery": resume_proof,
+        "interrupted_attempts": len(interrupted_by_attempt), "interrupted_costs": interrupted_costs,
+        "interrupted_attempt_ids": sorted(interrupted_by_attempt),
+        "known_interrupted_reader_input_tokens": sum(cost["receipted_input_tokens"] for cost in interrupted_costs),
+        "known_interrupted_reader_output_tokens": sum(cost["receipted_output_tokens"] for cost in interrupted_costs),
+        "complete_reader_input_tokens": None if interrupted_costs else sum(row["reader_input_tokens"] for row in actual_turns),
+        "complete_reader_output_tokens": None if interrupted_costs else sum(row["reader_output_tokens"] for row in actual_turns),
         "cohort_split": settings.get("cohort_split") if cohort else None,
         "candidate_preparation_only": settings.get("candidate_preparation_only", False),
         "candidate_family_states": len(candidate_families),
@@ -787,9 +838,21 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--turns", type=int)
+    parser.add_argument("--prepare-resume", action="store_true")
+    parser.add_argument("--pause-receipt")
+    parser.add_argument("--confirmed-stopped", action="store_true")
+    parser.add_argument("--resume-output")
     args = parser.parse_args(argv)
     config = yaml.safe_load(Path(args.config).read_text())
-    print(json.dumps(asyncio.run(measured_preferences(config, limit=args.turns)), ensure_ascii=False))
+    if args.prepare_resume:
+        from training.collection_recovery import prepare_collection_resume
+        if args.pause_receipt is None:
+            parser.error("--prepare-resume requires --pause-receipt")
+        result = prepare_collection_resume(config, pause_receipt=args.pause_receipt,
+            confirmed_stopped=args.confirmed_stopped, output_dir=args.resume_output)
+    else:
+        result = asyncio.run(measured_preferences(config, limit=args.turns))
+    print(json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == "__main__":
