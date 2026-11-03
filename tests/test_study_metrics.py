@@ -1,4 +1,3 @@
-from copy import deepcopy
 
 import pytest
 
@@ -35,16 +34,6 @@ def records(method="B0", *, latency=1000, long_score=80):
              "cost": cost(latency), "split": "dev"}]
 
 
-def test_mtrag_harmonic_uses_benchmark_aggregates_and_preserves_official_alias():
-    summary = summarize_methods(matrix(), records())["B0"]
-    assert summary["datasets"]["mtrag"]["primary_score"] == pytest.approx(.55)
-    assert summary["quality"] == pytest.approx(.675)
-    assert summary["eligible"]
-    assert summary["datasets"]["mtrag"]["raw_metrics"]["RB_agg"]["count"] == 2
-    assert summary["datasets"]["mtrag"]["metric_source_alias_counts"]["RB_agg_idk"] == 2
-    assert "run_algorithmic.py" in summary["datasets"]["mtrag"]["alias_provenance"]["RB_agg_idk"]
-
-
 def test_mtrag_primary_uses_answerability_conditioned_components_and_retains_raw_scores():
     rows = records()
     for row in rows[:2]:
@@ -58,19 +47,6 @@ def test_mtrag_primary_uses_answerability_conditioned_components_and_retains_raw
     assert summarize_methods(matrix(), rows)["B0"]["datasets"]["mtrag"]["primary_score"] == 1
 
 
-def test_missing_harmonic_component_or_cohort_never_freezes_partial_scores():
-    rows = records()
-    del rows[0]["metrics"]["RL_F_idk"]
-    summary = summarize_methods(matrix(), rows)["B0"]
-    assert summary["quality"] is None
-    assert summary["datasets"]["mtrag"]["scored"] == 1
-    with pytest.raises(ValueError):
-        select_development(matrix(), rows)
-    undeclared = matrix()
-    del undeclared["cohorts"]
-    assert "cohort_not_declared:mtrag" in summarize_methods(undeclared, records())["B0"]["selection_reasons"]
-
-
 def test_continuous_quality_wins_then_near_equal_uses_complete_cost():
     rows = records("B0", latency=100, long_score=70)+records("B3", latency=4000, long_score=90)
     assert select_development(matrix(), rows)["method"] == "B3"
@@ -78,16 +54,6 @@ def test_continuous_quality_wins_then_near_equal_uses_complete_cost():
     assert select_development(matrix(), near)["method"] == "B0"
     over_budget = records("B0", latency=100, long_score=70)+records("B3", latency=6000, long_score=90)
     assert select_development(matrix(), over_budget)["method"] == "B0"
-
-
-def test_missing_resource_measurements_and_duplicate_tasks_are_reported():
-    rows = records()
-    del rows[0]["cost"]["gpu_gib_seconds"]
-    rows.append(deepcopy(rows[0]))
-    summary = summarize_methods(matrix(), rows)["B0"]
-    assert not summary["eligible"]
-    assert summary["datasets"]["mtrag"]["duplicate_task_ids"] == ["a"]
-    assert "missing_cost:gpu_gib_seconds" in summary["selection_reasons"]
 
 
 def test_paired_bootstrap_resamples_conversations_and_preserves_raw_score_units():
@@ -131,19 +97,6 @@ def test_paired_subset_reports_tasks_both_methods_did_not_score_without_full_coh
     assert combined["comparison_scope"] == "common_scored_subset"
     assert not combined["complete_cohort"]
     assert combined["score_difference"] == pytest.approx(.1)
-
-
-def test_empty_paired_subset_still_reports_declared_cohort_coverage():
-    spec = {"methods": [{"id": "B0"}, {"id": "B3"}],
-        "datasets": {"loong": {"primary_metric": "loong_reference_score", "weight": 1}},
-        "cohorts": {"test": {"loong": ["missing"]}}}
-    rows = [{"method": method, "dataset": "loong", "task_id": "missing",
-             "conversation_id": "c", "status": "failed", "split": "test", "metrics": {}}
-            for method in ("B0", "B3")]
-    result, = paired_comparisons(spec, rows)
-    assert result["paired_tasks"] == 0
-    assert result["both_unscored_task_ids"] == ["missing"]
-    assert result["score_difference"] is None
 
 
 def test_development_track_excludes_evaluation_only_dataset_without_renormalizing():

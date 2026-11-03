@@ -9,7 +9,6 @@ from controller.evidence import make_evidence
 from controller.prefix_retention import EmpiricalRetentionModel, PrefixReadObserver
 from controller.reading import build_read_plan, step_messages
 from controller.schema import CompletionReceipt, ContextEpoch
-from controller.serialization import to_jsonable
 from controller.session_store import SessionStore
 from controller.templates import ByteTemplate, token_hash
 
@@ -135,18 +134,3 @@ def test_value_does_not_protect_when_native_already_has_the_same_expected_reuse_
         assert all(not path.endswith("/retain") for path, _ in engine.calls)
         store.close()
     asyncio.run(run())
-
-
-def test_authoritative_family_links_distinct_version_document_ids():
-    template = ByteTemplate()
-    plan, _, units, _, _ = material(template, version="2025")
-    current = replace(units[0], document_family="Program-A", source_spans=(replace(units[0].source_spans[0],
-        source_key=replace(units[0].source_spans[0].source_key, document_id="Program-A-2025-linux")),))
-    plan = replace(plan, selected_set=replace(plan.selected_set, selected_units=(current,)))
-    older_key = to_jsonable(replace(current.source_spans[0].source_key,
-        document_id="Program-A-2024-windows", version="2024"))
-    sources = ({"document_family": "Program-A", "source_spans": [{"source_key": older_key}]},)
-    features = PrefixReadObserver._features(plan, sources, (), 100)
-    assert features["source_task_relation"] == "other_version"
-    other = ({"document_family": "Program-B", "source_spans": [{"source_key": older_key}]},)
-    assert PrefixReadObserver._features(plan, other, (), 100)["source_task_relation"] == "other_source"

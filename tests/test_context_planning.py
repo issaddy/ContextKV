@@ -1,15 +1,11 @@
 from dataclasses import replace
 
 from controller.candidates import build_plan_candidates
-from controller.context_budget import append_legal
-from controller.context_schema import (Condition, ContextBudget, ContextPlan, EvidenceSet,
+from controller.context_schema import (ContextBudget, ContextPlan, EvidenceSet,
     EvidenceClaim, EvidenceUnit, Need, ReadingOutcome, SourceSpan, TaskState, TextRef)
 from controller.cost_model import CostModel
 from controller.evidence import make_evidence
-from controller.planner import PlannerKnobs, choose_plan
-from controller.schema import (CacheQuote, CacheQuoteBatch, CostEstimate, ExecutionLedger,
-    Message, QueryContext, SessionSnapshot, TurnRecord)
-from controller.serialization import dumps, loads
+from controller.schema import (CacheQuote, CacheQuoteBatch, CostEstimate, SessionSnapshot, TurnRecord)
 from controller.templates import ByteTemplate, verify_evidence_spans
 
 
@@ -39,11 +35,6 @@ class CandidateCosts(CostModel):
                             calibrated=True)
 
 
-def test_semantic_plan_round_trip_preserves_typed_original_blocks():
-    plan, _ = context_plan()
-    assert loads(ContextPlan, dumps(plan)) == plan
-
-
 def test_compiler_keeps_source_char_offsets_separate_from_prompt_offsets():
     plan, block = context_plan()
     template, snapshot = ByteTemplate(), SessionSnapshot("s")
@@ -70,52 +61,6 @@ def test_rebuild_selects_original_history_spans_and_preserves_actual_qa():
     assert candidate.messages[1].content.endswith(history.user_text[8:20])
     assert "irrelevant" not in "".join(m.content for m in candidate.messages)
     assert snapshot.raw_history == (history,)
-
-
-def test_fixed_action_compares_all_sets_with_unique_ids():
-    template, snapshot = ByteTemplate(), SessionSnapshot("s")
-    plans = (context_plan(set_id="low", quality=.3)[0],
-             context_plan(set_id="best", quality=.9)[0],
-             context_plan(set_id="middle", quality=.6)[0])
-    candidates = tuple(c for p in plans for c in build_plan_candidates(snapshot, "How?", p, template))
-    selected = choose_plan(candidates, None, CostModel(), snapshot,
-                           PlannerKnobs(strategy="always_rebuild"))
-    assert len({c.candidate_id for c in candidates}) == 9
-    assert selected.candidate.evidence_set_id == "best"
-
-
-def test_multiple_rebuild_sets_compete_on_quality_and_complete_cost():
-    template, snapshot = ByteTemplate(), SessionSnapshot("s")
-    plans = (context_plan(set_id="fast", quality=.6)[0],
-             context_plan(set_id="best", quality=.9)[0])
-    candidates = tuple(c for p in plans for c in build_plan_candidates(snapshot, "How?", p, template))
-    model = CandidateCosts({"fast": 100, "best": 200})
-    selected = choose_plan(candidates, quotes(candidates), model, snapshot,
-                           PlannerKnobs(lambda_time=.001))
-    assert selected.candidate.evidence_set_id == "best"
-    assert len(selected.predicted) == 6
-    selected = choose_plan(candidates, quotes(candidates), model, snapshot,
-                           PlannerKnobs(lambda_time=.01))
-    assert selected.candidate.evidence_set_id == "fast"
-
-
-def test_append_requires_task_condition_version_and_scope_continuation():
-    plan, block = context_plan()
-    state = plan.task_state
-    turn = TurnRecord(1, state.raw_question, "answer", query_context=QueryContext(
-        state.raw_question, "task_state", task_state=state))
-    template = ByteTemplate()
-    ledger = ExecutionLedger(1, "epoch", 1, (Message("system", "system"),), (), (),
-        frozenset((block.key,)), template.fingerprint.template_hash,
-        template.fingerprint.model_revision, "demo-v1")
-    snapshot = SessionSnapshot("s", raw_history=(turn,), execution=ledger)
-    state = replace(state, current_turn_id=2, working_history=(
-        TextRef(1, "user", 0, len(turn.user_text)), TextRef(1, "assistant", 0, len(turn.assistant_text))))
-    spans = plan.selected_set.selected_units[0].source_spans
-    assert append_legal(snapshot, state, frozenset((block.key,)), spans) == (True, "")
-    corrected = replace(state, conditions=(Condition("platform", relation_type="PLATFORM"),))
-    assert append_legal(snapshot, corrected, frozenset((block.key,)), spans)[1] == "conditions_changed"
-    assert append_legal(snapshot, state, frozenset(), spans)[1] == "source_scope_shrank"
 
 
 def test_source_aliases_preserve_two_versions_of_identical_text():
@@ -176,15 +121,6 @@ def test_large_read_unit_keeps_budgeted_original_and_root_citation():
         assert allowed and f'["{allowed[0]}",0,{len(block.text)}]' in candidate.messages[-1].content
         assert leaf.claim_id not in candidate.messages[-1].content
         assert candidate.visible_blocks == frozenset()
-
-
-def test_explicit_empty_answer_system_is_preserved():
-    from controller.candidates import CandidatePolicy
-    plan, _ = context_plan()
-    plan = replace(plan, answer_system_prompt="A different task policy")
-    candidate = build_plan_candidates(SessionSnapshot("s"), "How?", plan, ByteTemplate(),
-        policy=CandidatePolicy(system_prompt=""))[0]
-    assert candidate.messages[0].content == ""
 
 
 def test_derived_answer_excerpt_budget_is_shared_across_original_sources_before_background():

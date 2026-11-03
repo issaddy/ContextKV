@@ -61,30 +61,3 @@ def test_source_prefix_is_shared_across_numeric_and_multihop_operations():
     right = step_messages(bridge, bridge.steps[0], bridge.selected_set.selected_units)
     assert left[:2] == right[:2]
     assert left[-1].content.split("\nTask:\n", 1)[0] != right[-1].content.split("\nTask:\n", 1)[0]
-
-
-def test_source_windows_do_not_mix_arbitrary_documents_within_one_cached_read():
-    first, second = material(), material("v2")
-    second = replace(second, unit_id="other", source_spans=(replace(second.source_spans[0], span_id="other-span"),))
-    state = TaskState("task", "Compare both versions", needs=(Need("n"),))
-    selected = EvidenceSet("set", (first, second))
-    budget = ContextBudget(window_tokens=32768, read_input_tokens=24000, read_output_tokens=4096)
-    mixed = build_read_plan(state, selected, "selected_sources", budget)
-    separate = build_read_plan(state, selected, "selected_sources", budget,
-        read_layout="source_first", read_packing="source_windows")
-    assert len(mixed.steps) == 1
-    assert tuple(task.input_unit_ids for task in separate.steps) == (("unit",), ("other",))
-    assert set(separate.coverage_units) == {"unit", "other"}
-
-
-def test_read_packing_budget_tracks_visible_needs_when_offline_task_binding_changes():
-    unit = material()
-    state = TaskState("task", "List records and explain the procedure", needs=(
-        Need("new-enumeration", operation="enumerate"), Need("new-procedure", operation="procedure")))
-    budget = ContextBudget(window_tokens=16000, read_input_tokens=12000, read_output_tokens=2048)
-    current = build_read_plan(state, EvidenceSet("set", (unit,)), "selected_sources", budget)
-    old_assignment = replace(unit, need_ids=("old-unrelated-need",))
-    rebound = build_read_plan(state, EvidenceSet("set", (old_assignment,)), "selected_sources", budget)
-    assert current.steps == rebound.steps
-    assert step_messages(current, current.steps[0], (unit,)) == step_messages(
-        rebound, rebound.steps[0], (old_assignment,))

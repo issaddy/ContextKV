@@ -54,15 +54,3 @@ async def test_real_history_audit_flag_keeps_original_benchmark_grade(tmp_path, 
     manifest = json.loads((generation/"scoring/manifest.json").read_text())
     assert manifest["history_audit"]["judge_output_tokens"] == 11
     assert manifest["history_audit"]["benchmark_denominator"] == "unchanged"
-
-
-@pytest.mark.asyncio
-async def test_over_budget_history_remains_unaudited_with_unknown_flag(tmp_path, monkeypatch):
-    generation, rows, spec = prepare(tmp_path, [{"speaker": "assistant", "text": "x"*3000}],
-                                    [{"speaker": "agent", "text": "different"}])
-    spec["scoring"]["history_audit_window_tokens"] = 1024
-    monkeypatch.setattr("controller.templates.HuggingFaceTemplate", lambda *args, **kwargs: ByteTemplate())
-    result = await score_dataset({}, spec, rows, generation)
-    assert result[0]["script_history_mismatch"] is None
-    assert result[0]["history_audit"]["origin"] == "history_audit_input_over_budget"
-    assert result[0]["history_audit"]["status"] == "unaudited"

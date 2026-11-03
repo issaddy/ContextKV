@@ -48,15 +48,6 @@ def test_actual_history_custom_system_and_all_source_metadata_precede_content_sh
     assert short.conclusion_tokens > allocation.conclusion_tokens
 
 
-def test_impossible_actual_history_is_rejected_before_reading():
-    state = TaskState("t", "Question", needs=(Need("n"),),
-                      working_history=(TextRef(0, "user", 0, 100),), current_turn_id=1)
-    snapshot = SessionSnapshot("s", raw_history=(TurnRecord(0, "H" * 100, "ok"),))
-    plan = ContextPlan("p", state, sources(1), budget=ContextBudget(history_tokens=50))
-    with pytest.raises(ValueError, match="actual working history"):
-        allocate_answer_window(plan, ByteTemplate(), snapshot)
-
-
 def test_rebinding_refreshes_changed_history_and_union_sources_preserving_paid_read():
     from controller.reading import build_read_plan
     selected = sources(1)

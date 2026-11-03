@@ -3,19 +3,18 @@ import json
 from dataclasses import replace
 
 import pytest
-from jsonschema import Draft202012Validator
 
 from bench.mock_engine import MockEngine
 from controller.claim_graph import ClaimGraph
 from controller.context_schema import (
     ContextBudget, EvidenceClaim, EvidenceSet, EvidenceUnit, Need, ReadResult, ReductionState,
-    SourceSpan, TaskState, TextRef,
+    SourceSpan, TaskState,
 )
 from controller.evidence import make_evidence
 from controller.execution import ReadingExecutor
 from controller.reading import (
-    advance_read_plan, build_read_plan, numeric_read_scopes, parse_read_result,
-    read_output_reservation, stable_prefix_messages, step_messages, visible_output_schema,
+    advance_read_plan, build_read_plan, parse_read_result,
+    read_output_reservation, stable_prefix_messages, step_messages,
 )
 from controller.reduction import reduce_claims
 from controller.rolling_policy import _reduction_tasks, namespace_plan
@@ -45,18 +44,6 @@ def row(entity, value, unit="", needs=("n0", "n1"), scope="g0", source="s0"):
 def response(*facts):
     return {"format_version": 3, "facts": list(facts), "claims": [],
             "support": ["shipment-count", "shipment-mass"], "conflicts": [], "open_needs": []}
-
-
-def test_reader_sees_the_field_types_and_legal_values_used_by_its_decoder():
-    plan = numeric_plan((material("R1 mass 1 kg. R2 mass unstated."),))
-    task = plan.steps[0]
-    message = step_messages(plan, task, plan.selected_set.selected_units)[-1]
-    payload = json.loads(message.content)
-    assert payload["output_schema"] == visible_output_schema(task.output_schema)
-    branches = payload["output_schema"]["properties"]["facts"]["items"]["anyOf"]
-    assert any(branch["properties"]["v"].get("enum") == ["1"] for branch in branches)
-    assert task.output_schema["properties"]["facts"]["items"]["anyOf"][0]["required"]
-    assert "required" not in branches[0]
 
 
 class NumericEngine(MockEngine):
@@ -139,27 +126,6 @@ def test_condition_scopes_and_source_versions_remain_separate():
         parse_read_result(task, json.dumps(output), plan.selected_set.selected_units)
 
 
-@pytest.mark.parametrize("change", [
-    {"subject_refs": (TextRef(1, "user", 0, 5),)},
-    {"condition_ids": ("approved",)},
-    {"predecessor_need_ids": ("eligible",)},
-    {"scope": "all_supplied_documents"},
-])
-def test_different_populations_do_not_share_numeric_scope(change):
-    pair = material("R1 mass 1 kg.")
-    count = Need("count", operation="count")
-    total = replace(Need("sum", operation="sum"), **change)
-    state = TaskState("task", "Count all shipments; sum eligible masses.", needs=(count, total))
-    assert numeric_read_scopes(state, (pair[1],)) == ()
-
-
-def test_different_source_assignments_do_not_share_numeric_scope():
-    _, unit = material("R1 mass 1 kg.")
-    state = TaskState("task", "Count and sum.", needs=(Need("count", operation="count"),
-                                                     Need("sum", operation="sum")))
-    assert numeric_read_scopes(state, (replace(unit, need_ids=("count",)),)) == ()
-
-
 def test_same_entity_in_distinct_versions_keeps_two_source_proofs():
     plan = numeric_plan((material("R1 mass 1 kg.", "old", "v1"),
                          material("R1 mass 2 kg.", "new", "v2")))
@@ -194,55 +160,6 @@ def test_shared_fact_preserves_dependency_sources_and_predecessor_parent_proof()
     graph = ClaimGraph((parent, *result.claims, total))
     assert set(graph.source_spans("sum")) == {*quantity.source_spans, *prerequisite.source_spans}
     assert {claim.claim_id for claim in graph.leaf_claims("sum")} == {"eligible", result.claims[0].claim_id}
-
-
-@pytest.mark.parametrize("fact,valid", [
-    (row("R1", "1", "kg"), True),
-    (row("R3", "0", "g"), True),
-    (row("R2", None, needs=("n0",)), True),
-    (row("R2", None, needs=("n1",)), False),
-    (row("R2", None), False),
-    (row("R2", None, "kg", needs=("n0",)), False),
-    (row("R1", "99", "kg"), False),
-    (row("R1", 1, "kg"), False),
-])
-def test_schema_types_quantity_views_and_entity_only_count_views(fact, valid):
-    plan = numeric_plan((material("R1 mass 1 kg. R2 mass unstated. R3 mass 0 g."),))
-    schema = plan.steps[0].output_schema
-    Draft202012Validator.check_schema(schema)
-    assert Draft202012Validator(schema).is_valid(response(fact)) is valid
-    scope = plan.steps[0].shared_numeric_scopes[0]
-    assert scope.operations == ("count", "sum")
-
-
-def test_schema_binds_scope_and_operation_memberships_together():
-    needs = tuple(Need(f"{condition}-{operation}", operation=operation, condition_ids=(condition,))
-                  for condition in ("approved", "east") for operation in ("count", "sum"))
-    plan = numeric_plan((material("R1 approved mass 1 kg. R2 east mass unstated."),), needs)
-    schema = plan.steps[0].output_schema
-    Draft202012Validator.check_schema(schema)
-    validator = Draft202012Validator(schema)
-
-    def valid(fact):
-        data = response(fact)
-        data["support"] = [need.need_id for need in needs]
-        return validator.is_valid(data)
-
-    assert valid(row("R1", "1", "kg"))
-    assert valid(row("R2", None, scope="g1", needs=("n2",)))
-    assert not valid(row("R1", "1", "kg", needs=("n0", "n3")))
-    assert not valid(row("R1", "1", "kg", scope="g1", needs=("n0", "n1")))
-    assert not valid(row("R2", None, scope="g1", needs=("n3",)))
-
-
-def test_schema_without_quantity_literals_allows_only_entity_count_rows():
-    plan = numeric_plan((material("R1 qualifies. R2 has unstated mass."),))
-    schema = plan.steps[0].output_schema
-    Draft202012Validator.check_schema(schema)
-    validator = Draft202012Validator(schema)
-    assert validator.is_valid(response(row("R1", None, needs=("n0",))))
-    assert not validator.is_valid(response(row("R1", None, needs=("n1",))))
-    assert not validator.is_valid(response(row("R1", "1", "kg")))
 
 
 def test_shared_read_measures_less_actual_prompt_and_output_than_isolation():

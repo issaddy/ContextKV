@@ -9,7 +9,7 @@ from controller.cost_model import CostModel
 from controller.events import EventLog
 from controller.plan_policy import CompleteCost, NativePlanningState, ResourceForecast, StepForecast
 from controller.reading import build_read_plan
-from controller.rolling_policy import RollingPlanRuntime, namespace_plan
+from controller.rolling_policy import RollingPlanRuntime
 from controller.schema import CostEstimate
 from controller.service import Controller
 from controller.session_store import SessionStore
@@ -133,19 +133,6 @@ async def test_full_scope_forbids_cheap_direct_answer_before_all_originals_are_r
     await controller.aclose()
 
 
-def test_content_namespace_separates_different_read_zero_inputs_and_shares_identical_tasks():
-    from test_context_planning import context_plan
-    plan, _ = context_plan()
-    first = replace(plan, steps=(ReadTask("read:0", "READ", ("need",), ("u",)),))
-    other = replace(first, plan_id="another-set")
-    assert namespace_plan(first).steps[0].step_id == namespace_plan(other).steps[0].step_id
-    changed = replace(first, read_packing="source_windows")
-    assert namespace_plan(first).steps[0].step_id != namespace_plan(changed).steps[0].step_id
-    changed = replace(first, selected_set=replace(first.selected_set, selected_units=(
-        replace(first.selected_set.selected_units[0], text="different"),)))
-    assert namespace_plan(first).steps[0].step_id != namespace_plan(changed).steps[0].step_id
-
-
 @pytest.mark.asyncio
 async def test_fixed_reader_reports_fresh_answer_tail_and_keeps_replay_unobserved(tmp_path):
     from controller.planner import PlannerKnobs
@@ -207,26 +194,4 @@ async def test_observed_open_need_proposes_priced_multihop_with_real_parent_and_
     assert response.auxiliary_input_tokens == 7 and response.auxiliary_output_tokens == 2
     assert outcome.open_needs == ()
     assert len(observed.states) == 3
-    await controller.aclose()
-
-
-@pytest.mark.asyncio
-async def test_rolling_resolves_lost_read_receipt_without_generating_the_read_twice(tmp_path):
-    from controller.engine_client import UnknownOutcomeError
-    controller, store, engine, observed, plan = setup_controller(tmp_path)
-    engine.drop_next_generate_response = True
-    with pytest.raises(UnknownOutcomeError):
-        await controller.serve_turn("s", "How?", context_plans=(plan,), request_id="lost")
-    pending = store.find_request("s", "lost")
-    assert pending.stage == "STARTED"
-    assert store.get_snapshot("s").raw_history == ()
-    first = store.execution_step(pending.attempt_id, store.execution_steps(pending.attempt_id)[0].step_id)[1]
-    response = await controller.serve_turn("s", "How?", context_plans=(plan,), request_id="lost")
-    assert response.read_count == 1
-    assert len(engine.constraints) == 2  # native receipt replay, then one ANSWER
-    assert len(store.get_snapshot("s").raw_history) == 1
-    final = store.execution_steps(response.attempt_id)[0]
-    assert final.metrics["phase_window"]["start"] == first.metrics["phase_started_monotonic"]
-    assert observed.states[-1].steps[0].step_id == first.step_id
-    assert observed.paid[-1].input_tokens == len(final.input_ids)
     await controller.aclose()

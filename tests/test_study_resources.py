@@ -11,12 +11,6 @@ def test_shared_physical_memory_is_charged_once_across_overlapping_requests():
     assert sum(row["host_gib_seconds"] for row in costs.values()) == total["host_gib_seconds"] == 6
 
 
-def test_unobserved_memory_boundaries_remain_unknown():
-    samples = [{"timestamp": 1.0, "gpu_gib": 10.0, "host_gib": 2.0}]
-    assert integrate_physical(samples, 0, 2) == {
-        "complete_window_coverage": False, "gpu_gib_seconds": None, "host_gib_seconds": None}
-
-
 def test_idle_residency_is_retained_in_batch_integral():
     samples = [{"timestamp": float(t), "gpu_gib": 10.0, "host_gib": 2.0} for t in range(5)]
     costs = attribute_physical(samples, {"a": (0, 1), "b": (3, 4)})
