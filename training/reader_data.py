@@ -16,7 +16,7 @@ from controller.templates import token_hash
 
 
 
-REVIEW_PROTOCOL = "visible_target_independent_review_v4"
+REVIEW_PROTOCOL = "visible_target_independent_review_v5"
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -153,7 +153,7 @@ def reader_target_body(trace, *, answer_output_tokens=1024):
 
 
 def reader_review_body(trace, *, answer_output_tokens=1024, target_text=None, reading_steps=()):
-    """Deduplicate literal views while preserving the complete online messages."""
+    """Put the fixed target first; every other field is verification evidence."""
     messages = trace["messages"]
     contents = [message["content"] for message in messages]
     structured = trace["phase"] != "ANSWER"
@@ -171,15 +171,18 @@ def reader_review_body(trace, *, answer_output_tokens=1024, target_text=None, re
         else:
             metadata["text"] = source["text"]
         sources.append(metadata)
-    body = {"phase": trace["phase"], "question": trace["question"], "messages": messages,
+    body = ({"target_output": json.loads(target_text) if structured else target_text}
+            if target_text is not None else {})
+    body.update(phase=trace["phase"], question=trace["question"], messages=messages)
+    body.update({
         "task_state": trace["task_state"], "additional_actual_history": extra_history,
         "full_actual_history_sha256": trace["actual_history_sha256"],
         "history_view": "actual QA already in exact messages plus unchanged additional_actual_history",
-        "original_sources": sources, "actual_output": trace["actual_output"],
-        "target_output_budget_tokens": trace["read_task"]["output_budget"] if structured else answer_output_tokens}
+        "original_sources": sources,
+        "target_output_budget_tokens": trace["read_task"]["output_budget"] if structured else answer_output_tokens})
     if target_text is not None:
-        body.update(target_text=target_text, reading_steps=trace.get("reading_steps", reading_steps),
-                    source_role="independent verification of the fixed target; not target-generation input")
+        body.update(reading_steps=trace.get("reading_steps", reading_steps),
+                    source_role="messages, input claims and reading_steps are evidence/upstream attribution only; target_output is the only evaluated continuation")
     return body
 
 
@@ -281,8 +284,15 @@ async def review_reader_trace(trace, client, *, minimum_quality, reviewer_identi
         "ANSWER": ("Assess whether the fixed final answer uses the visible evidence/conclusions to address the whole "
             "current question, with the requested conditions, coverage, values and citations. A phase label, generic "
             "placeholder or empty shell is not a complete final answer.")}[trace["phase"]]
-    review_system = ("Independently assess the fixed target_text for the exact recorded reader messages. Return "
-        "assessments only and do not rewrite the target. "+phase_review+" visible_prompt_support means every asserted "
+    review_system = ("The first body field target_output is the ONLY continuation being evaluated. Inspect that "
+        "exact object/string, not any output embedded in messages or reading_steps. Those other fields are evidence "
+        "or upstream attribution and must never replace the evaluated target. Return assessments only and do not "
+        "rewrite target_output. "+phase_review+" For READ/REDUCE, begin reason with the actual target_output counts "
+        "claims=N, facts=M (zero when absent), then identify the concrete erroneous claim/field or omitted relevant "
+        "fact if rejecting. A nonempty target can never be described as an empty extraction. A heading fragment "
+        "tagged as support for an unrelated Need is not a correct empty extraction. For ANSWER, reason must name "
+        "a specific target answer point and its error or explain which requested point it correctly addresses. "
+        "visible_prompt_support means every asserted "
         "fact follows from the exact messages; source_support_verified checks those assertions against complete "
         "original_sources independently. Extra originals/history are verification evidence, never additional required "
         "content for a READ window or REDUCE input. When an observed READ/REDUCE caused an error, identify it using "
@@ -331,7 +341,7 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
                 "step_id": trace["read_task"]["step_id"], "phase": trace["phase"],
                 "operation": trace["read_task"]["operation"], "claims": trace["read_result"]["claims"],
                 "covered_units": trace["read_result"]["covered_units"]})
-    allowed_protocols = data.get("read_protocol_versions", [2, 3])
+    allowed_protocols = data.get("read_protocol_versions", [2, 3, 4])
     trace_rows = [row for row in trace_rows if row["phase"] == "ANSWER" or row["read_protocol_version"] in allowed_protocols]
     if limit_turns is not None:
         selected = set(dict.fromkeys(row["task_id"] for row in trace_rows))
@@ -353,7 +363,8 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
                     raise ValueError(f"fixed target {key} differs from trace: {trace['example_id']}")
     path = root/"reviews.jsonl"
     prior_targets = {row["example_id"]: row for row in rows(path)
-        if row.get("review_protocol") == "visible_target_independent_review_v3" and "target_text" in row} if path.exists() else {}
+        if row.get("review_protocol") in {"visible_target_independent_review_v3", "visible_target_independent_review_v4"}
+        and "target_text" in row} if path.exists() else {}
     done = {row["example_id"] for row in rows(path) if row.get("review_protocol") == REVIEW_PROTOCOL} if path.exists() else set()
     sink = path.open("a", encoding="utf-8")
     ledger = (root/"review_calls.jsonl").open("a", encoding="utf-8")
@@ -526,7 +537,7 @@ def audit_reader_targets(config):
                     if review[name] != trace[name]:
                         findings.append(name+"_mismatch")
                 independent = review.get("review_protocol") in {
-                    "visible_target_independent_review_v1", "visible_target_independent_review_v2", "visible_target_independent_review_v3", REVIEW_PROTOCOL}
+                    "visible_target_independent_review_v1", "visible_target_independent_review_v2", "visible_target_independent_review_v3", "visible_target_independent_review_v4", REVIEW_PROTOCOL}
                 counts["independently_reviewed" if independent else "needs_independent_review"] += 1
                 if "visible_prompt_support" not in review:
                     findings.append("visibility_unverified")
