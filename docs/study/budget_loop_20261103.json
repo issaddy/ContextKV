@@ -1,0 +1,128 @@
+{
+  "baseline_commit": "85f4ed4",
+  "measurement_kind": "hardware",
+  "gpu_status": "paused_by_user",
+  "evidence_scope": "Controlled mechanisms and partial training pilot; final full-development acceptance remains pending.",
+  "source_first_numeric_pair": {
+    "reader": "R0 Qwen3-32B BF16",
+    "layout": "source_first",
+    "json_whitespace_limit": 16,
+    "shared": {
+      "artifact": "runs/study/budget-loop-20261103/source-first-v2-full/long.json",
+      "read_calls": 12,
+      "cpu_reduce_calls": 2,
+      "input_tokens": 102563,
+      "output_tokens": 5705,
+      "response_complete_ms": 28945.972359040752,
+      "computed_count": 36,
+      "computed_mass_kg": 666,
+      "literal_answer_audit": "failed_or_ambiguous: final total is accompanied by example row quantities"
+    },
+    "isolated": {
+      "artifact": "runs/study/budget-loop-20261103/isolated-source-first-v2/long.json",
+      "read_calls": 24,
+      "cpu_reduce_calls": 2,
+      "input_tokens": 195001,
+      "output_tokens": 8579,
+      "response_complete_ms": 53135.29748888686,
+      "computed_count": 36,
+      "computed_mass_kg": 666,
+      "literal_answer_audit": "passed"
+    },
+    "answer_window": {
+      "input_tokens": 5147,
+      "output_budget": 1024,
+      "window_tokens": 32768,
+      "all_conclusions_and_source_paths_present": true,
+      "audit": "runs/study/budget-loop-20261103/phase2-answer-window.json"
+    }
+  },
+  "multihop": {
+    "artifact": "runs/study/budget-loop-20261103/source-first-v2-mechanisms/multihop.json",
+    "read_calls": 3,
+    "model_reduce_calls": 1,
+    "answer_year": 1997,
+    "source_chain_length": 3,
+    "answer_input_tokens": 892,
+    "response_complete_ms": 6970.888454001397,
+    "literal_and_provenance_audit": "passed"
+  },
+  "reader_cohorts": {
+    "full_train_states": 200,
+    "full_dev_states": 40,
+    "train_sessions": 31,
+    "dev_sessions": 7,
+    "pilot_train_states": 12,
+    "pilot_dev_states": 4,
+    "manifest": "runs/study/budget-loop-20261103/reader-cohorts/full/cohort_manifest.json"
+  },
+  "pilot_v2": {
+    "declared_states": 16,
+    "accepted_task_labels": 15,
+    "train_labels": 11,
+    "dev_labels": 4,
+    "need_operations": {
+      "lookup": 11,
+      "procedure": 4,
+      "enumerate": 1
+    },
+    "need_scopes": {
+      "selected_sources": 16
+    },
+    "completed_candidate_answers": 39,
+    "states_with_answers": 7,
+    "interrupted_attempts": 1,
+    "exported_read_traces": 233,
+    "exported_reduce_traces": 0,
+    "exported_answer_traces": 39,
+    "empty_read_extractions": 144,
+    "quality_review": "pending; empty extraction count is structural, not a quality verdict",
+    "completed_native_calls": 272,
+    "completed_native_tokens": 831917,
+    "submitted_read_without_receipt": 1,
+    "artifact": "runs/study/budget-loop-20261103/reader-pilot-v2/partial-cpu-audit/trace-audit.json"
+  },
+  "cost_indexes_at_gpu_pause": {
+    "native": {
+      "databases": 14,
+      "unique_completed_calls": 715,
+      "input_tokens": 2716608,
+      "output_tokens": 182236,
+      "total_tokens": 2898844,
+      "unmeasured_inventory_items": 25,
+      "artifact": "runs/study/budget-loop-20261103/cpu-cost-audit/native-usage.json"
+    },
+    "api": {
+      "unique_measured_responses": 71,
+      "prompt_tokens": 393449,
+      "completion_tokens": 19092,
+      "total_tokens": 412541,
+      "artifact": "runs/study/budget-loop-20261103/cpu-cost-audit/api-usage.json"
+    },
+    "physical": {
+      "observed_gpu_gib_seconds": 409946.21297429857,
+      "observed_process_pss_gib_seconds": 121086.29846106931,
+      "complete_gpu_window_coverage": false,
+      "clock": "client_monotonic",
+      "window": [
+        1811117.6169847385,
+        1819636.917333758
+      ],
+      "gpu_unknown_intervals": [
+        [
+          1811117.6169847385,
+          1814171.164084613
+        ]
+      ],
+      "artifact": "runs/study/budget-loop-20261103/cpu-cost-audit/physical-ledger.json"
+    },
+    "aggregation": "Native/API/auxiliary token indexes and physical integrals are separate; do not sum overlapping ledgers."
+  },
+  "pending": [
+    "Complete pilot target generation, independent full-source review and reader SFT",
+    "Expand real reader training to200train/40dev and recollect P1 rewards",
+    "Native observed-action gains, planner×reader four cells and own-history P3",
+    "Native/TTL15/TTL60/TTL180 paired windows and B×C concurrency1/4",
+    "Complete development-queue quality/P95 acceptance"
+  ]
+}

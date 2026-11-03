@@ -225,3 +225,12 @@ source-first 布局、R0、预算与原生 JSON 空白上限下的共享／隔�
 操作与范围定义原先只存在于解码约束中。采集在完成 34 个候选答案后中断，
 `reader-pilot/collection/train/interruption.json` 索引全部实际步骤、辅助成本及完整物理采样。
 下一批在相同状态上采用可见操作／范围语义，并独立核验固定标签。
+
+重审后的 `task-labels-pilot-v2/` 保留 15/16 状态，Need 分布为 11 lookup、4 procedure、
+1 enumerate，范围均为 selected_sources。用户暂停 GPU 时，`reader-pilot-v2/collection/train/`
+已完成 39 个候选答案，另有一个中断 attempt。模型服务、采集进程和连续 observer 均已停止。
+CPU 导出的 `reader-pilot-v2/partial-cpu-audit/` 包含 233 READ、39 ANSWER，
+以及未取得原生回执的已提交 READ；未启动目标生成、独立原文评分或 SFT。
+
+当前数值索引为 [budget_loop_20261103.json](budget_loop_20261103.json)。
+`cpu-cost-audit/` 分别索引原生回执、API 响应和去重后的物理采样，保留连续观察前的未知区间。
