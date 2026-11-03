@@ -236,10 +236,6 @@ class JudgeJournal:
         raw = result.json()
         self.budget.finish(ticket, output_tokens=raw["meta_info"].get("completion_tokens"))
         append(self.path, {"ticket": ticket["index"], "status": "completed", "response": raw})
-        finish = raw["meta_info"].get("finish_reason")
-        finish = finish.get("type") if isinstance(finish, dict) else finish
-        if finish in {"length", "max_tokens"}:
-            raise CompletedJudgeTruncated("actual fixed judge reached its output limit")
         return result
 
 
@@ -565,21 +561,35 @@ async def score_branch(judge, template, row, material, branch, *, path, identity
     # actual generated answer. An oversize prompt is unscored, never truncated.
     class WindowedJudge:
         async def post(self, endpoint, **kwargs):
-            if len(kwargs["json"]["input_ids"])+1024 > judge_window:
+            if len(kwargs["json"]["input_ids"])+256 > judge_window:
                 raise JudgeWindowUnavailable("fixed counterfactual judge prompt exceeds its declared model window")
             return await judge.post(endpoint, **kwargs)
     start = time.monotonic()
     judged = record = None
+    judge_path = Path(path).with_name("judge.json")
+
+    def journal(raw_record):
+        nonlocal record
+        record = raw_record
+        write(judge_path, {"call": record, "scorer_identity": identity})
+
     try:
-        judged, record = await _judge(WindowedJudge(), template, row, material, branch["answer"])
+        judged, record = await _judge(WindowedJudge(), template, row, material, branch["answer"], journal=journal)
         after = await base_client.post("/context/engine/info", json={})
         after.raise_for_status()
         if after.json()["fingerprint"] != expected_fingerprint:
             raise ValueError("fixed gain scorer changed checkpoint/tokenizer during scoring")
+        reason = record["meta_info"].get("finish_reason")
+        finish = reason.get("type") if isinstance(reason, dict) else reason
+        if finish in {"length", "max_tokens"}:
+            judged = None
+            raise CompletedJudgeTruncated("actual fixed judge reached its output limit")
+        if judged is None:
+            raise CompletedJudgeTruncated("actual fixed judge completed without a valid bounded score")
     finally:
         end = time.monotonic()
         physical = await resources.finish("judge", start, end)
-        write(Path(path).with_name("judge.json"), {"quality_components": judged, "call": record,
+        write(judge_path, {"quality_components": judged, "call": record,
             "physical_cost": physical, "scorer_identity": identity,
             "scope": "offline_judge_separate_from_online_answer_cost"})
     if set(weights) != set(COMPONENTS) or abs(sum(weights.values())-1) > 1e-9:
@@ -590,7 +600,7 @@ async def score_branch(judge, template, row, material, branch, *, path, identity
     quality = sum(weights[name]*judged[name] for name in COMPONENTS)
     branch.update(metrics={"plan_gain_quality": quality}, quality_components=judged,
         scoring={"status": "scored", "identity": identity, "judge_cost": {**record, **physical},
-                 "raw_output_path": str(Path(path).with_name("judge.json").resolve())})
+                 "raw_output_path": str(judge_path.resolve())})
     write(path, branch)
     return branch
 
@@ -605,7 +615,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
     from controller.context_schema import RetrievalState
     from controller.schema import OnlineTurn
     from profiling.retention_capture_cost import CaptureRunAccounting
-    from training.preference_rollout import _judge
+    from training.preference_rollout import P1_RUBRIC, _judge
 
     output = Path(settings["output_dir"])
     output.mkdir(parents=True, exist_ok=False)
@@ -734,7 +744,8 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 "reader_checkpoint": judge_info["fingerprint"]["model_revision"],
                 "fingerprint": judge_info["fingerprint"], "weights": weights,
                 "implementation_sha256": hashlib.sha256(inspect.getsource(_judge).encode()).hexdigest(),
-                "request_sampling": {"temperature": 0, "max_new_tokens": 1024},
+                "rubric": P1_RUBRIC,
+                "request_sampling": {"temperature": 0, "max_new_tokens": 256},
                 "metric": "plan_gain_quality", "score_range": [0, 1]}
             journal_judge = JudgeJournal(judge_client, budget, output/"judge-wire.jsonl")
             common_binding = {"reader_checkpoint": reader_checkpoint,

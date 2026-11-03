@@ -19,11 +19,14 @@ _RUNTIME = frozenset({"budget", "budgets", "strategy", "selection", "reading", "
     "wire_schema", "input_policy", "token_limit_hits", "texts_processed"})
 
 
-def _asset(value):
+def _asset(value, *, strip_runtime=True):
     if isinstance(value, dict):
-        return {key: _asset(item) for key, item in sorted(value.items()) if key not in _RUNTIME}
+        return {key: ("cuda" if key == "device" and isinstance(item, str)
+                      and item.startswith("cuda:") and item[5:].isdecimal()
+                      else _asset(item, strip_runtime=strip_runtime))
+                for key, item in sorted(value.items()) if not strip_runtime or key not in _RUNTIME}
     if isinstance(value, (tuple, list)):
-        return [_asset(item) for item in value]
+        return [_asset(item, strip_runtime=strip_runtime) for item in value]
     return value
 
 
@@ -38,7 +41,7 @@ def resident_model_identity(manifest):
     if raw is None:
         return None
     if raw.get("format") == "contextkv_resident_assets_v1":
-        return raw
+        return _asset(raw, strip_runtime=False)
     if "retrieval" not in raw:
         return {"format": "contextkv_resident_assets_v1", "assets": _asset(raw)}
     retrieval = raw["retrieval"]
