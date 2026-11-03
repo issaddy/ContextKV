@@ -242,30 +242,45 @@ async def collect_r1_preferences(config, *, limit=None):
 
 
 def attach_collection_costs(directory, binding):
-    """Finish saved successes and failed-case accounting after a partial batch."""
-    from bench.study_resources import integrate_physical
+    """Attribute the observed physical window across all concurrent branches."""
+    from bench.study_resources import attribute_physical, integrate_physical
     directory = Path(directory)
     physical_paths = sorted(directory.glob("collection_physical.*.json"))
     cost_paths = sorted(directory.glob("collection_cost.*.json"))
     samples = sorted((sample for path in physical_paths for sample in json.loads(path.read_text())["samples"]),
                      key=lambda sample: sample["timestamp"])
     rewards = rows(directory/"rewards.jsonl")
+    turn_path, failure_path = directory/"turns.jsonl", directory/"failed_cases.jsonl"
+    turns = rows(turn_path) if turn_path.exists() else []
+    failures = rows(failure_path) if failure_path.exists() else []
+    windows = {row["response"]["attempt_id"]: row["request_window"] for row in (*rewards, *turns)
+               if row["request_window"] is not None}
+    windows.update({row["attempt_id"]: row["request_window"] for row in failures if row["request_window"] is not None})
+    shares = attribute_physical(samples, windows)
+    envelopes = {key: integrate_physical(samples, *window) for key, window in windows.items()}
+    attribution = "physical interval occupancy divided across concurrently active successful and failed requests"
+
+    def attach(row, key):
+        envelope = envelopes.get(key)
+        covered = envelope is not None and envelope["complete_window_coverage"]
+        share = {name: shares[key][name] if covered else None
+                 for name in ("gpu_gib_seconds", "host_gib_seconds")}
+        row["physical_window"] = envelope
+        row["request_share"] = {**share, "attribution": attribution, "complete_window_coverage": covered}
+        row["physical_window_scope"] = "non-additive whole-device/process envelope during this request"
+        row["batch_cost_paths"] = [str(path) for path in cost_paths]
+        return share
+
     for row in rewards:
-        if "cost" not in row:
-            start, end = row["request_window"]
-            physical = integrate_physical(samples, start, end)
-            row["cost"] = {"complete_ms": row["response"]["complete_ms"],
-                "total_input_tokens": row["input_total_tokens"], "total_output_tokens": row["output_total_tokens"],
-                "gpu_gib_seconds": physical["gpu_gib_seconds"], "host_gib_seconds": physical["host_gib_seconds"]}
-        validate_reward(row, binding)
+        share = attach(row, row["response"]["attempt_id"])
+        row["cost"] = {"complete_ms": row["response"]["complete_ms"],
+            "total_input_tokens": row["input_total_tokens"], "total_output_tokens": row["output_total_tokens"],
+            **share, "attribution": attribution}
     write_rows(directory/"rewards.jsonl", rewards)
-    failure_path = directory/"failed_cases.jsonl"
+    for row in failures:
+        share = attach(row, row["attempt_id"])
+        row["physical_cost"] = share if row["request_window"] is not None else None
     if failure_path.exists():
-        failures = rows(failure_path)
-        for row in failures:
-            if row["request_window"] is not None:
-                row["physical_cost"] = integrate_physical(samples, *row["request_window"])
-            row["batch_cost_paths"] = [str(path) for path in cost_paths]
         write_rows(failure_path, failures)
     return rewards
 

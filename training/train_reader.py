@@ -294,19 +294,16 @@ async def measured_command(config, command, function, *, asynchronous=False):
         output = Path(settings["output_dir"] if command in {"train", "merge"} else settings["data"]["output_dir"])
         output.mkdir(parents=True, exist_ok=True)
         observation = json.dumps(sampler.observation(), indent=2)+"\n"
-        (output/f"{command}_physical_resources.json").write_text(observation)
         (output/f"{command}_physical_resources.{invocation_id}.json").write_text(observation)
         cost = {"command": command, "start": started, "end": ended,
             "invocation_id": invocation_id, "status": "completed" if completed else "failed",
             "complete_ms": (ended-started)*1000, "physical": integrate_physical(sampler.samples, started, ended),
             "gpu_devices": devices, "world_size": world,
             "physical_counts": "each physical GPU counted once; PSS summed across declared process roots and descendants"}
-        (output/f"{command}_cost.json").write_text(json.dumps(cost, indent=2)+"\n")
         (output/f"{command}_cost.{invocation_id}.json").write_text(json.dumps(cost, indent=2)+"\n")
     if "measurement_windows" in result:
         cost["phases"] = {name: {"start": start, "end": end,
             **integrate_physical(sampler.samples, start, end)} for name, (start, end) in result["measurement_windows"].items()}
-        (output/f"{command}_cost.json").write_text(json.dumps(cost, indent=2)+"\n")
         (output/f"{command}_cost.{invocation_id}.json").write_text(json.dumps(cost, indent=2)+"\n")
     return result
 
