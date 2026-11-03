@@ -80,7 +80,7 @@
     "completed_native_calls": 272,
     "completed_native_tokens": 831917,
     "submitted_read_without_receipt": 1,
-    "artifact": "runs/study/budget-loop-20261103/reader-pilot-v2/partial-cpu-audit/trace-audit.json"
+    "artifact": "runs/study/budget-loop-20261103/reader-pilot-v2/collection/train/runtime/sessions.sqlite3"
   },
   "cost_indexes_at_gpu_pause": {
     "native": {

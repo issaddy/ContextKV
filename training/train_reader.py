@@ -57,7 +57,7 @@ def _asset_digest(directory):
     return identity, files
 
 
-def train_reader(config, *, max_steps=None, resume_from_checkpoint=None):
+def train_reader(config, *, max_steps=None):
     preparation_started = time.monotonic()
     import torch
     from peft import LoraConfig, PeftModel, get_peft_model
@@ -93,11 +93,13 @@ def train_reader(config, *, max_steps=None, resume_from_checkpoint=None):
         counts[split] = {"examples": len(selected), "turns": len({row["task_id"] for row in selected}),
             "phases": dict(Counter(row["phase"] for row in selected)),
             "model_input_tokens_per_epoch": sum(len(row["input_ids"]) for row in encoded[split]),
-            "supervised_tokens_per_epoch": sum(sum(token != -100 for token in row["labels"]) for row in encoded[split])}
+            "supervised_tokens_per_epoch": sum(sum(token != -100 for token in row["labels"]) for row in encoded[split]),
+            "max_sequence_tokens": max((len(row["input_ids"]) for row in encoded[split]), default=0)}
     if counts["train"]["turns"] < settings["data"]["minimum_train_turns"]:
         raise ValueError(f"training needs {settings['data']['minimum_train_turns']} actual turns; selected {counts['train']['turns']}")
     model = AutoModelForCausalLM.from_pretrained(scope.model_path, dtype=torch.bfloat16,
-        local_files_only=True, trust_remote_code=False, attn_implementation=settings["attention_implementation"])
+        local_files_only=True, trust_remote_code=False, attn_implementation=settings["attention_implementation"],
+        device_map={"": f"cuda:{rank}"})
     model.config.use_cache = False
     lora = settings["lora"]
     if settings.get("initial_adapter"):
@@ -108,7 +110,7 @@ def train_reader(config, *, max_steps=None, resume_from_checkpoint=None):
             bias="none", task_type="CAUSAL_LM"))
     model.enable_input_require_grads()
     optimizer = settings["optimizer"]
-    arguments = TrainingArguments(output_dir=str(output/"checkpoints"),
+    arguments = TrainingArguments(output_dir=str(output),
         num_train_epochs=settings["epochs"], max_steps=settings["max_steps"] if max_steps is None else max_steps,
         per_device_train_batch_size=settings["batch_size"], per_device_eval_batch_size=1,
         gradient_accumulation_steps=settings["gradient_accumulation_steps"],
@@ -116,8 +118,7 @@ def train_reader(config, *, max_steps=None, resume_from_checkpoint=None):
         warmup_steps=optimizer["warmup_ratio"], lr_scheduler_type="cosine", max_grad_norm=optimizer["max_grad_norm"],
         bf16=True, tf32=True, optim="adamw_torch_fused", gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
-        logging_steps=settings["logging_steps"], save_steps=settings["save_steps"],
-        save_total_limit=settings["save_total_limit"],
+        logging_steps=settings["logging_steps"], save_strategy="no",
         dataloader_num_workers=0, dataloader_pin_memory=True,
         ddp_find_unused_parameters=False, ddp_broadcast_buffers=False,
         report_to="none", seed=settings["seed"], data_seed=settings["seed"], remove_unused_columns=False)
@@ -154,7 +155,7 @@ def train_reader(config, *, max_steps=None, resume_from_checkpoint=None):
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.synchronize()
     started = time.monotonic()
-    result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    result = trainer.train()
     torch.cuda.synchronize()
     elapsed_ms = (time.monotonic()-started)*1000
     training_ended = time.monotonic()
@@ -195,9 +196,9 @@ def train_reader(config, *, max_steps=None, resume_from_checkpoint=None):
         for name, target in (("README.md", "BASE_MODEL_CARD.md"), ("LICENSE", "LICENSE"), ("NOTICE", "BASE_NOTICE")):
             if (Path(scope.model_path)/name).is_file():
                 shutil.copyfile(Path(scope.model_path)/name, output/target)
-    checkpoint_ended = time.monotonic()
+    adapter_save_ended = time.monotonic()
     windows = {"preparation": [preparation_started, started], "training": [started, training_ended],
-               "checkpoint_save": [training_ended, checkpoint_ended]}
+               "adapter_save": [training_ended, adapter_save_ended]}
     if encoded["validation"] and settings.get("evaluate_train_holdout", True):
         validation_started = time.monotonic()
         metrics = trainer.evaluate()
@@ -315,7 +316,6 @@ def main(argv=None):
     parser.add_argument("command", choices=("export", "review", "prepare", "train", "merge"))
     parser.add_argument("--config", default="configs/reader_r1.yaml")
     parser.add_argument("--max-steps", type=int)
-    parser.add_argument("--resume-from-checkpoint")
     parser.add_argument("--limit-turns", type=int)
     parser.add_argument("--concurrency", type=int, default=8)
     args = parser.parse_args(argv)
@@ -327,7 +327,7 @@ def main(argv=None):
     elif args.command == "prepare":
         operation = partial(prepare_reader_data, config)
     elif args.command == "train":
-        operation = partial(train_reader, config, max_steps=args.max_steps, resume_from_checkpoint=args.resume_from_checkpoint)
+        operation = partial(train_reader, config, max_steps=args.max_steps)
     else:
         operation = partial(merge_reader, config)
     value = asyncio.run(measured_command(config, args.command, operation, asynchronous=args.command == "review"))

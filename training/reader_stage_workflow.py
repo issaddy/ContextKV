@@ -24,8 +24,13 @@ def prepare_reader_stage(config):
         raise ValueError("reader collection requires reviewed task labels bound to this registered cohort")
     reader_config = yaml.safe_load(Path(settings["reader_training_config"]).read_text())
     reader = reader_config["reader_training"]
+    run_path = settings["collection"]["run_config"]
+    run = yaml.safe_load(Path(run_path).read_text())
+    reader.update(base_scope=run["model"]["scope_path"], r0_run_config=run_path)
     reader.update(output_dir=settings["reader_output_dir"], merged_model_dir=settings["reader_merged_dir"],
                   max_length=settings.get("max_length", 32768))
+    if "gradient_accumulation_steps" in settings:
+        reader["gradient_accumulation_steps"] = settings["gradient_accumulation_steps"]
     data = reader["data"]
     data_root = output/"reader-data"
     data.update(output_dir=str(data_root), reviews_path=str(data_root/"reviews.jsonl"),
@@ -111,6 +116,7 @@ def prepare_reader_phases(config):
     output = Path(settings["output_dir"])
     last_adapter = source_config["reader_training"].get("initial_adapter")
     stages = []
+    training_gpus = settings.get("training_gpu_devices")
     for phase in ("READ", "REDUCE", "ANSWER"):
         destination = source/phase.lower()
         selected = {split: [row for row in rows(source/f"{split}.jsonl") if row["phase"] == phase]
@@ -135,8 +141,12 @@ def prepare_reader_phases(config):
                 reader["initial_adapter"] = str(last_adapter)
             path = output/f"reader_{phase.lower()}_training.yaml"
             path.write_text(yaml.safe_dump(actual, sort_keys=False))
-            stage.update(training_config=str(path.resolve()),
-                train_command=[sys.executable, "-m", "training.train_reader", "train", "--config", str(path.resolve())])
+            command = [sys.executable, "-m", "training.train_reader", "train", "--config", str(path.resolve())]
+            if training_gpus:
+                command = ["env", "CUDA_VISIBLE_DEVICES="+",".join(map(str, training_gpus)),
+                    sys.executable, "-m", "torch.distributed.run", "--standalone", "--nproc-per-node="+str(len(training_gpus)),
+                    "-m", "training.train_reader", "train", "--config", str(path.resolve())]
+            stage.update(training_config=str(path.resolve()), train_command=command)
             last_adapter = Path(reader["output_dir"])/"adapter"
         stages.append(stage)
     result = {"schema_version": 1, "data": combined, "stages": stages,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Linux/CUDA only. Run prepare_sglang.py for a full checkout first, install that
-# pinned checkout's own dependencies, and activate its isolated environment.
+# pinned checkout's runtime dependencies in the container's Python environment.
 set -euo pipefail
 CHECKOUT="${SGLANG_CHECKOUT:-vendor/sglang}"
 : "${CONTEXTKV_MODEL_SCOPE_PATH:?Set to an explicit local Qwen3 model scope JSON}"

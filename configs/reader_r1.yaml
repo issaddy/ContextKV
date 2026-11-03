@@ -13,8 +13,6 @@ reader_training:
   epochs: 1
   max_steps: -1
   logging_steps: 1
-  save_steps: 50
-  save_total_limit: 3
   evaluate_train_holdout: true
   lora:
     rank: 16
