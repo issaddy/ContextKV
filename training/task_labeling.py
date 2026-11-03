@@ -78,7 +78,8 @@ def verify_grounding(row, state, memory, client, *, record_path=None):
         "and the history-reference judgment. Return assessments only; do not rewrite the fixed TaskState.\n\n"+
         TASK_NEED_SEMANTICS}, {"role": "user", "content": json.dumps(body, ensure_ascii=False)}],
         response_format={"type": "json_schema", "json_schema": {
-            "name": "actual_history_grounding_review", "strict": True, "schema": schema}})
+            "name": "actual_history_grounding_review", "strict": True, "schema": schema}},
+        chat_template_kwargs={"enable_thinking": True})
     if record_path is not None:
         with Path(record_path).open("a", encoding="utf-8") as sink:
             sink.write(json.dumps({"task_id": row["task_id"], "status": completion.status,

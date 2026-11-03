@@ -78,7 +78,8 @@ def export_reader_traces(config):
             attempt_id = turn["response"]["attempt_id"]
             payload = connection.execute("SELECT payload FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()[0]
             attempt = load_record(connection, Attempt, payload)
-            history = turn["actual_history"]
+            history = [{key: item[key] for key in ("turn_id", "user_text", "assistant_text")}
+                       for item in turn["actual_history"]]
             plan = attempt.reading_outcome.plan if attempt.reading_outcome is not None else attempt.context_plan
             blocks = {block.key: block for block in attempt.evidence}
             if plan is not None:
@@ -162,7 +163,7 @@ def reader_review_body(trace, *, answer_output_tokens=1024, target_text=None, re
         user_present = any(message["role"] == "user" and turn["user_text"] in message["content"] for message in messages)
         assistant_present = any(message["role"] == "assistant" and turn["assistant_text"] == message["content"] for message in messages)
         if not (user_present and assistant_present):
-            extra_history.append(turn)
+            extra_history.append({key: turn[key] for key in ("turn_id", "user_text", "assistant_text")})
     sources = []
     for source in trace["original_sources"]:
         metadata = {name: value for name, value in source.items() if name != "text"}
