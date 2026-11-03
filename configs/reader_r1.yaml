@@ -30,7 +30,7 @@ reader_training:
     export_turns: null
     answer_output_tokens: 1024
     minimum_quality: 0.85
-    read_protocol_versions: [2, 3]
+    read_protocol_versions: [2, 3, 4]
     require_independent_review: true
     validation_fraction: 0.03
     split_seed: 42

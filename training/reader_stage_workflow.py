@@ -35,7 +35,7 @@ def prepare_reader_stage(config):
     data_root = output/"reader-data"
     data.update(output_dir=str(data_root), reviews_path=str(data_root/"reviews.jsonl"),
         export_turns=None, rollouts=[], cohort_manifest=str(cohort_path),
-        require_independent_review=True, read_protocol_versions=settings.get("read_protocol_versions", [2, 3]),
+        require_independent_review=True, read_protocol_versions=settings.get("read_protocol_versions", [2, 3, 4]),
         minimum_train_turns=sum(member["split"] == "train" for member in cohort["members"]))
     if settings.get("review"):
         reader["review"].update(settings["review"])

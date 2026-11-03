@@ -231,6 +231,7 @@ class ReadTask:
     shared_numeric_scopes: tuple[NumericReadScope, ...] = ()
     retained_conclusion_tokens: tuple[tuple[str, int], ...] = ()
     requires_reduction: bool = False
+    condition_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

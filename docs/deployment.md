@@ -9,6 +9,8 @@ python -m pip install --no-build-isolation -e '.[tokenizer,retrieval,query-adapt
 python -m pip install --no-deps --no-build-isolation -e vendor/sglang/python
 python -m pip install 'torch==2.14.1' 'sglang-kernel==0.4.10' \
   'flashinfer-python[cu13]==0.7.2' 'xgrammar==0.2.7' 'nvidia-cutlass-dsl[cu13]==4.8.0'
+python -m pip install --no-deps torchvision==0.29.2 torchaudio==2.11.1 \
+  torchcodec==0.17.0 quack-kernels==0.6.5 humming-kernels==0.1.12
 ```
 
 `CONTEXTKV_MODEL_SCOPE_PATH` 与 `CONTEXTKV_FINGERPRINT_JSON` 取当前本地模型记录和实际 tokenizer/template。启动入口为 `scripts/launch_sglang.sh`，原生参数：
@@ -21,4 +23,4 @@ python -m pip install 'torch==2.14.1' 'sglang-kernel==0.4.10' \
 --speculative-num-draft-tokens 12 --random-seed 42
 ```
 
-服务健康后接续当前采集配置。H200 上重新采集原生成本和配对结果；旧机器结果保留在评价参照中。实验结束关闭本任务启动的服务、observer 和 SSH 会话。
+本机 HTTP 调用同时设置 `NO_PROXY` 与 `no_proxy` 为 `127.0.0.1,localhost,::1`。独立 teacher 服务使用 GPU 7、端口 30001、98304 KV token；训练阶段当前使用 GPU 3/5/6。服务健康后接续当前采集配置。H200 上重新采集原生成本和配对结果；旧机器结果保留在评价参照中。实验结束关闭本任务启动的服务、observer 和 SSH 会话。

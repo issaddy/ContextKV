@@ -282,6 +282,103 @@ def _sum_known(values):
     return sum(values) if all(value is not None for value in values) else None
 
 
+def collection_manifest_statistics(*, actual_turns, collected, failures, interrupted_by_attempt,
+                                   cohort, cohort_split, labels, candidate_families, planned_rows,
+                                   categories=()):
+    """Summarize saved collector records without loading models or reading files.
+
+    candidate_families maps task IDs to their frozen family records; labels and
+    planned_rows are the accepted-label and selected execution records respectively.
+    """
+    interrupted_by_attempt = dict(interrupted_by_attempt)
+    for turn in actual_turns:
+        if "collection_recovery" in turn:
+            old = turn["collection_recovery"]
+            interrupted_by_attempt[old["old_attempt_id"]] = old["old_cost"]
+            interrupted_by_attempt.update((entry["old_attempt_id"], entry["cost"])
+                for entry in old["inherited_interrupted_costs"])
+    interrupted_costs = list(interrupted_by_attempt.values())
+    answer_by_attempt = {row["response"]["attempt_id"]: row for row in (*collected, *actual_turns)}
+    scored_by_attempt = {row["response"]["attempt_id"]: row for row in collected}
+    failure_by_attempt = {row["attempt_id"]: row for row in failures}
+    declared_states = ({member["task_id"] for member in cohort["members"]
+        if member["split"] == cohort_split} if cohort else {row["task_id"] for row in planned_rows})
+    accepted_labels = {row["task_id"] for row in labels if row["task_id"] in declared_states}
+    declared_families = {identity: family for identity, family in candidate_families.items()
+        if identity in declared_states}
+    candidate_keys = ({(identity, category) for identity, family in declared_families.items()
+        for category in family["evidence_sets"]} if cohort else
+        {(row["task_id"], category) for row in planned_rows for category in categories})
+    success_keys = {(row["task_id"], row["category"]) for row in answer_by_attempt.values()}
+    failed_keys = {(row["task_id"], row["category"]) for row in failure_by_attempt.values()}-success_keys
+    incomplete_keys = candidate_keys-success_keys-failed_keys
+    states_with_answers = {row["task_id"] for row in answer_by_attempt.values()}
+    paid_reader = {}
+    for identity, row in failure_by_attempt.items():
+        cost = row["phase_cost"]
+        unresolved = any(step["stage"] == "SUBMITTED" and step["record"]["receipt"] is None
+            for step in row["step_records"])
+        paid_reader[identity] = {"input": cost["reader_input_tokens"], "output": cost["reader_output_tokens"],
+            "complete_input": None if unresolved else cost["reader_input_tokens"],
+            "complete_output": None if unresolved else cost["reader_output_tokens"]}
+    for identity, row in answer_by_attempt.items():
+        paid_reader[identity] = {"input": row["reader_input_tokens"], "output": row["reader_output_tokens"],
+            "complete_input": row["reader_input_tokens"], "complete_output": row["reader_output_tokens"]}
+    for identity, cost in interrupted_by_attempt.items():
+        if identity not in paid_reader:
+            paid_reader[identity] = {"input": cost["receipted_input_tokens"], "output": cost["receipted_output_tokens"],
+                "complete_input": cost["reader_input_tokens_total"], "complete_output": cost["reader_output_tokens_total"]}
+    reader_input_tokens = sum(cost["input"] for cost in paid_reader.values() if cost["input"] is not None)
+    reader_output_tokens = sum(cost["output"] for cost in paid_reader.values() if cost["output"] is not None)
+    unknown_reader_attempts = [identity for identity, cost in paid_reader.items()
+        if cost["complete_input"] is None or cost["complete_output"] is None]
+    return {
+        'interrupted_attempts': len(interrupted_by_attempt),
+        'interrupted_costs': interrupted_costs,
+        'interrupted_attempt_ids': sorted(interrupted_by_attempt),
+        'known_interrupted_reader_input_tokens': sum(cost["receipted_input_tokens"] for cost in interrupted_costs),
+        'known_interrupted_reader_output_tokens': sum(cost["receipted_output_tokens"] for cost in interrupted_costs),
+        'complete_reader_input_tokens': _sum_known([cost["complete_input"] for cost in paid_reader.values()]),
+        'complete_reader_output_tokens': _sum_known([cost["complete_output"] for cost in paid_reader.values()]),
+        'unknown_reader_cost_attempt_ids': sorted(unknown_reader_attempts),
+        'paid_reader_attempts': len(paid_reader),
+        'candidate_family_states': len(declared_families),
+        'candidate_family_ready_states': sum(row["ready"] for row in declared_families.values()),
+        'candidate_family_shortfall_states': sum(not row["ready"] for row in declared_families.values()),
+        'planned_turns': len(planned_rows),
+        'answers': len(answer_by_attempt),
+        'scored_answers': len(scored_by_attempt),
+        'declared_states': len(declared_states),
+        'accepted_label_states': len(accepted_labels),
+        'planned_states': len({row["task_id"] for row in planned_rows}),
+        'states_without_accepted_labels': sorted(declared_states-accepted_labels),
+        'states_without_answers': sorted(declared_states-states_with_answers),
+        'state_answer_rate': len(declared_states & states_with_answers)/len(declared_states) if declared_states else None,
+        'declared_candidate_denominator': len(candidate_keys),
+        'candidate_denominator_basis': "actual frozen candidate_family evidence_sets; unknown families are not assigned invented candidates",
+        'candidate_denominator_complete': not cohort or declared_states == set(declared_families),
+        'states_without_candidate_family': sorted(declared_states-set(declared_families)) if cohort else [],
+        'successful_candidates': len(candidate_keys & success_keys),
+        'incomplete_candidates': len(incomplete_keys),
+        'incomplete_candidate_keys': sorted(incomplete_keys),
+        'candidate_completion_rate': len(candidate_keys & success_keys)/len(candidate_keys) if candidate_keys else None,
+        'candidate_terminal_rate': len(candidate_keys & (success_keys | failed_keys))/len(candidate_keys) if candidate_keys else None,
+        'actual_candidate_answers': len(answer_by_attempt),
+        'tasks_with_answers': len(states_with_answers),
+        'categories': {name: sum(row["category"] == name for row in answer_by_attempt.values())
+            for name in dict.fromkeys((*categories, *(row["category"] for row in answer_by_attempt.values())))},
+        'failed_candidates': len(candidate_keys & failed_keys),
+        'failed_attempts': len(failure_by_attempt),
+        'failure_codes': {
+            code: sum(row["failure_code"] == code for row in failure_by_attempt.values())
+            for code in sorted({row["failure_code"] for row in failure_by_attempt.values()})},
+        'reader_input_tokens': reader_input_tokens,
+        'reader_output_tokens': reader_output_tokens,
+        'reader_token_scope': "known paid reader tokens across distinct successful, failed and interrupted attempt IDs; complete totals remain null for unknown receipt gaps",
+        'judge_input_tokens': sum(row["judge_record"]["input_tokens"] for row in scored_by_attempt.values()),
+        'judge_output_tokens': _sum_known([row["judge_record"].get("output_tokens") for row in scored_by_attempt.values()])}
+
+
 def failed_read_candidate(controller, row, category, settings, output_dir, *, request_window=None,
                           session_id=None, request_id="answer"):
     """Retain a paid terminal READ truncation without producing a quality label."""
@@ -766,103 +863,31 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
     if resume_proof:
         interrupted_by_attempt.update((entry["old_attempt_id"], entry["cost"])
             for entry in resume_proof["inherited_interrupted_costs"])
-    for turn in actual_turns:
-        if "collection_recovery" in turn:
-            old = turn["collection_recovery"]
-            interrupted_by_attempt[old["old_attempt_id"]] = old["old_cost"]
-            interrupted_by_attempt.update((entry["old_attempt_id"], entry["cost"])
-                for entry in old["inherited_interrupted_costs"])
-    interrupted_costs = list(interrupted_by_attempt.values())
-    answer_by_attempt = {row["response"]["attempt_id"]: row for row in (*collected, *actual_turns)}
-    scored_by_attempt = {row["response"]["attempt_id"]: row for row in collected}
-    failure_by_attempt = {row["attempt_id"]: row for row in failures}
-    declared_states = ({member["task_id"] for member in cohort["members"]
-        if member["split"] == settings.get("cohort_split", "train")} if cohort else {row["task_id"] for row in rows})
-    accepted_labels = {row["task_id"] for line in labels_path.read_text().splitlines() if line
-        for row in (json.loads(line),) if row["task_id"] in declared_states}
-    declared_families = {identity: family for identity, family in {**saved_families, **candidate_families}.items()
-        if identity in declared_states}
-    candidate_keys = ({(identity, category) for identity, family in declared_families.items()
-        for category in family["evidence_sets"]} if cohort else
-        {(row["task_id"], category) for row in rows for category in categories})
-    success_keys = {(row["task_id"], row["category"]) for row in answer_by_attempt.values()}
-    failed_keys = {(row["task_id"], row["category"]) for row in failure_by_attempt.values()}-success_keys
-    incomplete_keys = candidate_keys-success_keys-failed_keys
-    states_with_answers = {row["task_id"] for row in answer_by_attempt.values()}
-    paid_reader = {}
-    for identity, row in failure_by_attempt.items():
-        cost = row["phase_cost"]
-        unresolved = any(step["stage"] == "SUBMITTED" and step["record"]["receipt"] is None
-            for step in row["step_records"])
-        paid_reader[identity] = {"input": cost["reader_input_tokens"], "output": cost["reader_output_tokens"],
-            "complete_input": None if unresolved else cost["reader_input_tokens"],
-            "complete_output": None if unresolved else cost["reader_output_tokens"]}
-    for identity, row in answer_by_attempt.items():
-        paid_reader[identity] = {"input": row["reader_input_tokens"], "output": row["reader_output_tokens"],
-            "complete_input": row["reader_input_tokens"], "complete_output": row["reader_output_tokens"]}
-    for identity, cost in interrupted_by_attempt.items():
-        if identity not in paid_reader:
-            paid_reader[identity] = {"input": cost["receipted_input_tokens"], "output": cost["receipted_output_tokens"],
-                "complete_input": cost["reader_input_tokens_total"], "complete_output": cost["reader_output_tokens_total"]}
-    reader_input_tokens = sum(cost["input"] for cost in paid_reader.values() if cost["input"] is not None)
-    reader_output_tokens = sum(cost["output"] for cost in paid_reader.values() if cost["output"] is not None)
-    unknown_reader_attempts = [identity for identity, cost in paid_reader.items()
-        if cost["complete_input"] is None or cost["complete_output"] is None]
-    manifest = {"cohort_manifest": settings.get("cohort_manifest"),
-        "collection_recovery": resume_proof,
-        "interrupted_attempts": len(interrupted_by_attempt), "interrupted_costs": interrupted_costs,
-        "interrupted_attempt_ids": sorted(interrupted_by_attempt),
-        "known_interrupted_reader_input_tokens": sum(cost["receipted_input_tokens"] for cost in interrupted_costs),
-        "known_interrupted_reader_output_tokens": sum(cost["receipted_output_tokens"] for cost in interrupted_costs),
-        "complete_reader_input_tokens": _sum_known([cost["complete_input"] for cost in paid_reader.values()]),
-        "complete_reader_output_tokens": _sum_known([cost["complete_output"] for cost in paid_reader.values()]),
-        "unknown_reader_cost_attempt_ids": sorted(unknown_reader_attempts),
-        "paid_reader_attempts": len(paid_reader),
-        "cohort_split": settings.get("cohort_split") if cohort else None,
-        "candidate_preparation_only": settings.get("candidate_preparation_only", False),
-        "candidate_family_states": len(candidate_families),
-        "candidate_family_ready_states": sum(row["ready"] for row in candidate_families.values()),
-        "candidate_family_shortfall_states": sum(not row["ready"] for row in candidate_families.values()),
-        "candidate_families_path": str((output_dir/"candidate_families.jsonl").resolve()) if cohort else None,
-        "turns_path": str(labels_path), "planned_turns": len(rows), "answers": len(answer_by_attempt),
-        "scored_answers": len(scored_by_attempt),
-        "declared_states": len(declared_states), "accepted_label_states": len(accepted_labels),
-        "planned_states": len({row["task_id"] for row in rows}),
-        "states_without_accepted_labels": sorted(declared_states-accepted_labels),
-        "states_without_answers": sorted(declared_states-states_with_answers),
-        "state_answer_rate": len(declared_states & states_with_answers)/len(declared_states) if declared_states else None,
-        "declared_candidate_denominator": len(candidate_keys),
-        "candidate_denominator_basis": "actual frozen candidate_family evidence_sets; unknown families are not assigned invented candidates",
-        "candidate_denominator_complete": not cohort or declared_states == set(declared_families),
-        "states_without_candidate_family": sorted(declared_states-set(declared_families)) if cohort else [],
-        "successful_candidates": len(candidate_keys & success_keys),
-        "incomplete_candidates": len(incomplete_keys),
-        "incomplete_candidate_keys": sorted(incomplete_keys),
-        "candidate_completion_rate": len(candidate_keys & success_keys)/len(candidate_keys) if candidate_keys else None,
-        "candidate_terminal_rate": len(candidate_keys & (success_keys | failed_keys))/len(candidate_keys) if candidate_keys else None,
-        "reader_data_only": settings.get("reader_data_only", False),
-        "candidate_concurrency": settings.get("candidate_concurrency", 4),
-        "physical_cost_scope": "collection device/process window counted once; concurrent branch request windows may overlap",
-        "actual_candidate_answers": len(answer_by_attempt),
-        "actual_turns_path": str(actual_turns_path.resolve()),
-        "tasks_with_answers": len(states_with_answers),
-        "categories": {name: sum(row["category"] == name for row in answer_by_attempt.values())
-            for name in dict.fromkeys((*categories, *(row["category"] for row in answer_by_attempt.values())))},
-        "skipped": skipped, "failed_candidates": len(candidate_keys & failed_keys),
-        "failed_attempts": len(failure_by_attempt), "failure_codes": {
-            code: sum(row["failure_code"] == code for row in failure_by_attempt.values())
-            for code in sorted({row["failure_code"] for row in failure_by_attempt.values()})}, "legal_actions": ["REBUILD"],
-        "elapsed_ms": (time.perf_counter()-started)*1000,
-        "reader_input_tokens": reader_input_tokens,
-        "reader_output_tokens": reader_output_tokens,
-        "reader_token_scope": "known paid reader tokens across distinct successful, failed and interrupted attempt IDs; complete totals remain null for unknown receipt gaps",
-        "preparation_input_tokens": _sum_known([item["input_tokens"] for item in preparations]),
-        "preparation_output_tokens": _sum_known([item["output_tokens"] for item in preparations]),
-        "preparations_path": str(preparations_path),
-        "judge_input_tokens": sum(row["judge_record"]["input_tokens"] for row in scored_by_attempt.values()),
-        "judge_output_tokens": _sum_known([row["judge_record"].get("output_tokens") for row in scored_by_attempt.values()]),
-        "support_usage": model.backend.usage, "pairs": pair_manifest,
-        "outputs": {"turns": str(actual_turns_path), "rewards": str(rewards_path), "preferences": str(preferences_path),
+    statistics = collection_manifest_statistics(actual_turns=actual_turns, collected=collected,
+        failures=failures, interrupted_by_attempt=interrupted_by_attempt, cohort=cohort,
+        cohort_split=settings.get("cohort_split", "train"),
+        labels=[json.loads(line) for line in labels_path.read_text().splitlines() if line],
+        candidate_families={**saved_families, **candidate_families}, planned_rows=rows, categories=categories)
+    manifest = {**statistics,
+        'cohort_manifest': settings.get("cohort_manifest"),
+        'collection_recovery': resume_proof,
+        'cohort_split': settings.get("cohort_split") if cohort else None,
+        'candidate_preparation_only': settings.get("candidate_preparation_only", False),
+        'candidate_families_path': str((output_dir/"candidate_families.jsonl").resolve()) if cohort else None,
+        'turns_path': str(labels_path),
+        'reader_data_only': settings.get("reader_data_only", False),
+        'candidate_concurrency': settings.get("candidate_concurrency", 4),
+        'physical_cost_scope': "collection device/process window counted once; concurrent branch request windows may overlap",
+        'actual_turns_path': str(actual_turns_path.resolve()),
+        'skipped': skipped,
+        'legal_actions': ["REBUILD"],
+        'elapsed_ms': (time.perf_counter()-started)*1000,
+        'preparation_input_tokens': _sum_known([item["input_tokens"] for item in preparations]),
+        'preparation_output_tokens': _sum_known([item["output_tokens"] for item in preparations]),
+        'preparations_path': str(preparations_path),
+        'support_usage': model.backend.usage,
+        'pairs': pair_manifest,
+        'outputs': {"turns": str(actual_turns_path), "rewards": str(rewards_path), "preferences": str(preferences_path),
                     "failed_cases": str(failures_path), "skipped_cases": str(skipped_path)}}
     (output_dir/"manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
     model.close()
