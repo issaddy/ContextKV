@@ -93,9 +93,16 @@ def comparison_report(by_method, planned, sources, protocol):
             generation_missing_task_ids=sorted(set(planned[method]["reference_task_ids"])-{row["task_id"] for row in rows}),
             scoring_failed_or_missing=[row["task_id"] for row in rows
                 if row["status"] == "completed" and PRIMARY not in row["metrics"]])
-    pairs = (("P0_R0", "P0_R1", "reader_at_P0"), ("P1_R0", "P1_R1", "reader_at_P1"),
-        ("P0_R0", "P1_R0", "policy_at_R0"), ("P0_R1", "P1_R1", "policy_at_R1"),
-        ("P0_R0", "P1_R1", "joint"))
+    readers = sorted({method.split("_", 1)[1] for method in by_method
+                      if method.startswith(("P0_", "P1_"))}, key=lambda reader: (reader != "R0", reader))
+    pairs = []
+    if len(readers) == 2:
+        first, second = readers
+        pairs.extend((f"P{policy}_{first}", f"P{policy}_{second}", f"reader_at_P{policy}")
+                     for policy in (0, 1))
+    pairs.extend((f"P0_{reader}", f"P1_{reader}", "policy_at_"+reader) for reader in readers)
+    if len(readers) == 2:
+        pairs.append(("P0_"+readers[0], "P1_"+readers[1], "joint"))
     comparisons = []
     for before, after, kind in pairs:
         if before in scored and after in scored:
