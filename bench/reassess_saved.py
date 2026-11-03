@@ -121,7 +121,14 @@ def reassess(matrix, rows, output, *, split, baseline, history_protocol,
             group, sources = condition_saved(group, spec, mtrag_checkout, destination)
             score_sources.extend(sources)
         updated.extend(group)
-    write_rows(output/"results.scored.jsonl", updated)
+    fields = ("task_id", "conversation_id", "turn", "dataset", "split", "method", "status",
+              "question", "answer", "metrics", "cost", "generation_dir",
+              "measurement_segment_id", "request_window")
+    write_rows(output/"question_scores.jsonl", ({
+        **{key: row.get(key) for key in fields},
+        "source_result_path": row.get("source_result_path") or str(Path(row["generation_dir"])/"results.scored.jsonl"),
+        "attempt_id": (row.get("response") or {}).get("attempt_id") or row.get("attempt_id"),
+    } for row in updated))
     methods = sorted({row["method"] for row in updated})
     specs = _track_specs(matrix, split)
     summaries = {}
@@ -168,7 +175,8 @@ def main(argv=None):
                         help="Include every attempt database below a declared method directory")
     args = parser.parse_args(argv)
     matrix = yaml.safe_load(Path(args.matrix).read_text())
-    rows = [row for path in args.rows for row in load_jsonl(path)
+    rows = [{**row, "source_result_path": row.get("source_result_path") or str(Path(path).resolve())}
+            for path in args.rows for row in load_jsonl(path)
             if args.methods is None or row["method"] in args.methods]
     roots = defaultdict(list)
     for item in args.execution_root:
