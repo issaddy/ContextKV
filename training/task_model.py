@@ -123,7 +123,7 @@ def create_task_network(base_path, *, adapter_path=None, rank=16, device="cuda",
             self.encoder = encoder
             width = base.config.hidden_size
             self.heads = nn.ModuleDict({name: nn.Linear(width, size) for name, size in {
-                "span": len(SPAN_KINDS)*3, "history": 2, "update": len(UPDATES),
+                "span": len(SPAN_KINDS)*3, "history": 2, "condition_update": len(UPDATES),
                 "condition_relation": len(CONDITION_RELATIONS), "operation": len(OPERATIONS),
                 "relation": len(RELATIONS), "version": len(VERSIONS),
                 "temporal_relation": len(TEMPORAL_RELATIONS)}.items()})
@@ -137,6 +137,7 @@ def create_task_network(base_path, *, adapter_path=None, rank=16, device="cuda",
             hidden = self.encoder(**batch).last_hidden_state.float()
             output = {name: head(hidden[:, 0] if name in {"relation", "version", "temporal_relation"} else hidden)
                       for name, head in self.heads.items()}
+            output["update"] = output.pop("condition_update")
             output["query"] = torch.nn.functional.normalize(hidden[:, 0], dim=-1)
             condition_keys = [self.null_condition]
             condition_keys.extend(hidden[0, positions].mean(0) if positions else hidden[0, 0]
