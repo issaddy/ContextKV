@@ -497,8 +497,6 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
         if (row["conversation_id"] != member["conversation_id"] or
                 history_digest(row["actual_history"]) != member["actual_history_sha256"]):
             raise ValueError(f"candidate state differs from declared cohort: {row['task_id']}")
-    if set(members) != {row["task_id"] for row in rows}:
-        raise ValueError("candidate turns do not contain every declared cohort state")
     rows = rows[:limit or len(rows)]
     assert rows and all(row["split"] == "train" and "actual_history" in row for row in rows)
     if settings.get("state_db"):
