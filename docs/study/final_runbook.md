@@ -45,3 +45,16 @@ python -m training.a_workflow compare --comparison-config COMPARISON.yaml \
 
 所有实验按运行前声明的 cohort、reader 身份和资源范围读取结果。质量未测得时保留未知，
 完成子集另外报告；训练 loss、输入投影成功率、预测成本和容量观测不能替代正式答案评分。
+
+C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观察窗。`replay` 与
+`retention_pair_workflow` 默认固定 Native、TTL15、TTL60、TTL180 四臂；
+`--horizon-seconds` 只决定共同观察长度，`--ttl-seconds` 只决定保护期限。
+窗口选择要求原始轨迹中存在观察窗之后的真实请求边界，保留其间全部压力；不足时记录
+不可观察，不改用更短窗口。每个窗口仅执行一次 Native，分别与三个 TTL 作差，不能把
+三个对照行中的 Native 成本再次相加。
+
+每臂的 `observation_window` 和物理/KV 积分覆盖相同长度，并持续采样到窗口结束，
+包括无重访时的空闲驻留。`revisit-outcomes.json` 按实际原文因果页需求与原生回执
+区分无重访、GPU 命中、Host 回载和重算；混合访问同时保留各类页数和事件数。
+训练行中的 `observation_seconds` 是共同计费窗口，`ttl_seconds` / `horizon_seconds`
+是策略保护期限。

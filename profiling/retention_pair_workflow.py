@@ -1,4 +1,4 @@
-"""At most four uniformly selected native/retained pairs, with split isolation."""
+"""Fixed-window Native/TTL15/TTL60/TTL180 pairs with split isolation."""
 import argparse
 import asyncio
 from datetime import datetime
@@ -52,7 +52,7 @@ async def run(args):
         verify_trace(trace)
         if not trace["training_eligible"] or any(turn["split"] != split for turn in trace["turns"]):
             raise ValueError("paired value fitting needs separate actual train/development traces")
-        reports[split] = audit_coverage(trace, horizons=args.horizons, page_size=args.page_size,
+        reports[split] = audit_coverage(trace, horizons=(args.horizon_seconds,), page_size=args.page_size,
             max_candidates=2, max_prefixes_per_decision=args.max_prefixes_per_decision,
             history_steps=args.history_steps, max_replay_steps=args.max_replay_steps, seed=args.seed)
         write_json(output/(split+"-coverage.json"), reports[split])
@@ -62,28 +62,26 @@ async def run(args):
             read_system_prompt_sha256=sorted(hashlib.sha256(prompt.encode()).hexdigest()
                 for prompt in prompts if prompt is not None),
             matches_current_read_prompt=prompts == {READ_SYSTEM})
-    choices = []
-    for horizon in sorted(args.horizons, reverse=True):
-        selected = {split: choose_windows(trace, horizon_seconds=horizon, max_candidates=2,
-            max_prefixes_per_decision=args.max_prefixes_per_decision, history_steps=args.history_steps,
-            max_replay_steps=args.max_replay_steps, seed=args.seed)[0] for split, trace in traces.items()}
-        calls = {split: sum(2*len(trace_generations(window_trace(traces[split], item))) for item in values)
-                 for split, values in selected.items()}
-        if all(len(values) == 2 for values in selected.values()) and sum(calls.values()) <= args.max_total_generations:
-            choices.append((horizon, selected, calls))
-    plan = dict(scope="actual source-first fixed-input paired C costs", maximum_pairs=4,
-        choice_basis="largest preregistered TTL with two observable windows per split and the declared call budget; no hit/latency/value outcome used",
-        horizons=list(args.horizons), seed=args.seed, train_trace=str(Path(trace_paths["train"]).resolve()),
-        dev_trace=str(Path(trace_paths["dev"]).resolve()), capture_stages=capture_stages,
-        protocol_scopes=protocol_scopes,
+    horizon = args.horizon_seconds
+    if horizon < max(180, *args.ttl_seconds):
+        raise ValueError("common observation window must cover 180 seconds and all TTL arms")
+    selected = {split: choose_windows(trace, horizon_seconds=horizon, max_candidates=2,
+        max_prefixes_per_decision=args.max_prefixes_per_decision, history_steps=args.history_steps,
+        max_replay_steps=args.max_replay_steps, seed=args.seed)[0] for split, trace in traces.items()}
+    calls = {split: sum((1+len(args.ttl_seconds))*len(trace_generations(window_trace(traces[split], item)))
+        for item in values) for split, values in selected.items()}
+    plan = dict(scope="actual source-first fixed-input same-window multi-TTL C costs", maximum_windows=4,
+        choice_basis="same preregistered observation window and request DAG for Native and every TTL; no shorter-window fallback or outcome selection",
+        observation_seconds=horizon, ttl_seconds=list(args.ttl_seconds), seed=args.seed,
+        train_trace=str(Path(trace_paths["train"]).resolve()), dev_trace=str(Path(trace_paths["dev"]).resolve()),
+        capture_stages=capture_stages, protocol_scopes=protocol_scopes,
         current_prompt_joint_qualification=all(scope["matches_current_read_prompt"]
                                                for scope in protocol_scopes.values()), stages=[])
-    if not choices:
-        plan.update(status="no_common_observable_budgeted_TTL", value_asset=None)
+    if any(len(values) != 2 for values in selected.values()) or sum(calls.values()) > args.max_total_generations:
+        plan.update(status="no_common_observable_budgeted_window", planned_calls=calls, value_asset=None)
         write_json(output/"paired-workflow.json", plan)
         print(json.dumps({"status": plan["status"], "pairs": 0}))
         return plan
-    horizon, selected, calls = choices[0]
     plan.update(status="running", horizon_seconds=horizon, planned_calls=calls,
         source_windows={split: [{key: value for key, value in item.items() if key != "turns"}
                                for item in values] for split, values in selected.items()})
@@ -96,6 +94,7 @@ async def run(args):
             "--trace", str(Path(path).resolve()), "--config", str(Path(args.config).resolve()),
             "--base-url", args.base_url, "--gpu-device", str(args.gpu_device),
             "--output-dir", str(output/split), "--horizon-seconds", str(horizon),
+            "--ttl-seconds", ",".join(str(ttl) for ttl in args.ttl_seconds),
             "--max-candidates", "2", "--max-prefixes-per-decision", str(args.max_prefixes_per_decision),
             "--history-steps", str(args.history_steps), "--max-replay-steps", str(args.max_replay_steps),
             "--max-total-generations", str(calls[split]), "--residency-interval", ".5", "--seed", str(args.seed)]
@@ -141,7 +140,7 @@ async def run(args):
     if plan["status"] == "running":
         plan["status"] = "completed_with_actual_signed_costs"
     write_json(output/"paired-workflow.json", plan)
-    print(json.dumps({"status": plan["status"], "horizon": horizon, "planned_pairs": 4,
+    print(json.dumps({"status": plan["status"], "observation_seconds": horizon, "planned_pairs": 4*len(args.ttl_seconds),
                       "value_asset": plan.get("value_asset")}))
     return plan
 
@@ -163,7 +162,8 @@ def main(argv=None):
     parser.add_argument("--study-config")
     parser.add_argument("--resource-gpu-devices")
     parser.add_argument("--resource-process-roots")
-    parser.add_argument("--horizons", type=lambda value: tuple(map(float, value.split(","))), default=(2, 5, 8, 15, 30))
+    parser.add_argument("--horizon-seconds", type=float, default=180)
+    parser.add_argument("--ttl-seconds", type=lambda value: tuple(map(float, value.split(","))), default=(15, 60, 180))
     parser.add_argument("--page-size", type=int)
     parser.add_argument("--max-prefixes-per-decision", type=int, default=2)
     parser.add_argument("--history-steps", type=int, default=4)

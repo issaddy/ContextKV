@@ -26,7 +26,8 @@ from bench.study_resources import StudyResourceSampler, integrate_physical, list
 from controller.config import create_controller, create_model_template, load_config
 from controller.context_schema import ContextBudget, ContextPlan, EvidenceClaim, EvidenceSet, Need, ReadTask, TaskState, TextRef
 from controller.engine_client import EngineError, SGLangEngineClient
-from controller.prefix_retention import EmpiricalRetentionModel, PrefixReadObserver, PrefixRuntimeClient
+from controller.prefix_retention import (EmpiricalRetentionModel, PrefixReadObserver, PrefixRuntimeClient,
+    RETENTION_FEATURE_NAMES, source_token_ranges, source_demand_event_key)
 from controller.reading import (build_read_plan, parse_read_result, stable_prefix_input_ids,
                                 stable_prefix_messages, stable_source_payload)
 from controller.reduction import reduce_claims
@@ -35,7 +36,6 @@ from controller.schema import ConfigFingerprint, PromptCandidate, SessionSnapsho
 from controller.serialization import decode, to_jsonable
 from controller.session_store import SessionStore, load_record
 from controller.templates import candidate_request, step_request, token_hash
-from controller.templates import ByteTokenizer, longest_common_prefix
 from engine_patches.contextkv_runtime import executed_prefix_hashes
 from profiling.retention_capture_cost import CaptureRunAccounting, load_resident_provider
 
@@ -126,32 +126,6 @@ def source_records(path, *, store=None, attempt_ids=None):
             if attempt_ids is not None and records.keys() >= attempt_ids:
                 break
     return records
-
-
-def source_token_ranges(template, rendered, messages, units):
-    """Locate encoded original-source text, excluding shared instructions/catalogue."""
-    if type(template.tokenizer) is ByteTokenizer:
-        offsets = [(index, index+1) for index, char in enumerate(rendered.text) for _ in char.encode("utf-8")]
-    else:
-        encoded = template.tokenizer(rendered.text, add_special_tokens=False, return_offsets_mapping=True)
-        if tuple(encoded["input_ids"]) != tuple(rendered.input_ids):
-            raise ValueError("source-body offset tokenizer differs from actual rendered input")
-        offsets = encoded["offset_mapping"]
-    content = messages[1].content
-    message_start = rendered.text.index(content)
-    ranges, cursor = [], 0
-    for unit in units:
-        literal = json.dumps(unit.text, ensure_ascii=False)
-        marker = '"text":'+literal
-        found = content.index(marker, cursor)
-        first = message_start+found+len('"text":')+1
-        last = first+len(literal)-2
-        tokens = [index for index, (start, end) in enumerate(offsets) if end > first and start < last and end > start]
-        if tokens:
-            ranges.append([tokens[0], tokens[-1]+1])
-        cursor = found+len(marker)
-    system = template.render((messages[0],)).input_ids
-    return ranges, longest_common_prefix(system, rendered.input_ids)
 
 
 def causal_pages(event, page_size, scope):
@@ -340,11 +314,7 @@ class CapturePrefixObserver:
         key = digest([record.engine_epoch.business_session_id, inspected["cache_scope_hash"], inspected["prefix_hash"]])
         now = time.monotonic_ns()
         features = PrefixReadObserver._features(plan, sources, self.accesses[key], now)
-        pool = inspected["pool"]
-        features.update(gpu_pressure=1-pool["free_gpu_tokens"]/pool["gpu_capacity_tokens"],
-            host_pressure=1-pool["free_host_tokens"]/pool["host_capacity_tokens"] if pool["host_capacity_tokens"] else 0,
-            gpu_prefix_tokens=inspected["residency"]["ready_gpu_prefix_tokens"],
-            host_load_tokens=inspected["residency"]["host_only_load_tokens"])
+        features.update(PrefixReadObserver._native_features(inspected))
         self.accesses[key].append(dict(observed_ns=now, payload={"turn_id": plan.task_state.current_turn_id}))
         return dict(state="OBSERVED", inspection=inspected, raw_features=features,
                     observed_ns=now, policy="capture_observation_only", training_origin="canonical_native_READ")
@@ -700,8 +670,8 @@ def verify_trace(trace):
             raise ValueError("retained source prefix is not the actual contiguous input path")
 
 
-async def replay_arm(trace, config, output, *, gpu_device, intervention=None, horizon_seconds=60,
-                     residency_interval=.25, target=None):
+async def replay_arm(trace, config, output, *, gpu_device, intervention=None, horizon_seconds=180,
+                     ttl_seconds=None, residency_interval=.25, target=None):
     """Replay the complete supplied window; intervention names one READ event."""
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -741,7 +711,8 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
     active_owners = set()
     report = dict(source="hardware", scope="fixed_reading_dag_replay", intervention=intervention,
         decision_target=target,
-        horizon_seconds=horizon_seconds, engine=to_jsonable(info), config=to_jsonable(config),
+        horizon_seconds=horizon_seconds, ttl_seconds=ttl_seconds,
+        engine=to_jsonable(info), config=to_jsonable(config),
         cache_scope_hash=cache_scope_hash, page_size=page_size,
         trace_digest=digest(trace), input_dag_digest=trace["input_dag_digest"], events=receipts,
         output_policy="actual new outputs with captured sampling/output budgets; no gold matching",
@@ -836,11 +807,7 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
                         target_prefix_id = source_row["prefix_id"]
                         target_features = features if identity == target["source_event_id"] else PrefixReadObserver._features(
                             plan, source_event["sources"], accesses[target_prefix_id], time.monotonic_ns())
-                        target_pool = target_view["pool"]
-                        target_features.update(gpu_pressure=1-target_pool["free_gpu_tokens"]/target_pool["gpu_capacity_tokens"],
-                            host_pressure=1-target_pool["free_host_tokens"]/target_pool["host_capacity_tokens"] if target_pool["host_capacity_tokens"] else 0,
-                            gpu_prefix_tokens=target_view["residency"]["ready_gpu_prefix_tokens"],
-                            host_load_tokens=target_view["residency"]["host_only_load_tokens"])
+                        target_features.update(PrefixReadObserver._native_features(target_view))
                         decision = row["decision_target"] = dict(prefix_id=target_prefix_id, inspection=target_view,
                             raw_features=target_features, decision_time=time.monotonic(), source_event_id=target["source_event_id"],
                             source_session_id=source_turn["session_id"], retention_control_ms=0,
@@ -849,7 +816,7 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
                         decision = row["decision_target"]
                         tick = time.monotonic()
                         decision["retain_receipt"] = await runtime.retain(owner_id=decision["prefix_id"], receipt=source_receipt,
-                            prefix_input_ids=source_event["prefix_input_ids"], sources=source_event["sources"], ttl_seconds=horizon_seconds)
+                            prefix_input_ids=source_event["prefix_input_ids"], sources=source_event["sources"], ttl_seconds=ttl_seconds)
                         decision["retention_control_ms"] = (time.monotonic()-tick)*1000+target_inspect_ms
                         active_owners.add(decision["prefix_id"])
                 if event["kind"] == "ANSWER":
@@ -870,6 +837,11 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
     tasks = [asyncio.create_task(execute_turn(turn)) for turn in ordered_turns]
     try:
         await asyncio.gather(*tasks)
+        decision_time = receipts[target["event_id"]]["decision_target"]["decision_time"]
+        observation_end = decision_time+horizon_seconds
+        await asyncio.sleep(max(0, observation_end-time.monotonic()))
+        await pages.sample()
+        report["observation_window"] = dict(start=decision_time, end=observation_end)
         report["status"] = "completed"
     finally:
         failure = sys.exc_info()[1]
@@ -898,6 +870,11 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
             prefix_observation=pages.observation())
         series, coverage = pool_series(native.observation(), start, end)
         report["native_cost"] = {"integrals": occupancy_integral(series), "coverage": coverage}
+        if "observation_window" in report:
+            window = report["observation_window"]
+            report["observation_physical_cost"] = integrate_physical(physical.samples, window["start"], window["end"])
+            series, coverage = pool_series(native.observation(), window["start"], window["end"])
+            report["observation_native_cost"] = dict(integrals=occupancy_integral(series), coverage=coverage)
         write_json(output/"report.json", report)
     return report
 
@@ -950,6 +927,9 @@ def choose_windows(trace, *, horizon_seconds, max_candidates, history_steps, max
             identity, source_identity = event_id(turn, event), event_id(source_turn, source_event)
             candidates.append(dict(event_id=identity, source_event_id=source_identity,
                 first_turn=begin, last_turn=last, steps=steps,
+                observation_seconds=horizon_seconds,
+                source_observation_window={"start": event["source_completed_s"], "end": deadline},
+                observed_boundary_turn=turns[last]["attempt_id"],
                 source_attempts=[item["attempt_id"] for item in window],
                 priority=digest([seed, identity, source_identity]), turns=window))
     candidates.sort(key=lambda item: item["priority"])
@@ -1031,6 +1011,9 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
     row = dict(source="hardware", scope="actual_source_first_single_prefix_intervention",
         dataset=turn["dataset"], split=turn["split"], training_eligible=trace["training_eligible"] and eligible,
         event_id=identity, source_event_id=selection["source_event_id"],
+        predicted_reuse_event_key=source_demand_event_key(target_event["prefix_input_ids"],
+            target_event["evidence_token_ranges"], left["inspection"]["page_size"],
+            left["inspection"]["cache_scope_hash"]),
         partition_eligible=trace["training_eligible"], measurement_eligible=eligible,
         features=left["raw_features"], retained_features=right["raw_features"],
         cache_scope_hash=left["inspection"]["cache_scope_hash"], fingerprint=trace["fingerprint"],
@@ -1065,14 +1048,52 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
     return row
 
 
+def revisit_outcomes(trace, report, selection):
+    """Classify actual source-page demand inside the common observation window."""
+    events = {event_id(turn, event): event for turn, event in read_decisions(trace)}
+    target = events[selection["source_event_id"]]
+    decision = report["events"][selection["event_id"]]["decision_target"]
+    window = report["observation_window"]
+    counts = dict(gpu_hit=0, host_load=0, recomputed=0)
+    visits = []
+    for identity, future in events.items():
+        actual = report["events"][identity]
+        if not window["start"] < actual["generation_window"]["start"] <= window["end"]:
+            continue
+        use = reuse_pages(target, future, actual["result"]["receipt"],
+            page_size=report["page_size"], scope=report["cache_scope_hash"])
+        demanded = set(use["shared_evidence_page_ids"])
+        if not demanded:
+            continue
+        gpu = set(use["actual_device_evidence_page_ids"])
+        host = set(use["actual_host_evidence_page_ids"])
+        recomputed = demanded-gpu-host
+        pages = dict(gpu_hit=len(gpu), host_load=len(host), recomputed=len(recomputed))
+        for category, count in pages.items():
+            counts[category] += count
+        visits.append(dict(event_id=identity,
+            seconds_after_decision=actual["generation_window"]["start"]-decision["decision_time"],
+            categories=[category for category, count in pages.items() if count], page_counts=pages,
+            demanded_page_ids=sorted(demanded), recomputed_page_ids=sorted(recomputed),
+            step_wall_ms=actual["step_wall_ms"], receipt=actual["result"]["receipt"]))
+    return dict(no_revisit=not visits, revisit_events=len(visits), page_counts=counts,
+        event_counts={category: sum(category in visit["categories"] for visit in visits) for category in counts},
+        visits=visits, observation_seconds=window["end"]-window["start"],
+        classification_basis="actual demanded original-source causal pages and native device/host receipt boundaries; mixed visits retain every category")
+
+
 async def replay(args):
     trace = json.loads(Path(args.trace).read_text())
     verify_trace(trace)
+    ttls = tuple(args.ttl_seconds)
+    if args.horizon_seconds < max(180, *ttls):
+        raise ValueError("all replay arms require one observation window covering at least 180 seconds and every TTL")
     selected, omitted = choose_windows(trace, horizon_seconds=args.horizon_seconds,
         max_candidates=args.max_candidates, history_steps=args.history_steps,
         max_replay_steps=args.max_replay_steps, seed=args.seed,
         max_prefixes_per_decision=args.max_prefixes_per_decision)
-    planned = sum(2*len(trace_generations(window_trace(trace, item))) for item in selected)
+    arms = {"native": None, **{f"ttl{ttl:g}": ttl for ttl in ttls}}
+    planned = sum(len(arms)*len(trace_generations(window_trace(trace, item))) for item in selected)
     if planned > args.max_total_generations:
         raise ValueError(f"selected replay needs {planned} model calls; declared budget is {args.max_total_generations}")
     config = load_config(args.config)
@@ -1080,36 +1101,51 @@ async def replay(args):
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     write_json(output/"selection.json", dict(source_trace_digest=digest(trace),
-        horizon_seconds=args.horizon_seconds, max_candidates=args.max_candidates,
+        horizon_seconds=args.horizon_seconds, ttl_seconds=ttls, arms=arms, max_candidates=args.max_candidates,
         max_prefixes_per_decision=args.max_prefixes_per_decision,
         history_steps=args.history_steps, max_replay_steps=args.max_replay_steps,
         max_total_generations=args.max_total_generations, planned_generations=planned,
         selected=[{key: value for key, value in item.items() if key != "turns"} for item in selected],
         omitted=omitted, initial_cache="explicit cold start of each contiguous recorded workload window",
-        pressure="all intervening turns/steps/input tokens retained; no artificial filler or removed pressure"))
+        pressure="same complete request/DAG window for all TTL arms, including intervening pressure and observed post-horizon boundary"))
     rows = []
     for index, item in enumerate(selected):
         local_trace = window_trace(trace, item)
         directory = output/f"pair-{index:04d}"
         write_json(directory/"trace.json", local_trace)
         reports = {}
-        order = ("native", "retained") if int(item["priority"][-1], 16) % 2 == 0 else ("retained", "native")
+        order = sorted(arms, key=lambda arm: digest([args.seed, item["event_id"], item["source_event_id"], arm]))
         for arm in order:
             reports[arm] = await replay_arm(local_trace, config, directory/arm,
-                gpu_device=args.gpu_device, intervention=item["event_id"] if arm == "retained" else None,
-                horizon_seconds=args.horizon_seconds, residency_interval=args.residency_interval,
+                gpu_device=args.gpu_device, intervention=item["event_id"] if arms[arm] is not None else None,
+                horizon_seconds=args.horizon_seconds, ttl_seconds=arms[arm], residency_interval=args.residency_interval,
                 target={"event_id": item["event_id"], "source_event_id": item["source_event_id"]})
-        row = paired_row(local_trace, reports["native"], reports["retained"], item, horizon_seconds=args.horizon_seconds)
-        row.update(reports={arm: str((directory/arm/"report.json").resolve()) for arm in reports},
-                   report_digests={arm: digest(report) for arm, report in reports.items()}, arm_order=list(order))
-        rows.append(row)
-        write_json(directory/"paired-row.json", row)
+        outcomes = {arm: revisit_outcomes(local_trace, report, item) for arm, report in reports.items()}
+        write_json(directory/"revisit-outcomes.json", outcomes)
+        for arm, ttl in arms.items():
+            if ttl is None:
+                continue
+            row = paired_row(local_trace, reports["native"], reports[arm], item, horizon_seconds=args.horizon_seconds)
+            row.update(observation_seconds=args.horizon_seconds, ttl_seconds=ttl, horizon_seconds=ttl,
+                retention_arm=arm, reuse_outcomes={"native": outcomes["native"], "retained": outcomes[arm]},
+                observation_physical_cost={key: reports[name]["observation_physical_cost"]
+                    for key, name in (("native", "native"), ("retained", arm))},
+                reports={key: str((directory/name/"report.json").resolve())
+                    for key, name in (("native", "native"), ("retained", arm))},
+                report_digests={"native": digest(reports["native"]), "retained": digest(reports[arm])},
+                arm_order=order)
+            rows.append(row)
+            write_json(directory/f"paired-row-{arm}.json", row)
         (output/"paired-rows.jsonl").write_text("".join(json.dumps(value, ensure_ascii=False)+"\n" for value in rows))
-        print(json.dumps({"pair": index, "reused": row["reused"], "training_eligible": row["training_eligible"]}), flush=True)
-    write_json(output/"manifest.json", dict(source="hardware", scope="single_prefix_intervention_collection",
-        trace_digest=digest(trace), input_dag_digest=trace["input_dag_digest"], pairs=len(rows),
+        print(json.dumps({"window": index, "arms": order, "outcomes": {
+            arm: {key: value for key, value in outcome.items() if key not in {"visits", "classification_basis"}}
+            for arm, outcome in outcomes.items()}}), flush=True)
+    write_json(output/"manifest.json", dict(source="hardware", scope="same_window_multi_TTL_single_prefix_interventions",
+        trace_digest=digest(trace), input_dag_digest=trace["input_dag_digest"], windows=len(selected), pairs=len(rows),
+        observation_seconds=args.horizon_seconds, ttl_seconds=ttls,
         eligible_pairs=sum(row["training_eligible"] for row in rows),
         planned_generations=planned, training_data=str((output/"paired-rows.jsonl").resolve()),
+        cost_rule="native report is a shared comparator, charged once per replay window; TTL rows are paired contrasts, not additive execution costs",
         value_claim="no quality claim; measured signed costs may favor native caching"))
     return rows
 
@@ -1193,7 +1229,8 @@ def main():
     sub.add_argument("--base-url", required=True, help="Dedicated profiling service; each arm clears cache")
     sub.add_argument("--gpu-device", type=int, required=True)
     sub.add_argument("--output-dir", required=True)
-    sub.add_argument("--horizon-seconds", type=float, default=30)
+    sub.add_argument("--horizon-seconds", type=float, default=180, help="Common observation window for every arm; at least 180 seconds")
+    sub.add_argument("--ttl-seconds", type=lambda value: tuple(map(float, value.split(","))), default=(15, 60, 180))
     sub.add_argument("--max-candidates", type=int, default=8)
     sub.add_argument("--max-prefixes-per-decision", type=int, default=4)
     sub.add_argument("--history-steps", type=int, default=32)
@@ -1204,8 +1241,7 @@ def main():
     sub = commands.add_parser("fit")
     sub.add_argument("--records", required=True)
     sub.add_argument("--split", choices=("train", "dev"), required=True)
-    sub.add_argument("--features", type=lambda value: value.split(","), default=[
-        "prior_access_count", "revisit", "source_task_relation", "gpu_pressure", "host_pressure"])
+    sub.add_argument("--features", type=lambda value: value.split(","), default=list(RETENTION_FEATURE_NAMES))
     sub.add_argument("--output", required=True)
     args = parser.parse_args()
     if args.command == "export":

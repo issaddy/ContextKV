@@ -14,6 +14,50 @@ from controller.schema import CompletionReceipt, ConfigFingerprint
 from controller.serialization import to_jsonable
 
 
+RETENTION_FEATURE_NAMES = (
+    "prior_access_count", "last_access_interval_seconds", "revisit", "source_task_relation",
+    "gpu_pressure", "host_pressure", "gpu_prefix_tokens", "host_prefix_tokens", "host_load_tokens",
+    "active_requests", "queued_requests",
+)
+
+
+def source_token_ranges(template, rendered, messages, units):
+    """Locate encoded original-source text, excluding shared instructions/catalogue."""
+    from controller.templates import ByteTokenizer, longest_common_prefix
+    if type(template.tokenizer) is ByteTokenizer:
+        offsets = [(index, index+1) for index, char in enumerate(rendered.text) for _ in char.encode("utf-8")]
+    else:
+        encoded = template.tokenizer(rendered.text, add_special_tokens=False, return_offsets_mapping=True)
+        if tuple(encoded["input_ids"]) != tuple(rendered.input_ids):
+            raise ValueError("source-body offset tokenizer differs from actual rendered input")
+        offsets = encoded["offset_mapping"]
+    content = messages[1].content
+    message_start = rendered.text.index(content)
+    ranges, cursor = [], 0
+    for unit in units:
+        literal = json.dumps(unit.text, ensure_ascii=False)
+        marker = '"text":'+literal
+        found = content.index(marker, cursor)
+        first = message_start+found+len('"text":')+1
+        last = first+len(literal)-2
+        tokens = [index for index, (start, end) in enumerate(offsets) if end > first and start < last and end > start]
+        if tokens:
+            ranges.append([tokens[0], tokens[-1]+1])
+        cursor = found+len(marker)
+    system = template.render((messages[0],)).input_ids
+    return ranges, longest_common_prefix(system, rendered.input_ids)
+
+
+
+def source_demand_event_key(prefix_input_ids, evidence_token_ranges, page_size, scope):
+    """The next READ demanding this known source-containing causal prefix."""
+    from engine_patches.contextkv_runtime import executed_prefix_hashes
+    for end, page in executed_prefix_hashes(prefix_input_ids, page_size).items():
+        if any(end > first and end-page_size < last for first, last in evidence_token_ranges):
+            return scope+":"+page
+    return None
+
+
 @dataclass(frozen=True)
 class PrefixForecast:
     horizon_seconds: float
@@ -30,10 +74,13 @@ class PrefixForecast:
     retained_window_cost_ms: float | None = None
 
     @property
+    def target_saved_ms(self):
+        return (self.reuse_probability * (self.native_reuse_cost_ms-self.retained_reuse_cost_ms)
+                if self.reuse_probability else 0.0)
+
+    @property
     def saved_ms(self):
-        benefit = (self.reuse_probability * (self.native_reuse_cost_ms-self.retained_reuse_cost_ms)
-                   if self.reuse_probability else 0.0)
-        return benefit+self.expected_collateral_saved_ms-self.retention_control_ms
+        return self.target_saved_ms+self.expected_collateral_saved_ms-self.retention_control_ms
 
 
 @dataclass(frozen=True)
@@ -43,9 +90,10 @@ class RetentionRequest:
     gpu_page_ids: frozenset[str]
     host_page_ids: frozenset[str]
     page_size: int
+    reuse_event_key: str = ""
 
     @classmethod
-    def from_receipt(cls, receipt, forecast):
+    def from_receipt(cls, receipt, forecast, *, reuse_event_key=""):
         if receipt["cache_scope_hash"] != forecast.cache_scope_hash:
             raise ValueError("retention forecast differs from the executing reader/cache scope")
         # Fit normalizes future tier residency by the full eligible token path.
@@ -56,7 +104,7 @@ class RetentionRequest:
         if len(path)*receipt["page_size"] != receipt["boundary_tokens"]:
             raise ValueError("retention needs the full recoverable causal page path")
         host = path if receipt["pool"]["host_capacity_tokens"] else frozenset()
-        return cls(receipt["owner_id"], forecast, path, host, receipt["page_size"])
+        return cls(receipt["owner_id"], forecast, path, host, receipt["page_size"], reuse_event_key)
 
 
 @dataclass(frozen=True)
@@ -70,45 +118,82 @@ class RetentionChoice:
     marginal_gpu_tokens: int
     marginal_host_tokens: int
     evidence_digest: str
+    reuse_event_key: str = ""
 
 
 def allocate_retention(requests, *, gpu_budget_tokens, host_budget_tokens,
                        lambda_gpu, lambda_host, protected_gpu_pages=frozenset(),
-                       protected_host_pages=frozenset()):
+                       protected_host_pages=frozenset(), protected_requests=()):
     """Choose positive marginal value, counting a shared causal page only once.
 
     The forecasts come from paired native/retained traces. Occupancy penalties
     are their incremental residency, rather than the full current cache size.
     Capacity budgets bound the protected set; soft references allocate no KV.
     """
-    requests = {request.owner_id: request for request in requests}
+    requests = {(request.owner_id, request.forecast.horizon_seconds): request for request in requests}
     gpu_pages, host_pages = set(protected_gpu_pages), set(protected_host_pages)
+    gpu_leases = {page: (float("inf"), 0) for page in gpu_pages}
+    host_leases = {page: (float("inf"), 0) for page in host_pages}
+    covered_events = {}
+    covered_collateral = {}
+
+    def cover(request):
+        forecast = request.forecast
+        event = request.reuse_event_key or request.owner_id
+        covered_events[event] = max(covered_events.get(event, 0), forecast.target_saved_ms)
+        covered_collateral[request.owner_id] = forecast.expected_collateral_saved_ms
+        for pages, leases, seconds in ((request.gpu_page_ids, gpu_leases, forecast.extra_gpu_seconds_per_page),
+                                      (request.host_page_ids, host_leases, forecast.extra_host_seconds_per_page)):
+            for page in pages:
+                if page not in leases or forecast.horizon_seconds > leases[page][0]:
+                    leases[page] = forecast.horizon_seconds, seconds
+        gpu_pages.update(request.gpu_page_ids)
+        host_pages.update(request.host_page_ids)
+
+    for request in protected_requests:
+        cover(request)
+
+    def added_residency(pages, leases, forecast, seconds, size):
+        return size*sum(seconds if page not in leases else seconds-leases[page][1]
+            for page in pages if page not in leases or forecast.horizon_seconds > leases[page][0])
+
     choices = []
     while requests:
         candidates = []
         for request in requests.values():
             gpu = len(request.gpu_page_ids-gpu_pages)*request.page_size
             host = len(request.host_page_ids-host_pages)*request.page_size
-            if not gpu and not host:
-                continue  # Another chosen owner already gives this entire path soft protection.
+            forecast = request.forecast
+            if not any(page not in leases or forecast.horizon_seconds > leases[page][0]
+                       for pages, leases in ((request.gpu_page_ids, gpu_leases), (request.host_page_ids, host_leases))
+                       for page in pages):
+                continue
             if ((len(gpu_pages | request.gpu_page_ids)*request.page_size > gpu_budget_tokens)
                     or (len(host_pages | request.host_page_ids)*request.page_size > host_budget_tokens)):
                 continue
-            forecast = request.forecast
-            gpu_integral = gpu*forecast.extra_gpu_seconds_per_page
-            host_integral = host*forecast.extra_host_seconds_per_page
-            value = forecast.saved_ms-lambda_gpu*gpu_integral-lambda_host*host_integral
+            gpu_integral = added_residency(request.gpu_page_ids, gpu_leases, forecast,
+                                           forecast.extra_gpu_seconds_per_page, request.page_size)
+            host_integral = added_residency(request.host_page_ids, host_leases, forecast,
+                                            forecast.extra_host_seconds_per_page, request.page_size)
+            event = request.reuse_event_key or request.owner_id
+            # Keep negative target effects negative. Control is paid per actual
+            # retain/renew call, outside the shared event's gross coverage.
+            target = forecast.target_saved_ms
+            target -= min(max(target, 0), covered_events.get(event, 0))
+            saved = (target+forecast.expected_collateral_saved_ms
+                     -covered_collateral.get(request.owner_id, 0)-forecast.retention_control_ms)
+            value = saved-lambda_gpu*gpu_integral-lambda_host*host_integral
             if value > 0:
                 choice = RetentionChoice(request.owner_id, forecast.horizon_seconds,
-                    forecast.saved_ms, gpu_integral, host_integral, value, gpu, host,
-                    forecast.evidence_digest)
+                    saved, gpu_integral, host_integral, value, gpu, host,
+                    forecast.evidence_digest, event)
                 candidates.append(choice)
         if not candidates:
             break
         choice = max(candidates, key=lambda item: (item.value, item.owner_id))
-        selected = requests.pop(choice.owner_id)
-        gpu_pages.update(selected.gpu_page_ids)
-        host_pages.update(selected.host_page_ids)
+        selected = requests[choice.owner_id, choice.ttl_seconds]
+        requests = {key: request for key, request in requests.items() if request.owner_id != choice.owner_id}
+        cover(selected)
         choices.append(choice)
     return tuple(choices)
 
@@ -135,7 +220,10 @@ class EmpiricalRetentionModel:
         "gpu_pressure": (.25, .5, .75, .9, .95),
         "host_pressure": (.25, .5, .75, .9, .95),
         "gpu_prefix_tokens": (64, 256, 1024, 4096, 16384),
+        "host_prefix_tokens": (64, 256, 1024, 4096, 16384),
         "host_load_tokens": (1, 64, 256, 1024, 4096, 16384),
+        "active_requests": (1, 2, 4, 8, 16, 32),
+        "queued_requests": (1, 2, 4, 8, 16, 32),
     }
 
     def __init__(self, forecasts, feature_schema):
@@ -295,6 +383,7 @@ class PrefixOwnerRecord:
     last_status: dict | None = None
     created_ns: int = 0
     updated_ns: int = 0
+    lease_started_ns: int = 0
 
 
 class PrefixObserver:
@@ -317,7 +406,7 @@ class PrefixObserver:
             record = PrefixOwnerRecord(owner_id, session_id, attempt_id, step_id, receipt,
                 self.engine.fingerprint, tuple(prefix_input_ids), tuple(sources), policy,
                 policy_choice, ttl_seconds, created_ns=previous.created_ns if previous else now,
-                updated_ns=now)
+                updated_ns=now, lease_started_ns=now)
             self.store.save_prefix_owner(record, "retain_requested")
             ack = await self.runtime.retain(owner_id=owner_id, receipt=receipt,
                 prefix_input_ids=prefix_input_ids, sources=sources, ttl_seconds=ttl_seconds)
@@ -402,12 +491,56 @@ class PrefixReadObserver:
             need_operations=tuple(sorted({need.operation for need in state.needs})),
             condition_updates=tuple(sorted({condition.update for condition in state.conditions})))
 
-    def _forecast(self, features, scope):
+    @staticmethod
+    def _native_features(inspected):
+        pool, residency, workload = inspected["pool"], inspected["residency"], inspected["workload"]
+        return dict(gpu_pressure=1-pool["free_gpu_tokens"]/pool["gpu_capacity_tokens"],
+            host_pressure=1-pool["free_host_tokens"]/pool["host_capacity_tokens"] if pool["host_capacity_tokens"] else 0,
+            gpu_prefix_tokens=residency["ready_gpu_prefix_tokens"],
+            host_prefix_tokens=len(inspected["host_page_ids"])*inspected["page_size"],
+            host_load_tokens=residency["host_only_load_tokens"],
+            active_requests=workload["active_requests"], queued_requests=workload["queued_requests"])
+
+    def _forecasts(self, features, scope):
         bucket = self.model.feature_bucket(features)
-        return self.model.forecasts.get(self.model._key(bucket, scope, self.settings["horizon_seconds"]))
+        horizons = (self.settings["horizon_seconds_choices"] if "horizon_seconds_choices" in self.settings
+                    else (self.settings["horizon_seconds"],))
+        return tuple(self.model.forecasts[key] for horizon in sorted(horizons)
+            if (key := self.model._key(bucket, scope, horizon)) in self.model.forecasts)
+
+    @staticmethod
+    def _remaining_forecast(curve, remaining):
+        """Interpolate measured horizon curves for the lease still in force.
+
+        Reuse is forecast from the current access history. Retain control was
+        already paid; keeping the existing lease issues no new native call.
+        """
+        right = next((point for point in curve if point.horizon_seconds >= remaining), curve[-1])
+        left = next((point for point in reversed(curve) if point.horizon_seconds < remaining), None)
+        lower = left.horizon_seconds if left else 0
+        upper = right.horizon_seconds
+        fraction = (min(remaining, upper)-lower)/(upper-lower) if upper > lower else 1
+
+        def interpolate(field):
+            before = getattr(left, field) if left else 0
+            return before+(getattr(right, field)-before)*fraction
+
+        def expected(point, field):
+            return point.reuse_probability*getattr(point, field) if point and point.reuse_probability else 0
+
+        probability = interpolate("reuse_probability")
+        def cost(field):
+            before = expected(left, field)
+            value = before+(expected(right, field)-before)*fraction
+            return value/probability if probability else None
+
+        return PrefixForecast(remaining, probability, cost("native_reuse_cost_ms"),
+            cost("retained_reuse_cost_ms"), interpolate("extra_gpu_seconds_per_page"),
+            interpolate("extra_host_seconds_per_page"), right.cache_scope_hash, right.evidence_digest,
+            expected_collateral_saved_ms=interpolate("expected_collateral_saved_ms"))
 
     async def __call__(self, plan, task, units, rendered, record):
-        from controller.reading import stable_prefix_input_ids, stable_source_payload
+        from controller.reading import stable_prefix_input_ids, stable_prefix_messages, stable_source_payload
         session_id = record.engine_epoch.business_session_id
         info = await self.engine.info()
         if info.engine_restart_id != record.receipt.engine_restart_id:
@@ -428,11 +561,7 @@ class PrefixReadObserver:
         prior = tuple(row for row in previous if row["native_attempt_id"] != record.receipt.attempt_id)
         now = time.monotonic_ns()
         features = self._features(plan, sources, prior, now)
-        pool = inspected["pool"]
-        features.update(gpu_pressure=1-pool["free_gpu_tokens"]/pool["gpu_capacity_tokens"],
-            host_pressure=1-pool["free_host_tokens"]/pool["host_capacity_tokens"] if pool["host_capacity_tokens"] else 0,
-            gpu_prefix_tokens=inspected["residency"]["ready_gpu_prefix_tokens"],
-            host_load_tokens=inspected["residency"]["host_only_load_tokens"])
+        features.update(self._native_features(inspected))
         self.store.record_prefix_access(owner_id=owner_id, session_id=session_id,
             native_attempt_id=record.receipt.attempt_id, observed_ns=now,
             payload=dict(attempt_id=record.attempt_id, step_id=record.step_id,
@@ -450,21 +579,19 @@ class PrefixReadObserver:
             choice = dict(qualification_only=True, features=features)
             return await self.owners.observe(**arguments, ttl_seconds=self.settings["ttl_seconds"],
                 policy="fixed_ttl_mechanism", policy_choice=choice)
-        return await self._allocate_value(plan, arguments, inspected, features, now)
+        ranges, _ = source_token_ranges(self.template, rendered, stable_prefix_messages(plan, task, units), units)
+        event = source_demand_event_key(prefix_ids, ranges, inspected["page_size"], inspected["cache_scope_hash"])
+        return await self._allocate_value(plan, arguments, inspected, features, now, event)
 
-    async def _allocate_value(self, plan, current, inspected, features, now):
-        scope = inspected["cache_scope_hash"]
-        forecast = self._forecast(features, scope)
-        requests, records = [], {}
-        forecasts, feature_rows = {current["owner_id"]: forecast}, {current["owner_id"]: features}
-        feasible = {current["owner_id"]: retainable_prefix(inspected)}
-        if forecast is not None and feasible[current["owner_id"]]:
-            requests.append(RetentionRequest.from_receipt(inspected, forecast))
+    async def _allocate_value(self, plan, current, inspected, features, now, event_key):
+        scope, current_id = inspected["cache_scope_hash"], current["owner_id"]
+        curves = {current_id: self._forecasts(features, scope)}
+        feature_rows, events = {current_id: features}, {current_id: event_key}
+        feasible = {current_id: retainable_prefix(inspected) and event_key is not None}
+        receipts, records, active = {current_id: inspected}, {}, []
         status = await self.runtime.status(inspected["engine_restart_id"])
         native = {row["owner_id"]: row for row in status["prefixes"]}
         for old in self.store.prefix_owners(active_only=True):
-            if old.owner_id == current["owner_id"]:
-                continue
             if old.receipt.engine_restart_id != inspected["engine_restart_id"]:
                 self.store.save_prefix_owner(replace(old, stage="LOST",
                     last_status={"reason": "engine_restart"}, updated_ns=now), "runtime_restarted")
@@ -473,36 +600,51 @@ class PrefixReadObserver:
                 self.store.save_prefix_owner(replace(old, stage="RELEASED",
                     last_status={"state": "RELEASED"}, updated_ns=now), "native_ownership_observed")
                 continue
-            accesses = self.store.prefix_accesses(old.owner_id)
-            old_features = self._features(plan, old.sources, accesses, now)
-            old_features.update(gpu_pressure=features["gpu_pressure"], host_pressure=features["host_pressure"],
-                gpu_prefix_tokens=native[old.owner_id]["residency"]["ready_gpu_prefix_tokens"],
-                host_load_tokens=native[old.owner_id]["residency"]["host_only_load_tokens"])
-            old_forecast = self._forecast(old_features, scope)
-            forecasts[old.owner_id], feature_rows[old.owner_id] = old_forecast, old_features
-            feasible[old.owner_id] = retainable_prefix(native[old.owner_id])
-            if old_forecast is not None and feasible[old.owner_id]:
-                requests.append(RetentionRequest.from_receipt(native[old.owner_id], old_forecast))
-                records[old.owner_id] = old
-        choices = allocate_retention(requests, gpu_budget_tokens=self.settings["gpu_budget_tokens"],
+            records[old.owner_id] = old
+            receipts[old.owner_id] = native[old.owner_id]
+            if old.owner_id != current_id:
+                accesses = self.store.prefix_accesses(old.owner_id)
+                old_features = self._features(plan, old.sources, accesses, now)
+                old_features.update(self._native_features(native[old.owner_id]))
+                curves[old.owner_id] = self._forecasts(old_features, scope)
+                feature_rows[old.owner_id] = old_features
+                events[old.owner_id] = old.policy_choice["reuse_event_key"]
+                feasible[old.owner_id] = retainable_prefix(native[old.owner_id])
+            remaining = max(0, old.ttl_seconds-(now-old.lease_started_ns)/1e9)
+            if remaining and curves[old.owner_id] and feasible[old.owner_id]:
+                forecast = self._remaining_forecast(curves[old.owner_id], remaining)
+                active.append(RetentionRequest.from_receipt(native[old.owner_id], forecast,
+                    reuse_event_key=events[old.owner_id]))
+
+        budgets = dict(gpu_budget_tokens=self.settings["gpu_budget_tokens"],
             host_budget_tokens=self.settings["host_budget_tokens"], lambda_gpu=self.settings["lambda_gpu"],
             lambda_host=self.settings["lambda_host"])
+        # Releasing an old owner is optional; keeping it does not renew its TTL.
+        keep = allocate_retention(active, **budgets)
+        kept_ids = {choice.owner_id for choice in keep}
+        protected = tuple(request for request in active if request.owner_id in kept_ids)
+        requests = [RetentionRequest.from_receipt(receipts[owner_id], forecast,
+                reuse_event_key=events[owner_id])
+            for owner_id, curve in curves.items() if feasible[owner_id] for forecast in curve]
+        choices = allocate_retention(requests, protected_requests=protected, **budgets)
         selected = {choice.owner_id: choice for choice in choices}
-        for owner_id in native.keys()-selected.keys():
+        final_ids = kept_ids | selected.keys()
+        for owner_id in native.keys()-final_ids:
             if self.store.prefix_owner(owner_id) is not None:
                 await self.owners.release(owner_id, reason="nonpositive_or_uncalibrated_marginal_value")
-        current_ack = {**inspected, "state": "UNRETAINED", "policy": "value",
-            "policy_choice": {"calibrated": forecast is not None, "features": features,
-                              "action_feasible": feasible[current["owner_id"]],
-                              "feature_bucket": self.model.feature_bucket(features),
-                              "model_digest": self.model_digest}}
+        current_ack = (native[current_id] if current_id in kept_ids else
+            {**inspected, "state": "UNRETAINED", "policy": "value",
+             "policy_choice": {"calibrated": bool(curves[current_id]), "features": features,
+                "action_feasible": feasible[current_id], "feature_bucket": self.model.feature_bucket(features),
+                "model_digest": self.model_digest}})
         for owner_id, choice in selected.items():
+            forecast = next(point for point in curves[owner_id] if point.horizon_seconds == choice.ttl_seconds)
             policy_choice = {**asdict(choice), "model_digest": self.model_digest,
-                "capacity_basis": "full eligible causal page paths per tier; ready physical replicas remain in native receipt",
+                "capacity_basis": "unique full causal pages; incremental lease residency beyond active protection",
                 "raw_features": feature_rows[owner_id],
                 "feature_bucket": self.model.feature_bucket(feature_rows[owner_id]),
-                "forecast": asdict(forecasts[owner_id])}
-            if owner_id == current["owner_id"]:
+                "forecast": asdict(forecast)}
+            if owner_id == current_id:
                 current_ack = await self.owners.observe(**current, ttl_seconds=choice.ttl_seconds,
                     policy="paired_native_value", policy_choice=policy_choice)
             else:
@@ -512,9 +654,10 @@ class PrefixReadObserver:
                     prefix_input_ids=old.prefix_input_ids, sources=old.sources, ttl_seconds=choice.ttl_seconds,
                     policy="paired_native_value", policy_choice=policy_choice)
         return {**current_ack, "retention_choices": [asdict(choice) for choice in choices],
+            "existing_retention_owners": sorted(kept_ids-selected.keys()),
             "retention_candidates": [{"owner_id": owner_id,
-                "action_feasible": feasible[owner_id],
+                "reuse_event_key": events[owner_id], "action_feasible": feasible[owner_id],
                 "raw_features": feature_rows[owner_id],
                 "feature_bucket": self.model.feature_bucket(feature_rows[owner_id]),
-                "forecast": asdict(prediction) if prediction is not None else None}
-                for owner_id, prediction in forecasts.items()]}
+                "forecasts": [asdict(prediction) for prediction in curve]}
+                for owner_id, curve in curves.items()]}
