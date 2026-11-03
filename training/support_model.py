@@ -507,18 +507,26 @@ cached once before optimizing the graph and disposition heads.
     import torch
     from adapters.support_model import SupportInput
     from controller.context_schema import EvidenceUnit, SupportBundle, TaskState
+    complete_started = time.perf_counter()
     torch.manual_seed(seed)
     backend = TrainedSupportBackend.load(asset_path, device=device)
     rows = select_cohort_rows((json.loads(line) for line in Path(preferences_path).read_text().splitlines() if line),
                              cohort_manifest, "train")
     assert rows
     assert all(row["label_origin"] == "actual_reader_answers" for row in rows)
-    graph_pairs = []
+    preprocessing_started = time.perf_counter()
+    graph_pairs, candidate_graphs = [], {}
+    cache_hits = 0
     for row in rows:
         state = decode(TaskState, row["task_state"])
         graphs = []
         for side in ("preferred", "dispreferred"):
             item = row[side]
+            candidate_id = (row["task_id"], item["response"]["attempt_id"])
+            if candidate_id in candidate_graphs:
+                graphs.append(candidate_graphs[candidate_id])
+                cache_hits += 1
+                continue
             assert item["reader_model"] == "qwen3_32b_nonthinking"
             inputs = tuple(SupportInput(state.task_id, example["need_id"], example["query"],
                 tuple(decode(EvidenceUnit, u) for u in example["units"]),
@@ -535,9 +543,16 @@ cached once before optimizing the graph and disposition heads.
                 item.get("old_body_tokens", 0)/32768, item.get("history_tokens", 0)/8192,
                 item.get("input_tokens", 0)/32768, item.get("output_budget", 0)/8192),
                 dtype=torch.float32, device=device)
-            graphs.append(((*graph, context), ANSWER_CLASSES.index(item["disposition"])
-                           if item["disposition"] is not None else None))
+            entry = ((*graph, context), ANSWER_CLASSES.index(item["disposition"])
+                     if item["disposition"] is not None else None)
+            candidate_graphs[candidate_id] = entry
+            graphs.append(entry)
         graph_pairs.append(graphs)
+    if device.startswith("cuda"):
+        torch.cuda.synchronize(device)
+    preprocessing = {"unique_candidates": len(candidate_graphs), "cache_hits": cache_hits,
+        "elapsed_ms": (time.perf_counter()-preprocessing_started)*1000}
+    print(json.dumps({"utility_graph_preprocessing": preprocessing}), flush=True)
     network = backend.network
     for name, parameter in network.named_parameters():
         parameter.requires_grad_(not name.startswith(("encoder.", "scalar_heads.", "support_head.", "span_head.")))
@@ -565,7 +580,9 @@ cached once before optimizing the graph and disposition heads.
         "preferences_path": str(preferences_path), "pairs": len(rows), "epochs": epochs,
         "seed": seed, "learning_rate": learning_rate, "losses": losses,
         "synthetic_fixture_count": sum(bool(row.get("synthetic_fixture")) for row in rows),
-        "elapsed_ms": (time.perf_counter()-started)*1000,
+        "elapsed_ms": (time.perf_counter()-complete_started)*1000,
+        "optimization_ms": (time.perf_counter()-started)*1000,
+        "graph_preprocessing": preprocessing,
         "encoding_usage": backend.usage, "frozen_encoder_dtype": backend.deployment["encoder_dtype"],
         "head_parameter_dtypes": sorted({str(parameter.dtype) for parameter in network.parameters() if parameter.requires_grad})}}
     _save(network, backend.tokenizer, output_dir, metadata,

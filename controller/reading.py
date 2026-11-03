@@ -414,15 +414,45 @@ def _source_first_numeric(plan, task):
             and (task.operation in {"count", "sum"} or bool(task.shared_numeric_scopes)))
 
 
+def _numeric_source_payload(task, units):
+    _, aliases, _ = numeric_aliases(task, units)
+    span_ids = {span_id: alias for alias, span_id in aliases.items()}
+    unit_ids = {unit.unit_id: f"u{index}" for index, unit in enumerate(units)}
+    documents, sources = {}, []
+    for unit in units:
+        spans = []
+        for span in unit.source_spans:
+            key = span.source_key
+            family = unit.document_family or key.document_id
+            identity = (key.corpus_id, key.document_id, key.passage_id, key.version, family)
+            entry = {"span": span_ids[span.span_id]}
+            if identity not in documents:
+                documents[identity] = f"d{len(documents)}"
+                entry["document"] = {"corpus_id": key.corpus_id, "document_id": key.document_id,
+                                     "passage_id": key.passage_id, "version": key.version,
+                                     "document_family": family}
+            entry["doc"] = documents[identity]
+            spans.append(entry)
+        sources.append({"unit": unit_ids[unit.unit_id], "spans": spans,
+            "heading": unit.heading, "table_id": unit.table_id,
+            "dependencies": [unit_ids[uid] for uid in unit.dependencies],
+            "text": unit.text, "applicability": unit.applicability})
+    return sources
+
+
 def stable_prefix_messages(plan, task, units):
-    sources, _ = stable_source_payload(units)
     system = SOURCE_SYSTEM
     if _source_first_numeric(plan, task):
+        sources = _numeric_source_payload(task, units)
+        citation = "Cite the source span aliases shown here directly in s. Document metadata is defined at first use."
         extraction = SHARED_NUMERIC_READ_SYSTEM if task.shared_numeric_scopes else READ_SYSTEM
         system += " "+extraction+NUMERIC_POPULATION_SYSTEM+SHORT_WIRE_SYSTEM
+    else:
+        sources, _ = stable_source_payload(units)
+        citation = "Use the following task's source_aliases to bind source_span to output span_ids."
     return (Message("system", system),
         Message("user", json.dumps({"original_sources": sources,
-            "citation_protocol": "Use the following task's source_aliases to bind source_span to output span_ids."}, ensure_ascii=False,
+            "citation_protocol": citation}, ensure_ascii=False,
                                   separators=(",", ":"))))
 
 
@@ -473,12 +503,13 @@ def step_messages(plan, task, units, claims=(), snapshot=None):
         payload["extraction_output_budget_tokens"] = task.output_budget
         payload["requires_reduction"] = task.requires_reduction
     if task.kind == "READ" and plan.read_layout == "source_first":
-        _, aliases = stable_source_payload(units)
         del payload["units"]
-        payload["source_aliases"] = aliases
         if _source_first_numeric(plan, task):
+            payload["fact_protocol"]["sources"] = list(sources)
             instructions = CONCLUSION_BUDGET_SYSTEM if plan.answer_allocation is not None else ""
         else:
+            _, aliases = stable_source_payload(units)
+            payload["source_aliases"] = aliases
             instructions = step_system(plan, task)
         return (*stable_prefix_messages(plan, task, units),
             Message("user", instructions+"\nTask:\n"+

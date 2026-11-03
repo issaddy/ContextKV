@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import time
 
-from adapters.history_state import TeacherTaskModel, boundary_ref_value
+from adapters.history_state import TASK_WIRE_SCHEMA, HistoryWindow, TeacherTaskModel, indexed_ref_value
 from adapters.query_selector import CompletionResult
 from controller.context_schema import Condition, Need, RetrievalState, TaskState, TextRef
 from controller.schema import OnlineTurn, TurnRecord
@@ -18,21 +18,24 @@ PROBE_QUESTION = "Use the next dependency 😀e\u0301中"
 
 def schema_probe(history_characters=0):
     """Fifth-turn needs own a dependency; sixth-turn aliasing must preserve it."""
-    state = TaskState("task-owner", "Linux", conditions=(Condition("five:c0",
-        value_spans=(TextRef(5, "user", 0, 5),), relation_type="PLATFORM"),),
+    prior_text = "Use Linux for batch jobs"
+    prior_ref = TextRef(5, "user", 0, len(prior_text))
+    state = TaskState("task-owner", prior_text, conditions=(Condition("five:c0",
+        value_spans=(prior_ref,), relation_type="PLATFORM"),),
         needs=(Need("five:n0", condition_ids=("five:c0",)),
                Need("five:n1", condition_ids=("five:c0",), predecessor_need_ids=("five:n0",))), current_turn_id=5)
     actual_answer = "A"*history_characters if history_characters else "Actual fifth answer"
-    memory = RetrievalState(5, (TurnRecord(5, "Linux", actual_answer),), (state,))
+    memory = RetrievalState(5, (TurnRecord(5, prior_text, actual_answer),), (state,))
+    last_character = TextRef(5, "assistant", len(actual_answer)-1, len(actual_answer))
     captured = {}
     class CaptureClient:
         manifest = {"kind": "schema_probe_only"}
         def complete(self, messages, *, response_format):
             captured["schema"] = response_format["json_schema"]["schema"]
             captured["wire"] = {"relation": "followup", "resume_task_id": "S0", "history_spans": [
-                    {"turn_id": 5, "speaker": "assistant", "boundary_chars": [len(actual_answer)-1, len(actual_answer)-1]}],
+                    {"window_id": "w1", "boundary_tokens": [0, 0]}],
                 "conditions": {}, "condition_removals": [], "needs": {
-                    "n0": {"anchor_spans": [], "subject_refs": [{"turn_id": 5, "speaker": "user", "boundary_chars": [4, 0]}], "operation": "lookup",
+                    "n0": {"anchor_spans": [], "subject_refs": [{"window_id": "w2", "boundary_tokens": [4, 0]}], "operation": "lookup",
                            "condition_ids": ["C0"], "predecessor_need_ids": ["N1"], "scope": "selected_sources"},
                     "n1": {"anchor_spans": [], "subject_refs": [], "operation": "lookup",
                            "condition_ids": ["C0"], "predecessor_need_ids": ["n0"], "scope": "selected_sources"}},
@@ -44,12 +47,14 @@ def schema_probe(history_characters=0):
             captured["wire"] = {name: captured["wire"][name] for name in selected}
             return CompletionResult("completed", json.dumps(captured["wire"]), "stop", 0,
                                     {"completion_tokens": 0})
-    prediction = TeacherTaskModel(CaptureClient()).predict(OnlineTurn("probe", "six", 6, "manual",
-        PROBE_QUESTION, (), (), "P3"), (), memory)
+    teacher = TeacherTaskModel(CaptureClient())
+    prediction = teacher.predict(OnlineTurn("probe", "six", 6, "manual",
+        PROBE_QUESTION, (), (), "P3"), (HistoryWindow(last_character, actual_answer[-1:], 1),), memory)
     assert prediction.needs[0].predecessor_need_ids == ("five:n1",)
     assert prediction.needs[1].predecessor_need_ids == ("six:n0",)
-    assert prediction.needs[0].subject_refs == (TextRef(5, "user", 0, 5),)
-    return captured["schema"], captured["wire"]
+    assert prediction.needs[0].subject_refs == (prior_ref,)
+    assert prediction.history_spans == (last_character,)
+    return captured["schema"], captured["wire"], teacher.last_text_ref_windows
 
 
 def native_probe(scope_path, *, history_characters=0):
@@ -57,7 +62,7 @@ def native_probe(scope_path, *, history_characters=0):
     from transformers import AutoTokenizer
     from engine_patches.contextkv_model_scope import load_model_scope
     schema_started = time.monotonic()
-    schema, wire = schema_probe(history_characters)
+    schema, wire, windows = schema_probe(history_characters)
     schema_build_ms = (time.monotonic()-schema_started)*1000
     scope = load_model_scope(scope_path)
     tokenizer = AutoTokenizer.from_pretrained(scope.model_path, local_files_only=True)
@@ -76,35 +81,37 @@ def native_probe(scope_path, *, history_characters=0):
     for first in range(5):
         for second in range(5):
             candidate = json.loads(json.dumps(wire))
-            ref = {"turn_id": 5, "speaker": "user", "boundary_chars": [first, second]}
+            ref = {"window_id": "w2", "boundary_tokens": [first, second]}
             candidate["needs"]["n0"]["subject_refs"] = [ref]
             result = xgr.GrammarMatcher(compiled).accept_string(json.dumps(candidate))
             tests.append({"name": f"boundary:{first}:{second}", "accepted": result, "expected": True})
             if result:
-                internal = boundary_ref_value(ref)
+                internal = indexed_ref_value(ref, windows)
                 represented.add((internal["start"], internal["end"]))
     for first, second in ((-1, 0), (0, 5), (5, 6)):
         candidate = json.loads(json.dumps(wire))
-        candidate["needs"]["n0"]["subject_refs"] = [{"turn_id": 5, "speaker": "user", "boundary_chars": [first, second]}]
+        candidate["needs"]["n0"]["subject_refs"] = [{"window_id": "w2", "boundary_tokens": [first, second]}]
         tests.append({"name": f"bounds:{first}:{second}",
             "accepted": xgr.GrammarMatcher(compiled).accept_string(json.dumps(candidate)), "expected": False})
-    for index, ref in enumerate(({"turn_id": 0, "speaker": "user", "boundary_chars": [0, 0]},
-                {"turn_id": 6, "speaker": "assistant", "boundary_chars": [0, 0]},
-                {"turn_id": 5, "speaker": "robot", "boundary_chars": [0, 0]},
-                {"turn_id": 5, "speaker": "user", "boundary_chars": [.5, 1]})):
+    for index, ref in enumerate(({"window_id": "w3", "boundary_tokens": [0, 0]},
+                {"window_id": "w1", "boundary_tokens": [0, 1]},
+                {"window_id": "w2", "boundary_tokens": [.5, 1]})):
         candidate = json.loads(json.dumps(wire))
         candidate["needs"]["n0"]["subject_refs"] = [ref]
         tests.append({"name": f"owner_or_integer:{index}",
             "accepted": xgr.GrammarMatcher(compiled).accept_string(json.dumps(candidate)), "expected": False})
     for anchors in ([], [0], [0, 1, 2]):
         candidate = json.loads(json.dumps(wire))
-        candidate["needs"]["n0"]["subject_refs"] = [{"turn_id": 5, "speaker": "user", "boundary_chars": anchors}]
+        candidate["needs"]["n0"]["subject_refs"] = [{"window_id": "w2", "boundary_tokens": anchors}]
         tests.append({"name": f"array_length:{len(anchors)}",
             "accepted": xgr.GrammarMatcher(compiled).accept_string(json.dumps(candidate)), "expected": False})
     for text in ("😀", "e\u0301"):
         offset = PROBE_QUESTION.index(text)
-        ref = {"turn_id": 6, "speaker": "user", "boundary_chars": [offset+len(text)-1, offset]}
-        internal = boundary_ref_value(ref)
+        spans = windows["w0"]["token_spans"]
+        first = next(index for index, (start, _) in enumerate(spans) if start == offset)
+        last = next(index for index, (_, end) in enumerate(spans) if end == offset+len(text))
+        ref = {"window_id": "w0", "boundary_tokens": [first, last]}
+        internal = indexed_ref_value(ref, windows)
         assert PROBE_QUESTION[internal["start"]:internal["end"]] == text
         candidate = json.loads(json.dumps(wire))
         candidate["needs"]["n0"]["subject_refs"] = [ref]
@@ -118,7 +125,7 @@ def native_probe(scope_path, *, history_characters=0):
     return {"measurement_kind": "native_xgrammar_cpu_probe", "model_forward_executed": False,
         "xgrammar_version": version("xgrammar"), "schema_bytes": len(json.dumps(schema).encode()),
         "schema_build_ms": schema_build_ms, "compile_ms": compile_ms, "probe_history_characters": history_characters,
-        "wire_schema": "owned_task_graph_v6_included_boundary_chars",
+        "wire_schema": TASK_WIRE_SCHEMA,
         "text_ref_owner_branches": len(schema["$defs"]["TextRef"]["anyOf"]),
         "valid_boundary_pairs_accepted": sum(item["accepted"] for item in boundaries),
         "represented_nonempty_intervals": len(represented),

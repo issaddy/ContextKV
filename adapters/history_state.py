@@ -57,37 +57,69 @@ def validate_task_refs(prediction, turn, memory):
         text_ref_text(ref, sources, field=field)
 
 
-def owned_text_ref_definitions(owners):
-    """Each owner permits two unordered, included Unicode character indices."""
+TASK_WIRE_SCHEMA = "owned_task_graph_v7_visible_token_boundaries"
+
+
+def indexed_ref_windows(windows):
+    """Keep literal source text and attach local indices to words and punctuation."""
+    import regex
+
+    visible, mapping = [], {}
+    for ref, text in windows:
+        boundaries = [0, *(match.start() for match in regex.finditer(r"\b", text, flags=regex.WORD)
+                           if 0 < match.start() < len(text)), len(text)]
+        parts, spans = [], []
+        for start, end in zip(boundaries, boundaries[1:]):
+            segment = text[start:end]
+            if segment and not segment.isspace():
+                parts.append(f"[{len(spans)}]")
+                spans.append((ref.start+start, ref.start+end))
+            parts.append(segment)
+        if not spans:
+            continue
+        window_id = f"w{len(visible)}"
+        visible.append({"window_id": window_id, "turn_id": ref.turn_id, "speaker": ref.speaker,
+                        "indexed_text": "".join(parts)})
+        mapping[window_id] = {"turn_id": ref.turn_id, "speaker": ref.speaker, "token_spans": spans}
+    return visible, mapping
+
+
+def owned_text_ref_definitions(windows):
     branches = [{"type": "object", "properties": {
-        "turn_id": {"type": "integer", "const": identity},
-        "speaker": {"type": "string", "const": speaker},
-        "boundary_chars": {"type": "array", "minItems": 2, "maxItems": 2,
-            "items": {"type": "integer", "minimum": 0, "maximum": len(text)-1}}},
-        "required": ["turn_id", "speaker", "boundary_chars"], "additionalProperties": False}
-        for (identity, speaker), text in owners.items() if text]
+        "window_id": {"type": "string", "const": window_id},
+        "boundary_tokens": {"type": "array", "minItems": 2, "maxItems": 2,
+            "items": {"type": "integer", "minimum": 0, "maximum": len(window["token_spans"])-1}}},
+        "required": ["window_id", "boundary_tokens"], "additionalProperties": False}
+        for window_id, window in windows.items()]
     return {"TextRef": {"anyOf": branches} if branches else False}
 
 
-def boundary_ref_value(ref):
-    first, second = ref["boundary_chars"]
-    return {"turn_id": ref["turn_id"], "speaker": ref["speaker"],
-            "start": min(first, second), "end": max(first, second)+1}
+def indexed_ref_value(ref, windows):
+    window = windows[ref["window_id"]]
+    first, last = sorted(ref["boundary_tokens"])
+    spans = window["token_spans"]
+    if not 0 <= first <= last < len(spans):
+        raise ValueError("task reference leaves its visible token window")
+    return {"turn_id": window["turn_id"], "speaker": window["speaker"],
+            "start": spans[first][0], "end": spans[last][1]}
 
 
-def decode_boundary_task_refs(value):
-    """Translate the declared online wire into the unchanged persisted contract."""
-    value["history_spans"] = [boundary_ref_value(ref) for ref in value["history_spans"]]
+def decode_indexed_task_refs(value, windows):
+    """Translate the online wire into the unchanged persisted TextRef contract."""
+    def resolve(ref):
+        return indexed_ref_value(ref, windows)
+
+    value["history_spans"] = [resolve(ref) for ref in value["history_spans"]]
     for condition in value["conditions"].values():
         for name in ("key_span", "predicate_span"):
-            condition[name] = None if condition[name] is None else boundary_ref_value(condition[name])
-        condition["value_spans"] = [boundary_ref_value(ref) for ref in condition["value_spans"]]
+            condition[name] = None if condition[name] is None else resolve(condition[name])
+        condition["value_spans"] = [resolve(ref) for ref in condition["value_spans"]]
     for event in value["condition_removals"]:
-        event["predicate_span"] = boundary_ref_value(event["predicate_span"])
+        event["predicate_span"] = resolve(event["predicate_span"])
     for need in value["needs"].values():
         for name in ("anchor_spans", "subject_refs"):
-            need[name] = [boundary_ref_value(ref) for ref in need[name]]
-    value["version_intent"]["time_refs"] = [boundary_ref_value(ref) for ref in value["version_intent"]["time_refs"]]
+            need[name] = [resolve(ref) for ref in need[name]]
+    value["version_intent"]["time_refs"] = [resolve(ref) for ref in value["version_intent"]["time_refs"]]
     return value
 
 
@@ -312,7 +344,7 @@ class TeacherTaskModel:
 
     @property
     def manifest(self):
-        return {"kind": "qwen3_32b_task_span_teacher", "wire_schema": "owned_task_graph_v6_included_boundary_chars",
+        return {"kind": "qwen3_32b_task_span_teacher", "wire_schema": TASK_WIRE_SCHEMA,
                 "need_semantics_version": TASK_NEED_SEMANTICS_VERSION,
                 "transport": self.client.manifest}
 
@@ -358,20 +390,44 @@ class TeacherTaskModel:
             item["version_intent"]["resolved_version_ids"] = [version_alias[identity]
                 for identity in item["version_intent"]["resolved_version_ids"]]
             item["version_intent"]["document_families"] = [family_alias[identity] for identity in item["version_intent"]["document_families"]]
-        body = {"turn_id": turn.turn, "question": turn.query,
+        owners = text_ref_sources(memory.committed_history, current_turn_id=turn.turn, current_user_text=turn.query)
+        source_windows = [(TextRef(turn.turn, "user", 0, len(turn.query)), turn.query)]
+        source_windows.extend((w.ref, w.text) for w in windows)
+        condition_by_id = {condition.condition_id: condition for state in memory.prior_task_states
+                           for condition in state.conditions}
+        active_conditions = [condition for state in latest.values() for condition in state.conditions]
+        prior_condition_ids = dict.fromkeys(identity for condition in active_conditions
+            for identity in (condition.condition_id, *condition.target_refs, *condition.supersedes))
+        condition_text = {}
+        for identity in prior_condition_ids:
+            condition = condition_by_id[identity]
+            parts = {}
+            for name, refs_ in (("key", (condition.key_span,)), ("predicate", (condition.predicate_span,)),
+                                ("values", condition.value_spans)):
+                parts[name] = []
+                for ref in refs_:
+                    if ref is None:
+                        continue
+                    text = text_ref_text(ref, owners)
+                    parts[name].append(text)
+                    if not any(existing.turn_id == ref.turn_id and existing.speaker == ref.speaker
+                               and existing.start <= ref.start and ref.end <= existing.end
+                               for existing, _ in source_windows):
+                        source_windows.append((ref, text))
+            condition_text[condition_alias[identity]] = parts
+        visible, ref_windows = indexed_ref_windows(source_windows)
+        self.last_text_ref_windows = ref_windows
+        body = {"turn_id": turn.turn, "question_window_id": visible[0]["window_id"],
+                "visible_windows": visible, "prior_condition_text": condition_text,
                 "reference_date": memory.source_index.reference_date if memory.source_index is not None else None,
-                "history": [{"ref": to_jsonable(w.ref), "text": w.text} for w in windows],
                 "prior_states": prior_view,
                 "source_versions": [{"version_id": alias, "literal_version": value} for value, alias in version_alias.items()],
                 "source_families": [{"family_id": alias, "literal_family": family,
                     "sources": [{**row, "version_id": version_alias[row["version"]]} for row in catalogue.get(family, ())]}
                     for family, alias in family_alias.items()]}
-        owners = text_ref_sources(memory.committed_history, current_turn_id=turn.turn, current_user_text=turn.query)
-        body["text_ref_sources"] = [{"turn_id": identity, "speaker": speaker, "characters": len(text)}
-            for (identity, speaker), text in owners.items()]
         body["wire_schema"] = self.manifest["wire_schema"]
         body["need_semantics_version"] = TASK_NEED_SEMANTICS_VERSION
-        definitions = owned_text_ref_definitions(owners)
+        definitions = owned_text_ref_definitions(ref_windows)
         ref_schema = {"$ref": "#/$defs/TextRef"}
         refs = {"type": "array", "maxItems": 16, "items": ref_schema}
         definitions["TextRefs"] = refs
@@ -461,15 +517,17 @@ class TeacherTaskModel:
                                  "additionalProperties": False})
         schema = {"type": "object", "anyOf": branches, "$defs": definitions}
         self.last_response_schema = schema
-        system = ("Interpret the current task using literal Unicode character positions in the supplied actual QA. "
-                  "Output TextRefs use boundary_chars:[i,j], two INCLUDED character indices in the original message. "
-                  "Order is irrelevant: they denote original_text[min(i,j):max(i,j)+1]. Equal indices select one character. "
-                  "These are not an exclusive end or a length. For a half-open interval [start,end), emit [start,end-1]. "
-                  "Input history/prior-state ledger refs still use half-open start/end; output refs must use boundary_chars. "
-                  "History text starts at its input ref.start in the original message. Open values point to original text. "
-                  "TextRefs may name only a listed text_ref_sources message: the current turn has a user message only. "
-                  "Each included index is between zero and characters-1. Never invent turn 0, future turns or a current assistant message. "
-                  "Use null for an absent key_span or predicate_span, and empty arrays when no references apply; "
+        system = ("Interpret the current task using the indexed literal text of visible_windows. "
+                  "The current question is the window named by question_window_id. "
+                  "Each [i] marks the next word or punctuation token, with indices local to that window. "
+                  "For a TextRef return window_id and boundary_tokens:[i,j], the two INCLUDED visible indices "
+                  "of the first and last tokens to cite. Equal indices cite one token. Order is irrelevant. "
+                  "Use only indices shown in that window; do not calculate character offsets or cite hidden text. "
+                  "Prior-state ledger refs are stored character coordinates and are not output citation indices. "
+                  "Use null for an absent key_span or predicate_span, and empty arrays when no references apply. "
+                  "If the actual request adds no condition, output conditions:{}. "
+                  "VERSION requires an actual user version or time restriction. Catalogue versions and output "
+                  "measurement or currency units do not establish VERSION conditions. "
                   "Keep the active object and needs for followups. For a correction emit REPLACE linked to prior condition IDs. "
                   "Represent every distinct requested answer point as a need, including related points requested together; "
                   "choose the operation for each point and preserve its question anchors. "
@@ -482,6 +540,8 @@ class TeacherTaskModel:
                   "conditions and needs are objects with contiguous keys c0..c{k-1} and n0..n{m-1}. "
                   "Their values do not contain condition_id or need_id: the controller assigns those IDs. "
                   "A need may name only existing prior needs or earlier current keys, never itself or a later need. "
+                  "Counting and summing the same population are independent operations. A shared pronoun or "
+                  "the order of the requests does not create a dependency unless the count itself is used in the later formula. "
                   "A need's current condition IDs must name conditions actually emitted in this object. "
                   "Emit ADD/REPLACE/COMPARE only for materialized active conditions. KEEP means no update. "
                   "Use condition_removals with original predicate spans and prior targets for REMOVE events; "
@@ -494,9 +554,9 @@ class TeacherTaskModel:
                   "resolved_version_ids are the final selected versions, while version_ids/source_turns may identify "
                   "anchors for before/after. Preserve the user's temporal_relation and original time_refs. "
                   "When dates are unknown, leave date-based resolved_version_ids empty.\n\n"+TASK_NEED_SEMANTICS)
-        completion = self.client.complete([{"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(body, ensure_ascii=False)}],
-            response_format={"type": "json_schema", "json_schema": {
+        messages = [{"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(body, ensure_ascii=False)}]
+        completion = self.client.complete(messages, response_format={"type": "json_schema", "json_schema": {
                 "name": "contextkv_task_spans", "strict": True, "schema": schema}})
         if self.record_path is not None:
             self.record_path.parent.mkdir(parents=True, exist_ok=True)
@@ -507,7 +567,7 @@ class TeacherTaskModel:
                     "finish_reason": completion.finish_reason, "input_tokens": completion.input_tokens,
                     "usage": completion.usage, "elapsed_ms": completion.elapsed_ms,
                     "raw_output": completion.text, "error": completion.error,
-                    "text_ref_sources": body["text_ref_sources"],
+                    "messages": messages, "text_ref_windows": ref_windows,
                     "raw_response": completion.raw_response}, ensure_ascii=False)+"\n")
         if completion.status != "completed" or completion.finish_reason != "stop":
             raise RuntimeError(f"task interpretation unfinished: {completion.status}/{completion.finish_reason}")
@@ -518,7 +578,7 @@ class TeacherTaskModel:
         self.usage["output_tokens"] += completion.usage["completion_tokens"]
         self.usage["elapsed_ms"] += completion.elapsed_ms
         self.last_raw_output = completion.text
-        value = decode_boundary_task_refs(json.loads(completion.text))
+        value = decode_indexed_task_refs(json.loads(completion.text), ref_windows)
         removals = value.pop("condition_removals")
         value["conditions"] = [{"condition_id": key, **value["conditions"][key]}
             for key in tuple(current_conditions)[:len(value["conditions"])]]
