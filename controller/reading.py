@@ -112,7 +112,10 @@ SOURCE_SYSTEM = (
     "active conditions, reading instructions and output schema. Return the requested JSON from those sources."
 )
 NUMERIC_POPULATION_SYSTEM = (
-    " Use the following task to identify the requested population, active conditions and quantity relation. "
+    " The question and actual conversation define the requested population, conditions and quantity relation. "
+    "When the question names explicit rows or a table, a cited source must contain that row label "
+    "or the matching table heading. An identifier mentioned in background prose is not a qualifying row. "
+    "Source identifier candidates constrain spelling only; they do not establish membership. "
     "Evaluate each Need's subject independently and include its alias only if the row establishes that Need. "
     "Emit a numeric row only when its cited source establishes that the entity qualifies for that "
     "population. For a requested quantity, the entity, magnitude and unit must be linked in the "
@@ -464,7 +467,7 @@ def step_messages(plan, task, units, claims=(), snapshot=None):
         "conditions": condition_aliases(task, claims), "scopes": to_jsonable(task.shared_numeric_scopes)}
     if (task.kind == "READ" and (task.operation in {"count", "sum"} or task.shared_numeric_scopes)
             and plan.numeric_identity == "source_ids"):
-        payload["record_identifiers"] = source_identifiers(units)
+        payload["source_identifier_candidates"] = source_identifiers(units)
     if plan.answer_allocation is not None:
         payload["conclusion_budget_tokens"] = dict(task.retained_conclusion_tokens)
         payload["extraction_output_budget_tokens"] = task.output_budget
