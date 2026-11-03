@@ -144,7 +144,9 @@ def prepare_reader_phases(config):
             command = [sys.executable, "-m", "training.train_reader", "train", "--config", str(path.resolve())]
             if training_gpus:
                 command = ["env", "CUDA_VISIBLE_DEVICES="+",".join(map(str, training_gpus)),
-                    sys.executable, "-m", "torch.distributed.run", "--standalone", "--nproc-per-node="+str(len(training_gpus)),
+                    sys.executable, "-m", "torch.distributed.run", "--rdzv-backend=static",
+                    "--master-addr=127.0.0.1", "--master-port="+str(settings.get("training_master_port", 29541)),
+                    "--nproc-per-node="+str(len(training_gpus)),
                     "-m", "training.train_reader", "train", "--config", str(path.resolve())]
             stage.update(training_config=str(path.resolve()), train_command=command)
             last_adapter = Path(reader["output_dir"])/"adapter"
