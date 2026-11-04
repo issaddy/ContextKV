@@ -1,6 +1,6 @@
-# 当前机制的复用依据
+# 方法复用与候选评估
 
-本文只维护当前主线使用的基础能力与直接相关的方法。课题要求见 [任务书](study/task_spec.md)，机制见 [架构](architecture.md)；运行与评分口径见 [数据与评价](data_and_evaluation.md)。历史文献选型和旧实验数值通过 Git 对应版本追溯。
+本文维护当前主线的复用依据及候选方法评估，调研更新于 2026-11-04。课题要求见 [任务书](study/task_spec.md)，机制见 [架构](architecture.md)；运行与评分口径见 [数据与评价](data_and_evaluation.md)。方法状态以当前代码为准，论文报告的收益不作为本项目实测结果。历史文献选型和旧实验数值通过 Git 对应版本追溯。
 
 | 能力与来源 | 当前复用 | 下一步使用原则 |
 |---|---|---|
@@ -17,18 +17,75 @@
 
 确定性 count/sum、量纲转换、来源依赖闭包、有限 DAG 和现有成本采样直接复用当前实现。新增方法应明确改变哪个决策、所需在线信息、训练标签、完整费用及相应消融。已有第三方代码说明与许可保留在 `docs/third_party/` 和各模块 NOTICE 中。
 
-## 实际落点与方法取舍
+## 评估口径
 
-这些方法组成资源预算下的近似方案，当前没有逐环节最优或全局最优的实测依据。
+优先级是依据当前课题约束作出的工程判断，没有逐环节最优或全局最优的实测依据。评估同时考虑：是否保留需求、条件、版本与来源；是否需要改变固定 Qwen；能否复用现有接口和资产；离线建索引/训练成本；在线解释、检索、阅读、控制与驻留总成本。压缩率、召回率和 TTFT 单项改善不能替代完整队列质量及完整响应 P95。
 
-| 环节 | 代码中的实际方法 | 相关替代与采用条件 |
+下表的“已有”指代码与调用已接通，“局部借鉴”指采用同类机制但未复现整篇方法，“候选”指尚未接入。候选不自动成为实施清单，只有对应瓶颈出现才比较；文档更新不改变冻结配置。
+
+## A：任务、历史、来源与证据选择
+
+| 方法与原始来源 | 可复用机制和当前状态 | 成本、适用条件与判断 |
 |---|---|---|
-| 召回 | `hybrid_retrieval.py` 已有 dense、BM25+dense RRF、hybrid_rerank；主配置 `study_multidoc_retriever.yaml` 选择 dense | BGE 作者建议混合召回后重排；专名、数值和版本召回不足时可直接启用已有 hybrid 路径。避免在 A 支持评分之前无依据再加一遍交叉编码器 |
-| 任务/证据 | `support_model.query_view` 传 Need scope、条件及完整版本意图；`evidence_planner.py` 做依赖闭包束搜索，P1 在 `train_set_utility` 学 pairwise log-sigmoid 偏好，线上 `learned` 消费同一图输入 | 查询适配与任务头分开训练；先看候选最优值与选择遗憾，不能把训练入口存在等同于学生优于教师或 P1 优于 coverage |
-| 阅读/数值 | `reading.py`、`reduction.py`、`claim_graph.py` 共享提取、按 Need 选择、CPU 固定运算、有限 DAG，`candidates.py` 编译完整结论 | [Program of Thoughts](https://arxiv.org/abs/2211.12588) 将计算交给程序执行；本项目采用固定运算符，没有复现模型生成任意程序。当前 count/sum 无需额外程序生成模型 |
-| 多跳/停止 | `action_proposals.py`、`plan_gain_protocol.py` 对真实未满足的 infer 缺口做有界续接，`plan_gain_completion.py` 拟合实际最终质量差，`action_policy.py` 执行一步后重规划 | [IRCoT](https://aclanthology.org/2023.acl-long.557/) 的推理与检索交替是相关依据；当前用有来源的桥接实体与 OpenNeed，不复现自由文本 CoT 循环。更长前瞻只在现有边界确实截断必要链路时考虑 |
-| 前缀/期限 | `prefix_retention.py` 比较绝对边际价值和容量密度两种贪心构造；`retention_trace.py fit` 的单 owner 配对经验模型被线上 observer 直接使用 | 当前既非精确覆盖求解，也未学习多 owner 联合干预的全部挤出效应；集合净收益由完整 Native/value 对照测量。CacheBlend 适用于非前缀复用瓶颈，但需改变 KV 执行协议，不能直接套入现有收益资产 |
-| 阶段错误归因 | `reader_data.py` 直接核验实际 READ/REDUCE/ANSWER 输出，区分可见输入支持、完整原文核验及上游错误 | 不再先生成更好答案再冒充实际运行质量；任务/支持教师的监督生成仍保留自己的输入可见性规则 |
+| [CONQRR](https://aclanthology.org/2022.emnlp-main.679/)／[Rewrite-Retrieve-Read](https://aclanthology.org/2023.emnlp-main.322/) | 将历史依赖问题改写为检索查询，分别用检索奖励或 reader 反馈训练改写器。当前有 Need 子查询、原问题查询与查询 LoRA，未实现两者的 RL rewriter | 固定 Qwen 可用；完整方法增加改写生成、训练和奖励采集。**条件候选**：任务解释正确而查询措辞仍造成漏召回时，先比较受现有条件图约束的查询视图，保留原问题流；候选已含答案时不优先训练 rewriter |
+| [BGE-M3](https://huggingface.co/BAAI/bge-m3) 混合表示／RRF | `hybrid_retrieval.py` 已有 BM25+dense RRF；主配置选择 dense。未实现 M3 learned sparse 和 multi-vector 三路融合，不能把 BM25 等同于 learned sparse | **优先复用已有 hybrid**，尤其专名、数值、编号和版本精确匹配不足时；无需新生成或训练。新增 M3 表示需索引、存储和评分，当前 dense query LoRA 也没有适配其他输出头 |
+| [ColBERTv2](https://aclanthology.org/2022.naacl-main.272/) | token 级 late interaction，结合残差压缩和去噪监督。当前单向量召回与交叉编码器支持评分之间没有该层 | **条件候选**：单向量丢失局部实体/关系、支持模型又无法覆盖更大池时。预训练模型可免训练，但要维护多向量表示并增加匹配成本；先比较有限候选排序，不直接替换多语种 BGE 全索引 |
+| [MMR](https://doi.org/10.1145/290941.291025) | 在相关性与已选材料相似度之间取舍。当前有完全相同正文合并、Need 配额及支持覆盖，没有语义 MMR | **优先局部候选**：重复模板占满每 Need 的支持评分名额时，在评分前做多样化。复用向量，仅增加 CPU 选择；保持版本、条件及依赖身份，不把互补材料当冗余，也不以多样性替代支持性 |
+| [预算最大覆盖](https://doi.org/10.1016/S0020-0190(99)00031-9) | 当前 `SupportCoverageUtility` 对各 Need 取集合最大支持，`evidence_planner.py` 用依赖闭包束搜索；可比较边际覆盖/新增真实 token 的轻量构造 | **已有相近目标，贪心是条件候选**。适合搜索控制成本突出时；复用已评分支持，不增加模型调用。pair/triple 互补、来源依赖与编译成本改变经典假设，不能直接套近似保证 |
+| [REPLUG](https://arxiv.org/abs/2301.12652)／[RAG-DDR](https://arxiv.org/abs/2410.13509) | reader 指导检索/模块偏好。当前 `train_set_utility` 用真实答案的 pairwise log-sigmoid 偏好，线上 `learned` 消费同一图输入；属于局部借鉴 | **保留实际最终效用监督**。REPLUG 的多文档分布集成和似然监督、DDR 的模块训练整法均未复现；完整引入有分支生成或联合训练费用。只优化辅助模型，Qwen 保持固定 |
+| [Late Chunking](https://arxiv.org/abs/2409.04701) | 整段上下文先过 embedding Transformer，随后按 chunk 做 mean pooling，保留跨片段语境；当前未实现 | **条件候选**：片段缺少上文指代或章节关系时。可免额外训练，但需长文编码和重建索引；当前 BGE CLS 向量及 query LoRA 不能直接与新 pooling 混用。只改检索表示，执行仍映射原文固定窗口 |
+| [LongRAG（Jiang 等）](https://arxiv.org/abs/2406.15319) | 较长资料单元检索后交给 reader。当前 canonical 窗口不是论文的长检索单元 | **优先局部候选：粗检索→固定阅读窗口**，用于跨段条款、表头或相邻关系漏召回。需粗索引与窗口映射；直接扩大 READ 会增加预填充、输出和最终窗口压力，不作为默认替换 |
+| [RAPTOR](https://arxiv.org/abs/2401.18059) | 递归聚类摘要并检索多个抽象层；当前没有摘要树 | **较后候选**：跨章节/全局问题持续漏召回时，可用摘要导航到原文叶子。离线建树和版本更新要支付 embedding、聚类、摘要成本；摘要节点不替代事实来源，不跨版本混树 |
+| [LongMemEval](https://arxiv.org/abs/2410.10813) 的记忆设计 | 研究记忆粒度、索引键、时间查询及结构化阅读。当前有原 QA 引用、任务状态与版本目录，没有复现其记忆系统 | **局部参考**：从整轮历史检索改为有关联的片段及多个索引键，适合任务回访召回不足时。额外抽取/索引计费；历史摘要只导航，条件更新仍引用实际消息。其个人聊天任务不直接替换本项目文档问答队列 |
+
+版本与有效期继续由显式目录及条件关系确定。`support_model.query_view` 已传 Need scope、条件和完整版本意图；最新文档、最相似文档和任务要求的适用版本是不同概念。查询改写或摘要不能替代该语义层。
+
+## B：共享阅读、结论、动作与停止
+
+| 方法与原始来源 | 可复用机制和当前状态 | 成本、适用条件与判断 |
+|---|---|---|
+| [多查询优化](https://drum.lib.umd.edu/items/dc467374-f73b-42c6-8298-8a4a745191e1) | 多个查询共用中间结果。`reading.py` 已按来源/条件/前驱/范围分组共享数值事实，再按各 Need 构造运算视图；属于机制借鉴，未复现数据库优化器 | **保留主线**。共享应减少重复提取，但按 Need 选择仍有费用；评价全部调用和输出 token。共享键不能仅按同一文档，否则不同群体与版本会混合 |
+| [PAL](https://proceedings.mlr.press/v202/gao23f.html)／[PoT](https://arxiv.org/abs/2211.12588) | 将语义理解与计算分开。`reduction.py` 已做去重、量纲转换和 count/sum/group；不是模型生成任意程序 | **保留主线**。CPU 运算便宜，主要费用在提取和选择；现有类型化算子已覆盖目标，不新增程序生成服务 |
+| [数据溯源：Why and Where](https://www.research.ed.ac.uk/en/publications/why-and-where-a-characterization-of-data-provenance/) | 区分来源位置与推导依据。当前 SourceSpan＋Claim DAG 表达原文坐标和父事实，有限归约保留证明路径；未复现其数据库 provenance 演算 | **保留主线**。短 ID、共享条件/版本表可以压缩表示，事实语义及必要来源仍应进入实际 ANSWER。先分别计量结论文字和来源元数据，定位窗口真正负担 |
+| [RECOMP](https://arxiv.org/abs/2310.04408) | 抽取/生成式压缩服务下游回答，可不给无益材料输出。当前 READ/REDUCE 已进行任务条件事实提取和有限归约 | **局部借鉴已有**。若正确根结论的自然语言仍占满最终窗口，可借用终端质量监督改进压缩；新增独立压缩器需训练或推断。来源元数据占主导时，通用摘要器并不能解决问题 |
+| [LLMLingua-2](https://arxiv.org/abs/2403.12968)／[LongLLMLingua](https://arxiv.org/abs/2310.06839) | 前者用蒸馏后的 token 分类器压缩，后者强调问题相关信息密度与位置。当前未实现 | **较后候选**：仅当 ANSWER 辅助摘录成为主要负担时局部比较。额外压缩模型有推断和驻留费用；对 READ 原文按问题删 token 会改变前缀与完整阅读语义，不能据压缩率直接推断净收益 |
+| [IRCoT](https://aclanthology.org/2023.acl-long.557/) | 推理与检索交替。当前 OpenNeed 保存桥接实体、缺失关系和父链，优先使用就绪来源，必要时接一次 GAP/终端 READ | **保留有界适配**。固定 Qwen 可执行，无需 reader 训练；更长循环增加检索和生成。仅当有界后续实际截断必要链路时扩展，不按“问题复杂”无条件加调用 |
+| [Adaptive-RAG](https://arxiv.org/abs/2403.14403)／[FLARE](https://aclanthology.org/2023.emnlp-main.495/) | 前者按复杂度选择检索深度；后者预测下一句，用低置信 token 触发检索与重生成。当前动作收益基于已观察状态，OpenNeed 负责缺口，无这两种路由器 | **借鉴监督与触发粒度，暂不叠加模型**。初始路由只有能省掉大量无益首轮准备才有独立价值；逐句 FLARE 需概率信息和额外解码，与当前一次最终 ANSWER 的形态不同 |
+| [Self-RAG](https://selfrag.github.io/) | 训练 reader 输出 reflection tokens，控制检索、支持和效用。当前外围支持/审核字段不等同于 Self-RAG | **整法不采用**：要求 reader 训练，与固定 Qwen 条件冲突。可参考相关性、支持性和效用的区分，复用当前审核而非再增加 critic 或反思解码 |
+| [计算价值](https://www2.eecs.berkeley.edu/Pubs/TechRpts/1988/5755.html)／[Rollout](https://web.mit.edu/dimitrib/www/dp_rollout_book.html) | 将继续计算视为有成本的动作；当前离线首动作＋固定后续得到 ΔQ，线上一次动作后重观察 | **保留主线**。线上不实际展开所有分支，离线配对和评分费用完整记录。预测增益与成本属于近似量，现有步骤执行预算继续约束实际支出，不继承精确 rollout 改进保证 |
+| 岭回归／[XGBoost](https://arxiv.org/abs/1603.02754) | 当前 B 使用岭回归质量和绝对成本头；树模型可拟合非线性和阈值交互，尚未接入 | **条件候选**：当前残差在命中/回载/压力区间呈系统误差，且有足够独立会话时才比较小树模型。可用 CPU 训练；保持同一前动作特征与会话分区，以动作选择结果判断，不凭训练误差替换 |
+
+## C：精确前缀、保留对象、容量与期限
+
+| 方法与原始来源 | 可复用机制和当前状态 | 成本、适用条件与判断 |
+|---|---|---|
+| [RadixAttention](https://arxiv.org/abs/2312.07104)／[HiCache](https://docs.sglang.io/docs/advanced_features/hicache_design) | 已有原生因果前缀和 GPU/Host 迁移；项目通过独立软 owner 保留来源 | **保留主干**。先区分原生已有命中、额外保护得到的命中、Host 回载和重算，再决定保留；最新上游能力不能直接视为固定 vendor 已有 |
+| [RAGCache／PGDSF](https://arxiv.org/abs/2404.12457) | 前缀知识树及成本、频率、大小驱动的分层替换。当前有路径、成本、访问与容量信息，未实现 PGDSF | **优先局部候选**：经验模型覆盖不足且存在重访时，用 PGDSF 风格排序作为无训练 owner 对照，仍复用原生缓存。它不直接预测相对 Native 的新增收益，须单独报告实际净效果；不另建一套淘汰器 |
+| [ContextPilot](https://arxiv.org/abs/2511.03475)、[作者实现](https://github.com/EfficientContext/ContextPilot) | 上下文重叠索引、顺序对齐与去重注释。仓库已有会话内 `contextpilot` 对照；规范来源 READ 主线使用固定排序，未接作者跨会话索引/调度 | **条件候选**：重复来源因顺序变化损失前缀匹配时，先复用重排部分。无需训练但要 CPU 索引与同步；新顺序生成新的因果路径，不能直接拼接旧 KV。独立窗口顺序已稳定时机会可能小 |
+| [Adaptive TTL](https://arxiv.org/abs/1704.04448)／[hazard–TTL](https://aferragu.github.io/assets/pdf/sigmetrics16.pdf) | 用访问过程或重访风险估计期限。当前是粗特征、配对净成本与 TTL15/60/180，没有生存模型 | **条件候选**：粗桶被重访间隔差异明显误导时，用分组经验生存曲线替换重访概率部分，保留三个期限和 Native 净成本目标。无须神经网络；按共同观察窗处理右删失，同窗三个 TTL 不能重复计作三个访问样本 |
+| 预算覆盖、局部交换与精确小规模求解 | 当前 `allocate_retention` 比较价值排序和容量密度两次贪心；同一需求收益取 max、共享页按并集、每 owner 只选一期限 | **已有可执行近似方案**。只有发现明显容量碎片或组合遗漏时，再比较一次局部交换；小规模枚举可作离线选择上限。不要把非单调、双预算和多 owner 外部性当作标准最大覆盖保证，当前未实现完整集合效应学习 |
+| [CacheBlend](https://arxiv.org/abs/2405.16444)／[Cache-Craft](https://arxiv.org/abs/2502.15734) | 选择性重算以复用非前缀块，后者还管理上下文化 chunk 缓存与重算。当前均未实现 | **独立后续路线**：非前缀限制挡住大量有效重访时才值得考虑。无需微调 Qwen，但会改变 KV 执行过程，需要模型内部统计、重算与搬运计量；位置修正不能消除不同前文的因果差异 |
+| [LMCache](https://arxiv.org/abs/2510.09665)、[官方实现](https://github.com/LMCache/LMCache) | KV 存取与传输系统，可集成不同后端；当前未接入，已有 HiCache 双层能力 | **条件候选**：出现跨进程/节点共享或现有后端不覆盖的需要时。普通 KV 存取可保持精确语义，CacheBlend 是另外的可选能力；当前叠加两个管理层会增加连接器和搬运成本 |
+| [H2O](https://arxiv.org/abs/2306.14048)／[SnapKV](https://arxiv.org/abs/2404.14469)／[KIVI](https://arxiv.org/abs/2402.02750) | 按重要性保留 token KV，或对 KV 低位量化。当前未实现 | **本阶段不采用**。权重可冻结，但会改变完整 KV 或数值精度，已超出现有固定推理条件；需要独立 attention/kernel 与质量比较，不能并入 Native/TTL 期限对照后仍声称仅改变保留 |
+
+## 评价、充分性与错误归因
+
+| 方法与原始来源 | 可复用内容 | 本项目判断 |
+|---|---|---|
+| [Sufficient Context](https://arxiv.org/abs/2411.06037) | 区分上下文缺少回答信息和模型没有用好充分信息 | **优先局部候选**：将“候选充分→已读事实充分→最终可见结论充分”分开标注，复用 `evidence_diagnosis`、真实 traces 与 `reader_data`。需要离线核验；充分性可作诊断/特征，不能代替实际最终 ΔQ，也不自动成为硬停止条件 |
+| [RAGChecker](https://arxiv.org/abs/2408.08067) | claim 级蕴含诊断，区分检索和生成问题 | **借鉴归因维度**。当前已有 Claim DAG 与阶段审核，可复用实际事实减少重复提取；尚未集成其整套评分。额外 judge 成本属于离线费用，不替代登记的官方分数 |
+| [ALCE](https://aclanthology.org/2023.emnlp-main.398/) | 分开评价答案正确性及引用支持质量 | **借鉴来源核验**。引用存在不等于引用支持结论；当前来源链给核验材料，自动语义核验仍有成本。优先核对实际 ANSWER 的结论与引用，不另造多套验收分数 |
+| [ARES](https://aclanthology.org/2024.naacl-long.20/) | 合成数据训练轻量 judge，并用人工标注做 prediction-powered inference | **较后候选**：只有反复评分成本突出且具备独立人工标注时考虑。当前未实现 PPI；少量自动评分或普通 bootstrap 不能冒称其校正方法，正式作者指标继续保留 |
+| [Lost in the Middle](https://aclanthology.org/2024.tacl-1.9/) | 证据位置会影响长上下文利用，是布局的评价依据 | **用于解释现有布局对照**。固定来源前缀有缓存价值，但提取质量仍要测；最终结论的位置可与原文布局分别组织。无需因此增加一组长度/位置扫描实验 |
+
+## 收敛后的采用顺序
+
+1. **直接复用现有能力**：显式条件/版本、BM25+dense RRF、支持覆盖/偏好、共享提取与 CPU 算子、有限 Claim DAG、有界收益、原生前缀保留。是否切换配置由对应错误决定，不同时启用所有选项。
+2. **优先局部候选**：候选冗余→评分前 MMR；跨段关系漏召回→粗检索映射固定窗口；错误环节不清→上下文充分性分层；C 经验模型缺覆盖→无训练成本/频率 owner 对照。这些分别接现有池、目录、审核和分配入口。
+3. **条件成熟再扩展**：查询改写训练、late interaction、Late Chunking、RAPTOR、轻量非线性回归、经验生存模型。每项都需可定位的独立瓶颈，不按方法新旧排序。
+4. **另设执行路线**：CacheBlend/Cache-Craft、KV 剪枝/量化、跨节点缓存。它们改变的条件较多，本阶段不混入冻结 A 与 Native/TTL 主比较。
+
+未来恢复 GPU 后，只比较命中当前瓶颈的候选与现有方案；候选资料充分性、最终答案、完整响应和全部已付成本共同决定采用。当前不增加正式队列、模型训练或参数网格。
 
 ## 保留的可选对照
 
