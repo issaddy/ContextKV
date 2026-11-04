@@ -274,7 +274,8 @@ async def test_completed_reduction_is_offered_again_only_after_basis_expands(tmp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_material,existing_terminal", [(True, False), (False, False), (True, True)])
-async def test_bounded_infer_bridge_reads_terminal_once_and_empty_gap_stops(tmp_path, terminal_material, existing_terminal):
+@pytest.mark.parametrize("hard_steps", [2, 20])
+async def test_bounded_infer_bridge_reads_terminal_once_and_empty_gap_stops(tmp_path, terminal_material, existing_terminal, hard_steps):
     from training.plan_gain_protocol import BOUNDED_CONTINUATION
     from controller.reading import build_read_plan
     service, native, budget, captured, snapshot, old, _, _, binding, row, prep = await frozen_fixture(tmp_path)
@@ -283,6 +284,7 @@ async def test_bounded_infer_bridge_reads_terminal_once_and_empty_gap_stops(tmp_
         selected_units=captured.plan.selected_set.selected_units[:1])
     base = build_read_plan(task_state, selected, "selected_sources", captured.plan.budget,
         template=service.template, snapshot=snapshot, read_packing="source_windows")
+    base = replace(base, budget=replace(base.budget, max_steps=hard_steps))
     frozen = ReadingOutcome(base, auxiliary_usage=dict(ZERO_AUX))
     observed = observed_state_binding(frozen, snapshot, paid_cost=CompleteCost(500, 0, 0, 7, 0),
         native_condition=old["native_condition"], reader_checkpoint=old["reader_checkpoint"],
@@ -314,10 +316,14 @@ async def test_bounded_infer_bridge_reads_terminal_once_and_empty_gap_stops(tmp_
         binding=binding, preparation=prep, resources=Resources(), cache_start="observed",
         generation_budget=budget, observed=observed, gap_request=request, gap_provider=retrieve)
     assert run["status"] == "completed", run["failure"]
-    assert len(calls) == (0 if existing_terminal else 1)
-    assert run["new_action_counts"] == {"READ": 2 if terminal_material else 1,
-        "REDUCE": 0, "GAP_RETRIEVAL": 0 if existing_terminal else 1, "ANSWER": 1}
-    if terminal_material:
+    assert len(calls) == (0 if existing_terminal or hard_steps == 2 else 1)
+    assert run["new_action_counts"] == {"READ": 2 if terminal_material and hard_steps > 2 else 1,
+        "REDUCE": 0, "GAP_RETRIEVAL": 0 if existing_terminal or hard_steps == 2 else 1, "ANSWER": 1}
+    if hard_steps == 2:
+        assert len(run["steps"]) == 1
+        assert {claim["entity"] for claim in run["steps"][0]["result"]["claims"]} == {"R1"}
+        assert not any(step["step_id"].startswith("bounded-terminal:") for step in run["steps"])
+    if terminal_material and hard_steps > 2:
         assert run["steps"][-1]["task"]["input_claim_ids"]
     assert run["continuation_protocol"] == BOUNDED_CONTINUATION
     assert run["pre_action_quote"]["candidate_id"] is not None

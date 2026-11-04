@@ -335,7 +335,8 @@ class SourceDirectory:
             pieces = [need_text(ref) for ref in (*need.anchor_spans, *need.subject_refs)]
             pieces.extend(state.raw_question[ref.start:ref.end] if ref.turn_id == state.current_turn_id
                           else history_text(ref, memory)
-                          for condition in state.conditions for ref in condition.value_spans)
+                          for condition in state.conditions if condition.condition_id in need.condition_ids
+                          for ref in condition.value_spans)
             streams.append(recall("\n".join(pieces), profile.per_need_top_k, "need", need.need_id))
         archive = [key for key in memory.archive_source_keys if self._applicable(key, state, memory, temporal_sources=temporal)]
         archive = self.archive_search(state.query or state.raw_question, archive, top_k=profile.archive_top_k)

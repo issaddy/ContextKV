@@ -199,3 +199,5 @@ python -m bench.study_workloads --tasks TASKS.jsonl --arrivals DECLARED-ARRIVALS
 ```
 
 `DECLARED-ARRIVALS.json` 必须显式列出每道任务的相对到达秒数，例如 `{"session:1":0,"session:2":30}`；该示例不是已选定的正式负载。保存任务与到达映射哈希，E0—E4 复用同一声明；原生观测仍由未来真实执行产生。
+
+B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_state_v1`，使用实际已付资源和剩余额度；旧特征资产不能直接用于该决策。C 的两次容量构造共用原有 TTL15/60/180、owner、页并集和需求去重目标，不新增 TTL 网格或原生接口。

@@ -160,6 +160,18 @@ class RetentionChoice:
 def allocate_retention(requests, *, gpu_budget_tokens, host_budget_tokens,
                        lambda_gpu, lambda_host, protected_gpu_pages=frozenset(),
                        protected_host_pages=frozenset(), protected_requests=()):
+    """Compare value-ordered and capacity-density constructions on the same objective."""
+    requests, protected_requests = tuple(requests), tuple(protected_requests)
+    choices = tuple(_allocate_retention_greedy(requests, gpu_budget_tokens=gpu_budget_tokens,
+        host_budget_tokens=host_budget_tokens, lambda_gpu=lambda_gpu, lambda_host=lambda_host,
+        protected_gpu_pages=protected_gpu_pages, protected_host_pages=protected_host_pages,
+        protected_requests=protected_requests, density=density) for density in (False, True))
+    return max(choices, key=lambda selected: sum(choice.value for choice in selected))
+
+
+def _allocate_retention_greedy(requests, *, gpu_budget_tokens, host_budget_tokens,
+                              lambda_gpu, lambda_host, protected_gpu_pages,
+                              protected_host_pages, protected_requests, density):
     """Choose positive marginal value, counting a shared causal page only once.
 
     Value uses the next READ target saving, deduplicated against protected
@@ -226,7 +238,15 @@ def allocate_retention(requests, *, gpu_budget_tokens, host_budget_tokens,
                 candidates.append(choice)
         if not candidates:
             break
-        choice = max(candidates, key=lambda item: (item.value, item.owner_id))
+        def priority(item):
+            if not density:
+                return (False, item.value, item.value, item.owner_id)
+            capacity = ((item.marginal_gpu_tokens/gpu_budget_tokens if gpu_budget_tokens else 0)
+                        +(item.marginal_host_tokens/host_budget_tokens if host_budget_tokens else 0))
+            # Renewing an already covered page can add value without adding capacity.
+            return (capacity == 0, item.value/capacity if capacity else item.value,
+                    item.value, item.owner_id)
+        choice = max(candidates, key=priority)
         selected = requests[choice.owner_id, choice.ttl_seconds]
         requests = {key: request for key, request in requests.items() if request.owner_id != choice.owner_id}
         cover(selected)

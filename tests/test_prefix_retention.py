@@ -201,3 +201,17 @@ def test_complete_source_demand_identity_and_single_owner_collateral_are_distinc
     request = RetentionRequest("losing-owner", forecast, frozenset({"page"}), frozenset(), 64, "read")
     assert allocate_retention((request,), gpu_budget_tokens=64, host_budget_tokens=0,
                               lambda_gpu=0, lambda_host=0) == ()
+
+
+def test_capacity_density_combines_small_prefixes_without_losing_large_value_choice():
+    def request(owner, pages, gain):
+        forecast = PrefixForecast(60, 1, gain, 0, 0, 0, "scope", "specified-pair")
+        return RetentionRequest(owner, forecast, frozenset(pages), frozenset(), 64, owner)
+    small = (request("b", ["b"], 6), request("c", ["c"], 6))
+    def select(large_gain):
+        return allocate_retention((request("a", ["a1", "a2"], large_gain), *small),
+            gpu_budget_tokens=128, host_budget_tokens=0, lambda_gpu=0, lambda_host=0)
+    chosen = select(10)
+    assert {item.owner_id for item in chosen} == {"b", "c"}
+    assert sum(item.value for item in chosen) == 12
+    assert [item.owner_id for item in select(20)] == ["a"]

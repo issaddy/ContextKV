@@ -1,8 +1,10 @@
 """Need-specific conditions survive task interpretation and shared reading."""
 from dataclasses import replace
 import json
+from types import SimpleNamespace
 import unittest
 
+from adapters.evidence_pool import SourceDirectory
 from adapters.history_state import TaskInterpreter, TaskPrediction
 from adapters.support_model import query_view
 from controller.context_schema import Condition, Need, RetrievalState, TextRef
@@ -47,6 +49,33 @@ def prior_memory():
 
 
 class NeedConditionScopeTests(unittest.TestCase):
+    def test_retrieval_queries_use_only_explicit_active_condition_links(self):
+        prediction = initial_prediction()
+        for bindings, expected in (
+            ((("year23",), ("year24",)), ("2023", "2024")),
+            ((("year23",), ("year23",)), ("2023", "2023")),
+            ((("year23",), ()), ("2023", "")),
+            ((("retired",), ("year24",)), ("", "2024")),
+        ):
+            with self.subTest(bindings=bindings):
+                state = replace(interpret(prediction), needs=tuple(
+                    replace(need, condition_ids=ids)
+                    for need, ids in zip(prediction.needs, bindings, strict=True)))
+                queries = []
+
+                def search(query, *, top_k):
+                    queries.append(query)
+                    return ()
+
+                index = SimpleNamespace(blocks=(), source_metadata={}, retrieved_keys=lambda contexts: ())
+                directory = SourceDirectory(index, search, tokenizer=None)
+                pool = directory.retrieve_pool(state, RetrievalState(0))
+                self.assertEqual(queries[0], state.query or state.raw_question)
+                self.assertEqual(queries[1:], [
+                    "Count employees" + ("\n" + expected[0] if expected[0] else ""),
+                    "sum revenue" + ("\n" + expected[1] if expected[1] else "")])
+                self.assertEqual([row["need_id"] for row in pool.trace], ["", "count", "sum"])
+
     def test_independent_conditions_remain_separate_in_support_and_shared_reading(self):
         state = interpret(initial_prediction())
         self.assertEqual([need.condition_ids for need in state.needs], [("year23",), ("year24",)])

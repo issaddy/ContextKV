@@ -175,3 +175,40 @@ def test_cost_development_reports_use_deduplicated_direct_samples_and_bound_read
     assert report["cost_samples"] == 4 and report["unique_direct_samples"] == 1
     assert report["cost_errors"]["branch_complete_cost"]["complete_ms"]["mae"] < 1e-3
     assert set(model.feature_names) == set(FEATURE_NAMES)
+
+
+def test_observed_budget_features_use_actual_paid_state_and_hard_steps():
+    from controller.plan_policy import PlanCandidate, plan_features
+    from controller.serialization import decode
+    rows, state = paired_records()
+    row = rows[0]
+    plan = decode(PlanCandidate, row["plan"])
+    paid = decode(CompleteCost, row["observed_state_binding"]["paid_cost"])
+    before = plan_features(plan, state, paid_cost=paid)
+    after = plan_features(plan, state, paid_cost=replace(paid, input_tokens=paid.input_tokens+10,
+                                                       latency_ms=paid.latency_ms+20))
+    assert after["remaining_total_tokens"] == before["remaining_total_tokens"]-10
+    assert after["paid_complete_ms"] == before["paid_complete_ms"]+20
+    assert before["paid_steps"] == len(state.steps)
+    limited = replace(state, plan=replace(state.plan, budget=replace(state.plan.budget,
+        max_steps=len(state.steps)+2, max_complete_ms=20000)))
+    generous = replace(limited, plan=replace(limited.plan, budget=replace(limited.plan.budget,
+        max_steps=len(state.steps)+20)))
+    assert plan_features(plan, limited, paid_cost=paid)["remaining_hard_steps"] == 2
+    assert plan_features(plan, generous, paid_cost=paid)["remaining_hard_steps"] == 20
+    assert plan_features(plan, limited, paid_cost=paid)["remaining_complete_ms"] == 10000
+    assert before["complete_ms_unbounded"] == 1
+    assert plan_features(plan, limited, paid_cost=paid)["complete_ms_unbounded"] == 0
+    unbounded = replace(state, plan=replace(state.plan, budget=replace(state.plan.budget,
+        max_total_tokens=None)))
+    assert plan_features(plan, unbounded, paid_cost=paid)["total_tokens_unbounded"] == 1
+
+
+def test_observed_asset_cannot_silently_drop_budget_features(tmp_path):
+    model = PlanGainModel("reader", "profile", "old-observed", FEATURE_NAMES,
+        (0.,)*len(FEATURE_NAMES), (1.,)*len(FEATURE_NAMES), (0.,)*len(FEATURE_NAMES), 0.,
+        {"trained_semantic_kinds": ["read_once"]})
+    path = tmp_path/"old.json"
+    model.save(path)
+    with pytest.raises(ValueError, match="budget feature schema"):
+        PlanGainModel.load(path, reader_checkpoint="reader", reader_profile_id="profile")

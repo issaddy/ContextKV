@@ -284,7 +284,11 @@ class FixedCounterfactualRuntime:
             if not pending:
                 continued = True
                 ready_terminal = continuation_read(state, self.initial_state.plan)
+                paid_steps = len(state.steps)+self.new_action_counts["GAP_RETRIEVAL"]
+                remaining_steps = plan.budget.max_steps-paid_steps
                 if ready_terminal is not None:
+                    if remaining_steps < 2:  # terminal READ plus committed ANSWER
+                        break
                     task = replace(ready_terminal, step_id="bounded-terminal:"+ready_terminal.step_id,
                         predecessor_step_ids=(), input_claim_ids=tuple(claim.claim_id for claim in state.claims))
                     plan = replace(plan, steps=(*plan.steps, task))
@@ -292,10 +296,14 @@ class FixedCounterfactualRuntime:
                 else:
                     gaps = continuation_gap(state, used_gap=bool(self.new_action_counts["GAP_RETRIEVAL"]))
                     if gaps and self.gap_provider is not None and self.gap_request is not None:
+                        if remaining_steps < 3:  # GAP, terminal READ, ANSWER
+                            break
                         request = replace(self.gap_request, open_needs=gaps, query=gap_query(plan.task_state, gaps))
                         pool = await retrieve(request)
                     elif self.new_action_counts["GAP_RETRIEVAL"] and any(
                             need.operation == "infer" for need in plan.task_state.needs):
+                        if remaining_steps < 2:  # registered GAP already paid
+                            break
                         pool = self.gap_result["pool"]
                     else:
                         break

@@ -16,7 +16,7 @@ import time
 
 from controller.context_schema import ReadingOutcome
 from controller.action_proposals import BOUNDED_CONTINUATION, validate_action_counts
-from controller.plan_policy import NATIVE_COST_SCHEMA, PlanCandidate, plan_cost_features, plan_features
+from controller.plan_policy import OBSERVED_FEATURE_SCHEMA, CompleteCost, NATIVE_COST_SCHEMA, PlanCandidate, plan_cost_features, plan_features
 from controller.schema import CacheQuoteBatch, SessionSnapshot
 from controller.serialization import decode
 from training.train_plan_gain import (COST_FIELDS, PlanGainModel, _fit_features, _ridge,
@@ -148,13 +148,14 @@ def completion_record(before, run):
                 for span in units[identity].source_spans:
                     covered.setdefault(str(span.source_key), []).append((span.start, span.end))
     required_chars, covered_chars = _size(required), _size(covered)
+    paid = None if observed is None else decode(CompleteCost, observed["paid_cost"])
     cost_features = None
     if observed is not None and (native := run.get("pre_action_quote")) is not None:
         batch = decode(CacheQuoteBatch, native["batch"])
         first = (None if native["candidate_id"] is None else
                  next(quote for quote in batch.quotes if quote.candidate_id == native["candidate_id"]))
         cost_features = plan_cost_features(plan_features(planned, state,
-            output_budgets=run["executed_output_budgets"]), batch, first)
+            output_budgets=run["executed_output_budgets"], paid_cost=paid), batch, first)
     return {"schema_version": 2, "source": "actual_plan_completion", "record_id": digest([
             key, run["plan_id"], run["actual_native_calls"], run["qa_increment"]]),
         "state_key": key, "task_id": run["task_id"], "conversation_id": run["conversation_id"],
@@ -169,7 +170,7 @@ def completion_record(before, run):
         "effective_utility": utility, "effective_final_coverage": effective_coverage,
         "utility_rule": RULE, "read_source_char_fraction": covered_chars/required_chars if required_chars else None,
         "read_original_characters": covered_chars, "required_original_characters": required_chars,
-        "features": plan_features(planned, state), "cost_features": cost_features,
+        "features": plan_features(planned, state, paid_cost=paid), "cost_features": cost_features,
         "pre_registration": before, "actual_run": run}
 
 
@@ -338,7 +339,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
         cost_scale[cost_scale == 0] = 1.0
         cost_models, cost_mse = fit_cost_heads(samples, cost_names, cost_center, cost_scale,
             ridge=ridge, targets=("branch_complete_cost",))
-        cost_provenance = {"continuation_protocol": BOUNDED_CONTINUATION,
+        cost_provenance = {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA, "continuation_protocol": BOUNDED_CONTINUATION,
             "source": "actual_observed_terminal_branch_and_paired_direct_costs",
             "feature_schema": NATIVE_COST_SCHEMA, "feature_names": cost_names,
             "center": cost_center.tolist(), "scale": cost_scale.tolist(),
@@ -351,7 +352,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
     return PlanGainModel(training[0]["reader_checkpoint"], training[0]["reader_profile_id"],
         "effective-plan-gain:"+digest(training), names, tuple(center.tolist()), tuple(scale.tolist()),
         tuple(coefficients.tolist()), float(intercept),
-        {"continuation_protocol": BOUNDED_CONTINUATION,
+        {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA, "continuation_protocol": BOUNDED_CONTINUATION,
          "continuation_gap_limits": training[0]["counterfactual"]["actual_run"]["continuation_gap_limits"],
          "resident_model_manifest_digests": sorted(resident_digests),
          "label": LABEL, "utility_rule": RULE, "no_answer_utility": 0.0, "raw_missing_quality_preserved": True,

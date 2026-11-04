@@ -30,6 +30,14 @@ ACTION_SIZE_FEATURE_NAMES = ("planned_read_chars", "reduce_input_claim_chars", "
 FEATURE_NAMES = (*PLAN_KINDS, *STRUCTURAL_FEATURE_NAMES, *ACTION_SIZE_FEATURE_NAMES)
 
 
+OBSERVED_FEATURE_SCHEMA = "pre_action_budget_state_v1"
+BUDGET_FEATURE_NAMES = ("paid_total_tokens", "paid_complete_ms", "paid_steps",
+    "total_tokens_cap", "total_tokens_unbounded", "remaining_total_tokens",
+    "hard_steps_cap", "remaining_hard_steps", "complete_ms_cap",
+    "complete_ms_unbounded", "remaining_complete_ms")
+OBSERVED_FEATURE_NAMES = (*FEATURE_NAMES, *BUDGET_FEATURE_NAMES)
+
+
 class NoCompletePlan(ValueError):
     """All evaluated complete routes were infeasible; evaluations are retained."""
 
@@ -223,7 +231,7 @@ def _completed_steps(plan, state):
     return completed
 
 
-def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=None):
+def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=None, paid_cost: CompleteCost | None = None):
     """Structure and current state only; oracle scores never enter features."""
     completed = _completed_steps(plan, state)
     remaining = [step.task for step in plan.steps if step.task.step_id not in completed]
@@ -260,7 +268,24 @@ def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=
         existing_claim_chars=sum(claim_chars(claim) for claim in state.claims),
         working_history_chars=sum(ref.end-ref.start for ref in state.plan.task_state.working_history),
         answer_body_tokens=plan.context_plan.budget.body_tokens)
-    return {name: float(values[name]) for name in FEATURE_NAMES}
+    if paid_cost is not None:
+        import math
+        if any(not math.isfinite(value) or value < 0 for value in
+               (paid_cost.input_tokens, paid_cost.output_tokens, paid_cost.latency_ms)):
+            raise ValueError("budget features require measured nonnegative paid cost")
+        budget = state.plan.budget
+        paid_tokens = paid_cost.input_tokens + paid_cost.output_tokens
+        values.update(paid_total_tokens=paid_tokens, paid_complete_ms=paid_cost.latency_ms,
+            paid_steps=len(state.steps), hard_steps_cap=budget.max_steps,
+            remaining_hard_steps=budget.max_steps-len(state.steps))
+        for stem, cap, spent in (("total_tokens", budget.max_total_tokens, paid_tokens),
+                                  ("complete_ms", budget.max_complete_ms, paid_cost.latency_ms)):
+            # Unbounded coordinates are masked by an explicit flag, never measured.
+            values[stem+"_unbounded"] = float(cap is None)
+            values[stem+"_cap"] = 0 if cap is None else cap
+            values["remaining_"+stem] = 0 if cap is None else cap-spent
+    names = OBSERVED_FEATURE_NAMES if paid_cost is not None else FEATURE_NAMES
+    return {name: float(values[name]) for name in names}
 
 
 NATIVE_COST_SCHEMA = "pre_action_native_absolute_v1"

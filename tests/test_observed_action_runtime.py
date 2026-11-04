@@ -6,7 +6,7 @@ import pytest
 
 from bench.mock_engine import MockEngine
 from controller.context_schema import EvidencePool
-from controller.plan_policy import PLAN_KINDS
+from controller.plan_policy import PLAN_KINDS, OBSERVED_FEATURE_NAMES, OBSERVED_FEATURE_SCHEMA
 from controller.rolling_policy import RollingPlanRuntime
 from training.collect_plan_gains import export_observed_packets
 from test_plan_policy import SpecifiedGainFixture
@@ -15,15 +15,17 @@ from test_rolling_policy import NativeObservationFixture, setup_controller
 
 
 class LearnedFixture(SpecifiedGainFixture):
-    """Declared test coefficients/costs with the same strict action scope as a v2 asset."""
+    """Declared test coefficients/costs with the same strict action and budget schema as the current asset."""
     kinds = {"direct_answer", "read_once", "reduce_once", "gap_retrieval"}
 
     def __init__(self, reads=1, gap_gain=-.1, reduce_gain=-.1, direct_ms=10, read_ms=20):
         self.reads, self.gap_gain, self.reduce_gain = reads, gap_gain, reduce_gain
         self.direct_ms, self.read_ms = direct_ms, read_ms
         from controller.action_proposals import BOUNDED_CONTINUATION
-        self.cost_provenance = {}
-        self.provenance = {"continuation_protocol": BOUNDED_CONTINUATION,
+        self.feature_names = OBSERVED_FEATURE_NAMES
+        self.cost_provenance = {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA}
+        self.provenance = {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA,
+            "continuation_protocol": BOUNDED_CONTINUATION,
             "continuation_gap_limits": {"max_units": 2, "max_passages": 2}}
         self.quality_calls = []
 

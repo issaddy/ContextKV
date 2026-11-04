@@ -16,11 +16,11 @@ import math
 from pathlib import Path
 import time
 
-from controller.plan_policy import (FEATURE_NAMES, LEGACY_FEATURE_NAMES, LEGACY_PLAN_KINDS, NATIVE_COST_SCHEMA,
+from controller.plan_policy import (FEATURE_NAMES, OBSERVED_FEATURE_NAMES, OBSERVED_FEATURE_SCHEMA, CompleteCost, LEGACY_FEATURE_NAMES, LEGACY_PLAN_KINDS, NATIVE_COST_SCHEMA,
                                      PLAN_KINDS, PlanCandidate, complete_plan, plan_features)
 from controller.context_schema import ReadingOutcome
 from controller.schema import SessionSnapshot
-from controller.serialization import to_jsonable
+from controller.serialization import to_jsonable, decode
 
 
 COST_FIELDS = ("complete_ms", "gpu_gib_seconds", "host_gib_seconds",
@@ -121,6 +121,7 @@ def build_gain_record(plan: PlanCandidate, state: ReadingOutcome, snapshot: Sess
         raise ValueError("DeltaQ baseline must be direct ANSWER without newly paid reading")
     if counterfactual["plan_id"] != plan.plan_id:
         raise ValueError("counterfactual answer must execute the labelled complete plan")
+    paid = None if observed is None else decode(CompleteCost, observed["paid_cost"])
     record = {"schema_version": 1, "record_id": _digest([expected_state, plan.plan_id,
             direct["native_receipts"], counterfactual["native_receipts"]]),
         "source": "actual_answer_counterfactual", "split": direct["split"],
@@ -129,7 +130,7 @@ def build_gain_record(plan: PlanCandidate, state: ReadingOutcome, snapshot: Sess
         "reader_checkpoint": direct["reader_checkpoint"], "reader_profile_id": direct["reader_profile_id"],
         "scorer_identity": direct["scorer_identity"], "comparison_budget": direct["comparison_budget"],
         "plan_id": plan.plan_id, "semantic_kind": plan.semantic_kind,
-        "features": plan_features(plan, state, output_budgets=counterfactual.get("output_budgets")),
+        "features": plan_features(plan, state, output_budgets=counterfactual.get("output_budgets"), paid_cost=paid),
         "quality_direct": direct["quality"], "quality_counterfactual": counterfactual["quality"],
         "delta_q": counterfactual["quality"]-direct["quality"],
         "incremental_complete_cost": {name: counterfactual["cost"][name]-direct["cost"][name]
@@ -142,7 +143,7 @@ def build_gain_record(plan: PlanCandidate, state: ReadingOutcome, snapshot: Sess
         direct_plan = complete_plan(replace(state.plan, plan_id=direct["plan_id"],
             steps=tuple(step.task for step in state.steps)), (), semantic_kind="direct_answer",
             reader_checkpoint=plan.reader_checkpoint)
-        record["direct_features"] = plan_features(direct_plan, state, output_budgets=direct.get("output_budgets"))
+        record["direct_features"] = plan_features(direct_plan, state, output_budgets=direct.get("output_budgets"), paid_cost=paid)
         record["cost_targets"] = observed_cost_targets(direct, counterfactual)
     return record
 
@@ -228,8 +229,17 @@ class PlanGainModel:
         if data["reader_checkpoint"] != reader_checkpoint or data["reader_profile_id"] != reader_profile_id:
             raise ValueError("gain asset requires its measured reader checkpoint and runtime profile")
         if (len(set(data["feature_names"])) != len(data["feature_names"])
-                or not set(data["feature_names"]) <= set(FEATURE_NAMES)):
+                or not set(data["feature_names"]) <= set(OBSERVED_FEATURE_NAMES)):
             raise ValueError("gain asset declares unknown or duplicate online plan features")
+        observed = bool(set(data["provenance"].get("trained_semantic_kinds", ())) - set(LEGACY_PLAN_KINDS))
+        if observed or data["provenance"].get("observed_feature_schema") is not None:
+            if (data["provenance"].get("observed_feature_schema") != OBSERVED_FEATURE_SCHEMA
+                    or tuple(data["feature_names"]) != OBSERVED_FEATURE_NAMES
+                    or data.get("cost_provenance", {}).get("observed_feature_schema") != OBSERVED_FEATURE_SCHEMA):
+                raise ValueError("observed action asset requires the current pre-action budget feature schema")
+            cost_names = data["cost_provenance"].get("feature_names", data["feature_names"])
+            if not set(OBSERVED_FEATURE_NAMES) <= set(cost_names):
+                raise ValueError("observed cost asset omits pre-action budget features")
         for name in ("feature_names", "center", "scale", "coefficients"):
             data[name] = tuple(data[name])
         return cls(**data)
@@ -274,6 +284,19 @@ def _supervision(rows, *, split):
             if (row["observed_state_binding"].get("continuation_protocol") != BOUNDED_CONTINUATION
                     or direct["continuation_gap_limits"] != counterfactual["continuation_gap_limits"]):
                 raise ValueError("gain branches use different bounded continuation definitions")
+            state = decode(ReadingOutcome, row["working_state"])
+            plan = decode(PlanCandidate, row["plan"])
+            paid = decode(CompleteCost, row["observed_state_binding"]["paid_cost"])
+            expected_features = plan_features(plan, state,
+                output_budgets=counterfactual.get("output_budgets"), paid_cost=paid)
+            direct_plan = complete_plan(replace(state.plan, plan_id=direct["plan_id"],
+                steps=tuple(step.task for step in state.steps)), (), semantic_kind="direct_answer",
+                reader_checkpoint=plan.reader_checkpoint)
+            if row["direct_features"] != plan_features(direct_plan, state,
+                    output_budgets=direct.get("output_budgets"), paid_cost=paid):
+                raise ValueError("direct cost features differ from the bound pre-action paid budget state")
+            if row["features"] != expected_features:
+                raise ValueError("observed features or action one-hot values differ from the bound pre-action paid budget state")
             if row["cost_targets"] != observed_cost_targets(direct, counterfactual):
                 raise ValueError("cost labels must equal the actual observed complete response costs")
             if row["incremental_complete_cost"] != row["cost_targets"]["incremental_complete_cost"]:
@@ -283,7 +306,10 @@ def _supervision(rows, *, split):
 
 def _fit_features(rows):
     names = tuple(rows[0]["features"])
-    selected = FEATURE_NAMES if set(names) == set(FEATURE_NAMES) else LEGACY_FEATURE_NAMES
+    selected = (OBSERVED_FEATURE_NAMES if set(names) == set(OBSERVED_FEATURE_NAMES) else
+                FEATURE_NAMES if set(names) == set(FEATURE_NAMES) else LEGACY_FEATURE_NAMES)
+    if any(row.get("observed_state_binding") is not None for row in rows) and selected != OBSERVED_FEATURE_NAMES:
+        raise ValueError("observed supervision requires measured pre-action budget features and action one-hot values")
     if any(set(row["features"]) != set(selected) for row in rows):
         raise ValueError("fit one declared current or legacy feature schema without zero-filling new actions")
     if any(row["semantic_kind"] not in LEGACY_PLAN_KINDS and row["semantic_kind"] not in selected for row in rows):
@@ -358,6 +384,7 @@ def fit_gain(rows, *, ridge=1.0, input_path=None):
     if cost_samples:
         cost_models, cost_mse = fit_cost_heads(cost_samples, names, center, scale, ridge=ridge)
         cost_provenance = {"source": "actual_observed_action_and_paired_direct_complete_response_costs",
+            "observed_feature_schema": OBSERVED_FEATURE_SCHEMA,
             "training_samples": len(cost_samples), "action_samples": len(cost_samples)-direct_count,
             "unique_direct_samples": direct_count,
             "record_ids": [row["record_id"] for row in rows if row.get("observed_state_binding") is not None],
@@ -369,7 +396,8 @@ def fit_gain(rows, *, ridge=1.0, input_path=None):
     digest = _digest(rows)
     return PlanGainModel(reader, profile, "plan-gain:"+digest, names,
         tuple(center.tolist()), tuple(scale.tolist()), tuple(coefficients.tolist()), float(intercept),
-        {"label": "actual_final_quality_minus_actual_direct_answer_quality",
+        {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA if cost_samples else None,
+         "label": "actual_final_quality_minus_actual_direct_answer_quality",
          "continuation_protocol": BOUNDED_CONTINUATION,
          "continuation_gap_limits": rows[0]["counterfactual_run"]["continuation_gap_limits"]
              if rows[0].get("observed_state_binding") is not None else None,

@@ -924,7 +924,24 @@
       "rule": "per-track original metric, declared/completed/scored denominators and unknown-score bounds; registered mixed-Q unchanged",
       "cpu_validation": "11 study metrics and measurement checks passed"
     },
-    "arrival_preparation": "CPU-only explicit arrivals JSON entry implemented; records-based export retained for future observed traces; no formal timing values inferred from discarded records"
+    "arrival_preparation": "CPU-only explicit arrivals JSON entry implemented; records-based export retained for future observed traces; no formal timing values inferred from discarded records",
+    "method_implementation_followthrough": {
+      "scope": "code and scripted CPU mechanism validation only; no model fitting/inference or GPU",
+      "A": "Need-specific retrieval uses only explicitly linked active conditions",
+      "B": "pre_action_budget_state_v1 in online/paired features; optional continuation reserves terminal ANSWER steps",
+      "C": "compare absolute marginal value and incremental-capacity-density constructions under the same deduplicated objective",
+      "cpu_evidence": {
+        "A_query_checks": "8 passed with6subtests",
+        "B_observed_runtime_checks": 7,
+        "B_bounded_protocol_checks": 14,
+        "C_allocator_and_owner_checks": 12,
+        "C_specified_counterexample": {
+          "old_objective": 10,
+          "new_objective": 12,
+          "scope": "specified forecast fixture, not measured latency/quality"
+        }
+      }
+    }
   },
   "raw_artifact_availability": {
     "status": "discarded_by_user",

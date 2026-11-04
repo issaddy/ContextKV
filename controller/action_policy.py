@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from .plan_policy import (NATIVE_COST_SCHEMA, CompleteCost, Decision, NextStep, NoCompletePlan, PlanEvaluation,
+from .plan_policy import (NATIVE_COST_SCHEMA, OBSERVED_FEATURE_SCHEMA, OBSERVED_FEATURE_NAMES, CompleteCost, Decision, NextStep, NoCompletePlan, PlanEvaluation,
                           _completed_steps, plan_cost_features, plan_features)
 from .reading import step_generation_kind
 from .action_proposals import BOUNDED_CONTINUATION
@@ -34,6 +34,10 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes):
         raise ValueError("observed action asset belongs to a different reader checkpoint/profile")
     if model.provenance.get("continuation_protocol") != BOUNDED_CONTINUATION:
         raise ValueError("observed action asset uses a different bounded continuation protocol")
+    if (model.provenance.get("observed_feature_schema") != OBSERVED_FEATURE_SCHEMA
+            or tuple(model.feature_names) != OBSERVED_FEATURE_NAMES
+            or model.cost_provenance.get("observed_feature_schema") != OBSERVED_FEATURE_SCHEMA):
+        raise ValueError("observed action asset requires the current pre-action budget feature schema")
     quotes = {quote.candidate_id: quote for quote in native.quotes.quotes}
     native_cost = model.cost_provenance.get("feature_schema") == NATIVE_COST_SCHEMA
     direct_prediction = None
@@ -111,7 +115,7 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes):
             if len(state.steps)+len(ordered) > state.plan.budget.max_steps:
                 reason = "cumulative_step_budget"
             reason = reason or policy._constraint(native.paid_cost+current, state.plan.budget)
-            features = plan_features(plan, state, output_budgets={task.step_id: output})
+            features = plan_features(plan, state, output_budgets={task.step_id: output}, paid_cost=native.paid_cost)
             cost_features = (plan_cost_features(features, native.quotes, quote if candidate is not None else None)
                              if native_cost else features)
             predicted = model.predict_costs(cost_features)
