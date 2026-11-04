@@ -57,9 +57,12 @@ class NumericEngine(MockEngine):
             self.selections += 1
             # Each view keeps its eligible source facts, including missing/zero mass.
             views = response_schema["properties"]["views"]["properties"]
+            rendered = bytes(kwargs["input_ids"]).decode()
+            payload = json.loads(rendered.split("<|user|>\n")[-1].split("\n<|end|>")[0])
             self.response_text = json.dumps({"format_version": 7,
-                "views": {alias: {parent: decision.get("const", True)
-                    for parent, decision in value["properties"].items()} for alias, value in views.items()}})
+                "views": {alias: {parent: payload["needs"][alias]["operation"] == "count"
+                    or payload["parents"][parent]["value"] is not None
+                    for parent in value["properties"]} for alias, value in views.items()}})
         else:
             self.reads += 1
             self.response_text = json.dumps(self.output)
@@ -234,17 +237,28 @@ def test_numeric_selection_requires_last_parent_decision_and_preserves_rejected_
             shared_need_ids=('shipment-mass',)),
         EvidenceClaim('last-valid', 'shipment-count', 'extract',
             text='Inventory-3-035: 35 credits.', entity='Inventory-3-035', value='35', unit='credits',
-            shared_need_ids=('shipment-mass',)),
+            source_spans=plan.selected_set.selected_units[0].source_spans, shared_need_ids=()),
+        EvidenceClaim('missing-quantity', 'shipment-count', 'extract',
+            text='Inventory-3-036 quantity unstated.', entity='Inventory-3-036', value=None, unit=''),
     )
     schema = output_schema(task, claims=claims)
     assert schema['properties']['format_version']['const'] == 7
     for view in schema['properties']['views']['properties'].values():
-        assert view['required'] == ['p0', 'p1']
+        assert view['required'] == ['p0', 'p1', 'p2']
+        assert view['properties']['p1'] == {'type': 'boolean'}
+    assert schema['properties']['views']['properties']['n0']['properties']['p2'] == {'type': 'boolean'}
+    assert schema['properties']['views']['properties']['n1']['properties']['p2'] == {
+        'type': 'boolean', 'const': False}
     output = {'format_version': 7,
-              'views': {'n0': {'p0': False, 'p1': True}, 'n1': {'p0': False, 'p1': True}}}
+              'views': {'n0': {'p0': False, 'p1': True, 'p2': False},
+                        'n1': {'p0': False, 'p1': True, 'p2': False}}}
     selected = parse_read_result(task, json.dumps(output), claims=claims)
     assert [claim.parent_claim_ids for claim in selected.claims] == [('last-valid',), ('last-valid',)]
     assert all(claim.text == claims[1].text for claim in selected.claims)
+    assert not claims[1].serves('shipment-mass')
+    assert selected.claims[1].need_id == 'shipment-mass'
+    assert (selected.claims[1].value, selected.claims[1].unit, selected.claims[1].source_spans) == \
+        (claims[1].value, claims[1].unit, claims[1].source_spans)
     del output['views']['n1']['p1']
     with pytest.raises(ValueError, match='every parent'):
         parse_read_result(task, json.dumps(output), claims=claims)

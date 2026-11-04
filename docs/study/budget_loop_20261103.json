@@ -2,7 +2,7 @@
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
   "gpu_status": "Active task resumed from PR3; canonical-A minimum native verification uses only GPU2 on hangu7. Prior B/C/P1 batches remain completed; no old follow-on queue restarted.",
-  "evidence_scope": "Historical full350 pre-freeze P0 Q=0.6575398416096789 versus registered0.44509019347880296. Current canonical-A continuation is not frozen; B bounded continuation and C independent calibration/joint acceptance remain pending.",
+  "evidence_scope": "Historical full350 pre-freeze P0 Q=0.6575398416096789 versus registered0.44509019347880296. Current canonical-A protocol interface frozen for B/C implementation after local native semantic checks; final frozen350 acceptance pending.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
     "layout": "source_first",
@@ -796,7 +796,7 @@
     "implementation_commit": "f043aa0",
     "window_tokens": 2048,
     "max_nonempty_lines": 8,
-    "status": "source prefix verified; selector omission repair under validation; A not frozen",
+    "status": "A protocol interface frozen for B/C implementation; formal350 adoption/quality/resource comparison pending",
     "tokenizer_prefix": "runs/study/budget-loop-20261103/canonical-a/tokenizer-prefix.json",
     "prefix_native_probe": {
       "artifact": "runs/study/budget-loop-20261103/canonical-a/prefix/manifest.json",
@@ -843,8 +843,38 @@
     },
     "limitations": [
       "2048-window long input exceeds historical dynamic-window input; no net resource improvement claimed",
-      "selector7 needs saved-error native replay",
-      "case006 consistent=false extraction conflicts with explicit matching final values; scoring check pending"
-    ]
+      "two saved states still have semantic selector omissions",
+      "case006 consistent=false extraction conflicts with explicit matching final values; independent scoring check pending"
+    ],
+    "selector_replay": {
+      "initial": "runs/study/budget-loop-20261103/canonical-a/selector7",
+      "shared_basis_failed": "runs/study/budget-loop-20261103/canonical-a/selector7-shared-basis",
+      "quantity_constrained": "runs/study/budget-loop-20261103/canonical-a/selector7-quantity",
+      "corrected": {
+        "002_sum": 630,
+        "010_count": 43,
+        "012_sum": 903,
+        "004_sum": 780
+      },
+      "remaining": {
+        "005_sum": {
+          "actual": 759,
+          "expected": 780,
+          "stage": "selector falsely excludes existing21credits"
+        },
+        "007_sum": {
+          "actual": 1222,
+          "expected": 1225,
+          "stage": "selector falsely excludes existing3credits"
+        }
+      },
+      "scope": "existing READ facts; only changed selector/native generation and CPU recalculation, not end-to-end quality"
+    },
+    "read_error_replay": {
+      "artifact": "runs/study/budget-loop-20261103/canonical-a/read-errors",
+      "requests": 5,
+      "003": "complete30credits with no output truncation",
+      "015": "complete24credits with original unit"
+    }
   }
 }

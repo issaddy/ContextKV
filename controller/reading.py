@@ -289,10 +289,15 @@ def shared_numeric_schema(task, schema, units, claims, numeric_identity):
 def output_schema(task, units=(), claims=(), *, reading_mode="typed_reduce", numeric_identity="names"):
     if task.operation == "numeric_select":
         needs, _, _ = numeric_aliases(task, (), claims)
+        operations = {identity: operation for scope in task.shared_numeric_scopes
+                      for identity, operation in zip(scope.need_ids, scope.operations, strict=True)}
         views = {}
         for alias, need_id in needs.items():
-            decisions = {f"p{index}": {"type": "boolean", **({} if claim.serves(need_id)
-                else {"const": False})} for index, claim in enumerate(claims)}
+            # Reassess READ aliases, while sum still requires a source quantity.
+            operation = operations[need_id]
+            decisions = {f"p{index}": {"type": "boolean", **(
+                {"const": False} if operation == "sum" and claim.value is None else {})}
+                for index, claim in enumerate(claims)}
             views[alias] = {"type": "object", "additionalProperties": False,
                            "properties": decisions, "required": list(decisions)}
         return {"type": "object", "additionalProperties": False,
@@ -812,7 +817,8 @@ def numeric_selection_task(plan, results, claims=None, *, need_id):
     task = ReadTask(step_id, "REDUCE", (need_id,), input_claim_ids=basis,
         reduction_basis_claim_ids=basis, predecessor_step_ids=read_ids,
         input_budget=plan.budget.window_tokens-output_budget, output_budget=output_budget,
-        operation="numeric_select")
+        operation="numeric_select",
+        shared_numeric_scopes=numeric_read_scopes(plan.task_state, plan.selected_set.selected_units))
     return replace(task, output_schema=output_schema(task, claims=extracted))
 
 
@@ -899,8 +905,6 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
                 chosen = tuple(dict.fromkeys(view))
             for parent_alias in chosen:
                 parent = by_id[parents[parent_alias]]
-                if not parent.serves(need_id):
-                    raise ValueError("numeric selection parent does not serve the Need")
                 selected.append(replace(parent, claim_id=f"{task.step_id}:claim:{len(selected)}",
                     need_id=need_id, kind="derived", operation="numeric_select",
                     parent_claim_ids=(parent.claim_id,), shared_need_ids=()))
