@@ -343,8 +343,8 @@ class RollingPlanRuntime:
 
     async def _run_gap(self, attempt_id, task, request, state, snapshot, template, executor, expanded,
                        provider, events, arrived):
-        from .action_proposals import gap_key
-        from .evidence_planner import _passages, close_dependencies
+        from .action_proposals import gap_key, gap_retrieval_plan
+        from .evidence_planner import _passages
         from .execution import require_online_tokens
         from .session_store import ReadingProgress
         tick = time.monotonic()
@@ -357,14 +357,7 @@ class RollingPlanRuntime:
         executor.store.save_reading_progress(attempt_id, state.plan,
             ReadingProgress(tuple(sorted(expanded)), (), state.auxiliary_usage))
         events.emit("rolling_gap_selected", attempt_id=attempt_id, request=request, step_id=task.step_id)
-        read_ids = tuple(dict.fromkeys(identity for result in state.results for identity in result.covered_units))
-        units = {unit.unit_id: unit for unit in state.plan.selected_set.selected_units}
-        read_units = close_dependencies(read_ids, units)
-        cap = len(_passages(read_units))+request.limits["max_passages"]
-        if state.plan.budget.max_passages is not None:
-            cap = min(cap, state.plan.budget.max_passages)
-        read_base = replace(state.plan, selected_set=replace(state.plan.selected_set, selected_units=read_units),
-                            budget=replace(state.plan.budget, max_passages=cap))
+        read_base = gap_retrieval_plan(state, request)
         pool = await provider(read_base, request.open_needs, state.claims)
         ended = time.monotonic()
         record = replace(record, result=ReadResult(task.step_id, raw_output=dumps(pool), elapsed_ms=(ended-tick)*1000),

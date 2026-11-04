@@ -880,7 +880,7 @@
   },
   "implementation_20261104": {
     "status": "core local implementation audited; continuing CPU-only diagnostics and delivery preparation; model training/inference and GPU measurements held",
-    "B_protocol": "infer_bridge_ready_or_one_gap_one_terminal_read_v2",
+    "B_protocol": "infer_bridge_ready_or_one_gap_one_terminal_read_v3",
     "C_asset_kind": "paired_native_retention_v5",
     "C_selection": "deduplicated target savings minus control, incremental residency and paired external-request penalty; full protected-set net must be measured",
     "arrival_protocol": "fixed_arrivals with shared per-dataset manifests; history and semaphore waits included in response and decision budgets",

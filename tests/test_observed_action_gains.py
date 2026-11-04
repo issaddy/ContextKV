@@ -1,11 +1,8 @@
 """CPU protocol fixtures exercise action collection; these are not GPU reward measurements."""
-from copy import deepcopy
 from dataclasses import replace
 import json
 
-import httpx
 import pytest
-import yaml
 
 from bench.mock_engine import MockEngine
 from controller.context_schema import (
@@ -25,7 +22,7 @@ from training.collect_plan_gains import collect_pair
 from training.plan_gain_protocol import (
     GapRetrievalRequest, ZERO_AUX, build_observed_action_plans, gap_query, observed_state_binding,
 )
-from training.plan_gain_rollout import GenerationBudget, bounded_engine, execute_branch, observed_rows
+from training.plan_gain_rollout import GenerationBudget, bounded_engine, execute_branch
 
 
 class Reader(MockEngine):
@@ -145,6 +142,9 @@ async def test_frozen_nonempty_state_runs_each_single_action_without_replaying_o
         before = json.loads((tmp_path / "gap_retrieval" / "before.json").read_text())
         assert before["gap_request"] == to_jsonable(registered)
         assert registered == request and claims == frozen.claims
+        assert {unit.unit_id for unit in plan.selected_set.selected_units} == {"R1"}
+        assert {unit.unit_id for unit in frozen.plan.selected_set.selected_units} == {"R1", "R2"}
+        assert plan.budget.max_passages == 2  # one completed passage plus one new passage
         calls.append(registered)
         block, unit = material("R3")
         return EvidencePool((unit,), (block,), auxiliary_usage={"input_tokens": 3,

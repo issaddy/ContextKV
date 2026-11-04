@@ -28,6 +28,21 @@ def gap_query(state, open_needs):
     return "\n\n".join(SourceDirectory.open_need_query(state, need) for need in open_needs)
 
 
+def gap_retrieval_plan(state, request):
+    """The retriever excludes completed source ranges, not unread candidates."""
+    from .evidence_planner import _passages, close_dependencies
+
+    plan = state.plan
+    covered = tuple(dict.fromkeys(identity for result in state.results for identity in result.covered_units))
+    units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+    read_units = close_dependencies(covered, units)
+    cap = len(_passages(read_units)) + request.limits["max_passages"]
+    if plan.budget.max_passages is not None:
+        cap = min(cap, plan.budget.max_passages)
+    return replace(plan, selected_set=replace(plan.selected_set, selected_units=read_units),
+                   budget=replace(plan.budget, max_passages=cap))
+
+
 
 def observed_reduction_task(frozen):
     """Choose the next typed reduction or compress a multi-fact extract basis."""
@@ -129,7 +144,7 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
 
 
 
-BOUNDED_CONTINUATION = "infer_bridge_ready_or_one_gap_one_terminal_read_v2"
+BOUNDED_CONTINUATION = "infer_bridge_ready_or_one_gap_one_terminal_read_v3"
 
 
 def continuation_gap(state, *, used_gap):

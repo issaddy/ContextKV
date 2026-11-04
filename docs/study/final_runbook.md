@@ -184,7 +184,7 @@ C 固定 DAG 回放解析原始输出文本，新的生成响应用于实际 tok
 预测用两臂窗口成本差验证，下一次 READ 的集合收益按事件及共享页去重。
 
 
-B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v2` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上执行一个动作后重新观察。旧一步资产不用于这个监督目标，仅重新采集目标实际变化的状态。
+B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v3` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上执行一个动作后重新观察。旧一步资产不用于这个监督目标，仅重新采集目标实际变化的状态。
 
 C 使用 `paired_native_retention_v5` 及 `target_demand_rule=exact_complete_causal_prefix_and_body_ranges_v1`，旧标签不能直接重命名为新目标。训练行必须保存独立会话集合，train/dev 集合互斥；同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。v4 资产不直接挂入新选择。只有相同完整来源需求重访才标注整次下一 READ 的 target 收益；部分页复用仍记录在原生观察与整窗成本中。新增 owner 的目标收益按完整来源需求去重，容量与驻留按共享页增量；配对外部请求代价进入选择，正 collateral 不再额外记为可叠加收益。完整集合的真实净效果仍由同轨 Native/value 对照和物理积分验收。
 
@@ -203,3 +203,5 @@ python -m bench.study_workloads --tasks TASKS.jsonl --arrivals DECLARED-ARRIVALS
 `DECLARED-ARRIVALS.json` 必须显式列出每道任务的相对到达秒数，例如 `{"session:1":0,"session:2":30}`；该示例不是已选定的正式负载。保存任务与到达映射哈希，E0—E4 复用同一声明；原生观测仍由未来真实执行产生。
 
 B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_support_state_v2`，使用实际已付资源和剩余额度；旧特征资产不能直接用于该决策。C 的两次容量构造共用原有 TTL15/60/180、owner、页并集和需求去重目标，不新增 TTL 网格或原生接口。
+
+B v3 修正 GAP 的已读范围：离线与线上只排除实际已读来源，统一新增 passage 额度。v2 候选标签采用了不同的排除范围，不用于 v3 拟合。

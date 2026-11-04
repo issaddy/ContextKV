@@ -908,12 +908,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 async def retrieve_gap(plan, request, claims):
                     if request.retriever_identity != gap_retriever_identity(provider.manifest):
                         raise ValueError("GAP request is not bound to this actual retriever")
-                    from controller.evidence_planner import _passages
-                    cap = len(_passages(plan.selected_set.selected_units))+request.limits["max_passages"]
-                    if plan.budget.max_passages is not None:
-                        cap = min(cap, plan.budget.max_passages)
-                    return await provider.extend_for_plan(snap, replace(plan, budget=replace(plan.budget,
-                        max_passages=cap)), request.open_needs, claims)
+                    return await provider.extend_for_plan(snap, plan, request.open_needs, claims)
                 baseline = None
                 for branch_number, plan in enumerate(plans):
                     branch_dir = task_dir/f"branch-{branch_number:02d}"

@@ -11,7 +11,7 @@ import time
 from adapters.history_state import validate_task_refs
 from controller.action_proposals import (GapRetrievalRequest as GapRetrievalRequest,
     build_observed_action_plans as build_observed_action_plans, gap_query as gap_query,
-    BOUNDED_CONTINUATION, continuation_gap, continuation_read)
+    BOUNDED_CONTINUATION, continuation_gap, continuation_read, gap_retrieval_plan)
 from controller.context_schema import EvidencePool, ReadingOutcome, ReadTask
 from controller.context_budget import bind_answer_window
 from controller.plan_policy import CompleteCost, complete_plan
@@ -248,7 +248,7 @@ class FixedCounterfactualRuntime:
                 self.pre_action_quote = {"batch": await engine.quote_batch((), template.fingerprint), "candidate_id": None}
             tick = time.monotonic()
             self.new_action_counts["GAP_RETRIEVAL"] = 1
-            pool = await self.gap_provider(plan, self.gap_request, state.claims)
+            pool = await self.gap_provider(gap_retrieval_plan(state, request), request, state.claims)
             elapsed = (time.monotonic()-tick)*1000
             if not isinstance(pool, EvidencePool):
                 raise TypeError("GAP action requires measured EvidencePool material")
