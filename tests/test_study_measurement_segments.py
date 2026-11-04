@@ -98,3 +98,14 @@ def test_cancelled_fixed_tail_remains_observed_and_counts_blocked_requests():
         assert metrics["failure_fraction"] == 1
         assert metrics["latency_slo_goodput_requests_per_second"] == 0
     asyncio.run(run())
+
+
+def test_explicit_arrival_declaration_does_not_require_discarded_results():
+    from bench.study_workloads import declare_fixed_arrivals
+    rows = [dict(task_id=f"s:{i}", conversation_id="s", turn=i, Collection="track", contexts=[])
+            for i in (1, 2)]
+    plan = declare_fixed_arrivals(rows, {"s:1": 0, "s:2": 30}, name="declared", concurrency=4)
+    assert plan.dispatch_semantics == "fixed_arrivals"
+    assert [turn.start_delay_seconds for turn in plan.turns] == [0, 30]
+    assert plan.turns[1].release_after_task_id == "s:1"
+    assert "not observed historical arrivals" in plan.arrival_source_basis

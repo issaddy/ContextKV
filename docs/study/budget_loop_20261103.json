@@ -876,7 +876,7 @@
       "003": "complete30credits with no output truncation",
       "015": "complete24credits with original unit"
     },
-    "remaining_scoring_check": "case006 final42/903 matches gold but old extraction consistent=false; unchanged raw score retained until independent reassessment"
+    "remaining_scoring_check": "historical case006 extraction inconsistency remains a summary only; raw records were discarded, so fresh-protocol scoring must be validated on new data"
   },
   "implementation_20261104": {
     "status": "core local implementation audited; continuing CPU-only diagnostics and delivery preparation; model training/inference and GPU measurements held",
@@ -893,7 +893,7 @@
       "fixed_arrival_tail_cancellation": "actual sampling continues to last registered arrival; blocked tasks enter delivery denominator; focused CPU test passed"
     },
     "remaining": [
-      "export complete registered arrival schedule from retained task/attempt assets",
+      "freeze a new explicitly declared common arrival schedule; old observed trajectories were discarded",
       "collect only affected initial/bridge B branches and fit matching gain asset",
       "collect independent C train/dev windows and validate net effects",
       "run declared full350 c4 E0-E4 and c1 E1/E4 plus frozen public comparison"
@@ -912,7 +912,7 @@
       "output": "preference_manifest.json.candidate_quality_diagnostics",
       "scope": "existing saved numeric rewards only, grouped by actual history/budget/reader/scorer/query; no model calls",
       "tie_rule": "report best/worst regret over equal highest predictions, independent of input order",
-      "validation": "4 reader-stage/diagnostic CPU checks passed; actual new dataset statistics not produced because candidate assets are not local"
+      "validation": "4 reader-stage/diagnostic CPU checks passed; actual old-record analysis unavailable because user discarded the records"
     },
     "offline_track_reporting": {
       "status": "implemented; no generation or scoring run",
@@ -923,6 +923,13 @@
       "constructed_registered_weight": 0.45,
       "rule": "per-track original metric, declared/completed/scored denominators and unknown-score bounds; registered mixed-Q unchanged",
       "cpu_validation": "11 study metrics and measurement checks passed"
-    }
+    },
+    "arrival_preparation": "CPU-only explicit arrivals JSON entry implemented; records-based export retained for future observed traces; no formal timing values inferred from discarded records"
+  },
+  "raw_artifact_availability": {
+    "status": "discarded_by_user",
+    "scope": "previous candidate rewards, per-question answers and cost records",
+    "summary_status": "historical summaries retained; raw paths are unavailable and cannot substantiate current acceptance",
+    "required_next_data": "fresh collection under current frozen protocol after model/GPU work is authorized"
   }
 }

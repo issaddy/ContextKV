@@ -1,7 +1,7 @@
 # 当前课题运行入口
 
 GPU 工作按用户最新要求暂停，SSH 已关闭；当前只做本地实现与 CPU 集成，不启动训练、采集或原生实验。原生检查结果与待验证部分均保留在已有记录中。
-运行状态统一查看 [budget_loop_20261103.json](budget_loop_20261103.json)。
+运行状态统一查看 [budget_loop_20261103.json](budget_loop_20261103.json)。旧实验记录已由用户丢弃；以下历史路径和数字仅用于说明已做工作，不能作为当前可读取、可重评的原始证据。
 
 新一阶段按 [模块方法论与实施范围](task_spec.md) 选择必要训练、验证和实验；[当前审查](review_20261104.md)保存发现依据。以下命令描述现有入口。
 
@@ -189,3 +189,13 @@ C 使用 `paired_native_retention_v5` 及 `target_demand_rule=exact_complete_cau
 已有候选答案的纯 CPU 诊断随 `python -m training.train_evidence_policy prepare --config CONFIG.yaml` 写入 `preference_manifest.json.candidate_quality_diagnostics`。该命令只读取已生成答案、评分和成本资产，按真实历史/预算/reader/scorer/query 分组，给出候选质量上限、最高预测并列时的遗憾区间和声明任务缺失列表，不产生模型训练或推理。实际数据不在本地时，先完成入口实现，待资产可用后运行；不能把夹具结果写作研究结果。
 
 联合汇总的 `dataset_protocols` 来自矩阵已有 `split_kind` 与分区指标声明；Markdown 将公开基准、参考历史诊断和构造机制任务分表。每轨原指标、完整题目分母、已评分子集与未知区间同时呈现，混合开发 Q 的登记权重保持不变。
+
+
+旧请求记录已丢弃时，直接冻结新声明的共同到达映射，无需模型调用：
+
+```sh
+python -m bench.study_workloads --tasks TASKS.jsonl --arrivals DECLARED-ARRIVALS.json \
+  --output FIXED-ARRIVALS.json --name DECLARED-NAME --concurrency 4
+```
+
+`DECLARED-ARRIVALS.json` 必须显式列出每道任务的相对到达秒数，例如 `{"session:1":0,"session:2":30}`；该示例不是已选定的正式负载。保存任务与到达映射哈希，E0—E4 复用同一声明；原生观测仍由未来真实执行产生。

@@ -461,16 +461,29 @@ def export_fixed_arrivals(rows, records, *, name, concurrency):
         arrival_source_basis="saved request_window starts relative to first request; frozen replay schedule, not a reconstruction of unrecorded upstream arrivals")
 
 
+def declare_fixed_arrivals(rows, arrivals, *, name, concurrency):
+    """Freeze an explicit new workload, without presenting it as a past trace."""
+    manifest = freeze_workload(rows, name=name, concurrency=concurrency, fixed_arrivals=arrivals)
+    encoded = json.dumps(arrivals, sort_keys=True, separators=(",", ":")).encode()
+    return replace(manifest, arrival_source_sha256=hashlib.sha256(encoded).hexdigest(),
+        arrival_source_basis="explicit preregistered task-to-relative-seconds schedule; not observed historical arrivals")
+
+
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Export fixed replay arrivals from saved request windows; no generation")
+    parser = argparse.ArgumentParser(description="Freeze declared arrivals or export an existing trace; no generation")
     parser.add_argument("--tasks", required=True)
-    parser.add_argument("--records", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--records", help="Existing request-window JSONL")
+    source.add_argument("--arrivals", help="Explicit JSON mapping each task ID to relative arrival seconds")
     parser.add_argument("--output", required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--concurrency", type=int, required=True)
     args = parser.parse_args()
     def read_rows(path):
         return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
-    export_fixed_arrivals(read_rows(args.tasks), read_rows(args.records),
-        name=args.name, concurrency=args.concurrency).write(args.output)
+    tasks = read_rows(args.tasks)
+    manifest = (export_fixed_arrivals(tasks, read_rows(args.records), name=args.name, concurrency=args.concurrency)
+                if args.records else declare_fixed_arrivals(tasks, json.loads(Path(args.arrivals).read_text()),
+                    name=args.name, concurrency=args.concurrency))
+    manifest.write(args.output)
