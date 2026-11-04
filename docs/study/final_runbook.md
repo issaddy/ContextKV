@@ -161,6 +161,10 @@ python -m bench.capacity_workflow --full-queue \
 进程并加入协调进程。`--reader-base-url` 显式指定实际服务端点。联合矩阵沿用正式 350 题清单，
 其中检索器设备配置与本次物理卡号一致。GAP 限额沿用冻结观测配置，
 缺省为 96 个单元和 10 个 passage，可用 `--gap-max-units`、`--gap-max-passages` 显式指定。
+`--lambda-time` 覆盖冻结配置中的动作成本权重，实际值写入 `capacity-plan.json`。
+分设备结果用 `profiling.final_study_index --joint-scope joint-frozen-A/inputs.json`
+汇总，逐个 `--artifact NAME=WORKFLOW.json` 指定各设备结果。共同输入、实际 worker 配置、
+cohort、reader 和 B/C 资产身份进入对照，报告保留全分母质量、完成率、已交付完整响应 P95 与成本出处。
 
 每格按自己的 P3 历史执行原 350 题，使用声明的开发指标与权重。未交付回答计入
 完整分母并贡献零分，已交付但未评分的回答保留质量区间。报告另列原生已付调用
@@ -169,8 +173,8 @@ python -m bench.capacity_workflow --full-queue \
 C 的离线 `retention_trace export` 需显式提供 `--failed-conversations`（零失败为 `[]`）。
 同测量段内未导出的成功与失败请求墙钟区间进入压力索引，回放不使用与之重叠的窗口。
 
-C 已准备 train/dev 各两窗，共计划 2388 次真实生成；`retention-preparation/paired-plan.json`
-记录同一180秒观察窗、Native/TTL15/60/180四臂及排队依赖。训练轨迹来自已有真实证据候选，
+C 已在完成隔离对照的 GPU4 reader 上启动 train/dev 各两窗，共计划 2388 次真实生成；`retention-preparation/paired-plan.json`
+记录同一180秒观察窗、Native/TTL15/60/180四臂及运行资源。训练轨迹来自已有真实证据候选，
 开发轨迹来自P0自身P3；其与最终冻结A的联合队列分别计量。训练轨迹中624次READ输入
 已按当前协议重新编译，全部与原始输入hash一致，审计未调用生成模型。
 

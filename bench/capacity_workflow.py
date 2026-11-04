@@ -193,6 +193,8 @@ def prepare_full_queue(args, root):
         host_enabled=run.engine.host_capacity_tokens > 0, model="Qwen3-32B")
     matrix["resources"].update(gpu_devices=args.online_gpu_devices, process_ids=roots)
     execution = config["execution"]
+    if args.lambda_time is not None:
+        execution["lambda_time"] = args.lambda_time
     gap_limits = ((execution.get("state_observation") or {}).get("gap_limits") or {})
     gap_limits = {
         "max_units": args.gap_max_units if args.gap_max_units is not None else gap_limits.get("max_units", 96),
@@ -235,7 +237,8 @@ def prepare_full_queue(args, root):
         source_config=snapshot(args.config), source_matrix=snapshot(args.matrix),
         reader_profile_id=profile, reader_run=snapshot(run_path), resource_scope=scope,
         assets={"gain": snapshot(gain_path), "value": snapshot(args.value_model)},
-        cohort=cohorts, value_policy=value_policy, gain_mode="observed_actions", concurrency=args.concurrency,
+        cohort=cohorts, value_policy=value_policy, gain_mode="observed_actions",
+        lambda_time=execution["lambda_time"], concurrency=args.concurrency,
         selected_methods=selected_methods, requested_qa=requested*len(jobs), jobs=jobs, config=str(config_path),
         cache_boundary="one cold boundary per method and dataset; never cold between turns",
         scoring="declared development metrics and weights with the complete task denominator")

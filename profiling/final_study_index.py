@@ -244,6 +244,8 @@ def artifact_summary(value):
 def capacity_tables(value, path):
     if isinstance(value, dict) and value.get("format") == "contextkv_two_turn_capacity_workflow_v1":
         rows = value["results"]
+    elif isinstance(value, dict) and "queue_quality" in value:
+        return [], []
     elif isinstance(value, dict) and {"job", "concurrency", "completed_qa"} <= value.keys():
         rows = [value]
     else:
@@ -266,6 +268,88 @@ def capacity_tables(value, path):
     return indexed, comparisons
 
 
+def full_queue_cells(value, path, joint_scope=None):
+    if not isinstance(value, dict):
+        return []
+    if value.get("format") == "contextkv_full_queue_joint_workflow_v1":
+        rows, root = value["results"], path.parent
+    elif {"job", "datasets", "queue_quality", "paid_native_usage"} <= value.keys():
+        rows, root = [value], path.parents[2]
+    else:
+        return []
+    plan_path = root/"capacity-plan.json"
+    plan = load(plan_path)
+    run = load(plan["reader_run"]["path"])
+    run.pop("state_dir", None)
+    run["engine"].pop("base_url", None)
+    canonical = lambda item: hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest()
+    binding = dict(frozen_A_config_sha256=plan["source_config"]["sha256"],
+        matrix_sha256=plan["source_matrix"]["sha256"], cohort_sha256=canonical(plan["cohort"]),
+        reader_run_sha256=canonical(run), reader_profile_id=plan["reader_profile_id"],
+        lambda_time=plan["lambda_time"],
+        gain_sha256=plan["assets"]["gain"]["sha256"], value_sha256=plan["assets"]["value"]["sha256"])
+    device_source = {key: binding[key] for key in ("frozen_A_config_sha256", "matrix_sha256")}
+    if joint_scope is not None:
+        registered = [worker for worker in joint_scope["workers"]
+            if Path(worker["config"]).resolve() == Path(plan["source_config"]["path"]).resolve()
+            and Path(worker["matrix"]).resolve() == Path(plan["source_matrix"]["path"]).resolve()]
+        if len(registered) != 1:
+            raise ValueError("full-queue source configuration/matrix is not a worker in the explicit joint scope")
+        for name in ("config", "matrix"):
+            source = plan["source_"+name]
+            if identity(registered[0][name])["sha256"] != source["sha256"]:
+                raise ValueError("registered worker input differs from the full-queue execution source")
+        binding.update(frozen_A_config_sha256=joint_scope["source_config_sha256"],
+            matrix_sha256=joint_scope["source_matrix_sha256"],
+            joint_scope_sha256=joint_scope["manifest"]["sha256"])
+    jobs = {job["name"]: job for job in plan["jobs"]}
+    cells = []
+    for row in rows:
+        job = jobs[row["job"]]
+        missing = {name: track["missing_execution_task_ids"] for name, track in row["datasets"].items()}
+        failed = {name: track["failed_task_ids"] for name, track in row["datasets"].items()}
+        unscored = {name: track["unscored_answer_task_ids"] for name, track in row["datasets"].items()}
+        cells.append({**row, "evaluation_kind": "full_queue_own_P3", "source_file": str(path),
+            "generation_dir": job["output"], "comparison_identity": binding,
+            "device_source_identity": device_source,
+            "explicit_joint_scope": {"manifest": joint_scope["manifest"], "frozen_A": joint_scope["frozen_A"]}
+                if joint_scope is not None else None,
+            "capacity_plan": identity(plan_path), "full_workflow_cost": str(root/"capacity-cost.json"),
+            "completion_rate": row["completed_qa"]/row["requested_qa"],
+            "p95_response_count": row["completed_qa"], "missing_execution_task_ids": missing,
+            "failed_task_ids": failed, "unscored_answer_task_ids": unscored,
+            "full_queue_delivered": row["completed_qa"] == row["requested_qa"],
+            "latency_scope": "complete request wall time of delivered responses; failed and blocked tasks are absent from P95"})
+    return cells
+
+
+def full_queue_comparisons(cells):
+    comparisons = []
+    for row in cells:
+        if row["method"] == "B6_native":
+            continue
+        baselines = [other for other in cells if other["method"] == "B6_native"
+                     and other["concurrency"] == row["concurrency"]]
+        for reference in baselines:
+            same = row["comparison_identity"] == reference["comparison_identity"]
+            comparisons.append(dict(concurrency=row["concurrency"], candidate=row["method"], baseline="B6_native",
+                source_file=row["source_file"], baseline_source_file=reference["source_file"],
+                candidate_generation_dir=row["generation_dir"], baseline_generation_dir=reference["generation_dir"],
+                comparable=same, incompatible_identity_fields=[key for key, value in row["comparison_identity"].items()
+                    if value != reference["comparison_identity"][key]],
+                device_source_identity_differs=row["device_source_identity"] != reference["device_source_identity"],
+                differences={field: row[field]-reference[field] if same and numeric(row[field])
+                    and numeric(reference[field]) else None
+                    for field in ("queue_quality", "completion_rate", "completed_qa", "p95_complete_ms")},
+                candidate_completed=row["completed_qa"], baseline_completed=reference["completed_qa"],
+                candidate_declared=row["requested_qa"], baseline_declared=reference["requested_qa"],
+                both_full_queue_delivered=row["full_queue_delivered"] and reference["full_queue_delivered"],
+                latency_scope="delivered responses only; with incomplete delivery, P95 does not compare the complete declared queue",
+                cost_scope="each cell retains its paid native index, batch costs and whole workflow cost; nested scopes are not added",
+                scope="same frozen A, reader budgets and declared own-P3 queue; different actual histories and answers permitted"))
+    return comparisons
+
+
 def markdown(report):
     lines = ["# ContextKV 最终产物索引", "", f"评审基线：`{report['baseline_commit']}`。",
         "仅从指定产物读取已有评分与费用，按原指标名称作算术汇总；缺失值不补零。", "",
@@ -286,7 +370,13 @@ def markdown(report):
         lines.append(f"| {row['model']} | {row['matched_pairs']}/{row['eligible_pairs']} | {row['weighted_mae_ms']} | {row['observed_policy_delta_ms']} |")
     lines += ["", "## 实际两轮容量与联合", "", "| 方法 | 并发 / clients | 完成 / 预定 | QA/s（含停顿） | P95 ms |", "|---|---:|---:|---:|---:|"]
     for row in report["capacity"]:
-        lines.append(f"| {row['method']} | {row['concurrency']}/{row['clients']} | {row['completed_qa']}/{row['requested_qa']} | {row['throughput_qa_per_second']} | {row['p95_complete_ms']} |")
+        if row.get("evaluation_kind") != "full_queue_own_P3":
+            lines.append(f"| {row['method']} | {row['concurrency']}/{row['clients']} | {row['completed_qa']}/{row['requested_qa']} | {row['throughput_qa_per_second']} | {row['p95_complete_ms']} |")
+    lines += ["", "## 完整队列联合格", "", "| 方法 | 并发 | 交付 / 声明 | 队列质量 | 队列质量区间 | 成功完整响应 P95 ms |", "|---|---:|---:|---:|---|---:|"]
+    for row in report["capacity"]:
+        if row.get("evaluation_kind") == "full_queue_own_P3":
+            lines.append(f"| {row['method']} | {row['concurrency']} | {row['completed_qa']}/{row['requested_qa']} | {row['queue_quality']} | {row['queue_quality_bounds']} | {row['p95_complete_ms']} |")
+    lines += ["", "P95 的样本仅包含已交付响应。未完成与未评分任务按完整声明分母另列，存在交付缺失时不据此声称完整队列延迟改善。"]
     lines += ["", "四格自身 P3 与并发容量保留不同回答、分支和 DAG；它们不替代固定输入的 C 配对。",
         "逐方法相对基线差、共同任务数、相同问题/历史计数及原始成本来源见 JSON。",
         "", "## 成本", "", "物理总量引用已有去重 ledger；嵌套 job、phase 与请求份额不重复相加。",
@@ -306,11 +396,19 @@ def main(argv=None):
     parser.add_argument("--cost-ledger", action="append", default=[])
     parser.add_argument("--cost-manifest", action="append", default=[], help="Preserve this explicit glob in the ledger command")
     parser.add_argument("--physical", action="append", default=[])
+    parser.add_argument("--joint-scope", help="Explicit frozen inputs.json registering the workers used by full-queue artifacts")
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     root = Path(args.output).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    artifacts, capacity, capacity_comparisons, ledgers = [], [], [], []
+    artifacts, capacity, capacity_comparisons, ledgers, full_cells = [], [], [], [], []
+    joint_scope = None
+    if args.joint_scope:
+        scope = load(args.joint_scope)
+        for name in ("config", "matrix"):
+            if identity(scope["source_"+name])["sha256"] != scope["source_"+name+"_sha256"]:
+                raise ValueError("explicit joint scope source identity differs from the frozen original input")
+        joint_scope = {**scope, "manifest": identity(args.joint_scope)}
     paths, missing = expanded(args.artifact)
     for label, path in paths:
         value = load(path)
@@ -318,6 +416,10 @@ def main(argv=None):
         indexed, comparisons = capacity_tables(value, path)
         capacity.extend(indexed)
         capacity_comparisons.extend(comparisons)
+        full_cells.extend(full_queue_cells(value, path, joint_scope))
+    full_cells = list({row["generation_dir"]: row for row in full_cells}.values())
+    capacity.extend(full_cells)
+    capacity_comparisons.extend(full_queue_comparisons(full_cells))
     for path in args.cost_ledger:
         value = load(path)
         ledgers.append({**identity(path), "physical_total": value["physical_total"],
