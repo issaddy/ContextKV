@@ -129,7 +129,7 @@ def test_online_totals_already_include_auxiliary_model_tokens():
 
 def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     import json
-    from profiling.final_study_index import full_queue_cells, full_queue_comparisons, main
+    from profiling.final_study_index import full_queue_cells, full_queue_comparisons, main, markdown
 
     run = tmp_path / 'reader.json'
     run.write_text(json.dumps({'engine': {'base_url': 'local'}, 'state_dir': 'temporary'}))
@@ -153,11 +153,24 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     candidate = {**row, 'method': 'S3_native', 'queue_quality': .6}
     same = full_queue_comparisons(reference + cells(candidate))[0]
     assert same['comparable'] and same['differences']['queue_quality'] == pytest.approx(.1)
+    faster = full_queue_comparisons(reference + cells({**candidate, 'p95_complete_ms': 85}))[0]
+    assert faster['relative_p95_change'] == pytest.approx(-.15)
+    assert faster['quality_not_lower'] is True
+    incomplete = full_queue_comparisons(reference + cells({**candidate, 'completed_qa': 0}))[0]
+    assert incomplete['relative_p95_change'] is None
+    assert incomplete['quality_not_lower'] is None
+    assert incomplete['differences']['queue_quality'] == pytest.approx(.1)
+    unscored = {**candidate, 'datasets': {'track': dict(missing_execution_task_ids=[],
+        failed_task_ids=[], unscored_answer_task_ids=['task'])}}
+    assert full_queue_comparisons(reference + cells(unscored))[0]['relative_p95_change'] is None
+    assert full_queue_comparisons(reference + cells({**candidate, 'queue_quality': None}))[0]['quality_not_lower'] is None
+    assert full_queue_comparisons(cells({**row, 'p95_complete_ms': 0}) + cells(candidate))[0]['relative_p95_change'] is None
     plan['workload_plans']['4']['track']['sha256'] = 'arrivals-B'
     plan_path.write_text(json.dumps(plan))
     changed = full_queue_comparisons(reference + cells(candidate))[0]
     assert not changed['comparable'] and changed['differences']['queue_quality'] is None
     assert changed['incompatible_identity_fields'] == ['workload_sha256']
+    assert changed['relative_p95_change'] is None
     plan['workload_plans']['4']['track']['sha256'] = 'arrivals-A'
     plan['jobs'][0]['complete_slo_seconds'] = 60
     plan_path.write_text(json.dumps(plan))
@@ -167,6 +180,10 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     report = main(['--baseline-commit', '85f4ed4', '--physical', 'recorded-physical.json',
                   '--gpu-devices', '2', '--output', str(out)])
     assert report['baseline_commit'] == '85f4ed4'
+    report['capacity_comparisons'] = [faster, incomplete]
+    rendered = markdown(report)
+    assert '-15.00%' in rendered and '未知' in rendered
+    assert '质量差（候选−基线）' in rendered and '负值表示降低' in rendered
     command = json.loads((out / 'cost-ledger-command.json').read_text())
     assert not command['executed']
     assert command['argv'][command['argv'].index('--gpu-devices') + 1] == '2'

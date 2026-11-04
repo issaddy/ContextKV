@@ -343,6 +343,12 @@ def full_queue_comparisons(cells):
                      and other["concurrency"] == row["concurrency"]]
         for reference in baselines:
             same = row["comparison_identity"] == reference["comparison_identity"]
+            complete_scored = all(cell["full_queue_delivered"]
+                and numeric(cell["queue_quality"])
+                and not any(cell["unscored_answer_task_ids"].values()) for cell in (row, reference))
+            relative_p95 = ((row["p95_complete_ms"] / reference["p95_complete_ms"] - 1)
+                if same and complete_scored and numeric(row["p95_complete_ms"])
+                and numeric(reference["p95_complete_ms"]) and reference["p95_complete_ms"] > 0 else None)
             comparisons.append(dict(concurrency=row["concurrency"], candidate=row["method"], baseline=reference["method"],
                 source_file=row["source_file"], baseline_source_file=reference["source_file"],
                 candidate_generation_dir=row["generation_dir"], baseline_generation_dir=reference["generation_dir"],
@@ -355,6 +361,10 @@ def full_queue_comparisons(cells):
                 candidate_completed=row["completed_qa"], baseline_completed=reference["completed_qa"],
                 candidate_declared=row["requested_qa"], baseline_declared=reference["requested_qa"],
                 both_full_queue_delivered=row["full_queue_delivered"] and reference["full_queue_delivered"],
+                both_full_queue_scored=complete_scored,
+                relative_p95_change=relative_p95,
+                quality_not_lower=(row["queue_quality"] >= reference["queue_quality"]
+                                   if same and complete_scored else None),
                 latency_scope="delivered responses only; with incomplete delivery, P95 does not compare the complete declared queue",
                 cost_scope="each cell retains its paid native index, batch costs and whole workflow cost; nested scopes are not added",
                 scope=("registered E0 reference versus current method under shared reader, budgets, arrivals and own-P3 queue"
@@ -409,6 +419,21 @@ def markdown(report):
     for row in report["capacity"]:
         if row.get("evaluation_kind") == "full_queue_own_P3":
             lines.append(f"| {row['method']} | {row['concurrency']} | {row['completed_qa']}/{row['requested_qa']} | {row['queue_quality']} | {row['queue_quality_bounds']} | {row['p95_complete_ms']} |")
+    lines += ["", "## 完整队列对照差", "",
+        "| 候选 / 基线 | 并发 | 质量差（候选−基线） | 完整 P95 相对变化 | 质量不低于基线 |",
+        "|---|---:|---:|---:|---|"]
+    for comparison in report["capacity_comparisons"]:
+        if "relative_p95_change" not in comparison:
+            continue
+        delta = comparison["differences"]["queue_quality"]
+        relative = comparison["relative_p95_change"]
+        quality = comparison["quality_not_lower"]
+        lines.append(f"| {comparison['candidate']} / {comparison['baseline']} | {comparison['concurrency']} | "
+            f"{delta if delta is not None else '未知'} | "
+            f"{format(relative, '.2%') if relative is not None else '未知'} | "
+            f"{('是' if quality else '否') if quality is not None else '未知'} |")
+    lines += ["", "P95 相对变化为（候选 / 基线 − 1），负值表示降低；仅在身份一致、完整交付且全部质量已评分时报告。"
+        "质量不低于基线仅比较现有点估计，不代表统计等质量结论；本表不判定同预算、资源收益或研究目标达成。"]
     lines += full_queue_track_tables(report["capacity"])
     lines += ["", "分轨保留原指标量纲；混合开发 Q 仍采用登记权重，不将构造题增益表述为公开基准增益。"]
     lines += ["", "## 完整响应 SLO", "",
