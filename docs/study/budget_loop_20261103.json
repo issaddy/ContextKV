@@ -426,7 +426,38 @@
       ],
       "claim_scope": "initial two training states only; no development-policy quality claim"
     },
-    "reduce_candidates": "typed reductions first; optional summarize for lookup/procedure Need with at least two observed extract facts; current candidates are distinguished from original packet legal_actions"
+    "reduce_candidates": "typed reductions first; optional summarize for lookup/procedure Need with at least two observed extract facts; current candidates are distinguished from original packet legal_actions",
+    "selected_A_reduce_pilot": {
+      "artifact": "runs/study/budget-loop-20261103/b-selected-a-reduce-pilot",
+      "states": 2,
+      "completed_branches": 6,
+      "gain_pairs": 4,
+      "reader_calls": 8,
+      "judge_calls": 6,
+      "elapsed_ms": 101393.33964511752,
+      "quality_deltas": [
+        {
+          "action": "reduce_once",
+          "delta": 0.24
+        },
+        {
+          "action": "gap_retrieval",
+          "delta": 0.4
+        },
+        {
+          "action": "read_once",
+          "delta": 0.0
+        },
+        {
+          "action": "gap_retrieval",
+          "delta": 0.0
+        }
+      ],
+      "claim_scope": "second bounded collection under the full action protocol, not a full-dev quality result"
+    },
+    "scheduled_train_states": 178,
+    "declared_train_states": 200,
+    "failed_capture_state_policy": "preserve genuine pre-failure observations; map through failed Attempt IDs; later capture failure is provenance, not a model feature"
   },
   "P1_scoring": {
     "rubric": "necessary_points_grounding_conditions_versions_task_v2",

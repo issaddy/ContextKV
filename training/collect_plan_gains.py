@@ -78,17 +78,19 @@ def collect_pair(packet, direct_row, candidate_row):
 
 
 def export_observed_packets(observations, actual_turns, output):
-    """Resolve runtime attempt IDs against actual served turns, never stable TaskState IDs."""
-    tasks = {}
+    """Resolve runtime attempts against completed or failed actual capture rows."""
+    tasks, capture_statuses = {}, {}
     for row in actual_turns:
         response = row.get("response")
-        if response is None:
+        actual = response if response is not None else row.get("attempt")
+        if actual is None:
             continue
-        attempt = response["attempt_id"]
+        attempt = actual["attempt_id"]
         binding = {name: row[name] for name in ("task_id", "cohort_split", "cohort_manifest_sha256")}
         if attempt in tasks and tasks[attempt] != binding:
             raise ValueError("one actual attempt maps to different task/cohort identities")
         tasks[attempt] = binding
+        capture_statuses[attempt] = row.get("status", "completed" if response is not None else "failed")
     packets, excluded, seen = [], [], set()
     for observation in observations:
         identity = observation["observation_id"]
@@ -106,13 +108,13 @@ def export_observed_packets(observations, actual_turns, output):
         binding = tasks[attempt]
         if any(name in observation and observation[name] != value for name, value in binding.items()):
             raise ValueError("observed packet differs from its actual turn's task/cohort identity")
-        packets.append({**observation, **binding})
+        packets.append({**observation, **binding, "source_capture_status": capture_statuses[attempt]})
     path = Path(output)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x") as stream:
         for packet in packets:
             stream.write(json.dumps(packet, ensure_ascii=False, allow_nan=False)+"\n")
-    manifest = {"schema_version": 1, "scope": "observed decision packets mapped through actual response.attempt_id",
+    manifest = {"schema_version": 1, "scope": "observed decision packets mapped through actual response or failed attempt IDs",
         "packets": len(packets), "excluded": excluded, "output": str(path.resolve()),
         "cohort_bindings": [{"cohort_split": split, "cohort_manifest_sha256": identity}
             for split, identity in sorted({(packet["cohort_split"], packet["cohort_manifest_sha256"])
@@ -126,7 +128,7 @@ def main(argv=None):
     source_group = parser.add_mutually_exclusive_group(required=True)
     source_group.add_argument("--pairs", help="JSONL packets naming direct_run and candidate_run JSON files")
     source_group.add_argument("--observations", help="Runtime observed-state JSONL with attempt/request IDs")
-    parser.add_argument("--actual-turns", help="Actual served-turn JSONL containing task_id and response.attempt_id")
+    parser.add_argument("--actual-turns", help="JSONL of completed response.attempt_id and failed attempt.attempt_id capture rows")
     parser.add_argument("--output", required=True, help="New JSONL gain data file")
     args = parser.parse_args(argv)
     if args.observations:

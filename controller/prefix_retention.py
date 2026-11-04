@@ -80,7 +80,15 @@ class PrefixForecast:
 
     @property
     def saved_ms(self):
+        """Next READ target saving minus retain control, before residency prices."""
         return self.target_saved_ms-self.retention_control_ms
+
+    @property
+    def full_window_saved_ms(self):
+        """Single-prefix paired response-window saving, including all affected turns."""
+        if self.native_window_cost_ms is None or self.retained_window_cost_ms is None:
+            return None
+        return self.native_window_cost_ms-self.retained_window_cost_ms
 
 
 @dataclass(frozen=True)
@@ -126,8 +134,9 @@ def allocate_retention(requests, *, gpu_budget_tokens, host_budget_tokens,
                        protected_host_pages=frozenset(), protected_requests=()):
     """Choose positive marginal value, counting a shared causal page only once.
 
-    The forecasts come from paired native/retained traces. Occupancy penalties
-    are their incremental residency, rather than the full current cache size.
+    Value uses the next READ target saving, deduplicated against protected
+    requests, minus this call's control and incremental residency prices.
+    Single-prefix full-window residuals are not additive across protected sets.
     Capacity budgets bound the protected set; soft references allocate no KV.
     """
     requests = {(request.owner_id, request.forecast.horizon_seconds): request for request in requests}
@@ -174,8 +183,9 @@ def allocate_retention(requests, *, gpu_budget_tokens, host_budget_tokens,
             host_integral = added_residency(request.host_page_ids, host_leases, forecast,
                                             forecast.extra_host_seconds_per_page, request.page_size)
             event = request.reuse_event_key or request.owner_id
-            # Keep negative target effects negative. Control is paid per actual
-            # retain/renew call, outside the shared event's gross coverage.
+            # Only the next READ target is deduplicated. Full-window residuals
+            # can share later requests and are excluded from set allocation.
+            # Control is paid per actual retain/renew call.
             target = forecast.target_saved_ms
             target -= min(max(target, 0), covered_events.get(event, 0))
             saved = target-forecast.retention_control_ms

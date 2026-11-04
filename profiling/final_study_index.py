@@ -200,18 +200,24 @@ def retention_validation(models, paired):
         values, unmatched = [], []
         for row in dev:
             try:
-                predicted = model.predict(row["features"], row["cache_scope_hash"], row["horizon_seconds"]).saved_ms
+                forecast = model.predict(row["features"], row["cache_scope_hash"], row["horizon_seconds"])
             except KeyError:
                 unmatched.append(row["event_id"])
                 continue
-            values.append((row["sampling_weight"], predicted, row["full_window_cost_difference_ms"]))
+            values.append((row["sampling_weight"], forecast.full_window_saved_ms,
+                           forecast.saved_ms, row["full_window_cost_difference_ms"]))
         weight = sum(item[0] for item in values)
-        policy = sum(w*actual if predicted > 0 else 0 for w, predicted, actual in values)/weight if values else None
+        policy = sum(w*actual if choice > 0 else 0 for w, _, choice, actual in values)/weight if values else None
+        full = [(w, predicted, actual) for w, predicted, _, actual in values if predicted is not None]
         result.append(dict(model=name, **identity(path), fit_split=raw["training_manifest"]["split"],
             evaluation_split="dev", eligible_pairs=len(dev), matched_pairs=len(values),
             prediction_coverage=len(values)/len(dev) if dev else None, unmatched_event_ids=unmatched,
-            weighted_mae_ms=sum(w*abs(predicted-actual) for w, predicted, actual in values)/weight if values else None,
-            selected_positive_predictions=sum(predicted > 0 for _, predicted, _ in values),
+            full_window_prediction_pairs=len(full),
+            weighted_mae_ms=sum(w*abs(predicted-actual) for w, predicted, actual in full)
+                /sum(w for w, _, _ in full) if full else None,
+            prediction_error_scope="complete response window",
+            policy_selection_scope="next READ target minus control; before residency prices and protected-event deduction",
+            selected_positive_predictions=sum(choice > 0 for _, _, choice, _ in values),
             observed_policy_delta_ms=policy if len(values) == len(dev) else None,
             matched_subgroup_policy_delta_ms=policy,
             scope="offline dev cost ablation on existing paired data; no dev fitting; signed Native−Retain; online inspect/inference cost remains in actual joint records"))

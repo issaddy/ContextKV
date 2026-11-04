@@ -129,14 +129,20 @@ async def run(args):
             row = json.loads(line)
             try:
                 predicted = model.predict(row["features"], row["cache_scope_hash"], row["horizon_seconds"])
-                expected = predicted.saved_ms
             except KeyError:
-                expected = None
-            validation.append(dict(event_id=row["event_id"], calibrated=expected is not None,
-                predicted_full_window_saved_ms=expected,
+                predicted = None
+            validation.append(dict(event_id=row["event_id"], calibrated=predicted is not None,
+                predicted_target_saved_ms=predicted.target_saved_ms if predicted else None,
+                predicted_retention_control_ms=predicted.retention_control_ms if predicted else None,
+                predicted_collateral_saved_ms=predicted.expected_collateral_saved_ms if predicted else None,
+                predicted_policy_value_ms=predicted.saved_ms if predicted else None,
+                policy_value_scope="next READ target minus control; before residency prices and protected-event deduction",
+                predicted_full_window_saved_ms=predicted.full_window_saved_ms if predicted else None,
                 actual_full_window_saved_ms=row["full_window_cost_difference_ms"],
                 semantic_quality_label=None, split="dev"))
-        write_json(output/"dev-validation.json", {"fit_split": "train", "evaluation_split": "dev", "rows": validation})
+        write_json(output/"dev-validation.json", {"fit_split": "train", "evaluation_split": "dev",
+            "comparison_scope": "single-prefix complete response windows; no protected-set externality estimate",
+            "rows": validation})
     if plan["status"] == "running":
         plan["status"] = "completed_with_actual_signed_costs"
     write_json(output/"paired-workflow.json", plan)

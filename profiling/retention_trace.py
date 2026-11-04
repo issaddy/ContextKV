@@ -236,6 +236,7 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
             continue
         event = annotated_generation(plan, step, template)
         event.update(read_task=to_jsonable(step.task),
+                     original_output_text=generation.text,
                      input_claims=to_jsonable(tuple(parent_claims[key] for key in step.task.input_claim_ids)))
         event["prefix_observation"] = step.metrics.get("evidence_prefix")
         recorded = calls.get(step.receipt.attempt_id)
@@ -256,6 +257,7 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
     events.append(dict(step_id="ANSWER", kind="ANSWER", operation="answer", predecessor_step_ids=[
         event["step_id"] for event in events], input_ids=list(final.input_ids), input_hash=final.input_hash,
         original_output_ids=list(attempt.result.output_ids), original_receipt=to_jsonable(attempt.result.receipt),
+        original_output_text=attempt.result.text,
         original_epoch=to_jsonable(attempt.epoch), request=to_jsonable(request),
         system_prompt=final.messages[0].content, context_action=final.action,
         sampling=recorded["sampling"] if recorded else dict(sampling),
@@ -731,7 +733,9 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
         engine=to_jsonable(info), config=to_jsonable(config),
         cache_scope_hash=cache_scope_hash, page_size=page_size,
         trace_digest=digest(trace), input_dag_digest=trace["input_dag_digest"], events=receipts,
-        output_policy="actual new outputs with captured sampling/output budgets; no gold matching",
+        output_policy="fresh responses measure actual native cost; captured outputs preserve the fixed DAG",
+        parse_policy="captured_original_outputs",
+        quality_scope="fixed-input cost attribution only; fresh outputs do not establish new QA quality",
         timing_policy="captured per-turn input-ready arrivals; internal DAG executes causally without fixed model-submit stalls",
         cost_scope="reading DAG/ANSWER, C controls and declared physical process groups; upstream A is frozen",
         status="running", controls=controls)
@@ -792,11 +796,13 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
                     tick = time.monotonic()
                     task = decode(ReadTask, event["read_task"])
                     by_id = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
-                    parsed = parse_read_result(task, result.text,
+                    parsed = parse_read_result(task, event["original_output_text"],
                         tuple(by_id[key] for key in task.input_unit_ids),
                         tuple(decode(EvidenceClaim, value) for value in event["input_claims"]),
-                        elapsed_ms=result.elapsed_ms, input_tokens=len(event["input_ids"]), output_tokens=len(result.output_ids))
-                    row.update(parse_ms=(time.monotonic()-tick)*1000, parsed_output=to_jsonable(parsed))
+                        elapsed_ms=result.elapsed_ms, input_tokens=len(event["input_ids"]),
+                        output_tokens=len(event["original_output_ids"]))
+                    row.update(parse_ms=(time.monotonic()-tick)*1000, parsed_output=to_jsonable(parsed),
+                               parse_policy="captured_original_outputs")
                 if event["kind"] == "READ":
                     prefix_ids = event["prefix_input_ids"][:len(event["prefix_input_ids"])//page_size*page_size]
                     inspected = dict(cache_scope_hash=cache_scope_hash, prefix_hash=token_hash(prefix_ids),
