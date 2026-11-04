@@ -3,7 +3,7 @@
 按用户要求，已启动批次收尾后不再启动后续实验；本批次已结束，模型服务已停止。
 运行状态统一查看 [budget_loop_20261103.json](budget_loop_20261103.json)。
 
-新一阶段按 [当前审查](review_20261104.md) 的语义、来源前缀、B 后续价值、C 独立窗口与联合实验依赖实施；以下命令描述现有入口。
+新一阶段按 [模块方法论与实施范围](task_spec.md) 选择必要训练、验证和实验；[当前审查](review_20261104.md)保存发现依据。以下命令描述现有入口。
 
 运行冻结同一 Qwen3-32B 模型权重与解码参数，显式配置端点、协议身份与原生缓存。主机目录、GPU、服务端口和
 输出目录由本次运行配置声明；不复用旧批次的固定路径或截止时间。
@@ -127,7 +127,7 @@ C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观�
 python -m bench.capacity_workflow --full-queue \
   --config "$FROZEN_A_STUDY" --matrix "$JOINT_MATRIX" \
   --gain-asset "$B_GAIN" --online-gpu-devices "$ONLINE_GPUS" --reader-base-url "$READER_URL" \
-  --value-model "$C_VALUE" --concurrency 1 4 --output "$JOINT_OUTPUT"
+  --value-model "$C_VALUE" --concurrency 4 --output "$JOINT_OUTPUT"
 ```
 
 完整队列四格共用冻结 A 的模型、支持策略、查询资产、阅读协议和预算。可用
