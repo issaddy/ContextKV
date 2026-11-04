@@ -165,9 +165,6 @@ def validate_reward(row, binding):
     for value in row["quality_components"].values():
         if not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
             raise ValueError("quality components must be observed normalized answer scores")
-    for name in ("complete_ms", "gpu_gib_seconds", "host_gib_seconds", "total_input_tokens", "total_output_tokens"):
-        if row["cost"][name] is None:
-            raise ValueError("reader-bound utility data retain full physical and token costs")
 
 
 def parent_support_binding(settings):
@@ -199,7 +196,8 @@ def build_reader_bound_pairs(reward_rows, *, binding, weights, minimum_differenc
                 continue
             if preferred["task_state"] != dispreferred["task_state"]:
                 raise ValueError("utility interventions must keep the same resolved task state")
-            incremental_cost = {name: preferred["cost"][name]-dispreferred["cost"][name]
+            incremental_cost = {name: (preferred["cost"][name]-dispreferred["cost"][name]
+                if preferred["cost"][name] is not None and dispreferred["cost"][name] is not None else None)
                 for name in ("complete_ms", "gpu_gib_seconds", "host_gib_seconds")}
             incremental_cost.update({name: preferred[name]-dispreferred[name]
                 for name in ("reader_input_tokens", "reader_output_tokens")})
@@ -397,7 +395,7 @@ def prepare_preferences(config):
             raise ValueError("reward used a different parent support asset")
     cost_fields = ("complete_ms", "gpu_gib_seconds", "host_gib_seconds", "total_input_tokens", "total_output_tokens")
     measured = [row for row in rewards if all(row["cost"][key] is not None for key in cost_fields)]
-    pairs = (build_reader_bound_pairs(measured, binding=binding, weights=settings["reward_weights"],
+    pairs = (build_reader_bound_pairs(rewards, binding=binding, weights=settings["reward_weights"],
                                      minimum_difference=settings["minimum_reward_difference"])
              if split == "train" else [])
     write_rows(directory/"preferences.jsonl", pairs)

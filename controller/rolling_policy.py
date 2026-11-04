@@ -375,9 +375,14 @@ class RollingPlanRuntime:
         plans = []
         for original in context_plans:
             plan = _with_observed_sources(original, state)
-            from .context_budget import bind_answer_window
-            plan = bind_answer_window(plan, template, snapshot,
-                preserve_step_ids=tuple(record.step_id for record in state.steps))
+            from .context_budget import AnswerWindowExceeded, bind_answer_window
+            try:
+                plan = bind_answer_window(plan, template, snapshot,
+                    preserve_step_ids=tuple(record.step_id for record in state.steps))
+            except AnswerWindowExceeded:
+                # Window exhaustion belongs to this alternative. Keep evaluating
+                # other proposals, while propagating malformed source/task errors.
+                continue
             from .evidence_planner import render_selection
             plan = replace(plan, selected_set=replace(plan.selected_set, token_cost=len(template.tokenizer.encode(
                 render_selection(plan.selected_set.selected_units), add_special_tokens=False))))
@@ -415,6 +420,8 @@ class RollingPlanRuntime:
                 if not any(claim.serves(need.need_id) for claim in state.claims))))
         # Direct ANSWER is an explicit stop action from the same observed state.
         # Full-range feasibility is checked against state.plan.coverage_units.
+        if not plans:
+            raise NoCompletePlan("no proposal fits its ANSWER window allocation")
         if not any(plan.semantic_kind == "direct_answer" for plan in plans):
             source = plans[0].context_plan
             direct = replace(source, plan_id="direct:"+source.plan_id, steps=())

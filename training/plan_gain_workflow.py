@@ -47,7 +47,12 @@ async def workflow(config, settings):
     try:
         train_cap = settings["max_generations"]*settings["train_states"]//(settings["train_states"]+settings["dev_states"])
         for split, count in (("train", settings["train_states"]), ("dev", settings["dev_states"])):
+            if count == 0:
+                continue
             cap = train_cap if split == "train" else settings["max_generations"]-used
+            if cap < 1:
+                result["cohorts"][split] = {"status": "generation_budget_unavailable"}
+                continue
             actual = {**settings, "split": split, "limit_tasks": count,
                 "output_dir": str(root/split), "max_generations": cap}
             report = await collect(config, actual)
@@ -55,10 +60,19 @@ async def workflow(config, settings):
             completion = finalize(root/split, root/(split+"-supervision"))
             result["cohorts"][split] = {"collection": report, "supervision": completion}
             write(root/"workflow.json", result)
-        asset = settings.get("asset") or str(root/"plan-gain.json")
-        await asyncio.to_thread(fit_main, ["fit", "--train", str(root/"train-supervision"/"effective-gains.jsonl"),
-            "--dev", str(root/"dev-supervision"/"effective-gains.jsonl"), "--output", asset])
-        result.update(status="completed", asset=asset, actual_model_generations=used)
+        training = result["cohorts"].get("train", {}).get("supervision", {})
+        if training.get("effective_gain_records", 0):
+            asset = settings.get("asset") or str(root/"plan-gain.json")
+            fit_args = ["fit", "--train", str(root/"train-supervision"/"effective-gains.jsonl"),
+                "--output", asset]
+            development = result["cohorts"].get("dev", {}).get("supervision", {})
+            if development.get("effective_gain_records", 0):
+                fit_args.extend(["--dev", str(root/"dev-supervision"/"effective-gains.jsonl")])
+            await asyncio.to_thread(fit_main, fit_args)
+            result["asset"] = asset
+        else:
+            result["fit"] = {"status": "skipped", "reason": "no_effective_training_gains"}
+        result.update(status="completed", actual_model_generations=used)
     finally:
         import sys
         error = sys.exc_info()[1]
@@ -96,8 +110,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.mode == "observed_actions" and not args.observed_states:
         parser.error("observed_actions requires --observed-states")
-    if min(args.train_states, args.dev_states) < 1 or args.max_generations < 4:
-        raise ValueError("actual train/dev state counts and total generation allocation must be positive")
+    if (min(args.train_states, args.dev_states) < 0 or args.train_states+args.dev_states < 1
+            or args.max_generations < 1):
+        raise ValueError("state counts must be nonnegative with at least one requested state and a positive generation allocation")
     config = yaml.safe_load(Path(args.study_config).read_text())
     print(json.dumps(asyncio.run(workflow(config, vars(args))), ensure_ascii=False))
 

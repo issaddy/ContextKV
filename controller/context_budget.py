@@ -8,6 +8,10 @@ from .schema import Message
 from .serialization import to_jsonable
 
 
+class AnswerWindowExceeded(ValueError):
+    """A proposal cannot reserve its actual terminal ANSWER envelope."""
+
+
 def text_ref_sources(history, *, current_turn_id=None, current_user_text=None):
     sources = {(row.turn_id, speaker): text for row in history for speaker, text in (
         ("user", row.user_text), ("assistant", row.assistant_text))}
@@ -81,7 +85,7 @@ def allocate_answer_window(plan, template, snapshot):
     candidate = build_plan_candidates(snapshot,
         plan.task_state.raw_question, empty, template, layouts=("existing",))[0]
     if candidate.reason == "working_history_budget":
-        raise ValueError("actual working history exceeds the ANSWER history allocation")
+        raise AnswerWindowExceeded("actual working history exceeds the ANSWER history allocation")
     fixed = len(candidate.input_ids)
     spans = tuple(dict.fromkeys(span for unit in plan.selected_set.selected_units for span in unit.source_spans))
     claims = tuple(EvidenceClaim(f"allocation:{index}", need.need_id, "extract",
@@ -95,7 +99,7 @@ def allocate_answer_window(plan, template, snapshot):
     metadata = len(source_candidate.input_ids)-fixed
     remaining = plan.budget.window_tokens-plan.budget.output_tokens-fixed-metadata
     if remaining <= 0:
-        raise ValueError("system, task, history, complete source metadata and ANSWER output exhaust the conclusion window")
+        raise AnswerWindowExceeded("system, task, history, complete source metadata and ANSWER output exhaust the conclusion window")
     count = len(plan.task_state.needs)
     shares = tuple((need.need_id, remaining//count+(index < remaining%count))
                    for index, need in enumerate(plan.task_state.needs))

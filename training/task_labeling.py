@@ -21,7 +21,7 @@ from controller.config import load_config
 from controller.context_schema import EvidenceKey, RetrievalState
 from controller.schema import OnlineMessage, OnlineTurn, TurnRecord
 from controller.serialization import decode, to_jsonable
-from training.task_data import read_jsonl, write_jsonl
+from training.task_data import read_jsonl
 from training.reader_data import file_digest, history_digest
 
 
@@ -116,13 +116,13 @@ def verify_grounding(row, state, memory, client, *, record_path=None):
 
 
 async def label_rollouts(config, *, turns_path=None, output_path=None, concurrency=8, limit=None):
+    if limit is not None and limit < 0:
+        raise ValueError("label limit must be nonnegative")
     settings = config.get("training", {})
     root = Path(settings.get("data_dir", "runs/study/data"))
     turns_path = Path(turns_path or settings.get("task_label_turns", root/"turns.jsonl"))
     output = Path(output_path or root/"task_labels.jsonl")
     rows = list(read_jsonl(turns_path))
-    if limit is not None:
-        rows = rows[:limit]
     cohort_path = settings.get("cohort_manifest")
     cohort = json.loads(Path(cohort_path).read_text()) if cohort_path else None
     if cohort is not None:
@@ -156,6 +156,13 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
                     old.get("need_semantics_version") != TASK_NEED_SEMANTICS_VERSION or
                     old.get("need_semantics_verified") is not True):
                 raise ValueError(f"saved task label differs from actual cohort state: {old['task_id']}")
+    pending = [row["task_id"] for row in rows if row["task_id"] not in by_id]
+    requested = set(pending if limit is None else pending[:limit])
+    if not requested:
+        return {"status": "completed" if not pending else "incomplete",
+            "actual_history_rows": len(rows), "labels": len(by_id), "generated_labels": 0,
+            "requested_new_labels": 0, "pending_labels": len(pending), "teacher_calls": 0,
+            "labels_path": str(output.resolve()), "source_path": str(turns_path.resolve())}
     reader = load_config(settings.get("reader_config", "configs/qwen3_32b.yaml"))
     urls = settings.get("teacher_urls", ["http://127.0.0.1:30001"])
     clients = [OpenAICompletionClient(SelectorConfig(url, reader.model.name, reader.model.revision,
@@ -191,6 +198,8 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
                 if row["task_id"] in by_id:
                     from controller.context_schema import TaskState
                     states.append(decode(TaskState, by_id[row["task_id"]]["task_state"]))
+                    continue
+                if row["task_id"] not in requested:
                     continue
                 history = tuple(decode(TurnRecord, value) for value in row["actual_history"])
                 memory = RetrievalState(len(history), history, tuple(states))
@@ -263,6 +272,7 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
             "need_semantics_version": TASK_NEED_SEMANTICS_VERSION,
             "task_label_review_protocol": "fixed_task_state_semantics_v2",
             "actual_history_rows": len(rows), "labels": len(by_id), "generated_labels": generated,
+            "requested_new_labels": len(requested),
             "pending_labels": len(rows)-len(by_id), "conversations": len(grouped),
             "need_operations": dict(Counter(need["operation"] for row in by_id.values() for need in row["task_state"]["needs"])),
             "need_scopes": dict(Counter(need["scope"] for row in by_id.values() for need in row["task_state"]["needs"])),
@@ -284,12 +294,6 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
             "cohort_splits": {split: sum(row.get("cohort_split") == split for row in by_id.values())
                               for split in ("train", "dev")},
             "token_cost_scope": "current invocation including unsuccessful paid calls; reused labels retain original metrics"}
-        if cohort is not None:
-            manifest["split_labels"] = {}
-            for split in ("train", "dev"):
-                path = output.parent/f"{split}_task_labels.jsonl"
-                write_jsonl(path, [row for row in by_id.values() if row["cohort_split"] == split])
-                manifest["split_labels"][split] = str(path.resolve())
         output.with_name(output.stem+"_manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
         output.with_name(output.stem+f"_manifest.{invocation}.json").write_text(json.dumps(manifest, indent=2)+"\n")
     return manifest
@@ -301,7 +305,7 @@ def main(argv=None):
     parser.add_argument("--turns")
     parser.add_argument("--output")
     parser.add_argument("--concurrency", type=int, default=8)
-    parser.add_argument("--limit", type=int)
+    parser.add_argument("--limit", type=int, help="Maximum new labels in this invocation; completed labels are reused")
     args = parser.parse_args(argv)
     result = asyncio.run(label_rollouts(yaml.safe_load(Path(args.config).read_text()),
         turns_path=args.turns, output_path=args.output, concurrency=args.concurrency, limit=args.limit))

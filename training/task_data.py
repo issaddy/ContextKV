@@ -105,8 +105,7 @@ def prepare_cohort_task_labels(config):
     settings = config["task_cohort_labeling"]
     output = Path(settings["output_dir"]).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    if (output/"task_labels.jsonl").exists():
-        raise ValueError("cohort label preparation requires a new output directory")
+    labels_path = output/"task_labels.jsonl"
     cohort_path = Path(settings["cohort_manifest"])
     cohort = json.loads(cohort_path.read_text())
     members = {member["task_id"]: member for member in cohort["members"]}
@@ -117,6 +116,10 @@ def prepare_cohort_task_labels(config):
     originals = {row["source_id"]: row for row in read_jsonl(settings["sources_path"])}
     existing_labels = settings["existing_labels_path"]
     prior = {} if existing_labels is None else {row["task_id"]: row for row in read_jsonl(existing_labels)}
+    local_labels = list(read_jsonl(labels_path)) if labels_path.exists() else []
+    if any(row["task_id"] not in members for row in local_labels):
+        raise ValueError("existing output labels belong to a different cohort")
+    prior.update((row["task_id"], row) for row in local_labels)
     database = Path(settings["state_db"]).resolve()
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     selected, reused, reuse_exclusions = [], [], []
@@ -173,7 +176,7 @@ def prepare_cohort_task_labels(config):
                     "existing_label_not_bound_to_registered_actual_state" if not same_state or not same_history
                     else "existing_label_missing_independent_source_and_task_verification"})
     connection.close()
-    turns_path, labels_path = output/"turns.jsonl", output/"task_labels.jsonl"
+    turns_path = output/"turns.jsonl"
     write_jsonl(turns_path, selected)
     write_jsonl(labels_path, reused)
     write_jsonl(output/"label_reuse_exclusions.jsonl", reuse_exclusions)

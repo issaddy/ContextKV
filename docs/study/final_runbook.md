@@ -49,6 +49,7 @@ B 固定流程观测使用 `execution.state_observation`，从真实请求开始
 B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
 `--cohort-manifest` 指向同一文件；不再使用 `--partition-seed` 或 `--dev-fraction`
 重新划分状态，实际采集数量从声明分区内选择并单独记录。
+`plan_gain_workflow` 可将 `--train-states` 或 `--dev-states` 设为 0，只补所需分区；无有效训练标签时保留采集结果并跳过拟合，开发标签可随后独立补采。
 模型 scope 位于 `configs/model_scopes/`。Reader、策略身份、来源与费用由本次阶段
 manifest 记录。
 
@@ -80,6 +81,7 @@ python -m training.task_labeling --config runs/study/auxiliary/task-labels/task_
 
 采集量是示例，cohort manifest 记录实际数量与 shortfall，不预先宣称达到 200/40。
 `task_cohort_labeling.existing_labels_path: null` 表示从零标注；只有存在可复用的真实标签时才指定文件。
+`prepare-labels` 可在同一输出目录重跑，复用与当前状态一致的已有标签。`training.task_labeling --limit N` 每次最多新增 N 条，已完成条目不占该额度；全部完成后不再加载模型。
 当前配置 `task_model.initial_adapter_path: null` 与 `training.support_parent_asset: null` 从显式 BGE base 初始化；设为非空父路径时只复用真实存在的资产，不自动回退。有效学生与支持资产须由本次训练及开发评价确认。
 配置默认将实际历史写入 `runs/study/actual-rollout/sessions.sqlite3`。训练与评价共用
 `runs/study/auxiliary/task-labels/task_labels.jsonl`，由 cohort manifest 隔离 train/dev。
@@ -96,6 +98,7 @@ python -m training.train_models --config configs/auxiliary_training.yaml --stage
 `build_examples` 使用固定 Qwen 服务生成支持关系标签。P1 采集将
 `collection.task_asset` 设为实际训练后的 task 资产、`parent_support_asset` 设为实际 support 资产，
 按同一 manifest 分别采集 train/dev；查询资产身份随奖励保存。
+P1 质量偏好可使用物理成本部分缺失的已评分答案；缺失费用保留未知，成本覆盖率单列，不将其作为实测成本收益。
 
 当前辅助配置将新 support 输出接为 P1 父资产与 P0 对照，将新 task 输出同时接入 P1 奖励采集和比较的查询编码器。初始化真实历史的辅助 rollout 使用显式无查询 adapter 的 BGE 基座；若采用已有资产，修改对应显式路径后重新绑定采集身份。
 
