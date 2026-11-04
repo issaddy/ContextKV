@@ -31,7 +31,7 @@ Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 只导出实际 
 
 先从实际 ANSWER 窗口扣除系统、任务、工作历史、输出和来源元数据，再把可用结论份额分到 Need、READ 分片和有限 REDUCE 节点。生成输出上限与最终保留份额分别记录。READ 的完整输出结构同时出现在可见消息和原生 JSON 约束中。
 
-READ 按实际 tokenizer 的输入容量与结构化输出容量打包。同来源、条件、版本下的 count/sum 共享一次实体／量值提取。Wire 5 的数值事实包含原文短摘录，并用短 ID 引用来源、条件、Need 和父事实。`numeric_need_isolation` 保留为对照。当前 source_first 将原文放在任务正文之前；数值分支仍使用专属来源 schema 和系统指令，切片坐标也会随当前任务容量变化，因此跨操作及不同切片的原生前缀并不相同。规范来源窗口与操作无关前缀的实施依据见 [当前审查](study/review_20261104.md)。缺口由 `unresolved_needs` 统一计算：后续步骤完成终端 Need 后，早期缺口关闭；不同时间范围分别检索，相同关系合并父结论。
+READ 按实际 tokenizer 的输入容量与结构化输出容量打包。同来源、条件、版本下的 count/sum 共享一次实体／量值提取。Wire 5 的数值事实包含原文短摘录，并用短 ID 引用来源、条件、Need 和父事实。`numeric_need_isolation` 保留为对照。来源目录按固定 512-token、最多 8 个非空原文行形成窗口；超长行使用实际 tokenizer 切分，普通行和表格行保持完整。`source_windows` READ 每次执行一个完整窗口与其来源依赖闭包，按来源坐标排序，不随任务预算重新拼包或切片。source-first 的系统与原文段跨操作一致；数值、bridge、条件、运行别名和输出 schema 均在来源之后。超出实际输入/输出份额的完整窗口明确不进入执行。CPU 前缀性质已验证，真实 Qwen 提取与原生收益仍待当前验证。缺口由 `unresolved_needs` 统一计算：后续步骤完成终端 Need 后，早期缺口关闭；不同时间范围分别检索，相同关系合并父结论。
 
 共享数值 READ 全部完成后，每个数值 Need 各声明一次显式 `numeric_select` REDUCE。Wire 6 的输出只列出选中的原事实父 ID，量值、实体、单位和来源沿用原事实。CPU 随后按各自 Need 的选中结果执行 count 或 sum。
 
@@ -70,4 +70,4 @@ C 配对重放为 Native、TTL15、TTL60、TTL180 使用同一请求序列、DAG
 
 公开评价复用作者指标规则。MTRAGEval 先完成各分量的可答性条件化，再计算聚合分；2Wiki 官方评价保留所有声明 gold 任务。共同完成子集用于诊断，完整队列用于方案选择。成本同时保存实际生成 token、完整响应、GPU/Host 物理积分与 unique KV 页占用；它们分别解释计算、时延和保护容量。
 
-`bench.capacity_workflow --full-queue` 对完整声明的 350 题执行固定 B / 收益 B × native / value 的 c1、c4 四格，每格沿自己的实际问答历史推进。该入口直接使用冻结 A、动作收益与 C 资产，按当前 reader 配置绑定资源；原两轮诊断和 `whole_plan` 保留独立入口。
+`bench.capacity_workflow --full-queue` 对完整声明的 350 题在 c4 执行固定 B / 收益 B × native / value 四格（E1—E4），并与登记 E0 比较；c1 只补 E1/E4。每格沿自己的实际问答历史推进。该入口直接使用冻结 A、动作收益与 C 资产，按当前 reader 配置绑定资源；原两轮诊断和 `whole_plan` 保留独立入口。

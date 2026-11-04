@@ -130,10 +130,12 @@ class PartitionEngine(MockEngine):
 @pytest.mark.parametrize("compress", [True, False])
 async def test_partition_forest_and_merges_spend_one_logical_target_with_complete_proof(tmp_path, compress):
     from controller.reading import build_read_plan
+    # ByteTemplate needs room for a complete fixed 512-token source window and
+    # its wire/schema overhead; the six sources still force reduction partitions.
     selected = sources(6, width=55)
     state = TaskState("t", "Infer all qualifying records.", needs=(Need("n", operation="infer"),))
     plan = build_read_plan(state, selected, "all_supplied_documents",
-        ContextBudget(window_tokens=6500, read_input_tokens=5500, read_output_tokens=2600,
+        ContextBudget(window_tokens=9000, read_input_tokens=6400, read_output_tokens=2600,
                       output_tokens=200, body_tokens=0, max_steps=64), template=ByteTemplate(),
         read_packing="source_windows", answer_system_prompt="Custom " * 200)
     store = SessionStore(tmp_path / "state.db")

@@ -71,7 +71,7 @@ def build_case(case, snapshot, template):
     budget = ContextBudget(window_tokens=32768, body_tokens=4096, history_tokens=4096,
         output_tokens=512, read_input_tokens=12288, read_output_tokens=2048, max_steps=16)
     return build_read_plan(state, evidence, "selected_sources", budget, template=template,
-                           snapshot=snapshot, read_layout="source_first")
+                           snapshot=snapshot, read_layout="source_first", read_packing="source_windows")
 
 
 async def read_proofs(service, plan, steps):

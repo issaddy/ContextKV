@@ -37,23 +37,31 @@ def numeric_plan(pairs, needs=None, **kwargs):
 
 
 def row(entity, value, unit="", needs=("n0", "n1"), scope="g0", source="s0"):
-    return {"g": scope, "n": list(needs), "e": entity, "r": "mass", "v": value,
+    excerpt = f"{entity} mass {value} {unit}." if value is not None else f"{entity} mass unstated."
+    return {"t": excerpt, "g": scope, "n": list(needs), "e": entity, "r": "mass", "v": value,
             "u": unit, "s": [source], "p": []}
 
 
 def response(*facts):
-    return {"format_version": 3, "facts": list(facts), "claims": [],
-            "support": ["shipment-count", "shipment-mass"], "conflicts": [], "open_needs": []}
+    return {"format_version": 5, "facts": list(facts), "claims": [],
+            "support": ["n0", "n1"], "conflicts": [], "open_needs": []}
 
 
 class NumericEngine(MockEngine):
     def __init__(self, output):
         super().__init__()
-        self.output, self.reads = output, 0
+        self.output, self.reads, self.selections = output, 0, 0
 
     async def generate(self, *, response_schema=None, **kwargs):
-        self.reads += 1
-        self.response_text = json.dumps(self.output)
+        if response_schema["properties"]["format_version"]["const"] == 6:
+            self.selections += 1
+            # Each view keeps its eligible source facts, including missing/zero mass.
+            views = response_schema["properties"]["views"]["properties"]
+            self.response_text = json.dumps({"format_version": 6,
+                "views": {alias: value["items"]["enum"] for alias, value in views.items()}})
+        else:
+            self.reads += 1
+            self.response_text = json.dumps(self.output)
         return await super().generate(**kwargs)
 
 
@@ -69,20 +77,23 @@ async def test_one_read_two_cpu_views_with_absent_and_zero_mass_and_durable_repl
     executor = ReadingExecutor(store, engine, ByteTemplate())
     outcome = await executor.execute_reads(attempt.attempt_id, snapshot, plan)
     extracts = tuple(claim for claim in outcome.claims if claim.kind == "extract")
-    derived = {claim.operation: claim for claim in outcome.claims if claim.kind == "derived"}
-    assert engine.reads == 1 and len(extracts) == 3
+    derived = {claim.operation: claim for claim in outcome.claims if claim.kind == "derived" and claim.operation in {"count", "sum"}}
+    assert engine.reads == 1 and engine.selections == 2 and len(extracts) == 3
     assert derived["count"].value == 3
     assert (derived["sum"].value, derived["sum"].unit) == ("1000", "g")
-    assert derived["count"].parent_claim_ids == tuple(claim.claim_id for claim in extracts)
-    assert derived["sum"].parent_claim_ids == (extracts[0].claim_id, extracts[2].claim_id)
+    by_id = {claim.claim_id: claim for claim in outcome.claims}
+    assert tuple(by_id[identity].parent_claim_ids[0] for identity in derived["count"].parent_claim_ids) == \
+        tuple(claim.claim_id for claim in extracts)
+    assert tuple(by_id[identity].parent_claim_ids[0] for identity in derived["sum"].parent_claim_ids) == \
+        (extracts[0].claim_id, extracts[2].claim_id)
     assert extracts[0].shared_need_ids == ("shipment-mass",)
     graph = ClaimGraph(outcome.claims)
     assert graph.source_spans(derived["sum"].claim_id) == pair[1].source_spans
     assert [point.claim_ids for point in outcome.plan.answer_plan.points] == [
         (derived["count"].claim_id,), (derived["sum"].claim_id,)]
     replay = await executor.execute_reads(attempt.attempt_id, snapshot, outcome.plan)
-    assert replay.claims == outcome.claims and engine.reads == 1
-    assert len(store.execution_steps(attempt.attempt_id)) == 3
+    assert replay.claims == outcome.claims and engine.reads == 1 and engine.selections == 2
+    assert len(store.execution_steps(attempt.attempt_id)) == 5
 
 
 def test_count_reduction_does_not_consume_unfinished_sum_view_or_rolling_basis():
@@ -112,7 +123,7 @@ def test_condition_scopes_and_source_versions_remain_separate():
     task = plan.steps[0]
     output = response(row("R1", "1", "kg"),
                       row("R1", "2", "kg", needs=("n2", "n3"), scope="g1", source="s1"))
-    output["support"] = list(task.need_ids)
+    output["support"] = [f"n{index}" for index in range(len(task.need_ids))]
     result = parse_read_result(task, json.dumps(output), plan.selected_set.selected_units)
     assert [(fact.conditions, fact.version) for fact in result.claims] == [
         (("approved",), "v1"), (("east",), "v2")]
@@ -199,7 +210,7 @@ def test_shared_read_measures_less_actual_prompt_and_output_than_isolation():
         tuple(unit for unit in isolated.selected_set.selected_units if unit.unit_id in task.input_unit_ids),
         template.tokenizer) for task in isolated.steps)
     assert reservation < isolated_reservation
-    assert shared.steps[0].output_schema["properties"]["format_version"]["const"] == 3
+    assert shared.steps[0].output_schema["properties"]["format_version"]["const"] == 5
     print({"source_tokens": [isolated_source, shared_source],
            "prompt_tokens": [isolated_prompt, shared_prompt],
            "fact_output_tokens": [isolated_output, shared_output],

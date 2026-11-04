@@ -409,24 +409,23 @@ def history_view(state, snapshot):
 
 
 def stable_source_payload(units):
-    """Source identities depend on original coordinates, independently of Need/step IDs."""
-    def span_identity(span):
-        coordinates = {"source_key": to_jsonable(span.source_key), "start": span.start, "end": span.end}
-        digest = sha256(json.dumps(coordinates, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        return {"source_span": "source:"+digest, **coordinates}
-
-    unit_ids = {unit.unit_id: "window:"+sha256(json.dumps(
-        [span_identity(span) for span in unit.source_spans], sort_keys=True,
-        separators=(",", ":")).encode()).hexdigest() for unit in units}
+    """Describe original coordinates with compact window-local citation handles."""
+    coordinates = {}
     sources, aliases = [], []
-    for unit in units:
-        spans = [span_identity(span) for span in unit.source_spans]
-        sources.append({"source_unit": unit_ids[unit.unit_id], "source_spans": spans,
+    for index, unit in enumerate(units):
+        spans = []
+        for span in unit.source_spans:
+            identity = (span.source_key, span.start, span.end)
+            handle = coordinates.setdefault(identity, f"s{len(coordinates)}")
+            spans.append({"source_span": handle, "source_key": to_jsonable(span.source_key),
+                          "start": span.start, "end": span.end})
+        source_unit = f"u{index}"
+        sources.append({"source_unit": source_unit, "source_spans": spans,
             "document_family": unit.document_family or unit.source_spans[0].source_key.document_id,
             "heading": unit.heading, "table_id": unit.table_id,
-            "dependencies": [unit_ids[uid] for uid in unit.dependencies],
             "text": unit.text, "applicability": unit.applicability})
-        aliases.append({"source_unit": unit_ids[unit.unit_id], "unit_id": unit.unit_id,
+        aliases.append({"source_unit": source_unit, "unit_id": unit.unit_id,
+            "dependencies": list(unit.dependencies),
             "spans": [{"source_span": stable["source_span"], "span_id": span.span_id}
                 for stable, span in zip(spans, unit.source_spans, strict=True)]})
     return sources, aliases
@@ -454,48 +453,12 @@ def _source_first_numeric(plan, task):
             and (task.operation in {"count", "sum"} or bool(task.shared_numeric_scopes)))
 
 
-def _numeric_source_payload(task, units):
-    _, aliases, _ = numeric_aliases(task, units)
-    span_ids = {span_id: alias for alias, span_id in aliases.items()}
-    unit_ids = {unit.unit_id: f"u{index}" for index, unit in enumerate(units)}
-    documents, sources = {}, []
-    for unit in units:
-        spans = []
-        for span in unit.source_spans:
-            key = span.source_key
-            family = unit.document_family or key.document_id
-            identity = (key.corpus_id, key.document_id, key.passage_id, key.version, family)
-            entry = {"span": span_ids[span.span_id]}
-            if identity not in documents:
-                documents[identity] = f"d{len(documents)}"
-                entry["document"] = {"corpus_id": key.corpus_id, "document_id": key.document_id,
-                                     "passage_id": key.passage_id, "version": key.version,
-                                     "document_family": family}
-            entry["doc"] = documents[identity]
-            spans.append(entry)
-        sources.append({"unit": unit_ids[unit.unit_id], "spans": spans,
-            "heading": unit.heading, "table_id": unit.table_id,
-            "dependencies": [unit_ids[uid] for uid in unit.dependencies],
-            "text": unit.text, "applicability": unit.applicability})
-    return sources
-
-
 def stable_prefix_messages(plan, task, units):
-    system = SOURCE_SYSTEM
-    if _source_first_numeric(plan, task):
-        sources = _numeric_source_payload(task, units)
-        citation = "Cite the source span aliases shown here directly in s. Document metadata is defined at first use."
-        extraction = SHARED_NUMERIC_READ_SYSTEM if task.shared_numeric_scopes else READ_SYSTEM
-        system += " "+extraction+NUMERIC_POPULATION_SYSTEM+SHORT_WIRE_SYSTEM.format(version=_read_protocol_version(task))
-        if task.shared_numeric_scopes:
-            system += SHARED_NUMERIC_POPULATION_EXAMPLE
-    else:
-        sources, _ = stable_source_payload(units)
-        citation = "Use the following task's source_aliases to bind source_span to output span_ids."
-    return (Message("system", system),
+    sources, _ = stable_source_payload(units)
+    return (Message("system", SOURCE_SYSTEM),
         Message("user", json.dumps({"original_sources": sources,
-            "citation_protocol": citation}, ensure_ascii=False,
-                                  separators=(",", ":"))))
+            "citation_protocol": "Use the following task's source_aliases to bind source_span to output span_ids, then cite fact_protocol source aliases."},
+            ensure_ascii=False, separators=(",", ":"))))
 
 
 def stable_prefix_input_ids(template, plan, task, units, rendered):
@@ -559,13 +522,13 @@ def step_messages(plan, task, units, claims=(), snapshot=None):
         payload["requires_reduction"] = task.requires_reduction
     if task.kind == "READ" and plan.read_layout == "source_first":
         del payload["units"]
+        _, aliases = stable_source_payload(units)
+        payload["source_aliases"] = aliases
+        instructions = step_system(plan, task)
         if _source_first_numeric(plan, task):
-            payload["fact_protocol"]["sources"] = list(sources)
-            instructions = CONCLUSION_BUDGET_SYSTEM if plan.answer_allocation is not None else ""
-        else:
-            _, aliases = stable_source_payload(units)
-            payload["source_aliases"] = aliases
-            instructions = step_system(plan, task)
+            instructions += NUMERIC_POPULATION_SYSTEM
+            if task.shared_numeric_scopes:
+                instructions += SHARED_NUMERIC_POPULATION_EXAMPLE
         return (*stable_prefix_messages(plan, task, units),
             Message("user", instructions+"\nTask:\n"+
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":"))))
@@ -631,6 +594,20 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
                     separate_needs=False, numeric_identity="names", read_layout="task_first",
                     read_packing="mixed", answer_system_prompt=None, _step_prefix=""):
     template = template or ByteTemplate()
+    if read_packing == "source_windows":
+        from .source_windows import source_window_spans
+        windows = {}
+        for unit in evidence_set.selected_units:
+            spans = source_window_spans(unit.text, template.tokenizer)
+            windows[unit.unit_id] = tuple(unit if (left, right) == (0, len(unit.text)) else replace(
+                unit, unit_id=f"{unit.unit_id}:window:{left}:{right}", text=unit.text[left:right],
+                source_spans=tuple(replace(span, span_id=f"{span.span_id}:window:{left}:{right}",
+                    start=span.start+left, end=span.start+right) for span in unit.source_spans),
+                body_tokens=len(template.tokenizer.encode(unit.text[left:right], add_special_tokens=False)))
+                for left, right in spans)
+        evidence_set = replace(evidence_set, selected_units=tuple(replace(window,
+            dependencies=tuple(part.unit_id for identity in window.dependencies for part in windows[identity]))
+            for group in windows.values() for window in group))
     plan = ContextPlan(f"{state.task_id}:{evidence_set.set_id}", state, evidence_set,
                        coverage_scope, budget=budget, reading_mode=reading_mode,
                        separate_needs=separate_needs, numeric_identity=numeric_identity,
@@ -683,7 +660,10 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
     def pack_closure(units):
         from .evidence_planner import close_dependencies
         lookup = {**source_units, **{unit.unit_id: unit for unit in units}}
-        return close_dependencies(tuple(unit.unit_id for unit in units), lookup)
+        closed = close_dependencies(tuple(unit.unit_id for unit in units), lookup)
+        return (tuple(sorted(closed, key=lambda unit: tuple(
+            (span.source_key, span.start, span.end) for span in unit.source_spans)))
+            if read_packing == "source_windows" else closed)
 
     def input_size(units):
         task = replace(prototype, step_id=f"{_step_prefix}read:{len(packs)}")
@@ -697,9 +677,6 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
 
     def fits(units):
         return input_size(units) <= maximum and output_size(units) <= output_budget
-
-    def window_identity(unit):
-        return tuple(sorted({span.source_key for span in unit.source_spans}))
 
     def finish_pack():
         nonlocal pack
@@ -716,10 +693,14 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
     for unit in evidence_set.selected_units:
         if unit.unit_id in assigned:
             continue
-        if pack and read_packing == "source_windows" and window_identity(pack[0]) != window_identity(unit):
+        if read_packing == "source_windows":
+            # The source directory fixes window coordinates before seeing a task.
+            # Retain the complete dependency path, in source order, for every use.
+            if not fits((unit,)):
+                raise ValueError("canonical source window and task exceed the READ input/output allocation")
+            pack = [unit]
             finish_pack()
-            if unit.unit_id in assigned:
-                continue
+            continue
         remaining, sequence = unit, 0
         while True:
             final = (_split_unit(remaining, len(remaining.text), sequence) if sequence else remaining)

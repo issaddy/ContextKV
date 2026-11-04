@@ -3,13 +3,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date
-import re
 import time
 
 import numpy as np
 
 from controller.context_schema import EvidencePool, EvidenceUnit, SourceSpan
 from adapters.table_relations import extract_table_relations
+from controller.source_windows import SOURCE_WINDOW_TOKENS, source_window_spans
 
 
 _TEMPORAL_UNSET = object()
@@ -21,7 +21,7 @@ class PoolProfile:
     per_need_top_k: int = 20
     archive_top_k: int = 12
     primary_pool_size: int = 96
-    unit_tokens: int = 2048
+    unit_tokens: int = SOURCE_WINDOW_TOKENS
 
 
 def unit_identity(key, start, end):
@@ -78,38 +78,19 @@ class SourceDirectory:
     def _split(self, block):
         metadata = self.corpus_index.source_metadata.get(block.key, {})
         base = block.span[0] if block.span else 0
-        # Keep source rows intact; long prose prefers literal sentence boundaries.
-        regions = [(match.start(), match.end()) for match in re.finditer(r"[^\n]+(?:\n|$)", block.text)]
         units = []
-        for start, end in regions:
-            offsets = self.tokenizer(block.text[start:end], add_special_tokens=False,
-                                     return_offsets_mapping=True)["offset_mapping"]
-            sentence_ends = {match.end() for match in re.finditer(r"[.!?。！？;；](?:\s+|$)", block.text[start:end])}
-            first = 0
-            while first < len(offsets):
-                last = min(first+self.profile.unit_tokens, len(offsets))
-                boundaries = [index+1 for index in range(first, last)
-                    if offsets[index][1] in sentence_ends and index-first >= self.profile.unit_tokens//2]
-                if last < len(offsets) and boundaries:
-                    last = boundaries[-1]
-                section = offsets[first:last]
-                left = start + section[0][0]
-                right = start + section[-1][1]
-                text = block.text[left:right]
-                unit_id = unit_identity(block.key, base+left, base+right)
-                spans = (SourceSpan(f"span:{unit_id}", block.key, base+left, base+right),)
-                applicability = tuple(sorted(metadata.get("applicability", {}).items()))
-                units.append(EvidenceUnit(unit_id, spans, text, metadata.get("heading", block.title),
-                    metadata.get("table_id"), applicability=applicability,
-                    body_tokens=len(self.tokenizer(text, add_special_tokens=False)["input_ids"]),
-                    document_family=metadata.get("document_family", block.key.document_id),
-                    valid_from=metadata.get("valid_from"), valid_to=metadata.get("valid_to"),
-                    published_at=metadata.get("published_at"), original_passage_ids=(block.key.passage_id,),
-                    version_order=tuple(metadata.get("version_order") or ()), current=metadata.get("current")))
-                if last == len(offsets):
-                    break
-                overlap = 0 if offsets[last-1][1] in sentence_ends else min(32, self.profile.unit_tokens//8)
-                first = max(first+1, last-overlap)
+        for left, right in source_window_spans(block.text, self.tokenizer, tokens=self.profile.unit_tokens):
+            text = block.text[left:right]
+            unit_id = unit_identity(block.key, base+left, base+right)
+            spans = (SourceSpan(f"span:{unit_id}", block.key, base+left, base+right),)
+            applicability = tuple(sorted(metadata.get("applicability", {}).items()))
+            units.append(EvidenceUnit(unit_id, spans, text, metadata.get("heading", block.title),
+                metadata.get("table_id"), applicability=applicability,
+                body_tokens=len(self.tokenizer.encode(text, add_special_tokens=False)),
+                document_family=metadata.get("document_family", block.key.document_id),
+                valid_from=metadata.get("valid_from"), valid_to=metadata.get("valid_to"),
+                published_at=metadata.get("published_at"), original_passage_ids=(block.key.passage_id,),
+                version_order=tuple(metadata.get("version_order") or ()), current=metadata.get("current")))
         tables = extract_table_relations(block.text, mode="explicit")
         for table in tables:
             table_id = f"{block.key.document_id}:{block.key.passage_id}:{block.key.version}:table:{base+table.span.start}"

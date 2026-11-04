@@ -141,3 +141,12 @@ A 的规范来源前缀、共享提取只有在论文分别主张贡献时才各
 - 形式正确性、标签或协议发生变化，只重做受影响的结果；无关部分继续复用。
 - 正式结果仅因明确协议错误、相关实现变化或关键结论不确定而重跑。
 - 当前实验一旦足以回答其预先声明的问题，就完成该阶段；不以新增实验数量作为研究进展。
+
+## 本轮接续核对（2026-11-04）
+
+已核对 PR #3 最新 head 为 `3a9b219`，并在任务分支快进接续；Need 条件关联和旧新 lease 共同竞争已实现，不再列为待改。
+真实调用链为 `bench.study.run_dataset` → `StudyEvidenceProvider.retrieve/retrieve_supplied` → `Controller.serve_turn` → `ReadingExecutor` → `SessionStore.commit_turn_and_outbox`；下一轮从该方案实际提交的 `raw_history` 读取历史。A 的来源目录与支持选择、B 的逐步观察与 Claim DAG、C 的 READ epoch 后独立 owner 共用实际输入和账本。
+
+本轮首先改变来源窗口与 source-first 序列化：现有 `_split` 行级单元虽有稳定坐标，`build_read_plan` 仍按任务剩余容量重新拼包/切片；数值系统提示又先于正文。采用单一 512-token、最多 8 个非空来源行的窗口档位，优先保留段落/表格行边界；超长行按实际 tokenizer 容量切分。该档位在来源目录建立时确定，READ 使用完整窗口及必要原文依赖，不按当前问题重新切分。所有操作指令和运行别名后移。保留依据是跨问题/操作的完整因果前缀相同、来源坐标逐字对应、共享 count/sum 与多跳真实阅读有效；若调用开销抵消复用，再依据实测调整这一档位。
+
+已核对固定 vendor 的 `UnifiedRadixCache.match_prefix` 与 `UnifiedTreeCore.match_prefix`：引擎沿 page-aligned token 路径匹配，HiCache 分别报告可恢复与设备可用前缀。本轮继续使用现有原生路径，不把任意原文块拼成 KV。原 350 题阶段质量改善与 reader token 降幅不能证明冻结联合性能；最终按第七节 c4 E0—E4、c1 E1/E4 测量完整响应及物理资源。
