@@ -632,14 +632,17 @@ class PrefixReadObserver:
         budgets = dict(gpu_budget_tokens=self.settings["gpu_budget_tokens"],
             host_budget_tokens=self.settings["host_budget_tokens"], lambda_gpu=self.settings["lambda_gpu"],
             lambda_host=self.settings["lambda_host"])
-        # Releasing an old owner is optional; keeping it does not renew its TTL.
-        keep = allocate_retention(active, **budgets)
-        kept_ids = {choice.owner_id for choice in keep}
-        protected = tuple(request for request in active if request.owner_id in kept_ids)
         requests = [RetentionRequest.from_receipt(receipts[owner_id], forecast,
                 reuse_event_key=events[owner_id])
             for owner_id, curve in curves.items() if feasible[owner_id] for forecast in curve]
-        choices = allocate_retention(requests, protected_requests=protected, **budgets)
+        # Keep, renew and new leases compete for the same future capacity.
+        # A remaining lease has no new control call; at an identical horizon
+        # it replaces the renewal option. Unselected old leases are released.
+        keep_options = {(request.owner_id, request.forecast.horizon_seconds) for request in active}
+        allocated = allocate_retention((*requests, *active), **budgets)
+        kept_ids = {choice.owner_id for choice in allocated
+                    if (choice.owner_id, choice.ttl_seconds) in keep_options}
+        choices = tuple(choice for choice in allocated if choice.owner_id not in kept_ids)
         selected = {choice.owner_id: choice for choice in choices}
         final_ids = kept_ids | selected.keys()
         for owner_id in native.keys()-final_ids:

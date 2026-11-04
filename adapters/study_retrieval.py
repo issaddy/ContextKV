@@ -260,7 +260,7 @@ class StudyEvidenceProvider:
                 utility = self._search_utility(support_model)
                 planner = BudgetedEvidencePlanner(self.template.tokenizer, utility,
                     profile=SearchProfile(selection.get("beam_width", 4), selection.get("max_actions", 12),
-                        selection.get("retained_sets", 3), selection.get("initial_gap_search_rounds", 1)),
+                        selection.get("retained_sets", 3)),
                     measure_context=measure_context)
                 scores = support_model.score_support(state, pool)
                 support_ms = scores.scoring_ms
@@ -562,7 +562,7 @@ class StudyEvidenceProvider:
             planner = BudgetedEvidencePlanner(self.template.tokenizer,
                 self._search_utility(support),
                 profile=SearchProfile(selection.get("beam_width", 4), selection.get("max_actions", 12),
-                    selection.get("retained_sets", 3), 0), measure_body=new_body, passage_exclusions=used_passages)
+                    selection.get("retained_sets", 3)), measure_body=new_body, passage_exclusions=used_passages)
             evidence_sets = planner.search_sets(state, context_pool, scores, budget)
             evidence_sets, rerank_ms = self._rerank_sets(state, evidence_sets, scores, support)
             chosen = next((selected for selected in evidence_sets if any(not already_read(unit)

@@ -29,6 +29,7 @@ class ReadRuntimeChannel:
             gpu_page_ids=pages, host_page_ids=pages, reference_present=False,
             pool=dict(gpu_capacity_tokens=65536, free_gpu_tokens=32768,
                 host_capacity_tokens=65536, free_host_tokens=32768),
+            workload=dict(active_requests=0, queued_requests=0),
             residency=dict(ready_gpu_prefix_tokens=boundary, host_only_load_tokens=0,
                 recoverable_prefix_tokens=boundary, inflight_h2d_tokens=0, inflight_d2h_tokens=0))
     async def _post(self, path, body):

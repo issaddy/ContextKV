@@ -52,7 +52,7 @@ def configure(args, root):
     run = merge_config(run, native["config_overlay"])
     run_path = root/"run.yaml"
     run_path.write_text(yaml.safe_dump(run, allow_unicode=True, sort_keys=False))
-    settings = dict(mode="rolling_gain", gain_asset=str(Path(args.gain_asset).resolve()),
+    settings = dict(mode="whole_plan", gain_asset=str(Path(args.gain_asset).resolve()),
         execution_profile_asset=str(Path(args.execution_profile).resolve()),
         reader_checkpoint=checkpoint, reader_profile_id=profile,
         gpu_devices=execution["resource_scope"]["gpu_devices"],

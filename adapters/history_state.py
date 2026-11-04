@@ -230,6 +230,18 @@ def apply_condition_updates(prior: tuple[Condition, ...], updates: tuple[Conditi
     return tuple(active.values())
 
 
+def apply_need_condition_updates(needs: tuple[Need, ...], updates: tuple[Condition, ...]):
+    """Rewrite only the condition edges already assigned to each Need."""
+    retired = {target for condition in updates if condition.update in {"REPLACE", "REMOVE"}
+               for target in (*condition.target_refs, *condition.supersedes)}
+    replacements = {target: tuple(condition.condition_id for condition in updates
+        if condition.update == "REPLACE" and target in (*condition.target_refs, *condition.supersedes))
+        for target in retired}
+    return tuple(replace(need, condition_ids=tuple(dict.fromkeys(
+        current for previous in need.condition_ids for current in replacements.get(previous, (previous,)))))
+        for need in needs)
+
+
 class TaskInterpreter:
     def __init__(self, model, history_index: HistoryIndex):
         self.model, self.history_index = model, history_index
@@ -247,7 +259,7 @@ class TaskInterpreter:
                 if inherited and memory.prior_task_states else None)
         conditions = apply_condition_updates(base.conditions if base else (), prediction.conditions)
         needs = prediction.needs or (base.needs if base else ())
-        needs = tuple(replace(need, condition_ids=tuple(c.condition_id for c in conditions)) for need in needs)
+        needs = apply_need_condition_updates(needs, prediction.conditions)
         spans = tuple(dict.fromkeys((*prediction.history_spans,
             *(ref for need in needs for ref in (*need.anchor_spans, *need.subject_refs)),
             *(ref for condition in conditions for ref in condition.value_spans))))
@@ -306,7 +318,7 @@ def retrieval_state(snapshot, source_index):
 
 
 
-TASK_NEED_SEMANTICS_VERSION = "task_need_semantics_v1"
+TASK_NEED_SEMANTICS_VERSION = "task_need_semantics_v2_condition_links"
 TASK_NEED_SEMANTICS = (
     "Need operation semantics:\n"
     "- lookup: retrieve a directly stated fact or relation answering a requested point.\n"
@@ -323,6 +335,13 @@ TASK_NEED_SEMANTICS = (
     "- group: partition or aggregate the requested items by the requested grouping keys.\n"
     "Choose each Need's operation from the user's requested result, not from how many documents exist "
     "or whether a reader could retrieve the answer. Keep separately requested results as separate Needs.\n"
+    "Need condition links:\n"
+    "- condition_ids names only the active restrictions that apply to that Need. An empty list means "
+    "the Need has no condition restriction. Conditions elsewhere in the task do not automatically apply.\n"
+    "- When a restriction is shared, explicitly assign the same condition ID to every affected Need. "
+    "Keep different dates, subjects or eligibility restrictions attached to their respective requested results.\n"
+    "- Return the active Needs for a followup with their resulting condition links, including new ADD "
+    "conditions. REPLACE and REMOVE update only Needs that reference their targeted prior condition.\n"
     "Need scope semantics (independent of operation):\n"
     "- selected_sources: answer from relevant selected sources. This is the ordinary scope for lookup, "
     "procedure and other requests without a demand to cover the complete supplied source range.\n"

@@ -14,7 +14,6 @@ class SearchProfile:
     beam_width: int = 4
     max_actions: int = 12
     retained_sets: int = 3
-    gap_search_rounds: int = 1
 
 
 def render_unit_union(units: tuple[EvidenceUnit, ...]) -> str:
@@ -166,22 +165,6 @@ class BudgetedEvidencePlanner:
         elapsed = (time.perf_counter()-started)*1000
         self.trace = tuple(trace)
         return tuple(replace(c, search_ms=elapsed) for c in ordered[:min(3, self.profile.retained_sets)])
-
-    def search_with_gaps(self, state, pool, scores, budget, *, score_model, retrieve_gap):
-        sets = self.search_sets(state, pool, scores, budget)
-        traces = [*pool.trace]
-        for round_no in range(self.profile.gap_search_rounds):
-            gaps = unresolved_needs(state, sets[0])
-            if not gaps:
-                break
-            additions = tuple(unit for gap in gaps for unit in retrieve_gap(state, gap))
-            merged = {u.unit_id: u for u in (*pool.units, *additions)}
-            traces.append({"gap_round": round_no, "open_needs": [g.need_id for g in gaps],
-                           "added_units": [u.unit_id for u in additions]})
-            pool = replace(pool, units=tuple(merged.values()), trace=tuple(traces))
-            scores = score_model.score_support(state, pool)
-            sets = self.search_sets(state, pool, scores, budget)
-        return pool, scores, sets
 
 
 def search_sets(state, pool, scores, budget, *, tokenizer, utility_model,

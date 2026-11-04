@@ -4,7 +4,7 @@
 |---|---|
 | 实施任务与研究边界 | [task_spec.md](task_spec.md) |
 | 当前执行机制 | [架构](../architecture.md)、[reading_runtime.md](reading_runtime.md) |
-| 根因与实现要求 | [review_20261103.md](review_20261103.md) |
+| 当前审查与实施阶段 | [review_20261104.md](review_20261104.md) |
 | 当前运行入口 | [final_runbook.md](final_runbook.md) |
 | 当前重评数值 | [reference_20261103.json](reference_20261103.json)、[budget_loop_20261103.json](budget_loop_20261103.json) |
 

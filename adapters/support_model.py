@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import combinations
 import json
-from pathlib import Path
 import time
 from typing import Callable, Protocol
 
@@ -191,11 +190,3 @@ class SupportModel:
     def manifest(self):
         return {"backend": self.backend.manifest,
                 "schedule": self.profile.__dict__, "last_schedule": self.last_schedule}
-
-
-def score_support(state, pool, *, model: SupportModel, open_needs=()):
-    return model.score_support(state, pool, open_needs=open_needs)
-
-
-def load_support_manifest(path):
-    return json.loads((Path(path)/"support-model.json").read_text())
