@@ -275,6 +275,7 @@ def capacity_tables(value, path):
 
 
 def full_queue_cells(value, path, joint_scope=None):
+    from profiling.runtime_manifest import hardware_identity
     if not isinstance(value, dict):
         return []
     if value.get("format") == "contextkv_full_queue_joint_workflow_v1":
@@ -316,7 +317,14 @@ def full_queue_cells(value, path, joint_scope=None):
         failed = {name: track["failed_task_ids"] for name, track in row["datasets"].items()}
         unscored = {name: track["unscored_answer_task_ids"] for name, track in row["datasets"].items()}
         workload = plan["workload_plans"][str(row["concurrency"])]
+        scope = plan["resource_scope"]
+        hardware = (hardware_identity(row["runtime_hardware"], scope["gpu_devices"])
+                    if row.get("runtime_hardware") is not None else None)
+        resource_identity = {key: scope[key] for key in ("gpu_capacity_tokens", "host_capacity_tokens")}
+        resource_identity.update(gpu_device_count=len(set(scope["gpu_devices"])), hardware=hardware,
+                                 native_cache_config=row.get("native_cache_config"))
         comparison = {**binding,
+            "resource_scope": resource_identity,
             "workload_sha256": {name: item["sha256"] for name, item in workload.items()},
             "complete_slo_seconds": job["complete_slo_seconds"]}
         cells.append({**row, "evaluation_kind": "full_queue_own_P3", "source_file": str(path),
@@ -342,7 +350,9 @@ def full_queue_comparisons(cells):
                      and other["method"] != row["method"] and row["method"] != "E0_native"
                      and other["concurrency"] == row["concurrency"]]
         for reference in baselines:
-            same = row["comparison_identity"] == reference["comparison_identity"]
+            missing_resource_fields = [name for name in ("hardware", "native_cache_config")
+                if any(cell["comparison_identity"]["resource_scope"][name] is None for cell in (row, reference))]
+            same = not missing_resource_fields and row["comparison_identity"] == reference["comparison_identity"]
             complete_scored = all(cell["full_queue_delivered"]
                 and numeric(cell["queue_quality"])
                 and not any(cell["unscored_answer_task_ids"].values()) for cell in (row, reference))
@@ -354,6 +364,7 @@ def full_queue_comparisons(cells):
                 candidate_generation_dir=row["generation_dir"], baseline_generation_dir=reference["generation_dir"],
                 comparable=same, incompatible_identity_fields=[key for key, value in row["comparison_identity"].items()
                     if value != reference["comparison_identity"][key]],
+                missing_identity_fields=["resource_scope."+name for name in missing_resource_fields],
                 device_source_identity_differs=row["device_source_identity"] != reference["device_source_identity"],
                 differences={field: row[field]-reference[field] if same and numeric(row[field])
                     and numeric(reference[field]) else None

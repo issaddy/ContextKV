@@ -55,7 +55,8 @@ async def reallocate(old_curve, new_curve, *, old_pages=("old",), new_pages=("ne
     callback._features = lambda plan, sources, accesses, now: {"owner": sources[0]["owner"]}
     callback._native_features = lambda inspection: {}
     callback._forecasts = lambda features, scope: curves[features["owner"]]
-    result = await callback._allocate_value(None, {"owner_id": "new"}, new_receipt,
+    result = await callback._allocate_value(None,
+                                           {"owner_id": "new", "receipt": SimpleNamespace(attempt_id="new-native-attempt")}, new_receipt,
                                            {"owner": "new"}, now, new_event)
     return result, calls
 

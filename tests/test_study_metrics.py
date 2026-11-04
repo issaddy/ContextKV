@@ -105,6 +105,7 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     plan = dict(reader_run={'path': str(run)},
         source_config={'sha256': 'A'}, source_matrix={'sha256': 'matrix'},
         cohort={'track': ['task']}, reader_profile_id='fixed', lambda_time=0,
+        resource_scope={'gpu_devices': [0], 'gpu_capacity_tokens': 32768, 'host_capacity_tokens': 65536},
         workload_plans={'4': {'track': {'sha256': 'arrivals-A'}}},
         assets={'gain': {'sha256': 'B'}, 'value': None},
         jobs=[dict(name='job', output='generation', complete_slo_seconds=30)])
@@ -112,6 +113,10 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     plan_path.write_text(json.dumps(plan))
     row = dict(job='job', method='B6_native', concurrency=4, requested_qa=1, completed_qa=1,
         queue_quality=.5, p95_complete_ms=100, paid_native_usage={},
+        native_cache_config={'gpu_capacity_tokens': 32768, 'host_capacity_tokens': 65536, 'page_size': 16},
+        runtime_hardware={'host_name': 'fixture-host', 'platform': 'fixture-platform',
+            'gpus': [{'index': 0, 'uuid': 'fixture-device', 'name': 'H200',
+                      'memory_bytes': 141*1024**3, 'driver_version': 'fixture-driver'}]},
         datasets={'track': dict(missing_execution_task_ids=[], failed_task_ids=[], unscored_answer_task_ids=[])})
     path = tmp_path / 'workflow.json'
     def cells(value):
@@ -125,6 +130,18 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     faster = full_queue_comparisons(reference + cells({**candidate, 'p95_complete_ms': 85}))[0]
     assert faster['relative_p95_change'] == pytest.approx(-.15)
     assert faster['quality_not_lower'] is True
+    other_hardware = {**row['runtime_hardware'], 'gpus': [
+        {**row['runtime_hardware']['gpus'][0], 'name': 'A100'}]}
+    changed_device = full_queue_comparisons(reference + cells({**candidate, 'runtime_hardware': other_hardware}))[0]
+    assert not changed_device['comparable'] and changed_device['relative_p95_change'] is None
+    assert changed_device['incompatible_identity_fields'] == ['resource_scope']
+    unknown = full_queue_comparisons(reference + cells({**candidate, 'runtime_hardware': None}))[0]
+    assert not unknown['comparable'] and unknown['missing_identity_fields'] == ['resource_scope.hardware']
+    plan['resource_scope']['host_capacity_tokens'] = 131072
+    plan_path.write_text(json.dumps(plan))
+    assert full_queue_comparisons(reference + cells(candidate))[0]['incompatible_identity_fields'] == ['resource_scope']
+    plan['resource_scope']['host_capacity_tokens'] = 65536
+    plan_path.write_text(json.dumps(plan))
     incomplete = full_queue_comparisons(reference + cells({**candidate, 'completed_qa': 0}))[0]
     assert incomplete['relative_p95_change'] is None
     assert incomplete['quality_not_lower'] is None

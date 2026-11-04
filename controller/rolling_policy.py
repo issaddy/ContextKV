@@ -335,8 +335,7 @@ class RollingPlanRuntime:
                         results=(*state.results, complete.result), auxiliary_usage=usage)
         state = replace(state, plan=_with_observed_sources(plan, state))
         executor.store.save_reading_progress(record.attempt_id, state.plan,
-            ReadingProgress(tuple(sorted(expanded)), (), usage))
-        executor.store.save_execution_step(complete, "COMPLETE")
+            ReadingProgress(tuple(sorted(expanded)), (), usage), completed_step=complete)
         events.emit("rolling_gap_complete", attempt_id=record.attempt_id, step=complete,
                     returned_unit_ids=tuple(unit.unit_id for unit in pool.units))
         return state
@@ -452,6 +451,19 @@ class RollingPlanRuntime:
         if self.mode == "observed_actions" and saved:
             catalog = executor.store.context_plan(attempt_id)
             context_plans = (namespace_plan(catalog),)
+        if saved:
+            arrivals = {record.metrics["request_arrived_monotonic"] for _, record, _ in saved}
+            if len(arrivals) != 1 or None in arrivals:
+                raise ValueError("resumed rolling cost requires its original observed request arrival")
+            arrived = arrivals.pop()
+            executor.request_arrived = arrived
+            catalog = executor.store.context_plan(attempt_id)
+            finished = []
+            for stage, record, generation in saved:
+                if stage == "COMPLETE" and record.engine_epoch is not None:
+                    record = await executor.finish_completed_step(catalog, record)
+                finished.append((stage, record, generation))
+            saved = tuple(finished)
         records = tuple(record for stage, record, _ in saved if stage == "COMPLETE")
         graph = ClaimGraph(claim for record in records for claim in record.result.claims)
         coverage = tuple((context_plans[0].coverage_scope, span.source_key.document_id,
@@ -467,14 +479,16 @@ class RollingPlanRuntime:
         if self.mode == "observed_actions":
             state = replace(state, auxiliary_usage=self._gap_usage(executor, attempt_id))
         if saved:
-            arrivals = {record.metrics["request_arrived_monotonic"] for _, record, _ in saved}
-            if len(arrivals) != 1 or None in arrivals:
-                raise ValueError("resumed rolling cost requires its original observed request arrival")
-            arrived = arrivals.pop()
-            executor.request_arrived = arrived
             for stage, record, _ in saved:
                 if stage != "COMPLETE":
                     if self.mode == "observed_actions" and record.task.kind == "GAP":
+                        if stage == "RESULT_READY":
+                            import json
+                            pool = decode(EvidencePool, json.loads(record.result.raw_output))
+                            state = await self._finish_gap(record, pool, state, snapshot, template,
+                                executor, expanded, events)
+                            context_plans = (state.plan,)
+                            continue
                         raise ValueError("selected GAP was already submitted; it will not be paid again")
                     variants = compile_step(state.plan, record.task, state, snapshot, template,
                                             outputs=(record.task.output_budget,))

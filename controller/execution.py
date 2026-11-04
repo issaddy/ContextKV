@@ -41,6 +41,16 @@ def aggregate_numeric_view(task, inputs, plan, results):
     return claim
 
 
+def completed_reduction_record(record, task, basis, results=(), *, frontier=None, mode=None):
+    """Bind the input basis and effective frontier before publishing COMPLETE."""
+    selected = task.operation == "numeric_select"
+    if frontier is None:
+        frontier = record.result.claims if selected else claim_frontier(basis, record.result.claims)
+    return replace(record, result=replace(record.result, reduction=ReductionState(
+        task.step_id, task.need_ids, task.operation, reduction_basis_ids(task, basis, results),
+        tuple(claim.claim_id for claim in frontier), mode or ("selected" if selected else "merged"))))
+
+
 class ReadingBudgetExceeded(ValueError):
     pass
 
@@ -133,7 +143,6 @@ class ReadingExecutor:
                                          "phase_window": {"start": tick, "end": ended,
                                              "clock": "client_monotonic", "scope": "step_wall"},
                                          "request_arrived_monotonic": self.request_arrived})
-            self.store.save_execution_step(record, "COMPLETE")
         else:
             rendered = self.template.render(step_messages(plan, task, selected_units, selected_claims, snapshot))
             if candidate is None or (candidate.input_ids, candidate.output_budget) != (
@@ -147,13 +156,10 @@ class ReadingExecutor:
                       if usage is not None and gap is not None else None)
             require_online_tokens(plan.budget.max_total_tokens, tokens,
                 len(rendered.input_ids)+task.output_budget, task.kind)
-            record = await self._generate_step(attempt_id, snapshot, plan, task, selected_units, selected_claims)
-        if task.kind == "REDUCE":
-            frontier = (record.result.claims if task.operation == "numeric_select"
-                        else claim_frontier(selected_claims, record.result.claims))
-            record = replace(record, result=replace(record.result, reduction=ReductionState(
-                task.step_id, task.need_ids, task.operation, reduction_basis_ids(task, selected_claims, state.results),
-                tuple(claim.claim_id for claim in frontier), "merged")))
+            record = await self._generate_step(attempt_id, snapshot, plan, task, selected_units, selected_claims,
+                                               results=state.results)
+        if cpu:
+            record = completed_reduction_record(record, task, selected_claims, state.results)
             self.store.save_execution_step(record, "COMPLETE")
         graph = ClaimGraph(state.claims)
         for claim in record.result.claims:
@@ -198,7 +204,18 @@ class ReadingExecutor:
             raise EngineError("READ_RETIRE_PENDING", record.step_id)
         self.store.ack_retire(operation_id)
 
-    async def _generate_step(self, attempt_id, snapshot, plan, task, units, claims):
+    async def finish_completed_step(self, plan, record):
+        """Finish prefix observation and retirement using the paid, saved input."""
+        rendered = self.template.render(record.input_messages)
+        if rendered.input_ids != record.input_ids:
+            raise ValueError("persisted completed step differs from the current template")
+        by_id = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+        units = tuple(by_id[identity] for identity in record.task.input_unit_ids)
+        record = await self._observe_prefix(plan, record.task, units, rendered, record)
+        await self._retire_step(record)
+        return record
+
+    async def _generate_step(self, attempt_id, snapshot, plan, task, units, claims, *, results=()):
         step_started = time.monotonic()
         identity = f"{attempt_id}:{task.step_id}"
         messages = step_messages(plan, task, units, claims, snapshot)
@@ -227,9 +244,7 @@ class ReadingExecutor:
             if record.task != task or record.input_ids != rendered.input_ids:
                 raise ValueError("persisted step input differs from the reading plan")
             if stage == "COMPLETE":
-                record = await self._observe_prefix(plan, task, units, rendered, record)
-                await self._retire_step(record)
-                return record
+                return await self.finish_completed_step(plan, record)
         if stage == "PLANNED":
             info = await self.engine.info()
             prepared_at = time.monotonic()
@@ -312,6 +327,13 @@ class ReadingExecutor:
                 output_tokens=len(generation.output_ids))
             record = replace(record, result=result,
                              metrics={**record.metrics, "parse_ms": (time.monotonic()-parse_started)*1000})
+            if task.kind == "REDUCE":
+                by_id = {claim.claim_id: claim for previous in results for claim in previous.claims}
+                by_id.update((claim.claim_id, claim) for claim in claims)
+                basis = (tuple(by_id[identity] for identity in task.reduction_basis_claim_ids)
+                         if task.reduction_basis_claim_ids else claims)
+                frontier = result.claims if task.operation == "numeric_select" else claim_frontier(claims, result.claims)
+                record = completed_reduction_record(record, task, basis, results, frontier=frontier)
             self.store.save_execution_step(record, "COMPLETE")
             record = await self._observe_prefix(plan, task, units, rendered, record)
             retire_started = time.monotonic()
@@ -398,7 +420,7 @@ class ReadingExecutor:
                     len(rendered.input_ids)+task.output_budget, task.kind)
             try:
                 record = await self._generate_step(attempt_id, snapshot, plan, task,
-                                                   selected_units, selected_claims)
+                                                   selected_units, selected_claims, results=tuple(results))
             finally:
                 saved = self.store.execution_step(attempt_id, task.step_id)
                 if saved is not None:
@@ -408,11 +430,10 @@ class ReadingExecutor:
             return record.result
 
         def complete_reduction(task, basis, frontier, mode):
-            completion = ReductionState(task.step_id, task.need_ids, task.operation,
-                reduction_basis_ids(task, basis, results),
-                tuple(claim.claim_id for claim in frontier), mode)
-            record = records[-1]
-            record = replace(record, result=replace(record.result, reduction=completion))
+            record = completed_reduction_record(records[-1], task, basis, results,
+                                                frontier=frontier, mode=mode)
+            if record == records[-1]:
+                return
             records[-1], results[-1] = record, record.result
             self.store.save_execution_step(record, "COMPLETE")
 
@@ -636,9 +657,9 @@ class ReadingExecutor:
                                             "native_workload": native_workload,
                                             "phase_window": {"start": tick, "end": ended,
                                                 "clock": "client_monotonic", "scope": "step_wall"}})
+                    record = completed_reduction_record(record, task, selected_claims, results)
                     self.store.save_execution_step(record, "COMPLETE")
                     accept(record, selected_units)
-                    complete_reduction(task, selected_claims, (claim,), "merged")
                 elif task.kind == "REDUCE":
                     await run_reduction(task, selected_claims)
                 else:

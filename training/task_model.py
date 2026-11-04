@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 import json
 from pathlib import Path
 import random
 import time
 
-from adapters.history_state import HistoryIndex, TaskPrediction, task_source_catalogue, task_catalogue_candidates, TASK_MAX_OBJECTS, TASK_MAX_REFS, TASK_MAX_VERSION_TURNS, task_graph_history, validate_task_anchors
+from adapters.history_state import HistoryIndex, TaskPrediction, task_source_catalogue, task_catalogue_candidates, TASK_MAX_OBJECTS, TASK_MAX_REFS, TASK_MAX_VERSION_TURNS, task_graph_history, validate_task_anchors, observed_task_sources, budget_task_catalogue
 from controller.context_schema import Condition, Need, RetrievalState, TextRef, VersionIntent
 from controller.schema import OnlineTurn, TurnRecord
 from controller.serialization import decode
@@ -30,7 +31,7 @@ def encode_task(tokenizer, turn, windows, memory, *, catalogue=None, max_input_t
     groups.append((TextRef(turn.turn, "user", 0, len(turn.query)), turn.query))
     # Historical graph candidates are encoded from actual QA, independently of labels.
     from adapters.history_state import history_text
-    prior_refs = tuple(dict.fromkeys(ref for state in memory.prior_task_states
+    prior_refs = tuple(dict.fromkeys(ref for state in reversed(memory.prior_task_states)
         for refs in ([n.anchor_spans + n.subject_refs for n in state.needs] +
                      [c.value_spans + ((c.key_span,) if c.key_span else ()) +
                       ((c.predicate_span,) if c.predicate_span else ()) for c in state.conditions])
@@ -40,7 +41,11 @@ def encode_task(tokenizer, turn, windows, memory, *, catalogue=None, max_input_t
                    and owner.start <= ref.start and ref.end <= owner.end for owner, _ in groups):
             groups.append((ref, history_text(ref, memory, turn)))
     catalogue = task_source_catalogue(memory) if catalogue is None else catalogue
-    versions, families = task_catalogue_candidates(catalogue, memory.prior_task_states)
+    catalogue = budget_task_catalogue(tokenizer, turn.query, catalogue, memory.prior_task_states, max_input_tokens, current_turn_id=turn.turn)
+    versions, families = task_catalogue_candidates(catalogue)
+    current_size = len(tokenizer(f"Turn {turn.turn} user: ", add_special_tokens=False)["input_ids"]) + len(tokenizer(turn.query, add_special_tokens=False)["input_ids"]) + 1
+    if 1 + current_size > max_input_tokens:
+        raise ValueError("current question exceeds the encoder input budget")
     catalogue_positions = {}
     for name, identities in (("document_families", families), ("version_ids", versions)):
         catalogue_positions[name] = []
@@ -48,31 +53,48 @@ def encode_task(tokenizer, turn, windows, memory, *, catalogue=None, max_input_t
             rows = (catalogue.get(identity, []) if name == "document_families" else
                     [{"family": family, **row} for family, rows in catalogue.items()
                      for row in rows if row["version"] == identity])
+            rows = list({json.dumps(row, sort_keys=True, ensure_ascii=False): row for row in rows}.values())
             text = json.dumps({"kind": name, "identity": identity, "sources": rows}, ensure_ascii=False)
             tokens = tokenizer(text, add_special_tokens=False)["input_ids"]
             begin = len(ids)
             ids.extend(tokens + [tokenizer.sep_token_id])
             refs.extend([None]*(len(tokens)+1))
             catalogue_positions[name].append(list(range(begin, begin+len(tokens))))
+    metadata_limit = len(ids) + max(0, (max_input_tokens - current_size - len(ids))//3)
     # Pointer candidates have their own observed metadata representations even
     # when the optional history window for that turn is outside the budget.
     def metadata_positions(value):
         tokens = tokenizer(json.dumps(value, ensure_ascii=False), add_special_tokens=False)["input_ids"]
+        if len(ids) + len(tokens) + 1 > metadata_limit:
+            return []
         begin = len(ids)
         ids.extend(tokens + [tokenizer.sep_token_id])
         refs.extend([None]*(len(tokens)+1))
         return list(range(begin, begin+len(tokens)))
-    resume_tasks = tuple({state.task_id: state for state in memory.prior_task_states}.values())
+    resume_tasks = tuple(reversed(tuple({state.task_id: state for state in memory.prior_task_states}.values())))
+    input_omissions = []
+    observation = {}
+    if memory.source_index is not None and hasattr(memory.source_index, "reference_date"):
+        observation["reference_date"] = memory.source_index.reference_date
+    if memory.source_index is not None and hasattr(memory.source_index, "observed_source_scope"):
+        observation["source_scope"] = [str(key) for key in memory.source_index.observed_source_scope]
+    if observation and not metadata_positions(observation):
+        input_omissions.append("source date/scope metadata exceeds the task metadata budget")
     task_positions = [metadata_positions({"task_id": state.task_id, "question": state.raw_question,
         "turn_id": state.current_turn_id}) for state in resume_tasks]
+    retained_tasks = [(state, indices) for state, indices in zip(resume_tasks, task_positions) if indices]
+    resume_tasks = tuple(state for state, _ in retained_tasks)
+    task_positions = [indices for _, indices in retained_tasks]
     version_turn_ids = [row.turn_id for row in memory.committed_history]
     version_turn_positions = [metadata_positions({"turn_id": turn_id,
         "version_intents": [{"mode": state.version_intent.mode, "document_families": state.version_intent.document_families,
                             "version_ids": state.version_intent.version_ids, "resolved_version_ids": state.version_intent.resolved_version_ids} for state in memory.prior_task_states
                             if state.current_turn_id == turn_id]}) for turn_id in version_turn_ids]
+    retained_turns = [(identity, indices) for identity, indices in zip(version_turn_ids, version_turn_positions) if indices]
+    version_turn_ids = [identity for identity, _ in retained_turns]
+    version_turn_positions = [indices for _, indices in retained_turns]
     ranges = []
-    # Required state and directory precede optional retrieved history windows.
-    required_count = len(groups)
+    # Historical anchors and retrieved windows are optional under the same budget.
     groups.extend((window.ref, window.text) for window in windows)
     included_groups = []
     for group_index, (ref, text) in enumerate(groups):
@@ -80,8 +102,8 @@ def encode_task(tokenizer, turn, windows, memory, *, catalogue=None, max_input_t
         encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
         size = len(prefix) + len(encoded["input_ids"]) + 1
         if len(ids) + size > max_input_tokens:
-            if group_index < required_count:
-                raise ValueError("required task state and catalogue exceed the encoder input budget")
+            if group_index == 0:
+                raise ValueError("current question exceeds the encoder input budget")
             continue
         included_groups.append((ref, text))
         ids.extend(prefix)
@@ -93,7 +115,16 @@ def encode_task(tokenizer, turn, windows, memory, *, catalogue=None, max_input_t
         ranges.append((begin, len(ids), ref))
         ids.append(tokenizer.sep_token_id)
         refs.append(None)
-    prior_conditions = tuple(condition for state in memory.prior_task_states for condition in state.conditions)
+    def visible(spans):
+        return all(any(owner.turn_id == span.turn_id and owner.speaker == span.speaker
+                       and owner.start <= span.start and span.end <= owner.end
+                       for owner, _ in included_groups) for span in spans)
+    prior_tasks = tuple(replace(state,
+        needs=tuple(n for n in state.needs if visible(n.anchor_spans)),
+        conditions=tuple(c for c in state.conditions if visible(c.value_spans +
+            ((c.key_span,) if c.key_span else ()) + ((c.predicate_span,) if c.predicate_span else ()))))
+        for state in memory.prior_task_states if state.task_id in {s.task_id for s in resume_tasks})
+    prior_conditions = tuple(condition for state in prior_tasks for condition in state.conditions)
     prior_conditions = tuple({condition.condition_id: condition for condition in prior_conditions}.values())
 
     def positions(spans):
@@ -103,15 +134,39 @@ def encode_task(tokenizer, turn, windows, memory, *, catalogue=None, max_input_t
 
     condition_positions = [positions(condition.value_spans + ((condition.key_span,) if condition.key_span else ())
         + ((condition.predicate_span,) if condition.predicate_span else ())) for condition in prior_conditions]
-    return {"input_ids": ids, "refs": refs, "ranges": ranges, "text_groups": included_groups,
+    return {"input_omissions": input_omissions, "input_ids": ids, "refs": refs, "ranges": ranges, "text_groups": included_groups,
             "catalogue_versions": versions, "catalogue_families": families, "catalogue_positions": catalogue_positions,
             "current_turn_id": turn.turn,
             "prior_conditions": prior_conditions, "condition_positions": condition_positions,
-            "prior_tasks": memory.prior_task_states, "resume_tasks": resume_tasks, "task_positions": task_positions,
+            "prior_tasks": prior_tasks, "resume_tasks": resume_tasks, "task_positions": task_positions,
             "version_turn_ids": version_turn_ids, "version_turn_positions": version_turn_positions}
 
 
+class TaskInputNotVisible(ValueError):
+    """Supervision refers to candidates excluded by the observed input budget."""
+
+
 def task_targets(encoded, prediction):
+    if encoded.get("input_omissions"):
+        raise TaskInputNotVisible("; ".join(encoded["input_omissions"]))
+    refs = [*prediction.history_spans, *prediction.version_intent.time_refs]
+    refs.extend(ref for n in prediction.needs for ref in (*n.anchor_spans, *n.subject_refs))
+    refs.extend(ref for c in prediction.conditions for ref in (*c.value_spans,
+        *((c.key_span,) if c.key_span else ()), *((c.predicate_span,) if c.predicate_span else ())))
+    if any(not any(owner.turn_id == ref.turn_id and owner.speaker == ref.speaker
+                   and owner.start <= ref.start and ref.end <= owner.end
+                   for owner, _ in encoded["text_groups"]) for ref in refs):
+        raise TaskInputNotVisible("supervised span is outside the budgeted task input")
+    task_ids = {s.task_id for s in encoded["resume_tasks"]}
+    if prediction.resume_task_id and prediction.resume_task_id not in task_ids:
+        raise TaskInputNotVisible("supervised task pointer is outside the budgeted task input")
+    items = candidates(encoded, prediction.needs, prediction.conditions,
+        tuple(ref for n in prediction.needs for ref in n.subject_refs),
+        relation=prediction.relation, resume_task_id=prediction.resume_task_id)
+    if any(not set(n.condition_ids) <= {c.condition_id for c in items["conditions"]}
+           or not set(n.predecessor_need_ids) <= {p.need_id for p in items["predecessors"]}
+           for n in prediction.needs):
+        raise TaskInputNotVisible("supervised graph edge is outside the budgeted task input")
     validate_task_anchors(prediction)
     n = len(encoded["input_ids"])
     targets = {name: [-100]*n for name in ("span", "history", "update", "condition_relation", "operation")}
@@ -119,7 +174,7 @@ def task_targets(encoded, prediction):
         targets[name] = [[-100]*len(encoded["prior_conditions"]) for _ in range(n)]
     targets["source_turns"] = [int(identity in prediction.version_intent.source_turns) for identity in encoded["version_turn_ids"]]
     if not set(prediction.version_intent.source_turns) <= set(encoded["version_turn_ids"]):
-        raise ValueError("version source turn is absent from committed history")
+        raise TaskInputNotVisible("version source turn is outside the budgeted task input")
     targets["span"] = [[0 if ref is not None else -100 for _ in SPAN_KINDS] for ref in encoded["refs"]]
 
     def assign(refs, kind, values=None):
@@ -146,7 +201,7 @@ def task_targets(encoded, prediction):
     condition_ids = [c.condition_id for c in encoded["prior_conditions"]]
     for condition in prediction.conditions:
         if not set((*condition.target_refs, *condition.supersedes)) <= base_condition_ids:
-            raise ValueError("condition update names an unavailable historical condition")
+            raise TaskInputNotVisible("condition update target is outside the budgeted task input")
         values = {"update": UPDATES.index(condition.update),
                   "condition_relation": CONDITION_RELATIONS.index(condition.relation_type),
                   "condition_target": [int(identity in condition.target_refs) if identity in base_condition_ids else -100 for identity in condition_ids],
@@ -166,7 +221,7 @@ def task_targets(encoded, prediction):
                              ("resolved_version_ids", encoded["catalogue_versions"])):
         selected = getattr(prediction.version_intent, name)
         if not set(selected) <= set(identities):
-            raise ValueError(f"{name} supervision names a candidate absent from the observed catalogue")
+            raise TaskInputNotVisible(f"{name} supervision is outside the budgeted observed catalogue")
         targets[name] = [int(identity in selected) for identity in identities]
     return targets
 
@@ -458,7 +513,8 @@ class TaskModel:
         self.usage["input_tokens"] += len(encoded["input_ids"])
         self.usage["elapsed_ms"] += elapsed
         self.usage["task_ms"] += elapsed
-        self.last_metrics = {"input_tokens": len(encoded["input_ids"]), "output_tokens": 0, "elapsed_ms": elapsed}
+        self.last_metrics = {"input_tokens": len(encoded["input_ids"]), "output_tokens": 0, "elapsed_ms": elapsed,
+            "input_omissions": encoded["input_omissions"]}
         return prediction
 
 
@@ -539,6 +595,7 @@ def train_task(config):
         {"params": adapter_params, "lr": settings.get("adapter_lr", 2e-4)},
         {"params": head_params, "lr": settings.get("head_lr", 1e-4)}], weight_decay=.01)
     logs = []
+    input_not_visible = []
     span_counts = {kind: Counter() for kind in SPAN_KINDS}
     training_usage = {"task_input_tokens": 0, "history_input_tokens": 0,
                       "document_input_tokens": 0, "query_input_tokens": 0}
@@ -548,7 +605,8 @@ def train_task(config):
         order.shuffle(conversation_ids)
         for row in (row for identity in conversation_ids for row in conversations[identity]):
             history = tuple(decode(TurnRecord, value) for value in row["actual_history"])
-            memory = RetrievalState(len(history), history, tuple(prior_states.get(row["conversation_id"], ())))
+            memory = RetrievalState(len(history), history, tuple(prior_states.get(row["conversation_id"], ())),
+                source_index=observed_task_sources(row))
             turn = OnlineTurn(row["conversation_id"], row["task_id"], row["turn"], row["snapshot_id"], row["question"], (), (), "P3")
             # Ranking here uses the frozen document encoder, keeping its space fixed.
             def encode(texts):
@@ -563,7 +621,13 @@ def train_task(config):
             if len(encoded["input_ids"]) > 8192:
                 raise ValueError("task training view exceeds BGE-M3 input budget")
             prediction = decode(TaskPrediction, row["prediction"])
-            targets = task_targets(encoded, prediction)
+            try:
+                targets = task_targets(encoded, prediction)
+            except TaskInputNotVisible as error:
+                input_not_visible.append({"task_id": row["task_id"], "epoch": epoch, "reason": str(error)})
+                from controller.context_schema import TaskState
+                prior_states.setdefault(row["conversation_id"], []).append(decode(TaskState, row["task_state"]))
+                continue
             batch = {"input_ids": torch.tensor([encoded["input_ids"]], device=device),
                      "attention_mask": torch.ones((1, len(encoded["input_ids"])), dtype=torch.long, device=device)}
             network.train()
@@ -635,6 +699,13 @@ def train_task(config):
             from controller.context_schema import TaskState
             prior_states.setdefault(row["conversation_id"], []).append(decode(TaskState, row["task_state"]))
     output.mkdir(parents=True, exist_ok=True)
+    write_rows(output/"input_not_visible.jsonl", input_not_visible)
+    if not logs:
+        status = {"status": "not_fitted", "reason": "no visible supervised training steps",
+            "declared_training_rows": len(labels), "training_rows": 0, "steps": 0,
+            "input_not_visible_states": len(input_not_visible)}
+        (output/"training-status.json").write_text(json.dumps(status, indent=2)+"\n")
+        return status
     network.encoder.save_pretrained(output/"adapter")
     torch.save({name: value.cpu() for name, value in network.state_dict().items()
                 if not name.startswith("encoder.")}, output/"task-heads.pt")
@@ -645,7 +716,8 @@ def train_task(config):
             "model_id", "revision", "max_length", "pooling")},
         "document_encoder_manifest": dense.manifest["encoder"], "document_encoder_training": "frozen",
         "rank": task.get("lora_rank", 16), "dtype": dtype,
-        "training_rows": len(labels), "steps": len(logs), "elapsed_ms": (time.perf_counter()-started)*1000,
+        "declared_training_rows": len(labels),
+        "training_rows": len({row["task_id"] for row in logs}), "steps": len(logs), "elapsed_ms": (time.perf_counter()-started)*1000,
         "complete_ms": (time.perf_counter()-complete_started)*1000,
         "model_setup_ms": (started-complete_started)*1000,
         "input_tokens": sum(training_usage.values()), "token_usage": training_usage,
@@ -679,6 +751,7 @@ def train_task(config):
         "training_order": "seeded conversation shuffle per epoch; ascending turns within each conversation",
         "history_supervision": "token-level selected historical spans; current question masked",
         "training_config": settings}
+    manifest["input_not_visible_states"] = len(input_not_visible)
     (output/"task-model.json").write_text(json.dumps(manifest, indent=2)+"\n")
     (output/"losses.jsonl").write_text("".join(json.dumps(row)+"\n" for row in logs))
     return manifest
@@ -711,10 +784,18 @@ def evaluate_task(config):
     evaluation_rows = select_cohort_rows(read_jsonl(settings["task_eval_labels"]), settings["cohort_manifest"], "dev")
     for row in evaluation_rows:
         history = tuple(decode(TurnRecord, value) for value in row["actual_history"])
-        memory = RetrievalState(len(history), history, tuple(prior.get(row["conversation_id"], ())))
+        memory = RetrievalState(len(history), history, tuple(prior.get(row["conversation_id"], ())),
+            source_index=observed_task_sources(row))
         turn = OnlineTurn(row["conversation_id"], row["task_id"], row["turn"], row["snapshot_id"], row["question"], (), (), "P3")
         expected = decode(TaskPrediction, row["prediction"])
-        predicted = model.predict(turn, index.select(turn.query, memory, current_turn_id=turn.turn), memory,
+        windows = index.select(turn.query, memory, current_turn_id=turn.turn)
+        encoded = encode_task(model.tokenizer, turn, windows, memory, catalogue=row["task_catalogue"])
+        input_visibility = {"status": "visible"}
+        try:
+            task_targets(encoded, expected)
+        except TaskInputNotVisible as error:
+            input_visibility = {"status": "input_not_visible", "reason": str(error)}
+        predicted = model.predict(turn, windows, memory,
                                   catalogue=row["task_catalogue"])
         def condition_items(prediction):
             return {(condition.update, condition.relation_type,
@@ -743,6 +824,7 @@ def evaluate_task(config):
         rows.append({"task_id": row["task_id"], "split": row["split"], "cohort_split": row["cohort_split"],
                      "cohort_manifest_sha256": row["cohort_manifest_sha256"], "question": row["question"],
                      "actual_history": row["actual_history"], "metrics": metrics,
+                     "input_visibility": input_visibility,
                      "prediction": to_jsonable(predicted), "expected": to_jsonable(expected)})
         prior.setdefault(row["conversation_id"], []).append(decode(TaskState, row["task_state"]))
     output = Path(settings.get("task_eval_output", "runs/study/task-evaluation"))

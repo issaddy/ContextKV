@@ -13,7 +13,7 @@ import time
 import yaml
 
 from adapters.history_state import (HistoryIndex, TaskInterpreter, TeacherTaskModel, history_text,
-    TASK_NEED_SEMANTICS, TASK_NEED_SEMANTICS_VERSION, task_source_catalogue)
+    TASK_NEED_SEMANTICS, TASK_NEED_SEMANTICS_VERSION, task_source_catalogue, observed_task_sources)
 from adapters.hybrid_retrieval import LocalBGE
 from adapters.query_selector import OpenAICompletionClient, SelectorConfig
 from adapters.retrieval import run_retrieval_worker
@@ -152,7 +152,9 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
                     old["cohort_split"] != actual["cohort_split"] or
                     old.get("correct_task_binding") is not True or old.get("source_support_verified") is not True or
                     old.get("task_label_review_protocol") != "fixed_task_state_semantics_v2" or
-                    "task_catalogue" not in old or
+                    old.get("task_catalogue") != actual["task_catalogue"] or
+                    old.get("task_reference_date") != actual["task_reference_date"] or
+                    old.get("source_scope", []) != actual.get("source_scope", []) or
                     old.get("need_semantics_version") != TASK_NEED_SEMANTICS_VERSION or
                     old.get("need_semantics_verified") is not True):
                 raise ValueError(f"saved task label differs from actual cohort state: {old['task_id']}")
@@ -202,7 +204,8 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
                 if row["task_id"] not in requested:
                     continue
                 history = tuple(decode(TurnRecord, value) for value in row["actual_history"])
-                memory = RetrievalState(len(history), history, tuple(states))
+                memory = RetrievalState(len(history), history, tuple(states),
+                    source_index=observed_task_sources(row))
                 messages = tuple(message for old in history for message in (
                     OnlineMessage("user", old.user_text), OnlineMessage("assistant", old.assistant_text)))
                 turn = OnlineTurn(conversation_id, row["task_id"], row["turn"], row["snapshot_id"], row["question"], messages, (), "P3")

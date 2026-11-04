@@ -271,13 +271,19 @@ class SessionStore:
                             "DO UPDATE SET plan=excluded.plan",
                             (attempt_id, self._dump(context_plan)))
 
-    def save_reading_progress(self, attempt_id, context_plan, progress):
+    def save_reading_progress(self, attempt_id, context_plan, progress, *, completed_step=None):
         """Persist the completed gap work and its resulting plan atomically."""
         with self._transaction():
             self.db.execute("INSERT INTO turn_plans VALUES(?,?) ON CONFLICT(attempt_id) "
                             "DO UPDATE SET plan=excluded.plan", (attempt_id, self._dump(context_plan)))
             self.db.execute("INSERT INTO reading_progress VALUES(?,?) ON CONFLICT(attempt_id) "
                             "DO UPDATE SET payload=excluded.payload", (attempt_id, self._dump(progress)))
+            if completed_step is not None:
+                if completed_step.attempt_id != attempt_id:
+                    raise ValueError("completed reading step belongs to a different attempt")
+                self.db.execute("INSERT INTO execution_steps VALUES(?,?,?,?,NULL) "
+                    "ON CONFLICT(attempt_id,step_id) DO UPDATE SET stage=excluded.stage, payload=excluded.payload",
+                    (attempt_id, completed_step.step_id, "COMPLETE", self._dump(completed_step)))
 
     def reading_progress(self, attempt_id):
         with self._mutex:
@@ -344,6 +350,18 @@ class SessionStore:
                 "session_id": row["session_id"], "native_attempt_id": row["native_attempt_id"],
                 "observed_ns": row["observed_ns"], "payload": load_record(self.db, dict, row["payload"])}
                 for row in self.db.execute(sql+" ORDER BY access_id", params))
+
+    def complete_prefix_access(self, *, owner_id, native_attempt_id, result):
+        """Finish one policy decision without registering another source READ."""
+        with self._transaction():
+            row = self.db.execute("SELECT payload FROM prefix_accesses "
+                "WHERE owner_id=? AND native_attempt_id=?", (owner_id, native_attempt_id)).fetchone()
+            if row is None:
+                raise KeyError((owner_id, native_attempt_id))
+            payload = load_record(self.db, dict, row[0])
+            payload["policy_result"] = result
+            self.db.execute("UPDATE prefix_accesses SET payload=? WHERE owner_id=? AND native_attempt_id=?",
+                (self._dump(payload), owner_id, native_attempt_id))
 
     def add_reading_elapsed(self, attempt_id, elapsed_ms):
         """Accumulate measured execution segments across transport retries."""

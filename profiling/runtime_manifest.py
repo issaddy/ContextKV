@@ -55,6 +55,17 @@ def _public_server_config(value):
     return value
 
 
+def hardware_identity(runtime, gpu_devices):
+    """Compare measured device types/capacities; retain UUIDs in the raw manifest."""
+    devices = {gpu["index"]: gpu for gpu in runtime["gpus"]}
+    if not set(gpu_devices) <= devices.keys():
+        return None
+    return {"host_name": runtime["host_name"], "platform": runtime["platform"],
+        "gpus": sorted(({key: devices[index][key] for key in
+                         ("name", "memory_bytes", "driver_version")}
+                        for index in set(gpu_devices)), key=lambda gpu: tuple(gpu.values()))}
+
+
 async def collect_server(base_url, *, research=False, api_key_env="CONTEXTKV_ENGINE_API_KEY", transport=None):
     key = os.environ.get(api_key_env)
     headers = {"Authorization": f"Bearer {key}"} if key else {}

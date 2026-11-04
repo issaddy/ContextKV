@@ -204,6 +204,7 @@ def prepare_full_queue(args, root):
         roots = sorted({os.getpid(), *listening_processes([urlparse(url).port for url in endpoints])})
     scope = dict(gpu_devices=args.online_gpu_devices, process_roots=roots,
         native_endpoint=run.engine.base_url, gpu_capacity_tokens=run.engine.gpu_capacity_tokens,
+        host_capacity_tokens=run.engine.host_capacity_tokens,
         host_enabled=run.engine.host_capacity_tokens > 0, model="Qwen3-32B")
     matrix["resources"].update(gpu_devices=args.online_gpu_devices, process_ids=roots)
     execution = config["execution"]
@@ -441,6 +442,9 @@ async def run(args):
             if deadline is not None and time.time() >= deadline:
                 state["jobs"].append({**job, "status": "not_started_deadline"})
                 continue
+            from profiling.runtime_manifest import collect_local_runtime, collect_server
+            hardware = await asyncio.to_thread(collect_local_runtime, include_torch=False)
+            native_runtime = await collect_server(scope["native_endpoint"], research=True)
             command = [args.python or sys.executable, "-m", "bench.study", "evaluate", "--config", plan["config"],
                 "--matrix", job["matrix"], "--split", "dev", "--methods", job["method"],
                 "--concurrency", str(job["concurrency"]), "--output", job["output"]]
@@ -468,6 +472,8 @@ async def run(args):
             record.update(returncode=code, ended_s=time.monotonic(),
                           status="completed" if code == 0 else "failed_with_existing_raw_preserved")
             summary = summarize_full_queue(job) if args.full_queue else summarize_job(job)
+            summary["runtime_hardware"] = hardware
+            summary["native_cache_config"] = native_runtime["cache_config"]
             write_json(directory/"capacity-summary.json", summary)
             state["results"].append(summary)
             write_json(root/"workflow.json", state)

@@ -279,7 +279,18 @@ class TaskInterpreter:
     def interpret(self, turn: OnlineTurn, memory: RetrievalState) -> TaskState:
         started = time.perf_counter()
         windows = self.history_index.select(turn.query, memory, current_turn_id=turn.turn)
+        source = memory.source_index
+        if source is not None:
+            from types import SimpleNamespace
+            view = SimpleNamespace(task_catalogue=budget_task_catalogue(self.history_index.tokenizer,
+                turn.query, task_source_catalogue(memory), memory.prior_task_states, current_turn_id=turn.turn),
+                reference_date=getattr(source, "reference_date", None))
+            if hasattr(source, "observed_source_scope"):
+                view.observed_source_scope = source.observed_source_scope
+            memory = replace(memory, source_index=view)
         prediction = self.model.predict(turn, windows, memory)
+        if memory.source_index is not None and hasattr(memory.source_index, "observed_source_scope"):
+            prediction = replace(prediction, source_scope=memory.source_index.observed_source_scope)
         self.last_prediction = prediction
         validate_task_refs(prediction, turn, memory)
         base = task_base_state(memory.prior_task_states, prediction.relation, prediction.resume_task_id)
@@ -383,8 +394,53 @@ TASK_NEED_SEMANTICS = (
     "scope without a current or inherited actual user request for the complete source range."
 )
 
+def budget_task_catalogue(tokenizer, query, catalogue, prior_tasks, max_input_tokens=8192, current_turn_id=0):
+    """Reserve one third of non-question input for a relevant public directory."""
+    import re
+    question_tokens = (len(tokenizer(f"Turn {current_turn_id} user: ", add_special_tokens=False)["input_ids"])
+        + len(tokenizer(query, add_special_tokens=False)["input_ids"]) + 2)
+    budget = max(0, (max_input_tokens-question_tokens)//3)
+    active = set(prior_tasks[-1].version_intent.document_families) if prior_tasks else set()
+    terms = set(re.findall(r"\w+", query.casefold()))
+    def priority(item):
+        family, rows = item
+        words = set(re.findall(r"\w+", " ".join([family, *[str(row.get("title", "")) for row in rows],
+            *[str(row["version"]) for row in rows]]).casefold()))
+        return (family not in active, -len(words & terms), family)
+    def cost(value):
+        versions, families = task_catalogue_candidates(value)
+        total = 0
+        for name, identities in (("document_families", families), ("version_ids", versions)):
+            for identity in identities:
+                rows = (value[identity] if name == "document_families" else
+                    [{"family": family, **row} for family, rows in value.items() for row in rows if row["version"] == identity])
+                text = json.dumps({"kind": name, "identity": identity, "sources": rows}, ensure_ascii=False)
+                total += len(tokenizer(text, add_special_tokens=False)["input_ids"]) + 1
+        return total
+    selected = {}
+    for family, rows in sorted(catalogue.items(), key=priority):
+        unique = list({json.dumps(row, sort_keys=True, ensure_ascii=False): row for row in rows}.values())
+        proposed = {**selected, family: unique}
+        if cost(proposed) <= budget:
+            selected = proposed
+    return selected
+
+
+def observed_task_sources(row):
+    """Restore only the public source observation saved with an actual rollout."""
+    from types import SimpleNamespace
+    if "task_catalogue" not in row or "task_reference_date" not in row:
+        raise ValueError("task row lacks its observed source catalogue/reference date")
+    from controller.context_schema import EvidenceKey
+    return SimpleNamespace(task_catalogue=row["task_catalogue"],
+        reference_date=row["task_reference_date"],
+        observed_source_scope=tuple(decode(EvidenceKey, key) for key in row.get("source_scope", ())))
+
+
 def task_source_catalogue(memory):
     """The literal source directory visible to the task teacher and student."""
+    if memory.source_index is not None and hasattr(memory.source_index, "task_catalogue"):
+        return memory.source_index.task_catalogue
     catalogue = {}
     if memory.source_index is not None:
         for key, block in memory.source_index._blocks.items():
@@ -396,14 +452,11 @@ def task_source_catalogue(memory):
     return catalogue
 
 
-def task_catalogue_candidates(catalogue, prior_task_states):
-    latest = {state.task_id: state for state in prior_task_states}
-    versions = tuple(dict.fromkeys([row["version"] for rows in catalogue.values() for row in rows]
-        +[version for state in latest.values() for version in
-          (*state.version_intent.version_ids, *state.version_intent.resolved_version_ids)]))
-    families = tuple(dict.fromkeys([family for family, rows in catalogue.items()
-        if len({row["version"] for row in rows}) > 1 or any(row.get("valid_from") or row.get("version_order") for row in rows)]
-        +[family for state in latest.values() for family in state.version_intent.document_families]))
+def task_catalogue_candidates(catalogue):
+    versions = tuple(dict.fromkeys(row["version"] for rows in catalogue.values() for row in rows))
+    families = tuple(family for family, rows in catalogue.items()
+        if len({row["version"] for row in rows}) > 1
+        or any(row.get("valid_from") or row.get("version_order") for row in rows))
     return versions, families
 
 
@@ -432,7 +485,7 @@ class TeacherTaskModel:
         current_conditions = {f"c{i}": f"{turn.task_id}:c{i}" for i in range(TASK_MAX_OBJECTS)}
         current_needs = {f"n{i}": f"{turn.task_id}:n{i}" for i in range(TASK_MAX_OBJECTS)}
         catalogue = task_source_catalogue(memory)
-        versions, families = task_catalogue_candidates(catalogue, memory.prior_task_states)
+        versions, families = task_catalogue_candidates(catalogue)
         version_alias = {version: f"V{i}" for i, version in enumerate(versions)}
         family_alias = {family: f"F{i}" for i, family in enumerate(families)}
         prior_view = to_jsonable(tuple(latest.values()))
@@ -446,10 +499,10 @@ class TeacherTaskModel:
                 need["need_id"] = need_alias[need["need_id"]]
                 need["condition_ids"] = [condition_alias[identity] for identity in need["condition_ids"]]
                 need["predecessor_need_ids"] = [need_alias[identity] for identity in need["predecessor_need_ids"]]
-            item["version_intent"]["version_ids"] = [version_alias[identity] for identity in item["version_intent"]["version_ids"]]
-            item["version_intent"]["resolved_version_ids"] = [version_alias[identity]
+            item["version_intent"]["version_ids"] = [version_alias.get(identity, identity) for identity in item["version_intent"]["version_ids"]]
+            item["version_intent"]["resolved_version_ids"] = [version_alias.get(identity, identity)
                 for identity in item["version_intent"]["resolved_version_ids"]]
-            item["version_intent"]["document_families"] = [family_alias[identity] for identity in item["version_intent"]["document_families"]]
+            item["version_intent"]["document_families"] = [family_alias.get(identity, identity) for identity in item["version_intent"]["document_families"]]
         owners = text_ref_sources(memory.committed_history, current_turn_id=turn.turn, current_user_text=turn.query)
         source_windows = [(TextRef(turn.turn, "user", 0, len(turn.query)), turn.query)]
         source_windows.extend((w.ref, w.text) for w in windows)
@@ -481,6 +534,7 @@ class TeacherTaskModel:
                 "visible_windows": visible, "prior_condition_text": condition_text,
                 "reference_date": memory.source_index.reference_date if memory.source_index is not None else None,
                 "prior_states": prior_view,
+                "source_scope": to_jsonable(getattr(memory.source_index, "observed_source_scope", ())),
                 "source_versions": [{"version_id": alias, "literal_version": value} for value, alias in version_alias.items()],
                 "source_families": [{"family_id": alias, "literal_family": family,
                     "sources": [{**row, "version_id": version_alias[row["version"]]} for row in catalogue.get(family, ())]}

@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from controller.schema import CompletionReceipt, ConfigFingerprint
+from controller.engine_client import EngineError
 from controller.serialization import to_jsonable
 
 
@@ -475,13 +476,26 @@ class PrefixObserver:
         async with self._lock:
             previous = self.store.prefix_owner(owner_id)
             now = time.monotonic_ns()
+            prior_status = ((previous.last_status or previous.runtime_receipt or {})
+                            if previous else {})
+            policy_choice = {**policy_choice,
+                "previous_native_expires_at": prior_status.get("expires_at")}
             record = PrefixOwnerRecord(owner_id, session_id, attempt_id, step_id, receipt,
                 self.engine.fingerprint, tuple(prefix_input_ids), tuple(sources), policy,
                 policy_choice, ttl_seconds, created_ns=previous.created_ns if previous else now,
                 updated_ns=now, lease_started_ns=now)
             self.store.save_prefix_owner(record, "retain_requested")
-            ack = await self.runtime.retain(owner_id=owner_id, receipt=receipt,
-                prefix_input_ids=prefix_input_ids, sources=sources, ttl_seconds=ttl_seconds)
+            try:
+                ack = await self.runtime.retain(owner_id=owner_id, receipt=receipt,
+                    prefix_input_ids=prefix_input_ids, sources=sources, ttl_seconds=ttl_seconds)
+            except EngineError as error:
+                if error.code != "PREFIX_NOT_RESIDENT":
+                    raise
+                ack = dict(owner_id=owner_id, state="UNRETAINED", reason="prefix_not_resident",
+                    engine_restart_id=receipt.engine_restart_id)
+                self.store.save_prefix_owner(replace(record, stage="RELEASED", last_status=ack,
+                    updated_ns=time.monotonic_ns()), "retention_opportunity_lost")
+                return ack
             record = replace(record, stage="RETAINED", runtime_receipt=ack,
                              last_status=ack, updated_ns=time.monotonic_ns())
             self.store.save_prefix_owner(record, "retain_acknowledged")
@@ -591,6 +605,16 @@ class PrefixReadObserver:
             if (key := self.model._key(bucket, scope, horizon)) in self.model.forecasts)
 
     @staticmethod
+    def _accepted_policy_call(owner, status):
+        """Distinguish this retain from an unchanged lease predating its intent."""
+        prior_expiry = owner.policy_choice.get("previous_native_expires_at")
+        if status.get("state") != "RETAINED":
+            return False
+        if prior_expiry is not None:
+            return status.get("expires_at") != prior_expiry
+        return status.get("source_attempt_id") == owner.receipt.attempt_id
+
+    @staticmethod
     def _remaining_forecast(curve, remaining):
         """Interpolate measured horizon curves for the lease still in force.
 
@@ -622,6 +646,12 @@ class PrefixReadObserver:
             expected_collateral_saved_ms=interpolate("expected_collateral_saved_ms"))
 
     async def __call__(self, plan, task, units, rendered, record):
+        # Observation and the resulting owner changes must see one allocation
+        # order, including callbacks restoring an already completed READ.
+        async with self._allocation_lock:
+            return await self._observe_and_allocate(plan, task, units, rendered, record)
+
+    async def _observe_and_allocate(self, plan, task, units, rendered, record):
         from controller.reading import stable_prefix_input_ids, stable_prefix_messages, stable_source_payload
         session_id = record.engine_epoch.business_session_id
         info = await self.engine.info()
@@ -639,7 +669,8 @@ class PrefixReadObserver:
             inspected["prefix_hash"]], separators=(",", ":")).encode()).hexdigest()
         inspected = {**inspected, "owner_id": owner_id}
         previous = self.store.prefix_accesses(owner_id)
-        seen = any(row["native_attempt_id"] == record.receipt.attempt_id for row in previous)
+        access = next((row for row in previous
+                       if row["native_attempt_id"] == record.receipt.attempt_id), None)
         prior = tuple(row for row in previous if row["native_attempt_id"] != record.receipt.attempt_id)
         now = time.monotonic_ns()
         features = self._features(plan, sources, prior, now)
@@ -650,25 +681,39 @@ class PrefixReadObserver:
                 turn_id=plan.task_state.current_turn_id, sources=sources,
                 receipt=asdict(record.receipt), inspection=inspected, features=features,
                 clock="client_monotonic_nanoseconds"))
-        if seen:
+        if access is not None:
             updated = await self.owners.reconcile(session_id)
             owner = next((row for row in updated if row.owner_id == owner_id), self.store.prefix_owner(owner_id))
-            return owner.last_status if owner is not None else {**inspected, "state": "UNRETAINED"}
+            completed = access["payload"].get("policy_result")
+            if completed is not None:
+                return owner.last_status if owner is not None else completed
+            accepted = (self.settings["mode"] == "fixed_ttl"
+                and owner is not None and owner.stage == "RETAINED"
+                and owner.receipt.attempt_id == record.receipt.attempt_id
+                and self._accepted_policy_call(owner, owner.last_status))
+            if accepted:
+                self.store.complete_prefix_access(owner_id=owner_id,
+                    native_attempt_id=record.receipt.attempt_id, result=owner.last_status)
+                return owner.last_status
         prefix_ids = prefix_ids[:inspected["boundary_tokens"]]
         ranges, _ = source_token_ranges(self.template, rendered, stable_prefix_messages(plan, task, units), units)
         event = source_demand_event_key(prefix_ids, ranges, inspected["page_size"], inspected["cache_scope_hash"])
         if event is None:
-            return {**inspected, "state": "UNRETAINED", "reason": "no_complete_source_body_page"}
+            result = {**inspected, "state": "UNRETAINED", "reason": "no_complete_source_body_page"}
+            self.store.complete_prefix_access(owner_id=owner_id,
+                native_attempt_id=record.receipt.attempt_id, result=result)
+            return result
         arguments = dict(owner_id=owner_id, session_id=session_id, attempt_id=record.attempt_id,
             step_id=record.step_id, receipt=record.receipt, prefix_input_ids=prefix_ids, sources=sources)
         if self.settings["mode"] == "fixed_ttl":
             choice = dict(qualification_only=True, features=features)
-            return await self.owners.observe(**arguments, ttl_seconds=self.settings["ttl_seconds"],
+            result = await self.owners.observe(**arguments, ttl_seconds=self.settings["ttl_seconds"],
                 policy="fixed_ttl_mechanism", policy_choice=choice)
-        # The owner lock protects individual operations; allocation needs one
-        # consistent protected set through all releases and retains.
-        async with self._allocation_lock:
-            return await self._allocate_value(plan, arguments, inspected, features, time.monotonic_ns(), event)
+        else:
+            result = await self._allocate_value(plan, arguments, inspected, features, time.monotonic_ns(), event)
+        self.store.complete_prefix_access(owner_id=owner_id,
+            native_attempt_id=record.receipt.attempt_id, result=result)
+        return result
 
     async def _allocate_value(self, plan, current, inspected, features, now, event_key):
         scope, current_id = inspected["cache_scope_hash"], current["owner_id"]
@@ -676,6 +721,8 @@ class PrefixReadObserver:
         feature_rows, events = {current_id: features}, {current_id: event_key}
         feasible = {current_id: retainable_prefix(inspected)}
         receipts, records, active = {current_id: inspected}, {}, []
+        trigger = current["receipt"].attempt_id
+        applied = set()
         status = await self.runtime.status(inspected["engine_restart_id"])
         native = {row["owner_id"]: row for row in status["prefixes"]}
         for old in self.store.prefix_owners(active_only=True):
@@ -689,6 +736,9 @@ class PrefixReadObserver:
                 continue
             records[old.owner_id] = old
             receipts[old.owner_id] = native[old.owner_id]
+            if (old.policy_choice.get("trigger_native_attempt_id") == trigger
+                    and self._accepted_policy_call(old, native[old.owner_id])):
+                applied.add(old.owner_id)
             if old.owner_id != current_id:
                 accesses = self.store.prefix_accesses(old.owner_id)
                 old_features = self._features(plan, old.sources, accesses, now)
@@ -708,7 +758,8 @@ class PrefixReadObserver:
             lambda_host=self.settings["lambda_host"])
         requests = [RetentionRequest.from_receipt(receipts[owner_id], forecast,
                 reuse_event_key=events[owner_id])
-            for owner_id, curve in curves.items() if feasible[owner_id] for forecast in curve]
+            for owner_id, curve in curves.items() if feasible[owner_id] and owner_id not in applied
+            for forecast in curve]
         # Keep, renew and new leases compete for the same future capacity.
         # A remaining lease has no new control call; at an identical horizon
         # it replaces the renewal option. Unselected old leases are released.
@@ -730,6 +781,7 @@ class PrefixReadObserver:
         for owner_id, choice in selected.items():
             forecast = next(point for point in curves[owner_id] if point.horizon_seconds == choice.ttl_seconds)
             policy_choice = {**asdict(choice), "model_digest": self.model_digest,
+                "trigger_native_attempt_id": trigger,
                 "capacity_basis": "unique full causal pages; incremental lease residency beyond active protection",
                 "raw_features": feature_rows[owner_id],
                 "feature_bucket": self.model.feature_bucket(feature_rows[owner_id]),

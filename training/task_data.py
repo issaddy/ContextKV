@@ -151,7 +151,10 @@ def prepare_cohort_task_labels(config):
         verification_sources = [{"source_id": source_id, "text": originals[source_id]["text"],
             "version": originals[source_id]["version"], "source_uri": originals[source_id]["source_uri"]}
             for source_id in dict.fromkeys(span["passage_id"] for span in author["grounding"])]
-        prepared = {**row, "retrieved_grounding": row["grounding"],
+        observed_catalogue = row["task_catalogue"]
+        reference_date = row["task_reference_date"]
+        prepared = {**row, "task_catalogue": observed_catalogue,
+            "task_reference_date": reference_date, "source_scope": row.get("source_scope", []), "retrieved_grounding": row["grounding"],
             "grounding": author["grounding"], "author_grounding": author["grounding"],
             "reference_history": author["reference_history"], "reference_answer": author["reference_answer"],
             "grounding_origin": "author_native_train_pending_actual_history_review",
@@ -168,7 +171,8 @@ def prepare_cohort_task_labels(config):
                     and old.get("correct_task_binding") is True and old.get("source_support_verified") is True
                     and old.get("need_semantics_version") == TASK_NEED_SEMANTICS_VERSION
                     and old.get("need_semantics_verified") is True
-                    and "task_catalogue" in old):
+                    and old.get("task_catalogue") == observed_catalogue
+                    and old.get("task_reference_date") == reference_date):
                 reused.append({**old, **prepared, "grounding_origin": old["grounding_origin"],
                                "cohort_label_origin": "reused_exact_actual_state_review"})
             else:
