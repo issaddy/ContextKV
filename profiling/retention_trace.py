@@ -331,9 +331,9 @@ def make_trace(turns, *, config, source_db, captured, case_outcomes=()):
     return dict(format="contextkv_source_first_trace_v2", source="hardware",
         scope="fixed_recorded_reading_dag", training_eligible=eligible,
         layout="source_first", captured_generation_wire=captured,
-        unexported_pressure_intervals=[dict(start=case["native_window"]["start"],
-            end=case["native_window"]["end"], reason=case["reason"])
-            for case in case_outcomes if "native_window" in case],
+        unexported_pressure_intervals=[{**case.get("request_window", case.get("native_window")),
+            "reason": case["reason"]}
+            for case in case_outcomes if "request_window" in case or "native_window" in case],
         source_database=str(Path(source_db).resolve()), config=to_jsonable(config),
         fingerprint=model_events[0]["fingerprint"] if model_events else None,
         turns=turns, input_hashes=hashes, input_dag_digest=digest([
@@ -919,7 +919,7 @@ def choose_windows(trace, *, horizon_seconds, max_candidates, history_steps, max
             if any(gap["start"] < window_end and gap["end"] > window_start
                    for gap in trace.get("unexported_pressure_intervals", ())):
                 omitted.append(dict(event_id=event_id(turn, event), source_event_id=event_id(source_turn, source_event),
-                    reason="completed_failed_native_pressure_has_no_canonical_DAG; window_not_replayed"))
+                    reason="unexported_request_pressure_overlaps_replay_window"))
                 continue
             steps = sum(len(item["events"]) for item in window)
             if steps > max_replay_steps:
@@ -1180,14 +1180,41 @@ def fit(args):
     return asset
 
 
+def unexported_requests(records_path, failures_path, selected, segments):
+    def outcome(row, attempt_id, path, reason):
+        start, end = row["request_window"]
+        return dict(reason=reason, request_window=dict(start=start, end=end,
+            scope=row.get("failure_window_scope", "request_wall"),
+            attempt_id=attempt_id, task_id=row["task_id"], source_path=str(Path(path).resolve()),
+            measurement_segment_id=row["measurement_segment_id"]))
+
+    with Path(records_path).open() as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("status", "completed") != "completed":
+                continue
+            attempt_id = row["response"]["attempt_id"]
+            if attempt_id not in selected and row["measurement_segment_id"] in segments:
+                yield outcome(row, attempt_id, records_path, "completed_request_not_selected")
+    for row in json.loads(Path(failures_path).read_text()):
+        if row["measurement_segment_id"] in segments:
+            yield outcome(row, row["attempt_id"], failures_path, "failed_request_not_exported")
+
+
 def export(args):
     config = load_config(args.config)
     template = create_model_template(config.model)
     store = SourceLedger(args.state_db)
-    selected = store.committed_attempts(args.attempt_id, limit=args.max_capture_turns)
-    records = source_records(args.records, store=store, attempt_ids={attempt.attempt_id for attempt in selected})
     turns = []
     try:
+        selected = store.committed_attempts(args.attempt_id, limit=args.max_capture_turns)
+        attempt_ids = {attempt.attempt_id for attempt in selected}
+        records = source_records(args.records, store=store, attempt_ids=attempt_ids)
+        segments = {row["measurement_segment_id"] for row in records.values()}
+        if len(segments) > 1:
+            raise ValueError("export requires one measurement segment; select its requests with --attempt-id")
         for attempt in selected:
             metadata = {**records.get(attempt.attempt_id, {}), "max_new_tokens": config.context.max_new_tokens}
             if "response" not in metadata:
@@ -1195,7 +1222,8 @@ def export(args):
             turns.append(export_attempt(store, attempt, template, request_sampling(config.sampling), metadata))
     finally:
         store.close()
-    result = make_trace(turns, config=config, source_db=args.state_db, captured=False)
+    result = make_trace(turns, config=config, source_db=args.state_db, captured=False,
+        case_outcomes=unexported_requests(args.records, args.failed_conversations, attempt_ids, segments))
     write_json(args.output, result)
     return result
 
@@ -1214,6 +1242,7 @@ def main():
         else:
             sub.add_argument("--reader-traces", required=True)
         if name == "export":
+            sub.add_argument("--failed-conversations", required=True)
             sub.add_argument("--output", required=True)
         else:
             sub.add_argument("--base-url", required=True, help="Dedicated canonical native reader service")

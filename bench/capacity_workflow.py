@@ -1,4 +1,4 @@
-"""Two-turn own-history P3 capacity jobs for fixed and learned B under C policies."""
+"""Own-history P3 capacity diagnostics and full-queue joint B/C evaluation."""
 from __future__ import annotations
 
 import argparse
@@ -19,9 +19,11 @@ import yaml
 
 from bench.metrics import occupancy_integral
 from bench.native_metrics import NativePoolSampler, pool_series
+from bench.plan_result_summary import batch_ledger
+from bench.reassess_saved import paid_execution_index
 from bench.rolling_study_workflow import configure
 from bench.study import merge_config, read_jsonl, write_json, write_jsonl
-from bench.study_metrics import _quantile
+from bench.study_metrics import _cost_summary, _quantile, _track_specs, declared_queue_summary
 from bench.study_resources import StudyResourceSampler, integrate_physical
 from bench.study_workloads import freeze_workload, load_goal_policy
 
@@ -32,9 +34,10 @@ def snapshot(path):
 
 
 def prepare(args, root):
-    source_path = Path(args.source_manifest).resolve()
-    source = json.loads(source_path.read_text())
-    source_matrix = yaml.safe_load(Path(source["diagnostic_matrix_path"]).read_text())
+    if not args.full_queue:
+        source_path = Path(args.source_manifest).resolve()
+        source = json.loads(source_path.read_text())
+        source_matrix = yaml.safe_load(Path(source["diagnostic_matrix_path"]).read_text())
     settings = yaml.safe_load(Path(args.config).read_text())
     settings = merge_config(settings, {
         "support_model": {"mode": "trained", "asset": args.parent_policy_asset,
@@ -42,7 +45,9 @@ def prepare(args, root):
         "selection": {"utility": "learned"},
         "reading": {"layout": "source_first", "packing": "source_windows"},
         "execution": {"prefix_retention": {"mode": "native"}}})
-    parent = root/"parent-P0-study.yaml"
+    if args.full_queue:
+        settings["reading"].update(need_isolation=False, numeric_need_isolation=False)
+    parent = root/("frozen-A-study.yaml" if args.full_queue else "parent-P0-study.yaml")
     parent.write_text(yaml.safe_dump(settings, sort_keys=False))
     scope = SimpleNamespace(config=str(parent), matrix=args.matrix or source["diagnostic_matrix_path"],
         execution_profile=args.execution_profile, native_assets=args.native_assets, gain_asset=args.gain_asset,
@@ -53,6 +58,10 @@ def prepare(args, root):
     config, matrix, config_path = configure(scope, root)
     config["execution"].update(cache_start="cold", prefix_retention={"mode": "native"})
     config["reading"].update(layout="source_first", packing="source_windows")
+    if args.full_queue:
+        rolling = next(method for method in matrix["methods"] if method["strategy"] == "B7")
+        config["generation"]["run_config"] = rolling["overrides"]["generation"]["run_config"]
+        config["execution"]["cost_artifact"] = rolling["overrides"]["execution"]["cost_artifact"]
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
     methods = []
     for method in matrix["methods"]:
@@ -64,7 +73,7 @@ def prepare(args, root):
             "execution": {"cache_start": "cold", "prefix_retention": {"mode": "native"}}})
         if value["strategy"] == "B7":
             gain = value["overrides"]["execution"]["plan_gain"]
-            gain["mode"] = args.gain_mode
+            gain["mode"] = "observed_actions" if args.full_queue else args.gain_mode
             if args.value_model is not None:
                 gain["prefix_directory"] = True
         methods.append(value)
@@ -79,6 +88,8 @@ def prepare(args, root):
             value["overrides"]["execution"]["prefix_retention"] = deepcopy(value_policy)
             methods.append(value)
     matrix["methods"] = methods
+    if args.full_queue:
+        return prepare_full_queue(args, root, matrix, config_path, value_policy)
     matrix["resources"].update(gpu_capacity_tokens=32768, host_capacity_tokens=61056)
     policy_path = Path(source["goal_policy_path"]).resolve()
     policy = load_goal_policy(policy_path, expected_sha256=source["goal_policy_sha256"])
@@ -158,6 +169,68 @@ def prepare(args, root):
     return manifest
 
 
+def prepare_full_queue(args, root, matrix, config_path, value_policy):
+    cohorts = matrix["cohorts"]["dev"]
+    datasets = tuple(cohorts)
+    requested = sum(len(task_ids) for task_ids in cohorts.values())
+    for name in datasets:
+        matrix["datasets"][name].update(protocol="P3", continue_conversation_failures=True)
+    matrix_path = root/"joint-matrix.yaml"
+    matrix_path.write_text(yaml.safe_dump(matrix, sort_keys=False))
+    jobs = []
+    for concurrency in args.concurrency:
+        for method in matrix["methods"]:
+            name = f"c{concurrency}-{method['id']}"
+            jobs.append(dict(name=name, concurrency=concurrency, method=method["id"], datasets=datasets,
+                requested_qa=requested, matrix=str(matrix_path), output=str(root/"jobs"/name/"generation")))
+    manifest = dict(format="contextkv_full_queue_joint_plan_v1", scope="full declared P3 development queue",
+        source_config=snapshot(args.config), source_matrix=snapshot(args.matrix),
+        frozen_support_asset=str(Path(args.parent_policy_asset).resolve()),
+        frozen_support_heads=snapshot(Path(args.parent_policy_asset)/"heads.pt"),
+        reader_profile_id=args.reader_profile_id, assets={name: snapshot(path) for name, path in (
+            ("gain", args.gain_asset), ("execution", args.execution_profile), ("native", args.native_assets),
+            ("value", args.value_model))},
+        cohort=cohorts, value_policy=value_policy, gain_mode="observed_actions", concurrency=args.concurrency,
+        requested_qa=requested*len(jobs), jobs=jobs, config=str(config_path),
+        cache_boundary="one cold boundary per method and dataset; never cold between turns",
+        scoring="declared development metrics and weights with the complete task denominator")
+    write_json(root/"capacity-plan.json", manifest)
+    return manifest
+
+
+def summarize_full_queue(job):
+    directory = Path(job["output"])/job["method"]
+    rows, batch_tracks, failure_ledgers = [], [], {}
+    for dataset in job["datasets"]:
+        track = directory/dataset
+        batch_tracks.append({"generation_dir": str(track)})
+        scored, unscored = track/"results.scored.jsonl", track/"results.unscored.jsonl"
+        results = scored if scored.exists() else unscored
+        if results.exists():
+            rows.extend({**row, "generation_dir": str(track)} for row in read_jsonl(results))
+        failures = track/"failed_conversations.json"
+        if failures.exists():
+            failure_ledgers[dataset] = str(failures)
+    matrix = yaml.safe_load(Path(job["matrix"]).read_text())
+    specs = _track_specs(matrix, "dev")
+    tracks = {name: declared_queue_summary([row for row in rows if row["dataset"] == name],
+        spec, matrix["cohorts"]["dev"][name]) for name, spec in specs.items()}
+    quality = {name: track["queue_primary_score"] for name, track in tracks.items()}
+    return {"job": job["name"], "method": job["method"], "concurrency": job["concurrency"],
+        "requested_qa": job["requested_qa"],
+        "completed_qa": sum(track["completed"] for track in tracks.values()),
+        "datasets": tracks, "track_weights": {name: spec["weight"] for name, spec in specs.items()},
+        "queue_quality": sum(spec["weight"]*quality[name]/spec.get("normalization", 1.0)
+            for name, spec in specs.items()) if all(value is not None for value in quality.values()) else None,
+        "queue_quality_bounds": [sum(spec["weight"]*tracks[name]["queue_score_bounds"][bound]
+            /spec.get("normalization", 1.0) for name, spec in specs.items()) for bound in (0, 1)],
+        "p95_complete_ms": _cost_summary(rows)["p95_complete_ms"],
+        "latency_population": "delivered responses; completion counts use the entire declared queue",
+        "failure_ledgers": failure_ledgers,
+        "cost_batches": batch_ledger(batch_tracks),
+        "paid_native_usage": paid_execution_index(rows, [directory], Path(job["output"])/"native.json")}
+
+
 def summarize_job(job):
     directory = Path(job["output"])/job["method"]/"dynamic_goal_dev"
     records = [json.loads(path.read_text()) for path in sorted((directory/"records").glob("*.json"))]
@@ -235,7 +308,8 @@ async def run(args):
     started = time.monotonic()
     deadline = datetime.fromisoformat(args.deadline).timestamp() if args.deadline else None
     child_start = resource.getrusage(resource.RUSAGE_CHILDREN)
-    state = dict(format="contextkv_two_turn_capacity_workflow_v1", scope=plan["scope"],
+    state = dict(format=("contextkv_full_queue_joint_workflow_v1" if args.full_queue
+                         else "contextkv_two_turn_capacity_workflow_v1"), scope=plan["scope"],
         status="running", requested_qa=plan["requested_qa"], jobs=[], results=[])
     try:
         for job in plan["jobs"]:
@@ -244,9 +318,12 @@ async def run(args):
                 continue
             command = [args.python or sys.executable, "-m", "bench.study", "evaluate", "--config", plan["config"],
                 "--matrix", job["matrix"], "--split", "dev", "--methods", job["method"],
-                "--datasets", "dynamic_goal_dev", "--concurrency", str(job["concurrency"]),
-                "--workload-plan", job["workload"], "--goal-policy", job["goal_policy"],
-                "--unscored", "--output", job["output"]]
+                "--concurrency", str(job["concurrency"]), "--output", job["output"]]
+            if args.full_queue:
+                command += ["--datasets", *job["datasets"]]
+            else:
+                command += ["--datasets", "dynamic_goal_dev", "--workload-plan", job["workload"],
+                            "--goal-policy", job["goal_policy"], "--unscored"]
             directory = root/"jobs"/job["name"]
             directory.mkdir(parents=True, exist_ok=True)
             record = {**job, "command": command, "status": "running", "started_s": time.monotonic()}
@@ -265,7 +342,7 @@ async def run(args):
                     record["deadline_terminated"] = True
             record.update(returncode=code, ended_s=time.monotonic(),
                           status="completed" if code == 0 else "failed_with_existing_raw_preserved")
-            summary = summarize_job(job)
+            summary = summarize_full_queue(job) if args.full_queue else summarize_job(job)
             write_json(directory/"capacity-summary.json", summary)
             state["results"].append(summary)
             write_json(root/"workflow.json", state)
@@ -278,7 +355,8 @@ async def run(args):
         await physical.stop()
         child_end = resource.getrusage(resource.RUSAGE_CHILDREN)
         series, coverage = pool_series(native.observation(), started, end)
-        write_json(root/"capacity-cost.json", dict(format="contextkv_two_turn_capacity_cost_v1",
+        write_json(root/"capacity-cost.json", dict(format=("contextkv_full_queue_joint_cost_v1" if args.full_queue
+                   else "contextkv_two_turn_capacity_cost_v1"),
             source="hardware", resource_window=dict(start=started, end=end),
             resource_scope=scope, physical_observation=physical.observation(),
             physical_cost=integrate_physical(physical.samples, started, end),
@@ -297,8 +375,9 @@ async def run(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True, help="Actual parent-P0 G3 study configuration")
-    parser.add_argument("--source-manifest", required=True)
+    parser.add_argument("--config", required=True, help="Study configuration with frozen A for full-queue evaluation")
+    parser.add_argument("--full-queue", action="store_true", help="Run all declared development tasks in each B/C cell")
+    parser.add_argument("--source-manifest", help="Source manifest for the two-turn capacity diagnostic")
     parser.add_argument("--matrix")
     parser.add_argument("--parent-policy-asset", required=True)
     parser.add_argument("--gain-asset", required=True)
@@ -316,7 +395,13 @@ def main(argv=None):
     parser.add_argument("--deadline")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--output", required=True)
-    return asyncio.run(run(parser.parse_args(argv)))
+    args = parser.parse_args(argv)
+    if args.full_queue:
+        if not args.matrix or not args.value_model:
+            parser.error("--full-queue requires --matrix and --value-model")
+    elif not args.source_manifest:
+        parser.error("the two-turn diagnostic requires --source-manifest")
+    return asyncio.run(run(args))
 
 
 if __name__ == "__main__":

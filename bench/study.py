@@ -163,6 +163,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     segment_id = uuid.uuid4().hex
     run = load_config(config["generation"]["run_config"])
     run = replace(apply_study_config(run, config), state_dir=str(directory/"state"))
+    if "answer_system_prompt" in spec:
+        run = replace(run, context=replace(run.context, system_prompt=spec["answer_system_prompt"]))
     service = create_controller(run)
     provider_started = time.monotonic()
     provider = await asyncio.to_thread(create_study_retriever, config, service.template)

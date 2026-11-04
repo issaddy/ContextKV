@@ -98,7 +98,7 @@ Q 为 0.44509019347880296。报告位于
 旧 P1 隔离 36 答、0.5175，共享 35 答、0.4325。旧 P1 已被拒绝，A 尚未冻结。
 效用训练已去除实际 READ 后长度带来的输入泄漏，训练和推理统一使用零上下文
 `evidence_set_only`。新资产 `models/study-support-fixed-qwen-set-only` 沿用 1400 对偏好、
-147 个状态和 3 个 epoch，正在训练，验证待定。旧 B capture 完成的 115 个状态保留为
+147 个状态和 3 个 epoch，已完成训练，完整阶段耗时 1485.07 秒；40 题验证正在运行。旧 B capture 完成的 115 个状态保留为
 旧模型的成本记录，不用于新模型训练。B 配对尚未执行。
 `selected-a-followthrough/launch.json` 接续新验证：P1 的全分母 Q40 达到 0.61 时采用 P1，否则保留 P0；
 随后重新采集所选 A 的观测并执行 B 配对。修正后 P1 的隔离协议固定历史格在 B 之后执行。
@@ -113,11 +113,12 @@ Q 为 0.44509019347880296。报告位于
 P0 共享协议的 MultiDoc2Dial 已评分，交付 205/209 个答案，全队列 Q 为 0.6626794258373205，
 参照为 0.5822966507177033。该批次实际加载 607e02d，含一个数值 Need 的筛选步骤；
 其消息早于后续的通用单位提示修正，协议审计见 `formal-dev-c4-grounded/P0-multidoc2dial-protocol-audit.json`。
-MTRAG 继续运行，最终联合实验采用冻结后的协议。
+MTRAG 已评分 41/41，完整队列 Q 为 0.5074440554339312，参照为 0.32660479305396806。
+最终联合实验采用冻结后的协议。
 
 原 350 题参照维持 300 个答案、Q 为 0.44509019347880296。参照的原生账本已核实
 2487 次调用和 11941836 token。另有 1 条 PLANNED 未提交记录，其模型 token 为 0，
-前置物理成本仍计入。本阶段累计清理 2702556916 字节重复产物，原始账本保留。
+前置物理成本仍计入。本阶段累计清理 2838740464 字节重复产物，原始账本保留。
 完整 P95 尚不可验收，B/C 和完整队列质量目标尚未完成。
 
 默认关闭大型消融 sweep，
@@ -137,3 +138,20 @@ C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观�
 区分无重访、GPU 命中、Host 回载和重算；混合访问同时保留各类页数和事件数。
 训练行中的 `observation_seconds` 是共同计费窗口，`ttl_seconds` / `horizon_seconds`
 是策略保护期限。
+
+冻结 A 后，联合开发验收使用 `bench.capacity_workflow --full-queue`。
+
+```sh
+python -m bench.capacity_workflow --full-queue \
+  --config "$FROZEN_A_STUDY" --matrix runs/study/formal-dev-queue.matrix.json \
+  --parent-policy-asset "$FROZEN_A_SUPPORT" --reader-profile-id "$READER_PROFILE" \
+  --gain-asset "$B_GAIN" --execution-profile "$EXECUTION_PROFILE" --native-assets "$NATIVE_ASSETS" \
+  --value-model "$C_VALUE" --concurrency 1 4 --output "$JOINT_OUTPUT"
+```
+
+每格按自己的 P3 历史执行原 350 题，使用声明的开发指标与权重。未交付回答计入
+完整分母并贡献零分，已交付但未评分的回答保留质量区间。报告另列原生已付调用
+索引和整批物理成本账本。评分依赖沿用冻结配置。`--source-manifest` 用于原有两轮容量诊断。
+
+C 的离线 `retention_trace export` 需显式提供 `--failed-conversations`（零失败为 `[]`）。
+同测量段内未导出的成功与失败请求墙钟区间进入压力索引，回放不使用与之重叠的窗口。
