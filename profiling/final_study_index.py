@@ -286,8 +286,7 @@ def full_queue_cells(value, path, joint_scope=None):
     binding = dict(frozen_A_config_sha256=plan["source_config"]["sha256"],
         matrix_sha256=plan["source_matrix"]["sha256"], cohort_sha256=canonical(plan["cohort"]),
         reader_run_sha256=canonical(run), reader_profile_id=plan["reader_profile_id"],
-        lambda_time=plan["lambda_time"],
-        gain_sha256=plan["assets"]["gain"]["sha256"], value_sha256=plan["assets"]["value"]["sha256"])
+        lambda_time=plan["lambda_time"])
     device_source = {key: binding[key] for key in ("frozen_A_config_sha256", "matrix_sha256")}
     if joint_scope is not None:
         registered = [worker for worker in joint_scope["workers"]
@@ -311,6 +310,8 @@ def full_queue_cells(value, path, joint_scope=None):
         unscored = {name: track["unscored_answer_task_ids"] for name, track in row["datasets"].items()}
         cells.append({**row, "evaluation_kind": "full_queue_own_P3", "source_file": str(path),
             "generation_dir": job["output"], "comparison_identity": binding,
+            "active_assets": {name: plan["assets"][name] for name, active in (
+                ("gain", row["method"].startswith("S3_")), ("value", row["method"].endswith("_value"))) if active},
             "device_source_identity": device_source,
             "explicit_joint_scope": {"manifest": joint_scope["manifest"], "frozen_A": joint_scope["frozen_A"]}
                 if joint_scope is not None else None,

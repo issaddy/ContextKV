@@ -1,5 +1,8 @@
 # 当前课题运行入口
 
+按用户本轮要求，后续实验的自动接续已挂起，现有采集仅收尾，不自动开启新实验。
+运行状态统一查看 [budget_loop_20261103.json](budget_loop_20261103.json)。
+
 运行冻结同一 Qwen3-32B 模型权重与解码参数，显式配置端点、协议身份与原生缓存。主机目录、GPU、服务端口和
 输出目录由本次运行配置声明；不复用旧批次的固定路径或截止时间。
 
@@ -32,7 +35,7 @@ B 固定流程观测使用 `execution.state_observation`，从真实请求开始
 `training.collect_plan_gains --observations OBS --actual-turns TURNS --output PACKETS`
 导出后，`training.plan_gain_workflow --mode observed_actions --observed-states PACKETS`
 沿用源 cohort 身份。每个源 task 保留各合法动作首次可配对的观测，不按未来质量选点。
-`observed_actions` 沿用源动作的输出份额，不扫描 `read-outputs`；当前 178/36 个可调度状态的生成预算上限设为 3041，声明分母仍为 200/40。
+`observed_actions` 沿用源动作的输出份额，不扫描 `read-outputs`；有效观测数单独记录，声明分母仍为 200/40。
 新成本拟合读取各分支 `run.json.pre_action_quote`，质量与成本分别归一化；`cold` 数据只能说明冷启动费用，`observed` 保留实际分支起点，不声称恢复源缓存。
 B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
 `--cohort-manifest` 指向同一文件；不再使用 `--partition-seed` 或 `--dev-fraction`
@@ -83,53 +86,18 @@ python -m training.a_workflow compare --comparison-config COMPARISON.yaml \
 正式主验收沿用 `study_matrix.yaml` 既有四数据集的 development_weights 和指标。
 已从既有 `runs/study/cohorts.json` 固定 350 题、77 会话至 `runs/study/formal-dev-queue.matrix.json`，
 运行及评分直接使用其中 IDs，再在相同清单上重跑 baseline 与候选；辅助学习的
-200/40 划分用于辅助训练。正式 c4 参照已评分，350 题交付 300 个答案，全队列
-Q 为 0.44509019347880296。报告位于
-`runs/study/budget-loop-20261103/formal-dev-c4/reference-final/report.json`。
-
-| 开发轨道 | 答案 / 声明题数 | 全队列 Q | 权重 |
-|---|---:|---:|---:|
-| MultiDoc2Dial | 183 / 209 | 0.5822966507177033 | 0.30 |
-| MTRAG | 41 / 41 | 0.32660479305396806 | 0.25 |
-| VersionQA | 76 / 80 | 0.94375 | 0.20 |
-| Constructed long | 0 / 20 | 0 | 0.25 |
-
-固定历史四格均按声明的 40 题计算 RB_llm。P0 隔离 32 答、0.605，共享 34 答、0.610。
-旧 P1 隔离 36 答、0.5175，共享 35 答、0.4325。旧 P1 已被拒绝。修正后 P1 共享格交付 36/40、Q 为 0.5325，仍低于 P0 的 0.610；
-已选择并冻结 P0 共享协议进入 B/C。
-效用训练已去除实际 READ 后长度带来的输入泄漏，训练和推理统一使用零上下文
-`evidence_set_only`。新资产 `models/study-support-fixed-qwen-set-only` 沿用 1400 对偏好、
-147 个状态和 3 个 epoch，已完成训练，完整阶段耗时 1485.07 秒；40 题验证已完成。旧 B capture 完成的 115 个状态保留为
-旧模型的成本记录，不用于新模型训练。B 小批次配对已完成，完整状态配对待开发观测采集结束后执行。
-`selected-a-followthrough/selection.json` 已记录 P0 的冻结资产、配置与选择证据；
-P0 train 观测已完成 178 个状态：173 个交付答案、5 个失败，共 590 条实际观察；失败前的有效观察也进入配对。
-dev 观测仍在采集，随后执行 B 配对。修正后 P1 的隔离协议固定历史格在 B 之后执行。
-
-`constructed_numeric_exact_v1` 已重评 21 个已有长文答案。抽取器只看到实际问题和答案，
-由代码精确比较整数计数、Decimal 总额和单位。正式筛选前长文运行交付 16/20 答案，
-7 题正确，全分母 Q 为 0.35。新 per-Need 长文运行已完成生成与评分，
-见 `runs/study/budget-loop-20261103/numeric-selected-p3-c4`。20 题交付 15 个答案，
-11 题计数与总额均精确匹配，全分母 Q 为 0.55。五次失败包括 1 次 READ 输出截断、
-3 次单位不兼容和 1 次量值冲突。case002 的最终答案为 35 项、595 credits，仍有误。
-冻结旧 READ 的单 Need 局部重放曾得到正确的 630 credits 和 35 个父结论。
-P0 共享协议的 MultiDoc2Dial 已评分，交付 205/209 个答案，全队列 Q 为 0.6626794258373205，
-参照为 0.5822966507177033。该批次实际加载 607e02d，含一个数值 Need 的筛选步骤；
-其消息早于后续的通用单位提示修正，协议审计见 `formal-dev-c4-grounded/P0-multidoc2dial-protocol-audit.json`。
-MTRAG 已评分 41/41，完整队列 Q 为 0.5074440554339312，参照为 0.32660479305396806。
-最终联合实验采用冻结后的协议。
-
-原 350 题参照维持 300 个答案、Q 为 0.44509019347880296。参照的原生账本已核实
-2487 次调用和 11941836 token。另有 1 条 PLANNED 未提交记录，其模型 token 为 0，
-前置物理成本仍计入。本阶段累计清理 3289295076 字节重复产物，原始账本保留。
-P0 共享候选已完成完整 350 题对照：341 答、Q 为 0.6575398416096789，较参照提高
-21.2449648130876 个百分点；包含失败步骤的阅读器原生 token 为 7520143，减少 37.0269%。
-两臂的窗口、历史、输出、累计步骤和 token 配额一致。报告为
-`formal-dev-c4-grounded/P0-complete-queue-report/report.json`。这是冻结前 P0 的完整队列结果；
-阶段质量指标已超过 5 个百分点，最终 A/B/C 联合实验及完整 P95 验收仍待完成。
+200/40 划分用于辅助训练，不能替代正式开发队列。
+冻结 A 采用 P0 共享协议；模型、支持策略、查询资产、阅读协议与预算由
+`selected-a-followthrough/selection.json` 及其实际运行配置绑定。
+P1 效用输入使用零上下文 `evidence_set_only`，不使用实际 READ 后长度。
+B 从冻结 A 的真实观察采集动作分支；失败尝试中已完成步骤的观察通过真实 Attempt ID
+进入配对，capture 最终状态仅作出处，不作为模型特征或未来质量筛选条件。
 
 默认关闭大型消融 sweep，
 保留 B0/Btoken/B3/B6/B7/Lmap 对照入口和 c1/c4 资源配置。
-20 道 constructed long_dev 仅按参考正确性评分（correctness=1，归一化为 1）；
+20 道 constructed long_dev 使用非官方 `constructed_numeric_exact_v1`：模型仅从实际问题和答案
+抽取最终计数、总额、单位与一致性，不接触 gold；代码按整数、Decimal 和 credits 单位精确比较，
+计数与总额同时匹配才得 1 分；
 公开 Loong test 保留官方 loong_reference_score/100，二者通过 metric_by_split 明确区分。
 
 C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观察窗。`replay` 与
@@ -155,7 +123,19 @@ python -m bench.capacity_workflow --full-queue \
 ```
 
 完整队列四格共用冻结 A 的模型、支持策略、查询资产、阅读协议和预算。可用
-`--methods B6_native` 等参数将指定方法分配到独立 reader 服务。默认执行四格，每格使用同一完整队列。
+`--methods B6_native` 等参数将指定方法分配到独立 reader 服务，只生成所选方法的矩阵和任务。
+`B6_native` 无需 gain/value；`B6_value` 仅需 `--value-model`；没有 S3 方法时须显式提供
+`--reader-profile-id`。S3 方法需要 `--gain-asset`，value 方法需要 `--value-model`。
+默认执行四格并要求两种资产，每格使用同一完整队列。
+固定 B 可独立执行，例如：
+
+```sh
+python -m bench.capacity_workflow --full-queue --methods B6_native \
+  --config "$FROZEN_A_STUDY" --matrix "$JOINT_MATRIX" \
+  --reader-profile-id "$READER_PROFILE" --reader-base-url "$READER_URL" \
+  --online-gpu-devices "$ONLINE_GPUS" --concurrency 1 4 --output "$JOINT_OUTPUT"
+```
+
 收益 B 的 reader 身份由实际运行配置与实测收益资产绑定。`--online-gpu-devices` 接受逗号分隔的物理卡号。
 可通过 `--online-process-roots` 指定逗号分隔的 PID，默认按 reader 和 helper 的端口发现
 进程并加入协调进程。`--reader-base-url` 显式指定实际服务端点。联合矩阵沿用正式 350 题清单，
@@ -164,7 +144,8 @@ python -m bench.capacity_workflow --full-queue \
 `--lambda-time` 覆盖冻结配置中的动作成本权重，实际值写入 `capacity-plan.json`。
 分设备结果用 `profiling.final_study_index --joint-scope joint-frozen-A/inputs.json`
 汇总，逐个 `--artifact NAME=WORKFLOW.json` 指定各设备结果。共同输入、实际 worker 配置、
-cohort、reader 和 B/C 资产身份进入对照，报告保留全分母质量、完成率、已交付完整响应 P95 与成本出处。
+cohort、reader 与预算确定对照条件，各格分别列出实际启用的 B/C 资产。
+报告保留全分母质量、完成率、已交付完整响应 P95 与成本出处。
 
 每格按自己的 P3 历史执行原 350 题，使用声明的开发指标与权重。未交付回答计入
 完整分母并贡献零分，已交付但未评分的回答保留质量区间。报告另列原生已付调用
@@ -172,20 +153,12 @@ cohort、reader 和 B/C 资产身份进入对照，报告保留全分母质量�
 
 C 的离线 `retention_trace export` 需显式提供 `--failed-conversations`（零失败为 `[]`）。
 同测量段内未导出的成功与失败请求墙钟区间进入压力索引，回放不使用与之重叠的窗口。
+`profiling.retention_coverage --replay-root C_OUTPUT --output COVERAGE.json` 只读已有回执，
+分别汇总干预目标与整窗重复来源页的 GPU 命中、Host 回载和重算，不产生模型调用。
 
-C 已在完成隔离对照的 GPU4 reader 上启动 train/dev 各两窗，共计划 2388 次真实生成；`retention-preparation/paired-plan.json`
-记录同一180秒观察窗、Native/TTL15/60/180四臂及运行资源。训练轨迹来自已有真实证据候选，
-开发轨迹来自P0自身P3；其与最终冻结A的联合队列分别计量。训练轨迹中624次READ输入
-已按当前协议重新编译，全部与原始输入hash一致，审计未调用生成模型。
+B 的 DIRECT/READ/REDUCE/GAP 分支从实际动作前状态报价，分别拟合绝对分支成本，
+同一批次以动作减 DIRECT 计算增量成本和实际质量差，已付共享成本只计一次。
+REDUCE 只读已观察材料；源 packet 的 legal_actions 保留，补充的反事实候选单独登记并在执行前重新报价。
 
-B 已完成最早两个训练状态的小批次：5 个回答分支、3 组实际配对（6 次 reader、5 次 judge），
-补检索的一组质量差为 +0.16，其余两组为0。原始记录在 `b-selected-a-pilot`。
-当前动作协议允许对至少两条 lookup/procedure 原事实做一次可选 summarize；归约仍只读已观察材料。
-源 packet 的 legal_actions 保留，采集清单另记本次补充的反事实候选，实际执行前重新报价。
-
-补充REDUCE后的两题采集已完成6个回答分支、4组配对（8次reader、6次judge）。
-本次REDUCE质量差为+0.24，GAP两组为+0.4/0，READ为0，均保留实际新增成本。
-正式B采集保留200/40声明分母，当前train有178个审核可用状态。失败尝试中的有效观察
-通过真实Attempt ID进入配对，capture最终状态仅作出处。
-C固定DAG回放解析原始输出文本，新的生成响应只用于实际token、耗时和费用；完整窗口
-预测用两臂窗口成本差验证，下一次READ的集合收益继续按事件及共享页去重。
+C 固定 DAG 回放解析原始输出文本，新的生成响应用于实际 token、耗时和费用；完整窗口
+预测用两臂窗口成本差验证，下一次 READ 的集合收益按事件及共享页去重。

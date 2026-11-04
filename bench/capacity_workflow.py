@@ -179,9 +179,14 @@ def prepare_full_queue(args, root):
     run_path.write_text(yaml.safe_dump(run_data, sort_keys=False))
     run = load_config(run_path)
     config["generation"]["run_config"] = str(run_path)
-    gain_path = Path(args.gain_asset).resolve()
-    profile = json.loads(gain_path.read_text())["reader_profile_id"]
-    gain = PlanGainModel.load(gain_path, reader_checkpoint=run.model.revision, reader_profile_id=profile)
+    selected_methods = [method for method in ("B6_native", "B6_value", "S3_native", "S3_value")
+        if args.methods is None or method in args.methods]
+    needs_gain = any(method.startswith("S3_") for method in selected_methods)
+    needs_value = any(method.endswith("_value") for method in selected_methods)
+    gain_path = Path(args.gain_asset).resolve() if needs_gain else None
+    profile = json.loads(gain_path.read_text())["reader_profile_id"] if needs_gain else args.reader_profile_id
+    gain = (PlanGainModel.load(gain_path, reader_checkpoint=run.model.revision, reader_profile_id=profile)
+        if needs_gain else None)
     roots = args.online_process_roots
     if not roots:
         endpoints = [run.engine.base_url]
@@ -206,15 +211,16 @@ def prepare_full_queue(args, root):
         gpu_devices=args.online_gpu_devices, process_ids=roots,
         sampling_interval_seconds=args.sampling_interval, output_budgets=args.read_outputs,
         output_tokens_per_fact=config["reading"]["output_tokens_per_fact"],
-        prefix_directory=True, gap_limits=gap_limits)
+        prefix_directory=True, gap_limits=gap_limits) if needs_gain else None
     value_policy = dict(mode="value", model_path=str(Path(args.value_model).resolve()),
         horizon_seconds_choices=[15, 60, 180], gpu_budget_tokens=8192, host_budget_tokens=16384,
-        lambda_gpu=0.0, lambda_host=0.0)
+        lambda_gpu=0.0, lambda_host=0.0) if needs_value else None
     matrix["methods"] = [
         dict(id=f"{name}_{policy}", strategy=strategy, overrides={"execution": {
             "plan_gain": action, "prefix_retention": retention}})
         for name, strategy, action in (("B6", "B6", None), ("S3", "B7", gain_settings))
-        for policy, retention in (("native", {"mode": "native"}), ("value", value_policy))]
+        for policy, retention in (("native", {"mode": "native"}), ("value", value_policy))
+        if f"{name}_{policy}" in selected_methods]
     matrix["selection"]["include_ablations"] = False
     config_path = root/"frozen-A-study.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
@@ -225,8 +231,6 @@ def prepare_full_queue(args, root):
         matrix["datasets"][name].update(protocol="P3", continue_conversation_failures=True)
     matrix_path = root/"joint-matrix.yaml"
     matrix_path.write_text(yaml.safe_dump(matrix, sort_keys=False))
-    selected_methods = [method["id"] for method in matrix["methods"]
-        if args.methods is None or method["id"] in args.methods]
     jobs = []
     for concurrency in args.concurrency:
         for method in selected_methods:
@@ -236,7 +240,8 @@ def prepare_full_queue(args, root):
     manifest = dict(format="contextkv_full_queue_joint_plan_v1", scope="full declared P3 development queue",
         source_config=snapshot(args.config), source_matrix=snapshot(args.matrix),
         reader_profile_id=profile, reader_run=snapshot(run_path), resource_scope=scope,
-        assets={"gain": snapshot(gain_path), "value": snapshot(args.value_model)},
+        assets={"gain": snapshot(gain_path) if needs_gain else None,
+                "value": snapshot(args.value_model) if needs_value else None},
         cohort=cohorts, value_policy=value_policy, gain_mode="observed_actions",
         lambda_time=execution["lambda_time"], concurrency=args.concurrency,
         selected_methods=selected_methods, requested_qa=requested*len(jobs), jobs=jobs, config=str(config_path),
@@ -430,7 +435,7 @@ def main(argv=None):
     parser.add_argument("--source-manifest", help="Source manifest for the two-turn capacity diagnostic")
     parser.add_argument("--matrix")
     parser.add_argument("--parent-policy-asset")
-    parser.add_argument("--gain-asset", required=True)
+    parser.add_argument("--gain-asset")
     parser.add_argument("--execution-profile")
     parser.add_argument("--native-assets")
     parser.add_argument("--value-model", help="Add value-C B6/S3 cells at each declared concurrency")
@@ -454,12 +459,20 @@ def main(argv=None):
     if args.methods is not None and not args.full_queue:
         parser.error("--methods requires --full-queue")
     if args.full_queue:
-        if not args.matrix or not args.value_model or not args.online_gpu_devices or not args.reader_base_url:
-            parser.error("--full-queue requires --matrix, --value-model, --online-gpu-devices and --reader-base-url")
+        if not args.matrix or not args.online_gpu_devices or not args.reader_base_url:
+            parser.error("--full-queue requires --matrix, --online-gpu-devices and --reader-base-url")
+        methods = args.methods or ("B6_native", "B6_value", "S3_native", "S3_value")
+        if any(method.startswith("S3_") for method in methods):
+            if not args.gain_asset:
+                parser.error("S3 full-queue methods require --gain-asset")
+        elif not args.reader_profile_id:
+            parser.error("B6-only full-queue methods require --reader-profile-id")
+        if any(method.endswith("_value") for method in methods) and not args.value_model:
+            parser.error("value full-queue methods require --value-model")
     elif not all((args.source_manifest, args.parent_policy_asset, args.execution_profile,
-                  args.native_assets, args.reader_profile_id)):
+                  args.native_assets, args.reader_profile_id, args.gain_asset)):
         parser.error("the two-turn diagnostic requires --source-manifest, --parent-policy-asset, "
-                     "--execution-profile, --native-assets and --reader-profile-id")
+                     "--execution-profile, --native-assets, --reader-profile-id and --gain-asset")
     return asyncio.run(run(args))
 
 
