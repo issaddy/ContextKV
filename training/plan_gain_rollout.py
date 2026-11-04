@@ -82,9 +82,6 @@ def observed_rows(rows, packets, *, selection=None):
         if packet["decision_mode"] == "mandatory_coverage":
             skipped["mandatory_source_coverage_incomplete"] += 1
             continue
-        if not state.steps:
-            skipped["empty_observed_state"] += 1
-            continue
         snapshot = decode(SessionSnapshot, packet["snapshot"])
         expected = [{name: turn[name] for name in ("turn_id", "user_text", "assistant_text")}
                     for turn in row["actual_history"]]
@@ -713,6 +710,11 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
             StudyResourceSampler(settings["judge_gpu_devices"], judge_roots, interval=.5))
     own_controller, own_provider, own_judge = controller is None, provider is None, judge_client is None
     all_runs, all_pairs, preparations, unavailable = [], [], [], []
+    def preparation_counts():
+        return {"source_tasks_prepared": len({row["task_id"] for row in preparations}),
+            "source_tasks_planned": len(cohort["planned_task_ids"]),
+            "decision_states_prepared": len(preparations), "decision_states_planned": len(valid)}
+
     status, stop_reason = "completed", None
     active_error = None
     async with accounting:
@@ -931,8 +933,8 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                         append(output/"gains.jsonl", pair)
                         append(output/"pairs.jsonl", packet)
                         all_pairs.append(pair)
-                write(output/"progress.json", {"tasks_prepared": len(preparations), "runs": len(all_runs),
-                    "pairs": len(all_pairs), "generations": len(budget.tickets), "status": status})
+                write(output/"progress.json", {**preparation_counts(), "runs": len(all_runs),
+                    "pairs": len(all_pairs), "generations": len(budget.tickets), "status": "running"})
                 if budget.remaining < 2:
                     status, stop_reason = "generation_budget_exhausted", "no_complete_reader_and_judge_allocation"
                     break
@@ -957,7 +959,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 "scope": "actual reader-bound counterfactual supervision collection",
                 "elapsed_ms": (time.monotonic()-started)*1000, "planned_tasks": cohort["planned_task_ids"],
                 "cohort": cohort,
-                "tasks_prepared": len(preparations), "actual_runs": len(all_runs), "actual_gain_pairs": len(all_pairs),
+                **preparation_counts(), "actual_runs": len(all_runs), "actual_gain_pairs": len(all_pairs),
                 "actual_observations": len({row["observed_state_binding"]["observation_id"] for row in all_runs
                                             if row["observed_state_binding"] is not None}),
                 "actual_action_task_ids": {kind: sorted({row["task_id"] for row in all_runs
@@ -974,6 +976,8 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                     "raw_support": str(output/"support-wire.jsonl"),
                     "raw_judge": str(output/"judge-wire.jsonl"), "all_calls": str(output/"all-model-calls.jsonl")},
                 "cost_accounting": "entry physical/native totals count shared preparation once; each branch also records full hypothetical response cost with shared preparation ID; offline judge remains separate"})
+            write(output/"progress.json", {**preparation_counts(), "runs": len(all_runs),
+                "pairs": len(all_pairs), "generations": len(budget.tickets), "status": status})
     entry_path = output/"capture-entry.json"
     if entry_path.exists():
         entry = json.loads(entry_path.read_text())

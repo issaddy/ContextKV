@@ -478,7 +478,16 @@
       "observations": 122,
       "manifest": "runs/study/budget-loop-20261103/selected-a-followthrough/dev/frozen/P0_source_first_shared/generation_manifest.json"
     },
-    "failed_capture_observations": 19
+    "failed_capture_observations": 19,
+    "running_collection_scope": {
+      "artifact": "runs/study/budget-loop-20261103/b-selected-a-paired/train/cohort.json",
+      "declared_source_tasks": 200,
+      "planned_source_tasks": 148,
+      "planned_decision_states": 210,
+      "initial_observations_excluded_by_loaded_collector": 178,
+      "protocol": "already-running collection uses post-READ decision snapshots; no recollection started",
+      "code_correction": "future collection accepts actual post-retrieval initial states when DIRECT/action are legal; source task and decision-state counts reported separately"
+    }
   },
   "P1_scoring": {
     "rubric": "necessary_points_grounding_conditions_versions_task_v2",
@@ -611,6 +620,14 @@
         "model_calls_for_correction": 0,
         "basis": "ready GPU + H2D allocated destination; ready Host + D2H allocated destination; original reports and sampling windows retained"
       }
+    },
+    "resource_release": {
+      "artifact": "runs/study/budget-loop-20261103/implementation-priority-hold.json",
+      "gpu": 5,
+      "reader_port": 30000,
+      "before_MiB": 76274,
+      "after_MiB": 535,
+      "scope": "dedicated P1 reader released after current dataset finished; shared helper/judge and live B/C retained"
     }
   },
   "failure_artifact_cleanup": {

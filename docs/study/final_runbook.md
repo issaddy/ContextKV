@@ -35,6 +35,8 @@ B 固定流程观测使用 `execution.state_observation`，从真实请求开始
 `training.collect_plan_gains --observations OBS --actual-turns TURNS --output PACKETS`
 导出后，`training.plan_gain_workflow --mode observed_actions --observed-states PACKETS`
 沿用源 cohort 身份。每个源 task 保留各合法动作首次可配对的观测，不按未来质量选点。
+真实检索后的初始状态也可配对 DIRECT 与首次 READ；无需先完成一次 READ。
+进度分别记录去重源任务数和决策快照数，不将多个动作快照重复计为训练任务。
 `observed_actions` 沿用源动作的输出份额，不扫描 `read-outputs`；有效观测数单独记录，声明分母仍为 200/40。
 新成本拟合读取各分支 `run.json.pre_action_quote`，质量与成本分别归一化；`cold` 数据只能说明冷启动费用，`observed` 保留实际分支起点，不声称恢复源缓存。
 B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
