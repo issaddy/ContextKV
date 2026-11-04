@@ -196,6 +196,22 @@ def annotated_generation(plan, step, template):
     return result
 
 
+def trace_source_metadata(metadata):
+    fields = (
+        "task_id", "conversation_id", "turn", "dataset", "split", "source_partition",
+        "cohort_split", "cohort_manifest_sha256", "method", "status", "scope",
+        "history_origin", "snapshot_id", "rollout_policy", "measurement_segment_id",
+        "measurement_kind", "request_window", "workload_arrival", "record_number",
+        "generation_dir", "source_status_derivation", "max_new_tokens",
+        "capture_origin", "source_attempt_id", "source_example_id", "source_trace_origin",
+        "source_mutations", "quality_claim", "source_trace_files", "source_bank_files",
+        "probe", "packing",
+    )
+    return {**{key: metadata[key] for key in fields if key in metadata},
+        "response": {key: metadata["response"][key] for key in ("answer_phase_window", "timing")
+                     if key in metadata.get("response", {})}}
+
+
 def export_attempt(store, attempt, template, sampling, metadata, *, recorded_calls=None):
     if attempt.stage != "COMMITTED" or attempt.reading_outcome is None:
         raise ValueError("retention trace requires a committed real reading request")
@@ -258,7 +274,7 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
     return dict(attempt_id=attempt.attempt_id, session_id=attempt.session_id, request_id=attempt.request_id,
         query=attempt.query, arrival_s=arrival, context_plan=to_jsonable(plan),
         actual_history=to_jsonable(before_snapshot(store, attempt).raw_history), events=events,
-        dataset=metadata.get("dataset"), split=metadata.get("split"), source_metadata=metadata)
+        dataset=metadata.get("dataset"), split=metadata.get("split"), source_metadata=trace_source_metadata(metadata))
 
 
 class RecordingEngine:
@@ -1224,6 +1240,9 @@ def export(args):
         store.close()
     result = make_trace(turns, config=config, source_db=args.state_db, captured=False,
         case_outcomes=unexported_requests(args.records, args.failed_conversations, attempt_ids, segments))
+    records_path = Path(args.records).resolve()
+    with records_path.open("rb") as stream:
+        result["source_records"] = {"path": str(records_path), "sha256": hashlib.file_digest(stream, "sha256").hexdigest()}
     write_json(args.output, result)
     return result
 
