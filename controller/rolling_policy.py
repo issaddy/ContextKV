@@ -13,15 +13,22 @@ import time
 
 from .claim_graph import ClaimGraph
 from .context_schema import EvidencePool, ReadResult, ReadTask, ReadingOutcome, StepRecord
-from .plan_policy import (NoCompletePlan, PlanPolicy, PlanStep,
+from .plan_policy import (CompleteCost, NoCompletePlan, PlanCandidate, PlanPolicy, PlanStep,
                           _completed_steps, complete_plan)
-from .reading import (output_schema, read_output_reservation, step_generation_kind,
+from .reading import (advance_read_plan, output_schema, read_output_reservation, step_generation_kind,
                       step_messages, unresolved_needs)
 from .schema import Plan, PromptCandidate
 from .serialization import decode, dumps, to_jsonable
 
 
 ZERO_AUX = {"input_tokens": 0, "output_tokens": 0, "compute_ms": 0.0, "models": []}
+
+
+def _gap_retriever_identity(manifest):
+    from .resident_models import resident_model_digest
+
+    return {"implementation": "StudyEvidenceProvider.extend_for_plan",
+            "resident_model_manifest_digest": resident_model_digest(manifest)}
 
 
 def namespace_plan(plan):
@@ -188,6 +195,8 @@ class RollingPlanRuntime:
 
     def bind_resident_models(self, manifest):
         self.native.bind_resident_models(manifest)
+        if self.mode == "observed_actions" and self.gap_limits is not None:
+            self.gap_retriever_identity = _gap_retriever_identity(manifest)
 
     async def aclose(self):
         await self.native.aclose()
@@ -353,6 +362,11 @@ class RollingPlanRuntime:
             metrics={**record.metrics, "auxiliary_usage": pool.auxiliary_usage,
                 "phase_window": {"start": tick, "end": ended, "clock": "client_monotonic", "scope": "gap_retrieval"}})
         executor.store.save_execution_step(record, "RESULT_READY")
+        if (len(pool.units) > request.limits["max_units"]
+                or len(_passages(pool.units)) > request.limits["max_passages"]):
+            from .execution import ReadingBudgetExceeded
+
+            raise ReadingBudgetExceeded("actual GAP material exceeds its registered retrieval limits")
         return await self._finish_gap(record, pool, state, snapshot, template, executor, expanded, events)
 
     def proposals(self, context_plans, state, snapshot, template, compile_answers):
@@ -406,6 +420,19 @@ class RollingPlanRuntime:
                 semantic_kind="direct_answer", reader_checkpoint=self.reader_checkpoint))
         return tuple(plans)
 
+    def _required_scope_step(self, state):
+        if state.plan.coverage_scope != "all_supplied_documents":
+            return None
+        ready = advance_read_plan(state.plan, state.results)
+        if self._mandatory_coverage(state):
+            task = next((task for task in ready if task.kind == "READ"), None)
+            if task is None:
+                raise NoCompletePlan("no ready READ can complete the required source scope")
+            return task
+        return next((task for task in ready if task.kind == "REDUCE"
+                     and state.plan.reading_mode == "typed_reduce"
+                     and task.operation in {"numeric_select", "count", "sum", "union", "group"}), None)
+
     async def run(self, attempt_id, snapshot, context_plans, executor, engine, template,
                   cost_model, compile_answers, *, arrived, auxiliary_usage, events, open_need_provider=None):
         context_plans = tuple(namespace_plan(plan) for plan in context_plans)
@@ -447,10 +474,46 @@ class RollingPlanRuntime:
         decisions = []
         while True:
             selection_started = time.monotonic()
+            observed = self.mode == "observed_actions"
+            required_step = self._required_scope_step(state) if observed else None
+            if required_step is not None:
+                from .action_policy import native_admission_reason
+                from .session_store import ReadingProgress
+
+                plan = state.plan
+                cpu = required_step.kind == "REDUCE" and required_step.operation != "numeric_select"
+                variants = () if cpu else compile_step(plan, required_step, state, snapshot, template,
+                                                       outputs=(required_step.output_budget,))
+                candidate = None if cpu else variants[0]
+                if candidate is not None and not candidate.feasible:
+                    raise NoCompletePlan("required source-scope step exceeds its model window")
+                proposal = PlanCandidate(plan.plan_id, "scope_scan", plan,
+                    (PlanStep(required_step, variants),), self.reader_checkpoint)
+                native, _ = await self.native.observe((proposal,), state, snapshot, engine, cost_model,
+                    arrived, auxiliary_usage, selection_started=selection_started)
+                reserved = CompleteCost(0, 0, 0, 0 if cpu else len(candidate.input_ids),
+                                        plan.budget.output_tokens+(0 if cpu else candidate.output_budget))
+                reason = self.policy._constraint(native.paid_cost+reserved, plan.budget)
+                if candidate is not None:
+                    reason = reason or native_admission_reason(native, candidate)
+                if reason is not None:
+                    raise NoCompletePlan(f"required source-scope step exceeds {reason}")
+                self._observe_state(attempt_id, executor, state, snapshot, native, None, True)
+                audit = {"decision_mode": "mandatory_coverage", "step_id": required_step.step_id,
+                    "task": required_step, "quote": native.quotes, "paid_cost": native.paid_cost,
+                    "physical_paid_observation": native.paid_observation}
+                decisions.append(audit)
+                events.emit("rolling_required_scope_step", attempt_id=attempt_id, **audit)
+                state = await executor.execute_one(attempt_id, snapshot, plan, required_step, state,
+                    initial_auxiliary_usage=auxiliary_usage, candidate=candidate)
+                context_plans = (state.plan,)
+                executor.store.save_reading_progress(attempt_id, state.plan,
+                    ReadingProgress(tuple(sorted(expanded)), (), state.auxiliary_usage))
+                continue
             mandatory = self._mandatory_coverage(state)
             gap_request = self._gap_request(state, expanded, open_need_provider)
             plans = (self.action_proposals(context_plans[0], state, snapshot, template,
-                compile_answers, gap_request) if self.mode == "observed_actions" and not mandatory else
+                compile_answers, gap_request) if observed else
                 self.proposals(context_plans, state, snapshot, template, compile_answers))
             if len(plans) > self.policy.limits.max_plan_candidates:
                 raise ValueError("rolling proposals exceed the configured finite candidate set")
@@ -461,9 +524,7 @@ class RollingPlanRuntime:
             self._observe_state(attempt_id, executor, state, snapshot, native, gap_request, mandatory)
             try:
                 decision = (self.policy.choose_observed_actions(plans, state, native, reusable)
-                    if self.mode == "observed_actions" and not mandatory else
-                    self.policy.choose(plans, state, native, reusable,
-                        mandatory_coverage=self.mode == "observed_actions" and mandatory))
+                    if observed else self.policy.choose(plans, state, native, reusable))
             except NoCompletePlan:
                 events.emit("rolling_plan_no_complete", attempt_id=attempt_id,
                     observed_at_ms=(time.monotonic()-arrived)*1000,
@@ -506,12 +567,14 @@ class RollingPlanRuntime:
                 plan = replace(plan, online_tokens_spent=spent)
                 outcome = replace(state, plan=plan)
                 candidate = decision.next_step.candidate
-                quote = next(row for row in native.quotes.quotes if row.candidate_id == candidate.candidate_id)
-                estimate = native.cost_model.predict_native(replace(candidate, predicted_read_ms=0.0,
-                    auxiliary_ms=0.0), quote, snapshot, batch=native.quotes,
-                    concurrency=native.quotes.active_requests+1)
-                selected = Plan(candidate, predicted=(estimate,), quote_seq=native.quotes.observed_seq,
-                    reason="rolling_observed_action_gain_cost" if self.mode == "observed_actions" else "rolling_plan_gain")
+                estimates = ()
+                if not observed:
+                    quote = next(row for row in native.quotes.quotes if row.candidate_id == candidate.candidate_id)
+                    estimates = (native.cost_model.predict_native(replace(candidate, predicted_read_ms=0.0,
+                        auxiliary_ms=0.0), quote, snapshot, batch=native.quotes,
+                        concurrency=native.quotes.active_requests+1),)
+                selected = Plan(candidate, predicted=estimates, quote_seq=native.quotes.observed_seq,
+                    reason="rolling_observed_action_gain_cost" if observed else "rolling_plan_gain")
                 return RollingResult(outcome, selected, native.quotes, tuple(decisions), selection_started)
             if self.mode == "observed_actions" and decision.next_step.task.kind == "GAP":
                 catalog = _with_observed_sources(context_plans[0], state)
@@ -623,9 +686,7 @@ class FixedReadingObserver:
             "cohort_manifest_sha256": hashlib.sha256(Path(settings["cohort_manifest"]).read_bytes()).hexdigest()}
 
     def bind_resident_models(self, manifest):
-        from .resident_models import resident_model_digest
-        self.gap_retriever_identity = {"implementation": "StudyEvidenceProvider.extend_for_plan",
-            "resident_model_manifest_digest": resident_model_digest(manifest)}
+        self.gap_retriever_identity = _gap_retriever_identity(manifest)
 
     async def start(self):
         await self.paid.start()

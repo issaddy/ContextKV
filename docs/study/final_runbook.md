@@ -95,13 +95,14 @@ Q 为 0.44509019347880296。报告位于
 | Constructed long | 0 / 20 | 0 | 0.25 |
 
 固定历史四格均按声明的 40 题计算 RB_llm。P0 隔离 32 答、0.605，共享 34 答、0.610。
-旧 P1 隔离 36 答、0.5175，共享 35 答、0.4325。旧 P1 已被拒绝，A 尚未冻结。
+旧 P1 隔离 36 答、0.5175，共享 35 答、0.4325。旧 P1 已被拒绝。修正后 P1 共享格交付 36/40、Q 为 0.5325，仍低于 P0 的 0.610；
+已选择并冻结 P0 共享协议进入 B/C。
 效用训练已去除实际 READ 后长度带来的输入泄漏，训练和推理统一使用零上下文
 `evidence_set_only`。新资产 `models/study-support-fixed-qwen-set-only` 沿用 1400 对偏好、
-147 个状态和 3 个 epoch，已完成训练，完整阶段耗时 1485.07 秒；40 题验证正在运行。旧 B capture 完成的 115 个状态保留为
+147 个状态和 3 个 epoch，已完成训练，完整阶段耗时 1485.07 秒；40 题验证已完成。旧 B capture 完成的 115 个状态保留为
 旧模型的成本记录，不用于新模型训练。B 配对尚未执行。
-`selected-a-followthrough/launch.json` 接续新验证：P1 的全分母 Q40 达到 0.61 时采用 P1，否则保留 P0；
-随后重新采集所选 A 的观测并执行 B 配对。修正后 P1 的隔离协议固定历史格在 B 之后执行。
+`selected-a-followthrough/selection.json` 已记录 P0 的冻结资产、配置与选择证据；
+当前重新采集 P0 的 train/dev 观测，随后执行 B 配对。修正后 P1 的隔离协议固定历史格在 B 之后执行。
 
 `constructed_numeric_exact_v1` 已重评 21 个已有长文答案。抽取器只看到实际问题和答案，
 由代码精确比较整数计数、Decimal 总额和单位。正式筛选前长文运行交付 16/20 答案，
@@ -118,8 +119,12 @@ MTRAG 已评分 41/41，完整队列 Q 为 0.5074440554339312，参照为 0.3266
 
 原 350 题参照维持 300 个答案、Q 为 0.44509019347880296。参照的原生账本已核实
 2487 次调用和 11941836 token。另有 1 条 PLANNED 未提交记录，其模型 token 为 0，
-前置物理成本仍计入。本阶段累计清理 2838740464 字节重复产物，原始账本保留。
-完整 P95 尚不可验收，B/C 和完整队列质量目标尚未完成。
+前置物理成本仍计入。本阶段累计清理 3289295076 字节重复产物，原始账本保留。
+P0 共享候选已完成完整 350 题对照：341 答、Q 为 0.6575398416096789，较参照提高
+21.2449648130876 个百分点；包含失败步骤的阅读器原生 token 为 7520143，减少 37.0269%。
+两臂的窗口、历史、输出、累计步骤和 token 配额一致。报告为
+`formal-dev-c4-grounded/P0-complete-queue-report/report.json`。这是冻结前 P0 的完整队列结果；
+阶段质量指标已超过 5 个百分点，最终 A/B/C 联合实验及完整 P95 验收仍待完成。
 
 默认关闭大型消融 sweep，
 保留 B0/Btoken/B3/B6/B7/Lmap 对照入口和 c1/c4 资源配置。
@@ -143,11 +148,17 @@ C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观�
 
 ```sh
 python -m bench.capacity_workflow --full-queue \
-  --config "$FROZEN_A_STUDY" --matrix runs/study/formal-dev-queue.matrix.json \
-  --parent-policy-asset "$FROZEN_A_SUPPORT" --reader-profile-id "$READER_PROFILE" \
-  --gain-asset "$B_GAIN" --execution-profile "$EXECUTION_PROFILE" --native-assets "$NATIVE_ASSETS" \
+  --config "$FROZEN_A_STUDY" --matrix "$JOINT_MATRIX" \
+  --gain-asset "$B_GAIN" --online-gpu-devices "$ONLINE_GPUS" --reader-base-url "$READER_URL" \
   --value-model "$C_VALUE" --concurrency 1 4 --output "$JOINT_OUTPUT"
 ```
+
+完整队列四格共用冻结 A 的模型、支持策略、查询资产、阅读协议和预算。收益 B 的 reader
+身份由实际运行配置与实测收益资产绑定。`--online-gpu-devices` 接受逗号分隔的物理卡号。
+可通过 `--online-process-roots` 指定逗号分隔的 PID，默认按 reader 和 helper 的端口发现
+进程并加入协调进程。`--reader-base-url` 显式指定实际服务端点。联合矩阵沿用正式 350 题清单，
+其中检索器设备配置与本次物理卡号一致。GAP 限额沿用冻结观测配置，
+缺省为 96 个单元和 10 个 passage，可用 `--gap-max-units`、`--gap-max-passages` 显式指定。
 
 每格按自己的 P3 历史执行原 350 题，使用声明的开发指标与权重。未交付回答计入
 完整分母并贡献零分，已交付但未评分的回答保留质量区间。报告另列原生已付调用
@@ -155,3 +166,8 @@ python -m bench.capacity_workflow --full-queue \
 
 C 的离线 `retention_trace export` 需显式提供 `--failed-conversations`（零失败为 `[]`）。
 同测量段内未导出的成功与失败请求墙钟区间进入压力索引，回放不使用与之重叠的窗口。
+
+C 已准备 train/dev 各两窗，共计划 2388 次真实生成；`retention-preparation/paired-plan.json`
+记录同一180秒观察窗、Native/TTL15/60/180四臂及排队依赖。训练轨迹来自已有真实证据候选，
+开发轨迹来自P0自身P3；其与最终冻结A的联合队列分别计量。训练轨迹中624次READ输入
+已按当前协议重新编译，全部与原始输入hash一致，审计未调用生成模型。

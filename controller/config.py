@@ -140,7 +140,10 @@ class RunConfig:
         if self.plan_gain is not None:
             if self.plan_gain["mode"] not in {"rolling_gain", "whole_plan", "observed_actions"} or self.shadow:
                 raise ValueError("plan_gain enables reader-bound rolling execution without shadow fallback")
-            for name in ("gain_asset", "execution_profile_asset", "reader_checkpoint", "reader_profile_id"):
+            required = ("gain_asset", "reader_checkpoint", "reader_profile_id")
+            if self.plan_gain["mode"] != "observed_actions":
+                required += ("execution_profile_asset",)
+            for name in required:
                 if not self.plan_gain[name]:
                     raise ValueError(f"rolling plan policy requires explicit {name}")
 

@@ -9,11 +9,13 @@ from dataclasses import replace
 from datetime import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import resource
 import sys
 import time
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 import yaml
 
@@ -24,7 +26,7 @@ from bench.reassess_saved import paid_execution_index
 from bench.rolling_study_workflow import configure
 from bench.study import merge_config, read_jsonl, write_json, write_jsonl
 from bench.study_metrics import _cost_summary, _quantile, _track_specs, declared_queue_summary
-from bench.study_resources import StudyResourceSampler, integrate_physical
+from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
 from bench.study_workloads import freeze_workload, load_goal_policy
 
 
@@ -34,10 +36,11 @@ def snapshot(path):
 
 
 def prepare(args, root):
-    if not args.full_queue:
-        source_path = Path(args.source_manifest).resolve()
-        source = json.loads(source_path.read_text())
-        source_matrix = yaml.safe_load(Path(source["diagnostic_matrix_path"]).read_text())
+    if args.full_queue:
+        return prepare_full_queue(args, root)
+    source_path = Path(args.source_manifest).resolve()
+    source = json.loads(source_path.read_text())
+    source_matrix = yaml.safe_load(Path(source["diagnostic_matrix_path"]).read_text())
     settings = yaml.safe_load(Path(args.config).read_text())
     settings = merge_config(settings, {
         "support_model": {"mode": "trained", "asset": args.parent_policy_asset,
@@ -45,9 +48,7 @@ def prepare(args, root):
         "selection": {"utility": "learned"},
         "reading": {"layout": "source_first", "packing": "source_windows"},
         "execution": {"prefix_retention": {"mode": "native"}}})
-    if args.full_queue:
-        settings["reading"].update(need_isolation=False, numeric_need_isolation=False)
-    parent = root/("frozen-A-study.yaml" if args.full_queue else "parent-P0-study.yaml")
+    parent = root/"parent-P0-study.yaml"
     parent.write_text(yaml.safe_dump(settings, sort_keys=False))
     scope = SimpleNamespace(config=str(parent), matrix=args.matrix or source["diagnostic_matrix_path"],
         execution_profile=args.execution_profile, native_assets=args.native_assets, gain_asset=args.gain_asset,
@@ -58,10 +59,6 @@ def prepare(args, root):
     config, matrix, config_path = configure(scope, root)
     config["execution"].update(cache_start="cold", prefix_retention={"mode": "native"})
     config["reading"].update(layout="source_first", packing="source_windows")
-    if args.full_queue:
-        rolling = next(method for method in matrix["methods"] if method["strategy"] == "B7")
-        config["generation"]["run_config"] = rolling["overrides"]["generation"]["run_config"]
-        config["execution"]["cost_artifact"] = rolling["overrides"]["execution"]["cost_artifact"]
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
     methods = []
     for method in matrix["methods"]:
@@ -73,7 +70,7 @@ def prepare(args, root):
             "execution": {"cache_start": "cold", "prefix_retention": {"mode": "native"}}})
         if value["strategy"] == "B7":
             gain = value["overrides"]["execution"]["plan_gain"]
-            gain["mode"] = "observed_actions" if args.full_queue else args.gain_mode
+            gain["mode"] = args.gain_mode
             if args.value_model is not None:
                 gain["prefix_directory"] = True
         methods.append(value)
@@ -88,8 +85,6 @@ def prepare(args, root):
             value["overrides"]["execution"]["prefix_retention"] = deepcopy(value_policy)
             methods.append(value)
     matrix["methods"] = methods
-    if args.full_queue:
-        return prepare_full_queue(args, root, matrix, config_path, value_policy)
     matrix["resources"].update(gpu_capacity_tokens=32768, host_capacity_tokens=61056)
     policy_path = Path(source["goal_policy_path"]).resolve()
     policy = load_goal_policy(policy_path, expected_sha256=source["goal_policy_sha256"])
@@ -164,12 +159,63 @@ def prepare(args, root):
         cache_boundary="one cold boundary per method/concurrency job; never cold between clients/turns",
         question_protocol="P3 own committed generated QA; no authored/other-method answer imported",
         scoring="capacity/completion/Need-source coverage only; no public quality aggregate", jobs=plans,
-        config=str(config_path))
+        config=str(config_path),
+        resource_scope={**json.loads(Path(args.execution_profile).read_text())["resource_scope"],
+            "gpu_capacity_tokens": 32768, "host_enabled": True, "model": "Qwen3-32B"})
     write_json(root/"capacity-plan.json", manifest)
     return manifest
 
 
-def prepare_full_queue(args, root, matrix, config_path, value_policy):
+def prepare_full_queue(args, root):
+    from controller.config import load_config
+    from training.train_plan_gain import PlanGainModel
+
+    config = yaml.safe_load(Path(args.config).read_text())
+    matrix = yaml.safe_load(Path(args.matrix).read_text())
+    run_path = Path(config["generation"]["run_config"]).resolve()
+    run_data = yaml.safe_load(run_path.read_text())
+    run_data["engine"]["base_url"] = args.reader_base_url
+    run_path = root/"reader-run.yaml"
+    run_path.write_text(yaml.safe_dump(run_data, sort_keys=False))
+    run = load_config(run_path)
+    config["generation"]["run_config"] = str(run_path)
+    gain_path = Path(args.gain_asset).resolve()
+    profile = json.loads(gain_path.read_text())["reader_profile_id"]
+    gain = PlanGainModel.load(gain_path, reader_checkpoint=run.model.revision, reader_profile_id=profile)
+    roots = args.online_process_roots
+    if not roots:
+        endpoints = [run.engine.base_url]
+        if config["generation"].get("teacher_url"):
+            endpoints.append(config["generation"]["teacher_url"])
+        roots = sorted({os.getpid(), *listening_processes([urlparse(url).port for url in endpoints])})
+    scope = dict(gpu_devices=args.online_gpu_devices, process_roots=roots,
+        native_endpoint=run.engine.base_url, gpu_capacity_tokens=run.engine.gpu_capacity_tokens,
+        host_enabled=run.engine.host_capacity_tokens > 0, model="Qwen3-32B")
+    matrix["resources"].update(gpu_devices=args.online_gpu_devices, process_ids=roots)
+    execution = config["execution"]
+    gap_limits = ((execution.get("state_observation") or {}).get("gap_limits") or {})
+    gap_limits = {
+        "max_units": args.gap_max_units if args.gap_max_units is not None else gap_limits.get("max_units", 96),
+        "max_passages": args.gap_max_passages if args.gap_max_passages is not None else gap_limits.get("max_passages", 10),
+    }
+    execution.update(cache_start="cold", state_observation=None)
+    gain_settings = dict(mode="observed_actions", gain_asset=str(gain_path),
+        reader_checkpoint=gain.reader_checkpoint, reader_profile_id=gain.reader_profile_id,
+        gpu_devices=args.online_gpu_devices, process_ids=roots,
+        sampling_interval_seconds=args.sampling_interval, output_budgets=args.read_outputs,
+        output_tokens_per_fact=config["reading"]["output_tokens_per_fact"],
+        prefix_directory=True, gap_limits=gap_limits)
+    value_policy = dict(mode="value", model_path=str(Path(args.value_model).resolve()),
+        horizon_seconds_choices=[15, 60, 180], gpu_budget_tokens=8192, host_budget_tokens=16384,
+        lambda_gpu=0.0, lambda_host=0.0)
+    matrix["methods"] = [
+        dict(id=f"{name}_{policy}", strategy=strategy, overrides={"execution": {
+            "plan_gain": action, "prefix_retention": retention}})
+        for name, strategy, action in (("B6", "B6", None), ("S3", "B7", gain_settings))
+        for policy, retention in (("native", {"mode": "native"}), ("value", value_policy))]
+    matrix["selection"]["include_ablations"] = False
+    config_path = root/"frozen-A-study.yaml"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
     cohorts = matrix["cohorts"]["dev"]
     datasets = tuple(cohorts)
     requested = sum(len(task_ids) for task_ids in cohorts.values())
@@ -185,11 +231,8 @@ def prepare_full_queue(args, root, matrix, config_path, value_policy):
                 requested_qa=requested, matrix=str(matrix_path), output=str(root/"jobs"/name/"generation")))
     manifest = dict(format="contextkv_full_queue_joint_plan_v1", scope="full declared P3 development queue",
         source_config=snapshot(args.config), source_matrix=snapshot(args.matrix),
-        frozen_support_asset=str(Path(args.parent_policy_asset).resolve()),
-        frozen_support_heads=snapshot(Path(args.parent_policy_asset)/"heads.pt"),
-        reader_profile_id=args.reader_profile_id, assets={name: snapshot(path) for name, path in (
-            ("gain", args.gain_asset), ("execution", args.execution_profile), ("native", args.native_assets),
-            ("value", args.value_model))},
+        reader_profile_id=profile, reader_run=snapshot(run_path), resource_scope=scope,
+        assets={"gain": snapshot(gain_path), "value": snapshot(args.value_model)},
         cohort=cohorts, value_policy=value_policy, gain_mode="observed_actions", concurrency=args.concurrency,
         requested_qa=requested*len(jobs), jobs=jobs, config=str(config_path),
         cache_boundary="one cold boundary per method and dataset; never cold between turns",
@@ -299,10 +342,10 @@ async def run(args):
     if args.prepare_only:
         print(json.dumps({"status": "prepared", "qa": plan["requested_qa"], "plan": str(root/"capacity-plan.json")}))
         return plan
-    execution = json.loads(Path(args.execution_profile).read_text())
-    scope = execution["resource_scope"]
+    scope = plan["resource_scope"]
     physical = StudyResourceSampler(tuple(scope["gpu_devices"]), tuple(scope["process_roots"]), interval=args.sampling_interval)
-    native = NativePoolSampler(scope["native_endpoint"], gpu_capacity=32768, host_enabled=True, model="Qwen3-32B")
+    native = NativePoolSampler(scope["native_endpoint"], gpu_capacity=scope["gpu_capacity_tokens"],
+        host_enabled=scope["host_enabled"], model=scope["model"])
     await physical.start()
     await native.start()
     started = time.monotonic()
@@ -379,14 +422,19 @@ def main(argv=None):
     parser.add_argument("--full-queue", action="store_true", help="Run all declared development tasks in each B/C cell")
     parser.add_argument("--source-manifest", help="Source manifest for the two-turn capacity diagnostic")
     parser.add_argument("--matrix")
-    parser.add_argument("--parent-policy-asset", required=True)
+    parser.add_argument("--parent-policy-asset")
     parser.add_argument("--gain-asset", required=True)
-    parser.add_argument("--execution-profile", required=True)
-    parser.add_argument("--native-assets", required=True)
+    parser.add_argument("--execution-profile")
+    parser.add_argument("--native-assets")
     parser.add_argument("--value-model", help="Add value-C B6/S3 cells at each declared concurrency")
     parser.add_argument("--concurrency", type=int, nargs="+", choices=(1, 4, 8), default=[1, 4])
     parser.add_argument("--gain-mode", choices=("observed_actions", "whole_plan"), default="observed_actions")
-    parser.add_argument("--reader-profile-id", required=True)
+    parser.add_argument("--reader-profile-id")
+    parser.add_argument("--online-gpu-devices", type=lambda value: tuple(map(int, value.split(","))))
+    parser.add_argument("--online-process-roots", type=lambda value: tuple(map(int, value.split(","))))
+    parser.add_argument("--reader-base-url")
+    parser.add_argument("--gap-max-units", type=int)
+    parser.add_argument("--gap-max-passages", type=int)
     parser.add_argument("--lambda-time", type=float)
     parser.add_argument("--read-outputs", type=lambda value: tuple(map(int, value.split(","))), default=(2048,))
     parser.add_argument("--sampling-interval", type=float, default=.5)
@@ -397,10 +445,12 @@ def main(argv=None):
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     if args.full_queue:
-        if not args.matrix or not args.value_model:
-            parser.error("--full-queue requires --matrix and --value-model")
-    elif not args.source_manifest:
-        parser.error("the two-turn diagnostic requires --source-manifest")
+        if not args.matrix or not args.value_model or not args.online_gpu_devices or not args.reader_base_url:
+            parser.error("--full-queue requires --matrix, --value-model, --online-gpu-devices and --reader-base-url")
+    elif not all((args.source_manifest, args.parent_policy_asset, args.execution_profile,
+                  args.native_assets, args.reader_profile_id)):
+        parser.error("the two-turn diagnostic requires --source-manifest, --parent-policy-asset, "
+                     "--execution-profile, --native-assets and --reader-profile-id")
     return asyncio.run(run(args))
 
 

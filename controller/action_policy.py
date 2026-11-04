@@ -14,6 +14,15 @@ def regression_cost(values):
         values["host_gib_seconds"]*1000, values["total_input_tokens"], values["total_output_tokens"])
 
 
+def native_admission_reason(native, candidate):
+    admission = (native.paid_observation or {}).get("native_admission")
+    if admission is not None:
+        output = min(candidate.output_budget, admission["native_max_new_tokens_clip"])
+        if len(candidate.input_ids)+output+admission["page_size"] >= admission["gpu_capacity_tokens"]:
+            return "native_hard_capacity_exceeded"
+    return None
+
+
 def choose_observed_action(policy, plans, state, native, reusable_prefixes):
     """Price one action plus ANSWER; sunk costs constrain the budget, not its marginal value."""
     plans = tuple(plans)
@@ -80,11 +89,7 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes):
                     peaks.append(CompleteCost(0, 0, 0, 0, 0, resource.gpu_peak_gib, resource.host_peak_gib))
                 elif policy.limits.max_gpu_peak_gib is not None or policy.limits.max_host_peak_gib is not None:
                     reason = "unmeasured_current_resource_peak"
-                admission = (native.paid_observation or {}).get("native_admission")
-                if admission is not None:
-                    gate = len(candidate.input_ids)+min(output, admission["native_max_new_tokens_clip"])+admission["page_size"]
-                    if gate >= admission["gpu_capacity_tokens"]:
-                        reason = "native_hard_capacity_exceeded"
+                reason = native_admission_reason(native, candidate) or reason
             elif cpu:
                 profiles = native.future.get((plan.plan_id, task.step_id), ())
                 if profiles:

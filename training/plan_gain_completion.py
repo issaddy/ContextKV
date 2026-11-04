@@ -289,6 +289,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
         raise ValueError("effective gain asset binds one actual reader/profile/scorer")
     samples, direct_seen, cost_kinds, cache_scopes = [], set(), set(), set()
     cost_record_ids = []
+    resident_digests = set()
     for row in training:
         branches = {name: completion_record(row[name]["pre_registration"], row[name]["actual_run"])
                     for name in ("direct", "counterfactual")}
@@ -302,6 +303,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
             raise ValueError("effective cost labels differ from the paired actual paid branch costs")
         if row["observed_state_binding"] is None:
             continue
+        resident_digests.add(row["observed_state_binding"]["resident_model_manifest_digest"])
         costs = row["cost_targets"]
         for side, target in (("direct", "direct_complete_cost"), ("counterfactual", "branch_complete_cost")):
             branch = branches[side]
@@ -342,7 +344,8 @@ def fit_effective(training, *, ridge=1.0, path=None):
     return PlanGainModel(training[0]["reader_checkpoint"], training[0]["reader_profile_id"],
         "effective-plan-gain:"+digest(training), names, tuple(center.tolist()), tuple(scale.tolist()),
         tuple(coefficients.tolist()), float(intercept),
-        {"label": LABEL, "utility_rule": RULE, "no_answer_utility": 0.0, "raw_missing_quality_preserved": True,
+        {"resident_model_manifest_digests": sorted(resident_digests),
+         "label": LABEL, "utility_rule": RULE, "no_answer_utility": 0.0, "raw_missing_quality_preserved": True,
          "training_split": "train", "training_records": len(training), "counterfactual_runs_retained": True,
          "input_sha256": digest(training), "input_path": str(Path(path).resolve()) if path else None,
          "training_state_keys": sorted({row["state_key"] for row in training}),

@@ -1,8 +1,8 @@
 {
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
-  "gpu_status": "Corrected set-only P1 trained; fixed-history40 validation and formal P0 P3 continue",
-  "evidence_scope": "The 350-task development reference is scored. Candidate full-development quality and P95 acceptance remain open.",
+  "gpu_status": "P0 source-first A frozen; new B train capture and remaining corrected-P1 P3 cells running",
+  "evidence_scope": "Full350 pre-freeze P0 candidate Q=0.6575398416096789 versus registered Q=0.44509019347880296 under unchanged request limits. A selection, B counterfactual fit, C pairs and frozen joint evaluation remain open.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
     "layout": "source_first",
@@ -286,6 +286,32 @@
       "scored": 41,
       "queue_quality": 0.5074440554339312,
       "reference_quality": 0.32660479305396806
+    },
+    "candidate_P0_complete_queue": {
+      "report": "runs/study/budget-loop-20261103/formal-dev-c4-grounded/P0-complete-queue-report/report.json",
+      "declared": 350,
+      "answered": 341,
+      "full_denominator_quality": 0.6575398416096789,
+      "quality_gain_percentage_points": 21.2449648130876,
+      "native_reader_calls": 2585,
+      "native_reader_tokens": 7520143,
+      "native_reader_token_reduction_percent": 37.026911104791594,
+      "allocation": {
+        "window_tokens": 32768,
+        "history_tokens": 8192,
+        "output_tokens": 1024,
+        "max_steps": 512,
+        "max_total_tokens": 4194304,
+        "concurrency": 4
+      },
+      "scope": "pre-freeze full-queue P0; component source snapshots documented; final frozen-A B/C comparison still required"
+    },
+    "candidate_P0_versionqa": {
+      "declared": 80,
+      "answered": 80,
+      "scored": 80,
+      "queue_quality": 0.971875,
+      "reference_quality": 0.94375
     }
   },
   "source_snapshots": {
@@ -414,7 +440,7 @@
       "cost_scope": "The 32512 ms elapsed_ms covers head optimization only."
     },
     "set_only_retraining": {
-      "status": "completed; fixed-history40 validation running",
+      "status": "completed and evaluated; below P0 shared, not selected",
       "asset": "models/study-support-fixed-qwen-set-only",
       "pairs": 1400,
       "states_with_preferences": 147,
@@ -428,7 +454,15 @@
         "cache_hits": 1937,
         "elapsed_ms": 1415032.5639601797
       },
-      "cost_asset": "models/study-support-fixed-qwen-set-only/training_cost.1793750716200180949.json"
+      "cost_asset": "models/study-support-fixed-qwen-set-only/training_cost.1793750716200180949.json",
+      "validation": {
+        "declared": 40,
+        "answered": 36,
+        "scored": 36,
+        "Q40": 0.5325,
+        "P0_shared_Q40": 0.61,
+        "old_P1_shared_Q40": 0.4325
+      }
     }
   },
   "fixed_history_attribution": {
@@ -439,7 +473,7 @@
     "retrieval": "each P0/P1 planner executes its own query encoder and retrieval",
     "model": "fixed Qwen3-32B",
     "P0_status": "scored",
-    "P1_status": "old P1 rejected; A remains unfrozen",
+    "P1_status": "corrected P1 shared scored 0.5325; P0 shared frozen for B/C",
     "artifact": "runs/study/budget-loop-20261103/fixed-history-40",
     "judge_output_cap": 8192,
     "P0_task_first_isolated": {
@@ -466,14 +500,24 @@
     "P1": "runs/study/budget-loop-20261103/p1-rewards/after-collection-stages.json",
     "full_protocol_queue": "runs/study/budget-loop-20261103/formal-dev-c4-grounded/launch.json",
     "B_train_capture": "runs/study/budget-loop-20261103/selected-a-followthrough/launch.json",
-    "status": "Await corrected P1 shared Q40, select P1 if >= 0.61 else P0, then capture new selected-A observations and pair B; corrected P1 isolated A40 follows B. Full350 P3 and C/joint experiments continue.",
-    "selection_rule": "full declared40 quality; Qwen3-32B weights fixed"
+    "status": "Selected P0 source-first shared (Q40=0.61). New selected-A train/dev observations and B actual pairs follow; corrected-P1 P3 and fixed-history isolated comparison remain scheduled. C pairs queued after B release; full frozen-A joint evaluation still required.",
+    "selection_rule": "full declared40 quality; Qwen3-32B weights fixed",
+    "frozen_A": {
+      "selection": "runs/study/budget-loop-20261103/selected-a-followthrough/selection.json",
+      "cell": "P0_source_first_shared",
+      "asset": "models/study-support-actual-prefix",
+      "heads_sha256": "19e99b24285ab13108a4c04c1917b75fe7841e97f97942b0282e75b2205bfd02",
+      "query_asset": null
+    },
+    "C_pairs": "runs/study/budget-loop-20261103/retention-preparation/paired-plan.json",
+    "C_planned_generations": 2388
   },
   "failure_artifact_cleanup": {
-    "redundant_bytes_removed": 2838740464,
+    "redundant_bytes_removed": 3289295076,
     "original_ledger_retained": true,
     "fixed_history_duplicate_cleanup": "runs/study/budget-loop-20261103/fixed-history-40/duplicate-cleanup.json",
-    "retired_B_duplicate_records_removed": 115
+    "retired_B_duplicate_records_removed": 115,
+    "cache_trace_metadata_bytes_removed": 450554612
   },
   "numeric_compact_v7_first_long": {
     "status": "delivered",
