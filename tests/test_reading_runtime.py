@@ -109,7 +109,8 @@ async def test_derived_answer_keeps_all_leaf_spans_and_only_final_legal_citation
 
 
 @pytest.mark.asyncio
-async def test_hierarchical_reduce_keeps_all_source_leaves_within_each_window(tmp_path):
+@pytest.mark.parametrize("rolling", [False, True])
+async def test_hierarchical_reduce_keeps_all_source_leaves_within_each_window(tmp_path, rolling):
     class CombiningEngine(MockEngine):
         async def generate(self, *, response_schema=None, **kwargs):
             rendered = bytes(kwargs["input_ids"]).decode()
@@ -135,10 +136,43 @@ async def test_hierarchical_reduce_keeps_all_source_leaves_within_each_window(tm
     store = SessionStore(tmp_path/"state.db")
     snapshot = store.read_snapshot("s")
     attempt = store.begin_attempt("s", "r", "hash", state.raw_question, 0)
-    outcome = await ReadingExecutor(store, CombiningEngine(), ByteTemplate()).execute_reads(
-        attempt.attempt_id, snapshot, plan)
+    engine = CombiningEngine()
+    executor = ReadingExecutor(store, engine, ByteTemplate())
+    if rolling:
+        import time
+        from controller.candidates import build_plan_candidates
+        from controller.cost_model import CostModel
+        from controller.events import EventLog
+        from controller.rolling_policy import RollingPlanRuntime, ZERO_AUX
+        from rolling_helpers import NativeObservationFixture
+        from test_observed_action_runtime import LearnedFixture
+
+        observed = NativeObservationFixture()
+        runtime = RollingPlanRuntime(LearnedFixture(reads=0, reduce_gain=.8), observed,
+            reader_checkpoint="reader-fixture", reader_profile_id="profile-fixture", output_budgets=(3000,),
+            mode="observed_actions", gap_limits={"max_units": 2, "max_passages": 2})
+
+        def answers(snapshot, plans, current):
+            return tuple(candidate for item in plans for candidate in build_plan_candidates(snapshot,
+                state.raw_question, item, ByteTemplate(), outcome=current, layouts=("existing",)))
+
+        result = await runtime.run(attempt.attempt_id, snapshot, (plan,), executor, engine, ByteTemplate(),
+            CostModel(), answers, arrived=time.monotonic(), auxiliary_usage=dict(ZERO_AUX),
+            events=EventLog(tmp_path / "events.jsonl"))
+        outcome = result.outcome
+        complete_read_states = [current for current in observed.states if len({
+            unit for result in current.results for unit in result.covered_units}) == 100]
+        assert len(complete_read_states) > 2
+        for current in complete_read_states:
+            graph = ClaimGraph(current.claims)
+            point = graph.answer_plan(state, results=current.results).points[0]
+            assert len({leaf.claim_id for identity in point.claim_ids for leaf in graph.leaf_claims(identity)}) == 100
+    else:
+        outcome = await executor.execute_reads(attempt.attempt_id, snapshot, plan)
     reductions = [step for step in outcome.steps if step.task.kind == "REDUCE"]
     assert len(reductions) > 1
+    assert len(reductions[-1].result.reduction.basis_claim_ids) == 100
+    assert all(len(step.result.reduction.basis_claim_ids) < 100 for step in reductions[:-1])
     assert all(len(step.input_ids)+step.task.output_budget <= budget.window_tokens for step in outcome.steps)
     point = outcome.plan.answer_plan.points[0]
     assert len(point.claim_ids) == 1 and len(point.source_spans) == 100

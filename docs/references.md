@@ -9,7 +9,7 @@
 | [BGE-M3](https://huggingface.co/BAAI/bge-m3)、[BGE-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3)、[LoRA](https://arxiv.org/abs/2106.09685) | 编码器和交叉编码器直接复用；`task_model.py` 的查询 LoRA 接检索损失，任务头接 detached 特征上的任务损失；`support_model.py` 接支持和集合偏好 | 未复现 BGE-M3 的多功能自知识蒸馏。学习资产仅在配置显式选择时启用；当前主线仍可使用任务/支持教师和 coverage 效用 |
 | [Dozat & Manning：Deep Biaffine Attention for Neural Dependency Parsing（2017）](https://nlp.stanford.edu/pubs/dozat2017deep.pdf) | `task_model.py` 借鉴图边评分，使用投影点积的双线性关联头 | Need 条件、主体、前驱和范围是项目任务图适配；没有直接复现 biaffine 依存句法模型 |
 | [Bertsekas：Rollout / MPC](https://www.mit.edu/~dimitrib/Newton%27sMethodforRLMPC.pdf) | B 使用固定有界后续评价首动作，线上执行一步后依据新观测重规划；剩余资源并入状态 | 复用有限前瞻和滚动决策结构；本项目使用近似回归、部分观测与有限后续，不把经典精确值函数结论直接当作质量保证 |
-| [Khuller–Moss–Naor：Budgeted Maximum Coverage](https://doi.org/10.1016/S0020-0190(99)00031-9) | C 以读取需求为收益对象、共享页为容量对象，比较绝对边际价值与容量密度两种构造 | GPU/Host 双预算、同 owner 多租期和带代价目标是本项目适配；保留真实去重目标，不声称复现论文的单预算近似界 |
+| [Khuller–Moss–Naor：Budgeted Maximum Coverage](https://doi.org/10.1016/S0020-0190(99)00031-9) | C 以读取需求为收益对象、共享页为容量对象，比较绝对边际价值与容量密度两种构造 | 单一逻辑保护容量、同 owner 多租期和分层驻留代价是本项目适配；保留真实去重目标，不声称复现论文的近似界 |
 | [REPLUG](https://arxiv.org/abs/2301.12652) | 冻结生成模型指导检索的相关方法依据 | 当前偏好监督使用固定 Qwen 的实际候选回答；不把该适配描述为完整复现 REPLUG 集成生成 |
 | [CacheBlend](https://arxiv.org/abs/2405.16444) | 非前缀 KV 融合的相关工作，当前未实现 | 本阶段先完成精确原生前缀路线；如后续引入，单独评价重算成本与输出影响 |
 | [MT-RAG](https://github.com/IBM/mt-rag-benchmark)、[MultiDoc2Dial](https://github.com/IBM/multidoc2dial) | 公开多轮文档任务和作者评价；项目 P3 使用自己的实际历史 | 固定作者历史与自身生成历史分轨报告 |
@@ -36,7 +36,7 @@
 | 已读信息形成完整结论并进入真实 ANSWER | 先确定最终容量，保留足够回答当前问题的事实及来源证明，归约有限结束 | ANSWER 预算反向分配＋短 ID/共享字段＋Claim DAG＋有限 REDUCE。优先压缩结构重复；不以任意删原文 token 替代完整结论 |
 | 必要桥接继续，低收益读取停止 | 比较继续动作对最终回答的预期增益和新增完整成本，状态包含剩余预算 | 计算价值＋固定有界后续监督＋一步重规划。优先现有轻量回归；充分性是信息与诊断，不能直接等同于停止价值 |
 | 多轮重复计算尽量避免，必要重读尽量便宜 | 区分已知结果复用、来源 KV 复用和重新计算 | 同版本、适用范围、来源及覆盖语义下，先复用正确事实/运算结果，再对必要 READ 使用精确前缀 KV。当前共享提取主要在任务内；跨轮类型化事实视图入口是新增候选，尚未实现，不能把保存历史 QA 当成已具有该能力 |
-| GPU/Host 受限、重访间隔不同且存在并发 | 对完整读取需求估计保留相对 Native 的新增节省，计入其他请求受到的影响 | 条件重访估计＋相对 Native 成本差＋共享页/需求去重＋双预算期限分配。PGDSF 是便宜对照；固定 TTL 与频率排序不能替代净收益目标 |
+| GPU/Host 受限、重访间隔不同且存在并发 | 对完整读取需求估计保留相对 Native 的新增节省，计入其他请求受到的影响 | 条件重访估计＋相对 Native 成本差＋共享页/需求去重＋逻辑容量内的期限分配，Native 管理物理层。PGDSF 是便宜对照；固定 TTL 与频率排序不能替代净收益目标 |
 | 改动改善完整队列，而非少量成功题或某个局部指标 | 分开定位候选不足、提取错误、最终窗口不足和答案使用错误 | 官方全分母质量＋实际 P3＋逐阶段充分性/来源核验＋全部费用及完整响应。复用现有账本和审核入口 |
 
 B 的决策目标可写成 `E[ΔQ(a | 当前状态, 剩余预算)] − λ·E[新增完整成本(a)]`，其中 ΔQ 和费用都相对当前直接 ANSWER，且包含固定有界后续。已付费用只影响剩余资源。所有合法继续动作的预期净收益都不大于零时选择 ANSWER；必须完成的范围覆盖由任务语义决定。经典 rollout 为此提供结构依据，当前预测器与有限后续只近似这个目标。

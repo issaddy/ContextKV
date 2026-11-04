@@ -203,6 +203,11 @@ class StudyEvidenceProvider:
                         self.config.get("reading", {}).get("coverage_mode", "selected_sources"))
             if not reading:
                 coverage = "selected_sources"
+            elif (any(need.scope == "all_supplied_documents" for need in state.needs)
+                    and (supplied_blocks is not None or state.source_scope)):
+                # Exhaustive Needs scan their declared source boundary; the
+                # operation alone never expands a task to the whole corpus.
+                coverage = "all_supplied_documents"
             full_scope_read = reading and coverage == "all_supplied_documents"
             if supplied_blocks is not None:
                 state = replace(state, source_scope=tuple(block.key for block in supplied_blocks))

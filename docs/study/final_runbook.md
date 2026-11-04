@@ -11,7 +11,7 @@
 |---|---|---|
 | 结论预算、共享数值与有限归约 | `bench.reading_mechanisms` | 共享阅读 / `--numeric-need-isolation`；实际 messages、完整来源叶子与阶段账本 |
 | 原生来源前缀机制 | `bench.prefix_read_mechanisms` | 实际 READ epoch、前缀身份与 owner 观察 |
-| 阅读协议审计与会话队列 | `training.reader_audit` 的 `export`、`review`；`training.a_workflow` 的 `audit`、`cohort`、`prepare-labels` | 实际 messages 与完整原文独立核验，无 SFT 输出 |
+| 阅读协议审计与会话队列 | `training.reader_audit` 的 `export`、`review`；`training.a_workflow` 的 `cohort`、`prepare-labels` | 实际 messages 与完整原文独立核验，无 SFT 输出 |
 | P0/P1 规划器 × 阅读协议 | `training.a_workflow compare`、`bench.evidence_policy_comparison` | task_first+隔离数值 / source_first+共享提取；固定实际输入四格与各自真实 P3 |
 | 证据策略真实候选收益 | `training.preference_rollout` | 实际最终回答、官方质量与完整成本；绑定当前 reader |
 | B 动作收益 | `training.plan_gain_rollout`、`training.plan_gain_completion`、`training.collect_plan_gains` | DIRECT/READ/REDUCE/GAP 的真实增量执行、当前完整状态、独立最终答案与成对费用 |
@@ -216,6 +216,7 @@ cohort、reader 与预算确定对照条件，各格分别列出实际启用的 
 联合汇总的 `dataset_protocols` 来自矩阵已有 `split_kind` 与分区指标声明；Markdown 将公开基准、参考历史诊断和构造机制任务分表。每轨原指标、完整题目分母、已评分子集与未知区间同时呈现，混合开发 Q 的登记权重保持不变。
 
 联合 Markdown 对照表直接呈现完整分母质量差与 P95 相对变化（候选/基线−1，负值为降低），并列出候选质量是否不低于基线。相对延迟只在比较身份一致、双方完整交付且全部已评分时提供；质量判断为点估计，资源变化仍读取实际成本账本。
+`final_study_index` 同时输出 B 在 Native/价值 C 下、C 在固定/收益 B 下的直接对照，以及四格交互 `E4−E2−E3＋E1`；共同启用的 B/C 资产须一致。P95 交互使用四格完整队列各自的分位数。
 每格执行前自动记录本机硬件和服务的原生缓存配置，随结果进入比较身份；只在声明的实际测量主机执行此工作流。资源容量、设备数量、GPU 型号/显存/驱动或原生缓存配置不同，以及观测缺失时，不报告可比差值。
 
 每格按自己的 P3 历史执行原 350 题，使用声明的开发指标与权重。未交付回答计入

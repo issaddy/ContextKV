@@ -10,6 +10,7 @@ import argparse
 from collections import Counter, defaultdict
 import glob
 import hashlib
+from itertools import product
 import json
 import math
 from pathlib import Path
@@ -345,14 +346,20 @@ def full_queue_cells(value, path, joint_scope=None):
 
 def full_queue_comparisons(cells):
     comparisons = []
+    references = {"E0_native": (), "B6_native": ("E0_native",),
+        "S3_native": ("E0_native", "B6_native"),
+        "B6_value": ("E0_native", "B6_native"),
+        "S3_value": ("E0_native", "B6_native", "S3_native", "B6_value")}
     for row in cells:
-        baselines = [other for other in cells if other["method"] in {"E0_native", "B6_native"}
-                     and other["method"] != row["method"] and row["method"] != "E0_native"
+        baselines = [other for other in cells if other["method"] in references[row["method"]]
                      and other["concurrency"] == row["concurrency"]]
         for reference in baselines:
             missing_resource_fields = [name for name in ("hardware", "native_cache_config")
                 if any(cell["comparison_identity"]["resource_scope"][name] is None for cell in (row, reference))]
-            same = not missing_resource_fields and row["comparison_identity"] == reference["comparison_identity"]
+            different_assets = [name for name in row["active_assets"].keys() & reference["active_assets"].keys()
+                if row["active_assets"][name]["sha256"] != reference["active_assets"][name]["sha256"]]
+            same = (not missing_resource_fields and not different_assets
+                    and row["comparison_identity"] == reference["comparison_identity"])
             complete_scored = all(cell["full_queue_delivered"]
                 and numeric(cell["queue_quality"])
                 and not any(cell["unscored_answer_task_ids"].values()) for cell in (row, reference))
@@ -363,7 +370,7 @@ def full_queue_comparisons(cells):
                 source_file=row["source_file"], baseline_source_file=reference["source_file"],
                 candidate_generation_dir=row["generation_dir"], baseline_generation_dir=reference["generation_dir"],
                 comparable=same, incompatible_identity_fields=[key for key, value in row["comparison_identity"].items()
-                    if value != reference["comparison_identity"][key]],
+                    if value != reference["comparison_identity"][key]] + ["assets."+name for name in sorted(different_assets)],
                 missing_identity_fields=["resource_scope."+name for name in missing_resource_fields],
                 device_source_identity_differs=row["device_source_identity"] != reference["device_source_identity"],
                 differences={field: row[field]-reference[field] if same and numeric(row[field])
@@ -382,6 +389,43 @@ def full_queue_comparisons(cells):
                        if reference["method"] == "E0_native" else
                        "same frozen A, reader budgets, arrivals and own-P3 queue; different actual histories permitted")))
     return comparisons
+
+
+def full_queue_interactions(cells):
+    """Compute the registered B/C factorial contrast on the complete queue."""
+    methods = ("B6_native", "S3_native", "B6_value", "S3_value")
+    groups = defaultdict(lambda: defaultdict(list))
+    for cell in cells:
+        if cell["method"] in methods:
+            key = (cell["concurrency"], json.dumps(cell["comparison_identity"], sort_keys=True))
+            groups[key][cell["method"]].append(cell)
+    interactions = []
+    for (concurrency, _), group in groups.items():
+        for quartet in product(*(group[method] for method in methods)):
+            e1, e2, e3, e4 = quartet
+            scope = e1["comparison_identity"]["resource_scope"]
+            if any(scope[name] is None for name in ("hardware", "native_cache_config")):
+                continue
+            if (e2["active_assets"]["gain"]["sha256"] != e4["active_assets"]["gain"]["sha256"]
+                    or e3["active_assets"]["value"]["sha256"] != e4["active_assets"]["value"]["sha256"]):
+                continue
+            complete = all(cell["full_queue_delivered"] and numeric(cell["queue_quality"])
+                and not any(cell["unscored_answer_task_ids"].values()) for cell in quartet)
+            contrasts = {}
+            for metric in ("queue_quality", "completion_rate", "p95_complete_ms"):
+                values = [cell[metric] for cell in quartet]
+                known = all(numeric(value) for value in values) and (metric != "p95_complete_ms" or complete)
+                contrasts[metric] = (dict(B_native=values[1]-values[0], C_fixed=values[2]-values[0],
+                    B_value=values[3]-values[2], C_gain=values[3]-values[1],
+                    joint=values[3]-values[0], interaction=values[3]-values[1]-values[2]+values[0])
+                    if known else None)
+            interactions.append(dict(concurrency=concurrency, comparison_identity=e1["comparison_identity"],
+                cells={f"E{index}": dict(method=cell["method"], source_file=cell["source_file"],
+                    generation_dir=cell["generation_dir"]) for index, cell in enumerate(quartet, 1)},
+                contrasts=contrasts, full_queue_delivered_and_scored=complete,
+                formula="interaction = E4 - E2 - E3 + E1",
+                scope="own-P3 full-queue contrasts; P95 contrast uses four queue quantiles, not request-level effects"))
+    return interactions
 
 
 def full_queue_track_tables(cells):
@@ -445,6 +489,16 @@ def markdown(report):
             f"{('是' if quality else '否') if quality is not None else '未知'} |")
     lines += ["", "P95 相对变化为（候选 / 基线 − 1），负值表示降低；仅在身份一致、完整交付且全部质量已评分时报告。"
         "质量不低于基线仅比较现有点估计，不代表统计等质量结论；本表不判定同预算、资源收益或研究目标达成。"]
+    lines += ["", "## B/C 四格贡献与交互", "",
+        "| 并发 | 指标 | B（Native） | B（价值 C） | C（固定 B） | C（收益 B） | 联合 E4−E1 | 交互 |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|"]
+    for row in report["factorial_interactions"]:
+        for metric, effects in row["contrasts"].items():
+            values = [effects[name] if effects is not None else "未知"
+                      for name in ("B_native", "B_value", "C_fixed", "C_gain", "joint", "interaction")]
+            lines.append(f"| {row['concurrency']} | {metric} | " + " | ".join(map(str, values)) + " |")
+    lines += ["", "交互＝E4−E2−E3＋E1；质量为正表示互补，延迟为负表示额外降低。"
+        "P95 使用四格各自完整队列的分位数，仅为队列统计量的算术对照。"]
     lines += full_queue_track_tables(report["capacity"])
     lines += ["", "分轨保留原指标量纲；混合开发 Q 仍采用登记权重，不将构造题增益表述为公开基准增益。"]
     lines += ["", "## 完整响应 SLO", "",
@@ -520,7 +574,8 @@ def main(argv=None):
         artifacts=artifacts, unmatched_artifact_patterns=missing, record_import=record_import,
         record_summaries=summaries, common_task_comparisons=comparisons,
         paired_C=paired_index, retention_dev=retention_validation(args.retention_model, paired),
-        capacity=capacity, capacity_comparisons=capacity_comparisons, cost_ledgers=ledgers)
+        capacity=capacity, capacity_comparisons=capacity_comparisons,
+        factorial_interactions=full_queue_interactions(full_cells), cost_ledgers=ledgers)
     if args.cost_manifest or args.physical:
         command = ["python", "-m", "profiling.study_cost_ledger"]
         for path in args.cost_manifest:

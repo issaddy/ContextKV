@@ -47,12 +47,6 @@ def completed_reduction_record(record, task, basis, results=(), *, frontier=None
     selected = task.operation == "numeric_select"
     if frontier is None:
         frontier = record.result.claims if selected else claim_frontier(basis, record.result.claims)
-    if selected and task.reduction_basis_claim_ids and ":part:0:" in task.step_id:
-        # Only the last selection part carries the complete logical basis.
-        logical_id = task.step_id.rsplit(":part:0:", 1)[0]
-        frontier = tuple(claim for result in results if result.step_id.startswith(logical_id+":part:0:")
-                         for claim in result.claims) + tuple(frontier)
-        task = replace(task, step_id=logical_id)
     return replace(record, result=replace(record.result, reduction=ReductionState(
         task.step_id, task.need_ids, task.operation, reduction_basis_ids(task, basis, results),
         tuple(claim.claim_id for claim in frontier), mode or ("selected" if selected else "merged"))))
@@ -106,10 +100,84 @@ def reduction_partitions(plan, task, claims, snapshot, template):
         child = replace(task, step_id=f"{task.step_id}:part:0:{index}",
             input_claim_ids=tuple(claim.claim_id for claim in pack),
             reduction_basis_claim_ids=tuple(claim.claim_id for claim in claims)
-                if task.operation == "numeric_select" and index == len(packs)-1 else (),
+                if task.operation != "numeric_select" or index == len(packs)-1 else (),
             retained_conclusion_tokens=targets[index])
         parts.append((child, pack))
     return tuple(parts)
+
+
+def reduction_schedule(plan, task, basis, results, snapshot, template):
+    """Return one finite model call, or the complete logical frontier.
+
+    Every merge consumes at least two whole bundles. N initial packs therefore
+    permit at most N-1 merges, including when a caller reobserves after each call.
+    """
+    from .context_budget import merge_conclusion_tokens
+
+    observed = {result.step_id: result for result in results}
+    parts = reduction_partitions(plan, task, basis, snapshot, template)
+    bundles = []
+    for child, pack in parts:
+        if child.step_id not in observed:
+            return (child, pack), (), None
+        result = observed[child.step_id]
+        frontier = (result.claims if task.operation == "numeric_select"
+                    else claim_frontier(pack, result.claims))
+        bundles.append((frontier, (child.step_id,), child.retained_conclusion_tokens))
+    if task.operation == "numeric_select":
+        return None, tuple(claim for bundle in bundles for claim in bundle[0]), "selected"
+    level = 1
+    while len(bundles) > 1:
+        groups, group = [], []
+        for bundle in bundles:
+            child = replace(task, step_id=f"{task.step_id}:merge:{level}:{len(groups)}",
+                            reduction_basis_claim_ids=())
+            trial = tuple(claim for item in (*group, bundle) for claim in item[0])
+            size = len(template.render(step_messages(plan, child, (), trial, snapshot)).input_ids)
+            if group and size > task.input_budget:
+                groups.append(tuple(group))
+                group = []
+            group.append(bundle)
+        if group:
+            groups.append(tuple(group))
+        if len(groups) == len(bundles):
+            break
+        merged = []
+        for index, group in enumerate(groups):
+            if len(group) == 1:
+                merged.append(group[0])
+                continue
+            inputs = tuple(claim for item in group for claim in item[0])
+            child = replace(task,
+                step_id=task.step_id if len(groups) == 1 else f"{task.step_id}:merge:{level}:{index}",
+                input_claim_ids=tuple(claim.claim_id for claim in inputs),
+                predecessor_step_ids=tuple(identity for item in group for identity in item[1]),
+                reduction_basis_claim_ids=tuple(claim.claim_id for claim in basis),
+                retained_conclusion_tokens=merge_conclusion_tokens(item[2] for item in group))
+            if child.step_id not in observed:
+                return (child, inputs), (), None
+            result = observed[child.step_id]
+            merged.append((claim_frontier(inputs, result.claims), (child.step_id,),
+                           child.retained_conclusion_tokens))
+        bundles = merged
+        level += 1
+    return None, tuple(claim for bundle in bundles for claim in bundle[0]), (
+        "merged" if len(bundles) == 1 else "forest")
+
+
+def logical_reduction_task(plan, task, basis):
+    """Recover the existing logical reduction from its finite call identity."""
+    identity = task.step_id.split(":part:0:", 1)[0].split(":merge:", 1)[0]
+    shares = task.retained_conclusion_tokens
+    if task.operation == "numeric_select":
+        shares = ()
+    elif plan.answer_allocation is not None:
+        shares = tuple((need, tokens) for need, tokens in plan.answer_allocation.need_tokens
+                       if need in task.need_ids)
+    return replace(task, step_id=identity,
+        input_claim_ids=tuple(claim.claim_id for claim in basis),
+        predecessor_step_ids=tuple(dict.fromkeys(claim.claim_id.rsplit(":claim:", 1)[0] for claim in basis)),
+        retained_conclusion_tokens=shares)
 
 
 def auxiliary_tokens(usage):
@@ -389,8 +457,16 @@ class ReadingExecutor:
                 by_id.update((claim.claim_id, claim) for claim in claims)
                 basis = (tuple(by_id[identity] for identity in task.reduction_basis_claim_ids)
                          if task.reduction_basis_claim_ids else claims)
-                frontier = result.claims if task.operation == "numeric_select" else claim_frontier(claims, result.claims)
-                record = completed_reduction_record(record, task, basis, results, frontier=frontier)
+                logical = logical_reduction_task(plan, task, basis)
+                pending, frontier, mode = reduction_schedule(
+                    plan, logical, basis, (*results, result), snapshot, self.template)
+                if pending is None:
+                    record = completed_reduction_record(record, logical, basis, results,
+                                                        frontier=frontier, mode=mode)
+                else:
+                    frontier = (result.claims if task.operation == "numeric_select"
+                                else claim_frontier(claims, result.claims))
+                    record = completed_reduction_record(record, task, claims, results, frontier=frontier)
             self.store.save_execution_step(record, "COMPLETE")
             record = await self._observe_prefix(plan, task, units, rendered, record)
             retire_started = time.monotonic()
@@ -495,67 +571,13 @@ class ReadingExecutor:
             self.store.save_execution_step(record, "COMPLETE")
 
         async def run_reduction(task, selected_claims):
-            """Reduce source partitions, then merge whole result bundles.
-
-            A merge consumes at least two bundles. N initial calls therefore
-            admit at most N-1 merge calls; unmerged roots remain in the answer.
-            """
-            basis = selected_claims
-
-            def size(current_task, claims):
-                return len(self.template.render(step_messages(
-                    plan, current_task, (), claims, snapshot)).input_ids)
-
-            parts = reduction_partitions(plan, task, basis, snapshot, self.template)
-            if len(parts) == 1 and parts[0][0].step_id == task.step_id:
-                result = await run_model(task, (), basis)
-                frontier = (result.claims if task.operation == "numeric_select"
-                            else claim_frontier(basis, result.claims))
-                complete_reduction(task, basis, frontier, "selected" if task.operation == "numeric_select" else "merged")
-                return
-            from .context_budget import merge_conclusion_tokens
-            bundles = []
-            for child, pack in parts:
-                result = await run_model(child, (), pack)
-                frontier = (result.claims if task.operation == "numeric_select"
-                            else claim_frontier(pack, result.claims))
-                bundles.append((frontier, (result.step_id,), child.retained_conclusion_tokens))
-            if task.operation == "numeric_select":
-                return
-            level = 1
-            while len(bundles) > 1:
-                groups, group = [], []
-                for bundle in bundles:
-                    child = replace(task, step_id=f"{task.step_id}:merge:{level}:{len(groups)}",
-                                    reduction_basis_claim_ids=())
-                    trial = tuple(claim for item in (*group, bundle) for claim in item[0])
-                    if group and size(child, trial) > task.input_budget:
-                        groups.append(tuple(group))
-                        group = []
-                    group.append(bundle)
-                if group:
-                    groups.append(tuple(group))
-                if len(groups) == len(bundles):
-                    break
-                merged = []
-                for index, group in enumerate(groups):
-                    if len(group) == 1:
-                        merged.append(group[0])
-                        continue
-                    claims = tuple(claim for item in group for claim in item[0])
-                    predecessors = tuple(identity for item in group for identity in item[1])
-                    child = replace(task,
-                        step_id=task.step_id if len(groups) == 1 else f"{task.step_id}:merge:{level}:{index}",
-                        predecessor_step_ids=predecessors,
-                        reduction_basis_claim_ids=task.reduction_basis_claim_ids if len(groups) == 1 else (),
-                        retained_conclusion_tokens=merge_conclusion_tokens(item[2] for item in group))
-                    result = await run_model(child, (), claims)
-                    merged.append((claim_frontier(claims, result.claims), (result.step_id,),
-                                   child.retained_conclusion_tokens))
-                bundles = merged
-                level += 1
-            frontier = tuple(claim for claims, _, _ in bundles for claim in claims)
-            complete_reduction(task, basis, frontier, "merged" if len(bundles) == 1 else "forest")
+            while True:
+                pending, _, _ = reduction_schedule(
+                    plan, task, selected_claims, results, snapshot, self.template)
+                if pending is None:
+                    return
+                child, inputs = pending
+                await run_model(child, (), inputs)
 
         async def observe_current():
             if self.observe_state is not None:

@@ -154,9 +154,12 @@ def test_full_scope_provider_builds_one_scan_without_support_or_set_search():
 
     template = ByteTemplate()
     blocks = tuple(make_evidence(f'Record R{i} weighs {i+1} kg.', f'ledger-{i}') for i in range(2))
-    state = TaskState('task', 'Count every record.', needs=(Need('n', operation='count',
-        scope='all_supplied_documents'),), current_turn_id=1)
-    for supplied in (True, False):
+    state = TaskState('task', 'Count every record and describe the ledger.', needs=(
+        Need('n', operation='count', scope='all_supplied_documents'),
+        Need('description', operation='lookup', scope='selected_sources')),
+        source_scope=tuple(block.key for block in blocks), current_turn_id=1)
+    for coverage, supplied in ((coverage, supplied)
+            for coverage in ('all_supplied_documents', 'selected_sources') for supplied in (True, False)):
         corpus = SimpleNamespace(blocks=blocks, source_metadata={})
         interpreter = SimpleNamespace(model=SimpleNamespace(), last_metrics={'task_model_ms': 0},
                                       interpret=lambda turn, memory: state)
@@ -166,15 +169,16 @@ def test_full_scope_provider_builds_one_scan_without_support_or_set_search():
             retrieval_state=lambda snapshot: RetrievalState(0, source_index=directory))
         support = SimpleNamespace(usage={}, predict=Mock(side_effect=AssertionError('scan needs no support search')))
         provider = StudyEvidenceProvider({'study': {'strategy': 'B7'},
-            'reading': {'coverage_mode': 'all_supplied_documents', 'layout': 'source_first',
+            'reading': {'coverage_mode': coverage, 'layout': 'source_first',
                         'output_tokens': 4096, 'output_tokens_per_fact': None}},
             template, serving, directory, support_backend=support)
         provider._rank_supplied = Mock(side_effect=AssertionError('scan needs no relevance ranking'))
         selection = provider._retrieve(SessionSnapshot('session'), state.raw_question, 'request',
-            supplied_blocks=blocks if supplied else None)
+            supplied_blocks=blocks if supplied else None, supplied_coverage_scope=coverage)
         assert len(selection.context_plans) == 1
         reading = selection.context_plans[0]
         assert reading.coverage_scope == 'all_supplied_documents'
+        assert reading.task_state.needs == state.needs
         assert set(reading.task_state.source_scope) == {block.key for block in blocks}
         assert set(reading.coverage_units) == {unit.unit_id for unit in reading.selected_set.selected_units}
         assert len(reading.steps) == 2

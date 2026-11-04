@@ -134,12 +134,13 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
         add("read_once", (bind_read_parents(ready[0], frozen),))
     reduction = observed_reduction_task(replace(frozen, plan=base))
     if reduction is not None:
-        if reduction.operation == "numeric_select":
-            from .execution import reduction_partitions
+        if reduction.operation not in {"union", "count", "sum", "group"}:
+            from .execution import reduction_schedule
             by_id = {claim.claim_id: claim for claim in frozen.claims}
-            parts = reduction_partitions(base, reduction,
-                tuple(by_id[identity] for identity in reduction.input_claim_ids), snapshot, template)
-            reduction = next(task for task, _ in parts if task.step_id not in completed)
+            pending, _, _ = reduction_schedule(base, reduction,
+                tuple(by_id[identity] for identity in reduction.input_claim_ids),
+                frozen.results, snapshot, template)
+            reduction, _ = pending
         add("reduce_once", (reduction,))
     if gap_request is not None:
         if not gap_request.open_needs or not set(gap_request.open_needs) <= set(frozen.open_needs):
