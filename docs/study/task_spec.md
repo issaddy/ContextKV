@@ -147,6 +147,13 @@ A 的规范来源前缀、共享提取只有在论文分别主张贡献时才各
 已核对 PR #3 最新 head 为 `3a9b219`，并在任务分支快进接续；Need 条件关联和旧新 lease 共同竞争已实现，不再列为待改。
 真实调用链为 `bench.study.run_dataset` → `StudyEvidenceProvider.retrieve/retrieve_supplied` → `Controller.serve_turn` → `ReadingExecutor` → `SessionStore.commit_turn_and_outbox`；下一轮从该方案实际提交的 `raw_history` 读取历史。A 的来源目录与支持选择、B 的逐步观察与 Claim DAG、C 的 READ epoch 后独立 owner 共用实际输入和账本。
 
-本轮首先改变来源窗口与 source-first 序列化：现有 `_split` 行级单元虽有稳定坐标，`build_read_plan` 仍按任务剩余容量重新拼包/切片；数值系统提示又先于正文。采用单一 512-token、最多 8 个非空来源行的窗口档位，优先保留段落/表格行边界；超长行按实际 tokenizer 容量切分。该档位在来源目录建立时确定，READ 使用完整窗口及必要原文依赖，不按当前问题重新切分。所有操作指令和运行别名后移。保留依据是跨问题/操作的完整因果前缀相同、来源坐标逐字对应、共享 count/sum 与多跳真实阅读有效；若调用开销抵消复用，再依据实测调整这一档位。
+本轮首先改变来源窗口与 source-first 序列化：现有 `_split` 行级单元虽有稳定坐标，`build_read_plan` 仍按任务剩余容量重新拼包/切片；数值系统提示又先于正文。采用单一 2048-token、最多 8 个非空来源行的窗口档位，优先保留段落/表格行边界；超长行按实际 tokenizer 容量切分。该档位在来源目录建立时确定，READ 使用完整窗口及必要原文依赖，不按当前问题重新切分。所有操作指令和运行别名后移。保留依据是跨问题/操作的完整因果前缀相同、来源坐标逐字对应、共享 count/sum 与多跳真实阅读有效；若调用开销抵消复用，再依据实测调整这一档位。
 
 已核对固定 vendor 的 `UnifiedRadixCache.match_prefix` 与 `UnifiedTreeCore.match_prefix`：引擎沿 page-aligned token 路径匹配，HiCache 分别报告可恢复与设备可用前缀。本轮继续使用现有原生路径，不把任意原文块拼成 KV。原 350 题阶段质量改善与 reader token 降幅不能证明冻结联合性能；最终按第七节 c4 E0—E4、c1 E1/E4 测量完整响应及物理资源。
+
+首轮原生检查中，512-token 长文计划超过既有 64 步额度，尚未执行长文生成；已付 pair 调用保存在 `canonical-a/reading`。据此将唯一窗口档位改为 2048 token，继续保留 8 行边界约束，仅重验受影响的长文与未执行多跳。真实 Qwen tokenizer 的 count/sum/infer 三类窗口前缀已逐一相同。旧候选开发 36/40 状态的候选上限为 0.89514，按保存预测选择的遗憾为 0.31625；该诊断不是部署 P0/P1 遗憾，也不直接决定更换 A。
+
+
+旧长文逐步账本已定位 selector 的实际错误：002 的 count 选择35条而 sum 漏掉已有的第35条；010 的 count 漏掉最后两条，sum 有完整43条；012 的 sum 漏掉已有第29条。对应 CPU 结果与选择集合一致，ANSWER 照用了错误结论。004/005/007 则把车辆注册美元、DMV 收入及社保 credit 等背景事实选进了明确要求 Inventory rows 的运算；015 的 READ 漏了原摘录中明确的 credits 单位。006 的最终 count42/sum903 与原始精确 gold 一致，评分提取却给 consistent=false，需独立核对评分噪声，不按错误 ANSWER 修改生成协议。
+
+本轮下一项改动限定 numeric_select：稀疏父 ID 列表改为每个父事实必填的布尔选择表，显式判断所有事实的群体与所求量，避免列表漏项；不同 Need 仍各自判断，不能强行令 count/sum 集合相同。只用已保存错误状态重放选择→CPU 来判断保留，背景事实不得混入。缺单位仍回到提取环节处理，CPU 不忽略或补造量纲。

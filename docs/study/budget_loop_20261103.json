@@ -1,8 +1,8 @@
 {
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
-  "gpu_status": "Previously running B/C and P1 dataset batches finished; all task model services stopped; shared observer completed; subsequent experiments held by user direction",
-  "evidence_scope": "Full350 pre-freeze P0 candidate Q=0.6575398416096789 versus registered Q=0.44509019347880296 under unchanged request limits. A frozen; current B and C assets completed. Final frozen-A joint quality/P95 acceptance not run.",
+  "gpu_status": "Active task resumed from PR3; canonical-A minimum native verification uses only GPU2 on hangu7. Prior B/C/P1 batches remain completed; no old follow-on queue restarted.",
+  "evidence_scope": "Historical full350 pre-freeze P0 Q=0.6575398416096789 versus registered0.44509019347880296. Current canonical-A continuation is not frozen; B bounded continuation and C independent calibration/joint acceptance remain pending.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
     "layout": "source_first",
@@ -790,5 +790,61 @@
       "correct": true,
       "scope": "local replay of frozen earlier READs; no new final ANSWER"
     }
+  },
+  "canonical_a_20261104": {
+    "base_commit": "3a9b219",
+    "implementation_commit": "f043aa0",
+    "window_tokens": 2048,
+    "max_nonempty_lines": 8,
+    "status": "source prefix verified; selector omission repair under validation; A not frozen",
+    "tokenizer_prefix": "runs/study/budget-loop-20261103/canonical-a/tokenizer-prefix.json",
+    "prefix_native_probe": {
+      "artifact": "runs/study/budget-loop-20261103/canonical-a/prefix/manifest.json",
+      "qualified": true,
+      "same_source_revisit_gpu_hit_tokens": 640,
+      "source_prefix_tokens": 271,
+      "native_and_ttl60_hits_equal": true,
+      "scope": "semantic reuse, not positive C intervention benefit"
+    },
+    "reading": {
+      "artifact": "runs/study/budget-loop-20261103/canonical-a/reading-2048",
+      "long": {
+        "read_calls": 48,
+        "reduce_calls": 4,
+        "input_tokens": 177812,
+        "output_tokens": 6597,
+        "complete_ms": 68314.89894539118,
+        "count": 36,
+        "mass_kg": 666,
+        "answer_input_tokens": 5196,
+        "answer_output_allocation": 1024
+      },
+      "multihop": {
+        "answer_year": 1997,
+        "input_tokens": 5786,
+        "output_tokens": 1025,
+        "complete_ms": 8388.298129662871
+      }
+    },
+    "discarded_window_512": {
+      "artifact": "runs/study/budget-loop-20261103/canonical-a/reading",
+      "reason": "long planning exceeds existing64step budget; pair generated and its paid cost retained"
+    },
+    "candidate_diagnosis": {
+      "artifact": "runs/study/budget-loop-20261103/canonical-a/candidate-diagnosis.json",
+      "train_declared": 200,
+      "train_observed": 181,
+      "train_oracle_available": 0.9127624309392266,
+      "dev_declared": 40,
+      "dev_observed": 36,
+      "dev_oracle_available": 0.8951388888888889,
+      "dev_prediction_regret": 0.31625,
+      "scope": "saved candidate predictions; not deployed P0/P1 regret"
+    },
+    "limitations": [
+      "2048-window long input exceeds historical dynamic-window input; no net resource improvement claimed",
+      "selector7 needs saved-error native replay",
+      "case006 consistent=false extraction conflicts with explicit matching final values; scoring check pending"
+    ]
   }
 }

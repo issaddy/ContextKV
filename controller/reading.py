@@ -15,7 +15,7 @@ from .templates import ByteTemplate
 
 READ_PROTOCOL_VERSION = 4
 SHARED_NUMERIC_PROTOCOL_VERSION = 5
-NUMERIC_SELECT_PROTOCOL_VERSION = 6
+NUMERIC_SELECT_PROTOCOL_VERSION = 7
 CLAIM_WIRE_FIELDS = {"need_id": "n", "text": "t", "entity": "e", "relation": "r",
     "value": "v", "unit": "u", "conditions": "c", "span_ids": "s",
     "parent_claim_ids": "p", "followups": "f"}
@@ -95,13 +95,19 @@ REDUCE_SYSTEM = (
 NUMERIC_SELECT_SYSTEM = (
     "Select the parent facts that establish each numeric Need under the question and active conditions. "
     "Use the original excerpts to check population membership and the requested quantity. "
+    "When the question names explicit rows or a table, require the literal requested row label "
+    "or matching table heading in the cited excerpt; identifiers in unrelated background prose "
+    "do not establish that population. "
     "Exclude background rows, even when they contain an identifier or number. Evaluate each Need "
     "separately. When the requested amounts refer to the counted population, both views use that "
     "same eligibility rule: the sum may omit missing quantities but cannot add unrelated entities. "
     "A sum parent must state the requested property in a compatible measurement unit. "
-    "Return format_version 6 JSON with one parent-alias array per Need in views. "
-    "Include every qualifying parent once per applicable view, or an empty array when none qualifies. "
-    "Return only aliases. The controller preserves the original facts and computes count and sum."
+    "Return format_version 7 JSON with one object per Need in views. Each object must explicitly "
+    "decide every supplied parent alias: true when it qualifies for that Need, false otherwise. "
+    "Inspect every parent through the final parent; do not stop at an earlier qualifying row. "
+    "Do not infer that count and sum Needs share conditions or populations: evaluate their supplied "
+    "scopes independently. A missing requested quantity can qualify for count but not sum. "
+    "The controller preserves the original facts and computes count and sum."
 )
 SUMMARY_READ_SYSTEM = (
     "Summarize the supplied document window for the question. Retain the main information and "
@@ -283,8 +289,12 @@ def shared_numeric_schema(task, schema, units, claims, numeric_identity):
 def output_schema(task, units=(), claims=(), *, reading_mode="typed_reduce", numeric_identity="names"):
     if task.operation == "numeric_select":
         needs, _, _ = numeric_aliases(task, (), claims)
-        views = {alias: _string_array(tuple(f"p{index}" for index, claim in enumerate(claims)
-                                           if claim.serves(need_id))) for alias, need_id in needs.items()}
+        views = {}
+        for alias, need_id in needs.items():
+            decisions = {f"p{index}": {"type": "boolean", **({} if claim.serves(need_id)
+                else {"const": False})} for index, claim in enumerate(claims)}
+            views[alias] = {"type": "object", "additionalProperties": False,
+                           "properties": decisions, "required": list(decisions)}
         return {"type": "object", "additionalProperties": False,
                 "properties": {"format_version": {"type": "integer", "const": NUMERIC_SELECT_PROTOCOL_VERSION},
                     "views": {"type": "object", "additionalProperties": False,
@@ -872,13 +882,25 @@ def advance_read_plan(plan, results, budget=None):
 def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_tokens=0, output_tokens=0):
     data = json.loads(text)
     wire_version = data.get("format_version", 1)
-    if wire_version == NUMERIC_SELECT_PROTOCOL_VERSION:
+    # Protocol 6 arrays are retained only for frozen historical-DAG replay;
+    # live selection schemas require exhaustive protocol 7 boolean decisions.
+    if wire_version in {6, NUMERIC_SELECT_PROTOCOL_VERSION}:
         needs, _, parents = numeric_aliases(task, (), claims)
         by_id = {claim.claim_id: claim for claim in claims}
         selected = []
         for alias, need_id in needs.items():
-            for parent_alias in dict.fromkeys(data["views"][alias]):
+            view = data["views"][alias]
+            if wire_version == NUMERIC_SELECT_PROTOCOL_VERSION:
+                if not isinstance(view, dict) or set(view) != set(parents) or any(
+                        type(decision) is not bool for decision in view.values()):
+                    raise ValueError("numeric selection requires a boolean decision for every parent")
+                chosen = [identity for identity in parents if view[identity]]
+            else:
+                chosen = tuple(dict.fromkeys(view))
+            for parent_alias in chosen:
                 parent = by_id[parents[parent_alias]]
+                if not parent.serves(need_id):
+                    raise ValueError("numeric selection parent does not serve the Need")
                 selected.append(replace(parent, claim_id=f"{task.step_id}:claim:{len(selected)}",
                     need_id=need_id, kind="derived", operation="numeric_select",
                     parent_claim_ids=(parent.claim_id,), shared_need_ids=()))

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-SOURCE_WINDOW_TOKENS = 512
+SOURCE_WINDOW_TOKENS = 2048
 SOURCE_WINDOW_LINES = 8
 
 

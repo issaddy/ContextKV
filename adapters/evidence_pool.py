@@ -78,8 +78,27 @@ class SourceDirectory:
     def _split(self, block):
         metadata = self.corpus_index.source_metadata.get(block.key, {})
         base = block.span[0] if block.span else 0
+        tables = extract_table_relations(block.text, mode="explicit")
+        # Shared table context must not be grouped with data: otherwise a data
+        # window becomes another data window's header dependency and is excluded
+        # from extraction-output reservation as though it contained only context.
+        boundaries = {0, len(block.text)}
+        for table in tables:
+            anchors = (*table.headers, *table.source_notes,
+                *((table.caption,) if table.caption is not None else ()),
+                *(anchor for row in table.relations for anchor in (*row.parent_path, *row.notes)))
+            for anchor in anchors:
+                left = block.text.rfind("\n", 0, anchor.start) + 1
+                newline = block.text.find("\n", anchor.end)
+                right = len(block.text) if newline < 0 else newline + 1
+                boundaries.update((left, right))
+        ordered = sorted(boundaries)
+        windows = tuple((start+left, start+right)
+            for start, end in zip(ordered, ordered[1:])
+            for left, right in source_window_spans(block.text[start:end], self.tokenizer,
+                                                   tokens=self.profile.unit_tokens))
         units = []
-        for left, right in source_window_spans(block.text, self.tokenizer, tokens=self.profile.unit_tokens):
+        for left, right in windows:
             text = block.text[left:right]
             unit_id = unit_identity(block.key, base+left, base+right)
             spans = (SourceSpan(f"span:{unit_id}", block.key, base+left, base+right),)
@@ -91,7 +110,6 @@ class SourceDirectory:
                 valid_from=metadata.get("valid_from"), valid_to=metadata.get("valid_to"),
                 published_at=metadata.get("published_at"), original_passage_ids=(block.key.passage_id,),
                 version_order=tuple(metadata.get("version_order") or ()), current=metadata.get("current")))
-        tables = extract_table_relations(block.text, mode="explicit")
         for table in tables:
             table_id = f"{block.key.document_id}:{block.key.passage_id}:{block.key.version}:table:{base+table.span.start}"
             for row in table.relations:

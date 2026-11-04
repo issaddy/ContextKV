@@ -53,12 +53,13 @@ class NumericEngine(MockEngine):
         self.output, self.reads, self.selections = output, 0, 0
 
     async def generate(self, *, response_schema=None, **kwargs):
-        if response_schema["properties"]["format_version"]["const"] == 6:
+        if response_schema["properties"]["format_version"]["const"] == 7:
             self.selections += 1
             # Each view keeps its eligible source facts, including missing/zero mass.
             views = response_schema["properties"]["views"]["properties"]
-            self.response_text = json.dumps({"format_version": 6,
-                "views": {alias: value["items"]["enum"] for alias, value in views.items()}})
+            self.response_text = json.dumps({"format_version": 7,
+                "views": {alias: {parent: decision.get("const", True)
+                    for parent, decision in value["properties"].items()} for alias, value in views.items()}})
         else:
             self.reads += 1
             self.response_text = json.dumps(self.output)
@@ -220,3 +221,32 @@ def test_shared_read_measures_less_actual_prompt_and_output_than_isolation():
     assert stable_prefix_messages(shared, shared.steps[0], shared.selected_set.selected_units) == \
         stable_prefix_messages(shared, renamed, shared.selected_set.selected_units)
     assert namespace_plan(shared).steps[0].shared_numeric_scopes == shared.steps[0].shared_numeric_scopes
+
+
+def test_numeric_selection_requires_last_parent_decision_and_preserves_rejected_background():
+    from controller.reading import output_schema
+
+    plan = numeric_plan((material('Inventory-3-035: 35 credits. Registration costs 24 credits.'),))
+    task = replace(plan.steps[0], step_id='select', kind='REDUCE', operation='numeric_select')
+    claims = (
+        EvidenceClaim('background', 'shipment-count', 'extract',
+            text='Registration costs 24 credits.', entity='Registration', value='24', unit='credits',
+            shared_need_ids=('shipment-mass',)),
+        EvidenceClaim('last-valid', 'shipment-count', 'extract',
+            text='Inventory-3-035: 35 credits.', entity='Inventory-3-035', value='35', unit='credits',
+            shared_need_ids=('shipment-mass',)),
+    )
+    schema = output_schema(task, claims=claims)
+    assert schema['properties']['format_version']['const'] == 7
+    for view in schema['properties']['views']['properties'].values():
+        assert view['required'] == ['p0', 'p1']
+    output = {'format_version': 7,
+              'views': {'n0': {'p0': False, 'p1': True}, 'n1': {'p0': False, 'p1': True}}}
+    selected = parse_read_result(task, json.dumps(output), claims=claims)
+    assert [claim.parent_claim_ids for claim in selected.claims] == [('last-valid',), ('last-valid',)]
+    assert all(claim.text == claims[1].text for claim in selected.claims)
+    del output['views']['n1']['p1']
+    with pytest.raises(ValueError, match='every parent'):
+        parse_read_result(task, json.dumps(output), claims=claims)
+    historical = {'format_version': 6, 'views': {'n0': ['p1'], 'n1': ['p1']}}
+    assert parse_read_result(task, json.dumps(historical), claims=claims).claims == selected.claims

@@ -81,7 +81,8 @@ async def read_proofs(service, plan, steps):
         if step.task.kind != "READ":
             continue
         _, step, _ = service.store.execution_step(step.attempt_id, step.step_id)
-        units = tuple(unit for unit in plan.selected_set.selected_units if unit.unit_id in step.task.input_unit_ids)
+        by_id = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+        units = tuple(by_id[identity] for identity in step.task.input_unit_ids)
         rendered = service.template.render(step.input_messages)
         prefix = stable_prefix_input_ids(service.template, plan, step.task, units, rendered)
         source_payload, _ = stable_source_payload(units)

@@ -111,3 +111,32 @@ def test_canonical_windows_keep_rows_coordinates_and_prefix_across_task_budgets(
         assert first[:2] == second[:2]
         prefix = stable_prefix_input_ids(template, left, a, window, template.render(first))
         assert prefix == template.render(second).input_ids[:len(prefix)]
+
+
+def test_canonical_table_windows_keep_shared_context_out_of_data_dependencies():
+    from types import SimpleNamespace
+    from adapters.evidence_pool import SourceDirectory
+
+    text = ('Table 1: Mass\n| Record | Mass (kg) |\n| --- | --- |\n'
+            + ''.join(f'| R{i} | {i} |\n' for i in range(12))
+            + 'Note: Approved records only.\n')
+    block = replace(make_evidence(text, 'explicit-table', version='v2'),
+                    span=(100, 100+len(text)))
+    directory = SourceDirectory(SimpleNamespace(blocks=(block,), source_metadata={}),
+                                None, ByteTemplate().tokenizer)
+    units = directory.full_scope((block.key,)).units
+    assert ''.join(unit.text for unit in units) == text
+    data = tuple(unit for unit in units if any(f'| R{i} |' in unit.text for i in range(12)))
+    assert len(data) == 2
+    data_ids = {unit.unit_id for unit in data}
+    lookup = {unit.unit_id: unit for unit in units}
+    for unit in units:
+        span = unit.source_spans[0]
+        assert span.source_key == block.key
+        assert text[span.start-100:span.end-100] == unit.text
+    for unit in data:
+        assert not data_ids.intersection(unit.dependencies)
+        context = ''.join(lookup[identity].text for identity in unit.dependencies)
+        assert 'Table 1: Mass' in context and 'Mass (kg)' in context
+        assert 'Note: Approved records only.' in context
+        assert unit.table_id is not None
