@@ -227,10 +227,13 @@ def _completed_steps(plan, state):
                old_units[identity].text != new_units[identity].text for identity in task.input_unit_ids):
             continue
         completed.add(task.step_id)
-    predecessors = {step.task.step_id: set(step.task.predecessor_step_ids) for step in plan.steps}
+    reduction_owners = {result.reduction.step_id: result.step_id for result in state.results
+                        if result.reduction is not None}
+    predecessors = {step.task.step_id: {reduction_owners.get(identity, identity)
+                                      for identity in step.task.predecessor_step_ids} for step in plan.steps}
     while any(not predecessors[identity] <= completed for identity in completed):
         completed = {identity for identity in completed if predecessors[identity] <= completed}
-    return completed
+    return completed | {logical for logical, owner in reduction_owners.items() if owner in completed}
 
 
 def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=None, paid_cost: CompleteCost | None = None):
@@ -467,9 +470,9 @@ class PlanPolicy:
             (limits.max_host_peak_gib, cost.host_peak_gib, "host_capacity_budget"))
         return next((reason for limit, value, reason in checks if limit is not None and value > limit), None)
 
-    def choose_observed_actions(self, plans, state, native, reusable_prefixes):
+    def choose_observed_actions(self, plans, state, native, reusable_prefixes, *, read_control=None):
         from .action_policy import choose_observed_action
-        return choose_observed_action(self, plans, state, native, reusable_prefixes)
+        return choose_observed_action(self, plans, state, native, reusable_prefixes, read_control=read_control)
 
     def choose(self, plans, state: ReadingOutcome, native: NativePlanningState, reusable_prefixes, *,
                mandatory_coverage=False):

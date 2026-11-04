@@ -77,7 +77,8 @@ def configure(args, root):
                               "cost_artifact": native["base_artifact"]}}})
     methods.sort(key=lambda method: method.get("comparison") != "actual_reader_bound_plan_gain")
     matrix = merge_config(matrix, {"methods": methods, "selection": {
-        "include_ablations": False, "test_comparators": args.baselines}})
+        "include_ablations": False, "baseline": args.baselines[0],
+        "test_comparators": args.baselines}})
     matrix["resources"]["gpu_devices"] = settings["gpu_devices"]
     matrix["resources"]["process_ids"] = settings["process_ids"]
     config_path = root/"study.yaml"

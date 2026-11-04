@@ -48,8 +48,7 @@ async def reallocate(old_curve, new_curve, *, old_pages=("old",), new_pages=("ne
         prefix_accesses=lambda owner: ())
     callback.runtime = SimpleNamespace(status=status)
     callback.owners = SimpleNamespace(release=release, observe=observe)
-    callback.settings = dict(gpu_budget_tokens=capacity, host_budget_tokens=0,
-                             lambda_gpu=0, lambda_host=0)
+    callback.settings = dict(protection_budget_tokens=capacity, lambda_gpu=0, lambda_host=0)
     callback.model = SimpleNamespace(feature_bucket=lambda features: features)
     callback.model_digest = "paired-model"
     callback._features = lambda plan, sources, accesses, now: {"owner": sources[0]["owner"]}
@@ -75,7 +74,7 @@ class RetentionReallocationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [("retain", "new", 60)])
         self.assertEqual(result["existing_retention_owners"], ["old"])
         choice = result["retention_choices"][0]
-        self.assertEqual(choice["marginal_gpu_tokens"], 1)
+        self.assertEqual(choice["marginal_protected_tokens"], 1)
         self.assertEqual(choice["expected_saved_ms"], 90)
 
     async def test_same_read_replaces_short_prefix_without_duplicate_benefit(self):

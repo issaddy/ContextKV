@@ -163,6 +163,18 @@ async def test_bounded_infer_bridge_reads_terminal_once_and_empty_gap_stops(tmp_
         labelled = completion_record(before, run)
         assert 0 <= labelled["read_source_char_fraction"] <= 1
         assert labelled["read_original_characters"] == labelled["required_original_characters"]
+        if existing_terminal:
+            from controller.reading import unresolved_needs
+            from controller.serialization import decode
+            first = decode(StepRecord, run["steps"][0])
+            unrelated = replace(first.result.claims[0], claim_id="unrelated:claim:0", need_id="other")
+            state = ReadingOutcome(base, results=(first.result,), steps=(first,),
+                claims=(*first.result.claims, unrelated), open_needs=unresolved_needs((first.result,)))
+            online, _ = build_observed_action_plans(state, snapshot, service.template,
+                reader_checkpoint=old["reader_checkpoint"])
+            next_read = next(item for item in online if item.semantic_kind == "read_once").context_plan.steps[-1]
+            assert next_read.input_claim_ids == tuple(run["steps"][-1]["task"]["input_claim_ids"])
+            assert unrelated.claim_id not in next_read.input_claim_ids
     assert run["continuation_protocol"] == BOUNDED_CONTINUATION
     assert run["pre_action_quote"]["candidate_id"] is not None
     await service.aclose()

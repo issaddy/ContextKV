@@ -28,6 +28,14 @@ def gap_query(state, open_needs):
     return "\n\n".join(SourceDirectory.open_need_query(state, need) for need in open_needs)
 
 
+def bind_read_parents(task, state):
+    """Give the next READ the facts that establish its unresolved relations."""
+    parents = tuple(dict.fromkeys((*task.input_claim_ids,
+        *(parent for need in state.open_needs if need.need_id in task.need_ids
+          for parent in need.parent_claim_ids))))
+    return replace(task, input_claim_ids=parents)
+
+
 def gap_retrieval_plan(state, request):
     """The retriever excludes completed source ranges, not unread candidates."""
     from .evidence_planner import _passages, close_dependencies
@@ -123,9 +131,15 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
     ready = tuple(task for task in base.steps if task.kind == "READ" and task.step_id not in completed
                   and set(task.predecessor_step_ids) <= completed)
     if ready:
-        add("read_once", ready[:1])
+        add("read_once", (bind_read_parents(ready[0], frozen),))
     reduction = observed_reduction_task(replace(frozen, plan=base))
     if reduction is not None:
+        if reduction.operation == "numeric_select":
+            from .execution import reduction_partitions
+            by_id = {claim.claim_id: claim for claim in frozen.claims}
+            parts = reduction_partitions(base, reduction,
+                tuple(by_id[identity] for identity in reduction.input_claim_ids), snapshot, template)
+            reduction = next(task for task, _ in parts if task.step_id not in completed)
         add("reduce_once", (reduction,))
     if gap_request is not None:
         if not gap_request.open_needs or not set(gap_request.open_needs) <= set(frozen.open_needs):
@@ -144,7 +158,7 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
 
 
 
-BOUNDED_CONTINUATION = "infer_bridge_ready_or_one_gap_one_terminal_read_v3"
+BOUNDED_CONTINUATION = "infer_bridge_ready_or_one_gap_one_terminal_read_v4"
 
 
 def continuation_gap(state, *, used_gap):
@@ -171,7 +185,8 @@ def continuation_read(state, catalog):
     needs = {need.need_id for need in continuation_gap(state, used_gap=False)}
     completed = {result.step_id for result in state.results}
     covered = {unit for result in state.results for unit in result.covered_units}
-    return next((task for task in catalog.steps if task.kind == "READ"
+    task = next((task for task in catalog.steps if task.kind == "READ"
         and task.step_id not in completed and needs.intersection(task.need_ids)
         and set(task.predecessor_step_ids) <= completed
         and not set(task.input_unit_ids) <= covered), None)
+    return bind_read_parents(task, state) if task is not None else None

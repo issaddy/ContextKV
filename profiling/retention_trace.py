@@ -26,8 +26,8 @@ from bench.study_resources import StudyResourceSampler, integrate_physical, list
 from controller.config import create_controller, create_model_template, load_config
 from controller.context_schema import ContextBudget, ContextPlan, EvidenceClaim, EvidenceSet, Need, ReadTask, TaskState, TextRef
 from controller.engine_client import EngineError, SGLangEngineClient
-from controller.prefix_retention import (EmpiricalRetentionModel, PrefixReadObserver, PrefixRuntimeClient, TARGET_DEMAND_RULE,
-    RETENTION_FEATURE_NAMES, source_token_ranges, source_demand_event_key)
+from controller.prefix_retention import (EmpiricalRetentionModel, PrefixObserver, PrefixReadObserver, PrefixRuntimeClient, TARGET_DEMAND_RULE,
+    RETENTION_FEATURE_NAMES, RETENTION_CONTROL_RULE, MIN_RETENTION_GROUPS, source_token_ranges, source_demand_event_key)
 from controller.reading import (build_read_plan, parse_read_result, stable_prefix_input_ids,
                                 stable_prefix_messages, stable_source_payload, step_messages)
 from controller.reduction import reduce_claims
@@ -701,7 +701,9 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
     info = await engine.info()
     for client in engines.values():
         await client.info()
-    runtime = PrefixRuntimeClient(engine)
+    owner_store = SessionStore(output/"prefix-owners.sqlite")
+    owners = PrefixObserver(owner_store, engine)
+    runtime = owners.runtime
     pages = PrefixPageSampler(engine, interval=residency_interval)
     pool = (await engine.metrics())["pool"]
     page_size = pool["page_size"]
@@ -826,14 +828,20 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
                         decision = row["decision_target"] = dict(prefix_id=target_prefix_id, inspection=target_view,
                             raw_features=target_features, decision_time=time.monotonic(), source_event_id=target["source_event_id"],
                             source_session_id=source_turn["session_id"], retention_control_ms=0,
+                            inspection_control_ms=target_inspect_ms,
                             action_feasible=target_view["residency"]["recoverable_prefix_tokens"] >= target_view["boundary_tokens"])
                     if identity == intervention and row["decision_target"]["action_feasible"]:
                         decision = row["decision_target"]
                         tick = time.monotonic()
-                        decision["retain_receipt"] = await runtime.retain(owner_id=decision["prefix_id"], receipt=source_receipt,
-                            prefix_input_ids=source_event["prefix_input_ids"], sources=source_event["sources"], ttl_seconds=ttl_seconds)
-                        decision["retention_control_ms"] = (time.monotonic()-tick)*1000+target_inspect_ms
-                        active_owners.add(decision["prefix_id"])
+                        # Match the online owner mutation, including its local ledger writes.
+                        decision["retain_receipt"] = await owners.observe(owner_id=decision["prefix_id"],
+                            session_id=source_turn["session_id"], attempt_id=source_turn["attempt_id"],
+                            step_id=source_event["step_id"], receipt=source_receipt,
+                            prefix_input_ids=source_event["prefix_input_ids"], sources=source_event["sources"],
+                            ttl_seconds=ttl_seconds, policy="single_prefix_intervention", policy_choice={})
+                        decision["retention_control_ms"] = (time.monotonic()-tick)*1000
+                        if decision["retain_receipt"]["state"] == "RETAINED":
+                            active_owners.add(decision["prefix_id"])
                 if event["kind"] == "ANSWER":
                     previous = previous_answers.get(turn["session_id"])
                     if previous is not None and previous != original_epoch:
@@ -869,7 +877,7 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
             report.update(status="failed", error=str(failure))
         for prefix_id in active_owners:
             tick = time.monotonic()
-            await runtime.release(prefix_id, info.engine_restart_id)
+            await owners.release(prefix_id, reason="experiment_prefix_cleanup")
             controls.append(dict(operation="experiment_prefix_cleanup", elapsed_ms=(time.monotonic()-tick)*1000))
         for original_id in epochs:
             await retire(original_id)
@@ -879,6 +887,7 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
         await physical.stop()
         for client in engines.values():
             await client.aclose()
+        owner_store.close()
         report.update(resource_window={"start": start, "end": end}, workload_end=workload_end,
             physical_cost=integrate_physical(physical.samples, start, end),
             native_observation=native.observation(), physical_observation=physical.observation(),
@@ -966,6 +975,56 @@ def choose_windows(trace, *, horizon_seconds, max_candidates, history_steps, max
     return selected, omitted
 
 
+def fit_window_pairs(trace, *, horizon_seconds, history_steps, max_replay_steps, seed,
+                     max_prefixes_per_decision=1, page_size=None):
+    """Pair observed feature buckets across disjoint complete session windows.
+
+    This uses captured pre-intervention state, never retention outcomes. Each
+    selected window will produce all TTL arms; those arms are repeated measures.
+    Older targets without a captured observation at the decision are left to the
+    diagnostic replay path rather than assigned an invented residency bucket.
+    """
+    reads = read_decisions(trace)
+    candidates, omitted = choose_windows(trace, horizon_seconds=horizon_seconds,
+        max_candidates=len(reads)*max_prefixes_per_decision, history_steps=history_steps,
+        max_replay_steps=max_replay_steps, seed=seed,
+        max_prefixes_per_decision=max_prefixes_per_decision, page_size=page_size)
+    events = {event_id(turn, event): event for turn, event in reads}
+    buckets = defaultdict(list)
+    for item in candidates:
+        observed = events[item["event_id"]].get("prefix_observation")
+        if (item["source_event_id"] != item["event_id"] or observed is None
+                or "raw_features" not in observed or "inspection" not in observed):
+            omitted.append(dict(event_id=item["event_id"], source_event_id=item["source_event_id"],
+                reason="fit_needs_captured_target_features_at_decision"))
+            continue
+        features = {name: observed["raw_features"][name] for name in RETENTION_FEATURE_NAMES}
+        scope = observed["inspection"]["cache_scope_hash"]
+        bucket = json.dumps([features, scope], sort_keys=True, separators=(",", ":"))
+        item = {**item, "fit_bucket": bucket, "captured_features": features,
+            "independent_session_ids": sorted({turn["session_id"] for turn in item["turns"]}),
+            "model_calls_per_arm": len(trace_generations(window_trace(trace, item))),
+            "sampling_probability": None, "sampling_weight": 1.0,
+            "sampling_design": "budgeted feature-matched disjoint session windows; group-balanced, not inverse-probability"}
+        buckets[bucket].append(item)
+    pairs, support = {}, []
+    for bucket, cohort in sorted(buckets.items()):
+        possible = ((left, right) for index, left in enumerate(cohort) for right in cohort[index+1:]
+            if not set(left["independent_session_ids"]) & set(right["independent_session_ids"]))
+        pair = min(possible, key=lambda pair: (
+            sum(item["model_calls_per_arm"] for item in pair),
+            tuple(item["priority"] for item in pair)), default=None)
+        support.append(dict(fit_bucket=bucket, observable_windows=len(cohort),
+            independent_pair_available=pair is not None,
+            minimum_independent_groups_per_bucket=MIN_RETENTION_GROUPS))
+        if pair is not None:
+            pairs[bucket] = pair
+    return pairs, dict(buckets=support, omissions=omitted,
+        selection_basis="minimum observable replay calls within matched captured feature buckets, then seeded hash; no reuse or retention benefit selected",
+        minimum_independent_groups_per_bucket=MIN_RETENTION_GROUPS,
+        replay_bucket_note="captured buckets plan support; actual replay features determine fit eligibility")
+
+
 def window_trace(trace, selected):
     result = {**trace, "turns": selected["turns"], "window_selection": {
         key: value for key, value in selected.items() if key != "turns"}}
@@ -1020,7 +1079,8 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
         right["decision_time"], ends[1], right["inspection"]["page_size"])
     eligible = all(value["complete_window_coverage"] for value in (left_residency, right_residency))
     eligible = eligible and native["status"] == retained["status"] == "completed"
-    eligible = eligible and left["action_feasible"] and right["action_feasible"] and "retain_receipt" in right
+    eligible = (eligible and left["action_feasible"] and right["action_feasible"]
+                and right.get("retain_receipt", {}).get("state") == "RETAINED")
     body_pages = len(causal_pages(target_event, left["inspection"]["page_size"], left["inspection"]["cache_scope_hash"])[1])
     eligible = eligible and body_pages > 0
     eligible = eligible and all(arm["physical_cost"]["complete_window_coverage"] and
@@ -1065,6 +1125,9 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
         window_cost_basis="sum of complete component response intervals for all fixed affected turns, including collateral reads/ANSWER and policy controls",
         reuse_event_basis="target reward requires exact complete source-demand key; partial causal body-page demand remains in causal_reuse and whole-window costs",
         retention_control_ms=right["retention_control_ms"],
+        control_cost_rule=RETENTION_CONTROL_RULE,
+        paired_inspection_control_ms={"native": left["inspection_control_ms"],
+                                     "retained": right["inspection_control_ms"]},
         native_reuse_result=next_left["result"] if reused else None,
         retained_reuse_result=next_right["result"] if reused else None,
         native_prefix_residency=left_residency, retained_prefix_residency=right_residency,
@@ -1127,10 +1190,19 @@ async def replay(args):
     ttls = tuple(args.ttl_seconds)
     if args.horizon_seconds < max(180, *ttls):
         raise ValueError("all replay arms require one observation window covering at least 180 seconds and every TTL")
-    selected, omitted = choose_windows(trace, horizon_seconds=args.horizon_seconds,
-        max_candidates=args.max_candidates, history_steps=args.history_steps,
-        max_replay_steps=args.max_replay_steps, seed=args.seed,
-        max_prefixes_per_decision=args.max_prefixes_per_decision, page_size=page_size)
+    if args.selection:
+        selection = json.loads(Path(args.selection).read_text())
+        if selection["source_trace_digest"] != digest(trace):
+            raise ValueError("predeclared retention selection belongs to a different trace")
+        turns = {turn["attempt_id"]: turn for turn in trace["turns"]}
+        selected = [{**item, "turns": [turns[key] for key in item["source_attempts"]]}
+                    for item in selection["selected"]]
+        omitted = []
+    else:
+        selected, omitted = choose_windows(trace, horizon_seconds=args.horizon_seconds,
+            max_candidates=args.max_candidates, history_steps=args.history_steps,
+            max_replay_steps=args.max_replay_steps, seed=args.seed,
+            max_prefixes_per_decision=args.max_prefixes_per_decision, page_size=page_size)
     arms = {"native": None, **{f"ttl{ttl:g}": ttl for ttl in ttls}}
     planned = sum(len(arms)*len(trace_generations(window_trace(trace, item))) for item in selected)
     if planned > args.max_total_generations:
@@ -1374,6 +1446,7 @@ def main():
             sub.add_argument("--read-output-budget", type=int, default=2048)
     sub = commands.add_parser("replay")
     sub.add_argument("--trace", required=True)
+    sub.add_argument("--selection", help="Predeclared feature-matched independent windows from retention_pair_workflow")
     sub.add_argument("--config", required=True)
     sub.add_argument("--base-url", required=True, help="Dedicated profiling service; each arm clears cache")
     sub.add_argument("--gpu-device", type=int, required=True)

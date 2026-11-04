@@ -321,7 +321,8 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
                     audit_path=directory/"audit.jsonl", visible_evidence_manifest=response.visible_evidence_manifest,
                     audit_evidence=tuple(blocks.values()), input_ids=attempt.plan.candidate.input_ids,
                     output_ids=response.output_ids, truncated=response.truncated, citation_scope=response.citation_scope,
-                    measurement_kind=value["measurement_kind"])
+                    measurement_kind=value["measurement_kind"], reading_outcome=attempt.reading_outcome,
+                    reference_map=attempt.plan.candidate.reference_map)
             await service.close_session(session)
     finally:
         provider.close()

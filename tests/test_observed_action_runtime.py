@@ -23,7 +23,8 @@ class LearnedFixture(SpecifiedGainFixture):
         self.direct_ms, self.read_ms = direct_ms, read_ms
         from controller.action_proposals import BOUNDED_CONTINUATION
         self.feature_names = OBSERVED_FEATURE_NAMES
-        self.cost_provenance = {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA}
+        self.cost_provenance = {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA,
+            "prefix_control_scope": "native_excludes_prefix_control"}
         self.provenance = {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA,
             "continuation_protocol": BOUNDED_CONTINUATION,
             "continuation_gap_limits": {"max_units": 2, "max_passages": 2}}
@@ -201,4 +202,32 @@ async def test_absolute_branch_plus_paid_constrains_budget_even_when_signed_diff
     response = await controller.serve_turn("s", "How?", context_plans=(plan,))
     assert response.read_count == 0
     assert any(item.reason == "complete_latency_budget" for item in controller.rolling_policy.policy.last_evaluations)
+    await controller.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("control_ms", [None, 7.0])
+async def test_first_read_adds_only_measured_prefix_control_once(tmp_path, control_ms):
+    controller, _, _, _, plan = configured(tmp_path, reads=1, model=LearnedFixture(reads=0),
+        observer=Observer(paid_ms=0))
+
+    class PrefixControl:
+        control_observation_count = 0 if control_ms is None else 3
+
+        def predicted_control_ms(self):
+            return control_ms
+
+    controller.observe_prefix = PrefixControl()
+    plan = replace(plan, read_layout="source_first")
+    response = await controller.serve_turn("s", "How?", context_plans=(plan,))
+    assert response.read_count == 0
+    policy = controller.rolling_policy.policy
+    read = next(item for item in policy.last_evaluations if item.plan_id.endswith(":read_once"))
+    direct = next(item for item in policy.last_evaluations if item.plan_id.endswith(":direct_answer"))
+    assert read.cost.latency_ms == 20+(control_ms or 0)
+    assert direct.cost.latency_ms == 10
+    diagnostic = next(item for item in policy.last_option_diagnostics.values() if item["plan_id"] == read.plan_id)
+    assert diagnostic["first_read_prefix_control"] == {"predicted_ms": control_ms,
+        "source": "actual_prefix_control_ms", "observation_count": PrefixControl.control_observation_count,
+        "scope": "first_READ_only"}
     await controller.aclose()

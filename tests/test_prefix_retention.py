@@ -141,15 +141,15 @@ def test_owner_renewal_is_idempotent_and_ttl_releases_only_its_reference(owner, 
 
 def test_shared_pages_are_charged_once_and_native_hits_have_no_added_value():
     forecast = PrefixForecast(10, .8, 100, 10, 5, 5, "cache", "paired-observation-digest")
-    a = RetentionRequest("a", forecast, frozenset({"root", "a"}), frozenset(), 64)
-    b = RetentionRequest("b", forecast, frozenset({"root", "b"}), frozenset(), 64)
+    a = RetentionRequest("a", forecast, frozenset({"root", "a"}), 64)
+    b = RetentionRequest("b", forecast, frozenset({"root", "b"}), 64)
     natural = RetentionRequest("native-hit", replace(forecast, native_reuse_cost_ms=10),
-        frozenset({"native"}), frozenset(), 64)
-    chosen = allocate_retention((a, b, natural), gpu_budget_tokens=192, host_budget_tokens=0,
+        frozenset({"native"}), 64)
+    chosen = allocate_retention((a, b, natural), protection_budget_tokens=192,
         lambda_gpu=.01, lambda_host=0)
     assert {row.owner_id for row in chosen} == {"a", "b"}
-    assert sum(row.marginal_gpu_tokens for row in chosen) == 192
-    assert [row.marginal_gpu_tokens for row in chosen] == [128, 64]
+    assert sum(row.marginal_protected_tokens for row in chosen) == 192
+    assert [row.marginal_protected_tokens for row in chosen] == [128, 64]
     assert all(row.expected_saved_ms == 72 for row in chosen)
     assert all(row.evidence_digest == forecast.evidence_digest for row in chosen)
 
@@ -166,6 +166,6 @@ def test_complete_source_demand_identity_and_single_owner_collateral_are_distinc
         native_window_cost_ms=200, retained_window_cost_ms=225)
     assert forecast.saved_ms == -25
     assert forecast.full_window_saved_ms == -25
-    request = RetentionRequest("losing-owner", forecast, frozenset({"page"}), frozenset(), 64, "read")
-    assert allocate_retention((request,), gpu_budget_tokens=64, host_budget_tokens=0,
+    request = RetentionRequest("losing-owner", forecast, frozenset({"page"}), 64, "read")
+    assert allocate_retention((request,), protection_budget_tokens=64,
                               lambda_gpu=0, lambda_host=0) == ()

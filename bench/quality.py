@@ -155,11 +155,47 @@ def official_record(turn: OnlineTurn, answer: str) -> dict:
     return record
 
 
+def evaluation_contexts(turn, manifests, evidence, citation_scope):
+    """Project only executed excerpts and the source leaves of final conclusions."""
+    blocks = {tuple(sorted(block["key"].items())): block for block in evidence}
+    allowed = None if citation_scope is None else set(citation_scope)
+    intervals = defaultdict(list)
+    for span in manifests:
+        if allowed is not None and span["reference_id"] not in allowed:
+            continue
+        key = tuple(sorted(span["key"].items()))
+        block = blocks[key]
+        base = block["span"][0] if block["span"] is not None else 0
+        start = span.get("source_start")
+        end = span.get("source_end")
+        intervals[key].append((base if start is None else start,
+                              base + len(block["text"]) if end is None else end))
+    ranked = {context.document_id: (index, context.score or 0.0)
+              for index, context in enumerate((*turn.contexts, *turn.supporting_contexts))}
+    contexts = []
+    for key, ranges in intervals.items():
+        merged = []
+        for start, end in sorted(set(ranges)):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        block = blocks[key]
+        base = block["span"][0] if block["span"] is not None else 0
+        passage = block["key"]["passage_id"]
+        contexts.append({"document_id": passage, "source": block["source_uri"],
+            "score": ranked.get(passage, (0, 0.0))[1], "title": block["title"],
+            "text": "\n\n".join(block["text"][start-base:end-base] for start, end in merged)})
+    contexts.sort(key=lambda context: ranked.get(context["document_id"], (len(ranked), 0))[0])
+    return contexts
+
+
 def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Path, audit_path: str | Path,
                       visible_evidence_manifest: Sequence[Any], audit_evidence: Sequence[Any],
                       input_ids: Sequence[int], output_ids: Sequence[int],
                       branch_reason: str | None = None, measurement_kind: str | None = None,
-                      truncated: bool | None = None, citation_scope: Sequence[str] | None = None) -> None:
+                      truncated: bool | None = None, citation_scope: Sequence[str] | None = None,
+                      reading_outcome=None, reference_map=()) -> None:
     if Path(official_path).resolve() == Path(audit_path).resolve():
         raise ValueError("official and full audit outputs must be physically separate")
     full = {"task_id": turn.task_id, "conversation_id": turn.conversation_id, "turn": turn.turn,
@@ -169,28 +205,34 @@ def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Pat
             "visible_evidence_manifest": _jsonable(visible_evidence_manifest),
             "audit_evidence": _jsonable(audit_evidence), "input_ids": list(input_ids),
             "output_ids": list(output_ids), "actual_history": _jsonable(turn.history)}
+    full["conclusion_source_manifest"] = []
+    full["reading_conclusions"] = None
+    if reading_outcome is not None:
+        from controller.claim_graph import ClaimGraph
+        graph = ClaimGraph(reading_outcome.claims)
+        plan = reading_outcome.plan.answer_plan
+        conclusions = graph.conclusion_table(plan, reference_map)
+        conclusions["open_needs"] = reading_outcome.open_needs
+        full["reading_conclusions"] = _jsonable(conclusions)
+        by_key = {key: reference for reference, key in reference_map}
+        sources = dict.fromkeys(span for point in plan.points for identity in point.claim_ids
+                                for span in graph.source_spans(identity))
+        full["conclusion_source_manifest"] = [
+            {"key": _jsonable(span.source_key), "reference_id": by_key[span.source_key],
+             "source_start": span.start, "source_end": span.end} for span in sources]
     if citation_scope is not None:
         full["citation_scope"] = list(citation_scope)
     if turn.query_context is not None:
         full["query_context"] = _jsonable(turn.query_context)
     official = official_record(turn, answer)
-    if citation_scope is not None:
-        # Generation may read source layout, dependencies or restored evidence
-        # absent from the raw ranking rows. Score the actual current material.
-        allowed = set(citation_scope)
-        required = {tuple(sorted(span["key"].items())) for span in full["visible_evidence_manifest"]
-                    if span["reference_id"] in allowed}
-        ranked = {c.document_id: (i, c.score or 0.0)
-                  for i, c in enumerate((*turn.contexts, *turn.supporting_contexts))}
-        reading = [{"document_id": block["key"]["passage_id"], "source": block["source_uri"],
-                    "score": ranked.get(block["key"]["passage_id"], (0, 0.0))[1],
-                    "text": block["text"], "title": block["title"]}
-                   for block in full["audit_evidence"] if tuple(sorted(block["key"].items())) in required]
-        reading.sort(key=lambda c: ranked.get(c["document_id"], (len(ranked), 0))[0])
-        if reading != official["contexts"]:
-            official.setdefault("retrieval_contexts", [{"document_id": c.document_id, "source": c.source,
-                "score": c.score or 0.0, "text": c.text, "title": c.title} for c in turn.contexts])
-            official["contexts"] = reading
+    reading = evaluation_contexts(turn,
+        (*full["visible_evidence_manifest"], *full["conclusion_source_manifest"]),
+        full["audit_evidence"], citation_scope)
+    full["evaluation_contexts"] = reading
+    if reading != official["contexts"]:
+        official.setdefault("retrieval_contexts", [{"document_id": c.document_id, "source": c.source,
+            "score": c.score or 0.0, "text": c.text, "title": c.title} for c in turn.contexts])
+        official["contexts"] = reading
     for path, record in ((official_path, official), (audit_path, full)):
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import time
 
 from .claim_graph import ClaimGraph, claim_frontier
@@ -46,6 +47,12 @@ def completed_reduction_record(record, task, basis, results=(), *, frontier=None
     selected = task.operation == "numeric_select"
     if frontier is None:
         frontier = record.result.claims if selected else claim_frontier(basis, record.result.claims)
+    if selected and task.reduction_basis_claim_ids and ":part:0:" in task.step_id:
+        # Only the last selection part carries the complete logical basis.
+        logical_id = task.step_id.rsplit(":part:0:", 1)[0]
+        frontier = tuple(claim for result in results if result.step_id.startswith(logical_id+":part:0:")
+                         for claim in result.claims) + tuple(frontier)
+        task = replace(task, step_id=logical_id)
     return replace(record, result=replace(record.result, reduction=ReductionState(
         task.step_id, task.need_ids, task.operation, reduction_basis_ids(task, basis, results),
         tuple(claim.claim_id for claim in frontier), mode or ("selected" if selected else "merged"))))
@@ -57,6 +64,52 @@ class ReadingBudgetExceeded(ValueError):
 
 class OnlineTokenBudgetUnmeasured(ValueError):
     pass
+
+
+def reduction_partitions(plan, task, claims, snapshot, template):
+    """Compile finite input packs before a caller quotes and executes each one."""
+    from .context_budget import split_conclusion_tokens
+
+    claims = tuple(claims)
+
+    def fits(current, inputs):
+        if len(template.render(step_messages(plan, current, (), inputs, snapshot)).input_ids) > current.input_budget:
+            return False
+        if current.operation != "numeric_select":
+            return True
+        schema = output_schema(current, claims=inputs)["properties"]
+        outputs = ({"format_version": schema["format_version"]["const"], "views": {
+            alias: {parent: decision.get("const", value) for parent, decision in view["properties"].items()}
+            for alias, view in schema["views"]["properties"].items()}} for value in (False, True))
+        return max(len(template.tokenizer.encode(json.dumps(output, separators=(",", ":")),
+            add_special_tokens=False)) for output in outputs) <= current.output_budget
+
+    if fits(task, claims):
+        return ((task, claims),)
+    packs, pack = [], []
+    for claim in claims:
+        child = replace(task, step_id=f"{task.step_id}:part:0:{len(packs)}", reduction_basis_claim_ids=())
+        fits_pack = fits(child, (*pack, claim))
+        if pack and not fits_pack:
+            packs.append(tuple(pack))
+            pack = []
+            child = replace(task, step_id=f"{task.step_id}:part:0:{len(packs)}", reduction_basis_claim_ids=())
+            fits_pack = fits(child, (claim,))
+        if not fits_pack:
+            raise ReadingBudgetExceeded("one claim exceeds the reduction input/output allocation")
+        pack.append(claim)
+    if pack:
+        packs.append(tuple(pack))
+    targets = split_conclusion_tokens(task.retained_conclusion_tokens, len(packs))
+    parts = []
+    for index, pack in enumerate(packs):
+        child = replace(task, step_id=f"{task.step_id}:part:0:{index}",
+            input_claim_ids=tuple(claim.claim_id for claim in pack),
+            reduction_basis_claim_ids=tuple(claim.claim_id for claim in claims)
+                if task.operation == "numeric_select" and index == len(packs)-1 else (),
+            retained_conclusion_tokens=targets[index])
+        parts.append((child, pack))
+    return tuple(parts)
 
 
 def auxiliary_tokens(usage):
@@ -190,8 +243,12 @@ class ReadingExecutor:
             return record
         started = time.monotonic()
         receipt = await self.observe_prefix(plan, task, units, rendered, record)
+        elapsed_ms = (time.monotonic()-started)*1000
+        observe_control = getattr(self.observe_prefix, "observe_control", None)
+        if observe_control is not None:
+            observe_control(elapsed_ms, receipt)
         record = replace(record, metrics={**record.metrics, "evidence_prefix": receipt,
-            "prefix_control_ms": (time.monotonic()-started)*1000})
+            "prefix_control_ms": elapsed_ms})
         self.store.save_execution_step(record, "COMPLETE")
         return record
 
@@ -449,38 +506,21 @@ class ReadingExecutor:
                 return len(self.template.render(step_messages(
                     plan, current_task, (), claims, snapshot)).input_ids)
 
-            if size(task, basis) <= task.input_budget:
+            parts = reduction_partitions(plan, task, basis, snapshot, self.template)
+            if len(parts) == 1 and parts[0][0].step_id == task.step_id:
                 result = await run_model(task, (), basis)
                 frontier = (result.claims if task.operation == "numeric_select"
                             else claim_frontier(basis, result.claims))
                 complete_reduction(task, basis, frontier, "selected" if task.operation == "numeric_select" else "merged")
                 return
-            packs, pack = [], []
-            for claim in basis:
-                child = replace(task, step_id=f"{task.step_id}:part:0:{len(packs)}",
-                                reduction_basis_claim_ids=())
-                if pack and size(child, (*pack, claim)) > task.input_budget:
-                    packs.append(tuple(pack))
-                    pack = []
-                    child = replace(task, step_id=f"{task.step_id}:part:0:{len(packs)}",
-                                    reduction_basis_claim_ids=())
-                if size(child, (*pack, claim)) > task.input_budget:
-                    raise ReadingBudgetExceeded("one claim exceeds the reduction input allocation")
-                pack.append(claim)
-            if pack:
-                packs.append(tuple(pack))
-            from .context_budget import merge_conclusion_tokens, split_conclusion_tokens
-            targets = split_conclusion_tokens(task.retained_conclusion_tokens, len(packs))
+            from .context_budget import merge_conclusion_tokens
             bundles = []
-            for index, pack in enumerate(packs):
-                child = replace(task, step_id=f"{task.step_id}:part:0:{index}",
-                                reduction_basis_claim_ids=(), retained_conclusion_tokens=targets[index])
+            for child, pack in parts:
                 result = await run_model(child, (), pack)
                 frontier = (result.claims if task.operation == "numeric_select"
                             else claim_frontier(pack, result.claims))
-                bundles.append((frontier, (result.step_id,), targets[index]))
+                bundles.append((frontier, (result.step_id,), child.retained_conclusion_tokens))
             if task.operation == "numeric_select":
-                complete_reduction(task, basis, tuple(claim for bundle in bundles for claim in bundle[0]), "selected")
                 return
             level = 1
             while len(bundles) > 1:

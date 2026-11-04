@@ -9,7 +9,7 @@ import sys
 from controller.prefix_retention import EmpiricalRetentionModel, session_components, session_group, balance_session_rows
 from controller.config import create_model_template, load_config
 from profiling.retention_coverage import audit_coverage
-from profiling.retention_trace import audit_trace_inputs, choose_windows, trace_generations, verify_trace, window_trace, write_json
+from profiling.retention_trace import audit_trace_inputs, digest, fit_window_pairs, verify_trace, write_json
 
 
 def validate_session_partitions(traces):
@@ -69,20 +69,30 @@ async def run(args):
     horizon = args.horizon_seconds
     if horizon < max(180, *args.ttl_seconds):
         raise ValueError("common observation window must cover 180 seconds and all TTL arms")
-    selected = {split: choose_windows(trace, horizon_seconds=horizon, max_candidates=2,
-        max_prefixes_per_decision=args.max_prefixes_per_decision, history_steps=args.history_steps,
-        max_replay_steps=args.max_replay_steps, seed=args.seed, page_size=args.page_size)[0]
-        for split, trace in traces.items()}
-    calls = {split: sum((1+len(args.ttl_seconds))*len(trace_generations(window_trace(traces[split], item)))
-        for item in values) for split, values in selected.items()}
+    pools, support = {}, {}
+    for split, trace in traces.items():
+        pools[split], support[split] = fit_window_pairs(trace, horizon_seconds=horizon,
+            max_prefixes_per_decision=args.max_prefixes_per_decision, history_steps=args.history_steps,
+            max_replay_steps=args.max_replay_steps, seed=args.seed, page_size=args.page_size)
+    arms = 1+len(args.ttl_seconds)
+    common = sorted(pools["train"].keys() & pools["dev"].keys(), key=lambda key: digest([args.seed, key]))
+    affordable = [key for key in common if arms*sum(item["model_calls_per_arm"]
+        for split in ("train", "dev") for item in pools[split][key]) <= args.max_total_generations]
+    bucket = affordable[0] if affordable else None
+    selected = {split: pools[split][bucket] if bucket is not None else () for split in traces}
+    calls = {split: arms*sum(item["model_calls_per_arm"] for item in values)
+             for split, values in selected.items()}
     plan = dict(scope="actual source-first fixed-input same-window multi-TTL C costs", maximum_windows=4,
         choice_basis="same preregistered observation window and request DAG for Native and every TTL; no shorter-window fallback or outcome selection",
         observation_seconds=horizon, ttl_seconds=list(args.ttl_seconds), seed=args.seed,
         train_trace=str(Path(trace_paths["train"]).resolve()), dev_trace=str(Path(trace_paths["dev"]).resolve()),
         capture_stages=capture_stages, protocol_scopes=protocol_scopes,
+        fit_support=support, matched_fit_bucket=bucket,
+        max_total_generations=args.max_total_generations,
         stages=[])
-    if any(len(values) != 2 for values in selected.values()) or sum(calls.values()) > args.max_total_generations:
-        plan.update(status="no_common_observable_budgeted_window", planned_calls=calls, value_asset=None)
+    if bucket is None:
+        plan.update(status="no_common_observable_budgeted_fit_bucket", planned_calls=calls,
+            common_observed_buckets=len(common), value_asset=None)
         write_json(output/"paired-workflow.json", plan)
         print(json.dumps({"status": plan["status"], "pairs": 0}))
         return plan
@@ -94,11 +104,15 @@ async def run(args):
         if args.deadline and datetime.now().astimezone().timestamp() >= datetime.fromisoformat(args.deadline).timestamp():
             plan["stages"].append({"split": split, "status": "not_started_deadline"})
             break
+        selection_path = output/(split+"-selection.json")
+        write_json(selection_path, dict(source_trace_digest=digest(traces[split]),
+            selected=plan["source_windows"][split]))
         command = [args.python or sys.executable, "-m", "profiling.retention_trace", "replay",
             "--trace", str(Path(path).resolve()), "--config", str(Path(args.config).resolve()),
             "--base-url", args.base_url, "--gpu-device", str(args.gpu_device),
             "--output-dir", str(output/split), "--horizon-seconds", str(horizon),
             "--ttl-seconds", ",".join(str(ttl) for ttl in args.ttl_seconds),
+            "--selection", str(selection_path),
             "--max-candidates", "2", "--max-prefixes-per-decision", str(args.max_prefixes_per_decision),
             "--history-steps", str(args.history_steps), "--max-replay-steps", str(args.max_replay_steps),
             "--max-total-generations", str(calls[split]), "--residency-interval", ".5", "--seed", str(args.seed)]
@@ -158,8 +172,14 @@ async def run(args):
             "calibrated_independent_samples": len({tuple(row["independent_sample_id"]) for row in validation if row["calibrated"]}),
             "sample_unit": "session group; TTL interventions are repeated measures",
             "rows": validation})
+        if not any(row["calibrated"] for row in validation):
+            plan.update(status="no_development_bucket_coverage", value_asset=None)
+    elif plan["status"] == "running":
+        plan.update(status="collected_without_development_validation", value_asset=None)
     if plan["status"] == "running":
         plan["status"] = "completed_with_actual_signed_costs"
+    if plan["status"] != "completed_with_actual_signed_costs":
+        plan["value_asset"] = None
     write_json(output/"paired-workflow.json", plan)
     print(json.dumps({"status": plan["status"], "observation_seconds": horizon, "planned_pairs": 4*len(args.ttl_seconds),
                       "value_asset": plan.get("value_asset")}))

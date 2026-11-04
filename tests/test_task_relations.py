@@ -154,3 +154,85 @@ def test_budgeted_history_catalogue_and_invisible_supervision():
     assert hidden_metadata["input_omissions"]
     with pytest.raises(TaskInputNotVisible, match="date/scope"):
         task_targets(hidden_metadata, TaskPrediction("standalone"))
+
+
+def test_teacher_budgets_complete_input_with_condition_and_predecessor_closure():
+    import json
+    from types import SimpleNamespace
+    import httpx
+    from adapters.history_state import HistoryWindow, TeacherTaskModel
+    from adapters.query_selector import OpenAICompletionClient, SelectorConfig
+    from controller.context_schema import RetrievalState
+    from controller.schema import TurnRecord
+
+    class Characters:
+        chat_template = 'literal test chat'
+
+        def __call__(self, text, **kwargs):
+            return {'input_ids': list(text.encode())}
+
+        def apply_chat_template(self, messages, **kwargs):
+            return list(''.join(f'<{item["role"]}>{item["content"]}' for item in messages).encode())
+
+    history, states = [], []
+    for index in range(1, 61):
+        question = f'Task {index}: count records for ' + f'group-{index} ' * 30
+        anchor = question.index('count records')
+        value = question.index(f'group-{index}')
+        condition = Condition(f'c{index}', value_spans=(TextRef(index, 'user', value, value+len(f'group-{index}')),))
+        need = Need(f'n{index}', (TextRef(index, 'user', anchor, anchor+len('count records')),),
+            condition_ids=(condition.condition_id,), predecessor_need_ids=('n20',) if index == 60 else ())
+        history.append(TurnRecord(index, question, 'Actual answer.'))
+        states.append(TaskState(f'task-{index}', question, conditions=(condition,), needs=(need,),
+                                current_turn_id=index))
+    update = 'Use the approved group instead.'
+    replacement = Condition('c61', value_spans=(TextRef(61, 'user', 8, 16),),
+                            target_refs=('c60',), supersedes=('c60',), update='REPLACE')
+    history.append(TurnRecord(61, update, 'Actual correction.'))
+    from dataclasses import replace
+    states.append(replace(states[-1], raw_question=update, conditions=(replacement,), current_turn_id=61,
+        needs=(replace(states[-1].needs[0], condition_ids=('c61',)),)))
+    memory = RetrievalState(61, tuple(history), tuple(states))
+    windows = tuple(HistoryWindow(TextRef(index, 'user', 0, len(history[index-1].user_text)),
+        history[index-1].user_text, len(history[index-1].user_text), .5)
+        for index in (*range(1, 16), 61))
+    turn = SimpleNamespace(turn=62, task_id='current', query='Compare with the earlier group.')
+    observed = {}
+
+    def respond(request):
+        request_body = json.loads(request.content)
+        body = json.loads(request_body['messages'][-1]['content'])
+        observed.update(body=body, messages=request_body['messages'], schema=request_body['response_format'])
+        active = body['prior_states'][0]
+        predecessor = body['prior_predecessor_needs'][0]
+        value = {'relation': 'followup', 'resume_task_id': active['task_id'], 'history_spans': [],
+            'conditions': {}, 'condition_removals': [],
+            'version_intent': {'mode': 'current', 'temporal_relation': 'at', 'document_families': [],
+                'version_ids': [], 'resolved_version_ids': [], 'time_refs': [], 'source_turns': []},
+            'needs': {'n0': {'anchor_spans': [{'window_id': 'w0', 'boundary_tokens': [0, 0]}],
+                'subject_refs': [], 'operation': 'compare', 'condition_ids': [active['conditions'][0]['condition_id']],
+                'predecessor_need_ids': [predecessor['need_id']], 'scope': 'selected_sources'}}}
+        return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps(value)},
+            'finish_reason': 'stop'}], 'usage': {'completion_tokens': 100}})
+
+    client = OpenAICompletionClient(SelectorConfig('http://task-fixture', 'fixture', 'fixture',
+        max_input_tokens=14000, max_new_tokens=512), tokenizer=Characters(), transport=httpx.MockTransport(respond))
+    teacher = TeacherTaskModel(client)
+    try:
+        prediction = teacher.predict(turn, windows, memory)
+        assert client.calls == 1
+        assert client.count_input_tokens(observed['messages']) <= client.config.max_input_tokens
+    finally:
+        client.close()
+    assert prediction.resume_task_id == 'task-60'
+    assert prediction.needs[0].condition_ids == ('c61',)
+    assert prediction.needs[0].predecessor_need_ids == ('n20',)
+    body = observed['body']
+    assert 0 < len(body['prior_states']) < len(states)
+    condition_values = [value for condition in body['prior_condition_text'].values() for value in condition['values']]
+    assert all(value in condition_values for value in ('approved', 'group-60', 'group-20'))
+    visible_turns = {window['turn_id'] for window in body['visible_windows']}
+    assert {20, 60, 61, 62} <= visible_turns
+    version_turns = observed['schema']['json_schema']['schema']['$defs']['VersionIntent']['properties']['source_turns']['items']['enum']
+    assert set(version_turns) <= visible_turns
+    assert len(memory.prior_task_states) == 61

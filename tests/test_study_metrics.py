@@ -96,6 +96,29 @@ def test_development_track_excludes_evaluation_only_dataset_without_renormalizin
     assert "mtrag_un" in test_summary["datasets"]
 
 
+def test_registered_joint_reference_survives_freeze_and_report(tmp_path):
+    import json
+    from bench.study import freeze, report
+
+    spec = matrix()
+    spec["methods"] = [{"id": "E0_native"}, {"id": "S3_value"}]
+    spec["selection"].update(baseline="E0_native", test_comparators=["E0_native"])
+    spec["cohorts"]["test"] = spec["cohorts"]["dev"]
+    config = {"study": {"learning": True}, "task_model": {"mode": "teacher"},
+              "support_model": {"mode": "teacher"}}
+    rows = records("E0_native", long_score=70) + records("S3_value", long_score=90)
+    for row in rows:
+        row["response"] = {"action": "REBUILD", "read_count": 1,
+                           "reduce_count": 0, "truncated": False}
+    frozen = freeze(config, spec, rows, tmp_path/"frozen.json")
+    assert [method["id"] for method in frozen["test_methods"]] == ["E0_native", "S3_value"]
+    report(frozen, [{**row, "split": "test"} for row in rows], tmp_path/"report")
+    paired = json.loads((tmp_path/"report"/"paired_intervals.json").read_text())
+    assert paired and all(row["baseline"] == "E0_native" for row in paired)
+    assert {row["dataset"]: row["paired_task_ids"] for row in paired
+            if row["dataset"] in spec["datasets"]} == spec["cohorts"]["test"]
+
+
 def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     import json
     from profiling.final_study_index import full_queue_cells, full_queue_comparisons, main, markdown

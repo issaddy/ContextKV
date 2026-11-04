@@ -345,6 +345,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
             ridge=ridge, targets=("branch_complete_cost",))
         cost_provenance = {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA, "continuation_protocol": BOUNDED_CONTINUATION,
             "source": "actual_observed_terminal_branch_and_paired_direct_costs",
+            "prefix_control_scope": "native_excludes_prefix_control",
             "feature_schema": NATIVE_COST_SCHEMA, "feature_names": cost_names,
             "center": cost_center.tolist(), "scale": cost_scale.tolist(),
             "training_cache_starts": sorted(cache_scopes), "training_samples": len(samples),

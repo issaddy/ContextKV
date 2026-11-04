@@ -107,7 +107,8 @@ NUMERIC_SELECT_SYSTEM = (
     "Inspect every parent through the final parent; do not stop at an earlier qualifying row. "
     "Do not infer that count and sum Needs share conditions or populations: evaluate their supplied "
     "scopes independently. A missing requested quantity can qualify for count but not sum. "
-    "The controller preserves the original facts and computes count and sum."
+    "The controller preserves the original facts and computes count and sum. "
+    "Return compact JSON without optional whitespace."
 )
 SUMMARY_READ_SYSTEM = (
     "Summarize the supplied document window for the question. Retain the main information and "
@@ -705,7 +706,13 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
     # Final IDs and the actual next step index are known while measuring.
     # A split is emitted into that step immediately; no later renaming or
     # repacking can make its previously measured input longer.
-    for unit in evidence_set.selected_units:
+    reading_units = evidence_set.selected_units
+    if read_packing == "source_windows":
+        # Read the data roots first: their closures already read shared headings,
+        # headers and notes. A context window needs no separate READ beforehand.
+        reading_units = tuple(unit for unit in reading_units if unit.unit_id not in dependency_ids) + tuple(
+            unit for unit in reading_units if unit.unit_id in dependency_ids)
+    for unit in reading_units:
         if unit.unit_id in assigned:
             continue
         if read_packing == "source_windows":

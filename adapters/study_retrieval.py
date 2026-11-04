@@ -198,11 +198,24 @@ class StudyEvidenceProvider:
                     self.serving.corpus_id, query, history, (), "P3")
                 state = self.directory.task_interpreter.interpret(turn, memory)
                 auxiliary = (("task", self.directory.task_interpreter.last_metrics["task_model_ms"]),)
+            reading = self.config.get("reading", {}).get("enabled", True) and self.strategy in {"B6", "B7", "Lmap"}
+            coverage = (supplied_coverage_scope if supplied_blocks is not None else
+                        self.config.get("reading", {}).get("coverage_mode", "selected_sources"))
+            if not reading:
+                coverage = "selected_sources"
+            full_scope_read = reading and coverage == "all_supplied_documents"
             if supplied_blocks is not None:
                 state = replace(state, source_scope=tuple(block.key for block in supplied_blocks))
                 pool = self.directory.full_scope(state.source_scope)
+            elif full_scope_read:
+                document_ids = self.config.get("reading", {}).get("document_ids", ())
+                keys = state.source_scope or tuple(block.key for block in self.directory.corpus_index.blocks
+                    if not document_ids or block.key.document_id in document_ids)
+                pool = self.directory.full_scope(keys)
             else:
                 pool = self.directory.retrieve_pool(state, memory)
+            if full_scope_read:
+                state = replace(state, source_scope=tuple(block.key for block in pool.source_blocks))
             selection = self.config.get("selection", {})
             policy = CandidatePolicy(max_total_model_tokens=self.budget.window_tokens,
                                      max_new_tokens=self.budget.output_tokens)
@@ -228,7 +241,7 @@ class StudyEvidenceProvider:
                     return EvidenceSelection(direct.selected_set.source_blocks,
                         tuple(block.key for block in direct.selected_set.source_blocks), context,
                         (direct,), auxiliary_usage=usage)
-            if supplied_blocks is not None:
+            if supplied_blocks is not None and not full_scope_read:
                 pool = self._rank_supplied(state, snapshot, pool)
 
             def measure_context(state, units):
@@ -244,7 +257,11 @@ class StudyEvidenceProvider:
             support_model = None
             search_trace = ()
             support_ms = search_ms = 0.0
-            if self.strategy in {"B0", "Btoken", "B1"}:
+            if full_scope_read:
+                token_cost = len(self.template.tokenizer.encode(render_unit_union(pool.units), add_special_tokens=False))
+                evidence_sets = (EvidenceSet(f"{state.task_id}:full_scope", pool.units,
+                    token_cost=token_cost, disposition="partial", source_blocks=pool.source_blocks),)
+            elif self.strategy in {"B0", "Btoken", "B1"}:
                 search_started = time.perf_counter()
                 evidence_sets = (self._relevance_set(state, pool, measure_context),)
                 search_ms = (time.perf_counter()-search_started)*1000
@@ -282,50 +299,24 @@ class StudyEvidenceProvider:
                 evidence_sets, rerank_ms = self._rerank_sets(state, evidence_sets, scores, support_model)
                 search_ms += rerank_ms
             auxiliary += (("retrieval", pool.retrieval_ms), ("support", support_ms), ("search", search_ms))
-            coverage = (supplied_coverage_scope if supplied_blocks is not None else
-                        self.config.get("reading", {}).get("coverage_mode", "selected_sources"))
-            reading = self.config.get("reading", {}).get("enabled", True) and self.strategy in {"B6", "B7", "Lmap"}
             quality_sets = {selected.set_id: selected for selected in evidence_sets}
-            if not reading:
-                coverage = "selected_sources"
-            full_scope_read = reading and coverage == "all_supplied_documents"
-            if full_scope_read:
-                document_ids = self.config.get("reading", {}).get("document_ids", ())
-                keys = state.source_scope or tuple(block.key for block in self.directory.corpus_index.blocks
-                    if not document_ids or block.key.document_id in document_ids)
-                complete = self.directory.full_scope(keys)
-                state = replace(state, source_scope=tuple(block.key for block in complete.source_blocks))
-                token_cost = len(self.template.tokenizer.encode(
-                    render_unit_union(complete.units), add_special_tokens=False))
-                evidence_sets = tuple(replace(selected, selected_units=complete.units,
-                    source_blocks=complete.source_blocks, token_cost=token_cost) for selected in evidence_sets)
-            full_scope_plan = None
             plans = []
             candidate_quality_ms = 0.0
             for selected in evidence_sets:
-                if full_scope_plan is not None:
-                    plan_id = f"{state.task_id}:{selected.set_id}"
-                    if full_scope_plan.separate_needs and len(state.needs) > 1:
-                        plan_id += ":isolated"
-                    plan = replace(full_scope_plan, plan_id=plan_id,
-                        selected_set=replace(selected, selected_units=full_scope_plan.selected_set.selected_units))
-                else:
-                    plan = (build_read_plan(state, selected, coverage, self.budget, template=self.template, snapshot=snapshot,
-                                output_tokens_per_fact=None if self.strategy == "Lmap" else
-                                    self.config.get("reading", {}).get("output_tokens_per_fact", 64),
-                                reading_mode=self.config.get("reading", {}).get("mode", "typed_reduce"),
-                                separate_needs=self.config.get("reading", {}).get("need_isolation", False)
-                                    or (self.config.get("reading", {}).get("numeric_need_isolation", False)
-                                        and any(need.operation in {"count", "sum"} for need in state.needs)),
-                                numeric_identity=self.config.get("reading", {}).get("numeric_identity", "names"),
-                                read_layout=self.config.get("reading", {}).get("layout", "task_first"),
-                                answer_system_prompt=self.answer_system_prompt,
-                                read_packing=self.config.get("reading", {}).get("packing", "source_windows"
-                                    if self.config.get("reading", {}).get("layout") == "source_first" else "mixed"))
-                            if reading else ContextPlan(f"{request_id}:{selected.set_id}", state, selected,
-                                coverage, budget=self.budget))
-                    if full_scope_read:
-                        full_scope_plan = plan
+                plan = (build_read_plan(state, selected, coverage, self.budget, template=self.template, snapshot=snapshot,
+                            output_tokens_per_fact=None if self.strategy == "Lmap" else
+                                self.config.get("reading", {}).get("output_tokens_per_fact", 64),
+                            reading_mode=self.config.get("reading", {}).get("mode", "typed_reduce"),
+                            separate_needs=self.config.get("reading", {}).get("need_isolation", False)
+                                or (self.config.get("reading", {}).get("numeric_need_isolation", False)
+                                    and any(need.operation in {"count", "sum"} for need in state.needs)),
+                            numeric_identity=self.config.get("reading", {}).get("numeric_identity", "names"),
+                            read_layout=self.config.get("reading", {}).get("layout", "task_first"),
+                            answer_system_prompt=self.answer_system_prompt,
+                            read_packing=self.config.get("reading", {}).get("packing", "source_windows"
+                                if self.config.get("reading", {}).get("layout") == "source_first" else "mixed"))
+                        if reading else ContextPlan(f"{request_id}:{selected.set_id}", state, selected,
+                            coverage, budget=self.budget))
                 if self.strategy == "Lmap":
                     plan = replace(plan, steps=tuple(replace(step, operation="summarize", shared_numeric_scopes=(),
                         requires_reduction=True)
@@ -368,6 +359,7 @@ class StudyEvidenceProvider:
             trace = {"task_state": to_jsonable(state), "pool": to_jsonable(pool),
                 "provided_full_direct": direct_trace,
                 "support_scores": to_jsonable(scores), "search_trace": search_trace,
+                "selection_policy_heads_used": support_model is not None,
                 "support_schedule": to_jsonable(support_model.last_schedule) if support_model else (),
                 "selection_utility": self._utility_mode(),
                 "rerank_retained_sets": selection.get("rerank_retained_sets", False),

@@ -501,9 +501,20 @@ class RollingPlanRuntime:
             required_step = self._required_scope_step(state) if observed else None
             if required_step is not None:
                 from .action_policy import native_admission_reason
+                from .execution import reduction_partitions
                 from .session_store import ReadingProgress
 
                 plan = state.plan
+                if required_step.operation == "numeric_select":
+                    claims = {claim.claim_id: claim for claim in state.claims}
+                    parts = reduction_partitions(plan, required_step,
+                        tuple(claims[identity] for identity in required_step.input_claim_ids), snapshot, template)
+                    tasks = {task.step_id: task for task in plan.steps}
+                    tasks.update((task.step_id, task) for task, _ in parts)
+                    plan = replace(plan, steps=tuple(tasks.values()))
+                    state = replace(state, plan=plan)
+                    completed = {result.step_id for result in state.results}
+                    required_step = next(task for task, _ in parts if task.step_id not in completed)
                 cpu = required_step.kind == "REDUCE" and required_step.operation != "numeric_select"
                 variants = () if cpu else compile_step(plan, required_step, state, snapshot, template,
                                                        outputs=(required_step.output_budget,))
@@ -545,8 +556,13 @@ class RollingPlanRuntime:
             native, reusable = await self.native.observe(plans, state, snapshot, engine, cost_model,
                 arrived, auxiliary_usage, selection_started=selection_started)
             self._observe_state(attempt_id, executor, state, snapshot, native, gap_request, mandatory)
+            control_forecast = getattr(executor.observe_prefix, "predicted_control_ms", None)
+            read_control = ({"predicted_ms": control_forecast(), "source": "actual_prefix_control_ms",
+                             "observation_count": executor.observe_prefix.control_observation_count,
+                             "scope": "first_READ_only"}
+                if control_forecast is not None and state.plan.read_layout == "source_first" else None)
             try:
-                decision = (self.policy.choose_observed_actions(plans, state, native, reusable)
+                decision = (self.policy.choose_observed_actions(plans, state, native, reusable, read_control=read_control)
                     if observed else self.policy.choose(plans, state, native, reusable))
             except NoCompletePlan:
                 events.emit("rolling_plan_no_complete", attempt_id=attempt_id,

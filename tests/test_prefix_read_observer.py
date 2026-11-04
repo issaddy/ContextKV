@@ -4,9 +4,11 @@ from dataclasses import replace
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from controller.context_schema import ContextBudget, EvidenceSet, EvidenceUnit, Need, SourceSpan, StepRecord, TaskState
 from controller.evidence import make_evidence
-from controller.prefix_retention import EmpiricalRetentionModel, PrefixReadObserver, TARGET_DEMAND_RULE
+from controller.prefix_retention import EmpiricalRetentionModel, PrefixReadObserver, TARGET_DEMAND_RULE, RETENTION_CONTROL_RULE
 from controller.reading import build_read_plan, step_messages
 from controller.schema import CompletionReceipt, ContextEpoch
 from controller.session_store import SessionStore
@@ -93,20 +95,24 @@ def test_fixed_ttl_recovery_counts_actual_read_once_and_does_not_extend_ttl(tmp_
     asyncio.run(run())
 
 
-def model_asset(path, *, native_ms, retained_ms):
+def paired_model_rows(*, native_ms, retained_ms):
     rows = [dict(target_demand_rule=TARGET_DEMAND_RULE, features={"access_state": "first", "native_residency": "device", "pressure_concurrency": "normal:single"},
         cache_scope_hash="scope", horizon_seconds=30, reused=True,
         native_input_hashes=["fixed-input"], retained_input_hashes=["fixed-input"],
         native_reuse_cost_ms=native_ms, retained_reuse_cost_ms=retained_ms,
         native_window_cost_ms=native_ms, retained_window_cost_ms=retained_ms,
-        retention_control_ms=0,
+        retention_control_ms=0, control_cost_rule=RETENTION_CONTROL_RULE,
         gpu_page_count=1, host_page_count=1, page_size=64,
         native_gpu_token_seconds=0, retained_gpu_token_seconds=0,
         native_host_token_seconds=0, retained_host_token_seconds=0)]
-    rows = [{**rows[0], "independent_sample_id": name, "independent_session_ids": [name]} for name in ("session-a", "session-b")]
+    return [{**rows[0], "independent_sample_id": name, "independent_session_ids": [name]} for name in ("session-a", "session-b")]
+
+
+def model_asset(path, *, native_ms, retained_ms):
+    rows = paired_model_rows(native_ms=native_ms, retained_ms=retained_ms)
     path.write_text(json.dumps(EmpiricalRetentionModel.fit(rows).to_dict()))
     return dict(mode="value", model_path=str(path), horizon_seconds=30,
-        gpu_budget_tokens=65536, host_budget_tokens=65536, lambda_gpu=0, lambda_host=0)
+        protection_budget_tokens=65536, lambda_gpu=0, lambda_host=0)
 
 
 def test_value_inspects_native_residency_before_protection_and_keeps_measured_gain(tmp_path):
@@ -148,3 +154,66 @@ def test_partial_native_reuse_does_not_duplicate_exact_read_target_reward():
     assert partial["shared_evidence_page_ids"] and partial["actual_device_evidence_page_ids"]
     assert exact_target_demand(first, future, page_size=2, scope="scope")
     assert not exact_target_demand(second, future, page_size=2, scope="scope")
+
+
+def test_ttl_arms_do_not_replace_independent_groups_or_publish_an_empty_model(tmp_path):
+    from profiling.retention_trace import digest, fit
+
+    first = paired_model_rows(native_ms=100, retained_ms=20)[0]
+    report_path = tmp_path/"native-report.json"
+    report_path.write_text('{}')
+    rows = [{**first, "horizon_seconds": ttl, "event_id": "read", "split": "train",
+        "source": "hardware", "scope": "actual_source_first_single_prefix_intervention",
+        "partition_eligible": True, "training_eligible": True, "source_body_page_count": 1,
+        "reports": {"native": str(report_path)}, "report_digests": {"native": digest({})}}
+        for ttl in (15, 60, 180)]
+    records = tmp_path/"pairs.jsonl"
+    records.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+    output = tmp_path/"value-model.json"
+    with pytest.raises(ValueError, match="independent session groups"):
+        fit(SimpleNamespace(records=str(records), split="train", features=None, output=str(output)))
+    assert not output.exists()
+    independent = [{**row, "independent_session_ids": ["session-b"]} for row in rows]
+    model = EmpiricalRetentionModel.fit([*rows, *independent])
+    assert len(model.forecasts) == 3 and model.independent_samples == 2
+
+
+def test_complete_callback_cost_is_observed_once_without_changing_sunk_cost_selection(tmp_path):
+    async def run():
+        template = ByteTemplate()
+        store = SessionStore(tmp_path/"state.sqlite")
+        settings = model_asset(tmp_path/"paired-model.json", native_ms=100, retained_ms=20)
+        callback = PrefixReadObserver(store, ReadRuntimeChannel(template.fingerprint), template, settings)
+        assert callback.predicted_control_ms() is None
+        receipt = await callback(*material(template))
+        callback.observe_control(100, receipt)
+        assert callback.predicted_control_ms() == 100 and callback.control_observation_count == 1
+        assert receipt["predicted_set_net_value_ms"] == -20
+        observed = receipt["control_observation"]
+        assert observed["allocation_fixed_ms"]+observed["owner_mutations_ms"] == observed["total_ms"] == 100
+        assert receipt["state"] == "RETAINED"  # The fixed callback cost was already paid.
+        store.close()
+    asyncio.run(run())
+
+
+def test_fit_window_selection_matches_features_and_disjoint_session_groups():
+    from profiling.retention_trace import fit_window_pairs
+
+    def turn(session, number, start):
+        features = dict(access_state="first" if number == 0 else "recent",
+                        native_residency="device", pressure_concurrency="normal:single")
+        event = dict(step_id="read", kind="READ", source_started_s=start, source_completed_s=start+1,
+            input_hash=token_hash((1, 2, 3, 4)), predecessor_step_ids=[],
+            prefix_input_ids=[1, 2, 3, 4], evidence_token_ranges=[[2, 4]], fixed_system_prefix_tokens=0,
+            prefix_observation={"raw_features": features, "inspection": {"page_size": 2, "cache_scope_hash": "scope"}})
+        return dict(attempt_id=f"{session}-{number}", session_id=session, events=[event])
+
+    trace = {"turns": [turn("a", 0, 0), turn("a", 1, 190), turn("b", 0, 1000), turn("b", 1, 1190)]}
+    options = dict(horizon_seconds=180, history_steps=0, max_replay_steps=8, seed=42, page_size=2)
+    pairs, audit = fit_window_pairs(trace, **options)
+    assert len(pairs) == 1 and audit["minimum_independent_groups_per_bucket"] == 2
+    left, right = next(iter(pairs.values()))
+    assert not set(left["independent_session_ids"]) & set(right["independent_session_ids"])
+    assert left["fit_bucket"] == right["fit_bucket"] and left["sampling_weight"] == right["sampling_weight"] == 1
+    trace["turns"][2]["events"][0]["prefix_observation"]["raw_features"]["native_residency"] = "host"
+    assert fit_window_pairs(trace, **options)[0] == {}

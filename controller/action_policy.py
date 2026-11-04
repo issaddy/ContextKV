@@ -24,7 +24,7 @@ def native_admission_reason(native, candidate):
     return None
 
 
-def choose_observed_action(policy, plans, state, native, reusable_prefixes):
+def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, read_control=None):
     """Price one action plus ANSWER; sunk costs constrain the budget, not its marginal value."""
     plans = tuple(plans)
     if len(plans) > policy.limits.max_plan_candidates:
@@ -122,6 +122,12 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes):
             if native_cost and plan.semantic_kind == "direct_answer":
                 direct_prediction = predicted["branch_complete_cost"]
             branch = regression_cost(predicted["branch_complete_cost"])
+            control = read_control if task.kind == "READ" else None
+            control_ms = None if control is None else control["predicted_ms"]
+            if control_ms is not None:
+                if model.cost_provenance["prefix_control_scope"] != "native_excludes_prefix_control":
+                    raise ValueError("READ control addition requires native-only branch cost labels")
+                branch = replace(branch, latency_ms=branch.latency_ms+control_ms)
             branch = replace(branch, gpu_peak_gib=max(cost.gpu_peak_gib for cost in peaks),
                              host_peak_gib=max(cost.host_peak_gib for cost in peaks))
             cumulative = native.paid_cost+branch
@@ -129,12 +135,15 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes):
             gain = 0.0 if plan.semantic_kind == "direct_answer" else model.predict(features)
             # All native costs share the same DIRECT offset, applied once below.
             cost = branch if native_cost else regression_cost(predicted["incremental_complete_cost"])
+            if not native_cost and control_ms is not None:
+                cost = replace(cost, latency_ms=cost.latency_ms+control_ms)
             objective = gain-policy._penalty(cost, state.plan.budget)
             key = candidate.candidate_id if candidate is not None else task.step_id
             policy.last_option_diagnostics[key] = {"plan_id": plan.plan_id, "features": features,
                 "cost_features": cost_features,
                 "cost_source": "observed_action_paired_run_regression", "predicted_costs": predicted,
                 "native_quote_role": "pre_action_cost_features" if native_cost else "actual_known_input_admission_and_audit",
+                "first_read_prefix_control": control,
                 "reason": reason or "eligible"}
             evaluation = PlanEvaluation(plan.plan_id, gain, objective, cumulative, reason is None,
                 reason or "reader_bound_observed_action_regression", ((task.step_id,

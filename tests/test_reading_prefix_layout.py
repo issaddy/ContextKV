@@ -111,3 +111,74 @@ def test_canonical_table_windows_keep_shared_context_out_of_data_dependencies():
         assert 'Table 1: Mass' in context and 'Mass (kg)' in context
         assert 'Note: Approved records only.' in context
         assert unit.table_id is not None
+    selected = EvidenceSet('table', units, source_blocks=(block,))
+    state = TaskState('count', 'Count all approved records.', needs=(Need('n', operation='count'),))
+    reading = build_read_plan(state, selected, 'all_supplied_documents',
+        ContextBudget(read_output_tokens=4096), template=ByteTemplate(),
+        read_layout='source_first', read_packing='source_windows', output_tokens_per_fact=None)
+    assert len(reading.steps) == len(data)
+    assert set(reading.coverage_units) == set(lookup)
+    for step in reading.steps:
+        assert len(set(step.input_unit_ids) & data_ids) == 1
+        assert set(lookup) - data_ids <= set(step.input_unit_ids)
+
+
+def test_committed_windows_do_not_change_original_metadata_or_next_turn_prefixes():
+    from types import SimpleNamespace
+    from adapters.evidence_pool import SourceDirectory
+    from adapters.history_state import restore_source_metadata
+    from controller.reading import stable_source_payload
+
+    text = ('Table 1: Mass\n| Record | Mass (kg) |\n| --- | --- |\n| A | 1 |\n| B | 2 |\n\n'
+            'Table 2: Mass\n| Record | Mass (kg) |\n| --- | --- |\n| C | 3 |\n| D | 4 |\n')
+    block = make_evidence(text, 'two-tables', version='v1')
+    corpus = SimpleNamespace(blocks=(block,), source_metadata={})
+    directory = SourceDirectory(corpus, None, ByteTemplate().tokenizer)
+    before = directory.full_scope((block.key,)).units
+    restore_source_metadata(directory, before)
+    directory.add_archive((block,))
+    after = directory.full_scope((block.key,)).units
+    assert stable_source_payload(before) == stable_source_payload(after)
+    assert len({unit.table_id for unit in after if unit.table_id is not None}) == 2
+    assert 'table_id' not in corpus.source_metadata[block.key]
+    assert 'heading' not in corpus.source_metadata[block.key]
+
+
+def test_full_scope_provider_builds_one_scan_without_support_or_set_search():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from adapters.evidence_pool import SourceDirectory
+    from adapters.study_retrieval import StudyEvidenceProvider
+    from controller.context_schema import RetrievalState
+    from controller.schema import SessionSnapshot
+
+    template = ByteTemplate()
+    blocks = tuple(make_evidence(f'Record R{i} weighs {i+1} kg.', f'ledger-{i}') for i in range(2))
+    state = TaskState('task', 'Count every record.', needs=(Need('n', operation='count',
+        scope='all_supplied_documents'),), current_turn_id=1)
+    for supplied in (True, False):
+        corpus = SimpleNamespace(blocks=blocks, source_metadata={})
+        interpreter = SimpleNamespace(model=SimpleNamespace(), last_metrics={'task_model_ms': 0},
+                                      interpret=lambda turn, memory: state)
+        directory = SourceDirectory(corpus, None, template.tokenizer, task_interpreter=interpreter)
+        directory.retrieve_pool = Mock(side_effect=AssertionError('full scope has no retrieval choice'))
+        serving = SimpleNamespace(corpus_snapshot_id='corpus', corpus_id='corpus', retriever=SimpleNamespace(),
+            retrieval_state=lambda snapshot: RetrievalState(0, source_index=directory))
+        support = SimpleNamespace(usage={}, predict=Mock(side_effect=AssertionError('scan needs no support search')))
+        provider = StudyEvidenceProvider({'study': {'strategy': 'B7'},
+            'reading': {'coverage_mode': 'all_supplied_documents', 'layout': 'source_first',
+                        'output_tokens': 4096, 'output_tokens_per_fact': None}},
+            template, serving, directory, support_backend=support)
+        provider._rank_supplied = Mock(side_effect=AssertionError('scan needs no relevance ranking'))
+        selection = provider._retrieve(SessionSnapshot('session'), state.raw_question, 'request',
+            supplied_blocks=blocks if supplied else None)
+        assert len(selection.context_plans) == 1
+        reading = selection.context_plans[0]
+        assert reading.coverage_scope == 'all_supplied_documents'
+        assert set(reading.task_state.source_scope) == {block.key for block in blocks}
+        assert set(reading.coverage_units) == {unit.unit_id for unit in reading.selected_set.selected_units}
+        assert len(reading.steps) == 2
+        trace = provider.traces['session', 'request']
+        assert trace['support_schedule'] == trace['search_trace'] == ()
+        assert not trace['selection_policy_heads_used']
+        assert dict(reading.auxiliary_ms)['support'] == dict(reading.auxiliary_ms)['search'] == 0

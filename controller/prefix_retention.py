@@ -6,7 +6,7 @@ from bisect import bisect_right
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
-from collections import defaultdict
+from collections import defaultdict, deque
 import time
 from pathlib import Path
 
@@ -17,6 +17,8 @@ from controller.serialization import to_jsonable
 
 RETENTION_FEATURE_NAMES = ("access_state", "native_residency", "pressure_concurrency")
 TARGET_DEMAND_RULE = "exact_complete_causal_prefix_and_body_ranges_v1"
+MIN_RETENTION_GROUPS = 2
+RETENTION_CONTROL_RULE = "owner_call_only_fixed_decision_once_v1"
 
 
 
@@ -124,8 +126,7 @@ class PrefixForecast:
 class RetentionRequest:
     owner_id: str
     forecast: PrefixForecast
-    gpu_page_ids: frozenset[str]
-    host_page_ids: frozenset[str]
+    page_ids: frozenset[str]
     page_size: int
     reuse_event_key: str = ""
 
@@ -133,15 +134,12 @@ class RetentionRequest:
     def from_receipt(cls, receipt, forecast, *, reuse_event_key=""):
         if receipt["cache_scope_hash"] != forecast.cache_scope_hash:
             raise ValueError("retention forecast differs from the executing reader/cache scope")
-        # Fit normalizes future tier residency by the full eligible token path.
-        # A currently Host-only page can occupy GPU again within this horizon.
-        # These are logical protection capacities; the receipt retains the exact
-        # presently ready replica sets for physical-residency observations.
+        # A soft owner protects one complete path in both native tiers. Native
+        # receipts, rather than this logical capacity, describe physical replicas.
         path = frozenset(receipt["gpu_page_ids"]) | frozenset(receipt["host_page_ids"])
         if len(path)*receipt["page_size"] != receipt["boundary_tokens"]:
             raise ValueError("retention needs the full recoverable causal page path")
-        host = path if receipt["pool"]["host_capacity_tokens"] else frozenset()
-        return cls(receipt["owner_id"], forecast, path, host, receipt["page_size"], reuse_event_key)
+        return cls(receipt["owner_id"], forecast, path, receipt["page_size"], reuse_event_key)
 
 
 @dataclass(frozen=True)
@@ -152,55 +150,44 @@ class RetentionChoice:
     extra_gpu_token_seconds: float
     extra_host_token_seconds: float
     value: float
-    marginal_gpu_tokens: int
-    marginal_host_tokens: int
+    marginal_protected_tokens: int
     evidence_digest: str
     reuse_event_key: str = ""
 
 
-def allocate_retention(requests, *, gpu_budget_tokens, host_budget_tokens,
-                       lambda_gpu, lambda_host, protected_gpu_pages=frozenset(),
-                       protected_host_pages=frozenset(), protected_requests=()):
+def allocate_retention(requests, *, protection_budget_tokens, lambda_gpu, lambda_host):
     """Compare value-ordered and capacity-density constructions on the same objective."""
-    requests, protected_requests = tuple(requests), tuple(protected_requests)
-    choices = tuple(_allocate_retention_greedy(requests, gpu_budget_tokens=gpu_budget_tokens,
-        host_budget_tokens=host_budget_tokens, lambda_gpu=lambda_gpu, lambda_host=lambda_host,
-        protected_gpu_pages=protected_gpu_pages, protected_host_pages=protected_host_pages,
-        protected_requests=protected_requests, density=density) for density in (False, True))
+    requests = tuple(requests)
+    choices = tuple(_allocate_retention_greedy(requests, protection_budget_tokens=protection_budget_tokens,
+        lambda_gpu=lambda_gpu, lambda_host=lambda_host, density=density) for density in (False, True))
     return max(choices, key=lambda selected: sum(choice.value for choice in selected))
 
 
-def _allocate_retention_greedy(requests, *, gpu_budget_tokens, host_budget_tokens,
-                              lambda_gpu, lambda_host, protected_gpu_pages,
-                              protected_host_pages, protected_requests, density):
+def _allocate_retention_greedy(requests, *, protection_budget_tokens,
+                              lambda_gpu, lambda_host, density):
     """Choose positive marginal value, counting a shared causal page only once.
 
-    Value uses the next READ target saving, deduplicated against protected
-    requests, minus this call's control, measured external-request penalty and
+    Value uses the next READ target saving, deduplicated against selected
+    requests, minus this owner's control, measured external-request penalty and
     incremental residency prices.
     Single-prefix full-window residuals are not additive across protected sets.
-    Capacity budgets bound the protected set; soft references allocate no KV.
+    One logical capacity bounds protection; native tier placement is unchanged.
     """
     requests = {(request.owner_id, request.forecast.horizon_seconds): request for request in requests}
-    gpu_pages, host_pages = set(protected_gpu_pages), set(protected_host_pages)
-    gpu_leases = {page: (float("inf"), 0) for page in gpu_pages}
-    host_leases = {page: (float("inf"), 0) for page in host_pages}
+    protected_pages = set()
+    gpu_leases, host_leases = {}, {}
     covered_events = {}
 
     def cover(request):
         forecast = request.forecast
         event = request.reuse_event_key or request.owner_id
         covered_events[event] = max(covered_events.get(event, 0), forecast.target_saved_ms)
-        for pages, leases, seconds in ((request.gpu_page_ids, gpu_leases, forecast.extra_gpu_seconds_per_page),
-                                      (request.host_page_ids, host_leases, forecast.extra_host_seconds_per_page)):
-            for page in pages:
+        for leases, seconds in ((gpu_leases, forecast.extra_gpu_seconds_per_page),
+                                (host_leases, forecast.extra_host_seconds_per_page)):
+            for page in request.page_ids:
                 if page not in leases or forecast.horizon_seconds > leases[page][0]:
                     leases[page] = forecast.horizon_seconds, seconds
-        gpu_pages.update(request.gpu_page_ids)
-        host_pages.update(request.host_page_ids)
-
-    for request in protected_requests:
-        cover(request)
+        protected_pages.update(request.page_ids)
 
     def added_residency(pages, leases, forecast, seconds, size):
         return size*sum(seconds if page not in leases else seconds-leases[page][1]
@@ -210,19 +197,16 @@ def _allocate_retention_greedy(requests, *, gpu_budget_tokens, host_budget_token
     while requests:
         candidates = []
         for request in requests.values():
-            gpu = len(request.gpu_page_ids-gpu_pages)*request.page_size
-            host = len(request.host_page_ids-host_pages)*request.page_size
+            added_tokens = len(request.page_ids-protected_pages)*request.page_size
             forecast = request.forecast
-            if not any(page not in leases or forecast.horizon_seconds > leases[page][0]
-                       for pages, leases in ((request.gpu_page_ids, gpu_leases), (request.host_page_ids, host_leases))
-                       for page in pages):
+            if not any(page not in gpu_leases or forecast.horizon_seconds > gpu_leases[page][0]
+                       for page in request.page_ids):
                 continue
-            if ((len(gpu_pages | request.gpu_page_ids)*request.page_size > gpu_budget_tokens)
-                    or (len(host_pages | request.host_page_ids)*request.page_size > host_budget_tokens)):
+            if len(protected_pages | request.page_ids)*request.page_size > protection_budget_tokens:
                 continue
-            gpu_integral = added_residency(request.gpu_page_ids, gpu_leases, forecast,
+            gpu_integral = added_residency(request.page_ids, gpu_leases, forecast,
                                            forecast.extra_gpu_seconds_per_page, request.page_size)
-            host_integral = added_residency(request.host_page_ids, host_leases, forecast,
+            host_integral = added_residency(request.page_ids, host_leases, forecast,
                                             forecast.extra_host_seconds_per_page, request.page_size)
             event = request.reuse_event_key or request.owner_id
             # Credit each target READ once. Include the paired intervention's
@@ -234,7 +218,7 @@ def _allocate_retention_greedy(requests, *, gpu_budget_tokens, host_budget_token
             value = saved-lambda_gpu*gpu_integral-lambda_host*host_integral
             if value > 0:
                 choice = RetentionChoice(request.owner_id, forecast.horizon_seconds,
-                    saved, gpu_integral, host_integral, value, gpu, host,
+                    saved, gpu_integral, host_integral, value, added_tokens,
                     forecast.evidence_digest, event)
                 candidates.append(choice)
         if not candidates:
@@ -242,8 +226,7 @@ def _allocate_retention_greedy(requests, *, gpu_budget_tokens, host_budget_token
         def priority(item):
             if not density:
                 return (False, item.value, item.value, item.owner_id)
-            capacity = ((item.marginal_gpu_tokens/gpu_budget_tokens if gpu_budget_tokens else 0)
-                        +(item.marginal_host_tokens/host_budget_tokens if host_budget_tokens else 0))
+            capacity = item.marginal_protected_tokens
             # Renewing an already covered page can add value without adding capacity.
             return (capacity == 0, item.value/capacity if capacity else item.value,
                     item.value, item.owner_id)
@@ -330,6 +313,8 @@ class EmpiricalRetentionModel:
             raise ValueError("retention fit requires paired observations")
         if any(row.get("target_demand_rule") != TARGET_DEMAND_RULE for row in (*rows, *reuse_rows)):
             raise ValueError("retention fit requires exact complete READ demand labels")
+        if any(row.get("control_cost_rule") != RETENTION_CONTROL_RULE for row in rows):
+            raise ValueError("retention fit requires owner-call control labels separated from allocation cost")
         names = RETENTION_FEATURE_NAMES if feature_names is None else tuple(feature_names)
         schema = cls._schema(rows, names) if feature_schema is None else feature_schema
         model = cls({}, schema)
@@ -346,7 +331,7 @@ class EmpiricalRetentionModel:
             reuse_groups[cls._key(bucket, row["cache_scope_hash"], row["horizon_seconds"])].append(row)
         forecasts = {}
         for key, cohort in groups.items():
-            if len({session_group(row, components) for row in cohort}) < 2:
+            if len({session_group(row, components) for row in cohort}) < MIN_RETENTION_GROUPS:
                 continue
             cohort = balance_session_rows(cohort, components)
             reused = [row for row in cohort if row["reused"]]
@@ -385,6 +370,9 @@ class EmpiricalRetentionModel:
                 host_seconds/(host_pages*cohort[0]["page_size"]) if host_pages else 0,
                 cohort[0]["cache_scope_hash"], evidence,
                 control, native_window-retained_window-target_gain+control, native_window, retained_window)
+        if not forecasts:
+            raise ValueError("retention fit has no supported feature/scope/TTL bucket: each needs at least "
+                             f"{MIN_RETENTION_GROUPS} independent session groups and observed reuse outcomes")
         model = cls(forecasts, schema)
         model.independent_samples = len(components)
         return model
@@ -393,8 +381,10 @@ class EmpiricalRetentionModel:
         return self.forecasts[self._key(self.feature_bucket(features), cache_scope_hash, horizon_seconds)]
 
     def to_dict(self):
-        return {"kind": "paired_native_retention_v5", "feature_schema": self.feature_schema,
+        return {"kind": "paired_native_retention_v6", "feature_schema": self.feature_schema,
                 "target_demand_rule": TARGET_DEMAND_RULE,
+                "control_cost_rule": RETENTION_CONTROL_RULE,
+                "minimum_independent_groups_per_bucket": MIN_RETENTION_GROUPS,
                 "value_basis": "marginal exact source-demand READ saving minus control and paired external-request penalty; full protected-set net measured by set intervention",
                 "bin_convention": "left_closed_right_open; None is missing",
                 "independent_samples": self.independent_samples,
@@ -404,8 +394,9 @@ class EmpiricalRetentionModel:
 
     @classmethod
     def from_dict(cls, value):
-        if (value["kind"] != "paired_native_retention_v5"
-                or value.get("target_demand_rule") != TARGET_DEMAND_RULE):
+        if (value["kind"] != "paired_native_retention_v6"
+                or value.get("target_demand_rule") != TARGET_DEMAND_RULE
+                or value.get("control_cost_rule") != RETENTION_CONTROL_RULE):
             raise ValueError("unknown retention model format")
         return cls({key: PrefixForecast(**row) for key, row in value["forecasts"].items()}, value["feature_schema"],
                    independent_samples=value["independent_samples"])
@@ -547,6 +538,7 @@ class PrefixReadObserver:
         self.owners = PrefixObserver(store, engine)
         self.runtime = self.owners.runtime
         self._allocation_lock = asyncio.Lock()
+        self._control_observations = deque(maxlen=32)
         if settings["mode"] not in {"fixed_ttl", "value"}:
             raise ValueError("prefix callback requires fixed_ttl or value mode")
         self.model = None
@@ -556,6 +548,29 @@ class PrefixReadObserver:
             if not self.model.forecasts:
                 raise ValueError("retention value needs paired native observations")
             self.model_digest = hashlib.sha256(raw).hexdigest()
+
+    @property
+    def control_observation_count(self):
+        return len(self._control_observations)
+
+    def predicted_control_ms(self):
+        """One future READ callback, estimated only from actual complete callbacks."""
+        if not self._control_observations:
+            return None
+        return sum(self._control_observations)/len(self._control_observations)
+
+    def observe_control(self, elapsed_ms, receipt):
+        """Decompose the executor's existing prefix_control_ms; charge nothing again."""
+        self._control_observations.append(elapsed_ms)
+        owner = receipt["prefix_owner_control"]
+        owner_ms = owner["retain_ms"]+owner["release_ms"]
+        receipt["control_observation"] = dict(total_ms=elapsed_ms,
+            allocation_fixed_ms=elapsed_ms-owner_ms, owner_mutations_ms=owner_ms,
+            source="actual_prefix_control_ms", sample_count=self.control_observation_count,
+            accounting="decomposition of the already charged callback, not an additional cost")
+        if "predicted_set_value_before_control_ms" in receipt:
+            receipt["predicted_set_net_value_ms"] = receipt["predicted_set_value_before_control_ms"]-elapsed_ms
+            receipt["set_value_scope"] = "deduplicated expected savings and residency prices minus this complete observed callback once; not a measured set-intervention benefit"
 
     @staticmethod
     def _features(plan, sources, accesses, now):
@@ -649,9 +664,11 @@ class PrefixReadObserver:
         # Observation and the resulting owner changes must see one allocation
         # order, including callbacks restoring an already completed READ.
         async with self._allocation_lock:
-            return await self._observe_and_allocate(plan, task, units, rendered, record)
+            control = dict(retain_ms=0.0, release_ms=0.0, retain_calls=0, release_calls=0)
+            result = await self._observe_and_allocate(plan, task, units, rendered, record, control)
+            return {**result, "prefix_owner_control": control}
 
-    async def _observe_and_allocate(self, plan, task, units, rendered, record):
+    async def _observe_and_allocate(self, plan, task, units, rendered, record, control):
         from controller.reading import stable_prefix_input_ids, stable_prefix_messages, stable_source_payload
         session_id = record.engine_epoch.business_session_id
         info = await self.engine.info()
@@ -707,15 +724,20 @@ class PrefixReadObserver:
             step_id=record.step_id, receipt=record.receipt, prefix_input_ids=prefix_ids, sources=sources)
         if self.settings["mode"] == "fixed_ttl":
             choice = dict(qualification_only=True, features=features, reuse_event_key=event)
+            started = time.monotonic()
             result = await self.owners.observe(**arguments, ttl_seconds=self.settings["ttl_seconds"],
                 policy="fixed_ttl_mechanism", policy_choice=choice)
+            control["retain_ms"] += (time.monotonic()-started)*1000
+            control["retain_calls"] += 1
         else:
-            result = await self._allocate_value(plan, arguments, inspected, features, time.monotonic_ns(), event)
+            result = await self._allocate_value(plan, arguments, inspected, features, time.monotonic_ns(), event,
+                                                control=control)
         self.store.complete_prefix_access(owner_id=owner_id,
             native_attempt_id=record.receipt.attempt_id, result=result)
         return result
 
-    async def _allocate_value(self, plan, current, inspected, features, now, event_key):
+    async def _allocate_value(self, plan, current, inspected, features, now, event_key, *, control=None):
+        control = control if control is not None else dict(retain_ms=0.0, release_ms=0.0, retain_calls=0, release_calls=0)
         scope, current_id = inspected["cache_scope_hash"], current["owner_id"]
         curves = {current_id: self._forecasts(features, scope)}
         feature_rows, events = {current_id: features}, {current_id: event_key}
@@ -753,8 +775,7 @@ class PrefixReadObserver:
                 active.append(RetentionRequest.from_receipt(native[old.owner_id], forecast,
                     reuse_event_key=events[old.owner_id]))
 
-        budgets = dict(gpu_budget_tokens=self.settings["gpu_budget_tokens"],
-            host_budget_tokens=self.settings["host_budget_tokens"], lambda_gpu=self.settings["lambda_gpu"],
+        budgets = dict(protection_budget_tokens=self.settings["protection_budget_tokens"], lambda_gpu=self.settings["lambda_gpu"],
             lambda_host=self.settings["lambda_host"])
         requests = [RetentionRequest.from_receipt(receipts[owner_id], forecast,
                 reuse_event_key=events[owner_id])
@@ -772,7 +793,10 @@ class PrefixReadObserver:
         final_ids = kept_ids | selected.keys()
         for owner_id in native.keys()-final_ids:
             if self.store.prefix_owner(owner_id) is not None:
+                started = time.monotonic()
                 await self.owners.release(owner_id, reason="nonpositive_or_uncalibrated_marginal_value")
+                control["release_ms"] += (time.monotonic()-started)*1000
+                control["release_calls"] += 1
         current_ack = (native[current_id] if current_id in kept_ids else
             {**inspected, "state": "UNRETAINED", "policy": "value",
              "policy_choice": {"calibrated": bool(curves[current_id]), "features": features,
@@ -782,10 +806,11 @@ class PrefixReadObserver:
             forecast = next(point for point in curves[owner_id] if point.horizon_seconds == choice.ttl_seconds)
             policy_choice = {**asdict(choice), "model_digest": self.model_digest,
                 "trigger_native_attempt_id": trigger,
-                "capacity_basis": "unique full causal pages; incremental lease residency beyond active protection",
+                "capacity_basis": "one logical capacity of unique full causal pages; native GPU/Host placement unchanged",
                 "raw_features": feature_rows[owner_id],
                 "feature_bucket": self.model.feature_bucket(feature_rows[owner_id]),
                 "forecast": asdict(forecast)}
+            started = time.monotonic()
             if owner_id == current_id:
                 current_ack = await self.owners.observe(**current, ttl_seconds=choice.ttl_seconds,
                     policy="paired_native_value", policy_choice=policy_choice)
@@ -795,7 +820,14 @@ class PrefixReadObserver:
                     attempt_id=old.attempt_id, step_id=old.step_id, receipt=old.receipt,
                     prefix_input_ids=old.prefix_input_ids, sources=old.sources, ttl_seconds=choice.ttl_seconds,
                     policy="paired_native_value", policy_choice=policy_choice)
+            control["retain_ms"] += (time.monotonic()-started)*1000
+            control["retain_calls"] += 1
+        owner_prediction = sum(next(point.retention_control_ms for point in curves[choice.owner_id]
+            if point.horizon_seconds == choice.ttl_seconds) for choice in choices)
         return {**current_ack, "retention_choices": [asdict(choice) for choice in choices],
+            "predicted_set_value_before_control_ms": sum(choice.value for choice in allocated)+owner_prediction,
+            "predicted_owner_control_ms": owner_prediction,
+            "prefix_owner_control": control,
             "existing_retention_owners": sorted(kept_ids-selected.keys()),
             "retention_candidates": [{"owner_id": owner_id,
                 "reuse_event_key": events[owner_id], "action_feasible": feasible[owner_id],

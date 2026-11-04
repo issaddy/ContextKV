@@ -80,7 +80,7 @@ def prepare(args, root):
     if args.value_model is not None:
         value_policy = dict(mode="value", model_path=str(Path(args.value_model).resolve()),
             horizon_seconds_choices=[15, 60, 180],
-            gpu_budget_tokens=8192, host_budget_tokens=16384, lambda_gpu=0.0, lambda_host=0.0)
+            protection_budget_tokens=8192, lambda_gpu=0.0, lambda_host=0.0)
         for method in tuple(methods):
             value = deepcopy(method)
             value["id"] = method["id"].removesuffix("_native")+"_value"
@@ -223,7 +223,7 @@ def prepare_full_queue(args, root):
         output_tokens_per_fact=config["reading"]["output_tokens_per_fact"],
         prefix_directory=True, gap_limits=gap_limits) if needs_gain else None
     value_policy = dict(mode="value", model_path=str(Path(args.value_model).resolve()),
-        horizon_seconds_choices=[15, 60, 180], gpu_budget_tokens=8192, host_budget_tokens=16384,
+        horizon_seconds_choices=[15, 60, 180], protection_budget_tokens=8192,
         lambda_gpu=0.0, lambda_host=0.0) if needs_value else None
     matrix["methods"] = [
         dict(id=f"{name}_{policy}", strategy=strategy, overrides={"execution": {
@@ -235,7 +235,9 @@ def prepare_full_queue(args, root):
         matrix["methods"].insert(0, dict(id="E0_native", strategy="B6", overrides={
             "reading": {"layout": "task_first", "packing": "mixed", "numeric_need_isolation": True},
             "execution": {"plan_gain": None, "prefix_retention": {"mode": "native"}}}))
-    matrix["selection"]["include_ablations"] = False
+    reference = "E0_native" if "E0_native" in selected_methods else matrix["methods"][0]["id"]
+    matrix["selection"].update(include_ablations=False, baseline=reference,
+                               test_comparators=[reference])
     config_path = root/"frozen-A-study.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
     cohorts = matrix["cohorts"]["dev"]

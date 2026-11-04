@@ -11,7 +11,7 @@ import time
 from adapters.history_state import validate_task_refs
 from controller.action_proposals import (GapRetrievalRequest as GapRetrievalRequest,
     build_observed_action_plans as build_observed_action_plans, gap_query as gap_query,
-    BOUNDED_CONTINUATION, continuation_gap, continuation_read, gap_retrieval_plan)
+    BOUNDED_CONTINUATION, bind_read_parents, continuation_gap, continuation_read, gap_retrieval_plan)
 from controller.context_schema import EvidencePool, ReadingOutcome, ReadTask
 from controller.context_budget import bind_answer_window
 from controller.plan_policy import CompleteCost, complete_plan
@@ -290,7 +290,7 @@ class FixedCounterfactualRuntime:
                     if remaining_steps < 2:  # terminal READ plus committed ANSWER
                         break
                     task = replace(ready_terminal, step_id="bounded-terminal:"+ready_terminal.step_id,
-                        predecessor_step_ids=(), input_claim_ids=tuple(claim.claim_id for claim in state.claims))
+                        predecessor_step_ids=())
                     plan = replace(plan, steps=(*plan.steps, task))
                     state = replace(state, plan=plan)
                 else:
@@ -313,17 +313,20 @@ class FixedCounterfactualRuntime:
                     from controller.evidence_planner import close_dependencies
                     units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
                     terminal_units = close_dependencies(tuple(unit.unit_id for unit in novel), units)
+                    parents = tuple(dict.fromkeys(parent for need in continuation_gap(state, used_gap=False)
+                                                  for parent in need.parent_claim_ids))
+                    by_id = {claim.claim_id: claim for claim in state.claims}
                     gap_plan = build_read_plan(plan.task_state, replace(plan.selected_set, selected_units=terminal_units),
                         "selected_sources", plan.budget, template=template, snapshot=snapshot,
-                        input_claims=state.claims, reading_mode=plan.reading_mode,
+                        input_claims=tuple(by_id[parent] for parent in parents), reading_mode=plan.reading_mode,
                         separate_needs=plan.separate_needs, numeric_identity=plan.numeric_identity,
                         read_layout=plan.read_layout, read_packing=plan.read_packing,
                         answer_system_prompt=plan.answer_system_prompt)
                     reads = tuple(task for task in gap_plan.steps if task.kind == "READ")
                     if not reads:
                         break
-                    task = replace(reads[0], step_id="bounded-terminal:"+reads[0].step_id,
-                        predecessor_step_ids=(), input_claim_ids=tuple(claim.claim_id for claim in state.claims))
+                    task = replace(bind_read_parents(reads[0], state),
+                        step_id="bounded-terminal:"+reads[0].step_id, predecessor_step_ids=())
                     selected = replace(plan.selected_set, selected_units=tuple({
                         **{unit.unit_id: unit for unit in plan.selected_set.selected_units},
                         **{unit.unit_id: unit for unit in gap_plan.selected_set.selected_units}}.values()))

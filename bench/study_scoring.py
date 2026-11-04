@@ -349,7 +349,9 @@ async def _version_scores(config, spec, directory, settings):
                 requirements = reference.get("goal_conditions")
                 if settings.get("project_reference_only", False):
                     judged_audit = {**audit, "retrieved_evidence": [], "audit_evidence": [],
-                        "visible_evidence_manifest": [], "citation_scope": []}
+                        "visible_evidence_manifest": [], "citation_scope": [],
+                        "conclusion_source_manifest": [], "evaluation_contexts": [],
+                        "reading_conclusions": None}
                     requirements = {"requirement": audit["query"], "dimensions": list(settings["project_weights"])}
                 try:
                     record = await judge.evaluate(judged_audit, reference=reference, requirements=requirements)

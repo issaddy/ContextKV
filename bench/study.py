@@ -280,7 +280,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             audit_path=directory/"audit.jsonl", visible_evidence_manifest=response.visible_evidence_manifest,
             audit_evidence=tuple(blocks.values()), input_ids=attempt.plan.candidate.input_ids,
             output_ids=response.output_ids, truncated=response.truncated,
-            citation_scope=response.citation_scope, measurement_kind="hardware")
+            citation_scope=response.citation_scope, measurement_kind="hardware",
+            reading_outcome=attempt.reading_outcome, reference_map=attempt.plan.candidate.reference_map)
         trace = provider.traces.pop((session_id, request_id), {})
         internal_ms = [step["elapsed_ms"] for step in response.step_metrics if "elapsed_ms" in step]
         model_work_ms = (response.engine_elapsed_ms+sum(internal_ms)

@@ -279,9 +279,10 @@ def _interval(values, confidence):
     return [_quantile(values, alpha), _quantile(values, 1-alpha)]
 
 
-def paired_comparisons(matrix, rows, baseline="B0", split="test", *, samples=None, seed=None):
+def paired_comparisons(matrix, rows, baseline=None, split="test", *, samples=None, seed=None):
     """Resample whole conversations/documents, retaining paired actual turns."""
     selection = matrix.get("selection", {})
+    baseline = baseline if baseline is not None else selection.get("baseline", matrix["methods"][0]["id"])
     samples = samples if samples is not None else selection.get("bootstrap_samples", 5000)
     rng = random.Random(matrix.get("seed", 42) if seed is None else seed)
     confidence = selection.get("confidence", .95)

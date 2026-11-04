@@ -327,12 +327,12 @@ def interpret(turn: OnlineTurn, memory: RetrievalState) -> TaskState:
 
 
 def restore_source_metadata(source_index, units):
-    """Rehydrate the public catalogue carried by persisted selected evidence."""
+    """Restore document metadata; table identity and heading belong to windows."""
     for unit in units:
         metadata = {name: value for name, value in (
             ("document_family", unit.document_family), ("valid_from", unit.valid_from),
-            ("valid_to", unit.valid_to), ("published_at", unit.published_at), ("heading", unit.heading),
-            ("table_id", unit.table_id), ("applicability", dict(unit.applicability)),
+            ("valid_to", unit.valid_to), ("published_at", unit.published_at),
+            ("applicability", dict(unit.applicability)),
             ("version_order", unit.version_order), ("current", unit.current)) if value is not None and value != ""}
         for span in unit.source_spans:
             current = source_index.corpus_index.source_metadata.get(span.source_key, {})
@@ -393,6 +393,60 @@ TASK_NEED_SEMANTICS = (
     "source scope from operation=enumerate/count/sum alone. Do not expand a previously selected task's "
     "scope without a current or inherited actual user request for the complete source range."
 )
+
+TASK_TEACHER_SYSTEM = ("Interpret the current task using the indexed literal text of visible_windows. "
+          "The current question is the window named by question_window_id. "
+          "Each [i] marks the next word or punctuation token, with indices local to that window. "
+          "For a TextRef return window_id and boundary_tokens:[i,j], the two INCLUDED visible indices "
+          "of the first and last tokens to cite. Equal indices cite one token. Order is irrelevant. "
+          "Use only indices shown in that window; do not calculate character offsets or cite hidden text. "
+          "Prior-state ledger refs are stored character coordinates and are not output citation indices. "
+          "Use null for an absent key_span or predicate_span, and empty arrays when no references apply. "
+          "If the actual request adds no condition, output conditions:{}. "
+          "VERSION requires an actual user version or time restriction. Catalogue versions and output "
+          "measurement or currency units do not establish VERSION conditions. "
+          "Keep the active object and needs for followups. For a correction emit REPLACE linked to prior condition IDs. "
+          "Represent every distinct requested answer point as a need, including related points requested together; "
+          "choose the operation for each point and preserve its question anchors. "
+          "Select an old task for revisits. Predict operations and current/explicit/as_of/compare version intent. "
+          "Distinguish at-date from before/after. For relative previous/next policy, point source_turns "
+          "to the actual turn whose source version anchors that relation. "
+          "Do not produce answer facts. Use an empty resume_task_id for a new task. "
+          "A continuation must name its exact prior task ID. Condition targets and supersedes must select "
+          "condition IDs from that task's active state; a new task adds conditions without old targets. "
+          "conditions and needs are objects with contiguous keys c0..c{k-1} and n0..n{m-1}. "
+          "Their values do not contain condition_id or need_id: the controller assigns those IDs. "
+          "A need may name only existing prior needs or earlier current keys, never itself or a later need. "
+          "Counting and summing the same population are independent operations. A shared pronoun or "
+          "the order of the requests does not create a dependency unless the count itself is used in the later formula. "
+          "A need's current condition IDs must name conditions actually emitted in this object. "
+          "Emit ADD/REPLACE/COMPARE only for materialized active conditions. KEEP means no update. "
+          "Use condition_removals with original predicate spans and prior targets for REMOVE events; "
+          "removal events cannot be referenced as current conditions. "
+          "Select document_families and version_ids only through supplied F/V catalogue aliases; "
+          "literal versions may have prefixes different from user wording. Leave unknown IDs empty and "
+          "retain literal version/date wording through original TextRefs. The catalogue is source metadata, "
+          "not an answer oracle. For an as-of date, use the source catalogue's declared valid_from/to "
+          "and reference_date to select the final applicable resolved_version_ids; never invent unknown dates. "
+          "resolved_version_ids are the final selected versions, while version_ids/source_turns may identify "
+          "anchors for before/after. Preserve the user's temporal_relation and original time_refs. "
+          "When dates are unknown, leave date-based resolved_version_ids empty.\n\n"
+          "Example current question window w0: [0]Report [1]the [2]distance [3]in "
+          "[4]kilometers [5]and [6]the [7]duration [8]in [9]minutes[10].\n"
+          'Example output: {"relation":"standalone","history_spans":[],"resume_task_id":"",'
+          '"version_intent":{"mode":"current","temporal_relation":"at","document_families":[],'
+          '"version_ids":[],"resolved_version_ids":[],"time_refs":[],"source_turns":[]},'
+          '"conditions":{},"condition_removals":[],"needs":{'
+          '"n0":{"anchor_spans":[{"window_id":"w0","boundary_tokens":[2,4]}],'
+          '"subject_refs":[],"operation":"lookup","condition_ids":[],"predecessor_need_ids":[],'
+          '"scope":"selected_sources"},'
+          '"n1":{"anchor_spans":[{"window_id":"w0","boundary_tokens":[7,9]}],'
+          '"subject_refs":[],"operation":"lookup","condition_ids":[],"predecessor_need_ids":[],'
+          '"scope":"selected_sources"}}}\n'
+          "Here both units specify the requested results. A user request for a named edition supplies "
+          "a VERSION restriction; a user request for the rule in force on a specified date supplies "
+          "as_of intent with a reference to that date.\n\n"+TASK_NEED_SEMANTICS)
+
 
 def budget_task_catalogue(tokenizer, query, catalogue, prior_tasks, max_input_tokens=8192, current_turn_id=0):
     """Reserve one third of non-question input for a relevant public directory."""
@@ -460,6 +514,150 @@ def task_catalogue_candidates(catalogue):
     return versions, families
 
 
+def teacher_messages(body):
+    return [{"role": "system", "content": TASK_TEACHER_SYSTEM},
+            {"role": "user", "content": json.dumps(body, ensure_ascii=False, separators=(",", ":"))}]
+
+
+def teacher_task_payload(turn, windows, memory, prior_tasks, catalogue):
+    """Render selected tasks together with their original condition/Need closure."""
+    from controller.serialization import to_jsonable
+    latest = {state.task_id: state for state in prior_tasks}
+    all_needs = {need.need_id: need for state in memory.prior_task_states for need in state.needs}
+    all_conditions = {condition.condition_id: condition for state in memory.prior_task_states
+                      for condition in state.conditions}
+    needs = {need.need_id: need for state in latest.values() for need in state.needs}
+    pending = list(needs.values())
+    for need in pending:
+        for identity in need.predecessor_need_ids:
+            if identity not in needs:
+                needs[identity] = all_needs[identity]
+                pending.append(needs[identity])
+    conditions = {condition.condition_id: condition for state in latest.values() for condition in state.conditions}
+    # The ledger renders active updates and their named targets. Older target
+    # records contribute literal restrictions, not another update-history chain.
+    for condition in tuple(conditions.values()):
+        conditions.update((identity, all_conditions[identity])
+                          for identity in (*condition.target_refs, *condition.supersedes))
+    conditions.update((identity, all_conditions[identity]) for need in needs.values() for identity in need.condition_ids)
+    task_alias = {identity: f"S{i}" for i, identity in enumerate(latest)}
+    condition_alias = {identity: f"C{i}" for i, identity in enumerate(conditions)}
+    need_alias = {identity: f"N{i}" for i, identity in enumerate(needs)}
+    versions, families = task_catalogue_candidates(catalogue)
+    version_alias = {version: f"V{i}" for i, version in enumerate(versions)}
+    family_alias = {family: f"F{i}" for i, family in enumerate(families)}
+
+    def alias_need(need):
+        need["need_id"] = need_alias[need["need_id"]]
+        need["condition_ids"] = [condition_alias[identity] for identity in need["condition_ids"]]
+        need["predecessor_need_ids"] = [need_alias[identity] for identity in need["predecessor_need_ids"]]
+        return need
+
+    prior_view = to_jsonable(tuple(latest.values()))
+    for item in prior_view:
+        item["task_id"] = task_alias[item["task_id"]]
+        for condition in item["conditions"]:
+            condition["condition_id"] = condition_alias[condition["condition_id"]]
+            condition["target_refs"] = [condition_alias[identity] for identity in condition["target_refs"]]
+            condition["supersedes"] = [condition_alias[identity] for identity in condition["supersedes"]]
+        item["needs"] = [alias_need(need) for need in item["needs"]]
+        for name in ("version_ids", "resolved_version_ids"):
+            item["version_intent"][name] = [version_alias.get(identity, identity)
+                                            for identity in item["version_intent"][name]]
+        item["version_intent"]["document_families"] = [family_alias.get(identity, identity)
+            for identity in item["version_intent"]["document_families"]]
+    owners = text_ref_sources(memory.committed_history, current_turn_id=turn.turn, current_user_text=turn.query)
+    source_windows = [(TextRef(turn.turn, "user", 0, len(turn.query)), turn.query)]
+
+    def include(ref, text=None):
+        if not any(owner.turn_id == ref.turn_id and owner.speaker == ref.speaker
+                   and owner.start <= ref.start and ref.end <= owner.end for owner, _ in source_windows):
+            source_windows.append((ref, text_ref_text(ref, owners) if text is None else text))
+
+    for window in windows:
+        include(window.ref, window.text)
+    for state in latest.values():
+        for ref in (*state.working_history, *state.version_intent.time_refs):
+            include(ref)
+    for need in needs.values():
+        for ref in (*need.anchor_spans, *need.subject_refs):
+            include(ref)
+    condition_text = {}
+    for identity, condition in conditions.items():
+        parts = {}
+        for name, refs in (("key", (condition.key_span,)), ("predicate", (condition.predicate_span,)),
+                           ("values", condition.value_spans)):
+            parts[name] = []
+            for ref in refs:
+                if ref is not None:
+                    text = text_ref_text(ref, owners)
+                    parts[name].append(text)
+                    include(ref, text)
+        condition_text[condition_alias[identity]] = parts
+    visible, ref_windows = indexed_ref_windows(source_windows)
+    active_needs = {need.need_id for state in latest.values() for need in state.needs}
+    body = {"turn_id": turn.turn, "question_window_id": visible[0]["window_id"],
+        "visible_windows": visible, "prior_condition_text": condition_text,
+        "reference_date": memory.source_index.reference_date if memory.source_index is not None else None,
+        "prior_states": prior_view,
+        "prior_predecessor_needs": [alias_need(to_jsonable(need)) for identity, need in needs.items()
+                                    if identity not in active_needs],
+        "source_scope": to_jsonable(getattr(memory.source_index, "observed_source_scope", ())),
+        "source_versions": [{"version_id": alias, "literal_version": value} for value, alias in version_alias.items()],
+        "source_families": [{"family_id": alias, "literal_family": family,
+            "sources": [{**row, "version_id": version_alias[row["version"]]} for row in catalogue[family]]}
+            for family, alias in family_alias.items()],
+        "wire_schema": TASK_WIRE_SCHEMA, "need_semantics_version": TASK_NEED_SEMANTICS_VERSION}
+    return body, ref_windows, latest, (task_alias, condition_alias, need_alias, version_alias, family_alias)
+
+
+def budget_teacher_input(client, turn, windows, memory):
+    """Select whole observed task closures and history windows under one prompt budget."""
+    maximum = min(client.config.max_input_tokens, client.config.context_window-client.config.max_new_tokens)
+    catalogue = budget_task_catalogue(client.tokenizer, turn.query, task_source_catalogue(memory),
+        memory.prior_task_states, current_turn_id=turn.turn)
+
+    def render(tasks, selected_windows):
+        payload = teacher_task_payload(turn, selected_windows, memory, tasks, catalogue)
+        return payload, client.count_input_tokens(teacher_messages(payload[0]))
+
+    payload, size = render((), ())
+    while size > maximum and catalogue:
+        catalogue.pop(next(reversed(catalogue)))
+        payload, size = render((), ())
+    if size > maximum:
+        raise ValueError("current question and source observation exceed the task input budget")
+    latest = {state.task_id: state for state in memory.prior_task_states}
+    scores = {}
+    for state in latest.values():
+        refs = (*state.working_history, *state.version_intent.time_refs,
+                *(ref for need in state.needs for ref in (*need.anchor_spans, *need.subject_refs)),
+                *(ref for condition in state.conditions for ref in (*condition.value_spans,
+                    *((condition.key_span,) if condition.key_span else ()),
+                    *((condition.predicate_span,) if condition.predicate_span else ()))))
+        matches = [window.score for window in windows if window.ref.turn_id == state.current_turn_id or any(
+            ref.turn_id == window.ref.turn_id and ref.speaker == window.ref.speaker
+            and ref.start < window.ref.end and window.ref.start < ref.end for ref in refs)]
+        if matches:
+            scores[state.task_id] = max(matches)
+    active = memory.prior_task_states[-1].task_id if memory.prior_task_states else None
+    candidates = sorted((state for state in latest.values() if state.task_id == active or state.task_id in scores),
+        key=lambda state: (state.task_id != active, -scores.get(state.task_id, 0), -state.current_turn_id))
+    selected_tasks = []
+    for state in candidates:
+        proposed, size = render((*selected_tasks, state), ())
+        if size <= maximum:
+            selected_tasks.append(state)
+            payload = proposed
+    selected_windows = []
+    for window in sorted(windows, key=lambda item: (-item.score, -item.ref.turn_id, item.ref.start)):
+        proposed, size = render(selected_tasks, (*selected_windows, window))
+        if size <= maximum:
+            selected_windows.append(window)
+            payload = proposed
+    return payload
+
+
 class TeacherTaskModel:
     """Structured Qwen teacher for data collection and first integration runs."""
     def __init__(self, client, *, record_path=None):
@@ -474,73 +672,14 @@ class TeacherTaskModel:
                 "transport": self.client.manifest}
 
     def predict(self, turn, windows, memory):
-        from controller.serialization import to_jsonable
-        latest = {state.task_id: state for state in memory.prior_task_states}
-        task_alias = {task_id: f"S{i}" for i, task_id in enumerate(latest)}
-        condition_ids = tuple(dict.fromkeys(condition.condition_id for state in memory.prior_task_states
-                                             for condition in state.conditions))
-        need_ids = tuple(dict.fromkeys(need.need_id for state in memory.prior_task_states for need in state.needs))
-        condition_alias = {identity: f"C{i}" for i, identity in enumerate(condition_ids)}
-        need_alias = {identity: f"N{i}" for i, identity in enumerate(need_ids)}
+        body, ref_windows, latest, aliases = budget_teacher_input(self.client, turn, windows, memory)
+        task_alias, condition_alias, need_alias, version_alias, family_alias = aliases
         current_conditions = {f"c{i}": f"{turn.task_id}:c{i}" for i in range(TASK_MAX_OBJECTS)}
         current_needs = {f"n{i}": f"{turn.task_id}:n{i}" for i in range(TASK_MAX_OBJECTS)}
-        catalogue = task_source_catalogue(memory)
-        versions, families = task_catalogue_candidates(catalogue)
-        version_alias = {version: f"V{i}" for i, version in enumerate(versions)}
-        family_alias = {family: f"F{i}" for i, family in enumerate(families)}
-        prior_view = to_jsonable(tuple(latest.values()))
-        for item in prior_view:
-            item["task_id"] = task_alias[item["task_id"]]
-            for condition in item["conditions"]:
-                condition["condition_id"] = condition_alias[condition["condition_id"]]
-                condition["target_refs"] = [condition_alias[identity] for identity in condition["target_refs"]]
-                condition["supersedes"] = [condition_alias[identity] for identity in condition["supersedes"]]
-            for need in item["needs"]:
-                need["need_id"] = need_alias[need["need_id"]]
-                need["condition_ids"] = [condition_alias[identity] for identity in need["condition_ids"]]
-                need["predecessor_need_ids"] = [need_alias[identity] for identity in need["predecessor_need_ids"]]
-            item["version_intent"]["version_ids"] = [version_alias.get(identity, identity) for identity in item["version_intent"]["version_ids"]]
-            item["version_intent"]["resolved_version_ids"] = [version_alias.get(identity, identity)
-                for identity in item["version_intent"]["resolved_version_ids"]]
-            item["version_intent"]["document_families"] = [family_alias.get(identity, identity) for identity in item["version_intent"]["document_families"]]
-        owners = text_ref_sources(memory.committed_history, current_turn_id=turn.turn, current_user_text=turn.query)
-        source_windows = [(TextRef(turn.turn, "user", 0, len(turn.query)), turn.query)]
-        source_windows.extend((w.ref, w.text) for w in windows)
-        condition_by_id = {condition.condition_id: condition for state in memory.prior_task_states
-                           for condition in state.conditions}
-        active_conditions = [condition for state in latest.values() for condition in state.conditions]
-        prior_condition_ids = dict.fromkeys(identity for condition in active_conditions
-            for identity in (condition.condition_id, *condition.target_refs, *condition.supersedes))
-        condition_text = {}
-        for identity in prior_condition_ids:
-            condition = condition_by_id[identity]
-            parts = {}
-            for name, refs_ in (("key", (condition.key_span,)), ("predicate", (condition.predicate_span,)),
-                                ("values", condition.value_spans)):
-                parts[name] = []
-                for ref in refs_:
-                    if ref is None:
-                        continue
-                    text = text_ref_text(ref, owners)
-                    parts[name].append(text)
-                    if not any(existing.turn_id == ref.turn_id and existing.speaker == ref.speaker
-                               and existing.start <= ref.start and ref.end <= existing.end
-                               for existing, _ in source_windows):
-                        source_windows.append((ref, text))
-            condition_text[condition_alias[identity]] = parts
-        visible, ref_windows = indexed_ref_windows(source_windows)
         self.last_text_ref_windows = ref_windows
-        body = {"turn_id": turn.turn, "question_window_id": visible[0]["window_id"],
-                "visible_windows": visible, "prior_condition_text": condition_text,
-                "reference_date": memory.source_index.reference_date if memory.source_index is not None else None,
-                "prior_states": prior_view,
-                "source_scope": to_jsonable(getattr(memory.source_index, "observed_source_scope", ())),
-                "source_versions": [{"version_id": alias, "literal_version": value} for value, alias in version_alias.items()],
-                "source_families": [{"family_id": alias, "literal_family": family,
-                    "sources": [{**row, "version_id": version_alias[row["version"]]} for row in catalogue.get(family, ())]}
-                    for family, alias in family_alias.items()]}
-        body["wire_schema"] = self.manifest["wire_schema"]
-        body["need_semantics_version"] = TASK_NEED_SEMANTICS_VERSION
+        observed_turns = {window["turn_id"] for window in ref_windows.values()}
+        observed_turns.update(turn_id for state in latest.values() for turn_id in state.version_intent.source_turns)
+        version_turns = tuple(row.turn_id for row in memory.committed_history if row.turn_id in observed_turns)
         definitions = owned_text_ref_definitions(ref_windows)
         ref_schema = {"$ref": "#/$defs/TextRef"}
         refs = {"type": "array", "maxItems": TASK_MAX_REFS, "items": ref_schema}
@@ -581,9 +720,8 @@ class TeacherTaskModel:
                 "resolved_version_ids": {"type": "array", "maxItems": min(16, len(version_alias)),
                     "items": {"type": "string", **({"enum": list(version_alias.values())} if version_alias else {})}},
                 "time_refs": refs,
-                "source_turns": {"type": "array", "maxItems": min(TASK_MAX_VERSION_TURNS, len(memory.committed_history)),
-                    "items": {"type": "integer", **({"enum": [row.turn_id for row in memory.committed_history]}
-                        if memory.committed_history else {})}}},
+                "source_turns": {"type": "array", "maxItems": min(TASK_MAX_VERSION_TURNS, len(version_turns)),
+                    "items": {"type": "integer", **({"enum": list(version_turns)} if version_turns else {})}}},
                 "required": ["mode", "temporal_relation", "document_families", "version_ids", "resolved_version_ids", "time_refs", "source_turns"],
                 "additionalProperties": False}}
         definitions["VersionIntent"] = properties.pop("version_intent")
@@ -635,60 +773,7 @@ class TeacherTaskModel:
                                  "additionalProperties": False})
         schema = {"type": "object", "anyOf": branches, "$defs": definitions}
         self.last_response_schema = schema
-        system = ("Interpret the current task using the indexed literal text of visible_windows. "
-                  "The current question is the window named by question_window_id. "
-                  "Each [i] marks the next word or punctuation token, with indices local to that window. "
-                  "For a TextRef return window_id and boundary_tokens:[i,j], the two INCLUDED visible indices "
-                  "of the first and last tokens to cite. Equal indices cite one token. Order is irrelevant. "
-                  "Use only indices shown in that window; do not calculate character offsets or cite hidden text. "
-                  "Prior-state ledger refs are stored character coordinates and are not output citation indices. "
-                  "Use null for an absent key_span or predicate_span, and empty arrays when no references apply. "
-                  "If the actual request adds no condition, output conditions:{}. "
-                  "VERSION requires an actual user version or time restriction. Catalogue versions and output "
-                  "measurement or currency units do not establish VERSION conditions. "
-                  "Keep the active object and needs for followups. For a correction emit REPLACE linked to prior condition IDs. "
-                  "Represent every distinct requested answer point as a need, including related points requested together; "
-                  "choose the operation for each point and preserve its question anchors. "
-                  "Select an old task for revisits. Predict operations and current/explicit/as_of/compare version intent. "
-                  "Distinguish at-date from before/after. For relative previous/next policy, point source_turns "
-                  "to the actual turn whose source version anchors that relation. "
-                  "Do not produce answer facts. Use an empty resume_task_id for a new task. "
-                  "A continuation must name its exact prior task ID. Condition targets and supersedes must select "
-                  "condition IDs from that task's active state; a new task adds conditions without old targets. "
-                  "conditions and needs are objects with contiguous keys c0..c{k-1} and n0..n{m-1}. "
-                  "Their values do not contain condition_id or need_id: the controller assigns those IDs. "
-                  "A need may name only existing prior needs or earlier current keys, never itself or a later need. "
-                  "Counting and summing the same population are independent operations. A shared pronoun or "
-                  "the order of the requests does not create a dependency unless the count itself is used in the later formula. "
-                  "A need's current condition IDs must name conditions actually emitted in this object. "
-                  "Emit ADD/REPLACE/COMPARE only for materialized active conditions. KEEP means no update. "
-                  "Use condition_removals with original predicate spans and prior targets for REMOVE events; "
-                  "removal events cannot be referenced as current conditions. "
-                  "Select document_families and version_ids only through supplied F/V catalogue aliases; "
-                  "literal versions may have prefixes different from user wording. Leave unknown IDs empty and "
-                  "retain literal version/date wording through original TextRefs. The catalogue is source metadata, "
-                  "not an answer oracle. For an as-of date, use the source catalogue's declared valid_from/to "
-                  "and reference_date to select the final applicable resolved_version_ids; never invent unknown dates. "
-                  "resolved_version_ids are the final selected versions, while version_ids/source_turns may identify "
-                  "anchors for before/after. Preserve the user's temporal_relation and original time_refs. "
-                  "When dates are unknown, leave date-based resolved_version_ids empty.\n\n"
-                  "Example current question window w0: [0]Report [1]the [2]distance [3]in "
-                  "[4]kilometers [5]and [6]the [7]duration [8]in [9]minutes[10].\n"
-                  'Example output: {"relation":"standalone","history_spans":[],"resume_task_id":"",'
-                  '"version_intent":{"mode":"current","temporal_relation":"at","document_families":[],'
-                  '"version_ids":[],"resolved_version_ids":[],"time_refs":[],"source_turns":[]},'
-                  '"conditions":{},"condition_removals":[],"needs":{'
-                  '"n0":{"anchor_spans":[{"window_id":"w0","boundary_tokens":[2,4]}],'
-                  '"subject_refs":[],"operation":"lookup","condition_ids":[],"predecessor_need_ids":[],'
-                  '"scope":"selected_sources"},'
-                  '"n1":{"anchor_spans":[{"window_id":"w0","boundary_tokens":[7,9]}],'
-                  '"subject_refs":[],"operation":"lookup","condition_ids":[],"predecessor_need_ids":[],'
-                  '"scope":"selected_sources"}}}\n'
-                  "Here both units specify the requested results. A user request for a named edition supplies "
-                  "a VERSION restriction; a user request for the rule in force on a specified date supplies "
-                  "as_of intent with a reference to that date.\n\n"+TASK_NEED_SEMANTICS)
-        messages = [{"role": "system", "content": system},
-                    {"role": "user", "content": json.dumps(body, ensure_ascii=False)}]
+        messages = teacher_messages(body)
         completion = self.client.complete(messages, response_format={"type": "json_schema", "json_schema": {
                 "name": "contextkv_task_spans", "strict": True, "schema": schema}})
         if self.record_path is not None:

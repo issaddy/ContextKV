@@ -29,7 +29,7 @@ P1 支持策略配置为 `configs/evidence_policy_fixed_qwen.yaml`。
 `runs/study/auxiliary/cohorts/full/cohort_manifest.json`。
 task/support 配置必填 `training.cohort_manifest`；P1 采集必填
 `collection.cohort_manifest` 和 `cohort_split`，开发采集显式选择 `dev`。
-B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v3` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上执行一个动作后重新观察。旧一步资产不用于这个监督目标，仅重新采集目标实际变化的状态。
+B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v4` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上与反事实 READ 共用相关父结论绑定，线上执行一个动作后重新观察。成本资产同时记录 `prefix_control_scope=native_excludes_prefix_control`，价值 C 的首步控制预测另加一次。当前协议的答案与费用在恢复推理后重新采集。
 
 B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_support_state_v2`，使用实际已付资源和剩余额度；旧特征资产不能直接用于该决策。
 
@@ -137,9 +137,11 @@ B 从冻结 A 的真实观察采集动作分支；失败尝试中已完成步骤
 计数与总额同时匹配才得 1 分；
 公开 Loong test 保留官方 loong_reference_score/100，二者通过 metric_by_split 明确区分。
 
-C 使用 `paired_native_retention_v5` 及 `target_demand_rule=exact_complete_causal_prefix_and_body_ranges_v1`，旧标签不能直接重命名为新目标。训练行必须保存独立会话集合，train/dev 集合互斥；同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。只有相同完整来源需求重访才标注整次下一 READ 的 target 收益；部分页复用仍记录在原生观察与整窗成本中。新增 owner 的目标收益按完整来源需求去重，容量与驻留按共享页增量；配对外部请求代价进入选择，正 collateral 不再额外记为可叠加收益。完整集合的真实净效果仍由同轨 Native/value 对照和物理积分验收。
+C 使用 `paired_native_retention_v6`、`target_demand_rule=exact_complete_causal_prefix_and_body_ranges_v1` 与 `control_cost_rule=owner_call_only_fixed_decision_once_v1`。训练行保存独立会话集合，train/dev 集合互斥；同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。只有相同完整来源需求重访才标注整次下一 READ 的 target 收益；部分页复用仍记录在原生观察与整窗成本中。新增 owner 的目标收益按完整来源需求去重，容量与驻留按共享页增量；配对外部请求代价进入选择，正 collateral 不另计可叠加收益。单 owner 标签计量实际保留调用（ledger＋retain），inspect 与完整 callback 分别记录。完整集合的真实净效果仍由同轨 Native/value 对照和物理积分验收。
 
-C 的两次容量构造共用原有 TTL15/60/180、owner、页并集和需求去重目标，不新增 TTL 网格或原生接口。
+C 的两次容量构造共用原有 TTL15/60/180、owner、页并集和需求去重目标。配置使用单一 `protection_budget_tokens`（联合入口为 8192），GPU/Host 的 Native 物理配额与 `lambda_gpu` / `lambda_host` 驻留价格保留原含义。
+
+`retention_pair_workflow` 先在同一捕获特征桶内选择两组完整、会话互不相交的训练窗口，并在独立开发轨迹中匹配同桶窗口，再核算 Native 与三个 TTL 的总调用预算。选择清单通过 `retention_trace replay --selection` 原样使用。拟合按重放时的实际特征要求每桶至少两个独立会话组；没有支持桶或开发覆盖时，工作流记录无可用资产状态。窗口数量与期限网格保持不变。
 
 C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观察窗。`replay` 与
 `retention_pair_workflow` 默认固定 Native、TTL15、TTL60、TTL180 四臂；
@@ -158,7 +160,7 @@ C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观�
 `profiling.retention_trace reassess --replay-root COMPLETED_REPLAY` 从已完成重放的原始回执重算派生费用，
 保留原请求、采样窗口和全部已付成本，不产生模型调用。
 
-冻结 A 后，联合开发验收使用 `bench.capacity_workflow --full-queue`。主负载 c4 默认执行 E0—E4，c1 默认只执行 E1/E4。E0_native 显式保留 PR3 原行分片、task-first、隔离数值和 Native；P0 支持/查询资产与公共正确性代码共用。
+冻结 A 后，联合开发验收使用 `bench.capacity_workflow --full-queue`。主负载 c4 默认执行 E0—E4，c1 默认只执行 E1/E4。E0_native 显式保留 PR3 原行分片、task-first、隔离数值和 Native；P0 支持/查询资产与公共正确性代码共用。生成矩阵同时写入实际 `selection.baseline` 与测试参照：有 E0 时使用 E0，否则使用已登记的首个方法；冻结与配对汇总读取同一参照。
 必须提供 `--arrival-plan`：JSON 索引格式为 `{"format":"contextkv_dataset_workload_index_v1","datasets":{"DATASET":"/absolute/fixed-arrivals.json"}}`，每个数据集严格覆盖声明队列。
 使用已有请求轨迹离线导出固定相对到达（不产生模型调用）：
 

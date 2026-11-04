@@ -62,11 +62,121 @@ class NumericEngine(MockEngine):
             self.response_text = json.dumps({"format_version": 7,
                 "views": {alias: {parent: payload["needs"][alias]["operation"] == "count"
                     or payload["parents"][parent]["value"] is not None
-                    for parent in value["properties"]} for alias, value in views.items()}})
+                    for parent in value["properties"]} for alias, value in views.items()}}, separators=(",", ":"))
         else:
             self.reads += 1
             self.response_text = json.dumps(self.output)
         return await super().generate(**kwargs)
+
+
+class WindowNumericEngine(NumericEngine):
+    """Extract the four literal records in each original source window."""
+    def __init__(self):
+        super().__init__(None)
+        self.quoted_inputs = set()
+
+    async def quote_batch(self, candidates, fingerprint):
+        self.quoted_inputs.update(candidate.input_ids for candidate in candidates)
+        return await super().quote_batch(candidates, fingerprint)
+
+    async def generate(self, *, response_schema=None, **kwargs):
+        assert kwargs["input_ids"] in self.quoted_inputs
+        if response_schema is None:
+            self.response_text = "160 shipments."
+            return await MockEngine.generate(self, **kwargs)
+        if response_schema["properties"]["format_version"]["const"] != 7:
+            payload = json.loads(bytes(kwargs["input_ids"]).decode().split("<|user|>\n")[-1].split("\n<|end|>")[0])
+            facts = []
+            for unit in payload["units"]:
+                span = unit["source_spans"][0]["span_id"]
+                source = next(alias for alias, identity in payload["fact_protocol"]["sources"].items() if identity == span)
+                for line in unit["text"].splitlines():
+                    entity, quantity = line.split(" mass ")
+                    facts.append(row(entity, quantity.removesuffix(" g."), "g", needs=("n0",), source=source))
+            self.output = response(*facts)
+            self.output["support"] = ["n0"]
+        return await super().generate(response_schema=response_schema, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_large_numeric_selection_fixed_and_rolling_quote_each_pack_and_keep_full_frontier(tmp_path):
+    from controller.cost_model import CostModel
+    from controller.events import EventLog
+    from controller.rolling_policy import RollingPlanRuntime, ZERO_AUX, namespace_plan
+    from controller.schema import Plan
+    from rolling_helpers import NativeObservationFixture
+    from test_observed_action_runtime import LearnedFixture
+    import time
+
+    pairs = tuple(material("\n".join(f"Shipment-register-{index:03d}-{offset:03d} mass {index*4+offset+1} g."
+        for offset in range(4)), name=f"register-{index:03d}") for index in range(40))
+    blocks, units = zip(*pairs)
+    task_state = TaskState("large-count", "Count all shipments.", needs=(Need("count", operation="count"),))
+    plan = build_read_plan(task_state, EvidenceSet("all", units, source_blocks=blocks), "all_supplied_documents",
+        ContextBudget(window_tokens=32000, read_input_tokens=16000, read_output_tokens=2048,
+            output_tokens=64, max_steps=64), template=ByteTemplate(), read_packing="source_windows")
+    assert len(plan.steps) == 40
+    outcomes = []
+    for rolling in (False, True):
+        case = tmp_path / str(rolling)
+        case.mkdir()
+        engine, store = WindowNumericEngine(), SessionStore(case / "state.db")
+        snapshot = store.read_snapshot("source")
+        current = namespace_plan(plan) if rolling else plan
+        attempt = store.begin_attempt("source", "request", "hash", task_state.raw_question, 0)
+        arrived = time.monotonic()
+        executor = ReadingExecutor(store, engine, ByteTemplate(), request_arrived=arrived)
+        if rolling:
+            from controller.candidates import build_plan_candidates
+            runtime = RollingPlanRuntime(LearnedFixture(reads=0), NativeObservationFixture(),
+                reader_checkpoint="reader-fixture", reader_profile_id="profile-fixture", output_budgets=(2048,),
+                mode="observed_actions", gap_limits={"max_units": 2, "max_passages": 2})
+
+            def answers(snapshot, plans, state):
+                return tuple(candidate for item in plans for candidate in build_plan_candidates(snapshot,
+                    task_state.raw_question, item, ByteTemplate(), outcome=state, layouts=("existing",)))
+
+            result = await runtime.run(attempt.attempt_id, snapshot, (current,), executor, engine,
+                ByteTemplate(), CostModel(), answers, arrived=arrived, auxiliary_usage=dict(ZERO_AUX),
+                events=EventLog(case / "events.jsonl"))
+            assert isinstance(result.plan, Plan)
+            outcome = result.outcome
+        else:
+            outcome = await executor.execute_reads(attempt.attempt_id, snapshot, current)
+        assert engine.reads == 40 and engine.selections > 1
+        selected = [record for record in outcome.steps if record.task.operation == "numeric_select"]
+        assert len(selected) == engine.selections
+        assert all(len(record.input_ids)+record.task.output_budget <= plan.budget.window_tokens for record in selected)
+        assert all(len(record.output_ids) <= record.task.output_budget for record in selected)
+        assert all(record.receipt.input_hash == record.metrics["cache_quote"]["quotes"][0]["input_hash"] for record in selected)
+        selection = selected[-1].result.reduction
+        assert ":part:" not in selection.step_id
+        assert len(selection.basis_claim_ids) == len(selection.frontier_claim_ids) == 160
+        assert set(selection.frontier_claim_ids) == {claim.claim_id for record in selected for claim in record.result.claims}
+        count = next(claim for claim in outcome.claims if claim.operation == "count" and claim.kind == "derived")
+        assert count.value == 160 and len(ClaimGraph(outcome.claims).leaf_claims(count.claim_id)) == 160
+        assert outcome.plan.online_tokens_spent == sum(len(record.input_ids)+len(record.output_ids) for record in outcome.steps)
+        if not rolling:
+            from controller.execution import reduction_partitions
+            basis = tuple(claim for claim in outcome.claims if claim.kind == "extract")
+            full = replace(selected[-1].task, step_id=selection.step_id,
+                input_claim_ids=selection.basis_claim_ids, input_budget=64000-1024, output_budget=1024)
+            output_limited = replace(outcome.plan, budget=replace(plan.budget,
+                window_tokens=64000, read_output_tokens=1024))
+            template = ByteTemplate()
+            assert len(template.render(step_messages(output_limited, full, (), basis, snapshot)).input_ids) < full.input_budget
+
+            def selection_size(facts):
+                wire = {"format_version": 7, "views": {"n0": {f"p{i}": False for i in range(len(facts))}}}
+                return len(template.tokenizer.encode(json.dumps(wire, separators=(",", ":")), add_special_tokens=False))
+
+            assert selection_size(basis) > full.output_budget
+            parts = reduction_partitions(output_limited, full, basis, snapshot, template)
+            assert len(parts) > 1 and all(selection_size(facts) <= task.output_budget for task, facts in parts)
+            assert tuple(claim.claim_id for _, facts in parts for claim in facts) == selection.basis_claim_ids
+        outcomes.append((engine.reads, engine.selections, count.value))
+        store.close()
+    assert outcomes[0] == outcomes[1]
 
 
 @pytest.mark.asyncio

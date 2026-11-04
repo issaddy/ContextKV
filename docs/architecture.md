@@ -31,7 +31,9 @@ Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 导出实际 REA
 
 在线检索由 `ServingRetriever.configure_study(interpreter, tokenizer)` 绑定，`retrieve_pool(snapshot, query, request_id)` 返回任务、来源池与检索状态。`Controller.serve_turn(context_plans=...)` 或 `EvidenceSelection.context_plans` 注入计划，`extend_open_needs(plan, open_needs, claims)` 返回带新增原文和阅读单元的 `EvidencePool`。支持评分的查询含每个 Need 的 scope、条件和完整版本意图，区分版本锚点与最终适用版本。先评单段，再按配置评 pair/triple；`selection.utility: support_coverage` 对各 Need 取集合内最大适用性乘联合支持，再求均值。集合搜索展开依赖闭包并用实际 tokenizer 计量完整 prompt；beam、动作与布局候选复用已评分支持，不重复调用教师。
 
-任务视图先预留完整当前问题，再为相关来源目录、历史指针及原文分配有限份额；预算外历史图候选同步移除。rollout 保存实际目录、日期与 scope，标注、训练和评价复用同一观测与目录选择规则。输入不可见的监督不参与拟合，评价保留其分母与不可见原因。
+教师通过 `budget_teacher_input` 先保留当前问题与目录，再按当前任务优先、历史相关性次序选入任务闭包，最后加入其他历史窗口。闭包包含活跃条件及其更新目标、Need 前驱与对应原文；整个 system/user 消息使用实际 tokenizer 统一计量。预算外历史任务不进入输出 schema。rollout 保存实际目录、日期与 scope，标注、训练和评价复用同一观测与目录选择规则。输入不可见的监督不参与拟合，评价保留其分母与不可见原因。
+
+`all_supplied_documents` 在支持评分与集合搜索之前确定，直接生成一个覆盖完整来源的阅读计划。该路径记录 `selection_policy_heads_used=false`；选材路径继续使用现有支持与集合搜索。跨轮恢复只恢复文档级元数据，表格身份与标题由原文窗口重建，保持同一来源的因果 token 前缀稳定。表头、标题、注释先作为数据窗口依赖读取，已覆盖依赖不再单独建立 READ。
 
 ## B：有限阅读、有效结论和收益选择
 
@@ -39,7 +41,7 @@ Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 导出实际 REA
 
 READ 按实际 tokenizer 的输入容量与结构化输出容量打包。同来源、条件、版本下的 count/sum 共享一次实体／量值提取。Wire 5 的数值事实包含原文短摘录，并用短 ID 引用来源、条件、Need 和父事实。`numeric_need_isolation` 保留为对照。来源目录按固定 2048-token、最多 8 个非空原文行形成窗口；超长行使用实际 tokenizer 切分，普通行和表格行保持完整。`source_windows` READ 每次执行一个完整窗口与其来源依赖闭包，按来源坐标排序，不随任务预算重新拼包或切片。source-first 的系统与原文段跨操作一致；数值、bridge、条件、运行别名和输出 schema 均在来源之后。超出实际输入/输出份额的完整窗口明确不进入执行。固定窗口的最终净资源收益由完整质量与成本实验评价。缺口由 `unresolved_needs` 统一计算：后续步骤完成终端 Need 后，早期缺口关闭；不同时间范围分别检索，相同关系合并父结论。
 
-共享数值 READ 全部完成后，每个数值 Need 各声明一次显式 `numeric_select` REDUCE。Wire 7 对每个原事实父 ID 给出必填布尔选择，避免稀疏列表漏掉已读事实；量值、实体、单位和来源沿用原事实。CPU 随后按各自 Need 的选中结果执行 count 或 sum。
+共享数值 READ 全部完成后，每个数值 Need 各声明一次显式 `numeric_select` REDUCE。Wire 7 对每个原事实父 ID 给出必填布尔选择；量值、实体、单位和来源沿用原事实。固定执行与滚动动作共用 `reduction_partitions`，在报价前同时按实际消息输入与 wire7 紧凑布尔结果的输出容量分包，每包独立执行和计费。最后一包的 `ReductionState` 绑定完整逻辑基底与全部已选 frontier，CPU 随后按各自 Need 执行 count 或 sum。
 
 归约计算分两类。
 
@@ -52,10 +54,11 @@ READ 按实际 tokenizer 的输入容量与结构化输出容量打包。同来�
 
 `action_policy.py` 在当前状态比较直接回答、一次 READ、一次 REDUCE 和一次 GAP。`plan_policy.py` 保留完整计划对照的调度与预算接口。
 
-`observed_actions` 模式把直接 ANSWER、一次 READ、一次 REDUCE、一次 GAP 放在同一已观察状态上配对。反事实收益采用 `infer_bridge_ready_or_one_gap_one_terminal_read_v3`：首动作之后，只对尚未满足的 infer 桥接需求接至多一次终端 READ；已有就绪来源优先，否则至多一次 GAP。直接 ANSWER 不续接。线上仍仅执行首动作后重新观察，监督与收益资产绑定相同协议和 `observed_feature_schema=pre_action_budget_support_state_v2`。价值与成本特征同时包含 A 的支持/桥接估计、Need 前驱、已观察终端支持与桥接缺口，以及实际已付 token/墙钟、已执行步骤及对应剩余预算；无界额度用独立标记表达。可选后续在硬步骤不足以完成 READ+ANSWER 或 GAP+READ+ANSWER 时直接进入终端 ANSWER，不启动无预算步骤。
+`observed_actions` 模式把直接 ANSWER、一次 READ、一次 REDUCE、一次 GAP 放在同一已观察状态上配对。反事实收益采用 `infer_bridge_ready_or_one_gap_one_terminal_read_v4`：首动作之后，只对尚未满足的 infer 桥接需求接至多一次终端 READ；已有就绪来源优先，否则至多一次 GAP。线上与反事实均由 `bind_read_parents` 绑定未解需求的相关父结论。直接 ANSWER 不续接。线上仍仅执行首动作后重新观察，监督与收益资产绑定相同协议和 `observed_feature_schema=pre_action_budget_support_state_v2`。价值与成本特征同时包含 A 的支持/桥接估计、Need 前驱、已观察终端支持与桥接缺口，以及实际已付 token/墙钟、已执行步骤及对应剩余预算；无界额度用独立标记表达。可选后续在硬步骤不足以完成 READ+ANSWER 或 GAP+READ+ANSWER 时直接进入终端 ANSWER，不启动无预算步骤。
 GAP 仅在选中后执行并进入步骤账本；返回的新来源与原事实合并，再决定是否阅读。线上与离线共用 `action_proposals.gap_retrieval_plan`，仅排除实际已读来源闭包；未读候选仍可召回，passage 上限为已读数量加声明新增额度，并受原总上限约束。反事实 REDUCE 使用与线上工厂相同的事实基底，不按原 READ Need 别名或 extract 类型再次筛选。
 质量模型学习实际最终质量差。新成本模型用动作前的原生缓存、压力和可编译首步报价预测动作加最终回答的绝对成本；GAP 和 CPU REDUCE 只使用动作前的批级状态。
 在线在同一次原生观测下分别预测动作和 DIRECT，再计算带符号差；采集时不同分支的实测成本差保留为诊断，避免把执行顺序产生的预热收益当作动作收益。
+成本资产声明 `prefix_control_scope=native_excludes_prefix_control`。价值 C 开启时，B 仅给候选首个 READ 加入最近实际完整 callback 的均值；没有观测时诊断保留未知。`prefix_control_ms` 仍是唯一实际计费字段，已付 callback 费用进入累计成本，原生报价中的命中效果不再额外抵扣。
 已付成本加绝对分支成本约束总预算。明确终止且没有提交回答的分支按零交付效用计，原始评分缺失仍保留；暂停和未决分支不进入这类标签。
 `observed_actions` 使用实时原生报价和配对得到的完整分支成本模型，不依赖整计划的执行 profile。
 全来源任务先按原计划逐步完成必要 READ、数值选择和 CPU 归约，再比较继续动作与直接回答。
@@ -66,11 +69,13 @@ REDUCE 的完整基底与 frontier 在首次写入 `COMPLETE` 前统一绑定。
 
 ## C：独立来源前缀与相对 native 的保留价值
 
-旧 lease 的保持、续租与新前缀在同一次容量分配中竞争；分配器以同一去重净目标比较绝对边际价值与新增容量收益密度两次构造，避免大项阻挡更高总收益的小项组合；保持仅使用剩余期限，不发续租调用，未选旧项释放。同 owner 只选一个期限。读取需求由 scope、完整因果页路径和正文 token 范围共同确定；相同首正文页但不同完整路径是不同需求，共享页只在容量与驻留中去重。
+旧 lease 的保持、续租与新前缀在同一次逻辑保护容量 `protection_budget_tokens` 内竞争；分配器以同一去重净目标比较绝对边际价值与新增容量收益密度两次构造，保持仅使用剩余期限，不发续租调用，未选旧项释放。同 owner 只选一个期限。读取需求由 scope、完整因果页路径和正文 token 范围共同确定；相同首正文页但不同完整路径是不同需求，共享页按并集占保护容量。实际 GPU/Host 放置与容量仍由 Native 管理，各层额外驻留使用独立价格。
 
 `prefix_view.py` 按完整因果 token 路径识别来源前缀，`prefix_retention.py` 在业务 READ epoch 结束后以独立 owner 继续保护。Radix/HiCache 负责物理页匹配、迁移与淘汰；策略读取当前 active 保护集合，比较保留、延长或释放带来的边际净收益，共享因果页只收一次新增容量和驻留成本。预测压缩为过去访问状态、当前原生驻留、压力/并发组合三个粗特征；训练按独立会话组等权，同窗 TTL 不扩充样本；已付控制成本不再次收取，原生已有的命中也不重复记作保护收益。
 
-C 配对目标为 `paired_native_retention_v5`，需求规则为 `exact_complete_causal_prefix_and_body_ranges_v1`；旧目标资产不能改名复用。配对重放为 Native、TTL15、TTL60、TTL180 使用同一请求序列、DAG、外部压力和至少 180 秒的共同观察窗。并发窗口按 READ 实际完成顺序登记可选前缀，重放沿用记录中的请求到达间隔。保护期限独立于观察长度。实际原文页需求与原生回执分别记录无重访、GPU 命中、Host 回载和重算，混合访问保留各类页数，空闲驻留持续计费。每个窗口只执行一次 Native，再分别与三个 TTL 作差。集合选择使用去重后的下一次 READ 收益，扣除本次控制、新增驻留价格与配对观测的外部请求代价；正 collateral 不另计叠加奖励；单前缀完整窗口预测单独与两臂窗口成本差比较。固定 DAG 回放解析捕获时的输出，新增生成响应用于实际成本计量。相同来源需求事件的预期读取节省取已覆盖的最大值，共享页按租期增量计费。观察保护集合、分配、释放及保留由同一分配锁串行执行。完整目标重访标签、线上需求键与独立会话分组在拟合和开发汇总中一致；不同完整需求的部分页重叠不重复认领整次下一 READ 的节省，逐 TTL 开发统计仅解释配对臂。
+C 配对目标为 `paired_native_retention_v6`，需求规则为 `exact_complete_causal_prefix_and_body_ranges_v1`，控制规则为 `owner_call_only_fixed_decision_once_v1`。配对重放为 Native、TTL15、TTL60、TTL180 使用同一请求序列、DAG、外部压力和至少 180 秒的共同观察窗。并发窗口按 READ 实际完成顺序登记可选前缀，重放沿用记录中的请求到达间隔。保护期限独立于观察长度。实际原文页需求与原生回执分别记录无重访、GPU 命中、Host 回载和重算，混合访问保留各类页数，空闲驻留持续计费。每个窗口只执行一次 Native，再分别与三个 TTL 作差。单 owner 标签的 `retention_control_ms` 测量实际保留调用（ledger＋retain），共同 inspect 成本另存 `paired_inspection_control_ms`。集合选择扣除候选 owner 调用费、增量驻留价格及外部请求代价；完整 callback 的固定费用仅在整个集合净值中计一次，分配时已付费用不改变边际排序。正 collateral 不另计叠加奖励；单前缀完整窗口预测单独与两臂窗口成本差比较。固定 DAG 回放解析捕获时的输出，新增生成响应用于实际成本计量。相同来源需求事件的预期读取节省取已覆盖的最大值，共享页按租期增量计费。观察保护集合、分配、释放及保留由同一分配锁串行执行。
+
+配对工作流按捕获时的粗特征桶选择两组会话互不相交的完整训练窗口，并匹配独立开发窗口；选择依据为实际可观察性、调用预算与固定种子。清单直接传入重放。真实重放特征决定最终拟合覆盖，每个 feature/scope/TTL 桶至少需要两个独立会话组；无支持桶时不写空模型。多 TTL 仍是同窗重复测量，完整集合净收益由共同负载的 Native/value 对照验证。
 
 前缀观察、分配和完成登记共用分配锁。访问去重与策略完成分别记录；未完成策略恢复执行，原生已经接受的保留通过回执/租期核实后复用。原生明确返回 `PREFIX_NOT_RESIDENT` 时记为保留机会消失，业务 READ 继续。
 
@@ -81,6 +86,8 @@ C 配对目标为 `paired_native_retention_v5`，需求规则为 `exact_complete
 SQLite 的 `turn_plans` 保存计划，`execution_steps` 保存输入、原生 epoch、输出、解析结果和计时；`reading_progress` 与后继计划原子保存缺口扩展及辅助用量。内部生成使用独立步骤请求和临时 epoch，完整结果保存后登记退役 outbox；重试按步骤账本与原生 status 恢复，最终只提交一次 QA。`reader_*_tokens` 统计 READ/REDUCE/ANSWER，`auxiliary_*_tokens` 统计任务、检索、支持与 gap 调用，`total_*` 为两者之和；未测得的辅助 token 保留空值。`profiling.reading_measurements` 仅从 dev 步骤的实际回执与客户端计时导出校准点，缺失末 token 观测的记录不补成估计。
 
 公开评价复用作者指标规则。MTRAGEval 先完成各分量的可答性条件化，再计算聚合分；2Wiki 官方评价保留所有声明 gold 任务。共同完成子集用于诊断，完整队列用于方案选择。成本同时保存实际生成 token、完整响应、GPU/Host 物理积分与 unique KV 页占用；它们分别解释计算、时延和保护容量。
+
+`bench.quality.export_evaluation` 从最终 `evidence_spans` 的实际原文区间，以及 `ReadingOutcome` 最终 answer plan 各结论的来源叶子生成评分上下文。重叠区间合并，结论独占来源保留，未读档案正文不扩入上下文。`reading_conclusions` 同时保存实际结论表与未解需求；完整 `audit_evidence` 另作原文核验。官方导出和项目 judge 共用该投影。矩阵显式登记 `selection.baseline`，冻结与配对报告使用同一实际存在的方法。
 
 `bench.capacity_workflow --full-queue` 对完整声明的 350 题在 c4 执行 E0_native 及固定 B / 收益 B × native / value 四格（E1—E4）；c1 只补 E1/E4。每格沿自己的实际问答历史推进。该入口直接使用冻结 A、动作收益与 C 资产，按当前 reader 配置绑定资源；原两轮诊断和 `whole_plan` 保留独立入口。
 

@@ -4,6 +4,7 @@ baseline_commit: 85f4ed4
 seed: 42
 protocol: P3
 selection:
+  baseline: B0
   development_weights: {multidoc2dial: 0.30, mtrag: 0.25, versionqa: 0.20, loong: 0.25}
   near_equal_quality: 0.002
   equal_cost_relative_tolerance: 0.05
