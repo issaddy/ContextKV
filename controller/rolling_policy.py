@@ -142,15 +142,19 @@ def compile_step(plan, task, state, snapshot, template, *, outputs):
     selected_claims = tuple(claims[identity] for identity in task.input_claim_ids)
     task = replace(task, output_schema=output_schema(task, selected_units, selected_claims,
         reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
-    messages = step_messages(plan, task, selected_units, selected_claims, snapshot)
-    rendered = template.render(messages)
     kind = step_generation_kind(task.kind, task.operation, plan.reading_mode)
-    return tuple(PromptCandidate(dumps([plan.plan_id, task.step_id, output]), "REBUILD", snapshot.version,
-        messages, rendered.input_ids, rendered.input_hash, frozenset(), frozenset(),
-        feasible=len(rendered.input_ids) <= task.input_budget and len(rendered.input_ids)+output <= plan.budget.window_tokens,
-        fingerprint=template.fingerprint, corpus_snapshot_id=snapshot.corpus_snapshot_id,
-        context_plan_id=plan.plan_id, evidence_set_id=plan.selected_set.set_id,
-        output_budget=output, generation_kind=kind) for output in outputs)
+    candidates = []
+    for output in outputs:
+        actual_task = replace(task, output_budget=output)
+        messages = step_messages(plan, actual_task, selected_units, selected_claims, snapshot)
+        rendered = template.render(messages)
+        candidates.append(PromptCandidate(dumps([plan.plan_id, task.step_id, output]), "REBUILD", snapshot.version,
+            messages, rendered.input_ids, rendered.input_hash, frozenset(), frozenset(),
+            feasible=len(rendered.input_ids) <= task.input_budget and len(rendered.input_ids)+output <= plan.budget.window_tokens,
+            fingerprint=template.fingerprint, corpus_snapshot_id=snapshot.corpus_snapshot_id,
+            context_plan_id=plan.plan_id, evidence_set_id=plan.selected_set.set_id,
+            output_budget=output, generation_kind=kind))
+    return tuple(candidates)
 
 
 @dataclass(frozen=True)
@@ -184,6 +188,11 @@ class RollingPlanRuntime:
             raise ValueError("rolling mode must be whole_plan or observed_actions")
         if mode == "observed_actions" and replan is not None:
             raise ValueError("observed actions use selected GAP retrieval instead of automatic replanning")
+        if mode == "observed_actions":
+            from .action_proposals import BOUNDED_CONTINUATION
+            if (gain_model.provenance.get("continuation_protocol") != BOUNDED_CONTINUATION
+                    or gain_model.provenance.get("continuation_gap_limits") != gap_limits):
+                raise ValueError("rolling gain asset uses a different bounded continuation protocol")
         self.mode = mode
         self.observation_path = None if observation_path is None else Path(observation_path)
         self.gap_retriever_identity, self.gap_limits = gap_retriever_identity, gap_limits

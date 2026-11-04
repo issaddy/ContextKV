@@ -1,7 +1,7 @@
 {
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
-  "gpu_status": "Active task resumed from PR3; canonical-A minimum native verification uses only GPU2 on hangu7. Prior B/C/P1 batches remain completed; no old follow-on queue restarted.",
+  "gpu_status": "GPU environment use paused by user after canonical-A probes completed. hangu7 container exec terminated externally (ttrpc closed), host GPU compute-app query empty; SSH PTY closed. No new GPU work authorized while this pause remains.",
   "evidence_scope": "Historical full350 pre-freeze P0 Q=0.6575398416096789 versus registered0.44509019347880296. Current canonical-A protocol interface frozen for B/C implementation after local native semantic checks; final frozen350 acceptance pending.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
@@ -793,7 +793,7 @@
   },
   "canonical_a_20261104": {
     "base_commit": "3a9b219",
-    "implementation_commit": "f043aa0",
+    "implementation_commit": "115fec7",
     "window_tokens": 2048,
     "max_nonempty_lines": 8,
     "status": "A protocol interface frozen for B/C implementation; formal350 adoption/quality/resource comparison pending",
@@ -875,6 +875,29 @@
       "requests": 5,
       "003": "complete30credits with no output truncation",
       "015": "complete24credits with original unit"
-    }
+    },
+    "remaining_scoring_check": "case006 final42/903 matches gold but old extraction consistent=false; unchanged raw score retained until independent reassessment"
+  },
+  "implementation_20261104": {
+    "status": "B/C and fixed-arrival integration implemented locally; GPU-dependent collection/evaluation held by user",
+    "B_protocol": "infer_bridge_ready_or_one_gap_one_terminal_read_v2",
+    "C_asset_kind": "paired_native_retention_v5",
+    "C_selection": "deduplicated target savings minus control, incremental residency and paired external-request penalty; full protected-set net must be measured",
+    "arrival_protocol": "fixed_arrivals with shared per-dataset manifests; history and semaphore waits included in response and decision budgets",
+    "validation": {
+      "core_suite_passed": 116,
+      "subtests_passed": 2,
+      "core_seconds": 3.86,
+      "arrival_budget_adjacent_passed": 31,
+      "cpu_demo": "runs/demo/demo-400c01a7aac543e2ac726f9aa469a685.json",
+      "fixed_arrival_tail_cancellation": "actual sampling continues to last registered arrival; blocked tasks enter delivery denominator; focused CPU test passed"
+    },
+    "remaining": [
+      "export complete registered arrival schedule from retained task/attempt assets",
+      "collect only affected initial/bridge B branches and fit matching gain asset",
+      "collect independent C train/dev windows and validate net effects",
+      "run declared full350 c4 E0-E4 and c1 E1/E4 plus frozen public comparison"
+    ],
+    "container_sync": "d727175 plus tested final selector patch was present before container disconnect; subsequent115fec7 commit and B/C integration require sync after GPU environment resumes"
   }
 }

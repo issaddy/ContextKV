@@ -76,11 +76,11 @@ async def test_failed_read_lowers_utility_keeps_raw_q_missing_and_paid_signed_co
     model = fit_effective([pair])
     assert model.supports_semantic_kind("read_once") and model.supports_semantic_kind("read_once", costs=True)
     assert model.cost_provenance["unique_direct_samples"] == 1
-    assert set(model.predict_costs(pair["features"])["branch_complete_cost"]) == set(COST_FIELDS)
+    assert set(model.predict_costs(pair["counterfactual"]["cost_features"])["branch_complete_cost"]) == set(COST_FIELDS)
     path = tmp_path/"effective-v2.json"
     model.save(path)
     loaded = PlanGainModel.load(path, reader_checkpoint=model.reader_checkpoint, reader_profile_id=model.reader_profile_id)
-    assert loaded.predict_costs(pair["features"]) == model.predict_costs(pair["features"])
+    assert loaded.predict_costs(pair["counterfactual"]["cost_features"]) == model.predict_costs(pair["counterfactual"]["cost_features"])
     before, paused = deepcopy(values["read_once"])
     paused["termination"]["user_paused"] = True
     assert completion_record(before, paused)["effective_utility"] is None

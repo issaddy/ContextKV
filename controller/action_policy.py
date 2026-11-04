@@ -6,6 +6,7 @@ from dataclasses import replace
 from .plan_policy import (NATIVE_COST_SCHEMA, CompleteCost, Decision, NextStep, NoCompletePlan, PlanEvaluation,
                           _completed_steps, plan_cost_features, plan_features)
 from .reading import step_generation_kind
+from .action_proposals import BOUNDED_CONTINUATION
 from .evidence_planner import _passages
 
 
@@ -31,6 +32,8 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes):
     model = policy.gain_model
     if (native.reader_checkpoint, native.reader_profile_id) != (model.reader_checkpoint, model.reader_profile_id):
         raise ValueError("observed action asset belongs to a different reader checkpoint/profile")
+    if model.provenance.get("continuation_protocol") != BOUNDED_CONTINUATION:
+        raise ValueError("observed action asset uses a different bounded continuation protocol")
     quotes = {quote.candidate_id: quote for quote in native.quotes.quotes}
     native_cost = model.cost_provenance.get("feature_schema") == NATIVE_COST_SCHEMA
     direct_prediction = None

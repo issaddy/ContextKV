@@ -315,9 +315,11 @@ class Controller:
                          open_need_provider: Callable | None = None,
                          auxiliary_usage: dict | None = None,
                          evidence_provider: Callable[[SessionSnapshot], Awaitable[EvidenceSelection]] | None = None,
-                         from_corpus_snapshot_id: str | None = None) -> TurnResponse:
+                         from_corpus_snapshot_id: str | None = None,
+                         request_arrived: float | None = None) -> TurnResponse:
         if not session_id or not query.strip():
             raise ValueError("session_id and query must be nonempty")
+        arrived = time.monotonic() if request_arrived is None else request_arrived
         evidence = tuple(evidence)
         context_plans = tuple(context_plans)
         if evidence_provider is not None and (evidence or reference_history is not None or retrieval_priority is not None
@@ -341,7 +343,6 @@ class Controller:
             observation_startup = time.monotonic()
             await self.state_observer.start()
             observation_startup_ms = (time.monotonic()-observation_startup)*1000
-        arrived = time.monotonic()
         async with self._lock(session_id):
             entered = time.monotonic()
             self.events.emit("turn_received", business_session_id=session_id, request_id=request_id)

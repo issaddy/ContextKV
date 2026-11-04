@@ -127,3 +127,36 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
         add("gap_retrieval", (task,) if include_gap_step else ())
     return tuple(branches), ()
 
+
+
+BOUNDED_CONTINUATION = "infer_bridge_ready_or_one_gap_one_terminal_read_v2"
+
+
+def continuation_gap(state, *, used_gap):
+    """Only an observed infer relation can justify the one continuation GAP."""
+    infer = {need.need_id for need in state.plan.task_state.needs if need.operation == "infer"}
+    return () if used_gap else tuple(need for need in state.open_needs if need.need_id in infer)
+
+
+def validate_action_counts(kind, counts, *, complete=True):
+    """Bounded branches contain the first action and at most GAP + terminal READ."""
+    first = {"direct_answer": None, "read_once": "READ", "reduce_once": "REDUCE",
+             "gap_retrieval": "GAP_RETRIEVAL"}[kind]
+    limits = {"READ": int(first == "READ") + int(first is not None),
+              "REDUCE": int(first == "REDUCE"), "GAP_RETRIEVAL": int(first is not None), "ANSWER": 1}
+    if set(counts) != set(limits) or any(type(counts[k]) is not int or not 0 <= counts[k] <= v for k, v in limits.items()):
+        raise ValueError("action counts exceed bounded continuation protocol")
+    if complete and (counts["ANSWER"] != 1 or (first and counts[first] < 1)):
+        raise ValueError("registered first action and terminal ANSWER must execute")
+
+
+
+def continuation_read(state, catalog):
+    """Prefer one existing ready source for an observed missing infer relation."""
+    needs = {need.need_id for need in continuation_gap(state, used_gap=False)}
+    completed = {result.step_id for result in state.results}
+    covered = {unit for result in state.results for unit in result.covered_units}
+    return next((task for task in catalog.steps if task.kind == "READ"
+        and task.step_id not in completed and needs.intersection(task.need_ids)
+        and set(task.predecessor_step_ids) <= completed
+        and not set(task.input_unit_ids) <= covered), None)

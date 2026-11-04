@@ -1,6 +1,5 @@
 """Reading protocol, provenance and one outer commit with scripted engine outputs."""
 import json
-import re
 from dataclasses import replace
 
 import pytest
@@ -28,7 +27,13 @@ class ScriptedReadingEngine(MockEngine):
 
     async def generate(self, *, response_schema=None, **kwargs):
         self.constraints.append((response_schema, kwargs.get("citation_ids")))
-        self.response_text = json.dumps(next(self.readings)) if response_schema else "Supported final answer."
+        if response_schema and response_schema["properties"]["format_version"]["const"] == 7:
+            self.response_text = json.dumps({"format_version": 7, "views": {
+                alias: {parent: decision.get("const", True)
+                        for parent, decision in view["properties"].items()}
+                for alias, view in response_schema["properties"]["views"]["properties"].items()}})
+        else:
+            self.response_text = json.dumps(next(self.readings)) if response_schema else "Supported final answer."
         return await super().generate(**kwargs)
 
 
@@ -131,8 +136,8 @@ def test_reduction_aligns_entities_units_and_preserves_all_leaves():
 
 @pytest.mark.asyncio
 async def test_full_coverage_reads_every_pack_and_count_runs_on_cpu(tmp_path):
-    first, unit_a = material("Alpha\n"*120, "a")
-    second, unit_b = material("Beta\n"*120, "b")
+    first, unit_a = material("Alpha "*120, "a")
+    second, unit_b = material("Beta "*120, "b")
     state = TaskState("t", "Count all entities.", needs=(Need("n", operation="count"),))
     selected = EvidenceSet("s", (unit_a, unit_b), source_blocks=(first, second))
     budget = ContextBudget(read_input_tokens=7000, read_output_tokens=1024)
@@ -146,7 +151,7 @@ async def test_full_coverage_reads_every_pack_and_count_runs_on_cpu(tmp_path):
     outcome = await ReadingExecutor(store, engine, ByteTemplate()).execute_reads(attempt.attempt_id, snapshot, plan)
     assert {row[2] for row in outcome.coverage} == {"a", "b"}
     assert outcome.claims[-1].value == 2
-    assert len(outcome.steps) == 3 and len(engine.constraints) == 2
+    assert len(outcome.steps) == 4 and len(engine.constraints) == 3
     assert outcome.plan.answer_plan.points[0].claim_ids == (outcome.claims[-1].claim_id,)
     assert store.get_snapshot("s").version == 0
 
@@ -179,10 +184,10 @@ async def test_open_need_adds_another_read_and_claim_parent_chain(tmp_path):
     assert len(requested) == 1 and len(outcome.results) == 2
     assert outcome.results[1].covered_units == ("b",)
     assert outcome.steps[1].task.predecessor_step_ids == ("read:0",)
-    constraint = outcome.steps[1].task.output_schema["properties"]["open_needs"]["items"]["properties"]["parent_claim_ids"]["items"]["pattern"]
-    assert re.fullmatch(constraint, "read:0:claim:0")
-    assert not re.fullmatch(constraint, "hop:1:read:0:claim:1")
-    assert not re.fullmatch(constraint, "read:0:claim:1")
+    constraint = outcome.steps[1].task.output_schema["properties"]["open_needs"]["items"]["properties"]["p"]["items"]["enum"]
+    assert constraint == ["p0"]
+    from controller.reading import numeric_aliases
+    assert numeric_aliases(outcome.steps[1].task, (), outcome.claims[:1])[2] == {"p0": "read:0:claim:0"}
     assert not outcome.open_needs
     assert outcome.plan.answer_plan.points[0].claim_ids == (outcome.claims[-1].claim_id,)
     assert {span.span_id for span in outcome.plan.answer_plan.points[0].source_spans} == {"a", "b"}
@@ -270,7 +275,7 @@ async def test_hierarchical_reduce_keeps_all_source_leaves_within_each_window(tm
     blocks, units = zip(*materialized)
     state = TaskState("t", "Infer the combined relationship.", needs=(Need("n", operation="infer"),))
     budget = ContextBudget(window_tokens=10000, body_tokens=2048,
-                           read_input_tokens=4000, read_output_tokens=3000)
+                           read_input_tokens=6000, read_output_tokens=3000)
     plan = build_read_plan(state, EvidenceSet("s", units, source_blocks=blocks),
                            "all_supplied_documents", budget, template=ByteTemplate())
     store = SessionStore(tmp_path/"state.db")
@@ -307,7 +312,7 @@ async def test_lmap_uses_plain_summaries_and_model_merge_for_count_task(tmp_path
     state = TaskState("t", "Count all entities.", needs=(Need("n", operation="count"),))
     plan = build_read_plan(state, EvidenceSet("s", (unit_a, unit_b), source_blocks=(first, second)),
                            "all_supplied_documents", ContextBudget(), template=ByteTemplate())
-    plan = replace(plan, steps=tuple(replace(step, operation="summarize") for step in plan.steps))
+    plan = replace(plan, steps=tuple(replace(step, operation="summarize", shared_numeric_scopes=()) for step in plan.steps))
     summary = fact("", "summary", "2")
     summary["span_ids"] = []
     summary["parent_claim_ids"] = ["read:0:claim:0", "read:0:claim:1"]
@@ -410,7 +415,7 @@ async def test_total_online_tokens_include_persisted_auxiliary_usage_once(tmp_pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode,model_calls", [("coverage_only", 1), ("claims", 2), ("typed_reduce", 1)])
+@pytest.mark.parametrize("mode,model_calls", [("coverage_only", 1), ("claims", 2), ("typed_reduce", 2)])
 async def test_reading_ablation_modes_execute_distinct_count_paths(tmp_path, mode, model_calls):
     first, unit_a = material("Alpha is approved.", "a")
     second, unit_b = material("Beta is approved.", "b")
@@ -447,6 +452,11 @@ async def test_every_table_read_carries_header_and_coverage_counts_header_once(t
         async def generate(self, *, response_schema=None, **kwargs):
             text = bytes(kwargs["input_ids"]).decode()
             payload = json.loads(text.split("<|user|>\n")[-1].split("\n<|end|>")[0])
+            if response_schema["properties"]["format_version"]["const"] == 7:
+                self.response_text = json.dumps({"format_version": 7, "views": {
+                    alias: {parent: True for parent in view["properties"]}
+                    for alias, view in response_schema["properties"]["views"]["properties"].items()}})
+                return await super().generate(**kwargs)
             assert any(unit["unit_id"] == "header" for unit in payload["units"])
             self.response_text = json.dumps(read_output(*(fact(unit["source_spans"][0]["span_id"],
                 unit["unit_id"]) for unit in payload["units"] if unit["unit_id"] != "header")))

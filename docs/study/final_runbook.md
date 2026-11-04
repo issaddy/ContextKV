@@ -1,6 +1,6 @@
 # 当前课题运行入口
 
-上一批次已收尾、模型服务已停止。本轮按新任务恢复必要实现与最小验证，A 冻结后执行声明实验；不启动旧自动续跑队列。
+GPU 工作按用户最新要求暂停，SSH 已关闭；当前只做本地实现与 CPU 集成，不启动训练、采集或原生实验。原生检查结果与待验证部分均保留在已有记录中。
 运行状态统一查看 [budget_loop_20261103.json](budget_loop_20261103.json)。
 
 新一阶段按 [模块方法论与实施范围](task_spec.md) 选择必要训练、验证和实验；[当前审查](review_20261104.md)保存发现依据。以下命令描述现有入口。
@@ -121,11 +121,21 @@ C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观�
 `profiling.retention_trace reassess --replay-root COMPLETED_REPLAY` 从已完成重放的原始回执重算派生费用，
 保留原请求、采样窗口和全部已付成本，不产生模型调用。
 
-冻结 A 后，联合开发验收使用 `bench.capacity_workflow --full-queue`。
+冻结 A 后，联合开发验收使用 `bench.capacity_workflow --full-queue`。主负载 c4 对应 E1—E4，c1 默认只执行 E1/E4；E0 用登记 task-first/isolated Native 配置与同一到达计划比较。
+必须提供 `--arrival-plan`：JSON 索引格式为 `{"format":"contextkv_dataset_workload_index_v1","datasets":{"DATASET":"/absolute/fixed-arrivals.json"}}`，每个数据集严格覆盖声明队列。
+使用已有请求轨迹离线导出固定相对到达（不产生模型调用）：
+
+```sh
+python -m bench.study_workloads --tasks TASKS.jsonl --records RECORDED-REQUESTS.jsonl \
+  --output FIXED-ARRIVALS.json --name DECLARED-NAME --concurrency 4
+```
+
+来源记录必须包含所有声明任务的请求开始时间；未记录的上游到达不能反推或补成零。各方案复用同一固定计划及哈希，按各自真实 P3 历史完成依赖；等待前一轮和等待并发槽均计入完整响应。
+`--complete-slo-seconds` 设置事先声明的完整响应 SLO，goodput 按达标完整回答/观察秒数计算，无阈值时不生成 SLO 数值。
 
 ```sh
 python -m bench.capacity_workflow --full-queue \
-  --config "$FROZEN_A_STUDY" --matrix "$JOINT_MATRIX" \
+  --config "$FROZEN_A_STUDY" --matrix "$JOINT_MATRIX" --arrival-plan "$ARRIVAL_PLAN" \
   --gain-asset "$B_GAIN" --online-gpu-devices "$ONLINE_GPUS" --reader-base-url "$READER_URL" \
   --value-model "$C_VALUE" --concurrency 4 --output "$JOINT_OUTPUT"
 ```
@@ -134,12 +144,12 @@ python -m bench.capacity_workflow --full-queue \
 `--methods B6_native` 等参数将指定方法分配到独立 reader 服务，只生成所选方法的矩阵和任务。
 `B6_native` 无需 gain/value；`B6_value` 仅需 `--value-model`；没有 S3 方法时须显式提供
 `--reader-profile-id`。S3 方法需要 `--gain-asset`，value 方法需要 `--value-model`。
-默认执行四格并要求两种资产，每格使用同一完整队列。
+默认 c4 执行四格并要求两种资产；c1 默认只执行 B6_native/S3_value，每格使用同一完整队列。
 固定 B 可独立执行，例如：
 
 ```sh
 python -m bench.capacity_workflow --full-queue --methods B6_native \
-  --config "$FROZEN_A_STUDY" --matrix "$JOINT_MATRIX" \
+  --config "$FROZEN_A_STUDY" --matrix "$JOINT_MATRIX" --arrival-plan "$ARRIVAL_PLAN" \
   --reader-profile-id "$READER_PROFILE" --reader-base-url "$READER_URL" \
   --online-gpu-devices "$ONLINE_GPUS" --concurrency 1 4 --output "$JOINT_OUTPUT"
 ```
@@ -170,3 +180,8 @@ REDUCE 只读已观察材料；源 packet 的 legal_actions 保留，补充的�
 
 C 固定 DAG 回放解析原始输出文本，新的生成响应用于实际 token、耗时和费用；完整窗口
 预测用两臂窗口成本差验证，下一次 READ 的集合收益按事件及共享页去重。
+
+
+B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v2` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上执行一个动作后重新观察。旧一步资产不用于这个监督目标，仅重新采集目标实际变化的状态。
+
+C 使用 `paired_native_retention_v5`，训练行必须保存独立会话集合；同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。v4 资产不直接挂入新选择。新增 owner 的目标收益按完整来源需求去重，容量与驻留按共享页增量；配对外部请求代价进入选择，正 collateral 不再额外记为可叠加收益。完整集合的真实净效果仍由同轨 Native/value 对照和物理积分验收。

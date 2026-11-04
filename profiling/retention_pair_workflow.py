@@ -136,13 +136,18 @@ async def run(args):
                 predicted_target_saved_ms=predicted.target_saved_ms if predicted else None,
                 predicted_retention_control_ms=predicted.retention_control_ms if predicted else None,
                 predicted_collateral_saved_ms=predicted.expected_collateral_saved_ms if predicted else None,
+                independent_sample_id=row["independent_sample_id"],
                 predicted_policy_value_ms=predicted.saved_ms if predicted else None,
+                predicted_single_owner_net_ms=predicted.full_window_saved_ms if predicted else None,
                 policy_value_scope="next READ target minus control; before residency prices and protected-event deduction",
                 predicted_full_window_saved_ms=predicted.full_window_saved_ms if predicted else None,
                 actual_full_window_saved_ms=row["full_window_cost_difference_ms"],
                 semantic_quality_label=None, split="dev"))
         write_json(output/"dev-validation.json", {"fit_split": "train", "evaluation_split": "dev",
             "comparison_scope": "single-prefix complete response windows; no protected-set externality estimate",
+            "independent_samples": len({row["independent_sample_id"] for row in validation}),
+            "calibrated_independent_samples": len({row["independent_sample_id"] for row in validation if row["calibrated"]}),
+            "sample_unit": "session group; TTL interventions are repeated measures",
             "rows": validation})
     if plan["status"] == "running":
         plan["status"] = "completed_with_actual_signed_costs"

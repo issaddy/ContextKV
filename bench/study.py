@@ -193,6 +193,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         "scheduled_task_ids": expected, "cohort_declared": declared_tasks is not None,
         "concurrency": concurrency, "retrieval": provider.manifest,
         "concurrency_scope": "request",
+        "response_latency_basis": "fixed scheduled arrival when supplied, otherwise observed arrival before semaphore, through committed response",
         "workload": to_jsonable(workload), "answer_driven_policy": question_fn is not None,
         "cache_start_protocol": cache_protocol, "cache_start_record": cache_start,
         "reuse_provider": reuse_provider, "conversation_cache_boundary": "cold" if reuse_provider else None,
@@ -265,7 +266,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             return await provider.extend_for_plan(before, plan, open_needs, claims)
         response = await service.serve_turn(session_id, query, request_id=request_id,
             corpus_snapshot_id=provider.corpus_snapshot_id, evidence_provider=retrieve,
-            open_need_provider=extend)
+            open_need_provider=extend, request_arrived=start)
         end = time.monotonic()
         attempt = service.store.get_attempt(response.attempt_id)
         snapshot = service.store.get_snapshot(session_id)
@@ -329,7 +330,9 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             snapshot = service.store.read_snapshot(session_id, provider.corpus_snapshot_id)
             workload_arrival = (await dispatcher.wait_turn(row, snapshot.raw_history)
                                 if dispatcher is not None else None)
-            arrival = time.monotonic() if dispatcher is not None else None
+            arrival = (dispatcher.origin+workload_arrival["actual_arrival_seconds"]
+                       if dispatcher is not None else time.monotonic())
+            request_starts[row["task_id"]] = arrival
             async with semaphore:
                 await one_turn(sid, number, row, arrival, workload_arrival)
             if dispatcher is not None:
@@ -411,6 +414,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 for sid in conversations:
                     group.create_task(conversation(sid), name=f"study:{method['id']}:{dataset_name}:{split}:{sid}")
     finally:
+        dispatch_window = await dispatcher.finish_arrivals() if dispatcher is not None else None
         measured_end = time.monotonic()
         await native.stop()
         await physical.stop()
@@ -446,9 +450,11 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                     failure_key = digest(failure["conversation_id"])[:20]
                     write_json(directory/"terminal_read_failures"/(failure_key+".json"), failure)
             write_json(directory/"failed_conversations.json", list(failures.values()))
-        if continue_conversation_failures and dispatcher is not None:
+        if dispatcher is not None:
             write_json(directory/"workload_dispatch.json", dict(origin=dispatcher.origin,
-                clock="client_monotonic", actual_arrivals=dispatcher.arrivals, cancelled=dispatcher.cancelled,
+                clock="client_monotonic", observation_window=dispatch_window,
+                actual_arrivals=dispatcher.arrivals, cancelled=dispatcher.cancelled,
+                completion_seconds=dispatcher._completion_times,
                 independent_clients=workload.dispatch_semantics == "independent_clients_after_own_prior_commit"))
         ordered = [results[key] for key in expected if key in results]
         write_jsonl(directory/"results.unscored.jsonl", ordered)
@@ -495,7 +501,7 @@ async def evaluate(config, matrix, output, *, split, frozen=None, methods=None, 
             directory = output/method["id"]/name
             rows = await run_dataset(config, matrix, method, name, split, directory,
                 concurrency=concurrency, limit_conversations=limit_conversations,
-                workload=workload, question_fn=question_fn)
+                workload=workload[name] if isinstance(workload, dict) else workload, question_fn=question_fn)
             if score:
                 rows = await score_dataset(config, dataset, rows, directory,
                     expected_task_ids=matrix.get("cohorts", {}).get(split, {}).get(name))

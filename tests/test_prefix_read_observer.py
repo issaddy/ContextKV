@@ -94,7 +94,7 @@ def test_fixed_ttl_recovery_counts_actual_read_once_and_does_not_extend_ttl(tmp_
 
 
 def model_asset(path, *, native_ms, retained_ms):
-    rows = [dict(features={"version_mode": "current", "source_task_relation": "same_version"},
+    rows = [dict(features={"access_state": "first", "native_residency": "device", "pressure_concurrency": "normal:single"},
         cache_scope_hash="scope", horizon_seconds=30, reused=True,
         native_input_hashes=["fixed-input"], retained_input_hashes=["fixed-input"],
         native_reuse_cost_ms=native_ms, retained_reuse_cost_ms=retained_ms,
@@ -103,6 +103,7 @@ def model_asset(path, *, native_ms, retained_ms):
         gpu_page_count=1, host_page_count=1, page_size=64,
         native_gpu_token_seconds=0, retained_gpu_token_seconds=0,
         native_host_token_seconds=0, retained_host_token_seconds=0)]
+    rows = [{**rows[0], "independent_sample_id": name, "independent_session_ids": [name]} for name in ("session-a", "session-b")]
     path.write_text(json.dumps(EmpiricalRetentionModel.fit(rows).to_dict()))
     return dict(mode="value", model_path=str(path), horizon_seconds=30,
         gpu_budget_tokens=65536, host_budget_tokens=65536, lambda_gpu=0, lambda_host=0)
@@ -135,3 +136,16 @@ def test_value_does_not_protect_when_native_already_has_the_same_expected_reuse_
         assert all(not path.endswith("/retain") for path, _ in engine.calls)
         store.close()
     asyncio.run(run())
+
+
+def test_repeated_interventions_do_not_create_independent_calibration(tmp_path):
+    path = tmp_path/"model.json"
+    model_asset(path, native_ms=100, retained_ms=10)
+    import copy
+    # Use the same paired fixture, but make all observations one session.
+    from controller.prefix_retention import RETENTION_FEATURE_NAMES
+    assert len(RETENTION_FEATURE_NAMES) == 3
+    row = dict(features=dict(access_state="first", native_residency="device", pressure_concurrency="normal:single"),
+        independent_sample_id="one-session", independent_session_ids=["one-session"], cache_scope_hash="scope", horizon_seconds=60,
+        native_input_hashes=["fixed"], retained_input_hashes=["fixed"])
+    assert not EmpiricalRetentionModel.fit([row, copy.deepcopy(row)]).forecasts

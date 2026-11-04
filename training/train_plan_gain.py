@@ -6,6 +6,8 @@ scores.  A new reader checkpoint/profile gets a separate gain-data cohort.
 """
 from __future__ import annotations
 
+from controller.action_proposals import BOUNDED_CONTINUATION, validate_action_counts
+
 import argparse
 from dataclasses import asdict, dataclass, field, replace
 import hashlib
@@ -112,10 +114,9 @@ def build_gain_record(plan: PlanCandidate, state: ReadingOutcome, snapshot: Sess
         expected = {"READ": 0, "REDUCE": 0, "GAP_RETRIEVAL": 0, "ANSWER": 1}
         if direct["new_action_counts"] != expected:
             raise ValueError("observed direct baseline must perform only one new ANSWER")
-        action = {"read_once": "READ", "reduce_once": "REDUCE", "gap_retrieval": "GAP_RETRIEVAL"}[plan.semantic_kind]
-        expected[action] = 1
-        if counterfactual["new_action_counts"] != expected:
-            raise ValueError("observed counterfactual must perform exactly its one registered action and ANSWER")
+        if observed.get("continuation_protocol") != BOUNDED_CONTINUATION:
+            raise ValueError("observed gain labels use a different continuation protocol")
+        validate_action_counts(plan.semantic_kind, counterfactual["new_action_counts"])
     if direct["semantic_kind"] != "direct_answer" or direct["read_count"] != 0:
         raise ValueError("DeltaQ baseline must be direct ANSWER without newly paid reading")
     if counterfactual["plan_id"] != plan.plan_id:
@@ -241,6 +242,10 @@ def _supervision(rows, *, split):
                    json.dumps(row["scorer_identity"], sort_keys=True)) for row in rows}
     if len(identities) != 1:
         raise ValueError("fit one reader checkpoint/profile and scorer identity per gain asset")
+    limits = {_digest(row["counterfactual_run"]["continuation_gap_limits"]) for row in rows
+              if row.get("observed_state_binding") is not None}
+    if len(limits) > 1:
+        raise ValueError("one bounded gain asset requires the same declared GAP limits")
     for row in rows:
         if row["delta_q"] != row["quality_counterfactual"]-row["quality_direct"]:
             raise ValueError("gain labels must equal observed counterfactual quality minus direct quality")
@@ -266,6 +271,9 @@ def _supervision(rows, *, split):
             if (row["observed_state_binding"] != direct.get("observed_state_binding")
                     or row["observed_state_binding"] != counterfactual.get("observed_state_binding")):
                 raise ValueError("observed cost labels must retain their bound paid/native decision state")
+            if (row["observed_state_binding"].get("continuation_protocol") != BOUNDED_CONTINUATION
+                    or direct["continuation_gap_limits"] != counterfactual["continuation_gap_limits"]):
+                raise ValueError("gain branches use different bounded continuation definitions")
             if row["cost_targets"] != observed_cost_targets(direct, counterfactual):
                 raise ValueError("cost labels must equal the actual observed complete response costs")
             if row["incremental_complete_cost"] != row["cost_targets"]["incremental_complete_cost"]:
@@ -362,6 +370,9 @@ def fit_gain(rows, *, ridge=1.0, input_path=None):
     return PlanGainModel(reader, profile, "plan-gain:"+digest, names,
         tuple(center.tolist()), tuple(scale.tolist()), tuple(coefficients.tolist()), float(intercept),
         {"label": "actual_final_quality_minus_actual_direct_answer_quality",
+         "continuation_protocol": BOUNDED_CONTINUATION,
+         "continuation_gap_limits": rows[0]["counterfactual_run"]["continuation_gap_limits"]
+             if rows[0].get("observed_state_binding") is not None else None,
          "training_split": "train", "training_records": len(rows),
          "training_state_count": len({row["state_key"] for row in rows}),
          "record_ids": [row["record_id"] for row in rows], "input_sha256": digest,

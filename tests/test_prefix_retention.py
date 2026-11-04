@@ -184,3 +184,20 @@ def test_host_only_path_keeps_future_gpu_opportunity_cost_and_shared_protection_
     gpu_only = RetentionRequest.from_receipt({**observed, "pool": {"host_capacity_tokens": 0},
         "gpu_page_ids": observed["host_page_ids"], "host_page_ids": []}, forecast)
     assert not gpu_only.host_page_ids and gpu_only.gpu_page_ids == request.gpu_page_ids
+
+
+def test_complete_source_demand_identity_and_single_owner_collateral_are_distinct():
+    from controller.prefix_retention import source_demand_event_key
+    # Shared first body page does not make two complete READ paths one demand.
+    first = source_demand_event_key((1, 2, 3, 4), [[0, 4]], 2, "scope")
+    second = source_demand_event_key((1, 2, 5, 6), [[0, 4]], 2, "scope")
+    assert first != second
+    assert first == source_demand_event_key((1, 2, 3, 4), [[0, 4]], 2, "scope")
+    forecast = PrefixForecast(60, 1, 100, 0, 0, 0, "scope", "paired",
+        retention_control_ms=5, expected_collateral_saved_ms=-120,
+        native_window_cost_ms=200, retained_window_cost_ms=225)
+    assert forecast.saved_ms == -25
+    assert forecast.full_window_saved_ms == -25
+    request = RetentionRequest("losing-owner", forecast, frozenset({"page"}), frozenset(), 64, "read")
+    assert allocate_retention((request,), gpu_budget_tokens=64, host_budget_tokens=0,
+                              lambda_gpu=0, lambda_host=0) == ()

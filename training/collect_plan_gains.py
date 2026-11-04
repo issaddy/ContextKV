@@ -57,6 +57,7 @@ def served_branch(row, *, semantic_kind, plan_id, metric, normalization, scorer_
         "measurement_kind": row["measurement_kind"], "history_origin": row["history_origin"],
         "semantic_kind": semantic_kind, "plan_id": plan_id, "read_count": reads,
         "observed_state_binding": observed,
+        "continuation_gap_limits": row["continuation_gap_limits"],
         "new_action_counts": row.get("new_action_counts"),
         "new_step_ids": row.get("new_step_ids"),
         "remaining_cost": row.get("actual_branch_execution_cost"),
@@ -72,7 +73,7 @@ def collect_pair(packet, direct_row, candidate_row):
     direct = served_branch(direct_row, semantic_kind="direct_answer", plan_id=direct_row["plan_id"], **shared)
     candidate = served_branch(candidate_row, semantic_kind=plan.semantic_kind, plan_id=plan.plan_id, **shared)
     record = build_gain_record(plan, state, snapshot, direct, candidate)
-    record["collection_protocol"] = ("observed_single_action_actual_final_answers_v1"
+    record["collection_protocol"] = ("observed_bounded_continuation_actual_final_answers_v1"
         if direct["observed_state_binding"] is not None else "recorded_frozen_state_actual_served_answers_v1")
     return record
 

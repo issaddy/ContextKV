@@ -1032,6 +1032,10 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
     row = dict(source="hardware", scope="actual_source_first_single_prefix_intervention",
         dataset=turn["dataset"], split=turn["split"], training_eligible=trace["training_eligible"] and eligible,
         event_id=identity, source_event_id=selection["source_event_id"],
+        independent_session_ids=sorted({value["session_id"] for value in trace["turns"]}),
+        independent_sample_id=digest(sorted({value["session_id"] for value in trace["turns"]})),
+        sample_unit="independent session group; overlapping windows and TTL arms are repeated measures",
+        measurement_window_id=digest(selection["source_attempts"]),
         source_body_page_count=body_pages,
         predicted_reuse_event_key=source_demand_event_key(target_event["prefix_input_ids"],
             target_event["evidence_token_ranges"], left["inspection"]["page_size"],
@@ -1231,7 +1235,8 @@ def fit(args):
     asset = model.to_dict()
     asset["training_manifest"] = dict(split=args.split, source_path=str(Path(args.records).resolve()),
         source_sha256=hashlib.sha256(Path(args.records).read_bytes()).hexdigest(),
-        accepted=len(accepted), excluded=excluded, source="real_native_fixed_DAG_single_prefix_pairs",
+        accepted=len(accepted), independent_samples=model.independent_samples,
+        sample_unit="session group; TTL arms are paired interventions", excluded=excluded, source="real_native_fixed_DAG_single_prefix_pairs",
         protocol="all real captured inputs and original budgets; fresh outputs are not matched to gold")
     write_json(args.output, asset)
     print(json.dumps({"trained_profiles": len(model.forecasts), "accepted_pairs": len(accepted),

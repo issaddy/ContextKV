@@ -14,11 +14,7 @@ from controller.schema import CompletionReceipt, ConfigFingerprint
 from controller.serialization import to_jsonable
 
 
-RETENTION_FEATURE_NAMES = (
-    "prior_access_count", "last_access_interval_seconds", "revisit", "source_task_relation",
-    "gpu_pressure", "host_pressure", "gpu_prefix_tokens", "host_prefix_tokens", "host_load_tokens",
-    "active_requests", "queued_requests",
-)
+RETENTION_FEATURE_NAMES = ("access_state", "native_residency", "pressure_concurrency")
 
 
 def source_token_ranges(template, rendered, messages, units):
@@ -52,10 +48,10 @@ def source_token_ranges(template, rendered, messages, units):
 def source_demand_event_key(prefix_input_ids, evidence_token_ranges, page_size, scope):
     """The next READ demanding this known source-containing causal prefix."""
     from engine_patches.contextkv_runtime import executed_prefix_hashes
-    for end, page in executed_prefix_hashes(prefix_input_ids, page_size).items():
-        if any(end > first and end-page_size < last for first, last in evidence_token_ranges):
-            return scope+":"+page
-    return None
+    path = executed_prefix_hashes(prefix_input_ids, page_size)
+    body = [page for end, page in path.items()
+            if any(end > first and end-page_size < last for first, last in evidence_token_ranges)]
+    return json.dumps([scope, list(path.values()), evidence_token_ranges], separators=(",", ":")) if body else None
 
 
 @dataclass(frozen=True)
@@ -80,8 +76,9 @@ class PrefixForecast:
 
     @property
     def saved_ms(self):
-        """Next READ target saving minus retain control, before residency prices."""
-        return self.target_saved_ms-self.retention_control_ms
+        """Next READ saving minus control and measured external-request penalty."""
+        return (self.target_saved_ms-self.retention_control_ms
+                +min(0.0, self.expected_collateral_saved_ms))
 
     @property
     def full_window_saved_ms(self):
@@ -135,7 +132,8 @@ def allocate_retention(requests, *, gpu_budget_tokens, host_budget_tokens,
     """Choose positive marginal value, counting a shared causal page only once.
 
     Value uses the next READ target saving, deduplicated against protected
-    requests, minus this call's control and incremental residency prices.
+    requests, minus this call's control, measured external-request penalty and
+    incremental residency prices.
     Single-prefix full-window residuals are not additive across protected sets.
     Capacity budgets bound the protected set; soft references allocate no KV.
     """
@@ -183,12 +181,12 @@ def allocate_retention(requests, *, gpu_budget_tokens, host_budget_tokens,
             host_integral = added_residency(request.host_page_ids, host_leases, forecast,
                                             forecast.extra_host_seconds_per_page, request.page_size)
             event = request.reuse_event_key or request.owner_id
-            # Only the next READ target is deduplicated. Full-window residuals
-            # can share later requests and are excluded from set allocation.
-            # Control is paid per actual retain/renew call.
+            # Credit each target READ once. Include the paired intervention's
+            # external-request penalty; positive residual benefits may overlap
+            # another target and are not an additional reward.
             target = forecast.target_saved_ms
             target -= min(max(target, 0), covered_events.get(event, 0))
-            saved = target-forecast.retention_control_ms
+            saved = target-forecast.retention_control_ms+min(0.0, forecast.expected_collateral_saved_ms)
             value = saved-lambda_gpu*gpu_integral-lambda_host*host_integral
             if value > 0:
                 choice = RetentionChoice(request.owner_id, forecast.horizon_seconds,
@@ -233,7 +231,8 @@ class EmpiricalRetentionModel:
         "queued_requests": (1, 2, 4, 8, 16, 32),
     }
 
-    def __init__(self, forecasts, feature_schema):
+    def __init__(self, forecasts, feature_schema, *, independent_samples=0):
+        self.independent_samples = independent_samples
         self.forecasts = forecasts
         self.feature_schema = feature_schema
         self.feature_names = tuple(sorted(feature_schema))
@@ -274,25 +273,48 @@ class EmpiricalRetentionModel:
     @classmethod
     def fit(cls, rows, *, feature_names=None, feature_schema=None, reuse_rows=None):
         rows = tuple(rows)
+        reuse_rows = rows if reuse_rows is None else tuple(reuse_rows)
         if not rows:
             raise ValueError("retention fit requires paired observations")
-        names = tuple(sorted(rows[0]["features"])) if feature_names is None else tuple(feature_names)
+        names = RETENTION_FEATURE_NAMES if feature_names is None else tuple(feature_names)
         schema = cls._schema(rows, names) if feature_schema is None else feature_schema
         model = cls({}, schema)
         groups = defaultdict(list)
         reuse_groups = defaultdict(list)
+        # Windows sharing any session belong to one independent component.
+        # The TTL intervention and target prefix do not change that component.
+        components = []
+        for row in (*rows, *reuse_rows):
+            sessions = set(row["independent_session_ids"])
+            overlapping = [group for group in components if group & sessions]
+            for group in overlapping:
+                sessions.update(group)
+                components.remove(group)
+            components.append(sessions)
+        def sample(row):
+            sessions = set(row["independent_session_ids"])
+            return tuple(sorted(next(group for group in components if group & sessions)))
         for row in rows:
             if row["native_input_hashes"] != row["retained_input_hashes"]:
                 raise ValueError("C observations must use identical executed input token paths")
             bucket = model.feature_bucket(row["features"])
             groups[cls._key(bucket, row["cache_scope_hash"], row["horizon_seconds"])].append(row)
-        for row in rows if reuse_rows is None else reuse_rows:
+        for row in reuse_rows:
             bucket = model.feature_bucket(row["features"])
             reuse_groups[cls._key(bucket, row["cache_scope_hash"], row["horizon_seconds"])].append(row)
         forecasts = {}
         for key, cohort in groups.items():
+            if len({sample(row) for row in cohort}) < 2:
+                continue
+            def balance(values):
+                totals = defaultdict(float)
+                for row in values:
+                    totals[sample(row)] += row.get("sampling_weight", 1.0)
+                return [{**row, "sampling_weight": row.get("sampling_weight", 1.0)/totals[sample(row)]}
+                        for row in values]
+            cohort = balance(cohort)
             reused = [row for row in cohort if row["reused"]]
-            frequency = reuse_groups[key]
+            frequency = balance(reuse_groups[key])
             frequency_weight = sum(row.get("sampling_weight", 1.0) for row in frequency)
             probability = sum(row.get("sampling_weight", 1.0) for row in frequency if row["reused"])/frequency_weight
             if probability and not reused:
@@ -327,22 +349,28 @@ class EmpiricalRetentionModel:
                 host_seconds/(host_pages*cohort[0]["page_size"]) if host_pages else 0,
                 cohort[0]["cache_scope_hash"], evidence,
                 control, native_window-retained_window-target_gain+control, native_window, retained_window)
-        return cls(forecasts, schema)
+        model = cls(forecasts, schema)
+        model.independent_samples = len(components)
+        return model
 
     def predict(self, features, cache_scope_hash, horizon_seconds):
         return self.forecasts[self._key(self.feature_bucket(features), cache_scope_hash, horizon_seconds)]
 
     def to_dict(self):
-        return {"kind": "paired_native_retention_v4", "feature_schema": self.feature_schema,
-                "value_basis": "next source-demand READ saving minus retain control; full-window collateral is measured separately, not added per owner",
+        return {"kind": "paired_native_retention_v5", "feature_schema": self.feature_schema,
+                "value_basis": "marginal exact source-demand READ saving minus control and paired external-request penalty; full protected-set net measured by set intervention",
                 "bin_convention": "left_closed_right_open; None is missing",
+                "independent_samples": self.independent_samples,
+                "sample_unit": "connected session groups; TTL arms and overlapping windows are repeated measures",
+                "set_intervention_required": "same fixed workload Native versus protected owner set; record all response intervals, controls and physical residency",
                 "forecasts": {key: asdict(value) for key, value in self.forecasts.items()}}
 
     @classmethod
     def from_dict(cls, value):
-        if value["kind"] != "paired_native_retention_v4":
+        if value["kind"] != "paired_native_retention_v5":
             raise ValueError("unknown retention model format")
-        return cls({key: PrefixForecast(**row) for key, row in value["forecasts"].items()}, value["feature_schema"])
+        return cls({key: PrefixForecast(**row) for key, row in value["forecasts"].items()}, value["feature_schema"],
+                   independent_samples=value["independent_samples"])
 
 
 class PrefixRuntimeClient:
@@ -492,7 +520,8 @@ class PrefixReadObserver:
         current_versions = {(key.corpus_id, family, key.version) for family, key in current}
         relation = "same_version" if versions & current_versions else (
             "other_version" if source_families & current_families else "other_source")
-        return dict(prior_access_count=len(accesses),
+        return dict(access_state=("first" if not accesses else "recent" if (now-last["observed_ns"])/1e9 <= 60 else "revisit"),
+            prior_access_count=len(accesses),
             last_access_interval_seconds=(now-last["observed_ns"])/1e9 if last else None,
             source_turn_gap=gap, revisit=gap is not None and gap > 1,
             version_mode=state.version_intent.mode, source_task_relation=relation,
@@ -502,7 +531,15 @@ class PrefixReadObserver:
     @staticmethod
     def _native_features(inspected):
         pool, residency, workload = inspected["pool"], inspected["residency"], inspected["workload"]
-        return dict(gpu_pressure=1-pool["free_gpu_tokens"]/pool["gpu_capacity_tokens"],
+        ready = residency["ready_gpu_prefix_tokens"]
+        residency_state = ("device" if ready >= inspected["boundary_tokens"] else
+                           "host" if residency["recoverable_prefix_tokens"] >= inspected["boundary_tokens"] else "missing")
+        pressure = max(1-pool["free_gpu_tokens"]/pool["gpu_capacity_tokens"],
+            1-pool["free_host_tokens"]/pool["host_capacity_tokens"] if pool["host_capacity_tokens"] else 0)
+        load = "contended" if workload["active_requests"] > 1 or workload["queued_requests"] else "single"
+        return dict(native_residency=residency_state,
+            pressure_concurrency=("high" if pressure >= .9 else "normal")+":"+load,
+            gpu_pressure=1-pool["free_gpu_tokens"]/pool["gpu_capacity_tokens"],
             host_pressure=1-pool["free_host_tokens"]/pool["host_capacity_tokens"] if pool["host_capacity_tokens"] else 0,
             gpu_prefix_tokens=residency["ready_gpu_prefix_tokens"],
             host_prefix_tokens=len(inspected["host_page_ids"])*inspected["page_size"],

@@ -98,6 +98,11 @@ async def test_controller_reselects_after_each_read_and_commits_one_qa(tmp_path)
     assert attempt.plan.reason == "rolling_plan_gain"
     assert len({row.step_id for row in attempt.reading_outcome.steps}) == 2
     assert all(row.step_id.startswith("policy:") for row in attempt.reading_outcome.steps)
+    # The chosen output limit is present in the prompt itself, so each variant
+    # must be rendered with that same limit before it is quoted and executed.
+    for row in attempt.reading_outcome.steps:
+        assert row.task.output_budget == 256
+        assert '"extraction_output_budget_tokens":256' in bytes(row.input_ids).decode()
     calls = len(engine.constraints)
     replay = await controller.serve_turn("s", "How?", context_plans=(plan,), request_id="r")
     assert replay.idempotent_replay and len(engine.constraints) == calls
@@ -167,15 +172,14 @@ async def test_observed_open_need_proposes_priced_multihop_with_real_parent_and_
             if response_schema:
                 self.model_reads += 1
                 properties = response_schema["properties"]["claims"]["items"]["properties"]
-                parents = ([] if self.model_reads == 1 else
-                           properties["parent_claim_ids"]["items"]["enum"])
-                value = fact(properties["span_ids"]["items"]["enum"][0])
-                del value["version"]
-                value["parent_claim_ids"] = parents
-                value["followups"] = ([{"need_id": "n", "missing_relation": "prerequisite",
-                    "bound_entities": ["item"], "temporal_scope": "current"}]
-                    if self.model_reads == 1 else [])
-                self.response_text = json.dumps({"format_version": 2, **read_output(value)})
+                parents = [] if self.model_reads == 1 else properties["p"]["items"]["enum"]
+                value = {"n": properties["n"]["enum"][0], "t": "prerequisite", "e": "item", "r": "requires",
+                    "v": "form", "u": "", "c": [], "s": [properties["s"]["items"]["enum"][0]],
+                    "p": parents, "f": ([{"n": "n0", "r": "prerequisite", "e": ["item"], "t": "current"}]
+                        if self.model_reads == 1 else [])}
+                self.response_text = json.dumps({"format_version": response_schema["properties"]["format_version"]["const"],
+                    "claims": [value], "support": [] if self.model_reads == 1 else ["n0"],
+                    "conflicts": [], "open_needs": []}, separators=(",", ":"))
             else:
                 self.response_text = "The prerequisite form is required."
             return await super().generate(**kwargs)

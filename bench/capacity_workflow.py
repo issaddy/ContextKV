@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import resource
@@ -19,15 +20,15 @@ from urllib.parse import urlparse
 
 import yaml
 
-from bench.metrics import occupancy_integral
+from bench.metrics import TurnTiming, occupancy_integral, summarize_timings
 from bench.native_metrics import NativePoolSampler, pool_series
 from bench.plan_result_summary import batch_ledger
 from bench.reassess_saved import paid_execution_index
 from bench.rolling_study_workflow import configure
-from bench.study import merge_config, read_jsonl, write_json, write_jsonl
+from bench.study import dataset_rows, merge_config, read_jsonl, write_json, write_jsonl
 from bench.study_metrics import _cost_summary, _quantile, _track_specs, declared_queue_summary
 from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
-from bench.study_workloads import freeze_workload, load_goal_policy
+from bench.study_workloads import freeze_workload, load_goal_policy, read_workload_manifest
 
 
 def snapshot(path):
@@ -166,6 +167,13 @@ def prepare(args, root):
     return manifest
 
 
+def full_queue_methods(concurrency, methods=None):
+    if methods is not None:
+        return tuple(methods)
+    return (("B6_native", "S3_value") if concurrency == 1 else
+            ("B6_native", "S3_native", "B6_value", "S3_value"))
+
+
 def prepare_full_queue(args, root):
     from controller.config import load_config
     from training.train_plan_gain import PlanGainModel
@@ -232,17 +240,40 @@ def prepare_full_queue(args, root):
     matrix_path = root/"joint-matrix.yaml"
     matrix_path.write_text(yaml.safe_dump(matrix, sort_keys=False))
     jobs = []
+    workload_plans = {}
+    arrivals = read_workload_manifest(args.arrival_plan)
     for concurrency in args.concurrency:
-        for method in selected_methods:
+        workload_paths = {}
+        for dataset in datasets:
+            rows = dataset_rows(matrix["datasets"][dataset], "dev", task_ids=cohorts[dataset])
+            workload_path = root/f"workload-c{concurrency}-{dataset}.json"
+            source_plan = arrivals[dataset]
+            if source_plan.dispatch_semantics != "fixed_arrivals":
+                raise ValueError("full queue requires fixed absolute relative arrivals")
+            if set(source_plan.dispatch_order) != {row["task_id"] for row in rows}:
+                raise ValueError("arrival plan must cover the declared cohort exactly")
+            replace(source_plan, concurrency=concurrency).write(workload_path)
+            workload_paths[dataset] = str(workload_path.resolve())
+        workload_index = root/f"workload-c{concurrency}.json"
+        write_json(workload_index, dict(format="contextkv_dataset_workload_index_v1", datasets=workload_paths))
+        workload_plans[str(concurrency)] = {name: snapshot(path) for name, path in workload_paths.items()}
+        for method in full_queue_methods(concurrency, args.methods):
             name = f"c{concurrency}-{method}"
             jobs.append(dict(name=name, concurrency=concurrency, method=method, datasets=datasets,
-                requested_qa=requested, matrix=str(matrix_path), output=str(root/"jobs"/name/"generation")))
+                requested_qa=requested, complete_slo_seconds=args.complete_slo_seconds,
+                matrix=str(matrix_path), workload=str(workload_index.resolve()),
+                output=str(root/"jobs"/name/"generation")))
     manifest = dict(format="contextkv_full_queue_joint_plan_v1", scope="full declared P3 development queue",
         source_config=snapshot(args.config), source_matrix=snapshot(args.matrix),
         reader_profile_id=profile, reader_run=snapshot(run_path), resource_scope=scope,
         assets={"gain": snapshot(gain_path) if needs_gain else None,
                 "value": snapshot(args.value_model) if needs_value else None},
-        cohort=cohorts, value_policy=value_policy, gain_mode="observed_actions",
+        cohort=cohorts, workload_plans=workload_plans,
+        experiment_cells={"E1": "B6_native", "E2": "S3_native", "E3": "B6_value", "E4": "S3_value"},
+        E0_workload_usage="Use the existing task-first isolated Native matrix with bench.study evaluate --workload-plan workload-c4.json and the same cohorts/resources",
+        source_arrival_plan=snapshot(args.arrival_plan),
+        arrival_protocol="fixed relative arrival timestamps shared across methods; own-history and semaphore waits included in complete response",
+        value_policy=value_policy, gain_mode="observed_actions",
         lambda_time=execution["lambda_time"], concurrency=args.concurrency,
         selected_methods=selected_methods, requested_qa=requested*len(jobs), jobs=jobs, config=str(config_path),
         cache_boundary="one cold boundary per method and dataset; never cold between turns",
@@ -251,9 +282,36 @@ def prepare_full_queue(args, root):
     return manifest
 
 
+def delivery_summary(dataset_rows, failed, dispatch, *, complete_slo_seconds=None):
+    """Request-level delivery status and observed arrival-to-completion window."""
+    timings = [TurnTiming(row["conversation_id"], row["task_id"], "success",
+        row["response"]["output_tokens"], row["request_window"][0],
+        t_response_done=row["request_window"][1], t_commit=row["request_window"][1],
+        truncated=row["response"]["truncated"]) for row in dataset_rows]
+    timings += [TurnTiming(row["conversation_id"], row["task_id"], "failed", 0,
+                row["request_window"][0]) for row in failed]
+    windows = [row["request_window"] for row in (*dataset_rows, *failed)]
+    if dispatch is not None:
+        known = {timing.task_id for timing in timings}
+        timings += [TurnTiming(value["conversation_id"], task_id, "blocked", 0,
+            dispatch["origin"]+value["fixed_arrival_seconds"])
+            for task_id, value in dispatch["cancelled"].items()
+            if task_id not in known and value["fixed_arrival_seconds"] is not None]
+        if dispatch.get("observation_window") is not None:
+            window = dispatch["observation_window"]
+            windows.append([window["start"], window["end"]])
+    if windows:
+        return summarize_timings(timings,
+            window_start=min(window[0] for window in windows),
+            window_end=math.nextafter(max(window[1] for window in windows), math.inf),
+            ttft_slo=0, tpot_slo=0, response_mode="buffered",
+            complete_slo=complete_slo_seconds)
+    return None
+
+
 def summarize_full_queue(job):
     directory = Path(job["output"])/job["method"]
-    rows, batch_tracks, failure_ledgers = [], [], {}
+    rows, batch_tracks, failure_ledgers, delivery = [], [], {}, {}
     for dataset in job["datasets"]:
         track = directory/dataset
         batch_tracks.append({"generation_dir": str(track)})
@@ -264,6 +322,12 @@ def summarize_full_queue(job):
         failures = track/"failed_conversations.json"
         if failures.exists():
             failure_ledgers[dataset] = str(failures)
+        dataset_rows = [row for row in rows if row["dataset"] == dataset]
+        failed = json.loads(failures.read_text()) if failures.exists() else []
+        dispatch_path = track/"workload_dispatch.json"
+        dispatch = json.loads(dispatch_path.read_text()) if dispatch_path.exists() else None
+        delivery[dataset] = delivery_summary(dataset_rows, failed, dispatch,
+            complete_slo_seconds=job.get("complete_slo_seconds"))
     matrix = yaml.safe_load(Path(job["matrix"]).read_text())
     specs = _track_specs(matrix, "dev")
     tracks = {name: declared_queue_summary([row for row in rows if row["dataset"] == name],
@@ -280,6 +344,7 @@ def summarize_full_queue(job):
         "p95_complete_ms": _cost_summary(rows)["p95_complete_ms"],
         "latency_population": "delivered responses; completion counts use the entire declared queue",
         "failure_ledgers": failure_ledgers,
+        "delivery_metrics": delivery,
         "cost_batches": batch_ledger(batch_tracks),
         "paid_native_usage": paid_execution_index(rows, [directory], Path(job["output"])/"native.json")}
 
@@ -373,7 +438,7 @@ async def run(args):
                 "--matrix", job["matrix"], "--split", "dev", "--methods", job["method"],
                 "--concurrency", str(job["concurrency"]), "--output", job["output"]]
             if args.full_queue:
-                command += ["--datasets", *job["datasets"]]
+                command += ["--datasets", *job["datasets"], "--workload-plan", job["workload"]]
             else:
                 command += ["--datasets", "dynamic_goal_dev", "--workload-plan", job["workload"],
                             "--goal-policy", job["goal_policy"], "--unscored"]
@@ -429,6 +494,8 @@ async def run(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="Study configuration with frozen A for full-queue evaluation")
+    parser.add_argument("--arrival-plan", help="Dataset workload index with explicit fixed_arrivals schedules")
+    parser.add_argument("--complete-slo-seconds", type=float, help="Buffered arrival-to-completion SLO for request goodput")
     parser.add_argument("--full-queue", action="store_true", help="Run all declared development tasks in each B/C cell")
     parser.add_argument("--methods", nargs="+", choices=("B6_native", "B6_value", "S3_native", "S3_value"),
                         help="Select full-queue cells for this reader")
@@ -439,7 +506,7 @@ def main(argv=None):
     parser.add_argument("--execution-profile")
     parser.add_argument("--native-assets")
     parser.add_argument("--value-model", help="Add value-C B6/S3 cells at each declared concurrency")
-    parser.add_argument("--concurrency", type=int, nargs="+", choices=(1, 4, 8), default=[1, 4])
+    parser.add_argument("--concurrency", type=int, nargs="+", choices=(1, 4, 8), default=[4])
     parser.add_argument("--gain-mode", choices=("observed_actions", "whole_plan"), default="observed_actions")
     parser.add_argument("--reader-profile-id")
     parser.add_argument("--online-gpu-devices", type=lambda value: tuple(map(int, value.split(","))))
@@ -459,8 +526,8 @@ def main(argv=None):
     if args.methods is not None and not args.full_queue:
         parser.error("--methods requires --full-queue")
     if args.full_queue:
-        if not args.matrix or not args.online_gpu_devices or not args.reader_base_url:
-            parser.error("--full-queue requires --matrix, --online-gpu-devices and --reader-base-url")
+        if not args.matrix or not args.online_gpu_devices or not args.reader_base_url or not args.arrival_plan:
+            parser.error("--full-queue requires --matrix, --online-gpu-devices, --reader-base-url and --arrival-plan")
         methods = args.methods or ("B6_native", "B6_value", "S3_native", "S3_value")
         if any(method.startswith("S3_") for method in methods):
             if not args.gain_asset:

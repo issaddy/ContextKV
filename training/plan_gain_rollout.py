@@ -19,7 +19,7 @@ import time
 import sys
 from urllib.parse import urlsplit
 
-from controller.action_proposals import observed_reduction_task
+from controller.action_proposals import observed_reduction_task, BOUNDED_CONTINUATION
 from controller.context_schema import EvidenceSet, EvidenceUnit, ReadingOutcome, SourceSpan, TaskState
 from controller.schema import QueryContext, SessionSnapshot, TurnRecord
 from controller.serialization import decode, to_jsonable
@@ -414,8 +414,13 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
             or observed["reader_checkpoint"] != binding["reader_checkpoint"]
             or observed["reader_profile_id"] != binding["reader_profile_id"]):
         raise ValueError("observed branch differs from its frozen reader/history binding")
-    registration = {"registered_at": time.monotonic(), "frozen_state_key": state_key,
+    continuation_request = gap_request
+    if observed is not None and continuation_request is None and gap_provider is not None:
+        continuation_request = GapRetrievalRequest((), "", gap_retriever_identity(binding["resident_model_manifest"]),
+            binding["continuation_gap_limits"])
+    registration = {"continuation_protocol": BOUNDED_CONTINUATION, "registered_at": time.monotonic(), "frozen_state_key": state_key,
         "plan_candidate": to_jsonable(plan), "working_state": to_jsonable(frozen), "snapshot": to_jsonable(snapshot),
+        "continuation_gap_limits": continuation_request.limits if continuation_request is not None else None,
         "source_task_id": row["task_id"], "source_native_partition": row["split"],
         "observed_state_binding": observed, "gap_request": gap_request if plan.semantic_kind == "gap_retrieval" else None,
         **binding}
@@ -426,7 +431,7 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
     from controller.plan_policy import CompleteCost
     paid = None if observed is None else decode(CompleteCost, observed["paid_cost"])
     runtime = FixedCounterfactualRuntime(plan, initial_state=frozen if observed is not None else None,
-        paid_cost=paid, gap_request=gap_request, gap_provider=gap_provider,
+        paid_cost=paid, gap_request=continuation_request, gap_provider=gap_provider,
         initial_snapshot=snapshot if observed is not None else None)
     service.rolling_policy = runtime
     service.bind_resident_models(binding["resident_model_manifest"])
@@ -434,7 +439,11 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
     required_calls = sum(step.task.step_id not in completed and (step.task.kind == "ANSWER" or not (
         step.task.kind == "REDUCE" and plan.context_plan.reading_mode == "typed_reduce"
         and step.task.operation in {"count", "sum", "group", "union"})) for step in plan.steps)
-    if generation_budget.remaining < required_calls+1:
+    continuation_calls = int(observed is not None and plan.semantic_kind != "direct_answer"
+        and any(need.operation == "infer" for need in frozen.plan.task_state.needs))
+    # Terminal READ and one final judge are reserved before starting this branch.
+    # Support calls additionally claim tickets from the same atomic hard cap.
+    if generation_budget.remaining < required_calls+continuation_calls+1:
         write(case_dir/"not-run.json", {"status": "generation_budget_unavailable", "registered": registration})
         return None
     if cache_start == "cold":
@@ -531,6 +540,8 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
             "steps": to_jsonable(steps), "attempt": to_jsonable(attempt), "cost": full_cost,
             "actual_branch_execution_cost": execution, "executed_output_budgets": actual_budgets,
             "paid_cost": prior, "cleanup_cost": cleanup_cost, "observed_state_binding": observed,
+            "continuation_protocol": BOUNDED_CONTINUATION,
+            "continuation_gap_limits": continuation_request.limits if continuation_request is not None else None,
             "pre_action_quote": to_jsonable(runtime.pre_action_quote),
             "new_step_ids": tuple(step.step_id for step in steps), "new_action_counts": action_counts,
             "gap_result": to_jsonable(runtime.gap_result),
@@ -542,10 +553,20 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
         raise ValueError("counterfactual branch did not commit exactly one current QA")
     if response is None and output["qa_increment"] != 0:
         raise ValueError("failed counterfactual branch committed a QA")
-    if response is not None and (attempt.plan.candidate.context_plan_id != plan.plan_id
-            or set(actual_budgets)-{"ANSWER"} != {step.task.step_id for step in plan.steps
-                if step.task.kind != "ANSWER" and step.task.step_id not in completed}):
-        raise ValueError("actual branch execution differs from its pre-registered complete DAG")
+    if response is not None:
+        expected = {step.task.step_id for step in plan.steps
+            if step.task.kind != "ANSWER" and step.task.step_id not in completed}
+        actual = set(actual_budgets)-{"ANSWER"}
+        if observed is None:
+            valid = actual == expected
+        else:
+            from controller.action_proposals import validate_action_counts
+            validate_action_counts(plan.semantic_kind, action_counts)
+            extra = actual-expected
+            valid = (expected <= actual and actual == set(runtime.new_step_ids)
+                     and len(extra) <= 1 and all(key.startswith("bounded-terminal:") for key in extra))
+        if attempt.plan.candidate.context_plan_id != plan.plan_id or not valid:
+            raise ValueError("actual branch execution differs from its registered continuation protocol")
     return output
 
 
@@ -773,6 +794,8 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 "cohort_manifest_sha256": row["cohort_manifest_sha256"],
                 "measurement_kind": "hardware" if info.engine_kind == "sglang" else "simulation",
                 "resident_model_manifest": to_jsonable(provider.manifest),
+                "continuation_protocol": BOUNDED_CONTINUATION,
+                "continuation_gap_limits": (run.state_observation or run.plan_gain)["gap_limits"] if mode == "observed_actions" else None,
                 "task_state_source": "frozen_audited_actual", "collection_mode": mode,
                 "counterfactual_cache_start": settings["cache_start"]}
             write(output/"binding.json", {**common_binding, "reader_engine_info": info,
@@ -879,7 +902,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 comparison = {"body_tokens": base.budget.body_tokens,
                     "answer_output_tokens": base.budget.output_tokens, "window_tokens": base.budget.window_tokens,
                     "read_output_budget_grid": settings["read_outputs"] if mode == "whole_plan" else None,
-                    "action_protocol": "whole_registered_plan" if mode == "whole_plan" else "one_registered_action_then_ANSWER",
+                    "action_protocol": "whole_registered_plan" if mode == "whole_plan" else BOUNDED_CONTINUATION,
                     "reference_state": "same frozen original material/actual history; direct has zero new READ"}
                 binding = {**common_binding, "comparison_budget": comparison}
                 async def retrieve_gap(plan, request, claims):
@@ -959,13 +982,14 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
             write(output/"manifest.json", {"schema_version": 1, "status": status, "collection_mode": mode,
                 "error": str(active_error) if active_error is not None else stop_reason,
                 "scope": "actual reader-bound counterfactual supervision collection",
+                "continuation_protocol": BOUNDED_CONTINUATION,
                 "elapsed_ms": (time.monotonic()-started)*1000, "planned_tasks": cohort["planned_task_ids"],
                 "cohort": cohort,
                 **preparation_counts(), "actual_runs": len(all_runs), "actual_gain_pairs": len(all_pairs),
                 "actual_observations": len({row["observed_state_binding"]["observation_id"] for row in all_runs
                                             if row["observed_state_binding"] is not None}),
                 "actual_action_task_ids": {kind: sorted({row["task_id"] for row in all_runs
-                    if row["semantic_kind"] == kind and row["new_action_counts"][action] == 1})
+                    if row["semantic_kind"] == kind and row["new_action_counts"][action] >= 1})
                     for kind, action in (("read_once", "READ"), ("reduce_once", "REDUCE"),
                                          ("gap_retrieval", "GAP_RETRIEVAL"))},
                 "run_statuses": dict(Counter(row["status"] for row in all_runs)),

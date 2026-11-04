@@ -40,6 +40,8 @@ def paired_records(*, split="train", tag="training"):
         "question": task_state.raw_question, "actual_history": observed["actual_history"],
         "state_key": observed["state_key"], "reader_checkpoint": "reader-fixture",
         "reader_profile_id": "profile-fixture", "split": split, "answer": "specified answer",
+        "cohort_split": split, "cohort_manifest_sha256": "specified-fixture",
+        "continuation_gap_limits": {"max_units": 2, "max_passages": 2},
         "scorer_identity": {"kind": "specified unit-test scorer"},
         "comparison_budget": {"window_tokens": base.budget.window_tokens, "answer_output_tokens": 64},
         "observed_state_binding": observed, "output_budgets": {"ANSWER": 64}}
@@ -142,13 +144,7 @@ def test_legacy_declared_feature_asset_remains_a_control_and_rejects_new_actions
         model.predict_costs(legacy)
 
 
-def test_only_observed_action_costs_train_heads_and_legacy_data_is_not_zero_filled():
-    from test_plan_gain import observed_pair
-    plan, state, snapshot, direct, candidate = observed_pair()
-    row = build_gain_record(plan, state, snapshot, direct, candidate)
-    row["features"] = {name: row["features"][name] for name in LEGACY_FEATURE_NAMES}
-    model = fit_gain([row])
-    assert model.feature_names == LEGACY_FEATURE_NAMES and not model.cost_models
+def test_current_action_features_are_not_zero_filled_or_masked():
     current = paired_records()[0][0]
     current["features"] = {name: current["features"][name] for name in LEGACY_FEATURE_NAMES}
     with pytest.raises(ValueError, match="one-hot"):

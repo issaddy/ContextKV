@@ -15,6 +15,7 @@ from pathlib import Path
 import time
 
 from controller.context_schema import ReadingOutcome
+from controller.action_proposals import BOUNDED_CONTINUATION, validate_action_counts
 from controller.plan_policy import NATIVE_COST_SCHEMA, PlanCandidate, plan_cost_features, plan_features
 from controller.schema import CacheQuoteBatch, SessionSnapshot
 from controller.serialization import decode
@@ -111,14 +112,16 @@ def completion_record(before, run):
     complete, reason = _completion(run, observed=observed is not None)
     if observed is not None:
         counts = run["new_action_counts"]
-        allowed = {"READ": 0, "REDUCE": 0, "GAP_RETRIEVAL": 0, "ANSWER": 1}
-        if planned.semantic_kind != "direct_answer":
-            action = {"read_once": "READ", "reduce_once": "REDUCE", "gap_retrieval": "GAP_RETRIEVAL"}[planned.semantic_kind]
-            allowed[action] = 1
-        if any(counts[name] != count for name, count in allowed.items() if name != "ANSWER"):
+        if (observed.get("continuation_protocol") != BOUNDED_CONTINUATION
+                or before.get("continuation_protocol") != BOUNDED_CONTINUATION
+                or run.get("continuation_protocol") != BOUNDED_CONTINUATION):
+            raise ValueError("completion labels require the registered bounded continuation protocol")
+        if before["continuation_gap_limits"] != run["continuation_gap_limits"]:
+            raise ValueError("bounded continuation GAP limits changed after registration")
+        try:
+            validate_action_counts(planned.semantic_kind, counts, complete=complete == 1)
+        except ValueError:
             complete, reason = None, "registered_action_not_executed"
-        if counts["ANSWER"] not in ({1} if complete == 1 or planned.semantic_kind == "direct_answer" else {0, 1}):
-            complete, reason = None, "new_answer_count_mismatch"
         new_ids = set(run["new_step_ids"])
         if not new_ids <= {step["step_id"] for step in run["steps"]}:
             raise ValueError("observed completion names unavailable new physical steps")
@@ -194,7 +197,7 @@ def effective_pair(base, candidate):
                  "scorer_identity", "observed_state_binding"):
         if base[name] != candidate[name]:
             raise ValueError(f"effective branches differ in {name}")
-    for name in ("comparison_budget", "paid_cost"):
+    for name in ("comparison_budget", "paid_cost", "continuation_gap_limits"):
         if base["actual_run"].get(name) != candidate["actual_run"].get(name):
             raise ValueError(f"effective counterfactuals differ in {name}")
     if (base["actual_run"]["cost"]["shared_preparation_cost_id"]
@@ -287,6 +290,9 @@ def fit_effective(training, *, ridge=1.0, path=None):
     binding = {(row["reader_checkpoint"], row["reader_profile_id"], digest(row["scorer_identity"])) for row in training}
     if len(binding) != 1:
         raise ValueError("effective gain asset binds one actual reader/profile/scorer")
+    limits = {digest(row["counterfactual"]["actual_run"]["continuation_gap_limits"]) for row in training}
+    if len(limits) != 1:
+        raise ValueError("one bounded gain asset requires the same declared GAP limits")
     samples, direct_seen, cost_kinds, cache_scopes = [], set(), set(), set()
     cost_record_ids = []
     resident_digests = set()
@@ -332,7 +338,8 @@ def fit_effective(training, *, ridge=1.0, path=None):
         cost_scale[cost_scale == 0] = 1.0
         cost_models, cost_mse = fit_cost_heads(samples, cost_names, cost_center, cost_scale,
             ridge=ridge, targets=("branch_complete_cost",))
-        cost_provenance = {"source": "actual_observed_terminal_branch_and_paired_direct_costs",
+        cost_provenance = {"continuation_protocol": BOUNDED_CONTINUATION,
+            "source": "actual_observed_terminal_branch_and_paired_direct_costs",
             "feature_schema": NATIVE_COST_SCHEMA, "feature_names": cost_names,
             "center": cost_center.tolist(), "scale": cost_scale.tolist(),
             "training_cache_starts": sorted(cache_scopes), "training_samples": len(samples),
@@ -344,7 +351,9 @@ def fit_effective(training, *, ridge=1.0, path=None):
     return PlanGainModel(training[0]["reader_checkpoint"], training[0]["reader_profile_id"],
         "effective-plan-gain:"+digest(training), names, tuple(center.tolist()), tuple(scale.tolist()),
         tuple(coefficients.tolist()), float(intercept),
-        {"resident_model_manifest_digests": sorted(resident_digests),
+        {"continuation_protocol": BOUNDED_CONTINUATION,
+         "continuation_gap_limits": training[0]["counterfactual"]["actual_run"]["continuation_gap_limits"],
+         "resident_model_manifest_digests": sorted(resident_digests),
          "label": LABEL, "utility_rule": RULE, "no_answer_utility": 0.0, "raw_missing_quality_preserved": True,
          "training_split": "train", "training_records": len(training), "counterfactual_runs_retained": True,
          "input_sha256": digest(training), "input_path": str(Path(path).resolve()) if path else None,

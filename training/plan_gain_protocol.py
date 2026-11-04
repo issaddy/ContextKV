@@ -10,7 +10,8 @@ import time
 
 from adapters.history_state import validate_task_refs
 from controller.action_proposals import (GapRetrievalRequest as GapRetrievalRequest,
-    build_observed_action_plans as build_observed_action_plans, gap_query as gap_query)
+    build_observed_action_plans as build_observed_action_plans, gap_query as gap_query,
+    BOUNDED_CONTINUATION, continuation_gap, continuation_read)
 from controller.context_schema import EvidencePool, ReadingOutcome, ReadTask
 from controller.context_budget import bind_answer_window
 from controller.plan_policy import CompleteCost, complete_plan
@@ -37,7 +38,7 @@ class ObservedActionFailure(ValueError):
 def observed_state_binding(state, snapshot, *, paid_cost, native_condition,
                            reader_checkpoint, reader_profile_id, paid_observation=None):
     from training.train_plan_gain import actual_history, working_state_key
-    binding = {"state_key": working_state_key(state, snapshot), "actual_history": actual_history(snapshot),
+    binding = {"continuation_protocol": BOUNDED_CONTINUATION, "state_key": working_state_key(state, snapshot), "actual_history": actual_history(snapshot),
         "reader_checkpoint": reader_checkpoint, "reader_profile_id": reader_profile_id,
         "paid_cost": to_jsonable(paid_cost), "native_condition": to_jsonable(native_condition)}
     if paid_observation is not None:
@@ -232,10 +233,19 @@ class FixedCounterfactualRuntime:
             expected = 1 if self.planned.semantic_kind in {"read_once", "reduce_once"} else 0
             if len(pending) != expected:
                 raise ValueError("observed branch must contain exactly its registered new action")
-        if self.planned.semantic_kind == "gap_retrieval":
+        async def retrieve(request):
+            nonlocal plan, state
+            from controller.execution import ReadingBudgetExceeded, require_online_tokens
+            if (observed and plan.budget.max_complete_ms is not None and
+                    self.paid_cost.latency_ms+(time.monotonic()-arrived)*1000 > plan.budget.max_complete_ms):
+                raise ReadingBudgetExceeded("paid state plus bounded GAP exceeds complete latency")
+            if len(state.steps)+self.new_action_counts["GAP_RETRIEVAL"]+2 > plan.budget.max_steps:
+                raise ReadingBudgetExceeded("bounded GAP leaves no terminal ANSWER allocation")
+            self.gap_request = request
             from controller.evidence_planner import _passages, close_dependencies
             from controller.execution import auxiliary_tokens, merge_auxiliary_usage
-            self.pre_action_quote = {"batch": await engine.quote_batch((), template.fingerprint), "candidate_id": None}
+            if self.pre_action_quote is None:
+                self.pre_action_quote = {"batch": await engine.quote_batch((), template.fingerprint), "candidate_id": None}
             tick = time.monotonic()
             self.new_action_counts["GAP_RETRIEVAL"] = 1
             pool = await self.gap_provider(plan, self.gap_request, state.claims)
@@ -262,13 +272,65 @@ class FixedCounterfactualRuntime:
             state = replace(state, plan=plan, auxiliary_usage=usage)
             plan = replace(plan, online_tokens_spent=plan.online_tokens_spent+auxiliary_tokens(pool.auxiliary_usage))
             state = replace(state, plan=plan)
+            require_online_tokens(plan.budget.max_total_tokens, plan.online_tokens_spent,
+                                  plan.budget.output_tokens, "bounded GAP and ANSWER")
             events.emit("plan_gain_experimental_gap", attempt_id=attempt_id, **self.gap_result)
+            return pool
+        if self.planned.semantic_kind == "gap_retrieval":
+            pool = await retrieve(self.gap_request)
         records = []
-        while pending:
+        continued = False
+        while pending or (observed and self.planned.semantic_kind != "direct_answer" and not continued):
+            if not pending:
+                continued = True
+                ready_terminal = continuation_read(state, self.initial_state.plan)
+                if ready_terminal is not None:
+                    task = replace(ready_terminal, step_id="bounded-terminal:"+ready_terminal.step_id,
+                        predecessor_step_ids=(), input_claim_ids=tuple(claim.claim_id for claim in state.claims))
+                    plan = replace(plan, steps=(*plan.steps, task))
+                    state = replace(state, plan=plan)
+                else:
+                    gaps = continuation_gap(state, used_gap=bool(self.new_action_counts["GAP_RETRIEVAL"]))
+                    if gaps and self.gap_provider is not None and self.gap_request is not None:
+                        request = replace(self.gap_request, open_needs=gaps, query=gap_query(plan.task_state, gaps))
+                        pool = await retrieve(request)
+                    elif self.new_action_counts["GAP_RETRIEVAL"] and any(
+                            need.operation == "infer" for need in plan.task_state.needs):
+                        pool = self.gap_result["pool"]
+                    else:
+                        break
+                    covered = {unit for result in state.results for unit in result.covered_units}
+                    novel = tuple(unit for unit in pool.units if unit.unit_id not in covered)
+                    if not novel:
+                        break
+                    from controller.evidence_planner import close_dependencies
+                    units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+                    terminal_units = close_dependencies(tuple(unit.unit_id for unit in novel), units)
+                    gap_plan = build_read_plan(plan.task_state, replace(plan.selected_set, selected_units=terminal_units),
+                        "selected_sources", plan.budget, template=template, snapshot=snapshot,
+                        input_claims=state.claims, reading_mode=plan.reading_mode,
+                        separate_needs=plan.separate_needs, numeric_identity=plan.numeric_identity,
+                        read_layout=plan.read_layout, read_packing=plan.read_packing,
+                        answer_system_prompt=plan.answer_system_prompt)
+                    reads = tuple(task for task in gap_plan.steps if task.kind == "READ")
+                    if not reads:
+                        break
+                    task = replace(reads[0], step_id="bounded-terminal:"+reads[0].step_id,
+                        predecessor_step_ids=(), input_claim_ids=tuple(claim.claim_id for claim in state.claims))
+                    selected = replace(plan.selected_set, selected_units=tuple({
+                        **{unit.unit_id: unit for unit in plan.selected_set.selected_units},
+                        **{unit.unit_id: unit for unit in gap_plan.selected_set.selected_units}}.values()))
+                    plan = replace(plan, selected_set=selected, steps=(*plan.steps, task))
+                    state = replace(state, plan=plan)
+                pending.append(task)
             completed = {result.step_id for result in state.results}
             ready = [task for task in pending if set(task.predecessor_step_ids) <= completed]
             if not ready:
                 raise ValueError("pre-registered experimental DAG has no executable next step")
+            from controller.execution import ReadingBudgetExceeded
+            if (observed and plan.budget.max_complete_ms is not None and
+                    self.paid_cost.latency_ms+(time.monotonic()-arrived)*1000 > plan.budget.max_complete_ms):
+                raise ReadingBudgetExceeded("paid state plus bounded continuation exceeds complete latency")
             task = ready[0]
             pending.remove(task)
             parents = tuple(claim for result in state.results if result.step_id in task.predecessor_step_ids
@@ -280,7 +342,8 @@ class FixedCounterfactualRuntime:
                     previous.task.step_id in task.predecessor_step_ids and previous.task.kind != "GAP"
                     for previous in self.planned.steps):
                 raise EmptyPlannedPremise("planned predecessor produced no factual input: "+task.step_id)
-            task = replace(task, input_claim_ids=tuple(claim.claim_id for claim in parents))
+            task = replace(task, input_claim_ids=tuple(claim.claim_id for claim in parents)
+                           if task.predecessor_step_ids else task.input_claim_ids)
             plan = replace(plan, steps=tuple(task if old.step_id == task.step_id else old for old in plan.steps))
             cpu = plan.reading_mode == "typed_reduce" and task.kind == "REDUCE" and task.operation in {"count", "sum", "group", "union"}
             variants = () if cpu else compile_step(plan, task, state, snapshot, template, outputs=(task.output_budget,))
@@ -288,7 +351,7 @@ class FixedCounterfactualRuntime:
                 from controller.execution import ReadingBudgetExceeded
                 raise ReadingBudgetExceeded("actual generated facts exceed the pre-registered execution window")
             quote = None if cpu else await engine.quote_batch(variants, template.fingerprint)
-            if observed:
+            if observed and not self.new_step_ids and self.pre_action_quote is None:
                 self.pre_action_quote = {
                     "batch": await engine.quote_batch((), template.fingerprint) if cpu else quote,
                     "candidate_id": None if cpu else variants[0].candidate_id}

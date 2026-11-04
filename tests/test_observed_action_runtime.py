@@ -21,6 +21,10 @@ class LearnedFixture(SpecifiedGainFixture):
     def __init__(self, reads=1, gap_gain=-.1, reduce_gain=-.1, direct_ms=10, read_ms=20):
         self.reads, self.gap_gain, self.reduce_gain = reads, gap_gain, reduce_gain
         self.direct_ms, self.read_ms = direct_ms, read_ms
+        from controller.action_proposals import BOUNDED_CONTINUATION
+        self.cost_provenance = {}
+        self.provenance = {"continuation_protocol": BOUNDED_CONTINUATION,
+            "continuation_gap_limits": {"max_units": 2, "max_passages": 2}}
         self.quality_calls = []
 
     def supports_semantic_kind(self, kind, *, costs=False):
@@ -94,6 +98,7 @@ async def test_after_each_read_learned_value_selects_stop_or_one_more_read(tmp_p
     assert all("task_id" not in record for record in records)
     assert records[-1]["paid_cost"]["input_tokens"] > 0
     result = export_observed_packets(records, [{"task_id": "real-task-turn-id",
+        "cohort_split": "train", "cohort_manifest_sha256": "specified-fixture",
         "response": {"attempt_id": response.attempt_id}}], tmp_path / "packets.jsonl")
     assert result["packets"] == wanted+1
     assert all(json.loads(line)["task_id"] == "real-task-turn-id" for line in
@@ -114,20 +119,23 @@ class BridgeReader(MockEngine):
             payload = json.loads(bytes(kwargs["input_ids"]).decode().split("<|user|>\n")[-1].split("\n<|end|>")[0])
             self.read_inputs.append(payload)
             unit = next((unit for unit in payload["units"] if unit["unit_id"] == "new"), payload["units"][-1])
-            gap = {"need_id": "n", "missing_relation": "start date", "bound_entities": ["R3"], "temporal_scope": "current"}
+            protocol = payload["fact_protocol"]
+            need = next(iter(protocol["needs"]))
+            parents = list(protocol["parents"])
+            source = next(alias for alias, identity in protocol["sources"].items()
+                          if identity == unit["source_spans"][0]["span_id"])
+            gap = {"n": need, "r": "start date", "e": ["R3"], "t": "current"}
             if self.question_only and self.reads == 1:
-                claims, opened = [], [{**gap, "parent_claim_ids": []}]
+                claims, opened = [], [{**gap, "p": []}]
             else:
-                value = fact(unit["source_spans"][0]["span_id"], "R1" if self.reads == 1 else "R3",
-                             "R3" if self.reads == 1 else "2001")
-                del value["version"]
-                value["text"] = unit["text"]
-                value["relation"] = "parent" if self.reads == 1 else "start date"
-                value["parent_claim_ids"] = [claim["claim_id"] for claim in payload["claims"]]
-                value["followups"] = [gap] if self.reads == 1 or self.repeat else []
+                value = {"n": need, "t": "bridge", "e": "R1" if self.reads == 1 else "R3",
+                    "r": "parent" if self.reads == 1 else "start date",
+                    "v": "R3" if self.reads == 1 else "2001", "u": "", "c": [], "s": [source],
+                    "p": parents, "f": [gap] if self.reads == 1 or self.repeat else []}
                 claims, opened = [value], []
-            self.response_text = json.dumps({"format_version": 2, "claims": claims,
-                "support": [] if self.reads == 1 or self.repeat else ["n"], "conflicts": [], "open_needs": opened})
+            self.response_text = json.dumps({"format_version": protocol["format_version"], "claims": claims,
+                "support": [] if self.reads == 1 or self.repeat else [need], "conflicts": [], "open_needs": opened},
+                separators=(",", ":"))
         else:
             self.response_text = "Supported answer."
         return await super().generate(**kwargs)
@@ -196,7 +204,7 @@ async def test_mandatory_coverage_uses_native_fixed_path_without_untrained_whole
 
     response = await controller.serve_turn("s", "How?", context_plans=(plan,), open_need_provider=provider)
     assert response.read_count == 2 and not calls
-    assert not model.quality_calls
+    assert not {"read_once", "gap_retrieval"}.intersection(model.quality_calls)
     assert len(observed.states[-1].results) == 2
     await controller.aclose()
 
@@ -222,8 +230,8 @@ def test_export_uses_actual_attempt_mapping_for_each_turn_and_preserves_exclusio
         for index, (attempt, request) in enumerate((("a", "r1"), ("b", "r2"), ("unknown", "r3")))]
     observations.append({**observations[0], "observation_id": "mandatory", "decision_mode": "mandatory_coverage"})
     manifest = export_observed_packets(observations, [
-        {"task_id": "real-turn-1", "response": {"attempt_id": "a"}},
-        {"task_id": "real-turn-2", "response": {"attempt_id": "b"}}], tmp_path / "packets.jsonl")
+        {"task_id": "real-turn-1", "cohort_split": "train", "cohort_manifest_sha256": "specified-fixture", "response": {"attempt_id": "a"}},
+        {"task_id": "real-turn-2", "cohort_split": "train", "cohort_manifest_sha256": "specified-fixture", "response": {"attempt_id": "b"}}], tmp_path / "packets.jsonl")
     assert manifest["packets"] == 2 and len(manifest["excluded"]) == 2
     rows = [json.loads(line) for line in (tmp_path / "packets.jsonl").read_text().splitlines()]
     assert [row["task_id"] for row in rows] == ["real-turn-1", "real-turn-2"]

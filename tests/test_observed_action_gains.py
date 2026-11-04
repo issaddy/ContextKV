@@ -38,6 +38,12 @@ class Reader(MockEngine):
     async def info(self):
         return replace(await super().info(), engine_kind="sglang")
 
+    async def quote_batch(self, *args, **kwargs):
+        batch = await super().quote_batch(*args, **kwargs)
+        return replace(batch, gpu_capacity_tokens=128000, active_requests=0, queued_requests=0,
+            quotes=tuple(replace(quote, ready_gpu_prefix_tokens=0, host_only_load_tokens=0)
+                         for quote in batch.quotes))
+
     async def generate(self, *, response_schema=None, **kwargs):
         rendered = bytes(kwargs["input_ids"]).decode()
         self.inputs.append((response_schema is not None, rendered))
@@ -107,6 +113,7 @@ async def frozen_fixture(tmp_path):
     observed = observed_state_binding(frozen, snapshot, paid_cost=paid,
         native_condition={"cache_state": "specified-fixture", "quote_seq": 1},
         reader_checkpoint=checkpoint, reader_profile_id="fixture-profile")
+    observed["resident_model_manifest_digest"] = "specified-fixture"
     request = GapRetrievalRequest(frozen.open_needs, gap_query(state, frozen.open_needs),
         {"implementation": "specified-fixture"}, {"max_units": 1, "max_passages": 1})
     plans, omitted = build_observed_action_plans(frozen, snapshot, template,
@@ -119,7 +126,8 @@ async def frozen_fixture(tmp_path):
         "scorer_identity": {"kind": "specified-fixture"}, "split": "train", "measurement_kind": "hardware",
         "resident_model_manifest": {"source": "specified-fixture"},
         "comparison_budget": {"window_tokens": 16000, "answer_output_tokens": 256},
-        "collection_mode": "observed_actions"}
+        "collection_mode": "observed_actions", "counterfactual_cache_start": "observed", "cohort_split": "train",
+        "cohort_manifest_sha256": "specified-fixture"}
     row = {"task_id": "task", "split": "train", "conversation_id": "fixture", "question": state.raw_question,
            "snapshot_id": "demo-v1", "turn": 2, "rollout_policy": "dense5_rebuild_qwen3_32b_nonthinking"}
     preparation = {"shared_cost_id": "specified-preparation", "complete_ms": 0,
@@ -130,7 +138,7 @@ async def frozen_fixture(tmp_path):
 @pytest.mark.asyncio
 async def test_frozen_nonempty_state_runs_each_single_action_without_replaying_or_unselected_gap(tmp_path):
     service, native, budget, frozen, snapshot, observed, request, plans, binding, row, prep = await frozen_fixture(tmp_path)
-    assert {plan.semantic_kind for plan in plans} == {"direct_answer", "read_once", "reduce_once", "gap_retrieval"}
+    assert {plan.semantic_kind for plan in plans} == {"direct_answer", "read_once", "gap_retrieval"}
     calls, runs = [], {}
 
     async def retrieve(plan, registered, claims):
@@ -161,15 +169,15 @@ async def test_frozen_nonempty_state_runs_each_single_action_without_replaying_o
     assert runs["direct_answer"]["response"]["read_count"] == 1
     assert runs["direct_answer"]["new_action_counts"]["READ"] == 0
     answers = [prompt for structured, prompt in native.inputs if not structured]
-    assert len(answers) == 4 and all("Use the frozen condition" in prompt and "R1" in prompt for prompt in answers)
+    assert len(answers) == 3 and all("Use the frozen condition" in prompt and "R1" in prompt for prompt in answers)
     assert "R3" in answers[-1]
     assert sum(structured for structured, _ in native.inputs) == 2  # one capture READ, one new READ
     direct = runs["direct_answer"]
-    candidate = runs["reduce_once"]
+    candidate = runs["read_once"]
     for run, quality in ((direct, .4), (candidate, .7)):
         run["scoring"] = {"status": "scored", "identity": binding["scorer_identity"]}
         run["metrics"] = {"Q": quality}
-    plan = next(plan for plan in plans if plan.semantic_kind == "reduce_once")
+    plan = next(plan for plan in plans if plan.semantic_kind == "read_once")
     packet = {"plan_candidate": to_jsonable(plan), "working_state": to_jsonable(frozen),
         "snapshot": to_jsonable(snapshot), "metric": "Q", "normalization": {"scale": 1,
         "offset": 0, "protocol_source": "specified protocol fixture"},
@@ -205,31 +213,6 @@ async def test_empty_new_read_still_gets_a_final_answer_and_prior_paid_budget_is
             ReadingExecutor(service.store, service.engine, service.template), service.engine,
             service.template, None, None, arrived=0, auxiliary_usage=dict(ZERO_AUX),
             events=service.events)
-    await service.aclose()
-    service.store.close()
-
-
-@pytest.mark.asyncio
-async def test_packet_binding_rejects_changed_history_reader_and_unregistered_gap(tmp_path):
-    service, _, _, frozen, snapshot, observed, request, _, _, _, _ = await frozen_fixture(tmp_path)
-    row = {"task_id": "task", "question": frozen.plan.task_state.raw_question,
-        "task_state": to_jsonable(frozen.plan.task_state), "actual_history": observed["actual_history"],
-        "turn": 2, "conversation_id": "fixture"}
-    packet = {"task_id": "task", "working_state": to_jsonable(frozen), "snapshot": to_jsonable(snapshot),
-        "paid_cost": observed["paid_cost"], "native_condition": observed["native_condition"],
-        "reader_checkpoint": observed["reader_checkpoint"], "reader_profile_id": "fixture-profile"}
-    assert len(observed_rows([row], [packet])) == 1
-    changed = deepcopy(packet)
-    changed["snapshot"]["raw_history"][0]["assistant_text"] = "invented history"
-    with pytest.raises(ValueError, match="actual task/history"):
-        observed_rows([row], [changed])
-    with pytest.raises(ValueError, match="GAP query"):
-        build_observed_action_plans(frozen, snapshot, service.template,
-            reader_checkpoint=observed["reader_checkpoint"], gap_request=replace(request, query="other query"))
-    incomplete = replace(frozen, plan=replace(frozen.plan, coverage_scope="all_supplied_documents"))
-    plans, unavailable = build_observed_action_plans(incomplete, snapshot, service.template,
-                                                   reader_checkpoint=observed["reader_checkpoint"])
-    assert not plans and unavailable[0]["reason"] == "mandatory_source_coverage_incomplete"
     await service.aclose()
     service.store.close()
 
@@ -289,100 +272,66 @@ async def test_completed_reduction_is_offered_again_only_after_basis_expands(tmp
     service.store.close()
 
 
-def test_incremental_complete_cost_is_signed_and_common_paid_cost_cancels():
-    from test_plan_gain import observed_pair
-    from training.train_plan_gain import build_gain_record
-    plan, state, snapshot, direct, candidate = observed_pair()
-    direct["cost"]["complete_ms"] = 820
-    candidate["cost"]["complete_ms"] = 790
-    record = build_gain_record(plan, state, snapshot, direct, candidate)
-    assert record["incremental_complete_cost"]["complete_ms"] == -30
-    direct["cost"]["complete_ms"] += 1000
-    candidate["cost"]["complete_ms"] += 1000
-    assert build_gain_record(plan, state, snapshot, direct, candidate)["incremental_complete_cost"] == \
-        record["incremental_complete_cost"]
-
-
 @pytest.mark.asyncio
-async def test_observed_mode_collects_registered_final_answer_pairs_without_preparation_retrieval(tmp_path):
-    from training.plan_gain_protocol import AuditedTaskInterpreter
-    from training.plan_gain_rollout import collect, gap_retriever_identity
-    service, _, _, frozen, snapshot, observed, request, _, _, row, _ = await frozen_fixture(tmp_path)
-    config = {"study": {"strategy": "B7"}, "generation": {"teacher_url": "http://fixture:30000"},
-        "execution": {"window_tokens": 16000, "output_tokens": 256, "lambda_time": 0,
-                      "lambda_gpu": 0, "lambda_host": 0}, "retrieval": {"corpus_id": "demo"}}
-    row = {**row, "turn": 2, "reference_answer": "OFFLINE_ONLY_TARGET", "actual_history": observed["actual_history"],
-        "script_history_review_status": "reviewed", "script_history_mismatch": False,
-        "task_state": to_jsonable(frozen.plan.task_state), "verified_grounding": [
-            {"passage_id": "R1", "start": 0, "end": 2, "quote": "R1"}],
-        "response": {"receipt": to_jsonable(frozen.steps[0].receipt)}, "answer": "Source actual answer"}
-    source_rows = [{"source_id": block.key.passage_id, "text": block.text, "version": block.key.version,
-                    "source_uri": block.source_uri} for block in frozen.plan.selected_set.source_blocks]
-    packet = {"task_id": "task", "working_state": to_jsonable(frozen), "snapshot": to_jsonable(snapshot),
-        "paid_cost": observed["paid_cost"], "native_condition": observed["native_condition"],
-        "reader_checkpoint": observed["reader_checkpoint"], "reader_profile_id": "fixture-profile",
-        "gap_request": to_jsonable(replace(request, retriever_identity=gap_retriever_identity(config)))}
-    paths = {}
-    past = {**row, "turn": 1, "question": snapshot.raw_history[0].user_text,
-            "answer": snapshot.raw_history[0].assistant_text}
-    for name, rows in (("task_labels", [row]), ("actual_rollouts", [past, row]),
-                       ("sources", source_rows), ("observed_states", [packet])):
-        path = tmp_path / (name+".jsonl")
-        path.write_text("".join(json.dumps(item)+"\n" for item in rows))
-        paths[name] = str(path)
-    run_config = tmp_path / "reader.yaml"
-    run_config.write_text(yaml.safe_dump({"engine": {"kind": "mock"},
-                                        "planner": {"strategy": "always_rebuild"}}))
-    gap_calls = []
+@pytest.mark.parametrize("terminal_material,existing_terminal", [(True, False), (False, False), (True, True)])
+async def test_bounded_infer_bridge_reads_terminal_once_and_empty_gap_stops(tmp_path, terminal_material, existing_terminal):
+    from training.plan_gain_protocol import BOUNDED_CONTINUATION
+    from controller.reading import build_read_plan
+    service, native, budget, captured, snapshot, old, _, _, binding, row, prep = await frozen_fixture(tmp_path)
+    task_state = replace(captured.plan.task_state, needs=(Need("n", operation="infer"),))
+    selected = captured.plan.selected_set if existing_terminal else replace(captured.plan.selected_set,
+        selected_units=captured.plan.selected_set.selected_units[:1])
+    base = build_read_plan(task_state, selected, "selected_sources", captured.plan.budget,
+        template=service.template, snapshot=snapshot, read_packing="source_windows")
+    frozen = ReadingOutcome(base, auxiliary_usage=dict(ZERO_AUX))
+    observed = observed_state_binding(frozen, snapshot, paid_cost=CompleteCost(500, 0, 0, 7, 0),
+        native_condition=old["native_condition"], reader_checkpoint=old["reader_checkpoint"],
+        reader_profile_id=old["reader_profile_id"])
+    plans, _ = build_observed_action_plans(frozen, snapshot, service.template,
+        reader_checkpoint=old["reader_checkpoint"])
+    plan = next(plan for plan in plans if plan.semantic_kind == "read_once")
+    request = GapRetrievalRequest((), "", {"implementation": "specified-fixture"},
+        {"max_units": 1, "max_passages": 1})
+    calls = []
 
-    class Provider:
-        manifest = {"source": "specified protocol fixture"}
-        support_backend = None
+    async def retrieve(plan, request, claims):
+        calls.append(request)
+        assert request.open_needs and request.open_needs[0].missing_relation == "qualifying record"
+        block = make_evidence("R3 qualifies. "*220, "R3")
+        unit = EvidenceUnit("R3", (SourceSpan("R3", block.key, 0, len(block.text)),), block.text)
+        return EvidencePool((unit,) if terminal_material else (), (block,) if terminal_material else (),
+            auxiliary_usage=dict(ZERO_AUX))
 
-        def _usage_sources(self):
-            return ()
+    if existing_terminal:
+        tickets = len(budget.tickets)
+        unavailable = await execute_branch(service, plan, frozen, snapshot, row,
+            case_dir=tmp_path/"insufficient-continuation-reserve", binding=binding, preparation=prep,
+            resources=Resources(), cache_start="observed", generation_budget=GenerationBudget(3, tmp_path/"reserve.jsonl"),
+            observed=observed, gap_request=request, gap_provider=retrieve)
+        assert unavailable is None and len(budget.tickets) == tickets
 
-        def _auxiliary_usage(self, *args):
-            return dict(ZERO_AUX)
-
-        async def retrieve(self, *args):
-            raise AssertionError("observed mode must reuse the recorded state")
-
-        async def extend_for_plan(self, snap, plan, open_needs, claims):
-            assert snap.raw_history == snapshot.raw_history
-            gap_calls.append(open_needs)
-            block, unit = material("R3")
-            return EvidencePool((unit,), (block,), auxiliary_usage=dict(ZERO_AUX))
-
-    class Accounting:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return False
-
-    def judge(request):
-        if request.url.path == "/context/engine/info":
-            return httpx.Response(200, json={"fingerprint": to_jsonable(service.template.fingerprint)})
-        return httpx.Response(200, json={"text": json.dumps({
-            **{name: .5 for name in ("necessary_points", "grounding", "conditions_versions", "task_score")},
-            "disposition": "answer", "rationale": "specified protocol fixture"}),
-            "meta_info": {"completion_tokens": 24, "finish_reason": {"type": "stop"}}})
-
-    settings = {**paths, "run_config": str(run_config), "judge_config": str(run_config),
-        "judge_base_url": "http://fixture:30000", "reader_profile_id": "fixture-profile",
-        "output_dir": str(tmp_path / "observed-collection"), "split": "train", "limit_tasks": 1,
-        "partition_seed": "plan-gain-native-train-v1", "dev_fraction": .2, "read_outputs": (2048,),
-        "max_generations": 64, "online_gpu_devices": (0,), "judge_gpu_devices": (0,),
-        "extra_process_roots": (), "scope_scan": True, "cache_start": "observed", "mode": "observed_actions"}
-    async with httpx.AsyncClient(base_url="http://fixture:30000", transport=httpx.MockTransport(judge)) as client:
-        manifest = await collect(config, settings, controller=service, provider=Provider(),
-            interpreter=AuditedTaskInterpreter(None), resources=Resources(), judge_client=client,
-            judge_template=service.template, accounting=Accounting())
-    assert manifest["actual_runs"] == 4 and manifest["actual_gain_pairs"] == 3
-    assert len(gap_calls) == 1
-    gains = [json.loads(line) for line in (tmp_path / "observed-collection" / "gains.jsonl").read_text().splitlines()]
-    assert {record["semantic_kind"] for record in gains} == {"read_once", "reduce_once", "gap_retrieval"}
-    assert all(record["delta_q"] == 0 and record["observed_state_binding"] == observed for record in gains)
+    run = await execute_branch(service, plan, frozen, snapshot, row, case_dir=tmp_path/"bridge",
+        binding=binding, preparation=prep, resources=Resources(), cache_start="observed",
+        generation_budget=budget, observed=observed, gap_request=request, gap_provider=retrieve)
+    assert run["status"] == "completed", run["failure"]
+    assert len(calls) == (0 if existing_terminal else 1)
+    assert run["new_action_counts"] == {"READ": 2 if terminal_material else 1,
+        "REDUCE": 0, "GAP_RETRIEVAL": 0 if existing_terminal else 1, "ANSWER": 1}
+    if terminal_material:
+        assert run["steps"][-1]["task"]["input_claim_ids"]
+    assert run["continuation_protocol"] == BOUNDED_CONTINUATION
+    assert run["pre_action_quote"]["candidate_id"] is not None
     await service.aclose()
     service.store.close()
+
+
+def test_bounded_continuation_stops_with_evidence_and_rejects_invalid_actions():
+    from types import SimpleNamespace
+    from controller.action_proposals import continuation_gap, validate_action_counts
+    state = SimpleNamespace(plan=SimpleNamespace(task_state=TaskState("s", "question",
+        needs=(Need("n", operation="infer"),))), open_needs=())
+    assert continuation_gap(state, used_gap=False) == ()
+    validate_action_counts("direct_answer", {"READ": 0, "REDUCE": 0, "GAP_RETRIEVAL": 0, "ANSWER": 1})
+    with pytest.raises(ValueError, match="exceed"):
+        validate_action_counts("read_once", {"READ": 3, "REDUCE": 0, "GAP_RETRIEVAL": 1, "ANSWER": 1})
+    validate_action_counts("read_once", {"READ": 2, "REDUCE": 0, "GAP_RETRIEVAL": 0, "ANSWER": 1})

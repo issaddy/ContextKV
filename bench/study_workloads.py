@@ -9,6 +9,7 @@ import asyncio
 from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import time
@@ -210,6 +211,8 @@ class WorkloadManifest:
     concurrency_scope: str = "request"
     time_origin: str = "dispatcher construction: monotonic seconds"
     dispatch_semantics: str = "explicit ordinal after own prior commit plus fixed think-time"
+    arrival_source_sha256: str | None = None
+    arrival_source_basis: str | None = None
 
     @property
     def dispatch_order(self):
@@ -224,15 +227,21 @@ class WorkloadManifest:
 
 def read_workload_manifest(path):
     value = json.loads(Path(path).read_text())
+    if value.get("format") == "contextkv_dataset_workload_index_v1":
+        return {name: read_workload_manifest(source) for name, source in value["datasets"].items()}
     value["turns"] = tuple(WorkloadTurn(**{**turn, "source_document_ids": tuple(turn["source_document_ids"])})
                             for turn in value["turns"])
     return WorkloadManifest(**value)
 
 
 def freeze_workload(rows, *, name, concurrency, think_time_seconds=0.0, pause_after=None,
-                    session_start_delays=None, interleaving=None, goal_policy_sha256=None):
+                    session_start_delays=None, interleaving=None, goal_policy_sha256=None, fixed_arrivals=None):
     """Keep questions/references fixed; freeze arrivals and annotate source reuse."""
     pause_after, session_start_delays = pause_after or {}, session_start_delays or {}
+    if fixed_arrivals is not None and set(fixed_arrivals) != {row["task_id"] for row in rows}:
+        raise ValueError("fixed arrivals must cover every declared task exactly once")
+    if fixed_arrivals is not None and any(not math.isfinite(value) or value < 0 for value in fixed_arrivals.values()):
+        raise ValueError("fixed arrival offsets must be finite and nonnegative")
     grouped = {}
     for row in rows:
         grouped.setdefault(row["conversation_id"], []).append(row)
@@ -255,7 +264,8 @@ def freeze_workload(rows, *, name, concurrency, think_time_seconds=0.0, pause_af
                 raise ValueError("interleaving must preserve committed order within each conversation")
             entries[row["task_id"]] = WorkloadTurn(row["task_id"], sid, row["turn"], index[row["task_id"]],
                 previous, 0.0 if previous is None else pause_after.get(previous, think_time_seconds),
-                session_start_delays.get(sid, 0.0) if previous is None else 0.0, topic, sources,
+                (fixed_arrivals[row["task_id"]] if fixed_arrivals is not None else
+                 session_start_delays.get(sid, 0.0) if previous is None else 0.0), topic, sources,
                 previous_topic is not None and previous_topic != topic,
                 bool((seen-previous_sources).intersection(sources)))
             seen.update(sources)
@@ -263,7 +273,9 @@ def freeze_workload(rows, *, name, concurrency, think_time_seconds=0.0, pause_af
             previous_sources = set(sources)
     frozen = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return WorkloadManifest(name, concurrency, tuple(entries[task_id] for task_id in order),
-                            hashlib.sha256(frozen).hexdigest(), goal_policy_sha256)
+        hashlib.sha256(frozen).hexdigest(), goal_policy_sha256,
+        dispatch_semantics=("fixed_arrivals" if fixed_arrivals is not None else
+                            "explicit ordinal after own prior commit plus fixed think-time"))
 
 
 def prepare_workloads(config, matrix):
@@ -379,21 +391,28 @@ class WorkloadDispatcher:
 
     async def wait_turn(self, row, actual_history):
         turn = self._turns[row["task_id"]]
-        if turn.release_after_task_id is None:
+        fixed = self.manifest.dispatch_semantics == "fixed_arrivals"
+        if fixed:
+            planned = turn.start_delay_seconds
+            if turn.release_after_task_id is not None:
+                await self._completed[turn.release_after_task_id].wait()
+        elif turn.release_after_task_id is None:
             planned = turn.start_delay_seconds
         else:
             await self._completed[turn.release_after_task_id].wait()
             planned = self._completion_times[turn.release_after_task_id]+turn.think_time_seconds
         await asyncio.sleep(max(0.0, self.origin+planned-time.monotonic()))
         async with self._condition:
-            independent = self.manifest.dispatch_semantics == "independent_clients_after_own_prior_commit"
+            independent = fixed or self.manifest.dispatch_semantics == "independent_clients_after_own_prior_commit"
             if not independent:
                 await self._condition.wait_for(lambda: turn.dispatch_index == self._next)
             arrival = time.monotonic()-self.origin
             value = {"task_id": turn.task_id, "dispatch_index": turn.dispatch_index,
                 "release_after_task_id": turn.release_after_task_id,
                 "fixed_think_time_seconds": turn.think_time_seconds,
-                "planned_arrival_seconds": planned, "actual_arrival_seconds": arrival,
+                "planned_arrival_seconds": planned,
+                "actual_arrival_seconds": planned if fixed else arrival,
+                "history_ready_seconds": arrival,
                 "dispatch_delay_seconds": arrival-planned,
                 "measurement_segment_restored_tasks": self.restored_task_ids,
                 "resume_pause_basis": "configured pause reapplied from segment origin" if self.restored_task_ids else None,
@@ -411,10 +430,47 @@ class WorkloadDispatcher:
             for turn in self.manifest.turns:
                 if (turn.conversation_id == conversation_id and turn.task_id not in self.arrivals
                         and not self._completed[turn.task_id].is_set()):
-                    self.cancelled[turn.task_id] = {"reason": reason, "completed": False}
+                    self.cancelled[turn.task_id] = dict(reason=reason, completed=False,
+                        conversation_id=turn.conversation_id, task_id=turn.task_id,
+                        fixed_arrival_seconds=(turn.start_delay_seconds
+                            if self.manifest.dispatch_semantics == "fixed_arrivals" else None))
             self._skip_completed_ordinals()
             self._condition.notify_all()
+
+    async def finish_arrivals(self):
+        """Keep the measured workload open through every fixed declared arrival."""
+        if self.manifest.dispatch_semantics == "fixed_arrivals":
+            last = max(turn.start_delay_seconds for turn in self.manifest.turns)
+            await asyncio.sleep(max(0.0, self.origin+last-time.monotonic()))
+        return {"start": self.origin, "end": time.monotonic()}
 
     def complete_turn(self, task_id):
         self._completion_times[task_id] = time.monotonic()-self.origin
         self._completed[task_id].set()
+
+
+def export_fixed_arrivals(rows, records, *, name, concurrency):
+    """Freeze one saved request trajectory as the common replay arrival plan."""
+    by_id = {row["task_id"]: row for row in records}
+    starts = {row["task_id"]: by_id[row["task_id"]]["request_window"][0] for row in rows}
+    origin = min(starts.values())
+    manifest = freeze_workload(rows, name=name, concurrency=concurrency,
+        fixed_arrivals={task: start-origin for task, start in starts.items()})
+    trajectory = json.dumps(records, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+    return replace(manifest, arrival_source_sha256=hashlib.sha256(trajectory).hexdigest(),
+        arrival_source_basis="saved request_window starts relative to first request; frozen replay schedule, not a reconstruction of unrecorded upstream arrivals")
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Export fixed replay arrivals from saved request windows; no generation")
+    parser.add_argument("--tasks", required=True)
+    parser.add_argument("--records", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--concurrency", type=int, required=True)
+    args = parser.parse_args()
+    def read_rows(path):
+        return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    export_fixed_arrivals(read_rows(args.tasks), read_rows(args.records),
+        name=args.name, concurrency=args.concurrency).write(args.output)

@@ -107,6 +107,8 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
             descriptive_observed_fraction=(sum(case["within_ttl"] for case in identifiable)/len(identifiable)
                                            if identifiable else None),
             sampled_windows=len(selected), sampled_identifiable_body_windows=len(sampled),
+            sampled_session_groups=[sorted({turn["session_id"] for turn in window["turns"]}) for window in selected],
+            sample_unit="independent session group; selected windows can overlap and TTL arms are repeated measures",
             sampling_probability=probability,
             sampled_weight_sum=sum(case["sampling_weight"] for case in sampled),
             omission_counts=dict(Counter(row["reason"] for row in omissions)), windows=cases,

@@ -10,6 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 from training.plan_gain_completion import finalize, main as fit_main
+from controller.action_proposals import BOUNDED_CONTINUATION
 from training.plan_gain_rollout import collect, write
 
 
@@ -38,6 +39,7 @@ async def workflow(config, settings):
     started = time.monotonic()
     result = {"status": "running", "cohorts": {}, "source_files": provenance,
         "collection_mode": settings.get("mode", "whole_plan"),
+        "continuation_protocol": BOUNDED_CONTINUATION,
         "reader_profile_id": settings["reader_profile_id"], "cohort_manifest": settings["cohort_manifest"],
         "train_states": settings["train_states"], "dev_states": settings["dev_states"],
         "model_generation_limit": settings["max_generations"]}
