@@ -27,6 +27,22 @@ def _track_specs(matrix, split):
     return {name: split_metric_spec(spec, split) for name, spec in matrix["datasets"].items()}
 
 
+def evaluation_track_protocol(spec, split):
+    """Report the registered source split separately from the metric's scale."""
+    origins = {
+        "native": {"dev": "public_benchmark", "test": "public_benchmark"},
+        "project_conversation": {"dev": "public_benchmark", "test": "public_benchmark"},
+        "project_selected_turn_reference_diagnostic": {
+            "dev": "public_reference_diagnostic", "test": "public_reference_diagnostic"},
+        "independent_family_dev_and_public_test": {"dev": "constructed_task", "test": "public_benchmark"},
+        "independent_training_sources_dev_and_public_test": {"dev": "constructed_task", "test": "public_benchmark"},
+    }
+    resolved = split_metric_spec(spec, split)
+    return {"origin": origins[spec["split_kind"]][split], "split_kind": spec["split_kind"],
+            "primary_metric": resolved["primary_metric"], "normalization": resolved["normalization"],
+            "registered_weight": resolved["weight"]}
+
+
 def _number(value):
     if isinstance(value, (list, tuple)):
         return statistics.fmean(value) if value and all(_number(v) is not None for v in value) else None

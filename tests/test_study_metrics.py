@@ -170,3 +170,27 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     command = json.loads((out / 'cost-ledger-command.json').read_text())
     assert not command['executed']
     assert command['argv'][command['argv'].index('--gpu-devices') + 1] == '2'
+
+
+def test_public_and_constructed_tables_keep_split_metrics_and_full_denominators():
+    from bench.study_metrics import evaluation_track_protocol, declared_queue_summary
+    from profiling.final_study_index import full_queue_track_tables
+    spec = dict(split_kind="independent_training_sources_dev_and_public_test",
+        primary_metric="loong_reference_score", normalization=100, weight=.25,
+        metric_by_split={"dev": {"primary_metric": "project_condition_version_score", "normalization": 1}})
+    dev = evaluation_track_protocol(spec, "dev")
+    public = evaluation_track_protocol(spec, "test")
+    assert dev["origin"] == "constructed_task" and dev["normalization"] == 1
+    assert public["origin"] == "public_benchmark" and public["normalization"] == 100
+    rows = [dict(task_id="scored", status="completed", metrics={"project_condition_version_score": 1}, cost={}),
+            dict(task_id="unscored", status="completed", metrics={}, cost={})]
+    track = declared_queue_summary(rows, {**spec, **spec["metric_by_split"]["dev"]},
+                                    ["scored", "unscored", "missing"])
+    cell = dict(evaluation_kind="full_queue_own_P3", method="E1", concurrency=4,
+                dataset_protocols={"loong": dev}, datasets={"loong": track})
+    rendered = '\n'.join(full_queue_track_tables([cell]))
+    assert "构造任务机制轨" in rendered and "公开基准数据轨" not in rendered
+    assert "2/3 | 1/2" in rendered
+    assert track["queue_primary_score"] is None
+    assert track["queue_score_bounds"] == pytest.approx([1/3, 2/3])
+    assert track["scored_subset_primary"] == 1

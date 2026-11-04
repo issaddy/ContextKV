@@ -913,6 +913,16 @@
       "scope": "existing saved numeric rewards only, grouped by actual history/budget/reader/scorer/query; no model calls",
       "tie_rule": "report best/worst regret over equal highest predictions, independent of input order",
       "validation": "4 reader-stage/diagnostic CPU checks passed; actual new dataset statistics not produced because candidate assets are not local"
+    },
+    "offline_track_reporting": {
+      "status": "implemented; no generation or scoring run",
+      "source_matrix": "runs/study/formal-dev-queue.matrix.json",
+      "public_tasks": 250,
+      "public_registered_weight": 0.55,
+      "constructed_tasks": 100,
+      "constructed_registered_weight": 0.45,
+      "rule": "per-track original metric, declared/completed/scored denominators and unknown-score bounds; registered mixed-Q unchanged",
+      "cpu_validation": "11 study metrics and measurement checks passed"
     }
   }
 }

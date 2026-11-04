@@ -363,6 +363,26 @@ def full_queue_comparisons(cells):
     return comparisons
 
 
+def full_queue_track_tables(cells):
+    lines = []
+    for origin, title in (("public_benchmark", "公开基准数据轨"),
+                          ("public_reference_diagnostic", "公开参考历史诊断轨"),
+                          ("constructed_task", "构造任务机制轨")):
+        selected = [(cell, name, cell["datasets"][name], protocol) for cell in cells
+                    if cell.get("evaluation_kind") == "full_queue_own_P3"
+                    for name, protocol in cell["dataset_protocols"].items() if protocol["origin"] == origin]
+        if not selected:
+            continue
+        lines += ["", "## "+title, "",
+            "| 方法 | 并发 | 数据集 / 原指标 | 交付 / 声明 | 已评分 / 已交付 | 全分母原指标 | 未知区间 | 已评分子集指标 |",
+            "|---|---:|---|---:|---:|---:|---|---:|"]
+        for cell, name, track, protocol in selected:
+            lines.append(f"| {cell['method']} | {cell['concurrency']} | {name} / {protocol['primary_metric']} | "
+                f"{track['completed']}/{track['declared']} | {track['scored']}/{track['completed']} | "
+                f"{track['queue_primary_score']} | {track['queue_score_bounds']} | {track['scored_subset_primary']} |")
+    return lines
+
+
 def markdown(report):
     lines = ["# ContextKV 最终产物索引", "", f"评审基线：`{report['baseline_commit']}`。",
         "仅从指定产物读取已有评分与费用，按原指标名称作算术汇总；缺失值不补零。", "",
@@ -389,6 +409,8 @@ def markdown(report):
     for row in report["capacity"]:
         if row.get("evaluation_kind") == "full_queue_own_P3":
             lines.append(f"| {row['method']} | {row['concurrency']} | {row['completed_qa']}/{row['requested_qa']} | {row['queue_quality']} | {row['queue_quality_bounds']} | {row['p95_complete_ms']} |")
+    lines += full_queue_track_tables(report["capacity"])
+    lines += ["", "分轨保留原指标量纲；混合开发 Q 仍采用登记权重，不将构造题增益表述为公开基准增益。"]
     lines += ["", "## 完整响应 SLO", "",
         "| 方法 | 并发 | 数据集 | 完成 / 失败 / 阻断 | SLO 秒 | 达标回答 / 秒 | 观察秒数 |",
         "|---|---:|---|---|---|---|---:|"]

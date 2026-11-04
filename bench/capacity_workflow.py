@@ -26,7 +26,8 @@ from bench.plan_result_summary import batch_ledger
 from bench.reassess_saved import paid_execution_index
 from bench.rolling_study_workflow import configure
 from bench.study import dataset_rows, merge_config, read_jsonl, write_json, write_jsonl
-from bench.study_metrics import _cost_summary, _quantile, _track_specs, declared_queue_summary
+from bench.study_metrics import (_cost_summary, _quantile, _track_specs, declared_queue_summary,
+                                 evaluation_track_protocol)
 from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
 from bench.study_workloads import freeze_workload, load_goal_policy, read_workload_manifest
 
@@ -340,7 +341,9 @@ def summarize_full_queue(job):
     return {"job": job["name"], "method": job["method"], "concurrency": job["concurrency"],
         "requested_qa": job["requested_qa"],
         "completed_qa": sum(track["completed"] for track in tracks.values()),
-        "datasets": tracks, "track_weights": {name: spec["weight"] for name, spec in specs.items()},
+        "datasets": tracks,
+        "dataset_protocols": {name: evaluation_track_protocol(spec, "dev") for name, spec in specs.items()},
+        "track_weights": {name: spec["weight"] for name, spec in specs.items()},
         "queue_quality": sum(spec["weight"]*quality[name]/spec.get("normalization", 1.0)
             for name, spec in specs.items()) if all(value is not None for value in quality.values()) else None,
         "queue_quality_bounds": [sum(spec["weight"]*tracks[name]["queue_score_bounds"][bound]
