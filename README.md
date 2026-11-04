@@ -27,6 +27,7 @@ uv run ruff check controller adapters bench profiling tests scripts engine_patch
 ```
 
 CPU 测试保留核心阅读、数值归约、来源链、目标可见性、动作决策和前缀接口冒烟。
+CI 仅按需手动触发，提交代码和创建 PR 不自动运行测试。
 实际模型运行由本次配置明确声明模型、端点、reader 身份、缓存设置、cohort 和输出目录。
 
 | 文档 | 内容 |
