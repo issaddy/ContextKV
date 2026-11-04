@@ -73,6 +73,7 @@ class StudyEvidenceProvider:
     @property
     def manifest(self):
         return {"strategy": self.strategy, "retrieval": self.serving.manifest,
+                "source_window_profile": to_jsonable(self.directory.profile),
                 "budget": to_jsonable(self.budget), "task_model": getattr(self.task_model, "manifest", None),
                 "history_encoder": getattr(self.frozen_history, "manifest", None),
                 "query_encoder_binding": self.query_encoder_identity,
@@ -662,8 +663,13 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
                                       device=task_config.get("device", "cuda:1"))
         if previous_encoder is not task_model:
             previous_encoder.close()
+    layout = config.get("reading", {}).get("layout", "task_first")
+    protocols = {"task_first": "source_rows_pr3", "source_first": "canonical"}
+    if layout not in protocols:
+        raise ValueError("unknown reading layout for source window protocol")
     profile = PoolProfile(retrieval.get("current_top_k", 50), retrieval.get("per_need_top_k", 20),
-        retrieval.get("archive_top_k", 12), retrieval.get("primary_pool_size", 96))
+        retrieval.get("archive_top_k", 12), retrieval.get("primary_pool_size", 96),
+        window_protocol=protocols[layout])
     if task_interpreter is not None:
         directory = serving.configure_study(task_interpreter, template.tokenizer, profile=profile,
                                            reference_date=retrieval.get("reference_date"))

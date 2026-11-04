@@ -33,7 +33,7 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
                                  "datasets": {"track": str(path)}}))
     assert read_workload_manifest(index)["track"] == manifest
     assert full_queue_methods(1) == ("B6_native", "S3_value")
-    assert set(full_queue_methods(4)) == {"B6_native", "S3_native", "B6_value", "S3_value"}
+    assert set(full_queue_methods(4)) == {"E0_native", "B6_native", "S3_native", "B6_value", "S3_value"}
     assert full_queue_methods(1, ["S3_native"]) == ("S3_native",)
 
     async def run():

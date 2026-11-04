@@ -879,17 +879,17 @@
     "remaining_scoring_check": "case006 final42/903 matches gold but old extraction consistent=false; unchanged raw score retained until independent reassessment"
   },
   "implementation_20261104": {
-    "status": "B/C and fixed-arrival integration implemented locally; GPU-dependent collection/evaluation held by user",
+    "status": "local implementation and final CPU audit complete; GPU environment remains paused until user notification",
     "B_protocol": "infer_bridge_ready_or_one_gap_one_terminal_read_v2",
     "C_asset_kind": "paired_native_retention_v5",
     "C_selection": "deduplicated target savings minus control, incremental residency and paired external-request penalty; full protected-set net must be measured",
     "arrival_protocol": "fixed_arrivals with shared per-dataset manifests; history and semaphore waits included in response and decision budgets",
     "validation": {
-      "core_suite_passed": 116,
+      "core_suite_passed": 122,
       "subtests_passed": 2,
-      "core_seconds": 3.86,
+      "core_seconds": 4.26,
       "arrival_budget_adjacent_passed": 31,
-      "cpu_demo": "runs/demo/demo-400c01a7aac543e2ac726f9aa469a685.json",
+      "cpu_demo": "runs/demo/demo-fa3686977fc2406ebfb6304cf2a3c9fb.json",
       "fixed_arrival_tail_cancellation": "actual sampling continues to last registered arrival; blocked tasks enter delivery denominator; focused CPU test passed"
     },
     "remaining": [
@@ -898,6 +898,14 @@
       "collect independent C train/dev windows and validate net effects",
       "run declared full350 c4 E0-E4 and c1 E1/E4 plus frozen public comparison"
     ],
-    "container_sync": "d727175 plus tested final selector patch was present before container disconnect; subsequent115fec7 commit and B/C integration require sync after GPU environment resumes"
+    "container_sync": "No remote/GPU access after pause. Local commits since d727175 plus the tested selector patch need syncing only after user notification.",
+    "local_audit_corrections": [
+      "observed REDUCE keeps exactly the online factory fact basis, including reassigned and derived numeric facts",
+      "C target labels require exact complete READ demand; partial-page reuse is retained only in native observations and full-window costs",
+      "C training and dev use the same connected-session balancing; train/dev sessions must be disjoint",
+      "E0_native preserves PR3 source rows and is part of the default c4 E0-E4 matrix",
+      "final comparisons include arrival hashes and declared SLO; baseline commit and cost GPU devices are explicit"
+    ],
+    "C_target_demand_rule": "exact_complete_causal_prefix_and_body_ranges_v1"
   }
 }

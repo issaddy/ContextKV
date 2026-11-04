@@ -15,7 +15,38 @@ from controller.serialization import to_jsonable
 
 
 RETENTION_FEATURE_NAMES = ("access_state", "native_residency", "pressure_concurrency")
+TARGET_DEMAND_RULE = "exact_complete_causal_prefix_and_body_ranges_v1"
 
+
+
+def session_components(rows):
+    """Windows sharing any session form one independent observation group."""
+    components = []
+    for row in rows:
+        sessions = set(row["independent_session_ids"])
+        if not sessions:
+            raise ValueError("retention observations require actual session identities")
+        overlapping = [group for group in components if group & sessions]
+        for group in overlapping:
+            sessions.update(group)
+            components.remove(group)
+        components.append(sessions)
+    return tuple(tuple(sorted(group)) for group in components)
+
+
+def session_group(row, components):
+    sessions = set(row["independent_session_ids"])
+    return next(group for group in components if sessions.intersection(group))
+
+
+def balance_session_rows(rows, components):
+    """Give each connected session group total weight one; arms are repeated measures."""
+    rows = tuple(rows)
+    totals = defaultdict(float)
+    for row in rows:
+        totals[session_group(row, components)] += row.get("sampling_weight", 1.0)
+    return [{**row, "sampling_weight": row.get("sampling_weight", 1.0)/totals[session_group(row, components)]}
+            for row in rows]
 
 def source_token_ranges(template, rendered, messages, units):
     """Locate encoded original-source text, excluding shared instructions/catalogue."""
@@ -276,24 +307,14 @@ class EmpiricalRetentionModel:
         reuse_rows = rows if reuse_rows is None else tuple(reuse_rows)
         if not rows:
             raise ValueError("retention fit requires paired observations")
+        if any(row.get("target_demand_rule") != TARGET_DEMAND_RULE for row in (*rows, *reuse_rows)):
+            raise ValueError("retention fit requires exact complete READ demand labels")
         names = RETENTION_FEATURE_NAMES if feature_names is None else tuple(feature_names)
         schema = cls._schema(rows, names) if feature_schema is None else feature_schema
         model = cls({}, schema)
         groups = defaultdict(list)
         reuse_groups = defaultdict(list)
-        # Windows sharing any session belong to one independent component.
-        # The TTL intervention and target prefix do not change that component.
-        components = []
-        for row in (*rows, *reuse_rows):
-            sessions = set(row["independent_session_ids"])
-            overlapping = [group for group in components if group & sessions]
-            for group in overlapping:
-                sessions.update(group)
-                components.remove(group)
-            components.append(sessions)
-        def sample(row):
-            sessions = set(row["independent_session_ids"])
-            return tuple(sorted(next(group for group in components if group & sessions)))
+        components = session_components((*rows, *reuse_rows))
         for row in rows:
             if row["native_input_hashes"] != row["retained_input_hashes"]:
                 raise ValueError("C observations must use identical executed input token paths")
@@ -304,17 +325,11 @@ class EmpiricalRetentionModel:
             reuse_groups[cls._key(bucket, row["cache_scope_hash"], row["horizon_seconds"])].append(row)
         forecasts = {}
         for key, cohort in groups.items():
-            if len({sample(row) for row in cohort}) < 2:
+            if len({session_group(row, components) for row in cohort}) < 2:
                 continue
-            def balance(values):
-                totals = defaultdict(float)
-                for row in values:
-                    totals[sample(row)] += row.get("sampling_weight", 1.0)
-                return [{**row, "sampling_weight": row.get("sampling_weight", 1.0)/totals[sample(row)]}
-                        for row in values]
-            cohort = balance(cohort)
+            cohort = balance_session_rows(cohort, components)
             reused = [row for row in cohort if row["reused"]]
-            frequency = balance(reuse_groups[key])
+            frequency = balance_session_rows(reuse_groups[key], components)
             frequency_weight = sum(row.get("sampling_weight", 1.0) for row in frequency)
             probability = sum(row.get("sampling_weight", 1.0) for row in frequency if row["reused"])/frequency_weight
             if probability and not reused:
@@ -358,6 +373,7 @@ class EmpiricalRetentionModel:
 
     def to_dict(self):
         return {"kind": "paired_native_retention_v5", "feature_schema": self.feature_schema,
+                "target_demand_rule": TARGET_DEMAND_RULE,
                 "value_basis": "marginal exact source-demand READ saving minus control and paired external-request penalty; full protected-set net measured by set intervention",
                 "bin_convention": "left_closed_right_open; None is missing",
                 "independent_samples": self.independent_samples,
@@ -367,7 +383,8 @@ class EmpiricalRetentionModel:
 
     @classmethod
     def from_dict(cls, value):
-        if value["kind"] != "paired_native_retention_v5":
+        if (value["kind"] != "paired_native_retention_v5"
+                or value.get("target_demand_rule") != TARGET_DEMAND_RULE):
             raise ValueError("unknown retention model format")
         return cls({key: PrefixForecast(**row) for key, row in value["forecasts"].items()}, value["feature_schema"],
                    independent_samples=value["independent_samples"])

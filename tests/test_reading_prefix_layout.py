@@ -140,3 +140,39 @@ def test_canonical_table_windows_keep_shared_context_out_of_data_dependencies():
         assert 'Table 1: Mass' in context and 'Mass (kg)' in context
         assert 'Note: Approved records only.' in context
         assert unit.table_id is not None
+
+
+def test_explicit_source_protocols_keep_canonical_groups_and_pr3_rows_stable():
+    from types import SimpleNamespace
+    from adapters.evidence_pool import PoolProfile, SourceDirectory
+    from controller.templates import ByteTokenizer
+
+    class OffsetBytes(ByteTokenizer):
+        def __call__(self, text, **kwargs):
+            # This fixture is ASCII, so each actual byte token spans one character.
+            return {'input_ids': self.encode(text),
+                    'offset_mapping': [(index, index+1) for index in range(len(text))]}
+
+    text = ''.join(f'Row R{i}: {i} kg.\n' for i in range(12))
+    block = make_evidence(text, 'protocols')
+    corpus = SimpleNamespace(blocks=(block,), source_metadata={})
+    grouped = None
+    for protocol, expected in [('canonical', 2), ('source_rows_pr3', 12)]:
+        profile = PoolProfile(window_protocol=protocol)
+        first = SourceDirectory(corpus, None, OffsetBytes(), profile=profile)
+        second = SourceDirectory(corpus, None, OffsetBytes(), profile=profile)
+        units = first.full_scope((block.key,)).units
+        assert units == second.full_scope((block.key,)).units
+        assert len(units) == expected
+        assert ''.join(unit.text for unit in units) == text
+        assert first.profile.window_protocol == protocol
+        if protocol == 'canonical':
+            grouped = units
+        else:
+            assert all(unit.text.count('\n') == 1 for unit in units)
+    assert grouped[0].text.count('\n') == 8
+    long = make_evidence('x'*80, 'long-row')
+    directory = SourceDirectory(SimpleNamespace(blocks=(long,), source_metadata={}), None, OffsetBytes(),
+        profile=PoolProfile(unit_tokens=32, window_protocol='source_rows_pr3'))
+    spans = [unit.source_spans[0] for unit in directory.full_scope((long.key,)).units]
+    assert [(span.start, span.end) for span in spans] == [(0, 32), (28, 60), (56, 80)]

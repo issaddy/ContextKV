@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from bench.metrics import distribution
+from controller.prefix_retention import session_components, balance_session_rows
 from profiling.retention_trace import (actual_page_size, causal_pages, choose_windows, digest, event_id,
     read_decisions, revisit_outcomes, trace_generations, verify_trace, write_json)
 
@@ -88,6 +89,7 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
             decision, source = by_id[window["event_id"]], by_id[window["source_event_id"]]
             demand = next_demand(source, decision["decision_s"])
             cases.append(dict(event_id=window["event_id"], source_event_id=window["source_event_id"],
+                independent_session_ids=sorted({turn["session_id"] for turn in window["turns"]}),
                 source_session_id=source["session_id"], decision_session_id=decision["session_id"],
                 source_body_pages=source["source_body_pages"], next_actual_body_demand=demand,
                 within_ttl=demand is not None and demand["gap_seconds"] <= horizon,
@@ -97,6 +99,10 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
                 sampling_weight=1/probability if probability is not None else None))
         identifiable = [case for case in cases if case["source_body_pages"] and case["exact_decision_observation"]]
         sampled = [case for case in identifiable if case["sampled"]]
+        components = session_components(cases)
+        sampled_components = {group for group in components if any(
+            set(case["independent_session_ids"]).intersection(group) for case in sampled)}
+        balanced = balance_session_rows(identifiable, components)
         complete = [row for row in rows if row["exact_decision_observation"] and row["source_body_pages"]
             and bisect_right(turn_starts, row["decision_s"]+horizon) < len(turn_starts)]
         horizon_rows.append(dict(horizon_seconds=horizon,
@@ -107,6 +113,9 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
             descriptive_observed_fraction=(sum(case["within_ttl"] for case in identifiable)/len(identifiable)
                                            if identifiable else None),
             sampled_windows=len(selected), sampled_identifiable_body_windows=len(sampled),
+            independent_samples=len(components), sampled_independent_samples=len(sampled_components),
+            group_balanced_observed_fraction=(sum(case["sampling_weight"]*case["within_ttl"] for case in balanced)
+                /sum(case["sampling_weight"] for case in balanced) if balanced else None),
             sampled_session_groups=[sorted({turn["session_id"] for turn in window["turns"]}) for window in selected],
             sample_unit="independent session group; selected windows can overlap and TTL arms are repeated measures",
             sampling_probability=probability,

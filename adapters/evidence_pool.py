@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date
+import re
 import time
 
 import numpy as np
@@ -22,6 +23,11 @@ class PoolProfile:
     archive_top_k: int = 12
     primary_pool_size: int = 96
     unit_tokens: int = SOURCE_WINDOW_TOKENS
+    window_protocol: str = "canonical"
+
+    def __post_init__(self):
+        if self.window_protocol not in {"canonical", "source_rows_pr3"}:
+            raise ValueError("unknown source window protocol")
 
 
 def unit_identity(key, start, end):
@@ -92,11 +98,36 @@ class SourceDirectory:
                 newline = block.text.find("\n", anchor.end)
                 right = len(block.text) if newline < 0 else newline + 1
                 boundaries.update((left, right))
-        ordered = sorted(boundaries)
-        windows = tuple((start+left, start+right)
-            for start, end in zip(ordered, ordered[1:])
-            for left, right in source_window_spans(block.text[start:end], self.tokenizer,
-                                                   tokens=self.profile.unit_tokens))
+        if self.profile.window_protocol == "canonical":
+            ordered = sorted(boundaries)
+            windows = tuple((start+left, start+right)
+                for start, end in zip(ordered, ordered[1:])
+                for left, right in source_window_spans(block.text[start:end], self.tokenizer,
+                                                       tokens=self.profile.unit_tokens))
+        else:
+            # Frozen PR3 source-row protocol, including its long-line overlap.
+            windows = []
+            for match in re.finditer(r"[^\n]+(?:\n|$)", block.text):
+                start, end = match.span()
+                offsets = self.tokenizer(block.text[start:end], add_special_tokens=False,
+                    return_offsets_mapping=True)["offset_mapping"]
+                sentence_ends = {match.end() for match in re.finditer(
+                    r"[.!?。！？;；](?:\s+|$)", block.text[start:end])}
+                first = 0
+                while first < len(offsets):
+                    last = min(first+self.profile.unit_tokens, len(offsets))
+                    cuts = [index+1 for index in range(first, last)
+                        if offsets[index][1] in sentence_ends
+                        and index-first >= self.profile.unit_tokens//2]
+                    if last < len(offsets) and cuts:
+                        last = cuts[-1]
+                    section = offsets[first:last]
+                    windows.append((start+section[0][0], start+section[-1][1]))
+                    if last == len(offsets):
+                        break
+                    overlap = (0 if offsets[last-1][1] in sentence_ends
+                               else min(32, self.profile.unit_tokens//8))
+                    first = max(first+1, last-overlap)
         units = []
         for left, right in windows:
             text = block.text[left:right]

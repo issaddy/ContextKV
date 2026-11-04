@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from controller.context_schema import ContextBudget, EvidenceSet, EvidenceUnit, Need, SourceSpan, StepRecord, TaskState
 from controller.evidence import make_evidence
-from controller.prefix_retention import EmpiricalRetentionModel, PrefixReadObserver
+from controller.prefix_retention import EmpiricalRetentionModel, PrefixReadObserver, TARGET_DEMAND_RULE
 from controller.reading import build_read_plan, step_messages
 from controller.schema import CompletionReceipt, ContextEpoch
 from controller.session_store import SessionStore
@@ -94,7 +94,7 @@ def test_fixed_ttl_recovery_counts_actual_read_once_and_does_not_extend_ttl(tmp_
 
 
 def model_asset(path, *, native_ms, retained_ms):
-    rows = [dict(features={"access_state": "first", "native_residency": "device", "pressure_concurrency": "normal:single"},
+    rows = [dict(target_demand_rule=TARGET_DEMAND_RULE, features={"access_state": "first", "native_residency": "device", "pressure_concurrency": "normal:single"},
         cache_scope_hash="scope", horizon_seconds=30, reused=True,
         native_input_hashes=["fixed-input"], retained_input_hashes=["fixed-input"],
         native_reuse_cost_ms=native_ms, retained_reuse_cost_ms=retained_ms,
@@ -145,7 +145,38 @@ def test_repeated_interventions_do_not_create_independent_calibration(tmp_path):
     # Use the same paired fixture, but make all observations one session.
     from controller.prefix_retention import RETENTION_FEATURE_NAMES
     assert len(RETENTION_FEATURE_NAMES) == 3
-    row = dict(features=dict(access_state="first", native_residency="device", pressure_concurrency="normal:single"),
+    row = dict(target_demand_rule=TARGET_DEMAND_RULE, features=dict(access_state="first", native_residency="device", pressure_concurrency="normal:single"),
         independent_sample_id="one-session", independent_session_ids=["one-session"], cache_scope_hash="scope", horizon_seconds=60,
         native_input_hashes=["fixed"], retained_input_hashes=["fixed"])
     assert not EmpiricalRetentionModel.fit([row, copy.deepcopy(row)]).forecasts
+
+
+def test_session_components_balance_windows_ttl_arms_and_reject_partition_leakage():
+    import pytest
+    from controller.prefix_retention import session_components, session_group, balance_session_rows
+    from profiling.retention_pair_workflow import validate_session_partitions
+    rows = [{"independent_session_ids": sessions, "sampling_weight": 2, "ttl": ttl}
+            for sessions in (["A", "B"], ["B", "C"], ["D"])
+            for ttl in (15, 60, 180)]
+    components = session_components(rows)
+    assert set(components) == {("A", "B", "C"), ("D",)}
+    balanced = balance_session_rows(rows, components)
+    for group in components:
+        assert sum(row["sampling_weight"] for row in balanced if session_group(row, components) == group) == pytest.approx(1)
+    validate_session_partitions({"train": {"turns": [{"session_id": "A"}]},
+                                 "dev": {"turns": [{"session_id": "D"}]}})
+    with pytest.raises(ValueError, match="share independent sessions"):
+        validate_session_partitions({"train": {"turns": [{"session_id": "A"}]},
+                                     "dev": {"turns": [{"session_id": "A"}]}})
+
+
+def test_partial_native_reuse_does_not_duplicate_exact_read_target_reward():
+    from profiling.retention_trace import exact_target_demand, reuse_pages
+    first = {"prefix_input_ids": [1, 2, 3, 4], "evidence_token_ranges": [[0, 4]], "fixed_system_prefix_tokens": 0}
+    second = {**first, "prefix_input_ids": [1, 2, 5, 6]}
+    future = dict(first)
+    receipt = {"actual_device_hit_tokens": 2, "actual_host_loaded_tokens": 0}
+    partial = reuse_pages(second, future, receipt, page_size=2, scope="scope")
+    assert partial["shared_evidence_page_ids"] and partial["actual_device_evidence_page_ids"]
+    assert exact_target_demand(first, future, page_size=2, scope="scope")
+    assert not exact_target_demand(second, future, page_size=2, scope="scope")

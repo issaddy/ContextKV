@@ -26,7 +26,7 @@ from bench.study_resources import StudyResourceSampler, integrate_physical, list
 from controller.config import create_controller, create_model_template, load_config
 from controller.context_schema import ContextBudget, ContextPlan, EvidenceClaim, EvidenceSet, Need, ReadTask, TaskState, TextRef
 from controller.engine_client import EngineError, SGLangEngineClient
-from controller.prefix_retention import (EmpiricalRetentionModel, PrefixReadObserver, PrefixRuntimeClient,
+from controller.prefix_retention import (EmpiricalRetentionModel, PrefixReadObserver, PrefixRuntimeClient, TARGET_DEMAND_RULE,
     RETENTION_FEATURE_NAMES, source_token_ranges, source_demand_event_key)
 from controller.reading import (build_read_plan, parse_read_result, stable_prefix_input_ids,
                                 stable_prefix_messages, stable_source_payload, step_messages)
@@ -974,6 +974,12 @@ def window_trace(trace, selected):
     return result
 
 
+
+def exact_target_demand(target, future, *, page_size, scope):
+    key = source_demand_event_key(target["prefix_input_ids"], target["evidence_token_ranges"], page_size, scope)
+    return key is not None and key == source_demand_event_key(
+        future["prefix_input_ids"], future["evidence_token_ranges"], page_size, scope)
+
 def paired_row(trace, native, retained, selection, *, horizon_seconds):
     identity = selection["event_id"]
     left, right = native["events"][identity]["decision_target"], retained["events"][identity]["decision_target"]
@@ -998,7 +1004,7 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
         left_use = reuse_pages(target_event, source_events[key], actual["result"]["receipt"], page_size=size, scope=scope)
         right_use = reuse_pages(target_event, source_events[key], retained["events"][key]["result"]["receipt"], page_size=size, scope=scope)
         uses.append(dict(event_id=key, native=left_use, retained=right_use))
-        if left_use["shared_evidence_page_ids"]:
+        if exact_target_demand(target_event, source_events[key], page_size=size, scope=scope):
             future.append((key, actual))
     future.sort(key=lambda item: item[1]["generation_window"]["start"])
     next_key, next_left = future[0] if future else (None, None)
@@ -1030,6 +1036,7 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
     target_delta = next_left["step_wall_ms"]-next_right["step_wall_ms"] if reused else 0
     window_delta = window_costs["native"]-window_costs["retained"]
     row = dict(source="hardware", scope="actual_source_first_single_prefix_intervention",
+        target_demand_rule=TARGET_DEMAND_RULE,
         dataset=turn["dataset"], split=turn["split"], training_eligible=trace["training_eligible"] and eligible,
         event_id=identity, source_event_id=selection["source_event_id"],
         independent_session_ids=sorted({value["session_id"] for value in trace["turns"]}),
@@ -1054,7 +1061,7 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
         collateral_and_initial_control_cost_difference_ms=window_delta-target_delta,
         affected_turn_ids=affected_ids,
         window_cost_basis="sum of complete component response intervals for all fixed affected turns, including collateral reads/ANSWER and policy controls",
-        reuse_event_basis="future actual inputs demand shared causal pages containing original-source text; GPU/Host utilization recorded separately; system/catalogue-only excluded",
+        reuse_event_basis="target reward requires exact complete source-demand key; partial causal body-page demand remains in causal_reuse and whole-window costs",
         retention_control_ms=right["retention_control_ms"],
         native_reuse_result=next_left["result"] if reused else None,
         retained_reuse_result=next_right["result"] if reused else None,

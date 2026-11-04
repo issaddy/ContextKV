@@ -6,10 +6,17 @@ import json
 from pathlib import Path
 import sys
 
-from controller.prefix_retention import EmpiricalRetentionModel
+from controller.prefix_retention import EmpiricalRetentionModel, session_components, session_group, balance_session_rows
 from controller.config import create_model_template, load_config
 from profiling.retention_coverage import audit_coverage
 from profiling.retention_trace import audit_trace_inputs, choose_windows, trace_generations, verify_trace, window_trace, write_json
+
+
+def validate_session_partitions(traces):
+    train = {turn["session_id"] for turn in traces["train"]["turns"]}
+    dev = {turn["session_id"] for turn in traces["dev"]["turns"]}
+    if train & dev:
+        raise ValueError("retention train/dev traces share independent sessions: "+repr(sorted(train & dev)))
 
 
 async def run(args):
@@ -45,6 +52,7 @@ async def run(args):
             trace_paths[split] = getattr(args, split+"_trace")
     traces = {split: json.loads(Path(path).read_text()) for split, path in
               trace_paths.items()}
+    validate_session_partitions(traces)
     reports = {}
     protocol_scopes = {}
     template = create_model_template(load_config(args.config).model)
@@ -126,8 +134,9 @@ async def run(args):
     if asset.exists() and dev_rows.exists():
         model = EmpiricalRetentionModel.from_dict(json.loads(asset.read_text()))
         validation = []
-        for line in dev_rows.read_text().splitlines():
-            row = json.loads(line)
+        rows = [json.loads(line) for line in dev_rows.read_text().splitlines() if line.strip()]
+        components = session_components(rows)
+        for row in balance_session_rows(rows, components):
             try:
                 predicted = model.predict(row["features"], row["cache_scope_hash"], row["horizon_seconds"])
             except KeyError:
@@ -136,17 +145,17 @@ async def run(args):
                 predicted_target_saved_ms=predicted.target_saved_ms if predicted else None,
                 predicted_retention_control_ms=predicted.retention_control_ms if predicted else None,
                 predicted_collateral_saved_ms=predicted.expected_collateral_saved_ms if predicted else None,
-                independent_sample_id=row["independent_sample_id"],
+                independent_sample_id=list(session_group(row, components)), sampling_weight=row["sampling_weight"],
                 predicted_policy_value_ms=predicted.saved_ms if predicted else None,
                 predicted_single_owner_net_ms=predicted.full_window_saved_ms if predicted else None,
-                policy_value_scope="next READ target minus control; before residency prices and protected-event deduction",
+                policy_value_scope="each paired TTL arm independently; next READ target minus control and external-request penalty; before residency prices and protected-event deduction",
                 predicted_full_window_saved_ms=predicted.full_window_saved_ms if predicted else None,
                 actual_full_window_saved_ms=row["full_window_cost_difference_ms"],
                 semantic_quality_label=None, split="dev"))
         write_json(output/"dev-validation.json", {"fit_split": "train", "evaluation_split": "dev",
             "comparison_scope": "single-prefix complete response windows; no protected-set externality estimate",
-            "independent_samples": len({row["independent_sample_id"] for row in validation}),
-            "calibrated_independent_samples": len({row["independent_sample_id"] for row in validation if row["calibrated"]}),
+            "independent_samples": len(components),
+            "calibrated_independent_samples": len({tuple(row["independent_sample_id"]) for row in validation if row["calibrated"]}),
             "sample_unit": "session group; TTL interventions are repeated measures",
             "rows": validation})
     if plan["status"] == "running":

@@ -333,17 +333,24 @@ class FixedCounterfactualRuntime:
                 raise ReadingBudgetExceeded("paid state plus bounded continuation exceeds complete latency")
             task = ready[0]
             pending.remove(task)
-            parents = tuple(claim for result in state.results if result.step_id in task.predecessor_step_ids
-                            for claim in result.claims)
-            if task.kind == "REDUCE":
-                parents = tuple(claim for claim in parents if any(claim.serves(need) for need in task.need_ids)
-                                and claim.kind == "extract")
-            if task.predecessor_step_ids and not parents and any(
-                    previous.task.step_id in task.predecessor_step_ids and previous.task.kind != "GAP"
-                    for previous in self.planned.steps):
-                raise EmptyPlannedPremise("planned predecessor produced no factual input: "+task.step_id)
-            task = replace(task, input_claim_ids=tuple(claim.claim_id for claim in parents)
-                           if task.predecessor_step_ids else task.input_claim_ids)
+            if observed:
+                # Single-action factories already bind the actual shared/selected
+                # basis. READ aliases and extract-only filters would discard valid
+                # reassessment inputs or selector-derived CPU inputs.
+                by_id = {claim.claim_id: claim for claim in state.claims}
+                parents = tuple(by_id[identity] for identity in task.input_claim_ids)
+            else:
+                parents = tuple(claim for result in state.results if result.step_id in task.predecessor_step_ids
+                                for claim in result.claims)
+                if task.kind == "REDUCE":
+                    parents = tuple(claim for claim in parents if any(claim.serves(need) for need in task.need_ids)
+                                    and claim.kind == "extract")
+                if task.predecessor_step_ids and not parents and any(
+                        previous.task.step_id in task.predecessor_step_ids and previous.task.kind != "GAP"
+                        for previous in self.planned.steps):
+                    raise EmptyPlannedPremise("planned predecessor produced no factual input: "+task.step_id)
+                task = replace(task, input_claim_ids=tuple(claim.claim_id for claim in parents)
+                               if task.predecessor_step_ids else task.input_claim_ids)
             plan = replace(plan, steps=tuple(task if old.step_id == task.step_id else old for old in plan.steps))
             cpu = plan.reading_mode == "typed_reduce" and task.kind == "REDUCE" and task.operation in {"count", "sum", "group", "union"}
             variants = () if cpu else compile_step(plan, task, state, snapshot, template, outputs=(task.output_budget,))

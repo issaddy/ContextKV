@@ -125,3 +125,48 @@ def test_online_totals_already_include_auxiliary_model_tokens():
     assert cost_summary["online_tokens"] == 3*175
     assert cost_summary["auxiliary_input_tokens"] == 150
     assert cost_summary["token_accounting"] == "all_online_models"
+
+
+def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
+    import json
+    from profiling.final_study_index import full_queue_cells, full_queue_comparisons, main
+
+    run = tmp_path / 'reader.json'
+    run.write_text(json.dumps({'engine': {'base_url': 'local'}, 'state_dir': 'temporary'}))
+    plan = dict(reader_run={'path': str(run)},
+        source_config={'sha256': 'A'}, source_matrix={'sha256': 'matrix'},
+        cohort={'track': ['task']}, reader_profile_id='fixed', lambda_time=0,
+        workload_plans={'4': {'track': {'sha256': 'arrivals-A'}}},
+        assets={'gain': {'sha256': 'B'}, 'value': None},
+        jobs=[dict(name='job', output='generation', complete_slo_seconds=30)])
+    plan_path = tmp_path / 'capacity-plan.json'
+    plan_path.write_text(json.dumps(plan))
+    row = dict(job='job', method='B6_native', concurrency=4, requested_qa=1, completed_qa=1,
+        queue_quality=.5, p95_complete_ms=100, paid_native_usage={},
+        datasets={'track': dict(missing_execution_task_ids=[], failed_task_ids=[], unscored_answer_task_ids=[])})
+    path = tmp_path / 'workflow.json'
+    def cells(value):
+        return full_queue_cells({'format': 'contextkv_full_queue_joint_workflow_v1', 'results': [value]}, path)
+    reference = cells(row)
+    baseline = cells({**row, 'method': 'E0_native'})
+    assert full_queue_comparisons(baseline + reference)[0]['baseline'] == 'E0_native'
+    candidate = {**row, 'method': 'S3_native', 'queue_quality': .6}
+    same = full_queue_comparisons(reference + cells(candidate))[0]
+    assert same['comparable'] and same['differences']['queue_quality'] == pytest.approx(.1)
+    plan['workload_plans']['4']['track']['sha256'] = 'arrivals-B'
+    plan_path.write_text(json.dumps(plan))
+    changed = full_queue_comparisons(reference + cells(candidate))[0]
+    assert not changed['comparable'] and changed['differences']['queue_quality'] is None
+    assert changed['incompatible_identity_fields'] == ['workload_sha256']
+    plan['workload_plans']['4']['track']['sha256'] = 'arrivals-A'
+    plan['jobs'][0]['complete_slo_seconds'] = 60
+    plan_path.write_text(json.dumps(plan))
+    assert full_queue_comparisons(reference + cells(candidate))[0]['incompatible_identity_fields'] == ['complete_slo_seconds']
+
+    out = tmp_path / 'index'
+    report = main(['--baseline-commit', '85f4ed4', '--physical', 'recorded-physical.json',
+                  '--gpu-devices', '2', '--output', str(out)])
+    assert report['baseline_commit'] == '85f4ed4'
+    command = json.loads((out / 'cost-ledger-command.json').read_text())
+    assert not command['executed']
+    assert command['argv'][command['argv'].index('--gpu-devices') + 1] == '2'

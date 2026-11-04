@@ -171,7 +171,7 @@ def full_queue_methods(concurrency, methods=None):
     if methods is not None:
         return tuple(methods)
     return (("B6_native", "S3_value") if concurrency == 1 else
-            ("B6_native", "S3_native", "B6_value", "S3_value"))
+            ("E0_native", "B6_native", "S3_native", "B6_value", "S3_value"))
 
 
 def prepare_full_queue(args, root):
@@ -187,8 +187,8 @@ def prepare_full_queue(args, root):
     run_path.write_text(yaml.safe_dump(run_data, sort_keys=False))
     run = load_config(run_path)
     config["generation"]["run_config"] = str(run_path)
-    selected_methods = [method for method in ("B6_native", "B6_value", "S3_native", "S3_value")
-        if args.methods is None or method in args.methods]
+    selected_methods = tuple(dict.fromkeys(method for concurrency in args.concurrency
+        for method in full_queue_methods(concurrency, args.methods)))
     needs_gain = any(method.startswith("S3_") for method in selected_methods)
     needs_value = any(method.endswith("_value") for method in selected_methods)
     gain_path = Path(args.gain_asset).resolve() if needs_gain else None
@@ -229,6 +229,10 @@ def prepare_full_queue(args, root):
         for name, strategy, action in (("B6", "B6", None), ("S3", "B7", gain_settings))
         for policy, retention in (("native", {"mode": "native"}), ("value", value_policy))
         if f"{name}_{policy}" in selected_methods]
+    if "E0_native" in selected_methods:
+        matrix["methods"].insert(0, dict(id="E0_native", strategy="B6", overrides={
+            "reading": {"layout": "task_first", "packing": "mixed", "numeric_need_isolation": True},
+            "execution": {"plan_gain": None, "prefix_retention": {"mode": "native"}}}))
     matrix["selection"]["include_ablations"] = False
     config_path = root/"frozen-A-study.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
@@ -269,8 +273,8 @@ def prepare_full_queue(args, root):
         assets={"gain": snapshot(gain_path) if needs_gain else None,
                 "value": snapshot(args.value_model) if needs_value else None},
         cohort=cohorts, workload_plans=workload_plans,
-        experiment_cells={"E1": "B6_native", "E2": "S3_native", "E3": "B6_value", "E4": "S3_value"},
-        E0_workload_usage="Use the existing task-first isolated Native matrix with bench.study evaluate --workload-plan workload-c4.json and the same cohorts/resources",
+        experiment_cells={"E0": "E0_native", "E1": "B6_native", "E2": "S3_native", "E3": "B6_value", "E4": "S3_value"},
+        E0_protocol="P0 support/query assets with task_first, source_rows_pr3, numeric_need_isolation and Native; same public correctness code and arrival schedule",
         source_arrival_plan=snapshot(args.arrival_plan),
         arrival_protocol="fixed relative arrival timestamps shared across methods; own-history and semaphore waits included in complete response",
         value_policy=value_policy, gain_mode="observed_actions",
@@ -497,7 +501,7 @@ def main(argv=None):
     parser.add_argument("--arrival-plan", help="Dataset workload index with explicit fixed_arrivals schedules")
     parser.add_argument("--complete-slo-seconds", type=float, help="Buffered arrival-to-completion SLO for request goodput")
     parser.add_argument("--full-queue", action="store_true", help="Run all declared development tasks in each B/C cell")
-    parser.add_argument("--methods", nargs="+", choices=("B6_native", "B6_value", "S3_native", "S3_value"),
+    parser.add_argument("--methods", nargs="+", choices=("E0_native", "B6_native", "B6_value", "S3_native", "S3_value"),
                         help="Select full-queue cells for this reader")
     parser.add_argument("--source-manifest", help="Source manifest for the two-turn capacity diagnostic")
     parser.add_argument("--matrix")
@@ -528,12 +532,13 @@ def main(argv=None):
     if args.full_queue:
         if not args.matrix or not args.online_gpu_devices or not args.reader_base_url or not args.arrival_plan:
             parser.error("--full-queue requires --matrix, --online-gpu-devices, --reader-base-url and --arrival-plan")
-        methods = args.methods or ("B6_native", "B6_value", "S3_native", "S3_value")
+        methods = {method for concurrency in args.concurrency
+                   for method in full_queue_methods(concurrency, args.methods)}
         if any(method.startswith("S3_") for method in methods):
             if not args.gain_asset:
                 parser.error("S3 full-queue methods require --gain-asset")
         elif not args.reader_profile_id:
-            parser.error("B6-only full-queue methods require --reader-profile-id")
+            parser.error("fixed-B full-queue methods require --reader-profile-id")
         if any(method.endswith("_value") for method in methods) and not args.value_model:
             parser.error("value full-queue methods require --value-model")
     elif not all((args.source_manifest, args.parent_policy_asset, args.execution_profile,

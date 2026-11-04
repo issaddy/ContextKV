@@ -335,3 +335,56 @@ def test_bounded_continuation_stops_with_evidence_and_rejects_invalid_actions():
     with pytest.raises(ValueError, match="exceed"):
         validate_action_counts("read_once", {"READ": 3, "REDUCE": 0, "GAP_RETRIEVAL": 1, "ANSWER": 1})
     validate_action_counts("read_once", {"READ": 2, "REDUCE": 0, "GAP_RETRIEVAL": 0, "ANSWER": 1})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['numeric_select', 'sum'])
+async def test_observed_numeric_actions_keep_factory_bound_shared_and_selected_basis(tmp_path, stage):
+    from controller.action_proposals import observed_reduction_task
+    from controller.plan_policy import complete_plan
+    from controller.reading import build_read_plan, numeric_selection_task, parse_read_result
+    from training.plan_gain_protocol import FixedCounterfactualRuntime
+
+    service, native, _, captured, snapshot, observed, _, _, _, _, _ = await frozen_fixture(tmp_path)
+    needs = (Need('sum', operation='sum'), Need('count', operation='count'))
+    base = build_read_plan(replace(captured.plan.task_state, needs=needs),
+        replace(captured.plan.selected_set, selected_units=captured.plan.selected_set.selected_units[:1]),
+        'selected_sources', captured.plan.budget, template=service.template, snapshot=snapshot)
+    read = base.steps[0]
+    original = EvidenceClaim(read.step_id+':claim:0', 'count', 'extract',
+        text='Inventory-13-029: 29 credits.', entity='Inventory-13-029', value='29', unit='credits',
+        source_spans=base.selected_set.selected_units[0].source_spans)
+    result = ReadResult(read.step_id, (original,), covered_units=read.input_unit_ids)
+    frozen = ReadingOutcome(base, claims=(original,), results=(result,),
+        steps=(StepRecord('capture', read.step_id, read, result=result),), auxiliary_usage=dict(ZERO_AUX))
+    if stage == 'sum':
+        # Both selectors have completed; CPU sum must consume selector-derived facts.
+        for need_id in ('sum', 'count'):
+            selector = numeric_selection_task(base, frozen.results, frozen.claims, need_id=need_id)
+            selected = parse_read_result(selector, json.dumps({'format_version': 7,
+                'views': {'n0': {'p0': True}}}), claims=(original,))
+            frozen = replace(frozen, claims=(*frozen.claims, *selected.claims),
+                results=(*frozen.results, selected),
+                steps=(*frozen.steps, StepRecord('capture', selector.step_id, selector, result=selected)))
+    task = observed_reduction_task(frozen)
+    assert task.operation == stage
+    expected = tuple(claim for claim in frozen.claims if claim.claim_id in task.input_claim_ids)
+    assert expected and (expected[0].kind == 'derived' if stage == 'sum' else not original.serves('sum'))
+    plan = complete_plan(replace(base, steps=(*(record.task for record in frozen.steps), task)), (),
+        semantic_kind='reduce_once', reader_checkpoint=observed['reader_checkpoint'])
+
+    class BasisObserved(Exception):
+        pass
+
+    class Executor:
+        async def execute_one(self, attempt_id, snapshot, plan, actual, state, **kwargs):
+            assert actual.input_claim_ids == task.input_claim_ids
+            assert tuple(claim for claim in state.claims if claim.claim_id in actual.input_claim_ids) == expected
+            raise BasisObserved
+
+    runtime = FixedCounterfactualRuntime(plan, initial_state=frozen, paid_cost=CompleteCost(0, 0, 0, 0, 0))
+    with pytest.raises(BasisObserved):
+        await runtime.run('basis', snapshot, (plan.context_plan,), Executor(), native, service.template,
+            None, None, arrived=0, auxiliary_usage=dict(ZERO_AUX), events=service.events)
+    await service.aclose()
+    service.store.close()

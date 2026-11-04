@@ -121,7 +121,7 @@ C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观�
 `profiling.retention_trace reassess --replay-root COMPLETED_REPLAY` 从已完成重放的原始回执重算派生费用，
 保留原请求、采样窗口和全部已付成本，不产生模型调用。
 
-冻结 A 后，联合开发验收使用 `bench.capacity_workflow --full-queue`。主负载 c4 对应 E1—E4，c1 默认只执行 E1/E4；E0 用登记 task-first/isolated Native 配置与同一到达计划比较。
+冻结 A 后，联合开发验收使用 `bench.capacity_workflow --full-queue`。主负载 c4 默认执行 E0—E4，c1 默认只执行 E1/E4。E0_native 显式保留 PR3 原行分片、task-first、隔离数值和 Native；P0 支持/查询资产与公共正确性代码共用。
 必须提供 `--arrival-plan`：JSON 索引格式为 `{"format":"contextkv_dataset_workload_index_v1","datasets":{"DATASET":"/absolute/fixed-arrivals.json"}}`，每个数据集严格覆盖声明队列。
 使用已有请求轨迹离线导出固定相对到达（不产生模型调用）：
 
@@ -140,11 +140,11 @@ python -m bench.capacity_workflow --full-queue \
   --value-model "$C_VALUE" --concurrency 4 --output "$JOINT_OUTPUT"
 ```
 
-完整队列四格共用冻结 A 的模型、支持策略、查询资产、阅读协议和预算。可用
+E1—E4 四格共用冻结 A 的模型、支持策略、查询资产、阅读协议和预算；E0_native 仅覆盖登记基线的阅读与来源协议。可用
 `--methods B6_native` 等参数将指定方法分配到独立 reader 服务，只生成所选方法的矩阵和任务。
 `B6_native` 无需 gain/value；`B6_value` 仅需 `--value-model`；没有 S3 方法时须显式提供
 `--reader-profile-id`。S3 方法需要 `--gain-asset`，value 方法需要 `--value-model`。
-默认 c4 执行四格并要求两种资产；c1 默认只执行 B6_native/S3_value，每格使用同一完整队列。
+默认 c4 执行 E0_native/B6_native/S3_native/B6_value/S3_value 并要求两种资产；c1 默认只执行 B6_native/S3_value，每格使用同一完整队列。
 固定 B 可独立执行，例如：
 
 ```sh
@@ -160,10 +160,10 @@ python -m bench.capacity_workflow --full-queue --methods B6_native \
 其中检索器设备配置与本次物理卡号一致。GAP 限额沿用冻结观测配置，
 缺省为 96 个单元和 10 个 passage，可用 `--gap-max-units`、`--gap-max-passages` 显式指定。
 `--lambda-time` 覆盖冻结配置中的动作成本权重，实际值写入 `capacity-plan.json`。
-分设备结果用 `profiling.final_study_index --joint-scope joint-frozen-A/inputs.json`
+分设备结果用 `profiling.final_study_index --baseline-commit "$E0_SOURCE_COMMIT" --joint-scope joint-frozen-A/inputs.json`
 汇总，逐个 `--artifact NAME=WORKFLOW.json` 指定各设备结果。共同输入、实际 worker 配置、
 cohort、reader 与预算确定对照条件，各格分别列出实际启用的 B/C 资产。
-报告保留全分母质量、完成率、已交付完整响应 P95 与成本出处。
+报告保留全分母质量、完成率、已交付完整响应 P95、逐数据集 SLO goodput 与成本出处。比较身份同时核对到达计划哈希和 SLO；提供 `--cost-manifest`/`--physical` 生成成本命令时，必须通过 `--gpu-devices` 声明实际设备，不默认包含整机。
 
 每格按自己的 P3 历史执行原 350 题，使用声明的开发指标与权重。未交付回答计入
 完整分母并贡献零分，已交付但未评分的回答保留质量区间。报告另列原生已付调用
@@ -184,4 +184,4 @@ C 固定 DAG 回放解析原始输出文本，新的生成响应用于实际 tok
 
 B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v2` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上执行一个动作后重新观察。旧一步资产不用于这个监督目标，仅重新采集目标实际变化的状态。
 
-C 使用 `paired_native_retention_v5`，训练行必须保存独立会话集合；同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。v4 资产不直接挂入新选择。新增 owner 的目标收益按完整来源需求去重，容量与驻留按共享页增量；配对外部请求代价进入选择，正 collateral 不再额外记为可叠加收益。完整集合的真实净效果仍由同轨 Native/value 对照和物理积分验收。
+C 使用 `paired_native_retention_v5` 及 `target_demand_rule=exact_complete_causal_prefix_and_body_ranges_v1`，旧标签不能直接重命名为新目标。训练行必须保存独立会话集合，train/dev 集合互斥；同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。v4 资产不直接挂入新选择。只有相同完整来源需求重访才标注整次下一 READ 的 target 收益；部分页复用仍记录在原生观察与整窗成本中。新增 owner 的目标收益按完整来源需求去重，容量与驻留按共享页增量；配对外部请求代价进入选择，正 collateral 不再额外记为可叠加收益。完整集合的真实净效果仍由同轨 Native/value 对照和物理积分验收。
