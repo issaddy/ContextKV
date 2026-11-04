@@ -9,7 +9,6 @@ import sys
 
 import yaml
 
-from training.reader_data import audit_reader_targets
 from training.reader_curriculum import prepare_evidence_cohorts
 from training.task_data import build_task_data, prepare_cohort_task_labels
 
@@ -34,10 +33,10 @@ def comparison_workflow(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("compare", "audit", "cohort", "prepare-data", "prepare-labels"))
+    parser.add_argument("command", choices=("compare", "cohort", "prepare-data", "prepare-labels"))
     parser.add_argument("--policy-asset", default="models/study-support-fixed-qwen")
     parser.add_argument("--output", required=True)
-    parser.add_argument("--config", help="reader audit, cohort or task_cohort_labeling configuration")
+    parser.add_argument("--config", help="cohort or task_cohort_labeling configuration")
     parser.add_argument("--conversations", type=int)
     parser.add_argument("--comparison-config")
     parser.add_argument("--phase", choices=("frozen", "p3", "both"), default="both")
@@ -50,7 +49,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == "compare" and (args.matrix is None or args.comparison_config is None):
         parser.error("compare requires --comparison-config and --matrix")
-    if args.command in {"audit", "cohort", "prepare-data", "prepare-labels"}:
+    if args.command in {"cohort", "prepare-data", "prepare-labels"}:
         if args.config is None:
             parser.error(f"{args.command} requires --config")
         config = yaml.safe_load(Path(args.config).read_text())
@@ -60,9 +59,6 @@ def main(argv=None):
         if args.command == "prepare-data":
             config["training"]["data_dir"] = args.output
             result = build_task_data(config)
-        elif args.command == "audit":
-            config["reader_audit"]["data"]["output_dir"] = args.output
-            result = audit_reader_targets(config)
         elif args.command == "prepare-labels":
             config["task_cohort_labeling"]["output_dir"] = args.output
             result = prepare_cohort_task_labels(config)

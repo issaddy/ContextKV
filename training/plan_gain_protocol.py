@@ -300,8 +300,7 @@ class FixedCounterfactualRuntime:
                             break
                         request = replace(self.gap_request, open_needs=gaps, query=gap_query(plan.task_state, gaps))
                         pool = await retrieve(request)
-                    elif self.new_action_counts["GAP_RETRIEVAL"] and any(
-                            need.operation == "infer" for need in plan.task_state.needs):
+                    elif self.new_action_counts["GAP_RETRIEVAL"] and continuation_gap(state, used_gap=False):
                         if remaining_steps < 2:  # registered GAP already paid
                             break
                         pool = self.gap_result["pool"]

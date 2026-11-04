@@ -16,7 +16,7 @@ def trace(identity="answer", phase="ANSWER"):
         "actual_history": [], "actual_history_sha256": history_digest([]),
         "prompt_token_hash": identity, "reader_identity": "R0", "task_state": None,
         "read_protocol_version": 2, "read_task": {"output_budget": 1024},
-        "output_schema": {"type": "object"}, "actual_output": "655 kg",
+        "output_schema": {"type": "object"}, "actual_output": "655 kg", "actual_output_ids": [1, 2, 3],
         "original_sources": [{"source_key": {"document_id": identity}, "start": 0,
             "end": 31, "text": "Observed mass: 655 kg. Total: 666 kg."}]}
 
@@ -32,10 +32,15 @@ class Completion:
 
 
 @pytest.mark.asyncio
-async def test_fixed_targets_get_independent_review_with_complete_original():
-    phase = "ANSWER"
+@pytest.mark.parametrize("phase,target", [
+    ("READ", '{"claims":[{"text":"655 kg"}]}'),
+    ("REDUCE", '{"claims":[{"text":"655 kg"}]}'),
+    ("ANSWER", "655 kg"),
+    ("READ", '{"claims":['),
+])
+async def test_observed_outputs_get_independent_review_with_complete_original(phase, target):
     item = trace(phase, phase)
-    target = "655 kg" if phase == "ANSWER" else json.dumps({"claims": [{"text": "655 kg"}]})
+    item["actual_output"] = target
     calls, ledger = [], []
 
     class Client:
@@ -45,7 +50,7 @@ async def test_fixed_targets_get_independent_review_with_complete_original():
         def complete(self, messages, *, response_format, max_new_tokens, chat_template_kwargs):
             calls.append(response_format["json_schema"]["name"])
             body = json.loads(messages[-1]["content"])
-            assert body["target_output"] == (target if phase == "ANSWER" else json.loads(target))
+            assert body["target_output"] == target
             assert "666 kg" in body["original_sources"][0]["text"]
             assert "target" not in response_format["json_schema"]["schema"]["properties"]
             return Completion(json.dumps({"quality": .2, "source_support_verified": False,
@@ -53,10 +58,11 @@ async def test_fixed_targets_get_independent_review_with_complete_original():
                 usage={"completion_tokens": 4})
 
     result = await review_reader_trace(item, Client(), minimum_quality=.85,
-        reviewer_identity="teacher", review_input_budget=4096, record_call=ledger.append,
-        fixed_target_text=target)
+        reviewer_identity="teacher", review_input_budget=4096, record_call=ledger.append)
     assert calls == ["reader_review"]
     assert result["target_text"] == target and result["status"] == "rejected"
-    assert result["review_protocol"] == "visible_target_independent_review_v6"
+    assert result["review_protocol"] == "observed_output_independent_review_v1"
+    assert result["target_origin"] == "observed_reader_output"
+    assert result["target_output_tokens"] == len(item["actual_output_ids"])
     assert ledger[0]["stage"] == "review"
     assert "666 kg" in reader_review_body(item)["original_sources"][0]["text"]

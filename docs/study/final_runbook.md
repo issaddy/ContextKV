@@ -107,6 +107,8 @@ P1 质量偏好可使用物理成本部分缺失的已评分答案；缺失费�
 
 固定模型协议审计与四格比较示例：
 
+`reader_audit review` 使用 `observed_output_independent_review_v1`，只审核导出 traces 的实际输出；每条只产生审核调用，不重写答案。原始 token 数、输入、来源与阶段归因保留。旧目标生成、旧目标再审计和 `reader_data_only` 采集入口已移除。
+
 ```bash
 python -m training.reader_audit export --config ACTUAL-AUDIT.yaml
 python -m training.reader_audit review --config ACTUAL-AUDIT.yaml
@@ -226,6 +228,8 @@ C 的离线 `retention_trace export` 需显式提供 `--failed-conversations`（
 B 的 DIRECT/READ/REDUCE/GAP 分支从实际动作前状态报价，分别拟合绝对分支成本，
 同一批次以动作减 DIRECT 计算增量成本和实际质量差，已付共享成本只计一次。
 REDUCE 只读已观察材料；源 packet 的 legal_actions 保留，补充的反事实候选单独登记并在执行前重新报价。
+
+完成记录的来源覆盖诊断采用注册前来源分母，合并既往与新增已读覆盖；GAP 新来源保留在实际 outcome，不修改注册分母。`whole_plan` 与 `observed_actions` 的资产分别声明实际特征，不交叉标记为动作模型。
 
 C 固定 DAG 回放解析原始输出文本，新的生成响应用于实际 token、耗时和费用；完整窗口
 预测用两臂窗口成本差验证，下一次 READ 的集合收益按事件及共享页去重。

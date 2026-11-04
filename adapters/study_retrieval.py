@@ -648,6 +648,8 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
             from training.task_model import TaskModel
             task_model = TaskModel(task_config["asset"], base_path=task_config.get("base_path"),
                                    device=task_config.get("device", "cuda:1"))
+            from training.preference_rollout import query_encoder_binding
+            query_encoder_identity = query_encoder_binding({"task_asset": task_config["asset"]})
             previous_encoder = retriever.encoder
             retriever.encoder = task_model
             previous_encoder.close()

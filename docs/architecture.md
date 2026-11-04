@@ -25,11 +25,11 @@ flowchart TD
 
 `adapters/evidence_pool.py` 建立原文坐标、版本和依赖目录。task-first E0 使用 `source_rows_pr3` 原行/长行分片，source-first A 使用 canonical 窗口；运行 manifest 记录该选择。目录合并当前检索、历史来源和缺口召回。同一原文命中多个 Need 时合并需求归属，保留最高召回分。`support_model.py` 计算单段与组合支持；`evidence_planner.py` 在正文预算及依赖闭包内组织候选集合。P1 的训练奖励来自绑定 reader 的实际回答差异。标记为 `evidence_set_only` 的 utility 资产在训练和推理时都使用同一输入范围，即任务状态、证据单元与支持图。动作、布局和执行上下文特征均置零。
 
-Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 只导出实际 READ/REDUCE/ANSWER traces，并用完整原文独立核验可见输入支持、来源和任务绑定，不生成 SFT 数据或保存 reader adapter。P0/P1 规划器与两种阅读协议组成归因对照，分别沿自己的实际历史运行 P3。完整联合入口直接读取冻结的 P0 共享 A study 配置，四格共用其支持模型、查询资产、阅读协议与预算。既往 LoRA 的已付调用和训练费用只列为弃用支出，不计入改进结果。
+Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 导出实际 READ/REDUCE/ANSWER traces，直接审核其中的 `actual_output`，用可见输入和完整原文分别核验支持、来源和任务绑定；不再另生成目标答案，不生成 SFT 数据或保存 reader adapter。P0/P1 规划器与两种阅读协议组成归因对照，分别沿自己的实际历史运行 P3。完整联合入口直接读取冻结的 P0 共享 A study 配置，四格共用其支持模型、查询资产、阅读协议与预算。既往 LoRA 的已付调用和训练费用只列为弃用支出，不计入改进结果。
 
 任务教师 wire 为 `owned_task_graph_v7_visible_token_boundaries`，语义版本为 `task_need_semantics_v3_anchored_owned_graph`。教师引用可见窗口的 `boundary_tokens`，映射回原消息 owner 和半开字符坐标 `TextRef(start,end)`；持久化保留原文坐标。Need 与 Condition 必须有实际锚点，实际输入、输出与调用费用由标注入口记录。
 
-在线检索由 `ServingRetriever.configure_study(interpreter, tokenizer)` 绑定，`retrieve_pool(snapshot, query, request_id)` 返回任务、来源池与检索状态。`Controller.serve_turn(context_plans=...)` 或 `EvidenceSelection.context_plans` 注入计划，`extend_open_needs(plan, open_needs, claims)` 返回带新增原文和阅读单元的 `EvidencePool`。支持评分先评单段，再按配置评 pair/triple；`selection.utility: support_coverage` 对各 Need 取集合内最大适用性乘联合支持，再求均值。集合搜索展开依赖闭包并用实际 tokenizer 计量完整 prompt；beam、动作与布局候选复用已评分支持，不重复调用教师。
+在线检索由 `ServingRetriever.configure_study(interpreter, tokenizer)` 绑定，`retrieve_pool(snapshot, query, request_id)` 返回任务、来源池与检索状态。`Controller.serve_turn(context_plans=...)` 或 `EvidenceSelection.context_plans` 注入计划，`extend_open_needs(plan, open_needs, claims)` 返回带新增原文和阅读单元的 `EvidencePool`。支持评分的查询含每个 Need 的 scope、条件和完整版本意图，区分版本锚点与最终适用版本。先评单段，再按配置评 pair/triple；`selection.utility: support_coverage` 对各 Need 取集合内最大适用性乘联合支持，再求均值。集合搜索展开依赖闭包并用实际 tokenizer 计量完整 prompt；beam、动作与布局候选复用已评分支持，不重复调用教师。
 
 任务视图先预留完整当前问题，再为相关来源目录、历史指针及原文分配有限份额；预算外历史图候选同步移除。rollout 保存实际目录、日期与 scope，标注、训练和评价复用同一观测与目录选择规则。输入不可见的监督不参与拟合，评价保留其分母与不可见原因。
 

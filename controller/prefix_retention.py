@@ -706,7 +706,7 @@ class PrefixReadObserver:
         arguments = dict(owner_id=owner_id, session_id=session_id, attempt_id=record.attempt_id,
             step_id=record.step_id, receipt=record.receipt, prefix_input_ids=prefix_ids, sources=sources)
         if self.settings["mode"] == "fixed_ttl":
-            choice = dict(qualification_only=True, features=features)
+            choice = dict(qualification_only=True, features=features, reuse_event_key=event)
             result = await self.owners.observe(**arguments, ttl_seconds=self.settings["ttl_seconds"],
                 policy="fixed_ttl_mechanism", policy_choice=choice)
         else:

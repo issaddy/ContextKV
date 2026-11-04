@@ -66,10 +66,16 @@ def query_view(state: TaskState, need: Need, resolve: Callable, *, open_needs=()
                    "predicate": resolve(c.predicate_span) if c.predicate_span else ""}
                   for c in state.conditions if c.condition_id in need.condition_ids]
     payload = {"question": state.raw_question, "need_id": need.need_id,
-        "operation": need.operation, "anchors": [resolve(ref) for ref in need.anchor_spans],
+        "operation": need.operation, "scope": need.scope, "anchors": [resolve(ref) for ref in need.anchor_spans],
         "subjects": [resolve(ref) for ref in need.subject_refs], "working_history": history,
-        "conditions": conditions, "version_mode": state.version_intent.mode,
-        "versions": state.version_intent.version_ids}
+        "conditions": conditions, "version_intent": {
+            "mode": state.version_intent.mode,
+            "document_families": state.version_intent.document_families,
+            "version_ids": state.version_intent.version_ids,
+            "resolved_version_ids": state.version_intent.resolved_version_ids,
+            "temporal_relation": state.version_intent.temporal_relation,
+            "time_refs": [resolve(ref) for ref in state.version_intent.time_refs],
+            "source_turns": state.version_intent.source_turns}}
     pending = [item for item in open_needs if item.need_id == need.need_id]
     if pending:
         payload["open_needs"] = [{"need_id": item.need_id, "missing_relation": item.missing_relation,

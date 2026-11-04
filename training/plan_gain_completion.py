@@ -141,12 +141,16 @@ def completion_record(before, run):
     for unit in units.values():
         for span in unit.source_spans:
             required.setdefault(str(span.source_key), []).append((span.start, span.end))
-    for step in run["steps"]:
-        result = step["result"]
-        if step["task"]["kind"] == "READ" and result is not None:
-            for identity in result["covered_units"]:
-                for span in units[identity].source_spans:
-                    covered.setdefault(str(span.source_key), []).append((span.start, span.end))
+    # This diagnostic measures the registered source scope. A bounded GAP can
+    # add sources after registration; those remain in the actual run's outcome
+    # and GAP result, rather than changing this diagnostic's denominator.
+    covered_ids = {identity for result in state.results for identity in result.covered_units}
+    covered_ids.update(identity for step in run["steps"]
+        if step["task"]["kind"] == "READ" and step["result"] is not None
+        for identity in step["result"]["covered_units"])
+    for identity in covered_ids & units.keys():
+        for span in units[identity].source_spans:
+            covered.setdefault(str(span.source_key), []).append((span.start, span.end))
     required_chars, covered_chars = _size(required), _size(covered)
     paid = None if observed is None else decode(CompleteCost, observed["paid_cost"])
     cost_features = None
@@ -352,7 +356,9 @@ def fit_effective(training, *, ridge=1.0, path=None):
     return PlanGainModel(training[0]["reader_checkpoint"], training[0]["reader_profile_id"],
         "effective-plan-gain:"+digest(training), names, tuple(center.tolist()), tuple(scale.tolist()),
         tuple(coefficients.tolist()), float(intercept),
-        {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA, "continuation_protocol": BOUNDED_CONTINUATION,
+        {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA if any(
+             row["observed_state_binding"] is not None for row in training) else None,
+         "continuation_protocol": BOUNDED_CONTINUATION,
          "continuation_gap_limits": training[0]["counterfactual"]["actual_run"]["continuation_gap_limits"],
          "resident_model_manifest_digests": sorted(resident_digests),
          "label": LABEL, "utility_rule": RULE, "no_answer_utility": 0.0, "raw_missing_quality_preserved": True,

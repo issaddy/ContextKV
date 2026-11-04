@@ -760,7 +760,9 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
                 original_epoch = event["original_epoch"]["engine_session_id"]
                 if original_epoch not in epochs:
                     epochs[original_epoch] = await engine.prepare(uuid.uuid4().hex, uuid.uuid4().hex,
-                                                                  info.engine_restart_id)
+                        info.engine_restart_id,
+                        **({"business_session_id": turn["session_id"]}
+                           if info.business_session_identity_supported else {}))
                 epoch = epochs[original_epoch]
                 client = engines[digest(event["sampling"])]
                 submitted = time.monotonic()

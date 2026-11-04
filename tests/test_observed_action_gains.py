@@ -158,8 +158,46 @@ async def test_bounded_infer_bridge_reads_terminal_once_and_empty_gap_stops(tmp_
         assert not any(step["step_id"].startswith("bounded-terminal:") for step in run["steps"])
     if terminal_material and hard_steps > 2:
         assert run["steps"][-1]["task"]["input_claim_ids"]
+        from training.plan_gain_completion import completion_record
+        before = json.loads((tmp_path/"bridge"/"before.json").read_text())
+        labelled = completion_record(before, run)
+        assert 0 <= labelled["read_source_char_fraction"] <= 1
+        assert labelled["read_original_characters"] == labelled["required_original_characters"]
     assert run["continuation_protocol"] == BOUNDED_CONTINUATION
     assert run["pre_action_quote"]["candidate_id"] is not None
+    await service.aclose()
+    service.store.close()
+
+
+@pytest.mark.asyncio
+async def test_gap_for_numeric_need_does_not_continue_an_unrelated_infer_need(tmp_path):
+    from training.plan_gain_protocol import gap_query
+    service, native, budget, frozen, snapshot, old, _, _, binding, row, prep = await frozen_fixture(tmp_path)
+    task_state = replace(frozen.plan.task_state, needs=(*frozen.plan.task_state.needs,
+                                                     Need("already-supported", operation="infer")))
+    frozen = replace(frozen, plan=replace(frozen.plan, task_state=task_state),
+        results=tuple(replace(result, support=("already-supported",)) for result in frozen.results))
+    observed = observed_state_binding(frozen, snapshot, paid_cost=CompleteCost(500, 0, 0, 7, 0),
+        native_condition=old["native_condition"], reader_checkpoint=old["reader_checkpoint"],
+        reader_profile_id=old["reader_profile_id"])
+    # Retain the already paid reader tokens in this branch's observed binding.
+    observed["paid_cost"]["input_tokens"] += sum(len(step.input_ids) + len(step.output_ids)
+                                                  for step in frozen.steps)
+    request = GapRetrievalRequest(frozen.open_needs, gap_query(task_state, frozen.open_needs),
+        {"implementation": "specified-fixture"}, {"max_units": 1, "max_passages": 1})
+    plans, _ = build_observed_action_plans(frozen, snapshot, service.template,
+        reader_checkpoint=old["reader_checkpoint"], gap_request=request)
+    plan = next(plan for plan in plans if plan.semantic_kind == "gap_retrieval")
+
+    async def retrieve(*args):
+        block, unit = material("R3")
+        return EvidencePool((unit,), (block,), auxiliary_usage=dict(ZERO_AUX))
+
+    run = await execute_branch(service, plan, frozen, snapshot, row, case_dir=tmp_path/"numeric-gap",
+        binding=binding, preparation=prep, resources=Resources(), cache_start="observed",
+        generation_budget=budget, observed=observed, gap_request=request, gap_provider=retrieve)
+    assert run["status"] == "completed", run["failure"]
+    assert run["new_action_counts"] == {"READ": 0, "REDUCE": 0, "GAP_RETRIEVAL": 1, "ANSWER": 1}
     await service.aclose()
     service.store.close()
 

@@ -8,9 +8,10 @@ import json
 
 import pytest
 
-from training.plan_gain_completion import completion_record, effective_pair, finalize
+from training.plan_gain_completion import completion_record, effective_pair, finalize, fit_effective
 from training.plan_gain_rollout import execute_branch
 from training.train_plan_gain import COST_FIELDS
+from training.train_plan_gain import PlanGainModel
 from action_helpers import Resources, frozen_fixture
 
 
@@ -82,3 +83,23 @@ async def test_failed_read_lowers_utility_keeps_raw_q_missing_and_paid_signed_co
     uncertain = effective_pair(direct, completion_record(before, unknown))
     assert uncertain["cost_targets"]["branch_complete_cost"]["host_gib_seconds"] is None
     assert uncertain["effective_delta_q"] == -.6
+
+
+@pytest.mark.asyncio
+async def test_whole_plan_completion_asset_round_trips_without_observed_features(tmp_path):
+    _, _, values = await measured_fixture(tmp_path)
+    branches = {}
+    for kind, (before, run) in deepcopy(values).items():
+        before["observed_state_binding"] = run["observed_state_binding"] = None
+        if kind == "read_once":
+            before["plan_candidate"]["semantic_kind"] = "complementary_evidence"
+            run["semantic_kind"] = "complementary_evidence"
+        branches[kind] = completion_record(before, run)
+    pair = effective_pair(branches["direct_answer"], branches["read_once"])
+    model = fit_effective([pair])
+    path = tmp_path/"whole-plan.json"
+    model.save(path)
+    loaded = PlanGainModel.load(path, reader_checkpoint=model.reader_checkpoint,
+                               reader_profile_id=model.reader_profile_id)
+    assert loaded.provenance["observed_feature_schema"] is None
+    assert loaded.predict(pair["features"]) == pytest.approx(model.predict(pair["features"]))

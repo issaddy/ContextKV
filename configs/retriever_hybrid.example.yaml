@@ -1,6 +1,5 @@
-# Measured fast P3 path: last3 + stable_key (the controller's default layout).
-# Qwen3/H200 deployment uses generation GPU0 and retrieval GPU1.
-# Use the documented client thread environment when comparing saved timings.
+# Optional BM25 + dense RRF followed by relevance reranking.
+# The main study selects its retrieval stage explicitly; this is not a measured optimum.
 schema_version: 1
 kind: hybrid
 stage: hybrid_rerank

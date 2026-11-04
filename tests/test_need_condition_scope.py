@@ -5,7 +5,7 @@ import unittest
 
 from adapters.history_state import TaskInterpreter, TaskPrediction
 from adapters.support_model import query_view
-from controller.context_schema import Condition, Need, RetrievalState, TextRef
+from controller.context_schema import Condition, Need, RetrievalState, TextRef, VersionIntent
 from controller.reading import numeric_read_scopes
 from controller.schema import OnlineTurn, TurnRecord
 
@@ -56,6 +56,15 @@ class NeedConditionScopeTests(unittest.TestCase):
         self.assertEqual([[row["values"] for row in query["conditions"]] for query in queries],
                          [[["2023"]], [["2024"]]])
         self.assertEqual([scope.need_ids for scope in numeric_read_scopes(state, ())], [("count",), ("sum",)])
+        previous_version = replace(state, version_intent=VersionIntent("as_of",
+            document_families=("policy",), version_ids=("v2",), resolved_version_ids=("v1",),
+            temporal_relation="before", source_turns=(1,)))
+        exhaustive = replace(state.needs[0], scope="all_supplied_documents")
+        resolved = json.loads(query_view(previous_version, exhaustive, lambda ref: QUESTION[ref.start:ref.end]))
+        self.assertEqual(resolved["scope"], "all_supplied_documents")
+        self.assertEqual(resolved["version_intent"]["version_ids"], ["v2"])
+        self.assertEqual(resolved["version_intent"]["resolved_version_ids"], ["v1"])
+        self.assertEqual(resolved["version_intent"]["temporal_relation"], "before")
 
     def test_explicit_shared_condition_keeps_one_numeric_scope(self):
         prediction = initial_prediction()

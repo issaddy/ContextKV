@@ -21,7 +21,7 @@ supplement = render_table_relations(existing_reference_id, tables)
 
 通过`context.table_relations: true`启用，默认关闭；原生CLI使用`--table-relations`，matrix两条执行路径继承共同的base config。每轮对required证据提取一次，供APPEND/REBUILD共用。APPEND在当前消息附加本轮注释，新增长度计入共享预算。集成检查覆盖默认行为、QA/正文跨度、Native输入一致性及身份计算复用。
 
-新增的 `context.table_annotation_style` 默认为 `all_rows`，保留原全行输出；设为 `focus_refs` 才使用问题相关行和原引用样式，而且仍须 `table_relations: true`。该轻量样式直接复用 CRAFT 的行文本构造函数，词法选择复用现有 BM25S 与纠正线索，所需依赖已属于 `contextkv[retrieval]`；默认关闭和全行样式不加载此可选依赖。完整 MIT 归属见[CRAFT notice](../third_party/CRAFT_NOTICE.md)。
+`context.table_annotation_style` 默认为 `all_rows`，输出全部行关系；设为 `focus_refs` 才选择问题相关行，且仍须 `table_relations: true`。该样式复用 CRAFT 的行文本构造函数与 BM25S 分词，按对象、列名、行文本的词项交集数量作字典序选择，并保留最高分并列项；没有使用 BM25 排名或 CRAFT 稠密重排。完整 MIT 归属见[CRAFT notice](../third_party/CRAFT_NOTICE.md)。
 
 `context.table_structure_mode: explicit`支持无编号数量表头，并从原文Markdown标题和缩进提取父路径；默认`legacy`支持下述两种格式。实现见`adapters/table_structure.py`。
 
@@ -36,4 +36,4 @@ supplement = render_table_relations(existing_reference_id, tables)
 
 相邻的`Note:`、`Remark:`、中文注释或脚注以`source note`保留。行与注释开头具有相同的`†`、`‡`、单星或`[^id]`标记时，建立行级`notes`关联；其余注释保留在表级。遇到普通叙述段落时停止搜集。
 
-相应 CPU 合同覆盖于 `tests/test_table_*.py`；已有局部生成检查，整体质量与成本收益尚待验证。
+这是默认关闭的表格注释对照，不属于当前规范来源窗口主线；没有保留可支持当前协议收益结论的原始实验记录。

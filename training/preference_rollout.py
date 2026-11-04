@@ -653,8 +653,7 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
         binding = {"reader_checkpoint": settings["reader_checkpoint"],
             "reader_profile_id": settings["reader_profile_id"],
             "cohort_manifest_sha256": file_digest(settings["cohort_manifest"]),
-            "query_encoder": query_binding,
-            "reader_data_only": settings.get("reader_data_only", False)}
+            "query_encoder": query_binding}
         binding_path = output_dir/"reader_collection_binding.json"
         if binding_path.exists() and json.loads(binding_path.read_text()) != binding:
             raise ValueError("existing candidate collection belongs to a different reader or cohort")
@@ -688,8 +687,6 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
     existing = [json.loads(line) for line in rewards_path.read_text().splitlines() if line] if rewards_path.exists() else []
     actual_turns_path = output_dir/"turns.jsonl"
     actual_turns = [json.loads(line) for line in actual_turns_path.read_text().splitlines() if line] if actual_turns_path.exists() else []
-    if settings.get("reader_data_only", False):
-        actual_turns_path.touch(exist_ok=True)
     completed = {(row["task_id"], row["category"]) for row in existing}
     completed.update((row["task_id"], row["category"]) for row in actual_turns)
     categories = ("relevance", "direct_support", "complementary", "redundant",
@@ -722,7 +719,7 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                           if identity in {row["task_id"] for row in rows}}
     started = time.perf_counter()
     async with httpx.AsyncClient(base_url=settings.get("judge_base_url", config.get("generation", {}).get("teacher_url", "http://127.0.0.1:30001")), timeout=180) as judge:
-        if not settings.get("reader_data_only", False) and not settings.get("candidate_preparation_only", False):
+        if not settings.get("candidate_preparation_only", False):
             labels = {item["task_id"]: item for item in saved_rows(labels_path)}
             collected, judge_calls = await rescore_saved_answers(judge, controller.template, controller.store.get_attempt,
                 labels, output_dir, {**settings, "support_asset": asset}, query_binding)
@@ -919,10 +916,6 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
                     if (row["task_id"], category) not in {(item["task_id"], item["category"]) for item in actual_turns}:
                         append_record(actual_turns_path, actual_turn)
                         actual_turns.append(actual_turn)
-                    if settings.get("reader_data_only", False):
-                        completed.add((row["task_id"], category))
-                        await controller.close_session(session_id)
-                        return
                     reward = reward_template(actual_turn, row, controller.store.get_attempt, {**settings, "support_asset": asset}, query_binding)
                     reward.update(shared_preparation_cost=preparation,
                         comparable_cost={"complete_ms": response.complete_ms+preparation["wall_ms"]
@@ -951,9 +944,7 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
     weights = settings.get("reward_weights", training.get("reward_weights", {
         "necessary_points": .3, "grounding": .2, "conditions_versions": .2, "task_score": .3}))
     preferences_path = Path(settings.get("preferences_path", training.get("preferences", output_dir/"preferences.jsonl")))
-    if settings.get("reader_data_only", False):
-        pair_manifest = {"pairs": 0, "reason": "reader_protocol_audit_only"}
-    elif settings.get("candidate_preparation_only", False):
+    if settings.get("candidate_preparation_only", False):
         pair_manifest = {"pairs": 0, "reason": "candidate_preparation_only"}
     elif not collected:
         pair_manifest = {"pairs": 0, "reason": "no_actual_reader_answers"}
@@ -978,7 +969,6 @@ async def collect_preferences(config, *, controller=None, directory=None, limit=
         'candidate_preparation_only': settings.get("candidate_preparation_only", False),
         'candidate_families_path': str((output_dir/"candidate_families.jsonl").resolve()),
         'turns_path': str(labels_path),
-        'reader_data_only': settings.get("reader_data_only", False),
         'candidate_concurrency': settings.get("candidate_concurrency", 4),
         'query_encoder': query_binding,
         'physical_cost_scope': "collection device/process window counted once; concurrent branch request windows may overlap",
@@ -1009,9 +999,7 @@ async def measured_preferences(config, *, limit=None):
     from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
     from controller.config import load_config
     run = load_config(settings["run_config"])
-    urls = [settings.get("reader_base_url", run.engine.base_url)]
-    if not settings.get("reader_data_only", False):
-        urls.append(settings["judge_base_url"])
+    urls = [settings.get("reader_base_url", run.engine.base_url), settings["judge_base_url"]]
     if settings.get("support_mode", "trained") == "teacher":
         urls.append(settings["support_teacher_url"])
     processes = [os.getpid(), *listening_processes([urlparse(url).port for url in urls])]
@@ -1035,7 +1023,6 @@ async def measured_preferences(config, *, limit=None):
             "complete_ms": (ended-started)*1000, "physical": integrate_physical(sampler.samples, started, ended),
             "reader_checkpoint": settings.get("reader_checkpoint"), "reader_profile_id": settings.get("reader_profile_id"),
             "cohort_manifest_sha256": file_digest(settings["cohort_manifest"]) if settings.get("cohort_manifest") else None,
-            "reader_data_only": settings.get("reader_data_only", False),
             "gpu_devices": settings["gpu_devices"], "process_roots": processes}
         (output/f"collection_cost.{invocation}.json").write_text(json.dumps(cost, indent=2)+"\n")
 
