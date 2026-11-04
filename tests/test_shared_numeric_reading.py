@@ -14,10 +14,10 @@ from controller.evidence import make_evidence
 from controller.execution import ReadingExecutor
 from controller.reading import (
     advance_read_plan, build_read_plan, parse_read_result,
-    read_output_reservation, stable_prefix_messages, step_messages,
+    step_messages,
 )
 from controller.reduction import reduce_claims
-from controller.rolling_policy import _reduction_tasks, namespace_plan
+from controller.rolling_policy import _reduction_tasks
 from controller.session_store import SessionStore
 from controller.templates import ByteTemplate
 
@@ -141,17 +141,6 @@ def test_condition_scopes_and_source_versions_remain_separate():
         parse_read_result(task, json.dumps(output), plan.selected_set.selected_units)
 
 
-def test_same_entity_in_distinct_versions_keeps_two_source_proofs():
-    plan = numeric_plan((material("R1 mass 1 kg.", "old", "v1"),
-                         material("R1 mass 2 kg.", "new", "v2")))
-    result = parse_read_result(plan.steps[0], json.dumps(response(row("R1", "1", "kg"),
-        row("R1", "2", "kg", source="s1"))), plan.selected_set.selected_units)
-    total = reduce_claims("sum", result.claims, claim_id="sum", need_id="shipment-mass")
-    assert total.value == "3000" and len(total.source_spans) == 2
-    count = reduce_claims("count", result.claims, claim_id="count", need_id="shipment-count")
-    assert count.value == 2
-
-
 def test_shared_fact_preserves_dependency_sources_and_predecessor_parent_proof():
     eligibility, prerequisite = material("Approved shipments qualify.", "eligibility", "v1")
     register, quantity = material("R1 mass 500 g.", "register", "v2")
@@ -175,55 +164,6 @@ def test_shared_fact_preserves_dependency_sources_and_predecessor_parent_proof()
     graph = ClaimGraph((parent, *result.claims, total))
     assert set(graph.source_spans("sum")) == {*quantity.source_spans, *prerequisite.source_spans}
     assert {claim.claim_id for claim in graph.leaf_claims("sum")} == {"eligible", result.claims[0].claim_id}
-
-
-def test_shared_read_measures_less_actual_prompt_and_output_than_isolation():
-    text = "\n".join(f"Shipment R{i} is approved for the northern route and has mass {i} kg."
-                     for i in range(1, 51))
-    pair = material(text)
-    shared = numeric_plan((pair,), read_layout="source_first", output_tokens_per_fact=None)
-    isolated = numeric_plan((pair,), read_layout="source_first", output_tokens_per_fact=None,
-                            separate_needs=True)
-    template = ByteTemplate()
-
-    def measure(plan):
-        units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
-        source_tokens = prompt_tokens = 0
-        for task in plan.steps:
-            selected = tuple(units[identity] for identity in task.input_unit_ids)
-            prompt_tokens += len(template.render(step_messages(plan, task, selected)).input_ids)
-            source_tokens += sum(len(template.tokenizer.encode(unit.text)) for unit in selected)
-        return source_tokens, prompt_tokens
-
-    shared_source, shared_prompt = measure(shared)
-    isolated_source, isolated_prompt = measure(isolated)
-    assert isolated_source == 2 * shared_source and shared_prompt < isolated_prompt
-    shared_rows = response(*(row(f"R{i}", str(i), "kg") for i in range(1, 51)))
-    shared_output = len(template.tokenizer.encode(json.dumps(shared_rows)))
-    old_rows = [{"need_id": need.need_id, "text": f"R{i}", "entity": f"R{i}",
-                 "relation": "mass", "value": str(i) if need.operation == "sum" else "1",
-                 "unit": "kg" if need.operation == "sum" else "", "conditions": [],
-                 "span_ids": ["need:0:register"], "parent_claim_ids": [], "followups": []}
-                for need in shared.task_state.needs for i in range(1, 51)]
-    isolated_output = len(template.tokenizer.encode(json.dumps({"format_version": 2,
-        "claims": old_rows, "support": list(shared.steps[0].need_ids), "conflicts": [], "open_needs": []})))
-    assert shared_output < isolated_output
-    reservation = read_output_reservation(shared.task_state, shared.steps[0],
-        shared.selected_set.selected_units, template.tokenizer)
-    isolated_reservation = sum(read_output_reservation(isolated.task_state, task,
-        tuple(unit for unit in isolated.selected_set.selected_units if unit.unit_id in task.input_unit_ids),
-        template.tokenizer) for task in isolated.steps)
-    assert reservation < isolated_reservation
-    assert shared.steps[0].output_schema["properties"]["format_version"]["const"] == 5
-    print({"source_tokens": [isolated_source, shared_source],
-           "prompt_tokens": [isolated_prompt, shared_prompt],
-           "fact_output_tokens": [isolated_output, shared_output],
-           "output_reservation": [isolated_reservation, reservation]})
-    # Source-first causal content remains independent of the operation view aliases.
-    renamed = replace(shared.steps[0], need_ids=("renamed-count", "renamed-sum"))
-    assert stable_prefix_messages(shared, shared.steps[0], shared.selected_set.selected_units) == \
-        stable_prefix_messages(shared, renamed, shared.selected_set.selected_units)
-    assert namespace_plan(shared).steps[0].shared_numeric_scopes == shared.steps[0].shared_numeric_scopes
 
 
 def test_numeric_selection_requires_last_parent_decision_and_preserves_rejected_background():

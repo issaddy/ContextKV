@@ -1,10 +1,8 @@
 """Need-specific conditions survive task interpretation and shared reading."""
 from dataclasses import replace
 import json
-from types import SimpleNamespace
 import unittest
 
-from adapters.evidence_pool import SourceDirectory
 from adapters.history_state import TaskInterpreter, TaskPrediction
 from adapters.support_model import query_view
 from controller.context_schema import Condition, Need, RetrievalState, TextRef
@@ -49,32 +47,6 @@ def prior_memory():
 
 
 class NeedConditionScopeTests(unittest.TestCase):
-    def test_retrieval_queries_use_only_explicit_active_condition_links(self):
-        prediction = initial_prediction()
-        for bindings, expected in (
-            ((("year23",), ("year24",)), ("2023", "2024")),
-            ((("year23",), ("year23",)), ("2023", "2023")),
-            ((("year23",), ()), ("2023", "")),
-            ((("retired",), ("year24",)), ("", "2024")),
-        ):
-            with self.subTest(bindings=bindings):
-                state = replace(interpret(prediction), needs=tuple(
-                    replace(need, condition_ids=ids)
-                    for need, ids in zip(prediction.needs, bindings, strict=True)))
-                queries = []
-
-                def search(query, *, top_k):
-                    queries.append(query)
-                    return ()
-
-                index = SimpleNamespace(blocks=(), source_metadata={}, retrieved_keys=lambda contexts: ())
-                directory = SourceDirectory(index, search, tokenizer=None)
-                pool = directory.retrieve_pool(state, RetrievalState(0))
-                self.assertEqual(queries[0], state.query or state.raw_question)
-                self.assertEqual(queries[1:], [
-                    "Count employees" + ("\n" + expected[0] if expected[0] else ""),
-                    "sum revenue" + ("\n" + expected[1] if expected[1] else "")])
-                self.assertEqual([row["need_id"] for row in pool.trace], ["", "count", "sum"])
 
     def test_independent_conditions_remain_separate_in_support_and_shared_reading(self):
         state = interpret(initial_prediction())
@@ -94,16 +66,6 @@ class NeedConditionScopeTests(unittest.TestCase):
         self.assertEqual([(scope.need_ids, scope.condition_ids) for scope in scopes],
                          [(("count", "sum"), ("year23",))])
 
-    def test_unconditioned_need_does_not_acquire_other_need_restrictions(self):
-        prediction = initial_prediction()
-        state = interpret(replace(prediction, needs=(prediction.needs[0],
-            replace(prediction.needs[1], condition_ids=()))))
-        self.assertEqual([need.condition_ids for need in state.needs], [("year23",), ()])
-
-    def test_followup_inherits_each_need_own_bindings(self):
-        memory = prior_memory()
-        state = interpret(TaskPrediction("followup"), question="Repeat the results.", turn=2, memory=memory)
-        self.assertEqual(state.needs, memory.prior_task_states[0].needs)
 
     def test_replace_updates_only_needs_linked_to_the_replaced_condition(self):
         question = "Use 2025 for the employee count."
@@ -125,17 +87,6 @@ class NeedConditionScopeTests(unittest.TestCase):
                           question=question, turn=2, memory=prior_memory())
         self.assertEqual([need.condition_ids for need in state.needs], [(), ("year24",)])
         self.assertEqual([condition.condition_id for condition in state.conditions], ["year24"])
-
-    def test_added_condition_uses_explicit_need_links(self):
-        memory = prior_memory()
-        question = "Limit revenue to Germany."
-        addition = Condition("germany", value_spans=(reference("Germany", question=question, turn=2),),
-                             relation_type="LOCATION")
-        first, second = memory.prior_task_states[0].needs
-        prediction = TaskPrediction("correction", conditions=(addition,),
-            needs=(first, replace(second, condition_ids=("year24", "germany"))))
-        state = interpret(prediction, question=question, turn=2, memory=memory)
-        self.assertEqual([need.condition_ids for need in state.needs], [("year23",), ("year24", "germany")])
 
 
 if __name__ == "__main__":

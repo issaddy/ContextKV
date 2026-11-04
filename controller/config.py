@@ -199,9 +199,7 @@ def assemble_cost_model(config, *, artifact=None, measurements=None,
     else:
         model = CostModel(**settings, **overrides)
     protocol = GenerationProtocol.from_config(config)
-    model.configure_sampling(protocol.sampling,
-        fallback_mean=settings.get("default_output_tokens", 128),
-        fallback_p90=settings.get("p90_output_tokens", 256), system_prompt=protocol.system_prompt)
+    model.configure_sampling(protocol.sampling, system_prompt=protocol.system_prompt)
     return model
 
 
@@ -227,7 +225,6 @@ def load_cost_model(config, *, artifact_path=None, max_new_tokens=None):
                 include_decode_cost=model.include_decode_cost, include_control_cost=model.include_control_cost)
         for kind, child in model.step_models.items():
             child.configure_sampling(GenerationProtocol.from_config(config).sampling,
-                fallback_mean=child.default_output_tokens, fallback_p90=child.p90_output_tokens,
                 system_prompt=prompts[kind])
     return model
 

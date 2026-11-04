@@ -1,8 +1,8 @@
 # 当前课题运行入口
 
-训练、模型推理与 GPU 测量按用户要求暂停，本地实现与 CPU 集成继续。旧候选奖励、逐题答案与成本原始记录已丢弃；下文历史目录仅说明输入类型，不表示资产仍可访问。新答案、奖励及原生成本由恢复运行后的实际采集产生。
+训练、模型推理与 GPU 测量按用户要求暂停。旧实验原始记录已丢弃；恢复运行后按本次配置重新采集答案、奖励及成本。
 
-要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)，历史发现见 [审查基线](review_20261104.md)，资产状态见 [预算阅读记录](budget_loop_20261103.json)。以下命令描述实际入口。
+要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 
 运行冻结同一 Qwen3-32B 模型权重与解码参数，显式配置端点、协议身份与原生缓存。主机目录、GPU、服务端口和
 输出目录由本次运行配置声明；不复用旧批次的固定路径或截止时间。
@@ -33,7 +33,7 @@ B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v3` 及 GAP �
 
 B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_support_state_v2`，使用实际已付资源和剩余额度；旧特征资产不能直接用于该决策。
 
-B v3 修正 GAP 的已读范围：离线与线上只排除实际已读来源，统一新增 passage 额度。v2 候选标签采用了不同的排除范围，不用于 v3 拟合。
+GAP 离线与线上只排除实际已读来源，统一新增 passage 额度；采集和拟合必须绑定相同协议。
 
 B 固定流程观测使用 `execution.state_observation`，从真实请求开始计量并记录 READ/REDUCE 决策状态；
 不加载 gain 模型，不从旧 SQLite 补造物理状态。A 冻结后显式启用。
@@ -50,8 +50,7 @@ B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
 `--cohort-manifest` 指向同一文件；不再使用 `--partition-seed` 或 `--dev-fraction`
 重新划分状态，实际采集数量从声明分区内选择并单独记录。
 模型 scope 位于 `configs/model_scopes/`。Reader、策略身份、来源与费用由本次阶段
-manifest 记录。当前数值入口为 [reference_20261103.json](reference_20261103.json)
-和 [budget_loop_20261103.json](budget_loop_20261103.json)。
+manifest 记录。
 
 机制重放示例（显式指定实际服务配置和新输出目录）：
 
@@ -81,8 +80,8 @@ python -m training.task_labeling --config runs/study/auxiliary/task-labels/task_
 
 采集量是示例，cohort manifest 记录实际数量与 shortfall，不预先宣称达到 200/40。
 `task_cohort_labeling.existing_labels_path: null` 表示从零标注；只有存在可复用的真实标签时才指定文件。
-当前配置 `task_model.initial_adapter_path: null` 与 `training.support_parent_asset: null` 从显式 BGE base 初始化；设为非空父路径时只复用真实存在的资产，不自动回退。完整学习接口已经实现，尚未运行训练、推理或开发评价，不能视为已有有效学生/支持资产。
-实际历史数据库为 `runs/study/actual-rollout/sessions.sqlite3`。训练与评价共用
+当前配置 `task_model.initial_adapter_path: null` 与 `training.support_parent_asset: null` 从显式 BGE base 初始化；设为非空父路径时只复用真实存在的资产，不自动回退。有效学生与支持资产须由本次训练及开发评价确认。
+配置默认将实际历史写入 `runs/study/actual-rollout/sessions.sqlite3`。训练与评价共用
 `runs/study/auxiliary/task-labels/task_labels.jsonl`，由 cohort manifest 隔离 train/dev。
 
 运行时以 `CUDA_VISIBLE_DEVICES` 选择物理设备，配置内使用该进程的 `cuda:0`：
@@ -100,7 +99,7 @@ python -m training.train_models --config configs/auxiliary_training.yaml --stage
 
 当前辅助配置将新 support 输出接为 P1 父资产与 P0 对照，将新 task 输出同时接入 P1 奖励采集和比较的查询编码器。初始化真实历史的辅助 rollout 使用显式无查询 adapter 的 BGE 基座；若采用已有资产，修改对应显式路径后重新绑定采集身份。
 
-已有候选答案的纯 CPU 诊断随 `python -m training.train_evidence_policy prepare --config CONFIG.yaml` 写入 `preference_manifest.json.candidate_quality_diagnostics`。该命令只读取已生成答案、评分和成本资产，按真实历史/预算/reader/scorer/query 分组，给出候选质量上限、最高预测并列时的遗憾区间和声明任务缺失列表，不产生模型训练或推理。该诊断入口已经实现；输入资产不可用时不产生研究诊断结果，夹具结果不写作研究结果。
+已有候选答案的纯 CPU 诊断随 `python -m training.train_evidence_policy prepare --config CONFIG.yaml` 写入 `preference_manifest.json.candidate_quality_diagnostics`。该命令只读取已生成答案、评分和成本资产，按真实历史/预算/reader/scorer/query 分组，给出候选质量上限、最高预测并列时的遗憾区间和声明任务缺失列表，不产生模型训练或推理。输入资产不可用时不产生诊断结果。
 
 固定模型协议审计与四格比较示例：
 
@@ -114,14 +113,13 @@ python -m training.a_workflow compare --comparison-config COMPARISON.yaml \
 
 所有实验按运行前声明的 cohort、reader 身份和资源范围读取结果。质量未测得时保留未知，
 完成子集另外报告；输入投影成功率、预测成本和容量观测不能替代正式答案评分。
-旧 Qwen LoRA/合并模型已退出活动入口，既往已付费用列为弃用支出，不进入受控改进结果。
 
 正式主验收沿用 `study_matrix.yaml` 既有四数据集的 development_weights 和指标。
-已从既有 `runs/study/cohorts.json` 固定 350 题、77 会话至 `runs/study/formal-dev-queue.matrix.json`，
+正式开发队列为 `runs/study/formal-dev-queue.matrix.json`，声明 350 题、77 会话；
 运行及评分直接使用其中 IDs，再在相同清单上重跑 baseline 与候选；辅助学习的
 200/40 划分用于辅助训练，不能替代正式开发队列。
 冻结 A 采用 P0 共享协议；模型、支持策略、查询资产、阅读协议与预算由
-`selected-a-followthrough/selection.json` 及其实际运行配置绑定。
+本次冻结 A 的 manifest 及实际运行配置绑定。
 P1 效用输入使用零上下文 `evidence_set_only`，不使用实际 READ 后长度。
 B 从冻结 A 的真实观察采集动作分支；失败尝试中已完成步骤的观察通过真实 Attempt ID
 进入配对，capture 最终状态仅作出处，不作为模型特征或未来质量筛选条件。
@@ -133,7 +131,7 @@ B 从冻结 A 的真实观察采集动作分支；失败尝试中已完成步骤
 计数与总额同时匹配才得 1 分；
 公开 Loong test 保留官方 loong_reference_score/100，二者通过 metric_by_split 明确区分。
 
-C 使用 `paired_native_retention_v5` 及 `target_demand_rule=exact_complete_causal_prefix_and_body_ranges_v1`，旧标签不能直接重命名为新目标。训练行必须保存独立会话集合，train/dev 集合互斥；同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。v4 资产不直接挂入新选择。只有相同完整来源需求重访才标注整次下一 READ 的 target 收益；部分页复用仍记录在原生观察与整窗成本中。新增 owner 的目标收益按完整来源需求去重，容量与驻留按共享页增量；配对外部请求代价进入选择，正 collateral 不再额外记为可叠加收益。完整集合的真实净效果仍由同轨 Native/value 对照和物理积分验收。
+C 使用 `paired_native_retention_v5` 及 `target_demand_rule=exact_complete_causal_prefix_and_body_ranges_v1`，旧标签不能直接重命名为新目标。训练行必须保存独立会话集合，train/dev 集合互斥；同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。只有相同完整来源需求重访才标注整次下一 READ 的 target 收益；部分页复用仍记录在原生观察与整窗成本中。新增 owner 的目标收益按完整来源需求去重，容量与驻留按共享页增量；配对外部请求代价进入选择，正 collateral 不再额外记为可叠加收益。完整集合的真实净效果仍由同轨 Native/value 对照和物理积分验收。
 
 C 的两次容量构造共用原有 TTL15/60/180、owner、页并集和需求去重目标，不新增 TTL 网格或原生接口。
 

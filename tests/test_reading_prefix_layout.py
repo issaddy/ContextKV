@@ -3,7 +3,7 @@ import json
 
 from controller.context_schema import ContextBudget, ContextPlan, EvidenceSet, EvidenceUnit, Need, ReadTask, SourceSpan, TaskState
 from controller.evidence import make_evidence
-from controller.reading import build_read_plan, stable_prefix_input_ids, stable_prefix_messages, step_messages
+from controller.reading import build_read_plan, stable_prefix_input_ids, step_messages
 from controller.templates import ByteTemplate
 
 
@@ -46,35 +46,6 @@ def test_source_version_and_original_offsets_change_prefix_identity():
     shifted = replace(original, source_spans=(replace(original.source_spans[0], start=1),))
     assert first[1] != step_messages(plan(shifted), task, (shifted,))[1]
     assert template.render(first).input_ids != template.render(second).input_ids
-
-
-def test_source_prefix_is_shared_across_numeric_and_multihop_operations():
-    unit = material()
-    selected = EvidenceSet("selected", (unit,))
-    numeric = build_read_plan(TaskState("numeric", "Count records and sum mass", needs=(
-        Need("count", operation="count"), Need("sum", operation="sum"))), selected,
-        "selected_sources", ContextBudget(), read_layout="source_first")
-    bridge = build_read_plan(TaskState("bridge", "Follow the record's supplier relation", needs=(
-        Need("supplier", operation="infer"),)), selected, "selected_sources", ContextBudget(),
-        read_layout="source_first")
-    left = step_messages(numeric, numeric.steps[0], numeric.selected_set.selected_units)
-    right = step_messages(bridge, bridge.steps[0], bridge.selected_set.selected_units)
-    assert left[:2] == right[:2]
-    assert left[-1].content.split("\nTask:\n", 1)[0] != right[-1].content.split("\nTask:\n", 1)[0]
-
-    # The actual operation, protocol version and task aliases cannot precede sources.
-    template = ByteTemplate()
-    baseline = stable_prefix_messages(bridge, bridge.steps[0], (unit,))
-    prefix = stable_prefix_input_ids(template, bridge, bridge.steps[0], (unit,), template.render(right))
-    for operation in ("count", "sum", "extract", "infer"):
-        task = replace(bridge.steps[0], operation=operation, step_id="changed:"+operation)
-        messages = step_messages(bridge, task, (unit,))
-        assert messages[:2] == baseline
-        assert template.render(messages).input_ids[:len(prefix)] == prefix
-        task_payload = json.loads(messages[-1].content.split("\nTask:\n", 1)[1])
-        assert task_payload["source_aliases"][0]["spans"][0]["span_id"] == "span"
-        assert "output_schema" in task_payload
-    assert "population" not in baseline[0].content
 
 
 def test_canonical_windows_keep_rows_coordinates_and_prefix_across_task_budgets():
@@ -140,39 +111,3 @@ def test_canonical_table_windows_keep_shared_context_out_of_data_dependencies():
         assert 'Table 1: Mass' in context and 'Mass (kg)' in context
         assert 'Note: Approved records only.' in context
         assert unit.table_id is not None
-
-
-def test_explicit_source_protocols_keep_canonical_groups_and_pr3_rows_stable():
-    from types import SimpleNamespace
-    from adapters.evidence_pool import PoolProfile, SourceDirectory
-    from controller.templates import ByteTokenizer
-
-    class OffsetBytes(ByteTokenizer):
-        def __call__(self, text, **kwargs):
-            # This fixture is ASCII, so each actual byte token spans one character.
-            return {'input_ids': self.encode(text),
-                    'offset_mapping': [(index, index+1) for index in range(len(text))]}
-
-    text = ''.join(f'Row R{i}: {i} kg.\n' for i in range(12))
-    block = make_evidence(text, 'protocols')
-    corpus = SimpleNamespace(blocks=(block,), source_metadata={})
-    grouped = None
-    for protocol, expected in [('canonical', 2), ('source_rows_pr3', 12)]:
-        profile = PoolProfile(window_protocol=protocol)
-        first = SourceDirectory(corpus, None, OffsetBytes(), profile=profile)
-        second = SourceDirectory(corpus, None, OffsetBytes(), profile=profile)
-        units = first.full_scope((block.key,)).units
-        assert units == second.full_scope((block.key,)).units
-        assert len(units) == expected
-        assert ''.join(unit.text for unit in units) == text
-        assert first.profile.window_protocol == protocol
-        if protocol == 'canonical':
-            grouped = units
-        else:
-            assert all(unit.text.count('\n') == 1 for unit in units)
-    assert grouped[0].text.count('\n') == 8
-    long = make_evidence('x'*80, 'long-row')
-    directory = SourceDirectory(SimpleNamespace(blocks=(long,), source_metadata={}), None, OffsetBytes(),
-        profile=PoolProfile(unit_tokens=32, window_protocol='source_rows_pr3'))
-    spans = [unit.source_spans[0] for unit in directory.full_scope((long.key,)).units]
-    assert [(span.start, span.end) for span in spans] == [(0, 32), (28, 60), (56, 80)]

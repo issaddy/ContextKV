@@ -31,7 +31,7 @@ from controller.prefix_retention import (EmpiricalRetentionModel, PrefixReadObse
 from controller.reading import (build_read_plan, parse_read_result, stable_prefix_input_ids,
                                 stable_prefix_messages, stable_source_payload, step_messages)
 from controller.reduction import reduce_claims
-from controller.sampling import SamplingRecipe, request_sampling
+from controller.sampling import bound_recipe, request_sampling
 from controller.schema import ConfigFingerprint, PromptCandidate, SessionSnapshot, TurnRecord
 from controller.serialization import decode, to_jsonable
 from controller.session_store import SessionStore, load_record
@@ -693,7 +693,7 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
     recipes = {digest(event["sampling"]): event["sampling"] for _, event in trace_generations(trace)}
     engines = {key: SGLangEngineClient(config.engine.base_url, fingerprint,
         timeout=config.engine.timeout_seconds, stream=True,
-        sampling=None if recipe == {"temperature": 0} else SamplingRecipe(**recipe),
+        sampling=bound_recipe(recipe),
         **({"model_scope": config.model.scope.manifest()} if config.model.scope else {}))
         for key, recipe in recipes.items()}
     engine = next(iter(engines.values()))

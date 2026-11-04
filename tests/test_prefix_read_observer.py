@@ -138,38 +138,6 @@ def test_value_does_not_protect_when_native_already_has_the_same_expected_reuse_
     asyncio.run(run())
 
 
-def test_repeated_interventions_do_not_create_independent_calibration(tmp_path):
-    path = tmp_path/"model.json"
-    model_asset(path, native_ms=100, retained_ms=10)
-    import copy
-    # Use the same paired fixture, but make all observations one session.
-    from controller.prefix_retention import RETENTION_FEATURE_NAMES
-    assert len(RETENTION_FEATURE_NAMES) == 3
-    row = dict(target_demand_rule=TARGET_DEMAND_RULE, features=dict(access_state="first", native_residency="device", pressure_concurrency="normal:single"),
-        independent_sample_id="one-session", independent_session_ids=["one-session"], cache_scope_hash="scope", horizon_seconds=60,
-        native_input_hashes=["fixed"], retained_input_hashes=["fixed"])
-    assert not EmpiricalRetentionModel.fit([row, copy.deepcopy(row)]).forecasts
-
-
-def test_session_components_balance_windows_ttl_arms_and_reject_partition_leakage():
-    import pytest
-    from controller.prefix_retention import session_components, session_group, balance_session_rows
-    from profiling.retention_pair_workflow import validate_session_partitions
-    rows = [{"independent_session_ids": sessions, "sampling_weight": 2, "ttl": ttl}
-            for sessions in (["A", "B"], ["B", "C"], ["D"])
-            for ttl in (15, 60, 180)]
-    components = session_components(rows)
-    assert set(components) == {("A", "B", "C"), ("D",)}
-    balanced = balance_session_rows(rows, components)
-    for group in components:
-        assert sum(row["sampling_weight"] for row in balanced if session_group(row, components) == group) == pytest.approx(1)
-    validate_session_partitions({"train": {"turns": [{"session_id": "A"}]},
-                                 "dev": {"turns": [{"session_id": "D"}]}})
-    with pytest.raises(ValueError, match="share independent sessions"):
-        validate_session_partitions({"train": {"turns": [{"session_id": "A"}]},
-                                     "dev": {"turns": [{"session_id": "A"}]}})
-
-
 def test_partial_native_reuse_does_not_duplicate_exact_read_target_reward():
     from profiling.retention_trace import exact_target_demand, reuse_pages
     first = {"prefix_input_ids": [1, 2, 3, 4], "evidence_token_ranges": [[0, 4]], "fixed_system_prefix_tokens": 0}

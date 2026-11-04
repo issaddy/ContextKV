@@ -1,38 +1,12 @@
+from context_helpers import context_plan
 from dataclasses import replace
 
 from controller.candidates import build_plan_candidates
 from controller.context_schema import (ContextBudget, ContextPlan, EvidenceSet,
     EvidenceClaim, EvidenceUnit, Need, ReadingOutcome, SourceSpan, TaskState, TextRef)
-from controller.cost_model import CostModel
 from controller.evidence import make_evidence
-from controller.schema import (CacheQuote, CacheQuoteBatch, CostEstimate, SessionSnapshot, TurnRecord)
+from controller.schema import (SessionSnapshot, TurnRecord)
 from controller.templates import ByteTemplate, verify_evidence_spans
-
-
-def context_plan(question="How?", *, set_id="set", quality=.7):
-    block = make_evidence("前文。Linux instructions。后文", "manual")
-    start, end = 3, 21
-    unit = EvidenceUnit("u", (SourceSpan("span:u", block.key, start, end),),
-                        block.text[start:end])
-    state = TaskState("task", question, needs=(Need("need"),), current_turn_id=1)
-    selected = EvidenceSet(set_id, (unit,), quality_prediction=quality, source_blocks=(block,))
-    return ContextPlan("plan:"+set_id, state, selected), block
-
-
-def quotes(candidates):
-    return CacheQuoteBatch("quotes", 1, 1, "restart", "cache", 100000, 100000,
-        tuple(CacheQuote(c.candidate_id, c.input_hash, len(c.input_ids), len(c.input_ids)-1)
-              for c in candidates), fingerprint=candidates[0].fingerprint)
-
-
-class CandidateCosts(CostModel):
-    def __init__(self, values):
-        super().__init__()
-        self.values = values
-
-    def predict_native(self, candidate, quote, *args, **kwargs):
-        return CostEstimate(candidate.candidate_id, self.values[candidate.evidence_set_id],
-                            calibrated=True)
 
 
 def test_compiler_keeps_source_char_offsets_separate_from_prompt_offsets():

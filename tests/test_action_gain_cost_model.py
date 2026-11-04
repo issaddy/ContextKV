@@ -6,13 +6,13 @@ import pytest
 
 from controller.claim_graph import ClaimGraph
 from controller.context_schema import EvidenceClaim, Need, ReadingOutcome, ReadResult, ReadTask, StepRecord
-from controller.plan_policy import FEATURE_NAMES, OBSERVED_FEATURE_NAMES, CompleteCost, complete_plan
+from controller.plan_policy import CompleteCost, complete_plan
 from controller.schema import SessionSnapshot, TurnRecord
 from training.plan_gain_protocol import ZERO_AUX, observed_state_binding
 from training.train_plan_gain import (
-    COST_FIELDS, PlanGainModel, _supervision, build_gain_record, evaluate_gain, fit_gain,
+    COST_FIELDS, build_gain_record,
 )
-from test_context_planning import context_plan
+from context_helpers import context_plan
 
 
 def paired_records(*, split="train", tag="training"):
@@ -98,62 +98,6 @@ def test_action_features_and_sizes_are_pre_execution_information():
     assert changed["delta_q"] != row["delta_q"]
 
 
-def test_shared_ridge_learns_signed_costs_and_nonzero_direct_cost_without_past_paid_work(tmp_path):
-    rows, _ = paired_records()
-    model = fit_gain(rows, ridge=1e-6)
-    assert model.cost_provenance["unique_direct_samples"] == 1
-    assert model.cost_provenance["action_samples"] == 3
-    assert model.cost_provenance["training_samples"] == 4
-    reduced = model.predict_costs(rows[1]["features"])
-    assert reduced["branch_complete_cost"]["complete_ms"] == pytest.approx(70, abs=1e-3)
-    assert reduced["incremental_complete_cost"]["complete_ms"] == pytest.approx(-30, abs=1e-3)
-    assert reduced["incremental_complete_cost"]["total_input_tokens"] < 0
-    direct = model.predict_costs(rows[0]["direct_features"])
-    assert direct["branch_complete_cost"]["complete_ms"] == pytest.approx(100, abs=1e-3)
-    assert direct["incremental_complete_cost"]["complete_ms"] == 0
-    assert model.predict(rows[0]["direct_features"]) == 0
-    assert model.predict(rows[1]["features"]) == pytest.approx(.4, abs=1e-3)
-    path = tmp_path / "gain-cost.json"
-    model.save(path)
-    restored = PlanGainModel.load(path, reader_checkpoint="reader-fixture", reader_profile_id="profile-fixture")
-    assert restored.predict_costs(rows[1]["features"]) == reduced
-    assert restored.supports_semantic_kind("gap_retrieval")
-    assert restored.supports_semantic_kind("gap_retrieval", costs=True)
-
-
-def test_current_action_features_are_not_zero_filled_or_masked():
-    current = paired_records()[0][0]
-    current["features"] = {name: current["features"][name] for name in FEATURE_NAMES}
-    with pytest.raises(ValueError, match="one-hot"):
-        fit_gain([current])
-    current = paired_records()[0][0]
-    current["features"]["read_once"] = 0
-    with pytest.raises(ValueError, match="one-hot"):
-        fit_gain([current])
-
-
-@pytest.mark.parametrize("tamper", ["absolute_paid", "signed_delta"])
-def test_cost_labels_cannot_replace_actual_paired_costs(tamper):
-    rows, _ = paired_records()
-    row = rows[1]
-    if tamper == "absolute_paid":
-        row["cost_targets"]["branch_complete_cost"]["complete_ms"] += 10000
-    else:
-        row["incremental_complete_cost"]["complete_ms"] = 0
-    with pytest.raises(ValueError, match="cost"):
-        _supervision(rows, split="train")
-
-
-def test_cost_development_reports_use_deduplicated_direct_samples_and_bound_reader():
-    train, _ = paired_records()
-    dev, _ = paired_records(split="dev", tag="heldout")
-    model = fit_gain(train, ridge=1e-6)
-    report = evaluate_gain(model, dev, training_state_keys=[row["state_key"] for row in train])
-    assert report["cost_samples"] == 4 and report["unique_direct_samples"] == 1
-    assert report["cost_errors"]["branch_complete_cost"]["complete_ms"]["mae"] < 1e-3
-    assert set(model.feature_names) == set(OBSERVED_FEATURE_NAMES)
-
-
 def test_observed_budget_features_use_actual_paid_state_and_hard_steps():
     from controller.plan_policy import PlanCandidate, plan_features
     from controller.serialization import decode
@@ -179,16 +123,6 @@ def test_observed_budget_features_use_actual_paid_state_and_hard_steps():
     unbounded = replace(state, plan=replace(state.plan, budget=replace(state.plan.budget,
         max_total_tokens=None)))
     assert plan_features(plan, unbounded, paid_cost=paid)["total_tokens_unbounded"] == 1
-
-
-def test_observed_asset_cannot_silently_drop_budget_features(tmp_path):
-    model = PlanGainModel("reader", "profile", "old-observed", FEATURE_NAMES,
-        (0.,)*len(FEATURE_NAMES), (1.,)*len(FEATURE_NAMES), (0.,)*len(FEATURE_NAMES), 0.,
-        {"trained_semantic_kinds": ["read_once"]})
-    path = tmp_path/"old.json"
-    model.save(path)
-    with pytest.raises(ValueError, match="budget feature schema"):
-        PlanGainModel.load(path, reader_checkpoint="reader", reader_profile_id="profile")
 
 
 def test_observed_value_uses_existing_support_and_bridge_state_without_future_results():

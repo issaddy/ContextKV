@@ -45,5 +45,4 @@ P2/P3从首轮连续运行。参考答案、qrels和支持标注用于离线评�
 
 `profiling.study_cost_ledger` 汇总训练、在线执行、辅助模型及离线评分的实际调用和物理积分。
 GPU/Host 物理驻留与唯一 KV 页分别报告，共享页只计一次，空闲驻留仍计入总成本。
-实际结果由每次运行的 manifest、原始回答、评分与采样追溯；历史数值见
-[当前重评数值](study/reference_20261103.json)，当前命令见[运行手册](study/final_runbook.md)。
+实际结果由每次运行的 manifest、原始回答、评分与采样追溯；执行命令见[运行手册](study/final_runbook.md)。

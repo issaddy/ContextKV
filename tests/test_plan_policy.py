@@ -1,3 +1,4 @@
+from policy_helpers import SpecifiedGainFixture, bind_fixture_timing
 from dataclasses import replace
 
 
@@ -6,16 +7,7 @@ from controller.cost_model import CostModel
 from controller.plan_policy import (CompleteCost, NativePlanningState, PlanPolicy,
     ResourceForecast, StepForecast, complete_plan)
 from controller.schema import CacheQuote, CacheQuoteBatch, CostEstimate, Message, PromptCandidate, SessionSnapshot
-from test_context_planning import context_plan
-
-
-class SpecifiedGainFixture:
-    """Explicit unit-test gains, not a deployed or trained quality model."""
-    reader_checkpoint = "reader-fixture"
-    reader_profile_id = "profile-fixture"
-    asset_id = "test-only-specified-gains"
-    def predict(self, features):
-        return .6 if features["read_steps"] else .1
+from context_helpers import context_plan
 
 
 class QuotedCostFixture(CostModel):
@@ -31,19 +23,6 @@ class QuotedCostFixture(CostModel):
 def prompt(name, *, action="REBUILD", output=64, kind="ANSWER", tokens=16):
     return PromptCandidate(name, action, 0, (Message("system", kind+" fixture system"),), (1,)*tokens, "hash:"+name,
         frozenset(), frozenset(), output_budget=output, generation_kind=kind)
-
-
-def bind_fixture_timing(model, candidates):
-    """Explicit protocol bindings for specified test costs, not real profiles."""
-    for candidate in candidates:
-        kind = candidate.generation_kind
-        child = model if kind == "ANSWER" else model.step_models.setdefault(kind, CostModel())
-        child.calibration_metadata = {"generation_kind": kind,
-            "output_prior_system_prompt": candidate.messages[0].content,
-            "step_control_scope": ["rolling_proposals_compilation_start"]}
-        child.step_output_priors[f"{kind}:{candidate.output_budget}"] = {
-            "mean_tokens": 1, "p90_tokens": 1, "mean_control_ms": 0,
-            "mean_remaining_control_ms": 0}
 
 
 def make_plans(*, two_reads=False, scope=False):

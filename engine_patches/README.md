@@ -40,4 +40,4 @@ python scripts/prepare_sglang.py --source-only \
 python -m profiling.smoke --config configs/qwen3_32b_scope.example.yaml
 ```
 
-`profiling.lifecycle_probe`和`profiling.observation_probe`用于隔离服务的生命周期与观测验证。`profiling.sglang_probe`采集B所需的阶段数据；这些工具的准备操作会改变缓存状态，按各命令的`--help`运行。应用层调用与提交关系见[架构](../docs/architecture.md)，测量方法见[成本标定](../docs/guides/stage_cost_model.md)。
+`profiling.lifecycle_probe`用于来源前缀机制检查中的生命周期验证；`profiling.sglang_probe`采集B所需的阶段数据。准备操作会改变缓存状态，按各命令的`--help`运行。应用层调用与提交关系见[架构](../docs/architecture.md)，测量方法见[成本标定](../docs/guides/stage_cost_model.md)。

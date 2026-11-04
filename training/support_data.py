@@ -278,20 +278,11 @@ def annotate_support_parallel(examples_path, output_path, *, template, base_urls
             records = _read(path)
             calls.extend(records)
             journaled_ids.update(row["example_id"] for row in records)
-        legacy = {}
         for path in paths:
             for row in _read(path):
                 labels[row["example_id"]] = row
-                if not path.with_suffix(".calls.jsonl").exists():
-                    legacy[row["example_id"]] = row
-        for example_id, row in labels.items():
-            if example_id not in journaled_ids and example_id not in legacy:
-                legacy[example_id] = row
-        for row in legacy.values():
-            record = row["teacher_record"]
-            calls.append({"example_id": row["example_id"], "input_tokens": record["input_tokens"],
-                "output_tokens": record["metadata"].get("completion_tokens"),
-                "elapsed_ms": record["elapsed_ms"], "origin": "retained_legacy_teacher_record"})
+        if not labels.keys() <= journaled_ids:
+            raise ValueError("support labels require their actual teacher call journal")
         return labels, calls
 
     existing, previous_calls = recover()
@@ -327,8 +318,8 @@ def annotate_support_parallel(examples_path, output_path, *, template, base_urls
             "new_examples": len(labels.keys()-existing.keys()),
             "calls": len(calls), "new_calls": len(calls)-len(previous_calls), **cost,
             "wall_elapsed_ms": wall_ms,
-            "cumulative_wall_elapsed_ms": previous_manifest.get("cumulative_wall_elapsed_ms",
-                previous_manifest.get("wall_elapsed_ms", 0.0))+wall_ms,
+            "cumulative_wall_elapsed_ms": (previous_manifest["cumulative_wall_elapsed_ms"]
+                if previous_manifest else 0.0)+wall_ms,
             "output": str(output_path), "shards": manifests, "base_urls": base_urls,
             "status": "completed" if requested_ids <= labels.keys() else "incomplete"}
         (batch/"manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")

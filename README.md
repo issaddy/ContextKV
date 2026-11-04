@@ -34,12 +34,9 @@ CI 仅按需手动触发，提交代码和创建 PR 不自动运行测试。
 |---|---|
 | [课题索引](docs/study/README.md) | 当前机制与入口 |
 | [任务要求](docs/study/task_spec.md) | 研究边界 |
-| [历史审查基线](docs/study/review_20261104.md) | 历史快照的问题、纠正与阶段依据 |
 | [运行手册](docs/study/final_runbook.md) | 当前复现入口 |
 | [架构](docs/architecture.md) | 服务与状态链 |
 | [数据与评价](docs/data_and_evaluation.md) | 官方任务、完整分母和成本口径 |
-| [历史重评](docs/study/reference_20261103.json) | 已丢弃原始记录的历史数值摘要 |
-| [预算阅读记录](docs/study/budget_loop_20261103.json) | 实现状态、历史摘要与资产可用性 |
 | [部署](docs/deployment.md) | 原生引擎与 HTTP 接入 |
 
 `controller/` 为运行核心，`adapters/` 提供资料与检索适配，`engine_patches/` 对接原生缓存；

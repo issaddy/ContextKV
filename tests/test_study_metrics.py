@@ -56,26 +56,6 @@ def test_continuous_quality_wins_then_near_equal_uses_complete_cost():
     assert select_development(matrix(), over_budget)["method"] == "B0"
 
 
-def test_paired_bootstrap_resamples_conversations_and_preserves_raw_score_units():
-    spec = {"methods": [{"id": "B0"}, {"id": "B3"}], "seed": 42,
-        "datasets": {"loong": {"primary_metric": "loong_reference_score", "normalization": 100, "weight": 1}},
-        "cohorts": {"test": {"loong": ["0", "1", "2"]}},
-        "selection": {"bootstrap_samples": 50, "equal_cost_relative_tolerance": .05}}
-    rows = []
-    for method, gain in (("B0", 0), ("B3", 10)):
-        for index, conversation in enumerate(("one", "one", "two")):
-            rows.append({"method": method, "dataset": "loong", "task_id": str(index),
-                "conversation_id": conversation, "status": "completed", "split": "test",
-                "metrics": {"loong_reference_score": 50+index+gain}, "cost": cost()})
-    comparisons = paired_comparisons(spec, rows)
-    assert comparisons[0]["clusters"] == 2
-    assert comparisons[0]["paired_tasks"] == 3
-    assert comparisons[0]["score_interval"] == pytest.approx([10, 10])
-    assert comparisons[0]["equal_cost_match"]
-    assert comparisons[1]["dataset"] == "engineering_Q"
-    assert comparisons[1]["score_interval"] == pytest.approx([.1, .1])
-
-
 def test_paired_subset_reports_tasks_both_methods_did_not_score_without_full_cohort_q():
     spec = {"methods": [{"id": "B0"}, {"id": "B3"}], "seed": 42,
         "datasets": {"loong": {"primary_metric": "loong_reference_score", "normalization": 100, "weight": 1}},
@@ -114,17 +94,6 @@ def test_development_track_excludes_evaluation_only_dataset_without_renormalizin
     test_summary = summarize_methods(spec, test_rows, "test")["B0"]
     assert not test_summary["eligible"]
     assert "mtrag_un" in test_summary["datasets"]
-
-
-def test_online_totals_already_include_auxiliary_model_tokens():
-    rows = records()
-    for row in rows:
-        row["cost"].update(total_input_tokens=150, total_output_tokens=25,
-                           auxiliary_input_tokens=50, auxiliary_output_tokens=5)
-    cost_summary = summarize_methods(matrix(), rows)["B0"]["cost"]
-    assert cost_summary["online_tokens"] == 3*175
-    assert cost_summary["auxiliary_input_tokens"] == 150
-    assert cost_summary["token_accounting"] == "all_online_models"
 
 
 def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):

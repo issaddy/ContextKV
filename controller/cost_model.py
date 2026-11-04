@@ -105,7 +105,7 @@ class CostModel:
         self._bias_ms = 0.0
         self.sampling_scope_compatible = True
         self.sampling_scope_report = None
-        self._sampling_prior_override = None
+        self.output_prior_scope_compatible = True
         self._development_lengths = self.stage_model.get("development_output_lengths", {}).get("lengths", ())
         self._observed_output_lengths = deque(maxlen=128)
         self.calibration_metadata: dict = {}
@@ -349,7 +349,7 @@ class CostModel:
         output_budget = candidate.output_budget or self.max_new_tokens
         step_profile = self.step_output_priors.get(f"{candidate.generation_kind}:{output_budget}",
             self.step_output_priors.get(candidate.generation_kind))
-        step_prior_known = (candidate.generation_kind == "ANSWER" or step_profile is not None
+        step_prior_known = self.output_prior_scope_compatible and (candidate.generation_kind == "ANSWER" or step_profile is not None
             and self.calibration_metadata.get("generation_kind") == candidate.generation_kind)
         if step_profile is not None:
             mean, p90 = step_profile["mean_tokens"], step_profile["p90_tokens"]
@@ -382,7 +382,7 @@ class CostModel:
             if step < prior.p90_tokens:
                 risk_decode += tpot
             calibrated = calibrated and step_calibrated
-        components_supported = (calibrated and self.calibration_scope_compatible is not False
+        components_supported = (calibrated and self.calibration_scope_compatible is True
                                 and self.sampling_scope_compatible)
         calibrated = (components_supported and not quote.native_estimate_uncertain and not partial_restore
                       and step_prior_known and candidate.cost_prediction_eligible)
@@ -450,10 +450,9 @@ class CostModel:
 
     @property
     def effective_output_prior(self) -> tuple[int, int]:
-        return self._sampling_prior_override or (self.default_output_tokens, self.p90_output_tokens)
+        return self.default_output_tokens, self.p90_output_tokens
 
-    def configure_sampling(self, sampling, *, fallback_mean: int, fallback_p90: int,
-                           system_prompt: str | None = None) -> dict:
+    def configure_sampling(self, sampling, *, system_prompt: str | None = None) -> dict:
         """Bind request policy once, without changing measured execution points.
 
         Server wall intervals include sampler work. Cross-recipe timing reuse is
@@ -465,36 +464,31 @@ class CostModel:
         manifest = self.calibration_metadata.get("profile_manifest") or {}
         manifests = self.calibration_metadata.get("profile_manifests") or [manifest]
         timing_recipes = [bound_recipe(entry.get("sampling_recipe")) for entry in manifests]
-        # Preserve old standard-greedy loading without inventing source proof.
-        legacy_compatible = recipe == SamplingRecipe()
         self.sampling_scope_compatible = all(
-            value == recipe or value is None and legacy_compatible for value in timing_recipes)
+            value == recipe for value in timing_recipes)
         prior_recipe = bound_recipe(self.calibration_metadata.get("output_prior_sampling"))
-        prior_matches = recipe == prior_recipe or prior_recipe is None and legacy_compatible
+        prior_matches = recipe == prior_recipe
         prior_prompt = self.calibration_metadata.get("output_prior_system_prompt")
         prompt_matches = system_prompt is None or prior_prompt == system_prompt
-        self._sampling_prior_override = None if prior_matches and prompt_matches else (fallback_mean, fallback_p90)
+        self.output_prior_scope_compatible = prior_matches and prompt_matches
         lengths = self.stage_model.get("development_output_lengths", {})
-        length_recipe = bound_recipe(lengths.get("sampling_recipe", self.calibration_metadata.get("output_prior_sampling")))
-        lengths_match = recipe == length_recipe or length_recipe is None and legacy_compatible
-        length_prompt_matches = system_prompt is None or lengths.get("system_prompt", prior_prompt) == system_prompt
+        length_recipe = bound_recipe(lengths.get("sampling_recipe"))
+        lengths_match = recipe == length_recipe
+        length_prompt_matches = system_prompt is None or lengths.get("system_prompt") == system_prompt
         self._development_lengths = lengths.get("lengths", ()) if lengths_match and length_prompt_matches else ()
         self._observed_output_lengths.clear()
         self.sampling_scope_report = {
             "requested_sampling": request_sampling(sampling),
             "timing_recipes": [value.record() if value is not None else None for value in timing_recipes],
-            "timing_binding": "legacy_unbound" if any(value is None for value in timing_recipes) else "explicit",
+            "timing_binding": "unbound" if any(value is None for value in timing_recipes) else "explicit",
             "timing_compatible": self.sampling_scope_compatible,
             "timing_scope": "measured_server_wall_including_sampler; cross_recipe_unvalidated",
             "output_prior_recipe": prior_recipe.record() if prior_recipe is not None else None,
-            "output_prior_status": ("legacy_unbound_compatibility" if prior_recipe is None else "matching_recipe")
-                if prior_matches and prompt_matches else "configured_prior_fallback",
+            "output_prior_status": "matching_recipe" if self.output_prior_scope_compatible else "unavailable_binding_mismatch",
             "output_prior_prompt_status": ("not_checked" if system_prompt is None else
                 "matching_prompt" if prompt_matches else "unbound_or_different_prompt"),
-            "development_lengths_status": ("legacy_unbound_compatibility" if length_recipe is None else "matching_recipe")
-                if lengths_match and length_prompt_matches else
+            "development_lengths_status": "matching_recipe" if lengths_match and length_prompt_matches else
                 "disabled_recipe_mismatch" if not lengths_match else "disabled_prompt_mismatch",
-            "legacy_missing_binding": "unknown; compatibility exception only for standard greedy serving",
         }
         return self.sampling_scope_report
 
@@ -502,8 +496,8 @@ class CostModel:
         """Compare a bound engine configuration once at startup/restart.
 
         Matching this identity does not prove the same GPU, drivers or topology.
-        Legacy artifacts remain usable with an explicit unbound report. A known
-        mismatch keeps diagnostic predictions but disables calibrated selection.
+        Unbound or mismatching assets retain diagnostic predictions and cannot
+        supply calibrated selection costs.
         """
         actual = asdict(info) if is_dataclass(info) else dict(info)
         manifest = self.calibration_metadata.get("profile_manifest") or {}
@@ -513,7 +507,7 @@ class CostModel:
         compared = [key for key, value in expected.items() if value is not None]
         mismatches = [{"field": key, "expected": expected[key], "actual": actual.get(key)}
                       for key in compared if actual.get(key) != expected[key]]
-        status = "mismatch" if mismatches else ("matching_scope" if len(compared) == 2 else "legacy_unbound")
+        status = "mismatch" if mismatches else ("matching_scope" if len(compared) == 2 else "unbound")
         self.calibration_scope_compatible = False if mismatches else (True if status == "matching_scope" else None)
         self.calibration_scope_report = {"status": status,
             "matching_scope": "engine_configuration_only" if status == "matching_scope" else None,

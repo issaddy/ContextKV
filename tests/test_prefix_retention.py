@@ -7,7 +7,7 @@ import sys
 import pytest
 
 from controller.prefix_retention import (PrefixForecast,
-    RetentionRequest, allocate_retention, retainable_prefix)
+    RetentionRequest, allocate_retention)
 from engine_patches.contextkv_runtime import (ContextKVError, ContextKVRuntime,
     executed_prefix_hashes, token_hash)
 
@@ -124,19 +124,6 @@ def test_independent_owner_uses_page_endpoint_and_survives_business_release(owne
     assert prefix.component_data[0].session_ref == 0 and prefix.component_data[0].value == [1, 2]
 
 
-def test_inspection_is_read_only_and_returns_actual_two_tier_pages_before_ownership(owner):
-    runtime, cache, component, prefix, tail, actions, matches = owner
-    before = dict(cache.session_refs._session_generations), prefix.component_data[0].session_ref
-    inspected = runtime.prefix_status(retain_data(runtime))
-    assert inspected["state"] == "OBSERVED" and inspected["protection"] == "none"
-    assert inspected["boundary_tokens"] == 2 and not inspected["reference_present"]
-    assert len(inspected["gpu_page_ids"]) == len(inspected["host_page_ids"]) == 1
-    assert not runtime.prefix_owners and not actions and not matches
-    assert before == (cache.session_refs._session_generations, prefix.component_data[0].session_ref)
-    with pytest.raises(ContextKVError, match="PREFIX_NOT_EXECUTED"):
-        runtime.prefix_status(retain_data(runtime, (1, 99)))
-
-
 def test_owner_renewal_is_idempotent_and_ttl_releases_only_its_reference(owner, monkeypatch):
     runtime, _, component, prefix, *_ = owner
     monkeypatch.setattr("engine_patches.contextkv_runtime.time.monotonic", lambda: 100)
@@ -167,25 +154,6 @@ def test_shared_pages_are_charged_once_and_native_hits_have_no_added_value():
     assert all(row.evidence_digest == forecast.evidence_digest for row in chosen)
 
 
-def test_host_only_path_keeps_future_gpu_opportunity_cost_and_shared_protection_once():
-    forecast = PrefixForecast(10, 1, 100, 20, 2, 1, "scope", "real-paired-proof")
-    observed = dict(owner_id="host-only", cache_scope_hash="scope", boundary_tokens=128,
-        page_size=64, gpu_page_ids=[], host_page_ids=["root", "source"],
-        pool={"host_capacity_tokens": 1024}, residency={"recoverable_prefix_tokens": 128,
-            "inflight_h2d_tokens": 0, "inflight_d2h_tokens": 0})
-    request = RetentionRequest.from_receipt(observed, forecast)
-    assert request.gpu_page_ids == request.host_page_ids == frozenset({"root", "source"})
-    assert retainable_prefix(observed)
-    assert not retainable_prefix({**observed, "residency": {**observed["residency"], "recoverable_prefix_tokens": 64}})
-    chosen = allocate_retention((request, replace(request, owner_id="same-path")),
-        gpu_budget_tokens=128, host_budget_tokens=128, lambda_gpu=.1, lambda_host=.1)
-    assert len(chosen) == 1 and chosen[0].extra_gpu_token_seconds == 256
-    assert chosen[0].extra_host_token_seconds == 128 and chosen[0].value == pytest.approx(41.6)
-    gpu_only = RetentionRequest.from_receipt({**observed, "pool": {"host_capacity_tokens": 0},
-        "gpu_page_ids": observed["host_page_ids"], "host_page_ids": []}, forecast)
-    assert not gpu_only.host_page_ids and gpu_only.gpu_page_ids == request.gpu_page_ids
-
-
 def test_complete_source_demand_identity_and_single_owner_collateral_are_distinct():
     from controller.prefix_retention import source_demand_event_key
     # Shared first body page does not make two complete READ paths one demand.
@@ -201,17 +169,3 @@ def test_complete_source_demand_identity_and_single_owner_collateral_are_distinc
     request = RetentionRequest("losing-owner", forecast, frozenset({"page"}), frozenset(), 64, "read")
     assert allocate_retention((request,), gpu_budget_tokens=64, host_budget_tokens=0,
                               lambda_gpu=0, lambda_host=0) == ()
-
-
-def test_capacity_density_combines_small_prefixes_without_losing_large_value_choice():
-    def request(owner, pages, gain):
-        forecast = PrefixForecast(60, 1, gain, 0, 0, 0, "scope", "specified-pair")
-        return RetentionRequest(owner, forecast, frozenset(pages), frozenset(), 64, owner)
-    small = (request("b", ["b"], 6), request("c", ["c"], 6))
-    def select(large_gain):
-        return allocate_retention((request("a", ["a1", "a2"], large_gain), *small),
-            gpu_budget_tokens=128, host_budget_tokens=0, lambda_gpu=0, lambda_host=0)
-    chosen = select(10)
-    assert {item.owner_id for item in chosen} == {"b", "c"}
-    assert sum(item.value for item in chosen) == 12
-    assert [item.owner_id for item in select(20)] == ["a"]

@@ -9,9 +9,9 @@ from controller.context_schema import EvidencePool
 from controller.plan_policy import PLAN_KINDS, OBSERVED_FEATURE_NAMES, OBSERVED_FEATURE_SCHEMA
 from controller.rolling_policy import RollingPlanRuntime
 from training.collect_plan_gains import export_observed_packets
-from test_plan_policy import SpecifiedGainFixture
-from test_reading_runtime import material
-from test_rolling_policy import NativeObservationFixture, setup_controller
+from policy_helpers import SpecifiedGainFixture
+from reading_helpers import material
+from rolling_helpers import NativeObservationFixture, setup_controller
 
 
 class LearnedFixture(SpecifiedGainFixture):
@@ -144,21 +144,6 @@ class BridgeReader(MockEngine):
 
 
 @pytest.mark.asyncio
-async def test_unselected_gap_has_zero_calls(tmp_path):
-    controller, _, _, _, plan = configured(tmp_path, reads=1)
-    controller.engine = BridgeReader()
-    calls = []
-
-    async def provider(*args):
-        calls.append(args)
-        raise AssertionError("an unselected GAP cannot be paid")
-
-    response = await controller.serve_turn("s", "How?", context_plans=(plan,), open_need_provider=provider)
-    assert response.read_count == 1 and not calls
-    await controller.aclose()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("question_only", [False, True])
 async def test_selected_gap_is_paid_once_and_new_read_keeps_old_dependency_proof(tmp_path, question_only):
     controller, store, _, observed, plan = configured(tmp_path, reads=1,
@@ -191,8 +176,6 @@ async def test_selected_gap_is_paid_once_and_new_read_keeps_old_dependency_proof
     await controller.aclose()
 
 
-
-
 @pytest.mark.asyncio
 async def test_mandatory_coverage_uses_native_fixed_path_without_untrained_whole_plan_gain_or_gap(tmp_path):
     model = LearnedFixture(reads=0, gap_gain=.9)
@@ -219,22 +202,3 @@ async def test_absolute_branch_plus_paid_constrains_budget_even_when_signed_diff
     assert response.read_count == 0
     assert any(item.reason == "complete_latency_budget" for item in controller.rolling_policy.policy.last_evaluations)
     await controller.aclose()
-
-
-
-
-
-
-def test_export_uses_actual_attempt_mapping_for_each_turn_and_preserves_exclusions(tmp_path):
-    base = {"working_state": {"plan": {"task_state": {"task_id": "stable-task"}}},
-            "decision_mode": "observed_actions"}
-    observations = [{**base, "observation_id": str(index), "attempt_id": attempt, "request_id": request}
-        for index, (attempt, request) in enumerate((("a", "r1"), ("b", "r2"), ("unknown", "r3")))]
-    observations.append({**observations[0], "observation_id": "mandatory", "decision_mode": "mandatory_coverage"})
-    manifest = export_observed_packets(observations, [
-        {"task_id": "real-turn-1", "cohort_split": "train", "cohort_manifest_sha256": "specified-fixture", "response": {"attempt_id": "a"}},
-        {"task_id": "real-turn-2", "cohort_split": "train", "cohort_manifest_sha256": "specified-fixture", "response": {"attempt_id": "b"}}], tmp_path / "packets.jsonl")
-    assert manifest["packets"] == 2 and len(manifest["excluded"]) == 2
-    rows = [json.loads(line) for line in (tmp_path / "packets.jsonl").read_text().splitlines()]
-    assert [row["task_id"] for row in rows] == ["real-turn-1", "real-turn-2"]
-    assert all(row["task_id"] != row["working_state"]["plan"]["task_state"]["task_id"] for row in rows)

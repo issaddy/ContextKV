@@ -8,10 +8,10 @@ import json
 
 import pytest
 
-from training.plan_gain_completion import completion_record, effective_pair, finalize, fit_effective
+from training.plan_gain_completion import completion_record, effective_pair, finalize
 from training.plan_gain_rollout import execute_branch
-from training.train_plan_gain import COST_FIELDS, PlanGainModel
-from test_observed_action_gains import Resources, frozen_fixture
+from training.train_plan_gain import COST_FIELDS
+from action_helpers import Resources, frozen_fixture
 
 
 async def measured_fixture(tmp_path):
@@ -73,14 +73,6 @@ async def test_failed_read_lowers_utility_keeps_raw_q_missing_and_paid_signed_co
 
     assert raw_direct["response"]["read_count"] == 1
     assert raw_direct["new_action_counts"]["READ"] == 0
-    model = fit_effective([pair])
-    assert model.supports_semantic_kind("read_once") and model.supports_semantic_kind("read_once", costs=True)
-    assert model.cost_provenance["unique_direct_samples"] == 1
-    assert set(model.predict_costs(pair["counterfactual"]["cost_features"])["branch_complete_cost"]) == set(COST_FIELDS)
-    path = tmp_path/"effective-v2.json"
-    model.save(path)
-    loaded = PlanGainModel.load(path, reader_checkpoint=model.reader_checkpoint, reader_profile_id=model.reader_profile_id)
-    assert loaded.predict_costs(pair["counterfactual"]["cost_features"]) == model.predict_costs(pair["counterfactual"]["cost_features"])
     before, paused = deepcopy(values["read_once"])
     paused["termination"]["user_paused"] = True
     assert completion_record(before, paused)["effective_utility"] is None

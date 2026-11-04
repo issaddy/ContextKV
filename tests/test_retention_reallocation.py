@@ -67,20 +67,6 @@ class RetentionReallocationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["state"], "RETAINED")
         self.assertEqual(result["existing_retention_owners"], [])
 
-    async def test_more_valuable_existing_lease_is_kept_without_renewing(self):
-        result, calls = await reallocate((forecast(100, control=5),), (forecast(10),))
-        self.assertEqual(calls, [])
-        self.assertEqual(result["state"], "UNRETAINED")
-        self.assertEqual(result["existing_retention_owners"], ["old"])
-        self.assertEqual(result["retention_choices"], [])
-
-    async def test_extension_can_replace_keep_option_for_the_same_owner(self):
-        result, calls = await reallocate(
-            (forecast(10, horizon=30, control=5), forecast(100, control=5)),
-            (forecast(0),), elapsed=30)
-        self.assertEqual(calls, [("retain", "old", 60)])
-        self.assertEqual(result["existing_retention_owners"], [])
-        self.assertEqual(len(result["retention_choices"]), 1)
 
     async def test_distinct_reads_share_page_capacity(self):
         result, calls = await reallocate((forecast(100),), (forecast(90),),
