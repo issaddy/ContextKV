@@ -29,7 +29,7 @@ from controller.engine_client import EngineError, SGLangEngineClient
 from controller.prefix_retention import (EmpiricalRetentionModel, PrefixReadObserver, PrefixRuntimeClient,
     RETENTION_FEATURE_NAMES, source_token_ranges, source_demand_event_key)
 from controller.reading import (build_read_plan, parse_read_result, stable_prefix_input_ids,
-                                stable_prefix_messages, stable_source_payload)
+                                stable_prefix_messages, stable_source_payload, step_messages)
 from controller.reduction import reduce_claims
 from controller.sampling import SamplingRecipe, request_sampling
 from controller.schema import ConfigFingerprint, PromptCandidate, SessionSnapshot, TurnRecord
@@ -1262,6 +1262,48 @@ def unexported_requests(records_path, failures_path, selected, segments):
             yield outcome(row, row["attempt_id"], failures_path, "failed_request_not_exported")
 
 
+def audit_trace_inputs(trace, template, *, trace_path, config_path):
+    phases = {kind: {"total": 0, "matched": 0, "mismatches": []} for kind in ("READ", "REDUCE")}
+    for turn in trace["turns"]:
+        plan = decode(ContextPlan, turn["context_plan"])
+        units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+        snapshot = SessionSnapshot(turn["session_id"], raw_history=decode(tuple[TurnRecord, ...], turn["actual_history"]))
+        for event in turn["events"]:
+            if event["kind"] not in phases:
+                continue
+            task = decode(ReadTask, event["read_task"])
+            claims = decode(tuple[EvidenceClaim, ...], event["input_claims"])
+            messages = step_messages(plan, task, tuple(units[key] for key in task.input_unit_ids), claims, snapshot)
+            current_hash = template.render(messages).input_hash
+            phase = phases[event["kind"]]
+            phase["total"] += 1
+            if current_hash == event["input_hash"]:
+                phase["matched"] += 1
+            else:
+                phase["mismatches"].append({"event_id": event_id(turn, event),
+                    "recorded_input_hash": event["input_hash"], "current_input_hash": current_hash})
+    provenance = {}
+    for name, path in (("source_trace", trace_path), ("config", config_path),
+                       ("reading_compiler", Path(__file__).resolve().parents[1]/"controller"/"reading.py")):
+        with Path(path).open("rb") as stream:
+            provenance[name] = {"path": str(Path(path).resolve()),
+                "sha256": hashlib.file_digest(stream, "sha256").hexdigest()}
+    return {"scope": "recorded READ and model REDUCE inputs recompiled with current messages and tokenizer",
+        "split": sorted({turn["split"] for turn in trace["turns"]}), **provenance,
+        "fingerprint": asdict(template.fingerprint), "phases": phases,
+        "current_read_inputs_match": not phases["READ"]["mismatches"] if phases["READ"]["total"] else None,
+        "current_reduce_inputs_match": not phases["REDUCE"]["mismatches"] if phases["REDUCE"]["total"] else None,
+        "excluded_scope": "scheduler, CPU reductions and ANSWER protocol", "model_calls": 0}
+
+
+def audit_inputs(args):
+    config = load_config(args.config)
+    result = audit_trace_inputs(json.loads(Path(args.trace).read_text()), create_model_template(config.model),
+        trace_path=args.trace, config_path=args.config)
+    write_json(args.output, result)
+    return result
+
+
 def export(args):
     config = load_config(args.config)
     template = create_model_template(config.model)
@@ -1339,6 +1381,9 @@ def main():
     sub.add_argument("--output", required=True)
     sub = commands.add_parser("reassess")
     sub.add_argument("--replay-root", required=True)
+    sub = commands.add_parser("audit-inputs")
+    for name in ("trace", "config", "output"):
+        sub.add_argument("--"+name, required=True)
     args = parser.parse_args()
     if args.command == "export":
         export(args)
@@ -1350,6 +1395,8 @@ def main():
         asyncio.run(replay(args))
     elif args.command == "reassess":
         reassess(args)
+    elif args.command == "audit-inputs":
+        audit_inputs(args)
     else:
         fit(args)
 

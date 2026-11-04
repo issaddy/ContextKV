@@ -2,15 +2,14 @@
 import argparse
 import asyncio
 from datetime import datetime
-import hashlib
 import json
 from pathlib import Path
 import sys
 
 from controller.prefix_retention import EmpiricalRetentionModel
-from controller.reading import READ_SYSTEM
+from controller.config import create_model_template, load_config
 from profiling.retention_coverage import audit_coverage
-from profiling.retention_trace import choose_windows, trace_generations, verify_trace, window_trace, write_json
+from profiling.retention_trace import audit_trace_inputs, choose_windows, trace_generations, verify_trace, window_trace, write_json
 
 
 async def run(args):
@@ -48,6 +47,7 @@ async def run(args):
               trace_paths.items()}
     reports = {}
     protocol_scopes = {}
+    template = create_model_template(load_config(args.config).model)
     for split, trace in traces.items():
         verify_trace(trace)
         if not trace["training_eligible"] or any(turn["split"] != split for turn in trace["turns"]):
@@ -56,12 +56,8 @@ async def run(args):
             max_candidates=2, max_prefixes_per_decision=args.max_prefixes_per_decision,
             history_steps=args.history_steps, max_replay_steps=args.max_replay_steps, seed=args.seed)
         write_json(output/(split+"-coverage.json"), reports[split])
-        prompts = {event.get("system_prompt") for turn in trace["turns"]
-                   for event in turn["events"] if event["kind"] == "READ"}
-        protocol_scopes[split] = dict(
-            read_system_prompt_sha256=sorted(hashlib.sha256(prompt.encode()).hexdigest()
-                for prompt in prompts if prompt is not None),
-            matches_current_read_prompt=prompts == {READ_SYSTEM})
+        protocol_scopes[split] = audit_trace_inputs(trace, template,
+            trace_path=trace_paths[split], config_path=args.config)
     horizon = args.horizon_seconds
     if horizon < max(180, *args.ttl_seconds):
         raise ValueError("common observation window must cover 180 seconds and all TTL arms")
@@ -76,8 +72,7 @@ async def run(args):
         observation_seconds=horizon, ttl_seconds=list(args.ttl_seconds), seed=args.seed,
         train_trace=str(Path(trace_paths["train"]).resolve()), dev_trace=str(Path(trace_paths["dev"]).resolve()),
         capture_stages=capture_stages, protocol_scopes=protocol_scopes,
-        current_prompt_joint_qualification=all(scope["matches_current_read_prompt"]
-                                               for scope in protocol_scopes.values()), stages=[])
+        stages=[])
     if any(len(values) != 2 for values in selected.values()) or sum(calls.values()) > args.max_total_generations:
         plan.update(status="no_common_observable_budgeted_window", planned_calls=calls, value_asset=None)
         write_json(output/"paired-workflow.json", plan)
@@ -126,7 +121,6 @@ async def run(args):
     if asset.exists():
         model_data = json.loads(asset.read_text())
         model_data["measurement_protocol_scope"] = protocol_scopes
-        model_data["current_prompt_joint_qualification"] = plan["current_prompt_joint_qualification"]
         write_json(asset, model_data)
     dev_rows = output/"dev"/"paired-rows.jsonl"
     if asset.exists() and dev_rows.exists():

@@ -229,7 +229,8 @@ def artifact_summary(value):
         return dict(type=type(value).__name__, items=len(value) if isinstance(value, list) else None)
     keys = ("format", "schema_version", "kind", "status", "scope", "source", "identity", "model_identity",
         "reader_checkpoint", "reader_profile_id", "reader_binding", "calibration_status", "calibration_split",
-        "feature_schema", "training_manifest", "measurement_protocol_scope", "current_prompt_joint_qualification",
+        "feature_schema", "training_manifest", "measurement_protocol_scope", "protocol_scopes",
+        "current_read_inputs_match", "current_reduce_inputs_match", "phases",
         "coverage", "source_partition", "sample_counts", "actual_train_samples", "optimizer_steps", "training_wall_ms",
         "total_model_input_tokens", "total_supervised_tokens", "available_kinds", "missing_kinds", "validation",
         "resource_scope", "resident_model_manifest_digest", "selected_protocols", "answer_start_definition",
