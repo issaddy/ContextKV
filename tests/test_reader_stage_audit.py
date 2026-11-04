@@ -74,3 +74,25 @@ async def test_fixed_old_targets_only_get_independent_review_with_complete_origi
     assert result["review_protocol"] == "visible_target_independent_review_v6"
     assert ledger[0]["stage"] == "review"
     assert "666 kg" in reader_review_body(item)["original_sources"][0]["text"]
+
+
+def test_candidate_diagnosis_keeps_ties_histories_and_declared_denominator():
+    from training.train_evidence_policy import candidate_quality_diagnostics
+    common = dict(task_id="observed", actual_history=[], body_budget=100, output_budget=20,
+        reader_checkpoint="fixed", reader_profile_id="protocol", scorer_identity={"version": 1},
+        query_encoder={"id": "fixed"}, evidence_set={"quality_prediction": .8})
+    rewards = [{**common, "input_hash": "good", "quality_components": {"q": 1}},
+               {**common, "input_hash": "bad", "quality_components": {"q": .2}}]
+    report = candidate_quality_diagnostics(rewards, weights={"q": 1},
+                                           declared_task_ids=["observed", "missing"])
+    assert report["declared_tasks"] == 2 and report["observed_tasks"] == 1
+    assert report["missing_task_ids"] == ["missing"]
+    assert report["available_group_oracle_mean"] == 1
+    assert report["available_group_prediction_regret_interval"] == [0, .8]
+    assert candidate_quality_diagnostics(list(reversed(rewards)), weights={"q": 1},
+        declared_task_ids=["observed", "missing"]) == report
+    changed_history = {**rewards[1], "actual_history": [{"assistant": "a different actual answer"}]}
+    split = candidate_quality_diagnostics([rewards[0], changed_history], weights={"q": 1},
+                                          declared_task_ids=["observed"])
+    assert split["comparison_groups"] == 2
+    assert split["available_group_oracle_mean"] == .6

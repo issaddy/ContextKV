@@ -342,6 +342,43 @@ def attach_collection_costs(directory, binding):
     return rewards
 
 
+def candidate_quality_diagnostics(rewards, *, weights, declared_task_ids):
+    """Describe saved candidate limits; score ties do not identify a deployed choice."""
+    groups = {}
+    declared = set(declared_task_ids)
+    for row in rewards:
+        if row["task_id"] not in declared:
+            raise ValueError("candidate diagnostic task is outside the declared cohort")
+        key = (row["task_id"], digest(row["actual_history"]), row["body_budget"], row["output_budget"],
+               digest({name: row[name] for name in (
+                   "reader_checkpoint", "reader_profile_id", "scorer_identity", "query_encoder")}))
+        groups.setdefault(key, []).append(row)
+    details = []
+    for key, candidates in groups.items():
+        scored = [(row, sum(weights[name]*row["quality_components"][name] for name in weights))
+                  for row in candidates]
+        oracle = max(quality for _, quality in scored)
+        prediction = max(row["evidence_set"]["quality_prediction"] for row, _ in scored)
+        tied = [(row, quality) for row, quality in scored
+                if row["evidence_set"]["quality_prediction"] == prediction]
+        details.append(dict(task_id=key[0], actual_history_sha256=key[1], body_budget=key[2],
+            output_budget=key[3], reader_scorer_query_sha256=key[4], scored_candidates=len(scored),
+            distinct_inputs=len({row["input_hash"] for row, _ in scored}), oracle_quality=oracle,
+            top_prediction=prediction, top_prediction_ties=len(tied),
+            top_prediction_input_hashes=sorted({row["input_hash"] for row, _ in tied}),
+            prediction_regret_interval=[oracle-max(quality for _, quality in tied),
+                                        oracle-min(quality for _, quality in tied)]))
+    observed = {row["task_id"] for row in details}
+    return dict(scope="saved scored candidates grouped by actual state and protocol; not deployed P0/P1 regret or full-queue quality",
+        declared_tasks=len(declared), observed_tasks=len(observed), missing_task_ids=sorted(declared-observed),
+        comparison_groups=len(details), groups=details,
+        available_group_oracle_mean=(sum(row["oracle_quality"] for row in details)/len(details)
+                                     if details else None),
+        available_group_prediction_regret_interval=(
+            [sum(row["prediction_regret_interval"][bound] for row in details)/len(details) for bound in (0, 1)]
+            if details else None))
+
+
 def prepare_preferences(config):
     settings, binding = config["evidence_policy_training"], reader_binding(config)
     directory = cohort_directory(config)
@@ -388,6 +425,8 @@ def prepare_preferences(config):
         "scored_answers_without_measured_cost": len(rewards)-len(measured),
         "answers": len(rewards), "pairs": len(pairs), "paired_states": len({row["task_id"] for row in pairs}),
         "reward_weights": settings["reward_weights"],
+        "candidate_quality_diagnostics": candidate_quality_diagnostics(rewards,
+            weights=settings["reward_weights"], declared_task_ids=members),
         "cost_scope": "observed candidate request cost; shared preparation and offline scorer costs stay in collection ledgers",
         "source_rewards_sha256": file_digest(directory/P1_REWARDS),
         "preferences_sha256": file_digest(directory/"preferences.jsonl")}

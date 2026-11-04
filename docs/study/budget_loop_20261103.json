@@ -879,7 +879,7 @@
     "remaining_scoring_check": "case006 final42/903 matches gold but old extraction consistent=false; unchanged raw score retained until independent reassessment"
   },
   "implementation_20261104": {
-    "status": "local implementation and final CPU audit complete; GPU environment remains paused until user notification",
+    "status": "core local implementation audited; continuing CPU-only diagnostics and delivery preparation; model training/inference and GPU measurements held",
     "B_protocol": "infer_bridge_ready_or_one_gap_one_terminal_read_v2",
     "C_asset_kind": "paired_native_retention_v5",
     "C_selection": "deduplicated target savings minus control, incremental residency and paired external-request penalty; full protected-set net must be measured",
@@ -906,6 +906,13 @@
       "E0_native preserves PR3 source rows and is part of the default c4 E0-E4 matrix",
       "final comparisons include arrival hashes and declared SLO; baseline commit and cost GPU devices are explicit"
     ],
-    "C_target_demand_rule": "exact_complete_causal_prefix_and_body_ranges_v1"
+    "C_target_demand_rule": "exact_complete_causal_prefix_and_body_ranges_v1",
+    "offline_candidate_diagnostics": {
+      "entry": "training.train_evidence_policy prepare",
+      "output": "preference_manifest.json.candidate_quality_diagnostics",
+      "scope": "existing saved numeric rewards only, grouped by actual history/budget/reader/scorer/query; no model calls",
+      "tie_rule": "report best/worst regret over equal highest predictions, independent of input order",
+      "validation": "4 reader-stage/diagnostic CPU checks passed; actual new dataset statistics not produced because candidate assets are not local"
+    }
   }
 }
