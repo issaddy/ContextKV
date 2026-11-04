@@ -596,14 +596,21 @@
     "cache_regime_evidence": {
       "artifact": "runs/study/budget-loop-20261103/retention-native-pairs/replay-coverage.json",
       "scope": "Pure offline summaries of completed arms: intervention-target demand versus whole-window repeated source-body pages; no new model calls",
-      "target_examples": "train pair0000 no revisit; train pair0001 native has two Host-load visits, TTL60 has two GPU-hit visits",
+      "target_examples": "train pair0000 contains no complete source-body pages and is cost-only, not a no-revisit training label; pair0001 native has two Host-load visits, TTL60 has two GPU-hit visits",
       "workload_example": {
         "window": "train/pair-0000/native",
         "gpu_hit_events": 5,
         "host_load_events": 5,
         "recomputed_events": 45
       },
-      "completion": "partial paired workflow; final results pending"
+      "completion": "C train replay complete; three evidence-bearing TTL pairs recovered by offline allocated-residency accounting; current dev replay still finishing",
+      "residency_correction": {
+        "artifact": "runs/study/budget-loop-20261103/retention-native-pairs/train/manifest.json",
+        "paid_pairs": 6,
+        "eligible_pairs": 3,
+        "model_calls_for_correction": 0,
+        "basis": "ready GPU + H2D allocated destination; ready Host + D2H allocated destination; original reports and sampling windows retained"
+      }
     }
   },
   "failure_artifact_cleanup": {

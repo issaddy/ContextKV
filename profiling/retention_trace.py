@@ -1178,7 +1178,7 @@ async def replay(args):
 def reassess(args):
     """Recompute paired labels from saved native reports without model calls."""
     root = Path(args.replay_root)
-    by_split = defaultdict(list)
+    by_split, by_pair = defaultdict(list), defaultdict(dict)
     for path in sorted(root.rglob("paired-row-*.json")):
         previous = json.loads(path.read_text())
         trace = json.loads((path.parent/"trace.json").read_text())
@@ -1193,6 +1193,10 @@ def reassess(args):
             "reuse_outcomes": {arm: revisit_outcomes(trace, report, selection) for arm, report in reports.items()}}
         write_json(path, row)
         by_split[path.parent.parent].append(row)
+        by_pair[path.parent]["native"] = row["reuse_outcomes"]["native"]
+        by_pair[path.parent][row["retention_arm"]] = row["reuse_outcomes"]["retained"]
+    for directory, outcomes in by_pair.items():
+        write_json(directory/"revisit-outcomes.json", outcomes)
     summary = []
     for directory, rows in by_split.items():
         (directory/"paired-rows.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in rows))
