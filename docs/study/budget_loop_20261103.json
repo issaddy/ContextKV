@@ -952,6 +952,26 @@
       ],
       "validation": "7 selected feature/binding checks and21 scripted observed-action checks passed; fitting tests not executed",
       "benefit_scope": "structural distinguishability only; learned quality/cost improvement requires new observations"
+    },
+    "latest_local_integration": {
+      "date": "2026-11-04",
+      "source_commit": "a5d57e6",
+      "scope": "retained A/B/C semantics, scripted runtime, queue metrics and cost accounting; no model training/inference or GPU",
+      "pytest": {
+        "passed": 114,
+        "subtests_passed": 6,
+        "seconds": 3.65
+      },
+      "demo": "runs/demo/demo-eb730812d0604836bcad7f459933419f.json",
+      "demo_manifest": "runs/demo/manifest-eb730812d0604836bcad7f459933419f.json",
+      "demo_scope": "four mock turns; actual history commit and protocol only",
+      "asset_availability": {
+        "formal_dev_queue": "runs/study/formal-dev-queue.matrix.json",
+        "declared_cohorts": "runs/study/cohorts.json",
+        "auxiliary_200_40_manifest": "not present locally; old path is not an available asset",
+        "current_B_C_models": "not collected/fitted under current protocols"
+      },
+      "pending_measurement": "fresh fixed-reader observations, conditional auxiliary fitting, independent C pairs, c4 E0-E4, c1 E1/E4 and selected public comparison"
     }
   },
   "raw_artifact_availability": {

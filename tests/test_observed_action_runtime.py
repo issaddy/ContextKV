@@ -10,7 +10,7 @@ from controller.plan_policy import PLAN_KINDS, OBSERVED_FEATURE_NAMES, OBSERVED_
 from controller.rolling_policy import RollingPlanRuntime
 from training.collect_plan_gains import export_observed_packets
 from test_plan_policy import SpecifiedGainFixture
-from test_reading_runtime import fact, material
+from test_reading_runtime import material
 from test_rolling_policy import NativeObservationFixture, setup_controller
 
 
