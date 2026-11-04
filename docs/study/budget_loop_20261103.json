@@ -1,8 +1,8 @@
 {
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
-  "gpu_status": "Implementation-first hold: automatic follow-on coordinators stopped; already-running B, C and P1 dataset capture retained to finish",
-  "evidence_scope": "Full350 pre-freeze P0 candidate Q=0.6575398416096789 versus registered Q=0.44509019347880296 under unchanged request limits. A is frozen; B counterfactual fit, C pairs and frozen joint evaluation remain open.",
+  "gpu_status": "Previously running B/C and P1 dataset batches finished; all task model services stopped; shared observer completed; subsequent experiments held by user direction",
+  "evidence_scope": "Full350 pre-freeze P0 candidate Q=0.6575398416096789 versus registered Q=0.44509019347880296 under unchanged request limits. A frozen; current B and C assets completed. Final frozen-A joint quality/P95 acceptance not run.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
     "layout": "source_first",
@@ -112,12 +112,10 @@
     "aggregation": "Native/API/auxiliary token indexes and physical integrals are separate; do not sum overlapping ledgers."
   },
   "pending": [
-    "Validate corrected set-only P1 and freeze A only after acceptance",
-    "Run matched full-development protocol/planner cells",
-    "Run planner x protocol fixed-history cells and own-history P3",
-    "Fit B from paired actual actions and complete native/value joint experiment",
-    "Native/TTL15/TTL60/TTL180 paired windows, concurrency 1 and 4",
-    "Full-queue quality/P95 acceptance"
+    "Complete the corrected planner/protocol fixed-history and own-P3 comparisons, including scoring the saved P1 MD answers",
+    "Collect initial DIRECT-versus-first-READ supervision if the corrected initial-state path is to be trained; current B asset uses post-READ states",
+    "Resolve C development calibration coverage (0 of 6 current comparisons calibrated)",
+    "Run frozen-A fixed/gain-B x native/value on the full queue at concurrency 1 and 4 and assess final quality/P95"
   ],
   "controlled_condition": {
     "reader": "frozen Qwen3-32B BF16",
@@ -399,7 +397,7 @@
   },
   "B_observation_entry": {
     "implementation": "capture actual fixed-plan decision states without loading a gain model",
-    "status": "Selected-P0 capture complete: train 173 completed + 5 failed, dev 33 completed + 3 failed. Formal B pairing running on 712 genuine observations; current job only, later automatic stages held.",
+    "status": "Current post-READ paired train/dev collection and fit completed; no follow-on collection started",
     "cohort": "original full200/40 manifest; unique source states counted before observation/action selection",
     "cost_model": {
       "schema": "pre_action_native_absolute_v1",
@@ -485,8 +483,41 @@
       "planned_source_tasks": 148,
       "planned_decision_states": 210,
       "initial_observations_excluded_by_loaded_collector": 178,
-      "protocol": "already-running collection uses post-READ decision snapshots; no recollection started",
+      "protocol": "Completed collection used post-READ snapshots; corrected initial-state support was not recollected",
       "code_correction": "future collection accepts actual post-retrieval initial states when DIRECT/action are legal; source task and decision-state counts reported separately"
+    },
+    "completed_collection": {
+      "artifact": "runs/study/budget-loop-20261103/b-selected-a-paired/workflow.json",
+      "asset": "runs/study/budget-loop-20261103/b-selected-a-paired/plan-gain.json",
+      "asset_sha256": "cd624bedf017e7fc27b885f84832a59599d45c6fac252f0fbaf4e627952802b6",
+      "declared_sources": {
+        "train": 200,
+        "dev": 40
+      },
+      "actual_sources": {
+        "train": 148,
+        "dev": 32
+      },
+      "decision_states": {
+        "train": 210,
+        "dev": 48
+      },
+      "answer_branches": {
+        "train": 516,
+        "dev": 113
+      },
+      "failed_branches": {
+        "train": 2,
+        "dev": 1
+      },
+      "effective_gain_pairs": {
+        "train": 306,
+        "dev": 65
+      },
+      "actual_model_generations": 1519,
+      "development_effective_delta_Q_MAE": 0.0759071914758785,
+      "elapsed_ms": 6495429.018892348,
+      "quality_claim": "paired prediction error only; no complete-queue policy improvement measured"
     }
   },
   "P1_scoring": {
@@ -586,7 +617,7 @@
     "P1": "runs/study/budget-loop-20261103/p1-rewards/after-collection-stages.json",
     "full_protocol_queue": "runs/study/budget-loop-20261103/formal-dev-c4-grounded/launch.json",
     "B_train_capture": "runs/study/budget-loop-20261103/selected-a-followthrough/launch.json",
-    "status": "Implementation first per user direction. Joint dispatcher and follow-on A/P3 coordinators stopped; current B paired workflow, C paired workflow and active P1 dataset capture may finish. No automatic new joint jobs or extra validation.",
+    "status": "All batches already running at the user instruction have finished. No subsequent P1, B recollection or joint experiments started. Task model services and shared observer stopped.",
     "selection_rule": "full declared40 quality; Qwen3-32B weights fixed",
     "frozen_A": {
       "selection": "runs/study/budget-loop-20261103/selected-a-followthrough/selection.json",
@@ -612,22 +643,67 @@
         "host_load_events": 5,
         "recomputed_events": 45
       },
-      "completion": "C train replay complete; three evidence-bearing TTL pairs recovered by offline allocated-residency accounting; current dev replay still finishing",
+      "completion": "All four windows and sixteen arms completed; 12 paired TTL contrasts; train3/6 and dev6/6 qualified by source-body and complete allocated-residency measurements",
       "residency_correction": {
         "artifact": "runs/study/budget-loop-20261103/retention-native-pairs/train/manifest.json",
         "paid_pairs": 6,
         "eligible_pairs": 3,
         "model_calls_for_correction": 0,
         "basis": "ready GPU + H2D allocated destination; ready Host + D2H allocated destination; original reports and sampling windows retained"
+      },
+      "value_asset": "runs/study/budget-loop-20261103/retention-native-pairs/value-model.json",
+      "value_asset_sha256": "98312f381efabc7ecd82dbb5380ab391e0414d5a9bc843991457e2ba3d1a8de7",
+      "trained_profiles": 3,
+      "dev_calibrated": 0,
+      "dev_comparisons": 6,
+      "input_protocol": {
+        "train_READ": {
+          "total": 624,
+          "matched": 624
+        },
+        "dev_READ": {
+          "total": 145,
+          "matched": 145
+        },
+        "dev_model_REDUCE": {
+          "total": 12,
+          "matched": 12
+        },
+        "artifacts": [
+          "runs/study/budget-loop-20261103/retention-native-pairs/train-input-protocol.json",
+          "runs/study/budget-loop-20261103/retention-native-pairs/dev-input-protocol.json"
+        ],
+        "scope": "exact compiled READ/model-REDUCE inputs; excludes scheduler and ANSWER; no model calls"
       }
     },
     "resource_release": {
       "artifact": "runs/study/budget-loop-20261103/implementation-priority-hold.json",
-      "gpu": 5,
-      "reader_port": 30000,
-      "before_MiB": 76274,
-      "after_MiB": 535,
-      "scope": "dedicated P1 reader released after current dataset finished; shared helper/judge and live B/C retained"
+      "stopped_reader_ports": [
+        30000,
+        30002,
+        30004
+      ],
+      "stopped_shared_service_ports": [
+        30001,
+        30003
+      ],
+      "gpu_compute_processes_after": []
+    },
+    "user_decision": "Let current batches finish; do not start subsequent experiments",
+    "completed_P1_MD_capture": {
+      "artifact": "runs/study/budget-loop-20261103/formal-dev-c4-grounded/P1_task_first_isolated/multidoc2dial/p3/P1_task_first_isolated/manifest.json",
+      "declared": 209,
+      "completed_turns": 207,
+      "missing_execution": 2,
+      "scoring": "not started"
+    },
+    "completed_observer": {
+      "artifact": "runs/study/budget-loop-20261103/observer-all-followthrough/manifest.json",
+      "complete_window_coverage": true,
+      "samples": 6623,
+      "gpu_gib_seconds": 11459734.138542011,
+      "host_gib_seconds": 3932983.0281471587,
+      "scope": "this shared observation segment only; overlaps phase manifests and must not be added to them"
     }
   },
   "failure_artifact_cleanup": {
