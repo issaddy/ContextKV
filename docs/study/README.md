@@ -8,14 +8,8 @@
 | 当前运行入口 | [final_runbook.md](final_runbook.md) |
 | 当前重评数值 | [reference_20261103.json](reference_20261103.json)、[budget_loop_20261103.json](budget_loop_20261103.json) |
 
-当前实现围绕完整结论预算与来源链、共享数值阅读、有限归约、实际历史和阅读协议可见性、
-B 显式动作收益、C Native/TTL 前缀保护，以及全部声明任务的官方评分和完整成本账本。
-历史一次性批次脚本、旧 sweep 配方及重复状态快照已清理；旧代码和旧文档可从 Git 历史追溯。
+当前实现连接完整结论预算与来源链、共享数值阅读、有限归约、实际历史、B 动作收益及 C 来源前缀保护。Qwen3-32B 权重与解码固定。P0/P1 与隔离/共享阅读协议用于归因，完整联合入口读取冻结 P0 共享 A 配置。
 
-Qwen3-32B 权重与解码恒定；P0/P1 规划器与 task_first+隔离数值、source_first+共享数值两种协议组成四格。只审计实际阅读记录，不微调生成模型。
+A 的实际候选采集和比较使用 `training.preference_rollout`、`bench.evidence_policy_comparison`。B 使用 `training.plan_gain_workflow --mode observed_actions`，以真实动作配对学习最终质量差和动作前原生状态条件化的绝对分支成本。C 使用 `profiling.retention_trace`，按同窗口 Native/TTL 配对估值，并在保护集合中去重未来读取收益和共享页费用。
 
-A 入口是 `training.a_workflow`、`training.preference_rollout` 和
-`bench.evidence_policy_comparison`；B 入口是 `training.plan_gain_rollout`、
-`training.plan_gain_completion` 和 `bench.rolling_study_workflow`；C 入口是
-`profiling.retention_trace` 和 `bench.capacity_workflow`。所有训练、评分和成本记录
-绑定各自实际 reader 与来源。
+`bench.capacity_workflow --full-queue` 接入冻结 A、B 收益与 C 资产，执行完整 350 题的固定 B / 收益 B × native / value，在 c1/c4 下分别报告各自 P3、完整分母质量、响应时延和成本。`whole_plan` 及原两轮容量诊断作为实际对照保留。运行参数见运行手册，实测状态统一见数值记录。
