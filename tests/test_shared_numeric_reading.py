@@ -263,4 +263,5 @@ def test_numeric_selection_requires_last_parent_decision_and_preserves_rejected_
     with pytest.raises(ValueError, match='every parent'):
         parse_read_result(task, json.dumps(output), claims=claims)
     historical = {'format_version': 6, 'views': {'n0': ['p1'], 'n1': ['p1']}}
-    assert parse_read_result(task, json.dumps(historical), claims=claims).claims == selected.claims
+    with pytest.raises(ValueError, match='protocol 7'):
+        parse_read_result(task, json.dumps(historical), claims=claims)

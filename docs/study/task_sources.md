@@ -6,28 +6,13 @@
 
 ## 在线跨度 wire 与持久化坐标
 
-当前待原生确认的 wire 为 `owned_task_graph_v6_included_boundary_chars`。每个输出引用为
-`{"turn_id":4,"speaker":"user","boundary_chars":[i,j]}`。两个坐标是原消息中已包含的 Unicode 字符索引，
-均在 `0..len(message)-1`，顺序无关；同一坐标两次表示一个字符。控制器按声明的语义生成
-`TextRef(start=min(i,j), end=max(i,j)+1)`，所以每个合法 wire 都表达非空原文，且每个合法半开跨度
-`[start,end)` 都可由 `[start,end-1]` 表达。没有字符对枚举。
-
-消息 owner 由原生 schema 逐条固定；当前轮只有 user。缺少可选跨度使用 null，无引用的数组使用[]。
-Teacher 在现有 TaskPrediction 解析前逐字段转换边界，原始 boundary wire 和 wire 版本留在教师调用记录。
-TaskState、TextRef、训练标签及旧持久化解码器继续使用半开 `start/end`，输入历史账本的坐标含义同样保持。
-
-原生取舍证据由主 agent 从指定容器报告：v4 的 sibling 属性交集形态未通过合法输入资格；
-v5 完整 owned dyadic 矩形正确性通过，小 schema154433B、编译305.57ms，但10k字符约4.21MB、
-编译404824.57ms（约6.75分钟），不能作为在线方案。v6 本地同一小/10k探针分别137361B/137363B，
-10k构建约2.4ms；43项相关测试通过，原生编译与资格仍待确认。原失败记录保留。
-
-```bash
-python -m profiling.task_protocol --output runs/task-wire-v6-small.json
-python -m profiling.task_protocol --history-characters 10000 --output runs/task-wire-v6-10k.json
-```
-
-探针保存全部合法/非法项和资格计数后再断言，包括owner、整数边界、固定二元素数组、Unicode、5→6轮依赖，
-以及25个有效无序边界对到15个非空半开跨度的完整覆盖。编译开销与模型生成成本分开记录。
+当前教师 wire 为 `owned_task_graph_v7_visible_token_boundaries`，任务语义版本为
+`task_need_semantics_v3_anchored_owned_graph`。引用格式为
+`{"window_id":"w0","boundary_tokens":[i,j]}`：两个索引指向实际可见窗口中已包含的 token，
+顺序无关，由窗口映射恢复原消息 owner 与半开字符坐标 `TextRef(start,end)`。
+Need 必须有实际锚点，Condition 至少有一个实际限制锚点。协议不枚举字符对。
+教师调用保留原始 wire、语义版本及实际可见的 `task_catalogue`，持久化状态仍使用原文字符坐标。
+协议探针入口为 `profiling.task_protocol`；编译开销与模型生成成本分别记录。
 
 `adapters/evidence_pool.py` 的 `SourceDirectory` 保存来源版本、文档族、生效区间、发布日期、适用条件、表格与显式依赖。阅读单元按原文行和 tokenizer offset mapping 划分，长行按实际 token 分割。每个单元保留来源跨度及原始 passage ID。候选搜索采用当前查询 top50、每个 Need top20、历史来源 top12 和显式版本来源的轮转配额，初始 96 个主来源；依赖闭包随后展开。`full_scope()` 直接展开指定完整来源范围。
 
@@ -35,10 +20,18 @@ python -m profiling.task_protocol --history-characters 10000 --output runs/task-
 
 ## 训练入口和资产
 
-`training.task_data.build_task_data(config)` 导出 MultiDoc2Dial 原生训练分区。2026-11-02 本地运行得到 3474 个作者会话、22806 个问题及 488 个完整来源，记录在 `runs/study/data/task_data_manifest.json`。作者 QA 写入 `reference_history`；`turns.jsonl` 由真实 rollout 导入，使用 `actual_history` 与 `rollout_policy`。`label_actual_rollouts()` 对真实历史进行教师标注，并为选中的历史跨度生成成对移除测量请求。
+`training.task_data.build_task_data(config)` 导出 MultiDoc2Dial 原生训练分区。导出的会话、问题和来源数量由本次数据 manifest 记录。作者 QA 写入 `reference_history`；`turns.jsonl` 由真实 rollout 导入，使用 `actual_history` 与 `rollout_policy`。真实历史标注统一经 `training.a_workflow prepare-labels` 审核入口准备，再运行输出的 `task_labeling.yaml`；`existing_labels_path: null` 明确从零标注。实际采集数及 shortfall 由 cohort manifest 记录，train/dev 按会话隔离。完整准备顺序见 [运行手册](final_runbook.md)。
 
-`training.task_model.train_task(config)` 从现有 BGE-M3 查询 LoRA 初始化，训练历史、BIO 跨度、条件操作、条件关系、条件指针、需求操作、版本和任务指针头。对比检索目标使用依据实际历史核对过的 `verified_grounding`。文档编码器冻结；超过编码窗口的文档按完整窗口编码并聚合。输出 `adapter/`、`task-heads.pt`、`task-model.json` 与逐步损失。`TaskModel` 同时提供任务预测和已有 `DenseIndex` 所需的查询 `encode()`。
+`training.task_model.train_task(config)` 已接通以下学习、解码和评价路径：
+
+- 多锚点 Need 分组，Need—subject、Need—condition、Need—predecessor 关联与 scope。
+- Condition key/value/predicate 学习分组、独立 predicate，以及 target_refs/supersedes 多标签。
+- 从教师可见目录选择 family/version/resolved，source_turns 多标签；followup/correction/revisit 恢复任务。
+
+targets、head、loss、decode、严格 v3 资产与 eval 使用同一图契约。mandatory 状态及目录先占用 8192-token 输入预算，历史窗口使用剩余额度。Need 前驱可指向完整跨轮 memory，条件只从选定 base 中选取。`source_scope` 保持调用方给定范围，不学习新的自由文本。查询对比目标使用已核对的 `verified_grounding`；文档编码器冻结。
+
+当前辅助配置的 `task_model.initial_adapter_path: null`、`training.support_parent_asset: null` 表示分别从显式 BGE base 初始化；非空路径必须真实存在，不自动回退。代码输出 `adapter/`、`task-heads.pt`、`task-model.json` 与损失记录，`TaskModel` 同时提供任务预测和查询 `encode()`。训练与推理仍暂停，接口完整不代表已得到有效训练资产或质量提升。
 
 配置键：`training.data_dir`、`training.rollout_paths`、`training.task_labels`、`training.task_output`、`training.device`、`training.dtype`、`training.adapter_lr`、`training.head_lr`、`training.epochs`；`task_model.base_path`、`task_model.initial_adapter_path`、`task_model.lora_rank`、`task_model.history_unit_tokens`、`task_model.history_candidates`。
 
-本地机制与相关回归测试共 92 项通过。GPU 训练和持出集模型指标由训练运行清单记录。
+GPU 训练和持出集模型指标由实际训练运行清单记录。

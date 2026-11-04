@@ -4,12 +4,12 @@
 |---|---|
 | 实施任务与研究边界 | [task_spec.md](task_spec.md) |
 | 当前执行机制 | [架构](../architecture.md)、[reading_runtime.md](reading_runtime.md) |
-| 当前审查与实施阶段 | [review_20261104.md](review_20261104.md) |
+| 历史审查基线 | [review_20261104.md](review_20261104.md) |
 | 当前运行入口 | [final_runbook.md](final_runbook.md) |
 | 历史数值摘要与资产状态 | [reference_20261103.json](reference_20261103.json)、[budget_loop_20261103.json](budget_loop_20261103.json) |
 
-当前实现连接完整结论预算与来源链、共享数值阅读、有限归约、实际历史、B 动作收益及 C 来源前缀保护。Qwen3-32B 权重与解码固定。P0/P1 与隔离/共享阅读协议用于归因，完整联合入口读取冻结 P0 共享 A 配置。
+当前机制以架构为准；详细接口见 [任务与来源](task_sources.md)、[支持搜索](support_and_search.md)、[执行账本](reading_runtime.md)。
 
-A 的实际候选采集和比较使用 `training.preference_rollout`、`bench.evidence_policy_comparison`。B 使用 `training.plan_gain_workflow --mode observed_actions`，以真实动作配对学习最终质量差和动作前原生状态条件化的绝对分支成本。C 使用 `profiling.retention_trace`，按同窗口 Native/TTL 配对估值，并在保护集合中去重未来读取收益和共享页费用。
+正式比较固定 Qwen3-32B 和冻结 P0 共享 A：c4 执行 E0—E4，c1 仅执行 E1/E4，每格沿完整 350 题声明队列和自己的实际 P3 历史运行。保留 P0/P1、隔离/共享阅读、`whole_plan` 及 Native/固定 TTL 的实际对照，参数集中在运行手册。
 
-`bench.capacity_workflow --full-queue` 接入冻结 A、B 收益与 C 资产，c4 执行 E0—E4，c1 仅执行 E1/E4，每格使用完整 350 题队列及自己的真实 P3 历史，报告完整分母质量、响应时延和成本。`whole_plan` 及原两轮容量诊断作为实际对照保留。运行参数见运行手册。旧逐题结果与成本原始记录已丢弃，历史摘要不作为当前验收证据。
+旧逐题答案、奖励与成本原始记录已丢弃，历史摘要不作为当前验收证据。训练、推理及 GPU 测量暂停；代码实现状态与尚未采集的研究结果分别说明。

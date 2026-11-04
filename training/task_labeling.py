@@ -13,7 +13,7 @@ import time
 import yaml
 
 from adapters.history_state import (HistoryIndex, TaskInterpreter, TeacherTaskModel, history_text,
-    TASK_NEED_SEMANTICS, TASK_NEED_SEMANTICS_VERSION)
+    TASK_NEED_SEMANTICS, TASK_NEED_SEMANTICS_VERSION, task_source_catalogue)
 from adapters.hybrid_retrieval import LocalBGE
 from adapters.query_selector import OpenAICompletionClient, SelectorConfig
 from adapters.retrieval import run_retrieval_worker
@@ -152,6 +152,7 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
                     old["cohort_split"] != actual["cohort_split"] or
                     old.get("correct_task_binding") is not True or old.get("source_support_verified") is not True or
                     old.get("task_label_review_protocol") != "fixed_task_state_semantics_v2" or
+                    "task_catalogue" not in old or
                     old.get("need_semantics_version") != TASK_NEED_SEMANTICS_VERSION or
                     old.get("need_semantics_verified") is not True):
                 raise ValueError(f"saved task label differs from actual cohort state: {old['task_id']}")
@@ -216,6 +217,7 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
                             "task_state": to_jsonable(state), **verification}, ensure_ascii=False)+"\n")
                     continue
                 record = {**row, **verification, "prediction": to_jsonable(interpreter.last_prediction),
+                    "task_catalogue": task_source_catalogue(memory),
                     "task_state": to_jsonable(state), "teacher_metrics": interpreter.last_metrics,
                     "teacher_raw_output": interpreter.model.last_raw_output,
                     "label_origin": "frozen_qwen3_32b_actual_history_teacher",

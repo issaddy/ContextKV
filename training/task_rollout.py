@@ -142,6 +142,9 @@ def main(argv=None):
     parser.add_argument("--concurrency", type=int, default=8)
     args = parser.parse_args(argv)
     config = yaml.safe_load(Path(args.config).read_text())
+    if "base_study_config" in config:
+        from bench.study import merge_config
+        config = merge_config(yaml.safe_load(Path(config["base_study_config"]).read_text()), config)
     result = asyncio.run(run_actual_rollouts(config, output_path=args.output,
         min_conversations=args.min_conversations, min_turns=args.min_turns,
         limit_turns=args.limit_turns, concurrency=args.concurrency))

@@ -888,21 +888,18 @@ def advance_read_plan(plan, results, budget=None):
 def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_tokens=0, output_tokens=0):
     data = json.loads(text)
     wire_version = data.get("format_version", 1)
-    # Protocol 6 arrays are retained only for frozen historical-DAG replay;
-    # live selection schemas require exhaustive protocol 7 boolean decisions.
-    if wire_version in {6, NUMERIC_SELECT_PROTOCOL_VERSION}:
+    if task.operation == "numeric_select" and wire_version != NUMERIC_SELECT_PROTOCOL_VERSION:
+        raise ValueError("numeric selection requires protocol 7 boolean decisions")
+    if wire_version == NUMERIC_SELECT_PROTOCOL_VERSION:
         needs, _, parents = numeric_aliases(task, (), claims)
         by_id = {claim.claim_id: claim for claim in claims}
         selected = []
         for alias, need_id in needs.items():
             view = data["views"][alias]
-            if wire_version == NUMERIC_SELECT_PROTOCOL_VERSION:
-                if not isinstance(view, dict) or set(view) != set(parents) or any(
-                        type(decision) is not bool for decision in view.values()):
-                    raise ValueError("numeric selection requires a boolean decision for every parent")
-                chosen = [identity for identity in parents if view[identity]]
-            else:
-                chosen = tuple(dict.fromkeys(view))
+            if not isinstance(view, dict) or set(view) != set(parents) or any(
+                    type(decision) is not bool for decision in view.values()):
+                raise ValueError("numeric selection requires a boolean decision for every parent")
+            chosen = [identity for identity in parents if view[identity]]
             for parent_alias in chosen:
                 parent = by_id[parents[parent_alias]]
                 selected.append(replace(parent, claim_id=f"{task.step_id}:claim:{len(selected)}",

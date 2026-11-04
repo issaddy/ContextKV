@@ -4,7 +4,7 @@ evidence_policy_training:
   run_config: configs/qwen3_32b.yaml
   helper_run_config: configs/qwen3_32b.yaml
   output_dir: runs/study/fixed-qwen-preferences
-  parent_support_asset: models/study-support-actual-prefix
+  parent_support_asset: models/study-support-budget-loop
   output_asset: models/study-support-fixed-qwen
   gpu_devices: [1, 2, 4]
   scorer_identity:
@@ -15,15 +15,15 @@ evidence_policy_training:
   reward_weights: {necessary_points: 0.3, grounding: 0.2, conditions_versions: 0.2, task_score: 0.3}
   minimum_reward_difference: 0.01
   collection:
-    cohort_manifest: runs/study/budget-loop-20261103/reader-cohorts/full/cohort_manifest.json
+    cohort_manifest: runs/study/auxiliary/cohorts/full/cohort_manifest.json
     cohort_split: train
-    turns_path: runs/study/data/task_labels.jsonl
+    turns_path: runs/study/auxiliary/task-labels/task_labels.jsonl
     turns: 200
     device: cuda:1
     encoder_device: cuda:1
     dense_index: data/multidoc2dial/bge-m3-sections
     encoder_path: models/bge-m3
-    query_adapter_path: models/bge-m3-dialogue-query-v1
+    task_asset: models/study-task-budget-loop
     judge_base_url: http://127.0.0.1:30001
     body_budget: 4096
     output_budget: 1024

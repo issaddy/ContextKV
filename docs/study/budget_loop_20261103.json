@@ -879,7 +879,7 @@
     "remaining_scoring_check": "historical case006 extraction inconsistency remains a summary only; raw records were discarded, so fresh-protocol scoring must be validated on new data"
   },
   "implementation_20261104": {
-    "status": "local primary implementation and integration delivered; fresh current-protocol observations, B/C assets and final measurements await user resuming model/GPU work",
+    "status": "known code gaps completed and locally reviewed; model collection/training/inference and native joint measurements remain unexecuted",
     "B_protocol": "infer_bridge_ready_or_one_gap_one_terminal_read_v3",
     "C_asset_kind": "paired_native_retention_v5",
     "C_selection": "deduplicated target savings minus control, incremental residency and paired external-request penalty; full protected-set net must be measured",
@@ -954,12 +954,11 @@
     },
     "latest_local_integration": {
       "date": "2026-11-04",
-      "source_commit": "a5d57e6",
-      "scope": "retained A/B/C semantics, scripted runtime, queue metrics and cost accounting; no model training/inference or GPU",
+      "scope": "working-tree task graph, current A/B/C and evaluation integration; no real model training/inference or GPU",
       "pytest": {
-        "passed": 114,
+        "passed": 117,
         "subtests_passed": 6,
-        "seconds": 3.65
+        "seconds": 4.0
       },
       "demo": "runs/demo/demo-eb730812d0604836bcad7f459933419f.json",
       "demo_manifest": "runs/demo/manifest-eb730812d0604836bcad7f459933419f.json",
@@ -970,7 +969,38 @@
         "auxiliary_200_40_manifest": "not present locally; old path is not an available asset",
         "current_B_C_models": "not collected/fitted under current protocols"
       },
-      "pending_measurement": "fresh fixed-reader observations, conditional auxiliary fitting, independent C pairs, c4 E0-E4, c1 E1/E4 and selected public comparison"
+      "pending_measurement": "fresh fixed-reader observations, conditional auxiliary fitting, independent C pairs, c4 E0-E4, c1 E1/E4 and selected public comparison",
+      "source_base_commit": "a12b8ac530f5a0425b560c40dec0a37923db68f4",
+      "static": "ruff, compileall and diff checks passed"
+    },
+    "task_student": {
+      "format": "bge_owned_need_graph_v3",
+      "status": "targets, heads, losses, bounded decoding, strict asset IO and evaluation implemented; no model fit or inference performed",
+      "contract": [
+        "Need subject/condition/predecessor/scope",
+        "multi-anchor Need groups",
+        "Condition key/value/predicate groups and target/supersedes edges",
+        "observed family/version/resolved/source-turn selection",
+        "selected prior task restoration"
+      ],
+      "input": "actual history, mandatory task anchors and recorded task_catalogue; no candidates derived from gold identities",
+      "scope_binding": "source_scope remains an explicit caller input",
+      "cpu_validation": "2 supplied-logit tests cover relation ownership, DAG, multiple anchors, condition updates, directory selection and semantic evaluation"
+    },
+    "cleanup": {
+      "removed": [
+        "Wire6 numeric selection array parser",
+        "schema1 and partial legacy gain feature assets",
+        "unused label_actual_rollouts entry",
+        "duplicate plan_gain_policy.md and repeated progress prose"
+      ],
+      "retained_controls": [
+        "whole_plan with current features",
+        "numeric_need_isolation",
+        "E0 original source rows",
+        "Native and TTL15/60/180"
+      ],
+      "fresh_asset_flow": "prepare-data -> actual rollout -> disjoint cohort -> prepare-labels with explicit null prior -> reviewed labels -> task/support training; explicit base initialization supported"
     }
   },
   "raw_artifact_availability": {

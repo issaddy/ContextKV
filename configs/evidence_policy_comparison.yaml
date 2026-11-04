@@ -2,7 +2,7 @@ base_study_config: configs/study.yaml
 policy_comparison:
   concurrency: 4
   policies:
-    P0: models/study-support-actual-prefix
+    P0: models/study-support-budget-loop
     P1: models/study-support-fixed-qwen
   query_assets:
     P0: null

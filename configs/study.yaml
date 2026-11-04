@@ -82,7 +82,7 @@ execution:
   lambda_host: 0.0
 training:
   enabled: false
-  cohort_manifest: runs/study/budget-loop-20261103/reader-cohorts/full/cohort_manifest.json
+  cohort_manifest: runs/study/auxiliary/cohorts/full/cohort_manifest.json
   data_dir: runs/study/data
   multidoc_source: data/multidoc2dial/source
   reader_config: configs/qwen3_32b.yaml
@@ -116,5 +116,5 @@ training:
     conditions_versions: 0.2
     task_score: 0.2
 preferences:
-  cohort_manifest: runs/study/budget-loop-20261103/reader-cohorts/full/cohort_manifest.json
+  cohort_manifest: runs/study/auxiliary/cohorts/full/cohort_manifest.json
   cohort_split: train

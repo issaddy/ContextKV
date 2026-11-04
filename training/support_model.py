@@ -358,16 +358,36 @@ def _save(network, tokenizer, directory, metadata, *, encoder_source=None, paren
 
 def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, device="cuda:0", epochs=1,
                   batch_size=4, learning_rate=1e-4, encoder_learning_rate=1e-5,
-                  max_length=8192, seed=42,
+                  max_length=8192, seed=42, base_path=None,
                   encoder_autocast_dtype="float32", inference_encoder_dtype="float32"):
-    """Continue the saved encoder and heads on reviewed support supervision."""
+    """Train reviewed support labels from an explicit parent or local BGE base."""
+    if parent_asset is None and base_path is None:
+        raise ValueError("base_path is required when parent_asset is None")
     complete_started = time.perf_counter()
     import torch
     from adapters.support_model import SupportInput
     from controller.context_schema import EvidenceUnit
     torch.manual_seed(seed)
-    backend = TrainedSupportBackend.load(parent_asset, device=device, batch_size=batch_size,
-        encoder_dtype="float32", encoder_autocast_dtype=encoder_autocast_dtype)
+    initialization_started = time.perf_counter()
+    if parent_asset is not None:
+        backend = TrainedSupportBackend.load(parent_asset, device=device, batch_size=batch_size,
+            encoder_dtype="float32", encoder_autocast_dtype=encoder_autocast_dtype)
+        initialization = {"mode": "parent_support_asset", "parent_support_asset": str(parent_asset)}
+    else:
+        from transformers import AutoModel, AutoTokenizer
+        base_path = str(Path(base_path))
+        model_id = "BAAI/bge-reranker-v2-m3"
+        tokenizer = AutoTokenizer.from_pretrained(base_path, local_files_only=True)
+        encoder = AutoModel.from_pretrained(base_path, local_files_only=True)
+        manifest = {"base": model_id, "base_path": base_path,
+            "base_provenance": _base_provenance(base_path, model_id),
+            "graph_width": 128, "max_length": max_length}
+        network = create_network(encoder, graph_width=manifest["graph_width"],
+            encoder_autocast_dtype=encoder_autocast_dtype)
+        backend = TrainedSupportBackend(network, tokenizer, manifest, device=device,
+            batch_size=batch_size, encoder_dtype="float32")
+        initialization = {"mode": "base_encoder_new_heads", "base_path": base_path}
+    initialization_ms = (time.perf_counter()-initialization_started)*1000
     network, tokenizer = backend.network, backend.tokenizer
     examples = select_cohort_rows((json.loads(line) for line in Path(examples_path).read_text().splitlines() if line),
                                  cohort_manifest, "train")
@@ -467,7 +487,8 @@ def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, d
             losses.append(float(loss.detach()))
     if device.startswith("cuda"):
         torch.cuda.synchronize(device)
-    metadata = {**backend.manifest, "parent_support_asset": str(parent_asset), "max_length": max_length,
+    metadata = {**backend.manifest,
+        "parent_support_asset": str(parent_asset) if parent_asset is not None else None, "max_length": max_length,
         "training_encoder_autocast_dtype": encoder_autocast_dtype,
         "training_parameter_dtypes": sorted({str(parameter.dtype) for parameter in network.parameters()}),
         "optimizer_state_dtypes": sorted({str(value.dtype) for state in optimizer.state.values()
@@ -477,7 +498,8 @@ def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, d
             "history_origins": dict(Counter(row.get("history_kind", "explicit_training_fixture") for row in examples))},
         "packages": {name: version(name) for name in ("torch", "transformers", "tokenizers")},
         "support_classes": SUPPORT_CLASSES, "answer_classes": ANSWER_CLASSES,
-        "support_training": {"examples_path": str(examples_path), "examples": len(examples),
+        "support_training": {"initialization": initialization, "initialization_ms": initialization_ms,
+            "examples_path": str(examples_path), "examples": len(examples),
             "epochs": epochs, "batch_size": batch_size, "seed": seed,
             "head_learning_rate": learning_rate, "encoder_learning_rate": encoder_learning_rate,
             "label_origins": dict(Counter(row["label_origin"] for row in examples)),

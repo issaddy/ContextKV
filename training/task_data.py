@@ -6,9 +6,7 @@ import json
 from pathlib import Path
 
 from adapters.doc2dial import benchmark_rows, convert
-from controller.context_schema import RetrievalState
-from controller.schema import OnlineMessage, OnlineTurn, TurnRecord
-from controller.serialization import decode, to_jsonable
+from controller.serialization import to_jsonable
 
 
 def write_jsonl(path, rows):
@@ -88,39 +86,9 @@ def build_task_data(config):
         "rollout_paths": [str(path) for path in rollout_paths],
         "paths": {name: str((root/name).resolve()) for name in (
             "sources.jsonl", "original_train_turns.jsonl", "supervision.jsonl", "turns.jsonl")},
-        "stage_one_target": {"turns": 10000, "actual_conversations": 1000},
         "source_manifest": manifest}
     root.mkdir(parents=True, exist_ok=True)
     (root/"task_data_manifest.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2)+"\n")
-    return summary
-
-
-def label_actual_rollouts(turns_path, output_dir, interpreter):
-    output = Path(output_dir)
-    states, labels, removals = {}, [], []
-    for row in read_jsonl(turns_path):
-        history = tuple(decode(TurnRecord, item) for item in row["actual_history"])
-        messages = tuple(message for item in history for message in (
-            OnlineMessage("user", item.user_text), OnlineMessage("assistant", item.assistant_text)))
-        turn = OnlineTurn(row["conversation_id"], row["task_id"], row["turn"], row["snapshot_id"],
-                          row["question"], messages, (), "P3")
-        prior = tuple(states.get(row["conversation_id"], ()))
-        memory = RetrievalState(len(history), history, prior)
-        state = interpreter.interpret(turn, memory)
-        states.setdefault(row["conversation_id"], []).append(state)
-        labels.append({**row, "prediction": to_jsonable(interpreter.last_prediction),
-            "task_state": to_jsonable(state), "label_origin": "frozen_qwen3_32b_teacher",
-            "teacher_metrics": interpreter.last_metrics})
-        for ref in state.working_history:
-            removals.append({"task_id": row["task_id"], "split": row["split"],
-                "removed_span": to_jsonable(ref), "actual_history": row["actual_history"],
-                "question": row["question"], "status": "pending_paired_retrieval_answer_measurement"})
-    count = write_jsonl(output/"task_labels.jsonl", labels)
-    removal_count = write_jsonl(output/"history_removal_requests.jsonl", removals)
-    summary = {"labels": count, "removal_requests": removal_count,
-        "relation_counts": dict(Counter(row["prediction"]["relation"] for row in labels)),
-        "paths": {name: str((output/name).resolve()) for name in ("task_labels.jsonl", "history_removal_requests.jsonl")}}
-    (output/"task_label_manifest.json").write_text(json.dumps(summary, indent=2)+"\n")
     return summary
 
 
@@ -130,6 +98,7 @@ def prepare_cohort_task_labels(config):
     import sys
     import yaml
     from copy import deepcopy
+    from adapters.history_state import TASK_NEED_SEMANTICS_VERSION
     from controller.session_store import Attempt, load_record
     from training.reader_data import file_digest, history_digest
 
@@ -146,7 +115,8 @@ def prepare_cohort_task_labels(config):
         raise ValueError("actual rollout does not contain every registered labeling state")
     authored = {row["task_id"]: row for row in read_jsonl(settings["original_turns_path"]) if row["task_id"] in members}
     originals = {row["source_id"]: row for row in read_jsonl(settings["sources_path"])}
-    prior = {row["task_id"]: row for row in read_jsonl(settings["existing_labels_path"])}
+    existing_labels = settings["existing_labels_path"]
+    prior = {} if existing_labels is None else {row["task_id"]: row for row in read_jsonl(existing_labels)}
     database = Path(settings["state_db"]).resolve()
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     selected, reused, reuse_exclusions = [], [], []
@@ -192,7 +162,10 @@ def prepare_cohort_task_labels(config):
             same_state = all(old[key] == row[key] for key in ("conversation_id", "turn", "question", "snapshot_id"))
             same_history = history_digest(old["actual_history"]) == member["actual_history_sha256"]
             if (same_state and same_history and old["script_history_review_status"] == "reviewed"
-                    and old.get("correct_task_binding") is True and old.get("source_support_verified") is True):
+                    and old.get("correct_task_binding") is True and old.get("source_support_verified") is True
+                    and old.get("need_semantics_version") == TASK_NEED_SEMANTICS_VERSION
+                    and old.get("need_semantics_verified") is True
+                    and "task_catalogue" in old):
                 reused.append({**old, **prepared, "grounding_origin": old["grounding_origin"],
                                "cohort_label_origin": "reused_exact_actual_state_review"})
             else:
@@ -216,7 +189,8 @@ def prepare_cohort_task_labels(config):
         "cohort_splits": dict(Counter(member["split"] for member in members.values())),
         "reused_labels": len(reused), "pending_labels": len(members)-len(reused),
         "source_files": {name: {"path": str(Path(settings[name]).resolve()), "sha256": file_digest(settings[name])}
-            for name in ("actual_turns_path", "original_turns_path", "sources_path", "existing_labels_path")},
+            for name in ("actual_turns_path", "original_turns_path", "sources_path", "existing_labels_path")
+            if settings[name] is not None},
         "state_db": str(database), "turns_path": str(turns_path), "labels_path": str(labels_path),
         "labeling_config": str(config_path),
         "labeling_command": [sys.executable, "-m", "training.task_labeling", "--config", str(config_path)],

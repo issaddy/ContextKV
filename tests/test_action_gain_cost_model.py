@@ -1,13 +1,12 @@
 """Specified paired scores/costs test CPU regression, not experimental GPU rewards."""
 from copy import deepcopy
 from dataclasses import replace
-import json
 
 import pytest
 
 from controller.claim_graph import ClaimGraph
 from controller.context_schema import EvidenceClaim, Need, ReadingOutcome, ReadResult, ReadTask, StepRecord
-from controller.plan_policy import FEATURE_NAMES, OBSERVED_FEATURE_NAMES, LEGACY_FEATURE_NAMES, CompleteCost, complete_plan
+from controller.plan_policy import FEATURE_NAMES, OBSERVED_FEATURE_NAMES, CompleteCost, complete_plan
 from controller.schema import SessionSnapshot, TurnRecord
 from training.plan_gain_protocol import ZERO_AUX, observed_state_binding
 from training.train_plan_gain import (
@@ -122,31 +121,9 @@ def test_shared_ridge_learns_signed_costs_and_nonzero_direct_cost_without_past_p
     assert restored.supports_semantic_kind("gap_retrieval", costs=True)
 
 
-def test_legacy_declared_feature_asset_remains_a_control_and_rejects_new_actions(tmp_path):
-    row = paired_records()[0][0]
-    path = tmp_path / "legacy.json"
-    path.write_text(json.dumps({"schema_version": 1, "model_type": "reader_bound_plan_gain_ridge",
-        "reader_checkpoint": "reader-fixture", "reader_profile_id": "profile-fixture", "asset_id": "real-legacy-control",
-        "feature_names": LEGACY_FEATURE_NAMES, "center": [0]*len(LEGACY_FEATURE_NAMES),
-        "scale": [1]*len(LEGACY_FEATURE_NAMES), "coefficients": [
-            .25 if name == "read_steps" else 0 for name in LEGACY_FEATURE_NAMES],
-        "intercept": .1, "provenance": {"source": "specified legacy asset fixture"}}))
-    model = PlanGainModel.load(path, reader_checkpoint="reader-fixture", reader_profile_id="profile-fixture")
-    legacy = {**row["features"], "read_once": 0, "complementary_evidence": 1}
-    assert model.feature_names == LEGACY_FEATURE_NAMES
-    assert model.predict(legacy) == pytest.approx(.35)
-    assert model.predict(row["direct_features"]) == pytest.approx(.1)
-    assert not model.supports_semantic_kind("read_once")
-    assert not model.supports_semantic_kind("direct_answer", costs=True)
-    with pytest.raises(ValueError, match="has not learned"):
-        model.predict(row["features"])
-    with pytest.raises(ValueError, match="no measured"):
-        model.predict_costs(legacy)
-
-
 def test_current_action_features_are_not_zero_filled_or_masked():
     current = paired_records()[0][0]
-    current["features"] = {name: current["features"][name] for name in LEGACY_FEATURE_NAMES}
+    current["features"] = {name: current["features"][name] for name in FEATURE_NAMES}
     with pytest.raises(ValueError, match="one-hot"):
         fit_gain([current])
     current = paired_records()[0][0]

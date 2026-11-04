@@ -24,7 +24,6 @@ STRUCTURAL_FEATURE_NAMES = ("needs", "conditions", "version_comparison", "open_n
     "unmet_answer_points", "existing_claims", "completed_steps", "read_steps", "reduce_steps",
     "evidence_units", "source_passages", "dependencies", "source_versions", "required_coverage",
     "planned_coverage", "input_budget_tokens", "output_budget_tokens")
-LEGACY_FEATURE_NAMES = (*LEGACY_PLAN_KINDS, *STRUCTURAL_FEATURE_NAMES)
 ACTION_SIZE_FEATURE_NAMES = ("planned_read_chars", "reduce_input_claim_chars", "existing_claim_chars",
                              "working_history_chars", "answer_body_tokens")
 FEATURE_NAMES = (*PLAN_KINDS, *STRUCTURAL_FEATURE_NAMES, *ACTION_SIZE_FEATURE_NAMES)

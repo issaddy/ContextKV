@@ -19,7 +19,8 @@ def train(config, stage):
     if stage == "support":
         from training.support_model import train_support
         return train_support(settings["support_labels"], settings["support_parent_asset"],
-            settings["support_output"], device=config["support_model"]["device"], epochs=settings["epochs"],
+            settings["support_output"], base_path=config["support_model"]["base_path"],
+            device=config["support_model"]["device"], epochs=settings["epochs"],
             learning_rate=settings["head_lr"], encoder_learning_rate=settings.get("support_encoder_lr", 1e-5),
             batch_size=settings.get("support_batch_size", 4), seed=settings.get("seed", 42),
             cohort_manifest=settings["cohort_manifest"])

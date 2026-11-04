@@ -2,7 +2,7 @@ reader_audit:
   base_scope: configs/model_scopes/qwen3-32b.local.json
   resource_sample_seconds: 0.5
   data:
-    cohort_manifest: runs/study/budget-loop-20261103/reader-cohorts/full/cohort_manifest.json
+    cohort_manifest: runs/study/auxiliary/cohorts/full/cohort_manifest.json
     output_dir: runs/study/reader-audit
     answer_output_tokens: 1024
     minimum_quality: 0.85

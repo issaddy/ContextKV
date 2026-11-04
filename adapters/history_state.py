@@ -40,7 +40,17 @@ def history_text(ref: TextRef, memory: RetrievalState, turn: OnlineTurn | None =
         current_user_text=turn.query if turn is not None else None))
 
 
+def validate_task_anchors(prediction):
+    for need in prediction.needs:
+        if not need.anchor_spans:
+            raise ValueError("a Need requires an observed request anchor")
+    for condition in prediction.conditions:
+        if not (condition.key_span or condition.predicate_span or condition.value_spans):
+            raise ValueError("a condition update requires an observed restriction or update anchor")
+
+
 def validate_task_refs(prediction, turn, memory):
+    validate_task_anchors(prediction)
     sources = text_ref_sources(memory.committed_history, current_turn_id=turn.turn, current_user_text=turn.query)
     refs = [(f"history_spans[{index}]", ref) for index, ref in enumerate(prediction.history_spans)]
     for index, condition in enumerate(prediction.conditions):
@@ -55,6 +65,11 @@ def validate_task_refs(prediction, turn, memory):
                 for index, ref in enumerate(prediction.version_intent.time_refs))
     for field, ref in refs:
         text_ref_text(ref, sources, field=field)
+
+
+TASK_MAX_OBJECTS = 8
+TASK_MAX_REFS = 16
+TASK_MAX_VERSION_TURNS = 2
 
 
 TASK_WIRE_SCHEMA = "owned_task_graph_v7_visible_token_boundaries"
@@ -242,6 +257,20 @@ def apply_need_condition_updates(needs: tuple[Need, ...], updates: tuple[Conditi
         for need in needs)
 
 
+def task_base_state(prior_task_states, relation, resume_task_id):
+    """The interpreter's existing selected task semantics, shared by task heads."""
+    inherited = relation not in {"standalone", "topic_switch"}
+    return (next(state for state in reversed(prior_task_states) if state.task_id == resume_task_id)
+            if inherited and resume_task_id else prior_task_states[-1]
+            if inherited and prior_task_states else None)
+
+
+def task_graph_history(prior_task_states, relation, resume_task_id):
+    base = task_base_state(prior_task_states, relation, resume_task_id)
+    needs = tuple({n.need_id: n for state in prior_task_states for n in state.needs}.values())
+    return (base.conditions if base is not None else ()), needs
+
+
 class TaskInterpreter:
     def __init__(self, model, history_index: HistoryIndex):
         self.model, self.history_index = model, history_index
@@ -253,10 +282,7 @@ class TaskInterpreter:
         prediction = self.model.predict(turn, windows, memory)
         self.last_prediction = prediction
         validate_task_refs(prediction, turn, memory)
-        inherited = prediction.relation not in {"standalone", "topic_switch"}
-        base = (next(state for state in reversed(memory.prior_task_states) if state.task_id == prediction.resume_task_id)
-                if inherited and prediction.resume_task_id else memory.prior_task_states[-1]
-                if inherited and memory.prior_task_states else None)
+        base = task_base_state(memory.prior_task_states, prediction.relation, prediction.resume_task_id)
         conditions = apply_condition_updates(base.conditions if base else (), prediction.conditions)
         needs = prediction.needs or (base.needs if base else ())
         needs = apply_need_condition_updates(needs, prediction.conditions)
@@ -318,8 +344,11 @@ def retrieval_state(snapshot, source_index):
 
 
 
-TASK_NEED_SEMANTICS_VERSION = "task_need_semantics_v2_condition_links"
+TASK_NEED_SEMANTICS_VERSION = "task_need_semantics_v3_anchored_owned_graph"
 TASK_NEED_SEMANTICS = (
+    "Every Need must cite at least one actual visible request anchor. Every materialized condition "
+    "must cite an actual key, value or predicate; a removal must cite its update predicate. "
+    "Condition links stay within the selected prior task; predecessor Needs may cite actual earlier tasks.\n"
     "Need operation semantics:\n"
     "- lookup: retrieve a directly stated fact or relation answering a requested point.\n"
     "- procedure: identify the actions, prerequisites and ordered steps for carrying out a task. "
@@ -354,6 +383,30 @@ TASK_NEED_SEMANTICS = (
     "scope without a current or inherited actual user request for the complete source range."
 )
 
+def task_source_catalogue(memory):
+    """The literal source directory visible to the task teacher and student."""
+    catalogue = {}
+    if memory.source_index is not None:
+        for key, block in memory.source_index._blocks.items():
+            metadata = memory.source_index.corpus_index.source_metadata.get(key, {})
+            family = metadata.get("document_family", key.document_id)
+            catalogue.setdefault(family, []).append({"version": key.version, "title": block.title,
+                **{name: metadata[name] for name in ("valid_from", "valid_to", "version_order", "current", "applicability")
+                   if name in metadata}})
+    return catalogue
+
+
+def task_catalogue_candidates(catalogue, prior_task_states):
+    latest = {state.task_id: state for state in prior_task_states}
+    versions = tuple(dict.fromkeys([row["version"] for rows in catalogue.values() for row in rows]
+        +[version for state in latest.values() for version in
+          (*state.version_intent.version_ids, *state.version_intent.resolved_version_ids)]))
+    families = tuple(dict.fromkeys([family for family, rows in catalogue.items()
+        if len({row["version"] for row in rows}) > 1 or any(row.get("valid_from") or row.get("version_order") for row in rows)]
+        +[family for state in latest.values() for family in state.version_intent.document_families]))
+    return versions, families
+
+
 class TeacherTaskModel:
     """Structured Qwen teacher for data collection and first integration runs."""
     def __init__(self, client, *, record_path=None):
@@ -376,22 +429,10 @@ class TeacherTaskModel:
         need_ids = tuple(dict.fromkeys(need.need_id for state in memory.prior_task_states for need in state.needs))
         condition_alias = {identity: f"C{i}" for i, identity in enumerate(condition_ids)}
         need_alias = {identity: f"N{i}" for i, identity in enumerate(need_ids)}
-        current_conditions = {f"c{i}": f"{turn.task_id}:c{i}" for i in range(8)}
-        current_needs = {f"n{i}": f"{turn.task_id}:n{i}" for i in range(8)}
-        catalogue = {}
-        if memory.source_index is not None:
-            for key, block in memory.source_index._blocks.items():
-                metadata = memory.source_index.corpus_index.source_metadata.get(key, {})
-                family = metadata.get("document_family", key.document_id)
-                catalogue.setdefault(family, []).append({"version": key.version, "title": block.title,
-                    **{name: metadata[name] for name in ("valid_from", "valid_to", "version_order", "current", "applicability")
-                       if name in metadata}})
-        versions = tuple(dict.fromkeys([row["version"] for rows in catalogue.values() for row in rows]
-            +[version for state in latest.values() for version in
-              (*state.version_intent.version_ids, *state.version_intent.resolved_version_ids)]))
-        families = tuple(dict.fromkeys([family for family, rows in catalogue.items()
-            if len({row["version"] for row in rows}) > 1 or any(row.get("valid_from") or row.get("version_order") for row in rows)]
-            +[family for state in latest.values() for family in state.version_intent.document_families]))
+        current_conditions = {f"c{i}": f"{turn.task_id}:c{i}" for i in range(TASK_MAX_OBJECTS)}
+        current_needs = {f"n{i}": f"{turn.task_id}:n{i}" for i in range(TASK_MAX_OBJECTS)}
+        catalogue = task_source_catalogue(memory)
+        versions, families = task_catalogue_candidates(catalogue, memory.prior_task_states)
         version_alias = {version: f"V{i}" for i, version in enumerate(versions)}
         family_alias = {family: f"F{i}" for i, family in enumerate(families)}
         prior_view = to_jsonable(tuple(latest.values()))
@@ -448,7 +489,7 @@ class TeacherTaskModel:
         body["need_semantics_version"] = TASK_NEED_SEMANTICS_VERSION
         definitions = owned_text_ref_definitions(ref_windows)
         ref_schema = {"$ref": "#/$defs/TextRef"}
-        refs = {"type": "array", "maxItems": 16, "items": ref_schema}
+        refs = {"type": "array", "maxItems": TASK_MAX_REFS, "items": ref_schema}
         definitions["TextRefs"] = refs
         refs = {"$ref": "#/$defs/TextRefs"}
         optional_ref = {"anyOf": [ref_schema, {"type": "null"}]}
@@ -462,9 +503,13 @@ class TeacherTaskModel:
             "target_refs": strings, "supersedes": strings,
             "update": {"type": "string", "enum": ["ADD", "REPLACE", "COMPARE"]}},
             "required": ["key_span", "value_spans", "relation_type", "predicate_span",
-                         "target_refs", "supersedes", "update"], "additionalProperties": False}
+                         "target_refs", "supersedes", "update"],
+            "anyOf": [{"properties": {"key_span": ref_schema}},
+                      {"properties": {"predicate_span": ref_schema}},
+                      {"properties": {"value_spans": {"allOf": [refs], "minItems": 1}}}],
+            "additionalProperties": False}
         need_schema = {"type": "object", "properties": {
-            "anchor_spans": refs, "subject_refs": refs,
+            "anchor_spans": {"allOf": [refs], "minItems": 1}, "subject_refs": refs,
             "operation": {"$ref": "#/$defs/Operation"},
             "condition_ids": strings, "predecessor_need_ids": strings,
             "scope": {"$ref": "#/$defs/NeedScope"}},
@@ -482,7 +527,7 @@ class TeacherTaskModel:
                 "resolved_version_ids": {"type": "array", "maxItems": min(16, len(version_alias)),
                     "items": {"type": "string", **({"enum": list(version_alias.values())} if version_alias else {})}},
                 "time_refs": refs,
-                "source_turns": {"type": "array", "maxItems": min(2, len(memory.committed_history)),
+                "source_turns": {"type": "array", "maxItems": min(TASK_MAX_VERSION_TURNS, len(memory.committed_history)),
                     "items": {"type": "integer", **({"enum": [row.turn_id for row in memory.committed_history]}
                         if memory.committed_history else {})}}},
                 "required": ["mode", "temporal_relation", "document_families", "version_ids", "resolved_version_ids", "time_refs", "source_turns"],
@@ -512,7 +557,7 @@ class TeacherTaskModel:
                 item["update"]["enum"] = ["ADD", "COMPARE"]
             condition_name = f"Condition_{base_index}"
             definitions[condition_name] = condition
-            for condition_count in range(9):
+            for condition_count in range(TASK_MAX_OBJECTS+1):
                 branch = deepcopy(properties)
                 branch["relation"]["enum"] = ["standalone", "topic_switch"] if base is None else ["followup", "correction", "revisit"]
                 branch["resume_task_id"] = {"type": "string", "enum": [task_alias[base.task_id] if base else ""]}
@@ -531,7 +576,7 @@ class TeacherTaskModel:
                     need["properties"]["predecessor_need_ids"] = {"$ref": f"#/$defs/Predecessors_{need_key}"}
                     definitions[f"Need_{base_index}_{condition_count}_{need_key}"] = need
                 branch["needs"] = {"anyOf": [owned_object(tuple(current_needs)[:count],
-                    lambda key: {"$ref": f"#/$defs/Need_{base_index}_{condition_count}_{key}"}) for count in range(9)]}
+                    lambda key: {"$ref": f"#/$defs/Need_{base_index}_{condition_count}_{key}"}) for count in range(TASK_MAX_OBJECTS+1)]}
                 branches.append({"type": "object", "properties": branch, "required": list(branch),
                                  "additionalProperties": False})
         schema = {"type": "object", "anyOf": branches, "$defs": definitions}

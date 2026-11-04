@@ -2,9 +2,7 @@
 
 `controller.reading.build_read_plan` 将 `EvidenceSet` 编译为 READ 步骤。传入实际
 `template` 和 `snapshot` 后，装包按完整提示的 tokenizer IDs 计量，包括当前问题、
-工作历史、条件、来源标识及输出预留。超长单元按 Unicode 字符切开；切片保留原始
-来源的字符区间，并获得独立 span ID。`all_supplied_documents` 使用完整来源目录
-产生的集合，覆盖表逐项记录实际执行的窗口。
+工作历史、条件、来源标识及输出预留。source-first 每次执行按实际 tokenizer、段落与表格边界形成的完整规范来源窗口和依赖闭包，超出份额时不执行；task-first E0 保留 PR3 原行/长行分片，见 [架构](../architecture.md)。`all_supplied_documents` 使用完整来源目录产生的集合，覆盖表逐项记录实际执行的窗口。
 各 READ 包展开本包记录的依赖闭包，重复携带所需表头、定义原文，并按实际输入
 计量。覆盖表按 unit ID 记录首次完成阅读；重复依赖保留在每步输入账本。
 

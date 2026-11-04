@@ -16,7 +16,7 @@ import math
 from pathlib import Path
 import time
 
-from controller.plan_policy import (FEATURE_NAMES, OBSERVED_FEATURE_NAMES, OBSERVED_FEATURE_SCHEMA, CompleteCost, LEGACY_FEATURE_NAMES, LEGACY_PLAN_KINDS, NATIVE_COST_SCHEMA,
+from controller.plan_policy import (FEATURE_NAMES, OBSERVED_FEATURE_NAMES, OBSERVED_FEATURE_SCHEMA, CompleteCost, LEGACY_PLAN_KINDS, NATIVE_COST_SCHEMA,
                                      PLAN_KINDS, PlanCandidate, complete_plan, plan_features)
 from controller.context_schema import ReadingOutcome
 from controller.schema import SessionSnapshot
@@ -165,13 +165,13 @@ class PlanGainModel:
     def supports_semantic_kind(self, kind, *, costs=False):
         if costs:
             return bool(self.cost_models) and kind in self.cost_provenance["trained_semantic_kinds"]
-        declared = self.provenance.get("trained_semantic_kinds", LEGACY_PLAN_KINDS)
-        return kind == "direct_answer" or (kind in declared and (kind in LEGACY_PLAN_KINDS or kind in self.feature_names))
+        declared = self.provenance["trained_semantic_kinds"]
+        return kind == "direct_answer" or (kind in declared and kind in self.feature_names)
 
     def _check_action(self, features, *, costs=False):
         for kind in PLAN_KINDS:
             if features.get(kind, 0) > .5 and (not self.supports_semantic_kind(kind, costs=costs)
-                    or (kind not in LEGACY_PLAN_KINDS and kind not in self.feature_names)):
+                    or kind not in self.feature_names):
                 raise ValueError(f"asset has not learned semantic action {kind}")
 
     def _linear(self, features, coefficients, intercept):
@@ -220,8 +220,7 @@ class PlanGainModel:
     def load(cls, path, *, reader_checkpoint, reader_profile_id):
         data = json.loads(Path(path).read_text())
         schema, kind = data.pop("schema_version"), data.pop("model_type")
-        if (schema, kind) not in {(1, "reader_bound_plan_gain_ridge"),
-                                  (2, "reader_bound_plan_gain_cost_ridge"),
+        if (schema, kind) not in {(2, "reader_bound_plan_gain_cost_ridge"),
                                   (3, "reader_bound_plan_gain_cost_ridge")}:
             raise ValueError("unsupported plan gain asset schema")
         if schema == 3 and data["cost_provenance"]["feature_schema"] != NATIVE_COST_SCHEMA:
@@ -229,9 +228,9 @@ class PlanGainModel:
         if data["reader_checkpoint"] != reader_checkpoint or data["reader_profile_id"] != reader_profile_id:
             raise ValueError("gain asset requires its measured reader checkpoint and runtime profile")
         if (len(set(data["feature_names"])) != len(data["feature_names"])
-                or not set(data["feature_names"]) <= set(OBSERVED_FEATURE_NAMES)):
-            raise ValueError("gain asset declares unknown or duplicate online plan features")
-        observed = bool(set(data["provenance"].get("trained_semantic_kinds", ())) - set(LEGACY_PLAN_KINDS))
+                or set(data["feature_names"]) not in (set(FEATURE_NAMES), set(OBSERVED_FEATURE_NAMES))):
+            raise ValueError("gain asset requires a complete current feature schema")
+        observed = bool(set(data["provenance"]["trained_semantic_kinds"]) - set(LEGACY_PLAN_KINDS))
         if observed or data["provenance"].get("observed_feature_schema") is not None:
             if (data["provenance"].get("observed_feature_schema") != OBSERVED_FEATURE_SCHEMA
                     or tuple(data["feature_names"]) != OBSERVED_FEATURE_NAMES
@@ -306,12 +305,11 @@ def _supervision(rows, *, split):
 
 def _fit_features(rows):
     names = tuple(rows[0]["features"])
-    selected = (OBSERVED_FEATURE_NAMES if set(names) == set(OBSERVED_FEATURE_NAMES) else
-                FEATURE_NAMES if set(names) == set(FEATURE_NAMES) else LEGACY_FEATURE_NAMES)
+    selected = OBSERVED_FEATURE_NAMES if set(names) == set(OBSERVED_FEATURE_NAMES) else FEATURE_NAMES
     if any(row.get("observed_state_binding") is not None for row in rows) and selected != OBSERVED_FEATURE_NAMES:
         raise ValueError("observed supervision requires measured pre-action budget features and action one-hot values")
     if any(set(row["features"]) != set(selected) for row in rows):
-        raise ValueError("fit one declared current or legacy feature schema without zero-filling new actions")
+        raise ValueError("fit one complete current feature schema without zero-filling new actions")
     if any(row["semantic_kind"] not in LEGACY_PLAN_KINDS and row["semantic_kind"] not in selected for row in rows):
         raise ValueError("single-action labels require their declared action one-hot features")
     if any(row["features"][kind] != float(kind == row["semantic_kind"])

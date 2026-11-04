@@ -1,11 +1,8 @@
 # 当前课题运行入口
 
-GPU 工作按用户最新要求暂停，SSH 已关闭；当前只做本地实现与 CPU 集成，不启动训练、采集或原生实验。历史原生结果仅剩摘要，实际验收需重新采集。
-运行状态统一查看 [budget_loop_20261103.json](budget_loop_20261103.json)。旧实验记录已由用户丢弃；以下历史路径和数字仅用于说明已做工作，不能作为当前可读取、可重评的原始证据。
+训练、模型推理与 GPU 测量按用户要求暂停，本地实现与 CPU 集成继续。旧候选奖励、逐题答案与成本原始记录已丢弃；下文历史目录仅说明输入类型，不表示资产仍可访问。新答案、奖励及原生成本由恢复运行后的实际采集产生。
 
-新一阶段按 [模块方法论与实施范围](task_spec.md) 选择必要训练、验证和实验；[当前审查](review_20261104.md)保存发现依据。以下命令描述现有入口。
-
-当前训练、模型推理与 GPU 测量暂停；本地方法实现不受此限制。旧候选奖励、逐题答案与成本原始记录已丢弃。下文引用的历史运行目录表示协议要求的输入类型，不表示记录仍可访问；声明清单与源码可继续复用，新答案、动作奖励及原生成本由恢复运行后的实际采集产生。
+要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)，历史发现见 [审查基线](review_20261104.md)，资产状态见 [预算阅读记录](budget_loop_20261103.json)。以下命令描述实际入口。
 
 运行冻结同一 Qwen3-32B 模型权重与解码参数，显式配置端点、协议身份与原生缓存。主机目录、GPU、服务端口和
 输出目录由本次运行配置声明；不复用旧批次的固定路径或截止时间。
@@ -29,9 +26,15 @@ P1 支持策略配置为 `configs/evidence_policy_fixed_qwen.yaml`。
 审计配置为 `configs/reader_audit.yaml` 的 `reader_audit:{base_scope,data,review,resource_sample_seconds}`。
 会话队列使用 `evidence_cohort`；P1 支持策略直接绑定固定生成配置。
 辅助学习的 200 train / 40 dev 状态统一使用
-`runs/study/budget-loop-20261103/reader-cohorts/full/cohort_manifest.json`。
+`runs/study/auxiliary/cohorts/full/cohort_manifest.json`。
 task/support 配置必填 `training.cohort_manifest`；P1 采集必填
 `collection.cohort_manifest` 和 `cohort_split`，开发采集显式选择 `dev`。
+B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v3` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上执行一个动作后重新观察。旧一步资产不用于这个监督目标，仅重新采集目标实际变化的状态。
+
+B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_support_state_v2`，使用实际已付资源和剩余额度；旧特征资产不能直接用于该决策。
+
+B v3 修正 GAP 的已读范围：离线与线上只排除实际已读来源，统一新增 passage 额度。v2 候选标签采用了不同的排除范围，不用于 v3 拟合。
+
 B 固定流程观测使用 `execution.state_observation`，从真实请求开始计量并记录 READ/REDUCE 决策状态；
 不加载 gain 模型，不从旧 SQLite 补造物理状态。A 冻结后显式启用。
 四格固定历史入口设置 `policy_comparison.audited_history:{cohort_manifest,cohort_split,actual_rollouts}`，
@@ -61,7 +64,27 @@ python -m bench.reading_mechanisms --config ACTUAL-RUN.yaml \
   --output-dir NEW-OUTPUT/isolated
 ```
 
-辅助训练复用现有核验标签与 BGE 资产，配置 `configs/auxiliary_training.yaml`。
+辅助训练配置为 `configs/auxiliary_training.yaml`；BGE 资产按配置复用，标签由以下入口重新准备。
+先准备原始任务，再采集实际生成历史、声明会话隔离的 cohort、生成教师标注配置，最后标注和训练。以下命令供恢复 GPU 工作后执行，当前不运行：
+
+```bash
+python -m training.a_workflow prepare-data --config configs/auxiliary_training.yaml \
+  --output runs/study/data
+python -m training.task_rollout --config configs/auxiliary_training.yaml \
+  --min-conversations 40 --min-turns 300 --concurrency 4
+python -m training.a_workflow cohort --config configs/auxiliary_training.yaml \
+  --output runs/study/auxiliary/cohorts
+python -m training.a_workflow prepare-labels --config configs/auxiliary_training.yaml \
+  --output runs/study/auxiliary/task-labels
+python -m training.task_labeling --config runs/study/auxiliary/task-labels/task_labeling.yaml
+```
+
+采集量是示例，cohort manifest 记录实际数量与 shortfall，不预先宣称达到 200/40。
+`task_cohort_labeling.existing_labels_path: null` 表示从零标注；只有存在可复用的真实标签时才指定文件。
+当前配置 `task_model.initial_adapter_path: null` 与 `training.support_parent_asset: null` 从显式 BGE base 初始化；设为非空父路径时只复用真实存在的资产，不自动回退。完整学习接口已经实现，尚未运行训练、推理或开发评价，不能视为已有有效学生/支持资产。
+实际历史数据库为 `runs/study/actual-rollout/sessions.sqlite3`。训练与评价共用
+`runs/study/auxiliary/task-labels/task_labels.jsonl`，由 cohort manifest 隔离 train/dev。
+
 运行时以 `CUDA_VISIBLE_DEVICES` 选择物理设备，配置内使用该进程的 `cuda:0`：
 
 ```bash
@@ -74,6 +97,10 @@ python -m training.train_models --config configs/auxiliary_training.yaml --stage
 `build_examples` 使用固定 Qwen 服务生成支持关系标签。P1 采集将
 `collection.task_asset` 设为实际训练后的 task 资产、`parent_support_asset` 设为实际 support 资产，
 按同一 manifest 分别采集 train/dev；查询资产身份随奖励保存。
+
+当前辅助配置将新 support 输出接为 P1 父资产与 P0 对照，将新 task 输出同时接入 P1 奖励采集和比较的查询编码器。初始化真实历史的辅助 rollout 使用显式无查询 adapter 的 BGE 基座；若采用已有资产，修改对应显式路径后重新绑定采集身份。
+
+已有候选答案的纯 CPU 诊断随 `python -m training.train_evidence_policy prepare --config CONFIG.yaml` 写入 `preference_manifest.json.candidate_quality_diagnostics`。该命令只读取已生成答案、评分和成本资产，按真实历史/预算/reader/scorer/query 分组，给出候选质量上限、最高预测并列时的遗憾区间和声明任务缺失列表，不产生模型训练或推理。该诊断入口已经实现；输入资产不可用时不产生研究诊断结果，夹具结果不写作研究结果。
 
 固定模型协议审计与四格比较示例：
 
@@ -106,6 +133,10 @@ B 从冻结 A 的真实观察采集动作分支；失败尝试中已完成步骤
 计数与总额同时匹配才得 1 分；
 公开 Loong test 保留官方 loong_reference_score/100，二者通过 metric_by_split 明确区分。
 
+C 使用 `paired_native_retention_v5` 及 `target_demand_rule=exact_complete_causal_prefix_and_body_ranges_v1`，旧标签不能直接重命名为新目标。训练行必须保存独立会话集合，train/dev 集合互斥；同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。v4 资产不直接挂入新选择。只有相同完整来源需求重访才标注整次下一 READ 的 target 收益；部分页复用仍记录在原生观察与整窗成本中。新增 owner 的目标收益按完整来源需求去重，容量与驻留按共享页增量；配对外部请求代价进入选择，正 collateral 不再额外记为可叠加收益。完整集合的真实净效果仍由同轨 Native/value 对照和物理积分验收。
+
+C 的两次容量构造共用原有 TTL15/60/180、owner、页并集和需求去重目标，不新增 TTL 网格或原生接口。
+
 C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观察窗。`replay` 与
 `retention_pair_workflow` 默认固定 Native、TTL15、TTL60、TTL180 四臂；
 `--horizon-seconds` 只决定共同观察长度，`--ttl-seconds` 只决定保护期限。
@@ -131,6 +162,15 @@ C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观�
 python -m bench.study_workloads --tasks TASKS.jsonl --records RECORDED-REQUESTS.jsonl \
   --output FIXED-ARRIVALS.json --name DECLARED-NAME --concurrency 4
 ```
+
+旧请求记录已丢弃时，直接冻结新声明的共同到达映射，无需模型调用：
+
+```sh
+python -m bench.study_workloads --tasks TASKS.jsonl --arrivals DECLARED-ARRIVALS.json \
+  --output FIXED-ARRIVALS.json --name DECLARED-NAME --concurrency 4
+```
+
+`DECLARED-ARRIVALS.json` 必须显式列出每道任务的相对到达秒数，例如 `{"session:1":0,"session:2":30}`；该示例不是已选定的正式负载。保存任务与到达映射哈希，E0—E4 复用同一声明；原生观测仍由未来真实执行产生。
 
 来源记录必须包含所有声明任务的请求开始时间；未记录的上游到达不能反推或补成零。各方案复用同一固定计划及哈希，按各自真实 P3 历史完成依赖；等待前一轮和等待并发槽均计入完整响应。
 `--complete-slo-seconds` 设置事先声明的完整响应 SLO，goodput 按达标完整回答/观察秒数计算，无阈值时不生成 SLO 数值。
@@ -167,6 +207,8 @@ python -m bench.capacity_workflow --full-queue --methods B6_native \
 cohort、reader 与预算确定对照条件，各格分别列出实际启用的 B/C 资产。
 报告保留全分母质量、完成率、已交付完整响应 P95、逐数据集 SLO goodput 与成本出处。比较身份同时核对到达计划哈希和 SLO；提供 `--cost-manifest`/`--physical` 生成成本命令时，必须通过 `--gpu-devices` 声明实际设备，不默认包含整机。
 
+联合汇总的 `dataset_protocols` 来自矩阵已有 `split_kind` 与分区指标声明；Markdown 将公开基准、参考历史诊断和构造机制任务分表。每轨原指标、完整题目分母、已评分子集与未知区间同时呈现，混合开发 Q 的登记权重保持不变。
+
 联合 Markdown 对照表直接呈现完整分母质量差与 P95 相对变化（候选/基线−1，负值为降低），并列出候选质量是否不低于基线。相对延迟只在比较身份一致、双方完整交付且全部已评分时提供；质量判断为点估计，资源变化仍读取实际成本账本。
 
 每格按自己的 P3 历史执行原 350 题，使用声明的开发指标与权重。未交付回答计入
@@ -184,26 +226,3 @@ REDUCE 只读已观察材料；源 packet 的 legal_actions 保留，补充的�
 
 C 固定 DAG 回放解析原始输出文本，新的生成响应用于实际 token、耗时和费用；完整窗口
 预测用两臂窗口成本差验证，下一次 READ 的集合收益按事件及共享页去重。
-
-
-B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v3` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上执行一个动作后重新观察。旧一步资产不用于这个监督目标，仅重新采集目标实际变化的状态。
-
-C 使用 `paired_native_retention_v5` 及 `target_demand_rule=exact_complete_causal_prefix_and_body_ranges_v1`，旧标签不能直接重命名为新目标。训练行必须保存独立会话集合，train/dev 集合互斥；同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。v4 资产不直接挂入新选择。只有相同完整来源需求重访才标注整次下一 READ 的 target 收益；部分页复用仍记录在原生观察与整窗成本中。新增 owner 的目标收益按完整来源需求去重，容量与驻留按共享页增量；配对外部请求代价进入选择，正 collateral 不再额外记为可叠加收益。完整集合的真实净效果仍由同轨 Native/value 对照和物理积分验收。
-
-已有候选答案的纯 CPU 诊断随 `python -m training.train_evidence_policy prepare --config CONFIG.yaml` 写入 `preference_manifest.json.candidate_quality_diagnostics`。该命令只读取已生成答案、评分和成本资产，按真实历史/预算/reader/scorer/query 分组，给出候选质量上限、最高预测并列时的遗憾区间和声明任务缺失列表，不产生模型训练或推理。实际数据不在本地时，先完成入口实现，待资产可用后运行；不能把夹具结果写作研究结果。
-
-联合汇总的 `dataset_protocols` 来自矩阵已有 `split_kind` 与分区指标声明；Markdown 将公开基准、参考历史诊断和构造机制任务分表。每轨原指标、完整题目分母、已评分子集与未知区间同时呈现，混合开发 Q 的登记权重保持不变。
-
-
-旧请求记录已丢弃时，直接冻结新声明的共同到达映射，无需模型调用：
-
-```sh
-python -m bench.study_workloads --tasks TASKS.jsonl --arrivals DECLARED-ARRIVALS.json \
-  --output FIXED-ARRIVALS.json --name DECLARED-NAME --concurrency 4
-```
-
-`DECLARED-ARRIVALS.json` 必须显式列出每道任务的相对到达秒数，例如 `{"session:1":0,"session:2":30}`；该示例不是已选定的正式负载。保存任务与到达映射哈希，E0—E4 复用同一声明；原生观测仍由未来真实执行产生。
-
-B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_support_state_v2`，使用实际已付资源和剩余额度；旧特征资产不能直接用于该决策。C 的两次容量构造共用原有 TTL15/60/180、owner、页并集和需求去重目标，不新增 TTL 网格或原生接口。
-
-B v3 修正 GAP 的已读范围：离线与线上只排除实际已读来源，统一新增 passage 额度。v2 候选标签采用了不同的排除范围，不用于 v3 拟合。
