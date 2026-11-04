@@ -879,7 +879,7 @@
     "remaining_scoring_check": "historical case006 extraction inconsistency remains a summary only; raw records were discarded, so fresh-protocol scoring must be validated on new data"
   },
   "implementation_20261104": {
-    "status": "core local implementation audited; continuing CPU-only diagnostics and delivery preparation; model training/inference and GPU measurements held",
+    "status": "local primary implementation and integration delivered; fresh current-protocol observations, B/C assets and final measurements await user resuming model/GPU work",
     "B_protocol": "infer_bridge_ready_or_one_gap_one_terminal_read_v3",
     "C_asset_kind": "paired_native_retention_v5",
     "C_selection": "deduplicated target savings minus control, incremental residency and paired external-request penalty; full protected-set net must be measured",
@@ -889,7 +889,6 @@
       "subtests_passed": 2,
       "core_seconds": 4.26,
       "arrival_budget_adjacent_passed": 31,
-      "cpu_demo": "runs/demo/demo-fa3686977fc2406ebfb6304cf2a3c9fb.json",
       "fixed_arrival_tail_cancellation": "actual sampling continues to last registered arrival; blocked tasks enter delivery denominator; focused CPU test passed"
     },
     "remaining": [
