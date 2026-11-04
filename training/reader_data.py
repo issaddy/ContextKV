@@ -350,8 +350,6 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
                 "step_id": trace["read_task"]["step_id"], "phase": trace["phase"],
                 "operation": trace["read_task"]["operation"], "claims": trace["read_result"]["claims"],
                 "covered_units": trace["read_result"]["covered_units"]})
-    allowed_protocols = data.get("read_protocol_versions", [2, 3, 4])
-    trace_rows = [row for row in trace_rows if row["phase"] == "ANSWER" or row["read_protocol_version"] in allowed_protocols]
     if limit_turns is not None:
         selected = set(dict.fromkeys(row["task_id"] for row in trace_rows))
         selected = set(sorted(selected)[:limit_turns])

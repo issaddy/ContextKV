@@ -6,7 +6,6 @@ reader_audit:
     output_dir: runs/study/reader-audit
     answer_output_tokens: 1024
     minimum_quality: 0.85
-    read_protocol_versions: [2, 3, 4]
     rollouts: []
   review:
     base_urls: [http://127.0.0.1:30001]

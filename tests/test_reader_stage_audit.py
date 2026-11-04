@@ -1,25 +1,11 @@
 """Offline reader stage audit, immutable review and native cohort boundaries."""
-
-
 from dataclasses import dataclass
-
-
 import json
-
-
 from types import SimpleNamespace
-
 
 import pytest
 
-
-
-
-
-
-from training.reader_data import (history_digest, reader_review_body, review_reader_trace)
-
-
+from training.reader_data import history_digest, reader_review_body, review_reader_trace
 
 
 def trace(identity="answer", phase="ANSWER"):
@@ -96,3 +82,32 @@ def test_candidate_diagnosis_keeps_ties_histories_and_declared_denominator():
                                           declared_task_ids=["observed"])
     assert split["comparison_groups"] == 2
     assert split["available_group_oracle_mean"] == .6
+
+
+@pytest.mark.asyncio
+async def test_batch_audit_includes_current_numeric_read_and_selector_protocols(tmp_path, monkeypatch):
+    from training import reader_data
+
+    items = [dict(trace("read", "READ"), read_protocol_version=5),
+             dict(trace("select", "REDUCE"), read_protocol_version=7),
+             dict(trace(), read_protocol_version=None)]
+    reader_data.write_rows(tmp_path / "traces.jsonl", items)
+    scope = SimpleNamespace(model_path="specified-fixture", identity="fixed",
+                            manifest=lambda: {"identity": "fixed"})
+    monkeypatch.setattr("engine_patches.contextkv_model_scope.load_model_scope", lambda _: scope)
+    monkeypatch.setattr("adapters.query_selector.OpenAICompletionClient",
+                        lambda _: SimpleNamespace(close=lambda: None))
+    seen = []
+
+    async def review(item, client, **kwargs):
+        seen.append((item["phase"], item["read_protocol_version"]))
+        return {"example_id": item["example_id"], "review_protocol": reader_data.REVIEW_PROTOCOL,
+                "status": "accepted"}
+
+    monkeypatch.setattr(reader_data, "review_reader_trace", review)
+    manifest = await reader_data.review_reader_traces({"reader_audit": {
+        "base_scope": "specified-fixture", "data": {"output_dir": str(tmp_path), "minimum_quality": .85},
+        "review": {"base_urls": ["http://fixture.invalid"], "max_input_tokens": 4096,
+                   "max_output_tokens": 1024, "context_window": 8192, "timeout_seconds": 1}}})
+    assert set(seen) == {("READ", 5), ("REDUCE", 7), ("ANSWER", None)}
+    assert manifest["requested_examples"] == manifest["reviewed_examples"] == 3
