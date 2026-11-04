@@ -153,8 +153,9 @@ python -m bench.capacity_workflow --full-queue \
   --value-model "$C_VALUE" --concurrency 1 4 --output "$JOINT_OUTPUT"
 ```
 
-完整队列四格共用冻结 A 的模型、支持策略、查询资产、阅读协议和预算。收益 B 的 reader
-身份由实际运行配置与实测收益资产绑定。`--online-gpu-devices` 接受逗号分隔的物理卡号。
+完整队列四格共用冻结 A 的模型、支持策略、查询资产、阅读协议和预算。可用
+`--methods B6_native` 等参数将指定方法分配到独立 reader 服务。默认执行四格，每格使用同一完整队列。
+收益 B 的 reader 身份由实际运行配置与实测收益资产绑定。`--online-gpu-devices` 接受逗号分隔的物理卡号。
 可通过 `--online-process-roots` 指定逗号分隔的 PID，默认按 reader 和 helper 的端口发现
 进程并加入协调进程。`--reader-base-url` 显式指定实际服务端点。联合矩阵沿用正式 350 题清单，
 其中检索器设备配置与本次物理卡号一致。GAP 限额沿用冻结观测配置，
@@ -171,3 +172,8 @@ C 已准备 train/dev 各两窗，共计划 2388 次真实生成；`retention-pr
 记录同一180秒观察窗、Native/TTL15/60/180四臂及排队依赖。训练轨迹来自已有真实证据候选，
 开发轨迹来自P0自身P3；其与最终冻结A的联合队列分别计量。训练轨迹中624次READ输入
 已按当前协议重新编译，全部与原始输入hash一致，审计未调用生成模型。
+
+B 已完成最早两个训练状态的小批次：5 个回答分支、3 组实际配对（6 次 reader、5 次 judge），
+补检索的一组质量差为 +0.16，其余两组为0。原始记录在 `b-selected-a-pilot`。
+当前动作协议允许对至少两条 lookup/procedure 原事实做一次可选 summarize；归约仍只读已观察材料。
+源 packet 的 legal_actions 保留，采集清单另记本次补充的反事实候选，实际执行前重新报价。

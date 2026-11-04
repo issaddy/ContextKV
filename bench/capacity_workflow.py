@@ -223,18 +223,20 @@ def prepare_full_queue(args, root):
         matrix["datasets"][name].update(protocol="P3", continue_conversation_failures=True)
     matrix_path = root/"joint-matrix.yaml"
     matrix_path.write_text(yaml.safe_dump(matrix, sort_keys=False))
+    selected_methods = [method["id"] for method in matrix["methods"]
+        if args.methods is None or method["id"] in args.methods]
     jobs = []
     for concurrency in args.concurrency:
-        for method in matrix["methods"]:
-            name = f"c{concurrency}-{method['id']}"
-            jobs.append(dict(name=name, concurrency=concurrency, method=method["id"], datasets=datasets,
+        for method in selected_methods:
+            name = f"c{concurrency}-{method}"
+            jobs.append(dict(name=name, concurrency=concurrency, method=method, datasets=datasets,
                 requested_qa=requested, matrix=str(matrix_path), output=str(root/"jobs"/name/"generation")))
     manifest = dict(format="contextkv_full_queue_joint_plan_v1", scope="full declared P3 development queue",
         source_config=snapshot(args.config), source_matrix=snapshot(args.matrix),
         reader_profile_id=profile, reader_run=snapshot(run_path), resource_scope=scope,
         assets={"gain": snapshot(gain_path), "value": snapshot(args.value_model)},
         cohort=cohorts, value_policy=value_policy, gain_mode="observed_actions", concurrency=args.concurrency,
-        requested_qa=requested*len(jobs), jobs=jobs, config=str(config_path),
+        selected_methods=selected_methods, requested_qa=requested*len(jobs), jobs=jobs, config=str(config_path),
         cache_boundary="one cold boundary per method and dataset; never cold between turns",
         scoring="declared development metrics and weights with the complete task denominator")
     write_json(root/"capacity-plan.json", manifest)
@@ -420,6 +422,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="Study configuration with frozen A for full-queue evaluation")
     parser.add_argument("--full-queue", action="store_true", help="Run all declared development tasks in each B/C cell")
+    parser.add_argument("--methods", nargs="+", choices=("B6_native", "B6_value", "S3_native", "S3_value"),
+                        help="Select full-queue cells for this reader")
     parser.add_argument("--source-manifest", help="Source manifest for the two-turn capacity diagnostic")
     parser.add_argument("--matrix")
     parser.add_argument("--parent-policy-asset")
@@ -444,6 +448,8 @@ def main(argv=None):
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
+    if args.methods is not None and not args.full_queue:
+        parser.error("--methods requires --full-queue")
     if args.full_queue:
         if not args.matrix or not args.value_model or not args.online_gpu_devices or not args.reader_base_url:
             parser.error("--full-queue requires --matrix, --value-model, --online-gpu-devices and --reader-base-url")

@@ -19,6 +19,7 @@ import time
 import sys
 from urllib.parse import urlsplit
 
+from controller.action_proposals import observed_reduction_task
 from controller.context_schema import EvidenceSet, EvidenceUnit, ReadingOutcome, SourceSpan, TaskState
 from controller.schema import QueryContext, SessionSnapshot, TurnRecord
 from controller.serialization import decode, to_jsonable
@@ -110,10 +111,18 @@ def observed_rows(rows, packets, *, selection=None):
             cohort_manifest_sha256=packet["cohort_manifest_sha256"],
             resident_model_manifest_digest=packet["resident_model_manifest_digest"])
         key = (packet["decision_seq"], packet["native_condition"]["observed_time_ns"], identity)
+        reduction = observed_reduction_task(state)
+        supplement = ({"family": "reduce_once", "operation": reduction.operation,
+                       "need_ids": reduction.need_ids, "input_claim_ids": reduction.input_claim_ids}
+                      if reduction is not None and reduction.operation == "summarize" else None)
         candidate = {**row, "task_state": to_jsonable(state.plan.task_state),
-                     "observed_packet": packet, "observed_binding": binding}
+                     "observed_packet": packet, "observed_binding": binding,
+                     "current_protocol_reduce_candidate": supplement}
         for kind in kinds:
-            if kind not in packet["legal_actions"]:
+            if kind == "reduce_once":
+                if reduction is None or (kind not in packet["legal_actions"] and supplement is None):
+                    continue
+            elif kind not in packet["legal_actions"]:
                 continue
             action = task_id, kind
             if action in chosen:
@@ -139,7 +148,13 @@ def observed_rows(rows, packets, *, selection=None):
     if selection is not None:
         selection.update(rule="first legal decision_seq/native observed time/observation_id per unique task and action; no future outcomes",
             selected=[{"task_id": row["task_id"], "observation_id": row["observed_packet"]["observation_id"],
-                       "actions": row["observed_action_kinds"]} for row in result],
+                       "actions": row["observed_action_kinds"],
+                       "source_observed_actions": row["observed_packet"]["legal_actions"],
+                       "current_protocol_supplements": [row["current_protocol_reduce_candidate"]]
+                           if "reduce_once" in row["observed_action_kinds"]
+                               and "reduce_once" not in row["observed_packet"]["legal_actions"]
+                               and row["current_protocol_reduce_candidate"] is not None else []}
+                      for row in result],
             observed_task_ids=[row["task_id"] for row in rows if row["task_id"] in observed_tasks],
             missing_observation_task_ids=[row["task_id"] for row in rows if row["task_id"] not in observed_tasks],
             action_coverage={kind: coverage.get(kind, []) for kind in kinds},
@@ -810,7 +825,10 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                             for kind, reason in reasons.items() if kind not in available))
                         plans = tuple(plan for plan in plans if plan.semantic_kind == "direct_answer"
                                       or plan.semantic_kind in row["observed_action_kinds"])
-                        trace, scope_material = {"source": "recorded_observed_state", "binding": observed}, None
+                        trace, scope_material = {"source": "recorded_observed_state", "binding": observed,
+                            "source_observed_actions": packet["legal_actions"],
+                            "current_protocol_reduce_candidate": row["current_protocol_reduce_candidate"]
+                                if "reduce_once" in row["observed_action_kinds"] else None}, None
                     else:
                         selection = await provider.retrieve(snap, row["question"], row["task_id"])
                         base = selection.context_plans[0]
