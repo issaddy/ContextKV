@@ -405,7 +405,7 @@
       "fitting": "absolute branch costs from actual pre-action quotes; quality features unchanged",
       "online_increment": "action absolute cost minus DIRECT absolute cost under the same current observation",
       "actual_signed_differences": "diagnostic labels; not the new online cost head target",
-      "status": "implemented, not yet fitted or evaluated"
+      "status": "Fitted from the completed current paired batch; final online joint evaluation not run"
     },
     "eligible_for_new_P1_training": false,
     "selected_A_pilot": {
@@ -477,15 +477,6 @@
       "manifest": "runs/study/budget-loop-20261103/selected-a-followthrough/dev/frozen/P0_source_first_shared/generation_manifest.json"
     },
     "failed_capture_observations": 19,
-    "running_collection_scope": {
-      "artifact": "runs/study/budget-loop-20261103/b-selected-a-paired/train/cohort.json",
-      "declared_source_tasks": 200,
-      "planned_source_tasks": 148,
-      "planned_decision_states": 210,
-      "initial_observations_excluded_by_loaded_collector": 178,
-      "protocol": "Completed collection used post-READ snapshots; corrected initial-state support was not recollected",
-      "code_correction": "future collection accepts actual post-retrieval initial states when DIRECT/action are legal; source task and decision-state counts reported separately"
-    },
     "completed_collection": {
       "artifact": "runs/study/budget-loop-20261103/b-selected-a-paired/workflow.json",
       "asset": "runs/study/budget-loop-20261103/b-selected-a-paired/plan-gain.json",
@@ -518,6 +509,16 @@
       "development_effective_delta_Q_MAE": 0.0759071914758785,
       "elapsed_ms": 6495429.018892348,
       "quality_claim": "paired prediction error only; no complete-queue policy improvement measured"
+    },
+    "completed_collection_scope": {
+      "artifact": "runs/study/budget-loop-20261103/b-selected-a-paired/train/cohort.json",
+      "declared_source_tasks": 200,
+      "planned_source_tasks": 148,
+      "planned_decision_states": 210,
+      "initial_observations_excluded_by_loaded_collector": 178,
+      "protocol": "Completed collection used post-READ snapshots; corrected initial-state support was not recollected",
+      "code_correction": "future collection accepts actual post-retrieval initial states when DIRECT/action are legal; source task and decision-state counts reported separately",
+      "unused_label_state_gate": "Observed-action collection validates the actual packet TaskState; the unused old label TaskState gate is restricted to whole_plan"
     }
   },
   "P1_scoring": {

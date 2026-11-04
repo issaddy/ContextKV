@@ -636,28 +636,30 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
     selected, cohort = audited_cohort(labels, source_rows, split=settings["split"], limit=len(labels),
         cohort_manifest=settings["cohort_manifest"])
     verify_actual_history(selected, read_rows(settings["actual_rollouts"]))
-    validator = AuditedTaskInterpreter(None)
-    valid, invalid = [], []
-    for row in selected:
-        history = tuple(decode(TurnRecord, turn) for turn in row["actual_history"])
-        state = decode(TaskState, row["task_state"])
-        validator.bind(row, state)
-        try:
-            validator.interpret(OnlineTurn(row["conversation_id"], row["task_id"], row["turn"],
-                "training", row["question"], (), (), "P3"), RetrievalState(0, history))
-        except ValueError as error:
-            invalid.append({"task_id": row["task_id"], "reason": "invalid_audited_task_binding", "error": str(error)})
-        else:
-            valid.append(row)
+    mode = settings.get("mode", "whole_plan")
+    valid, invalid = selected, []
+    if mode == "whole_plan":
+        validator = AuditedTaskInterpreter(None)
+        valid = []
+        for row in selected:
+            history = tuple(decode(TurnRecord, turn) for turn in row["actual_history"])
+            state = decode(TaskState, row["task_state"])
+            validator.bind(row, state)
+            try:
+                validator.interpret(OnlineTurn(row["conversation_id"], row["task_id"], row["turn"],
+                    "training", row["question"], (), (), "P3"), RetrievalState(0, history))
+            except ValueError as error:
+                invalid.append({"task_id": row["task_id"], "reason": "invalid_audited_task_binding", "error": str(error)})
+            else:
+                valid.append(row)
+    elif mode != "observed_actions":
+        raise ValueError("gain collection mode must be whole_plan or observed_actions")
     requested = cohort["declared_task_ids"][:settings["limit_tasks"]]
     eligible = {row["task_id"]: row for row in valid}
     valid = [eligible[identity] for identity in requested if identity in eligible]
-    mode = settings.get("mode", "whole_plan")
     observation_selection = {}
     if mode == "observed_actions":
         valid = observed_rows(valid, read_rows(settings["observed_states"]), selection=observation_selection)
-    elif mode != "whole_plan":
-        raise ValueError("gain collection mode must be whole_plan or observed_actions")
     cohort["task_ref_exclusions"] = invalid
     cohort["requested_task_ids"] = requested
     cohort["missing_eligible_label_task_ids"] = [identity for identity in requested if identity not in eligible]
