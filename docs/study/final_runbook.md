@@ -32,7 +32,7 @@ B 固定流程观测使用 `execution.state_observation`，从真实请求开始
 `training.collect_plan_gains --observations OBS --actual-turns TURNS --output PACKETS`
 导出后，`training.plan_gain_workflow --mode observed_actions --observed-states PACKETS`
 沿用源 cohort 身份。每个源 task 保留各合法动作首次可配对的观测，不按未来质量选点。
-`observed_actions` 沿用源动作的输出份额，不扫描 `read-outputs`；当前 181/36 个有效状态的生成预算上限设为 3041，声明分母仍为 200/40。
+`observed_actions` 沿用源动作的输出份额，不扫描 `read-outputs`；当前 178/36 个可调度状态的生成预算上限设为 3041，声明分母仍为 200/40。
 新成本拟合读取各分支 `run.json.pre_action_quote`，质量与成本分别归一化；`cold` 数据只能说明冷启动费用，`observed` 保留实际分支起点，不声称恢复源缓存。
 B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
 `--cohort-manifest` 指向同一文件；不再使用 `--partition-seed` 或 `--dev-fraction`
@@ -100,9 +100,10 @@ Q 为 0.44509019347880296。报告位于
 效用训练已去除实际 READ 后长度带来的输入泄漏，训练和推理统一使用零上下文
 `evidence_set_only`。新资产 `models/study-support-fixed-qwen-set-only` 沿用 1400 对偏好、
 147 个状态和 3 个 epoch，已完成训练，完整阶段耗时 1485.07 秒；40 题验证已完成。旧 B capture 完成的 115 个状态保留为
-旧模型的成本记录，不用于新模型训练。B 配对尚未执行。
+旧模型的成本记录，不用于新模型训练。B 小批次配对已完成，完整状态配对待开发观测采集结束后执行。
 `selected-a-followthrough/selection.json` 已记录 P0 的冻结资产、配置与选择证据；
-当前重新采集 P0 的 train/dev 观测，随后执行 B 配对。修正后 P1 的隔离协议固定历史格在 B 之后执行。
+P0 train 观测已完成 178 个状态：173 个交付答案、5 个失败，共 590 条实际观察；失败前的有效观察也进入配对。
+dev 观测仍在采集，随后执行 B 配对。修正后 P1 的隔离协议固定历史格在 B 之后执行。
 
 `constructed_numeric_exact_v1` 已重评 21 个已有长文答案。抽取器只看到实际问题和答案，
 由代码精确比较整数计数、Decimal 总额和单位。正式筛选前长文运行交付 16/20 答案，

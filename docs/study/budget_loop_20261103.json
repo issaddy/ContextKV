@@ -1,8 +1,8 @@
 {
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
-  "gpu_status": "P0 source-first A frozen; new B train capture and remaining corrected-P1 P3 cells running",
-  "evidence_scope": "Full350 pre-freeze P0 candidate Q=0.6575398416096789 versus registered Q=0.44509019347880296 under unchanged request limits. A selection, B counterfactual fit, C pairs and frozen joint evaluation remain open.",
+  "gpu_status": "P0 source-first A frozen; B train capture completed, dev capture and corrected-P1 P3 cells running",
+  "evidence_scope": "Full350 pre-freeze P0 candidate Q=0.6575398416096789 versus registered Q=0.44509019347880296 under unchanged request limits. A is frozen; B counterfactual fit, C pairs and frozen joint evaluation remain open.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
     "layout": "source_first",
@@ -391,7 +391,7 @@
   },
   "B_observation_entry": {
     "implementation": "capture actual fixed-plan decision states without loading a gain model",
-    "status": "115 completed old-P1 capture states retained as cost evidence; B pairing has not run",
+    "status": "115 old-P1 capture states retained as cost evidence. Selected-P0 pilot pairing completed; train capture completed, dev capture running before full pairing.",
     "cohort": "original full200/40 manifest; unique source states counted before observation/action selection",
     "cost_model": {
       "schema": "pre_action_native_absolute_v1",
@@ -457,6 +457,12 @@
     },
     "scheduled_train_states": 178,
     "declared_train_states": 200,
+    "selected_A_train_capture": {
+      "completed": 173,
+      "failed": 5,
+      "observations": 590,
+      "manifest": "runs/study/budget-loop-20261103/selected-a-followthrough/train/frozen/P0_source_first_shared/generation_manifest.json"
+    },
     "failed_capture_state_policy": "preserve genuine pre-failure observations; map through failed Attempt IDs; later capture failure is provenance, not a model feature"
   },
   "P1_scoring": {
