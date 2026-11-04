@@ -1,7 +1,7 @@
 {
   "baseline_commit": "85f4ed4",
   "measurement_kind": "hardware",
-  "gpu_status": "P0 source-first A frozen; B train capture completed, dev capture and corrected-P1 P3 cells running",
+  "gpu_status": "Frozen-A B dev capture and corrected-P1 P3 running; required C pairs running on released GPU4",
   "evidence_scope": "Full350 pre-freeze P0 candidate Q=0.6575398416096789 versus registered Q=0.44509019347880296 under unchanged request limits. A is frozen; B counterfactual fit, C pairs and frozen joint evaluation remain open.",
   "source_first_numeric_pair": {
     "reader": "R0 Qwen3-32B BF16",
@@ -562,7 +562,7 @@
     "P1": "runs/study/budget-loop-20261103/p1-rewards/after-collection-stages.json",
     "full_protocol_queue": "runs/study/budget-loop-20261103/formal-dev-c4-grounded/launch.json",
     "B_train_capture": "runs/study/budget-loop-20261103/selected-a-followthrough/launch.json",
-    "status": "Selected P0 source-first shared (Q40=0.61). New selected-A train/dev observations and B actual pairs follow; corrected-P1 P3 and fixed-history isolated comparison remain scheduled. C pairs queued after B release; full frozen-A joint evaluation still required.",
+    "status": "P0 shared A frozen. B train capture finished (173 completed, 5 failed); dev capture running before full paired fit. Required C four-window pairs running on GPU4. Full350 fixed/gain-B x native/value at c1/c4 queued on three registered identical readers after real assets and reader release.",
     "selection_rule": "full declared40 quality; Qwen3-32B weights fixed",
     "frozen_A": {
       "selection": "runs/study/budget-loop-20261103/selected-a-followthrough/selection.json",
@@ -573,7 +573,10 @@
     },
     "C_pairs": "runs/study/budget-loop-20261103/retention-preparation/paired-plan.json",
     "C_planned_generations": 2388,
-    "joint_inputs": "runs/study/budget-loop-20261103/joint-frozen-A/inputs.json"
+    "joint_inputs": "runs/study/budget-loop-20261103/joint-frozen-A/inputs.json",
+    "C_dispatcher": "runs/study/budget-loop-20261103/retention-preparation/pairing-execution.json",
+    "joint_queue": "runs/study/budget-loop-20261103/joint-frozen-A/launch-plan.json",
+    "joint_worker_input_audit": "runs/study/budget-loop-20261103/joint-frozen-A/worker-config-differences.json"
   },
   "failure_artifact_cleanup": {
     "redundant_bytes_removed": 3289295076,
