@@ -112,6 +112,10 @@ C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观�
 区分无重访、GPU 命中、Host 回载和重算；混合访问同时保留各类页数和事件数。
 训练行中的 `observation_seconds` 是共同计费窗口，`ttl_seconds` / `horizon_seconds`
 是策略保护期限。
+候选前缀必须含完整来源正文页；纯系统或元数据前缀不作为“无重访”训练样本。
+单前缀配对分别积分 ready 页和传输目标已分配空间：H2D 计入 GPU，D2H 计入 Host。
+`profiling.retention_trace reassess --replay-root COMPLETED_REPLAY` 从已完成重放的原始回执重算派生费用，
+保留原请求、采样窗口和全部已付成本，不产生模型调用。
 
 冻结 A 后，联合开发验收使用 `bench.capacity_workflow --full-queue`。
 

@@ -67,7 +67,8 @@ async def run(args):
         raise ValueError("common observation window must cover 180 seconds and all TTL arms")
     selected = {split: choose_windows(trace, horizon_seconds=horizon, max_candidates=2,
         max_prefixes_per_decision=args.max_prefixes_per_decision, history_steps=args.history_steps,
-        max_replay_steps=args.max_replay_steps, seed=args.seed)[0] for split, trace in traces.items()}
+        max_replay_steps=args.max_replay_steps, seed=args.seed, page_size=args.page_size)[0]
+        for split, trace in traces.items()}
     calls = {split: sum((1+len(args.ttl_seconds))*len(trace_generations(window_trace(traces[split], item)))
         for item in values) for split, values in selected.items()}
     plan = dict(scope="actual source-first fixed-input same-window multi-TTL C costs", maximum_windows=4,
@@ -98,6 +99,8 @@ async def run(args):
             "--max-candidates", "2", "--max-prefixes-per-decision", str(args.max_prefixes_per_decision),
             "--history-steps", str(args.history_steps), "--max-replay-steps", str(args.max_replay_steps),
             "--max-total-generations", str(calls[split]), "--residency-interval", ".5", "--seed", str(args.seed)]
+        if args.page_size is not None:
+            command += ["--page-size", str(args.page_size)]
         with (output/(split+"-replay.log")).open("wb") as log:
             process = await asyncio.create_subprocess_exec(*command, stdout=log, stderr=asyncio.subprocess.STDOUT)
             code = await process.wait()
@@ -115,6 +118,10 @@ async def run(args):
             process = await asyncio.create_subprocess_exec(*command, stdout=log, stderr=asyncio.subprocess.STDOUT)
             code = await process.wait()
         plan["value_asset"] = str(output/"value-model.json") if code == 0 else None
+        if code:
+            plan["status"] = "fit_failed"
+            write_json(output/"paired-workflow.json", plan)
+            raise RuntimeError("C value fitting failed; see "+str(output/"fit.log"))
     asset = output/"value-model.json"
     if asset.exists():
         model_data = json.loads(asset.read_text())

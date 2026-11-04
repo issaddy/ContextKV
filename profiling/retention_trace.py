@@ -573,14 +573,11 @@ class PrefixPageSampler:
     def __init__(self, engine, *, interval=.25):
         self.runtime, self.interval = PrefixRuntimeClient(engine), interval
         self.watches, self.samples, self.errors, self.controls = {}, [], [], []
-        self.order = []
         self._stop = asyncio.Event()
         self._task = None
         self._sampling = asyncio.Lock()
 
     def watch(self, prefix_id, receipt, ids, sources):
-        if prefix_id not in self.order:
-            self.order.append(prefix_id)
         self.watches[prefix_id] = dict(receipt=receipt, prefix_input_ids=tuple(ids), sources=sources)
 
     async def sample(self):
@@ -615,20 +612,11 @@ class PrefixPageSampler:
     def observation(self):
         return dict(clock="client_monotonic", interval_seconds=self.interval,
             page_basis="native inspected ready causal pages; inflight markers retained",
-            marginal_order=self.order, samples=self.samples, controls=self.controls, errors=self.errors)
+            samples=self.samples, controls=self.controls, errors=self.errors)
 
 
-def marginal_page_counts(prefixes, order, tier):
-    """Exact unique-page increments in the registered first-access order."""
-    assigned, counts = set(), {}
-    for prefix_id in order:
-        pages = set(prefixes.get(prefix_id, {}).get(tier+"_page_ids", ()))
-        counts[prefix_id] = len(pages-assigned)
-        assigned.update(pages)
-    return counts, len(assigned)
-
-
-def integrate_prefix_residency(observation, prefix_id, start, end, page_size, *, protected_prefix_ids=()):
+def integrate_prefix_residency(observation, prefix_id, start, end, page_size):
+    """Integrate one observed prefix, including allocated transfer destinations."""
     samples = observation["samples"]
     before = [row for row in samples if row["timestamp"] <= start and prefix_id in row["prefixes"]]
     after = [row for row in samples if row["timestamp"] >= end and prefix_id in row["prefixes"]]
@@ -640,21 +628,18 @@ def integrate_prefix_residency(observation, prefix_id, start, end, page_size, *,
         for row in rows for key in ("inflight_h2d_tokens", "inflight_d2h_tokens"))
     costs = {}
     for tier in ("gpu", "host"):
-        integral = union_integral = attributed_integral = 0.0
+        ready_integral = pending_integral = 0.0
+        transfer = "inflight_h2d_tokens" if tier == "gpu" else "inflight_d2h_tokens"
         for row, following in zip(rows, rows[1:]):
-            counts, union = marginal_page_counts(row["prefixes"], observation["marginal_order"], tier)
-            pages = set(row["prefixes"][prefix_id][tier+"_page_ids"])
-            already_protected = {page for owner in protected_prefix_ids
-                for page in row["prefixes"].get(owner, {}).get(tier+"_page_ids", ())}
-            integral += len(pages-already_protected)*page_size*(following["timestamp"]-row["timestamp"])
-            attributed_integral += counts[prefix_id]*page_size*(following["timestamp"]-row["timestamp"])
-            union_integral += union*page_size*(following["timestamp"]-row["timestamp"])
-        costs[tier+"_token_seconds"] = integral
-        costs[tier+"_first_access_attributed_token_seconds"] = attributed_integral
-        costs[tier+"_observed_union_token_seconds"] = union_integral
+            prefix = row["prefixes"][prefix_id]
+            elapsed = following["timestamp"]-row["timestamp"]
+            ready_integral += len(set(prefix[tier+"_page_ids"]))*page_size*elapsed
+            pending_integral += prefix["residency"][transfer]*elapsed
+        costs[tier+"_ready_token_seconds"] = ready_integral
+        costs[tier+"_pending_token_seconds"] = pending_integral
+        costs[tier+"_token_seconds"] = ready_integral+pending_integral
     return dict(complete_window_coverage=True, transfer_pending_observed=pending,
-        cost_basis="sampled_ready_causal_KV_pages", protected_prefix_ids=list(protected_prefix_ids),
-        marginal_order=observation["marginal_order"], **costs)
+        cost_basis="sampled_single_prefix_ready_pages_plus_allocated_transfer_destinations", **costs)
 
 
 def trace_generations(trace):
@@ -667,6 +652,16 @@ def read_decisions(trace):
 
 def event_id(turn, event):
     return turn["attempt_id"]+":"+event["step_id"]
+
+
+def actual_page_size(reads, declared=None):
+    sizes = {event["prefix_observation"]["inspection"]["page_size"] for _, event in reads
+        if event.get("prefix_observation") and "inspection" in event["prefix_observation"]}
+    if declared is not None:
+        sizes.add(declared)
+    if len(sizes) != 1:
+        raise ValueError("coverage needs one actual observed native page_size or its explicit declaration")
+    return sizes.pop()
 
 
 def verify_trace(trace):
@@ -711,10 +706,6 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
     pool = (await engine.metrics())["pool"]
     page_size = pool["page_size"]
     cache_scope_hash = digest([asdict(fingerprint), info.cache_config_hash])
-    ordered_reads = sorted(read_decisions(trace), key=lambda item: item[1]["source_started_s"])
-    pages.order = list(dict.fromkeys("trace-prefix:"+digest([turn["session_id"], cache_scope_hash,
-        token_hash(event["prefix_input_ids"][:len(event["prefix_input_ids"])//page_size*page_size])])
-        for turn, event in ordered_reads))
     native = NativePoolSampler(config.engine.base_url, gpu_capacity=config.engine.gpu_capacity_tokens,
         host_enabled=config.engine.host_capacity_tokens > 0, model=config.model.name, interval=.1)
     physical = StudyResourceSampler((gpu_device,), listening_processes((urlsplit(config.engine.base_url).port,)), interval=.1)
@@ -902,17 +893,23 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
 
 
 def choose_windows(trace, *, horizon_seconds, max_candidates, history_steps, max_replay_steps, seed,
-                   max_prefixes_per_decision=1):
+                   max_prefixes_per_decision=1, page_size=None):
     """Select bounded contiguous windows; never remove intervening pressure."""
     turns = sorted(trace["turns"], key=lambda turn: min(event["source_started_s"]
         for event in turn["events"] if event["kind"] != "CPU_REDUCE"))
     read_events = sorted(((index, turn, event) for index, turn in enumerate(turns)
                           for event in turn["events"] if event["kind"] == "READ"),
                          key=lambda item: item[2]["source_completed_s"])
+    page_size = actual_page_size([(turn, event) for _, turn, event in read_events], page_size)
     candidates, omitted, known = [], [], defaultdict(dict)
     for index, turn, event in read_events:
         signature = digest(event["prefix_input_ids"])
-        known[turn["session_id"]][signature] = (index, turn, event)
+        _, body_pages, _ = causal_pages(event, page_size, "")
+        if body_pages:
+            known[turn["session_id"]][signature] = (index, turn, event)
+        else:
+            omitted.append(dict(source_event_id=event_id(turn, event),
+                reason="no_complete_source_body_page", reuse_label=None))
         targets = sorted(known[turn["session_id"]].values(),
                          key=lambda item: item[2]["source_completed_s"], reverse=True)
         targets = targets[:max_prefixes_per_decision]
@@ -1013,11 +1010,11 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
         left["decision_time"], ends[0], left["inspection"]["page_size"])
     right_residency = integrate_prefix_residency(retained["prefix_observation"], right["prefix_id"],
         right["decision_time"], ends[1], right["inspection"]["page_size"])
-    eligible = all(value["complete_window_coverage"] and not value["transfer_pending_observed"]
-                   for value in (left_residency, right_residency))
+    eligible = all(value["complete_window_coverage"] for value in (left_residency, right_residency))
     eligible = eligible and native["status"] == retained["status"] == "completed"
     eligible = eligible and left["action_feasible"] and right["action_feasible"] and "retain_receipt" in right
-    eligible = eligible and bool(causal_pages(target_event, left["inspection"]["page_size"], left["inspection"]["cache_scope_hash"])[1])
+    body_pages = len(causal_pages(target_event, left["inspection"]["page_size"], left["inspection"]["cache_scope_hash"])[1])
+    eligible = eligible and body_pages > 0
     eligible = eligible and all(arm["physical_cost"]["complete_window_coverage"] and
         arm["native_cost"]["coverage"]["complete_window_coverage"] for arm in (native, retained))
     turn = next(turn for turn in trace["turns"] if any(event_id(turn, event) == identity for event in turn["events"]))
@@ -1035,6 +1032,7 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
     row = dict(source="hardware", scope="actual_source_first_single_prefix_intervention",
         dataset=turn["dataset"], split=turn["split"], training_eligible=trace["training_eligible"] and eligible,
         event_id=identity, source_event_id=selection["source_event_id"],
+        source_body_page_count=body_pages,
         predicted_reuse_event_key=source_demand_event_key(target_event["prefix_input_ids"],
             target_event["evidence_token_ranges"], left["inspection"]["page_size"],
             left["inspection"]["cache_scope_hash"]),
@@ -1076,6 +1074,7 @@ def revisit_outcomes(trace, report, selection):
     """Classify actual source-page demand inside the common observation window."""
     events = {event_id(turn, event): event for turn, event in read_decisions(trace)}
     target = events[selection["source_event_id"]]
+    body_pages = len(causal_pages(target, report["page_size"], report["cache_scope_hash"])[1])
     decision = report["events"][selection["event_id"]]["decision_target"]
     window = report["observation_window"]
     counts = dict(gpu_hit=0, host_load=0, recomputed=0)
@@ -1100,7 +1099,8 @@ def revisit_outcomes(trace, report, selection):
             categories=[category for category, count in pages.items() if count], page_counts=pages,
             demanded_page_ids=sorted(demanded), recomputed_page_ids=sorted(recomputed),
             step_wall_ms=actual["step_wall_ms"], receipt=actual["result"]["receipt"]))
-    return dict(no_revisit=not visits, revisit_events=len(visits), page_counts=counts,
+    return dict(source_body_page_count=body_pages, no_revisit=not visits if body_pages else None,
+        revisit_events=len(visits), page_counts=counts,
         event_counts={category: sum(category in visit["categories"] for visit in visits) for category in counts},
         visits=visits, observation_seconds=window["end"]-window["start"],
         classification_basis="actual demanded original-source causal pages and native device/host receipt boundaries; mixed visits retain every category")
@@ -1109,18 +1109,19 @@ def revisit_outcomes(trace, report, selection):
 async def replay(args):
     trace = json.loads(Path(args.trace).read_text())
     verify_trace(trace)
+    config = load_config(args.config)
+    page_size = args.page_size if args.page_size is not None else config.engine.page_size
     ttls = tuple(args.ttl_seconds)
     if args.horizon_seconds < max(180, *ttls):
         raise ValueError("all replay arms require one observation window covering at least 180 seconds and every TTL")
     selected, omitted = choose_windows(trace, horizon_seconds=args.horizon_seconds,
         max_candidates=args.max_candidates, history_steps=args.history_steps,
         max_replay_steps=args.max_replay_steps, seed=args.seed,
-        max_prefixes_per_decision=args.max_prefixes_per_decision)
+        max_prefixes_per_decision=args.max_prefixes_per_decision, page_size=page_size)
     arms = {"native": None, **{f"ttl{ttl:g}": ttl for ttl in ttls}}
     planned = sum(len(arms)*len(trace_generations(window_trace(trace, item))) for item in selected)
     if planned > args.max_total_generations:
         raise ValueError(f"selected replay needs {planned} model calls; declared budget is {args.max_total_generations}")
-    config = load_config(args.config)
     config = replace(config, engine=replace(config.engine, base_url=args.base_url))
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -1174,6 +1175,37 @@ async def replay(args):
     return rows
 
 
+def reassess(args):
+    """Recompute paired labels from saved native reports without model calls."""
+    root = Path(args.replay_root)
+    by_split = defaultdict(list)
+    for path in sorted(root.rglob("paired-row-*.json")):
+        previous = json.loads(path.read_text())
+        trace = json.loads((path.parent/"trace.json").read_text())
+        reports = {arm: json.loads(Path(source).read_text()) for arm, source in previous["reports"].items()}
+        for arm, report in reports.items():
+            if digest(report) != previous["report_digests"][arm]:
+                raise ValueError("paired source report changed after collection")
+        selection = trace["window_selection"]
+        derived = paired_row(trace, reports["native"], reports["retained"], selection,
+                             horizon_seconds=previous["observation_seconds"])
+        row = {**previous, **derived, "horizon_seconds": previous["ttl_seconds"],
+            "reuse_outcomes": {arm: revisit_outcomes(trace, report, selection) for arm, report in reports.items()}}
+        write_json(path, row)
+        by_split[path.parent.parent].append(row)
+    summary = []
+    for directory, rows in by_split.items():
+        (directory/"paired-rows.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in rows))
+        manifest = json.loads((directory/"manifest.json").read_text())
+        manifest.update(eligible_pairs=sum(row["training_eligible"] for row in rows),
+            postprocessing=dict(source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                model_calls=0, basis="original fixed-DAG reports; single-prefix allocated residency includes transfer destinations"))
+        write_json(directory/"manifest.json", manifest)
+        summary.append(dict(directory=str(directory), pairs=len(rows), eligible_pairs=manifest["eligible_pairs"]))
+    print(json.dumps(summary))
+    return summary
+
+
 def fit(args):
     rows = [json.loads(line) for line in Path(args.records).read_text().splitlines() if line.strip()]
     accepted, excluded, frequency = [], [], []
@@ -1184,10 +1216,11 @@ def fit(args):
             report = json.loads(Path(path).read_text())
             if digest(report) != row["report_digests"][arm]:
                 raise ValueError("paired source report changed after collection")
-        if row["split"] == args.split and row["partition_eligible"]:
+        if row["split"] == args.split and row["partition_eligible"] and row["source_body_page_count"]:
             frequency.append(row)
         if row["split"] != args.split or not row["training_eligible"]:
-            excluded.append(dict(event_id=row["event_id"], split=row["split"], training_eligible=row["training_eligible"]))
+            excluded.append(dict(event_id=row["event_id"], split=row["split"],
+                source_body_page_count=row["source_body_page_count"], training_eligible=row["training_eligible"]))
             continue
         accepted.append(row)
     model = EmpiricalRetentionModel.fit(accepted, feature_names=args.features, reuse_rows=frequency)
@@ -1288,6 +1321,7 @@ def main():
     sub.add_argument("--horizon-seconds", type=float, default=180, help="Common observation window for every arm; at least 180 seconds")
     sub.add_argument("--ttl-seconds", type=lambda value: tuple(map(float, value.split(","))), default=(15, 60, 180))
     sub.add_argument("--max-candidates", type=int, default=8)
+    sub.add_argument("--page-size", type=int)
     sub.add_argument("--max-prefixes-per-decision", type=int, default=4)
     sub.add_argument("--history-steps", type=int, default=32)
     sub.add_argument("--max-replay-steps", type=int, default=128)
@@ -1299,6 +1333,8 @@ def main():
     sub.add_argument("--split", choices=("train", "dev"), required=True)
     sub.add_argument("--features", type=lambda value: value.split(","), default=list(RETENTION_FEATURE_NAMES))
     sub.add_argument("--output", required=True)
+    sub = commands.add_parser("reassess")
+    sub.add_argument("--replay-root", required=True)
     args = parser.parse_args()
     if args.command == "export":
         export(args)
@@ -1308,6 +1344,8 @@ def main():
         asyncio.run(capture_reader_traces(args))
     elif args.command == "replay":
         asyncio.run(replay(args))
+    elif args.command == "reassess":
+        reassess(args)
     else:
         fit(args)
 

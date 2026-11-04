@@ -581,14 +581,16 @@ class PrefixReadObserver:
             owner = next((row for row in updated if row.owner_id == owner_id), self.store.prefix_owner(owner_id))
             return owner.last_status if owner is not None else {**inspected, "state": "UNRETAINED"}
         prefix_ids = prefix_ids[:inspected["boundary_tokens"]]
+        ranges, _ = source_token_ranges(self.template, rendered, stable_prefix_messages(plan, task, units), units)
+        event = source_demand_event_key(prefix_ids, ranges, inspected["page_size"], inspected["cache_scope_hash"])
+        if event is None:
+            return {**inspected, "state": "UNRETAINED", "reason": "no_complete_source_body_page"}
         arguments = dict(owner_id=owner_id, session_id=session_id, attempt_id=record.attempt_id,
             step_id=record.step_id, receipt=record.receipt, prefix_input_ids=prefix_ids, sources=sources)
         if self.settings["mode"] == "fixed_ttl":
             choice = dict(qualification_only=True, features=features)
             return await self.owners.observe(**arguments, ttl_seconds=self.settings["ttl_seconds"],
                 policy="fixed_ttl_mechanism", policy_choice=choice)
-        ranges, _ = source_token_ranges(self.template, rendered, stable_prefix_messages(plan, task, units), units)
-        event = source_demand_event_key(prefix_ids, ranges, inspected["page_size"], inspected["cache_scope_hash"])
         # The owner lock protects individual operations; allocation needs one
         # consistent protected set through all releases and retains.
         async with self._allocation_lock:
@@ -598,7 +600,7 @@ class PrefixReadObserver:
         scope, current_id = inspected["cache_scope_hash"], current["owner_id"]
         curves = {current_id: self._forecasts(features, scope)}
         feature_rows, events = {current_id: features}, {current_id: event_key}
-        feasible = {current_id: retainable_prefix(inspected) and event_key is not None}
+        feasible = {current_id: retainable_prefix(inspected)}
         receipts, records, active = {current_id: inspected}, {}, []
         status = await self.runtime.status(inspected["engine_restart_id"])
         native = {row["owner_id"]: row for row in status["prefixes"]}

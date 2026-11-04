@@ -8,18 +8,8 @@ import json
 from pathlib import Path
 
 from bench.metrics import distribution
-from profiling.retention_trace import (causal_pages, choose_windows, digest, event_id,
+from profiling.retention_trace import (actual_page_size, causal_pages, choose_windows, digest, event_id,
     read_decisions, revisit_outcomes, trace_generations, verify_trace, write_json)
-
-
-def actual_page_size(reads, declared):
-    sizes = {event["prefix_observation"]["inspection"]["page_size"] for _, event in reads
-        if event.get("prefix_observation") and "inspection" in event["prefix_observation"]}
-    if declared is not None:
-        sizes.add(declared)
-    if len(sizes) != 1:
-        raise ValueError("coverage needs one actual observed native page_size or its explicit declaration")
-    return sizes.pop()
 
 
 def decision_boundary(event):
@@ -90,7 +80,7 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
     for horizon in horizons:
         all_windows, omissions = choose_windows(trace, horizon_seconds=horizon,
             max_candidates=capacity, max_prefixes_per_decision=max_prefixes_per_decision,
-            history_steps=history_steps, max_replay_steps=max_replay_steps, seed=seed)
+            history_steps=history_steps, max_replay_steps=max_replay_steps, seed=seed, page_size=size)
         selected = all_windows[:max_candidates]
         probability = min(1, max_candidates/len(all_windows)) if all_windows else None
         cases = []
@@ -206,7 +196,7 @@ def audit_replay_coverage(root):
             arms[report_path.parent.name] = {"report": str(report_path),
                 "observation_window": report["observation_window"],
                 "target": {key: target[key] for key in (
-                    "no_revisit", "revisit_events", "page_counts", "event_counts", "observation_seconds")},
+                    "source_body_page_count", "no_revisit", "revisit_events", "page_counts", "event_counts", "observation_seconds")},
                 "target_event_ids": [visit["event_id"] for visit in target["visits"]],
                 "workload": workload_revisit_coverage(trace, report)}
         windows.append({"window": str(pair), "trace": str(trace_path), "arms": arms})
