@@ -7,7 +7,7 @@ import pytest
 
 from controller.claim_graph import ClaimGraph
 from controller.context_schema import EvidenceClaim, Need, ReadingOutcome, ReadResult, ReadTask, StepRecord
-from controller.plan_policy import FEATURE_NAMES, LEGACY_FEATURE_NAMES, CompleteCost, complete_plan
+from controller.plan_policy import FEATURE_NAMES, OBSERVED_FEATURE_NAMES, LEGACY_FEATURE_NAMES, CompleteCost, complete_plan
 from controller.schema import SessionSnapshot, TurnRecord
 from training.plan_gain_protocol import ZERO_AUX, observed_state_binding
 from training.train_plan_gain import (
@@ -174,7 +174,7 @@ def test_cost_development_reports_use_deduplicated_direct_samples_and_bound_read
     report = evaluate_gain(model, dev, training_state_keys=[row["state_key"] for row in train])
     assert report["cost_samples"] == 4 and report["unique_direct_samples"] == 1
     assert report["cost_errors"]["branch_complete_cost"]["complete_ms"]["mae"] < 1e-3
-    assert set(model.feature_names) == set(FEATURE_NAMES)
+    assert set(model.feature_names) == set(OBSERVED_FEATURE_NAMES)
 
 
 def test_observed_budget_features_use_actual_paid_state_and_hard_steps():
@@ -212,3 +212,34 @@ def test_observed_asset_cannot_silently_drop_budget_features(tmp_path):
     model.save(path)
     with pytest.raises(ValueError, match="budget feature schema"):
         PlanGainModel.load(path, reader_checkpoint="reader", reader_profile_id="profile")
+
+
+def test_observed_value_uses_existing_support_and_bridge_state_without_future_results():
+    from controller.context_schema import OpenNeed, SupportBundle
+    from controller.plan_policy import PlanCandidate, plan_features
+    from controller.serialization import decode
+    rows, state = paired_records()
+    plan = decode(PlanCandidate, rows[0]["plan"])
+    paid = decode(CompleteCost, rows[0]["observed_state_binding"]["paid_cost"])
+    support = SupportBundle("known", "need", ("u",), .5, .8, bridge_value=.6)
+    material = replace(plan.context_plan.selected_set, need_support=(support,))
+    plan = replace(plan, context_plan=replace(plan.context_plan, selected_set=material))
+    bridge = replace(state, open_needs=(OpenNeed("need", "founded", ("R1",),
+        parent_claim_ids=(state.claims[0].claim_id,)),))
+    features = plan_features(plan, bridge, paid_cost=paid)
+    assert features["retrieval_support_needs"] == 1
+    assert features["retrieval_support_mean"] == pytest.approx(.4)
+    assert features["retrieval_bridge_mean"] == pytest.approx(.3)
+    assert features["infer_needs"] == features["observed_bridge_gaps"] == 1
+    assert features["observed_terminal_needs"] == 0
+    terminal = replace(state, results=(replace(state.results[0], support=("need",)),), open_needs=())
+    completed = plan_features(plan, terminal, paid_cost=paid)
+    assert completed["observed_terminal_needs"] == 1
+    assert completed["observed_bridge_gaps"] == 0
+    assert completed["existing_claim_chars"] == features["existing_claim_chars"]
+    assert completed["remaining_hard_steps"] == features["remaining_hard_steps"]
+    absent = plan_features(replace(plan, context_plan=state.plan), state, paid_cost=paid)
+    zero = replace(support, joint_support=0, bridge_value=0)
+    known_zero = plan_features(replace(plan, context_plan=replace(plan.context_plan,
+        selected_set=replace(material, need_support=(zero,)))), state, paid_cost=paid)
+    assert absent["retrieval_support_needs"] == 0 and known_zero["retrieval_support_needs"] == 1

@@ -30,12 +30,15 @@ ACTION_SIZE_FEATURE_NAMES = ("planned_read_chars", "reduce_input_claim_chars", "
 FEATURE_NAMES = (*PLAN_KINDS, *STRUCTURAL_FEATURE_NAMES, *ACTION_SIZE_FEATURE_NAMES)
 
 
-OBSERVED_FEATURE_SCHEMA = "pre_action_budget_state_v1"
+OBSERVED_FEATURE_SCHEMA = "pre_action_budget_support_state_v2"
 BUDGET_FEATURE_NAMES = ("paid_total_tokens", "paid_complete_ms", "paid_steps",
     "total_tokens_cap", "total_tokens_unbounded", "remaining_total_tokens",
     "hard_steps_cap", "remaining_hard_steps", "complete_ms_cap",
     "complete_ms_unbounded", "remaining_complete_ms")
-OBSERVED_FEATURE_NAMES = (*FEATURE_NAMES, *BUDGET_FEATURE_NAMES)
+SUPPORT_FEATURE_NAMES = ("infer_needs", "numeric_needs", "need_predecessors",
+    "observed_terminal_needs", "observed_bridge_gaps", "retrieval_support_needs",
+    "retrieval_support_mean", "retrieval_bridge_mean")
+OBSERVED_FEATURE_NAMES = (*FEATURE_NAMES, *BUDGET_FEATURE_NAMES, *SUPPORT_FEATURE_NAMES)
 
 
 class NoCompletePlan(ValueError):
@@ -274,6 +277,22 @@ def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=
                (paid_cost.input_tokens, paid_cost.output_tokens, paid_cost.latency_ms)):
             raise ValueError("budget features require measured nonnegative paid cost")
         budget = state.plan.budget
+        needs = state.plan.task_state.needs
+        active = {need.need_id for need in needs}
+        open_ids = {need.need_id for need in state.open_needs}
+        terminal = {identity for result in state.results for identity in result.support}
+        support = [item for item in plan.context_plan.selected_set.need_support if item.need_id in active]
+        values.update(infer_needs=sum(need.operation == "infer" for need in needs),
+            numeric_needs=sum(need.operation in {"count", "sum", "group"} for need in needs),
+            need_predecessors=sum(len(need.predecessor_need_ids) for need in needs),
+            observed_terminal_needs=len((terminal & active)-open_ids),
+            observed_bridge_gaps=sum(need.need_id in active and bool(need.parent_claim_ids)
+                                     for need in state.open_needs),
+            retrieval_support_needs=len(support),
+            retrieval_support_mean=sum(item.applicability*item.joint_support for item in support)/len(support)
+                if support else 0,
+            retrieval_bridge_mean=sum(item.applicability*item.bridge_value for item in support)/len(support)
+                if support else 0)
         paid_tokens = paid_cost.input_tokens + paid_cost.output_tokens
         values.update(paid_total_tokens=paid_tokens, paid_complete_ms=paid_cost.latency_ms,
             paid_steps=len(state.steps), hard_steps_cap=budget.max_steps,

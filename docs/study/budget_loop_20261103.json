@@ -928,7 +928,7 @@
     "method_implementation_followthrough": {
       "scope": "code and scripted CPU mechanism validation only; no model fitting/inference or GPU",
       "A": "Need-specific retrieval uses only explicitly linked active conditions",
-      "B": "pre_action_budget_state_v1 in online/paired features; optional continuation reserves terminal ANSWER steps",
+      "B": "pre_action_budget_support_state_v2 uses measured budget plus existing Need/support/bridge/terminal state; optional continuation reserves terminal ANSWER steps",
       "C": "compare absolute marginal value and incremental-capacity-density constructions under the same deduplicated objective",
       "cpu_evidence": {
         "A_query_checks": "8 passed with6subtests",
@@ -941,6 +941,17 @@
           "scope": "specified forecast fixture, not measured latency/quality"
         }
       }
+    },
+    "A_to_B_support_features": {
+      "status": "implemented without new model calls",
+      "schema": "pre_action_budget_support_state_v2",
+      "inputs": [
+        "Need operations and predecessors",
+        "observed terminal support and parent-bound gaps",
+        "existing applicability-weighted support and bridge estimates"
+      ],
+      "validation": "7 selected feature/binding checks and21 scripted observed-action checks passed; fitting tests not executed",
+      "benefit_scope": "structural distinguishability only; learned quality/cost improvement requires new observations"
     }
   },
   "raw_artifact_availability": {
