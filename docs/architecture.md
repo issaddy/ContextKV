@@ -29,6 +29,8 @@ Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 导出实际 REA
 
 任务教师 wire 为 `owned_task_graph_v7_visible_token_boundaries`，语义版本为 `task_need_semantics_v3_anchored_owned_graph`。教师引用可见窗口的 `boundary_tokens`，映射回原消息 owner 和半开字符坐标 `TextRef(start,end)`；持久化保留原文坐标。Need 与 Condition 必须有实际锚点，实际输入、输出与调用费用由标注入口记录。
 
+版本意图只表达用户当前或继承的来源版本／生效日期限制；等待时长与年龄属于待答事实或资格条件。没有这类版本限制时使用 `current` 和空 `time_refs`；目录日期与 `reference_date` 只帮助解析实际日期限制，不能自行产生 `as_of`。`time_refs` 仅引用对应日期或时间短语。
+
 在线检索由 `ServingRetriever.configure_study(interpreter, tokenizer)` 绑定，`retrieve_pool(snapshot, query, request_id)` 返回任务、来源池与检索状态。`Controller.serve_turn(context_plans=...)` 或 `EvidenceSelection.context_plans` 注入计划，`extend_open_needs(plan, open_needs, claims)` 返回带新增原文和阅读单元的 `EvidencePool`。支持评分的查询含每个 Need 的 scope、条件和完整版本意图，区分版本锚点与最终适用版本。先评单段，再按配置评 pair/triple；`selection.utility: support_coverage` 对各 Need 取集合内最大适用性乘联合支持，再求均值。集合搜索展开依赖闭包并用实际 tokenizer 计量完整 prompt；beam、动作与布局候选复用已评分支持，不重复调用教师。
 
 教师通过 `budget_teacher_input` 先保留当前问题与目录，再按当前任务优先、历史相关性次序选入任务闭包，最后加入其他历史窗口。闭包包含活跃条件及其更新目标、Need 前驱与对应原文；整个 system/user 消息使用实际 tokenizer 统一计量。预算外历史任务不进入输出 schema。rollout 保存实际目录、日期与 scope，标注、训练和评价复用同一观测与目录选择规则。输入不可见的监督不参与拟合，评价保留其分母与不可见原因。

@@ -2,6 +2,9 @@
 # Main frozen reader/serving keeps transformers==5.19.0.
 # Complete resolved pip-freeze and shared torch/CUDA identities stay with the
 # container experiment manifest; this file does not replace that full lock.
+torch==2.14.1
+torchvision==0.29.2
+torchaudio==2.11.1
 evaluate==0.4.6
 transformers==4.57.6
 huggingface-hub==0.36.0
