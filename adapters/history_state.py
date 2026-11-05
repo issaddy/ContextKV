@@ -697,9 +697,6 @@ class TeacherTaskModel:
             "update": {"type": "string", "enum": ["ADD", "REPLACE", "COMPARE"]}},
             "required": ["key_span", "value_spans", "relation_type", "predicate_span",
                          "target_refs", "supersedes", "update"],
-            "anyOf": [{"properties": {"key_span": ref_schema}},
-                      {"properties": {"predicate_span": ref_schema}},
-                      {"properties": {"value_spans": {"allOf": [refs], "minItems": 1}}}],
             "additionalProperties": False}
         need_schema = {"type": "object", "properties": {
             "anchor_spans": {"allOf": [refs], "minItems": 1}, "subject_refs": refs,
@@ -748,7 +745,13 @@ class TeacherTaskModel:
             if not targets:
                 item["update"]["enum"] = ["ADD", "COMPARE"]
             condition_name = f"Condition_{base_index}"
-            definitions[condition_name] = condition
+            anchored_conditions = []
+            for name, anchor in (("key_span", ref_schema), ("predicate_span", ref_schema),
+                    ("value_spans", {**definitions["TextRefs"], "minItems": 1})):
+                anchored = deepcopy(condition)
+                anchored["properties"][name] = anchor
+                anchored_conditions.append(anchored)
+            definitions[condition_name] = {"anyOf": anchored_conditions}
             for condition_count in range(TASK_MAX_OBJECTS+1):
                 branch = deepcopy(properties)
                 branch["relation"]["enum"] = ["standalone", "topic_switch"] if base is None else ["followup", "correction", "revisit"]

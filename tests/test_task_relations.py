@@ -236,3 +236,25 @@ def test_teacher_budgets_complete_input_with_condition_and_predecessor_closure()
     version_turns = observed['schema']['json_schema']['schema']['$defs']['VersionIntent']['properties']['source_turns']['items']['enum']
     assert set(version_turns) <= visible_turns
     assert len(memory.prior_task_states) == 61
+    from jsonschema import Draft202012Validator
+    schema = observed['schema']['json_schema']['schema']
+    validator = Draft202012Validator({'$defs': schema['$defs'], '$ref': '#/$defs/Condition_0'})
+    anchor = {'window_id': 'w0', 'boundary_tokens': [0, 0]}
+    condition = {'key_span': None, 'value_spans': [], 'relation_type': 'PREDICATE',
+        'predicate_span': None, 'target_refs': [], 'supersedes': [], 'update': 'ADD'}
+    assert not validator.is_valid(condition)
+    for field in ('key_span', 'predicate_span', 'value_spans'):
+        complete = {**condition, field: [anchor] if field == 'value_spans' else anchor}
+        validator.validate(complete)
+        for required in condition:
+            assert not validator.is_valid({key: value for key, value in complete.items() if key != required})
+    for variant in schema['$defs']['Condition_0']['anyOf']:
+        assert variant['type'] == 'object'
+        assert set(variant['required']) == set(condition)
+        assert not variant['additionalProperties']
+    assert not validator.is_valid({'key_span': anchor})
+    assert not validator.is_valid({**condition, 'key_span': anchor, 'target_refs': ['C0']})
+    inherited = Draft202012Validator({'$defs': schema['$defs'], '$ref': '#/$defs/Condition_1'})
+    target = body['prior_states'][0]['conditions'][0]['condition_id']
+    inherited.validate({**condition, 'predicate_span': anchor, 'target_refs': [target], 'update': 'REPLACE'})
+    assert not inherited.is_valid({**condition, 'key_span': anchor, 'target_refs': ['unrelated']})
