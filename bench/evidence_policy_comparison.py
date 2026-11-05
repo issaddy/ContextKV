@@ -96,29 +96,43 @@ def fixed_reader_identity(reader_spec):
 def cell_config(config, policy, protocol):
     settings = config["policy_comparison"]
     asset, reader_spec = settings["policies"][policy], settings["reader"]
+    teacher = policy == "P0" and asset is None
+    if teacher:
+        if config["support_model"]["mode"] != "teacher" or config["selection"]["utility"] != "support_coverage":
+            raise ValueError("P0 without an asset requires explicit teacher support and support_coverage")
+    elif asset is None:
+        raise ValueError("trained evidence policies require an explicit policy asset")
     run_path = reader_spec["run_config"]
     fixed_reader = fixed_reader_identity(reader_spec)
     query_asset = settings["query_assets"][policy]
+    support = ({"device": settings["support_device"]} if teacher else
+        {"mode": "trained", "asset": asset, "preference_asset": asset,
+         "device": settings["support_device"]})
     actual = merge_config(config, {"generation": {"run_config": run_path,
         "teacher_url": settings["teacher_url"], "helper_run_config": settings["helper_run_config"]},
         "task_model": {"device": settings["encoder_device"]},
         "retrieval": {"task_query_asset": query_asset},
-        "support_model": {"mode": "trained", "asset": asset, "preference_asset": asset,
-            "device": settings["support_device"]}, "selection": {"utility": "learned"},
+        "support_model": support,
+        "selection": {"utility": "support_coverage" if teacher else "learned"},
         "execution": {"prefix_retention": {"mode": "native"}, "plan_gain": None},
         "reading": READING_PROTOCOLS[protocol]})
-    metadata = json.loads((Path(asset)/"support-model.json").read_text())
     identity = {"policy": policy, "read_protocol": protocol,
         "reading": READING_PROTOCOLS[protocol], "read_protocol_version": READ_PROTOCOL_VERSION,
         "shared_numeric_protocol_version": SHARED_NUMERIC_PROTOCOL_VERSION,
         "numeric_selection_protocol_version": NUMERIC_SELECT_PROTOCOL_VERSION,
         "numeric_selection_schedule": "one_explicit_reduce_per_need",
-        "policy_asset": asset, "policy_heads_sha256": file_digest(Path(asset)/"heads.pt"),
-        "policy_checkpoint": metadata.get("policy_checkpoint"),
+        "policy_asset": asset, "support_policy_mode": "teacher" if teacher else "trained",
         "query_asset": query_asset,
-        "reader_binding_used_for_policy_training": metadata.get("reader_binding"),
         "fixed_reader": fixed_reader,
         "evaluation_scope": "evidence planner x read protocol; fixed model weights and common total budgets"}
+    if teacher:
+        identity.update(teacher_url=settings["teacher_url"],
+                        helper_run_config_sha256=file_digest(settings["helper_run_config"]))
+    else:
+        metadata = json.loads((Path(asset)/"support-model.json").read_text())
+        identity.update(policy_heads_sha256=file_digest(Path(asset)/"heads.pt"),
+            policy_checkpoint=metadata.get("policy_checkpoint"),
+            reader_binding_used_for_policy_training=metadata.get("reader_binding"))
     if policy == "P1":
         from training.train_evidence_policy import require_policy_reader_binding
         from training.preference_rollout import query_encoder_binding
