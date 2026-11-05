@@ -141,7 +141,7 @@ def method_config(config, method, dataset, split):
 
 
 async def run_dataset(config, matrix, method, dataset_name, split, directory, *, concurrency=1,
-                      limit_conversations=None, workload=None, question_fn=None):
+                      limit_conversations=None, workload=None, question_fn=None, request_namespace=None):
     from adapters.study_retrieval import create_study_retriever
     from controller.evidence import make_evidence
     from bench.native_metrics import NativePoolSampler, pool_series
@@ -155,6 +155,10 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     source_rows = dataset_rows(spec, split, task_ids=declared_tasks)
     reuse_provider = spec.get("reuse_provider", False)
     continue_conversation_failures = spec.get("continue_conversation_failures", False)
+
+    def actual_request_id(task_id):
+        return task_id if request_namespace is None else f"{request_namespace}:{task_id}"
+
     if workload is not None:
         concurrency = workload.concurrency
     config = method_config(config, method, spec, split)
@@ -192,7 +196,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         "dataset": dataset_name, "split": split, "task_ids": [row["task_id"] for row in source_rows],
         "scheduled_task_ids": expected, "cohort_declared": declared_tasks is not None,
         "concurrency": concurrency, "retrieval": provider.manifest,
-        "concurrency_scope": "request",
+        "concurrency_scope": "request", "request_namespace": request_namespace,
         "response_latency_basis": "fixed scheduled arrival when supplied, otherwise observed arrival before semaphore, through committed response",
         "workload": to_jsonable(workload), "answer_driven_policy": question_fn is not None,
         "cache_start_protocol": cache_protocol, "cache_start_record": cache_start,
@@ -243,7 +247,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             query = decision.question
         history = tuple(message for turn in before.raw_history for message in (
             OnlineMessage("user", turn.user_text), OnlineMessage("assistant", turn.assistant_text)))
-        request_id = row["task_id"]
+        task_id = row["task_id"]
+        request_id = actual_request_id(task_id)
         if (row.get("coverage_mode") or spec.get("supplied_documents",
                 dataset_name in {"loong", "long_dev", "multihop_dev"})):
             supplied = tuple(make_evidence(context["text"], context["document_id"],
@@ -256,12 +261,12 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 "table_id", "heading", "current", "version_order") if key in context}
                 for block, context in zip(supplied, row["contexts"], strict=True)}
             async def retrieve(snapshot):
-                return await provider.retrieve_supplied(snapshot, query, request_id, supplied,
+                return await provider.retrieve_supplied(snapshot, query, task_id, supplied,
                     source_metadata=metadata, coverage_scope=row.get("coverage_mode",
                         spec.get("coverage_mode", "selected_sources")))
         else:
             async def retrieve(snapshot):
-                return await provider.retrieve(snapshot, query, request_id)
+                return await provider.retrieve(snapshot, query, task_id)
         async def extend(plan, open_needs, claims):
             return await provider.extend_for_plan(before, plan, open_needs, claims)
         response = await service.serve_turn(session_id, query, request_id=request_id,
@@ -272,7 +277,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         snapshot = service.store.get_snapshot(session_id)
         blocks = {block.key: block for block in snapshot.archive}
         selected = tuple(blocks[key] for key in sorted(attempt.plan.candidate.required_blocks))
-        turn = OnlineTurn(sid, request_id, row["turn"], row["Collection"], query, history,
+        turn = OnlineTurn(sid, task_id, row["turn"], row["Collection"], query, history,
             tuple(OnlineContext(block.key.passage_id, block.text, block.source_uri,
                                 block.title) for block in selected), protocol,
             query_context=attempt.query_context)
@@ -282,7 +287,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             output_ids=response.output_ids, truncated=response.truncated,
             citation_scope=response.citation_scope, measurement_kind="hardware",
             reading_outcome=attempt.reading_outcome, reference_map=attempt.plan.candidate.reference_map)
-        trace = provider.traces.pop((session_id, request_id), {})
+        trace = provider.traces.pop((session_id, task_id), {})
         internal_ms = [step["elapsed_ms"] for step in response.step_metrics if "elapsed_ms" in step]
         model_work_ms = (response.engine_elapsed_ms+sum(internal_ms)
                          if response.engine_elapsed_ms is not None
@@ -305,7 +310,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             "online_compute_basis": "summed generation service elapsed and measured auxiliary pipeline time",
             "gpu_gib_seconds": None, "host_gib_seconds": None}
         value = {"method": method["id"], "dataset": dataset_name, "split": split,
-            "task_id": request_id, "conversation_id": sid, "turn": row["turn"],
+            "task_id": task_id, "request_id": request_id, "conversation_id": sid, "turn": row["turn"],
             "status": "completed", "question": query, "actual_history": to_jsonable(before.raw_history),
             "history_origin": "author_reference_import" if protocol == "P1" else "model_actual",
             "answer": response.assistant_text, "response": to_jsonable(response),
@@ -317,10 +322,10 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             "generation_dir": str(directory.resolve())}
         value["workload_arrival"] = workload_arrival
         value["question_policy"] = to_jsonable(decision)
-        results[request_id] = value
-        windows[request_id] = (start, end)
+        results[task_id] = value
+        windows[task_id] = (start, end)
         write_json(directory/"records"/f"{number:06d}.json", value)
-        print(dumps({"method": method["id"], "dataset": dataset_name, "task": request_id,
+        print(dumps({"method": method["id"], "dataset": dataset_name, "task": task_id,
                      "complete_ms": response.complete_ms}), flush=True)
 
     async def conversation(sid):
@@ -350,8 +355,9 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             ordered_rows = sorted(grouped[sid], key=lambda item: item[1]["turn"])
             row = next((row for _, row in ordered_rows if row["task_id"] not in results), ordered_rows[-1][1])
             session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
-            attempt = service.store.find_request(session_id, row["task_id"])
+            attempt = service.store.find_request(session_id, actual_request_id(row["task_id"]))
             failure = dict(conversation_id=sid, task_id=row["task_id"], session_id=session_id,
+                request_id=actual_request_id(row["task_id"]),
                 error_type=type(error).__name__, error=str(error),
                 request_window=[request_starts[row["task_id"]] if row["task_id"] in request_starts else client_started,
                                 time.monotonic()],
@@ -377,7 +383,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 if row["task_id"] in results or sid in failures:
                     continue
                 session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
-                previous = service.store.find_request(session_id, row["task_id"])
+                previous = service.store.find_request(session_id, actual_request_id(row["task_id"]))
                 if previous is not None and previous.stage == "FAILED":
                     if not terminal_budget_text(previous.error):
                         raise ValueError(f"unrecognized prior failed attempt: {previous.error}")
@@ -401,7 +407,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                             raise unknown
                     elif not terminal_model_budget(error):
                         raise
-                    attempt = service.store.find_request(session_id, row["task_id"])
+                    attempt = service.store.find_request(session_id, actual_request_id(row["task_id"]))
                     failure = persist_p3_failure(directory, sid, row["task_id"], session_id, attempt, str(error))
                     failure.update(request_window=[request_start, time.monotonic()],
                         measurement_segment_id=segment_id)
@@ -482,7 +488,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
 
 
 async def evaluate(config, matrix, output, *, split, frozen=None, methods=None, datasets=None,
-                   concurrency=1, limit_conversations=None, score=True, workload=None, question_fn=None):
+                   concurrency=1, limit_conversations=None, score=True, workload=None, question_fn=None,
+                   request_namespace=None):
     from bench.study_scoring import score_dataset
 
     output = Path(output)
@@ -502,7 +509,8 @@ async def evaluate(config, matrix, output, *, split, frozen=None, methods=None, 
             directory = output/method["id"]/name
             rows = await run_dataset(config, matrix, method, name, split, directory,
                 concurrency=concurrency, limit_conversations=limit_conversations,
-                workload=workload[name] if isinstance(workload, dict) else workload, question_fn=question_fn)
+                workload=workload[name] if isinstance(workload, dict) else workload, question_fn=question_fn,
+                request_namespace=request_namespace)
             if score:
                 rows = await score_dataset(config, dataset, rows, directory,
                     expected_task_ids=matrix.get("cohorts", {}).get(split, {}).get(name))
@@ -608,6 +616,7 @@ def main(argv=None):
     parser.add_argument("--workload-plan")
     parser.add_argument("--goal-policy")
     parser.add_argument("--cohorts", help="Existing split/dataset task-ID manifest to bind into the matrix")
+    parser.add_argument("--request-namespace", help="Explicit execution identity for a new attempt; logical task IDs stay fixed")
     args = parser.parse_args(argv)
     config = yaml.safe_load(Path(args.config).read_text())
     matrix = yaml.safe_load(Path(args.matrix).read_text())
@@ -654,7 +663,8 @@ def main(argv=None):
         result = asyncio.run(evaluate(config, matrix, output, split=args.split, frozen=frozen,
             methods=args.methods, datasets=args.datasets, concurrency=args.concurrency,
             limit_conversations=args.limit_conversations, score=not args.unscored,
-            workload=workload, question_fn=goal_policy.question_fn if goal_policy else None))
+            workload=workload, question_fn=goal_policy.question_fn if goal_policy else None,
+            request_namespace=args.request_namespace))
         result = {"rows": len(result), "output": str(output.resolve())}
     elif args.command == "freeze":
         rows = read_jsonl(args.results)

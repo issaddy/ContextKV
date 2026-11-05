@@ -1,6 +1,6 @@
 # 当前 GPU 部署
 
-当前入口依次为 `ssh relay`、`ssh songjiayun@infra-wlf3-ge103-1.idchb2az3.hb2.kwaidc.com`、`sudo nerdctl exec -it test-0518 bash`。项目目录为 `/home/relay/songjiayun/ContextKV`。使用容器自带环境；模型路径、GPU 设备和端口以本次实际盘点与运行配置为准，不沿用旧容器的设备分工。
+当前入口依次为 `ssh relay`、`ssh songjiayun@public-ge108-wlf3-hangu-7.idchb2az3.hb2.kwaidc.com`、`sudo nerdctl exec -it test-0518 bash`。项目目录为 `/home/relay/songjiayun/ContextKV`，Qwen3-32B 位于 `/media/ssd1/data/models/qwen3-32b`。保留容器自带环境，固定引擎所需版本装入 `.venv-sglang`；GPU 设备、端口及截止时间由本次 launch manifest 声明。
 
 固定 SGLang 提交为 `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。复用已安装的匹配运行依赖和固定 vendor；模型权重与 tokenizer 不变。主比较沿用 BF16 权重/KV、32768 KV token、16 GiB Host、page64、NGRAM breadth1/draft12、fa3、JSON 空白上限16。实际环境、启动参数与原生缓存配置保存为本次 runtime manifest。
 
