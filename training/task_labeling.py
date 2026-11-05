@@ -68,6 +68,8 @@ def verify_grounding(row, state, memory, client, *, record_path=None):
         "active conditions and version; topical background alone is not a positive retrieval label. "
         "Use the supplied zero-based indices. When a fixed task_state is provided, assess correct_task_binding "
         "against the unchanged ACTUAL question and history, including Need references, active conditions and versions. "
+        "For every Need, check that its requested relation and actual object are bound; a pronoun or omitted object "
+        "must resolve to the relevant literal antecedent. Include these judgments in correct_task_binding. "
         "Assess source_support_verified for the selected grounding quotes against complete grounding_original_sources; "
         "original_sources identifies the actual runtime evidence. Independently assess operation_correct and "
         "scope_correct for EVERY fixed Need using the semantics below; do not merely check that enum values "

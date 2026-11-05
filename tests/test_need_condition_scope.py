@@ -48,6 +48,21 @@ def prior_memory():
 
 class NeedConditionScopeTests(unittest.TestCase):
 
+    def test_selected_history_supplies_the_object_of_an_elliptical_query(self):
+        previous = "Explain escort driver certification."
+        question = "When do I need one?"
+        antecedent = TextRef(1, "user", 8, len(previous)-1)
+        prior = interpret(TaskPrediction("standalone", needs=(Need("certification", (antecedent,)),)),
+                          question=previous)
+        memory = RetrievalState(1, (TurnRecord(1, previous, "The application fee is $40."),), (prior,))
+        prediction = TaskPrediction("followup", resume_task_id=prior.task_id, history_spans=(antecedent,),
+            needs=(Need("when", (reference(question, question=question, turn=2),)),))
+        state = interpret(prediction, question=question, turn=2, memory=memory)
+        self.assertEqual(state.query.splitlines()[0], question)
+        self.assertIn("escort driver certification", state.query)
+        self.assertEqual(state.working_history, (antecedent,))
+        self.assertNotIn("$40", state.query)
+
     def test_independent_conditions_remain_separate_in_support_and_shared_reading(self):
         state = interpret(initial_prediction())
         self.assertEqual([need.condition_ids for need in state.needs], [("year23",), ("year24",)])
@@ -83,19 +98,32 @@ class NeedConditionScopeTests(unittest.TestCase):
         memory = prior_memory()
         for needs in ((), memory.prior_task_states[0].needs):
             with self.subTest(explicit_needs=bool(needs)):
-                state = interpret(TaskPrediction("correction", conditions=(replacement,), needs=needs),
+                state = interpret(TaskPrediction("correction", conditions=(replacement,), needs=needs,
+                    history_spans=(TextRef(1, "user", 0, len(QUESTION)),)),
                                   question=question, turn=2, memory=memory)
                 self.assertEqual([need.condition_ids for need in state.needs], [("year25",), ("year24",)])
                 self.assertEqual({condition.condition_id for condition in state.conditions}, {"year25", "year24"})
+                self.assertNotIn("2023", state.query)
+                self.assertIn("2024", state.query)
 
     def test_remove_drops_only_the_targeted_binding(self):
         question = "Remove the year restriction from the employee count."
         removal = Condition("remove-year", predicate_span=reference("Remove", question=question, turn=2),
                             target_refs=("year23",), update="REMOVE")
-        state = interpret(TaskPrediction("correction", conditions=(removal,)),
-                          question=question, turn=2, memory=prior_memory())
-        self.assertEqual([need.condition_ids for need in state.needs], [(), ("year24",)])
-        self.assertEqual([condition.condition_id for condition in state.conditions], ["year24"])
+        for retired in (Condition("year23", value_spans=(reference("2023"),)),
+                        Condition("year23", key_span=reference("2023")),
+                        Condition("year23", predicate_span=reference("2023"))):
+            with self.subTest(retired=retired):
+                memory = prior_memory()
+                previous = replace(memory.prior_task_states[0],
+                    conditions=(retired, memory.prior_task_states[0].conditions[1]))
+                state = interpret(TaskPrediction("correction", conditions=(removal,),
+                    history_spans=(TextRef(1, "user", 0, len(QUESTION)),)),
+                    question=question, turn=2, memory=replace(memory, prior_task_states=(previous,)))
+                self.assertEqual([need.condition_ids for need in state.needs], [(), ("year24",)])
+                self.assertEqual([condition.condition_id for condition in state.conditions], ["year24"])
+                self.assertNotIn("2023", state.query)
+                self.assertIn("2024", state.query)
 
 
 if __name__ == "__main__":

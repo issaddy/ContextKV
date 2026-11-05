@@ -27,7 +27,7 @@ flowchart TD
 
 Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 导出实际 READ/REDUCE/ANSWER traces，直接审核其中的 `actual_output`，用可见输入和完整原文分别核验支持、来源和任务绑定；不再另生成目标答案，不生成 SFT 数据或保存 reader adapter。P0/P1 规划器与两种阅读协议组成归因对照，分别沿自己的实际历史运行 P3。完整联合入口直接读取冻结的 P0 共享 A study 配置，四格共用其支持模型、查询资产、阅读协议与预算。既往 LoRA 的已付调用和训练费用只列为弃用支出，不计入改进结果。
 
-任务教师 wire 为 `owned_task_graph_v7_visible_token_boundaries`，语义版本为 `task_need_semantics_v3_anchored_owned_graph`。教师引用可见窗口的 `boundary_tokens`，映射回原消息 owner 和半开字符坐标 `TextRef(start,end)`；持久化保留原文坐标。Need 与 Condition 必须有实际锚点，实际输入、输出与调用费用由标注入口记录。
+任务教师 wire 为 `owned_task_graph_v7_visible_token_boundaries`，语义版本为 `task_need_semantics_v3_anchored_owned_graph`。教师引用可见窗口的 `boundary_tokens`，映射回原消息 owner 和半开字符坐标 `TextRef(start,end)`；持久化保留原文坐标。Need 的请求锚点保留所求关系，`subject_refs` 绑定当前或历史中的实际对象；独立审核同时检查回指。全局检索 query 先放当前问题，再放活跃需求与已选历史，并剔除已退役条件的原文坐标；逐 Need 召回仍只附加自己的对象和条件。Need 与 Condition 必须有实际锚点，实际输入、输出与调用费用由标注入口记录。
 
 版本意图只表达用户当前或继承的来源版本／生效日期限制；等待时长与年龄属于待答事实或资格条件。没有这类版本限制时使用 `current` 和空 `time_refs`；目录日期与 `reference_date` 只帮助解析实际日期限制，不能自行产生 `as_of`。`time_refs` 仅引用对应日期或时间短语。
 

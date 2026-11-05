@@ -165,7 +165,8 @@ def prepare_cohort_task_labels(config):
         selected.append(prepared)
         old = prior.get(identity)
         if old is not None:
-            same_state = all(old[key] == row[key] for key in ("conversation_id", "turn", "question", "snapshot_id"))
+            same_state = (all(old[key] == row[key] for key in ("conversation_id", "turn", "question", "snapshot_id"))
+                          and old.get("source_scope", []) == row.get("source_scope", []))
             same_history = history_digest(old["actual_history"]) == member["actual_history_sha256"]
             if (same_state and same_history and old["script_history_review_status"] == "reviewed"
                     and old.get("correct_task_binding") is True and old.get("source_support_verified") is True
@@ -173,8 +174,10 @@ def prepare_cohort_task_labels(config):
                     and old.get("need_semantics_verified") is True
                     and old.get("task_catalogue") == observed_catalogue
                     and old.get("task_reference_date") == reference_date):
-                reused.append({**old, **prepared, "grounding_origin": old["grounding_origin"],
-                               "cohort_label_origin": "reused_exact_actual_state_review"})
+                reused.append({**prepared, **old, **{name: prepared[name] for name in (
+                    "actual_history_sha256", "cohort_split", "cohort_manifest_sha256",
+                    "original_sources", "grounding_original_sources", "source_attempt")},
+                    "cohort_label_origin": "reused_exact_actual_state_review"})
             else:
                 reuse_exclusions.append({"task_id": identity, "reason":
                     "existing_label_not_bound_to_registered_actual_state" if not same_state or not same_history

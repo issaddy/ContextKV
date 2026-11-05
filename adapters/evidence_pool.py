@@ -312,11 +312,8 @@ class SourceDirectory:
             return hits
 
         streams.append(recall(state.query or state.raw_question, profile.current_top_k, "current"))
-        from adapters.history_state import history_text
-        active_ids = {condition.condition_id for condition in state.conditions}
-        inactive = tuple(ref for prior in memory.prior_task_states for condition in prior.conditions
-                         if prior.task_id == state.task_id and condition.condition_id not in active_ids
-                         for ref in condition.value_spans)
+        from adapters.history_state import history_text, retired_condition_refs
+        inactive = retired_condition_refs(memory.prior_task_states, state.task_id, state.conditions)
 
         def need_text(ref):
             text = (state.raw_question[ref.start:ref.end] if ref.turn_id == state.current_turn_id

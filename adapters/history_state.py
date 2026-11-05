@@ -151,6 +151,13 @@ def active_ref_text(ref, memory, turn, excluded):
     return "".join(pieces)
 
 
+def retired_condition_refs(prior_states, task_id, active_conditions):
+    active_ids = {condition.condition_id for condition in active_conditions}
+    return tuple(ref for state in prior_states if state.task_id == task_id
+        for condition in state.conditions if condition.condition_id not in active_ids
+        for ref in (*condition.value_spans, condition.key_span, condition.predicate_span) if ref is not None)
+
+
 class HistoryIndex:
     """Frozen-encoder windows retain character coordinates and actual speakers."""
     def __init__(self, tokenizer, encode, *, unit_tokens=384, candidates=16, view_tokens=8192):
@@ -301,18 +308,15 @@ class TaskInterpreter:
             *(ref for need in needs for ref in (*need.anchor_spans, *need.subject_refs)),
             *(ref for condition in conditions for ref in condition.value_spans))))
         working = tuple(ref for ref in spans if ref.turn_id != turn.turn)
-        active_ids = {condition.condition_id for condition in conditions}
-        earlier_conditions = tuple(condition for earlier in memory.prior_task_states
-            if base is not None and earlier.task_id == base.task_id for condition in earlier.conditions)
-        excluded = tuple(ref for condition in earlier_conditions if condition.condition_id not in active_ids
-                         for ref in condition.value_spans)
-        parts = [active_ref_text(ref, memory, turn, excluded)
-                 for need in needs for ref in (*need.anchor_spans, *need.subject_refs)]
+        excluded = retired_condition_refs(memory.prior_task_states, base.task_id if base else None, conditions)
+        parts = [turn.query]
+        parts.extend(active_ref_text(ref, memory, turn, excluded)
+                     for need in needs for ref in (*need.anchor_spans, *need.subject_refs))
         parts.extend(history_text(ref, memory, turn) for condition in conditions for ref in condition.value_spans)
         parts.extend(history_text(ref, memory, turn) for ref in prediction.version_intent.time_refs)
         if prediction.version_intent.temporal_relation in {"before", "after"}:
             parts.append(prediction.version_intent.temporal_relation.upper())
-        parts.append(turn.query)
+        parts.extend(active_ref_text(ref, memory, turn, excluded) for ref in working)
         state = TaskState(base.task_id if base else turn.task_id, turn.query, working, conditions, needs,
                           prediction.version_intent, prediction.source_scope, turn.turn,
                           "\n".join(dict.fromkeys(parts)))
@@ -360,6 +364,13 @@ TASK_NEED_SEMANTICS = (
     "Every Need must cite at least one actual visible request anchor. Every materialized condition "
     "must cite an actual key, value or predicate; a removal must cite its update predicate. "
     "Condition links stay within the selected prior task; predecessor Needs may cite actual earlier tasks.\n"
+    "Need object binding:\n"
+    "- anchor_spans identify the requested relation or result, including the words distinguishing it.\n"
+    "- subject_refs identify that Need's actual object. Resolve a pronoun or omitted object by citing its "
+    "literal antecedent in the current or actual earlier messages. Attach each object to its own Need.\n"
+    "- history_spans retain other context needed to interpret the task. A revisit selects the earlier task "
+    "whose object the current request resumes, including across an intervening topic. "
+    "Earlier assistant text establishes conversational intent; original sources establish answer facts.\n"
     "Need operation semantics:\n"
     "- lookup: retrieve a directly stated fact or relation answering a requested point.\n"
     "- procedure: identify the actions, prerequisites and ordered steps for carrying out a task. "
