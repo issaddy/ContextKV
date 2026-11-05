@@ -79,6 +79,9 @@ class ByteTokenizer:
     def encode(self, text: str, **_: object) -> tuple[int, ...]:
         return tuple(text.encode("utf-8"))
 
+    def __call__(self, texts, **kwargs):
+        return {"input_ids": [self.encode(text, **kwargs) for text in texts]}
+
     def decode(self, ids: Iterable[int], **_: object) -> str:
         return bytes(ids).decode("utf-8", errors="replace")
 

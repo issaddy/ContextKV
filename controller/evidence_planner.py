@@ -67,12 +67,12 @@ def unresolved_needs(state: TaskState, evidence_set: EvidenceSet):
 
 class BudgetedEvidencePlanner:
     def __init__(self, tokenizer, utility_model, *, profile=SearchProfile(),
-                 measure_context=None, measure_body=None, passage_exclusions=frozenset()):
+                 measure_contexts=None, measure_bodies=None, passage_exclusions=frozenset()):
         self.tokenizer = tokenizer
         self.utility_model = utility_model
         self.profile = profile
-        self.measure_context = measure_context
-        self.measure_body = measure_body
+        self.measure_contexts = measure_contexts
+        self.measure_bodies = measure_bodies
         self.passage_exclusions = frozenset(passage_exclusions)
         self.trace = ()
 
@@ -87,32 +87,12 @@ class BudgetedEvidencePlanner:
         candidate_cache = {}
         measurement_cache = {}
 
-        def evaluate(ids):
-            ordered = tuple(sorted(ids, key=lambda uid: (-by_id[uid].retrieval_score, uid)))
-            units = close_dependencies(ordered, by_id)
-            closed_ids = frozenset(u.unit_id for u in units)
+        def evaluate(ids, units, closed_ids, measurement_key):
             if closed_ids in candidate_cache:
                 return candidate_cache[closed_ids]
-            measurement_key = tuple(unit.unit_id for unit in units)
-            if measurement_key in measurement_cache:
-                body_tokens = measurement_cache[measurement_key]
-                if body_tokens is None:
-                    return None
-            else:
-                body_tokens = (self.measure_body(units) if self.measure_body is not None else
-                               len(self.tokenizer.encode(render_unit_union(units), add_special_tokens=False)))
-                if body_tokens > budget.body_tokens:
-                    measurement_cache[measurement_key] = None
-                    return None
-                if budget.max_passages is not None and len(_passages(units)-self.passage_exclusions) > budget.max_passages:
-                    measurement_cache[measurement_key] = None
-                    return None
-                if self.measure_context is not None:
-                    input_tokens = self.measure_context(state, units)
-                    if input_tokens + budget.output_tokens > budget.window_tokens:
-                        measurement_cache[measurement_key] = None
-                        return None
-                measurement_cache[measurement_key] = body_tokens
+            body_tokens = measurement_cache[measurement_key]
+            if body_tokens is None:
+                return None
             available = tuple(s for s in supports if set(s.unit_ids) <= closed_ids)
             best = tuple(max((s for s in available if s.need_id == need.need_id),
                             key=lambda s: s.joint_support*s.applicability)
@@ -129,18 +109,47 @@ class BudgetedEvidencePlanner:
             return candidate
 
         for depth in range(self.profile.max_actions):
-            proposals = {}
+            proposals, pending, unmeasured = {}, [], {}
             for ids in frontier:
                 for action in actions:
                     expanded = ids | frozenset(action)
                     if expanded == ids or expanded in visited:
                         continue
                     visited.add(expanded)
-                    candidate = evaluate(expanded)
-                    if candidate is not None:
-                        closed = frozenset(u.unit_id for u in candidate.selected_units)
-                        proposals[closed] = candidate
-                        retained[closed] = candidate
+                    ordered_ids = tuple(sorted(expanded, key=lambda uid: (-by_id[uid].retrieval_score, uid)))
+                    units = close_dependencies(ordered_ids, by_id)
+                    closed = frozenset(unit.unit_id for unit in units)
+                    key = tuple(unit.unit_id for unit in units)
+                    pending.append((expanded, units, closed, key))
+                    if closed not in candidate_cache and key not in measurement_cache:
+                        unmeasured.setdefault(key, units)
+            if unmeasured:
+                groups = tuple(unmeasured.values())
+                body_sizes = (self.measure_bodies(groups) if self.measure_bodies is not None else
+                    tuple(len(ids) for ids in self.tokenizer(
+                        [render_unit_union(units) for units in groups], add_special_tokens=False,
+                        return_attention_mask=False, return_token_type_ids=False)["input_ids"]))
+                admissible = {}
+                for (key, units), body_tokens in zip(unmeasured.items(), body_sizes, strict=True):
+                    if (body_tokens > budget.body_tokens or (budget.max_passages is not None
+                            and len(_passages(units)-self.passage_exclusions) > budget.max_passages)):
+                        measurement_cache[key] = None
+                    else:
+                        measurement_cache[key] = body_tokens
+                        admissible[key] = units
+                if self.measure_contexts is not None and admissible:
+                    sizes = self.measure_contexts(state, tuple(admissible.values()))
+                    for key, input_tokens in zip(admissible, sizes, strict=True):
+                        if input_tokens + budget.output_tokens > budget.window_tokens:
+                            measurement_cache[key] = None
+            # Measurement is independent within a depth. Utility, first closure
+            # ownership and beam ranking retain the original traversal order.
+            for proposal in pending:
+                candidate = evaluate(*proposal)
+                if candidate is not None:
+                    closed = frozenset(u.unit_id for u in candidate.selected_units)
+                    proposals[closed] = candidate
+                    retained[closed] = candidate
             ordered = sorted(proposals.items(), key=lambda item: (
                 -item[1].quality_prediction, item[1].token_cost, item[1].set_id))
             trace.append({"depth": depth, "proposed": len(proposals),
@@ -168,10 +177,10 @@ class BudgetedEvidencePlanner:
 
 
 def search_sets(state, pool, scores, budget, *, tokenizer, utility_model,
-                profile=SearchProfile(), measure_context=None, measure_body=None,
+                profile=SearchProfile(), measure_contexts=None, measure_bodies=None,
                 passage_exclusions=frozenset()):
     return BudgetedEvidencePlanner(tokenizer, utility_model, profile=profile,
-        measure_context=measure_context, measure_body=measure_body,
+        measure_contexts=measure_contexts, measure_bodies=measure_bodies,
         passage_exclusions=passage_exclusions).search_sets(state, pool, scores, budget)
 
 

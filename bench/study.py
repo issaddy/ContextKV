@@ -466,7 +466,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         ordered = [results[key] for key in expected if key in results]
         write_jsonl(directory/"results.unscored.jsonl", ordered)
         references = []
-        for row in source_rows:
+        for _, row in (item for sid in conversations for item in grouped[sid]):
             record = results.get(row["task_id"])
             decision = record["question_policy"] if record is not None else None
             if decision is None:

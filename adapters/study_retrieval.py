@@ -15,7 +15,7 @@ from adapters.retrieval import run_retrieval_worker
 from adapters.retriever_factory import create_retriever
 from adapters.serving_retrieval import ServingRetriever
 from adapters.support_model import SetPrediction, SupportModel, SupportProfile
-from controller.candidates import CandidatePolicy, build_plan_candidates
+from controller.candidates import CandidatePolicy, build_plan_candidates, measure_plan_contexts
 from controller.config import load_config
 from controller.context_budget import resolve_text, working_history_messages
 from controller.context_schema import (AnswerPlan, AnswerPoint, ContextBudget, ContextPlan,
@@ -249,14 +249,14 @@ class StudyEvidenceProvider:
             if supplied_blocks is not None and not full_scope_read:
                 pool = self._rank_supplied(state, snapshot, pool)
 
-            def measure_context(state, units):
-                source_keys = {span.source_key for unit in units for span in unit.source_spans}
-                blocks = tuple(block for block in pool.source_blocks if block.key in source_keys)
-                evidence_set = EvidenceSet("measurement", units, source_blocks=blocks)
-                plan = ContextPlan("measurement", state, evidence_set, budget=self.budget)
-                candidates = build_plan_candidates(snapshot, query, plan, self.template, policy=policy,
-                    layouts=("existing",), actions=("REBUILD",))
-                return next(len(candidate.input_ids) for candidate in candidates if candidate.action == "REBUILD")
+            def measure_contexts(state, groups):
+                plans = []
+                for units in groups:
+                    source_keys = {span.source_key for unit in units for span in unit.source_spans}
+                    blocks = tuple(block for block in pool.source_blocks if block.key in source_keys)
+                    evidence_set = EvidenceSet("measurement", units, source_blocks=blocks)
+                    plans.append(ContextPlan("measurement", state, evidence_set, budget=self.budget))
+                return measure_plan_contexts(snapshot, query, plans, self.template, policy=policy)
 
             scores = SupportScores()
             support_model = None
@@ -268,7 +268,8 @@ class StudyEvidenceProvider:
                     token_cost=token_cost, disposition="partial", source_blocks=pool.source_blocks),)
             elif self.strategy in {"B0", "Btoken", "B1"}:
                 search_started = time.perf_counter()
-                evidence_sets = (self._relevance_set(state, pool, measure_context),)
+                evidence_sets = (self._relevance_set(state, pool,
+                    lambda state, units: measure_contexts(state, (units,))[0]),)
                 search_ms = (time.perf_counter()-search_started)*1000
             else:
                 support_config = self.config.get("support_model", {})
@@ -284,7 +285,7 @@ class StudyEvidenceProvider:
                 planner = BudgetedEvidencePlanner(self.template.tokenizer, utility,
                     profile=SearchProfile(selection.get("beam_width", 4), selection.get("max_actions", 12),
                         selection.get("retained_sets", 3)),
-                    measure_context=measure_context)
+                    measure_contexts=measure_contexts)
                 scores = support_model.score_support(state, pool)
                 support_ms = scores.scoring_ms
                 evidence_sets = planner.search_sets(state, pool, scores, self.budget)
@@ -540,8 +541,10 @@ class StudyEvidenceProvider:
                 fresh = tuple(unit.unit_id for unit in selected if not already_read(unit))
                 return close_dependencies(fresh, by_id)
 
-            def new_body(selected):
-                return len(self.template.tokenizer.encode(render_unit_union(read_material(selected)), add_special_tokens=False))
+            def new_bodies(groups):
+                return tuple(len(ids) for ids in self.template.tokenizer(
+                    [render_unit_union(read_material(selected)) for selected in groups], add_special_tokens=False,
+                    return_attention_mask=False, return_token_type_ids=False)["input_ids"])
 
             config = self.config.get("support_model", {})
             direct = self.strategy == "B2" or config.get("group_mode") == "direct"
@@ -560,7 +563,7 @@ class StudyEvidenceProvider:
             planner = BudgetedEvidencePlanner(self.template.tokenizer,
                 self._search_utility(support),
                 profile=SearchProfile(selection.get("beam_width", 4), selection.get("max_actions", 12),
-                    selection.get("retained_sets", 3)), measure_body=new_body, passage_exclusions=used_passages)
+                    selection.get("retained_sets", 3)), measure_bodies=new_bodies, passage_exclusions=used_passages)
             evidence_sets = planner.search_sets(state, context_pool, scores, budget)
             evidence_sets, rerank_ms = self._rerank_sets(state, evidence_sets, scores, support)
             chosen = next((selected for selected in evidence_sets if any(not already_read(unit)
