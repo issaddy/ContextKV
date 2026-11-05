@@ -22,6 +22,7 @@ class TeacherSupportBackend:
         self.record_path = Path(record_path) if record_path else None
         self.manifest = {"backend": "frozen_qwen3_support_utility_teacher",
             "reader_model": "qwen3_32b_nonthinking", "base_url": base_url,
+            "prediction_protocol": "support_span_membership_v1",
             "batch_size": batch_size, "window_tokens": window_tokens}
         self.usage = {"calls": 0, "examples": 0, "input_tokens": 0, "output_tokens": 0,
                       "compute_ms": 0.0, "support_ms": 0.0, "utility_ms": 0.0, "oversized_examples": 0}
@@ -48,7 +49,9 @@ class TeacherSupportBackend:
         self.usage[kind+"_ms"] += elapsed
         self.usage["compute_ms"] += elapsed
         record = {"kind": kind, "raw_output": raw["text"], "meta_info": raw["meta_info"],
+                  "prediction_protocol": self.manifest["prediction_protocol"],
                   "input_tokens": len(rendered.input_ids), "elapsed_ms": elapsed,
+                  "messages": to_jsonable(messages), "response_schema": schema, "output_limit": output_tokens,
                   "source_span_catalog": payload.get("span_catalog", {})}
         self.records.append(record)
         if self.record_path:
@@ -70,6 +73,7 @@ class TeacherSupportBackend:
             rendered_units = []
             for unit in units.values():
                 rendered = to_jsonable(unit)
+                rendered.pop("retrieval_score")
                 for span in rendered["source_spans"]:
                     span["span_id"] = aliases[span["span_id"]]
                 rendered_units.append(rendered)
@@ -77,16 +81,17 @@ class TeacherSupportBackend:
             item = {"type": "object", "properties": {
                 **{name: scalar for name in ("applicability", "direct_support", "joint_support", "bridge_value")},
                 "disposition": {"type": "string", "enum": ["complete", "partial", "background", "contradict"]},
-                "span_ids": {"type": "array", "items": {"type": "string", "enum": list(spans)}},
                 "missing_relation": {"type": "string"}},
                 "required": ["applicability", "direct_support", "joint_support", "bridge_value",
-                             "disposition", "span_ids", "missing_relation"], "additionalProperties": False}
+                             "disposition", "span_selection", "missing_relation"], "additionalProperties": False}
             by_index = {}
             for index, example in enumerate(batch):
-                allowed = [aliases[span.span_id] for unit in (*example.units, *example.dependencies)
-                           for span in unit.source_spans]
+                allowed = list(dict.fromkeys(aliases[span.span_id]
+                    for unit in (*example.units, *example.dependencies) for span in unit.source_spans))
                 by_index[str(index)] = {**item, "properties": {**item["properties"],
-                    "span_ids": {"type": "array", "items": {"type": "string", "enum": allowed}}}}
+                    "span_selection": {"type": "object", "properties": {
+                        span_id: {"type": "boolean"} for span_id in allowed},
+                        "required": allowed, "additionalProperties": False}}}
             schema = {"type": "object", "properties": {"predictions": {"type": "object",
                 "properties": by_index, "required": list(by_index), "additionalProperties": False}},
                 "required": ["predictions"], "additionalProperties": False}
@@ -99,14 +104,15 @@ class TeacherSupportBackend:
                 "History identifies the task and conditions, not facts. Distinguish complete, partial, "
                 "background and contradict. Applicability tests current conditions and version. "
                 "Joint support tests combined premises. A partial source can have high bridge value. "
-                "Select supporting original span_ids and name missing relations. Return one prediction "
+                "Score factual support, not retrieval relevance. A complete prediction has an empty missing_relation. "
+                "Set every allowed original span_selection ID to true or false and name missing relations. Return one prediction "
                 "for every index in the requested JSON.", payload, schema, "support", self.output_tokens)
             if output is None:
                 continue
             for index_text, value in output["predictions"].items():
                 index = int(index_text)
-                selected_ids = value.pop("span_ids")
-                selected_spans = tuple(spans[span_id] for span_id in selected_ids)
+                selection = value.pop("span_selection")
+                selected_spans = tuple(spans[span_id] for span_id, selected in selection.items() if selected)
                 results[start+index] = SupportPrediction(source_spans=selected_spans, **value)
             self.usage["examples"] += len(batch)
         return tuple(results)

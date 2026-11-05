@@ -51,6 +51,56 @@ def test_source_aliases_preserve_two_versions_of_identical_text():
                                 (block, alias), candidate.reference_map) == {block.key, alias.key}
 
 
+def test_support_teacher_uses_complete_span_selection_and_records_actual_request(tmp_path):
+    import json
+    import httpx
+    from jsonschema import Draft202012Validator
+    from adapters.support_model import SupportInput
+    from adapters.teacher_support import TeacherSupportBackend
+    from controller.schema import Message
+
+    plan, _ = context_plan()
+    first = replace(plan.selected_set.selected_units[0], retrieval_score=.440746)
+    other = make_evidence('An independent supporting rule.', 'rules')
+    second = EvidenceUnit('rule', (SourceSpan('rule:span', other.key, 0, len(other.text)),),
+                          other.text, retrieval_score=.290210)
+    scores = {'applicability': .9, 'direct_support': .7, 'joint_support': .8, 'bridge_value': .6,
+              'disposition': 'partial', 'missing_relation': 'The applicable filing limit.'}
+    output = {'predictions': {'0': {**scores, 'span_selection': {'s0': True}},
+                             '1': {**scores, 'span_selection': {'s0': False, 's1': True}}}}
+    observed = {}
+
+    def respond(request):
+        observed.update(json.loads(request.content))
+        return httpx.Response(200, json={'text': json.dumps(output),
+            'meta_info': {'completion_tokens': 51, 'finish_reason': {'type': 'stop'}}})
+
+    template, path = ByteTemplate(), tmp_path/'support-calls.jsonl'
+    backend = TeacherSupportBackend('http://support-fixture', template, record_path=path)
+    backend.client.close()
+    backend.client = httpx.Client(base_url='http://support-fixture', transport=httpx.MockTransport(respond))
+    try:
+        predictions = backend.predict((SupportInput('task', 'need', 'Which rule?', (first,)),
+            SupportInput('task', 'need', 'Which rule?', (first, second))))
+    finally:
+        backend.close()
+    assert [prediction.source_spans for prediction in predictions] == [first.source_spans, second.source_spans]
+    assert predictions[1].missing_relation == scores['missing_relation']
+    schema = json.loads(observed['sampling_params']['json_schema'])
+    validator = Draft202012Validator(schema)
+    validator.validate(output)
+    for invalid in ({}, {'s0': True, 's1': True}, ['s0', 's0']):
+        assert not validator.is_valid({'predictions': {**output['predictions'],
+            '0': {**scores, 'span_selection': invalid}}})
+    record = json.loads(path.read_text())
+    payload = json.loads(record['messages'][-1]['content'])
+    assert all('retrieval_score' not in unit for unit in payload['units'])
+    assert record['response_schema'] == schema
+    assert record['output_limit'] == observed['sampling_params']['max_new_tokens']
+    assert list(template.render(tuple(Message(**row) for row in record['messages'])).input_ids) == observed['input_ids']
+    assert backend.usage['calls'] == 1 and backend.usage['examples'] == 2 and backend.usage['output_tokens'] == 51
+
+
 def test_compiled_instruction_and_output_reservations_use_real_tokens():
     plan, _ = context_plan()
     tiny = replace(plan, budget=ContextBudget(window_tokens=2048, output_tokens=1024))
