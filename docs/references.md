@@ -111,6 +111,8 @@ C 对新增保护项及期限 `(p, τ)` 的目标是 `ΔV(p, τ | 已保护集�
 
 ## 保留的可选对照
 
+ContextPilot 的作者索引已是主四格的编译因素；TTL/value 仍为独立可选保留策略。以下不改变该因素定义。
+
 - [ContextPilot](https://arxiv.org/abs/2511.03475)：`adapters/contextpilot.py` 复用作者低层索引及来源排列；旧会话内重叠对照入口保留，不等同于当前作者索引。
 - [EfficientAgent 的 Host 准入适配](third_party/EFFICIENTAGENT_NOTICE.md)：原生补丁 `HostAdmissionPolicy` 默认关闭；显式启用时配置进入 cache scope，线上与配对重放均传真实业务会话身份。它是 Host 写入对照，未替代 C 的 TTL 分配。
 - [CRAFT 行文本函数](third_party/CRAFT_NOTICE.md)与[表格关系适配](research/table_relations.md)：仅在表格注释选项启用时使用，未引入上游完整检索系统。
@@ -119,4 +121,6 @@ C 对新增保护项及期限 `(p, τ)` 的目标是 `ΔV(p, τ | 已保护集�
 
 ## 成熟外部参照的工程复用
 
-[LlamaIndex CondenseQuestionChatEngine](https://github.com/run-llama/llama_index/blob/v0.14.25/llama-index-core/llama_index/core/chat_engine/condense_question.py) 和 [CompactAndRefine](https://github.com/run-llama/llama_index/blob/v0.14.25/llama-index-core/llama_index/core/response_synthesizers/compact_and_refine.py) 由 `adapters/llamaindex_dialogue.py` 直接调用。适配层使用上游 Memory、问题凝练和 compact/refine，所有 LLM 调用交给项目回调；实际框架版本记录。该适配层尚未接入统一执行器与正式队列，不属于已完成的外部比较。
+[LlamaIndex CondenseQuestionChatEngine](https://github.com/run-llama/llama_index/blob/v0.14.25/llama-index-core/llama_index/core/chat_engine/condense_question.py) 和 [CompactAndRefine](https://github.com/run-llama/llama_index/blob/v0.14.25/llama-index-core/llama_index/core/response_synthesizers/compact_and_refine.py) 由 `adapters/llamaindex_dialogue.py` 直接调用。适配层使用上游 Memory、问题凝练和 compact/refine，所有 LLM 调用交给项目回调；实际框架版本记录。`execution.dialogue_mode: llamaindex` 已接入统一 Controller/SessionStore；正式入口声明 `LlamaIndex_native`，为真实历史 condense＋hybrid/rerank 检索＋compact/refine＋Native 编译/保留。各数据集物化 `hybrid_rerank`、`query_mode: current` 配置，关闭项目 query adapter/selector，使用发布版 BGE reranker；不调用项目任务/支持规划器。所有框架 LLM 调用仍走实际固定 Qwen 引擎与账本。该代码接线不等于已完成外部比较，质量、完整响应与全部费用留待当前环境实际执行。
+
+最终评价在 c1/c4 均以固定/收益 B × Native/ContextPilot 编译构成主四格，统一使用 Native retention；`S3_contextpilot_no_fact_reuse` 与联合格配对检验跨轮事实复用。外部参照、事实复用和编译四格分别回答不同问题，不将历史 E0 或可选 TTL/value 替代其中任何一项。

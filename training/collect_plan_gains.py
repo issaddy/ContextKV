@@ -8,6 +8,7 @@ from pathlib import Path
 
 from controller.context_schema import ReadingOutcome
 from controller.plan_policy import PlanCandidate
+from controller.plan_gain_protocol import validate_input_protocol, validate_pre_action_input
 from controller.schema import SessionSnapshot
 from controller.serialization import decode
 from .train_plan_gain import build_gain_record
@@ -34,6 +35,8 @@ def served_branch(row, *, semantic_kind, plan_id, metric, normalization, scorer_
     if row["plan_id"] != plan_id or attempt["plan"]["candidate"]["context_plan_id"] != plan_id:
         raise ValueError("gain branch plan identity differs from its actually executed context plan")
     candidate = attempt["plan"]["candidate"]
+    validate_input_protocol(row.get("input_protocol"), reader_fingerprint=candidate["fingerprint"])
+    validate_pre_action_input(row)
     if candidate["fingerprint"]["model_revision"] != row["reader_checkpoint"]:
         raise ValueError("gain reader label differs from the actual executed input fingerprint")
     budgets = {step["step_id"]: step["task"]["output_budget"] for step in row["steps"]}
@@ -41,7 +44,7 @@ def served_branch(row, *, semantic_kind, plan_id, metric, normalization, scorer_
     if row["executed_output_budgets"] != budgets:
         raise ValueError("gain output budgets differ from the actual executed steps")
     observed = row.get("observed_state_binding")
-    reads = row["new_action_counts"]["READ"] if observed is not None else row["response"]["read_count"]
+    reads = row["new_action_counts"]["READ"]
     if reads != sum(step["task"]["kind"] == "READ" for step in row["steps"]):
         raise ValueError("gain READ count differs from the actual executed steps")
     if observed is not None and set(row["new_step_ids"]) != {step["step_id"] for step in row["steps"]}:
@@ -57,6 +60,7 @@ def served_branch(row, *, semantic_kind, plan_id, metric, normalization, scorer_
         "measurement_kind": row["measurement_kind"], "history_origin": row["history_origin"],
         "semantic_kind": semantic_kind, "plan_id": plan_id, "read_count": reads,
         "observed_state_binding": observed,
+        "input_protocol": row.get("input_protocol"),
         "continuation_gap_limits": row["continuation_gap_limits"],
         "new_action_counts": row.get("new_action_counts"),
         "new_step_ids": row.get("new_step_ids"),

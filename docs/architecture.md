@@ -66,6 +66,8 @@ READ 按实际 tokenizer 的输入容量与结构化输出容量打包。同来�
 GAP 仅在选中后执行并进入步骤账本；返回的新来源与原事实合并，再决定是否阅读。线上与离线共用 `action_proposals.gap_retrieval_plan`，仅排除实际已读来源闭包；未读候选仍可召回，passage 上限为已读数量加声明新增额度，并受原总上限约束。反事实 REDUCE 使用与线上工厂相同的事实基底，不按原 READ Need 别名或 extract 类型再次筛选。
 质量模型学习实际最终质量差。新成本模型用动作前的原生缓存、压力和可编译首步报价预测动作加最终回答的绝对成本；GAP 和 CPU REDUCE 只使用动作前的批级状态。
 在线在同一次原生观测下分别预测动作和 DIRECT，再计算带符号差；采集时不同分支的实测成本差保留为诊断，避免把执行顺序产生的预热收益当作动作收益。
+B 的 `input_protocol` 额外绑定 `merged_source_windows_actual_coverage_reused_facts_compiled_choice`、实际规范来源窗口粒度与完整 reader fingerprint；观察、分支、配对、拟合及加载沿用同一身份，缺失或不匹配时拒绝旧资产。真实状态保留已复用 seed、已读覆盖及编译器选中排列，`pre_action_input` 将原生报价与实际执行输入绑定。禁用事实复用是显式机制消融，其开关不改变资产可接受的协议身份，实际 seed 差异保留在状态中。
+
 成本资产声明 `prefix_control_scope=native_excludes_prefix_control`。价值 C 开启时，B 仅给候选首个 READ 加入最近实际完整 callback 的均值；没有观测时诊断保留未知。`prefix_control_ms` 仍是唯一实际计费字段，已付 callback 费用进入累计成本，原生报价中的命中效果不再额外抵扣。
 已付成本加绝对分支成本约束总预算。明确终止且没有提交回答的分支按零交付效用计，原始评分缺失仍保留；暂停和未决分支不进入这类标签。
 `observed_actions` 使用实时原生报价和配对得到的完整分支成本模型，不依赖整计划的执行 profile。
@@ -101,9 +103,9 @@ SQLite 的 `turn_plans` 保存计划，`execution_steps` 保存输入、原生 e
 
 公开评价复用作者指标规则。MTRAGEval 先完成各分量的可答性条件化，再计算聚合分；2Wiki 官方评价保留所有声明 gold 任务。共同完成子集用于诊断，完整队列用于方案选择。成本同时保存实际生成 token、完整响应、GPU/Host 物理积分与 unique KV 页占用；它们分别解释计算、时延和保护容量。
 
-`bench.quality.export_evaluation` 从最终 `evidence_spans` 的实际原文区间，以及 `ReadingOutcome` 最终 answer plan 各结论的来源叶子生成评分上下文。重叠区间合并，结论独占来源保留，未读档案正文不扩入上下文。`reading_conclusions` 同时保存实际结论表与未解需求；完整 `audit_evidence` 另作原文核验。官方导出和项目 judge 共用该投影。矩阵显式登记 `selection.baseline`，冻结与配对报告使用同一实际存在的方法。
+`bench.quality.export_evaluation` 从最终 `evidence_spans` 的实际原文区间，以及 `ReadingOutcome` 最终 answer plan 各结论的来源叶子生成评分上下文。重叠区间合并，结论独占来源保留，未读档案正文不扩入上下文。`reading_conclusions` 同时保存实际结论表与未解需求；完整 `audit_evidence` 另作原文核验。官方导出和项目 judge 共用该投影。LlamaIndex 的早期 compact/refine 原文片段从实际步骤 `source_view.evidence_spans` 投影，并保留步骤、生成类型及输入 hash 证明；末次实际片段沿用最终可见清单。中间输出按原始模型文本保留，不构造 ClaimGraph 事实，也不把仅被检索的正文加入评分上下文。矩阵显式登记 `selection.baseline`，冻结与配对报告使用同一实际存在的方法。
 
-`bench.capacity_workflow --full-queue` 对完整声明的 350 题在 c4 执行 E0_native 及固定 B / 收益 B × native / value 四格（E1—E4）；c1 只补 E1/E4。每格沿自己的实际问答历史推进。该入口直接使用冻结 A、动作收益与 C 资产，按当前 reader 配置绑定资源；原两轮诊断和 `whole_plan` 保留独立入口。
+`bench.capacity_workflow --full-queue` 在 c1/c4 都执行固定 B / 收益 B × Native / ContextPilot 请求编译四格（E1—E4），四格的 `prefix_retention` 均为 Native。共同参照为 `B6_native`，同时执行 `LlamaIndex_native` 外部参照及 `S3_contextpilot_no_fact_reuse`（只禁用 `reading.fact_reuse`）主消融。每格均读取原声明的 350 题、77 会话 IDs，沿自身实际 P3 历史推进；固定到达与全部在线费用不变。E0 和 TTL/value 是显式可选对照，固定 B 不依赖收益资产。汇总的主四格交互绑定请求编译与 B 的实际因素，不把价值保留当作编译贡献。原两轮诊断和 `whole_plan` 保留独立入口。
 
 联合汇总按矩阵既有分区声明分别呈现公开基准、参考历史诊断与构造机制任务，保留原指标、完整分母及未知区间。比较身份核对模型、队列、预算、到达计划和 SLO；完整队列相对 P95 仅在双方完整交付且全部评分时提供，资源变化读取实际成本账本。
 
@@ -113,4 +115,6 @@ SQLite 的 `turn_plans` 保存计划，`execution_steps` 保存输入、原生 e
 
 ## 本轮尚未完成
 
-LlamaIndex 多轮 history＋compact adapter 尚无统一执行器消费者；正式矩阵尚未切换到最终编排对照。事实复用/合并阅读后的 B 标签与配对训练要按新协议生成。当前 CUDA 12.9 引擎补丁只完成 CPU 应用、语法和回执检查，GPU 端到端与质量/成本目标尚未验收。
+LlamaIndex 的 `execution.dialogue_mode: llamaindex` 通过统一 Controller/SessionStore 执行上游 history condense 与 compact/refine。外部问题凝练后以该真实查询执行 hybrid＋发布版 reranker，不经过项目任务解释/支持规划；各次 LLM 调用由项目引擎、步骤回执及原生报价计量。外部方法使用独立物化的检索配置，不继承主线查询 adapter 或 selector。
+
+当前在更新后的 `test-0523` 环境恢复验证；事实复用/合并阅读后的 B 标签与配对训练仍须按当前监督身份生成。GPU 端到端和完整队列质量/成本目标尚未验收，代码接线与 CPU 检查不代替真实结果。

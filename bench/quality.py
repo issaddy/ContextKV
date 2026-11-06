@@ -207,7 +207,24 @@ def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Pat
             "output_ids": list(output_ids), "actual_history": _jsonable(turn.history)}
     full["conclusion_source_manifest"] = []
     full["reading_conclusions"] = None
-    if reading_outcome is not None:
+    if reading_outcome is not None and reading_outcome.plan.reading_mode == "llamaindex":
+        prior_outputs = []
+        for step in reading_outcome.steps:
+            if step.task.kind not in {"LLAMAINDEX_COMPACT", "LLAMAINDEX_REFINE"}:
+                continue
+            observed = step.metrics.get("source_view", {})
+            proof = {"step_id": step.step_id, "generation_kind": step.task.kind,
+                     "input_hash": observed["input_hash"]}
+            full["conclusion_source_manifest"].extend(
+                {"key": span["key"], "reference_id": span["reference_id"],
+                 "source_start": span["source_start"], "source_end": span["source_end"],
+                 "execution_proof": proof}
+                for span in _jsonable(observed.get("evidence_spans", ())))
+            if step.result is not None:
+                prior_outputs.append({**proof, "raw_output": step.result.raw_output})
+        full["reading_conclusions"] = {
+            "kind": "llamaindex_raw_prior_outputs", "outputs": prior_outputs}
+    elif reading_outcome is not None:
         from controller.claim_graph import ClaimGraph
         graph = ClaimGraph(reading_outcome.claims)
         plan = reading_outcome.plan.answer_plan

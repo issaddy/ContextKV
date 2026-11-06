@@ -41,12 +41,14 @@ async def test_controller_reselects_after_each_read_and_commits_one_qa(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_full_scope_forbids_cheap_direct_answer_before_all_originals_are_read(tmp_path):
+async def test_full_scope_forbids_direct_when_originals_do_not_fit_the_answer(tmp_path):
+    from dataclasses import replace
     class NegativeGain(SpecifiedGainFixture):
         def predict(self, features):
             return -.5
     controller, _, _, observed, plan = setup_controller(tmp_path, scope="all_supplied_documents", reads=2,
                                                        gain=NegativeGain())
+    plan = replace(plan, budget=replace(plan.budget, body_tokens=0))
     response = await controller.serve_turn("s", "How?", context_plans=(plan,))
     assert response.read_count == 2
     assert len(observed.states[-1].results) == 2

@@ -254,6 +254,8 @@ async def test_observed_numeric_actions_keep_factory_bound_shared_and_selected_b
         pass
 
     class Executor:
+        request_compiler = service.request_compiler
+
         async def execute_one(self, attempt_id, snapshot, plan, actual, state, **kwargs):
             assert actual.input_claim_ids == task.input_claim_ids
             assert tuple(claim for claim in state.claims if claim.claim_id in actual.input_claim_ids) == expected
@@ -263,5 +265,82 @@ async def test_observed_numeric_actions_keep_factory_bound_shared_and_selected_b
     with pytest.raises(BasisObserved):
         await runtime.run('basis', snapshot, (plan.context_plan,), Executor(), native, service.template,
             None, None, arrived=0, auxiliary_usage=dict(ZERO_AUX), events=service.events)
+    await service.aclose()
+    service.store.close()
+
+
+@pytest.mark.asyncio
+async def test_whole_plan_collection_preserves_unpaid_reuse_seed_and_skips_replayed_sources(tmp_path):
+    from training.plan_gain_protocol import build_counterfactual_plans
+
+    service, native, budget, frozen, snapshot, _, _, _, binding, row, prep = await frozen_fixture(tmp_path)
+    old = frozen.plan.steps[0]
+    imported = replace(old, step_id='policy:reuse:specified', input_budget=0, output_budget=0)
+    seed = replace(frozen, steps=(), results=(replace(frozen.results[0], step_id=imported.step_id),),
+        plan=replace(frozen.plan, steps=(imported, *frozen.plan.steps[1:])))
+    plans, _ = build_counterfactual_plans(seed.plan, snapshot, service.template,
+        reader_checkpoint=binding['reader_checkpoint'], read_outputs=(2048,), initial_state=seed)
+    assert plans
+    for planned in plans:
+        assert imported.step_id in {step.task.step_id for step in planned.steps}
+        assert not any(set(step.task.input_unit_ids) & set(imported.input_unit_ids)
+            for step in planned.steps if step.task.kind == 'READ' and step.task.step_id != imported.step_id)
+    direct = next(plan for plan in plans if plan.semantic_kind == 'direct_answer')
+    assert [step.task.kind for step in direct.steps] == ['READ', 'ANSWER']
+    run = await execute_branch(service, direct, seed, snapshot, row, case_dir=tmp_path/'whole-direct',
+        binding={**binding, 'collection_mode': 'whole_plan'}, preparation=prep, resources=Resources(),
+        cache_start='observed', generation_budget=budget)
+    assert run['new_action_counts'] == {'READ': 0, 'REDUCE': 0, 'GAP_RETRIEVAL': 0, 'ANSWER': 1}
+    assert run['response']['read_count'] == 0  # reused logical facts do not add physical READ calls
+    assert len(run['actual_native_calls']) == 1 and not run['steps']
+    assert frozen.claims[0].text in native.inputs[-1][1]
+    assert run['attempt']['reading_outcome']['results'][0]['step_id'] == imported.step_id
+    await service.aclose()
+    service.store.close()
+
+
+@pytest.mark.asyncio
+async def test_counterfactual_terminal_answer_executes_and_records_contextpilot_choice(tmp_path):
+    from controller.context_schema import AnswerPlan, EvidenceSet
+    from controller.plan_policy import complete_plan
+    from controller.request_compiler import RequestCompiler
+    from controller.plan_gain_protocol import validate_pre_action_input
+
+    service, native, budget, frozen, snapshot, _, _, _, binding, row, prep = await frozen_fixture(tmp_path)
+
+    class ReverseIndex:
+        def propose_orders(self, identities, **scope):
+            return (tuple(identities), tuple(reversed(identities)))
+
+        def observe_executed(self, *args, **kwargs):
+            return 'specified-executed-order'
+
+    service.request_compiler = RequestCompiler(service.template, ReverseIndex())
+    quote = native.quote_batch
+
+    async def prefer_reordered(candidates, fingerprint):
+        batch = await quote(candidates, fingerprint)
+        choices = {candidate.candidate_id: candidate for candidate in candidates}
+        return replace(batch, quotes=tuple(replace(current,
+            ready_gpu_prefix_tokens=current.input_len-1 if choices[current.candidate_id].layout_id.endswith(':contextpilot') else 0)
+            for current in batch.quotes))
+
+    native.quote_batch = prefer_reordered
+    pairs = tuple(material(name) for name in ('left', 'right'))
+    blocks, units = zip(*pairs)
+    base = replace(frozen.plan, steps=(), answer_plan=AnswerPlan(),
+        task_state=replace(frozen.plan.task_state, needs=(Need('n', operation='lookup'),)),
+        selected_set=EvidenceSet('small', units, source_blocks=blocks))
+    from controller.context_budget import bind_answer_window
+    base = bind_answer_window(base, service.template, snapshot, service.policy.system_prompt)
+    initial = ReadingOutcome(base, auxiliary_usage=dict(ZERO_AUX))
+    plan = complete_plan(base, (), semantic_kind='direct_answer', reader_checkpoint=binding['reader_checkpoint'])
+    run = await execute_branch(service, plan, initial, snapshot, row, case_dir=tmp_path/'permuted',
+        binding=binding, preparation=prep, resources=Resources(), cache_start='observed', generation_budget=budget)
+    chosen = run['pre_action_input']
+    assert chosen['layout_id'] == 'existing:contextpilot'
+    assert chosen['input_ids'] == run['actual_native_calls'][0]['request']['input_ids']
+    assert chosen['input_hash'] == run['attempt']['plan']['candidate']['input_hash']
+    validate_pre_action_input(run)
     await service.aclose()
     service.store.close()

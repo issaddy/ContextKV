@@ -13,6 +13,34 @@ selection:
   include_ablations: false
   lambda_time_grid: []
   test_comparators: [B0, Btoken, B3, B6, Lmap]
+# capacity_workflow materializes these recipes against the frozen A and declared IDs.
+# Legacy methods below remain available for historical/local diagnostics.
+final_evaluation:
+  workflow: bench.capacity_workflow
+  protocol: P3
+  declared_qa: 350
+  declared_sessions: 77
+  concurrency: [1, 4]
+  baseline: B6_native
+  factorial:
+    E1: {method: B6_native, B: fixed, compilation: native, retention: native}
+    E2: {method: S3_native, B: gain, compilation: native, retention: native}
+    E3: {method: B6_contextpilot, B: fixed, compilation: contextpilot, retention: native}
+    E4: {method: S3_contextpilot, B: gain, compilation: contextpilot, retention: native}
+  external_reference:
+    method: LlamaIndex_native
+    dialogue_mode: llamaindex
+    retrieval: hybrid_rerank
+    synthesis: history_condense_compact_refine
+    compilation: native
+    retention: native
+  principal_ablation:
+    method: S3_contextpilot_no_fact_reuse
+    reference: S3_contextpilot
+    overrides: {reading: {fact_reuse: false}}
+  optional_methods: [E0_native, B6_value, S3_value]
+  arrival_plan: explicit_fixed_arrivals_required
+  cost_scope: all_online_and_physical_costs
 resources:
   gpu_capacity_tokens: 32768
   host_capacity_tokens: 61056

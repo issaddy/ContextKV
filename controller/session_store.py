@@ -59,6 +59,7 @@ class Attempt:
     reading_outcome: ReadingOutcome | None = None
     reading_elapsed_ms: float = 0.0
     auxiliary_usage: dict | None = None
+    final_step_id: str | None = None
 
 
 ACTIVE_STAGES = ("STARTED", "PLANNED", "PREPARING", "PREPARED", "SUBMITTED", "RESULT_READY")
@@ -556,6 +557,27 @@ class SessionStore:
         self.db.execute("INSERT OR IGNORE INTO retire_outbox(operation_id,session_id,payload,created_ns) VALUES(?,?,?,?)",
                         (operation.operation_id, session_id, dumps(operation), time.monotonic_ns()))
 
+    def promote_completed_step(self, attempt: Attempt) -> Attempt:
+        """Publish one already-paid external answer for the ordinary QA CAS commit."""
+        with self._transaction():
+            current = self.get_attempt(attempt.attempt_id)
+            if current.stage != "STARTED" or attempt.stage != "RESULT_READY" or not attempt.final_step_id:
+                raise StoreError("Only a started outer attempt can promote a completed physical answer")
+            paid = self.execution_step(attempt.attempt_id, attempt.final_step_id)
+            if (paid is None or paid[0] != "COMPLETE" or paid[2] != attempt.result
+                    or paid[1].input_ids != attempt.plan.candidate.input_ids
+                    or paid[1].input_messages != attempt.plan.candidate.messages
+                    or paid[1].engine_epoch.engine_session_id != attempt.epoch.engine_session_id):
+                raise StoreError("External answer must match its durable completed physical step")
+            if (current.session_id, current.request_id, current.request_hash, current.expected_version) != (
+                    attempt.session_id, attempt.request_id, attempt.request_hash, attempt.expected_version):
+                raise StoreError("Attempt identity is immutable")
+            self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?",
+                            (attempt.stage, self._dump(attempt), attempt.attempt_id))
+            self.db.execute("INSERT INTO turn_plans VALUES(?,?) ON CONFLICT(attempt_id) "
+                            "DO UPDATE SET plan=excluded.plan", (attempt.attempt_id, self._dump(attempt.context_plan)))
+            return attempt
+
     def commit_turn_and_outbox(self, attempt_id: str) -> SessionSnapshot:
         attempt = self.get_attempt(attempt_id)
         if attempt.stage == "COMMITTED":
@@ -585,7 +607,8 @@ class SessionStore:
             if attempt.context_plan is not None:
                 steps = attempt.reading_outcome.steps if attempt.reading_outcome is not None else ()
                 reader_tokens = (len(candidate.input_ids)+len(result.output_ids)
-                    +sum(len(step.input_ids)+len(step.output_ids) for step in steps))
+                    +sum(len(step.input_ids)+len(step.output_ids) for step in steps
+                         if step.step_id != attempt.final_step_id))
                 auxiliary = attempt.auxiliary_usage
                 auxiliary_tokens = (0 if auxiliary is None else
                     auxiliary["input_tokens"]+auxiliary["output_tokens"]
@@ -619,8 +642,9 @@ class SessionStore:
                               raw_history_version=history_version, execution=ledger,
                               archive=tuple(archive[k] for k in sorted(archive)),
                               corpus_snapshot_id=candidate.corpus_snapshot_id,
-                              current_epoch=replace(epoch, state="COMMITTED"), history_sync_pending=False,
-                              force_new_epoch_for_recovery=False, must_rebuild=False,
+                              current_epoch=replace(epoch, state="RETIRED" if attempt.final_step_id else "COMMITTED"),
+                              history_sync_pending=False, force_new_epoch_for_recovery=False,
+                              must_rebuild=bool(attempt.final_step_id),
                               reference_map=candidate.reference_map,
                               turns_since_rebuild=0 if candidate.action == "REBUILD" else snap.turns_since_rebuild + 1)
             self._write_snapshot(updated, snap.version)

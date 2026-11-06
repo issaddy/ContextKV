@@ -78,6 +78,13 @@ class ServingRetriever:
         started = time.monotonic()
         return await run_retrieval_worker(self._retrieve, snapshot, query, request_id, started)
 
+    async def retrieve_supplied(self, snapshot, query, request_id, blocks, *, source_metadata=None,
+                                coverage_scope="selected_sources"):
+        """The direct-answer baseline reads the caller's supplied original set."""
+        blocks = tuple(blocks)
+        return EvidenceSelection(blocks, tuple(block.key for block in blocks),
+            auxiliary_usage={"input_tokens": 0, "output_tokens": 0, "compute_ms": 0, "models": []})
+
     def finish_request(self, task_id):
         """This retriever owns no request-local support predictions."""
         if self.events is not None:

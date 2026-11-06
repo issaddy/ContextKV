@@ -119,8 +119,19 @@ class RunConfig:
     cache_compilation: dict = field(default_factory=lambda: {"mode": "native"})
     plan_gain: dict | None = None
     state_observation: dict | None = None
+    dialogue_mode: str = "contextkv"
+    dialogue_history_tokens: int = 8192
 
     def __post_init__(self):
+        if self.dialogue_mode not in {"contextkv", "llamaindex"}:
+            raise ValueError("dialogue_mode must be contextkv or llamaindex")
+        if self.dialogue_history_tokens < 1:
+            raise ValueError("dialogue_history_tokens must be positive")
+        if self.dialogue_mode == "llamaindex" and (self.plan_gain is not None
+                or self.cache_compilation["mode"] != "native"
+                or self.prefix_retention["mode"] != "native" or self.shadow
+                or self.state_observation is not None):
+            raise ValueError("LlamaIndex reference requires native execution without ContextKV policies")
         if self.engine.kind not in ("mock", "sglang"):
             raise ValueError("engine.kind must be mock or sglang")
         if self.cache_compilation["mode"] not in {"native", "contextpilot"}:
@@ -166,7 +177,8 @@ def apply_study_config(config: RunConfig, study):
     artifact = execution.get("cost_artifact", config.cost_model.artifact)
     return replace(config, context=replace(config.context,
         max_total_model_tokens=execution["window_tokens"], max_new_tokens=execution["output_tokens"],
-        system_prompt=config.context.system_prompt or (None if strategy == "B0" else PLAN_SYSTEM_PROMPT)),
+        system_prompt=config.context.system_prompt or (None if strategy == "B0"
+            or execution.get("dialogue_mode", config.dialogue_mode) == "llamaindex" else PLAN_SYSTEM_PROMPT)),
         planner=replace(config.planner, strategy="cost" if strategy == "B7" else "always_rebuild",
             lambda_time=execution["lambda_time"], lambda_gpu=execution["lambda_gpu"],
             lambda_host=execution["lambda_host"]),
@@ -174,7 +186,9 @@ def apply_study_config(config: RunConfig, study):
         prefix_retention=execution.get("prefix_retention", config.prefix_retention),
         cache_compilation=execution.get("cache_compilation", config.cache_compilation),
         plan_gain=execution.get("plan_gain", config.plan_gain),
-        state_observation=execution.get("state_observation", config.state_observation))
+        state_observation=execution.get("state_observation", config.state_observation),
+        dialogue_mode=execution.get("dialogue_mode", config.dialogue_mode),
+        dialogue_history_tokens=execution.get("history_tokens", config.dialogue_history_tokens))
 
 
 def assemble_cost_model(config, *, artifact=None, measurements=None,
@@ -292,6 +306,8 @@ def create_controller(config: RunConfig) -> Controller:
                       epoch_retirement=config.ablation.epoch_retirement,
                       online_calibration=config.cost_model.online_calibration,
                       prefix_settings=config.prefix_retention,
+                      dialogue_mode=config.dialogue_mode,
+                      dialogue_history_tokens=config.dialogue_history_tokens,
                       rolling_policy=rolling,
                       state_observer=state_observer,
                       events=EventLog(state_dir / "events.jsonl",

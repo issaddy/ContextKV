@@ -129,9 +129,10 @@ def multihop_geometry(base, budget, template, snapshot):
     return replace(isolated, steps=tuple(tasks))
 
 
-def complete_predeclared(plan, *, semantic_kind, reader_checkpoint):
+def complete_predeclared(plan, *, semantic_kind, reader_checkpoint, initial_state=None):
     plan = namespace_plan(plan)
-    empty = ReadingOutcome(plan, auxiliary_usage=dict(ZERO_AUX))
+    empty = (ReadingOutcome(plan, auxiliary_usage=dict(ZERO_AUX)) if initial_state is None
+             else replace(initial_state, plan=plan))
     reduced = {need for task in plan.steps if task.kind == "REDUCE" for need in task.need_ids}
     tail = tuple(task for task in _reduction_tasks(plan, empty) if not reduced.intersection(task.need_ids))
     plan = replace(plan, steps=(*plan.steps, *tail))
@@ -139,14 +140,16 @@ def complete_predeclared(plan, *, semantic_kind, reader_checkpoint):
 
 
 def build_counterfactual_plans(base, snapshot, template, *, reader_checkpoint, read_outputs,
-                               scope_material=None, answer_system_prompt=None):
+                               scope_material=None, answer_system_prompt=None, initial_state=None):
     """Each output budget repacks the original material before registration."""
     if not base.selected_set.selected_units:
         return (), ({"family": "complementary_evidence", "reason": "no_selected_original_material"},)
     base = bind_answer_window(base, template, snapshot, answer_system_prompt)
-    direct = replace(base, plan_id=base.plan_id+":gain-direct", steps=(),
+    completed = set() if initial_state is None else {result.step_id for result in initial_state.results}
+    direct = replace(base, plan_id=base.plan_id+":gain-direct",
+                     steps=tuple(task for task in base.steps if task.step_id in completed),
                      coverage_scope="selected_sources", coverage_units=())
-    proposals = [complete_predeclared(direct, semantic_kind="direct_answer", reader_checkpoint=reader_checkpoint)]
+    proposals = [complete_plan(direct, (), semantic_kind="direct_answer", reader_checkpoint=reader_checkpoint)]
     unavailable = []
     for output in read_outputs:
         budget = replace(base.budget, read_output_tokens=output)
@@ -165,6 +168,9 @@ def build_counterfactual_plans(base, snapshot, template, *, reader_checkpoint, r
                     source = (replace(base, selected_set=scope_material, coverage_scope="all_supplied_documents")
                               if family == "scope_scan" else replace(base, coverage_scope="selected_sources"))
                     plan = read_geometry(source, budget, template, snapshot)
+                if initial_state is not None:
+                    from controller.fact_reuse import apply_reuse_to_plan
+                    plan = apply_reuse_to_plan(plan, initial_state, template, snapshot).plan
             except ValueError as error:
                 # These are pre-generation geometry failures; retain the exact
                 # message and original material rather than making another plan.
@@ -175,7 +181,8 @@ def build_counterfactual_plans(base, snapshot, template, *, reader_checkpoint, r
                     "reason": "geometry_infeasible", "error": str(error)})
                 continue
             plan = replace(plan, plan_id=f"{base.plan_id}:gain:{family}:{output}", layouts=base.layouts)
-            proposals.append(complete_predeclared(plan, semantic_kind=family, reader_checkpoint=reader_checkpoint))
+            proposals.append(complete_predeclared(plan, semantic_kind=family, reader_checkpoint=reader_checkpoint,
+                initial_state=initial_state))
     return tuple(proposals), tuple(unavailable)
 
 
@@ -192,6 +199,7 @@ class FixedCounterfactualRuntime:
         self.gap_request, self.gap_provider = gap_request, gap_provider
         self.gap_result = None
         self.pre_action_quote = None
+        self.pre_action_input = None
         self.new_auxiliary_usage = dict(ZERO_AUX)
         self.new_step_ids = ()
         self.new_action_counts = {"READ": 0, "REDUCE": 0, "GAP_RETRIEVAL": 0, "ANSWER": 0}
@@ -206,19 +214,22 @@ class FixedCounterfactualRuntime:
         return
 
     async def run(self, attempt_id, snapshot, context_plans, executor, engine, template,
-                  cost_model, compile_answers, *, arrived, auxiliary_usage, events, open_need_provider=None):
+                  cost_model, compile_answers, *, arrived, auxiliary_usage, events, open_need_provider=None,
+                  initial_outcomes=()):
         if context_plans != (self.planned.context_plan,):
             raise ValueError("experimental branch differs from its pre-registered complete plan")
         if self.initial_snapshot is not None:
             snapshot = replace(snapshot, archive=self.initial_snapshot.archive,
                                reference_map=self.initial_snapshot.reference_map)
         plan = self.planned.context_plan
-        state = (ReadingOutcome(plan, auxiliary_usage=dict(ZERO_AUX)) if self.initial_state is None
-                 else replace(self.initial_state, plan=plan))
+        supplied = next((seed for seed in initial_outcomes if seed.plan.plan_id == plan.plan_id), None)
+        initial = self.initial_state if self.initial_state is not None else supplied
+        state = (ReadingOutcome(plan, auxiliary_usage=dict(ZERO_AUX)) if initial is None
+                 else replace(initial, plan=plan))
         completed = {result.step_id for result in state.results}
         pending = [step.task for step in self.planned.steps if step.task.kind != "ANSWER"
                    and step.task.step_id not in completed]
-        observed = self.initial_state is not None
+        observed = self.paid_cost is not None
         if observed:
             from controller.execution import auxiliary_tokens, ReadingBudgetExceeded
             measured = sum(len(record.input_ids)+len(record.output_ids) for record in state.steps)
@@ -282,6 +293,7 @@ class FixedCounterfactualRuntime:
         if self.planned.semantic_kind == "gap_retrieval":
             pool = await retrieve(self.gap_request)
         records = []
+        self.decisions = records
         continued = False
         while pending or (observed and self.planned.semantic_kind != "direct_answer" and not continued):
             if not pending:
@@ -366,23 +378,28 @@ class FixedCounterfactualRuntime:
                                if task.predecessor_step_ids else task.input_claim_ids)
             plan = replace(plan, steps=tuple(task if old.step_id == task.step_id else old for old in plan.steps))
             cpu = plan.reading_mode == "typed_reduce" and task.kind == "REDUCE" and task.operation in {"count", "sum", "group", "union"}
-            variants = () if cpu else compile_step(plan, task, state, snapshot, template, outputs=(task.output_budget,))
-            if variants and not variants[0].feasible:
+            cache_scope = None if cpu else await engine.info()
+            variants = () if cpu else compile_step(plan, task, state, snapshot, template,
+                outputs=(task.output_budget,), request_compiler=executor.request_compiler, cache_scope=cache_scope)
+            if variants and not any(candidate.feasible for candidate in variants):
                 from controller.execution import ReadingBudgetExceeded
                 raise ReadingBudgetExceeded("actual generated facts exceed the pre-registered execution window")
             quote = None if cpu else await engine.quote_batch(variants, template.fingerprint)
-            if observed and not self.new_step_ids and self.pre_action_quote is None:
+            candidate = None if cpu else executor.request_compiler.choose_variant(variants, quote)
+            if not self.new_step_ids and self.pre_action_quote is None:
                 self.pre_action_quote = {
                     "batch": await engine.quote_batch((), template.fingerprint) if cpu else quote,
-                    "candidate_id": None if cpu else variants[0].candidate_id}
+                    "candidate_id": None if cpu else candidate.candidate_id}
+                self.pre_action_input = candidate
             record = {"step_id": task.step_id, "fact_binding": task.input_claim_ids,
-                "actual_quote": to_jsonable(quote), "selection": "predeclared_experimental_branch",
+                "actual_quote": to_jsonable(quote), "compiled_input": candidate,
+                "selection": "predeclared_semantic_branch_actual_compiler_choice",
                 "gain_prediction": None, "calibration_claim": None}
             records.append(record)
             events.emit("plan_gain_experimental_step", attempt_id=attempt_id, **record)
             try:
                 state = await executor.execute_one(attempt_id, snapshot, plan, task, state,
-                    initial_auxiliary_usage=auxiliary_usage, candidate=None if cpu else variants[0])
+                    initial_auxiliary_usage=auxiliary_usage, candidate=candidate)
             except ValueError as error:
                 if not str(error).startswith(("conflicting quantities for ", "sum requires compatible units:")):
                     raise
@@ -399,16 +416,19 @@ class FixedCounterfactualRuntime:
             raise ReadingBudgetExceeded("observed paid state plus action exhausts the complete request allocation")
         candidates = compile_answers(snapshot, (plan,), state)
         matching = [candidate for candidate in candidates if candidate.feasible
-                    and candidate.action == self.action and candidate.layout_id == self.layout]
-        if len(matching) != 1:
-            raise ValueError("predeclared terminal action/layout has no unique feasible actual input")
-        candidate = matching[0]
-        quotes = await engine.quote_batch((candidate,), template.fingerprint)
-        if observed and self.planned.semantic_kind == "direct_answer":
+                    and candidate.action == self.action
+                    and candidate.layout_id in {self.layout, self.layout+":contextpilot"}]
+        if not matching:
+            raise ValueError("predeclared terminal action/layout has no feasible actual input")
+        quotes = await engine.quote_batch(tuple(matching), template.fingerprint)
+        candidate = executor.request_compiler.choose_variant(matching, quotes)
+        if self.planned.semantic_kind == "direct_answer":
             self.pre_action_quote = {"batch": quotes, "candidate_id": candidate.candidate_id}
+            self.pre_action_input = candidate
         events.emit("plan_gain_experimental_answer", attempt_id=attempt_id,
             planned_plan_id=self.planned.plan_id, actual_input_hash=candidate.input_hash,
-            actual_quote=quotes, selection="predeclared_experimental_branch", gain_prediction=None)
+            actual_quote=quotes, compiled_input=candidate,
+            selection="predeclared_semantic_branch_actual_compiler_choice", gain_prediction=None)
         self.decisions = records
         self.new_action_counts["ANSWER"] = 1
         return RollingResult(state, Plan(candidate, quote_seq=quotes.observed_seq,

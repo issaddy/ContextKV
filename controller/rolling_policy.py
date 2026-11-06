@@ -13,6 +13,7 @@ import time
 
 from .claim_graph import ClaimGraph
 from .context_schema import EvidencePool, ReadResult, ReadTask, ReadingOutcome, StepRecord
+from .plan_gain_protocol import input_protocol
 from .plan_policy import (CompleteCost, NoCompletePlan, PlanCandidate, PlanPolicy, PlanStep,
                           _completed_steps, complete_plan)
 from .reading import (advance_read_plan, read_output_reservation, unresolved_needs)
@@ -224,6 +225,7 @@ class RollingPlanRuntime:
         attempt = executor.store.get_attempt(attempt_id)
         packet = {"schema_version": 1, "attempt_id": attempt_id, "request_id": attempt.request_id,
             "working_state": state, "snapshot": snapshot, "paid_cost": native.paid_cost,
+            "input_protocol": input_protocol(executor.template.fingerprint),
             "native_condition": native.quotes, "paid_observation": native.paid_observation,
             "reader_checkpoint": native.reader_checkpoint, "reader_profile_id": native.reader_profile_id,
             "gap_request": gap_request, "decision_mode": "mandatory_coverage" if mandatory else self.mode}

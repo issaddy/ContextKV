@@ -168,11 +168,63 @@ def prepare(args, root):
     return manifest
 
 
+MAIN_COMPILATION_CELLS = {
+    "E1": "B6_native", "E2": "S3_native",
+    "E3": "B6_contextpilot", "E4": "S3_contextpilot",
+}
+FULL_QUEUE_METHODS = (*MAIN_COMPILATION_CELLS.values(),
+    "LlamaIndex_native", "S3_contextpilot_no_fact_reuse")
+OPTIONAL_FULL_QUEUE_METHODS = ("E0_native", "B6_value", "S3_value")
+
+
 def full_queue_methods(concurrency, methods=None):
-    if methods is not None:
-        return tuple(methods)
-    return (("B6_native", "S3_value") if concurrency == 1 else
-            ("E0_native", "B6_native", "S3_native", "B6_value", "S3_value"))
+    # Both c1 and c4 answer the same factorial question and use the same queue.
+    return tuple(methods) if methods is not None else FULL_QUEUE_METHODS
+
+
+def full_queue_method_specs(selected, gain_settings, compilation, value_policy=None):
+    """Keep compilation, B decisions and optional retention as separate factors."""
+    specs = []
+    for method in selected:
+        gain = method.startswith("S3_")
+        external = method == "LlamaIndex_native"
+        contextpilot = "_contextpilot" in method
+        overrides = {"execution": {
+            "dialogue_mode": "llamaindex" if external else "contextkv",
+            "plan_gain": deepcopy(gain_settings) if gain else None,
+            "cache_compilation": deepcopy(compilation) if contextpilot else {"mode": "native"},
+            "prefix_retention": deepcopy(value_policy) if method.endswith("_value") else {"mode": "native"}},
+            "reading": {"fact_reuse": method != "S3_contextpilot_no_fact_reuse"}}
+        if method == "E0_native":
+            overrides["reading"].update(layout="task_first", packing="mixed", numeric_need_isolation=True)
+        specs.append(dict(id=method, strategy="B7" if gain else "B6", overrides=overrides,
+            evaluation_factors=dict(B="gain" if gain else "fixed", compilation="contextpilot" if contextpilot else "native",
+                retention="value" if method.endswith("_value") else "native",
+                fact_reuse=overrides["reading"]["fact_reuse"], dialogue="llamaindex" if external else "contextkv",
+                role=("external_reference" if external else "fact_reuse_control" if method.endswith("_no_fact_reuse")
+                      else "historical_reference" if method == "E0_native" else "optional_retention" if method.endswith("_value")
+                      else "main_factorial"))))
+    return specs
+
+
+
+def compilation_source_identity(checkout):
+    """Record the verified author tree and actual Python sources used by its index."""
+    import subprocess
+    from adapters.contextpilot import _verified_checkout
+
+    root = _verified_checkout(str(checkout))
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True,
+                          capture_output=True, text=True).stdout.strip()
+    tracked = subprocess.run(["git", "ls-files", "-z", "--", "contextpilot"], cwd=root,
+                             check=True, capture_output=True).stdout.decode().split("\0")
+    sources = [{"path": name, "sha256": hashlib.sha256((root/name).read_bytes()).hexdigest()}
+               for name in sorted(tracked) if name.endswith(".py")]
+    if not any(item["path"] == "contextpilot/server/live_index.py" for item in sources):
+        raise ValueError("verified ContextPilot checkout is missing its author index source")
+    digest = hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()
+    return dict(checkout=str(root), author_commit=head, source_manifest=sources, sha256=digest,
+                digest_scope="manifest of actual tracked contextpilot Python source content hashes")
 
 
 def prepare_full_queue(args, root):
@@ -215,7 +267,10 @@ def prepare_full_queue(args, root):
         "max_units": args.gap_max_units if args.gap_max_units is not None else gap_limits.get("max_units", 96),
         "max_passages": args.gap_max_passages if args.gap_max_passages is not None else gap_limits.get("max_passages", 10),
     }
-    execution.update(cache_start="cold", state_observation=None)
+    declared_compilation = deepcopy(execution.get("cache_compilation") or {})
+    execution.update(cache_start="cold", state_observation=None, plan_gain=None,
+                     prefix_retention={"mode": "native"}, cache_compilation={"mode": "native"},
+                     dialogue_mode="contextkv")
     gain_settings = dict(mode="observed_actions", gain_asset=str(gain_path),
         reader_checkpoint=gain.reader_checkpoint, reader_profile_id=gain.reader_profile_id,
         gpu_devices=args.online_gpu_devices, process_ids=roots,
@@ -225,17 +280,14 @@ def prepare_full_queue(args, root):
     value_policy = dict(mode="value", model_path=str(Path(args.value_model).resolve()),
         horizon_seconds_choices=[15, 60, 180], protection_budget_tokens=8192,
         lambda_gpu=0.0, lambda_host=0.0) if needs_value else None
-    matrix["methods"] = [
-        dict(id=f"{name}_{policy}", strategy=strategy, overrides={"execution": {
-            "plan_gain": action, "prefix_retention": retention}})
-        for name, strategy, action in (("B6", "B6", None), ("S3", "B7", gain_settings))
-        for policy, retention in (("native", {"mode": "native"}), ("value", value_policy))
-        if f"{name}_{policy}" in selected_methods]
-    if "E0_native" in selected_methods:
-        matrix["methods"].insert(0, dict(id="E0_native", strategy="B6", overrides={
-            "reading": {"layout": "task_first", "packing": "mixed", "numeric_need_isolation": True},
-            "execution": {"plan_gain": None, "prefix_retention": {"mode": "native"}}}))
-    reference = "E0_native" if "E0_native" in selected_methods else matrix["methods"][0]["id"]
+    checkout = getattr(args, "contextpilot_checkout", None) or declared_compilation.get("checkout")
+    needs_compilation = any("_contextpilot" in method for method in selected_methods)
+    compilation = ({"mode": "contextpilot", "checkout": str(Path(checkout).resolve())}
+                   if needs_compilation and checkout else None)
+    if needs_compilation and compilation is None:
+        raise ValueError("ContextPilot methods require --contextpilot-checkout or execution.cache_compilation.checkout")
+    matrix["methods"] = full_queue_method_specs(selected_methods, gain_settings, compilation, value_policy)
+    reference = "B6_native" if "B6_native" in selected_methods else matrix["methods"][0]["id"]
     matrix["selection"].update(include_ablations=False, baseline=reference,
                                test_comparators=[reference])
     config_path = root/"frozen-A-study.yaml"
@@ -247,6 +299,28 @@ def prepare_full_queue(args, root):
         matrix["datasets"][name].update(protocol="P3", continue_conversation_failures=True)
     matrix_path = root/"joint-matrix.yaml"
     matrix_path.write_text(yaml.safe_dump(matrix, sort_keys=False))
+    external_matrix_path = None
+    external_retrievers = {}
+    if "LlamaIndex_native" in selected_methods:
+        from bench.study import method_config
+        external_matrix = deepcopy(matrix)
+        external_method = next(item for item in matrix["methods"] if item["id"] == "LlamaIndex_native")
+        for dataset in datasets:
+            effective = method_config(config, external_method, matrix["datasets"][dataset], "dev")
+            retriever = yaml.safe_load(Path(effective["retrieval"]["config_path"]).read_text())
+            retriever.update(stage="hybrid_rerank", query_mode="current", selector=None,
+                query_adapter_path=None, reranker_path=args.external_reranker,
+                evidence_selection="ranked", query_fusion="single", rerank_query_mode="resolved",
+                source_window=False)
+            path = root/f"external-retriever-{dataset}.yaml"
+            path.write_text(yaml.safe_dump(retriever, sort_keys=False))
+            external_retrievers[dataset] = snapshot(path)
+            external_matrix["datasets"][dataset]["retriever_config"] = str(path.resolve())
+            split_retrieval = external_matrix["datasets"][dataset].get("retrieval_by_split", {}).get("dev", {})
+            if "config_path" in split_retrieval:
+                split_retrieval["config_path"] = str(path.resolve())
+        external_matrix_path = root/"external-matrix.yaml"
+        external_matrix_path.write_text(yaml.safe_dump(external_matrix, sort_keys=False))
     jobs = []
     workload_plans = {}
     arrivals = read_workload_manifest(args.arrival_plan)
@@ -269,7 +343,8 @@ def prepare_full_queue(args, root):
             name = f"c{concurrency}-{method}"
             jobs.append(dict(name=name, concurrency=concurrency, method=method, datasets=datasets,
                 requested_qa=requested, complete_slo_seconds=args.complete_slo_seconds,
-                matrix=str(matrix_path), workload=str(workload_index.resolve()),
+                matrix=str(external_matrix_path if method == "LlamaIndex_native" else matrix_path),
+                workload=str(workload_index.resolve()),
                 output=str(root/"jobs"/name/"generation")))
     manifest = dict(format="contextkv_full_queue_joint_plan_v1", scope="full declared P3 development queue",
         source_config=snapshot(args.config), source_matrix=snapshot(args.matrix),
@@ -277,7 +352,13 @@ def prepare_full_queue(args, root):
         assets={"gain": snapshot(gain_path) if needs_gain else None,
                 "value": snapshot(args.value_model) if needs_value else None},
         cohort=cohorts, workload_plans=workload_plans,
-        experiment_cells={"E0": "E0_native", "E1": "B6_native", "E2": "S3_native", "E3": "B6_value", "E4": "S3_value"},
+        experiment_cells=MAIN_COMPILATION_CELLS,
+        experiment_design="fixed/gain B x Native/ContextPilot compilation; retention Native; both c1 and c4",
+        method_factors={method["id"]: method["evaluation_factors"] for method in matrix["methods"]},
+        external_retrievers=external_retrievers, external_reranker=args.external_reranker,
+        compilation_policy=compilation,
+        compilation_asset=(compilation_source_identity(compilation["checkout"])
+                           if compilation is not None else None),
         E0_protocol="P0 support/query assets with task_first, source_rows_pr3, numeric_need_isolation and Native; same public correctness code and arrival schedule",
         source_arrival_plan=snapshot(args.arrival_plan),
         arrival_protocol="fixed relative arrival timestamps shared across methods; own-history and semaphore waits included in complete response",
@@ -512,7 +593,7 @@ def main(argv=None):
     parser.add_argument("--arrival-plan", help="Dataset workload index with explicit fixed_arrivals schedules")
     parser.add_argument("--complete-slo-seconds", type=float, help="Buffered arrival-to-completion SLO for request goodput")
     parser.add_argument("--full-queue", action="store_true", help="Run all declared development tasks in each B/C cell")
-    parser.add_argument("--methods", nargs="+", choices=("E0_native", "B6_native", "B6_value", "S3_native", "S3_value"),
+    parser.add_argument("--methods", nargs="+", choices=(*FULL_QUEUE_METHODS, *OPTIONAL_FULL_QUEUE_METHODS),
                         help="Select full-queue cells for this reader")
     parser.add_argument("--source-manifest", help="Source manifest for the two-turn capacity diagnostic")
     parser.add_argument("--matrix")
@@ -520,8 +601,11 @@ def main(argv=None):
     parser.add_argument("--gain-asset")
     parser.add_argument("--execution-profile")
     parser.add_argument("--native-assets")
-    parser.add_argument("--value-model", help="Add value-C B6/S3 cells at each declared concurrency")
-    parser.add_argument("--concurrency", type=int, nargs="+", choices=(1, 4, 8), default=[4])
+    parser.add_argument("--value-model", help="Asset for explicitly selected optional *_value retention cells")
+    parser.add_argument("--external-reranker", default="models/bge-reranker-v2-m3",
+                        help="Released reranker checkpoint for the hybrid LlamaIndex reference")
+    parser.add_argument("--contextpilot-checkout", help="Pinned author source checkout for ContextPilot compilation cells")
+    parser.add_argument("--concurrency", type=int, nargs="+", choices=(1, 4, 8), default=[1, 4])
     parser.add_argument("--gain-mode", choices=("observed_actions", "whole_plan"), default="observed_actions")
     parser.add_argument("--reader-profile-id")
     parser.add_argument("--online-gpu-devices", type=lambda value: tuple(map(int, value.split(","))))

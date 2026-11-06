@@ -198,24 +198,24 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     assert not command['executed']
     assert command['argv'][command['argv'].index('--gpu-devices') + 1] == '2'
 
-    plan['assets']['value'] = {'sha256': 'C'}
+    plan['compilation_asset'] = {'sha256': 'C'}
     plan_path.write_text(json.dumps(plan))
     quartet = [cells({**row, 'method': method, 'queue_quality': quality, 'p95_complete_ms': latency})[0]
         for method, quality, latency in (('B6_native', .5, 100), ('S3_native', .6, 90),
-                                        ('B6_value', .55, 95), ('S3_value', .7, 80))]
+                                        ('B6_contextpilot', .55, 95), ('S3_contextpilot', .7, 80))]
     effects = full_queue_interactions(quartet)[0]['contrasts']
     assert effects['queue_quality']['interaction'] == pytest.approx(.05)
-    assert effects['queue_quality']['B_value'] == pytest.approx(.15)
+    assert effects['queue_quality']['B_contextpilot'] == pytest.approx(.15)
     assert effects['p95_complete_ms']['interaction'] == -5
     assert {item['baseline'] for item in full_queue_comparisons(quartet)
-            if item['candidate'] == 'S3_value'} == {'B6_native', 'S3_native', 'B6_value'}
+            if item['candidate'] == 'S3_contextpilot'} == {'B6_native', 'S3_native', 'B6_contextpilot'}
     assert full_queue_interactions(quartet[:3]) == []
     quartet[-1]['full_queue_delivered'] = False
     assert full_queue_interactions(quartet)[0]['contrasts']['p95_complete_ms'] is None
     quartet[-1]['active_assets']['gain'] = {'sha256': 'different-B'}
     assert full_queue_interactions(quartet) == []
     mismatched = next(item for item in full_queue_comparisons(quartet)
-                     if item['candidate'] == 'S3_value' and item['baseline'] == 'S3_native')
+                     if item['candidate'] == 'S3_contextpilot' and item['baseline'] == 'S3_native')
     assert not mismatched['comparable']
     assert mismatched['incompatible_identity_fields'] == ['assets.gain']
 

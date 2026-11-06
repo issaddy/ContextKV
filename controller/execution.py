@@ -14,7 +14,7 @@ from .reduction import reduce_claims
 from .schema import ContextEpoch
 from .serialization import to_jsonable
 from .session_store import ReadingProgress
-from .templates import step_request
+from .templates import candidate_request, step_request
 
 
 def reduction_basis_ids(task, inputs, results):
@@ -376,7 +376,7 @@ class ReadingExecutor:
         return record
 
     async def _generate_step(self, attempt_id, snapshot, plan, task, units, claims, *, results=(),
-                             candidate, rendered):
+                             candidate, rendered, text_callback=False):
         step_started = time.monotonic()
         identity = f"{attempt_id}:{task.step_id}"
         messages = candidate.messages
@@ -393,7 +393,9 @@ class ReadingExecutor:
             record = StepRecord(attempt_id, task.step_id, task, epoch, messages, rendered.input_ids)
             record = replace(record, metrics={"generation_kind":
                 step_generation_kind(task.kind, task.operation, plan.reading_mode),
-                "read_protocol_version": task.output_schema["properties"]["format_version"]["const"],
+                "external_dialogue": text_callback,
+                "read_protocol_version": (None if text_callback else
+                    task.output_schema["properties"]["format_version"]["const"]),
                 "request_arrived_monotonic": self.request_arrived,
                 "phase_started_monotonic": step_started})
             self.store.save_execution_step(record, "PLANNED")
@@ -404,7 +406,7 @@ class ReadingExecutor:
             if record.task != task or record.input_ids != rendered.input_ids:
                 raise ValueError("persisted step input differs from the reading plan")
             if stage == "COMPLETE":
-                return await self.finish_completed_step(plan, record)
+                return record if text_callback else await self.finish_completed_step(plan, record)
         if stage == "PLANNED":
             info = await self.engine.info()
             prepared_at = time.monotonic()
@@ -441,7 +443,9 @@ class ReadingExecutor:
                 "submitted_from_arrival_ms": (submitted-self.request_arrived)*1000
                     if self.request_arrived is not None else None})
             self.store.save_execution_step(record, "SUBMITTED")
-            generation = await self.engine.generate(**step_request(rendered, task),
+            request = (candidate_request(candidate, task.output_budget) if text_callback
+                       else step_request(rendered, task))
+            generation = await self.engine.generate(**request,
                 session_id=epoch.engine_session_id, expected_generation=epoch.session_generation,
                 expected_restart_id=epoch.engine_restart_id, attempt_id=identity,
                 fingerprint=self.template.fingerprint)
@@ -477,12 +481,13 @@ class ReadingExecutor:
                 cache_scope=await self.engine.info())
             record = replace(record, metrics={**record.metrics, "source_view": observed})
             self.store.save_execution_step(record, "RESULT_READY", generation)
-            if generation.finish_reason in {"length", "max_tokens"}:
+            if not text_callback and generation.finish_reason in {"length", "max_tokens"}:
                 raise EngineError("READ_STEP_OUTPUT_TRUNCATED", task.step_id)
             parse_started = time.monotonic()
-            result = parse_read_result(task, generation.text, units, claims,
-                elapsed_ms=generation.elapsed_ms or 0, input_tokens=len(rendered.input_ids),
-                output_tokens=len(generation.output_ids))
+            result = (record.result if text_callback else
+                parse_read_result(task, generation.text, units, claims,
+                    elapsed_ms=generation.elapsed_ms or 0, input_tokens=len(rendered.input_ids),
+                    output_tokens=len(generation.output_ids)))
             record = replace(record, result=result,
                              metrics={**record.metrics, "parse_ms": (time.monotonic()-parse_started)*1000})
             if task.kind == "REDUCE":

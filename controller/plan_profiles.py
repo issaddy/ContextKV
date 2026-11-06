@@ -425,7 +425,8 @@ def load_rolling_runtime(settings, *, template, store, sampling, answer_system_p
     from .plan_policy import PolicyLimits
     from .rolling_policy import RollingPlanRuntime
     checkpoint, profile = settings["reader_checkpoint"], settings["reader_profile_id"]
-    model = PlanGainModel.load(settings["gain_asset"], reader_checkpoint=checkpoint, reader_profile_id=profile)
+    model = PlanGainModel.load(settings["gain_asset"], reader_checkpoint=checkpoint, reader_profile_id=profile,
+        reader_fingerprint=template.fingerprint)
     provenance = model.provenance
     if (provenance["label"] not in {"actual_final_quality_minus_actual_direct_answer_quality",
             "actual_completion_weighted_final_utility_minus_direct_utility"}

@@ -19,6 +19,7 @@ from controller.action_proposals import BOUNDED_CONTINUATION, validate_action_co
 from controller.plan_policy import OBSERVED_FEATURE_SCHEMA, CompleteCost, NATIVE_COST_SCHEMA, PlanCandidate, plan_cost_features, plan_features
 from controller.schema import CacheQuoteBatch, SessionSnapshot
 from controller.serialization import decode
+from controller.plan_gain_protocol import validate_input_protocol, validate_pre_action_input
 from training.train_plan_gain import (COST_FIELDS, PlanGainModel, _fit_features, _ridge,
     actual_history, fit_cost_heads, working_state_key)
 
@@ -89,6 +90,9 @@ def completion_record(before, run):
     state = decode(ReadingOutcome, before["working_state"])
     snapshot = decode(SessionSnapshot, before["snapshot"])
     key = working_state_key(state, snapshot)
+    protocol = validate_input_protocol(before.get("input_protocol"))
+    if run.get("input_protocol") != protocol:
+        raise ValueError("completion branch changed its actual input protocol")
     if (before["frozen_state_key"] != key or run["frozen_state_key"] != key or run["plan_id"] != planned.plan_id
             or before["registered_at"] >= run["actual_branch_execution_cost"]["window"]["start"]):
         raise ValueError("completion labels require the actual pre-execution plan/state registration")
@@ -109,6 +113,7 @@ def completion_record(before, run):
             or observed["reader_checkpoint"] != run["reader_checkpoint"]
             or observed["reader_profile_id"] != run["reader_profile_id"]):
         raise ValueError("observed completion binding differs from its actual frozen state")
+    validate_pre_action_input(run)
     complete, reason = _completion(run, observed=observed is not None)
     if observed is not None:
         counts = run["new_action_counts"]
@@ -162,6 +167,7 @@ def completion_record(before, run):
             output_budgets=run["executed_output_budgets"], paid_cost=paid), batch, first)
     return {"schema_version": 2, "source": "actual_plan_completion", "record_id": digest([
             key, run["plan_id"], run["actual_native_calls"], run["qa_increment"]]),
+        "input_protocol": protocol,
         "state_key": key, "task_id": run["task_id"], "conversation_id": run["conversation_id"],
         "plan_id": planned.plan_id, "semantic_kind": planned.semantic_kind,
         "collection_mode": "observed_actions" if observed is not None else "whole_plan",
@@ -199,7 +205,7 @@ def _cost_targets(base, candidate):
 
 def effective_pair(base, candidate):
     for name in ("state_key", "task_id", "conversation_id", "reader_checkpoint", "reader_profile_id", "split",
-                 "scorer_identity", "observed_state_binding"):
+                 "scorer_identity", "observed_state_binding", "input_protocol"):
         if base[name] != candidate[name]:
             raise ValueError(f"effective branches differ in {name}")
     for name in ("comparison_budget", "paid_cost", "continuation_gap_limits"):
@@ -222,7 +228,7 @@ def effective_pair(base, candidate):
         "record_id": digest([base["record_id"], candidate["record_id"]]),
         **{key: candidate[key] for key in ("state_key", "task_id", "conversation_id", "plan_id",
             "semantic_kind", "reader_checkpoint", "reader_profile_id", "split", "scorer_identity", "features",
-            "collection_mode", "observed_state_binding", "cohort_split", "cohort_manifest_sha256")},
+            "collection_mode", "observed_state_binding", "cohort_split", "cohort_manifest_sha256", "input_protocol")},
         "utility_rule": RULE, "no_answer_utility": 0.0,
         "raw_Q_direct": base["raw_judge_Q"], "raw_Q_counterfactual": candidate["raw_judge_Q"],
         "utility_direct": base["effective_utility"], "utility_counterfactual": candidate["effective_utility"],
@@ -295,6 +301,8 @@ def fit_effective(training, *, ridge=1.0, path=None):
     binding = {(row["reader_checkpoint"], row["reader_profile_id"], digest(row["scorer_identity"])) for row in training}
     if len(binding) != 1:
         raise ValueError("effective gain asset binds one actual reader/profile/scorer")
+    if len({digest(validate_input_protocol(row.get("input_protocol"))) for row in training}) != 1:
+        raise ValueError("effective gain asset binds one actual source/compiler/reader input protocol")
     limits = {digest(row["counterfactual"]["actual_run"]["continuation_gap_limits"]) for row in training}
     if len(limits) != 1:
         raise ValueError("one bounded gain asset requires the same declared GAP limits")
@@ -307,7 +315,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
         expected = effective_pair(branches["direct"], branches["counterfactual"])
         fields = ("state_key", "conversation_id", "semantic_kind", "reader_checkpoint", "reader_profile_id", "split",
                   "scorer_identity", "features", "raw_Q_direct", "raw_Q_counterfactual", "utility_direct",
-                  "utility_counterfactual", "effective_delta_q", "direct_features", "observed_state_binding")
+                  "utility_counterfactual", "effective_delta_q", "direct_features", "observed_state_binding", "input_protocol")
         if expected is None or any(row[name] != expected[name] for name in fields):
             raise ValueError("effective target/features differ from the actual fixed-state branch evidence")
         if expected.get("cost_targets") != row.get("cost_targets"):
@@ -357,7 +365,8 @@ def fit_effective(training, *, ridge=1.0, path=None):
     return PlanGainModel(training[0]["reader_checkpoint"], training[0]["reader_profile_id"],
         "effective-plan-gain:"+digest(training), names, tuple(center.tolist()), tuple(scale.tolist()),
         tuple(coefficients.tolist()), float(intercept),
-        {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA if any(
+        {"input_protocol": training[0]["input_protocol"],
+         "observed_feature_schema": OBSERVED_FEATURE_SCHEMA if any(
              row["observed_state_binding"] is not None for row in training) else None,
          "continuation_protocol": BOUNDED_CONTINUATION,
          "continuation_gap_limits": training[0]["counterfactual"]["actual_run"]["continuation_gap_limits"],
@@ -395,6 +404,7 @@ def main(argv=None):
         development = rows(args.dev)
         if any(row["split"] != "dev" or row["reader_checkpoint"] != model.reader_checkpoint or
                row["reader_profile_id"] != model.reader_profile_id or row["scorer_identity"] != model.provenance["scorer_identity"]
+               or row.get("input_protocol") != model.provenance["input_protocol"]
                for row in development):
             raise ValueError("effective gain development must match the actual reader/profile/scorer")
         if {row["conversation_id"] for row in development} & set(model.provenance["training_conversations"]):

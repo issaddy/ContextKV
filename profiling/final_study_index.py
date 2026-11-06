@@ -331,7 +331,10 @@ def full_queue_cells(value, path, joint_scope=None):
         cells.append({**row, "evaluation_kind": "full_queue_own_P3", "source_file": str(path),
             "generation_dir": job["output"], "comparison_identity": comparison,
             "active_assets": {name: plan["assets"][name] for name, active in (
-                ("gain", row["method"].startswith("S3_")), ("value", row["method"].endswith("_value"))) if active},
+                ("gain", row["method"].startswith("S3_")), ("value", row["method"].endswith("_value"))) if active}
+                | ({"compilation": plan["compilation_asset"]} if "_contextpilot" in row["method"] else {}),
+            "evaluation_factors": plan.get("method_factors", {}).get(row["method"]),
+            "experiment_design": plan.get("experiment_design", "historical retention design"),
             "device_source_identity": device_source,
             "explicit_joint_scope": {"manifest": joint_scope["manifest"], "frozen_A": joint_scope["frozen_A"]}
                 if joint_scope is not None else None,
@@ -346,12 +349,15 @@ def full_queue_cells(value, path, joint_scope=None):
 
 def full_queue_comparisons(cells):
     comparisons = []
-    references = {"E0_native": (), "B6_native": ("E0_native",),
-        "S3_native": ("E0_native", "B6_native"),
-        "B6_value": ("E0_native", "B6_native"),
-        "S3_value": ("E0_native", "B6_native", "S3_native", "B6_value")}
+    references = {"E0_native": (), "B6_native": ("E0_native", "LlamaIndex_native"),
+        "S3_native": ("E0_native", "B6_native", "LlamaIndex_native"),
+        "B6_contextpilot": ("E0_native", "B6_native", "LlamaIndex_native"),
+        "S3_contextpilot": ("E0_native", "B6_native", "S3_native", "B6_contextpilot", "LlamaIndex_native",
+                              "S3_contextpilot_no_fact_reuse"),
+        "LlamaIndex_native": (), "S3_contextpilot_no_fact_reuse": (),
+        "B6_value": ("B6_native",), "S3_value": ("S3_native", "B6_value")}
     for row in cells:
-        baselines = [other for other in cells if other["method"] in references[row["method"]]
+        baselines = [other for other in cells if other["method"] in references.get(row["method"], ())
                      and other["concurrency"] == row["concurrency"]]
         for reference in baselines:
             missing_resource_fields = [name for name in ("hardware", "native_cache_config")
@@ -392,8 +398,8 @@ def full_queue_comparisons(cells):
 
 
 def full_queue_interactions(cells):
-    """Compute the registered B/C factorial contrast on the complete queue."""
-    methods = ("B6_native", "S3_native", "B6_value", "S3_value")
+    """B decision x request compilation contrast; retention is Native in all cells."""
+    methods = ("B6_native", "S3_native", "B6_contextpilot", "S3_contextpilot")
     groups = defaultdict(lambda: defaultdict(list))
     for cell in cells:
         if cell["method"] in methods:
@@ -407,7 +413,7 @@ def full_queue_interactions(cells):
             if any(scope[name] is None for name in ("hardware", "native_cache_config")):
                 continue
             if (e2["active_assets"]["gain"]["sha256"] != e4["active_assets"]["gain"]["sha256"]
-                    or e3["active_assets"]["value"]["sha256"] != e4["active_assets"]["value"]["sha256"]):
+                    or e3["active_assets"]["compilation"]["sha256"] != e4["active_assets"]["compilation"]["sha256"]):
                 continue
             complete = all(cell["full_queue_delivered"] and numeric(cell["queue_quality"])
                 and not any(cell["unscored_answer_task_ids"].values()) for cell in quartet)
@@ -416,10 +422,11 @@ def full_queue_interactions(cells):
                 values = [cell[metric] for cell in quartet]
                 known = all(numeric(value) for value in values) and (metric != "p95_complete_ms" or complete)
                 contrasts[metric] = (dict(B_native=values[1]-values[0], C_fixed=values[2]-values[0],
-                    B_value=values[3]-values[2], C_gain=values[3]-values[1],
+                    B_contextpilot=values[3]-values[2], C_gain=values[3]-values[1],
                     joint=values[3]-values[0], interaction=values[3]-values[1]-values[2]+values[0])
                     if known else None)
-            interactions.append(dict(concurrency=concurrency, comparison_identity=e1["comparison_identity"],
+            interactions.append(dict(concurrency=concurrency, design="B x request_compilation; retention=native",
+                comparison_identity=e1["comparison_identity"],
                 cells={f"E{index}": dict(method=cell["method"], source_file=cell["source_file"],
                     generation_dir=cell["generation_dir"]) for index, cell in enumerate(quartet, 1)},
                 contrasts=contrasts, full_queue_delivered_and_scored=complete,
@@ -490,14 +497,14 @@ def markdown(report):
     lines += ["", "P95 相对变化为（候选 / 基线 − 1），负值表示降低；仅在身份一致、完整交付且全部质量已评分时报告。"
         "质量不低于基线仅比较现有点估计，不代表统计等质量结论；本表不判定同预算、资源收益或研究目标达成。"]
     lines += ["", "## B/C 四格贡献与交互", "",
-        "| 并发 | 指标 | B（Native） | B（价值 C） | C（固定 B） | C（收益 B） | 联合 E4−E1 | 交互 |",
+        "| 并发 | 指标 | B（Native 编译） | B（ContextPilot 编译） | 编译（固定 B） | 编译（收益 B） | 联合 E4−E1 | 交互 |",
         "|---:|---|---:|---:|---:|---:|---:|---:|"]
     for row in report["factorial_interactions"]:
         for metric, effects in row["contrasts"].items():
             values = [effects[name] if effects is not None else "未知"
-                      for name in ("B_native", "B_value", "C_fixed", "C_gain", "joint", "interaction")]
+                      for name in ("B_native", "B_contextpilot", "C_fixed", "C_gain", "joint", "interaction")]
             lines.append(f"| {row['concurrency']} | {metric} | " + " | ".join(map(str, values)) + " |")
-    lines += ["", "交互＝E4−E2−E3＋E1；质量为正表示互补，延迟为负表示额外降低。"
+    lines += ["", "四格均使用 Native retention；交互＝E4−E2−E3＋E1；质量为正表示互补，延迟为负表示额外降低。"
         "P95 使用四格各自完整队列的分位数，仅为队列统计量的算术对照。"]
     lines += full_queue_track_tables(report["capacity"])
     lines += ["", "分轨保留原指标量纲；混合开发 Q 仍采用登记权重，不将构造题增益表述为公开基准增益。"]

@@ -7,12 +7,12 @@ messages are its exact visible input, including the current compact/refine slice
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.metadata import version
 from typing import Awaitable, Callable
 
 from controller.evidence import assign_references
-from controller.schema import EvidenceBlock, EvidenceKey, Message, TurnRecord
+from controller.schema import EvidenceBlock, EvidenceKey, EvidenceSpan, Message, TurnRecord
 
 
 LLAMAINDEX_SOURCE_COMMIT = "f12d46acab73f5b2243ef49c2f00101617b38ce4"
@@ -26,6 +26,7 @@ class LlamaIndexCall:
     output_budget: int
     source_blocks: tuple[EvidenceBlock, ...]
     reference_map: tuple[tuple[str, EvidenceKey], ...]
+    evidence_spans: tuple[EvidenceSpan, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,17 +63,66 @@ async def run_dialogue(
     from llama_index.core.memory import Memory
     from llama_index.core.query_engine import RetrieverQueryEngine
     from llama_index.core.response_synthesizers import ResponseMode, get_response_synthesizer
+    from llama_index.core.prompts import PromptTemplate
     from llama_index.core.retrievers import BaseRetriever
-    from llama_index.core.schema import NodeWithScore, TextNode
+    from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
     from sqlalchemy.ext.asyncio import create_async_engine
 
     source_blocks, reference_map, condensed_query = (), (), ""
     calls = []
 
+    # Observe upstream packing without replacing its history or compact algorithm.
+    packed_sources = {}
+    context_open, context_close = "<llamaindex_context>\n", "\n</llamaindex_context>"
+
+    class AuditedPromptHelper(PromptHelper):
+        def repack(self, prompt, text_chunks, **kwargs):
+            combined, spans = "", []
+            for text in text_chunks:
+                stripped = text.strip()
+                if not stripped:
+                    continue
+                offset = len(combined)+(2 if combined else 0)
+                left = len(text)-len(text.lstrip())
+                combined += ("\n\n" if combined else "")+stripped
+                for span in packed_sources[text]:
+                    first, last = max(span.start, left), min(span.end, left+len(stripped))
+                    if first < last:
+                        spans.append(replace(span, start=offset+first-left, end=offset+last-left,
+                            source_start=span.source_start+first-span.start,
+                            source_end=span.source_start+last-span.start))
+            result = super().repack(prompt, text_chunks, **kwargs)
+            previous_start = -1
+            for text in result:
+                start = combined.find(text, previous_start+1)
+                if start < 0:
+                    raise ValueError("upstream packed text lost its original source coordinates")
+                previous_start = start
+                clipped = []
+                for span in spans:
+                    first, last = max(span.start, start), min(span.end, start+len(text))
+                    if first < last:
+                        clipped.append(replace(span, start=first-start, end=last-start,
+                            source_start=span.source_start+first-span.start,
+                            source_end=span.source_start+last-span.start))
+                packed_sources[text] = tuple(clipped)
+            return result
+
     async def dispatch(stage, messages):
-        call = LlamaIndexCall(f"llamaindex:{stage}:{len(calls)}", stage,
-            tuple(Message(message.role.value, message.content) for message in messages),
-            output_tokens, source_blocks, reference_map)
+        messages = tuple(Message(message.role.value, message.content or "") for message in messages)
+        spans = []
+        if stage == "compact":
+            for index, message in enumerate(messages):
+                if context_open not in message.content:
+                    continue
+                first = message.content.index(context_open)+len(context_open)
+                last = message.content.index(context_close, first)
+                context = message.content[first:last]
+                spans.extend(replace(span, message_index=index, start=first+span.start,
+                    end=first+span.end) for span in packed_sources[context])
+                stage = "refine" if "<llamaindex_existing_answer>" in message.content else "compact"
+        call = LlamaIndexCall(f"llamaindex:{stage}:{len(calls)}", stage, messages,
+            output_tokens, source_blocks, reference_map, tuple(spans))
         calls.append(call)
         return await complete_callback(call)
 
@@ -110,16 +160,36 @@ async def run_dialogue(
             source_blocks = tuple(await retrieve_callback(condensed_query))
             reference_map = assign_references(block.key for block in source_blocks)
             references = {key: reference for reference, key in reference_map}
-            return [NodeWithScore(node=TextNode(id_=references[block.key], text=block.text,
-                metadata={"citation_id": references[block.key], "title": block.title,
-                          "version": block.key.version})) for block in source_blocks]
+            nodes = []
+            for block in source_blocks:
+                reference = references[block.key]
+                node = TextNode(id_=reference, text=block.text, metadata={
+                    "citation_id": reference, "title": block.title, "version": block.key.version})
+                content = node.get_content(metadata_mode=MetadataMode.LLM)
+                start = len(content)-len(block.text)
+                if content[start:] != block.text:
+                    raise ValueError("upstream source rendering lost its original body")
+                packed_sources[content] = (EvidenceSpan(block.key, 0, start, len(content),
+                    block.source_uri, block.provenance, reference,
+                    source_start=block.span[0] if block.span else 0,
+                    source_end=(block.span[0] if block.span else 0)+len(block.text)),)
+                nodes.append(NodeWithScore(node=node))
+            return nodes
 
     callback_manager = CallbackManager([])
     condense_llm = CallbackLLM(stage="condense", callback_manager=callback_manager)
     answer_llm = CallbackLLM(stage="compact", system_prompt=system_prompt, callback_manager=callback_manager)
     synthesizer = get_response_synthesizer(llm=answer_llm,
-        prompt_helper=PromptHelper(context_window=context_window, num_output=output_tokens,
+        prompt_helper=AuditedPromptHelper(context_window=context_window, num_output=output_tokens,
                                    tokenizer=tokenizer.encode),
+        text_qa_template=PromptTemplate(
+            "Context information is below.\n"+context_open+"{context_str}"+context_close+
+            "\nGiven the context information, answer the query.\nQuery: {query_str}\nAnswer: "),
+        refine_template=PromptTemplate(
+            "Query: {query_str}\n<llamaindex_existing_answer>\n{existing_answer}\n"
+            "</llamaindex_existing_answer>\nRefine the existing answer using this additional context.\n"+
+            context_open+"{context_msg}"+context_close+
+            "\nIf the context is not useful, return the existing answer.\nRefined answer: "),
         response_mode=ResponseMode.COMPACT, callback_manager=callback_manager, use_async=True)
     query_engine = RetrieverQueryEngine(retriever=CallbackRetriever(callback_manager=callback_manager),
                                         response_synthesizer=synthesizer, callback_manager=callback_manager)

@@ -1,6 +1,6 @@
 # 当前课题运行入口
 
-本轮按用户要求先提交源码并停止容器任务，等待用户清理和更新容器后再恢复运行。旧批次不替代本轮完整队列结果。
+本轮转入 `test-0523`。接入前未发现运行任务，8 张 H800 空闲。原镜像的 CUDA 13 实际调用出现 error 803；显式加载主机驱动后仍报告运行时过新。隔离的 `.venv-cu129` 已用 PyTorch 2.13.0+cu129 完成真实 GPU 张量计算；Qwen 服务与完整队列尚未验收。旧批次不替代本轮结果。
 
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 
@@ -20,6 +20,8 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/launch_sglang.sh --host 127.0.0.1 --port 300
 
 scope 的 `model_path` 指向 `/data/models/qwen3-32b`，模型/tokenizer 身份沿用真实文件。默认集成为官方 SGLang 0.5.18 源码及项目补丁，CUDA 内核来自现有环境。`engine-source.json`、`engine-environment.txt` 记录实际版本；不要求升级主机驱动。
 
+本次环境先设置 `CONTEXTKV_ENGINE_PYTHON=$PWD/.venv-cu129/bin/python`，并以 `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.560.35.03` 选择容器中实际挂载的主机驱动库。镜像默认的 `libcuda.so.1` 指向不匹配的 580 库，系统链接未改动。上述路径属于本次主机运行记录，后续环境按实际安装使用。
+
 作者 ContextPilot 准备与启用：
 
 ```bash
@@ -28,7 +30,7 @@ python scripts/prepare_contextpilot.py --checkout vendor/contextpilot
 
 study 配置的 `execution.cache_compilation` 取 `{mode: contextpilot, checkout: vendor/contextpilot}`；Native 对照取 `{mode: native}`。`prefix_retention` 默认 `{mode: native}`，与编排开关独立。
 
-本轮仍缺：LlamaIndex adapter 到统一执行器的接线、最终矩阵更新、新动作协议监督资产及真实配对。下表保留已有可用采集与历史对照入口，不表示这些后续工作已完成。CUDA 12.9 补丁的真实 GPU 协议验收在容器更新后执行一次。
+LlamaIndex 的统一执行入口与最终编译矩阵已接线；当前协议的 B 监督资产、真实配对、GPU 端到端和完整队列仍须实际执行。下表的入口存在不表示对应实验已完成；真实 GPU 协议先做最小验收，再启动所需采集。
 
 | 任务 | 当前入口 | 必须保留的对照与产物 |
 |---|---|---|
@@ -40,7 +42,7 @@ study 配置的 `execution.cache_compilation` 取 `{mode: contextpilot, checkout
 | B 动作收益 | `training.plan_gain_rollout`、`training.plan_gain_completion`、`training.collect_plan_gains` | DIRECT/READ/REDUCE/GAP 的真实增量执行、当前完整状态、独立最终答案与成对费用 |
 | B 训练与滚动比较 | `training.plan_gain_workflow`、`bench.rolling_study_workflow` | 显式动作与 `whole_plan` 固定计划对照分别登记；保留已付成本与绝对分支预算 |
 | C 固定轨迹配对 | `profiling.retention_trace` | 同模型、同输入、同 DAG 下 Native/固定 TTL/学习保护；共享页与 idle 驻留成本 |
-| 实际并发容量 | `bench.capacity_workflow` | 相同质量与完整响应条件下的原生/保护对照；连续设备和进程采样 |
+| 完整联合与外部比较 | `bench.capacity_workflow --full-queue` | c1/c4 编译四格、LlamaIndex Native 参照、跨轮事实复用消融；固定到达、连续设备/进程采样与全部在线费用 |
 | 官方评分与离线重评 | `bench.study_scoring`、`bench.reassess_saved` | 全声明题目分母，失败、未完成、未评分及其已付费用 |
 | 全成本账本 | `profiling.study_cost_ledger` | 原始调用/采样引用、窗口并集、共享份额与未知覆盖 |
 
@@ -55,6 +57,8 @@ task/support 配置必填 `training.cohort_manifest`；P1 采集必填
 B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v4` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上与反事实 READ 共用相关父结论绑定，线上执行一个动作后重新观察。成本资产同时记录 `prefix_control_scope=native_excludes_prefix_control`，价值 C 的首步控制预测另加一次。当前协议的答案与费用在恢复推理后重新采集。
 
 B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_support_state_v2`，使用实际已付资源和剩余额度；旧特征资产不能直接用于该决策。
+
+当前 B 资产还必须携带 `input_protocol`：`merged_source_windows_actual_coverage_reused_facts_compiled_choice`、实际窗口粒度和完整 reader fingerprint。采集、分支、配对及加载全链核对该身份；旧资产缺少绑定时须按当前协议重采/重拟合，不改名复用。实际 seed、已读覆盖、编译选中排列及报价的 `pre_action_input` 一并保留；事实复用消融仍使用相同 B 模型，实际状态反映关闭复用。
 
 GAP 离线与线上只排除实际已读来源，统一新增 passage 额度；采集和拟合必须绑定相同协议。
 
@@ -183,7 +187,11 @@ C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观�
 `profiling.retention_trace reassess --replay-root COMPLETED_REPLAY` 从已完成重放的原始回执重算派生费用，
 保留原请求、采样窗口和全部已付成本，不产生模型调用。
 
-冻结 A 后，联合开发验收使用 `bench.capacity_workflow --full-queue`。主负载 c4 默认执行 E0—E4，c1 默认只执行 E1/E4。E0_native 显式保留 PR3 原行分片、task-first、隔离数值和 Native；P0 支持/查询资产与公共正确性代码共用。生成矩阵同时写入实际 `selection.baseline` 与测试参照：有 E0 时使用 E0，否则使用已登记的首个方法；冻结与配对汇总读取同一参照。
+冻结 A 后，联合开发验收使用 `bench.capacity_workflow --full-queue`。默认同时执行 c1/c4，每个并发运行 E1 `B6_native`、E2 `S3_native`、E3 `B6_contextpilot`、E4 `S3_contextpilot`；四格为固定/收益 B × Native/ContextPilot 编译，`prefix_retention` 均为 Native。共同基线为实际存在的 `B6_native`，独立选中其他方法时使用所选首项；冻结与配对汇总读取同一参照。
+
+每个并发还执行 `LlamaIndex_native` 和 `S3_contextpilot_no_fact_reuse`。外部方法通过统一 Controller 使用上游 history condense＋compact/refine，物化各数据集 `hybrid_rerank`、`query_mode: current`、无 query adapter/selector 的检索 YAML（`evidence_selection: ranked`、单查询融合、resolved rerank、`source_window: false`）；`--external-reranker` 显式选择发布版 checkpoint，默认 `models/bge-reranker-v2-m3`。其任务/支持规划关闭，Native 编译与保留相同。主消融与 E4 仅相差 `reading.fact_reuse: false`；仍保留实际历史和本轮共享提取。
+
+E0_native（原 PR3 task-first/隔离数值）和 `B6_value` / `S3_value` 为显式可选对照，不进入默认主四格，不要求 C value 资产。
 必须提供 `--arrival-plan`：JSON 索引格式为 `{"format":"contextkv_dataset_workload_index_v1","datasets":{"DATASET":"/absolute/fixed-arrivals.json"}}`，每个数据集严格覆盖声明队列。
 使用已有请求轨迹离线导出固定相对到达（不产生模型调用）：
 
@@ -199,7 +207,7 @@ python -m bench.study_workloads --tasks TASKS.jsonl --arrivals DECLARED-ARRIVALS
   --output FIXED-ARRIVALS.json --name DECLARED-NAME --concurrency 4
 ```
 
-`DECLARED-ARRIVALS.json` 必须显式列出每道任务的相对到达秒数，例如 `{"session:1":0,"session:2":30}`；该示例不是已选定的正式负载。保存任务与到达映射哈希，E0—E4 复用同一声明；原生观测仍由未来真实执行产生。
+`DECLARED-ARRIVALS.json` 必须显式列出每道任务的相对到达秒数，例如 `{"session:1":0,"session:2":30}`；该示例不是已选定的正式负载。保存任务与到达映射哈希，所有方法复用同一声明；原生观测仍由未来真实执行产生。
 
 来源记录必须包含所有声明任务的请求开始时间；未记录的上游到达不能反推或补成零。各方案复用同一固定计划及哈希，按各自真实 P3 历史完成依赖；等待前一轮和等待并发槽均计入完整响应。
 `--complete-slo-seconds` 设置事先声明的完整响应 SLO，goodput 按达标完整回答/观察秒数计算，无阈值时不生成 SLO 数值。
@@ -208,14 +216,12 @@ python -m bench.study_workloads --tasks TASKS.jsonl --arrivals DECLARED-ARRIVALS
 python -m bench.capacity_workflow --full-queue \
   --config "$FROZEN_A_STUDY" --matrix "$JOINT_MATRIX" --arrival-plan "$ARRIVAL_PLAN" \
   --gain-asset "$B_GAIN" --online-gpu-devices "$ONLINE_GPUS" --reader-base-url "$READER_URL" \
-  --value-model "$C_VALUE" --concurrency 4 --output "$JOINT_OUTPUT"
+  --contextpilot-checkout vendor/contextpilot --concurrency 1 4 --output "$JOINT_OUTPUT"
 ```
 
-E1—E4 四格共用冻结 A 的模型、支持策略、查询资产、阅读协议和预算；E0_native 仅覆盖登记基线的阅读与来源协议。可用
-`--methods B6_native` 等参数将指定方法分配到独立 reader 服务，只生成所选方法的矩阵和任务。
-`B6_native` 无需 gain/value；`B6_value` 仅需 `--value-model`；没有 S3 方法时须显式提供
-`--reader-profile-id`。S3 方法需要 `--gain-asset`，value 方法需要 `--value-model`。
-默认 c4 执行 E0_native/B6_native/S3_native/B6_value/S3_value 并要求两种资产；c1 默认只执行 B6_native/S3_value，每格使用同一完整队列。
+主四格共用冻结 A 的模型、支持策略、查询资产、阅读协议与预算；外部方法使用显式登记的发布版检索栈。可用 `--methods B6_native` 等参数将指定方法分配到独立 reader 服务，只生成所选方法的矩阵和任务。
+`B6_native`、`B6_contextpilot` 和 `LlamaIndex_native` 均无需 gain/value；无 S3 方法时显式提供 `--reader-profile-id`。S3 方法只需当前协议 `--gain-asset`；显式选择 `*_value` 才需要 `--value-model`。ContextPilot 方法需要 `--contextpilot-checkout` 或冻结配置的 `execution.cache_compilation.checkout`；准备阶段验证真实 checkout HEAD 与清洁源码，并保存作者 Python 源码内容清单及摘要，而不是把固定 revision 字符串当作源码摘要。
+默认六种方法在两个并发都使用相同 350 题、77 会话 IDs，各自实际 P3；未运行格保留缺失，不能用历史 E3/E4 的 value 结果充当新编译格。
 固定 B 可独立执行，例如：
 
 ```sh
@@ -239,7 +245,7 @@ cohort、reader 与预算确定对照条件，各格分别列出实际启用的 
 联合汇总的 `dataset_protocols` 来自矩阵已有 `split_kind` 与分区指标声明；Markdown 将公开基准、参考历史诊断和构造机制任务分表。每轨原指标、完整题目分母、已评分子集与未知区间同时呈现，混合开发 Q 的登记权重保持不变。
 
 联合 Markdown 对照表直接呈现完整分母质量差与 P95 相对变化（候选/基线−1，负值为降低），并列出候选质量是否不低于基线。相对延迟只在比较身份一致、双方完整交付且全部已评分时提供；质量判断为点估计，资源变化仍读取实际成本账本。
-`final_study_index` 同时输出 B 在 Native/价值 C 下、C 在固定/收益 B 下的直接对照，以及四格交互 `E4−E2−E3＋E1`；共同启用的 B/C 资产须一致。P95 交互使用四格完整队列各自的分位数。
+`final_study_index` 同时输出 B 在 Native/ContextPilot 编译下、编译在固定/收益 B 下的直接对照，以及四格交互 `E4−E2−E3＋E1`；共同启用的 B 与作者编译身份须一致。四格保留均为 Native；TTL/value 可选结果不进入该交互。报告另列 E4/无事实复用及主线/外部参照，P95 交互使用四格完整队列各自的分位数。
 每格执行前自动记录本机硬件和服务的原生缓存配置，随结果进入比较身份；只在声明的实际测量主机执行此工作流。资源容量、设备数量、GPU 型号/显存/驱动或原生缓存配置不同，以及观测缺失时，不报告可比差值。
 
 每格按自己的 P3 历史执行原 350 题，使用声明的开发指标与权重。未交付回答计入

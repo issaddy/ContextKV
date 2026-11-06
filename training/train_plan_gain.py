@@ -7,6 +7,7 @@ scores.  A new reader checkpoint/profile gets a separate gain-data cohort.
 from __future__ import annotations
 
 from controller.action_proposals import BOUNDED_CONTINUATION, validate_action_counts
+from controller.plan_gain_protocol import validate_input_protocol
 
 import argparse
 from dataclasses import asdict, dataclass, field, replace
@@ -59,8 +60,14 @@ def actual_history(snapshot: SessionSnapshot):
 def working_state_key(state: ReadingOutcome, snapshot: SessionSnapshot):
     return _digest({"task_state": state.plan.task_state, "results": state.results,
         "claims": state.claims, "coverage": state.coverage, "open_needs": state.open_needs,
-        "available_sources": tuple((unit.unit_id, unit.text, unit.source_spans, unit.dependencies)
-            for unit in state.plan.selected_set.selected_units),
+        "available_sources": state.plan.selected_set,
+        "source_blocks": snapshot.archive, "reference_map": snapshot.reference_map,
+        "corpus_snapshot_id": snapshot.corpus_snapshot_id,
+        "read_geometry": state.plan.steps, "answer_plan": state.plan.answer_plan,
+        "budget": state.plan.budget, "layouts": state.plan.layouts,
+        "reading_options": {name: getattr(state.plan, name) for name in (
+            "reading_mode", "separate_needs", "numeric_identity", "read_layout", "read_packing",
+            "answer_system_prompt", "answer_allocation")},
         "coverage_scope": state.plan.coverage_scope, "required_scope": state.plan.coverage_units,
         "actual_history": actual_history(snapshot)})
 
@@ -77,6 +84,11 @@ def build_gain_record(plan: PlanCandidate, state: ReadingOutcome, snapshot: Sess
     """
     expected_state = working_state_key(state, snapshot)
     expected_history = actual_history(snapshot)
+    protocol = validate_input_protocol(direct.get("input_protocol"))
+    if protocol["reader_fingerprint"]["model_revision"] != plan.reader_checkpoint:
+        raise ValueError("input protocol belongs to a different actual reader checkpoint")
+    if counterfactual.get("input_protocol") != protocol:
+        raise ValueError("paired gain answers differ in their actual input protocol")
     for branch in (direct, counterfactual):
         if branch["measurement_kind"] != "hardware" or branch["history_origin"] not in {
                 "model_actual", "frozen_actual_rollout"}:
@@ -128,6 +140,7 @@ def build_gain_record(plan: PlanCandidate, state: ReadingOutcome, snapshot: Sess
         "cohort_split": direct["cohort_split"], "cohort_manifest_sha256": direct["cohort_manifest_sha256"],
         "state_key": expected_state, "actual_history_sha256": _digest(expected_history),
         "reader_checkpoint": direct["reader_checkpoint"], "reader_profile_id": direct["reader_profile_id"],
+        "input_protocol": protocol,
         "scorer_identity": direct["scorer_identity"], "comparison_budget": direct["comparison_budget"],
         "plan_id": plan.plan_id, "semantic_kind": plan.semantic_kind,
         "features": plan_features(plan, state, output_budgets=counterfactual.get("output_budgets"), paid_cost=paid),
@@ -217,7 +230,7 @@ class PlanGainModel:
             **asdict(self)}, ensure_ascii=False, indent=2)+"\n")
 
     @classmethod
-    def load(cls, path, *, reader_checkpoint, reader_profile_id):
+    def load(cls, path, *, reader_checkpoint, reader_profile_id, reader_fingerprint=None):
         data = json.loads(Path(path).read_text())
         schema, kind = data.pop("schema_version"), data.pop("model_type")
         if (schema, kind) not in {(2, "reader_bound_plan_gain_cost_ridge"),
@@ -230,6 +243,10 @@ class PlanGainModel:
         if (len(set(data["feature_names"])) != len(data["feature_names"])
                 or set(data["feature_names"]) not in (set(FEATURE_NAMES), set(OBSERVED_FEATURE_NAMES))):
             raise ValueError("gain asset requires a complete current feature schema")
+        protocol = validate_input_protocol(data["provenance"].get("input_protocol"),
+            reader_fingerprint=reader_fingerprint)
+        if protocol["reader_fingerprint"]["model_revision"] != reader_checkpoint:
+            raise ValueError("gain input protocol belongs to a different reader checkpoint")
         observed = bool(set(data["provenance"]["trained_semantic_kinds"]) - set(LEGACY_PLAN_KINDS))
         if observed or data["provenance"].get("observed_feature_schema") is not None:
             if (data["provenance"].get("observed_feature_schema") != OBSERVED_FEATURE_SCHEMA
@@ -255,7 +272,13 @@ def _supervision(rows, *, split):
               if row.get("observed_state_binding") is not None}
     if len(limits) > 1:
         raise ValueError("one bounded gain asset requires the same declared GAP limits")
+    protocols = {_digest(validate_input_protocol(row.get("input_protocol"))) for row in rows}
+    if len(protocols) != 1:
+        raise ValueError("fit one actual source/compiler/reader input protocol per gain asset")
     for row in rows:
+        if any(row[name].get("input_protocol") != row["input_protocol"]
+               for name in ("direct_run", "counterfactual_run")):
+            raise ValueError("gain record input protocol differs from its actual branch evidence")
         if row["delta_q"] != row["quality_counterfactual"]-row["quality_direct"]:
             raise ValueError("gain labels must equal observed counterfactual quality minus direct quality")
         for name, quality in (("direct_run", row["quality_direct"]),
@@ -394,7 +417,8 @@ def fit_gain(rows, *, ridge=1.0, input_path=None):
     digest = _digest(rows)
     return PlanGainModel(reader, profile, "plan-gain:"+digest, names,
         tuple(center.tolist()), tuple(scale.tolist()), tuple(coefficients.tolist()), float(intercept),
-        {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA if cost_samples else None,
+        {"input_protocol": rows[0]["input_protocol"],
+         "observed_feature_schema": OBSERVED_FEATURE_SCHEMA if cost_samples else None,
          "label": "actual_final_quality_minus_actual_direct_answer_quality",
          "continuation_protocol": BOUNDED_CONTINUATION,
          "continuation_gap_limits": rows[0]["counterfactual_run"]["continuation_gap_limits"]
@@ -416,6 +440,8 @@ def evaluate_gain(model, rows, *, training_state_keys=()):
     reader, profile, _ = _supervision(rows, split="dev")
     if reader != model.reader_checkpoint or profile != model.reader_profile_id:
         raise ValueError("development gains belong to a different reader checkpoint/profile")
+    if rows[0]["input_protocol"] != model.provenance["input_protocol"]:
+        raise ValueError("development and training gain inputs use different source/compiler/reader scope")
     if rows[0]["scorer_identity"] != model.provenance["scorer_identity"]:
         raise ValueError("development and training gain labels use different scoring rubrics")
     if set(training_state_keys) & {row["state_key"] for row in rows}:

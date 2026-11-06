@@ -18,11 +18,11 @@ from .engine_client import Engine, EngineError, EngineInfo, PrepareAck, UnknownO
 from .events import EventLog
 from .planner import PlannerKnobs, choose_plan
 from .schema import (ClientTiming, CompletionReceipt, CostEstimate, EvidenceBlock, EvidenceKey,
-                     EvidenceSpan, GenerationResult, NoFeasiblePlan, QueryContext, SessionSnapshot, TurnRecord)
+                     EvidenceSpan, GenerationResult, NoFeasiblePlan, Plan, PromptCandidate, QueryContext, TurnRecord)
 from .serialization import dumps
 from .session_store import (Attempt, IdempotencyConflict, PendingAttempt, SessionStore, StoreError, VersionConflict)
 from .templates import ByteTemplate, candidate_request
-from .context_schema import ContextPlan, ReadingOutcome
+from .context_schema import ContextBudget, ContextPlan, EvidenceSet, ReadTask, ReadingOutcome, TaskState
 from .request_compiler import RequestCompiler
 
 
@@ -101,8 +101,12 @@ class Controller:
                  cost_model: CostModel | None = None, events: EventLog | None = None,
                  shadow: bool = False, epoch_retirement: bool = True,
                  online_calibration: bool = False, extend_open_needs=None, prefix_settings=None,
-                 rolling_policy=None, state_observer=None, request_compiler=None):
+                 rolling_policy=None, state_observer=None, request_compiler=None,
+                 dialogue_mode="contextkv", dialogue_history_tokens=8192):
         self.store, self.engine = store, engine
+        if dialogue_mode not in {"contextkv", "llamaindex"}:
+            raise ValueError("dialogue_mode must be contextkv or llamaindex")
+        self.dialogue_mode, self.dialogue_history_tokens = dialogue_mode, dialogue_history_tokens
         self.template = template or ByteTemplate()
         self.policy = policy or CandidatePolicy()
         self.knobs = knobs or PlannerKnobs()
@@ -245,9 +249,11 @@ class Controller:
             raise EngineError("INCOMPLETE_GENERATION")
         if result.finish_reason not in ("stop", "length", "eos", "max_tokens"):
             raise EngineError("INVALID_FINISH_REASON", result.finish_reason)
+        physical_id = (f"{attempt.attempt_id}:{attempt.final_step_id}" if attempt.final_step_id
+                       else attempt.attempt_id)
         if (receipt.rid, receipt.attempt_id, receipt.engine_session_id, receipt.session_generation,
                 receipt.engine_restart_id, receipt.input_hash, receipt.finish_reason) != (
-                attempt.attempt_id, attempt.attempt_id, epoch.engine_session_id, epoch.session_generation,
+                physical_id, physical_id, epoch.engine_session_id, epoch.session_generation,
                 epoch.engine_restart_id, candidate.input_hash, result.finish_reason):
             raise EngineError("RECEIPT_IDENTITY_MISMATCH")
         if any(not isinstance(token, int) or isinstance(token, bool) or token < 0 for token in result.output_ids):
@@ -261,10 +267,11 @@ class Controller:
         receipt = result.receipt
         prediction = next((e for e in plan.predicted if e.candidate_id == plan.candidate.candidate_id), None)
         ttft = (timing.t_first-timing.t_arrive)*1000 if timing and timing.t_first is not None else None
-        steps = attempt.reading_outcome.steps if attempt.reading_outcome else ()
+        all_steps = attempt.reading_outcome.steps if attempt.reading_outcome else ()
+        steps = tuple(step for step in all_steps if step.step_id != attempt.final_step_id)
         metrics = tuple({"step_id": step.step_id, "kind": step.task.kind,
                          "input_tokens": len(step.input_ids), "output_tokens": len(step.output_ids),
-                         **step.metrics} for step in steps)
+                         **step.metrics} for step in all_steps)
         internal_first = next((step.metrics["first_token_from_arrival_ms"] for step in steps
                                if step.metrics.get("first_token_from_arrival_ms") is not None), None)
         reader_input = len(plan.candidate.input_ids)+sum(len(step.input_ids) for step in steps)
@@ -309,6 +316,133 @@ class Controller:
                             online_token_budget_limit=token_limit, online_token_budget_verified=budget_verified,
                             answer_phase_window=answer_phase_window)
 
+    async def _serve_dialogue_attempt(self, attempt, snapshot, query, evidence, provider, budget,
+                                      arrived, migrating):
+        """Run upstream dialogue inside the current durable business attempt."""
+        from adapters.llamaindex_dialogue import run_dialogue
+        from .execution import ReadingExecutor, auxiliary_tokens, require_online_tokens
+        from .templates import SYSTEM_PROMPT
+
+        info = await self.engine.info()
+        if info.fingerprint != self.template.fingerprint:
+            raise EngineError("FINGERPRINT_MISMATCH")
+        budget = budget or ContextBudget(window_tokens=self.policy.max_total_model_tokens,
+            output_tokens=self.policy.max_new_tokens, history_tokens=self.dialogue_history_tokens)
+        if (budget.window_tokens, budget.output_tokens) != (self.policy.max_total_model_tokens,
+                                                           self.policy.max_new_tokens):
+            raise ValueError("dialogue and controller must use the same model allocation")
+        plan = ContextPlan("llamaindex:"+attempt.attempt_id,
+            TaskState(attempt.request_id, query, current_turn_id=len(snapshot.raw_history)+1, query=query),
+            EvidenceSet("llamaindex", (), source_blocks=evidence), budget=budget,
+            reading_mode="llamaindex", cost_prediction_eligible=False)
+        self.store.save_context_plan(attempt.attempt_id, plan)
+        executor = ReadingExecutor(self.store, self.engine, self.template,
+            events=self.events, request_arrived=arrived, request_compiler=self.request_compiler)
+        retrieval_ms = attempt.retrieval_ms or 0.0
+        auxiliary_usage = attempt.auxiliary_usage
+        records, candidates = [], []
+        seen_sources = set()
+        started = time.monotonic()
+
+        async def retrieve(condensed_query):
+            nonlocal evidence, retrieval_ms, auxiliary_usage, attempt
+            if attempt.query_context is not None:
+                if attempt.query_context.query != condensed_query:
+                    raise ValueError("recovered condensation differs from the paid retrieval")
+                evidence = attempt.evidence
+                return evidence
+            if provider is not None:
+                tick = time.monotonic()
+                selection = await provider(snapshot, condensed_query)
+                retrieval_ms += (time.monotonic()-tick)*1000
+                evidence = tuple(selection.evidence)
+                auxiliary_usage = (selection.auxiliary_usage if selection.auxiliary_usage is not None else
+                    {"input_tokens": None, "output_tokens": None, "compute_ms": None, "models": []})
+            attempt = self.store.save_retrieval(attempt.attempt_id, evidence=evidence,
+                retrieval_priority=tuple(block.key for block in evidence),
+                query_context=QueryContext(condensed_query, "llamaindex_condense"),
+                retrieval_ms=retrieval_ms, auxiliary_usage=auxiliary_usage)
+            return evidence
+
+        async def complete(call):
+            if len(records) >= budget.max_steps:
+                raise ContextOverflow("LlamaIndex exhausted the common request step allocation")
+            if budget.max_complete_ms is not None and (time.monotonic()-arrived)*1000 > budget.max_complete_ms:
+                raise ContextOverflow("LlamaIndex exhausted the common complete-time allocation")
+            rendered = self.template.render(call.messages)
+            current_sources = frozenset(span.key for span in call.evidence_spans)
+            seen_sources.update(current_sources)
+            candidate = PromptCandidate(call.step_id, "REBUILD", snapshot.version,
+                call.messages, rendered.input_ids, rendered.input_hash, current_sources,
+                frozenset(seen_sources), evidence_spans=call.evidence_spans,
+                reference_map=call.reference_map, corpus_snapshot_id=snapshot.corpus_snapshot_id,
+                fingerprint=self.template.fingerprint, output_budget=call.output_budget,
+                generation_kind="LLAMAINDEX_"+call.stage.upper(), cost_prediction_eligible=False,
+                layout_id="llamaindex_native")
+            spent = sum(len(record.input_ids)+len(record.output_ids) for record in records)
+            auxiliary = 0 if auxiliary_usage is None else auxiliary_tokens(auxiliary_usage)
+            require_online_tokens(budget.max_total_tokens,
+                spent+auxiliary if auxiliary is not None else None,
+                len(rendered.input_ids)+call.output_budget, candidate.generation_kind)
+            task = ReadTask(call.step_id, candidate.generation_kind,
+                input_budget=budget.window_tokens-call.output_budget, output_budget=call.output_budget)
+            record = await executor._generate_step(attempt.attempt_id, snapshot, plan, task, (), (),
+                candidate=candidate, rendered=rendered, text_callback=True)
+            records.append(record)
+            candidates.append(candidate)
+            return record.result.raw_output
+
+        dialogue = await run_dialogue(query, snapshot.raw_history, retrieve_callback=retrieve,
+            complete_callback=complete, tokenizer=self.template.tokenizer,
+            context_window=budget.window_tokens, output_tokens=budget.output_tokens,
+            history_tokens=budget.history_tokens,
+            system_prompt=self.policy.system_prompt or SYSTEM_PROMPT)
+        if not records or dialogue.calls[-1].stage == "condense":
+            raise ContextOverflow("LlamaIndex returned no physical answer call")
+        final, candidate = records[-1], candidates[-1]
+        generation = self.store.execution_step(attempt.attempt_id, final.step_id)[2]
+        if dialogue.answer != generation.text:
+            raise ValueError("upstream final answer differs from the paid physical output")
+        plan = replace(plan, selected_set=replace(plan.selected_set, source_blocks=dialogue.source_blocks),
+            steps=tuple(record.task for record in records))
+        outcome = ReadingOutcome(plan, tuple(record.result for record in records[:-1]), tuple(records[:-1]))
+        previous_epoch = snapshot.current_epoch
+        epoch = replace(final.engine_epoch, epoch_no=previous_epoch.epoch_no+1 if previous_epoch else 1,
+            parent_epoch_no=previous_epoch.epoch_no if previous_epoch else None,
+            reason="corpus_snapshot_change" if migrating else "llamaindex_native")
+        attempt = replace(self.store.get_attempt(attempt.attempt_id), stage="RESULT_READY",
+            evidence=dialogue.source_blocks, plan=Plan(candidate, reason="llamaindex_native"),
+            epoch=epoch, result=generation, new_epoch=True, final_step_id=final.step_id,
+            branch_reason=epoch.reason, context_plan=plan, reading_outcome=outcome,
+            reading_elapsed_ms=sum(record.metrics.get("step_wall_ms", 0.0) or 0.0
+                                   for record in records[:-1]),
+            retrieval_ms=retrieval_ms, auxiliary_usage=auxiliary_usage)
+        attempt = self.store.promote_completed_step(attempt)
+        self._validate(attempt, generation)
+        snapshot = self.store.commit_turn_and_outbox(attempt.attempt_id)
+        committed_at = time.monotonic()
+        answer_window = {"start": started, "end": committed_at, "commit_at": committed_at,
+            "clock": "client_monotonic", "scope": "answer_until_commit",
+            "start_definition": "external_dialogue_start", "end_definition": "external_qa_commit"}
+        try:
+            self.events.emit("ledger_committed", business_session_id=attempt.session_id,
+                attempt_id=attempt.attempt_id, ledger_version=snapshot.version, epoch=epoch.epoch_no,
+                answer_phase_window=answer_window)
+            self.events.emit("llamaindex_dialogue_committed", business_session_id=attempt.session_id,
+                attempt_id=attempt.attempt_id, ledger_version=snapshot.version,
+                framework_version=dialogue.framework_version, condensed_query=dialogue.condensed_query,
+                call_stages=tuple(call.stage for call in dialogue.calls))
+        except Exception as error:
+            logging.getLogger(__name__).error("Diagnostic output failed after commit: %s", error)
+        self._retire_background()
+        submitted = arrived+final.metrics["submitted_from_arrival_ms"]/1000
+        timing = ClientTiming(arrived, submitted,
+            submitted+generation.ttft_ms/1000 if generation.ttft_ms is not None else None,
+            submitted+generation.last_token_ms/1000 if generation.last_token_ms is not None else None,
+            committed_at, committed_at, token_observation="chunk" if generation.ttft_ms is not None else "none")
+        return self._response(attempt, elapsed_ms=(committed_at-arrived)*1000,
+            timing=timing, answer_phase_window=answer_window)
+
     async def serve_turn(self, session_id: str, query: str, evidence: tuple[EvidenceBlock, ...] = (), *,
                          request_id: str | None = None, corpus_snapshot_id: str = "demo-v1",
                          reference_history: tuple[TurnRecord, ...] | None = None,
@@ -317,9 +451,10 @@ class Controller:
                          context_plans: tuple[ContextPlan, ...] = (),
                          open_need_provider: Callable | None = None,
                          auxiliary_usage: dict | None = None,
-                         evidence_provider: Callable[[SessionSnapshot], Awaitable[EvidenceSelection]] | None = None,
+                         evidence_provider: Callable[..., Awaitable[EvidenceSelection]] | None = None,
                          from_corpus_snapshot_id: str | None = None,
-                         request_arrived: float | None = None) -> TurnResponse:
+                         request_arrived: float | None = None,
+                         dialogue_budget: ContextBudget | None = None) -> TurnResponse:
         if not session_id or not query.strip():
             raise ValueError("session_id and query must be nonempty")
         arrived = time.monotonic() if request_arrived is None else request_arrived
@@ -335,6 +470,8 @@ class Controller:
         # attempt rather than re-retrieving against newer history or rankings.
         content = (("retrieved_query", query, corpus_snapshot_id) if evidence_provider is not None else
                    (query, evidence, corpus_snapshot_id, reference_history, retrieval_priority))
+        if self.dialogue_mode != "contextkv":
+            content = (*content, self.dialogue_mode)
         if query_context is not None:
             content = (*content, query_context)
         if context_plans:
@@ -359,6 +496,8 @@ class Controller:
                     original_snapshot = (previous.plan.candidate.corpus_snapshot_id if previous.plan is not None
                                          else self.store.get_snapshot(session_id).corpus_snapshot_id)
                     original = ("retrieved_query", query, original_snapshot)
+                    if self.dialogue_mode != "contextkv":
+                        original = (*original, self.dialogue_mode)
                     matches = previous.request_hash == hashlib.sha256(dumps(original).encode()).hexdigest()
                 if not matches:
                     raise IdempotencyConflict("request_id reused with different content")
@@ -401,6 +540,9 @@ class Controller:
             reading_outcome = None
             initial_outcomes = ()
             try:
+                if self.dialogue_mode == "llamaindex":
+                    return await self._serve_dialogue_attempt(attempt, working_snap, query, evidence,
+                        evidence_provider, dialogue_budget, arrived, migrating)
                 if resume_context_plan is not None:
                     context_plans = (resume_context_plan,)
                     evidence = resume_context_plan.selected_set.source_blocks

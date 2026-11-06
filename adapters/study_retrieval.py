@@ -62,6 +62,7 @@ class StudyEvidenceProvider:
         self.helper_engine_info = helper_engine_info
         self.query_encoder_identity = query_encoder_identity
         self.strategy = config.get("study", {}).get("strategy", "B7")
+        self.external_dialogue = config.get("execution", {}).get("dialogue_mode") == "llamaindex"
         self.budget = study_budget(config)
         run_config = config.get("generation", {}).get("run_config")
         self.answer_system_prompt = load_config(run_config).context.system_prompt if run_config else None
@@ -81,7 +82,8 @@ class StudyEvidenceProvider:
 
     @property
     def manifest(self):
-        return {"strategy": self.strategy, "retrieval": self.serving.manifest,
+        return {"strategy": self.strategy, "dialogue_mode": "llamaindex" if self.external_dialogue else "contextkv",
+                "retrieval": self.serving.manifest,
                 "source_window_profile": to_jsonable(self.directory.profile),
                 "budget": to_jsonable(self.budget), "task_model": getattr(self.task_model, "manifest", None),
                 "history_encoder": getattr(self.frozen_history, "manifest", None),
@@ -121,6 +123,8 @@ class StudyEvidenceProvider:
             -selected.quality_prediction, selected.token_cost, selected.set_id))), (time.perf_counter()-started)*1000
 
     async def retrieve(self, snapshot, query, request_id):
+        if self.external_dialogue:
+            return await run_retrieval_worker(self._external_retrieve, snapshot, query, request_id)
         if self.strategy == "B0":
             return await run_retrieval_worker(self._baseline_retrieve, snapshot, query, request_id)
         return await run_retrieval_worker(self._retrieve, snapshot, query, request_id)
@@ -136,9 +140,45 @@ class StudyEvidenceProvider:
 
     async def retrieve_supplied(self, snapshot, query, request_id, blocks, *, source_metadata=None,
                                 coverage_scope="all_supplied_documents"):
+        if self.external_dialogue:
+            return await run_retrieval_worker(self._external_retrieve, snapshot, query, request_id,
+                supplied_blocks=tuple(blocks), source_metadata=source_metadata, coverage_scope=coverage_scope)
         return await run_retrieval_worker(self._retrieve, snapshot, query, request_id,
             supplied_blocks=tuple(blocks), supplied_metadata=source_metadata,
             supplied_coverage_scope=coverage_scope)
+
+    def _external_retrieve(self, snapshot, query, request_id, *, supplied_blocks=None,
+                           source_metadata=None, coverage_scope="selected_sources"):
+        """Rank the upstream condensed query; upstream compact owns synthesis."""
+        started = time.perf_counter()
+        with self._lock:
+            before = {id(model): dict(model.usage) for _, model in self._usage_sources()
+                      if hasattr(model, "usage")}
+            top_k = self.config.get("selection", {}).get("max_passages") or 5
+            if supplied_blocks is None:
+                contexts = self.serving.candidate_search(query,
+                    top_k=self.config.get("retrieval", {}).get("current_top_k", 50))[:top_k]
+                priority = self.directory.corpus_index.retrieved_keys(contexts)
+                blocks = self.directory.source_fetch(priority)
+            else:
+                if source_metadata is not None:
+                    self.directory.corpus_index.source_metadata.update(source_metadata)
+                self.directory.add_archive(supplied_blocks)
+                if coverage_scope == "all_supplied_documents":
+                    priority = tuple(block.key for block in supplied_blocks)
+                else:
+                    pool = self.directory.full_scope(tuple(block.key for block in supplied_blocks))
+                    ranked = self._rank_supplied(None, snapshot, pool, query_override=query)
+                    priority = tuple(dict.fromkeys(span.source_key
+                        for unit in sorted(ranked.units, key=lambda unit: -unit.retrieval_score)
+                        for span in unit.source_spans))[:top_k]
+                blocks = self.directory.source_fetch(priority)
+            usage = self._auxiliary_usage(before, ())
+            self.traces[snapshot.session_id, request_id] = {
+                "retrieval_query": query, "dialogue_mode": "llamaindex", "auxiliary_usage": usage,
+                "retrieval_ms": (time.perf_counter()-started)*1000,
+                "retrieval_priority": to_jsonable(priority), "coverage_scope": coverage_scope}
+            return EvidenceSelection(blocks, priority, auxiliary_usage=usage)
 
     async def extend_for_plan(self, snapshot, plan, open_needs, claims):
         """Resume directed gap selection from a persisted plan and committed QA."""
@@ -605,6 +645,7 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
                            support_backend=None, frozen_history=None):
     retrieval = config["retrieval"]
     strategy = config.get("study", {}).get("strategy", "B7")
+    external = config.get("execution", {}).get("dialogue_mode") == "llamaindex"
     if strategy not in STUDY_STRATEGIES:
         raise ValueError(f"unknown study strategy: {strategy}")
     retriever = retriever or create_retriever("P3", config_path=retrieval["config_path"])
@@ -614,8 +655,8 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
     task_config, support_config = config.get("task_model", {}), config.get("support_model", {})
     task_model = teacher_client = query_encoder_identity = None
     helper = helper_info = None
-    teacher_task = strategy not in {"B0", "Btoken"} and task_interpreter is None and task_config.get("mode", "trained") == "teacher"
-    teacher_support = strategy not in {"B0", "Btoken", "B1"} and support_backend is None and support_config.get("mode", "trained") == "teacher"
+    teacher_task = not external and strategy not in {"B0", "Btoken"} and task_interpreter is None and task_config.get("mode", "trained") == "teacher"
+    teacher_support = not external and strategy not in {"B0", "Btoken", "B1"} and support_backend is None and support_config.get("mode", "trained") == "teacher"
     if teacher_task or teacher_support:
         import httpx
         from controller.config import load_config
@@ -631,7 +672,7 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
             raise ValueError("actual helper checkpoint differs from generation.helper_run_config")
         if any(fingerprint[name] != getattr(template.fingerprint, name) for name in ("tokenizer_hash", "template_hash")):
             raise ValueError("helper tokenizer/template differs from the supplied token-counting template")
-    if strategy not in {"B0", "Btoken"} and task_interpreter is None:
+    if not external and strategy not in {"B0", "Btoken"} and task_interpreter is None:
         from adapters.hybrid_retrieval import LocalBGE
         frozen_history = frozen_history or LocalBGE(task_config.get("base_path", "models/bge-m3"),
             device=task_config.get("device", "cuda:1"), dtype="bfloat16", max_length=8192)
@@ -656,7 +697,7 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
         task_interpreter = TaskInterpreter(task_model, HistoryIndex(frozen_history.tokenizer, frozen_history.encode,
             unit_tokens=task_config.get("history_unit_tokens", 384), candidates=task_config.get("history_candidates", 16),
             view_tokens=task_config.get("history_view_tokens", 8192)))
-    if retrieval.get("task_query_asset"):
+    if not external and retrieval.get("task_query_asset"):
         from training.task_model import TaskModel
         from training.preference_rollout import query_encoder_binding
         query_encoder_identity = query_encoder_binding({"task_asset": retrieval["task_query_asset"]})
@@ -678,7 +719,7 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
     else:
         directory = SourceDirectory(corpus, serving.candidate_search, template.tokenizer, profile=profile)
         serving.source_directory = directory
-    if strategy not in {"B0", "Btoken", "B1"} and support_backend is None:
+    if not external and strategy not in {"B0", "Btoken", "B1"} and support_backend is None:
         if support_config.get("mode", "trained") == "teacher":
             from adapters.teacher_support import TeacherSupportBackend
             support_backend = TeacherSupportBackend(config.get("generation", {}).get("teacher_url",

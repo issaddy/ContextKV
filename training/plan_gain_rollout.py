@@ -20,6 +20,7 @@ import sys
 from urllib.parse import urlsplit
 
 from controller.action_proposals import observed_reduction_task, BOUNDED_CONTINUATION
+from controller.plan_gain_protocol import input_protocol, validate_input_protocol
 from controller.context_schema import EvidenceSet, EvidenceUnit, ReadingOutcome, SourceSpan, TaskState
 from controller.schema import QueryContext, SessionSnapshot, TurnRecord
 from controller.serialization import decode, to_jsonable
@@ -78,6 +79,7 @@ def observed_rows(rows, packets, *, selection=None):
         row = by_task[task_id]
         if any(packet[name] != row[name] for name in ("cohort_split", "cohort_manifest_sha256")):
             raise ValueError("observed state belongs to a different registered cohort identity")
+        validate_input_protocol(packet.get("input_protocol"))
         state = decode(ReadingOutcome, packet["working_state"])
         if packet["decision_mode"] == "mandatory_coverage":
             skipped["mandatory_source_coverage_incomplete"] += 1
@@ -104,7 +106,7 @@ def observed_rows(rows, packets, *, selection=None):
         binding = observed_state_binding(state, snapshot, paid_cost=paid,
             native_condition=packet["native_condition"], reader_checkpoint=packet["reader_checkpoint"],
             reader_profile_id=packet["reader_profile_id"], paid_observation=packet.get("paid_observation"))
-        binding.update(observation_id=identity, cohort_split=packet["cohort_split"],
+        binding.update(input_protocol=packet["input_protocol"], observation_id=identity, cohort_split=packet["cohort_split"],
             cohort_manifest_sha256=packet["cohort_manifest_sha256"],
             resident_model_manifest_digest=packet["resident_model_manifest_digest"])
         key = (packet["decision_seq"], packet["native_condition"]["observed_time_ns"], identity)
@@ -418,6 +420,10 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
     if observed is not None and continuation_request is None and gap_provider is not None:
         continuation_request = GapRetrievalRequest((), "", gap_retriever_identity(binding["resident_model_manifest"]),
             binding["continuation_gap_limits"])
+    protocol = input_protocol(service.template.fingerprint)
+    if binding.get("input_protocol", protocol) != protocol:
+        raise ValueError("collection input protocol differs from its actual reader compiler")
+    binding = {**binding, "input_protocol": protocol}
     registration = {"continuation_protocol": BOUNDED_CONTINUATION, "registered_at": time.monotonic(), "frozen_state_key": state_key,
         "plan_candidate": to_jsonable(plan), "working_state": to_jsonable(frozen), "snapshot": to_jsonable(snapshot),
         "continuation_gap_limits": continuation_request.limits if continuation_request is not None else None,
@@ -430,12 +436,12 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
     before = service.store.sync_history(session, snapshot.raw_history, before.version)
     from controller.plan_policy import CompleteCost
     paid = None if observed is None else decode(CompleteCost, observed["paid_cost"])
-    runtime = FixedCounterfactualRuntime(plan, initial_state=frozen if observed is not None else None,
+    runtime = FixedCounterfactualRuntime(plan, initial_state=frozen,
         paid_cost=paid, gap_request=continuation_request, gap_provider=gap_provider,
-        initial_snapshot=snapshot if observed is not None else None)
+        initial_snapshot=snapshot)
     service.rolling_policy = runtime
     service.bind_resident_models(binding["resident_model_manifest"])
-    completed = {result.step_id for result in frozen.results} if observed is not None else set()
+    completed = {result.step_id for result in frozen.results}
     required_calls = sum(step.task.step_id not in completed and (step.task.kind == "ANSWER" or not (
         step.task.kind == "REDUCE" and plan.context_plan.reading_mode == "typed_reduce"
         and step.task.operation in {"count", "sum", "group", "union"})) for step in plan.steps)
@@ -543,6 +549,8 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
             "continuation_protocol": BOUNDED_CONTINUATION,
             "continuation_gap_limits": continuation_request.limits if continuation_request is not None else None,
             "pre_action_quote": to_jsonable(runtime.pre_action_quote),
+            "pre_action_input": to_jsonable(runtime.pre_action_input),
+            "compiled_actions": to_jsonable(runtime.decisions),
             "new_step_ids": tuple(step.step_id for step in steps), "new_action_counts": action_counts,
             "gap_result": to_jsonable(runtime.gap_result),
             "qa_increment": len(after.raw_history)-len(before.raw_history), "cleanup": cleanup,
@@ -794,6 +802,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 "cohort_manifest_sha256": row["cohort_manifest_sha256"],
                 "measurement_kind": "hardware" if info.engine_kind == "sglang" else "simulation",
                 "resident_model_manifest": to_jsonable(provider.manifest),
+                "input_protocol": input_protocol(controller.template.fingerprint),
                 "continuation_protocol": BOUNDED_CONTINUATION,
                 "continuation_gap_limits": (run.state_observation or run.plan_gain)["gap_limits"] if mode == "observed_actions" else None,
                 "task_state_source": "frozen_audited_actual", "collection_mode": mode,
@@ -828,6 +837,8 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 try:
                     if mode == "observed_actions":
                         packet = row["observed_packet"]
+                        validate_input_protocol(packet.get("input_protocol"),
+                            reader_fingerprint=controller.template.fingerprint)
                         observed = row["observed_binding"]
                         if (observed["reader_checkpoint"] != reader_checkpoint
                                 or observed["reader_profile_id"] != settings["reader_profile_id"]):
@@ -867,11 +878,15 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                             scope_pool = provider.directory.full_scope(state.source_scope)
                             scope_material = EvidenceSet("gain-explicit-scope", scope_pool.units,
                                                          source_blocks=scope_pool.source_blocks)
+                        frozen = next((seed for seed in selection.initial_outcomes
+                            if seed.plan.plan_id == base.plan_id), None)
+                        if frozen is None:
+                            frozen = ReadingOutcome(base, auxiliary_usage={"input_tokens": 0,
+                                "output_tokens": 0, "compute_ms": 0.0, "models": []})
                         plans, omitted = build_counterfactual_plans(base, snap, controller.template,
                             reader_checkpoint=reader_checkpoint, read_outputs=settings["read_outputs"],
-                            scope_material=scope_material, answer_system_prompt=controller.policy.system_prompt)
-                        frozen = ReadingOutcome(base, auxiliary_usage={"input_tokens": 0,
-                            "output_tokens": 0, "compute_ms": 0.0, "models": []})
+                            scope_material=scope_material, answer_system_prompt=controller.policy.system_prompt,
+                            initial_state=frozen)
                     unavailable.extend({"task_id": row["task_id"], **reason} for reason in omitted)
                     material = judge_sources(base, scope_material, row, source_rows,
                                              corpus_id=config["retrieval"]["corpus_id"])

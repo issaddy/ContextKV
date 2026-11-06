@@ -44,12 +44,13 @@ class DocumentQA:
             elif supplied_blocks is not None:
                 supplied_blocks = tuple(supplied_blocks)
 
-            async def retrieve(snapshot):
+            async def retrieve(snapshot, retrieval_query=None):
+                selected_query = query if retrieval_query is None else retrieval_query
                 nonlocal memo_task_id
                 if supplied_blocks is None:
-                    selected = await self.provider.retrieve(snapshot, query, task_id)
+                    selected = await self.provider.retrieve(snapshot, selected_query, task_id)
                 else:
-                    selected = await self.provider.retrieve_supplied(snapshot, query, task_id, supplied_blocks,
+                    selected = await self.provider.retrieve_supplied(snapshot, selected_query, task_id, supplied_blocks,
                         source_metadata=source_metadata, coverage_scope=coverage_scope)
                 if selected.query_context is not None and selected.query_context.task_state is not None:
                     memo_task_id = selected.query_context.task_state.task_id
@@ -57,6 +58,7 @@ class DocumentQA:
 
             return await self.controller.serve_turn(session_id, query, request_id=request_id,
                 corpus_snapshot_id=snapshot_id, evidence_provider=retrieve,
-                from_corpus_snapshot_id=from_corpus_snapshot_id, request_arrived=arrived)
+                from_corpus_snapshot_id=from_corpus_snapshot_id, request_arrived=arrived,
+                dialogue_budget=getattr(self.provider, "budget", None))
         finally:
             self.provider.finish_request(memo_task_id)

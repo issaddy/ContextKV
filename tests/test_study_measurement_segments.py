@@ -54,6 +54,9 @@ async def test_explicit_request_namespace_resumes_failed_p3_without_changing_tas
         def close(self):
             pass
 
+        def finish_request(self, task_id):
+            pass
+
     class Sampler:
         def __init__(self, *args, **kwargs):
             self.samples = []
@@ -113,7 +116,7 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
     import asyncio
     import time
     from bench.study_workloads import WorkloadDispatcher, freeze_workload, read_workload_manifest
-    from bench.capacity_workflow import full_queue_methods
+    from bench.capacity_workflow import full_queue_methods, full_queue_method_specs
 
     rows = [dict(task_id=f"session:{turn}", conversation_id="session", turn=turn,
                  Collection="track", contexts=[]) for turn in (1, 2)]
@@ -125,8 +128,25 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
     index.write_text(json.dumps({"format": "contextkv_dataset_workload_index_v1",
                                  "datasets": {"track": str(path)}}))
     assert read_workload_manifest(index)["track"] == manifest
-    assert full_queue_methods(1) == ("B6_native", "S3_value")
-    assert set(full_queue_methods(4)) == {"E0_native", "B6_native", "S3_native", "B6_value", "S3_value"}
+    expected = ("B6_native", "S3_native", "B6_contextpilot", "S3_contextpilot",
+                "LlamaIndex_native", "S3_contextpilot_no_fact_reuse")
+    assert full_queue_methods(1) == full_queue_methods(4) == expected
+    from pathlib import Path
+    import yaml
+    declaration = yaml.safe_load(Path("configs/study_matrix.yaml").read_text())["final_evaluation"]
+    assert tuple(cell["method"] for cell in declaration["factorial"].values()) == expected[:4]
+    specs = {spec["id"]: spec for spec in full_queue_method_specs(expected,
+        {"gain_asset": "measured-B"}, {"mode": "contextpilot", "checkout": "pinned-author"})}
+    assert all(spec["overrides"]["execution"]["prefix_retention"] == {"mode": "native"}
+               for spec in specs.values())
+    assert specs["B6_native"]["overrides"]["execution"]["plan_gain"] is None
+    assert specs["B6_contextpilot"]["overrides"]["execution"]["cache_compilation"]["mode"] == "contextpilot"
+    assert specs["LlamaIndex_native"]["overrides"]["execution"]["dialogue_mode"] == "llamaindex"
+    control = specs["S3_contextpilot_no_fact_reuse"]["overrides"]
+    assert control["execution"] == specs["S3_contextpilot"]["overrides"]["execution"]
+    assert control["reading"] == {"fact_reuse": False}
+    fixed = full_queue_method_specs(["B6_native"], None, None)[0]
+    assert fixed["overrides"]["execution"]["plan_gain"] is None
     assert full_queue_methods(1, ["S3_native"]) == ("S3_native",)
 
     async def run():

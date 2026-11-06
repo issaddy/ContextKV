@@ -31,7 +31,7 @@ class PoolProfile:
 
 
 def unit_identity(key, start, end):
-    return f"{key.corpus_id}:{key.document_id}:{key.passage_id}:{key.version}:{start}:{end}"
+    return f"{key.corpus_id}:{key.document_id}:{key.passage_id}:{key.version}:{key.content_sha256}:{start}:{end}"
 
 
 def merge_retrieved_units(*groups):

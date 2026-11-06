@@ -144,6 +144,14 @@ def test_committed_windows_do_not_change_original_metadata_or_next_turn_prefixes
     assert 'table_id' not in corpus.source_metadata[block.key]
     assert 'heading' not in corpus.source_metadata[block.key]
 
+    # A publisher can replace a body without changing its version label. Such
+    # sources cannot share window identities or cached document vectors.
+    replacement = make_evidence(text.replace('| A | 1 |', '| A | 9 |'), 'two-tables', version='v1')
+    directory.add_archive((replacement,))
+    changed = directory.full_scope((replacement.key,)).units
+    assert not {unit.unit_id for unit in before} & {unit.unit_id for unit in changed}
+    assert all(directory.units_by_id[unit.unit_id] == unit for unit in (*before, *changed))
+
 
 def test_full_scope_provider_builds_one_scan_without_support_or_set_search():
     from types import SimpleNamespace

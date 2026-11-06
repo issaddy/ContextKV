@@ -7,6 +7,8 @@ import pytest
 from controller.claim_graph import ClaimGraph
 from controller.context_schema import EvidenceClaim, Need, ReadingOutcome, ReadResult, ReadTask, StepRecord
 from controller.plan_policy import CompleteCost, complete_plan
+from controller.plan_gain_protocol import input_protocol
+from controller.templates import ByteTemplate
 from controller.schema import SessionSnapshot, TurnRecord
 from training.plan_gain_protocol import ZERO_AUX, observed_state_binding
 from training.train_plan_gain import (
@@ -40,6 +42,7 @@ def paired_records(*, split="train", tag="training"):
         "state_key": observed["state_key"], "reader_checkpoint": "reader-fixture",
         "reader_profile_id": "profile-fixture", "split": split, "answer": "specified answer",
         "cohort_split": split, "cohort_manifest_sha256": "specified-fixture",
+        "input_protocol": input_protocol(replace(ByteTemplate().fingerprint, model_revision="reader-fixture")),
         "continuation_gap_limits": {"max_units": 2, "max_passages": 2},
         "scorer_identity": {"kind": "specified unit-test scorer"},
         "comparison_budget": {"window_tokens": base.budget.window_tokens, "answer_output_tokens": 64},
@@ -154,3 +157,20 @@ def test_observed_value_uses_existing_support_and_bridge_state_without_future_re
     known_zero = plan_features(replace(plan, context_plan=replace(plan.context_plan,
         selected_set=replace(material, need_support=(zero,)))), state, paid_cost=paid)
     assert absent["retrieval_support_needs"] == 0 and known_zero["retrieval_support_needs"] == 1
+
+
+
+def test_frozen_decision_identity_includes_actual_source_and_reader_geometry():
+    from training.train_plan_gain import working_state_key
+
+    _, state = paired_records()
+    snapshot = SessionSnapshot("actual")
+    identity = working_state_key(state, snapshot)
+    block = state.plan.selected_set.source_blocks[0]
+    changed = replace(state, plan=replace(state.plan, selected_set=replace(state.plan.selected_set,
+        source_blocks=(replace(block, title="Different rendered metadata"),))))
+    assert working_state_key(changed, snapshot) != identity
+    assert working_state_key(replace(state, plan=replace(state.plan, read_layout="source_first")), snapshot) != identity
+    assert working_state_key(replace(state, plan=replace(state.plan,
+        budget=replace(state.plan.budget, body_tokens=1))), snapshot) != identity
+    assert working_state_key(replace(state, claims=()), snapshot) != identity

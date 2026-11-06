@@ -103,3 +103,34 @@ async def test_whole_plan_completion_asset_round_trips_without_observed_features
                                reader_profile_id=model.reader_profile_id)
     assert loaded.provenance["observed_feature_schema"] is None
     assert loaded.predict(pair["features"]) == pytest.approx(model.predict(pair["features"]))
+
+
+@pytest.mark.asyncio
+async def test_effective_assets_reject_missing_or_changed_compiler_reader_scope(tmp_path):
+    from controller.templates import ByteTemplate
+
+    _, _, values = await measured_fixture(tmp_path)
+    pair = effective_pair(*(completion_record(*values[kind]) for kind in ("direct_answer", "read_once")))
+    model = fit_effective([pair])
+    path = tmp_path/"current.json"
+    model.save(path)
+    fingerprint = ByteTemplate().fingerprint
+    with pytest.raises(ValueError, match="input protocol differs"):
+        PlanGainModel.load(path, reader_checkpoint=model.reader_checkpoint,
+            reader_profile_id=model.reader_profile_id,
+            reader_fingerprint=replace(fingerprint, template_hash="different-template"))
+    saved = json.loads(path.read_text())
+    del saved["provenance"]["input_protocol"]
+    path.write_text(json.dumps(saved))
+    with pytest.raises(ValueError, match="current actual input protocol"):
+        PlanGainModel.load(path, reader_checkpoint=model.reader_checkpoint,
+            reader_profile_id=model.reader_profile_id)
+
+
+@pytest.mark.asyncio
+async def test_pre_action_cost_quote_must_bind_the_executed_compiler_choice(tmp_path):
+    _, _, values = await measured_fixture(tmp_path)
+    before, run = deepcopy(values["direct_answer"])
+    run["pre_action_input"]["input_ids"][0] += 1
+    with pytest.raises(ValueError, match="first executed native input"):
+        completion_record(before, run)
