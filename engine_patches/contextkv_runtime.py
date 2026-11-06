@@ -1052,7 +1052,7 @@ class ContextKVRuntime:
             return dict(mode=mode, info=replacement.info({}), pool=replacement.pool_snapshot())
         if mode == "settle":
             if self.cache.cache_controller is not None:
-                self.cache.flush_pending_backups()
+                self.cache.cache_controller.start_writing()
                 self.cache.writing_check(write_back=True)
             return dict(mode=mode, info=self.info({}), pool=self.pool_snapshot())
         if mode == "pressure":
@@ -1065,7 +1065,7 @@ class ContextKVRuntime:
             # Only settle already-submitted transfers. Session refs are retained;
             # native eviction still decides which referenced/unreferenced leaves go.
             if self.cache.cache_controller is not None:
-                self.cache.flush_pending_backups()
+                self.cache.cache_controller.start_writing()
                 self.cache.writing_check(write_back=True)
                 self.cache.loading_check()
             before = self.pool_snapshot()
@@ -1089,7 +1089,7 @@ class ContextKVRuntime:
             from sglang.srt.mem_cache.base_prefix_cache import EvictParams
             # Profiling fixture only: settle native writes, release soft refs,
             # evict device copies through native policy, then settle write-back.
-            self.cache.flush_pending_backups()
+            self.cache.cache_controller.start_writing()
             self.cache.writing_check(write_back=True)
             for sid, epoch in self.epochs.items():
                 if epoch["state"] != "RETIRED":
