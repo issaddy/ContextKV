@@ -32,7 +32,7 @@ if [[ "${CONTEXTKV_ENABLE_HICACHE:-1}" == 1 ]]; then
     --hicache-mem-layout "${CONTEXTKV_HICACHE_LAYOUT:-layer_first}")
 fi
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec "${CONTEXTKV_ENGINE_PYTHON:-python}" "$PROJECT_ROOT/engine_patches/contextkv_model_scope.py" \
+exec "${CONTEXTKV_ENGINE_PYTHON:-python3}" "$PROJECT_ROOT/engine_patches/contextkv_model_scope.py" \
   --scope "$CONTEXTKV_MODEL_SCOPE_PATH" --launch \
   --tp 1 --dtype bfloat16 --kv-cache-dtype bfloat16 --context-length 32768 \
   --page-size "${CONTEXTKV_PAGE_SIZE:-64}" ${SESSION_ARGS[@]+"${SESSION_ARGS[@]}"} \

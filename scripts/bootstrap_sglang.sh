@@ -2,7 +2,7 @@
 # Reuse the selected Linux/NVIDIA environment. Never reinstall torch/CUDA here.
 set -euo pipefail
 CHECKOUT="${SGLANG_CHECKOUT:-vendor/sglang-0.5.18}"
-ENGINE_PYTHON="${CONTEXTKV_ENGINE_PYTHON:-python}"
+ENGINE_PYTHON="${CONTEXTKV_ENGINE_PYTHON:-python3}"
 : "${CONTEXTKV_MODEL_SCOPE_PATH:?Set to the existing local Qwen3 model scope JSON; bootstrap does not download weights}"
 if [[ "$(uname -s)" != Linux ]]; then
   echo 'SGLang serving requires Linux; prepare_sglang.py --source-only verifies the patch on CPU.' >&2
