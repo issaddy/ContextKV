@@ -9,6 +9,7 @@ from pathlib import Path
 from controller.context_schema import ReadingOutcome
 from controller.plan_policy import PlanCandidate
 from controller.plan_gain_protocol import validate_input_protocol, validate_pre_action_input
+from controller.resident_models import resident_model_digest
 from controller.schema import SessionSnapshot
 from controller.serialization import decode
 from .train_plan_gain import build_gain_record
@@ -119,8 +120,22 @@ def export_observed_packets(observations, actual_turns, output):
             raise ValueError("observed export requires the actual capture raw offline reference")
         source_hash = hashlib.sha256(json.dumps(source, sort_keys=True,
             separators=(",", ":")).encode()).hexdigest()
-        packets.append({**observation, **binding, "source_capture_status": capture_statuses[attempt],
-            "source_capture_sha256": source_hash})
+        generation_dir = (Path(source["generation_dir"]) if source.get("response") is not None
+                          else Path(source["state_db"]).parent.parent)
+        manifest_path = (generation_dir/"measurements"/
+                         source["measurement_segment_id"]/"generation_manifest.json")
+        manifest_bytes = manifest_path.read_bytes()
+        resident_digest = resident_model_digest(json.loads(manifest_bytes)["retrieval"])
+        packet = {**observation, **binding, "source_capture_status": capture_statuses[attempt],
+            "source_capture_sha256": source_hash, "resident_model_manifest_digest": resident_digest,
+            "capture_resident_binding": {"recorded_digest": observation["resident_model_manifest_digest"],
+                "manifest_path": str(manifest_path.resolve()),
+                "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest()}}
+        if observation.get("gap_request") is not None:
+            packet["gap_request"] = {**observation["gap_request"], "retriever_identity": {
+                **observation["gap_request"]["retriever_identity"],
+                "resident_model_manifest_digest": resident_digest}}
+        packets.append(packet)
     path = Path(output)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x") as stream:

@@ -34,7 +34,7 @@ python3 scripts/prepare_contextpilot.py --checkout vendor/contextpilot
 
 study 配置的 `execution.cache_compilation` 取 `{mode: contextpilot, checkout: vendor/contextpilot}`；Native 对照取 `{mode: native}`。`prefix_retention` 默认 `{mode: native}`，与编排开关独立。
 
-LlamaIndex 的统一执行入口与最终编译矩阵已接线；当前协议的 B 监督资产、外部参照实测和完整队列比较仍须完成。B 恢复沿用原 SQLite 和已完成问答，通过已有 `--request-namespace` 为新尝试分配 ID；旧失败记录保存在原测量段，实际历史与已付成本继续保留。下表的入口存在不表示对应实验已完成。
+LlamaIndex 的统一执行入口与最终编译矩阵已接线；当前协议的 B 监督资产、外部参照实测和完整队列比较仍须完成。B 恢复沿用原 SQLite 和已完成问答，通过已有 `--request-namespace` 为新尝试分配 ID；旧失败记录保存在原测量段，实际历史与已付成本继续保留。导出时保留 `measurements/<segment>/generation_manifest.json`，模型身份由实际捕获资产派生，原 digest 和来源 hash 留在 `capture_resident_binding`。下表的入口存在不表示对应实验已完成。
 
 | 任务 | 当前入口 | 必须保留的对照与产物 |
 |---|---|---|

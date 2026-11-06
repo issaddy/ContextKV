@@ -19,12 +19,14 @@ _RUNTIME = frozenset({"budget", "budgets", "strategy", "selection", "reading", "
     "wire_schema", "input_policy", "token_limit_hits", "texts_processed"})
 
 
-def _asset(value, *, strip_runtime=True):
+def _asset(value, *, strip_runtime=True, model_scope=False):
     if isinstance(value, dict):
         return {key: ("cuda" if key == "device" and isinstance(item, str)
                       and item.startswith("cuda:") and item[5:].isdecimal()
-                      else _asset(item, strip_runtime=strip_runtime))
-                for key, item in sorted(value.items()) if not strip_runtime or key not in _RUNTIME}
+                      else _asset(item, strip_runtime=strip_runtime, model_scope=key == "model_scope"))
+                for key, item in sorted(value.items())
+                if key not in {"engine_restart_id", "base_url"} and not (model_scope and key == "source_path")
+                and (not strip_runtime or key not in _RUNTIME)}
     if isinstance(value, (tuple, list)):
         return [_asset(item, strip_runtime=strip_runtime) for item in value]
     return value
@@ -35,7 +37,8 @@ def resident_model_identity(manifest):
 
     Keep the original manifest in the capture/audit artifact. The extracted
     value binds corpus/index identities, actual model manifests/deployments and
-    observed helper engine identities, independently of request budgets.
+    observed helper engine identities, independently of request budgets, process
+    restarts, service routes and the path used to load a model-scope record.
     """
     raw = to_jsonable(manifest)
     if raw is None:

@@ -100,8 +100,14 @@ async def test_after_each_read_learned_value_selects_stop_or_one_more_read(tmp_p
     assert all(record["attempt_id"] == response.attempt_id and record["request_id"] == "actual-request" for record in records)
     assert all("task_id" not in record for record in records)
     assert records[-1]["paid_cost"]["input_tokens"] > 0
+    segment = tmp_path / "generation" / "measurements" / "captured-segment"
+    segment.mkdir(parents=True)
+    (segment / "generation_manifest.json").write_text(json.dumps({"retrieval": {
+        "retrieval": {"retriever": {"encoder": {"identity": "specified-fixture"}}}}}))
+    records = [{**record, "resident_model_manifest_digest": "recorded-fixture"} for record in records]
     result = export_observed_packets(records, [{"task_id": "real-task-turn-id",
         "cohort_split": "train", "cohort_manifest_sha256": "specified-fixture",
+        "generation_dir": str(tmp_path / "generation"), "measurement_segment_id": "captured-segment",
         "reference": {"task_id": "real-task-turn-id"},
         "response": {"attempt_id": response.attempt_id}}], tmp_path / "packets.jsonl")
     assert result["packets"] == wanted+1

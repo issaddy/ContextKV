@@ -47,6 +47,8 @@ Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 导出实际 REA
 
 `controller/fact_reuse.py` 从同会话已提交的物理 READ 构建可见提取 contract。任务解释同时绑定当前 Need 和可复用 contract；版本、hash、范围、字段和条件匹配后，只导入原子事实。逻辑复用节点不复制历史模型费用；当前 count/sum/group 重新选择和运算。`complete` 的覆盖按来源区间并集计算，旧新 unit ID 不同也不重复读取；`facts` 不冒充完整提取。支持 backend 的请求内 memo 延续到 GAP，QA 结束释放。
 
+B 的冻结资产身份保留模型、tokenizer、索引及实际计算配置，排除进程重启编号、服务地址和 model-scope 记录文件的位置。离线观测导出从对应测量段的真实 generation manifest 计算该身份；原始观测 digest、manifest 路径与内容 hash 同时保留，配对采集仍核对实际加载的资产。
+
 ## B：有限阅读、有效结论和收益选择
 
 先从实际 ANSWER 窗口扣除系统、任务、工作历史、输出和来源元数据，再把可用结论份额分到 Need、READ 分片和有限 REDUCE 节点。生成输出上限与最终保留份额分别记录。READ 的完整输出结构同时出现在可见消息和原生 JSON 约束中。

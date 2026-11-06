@@ -354,8 +354,40 @@ async def test_actual_snapshot_cohort_needs_no_task_labels_and_keeps_native_witn
     from training.reader_data import file_digest
     from controller.plan_gain_protocol import input_protocol
     from controller.context_schema import TextRef
+    from controller.resident_models import resident_model_digest, resident_model_identity
 
-    service, _, _, frozen, snapshot, _, _, plans, binding, row, _ = await frozen_fixture(tmp_path/'capture')
+    service, _, _, frozen, snapshot, _, request, plans, binding, row, _ = await frozen_fixture(tmp_path/'capture')
+    helper = {'engine_restart_id': 'original-process', 'model_scope': {
+        'source_path': '/original/scope.json', 'identity': 'fixed-model', 'record': {'weights': 'sha'}}}
+    resident = {'retrieval': {'retriever': {'dense': {'index_sha256': 'fixed-index'},
+        'encoder': {'identity': 'fixed-encoder', 'source_path': '/encoder/checkpoint',
+            'sdpa_backend': 'math', 'tokenizer': 'fixed-tokenizer', 'version': 'fixed-version'}}},
+        'helper_engine_info': helper, 'support_model': {
+            'base_url': 'http://127.0.0.1:30005', 'helper_engine_info': deepcopy(helper)},
+        'task_model': {'transport': {'base_url': 'http://127.0.0.1:30005'}}}
+    restarted = deepcopy(resident)
+    restarted['support_model']['base_url'] = 'http://127.0.0.1:30001'
+    restarted['task_model']['transport']['base_url'] = 'http://127.0.0.1:30001'
+    for engine in (restarted['helper_engine_info'], restarted['support_model']['helper_engine_info']):
+        engine['engine_restart_id'] = 'restarted-process'
+        engine['model_scope']['source_path'] = '/moved/scope.json'
+    assert resident_model_identity(resident) == resident_model_identity(restarted)
+    assert resident_model_identity(resident_model_identity(resident)) == resident_model_identity(resident)
+    for field in ('identity', 'record'):
+        changed = deepcopy(restarted)
+        changed['helper_engine_info']['model_scope'][field] = 'different-model'
+        assert resident_model_digest(changed) != resident_model_digest(resident)
+    for field in ('identity', 'source_path', 'sdpa_backend', 'tokenizer', 'version'):
+        changed = deepcopy(restarted)
+        changed['retrieval']['retriever']['encoder'][field] = 'different-asset'
+        assert resident_model_digest(changed) != resident_model_digest(resident)
+    changed = deepcopy(restarted)
+    changed['retrieval']['retriever']['dense']['index_sha256'] = 'different-index'
+    assert resident_model_digest(changed) != resident_model_digest(resident)
+    segment = tmp_path/'capture-generation/measurements/original-segment'
+    segment.mkdir(parents=True)
+    generation_manifest = segment/'generation_manifest.json'
+    generation_manifest.write_text(json.dumps({'retrieval': resident}))
     frozen = replace(frozen, plan=replace(frozen.plan, task_state=replace(frozen.plan.task_state,
         needs=(replace(frozen.plan.task_state.needs[0], anchor_spans=(
             TextRef(2, 'user', 0, len(row['question'])),)),))))
@@ -377,6 +409,7 @@ async def test_actual_snapshot_cohort_needs_no_task_labels_and_keeps_native_witn
     capture = {'task_id': 'task', 'conversation_id': 'fixture', 'turn': 2,
         'source_partition': 'train', 'split': 'train', 'measurement_kind': 'hardware',
         'history_origin': 'model_actual', 'cohort_split': 'train', 'cohort_manifest_sha256': cohort_hash,
+        'generation_dir': str(tmp_path/'capture-generation'), 'measurement_segment_id': 'original-segment',
         'method': 'B6_native', 'question': row['question'], 'reference': raw,
         'actual_history': to_jsonable(snapshot.raw_history), 'answer': 'specified actual answer',
         'response': {'attempt_id': 'actual-capture'}}
@@ -391,10 +424,36 @@ async def test_actual_snapshot_cohort_needs_no_task_labels_and_keeps_native_witn
         'native_condition': quote, 'paid_cost': to_jsonable(CompleteCost(500, 2000, 3000, 10000, 0)),
         'reader_checkpoint': binding['reader_checkpoint'], 'reader_profile_id': binding['reader_profile_id'],
         'resident_model_manifest_digest': 'specified-fixture', 'decision_mode': 'fixed_reading',
+        'gap_request': to_jsonable(request),
         'legal_actions': [plan.semantic_kind for plan in plans]}
     output = tmp_path/'packets.jsonl'
     export_observed_packets([packet], [previous, capture], output)
     packets = [json.loads(line) for line in output.read_text().splitlines()]
+    assert packets[0]['source_capture_sha256'] == digest(capture)
+    assert packets[0]['resident_model_manifest_digest'] == resident_model_digest(resident)
+    assert packets[0]['gap_request']['retriever_identity']['resident_model_manifest_digest'] == resident_model_digest(resident)
+    assert packets[0]['capture_resident_binding'] == {'recorded_digest': 'specified-fixture',
+        'manifest_path': str(generation_manifest.resolve()), 'manifest_sha256': file_digest(generation_manifest)}
+    assert packet['resident_model_manifest_digest'] == 'specified-fixture'
+    assert packet['gap_request'] == to_jsonable(request)
+    failed = {name: value for name, value in capture.items() if name not in {'response', 'generation_dir'}}
+    failed.update(status='failed', attempt={'attempt_id': 'failed-capture'},
+        state_db=str(tmp_path/'failed-generation/state/session.sqlite'), measurement_segment_id='failed-segment')
+    failed_segment = tmp_path/'failed-generation/measurements/failed-segment'
+    failed_segment.mkdir(parents=True)
+    failed_manifest = failed_segment/'generation_manifest.json'
+    failed_manifest.write_text(json.dumps({'retrieval': changed}))
+    failed_packet = {**packet, 'observation_id': 'failed:decision:1', 'attempt_id': 'failed-capture'}
+    failed_output = tmp_path/'failed-packets.jsonl'
+    export_observed_packets([failed_packet], [failed], failed_output)
+    exported_failure = json.loads(failed_output.read_text())
+    assert exported_failure['source_capture_status'] == 'failed'
+    assert exported_failure['source_capture_sha256'] == digest(failed)
+    assert exported_failure['resident_model_manifest_digest'] == resident_model_digest(changed)
+    assert exported_failure['resident_model_manifest_digest'] != packets[0]['resident_model_manifest_digest']
+    assert exported_failure['gap_request']['retriever_identity']['resident_model_manifest_digest'] == resident_model_digest(changed)
+    assert exported_failure['capture_resident_binding'] == {'recorded_digest': 'specified-fixture',
+        'manifest_path': str(failed_manifest.resolve()), 'manifest_sha256': file_digest(failed_manifest)}
     rows, cohort = observed_cohort([previous, capture], packets, sources, split='train', limit=1,
         cohort_manifest=manifest)
     assert cohort['task_label_dependency'] is False
