@@ -42,6 +42,23 @@ def write_rows(path, values):
             stream.write(json.dumps(value, ensure_ascii=False, allow_nan=False)+"\n")
 
 
+def label_scorer_identity(records):
+    """Only actually judged answers bind a rubric; terminal no-QA utility is RULE."""
+    identities = {}
+    for row in records:
+        identity = row["scorer_identity"]
+        if identity is None:
+            if (row["completion_direct"] != 0 or row["completion_counterfactual"] != 0
+                    or row["raw_Q_direct"] is not None or row["raw_Q_counterfactual"] is not None
+                    or row["utility_direct"] != 0 or row["utility_counterfactual"] != 0):
+                raise ValueError("a label without a scorer requires two terminal no-QA branches")
+        else:
+            identities[digest(identity)] = identity
+    if len(identities) > 1:
+        raise ValueError("effective gain labels require one actual scorer")
+    return next(iter(identities.values()), None)
+
+
 def _size(intervals):
     result = 0
     for spans in intervals.values():
@@ -98,9 +115,10 @@ def completion_record(before, run):
         raise ValueError("completion labels require the actual pre-execution plan/state registration")
     if run["measurement_kind"] != "hardware" or run["split"] not in {"train", "dev"}:
         raise ValueError("completion supervision uses actual hardware train/development branches")
-    if (any(run[name] != before[name] for name in ("reader_checkpoint", "reader_profile_id", "split", "scorer_identity"))
+    if (any(run[name] != before[name] for name in (
+            "reader_checkpoint", "reader_profile_id", "split", "comparison_budget", "scorer_identity"))
             or planned.reader_checkpoint != run["reader_checkpoint"]):
-        raise ValueError("completion branch reader/partition/scorer differs from its pre-registration")
+        raise ValueError("completion branch reader/partition/budget/declared scorer differs from its pre-registration")
     if (run["question"] != state.plan.task_state.raw_question or run["actual_history"] != actual_history(snapshot)
             or run["history_origin"] not in {"frozen_actual_rollout", "model_actual"}):
         raise ValueError("completion branch differs from its actual frozen question/history")
@@ -135,8 +153,11 @@ def completion_record(before, run):
                 raise ValueError("observed new action count differs from its actual new step IDs")
     quality = (run["metrics"].get("plan_gain_quality") if run["qa_increment"] == 1
                and run["scoring"]["status"] == "scored" else None)
+    # Execution declarations remain registered above. A derived offline label
+    # binds the judge that actually scored this answer, including a new rubric.
+    label_scorer = run["scoring"]["identity"] if quality is not None else None
     if quality is not None and (not _measured(quality) or not 0 <= quality <= 1
-            or run["scoring"]["identity"] != run["scorer_identity"]):
+            or label_scorer is None):
         raise ValueError("completion raw quality requires its actual normalized fixed scorer")
     necessary = (run.get("quality_components", {}).get("necessary_points") if quality is not None else None)
     utility = 0.0 if complete == 0 else quality if complete == 1 else None
@@ -166,7 +187,7 @@ def completion_record(before, run):
         cost_features = plan_cost_features(plan_features(planned, state,
             output_budgets=run["executed_output_budgets"], paid_cost=paid), batch, first)
     return {"schema_version": 2, "source": "actual_plan_completion", "record_id": digest([
-            key, run["plan_id"], run["actual_native_calls"], run["qa_increment"]]),
+            key, run["plan_id"], run["actual_native_calls"], run["qa_increment"], label_scorer, quality]),
         "input_protocol": protocol,
         "state_key": key, "task_id": run["task_id"], "conversation_id": run["conversation_id"],
         "plan_id": planned.plan_id, "semantic_kind": planned.semantic_kind,
@@ -174,7 +195,8 @@ def completion_record(before, run):
         "reader_checkpoint": run["reader_checkpoint"], "reader_profile_id": run["reader_profile_id"],
         "split": run["split"], "cohort_split": run["cohort_split"],
         "cohort_manifest_sha256": run["cohort_manifest_sha256"],
-        "scorer_identity": run["scorer_identity"], "observed_state_binding": observed,
+        "scorer_identity": label_scorer, "registered_scorer_identity": before["scorer_identity"],
+        "observed_state_binding": observed,
         "completion": complete, "completion_reason": reason,
         "raw_judge_Q": quality, "final_required_point_coverage": necessary,
         "effective_utility": utility, "effective_final_coverage": effective_coverage,
@@ -205,9 +227,15 @@ def _cost_targets(base, candidate):
 
 def effective_pair(base, candidate):
     for name in ("state_key", "task_id", "conversation_id", "reader_checkpoint", "reader_profile_id", "split",
-                 "scorer_identity", "observed_state_binding", "input_protocol"):
+                 "observed_state_binding", "input_protocol"):
         if base[name] != candidate[name]:
             raise ValueError(f"effective branches differ in {name}")
+    if (base["scorer_identity"] is not None and candidate["scorer_identity"] is not None
+            and base["scorer_identity"] != candidate["scorer_identity"]):
+        raise ValueError("effective branches differ in actual label scorer_identity")
+    # A terminal no-QA branch has operational utility zero under RULE, no judge.
+    label_scorer = (base["scorer_identity"] if base["scorer_identity"] is not None
+                    else candidate["scorer_identity"])
     for name in ("comparison_budget", "paid_cost", "continuation_gap_limits"):
         if base["actual_run"].get(name) != candidate["actual_run"].get(name):
             raise ValueError(f"effective counterfactuals differ in {name}")
@@ -227,8 +255,9 @@ def effective_pair(base, candidate):
     result = {"schema_version": 2, "source": "actual_completion_weighted_counterfactual",
         "record_id": digest([base["record_id"], candidate["record_id"]]),
         **{key: candidate[key] for key in ("state_key", "task_id", "conversation_id", "plan_id",
-            "semantic_kind", "reader_checkpoint", "reader_profile_id", "split", "scorer_identity", "features",
+            "semantic_kind", "reader_checkpoint", "reader_profile_id", "split", "features",
             "collection_mode", "observed_state_binding", "cohort_split", "cohort_manifest_sha256", "input_protocol")},
+        "scorer_identity": label_scorer,
         "utility_rule": RULE, "no_answer_utility": 0.0,
         "raw_Q_direct": base["raw_judge_Q"], "raw_Q_counterfactual": candidate["raw_judge_Q"],
         "utility_direct": base["effective_utility"], "utility_counterfactual": candidate["effective_utility"],
@@ -262,7 +291,7 @@ def finalize(collection, output):
         groups = {}
         for record in labelled:
             group = digest([record[name] for name in ("state_key", "conversation_id", "reader_checkpoint",
-                "reader_profile_id", "split", "scorer_identity", "observed_state_binding")])
+                "reader_profile_id", "split", "observed_state_binding")])
             groups.setdefault(group, []).append(record)
         for members in groups.values():
             direct = {record["record_id"]: record for record in members if record["semantic_kind"] == "direct_answer"}
@@ -298,9 +327,10 @@ def fit_effective(training, *, ridge=1.0, path=None):
     if not training or any(row["split"] != "train" or row["source"] != "actual_completion_weighted_counterfactual"
                            or row["utility_rule"] != RULE for row in training):
         raise ValueError("effective gain fit uses actual train-only completion-weighted counterfactuals")
-    binding = {(row["reader_checkpoint"], row["reader_profile_id"], digest(row["scorer_identity"])) for row in training}
+    binding = {(row["reader_checkpoint"], row["reader_profile_id"]) for row in training}
     if len(binding) != 1:
-        raise ValueError("effective gain asset binds one actual reader/profile/scorer")
+        raise ValueError("effective gain asset binds one actual reader/profile")
+    scorer_identity = label_scorer_identity(training)
     if len({digest(validate_input_protocol(row.get("input_protocol"))) for row in training}) != 1:
         raise ValueError("effective gain asset binds one actual source/compiler/reader input protocol")
     limits = {digest(row["counterfactual"]["actual_run"]["continuation_gap_limits"]) for row in training}
@@ -376,7 +406,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
          "input_sha256": digest(training), "input_path": str(Path(path).resolve()) if path else None,
          "training_state_keys": sorted({row["state_key"] for row in training}),
          "training_conversations": sorted({row["conversation_id"] for row in training}),
-         "scorer_identity": training[0]["scorer_identity"], "ridge": ridge,
+         "scorer_identity": scorer_identity, "ridge": ridge,
          "trained_semantic_kinds": sorted({row["semantic_kind"] for row in training}),
          "direct_baseline_identity": any(row["observed_state_binding"] is not None for row in training),
          "completion_counts": dict(Counter(str(row["completion_counterfactual"]) for row in training)),
@@ -403,10 +433,13 @@ def main(argv=None):
     if args.dev:
         development = rows(args.dev)
         if any(row["split"] != "dev" or row["reader_checkpoint"] != model.reader_checkpoint or
-               row["reader_profile_id"] != model.reader_profile_id or row["scorer_identity"] != model.provenance["scorer_identity"]
+               row["reader_profile_id"] != model.reader_profile_id
                or row.get("input_protocol") != model.provenance["input_protocol"]
                for row in development):
             raise ValueError("effective gain development must match the actual reader/profile/scorer")
+        dev_scorer = label_scorer_identity(development)
+        if dev_scorer is not None and dev_scorer != model.provenance["scorer_identity"]:
+            raise ValueError("effective gain development uses a different actual scorer")
         if {row["conversation_id"] for row in development} & set(model.provenance["training_conversations"]):
             raise ValueError("effective development conversations overlap fitted training conversations")
         report = {"records": len(development), "mae": sum(abs(model.predict(row["features"])-row["effective_delta_q"])

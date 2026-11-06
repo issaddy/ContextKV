@@ -1,6 +1,8 @@
 # 当前课题运行入口
 
-`test-0523` 当前使用容器默认 `python3`。长文共享提取得到 36 条、666 kg，多跳得到 1997。跨轮回执持久化与原生并发回执错误已修复；修正后 A 的固定 B＋Native 队列、B 断点采集及旧参照官方离线重评正在运行。完整 350 题、77 会话质量与 P95 尚未完成。
+`test-0523` 当前使用容器默认 `python3`。长文共享提取得到 36 条、666 kg，多跳得到 1997。旧中断参照的 64 个答案已完成官方重评，完整 350 题分母和已付成本保留；修正后 A 的固定 B＋Native 队列仍在运行。B 已完成 48/24 个训练/开发历史轮次及登记的 8/4 个决策状态配对，当前修正独立评分输入后重评已有答案。完整队列质量与 P95 尚未完成。
+
+Host 固定 token 配对已验证真实回载与重算：同一请求下，Native 回载 128、重算 129 tokens；独立前缀保留回载 256、重算 1 token。业务 epoch 退役后 owner 仍保留 Host 前缀。该结果验证生命周期，主实验保留策略仍为 Native；成功与初次接口失败的费用分别保存。
 
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 
@@ -84,6 +86,8 @@ B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
 `plan_gain_workflow` 可将 `--train-states` 或 `--dev-states` 设为 0，只补所需分区；无有效训练标签时保留采集结果并跳过拟合，开发标签可随后独立补采。
 模型 scope 位于 `configs/model_scopes/`。Reader、策略身份、来源与费用由本次阶段
 manifest 记录。
+
+P1/B 辅助评分 rubric 为 `necessary_points_grounding_conditions_versions_task_v3`，使用真实用户对话、完整来源和参考答案独立评价；TaskState 与模型评分不进入 judge。旧 v2 小批次存在条件适用性误判，其零增益模型仅作历史记录。重评产生新标签和实际 scorer 身份，保留原 `before.json`、原始回答与执行成本；不得把新 rubric 写回原执行登记。
 
 机制重放示例（显式指定实际服务配置和新输出目录）：
 

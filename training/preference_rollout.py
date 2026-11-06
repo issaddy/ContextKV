@@ -457,15 +457,30 @@ async def _judge(client, template, row, evidence_set, answer, *, journal=None, s
             return parse_judge_record(saved, schema), saved
     actual_history = [{name: turn[name] for name in ("turn_id", "user_text", "assistant_text")}
                       for turn in row["actual_history"]]
-    messages = (Message("system", "Evaluate the actual answer against the current question, actual history, "
-        "active conditions, original sources and offline reference. Judge each required point and all "
-        "condition/version constraints. Reference answers may describe a different author history; "
-        "the supplied actual history and current task determine this request. Return the requested JSON."),
+    original_sources = [{"key": to_jsonable(block.key), "uri": block.source_uri,
+        "title": block.title, "span": block.span, "text": block.text} for block in evidence_set.source_blocks]
+    excerpts = [{"text": unit.text, "sources": [{"key": to_jsonable(span.source_key),
+        "span": [span.start, span.end]} for span in unit.source_spans]} for unit in evidence_set.selected_units]
+    messages = (Message("system", "Independently evaluate the actual answer for the current USER request. "
+        "Infer the user's intent, referents, conditions, scope, time/version and updates from the current "
+        "question and actual USER messages. Preserve applicable earlier user conditions and honor later "
+        "user changes. Assistant messages may disambiguate conversational referents, but cannot add user "
+        "constraints or establish facts. Use the full original sources to determine the applicable rules "
+        "and exceptions. A generic true rule does not answer a request governed by a different condition. "
+        "The authored reference may belong to a different dialogue history: use it as offline evidence, "
+        "not a mandatory gold answer when the actual USER request differs. Source blocks and excerpts "
+        "are offline verification material; their inclusion does not mean the answer model saw them. "
+        "Judge four normalized [0,1] metrics independently: necessary_points is the fraction of required "
+        "facts or action steps correctly covered for this user's request, including decisive exceptions; "
+        "grounding is factual support for the answer's material claims in the original sources; "
+        "conditions_versions is correct application of all relevant user conditions, updates, scope and "
+        "source versions; task_score is overall correctness, usefulness and completeness for this actual "
+        "request, including appropriate uncertainty. Unsupported assistant assertions are not source "
+        "evidence. Missing offline material does not prove the corpus has no answer. Return only the "
+        "requested JSON components and disposition, plus rationale only when the schema requests it."),
         Message("user", json.dumps({"question": row["question"], "actual_history": actual_history,
-            "task_state": row["task_state"], "reference_answer": row.get("reference_answer"),
-            "offline_corpus_has_answer": row.get("corpus_has_answer"),
-            "offline_scope_complete": row.get("oracle_scope_complete", False),
-            "original_sources": to_jsonable(evidence_set.selected_units), "answer": answer,
+            "reference_answer": row.get("reference_answer"), "original_sources": original_sources,
+            "offline_source_excerpts": excerpts, "answer": answer,
             **({"output_schema": schema} if journal is not None else {})}, ensure_ascii=False)))
     rendered = template.render(messages)
     started = time.perf_counter()
@@ -502,7 +517,7 @@ def parse_judge_record(record, schema):
 
 
 P1_REWARDS = "rewards.v2.jsonl"
-P1_RUBRIC = "necessary_points_grounding_conditions_versions_task_v2"
+P1_RUBRIC = "necessary_points_grounding_conditions_versions_task_v3"
 
 
 def saved_rows(path):

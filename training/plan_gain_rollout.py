@@ -462,18 +462,26 @@ def judge_sources(base, scope_material, row, sources, *, corpus_id):
     from controller.evidence import make_evidence
     by_source = {source["source_id"]: source for source in sources}
     units = {unit.unit_id: unit for unit in base.selected_set.selected_units}
+    blocks = {block.key: block for block in base.selected_set.source_blocks}
     if scope_material is not None:
         units.update((unit.unit_id, unit) for unit in scope_material.selected_units)
+        for block in scope_material.source_blocks:
+            blocks.setdefault(block.key, block)
     for number, witness in enumerate(row["judge_grounding"] if row.get("task_state_source") == "actual_observed_decision"
                                      else row["verified_grounding"]):
         source = by_source[witness["passage_id"]]
         if source["text"][witness["start"]:witness["end"]] != witness["quote"]:
             raise ValueError("offline judge witness differs from the audited training original")
-        block = make_evidence(source["text"], source["source_id"], corpus_id=corpus_id,
-            version=source["version"], source_uri=source["source_uri"])
-        span = SourceSpan("judge-witness:"+str(number), block.key, witness["start"], witness["end"])
+        block = make_evidence(source["text"], source.get("document_family", source["source_id"]),
+            passage_id=source["source_id"], corpus_id=corpus_id, version=source["version"],
+            source_uri=source["source_uri"], title=source.get("title", ""))
+        if source.get("offsets") is not None:
+            block = replace(block, span=tuple(source["offsets"]))
+        blocks.setdefault(block.key, block)
+        start = block.span[0] if block.span else 0
+        span = SourceSpan("judge-witness:"+str(number), block.key, start+witness["start"], start+witness["end"])
         units[span.span_id] = EvidenceUnit(span.span_id, (span,), witness["quote"])
-    return EvidenceSet("offline-judge-material", tuple(units.values()))
+    return EvidenceSet("offline-judge-material", tuple(units.values()), source_blocks=tuple(blocks.values()))
 
 
 def planned_model_calls(plan):

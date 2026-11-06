@@ -461,8 +461,51 @@ async def test_actual_snapshot_cohort_needs_no_task_labels_and_keeps_native_witn
     assert rows[0]['reference_answer'] == raw['targets'][0]['text']
     actual = observed_rows(rows, packets)
     assert actual and actual[0]['task_state'] == to_jsonable(frozen.plan.task_state)
-    material = judge_sources(frozen.plan, None, actual[0], sources, corpus_id='demo')
+    from controller.context_schema import EvidenceSet
+    from training.preference_rollout import _judge, P1_RUBRIC
+
+    full_context = 'Context before. Witness excerpt. Exception in the full original after the witness.'
+    offline_witness = {'passage_id': 'offline-only', 'start': full_context.index('Witness'),
+        'end': full_context.index('Witness')+len('Witness excerpt.'), 'quote': 'Witness excerpt.'}
+    original = {'source_id': 'offline-only', 'document_family': 'offline-only', 'version': 'v1',
+        'source_uri': 'original://offline-only', 'title': 'Complete offline original', 'text': full_context}
+    scope_text = 'A full original block from the explicit applicable source scope.'
+    scope_block = replace(make_evidence(scope_text, 'scope-only'), token_ids=tuple(scope_text.encode()))
+    scope_unit = EvidenceUnit('scope-only', (SourceSpan('scope-only', scope_block.key, 0, len(scope_text)),),
+        scope_text, need_ids=('fallible-model-need',), retrieval_score=.99)
+    applicable = EvidenceSet('applicable', (scope_unit,), source_blocks=(scope_block,))
+    audit_row = {**actual[0], 'task_state': {'fallible_inference': 'MUST NOT REACH THE JUDGE'},
+        'judge_grounding': [*actual[0]['judge_grounding'], offline_witness]}
+    material = judge_sources(frozen.plan, applicable, audit_row, [*sources, original], corpus_id='demo')
     assert any(unit.text == witness['quote'] for unit in material.selected_units)
+    assert all(block in material.source_blocks for block in (*frozen.plan.selected_set.source_blocks, scope_block))
+    assert any(block.text == full_context for block in material.source_blocks)
+    assert not any(unit.text == full_context for unit in material.selected_units)
+    captured = []
+
+    class JudgeClient:
+        async def post(self, endpoint, **kwargs):
+            assert endpoint == '/generate'
+            rendered = bytes(kwargs['json']['input_ids']).decode()
+            payload = json.loads(rendered.split('<|user|>\n')[-1].split('\n<|end|>')[0])
+            captured.append(payload)
+            assert 'task_state' not in payload and 'MUST NOT REACH THE JUDGE' not in rendered
+            assert payload['actual_history'] == audit_row['actual_history']
+            assert payload['reference_answer'] == raw['targets'][0]['text']
+            blocks = payload['original_sources']
+            assert all(set(block) == {'key', 'uri', 'title', 'span', 'text'} for block in blocks)
+            assert any(block['text'] == full_context for block in blocks)
+            assert any(block['text'] == scope_text for block in blocks)
+            assert any(excerpt['text'] == offline_witness['quote'] for excerpt in payload['offline_source_excerpts'])
+            assert not any(key in json.dumps(payload) for key in ('token_ids', 'need_ids', 'retrieval_score', 'quality_prediction'))
+            response = {key: .5 for key in ('necessary_points', 'grounding', 'conditions_versions', 'task_score')}
+            response.update(disposition='partial', rationale='Specified payload fixture only')
+            from types import SimpleNamespace
+            return SimpleNamespace(raise_for_status=lambda: None,
+                json=lambda: {'text': json.dumps(response), 'meta_info': {'completion_tokens': 1}})
+
+    await _judge(JudgeClient(), service.template, audit_row, material, 'Specified actual answer.')
+    assert len(captured) == 1 and P1_RUBRIC.endswith('_v3')
     assert actual[0]['source_capture']['actual_history'] == to_jsonable(snapshot.raw_history)
 
     wrong = deepcopy(packets)
