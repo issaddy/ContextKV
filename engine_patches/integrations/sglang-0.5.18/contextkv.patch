@@ -1899,3 +1899,24 @@ diff --git a/python/sglang/srt/mem_cache/unified_radix_cache.py b/python/sglang/
              if self.metrics_collector is not None:
                  for pool, num_tokens in (ack.num_tokens_by_pool or {}).items():
                      if num_tokens > 0:
+diff --git a/python/sglang/srt/layers/deep_gemm_wrapper/configurer.py b/python/sglang/srt/layers/deep_gemm_wrapper/configurer.py
+--- a/python/sglang/srt/layers/deep_gemm_wrapper/configurer.py
++++ b/python/sglang/srt/layers/deep_gemm_wrapper/configurer.py
+@@ -15,6 +15,8 @@
+
+
+ def _compute_enable_deep_gemm():
++    if not envs.SGLANG_ENABLE_JIT_DEEPGEMM.get():
++        return False
+     sm_version = get_device_sm()
+     if (_is_cuda and sm_version < 90) or (_is_musa and sm_version < 31):
+         return False
+@@ -29,7 +31,7 @@
+     except ImportError:
+         return False
+
+-    return envs.SGLANG_ENABLE_JIT_DEEPGEMM.get()
++    return True
+
+
+ ENABLE_JIT_DEEPGEMM = _compute_enable_deep_gemm()
