@@ -87,7 +87,9 @@ B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
 模型 scope 位于 `configs/model_scopes/`。Reader、策略身份、来源与费用由本次阶段
 manifest 记录。
 
-P1/B 辅助评分 rubric 为 `necessary_points_grounding_conditions_versions_task_v3`，使用真实用户对话、完整来源和参考答案独立评价；TaskState 与模型评分不进入 judge。旧 v2 小批次存在条件适用性误判，其零增益模型仅作历史记录。重评产生新标签和实际 scorer 身份，保留原 `before.json`、原始回答与执行成本；不得把新 rubric 写回原执行登记。
+B 收益的唯一默认质量目标为固定官方 RB_llm，使用与最终评价相同的真实对话和实际证据投影。`--official-checkout` 可指定已有官方源码目录，默认沿 study 的 `scoring.official_checkout`。`plan_gain_quality` 保存作者已归一化的 RB 值；不把它当作必要点覆盖率。P1 的 `necessary_points_grounding_conditions_versions_task_v3` 保留为独立四项诊断，旧 B 自定义四分结果仅作历史记录。
+
+重评产生新标签和实际 scorer 身份，保留原 `before.json`、原始回答与执行成本，不回写原执行登记。实际观察到的评分条件误判随原文审计保留；不能据一次 judge 的分差声称正确性改进。
 
 机制重放示例（显式指定实际服务配置和新输出目录）：
 

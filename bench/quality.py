@@ -190,6 +190,48 @@ def evaluation_contexts(turn, manifests, evidence, citation_scope):
     return contexts
 
 
+def answer_evaluation_view(turn: OnlineTurn, *, visible_evidence_manifest, audit_evidence,
+                           reading_outcome=None, reference_map=(), citation_scope=None) -> dict:
+    """Project actual answer inputs and conclusion source leaves for offline scoring."""
+    view = {}
+    view["conclusion_source_manifest"] = []
+    view["reading_conclusions"] = None
+    if reading_outcome is not None and reading_outcome.plan.reading_mode == "llamaindex":
+        prior_outputs = []
+        for step in reading_outcome.steps:
+            if step.task.kind not in {"LLAMAINDEX_COMPACT", "LLAMAINDEX_REFINE"}:
+                continue
+            observed = step.metrics.get("source_view", {})
+            proof = {"step_id": step.step_id, "generation_kind": step.task.kind,
+                     "input_hash": observed["input_hash"]}
+            view["conclusion_source_manifest"].extend(
+                {"key": span["key"], "reference_id": span["reference_id"],
+                 "source_start": span["source_start"], "source_end": span["source_end"],
+                 "execution_proof": proof}
+                for span in _jsonable(observed.get("evidence_spans", ())))
+            if step.result is not None:
+                prior_outputs.append({**proof, "raw_output": step.result.raw_output})
+        view["reading_conclusions"] = {
+            "kind": "llamaindex_raw_prior_outputs", "outputs": prior_outputs}
+    elif reading_outcome is not None:
+        from controller.claim_graph import ClaimGraph
+        graph = ClaimGraph(reading_outcome.claims)
+        plan = reading_outcome.plan.answer_plan
+        conclusions = graph.conclusion_table(plan, reference_map)
+        conclusions["open_needs"] = reading_outcome.open_needs
+        view["reading_conclusions"] = _jsonable(conclusions)
+        by_key = {key: reference for reference, key in reference_map}
+        sources = dict.fromkeys(span for point in plan.points for identity in point.claim_ids
+                                for span in graph.source_spans(identity))
+        view["conclusion_source_manifest"] = [
+            {"key": _jsonable(span.source_key), "reference_id": by_key[span.source_key],
+             "source_start": span.start, "source_end": span.end} for span in sources]
+    view["evaluation_contexts"] = evaluation_contexts(turn,
+        (*_jsonable(visible_evidence_manifest), *view["conclusion_source_manifest"]),
+        _jsonable(audit_evidence), citation_scope)
+    return view
+
+
 def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Path, audit_path: str | Path,
                       visible_evidence_manifest: Sequence[Any], audit_evidence: Sequence[Any],
                       input_ids: Sequence[int], output_ids: Sequence[int],
@@ -205,47 +247,15 @@ def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Pat
             "visible_evidence_manifest": _jsonable(visible_evidence_manifest),
             "audit_evidence": _jsonable(audit_evidence), "input_ids": list(input_ids),
             "output_ids": list(output_ids), "actual_history": _jsonable(turn.history)}
-    full["conclusion_source_manifest"] = []
-    full["reading_conclusions"] = None
-    if reading_outcome is not None and reading_outcome.plan.reading_mode == "llamaindex":
-        prior_outputs = []
-        for step in reading_outcome.steps:
-            if step.task.kind not in {"LLAMAINDEX_COMPACT", "LLAMAINDEX_REFINE"}:
-                continue
-            observed = step.metrics.get("source_view", {})
-            proof = {"step_id": step.step_id, "generation_kind": step.task.kind,
-                     "input_hash": observed["input_hash"]}
-            full["conclusion_source_manifest"].extend(
-                {"key": span["key"], "reference_id": span["reference_id"],
-                 "source_start": span["source_start"], "source_end": span["source_end"],
-                 "execution_proof": proof}
-                for span in _jsonable(observed.get("evidence_spans", ())))
-            if step.result is not None:
-                prior_outputs.append({**proof, "raw_output": step.result.raw_output})
-        full["reading_conclusions"] = {
-            "kind": "llamaindex_raw_prior_outputs", "outputs": prior_outputs}
-    elif reading_outcome is not None:
-        from controller.claim_graph import ClaimGraph
-        graph = ClaimGraph(reading_outcome.claims)
-        plan = reading_outcome.plan.answer_plan
-        conclusions = graph.conclusion_table(plan, reference_map)
-        conclusions["open_needs"] = reading_outcome.open_needs
-        full["reading_conclusions"] = _jsonable(conclusions)
-        by_key = {key: reference for reference, key in reference_map}
-        sources = dict.fromkeys(span for point in plan.points for identity in point.claim_ids
-                                for span in graph.source_spans(identity))
-        full["conclusion_source_manifest"] = [
-            {"key": _jsonable(span.source_key), "reference_id": by_key[span.source_key],
-             "source_start": span.start, "source_end": span.end} for span in sources]
+    full.update(answer_evaluation_view(turn,
+        visible_evidence_manifest=visible_evidence_manifest, audit_evidence=audit_evidence,
+        reading_outcome=reading_outcome, reference_map=reference_map, citation_scope=citation_scope))
     if citation_scope is not None:
         full["citation_scope"] = list(citation_scope)
     if turn.query_context is not None:
         full["query_context"] = _jsonable(turn.query_context)
     official = official_record(turn, answer)
-    reading = evaluation_contexts(turn,
-        (*full["visible_evidence_manifest"], *full["conclusion_source_manifest"]),
-        full["audit_evidence"], citation_scope)
-    full["evaluation_contexts"] = reading
+    reading = full["evaluation_contexts"]
     if reading != official["contexts"]:
         official.setdefault("retrieval_contexts", [{"document_id": c.document_id, "source": c.source,
             "score": c.score or 0.0, "text": c.text, "title": c.title} for c in turn.contexts])

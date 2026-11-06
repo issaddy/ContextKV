@@ -100,6 +100,7 @@ def main(argv=None):
         parser.add_argument("--"+name, required=True)
     parser.add_argument("--task-labels", help="Required only for the whole_plan audited control")
     parser.add_argument("--reader-base-url")
+    parser.add_argument("--official-checkout", help="Pinned official RB_llm source checkout; defaults to study scoring configuration")
     parser.add_argument("--asset")
     parser.add_argument("--train-states", type=int, default=8)
     parser.add_argument("--dev-states", type=int, default=4)

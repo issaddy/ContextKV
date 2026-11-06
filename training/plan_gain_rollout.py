@@ -2,7 +2,7 @@
 
 All plans and frozen state keys are written before execution. Each experimental
 branch uses Controller.serve_turn, fixed semantic choices, real READ/REDUCE and
-one terminal QA. The shared four-component judge scores the actual answers.
+one terminal QA. The fixed official RB_llm scores the actual answers.
 """
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import asyncio
 from collections import Counter
 from dataclasses import replace
 import hashlib
-import inspect
 import json
 from pathlib import Path
 import threading
@@ -22,7 +21,8 @@ from urllib.parse import urlsplit
 from controller.action_proposals import observed_reduction_task, BOUNDED_CONTINUATION
 from controller.plan_gain_protocol import input_protocol, validate_input_protocol
 from controller.context_schema import EvidenceSet, EvidenceUnit, ReadingOutcome, SourceSpan, TaskState
-from controller.schema import QueryContext, SessionSnapshot, TurnRecord
+from controller.schema import (EvidenceBlock, OnlineContext, OnlineMessage, OnlineTurn,
+                               PromptCandidate, QueryContext, SessionSnapshot, TurnRecord, Message)
 from controller.serialization import decode, to_jsonable
 from training.collect_plan_gains import collect_pair
 from training.plan_gain_protocol import (AuditedTaskInterpreter, EmptyPlannedPremise,
@@ -31,8 +31,7 @@ from training.plan_gain_protocol import (AuditedTaskInterpreter, EmptyPlannedPre
 from training.train_plan_gain import actual_history, working_state_key
 
 
-COMPONENTS = ("necessary_points", "grounding", "conditions_versions", "task_score")
-DEFAULT_WEIGHTS = {"necessary_points": .3, "grounding": .2, "conditions_versions": .2, "task_score": .3}
+RADBENCH_SAMPLING = {"temperature": 0, "top_p": 1, "max_new_tokens": 2048}
 
 
 def digest(value):
@@ -162,10 +161,6 @@ def observed_rows(rows, packets, *, selection=None):
 
 
 class GenerationLimitReached(ValueError):
-    pass
-
-
-class CompletedJudgeTruncated(ValueError):
     pass
 
 
@@ -712,56 +707,84 @@ def verify_actual_history(rows, rollouts):
                 raise ValueError("frozen assistant history differs from its actual completed source rollout")
 
 
-async def score_branch(judge, template, row, material, branch, *, path, identity, weights,
+def branch_answer_record(row, before, branch):
+    """Use the same actually executed source projection as final evaluation."""
+    from bench.quality import answer_evaluation_view, official_record
+    attempt, response = branch["attempt"], branch["response"]
+    if response["assistant_text"] != branch["answer"]:
+        raise ValueError("gain scoring answer differs from the actual response")
+    snapshot = decode(SessionSnapshot, before["snapshot"])
+    candidate = decode(PromptCandidate, attempt["plan"]["candidate"])
+    outcome = (decode(ReadingOutcome, attempt["reading_outcome"])
+               if attempt["reading_outcome"] is not None else None)
+    blocks = {block.key: block for block in snapshot.archive}
+    blocks.update((block.key, block) for block in
+                  (decode(EvidenceBlock, raw) for raw in attempt["evidence"]))
+    if outcome is not None:
+        blocks.update((block.key, block) for block in outcome.plan.selected_set.source_blocks)
+    targets = [{"text": row["reference_answer"]}]
+    history = tuple(message for turn in branch["actual_history"] for message in (
+        OnlineMessage("user", turn["user_text"]), OnlineMessage("agent", turn["assistant_text"])))
+    selected = tuple(blocks[key] for key in sorted(candidate.required_blocks))
+    turn = OnlineTurn(branch["conversation_id"], branch["task_id"], row["turn"], row.get("Collection", "training"),
+        branch["question"], history, tuple(OnlineContext(block.key.passage_id, block.text,
+            block.source_uri, block.title) for block in selected), "P3")
+    view = answer_evaluation_view(turn,
+        visible_evidence_manifest=response["visible_evidence_manifest"], audit_evidence=tuple(blocks.values()),
+        reading_outcome=outcome, reference_map=candidate.reference_map,
+        citation_scope=response["citation_scope"])
+    record = official_record(turn, response["assistant_text"])
+    record["contexts"], record["targets"] = view["evaluation_contexts"], targets
+    return record, view
+
+
+def radbench_scorer_identity(contract, fingerprint):
+    return {"kind": "official_RB_llm_actual_answer_judge", "metric": "RB_llm",
+        "fingerprint": fingerprint, "official": contract.identity,
+        "normalization": contract.identity["normalization"],
+        "request_sampling": dict(RADBENCH_SAMPLING), "score_range": [0, 1]}
+
+
+async def score_branch(judge, template, row, before, branch, *, contract, path, identity,
                        resources, judge_window, expected_fingerprint):
-    from training.preference_rollout import _judge
+    if identity != radbench_scorer_identity(contract, expected_fingerprint):
+        raise ValueError("gain label identity differs from its actual official contract and judge")
     base_client = judge.client
-    before = await base_client.post("/context/engine/info", json={})
-    before.raise_for_status()
-    if before.json()["fingerprint"] != expected_fingerprint:
+    check = await base_client.post("/context/engine/info", json={})
+    check.raise_for_status()
+    if check.json()["fingerprint"] != expected_fingerprint:
         raise ValueError("fixed gain scorer changed checkpoint/tokenizer before scoring")
-    # Determine the actual prompt size at the recorded HTTP call, including the
-    # actual generated answer. An oversize prompt is unscored, never truncated.
-    class WindowedJudge:
-        async def post(self, endpoint, **kwargs):
-            if len(kwargs["json"]["input_ids"])+256 > judge_window:
-                raise JudgeWindowUnavailable("fixed counterfactual judge prompt exceeds its declared model window")
-            return await judge.post(endpoint, **kwargs)
+    official, view = branch_answer_record(row, before, branch)
     start = time.monotonic()
-    judged = record = None
+    quality = record = None
     judge_path = Path(path).with_name("judge.json")
-
-    def journal(raw_record):
-        nonlocal record
-        record = raw_record
-        write(judge_path, {"call": record, "scorer_identity": identity})
-
     try:
-        judged, record = await _judge(WindowedJudge(), template, row, material, branch["answer"], journal=journal)
-        after = await base_client.post("/context/engine/info", json={})
-        after.raise_for_status()
-        if after.json()["fingerprint"] != expected_fingerprint:
+        rendered = template.render((Message("user", contract.prompt(official)),))
+        if len(rendered.input_ids)+RADBENCH_SAMPLING["max_new_tokens"] > judge_window:
+            raise JudgeWindowUnavailable("official RB_llm prompt exceeds its declared model window")
+        response = await judge.post("/generate", json={"input_ids": list(rendered.input_ids),
+            "stream": False, "sampling_params": dict(RADBENCH_SAMPLING)})
+        response.raise_for_status()
+        raw = response.json()
+        record = {"raw_output": raw["text"], "meta_info": raw["meta_info"],
+            "input_tokens": len(rendered.input_ids), "output_tokens": raw["meta_info"].get("completion_tokens"),
+            "elapsed_ms": (time.monotonic()-start)*1000}
+        write(judge_path, {"call": record, "scorer_identity": identity,
+            "official_record": official, "evaluation_view": view})
+        check = await base_client.post("/context/engine/info", json={})
+        check.raise_for_status()
+        if check.json()["fingerprint"] != expected_fingerprint:
             raise ValueError("fixed gain scorer changed checkpoint/tokenizer during scoring")
-        reason = record["meta_info"].get("finish_reason")
-        finish = reason.get("type") if isinstance(reason, dict) else reason
-        if finish in {"length", "max_tokens"}:
-            judged = None
-            raise CompletedJudgeTruncated("actual fixed judge reached its output limit")
-        if judged is None:
-            raise CompletedJudgeTruncated("actual fixed judge completed without a valid bounded score")
+        quality = contract.parse(raw["text"])
     finally:
         end = time.monotonic()
         physical = await resources.finish("judge", start, end)
-        write(judge_path, {"quality_components": judged, "call": record,
-            "physical_cost": physical, "scorer_identity": identity,
+        write(judge_path, {"quality_components": None if quality is None else {"RB_llm": quality},
+            "call": record, "physical_cost": physical, "scorer_identity": identity,
+            "official_record": official, "evaluation_view": view,
             "scope": "offline_judge_separate_from_online_answer_cost"})
-    if set(weights) != set(COMPONENTS) or abs(sum(weights.values())-1) > 1e-9:
-        raise ValueError("counterfactual quality uses four declared normalized component weights")
-    for name in COMPONENTS:
-        if not isinstance(judged[name], (int, float)) or not 0 <= judged[name] <= 1:
-            raise ValueError("actual judge component is outside its declared normalized scale")
-    quality = sum(weights[name]*judged[name] for name in COMPONENTS)
-    branch.update(metrics={"plan_gain_quality": quality}, quality_components=judged,
+    branch.update(metrics={**branch["metrics"], "plan_gain_quality": quality, "RB_llm": quality},
+        quality_components={"RB_llm": quality},
         scoring={"status": "scored", "identity": identity, "judge_cost": {**record, **physical},
                  "raw_output_path": str(judge_path.resolve())})
     write(path, branch)
@@ -776,9 +799,8 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
     from controller.config import (GenerationProtocol, apply_study_config, create_controller,
                                    create_model_template, load_config)
     from controller.context_schema import RetrievalState
-    from controller.schema import OnlineTurn
+    from bench.official import load_radbench_contract
     from profiling.retention_capture_cost import CaptureRunAccounting
-    from training.preference_rollout import P1_RUBRIC, _judge
 
     output = Path(settings["output_dir"])
     output.mkdir(parents=True, exist_ok=False)
@@ -846,7 +868,8 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
         raise ValueError("gain supervision collection requires a scoped real SGLang reader")
     judge_run = load_config(settings["judge_config"])
     judge_url = settings["judge_base_url"]
-    weights = settings.get("quality_weights", DEFAULT_WEIGHTS)
+    contract = load_radbench_contract(settings.get("official_checkout") or
+        config.get("scoring", {}).get("official_checkout", "data/mtrag-official"))
     budget = GenerationBudget(settings["max_generations"], output/"all-model-calls.jsonl")
     ports = {urlsplit(run.engine.base_url).port, urlsplit(judge_url).port,
              urlsplit(config["generation"]["teacher_url"]).port}
@@ -921,13 +944,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 raise ValueError("fixed scorer actual checkpoint differs from its scoped tokenizer/model")
             if own_judge and judge_info["fingerprint"]["model_revision"] != judge_run.model.revision:
                 raise ValueError("fixed scorer does not match its explicit reader checkpoint")
-            scorer = {"kind": "frozen_four_component_actual_answer_judge",
-                "reader_checkpoint": judge_info["fingerprint"]["model_revision"],
-                "fingerprint": judge_info["fingerprint"], "weights": weights,
-                "implementation_sha256": hashlib.sha256(inspect.getsource(_judge).encode()).hexdigest(),
-                "rubric": P1_RUBRIC,
-                "request_sampling": {"temperature": 0, "max_new_tokens": 256},
-                "metric": "plan_gain_quality", "score_range": [0, 1]}
+            scorer = radbench_scorer_identity(contract, judge_info["fingerprint"])
             journal_judge = JudgeJournal(judge_client, budget, output/"judge-wire.jsonl")
             common_binding = {"reader_checkpoint": reader_checkpoint,
                 "reader_profile_id": settings["reader_profile_id"], "scorer_identity": scorer,
@@ -1030,7 +1047,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                         "working_state": frozen, "snapshot": snap, "frozen_state_key": working_state_key(frozen, snap),
                         "observed_state_binding": observed, "gap_request": gap_request,
                         "candidate_plans": plans, "unavailable": omitted,
-                        "offline_judge_material": material, "offline_reference": row["reference_answer"],
+                        "offline_audit_material": material, "offline_reference": row["reference_answer"],
                         "preparation_trace": trace, "source_task": row})
                 except (CompletedSupportTruncated, json.JSONDecodeError) as error:
                     unavailable.append({"task_id": row["task_id"], "reason": "completed_preparation_model_failed",
@@ -1065,7 +1082,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                     packet = {"plan_candidate": to_jsonable(plan), "working_state": to_jsonable(frozen),
                         "snapshot": to_jsonable(snap), "metric": "plan_gain_quality",
                         "normalization": {"scale": 1, "offset": 0,
-                            "protocol_source": "four normalized components weighted by fixed scorer_identity.weights"},
+                            "protocol_source": "official RB_llm extract_rating divides by 10; plan_gain_quality already normalized"},
                         "scorer_identity": scorer, "comparison_budget": comparison,
                         "direct_run": str((task_dir/"branch-00"/"run.json").resolve()),
                         "candidate_run": str((branch_dir/"run.json").resolve()),
@@ -1084,11 +1101,12 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                     if result["status"] != "completed":
                         continue
                     try:
-                        result = await score_branch(journal_judge, judge_template, row, material, result,
-                            path=branch_dir/"run.json", identity=scorer, weights=weights, resources=resources,
+                        result = await score_branch(journal_judge, judge_template, row,
+                            json.loads((branch_dir/"before.json").read_text()), result,
+                            contract=contract, path=branch_dir/"run.json", identity=scorer, resources=resources,
                             judge_window=judge_run.context.max_total_model_tokens,
                             expected_fingerprint=judge_info["fingerprint"])
-                    except (CompletedJudgeTruncated, JudgeWindowUnavailable, json.JSONDecodeError) as error:
+                    except JudgeWindowUnavailable as error:
                         result["scoring"].update(status="failed", error=str(error),
                                                  raw_output_path=str(branch_dir/"judge.json"))
                         write(branch_dir/"run.json", result)
@@ -1171,6 +1189,7 @@ def main(argv=None):
     parser.add_argument("--reader-base-url")
     parser.add_argument("--judge-config", required=True)
     parser.add_argument("--judge-base-url", required=True)
+    parser.add_argument("--official-checkout", help="Pinned official RB_llm source checkout; defaults to study scoring configuration")
     parser.add_argument("--task-labels", help="Required only for the whole_plan audited control")
     parser.add_argument("--cohort-manifest", required=True)
     parser.add_argument("--actual-rollouts", required=True)

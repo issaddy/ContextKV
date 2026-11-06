@@ -21,6 +21,81 @@ from training.plan_gain_rollout import GenerationBudget, execute_branch
 
 
 @pytest.mark.asyncio
+async def test_b_official_target_projects_actual_sources_and_keeps_raw_label_identity(tmp_path):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from training.plan_gain_completion import completion_record
+    from training.plan_gain_rollout import JudgeJournal, radbench_scorer_identity, score_branch
+    from training.train_plan_gain import working_state_key
+
+    service, _, budget, frozen, snapshot, observed, request, plans, binding, row, prep = await frozen_fixture(tmp_path)
+    unseen = make_evidence('UNSEEN OFFLINE GOLD WITNESS', 'unseen-gold')
+    snapshot = replace(snapshot, archive=(*snapshot.archive, unseen))
+    observed = {**observed, 'state_key': working_state_key(frozen, snapshot)}
+    plan = next(plan for plan in plans if plan.semantic_kind == 'read_once')
+    branch_dir = tmp_path/'actual-read'
+    run = await execute_branch(service, plan, frozen, snapshot, row, case_dir=branch_dir,
+        binding=binding, preparation=prep, resources=Resources(), cache_start='observed',
+        generation_budget=budget, observed=observed, gap_request=request)
+    before_bytes = (branch_dir/'before.json').read_bytes()
+    before = json.loads(before_bytes)
+    original = deepcopy(run)
+    row = {**row, 'reference_answer': 'The original native target.',
+        'task_state': {'fallible': 'MUST NOT REACH OFFICIAL PROMPT'},
+        'judge_grounding': [{'quote': unseen.text}]}
+    records, parsed = [], []
+
+    def prompt(record):
+        records.append(record)
+        return json.dumps(record)
+
+    def parse(raw):
+        parsed.append(raw)
+        return .8  # Specified contract result; the author's parser is tested separately.
+
+    contract = SimpleNamespace(prompt=prompt, parse=parse,
+        identity={'metric': 'RB_llm', 'source_commit': 'specified official contract fixture',
+                  'normalization': 'official_extract_rating_divide_by_10'})
+    fingerprint = to_jsonable(service.template.fingerprint)
+    identity = radbench_scorer_identity(contract, fingerprint)
+    requests = []
+
+    class JudgeClient:
+        async def post(self, endpoint, **kwargs):
+            if endpoint == '/context/engine/info':
+                raw = {'fingerprint': fingerprint}
+            else:
+                assert endpoint == '/generate'
+                requests.append(kwargs['json'])
+                raw = {'text': 'Rating: [[8]]', 'meta_info': {
+                    'finish_reason': {'type': 'length'}, 'completion_tokens': 5}}
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: raw)
+
+    judge_budget = GenerationBudget(1, tmp_path/'judge-calls.jsonl')
+    result = await score_branch(JudgeJournal(JudgeClient(), judge_budget, tmp_path/'judge-wire.jsonl'),
+        service.template, row, before, run, contract=contract, path=tmp_path/'rescored/run.json',
+        identity=identity, resources=Resources(), judge_window=32768, expected_fingerprint=fingerprint)
+    assert len(judge_budget.tickets) == len(requests) == 1 and parsed == ['Rating: [[8]]']
+    assert requests[0]['sampling_params'] == {'temperature': 0, 'top_p': 1, 'max_new_tokens': 2048}
+    rendered = bytes(requests[0]['input_ids']).decode()
+    assert rendered.count('<|user|>') == 1 and '<|system|>' not in rendered
+    assert records[0]['targets'] == [{'text': row['reference_answer']}]
+    assert records[0]['input'][-1]['text'] == row['question']
+    assert records[0]['input'][0]['text'] == original['actual_history'][0]['user_text']
+    assert records[0]['contexts'] and all('UNSEEN' not in context['text'] for context in records[0]['contexts'])
+    assert 'MUST NOT REACH OFFICIAL PROMPT' not in rendered
+    assert result['metrics']['plan_gain_quality'] == .8 and result['quality_components'] == {'RB_llm': .8}
+    assert result['scorer_identity'] == original['scorer_identity']
+    assert result['actual_native_calls'] == original['actual_native_calls']
+    assert result['cost'] == original['cost'] and (branch_dir/'before.json').read_bytes() == before_bytes
+    label = completion_record(before, result)
+    assert label['scorer_identity'] == identity and label['registered_scorer_identity'] == before['scorer_identity']
+    assert label['final_required_point_coverage'] is None
+    await service.aclose()
+    service.store.close()
+
+
+@pytest.mark.asyncio
 async def test_frozen_nonempty_state_runs_each_single_action_without_replaying_or_unselected_gap(tmp_path):
     service, native, budget, frozen, snapshot, observed, request, plans, binding, row, prep = await frozen_fixture(tmp_path)
     assert {plan.semantic_kind for plan in plans} == {"direct_answer", "read_once", "gap_retrieval"}

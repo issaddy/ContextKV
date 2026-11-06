@@ -240,6 +240,40 @@ def _structured_radbench(official, operation, *args):
         official.extract_conversation, official.split_conversation = extract, split
 
 
+def load_radbench_contract(checkout):
+    """Reuse the frozen author's RB_llm prompt and parser without model dependencies."""
+    root = Path(checkout).resolve()
+    source = json.loads((root / "contextkv-source.json").read_text())
+    if source["commit"] != DATASET_COMMIT:
+        raise ValueError("official source checkout is not the frozen MTRAG revision")
+    path = root / "scripts/evaluation/judge_utils.py"
+    names = {"extract_document_texts", "extract_texts", "extract_reference",
+             "format_conversation_radbench", "extract_rating"}
+    parsed = ast.parse(path.read_text(), filename=str(path))
+    functions = ast.Module(body=[node for node in parsed.body
+        if isinstance(node, ast.FunctionDef) and node.name in names], type_ignores=[])
+    namespace = {"ast": ast, "re": re}
+    exec(compile(functions, str(path), "exec"), namespace)
+
+    def prompt(record):
+        previous, question = _conversation_fields(record["input"])
+        row = {"document": namespace["extract_document_texts"](record["contexts"]),
+               "response": namespace["extract_texts"](record["predictions"]),
+               "reference_answer": namespace["extract_reference"](record["targets"]),
+               "previous_conversation": previous, "current_question": question}
+        # The author's formatter only consumes DataFrame.iterrows(); no pandas is needed.
+        rows = SimpleNamespace(iterrows=lambda: iter(((0, row),)))
+        return namespace["format_conversation_radbench"](rows)[0]
+
+    identity = {"metric": "RB_llm", "source_commit": source["commit"],
+                "source_files": {relative: sha256((root / relative).read_bytes()).hexdigest()
+                    for relative in ("scripts/evaluation/judge_utils.py",
+                                     "scripts/evaluation/judge_wrapper.py")},
+                "conversation_format": "structured_message_boundaries_v1",
+                "normalization": "official_extract_rating_divide_by_10"}
+    return SimpleNamespace(prompt=prompt, parse=namespace["extract_rating"], identity=identity)
+
+
 def load_conditioning_rules(checkout):
     """Load the pinned author's pure scoring rules without its model dependencies."""
     path = Path(checkout)/"scripts/evaluation/judge_wrapper.py"

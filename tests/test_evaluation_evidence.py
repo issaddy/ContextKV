@@ -5,7 +5,7 @@ import json
 from reading_helpers import material
 
 from bench.judge import judge_payload, rule_audit
-from bench.quality import export_evaluation
+from bench.quality import answer_evaluation_view, export_evaluation
 from controller.candidates import build_plan_candidates
 from controller.claim_graph import ClaimGraph
 from controller.context_schema import (
@@ -49,6 +49,11 @@ def test_final_excerpt_and_conclusion_only_source_reach_the_scorer(tmp_path):
         citation_scope=tuple(ref for ref, key in candidate.reference_map if key in candidate.required_blocks))
     official = json.loads((tmp_path/"official.jsonl").read_text())
     audit = json.loads((tmp_path/"audit.jsonl").read_text())
+    view = answer_evaluation_view(turn, visible_evidence_manifest=candidate.evidence_spans,
+        audit_evidence=snapshot.archive, reading_outcome=outcome,
+        reference_map=candidate.reference_map,
+        citation_scope=tuple(ref for ref, key in candidate.reference_map if key in candidate.required_blocks))
+    assert view == {key: audit[key] for key in view}
     contexts = {row["document_id"]: row["text"] for row in official["contexts"]}
     assert contexts == {first.key.passage_id: shown, second.key.passage_id: leaf_text}
     assert len(audit["audit_evidence"]) == 3
@@ -99,6 +104,10 @@ def test_external_refine_scoring_keeps_only_actual_prior_and_final_source_slices
         reference_map=(("E_ab", first.key), ("E_cd", last.key)), citation_scope=("E_ab", "E_cd"))
     official = json.loads((tmp_path/"official.jsonl").read_text())
     audit = json.loads((tmp_path/"audit.jsonl").read_text())
+    view = answer_evaluation_view(turn, visible_evidence_manifest=(final_span,),
+        audit_evidence=(first, last, unread), reading_outcome=outcome,
+        reference_map=(("E_ab", first.key), ("E_cd", last.key)), citation_scope=("E_ab", "E_cd"))
+    assert view == {key: audit[key] for key in view}
     assert {row["document_id"]: row["text"] for row in official["contexts"]} == {
         first.key.passage_id: "Earlier fact.", last.key.passage_id: "Final detail."}
     assert audit["conclusion_source_manifest"][0]["execution_proof"] == {
