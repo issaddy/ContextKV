@@ -108,6 +108,7 @@ def read_contracts(memory):
     if not memory.committed_readings:
         return ()
     blocks = memory.source_index._blocks
+    scope = None if memory.source_scope is None else set(memory.source_scope)
     contracts = []
     for attempt_id, outcome in memory.committed_readings:
         for record in outcome.steps:
@@ -118,7 +119,10 @@ def read_contracts(memory):
             for need_id in record.task.need_ids:
                 contract = ReadContract(attempt_id, outcome, record.step_id, need_id)
                 if (contract.units and set(record.task.input_unit_ids) == set(record.result.covered_units)
-                        and _valid_units(contract.units, blocks)):
+                        and _valid_units(contract.units, blocks)
+                        and (scope is None or all(span.source_key in scope
+                            for span in (*tuple(span for unit in contract.units for span in unit.source_spans),
+                                         *tuple(span for atom in contract.atoms for span in atom.source_spans))))):
                     contracts.append(contract)
     return tuple(contracts)
 

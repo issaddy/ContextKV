@@ -110,6 +110,8 @@ class RetrievalState:
     archive_source_keys: tuple[EvidenceKey, ...] = ()
     source_index: Any = None
     committed_readings: tuple[tuple[str, ReadingOutcome], ...] = ()
+    # None observes the public directory; an explicit tuple bounds supplied sources.
+    source_scope: tuple[EvidenceKey, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -327,16 +329,51 @@ class ContextPlan:
 
 
 @dataclass(frozen=True)
+class Message:
+    role: str
+    content: str
+
+
+@dataclass(frozen=True)
+class ContextEpoch:
+    business_session_id: str
+    epoch_no: int
+    engine_session_id: str
+    session_generation: int
+    parent_epoch_no: int | None = None
+    state: str = "PREPARED"
+    reason: str = "initial"
+    engine_restart_id: str = ""
+
+
+@dataclass(frozen=True)
+class CompletionReceipt:
+    rid: str
+    attempt_id: str
+    engine_session_id: str
+    session_generation: int
+    engine_restart_id: str
+    input_hash: str
+    finish_reason: str
+    generation_complete: bool
+    actual_device_hit_tokens: int = 0
+    actual_host_loaded_tokens: int = 0
+    actual_prefill_tokens: int = 0
+    inserted_cache_tokens: int = 0
+    session_ref_registered: bool = False
+
+
+@dataclass(frozen=True)
 class StepRecord:
     attempt_id: str
     step_id: str
     task: ReadTask
-    engine_epoch: Any = None
-    input_messages: tuple[Any, ...] = ()
+    engine_epoch: ContextEpoch | None = None
+    input_messages: tuple[Message, ...] = ()
     input_ids: tuple[int, ...] = ()
     output_ids: tuple[int, ...] = ()
     result: ReadResult | None = None
-    receipt: Any = None
+    receipt: CompletionReceipt | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
 
 

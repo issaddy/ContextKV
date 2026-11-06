@@ -40,7 +40,7 @@ async def test_read_answer_commit_once_and_replay_does_no_work(tmp_path):
     steps = store.execution_steps(response.attempt_id)
     assert steps[0].result.claims[0].source_spans == unit.source_spans
     assert steps[0].metrics["quote_ms"] >= 0
-    assert steps[0].metrics["cache_quote"]["quotes"][0]["input_hash"] == steps[0].receipt["input_hash"]
+    assert steps[0].metrics["cache_quote"]["quotes"][0]["input_hash"] == steps[0].receipt.input_hash
     assert steps[0].metrics["cache_config_hash"] == (await engine.info()).cache_config_hash
     calls = len(engine.constraints)
     replay = await controller.serve_turn("s", state.raw_question, context_plans=(plan,), request_id="one")

@@ -294,7 +294,9 @@ class TaskInterpreter:
             view = SimpleNamespace(task_catalogue=budget_task_catalogue(self.history_index.tokenizer,
                 turn.query, task_source_catalogue(memory), memory.prior_task_states, current_turn_id=turn.turn),
                 reference_date=getattr(source, "reference_date", None), read_contracts=read_contracts(memory))
-            if hasattr(source, "observed_source_scope"):
+            if memory.source_scope is not None:
+                view.observed_source_scope = memory.source_scope
+            elif hasattr(source, "observed_source_scope"):
                 view.observed_source_scope = source.observed_source_scope
             memory = replace(memory, source_index=view)
         prediction = self.model.predict(turn, windows, memory)
@@ -522,11 +524,16 @@ def observed_task_sources(row):
 
 def task_source_catalogue(memory):
     """The literal source directory visible to the task teacher and student."""
+    if memory.source_scope == ():
+        return {}
     if memory.source_index is not None and hasattr(memory.source_index, "task_catalogue"):
         return memory.source_index.task_catalogue
     catalogue = {}
     if memory.source_index is not None:
-        for key, block in memory.source_index._blocks.items():
+        blocks = memory.source_index._blocks
+        keys = blocks if memory.source_scope is None else memory.source_scope
+        for key in keys:
+            block = blocks[key]
             metadata = memory.source_index.corpus_index.source_metadata.get(key, {})
             family = metadata.get("document_family", key.document_id)
             catalogue.setdefault(family, []).append({"version": key.version, "title": block.title,

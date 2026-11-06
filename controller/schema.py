@@ -8,7 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .context_schema import (EvidenceKey, EvidenceBlock, TaskState, EvidenceSet, SupportBundle,
-                             AnswerPlan)
+                             AnswerPlan, Message as Message, ContextEpoch as ContextEpoch,
+                             CompletionReceipt as CompletionReceipt)
 
 
 def _tuples(instance, *names: str) -> None:
@@ -40,12 +41,6 @@ class EvidenceSpan:
         _tuples(self, "provenance")
         if self.alias_declaration is not None:
             _tuples(self, "alias_declaration")
-
-
-@dataclass(frozen=True)
-class Message:
-    role: str
-    content: str
 
 
 @dataclass(frozen=True)
@@ -121,18 +116,6 @@ class ExecutionLedger:
         _tuples(self, "messages", "last_input_ids", "last_output_ids", "evidence_spans")
         _references(self)
         object.__setattr__(self, "visible_blocks", frozenset(self.visible_blocks))
-
-
-@dataclass(frozen=True)
-class ContextEpoch:
-    business_session_id: str
-    epoch_no: int
-    engine_session_id: str
-    session_generation: int
-    parent_epoch_no: int | None = None
-    state: str = "PREPARED"
-    reason: str = "initial"
-    engine_restart_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -295,23 +278,6 @@ class CacheQuoteBatch:
         for name in ("native_running_requests", "native_waiting_requests", "native_running_budget_requests"):
             if getattr(self, name) is not None:
                 _tuples(self, name)
-
-
-@dataclass(frozen=True)
-class CompletionReceipt:
-    rid: str
-    attempt_id: str
-    engine_session_id: str
-    session_generation: int
-    engine_restart_id: str
-    input_hash: str
-    finish_reason: str
-    generation_complete: bool
-    actual_device_hit_tokens: int = 0
-    actual_host_loaded_tokens: int = 0
-    actual_prefill_tokens: int = 0
-    inserted_cache_tokens: int = 0
-    session_ref_registered: bool = False
 
 
 @dataclass(frozen=True)

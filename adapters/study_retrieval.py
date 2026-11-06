@@ -246,6 +246,8 @@ class StudyEvidenceProvider:
                     self.directory.corpus_index.source_metadata.update(supplied_metadata)
                 self.directory.add_archive(supplied_blocks)
             memory = self.serving.retrieval_state(snapshot)
+            if supplied_blocks is not None:
+                memory = replace(memory, source_scope=tuple(block.key for block in supplied_blocks))
             if self.committed_readings is not None:
                 memory = replace(memory, committed_readings=self.committed_readings(snapshot))
             if self.strategy in {"B0", "Btoken"}:

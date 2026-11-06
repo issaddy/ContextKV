@@ -12,7 +12,7 @@ import time
 import uuid
 
 from .evidence import merge_evidence_block
-from .schema import (CompletionReceipt, ContextEpoch, EvidenceBlock, EvidenceKey, ExecutionLedger, GenerationResult, Message, QueryContext,
+from .schema import (ContextEpoch, EvidenceBlock, EvidenceKey, ExecutionLedger, GenerationResult, Message, QueryContext,
                      Plan, RetireOperation, SessionSnapshot, TurnRecord)
 from .serialization import decode, dumps, loads
 from .context_schema import ContextPlan, OpenNeed, ReadingOutcome, StepRecord
@@ -478,9 +478,6 @@ class SessionStore:
             if row is None:
                 return None
             record = load_record(self.db, StepRecord, row["payload"])
-            record = replace(record, engine_epoch=decode(ContextEpoch, record.engine_epoch),
-                             input_messages=tuple(decode(Message, message) for message in record.input_messages),
-                             receipt=decode(CompletionReceipt, record.receipt) if record.receipt is not None else None)
             generation = load_record(self.db, GenerationResult, row["generation"]) if row["generation"] else None
             return row["stage"], record, generation
 

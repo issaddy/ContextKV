@@ -21,6 +21,8 @@ flowchart TD
 
 `controller/qa.py:DocumentQA` 是业务入口。`POST /documents` 将版本化原文登记到同一 SQLite 的 document_sets/text_blobs；`POST /sessions/{id}/query` 与 `bench.study` 调用同一个 ask。临时资料与预建语料沿同一检索/执行路径，登记、在线编码和查询费用分别保留。
 
+登记资料的来源范围在任务解释前绑定：目录与可复用 READ 合同只投影本次资料，包含范围外事实前提的合同整份排除；实际 QA 历史与条件继续保留。未指定登记资料时沿用公共语料目录。
+
 ## A：任务、证据与固定模型阅读协议
 
 `adapters/history_state.py` 将实际会话解释为任务操作，保留每个 Need 显式的条件关联。条件替换/撤销只改写引用目标条件的 Need；共享条件由多个 Need 引用同一 ID。`training/task_model.py` 已接通锚点分组、Need 的主体/条件/前驱边与 scope，条件 key/value/predicate 分组及多标签更新目标；目录选择、source_turns 和任务回访恢复也进入监督、损失、解码、严格 v3 资产与评价。该实现尚未产出经训练与开发评价证明有效的学生资产。线上解释后的状态进入检索查询和回答条件。每个 Need 的召回查询只附加其 condition_ids 指向的活跃条件，共享条件须显式关联；当前问题的广义召回流另行保留。
@@ -102,6 +104,8 @@ C 配对目标为 `paired_native_retention_v6`，需求规则为 `exact_complete
 ## 提交、评价与成本
 
 `service.py` 将多个内部步骤组织为一个用户 attempt；最终回答、实际会话状态和旧 epoch 退役记录在一次提交中保存。内部 READ/REDUCE 的生成、辅助模型、检索、等待、回载和提交开销分别进入完整账本。
+
+`StepRecord` 的消息、epoch 和回执使用共享规范类型，SQLite 读取统一由 `load_record` 还原；跨轮事实投影和步骤恢复消费同一类型。
 
 SQLite 的 `turn_plans` 保存计划，`execution_steps` 保存输入、原生 epoch、输出、解析结果和计时；`reading_progress` 与后继计划原子保存缺口扩展及辅助用量。内部生成使用独立步骤请求和临时 epoch，完整结果保存后登记退役 outbox；重试按步骤账本与原生 status 恢复，最终只提交一次 QA。`reader_*_tokens` 统计 READ/REDUCE/ANSWER，`auxiliary_*_tokens` 统计任务、检索、支持与 gap 调用，`total_*` 为两者之和；未测得的辅助 token 保留空值。`profiling.reading_measurements` 仅从 dev 步骤的实际回执与客户端计时导出校准点，缺失末 token 观测的记录不补成估计。
 

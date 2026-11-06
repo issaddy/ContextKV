@@ -1,10 +1,10 @@
 # 当前课题运行入口
 
-本轮使用 `test-0523` 的任务隔离环境 `.venv-cu129` 和项目目录内 CUDA 12.9 工具链，Qwen3-32B Native/HiCache 服务已运行。真实长文共享提取得到 36 条、666 kg；多跳得到 1997。完整 350 题、77 会话的原 A＋固定 B＋Native 参照正在运行，尚无完整队列质量或 P95 结论。
+`test-0523` 已完成长文与多跳机制运行：共享提取得到 36 条、666 kg，多跳得到 1997。旧 A 参照在真实跨轮复用中发现持久化类型错误后停止，已付成本和逐题记录保留；完整 350 题、77 会话质量与 P95 尚未完成。
 
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 
-后续运行使用容器默认 `python3`，不再新建虚拟环境；当前在途批次保留其真实解释器记录。跨机器仅同步代码、配置和轻量结果／成本记录，训练模型及大日志留在实验容器。
+后续运行使用容器默认 `python3`，不再新建虚拟环境；此前批次保留其真实解释器记录。跨机器仅同步代码、配置和轻量结果／成本记录，训练模型及大日志留在实验容器。
 
 运行冻结同一 Qwen3-32B 模型权重与解码参数，显式配置端点、协议身份与原生缓存。主机目录、GPU、服务端口和
 输出目录由本次运行配置声明；不复用旧批次的固定路径或截止时间。
@@ -22,7 +22,7 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/launch_sglang.sh --host 127.0.0.1 --port 300
 
 scope 的 `model_path` 指向 `/data/models/qwen3-32b`，模型/tokenizer 身份沿用真实文件。默认集成为官方 SGLang 0.5.18 源码及项目补丁，CUDA 内核来自现有环境。`engine-source.json`、`engine-environment.txt` 记录实际版本；不要求升级主机驱动。
 
-本次运行环境由 `source runs/study-20261106-resume/runtime.env` 恢复，其中 `CONTEXTKV_ENGINE_PYTHON` 指向 `.venv-cu129`，`CUDA_HOME` 指向该运行目录内的 `cuda12-toolkit/root/usr/local/cuda-12.9`，`LD_PRELOAD` 选择实际挂载的 `libcuda.so.560.35.03`。FlashInfer 使用官方 cu129 预编译缓存，SGLang JIT 也使用该 CUDA 12.9 工具链。系统 CUDA、驱动链接和共享 Python 环境未修改。
+此前 `runs/study-20261106-resume/runtime.env` 记录的是 `.venv-cu129` 批次，不能作为后续默认 Python 入口。容器默认环境正在复用已跑通的 CUDA 12.9 包与缓存；`CUDA_HOME` 使用该运行目录内的 `cuda12-toolkit/root/usr/local/cuda-12.9`，`LD_PRELOAD` 选择实际挂载的 `libcuda.so.560.35.03`，FlashInfer 与 SGLang JIT 使用对应 cu129 工具链。后续启动需由默认 `python3` 重新生成 `engine-runtime.env`。
 
 BGE 检索、发布重排器及历史编码器在本环境显式使用 `sdpa_backend: math`；对应配置分别位于 retriever YAML 和 `task_model`。两套索引的语料、向量哈希及离线费用见 `runs/study-20261106-resume/offline-index-build`。此后端选择不改变 Qwen 权重或推理设置。
 

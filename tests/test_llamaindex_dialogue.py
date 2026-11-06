@@ -71,7 +71,7 @@ async def test_real_compact_refine_shares_qa_ledger_and_committed_history(tmp_pa
     for step in steps:
         source_view = step.metrics["source_view"]
         for span in source_view["evidence_spans"]:
-            message = step.input_messages[span["message_index"]]["content"]
+            message = step.input_messages[span["message_index"]].content
             source = body if span["key"]["document_id"] == "a" else other.text
             assert message[span["start"]:span["end"]] == source[span["source_start"]:span["source_end"]]
             if source == body:
