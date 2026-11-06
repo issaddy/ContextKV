@@ -1,27 +1,7 @@
-diff --git a/python/sglang/srt/entrypoints/api_contract.py b/python/sglang/srt/entrypoints/api_contract.py
-index 5ea4fbf..1af15a8 100644
---- a/python/sglang/srt/entrypoints/api_contract.py
-+++ b/python/sglang/srt/entrypoints/api_contract.py
-@@ -12,6 +12,14 @@ from sglang.api.v1.api_types import GenerateRequest, JsonContractError
- def generate_contract_error(body: Any) -> Optional[str]:
-     """The contract violation in a parsed `/generate` JSON body, or None."""
-     try:
-+        # These Python-only research extensions are validated by io_struct and
-+        # by the scheduler before native session auto-ensure. All remaining
-+        # fields still pass the native generated schema unchanged.
-+        if isinstance(body, dict):
-+            body = {k: v for k, v in body.items() if k not in {
-+                "expected_restart_id", "expected_generation", "contextkv_attempt_id",
-+                "contextkv_fingerprint",
-+            }}
-         GenerateRequest.from_json_value(body)
-     except JsonContractError as e:
-         return str(e)
 diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
-index bf00f65..aeb7f9e 100644
 --- a/python/sglang/srt/entrypoints/http_server.py
 +++ b/python/sglang/srt/entrypoints/http_server.py
-@@ -946,10 +946,24 @@ async def serve_generate_request(obj: GenerateReqInput, request: Request):
+@@ -898,10 +898,24 @@
      if obj.stream:
  
          async def stream_results() -> AsyncIterator[bytes]:
@@ -46,7 +26,7 @@ index bf00f65..aeb7f9e 100644
                      yield b"data: " + dumps_json(out) + b"\n\n"
              except ValueError as e:
                  # A client disconnect also surfaces here. It's a client-side
-@@ -981,6 +995,14 @@ async def serve_generate_request(obj: GenerateReqInput, request: Request):
+@@ -933,6 +947,14 @@
              ret = await _global_state.tokenizer_manager.generate_request(
                  obj, request
              ).__anext__()
@@ -61,10 +41,12 @@ index bf00f65..aeb7f9e 100644
              return orjson_response(ret)
          except ValueError as e:
              logger.error(f"[http_server] Error: {e}")
-@@ -1662,6 +1684,62 @@ async def unload_lora_adapter(
+@@ -1568,6 +1590,62 @@
+     result = await _global_state.tokenizer_manager.unload_lora_adapter(obj, request)
+     status_code = HTTPStatus.OK if result.success else HTTPStatus.BAD_REQUEST
      return ORJSONResponse(msgspec_to_builtins(result), status_code=status_code)
- 
- 
++
++
 +
 +async def _contextkv_control(action: str, request: Request):
 +    payload = await _global_state.tokenizer_manager.contextkv_control(action, await request.json())
@@ -119,11 +101,9 @@ index bf00f65..aeb7f9e 100644
 +@app.post("/context/profiling/prepare")
 +async def contextkv_profile_prepare(request: Request):
 +    return await _contextkv_control("profile_prepare", request)
-+
-+
+ 
+ 
  @app.api_route("/open_session", methods=["GET", "POST"])
- async def open_session(obj: Annotated[OpenSessionReqInput, Body()], request: Request):
-     """Open a session, and return its unique session id."""
 diff --git a/python/sglang/srt/managers/contextkv_model_scope.py b/python/sglang/srt/managers/contextkv_model_scope.py
 new file mode 100644
 --- /dev/null
@@ -223,10 +203,9 @@ new file mode 100644
 +    raise SystemExit(main())
 diff --git a/python/sglang/srt/managers/contextkv_runtime.py b/python/sglang/srt/managers/contextkv_runtime.py
 new file mode 100644
-index 0000000..2a6f2ba
 --- /dev/null
 +++ b/python/sglang/srt/managers/contextkv_runtime.py
-@@ -0,0 +1,1161 @@
+@@ -0,0 +1,1169 @@
 +"""Scheduler-owned ContextKV protocol, for the pinned SGLang Python backend.
 +
 +This module deliberately has no background thread or GPU synchronizations. It is
@@ -246,7 +225,7 @@ index 0000000..2a6f2ba
 +from types import SimpleNamespace
 +import uuid
 +
-+COMMIT = "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b"
++COMMIT = "71de97b264b04dcd514cf904003028aefe9775c8"
 +PROTOCOL = "contextkv-v1"
 +
 +
@@ -327,16 +306,16 @@ index 0000000..2a6f2ba
 +    # pin when called from _select_prefill_admission. No match/lock/ACK here.
 +    diagnostic.observe(reason, dict(observed_at=time.perf_counter(),
 +        prompt_tokens=len(req.origin_input_ids), full_fill_tokens=len(req.full_untruncated_fill_ids),
-+        prefix_tokens=req.prefix_len,
++        prefix_tokens=len(req.prefix_indices),
 +        host_hit_tokens=req.host_hit_length, generated_tokens=len(req.output_ids),
 +        max_new_tokens=req.sampling_params.max_new_tokens,
 +        ignore_eos=req.sampling_params.ignore_eos,
 +        remaining_total=adder.rem_total_tokens, remaining_current=adder.cur_rem_tokens,
-+        total_offset=adder.memory_budget.total_offset, current_offset=adder.memory_budget.current_offset,
++        total_offset=adder.rem_total_token_offset, current_offset=adder.cur_rem_token_offset,
 +        page_size=adder.page_size,
 +        remaining_input=adder.rem_input_tokens, remaining_chunk=adder.rem_chunk_tokens,
 +        new_token_ratio=adder.new_token_ratio, admitted_requests=len(adder.can_run_list),
-+        budget_type=type(adder.memory_budget).__name__, **details))
++        budget_type="PrefillAdder0518", **details))
 +
 +
 +def record_admission_outcome(req, adder, admitted_before, result):
@@ -598,7 +577,7 @@ index 0000000..2a6f2ba
 +            prompt_window=int(os.environ.get("CONTEXTKV_HOST_ADMISSION_PROMPT_WINDOW", "256")))
 +        cc = cache.cache_controller
 +        allocator = getattr(cache, "token_to_kv_pool_allocator", None)
-+        config = {"page_size": cache.page_size, "backend": cache._tree_core_backend,
++        config = {"page_size": cache.page_size, "backend": type(cache.tree_core).__name__,
 +                  "hicache": cc is not None, "protocol": PROTOCOL,
 +                  "write_policy": getattr(cc, "write_policy", None),
 +                  "host_memory_mode": getattr(cache, "host_memory_mode", None),
@@ -731,6 +710,7 @@ index 0000000..2a6f2ba
 +        req.contextkv_input_hash = token_hash(recv.input_ids)
 +        req.contextkv_session_ref_registered = False
 +        req.contextkv_prefill_tokens = 0
++        req.contextkv_inserted_cache_tokens = 0
 +        if self.admission_diagnostics_enabled:
 +            req.contextkv_admission_diagnostic = AdmissionDiagnostic()
 +
@@ -762,7 +742,7 @@ index 0000000..2a6f2ba
 +            finish_reason=kind, generation_complete=complete,
 +            actual_device_hit_tokens=device, actual_host_loaded_tokens=host,
 +            actual_prefill_tokens=req.contextkv_prefill_tokens,
-+            inserted_cache_tokens=int(req.kv.cache_inserted_len),
++            inserted_cache_tokens=int(req.contextkv_inserted_cache_tokens),
 +            session_ref_registered=bool(getattr(req, "contextkv_session_ref_registered", False)))
 +        # Native HTTP output is published back to this owner before delivery.
 +        # A crash before that publication leaves a terminal receipt only.
@@ -1046,7 +1026,14 @@ index 0000000..2a6f2ba
 +        running_budget = sum(PrefillAdder._get_running_request_total_token_offset(offset_owner, req)
 +                             for req in budget_requests)
 +        waiting = [req for req in self.scheduler.waiting_queue if not req.finished()]
-+        running = self.scheduler.collect_inflight_reqs()
++        running = set(self.scheduler.running_batch.reqs)
++        if self.scheduler.last_batch is not None:
++            running.update(self.scheduler.last_batch.reqs)
++        if self.scheduler.cur_batch_for_debug is not None:
++            running.update(self.scheduler.cur_batch_for_debug.reqs)
++        if self.scheduler.enable_overlap:
++            for batch, _ in self.scheduler.result_queue:
++                running.update(batch.reqs)
 +        if self.scheduler.chunked_req is not None:
 +            running.add(self.scheduler.chunked_req)
 +        running.difference_update(waiting)
@@ -1058,8 +1045,8 @@ index 0000000..2a6f2ba
 +                        max_new_tokens=req.sampling_params.max_new_tokens,
 +                        ignore_eos=req.sampling_params.ignore_eos,
 +                        kv_allocated_tokens=req.kv.kv_allocated_len,
-+                        kv_committed_tokens=req.kv.kv_committed_len,
-+                        cache_protected_tokens=req.kv.cache_protected_len,
++                        kv_committed_tokens=req.kv_committed_len,
++                        cache_protected_tokens=req.cache_protected_len,
 +                        native_finished=req.finished(),
 +                        last_native_match=dict(req.contextkv_last_native_match)
 +                            if getattr(req, "contextkv_last_native_match", None) is not None else None)
@@ -1079,7 +1066,7 @@ index 0000000..2a6f2ba
 +        not a promise that the saved tier layout remains valid.
 +        """
 +        req.contextkv_last_native_match = dict(observed_time_ns=time.monotonic_ns(),
-+            input_tokens=input_tokens, device_prefix_tokens=req.prefix_len,
++            input_tokens=input_tokens, device_prefix_tokens=len(req.prefix_indices),
 +            host_hit_tokens=req.host_hit_length, matched_prefix_tokens=req.num_matched_prefix_tokens)
 +        if self.host_admission.mode != "off" and not getattr(req, "contextkv_host_admission_observed", False):
 +            req.contextkv_host_admission_observed = True
@@ -1330,14 +1317,14 @@ index 0000000..2a6f2ba
 +        # Native /flush_cache also resets generations. Rotate the existing
 +        # restart fence before any control operation or guarded admission.
 +        return runtime._replace_after_cache_reset(scheduler)
-+    from sglang.srt.runtime_context import get_parallel, get_model
++    from sglang.srt.runtime_context import get_parallel, get_model, get_server_args
 +    from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
++    from sglang.srt.mem_cache.unified_cache.unified_tree_core import UnifiedTreeCore
 +    parallel = get_parallel()
-+    if (parallel.tp_size != 1 or parallel.num_dp_ranks != 1 or parallel.pp_size != 1
++    if (parallel.tp_size != 1 or get_server_args().dp_size != 1 or parallel.pp_size != 1
 +            or not isinstance(cache, UnifiedRadixCache) or not cache.enable_session_radix_cache
-+            or cache._tree_core_backend != "python" or len(cache._components_tuple) != 1
-+            or cache.tree_core.is_eagle or cache.enable_storage or cache.linker is not None
-+            or cache.buffer_pipeline is not None
++            or not isinstance(cache.tree_core, UnifiedTreeCore) or len(cache._components_tuple) != 1
++            or cache.tree_core.is_eagle or cache.enable_storage
 +            or scheduler.dllm_config is not None
 +            or scheduler.rust_server is not None
 +            or not (scheduler.spec_algorithm.is_none() or scheduler.spec_algorithm.is_ngram())
@@ -1370,10 +1357,10 @@ index 0000000..2a6f2ba
 +        model_scope = scope.manifest()
 +    except (AssertionError, AttributeError, OSError, ValueError) as exc:
 +        raise ContextKVError("FINGERPRINT_MISMATCH", "running model config/revision/tokenizer/template differs") from exc
-+    from sglang.srt.environ import envs
 +    # Structured JSON and speculative decoding both change measured execution
 +    # and output lengths, so bind them to the calibration identity.
-+    resolved_args = get_server_args().resolved_dict()
++    from dataclasses import asdict
++    resolved_args = asdict(get_server_args())
 +    decoder_settings = {name: value for name, value in resolved_args.items()
 +                        if name.startswith("constrained_json_") or name == "grammar_backend"}
 +    if not scheduler.spec_algorithm.is_none():
@@ -1384,16 +1371,14 @@ index 0000000..2a6f2ba
 +                "speculative_adaptive_config"}})
 +    scheduler.contextkv_runtime = ContextKVRuntime(cache, fp, scheduler=scheduler,
 +        model_scope=model_scope, decoder_settings=decoder_settings,
-+        transfer_tma_enabled=envs.SGLANG_HICACHE_TMA_TRANSFER.get(),
++        transfer_tma_enabled=False,
 +        result_ttl_seconds=float(os.environ.get("CONTEXTKV_RESULT_TTL_SECONDS", "900")),
 +        result_max_bytes=int(os.environ.get("CONTEXTKV_RESULT_MAX_BYTES", str(64 << 20))))
 +    return scheduler.contextkv_runtime
-
 diff --git a/python/sglang/srt/managers/io_struct.py b/python/sglang/srt/managers/io_struct.py
-index 03241e9..c733e15 100644
 --- a/python/sglang/srt/managers/io_struct.py
 +++ b/python/sglang/srt/managers/io_struct.py
-@@ -181,6 +181,10 @@ class GenerateReqInput:
+@@ -164,6 +164,10 @@
      # Stable identity shared by requests in the same session. Unlike
      # session_params, this does not alter or reconstruct the prompt.
      session_id: Optional[str] = field(default=None, kw_only=True)
@@ -1404,7 +1389,7 @@ index 03241e9..c733e15 100644
      # The input prompt. It can be a single prompt or a batch of prompts.
      text: Optional[Union[List[str], str]] = None
      # The token ids for text.
-@@ -965,6 +969,10 @@ class GenerateReqInput:
+@@ -851,6 +855,10 @@
          sub = GenerateReqInput(
              rid=self.rid[i],
              session_id=self.session_id,
@@ -1415,7 +1400,7 @@ index 03241e9..c733e15 100644
              text=self.text[i] if self.text is not None else None,
              input_ids=self.input_ids[i] if self.input_ids is not None else None,
              input_embeds=(
-@@ -1099,6 +1107,11 @@ class TokenizedGenerateReqInput(BaseReq, kw_only=True):
+@@ -975,6 +983,11 @@
      routed_experts_start_len: int = 0
      return_indexer_topk: bool = False
  
@@ -1427,7 +1412,7 @@ index 03241e9..c733e15 100644
      # Session info for continual prompting
      session_id: Optional[str] = None
      session_params: Optional[SessionParams] = None
-@@ -2414,6 +2427,15 @@ class ConfigureLoggingReq(BaseReq, kw_only=True):
+@@ -2122,6 +2135,15 @@
      dump_requests_exclude_meta_keys: Optional[List[str]] = None
  
  
@@ -1443,35 +1428,39 @@ index 03241e9..c733e15 100644
  class OpenSessionReqInput(BaseReq, kw_only=True):
      capacity_of_str_len: int
      session_id: Optional[str] = None
+diff --git a/python/sglang/srt/managers/schedule_batch.py b/python/sglang/srt/managers/schedule_batch.py
+--- a/python/sglang/srt/managers/schedule_batch.py
++++ b/python/sglang/srt/managers/schedule_batch.py
+@@ -1390,6 +1390,9 @@
+             else:
+                 self.cache_protected_len = len(self.prefix_indices)
+ 
++            runtime = getattr(tree_cache, "contextkv_runtime", None)
++            if runtime is not None:
++                runtime.record_native_match(self, input_len)
+             if self.is_dllm():
+                 self._update_block_offset_for_dllm()
+ 
 diff --git a/python/sglang/srt/managers/schedule_policy.py b/python/sglang/srt/managers/schedule_policy.py
-index 197d7bb..c44c660 100644
 --- a/python/sglang/srt/managers/schedule_policy.py
 +++ b/python/sglang/srt/managers/schedule_policy.py
-@@ -3,6 +3,7 @@ from __future__ import annotations
- import logging
+@@ -4,6 +4,7 @@
+ from array import array
  
  from sglang.srt.environ import envs
 +from sglang.srt.managers.contextkv_runtime import record_admission_gate
  from sglang.srt.managers.prefill_delayer import PrefillDelayerSinglePassExecutor
- from sglang.srt.runtime_context import (
-     get_disagg,
-@@ -1352,6 +1353,7 @@ class PrefillAdder:
-         self, req: Req, has_chunked_req: bool, truncation_align_size: Optional[int]
-     ):
+ from sglang.srt.runtime_context import get_disagg
+ from sglang.srt.utils import get_bool_env_var, is_hip
+@@ -1208,6 +1209,7 @@
+             return AddReqResult.OTHER
+ 
          if (x := self.prefill_max_requests) is not None and len(self.can_run_list) >= x:
 +            record_admission_gate(req, self, "prefill_request_limit")
              return AddReqResult.OTHER
  
          if req.sampling_params.ignore_eos and getattr(self.tree_cache, "disable", True):
-@@ -1378,6 +1380,7 @@ class PrefillAdder:
-                     and self.tree_cache.buffer_pipeline is not None
-                 ):
-                     self.tree_cache.buffer_pipeline.defer_staged_admission(req, "mamba")
-+                record_admission_gate(req, self, "mamba_slot_budget")
-                 return AddReqResult.NO_TOKEN
-         request_slot_reserve = self._request_slot_reserve_for_req(req)
-         total_tokens += request_slot_reserve
-@@ -1408,6 +1411,7 @@ class PrefillAdder:
+@@ -1308,6 +1310,7 @@
                      waiting_queue_len=self.waiting_queue_len,
                  )
              ):
@@ -1479,95 +1468,11 @@ index 197d7bb..c44c660 100644
                  return AddReqResult.OTHER
  
              if req.needs_host_load_back():
-@@ -1455,6 +1459,7 @@ class PrefillAdder:
-                         self._defer_staged_for_capacity_if_idle(
-                             req, pool="load_back_budget"
-                         )
-+                        record_admission_gate(req, self, "load_back_budget")
-                         return AddReqResult.NO_TOKEN
-                     promised_host_hit = req.host_hit_length
-                     loaded = self.tree_cache.init_load_back(
-@@ -1465,6 +1470,7 @@ class PrefillAdder:
-                         )
-                     )
-                 if loaded is None:
-+                    record_admission_gate(req, self, "load_back_unavailable")
-                     return AddReqResult.OTHER
-                 req.host_loaded_length, req.last_node = loaded
-                 if 0 < req.host_loaded_length < promised_host_hit:
-@@ -1517,6 +1523,7 @@ class PrefillAdder:
-             if not self._kv_shard_reserve_scratch(
-                 prefix_len=admission.prefix_len, extend_len=admission.extend_len
-             ):
-+                record_admission_gate(req, self, "kv_shard_scratch")
-                 return AddReqResult.OTHER
- 
-             self._commit_prefill_admission(req, admission, mamba_gap_reserve)
-@@ -1548,6 +1555,7 @@ class PrefillAdder:
-             # The replay rows share the chunk with the extend.
-             chunk_limit -= replay_len
-             if chunk_limit <= 0:
-+                record_admission_gate(req, self, "replay_chunk_budget")
-                 return AddReqResult.OTHER
-         can_admit, chunk_tokens_limit = self._check_prefill_budget(
-             req,
-@@ -1556,6 +1564,11 @@ class PrefillAdder:
-             swa_host_hit_length=swa_host_hit_length,
-             chunk_limit=chunk_limit,
-         )
-+        record_admission_gate(req, self,
-+            "prefill_budget_accepted" if can_admit else "prefill_budget_rejected",
-+            requested_total_tokens=total_tokens, requested_extend_tokens=extend_len,
-+            considered_host_hit_tokens=host_hit_length, selected_prefix_tokens=prefix_len,
-+            selected_chunk_limit=chunk_tokens_limit)
-         if not can_admit:
-             return AddReqResult.NO_TOKEN
- 
-@@ -1565,6 +1578,7 @@ class PrefillAdder:
-             and self.can_run_list
-             and input_tokens >= self.rem_input_tokens
-         ):
-+            record_admission_gate(req, self, "prefill_input_pass_budget")
-             return AddReqResult.OTHER
- 
-         is_chunked = False
-@@ -1576,6 +1590,7 @@ class PrefillAdder:
-             )
-             extend_len = self._get_dllm_extend_len(req, prefix_len)
-             if extend_len <= 0:
-+                record_admission_gate(req, self, "empty_or_unaligned_chunk")
-                 return AddReqResult.OTHER
-             max_new_tokens = 0
-         elif chunk_tokens_limit is not None and chunk_fit_tokens > chunk_tokens_limit:
-@@ -1584,6 +1599,7 @@ class PrefillAdder:
-                 and get_schedule().schedule_policy == "shortest-prefill-first"
-             ):
-                 # Only one unfinished chunked request can be tracked.
-+                record_admission_gate(req, self, "continuing_chunk_conflict")
-                 return AddReqResult.OTHER
-             if self.exact_chunk_fill:
-                 # Take the remainder verbatim so the batch hits exactly
-@@ -1605,12 +1621,14 @@ class PrefillAdder:
-                 end = (prefix_len + extend_len) // self.page_size * self.page_size
-                 extend_len = end - prefix_len
-             if extend_len <= 0:
-+                record_admission_gate(req, self, "empty_or_unaligned_chunk")
-                 return AddReqResult.OTHER
-             is_chunked = True
-             max_new_tokens = 0
-             tile_tokens = extend_len
- 
-         if (verdict := self._check_prefill_tile_budget(tile_tokens)) is not None:
-+            record_admission_gate(req, self, "prefill_tile_budget")
-             return verdict
- 
-         return _PrefillAdmission(
 diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
-index 1831160..93a4b95 100644
 --- a/python/sglang/srt/managers/scheduler.py
 +++ b/python/sglang/srt/managers/scheduler.py
-@@ -1786,9 +1786,21 @@ class Scheduler(
-             f"SGLANG_FLASHINFER_PREFILL_SPLIT_TILE_SIZE."
+@@ -1529,9 +1529,20 @@
+             get_int_env_var(env_var, default_size) if env_var else None
          )
  
 +    def handle_contextkv_control(self, recv_req):
@@ -1576,8 +1481,7 @@ index 1831160..93a4b95 100644
 +        try:
 +            payload = get_runtime(self).dispatch(recv_req.action, recv_req.payload)
 +        except (ContextKVError, KeyError, TypeError, ValueError) as error:
-+            payload = {"error": {"code": getattr(error, "code", "INVALID_REQUEST"),
-+                                  "message": str(error)}}
++            payload = {"error": {"code": getattr(error, "code", "INVALID_REQUEST"), "message": str(error)}}
 +        return ContextKVControlReqOutput(payload=payload)
 +
      def init_request_dispatcher(self):
@@ -1588,17 +1492,17 @@ index 1831160..93a4b95 100644
                  (TokenizedGenerateReqInput, self.handle_generate_request),
                  (TokenizedEmbeddingReqInput, self.handle_embedding_request),
                  (BatchTokenizedGenerateReqInput, self.handle_batch_generate_request),
-@@ -2181,6 +2193,9 @@ class Scheduler(
+@@ -1875,6 +1886,9 @@
  
-     @scheduler_stage_method(SCHEDULER_STAGE_PROCESS_REQUESTS)
+     @scheduler_nvtx_method("scheduler.process_input_requests")
      def process_input_requests(self, recv_reqs: List):
 +        if getattr(self, "contextkv_runtime", None) is not None:
 +            self.contextkv_runtime.observed_seq += 1
 +            self.contextkv_runtime.observe_pool()
          now = time.monotonic()
          self.session_controller.maybe_reap(now)
- 
-@@ -2977,6 +2992,24 @@ class Scheduler(
+         if get_mm().mm_feature_transport == "cuda_vmm":
+@@ -2435,6 +2449,24 @@
              )
              req.tokenizer = self.tokenizer
  
@@ -1623,23 +1527,7 @@ index 1831160..93a4b95 100644
              if radix_native_session:
                  req.session_generation = self.tree_cache.ensure_session_generation(
                      recv_req.session_id
-@@ -3839,6 +3872,7 @@ class Scheduler(
-     def get_next_batch_to_run(
-         self, running_batch: ScheduleBatch, last_batch: Optional[ScheduleBatch]
-     ) -> NextBatchPlan:
-+        from sglang.srt.managers.contextkv_runtime import record_scheduler_gate
-         self.process_pending_chunked_abort()
-         self._process_hicache_events()
- 
-@@ -3915,6 +3949,7 @@ class Scheduler(
-         if self.dllm_config is not None:
-             new_batch = self.get_new_batch_dllm(running_batch)
-         elif self._should_defer_prefill(running_batch):
-+            record_scheduler_gate(self, running_batch, "scheduler_prefill_deferred")
-             new_batch = None
-         else:
-             prefill_plan = self.get_new_batch_prefill(running_batch)
-@@ -4026,6 +4061,9 @@ class Scheduler(
+@@ -3186,6 +3218,9 @@
          prefill_delayer_single_pass: Optional[PrefillDelayerSinglePassExecutor],
          running_batch: ScheduleBatch,
      ) -> Tuple[Optional[ScheduleBatch], ScheduleBatch]:
@@ -1649,7 +1537,7 @@ index 1831160..93a4b95 100644
          # Check if the grammar is ready in the grammar queue
          if self.grammar_manager.has_waiting_grammars():
              ready_grammar_requests = self.grammar_manager.get_ready_grammar_requests()
-@@ -4043,6 +4081,7 @@ class Scheduler(
+@@ -3202,6 +3237,7 @@
          if (
              running_batch.batch_is_full or len(self.waiting_queue) == 0
          ) and self.chunked_req is None:
@@ -1657,15 +1545,7 @@ index 1831160..93a4b95 100644
              return None, running_batch
  
          running_bs = len(running_batch.reqs)
-@@ -4057,6 +4096,7 @@ class Scheduler(
-                 ),
-             )
-         ):
-+            record_scheduler_gate(self, running_batch, "scheduler_min_free_slots")
-             return None, running_batch
- 
-         # A chunked request skips this check: it keeps its req_to_token row across
-@@ -4068,6 +4108,7 @@ class Scheduler(
+@@ -3227,6 +3263,7 @@
              and not self.enable_priority_preemption
          ):
              running_batch.batch_is_full = True
@@ -1673,26 +1553,10 @@ index 1831160..93a4b95 100644
              return None, running_batch
  
          # Get priority queue
-@@ -4150,6 +4191,7 @@ class Scheduler(
-             # A spent pass budget admits no one, even before the first
-             # candidate: the resumed chunk or mixed decode rows can spend it.
-             if adder.budget_state() == AddReqResult.OTHER:
-+                record_admission_gate(req, adder, "scheduler_pass_budget")
-                 break
-             if self.enable_lora and not self.can_schedule_lora_req(req, running_loras):
-                 continue
-@@ -4180,6 +4222,7 @@ class Scheduler(
-                 if not self.enable_priority_preemption or not adder.preempt_to_schedule(
-                     req
-                 ):
-+                    record_admission_gate(req, adder, "scheduler_request_slots_after_admission")
-                     break
+@@ -3325,11 +3362,13 @@
+                     req.storage_hit_length = loaded_tokens
  
-             if self.enable_hicache_storage or self.enable_lmcache:
-@@ -4212,11 +4255,13 @@ class Scheduler(
-                 req.time_stats.observe_storage_staging_ready(staging_ready)
-                 if not staging_ready:
-                     continue
+             req.init_next_round_input(self.tree_cache)
 +            admitted_before = len(adder.can_run_list)
              res = adder.add_one_req(
                  req,
@@ -1703,27 +1567,27 @@ index 1831160..93a4b95 100644
  
              if self.enable_lora:
                  running_loras.add(req.lora_id)
-@@ -4595,6 +4640,11 @@ class Scheduler(
+@@ -3652,6 +3691,11 @@
+         if self.disaggregation_mode == DisaggregationMode.PREFILL:
              for req in batch.reqs:
                  self.maybe_send_cached_prefix_chunk(req)
- 
++
 +        # Record actual extend work across chunks and retraction replays.
 +        from sglang.srt.managers.contextkv_runtime import snapshot_extend_work, complete_extend_work
 +        contextkv_extend_work = (snapshot_extend_work(batch)
 +                                 if getattr(self, "contextkv_runtime", None) is not None else ())
-+
+ 
          # Run forward
          if self.is_generation:
-             if self.enable_overlap:
-@@ -4873,6 +4923,7 @@ class Scheduler(
-                 self._pending_chunked_abort_req = self.chunked_req
+@@ -3839,6 +3883,7 @@
+                 )
  
          self._maybe_report_active_ranks()
 +        complete_extend_work(contextkv_extend_work)
  
          return ret
  
-@@ -6019,6 +6070,10 @@ class Scheduler(
+@@ -4834,6 +4879,10 @@
          return ExpertDistributionReqOutput()
  
      def open_session(self, recv_req: OpenSessionReqInput):
@@ -1734,7 +1598,7 @@ index 1831160..93a4b95 100644
          output = self.session_controller.open(recv_req)
          if output.success and self.enable_session_radix_cache:
              self.tree_cache.open_radix_session(recv_req.session_id)
-@@ -6031,6 +6086,10 @@ class Scheduler(
+@@ -4842,6 +4891,10 @@
          return None
  
      def close_session(self, recv_req: CloseSessionReqInput):
@@ -1746,10 +1610,9 @@ index 1831160..93a4b95 100644
              self.tree_cache.release_radix_session(recv_req.session_id)
          if (
 diff --git a/python/sglang/srt/managers/scheduler_components/output_streamer.py b/python/sglang/srt/managers/scheduler_components/output_streamer.py
-index 9fb430f..e4bef2c 100644
 --- a/python/sglang/srt/managers/scheduler_components/output_streamer.py
 +++ b/python/sglang/srt/managers/scheduler_components/output_streamer.py
-@@ -187,6 +187,9 @@ class SchedulerOutputStreamer:
+@@ -167,6 +167,9 @@
                  # because of the one additional delayed token. This "continue" prevented the dummy output.
                  continue
  
@@ -1759,32 +1622,24 @@ index 9fb430f..e4bef2c 100644
              acc.accept(req=req)
              self._maybe_log_time_stats(req=req)
  
-@@ -235,7 +238,7 @@ class SchedulerOutputStreamer:
- 
-     def is_request_level_customized_info_key(self, key: str) -> bool:
-         """Whether a customized-info value is emitted once rather than token-sliced."""
--        return False
-+        return key in {"contextkv_receipt", "contextkv_timing"}
- 
-     def _maybe_log_time_stats(self, *, req: Req) -> None:
-         if (
-@@ -666,7 +669,10 @@ class _GenerationStreamAccumulator:
+@@ -591,6 +594,13 @@
+         current_output_len = len(self.output_ids[-1])
+         if req.customized_info is not None:
              for key, req_values in req.customized_info.items():
-                 is_request_level = self.is_request_level_customized_info_key(key)
-                 if is_request_level:
--                    if req.stream:
-+                    if key in {"contextkv_receipt", "contextkv_timing"}:
-+                        if not req.finished():
-+                            continue
-+                    elif req.stream:
-                         if send_token_offset != 0:
-                             continue
-                     elif not req.finished():
++                if key in {"contextkv_receipt", "contextkv_timing"}:
++                    if not req.finished():
++                        continue
++                    if key not in self.customized_info:
++                        self.customized_info[key] = [[] for _ in self.output_ids[:-1]]
++                    self.customized_info[key].append(req_values)
++                    continue
+                 if key not in self.customized_info:
+                     self.customized_info[key] = [
+                         [None] * len(prev_output_ids)
 diff --git a/python/sglang/srt/managers/tokenizer_control_mixin.py b/python/sglang/srt/managers/tokenizer_control_mixin.py
-index 9d2dcd1..8d8f08c 100644
 --- a/python/sglang/srt/managers/tokenizer_control_mixin.py
 +++ b/python/sglang/srt/managers/tokenizer_control_mixin.py
-@@ -107,7 +107,10 @@ logger = logging.getLogger(__name__)
+@@ -91,7 +91,10 @@
  # Declarative spec: (attr_name_prefix, response_type[, mode])
  # Each entry creates self.{prefix}_communicator and registers
  # response_type -> communicator.handle_recv in the dispatch table.
@@ -1795,27 +1650,24 @@ index 9d2dcd1..8d8f08c 100644
      ("init_weights_update_group", InitWeightsUpdateGroupReqOutput),
      ("destroy_weights_update_group", DestroyWeightsUpdateGroupReqOutput),
      ("update_weights_from_distributed", UpdateWeightsFromDistributedReqOutput),
-@@ -180,6 +183,15 @@ class TokenizerControlMixin:
+@@ -151,6 +154,13 @@
      FanOutCommunicator, as opposed to data-plane inference requests multiplexed by rid.
      """
  
 +    async def contextkv_control(self, action, payload):
 +        self.auto_create_handle_loop()
-+        results = await self.contextkv_communicator(
-+            ContextKVControlReqInput(action=action, payload=payload)
-+        )
++        results = await self.contextkv_communicator(ContextKVControlReqInput(action=action, payload=payload))
 +        if len(results) != 1:
 +            return {"error": {"code": "UNSUPPORTED_ENGINE", "message": "DP=1 required"}}
 +        return results[0].payload
 +
-     def init_communicators(self: TokenizerManager):
+     def init_communicators(self: TokenizerManager, server_args: ServerArgs):
          dispatch_pairs = []
          for spec in _COMMUNICATOR_SPECS:
 diff --git a/python/sglang/srt/managers/tokenizer_manager.py b/python/sglang/srt/managers/tokenizer_manager.py
-index 34fe4cf..b8df87a 100644
 --- a/python/sglang/srt/managers/tokenizer_manager.py
 +++ b/python/sglang/srt/managers/tokenizer_manager.py
-@@ -370,7 +370,8 @@ def _slice_streaming_output_meta_info(
+@@ -305,7 +305,8 @@
      if customized_info_keys is not None:
          streaming_meta_info_keys.update(customized_info_keys)
      for key in meta_info.keys() & streaming_meta_info_keys:
@@ -1824,8 +1676,8 @@ index 34fe4cf..b8df87a 100644
 +            meta_info[key] = meta_info[key][last_output_offset:]
  
  
- def _build_flat_top_logprobs_fields(
-@@ -1619,6 +1620,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
+ def _build_flat_input_top_logprobs_fields(
+@@ -1431,6 +1432,10 @@
                  input_embeds=input_embeds,
                  positional_embed_overrides=obj.positional_embed_overrides,
                  session_id=obj.session_id,
@@ -1836,78 +1688,58 @@ index 34fe4cf..b8df87a 100644
                  session_params=session_params,
                  custom_logit_processor=obj.custom_logit_processor,
                  require_reasoning=obj.require_reasoning,
-diff --git a/python/sglang/srt/mem_cache/common.py b/python/sglang/srt/mem_cache/common.py
-index b556dad..07a1d1c 100644
---- a/python/sglang/srt/mem_cache/common.py
-+++ b/python/sglang/srt/mem_cache/common.py
-@@ -264,6 +264,11 @@ def match_kv_cache(
-         req.mamba_branching_seqlen = match_result.mamba_branching_seqlen
-     if match_result.cache_protected_len is not None:
-         req.kv.cache_protected_len = match_result.cache_protected_len
-+    # Research observer: save only this completed native match's CPU scalars.
-+    # Never refresh a prefix or acquire a lock on behalf of a quote.
-+    runtime = getattr(tree_cache, "contextkv_runtime", None)
-+    if runtime is not None:
-+        runtime.record_native_match(req, len(token_ids))
-     return match_result
- 
- 
 diff --git a/python/sglang/srt/mem_cache/unified_cache/session_ref_tracker.py b/python/sglang/srt/mem_cache/unified_cache/session_ref_tracker.py
-index 73f03a0..b7c2007 100644
 --- a/python/sglang/srt/mem_cache/unified_cache/session_ref_tracker.py
 +++ b/python/sglang/srt/mem_cache/unified_cache/session_ref_tracker.py
-@@ -79,6 +79,8 @@ class UnifiedSessionRefTracker:
+@@ -77,6 +77,8 @@
          for component in self.components:
-             component_leaf = component.resolve_session_leaf(req, node)
-             component.register_session_leaf(session_id, component_leaf)
+             leaf = component.resolve_session_leaf(req, last_node)
+             component.register_session_leaf(session_id, leaf)
 +        if hasattr(req, "contextkv_session_ref_registered"):
 +            req.contextkv_session_ref_registered = True
  
      def _remember_closed_session(self, session_id: str) -> None:
          self._closed_session_ids[session_id] = None
 diff --git a/python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py b/python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py
-index 7f73fe2..03914ad 100644
 --- a/python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py
 +++ b/python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py
-@@ -147,6 +147,9 @@ class UnifiedTreeNode:
+@@ -133,6 +133,7 @@
          # Anchor NodeId of an in-flight H->D load-back reading this node's
          # host slots; such host copies must not be reclaimed until the ack.
          self.load_back_pending_id: Optional[int] = None
-+        # Observation only: all H2D policies publish indices before ACK. This
-+        # flag never participates in native eviction, locking or admission.
 +        self.contextkv_h2d_pending_id: Optional[int] = None
-         # Logical-page KV sharding: rotation base of the chain this node's Full
-         # KV pages belong to — the owner rank of position-page P along the chain
-         # is (rotation_base + P) % shard_size. A host-side mirror of the
-@@ -970,6 +973,10 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
-             device_validators=device_validators,
+ 
+     def component(self, component_type: ComponentType) -> ComponentData:
+         return self.component_data[component_type]
+@@ -485,6 +486,10 @@
+             cache_actions=[],
          )
  
 +    def peek_full_prefix(self, key: RadixKey) -> dict[str, int]:
 +        from sglang.srt.managers.contextkv_runtime import peek_full_prefix
 +        return peek_full_prefix(self, key, BASE_COMPONENT_TYPE)
 +
-     def match_full_device_prefix(self, key: RadixKey) -> tuple[int, NodeId, int]:
-         """Read-only FULL-device match, independent of auxiliary components; the
-         third result counts the whole deepest node (a partial match pins it all)."""
-@@ -1471,6 +1478,7 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
-             new_node._tlru_history_len = child._tlru_history_len
+     def node_by_id(self, node_id: NodeId) -> UnifiedTreeNode:
+         """Resolve a NodeId back to its tree node.
+ 
+@@ -1059,6 +1064,7 @@
+         new_node.creation_time = child.creation_time
          # Split fragments stay on the anchor's root path for the ack's walk.
          new_node.load_back_pending_id = child.load_back_pending_id
 +        new_node.contextkv_h2d_pending_id = child.contextkv_h2d_pending_id
-         # The rotation base is constant along a chain (position-page P keeps
-         # owner (b + P) % N on both sides of the split).
-         new_node.rotation_base = child.rotation_base
-@@ -2689,6 +2697,8 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
+ 
+         self._for_each_component_lru(child, UnifiedLRUList.remove_node)
+ 
+@@ -1958,6 +1964,8 @@
          rebuild is deferred to the orchestration layer."""
          node = self.node_by_id(node_id)
          cache_actions: list[CacheAction | ComponentAction] = []
 +        for nid in kv_xfer.nodes_to_load or ():
 +            self.node_by_id(nid).contextkv_h2d_pending_id = node_id
          if self.is_write_back:
-             # Pin Full KV host slots against duplicate reclaim until the ack.
-             # Auxiliary pools have independent host locks and may legitimately
-@@ -2729,6 +2739,8 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
+             # Write-back may reclaim a duplicate host copy while H->D DMA is
+             # still reading it, so pin every source node until the ack.
+@@ -2001,6 +2009,8 @@
          """
          node = self.node_by_id(anchor_node_id)
          while node is not None and node is not self.root_node:
@@ -1916,35 +1748,19 @@ index 7f73fe2..03914ad 100644
              if self.is_write_back:
                  if node.load_back_pending_id != anchor_node_id:
                      node = node.parent
-diff --git a/python/sglang/srt/mem_cache/unified_cache/unified_tree_core_interface.py b/python/sglang/srt/mem_cache/unified_cache/unified_tree_core_interface.py
-index 3bc4616..9e62987 100644
---- a/python/sglang/srt/mem_cache/unified_cache/unified_tree_core_interface.py
-+++ b/python/sglang/srt/mem_cache/unified_cache/unified_tree_core_interface.py
-@@ -481,6 +481,10 @@ class UnifiedTreeCoreInterface(ABC):
-         """Match a key; returns the device prefix length + boundary NodeIds."""
-         ...
- 
-+    def peek_full_prefix(self, key: RadixKey) -> dict[str, int]:
-+        """Read-only FULL GPU/host view; optional Python ContextKV extension."""
-+        raise NotImplementedError("ContextKV requires the Python TreeCore")
-+
-     @abstractmethod
-     def match_full_device_prefix(self, key: RadixKey) -> tuple[int, NodeId, int]:
-         """Return (matched tokens, deepest node, FULL tokens pinned by it)."""
 diff --git a/python/sglang/srt/mem_cache/unified_radix_cache.py b/python/sglang/srt/mem_cache/unified_radix_cache.py
-index 8e797ab..44d204b 100644
 --- a/python/sglang/srt/mem_cache/unified_radix_cache.py
 +++ b/python/sglang/srt/mem_cache/unified_radix_cache.py
-@@ -656,7 +656,7 @@ class UnifiedRadixCache(BasePrefixCache):
-         same_params=["len(params.key)"],
-         same_results=["result.prefix_len"],
-     )
+@@ -434,7 +434,7 @@
+     def is_chunk_cache(self) -> bool:
+         return self.disable
+ 
 -    def insert(self, params: InsertParams) -> InsertResult:
 +    def insert(self, params: InsertParams, *, contextkv_request=None) -> InsertResult:
          if self.disable:
              return InsertResult(prefix_len=0)
          # Fail fast on re-entrancy without touching the in-flight walk.
-@@ -667,7 +667,7 @@ class UnifiedRadixCache(BasePrefixCache):
+@@ -443,15 +443,17 @@
          try:
              step = self.tree_core.begin_insert(params)
              while True:
@@ -1953,35 +1769,36 @@ index 8e797ab..44d204b 100644
                  if step.result is not None:
                      # Walk actions flow through the steps; the result is action-free.
                      assert not step.result.cache_actions
-@@ -675,7 +675,7 @@ class UnifiedRadixCache(BasePrefixCache):
++                    if contextkv_request is not None and hasattr(contextkv_request, "contextkv_runtime"):
++                        contextkv_request.contextkv_inserted_cache_tokens += max(0, len(params.key)-step.result.prefix_len)
+                     return step.result
                  step = self.tree_core.resume_insert()
          finally:
              # Drain still-pending actions so frees reach the allocator on abort.
 -            self._apply_cache_actions(self.tree_core.end_insert())
 +            self._apply_cache_actions(self.tree_core.end_insert(), contextkv_request=contextkv_request)
-             if self.buffer_pipeline is not None:
-                 self.buffer_pipeline.end_insert_walk()
  
-@@ -1228,7 +1228,7 @@ class UnifiedRadixCache(BasePrefixCache):
+     def evict(self, params: EvictParams) -> EvictResult:
+         if self.disable:
+@@ -717,7 +719,7 @@
+ 
+             insert_params.key = radix_key
+             insert_params.value = values
+-            result = self.insert(insert_params)
++            result = self.insert(insert_params, contextkv_request=req)
+ 
+             # Free unaligned tail (+ deferred truncation tail)
+             segments = [(kv_indices[page_aligned_len:], page_aligned_len)]
+@@ -815,7 +817,7 @@
  
          insert_params.key = radix_key
          insert_params.value = values
 -        result = self.insert(insert_params)
 +        result = self.insert(insert_params, contextkv_request=req)
  
-         if result.rotation_tail_declined:
-             # Rotation-base discontinuity with the matched chain (pipelined
-@@ -1271,7 +1271,8 @@ class UnifiedRadixCache(BasePrefixCache):
-                     priority=min(
-                         insert_params.priority + 1, torch.iinfo(torch.int64).max
-                     ),
--                )
-+                ),
-+                contextkv_request=req,
-             )
- 
-         # With PD decode radix caching, SWA matching can stop short of the inserted path.
-@@ -1365,17 +1366,17 @@ class UnifiedRadixCache(BasePrefixCache):
+         # Match prefix
+         match_result = self.match_prefix(MatchPrefixParams(key=radix_key, req=req))
+@@ -876,17 +878,17 @@
      # ---- Internal Helpers ----
  
      def _apply_cache_actions(
@@ -2002,71 +1819,56 @@ index 8e797ab..44d204b 100644
          # Component actions route to their component class; the rest are
          # cache-owned and handled here by type.
          if isinstance(action, ComponentAction):
-@@ -1403,7 +1404,7 @@ class UnifiedRadixCache(BasePrefixCache):
-             if self.linker is not None:
-                 self.linker.offload_nodes(action.node_ids)
-             else:
--                self._execute_and_commit_kv_backup(action)
-+                self._execute_and_commit_kv_backup(action, contextkv_request=contextkv_request)
+@@ -902,7 +904,7 @@
+             for indices in action.indices:
+                 self.token_to_kv_pool_allocator.free_segment(indices, start_pos=0)
+         elif isinstance(action, BackupKV):
+-            self._execute_and_commit_kv_backup(action)
++            self._execute_and_commit_kv_backup(action, contextkv_request=contextkv_request)
          else:
              raise AssertionError(f"unhandled CacheAction: {type(action).__name__}")
  
-@@ -1672,7 +1673,7 @@ class UnifiedRadixCache(BasePrefixCache):
-         )
+@@ -1167,12 +1169,16 @@
+     # ---- HiCache: Backup / LoadBack ----
  
      def _execute_and_commit_kv_backup(
 -        self, action: BackupKV, write_back: bool = False
 +        self, action: BackupKV, write_back: bool = False, *, contextkv_request=None
      ) -> int:
          """Run a backup action top-down, stopping at the first failed backup."""
-         if self.buffer_pipeline is not None:
-@@ -1683,9 +1684,22 @@ class UnifiedRadixCache(BasePrefixCache):
-             for node_id in action.node_ids:
-                 self.buffer_pipeline.enqueue_backup_intent(node_id)
-             return 0
-+        prepared_specs = None
-+        runtime = getattr(self, "contextkv_runtime", None)
-+        if (contextkv_request is not None and not write_back and runtime is not None
-+                and runtime.host_admission.mode != "off"
-+                and self.cache_controller.write_policy in {"write_through", "write_through_selective"}):
-+            # FULL-only research runtime: build the same specs once. This is
-+            # before host allocation, commit, added locks, pending state or DMA.
-+            prepared_specs = {node_id: self.tree_core.build_backup_spec(node_id)
-+                              for node_id in action.node_ids}
-+            new_tokens = sum(len(value) for value, _ in prepared_specs.values())
-+            if not runtime.allow_host_backup(contextkv_request, new_tokens):
-+                return 0
          written = 0
++        runtime = getattr(self, "contextkv_runtime", None)
          for node_id in action.node_ids:
--            device_value, comp_xfers = self.tree_core.build_backup_spec(node_id)
-+            device_value, comp_xfers = (self.tree_core.build_backup_spec(node_id)
-+                                       if prepared_specs is None else prepared_specs[node_id])
+             device_value, comp_xfers = self.tree_core.build_backup_spec(node_id)
++            if runtime is not None and contextkv_request is not None and not write_back:
++                if not runtime.allow_host_backup(contextkv_request, len(device_value)):
++                    continue
              # Overlapping chain actions may revisit nodes with Full KV already
              # backed up. Skip only when no transfer remains.
              if device_value.numel() == 0 and not comp_xfers:
-@@ -1704,6 +1718,8 @@ class UnifiedRadixCache(BasePrefixCache):
-             self._track_write_through_node(
-                 node_id, lock_params, publish_node_ids=publish_node_ids
-             )
-+            if prepared_specs is not None:
-+                runtime.record_host_backup_admitted(contextkv_request, len(host_indices))
+@@ -1189,6 +1195,8 @@
+                 lock_params = self.inc_lock_ref(node_id).to_dec_params()
+             self._track_write_through_node(node_id, lock_params)
              written = len(host_indices)
++            if runtime is not None and contextkv_request is not None and not write_back:
++                runtime.record_host_backup_admitted(contextkv_request, written)
          return written
  
-@@ -1738,7 +1754,11 @@ class UnifiedRadixCache(BasePrefixCache):
-             host_avail = self.cache_controller.mem_pool_host.available_size()
-             if host_avail < kv_tokens:
-                 needed = kv_tokens - host_avail
--                if self.evict_host(needed) < needed:
-+                evicted = self.evict_host(needed)
-+                runtime = getattr(self, "contextkv_runtime", None)
-+                if runtime is not None:
-+                    runtime.record_host_capacity_eviction(evicted)
-+                if evicted < needed:
-                     return None
+     def _build_backup_sidecar(self, device_value, comp_xfers):
+@@ -1204,7 +1212,11 @@
+         host_avail = self.cache_controller.mem_pool_host.available_size()
+         if host_avail < kv_tokens:
+             needed = kv_tokens - host_avail
+-            if self.evict_host(needed) < needed:
++            evicted = self.evict_host(needed)
++            runtime = getattr(self, "contextkv_runtime", None)
++            if runtime is not None:
++                runtime.record_host_capacity_eviction(evicted)
++            if evicted < needed:
+                 return None
          aux_xfers = [x for xfers in comp_xfers.values() for x in xfers]
          aux_xfers.extend(sidecar_xfers)
-@@ -3500,6 +3520,9 @@ class UnifiedRadixCache(BasePrefixCache):
+@@ -2165,6 +2177,9 @@
  
      def _log_write_ack_metrics(self, ack: HiCacheAck) -> None:
          """Record D->H backup volume and duration for a completed write ack."""
@@ -2076,7 +1878,7 @@ index 8e797ab..44d204b 100644
          if self.metrics_collector is None:
              return
          for pool, num_tokens in (ack.num_tokens_by_pool or {}).items():
-@@ -3551,6 +3574,9 @@ class UnifiedRadixCache(BasePrefixCache):
+@@ -2211,6 +2226,9 @@
                  # Unpin the loaded nodes; host copies stay as reclaimable duplicates.
                  self.tree_core.finish_load_back(node)
  

@@ -10,7 +10,7 @@ from controller.action_proposals import GapRetrievalRequest
 from controller.claim_graph import ClaimGraph
 from controller.context_schema import EvidencePool, Need, OpenNeed, ReadingOutcome, ReadTask
 from controller.execution import ReadingExecutor
-from controller.reading import advance_read_plan
+from controller.reading import advance_read_plan, parse_read_result
 from controller.rolling_policy import RollingPlanRuntime, ZERO_AUX, compile_step, namespace_plan
 from controller.session_store import SessionStore
 from controller.templates import ByteTemplate
@@ -44,6 +44,55 @@ def interrupt_after_save(store, predicate):
             raise Interrupted()
 
     store.save_execution_step = interrupted
+
+
+@pytest.mark.asyncio
+async def test_reused_numeric_atoms_restore_once_and_compute_current_condition_view(tmp_path):
+    from controller.context_budget import direct_answer_reason
+    from controller.fact_reuse import apply_reuse_to_plan
+
+    needs = (Need("shipment-count", operation="count", condition_ids=("current",)),
+             Need("shipment-mass", operation="sum", condition_ids=("current",)))
+    plan = numeric_plan((material("R1 mass 1 kg."),), needs=needs)
+    task = replace(plan.steps[0], step_id="policy:reuse:complete")
+    plan = replace(plan, steps=(task,))
+    read = parse_read_result(task, json.dumps(response(row("R1", "1", "kg"))),
+                             plan.selected_set.selected_units)
+    atoms = tuple(replace(read.claims[0], claim_id=f"history:{index}:atom",
+                          conditions=(f"old-{index}",)) for index in range(2))
+    read = replace(read, claims=atoms)
+    seed = ReadingOutcome(plan, (read,), claims=atoms)
+    assert direct_answer_reason(seed, None) == "numeric_selection_incomplete"
+    store = SessionStore(tmp_path / "state.db")
+    snapshot = store.read_snapshot("s")
+    current_units = tuple(replace(unit, unit_id="fresh:"+unit.unit_id,
+        source_spans=tuple(replace(span, span_id="fresh:"+span.span_id) for span in unit.source_spans))
+        for unit in plan.selected_set.selected_units)
+    current_plan = replace(plan, selected_set=replace(plan.selected_set, selected_units=current_units),
+        coverage_units=tuple(unit.unit_id for unit in current_units), steps=(replace(plan.steps[0],
+            step_id="new:read", input_unit_ids=tuple(unit.unit_id for unit in current_units)),))
+    seed = apply_reuse_to_plan(current_plan, seed, ByteTemplate(), snapshot)
+    plan = seed.plan
+    attempt = store.begin_attempt("s", "r", "hash", plan.task_state.raw_question, 0)
+    store.save_context_plan(attempt.attempt_id, plan, initial_outcome=seed)
+    engine = NumericEngine(None)
+    executor = ReadingExecutor(store, engine, ByteTemplate())
+    outcome = await executor.execute_reads(attempt.attempt_id, snapshot, plan,
+        initial_outcome=ReadingOutcome(plan))
+    computed = {claim.operation: claim for claim in outcome.claims if claim.operation in {"count", "sum"}}
+    assert computed["count"].value == 1 and computed["sum"].value == "1000"
+    assert all(claim.conditions == ("current",) for claim in outcome.claims if claim.operation == "numeric_select")
+    assert tuple(claim.conditions for claim in outcome.claims[:2]) == (("old-0",), ("old-1",))
+    assert engine.reads == 0 and engine.selections == 2
+    assert direct_answer_reason(outcome, None) is None
+    assert len(outcome.steps) == len(store.execution_steps(attempt.attempt_id)) == 4
+    assert outcome.plan.online_tokens_spent == sum(len(step.input_ids)+len(step.output_ids) for step in outcome.steps)
+    store.save_context_plan(attempt.attempt_id, outcome.plan, initial_outcome=outcome)
+    restored = await executor.execute_reads(attempt.attempt_id, snapshot, outcome.plan)
+    assert restored.claims == outcome.claims and restored.results == outcome.results
+    assert restored.plan.online_tokens_spent == outcome.plan.online_tokens_spent
+    assert len(restored.steps) == 4 and engine.reads == 0 and engine.selections == 2
+    store.close()
 
 
 @pytest.mark.asyncio
@@ -84,7 +133,7 @@ async def test_empty_numeric_selection_first_complete_is_recoverable(tmp_path, r
         runtime.mode = "observed_actions"
         captured = []
 
-        def stop(catalog, state, *args):
+        def stop(catalog, state, *args, **kwargs):
             captured.append(state)
             raise Interrupted()
 
@@ -144,7 +193,7 @@ async def test_gap_result_ready_resumes_saved_pool_without_retrieval(tmp_path, a
             executor, set(), provider, controller.events, arrived)
     captured = []
 
-    def stop(catalog, state, *args):
+    def stop(catalog, state, *args, **kwargs):
         captured.append(state)
         raise Interrupted()
 
@@ -195,7 +244,7 @@ async def test_rolling_complete_read_resumes_prefix_callback_before_retirement(t
     runtime.mode = "observed_actions"
     captured = []
 
-    def stop(catalog, state, *args):
+    def stop(catalog, state, *args, **kwargs):
         captured.append(state)
         raise Interrupted()
 

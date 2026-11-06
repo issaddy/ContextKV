@@ -12,6 +12,7 @@ import math
 from typing import Mapping, NamedTuple, Protocol
 
 from .context_schema import ContextPlan, ReadTask, ReadingOutcome
+from .context_budget import completed_source_coverage, direct_answer_reason
 from .cost_model import CostModel
 from .evidence_planner import _passages
 from .reading import step_generation_kind
@@ -483,7 +484,6 @@ class PlanPolicy:
         if (native.reader_checkpoint != self.gain_model.reader_checkpoint or
                 native.reader_profile_id != self.gain_model.reader_profile_id):
             raise ValueError("plan gain asset belongs to a different reader checkpoint/profile")
-        covered = {unit_id for result in state.results for unit_id in result.covered_units}
         required = set(state.plan.coverage_units) if state.plan.coverage_scope == "all_supplied_documents" else set()
         evaluations, decisions = [], []
         for plan in plans:
@@ -511,7 +511,12 @@ class PlanPolicy:
             planned_coverage = {unit_id for step in ordered if step.task.kind == "READ"
                                 for unit_id in step.task.input_unit_ids}
             reason = None
-            if not (required | set(plan.required_coverage)) <= covered | planned_coverage:
+            material = {unit.unit_id: unit for unit in (*state.plan.selected_set.selected_units,
+                                                       *plan.context_plan.selected_set.selected_units)}
+            required_units = tuple(material[identity]
+                for identity in (required | set(plan.required_coverage))-planned_coverage)
+            if ordered[0].task.kind != "ANSWER" and not completed_source_coverage(
+                    state.plan, state.results, required_units):
                 reason = "required_scope_uncovered"
             elif plan.semantic_kind == "direct_answer" and any(step.task.kind != "ANSWER" for step in ordered):
                 raise ValueError("direct_answer contains only its terminal ANSWER")
@@ -549,6 +554,8 @@ class PlanPolicy:
                 for option in route:
                     cost += option.cost
                 reason = self._constraint(cost, state.plan.budget)
+                if ordered[0].task.kind == "ANSWER":
+                    reason = direct_answer_reason(state, route[0].candidate) or reason
                 budgets = {step.task.step_id: option.output_budget for step, option in zip(ordered, route, strict=True)}
                 gain = (0.0 if mandatory_coverage or plan.semantic_kind == "direct_answer" else self.gain_model.predict(
                     plan_features(plan, state, output_budgets=budgets)))

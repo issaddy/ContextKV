@@ -74,7 +74,8 @@ def test_canonical_windows_keep_rows_coordinates_and_prefix_across_task_budgets(
         ContextBudget(read_input_tokens=16000, read_output_tokens=8192), template=template,
         read_layout='source_first', read_packing='source_windows', output_tokens_per_fact=None)
     assert left.coverage_units == right.coverage_units
-    assert len(left.steps) == len(right.steps) == len(units)
+    assert len(left.steps) == len(right.steps) == 1
+    assert left.selected_set.selected_units == right.selected_set.selected_units == units
     for a, b in zip(left.steps, right.steps, strict=True):
         window = tuple(unit for unit in units if unit.unit_id in a.input_unit_ids)
         first = step_messages(left, a, window)
@@ -116,10 +117,10 @@ def test_canonical_table_windows_keep_shared_context_out_of_data_dependencies():
     reading = build_read_plan(state, selected, 'all_supplied_documents',
         ContextBudget(read_output_tokens=4096), template=ByteTemplate(),
         read_layout='source_first', read_packing='source_windows', output_tokens_per_fact=None)
-    assert len(reading.steps) == len(data)
+    assert len(reading.steps) == 1
     assert set(reading.coverage_units) == set(lookup)
     for step in reading.steps:
-        assert len(set(step.input_unit_ids) & data_ids) == 1
+        assert set(step.input_unit_ids) & data_ids == data_ids
         assert set(lookup) - data_ids <= set(step.input_unit_ids)
 
 
@@ -161,7 +162,9 @@ def test_full_scope_provider_builds_one_scan_without_support_or_set_search():
     for coverage, supplied in ((coverage, supplied)
             for coverage in ('all_supplied_documents', 'selected_sources') for supplied in (True, False)):
         corpus = SimpleNamespace(blocks=blocks, source_metadata={})
+        from adapters.history_state import TaskPrediction
         interpreter = SimpleNamespace(model=SimpleNamespace(), last_metrics={'task_model_ms': 0},
+                                      last_prediction=TaskPrediction('NEW'), last_read_contracts=(),
                                       interpret=lambda turn, memory: state)
         directory = SourceDirectory(corpus, None, template.tokenizer, task_interpreter=interpreter)
         directory.retrieve_pool = Mock(side_effect=AssertionError('full scope has no retrieval choice'))
@@ -181,8 +184,107 @@ def test_full_scope_provider_builds_one_scan_without_support_or_set_search():
         assert reading.task_state.needs == state.needs
         assert set(reading.task_state.source_scope) == {block.key for block in blocks}
         assert set(reading.coverage_units) == {unit.unit_id for unit in reading.selected_set.selected_units}
-        assert len(reading.steps) == 2
+        assert len(reading.steps) == 1
         trace = provider.traces['session', 'request']
         assert trace['support_schedule'] == trace['search_trace'] == ()
         assert not trace['selection_policy_heads_used']
         assert dict(reading.auxiliary_ms)['support'] == dict(reading.auxiliary_ms)['search'] == 0
+
+
+def test_request_compiler_binds_read_order_and_actual_encoded_source_geometry():
+    from controller.engine_client import EngineInfo
+    from controller.prefix_view import actual_source_geometry
+    from controller.request_compiler import RequestCompiler
+    from controller.schema import CompletionReceipt, SessionSnapshot
+
+    class OrderingIndex:
+        def __init__(self):
+            self.observed = []
+        def propose_orders(self, identities, **scope):
+            return (tuple(identities), tuple(reversed(identities)))
+        def observe_executed(self, identities, **execution):
+            self.observed.append((identities, execution))
+            return 'actual-request'
+
+    template = ByteTemplate()
+    unit = material()
+    other = replace(unit, unit_id='other', text='Quoted "value"\nnext row',
+        source_spans=(replace(unit.source_spans[0], span_id='other', start=50, end=73),))
+    current = plan(unit)
+    current = replace(current, selected_set=EvidenceSet('both', (unit, other)))
+    task = ReadTask('read', 'READ', ('count',), ('unit', 'other'), input_budget=32000, output_budget=1024)
+    snapshot = SessionSnapshot('session')
+    scope = EngineInfo('restart', fingerprint=template.fingerprint)
+    index = OrderingIndex()
+    compiler = RequestCompiler(template, index)
+    variants = compiler.compile_read(current, task, (unit, other), (), snapshot,
+                                     outputs=(1024,), cache_scope=scope)
+    assert len(variants) == 2 and not index.observed
+    assert variants[0].read_unit_order == ('unit', 'other')
+    assert variants[1].read_unit_order == ('other', 'unit')
+    assert set(variants[0].source_ids) == set(variants[1].source_ids)
+    lookup = {unit.unit_id: unit for unit in (unit, other)}
+    for candidate in variants:
+        ordered = tuple(lookup[identity] for identity in candidate.read_unit_order)
+        bound = replace(task, input_unit_ids=candidate.read_unit_order)
+        assert template.render(step_messages(current, bound, ordered, snapshot=snapshot)).input_ids == candidate.input_ids
+        expected = sum(len(json.dumps(item.text, ensure_ascii=False)[1:-1].encode()) for item in ordered)
+        geometry = actual_source_geometry(template, candidate)
+        assert geometry['body_tokens'] == candidate.evidence_body_tokens == expected
+        assert geometry['causal_prefix_input_ids'] == candidate.input_ids[:geometry['causal_boundary_tokens']]
+    selected = variants[1]
+    receipt = CompletionReceipt('rid', 'attempt', 'engine', 0, 'restart', selected.input_hash, 'length', True)
+    observed = compiler.observe_executed(selected, receipt, cache_scope=scope)
+    assert observed['index_request_id'] == 'actual-request'
+    assert index.observed[0][0] == selected.source_ids
+    assert index.observed[0][1]['input_ids'] == selected.input_ids
+    plain = RequestCompiler(template).compile_read(current, task, (unit, other), (), snapshot, outputs=(1024,))
+    assert plain[0].input_ids == variants[0].input_ids and plain[0].source_ids == variants[0].source_ids
+
+    from controller.schema import CacheQuote, CacheQuoteBatch
+    left, right = variants
+    a = CacheQuote(left.candidate_id, left.input_hash, len(left.input_ids), len(left.input_ids),
+        ready_gpu_prefix_tokens=10, recoverable_prefix_tokens=len(left.input_ids)-20,
+        host_only_load_tokens=20, native_load_estimate=20)
+    b = CacheQuote(right.candidate_id, right.input_hash, len(right.input_ids), len(right.input_ids),
+        ready_gpu_prefix_tokens=len(right.input_ids)-40)
+    batch = CacheQuoteBatch('quote', 1, 1, 'restart', scope.cache_config_hash, 0, 0, (a, b),
+                            fingerprint=template.fingerprint)
+    assert compiler.choose_variant(variants, batch) is left  # full host restore exposes the complete prefix
+    partial = replace(batch, quotes=(replace(a, native_load_estimate=10), b))
+    assert compiler.choose_variant(variants, partial) is right  # partial restore leaves the first GPU boundary
+    cheaper_host = replace(batch, quotes=(a, replace(b, ready_gpu_prefix_tokens=len(right.input_ids)-20)))
+    assert compiler.choose_variant(variants, cheaper_host) is right
+
+
+def test_request_compiler_answer_reorders_only_actual_excerpts_and_preserves_task():
+    from controller.engine_client import EngineInfo
+    from controller.request_compiler import RequestCompiler
+    from controller.schema import SessionSnapshot
+
+    class ReverseIndex:
+        def propose_orders(self, identities, **scope):
+            return (tuple(identities), tuple(reversed(identities)))
+
+    template = ByteTemplate()
+    blocks = tuple(make_evidence(f'Row {index} has a complete source fact.', str(index)) for index in range(2))
+    units = tuple(EvidenceUnit(str(index), (SourceSpan(str(index), block.key, 0, len(block.text)),), block.text)
+                  for index, block in enumerate(blocks))
+    state = TaskState('task', 'Extract the source facts.', needs=(Need('extract', operation='extract'),))
+    current = ContextPlan('plan', state, EvidenceSet('sources', units, source_blocks=blocks))
+    snapshot = SessionSnapshot('s')
+    scope = EngineInfo('restart', fingerprint=template.fingerprint)
+    baseline = RequestCompiler(template).compile_answers(snapshot, state.raw_question, current,
+                                                        layouts=('existing',), actions=('REBUILD',))
+    variants = RequestCompiler(template, ReverseIndex()).compile_answers(snapshot, state.raw_question, current,
+        layouts=('existing',), actions=('REBUILD',), cache_scope=scope)
+    assert len(variants) == 2 and variants[0].input_ids == baseline[0].input_ids
+    assert variants[1].layout_id == 'existing:contextpilot'
+    assert variants[0].messages[:-1] == variants[1].messages[:-1]
+    suffix = '\nCurrent task and active conditions:\n'
+    assert variants[0].messages[-1].content.split(suffix)[1] == variants[1].messages[-1].content.split(suffix)[1]
+    assert set(variants[0].source_ids) == set(variants[1].source_ids)
+    assert variants[0].required_blocks == variants[1].required_blocks
+    for candidate in variants:
+        assert candidate.evidence_body_tokens == sum(len(block.text.encode()) for block in blocks)
+        assert {span.key for span in candidate.evidence_spans} == {block.key for block in blocks}

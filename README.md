@@ -4,15 +4,17 @@
 
 Qwen3-32B 权重与解码参数冻结，不做微调或合并模型。
 
-系统在实际问答历史、条件与版本基础上选择原文，按固定窗口和累计成本执行
-READ/REDUCE/ANSWER，并基于原生缓存状态决定来源前缀保护。最终结论保留完整来源链，
+业务入口 `DocumentQA` 贯通资料登记、HTTP 问答与 `bench.study`。
+
+系统在实际问答历史、条件与版本基础上选择原文，复用适用原子事实，合并稳定窗口执行
+READ/REDUCE/ANSWER；在选择前编译实际来源排列并取得 Native 报价。最终结论保留完整来源链，
 数值需求共享阅读，确定性运算在 CPU 完成；模型归约按有限分片执行。
 
 | 主线 | 当前入口 |
 |---|---|
 | A：实际历史、选材与阅读协议 | `training.a_workflow`、`training.preference_rollout`、`bench.evidence_policy_comparison` |
 | B：显式阅读动作与完整成本 | `controller.action_policy`、`controller.rolling_policy`、`training.plan_gain_rollout`、`training.plan_gain_completion` |
-| C：原生缓存与来源前缀保护 | `controller.prefix_retention`、`profiling.retention_trace`、`bench.capacity_workflow` |
+| C：请求编译与缓存协同 | `controller.request_compiler`、作者 ContextPilot index/reorder；`controller.prefix_retention` 为可选保护 |
 | 评价与总成本 | `bench.study_scoring`、`bench.reassess_saved`、`profiling.study_cost_ledger` |
 
 保留共享数值阅读 / `numeric_need_isolation`、显式动作 / `whole_plan` 固定计划、

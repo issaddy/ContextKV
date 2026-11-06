@@ -22,7 +22,7 @@ from controller.templates import ByteTemplate, verify_evidence_spans
 async def test_read_answer_commit_once_and_replay_does_no_work(tmp_path):
     block, unit = material("Eligible applicants use the online form.")
     state = TaskState("t", "How do I apply?", needs=(Need("n", operation="procedure"),), current_turn_id=1)
-    selected = EvidenceSet("s", (unit,), quality_prediction=.9, source_blocks=(block,))
+    selected = EvidenceSet("s", (unit,), quality_prediction=.9, disposition="partial", source_blocks=(block,))
     plan = build_read_plan(state, selected, "selected_sources", ContextBudget(), template=ByteTemplate())
     engine = ScriptedReadingEngine([read_output(fact("a"))])
     store = SessionStore(tmp_path/"state.db")
@@ -40,7 +40,7 @@ async def test_read_answer_commit_once_and_replay_does_no_work(tmp_path):
     steps = store.execution_steps(response.attempt_id)
     assert steps[0].result.claims[0].source_spans == unit.source_spans
     assert steps[0].metrics["quote_ms"] >= 0
-    assert steps[0].metrics["cache_quote"]["quotes"][0]["candidate_id"] == response.attempt_id+":read:0"
+    assert steps[0].metrics["cache_quote"]["quotes"][0]["input_hash"] == steps[0].receipt["input_hash"]
     assert steps[0].metrics["cache_config_hash"] == (await engine.info()).cache_config_hash
     calls = len(engine.constraints)
     replay = await controller.serve_turn("s", state.raw_question, context_plans=(plan,), request_id="one")
@@ -54,7 +54,7 @@ async def test_read_answer_commit_once_and_replay_does_no_work(tmp_path):
 async def test_source_prefix_observer_finishes_before_read_epoch_retirement_and_qa_commit(tmp_path):
     block, unit = material("Eligible applicants use the online form.")
     state = TaskState("t", "How do I apply?", needs=(Need("n", operation="procedure"),), current_turn_id=1)
-    plan = build_read_plan(state, EvidenceSet("set", (unit,), source_blocks=(block,)),
+    plan = build_read_plan(state, EvidenceSet("set", (unit,), disposition="partial", source_blocks=(block,)),
         "selected_sources", ContextBudget(), template=ByteTemplate(), read_layout="source_first")
     engine = ScriptedReadingEngine([read_output(fact("a"))])
     store = SessionStore(tmp_path/"state.db")

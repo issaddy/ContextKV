@@ -172,6 +172,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     service = create_controller(run)
     provider_started = time.monotonic()
     provider = await asyncio.to_thread(create_study_retriever, config, service.template)
+    from controller.qa import DocumentQA
+    qa = DocumentQA(service, provider)
     service.bind_resident_models(provider.manifest)
     initialization_ms = (time.monotonic()-provider_started)*1000
     engine_info = await service.engine.info()
@@ -249,6 +251,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             OnlineMessage("user", turn.user_text), OnlineMessage("assistant", turn.assistant_text)))
         task_id = row["task_id"]
         request_id = actual_request_id(task_id)
+        supplied, metadata = None, None
         if (row.get("coverage_mode") or spec.get("supplied_documents",
                 dataset_name in {"loong", "long_dev", "multihop_dev"})):
             supplied = tuple(make_evidence(context["text"], context["document_id"],
@@ -260,18 +263,9 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 "document_family", "valid_from", "valid_to", "published_at", "applicability",
                 "table_id", "heading", "current", "version_order") if key in context}
                 for block, context in zip(supplied, row["contexts"], strict=True)}
-            async def retrieve(snapshot):
-                return await provider.retrieve_supplied(snapshot, query, task_id, supplied,
-                    source_metadata=metadata, coverage_scope=row.get("coverage_mode",
-                        spec.get("coverage_mode", "selected_sources")))
-        else:
-            async def retrieve(snapshot):
-                return await provider.retrieve(snapshot, query, task_id)
-        async def extend(plan, open_needs, claims):
-            return await provider.extend_for_plan(before, plan, open_needs, claims)
-        response = await service.serve_turn(session_id, query, request_id=request_id,
-            corpus_snapshot_id=provider.corpus_snapshot_id, evidence_provider=retrieve,
-            open_need_provider=extend, request_arrived=start)
+        response = await qa.ask(session_id, query, request_id, task_id=task_id,
+            supplied_blocks=supplied, source_metadata=metadata, request_arrived=start,
+            coverage_scope=row.get("coverage_mode", spec.get("coverage_mode", "selected_sources")))
         end = time.monotonic()
         attempt = service.store.get_attempt(response.attempt_id)
         snapshot = service.store.get_snapshot(session_id)

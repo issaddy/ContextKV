@@ -13,6 +13,7 @@ from controller.context_schema import Condition, Need, RetrievalState, TaskState
 from controller.context_budget import text_ref_sources, text_ref_text
 from controller.schema import OnlineTurn
 from controller.serialization import decode
+from controller.fact_reuse import ReadReuse, read_contracts
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class TaskPrediction:
     version_intent: VersionIntent = VersionIntent()
     resume_task_id: str = ""
     source_scope: tuple = ()
+    read_reuse: tuple[ReadReuse, ...] = ()
 
 
 def history_text(ref: TextRef, memory: RetrievalState, turn: OnlineTurn | None = None) -> str:
@@ -72,7 +74,7 @@ TASK_MAX_REFS = 16
 TASK_MAX_VERSION_TURNS = 2
 
 
-TASK_WIRE_SCHEMA = "owned_task_graph_v7_visible_token_boundaries"
+TASK_WIRE_SCHEMA = "owned_task_graph_v8_visible_read_contracts"
 
 
 def indexed_ref_windows(windows):
@@ -291,7 +293,7 @@ class TaskInterpreter:
             from types import SimpleNamespace
             view = SimpleNamespace(task_catalogue=budget_task_catalogue(self.history_index.tokenizer,
                 turn.query, task_source_catalogue(memory), memory.prior_task_states, current_turn_id=turn.turn),
-                reference_date=getattr(source, "reference_date", None))
+                reference_date=getattr(source, "reference_date", None), read_contracts=read_contracts(memory))
             if hasattr(source, "observed_source_scope"):
                 view.observed_source_scope = source.observed_source_scope
             memory = replace(memory, source_index=view)
@@ -299,6 +301,7 @@ class TaskInterpreter:
         if memory.source_index is not None and hasattr(memory.source_index, "observed_source_scope"):
             prediction = replace(prediction, source_scope=memory.source_index.observed_source_scope)
         self.last_prediction = prediction
+        self.last_read_contracts = self.model.last_read_contracts if isinstance(self.model, TeacherTaskModel) else ()
         validate_task_refs(prediction, turn, memory)
         base = task_base_state(memory.prior_task_states, prediction.relation, prediction.resume_task_id)
         conditions = apply_condition_updates(base.conditions if base else (), prediction.conditions)
@@ -436,6 +439,16 @@ TASK_TEACHER_SYSTEM = ("Interpret the current task using the indexed literal tex
           "Counting and summing the same population are independent operations. A shared pronoun or "
           "the order of the requests does not create a dependency unless the count itself is used in the later formula. "
           "A need's current condition IDs must name conditions actually emitted in this object. "
+          "read_contracts contain completed original READs, their requested populations, source ranges, "
+          "conditions and source-stated atomic fields. For every Need, assign every visible read_contract ID "
+          "a read_reuse decision: none, facts or complete. none means unrelated or incompatible; facts means "
+          "compatible source atoms that do not close the current range or field gap. complete means that "
+          "the contract's ENTIRE original range was read for a population covering this Need, and its extracted "
+          "fields include the current result and every attribute required by the current filters. "
+          "complete covers only that READ range, never other documents. A broadened population cannot be complete "
+          "from a previously filtered subset. Count-only facts without the requested quantity cannot complete sum. "
+          "Choose facts when a new filter needs an unextracted attribute. Reuse only supplied atomic facts; "
+          "old counts, sums and other derived conclusions are not reusable atoms. "
           "Emit ADD/REPLACE/COMPARE only for materialized active conditions. KEEP means no update. "
           "Use condition_removals with original predicate spans and prior targets for REMOVE events; "
           "removal events cannot be referenced as current conditions. "
@@ -454,10 +467,10 @@ TASK_TEACHER_SYSTEM = ("Interpret the current task using the indexed literal tex
           '"version_ids":[],"resolved_version_ids":[],"time_refs":[],"source_turns":[]},'
           '"conditions":{},"condition_removals":[],"needs":{'
           '"n0":{"anchor_spans":[{"window_id":"w0","boundary_tokens":[2,4]}],'
-          '"subject_refs":[],"operation":"lookup","condition_ids":[],"predecessor_need_ids":[],'
+          '"subject_refs":[],"operation":"lookup","condition_ids":[],"predecessor_need_ids":[],"read_reuse":{},'
           '"scope":"selected_sources"},'
           '"n1":{"anchor_spans":[{"window_id":"w0","boundary_tokens":[7,9]}],'
-          '"subject_refs":[],"operation":"lookup","condition_ids":[],"predecessor_need_ids":[],'
+          '"subject_refs":[],"operation":"lookup","condition_ids":[],"predecessor_need_ids":[],"read_reuse":{},'
           '"scope":"selected_sources"}}}\n'
           "Here both units specify the requested results. A user request for a named edition supplies "
           "a VERSION restriction; a user request for the rule in force on a specified date supplies "
@@ -535,7 +548,7 @@ def teacher_messages(body):
             {"role": "user", "content": json.dumps(body, ensure_ascii=False, separators=(",", ":"))}]
 
 
-def teacher_task_payload(turn, windows, memory, prior_tasks, catalogue):
+def teacher_task_payload(turn, windows, memory, prior_tasks, catalogue, contracts=()):
     """Render selected tasks together with their original condition/Need closure."""
     from controller.serialization import to_jsonable
     latest = {state.task_id: state for state in prior_tasks}
@@ -623,8 +636,10 @@ def teacher_task_payload(turn, windows, memory, prior_tasks, catalogue):
         "source_families": [{"family_id": alias, "literal_family": family,
             "sources": [{**row, "version_id": version_alias[row["version"]]} for row in catalogue[family]]}
             for family, alias in family_alias.items()],
+        "read_contracts": [{"read_id": f"r{index}", **contract.visible(memory.committed_history)}
+                           for index, contract in enumerate(contracts)],
         "wire_schema": TASK_WIRE_SCHEMA, "need_semantics_version": TASK_NEED_SEMANTICS_VERSION}
-    return body, ref_windows, latest, (task_alias, condition_alias, need_alias, version_alias, family_alias)
+    return body, ref_windows, latest, (task_alias, condition_alias, need_alias, version_alias, family_alias), tuple(contracts)
 
 
 def budget_teacher_input(client, turn, windows, memory):
@@ -633,8 +648,8 @@ def budget_teacher_input(client, turn, windows, memory):
     catalogue = budget_task_catalogue(client.tokenizer, turn.query, task_source_catalogue(memory),
         memory.prior_task_states, current_turn_id=turn.turn)
 
-    def render(tasks, selected_windows):
-        payload = teacher_task_payload(turn, selected_windows, memory, tasks, catalogue)
+    def render(tasks, selected_windows, contracts=()):
+        payload = teacher_task_payload(turn, selected_windows, memory, tasks, catalogue, contracts)
         return payload, client.count_input_tokens(teacher_messages(payload[0]))
 
     payload, size = render((), ())
@@ -666,8 +681,18 @@ def budget_teacher_input(client, turn, windows, memory):
             selected_tasks.append(state)
             payload = proposed
     selected_windows = []
+    selected_contracts = []
+    selected_ids = {state.task_id for state in selected_tasks}
+    available_contracts = memory.source_index.read_contracts if memory.source_index is not None else ()
+    for contract in sorted(available_contracts, key=lambda item: (
+            item.outcome.plan.task_state.task_id not in selected_ids,
+            -item.outcome.plan.task_state.current_turn_id, item.read_id)):
+        proposed, size = render(selected_tasks, (), (*selected_contracts, contract))
+        if size <= maximum:
+            selected_contracts.append(contract)
+            payload = proposed
     for window in sorted(windows, key=lambda item: (-item.score, -item.ref.turn_id, item.ref.start)):
-        proposed, size = render(selected_tasks, (*selected_windows, window))
+        proposed, size = render(selected_tasks, (*selected_windows, window), selected_contracts)
         if size <= maximum:
             selected_windows.append(window)
             payload = proposed
@@ -688,7 +713,9 @@ class TeacherTaskModel:
                 "transport": self.client.manifest}
 
     def predict(self, turn, windows, memory):
-        body, ref_windows, latest, aliases = budget_teacher_input(self.client, turn, windows, memory)
+        body, ref_windows, latest, aliases, contracts = budget_teacher_input(self.client, turn, windows, memory)
+        self.last_read_contracts = contracts
+        read_aliases = {f"r{index}": contract for index, contract in enumerate(contracts)}
         task_alias, condition_alias, need_alias, version_alias, family_alias = aliases
         current_conditions = {f"c{i}": f"{turn.task_id}:c{i}" for i in range(TASK_MAX_OBJECTS)}
         current_needs = {f"n{i}": f"{turn.task_id}:n{i}" for i in range(TASK_MAX_OBJECTS)}
@@ -718,8 +745,11 @@ class TeacherTaskModel:
             "anchor_spans": {"allOf": [refs], "minItems": 1}, "subject_refs": refs,
             "operation": {"$ref": "#/$defs/Operation"},
             "condition_ids": strings, "predecessor_need_ids": strings,
+            "read_reuse": {"type": "object", "properties": {
+                identity: {"type": "string", "enum": ["none", "facts", "complete"]} for identity in read_aliases},
+                "required": list(read_aliases), "additionalProperties": False},
             "scope": {"$ref": "#/$defs/NeedScope"}},
-            "required": ["anchor_spans", "subject_refs", "operation", "condition_ids", "predecessor_need_ids", "scope"],
+            "required": ["anchor_spans", "subject_refs", "operation", "condition_ids", "predecessor_need_ids", "read_reuse", "scope"],
             "additionalProperties": False}
         properties = {"relation": {"type": "string", "enum": ["standalone", "followup", "correction", "revisit", "topic_switch"]},
             "history_spans": refs, "resume_task_id": {"type": "string"},
@@ -805,6 +835,8 @@ class TeacherTaskModel:
                     "usage": completion.usage, "elapsed_ms": completion.elapsed_ms,
                     "raw_output": completion.text, "error": completion.error,
                     "messages": messages, "text_ref_windows": ref_windows,
+                    "read_contract_origins": {alias: {"attempt_id": contract.attempt_id,
+                        "step_id": contract.step_id} for alias, contract in read_aliases.items()},
                     "raw_response": completion.raw_response}, ensure_ascii=False)+"\n")
         if completion.status != "completed" or completion.finish_reason != "stop":
             raise RuntimeError(f"task interpretation unfinished: {completion.status}/{completion.finish_reason}")
@@ -827,7 +859,11 @@ class TeacherTaskModel:
             condition["condition_id"] = current_conditions[condition["condition_id"]]
             condition["target_refs"] = [reverse_conditions[identity] for identity in condition["target_refs"]]
             condition["supersedes"] = [reverse_conditions[identity] for identity in condition["supersedes"]]
+        value["read_reuse"] = []
         for need in value["needs"]:
+            decisions = need.pop("read_reuse")
+            value["read_reuse"].extend({"need_id": current_needs[need["need_id"]],
+                "read_id": read_aliases[alias].read_id, "mode": mode} for alias, mode in decisions.items())
             need["need_id"] = current_needs[need["need_id"]]
             need["condition_ids"] = [{**reverse_conditions, **current_conditions}[identity] for identity in need["condition_ids"]]
             need["predecessor_need_ids"] = [{**reverse_needs, **current_needs}[identity] for identity in need["predecessor_need_ids"]]

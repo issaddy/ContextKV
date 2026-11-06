@@ -71,6 +71,22 @@ class ReadingProgress:
     auxiliary_usage: dict | None = None
 
 
+@dataclass(frozen=True)
+class DocumentSet:
+    document_set_id: str
+    corpus_snapshot_id: str
+    blocks: tuple[EvidenceBlock, ...]
+    source_metadata: tuple[tuple[EvidenceKey, dict], ...] = ()
+
+    @classmethod
+    def create(cls, blocks, source_metadata=None):
+        blocks = tuple(blocks)
+        metadata = tuple(sorted((source_metadata or {}).items()))
+        digest = sha256(dumps((blocks, metadata)).encode("utf-8")).hexdigest()
+        identity = "documents:"+digest
+        return cls(identity, identity, blocks, metadata)
+
+
 def load_record(connection, cls, payload):
     """Reconstruct exact persisted text for serving, recovery and frozen replay."""
     texts = {}
@@ -123,6 +139,8 @@ class SessionStore:
             PRIMARY KEY(session_id, version));
           CREATE TABLE IF NOT EXISTS text_blobs (
             sha256 TEXT PRIMARY KEY, text TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS document_sets (
+            document_set_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS turn_plans (
             attempt_id TEXT PRIMARY KEY REFERENCES attempts(attempt_id), plan TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS execution_steps (
@@ -209,6 +227,39 @@ class SessionStore:
         with self._mutex:
             return self._read(session_id)
 
+    def register_document_set(self, blocks, *, source_metadata=None) -> DocumentSet:
+        documents = DocumentSet.create(blocks, source_metadata)
+        with self._transaction():
+            self.db.execute("INSERT OR IGNORE INTO document_sets VALUES(?,?)",
+                            (documents.document_set_id, self._dump(documents)))
+        return documents
+
+    def load_document_set(self, document_set_id: str) -> DocumentSet:
+        with self._mutex:
+            row = self.db.execute("SELECT payload FROM document_sets WHERE document_set_id=?",
+                                  (document_set_id,)).fetchone()
+            if row is None:
+                raise KeyError(document_set_id)
+            return load_record(self.db, DocumentSet, row[0])
+
+    def committed_readings(self, snapshot: SessionSnapshot):
+        """Project actual committed READ outcomes without another facts ledger."""
+        turns = {turn.turn_id: turn for turn in snapshot.raw_history}
+        readings = []
+        with self._mutex:
+            rows = self.db.execute("SELECT payload FROM attempts WHERE session_id=? AND stage='COMMITTED' "
+                                   "ORDER BY rowid", (snapshot.session_id,)).fetchall()
+            for row in rows:
+                attempt = load_record(self.db, Attempt, row[0])
+                outcome = attempt.reading_outcome
+                if outcome is None or outcome.plan.task_state.current_turn_id not in turns:
+                    continue
+                turn = turns[outcome.plan.task_state.current_turn_id]
+                if ((attempt.query, attempt.result.text) == (turn.user_text, turn.assistant_text)
+                        and turn.evidence_set == outcome.plan.selected_set):
+                    readings.append((attempt.attempt_id, outcome))
+        return tuple(readings)
+
     def _write_snapshot(self, snapshot: SessionSnapshot, expected_version: int):
         payload = self._dump(snapshot)
         changed = self.db.execute("UPDATE sessions SET version=?,snapshot=? WHERE session_id=? AND version=?",
@@ -265,8 +316,13 @@ class SessionStore:
             self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (attempt.stage, self._dump(attempt), attempt.attempt_id))
             return attempt
 
-    def save_context_plan(self, attempt_id: str, context_plan: ContextPlan):
+    def save_context_plan(self, attempt_id: str, context_plan: ContextPlan, *, initial_outcome=None):
         with self._transaction():
+            if initial_outcome is not None:
+                attempt = self.get_attempt(attempt_id)
+                attempt = replace(attempt, context_plan=context_plan, reading_outcome=initial_outcome)
+                self.db.execute("UPDATE attempts SET payload=? WHERE attempt_id=?",
+                                (self._dump(attempt), attempt_id))
             self.db.execute("INSERT INTO turn_plans VALUES(?,?) ON CONFLICT(attempt_id) "
                             "DO UPDATE SET plan=excluded.plan",
                             (attempt_id, self._dump(context_plan)))

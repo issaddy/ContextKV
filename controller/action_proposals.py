@@ -81,7 +81,10 @@ def observed_reduction_task(frozen):
                               if selection.step_id in record.task.predecessor_step_ids}
         else:
             claims = tuple(claim for claim in frozen.claims if claim.kind == "extract" and claim.serves(need.need_id))
-            if len(claims) < (2 if summarize else 1):
+            read_ids = {task.step_id for task in base.steps if task.kind == "READ" and need.need_id in task.need_ids}
+            empty_group = (need.operation == "group" and bool(read_ids)
+                           and read_ids <= {result.step_id for result in frozen.results})
+            if len(claims) < (2 if summarize else 1) and not empty_group:
                 continue
         inputs = tuple(claim.claim_id for claim in claims)
         operation = ("summarize" if summarize else "union"
@@ -92,8 +95,9 @@ def observed_reduction_task(frozen):
                     else set(inputs) <= set(result.reduction.basis_claim_ids))
                for result in frozen.results):
             continue
+        producers = {claim.claim_id: result.step_id for result in frozen.results for claim in result.claims}
         predecessors = (selection.step_id,) if shared_numeric else tuple(
-            dict.fromkeys(claim.rsplit(":claim:", 1)[0] for claim in inputs))
+            dict.fromkeys(producers[claim] for claim in inputs if claim in producers))
         identity = hashlib.sha256(dumps((need.need_id, operation, inputs, predecessors)).encode()).hexdigest()[:16]
         return ReadTask("policy:observed:reduce:"+need.need_id+":"+identity, "REDUCE", (need.need_id,),
             input_claim_ids=inputs, reduction_basis_claim_ids=inputs,
@@ -113,10 +117,10 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
     """Register at most one ready READ, one current-basis REDUCE and one GAP."""
     base = bind_answer_window(frozen.plan, template, snapshot, answer_system_prompt,
                              preserve_step_ids=tuple(record.step_id for record in frozen.steps))
-    covered = {unit for result in frozen.results for unit in result.covered_units}
-    if base.coverage_scope == "all_supplied_documents" and not set(base.coverage_units) <= covered:
-        return (), ({"family": "direct_answer", "reason": "mandatory_source_coverage_incomplete"},)
-    historic = tuple(record.task for record in frozen.steps)
+    result_ids = {result.step_id for result in frozen.results}
+    historic = {task.step_id: task for task in base.steps if task.kind == "READ" and task.step_id in result_ids}
+    historic.update((record.step_id, record.task) for record in frozen.steps)
+    historic = tuple(historic.values())
     identity = hashlib.sha256(dumps((base.task_state, frozen.results, frozen.claims,
         frozen.coverage, frozen.open_needs, base.selected_set, snapshot.raw_history)).encode()).hexdigest()[:16]
     completed = {result.step_id for result in frozen.results}

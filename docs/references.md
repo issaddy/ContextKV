@@ -43,7 +43,7 @@ B 的决策目标可写成 `E[ΔQ(a | 当前状态, 剩余预算)] − λ·E[新
 
 C 对新增保护项及期限 `(p, τ)` 的目标是 `ΔV(p, τ | 已保护集合) = 预期目标读取节省 − 新增控制费 − 新增驻留费 − 外部请求代价`。目标读取节省相对同一原生状态、不含右侧另列费用；共享需求与共享页分别只计新增部分。重访概率只是其中一项，即便很快重访，Native 已能命中也可能无需额外保护。当前两种贪心近似求解这个集合目标，没有完整联合最优保证。
 
-可由机制直接确定的性质包括：给定正确完整事实和量纲，CPU 可按声明精度执行确定性运算；相同且适用的已算结果可避免重复计算；有限 DAG 会结束；因果前缀相同才可直接复用对应原生 KV。具体窗口大小、融合权重、beam 宽度、回归模型和 TTL 的最佳值不由这些性质决定。跨轮结果复用应先计算索引/匹配与维护成本及可节省的整次 READ，再决定是否接入；不因理论机会就改动当前冻结主线。
+可由机制直接确定的性质包括：给定正确完整事实和量纲，CPU 可按声明精度执行确定性运算；相同且适用的已算结果可避免重复计算；有限 DAG 会结束；因果前缀相同才可直接复用对应原生 KV。具体窗口大小、融合权重、beam 宽度、回归模型和 TTL 的最佳值不由这些性质决定。跨轮原子事实复用现已接入已有 contract/Claim DAG，范围完成按来源区间核查；其匹配成本与减少的 READ 一并计入实际响应。
 
 ## A：任务、历史、来源与证据选择
 
@@ -83,7 +83,7 @@ C 对新增保护项及期限 `(p, τ)` 的目标是 `ΔV(p, τ | 已保护集�
 |---|---|---|
 | [RadixAttention](https://arxiv.org/abs/2312.07104)／[HiCache](https://docs.sglang.io/docs/advanced_features/hicache_design) | 已有原生因果前缀和 GPU/Host 迁移；项目通过独立软 owner 保留来源 | **保留主干**。先区分原生已有命中、额外保护得到的命中、Host 回载和重算，再决定保留；最新上游能力不能直接视为固定 vendor 已有 |
 | [RAGCache／PGDSF](https://arxiv.org/abs/2404.12457) | 前缀知识树及成本、频率、大小驱动的分层替换。当前有路径、成本、访问与容量信息，未实现 PGDSF | **优先局部候选**：经验模型覆盖不足且存在重访时，用 PGDSF 风格排序作为无训练 owner 对照，仍复用原生缓存。它不直接预测相对 Native 的新增收益，须单独报告实际净效果；不另建一套淘汰器 |
-| [ContextPilot](https://arxiv.org/abs/2511.03475)、[作者实现](https://github.com/EfficientContext/ContextPilot) | 上下文重叠索引、顺序对齐与去重注释。仓库已有会话内 `contextpilot` 对照；规范来源 READ 主线使用固定排序，未接作者跨会话索引/调度 | **条件候选**：重复来源因顺序变化损失前缀匹配时，先复用重排部分。无需训练但要 CPU 索引与同步；新顺序生成新的因果路径，不能直接拼接旧 KV。独立窗口顺序已稳定时机会可能小 |
+| [ContextPilot](https://arxiv.org/abs/2511.03475)、[作者实现](https://github.com/EfficientContext/ContextPilot) | 上下文重叠索引、顺序对齐与去重注释。`SourceOrderIndex` 已接作者 CPU index/reorder，`RequestCompiler` 在真实 READ/ANSWER 编译中消费；没有采用作者 prompt pipeline 或 hook | **已接线、待净收益实测**：原排列和作者对齐排列在选择前取得 Native 报价。无需训练但要 CPU 索引与同步；新顺序生成新的因果路径，不能直接拼接旧 KV。独立窗口顺序已稳定时机会可能小 |
 | [Adaptive TTL](https://arxiv.org/abs/1704.04448)／[hazard–TTL](https://aferragu.github.io/assets/pdf/sigmetrics16.pdf) | 用访问过程或重访风险估计期限。当前是粗特征、配对净成本与 TTL15/60/180，没有生存模型 | **条件候选**：粗桶被重访间隔差异明显误导时，用分组经验生存曲线替换重访概率部分，保留三个期限和 Native 净成本目标。无须神经网络；按共同观察窗处理右删失，同窗三个 TTL 不能重复计作三个访问样本 |
 | 预算覆盖、局部交换与精确小规模求解 | 当前 `allocate_retention` 在一个逻辑保护容量下比较价值排序和容量密度两次贪心；同一需求收益取 max、共享页按并集、每 owner 只选一期限；Native 管理物理 GPU/Host 容量 | **已有可执行近似方案**。只有发现明显容量碎片或组合遗漏时，再比较一次局部交换；小规模枚举可作离线选择上限。当前目标含非单调项与多 owner 外部性，不具有标准最大覆盖保证，完整集合效果由实际配对评价 |
 | [CacheBlend](https://arxiv.org/abs/2405.16444)／[Cache-Craft](https://arxiv.org/abs/2502.15734) | 选择性重算以复用非前缀块，后者还管理上下文化 chunk 缓存与重算。当前均未实现 | **独立后续路线**：非前缀限制挡住大量有效重访时才值得考虑。无需微调 Qwen，但会改变 KV 执行过程，需要模型内部统计、重算与搬运计量；位置修正不能消除不同前文的因果差异 |
@@ -111,8 +111,12 @@ C 对新增保护项及期限 `(p, τ)` 的目标是 `ΔV(p, τ | 已保护集�
 
 ## 保留的可选对照
 
-- [ContextPilot](https://arxiv.org/abs/2511.03475)：`adapters/contextpilot.py` 保留会话内重叠顺序对齐与引用注释，供 `contextpilot` 策略使用；没有复现跨会话索引与调度。
+- [ContextPilot](https://arxiv.org/abs/2511.03475)：`adapters/contextpilot.py` 复用作者低层索引及来源排列；旧会话内重叠对照入口保留，不等同于当前作者索引。
 - [EfficientAgent 的 Host 准入适配](third_party/EFFICIENTAGENT_NOTICE.md)：原生补丁 `HostAdmissionPolicy` 默认关闭；显式启用时配置进入 cache scope，线上与配对重放均传真实业务会话身份。它是 Host 写入对照，未替代 C 的 TTL 分配。
 - [CRAFT 行文本函数](third_party/CRAFT_NOTICE.md)与[表格关系适配](research/table_relations.md)：仅在表格注释选项启用时使用，未引入上游完整检索系统。
 
-当前复用核对：BGE-M3 作者说明推荐混合召回后接 reranker；reranker 输出 query–passage 相关性分数，本项目的支持关系与集合效用是额外监督任务，不能把相关性直接当成事实支持。HiCache 官方设计以共享 token 前缀为复用条件，并区分 GPU/Host/存储层；当前实现保持固定 vendor 版本与原生 owner 接口，不随最新文档更换引擎。来源见 [BGE-M3 模型卡](https://huggingface.co/BAAI/bge-m3)、[reranker 模型卡](https://huggingface.co/BAAI/bge-reranker-v2-m3)、[HiCache 设计](https://docs.sglang.io/docs/advanced_features/hicache_design)。
+当前复用核对：BGE-M3 作者说明推荐混合召回后接 reranker；reranker 输出 query–passage 相关性分数，本项目的支持关系与集合效用是额外监督任务，不能把相关性直接当成事实支持。HiCache 官方设计以共享 token 前缀为复用条件，并区分 GPU/Host/存储层；当前集成复用容器 CUDA 依赖和明确适用的 SGLang 源码补丁；实际包版本、源码与补丁 hash 进入记录，不以旧包版本阻止启动。来源见 [BGE-M3 模型卡](https://huggingface.co/BAAI/bge-m3)、[reranker 模型卡](https://huggingface.co/BAAI/bge-reranker-v2-m3)、[HiCache 设计](https://docs.sglang.io/docs/advanced_features/hicache_design)。
+
+## 成熟外部参照的工程复用
+
+[LlamaIndex CondenseQuestionChatEngine](https://github.com/run-llama/llama_index/blob/v0.14.25/llama-index-core/llama_index/core/chat_engine/condense_question.py) 和 [CompactAndRefine](https://github.com/run-llama/llama_index/blob/v0.14.25/llama-index-core/llama_index/core/response_synthesizers/compact_and_refine.py) 由 `adapters/llamaindex_dialogue.py` 直接调用。适配层使用上游 Memory、问题凝练和 compact/refine，所有 LLM 调用交给项目回调；实际框架版本记录。该适配层尚未接入统一执行器与正式队列，不属于已完成的外部比较。

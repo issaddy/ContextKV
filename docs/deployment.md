@@ -1,8 +1,16 @@
 # 当前 GPU 部署
 
-当前入口依次为 `ssh relay`、`ssh songjiayun@public-ge108-wlf3-hangu-7.idchb2az3.hb2.kwaidc.com`、`sudo nerdctl exec -it test-0518 bash`。项目目录为 `/home/relay/songjiayun/ContextKV`，Qwen3-32B 位于 `/media/ssd1/data/models/qwen3-32b`。保留容器自带环境，固定引擎所需版本装入 `.venv-sglang`；GPU 设备、端口及截止时间由本次 launch manifest 声明。
+本轮源码先提交远端，容器任务与 SSH 已关闭，等待用户清理和更新容器。最近使用入口为 `ssh relay`、`ssh songjiayun@infra-wlf3-ge103-1.idchb2az3.hb2.kwaidc.com`、`sudo nerdctl exec -it test-0518 bash`；项目目录 `/home/relay/songjiayun/ContextKV`，模型 `/data/models/qwen3-32b`。
 
-固定 SGLang 提交为 `3f36fc08331f64cd63c4fbbdf39cc402f38bb38b`。复用已安装的匹配运行依赖和固定 vendor；模型权重与 tokenizer 不变。主比较沿用 BF16 权重/KV、32768 KV token、16 GiB Host、page64、NGRAM breadth1/draft12、fa3、JSON 空白上限16。实际环境、启动参数与原生缓存配置保存为本次 runtime manifest。
+复用容器当前 Python、PyTorch 和 CUDA 内核。`bootstrap_sglang.sh` 仅准备官方 SGLang 0.5.18 源码与当前项目补丁，不创建虚拟环境、不重装依赖、不要求升级驱动。源码提交和实际包版本进入 runtime manifest；课题固定 Qwen 权重、tokenizer 和组间推理条件。
+
+```bash
+export CONTEXTKV_MODEL_SCOPE_PATH=/absolute/path/qwen3-scope.json
+bash scripts/bootstrap_sglang.sh
+source runs/engine-runtime.env
+```
+
+默认启用 Unified Radix 的 Python TreeCore。主比较的 BF16 权重/KV、窗口、GPU/Host 配额、page size、采样和推理参数由运行配置共同冻结。新源码补丁尚待实际 GPU 端到端验证，不能套用旧机器的性能记录。
 
 `CONTEXTKV_MODEL_SCOPE_PATH` 与 `CONTEXTKV_FINGERPRINT_JSON` 取当前本地模型记录和实际 tokenizer/template。启动入口为 `scripts/launch_sglang.sh`，原生参数：
 
@@ -14,4 +22,4 @@
 --speculative-num-draft-tokens 12 --random-seed 42
 ```
 
-本机 HTTP 调用同时设置 `NO_PROXY` 与 `no_proxy` 为 `127.0.0.1,localhost,::1`。任务只使用本次明确选择的设备，重新采集当前硬件上的原生成本和配对结果；旧答案与成本记录已丢弃。下载与 Git 操作临时使用用户提供的代理，不写入配置或仓库。按用户本次指定的停止时间结束训练、推理与 GPU 测量，关闭本任务启动的服务、observer 和 SSH 会话。
+本机 HTTP 调用同时设置 `NO_PROXY` 与 `no_proxy` 为 `127.0.0.1,localhost,::1`。任务只使用本次明确选择的设备，重新采集当前硬件上的原生成本和配对结果；旧答案与成本记录已丢弃。下载与 Git 操作临时使用用户提供的代理，不写入配置或仓库。容器更新前不再启动训练、推理与 GPU 测量；后续任务完成时关闭本任务启动的服务、observer 和 SSH 会话。

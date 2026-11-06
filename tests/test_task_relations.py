@@ -211,7 +211,7 @@ def test_teacher_budgets_complete_input_with_condition_and_predecessor_closure()
                 'version_ids': [], 'resolved_version_ids': [], 'time_refs': [], 'source_turns': []},
             'needs': {'n0': {'anchor_spans': [{'window_id': 'w0', 'boundary_tokens': [0, 0]}],
                 'subject_refs': [], 'operation': 'compare', 'condition_ids': [active['conditions'][0]['condition_id']],
-                'predecessor_need_ids': [predecessor['need_id']], 'scope': 'selected_sources'}}}
+                    'predecessor_need_ids': [predecessor['need_id']], 'read_reuse': {}, 'scope': 'selected_sources'}}}
         return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps(value)},
             'finish_reason': 'stop'}], 'usage': {'completion_tokens': 100}})
 

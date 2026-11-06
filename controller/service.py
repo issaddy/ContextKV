@@ -12,7 +12,7 @@ import statistics
 from typing import Awaitable, Callable
 from weakref import WeakValueDictionary
 
-from .candidates import CandidatePolicy, build_candidates
+from .candidates import CandidatePolicy
 from .cost_model import CostModel
 from .engine_client import Engine, EngineError, EngineInfo, PrepareAck, UnknownOutcomeError
 from .events import EventLog
@@ -22,7 +22,8 @@ from .schema import (ClientTiming, CompletionReceipt, CostEstimate, EvidenceBloc
 from .serialization import dumps
 from .session_store import (Attempt, IdempotencyConflict, PendingAttempt, SessionStore, StoreError, VersionConflict)
 from .templates import ByteTemplate, candidate_request
-from .context_schema import ContextPlan
+from .context_schema import ContextPlan, ReadingOutcome
+from .request_compiler import RequestCompiler
 
 
 class ContextOverflow(ValueError):
@@ -38,6 +39,7 @@ class EvidenceSelection:
     context_plans: tuple[ContextPlan, ...] = ()
     open_need_provider: Callable | None = None
     auxiliary_usage: dict | None = None
+    initial_outcomes: tuple[ReadingOutcome, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -99,7 +101,7 @@ class Controller:
                  cost_model: CostModel | None = None, events: EventLog | None = None,
                  shadow: bool = False, epoch_retirement: bool = True,
                  online_calibration: bool = False, extend_open_needs=None, prefix_settings=None,
-                 rolling_policy=None, state_observer=None):
+                 rolling_policy=None, state_observer=None, request_compiler=None):
         self.store, self.engine = store, engine
         self.template = template or ByteTemplate()
         self.policy = policy or CandidatePolicy()
@@ -113,6 +115,7 @@ class Controller:
         self.extend_open_needs = extend_open_needs
         self.rolling_policy = rolling_policy
         self.state_observer = state_observer
+        self.request_compiler = request_compiler or RequestCompiler(self.template)
         self.observe_prefix = None
         if prefix_settings is not None and prefix_settings["mode"] != "native":
             from .prefix_retention import PrefixReadObserver
@@ -396,6 +399,7 @@ class Controller:
             reading_elapsed_ms = 0.0
             reading_segment_ms = 0.0
             reading_outcome = None
+            initial_outcomes = ()
             try:
                 if resume_context_plan is not None:
                     context_plans = (resume_context_plan,)
@@ -404,6 +408,7 @@ class Controller:
                         "task_state", task_state=resume_context_plan.task_state)
                     retrieval_ms = attempt.retrieval_ms
                     auxiliary_usage = attempt.auxiliary_usage
+                    initial_outcomes = ((attempt.reading_outcome,) if attempt.reading_outcome is not None else ())
                 elif evidence_provider is not None:
                     retrieval_started = time.monotonic()
                     try:
@@ -419,6 +424,7 @@ class Controller:
                     retrieval_priority = tuple(selection.retrieval_priority)
                     query_context = selection.query_context
                     context_plans = selection.context_plans
+                    initial_outcomes = selection.initial_outcomes
                     open_need_provider = selection.open_need_provider
                     auxiliary_usage = (selection.auxiliary_usage if selection.auxiliary_usage is not None
                         else {"input_tokens": None, "output_tokens": None, "compute_ms": None, "models": []})
@@ -444,29 +450,46 @@ class Controller:
                                  if recovery else working_snap)
                 if context_plans:
                     from .context_budget import bind_answer_window
-                    recorded_ids = tuple(record.step_id for record in
-                                         self.store.execution_steps(attempt.attempt_id))
+                    recorded_ids = tuple(dict.fromkeys((*(record.step_id for record in
+                        self.store.execution_steps(attempt.attempt_id)), *(result.step_id
+                        for outcome in initial_outcomes for result in outcome.results))))
                     context_plans = tuple(bind_answer_window(context_plan, self.template, planning_snap,
                         self.policy.system_prompt, preserve_step_ids=recorded_ids)
                         for context_plan in context_plans)
+                    bound = {context_plan.plan_id: context_plan for context_plan in context_plans}
+                    initial_outcomes = tuple(replace(outcome, plan=bound[outcome.plan.plan_id])
+                                             for outcome in initial_outcomes)
                 if context_plans and self.knobs.strategy == "cost" and self.rolling_policy is None:
                     from .context_cost import quote_read_costs
                     completed_steps = tuple(record for stage, record in
                         self.store.execution_steps_with_stage(attempt.attempt_id) if stage == "COMPLETE")
                     context_plans, read_cost_trace = await quote_read_costs(context_plans,
-                        planning_snap, self.template, self.engine, self.cost_model, completed_steps=completed_steps)
+                        planning_snap, self.template, self.engine, self.cost_model, completed_steps=completed_steps,
+                        initial_outcomes=initial_outcomes, request_compiler=self.request_compiler)
                     self.events.emit("reading_plan_cost_quotes", attempt_id=attempt.attempt_id,
                                      trace=read_cost_trace)
                 measure_redundancy = "redundancy_threshold" in {self.knobs.strategy, self.knobs.fallback_strategy}
                 def compile_candidates(snapshot, plans, outcome=None):
                     if plans:
-                        from .candidates import build_plan_candidates
                         return tuple(candidate for context_plan in plans for candidate in
-                            build_plan_candidates(snapshot, query, context_plan, self.template,
-                                                  policy=self.policy, outcome=outcome))
-                    return build_candidates(snapshot, query, evidence, self.policy, self.template,
+                            self.request_compiler.compile_answers(snapshot, query, context_plan,
+                                policy=self.policy, outcome=outcome or next((seed for seed in initial_outcomes
+                                    if seed.plan.plan_id == context_plan.plan_id), None), cache_scope=info))
+                    return self.request_compiler.compile_answers(snapshot, query, retrieved=evidence,
+                        policy=self.policy, cache_scope=info,
                         retrieval_priority=retrieval_priority, query_context=query_context,
                         measure_evidence_redundancy=measure_redundancy)
+
+                def fixed_source_order(candidates, quotes):
+                    if self.request_compiler.index is None or self.knobs.strategy == "cost":
+                        return candidates
+                    groups = {}
+                    for candidate in candidates:
+                        if candidate.feasible:
+                            key = (candidate.context_plan_id, candidate.action, candidate.working_history_id,
+                                   candidate.layout_id.removesuffix(":contextpilot"))
+                            groups.setdefault(key, []).append(candidate)
+                    return tuple(self.request_compiler.choose_variant(group, quotes) for group in groups.values())
 
                 rolling_result = None
                 answer_phase_started = time.monotonic()
@@ -475,13 +498,15 @@ class Controller:
                         raise ValueError("rolling plan policy requires explicit semantic ContextPlans")
                     from .execution import ReadingExecutor
                     executor = ReadingExecutor(self.store, self.engine, self.template,
-                        events=self.events, request_arrived=arrived, observe_prefix=self.observe_prefix)
+                        events=self.events, request_arrived=arrived, observe_prefix=self.observe_prefix,
+                        request_compiler=self.request_compiler)
                     reading_started = time.monotonic()
                     try:
                         rolling_result = await self.rolling_policy.run(attempt.attempt_id, planning_snap,
                             context_plans, executor, self.engine, self.template, self.cost_model,
                             compile_candidates, arrived=arrived, auxiliary_usage=auxiliary_usage, events=self.events,
-                            open_need_provider=open_need_provider or self.extend_open_needs)
+                            open_need_provider=open_need_provider or self.extend_open_needs,
+                            initial_outcomes=initial_outcomes)
                     finally:
                         reading_segment_ms = (time.monotonic()-reading_started)*1000
                         reading_elapsed_ms = self.store.add_reading_elapsed(attempt.attempt_id, reading_segment_ms)
@@ -493,7 +518,8 @@ class Controller:
                 valid = tuple(c for c in candidates if c.feasible)
                 if not valid:
                     raise ContextOverflow("shared_context_policy_overflow: required evidence and full QA exceed budget")
-                needs_quote = self.knobs.strategy in {"cost", "warm_idle"} and len(valid) > 1
+                needs_quote = (self.knobs.strategy in {"cost", "warm_idle"}
+                               or self.request_compiler.index is not None) and len(valid) > 1
                 quotes = (rolling_result.quotes if rolling_result is not None else
                           await self.engine.quote_batch(valid, self.template.fingerprint) if needs_quote else None)
                 if quotes is not None and quotes.engine_restart_id != info.engine_restart_id:
@@ -507,6 +533,8 @@ class Controller:
                     quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
                     if quotes.engine_restart_id != info.engine_restart_id:
                         raise EngineError("UNSTABLE_RESTART")
+                if rolling_result is None and quotes is not None:
+                    candidates = fixed_source_order(candidates, quotes)
                 # The planner validates this batch once before selecting a candidate.
                 pressure = (max(1, quotes.active_requests + (quotes.queued_requests or 0) + 1) if quotes is not None
                             and quotes.active_requests is not None else max(1, self._active_generations + 1))
@@ -536,6 +564,13 @@ class Controller:
                     selected_context_plan = next(context_plan for context_plan in context_plans
                         if context_plan.plan_id == plan.candidate.context_plan_id)
                     if rolling_result is None:
+                        from .context_budget import direct_answer_reason
+                        seed = next((outcome for outcome in initial_outcomes
+                                     if outcome.plan.plan_id == selected_context_plan.plan_id),
+                                    ReadingOutcome(selected_context_plan))
+                        seed = replace(seed, plan=selected_context_plan)
+                        self.store.save_context_plan(attempt.attempt_id, selected_context_plan,
+                                                     initial_outcome=seed)
                         reading_started = time.monotonic()
                         async def observe_fixed_state(state, expanded):
                             await self.state_observer.observe(attempt.attempt_id, executor, state, planning_snap,
@@ -544,10 +579,19 @@ class Controller:
                         executor = ReadingExecutor(self.store, self.engine, self.template,
                             extend_open_needs=open_need_provider or self.extend_open_needs, events=self.events,
                             request_arrived=arrived, observe_prefix=self.observe_prefix,
+                            request_compiler=self.request_compiler,
                             observe_state=observe_fixed_state if self.state_observer is not None else None)
                         try:
-                            reading_outcome = await executor.execute_reads(attempt.attempt_id, planning_snap,
-                                selected_context_plan, initial_auxiliary_usage=auxiliary_usage)
+                            if direct_answer_reason(seed, plan.candidate) is None:
+                                from .execution import auxiliary_tokens
+                                spent = (auxiliary_tokens(auxiliary_usage) if auxiliary_usage is not None else 0)
+                                reading_outcome = replace(seed, plan=replace(selected_context_plan,
+                                    online_tokens_spent=spent), auxiliary_usage={"input_tokens": 0,
+                                        "output_tokens": 0, "compute_ms": 0.0, "models": []})
+                            else:
+                                reading_outcome = await executor.execute_reads(attempt.attempt_id, planning_snap,
+                                    selected_context_plan, initial_auxiliary_usage=auxiliary_usage,
+                                    initial_outcome=seed)
                         finally:
                             reading_segment_ms = (time.monotonic()-reading_started)*1000
                             reading_elapsed_ms = self.store.add_reading_elapsed(attempt.attempt_id,
@@ -575,6 +619,7 @@ class Controller:
                         quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
                         if quotes.engine_restart_id != info.engine_restart_id:
                             raise EngineError("UNSTABLE_RESTART")
+                        candidates = fixed_source_order(candidates, quotes)
                         pressure = (max(1, quotes.active_requests+(quotes.queued_requests or 0)+1)
                             if quotes.active_requests is not None else max(1, self._active_generations+1))
                         plan = choose_plan(candidates, quotes, self.cost_model, planning_snap, self.knobs,
@@ -637,6 +682,11 @@ class Controller:
                 response_done = time.monotonic()
                 # Persist before validation so malformed/partial results remain auditable.
                 attempt = self.store.save_attempt(replace(attempt, stage="RESULT_READY", result=result))
+                if result.receipt is not None and result.receipt.generation_complete:
+                    source_view = self.request_compiler.observe_executed(plan.candidate, result.receipt,
+                        cache_scope=info)
+                    self.events.emit("answer_source_executed", attempt_id=attempt.attempt_id,
+                                     source_view=source_view)
                 self._validate(attempt, result)
                 snapshot = self.store.commit_turn_and_outbox(attempt.attempt_id)
             except BaseException as exc:

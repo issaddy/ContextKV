@@ -187,7 +187,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
 
 
 def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, outcome=None,
-                            layouts=None, actions=("REBUILD", "APPEND")):
+                            layouts=None, actions=("REBUILD", "APPEND"), source_orderer=None):
     """Prepare actual prompts and their shared candidate finalizer."""
     from .context_budget import (append_legal, measure_window, task_instruction,
                                  working_history_messages, evidence_interval_covered, _covers)
@@ -373,21 +373,24 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
             ordered = tuple(sorted(units, key=stable_rank))
         else:
             raise ValueError(f"unknown plan layout: {layout}")
-        variants = []
-        if "REBUILD" in actions:
-            current, spans = compile_user(ordered, len(history)+1)
-            variants.append(("REBUILD", (system, *history, current), spans, visible_originals(spans), None))
-        if snapshot.execution is not None and "APPEND" in actions:
-            legal, reason = append_legal(snapshot, state, required,
-                                        tuple(span for unit in units for span in unit.source_spans))
-            execution = snapshot.execution
-            missing = tuple(u for u in ordered if any(not evidence_interval_covered(snapshot, s)
-                                                       for s in u.source_spans))
-            current, new_spans = compile_user(missing, len(execution.messages), execution.visible_blocks)
-            variants.append(("APPEND", (*execution.messages, current),
-                (*execution.evidence_spans, *new_spans), visible_originals((*execution.evidence_spans, *new_spans)),
-                None if legal else reason))
-        prompts.extend((layout, *variant) for variant in variants)
+        orders = ((ordered,) if source_orderer is None else source_orderer(ordered, blocks))
+        for order_index, ordered in enumerate(orders):
+            actual_layout = layout if order_index == 0 else layout+":contextpilot"
+            variants = []
+            if "REBUILD" in actions:
+                current, spans = compile_user(ordered, len(history)+1)
+                variants.append(("REBUILD", (system, *history, current), spans, visible_originals(spans), None))
+            if snapshot.execution is not None and "APPEND" in actions:
+                legal, reason = append_legal(snapshot, state, required,
+                                            tuple(span for unit in units for span in unit.source_spans))
+                execution = snapshot.execution
+                missing = tuple(u for u in ordered if any(not evidence_interval_covered(snapshot, s)
+                                                           for s in u.source_spans))
+                current, new_spans = compile_user(missing, len(execution.messages), execution.visible_blocks)
+                variants.append(("APPEND", (*execution.messages, current),
+                    (*execution.evidence_spans, *new_spans), visible_originals((*execution.evidence_spans, *new_spans)),
+                    None if legal else reason))
+            prompts.extend((actual_layout, *variant) for variant in variants)
     def finish(rendered_prompts):
         candidates = []
         for (layout, action, messages, spans, visible, reason), rendered in zip(prompts, rendered_prompts, strict=True):
@@ -431,10 +434,10 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
 
 
 def build_plan_candidates(snapshot, query, plan, template, *, policy=None, outcome=None,
-                          layouts=None, actions=("REBUILD", "APPEND")):
+                          layouts=None, actions=("REBUILD", "APPEND"), source_orderer=None):
     """Compile each legal action/layout for one semantic evidence plan."""
     messages, finish = _plan_candidate_builder(snapshot, query, plan, template,
-        policy=policy, outcome=outcome, layouts=layouts, actions=actions)
+        policy=policy, outcome=outcome, layouts=layouts, actions=actions, source_orderer=source_orderer)
     return finish(template.render_many(messages))
 
 

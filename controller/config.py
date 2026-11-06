@@ -116,12 +116,15 @@ class RunConfig:
     shadow: bool = False
     sampling: SamplingRecipe | None = None
     prefix_retention: dict = field(default_factory=lambda: {"mode": "native"})
+    cache_compilation: dict = field(default_factory=lambda: {"mode": "native"})
     plan_gain: dict | None = None
     state_observation: dict | None = None
 
     def __post_init__(self):
         if self.engine.kind not in ("mock", "sglang"):
             raise ValueError("engine.kind must be mock or sglang")
+        if self.cache_compilation["mode"] not in {"native", "contextpilot"}:
+            raise ValueError("cache_compilation.mode must be native or contextpilot")
         if self.context.max_new_tokens >= self.context.max_total_model_tokens:
             raise ValueError("output budget must be smaller than the total context budget")
         if self.engine.page_size < 1 or min(self.engine.gpu_capacity_tokens, self.engine.host_capacity_tokens) < 0:
@@ -169,6 +172,7 @@ def apply_study_config(config: RunConfig, study):
             lambda_host=execution["lambda_host"]),
         cost_model=replace(config.cost_model, artifact=artifact),
         prefix_retention=execution.get("prefix_retention", config.prefix_retention),
+        cache_compilation=execution.get("cache_compilation", config.cache_compilation),
         plan_gain=execution.get("plan_gain", config.plan_gain),
         state_observation=execution.get("state_observation", config.state_observation))
 
@@ -278,7 +282,12 @@ def create_controller(config: RunConfig) -> Controller:
     if config.state_observation is not None:
         from .plan_profiles import load_fixed_reading_observer
         state_observer = load_fixed_reading_observer(config.state_observation, template=template)
-    return Controller(store, engine, template=template,
+    from .request_compiler import RequestCompiler
+    index = None
+    if config.cache_compilation["mode"] == "contextpilot":
+        from adapters.contextpilot import SourceOrderIndex
+        index = SourceOrderIndex(config.cache_compilation["checkout"])
+    return Controller(store, engine, template=template, request_compiler=RequestCompiler(template, index),
                       policy=config.context, knobs=config.planner, cost_model=model, shadow=config.shadow,
                       epoch_retirement=config.ablation.epoch_retirement,
                       online_calibration=config.cost_model.online_calibration,

@@ -7,7 +7,6 @@ import json
 from controller.claim_capacity import build_claim_capacity, claim_count_ceiling
 from controller.config import create_model_template, load_config
 from controller.context_schema import EvidenceKey, EvidenceUnit, ReadTask, SourceSpan
-from controller.engine_client import SGLANG_COMMIT
 from controller.reading import output_schema
 from profiling.retention_trace import write_json
 
@@ -31,7 +30,7 @@ def main(argv=None):
     if not all(literal in grammar.replace('\\"', '"') for literal in fixed):
         raise ValueError("installed native JSON grammar did not expose the required fixed key literals")
     bound["grammar_contract"] = dict(backend="xgrammar", package_version=version("xgrammar"),
-        engine_commit=SGLANG_COMMIT, protocol_format_version=2,
+        protocol_format_version=2,
         required_schema=schema, compiled_ebnf=grammar,
         source_scope="one-character grammar qualification placeholder; no factual/QA observation",
         compiled_ebnf_sha256=hashlib.sha256(grammar.encode()).hexdigest(),

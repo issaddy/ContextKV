@@ -9,7 +9,7 @@ import httpx
 
 from adapters.support_model import SetPrediction, SupportPrediction
 from controller.schema import Message
-from controller.serialization import to_jsonable
+from controller.serialization import dumps, to_jsonable
 
 
 class TeacherSupportBackend:
@@ -29,6 +29,8 @@ class TeacherSupportBackend:
         self.records = []
         self._sets = {}
         self._queries = {}
+        self._predictions = {}
+        self.usage["cache_hits"] = 0
 
     def _generate(self, system, payload, schema, kind, output_tokens):
         messages = (Message("system", system), Message("user", json.dumps(payload, ensure_ascii=False)))
@@ -61,11 +63,25 @@ class TeacherSupportBackend:
         return json.loads(raw["text"])
 
     def predict(self, examples):
+        keys, pending = [], {}
+        for example in examples:
+            self._queries.setdefault(example.task_id, {})[example.need_id] = example.query
+            view = to_jsonable(example)
+            for unit in (*view["units"], *view["dependencies"]):
+                unit.pop("retrieval_score")
+            key = (example.task_id, dumps(view))
+            keys.append(key)
+            if key not in self._predictions:
+                pending[key] = example
+        self.usage["cache_hits"] += len(examples)-len(pending)
+        if pending:
+            self._predictions.update(zip(pending, self._predict_uncached(tuple(pending.values())), strict=True))
+        return tuple(self._predictions[key] for key in keys)
+
+    def _predict_uncached(self, examples):
         results = [None]*len(examples)
         for start in range(0, len(examples), self.batch_size):
             batch = examples[start:start+self.batch_size]
-            for example in batch:
-                self._queries.setdefault(example.task_id, {})[example.need_id] = example.query
             units = {unit.unit_id: unit for example in batch for unit in (*example.units, *example.dependencies)}
             original_spans = {span.span_id: span for unit in units.values() for span in unit.source_spans}
             spans = {f"s{index}": span for index, span in enumerate(original_spans.values())}
@@ -118,8 +134,10 @@ class TeacherSupportBackend:
         return tuple(results)
 
     def predict_set(self, state, units, supports, *, context=(0.0,)*8):
-        key = (state.task_id, state.current_turn_id, state.raw_question,
-               tuple(unit.unit_id for unit in units), tuple(context))
+        payload = {"task": to_jsonable(state), "units": to_jsonable(units),
+            "working_views": self._queries.get(state.task_id, {}),
+            "support_graph": to_jsonable(supports), "candidate_context": context}
+        key = (state.task_id, dumps(payload))
         if key in self._sets:
             return self._sets[key]
         schema = {"type": "object", "properties": {
@@ -131,9 +149,7 @@ class TeacherSupportBackend:
             "missing prerequisites and redundancy. History and prior answers are not sources. "
             "Use retrieval_gap when missing evidence could exist outside the selected set. "
             "Return continuous quality and answer disposition in JSON.",
-            {"task": to_jsonable(state), "units": to_jsonable(units),
-             "working_views": self._queries.get(state.task_id, {}),
-             "support_graph": to_jsonable(supports), "candidate_context": context},
+            payload,
             schema, "utility", 256)
         if output is None:
             raise ValueError("teacher utility input exceeds the model window")
@@ -143,9 +159,15 @@ class TeacherSupportBackend:
 
     def release_task(self, task_id):
         self._queries.pop(task_id, None)
+        for key in tuple(self._predictions):
+            if key[0] == task_id:
+                del self._predictions[key]
         for key in tuple(self._sets):
             if key[0] == task_id:
                 del self._sets[key]
 
     def close(self):
+        self._predictions.clear()
+        self._sets.clear()
+        self._queries.clear()
         self.client.close()

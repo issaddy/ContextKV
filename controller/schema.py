@@ -191,8 +191,12 @@ class PromptCandidate:
     generation_kind: str = "ANSWER"
     cost_prediction_eligible: bool = True
 
+    read_unit_order: tuple[str, ...] = ()
+    source_ids: tuple[str, ...] = ()
+
     def __post_init__(self) -> None:
-        _tuples(self, "messages", "input_ids", "evidence_spans", "evidence_resolution")
+        _tuples(self, "messages", "input_ids", "evidence_spans", "evidence_resolution",
+                "read_unit_order", "source_ids")
         _references(self)
         object.__setattr__(self, "visible_blocks", frozenset(self.visible_blocks))
         object.__setattr__(self, "required_blocks", frozenset(self.required_blocks))

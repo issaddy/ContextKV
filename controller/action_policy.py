@@ -8,6 +8,7 @@ from .plan_policy import (NATIVE_COST_SCHEMA, OBSERVED_FEATURE_SCHEMA, OBSERVED_
 from .reading import step_generation_kind
 from .action_proposals import BOUNDED_CONTINUATION
 from .evidence_planner import _passages
+from .context_budget import direct_answer_reason
 
 
 def regression_cost(values):
@@ -67,13 +68,15 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
         else:
             # The paired collector currently declares REBUILD/existing terminal inputs.
             variants = tuple(candidate for candidate in first.variants if candidate.feasible
-                and (first.task.kind != "ANSWER" or (candidate.action, candidate.layout_id) == ("REBUILD", "existing")))
+                and (first.task.kind != "ANSWER" or candidate.action == "REBUILD"
+                     and candidate.layout_id in {"existing", "existing:contextpilot"}))
         if not variants:
             evaluations.append(PlanEvaluation(plan.plan_id, None, None, None, False, "next_step_not_compiled"))
         for candidate in variants:
             task = first.task
             output = task.output_budget if candidate is None else candidate.output_budget
-            reason = None
+            reason = (direct_answer_reason(state, candidate)
+                      if task.kind == "ANSWER" else None)
             current = CompleteCost(0, 0, 0, 0, 0)
             peaks = [native.paid_cost]
             if candidate is not None:

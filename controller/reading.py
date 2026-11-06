@@ -716,12 +716,18 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
         if unit.unit_id in assigned:
             continue
         if read_packing == "source_windows":
-            # The source directory fixes window coordinates before seeing a task.
-            # Retain the complete dependency path, in source order, for every use.
+            # Canonical windows keep their identity; one call may read several
+            # complete windows and their shared dependency closure.
+            if fits(tuple((*pack, unit))):
+                pack.append(unit)
+                continue
+            if pack:
+                finish_pack()
+                if unit.unit_id in assigned:
+                    continue
             if not fits((unit,)):
                 raise ValueError("canonical source window and task exceed the READ input/output allocation")
             pack = [unit]
-            finish_pack()
             continue
         remaining, sequence = unit, 0
         while True:
@@ -873,7 +879,8 @@ def advance_read_plan(plan, results, budget=None):
             continue
         selected_numeric = selector_id is not None and selector_id in completed
         inputs = numeric_reduction_inputs(plan, need.need_id, results)
-        if not inputs and not selected_numeric:
+        empty_group = need.operation == "group" and bool(read_ids) and set(read_ids) <= completed
+        if not inputs and not selected_numeric and not empty_group:
             continue
         operation = "summarize" if summarize else "union" if need.operation == "enumerate" else need.operation
         from .context_budget import reduction_output_budget
@@ -911,6 +918,8 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
                 parent = by_id[parents[parent_alias]]
                 selected.append(replace(parent, claim_id=f"{task.step_id}:claim:{len(selected)}",
                     need_id=need_id, kind="derived", operation="numeric_select",
+                    conditions=next(scope.condition_ids for scope in task.shared_numeric_scopes
+                                    if need_id in scope.need_ids),
                     parent_claim_ids=(parent.claim_id,), shared_need_ids=()))
         return ReadResult(task.step_id, tuple(selected), raw_output=text, elapsed_ms=elapsed_ms,
                           input_tokens=input_tokens, output_tokens=output_tokens)

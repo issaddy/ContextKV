@@ -1,23 +1,25 @@
 # 课题架构与机制
 
-当前主线是任务证据、有限阅读计算和来源前缀保留的协同。共享类型位于 [context_schema.py](../controller/context_schema.py)；实际执行与提交位于 [execution.py](../controller/execution.py)、[service.py](../controller/service.py) 和 [session_store.py](../controller/session_store.py)。
+当前主线是有效原文/跨轮原子事实、有限阅读计算和缓存感知请求编译的协同。共享类型位于 [context_schema.py](../controller/context_schema.py)；实际执行与提交位于 [execution.py](../controller/execution.py)、[service.py](../controller/service.py) 和 [session_store.py](../controller/session_store.py)。
 
 ## 共同状态与调用链
 
 ```mermaid
 flowchart TD
-    H["当前问题与实际 QA"] --> A["A：任务条件与证据集合"]
-    A --> B["B：阅读计划与完整成本"]
-    B --> R["READ / REDUCE"]
-    R --> G["Claim DAG 与有效结论"]
+    H["当前问题与实际 QA"] --> A["A：任务、证据与适用事实"]
+    A --> B["B：少量候选动作"]
+    B --> C["C：实际请求编译与来源排列"]
+    C --> N["Native 报价"]
+    N --> S["B：选择已报价请求"]
+    S --> R["统一执行 READ / REDUCE / ANSWER"]
+    R --> G["事实、结论与费用"]
     G --> B
-    G --> F["ANSWER 与一次 QA 提交"]
-    R --> C["C：独立来源前缀 owner"]
-    C --> N["原生 Radix / HiCache"]
-    N --> B
+    R --> F["最终回答与真实历史提交"]
 ```
 
 `TaskState` 表达当前任务、Need、条件更新、版本意图和工作历史。`EvidenceSet` 保存来源单元及必要依赖；`ContextPlan` 保存阅读步骤和预算；`ReadResult/ReadingOutcome` 保存实际结论、来源、覆盖和步骤成本。原文档案、最终模型窗口和物理 KV 是三个不同对象，分别由来源目录、上下文编译器和原生引擎维护。
+
+`controller/qa.py:DocumentQA` 是业务入口。`POST /documents` 将版本化原文登记到同一 SQLite 的 document_sets/text_blobs；`POST /sessions/{id}/query` 与 `bench.study` 调用同一个 ask。临时资料与预建语料沿同一检索/执行路径，登记、在线编码和查询费用分别保留。
 
 ## A：任务、证据与固定模型阅读协议
 
@@ -37,11 +39,13 @@ Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 导出实际 REA
 
 `all_supplied_documents` 在支持评分与集合搜索之前确定。配置或 Need 明确要求全资料覆盖且具有实际来源边界时，直接生成一个覆盖该范围的阅读计划。该路径记录 `selection_policy_heads_used=false`；选材路径继续使用现有支持与集合搜索。跨轮恢复只恢复文档级元数据，表格身份与标题由原文窗口重建，保持同一来源的因果 token 前缀稳定。表头、标题、注释先作为数据窗口依赖读取，已覆盖依赖不再单独建立 READ。
 
+`controller/fact_reuse.py` 从同会话已提交的物理 READ 构建可见提取 contract。任务解释同时绑定当前 Need 和可复用 contract；版本、hash、范围、字段和条件匹配后，只导入原子事实。逻辑复用节点不复制历史模型费用；当前 count/sum/group 重新选择和运算。`complete` 的覆盖按来源区间并集计算，旧新 unit ID 不同也不重复读取；`facts` 不冒充完整提取。支持 backend 的请求内 memo 延续到 GAP，QA 结束释放。
+
 ## B：有限阅读、有效结论和收益选择
 
 先从实际 ANSWER 窗口扣除系统、任务、工作历史、输出和来源元数据，再把可用结论份额分到 Need、READ 分片和有限 REDUCE 节点。生成输出上限与最终保留份额分别记录。READ 的完整输出结构同时出现在可见消息和原生 JSON 约束中。
 
-READ 按实际 tokenizer 的输入容量与结构化输出容量打包。同来源、条件、版本下的 count/sum 共享一次实体／量值提取。Wire 5 的数值事实包含原文短摘录，并用短 ID 引用来源、条件、Need 和父事实。`numeric_need_isolation` 保留为对照。来源目录按固定 2048-token、最多 8 个非空原文行形成窗口；超长行使用实际 tokenizer 切分，普通行和表格行保持完整。`source_windows` READ 每次执行一个完整窗口与其来源依赖闭包，按来源坐标排序，不随任务预算重新拼包或切片。source-first 的系统与原文段跨操作一致；数值、bridge、条件、运行别名和输出 schema 均在来源之后。超出实际输入/输出份额的完整窗口明确不进入执行。固定窗口的最终净资源收益由完整质量与成本实验评价。缺口由 `unresolved_needs` 统一计算：后续步骤完成终端 Need 后，早期缺口关闭；不同时间范围分别检索，相同关系合并父结论。
+READ 按实际 tokenizer 的输入容量与结构化输出容量打包。同来源、条件、版本下的 count/sum 共享一次实体／量值提取。Wire 5 的数值事实包含原文短摘录，并用短 ID 引用来源、条件、Need 和父事实。`numeric_need_isolation` 保留为对照。来源目录按固定 2048-token、最多 8 个非空原文行形成窗口；超长行使用实际 tokenizer 切分，普通行和表格行保持完整。`source_windows` 保持原文窗口与坐标稳定，把多个完整窗口和依赖闭包按实际输入/输出容量合并为一次 READ。窗口身份不等于模型调用边界。source-first 的系统与原文段跨操作一致；数值、bridge、条件、运行别名和输出 schema 均在来源之后。超出实际输入/输出份额的完整窗口明确不进入执行。固定窗口的最终净资源收益由完整质量与成本实验评价。缺口由 `unresolved_needs` 统一计算：后续步骤完成终端 Need 后，早期缺口关闭；不同时间范围分别检索，相同关系合并父结论。
 
 共享数值 READ 全部完成后，每个数值 Need 各声明一次显式 `numeric_select` REDUCE。Wire 7 对每个原事实父 ID 给出必填布尔选择；量值、实体、单位和来源沿用原事实。固定执行与滚动动作共用 `reduction_partitions`，在报价前同时按实际消息输入与 wire7 紧凑布尔结果的输出容量分包，每包独立执行和计费。最后一包的 `ReductionState` 绑定完整逻辑基底与全部已选 frontier，CPU 随后按各自 Need 执行 count 或 sum。
 
@@ -71,7 +75,13 @@ GAP 绑定当前检索器及采集时的材料限额。`whole_plan` 保留原执
 
 REDUCE 的完整基底与 frontier 在首次写入 `COMPLETE` 前统一绑定。GAP 的 `RESULT_READY` 直接复用已保存资料，完成账本、后继计划和进度在一个事务中提交，恢复不会重复检索或生成。
 
-## C：独立来源前缀与相对 native 的保留价值
+## C：选择前编译、报价与执行后登记
+
+`RequestCompiler` 供 Controller、ReadingExecutor、滚动动作和 READ 成本报价共用。作者 ContextPilot 的 CPU index/reorder 只提出来源排列；沿用项目实际系统、历史、条件、结论与引用编译。所有排列先变为实际 input_ids，再读 Native 报价，选中输入原样执行。固定策略以新增预填充 token、Host 回载和长度选择排列；收益策略按绑定当前协议的成本模型决策。
+
+每次成功完成的 READ 与直接 ANSWER 都按实际正文几何、完整因果前缀与回执登记，输出截断或 JSON 解析失败不抹去已经产生的 KV。来源登记不等于保留；`prefix_retention.mode=native` 不触发 TTL。
+
+### 可选的独立来源保留
 
 旧 lease 的保持、续租与新前缀在同一次逻辑保护容量 `protection_budget_tokens` 内竞争；分配器以同一去重净目标比较绝对边际价值与新增容量收益密度两次构造，保持仅使用剩余期限，不发续租调用，未选旧项释放。同 owner 只选一个期限。读取需求由 scope、完整因果页路径和正文 token 范围共同确定；相同首正文页但不同完整路径是不同需求，共享页按并集占保护容量。实际 GPU/Host 放置与容量仍由 Native 管理，各层额外驻留使用独立价格。
 
@@ -100,3 +110,7 @@ SQLite 的 `turn_plans` 保存计划，`execution_steps` 保存输入、原生 e
 固定到达负载将原定请求到达时间传入 `Controller.serve_turn`，因此 B 的已付墙钟预算、步骤账本与最终完整响应使用同一起点，包含真实历史依赖和并发槽前等待。
 
 联合比较还绑定声明的 GPU/Host token 容量、测量设备数量、主机平台、GPU 型号/显存/驱动及实际原生缓存配置。原始 UUID 与设备索引保留在运行观察中；同主机同型号同容量的不同卡可作对照。缺少硬件或原生配置观测时不产生“可比”结论。
+
+## 本轮尚未完成
+
+LlamaIndex 多轮 history＋compact adapter 尚无统一执行器消费者；正式矩阵尚未切换到最终编排对照。事实复用/合并阅读后的 B 标签与配对训练要按新协议生成。当前 CUDA 12.9 引擎补丁只完成 CPU 应用、语法和回执检查，GPU 端到端与质量/成本目标尚未验收。

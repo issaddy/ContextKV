@@ -71,14 +71,12 @@ class ExecutionProfiles:
         self.claim_capacity = data.get("claim_capacity")
         if self.claim_capacity is not None:
             from .context_schema import ReadTask
-            from .engine_client import SGLANG_COMMIT
             from .reading import output_schema
             bound = self.claim_capacity
             required = output_schema(ReadTask("capacity", "READ", ("need",)))["properties"]["claims"]["items"]["required"]
             grammar = bound["grammar_contract"]
             if (bound["tokenizer_hash"] != self.fingerprint.tokenizer_hash or
                     bound["required_keys"] != sorted(required) or
-                    grammar["engine_commit"] != SGLANG_COMMIT or
                     grammar["protocol_format_version"] != 2 or grammar["backend"] != "xgrammar"):
                 raise ValueError("claim capacity must bind the actual tokenizer and native claim-key protocol")
         if not data["cache_config_hash"] or not data["reader_checkpoint"] or not data["reader_profile_id"]:

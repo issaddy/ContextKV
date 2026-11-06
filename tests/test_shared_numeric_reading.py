@@ -115,7 +115,8 @@ async def test_large_numeric_selection_fixed_and_rolling_quote_each_pack_and_kee
     plan = build_read_plan(task_state, EvidenceSet("all", units, source_blocks=blocks), "all_supplied_documents",
         ContextBudget(window_tokens=32000, read_input_tokens=16000, read_output_tokens=2048,
             output_tokens=64, max_steps=64), template=ByteTemplate(), read_packing="source_windows")
-    assert len(plan.steps) == 40
+    assert 1 < len(plan.steps) < len(pairs)
+    assert {identity for task in plan.steps for identity in task.input_unit_ids} == {unit.unit_id for unit in units}
     outcomes = []
     for rolling in (False, True):
         case = tmp_path / str(rolling)
@@ -143,7 +144,7 @@ async def test_large_numeric_selection_fixed_and_rolling_quote_each_pack_and_kee
             outcome = result.outcome
         else:
             outcome = await executor.execute_reads(attempt.attempt_id, snapshot, current)
-        assert engine.reads == 40 and engine.selections > 1
+        assert engine.reads == len(plan.steps) and engine.selections > 1
         selected = [record for record in outcome.steps if record.task.operation == "numeric_select"]
         assert len(selected) == engine.selections
         assert all(len(record.input_ids)+record.task.output_budget <= plan.budget.window_tokens for record in selected)
@@ -227,6 +228,30 @@ def test_count_reduction_does_not_consume_unfinished_sum_view_or_rolling_basis()
     observed = ReadingOutcome(plan, claims=result.claims, results=(result,))
     rolling = _reduction_tasks(plan, observed)
     assert len(rolling) == 2 and all(task.input_claim_ids == tasks[0].input_claim_ids for task in rolling)
+
+
+@pytest.mark.asyncio
+async def test_complete_empty_group_has_cpu_result_and_original_scope(tmp_path):
+    from controller.context_budget import direct_answer_reason
+    from controller.context_schema import ReadingOutcome
+
+    plan = numeric_plan((material("No shipments qualify."),), needs=(Need("groups", operation="group"),))
+    task = replace(plan.steps[0], step_id="policy:reuse:empty")
+    plan = replace(plan, steps=(task,))
+    seed = ReadingOutcome(plan, (ReadResult(task.step_id, covered_units=plan.coverage_units, support=("groups",)),))
+    assert direct_answer_reason(seed, None) == "numeric_operation_incomplete"
+    store = SessionStore(tmp_path / "state.db")
+    snapshot = store.read_snapshot("s")
+    attempt = store.begin_attempt("s", "r", "hash", plan.task_state.raw_question, 0)
+    store.save_context_plan(attempt.attempt_id, plan, initial_outcome=seed)
+    engine = NumericEngine(None)
+    outcome = await ReadingExecutor(store, engine, ByteTemplate()).execute_reads(attempt.attempt_id, snapshot, plan)
+    assert len(outcome.steps) == 1 and outcome.steps[0].task.operation == "group"
+    assert outcome.claims[0].value == []
+    assert ClaimGraph(outcome.claims).source_spans(outcome.claims[0].claim_id) == plan.selected_set.selected_units[0].source_spans
+    assert direct_answer_reason(outcome, None) is None
+    assert engine.reads == engine.selections == 0
+    store.close()
 
 
 def test_condition_scopes_and_source_versions_remain_separate():

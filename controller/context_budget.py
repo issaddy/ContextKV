@@ -172,6 +172,90 @@ def _covers(interval, ranges):
     return start >= end
 
 
+def actual_source_coverage(candidate, required):
+    """Whether actual visible original intervals cover every SourceSpan/unit.
+
+    This is source geometry, not task sufficiency or completed computation.
+    Source references and visible-block flags alone do not establish coverage.
+    """
+    from .context_schema import EvidenceUnit
+
+    required_spans = tuple(span for item in required for span in (
+        item.source_spans if isinstance(item, EvidenceUnit) else (item,)))
+    ranges = {}
+    for span in candidate.evidence_spans:
+        if span.source_start is not None and span.source_end is not None:
+            ranges.setdefault(span.key, []).append((span.source_start, span.source_end))
+    return all(_covers((span.start, span.end), ranges.get(span.source_key, ())) for span in required_spans)
+
+
+def completed_source_coverage(plan, results, required):
+    """Check completed extraction intervals independently of unit aliases."""
+    units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+    ranges = {}
+    for result in results:
+        for identity in result.covered_units:
+            for span in units[identity].source_spans:
+                ranges.setdefault(span.source_key, []).append((span.start, span.end))
+    return all(_covers((span.start, span.end), ranges.get(span.source_key, ()))
+               for unit in required for span in unit.source_spans)
+
+
+def direct_answer_reason(state, candidate):
+    """Require sufficient current conclusions or complete visible source ranges.
+
+    Statistical views additionally require their complete extraction basis and
+    this turn's deterministic reduction; visible originals cannot replace it.
+    """
+    from .reading import numeric_selection_step_id
+
+    plan = state.plan
+    units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+    tasks = {task.step_id: task for task in plan.steps}
+    points = {point.need_id: point for point in plan.answer_plan.points}
+    results = tuple(state.results)
+    for need in plan.task_state.needs:
+        full_scope = plan.coverage_scope == "all_supplied_documents" or need.scope == "all_supplied_documents"
+        required = tuple(units[identity] for identity in plan.coverage_units) if full_scope else tuple(
+            unit for unit in units.values() if not unit.need_ids or need.need_id in unit.need_ids)
+        read_results = tuple(result for result in results if result.step_id in tasks
+            and tasks[result.step_id].kind == "READ" and need.need_id in tasks[result.step_id].need_ids)
+        facts_complete = bool(required) and completed_source_coverage(plan, read_results, required)
+        point = points.get(need.need_id)
+        if need.operation in {"count", "sum", "group"}:
+            if not facts_complete:
+                return "numeric_fact_scope_incomplete"
+            selector_id = numeric_selection_step_id(plan, need.need_id)
+            selection = next((result.reduction for result in reversed(results) if result.reduction is not None
+                and result.reduction.step_id == selector_id), None) if selector_id is not None else None
+            basis = (set(selection.basis_claim_ids) if selection is not None else
+                {claim.claim_id for result in read_results for claim in result.claims
+                 if claim.kind == "extract" and claim.serves(need.need_id)})
+            if selector_id is not None and selection is None:
+                return "numeric_selection_incomplete"
+            if not any(result.reduction is not None and need.need_id in result.reduction.need_ids
+                    and result.reduction.operation == need.operation
+                    and set(result.reduction.basis_claim_ids) == basis
+                    and point is not None and set(result.reduction.frontier_claim_ids) <= set(point.claim_ids)
+                    for result in results):
+                return "numeric_operation_incomplete"
+            continue
+        supported = any(need.need_id in result.support for result in read_results)
+        reduced = any(result.reduction is not None and need.need_id in result.reduction.need_ids
+                      and result.reduction.operation != "numeric_select" for result in results)
+        conclusion_complete = (point is not None and bool(point.claim_ids) and (supported or reduced)
+            and not any(gap.need_id == need.need_id for gap in state.open_needs)
+            and (not full_scope or facts_complete))
+        if conclusion_complete:
+            continue
+        support = next((item for item in plan.selected_set.need_support if item.need_id == need.need_id), None)
+        source_sufficient = full_scope or (support.disposition == "complete" if support is not None
+                                         else plan.selected_set.disposition == "answer")
+        if not source_sufficient or not required or not actual_source_coverage(candidate, required):
+            return "answer_evidence_incomplete"
+    return None
+
+
 def evidence_interval_covered(snapshot, source):
     archive = {block.key: block for block in snapshot.archive}
     ranges = []

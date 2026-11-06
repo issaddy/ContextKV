@@ -11,7 +11,7 @@ from .engine_client import EngineError
 from .reading import (advance_read_plan, build_read_plan, output_schema, parse_read_result,
                       step_generation_kind, step_messages, unresolved_needs)
 from .reduction import reduce_claims
-from .schema import ContextEpoch, PromptCandidate
+from .schema import ContextEpoch
 from .serialization import to_jsonable
 from .session_store import ReadingProgress
 from .templates import step_request
@@ -30,7 +30,10 @@ def reduction_basis_ids(task, inputs, results):
 def aggregate_numeric_view(task, inputs, plan, results):
     claim = reduce_claims(task.operation, inputs,
         claim_id=f"{task.step_id}:claim:0", need_id=task.need_ids[0])
-    if not inputs and task.operation in {"count", "sum"}:
+    if not inputs and task.operation == "group":
+        claim = replace(claim, source_spans=tuple(dict.fromkeys(span
+            for unit in plan.selected_set.selected_units for span in unit.source_spans)))
+    elif not inputs and task.operation in {"count", "sum"}:
         selections = [result.reduction for result in results if result.reduction is not None
                       and result.reduction.operation == "numeric_select"
                       and {result.reduction.step_id, result.step_id}.intersection(task.predecessor_step_ids)]
@@ -215,10 +218,36 @@ def merge_auxiliary_usage(*records):
     return result
 
 
+def seed_reading_outcome(store, attempt_id, plan, initial_outcome=None):
+    """Restore unpaid reused facts; this attempt's physical ledger is overlaid separately."""
+    stored = store.get_attempt(attempt_id).reading_outcome
+    seed = stored if stored is not None else initial_outcome
+    if seed is None:
+        return ReadingOutcome(plan)
+    paid = store.execution_steps(attempt_id)
+    paid_ids = {record.step_id for record in paid}
+    paid_claims = {claim.claim_id for record in paid if record.result is not None for claim in record.result.claims}
+    results = tuple(result for result in seed.results if result.step_id not in paid_ids)
+    claims = tuple(claim for claim in seed.claims if claim.claim_id not in paid_claims)
+    units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+    coverage = tuple(dict.fromkeys((plan.coverage_scope, span.source_key.document_id, identity, result.step_id)
+        for result in results for identity in result.covered_units for span in units[identity].source_spans))
+    graph = ClaimGraph(claims)
+    answer = graph.answer_plan(plan.task_state, plan.selected_set.disposition, results)
+    prior = {point.need_id: point for point in seed.plan.answer_plan.points}
+    answer = replace(answer, points=tuple(point if point.claim_ids or point.need_id not in prior else
+        replace(point, source_spans=prior[point.need_id].source_spans) for point in answer.points))
+    return ReadingOutcome(replace(plan, answer_plan=answer), results=results, claims=claims,
+        coverage=coverage, open_needs=unresolved_needs(results))
+
+
 class ReadingExecutor:
     def __init__(self, store, engine, template, *, extend_open_needs=None, events=None,
-                 request_arrived=None, observe_prefix=None, observe_state=None):
+                 request_arrived=None, observe_prefix=None, observe_state=None, request_compiler=None):
+        from .request_compiler import RequestCompiler
+
         self.store, self.engine, self.template = store, engine, template
+        self.request_compiler = request_compiler or RequestCompiler(template)
         self.extend_open_needs = extend_open_needs
         self.events = events
         self.request_arrived = request_arrived
@@ -245,6 +274,10 @@ class ReadingExecutor:
             raise ReadingBudgetExceeded("selected step leaves no terminal ANSWER allocation")
         self.store.save_context_plan(attempt_id, plan)
         units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+        if candidate is not None and task.kind == "READ":
+            if set(candidate.read_unit_order) != set(task.input_unit_ids) or len(candidate.read_unit_order) != len(task.input_unit_ids):
+                raise ValueError("selected READ order differs from the declared units")
+            task = replace(task, input_unit_ids=candidate.read_unit_order)
         selected_units = tuple(units[identity] for identity in task.input_unit_ids)
         claims = {claim.claim_id: claim for claim in state.claims}
         selected_claims = tuple(claims[identity] for identity in task.input_claim_ids)
@@ -269,6 +302,8 @@ class ReadingExecutor:
             if candidate is None or (candidate.input_ids, candidate.output_budget) != (
                     rendered.input_ids, task.output_budget):
                 raise ValueError("selected quote input/output differs from the executed logical step")
+            if candidate.messages != step_messages(plan, task, selected_units, selected_claims, snapshot):
+                raise ValueError("selected READ schema differs from its bound unit order")
             if candidate.action != "REBUILD":
                 raise ValueError("internal reading steps use independent native REBUILD epochs")
             usage = (0 if initial_auxiliary_usage is None else auxiliary_tokens(initial_auxiliary_usage))
@@ -278,7 +313,7 @@ class ReadingExecutor:
             require_online_tokens(plan.budget.max_total_tokens, tokens,
                 len(rendered.input_ids)+task.output_budget, task.kind)
             record = await self._generate_step(attempt_id, snapshot, plan, task, selected_units, selected_claims,
-                                               results=state.results)
+                                               results=state.results, candidate=candidate, rendered=rendered)
         if cpu:
             record = completed_reduction_record(record, task, selected_claims, state.results)
             self.store.save_execution_step(record, "COMPLETE")
@@ -340,11 +375,11 @@ class ReadingExecutor:
         await self._retire_step(record)
         return record
 
-    async def _generate_step(self, attempt_id, snapshot, plan, task, units, claims, *, results=()):
+    async def _generate_step(self, attempt_id, snapshot, plan, task, units, claims, *, results=(),
+                             candidate, rendered):
         step_started = time.monotonic()
         identity = f"{attempt_id}:{task.step_id}"
-        messages = step_messages(plan, task, units, claims, snapshot)
-        rendered = self.template.render(messages)
+        messages = candidate.messages
         if len(rendered.input_ids) > task.input_budget:
             raise ReadingBudgetExceeded(f"{task.step_id} input exceeds {task.input_budget}")
         if len(rendered.input_ids) + task.output_budget > plan.budget.window_tokens:
@@ -391,12 +426,6 @@ class ReadingExecutor:
                 raise EngineError("READ_STEP_OUTCOME_PENDING", status.state)
             generation = status.result
         elif stage == "PREPARED":
-            candidate = PromptCandidate(identity, "REBUILD", snapshot.version,
-                messages, rendered.input_ids, rendered.input_hash, frozenset(), frozenset(),
-                fingerprint=self.template.fingerprint, corpus_snapshot_id=snapshot.corpus_snapshot_id,
-                context_plan_id=plan.plan_id, evidence_set_id=plan.selected_set.set_id,
-                output_budget=task.output_budget,
-                generation_kind=step_generation_kind(task.kind, task.operation, plan.reading_mode))
             quote_started = time.monotonic()
             quote = await self.engine.quote_batch((candidate,), self.template.fingerprint)
             record = replace(record, metrics={**record.metrics,
@@ -444,6 +473,10 @@ class ReadingExecutor:
                 raise EngineError("READ_STEP_RECEIPT_MISMATCH")
             if not generation.generation_complete or not receipt.generation_complete:
                 raise EngineError("READ_STEP_INCOMPLETE")
+            observed = self.request_compiler.observe_executed(candidate, receipt,
+                cache_scope=await self.engine.info())
+            record = replace(record, metrics={**record.metrics, "source_view": observed})
+            self.store.save_execution_step(record, "RESULT_READY", generation)
             if generation.finish_reason in {"length", "max_tokens"}:
                 raise EngineError("READ_STEP_OUTPUT_TRUNCATED", task.step_id)
             parse_started = time.monotonic()
@@ -483,18 +516,22 @@ class ReadingExecutor:
                 self.events.emit("reading_step_complete", attempt_id=attempt_id, step=record)
         return record
 
-    async def execute_reads(self, attempt_id, snapshot, plan, *, initial_auxiliary_usage=None):
+    async def execute_reads(self, attempt_id, snapshot, plan, *, initial_auxiliary_usage=None,
+                            initial_outcome=None):
         from .evidence_planner import _passages, close_dependencies
         if self.observe_state is not None and self.store.execution_steps(attempt_id):
             raise ValueError("fixed state observation requires a newly executed attempt, not saved post-step state")
         if (plan.budget.max_passages is not None
                 and len(_passages(plan.selected_set.selected_units)) > plan.budget.max_passages):
             raise ReadingBudgetExceeded("initial plan exceeds the original passage allocation")
+        seed = seed_reading_outcome(self.store, attempt_id, plan, initial_outcome)
+        plan = seed.plan
         self.store.save_context_plan(attempt_id, plan)
         units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
-        graph, results, records, coverage = ClaimGraph(), [], [], []
+        graph, results, records, coverage = ClaimGraph(seed.claims), list(seed.results), [], list(seed.coverage)
+        result_indices = {result.step_id: index for index, result in enumerate(results)}
         record_indices = {}
-        covered_unit_ids = set()
+        covered_unit_ids = {identity for result in results for identity in result.covered_units}
         progress = self.store.reading_progress(attempt_id)
         expanded = set(progress.expanded) if progress is not None else set()
         blocked_open_needs = {(need.need_id, need.missing_relation, need.bound_entities, need.temporal_scope): need
@@ -523,12 +560,16 @@ class ReadingExecutor:
             result = record.result
             for claim in result.claims:
                 graph.add(claim)
+            if record.step_id in result_indices:
+                results[result_indices[record.step_id]] = result
+            else:
+                result_indices[record.step_id] = len(results)
+                results.append(result)
             if record.step_id in record_indices:
                 index = record_indices[record.step_id]
-                results[index], records[index] = result, record
+                records[index] = record
             else:
                 record_indices[record.step_id] = len(records)
-                results.append(result)
                 records.append(record)
             for unit in selected_units:
                 if unit.unit_id in covered_unit_ids:
@@ -536,24 +577,38 @@ class ReadingExecutor:
                 covered_unit_ids.add(unit.unit_id)
                 for document_id in dict.fromkeys(span.source_key.document_id for span in unit.source_spans):
                     coverage.append((plan.coverage_scope, document_id, unit.unit_id, record.step_id))
-            if record.step_id not in {step.step_id for step in plan.steps}:
-                plan = replace(plan, steps=plan.steps+(record.task,))
+            tasks = {step.step_id: step for step in plan.steps}
+            tasks[record.step_id] = record.task
+            plan = replace(plan, steps=tuple(tasks.values()))
 
         async def run_model(task, selected_units, selected_claims):
+            persisted = self.store.execution_step(attempt_id, task.step_id)
+            if persisted is not None:
+                task = persisted[1].task
+                selected_units = tuple(units[identity] for identity in task.input_unit_ids)
             task = replace(task, input_claim_ids=tuple(claim.claim_id for claim in selected_claims),
                 output_schema=output_schema(task, selected_units, selected_claims,
                     reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
-            rendered = self.template.render(step_messages(plan, task, selected_units,
-                                                          selected_claims, snapshot))
+            variants = self.request_compiler.compile_read(plan, task, selected_units, selected_claims,
+                snapshot, outputs=(task.output_budget,), cache_scope=await self.engine.info())
+            if persisted is None and len(variants) > 1:
+                quotes = await self.engine.quote_batch(variants, self.template.fingerprint)
+                candidate = self.request_compiler.choose_variant(variants, quotes)
+            else:
+                candidate = variants[0]
+            task = replace(task, input_unit_ids=candidate.read_unit_order,
+                output_schema=output_schema(task, tuple(units[identity] for identity in candidate.read_unit_order),
+                    selected_claims, reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
+            selected_units = tuple(units[identity] for identity in task.input_unit_ids)
+            rendered = self.template.render(candidate.messages)
             if len(records) + 1 >= plan.budget.max_steps:
                 raise ReadingBudgetExceeded("reading exhausted the request step allocation")
-            persisted = self.store.execution_step(attempt_id, task.step_id)
             if persisted is None or persisted[0] in {"PLANNED", "PREPARED"}:
                 require_online_tokens(plan.budget.max_total_tokens, refresh_usage(),
                     len(rendered.input_ids)+task.output_budget, task.kind)
             try:
                 record = await self._generate_step(attempt_id, snapshot, plan, task,
-                                                   selected_units, selected_claims, results=tuple(results))
+                    selected_units, selected_claims, results=tuple(results), candidate=candidate, rendered=rendered)
             finally:
                 saved = self.store.execution_step(attempt_id, task.step_id)
                 if saved is not None:
@@ -728,9 +783,10 @@ class ReadingExecutor:
                     await run_model(task, selected_units, selected_claims)
                 await observe_current()
             self.store.save_context_plan(attempt_id, plan)
-        covered = {row[2] for row in coverage}
-        if plan.coverage_scope == "all_supplied_documents" and covered != set(plan.coverage_units):
-            raise ValueError("full-document coverage is incomplete")
+        if plan.coverage_scope == "all_supplied_documents":
+            from .context_budget import completed_source_coverage
+            if not completed_source_coverage(plan, results, tuple(units[identity] for identity in plan.coverage_units)):
+                raise ValueError("full-document coverage is incomplete")
         unresolved = unresolved_needs(results)
         disposition = plan.selected_set.disposition
         if unresolved:

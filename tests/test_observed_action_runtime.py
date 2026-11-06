@@ -178,7 +178,7 @@ async def test_selected_gap_is_paid_once_and_new_read_keeps_old_dependency_proof
 
 
 @pytest.mark.asyncio
-async def test_mandatory_coverage_uses_native_fixed_path_without_untrained_whole_plan_gain_or_gap(tmp_path):
+async def test_full_scope_visible_originals_allow_direct_without_read_or_gap(tmp_path):
     model = LearnedFixture(reads=0, gap_gain=.9)
     controller, _, _, observed, plan = configured(tmp_path, reads=2, scope="all_supplied_documents", model=model)
     controller.engine = BridgeReader(repeat=True)
@@ -189,9 +189,9 @@ async def test_mandatory_coverage_uses_native_fixed_path_without_untrained_whole
         raise AssertionError("full supplied-source scope cannot expand itself")
 
     response = await controller.serve_turn("s", "How?", context_plans=(plan,), open_need_provider=provider)
-    assert response.read_count == 2 and not calls
-    assert not {"read_once", "gap_retrieval"}.intersection(model.quality_calls)
-    assert len(observed.states[-1].results) == 2
+    assert response.read_count == 0 and not calls
+    assert "gap_retrieval" not in model.quality_calls
+    assert observed.states[-1].results == ()
     await controller.aclose()
 
 

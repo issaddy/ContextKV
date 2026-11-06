@@ -109,6 +109,7 @@ class RetrievalState:
     prior_task_states: tuple[TaskState, ...] = ()
     archive_source_keys: tuple[EvidenceKey, ...] = ()
     source_index: Any = None
+    committed_readings: tuple[tuple[str, ReadingOutcome], ...] = ()
 
 
 @dataclass(frozen=True)

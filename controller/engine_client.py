@@ -19,7 +19,6 @@ from controller.templates import token_hash as token_hash
 from controller.templates import citation_regex
 
 PROTOCOL_VERSION = "contextkv-v1"
-SGLANG_COMMIT = "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b"
 
 
 class EngineError(RuntimeError):
@@ -159,10 +158,9 @@ class SGLangEngineClient:
         required = (data.get("protocol_version") == PROTOCOL_VERSION
                     and data.get("guarded_generate_supported") is True
                     and data.get("scheduler_owned") is True
-                    and data.get("completion_status_supported") is True
-                    and data.get("sglang_commit") == SGLANG_COMMIT)
+                    and data.get("completion_status_supported") is True)
         if not required:
-            raise EngineError("UNSUPPORTED_ENGINE", "fixed-commit scheduler-owned contextkv-v1 patch required")
+            raise EngineError("UNSUPPORTED_ENGINE", "scheduler-owned contextkv-v1 quote/generation protocol required")
         if data.get("fingerprint") != asdict(self.fingerprint):
             raise EngineError("FINGERPRINT_MISMATCH", "engine model/tokenizer/template/namespace differ")
         if self._expected_model_scope is not None:

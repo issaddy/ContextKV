@@ -53,7 +53,7 @@ class SourceDirectory:
         self.corpus_index, self.search, self.tokenizer = corpus_index, search, tokenizer
         self.task_interpreter = task_interpreter
         self.archive_encoder = archive_encoder
-        self._archive_vectors = {}
+        self._unit_vectors = {}
         self.reference_date = reference_date or date.today().isoformat()
         self.profile = profile or PoolProfile()
         self._units = {}
@@ -191,14 +191,24 @@ class SourceDirectory:
         keys = tuple(keys)
         if not keys or self.archive_encoder is None:
             return keys[:top_k]
+        vectors = {}
         for key in keys:
-            if key not in self._archive_vectors:
-                vectors = np.asarray(self.archive_encoder([u.text for u in self._units[key]]), dtype=np.float32)
-                vector = vectors.mean(axis=0)
-                self._archive_vectors[key] = vector / np.linalg.norm(vector)
+            vector = self.encode_source_units(self._units[key], self.archive_encoder).mean(axis=0)
+            vectors[key] = vector / np.linalg.norm(vector)
         query_vector = np.asarray(self.archive_encoder([query])[0], dtype=np.float32)
         query_vector /= np.linalg.norm(query_vector)
-        return tuple(sorted(keys, key=lambda key: -float(self._archive_vectors[key] @ query_vector)))[:top_k]
+        return tuple(sorted(keys, key=lambda key: -float(vectors[key] @ query_vector)))[:top_k]
+
+    def encode_source_units(self, units, encode):
+        """Reuse the fixed document encoder's vectors by original source identity."""
+        units = tuple(units)
+        missing = tuple({unit.unit_id: unit for unit in units
+                         if unit.unit_id not in self._unit_vectors}.values())
+        if missing:
+            values = encode([unit.text for unit in missing])
+            self._unit_vectors.update((unit.unit_id, np.asarray(value, dtype=np.float32))
+                for unit, value in zip(missing, values, strict=True))
+        return np.asarray([self._unit_vectors[unit.unit_id] for unit in units], dtype=np.float32)
 
     def candidate_search(self, query, *, top_k=50):
         return tuple(self.search(query, top_k=top_k))

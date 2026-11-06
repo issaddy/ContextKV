@@ -13,6 +13,7 @@ from adapters.serving_retrieval import ServingRetriever, ServingRetrievalError
 from .config import RunConfig, create_controller
 from .engine_client import EngineError
 from .evidence import make_evidence
+from .qa import DocumentQA
 from .serialization import to_jsonable
 from .service import ContextOverflow, Controller
 from .session_store import StoreError
@@ -51,6 +52,16 @@ class QueryInput(BaseModel):
     query: str = Field(min_length=1)
     request_id: str = Field(min_length=1)
     from_corpus_snapshot_id: str | None = Field(default=None, min_length=1)
+    document_set_id: str | None = None
+    coverage_scope: str = "selected_sources"
+
+
+class RegisteredEvidenceInput(EvidenceInput):
+    metadata: dict = Field(default_factory=dict)
+
+
+class RegistrationInput(BaseModel):
+    documents: list[RegisteredEvidenceInput] = Field(min_length=1)
 
 
 def _load_retrieval(service, *, retriever_index, retriever_config, evidence_corpus, corpus_id,
@@ -169,6 +180,7 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
                     evidence_corpus=evidence_corpus, corpus_id=corpus_id, study_config=study_config))
                 app.state.retrieval = await asyncio.shield(loader)
             if app.state.retrieval is not None:
+                app.state.qa = DocumentQA(service, app.state.retrieval)
                 service.bind_resident_models(app.state.retrieval.manifest)
                 service.events.emit("retrieval_configured", retrieval=app.state.retrieval.manifest)
             service.events.emit("service_started", engine=info, fingerprint=service.template.fingerprint,
@@ -250,21 +262,28 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
                 service.store.get_snapshot(session_id)
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail="session not found") from exc
-        from adapters.study_retrieval import StudyEvidenceProvider
-        open_need_provider = None
-        if isinstance(adapter, StudyEvidenceProvider):
-            async def extend(plan, open_needs, claims):
-                snapshot = service.store.get_snapshot(session_id)
-                return await adapter.extend_for_plan(snapshot, plan, open_needs, claims)
-            open_need_provider = extend
         try:
-            return to_jsonable(await service.serve_turn(session_id, body.query,
-                request_id=body.request_id, corpus_snapshot_id=adapter.corpus_snapshot_id,
-                evidence_provider=lambda snapshot: adapter.retrieve(snapshot, body.query, body.request_id),
-                open_need_provider=open_need_provider,
+            return to_jsonable(await app.state.qa.ask(session_id, body.query, body.request_id,
+                document_set_id=body.document_set_id, coverage_scope=body.coverage_scope,
                 from_corpus_snapshot_id=body.from_corpus_snapshot_id))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/documents")
+    async def register_documents(body: RegistrationInput):
+        if not app.state.ready or app.state.retrieval is None:
+            raise HTTPException(status_code=503, detail="query retrieval is not configured or not ready")
+        blocks, metadata = [], {}
+        for document in body.documents:
+            value = document.model_dump()
+            fields = value.pop("metadata")
+            block = make_evidence(**value)
+            blocks.append(block)
+            metadata[block.key] = fields
+        documents = app.state.qa.register_documents(blocks, source_metadata=metadata)
+        return {"document_set_id": documents.document_set_id,
+                "corpus_snapshot_id": documents.corpus_snapshot_id,
+                "documents": len(documents.blocks)}
 
     @app.post("/sessions/{session_id}/turns")
     async def turn(session_id: str, body: TurnInput):

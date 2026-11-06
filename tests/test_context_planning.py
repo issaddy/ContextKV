@@ -10,6 +10,8 @@ from controller.templates import ByteTemplate, verify_evidence_spans
 
 
 def test_compiler_keeps_source_char_offsets_separate_from_prompt_offsets():
+    from controller.context_budget import actual_source_coverage
+
     plan, block = context_plan()
     template, snapshot = ByteTemplate(), SessionSnapshot("s")
     candidates = build_plan_candidates(snapshot, "How?", plan, template)
@@ -21,6 +23,18 @@ def test_compiler_keeps_source_char_offsets_separate_from_prompt_offsets():
         assert candidate.messages[span.message_index].content[span.start:span.end] == block.text[3:21]
         assert verify_evidence_spans(candidate.messages, candidate.evidence_spans,
                                     (block,), candidate.reference_map) == {block.key}
+        required = plan.selected_set.selected_units
+        assert actual_source_coverage(candidate, required)
+        assert actual_source_coverage(candidate, required[0].source_spans)
+        assert not actual_source_coverage(replace(candidate, evidence_spans=()), required)
+        middle = span.source_start+5
+        left = replace(span, end=span.start+5, source_end=middle)
+        right = replace(span, start=span.start+5, source_start=middle)
+        assert actual_source_coverage(replace(candidate, evidence_spans=(left, right)), required)
+        assert not actual_source_coverage(replace(candidate,
+            evidence_spans=(left, replace(right, start=right.start+1, source_start=middle+1))), required)
+        changed = replace(required[0].source_spans[0], source_key=replace(block.key, version="v2"))
+        assert not actual_source_coverage(candidate, (changed,))
 
 
 def test_rebuild_selects_original_history_spans_and_preserves_actual_qa():

@@ -1,11 +1,34 @@
 # 当前课题运行入口
 
-训练、模型推理与 GPU 测量按用户最新授权和停止时间执行。旧实验原始记录已丢弃；本次按当前协议重新采集答案、奖励及成本。
+本轮按用户要求先提交源码并停止容器任务，等待用户清理和更新容器后再恢复运行。旧批次不替代本轮完整队列结果。
 
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 
 运行冻结同一 Qwen3-32B 模型权重与解码参数，显式配置端点、协议身份与原生缓存。主机目录、GPU、服务端口和
 输出目录由本次运行配置声明；不复用旧批次的固定路径或截止时间。
+
+本轮运行链：`DocumentQA.ask → StudyEvidenceProvider → Controller → RequestCompiler/ReadingExecutor → SessionStore`。API 的 `/documents` 登记资料，`/sessions/{id}/query` 用 `document_set_id` 引用；`bench.study` 共用 ask。新资料的编码和排序在实际检索阶段计费。
+
+引擎准备复用容器当前 Python/CUDA，不安装或替换 PyTorch：
+
+```bash
+export CONTEXTKV_MODEL_SCOPE_PATH=/absolute/path/qwen3-scope.json
+bash scripts/bootstrap_sglang.sh
+source runs/engine-runtime.env
+CUDA_VISIBLE_DEVICES=0 bash scripts/launch_sglang.sh --host 127.0.0.1 --port 30000
+```
+
+scope 的 `model_path` 指向 `/data/models/qwen3-32b`，模型/tokenizer 身份沿用真实文件。默认集成为官方 SGLang 0.5.18 源码及项目补丁，CUDA 内核来自现有环境。`engine-source.json`、`engine-environment.txt` 记录实际版本；不要求升级主机驱动。
+
+作者 ContextPilot 准备与启用：
+
+```bash
+python scripts/prepare_contextpilot.py --checkout vendor/contextpilot
+```
+
+study 配置的 `execution.cache_compilation` 取 `{mode: contextpilot, checkout: vendor/contextpilot}`；Native 对照取 `{mode: native}`。`prefix_retention` 默认 `{mode: native}`，与编排开关独立。
+
+本轮仍缺：LlamaIndex adapter 到统一执行器的接线、最终矩阵更新、新动作协议监督资产及真实配对。下表保留已有可用采集与历史对照入口，不表示这些后续工作已完成。CUDA 12.9 补丁的真实 GPU 协议验收在容器更新后执行一次。
 
 | 任务 | 当前入口 | 必须保留的对照与产物 |
 |---|---|---|

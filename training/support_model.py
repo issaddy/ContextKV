@@ -204,9 +204,11 @@ class TrainedSupportBackend:
         self.manifest = manifest
         self.max_length = manifest["max_length"]
         self.embeddings = EmbeddingCache(network.encoder.config.hidden_size)
+        self._predictions = {}
         self.usage = {"examples": 0, "input_tokens": 0, "output_tokens": 0,
                       "compute_ms": 0.0, "support_ms": 0.0, "utility_ms": 0.0,
                       "oversized_examples": 0}
+        self.usage["cache_hits"] = 0
         self.oversized_inputs = []
         self.deployment = {"device": str(device),
             "encoder_dtype": str(next(network.encoder.parameters()).dtype),
@@ -240,6 +242,28 @@ class TrainedSupportBackend:
             self.torch.cuda.synchronize(self.device)
 
     def predict(self, examples):
+        keys, pending = [], {}
+        for example in examples:
+            key = (example.task_id, example.need_id, example.query, render_document(example)[0])
+            keys.append(key)
+            if key not in self._predictions:
+                pending[key] = example
+        self.usage["cache_hits"] += len(examples)-len(pending)
+        if pending:
+            predictions = self._predict_uncached(tuple(pending.values()))
+            for key, example, prediction in zip(pending, pending.values(), predictions, strict=True):
+                embedding = (self.embeddings[example.task_id, example.need_id, tuple(u.unit_id for u in example.units)]
+                             if prediction is not None else None)
+                self._predictions[key] = prediction, embedding
+        results = []
+        for key, example in zip(keys, examples, strict=True):
+            prediction, embedding = self._predictions[key]
+            if prediction is not None:
+                self.embeddings[example.task_id, example.need_id, tuple(u.unit_id for u in example.units)] = embedding
+            results.append(prediction)
+        return tuple(results)
+
+    def _predict_uncached(self, examples):
         self._synchronize()
         started = time.perf_counter()
         predictions = [None]*len(examples)
@@ -326,11 +350,15 @@ class TrainedSupportBackend:
         return result
 
     def release_task(self, task_id):
+        for key in tuple(self._predictions):
+            if key[0] == task_id:
+                del self._predictions[key]
         for key in tuple(self.embeddings):
             if key[0] == task_id:
                 del self.embeddings[key]
 
     def close(self):
+        self._predictions.clear()
         self.embeddings.clear()
         del self.network
         if str(self.device).startswith("cuda"):

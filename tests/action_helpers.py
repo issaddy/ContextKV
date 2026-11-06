@@ -72,22 +72,23 @@ class Resources:
                 "window": {"start": start, "end": end}, "complete_window_coverage": True}
 
 
-def material(name):
-    block = make_evidence(name+" qualifies.", name)
+def material(name, detail=""):
+    block = make_evidence(name+" qualifies."+detail, name)
     return block, EvidenceUnit(name, (SourceSpan(name, block.key, 0, len(block.text)),), block.text)
 
 
 async def frozen_fixture(tmp_path):
     from controller.reading import build_read_plan
     template, native = ByteTemplate(), Reader()
-    pairs = (material("R1"), material("R2"))
+    # One complete source fits, but both exceed the actual READ input cap.
+    pairs = tuple(material(name, "\n"+"Original context. "*96) for name in ("R1", "R2"))
     blocks, units = zip(*pairs)
     state = TaskState("task", "Count qualifying records.", needs=(Need("n", operation="count"),),
         working_history=(TextRef(1, "user", 0, 24),), current_turn_id=2)
     history = (TurnRecord(1, "Use the frozen condition", "Confirmed"),)
     snapshot = SessionSnapshot("capture", raw_history=history)
     plan = build_read_plan(state, EvidenceSet("selected", units, source_blocks=blocks), "selected_sources",
-        ContextBudget(window_tokens=16000, read_input_tokens=10000, read_output_tokens=2048,
+        ContextBudget(window_tokens=16000, read_input_tokens=7200, read_output_tokens=2048,
             output_tokens=256, body_tokens=3000), template=template, snapshot=snapshot,
         read_packing="source_windows")
     store = SessionStore(tmp_path / "state.db")

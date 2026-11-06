@@ -78,6 +78,11 @@ class ServingRetriever:
         started = time.monotonic()
         return await run_retrieval_worker(self._retrieve, snapshot, query, request_id, started)
 
+    def finish_request(self, task_id):
+        """This retriever owns no request-local support predictions."""
+        if self.events is not None:
+            self.events.emit("retrieval_request_finished", task_id=task_id)
+
     def _retrieve(self, snapshot, query, request_id, started):
         history = tuple(message for turn in snapshot.raw_history for message in (
             OnlineMessage("user", turn.user_text), OnlineMessage("assistant", turn.assistant_text)))

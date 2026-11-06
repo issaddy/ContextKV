@@ -2,7 +2,7 @@
 # Linux/CUDA only. Run prepare_sglang.py for a full checkout first, install that
 # pinned checkout's runtime dependencies in the container's Python environment.
 set -euo pipefail
-CHECKOUT="${SGLANG_CHECKOUT:-vendor/sglang}"
+CHECKOUT="${SGLANG_CHECKOUT:-vendor/sglang-0.5.18}"
 : "${CONTEXTKV_MODEL_SCOPE_PATH:?Set to an explicit local Qwen3 model scope JSON}"
 : "${CONTEXTKV_FINGERPRINT_JSON:?Set the exact HFTemplateAdapter fingerprint JSON}"
 if [[ -f "$CHECKOUT/.contextkv-source-only" ]]; then
@@ -10,6 +10,7 @@ if [[ -f "$CHECKOUT/.contextkv-source-only" ]]; then
   exit 2
 fi
 export SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND=python
+export SGLANG_ENABLE_UNIFIED_RADIX_TREE=1
 export SGLANG_HICACHE_TMA_TRANSFER="${SGLANG_HICACHE_TMA_TRANSFER:-0}"
 export PYTHONPATH="$CHECKOUT/python${PYTHONPATH:+:$PYTHONPATH}"
 # Optional host admission uses inherited CONTEXTKV_HOST_ADMISSION=off|fixed|conditioned.
@@ -34,7 +35,7 @@ if [[ "${CONTEXTKV_ENABLE_HICACHE:-1}" == 1 ]]; then
     --hicache-mem-layout "${CONTEXTKV_HICACHE_LAYOUT:-layer_first}")
 fi
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec python "$PROJECT_ROOT/engine_patches/contextkv_model_scope.py" \
+exec "${CONTEXTKV_ENGINE_PYTHON:-python}" "$PROJECT_ROOT/engine_patches/contextkv_model_scope.py" \
   --scope "$CONTEXTKV_MODEL_SCOPE_PATH" --launch \
   --tp 1 --dtype bfloat16 --kv-cache-dtype bfloat16 --context-length 32768 \
   --page-size "${CONTEXTKV_PAGE_SIZE:-64}" ${SESSION_ARGS[@]+"${SESSION_ARGS[@]}"} \

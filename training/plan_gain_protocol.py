@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import replace
 import time
 
-from adapters.history_state import validate_task_refs
+from adapters.history_state import TaskPrediction, validate_task_refs
 from controller.action_proposals import (GapRetrievalRequest as GapRetrievalRequest,
     build_observed_action_plans as build_observed_action_plans, gap_query as gap_query,
     BOUNDED_CONTINUATION, bind_read_parents, continuation_gap, continuation_read, gap_retrieval_plan)
@@ -55,6 +55,9 @@ class AuditedTaskInterpreter:
         self.model = self
         self.usage = {"input_tokens": 0, "output_tokens": 0, "elapsed_ms": 0.0}
         self.last_metrics = {"task_model_ms": 0.0}
+        # A frozen TaskState makes no new cross-turn extraction judgments.
+        self.last_prediction = TaskPrediction("NEW")
+        self.last_read_contracts = ()
         self.row = None
         self.manifest = {"kind": "frozen_audited_actual_history_task_state", "inference_calls": 0}
 

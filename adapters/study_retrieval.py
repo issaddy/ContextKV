@@ -6,8 +6,6 @@ import threading
 import time
 from pathlib import Path
 
-import numpy as np
-
 from adapters.corpus import CorpusIndex
 from adapters.evidence_pool import PoolProfile, SourceDirectory, merge_retrieved_units
 from adapters.history_state import HistoryIndex, TaskInterpreter, TeacherTaskModel, restore_source_metadata
@@ -19,7 +17,8 @@ from controller.candidates import CandidatePolicy, build_plan_candidates, measur
 from controller.config import load_config
 from controller.context_budget import resolve_text, working_history_messages
 from controller.context_schema import (AnswerPlan, AnswerPoint, ContextBudget, ContextPlan,
-    EvidenceSet, EvidenceUnit, Need, ReadingOutcome, SourceSpan, SupportScores, TaskState, TextRef)
+    EvidencePool, EvidenceSet, Need, SupportScores, TaskState, TextRef)
+from controller.fact_reuse import build_reuse_seed, complete_reuse_ranges
 from controller.evidence_planner import (BudgetedEvidencePlanner, SearchProfile, _passages,
     close_dependencies, render_unit_union, unresolved_needs)
 from controller.reading import build_read_plan
@@ -69,6 +68,16 @@ class StudyEvidenceProvider:
         self.corpus_snapshot_id = serving.corpus_snapshot_id
         self.traces = {}
         self._lock = threading.Lock()
+        self.committed_readings = None
+
+    def finish_request(self, task_id):
+        """Release support predictions after this QA, including its GAP rounds."""
+        with self._lock:
+            if self.support_backend is not None:
+                owners = {task_id, *(trace["support_task_id"] for (_, request_id), trace in self.traces.items()
+                    if request_id == task_id and "support_task_id" in trace)}
+                for owner in owners:
+                    self.support_backend.release_task(owner)
 
     @property
     def manifest(self):
@@ -145,6 +154,9 @@ class StudyEvidenceProvider:
         encoder = getattr(self.serving.retriever, "encoder", None)
         if encoder is not None:
             sources.append(("retrieval_query_encoder", encoder))
+        reranker = getattr(self.serving.retriever, "reranker", None)
+        if reranker is not None:
+            sources.append(("published_reranker", reranker))
         if self.support_backend is not None:
             sources.append(("support_utility", self.support_backend))
         return sources
@@ -183,6 +195,8 @@ class StudyEvidenceProvider:
                     self.directory.corpus_index.source_metadata.update(supplied_metadata)
                 self.directory.add_archive(supplied_blocks)
             memory = self.serving.retrieval_state(snapshot)
+            if self.committed_readings is not None:
+                memory = replace(memory, committed_readings=self.committed_readings(snapshot))
             if self.strategy in {"B0", "Btoken"}:
                 refs = tuple(ref for row in snapshot.raw_history for ref in (
                     TextRef(row.turn_id, "user", 0, len(row.user_text)),
@@ -198,6 +212,33 @@ class StudyEvidenceProvider:
                     self.serving.corpus_id, query, history, (), "P3")
                 state = self.directory.task_interpreter.interpret(turn, memory)
                 auxiliary = (("task", self.directory.task_interpreter.last_metrics["task_model_ms"]),)
+            if supplied_blocks is not None:
+                state = replace(state, source_scope=tuple(block.key for block in supplied_blocks))
+            self.traces.setdefault((snapshot.session_id, request_id), {})["support_task_id"] = state.task_id
+            interpreter = self.directory.task_interpreter
+            reuse_enabled = self.config.get("reading", {}).get("fact_reuse", True)
+            bindings = (interpreter.last_prediction.read_reuse
+                if interpreter is not None and self.strategy not in {"B0", "Btoken"} and reuse_enabled else ())
+            contracts = interpreter.last_read_contracts if bindings else ()
+            preliminary = ContextPlan(state.task_id+":reuse", state, EvidenceSet("reuse", ()), budget=self.budget)
+            seed = build_reuse_seed(preliminary, bindings, contracts, memory)
+            covered = complete_reuse_ranges(seed)
+            from controller.context_budget import _covers
+            satisfied = set()
+            for need in state.needs:
+                results = tuple(result for result in seed.results if need.need_id in result.support)
+                if not results:
+                    continue
+                if need.scope == "all_supplied_documents":
+                    required = self.directory.full_scope(state.source_scope).units if state.source_scope else ()
+                    ranges = {}
+                    for span in covered.get(need.need_id, ()):
+                        ranges.setdefault(span.source_key, []).append((span.start, span.end))
+                    if not required or not all(_covers((span.start, span.end), ranges.get(span.source_key, ()))
+                        for unit in required for span in unit.source_spans):
+                        continue
+                satisfied.add(need.need_id)
+            active_state = replace(state, needs=tuple(need for need in state.needs if need.need_id not in satisfied))
             reading = self.config.get("reading", {}).get("enabled", True) and self.strategy in {"B6", "B7", "Lmap"}
             coverage = (supplied_coverage_scope if supplied_blocks is not None else
                         self.config.get("reading", {}).get("coverage_mode", "selected_sources"))
@@ -210,44 +251,24 @@ class StudyEvidenceProvider:
                 coverage = "all_supplied_documents"
             full_scope_read = reading and coverage == "all_supplied_documents"
             if supplied_blocks is not None:
-                state = replace(state, source_scope=tuple(block.key for block in supplied_blocks))
                 pool = self.directory.full_scope(state.source_scope)
             elif full_scope_read:
                 document_ids = self.config.get("reading", {}).get("document_ids", ())
                 keys = state.source_scope or tuple(block.key for block in self.directory.corpus_index.blocks
                     if not document_ids or block.key.document_id in document_ids)
                 pool = self.directory.full_scope(keys)
+            elif active_state.needs:
+                pool = self.directory.retrieve_pool(active_state, memory)
             else:
-                pool = self.directory.retrieve_pool(state, memory)
+                pool = EvidencePool((), (), "selected_sources")
             if full_scope_read:
                 state = replace(state, source_scope=tuple(block.key for block in pool.source_blocks))
             selection = self.config.get("selection", {})
             policy = CandidatePolicy(max_total_model_tokens=self.budget.window_tokens,
                                      max_new_tokens=self.budget.output_tokens)
-            direct_trace = None
-            if (selection.get("provided_full_direct_when_fits", False)
-                    and supplied_blocks is not None and not snapshot.raw_history and state.current_turn_id == 1):
-                direct_started = time.perf_counter()
-                direct, direct_trace = self._provided_full_direct(snapshot, query, state, pool, policy)
-                if direct is not None:
-                    auxiliary += (("provided_full_direct", (time.perf_counter()-direct_started)*1000),)
-                    direct = replace(direct, auxiliary_ms=auxiliary)
-                    usage = self._auxiliary_usage(usage_baseline, auxiliary)
-                    self.traces[snapshot.session_id, request_id] = {
-                        "task_state": to_jsonable(state),
-                        "pool": to_jsonable(replace(pool, units=direct.selected_set.selected_units)),
-                        "context_plans": to_jsonable((direct,)), "provided_full_direct": direct_trace,
-                        "support_scores": to_jsonable(SupportScores()), "search_trace": (),
-                        "selection_policy_heads_used": False, "auxiliary_usage": usage,
-                        "task_metrics": self.directory.task_interpreter.last_metrics
-                            if self.strategy not in {"B0", "Btoken"} else None,
-                        "planning_ms": (time.perf_counter()-started)*1000}
-                    context = QueryContext(state.query or query, "task_state", task_state=state)
-                    return EvidenceSelection(direct.selected_set.source_blocks,
-                        tuple(block.key for block in direct.selected_set.source_blocks), context,
-                        (direct,), auxiliary_usage=usage)
             if supplied_blocks is not None and not full_scope_read:
-                pool = self._rank_supplied(state, snapshot, pool)
+                pool = (self._rank_supplied(active_state, snapshot, pool) if active_state.needs else
+                        EvidencePool((), (), "selected_sources"))
 
             def measure_contexts(state, groups):
                 plans = []
@@ -262,7 +283,9 @@ class StudyEvidenceProvider:
             support_model = None
             search_trace = ()
             support_ms = search_ms = 0.0
-            if full_scope_read:
+            if not active_state.needs and not full_scope_read:
+                evidence_sets = (EvidenceSet(f"{state.task_id}:reuse", (), disposition="answer"),)
+            elif full_scope_read:
                 token_cost = len(self.template.tokenizer.encode(render_unit_union(pool.units), add_special_tokens=False))
                 evidence_sets = (EvidenceSet(f"{state.task_id}:full_scope", pool.units,
                     token_cost=token_cost, disposition="partial", source_blocks=pool.source_blocks),)
@@ -286,30 +309,32 @@ class StudyEvidenceProvider:
                     profile=SearchProfile(selection.get("beam_width", 4), selection.get("max_actions", 12),
                         selection.get("retained_sets", 3)),
                     measure_contexts=measure_contexts)
-                scores = support_model.score_support(state, pool)
+                scores = support_model.score_support(active_state, pool)
                 support_ms = scores.scoring_ms
-                evidence_sets = planner.search_sets(state, pool, scores, self.budget)
+                evidence_sets = planner.search_sets(active_state, pool, scores, self.budget)
                 search_ms += evidence_sets[0].search_ms
                 for _ in range(selection.get("initial_gap_search_rounds", 1)):
-                    gaps = unresolved_needs(state, evidence_sets[0])
+                    gaps = unresolved_needs(active_state, evidence_sets[0])
                     if not gaps:
                         break
                     if supplied_blocks is not None:
                         break
-                    pool = self.directory.extend_open_needs(state, memory, pool, gaps)
-                    scores = support_model.score_support(state, pool)
+                    pool = self.directory.extend_open_needs(active_state, memory, pool, gaps)
+                    scores = support_model.score_support(active_state, pool)
                     support_ms += scores.scoring_ms
-                    evidence_sets = planner.search_sets(state, pool, scores, self.budget)
+                    evidence_sets = planner.search_sets(active_state, pool, scores, self.budget)
                     search_ms += evidence_sets[0].search_ms
                 search_trace = planner.trace
-                evidence_sets, rerank_ms = self._rerank_sets(state, evidence_sets, scores, support_model)
+                evidence_sets, rerank_ms = self._rerank_sets(active_state, evidence_sets, scores, support_model)
                 search_ms += rerank_ms
             auxiliary += (("retrieval", pool.retrieval_ms), ("support", support_ms), ("search", search_ms))
             quality_sets = {selected.set_id: selected for selected in evidence_sets}
-            plans = []
+            plans, initial_outcomes = [], []
             candidate_quality_ms = 0.0
             for selected in evidence_sets:
-                plan = (build_read_plan(state, selected, coverage, self.budget, template=self.template, snapshot=snapshot,
+                current = None
+                read_state = state if full_scope_read else active_state
+                plan = (build_read_plan(read_state, selected, coverage, self.budget, template=self.template, snapshot=snapshot,
                             output_tokens_per_fact=None if self.strategy == "Lmap" else
                                 self.config.get("reading", {}).get("output_tokens_per_fact", 64),
                             reading_mode=self.config.get("reading", {}).get("mode", "typed_reduce"),
@@ -323,6 +348,7 @@ class StudyEvidenceProvider:
                                 if self.config.get("reading", {}).get("layout") == "source_first" else "mixed"))
                         if reading else ContextPlan(f"{request_id}:{selected.set_id}", state, selected,
                             coverage, budget=self.budget))
+                plan = replace(plan, task_state=state)
                 if self.strategy == "Lmap":
                     plan = replace(plan, steps=tuple(replace(step, operation="summarize", shared_numeric_scopes=(),
                         requires_reduction=True)
@@ -332,12 +358,21 @@ class StudyEvidenceProvider:
                     points = tuple(AnswerPoint(need.need_id, source_spans=tuple(span for support in selected.need_support
                         if support.need_id == need.need_id for span in support.source_spans)) for need in state.needs)
                     plan = replace(plan, answer_plan=AnswerPlan(points, selected.disposition))
+                if bindings:
+                    from controller.fact_reuse import apply_reuse_to_plan
+                    current = build_reuse_seed(plan, bindings, contracts, memory)
+                    current = apply_reuse_to_plan(plan, current, self.template, snapshot,
+                        output_tokens_per_fact=None if self.strategy == "Lmap" else
+                            self.config.get("reading", {}).get("output_tokens_per_fact", 64))
+                    plan = current.plan
+                    initial_outcomes.append(current)
                 if support_model is not None and self._utility_mode() == "learned":
                     quality_started = time.perf_counter()
                     quality_material = quality_sets[selected.set_id]
                     history_tokens = sum(len(self.template.tokenizer.encode(message.content, add_special_tokens=False))
                         for message in working_history_messages(state, snapshot))
                     candidates = build_plan_candidates(snapshot, query, plan, self.template, policy=policy,
+                        outcome=current,
                         layouts=tuple(selection.get("layouts", ("existing", "need_order", "stable_evidence"))))
                     qualities = []
                     for candidate in candidates:
@@ -351,7 +386,7 @@ class StudyEvidenceProvider:
                             span.start:span.end], add_special_tokens=False)) for span in old_spans)
                         selected_ids = {unit.unit_id for unit in quality_material.selected_units}
                         available = tuple(s for s in (*scores.singles, *scores.bundles) if set(s.unit_ids) <= selected_ids)
-                        quality = support_model.predict_candidate(state, quality_material.selected_units,
+                        quality = support_model.predict_candidate(active_state, quality_material.selected_units,
                             available, action=candidate.action, layout=candidate.layout_id,
                             old_body_tokens=old_tokens, history_tokens=history_tokens,
                             input_tokens=len(candidate.input_ids), output_budget=self.budget.output_tokens)
@@ -363,7 +398,9 @@ class StudyEvidenceProvider:
             auxiliary += (("candidate_quality", candidate_quality_ms),)
             plans = [replace(plan, auxiliary_ms=auxiliary) for plan in plans]
             trace = {"task_state": to_jsonable(state), "pool": to_jsonable(pool),
-                "provided_full_direct": direct_trace,
+                "support_task_id": state.task_id,
+                "reused_needs": sorted(satisfied),
+                "read_reuse": to_jsonable(bindings),
                 "support_scores": to_jsonable(scores), "search_trace": search_trace,
                 "selection_policy_heads_used": support_model is not None,
                 "support_schedule": to_jsonable(support_model.last_schedule) if support_model else (),
@@ -377,8 +414,6 @@ class StudyEvidenceProvider:
                 "auxiliary_usage": self._auxiliary_usage(usage_baseline, auxiliary),
                 "context_plans": to_jsonable(plans), "planning_ms": (time.perf_counter()-started)*1000}
             self.traces[snapshot.session_id, request_id] = trace
-            if support_model is not None:
-                support_model.release_task(state.task_id)
 
             async def extend(plan, open_needs, claims):
                 return await self.extend_for_plan(snapshot, plan, open_needs, claims)
@@ -387,53 +422,7 @@ class StudyEvidenceProvider:
             context = QueryContext(state.query or query, "task_state", task_state=state)
             return EvidenceSelection(selected_blocks, tuple(block.key for block in selected_blocks), context,
                                      tuple(plans), open_need_provider=extend,
-                                     auxiliary_usage=trace["auxiliary_usage"])
-
-    def _provided_full_direct(self, snapshot, query, state, pool, policy):
-        """Compile every supplied original verbatim; admission failure keeps the READ path."""
-        from adapters.evidence_pool import unit_identity
-        from controller.config import load_config
-        units = []
-        for block in pool.source_blocks:
-            base = block.span[0] if block.span else 0
-            identity = unit_identity(block.key, base, base+len(block.text))
-            metadata = self.directory.corpus_index.source_metadata.get(block.key, {})
-            units.append(EvidenceUnit(identity,
-                (SourceSpan("span:"+identity, block.key, base, base+len(block.text)),), block.text,
-                heading=block.title, applicability=tuple(sorted(metadata.get("applicability", {}).items())),
-                body_tokens=len(self.template.tokenizer.encode(block.text, add_special_tokens=False)),
-                document_family=metadata.get("document_family", block.key.document_id),
-                valid_from=metadata.get("valid_from"), valid_to=metadata.get("valid_to"),
-                published_at=metadata.get("published_at"), original_passage_ids=(block.key.passage_id,),
-                version_order=tuple(metadata.get("version_order") or ()), current=metadata.get("current")))
-        units = tuple(units)
-        body_tokens = len(self.template.tokenizer.encode(render_unit_union(units), add_special_tokens=False))
-        trace = {"enabled": True, "body_tokens": body_tokens, "body_budget": self.budget.body_tokens,
-            "supplied_originals": len(pool.source_blocks), "gold_used": False,
-            "comparison_scope": "all supplied originals; policy heads bypassed; reader comparison",
-            "unit_scope": "one exact full Unicode span per original block, including whitespace"}
-        if body_tokens > self.budget.body_tokens or (self.budget.max_passages is not None
-                and len(_passages(units)) > self.budget.max_passages):
-            return None, {**trace, "selected": False, "reason": "full_originals_exceed_body_or_passage_budget"}
-        selected = EvidenceSet(state.task_id+":provided_full_direct", units, token_cost=body_tokens,
-                               source_blocks=pool.source_blocks)
-        plan = ContextPlan(state.task_id+":provided_full_direct", state, selected,
-            steps=(), budget=self.budget, layouts=("existing",),
-            answer_plan=AnswerPlan(tuple(AnswerPoint(need.need_id) for need in state.needs), "answer"))
-        run = load_config(self.config["generation"]["run_config"])
-        policy = replace(policy, system_prompt=run.context.system_prompt)
-        candidates = build_plan_candidates(snapshot, query, plan, self.template, policy=policy,
-                                            outcome=ReadingOutcome(plan), layouts=("existing",))
-        feasible = tuple(candidate for candidate in candidates if candidate.action == "REBUILD" and candidate.feasible
-            and all(any(span.key == block.key and span.source_start == (block.span[0] if block.span else 0)
-                and span.source_end == (block.span[0] if block.span else 0)+len(block.text)
-                and candidate.messages[span.message_index].content[span.start:span.end] == block.text
-                for span in candidate.evidence_spans) for block in pool.source_blocks))
-        trace.update(actual_input_tokens=[len(candidate.input_ids) for candidate in candidates],
-                     output_tokens=self.budget.output_tokens, window_tokens=self.budget.window_tokens)
-        if not feasible:
-            return None, {**trace, "selected": False, "reason": "complete_original_prompt_exceeds_actual_window"}
-        return plan, {**trace, "selected": True, "reason": "complete_original_prompt_fits", "READ_steps": 0}
+                                     auxiliary_usage=trace["auxiliary_usage"], initial_outcomes=tuple(initial_outcomes))
 
     def _relevance_set(self, state, pool, measure_context):
         by_id = {unit.unit_id: unit for unit in pool.units}
@@ -454,8 +443,12 @@ class StudyEvidenceProvider:
             source_blocks=blocks)
 
     def _rank_supplied(self, state, snapshot, pool, *, query_override=None):
-        from adapters.hybrid_retrieval import HybridRetriever, LocalBGE
+        from adapters.hybrid_retrieval import DenseIndex, HybridRetriever, LocalBGE, search_variants
+        from adapters.retrieval import BM25SRetriever
+        from controller.schema import OnlineContext
         from adapters.dialogue_query import query_view
+        if not pool.units:
+            return pool
         started = time.perf_counter()
         if self.frozen_history is None:
             task = self.config.get("task_model", {})
@@ -467,11 +460,20 @@ class StudyEvidenceProvider:
             messages = [message for row in snapshot.raw_history for message in (
                 {"speaker": "user", "text": row.user_text}, {"speaker": "assistant", "text": row.assistant_text})]
             query, _ = query_view(state.raw_question, messages, query_encoder.tokenizer, limit=8192)
-        vector = np.asarray(query_encoder.encode([query])[0], dtype=np.float32)
-        unique = tuple(dict.fromkeys(unit.text for unit in pool.units))
-        encoded = self.frozen_history.encode(unique)
-        scores = {text: float(embedding @ vector) for text, embedding in zip(unique, encoded, strict=True)}
-        return replace(pool, units=tuple(replace(unit, retrieval_score=scores[unit.text]) for unit in pool.units),
+        contexts = tuple(OnlineContext(unit.unit_id, unit.text, title=unit.heading) for unit in pool.units)
+        encoded = self.directory.encode_source_units(pool.units, self.frozen_history.encode)
+        dense = DenseIndex(contexts, encoded, {"corpus_snapshot_id": snapshot.corpus_snapshot_id,
+                                            "encoder": self.frozen_history.manifest})
+        sparse = BM25SRetriever({context.document_id: {"text": context.text, "title": context.title}
+            for context in contexts}, corpus_snapshot_id=snapshot.corpus_snapshot_id)
+        retriever = self.serving.retriever
+        reranker = getattr(retriever, "reranker", None)
+        stages = search_variants(query, sparse, dense, query_encoder, reranker,
+            candidate_k=getattr(retriever, "candidate_k", 50),
+            rerank_k=getattr(retriever, "rerank_k", 50), rrf_k=getattr(retriever, "rrf_k", 60))
+        ranked = stages["hybrid_rerank" if reranker is not None else "hybrid"]["contexts"]
+        scores = {context.document_id: float(len(ranked)-index) for index, context in enumerate(ranked)}
+        return replace(pool, units=tuple(replace(unit, retrieval_score=scores.get(unit.unit_id, 0.0)) for unit in pool.units),
                        retrieval_ms=pool.retrieval_ms+(time.perf_counter()-started)*1000)
 
     def _select_gap(self, snapshot, memory, plan, open_needs, claims, parent_trace):
@@ -554,7 +556,6 @@ class StudyEvidenceProvider:
                 config.get("triple_successors_per_pair", 3))
             support = SupportModel(self.support_backend, history_resolver=lambda ref: resolve_text(ref, state, snapshot),
                                    profile=profile)
-            support.release_task(state.task_id)
             scores = support.score_support(state, context_pool, open_needs=tuple(open_needs))
             used_passages = _passages(previous)
             budget = replace(plan.budget, max_passages=None if plan.budget.max_passages is None
@@ -582,7 +583,6 @@ class StudyEvidenceProvider:
                 "used_passages": sorted(used_passages), "remaining_passages": budget.max_passages,
                 "auxiliary_usage": usage, "elapsed_ms": (time.perf_counter()-started)*1000}
             parent_trace.setdefault("gap_rounds", []).append(gap_trace)
-            support.release_task(state.task_id)
             return replace(fresh_pool, units=selected_units, source_blocks=selected_blocks,
                 retrieval_ms=context_pool.retrieval_ms,
                 trace=(*fresh_pool.trace, gap_trace), auxiliary_ms=phases, auxiliary_usage=usage,

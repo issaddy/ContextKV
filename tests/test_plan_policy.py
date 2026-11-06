@@ -2,11 +2,12 @@ from policy_helpers import SpecifiedGainFixture, bind_fixture_timing
 from dataclasses import replace
 
 
-from controller.context_schema import ReadResult, ReadTask, ReadingOutcome
+from controller.claim_graph import ClaimGraph
+from controller.context_schema import EvidenceClaim, ReadResult, ReadTask, ReadingOutcome
 from controller.cost_model import CostModel
 from controller.plan_policy import (CompleteCost, NativePlanningState, PlanPolicy,
     ResourceForecast, StepForecast, complete_plan)
-from controller.schema import CacheQuote, CacheQuoteBatch, CostEstimate, Message, PromptCandidate, SessionSnapshot
+from controller.schema import CacheQuote, CacheQuoteBatch, CostEstimate, EvidenceSpan, Message, PromptCandidate, SessionSnapshot
 from context_helpers import context_plan
 
 
@@ -21,8 +22,15 @@ class QuotedCostFixture(CostModel):
 
 
 def prompt(name, *, action="REBUILD", output=64, kind="ANSWER", tokens=16):
-    return PromptCandidate(name, action, 0, (Message("system", kind+" fixture system"),), (1,)*tokens, "hash:"+name,
-        frozenset(), frozenset(), output_budget=output, generation_kind=kind)
+    base, block = context_plan()
+    source = base.selected_set.selected_units[0].source_spans[0]
+    text = block.text[source.start:source.end]
+    spans = (EvidenceSpan(source.source_key, 1, 0, len(text), block.source_uri, block.provenance,
+                          source.span_id, source_start=source.start,
+                          source_end=source.end),) if kind == "ANSWER" else ()
+    return PromptCandidate(name, action, 0, (Message("system", kind+" fixture system"), Message("user", text)),
+        (1,)*tokens, "hash:"+name, frozenset(), frozenset(), evidence_spans=spans,
+        output_budget=output, generation_kind=kind)
 
 
 def make_plans(*, two_reads=False, scope=False):
@@ -98,12 +106,19 @@ def test_full_scope_completion_allows_a_budgeted_answer_from_a_large_read_archiv
     archive = replace(base.selected_set, token_cost=base.budget.body_tokens*4)
     base = replace(base, selected_set=archive)
     direct = replace(direct, context_plan=replace(direct.context_plan, selected_set=archive))
+    direct = replace(direct, steps=tuple(replace(step, variants=tuple(
+        replace(candidate, evidence_spans=()) for candidate in step.variants)) for step in direct.steps))
     scan = replace(scan, context_plan=replace(scan.context_plan, selected_set=archive))
     policy = PlanPolicy(SpecifiedGainFixture())
     decision = policy.choose((direct, scan), ReadingOutcome(base), native((direct, scan)), {})
     assert decision.next_step.plan_id == scan.plan_id
-    assert next(row for row in policy.last_evaluations if row.plan_id == direct.plan_id).reason == "required_scope_uncovered"
-    done = ReadingOutcome(scan.context_plan, results=(ReadResult("read:0", covered_units=("u",)),))
+    assert next(row for row in policy.last_evaluations if row.plan_id == direct.plan_id).reason == "answer_evidence_incomplete"
+    claim = EvidenceClaim("read:0:claim:0", "need", "extract", text="Complete supported conclusion",
+        source_spans=base.selected_set.selected_units[0].source_spans)
+    result = ReadResult("read:0", (claim,), covered_units=("u",), support=("need",))
+    done_plan = replace(scan.context_plan, answer_plan=ClaimGraph((claim,)).answer_plan(
+        base.task_state, results=(result,)))
+    done = ReadingOutcome(done_plan, results=(result,), claims=(claim,))
     next_direct = policy.choose((direct,), done, native((direct,)), {})
     assert next_direct.next_step.task.kind == "ANSWER"
     assert policy.last_evaluations[0].cost.input_tokens == 2+len(next_direct.next_step.candidate.input_ids)
