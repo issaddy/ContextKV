@@ -1,6 +1,6 @@
 # 当前课题运行入口
 
-`test-0523` 当前使用容器默认 `python3`。长文共享提取得到 36 条、666 kg，多跳得到 1997。旧中断参照的 64 个答案已完成官方重评，完整 350 题分母和已付成本保留；修正后 A 的固定 B＋Native 队列仍在运行。B 已完成 48/24 个训练/开发历史轮次及登记的 8/4 个决策状态配对，当前修正独立评分输入后重评已有答案。完整队列质量与 P95 尚未完成。
+`test-0523` 当前使用容器默认 `python3`。长文共享提取得到 36 条、666 kg，多跳得到 1997。旧中断参照的 64 个答案已完成官方重评，完整 350 题分母和已付成本保留；修正后 A 的固定 B＋Native 队列最近一次观测仍在运行。B 已完成 48/24 个训练/开发历史轮次及登记的 8/4 个决策状态配对，共生成 25 个分支答案。B 的默认监督已对齐官方 RB_llm，已有 4 个分支完成官方评分，其余沿用原答案重评。完整队列质量与 P95 尚未完成。
 
 Host 固定 token 配对已验证真实回载与重算：同一请求下，Native 回载 128、重算 129 tokens；独立前缀保留回载 256、重算 1 token。业务 epoch 退役后 owner 仍保留 Host 前缀。该结果验证生命周期，主实验保留策略仍为 Native；成功与初次接口失败的费用分别保存。
 
@@ -56,8 +56,8 @@ LlamaIndex 的统一执行入口与最终编译矩阵已接线；当前协议的
 P1 支持策略配置为 `configs/evidence_policy_fixed_qwen.yaml`。
 审计配置为 `configs/reader_audit.yaml` 的 `reader_audit:{base_scope,data,review,resource_sample_seconds}`。
 会话队列使用 `evidence_cohort`；P1 支持策略直接绑定固定生成配置。
-辅助学习的 200 train / 40 dev 状态统一使用
-`runs/study/auxiliary/cohorts/full/cohort_manifest.json`。
+辅助学习配置中的 200 train / 40 dev 规模使用
+`runs/study/auxiliary/cohorts/full/cohort_manifest.json`；实际运行指向本批预声明的 cohort。
 task/support 配置必填 `training.cohort_manifest`；P1 采集必填
 `collection.cohort_manifest` 和 `cohort_split`，开发采集显式选择 `dev`。
 B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v4` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上与反事实 READ 共用相关父结论绑定，线上执行一个动作后重新观察。成本资产同时记录 `prefix_control_scope=native_excludes_prefix_control`，价值 C 的首步控制预测另加一次。当前协议的监督使用真实 P3 状态重新配对采集。
@@ -78,7 +78,7 @@ B 固定流程观测使用 `execution.state_observation`，从真实请求开始
 `bench.study` 的成功/失败记录保留原始 `reference`、原始数据分区和 observer cohort 绑定，仅供离线审计与评分。导出器将 packet 绑定到完整实际 capture 行的 hash；B 采集核验 native-train 原始正文、版本、窗口坐标与 raw grounding 引文，开发会话独立隔离。原始参考不会进入 A/B/C 的在线输入。正式 dev 队列不能作为 B 训练数据。
 真实检索后的初始状态也可配对 DIRECT 与首次 READ；无需先完成一次 READ。
 进度分别记录去重源任务数和决策快照数，不将多个动作快照重复计为训练任务。
-`observed_actions` 沿用源动作的输出份额，不扫描 `read-outputs`；有效观测数单独记录，声明分母仍为 200/40。
+`observed_actions` 沿用源动作的输出份额，不扫描 `read-outputs`；有效观测数单独记录，声明分母来自所用 cohort。当前 B 小批次为 8/4 个源任务，48/24 个历史轮次不计作独立训练/开发状态。
 新成本拟合读取各分支 `run.json.pre_action_quote`，质量与成本分别归一化；`cold` 数据只能说明冷启动费用，`observed` 保留实际分支起点，不声称恢复源缓存。
 B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
 `--cohort-manifest` 指向同一文件；不再使用 `--partition-seed` 或 `--dev-fraction`
@@ -245,8 +245,8 @@ python3 -m bench.capacity_workflow --full-queue --methods B6_native \
 收益 B 的 reader 身份由实际运行配置与实测收益资产绑定。`--online-gpu-devices` 接受逗号分隔的物理卡号。
 可通过 `--online-process-roots` 指定逗号分隔的 PID，默认按 reader 和 helper 的端口发现
 进程并加入协调进程。`--reader-base-url` 显式指定实际服务端点。联合矩阵沿用正式 350 题清单，
-其中检索器设备配置与本次物理卡号一致。GAP 限额沿用冻结观测配置，
-缺省为 96 个单元和 10 个 passage，可用 `--gap-max-units`、`--gap-max-passages` 显式指定。
+其中检索器设备配置与本次物理卡号一致。收益 B 的 GAP 限额继承实际收益资产；固定 B 沿用冻结观测配置，
+缺省为 96 个单元和 10 个 passage。`--gap-max-units`、`--gap-max-passages` 可显式覆盖对应值；收益 B 仍须与采集协议一致。
 `--lambda-time` 覆盖冻结配置中的动作成本权重，实际值写入 `capacity-plan.json`。
 分设备结果用 `profiling.final_study_index --baseline-commit "$E0_SOURCE_COMMIT" --joint-scope joint-frozen-A/inputs.json`
 汇总，逐个 `--artifact NAME=WORKFLOW.json` 指定各设备结果。共同输入、实际 worker 配置、

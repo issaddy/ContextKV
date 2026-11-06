@@ -207,6 +207,14 @@ def full_queue_method_specs(selected, gain_settings, compilation, value_policy=N
     return specs
 
 
+def full_queue_gap_limits(execution, gain=None, *, max_units=None, max_passages=None):
+    """Bind gain actions to their measured limits; explicit CLI values take precedence."""
+    inherited = (gain.provenance["continuation_gap_limits"] if gain is not None else
+        {"max_units": 96, "max_passages": 10,
+         **((execution.get("state_observation") or {}).get("gap_limits") or {})})
+    return {"max_units": inherited["max_units"] if max_units is None else max_units,
+            "max_passages": inherited["max_passages"] if max_passages is None else max_passages}
+
 
 def compilation_source_identity(checkout):
     """Record the verified author tree and actual Python sources used by its index."""
@@ -262,11 +270,8 @@ def prepare_full_queue(args, root):
     execution = config["execution"]
     if args.lambda_time is not None:
         execution["lambda_time"] = args.lambda_time
-    gap_limits = ((execution.get("state_observation") or {}).get("gap_limits") or {})
-    gap_limits = {
-        "max_units": args.gap_max_units if args.gap_max_units is not None else gap_limits.get("max_units", 96),
-        "max_passages": args.gap_max_passages if args.gap_max_passages is not None else gap_limits.get("max_passages", 10),
-    }
+    gap_limits = full_queue_gap_limits(execution, gain,
+        max_units=args.gap_max_units, max_passages=args.gap_max_passages)
     declared_compilation = deepcopy(execution.get("cache_compilation") or {})
     execution.update(cache_start="cold", state_observation=None, plan_gain=None,
                      prefix_retention={"mode": "native"}, cache_compilation={"mode": "native"},

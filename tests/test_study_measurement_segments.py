@@ -116,7 +116,8 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
     import asyncio
     import time
     from bench.study_workloads import WorkloadDispatcher, freeze_workload, read_workload_manifest
-    from bench.capacity_workflow import full_queue_methods, full_queue_method_specs
+    from bench.capacity_workflow import full_queue_methods, full_queue_method_specs, full_queue_gap_limits
+    from types import SimpleNamespace
 
     rows = [dict(task_id=f"session:{turn}", conversation_id="session", turn=turn,
                  Collection="track", contexts=[]) for turn in (1, 2)]
@@ -148,6 +149,13 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
     fixed = full_queue_method_specs(["B6_native"], None, None)[0]
     assert fixed["overrides"]["execution"]["plan_gain"] is None
     assert full_queue_methods(1, ["S3_native"]) == ("S3_native",)
+    gain = SimpleNamespace(provenance={"continuation_gap_limits": {"max_units": 12, "max_passages": 12}})
+    execution = {"state_observation": {"gap_limits": {"max_units": 30, "max_passages": 8}}}
+    assert full_queue_gap_limits({"state_observation": None}, gain) == gain.provenance["continuation_gap_limits"]
+    assert full_queue_gap_limits(execution, gain, max_units=20) == {"max_units": 20, "max_passages": 12}
+    assert full_queue_gap_limits(execution, gain, max_passages=9) == {"max_units": 12, "max_passages": 9}
+    assert full_queue_gap_limits(execution) == {"max_units": 30, "max_passages": 8}
+    assert full_queue_gap_limits({"state_observation": None}) == {"max_units": 96, "max_passages": 10}
 
     async def run():
         dispatcher = WorkloadDispatcher(manifest)
