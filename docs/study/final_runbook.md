@@ -1,6 +1,6 @@
 # 当前课题运行入口
 
-`test-0523` 当前使用容器默认 `python3`。长文共享提取得到 36 条、666 kg，多跳得到 1997。旧中断参照的 64 个答案已完成官方重评，完整 350 题分母和已付成本保留；修正后 A 的固定 B＋Native 队列最近一次观测仍在运行。B 已完成 48/24 个训练/开发历史轮次及登记的 8/4 个决策状态配对，共生成 25 个分支答案。B 的默认监督已对齐官方 RB_llm，已有 4 个分支完成官方评分，其余沿用原答案重评。完整队列质量与 P95 尚未完成。
+`test-0523` 当前使用容器默认 `python3`。长文共享提取得到 36 条、666 kg，多跳得到 1997。旧中断参照的 64 个答案已完成官方重评，完整 350 题分母和已付成本保留；修正后 A 的固定 B＋Native 队列仍在运行。B 已完成 48/24 个训练/开发历史轮次、登记的 8/4 个决策状态配对，以及全部 25 个分支答案的官方重评和小批次收益拟合。完整队列质量与 P95 尚未完成。
 
 Host 固定 token 配对已验证真实回载与重算：同一请求下，Native 回载 128、重算 129 tokens；独立前缀保留回载 256、重算 1 token。业务 epoch 退役后 owner 仍保留 Host 前缀。该结果验证生命周期，主实验保留策略仍为 Native；成功与初次接口失败的费用分别保存。
 
@@ -36,7 +36,7 @@ python3 scripts/prepare_contextpilot.py --checkout vendor/contextpilot
 
 study 配置的 `execution.cache_compilation` 取 `{mode: contextpilot, checkout: vendor/contextpilot}`；Native 对照取 `{mode: native}`。`prefix_retention` 默认 `{mode: native}`，与编排开关独立。
 
-LlamaIndex 的统一执行入口与最终编译矩阵已接线；当前协议的 B 监督资产、外部参照实测和完整队列比较仍须完成。B 恢复沿用原 SQLite 和已完成问答，通过已有 `--request-namespace` 为新尝试分配 ID；旧失败记录保存在原测量段，实际历史与已付成本继续保留。导出时保留 `measurements/<segment>/generation_manifest.json`，模型身份由实际捕获资产派生，原 digest 和来源 hash 留在 `capture_resident_binding`。下表的入口存在不表示对应实验已完成。
+LlamaIndex 的统一执行入口与最终编译矩阵已接线；外部参照实测和完整队列比较仍须完成。首次外部运行的 4 次尝试在来源映射处失败，未生成答案，费用保留在 `external-contextpilot-fixed-001`。映射已按上游实际渲染保留的字符修正：正文尾空白被上游移除时，来源结束坐标相应缩短，仍逐字核对原文。B 恢复沿用原 SQLite 和已完成问答，通过已有 `--request-namespace` 为新尝试分配 ID；旧失败记录保存在原测量段，实际历史与已付成本继续保留。导出时保留 `measurements/<segment>/generation_manifest.json`，模型身份由实际捕获资产派生，原 digest 和来源 hash 留在 `capture_resident_binding`。下表的入口存在不表示对应实验已完成。
 
 | 任务 | 当前入口 | 必须保留的对照与产物 |
 |---|---|---|
@@ -90,6 +90,8 @@ manifest 记录。
 B 收益的唯一默认质量目标为固定官方 RB_llm，使用与最终评价相同的真实对话和实际证据投影。`--official-checkout` 可指定已有官方源码目录，默认沿 study 的 `scoring.official_checkout`。`plan_gain_quality` 保存作者已归一化的 RB 值；不把它当作必要点覆盖率。P1 的 `necessary_points_grounding_conditions_versions_task_v3` 保留为独立四项诊断，旧 B 自定义四分结果仅作历史记录。
 
 重评产生新标签和实际 scorer 身份，保留原 `before.json`、原始回答与执行成本，不回写原执行登记。实际观察到的评分条件误判随原文审计保留；不能据一次 judge 的分差声称正确性改进。
+
+当前小批次资产位于 `runs/study-20261106-resume/b-pilot/gain-official-018b710/`：4 次既有官方调用经实际输入和采样核对后复用，新增 21 次评分，未重生成问答。拟合使用 9 个 train、4 个 dev 配对；训练覆盖 8 个 READ、1 个 GAP，REDUCE 无样本。开发保存候选上的模型选择为 2 次 DIRECT、2 次 READ，按同一实测质量与费用目标应为 3 次 DIRECT、1 次 READ；其中官方评分的条件误判另有原文审计。该诊断尚不能证明在线策略收益。`summary.json` 保存逐状态选择和费用，模型文件留在实验容器；后续比较绑定实际资产，旧自定义评分模型不部署。
 
 机制重放示例（显式指定实际服务配置和新输出目录）：
 

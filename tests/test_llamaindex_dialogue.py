@@ -29,10 +29,11 @@ class DialogueEngine(MockEngine):
 
 @pytest.mark.asyncio
 async def test_real_compact_refine_shares_qa_ledger_and_committed_history(tmp_path):
-    body = " ".join(f"Entry {index}: Eligible applicants use the online form."
-                    for index in range(140))
-    block = make_evidence(body, "a")
-    other = make_evidence("After submitting the form, retain the confirmation.", "b")
+    body = " \n\t"+" ".join(f"Entry {index}: Eligible applicants use the online form."
+                            for index in range(140))+" \t\n"
+    block = replace(make_evidence(body, "a"), span=(137, 137+len(body)))
+    other_body = "\n \tAfter submitting the form, retain the confirmation.\t \n"
+    other = replace(make_evidence(other_body, "b"), span=(9017, 9017+len(other_body)))
 
     class Provider:
         corpus_snapshot_id = "corpus"
@@ -68,14 +69,23 @@ async def test_real_compact_refine_shares_qa_ledger_and_committed_history(tmp_pa
     attempt = store.get_attempt(response.attempt_id)
     assert attempt.context_plan.online_tokens_spent == response.total_input_tokens+response.total_output_tokens
     assert attempt.result.receipt.attempt_id.endswith(":"+attempt.final_step_id)
+    sources = {source.key: source for source in (block, other)}
+    observed_ranges = {source.key: [] for source in sources.values()}
     for step in steps:
         source_view = step.metrics["source_view"]
         for span in source_view["evidence_spans"]:
             message = step.input_messages[span["message_index"]].content
-            source = body if span["key"]["document_id"] == "a" else other.text
-            assert message[span["start"]:span["end"]] == source[span["source_start"]:span["source_end"]]
-            if source == body:
+            source = next(source for source in sources.values()
+                          if source.key.document_id == span["key"]["document_id"])
+            base = source.span[0]
+            assert message[span["start"]:span["end"]] == source.text[span["source_start"]-base:span["source_end"]-base]
+            assert base <= span["source_start"] < span["source_end"] <= base+len(source.text.rstrip())
+            observed_ranges[source.key].append((span["source_start"], span["source_end"]))
+            if source.key == block.key:
                 assert span["source_end"]-span["source_start"] < len(body)
+    for source in sources.values():
+        assert min(start for start, _ in observed_ranges[source.key]) == source.span[0]
+        assert max(end for _, end in observed_ranges[source.key]) == source.span[0]+len(source.text.rstrip())
     assert len(store.get_snapshot("session").raw_history) == 1
     assert store.get_snapshot("session").execution.evidence_spans
     assert store.get_snapshot("session").current_epoch.state == "RETIRED"

@@ -166,13 +166,17 @@ async def run_dialogue(
                 node = TextNode(id_=reference, text=block.text, metadata={
                     "citation_id": reference, "title": block.title, "version": block.key.version})
                 content = node.get_content(metadata_mode=MetadataMode.LLM)
-                start = len(content)-len(block.text)
-                if content[start:] != block.text:
+                # Upstream strips the formatted metadata + body. The nonempty
+                # citation metadata preserves leading body whitespace, while
+                # trailing body whitespace is absent from the actual LLM input.
+                body = node.get_content(metadata_mode=MetadataMode.NONE).rstrip()
+                start = len(content)-len(body)
+                if content[start:] != body:
                     raise ValueError("upstream source rendering lost its original body")
                 packed_sources[content] = (EvidenceSpan(block.key, 0, start, len(content),
                     block.source_uri, block.provenance, reference,
                     source_start=block.span[0] if block.span else 0,
-                    source_end=(block.span[0] if block.span else 0)+len(block.text)),)
+                    source_end=(block.span[0] if block.span else 0)+len(body)),) if body else ()
                 nodes.append(NodeWithScore(node=node))
             return nodes
 
