@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Linux/CUDA only. Run prepare_sglang.py for a full checkout first, install that
-# pinned checkout's runtime dependencies in the container's Python environment.
+# Linux/CUDA only. Prepare the source integration in the selected runtime.
 set -euo pipefail
 CHECKOUT="${SGLANG_CHECKOUT:-vendor/sglang-0.5.18}"
 : "${CONTEXTKV_MODEL_SCOPE_PATH:?Set to an explicit local Qwen3 model scope JSON}"
@@ -20,16 +19,14 @@ export PYTHONPATH="$CHECKOUT/python${PYTHONPATH:+:$PYTHONPATH}"
 HICACHE_ARGS=()
 SESSION_ARGS=()
 JSON_ARGS=()
-if [[ "${CONTEXTKV_JSON_FORMAT:-bounded}" == bounded ]]; then
-  JSON_ARGS=(--constrained-json-max-whitespace-cnt 16)
-elif [[ "${CONTEXTKV_JSON_FORMAT:-bounded}" == compact ]]; then
+if [[ "${CONTEXTKV_JSON_FORMAT:-compact}" == compact ]]; then
   JSON_ARGS=(--constrained-json-disable-any-whitespace)
 fi
 if [[ "${CONTEXTKV_ENABLE_SESSION_RADIX:-1}" == 1 ]]; then
   SESSION_ARGS=(--enable-session-radix-cache)
 fi
 if [[ "${CONTEXTKV_ENABLE_HICACHE:-1}" == 1 ]]; then
-  HICACHE_ARGS=(--enable-hierarchical-cache --hicache-host-memory-mode cache
+  HICACHE_ARGS=(--enable-hierarchical-cache
     --hicache-size "${CONTEXTKV_HICACHE_GB:-16}" --hicache-write-policy "${CONTEXTKV_WRITE_POLICY:-write_through}"
     --hicache-io-backend "${CONTEXTKV_HICACHE_IO_BACKEND:-kernel}"
     --hicache-mem-layout "${CONTEXTKV_HICACHE_LAYOUT:-layer_first}")

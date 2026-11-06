@@ -522,7 +522,7 @@ requires-dist = [
     { name = "peft", marker = "extra == 'query-adapter'", specifier = ">=0.21,<1" },
     { name = "prometheus-client", marker = "extra == 'evaluation'", specifier = ">=0.21,<1" },
     { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "tokenizers", marker = "extra == 'tokenizer'", specifier = ">=0.23,<0.24" },
+    { name = "tokenizers", marker = "extra == 'tokenizer'", specifier = ">=0.22,<0.24" },
     { name = "transformers", marker = "extra == 'tokenizer'", specifier = ">=5.12,<6" },
     { name = "uvicorn", specifier = ">=0.34,<1" },
 ]
