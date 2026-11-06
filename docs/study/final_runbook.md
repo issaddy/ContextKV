@@ -1,6 +1,6 @@
 # 当前课题运行入口
 
-`test-0523` 已完成长文与多跳机制运行：共享提取得到 36 条、666 kg，多跳得到 1997。旧 A 参照在真实跨轮复用中发现持久化类型错误后停止，已付成本和逐题记录保留；完整 350 题、77 会话质量与 P95 尚未完成。
+`test-0523` 当前使用容器默认 `python3`。长文共享提取得到 36 条、666 kg，多跳得到 1997。跨轮回执持久化与原生并发回执错误已修复；修正后 A 的固定 B＋Native 队列、B 断点采集及旧参照官方离线重评正在运行。完整 350 题、77 会话质量与 P95 尚未完成。
 
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 
@@ -22,7 +22,7 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/launch_sglang.sh --host 127.0.0.1 --port 300
 
 scope 的 `model_path` 指向 `/data/models/qwen3-32b`，模型/tokenizer 身份沿用真实文件。默认集成为官方 SGLang 0.5.18 源码及项目补丁，CUDA 内核来自现有环境。`engine-source.json`、`engine-environment.txt` 记录实际版本；不要求升级主机驱动。
 
-此前 `runs/study-20261106-resume/runtime.env` 记录的是 `.venv-cu129` 批次，不能作为后续默认 Python 入口。容器默认环境正在复用已跑通的 CUDA 12.9 包与缓存；`CUDA_HOME` 使用该运行目录内的 `cuda12-toolkit/root/usr/local/cuda-12.9`，`LD_PRELOAD` 选择实际挂载的 `libcuda.so.560.35.03`，FlashInfer 与 SGLang JIT 使用对应 cu129 工具链。后续启动需由默认 `python3` 重新生成 `engine-runtime.env`。
+本次使用 `source runs/study-20261106-resume/default-python/runtime.env`。默认解释器为 `/opt/sglang/bin/python3`；`CUDA_HOME` 使用该运行目录内的 `cuda12-toolkit/root/usr/local/cuda-12.9`，`LD_PRELOAD` 选择实际挂载的 `libcuda.so.560.35.03`，FlashInfer 与 SGLang JIT 使用对应 cu129 工具链。BF16/FA3 显式设置上游 `SGLANG_ENABLE_JIT_DEEPGEMM=0`，补丁使该开关在可选扩展导入前生效；共享 DeepGEMM 包未卸载。`NO_PROXY` 覆盖本机服务地址。旧虚拟环境路径只属于之前批次，当前服务及采集均已使用默认解释器。
 
 BGE 检索、发布重排器及历史编码器在本环境显式使用 `sdpa_backend: math`；对应配置分别位于 retriever YAML 和 `task_model`。两套索引的语料、向量哈希及离线费用见 `runs/study-20261106-resume/offline-index-build`。此后端选择不改变 Qwen 权重或推理设置。
 
@@ -34,7 +34,7 @@ python3 scripts/prepare_contextpilot.py --checkout vendor/contextpilot
 
 study 配置的 `execution.cache_compilation` 取 `{mode: contextpilot, checkout: vendor/contextpilot}`；Native 对照取 `{mode: native}`。`prefix_retention` 默认 `{mode: native}`，与编排开关独立。
 
-LlamaIndex 的统一执行入口与最终编译矩阵已接线；当前协议的 B 监督资产、外部参照实测和完整队列比较仍须完成。下表的入口存在不表示对应实验已完成。
+LlamaIndex 的统一执行入口与最终编译矩阵已接线；当前协议的 B 监督资产、外部参照实测和完整队列比较仍须完成。B 恢复沿用原 SQLite 和已完成问答，通过已有 `--request-namespace` 为新尝试分配 ID；旧失败记录保存在原测量段，实际历史与已付成本继续保留。下表的入口存在不表示对应实验已完成。
 
 | 任务 | 当前入口 | 必须保留的对照与产物 |
 |---|---|---|
