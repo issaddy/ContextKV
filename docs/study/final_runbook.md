@@ -1,6 +1,6 @@
 # 当前课题运行入口
 
-本轮转入 `test-0523`。接入前未发现运行任务，8 张 H800 空闲。原镜像的 CUDA 13 实际调用出现 error 803；显式加载主机驱动后仍报告运行时过新。隔离的 `.venv-cu129` 已用 PyTorch 2.13.0+cu129 完成真实 GPU 张量计算；Qwen 服务与完整队列尚未验收。旧批次不替代本轮结果。
+本轮使用 `test-0523` 的任务隔离环境 `.venv-cu129` 和项目目录内 CUDA 12.9 工具链，Qwen3-32B Native/HiCache 服务已运行。真实长文共享提取得到 36 条、666 kg；多跳得到 1997。完整 350 题、77 会话的原 A＋固定 B＋Native 参照正在运行，尚无完整队列质量或 P95 结论。
 
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 
@@ -20,7 +20,9 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/launch_sglang.sh --host 127.0.0.1 --port 300
 
 scope 的 `model_path` 指向 `/data/models/qwen3-32b`，模型/tokenizer 身份沿用真实文件。默认集成为官方 SGLang 0.5.18 源码及项目补丁，CUDA 内核来自现有环境。`engine-source.json`、`engine-environment.txt` 记录实际版本；不要求升级主机驱动。
 
-本次环境先设置 `CONTEXTKV_ENGINE_PYTHON=$PWD/.venv-cu129/bin/python`，并以 `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.560.35.03` 选择容器中实际挂载的主机驱动库。镜像默认的 `libcuda.so.1` 指向不匹配的 580 库，系统链接未改动。上述路径属于本次主机运行记录，后续环境按实际安装使用。
+本次运行环境由 `source runs/study-20261106-resume/runtime.env` 恢复，其中 `CONTEXTKV_ENGINE_PYTHON` 指向 `.venv-cu129`，`CUDA_HOME` 指向该运行目录内的 `cuda12-toolkit/root/usr/local/cuda-12.9`，`LD_PRELOAD` 选择实际挂载的 `libcuda.so.560.35.03`。FlashInfer 使用官方 cu129 预编译缓存，SGLang JIT 也使用该 CUDA 12.9 工具链。系统 CUDA、驱动链接和共享 Python 环境未修改。
+
+BGE 检索、发布重排器及历史编码器在本环境显式使用 `sdpa_backend: math`；对应配置分别位于 retriever YAML 和 `task_model`。两套索引的语料、向量哈希及离线费用见 `runs/study-20261106-resume/offline-index-build`。此后端选择不改变 Qwen 权重或推理设置。
 
 作者 ContextPilot 准备与启用：
 
@@ -30,7 +32,7 @@ python scripts/prepare_contextpilot.py --checkout vendor/contextpilot
 
 study 配置的 `execution.cache_compilation` 取 `{mode: contextpilot, checkout: vendor/contextpilot}`；Native 对照取 `{mode: native}`。`prefix_retention` 默认 `{mode: native}`，与编排开关独立。
 
-LlamaIndex 的统一执行入口与最终编译矩阵已接线；当前协议的 B 监督资产、真实配对、GPU 端到端和完整队列仍须实际执行。下表的入口存在不表示对应实验已完成；真实 GPU 协议先做最小验收，再启动所需采集。
+LlamaIndex 的统一执行入口与最终编译矩阵已接线；当前协议的 B 监督资产、外部参照实测和完整队列比较仍须完成。下表的入口存在不表示对应实验已完成。
 
 | 任务 | 当前入口 | 必须保留的对照与产物 |
 |---|---|---|

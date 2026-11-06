@@ -827,7 +827,10 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
     if not valid:
         raise ValueError("no validated task/decision snapshot remains for actual gain collection")
     run = load_config(settings["run_config"])
-    run = replace(apply_study_config(run, config), state_dir=str(output/"state"), plan_gain=None,
+    run = apply_study_config(run, config)
+    continuation_gap_limits = ((run.state_observation or run.plan_gain)["gap_limits"]
+                               if mode == "observed_actions" else None)
+    run = replace(run, state_dir=str(output/"state"), plan_gain=None, state_observation=None,
         prefix_retention={"mode": "native"}, planner=replace(run.planner, strategy="always_rebuild"))
     if settings.get("reader_base_url"):
         run = replace(run, engine=replace(run.engine, base_url=settings["reader_base_url"]))
@@ -926,7 +929,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 "resident_model_manifest": to_jsonable(provider.manifest),
                 "input_protocol": input_protocol(controller.template.fingerprint),
                 "continuation_protocol": BOUNDED_CONTINUATION,
-                "continuation_gap_limits": (run.state_observation or run.plan_gain)["gap_limits"] if mode == "observed_actions" else None,
+                "continuation_gap_limits": continuation_gap_limits,
                 "task_state_source": "actual_observed_decision" if mode == "observed_actions" else "frozen_audited_actual",
                 "collection_mode": mode,
                 "counterfactual_cache_start": settings["cache_start"]}
