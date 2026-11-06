@@ -730,6 +730,8 @@ class Controller:
                                 reading_outcome = replace(seed, plan=replace(selected_context_plan,
                                     online_tokens_spent=spent), auxiliary_usage={"input_tokens": 0,
                                         "output_tokens": 0, "compute_ms": 0.0, "models": []})
+                                if self.state_observer is not None:
+                                    await observe_fixed_state(reading_outcome, set())
                             else:
                                 reading_outcome = await executor.execute_reads(attempt.attempt_id, planning_snap,
                                     selected_context_plan, initial_auxiliary_usage=auxiliary_usage,

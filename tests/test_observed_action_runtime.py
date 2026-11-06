@@ -232,3 +232,63 @@ async def test_first_read_adds_only_measured_prefix_control_once(tmp_path, contr
         "source": "actual_prefix_control_ms", "observation_count": PrefixControl.control_observation_count,
         "scope": "first_READ_only"}
     await controller.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fixed_observer_keeps_visible_original_stop_without_waiving_numeric_scope(tmp_path):
+    import time
+    from controller.context_schema import ReadingOutcome
+    from controller.execution import ReadingExecutor
+    from controller.plan_policy import CompleteCost
+    from controller.rolling_policy import FixedReadingObserver
+    from controller.schema import SessionSnapshot
+
+    class Paid:
+        last_observation = {}
+
+        async def start(self):
+            pass
+
+        async def aclose(self):
+            pass
+
+        async def observe(self, arrived, state, usage):
+            self.last_observation = {"end": time.monotonic()}
+            return CompleteCost(1, 2, 3, 0, 0)
+
+    controller, store, engine, _, plan = setup_controller(tmp_path, operation="lookup",
+        scope="all_supplied_documents")
+    controller.rolling_policy = None
+    cohort = tmp_path/"cohort.json"
+    cohort.write_text(json.dumps({"members": []}))
+    path = tmp_path/"fixed-observations.jsonl"
+    observer = FixedReadingObserver({"reader_checkpoint": controller.template.fingerprint.model_revision,
+        "reader_profile_id": "specified-fixture", "observation_path": str(path), "output_budgets": [512],
+        "gap_limits": {"max_units": 2, "max_passages": 2}, "cohort_split": "train",
+        "cohort_manifest": str(cohort)}, Paid(), controller.template.fingerprint)
+    controller.state_observer = observer
+    response = await controller.serve_turn("s", "How?", context_plans=(plan,), request_id="direct")
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert response.read_count == 0 and len(records) == 1
+    assert records[0]["decision_mode"] == "fixed_reading"
+    assert "direct_answer" in records[0]["legal_actions"]
+    assert records[0]["decision_seq"] == 0
+    assert len(engine.constraints) == 1  # observation makes no extra generation
+
+    numeric = replace(plan, task_state=replace(plan.task_state,
+        needs=(replace(plan.task_state.needs[0], operation="count"),)))
+    snapshot = SessionSnapshot("numeric")
+
+    def compile_answers(snap, plans, outcome):
+        return controller.request_compiler.compile_answers(snap, "How?", plans[0], outcome=outcome,
+            policy=controller.policy, layouts=("existing",), actions=("REBUILD",))
+
+    await observer.observe(response.attempt_id, ReadingExecutor(store, engine, controller.template),
+        ReadingOutcome(numeric), snapshot, engine, controller.cost_model, compile_answers,
+        arrived=time.monotonic(), auxiliary_usage=None, expanded=set(), startup_ms=0)
+    numeric_record = json.loads(path.read_text().splitlines()[-1])
+    assert numeric_record["decision_mode"] == "mandatory_coverage"
+    assert numeric_record["legal_actions"] == []
+    assert len(engine.constraints) == 1
+    await controller.aclose()
+    store.close()

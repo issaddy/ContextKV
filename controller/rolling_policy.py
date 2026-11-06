@@ -762,7 +762,11 @@ class FixedReadingObserver:
                       *, arrived, auxiliary_usage, expanded, startup_ms):
         from .plan_policy import NativePlanningState
         started = time.monotonic()
-        mandatory = RollingPlanRuntime._mandatory_coverage(state)
+        from .context_budget import direct_answer_reason
+        direct = compile_answers(snapshot, (state.plan,), state)
+        direct_eligible = any(candidate.feasible and direct_answer_reason(state, candidate) is None
+                              for candidate in direct)
+        mandatory = RollingPlanRuntime._mandatory_coverage(state) and not direct_eligible
         gap = RollingPlanRuntime._gap_request(self, state, expanded, executor.extend_open_needs)
         plans = (() if mandatory else RollingPlanRuntime.action_proposals(self, state.plan, state,
             snapshot, executor.template, compile_answers, gap))
