@@ -344,3 +344,82 @@ async def test_counterfactual_terminal_answer_executes_and_records_contextpilot_
     validate_pre_action_input(run)
     await service.aclose()
     service.store.close()
+
+
+@pytest.mark.asyncio
+async def test_actual_snapshot_cohort_needs_no_task_labels_and_keeps_native_witness(tmp_path):
+    from copy import deepcopy
+    from training.collect_plan_gains import export_observed_packets
+    from training.plan_gain_rollout import observed_cohort, observed_rows, judge_sources, digest
+    from training.reader_data import file_digest
+    from controller.plan_gain_protocol import input_protocol
+    from controller.context_schema import TextRef
+
+    service, _, _, frozen, snapshot, _, _, plans, binding, row, _ = await frozen_fixture(tmp_path/'capture')
+    frozen = replace(frozen, plan=replace(frozen.plan, task_state=replace(frozen.plan.task_state,
+        needs=(replace(frozen.plan.task_state.needs[0], anchor_spans=(
+            TextRef(2, 'user', 0, len(row['question'])),)),))))
+    manifest = tmp_path/'cohort.json'
+    # A P3 cohort declares the queue before its model-generated history exists.
+    manifest.write_text(json.dumps({'members': [{'task_id': 'task', 'conversation_id': 'fixture',
+        'turn': 2, 'split': 'train'}]}))
+    cohort_hash = file_digest(manifest)
+    blocks = frozen.plan.selected_set.source_blocks
+    sources = [{'source_id': block.key.passage_id, 'version': block.key.version, 'text': block.text,
+        'source_uri': block.source_uri, 'split': 'train'} for block in blocks]
+    span = frozen.plan.selected_set.selected_units[0].source_spans[0]
+    block = next(block for block in blocks if block.key == span.source_key)
+    witness = {'passage_id': block.key.passage_id, 'start': span.start, 'end': span.start+3,
+        'quote': block.text[span.start:span.start+3]}
+    raw = {'task_id': 'task', 'conversation_id': 'fixture', 'turn': 2,
+        'input': [{'speaker': 'user', 'text': row['question']}],
+        'targets': [{'text': '原始 offline reference'}], 'grounding': [witness]}
+    capture = {'task_id': 'task', 'conversation_id': 'fixture', 'turn': 2,
+        'source_partition': 'train', 'split': 'train', 'measurement_kind': 'hardware',
+        'history_origin': 'model_actual', 'cohort_split': 'train', 'cohort_manifest_sha256': cohort_hash,
+        'method': 'B6_native', 'question': row['question'], 'reference': raw,
+        'actual_history': to_jsonable(snapshot.raw_history), 'answer': 'specified actual answer',
+        'response': {'attempt_id': 'actual-capture'}}
+    prior = snapshot.raw_history[0]
+    previous = {**capture, 'task_id': 'prior', 'turn': 1, 'question': prior.user_text,
+        'answer': prior.assistant_text, 'actual_history': [], 'response': {'attempt_id': 'prior-capture',
+            'receipt': {'generation_complete': True, 'input_hash': 'specified actual native prior QA'}}}
+    quote = to_jsonable(await service.engine.quote_batch((), service.template.fingerprint))
+    packet = {'observation_id': 'actual:decision:1', 'attempt_id': 'actual-capture',
+        'decision_seq': 1, 'working_state': to_jsonable(frozen), 'snapshot': to_jsonable(snapshot),
+        'input_protocol': input_protocol(service.template.fingerprint),
+        'native_condition': quote, 'paid_cost': to_jsonable(CompleteCost(500, 2000, 3000, 10000, 0)),
+        'reader_checkpoint': binding['reader_checkpoint'], 'reader_profile_id': binding['reader_profile_id'],
+        'resident_model_manifest_digest': 'specified-fixture', 'decision_mode': 'fixed_reading',
+        'legal_actions': [plan.semantic_kind for plan in plans]}
+    output = tmp_path/'packets.jsonl'
+    export_observed_packets([packet], [previous, capture], output)
+    packets = [json.loads(line) for line in output.read_text().splitlines()]
+    rows, cohort = observed_cohort([previous, capture], packets, sources, split='train', limit=1,
+        cohort_manifest=manifest)
+    assert cohort['task_label_dependency'] is False
+    assert rows[0]['source_capture']['reference'] == raw
+    assert rows[0]['reference_answer'] == raw['targets'][0]['text']
+    actual = observed_rows(rows, packets)
+    assert actual and actual[0]['task_state'] == to_jsonable(frozen.plan.task_state)
+    material = judge_sources(frozen.plan, None, actual[0], sources, corpus_id='demo')
+    assert any(unit.text == witness['quote'] for unit in material.selected_units)
+    assert actual[0]['source_capture']['actual_history'] == to_jsonable(snapshot.raw_history)
+
+    wrong = deepcopy(packets)
+    wrong[0]['attempt_id'] = 'unrelated-attempt'
+    with pytest.raises(ValueError, match='exact bound actual capture'):
+        observed_cohort([previous, capture], wrong, sources, split='train', limit=1, cohort_manifest=manifest)
+    tampered = deepcopy(capture)
+    tampered['reference']['grounding'][0]['quote'] = 'not in the source'
+    wrong = deepcopy(packets)
+    wrong[0]['source_capture_sha256'] = digest(tampered)
+    with pytest.raises(ValueError, match='raw offline witness'):
+        observed_cohort([previous, tampered], wrong, sources, split='train', limit=1, cohort_manifest=manifest)
+    manifest.write_text(json.dumps({'members': [
+        {'task_id': 'task', 'conversation_id': 'fixture', 'turn': 2, 'split': 'train'},
+        {'task_id': 'other', 'conversation_id': 'fixture', 'turn': 3, 'split': 'dev'}]}))
+    with pytest.raises(ValueError, match='conversations overlap'):
+        observed_cohort([previous, capture], packets, sources, split='train', limit=1, cohort_manifest=manifest)
+    await service.aclose()
+    service.store.close()

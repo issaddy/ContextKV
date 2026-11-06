@@ -102,6 +102,7 @@ async def test_after_each_read_learned_value_selects_stop_or_one_more_read(tmp_p
     assert records[-1]["paid_cost"]["input_tokens"] > 0
     result = export_observed_packets(records, [{"task_id": "real-task-turn-id",
         "cohort_split": "train", "cohort_manifest_sha256": "specified-fixture",
+        "reference": {"task_id": "real-task-turn-id"},
         "response": {"attempt_id": response.attempt_id}}], tmp_path / "packets.jsonl")
     assert result["packets"] == wanted+1
     assert all(json.loads(line)["task_id"] == "real-task-turn-id" for line in

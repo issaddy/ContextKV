@@ -84,7 +84,7 @@ def collect_pair(packet, direct_row, candidate_row):
 
 def export_observed_packets(observations, actual_turns, output):
     """Resolve runtime attempts against completed or failed actual capture rows."""
-    tasks, capture_statuses = {}, {}
+    tasks, capture_statuses, source_turns = {}, {}, {}
     for row in actual_turns:
         response = row.get("response")
         actual = response if response is not None else row.get("attempt")
@@ -95,6 +95,7 @@ def export_observed_packets(observations, actual_turns, output):
         if attempt in tasks and tasks[attempt] != binding:
             raise ValueError("one actual attempt maps to different task/cohort identities")
         tasks[attempt] = binding
+        source_turns[attempt] = row
         capture_statuses[attempt] = row.get("status", "completed" if response is not None else "failed")
     packets, excluded, seen = [], [], set()
     for observation in observations:
@@ -113,7 +114,13 @@ def export_observed_packets(observations, actual_turns, output):
         binding = tasks[attempt]
         if any(name in observation and observation[name] != value for name, value in binding.items()):
             raise ValueError("observed packet differs from its actual turn's task/cohort identity")
-        packets.append({**observation, **binding, "source_capture_status": capture_statuses[attempt]})
+        source = source_turns[attempt]
+        if not isinstance(source.get("reference"), dict):
+            raise ValueError("observed export requires the actual capture raw offline reference")
+        source_hash = hashlib.sha256(json.dumps(source, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest()
+        packets.append({**observation, **binding, "source_capture_status": capture_statuses[attempt],
+            "source_capture_sha256": source_hash})
     path = Path(output)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x") as stream:

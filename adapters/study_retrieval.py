@@ -493,7 +493,8 @@ class StudyEvidenceProvider:
         if self.frozen_history is None:
             task = self.config.get("task_model", {})
             self.frozen_history = LocalBGE(task.get("base_path", "models/bge-m3"),
-                device=task.get("device", "cuda:1"), dtype="bfloat16", max_length=8192)
+                device=task.get("device", "cuda:1"), dtype="bfloat16", max_length=8192,
+                sdpa_backend=task.get("sdpa_backend", "auto"))
         query_encoder = self.serving.retriever.encoder if isinstance(self.serving.retriever, HybridRetriever) else self.frozen_history
         query = query_override if query_override is not None else state.query or state.raw_question
         if query_override is None and self.strategy in {"B0", "Btoken"}:
@@ -675,7 +676,8 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
     if not external and strategy not in {"B0", "Btoken"} and task_interpreter is None:
         from adapters.hybrid_retrieval import LocalBGE
         frozen_history = frozen_history or LocalBGE(task_config.get("base_path", "models/bge-m3"),
-            device=task_config.get("device", "cuda:1"), dtype="bfloat16", max_length=8192)
+            device=task_config.get("device", "cuda:1"), dtype="bfloat16", max_length=8192,
+            sdpa_backend=task_config.get("sdpa_backend", "auto"))
         if task_config.get("mode", "trained") == "teacher":
             from adapters.query_selector import OpenAICompletionClient, SelectorConfig
             teacher_client = OpenAICompletionClient(SelectorConfig(

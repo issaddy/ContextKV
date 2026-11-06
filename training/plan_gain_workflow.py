@@ -20,9 +20,13 @@ async def workflow(config, settings):
     root = Path(settings["output_dir"])
     root.mkdir(parents=True, exist_ok=False)
     provenance = {}
-    inputs = ("task_labels", "actual_rollouts", "sources", "cohort_manifest")
+    inputs = ("actual_rollouts", "sources", "cohort_manifest")
     if settings.get("mode", "whole_plan") == "observed_actions":
         inputs += ("observed_states",)
+    else:
+        if not settings.get("task_labels"):
+            raise ValueError("whole_plan requires audited --task-labels")
+        inputs += ("task_labels",)
     for name in inputs:
         original = Path(settings[name]).resolve()
         with original.open("rb") as source:
@@ -92,8 +96,9 @@ def main(argv=None):
         return tuple(map(int, value.split(",")))
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("study-config", "run-config", "reader-profile-id", "judge-config", "judge-base-url",
-                 "task-labels", "actual-rollouts", "sources", "cohort-manifest", "output-dir"):
+                 "actual-rollouts", "sources", "cohort-manifest", "output-dir"):
         parser.add_argument("--"+name, required=True)
+    parser.add_argument("--task-labels", help="Required only for the whole_plan audited control")
     parser.add_argument("--reader-base-url")
     parser.add_argument("--asset")
     parser.add_argument("--train-states", type=int, default=8)
@@ -108,6 +113,8 @@ def main(argv=None):
     parser.add_argument("--mode", choices=("whole_plan", "observed_actions"), default="whole_plan")
     parser.add_argument("--observed-states", help="Actual observed-state packets registered with the cohort inputs")
     args = parser.parse_args(argv)
+    if args.mode == "whole_plan" and not args.task_labels:
+        parser.error("whole_plan requires --task-labels")
     if args.mode == "observed_actions" and not args.observed_states:
         parser.error("observed_actions requires --observed-states")
     if (min(args.train_states, args.dev_states) < 0 or args.train_states+args.dev_states < 1

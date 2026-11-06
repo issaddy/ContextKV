@@ -24,6 +24,7 @@ class HybridRetrievalConfig:
     reranker_path: str | None = None
     device: str = "cpu"
     dtype: str = "float32"
+    sdpa_backend: str = "auto"
     batch_size: int = 16
     encoder_max_length: int = 8192
     reranker_max_length: int = 1024
@@ -66,6 +67,8 @@ def load_retriever_config(path):
         raise ValueError("hybrid_rerank requires reranker_path")
     if value.dtype not in {"float32", "float16", "bfloat16"}:
         raise ValueError("unsupported model dtype")
+    if value.sdpa_backend not in {"auto", "math"}:
+        raise ValueError("sdpa_backend must be auto or math")
     if min(value.batch_size, value.encoder_max_length, value.reranker_max_length, value.cpu_threads) < 1:
         raise ValueError("batch size, token limits and CPU threads must be positive")
     return value
@@ -89,14 +92,16 @@ def create_retriever(protocol, *, config_path=None, index_path=None, corpus_path
             encoder = LocalBGE(config.encoder_path, device=config.device, dtype=config.dtype,
                                batch_size=config.batch_size, max_length=config.encoder_max_length,
                                query_adapter_path=config.query_adapter_path,
-                               normalize_float32=config.query_mode == "dialogue")
+                               normalize_float32=config.query_mode == "dialogue",
+                               sdpa_backend=config.sdpa_backend)
             cleanup.callback(encoder.close)
             if config.query_adapter_path and encoder.manifest["query_adapter"]["query_mode"] != config.query_mode:
                 raise ValueError("query adapter input recipe differs from configured query_mode")
             reranker = None
             if config.stage == "hybrid_rerank":
                 reranker = LocalBGE(config.reranker_path, reranker=True, device=config.device, dtype=config.dtype,
-                                   batch_size=config.batch_size, max_length=config.reranker_max_length)
+                                   batch_size=config.batch_size, max_length=config.reranker_max_length,
+                                   sdpa_backend=config.sdpa_backend)
                 cleanup.callback(reranker.close)
             resolver, client = None, None
             if config.selector is not None:

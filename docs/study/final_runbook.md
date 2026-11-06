@@ -68,7 +68,8 @@ B 固定流程观测使用 `execution.state_observation`，从真实请求开始
 各规划器对同一审核任务与真实 QA 执行自己的检索。P1 source-first 格可同时写 B 观测；原候选池重放入口另留作隔离对照。
 `training.collect_plan_gains --observations OBS --actual-turns TURNS --output PACKETS`
 导出后，`training.plan_gain_workflow --mode observed_actions --observed-states PACKETS`
-沿用源 cohort 身份。每个源 task 保留各合法动作首次可配对的观测，不按未来质量选点。
+沿用源 cohort 身份。主线直接读取真实 P3 capture 的 TaskState/ReadingOutcome，不要求另行准备 `--task-labels`、task/student 或 P1 标签；`whole_plan` 固定历史对照仍需审计标签。cohort 预声明 task、会话与 train/dev 分区，真实 QA 历史在采集后由 snapshot 和已完成原生回执核验，只有固定历史对照才额外校验预先提供的历史 hash。每个源 task 保留各合法动作首次可配对的观测，不按未来质量选点。
+`bench.study` 的成功/失败记录保留原始 `reference`、原始数据分区和 observer cohort 绑定，仅供离线审计与评分。导出器将 packet 绑定到完整实际 capture 行的 hash；B 采集核验 native-train 原始正文、版本、窗口坐标与 raw grounding 引文，开发会话独立隔离。原始参考不会进入 A/B/C 的在线输入。正式 dev 队列不能作为 B 训练数据。
 真实检索后的初始状态也可配对 DIRECT 与首次 READ；无需先完成一次 READ。
 进度分别记录去重源任务数和决策快照数，不将多个动作快照重复计为训练任务。
 `observed_actions` 沿用源动作的输出份额，不扫描 `read-outputs`；有效观测数单独记录，声明分母仍为 200/40。

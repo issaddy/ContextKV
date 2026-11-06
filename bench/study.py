@@ -307,6 +307,9 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             "task_id": task_id, "request_id": request_id, "conversation_id": sid, "turn": row["turn"],
             "status": "completed", "question": query, "actual_history": to_jsonable(before.raw_history),
             "history_origin": "author_reference_import" if protocol == "P1" else "model_actual",
+            "reference": row, "source_partition": split,
+            "measurement_kind": "hardware" if run.engine.kind == "sglang" else "simulation",
+            **(service.state_observer.cohort if service.state_observer is not None else {}),
             "answer": response.assistant_text, "response": to_jsonable(response),
             "task_state": trace.get("task_state"), "candidate_pool": trace.get("pool"),
             "planning_trace": trace, "context_plan": to_jsonable(attempt.context_plan),
@@ -361,6 +364,14 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 state_db=str((directory/"state"/"sessions.sqlite3").resolve()),
                 blocked_task_ids=[value["task_id"] for _, value in ordered_rows
                     if value["task_id"] not in results and value["task_id"] != row["task_id"]])
+            failure.update(reference=row, source_partition=split, split=split, turn=row["turn"],
+                status="failed", method=method["id"],
+                measurement_kind="hardware" if run.engine.kind == "sglang" else "simulation",
+                question=attempt.query if attempt is not None else row["input"][-1]["text"],
+                actual_history=to_jsonable(service.store.get_snapshot(session_id).raw_history),
+                history_origin="author_reference_import" if spec.get("protocol", "P3") == "P1" else "model_actual",
+                attempt=to_jsonable(attempt),
+                **(service.state_observer.cohort if service.state_observer is not None else {}))
             failures[sid] = failure
             try:
                 await service.close_session(session_id)
@@ -384,6 +395,13 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                     if sid not in failures:
                         failures[sid] = persist_p3_failure(directory, sid, row["task_id"], session_id,
                             previous, previous.error)
+                        failures[sid].update(reference=row, source_partition=split, split=split,
+                            turn=row["turn"], status="failed", method=method["id"],
+                            measurement_kind="hardware" if run.engine.kind == "sglang" else "simulation",
+                            question=previous.query, attempt=to_jsonable(previous), history_origin="model_actual",
+                            actual_history=to_jsonable(service.store.get_snapshot(session_id).raw_history),
+                            **(service.state_observer.cohort if service.state_observer is not None else {}))
+                        write_json(directory/"terminal_read_failures"/(digest(sid)[:20]+".json"), failures[sid])
                     await service.close_session(session_id)
                     continue
                 boundary_start = time.monotonic()
@@ -404,7 +422,13 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                     attempt = service.store.find_request(session_id, actual_request_id(row["task_id"]))
                     failure = persist_p3_failure(directory, sid, row["task_id"], session_id, attempt, str(error))
                     failure.update(request_window=[request_start, time.monotonic()],
-                        measurement_segment_id=segment_id)
+                        measurement_segment_id=segment_id, reference=row, source_partition=split,
+                        split=split, turn=row["turn"], status="failed", method=method["id"],
+                        measurement_kind="hardware" if run.engine.kind == "sglang" else "simulation",
+                        question=attempt.query if attempt is not None else row["input"][-1]["text"],
+                        actual_history=to_jsonable(service.store.get_snapshot(session_id).raw_history),
+                        history_origin="model_actual", attempt=to_jsonable(attempt),
+                        **(service.state_observer.cohort if service.state_observer is not None else {}))
                     failures[sid] = failure
                     write_json(directory/"terminal_read_failures"/(digest(sid)[:20]+".json"), failure)
                     await service.close_session(session_id)

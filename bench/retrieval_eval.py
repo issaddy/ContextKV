@@ -177,6 +177,7 @@ def main(argv=None):
         sub.add_argument("--encoder-max-length", type=int, default=8192)
         sub.add_argument("--device", default="cpu")
         sub.add_argument("--dtype", choices=["float32", "float16", "bfloat16"], default="float32")
+        sub.add_argument("--sdpa-backend", choices=["auto", "math"], default="auto")
         sub.add_argument("--batch-size", type=int, default=16)
     args = parser.parse_args(argv)
     if Path(args.output).exists():
@@ -193,7 +194,8 @@ def main(argv=None):
         if args.query_fusion == "current_topic_rrf" and (args.query_modes != ["user_topic"] or not args.dense_index):
             parser.error("current_topic_rrf requires --query-modes user_topic and --dense-index")
     encoder = (LocalBGE(args.encoder_path, device=args.device, dtype=args.dtype,
-                       batch_size=args.batch_size, max_length=args.encoder_max_length)
+                       batch_size=args.batch_size, max_length=args.encoder_max_length,
+                       sdpa_backend=args.sdpa_backend)
                if args.encoder_path else None)
     if args.command == "build":
         contexts = [OnlineContext(**value) for value in load_beir_corpus(args.corpus).values()]
@@ -210,7 +212,8 @@ def main(argv=None):
     sparse = BM25SRetriever.load(args.sparse_index, cpu_threads=args.cpu_threads)
     dense = DenseIndex.load(args.dense_index) if args.dense_index else None
     reranker = (LocalBGE(args.reranker_path, reranker=True, device=args.device, dtype=args.dtype,
-                        batch_size=args.batch_size, max_length=args.reranker_max_length)
+                        batch_size=args.batch_size, max_length=args.reranker_max_length,
+                        sdpa_backend=args.sdpa_backend)
                 if args.reranker_path else None)
     manifest = {"schema_version": 1, "status": "running", "config": vars(args),
         "sources": {"input": file_source(args.input), "split_manifest": file_source(args.split_manifest),

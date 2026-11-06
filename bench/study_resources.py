@@ -6,18 +6,15 @@ import csv
 import io
 import os
 from pathlib import Path
-import re
 import subprocess
 import time
 
 
 def listening_processes(ports):
-    output = subprocess.check_output(["ss", "-lptnH"], text=True)
-    selected = set()
-    for line in output.splitlines():
-        if int(line.split()[3].rsplit(":", 1)[1]) in ports:
-            selected.update(map(int, re.findall(r"pid=(\d+)", line)))
-    return tuple(sorted(selected))
+    import psutil
+    return tuple(sorted({connection.pid for connection in psutil.net_connections(kind="tcp")
+        if connection.status == psutil.CONN_LISTEN and connection.laddr.port in ports
+        and connection.pid is not None}))
 
 
 def descendants(process_ids):

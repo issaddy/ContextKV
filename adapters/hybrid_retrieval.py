@@ -5,6 +5,7 @@ are imported only by explicit model/index operations; no runtime downloads.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 import json
 from pathlib import Path
@@ -144,13 +145,17 @@ def select_requirement_evidence(primary, rankings, *, top_k=5, group_key=None):
 class LocalBGE:
     """Official Transformers-compatible checkpoints; explicit device/dtype/path."""
     def __init__(self, model_path, *, reranker=False, device="cpu", dtype="float32",
-                 batch_size=16, max_length=None, query_adapter_path=None, normalize_float32=False):
+                 batch_size=16, max_length=None, query_adapter_path=None, normalize_float32=False,
+                 sdpa_backend="auto"):
         if batch_size < 1 or (max_length is not None and max_length < 1):
             raise ValueError("model batch size and token limit must be positive")
+        if sdpa_backend not in {"auto", "math"}:
+            raise ValueError("sdpa_backend must be auto or math")
         import torch
         from importlib.metadata import version
         from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
         self.torch, self.batch_size, self.reranker = torch, batch_size, reranker
+        self.sdpa_backend = sdpa_backend
         if reranker and (query_adapter_path or normalize_float32):
             raise ValueError("query encoder adaptation is not a reranker option")
         self.normalize_float32 = normalize_float32 or query_adapter_path is not None
@@ -177,7 +182,11 @@ class LocalBGE:
             "dtype": str(self.model.dtype), "max_length": self.max_length, "batch_size": batch_size,
             "packages": {name: version(name) for name in ("torch", "transformers", "numpy")},
             "implementation": "Transformers official checkpoint API",
+            "attention_implementation": self.model.config._attn_implementation,
+            "sdpa_backend": sdpa_backend,
             "pooling": None if reranker else "CLS then L2 normalization; BGE-M3 needs no query instruction"}
+        with self._sdpa_context():
+            self.manifest["sdpa_enabled_backends"] = self._sdpa_enabled_backends()
 
         if self.normalize_float32:
             document_encoder = {k: self.manifest[k] for k in ("model_id", "revision", "max_length", "pooling")}
@@ -195,6 +204,17 @@ class LocalBGE:
                 query_adapter=metadata)
             self.manifest["packages"]["peft"] = version("peft")
 
+    def _sdpa_context(self):
+        if self.sdpa_backend == "math":
+            return self.torch.nn.attention.sdpa_kernel(self.torch.nn.attention.SDPBackend.MATH)
+        return nullcontext()
+
+    def _sdpa_enabled_backends(self):
+        # These are observed dispatcher flags, not a claim that auto chose a fused kernel.
+        backend = self.torch.backends.cuda
+        return {"flash": backend.flash_sdp_enabled(), "memory_efficient": backend.mem_efficient_sdp_enabled(),
+                "math": backend.math_sdp_enabled(), "cudnn": backend.cudnn_sdp_enabled()}
+
     def _forward(self, values):
         if self.model.device.type == "cuda":
             self.torch.cuda.synchronize(self.model.device)
@@ -209,7 +229,8 @@ class LocalBGE:
             self.texts_processed += len(batch)
             self.usage["input_tokens"] += int(lengths.sum())
             encoded = {name: value.to(self.model.device) for name, value in encoded.items()}
-            with self.torch.inference_mode():
+            with self.torch.inference_mode(), self._sdpa_context():
+                self.manifest["sdpa_enabled_backends"] = self._sdpa_enabled_backends()
                 result = self.model(**encoded, return_dict=True)
                 value = (result.logits.reshape(-1) if self.reranker else
                          self.torch.nn.functional.normalize(

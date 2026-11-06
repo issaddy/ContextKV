@@ -89,7 +89,7 @@ def observed_rows(rows, packets, *, selection=None):
                     for turn in row["actual_history"]]
         if (actual_history(snapshot) != expected or state.plan.task_state.current_turn_id != row["turn"]
                 or state.plan.task_state.raw_question != row["question"]):
-            raise ValueError("observed state differs from the audited actual task/history")
+            raise ValueError("observed state differs from the captured actual task/history")
         from controller.context_schema import RetrievalState
         from controller.schema import OnlineTurn
         interpreter = AuditedTaskInterpreter(None)
@@ -313,6 +313,118 @@ def audited_cohort(labels, sources, *, split, limit, cohort_manifest):
         "source_label_sha256": digest(labels), "source_originals_sha256": digest(sources)}
 
 
+
+def observed_cohort(rollouts, packets, sources, *, split, limit, cohort_manifest):
+    """Bind true P3 decision snapshots to their native capture, without task labels."""
+    from controller.evidence import validate_block
+    from training.reader_data import file_digest, history_digest
+
+    manifest = json.loads(Path(cohort_manifest).read_text())
+    manifest_hash = file_digest(cohort_manifest)
+    members, sessions = {}, {}
+    for member in manifest["members"]:
+        if member["split"] not in {"train", "dev"}:
+            raise ValueError("observed B cohorts require declared train/dev membership")
+        if member["task_id"] in members:
+            raise ValueError("observed cohort task IDs must be unique")
+        members[member["task_id"]] = member
+        previous = sessions.setdefault(member["conversation_id"], member["split"])
+        if previous != member["split"]:
+            raise ValueError("observed B train/development conversations overlap")
+    declared = [key for key, member in members.items() if member["split"] == split]
+    requested = set(declared[:limit])
+    actual, history = {}, {}
+    for row in rollouts:
+        response = row.get("response")
+        attempt = response if response is not None else row.get("attempt")
+        if attempt is not None:
+            identity = attempt["attempt_id"]
+            if identity in actual and actual[identity] != row:
+                raise ValueError("one observed attempt maps to conflicting actual captures")
+            actual[identity] = row
+        if response is not None:
+            key = row["conversation_id"], row["turn"]
+            if key in history and history[key] != row:
+                raise ValueError("observed history has conflicting actual committed turns")
+            history[key] = row
+    originals = {source["source_id"]: source for source in sources}
+    if len(originals) != len(sources):
+        raise ValueError("observed originals require unique source IDs")
+    selected, seen = {}, set()
+    for packet in packets:
+        task_id = packet["task_id"]
+        if task_id not in requested:
+            continue
+        member = members[task_id]
+        row = actual.get(packet["attempt_id"])
+        if row is None or digest(row) != packet["source_capture_sha256"]:
+            raise ValueError("observed decision lacks its exact bound actual capture row")
+        if (row["task_id"] != task_id or row["conversation_id"] != member["conversation_id"]
+                or row["turn"] != member["turn"] or row["source_partition"] != "train"
+                or row["measurement_kind"] != "hardware" or row["history_origin"] != "model_actual"
+                or any(packet[name] != value or row[name] != value for name, value in (
+                    ("cohort_split", split), ("cohort_manifest_sha256", manifest_hash)))):
+            raise ValueError("observed decision differs from its actual native-train/cohort binding")
+        if "actual_history_sha256" in member and history_digest(row["actual_history"]) != member["actual_history_sha256"]:
+            raise ValueError("observed actual history differs from its registered fixed-history control")
+        state = decode(ReadingOutcome, packet["working_state"])
+        snapshot = decode(SessionSnapshot, packet["snapshot"])
+        row_history = [{name: turn[name] for name in ("turn_id", "user_text", "assistant_text")}
+                       for turn in row["actual_history"]]
+        if (actual_history(snapshot) != row_history
+                or state.plan.task_state.current_turn_id != row["turn"]
+                or state.plan.task_state.raw_question != row["question"]
+                or row["turn"] != len(row["actual_history"])+1):
+            raise ValueError("observed snapshot differs from the actual current question/history")
+        for turn in row["actual_history"]:
+            origin = history.get((row["conversation_id"], turn["turn_id"]))
+            if origin is None or origin["history_origin"] != "model_actual" or origin["measurement_kind"] != "hardware":
+                raise ValueError("observed history requires its actual hardware committed QA chain")
+            receipt = origin["response"]["receipt"]
+            if (origin["question"] != turn["user_text"] or origin["answer"] != turn["assistant_text"]
+                    or not receipt["generation_complete"] or not receipt["input_hash"]):
+                raise ValueError("observed history differs from its actual completed native QA")
+        blocks = {block.key: block for block in (*snapshot.archive, *state.plan.selected_set.source_blocks)}
+        for block in blocks.values():
+            validate_block(block)
+            source = originals.get(block.key.passage_id)
+            if (source is None or source["split"] != "train" or source["version"] != block.key.version
+                    or source["text"] != block.text):
+                raise ValueError("observed source body/version differs from the actual training original")
+        for unit in state.plan.selected_set.selected_units:
+            for span in unit.source_spans:
+                block = blocks[span.source_key]
+                base = block.span[0] if block.span else 0
+                if (not base <= span.start < span.end <= base+len(block.text)
+                        or block.text[span.start-base:span.end-base] != unit.text):
+                    raise ValueError("observed source window differs from original coordinates/text")
+        reference = row["reference"]
+        if reference["task_id"] != task_id or reference["conversation_id"] != row["conversation_id"] or reference["turn"] != row["turn"]:
+            raise ValueError("raw offline reference belongs to a different captured task")
+        for witness in reference["grounding"]:
+            source = originals[witness["passage_id"]]
+            if (source["split"] != "train" or not 0 <= witness["start"] < witness["end"] <= len(source["text"])
+                    or source["text"][witness["start"]:witness["end"]] != witness["quote"]):
+                raise ValueError("raw offline witness differs from the native training original")
+        prepared = {**row, "split": split, "snapshot_id": snapshot.corpus_snapshot_id,
+            "actual_history": actual_history(snapshot),
+            "rollout_policy": row["method"], "task_state": to_jsonable(state.plan.task_state),
+            "reference_answer": reference["targets"][0]["text"],
+            "judge_grounding": reference["grounding"], "grounding_origin": "raw_native_reference_coordinates_checked",
+            "source_capture": row, "task_state_source": "actual_observed_decision"}
+        if task_id in selected and selected[task_id]["source_capture"] != row:
+            raise ValueError("one observed task maps to different actual capture requests")
+        selected[task_id] = prepared
+        seen.add(task_id)
+    values = [selected[key] for key in declared if key in seen]
+    return values, {"split": split, "source_partition": "train", "allocation_unit": "registered conversation_id",
+        "cohort_manifest": str(Path(cohort_manifest).resolve()), "cohort_manifest_sha256": manifest_hash,
+        "declared_task_ids": declared, "planned_task_ids": [row["task_id"] for row in values],
+        "missing_capture_task_ids": [key for key in declared[:limit] if key not in seen],
+        "task_state_source": "actual_observed_decision", "task_label_dependency": False,
+        "source_capture_sha256": digest(rollouts), "source_originals_sha256": digest(sources)}
+
+
 def create_audited_provider(config, template):
     from adapters.study_retrieval import create_study_retriever
     provider = create_study_retriever(config, template)
@@ -352,7 +464,8 @@ def judge_sources(base, scope_material, row, sources, *, corpus_id):
     units = {unit.unit_id: unit for unit in base.selected_set.selected_units}
     if scope_material is not None:
         units.update((unit.unit_id, unit) for unit in scope_material.selected_units)
-    for number, witness in enumerate(row["verified_grounding"]):
+    for number, witness in enumerate(row["judge_grounding"] if row.get("task_state_source") == "actual_observed_decision"
+                                     else row["verified_grounding"]):
         source = by_source[witness["passage_id"]]
         if source["text"][witness["start"]:witness["end"]] != witness["quote"]:
             raise ValueError("offline judge witness differs from the audited training original")
@@ -467,7 +580,8 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
         response = await service.serve_turn(session, row["question"], material,
             request_id="counterfactual", corpus_snapshot_id=row["snapshot_id"],
             context_plans=(plan.context_plan,), query_context=QueryContext(
-                plan.context_plan.task_state.query or row["question"], "frozen_audited_task",
+                plan.context_plan.task_state.query or row["question"],
+                "actual_observed_task" if observed is not None else "frozen_audited_task",
                 task_state=plan.context_plan.task_state))
         response_finished = time.monotonic()
     except (EngineError, ReadingBudgetExceeded, EmptyPlannedPremise, PlannedReductionConflict,
@@ -661,11 +775,19 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
     output = Path(settings["output_dir"])
     output.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
-    labels, source_rows = read_rows(settings["task_labels"]), read_rows(settings["sources"])
-    selected, cohort = audited_cohort(labels, source_rows, split=settings["split"], limit=len(labels),
-        cohort_manifest=settings["cohort_manifest"])
-    verify_actual_history(selected, read_rows(settings["actual_rollouts"]))
     mode = settings.get("mode", "whole_plan")
+    source_rows = read_rows(settings["sources"])
+    packets = read_rows(settings["observed_states"]) if mode == "observed_actions" else ()
+    if mode == "observed_actions":
+        selected, cohort = observed_cohort(read_rows(settings["actual_rollouts"]), packets, source_rows,
+            split=settings["split"], limit=settings["limit_tasks"], cohort_manifest=settings["cohort_manifest"])
+    else:
+        if not settings.get("task_labels"):
+            raise ValueError("whole_plan requires audited --task-labels")
+        labels = read_rows(settings["task_labels"])
+        selected, cohort = audited_cohort(labels, source_rows, split=settings["split"], limit=len(labels),
+            cohort_manifest=settings["cohort_manifest"])
+        verify_actual_history(selected, read_rows(settings["actual_rollouts"]))
     valid, invalid = selected, []
     if mode == "whole_plan":
         validator = AuditedTaskInterpreter(None)
@@ -688,22 +810,22 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
     valid = [eligible[identity] for identity in requested if identity in eligible]
     observation_selection = {}
     if mode == "observed_actions":
-        valid = observed_rows(valid, read_rows(settings["observed_states"]), selection=observation_selection)
+        valid = observed_rows(valid, packets, selection=observation_selection)
     cohort["task_ref_exclusions"] = invalid
     cohort["requested_task_ids"] = requested
-    cohort["missing_eligible_label_task_ids"] = [identity for identity in requested if identity not in eligible]
+    cohort["missing_eligible_task_ids"] = [identity for identity in requested if identity not in eligible]
     cohort["planned_task_ids"] = list(dict.fromkeys(row["task_id"] for row in valid))
     cohort["missing_task_ids"] = [identity for identity in requested if identity not in cohort["planned_task_ids"]]
     if mode == "observed_actions":
         observation_selection["unavailable_actions"].extend(
-            {"task_id": identity, "family": kind, "reason": "no_eligible_registered_label"}
+            {"task_id": identity, "family": kind, "reason": "no_eligible_actual_capture"}
             for identity in requested if identity not in eligible
             for kind in ("read_once", "reduce_once", "gap_retrieval"))
         cohort["observation_selection"] = observation_selection
         cohort["planned_observations"] = len(valid)
     write(output/"cohort.json", cohort)
     if not valid:
-        raise ValueError("no unchanged audited task binding remains for actual gain collection")
+        raise ValueError("no validated task/decision snapshot remains for actual gain collection")
     run = load_config(settings["run_config"])
     run = replace(apply_study_config(run, config), state_dir=str(output/"state"), plan_gain=None,
         prefix_retention={"mode": "native"}, planner=replace(run.planner, strategy="always_rebuild"))
@@ -763,7 +885,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
             if own_provider:
                 provider, interpreter = await asyncio.to_thread(create_audited_provider, config, controller.template)
             if not isinstance(interpreter, AuditedTaskInterpreter):
-                raise ValueError("gain preparation requires the unchanged audited-state interpreter")
+                raise ValueError("gain preparation requires the unchanged frozen-state interpreter")
             accounting.resident_model_manifest = to_jsonable(provider.manifest)
             if own_provider:
                 accounting.record_resident_models(settings["study_config"], provider.manifest)
@@ -798,24 +920,26 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
             journal_judge = JudgeJournal(judge_client, budget, output/"judge-wire.jsonl")
             common_binding = {"reader_checkpoint": reader_checkpoint,
                 "reader_profile_id": settings["reader_profile_id"], "scorer_identity": scorer,
-                "split": settings["split"], "cohort_split": row["cohort_split"],
-                "cohort_manifest_sha256": row["cohort_manifest_sha256"],
+                "split": settings["split"], "cohort_split": settings["split"],
+                "cohort_manifest_sha256": cohort["cohort_manifest_sha256"],
                 "measurement_kind": "hardware" if info.engine_kind == "sglang" else "simulation",
                 "resident_model_manifest": to_jsonable(provider.manifest),
                 "input_protocol": input_protocol(controller.template.fingerprint),
                 "continuation_protocol": BOUNDED_CONTINUATION,
                 "continuation_gap_limits": (run.state_observation or run.plan_gain)["gap_limits"] if mode == "observed_actions" else None,
-                "task_state_source": "frozen_audited_actual", "collection_mode": mode,
+                "task_state_source": "actual_observed_decision" if mode == "observed_actions" else "frozen_audited_actual",
+                "collection_mode": mode,
                 "counterfactual_cache_start": settings["cache_start"]}
             write(output/"binding.json", {**common_binding, "reader_engine_info": info,
                 "support_engine_info": support_engine_info,
                 "scorer_engine_info": judge_info, "generation_protocol": GenerationProtocol.from_config(run).record(),
                 "source_files": {name: {"path": str(Path(settings[name]).resolve()),
                     "sha256": hashlib.sha256(Path(settings[name]).read_bytes()).hexdigest()}
-                    for name in ("task_labels", "actual_rollouts", "sources", "run_config", "judge_config", "cohort_manifest")
-                        + (("observed_states",) if mode == "observed_actions" else ())},
+                    for name in ("actual_rollouts", "sources", "run_config", "judge_config", "cohort_manifest")
+                        + (("observed_states",) if mode == "observed_actions" else ("task_labels",))},
                 "configuration": config, "collection_settings": settings,
-                "task_inference": "frozen audited training labels; no new task-teacher inference"})
+                "task_inference": ("captured actual TaskState; no task-label dependency or new task inference"
+                    if mode == "observed_actions" else "frozen audited training labels; no new task-teacher inference")})
             for number, row in enumerate(valid):
                 if budget.remaining < 2:
                     status, stop_reason = "generation_budget_exhausted", "no_preparation_and_answer_allocation"
@@ -1036,7 +1160,7 @@ def main(argv=None):
     parser.add_argument("--reader-base-url")
     parser.add_argument("--judge-config", required=True)
     parser.add_argument("--judge-base-url", required=True)
-    parser.add_argument("--task-labels", required=True)
+    parser.add_argument("--task-labels", help="Required only for the whole_plan audited control")
     parser.add_argument("--cohort-manifest", required=True)
     parser.add_argument("--actual-rollouts", required=True)
     parser.add_argument("--sources", required=True)
@@ -1053,6 +1177,8 @@ def main(argv=None):
     parser.add_argument("--mode", choices=("whole_plan", "observed_actions"), default="whole_plan")
     parser.add_argument("--observed-states", help="Registered observed-state JSONL packets for observed_actions mode")
     args = parser.parse_args(argv)
+    if args.mode == "whole_plan" and not args.task_labels:
+        parser.error("whole_plan requires --task-labels")
     if args.mode == "observed_actions" and not args.observed_states:
         parser.error("observed_actions requires --observed-states")
     if args.limit_tasks < 1 or args.max_generations < 1 or any(
