@@ -217,6 +217,19 @@ class Controller:
                     self._retire_task = None
         await self._flush_retirements()
 
+    async def start(self):
+        """Start bound pricing before admitting or timestamping requests.
+
+        External-arrival callers await this after model binding and before
+        dispatch. PhysicalPaidCost owns the existing lock and idempotence.
+        """
+        started = time.monotonic()
+        if self.rolling_policy is not None:
+            await self.rolling_policy.start()
+        if self.state_observer is not None:
+            await self.state_observer.start()
+        return (time.monotonic()-started)*1000
+
     async def aclose(self):
         try:
             await self.drain()
@@ -457,6 +470,7 @@ class Controller:
                          dialogue_budget: ContextBudget | None = None) -> TurnResponse:
         if not session_id or not query.strip():
             raise ValueError("session_id and query must be nonempty")
+        observation_startup_ms = await self.start()
         arrived = time.monotonic() if request_arrived is None else request_arrived
         evidence = tuple(evidence)
         context_plans = tuple(context_plans)
@@ -477,12 +491,6 @@ class Controller:
         if context_plans:
             content = (*content, context_plans)
         request_hash = hashlib.sha256(dumps(content).encode()).hexdigest()
-        if self.rolling_policy is not None:
-            await self.rolling_policy.start()
-        if self.state_observer is not None:
-            observation_startup = time.monotonic()
-            await self.state_observer.start()
-            observation_startup_ms = (time.monotonic()-observation_startup)*1000
         async with self._lock(session_id):
             entered = time.monotonic()
             self.events.emit("turn_received", business_session_id=session_id, request_id=request_id)

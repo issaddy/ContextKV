@@ -789,4 +789,4 @@ class FixedReadingObserver:
                     "pre_arrival_startup_ms": startup_ms,
                     "quote_start": quote_started, "quote_end": quote_ended,
                     "paid_window_end": self.paid.last_observation["end"],
-                    "handling": "startup is in the outer request/collection window; decision capture through paid_window_end is in paid_cost; serialization is in subsequent paid windows and full request cost"}})
+                    "handling": "pricing startup precedes arrivals and is in initialization/startup cost; decision capture through paid_window_end is in paid_cost; serialization is in subsequent paid windows and full request cost"}})

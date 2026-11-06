@@ -9,6 +9,10 @@ class DocumentQA:
         self.controller, self.provider = controller, provider
         provider.committed_readings = controller.store.committed_readings
 
+    async def start(self):
+        """Start the controller lifecycle before an external queue admits requests."""
+        return await self.controller.start()
+
     def register_documents(self, blocks, *, source_metadata=None):
         started, cpu_started = time.monotonic(), time.thread_time()
         documents = self.controller.store.register_document_set(blocks, source_metadata=source_metadata)
@@ -24,6 +28,7 @@ class DocumentQA:
     async def ask(self, session_id, query, request_id, *, task_id=None, supplied_blocks=None,
                   source_metadata=None, coverage_scope="selected_sources",
                   from_corpus_snapshot_id=None, request_arrived=None, document_set_id=None):
+        await self.start()
         arrived = time.monotonic() if request_arrived is None else request_arrived
         task_id = task_id or request_id
         memo_task_id = task_id

@@ -292,3 +292,44 @@ async def test_fixed_observer_keeps_visible_original_stop_without_waiving_numeri
     assert len(engine.constraints) == 1
     await controller.aclose()
     store.close()
+
+
+@pytest.mark.asyncio
+async def test_pricing_starts_before_queued_arrivals_with_one_actual_sample_lifecycle(tmp_path):
+    import asyncio
+    import time
+    from bench.study_resources import StudyResourceSampler
+    from controller.plan_profiles import PhysicalPaidCost
+    from controller.rolling_policy import FixedReadingObserver
+
+    def sample(devices, roots):
+        return {'timestamp': time.monotonic(), 'gpu_gib': 1.0, 'host_gib': 2.0,
+            'devices': [], 'process_pss': []}  # specified CPU fixture, never hardware evidence
+
+    controller, store, engine, _, plan = setup_controller(tmp_path, operation='lookup',
+        scope='all_supplied_documents')
+    controller.rolling_policy = None
+    cohort = tmp_path/'cohort.json'
+    cohort.write_text(json.dumps({'members': []}))
+    path = tmp_path/'paid-observations.jsonl'
+    sampler = StudyResourceSampler((), (), sample=sample)
+    observer = FixedReadingObserver({'reader_checkpoint': controller.template.fingerprint.model_revision,
+        'reader_profile_id': 'specified-fixture', 'observation_path': str(path), 'output_budgets': [512],
+        'gap_limits': {'max_units': 2, 'max_passages': 2}, 'cohort_split': 'train',
+        'cohort_manifest': str(cohort)}, PhysicalPaidCost(sampler), controller.template.fingerprint)
+    controller.state_observer = observer
+    # This is the common API/bench lifecycle, before dispatcher/semaphore admission.
+    await asyncio.gather(controller.start(), controller.start())
+    assert len(sampler.samples) == 1
+    original_task = sampler._task
+    arrived = time.monotonic()
+    response = await controller.serve_turn('queued', 'How?', context_plans=(plan,), request_id='first',
+        request_arrived=arrived)
+    packet = json.loads(path.read_text().splitlines()[0])
+    assert sampler.samples[0]['timestamp'] <= arrived
+    assert packet['paid_observation']['start'] == arrived
+    assert packet['paid_observation']['physical']['complete_window_coverage'] is True
+    assert sampler._task is original_task  # no second sampler for the request
+    assert response.read_count == 0 and len(engine.constraints) == 1
+    await controller.aclose()
+    store.close()

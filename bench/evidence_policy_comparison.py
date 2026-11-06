@@ -228,6 +228,7 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
         provider = await asyncio.to_thread(create_study_retriever, actual, service.template,
             task_interpreter=interpreter, frozen_history=frozen_history)
     service.bind_resident_models(provider.manifest)
+    await service.start()
     initialization_ms = (time.monotonic()-started)*1000
     info = await service.engine.info()
     if info.fingerprint.model_revision != run.model.revision:

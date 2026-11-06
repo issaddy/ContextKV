@@ -175,6 +175,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     from controller.qa import DocumentQA
     qa = DocumentQA(service, provider)
     service.bind_resident_models(provider.manifest)
+    await qa.start()
     initialization_ms = (time.monotonic()-provider_started)*1000
     engine_info = await service.engine.info()
     cache_protocol = config["execution"].get("cache_start", "observed")

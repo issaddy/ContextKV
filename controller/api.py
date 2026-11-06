@@ -183,7 +183,9 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
                 app.state.qa = DocumentQA(service, app.state.retrieval)
                 service.bind_resident_models(app.state.retrieval.manifest)
                 service.events.emit("retrieval_configured", retrieval=app.state.retrieval.manifest)
+            pricing_startup_ms = await service.start()
             service.events.emit("service_started", engine=info, fingerprint=service.template.fingerprint,
+                pricing_startup_ms=pricing_startup_ms,
                 configuration_source="run_config" if resolved_config is not None else "injected_controller",
                 config=resolved_config)
             worker = retry_worker = asyncio.create_task(retries())
