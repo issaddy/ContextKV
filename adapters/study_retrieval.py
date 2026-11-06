@@ -20,7 +20,7 @@ from controller.context_schema import (AnswerPlan, AnswerPoint, ContextBudget, C
     EvidencePool, EvidenceSet, Need, SupportScores, TaskState, TextRef)
 from controller.fact_reuse import build_reuse_seed, complete_reuse_ranges
 from controller.evidence_planner import (BudgetedEvidencePlanner, SearchProfile, _passages,
-    close_dependencies, render_unit_union, unresolved_needs)
+    best_need_supports, close_dependencies, render_unit_union, unresolved_needs)
 from controller.reading import build_read_plan
 from controller.schema import OnlineMessage, OnlineTurn, QueryContext
 from controller.serialization import to_jsonable
@@ -33,9 +33,11 @@ STUDY_STRATEGIES = ("B0", "Btoken", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "L
 class SupportCoverageUtility:
     """Mean Need coverage from the model-scored single/pair/triple factors."""
     def predict_set(self, state, units, supports):
-        quality = sum(max((s.applicability*s.joint_support for s in supports if s.need_id == need.need_id),
-                          default=0.0) for need in state.needs)/max(1, len(state.needs))
-        return SetPrediction(quality, "answer" if quality >= .8 else "partial")
+        best, _ = best_need_supports(state, units, supports)
+        quality = sum(s.applicability*s.joint_support for s in best)/max(1, len(state.needs))
+        complete = len(best) == len(state.needs) and all(
+            s.disposition == "complete" and s.applicability*s.joint_support > 0 for s in best)
+        return SetPrediction(quality, "answer" if quality >= .8 and complete else "partial")
 
 
 def study_budget(config):
@@ -65,7 +67,10 @@ class StudyEvidenceProvider:
         self.external_dialogue = config.get("execution", {}).get("dialogue_mode") == "llamaindex"
         self.budget = study_budget(config)
         run_config = config.get("generation", {}).get("run_config")
-        self.answer_system_prompt = load_config(run_config).context.system_prompt if run_config else None
+        runtime = load_config(run_config) if run_config else None
+        self.answer_system_prompt = runtime.context.system_prompt if runtime else None
+        plan_gain = config.get("execution", {}).get("plan_gain", runtime.plan_gain if runtime else None)
+        self.whole_plan_candidates = plan_gain is not None and plan_gain["mode"] == "whole_plan"
         self.corpus_snapshot_id = serving.corpus_snapshot_id
         self.traces = {}
         self._lock = threading.Lock()
@@ -91,6 +96,8 @@ class StudyEvidenceProvider:
                 "support_model": getattr(self.support_backend, "manifest", None),
                 "helper_engine_info": self.helper_engine_info,
                 "selection_utility": self._utility_mode(),
+                "evidence_selection_order": "utility_complete_needs_bundle_anchor_reranker_tokens_v1",
+                "material_handoff": "whole_plan_candidates" if self.whole_plan_candidates else "single_material",
                 "rerank_retained_sets": self.config.get("selection", {}).get("rerank_retained_sets", False),
                 "coverage_mode": self.config.get("reading", {}).get("coverage_mode", "selected_sources")}
 
@@ -111,16 +118,20 @@ class StudyEvidenceProvider:
         if self.strategy in {"B2", "B3"} or not self.config.get("selection", {}).get("rerank_retained_sets", False):
             return evidence_sets, 0.0
         started = time.perf_counter()
-        reranked = []
+        reranked, completeness, relevance = [], {}, {}
         for selected in evidence_sets[:3]:
             ids = {unit.unit_id for unit in selected.selected_units}
             available = tuple(score for score in (*scores.singles, *scores.bundles)
                               if set(score.unit_ids) <= ids)
             prediction = support.predict_set(state, selected.selected_units, available)
+            best, relevance[selected.set_id] = best_need_supports(state, selected.selected_units, available)
+            completeness[selected.set_id] = sum(s.disposition == "complete" and s.applicability*s.joint_support > 0
+                                                for s in best)
             reranked.append(replace(selected, quality_prediction=prediction.quality,
                                     disposition=prediction.disposition))
         return tuple(sorted(reranked, key=lambda selected: (
-            -selected.quality_prediction, selected.token_cost, selected.set_id))), (time.perf_counter()-started)*1000
+            -selected.quality_prediction, -completeness[selected.set_id], -relevance[selected.set_id], selected.token_cost,
+            selected.set_id))), (time.perf_counter()-started)*1000
 
     async def retrieve(self, snapshot, query, request_id):
         if self.external_dialogue:
@@ -367,6 +378,9 @@ class StudyEvidenceProvider:
                 search_trace = planner.trace
                 evidence_sets, rerank_ms = self._rerank_sets(active_state, evidence_sets, scores, support_model)
                 search_ms += rerank_ms
+            material_candidates = evidence_sets
+            if not self.whole_plan_candidates:
+                evidence_sets = evidence_sets[:1]
             auxiliary += (("retrieval", pool.retrieval_ms), ("support", support_ms), ("search", search_ms))
             quality_sets = {selected.set_id: selected for selected in evidence_sets}
             plans, initial_outcomes = [], []
@@ -446,6 +460,9 @@ class StudyEvidenceProvider:
                 "support_schedule": to_jsonable(support_model.last_schedule) if support_model else (),
                 "selection_utility": self._utility_mode(),
                 "rerank_retained_sets": selection.get("rerank_retained_sets", False),
+                "material_handoff": {"mode": "whole_plan_candidates" if self.whole_plan_candidates else "single_material",
+                    "candidate_set_ids": [selected.set_id for selected in material_candidates],
+                    "selected_set_ids": [selected.set_id for selected in evidence_sets]},
                 "oversized_support_inputs": to_jsonable(getattr(self.support_backend, "oversized_inputs", ())),
                 "support_model_usage": {name: value-usage_before.get(name, 0)
                     for name, value in getattr(self.support_backend, "usage", {}).items()},

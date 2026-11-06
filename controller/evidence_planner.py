@@ -65,6 +65,30 @@ def unresolved_needs(state: TaskState, evidence_set: EvidenceSet):
                  if support is None or support.disposition != "complete")
 
 
+def best_need_supports(state, units, supports):
+    """Keep support utility and the published reranker's ordering separate.
+
+    All primary members of a complementary bundle must be present. Its best
+    primary anchor defines relevance; a necessary bridge may have low standalone
+    relevance. Closure-only dependencies cannot add relevance. Each Need first
+    maximizes existing support, then its complete contract, then relevance.
+    """
+    by_id = {unit.unit_id: unit for unit in units}
+
+    def relevance(support):
+        return (max(by_id[identity].retrieval_score for identity in support.unit_ids)
+                if support.applicability*support.joint_support > 0 else 0.0)
+
+    best = []
+    for need in state.needs:
+        available = tuple(support for support in supports if support.need_id == need.need_id)
+        if available:
+            best.append(min(available, key=lambda support: (
+                -support.applicability*support.joint_support, support.disposition != "complete",
+                -relevance(support), support.bundle_id)))
+    return tuple(best), sum(relevance(support) for support in best)/max(1, len(state.needs))
+
+
 class BudgetedEvidencePlanner:
     def __init__(self, tokenizer, utility_model, *, profile=SearchProfile(),
                  measure_contexts=None, measure_bodies=None, passage_exclusions=frozenset()):
@@ -86,6 +110,15 @@ class BudgetedEvidencePlanner:
         visited, retained, trace = set(), {}, []
         candidate_cache = {}
         measurement_cache = {}
+        relevance = {}
+
+        def completeness(candidate):
+            return sum(support.disposition == "complete" and support.applicability*support.joint_support > 0
+                       for support in candidate.need_support)
+
+        def order(candidate):
+            return (-candidate.quality_prediction, -completeness(candidate), -relevance[candidate.set_id],
+                    candidate.token_cost, candidate.set_id)
 
         def evaluate(ids, units, closed_ids, measurement_key):
             if closed_ids in candidate_cache:
@@ -94,9 +127,7 @@ class BudgetedEvidencePlanner:
             if body_tokens is None:
                 return None
             available = tuple(s for s in supports if set(s.unit_ids) <= closed_ids)
-            best = tuple(max((s for s in available if s.need_id == need.need_id),
-                            key=lambda s: s.joint_support*s.applicability)
-                         for need in state.needs if any(s.need_id == need.need_id for s in available))
+            best, source_relevance = best_need_supports(state, units, available)
             prediction = self.utility_model.predict_set(state, units, available)
             set_id = json.dumps([state.task_id, sorted(closed_ids)], ensure_ascii=False,
                                 separators=(",", ":"))
@@ -106,6 +137,7 @@ class BudgetedEvidencePlanner:
                 best, prediction.quality, body_tokens, prediction.disposition,
                 source_blocks=blocks)
             candidate_cache[closed_ids] = candidate
+            relevance[set_id] = source_relevance
             return candidate
 
         for depth in range(self.profile.max_actions):
@@ -150,10 +182,13 @@ class BudgetedEvidencePlanner:
                     closed = frozenset(u.unit_id for u in candidate.selected_units)
                     proposals[closed] = candidate
                     retained[closed] = candidate
-            ordered = sorted(proposals.items(), key=lambda item: (
-                -item[1].quality_prediction, item[1].token_cost, item[1].set_id))
+            ordered = sorted(proposals.items(), key=lambda item: order(item[1]))
             trace.append({"depth": depth, "proposed": len(proposals),
-                          "frontier": [c.set_id for _, c in ordered[:self.profile.beam_width]]})
+                          "frontier": [c.set_id for _, c in ordered[:self.profile.beam_width]],
+                          "frontier_complete_needs": [completeness(c)
+                              for _, c in ordered[:self.profile.beam_width]],
+                          "frontier_relevance": [relevance[c.set_id]
+                              for _, c in ordered[:self.profile.beam_width]]})
             frontier = [ids for ids, _ in ordered[:self.profile.beam_width]]
             if not frontier:
                 break
@@ -161,14 +196,18 @@ class BudgetedEvidencePlanner:
             prediction = self.utility_model.predict_set(state, (), ())
             retained[frozenset()] = EvidenceSet(json.dumps([state.task_id, []]), (),
                 quality_prediction=prediction.quality, disposition=prediction.disposition)
-        # Keep the quality/length frontier, then add distinct high quality sets
-        # when dominance leaves fewer than the requested number of candidates.
-        ranked = sorted(retained.values(), key=lambda c: (
-            -c.quality_prediction, c.token_cost, c.set_id))
+            relevance[retained[frozenset()].set_id] = 0.0
+        # Whole-plan controls retain utility/completeness/relevance/length
+        # tradeoffs. Shorter tied support alone cannot dominate a better anchor.
+        ranked = sorted(retained.values(), key=order)
         pareto = [candidate for candidate in ranked if not any(
             other.quality_prediction >= candidate.quality_prediction
+            and completeness(other) >= completeness(candidate)
+            and relevance[other.set_id] >= relevance[candidate.set_id]
             and other.token_cost <= candidate.token_cost
             and (other.quality_prediction > candidate.quality_prediction
+                 or completeness(other) > completeness(candidate)
+                 or relevance[other.set_id] > relevance[candidate.set_id]
                  or other.token_cost < candidate.token_cost) for other in ranked)]
         ordered = pareto + [c for c in ranked if c not in pareto]
         elapsed = (time.perf_counter()-started)*1000

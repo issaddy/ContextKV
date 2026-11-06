@@ -9,6 +9,59 @@ from controller.schema import (SessionSnapshot, TurnRecord)
 from controller.templates import ByteTemplate, verify_evidence_spans
 
 
+def test_support_plateau_keeps_specific_source_and_complete_low_relevance_bridge():
+    from adapters.study_retrieval import SupportCoverageUtility
+    from controller.context_schema import EvidencePool, SupportBundle, SupportScores
+    from controller.evidence_planner import BudgetedEvidencePlanner, SearchProfile, best_need_supports
+
+    # Actual 000026.json error: both sources scored (1,1,complete), but the
+    # shorter generic rule displaced the exact foreign-license exception.
+    question = ("If I have a driver license from another country and I have a NY State learner permit, "
+                "can I drive without a supervising driver?")
+    state = TaskState("dmv", question, needs=(Need("n"),))
+    generic = EvidenceUnit("generic", (), "A learner permit requires a supervising driver.", retrieval_score=4.40625)
+    exact = EvidenceUnit("exact", (), question+" Yes. Your valid foreign driver license allows you to drive "
+        "without a supervising driver, except in a DMV road test area.", retrieval_score=9.625)
+    generic_support = SupportBundle("generic", "n", ("generic",), 1, 1, disposition="complete")
+    exact_support = SupportBundle("exact", "n", ("exact",), 1, 1, disposition="complete")
+    utility = SupportCoverageUtility()
+    planner = BudgetedEvidencePlanner(ByteTemplate().tokenizer, utility,
+        profile=SearchProfile(beam_width=1, max_actions=2),
+        measure_bodies=lambda groups: tuple(sum(len(unit.text) for unit in units) for units in groups))
+    selected = planner.search_sets(state, EvidencePool((generic, exact)),
+        SupportScores((generic_support, exact_support)), ContextBudget())
+    assert selected[0].quality_prediction == 1
+    assert tuple(unit.unit_id for unit in selected[0].selected_units) == ("exact",)
+    assert planner.trace[0]["frontier"] == [selected[0].set_id]
+
+    # A bridge may have little standalone relevance to the original question.
+    # The complete bundle retains it and its dependency; a high-score header
+    # cannot inflate relevance, and the anchor alone is still only partial.
+    header = EvidenceUnit("header", (), "License applicability", retrieval_score=100)
+    bridge = EvidenceUnit("bridge", (), "The foreign license remains valid.",
+        dependencies=("header",), retrieval_score=-7)
+    partial = replace(exact_support, disposition="partial")
+    complete = SupportBundle("complementary", "n", ("exact", "bridge"), 1, 1, disposition="complete")
+    selected = planner.search_sets(state, EvidencePool((generic, exact, bridge, header)),
+        SupportScores((generic_support, partial), (complete,)), ContextBudget())
+    assert selected[0].quality_prediction == 1
+    assert {unit.unit_id for unit in selected[0].selected_units} == {"exact", "bridge", "header"}
+    assert selected[0].need_support == (complete,)
+    assert best_need_supports(state, selected[0].selected_units, (complete,))[1] == 9.625
+
+
+def test_numeric_support_score_does_not_turn_partial_contract_into_answer():
+    from adapters.study_retrieval import SupportCoverageUtility
+    from controller.context_schema import SupportBundle
+
+    state = TaskState("task", "Which rule applies?", needs=(Need("n"),))
+    unit = EvidenceUnit("u", (), "A partial prerequisite.", retrieval_score=10)
+    support = SupportBundle("partial", "n", ("u",), 1, 1, disposition="partial")
+    prediction = SupportCoverageUtility().predict_set(state, (unit,), (support,))
+    assert prediction.quality == 1
+    assert prediction.disposition == "partial"
+
+
 def test_compiler_keeps_source_char_offsets_separate_from_prompt_offsets():
     from controller.context_budget import actual_source_coverage
 

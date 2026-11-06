@@ -33,7 +33,11 @@ Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 导出实际 REA
 
 版本意图只表达用户当前或继承的来源版本／生效日期限制；等待时长与年龄属于待答事实或资格条件。没有这类版本限制时使用 `current` 和空 `time_refs`；目录日期与 `reference_date` 只帮助解析实际日期限制，不能自行产生 `as_of`。`time_refs` 仅引用对应日期或时间短语。
 
-在线检索由 `ServingRetriever.configure_study(interpreter, tokenizer)` 绑定，`retrieve_pool(snapshot, query, request_id)` 返回任务、来源池与检索状态。`Controller.serve_turn(context_plans=...)` 或 `EvidenceSelection.context_plans` 注入计划，`extend_open_needs(plan, open_needs, claims)` 返回带新增原文和阅读单元的 `EvidencePool`。支持评分的查询含每个 Need 的 scope、条件和完整版本意图，区分版本锚点与最终适用版本。先评单段，再按配置评 pair/triple；`selection.utility: support_coverage` 对各 Need 取集合内最大适用性乘联合支持，再求均值。集合搜索展开依赖闭包，每层合批计量正文与实际 REBUILD prompt，随后沿原遍历顺序评效用和选择 beam；批内复用分词，不改变 token 预算、候选或排序。beam、动作与布局候选复用已评分支持，不重复调用教师。
+在线检索由 `ServingRetriever.configure_study(interpreter, tokenizer)` 绑定，`retrieve_pool(snapshot, query, request_id)` 返回任务、来源池与检索状态。`Controller.serve_turn(context_plans=...)` 或 `EvidenceSelection.context_plans` 注入计划，`extend_open_needs(plan, open_needs, claims)` 返回带新增原文和阅读单元的 `EvidencePool`。支持评分的查询含每个 Need 的 scope、条件和完整版本意图，区分版本锚点与最终适用版本。先评单段，再按配置评 pair/triple；`selection.utility: support_coverage` 对各 Need 取集合内最大适用性乘联合支持，再求均值。数值效用保持原值；达到阈值且每个选中的最佳支持 contract 都为 `complete` 时才声明 `answer`，数值满分的 `partial` 仍不完整。
+
+集合搜索展开依赖闭包，每层合批计量正文与实际 REBUILD prompt。每个 Need 在达到最佳支持值的 bundle 中，先保留完整支持，再取主体单元最高的现有 reranker 分作为锚点相关性；互补 bundle 的所有主体及其依赖必须同时入集，不能用高分锚点替代必要的低相关桥接来源。零支持的相关性为零，集合相关性为各 Need 锚点分的均值；依赖和额外背景不加分。beam 与最终返回顺序均为效用、完整 Need 数、相关性、token 成本；Pareto 使用相同四个维度，避免短泛规则凭同一饱和支持分支配更相关的完整来源。这是已有支持和发布版 reranker 的独立排序，不把相关性当作回答质量概率。
+
+初始 A 材料交接在搜索和可选集合评估后、构造阅读计划前完成：固定 B 与 `observed_actions` 只接收语义第一名，避免下游 `fixed_choice` 再按输入长度重选不同材料；observed 的直接 ANSWER 与下一 READ/REDUCE/GAP 均基于这个实际材料状态。只有解析后的 `plan_gain.mode=whole_plan` 保留多个 A 集合供整计划对照。GAP 搜索仍在内部保留候选，先选择包含未读来源的集合，再返回一个选中结果。beam、动作与布局候选复用已评分支持，不重复调用教师。
 
 教师通过 `budget_teacher_input` 先保留当前问题与目录，再按当前任务优先、历史相关性次序选入任务闭包，最后加入其他历史窗口。闭包包含活跃条件及其更新目标、Need 前驱与对应原文；整个 system/user 消息使用实际 tokenizer 统一计量。预算外历史任务不进入输出 schema。rollout 保存实际目录、日期与 scope，标注、训练和评价复用同一观测与目录选择规则。输入不可见的监督不参与拟合，评价保留其分母与不可见原因。
 
