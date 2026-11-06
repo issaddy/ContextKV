@@ -1636,6 +1636,17 @@ diff --git a/python/sglang/srt/managers/scheduler_components/output_streamer.py 
                  if key not in self.customized_info:
                      self.customized_info[key] = [
                          [None] * len(prev_output_ids)
+@@ -605,4 +615,8 @@
+-        for per_request_values in self.customized_info.values():
++        for key, per_request_values in self.customized_info.items():
+             if len(per_request_values) < len(self.output_ids):
+-                per_request_values.append([None] * current_output_len)
++                per_request_values.append(
++                    []
++                    if key in {"contextkv_receipt", "contextkv_timing"}
++                    else [None] * current_output_len
++                )
+
 diff --git a/python/sglang/srt/managers/tokenizer_control_mixin.py b/python/sglang/srt/managers/tokenizer_control_mixin.py
 --- a/python/sglang/srt/managers/tokenizer_control_mixin.py
 +++ b/python/sglang/srt/managers/tokenizer_control_mixin.py

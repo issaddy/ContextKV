@@ -29,7 +29,7 @@ BGE 检索、发布重排器及历史编码器在本环境显式使用 `sdpa_bac
 作者 ContextPilot 准备与启用：
 
 ```bash
-python scripts/prepare_contextpilot.py --checkout vendor/contextpilot
+python3 scripts/prepare_contextpilot.py --checkout vendor/contextpilot
 ```
 
 study 配置的 `execution.cache_compilation` 取 `{mode: contextpilot, checkout: vendor/contextpilot}`；Native 对照取 `{mode: native}`。`prefix_retention` 默认 `{mode: native}`，与编排开关独立。
@@ -58,7 +58,7 @@ P1 支持策略配置为 `configs/evidence_policy_fixed_qwen.yaml`。
 `runs/study/auxiliary/cohorts/full/cohort_manifest.json`。
 task/support 配置必填 `training.cohort_manifest`；P1 采集必填
 `collection.cohort_manifest` 和 `cohort_split`，开发采集显式选择 `dev`。
-B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v4` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上与反事实 READ 共用相关父结论绑定，线上执行一个动作后重新观察。成本资产同时记录 `prefix_control_scope=native_excludes_prefix_control`，价值 C 的首步控制预测另加一次。当前协议的答案与费用在恢复推理后重新采集。
+B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v4` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上与反事实 READ 共用相关父结论绑定，线上执行一个动作后重新观察。成本资产同时记录 `prefix_control_scope=native_excludes_prefix_control`，价值 C 的首步控制预测另加一次。当前协议的监督使用真实 P3 状态重新配对采集。
 
 B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_support_state_v2`，使用实际已付资源和剩余额度；旧特征资产不能直接用于该决策。
 
@@ -88,27 +88,27 @@ manifest 记录。
 机制重放示例（显式指定实际服务配置和新输出目录）：
 
 ```bash
-python -m bench.reading_mechanisms --config ACTUAL-RUN.yaml \
+python3 -m bench.reading_mechanisms --config ACTUAL-RUN.yaml \
   --read-layout source_first --cases pair correction long multihop \
   --output-dir NEW-OUTPUT/shared
-python -m bench.reading_mechanisms --config ACTUAL-RUN.yaml \
+python3 -m bench.reading_mechanisms --config ACTUAL-RUN.yaml \
   --read-layout source_first --numeric-need-isolation --cases long \
   --output-dir NEW-OUTPUT/isolated
 ```
 
 辅助训练配置为 `configs/auxiliary_training.yaml`；BGE 资产按配置复用，标签由以下入口重新准备。
-先准备原始任务，再采集实际生成历史、声明会话隔离的 cohort、生成教师标注配置，最后标注和训练。以下命令供恢复 GPU 工作后执行，当前不运行：
+先准备原始任务，再采集实际生成历史、声明会话隔离的 cohort、生成教师标注配置，最后标注和训练。仅在对应任务或支持瓶颈需要辅助训练时执行：
 
 ```bash
-python -m training.a_workflow prepare-data --config configs/auxiliary_training.yaml \
+python3 -m training.a_workflow prepare-data --config configs/auxiliary_training.yaml \
   --output runs/study/data
-python -m training.task_rollout --config configs/auxiliary_training.yaml \
+python3 -m training.task_rollout --config configs/auxiliary_training.yaml \
   --min-conversations 40 --min-turns 300 --concurrency 4
-python -m training.a_workflow cohort --config configs/auxiliary_training.yaml \
+python3 -m training.a_workflow cohort --config configs/auxiliary_training.yaml \
   --output runs/study/auxiliary/cohorts
-python -m training.a_workflow prepare-labels --config configs/auxiliary_training.yaml \
+python3 -m training.a_workflow prepare-labels --config configs/auxiliary_training.yaml \
   --output runs/study/auxiliary/task-labels
-python -m training.task_labeling --config runs/study/auxiliary/task-labels/task_labeling.yaml
+python3 -m training.task_labeling --config runs/study/auxiliary/task-labels/task_labeling.yaml
 ```
 
 采集量是示例，cohort manifest 记录实际数量与 shortfall，不预先宣称达到 200/40。
@@ -122,10 +122,10 @@ python -m training.task_labeling --config runs/study/auxiliary/task-labels/task_
 运行时以 `CUDA_VISIBLE_DEVICES` 选择物理设备，配置内使用该进程的 `cuda:0`：
 
 ```bash
-python -m training.train_models --config configs/auxiliary_training.yaml --stage task
-python -m training.train_models --config configs/auxiliary_training.yaml --stage task-eval
-python -m training.build_examples --config configs/auxiliary_training.yaml
-python -m training.train_models --config configs/auxiliary_training.yaml --stage support
+python3 -m training.train_models --config configs/auxiliary_training.yaml --stage task
+python3 -m training.train_models --config configs/auxiliary_training.yaml --stage task-eval
+python3 -m training.build_examples --config configs/auxiliary_training.yaml
+python3 -m training.train_models --config configs/auxiliary_training.yaml --stage support
 ```
 
 `build_examples` 使用固定 Qwen 服务生成支持关系标签。P1 采集将
@@ -135,16 +135,16 @@ P1 质量偏好可使用物理成本部分缺失的已评分答案；缺失费�
 
 当前辅助配置将新 support 输出接为 P1 父资产与 P0 对照，将新 task 输出同时接入 P1 奖励采集和比较的查询编码器。初始化真实历史的辅助 rollout 使用显式无查询 adapter 的 BGE 基座；若采用已有资产，修改对应显式路径后重新绑定采集身份。
 
-已有候选答案的纯 CPU 诊断随 `python -m training.train_evidence_policy prepare --config CONFIG.yaml` 写入 `preference_manifest.json.candidate_quality_diagnostics`。该命令只读取已生成答案、评分和成本资产，按真实历史/预算/reader/scorer/query 分组，给出候选质量上限、最高预测并列时的遗憾区间和声明任务缺失列表，不产生模型训练或推理。输入资产不可用时不产生诊断结果。
+已有候选答案的纯 CPU 诊断随 `python3 -m training.train_evidence_policy prepare --config CONFIG.yaml` 写入 `preference_manifest.json.candidate_quality_diagnostics`。该命令只读取已生成答案、评分和成本资产，按真实历史/预算/reader/scorer/query 分组，给出候选质量上限、最高预测并列时的遗憾区间和声明任务缺失列表，不产生模型训练或推理。输入资产不可用时不产生诊断结果。
 
 固定模型协议审计与四格比较示例：
 
 `reader_audit review` 使用 `observed_output_independent_review_v1`，只审核导出 traces 的实际输出；每条只产生审核调用，不重写答案。原始 token 数、输入、来源与阶段归因保留。旧目标生成、旧目标再审计和 `reader_data_only` 采集入口已移除。
 
 ```bash
-python -m training.reader_audit export --config ACTUAL-AUDIT.yaml
-python -m training.reader_audit review --config ACTUAL-AUDIT.yaml
-python -m training.a_workflow compare --comparison-config COMPARISON.yaml \
+python3 -m training.reader_audit export --config ACTUAL-AUDIT.yaml
+python3 -m training.reader_audit review --config ACTUAL-AUDIT.yaml
+python3 -m training.a_workflow compare --comparison-config COMPARISON.yaml \
   --policy-asset CURRENT-P1-ASSET --matrix MATRIX.yaml --dataset DATASET \
   --split dev --phase both --output NEW-OUTPUT/comparison
 ```
@@ -201,14 +201,14 @@ E0_native（原 PR3 task-first/隔离数值）和 `B6_value` / `S3_value` 为显
 使用已有请求轨迹离线导出固定相对到达（不产生模型调用）：
 
 ```sh
-python -m bench.study_workloads --tasks TASKS.jsonl --records RECORDED-REQUESTS.jsonl \
+python3 -m bench.study_workloads --tasks TASKS.jsonl --records RECORDED-REQUESTS.jsonl \
   --output FIXED-ARRIVALS.json --name DECLARED-NAME --concurrency 4
 ```
 
 旧请求记录已丢弃时，直接冻结新声明的共同到达映射，无需模型调用：
 
 ```sh
-python -m bench.study_workloads --tasks TASKS.jsonl --arrivals DECLARED-ARRIVALS.json \
+python3 -m bench.study_workloads --tasks TASKS.jsonl --arrivals DECLARED-ARRIVALS.json \
   --output FIXED-ARRIVALS.json --name DECLARED-NAME --concurrency 4
 ```
 
@@ -218,7 +218,7 @@ python -m bench.study_workloads --tasks TASKS.jsonl --arrivals DECLARED-ARRIVALS
 `--complete-slo-seconds` 设置事先声明的完整响应 SLO，goodput 按达标完整回答/观察秒数计算，无阈值时不生成 SLO 数值。
 
 ```sh
-python -m bench.capacity_workflow --full-queue \
+python3 -m bench.capacity_workflow --full-queue \
   --config "$FROZEN_A_STUDY" --matrix "$JOINT_MATRIX" --arrival-plan "$ARRIVAL_PLAN" \
   --gain-asset "$B_GAIN" --online-gpu-devices "$ONLINE_GPUS" --reader-base-url "$READER_URL" \
   --contextpilot-checkout vendor/contextpilot --concurrency 1 4 --output "$JOINT_OUTPUT"
@@ -230,7 +230,7 @@ python -m bench.capacity_workflow --full-queue \
 固定 B 可独立执行，例如：
 
 ```sh
-python -m bench.capacity_workflow --full-queue --methods B6_native \
+python3 -m bench.capacity_workflow --full-queue --methods B6_native \
   --config "$FROZEN_A_STUDY" --matrix "$JOINT_MATRIX" --arrival-plan "$ARRIVAL_PLAN" \
   --reader-profile-id "$READER_PROFILE" --reader-base-url "$READER_URL" \
   --online-gpu-devices "$ONLINE_GPUS" --concurrency 1 4 --output "$JOINT_OUTPUT"

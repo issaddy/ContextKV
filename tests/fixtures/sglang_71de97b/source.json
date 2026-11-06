@@ -1,0 +1,20 @@
+{
+  "repository": "https://github.com/sgl-project/sglang",
+  "commit": "71de97b264b04dcd514cf904003028aefe9775c8",
+  "license": "engine_patches/SGLANG_LICENSE",
+  "output_streamer": {
+    "path": "python/sglang/srt/managers/scheduler_components/output_streamer.py",
+    "sha256": "4f069fbba82a77360fec29330edf5f6cf3740960984c5e1d01ef4e385c90ecaa"
+  },
+  "tokenizer_metadata": {
+    "path": "python/sglang/srt/managers/tokenizer_manager.py",
+    "source_sha256": "8102242c5094f8d444ac47232d3ae6113a70133a016791d9157864dada2fdad5",
+    "method": "TokenizerManager._handle_batch_output",
+    "lines": [
+      2302,
+      2307
+    ],
+    "fragment_sha256": "e66910bea82b36da4756e471b9bda3be5a467f0fbf13499a18c7bcb0f9bf6411",
+    "extraction": "verbatim if-customized_info AST block; no imports or metadata behavior rewritten"
+  }
+}
