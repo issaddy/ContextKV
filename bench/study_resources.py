@@ -34,7 +34,7 @@ def descendants(process_ids):
 def physical_sample(gpu_devices, process_ids):
     before = time.monotonic()
     output = subprocess.check_output(["nvidia-smi", "--query-gpu=index,uuid,memory.used",
-        "--format=csv,noheader,nounits"], text=True)
+        "--format=csv,noheader,nounits"], text=True, start_new_session=True)
     devices = [{"index": int(row[0]), "uuid": row[1].strip(), "memory_mib": float(row[2])}
                for row in csv.reader(io.StringIO(output)) if int(row[0]) in gpu_devices]
     pss, exited = [], []
