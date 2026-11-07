@@ -733,3 +733,13 @@ class SessionStore:
             if snap.current_epoch:
                 self._enqueue(session_id, snap.current_epoch, "session_closed", snap.version)
             self.db.execute("UPDATE sessions SET closed=1 WHERE session_id=?", (session_id,))
+
+    def reopen_session(self, session_id: str):
+        """Resume a study history under a new attempt identity and engine epoch."""
+        with self._transaction():
+            changed = self.db.execute("UPDATE sessions SET closed=0 WHERE session_id=? AND closed=1",
+                                      (session_id,)).rowcount
+            if changed:
+                snap = self._read(session_id)
+                self._write_snapshot(replace(snap, version=snap.version + 1,
+                    force_new_epoch_for_recovery=True), snap.version)

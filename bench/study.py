@@ -329,9 +329,10 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
 
     async def conversation(sid):
         session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
-        for number, row in sorted(grouped[sid], key=lambda item: item[1]["turn"]):
-            if row["task_id"] in results:
-                continue
+        pending = [(number, row) for number, row in grouped[sid] if row["task_id"] not in results]
+        if pending and request_namespace is not None:
+            service.store.reopen_session(session_id)
+        for number, row in sorted(pending, key=lambda item: item[1]["turn"]):
             snapshot = service.store.read_snapshot(session_id, provider.corpus_snapshot_id)
             workload_arrival = (await dispatcher.wait_turn(row, snapshot.raw_history)
                                 if dispatcher is not None else None)
@@ -476,6 +477,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 if reuse_provider:
                     failure_key = digest(failure["conversation_id"])[:20]
                     write_json(directory/"terminal_read_failures"/(failure_key+".json"), failure)
+            write_json(segment/"failed_conversations.json", [failures[sid] for _, sid in failure_windows])
             write_json(directory/"failed_conversations.json", list(failures.values()))
         if dispatcher is not None:
             write_json(directory/"workload_dispatch.json", dict(origin=dispatcher.origin,
