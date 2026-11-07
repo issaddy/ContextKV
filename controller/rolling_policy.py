@@ -226,9 +226,9 @@ class RollingPlanRuntime:
             state.plan, state.results, tuple(units[identity] for identity in state.plan.coverage_units)))
 
     def _gap_request(self, state, expanded, provider):
-        from .action_proposals import GapRetrievalRequest, gap_key, gap_query
-        if (provider is None or state.plan.coverage_scope == "all_supplied_documents"
-                or self.gap_retriever_identity is None or self.gap_limits is None):
+        from .action_proposals import GapRetrievalRequest, gap_key, gap_query, gap_scope_available
+        if (provider is None or self.gap_retriever_identity is None or self.gap_limits is None
+                or not gap_scope_available(state)):
             return None
         needs = tuple(need for need in state.open_needs if gap_key(need) not in expanded)
         return (GapRetrievalRequest(needs, gap_query(state.plan.task_state, needs),

@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from bench.study_resources import integrate_physical
-from controller.action_proposals import build_observed_action_plans, gap_key, gap_query, GapRetrievalRequest
+from controller.action_proposals import build_observed_action_plans, gap_key, gap_query, gap_scope_available, GapRetrievalRequest
 from controller.context_budget import completed_source_coverage
 from controller.context_schema import ReadingOutcome, ReadResult, ReadTask, StepRecord
 from controller.plan_gain_protocol import validate_input_protocol
@@ -121,7 +121,7 @@ def terminal_observation(before, run, source_task, answer_event, online, templat
                  "resident_model_manifest_digest": resident_digest}
     gaps = tuple(need for need in state.open_needs if gap_key(need) not in expanded)
     gap_request = (GapRetrievalRequest(gaps, gap_query(state.plan.task_state, gaps), retriever,
-        run["continuation_gap_limits"]) if gaps and state.plan.coverage_scope != "all_supplied_documents" else None)
+        run["continuation_gap_limits"]) if gaps and gap_scope_available(state) else None)
     domain = observed.get("action_domain")
     plans, _ = build_observed_action_plans(state, snapshot, template,
         reader_checkpoint=run["reader_checkpoint"], gap_request=gap_request,

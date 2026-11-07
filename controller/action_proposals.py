@@ -76,6 +76,22 @@ def gap_query(state, open_needs):
     return "\n\n".join(SourceDirectory.open_need_query(state, need) for need in open_needs)
 
 
+def gap_scope_available(state):
+    """A directed search can add material only outside completed source intervals."""
+    from .context_budget import _covers, completed_source_ranges
+
+    plan = state.plan
+    if plan.coverage_scope == "all_supplied_documents":
+        return False
+    scope = plan.task_state.effective_source_scope
+    if scope is None:
+        return True
+    blocks = {block.key: block for block in plan.selected_set.source_blocks}
+    ranges = completed_source_ranges(plan, state.results)
+    return any(key not in blocks or not _covers(blocks[key].span or (0, len(blocks[key].text)), ranges.get(key, ()))
+               for key in scope)
+
+
 def claim_predecessor_steps(results, claim_ids):
     """Resolve current producers from results, including logical reuse steps."""
     producers = {claim.claim_id: result.step_id for result in results for claim in result.claims}
@@ -208,7 +224,7 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
                 frozen.results, snapshot, template)
             reduction, _ = pending
         add("reduce_once", (reduction,))
-    if gap_request is not None:
+    if gap_request is not None and gap_scope_available(frozen):
         if not gap_request.open_needs or not set(gap_request.open_needs) <= set(frozen.open_needs):
             raise ValueError("registered GAP relations must belong to the frozen observed state")
         if gap_request.query != gap_query(base.task_state, gap_request.open_needs):
@@ -232,8 +248,10 @@ BOUNDED_CONTINUATION = "infer_bridge_ready_or_one_gap_one_terminal_read_v4"
 
 def continuation_gap(state, *, used_gap):
     """Only an observed infer relation can justify the one continuation GAP."""
+    if used_gap or not gap_scope_available(state):
+        return ()
     infer = {need.need_id for need in state.plan.task_state.needs if need.operation == "infer"}
-    return () if used_gap else tuple(need for need in state.open_needs if need.need_id in infer)
+    return tuple(need for need in state.open_needs if need.need_id in infer)
 
 
 def validate_action_counts(kind, counts, *, complete=True):

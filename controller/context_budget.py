@@ -287,14 +287,20 @@ def actual_source_coverage(candidate, required):
     return all(_covers((span.start, span.end), ranges.get(span.source_key, ())) for span in required_spans)
 
 
-def completed_source_coverage(plan, results, required):
-    """Check completed extraction intervals independently of unit aliases."""
+def completed_source_ranges(plan, results):
+    """Project completed extraction onto original source intervals."""
     units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
     ranges = {}
     for result in results:
         for identity in result.covered_units:
             for span in units[identity].source_spans:
                 ranges.setdefault(span.source_key, []).append((span.start, span.end))
+    return ranges
+
+
+def completed_source_coverage(plan, results, required):
+    """Check completed extraction intervals independently of unit aliases."""
+    ranges = completed_source_ranges(plan, results)
     return all(_covers((span.start, span.end), ranges.get(span.source_key, ()))
                for unit in required for span in unit.source_spans)
 
