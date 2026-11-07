@@ -227,25 +227,28 @@ def test_enumeration_and_group_roots_retain_values_in_final_answer_window(tmp_pa
     from controller.candidates import build_plan_candidates
     from controller.schema import SessionSnapshot
 
+    paper_role = "Alpha has the role Archivist for paper records."
+    digital_role = "Alpha has the role Archivist for digital records."
     materialized = [material(text+" Background notes."*15, name) for name, text in (
-        ("a", "Alpha has the role Archivist."),
+        ("a", f"{paper_role} {digital_role}"),
         ("b", "Alpha was founded in 1997."),
         ("c", "Beta has the role Curator."))]
     blocks, units = zip(*materialized)
     claims = tuple(EvidenceClaim(f"read:0:claim:{index}", "n", "extract", text=text,
         value=value, source_spans=units[source].source_spans, entity=entity, relation=relation)
         for index, (entity, relation, value, text, source) in enumerate((
-            ("Alpha", "role", "Archivist", "Alpha has the role Archivist.", 0),
+            ("Alpha", "role", "Archivist", paper_role, 0),
             ("Alpha", "founded", "1997", "Alpha was founded in 1997.", 1),
             ("Beta", "role", "Curator", "Beta has the role Curator.", 2),
-            ("Alpha", "role", "Archivist", "The role of Alpha is Archivist.", 0))))
+            ("Alpha", "role", "Archivist", digital_role, 0),
+            ("Alpha", "role", "Archivist", paper_role, 0))))
     reduced = reduce_claims(operation, claims, claim_id="reduce:n:1:claim:0", need_id="n")
     if operation == "union":
-        assert len(reduced.value) == 3
+        assert len(reduced.value) == 4
     else:
         alpha = next(group for group in reduced.value if group["entity"] == "Alpha")
-        assert {fact["relation"] for fact in alpha["facts"]} == {"role", "founded"}
-    assert len(reduced.parent_claim_ids) == 4
+        assert sorted(fact["relation"] for fact in alpha["facts"]) == ["founded", "role", "role"]
+    assert len(reduced.parent_claim_ids) == 5
     state = TaskState("t", "List all roles and founding years.",
                       needs=(Need("n", operation="enumerate"),))
     selected = EvidenceSet("s", units, source_blocks=blocks)
@@ -265,6 +268,7 @@ def test_enumeration_and_group_roots_retain_values_in_final_answer_window(tmp_pa
             blocks, candidate.reference_map) == candidate.required_blocks
         prompt = candidate.messages[-1].content
         assert all(value in prompt for value in ("Archivist", "1997", "Curator"))
+        assert all(prompt.count(json.dumps(text)) == 1 for text in (paper_role, digital_role))
         assert "read:0:claim:" not in prompt
 
 

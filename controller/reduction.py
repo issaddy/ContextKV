@@ -74,8 +74,7 @@ def reduce_claims(operation, claims, *, claim_id, need_id):
                 record = {"entity": claim.entity, "relation": claim.relation,
                     "value": claim.value, "unit": claim.unit, "text": claim.text,
                     "conditions": claim.conditions, "version": claim.version}
-                identity = {key: item for key, item in record.items() if key != "text"}
-                unique.setdefault(json.dumps(identity, sort_keys=True, ensure_ascii=False), record)
+                unique.setdefault(json.dumps(record, sort_keys=True, ensure_ascii=False), record)
             return tuple(unique.values())
         if operation == "union":
             value = [fact for group in groups for fact in facts(group)]
