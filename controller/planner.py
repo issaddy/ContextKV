@@ -15,7 +15,6 @@ COST_SELECTION_REASONS = frozenset({"cost_saving", "expected_cost", "native_kv_t
 class PlannerKnobs:
     strategy: str = "cost"
     fixed_token_threshold: int = 8192
-    fallback_strategy: str = "fixed_threshold"
     concurrency: int = 1
     period: int = 4
     warm_ratio: float = .5
@@ -27,8 +26,8 @@ class PlannerKnobs:
 
     def __post_init__(self) -> None:
         supported = {"cost", "always_append", "always_rebuild", "fixed_threshold", "stable_layout", "normal_rag", "fixed_period", "warm_idle", "contextpilot", "redundancy_threshold"}
-        if self.strategy not in supported or self.fallback_strategy not in supported - {"cost", "warm_idle"}:
-            raise ValueError("unknown planner strategy or recursive fallback")
+        if self.strategy not in supported:
+            raise ValueError("unknown planner strategy")
         if self.fixed_token_threshold < 0:
             raise ValueError("planner thresholds must be nonnegative")
         if self.period < 1 or not 0 <= self.warm_ratio <= 1:
@@ -141,12 +140,12 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
                       control_ms=(control_ms[c.candidate_id] if c.candidate_id in control_ms else
                                   control_ms[c.action]) if isinstance(control_ms, Mapping) else control_ms,
                       queue_ms=queue_ms) for c in valid)
-    if not all(e.calibrated if e.selection_eligible is None else e.selection_eligible for e in estimates):
-        return Plan(fixed_choice(knobs.fallback_strategy),
-                    predicted=estimates, quote_seq=quotes.observed_seq,
-                    reason="uncalibrated_cost_fallback")
+    costed = [candidate for candidate, estimate in zip(valid, estimates, strict=True)
+              if (estimate.calibrated if estimate.selection_eligible is None else estimate.selection_eligible)]
+    if not costed:
+        return NoFeasiblePlan("uncalibrated_cost")
     by_estimate = {e.candidate_id:e for e in estimates}
-    eligible = [c for c in valid if knobs.max_complete_ms is None or
+    eligible = [c for c in costed if knobs.max_complete_ms is None or
                 by_estimate[c.candidate_id].cost <= knobs.max_complete_ms]
     if not eligible:
         return NoFeasiblePlan("complete_latency_budget")
@@ -164,10 +163,10 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
         append = next(c for c in tied if c.action == "APPEND")
         rebuild = next(c for c in tied if c.action == "REBUILD")
         chosen, reason = _resource_tie_break(append, rebuild, quotes, by_id, by_estimate)
-    saving = max(e.cost for e in estimates) - by_estimate[chosen.candidate_id].cost
-    if len(valid) == 2 and {c.action for c in valid} == {"APPEND", "REBUILD"}:
-        saving = (next(by_estimate[c.candidate_id].cost for c in valid if c.action == "APPEND")
-                  - next(by_estimate[c.candidate_id].cost for c in valid if c.action == "REBUILD"))
+    saving = max(by_estimate[c.candidate_id].cost for c in costed) - by_estimate[chosen.candidate_id].cost
+    if len(costed) == 2 and {c.action for c in costed} == {"APPEND", "REBUILD"}:
+        saving = (next(by_estimate[c.candidate_id].cost for c in costed if c.action == "APPEND")
+                  - next(by_estimate[c.candidate_id].cost for c in costed if c.action == "REBUILD"))
     return Plan(chosen, predicted=estimates, quote_seq=quotes.observed_seq,
                 reason=reason,
                 predicted_saving_ms=saving)

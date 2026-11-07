@@ -113,7 +113,6 @@ class RunConfig:
     cost_model: CostSettings = field(default_factory=CostSettings)
     state_dir: str = "runs/local"
     calibration_path: str | None = None
-    shadow: bool = False
     sampling: SamplingRecipe | None = None
     prefix_retention: dict = field(default_factory=lambda: {"mode": "native"})
     cache_compilation: dict = field(default_factory=lambda: {"mode": "native"})
@@ -129,7 +128,7 @@ class RunConfig:
             raise ValueError("dialogue_history_tokens must be positive")
         if self.dialogue_mode == "llamaindex" and (self.plan_gain is not None
                 or self.cache_compilation["mode"] != "native"
-                or self.prefix_retention["mode"] != "native" or self.shadow
+                or self.prefix_retention["mode"] != "native"
                 or self.state_observation is not None):
             raise ValueError("LlamaIndex reference requires native execution without ContextKV policies")
         if self.engine.kind not in ("mock", "sglang"):
@@ -152,8 +151,8 @@ class RunConfig:
                 self.ablation.decode_cost, self.ablation.control_cost)):
             raise ValueError("cost-term ablations require frozen calibration; total residuals would restore excluded costs")
         if self.plan_gain is not None:
-            if self.plan_gain["mode"] not in {"whole_plan", "observed_actions"} or self.shadow:
-                raise ValueError("plan_gain enables reader-bound rolling execution without shadow fallback")
+            if self.plan_gain["mode"] not in {"whole_plan", "observed_actions"}:
+                raise ValueError("plan_gain.mode must be whole_plan or observed_actions")
             required = ("gain_asset", "reader_checkpoint", "reader_profile_id")
             if self.plan_gain["mode"] != "observed_actions":
                 required += ("execution_profile_asset",)
@@ -302,7 +301,7 @@ def create_controller(config: RunConfig) -> Controller:
         from adapters.contextpilot import SourceOrderIndex
         index = SourceOrderIndex(config.cache_compilation["checkout"])
     return Controller(store, engine, template=template, request_compiler=RequestCompiler(template, index),
-                      policy=config.context, knobs=config.planner, cost_model=model, shadow=config.shadow,
+                      policy=config.context, knobs=config.planner, cost_model=model,
                       epoch_retirement=config.ablation.epoch_retirement,
                       online_calibration=config.cost_model.online_calibration,
                       prefix_settings=config.prefix_retention,

@@ -57,7 +57,7 @@ uv run --extra tokenizer --extra retrieval --extra query-adapter contextkv \
 
 `--evidence-corpus`读取原文、来源、版本及条件/表头依赖的JSONL；`--corpus-id`是证据命名空间，默认`mtrag`，自有文档填写自己的命名空间。来源字段按`source_uri → source → url`读取，标题支持metadata。MTRAG已有索引配合`--evidence-corpus data/mtrag-official/cloud.jsonl`可补齐原始文档地址，正文、排名和向量保持不变。corpus snapshot来自已加载retriever的manifest；元数据按检索正文精确匹配，依赖保留原文并单独记录。
 
-索引构建接受BEIR `_id`和元数据语料的`passage_id`；同一`document_id`下的片段保持独立，`source_uri`可来自顶层或metadata。缺少地址时，证据URI使用`corpus_id`命名空间。旧版本若将自有语料来源写成`mtrag://…`，需设置正确source并使用新会话/新state；已有archive保持原样，同key来源变更会报冲突。
+索引构建接受BEIR `_id`和元数据语料的`passage_id`；同一`document_id`下的片段保持独立，`source_uri`可来自顶层或metadata。缺少地址时，证据URI使用`corpus_id`命名空间。
 
 ## 请求、结果与来源
 

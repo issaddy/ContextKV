@@ -131,8 +131,7 @@ def freeze_cases(database, manifest, split, template, *, limit=None, selection="
             candidates = build_candidates(snapshot, attempt.query, attempt.evidence, policy, template,
                                           retrieval_priority=attempt.retrieval_priority,
                                           query_context=attempt.query_context,
-                                          measure_evidence_redundancy="redundancy_threshold" in {
-                                              planner.strategy, planner.fallback_strategy})
+                                          measure_evidence_redundancy=planner.strategy == "redundancy_threshold")
             original = next((c for c in candidates if c.action == attempt.plan.candidate.action), None)
             if original is None or original.input_hash != attempt.plan.candidate.input_hash:
                 skipped.append({"attempt_id": attempt.attempt_id, "reason": "source_candidate_changed"})

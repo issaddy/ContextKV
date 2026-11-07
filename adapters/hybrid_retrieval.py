@@ -916,13 +916,13 @@ class HybridRetriever:
                     view = {"mode": self.query_mode, "text": query}
                 self.requests += 1
             if semantic_selection:
-                contexts, view, semantic_trace = self.evidence_selector.select(turn, prior_context, catalog, contexts,
+                contexts, view, semantic_trace = self.evidence_selector.select(turn, prior_context, catalog,
                     required_context=required_context, source_record=self.selection_record)
                 intent = decode(QueryContext, view["context"]) if view.get("context") is not None else None
                 conversational = intent is not None and intent.relation == "conversational"
                 if conversational:
                     contexts, supporting_contexts = (), ()
-                elif semantic_trace["status"] == "selected":
+                else:
                     selected_ids = {c.document_id for c in contexts}
                     supporting_contexts = tuple({s.document_id: s for c in contexts
                         for s in required_context.get(c.document_id, ()) if s.document_id not in selected_ids}.values())

@@ -41,7 +41,7 @@ python -m bench.retrieval_eval build \
 
 作者提供`doc_html_ts`时，同次导入将列表嵌套和`text_id`对应的原文坐标写入`metadata.source_lists`。JSONL的`text`仍是原始切片，已有BM25/BGE索引可直接复用。默认直接使用原文；显式设置`metadata.source_list_reading: true`时，`CorpusIndex`加载阶段插入作者的`ul/ol/li`结构，联合选材与生成使用同一阅读正文。列表中的“或”、前提和例外原话均保留，不自动推断逻辑标签。跨章节列表只保留本段完整的嵌套列表，不合并整篇文档或丢弃原话。
 
-这一处理采用[Docling结构化序列化](https://docling-project.github.io/docling/concepts/chunking/)的原则，直接利用现成HTML及坐标，不引入OCR、额外模型或转换依赖。格式化正文参与既有证据身份和实际token计量；引用和缓存不会误用旧的展平正文。质量导出以当前可引用的实际阅读材料为准，另存原始检索结果。公开输入配对诊断未显示HTML标记的净收益，因此结构数据的保留与是否注入模型分开处理，结果见[统一评价](../data_and_evaluation.md)。
+这一处理采用[Docling结构化序列化](https://docling-project.github.io/docling/concepts/chunking/)的原则，直接利用现成HTML及坐标，不引入OCR、额外模型或转换依赖。格式化正文参与既有证据身份和实际token计量。质量导出以当前可引用的实际阅读材料为准，另存原始检索结果。公开输入配对诊断未显示HTML标记的净收益，因此结构数据的保留与是否注入模型分开处理，结果见[统一评价](../data_and_evaluation.md)。
 
 为这一语料生成推荐的实际历史检索配置，以及既有比较配置：
 

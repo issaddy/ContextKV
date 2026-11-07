@@ -1,27 +1,13 @@
 # 当前课题运行入口
 
-`test-0523` 使用容器默认 `python3`，Qwen3-32B 权重固定。统一业务链已接通资料登记、跨轮事实复用、预算化阅读、Native 报价、执行及缓存反馈。本轮已完成依赖、分包、停止决策和恢复接线修正；后续更新受影响监督并完成完整队列实测。
-
-原协议运行位于 `runs/study-20261106-resume/final-joint-6888cf8-001`，使用 350 题／77 会话和共同到达序列。固定 B 的 c1/c4 使用 GPU 0/1、3/5；收益 B 使用 4/6、2/7，每组一张 reader 卡和一张 helper＋BGE 卡。四组已收尾，协调器和评价进程退出，原生请求清空；整段物理窗口和收尾费用按并集计量，四组覆盖均完整，见 `engineering-stop-summary.json`。计划、答案和费用保留，模型及大日志留在容器。这批记录只解释原实现，不与新协议结果混成正式四格。
-
-固定 B＋Native 的 MultiDoc2Dial 已交付并评分 209/209：c1 RB_llm 为 0.799522，c4 为 0.774641，见该目录的 `fixed-native-multidoc-scores.json`。完整 350 题质量与 P95 目标尚未验收。
-
-B 的小批资产摘要在 `b-ranked-gap-native-4t3/summary.json`：24 个训练配对、20 个状态，覆盖 READ/REDUCE/GAP；开发 10 个配对、8 个状态，质量 MAE 为 0.287940。非负工作量成本头修复了空闲容量导致预测截零的问题，24/10 标签和质量权重未改。新的 READ 分包身份已加入监督协议，下一批仅重做实际输入或动作改变的监督，不把旧资产标成新协议。
-
-工程修复依据：`work-cost/reuse-completion-replay.json` 保存 23 个真实状态、53 个候选的逻辑复用修复回放；`engineering-closure-read-packing.json` 保存 8 个截断包与 40 个已完成请求的 CPU 分包检查。原失败和全部已付调用保留。初次成本诊断中断的物理尾段缺失明确记录在 `cost-extrapolation-summary.json`；随后收尾费用以原窗口和 shutdown 窗口并集计量。
-
-READ/统计与缓存机制已有局部实测：共享长文得到 count=36、sum=666 kg，多跳得到 1997；固定输入 Host 配对中 Native 回载128、重算129 tokens，独立保留回载256、重算1 token。这些结果不代表完整队列收益；主矩阵保留策略仍为 Native，C 的主变量是请求编译。
-
-`bench.official generation-http` 的 RB_llm 默认以两路调用作者函数，相同提示留在同一分片并共用原 SQLite 缓存，结果按原题目顺序合并。`--rb-llm-workers 1` 使用串行；实际分片数见 `rb_llm.execution.json`。已有209题缓存核对串并结果和顺序完全一致，新增模型调用为0；IDK、RAGAS 和全分母评分规则不变。
+统一业务链为 `DocumentQA.ask → StudyEvidenceProvider → Controller → RequestCompiler/ReadingExecutor → SessionStore`。固定 Qwen3-32B 权重，使用容器默认 `python3`。API 的 `/documents` 登记资料，`/sessions/{id}/query` 引用资料集，`bench.study` 重放同一业务链。
 
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 
-后续运行使用容器默认 `python3`，不再新建虚拟环境；此前批次保留其真实解释器记录。跨机器仅同步代码、配置和轻量结果／成本记录，训练模型及大日志留在实验容器。
+跨机器同步代码、配置和轻量结果／成本记录；训练模型及完整日志保存在实验容器。
 
 运行冻结同一 Qwen3-32B 模型权重与解码参数，显式配置端点、协议身份与原生缓存。主机目录、GPU、服务端口和
-输出目录由本次运行配置声明；不复用旧批次的固定路径或截止时间。
-
-本轮运行链：`DocumentQA.ask → StudyEvidenceProvider → Controller → RequestCompiler/ReadingExecutor → SessionStore`。API 的 `/documents` 登记资料，`/sessions/{id}/query` 用 `document_set_id` 引用；`bench.study` 共用 ask。新资料的编码和排序在实际检索阶段计费。
+输出目录由本次运行配置声明。
 
 引擎准备复用容器当前 Python/CUDA，不安装或替换 PyTorch：
 
@@ -64,7 +50,7 @@ LlamaIndex 复用统一引擎、来源投影和成本账本。恢复按原 SQLit
 
 配置入口为 `configs/study.yaml`、`study_matrix.yaml`、`evidence_policy_comparison.yaml`；
 P1 支持策略配置为 `configs/evidence_policy_fixed_qwen.yaml`。
-`bench.study prepare` 的公开 VersionQA 资产从 `assets.versionqa.source/questions` 指定的原文和 CSV 构建，复用 `bench.versionqa` 与 BM25/BGE 索引入口，不再引用历史运行目录；其公开测试题与构造机制开发题分别登记。
+`bench.study prepare` 的公开 VersionQA 资产从 `assets.versionqa.source/questions` 指定的原文和 CSV 构建，复用 `bench.versionqa` 与 BM25/BGE 索引入口；其公开测试题与构造机制开发题分别登记。
 审计配置为 `configs/reader_audit.yaml` 的 `reader_audit:{base_scope,data,review,resource_sample_seconds}`。
 会话队列使用 `evidence_cohort`；P1 支持策略直接绑定固定生成配置。
 辅助学习配置中的 200 train / 40 dev 规模使用
@@ -73,16 +59,16 @@ task/support 配置必填 `training.cohort_manifest`；P1 采集必填
 `collection.cohort_manifest` 和 `cohort_split`，开发采集显式选择 `dev`。
 B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v4` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上与反事实 READ 共用相关父结论绑定，线上执行一个动作后重新观察。成本资产同时记录 `prefix_control_scope=native_excludes_prefix_control`，价值 C 的首步控制预测另加一次。当前协议的监督使用真实 P3 状态重新配对采集。
 
-B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_support_state_v2`，使用实际已付资源和剩余额度；旧特征资产不能直接用于该决策。
+B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_support_state_v2`，使用实际已付资源和剩余额度。
 
-当前 B 资产还必须携带 `input_protocol`：`merged_source_windows_actual_coverage_reused_facts_compiled_choice`、`read_output_reservation`、实际窗口粒度和 reader fingerprint。采集、分支、配对及加载全链核对该身份；旧资产缺少绑定时须按当前协议重采/重拟合，不改名复用。实际 seed、已读覆盖、编译选中排列及报价的 `pre_action_input` 一并保留；事实复用消融仍使用相同 B 模型，实际状态反映关闭复用。
+当前 B 资产还必须携带 `input_protocol`：`merged_source_windows_actual_coverage_reused_facts_compiled_choice`、`read_output_reservation`、实际窗口粒度和 reader fingerprint。采集、分支、配对及加载全链核对该身份。实际 seed、已读覆盖、编译选中排列及报价的 `pre_action_input` 一并保留；事实复用消融仍使用相同 B 模型，实际状态反映关闭复用。
 
-动作收益资产的 `evidence_selection_contract` 来自实际 A manifest，绑定选材模式和顺序，以及 `support` 使用的效用、保留集合重排和支持模型记录身份。观测包和实际分支使用同一合同，开发集及线上提供器须与拟合资产匹配。语料、索引、B6/B7 和服务地址独立记录。只缺该合同的旧资产可用保留了实际分支 manifest 的配对记录重新拟合，旧观测包可从原 capture 重新导出。
+动作收益资产的 `evidence_selection_contract` 来自实际 A manifest，绑定选材模式和顺序，以及 `support` 使用的效用、保留集合重排和支持模型记录身份。观测包和实际分支使用同一合同，开发集及线上提供器须与拟合资产匹配。语料、索引、B6/B7 和服务地址独立记录。
 
 GAP 离线与线上只排除实际已读来源，统一新增 passage 额度；采集和拟合必须绑定相同协议。
 
 B 固定流程观测使用 `execution.state_observation`，从真实请求开始计量并记录 READ/REDUCE 决策状态；
-不加载 gain 模型，不从旧 SQLite 补造物理状态。A 冻结后显式启用。
+A 冻结后启用实际状态观测。
 四格固定历史入口设置 `policy_comparison.audited_history:{cohort_manifest,cohort_split,actual_rollouts}`，
 各规划器对同一审核任务与真实 QA 执行自己的检索。P1 source-first 格可同时写 B 观测；原候选池重放入口另留作隔离对照。
 `training.collect_plan_gains --observations OBS --actual-turns TURNS --output PACKETS`
@@ -96,13 +82,12 @@ B 固定流程观测使用 `execution.state_observation`，从真实请求开始
 `observed_actions` 沿用源动作的输出份额，不扫描 `read-outputs`；有效观测数单独记录，声明分母来自所用 cohort。历史轮次不计作独立训练/开发状态。
 新成本拟合读取各分支 `run.json.pre_action_quote`，质量与成本分别归一化；`cold` 数据只能说明冷启动费用，`observed` 保留实际分支起点，不声称恢复源缓存。
 B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
-`--cohort-manifest` 指向同一文件；不再使用 `--partition-seed` 或 `--dev-fraction`
-重新划分状态，实际采集数量从声明分区内选择并单独记录。
+`--cohort-manifest` 指向同一会话划分，实际采集数量从声明分区内选择并单独记录。
 `plan_gain_workflow` 可将 `--train-states` 或 `--dev-states` 设为 0，只补所需分区；无有效训练标签时保留采集结果并跳过拟合，开发标签可随后独立补采。
 模型 scope 位于 `configs/model_scopes/`。Reader、策略身份、来源与费用由本次阶段
 manifest 记录。
 
-B 收益的唯一默认质量目标为固定官方 RB_llm，使用与最终评价相同的真实对话和实际证据投影。`--official-checkout` 可指定已有官方源码目录，默认沿 study 的 `scoring.official_checkout`。`plan_gain_quality` 保存作者已归一化的 RB 值；不把它当作必要点覆盖率。P1 的 `necessary_points_grounding_conditions_versions_task_v3` 保留为独立四项诊断，旧 B 自定义四分结果仅作历史记录。
+B 收益的唯一默认质量目标为固定官方 RB_llm，使用与最终评价相同的真实对话和实际证据投影。`--official-checkout` 可指定已有官方源码目录，默认沿 study 的 `scoring.official_checkout`。`plan_gain_quality` 保存作者已归一化的 RB 值；不把它当作必要点覆盖率。P1 的 `necessary_points_grounding_conditions_versions_task_v3` 保留为独立四项诊断。
 
 重评产生新标签和实际 scorer 身份，保留原 `before.json`、原始回答与执行成本，不回写原执行登记。实际观察到的评分条件误判随原文审计保留；不能据一次 judge 的分差声称正确性改进。
 
@@ -163,7 +148,7 @@ P1 质量偏好可使用物理成本部分缺失的已评分答案；缺失费�
 
 固定模型协议审计与四格比较示例：
 
-`reader_audit review` 使用 `observed_output_independent_review_v1`，只审核导出 traces 的实际输出；每条只产生审核调用，不重写答案。原始 token 数、输入、来源与阶段归因保留。旧目标生成、旧目标再审计和 `reader_data_only` 采集入口已移除。
+`reader_audit review` 使用 `observed_output_independent_review_v1`，只审核导出 traces 的实际输出；每条只产生审核调用，不重写答案。原始 token 数、输入、来源与阶段归因保留。
 
 ```bash
 python3 -m training.reader_audit export --config ACTUAL-AUDIT.yaml
@@ -229,7 +214,7 @@ python3 -m bench.study_workloads --tasks TASKS.jsonl --records RECORDED-REQUESTS
   --output FIXED-ARRIVALS.json --name DECLARED-NAME --concurrency 4
 ```
 
-旧请求记录已丢弃时，直接冻结新声明的共同到达映射，无需模型调用：
+生成声明队列的共同到达映射：
 
 ```sh
 python3 -m bench.study_workloads --tasks TASKS.jsonl --arrivals DECLARED-ARRIVALS.json \

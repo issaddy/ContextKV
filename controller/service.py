@@ -100,7 +100,7 @@ class Controller:
     def __init__(self, store: SessionStore, engine: Engine, *, template=None,
                  policy: CandidatePolicy | None = None, knobs: PlannerKnobs | None = None,
                  cost_model: CostModel | None = None, events: EventLog | None = None,
-                 shadow: bool = False, epoch_retirement: bool = True,
+                 epoch_retirement: bool = True,
                  online_calibration: bool = False, extend_open_needs=None, prefix_settings=None,
                  rolling_policy=None, state_observer=None, request_compiler=None,
                  dialogue_mode="contextkv", dialogue_history_tokens=8192):
@@ -114,7 +114,6 @@ class Controller:
         self.cost_model = cost_model or CostModel(max_new_tokens=self.policy.max_new_tokens)
         self.events = events or EventLog()
         self._retire_lock = asyncio.Lock()
-        self.shadow = shadow
         self.epoch_retirement = epoch_retirement
         self.online_calibration = online_calibration
         self.extend_open_needs = extend_open_needs
@@ -635,7 +634,7 @@ class Controller:
                         initial_outcomes=initial_outcomes, request_compiler=self.request_compiler)
                     self.events.emit("reading_plan_cost_quotes", attempt_id=attempt.attempt_id,
                                      trace=read_cost_trace)
-                measure_redundancy = "redundancy_threshold" in {self.knobs.strategy, self.knobs.fallback_strategy}
+                measure_redundancy = self.knobs.strategy == "redundancy_threshold"
                 def compile_candidates(snapshot, plans, outcome=None):
                     if plans:
                         return tuple(candidate for context_plan in plans for candidate in
@@ -718,11 +717,6 @@ class Controller:
                                    concurrency=pressure, control_ms=planning_control_ms))
                 if isinstance(plan, NoFeasiblePlan):
                     raise ContextOverflow(plan.reason)
-                if self.shadow and rolling_result is None:
-                    self.events.emit("shadow_plan", business_session_id=session_id, attempt_id=attempt.attempt_id, plan=plan)
-                    plan = choose_plan(candidates, quotes, self.cost_model, planning_snap,
-                                       replace(self.knobs, strategy=self.knobs.fallback_strategy),
-                                       concurrency=pressure, control_ms=planning_control_ms)
                 selected_context_plan = None
                 if context_plans:
                     from .execution import ReadingExecutor, merge_auxiliary_usage, require_online_tokens

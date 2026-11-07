@@ -15,7 +15,6 @@ context:
   max_new_tokens: 1024
 planner:
   strategy: always_rebuild
-shadow: false
 state_dir: runs/qwen3-32b-scope
 sampling:
   temperature: 0.7
