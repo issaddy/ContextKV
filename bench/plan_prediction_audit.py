@@ -170,13 +170,11 @@ def observed_remaining(row, event, attempt, terminal, observations):
         row["latency_reserve_underestimated"] = row["actual"]["latency_ms"] > row["completion_cost"]["latency_ms"]
 
 
-def observed_choice_trace(store, event, attempt, prefix_control):
+def observed_choice_trace(store, event, attempt, task, candidate, prefix_control):
     from controller.admission import quote_realization, quoted_native_work
     from controller.schema import CacheQuote
     from controller.serialization import decode
 
-    chosen, _, _ = event["decision"]
-    task, candidate = chosen["task"], chosen["candidate"]
     step_id = task["step_id"]
     batch = event["quote"]
     key = candidate["candidate_id"] if candidate is not None else step_id
@@ -200,7 +198,9 @@ def observed_choice_trace(store, event, attempt, prefix_control):
                              "quoted_prefill_tokens": prefill, "quoted_host_load_tokens": host})
     return {"request_id": attempt.request_id, "quote_seq": batch["observed_seq"],
         "candidate_id": key, "representation": candidate.get("representation") if candidate is not None else None,
-        "quoted_alternatives": alternatives, "selected_native_work": native, "joint_demand": option.get("joint_context"),
+        "quoted_alternatives": alternatives, "selected_native_work": native,
+        "joint_demand": event.get("joint_context", option.get("joint_context")),
+        "selection_rank": event.get("selection_rank"),
         "prefix_control": prefix_control, "step_stage": saved[0] if saved is not None else None,
         "new_claim_ids": tuple(claim.claim_id for claim in result.claims) if result is not None else (),
         "covered_unit_ids": result.covered_units if result is not None else (),
@@ -217,7 +217,7 @@ def audit_directory(directory):
     if unfinished:
         journal = journal[:-1]
     events = [json.loads(line) for line in journal if line.strip()]
-    decisions = [row for row in events if row["event"] == "rolling_plan_decision"]
+    decisions = [row for row in events if row["event"] in {"rolling_plan_decision", "rolling_required_scope_step"}]
     commits = {row["attempt_id"]: row for row in events if row["event"] == "ledger_committed"}
     recovered = {row["attempt_id"]: row for row in events if row["event"] == "attempt_recovered"}
     failures = {row["attempt_id"]: row for row in events if row["event"] == "attempt_failed"}
@@ -241,10 +241,17 @@ def audit_directory(directory):
     rows = []
     try:
         for number, event in enumerate(decisions):
-            next_step, action, output = event["decision"]
-            task = next_step["task"]
-            kind = (next_step["candidate"]["generation_kind"] if next_step["candidate"] is not None
-                    else "CPU_REDUCE" if task["kind"] == "REDUCE" else task["kind"])
+            required = event["event"] == "rolling_required_scope_step"
+            if required:
+                task, candidate = event["task"], event.get("selected_candidate")
+                action = candidate["action"] if candidate is not None else None
+                output = candidate["output_budget"] if candidate is not None else task["output_budget"]
+            else:
+                next_step, action, output = event["decision"]
+                task, candidate = next_step["task"], next_step["candidate"]
+            kind = (candidate["generation_kind"] if candidate is not None
+                    else "CPU_REDUCE" if task["kind"] == "REDUCE" and task["operation"] in
+                        {"union", "count", "sum", "group"} else task["kind"])
             identity = event["attempt_id"]+"/"+("ANSWER" if task["kind"] == "ANSWER" else task["step_id"])
             row = {"generation_dir": str(directory), "event_index": number, "observation_id": identity,
                 "attempt_id": event["attempt_id"], "step_id": task["step_id"], "kind": kind,
@@ -256,15 +263,17 @@ def audit_directory(directory):
                     and identity not in fitted_ids,
                 "overlap_check_basis": overlap_basis, "profile_assets": assets}
             rows.append(row)
-            if event["decision_mode"] == "observed_actions":
-                row["prediction_scope"] = "fixed_bounded_rollout"
+            if required or event["decision_mode"] == "observed_actions":
+                row["prediction_scope"] = "mandatory_scope_reservation" if required else "fixed_bounded_rollout"
                 attempt = store.get_attempt(event["attempt_id"])
-                choice = next_step["candidate"]
-                key = choice["candidate_id"] if choice is not None else task["step_id"]
+                key = candidate["candidate_id"] if candidate is not None else task["step_id"]
                 control = controls.get((attempt.attempt_id, key, event["quote"]["observed_seq"]))
-                row["trajectory"] = observed_choice_trace(store, event, attempt, control)
+                row["trajectory"] = observed_choice_trace(store, event, attempt, task, candidate, control)
             if event.get("engine_kind") != "sglang":
                 row["unmatched_reasons"].append("source_is_not_actual_sglang_hardware")
+                continue
+            if required:
+                row["completion_reserve"] = event["completion_reserve"]
                 continue
             if event["decision_mode"] == "observed_actions":
                 terminal = ((commits.get(attempt.attempt_id) or recovered.get(attempt.attempt_id))
@@ -294,7 +303,7 @@ def audit_directory(directory):
                 if overlap is None or overlap["start"] != window["start"]:
                     row["unmatched_reasons"].append("selected_answer_phase_start_does_not_match_actual_window")
                     continue
-                if next_step["candidate"]["input_hash"] != attempt.result.receipt.input_hash:
+                if candidate["input_hash"] != attempt.result.receipt.input_hash:
                     row["unmatched_reasons"].append("actual_answer_receipt_does_not_match_selected_input")
                     continue
                 start, end = paid["end"], window["end"]
@@ -313,9 +322,9 @@ def audit_directory(directory):
                 if window is None or window.get("clock") != "client_monotonic" or window.get("scope") != "step_wall":
                     row["unmatched_reasons"].append("actual_complete_step_phase_window_missing")
                     continue
-                if next_step["candidate"] is not None and (step.receipt is None or
+                if candidate is not None and (step.receipt is None or
                         not step.receipt.generation_complete or
-                        next_step["candidate"]["input_hash"] != step.receipt.input_hash):
+                        candidate["input_hash"] != step.receipt.input_hash):
                     row["unmatched_reasons"].append("actual_step_receipt_does_not_match_selected_input")
                     continue
                 start, end = window["start"], window["end"]
@@ -373,7 +382,8 @@ def trajectory_examples(rows):
             "observed_gpu_prefix_hit": work.get("actual_device_hit_tokens", 0),
             "observed_host_reload": work.get("actual_host_loaded_tokens", 0),
             "read_added_evidence": row["logical_kind"] == "READ" and trace["new_claim_ids"],
-            "applied_demand_retention": trace["prefix_control"],
+            "applied_demand_retention": any(owner.get("state") == "RETAINED" for owner in
+                (trace["prefix_control"] or {}).get("owner_status", {}).values()),
         }
         for name, present in tags.items():
             if present and name not in examples:
@@ -398,9 +408,11 @@ def main(argv=None):
     (destination/"predictions.jsonl").write_text("".join(json.dumps(to_jsonable(row), ensure_ascii=False, allow_nan=False)+"\n" for row in rows))
     remaining = [row for row in rows if row.get("prediction_scope") == "fixed_bounded_rollout"]
     summary = {"format": "contextkv_rolling_prediction_error_audit_v1", "source_directories": sources,
-        "summaries": summaries([row for row in rows if row.get("prediction_scope") != "fixed_bounded_rollout"]),
+        "summaries": summaries([row for row in rows if row.get("prediction_scope") is None]),
         "observed_rollout_remaining": summaries(remaining),
-        "trajectory_examples": trajectory_examples(remaining),
+        "mandatory_scope_decisions": dict(Counter(row["kind"] for row in rows
+            if row.get("prediction_scope") == "mandatory_scope_reservation")),
+        "trajectory_examples": trajectory_examples(rows),
         "delivered_latency_reserve_underestimated": sum(row.get("latency_reserve_underestimated") is True for row in remaining),
         "delivered_latency_reserve_checked": sum("latency_reserve_underestimated" in row for row in remaining),
         "error_sign": "prediction minus actual",

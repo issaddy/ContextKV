@@ -29,7 +29,10 @@ def observed_step_outputs(plan, task, template, *, output_budgets, output_tokens
         tuple(units[identity] for identity in task.input_unit_ids), template.tokenizer,
         dependency_ids=dependencies, output_tokens_per_fact=output_tokens_per_fact, reading_mode=plan.reading_mode)
     outputs = tuple(value for value in output_budgets if reserved <= value <= task.output_budget)
-    return reserved, (min(outputs),) if finite and outputs else outputs
+    if finite and outputs:
+        # READ has a fact reservation. REDUCE packs were sized for the full output allowance.
+        outputs = (max(outputs) if task.kind == "REDUCE" else min(outputs),)
+    return reserved, outputs
 
 
 def observed_answer_options(state, *, joint, finite):

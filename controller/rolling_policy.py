@@ -619,10 +619,14 @@ class RollingPlanRuntime:
                         choices.append((rank, step.task, candidate, reserve, option))
                 if not choices:
                     raise NoCompletePlan("required source-scope step exceeds "+", ".join(dict.fromkeys(reasons)))
-                _, required_step, candidate, reserve, option = min(choices, key=lambda choice: choice[0])
+                rank, required_step, candidate, reserve, option = min(choices, key=lambda choice: choice[0])
                 self._observe_state(attempt_id, executor, state, snapshot, native, None, True)
+                selected = ({"candidate_id": candidate.candidate_id, "generation_kind": candidate.generation_kind,
+                    "representation": candidate.representation, "action": candidate.action,
+                    "output_budget": candidate.output_budget} if candidate is not None else None)
                 audit = {"decision_mode": "mandatory_coverage", "step_id": required_step.step_id,
                     "task": required_step, "quote": native.quotes, "paid_cost": native.paid_cost,
+                    "selected_candidate": selected, "selection_rank": rank,
                     "completion_reserve": reserve,
                     "joint_context": option.trace() if option is not None else None,
                     "physical_paid_observation": native.paid_observation}
@@ -632,7 +636,8 @@ class RollingPlanRuntime:
                     mutation = await prefix_observer.apply_demand(option, state, snapshot.session_id,
                         batch=native.quotes)
                     audit["joint_prefix_control"] = mutation
-                    events.emit("joint_prefix_control", attempt_id=attempt_id, choice=required_step.step_id,
+                    events.emit("joint_prefix_control", attempt_id=attempt_id,
+                        choice=candidate.candidate_id if candidate is not None else required_step.step_id,
                         quote_seq=native.quotes.observed_seq, **mutation)
                 state = await executor.execute_one(attempt_id, snapshot, plan, required_step, state,
                     initial_auxiliary_usage=auxiliary_usage, candidate=candidate, quote=native.quotes,
