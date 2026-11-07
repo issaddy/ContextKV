@@ -135,7 +135,10 @@ class SGLangEngineClient:
         try:
             response = await self._client.post(path, json=body)
         except httpx.TransportError as exc:
-            raise UnknownOutcomeError("TRANSPORT_ERROR", str(exc)) from exc
+            request = exc.request
+            message = f"{type(exc).__name__} {request.method} {request.url.path}"
+            detail = str(exc)
+            raise UnknownOutcomeError("TRANSPORT_ERROR", f"{message}: {detail}" if detail else message) from exc
         try:
             data = response.json()
         except ValueError as exc:
@@ -294,7 +297,10 @@ class SGLangEngineClient:
                     if receipt:
                         final = item
         except httpx.TransportError as exc:
-            raise UnknownOutcomeError("TRANSPORT_ERROR", str(exc)) from exc
+            request = exc.request
+            message = f"{type(exc).__name__} {request.method} {request.url.path}"
+            detail = str(exc)
+            raise UnknownOutcomeError("TRANSPORT_ERROR", f"{message}: {detail}" if detail else message) from exc
         if not done or final is None or data_lines:
             raise UnknownOutcomeError("INCOMPLETE_STREAM", "complete receipt and SSE DONE required; inspect attempt status")
         if final.get("output_ids") != output_ids:
