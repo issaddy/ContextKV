@@ -8,6 +8,8 @@ Host 固定 token 配对已验证真实回载与重算：同一请求下，Nativ
 
 30 个预声明、空历史相同的首轮题已完成 ranked 固定输入对照：RB_llm 为 0.846667，原 support 为 0.776667（12 胜、13 平、5 负），与 LlamaIndex 均分相同。对照通过 `bench.evidence_policy_comparison frozen --cells P0_source_first_shared` 仅设置 `selection.mode: ranked`，原记录池、TaskState、预算和历史逐条一致，两种选材均由固定 B 直接 ANSWER。该结果不包含初始检索，不能当作完整 P3 或端到端提速。30 个请求费用窗口完整；批次另按真实末采样时刻报告可观测积分，后续代码已修正结束戳与停止采样的顺序。
 
+ranked 的 c1 MultiDoc2Dial 完整 P3 已交付并评分 209/209，RB_llm 为 0.788038，比原 support 的完整分母结果高 0.10；LlamaIndex 为 0.806220。两次项目方法的在线批次物理窗口均完整：ranked 3727.844 秒、618329.213 GPU GiB·s、172118.183 Host GiB·s；support 14022.922 秒、2315683.243 GPU GiB·s、617252.311 Host GiB·s，包含其失败请求。这里报告的是该公开轨道的整批成本，完整 350 题目标尚未验收。
+
 旧 support A 的 ContextPilot 队列已停止扩跑，203 个完成答案、1 次失败及全部已付费用留在 `external-contextpilot-fixed-002`；这些结果只解释旧 A。最终四格将绑定选定 A 及其对应的 B 资产，不能将旧 support 资产直接用于 ranked 状态。
 
 `3abfde2` 补齐所选来源的版本过滤、必需数值归约、选择报价到执行的传递，以及无 ContextPlan 的直接 ANSWER 来源编排。7 项受影响集成检查通过；容器未安装 pytest-asyncio，5 项异步检查由 `asyncio.run` 直接执行原用例，其余 2 项由 pytest 执行。`d09c1cd` 修复 Native 对尚未分配 KV 的排队请求报价崩溃，GPU 0 服务已恢复，失败输出与费用保留。
@@ -86,6 +88,8 @@ B 固定流程观测使用 `execution.state_observation`，从真实请求开始
 `training.collect_plan_gains --observations OBS --actual-turns TURNS --output PACKETS`
 导出后，`training.plan_gain_workflow --mode observed_actions --observed-states PACKETS`
 沿用源 cohort 身份。主线直接读取真实 P3 capture 的 TaskState/ReadingOutcome，不要求另行准备 `--task-labels`、task/student 或 P1 标签；`whole_plan` 固定历史对照仍需审计标签。cohort 预声明 task、会话与 train/dev 分区，真实 QA 历史在采集后由 snapshot 和已完成原生回执核验，只有固定历史对照才额外校验预先提供的历史 hash。每个源 task 保留各合法动作首次可配对的观测，不按未来质量选点。
+
+已有实际 READ 分支可用 `training.collect_plan_gains --terminal-branches GAIN_ROOT --reader-config READER_YAML --output NEW_PACKETS` 导出终端状态。该入口使用原先保存的报价事件和物理样本切分已付成本，排除尚未发生的 ANSWER 费用；来源标为 `frozen_actual_rollout`，原 P3 与实际分支身份均保留。新配对沿用原 `actual-rollouts`、sources 和 cohort，使用新输出目录。
 `bench.study` 的成功/失败记录保留原始 `reference`、原始数据分区和 observer cohort 绑定，仅供离线审计与评分。导出器将 packet 绑定到完整实际 capture 行的 hash；B 采集核验 native-train 原始正文、版本、窗口坐标与 raw grounding 引文，开发会话独立隔离。原始参考不会进入 A/B/C 的在线输入。正式 dev 队列不能作为 B 训练数据。
 真实检索后的初始状态也可配对 DIRECT 与首次 READ。离线 DIRECT 在当前材料上强制 ANSWER，线上停止须通过实际覆盖或结论充分性检查。确认终止而未提交回答的真实分支计效用 0，包含生成前终止，原始评分保留为空。
 进度分别记录去重源任务数和决策快照数，不将多个动作快照重复计为训练任务。

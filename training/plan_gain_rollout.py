@@ -66,6 +66,7 @@ def observed_rows(rows, packets, *, selection=None):
     kinds = ("read_once", "reduce_once", "gap_retrieval")
     by_task = {row["task_id"]: row for row in rows}
     chosen, skipped, seen = {}, Counter(), set()
+    requested_families = {}
     observed_tasks = set()
     for packet in packets:
         identity, task_id = packet["observation_id"], packet["task_id"]
@@ -76,6 +77,8 @@ def observed_rows(rows, packets, *, selection=None):
         if task_id not in by_task:
             skipped["outside_requested_members"] += 1
             continue
+        families = packet["requested_families"] if packet["decision_mode"] == "branch_terminal" else kinds
+        requested_families.setdefault(task_id, set()).update(families)
         row = by_task[task_id]
         if any(packet[name] != row[name] for name in ("cohort_split", "cohort_manifest_sha256")):
             raise ValueError("observed state belongs to a different registered cohort identity")
@@ -110,15 +113,23 @@ def observed_rows(rows, packets, *, selection=None):
             cohort_manifest_sha256=packet["cohort_manifest_sha256"],
             resident_model_manifest_digest=packet["resident_model_manifest_digest"],
             evidence_selection_contract=packet["evidence_selection_contract"])
+        if packet["decision_mode"] == "branch_terminal":
+            binding.update(history_origin=packet["history_origin"], state_origin="branch_terminal",
+                source_capture_attempt_id=packet["source_capture_attempt_id"],
+                source_capture_sha256=packet["source_capture_sha256"], terminal_branch=packet["terminal_branch"],
+                native_condition_scope=packet["native_condition_scope"])
         key = (packet["decision_seq"], packet["native_condition"]["observed_time_ns"], identity)
         reduction = observed_reduction_task(state)
         supplement = ({"family": "reduce_once", "operation": reduction.operation,
                        "need_ids": reduction.need_ids, "input_claim_ids": reduction.input_claim_ids}
-                      if reduction is not None and reduction.operation == "summarize" else None)
+                      if packet["decision_mode"] != "branch_terminal" and reduction is not None
+                          and reduction.operation == "summarize" else None)
         candidate = {**row, "task_state": to_jsonable(state.plan.task_state),
                      "observed_packet": packet, "observed_binding": binding,
                      "current_protocol_reduce_candidate": supplement}
         for kind in kinds:
+            if kind not in families:
+                continue
             if kind == "reduce_once":
                 if reduction is None or (kind not in packet["legal_actions"] and supplement is None):
                     continue
@@ -135,7 +146,8 @@ def observed_rows(rows, packets, *, selection=None):
         decisions = {}
         for kind in kinds:
             if (task_id, kind) not in chosen:
-                missing.append({"task_id": task_id, "family": kind, "reason": "no_legal_observation"})
+                reason = "no_legal_observation" if kind in requested_families.get(task_id, kinds) else "not_requested_for_collection"
+                missing.append({"task_id": task_id, "family": kind, "reason": reason})
                 continue
             _, candidate = chosen[task_id, kind]
             identity = candidate["observed_packet"]["observation_id"]
@@ -353,7 +365,16 @@ def observed_cohort(rollouts, packets, sources, *, split, limit, cohort_manifest
         if task_id not in requested:
             continue
         member = members[task_id]
-        row = actual.get(packet["attempt_id"])
+        capture_attempt_id = packet["attempt_id"]
+        if packet["decision_mode"] == "branch_terminal":
+            capture_attempt_id = packet["source_capture_attempt_id"]
+            branch = packet["terminal_branch"]
+            branch_raw = Path(branch["run_path"]).read_bytes()
+            if (packet["history_origin"] != "frozen_actual_rollout" or capture_attempt_id == packet["attempt_id"]
+                    or hashlib.sha256(branch_raw).hexdigest() != branch["run_sha256"]
+                    or json.loads(branch_raw)["attempt"]["attempt_id"] != packet["attempt_id"]):
+                raise ValueError("terminal decision lacks its unchanged actual branch binding")
+        row = actual.get(capture_attempt_id)
         if row is None or digest(row) != packet["source_capture_sha256"]:
             raise ValueError("observed decision lacks its exact bound actual capture row")
         if (row["task_id"] != task_id or row["conversation_id"] != member["conversation_id"]
@@ -793,6 +814,30 @@ async def score_branch(judge, template, row, before, branch, *, contract, path, 
     return branch
 
 
+def _filter_observed_initial_steps(plans, frozen, snapshot, compiler, cache_scope):
+    """Register only actions whose already known first model input fits."""
+    from controller.rolling_policy import compile_step
+
+    completed = {result.step_id for result in frozen.results}
+    kept, omitted = [], []
+    for branch in plans:
+        if branch.semantic_kind in {"read_once", "reduce_once"}:
+            plan = branch.context_plan
+            task = next(step.task for step in branch.steps if step.task.kind in {"READ", "REDUCE"}
+                        and step.task.step_id not in completed)
+            cpu = (plan.reading_mode == "typed_reduce" and task.kind == "REDUCE"
+                   and task.operation in {"count", "sum", "group", "union"})
+            if not cpu:
+                variants = compile_step(plan, task, frozen, snapshot, compiler.template,
+                    outputs=(task.output_budget,), request_compiler=compiler, cache_scope=cache_scope)
+                if not any(candidate.feasible for candidate in variants):
+                    omitted.append({"family": branch.semantic_kind, "plan_id": branch.plan_id,
+                        "step_id": task.step_id, "reason": "known_initial_step_context_budget"})
+                    continue
+        kept.append(branch)
+    return tuple(kept), tuple(omitted)
+
+
 async def collect(config, settings, *, controller=None, provider=None, interpreter=None,
                   resources=None, judge_client=None, judge_template=None, accounting=None):
     """Bounded actual collection; injected dependencies are protocol-test seams."""
@@ -1020,6 +1065,10 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                             for kind, reason in reasons.items() if kind not in available))
                         plans = tuple(plan for plan in plans if plan.semantic_kind == "direct_answer"
                                       or plan.semantic_kind in row["observed_action_kinds"])
+                        if any(plan.semantic_kind in {"read_once", "reduce_once"} for plan in plans):
+                            plans, infeasible = _filter_observed_initial_steps(plans, frozen, snap,
+                                controller.request_compiler, await controller.engine.info())
+                            omitted = (*omitted, *infeasible)
                         trace, scope_material = {"source": "recorded_observed_state", "binding": observed,
                             "source_observed_actions": packet["legal_actions"],
                             "current_protocol_reduce_candidate": row["current_protocol_reduce_candidate"]

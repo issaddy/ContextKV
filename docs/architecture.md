@@ -91,6 +91,8 @@ B 的 `input_protocol` 额外绑定 `merged_source_windows_actual_coverage_reuse
 GAP 绑定当前检索器及采集时的材料限额。`whole_plan` 保留原执行 profile 与原生时间标定，作为独立对照。
 动作收益资产由 `training.plan_gain_workflow --mode observed_actions` 采集、终止标注和拟合；开发文件报告实际配对质量差的误差，在线质量和时延由完整队列评价。
 
+离线候选准备复用实际编译器，已知首步输入超窗的 READ/模型 REDUCE 记录为不可选动作。执行后才出现的失败仍按实际完成规则计效用。已完成 READ 分支可导出终端 ANSWER 前的状态，复用事实、真实终端报价及该时点已付费用，再采集 REDUCE/GAP 的增量收益；未读来源目录随状态保留，原 P3 与分支记录分别绑定。
+
 REDUCE 的完整基底与 frontier 在首次写入 `COMPLETE` 前统一绑定。GAP 的 `RESULT_READY` 直接复用已保存资料，完成账本、后继计划和进度在一个事务中提交，恢复不会重复检索或生成。
 
 ## C：选择前编译、报价与执行后登记

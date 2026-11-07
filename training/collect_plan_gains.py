@@ -158,9 +158,19 @@ def main(argv=None):
     source_group = parser.add_mutually_exclusive_group(required=True)
     source_group.add_argument("--pairs", help="JSONL packets naming direct_run and candidate_run JSON files")
     source_group.add_argument("--observations", help="Runtime observed-state JSONL with attempt/request IDs")
+    source_group.add_argument("--terminal-branches", help="Completed observed-actions collection with train/dev READ branches")
     parser.add_argument("--actual-turns", help="JSONL of completed response.attempt_id and failed attempt.attempt_id capture rows")
+    parser.add_argument("--reader-config", help="Actual reader config for terminal-state action eligibility")
     parser.add_argument("--output", required=True, help="New JSONL gain data file")
     args = parser.parse_args(argv)
+    if args.terminal_branches:
+        if not args.reader_config:
+            parser.error("--terminal-branches requires --reader-config")
+        from controller.config import create_model_template, load_config
+        from training.terminal_observations import export_terminal_observations
+        export_terminal_observations(args.terminal_branches,
+            create_model_template(load_config(args.reader_config).model), args.output)
+        return
     if args.observations:
         if not args.actual_turns:
             parser.error("--observations requires --actual-turns")

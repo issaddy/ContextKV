@@ -431,7 +431,7 @@ async def test_actual_snapshot_cohort_needs_no_task_labels_and_keeps_native_witn
     from controller.context_schema import TextRef
     from controller.resident_models import resident_model_digest, resident_model_identity
 
-    service, _, _, frozen, snapshot, _, request, plans, binding, row, _ = await frozen_fixture(tmp_path/'capture')
+    service, native, budget, frozen, snapshot, _, request, plans, binding, row, prep = await frozen_fixture(tmp_path/'capture')
     helper = {'engine_restart_id': 'original-process', 'model_scope': {
         'source_path': '/original/scope.json', 'identity': 'fixed-model', 'record': {'weights': 'sha'}}}
     resident = {'retrieval': {'retriever': {'dense': {'index_sha256': 'fixed-index'},
@@ -463,7 +463,9 @@ async def test_actual_snapshot_cohort_needs_no_task_labels_and_keeps_native_witn
     segment.mkdir(parents=True)
     generation_manifest = segment/'generation_manifest.json'
     generation_manifest.write_text(json.dumps({'retrieval': resident}))
-    frozen = replace(frozen, plan=replace(frozen.plan, task_state=replace(frozen.plan.task_state,
+    ready = tuple(step if step.step_id == frozen.steps[0].step_id else replace(step,
+        input_budget=frozen.plan.budget.window_tokens-step.output_budget) for step in frozen.plan.steps)
+    frozen = replace(frozen, plan=replace(frozen.plan, steps=ready, task_state=replace(frozen.plan.task_state,
         needs=(replace(frozen.plan.task_state.needs[0], anchor_spans=(
             TextRef(2, 'user', 0, len(row['question'])),)),))))
     manifest = tmp_path/'cohort.json'
@@ -536,6 +538,81 @@ async def test_actual_snapshot_cohort_needs_no_task_labels_and_keeps_native_witn
     assert rows[0]['reference_answer'] == raw['targets'][0]['text']
     actual = observed_rows(rows, packets)
     assert actual and actual[0]['task_state'] == to_jsonable(frozen.plan.task_state)
+
+    from controller.events import EventLog
+    from controller.serialization import decode
+    from training.plan_gain_rollout import read_rows
+    from controller.action_proposals import continuation_read
+    from training.terminal_observations import restore_read_catalog, terminal_observation
+
+    event_path = tmp_path/'terminal-events.jsonl'
+    service.events = EventLog(event_path)
+    plans, _ = build_observed_action_plans(frozen, snapshot, service.template,
+        reader_checkpoint=binding['reader_checkpoint'], gap_request=request)
+    branch = tmp_path/'terminal-read'
+    branch_binding = {**binding, 'resident_model_manifest': resident,
+        'cohort_manifest_sha256': cohort_hash, 'continuation_gap_limits': request.limits}
+    run = await execute_branch(service, next(plan for plan in plans if plan.semantic_kind == 'read_once'),
+        frozen, snapshot, actual[0], case_dir=branch, binding=branch_binding, preparation=prep,
+        resources=Resources(), cache_start='observed', generation_budget=budget,
+        observed=actual[0]['observed_binding'], gap_request=request)
+    assert run['status'] == 'completed', run['failure']
+    event = next(event for event in read_rows(event_path) if event['event'] == 'plan_gain_experimental_answer')
+    before = json.loads((branch/'before.json').read_text())
+    start = run['actual_branch_execution_cost']['window']['start']
+    end = event['monotonic_timestamp_ns']/1e9
+    phase = {'clock': 'client_monotonic', 'samples': [{'timestamp': start-1, 'gpu_gib': 2, 'host_gib': 3},
+        {'timestamp': end+1, 'gpu_gib': 7, 'host_gib': 8}]}
+    run_path = branch/'run.json'
+    terminal = terminal_observation(before, run, actual[0], event, phase, service.template,
+        {'run_path': str(run_path), 'run_sha256': file_digest(run_path)})
+    assert terminal['attempt_id'] == run['attempt']['attempt_id'] != terminal['source_capture_attempt_id']
+    assert terminal['native_condition_scope'] == 'actual_terminal_answer_only'
+    assert terminal['requested_families'] == ['reduce_once', 'gap_retrieval']
+    assert terminal['paid_cost']['gpu_gib_ms'] == pytest.approx(2000+2000*(end-start))
+    assert terminal['paid_cost']['gpu_peak_gib'] == 2  # the later ANSWER-side sample is only a boundary witness
+    paid_tokens = sum(terminal['paid_cost'][key] for key in ('input_tokens', 'output_tokens'))
+    assert paid_tokens == 10000+len(run['steps'][0]['input_ids'])+len(run['steps'][0]['output_ids'])
+    assert terminal['working_state']['plan']['online_tokens_spent'] == paid_tokens
+    terminal_rows, _ = observed_cohort([previous, capture], [terminal], sources, split='train', limit=1,
+        cohort_manifest=manifest)
+    chosen, = observed_rows(terminal_rows, [terminal])
+    assert set(chosen['observed_action_kinds']) == {'reduce_once', 'gap_retrieval'}
+    terminal_state = decode(ReadingOutcome, terminal['working_state'])
+    from action_helpers import material as source_material
+    block, unit = source_material('unread-terminal-source')
+    selected_set = terminal_state.plan.selected_set
+    infer_plan = replace(terminal_state.plan, task_state=replace(terminal_state.plan.task_state,
+        needs=(replace(terminal_state.plan.task_state.needs[0], operation='infer'),)),
+        selected_set=replace(selected_set, selected_units=(*selected_set.selected_units, unit),
+            source_blocks=(*selected_set.source_blocks, block)))
+    covered_alias = replace(terminal_state.steps[0].task, step_id='covered-alias')
+    unread = replace(covered_alias, step_id='unread-original', input_unit_ids=(unit.unit_id,))
+    restored = restore_read_catalog(replace(terminal_state, plan=infer_plan),
+        replace(infer_plan, steps=(*infer_plan.steps, covered_alias, unread)))
+    assert covered_alias not in restored.plan.steps
+    assert continuation_read(restored, restored.plan).step_id == unread.step_id
+    plans, _ = build_observed_action_plans(terminal_state, snapshot, service.template,
+        reader_checkpoint=binding['reader_checkpoint'])
+    from bench.mock_engine import MockEngine
+    generate = native.generate
+
+    async def select_quantities(*, response_schema=None, **kwargs):
+        if response_schema is not None and response_schema['properties']['format_version']['const'] == 7:
+            native.response_text = json.dumps({'format_version': 7, 'views': {
+                alias: {parent: rule.get('const', True) for parent, rule in view['properties'].items()}
+                for alias, view in response_schema['properties']['views']['properties'].items()}})
+            return await MockEngine.generate(native, **kwargs)
+        return await generate(response_schema=response_schema, **kwargs)
+
+    native.generate = select_quantities
+    reduced = await execute_branch(service, next(plan for plan in plans if plan.semantic_kind == 'reduce_once'),
+        terminal_state, snapshot, chosen, case_dir=tmp_path/'terminal-reduce', binding=branch_binding,
+        preparation=prep, resources=Resources(), cache_start='observed', generation_budget=budget,
+        observed=chosen['observed_binding'], gap_request=request)
+    assert reduced['new_action_counts'] == {'READ': 0, 'REDUCE': 1, 'GAP_RETRIEVAL': 0, 'ANSWER': 1}
+    assert len(reduced['actual_native_calls']) == 2
+
     from controller.context_schema import EvidenceSet
     from training.preference_rollout import _judge, P1_RUBRIC
 

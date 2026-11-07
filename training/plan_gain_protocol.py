@@ -11,7 +11,7 @@ import time
 from adapters.history_state import TaskPrediction, validate_task_refs
 from controller.action_proposals import (GapRetrievalRequest as GapRetrievalRequest,
     build_observed_action_plans as build_observed_action_plans, gap_query as gap_query,
-    BOUNDED_CONTINUATION, bind_read_parents, continuation_gap, continuation_read, gap_retrieval_plan)
+    BOUNDED_CONTINUATION, bind_read_parents, continuation_gap, continuation_read, gap_key, gap_retrieval_plan)
 from controller.context_schema import EvidencePool, ReadingOutcome, ReadTask
 from controller.context_budget import bind_answer_window
 from controller.plan_policy import CompleteCost, complete_plan
@@ -19,7 +19,7 @@ from controller.reading import build_read_plan
 from controller.rolling_policy import (RollingResult, ZERO_AUX, _reduction_tasks,
                                        compile_step, namespace_plan)
 from controller.schema import Plan
-from controller.serialization import to_jsonable
+from controller.serialization import decode, to_jsonable
 
 
 class EmptyPlannedPremise(ValueError):
@@ -226,6 +226,8 @@ class FixedCounterfactualRuntime:
         initial = self.initial_state if self.initial_state is not None else supplied
         state = (ReadingOutcome(plan, auxiliary_usage=dict(ZERO_AUX)) if initial is None
                  else replace(initial, plan=plan))
+        expanded = {gap_key(need) for record in state.steps if record.task.kind == "GAP"
+                    for need in decode(GapRetrievalRequest, record.metrics["gap_request"]).open_needs}
         completed = {result.step_id for result in state.results}
         pending = [step.task for step in self.planned.steps if step.task.kind != "ANSWER"
                    and step.task.step_id not in completed]
@@ -309,13 +311,15 @@ class FixedCounterfactualRuntime:
                     plan = replace(plan, steps=(*plan.steps, task))
                     state = replace(state, plan=plan)
                 else:
-                    gaps = continuation_gap(state, used_gap=bool(self.new_action_counts["GAP_RETRIEVAL"]))
-                    if gaps and self.gap_provider is not None and self.gap_request is not None:
+                    gaps = tuple(need for need in continuation_gap(state, used_gap=False)
+                                 if gap_key(need) not in expanded)
+                    used_gap = self.new_action_counts["GAP_RETRIEVAL"]
+                    if gaps and not used_gap and self.gap_provider is not None and self.gap_request is not None:
                         if remaining_steps < 3:  # GAP, terminal READ, ANSWER
                             break
                         request = replace(self.gap_request, open_needs=gaps, query=gap_query(plan.task_state, gaps))
                         pool = await retrieve(request)
-                    elif self.new_action_counts["GAP_RETRIEVAL"] and continuation_gap(state, used_gap=False):
+                    elif used_gap and gaps:
                         if remaining_steps < 2:  # registered GAP already paid
                             break
                         pool = self.gap_result["pool"]
@@ -328,7 +332,7 @@ class FixedCounterfactualRuntime:
                     from controller.evidence_planner import close_dependencies
                     units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
                     terminal_units = close_dependencies(tuple(unit.unit_id for unit in novel), units)
-                    parents = tuple(dict.fromkeys(parent for need in continuation_gap(state, used_gap=False)
+                    parents = tuple(dict.fromkeys(parent for need in gaps
                                                   for parent in need.parent_claim_ids))
                     by_id = {claim.claim_id: claim for claim in state.claims}
                     gap_plan = build_read_plan(plan.task_state, replace(plan.selected_set, selected_units=terminal_units),
