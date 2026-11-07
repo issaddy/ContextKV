@@ -2,7 +2,7 @@
 
 `test-0523` 使用容器默认 `python3`，Qwen3-32B 权重保持固定。主链已接通；当前工作是补齐 B 的 GAP 监督，并完成冻结 ranked A 的联合比较。完整 350 题质量与 P95 尚未验收。
 
-正式运行位于 `runs/study-20261106-resume/final-joint-6888cf8-001`，沿用 `6888cf8` 的 A 与阅读协议；后续 `a2455a1` 统一离线 GAP 新增额度并删去线上重复检查。固定 B 的 c1、c4 两组依次运行 Native、ContextPilot 和 LlamaIndex Native，使用 GPU 0/1、3/5。收益 B 两组也已启动，使用 GPU 4/6、2/7，依次运行 Native、ContextPilot 及关闭跨轮事实复用的对照。四组均为一张 reader 卡和一张 helper＋BGE 卡，共用 350 题／77 会话、到达序列和生成条件。`inputs/inputs.json`、各组 `capacity-plan.json` 和启动记录保存实际配置及提交；模型和大日志留在容器。
+正式运行位于 `runs/study-20261106-resume/final-joint-6888cf8-001`，沿用 `6888cf8` 的 A 与阅读协议。固定 B 的 c1、c4 两组依次运行 Native、ContextPilot 和 LlamaIndex Native，使用 GPU 0/1、3/5。收益 B 使用修正后的成本头，在 `work-cost/run-c1-gain`、`work-cost/run-c4-gain` 运行 Native、ContextPilot 及关闭跨轮事实复用的对照，使用 GPU 4/6、2/7。四组均为一张 reader 卡和一张 helper＋BGE 卡，共用 350 题／77 会话、到达序列和生成条件。当前联合输入为 `work-cost/joint-inputs.json`；各组计划和启动记录保存实际配置及提交，模型和大日志留在容器。
 
 长文共享提取已得到 36 条、666 kg，多跳得到 1997。旧中断参照的 64 个答案已完成官方重评，完整声明分母与费用保留。
 
@@ -22,7 +22,9 @@ ranked 的 c1 MultiDoc2Dial 完整 P3 已交付并评分 209/209，RB_llm 为 0.
 
 ranked B 的小批次已完成：声明 8/4 个源任务，实际历史 48/24 轮。初始已知超窗动作从拟合中排除，原失败费用保留；复用 11 个真实 READ 后状态，合并得到 18/10 个训练／开发配对，分别来自 14/8 个状态和 7/4 个源任务。当前训练含 READ、REDUCE，开发集还有 1 个未训练 GAP；预测覆盖为 9/10，已覆盖动作 MAE 为 0.157019，整体 MAE 留空。原生分支未重跑；旧工作流只因开发评估遇到未训练 GAP 而报错的部分已用 CPU 补齐。数据、来源及成本摘要在 `runs/study-20261106-resume/b-ranked-3abfde2/summary.json`，模型仍留在实验容器。
 
-GAP 补充采集位于 `b-ranked-gap-native-4t3`：按原始训练问题的跨轮指代和来源切换预选 4 个第三轮目标，完成 12 个真实 P3 轮次，得到 4 个 READ 配对及其真实终端状态中的 2 个 GAP 配对。合并资产为该目录下的 `gain-combined/plan-gain.json`：24 个训练配对、20 个状态、11 个实际源任务，覆盖 READ 18、REDUCE 4、GAP 2。原开发 4 会话、10 个配对未改动，预测覆盖 10/10，MAE 0.287940；按原费用权重，在 8 个保存状态中的动作选择与实测最优一致 6 个。该结果用于冻结小批次资产，线上收益仍由完整 P3 比较判断。
+GAP 补充采集位于 `b-ranked-gap-native-4t3`：按原始训练问题的跨轮指代和来源切换预选 4 个第三轮目标，完成 12 个真实 P3 轮次，得到 4 个 READ 配对及其真实终端状态中的 2 个 GAP 配对。合并后有 24 个训练配对、20 个状态、11 个实际源任务，覆盖 READ 18、REDUCE 4、GAP 2。原开发 4 会话、10 个配对未改动，预测覆盖 10/10，质量 MAE 为 0.287940。当前资产为 `gain-work-cost/plan-gain.json`；它复用全部原标签和质量权重，只从原生报价重算工作量并在 CPU 上重拟合成本。
+
+初次收益 B 运行暴露了成本外推错误：空闲容量被当成负费用，118 个已记录候选中有 35 个未来费用被截零。`2d539eb` 改用非负工作量成本头，同一批报价重算后零费用为 0；这只是预测修复，最终收益仍待完整队列。两组原运行已停止，答案与原生调用保留。组信号同时打断采样子进程，整体物理尾段缺失；`cost-extrapolation-diagnosis.json` 和各组 `observed-physical-coverage.json` 显式记录已观测范围与未知尾段。`e83abd5` 将采样子进程独立于协调器退出信号，收尾仍等待真实采样完成。
 
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 
