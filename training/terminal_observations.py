@@ -144,9 +144,8 @@ def export_terminal_observations(collection, template, output):
     from training.plan_gain_rollout import digest
 
     packets, excluded = [], []
-    for split in ("train", "dev"):
-        directory = Path(collection) / split
-        phase_path = directory / "phase-resources.json"
+    for phase_path in sorted(Path(collection).glob("*/phase-resources.json")):
+        directory = phase_path.parent
         phase = json.loads(phase_path.read_text())["online"]
         event_path = directory / "state/events.jsonl"
         with event_path.open() as stream:
