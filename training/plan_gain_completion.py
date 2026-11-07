@@ -16,12 +16,13 @@ import time
 
 from controller.context_schema import ReadingOutcome
 from controller.action_proposals import BOUNDED_CONTINUATION, validate_action_counts
-from controller.plan_policy import OBSERVED_FEATURE_SCHEMA, CompleteCost, NATIVE_COST_SCHEMA, PlanCandidate, plan_cost_features, plan_features
+from controller.plan_policy import (OBSERVED_FEATURE_SCHEMA, CompleteCost, NATIVE_COST_FEATURE_NAMES,
+                                    NATIVE_COST_SCHEMA, PlanCandidate, plan_cost_features, plan_features)
 from controller.schema import CacheQuoteBatch, SessionSnapshot
 from controller.serialization import decode
 from controller.plan_gain_protocol import validate_input_protocol, validate_pre_action_input
 from training.train_plan_gain import (COST_FIELDS, PlanGainModel, _fit_features, _fit_selection_contract, _ridge,
-    actual_history, fit_cost_heads, working_state_key)
+    actual_history, fit_native_cost_heads, working_state_key)
 
 
 RULE = "terminal_no_committed_QA_has_utility_0; committed_QA_uses_actual_fixed_judge_Q; raw_missing_Q_remains_null"
@@ -384,25 +385,21 @@ def fit_effective(training, *, ridge=1.0, path=None):
     coefficients, intercept = _ridge((x-center)/scale, y, ridge)
     cost_models, cost_provenance = {}, {}
     if samples:
-        cost_names = tuple(samples[0][0])
-        cost_x = np.asarray([[features[name] for name in cost_names] for features, _ in samples], dtype=np.float64)
-        cost_center, cost_scale = cost_x.mean(axis=0), cost_x.std(axis=0)
-        cost_scale[cost_scale == 0] = 1.0
-        cost_models, cost_mse = fit_cost_heads(samples, cost_names, cost_center, cost_scale,
-            ridge=ridge, targets=("branch_complete_cost",))
+        cost_models, cost_mse, cost_scale = fit_native_cost_heads(samples, ridge=ridge)
         cost_provenance = {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA, "continuation_protocol": BOUNDED_CONTINUATION,
             "source": "actual_observed_terminal_branch_and_paired_direct_costs",
             "prefix_control_scope": "native_excludes_prefix_control",
-            "feature_schema": NATIVE_COST_SCHEMA, "feature_names": cost_names,
-            "center": cost_center.tolist(), "scale": cost_scale.tolist(),
+            "feature_schema": NATIVE_COST_SCHEMA, "feature_names": NATIVE_COST_FEATURE_NAMES,
+            "scale": cost_scale,
             "training_cache_starts": sorted(cache_scopes), "training_samples": len(samples),
             "action_samples": len(samples)-len(direct_seen), "unique_direct_samples": len(direct_seen),
             "record_ids": cost_record_ids, "trained_semantic_kinds": sorted(cost_kinds), "cost_fields": COST_FIELDS,
             "branch_scope": "actual new action through committed ANSWER or confirmed terminal no-QA failure; excludes common paid state/preparation/cleanup",
             "incremental_scope": "same_observation_predicted_action_absolute_minus_direct_absolute",
             "training_mse": cost_mse}
+    asset_input = (NATIVE_COST_SCHEMA, training) if cost_models else training
     return PlanGainModel(training[0]["reader_checkpoint"], training[0]["reader_profile_id"],
-        "effective-plan-gain:"+digest(training), names, tuple(center.tolist()), tuple(scale.tolist()),
+        "effective-plan-gain:"+digest(asset_input), names, tuple(center.tolist()), tuple(scale.tolist()),
         tuple(coefficients.tolist()), float(intercept),
         {"input_protocol": training[0]["input_protocol"],
          "evidence_selection_contract": selection_contract,

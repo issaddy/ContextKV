@@ -17,8 +17,8 @@ import math
 from pathlib import Path
 import time
 
-from controller.plan_policy import (FEATURE_NAMES, OBSERVED_FEATURE_NAMES, OBSERVED_FEATURE_SCHEMA, CompleteCost, LEGACY_PLAN_KINDS, NATIVE_COST_SCHEMA,
-                                     PLAN_KINDS, PlanCandidate, complete_plan, plan_features)
+from controller.plan_policy import (FEATURE_NAMES, OBSERVED_FEATURE_NAMES, OBSERVED_FEATURE_SCHEMA, CompleteCost, LEGACY_PLAN_KINDS,
+                                     NATIVE_COST_FEATURE_NAMES, NATIVE_COST_SCHEMA, PLAN_KINDS, PlanCandidate, complete_plan, plan_features)
 from controller.context_schema import ReadingOutcome
 from controller.resident_models import evidence_selection_contract
 from controller.schema import SessionSnapshot
@@ -214,11 +214,10 @@ class PlanGainModel:
             raise ValueError("asset has no measured observed-action complete-cost heads")
         self._check_action(features, costs=True)
         if self.cost_provenance.get("feature_schema") == NATIVE_COST_SCHEMA:
-            names = self.cost_provenance["feature_names"]
-            center, scale = self.cost_provenance["center"], self.cost_provenance["scale"]
-            return {"branch_complete_cost": {name: max(0.0, head["intercept"]+sum(
-                coefficient*(features[key]-mean)/deviation for key, mean, deviation, coefficient in
-                zip(names, center, scale, head["coefficients"], strict=True)))
+            scaled = tuple(features[key]/scale for key, scale in zip(self.cost_provenance["feature_names"],
+                self.cost_provenance["scale"], strict=True))
+            return {"branch_complete_cost": {name: head["intercept"]+sum(
+                coefficient*value for value, coefficient in zip(scaled, head["coefficients"], strict=True))
                 for name, head in self.cost_models["branch_complete_cost"].items()}}
         result = {}
         for target in COST_TARGETS:
@@ -246,7 +245,9 @@ class PlanGainModel:
         if (schema, kind) not in {(2, "reader_bound_plan_gain_cost_ridge"),
                                   (3, "reader_bound_plan_gain_cost_ridge")}:
             raise ValueError("unsupported plan gain asset schema")
-        if schema == 3 and data["cost_provenance"]["feature_schema"] != NATIVE_COST_SCHEMA:
+        cost_provenance = data["cost_provenance"]
+        if schema == 3 and (cost_provenance["feature_schema"] != NATIVE_COST_SCHEMA
+                or tuple(cost_provenance["feature_names"]) != NATIVE_COST_FEATURE_NAMES):
             raise ValueError("unsupported native cost feature schema")
         if data["reader_checkpoint"] != reader_checkpoint or data["reader_profile_id"] != reader_profile_id:
             raise ValueError("gain asset requires its measured reader checkpoint and runtime profile")
@@ -264,7 +265,7 @@ class PlanGainModel:
                     or data.get("cost_provenance", {}).get("observed_feature_schema") != OBSERVED_FEATURE_SCHEMA):
                 raise ValueError("observed action asset requires the current pre-action budget feature schema")
             cost_names = data["cost_provenance"].get("feature_names", data["feature_names"])
-            if not set(OBSERVED_FEATURE_NAMES) <= set(cost_names):
+            if schema != 3 and not set(OBSERVED_FEATURE_NAMES) <= set(cost_names):
                 raise ValueError("observed cost asset omits pre-action budget features")
         for name in ("feature_names", "center", "scale", "coefficients"):
             data[name] = tuple(data[name])
@@ -396,6 +397,27 @@ def fit_cost_heads(samples, feature_names, center, scale, *, ridge=1.0, targets=
     mse = {target: {name: float(errors[index*len(COST_FIELDS)+column]) for column, name in enumerate(COST_FIELDS)}
            for index, target in enumerate(targets)}
     return models, mse
+
+
+def fit_native_cost_heads(samples, *, ridge):
+    """Fit absolute costs on nonnegative work with an unpenalized intercept."""
+    import numpy as np
+    from scipy.optimize import nnls
+
+    names = NATIVE_COST_FEATURE_NAMES
+    work = np.asarray([[features[name] for name in names] for features, _ in samples], dtype=np.float64)
+    scale = np.maximum(work.max(axis=0), 1.0)
+    design = np.column_stack((np.ones(len(samples)), work/scale))
+    penalty = np.column_stack((np.zeros(len(names)), math.sqrt(ridge)*np.eye(len(names))))
+    augmented = np.vstack((design, penalty))
+    heads, mse = {}, {}
+    for name in COST_FIELDS:
+        targets = np.asarray([cost[name] for _, cost in samples], dtype=np.float64)
+        fitted, _ = nnls(augmented, np.concatenate((targets, np.zeros(len(names)))))
+        heads[name] = {"intercept": float(fitted[0]), "coefficients": fitted[1:].tolist()}
+        mse[name] = float(np.mean((design@fitted-targets)**2))
+    return {"branch_complete_cost": heads}, {"branch_complete_cost": mse}, scale.tolist()
+
 
 def fit_gain(rows, *, ridge=1.0, input_path=None):
     """Closed-form regression; called only by the explicit training command."""

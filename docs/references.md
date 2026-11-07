@@ -75,7 +75,7 @@ C 对新增保护项及期限 `(p, τ)` 的目标是 `ΔV(p, τ | 已保护集�
 | [Adaptive-RAG](https://arxiv.org/abs/2403.14403)／[FLARE](https://aclanthology.org/2023.emnlp-main.495/) | 前者按复杂度选择检索深度；后者预测下一句，用低置信 token 触发检索与重生成。当前动作收益基于已观察状态，OpenNeed 负责缺口，无这两种路由器 | **借鉴监督与触发粒度，暂不叠加模型**。初始路由只有能省掉大量无益首轮准备才有独立价值；逐句 FLARE 需概率信息和额外解码，与当前一次最终 ANSWER 的形态不同 |
 | [Self-RAG](https://selfrag.github.io/) | 训练 reader 输出 reflection tokens，控制检索、支持和效用。当前外围支持/审核字段不等同于 Self-RAG | **整法不采用**：要求 reader 训练，与固定 Qwen 条件冲突。可参考相关性、支持性和效用的区分，复用当前审核而非再增加 critic 或反思解码 |
 | [计算价值](https://www2.eecs.berkeley.edu/Pubs/TechRpts/1988/5755.html)／[Rollout](https://web.mit.edu/dimitrib/www/dp_rollout_book.html) | 将继续计算视为有成本的动作；当前离线首动作＋固定后续得到 ΔQ，线上一次动作后重观察 | **保留主线**。线上不实际展开所有分支，离线配对和评分费用完整记录。预测增益与成本属于近似量，现有步骤执行预算继续约束实际支出，不继承精确 rollout 改进保证 |
-| 岭回归／[XGBoost](https://arxiv.org/abs/1603.02754) | 当前 B 使用岭回归质量和绝对成本头；公共状态的线性项会在动作差中抵消，非线性或显式动作×状态交互可表达条件化排序，尚未接入 | **条件候选**：当前协议的配对标签显示错误排序时，先检验少量明确交互，再决定是否比较小树模型。保持同一前动作特征与会话分区，以实际动作选择结果判断；本轮只统一执行与监督协议 |
+| 岭回归、[非负最小二乘](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.nnls.html)／[XGBoost](https://arxiv.org/abs/1603.02754) | B 的质量头使用岭回归；绝对成本头用 SciPy NNLS 加岭惩罚，按非负实际工作量拟合，避免容量余额外推成负费用。质量头中不同追加动作共有的线性状态项会在排序时抵消；直接回答的增益基准为零 | **保留轻量回归**。非负系数约束成本随所声明工作量增加，具体误差仍需实测。只有配对标签显示错误排序时才考虑动作×状态交互或小树模型 |
 
 ## C：精确前缀、保留对象、容量与期限
 

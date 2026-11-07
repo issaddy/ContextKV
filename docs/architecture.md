@@ -78,9 +78,9 @@ READ 按实际 tokenizer 的输入容量与结构化输出容量打包。同来�
 
 `action_policy.py` 在当前状态比较直接回答、一次 READ、一次 REDUCE 和一次 GAP。`plan_policy.py` 保留完整计划对照的调度与预算接口。
 
-`observed_actions` 模式把直接 ANSWER、一次 READ、一次 REDUCE、一次 GAP 放在同一已观察状态上配对。反事实收益采用 `infer_bridge_ready_or_one_gap_one_terminal_read_v4`：首动作之后，只对尚未满足的 infer 桥接需求接至多一次终端 READ；已有就绪来源优先，否则至多一次 GAP。线上与反事实均由 `bind_read_parents` 绑定未解需求的相关父结论。离线 DIRECT 以当前材料上的强制 ANSWER 为终点。线上停止要求实际可见原文覆盖或结论充分，执行继续动作后重新观察。监督与收益资产绑定相同协议和 `observed_feature_schema=pre_action_budget_support_state_v2`。价值与成本特征同时包含 A 的支持/桥接估计、Need 前驱、已观察终端支持与桥接缺口，以及实际已付 token/墙钟、已执行步骤及对应剩余预算；无界额度用独立标记表达。可选后续在硬步骤不足以完成 READ+ANSWER 或 GAP+READ+ANSWER 时直接进入终端 ANSWER，不启动无预算步骤。
+`observed_actions` 模式把直接 ANSWER、一次 READ、一次 REDUCE、一次 GAP 放在同一已观察状态上配对。反事实收益采用 `infer_bridge_ready_or_one_gap_one_terminal_read_v4`：首动作之后，只对尚未满足的 infer 桥接需求接至多一次终端 READ；已有就绪来源优先，否则至多一次 GAP。线上与反事实均由 `bind_read_parents` 绑定未解需求的相关父结论。离线 DIRECT 以当前材料上的强制 ANSWER 为终点。线上停止要求实际可见原文覆盖或结论充分，执行继续动作后重新观察。监督与收益资产绑定相同协议和 `observed_feature_schema=pre_action_budget_support_state_v2`。质量特征包含 A 的支持/桥接估计、Need 前驱、已观察终端支持与桥接缺口，以及实际已付 token/墙钟、已执行步骤及对应剩余预算；无界额度用独立标记表达。可选后续在硬步骤不足以完成 READ+ANSWER 或 GAP+READ+ANSWER 时直接进入终端 ANSWER，不启动无预算步骤。
 GAP 仅在选中后执行并进入步骤账本；返回的新来源与原事实合并，再决定是否阅读。线上与离线共用 `action_proposals.gap_retrieval_plan`，仅排除实际已读来源闭包；未读候选仍可召回，passage 上限为已读数量加声明新增额度，并受原总上限约束。反事实 REDUCE 使用与线上工厂相同的事实基底，不按原 READ Need 别名或 extract 类型再次筛选。
-质量模型学习实际最终质量差。新成本模型用动作前的原生缓存、压力和可编译首步报价预测动作加最终回答的绝对成本；GAP 和 CPU REDUCE 只使用动作前的批级状态。
+质量模型学习实际最终质量差。绝对成本头用非负岭回归拟合动作加最终回答的费用，输入为动作、已有事实大小、输出份额、首步实际输入、未命中预填充、预计 Host 回载和排队量；首步无原生调用时，其输入与传输工作量为零。特征仅缩放、不中心化，截距和系数非负，不在预测后截零。特征协议为 `pre_action_native_nonnegative_work_v2`，旧成本资产由原实测报价重新提取特征并拟合。
 在线在同一次原生观测下分别预测动作和 DIRECT，再计算带符号差；采集时不同分支的实测成本差保留为诊断，避免把执行顺序产生的预热收益当作动作收益。
 B 的 `input_protocol` 额外绑定 `merged_source_windows_actual_coverage_reused_facts_compiled_choice`、实际规范来源窗口粒度与完整 reader fingerprint；观察、分支、配对、拟合及加载沿用同一身份，缺失或不匹配时拒绝旧资产。真实状态保留已复用 seed、已读覆盖及编译器选中排列，`pre_action_input` 将原生报价与实际执行输入绑定。禁用事实复用是显式机制消融，其开关不改变资产可接受的协议身份，实际 seed 差异保留在状态中。
 

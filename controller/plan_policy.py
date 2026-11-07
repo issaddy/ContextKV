@@ -310,22 +310,30 @@ def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=
     return {name: float(values[name]) for name in names}
 
 
-NATIVE_COST_SCHEMA = "pre_action_native_absolute_v1"
+NATIVE_COST_SCHEMA = "pre_action_native_nonnegative_work_v2"
+NATIVE_COST_PLAN_FEATURES = ("direct_answer", "read_once", "reduce_once", "gap_retrieval",
+                             "existing_claim_chars", "output_budget_tokens")
+NATIVE_COST_FEATURE_NAMES = (*NATIVE_COST_PLAN_FEATURES, "first_input_tokens", "first_prefill_tokens",
+                             "first_host_load_tokens", "active_requests", "queued_requests")
 
 
 def plan_cost_features(features, batch, first_quote):
-    """Add only the native state visible before the first action."""
-    return {**features,
-        "free_gpu_tokens": batch.free_gpu_tokens,
-        "free_host_tokens": batch.free_host_tokens,
-        "gpu_occupied_fraction": 1-batch.free_gpu_tokens/batch.gpu_capacity_tokens,
-        "evictable_gpu_tokens": batch.evictable_gpu_tokens,
-        "active_requests": batch.active_requests,
-        "queued_requests": batch.queued_requests,
-        "has_first_quote": float(first_quote is not None),
-        "first_input_tokens": first_quote.input_len if first_quote is not None else 0,
-        "first_ready_gpu_tokens": first_quote.ready_gpu_prefix_tokens if first_quote is not None else 0,
-        "first_host_load_tokens": first_quote.host_only_load_tokens if first_quote is not None else 0}
+    """Use branch work known before the first action and actual Native pressure."""
+    input_tokens, prefill_tokens, host_load = 0, 0, 0
+    if first_quote is not None:
+        input_tokens = first_quote.input_len
+        host_load = max(0, min(first_quote.host_only_load_tokens, first_quote.native_load_estimate))
+        # As in CostModel.predict_native, only a full Host restore exposes the
+        # contiguous recoverable prefix beyond the ready GPU prefix.
+        full_restore = host_load > 0 and host_load == first_quote.host_only_load_tokens
+        usable_prefix = min(first_quote.match_limit, first_quote.recoverable_prefix_tokens
+                            if full_restore else first_quote.ready_gpu_prefix_tokens)
+        prefill_tokens = max(0, input_tokens-usable_prefix)
+    values = {**{name: features[name] for name in NATIVE_COST_PLAN_FEATURES},
+        "first_input_tokens": input_tokens, "first_prefill_tokens": prefill_tokens,
+        "first_host_load_tokens": host_load, "active_requests": batch.active_requests,
+        "queued_requests": batch.queued_requests}
+    return values
 
 
 def complete_plan(context_plan, answer_variants, *, semantic_kind, reader_checkpoint,
