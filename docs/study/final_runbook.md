@@ -4,6 +4,8 @@
 
 Host 固定 token 配对已验证真实回载与重算：同一请求下，Native 回载 128、重算 129 tokens；独立前缀保留回载 256、重算 1 token。业务 epoch 退役后 owner 仍保留 Host 前缀。该结果验证生命周期，主实验保留策略仍为 Native；成功与初次接口失败的费用分别保存。
 
+已完成的 c1 MultiDoc2Dial：固定 B＋Native 交付 196/209，完整分母 RB_llm 为 0.688038；LlamaIndex Native 交付 209/209，为 0.806220。当前主线在该公开轨落后，尚未达到研究验收。两者 MT-RAG 各生成 41 个答案；DeBERTa tokenizer 的真实位置上限适配后，82 个答案的 algorithmic 阶段已离线补齐，没有重跑问答或已完成的 judge 调用。各有 1 个 RAGAS 分量缺失，不能将其当零分或完整质量结果。c1 尚未运行的 versionqa/loong 后续按原队列补齐，正在运行的其它格继续保留自己的实际 P3。
+
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 
 后续运行使用容器默认 `python3`，不再新建虚拟环境；此前批次保留其真实解释器记录。跨机器仅同步代码、配置和轻量结果／成本记录，训练模型及大日志留在实验容器。
@@ -134,7 +136,10 @@ python3 -m training.train_models --config configs/auxiliary_training.yaml --stag
 python3 -m training.train_models --config configs/auxiliary_training.yaml --stage task-eval
 python3 -m training.build_examples --config configs/auxiliary_training.yaml
 python3 -m training.train_models --config configs/auxiliary_training.yaml --stage support
+python3 -m training.train_models --config configs/auxiliary_training.yaml --stage support-eval
 ```
+
+`support-eval` 读取显式 `support_eval_asset`、`support_eval_labels`、cohort 和输出目录，核对资产实际训练会话与开发会话隔离，报告支持标量误差、错误 complete、原文 span 选择及真实推理费用。这是独立会话上的教师标签一致性，原文正确性另审；不能据此替代完整问答质量。当前优先分析支持选择是否丢失有效材料，未启动支持学生训练。
 
 `build_examples` 使用固定 Qwen 服务生成支持关系标签。P1 采集将
 `collection.task_asset` 设为实际训练后的 task 资产、`parent_support_asset` 设为实际 support 资产，

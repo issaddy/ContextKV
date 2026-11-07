@@ -152,6 +152,85 @@ def test_trained_support_memo_restores_the_matching_query_embedding():
     assert len(calls) == 3
 
 
+def test_support_eval_replays_only_dev_and_keeps_teacher_membership_and_cost(tmp_path, monkeypatch):
+    import pytest
+
+    from adapters.support_model import SupportPrediction
+    from controller.context_schema import SourceSpan
+    from controller.serialization import to_jsonable
+    from training.reader_data import file_digest
+    from training.support_model import TrainedSupportBackend
+    from training.train_models import train
+
+    _, contracts, _ = source_read()
+    unit = contracts[0].units[0]
+    span = unit.source_spans[0]
+    dep_block = make_evidence("Other material.", "dependency")
+    dep_span = SourceSpan("dependency", dep_block.key, 0, len(dep_block.text))
+    dependency = replace(unit, unit_id="dependency", text=dep_block.text, source_spans=(dep_span,))
+    labels = {"applicability": .6, "direct_support": .7, "joint_support": .9, "bridge_value": .2,
+              "disposition": "partial", "source_spans": [to_jsonable(span)],
+              "quality": None, "answer_disposition": None}
+    row = {"task_id": "dev-task", "conversation_id": "dev-session", "need_id": "n", "query": "Actual question",
+        "units": [to_jsonable(unit)], "dependencies": [to_jsonable(dependency)],
+        "split": "train", "label_origin": "observed_qwen3_support_teacher", "labels": labels}
+    examples_path = tmp_path/"labels.jsonl"
+    examples_path.write_text("\n".join(json.dumps(value) for value in (
+        {**row, "example_id": "train", "task_id": "train-task", "conversation_id": "train-session"},
+        {**row, "example_id": "dev-1"}, {**row, "example_id": "dev-2"}))+"\n")
+    cohort = tmp_path/"cohort.json"
+    cohort.write_text(json.dumps({"members": [
+        {"task_id": "train-task", "conversation_id": "train-session", "split": "train"},
+        {"task_id": "dev-task", "conversation_id": "dev-session", "split": "dev"},
+        {"task_id": "missing-task", "conversation_id": "dev-session", "split": "dev"}]}))
+    asset = tmp_path/"asset"
+    asset.mkdir()
+    manifest_path = asset/"support-model.json"
+    partition = {"split": "train", "cohort_manifest_sha256": file_digest(cohort),
+        "conversation_ids": ["parent-session", "train-session"]}
+    (asset/"heads.pt").write_bytes(b"specified fixture heads")
+    calls = []
+    prediction = SupportPrediction(.8, .7, .9, .2, "complete",
+        (replace(span, span_id="fragment-with-new-id", end=span.start+1), dep_span))
+
+    def predict(examples):
+        calls.extend(examples)
+        return prediction, None
+
+    backend = SimpleNamespace(predict=predict, release_task=lambda task_id: None, close=lambda: None,
+        usage={"input_tokens": 37, "output_tokens": 0, "support_ms": 3, "oversized_examples": 1},
+        deployment={"device": "cpu"})
+
+    def load(cls, path, **kwargs):
+        backend.manifest = json.loads((path/"support-model.json").read_text())
+        return backend
+
+    monkeypatch.setattr(TrainedSupportBackend, "load", classmethod(load))
+    output = tmp_path/"eval"
+    config = {"training": {"cohort_manifest": str(cohort), "support_eval_labels": str(examples_path),
+        "support_eval_asset": str(asset), "support_eval_output": str(output)},
+        "support_model": {"device": "cpu"}}
+    manifest_path.write_text(json.dumps({"training_partition": {**partition,
+        "conversation_ids": ["dev-session", "train-session"]}}))
+    with pytest.raises(ValueError, match="overlap asset training"):
+        train(config, "support-eval")
+    assert not calls
+    manifest_path.write_text(json.dumps({"training_partition": partition}))
+    report = train(config, "support-eval")
+    assert report["asset"]["training_partition"] == partition
+    assert [example.task_id for example in calls] == ["dev-task", "dev-task"]
+    assert report["declared_tasks"] == 2 and report["missing_task_ids"] == ["missing-task"]
+    assert report["scored_examples"] == 1 and report["unscored_examples"] == 1
+    assert abs(report["scalar_errors"]["applicability"]["mae"]-.2) < 1e-9
+    assert report["disposition"]["confusion_teacher_by_prediction"]["partial"]["complete"] == 1
+    assert report["disposition"]["false_complete"] == 1
+    membership = report["source_span_membership"]
+    assert (membership["true_positive"], membership["false_positive"], membership["false_negative"]) == (1, 1, 0)
+    assert report["cost"]["backend_usage"] == backend.usage
+    assert report["independent_original_source_audit"] == {"status": "not_evaluated"}
+    assert [json.loads(line)["example_id"] for line in (output/"predictions.jsonl").read_text().splitlines()] == ["dev-1", "dev-2"]
+
+
 def test_teacher_support_memo_only_computes_changed_input_and_is_released_per_qa():
     from adapters.support_model import SupportInput
     from adapters.teacher_support import TeacherSupportBackend

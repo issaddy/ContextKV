@@ -1,4 +1,4 @@
-"""Train the task asset or support-relation asset on registered train states."""
+"""Train or evaluate auxiliary assets on the registered train/dev cohorts."""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +16,9 @@ def train(config, stage):
     if stage == "task-eval":
         from training.task_model import evaluate_task
         return evaluate_task(config)
+    if stage == "support-eval":
+        from training.support_model import evaluate_support
+        return evaluate_support(config)
     if stage == "support":
         from training.support_model import train_support
         return train_support(settings["support_labels"], settings["support_parent_asset"],
@@ -29,7 +32,7 @@ def train(config, stage):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    parser.add_argument("--stage", required=True, choices=("task", "task-eval", "support"))
+    parser.add_argument("--stage", required=True, choices=("task", "task-eval", "support", "support-eval"))
     args = parser.parse_args(argv)
     config = yaml.safe_load(Path(args.config).read_text())
     if "base_study_config" in config:

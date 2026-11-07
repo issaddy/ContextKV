@@ -9,16 +9,18 @@ from dataclasses import asdict
 from collections import Counter
 from importlib.metadata import version
 import json
+from math import sqrt
 from pathlib import Path
 import time
 
-from adapters.support_model import SetPrediction, SupportPrediction
-from controller.context_schema import SourceSpan
+from adapters.support_model import SetPrediction, SupportInput, SupportPrediction
+from controller.context_schema import EvidenceUnit, SourceSpan
 from controller.serialization import decode
 from training.task_data import select_cohort_rows
 
 
 SUPPORT_CLASSES = ("complete", "partial", "background", "contradict")
+SUPPORT_SCALARS = ("applicability", "direct_support", "joint_support", "bridge_value")
 ANSWER_CLASSES = ("answer", "partial", "retrieval_gap", "unanswerable", "underspecified")
 
 
@@ -133,6 +135,12 @@ def render_document(example):
         parts.append(unit.text+"\n\n")
         cursor += len(unit.text)+2
     return "".join(parts), tuple(locations)
+
+
+def _support_input(row):
+    return SupportInput(row["task_id"], row["need_id"], row["query"],
+        tuple(decode(EvidenceUnit, unit) for unit in row["units"]),
+        tuple(decode(EvidenceUnit, unit) for unit in row.get("dependencies", [])))
 
 
 def _graph_inputs(state, units, supports, embeddings, torch, device):
@@ -384,6 +392,13 @@ def _save(network, tokenizer, directory, metadata, *, encoder_source=None, paren
     preserve_asset_sources(directory, parent_asset=parent_asset or (Path(encoder_source).parent if encoder_source is not None else None))
 
 
+def _training_partition(manifest):
+    partition = manifest.get("training_partition", {})
+    if not partition.get("cohort_manifest_sha256") or not partition.get("conversation_ids"):
+        raise ValueError("support asset is missing training cohort and conversation provenance")
+    return partition
+
+
 def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, device="cuda:0", epochs=1,
                   batch_size=4, learning_rate=1e-4, encoder_learning_rate=1e-5,
                   max_length=8192, seed=42, base_path=None,
@@ -393,13 +408,13 @@ def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, d
         raise ValueError("base_path is required when parent_asset is None")
     complete_started = time.perf_counter()
     import torch
-    from adapters.support_model import SupportInput
-    from controller.context_schema import EvidenceUnit
     torch.manual_seed(seed)
     initialization_started = time.perf_counter()
+    training_conversations = set()
     if parent_asset is not None:
         backend = TrainedSupportBackend.load(parent_asset, device=device, batch_size=batch_size,
             encoder_dtype="float32", encoder_autocast_dtype=encoder_autocast_dtype)
+        training_conversations.update(_training_partition(backend.manifest)["conversation_ids"])
         initialization = {"mode": "parent_support_asset", "parent_support_asset": str(parent_asset)}
     else:
         from transformers import AutoModel, AutoTokenizer
@@ -423,9 +438,7 @@ def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, d
     assert all(example["label_origin"] != "pending_teacher" for example in examples)
     fitting, oversized = [], []
     for row in examples:
-        example = SupportInput(row["task_id"], row["need_id"], row["query"],
-            tuple(decode(EvidenceUnit, unit) for unit in row["units"]),
-            tuple(decode(EvidenceUnit, unit) for unit in row.get("dependencies", [])))
+        example = _support_input(row)
         document, _ = render_document(example)
         input_tokens = len(tokenizer(row["query"], document, truncation=False)["input_ids"])
         if input_tokens <= max_length:
@@ -435,6 +448,7 @@ def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, d
                 "input_tokens": input_tokens, "encoder_limit": max_length})
     examples = fitting
     assert examples
+    training_conversations.update(row["conversation_id"] for row in examples)
     encoder_parameters = list(network.encoder.parameters())
     head_parameters = [value for name, value in network.named_parameters()
                        if not name.startswith("encoder.")]
@@ -447,10 +461,7 @@ def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, d
         order = torch.randperm(len(examples)).tolist()
         for start in range(0, len(order), batch_size):
             rows = [examples[index] for index in order[start:start+batch_size]]
-            inputs = [SupportInput(row["task_id"], row["need_id"], row["query"],
-                tuple(decode(EvidenceUnit, unit) for unit in row["units"]),
-                tuple(decode(EvidenceUnit, unit) for unit in row.get("dependencies", [])))
-                for row in rows]
+            inputs = [_support_input(row) for row in rows]
             documents = [render_document(example) for example in inputs]
             encoded = tokenizer([row["query"] for row in rows], [d[0] for d in documents],
                 padding=True, truncation=False,
@@ -475,8 +486,7 @@ def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, d
                                         span_labels[index, token] = 1 if lo <= gold["start"] else 2
             token_count += int(encoded["attention_mask"].sum())
             output = network(**{key: value.to(device) for key, value in encoded.items()})
-            targets = torch.tensor([[row["labels"][name] for name in (
-                "applicability", "direct_support", "joint_support", "bridge_value")]
+            targets = torch.tensor([[row["labels"][name] for name in SUPPORT_SCALARS]
                 for row in rows], dtype=torch.float32, device=device)
             status = torch.tensor([SUPPORT_CLASSES.index(row["labels"]["disposition"])
                                    for row in rows], device=device)
@@ -523,6 +533,8 @@ def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, d
                                            for value in state.values() if isinstance(value, torch.Tensor)}),
         "inference_encoder_dtype": inference_encoder_dtype, "inference_head_dtype": "float32",
         "training_partition": {"split": "train", "examples": len(examples),
+            "cohort_manifest_sha256": examples[0]["cohort_manifest_sha256"],
+            "conversation_ids": sorted(training_conversations),
             "history_origins": dict(Counter(row.get("history_kind", "explicit_training_fixture") for row in examples))},
         "packages": {name: version(name) for name in ("torch", "transformers", "tokenizers")},
         "support_classes": SUPPORT_CLASSES, "answer_classes": ANSWER_CLASSES,
@@ -546,6 +558,115 @@ def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, d
     metadata["complete_ms"] = (time.perf_counter()-complete_started)*1000
     (Path(output_dir)/"support-model.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2)+"\n")
     return metadata
+
+
+def _source_membership(example, spans):
+    """Project predicted BIO fragments onto the teacher's candidate source spans."""
+    return {(source.source_key, source.start, source.end)
+        for unit in (*example.units, *example.dependencies) for source in unit.source_spans
+        if any(span.source_key == source.source_key and span.start < source.end
+               and source.start < span.end for span in spans)}
+
+
+def evaluate_support(config):
+    """Replay held-out support inputs; measure label agreement, not source correctness."""
+    from training.reader_data import file_digest
+    from training.task_data import read_jsonl, write_jsonl
+
+    settings = config["training"]
+    labels_path = Path(settings["support_eval_labels"]).resolve()
+    cohort_path = Path(settings["cohort_manifest"]).resolve()
+    asset = Path(settings["support_eval_asset"]).resolve()
+    members = json.loads(cohort_path.read_text())["members"]
+    train_sessions = {row["conversation_id"] for row in members if row["split"] == "train"}
+    dev = [row for row in members if row["split"] == "dev"]
+    dev_sessions = {row["conversation_id"] for row in dev}
+    if train_sessions & dev_sessions:
+        raise ValueError("support-eval requires conversation-disjoint train and dev cohorts")
+    rows = select_cohort_rows(read_jsonl(labels_path), cohort_path, "dev")
+    if not rows or any(row["label_origin"] == "pending_teacher" for row in rows):
+        raise ValueError("support-eval requires labelled examples from the declared dev cohort")
+    by_task = {}
+    for row in rows:
+        by_task.setdefault(row["task_id"], []).append(row)
+    output = Path(settings["support_eval_output"]).resolve()
+    started = time.perf_counter()
+    backend = TrainedSupportBackend.load(asset, device=config["support_model"]["device"],
+        batch_size=settings.get("support_eval_batch_size", 8))
+    setup_ms = (time.perf_counter()-started)*1000
+    predictions, errors = [], {name: [] for name in SUPPORT_SCALARS}
+    confusion = {target: dict.fromkeys(SUPPORT_CLASSES, 0) for target in SUPPORT_CLASSES}
+    tp = fp = fn = exact = scored = 0
+    predict_ms = 0.0
+    try:
+        training_partition = _training_partition(backend.manifest)
+        overlap = dev_sessions.intersection(training_partition["conversation_ids"])
+        if overlap:
+            raise ValueError(f"support-eval dev conversations overlap asset training: {sorted(overlap)}")
+        output.mkdir(parents=True, exist_ok=False)
+        for task_id, batch in by_task.items():
+            examples = tuple(_support_input(row) for row in batch)
+            started = time.perf_counter()
+            actual = backend.predict(examples)
+            predict_ms += (time.perf_counter()-started)*1000
+            backend.release_task(task_id)
+            for row, example, prediction in zip(batch, examples, actual, strict=True):
+                labels = row["labels"]
+                predictions.append({**{key: row[key] for key in ("example_id", "task_id", "conversation_id",
+                    "need_id", "cohort_split", "cohort_manifest_sha256", "label_origin")},
+                    "labels": labels, "prediction": prediction})
+                if prediction is None:
+                    continue
+                scored += 1
+                for name in SUPPORT_SCALARS:
+                    errors[name].append(getattr(prediction, name)-labels[name])
+                confusion[labels["disposition"]][prediction.disposition] += 1
+                expected = {(span.source_key, span.start, span.end)
+                    for span in (decode(SourceSpan, value) for value in labels["source_spans"])}
+                selected = _source_membership(example, prediction.source_spans)
+                tp += len(expected & selected)
+                fp += len(selected-expected)
+                fn += len(expected-selected)
+                exact += selected == expected
+        usage, deployment = dict(backend.usage), dict(backend.deployment)
+    finally:
+        backend.close()
+    def ratio(numerator, denominator):
+        return numerator/denominator if denominator else None
+    false_complete = sum(confusion[target]["complete"] for target in SUPPORT_CLASSES if target != "complete")
+    expected_noncomplete = sum(sum(confusion[target].values()) for target in SUPPORT_CLASSES if target != "complete")
+    predicted_complete = sum(confusion[target]["complete"] for target in SUPPORT_CLASSES)
+    write_jsonl(output/"predictions.jsonl", predictions)
+    summary = {"scope": "held-out dev teacher-label agreement on fixed support examples",
+        "independent_original_source_audit": {"status": "not_evaluated"},
+        "split": "dev", "cohort_manifest": str(cohort_path), "cohort_manifest_sha256": file_digest(cohort_path),
+        "declared_tasks": len(dev), "selected_tasks": len(by_task),
+        "selected_conversations": len({row["conversation_id"] for row in rows}),
+        "missing_task_ids": sorted({row["task_id"] for row in dev}-by_task.keys()),
+        "labels_path": str(labels_path), "labels_sha256": file_digest(labels_path),
+        "label_origins": dict(Counter(row["label_origin"] for row in rows)),
+        "examples": len(rows), "scored_examples": scored, "unscored_examples": len(rows)-scored,
+        "scalar_errors": {name: {"mae": ratio(sum(map(abs, values)), scored),
+            "rmse": sqrt(sum(value*value for value in values)/scored) if scored else None}
+            for name, values in errors.items()},
+        "disposition": {"confusion_teacher_by_prediction": confusion,
+            "accuracy": ratio(sum(confusion[name][name] for name in SUPPORT_CLASSES), scored),
+            "false_complete": false_complete, "teacher_noncomplete": expected_noncomplete,
+            "predicted_complete": predicted_complete,
+            "false_complete_rate_among_teacher_noncomplete": ratio(false_complete, expected_noncomplete),
+            "false_complete_rate_among_predicted_complete": ratio(false_complete, predicted_complete)},
+        "source_span_membership": {"rule": "teacher selected original spans; prediction fragments mark input spans by positive coordinate overlap on the same source key",
+            "true_positive": tp, "false_positive": fp, "false_negative": fn,
+            "precision": ratio(tp, tp+fp), "recall": ratio(tp, tp+fn), "f1": ratio(2*tp, 2*tp+fp+fn),
+            "exact_example_rate": ratio(exact, scored)},
+        "asset": {"path": str(asset), "manifest_sha256": file_digest(asset/"support-model.json"),
+            "heads_sha256": file_digest(asset/"heads.pt"), "deployment": deployment,
+            "training_partition": training_partition},
+        "cost": {"scope": "fixed support input replay, grouped by task; not end-to-end QA",
+            "setup_ms": setup_ms, "predict_wall_ms": predict_ms, "backend_usage": usage},
+        "predictions_path": str(output/"predictions.jsonl")}
+    (output/"summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2)+"\n")
+    return summary
 
 
 def train_set_utility(preferences_path, asset_path, output_dir, *, cohort_manifest, device="cuda:0",

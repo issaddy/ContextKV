@@ -20,6 +20,9 @@ training:
   support_labels: runs/study/auxiliary/support/support_labels.jsonl
   support_parent_asset: null
   support_output: models/study-support-budget-loop
+  support_eval_labels: runs/study/auxiliary/support/support_labels.jsonl
+  support_eval_asset: models/study-support-budget-loop
+  support_eval_output: runs/study/auxiliary/support-evaluation
   reader_config: configs/qwen3_32b.yaml
   teacher_urls: [http://127.0.0.1:30001]
   teacher_concurrency: 4
