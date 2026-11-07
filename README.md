@@ -2,23 +2,23 @@
 
 面向资源受限多轮文档问答的上下文管理与 KV 缓存协同优化研究。
 
-Qwen3-32B 权重与解码参数冻结，不做微调或合并模型。
+实验固定 Qwen3-32B 权重与解码参数。
 
 业务入口 `DocumentQA` 贯通资料登记、HTTP 问答与 `bench.study`。
 `configs/study.yaml` 使用 `selection.mode: ranked` 按发布版重排与依赖闭包选材。`selection.mode: support` 用于支持模型对照。
 
-系统在实际问答历史、条件与版本基础上选择原文，复用适用原子事实，合并稳定窗口执行
-READ/REDUCE/ANSWER；在选择前编译实际来源排列并取得 Native 报价。最终结论保留完整来源链，
-数值需求共享阅读，确定性运算在 CPU 完成；模型归约按有限分片执行。
+系统按实际问答历史、条件与版本选择原文，复用适用的原子事实，并编译原文、结论及混合表示。
+SGLang 原生报价参与选择下一步阅读、归约或回答，剩余证据需求决定哪些正文前缀应获得短租。
+执行后用新增事实更新证据缺口和保留需求。数值需求共享提取，CPU 执行确定性运算，最终结论保留来源链。
 
 | 主线 | 当前入口 |
 |---|---|
 | A：实际历史、证据选择与事实复用 | `adapters.study_retrieval`、`controller.fact_reuse` |
 | B：显式阅读动作与完整成本 | `controller.action_policy`、`controller.rolling_policy`、`training.plan_gain_rollout`、`training.plan_gain_completion` |
-| C：请求编译与缓存协同 | `controller.request_compiler`、作者 ContextPilot index/reorder；`controller.prefix_retention` 为可选保护 |
+| C：请求编译与缓存协同 | `controller.request_compiler`、ContextPilot index/reorder、`controller.demand`、`controller.prefix_retention` |
 | 评价与总成本 | `bench.study_scoring`、`bench.reassess_saved`、`profiling.study_cost_ledger` |
 
-主比较在并发 1 和 4 下执行固定／收益 B × Native／ContextPilot 编译四格，另有 LlamaIndex 外部参照与关闭跨轮事实复用的对照。每格使用声明的 350 题、77 会话及各自真实 P3 历史。质量使用完整官方分母，成本包含失败请求、辅助计算及实际 GPU/Host 驻留。
+并发 1 和 4 各运行 E1–E6。E1–E4 交叉比较固定／收益决策与 Native／ContextPilot 编译，E5 增加有限表示选择，E6 再增加剩余需求驱动的保留。另有 LlamaIndex 外部参照和跨轮事实复用消融。各格共用 350 题、77 会话与固定到达计划，使用自身实际 P3 历史。验收以 E6 对 E1 的完整队列质量、完整响应 P95 和全部资源成本为准。
 
 `numeric_need_isolation`、`whole_plan`、支持模型及 TTL/value 保留为显式对照入口，默认主线不加载它们。
 
