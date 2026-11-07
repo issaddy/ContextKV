@@ -17,9 +17,10 @@ import random
 import uuid
 
 from controller.config import create_model_template, load_config
-from controller.engine_client import EngineError, SGLangEngineClient
+from controller.engine_client import SGLangEngineClient
 from controller.schema import PromptCandidate
 from controller.templates import token_hash
+from profiling.common import prepare_cache_fixture
 
 
 class LifecycleProbe:
@@ -38,13 +39,7 @@ class LifecycleProbe:
             self.candidates.append(PromptCandidate(name,"APPEND",0,(),query,token_hash(query),frozenset(),frozenset()))
 
     async def fixture(self, mode, **kwargs):
-        for retry in range(20):
-            try:
-                return await self.engine.profile_prepare(mode,**kwargs)
-            except EngineError as error:
-                if error.code != "ENGINE_BUSY" or retry == 19:
-                    raise
-                await asyncio.sleep(.05)
+        return await prepare_cache_fixture(self.engine, mode, **kwargs)
 
     async def snapshot(self):
         batch = await self.engine.quote_batch(self.candidates,self.engine.fingerprint)

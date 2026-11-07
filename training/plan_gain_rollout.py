@@ -26,6 +26,7 @@ from controller.resident_models import evidence_selection_contract
 from controller.schema import (EvidenceBlock, OnlineContext, OnlineMessage, OnlineTurn,
                                PromptCandidate, QueryContext, SessionSnapshot, TurnRecord, Message)
 from controller.serialization import decode, to_jsonable
+from profiling.common import prepare_cache_fixture
 from training.collect_plan_gains import collect_pair
 from training.plan_gain_protocol import (AuditedTaskInterpreter, EmptyPlannedPremise,
     FixedCounterfactualRuntime, GapRetrievalRequest, ObservedActionFailure, PlannedReductionConflict,
@@ -570,7 +571,7 @@ async def prepare_pair_cache(engine, compiler, mode, input_ids, source_ids, *, i
     from controller.templates import token_hash
 
     tick = time.monotonic()
-    reset = await engine.profile_prepare("cold")
+    reset = await prepare_cache_fixture(engine, "cold")
     info = await engine.info()
     shape = {"mode": mode, "cache_config_hash": info.cache_config_hash}
     warmup = None
@@ -590,7 +591,7 @@ async def prepare_pair_cache(engine, compiler, mode, input_ids, source_ids, *, i
                 info.engine_restart_id, "paired_branch_cache_fixture")
             if not retired.acknowledged:
                 raise ValueError("paired cache fixture still owns its priming epoch")
-        await engine.profile_prepare("host_only" if mode == "host_only" else "settle")
+        await prepare_cache_fixture(engine, "host_only" if mode == "host_only" else "settle")
         if compiler.index is not None:
             compiler.index.observe_executed(source_ids, fingerprint=fingerprint, cache_config_hash=info.cache_config_hash,
                 receipt=warmup.receipt, input_ids=input_ids)

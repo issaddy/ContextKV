@@ -1,5 +1,6 @@
 """Calibration records and run manifests, usable without NumPy or CUDA."""
 from __future__ import annotations
+import asyncio
 from dataclasses import asdict, dataclass
 import json
 import math
@@ -7,11 +8,23 @@ from pathlib import Path
 from typing import Iterable
 
 from bench.metrics import distribution
+from controller.engine_client import EngineError
 
 ENGINE_COMMIT = "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b"
 # Read-only identity for validating retained historical manifests, never a
 # default model or a loading revision for new runs.
 LEGACY_MODEL_REVISION = "a09a35458c702b33eeacc393d103063234e8bc28"
+
+
+async def prepare_cache_fixture(engine, mode, **kwargs):
+    """Wait for the profiling engine's idle boundary after the last receipt."""
+    for attempt in range(20):
+        try:
+            return await engine.profile_prepare(mode, **kwargs)
+        except EngineError as error:
+            if error.code != "ENGINE_BUSY" or attempt == 19:
+                raise
+            await asyncio.sleep(.05)
 
 
 @dataclass(frozen=True)

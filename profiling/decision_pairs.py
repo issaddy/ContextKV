@@ -23,12 +23,13 @@ from controller.candidates import CandidatePolicy, build_candidates
 from controller.config import RunConfig, create_model_template, load_config
 from controller.config import GenerationProtocol
 from controller.templates import candidate_request
-from controller.engine_client import EngineError, EngineInfo, SGLangEngineClient
+from controller.engine_client import EngineInfo, SGLangEngineClient
 from controller.planner import PlannerKnobs, choose_plan
 from controller.schema import CacheQuoteBatch, NoFeasiblePlan, PromptCandidate, SessionSnapshot
 from controller.serialization import decode, dumps, loads
 from controller.session_store import Attempt, load_record
 from controller.templates import ByteTemplate
+from profiling.common import prepare_cache_fixture
 
 
 def validate_candidate_protocol(cases, protocol):
@@ -212,13 +213,7 @@ class DecisionPairCollector:
         self.context_limit = context_limit
 
     async def fixture(self, mode):
-        for attempt in range(20):
-            try:
-                return await self.engine.profile_prepare(mode)
-            except EngineError as error:
-                if error.code != "ENGINE_BUSY" or attempt == 19:
-                    raise
-                await asyncio.sleep(.05)
+        return await prepare_cache_fixture(self.engine, mode)
 
     async def generate(self, ids, max_new_tokens, *, warmup=False, candidate=None):
         if warmup == (candidate is not None):
