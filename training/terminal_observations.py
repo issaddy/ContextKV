@@ -122,8 +122,10 @@ def terminal_observation(before, run, source_task, answer_event, online, templat
     gaps = tuple(need for need in state.open_needs if gap_key(need) not in expanded)
     gap_request = (GapRetrievalRequest(gaps, gap_query(state.plan.task_state, gaps), retriever,
         run["continuation_gap_limits"]) if gaps and state.plan.coverage_scope != "all_supplied_documents" else None)
+    domain = observed.get("action_domain")
     plans, _ = build_observed_action_plans(state, snapshot, template,
-        reader_checkpoint=run["reader_checkpoint"], gap_request=gap_request)
+        reader_checkpoint=run["reader_checkpoint"], gap_request=gap_request,
+        read_choices=domain["read_choices"] if domain is not None else 1)
     return to_jsonable({"schema_version": 1, "decision_mode": "branch_terminal", "history_origin": run["history_origin"],
         "observation_id": f"{attempt_id}:branch_terminal:{quote['request_id']}", "attempt_id": attempt_id,
         "request_id": attempt["request_id"], "task_id": run["task_id"], "cohort_split": run["cohort_split"],
@@ -136,6 +138,7 @@ def terminal_observation(before, run, source_task, answer_event, online, templat
         "reader_checkpoint": run["reader_checkpoint"], "reader_profile_id": run["reader_profile_id"],
         "input_protocol": run["input_protocol"], "resident_model_manifest_digest": resident_digest,
         "evidence_selection_contract": evidence_selection_contract(resident),
+        "action_domain": domain, "legal_answer_representations": (candidate["representation"],),
         "gap_request": gap_request, "legal_actions": [plan.semantic_kind for plan in plans],
         "requested_families": TERMINAL_FAMILIES})
 
@@ -144,7 +147,9 @@ def export_terminal_observations(collection, template, output):
     from training.plan_gain_rollout import digest
 
     packets, excluded = [], []
-    for phase_path in sorted(Path(collection).glob("*/phase-resources.json")):
+    root = Path(collection)
+    phases = (root/"phase-resources.json",) if (root/"phase-resources.json").is_file() else sorted(root.glob("*/phase-resources.json"))
+    for phase_path in phases:
         directory = phase_path.parent
         phase = json.loads(phase_path.read_text())["online"]
         event_path = directory / "state/events.jsonl"
