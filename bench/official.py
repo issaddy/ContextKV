@@ -437,6 +437,7 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     Run in the isolated evaluator environment. This function does not start a
     server, load weights, regenerate answers or alter official metric prompts.
     """
+    adapter_sha256 = sha256(Path(__file__).read_bytes()).hexdigest()
     root = Path(checkout).resolve()
     source = json.loads((root / "contextkv-source.json").read_text())
     if source["commit"] != DATASET_COMMIT:
@@ -494,7 +495,7 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     receipt = {**result, **identity, "status": "completed", "endpoint": endpoint,
                "rb_llm_workers_requested": rb_llm_workers,
                "endpoint_scope": "current invocation; reused stages may have run on a different endpoint",
-               "adapter_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
+               "adapter_sha256": adapter_sha256,
                "backend": "OpenAI-compatible HTTP via the official vllm client branch",
                "generation_answers_modified": False,
                "scope": "Official metric functions on the declared task protocol; scorer identity and source/label differences accompany interpretation."}
