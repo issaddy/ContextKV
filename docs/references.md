@@ -6,7 +6,7 @@
 |---|---|---|
 | [SGLang / RadixAttention](https://arxiv.org/abs/2312.07104)、[HiCache](https://docs.sglang.io/docs/advanced_features/hicache) | 原生推理、因果前缀复用、GPU/Host KV；项目补丁提供真实报价和来源 owner | 先稳定真实来源 token，再优化保留；以同请求轨迹的原生对照测净收益 |
 | [SGLang Model Gateway](https://github.com/sgl-project/sglang/tree/main/sgl-model-gateway) | 云端多副本部署的上游集成方向；当前补丁测量范围为单 worker | 复用其路由与服务接口；集群适配不增加研究主模块 |
-| [BGE-M3](https://huggingface.co/BAAI/bge-m3)、[BGE-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3)、[LoRA](https://arxiv.org/abs/2106.09685) | 编码器和交叉编码器直接复用；`task_model.py` 的查询 LoRA 接检索损失，任务头接 detached 特征上的任务损失；`support_model.py` 接支持和集合偏好 | 未复现 BGE-M3 的多功能自知识蒸馏。学习资产仅在配置显式选择时启用；当前主线仍可使用任务/支持教师和 coverage 效用 |
+| [BGE-M3](https://huggingface.co/BAAI/bge-m3)、[BGE-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3)、[LoRA](https://arxiv.org/abs/2106.09685) | 复用发布版编码器和交叉编码器。`task_model.py` 保留查询 LoRA 和任务头，`support_model.py` 保留支持与集合偏好 | 主线用 `selection.mode=ranked` 按发布版重排顺序与依赖闭包选材。`selection.mode=support` 用于独立支持对照，学习资产按配置显式启用 |
 | [Dozat & Manning：Deep Biaffine Attention for Neural Dependency Parsing（2017）](https://nlp.stanford.edu/pubs/dozat2017deep.pdf) | `task_model.py` 借鉴图边评分，使用投影点积的双线性关联头 | Need 条件、主体、前驱和范围是项目任务图适配；没有直接复现 biaffine 依存句法模型 |
 | [Bertsekas：Rollout / MPC](https://www.mit.edu/~dimitrib/Newton%27sMethodforRLMPC.pdf) | B 使用固定有界后续评价首动作，线上执行一步后依据新观测重规划；剩余资源并入状态 | 复用有限前瞻和滚动决策结构；本项目使用近似回归、部分观测与有限后续，不把经典精确值函数结论直接当作质量保证 |
 | [Khuller–Moss–Naor：Budgeted Maximum Coverage](https://doi.org/10.1016/S0020-0190(99)00031-9) | C 以读取需求为收益对象、共享页为容量对象，比较绝对边际价值与容量密度两种构造 | 单一逻辑保护容量、同 owner 多租期和分层驻留代价是本项目适配；保留真实去重目标，不声称复现论文的近似界 |
@@ -31,12 +31,12 @@
 |---|---|---|
 | 多轮追问、纠正和版本切换仍回答当前问题 | 保留需求、主体、条件、时间、版本及其真实历史出处，增量更新适用关系 | 显式 TaskState/Need 图＋原文引用＋版本目录过滤。查询改写服务这些语义；教师与 BGE 学生使用相同状态契约 |
 | 专名/编号与同义表述都能召回，片段具有解释上下文 | 精确匹配与语义匹配互补；检索粒度与实际阅读粒度分别组织 | BM25＋BGE 融合召回，按 Need 发查询；目录/粗粒度命中映射到稳定原文窗口并补齐依赖。混合融合是主候选，RRF 不具有普遍优于单路排序的定理 |
-| 多条材料共同支持答案，预算用在互补证据上 | 对完整证据集合估计最终用途，保留多跳前驱及单/双/三段支持 | 支持关系模型＋集合效用＋依赖闭包预算搜索。现有有限 beam 是可执行近似；MMR 只在评分名额被重复材料占用时辅助多样化 |
+| 多条材料共同支持答案，预算用在互补证据上 | 保留原文及必要依赖，按实际正文、ANSWER 窗口和原 passage 额度选材 | ranked 按发布版 reranker 顺序取原文并补齐依赖。B 对需要继续的桥接执行 READ 或 GAP。支持关系与集合效用搜索作为独立选材对照 |
 | count/sum/all 等问题覆盖全部指定记录 | 明确声明范围与完整覆盖；区分事实提取、按需求选择和运算 | 范围内扫描＋共同事实提取＋各 Need 运算视图＋CPU 确定性聚合。top-k 仅适用于候选定位，无法单独保证全量统计完整性 |
 | 已读信息形成完整结论并进入真实 ANSWER | 先确定最终容量，保留足够回答当前问题的事实及来源证明，归约有限结束 | ANSWER 预算反向分配＋短 ID/共享字段＋Claim DAG＋有限 REDUCE。优先压缩结构重复；不以任意删原文 token 替代完整结论 |
 | 必要桥接继续，低收益读取停止 | 比较继续动作对最终回答的预期增益和新增完整成本，状态包含剩余预算 | 计算价值＋固定有界后续监督＋一步重规划。优先现有轻量回归；充分性是信息与诊断，不能直接等同于停止价值 |
 | 多轮重复计算尽量避免，必要重读尽量便宜 | 区分已知结果复用、来源 KV 复用和重新计算 | 同版本、适用范围、来源及覆盖语义下，先复用已提取的原子事实，按本轮条件重算聚合，再对必要 READ 使用精确前缀 KV。`fact_reuse.py` 已从 SessionStore 的已提交 READ 投影合同并接入任务解释和执行 seed；实际质量、读取节省与新增解释成本由关闭复用的对照评价 |
-| GPU/Host 受限、重访间隔不同且存在并发 | 对完整读取需求估计保留相对 Native 的新增节省，计入其他请求受到的影响 | 条件重访估计＋相对 Native 成本差＋共享页/需求去重＋逻辑容量内的期限分配，Native 管理物理层。PGDSF 是便宜对照；固定 TTL 与频率排序不能替代净收益目标 |
+| GPU/Host 受限、重访间隔不同且存在并发 | 对实际编译输入取得原生报价，分别记录命中、Host 回载和重算 | ContextPilot 作者索引生成候选排列，`RequestCompiler` 编译实际 READ 与 ANSWER 输入，选择前取得 Native 报价。Native 管理 GPU/Host 驻留，TTL/value 作为独立保留对照核算新增净收益 |
 | 改动改善完整队列，而非少量成功题或某个局部指标 | 分开定位候选不足、提取错误、最终窗口不足和答案使用错误 | 官方全分母质量＋实际 P3＋逐阶段充分性/来源核验＋全部费用及完整响应。复用现有账本和审核入口 |
 
 B 的决策目标可写成 `E[ΔQ(a | 当前状态, 剩余预算)] − λ·E[新增完整成本(a)]`，其中 ΔQ 和费用都相对当前直接 ANSWER，且包含固定有界后续。已付费用只影响剩余资源。所有合法继续动作的预期净收益都不大于零时选择 ANSWER；必须完成的范围覆盖由任务语义决定。经典 rollout 为此提供结构依据，当前预测器与有限后续只近似这个目标。
@@ -102,10 +102,10 @@ C 对新增保护项及期限 `(p, τ)` 的目标是 `ΔV(p, τ | 已保护集�
 
 ## 收敛后的采用顺序
 
-1. **直接复用现有能力**：显式条件/版本、BM25+dense RRF、支持覆盖/偏好、共享提取与 CPU 算子、有限 Claim DAG、有界收益、原生前缀保留。是否切换配置由对应错误决定，不同时启用所有选项。
-2. **优先局部候选**：候选冗余→评分前 MMR；跨段关系漏召回→粗检索映射固定窗口；错误环节不清→上下文充分性分层；C 经验模型缺覆盖→无训练成本/频率 owner 对照。这些分别接现有池、目录、审核和分配入口。
-3. **条件成熟再扩展**：查询改写训练、late interaction、Late Chunking、RAPTOR、轻量非线性回归、经验生存模型。每项都需可定位的独立瓶颈，不按方法新旧排序。
-4. **另设执行路线**：CacheBlend/Cache-Craft、KV 剪枝/量化、跨节点缓存。它们改变的条件较多，本阶段不混入冻结 A 与 Native/TTL 主比较。
+1. **完成共用主链。** A 使用条件和版本约束、BM25+dense 召回、ranked 选材与依赖闭包。B 使用共享提取、CPU 运算和有界动作决策。C 通过原生排列与 ContextPilot 编译对照取得 Native 报价，四格均使用 Native 保留。
+2. **保留独立对照。** support 对照检验集合支持评分，TTL/value 对照检验额外保留的净收益。各自使用对应输入、质量和费用口径。
+3. **按实际瓶颈评估局部候选。** 使用现有池、目录、审核和分配入口定位重复候选、跨段漏召回、上下文充分性和重访覆盖。查询改写训练、late interaction、Late Chunking、RAPTOR、非线性回归和经验生存模型各自需要明确的瓶颈依据。
+4. **另设执行路线。** CacheBlend/Cache-Craft、KV 剪枝或量化、跨节点缓存各自声明执行语义与质量口径。
 
 只比较命中当前瓶颈的候选与现有方案；候选资料充分性、最终答案、完整响应和全部已付成本共同决定采用。方法清单不自动扩大正式队列、训练对象或参数网格。
 
