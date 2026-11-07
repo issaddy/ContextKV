@@ -517,7 +517,7 @@ def judge_sources(base, scope_material, row, sources, *, corpus_id):
 
 
 def preparation_usage(provider, before, budget, ticket_start):
-    observed = provider._auxiliary_usage(before, ())
+    observed = provider._auxiliary_usage(before)
     calls = [ticket for ticket in budget.tickets[ticket_start:] if ticket["role"] == "support"]
     models = ([row for row in observed["models"] if "support_utility" not in row["roles"]]
               if calls else observed["models"])
