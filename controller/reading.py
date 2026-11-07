@@ -523,11 +523,12 @@ def step_messages(plan, task, units, claims=(), snapshot=None, *, source_prompt=
             Message("user", json.dumps(payload, ensure_ascii=False, separators=(",", ":"))))
 
 
-def _split_unit(unit, char_end, sequence):
+def _split_unit(unit, char_end, sequence, tokenizer):
+    text = unit.text[:char_end]
     spans = tuple(SourceSpan(f"{span.span_id}:{sequence}", span.source_key,
                             span.start, span.start + char_end) for span in unit.source_spans)
-    return replace(unit, unit_id=f"{unit.unit_id}:{sequence}", text=unit.text[:char_end],
-                   source_spans=spans)
+    return replace(unit, unit_id=f"{unit.unit_id}:{sequence}", text=text, source_spans=spans,
+                   body_tokens=len(tokenizer.encode(text, add_special_tokens=False)))
 
 
 def read_output_reservation(state, task, units, tokenizer, *, dependency_ids=(),
@@ -687,23 +688,10 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
     for unit in reading_units:
         if unit.unit_id in assigned:
             continue
-        if read_packing == "source_windows":
-            # Canonical windows keep their identity; one call may read several
-            # complete windows and their shared dependency closure.
-            if fits(tuple((*pack, unit))):
-                pack.append(unit)
-                continue
-            if pack:
-                finish_pack()
-                if unit.unit_id in assigned:
-                    continue
-            if not fits((unit,)):
-                raise ValueError("canonical source window and task exceed the READ input/output allocation")
-            pack = [unit]
-            continue
         remaining, sequence = unit, 0
         while True:
-            final = (_split_unit(remaining, len(remaining.text), sequence) if sequence else remaining)
+            final = (_split_unit(remaining, len(remaining.text), sequence, template.tokenizer)
+                     if sequence else remaining)
             if fits(tuple((*pack, final))):
                 pack.append(final)
                 break
@@ -717,13 +705,17 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
             low, high = 0, len(remaining.text)
             while low < high:
                 middle = (low+high+1)//2
-                if fits((_split_unit(remaining, middle, sequence),)):
+                if fits((_split_unit(remaining, middle, sequence, template.tokenizer),)):
                     low = middle
                 else:
                     high = middle-1
             if low == 0:
                 raise ValueError("one READ fact and task exceed the input/output allocation")
-            pack.append(_split_unit(remaining, low, sequence))
+            if read_packing == "source_windows" and low < len(remaining.text):
+                row_end = remaining.text.rfind("\n", 0, low)+1
+                if row_end:
+                    low = row_end
+            pack.append(_split_unit(remaining, low, sequence, template.tokenizer))
             finish_pack()
             if low == len(remaining.text):
                 break
