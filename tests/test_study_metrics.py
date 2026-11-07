@@ -168,6 +168,7 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     plan_path.write_text(json.dumps(plan))
     incomplete = full_queue_comparisons(reference + cells({**candidate, 'completed_qa': 0}))[0]
     assert incomplete['relative_p95_change'] is None
+    assert incomplete['differences']['p95_complete_ms'] is None
     assert incomplete['quality_not_lower'] is None
     assert incomplete['differences']['queue_quality'] == pytest.approx(.1)
     unscored = {**candidate, 'datasets': {'track': dict(missing_execution_task_ids=[],
@@ -210,6 +211,10 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     assert {item['baseline'] for item in full_queue_comparisons(quartet)
             if item['candidate'] == 'S3_contextpilot'} == {'B6_native', 'S3_native', 'B6_contextpilot'}
     assert full_queue_interactions(quartet[:3]) == []
+    repeated = [{**cell, 'replicate_scope': 'paired-queues', 'repetition': index}
+                for index in range(2) for cell in quartet]
+    assert [row['repetition'] for row in full_queue_interactions(repeated)] == [0, 1]
+    assert len(full_queue_comparisons(repeated)) == 2 * len(full_queue_comparisons(quartet))
     quartet[-1]['full_queue_delivered'] = False
     assert full_queue_interactions(quartet)[0]['contrasts']['p95_complete_ms'] is None
     quartet[-1]['active_assets']['gain'] = {'sha256': 'different-B'}

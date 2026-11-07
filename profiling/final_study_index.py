@@ -359,6 +359,10 @@ def full_queue_cells(value, path, joint_scope=None):
     return cells
 
 
+def queue_repetition(cell):
+    return cell.get("replicate_scope"), cell.get("repetition")
+
+
 def full_queue_comparisons(cells):
     comparisons = []
     references = {"E0_native": (), "B6_native": ("E0_native", "LlamaIndex_native"),
@@ -373,7 +377,8 @@ def full_queue_comparisons(cells):
         "B6_value": ("B6_native",), "S3_value": ("S3_native", "B6_value")}
     for row in cells:
         baselines = [other for other in cells if other["method"] in references.get(row["method"], ())
-                     and other["concurrency"] == row["concurrency"]]
+                     and other["concurrency"] == row["concurrency"]
+                     and queue_repetition(other) == queue_repetition(row)]
         for reference in baselines:
             missing_resource_fields = [name for name in ("hardware", "native_cache_config")
                 if any(cell["comparison_identity"]["resource_scope"][name] is None for cell in (row, reference))]
@@ -388,6 +393,7 @@ def full_queue_comparisons(cells):
                 if same and complete_scored and numeric(row["p95_complete_ms"])
                 and numeric(reference["p95_complete_ms"]) and reference["p95_complete_ms"] > 0 else None)
             comparisons.append(dict(concurrency=row["concurrency"], candidate=row["method"], baseline=reference["method"],
+                replicate_scope=row.get("replicate_scope"), repetition=row.get("repetition"),
                 source_file=row["source_file"], baseline_source_file=reference["source_file"],
                 candidate_generation_dir=row["generation_dir"], baseline_generation_dir=reference["generation_dir"],
                 comparable=same, incompatible_identity_fields=[key for key, value in row["comparison_identity"].items()
@@ -395,7 +401,7 @@ def full_queue_comparisons(cells):
                 missing_identity_fields=["resource_scope."+name for name in missing_resource_fields],
                 device_source_identity_differs=row["device_source_identity"] != reference["device_source_identity"],
                 differences={field: row[field]-reference[field] if same and numeric(row[field])
-                    and numeric(reference[field]) else None
+                    and numeric(reference[field]) and (field != "p95_complete_ms" or complete_scored) else None
                     for field in ("queue_quality", "completion_rate", "completed_qa", "p95_complete_ms")},
                 candidate_completed=row["completed_qa"], baseline_completed=reference["completed_qa"],
                 candidate_declared=row["requested_qa"], baseline_declared=reference["requested_qa"],
@@ -418,10 +424,10 @@ def full_queue_interactions(cells):
     groups = defaultdict(lambda: defaultdict(list))
     for cell in cells:
         if cell["method"] in methods:
-            key = (cell["concurrency"], json.dumps(cell["comparison_identity"], sort_keys=True))
+            key = (cell["concurrency"], json.dumps(cell["comparison_identity"], sort_keys=True), *queue_repetition(cell))
             groups[key][cell["method"]].append(cell)
     interactions = []
-    for (concurrency, _), group in groups.items():
+    for (concurrency, _, replicate_scope, repetition), group in groups.items():
         for quartet in product(*(group[method] for method in methods)):
             e1, e2, e3, e4 = quartet
             scope = e1["comparison_identity"]["resource_scope"]
@@ -441,6 +447,7 @@ def full_queue_interactions(cells):
                     joint=values[3]-values[0], interaction=values[3]-values[1]-values[2]+values[0])
                     if known else None)
             interactions.append(dict(concurrency=concurrency, design="B x request_compilation; retention=native",
+                replicate_scope=replicate_scope, repetition=repetition,
                 comparison_identity=e1["comparison_identity"],
                 cells={f"E{index}": dict(method=cell["method"], source_file=cell["source_file"],
                     generation_dir=cell["generation_dir"]) for index, cell in enumerate(quartet, 1)},
