@@ -54,17 +54,26 @@ def study_budget(config):
         lambda_host=execution.get("lambda_host", 0.0))
 
 
+def _selection_mode(config):
+    mode = config.get("selection", {}).get("mode", "support")
+    if mode not in {"ranked", "support"}:
+        raise ValueError("selection.mode must be ranked or support")
+    return mode
+
+
 class StudyEvidenceProvider:
     def __init__(self, config, template, serving, directory, *, support_backend=None,
                  frozen_history=None, task_model=None, teacher_client=None, helper_engine_info=None,
                  query_encoder_identity=None):
         self.config, self.template, self.serving, self.directory = config, template, serving, directory
-        self.support_backend, self.frozen_history = support_backend, frozen_history
+        self.frozen_history = frozen_history
         self.task_model, self.teacher_client = task_model, teacher_client
         self.helper_engine_info = helper_engine_info
         self.query_encoder_identity = query_encoder_identity
         self.strategy = config.get("study", {}).get("strategy", "B7")
         self.external_dialogue = config.get("execution", {}).get("dialogue_mode") == "llamaindex"
+        self.selection_mode = _selection_mode(config)
+        self.support_backend = support_backend if self.selection_mode == "support" else None
         self.budget = study_budget(config)
         run_config = config.get("generation", {}).get("run_config")
         runtime = load_config(run_config) if run_config else None
@@ -95,13 +104,18 @@ class StudyEvidenceProvider:
                 "query_encoder_binding": self.query_encoder_identity,
                 "support_model": getattr(self.support_backend, "manifest", None),
                 "helper_engine_info": self.helper_engine_info,
+                **({"selection_mode": "ranked"} if self.selection_mode == "ranked" else {}),
                 "selection_utility": self._utility_mode(),
-                "evidence_selection_order": "utility_complete_needs_bundle_anchor_reranker_tokens_v1",
+                "evidence_selection_order": ("published_reranker_dependency_closure_v1"
+                    if self.selection_mode == "ranked" else "utility_complete_needs_bundle_anchor_reranker_tokens_v1"),
                 "material_handoff": "whole_plan_candidates" if self.whole_plan_candidates else "single_material",
-                "rerank_retained_sets": self.config.get("selection", {}).get("rerank_retained_sets", False),
+                "rerank_retained_sets": self.selection_mode == "support"
+                    and self.config.get("selection", {}).get("rerank_retained_sets", False),
                 "coverage_mode": self.config.get("reading", {}).get("coverage_mode", "selected_sources")}
 
     def _utility_mode(self):
+        if self.selection_mode != "support":
+            return None
         return "support_coverage" if self.strategy in {"B2", "B3"} else self.config.get(
             "selection", {}).get("utility", "support_coverage")
 
@@ -329,20 +343,22 @@ class StudyEvidenceProvider:
                     source_keys = {span.source_key for unit in units for span in unit.source_spans}
                     blocks = tuple(block for block in pool.source_blocks if block.key in source_keys)
                     evidence_set = EvidenceSet("measurement", units, source_blocks=blocks)
-                    plans.append(ContextPlan("measurement", state, evidence_set, budget=self.budget))
+                    plans.append(ContextPlan("measurement", state, evidence_set, budget=self.budget,
+                        answer_system_prompt=self.answer_system_prompt if self.selection_mode == "ranked" else None))
                 return measure_plan_contexts(snapshot, query, plans, self.template, policy=policy)
 
             scores = SupportScores()
             support_model = None
             search_trace = ()
             support_ms = search_ms = 0.0
+            ranked = self.selection_mode == "ranked" or self.strategy in {"B0", "Btoken", "B1"}
             if not active_state.needs and not full_scope_read:
                 evidence_sets = (EvidenceSet(f"{state.task_id}:reuse", (), disposition="answer"),)
             elif full_scope_read:
                 token_cost = len(self.template.tokenizer.encode(render_unit_union(pool.units), add_special_tokens=False))
                 evidence_sets = (EvidenceSet(f"{state.task_id}:full_scope", pool.units,
                     token_cost=token_cost, disposition="partial", source_blocks=pool.source_blocks),)
-            elif self.strategy in {"B0", "Btoken", "B1"}:
+            elif ranked:
                 search_started = time.perf_counter()
                 evidence_sets = (self._relevance_set(state, pool,
                     lambda state, units: measure_contexts(state, (units,))[0]),)
@@ -460,8 +476,9 @@ class StudyEvidenceProvider:
                 "support_scores": to_jsonable(scores), "search_trace": search_trace,
                 "selection_policy_heads_used": support_model is not None,
                 "support_schedule": to_jsonable(support_model.last_schedule) if support_model else (),
+                "selection_mode": "full_scope" if full_scope_read else "ranked" if ranked else "support",
                 "selection_utility": self._utility_mode(),
-                "rerank_retained_sets": selection.get("rerank_retained_sets", False),
+                "rerank_retained_sets": support_model is not None and selection.get("rerank_retained_sets", False),
                 "material_handoff": {"mode": "whole_plan_candidates" if self.whole_plan_candidates else "single_material",
                     "candidate_set_ids": [selected.set_id for selected in material_candidates],
                     "selected_set_ids": [selected.set_id for selected in evidence_sets]},
@@ -483,23 +500,27 @@ class StudyEvidenceProvider:
                                      tuple(plans), open_need_provider=extend,
                                      auxiliary_usage=trace["auxiliary_usage"], initial_outcomes=tuple(initial_outcomes))
 
-    def _relevance_set(self, state, pool, measure_context):
+    def _relevance_set(self, state, pool, measure_context=None, *, budget=None, candidates=None,
+                       passage_exclusions=()):
+        budget = self.budget if budget is None else budget
+        candidates = pool.units if candidates is None else candidates
         by_id = {unit.unit_id: unit for unit in pool.units}
-        chosen = ()
-        for unit in sorted(pool.units, key=lambda item: (-item.retrieval_score, item.unit_id)):
+        chosen, token_cost = (), 0
+        for unit in sorted(candidates, key=lambda item: (-item.retrieval_score, item.unit_id)):
             if self.strategy == "B0" and len({item.text for item in chosen}) >= 5:
                 break
             proposed = close_dependencies((*[u.unit_id for u in chosen], unit.unit_id), by_id)
             size = len(self.template.tokenizer.encode(render_unit_union(proposed), add_special_tokens=False))
-            passages = {pid for member in proposed for pid in member.original_passage_ids}
-            if (size <= self.budget.body_tokens and measure_context(state, proposed)+self.budget.output_tokens <= self.budget.window_tokens
-                    and (self.budget.max_passages is None or len(passages) <= self.budget.max_passages)):
-                chosen = proposed
+            if size > budget.body_tokens:
+                continue
+            if budget.max_passages is not None and len(_passages(proposed).difference(passage_exclusions)) > budget.max_passages:
+                continue
+            if measure_context is not None and measure_context(state, proposed)+budget.output_tokens > budget.window_tokens:
+                continue
+            chosen, token_cost = proposed, size
         keys = {span.source_key for unit in chosen for span in unit.source_spans}
         blocks = tuple(block for block in pool.source_blocks if block.key in keys)
-        return EvidenceSet(f"{state.task_id}:relevance", chosen,
-            token_cost=len(self.template.tokenizer.encode(render_unit_union(chosen), add_special_tokens=False)),
-            source_blocks=blocks)
+        return EvidenceSet(f"{state.task_id}:relevance", chosen, token_cost=token_cost, source_blocks=blocks)
 
     def _rank_supplied(self, state, snapshot, pool, *, query_override=None):
         from adapters.hybrid_retrieval import DenseIndex, HybridRetriever, LocalBGE, search_variants
@@ -608,38 +629,52 @@ class StudyEvidenceProvider:
                     [render_unit_union(read_material(selected)) for selected in groups], add_special_tokens=False,
                     return_attention_mask=False, return_token_type_ids=False)["input_ids"])
 
-            config = self.config.get("support_model", {})
-            direct = self.strategy == "B2" or config.get("group_mode") == "direct"
-            profile = SupportProfile(config.get("single_candidates_per_need", 24),
-                0 if direct else config.get("bridge_candidates_per_need", 6),
-                0 if direct or config.get("group_mode") == "single_pair" else config.get("triple_seed_pairs", 2),
-                config.get("triple_successors_per_pair", 3))
-            support = SupportModel(self.support_backend, history_resolver=lambda ref: resolve_text(ref, state, snapshot),
-                                   profile=profile)
-            scores = support.score_support(state, context_pool, open_needs=tuple(open_needs))
             used_passages = _passages(previous)
             budget = replace(plan.budget, max_passages=None if plan.budget.max_passages is None
                              else plan.budget.max_passages-len(used_passages))
             selection = self.config.get("selection", {})
-            planner = BudgetedEvidencePlanner(self.template.tokenizer,
-                self._search_utility(support),
-                profile=SearchProfile(selection.get("beam_width", 4), selection.get("max_actions", 12),
-                    selection.get("retained_sets", 3)), measure_bodies=new_bodies, passage_exclusions=used_passages)
-            evidence_sets = planner.search_sets(state, context_pool, scores, budget)
-            evidence_sets, rerank_ms = self._rerank_sets(state, evidence_sets, scores, support)
-            chosen = next((selected for selected in evidence_sets if any(not already_read(unit)
-                           for unit in selected.selected_units)), None)
-            selected_units = () if chosen is None else read_material(chosen.selected_units)
+            if self.selection_mode == "ranked":
+                search_started = time.perf_counter()
+                # Completed ranges are eligible as dependencies only. Their text
+                # still occupies the new READ body when its closure needs them.
+                ranked = self._relevance_set(state, context_pool, budget=budget,
+                    candidates=tuple(unit for unit in context_pool.units if not already_read(unit)),
+                    passage_exclusions=used_passages)
+                selected_units = ranked.selected_units
+                chosen = ranked if selected_units else None
+                scores, schedule, rerank = SupportScores(), (), False
+                search_ms = (time.perf_counter()-search_started)*1000
+            else:
+                config = self.config.get("support_model", {})
+                direct = self.strategy == "B2" or config.get("group_mode") == "direct"
+                profile = SupportProfile(config.get("single_candidates_per_need", 24),
+                    0 if direct else config.get("bridge_candidates_per_need", 6),
+                    0 if direct or config.get("group_mode") == "single_pair" else config.get("triple_seed_pairs", 2),
+                    config.get("triple_successors_per_pair", 3))
+                support = SupportModel(self.support_backend,
+                    history_resolver=lambda ref: resolve_text(ref, state, snapshot), profile=profile)
+                scores = support.score_support(state, context_pool, open_needs=tuple(open_needs))
+                planner = BudgetedEvidencePlanner(self.template.tokenizer, self._search_utility(support),
+                    profile=SearchProfile(selection.get("beam_width", 4), selection.get("max_actions", 12),
+                        selection.get("retained_sets", 3)), measure_bodies=new_bodies, passage_exclusions=used_passages)
+                evidence_sets = planner.search_sets(state, context_pool, scores, budget)
+                evidence_sets, rerank_ms = self._rerank_sets(state, evidence_sets, scores, support)
+                chosen = next((selected for selected in evidence_sets if any(not already_read(unit)
+                               for unit in selected.selected_units)), None)
+                selected_units = () if chosen is None else read_material(chosen.selected_units)
+                schedule = support.last_schedule
+                rerank = selection.get("rerank_retained_sets", False)
+                search_ms = evidence_sets[0].search_ms+rerank_ms
             source_keys = {span.source_key for unit in selected_units for span in unit.source_spans}
             selected_blocks = tuple(block for block in blocks if block.key in source_keys)
             phases = (("retrieval", context_pool.retrieval_ms), ("support", scores.scoring_ms),
-                      ("search", evidence_sets[0].search_ms+rerank_ms))
+                      ("search", search_ms))
             usage = self._auxiliary_usage(usage_before, phases)
             gap_trace = {"open_needs": to_jsonable(open_needs), "candidate_pool": to_jsonable(context_pool),
                 "support_scores": to_jsonable(scores), "selected_set": to_jsonable(chosen),
-                "support_schedule": to_jsonable(support.last_schedule),
+                "support_schedule": to_jsonable(schedule), "selection_mode": self.selection_mode,
                 "selection_utility": self._utility_mode(),
-                "rerank_retained_sets": selection.get("rerank_retained_sets", False),
+                "rerank_retained_sets": rerank,
                 "used_passages": sorted(used_passages), "remaining_passages": budget.max_passages,
                 "auxiliary_usage": usage, "elapsed_ms": (time.perf_counter()-started)*1000}
             parent_trace.setdefault("gap_rounds", []).append(gap_trace)
@@ -668,6 +703,8 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
     external = config.get("execution", {}).get("dialogue_mode") == "llamaindex"
     if strategy not in STUDY_STRATEGIES:
         raise ValueError(f"unknown study strategy: {strategy}")
+    use_support = (_selection_mode(config) == "support" and not external
+                   and strategy not in {"B0", "Btoken", "B1"})
     retriever = retriever or create_retriever("P3", config_path=retrieval["config_path"])
     corpus = CorpusIndex.from_jsonl(retrieval["corpus_path"], corpus_id=retrieval["corpus_id"],
                                    snapshot_id=retriever.corpus_snapshot_id)
@@ -676,7 +713,7 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
     task_model = teacher_client = query_encoder_identity = None
     helper = helper_info = None
     teacher_task = not external and strategy not in {"B0", "Btoken"} and task_interpreter is None and task_config.get("mode", "trained") == "teacher"
-    teacher_support = not external and strategy not in {"B0", "Btoken", "B1"} and support_backend is None and support_config.get("mode", "trained") == "teacher"
+    teacher_support = use_support and support_backend is None and support_config.get("mode", "trained") == "teacher"
     if teacher_task or teacher_support:
         import httpx
         from controller.config import load_config
@@ -740,7 +777,7 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
     else:
         directory = SourceDirectory(corpus, serving.candidate_search, template.tokenizer, profile=profile)
         serving.source_directory = directory
-    if not external and strategy not in {"B0", "Btoken", "B1"} and support_backend is None:
+    if use_support and support_backend is None:
         if support_config.get("mode", "trained") == "teacher":
             from adapters.teacher_support import TeacherSupportBackend
             support_backend = TeacherSupportBackend(config.get("generation", {}).get("teacher_url",

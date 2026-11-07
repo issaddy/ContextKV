@@ -6,6 +6,8 @@ Host 固定 token 配对已验证真实回载与重算：同一请求下，Nativ
 
 已完成的 c1 MultiDoc2Dial：固定 B＋Native 交付 196/209，完整分母 RB_llm 为 0.688038；LlamaIndex Native 交付 209/209，为 0.806220。当前主线在该公开轨落后，尚未达到研究验收。两者 MT-RAG 各生成 41 个答案；DeBERTa tokenizer 的真实位置上限适配后，82 个答案的 algorithmic 阶段已离线补齐，没有重跑问答或已完成的 judge 调用。各有 1 个 RAGAS 分量缺失，不能将其当零分或完整质量结果。c1 尚未运行的 versionqa/loong 后续按原队列补齐，正在运行的其它格继续保留自己的实际 P3。
 
+30 个双方完成、空历史相同的首轮题中，当前主线 RB_llm 低 7 个百分点。保存候选池的原文见证审计也观察到支持选材删去高排名材料；这支持优先比较已有 ranked 取材，尚不是它的答题收益。该对照仅设置 `selection.mode: ranked`，可通过现有 `bench.evidence_policy_comparison frozen --cells P0_source_first_shared` 在同一记录池、TaskState 和预算上执行新答案，再与已保存 support 答案配对。它不重做初始检索，不能据此报告无支持教师的端到端延迟收益。
+
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 
 后续运行使用容器默认 `python3`，不再新建虚拟环境；此前批次保留其真实解释器记录。跨机器仅同步代码、配置和轻量结果／成本记录，训练模型及大日志留在实验容器。

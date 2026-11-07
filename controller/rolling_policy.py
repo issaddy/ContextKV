@@ -276,15 +276,17 @@ class RollingPlanRuntime:
         return merge_auxiliary_usage(dict(ZERO_AUX), *usage)
 
     async def _finish_gap(self, record, pool, state, snapshot, template, executor, expanded, events):
-        from .action_proposals import GapRetrievalRequest
+        from .action_proposals import GapRetrievalRequest, gap_retrieval_plan
         from .context_budget import bind_answer_window
         from .evidence_planner import _passages, close_dependencies
         from .execution import ReadingBudgetExceeded
         from .reading import build_read_plan
         from .session_store import ReadingProgress
         request = decode(GapRetrievalRequest, record.metrics["gap_request"])
+        read_base = gap_retrieval_plan(state, request)
+        prior_passages = _passages(read_base.selected_set.selected_units)
         if (len(pool.units) > request.limits["max_units"]
-                or len(_passages(pool.units)) > request.limits["max_passages"]):
+                or len(_passages(pool.units)-prior_passages) > request.limits["max_passages"]):
             raise ReadingBudgetExceeded("selected GAP result exceeds its registered retrieval limits")
         old = state.plan
         units = {unit.unit_id: unit for unit in (*old.selected_set.selected_units, *pool.units)}
@@ -363,8 +365,9 @@ class RollingPlanRuntime:
             metrics={**record.metrics, "auxiliary_usage": pool.auxiliary_usage,
                 "phase_window": {"start": tick, "end": ended, "clock": "client_monotonic", "scope": "gap_retrieval"}})
         executor.store.save_execution_step(record, "RESULT_READY")
+        prior_passages = _passages(read_base.selected_set.selected_units)
         if (len(pool.units) > request.limits["max_units"]
-                or len(_passages(pool.units)) > request.limits["max_passages"]):
+                or len(_passages(pool.units)-prior_passages) > request.limits["max_passages"]):
             from .execution import ReadingBudgetExceeded
 
             raise ReadingBudgetExceeded("actual GAP material exceeds its registered retrieval limits")

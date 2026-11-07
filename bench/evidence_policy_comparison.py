@@ -97,8 +97,9 @@ def cell_config(config, policy, protocol):
     settings = config["policy_comparison"]
     asset, reader_spec = settings["policies"][policy], settings["reader"]
     teacher = policy == "P0" and asset is None
+    ranked = config.get("selection", {}).get("mode", "support") == "ranked"
     if teacher:
-        if config["support_model"]["mode"] != "teacher" or config["selection"]["utility"] != "support_coverage":
+        if not ranked and (config["support_model"]["mode"] != "teacher" or config["selection"]["utility"] != "support_coverage"):
             raise ValueError("P0 without an asset requires explicit teacher support and support_coverage")
     elif asset is None:
         raise ValueError("trained evidence policies require an explicit policy asset")
@@ -121,7 +122,7 @@ def cell_config(config, policy, protocol):
         "shared_numeric_protocol_version": SHARED_NUMERIC_PROTOCOL_VERSION,
         "numeric_selection_protocol_version": NUMERIC_SELECT_PROTOCOL_VERSION,
         "numeric_selection_schedule": "one_explicit_reduce_per_need",
-        "policy_asset": asset, "support_policy_mode": "teacher" if teacher else "trained",
+        "policy_asset": asset, "support_policy_mode": "ranked_without_support" if ranked else "teacher" if teacher else "trained",
         "query_asset": query_asset,
         "fixed_reader": fixed_reader,
         "evaluation_scope": "evidence planner x read protocol; fixed model weights and common total budgets"}
@@ -155,7 +156,7 @@ def frozen_inputs(record):
     from controller.context_schema import ContextPlan, EvidencePool
     initial, origin, stage = _initial_e0(record)
     return (decode(ContextPlan, initial), decode(EvidencePool, record["candidate_pool"]),
-            {"task_origin": origin, "plan_stage": stage, "pool_origin": "actual E0 candidate_pool; not oracle/verified"})
+            {"task_origin": origin, "plan_stage": stage, "pool_origin": "actual recorded candidate_pool; not oracle/verified"})
 
 
 def frozen_reference(source, actual):
@@ -223,7 +224,8 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
         provider, interpreter = await asyncio.to_thread(create_audited_provider, actual, service.template)
     else:
         frozen_history = await asyncio.to_thread(LocalBGE, actual["task_model"].get("base_path", "models/bge-m3"),
-            device=actual["policy_comparison"]["encoder_device"], dtype="bfloat16", max_length=8192)
+            device=actual["policy_comparison"]["encoder_device"], dtype="bfloat16", max_length=8192,
+            sdpa_backend=actual["task_model"].get("sdpa_backend", "auto"))
         interpreter = AuditedTaskInterpreter(HistoryIndex(frozen_history.tokenizer, frozen_history.encode))
         provider = await asyncio.to_thread(create_study_retriever, actual, service.template,
             task_interpreter=interpreter, frozen_history=frozen_history)

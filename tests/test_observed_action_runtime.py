@@ -80,7 +80,7 @@ def configured(tmp_path, *, reads=2, model=None, scope="selected_sources", opera
     runtime = RollingPlanRuntime(model, observer, reader_checkpoint="reader-fixture", reader_profile_id="profile-fixture",
         output_budgets=(256, 512), mode="observed_actions", observation_path=tmp_path / "observations.jsonl",
         gap_retriever_identity={"implementation": "specified test retriever"},
-        gap_limits={"max_units": 2, "max_passages": 2})
+        gap_limits=model.provenance["continuation_gap_limits"])
     controller.rolling_policy = runtime
     plan = replace(plan, budget=replace(plan.budget, max_steps=max_steps, max_complete_ms=max_ms,
                                        lambda_time=.001))
@@ -154,19 +154,64 @@ class BridgeReader(MockEngine):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("question_only", [False, True])
 async def test_selected_gap_is_paid_once_and_new_read_keeps_old_dependency_proof(tmp_path, question_only):
-    controller, store, _, observed, plan = configured(tmp_path, reads=1,
-        model=LearnedFixture(reads=1 if question_only else 2, gap_gain=.9), max_steps=4)
+    from types import SimpleNamespace
+    from adapters.evidence_pool import PoolProfile
+    from adapters.history_state import TaskPrediction
+    from adapters.study_retrieval import StudyEvidenceProvider
+    from controller.context_schema import RetrievalState
+    from controller.evidence_planner import render_unit_union
+    from controller.schema import SessionSnapshot
+
+    model = LearnedFixture(reads=1 if question_only else 2, gap_gain=.9)
+    model.provenance["continuation_gap_limits"]["max_passages"] = 1
+    controller, store, _, observed, plan = configured(tmp_path, reads=1, model=model, max_steps=4)
     engine = BridgeReader(question_only=question_only, repeat=True)
     controller.engine = engine
+    old, = plan.selected_set.selected_units
+    old_block, = plan.selected_set.source_blocks
     block, unit = material("R3 has a registration entry.", "new")
-    unit = replace(unit, dependencies=(plan.selected_set.selected_units[0].unit_id,))
+    unit = replace(unit, retrieval_score=2, dependencies=(old.unit_id,))
+    alias = replace(old, unit_id="already-read-alias", retrieval_score=3)
+    distractor_block, distractor = material("Irrelevant background. "*400, "distractor")
+    initial_pool = EvidencePool((distractor, replace(old, retrieval_score=2)), (distractor_block, old_block))
+    gap_pool = EvidencePool((alias, unit, distractor), (old_block, block, distractor_block))
+    reranker = SimpleNamespace(usage={"input_tokens": 0, "output_tokens": 0, "elapsed_ms": 0})
+    interpreter = SimpleNamespace(model=SimpleNamespace(usage=dict(reranker.usage)), last_metrics={"task_model_ms": 0},
+        last_prediction=TaskPrediction("NEW"), last_read_contracts=(), interpret=lambda turn, memory: plan.task_state)
+    directory = SimpleNamespace(profile=PoolProfile(), task_interpreter=interpreter,
+        corpus_index=SimpleNamespace(source_metadata={}), add_archive=lambda blocks: None,
+        retrieve_pool=lambda state, memory: initial_pool,
+        retrieve_gap_pool=lambda state, memory, needs: gap_pool,
+        open_need_query=lambda state, need: need.missing_relation)
+    serving = SimpleNamespace(corpus_snapshot_id="fixture", corpus_id="fixture", manifest={},
+        retriever=SimpleNamespace(reranker=reranker), retrieval_state=lambda snapshot: RetrievalState(0))
+    body = len(controller.template.tokenizer.encode(render_unit_union((unit, old))))
+    ranked = StudyEvidenceProvider({"study": {"strategy": "B6"},
+        "execution": {"max_steps": 4, "output_tokens": 64, "lambda_time": .001},
+        "reading": {"output_tokens": 512}, "selection": {"mode": "ranked", "max_passages": 2}},
+        controller.template, serving, directory)
+
+    def rank_gap(state, snapshot, pool, *, query_override):
+        reranker.usage.update(input_tokens=7, output_tokens=2, elapsed_ms=3)
+        return pool
+
+    ranked._rank_supplied = rank_gap
+    snapshot = SessionSnapshot("s")
+    initial = ranked._retrieve(snapshot, "How?", "initial")
+    plan, = initial.context_plans
+    assert tuple(item.unit_id for item in plan.selected_set.selected_units) == (old.unit_id,)
+    assert ranked.manifest["selection_mode"] == "ranked" and ranked.manifest["support_model"] is None
+    assert not ranked.traces["s", "initial"]["selection_policy_heads_used"]
     calls = []
 
     async def provider(current, needs, claims):
         calls.append((current, needs, claims))
         assert bool(needs[0].parent_claim_ids) is not question_only
-        return EvidencePool((unit,), (block,), auxiliary_usage={"input_tokens": 7,
-            "output_tokens": 2, "compute_ms": 3, "models": []})
+        pool = await ranked.extend_for_plan(snapshot, current, needs, claims)
+        assert {item.unit_id for item in pool.units} == {"new", old.unit_id}
+        assert pool.selected_set.token_cost == body
+        assert pool.trace[-1]["remaining_passages"] == 1
+        return pool
 
     response = await controller.serve_turn("s", "How?", context_plans=(plan,), open_need_provider=provider)
     assert len(calls) == 1 and response.read_count == 2
