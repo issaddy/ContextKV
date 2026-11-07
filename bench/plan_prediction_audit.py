@@ -178,7 +178,7 @@ def observed_choice_trace(store, event, attempt, task, candidate, prefix_control
     step_id = task["step_id"]
     batch = event["quote"]
     key = candidate["candidate_id"] if candidate is not None else step_id
-    option = event["option_diagnostics"].get(key, {})
+    option = event.get("option_diagnostics", {}).get(key, {})
     saved = store.execution_step(attempt.attempt_id, step_id) if task["kind"] != "ANSWER" else None
     result = saved[1].result if saved is not None else None
     if task["kind"] == "ANSWER" and attempt.result is not None:
