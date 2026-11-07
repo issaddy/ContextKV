@@ -58,6 +58,7 @@ class DemandLease:
     owner_id: str
     source_step_id: str
     target_step_id: str
+    boundary_tokens: int
     at_risk_tokens: int
 
 

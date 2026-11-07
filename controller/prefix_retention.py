@@ -13,6 +13,8 @@ from pathlib import Path
 from controller.schema import CompletionReceipt, ConfigFingerprint
 from controller.engine_client import EngineError
 from controller.serialization import to_jsonable
+from controller.templates import token_hash
+from engine_patches.contextkv_runtime import executed_prefix_hashes
 
 
 RETENTION_FEATURE_NAMES = ("access_state", "native_residency", "pressure_concurrency")
@@ -53,7 +55,6 @@ def balance_session_rows(rows, components):
 
 def source_demand_event_key(prefix_input_ids, evidence_token_ranges, page_size, scope):
     """The next READ demanding this known source-containing causal prefix."""
-    from engine_patches.contextkv_runtime import executed_prefix_hashes
     path = executed_prefix_hashes(prefix_input_ids, page_size)
     body = [page for end, page in path.items()
             if any(end > first and end-page_size < last for first, last in evidence_token_ranges)]
@@ -212,6 +213,16 @@ def _allocate_retention_greedy(requests, *, protection_budget_tokens,
 
 def owner_pages(receipt):
     return frozenset(receipt["gpu_page_ids"]) | frozenset(receipt["host_page_ids"])
+
+
+def shared_body_page(left, right, boundary, page_size):
+    for first, last in left:
+        for other_first, other_last in right:
+            start = max(first, other_first)
+            page_end = ((start+page_size-1)//page_size+1)*page_size
+            if page_end <= min(last, other_last, boundary):
+                return True
+    return False
 
 
 def retainable_prefix(receipt):
@@ -573,7 +584,6 @@ class PrefixReadObserver:
         limit = self.settings["protection_budget_tokens"]
         page_size = next(iter(sources.values()))[1]["page_size"] if sources else 0
         all_need_ids = {need.need_id for need in state.plan.task_state.needs}
-        paths = {owner: owner_pages(inspection) for owner, (_, inspection) in sources.items()}
 
         def work(candidate):
             return sum(quoted_native_work(quotes[candidate.candidate_id]))+candidate.output_budget
@@ -585,11 +595,20 @@ class PrefixReadObserver:
             key = compiled.candidate_id
             if key not in matched_paths:
                 quote = quotes[key]
-                matched_paths[key] = tuple((owner, record.step_id, inspection["boundary_tokens"], paths[owner])
-                    for owner, (record, inspection) in sources.items()
-                    if (boundary := inspection["boundary_tokens"]) <= min(quote.recoverable_prefix_tokens, quote.match_limit)
-                    and len(paths[owner])*page_size == boundary
-                    and longest_common_prefix(compiled.input_ids, record.input_ids[:boundary]) >= boundary)
+                upper = min(quote.ready_gpu_prefix_tokens, quote.match_limit, compiled.source_prefix_tokens, limit)
+                matches = {}
+                for record, inspection in sources.values():
+                    observed_end = min(upper, inspection["boundary_tokens"])
+                    common = longest_common_prefix(compiled.input_ids, record.input_ids[:observed_end])
+                    boundary = common//page_size*page_size
+                    if shared_body_page(record.metrics["source_view"]["body_token_ranges"],
+                            compiled.source_body_token_ranges or (), boundary, page_size):
+                        matches.setdefault(boundary, (record.step_id, inspection["cache_scope_hash"]))
+                hashes = executed_prefix_hashes(compiled.input_ids[:max(matches, default=0)], page_size)
+                matched_paths[key] = tuple(("demand:"+hashlib.sha256(json.dumps(
+                    [session_id, scope, hashes[boundary]], separators=(",", ":")).encode()).hexdigest(),
+                    step_id, boundary, frozenset(scope+":"+value for end, value in hashes.items() if end <= boundary))
+                    for boundary, (step_id, scope) in matches.items())
             return matched_paths[key]
 
         def allocate(demand, task, candidate, actions):
@@ -617,17 +636,17 @@ class PrefixReadObserver:
                     continue
                 for owner, step_id, boundary, path in matching_sources(compiled):
                     exposed = min(boundary, risk)
-                    proposed.append((exposed, owner, step_id, target, path, priority))
+                    proposed.append((exposed, owner, step_id, target, path, priority, boundary))
             protected, covered, selected = set(shared), set(), {}
             exposed_by_target = {}
-            for risk, owner, step, target, path, priority in sorted(proposed,
+            for risk, owner, step, target, path, priority, boundary in sorted(proposed,
                     key=lambda row: (-row[5], -row[0], len(row[4]-shared), row[1], row[3])):
                 exposed_by_target.setdefault(target, risk)
                 if target in covered or len(protected | path)*page_size > limit:
                     continue
                 protected.update(path)
                 covered.add(target)
-                selected.setdefault(owner, DemandLease(owner, step, target, risk))
+                selected.setdefault(owner, DemandLease(owner, step, target, boundary, risk))
             return JointOption(demand, tuple(lease for key, lease in selected.items() if key not in own),
                 tuple(sorted(own-selected.keys())), len(protected-shared)*page_size,
                 sum(risk for target, risk in exposed_by_target.items() if target not in covered))
@@ -647,14 +666,18 @@ class PrefixReadObserver:
             for lease in option.retain:
                 record = steps[lease.source_step_id]
                 observed = record.metrics["evidence_prefix"]
-                next_pages = protected | owner_pages(observed)
+                prefix = record.input_ids[:lease.boundary_tokens]
+                page_size, scope = observed["page_size"], observed["cache_scope_hash"]
+                pages = {scope+":"+value for value in executed_prefix_hashes(prefix, page_size).values()}
+                next_pages = protected | pages
                 if len(next_pages)*observed["page_size"] > self.settings["protection_budget_tokens"]:
                     receipts[lease.owner_id] = {"state": "UNRETAINED", "reason": "shared_protection_budget"}
                     continue
                 receipts[lease.owner_id] = await self.owners.observe(owner_id=lease.owner_id,
                     session_id=session_id, attempt_id=record.attempt_id, step_id=record.step_id,
-                    receipt=record.receipt, prefix_input_ids=record.input_ids[:observed["boundary_tokens"]],
-                    sources=tuple(observed["sources"]), ttl_seconds=self.settings["ttl_seconds"],
+                    receipt=record.receipt, prefix_input_ids=prefix,
+                    sources=({"kind": "executed_source_body_prefix", "prefix_hash": token_hash(prefix)},),
+                    ttl_seconds=self.settings["ttl_seconds"],
                     policy="joint_demand", policy_choice={**asdict(lease), "observed_quote_seq": batch.observed_seq,
                         "protected_tokens": option.protected_tokens})
                 if receipts[lease.owner_id]["state"] == "RETAINED":

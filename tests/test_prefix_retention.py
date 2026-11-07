@@ -169,3 +169,41 @@ def test_complete_source_demand_identity_and_single_owner_collateral_are_distinc
     request = RetentionRequest("losing-owner", forecast, frozenset({"page"}), 64, "read")
     assert allocate_retention((request,), protection_budget_tokens=64,
                               lambda_gpu=0, lambda_host=0) == ()
+
+
+@pytest.mark.asyncio
+async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared_body():
+    from controller.context_schema import ContextPlan, EvidenceSet, Need, ReadResult, ReadTask, ReadingOutcome, StepRecord, TaskState
+    from controller.plan_policy import PlanCandidate, PlanStep
+    from controller.prefix_retention import PrefixReadObserver
+    from controller.schema import CacheQuote, CacheQuoteBatch, PromptCandidate
+
+    old, later = (ReadTask(name, "READ", ("n",)) for name in ("old", "later"))
+    plan = ContextPlan("plan", TaskState("task", "question", needs=(Need("n"),)),
+                       EvidenceSet("evidence", ()), steps=(old, later))
+    record = StepRecord("attempt", old.step_id, old, input_ids=(1, 2, 3, 4), metrics={
+        "source_view": {"body_token_ranges": ((0, 4),)},
+        "evidence_prefix": {"demand_observation": True, "engine_restart_id": "restart",
+            "cache_config_hash": "cache", "owner_id": "old", "page_size": 2,
+            "boundary_tokens": 4, "cache_scope_hash": "scope"}})
+    state = ReadingOutcome(plan, results=(ReadResult(old.step_id),), steps=(record,))
+    ids = (1, 2, 5, 6)
+    candidate = PromptCandidate("later", "REBUILD", 0, (), ids, token_hash(ids), frozenset(), frozenset(),
+        output_budget=2, source_body_token_ranges=((0, 4),), source_prefix_tokens=4)
+    quote = CacheQuote(candidate.candidate_id, candidate.input_hash, 4, 4,
+                       ready_gpu_prefix_tokens=2, recoverable_prefix_tokens=2, evictable_gpu_prefix_tokens=2)
+    batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 0, 0, (quote,))
+    gap = PlanCandidate("gap", "gap_retrieval", plan, (PlanStep(ReadTask("gap", "GAP")),), "reader")
+    observer = PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
+                                  {"mode": "demand", "protection_budget_tokens": 4})
+
+    async def after_gap(target):
+        read = PlanCandidate("next", "read_once", plan, (PlanStep(later, (target,)),), "reader")
+        return (await observer.demand_options((gap, read), state, "session", batch,
+            prefix_status={"prefixes": []}))["gap"]
+
+    shared = await after_gap(candidate)
+    lease, = shared.retain
+    assert (lease.source_step_id, lease.target_step_id, lease.boundary_tokens) == ("old", "later", 2)
+    assert shared.protected_tokens == 2
+    assert (await after_gap(replace(candidate, source_body_token_ranges=((2, 4),)))).retain == ()
