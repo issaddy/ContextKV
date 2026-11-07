@@ -41,15 +41,17 @@ Qwen3-32B 权重与解码参数冻结。`training.reader_audit` 导出实际 REA
 
 初始 A 材料交接在搜索和可选集合评估后、构造阅读计划前完成：固定 B 与 `observed_actions` 只接收语义第一名，避免下游 `fixed_choice` 再按输入长度重选不同材料；observed 的直接 ANSWER 与下一 READ/REDUCE/GAP 均基于这个实际材料状态。只有解析后的 `plan_gain.mode=whole_plan` 保留多个 A 集合供整计划对照。GAP 搜索仍在内部保留候选，先选择包含未读来源的集合，再返回一个选中结果。beam、动作与布局候选复用已评分支持，不重复调用教师。
 
-`selection.mode=ranked` 是同一 A 入口的选材对照：复用发布版重排顺序、依赖闭包、正文与实际 ANSWER 窗口预算，跳过支持评分和集合搜索；任务条件、版本、事实复用及 B/C 执行不变。GAP 仍使用原缺口检索与重排，只以未读范围为候选根，所需旧依赖保留在实际 READ 中，原 passage 额度只扣新增部分。默认 `support` 保留已有冻结配置，ranked 的质量与端到端收益以实际对照决定。
+主配置使用 `selection.mode=ranked`，按发布版重排顺序、依赖闭包、正文与实际 ANSWER 窗口预算选材。登记资料的选材与 GAP 先按当前任务版本筛选来源根。GAP 使用原缺口检索与重排，只以未读范围为候选根，所需旧依赖保留在实际 READ 中，原 passage 额度只扣新增部分。`selection.mode=support` 用于支持模型对照。
 
 教师通过 `budget_teacher_input` 先保留当前问题与目录，再按当前任务优先、历史相关性次序选入任务闭包，最后加入其他历史窗口。闭包包含活跃条件及其更新目标、Need 前驱与对应原文；整个 system/user 消息使用实际 tokenizer 统一计量。预算外历史任务不进入输出 schema。rollout 保存实际目录、日期与 scope，标注、训练和评价复用同一观测与目录选择规则。输入不可见的监督不参与拟合，评价保留其分母与不可见原因。
 
-`all_supplied_documents` 在支持评分与集合搜索之前确定。配置或 Need 明确要求全资料覆盖且具有实际来源边界时，直接生成一个覆盖该范围的阅读计划。该路径记录 `selection_policy_heads_used=false`；选材路径继续使用现有支持与集合搜索。跨轮恢复只恢复文档级元数据，表格身份与标题由原文窗口重建，保持同一来源的因果 token 前缀稳定。表头、标题、注释先作为数据窗口依赖读取，已覆盖依赖不再单独建立 READ。
+`all_supplied_documents` 在选材之前确定。配置或 Need 明确要求全资料覆盖且具有实际来源边界时，直接生成一个覆盖该范围的阅读计划。该路径记录 `selection_policy_heads_used=false`，其余路径按配置选择材料。跨轮恢复只恢复文档级元数据，表格身份与标题由原文窗口重建，保持同一来源的因果 token 前缀稳定。表头、标题、注释先作为数据窗口依赖读取，已覆盖依赖不再单独建立 READ。
 
 `controller/fact_reuse.py` 从同会话已提交的物理 READ 构建可见提取 contract。任务解释同时绑定当前 Need 和可复用 contract；版本、hash、范围、字段和条件匹配后，只导入原子事实。逻辑复用节点不复制历史模型费用；当前 count/sum/group 重新选择和运算。`complete` 的覆盖按来源区间并集计算，旧新 unit ID 不同也不重复读取；`facts` 不冒充完整提取。支持 backend 的请求内 memo 延续到 GAP，QA 结束释放。
 
 B 的冻结资产身份保留模型、tokenizer、索引及实际计算配置，排除进程重启编号、服务地址和 model-scope 记录文件的位置。离线观测导出从对应测量段的真实 generation manifest 计算该身份；原始观测 digest、manifest 路径与内容 hash 同时保留，配对采集仍核对实际加载的资产。
+
+动作收益资产另携带 `evidence_selection_contract`。合同从实际 A manifest 读取 `ranked`/`support` 和选材顺序，`support` 另绑定支持效用、保留集合重排和支持模型的记录身份。观测导出、分支采集、训练与开发校验、线上绑定均核对此合同。语料、索引、B6/B7 策略编号和服务地址留在各自运行记录中，跨语料复用以实际选材合同匹配为准。
 
 B 的收益监督直接复用固定官方 RB_llm 的 prompt、parser 与归一化，使用原始用户请求、真实 QA 历史和实际最终可见材料及结论来源闭包；`answer_evaluation_view` 同时服务训练与最终评价。TaskState、模型支持分和未见的参考原文不进入该官方评价上下文。完整原文保留在独立审计材料中，P1 的四项诊断也以原始对话和完整来源判断。
 
@@ -76,16 +78,16 @@ READ 按实际 tokenizer 的输入容量与结构化输出容量打包。同来�
 
 `action_policy.py` 在当前状态比较直接回答、一次 READ、一次 REDUCE 和一次 GAP。`plan_policy.py` 保留完整计划对照的调度与预算接口。
 
-`observed_actions` 模式把直接 ANSWER、一次 READ、一次 REDUCE、一次 GAP 放在同一已观察状态上配对。反事实收益采用 `infer_bridge_ready_or_one_gap_one_terminal_read_v4`：首动作之后，只对尚未满足的 infer 桥接需求接至多一次终端 READ；已有就绪来源优先，否则至多一次 GAP。线上与反事实均由 `bind_read_parents` 绑定未解需求的相关父结论。直接 ANSWER 不续接。线上仍仅执行首动作后重新观察，监督与收益资产绑定相同协议和 `observed_feature_schema=pre_action_budget_support_state_v2`。价值与成本特征同时包含 A 的支持/桥接估计、Need 前驱、已观察终端支持与桥接缺口，以及实际已付 token/墙钟、已执行步骤及对应剩余预算；无界额度用独立标记表达。可选后续在硬步骤不足以完成 READ+ANSWER 或 GAP+READ+ANSWER 时直接进入终端 ANSWER，不启动无预算步骤。
+`observed_actions` 模式把直接 ANSWER、一次 READ、一次 REDUCE、一次 GAP 放在同一已观察状态上配对。反事实收益采用 `infer_bridge_ready_or_one_gap_one_terminal_read_v4`：首动作之后，只对尚未满足的 infer 桥接需求接至多一次终端 READ；已有就绪来源优先，否则至多一次 GAP。线上与反事实均由 `bind_read_parents` 绑定未解需求的相关父结论。离线 DIRECT 以当前材料上的强制 ANSWER 为终点。线上停止要求实际可见原文覆盖或结论充分，执行继续动作后重新观察。监督与收益资产绑定相同协议和 `observed_feature_schema=pre_action_budget_support_state_v2`。价值与成本特征同时包含 A 的支持/桥接估计、Need 前驱、已观察终端支持与桥接缺口，以及实际已付 token/墙钟、已执行步骤及对应剩余预算；无界额度用独立标记表达。可选后续在硬步骤不足以完成 READ+ANSWER 或 GAP+READ+ANSWER 时直接进入终端 ANSWER，不启动无预算步骤。
 GAP 仅在选中后执行并进入步骤账本；返回的新来源与原事实合并，再决定是否阅读。线上与离线共用 `action_proposals.gap_retrieval_plan`，仅排除实际已读来源闭包；未读候选仍可召回，passage 上限为已读数量加声明新增额度，并受原总上限约束。反事实 REDUCE 使用与线上工厂相同的事实基底，不按原 READ Need 别名或 extract 类型再次筛选。
 质量模型学习实际最终质量差。新成本模型用动作前的原生缓存、压力和可编译首步报价预测动作加最终回答的绝对成本；GAP 和 CPU REDUCE 只使用动作前的批级状态。
 在线在同一次原生观测下分别预测动作和 DIRECT，再计算带符号差；采集时不同分支的实测成本差保留为诊断，避免把执行顺序产生的预热收益当作动作收益。
 B 的 `input_protocol` 额外绑定 `merged_source_windows_actual_coverage_reused_facts_compiled_choice`、实际规范来源窗口粒度与完整 reader fingerprint；观察、分支、配对、拟合及加载沿用同一身份，缺失或不匹配时拒绝旧资产。真实状态保留已复用 seed、已读覆盖及编译器选中排列，`pre_action_input` 将原生报价与实际执行输入绑定。禁用事实复用是显式机制消融，其开关不改变资产可接受的协议身份，实际 seed 差异保留在状态中。
 
 成本资产声明 `prefix_control_scope=native_excludes_prefix_control`。价值 C 开启时，B 仅给候选首个 READ 加入最近实际完整 callback 的均值；没有观测时诊断保留未知。`prefix_control_ms` 仍是唯一实际计费字段，已付 callback 费用进入累计成本，原生报价中的命中效果不再额外抵扣。
-已付成本加绝对分支成本约束总预算。明确终止且没有提交回答的分支按零交付效用计，原始评分缺失仍保留；暂停和未决分支不进入这类标签。
+已付成本加绝对分支成本约束总预算。确认终止且没有提交回答的分支按零交付效用计，包含生成前已确认失败的 DIRECT，原始评分保留为空。暂停和未决分支保留未标注状态。
 `observed_actions` 使用实时原生报价和配对得到的完整分支成本模型，不依赖整计划的执行 profile。
-全来源任务先按原计划逐步完成必要 READ、数值选择和 CPU 归约，再比较继续动作与直接回答。
+全来源任务先按原计划逐步完成必要 READ、数值选择和 CPU 归约，再比较继续动作与直接回答。所选来源的 READ 全部完成后，任务必需的 `numeric_select` 与 CPU `count/sum/group` 也按固定规则执行。可选 REDUCE 继续受收益和成本样本覆盖约束。
 GAP 绑定当前检索器及采集时的材料限额。`whole_plan` 保留原执行 profile 与原生时间标定，作为独立对照。
 动作收益资产由 `training.plan_gain_workflow --mode observed_actions` 采集、终止标注和拟合；开发文件报告实际配对质量差的误差，在线质量和时延由完整队列评价。
 
@@ -94,6 +96,8 @@ REDUCE 的完整基底与 frontier 在首次写入 `COMPLETE` 前统一绑定。
 ## C：选择前编译、报价与执行后登记
 
 `RequestCompiler` 供 Controller、ReadingExecutor、滚动动作和 READ 成本报价共用。作者 ContextPilot 的 CPU index/reorder 只提出来源排列；沿用项目实际系统、历史、条件、结论与引用编译。所有排列先变为实际 input_ids，再读 Native 报价，选中输入原样执行。固定策略以新增预填充 token、Host 回载和长度选择排列；收益策略按绑定当前协议的成本模型决策。
+
+READ 执行沿用选择时的报价批次并记入步骤账本。没有 ContextPlan 的直接 ANSWER 也经过来源排列，APPEND 只排列新增正文，已提交前缀保持原样。ANSWER 完成回执通过实际输入核对后才登记来源索引。
 
 每次成功完成的 READ 与直接 ANSWER 都按实际正文几何、完整因果前缀与回执登记，输出截断或 JSON 解析失败不抹去已经产生的 KV。来源登记不等于保留；`prefix_retention.mode=native` 不触发 TTL。
 

@@ -13,6 +13,9 @@ from .schema import CacheQuoteBatch, CompletionReceipt, EvidenceSpan, PromptCand
 from .serialization import dumps
 
 
+_ANSWER_BODY_ENCODING = "answer-evidence-body:v1"
+
+
 class RequestCompiler:
     """One compiler for C-on/off; the optional index supplies permutations only."""
     def __init__(self, template, index=None):
@@ -98,7 +101,7 @@ class RequestCompiler:
             block = blocks[span.source_key]
             base = block.span[0] if block.span else 0
             body = block.text[span.start-base:span.end-base]
-            ids.append(source_fragment_id((span,), body, "answer-evidence-body:v1"))
+            ids.append(source_fragment_id((span,), body, _ANSWER_BODY_ENCODING))
         return tuple(ids)
 
     def _answer_orders(self, units, blocks, cache_scope):
@@ -114,20 +117,30 @@ class RequestCompiler:
                 proposed.append(ordered)
         return tuple(proposed)
 
+    def _answer_block_orders(self, blocks, cache_scope):
+        by_id = {}
+        for block in blocks:
+            start = block.span[0] if block.span else 0
+            source = SourceSpan("", block.key, start, start+len(block.text))
+            by_id[source_fragment_id((source,), block.text, _ANSWER_BODY_ENCODING)] = block
+        return tuple(tuple(by_id[identity] for identity in order)
+                     for order in self._orders(tuple(by_id), cache_scope))
+
     def compile_answers(self, snapshot, query, plan=None, *, policy=None, outcome=None,
                         layouts=None, actions=("REBUILD", "APPEND"), cache_scope=None,
                         **direct_options):
         """Delegate semantic/history/conclusion compilation to the existing builder.
 
-        Plan ANSWER source permutations occur after its actual excerpts are chosen.
-        The legacy direct-answer builder retains its existing layouts.
+        Source permutations occur after the builders choose original material.
         """
         blocks = {block.key: block for block in snapshot.archive}
         if plan is None:
             direct_options["retrieved"] = tuple(direct_options["retrieved"])
             blocks.update((block.key, block) for block in direct_options["retrieved"])
             candidates = build_candidates(snapshot, query, policy=policy, template=self.template,
-                                          **direct_options)
+                source_orderer=(None if self.index is None else
+                                lambda blocks: self._answer_block_orders(blocks, cache_scope)),
+                **direct_options)
         else:
             blocks.update((block.key, block) for block in plan.selected_set.source_blocks)
             candidates = build_plan_candidates(snapshot, query, plan, self.template, policy=policy,
@@ -145,7 +158,7 @@ class RequestCompiler:
                 else:
                     start, end = span.source_start, span.source_end
                 source = SourceSpan("", span.key, start, end)
-                ids.append(source_fragment_id((source,), body, "answer-evidence-body:v1"))
+                ids.append(source_fragment_id((source,), body, _ANSWER_BODY_ENCODING))
             candidate = replace(candidate, source_ids=tuple(dict.fromkeys(ids)))
             geometry = actual_source_geometry(self.template, candidate)
             result.append(replace(candidate, evidence_body_tokens=geometry["body_tokens"]))

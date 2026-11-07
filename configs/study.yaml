@@ -10,9 +10,11 @@ generation:
   teacher_url: http://127.0.0.1:30000
 assets:
   versionqa:
-    recorded_cache: runs/evidence-study-20261030
+    source: data/versionrag/data/raw
+    questions: data/versionrag/data/test/evaluation_set.csv
+    retriever_config: configs/study_versionqa_retriever.yaml
 scoring:
-  python: .venv-eval/bin/python
+  python: python3
   official_checkout: data/mtrag-official
   max_tokens: 2048
   ragas_json_schema: true
@@ -47,6 +49,7 @@ retrieval:
   archive_top_k: 12
   primary_pool_size: 96
 selection:
+  mode: ranked
   utility: support_coverage
   beam_width: 4
   max_actions: 12

@@ -48,7 +48,7 @@ def prepare(source, questions, output, tokenizer, *, pdf_text=None):
     pdfs = {row["filename"]: row for row in pdf_rows}
     if len(paths) != 34 or len(pdfs) != 6 or len(pdf_rows) != 6:
         raise ValueError("the pinned VersionQA corpus requires 34 documents, including six PDFs")
-    passages, documents = [], []
+    passages, documents, latest_versions = [], [], {}
     for path in paths:
         raw = path.read_bytes()
         digest = _digest(raw)
@@ -63,6 +63,8 @@ def prepare(source, questions, output, tokenizer, *, pdf_text=None):
         if not text or not version:
             raise ValueError(f"document needs text and its published version: {path.name}")
         version = version.group(1)
+        family = re.sub(r"v?\d+\.\d+\.\d+", "", path.name)
+        order = tuple(map(int, version.split(".")))
         offsets = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
         source_uri = (f"https://github.com/danielhuwiler/versionrag/blob/{SOURCE_COMMIT}/data/raw/"
                       + quote(path.name))
@@ -75,13 +77,18 @@ def prepare(source, questions, output, tokenizer, *, pdf_text=None):
                 continue
             passages.append({"passage_id": f"{doc_id}-{start:06d}", "document_id": path.name,
                              "version": version, "title": path.stem, "source_uri": source_uri,
-                             "span": [left, right], "text": text[left:right]})
+                             "span": [left, right], "text": text[left:right],
+                             "document_family": family, "version_order": list(order)})
             count += 1
             if stop == len(offsets):
                 break
         documents.append({"file": path.name, "sha256": digest, "version": version,
                           "chars": len(text), "tokens": len(offsets), "passages": count,
                           "extracted_from_pdf": path.suffix == ".pdf"})
+        if count:
+            latest_versions[family] = max(order, latest_versions.get(family, order))
+    for passage in passages:
+        passage["current"] = tuple(passage["version_order"]) == latest_versions[passage["document_family"]]
 
     with Path(questions).open(encoding="utf-8-sig", newline="") as stream:
         source_tasks = list(csv.DictReader(stream))
@@ -104,7 +111,12 @@ def prepare(source, questions, output, tokenizer, *, pdf_text=None):
     _write_jsonl(output / "references.jsonl", references)
     (output / "split.json").write_text(json.dumps({"dev": [], "test": [r["conversation_id"] for r in tasks]},
                                                   indent=2) + "\n", encoding="utf-8")
-    manifest = {"declared_source_commit": SOURCE_COMMIT, "documents": documents, "passages": len(passages),
+    manifest = {"dataset": "VersionQA", "declared_source_commit": SOURCE_COMMIT,
+                "source_partition": "public_evaluation_only", "training_use": False,
+                "documents": documents, "passages": len(passages), "questions": len(tasks),
+                "family_construction": "published filenames with semantic version component removed",
+                "current_scope": "highest declared semantic version within each supplied document family",
+                "unknown_dates": "publication and effective dates remain absent",
                 "questions_sha256": _digest(Path(questions).read_bytes()),
                 "corpus_sha256": _digest((output / "corpus.jsonl").read_bytes()),
                 "chunking": "tokenizer offsets; 512 tokens with 50-token overlap",

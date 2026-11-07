@@ -5,6 +5,7 @@
 Qwen3-32B 权重与解码参数冻结，不做微调或合并模型。
 
 业务入口 `DocumentQA` 贯通资料登记、HTTP 问答与 `bench.study`。
+`configs/study.yaml` 使用 `selection.mode: ranked` 按发布版重排与依赖闭包选材。`selection.mode: support` 用于支持模型对照。
 
 系统在实际问答历史、条件与版本基础上选择原文，复用适用原子事实，合并稳定窗口执行
 READ/REDUCE/ANSWER；在选择前编译实际来源排列并取得 Native 报价。最终结论保留完整来源链，
@@ -12,7 +13,7 @@ READ/REDUCE/ANSWER；在选择前编译实际来源排列并取得 Native 报价
 
 | 主线 | 当前入口 |
 |---|---|
-| A：实际历史、选材与阅读协议 | `training.a_workflow`、`training.preference_rollout`、`bench.evidence_policy_comparison` |
+| A：实际历史、选材与阅读协议 | `adapters.study_retrieval`、`bench.evidence_policy_comparison` |
 | B：显式阅读动作与完整成本 | `controller.action_policy`、`controller.rolling_policy`、`training.plan_gain_rollout`、`training.plan_gain_completion` |
 | C：请求编译与缓存协同 | `controller.request_compiler`、作者 ContextPilot index/reorder；`controller.prefix_retention` 为可选保护 |
 | 评价与总成本 | `bench.study_scoring`、`bench.reassess_saved`、`profiling.study_cost_ledger` |

@@ -20,6 +20,7 @@ import time
 from controller.plan_policy import (FEATURE_NAMES, OBSERVED_FEATURE_NAMES, OBSERVED_FEATURE_SCHEMA, CompleteCost, LEGACY_PLAN_KINDS, NATIVE_COST_SCHEMA,
                                      PLAN_KINDS, PlanCandidate, complete_plan, plan_features)
 from controller.context_schema import ReadingOutcome
+from controller.resident_models import evidence_selection_contract
 from controller.schema import SessionSnapshot
 from controller.serialization import to_jsonable, decode
 
@@ -50,6 +51,14 @@ def observed_cost_targets(direct, counterfactual):
 def _digest(value):
     return hashlib.sha256(json.dumps(to_jsonable(value), ensure_ascii=False,
         sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _fit_selection_contract(manifests):
+    contracts = (evidence_selection_contract(manifest) for manifest in manifests)
+    first = next(contracts, None)
+    if any(contract != first for contract in contracts):
+        raise ValueError("observed gains require one actual evidence selection contract")
+    return first
 
 
 def actual_history(snapshot: SessionSnapshot):
@@ -324,7 +333,10 @@ def _supervision(rows, *, split):
                 raise ValueError("cost labels must equal the actual observed complete response costs")
             if row["incremental_complete_cost"] != row["cost_targets"]["incremental_complete_cost"]:
                 raise ValueError("signed cost difference differs from the paired actual runs")
-    return next(iter(identities))
+    selection_contract = _fit_selection_contract(row[branch].get("source_run", {}).get("resident_model_manifest")
+        for row in rows if row.get("observed_state_binding") is not None
+        for branch in ("direct_run", "counterfactual_run"))
+    return (*next(iter(identities)), selection_contract)
 
 
 def _fit_features(rows):
@@ -388,7 +400,7 @@ def fit_cost_heads(samples, feature_names, center, scale, *, ridge=1.0, targets=
 def fit_gain(rows, *, ridge=1.0, input_path=None):
     """Closed-form regression; called only by the explicit training command."""
     import numpy as np
-    reader, profile, _ = _supervision(rows, split="train")
+    reader, profile, _, selection_contract = _supervision(rows, split="train")
     started = time.perf_counter()
     names = _fit_features(rows)
     cost_samples, direct_count = _cost_samples(rows)
@@ -419,6 +431,7 @@ def fit_gain(rows, *, ridge=1.0, input_path=None):
     return PlanGainModel(reader, profile, "plan-gain:"+digest, names,
         tuple(center.tolist()), tuple(scale.tolist()), tuple(coefficients.tolist()), float(intercept),
         {"input_protocol": rows[0]["input_protocol"],
+         "evidence_selection_contract": selection_contract,
          "observed_feature_schema": OBSERVED_FEATURE_SCHEMA if cost_samples else None,
          "label": "actual_final_quality_minus_actual_direct_answer_quality",
          "continuation_protocol": BOUNDED_CONTINUATION,
@@ -438,11 +451,13 @@ def fit_gain(rows, *, ridge=1.0, input_path=None):
 
 
 def evaluate_gain(model, rows, *, training_state_keys=()):
-    reader, profile, _ = _supervision(rows, split="dev")
+    reader, profile, _, selection_contract = _supervision(rows, split="dev")
     if reader != model.reader_checkpoint or profile != model.reader_profile_id:
         raise ValueError("development gains belong to a different reader checkpoint/profile")
     if rows[0]["input_protocol"] != model.provenance["input_protocol"]:
         raise ValueError("development and training gain inputs use different source/compiler/reader scope")
+    if selection_contract != model.provenance.get("evidence_selection_contract"):
+        raise ValueError("development and training gains use different evidence selection contracts")
     if rows[0]["scorer_identity"] != model.provenance["scorer_identity"]:
         raise ValueError("development and training gain labels use different scoring rubrics")
     if set(training_state_keys) & {row["state_key"] for row in rows}:

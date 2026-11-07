@@ -120,7 +120,10 @@ datasets:
 methods:
   - {id: B0, strategy: B0, description: Dense5_REBUILD}
   - {id: Btoken, strategy: Btoken, description: relevance_token_budget}
-  - {id: B3, strategy: B3, description: single_pair_triple_search}
+  - id: B3
+    strategy: B3
+    description: single_pair_triple_search
+    overrides: {selection: {mode: support}}
   - {id: B6, strategy: B6, description: coverage_READ_REDUCE_multihop}
   - {id: B7, strategy: B7, description: native_KV_complete_cost_no_new_training}
   - {id: Lmap, strategy: Lmap, description: full_scope_map_reduce}

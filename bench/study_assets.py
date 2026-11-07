@@ -1,48 +1,36 @@
 """Materialize public evaluation assets independently from training exports."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
-import re
-import shutil
-
-
-def version_catalog(rows):
-    families = {}
-    prepared = []
-    for original in rows:
-        row = dict(original)
-        family = re.sub(r"v?\d+\.\d+\.\d+", "", row["document_id"])
-        order = tuple(map(int, row["version"].split(".")))
-        row.update(document_family=family, version_order=list(order))
-        families[family] = max(order, families.get(family, order))
-        prepared.append(row)
-    for row in prepared:
-        row["current"] = tuple(row["version_order"]) == families[row["document_family"]]
-    return prepared
 
 
 def prepare_public_assets(config):
+    from adapters.hybrid_retrieval import DenseIndex, LocalBGE
+    from adapters.retrieval import BM25SRetriever, load_beir_corpus
+    from adapters.retriever_factory import load_retriever_config
+    from bench.versionqa import SOURCE_COMMIT, prepare
+    from controller.config import create_model_template, load_config
+    from controller.schema import OnlineContext
+
     settings = config["assets"]["versionqa"]
-    source = Path(settings["recorded_cache"]).resolve()
     target = Path(config["study"]["output_dir"])/"evaluation"/"versionqa"
-    target.mkdir(parents=True, exist_ok=True)
-    rows = [json.loads(line) for line in (source/"versionqa-corpus.jsonl").read_text().splitlines()]
-    prepared = version_catalog(rows)
-    (target/"corpus.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in prepared))
-    for name in ("tasks.jsonl", "references.jsonl", "split.json"):
-        shutil.copyfile(source/("versionqa-"+name), target/name)
-    for name in ("bm25s", "bge-m3"):
-        destination = target/name
-        if not destination.exists():
-            destination.symlink_to(source/("versionqa-"+name), target_is_directory=True)
-    manifest = {"dataset": "VersionQA", "questions": 100, "source_partition": "public_evaluation_only",
-        "source_commit": "2a2cbe8f285557f99dc7a79d6df7134e1e3eccff", "recorded_cache": str(source),
-        "passages": len(prepared), "documents": len({r["document_id"] for r in prepared}),
-        "family_construction": "published filenames with semantic version component removed",
-        "current_scope": "highest declared semantic version within each supplied document family",
-        "unknown_dates": "publication and effective dates remain absent",
-        "text_transformations": [], "training_use": False,
-        "original_manifest": json.loads((source/"versionqa-corpus-manifest.json").read_text())}
-    (target/"manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
-    return manifest
+    retrieval = load_retriever_config(settings["retriever_config"])
+    reader = load_config(config["generation"]["run_config"])
+    tokenizer = create_model_template(reader.model).tokenizer
+    manifest = prepare(settings["source"], settings["questions"], target, tokenizer,
+                       pdf_text=settings.get("pdf_text"))
+    corpus = load_beir_corpus(target/"corpus.jsonl")
+    snapshot = f"versionqa-{SOURCE_COMMIT}-{manifest['corpus_sha256'][:16]}"
+    sparse_path, dense_path = target/"bm25s", target/"bge-m3"
+    sparse = BM25SRetriever(corpus, corpus_snapshot_id=snapshot, cpu_threads=retrieval.cpu_threads)
+    sparse.save(sparse_path)
+    encoder = LocalBGE(retrieval.encoder_path, device=retrieval.device, dtype=retrieval.dtype,
+        batch_size=retrieval.batch_size, max_length=retrieval.encoder_max_length,
+        sdpa_backend=retrieval.sdpa_backend)
+    try:
+        DenseIndex.build([OnlineContext(**row) for row in corpus.values()], encoder,
+                         dense_path, corpus_snapshot_id=snapshot, show_progress=True)
+    finally:
+        encoder.close()
+    return {**manifest, "corpus_snapshot_id": snapshot, "sparse_index": str(sparse_path),
+            "dense_index": str(dense_path)}

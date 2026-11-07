@@ -834,12 +834,11 @@ class Controller:
                 response_done = time.monotonic()
                 # Persist before validation so malformed/partial results remain auditable.
                 attempt = self.store.save_attempt(replace(attempt, stage="RESULT_READY", result=result))
-                if result.receipt is not None and result.receipt.generation_complete:
-                    source_view = self.request_compiler.observe_executed(plan.candidate, result.receipt,
-                        cache_scope=info)
-                    self.events.emit("answer_source_executed", attempt_id=attempt.attempt_id,
-                                     source_view=source_view)
                 self._validate(attempt, result)
+                source_view = self.request_compiler.observe_executed(plan.candidate, result.receipt,
+                    cache_scope=info)
+                self.events.emit("answer_source_executed", attempt_id=attempt.attempt_id,
+                                 source_view=source_view)
                 snapshot = self.store.commit_turn_and_outbox(attempt.attempt_id)
             except BaseException as exc:
                 current = self.store.get_attempt(attempt.attempt_id)

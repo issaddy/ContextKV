@@ -384,7 +384,9 @@ class FixedCounterfactualRuntime:
             if variants and not any(candidate.feasible for candidate in variants):
                 from controller.execution import ReadingBudgetExceeded
                 raise ReadingBudgetExceeded("actual generated facts exceed the pre-registered execution window")
+            quote_started = time.monotonic()
             quote = None if cpu else await engine.quote_batch(variants, template.fingerprint)
+            quote_ms = None if cpu else (time.monotonic()-quote_started)*1000
             candidate = None if cpu else executor.request_compiler.choose_variant(variants, quote)
             if not self.new_step_ids and self.pre_action_quote is None:
                 self.pre_action_quote = {
@@ -399,7 +401,7 @@ class FixedCounterfactualRuntime:
             events.emit("plan_gain_experimental_step", attempt_id=attempt_id, **record)
             try:
                 state = await executor.execute_one(attempt_id, snapshot, plan, task, state,
-                    initial_auxiliary_usage=auxiliary_usage, candidate=candidate)
+                    initial_auxiliary_usage=auxiliary_usage, candidate=candidate, quote=quote, quote_ms=quote_ms)
             except ValueError as error:
                 if not str(error).startswith(("conflicting quantities for ", "sum requires compatible units:")):
                     raise

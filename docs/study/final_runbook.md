@@ -60,6 +60,7 @@ LlamaIndex 的统一执行入口与最终编译矩阵已接线；外部参照实
 
 配置入口为 `configs/study.yaml`、`study_matrix.yaml`、`evidence_policy_comparison.yaml`；
 P1 支持策略配置为 `configs/evidence_policy_fixed_qwen.yaml`。
+`bench.study prepare` 的公开 VersionQA 资产从 `assets.versionqa.source/questions` 指定的原文和 CSV 构建，复用 `bench.versionqa` 与 BM25/BGE 索引入口，不再引用历史运行目录；其公开测试题与构造机制开发题分别登记。
 审计配置为 `configs/reader_audit.yaml` 的 `reader_audit:{base_scope,data,review,resource_sample_seconds}`。
 会话队列使用 `evidence_cohort`；P1 支持策略直接绑定固定生成配置。
 辅助学习配置中的 200 train / 40 dev 规模使用
@@ -72,6 +73,8 @@ B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_suppor
 
 当前 B 资产还必须携带 `input_protocol`：`merged_source_windows_actual_coverage_reused_facts_compiled_choice`、实际窗口粒度和完整 reader fingerprint。采集、分支、配对及加载全链核对该身份；旧资产缺少绑定时须按当前协议重采/重拟合，不改名复用。实际 seed、已读覆盖、编译选中排列及报价的 `pre_action_input` 一并保留；事实复用消融仍使用相同 B 模型，实际状态反映关闭复用。
 
+动作收益资产的 `evidence_selection_contract` 来自实际 A manifest，绑定选材模式和顺序，以及 `support` 使用的效用、保留集合重排和支持模型记录身份。观测包和实际分支使用同一合同，开发集及线上提供器须与拟合资产匹配。语料、索引、B6/B7 和服务地址独立记录。只缺该合同的旧资产可用保留了实际分支 manifest 的配对记录重新拟合，旧观测包可从原 capture 重新导出。
+
 GAP 离线与线上只排除实际已读来源，统一新增 passage 额度；采集和拟合必须绑定相同协议。
 
 B 固定流程观测使用 `execution.state_observation`，从真实请求开始计量并记录 READ/REDUCE 决策状态；
@@ -82,7 +85,7 @@ B 固定流程观测使用 `execution.state_observation`，从真实请求开始
 导出后，`training.plan_gain_workflow --mode observed_actions --observed-states PACKETS`
 沿用源 cohort 身份。主线直接读取真实 P3 capture 的 TaskState/ReadingOutcome，不要求另行准备 `--task-labels`、task/student 或 P1 标签；`whole_plan` 固定历史对照仍需审计标签。cohort 预声明 task、会话与 train/dev 分区，真实 QA 历史在采集后由 snapshot 和已完成原生回执核验，只有固定历史对照才额外校验预先提供的历史 hash。每个源 task 保留各合法动作首次可配对的观测，不按未来质量选点。
 `bench.study` 的成功/失败记录保留原始 `reference`、原始数据分区和 observer cohort 绑定，仅供离线审计与评分。导出器将 packet 绑定到完整实际 capture 行的 hash；B 采集核验 native-train 原始正文、版本、窗口坐标与 raw grounding 引文，开发会话独立隔离。原始参考不会进入 A/B/C 的在线输入。正式 dev 队列不能作为 B 训练数据。
-真实检索后的初始状态也可配对 DIRECT 与首次 READ；无需先完成一次 READ。
+真实检索后的初始状态也可配对 DIRECT 与首次 READ。离线 DIRECT 在当前材料上强制 ANSWER，线上停止须通过实际覆盖或结论充分性检查。确认终止而未提交回答的真实分支计效用 0，包含生成前终止，原始评分保留为空。
 进度分别记录去重源任务数和决策快照数，不将多个动作快照重复计为训练任务。
 `observed_actions` 沿用源动作的输出份额，不扫描 `read-outputs`；有效观测数单独记录，声明分母来自所用 cohort。当前 B 小批次为 8/4 个源任务，48/24 个历史轮次不计作独立训练/开发状态。
 新成本拟合读取各分支 `run.json.pre_action_quote`，质量与成本分别归一化；`cold` 数据只能说明冷启动费用，`observed` 保留实际分支起点，不声称恢复源缓存。
@@ -281,7 +284,7 @@ C 的离线 `retention_trace export` 需显式提供 `--failed-conversations`（
 
 B 的 DIRECT/READ/REDUCE/GAP 分支从实际动作前状态报价，分别拟合绝对分支成本，
 同一批次以动作减 DIRECT 计算增量成本和实际质量差，已付共享成本只计一次。
-REDUCE 只读已观察材料；源 packet 的 legal_actions 保留，补充的反事实候选单独登记并在执行前重新报价。
+REDUCE 只读已观察材料。源 packet 的 `legal_actions` 保留，补充的反事实候选单独登记并在执行前重新报价。所选来源读完后，任务必需的 `numeric_select` 和 CPU `count/sum/group` 按固定流程完成。收益资产的样本覆盖只约束可选 REDUCE。
 
 完成记录的来源覆盖诊断采用注册前来源分母，合并既往与新增已读覆盖；GAP 新来源保留在实际 outcome，不修改注册分母。`whole_plan` 与 `observed_actions` 的资产分别声明实际特征，不交叉标记为动作模型。
 

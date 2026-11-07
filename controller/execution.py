@@ -255,7 +255,7 @@ class ReadingExecutor:
         self.observe_state = observe_state
 
     async def execute_one(self, attempt_id, snapshot, plan, task, state, *,
-                          initial_auxiliary_usage=None, candidate=None):
+                          initial_auxiliary_usage=None, candidate=None, quote=None, quote_ms=None):
         """Execute the chosen logical step and return its observed working state.
 
         Selection, gap proposals and terminal ANSWER belong to the rolling
@@ -313,7 +313,7 @@ class ReadingExecutor:
             require_online_tokens(plan.budget.max_total_tokens, tokens,
                 len(rendered.input_ids)+task.output_budget, task.kind)
             record = await self._generate_step(attempt_id, snapshot, plan, task, selected_units, selected_claims,
-                                               results=state.results, candidate=candidate, rendered=rendered)
+                results=state.results, candidate=candidate, rendered=rendered, quote=quote, quote_ms=quote_ms)
         if cpu:
             record = completed_reduction_record(record, task, selected_claims, state.results)
             self.store.save_execution_step(record, "COMPLETE")
@@ -376,7 +376,7 @@ class ReadingExecutor:
         return record
 
     async def _generate_step(self, attempt_id, snapshot, plan, task, units, claims, *, results=(),
-                             candidate, rendered, text_callback=False):
+                             candidate, rendered, text_callback=False, quote=None, quote_ms=None):
         step_started = time.monotonic()
         identity = f"{attempt_id}:{task.step_id}"
         messages = candidate.messages
@@ -428,16 +428,23 @@ class ReadingExecutor:
                 raise EngineError("READ_STEP_OUTCOME_PENDING", status.state)
             generation = status.result
         elif stage == "PREPARED":
-            quote_started = time.monotonic()
-            quote = await self.engine.quote_batch((candidate,), self.template.fingerprint)
+            if quote is None:
+                quote_started = time.monotonic()
+                quote = await self.engine.quote_batch((candidate,), self.template.fingerprint)
+                quote_ms = (time.monotonic()-quote_started)*1000
+            if quote.engine_restart_id != epoch.engine_restart_id:
+                raise EngineError("READ_STEP_QUOTE_RESTART")
+            matching = tuple(row for row in quote.quotes if row.candidate_id == candidate.candidate_id)
+            if (len(matching) != 1 or matching[0].input_hash != rendered.input_hash
+                    or matching[0].input_len != len(rendered.input_ids)
+                    or quote.fingerprint != candidate.fingerprint):
+                raise EngineError("READ_STEP_QUOTE_INPUT_MISMATCH")
             record = replace(record, metrics={**record.metrics,
-                "quote_ms": (time.monotonic()-quote_started)*1000,
+                "quote_ms": quote_ms,
                 "cache_quote": to_jsonable(quote),
                 "active_requests": quote.active_requests, "queued_requests": quote.queued_requests,
                 "cache_config_hash": quote.cache_config_hash})
             self.store.save_execution_step(record, "PREPARED")
-            if quote.engine_restart_id != epoch.engine_restart_id:
-                raise EngineError("READ_STEP_QUOTE_RESTART")
             submitted = time.monotonic()
             record = replace(record, metrics={**record.metrics,
                 "submitted_from_arrival_ms": (submitted-self.request_arrived)*1000
@@ -596,9 +603,12 @@ class ReadingExecutor:
                     reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
             variants = self.request_compiler.compile_read(plan, task, selected_units, selected_claims,
                 snapshot, outputs=(task.output_budget,), cache_scope=await self.engine.info())
+            quote, quote_ms = None, None
             if persisted is None and len(variants) > 1:
-                quotes = await self.engine.quote_batch(variants, self.template.fingerprint)
-                candidate = self.request_compiler.choose_variant(variants, quotes)
+                quote_started = time.monotonic()
+                quote = await self.engine.quote_batch(variants, self.template.fingerprint)
+                quote_ms = (time.monotonic()-quote_started)*1000
+                candidate = self.request_compiler.choose_variant(variants, quote)
             else:
                 candidate = variants[0]
             task = replace(task, input_unit_ids=candidate.read_unit_order,
@@ -613,7 +623,8 @@ class ReadingExecutor:
                     len(rendered.input_ids)+task.output_budget, task.kind)
             try:
                 record = await self._generate_step(attempt_id, snapshot, plan, task,
-                    selected_units, selected_claims, results=tuple(results), candidate=candidate, rendered=rendered)
+                    selected_units, selected_claims, results=tuple(results), candidate=candidate, rendered=rendered,
+                    quote=quote, quote_ms=quote_ms)
             finally:
                 saved = self.store.execution_step(attempt_id, task.step_id)
                 if saved is not None:

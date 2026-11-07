@@ -66,3 +66,18 @@ def resident_model_identity(manifest):
 def resident_model_digest(manifest):
     identity = resident_model_identity(manifest)
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def evidence_selection_contract(manifest):
+    """Identify A's actual selection policy independently of the resident corpus."""
+    if manifest is None:
+        raise ValueError("observed gains require the actual evidence selection manifest")
+    mode = manifest.get("selection_mode", "support")
+    if mode not in {"ranked", "support"}:
+        raise ValueError("unknown evidence selection mode in the actual manifest")
+    contract = {"mode": mode, "order": manifest.get("evidence_selection_order")}
+    if mode == "support":
+        contract.update(utility=manifest.get("selection_utility"),
+            rerank_retained_sets=manifest.get("rerank_retained_sets", False),
+            support_model=_asset(to_jsonable(manifest.get("support_model"))))
+    return contract

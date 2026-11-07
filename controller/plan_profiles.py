@@ -6,6 +6,7 @@ from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
+import time
 
 from .execution import auxiliary_tokens
 from .plan_policy import (CompleteCost, NativePlanningState, ResourceForecast, StepForecast,
@@ -265,7 +266,9 @@ class ProfiledNativeObserver:
     async def observe(self, plans, state, snapshot, engine, cost_model, arrived, auxiliary_usage, *, selection_started):
         candidates = tuple(candidate for plan in plans for step in plan.steps for candidate in step.variants
                            if candidate.feasible)
+        quote_started = time.monotonic()
         quotes = await engine.quote_batch(candidates, self.profiles.fingerprint)
+        quote_ms = (time.monotonic()-quote_started)*1000
         self.profiles.bind(quotes, self.reader_checkpoint, self.reader_profile_id)
         by_id = {quote.candidate_id: quote for quote in quotes.quotes}
         concurrency = quotes.active_requests+1
@@ -372,6 +375,7 @@ class ProfiledNativeObserver:
                 future[plan.plan_id, task.step_id] = tuple(choices)
         return NativePlanningState(self.reader_checkpoint, self.reader_profile_id, snapshot, quotes,
             cost_model, resources, future, paid, {**self.paid.last_observation,
+                "native_quote_ms": quote_ms,
                 "current_answer_phase_overlap": overlap_record,
                 "native_admission": admission,
                 "execution_profile_predictions": estimates}), reusable
@@ -398,7 +402,9 @@ class ObservedNativeObserver:
     async def observe(self, plans, state, snapshot, engine, cost_model, arrived, auxiliary_usage, *, selection_started):
         candidates = tuple(candidate for plan in plans for step in plan.steps for candidate in step.variants
                            if candidate.feasible)
+        quote_started = time.monotonic()
         quotes = await engine.quote_batch(candidates, self.fingerprint)
+        quote_ms = (time.monotonic()-quote_started)*1000
         if quotes.fingerprint != self.fingerprint:
             raise ValueError("native quote does not match the actual reader fingerprint")
         pool = (await engine.metrics())["pool"]
@@ -416,6 +422,7 @@ class ObservedNativeObserver:
             "basis": "actual native quote workload/clip and actual engine physical token pool"}
         return NativePlanningState(self.reader_checkpoint, self.reader_profile_id, snapshot, quotes,
             cost_model, {}, {}, paid, {**self.paid.last_observation, "native_admission": admission,
+                "native_quote_ms": quote_ms,
                 "resident_model_manifest_digest": self.resident_digest}), reusable
 
 

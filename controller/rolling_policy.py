@@ -196,6 +196,11 @@ class RollingPlanRuntime:
         await self.native.start()
 
     def bind_resident_models(self, manifest):
+        if self.mode == "observed_actions":
+            from .resident_models import evidence_selection_contract
+            if evidence_selection_contract(manifest) != self.policy.gain_model.provenance.get(
+                    "evidence_selection_contract"):
+                raise ValueError("rolling gain asset uses a different evidence selection contract")
         self.native.bind_resident_models(manifest)
         if self.mode == "observed_actions" and self.gap_limits is not None:
             self.gap_retriever_identity = _gap_retriever_identity(manifest)
@@ -434,17 +439,28 @@ class RollingPlanRuntime:
         return tuple(plans)
 
     def _required_scope_step(self, state):
-        if state.plan.coverage_scope != "all_supplied_documents":
-            return None
-        ready = advance_read_plan(state.plan, state.results)
+        plan = state.plan
+        full_scope = plan.coverage_scope == "all_supplied_documents"
+        numeric_operations = {"count", "sum", "group"}
+        if not full_scope:
+            if plan.reading_mode != "typed_reduce" or not any(
+                    need.operation in numeric_operations for need in plan.task_state.needs):
+                return None
+            completed = {result.step_id for result in state.results}
+            if any(task.kind == "READ" and task.step_id not in completed for task in plan.steps):
+                return None
+        ready = advance_read_plan(plan, state.results)
         if self._mandatory_coverage(state):
             task = next((task for task in ready if task.kind == "READ"), None)
             if task is None:
                 raise NoCompletePlan("no ready READ can complete the required source scope")
             return task
+        required_operations = numeric_operations | {"numeric_select"}
+        if full_scope:
+            required_operations.add("union")
         return next((task for task in ready if task.kind == "REDUCE"
-                     and state.plan.reading_mode == "typed_reduce"
-                     and task.operation in {"numeric_select", "count", "sum", "union", "group"}), None)
+                     and plan.reading_mode == "typed_reduce"
+                     and task.operation in required_operations), None)
 
     async def run(self, attempt_id, snapshot, context_plans, executor, engine, template,
                   cost_model, compile_answers, *, arrived, auxiliary_usage, events, open_need_provider=None,
@@ -565,7 +581,8 @@ class RollingPlanRuntime:
                 decisions.append(audit)
                 events.emit("rolling_required_scope_step", attempt_id=attempt_id, **audit)
                 state = await executor.execute_one(attempt_id, snapshot, plan, required_step, state,
-                    initial_auxiliary_usage=auxiliary_usage, candidate=candidate)
+                    initial_auxiliary_usage=auxiliary_usage, candidate=candidate, quote=native.quotes,
+                    quote_ms=(native.paid_observation or {}).get("native_quote_ms"))
                 context_plans = (state.plan,)
                 executor.store.save_reading_progress(attempt_id, state.plan,
                     ReadingProgress(tuple(sorted(expanded)), (), state.auxiliary_usage))
@@ -653,7 +670,8 @@ class RollingPlanRuntime:
                 continue
             execution_plan = _with_observed_sources(context_plans[0], state) if self.mode == "observed_actions" else plan
             state = await executor.execute_one(attempt_id, snapshot, execution_plan, decision.next_step.task, state,
-                initial_auxiliary_usage=auxiliary_usage, candidate=decision.next_step.candidate)
+                initial_auxiliary_usage=auxiliary_usage, candidate=decision.next_step.candidate, quote=native.quotes,
+                quote_ms=(native.paid_observation or {}).get("native_quote_ms"))
             if self.mode == "observed_actions":
                 from .session_store import ReadingProgress
                 context_plans = (state.plan,)
@@ -772,7 +790,8 @@ class FixedReadingObserver:
         mandatory = RollingPlanRuntime._mandatory_coverage(state) and not direct_eligible
         gap = RollingPlanRuntime._gap_request(self, state, expanded, executor.extend_open_needs)
         plans = (() if mandatory else RollingPlanRuntime.action_proposals(self, state.plan, state,
-            snapshot, executor.template, compile_answers, gap))
+            snapshot, executor.template, compile_answers, gap, request_compiler=executor.request_compiler,
+            cache_scope=await engine.info()))
         candidates = tuple(candidate for plan in plans for step in plan.steps for candidate in step.variants
                            if candidate.feasible)
         quote_started = time.monotonic()
@@ -787,6 +806,8 @@ class FixedReadingObserver:
                     if self.gap_retriever_identity is not None else None),
                 "after_step_id": state.steps[-1].step_id if state.steps else None,
                 "after_step_kind": state.steps[-1].task.kind if state.steps else None,
+                # Offline registration permits a forced DIRECT on a partial state.
+                # The live ANSWER separately requires sufficient evidence.
                 "legal_actions": [plan.semantic_kind for plan in plans],
                 "observation_overhead": {"clock": "client_monotonic", "start": started,
                     "pre_arrival_startup_ms": startup_ms,

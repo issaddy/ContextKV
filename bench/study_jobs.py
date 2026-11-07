@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from bench.study import merge_config
+
 
 def development_variants(matrix):
     methods = deepcopy(matrix["methods"])
@@ -10,8 +12,10 @@ def development_variants(matrix):
     ablations = matrix["ablations"]
 
     def add(parent, suffix, override, purpose):
-        methods.append({"id": parent+"-"+suffix, "strategy": by_id[parent]["strategy"],
-            "parent": parent, "comparison": purpose, "overrides": override})
+        method = by_id[parent]
+        methods.append({"id": parent+"-"+suffix, "strategy": method["strategy"],
+            "parent": parent, "comparison": purpose,
+            "overrides": merge_config(method.get("overrides", {}), override)})
 
     for budget in ablations["body_tokens"]:
         for parent in ("Btoken", "B3", "B4"):
@@ -23,7 +27,8 @@ def development_variants(matrix):
         for parent in ("B3", "B4"):
             if parent in by_id:
                 add(parent, "orders"+"_".join(map(str, orders)),
-                    {"support_model": {"group_mode": group_modes[tuple(orders)]}}, "support_arity")
+                    {"selection": {"mode": "support"},
+                     "support_model": {"group_mode": group_modes[tuple(orders)]}}, "support_arity")
     for mode in ablations["reading"]:
         add("B6", mode, {"reading": {"mode": mode}}, "reading_state_and_operations")
     for layout in ablations["layouts"]:

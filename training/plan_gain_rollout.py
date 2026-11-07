@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from controller.action_proposals import observed_reduction_task, BOUNDED_CONTINUATION
 from controller.plan_gain_protocol import input_protocol, validate_input_protocol
 from controller.context_schema import EvidenceSet, EvidenceUnit, ReadingOutcome, SourceSpan, TaskState
+from controller.resident_models import evidence_selection_contract
 from controller.schema import (EvidenceBlock, OnlineContext, OnlineMessage, OnlineTurn,
                                PromptCandidate, QueryContext, SessionSnapshot, TurnRecord, Message)
 from controller.serialization import decode, to_jsonable
@@ -107,7 +108,8 @@ def observed_rows(rows, packets, *, selection=None):
             reader_profile_id=packet["reader_profile_id"], paid_observation=packet.get("paid_observation"))
         binding.update(input_protocol=packet["input_protocol"], observation_id=identity, cohort_split=packet["cohort_split"],
             cohort_manifest_sha256=packet["cohort_manifest_sha256"],
-            resident_model_manifest_digest=packet["resident_model_manifest_digest"])
+            resident_model_manifest_digest=packet["resident_model_manifest_digest"],
+            evidence_selection_contract=packet["evidence_selection_contract"])
         key = (packet["decision_seq"], packet["native_condition"]["observed_time_ns"], identity)
         reduction = observed_reduction_task(state)
         supplement = ({"family": "reduce_once", "operation": reduction.operation,
@@ -998,11 +1000,14 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                         frozen = decode(ReadingOutcome, packet["working_state"])
                         snap = decode(SessionSnapshot, packet["snapshot"])
                         base = frozen.plan
-                        actual_resident = gap_retriever_identity(provider.manifest)["resident_model_manifest_digest"]
-                        if packet["resident_model_manifest_digest"] != actual_resident:
+                        actual_manifest = provider.manifest
+                        retriever_identity = gap_retriever_identity(actual_manifest)
+                        if packet["resident_model_manifest_digest"] != retriever_identity["resident_model_manifest_digest"]:
                             raise ValueError("observed state belongs to different frozen A resident assets")
+                        if observed["evidence_selection_contract"] != evidence_selection_contract(actual_manifest):
+                            raise ValueError("observed state uses a different frozen A evidence selection contract")
                         gap_request = decode(GapRetrievalRequest, packet["gap_request"]) if packet.get("gap_request") else None
-                        if gap_request is not None and gap_request.retriever_identity != gap_retriever_identity(provider.manifest):
+                        if gap_request is not None and gap_request.retriever_identity != retriever_identity:
                             raise ValueError("registered GAP retriever differs from the actual collection configuration")
                         plans, omitted = build_observed_action_plans(frozen, snap, controller.template,
                             reader_checkpoint=reader_checkpoint, gap_request=gap_request,

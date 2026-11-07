@@ -318,7 +318,8 @@ class StudyEvidenceProvider:
                 coverage = "all_supplied_documents"
             full_scope_read = reading and coverage == "all_supplied_documents"
             if supplied_blocks is not None:
-                pool = self.directory.full_scope(state.source_scope)
+                pool = (self.directory.full_scope(state.source_scope) if full_scope_read
+                        else self._applicable_supplied_pool(state, memory))
             elif full_scope_read:
                 document_ids = self.config.get("reading", {}).get("document_ids", ())
                 keys = state.source_scope or tuple(block.key for block in self.directory.corpus_index.blocks
@@ -522,6 +523,13 @@ class StudyEvidenceProvider:
         blocks = tuple(block for block in pool.source_blocks if block.key in keys)
         return EvidenceSet(f"{state.task_id}:relevance", chosen, token_cost=token_cost, source_blocks=blocks)
 
+    def _applicable_supplied_pool(self, state, memory):
+        temporal = (None if state.version_intent.resolved_version_ids
+                    else self.directory._temporal_sources(state, memory))
+        keys = tuple(key for key in state.source_scope
+                     if self.directory._applicable(key, state, memory, temporal_sources=temporal))
+        return self.directory.full_scope(keys)
+
     def _rank_supplied(self, state, snapshot, pool, *, query_override=None):
         from adapters.hybrid_retrieval import DenseIndex, HybridRetriever, LocalBGE, search_variants
         from adapters.retrieval import BM25SRetriever
@@ -592,8 +600,11 @@ class StudyEvidenceProvider:
                         return False
                 return True
 
-            fresh_pool = (self.directory.full_scope(state.source_scope) if state.source_scope
-                          else self.directory.retrieve_gap_pool(state, memory, open_needs))
+            if state.source_scope:
+                fresh_pool = (self.directory.full_scope(state.source_scope)
+                    if plan.coverage_scope == "all_supplied_documents" else self._applicable_supplied_pool(state, memory))
+            else:
+                fresh_pool = self.directory.retrieve_gap_pool(state, memory, open_needs)
             fresh_units = tuple(unit for unit in fresh_pool.units if not already_read(unit))
             phases = (("source_directory", (time.perf_counter()-source_started)*1000),) if state.source_scope else (
                 ("retrieval", fresh_pool.retrieval_ms),)

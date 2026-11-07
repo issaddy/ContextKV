@@ -277,7 +277,8 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
                          origin_guide: str = "",
                          query_context: QueryContext | None = None,
                          citation_scope: Iterable[EvidenceKey] | None = None,
-                         visible_bodies: Mapping[str, EvidenceSpan] | None = None
+                         visible_bodies: Mapping[str, EvidenceSpan] | None = None,
+                         preserve_source_order: bool = False,
                          ) -> tuple[Message, tuple[EvidenceSpan, ...]]:
     by_key = {key: reference for reference, key in references}
     blocks, reused = tuple(blocks), tuple(reused)
@@ -298,7 +299,7 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
             content += "\n" + "\n".join(reuse_annotation(ref) for ref in reused_ids) + "\n"
         else:
             content += "\nPreviously supplied evidence: " + ", ".join(f"[{r}]" for r in reused_ids) + "\n"
-    ordered = blocks if layout == "contextpilot" else sorted(blocks, key=lambda b: b.key)
+    ordered = blocks if preserve_source_order or layout == "contextpilot" else sorted(blocks, key=lambda b: b.key)
     for block in ordered:
         ref = by_key[block.key]
         owner = bodies.get(block.text)

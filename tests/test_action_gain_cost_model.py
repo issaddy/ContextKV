@@ -8,6 +8,7 @@ from controller.claim_graph import ClaimGraph
 from controller.context_schema import EvidenceClaim, Need, ReadingOutcome, ReadResult, ReadTask, StepRecord
 from controller.plan_policy import CompleteCost, complete_plan
 from controller.plan_gain_protocol import input_protocol
+from controller.resident_models import evidence_selection_contract, resident_model_digest
 from controller.templates import ByteTemplate
 from controller.schema import SessionSnapshot, TurnRecord
 from training.plan_gain_protocol import ZERO_AUX, observed_state_binding
@@ -32,9 +33,13 @@ def paired_records(*, split="train", tag="training"):
     state = ReadingOutcome(base, results=(old_result,), steps=(old_step,), claims=(leaf,), auxiliary_usage=dict(ZERO_AUX))
     snapshot = SessionSnapshot("source:"+tag, raw_history=(TurnRecord(1, "Use the current condition", "Confirmed:"+tag),))
     paid = CompleteCost(10000, 20000, 30000, 5000, 500)
+    resident_manifest = {"source": "specified paired fixture", "selection_mode": "ranked",
+        "evidence_selection_order": "published_reranker_dependency_closure_v1"}
     observed = observed_state_binding(state, snapshot, paid_cost=paid,
         native_condition={"cache_state": "specified paired fixture"}, reader_checkpoint="reader-fixture",
         reader_profile_id="profile-fixture")
+    observed.update(resident_model_manifest_digest=resident_model_digest(resident_manifest),
+        evidence_selection_contract=evidence_selection_contract(resident_manifest))
     baseline = dict(zip(COST_FIELDS, (100, 2, 3, 1000, 40), strict=True))
     prior = dict(zip(COST_FIELDS, (10000, 20, 30, 5000, 500), strict=True))
     common = {"measurement_kind": "hardware", "history_origin": "frozen_actual_rollout",
@@ -46,7 +51,8 @@ def paired_records(*, split="train", tag="training"):
         "continuation_gap_limits": {"max_units": 2, "max_passages": 2},
         "scorer_identity": {"kind": "specified unit-test scorer"},
         "comparison_budget": {"window_tokens": base.budget.window_tokens, "answer_output_tokens": 64},
-        "observed_state_binding": observed, "output_budgets": {"ANSWER": 64}}
+        "observed_state_binding": observed, "output_budgets": {"ANSWER": 64},
+        "source_run": {"resident_model_manifest": resident_manifest}}
     direct = {**deepcopy(common), "semantic_kind": "direct_answer", "plan_id": "direct:"+tag,
         "quality": .2, "read_count": 0, "native_receipts": [
             {"input_hash": "specified-direct:"+tag, "generation_complete": True}],

@@ -1,4 +1,6 @@
 base_study_config: configs/study.yaml
+selection:
+  mode: support
 policy_comparison:
   concurrency: 4
   policies:

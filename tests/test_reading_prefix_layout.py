@@ -296,3 +296,24 @@ def test_request_compiler_answer_reorders_only_actual_excerpts_and_preserves_tas
     for candidate in variants:
         assert candidate.evidence_body_tokens == sum(len(block.text.encode()) for block in blocks)
         assert {span.key for span in candidate.evidence_spans} == {block.key for block in blocks}
+
+    from controller.schema import ExecutionLedger, Message
+    prior_block = make_evidence("Earlier reference remains in the committed input.", "prior")
+    prior = RequestCompiler(template).compile_answers(snapshot, "First question", retrieved=(prior_block,))[0]
+    execution = ExecutionLedger(1, "engine", 0, (*prior.messages, Message("assistant", "First answer")),
+        prior.input_ids, (), prior.visible_blocks, template.fingerprint.template_hash,
+        template.fingerprint.model_revision, snapshot.corpus_snapshot_id,
+        prior.evidence_spans, prior.reference_map)
+    committed = replace(snapshot, execution=execution, archive=(prior_block,), reference_map=prior.reference_map)
+    plain = RequestCompiler(template).compile_answers(committed, state.raw_question, retrieved=blocks)
+    variants = RequestCompiler(template, ReverseIndex()).compile_answers(committed, state.raw_question,
+        retrieved=blocks, cache_scope=scope)
+    for base in plain:
+        original, reordered = (variant for variant in variants if variant.action == base.action)
+        assert original.input_ids == base.input_ids
+        assert reordered.layout_id == "existing:contextpilot"
+        assert reordered.reference_map == base.reference_map and reordered.required_blocks == base.required_blocks
+        assert reordered.messages[:-1] == original.messages[:-1]
+        offset = len(prior.evidence_spans) if base.action == "APPEND" else 0
+        assert reordered.evidence_spans[:offset] == prior.evidence_spans[:offset]
+        assert reordered.source_ids[offset:] == original.source_ids[offset:][::-1]

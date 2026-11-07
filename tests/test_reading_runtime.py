@@ -52,13 +52,38 @@ async def test_read_answer_commit_once_and_replay_does_no_work(tmp_path):
 
 @pytest.mark.asyncio
 async def test_source_prefix_observer_finishes_before_read_epoch_retirement_and_qa_commit(tmp_path):
+    from controller.request_compiler import RequestCompiler
+
     block, unit = material("Eligible applicants use the online form.")
+    other_block, other_unit = material("They must attach a valid ID.", "b")
     state = TaskState("t", "How do I apply?", needs=(Need("n", operation="procedure"),), current_turn_id=1)
-    plan = build_read_plan(state, EvidenceSet("set", (unit,), disposition="partial", source_blocks=(block,)),
-        "selected_sources", ContextBudget(), template=ByteTemplate(), read_layout="source_first")
+    plan = build_read_plan(state, EvidenceSet("set", (unit, other_unit), disposition="partial",
+        source_blocks=(block, other_block)), "selected_sources", ContextBudget(),
+        template=ByteTemplate(), read_layout="source_first")
     engine = ScriptedReadingEngine([read_output(fact("a"))])
+    class ReverseIndex:
+        def propose_orders(self, identities, **scope):
+            return (identities, identities[::-1]) if len(identities) > 1 else (identities,)
+
+        def observe_executed(self, identities, **receipt):
+            return "executed"
+
+    quote_batch = engine.quote_batch
+    read_quotes = []
+
+    async def quote(candidates, fingerprint):
+        batch = await quote_batch(candidates, fingerprint)
+        if any(candidate.read_unit_order for candidate in candidates):
+            preferred = batch.quotes[-1]
+            batch = replace(batch, quotes=(*batch.quotes[:-1],
+                replace(preferred, ready_gpu_prefix_tokens=preferred.match_limit)))
+            read_quotes.append(batch)
+        return batch
+
+    engine.quote_batch = quote
     store = SessionStore(tmp_path/"state.db")
-    controller = Controller(store, engine, knobs=PlannerKnobs(strategy="always_rebuild"))
+    controller = Controller(store, engine, knobs=PlannerKnobs(strategy="always_rebuild"),
+        request_compiler=RequestCompiler(ByteTemplate(), ReverseIndex()))
     seen = []
 
     async def observe(current_plan, task, units, rendered, record):
@@ -66,7 +91,7 @@ async def test_source_prefix_observer_finishes_before_read_epoch_retirement_and_
         assert engine._epochs[record.engine_epoch.engine_session_id].state == "COMMITTED"
         assert not store.get_snapshot("session").raw_history
         assert record.input_ids == rendered.input_ids
-        assert units == (unit,)
+        assert units == (other_unit, unit)
         seen.append(record.receipt.attempt_id)
         return {"owner_id": "independent-owner", "state": "RETAINED"}
 
@@ -75,6 +100,10 @@ async def test_source_prefix_observer_finishes_before_read_epoch_retirement_and_
     _, record, _ = store.execution_step(response.attempt_id, "read:0")
     assert record.metrics["evidence_prefix"]["owner_id"] == "independent-owner"
     assert record.metrics["prefix_control_ms"] >= 0
+    assert len(read_quotes) == 1
+    assert record.metrics["cache_quote"]["request_id"] == read_quotes[0].request_id
+    assert record.metrics["cache_quote"]["quotes"][-1]["input_hash"] == record.receipt.input_hash
+    assert record.metrics["quote_ms"] >= 0
     assert engine._epochs[record.engine_epoch.engine_session_id].state == "RETIRED"
     assert len(store.get_snapshot("session").raw_history) == 1
     await controller.serve_turn("session", state.raw_question, context_plans=(plan,), request_id="one")

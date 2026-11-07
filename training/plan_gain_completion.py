@@ -20,7 +20,7 @@ from controller.plan_policy import OBSERVED_FEATURE_SCHEMA, CompleteCost, NATIVE
 from controller.schema import CacheQuoteBatch, SessionSnapshot
 from controller.serialization import decode
 from controller.plan_gain_protocol import validate_input_protocol, validate_pre_action_input
-from training.train_plan_gain import (COST_FIELDS, PlanGainModel, _fit_features, _ridge,
+from training.train_plan_gain import (COST_FIELDS, PlanGainModel, _fit_features, _fit_selection_contract, _ridge,
     actual_history, fit_cost_heads, working_state_key)
 
 
@@ -131,6 +131,8 @@ def completion_record(before, run):
             or observed["reader_checkpoint"] != run["reader_checkpoint"]
             or observed["reader_profile_id"] != run["reader_profile_id"]):
         raise ValueError("observed completion binding differs from its actual frozen state")
+    if observed is not None and run.get("resident_model_manifest") != before.get("resident_model_manifest"):
+        raise ValueError("observed completion changed its registered resident model manifest")
     validate_pre_action_input(run)
     complete, reason = _completion(run, observed=observed is not None)
     if observed is not None:
@@ -246,8 +248,8 @@ def effective_pair(base, candidate):
     if base["semantic_kind"] != "direct_answer":
         raise ValueError("effective baseline must be direct ANSWER")
     if observed:
-        if base["actual_run"]["new_action_counts"] != {"READ": 0, "REDUCE": 0, "GAP_RETRIEVAL": 0, "ANSWER": 1}:
-            raise ValueError("effective observed direct must have zero newly executed reading actions")
+        validate_action_counts("direct_answer", base["actual_run"]["new_action_counts"],
+                               complete=base["completion"] == 1)
     elif base["actual_run"]["steps"]:
         raise ValueError("effective whole-plan direct must have zero READ/REDUCE steps")
     if base["effective_utility"] is None or candidate["effective_utility"] is None:
@@ -322,6 +324,12 @@ def finalize(collection, output):
     return manifest
 
 
+def _observed_selection_contract(records):
+    return _fit_selection_contract(row[branch]["actual_run"].get("resident_model_manifest")
+        for row in records if row.get("observed_state_binding") is not None
+        for branch in ("direct", "counterfactual"))
+
+
 def fit_effective(training, *, ridge=1.0, path=None):
     import numpy as np
     if not training or any(row["split"] != "train" or row["source"] != "actual_completion_weighted_counterfactual"
@@ -336,6 +344,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
     limits = {digest(row["counterfactual"]["actual_run"]["continuation_gap_limits"]) for row in training}
     if len(limits) != 1:
         raise ValueError("one bounded gain asset requires the same declared GAP limits")
+    selection_contract = _observed_selection_contract(training)
     samples, direct_seen, cost_kinds, cache_scopes = [], set(), set(), set()
     cost_record_ids = []
     resident_digests = set()
@@ -396,6 +405,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
         "effective-plan-gain:"+digest(training), names, tuple(center.tolist()), tuple(scale.tolist()),
         tuple(coefficients.tolist()), float(intercept),
         {"input_protocol": training[0]["input_protocol"],
+         "evidence_selection_contract": selection_contract,
          "observed_feature_schema": OBSERVED_FEATURE_SCHEMA if any(
              row["observed_state_binding"] is not None for row in training) else None,
          "continuation_protocol": BOUNDED_CONTINUATION,
@@ -437,6 +447,8 @@ def main(argv=None):
                or row.get("input_protocol") != model.provenance["input_protocol"]
                for row in development):
             raise ValueError("effective gain development must match the actual reader/profile/scorer")
+        if _observed_selection_contract(development) != model.provenance["evidence_selection_contract"]:
+            raise ValueError("effective development uses a different evidence selection contract")
         dev_scorer = label_scorer_identity(development)
         if dev_scorer is not None and dev_scorer != model.provenance["scorer_identity"]:
             raise ValueError("effective gain development uses a different actual scorer")

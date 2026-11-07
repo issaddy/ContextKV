@@ -38,7 +38,8 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
                      template: Template | None = None, *,
                      retrieval_priority: tuple[EvidenceKey, ...] | None = None,
                      query_context: QueryContext | None = None,
-                     measure_evidence_redundancy: bool = False
+                     measure_evidence_redundancy: bool = False,
+                     source_orderer=None,
                      ) -> tuple[PromptCandidate, ...]:
     """No archive/seen/epoch/template state is changed by candidate generation."""
     started = time.perf_counter()
@@ -99,7 +100,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     prompts = []
     body_lengths = {}
 
-    def candidate(action, messages, spans, visible, reason, rendered):
+    def candidate(layout, action, messages, spans, visible, reason, rendered):
         verify_rendered_evidence(messages, spans, rendered.text)
         total_body_tokens = nonrequired_body_tokens = None
         if measure_evidence_redundancy:
@@ -123,8 +124,11 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
             reason = "required_evidence_not_visible"
         if len(rendered.input_ids) + policy.max_new_tokens > policy.max_total_model_tokens:
             reason = "shared_context_policy_overflow"
+        candidate_id = f"{snapshot.session_id}:{snapshot.version}:{action}"
+        if layout != "existing":
+            candidate_id += ":contextpilot"
         return PromptCandidate(
-            candidate_id=f"{snapshot.session_id}:{snapshot.version}:{action}", action=action,
+            candidate_id=candidate_id, action=action,
             snapshot_version=snapshot.version, messages=messages, input_ids=rendered.input_ids,
             input_hash=rendered.input_hash, visible_blocks=visible, required_blocks=required_keys,
             build_ms=(time.perf_counter() - started) * 1000, feasible=reason is None,
@@ -132,7 +136,23 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
             theoretical_lcp=longest_common_prefix(rendered.input_ids, previous),
             corpus_snapshot_id=snapshot.corpus_snapshot_id, fingerprint=template.fingerprint,
             evidence_resolution=resolution, evidence_body_tokens=total_body_tokens,
-            nonrequired_evidence_body_tokens=nonrequired_body_tokens)
+            nonrequired_evidence_body_tokens=nonrequired_body_tokens, layout_id=layout)
+
+    def user_variants(blocks, *, message_index, reused=(), visible_bodies=None):
+        blocks = tuple(blocks)
+        if source_orderer is None:
+            orders = (blocks,)
+        else:
+            original = blocks if policy.layout == "contextpilot" else tuple(sorted(blocks, key=lambda b: b.key))
+            orders = source_orderer(original)
+        for index, ordered in enumerate(orders):
+            current, spans = current_user_message(query, ordered, references,
+                message_index=message_index, reused=reused, layout=policy.layout,
+                retrieval_priority=retrieval_priority, table_annotations=table_annotations,
+                evidence_relations=evidence_relations, citation_scope=required_keys, source_guide=source_guide,
+                query_context=query_context, visible_bodies=visible_bodies, origin_guide=origin_guide,
+                preserve_source_order=source_orderer is not None)
+            yield "existing" if index == 0 else "existing:contextpilot", current, spans
 
     execution = snapshot.execution
     if execution is not None:
@@ -162,26 +182,17 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         for span in execution.evidence_spans:
             if span.body_reference_id is None and span.key in visible:
                 visible_bodies.setdefault(archive[span.key].text, span)
-        current, spans = current_user_message(query, missing, references,
-            message_index=len(execution.messages), reused=required_keys & visible,
-            layout=policy.layout, retrieval_priority=retrieval_priority, table_annotations=table_annotations,
-            evidence_relations=evidence_relations, citation_scope=required_keys, source_guide=source_guide,
-            query_context=query_context, visible_bodies=visible_bodies, origin_guide=origin_guide)
-        prompts.append(("APPEND", execution.messages + (current,), execution.evidence_spans + spans,
-                        visible | frozenset(span.key for span in spans), reason))
+        for layout, current, spans in user_variants(missing, message_index=len(execution.messages),
+                reused=required_keys & visible, visible_bodies=visible_bodies):
+            prompts.append((layout, "APPEND", (*execution.messages, current), (*execution.evidence_spans, *spans),
+                            visible | frozenset(span.key for span in spans), reason))
 
     messages = [system_message]
     for turn in snapshot.raw_history:
         messages.extend((Message("user", turn.user_text), Message("assistant", turn.assistant_text)))
-    current, spans = current_user_message(query, required, references,
-                                         message_index=len(messages), layout=policy.layout,
-                                         retrieval_priority=retrieval_priority, table_annotations=table_annotations,
-                                         evidence_relations=evidence_relations, citation_scope=required_keys,
-                                         source_guide=source_guide, query_context=query_context,
-                                         origin_guide=origin_guide)
-    messages.append(current)
-    prompts.append(("REBUILD", tuple(messages), spans, frozenset(span.key for span in spans), None))
-    conversations = tuple(prompt[1] for prompt in prompts)
+    for layout, current, spans in user_variants(required, message_index=len(messages)):
+        prompts.append((layout, "REBUILD", (*messages, current), spans, frozenset(span.key for span in spans), None))
+    conversations = tuple(prompt[2] for prompt in prompts)
     rendered = template.render_many(conversations)
     return tuple(candidate(*prompt, output) for prompt, output in zip(prompts, rendered, strict=True))
 

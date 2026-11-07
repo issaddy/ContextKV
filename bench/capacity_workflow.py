@@ -47,7 +47,7 @@ def prepare(args, root):
     settings = merge_config(settings, {
         "support_model": {"mode": "trained", "asset": args.parent_policy_asset,
                           "preference_asset": args.parent_policy_asset},
-        "selection": {"utility": "learned"},
+        "selection": {"mode": "support", "utility": "learned"},
         "reading": {"layout": "source_first", "packing": "source_windows"},
         "execution": {"prefix_retention": {"mode": "native"}}})
     parent = root/"parent-P0-study.yaml"

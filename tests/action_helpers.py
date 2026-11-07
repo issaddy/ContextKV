@@ -9,6 +9,7 @@ from controller.context_schema import (
 from controller.evidence import make_evidence
 from controller.execution import ReadingExecutor
 from controller.plan_policy import CompleteCost
+from controller.resident_models import evidence_selection_contract, resident_model_digest
 from controller.rolling_policy import compile_step
 from controller.schema import SessionSnapshot, TurnRecord
 from controller.service import Controller
@@ -103,10 +104,13 @@ async def frozen_fixture(tmp_path):
     spent = sum(len(record.input_ids)+len(record.output_ids) for record in frozen.steps)
     paid = CompleteCost(500, 2000, 3000, spent+7, 0)
     checkpoint = template.fingerprint.model_revision
+    resident_manifest = {"source": "specified-fixture", "selection_mode": "ranked",
+        "evidence_selection_order": "published_reranker_dependency_closure_v1"}
     observed = observed_state_binding(frozen, snapshot, paid_cost=paid,
         native_condition={"cache_state": "specified-fixture", "quote_seq": 1},
         reader_checkpoint=checkpoint, reader_profile_id="fixture-profile")
-    observed["resident_model_manifest_digest"] = "specified-fixture"
+    observed.update(resident_model_manifest_digest=resident_model_digest(resident_manifest),
+        evidence_selection_contract=evidence_selection_contract(resident_manifest))
     request = GapRetrievalRequest(frozen.open_needs, gap_query(state, frozen.open_needs),
         {"implementation": "specified-fixture"}, {"max_units": 1, "max_passages": 1})
     plans, omitted = build_observed_action_plans(frozen, snapshot, template,
@@ -117,7 +121,7 @@ async def frozen_fixture(tmp_path):
     service.engine = bounded_engine(native, budget, tmp_path / "wire.json")
     binding = {"reader_checkpoint": checkpoint, "reader_profile_id": "fixture-profile",
         "scorer_identity": {"kind": "specified-fixture"}, "split": "train", "measurement_kind": "hardware",
-        "resident_model_manifest": {"source": "specified-fixture"},
+        "resident_model_manifest": resident_manifest,
         "comparison_budget": {"window_tokens": 16000, "answer_output_tokens": 256},
         "collection_mode": "observed_actions", "counterfactual_cache_start": "observed", "cohort_split": "train",
         "cohort_manifest_sha256": "specified-fixture"}
