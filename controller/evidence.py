@@ -32,8 +32,6 @@ class EvidencePolicy:
             raise ValueError("token budgets must be positive")
         if self.layout not in {"stable_key", "contextpilot"}:
             raise ValueError("layout must be stable_key or contextpilot")
-        if self.system_prompt is not None and not self.system_prompt.strip():
-            raise ValueError("system_prompt must be nonempty when provided")
         if self.table_annotation_style not in {"all_rows", "focus_refs"}:
             raise ValueError("table_annotation_style must be all_rows or focus_refs")
         if self.table_structure_mode not in {"legacy", "explicit"}:
@@ -135,25 +133,6 @@ _PRIOR_VERSION = re.compile(r"\b(?:old|older|previous|earlier)\s+versions?\b|"
 def allows_version_comparison(query: str, policy: EvidencePolicy) -> bool:
     return policy.allow_version_comparison or bool(_PRIOR_VERSION.search(query)) or bool(re.search(
         r"\b(compare|comparison|versus|vs\.?|difference)\b|对比|比较|差异|新旧", query, re.I))
-
-
-def select_shared_required_evidence(query: str, retrieved: Iterable[EvidenceBlock],
-                                   snapshot: SessionSnapshot,
-                                   policy: EvidencePolicy | None = None
-                                   ) -> tuple[EvidenceBlock, ...]:
-    retrieved = tuple(retrieved)
-    archive = evidence_index(retrieved, committed=snapshot.archive)
-    return resolve_required_evidence(query, (block.key for block in retrieved),
-                                     archive, snapshot, policy)
-
-
-def resolve_required_evidence(query: str, current: Iterable[EvidenceKey],
-                              archive: Mapping[EvidenceKey, EvidenceBlock],
-                              snapshot: SessionSnapshot,
-                              policy: EvidencePolicy | None = None
-                              ) -> tuple[EvidenceBlock, ...]:
-    """Resolve revisits and dependencies using the already validated turn index."""
-    return resolve_required_evidence_with_reasons(query, current, archive, snapshot, policy)[0]
 
 
 def resolve_required_evidence_with_reasons(query: str, current: Iterable[EvidenceKey],

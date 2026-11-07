@@ -1,16 +1,22 @@
-"""At most four uniformly selected native/retained pairs, with split isolation."""
+"""Fixed-window Native/TTL15/TTL60/TTL180 pairs with split isolation."""
 import argparse
 import asyncio
 from datetime import datetime
-import hashlib
 import json
 from pathlib import Path
 import sys
 
-from controller.prefix_retention import EmpiricalRetentionModel
-from controller.reading import READ_SYSTEM
+from controller.prefix_retention import EmpiricalRetentionModel, session_components, session_group, balance_session_rows
+from controller.config import create_model_template, load_config
 from profiling.retention_coverage import audit_coverage
-from profiling.retention_trace import choose_windows, trace_generations, verify_trace, window_trace, write_json
+from profiling.retention_trace import audit_trace_inputs, digest, fit_window_pairs, verify_trace, write_json
+
+
+def validate_session_partitions(traces):
+    train = {turn["session_id"] for turn in traces["train"]["turns"]}
+    dev = {turn["session_id"] for turn in traces["dev"]["turns"]}
+    if train & dev:
+        raise ValueError("retention train/dev traces share independent sessions: "+repr(sorted(train & dev)))
 
 
 async def run(args):
@@ -46,44 +52,50 @@ async def run(args):
             trace_paths[split] = getattr(args, split+"_trace")
     traces = {split: json.loads(Path(path).read_text()) for split, path in
               trace_paths.items()}
+    validate_session_partitions(traces)
     reports = {}
     protocol_scopes = {}
+    template = create_model_template(load_config(args.config).model)
     for split, trace in traces.items():
         verify_trace(trace)
         if not trace["training_eligible"] or any(turn["split"] != split for turn in trace["turns"]):
             raise ValueError("paired value fitting needs separate actual train/development traces")
-        reports[split] = audit_coverage(trace, horizons=args.horizons, page_size=args.page_size,
+        reports[split] = audit_coverage(trace, horizons=(args.horizon_seconds,), page_size=args.page_size,
             max_candidates=2, max_prefixes_per_decision=args.max_prefixes_per_decision,
             history_steps=args.history_steps, max_replay_steps=args.max_replay_steps, seed=args.seed)
         write_json(output/(split+"-coverage.json"), reports[split])
-        prompts = {event.get("system_prompt") for turn in trace["turns"]
-                   for event in turn["events"] if event["kind"] == "READ"}
-        protocol_scopes[split] = dict(
-            read_system_prompt_sha256=sorted(hashlib.sha256(prompt.encode()).hexdigest()
-                for prompt in prompts if prompt is not None),
-            matches_current_read_prompt=prompts == {READ_SYSTEM})
-    choices = []
-    for horizon in sorted(args.horizons, reverse=True):
-        selected = {split: choose_windows(trace, horizon_seconds=horizon, max_candidates=2,
+        protocol_scopes[split] = audit_trace_inputs(trace, template,
+            trace_path=trace_paths[split], config_path=args.config)
+    horizon = args.horizon_seconds
+    if horizon < max(180, *args.ttl_seconds):
+        raise ValueError("common observation window must cover 180 seconds and all TTL arms")
+    pools, support = {}, {}
+    for split, trace in traces.items():
+        pools[split], support[split] = fit_window_pairs(trace, horizon_seconds=horizon,
             max_prefixes_per_decision=args.max_prefixes_per_decision, history_steps=args.history_steps,
-            max_replay_steps=args.max_replay_steps, seed=args.seed)[0] for split, trace in traces.items()}
-        calls = {split: sum(2*len(trace_generations(window_trace(traces[split], item))) for item in values)
-                 for split, values in selected.items()}
-        if all(len(values) == 2 for values in selected.values()) and sum(calls.values()) <= args.max_total_generations:
-            choices.append((horizon, selected, calls))
-    plan = dict(scope="actual source-first fixed-input paired C costs", maximum_pairs=4,
-        choice_basis="largest preregistered TTL with two observable windows per split and the declared call budget; no hit/latency/value outcome used",
-        horizons=list(args.horizons), seed=args.seed, train_trace=str(Path(trace_paths["train"]).resolve()),
-        dev_trace=str(Path(trace_paths["dev"]).resolve()), capture_stages=capture_stages,
-        protocol_scopes=protocol_scopes,
-        current_prompt_joint_qualification=all(scope["matches_current_read_prompt"]
-                                               for scope in protocol_scopes.values()), stages=[])
-    if not choices:
-        plan.update(status="no_common_observable_budgeted_TTL", value_asset=None)
+            max_replay_steps=args.max_replay_steps, seed=args.seed, page_size=args.page_size)
+    arms = 1+len(args.ttl_seconds)
+    common = sorted(pools["train"].keys() & pools["dev"].keys(), key=lambda key: digest([args.seed, key]))
+    affordable = [key for key in common if arms*sum(item["model_calls_per_arm"]
+        for split in ("train", "dev") for item in pools[split][key]) <= args.max_total_generations]
+    bucket = affordable[0] if affordable else None
+    selected = {split: pools[split][bucket] if bucket is not None else () for split in traces}
+    calls = {split: arms*sum(item["model_calls_per_arm"] for item in values)
+             for split, values in selected.items()}
+    plan = dict(scope="actual source-first fixed-input same-window multi-TTL C costs", maximum_windows=4,
+        choice_basis="same preregistered observation window and request DAG for Native and every TTL; no shorter-window fallback or outcome selection",
+        observation_seconds=horizon, ttl_seconds=list(args.ttl_seconds), seed=args.seed,
+        train_trace=str(Path(trace_paths["train"]).resolve()), dev_trace=str(Path(trace_paths["dev"]).resolve()),
+        capture_stages=capture_stages, protocol_scopes=protocol_scopes,
+        fit_support=support, matched_fit_bucket=bucket,
+        max_total_generations=args.max_total_generations,
+        stages=[])
+    if bucket is None:
+        plan.update(status="no_common_observable_budgeted_fit_bucket", planned_calls=calls,
+            common_observed_buckets=len(common), value_asset=None)
         write_json(output/"paired-workflow.json", plan)
         print(json.dumps({"status": plan["status"], "pairs": 0}))
         return plan
-    horizon, selected, calls = choices[0]
     plan.update(status="running", horizon_seconds=horizon, planned_calls=calls,
         source_windows={split: [{key: value for key, value in item.items() if key != "turns"}
                                for item in values] for split, values in selected.items()})
@@ -92,13 +104,20 @@ async def run(args):
         if args.deadline and datetime.now().astimezone().timestamp() >= datetime.fromisoformat(args.deadline).timestamp():
             plan["stages"].append({"split": split, "status": "not_started_deadline"})
             break
+        selection_path = output/(split+"-selection.json")
+        write_json(selection_path, dict(source_trace_digest=digest(traces[split]),
+            selected=plan["source_windows"][split]))
         command = [args.python or sys.executable, "-m", "profiling.retention_trace", "replay",
             "--trace", str(Path(path).resolve()), "--config", str(Path(args.config).resolve()),
             "--base-url", args.base_url, "--gpu-device", str(args.gpu_device),
             "--output-dir", str(output/split), "--horizon-seconds", str(horizon),
+            "--ttl-seconds", ",".join(str(ttl) for ttl in args.ttl_seconds),
+            "--selection", str(selection_path),
             "--max-candidates", "2", "--max-prefixes-per-decision", str(args.max_prefixes_per_decision),
             "--history-steps", str(args.history_steps), "--max-replay-steps", str(args.max_replay_steps),
             "--max-total-generations", str(calls[split]), "--residency-interval", ".5", "--seed", str(args.seed)]
+        if args.page_size is not None:
+            command += ["--page-size", str(args.page_size)]
         with (output/(split+"-replay.log")).open("wb") as log:
             process = await asyncio.create_subprocess_exec(*command, stdout=log, stderr=asyncio.subprocess.STDOUT)
             code = await process.wait()
@@ -116,32 +135,53 @@ async def run(args):
             process = await asyncio.create_subprocess_exec(*command, stdout=log, stderr=asyncio.subprocess.STDOUT)
             code = await process.wait()
         plan["value_asset"] = str(output/"value-model.json") if code == 0 else None
+        if code:
+            plan["status"] = "fit_failed"
+            write_json(output/"paired-workflow.json", plan)
+            raise RuntimeError("C value fitting failed; see "+str(output/"fit.log"))
     asset = output/"value-model.json"
     if asset.exists():
         model_data = json.loads(asset.read_text())
         model_data["measurement_protocol_scope"] = protocol_scopes
-        model_data["current_prompt_joint_qualification"] = plan["current_prompt_joint_qualification"]
         write_json(asset, model_data)
     dev_rows = output/"dev"/"paired-rows.jsonl"
     if asset.exists() and dev_rows.exists():
         model = EmpiricalRetentionModel.from_dict(json.loads(asset.read_text()))
         validation = []
-        for line in dev_rows.read_text().splitlines():
-            row = json.loads(line)
+        rows = [json.loads(line) for line in dev_rows.read_text().splitlines() if line.strip()]
+        components = session_components(rows)
+        for row in balance_session_rows(rows, components):
             try:
                 predicted = model.predict(row["features"], row["cache_scope_hash"], row["horizon_seconds"])
-                expected = predicted.saved_ms
             except KeyError:
-                expected = None
-            validation.append(dict(event_id=row["event_id"], calibrated=expected is not None,
-                predicted_full_window_saved_ms=expected,
+                predicted = None
+            validation.append(dict(event_id=row["event_id"], calibrated=predicted is not None,
+                predicted_target_saved_ms=predicted.target_saved_ms if predicted else None,
+                predicted_retention_control_ms=predicted.retention_control_ms if predicted else None,
+                predicted_collateral_saved_ms=predicted.expected_collateral_saved_ms if predicted else None,
+                independent_sample_id=list(session_group(row, components)), sampling_weight=row["sampling_weight"],
+                predicted_policy_value_ms=predicted.saved_ms if predicted else None,
+                predicted_single_owner_net_ms=predicted.full_window_saved_ms if predicted else None,
+                policy_value_scope="each paired TTL arm independently; next READ target minus control and external-request penalty; before residency prices and protected-event deduction",
+                predicted_full_window_saved_ms=predicted.full_window_saved_ms if predicted else None,
                 actual_full_window_saved_ms=row["full_window_cost_difference_ms"],
                 semantic_quality_label=None, split="dev"))
-        write_json(output/"dev-validation.json", {"fit_split": "train", "evaluation_split": "dev", "rows": validation})
+        write_json(output/"dev-validation.json", {"fit_split": "train", "evaluation_split": "dev",
+            "comparison_scope": "single-prefix complete response windows; no protected-set externality estimate",
+            "independent_samples": len(components),
+            "calibrated_independent_samples": len({tuple(row["independent_sample_id"]) for row in validation if row["calibrated"]}),
+            "sample_unit": "session group; TTL interventions are repeated measures",
+            "rows": validation})
+        if not any(row["calibrated"] for row in validation):
+            plan.update(status="no_development_bucket_coverage", value_asset=None)
+    elif plan["status"] == "running":
+        plan.update(status="collected_without_development_validation", value_asset=None)
     if plan["status"] == "running":
         plan["status"] = "completed_with_actual_signed_costs"
+    if plan["status"] != "completed_with_actual_signed_costs":
+        plan["value_asset"] = None
     write_json(output/"paired-workflow.json", plan)
-    print(json.dumps({"status": plan["status"], "horizon": horizon, "planned_pairs": 4,
+    print(json.dumps({"status": plan["status"], "observation_seconds": horizon, "planned_pairs": 4*len(args.ttl_seconds),
                       "value_asset": plan.get("value_asset")}))
     return plan
 
@@ -163,7 +203,8 @@ def main(argv=None):
     parser.add_argument("--study-config")
     parser.add_argument("--resource-gpu-devices")
     parser.add_argument("--resource-process-roots")
-    parser.add_argument("--horizons", type=lambda value: tuple(map(float, value.split(","))), default=(2, 5, 8, 15, 30))
+    parser.add_argument("--horizon-seconds", type=float, default=180)
+    parser.add_argument("--ttl-seconds", type=lambda value: tuple(map(float, value.split(","))), default=(15, 60, 180))
     parser.add_argument("--page-size", type=int)
     parser.add_argument("--max-prefixes-per-decision", type=int, default=2)
     parser.add_argument("--history-steps", type=int, default=4)

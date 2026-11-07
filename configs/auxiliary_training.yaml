@@ -1,0 +1,52 @@
+base_study_config: configs/study.yaml
+task_model:
+  initial_adapter_path: null
+support_model:
+  device: cuda:0
+training:
+  cohort_manifest: runs/study/auxiliary/cohorts/full/cohort_manifest.json
+  data_dir: runs/study/data
+  task_labels: runs/study/auxiliary/task-labels/task_labels.jsonl
+  task_eval_labels: runs/study/auxiliary/task-labels/task_labels.jsonl
+  task_source_paths: [runs/study/data/sources.jsonl]
+  task_dense_index: data/multidoc2dial/bge-m3-sections
+  retriever_overrides:
+    query_adapter_path: null
+  adapter_lr: 0.00001
+  task_output: models/study-task-budget-loop
+  task_eval_output: runs/study/auxiliary/task-evaluation
+  support_data_dir: runs/study/auxiliary/support
+  support_teacher_labels: runs/study/auxiliary/support/teacher_labels.jsonl
+  support_labels: runs/study/auxiliary/support/support_labels.jsonl
+  support_parent_asset: null
+  support_output: models/study-support-budget-loop
+  support_eval_labels: runs/study/auxiliary/support/support_labels.jsonl
+  support_eval_asset: models/study-support-budget-loop
+  support_eval_output: runs/study/auxiliary/support-evaluation
+  reader_config: configs/qwen3_32b.yaml
+  teacher_urls: [http://127.0.0.1:30001]
+  teacher_concurrency: 4
+  min_rollout_turns: 200
+  epochs: 1
+  device: cuda:0
+  dtype: bfloat16
+  support_batch_size: 1
+  support_encoder_lr: 0.00001
+evidence_cohort:
+  output_dir: runs/study/auxiliary/cohorts
+  sources:
+    - split: train
+      turns_path: runs/study/data/turns.jsonl
+  validation_fraction: 0.2
+  split_seed: 42
+  seed: 42
+  full: {train: 200, dev: 40}
+  pilot: {train: 12, dev: 4}
+task_cohort_labeling:
+  output_dir: runs/study/auxiliary/task-labels
+  cohort_manifest: runs/study/auxiliary/cohorts/full/cohort_manifest.json
+  actual_turns_path: runs/study/data/turns.jsonl
+  original_turns_path: runs/study/data/original_train_turns.jsonl
+  sources_path: runs/study/data/sources.jsonl
+  state_db: runs/study/actual-rollout/sessions.sqlite3
+  existing_labels_path: null

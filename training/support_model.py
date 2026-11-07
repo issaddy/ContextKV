@@ -9,15 +9,18 @@ from dataclasses import asdict
 from collections import Counter
 from importlib.metadata import version
 import json
+from math import sqrt
 from pathlib import Path
 import time
 
-from adapters.support_model import SetPrediction, SupportPrediction
-from controller.context_schema import SourceSpan
+from adapters.support_model import SetPrediction, SupportInput, SupportPrediction
+from controller.context_schema import EvidenceUnit, SourceSpan
 from controller.serialization import decode
+from training.task_data import select_cohort_rows
 
 
 SUPPORT_CLASSES = ("complete", "partial", "background", "contradict")
+SUPPORT_SCALARS = ("applicability", "direct_support", "joint_support", "bridge_value")
 ANSWER_CLASSES = ("answer", "partial", "retrieval_gap", "unanswerable", "underspecified")
 
 
@@ -134,6 +137,12 @@ def render_document(example):
     return "".join(parts), tuple(locations)
 
 
+def _support_input(row):
+    return SupportInput(row["task_id"], row["need_id"], row["query"],
+        tuple(decode(EvidenceUnit, unit) for unit in row["units"]),
+        tuple(decode(EvidenceUnit, unit) for unit in row.get("dependencies", [])))
+
+
 def _graph_inputs(state, units, supports, embeddings, torch, device):
     selected = {unit.unit_id for unit in units}
     rows = [support for support in supports if set(support.unit_ids) <= selected]
@@ -203,9 +212,11 @@ class TrainedSupportBackend:
         self.manifest = manifest
         self.max_length = manifest["max_length"]
         self.embeddings = EmbeddingCache(network.encoder.config.hidden_size)
+        self._predictions = {}
         self.usage = {"examples": 0, "input_tokens": 0, "output_tokens": 0,
                       "compute_ms": 0.0, "support_ms": 0.0, "utility_ms": 0.0,
                       "oversized_examples": 0}
+        self.usage["cache_hits"] = 0
         self.oversized_inputs = []
         self.deployment = {"device": str(device),
             "encoder_dtype": str(next(network.encoder.parameters()).dtype),
@@ -214,14 +225,15 @@ class TrainedSupportBackend:
                                    for parameter in network.parameters())}
 
     @classmethod
-    def load(cls, path, *, device, batch_size=8, encoder_dtype=None):
+    def load(cls, path, *, device, batch_size=8, encoder_dtype=None, encoder_autocast_dtype="float32"):
         import torch
         from transformers import AutoModel, AutoTokenizer
         path = Path(path)
         manifest = json.loads((path/"support-model.json").read_text())
         tokenizer = AutoTokenizer.from_pretrained(path/"encoder", local_files_only=True)
         encoder = AutoModel.from_pretrained(path/"encoder", local_files_only=True)
-        network = create_network(encoder, graph_width=manifest["graph_width"])
+        network = create_network(encoder, graph_width=manifest["graph_width"],
+                                 encoder_autocast_dtype=encoder_autocast_dtype)
         weights = torch.load(path/"heads.pt", map_location="cpu", weights_only=True)
         for name, module in network.named_children():
             if name != "encoder":
@@ -238,6 +250,28 @@ class TrainedSupportBackend:
             self.torch.cuda.synchronize(self.device)
 
     def predict(self, examples):
+        keys, pending = [], {}
+        for example in examples:
+            key = (example.task_id, example.need_id, example.query, render_document(example)[0])
+            keys.append(key)
+            if key not in self._predictions:
+                pending[key] = example
+        self.usage["cache_hits"] += len(examples)-len(pending)
+        if pending:
+            predictions = self._predict_uncached(tuple(pending.values()))
+            for key, example, prediction in zip(pending, pending.values(), predictions, strict=True):
+                embedding = (self.embeddings[example.task_id, example.need_id, tuple(u.unit_id for u in example.units)]
+                             if prediction is not None else None)
+                self._predictions[key] = prediction, embedding
+        results = []
+        for key, example in zip(keys, examples, strict=True):
+            prediction, embedding = self._predictions[key]
+            if prediction is not None:
+                self.embeddings[example.task_id, example.need_id, tuple(u.unit_id for u in example.units)] = embedding
+            results.append(prediction)
+        return tuple(results)
+
+    def _predict_uncached(self, examples):
         self._synchronize()
         started = time.perf_counter()
         predictions = [None]*len(examples)
@@ -311,6 +345,8 @@ class TrainedSupportBackend:
         started = time.perf_counter()
         tensors = _graph_inputs(state, units, supports, self.embeddings,
                                self.torch, self.device)
+        if self.manifest.get("utility_input_scope") == "evidence_set_only":
+            context = (0.0,)*8
         with self.torch.inference_mode():
             quality, answer = self.network.set_forward(*tensors,
                 self.torch.tensor(context, dtype=self.torch.float32, device=self.device))
@@ -322,11 +358,15 @@ class TrainedSupportBackend:
         return result
 
     def release_task(self, task_id):
+        for key in tuple(self._predictions):
+            if key[0] == task_id:
+                del self._predictions[key]
         for key in tuple(self.embeddings):
             if key[0] == task_id:
                 del self.embeddings[key]
 
     def close(self):
+        self._predictions.clear()
         self.embeddings.clear()
         del self.network
         if str(self.device).startswith("cuda"):
@@ -334,47 +374,71 @@ class TrainedSupportBackend:
                 self.torch.cuda.empty_cache()
 
 
-def _save(network, tokenizer, directory, metadata, *, encoder_source=None):
+def _save(network, tokenizer, directory, metadata, *, encoder_source=None, parent_asset=None):
     import torch
-    import shutil
+    import os
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     if encoder_source is None:
         network.encoder.save_pretrained(directory/"encoder", safe_serialization=True)
+        tokenizer.save_pretrained(directory/"encoder")
     else:
-        shutil.copytree(encoder_source, directory/"encoder", dirs_exist_ok=True)
-    tokenizer.save_pretrained(directory/"encoder")
+        (directory/"encoder").symlink_to(os.path.relpath(Path(encoder_source).resolve(), directory.resolve()),
+                                        target_is_directory=True)
     torch.save({key: value.cpu() for key, value in network.state_dict().items()
                 if not key.startswith("encoder.")}, directory/"heads.pt")
     (directory/"support-model.json").write_text(json.dumps(metadata, ensure_ascii=False,
                                                          indent=2)+"\n")
-    preserve_asset_sources(directory, parent_asset=Path(encoder_source).parent if encoder_source is not None else None)
+    preserve_asset_sources(directory, parent_asset=parent_asset or (Path(encoder_source).parent if encoder_source is not None else None))
 
 
-def train_support(examples_path, base_path, output_dir, *, device="cuda:0", epochs=1,
+def _training_partition(manifest):
+    partition = manifest.get("training_partition", {})
+    if not partition.get("cohort_manifest_sha256") or not partition.get("conversation_ids"):
+        raise ValueError("support asset is missing training cohort and conversation provenance")
+    return partition
+
+
+def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, device="cuda:0", epochs=1,
                   batch_size=4, learning_rate=1e-4, encoder_learning_rate=1e-5,
-                  max_length=8192, graph_width=128, seed=42,
-                  encoder_autocast_dtype="float32", inference_encoder_dtype="float32",
-                  base_model_id="BAAI/bge-reranker-v2-m3"):
-    """Optimize explicitly labeled support examples, including span supervision."""
+                  max_length=8192, seed=42, base_path=None,
+                  encoder_autocast_dtype="float32", inference_encoder_dtype="float32"):
+    """Train reviewed support labels from an explicit parent or local BGE base."""
+    if parent_asset is None and base_path is None:
+        raise ValueError("base_path is required when parent_asset is None")
+    complete_started = time.perf_counter()
     import torch
-    from transformers import AutoModel, AutoTokenizer
-    from adapters.support_model import SupportInput
-    from controller.context_schema import EvidenceUnit
     torch.manual_seed(seed)
-    tokenizer = AutoTokenizer.from_pretrained(base_path, local_files_only=True)
-    encoder = AutoModel.from_pretrained(base_path, local_files_only=True)
-    network = create_network(encoder, graph_width=graph_width,
-                             encoder_autocast_dtype=encoder_autocast_dtype).to(device)
-    examples = [json.loads(line) for line in Path(examples_path).read_text().splitlines() if line]
+    initialization_started = time.perf_counter()
+    training_conversations = set()
+    if parent_asset is not None:
+        backend = TrainedSupportBackend.load(parent_asset, device=device, batch_size=batch_size,
+            encoder_dtype="float32", encoder_autocast_dtype=encoder_autocast_dtype)
+        training_conversations.update(_training_partition(backend.manifest)["conversation_ids"])
+        initialization = {"mode": "parent_support_asset", "parent_support_asset": str(parent_asset)}
+    else:
+        from transformers import AutoModel, AutoTokenizer
+        base_path = str(Path(base_path))
+        model_id = "BAAI/bge-reranker-v2-m3"
+        tokenizer = AutoTokenizer.from_pretrained(base_path, local_files_only=True)
+        encoder = AutoModel.from_pretrained(base_path, local_files_only=True)
+        manifest = {"base": model_id, "base_path": base_path,
+            "base_provenance": _base_provenance(base_path, model_id),
+            "graph_width": 128, "max_length": max_length}
+        network = create_network(encoder, graph_width=manifest["graph_width"],
+            encoder_autocast_dtype=encoder_autocast_dtype)
+        backend = TrainedSupportBackend(network, tokenizer, manifest, device=device,
+            batch_size=batch_size, encoder_dtype="float32")
+        initialization = {"mode": "base_encoder_new_heads", "base_path": base_path}
+    initialization_ms = (time.perf_counter()-initialization_started)*1000
+    network, tokenizer = backend.network, backend.tokenizer
+    examples = select_cohort_rows((json.loads(line) for line in Path(examples_path).read_text().splitlines() if line),
+                                 cohort_manifest, "train")
     assert examples
-    assert all(example["split"] == "train" for example in examples)
     assert all(example["label_origin"] != "pending_teacher" for example in examples)
     fitting, oversized = [], []
     for row in examples:
-        example = SupportInput(row["task_id"], row["need_id"], row["query"],
-            tuple(decode(EvidenceUnit, unit) for unit in row["units"]),
-            tuple(decode(EvidenceUnit, unit) for unit in row.get("dependencies", [])))
+        example = _support_input(row)
         document, _ = render_document(example)
         input_tokens = len(tokenizer(row["query"], document, truncation=False)["input_ids"])
         if input_tokens <= max_length:
@@ -384,6 +448,7 @@ def train_support(examples_path, base_path, output_dir, *, device="cuda:0", epoc
                 "input_tokens": input_tokens, "encoder_limit": max_length})
     examples = fitting
     assert examples
+    training_conversations.update(row["conversation_id"] for row in examples)
     encoder_parameters = list(network.encoder.parameters())
     head_parameters = [value for name, value in network.named_parameters()
                        if not name.startswith("encoder.")]
@@ -396,10 +461,7 @@ def train_support(examples_path, base_path, output_dir, *, device="cuda:0", epoc
         order = torch.randperm(len(examples)).tolist()
         for start in range(0, len(order), batch_size):
             rows = [examples[index] for index in order[start:start+batch_size]]
-            inputs = [SupportInput(row["task_id"], row["need_id"], row["query"],
-                tuple(decode(EvidenceUnit, unit) for unit in row["units"]),
-                tuple(decode(EvidenceUnit, unit) for unit in row.get("dependencies", [])))
-                for row in rows]
+            inputs = [_support_input(row) for row in rows]
             documents = [render_document(example) for example in inputs]
             encoded = tokenizer([row["query"] for row in rows], [d[0] for d in documents],
                 padding=True, truncation=False,
@@ -424,8 +486,7 @@ def train_support(examples_path, base_path, output_dir, *, device="cuda:0", epoc
                                         span_labels[index, token] = 1 if lo <= gold["start"] else 2
             token_count += int(encoded["attention_mask"].sum())
             output = network(**{key: value.to(device) for key, value in encoded.items()})
-            targets = torch.tensor([[row["labels"][name] for name in (
-                "applicability", "direct_support", "joint_support", "bridge_value")]
+            targets = torch.tensor([[row["labels"][name] for name in SUPPORT_SCALARS]
                 for row in rows], dtype=torch.float32, device=device)
             status = torch.tensor([SUPPORT_CLASSES.index(row["labels"]["disposition"])
                                    for row in rows], device=device)
@@ -464,34 +525,151 @@ def train_support(examples_path, base_path, output_dir, *, device="cuda:0", epoc
             losses.append(float(loss.detach()))
     if device.startswith("cuda"):
         torch.cuda.synchronize(device)
-    metadata = {"asset_type": "contextkv_support_utility", "base": base_model_id,
-        "base_path": str(base_path), "graph_width": graph_width, "max_length": max_length,
+    metadata = {**backend.manifest,
+        "parent_support_asset": str(parent_asset) if parent_asset is not None else None, "max_length": max_length,
         "training_encoder_autocast_dtype": encoder_autocast_dtype,
         "training_parameter_dtypes": sorted({str(parameter.dtype) for parameter in network.parameters()}),
         "optimizer_state_dtypes": sorted({str(value.dtype) for state in optimizer.state.values()
                                            for value in state.values() if isinstance(value, torch.Tensor)}),
         "inference_encoder_dtype": inference_encoder_dtype, "inference_head_dtype": "float32",
-        "base_provenance": _base_provenance(base_path, base_model_id),
         "training_partition": {"split": "train", "examples": len(examples),
+            "cohort_manifest_sha256": examples[0]["cohort_manifest_sha256"],
+            "conversation_ids": sorted(training_conversations),
             "history_origins": dict(Counter(row.get("history_kind", "explicit_training_fixture") for row in examples))},
         "packages": {name: version(name) for name in ("torch", "transformers", "tokenizers")},
         "support_classes": SUPPORT_CLASSES, "answer_classes": ANSWER_CLASSES,
-        "support_training": {"examples_path": str(examples_path), "examples": len(examples),
+        "support_training": {"initialization": initialization, "initialization_ms": initialization_ms,
+            "examples_path": str(examples_path), "examples": len(examples),
             "epochs": epochs, "batch_size": batch_size, "seed": seed,
             "head_learning_rate": learning_rate, "encoder_learning_rate": encoder_learning_rate,
             "label_origins": dict(Counter(row["label_origin"] for row in examples)),
             "oversized_examples": oversized,
             "losses": losses, "input_tokens": token_count,
+            "model_setup_ms": (started-complete_started)*1000,
             "elapsed_ms": (time.perf_counter()-started)*1000},
         "utility_training": {"stage": "support_supervision",
             "examples": sum(row["labels"]["quality"] is not None for row in examples),
             "answer_state_examples": sum(row["labels"]["answer_disposition"] is not None for row in examples),
             "answer_state_origins": dict(Counter(row.get("disposition_supervision_origin", "explicit_labels") for row in examples))}}
-    _save(network, tokenizer, output_dir, metadata)
+    save_started = time.perf_counter()
+    _save(network, tokenizer, output_dir, metadata, parent_asset=parent_asset)
+    metadata = json.loads((Path(output_dir)/"support-model.json").read_text())
+    metadata["save_ms"] = (time.perf_counter()-save_started)*1000
+    metadata["complete_ms"] = (time.perf_counter()-complete_started)*1000
+    (Path(output_dir)/"support-model.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2)+"\n")
     return metadata
 
 
-def train_set_utility(preferences_path, asset_path, output_dir, *, device="cuda:0",
+def _source_membership(example, spans):
+    """Project predicted BIO fragments onto the teacher's candidate source spans."""
+    return {(source.source_key, source.start, source.end)
+        for unit in (*example.units, *example.dependencies) for source in unit.source_spans
+        if any(span.source_key == source.source_key and span.start < source.end
+               and source.start < span.end for span in spans)}
+
+
+def evaluate_support(config):
+    """Replay held-out support inputs; measure label agreement, not source correctness."""
+    from training.reader_data import file_digest
+    from training.task_data import read_jsonl, write_jsonl
+
+    settings = config["training"]
+    labels_path = Path(settings["support_eval_labels"]).resolve()
+    cohort_path = Path(settings["cohort_manifest"]).resolve()
+    asset = Path(settings["support_eval_asset"]).resolve()
+    members = json.loads(cohort_path.read_text())["members"]
+    train_sessions = {row["conversation_id"] for row in members if row["split"] == "train"}
+    dev = [row for row in members if row["split"] == "dev"]
+    dev_sessions = {row["conversation_id"] for row in dev}
+    if train_sessions & dev_sessions:
+        raise ValueError("support-eval requires conversation-disjoint train and dev cohorts")
+    rows = select_cohort_rows(read_jsonl(labels_path), cohort_path, "dev")
+    if not rows or any(row["label_origin"] == "pending_teacher" for row in rows):
+        raise ValueError("support-eval requires labelled examples from the declared dev cohort")
+    by_task = {}
+    for row in rows:
+        by_task.setdefault(row["task_id"], []).append(row)
+    output = Path(settings["support_eval_output"]).resolve()
+    started = time.perf_counter()
+    backend = TrainedSupportBackend.load(asset, device=config["support_model"]["device"],
+        batch_size=settings.get("support_eval_batch_size", 8))
+    setup_ms = (time.perf_counter()-started)*1000
+    predictions, errors = [], {name: [] for name in SUPPORT_SCALARS}
+    confusion = {target: dict.fromkeys(SUPPORT_CLASSES, 0) for target in SUPPORT_CLASSES}
+    tp = fp = fn = exact = scored = 0
+    predict_ms = 0.0
+    try:
+        training_partition = _training_partition(backend.manifest)
+        overlap = dev_sessions.intersection(training_partition["conversation_ids"])
+        if overlap:
+            raise ValueError(f"support-eval dev conversations overlap asset training: {sorted(overlap)}")
+        output.mkdir(parents=True, exist_ok=False)
+        for task_id, batch in by_task.items():
+            examples = tuple(_support_input(row) for row in batch)
+            started = time.perf_counter()
+            actual = backend.predict(examples)
+            predict_ms += (time.perf_counter()-started)*1000
+            backend.release_task(task_id)
+            for row, example, prediction in zip(batch, examples, actual, strict=True):
+                labels = row["labels"]
+                predictions.append({**{key: row[key] for key in ("example_id", "task_id", "conversation_id",
+                    "need_id", "cohort_split", "cohort_manifest_sha256", "label_origin")},
+                    "labels": labels, "prediction": prediction})
+                if prediction is None:
+                    continue
+                scored += 1
+                for name in SUPPORT_SCALARS:
+                    errors[name].append(getattr(prediction, name)-labels[name])
+                confusion[labels["disposition"]][prediction.disposition] += 1
+                expected = {(span.source_key, span.start, span.end)
+                    for span in (decode(SourceSpan, value) for value in labels["source_spans"])}
+                selected = _source_membership(example, prediction.source_spans)
+                tp += len(expected & selected)
+                fp += len(selected-expected)
+                fn += len(expected-selected)
+                exact += selected == expected
+        usage, deployment = dict(backend.usage), dict(backend.deployment)
+    finally:
+        backend.close()
+    def ratio(numerator, denominator):
+        return numerator/denominator if denominator else None
+    false_complete = sum(confusion[target]["complete"] for target in SUPPORT_CLASSES if target != "complete")
+    expected_noncomplete = sum(sum(confusion[target].values()) for target in SUPPORT_CLASSES if target != "complete")
+    predicted_complete = sum(confusion[target]["complete"] for target in SUPPORT_CLASSES)
+    write_jsonl(output/"predictions.jsonl", predictions)
+    summary = {"scope": "held-out dev teacher-label agreement on fixed support examples",
+        "independent_original_source_audit": {"status": "not_evaluated"},
+        "split": "dev", "cohort_manifest": str(cohort_path), "cohort_manifest_sha256": file_digest(cohort_path),
+        "declared_tasks": len(dev), "selected_tasks": len(by_task),
+        "selected_conversations": len({row["conversation_id"] for row in rows}),
+        "missing_task_ids": sorted({row["task_id"] for row in dev}-by_task.keys()),
+        "labels_path": str(labels_path), "labels_sha256": file_digest(labels_path),
+        "label_origins": dict(Counter(row["label_origin"] for row in rows)),
+        "examples": len(rows), "scored_examples": scored, "unscored_examples": len(rows)-scored,
+        "scalar_errors": {name: {"mae": ratio(sum(map(abs, values)), scored),
+            "rmse": sqrt(sum(value*value for value in values)/scored) if scored else None}
+            for name, values in errors.items()},
+        "disposition": {"confusion_teacher_by_prediction": confusion,
+            "accuracy": ratio(sum(confusion[name][name] for name in SUPPORT_CLASSES), scored),
+            "false_complete": false_complete, "teacher_noncomplete": expected_noncomplete,
+            "predicted_complete": predicted_complete,
+            "false_complete_rate_among_teacher_noncomplete": ratio(false_complete, expected_noncomplete),
+            "false_complete_rate_among_predicted_complete": ratio(false_complete, predicted_complete)},
+        "source_span_membership": {"rule": "teacher selected original spans; prediction fragments mark input spans by positive coordinate overlap on the same source key",
+            "true_positive": tp, "false_positive": fp, "false_negative": fn,
+            "precision": ratio(tp, tp+fp), "recall": ratio(tp, tp+fn), "f1": ratio(2*tp, 2*tp+fp+fn),
+            "exact_example_rate": ratio(exact, scored)},
+        "asset": {"path": str(asset), "manifest_sha256": file_digest(asset/"support-model.json"),
+            "heads_sha256": file_digest(asset/"heads.pt"), "deployment": deployment,
+            "training_partition": training_partition},
+        "cost": {"scope": "fixed support input replay, grouped by task; not end-to-end QA",
+            "setup_ms": setup_ms, "predict_wall_ms": predict_ms, "backend_usage": usage},
+        "predictions_path": str(output/"predictions.jsonl")}
+    (output/"summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2)+"\n")
+    return summary
+
+
+def train_set_utility(preferences_path, asset_path, output_dir, *, cohort_manifest, device="cuda:0",
                       epochs=3, learning_rate=1e-4, seed=42):
     """Learn pairwise actual-answer utility on cached cross-encoder graph nodes.
 
@@ -502,18 +680,26 @@ cached once before optimizing the graph and disposition heads.
     import torch
     from adapters.support_model import SupportInput
     from controller.context_schema import EvidenceUnit, SupportBundle, TaskState
+    complete_started = time.perf_counter()
     torch.manual_seed(seed)
     backend = TrainedSupportBackend.load(asset_path, device=device)
-    rows = [json.loads(line) for line in Path(preferences_path).read_text().splitlines() if line]
+    rows = select_cohort_rows((json.loads(line) for line in Path(preferences_path).read_text().splitlines() if line),
+                             cohort_manifest, "train")
     assert rows
-    assert all(row["split"] == "train" and row["label_origin"] == "actual_reader_answers"
-               for row in rows)
-    graph_pairs = []
+    assert all(row["label_origin"] == "actual_reader_answers" for row in rows)
+    preprocessing_started = time.perf_counter()
+    graph_pairs, candidate_graphs = [], {}
+    cache_hits = 0
     for row in rows:
         state = decode(TaskState, row["task_state"])
         graphs = []
         for side in ("preferred", "dispreferred"):
             item = row[side]
+            candidate_id = (row["task_id"], item["response"]["attempt_id"])
+            if candidate_id in candidate_graphs:
+                graphs.append(candidate_graphs[candidate_id])
+                cache_hits += 1
+                continue
             assert item["reader_model"] == "qwen3_32b_nonthinking"
             inputs = tuple(SupportInput(state.task_id, example["need_id"], example["query"],
                 tuple(decode(EvidenceUnit, u) for u in example["units"]),
@@ -523,16 +709,17 @@ cached once before optimizing the graph and disposition heads.
             units = tuple(decode(EvidenceUnit, u) for u in item["units"])
             supports = tuple(decode(SupportBundle, s) for s in item["supports"])
             graph = _graph_inputs(state, units, supports, backend.embeddings, torch, device)
-            context = torch.tensor((float(item.get("action", "REBUILD") == "APPEND"),
-                float(item.get("layout", "existing") == "existing"),
-                float(item.get("layout", "existing") == "need_order"),
-                float(item.get("layout", "existing") == "stable_evidence"),
-                item.get("old_body_tokens", 0)/32768, item.get("history_tokens", 0)/8192,
-                item.get("input_tokens", 0)/32768, item.get("output_budget", 0)/8192),
-                dtype=torch.float32, device=device)
-            graphs.append(((*graph, context), ANSWER_CLASSES.index(item["disposition"])
-                           if item["disposition"] is not None else None))
+            context = torch.zeros(8, dtype=torch.float32, device=device)
+            entry = ((*graph, context), ANSWER_CLASSES.index(item["disposition"])
+                     if item["disposition"] is not None else None)
+            candidate_graphs[candidate_id] = entry
+            graphs.append(entry)
         graph_pairs.append(graphs)
+    if device.startswith("cuda"):
+        torch.cuda.synchronize(device)
+    preprocessing = {"unique_candidates": len(candidate_graphs), "cache_hits": cache_hits,
+        "elapsed_ms": (time.perf_counter()-preprocessing_started)*1000}
+    print(json.dumps({"utility_graph_preprocessing": preprocessing}), flush=True)
     network = backend.network
     for name, parameter in network.named_parameters():
         parameter.requires_grad_(not name.startswith(("encoder.", "scalar_heads.", "support_head.", "span_head.")))
@@ -556,11 +743,14 @@ cached once before optimizing the graph and disposition heads.
             losses.append(float(loss.detach()))
     if device.startswith("cuda"):
         torch.cuda.synchronize(device)
-    metadata = {**backend.manifest, "parent_support_asset": str(asset_path), "utility_training": {
+    metadata = {**backend.manifest, "parent_support_asset": str(asset_path),
+        "utility_input_scope": "evidence_set_only", "utility_training": {
         "preferences_path": str(preferences_path), "pairs": len(rows), "epochs": epochs,
         "seed": seed, "learning_rate": learning_rate, "losses": losses,
         "synthetic_fixture_count": sum(bool(row.get("synthetic_fixture")) for row in rows),
-        "elapsed_ms": (time.perf_counter()-started)*1000,
+        "elapsed_ms": (time.perf_counter()-complete_started)*1000,
+        "optimization_ms": (time.perf_counter()-started)*1000,
+        "graph_preprocessing": preprocessing,
         "encoding_usage": backend.usage, "frozen_encoder_dtype": backend.deployment["encoder_dtype"],
         "head_parameter_dtypes": sorted({str(parameter.dtype) for parameter in network.parameters() if parameter.requires_grad})}}
     _save(network, backend.tokenizer, output_dir, metadata,

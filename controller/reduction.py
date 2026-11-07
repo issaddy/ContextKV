@@ -21,6 +21,8 @@ UNIT_FACTORS = {
     "美元": ("USD", Decimal(1)), "USD": ("USD", Decimal(1)),
     "元": ("CNY", Decimal(1)), "CNY": ("CNY", Decimal(1)),
     "万元": ("CNY", Decimal(10000)),
+    "credit": ("credit", Decimal(1)), "credits": ("credit", Decimal(1)),
+    "Credit": ("credit", Decimal(1)), "Credits": ("credit", Decimal(1)),
 }
 
 
@@ -38,7 +40,7 @@ def aligned_claims(claims):
 
 def reduce_claims(operation, claims, *, claim_id, need_id):
     """Count unique entities and sum one aligned value per entity/condition/version."""
-    claims = tuple(claim for claim in claims if claim.need_id == need_id)
+    claims = tuple(claim for claim in claims if claim.serves(need_id))
     groups = aligned_claims(claims)
     parents = tuple(claim.claim_id for claim in claims)
     spans = {span.span_id: span for claim in claims for span in claim.source_spans}
@@ -72,8 +74,7 @@ def reduce_claims(operation, claims, *, claim_id, need_id):
                 record = {"entity": claim.entity, "relation": claim.relation,
                     "value": claim.value, "unit": claim.unit, "text": claim.text,
                     "conditions": claim.conditions, "version": claim.version}
-                identity = {key: item for key, item in record.items() if key != "text"}
-                unique.setdefault(json.dumps(identity, sort_keys=True, ensure_ascii=False), record)
+                unique.setdefault(json.dumps(record, sort_keys=True, ensure_ascii=False), record)
             return tuple(unique.values())
         if operation == "union":
             value = [fact for group in groups for fact in facts(group)]

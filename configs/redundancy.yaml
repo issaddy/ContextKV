@@ -1,6 +1,0 @@
-engine:
-  kind: mock
-state_dir: runs/redundancy
-planner:
-  strategy: redundancy_threshold
-  redundancy_threshold: 0.4

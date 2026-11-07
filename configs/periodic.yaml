@@ -1,6 +1,0 @@
-engine:
-  kind: mock
-state_dir: runs/periodic
-planner:
-  strategy: fixed_period
-  period: 4

@@ -1,4 +1,4 @@
-"""Audit saved rolling current-step cost predictions against completed phases.
+"""Audit saved rolling predictions against current steps or actual request tails.
 
 Read-only SQLite/events/physical observations; no generation, fitting or
 request-share allocation. The paid prefix and unexecuted future tail are
@@ -97,6 +97,11 @@ def calibration_ids(directory):
     settings = config["execution"].get("plan_gain")
     if settings is None:
         return set(), [], "rolling_profile_settings_missing"
+    if settings.get("mode") == "observed_actions":
+        if settings.get("action_policy") == "rule":
+            return set(), [], "coverage_and_quoted_work_rule"
+        path = Path(settings["gain_asset"])
+        return set(), [source(path)] if path.exists() else [], "bounded_rollout_cost_asset"
     paths = [settings["execution_profile_asset"]]
     run_path = Path(config["generation"]["run_config"])
     import yaml
@@ -118,6 +123,91 @@ def calibration_ids(directory):
     return identities, provenance, "missing_artifact_files:"+str(missing) if missing else "actual_declared_asset_observation_ids"
 
 
+def observed_remaining(row, event, attempt, terminal, observations):
+    step, _, _ = event["decision"]
+    key = step["candidate"]["candidate_id"] if step["candidate"] is not None else step["task"]["step_id"]
+    option = event["option_diagnostics"].get(key, {})
+    forecast = option.get("rollout_expected_cost")
+    row["prediction_scope"] = "fixed_bounded_rollout"
+    row["actual_scope"] = "online_replanning_until_actual_terminal_state"
+    row["terminal_state"] = attempt.stage
+    row["completion_reserve"] = option.get("completion_reserve")
+    row["completion_cost"] = option.get("completion_cost")
+    row["prediction"] = forecast
+    if forecast is None:
+        row["unmatched_reasons"].append("recorded_bounded_rollout_forecast_missing")
+        return
+    paid = event.get("physical_paid_observation")
+    if paid is None or terminal is None or attempt.stage not in {"COMMITTED", "FAILED"}:
+        row["unmatched_reasons"].append("paid_boundary_or_authoritative_terminal_event_missing")
+        return
+    start = paid["end"]
+    window = terminal.get("answer_phase_window")
+    end = window["end"] if window is not None else terminal["monotonic_timestamp_ns"]/1e9
+    if end <= start:
+        row["unmatched_reasons"].append("terminal_boundary_does_not_follow_paid_boundary")
+        return
+    row["phase_window"] = {"start": start, "end": end, "clock": "client_monotonic"}
+    row["actual"]["latency_ms"] = (end-start)*1000
+    physical, reason = physical_match(observations, paid, start, end)
+    if physical is None:
+        row["unmatched_reasons"].extend(reason)
+    else:
+        row["actual"].update({key: physical[key] for key in ("gpu_gib_ms", "host_gib_ms")})
+        row["physical_match"] = physical
+    if attempt.stage == "COMMITTED" and attempt.result is not None:
+        steps = attempt.reading_outcome.steps if attempt.reading_outcome else ()
+        usage = attempt.auxiliary_usage or {"input_tokens": 0, "output_tokens": 0}
+        for name, answer_tokens, step_field in (("input_tokens", attempt.plan.candidate.input_ids, "input_ids"),
+                ("output_tokens", attempt.result.output_ids, "output_ids")):
+            if usage[name] is None:
+                continue
+            actual = usage[name]+len(answer_tokens)+sum(len(getattr(step, step_field)) for step in steps)
+            if actual >= event["paid_cost"][name]:
+                row["actual"][name] = actual-event["paid_cost"][name]
+    row["errors"] = {key: forecast[key]-value for key, value in row["actual"].items()}
+    if row["completion_cost"] is not None and attempt.stage == "COMMITTED":
+        row["latency_reserve_underestimated"] = row["actual"]["latency_ms"] > row["completion_cost"]["latency_ms"]
+
+
+def observed_choice_trace(store, event, attempt, task, candidate, prefix_control):
+    from controller.admission import quote_realization, quoted_native_work
+    from controller.schema import CacheQuote
+    from controller.serialization import decode
+
+    step_id = task["step_id"]
+    batch = event["quote"]
+    key = candidate["candidate_id"] if candidate is not None else step_id
+    option = event.get("option_diagnostics", {}).get(key, {})
+    saved = store.execution_step(attempt.attempt_id, step_id) if task["kind"] != "ANSWER" else None
+    result = saved[1].result if saved is not None else None
+    if task["kind"] == "ANSWER" and attempt.result is not None:
+        receipt = attempt.result.receipt
+        native = quote_realization(attempt.answer_quote, receipt)
+    else:
+        receipt = saved[1].receipt if saved is not None else None
+        native = saved[1].metrics.get("native_quote_work") if saved is not None else None
+    if receipt is not None:
+        native = {**(native or {}), "actual_device_hit_tokens": receipt.actual_device_hit_tokens,
+            "actual_host_loaded_tokens": receipt.actual_host_loaded_tokens, "actual_prefill_tokens": receipt.actual_prefill_tokens}
+    alternatives = []
+    for raw in batch["quotes"]:
+        quote = decode(CacheQuote, raw)
+        prefill, host = quoted_native_work(quote)
+        alternatives.append({"candidate_id": quote.candidate_id, "input_tokens": quote.input_len,
+                             "quoted_prefill_tokens": prefill, "quoted_host_load_tokens": host})
+    return {"request_id": attempt.request_id, "quote_seq": batch["observed_seq"],
+        "candidate_id": key, "representation": candidate.get("representation") if candidate is not None else None,
+        "quoted_alternatives": alternatives, "selected_native_work": native,
+        "joint_demand": event.get("joint_context", option.get("joint_context")),
+        "selection_rank": event.get("selection_rank"),
+        "prefix_control": prefix_control, "step_stage": saved[0] if saved is not None else None,
+        "new_claim_ids": tuple(claim.claim_id for claim in result.claims) if result is not None else (),
+        "covered_unit_ids": result.covered_units if result is not None else (),
+        "supported_needs": result.support if result is not None else (),
+        "terminal_stage": attempt.stage}
+
+
 def audit_directory(directory):
     directory = Path(directory).resolve()
     journal_path = directory/"state"/"events.jsonl"
@@ -127,8 +217,13 @@ def audit_directory(directory):
     if unfinished:
         journal = journal[:-1]
     events = [json.loads(line) for line in journal if line.strip()]
-    decisions = [row for row in events if row["event"] == "rolling_plan_decision"]
+    decisions = [row for row in events if row["event"] in {"rolling_plan_decision", "rolling_required_scope_step"}]
     commits = {row["attempt_id"]: row for row in events if row["event"] == "ledger_committed"}
+    recovered = {row["attempt_id"]: row for row in events if row["event"] == "attempt_recovered"}
+    failures = {row["attempt_id"]: row for row in events if row["event"] == "attempt_failed"}
+    controls = {(row["attempt_id"], row["choice"], row["quote_seq"]):
+        {key: row[key] for key in ("elapsed_ms", "owner_status")}
+        for row in events if row["event"] == "joint_prefix_control"}
     observations, internal = [], defaultdict(dict)
     for path in sorted((directory/"measurements").glob("*/physical_resources.json")):
         item = json.loads(path.read_text())
@@ -146,10 +241,17 @@ def audit_directory(directory):
     rows = []
     try:
         for number, event in enumerate(decisions):
-            next_step, action, output = event["decision"]
-            task = next_step["task"]
-            kind = (next_step["candidate"]["generation_kind"] if next_step["candidate"] is not None
-                    else "CPU_REDUCE" if task["kind"] == "REDUCE" else task["kind"])
+            required = event["event"] == "rolling_required_scope_step"
+            if required:
+                task, candidate = event["task"], event.get("selected_candidate")
+                action = candidate["action"] if candidate is not None else None
+                output = candidate["output_budget"] if candidate is not None else task["output_budget"]
+            else:
+                next_step, action, output = event["decision"]
+                task, candidate = next_step["task"], next_step["candidate"]
+            kind = (candidate["generation_kind"] if candidate is not None
+                    else "CPU_REDUCE" if task["kind"] == "REDUCE" and task["operation"] in
+                        {"union", "count", "sum", "group"} else task["kind"])
             identity = event["attempt_id"]+"/"+("ANSWER" if task["kind"] == "ANSWER" else task["step_id"])
             row = {"generation_dir": str(directory), "event_index": number, "observation_id": identity,
                 "attempt_id": event["attempt_id"], "step_id": task["step_id"], "kind": kind,
@@ -161,8 +263,22 @@ def audit_directory(directory):
                     and identity not in fitted_ids,
                 "overlap_check_basis": overlap_basis, "profile_assets": assets}
             rows.append(row)
+            if required or event["decision_mode"] == "observed_actions":
+                row["prediction_scope"] = "mandatory_scope_reservation" if required else "fixed_bounded_rollout"
+                attempt = store.get_attempt(event["attempt_id"])
+                key = candidate["candidate_id"] if candidate is not None else task["step_id"]
+                control = controls.get((attempt.attempt_id, key, event["quote"]["observed_seq"]))
+                row["trajectory"] = observed_choice_trace(store, event, attempt, task, candidate, control)
             if event.get("engine_kind") != "sglang":
                 row["unmatched_reasons"].append("source_is_not_actual_sglang_hardware")
+                continue
+            if required:
+                row["completion_reserve"] = event["completion_reserve"]
+                continue
+            if event["decision_mode"] == "observed_actions":
+                terminal = ((commits.get(attempt.attempt_id) or recovered.get(attempt.attempt_id))
+                            if attempt.stage == "COMMITTED" else failures.get(attempt.attempt_id))
+                observed_remaining(row, event, attempt, terminal, observations)
                 continue
             prediction, reason = selected_prediction(event)
             if reason:
@@ -187,7 +303,7 @@ def audit_directory(directory):
                 if overlap is None or overlap["start"] != window["start"]:
                     row["unmatched_reasons"].append("selected_answer_phase_start_does_not_match_actual_window")
                     continue
-                if next_step["candidate"]["input_hash"] != attempt.result.receipt.input_hash:
+                if candidate["input_hash"] != attempt.result.receipt.input_hash:
                     row["unmatched_reasons"].append("actual_answer_receipt_does_not_match_selected_input")
                     continue
                 start, end = paid["end"], window["end"]
@@ -206,9 +322,9 @@ def audit_directory(directory):
                 if window is None or window.get("clock") != "client_monotonic" or window.get("scope") != "step_wall":
                     row["unmatched_reasons"].append("actual_complete_step_phase_window_missing")
                     continue
-                if next_step["candidate"] is not None and (step.receipt is None or
+                if candidate is not None and (step.receipt is None or
                         not step.receipt.generation_complete or
-                        next_step["candidate"]["input_hash"] != step.receipt.input_hash):
+                        candidate["input_hash"] != step.receipt.input_hash):
                     row["unmatched_reasons"].append("actual_step_receipt_does_not_match_selected_input")
                     continue
                 start, end = window["start"], window["end"]
@@ -254,6 +370,28 @@ def summaries(rows):
     return result
 
 
+def trajectory_examples(rows):
+    examples = {}
+    for row in rows:
+        trace = row.get("trajectory")
+        if not trace or row["unmatched_reasons"] == ["source_is_not_actual_sglang_hardware"]:
+            continue
+        work = trace["selected_native_work"] or {}
+        tags = {
+            "observed_prefill": work.get("actual_prefill_tokens", 0),
+            "observed_gpu_prefix_hit": work.get("actual_device_hit_tokens", 0),
+            "observed_host_reload": work.get("actual_host_loaded_tokens", 0),
+            "read_added_evidence": row["logical_kind"] == "READ" and trace["new_claim_ids"],
+            "applied_demand_retention": any(owner.get("state") == "RETAINED" for owner in
+                (trace["prefix_control"] or {}).get("owner_status", {}).values()),
+        }
+        for name, present in tags.items():
+            if present and name not in examples:
+                examples[name] = {"generation_dir": row["generation_dir"], "observation_id": row["observation_id"],
+                                  "request_id": trace["request_id"]}
+    return examples
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", action="append", required=True, help="Saved study/workflow root; discovers state/events.jsonl")
@@ -268,8 +406,16 @@ def main(argv=None):
     destination = Path(args.output)
     destination.mkdir(parents=True, exist_ok=False)
     (destination/"predictions.jsonl").write_text("".join(json.dumps(to_jsonable(row), ensure_ascii=False, allow_nan=False)+"\n" for row in rows))
+    remaining = [row for row in rows if row.get("prediction_scope") == "fixed_bounded_rollout"]
     summary = {"format": "contextkv_rolling_prediction_error_audit_v1", "source_directories": sources,
-        "summaries": summaries(rows), "error_sign": "prediction minus actual",
+        "summaries": summaries([row for row in rows if row.get("prediction_scope") is None]),
+        "observed_rollout_remaining": summaries(remaining),
+        "mandatory_scope_decisions": dict(Counter(row["kind"] for row in rows
+            if row.get("prediction_scope") == "mandatory_scope_reservation")),
+        "trajectory_examples": trajectory_examples(rows),
+        "delivered_latency_reserve_underestimated": sum(row.get("latency_reserve_underestimated") is True for row in remaining),
+        "delivered_latency_reserve_checked": sum("latency_reserve_underestimated" in row for row in remaining),
+        "error_sign": "prediction minus actual",
         "physical_unit": "GiB milliseconds", "physical_scope": "whole declared device/process envelope, not marginal or shared",
         "heldout_rule": "exclude exact observation IDs in declared calibration assets; missing asset proof is retained in overlap_check_basis",
         "method": "read saved selected predictions and actual completed phases; no calls, refitting, score imputation or paid-cost addition"}

@@ -26,16 +26,16 @@ from bench.study_resources import StudyResourceSampler, integrate_physical, list
 from controller.config import create_controller, create_model_template, load_config
 from controller.context_schema import ContextBudget, ContextPlan, EvidenceClaim, EvidenceSet, Need, ReadTask, TaskState, TextRef
 from controller.engine_client import EngineError, SGLangEngineClient
-from controller.prefix_retention import EmpiricalRetentionModel, PrefixReadObserver, PrefixRuntimeClient
-from controller.reading import (build_read_plan, parse_read_result, stable_prefix_input_ids,
-                                stable_prefix_messages, stable_source_payload)
+from controller.prefix_retention import (EmpiricalRetentionModel, PrefixObserver, PrefixReadObserver, PrefixRuntimeClient, TARGET_DEMAND_RULE,
+    RETENTION_FEATURE_NAMES, RETENTION_CONTROL_RULE, MIN_RETENTION_GROUPS, source_demand_event_key)
+from controller.reading import (build_read_plan, parse_read_result, stable_prefix_messages,
+                                stable_source_payload, step_messages)
 from controller.reduction import reduce_claims
-from controller.sampling import SamplingRecipe, request_sampling
+from controller.sampling import bound_recipe, request_sampling
 from controller.schema import ConfigFingerprint, PromptCandidate, SessionSnapshot, TurnRecord
 from controller.serialization import decode, to_jsonable
 from controller.session_store import SessionStore, load_record
-from controller.templates import candidate_request, step_request, token_hash
-from controller.templates import ByteTokenizer, longest_common_prefix
+from controller.templates import candidate_request, longest_common_prefix, step_request, token_hash
 from engine_patches.contextkv_runtime import executed_prefix_hashes
 from profiling.retention_capture_cost import CaptureRunAccounting, load_resident_provider
 
@@ -128,32 +128,6 @@ def source_records(path, *, store=None, attempt_ids=None):
     return records
 
 
-def source_token_ranges(template, rendered, messages, units):
-    """Locate encoded original-source text, excluding shared instructions/catalogue."""
-    if type(template.tokenizer) is ByteTokenizer:
-        offsets = [(index, index+1) for index, char in enumerate(rendered.text) for _ in char.encode("utf-8")]
-    else:
-        encoded = template.tokenizer(rendered.text, add_special_tokens=False, return_offsets_mapping=True)
-        if tuple(encoded["input_ids"]) != tuple(rendered.input_ids):
-            raise ValueError("source-body offset tokenizer differs from actual rendered input")
-        offsets = encoded["offset_mapping"]
-    content = messages[1].content
-    message_start = rendered.text.index(content)
-    ranges, cursor = [], 0
-    for unit in units:
-        literal = json.dumps(unit.text, ensure_ascii=False)
-        marker = '"text":'+literal
-        found = content.index(marker, cursor)
-        first = message_start+found+len('"text":')+1
-        last = first+len(literal)-2
-        tokens = [index for index, (start, end) in enumerate(offsets) if end > first and start < last and end > start]
-        if tokens:
-            ranges.append([tokens[0], tokens[-1]+1])
-        cursor = found+len(marker)
-    system = template.render((messages[0],)).input_ids
-    return ranges, longest_common_prefix(system, rendered.input_ids)
-
-
 def causal_pages(event, page_size, scope):
     hashes = executed_prefix_hashes(event["prefix_input_ids"], page_size)
     evidence, system = set(), set()
@@ -211,15 +185,33 @@ def annotated_generation(plan, step, template):
     if step.task.kind == "READ":
         by_id = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
         units = tuple(by_id[identity] for identity in step.task.input_unit_ids)
-        if step.input_messages[:2] != stable_prefix_messages(plan, step.task, units):
+        if step.input_messages[:2] != stable_prefix_messages(units):
             raise ValueError("source READ is not the current canonical source_first prefix; recapture it natively")
-        prefix = stable_prefix_input_ids(template, plan, step.task, units, rendered)
-        ranges, system_tokens = source_token_ranges(template, rendered, step.input_messages, units)
+        source_view = step.metrics["source_view"]
+        prefix = step.input_ids[:source_view["source_prefix_tokens"]]
+        ranges = [list(interval) for interval in source_view["body_token_ranges"]]
+        system_tokens = longest_common_prefix(template.render((step.input_messages[0],)).input_ids, step.input_ids)
         sources, _ = stable_source_payload(units)
         result.update(prefix_input_ids=list(prefix), evidence_token_ranges=ranges, fixed_system_prefix_tokens=system_tokens, sources=[
             {"source_unit": item["source_unit"], "source_spans": item["source_spans"],
              "document_family": item["document_family"], "applicability": to_jsonable(item["applicability"])} for item in sources])
     return result
+
+
+def trace_source_metadata(metadata):
+    fields = (
+        "task_id", "conversation_id", "turn", "dataset", "split", "source_partition",
+        "cohort_split", "cohort_manifest_sha256", "method", "status", "scope",
+        "history_origin", "snapshot_id", "rollout_policy", "measurement_segment_id",
+        "measurement_kind", "request_window", "workload_arrival", "record_number",
+        "generation_dir", "source_status_derivation", "max_new_tokens",
+        "capture_origin", "source_attempt_id", "source_example_id", "source_trace_origin",
+        "source_mutations", "quality_claim", "source_trace_files", "source_bank_files",
+        "probe", "packing",
+    )
+    return {**{key: metadata[key] for key in fields if key in metadata},
+        "response": {key: metadata["response"][key] for key in ("answer_phase_window", "timing")
+                     if key in metadata.get("response", {})}}
 
 
 def export_attempt(store, attempt, template, sampling, metadata, *, recorded_calls=None):
@@ -246,6 +238,7 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
             continue
         event = annotated_generation(plan, step, template)
         event.update(read_task=to_jsonable(step.task),
+                     original_output_text=generation.text,
                      input_claims=to_jsonable(tuple(parent_claims[key] for key in step.task.input_claim_ids)))
         event["prefix_observation"] = step.metrics.get("evidence_prefix")
         recorded = calls.get(step.receipt.attempt_id)
@@ -266,6 +259,7 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
     events.append(dict(step_id="ANSWER", kind="ANSWER", operation="answer", predecessor_step_ids=[
         event["step_id"] for event in events], input_ids=list(final.input_ids), input_hash=final.input_hash,
         original_output_ids=list(attempt.result.output_ids), original_receipt=to_jsonable(attempt.result.receipt),
+        original_output_text=attempt.result.text,
         original_epoch=to_jsonable(attempt.epoch), request=to_jsonable(request),
         system_prompt=final.messages[0].content, context_action=final.action,
         sampling=recorded["sampling"] if recorded else dict(sampling),
@@ -284,7 +278,7 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
     return dict(attempt_id=attempt.attempt_id, session_id=attempt.session_id, request_id=attempt.request_id,
         query=attempt.query, arrival_s=arrival, context_plan=to_jsonable(plan),
         actual_history=to_jsonable(before_snapshot(store, attempt).raw_history), events=events,
-        dataset=metadata.get("dataset"), split=metadata.get("split"), source_metadata=metadata)
+        dataset=metadata.get("dataset"), split=metadata.get("split"), source_metadata=trace_source_metadata(metadata))
 
 
 class RecordingEngine:
@@ -327,12 +321,12 @@ class RecordingEngine:
 
 class CapturePrefixObserver:
     """Record post-READ native state, without retaining any prefix."""
-    def __init__(self, engine, template):
-        self.runtime, self.template = PrefixRuntimeClient(engine), template
+    def __init__(self, engine):
+        self.runtime = PrefixRuntimeClient(engine)
         self.accesses = defaultdict(list)
 
-    async def __call__(self, plan, task, units, rendered, record):
-        ids = stable_prefix_input_ids(self.template, plan, task, units, rendered)
+    async def __call__(self, plan, task, units, record):
+        ids = record.input_ids[:record.metrics["source_view"]["source_prefix_tokens"]]
         sources, _ = stable_source_payload(units)
         sources = [{"source_unit": item["source_unit"], "source_spans": item["source_spans"],
                     "document_family": item["document_family"], "applicability": to_jsonable(item["applicability"])} for item in sources]
@@ -340,11 +334,7 @@ class CapturePrefixObserver:
         key = digest([record.engine_epoch.business_session_id, inspected["cache_scope_hash"], inspected["prefix_hash"]])
         now = time.monotonic_ns()
         features = PrefixReadObserver._features(plan, sources, self.accesses[key], now)
-        pool = inspected["pool"]
-        features.update(gpu_pressure=1-pool["free_gpu_tokens"]/pool["gpu_capacity_tokens"],
-            host_pressure=1-pool["free_host_tokens"]/pool["host_capacity_tokens"] if pool["host_capacity_tokens"] else 0,
-            gpu_prefix_tokens=inspected["residency"]["ready_gpu_prefix_tokens"],
-            host_load_tokens=inspected["residency"]["host_only_load_tokens"])
+        features.update(PrefixReadObserver._native_features(inspected))
         self.accesses[key].append(dict(observed_ns=now, payload={"turn_id": plan.task_state.current_turn_id}))
         return dict(state="OBSERVED", inspection=inspected, raw_features=features,
                     observed_ns=now, policy="capture_observation_only", training_origin="canonical_native_READ")
@@ -361,9 +351,9 @@ def make_trace(turns, *, config, source_db, captured, case_outcomes=()):
     return dict(format="contextkv_source_first_trace_v2", source="hardware",
         scope="fixed_recorded_reading_dag", training_eligible=eligible,
         layout="source_first", captured_generation_wire=captured,
-        unexported_pressure_intervals=[dict(start=case["native_window"]["start"],
-            end=case["native_window"]["end"], reason=case["reason"])
-            for case in case_outcomes if "native_window" in case],
+        unexported_pressure_intervals=[{**case.get("request_window", case.get("native_window")),
+            "reason": case["reason"]}
+            for case in case_outcomes if "request_window" in case or "native_window" in case],
         source_database=str(Path(source_db).resolve()), config=to_jsonable(config),
         fingerprint=model_events[0]["fingerprint"] if model_events else None,
         turns=turns, input_hashes=hashes, input_dag_digest=digest([
@@ -434,7 +424,7 @@ async def capture(args):
             resident_provider, accounting.resident_model_manifest = await asyncio.to_thread(
                 load_resident_provider, args.study_config, service.template)
             accounting.record_resident_models(args.study_config, accounting.resident_model_manifest)
-        service.observe_prefix = CapturePrefixObserver(service.engine, service.template)
+        service.observe_prefix = CapturePrefixObserver(service.engine)
         recorder = RecordingEngine(service.engine)
         service.engine = recorder
         accounting.calls = recorder.calls
@@ -515,7 +505,7 @@ async def capture_reader_traces(args):
             resident_provider, accounting.resident_model_manifest = await asyncio.to_thread(
                 load_resident_provider, args.study_config, service.template)
             accounting.record_resident_models(args.study_config, accounting.resident_model_manifest)
-        service.observe_prefix = CapturePrefixObserver(service.engine, service.template)
+        service.observe_prefix = CapturePrefixObserver(service.engine)
         recorder = RecordingEngine(service.engine)
         service.engine = recorder
         accounting.calls = recorder.calls
@@ -585,14 +575,11 @@ class PrefixPageSampler:
     def __init__(self, engine, *, interval=.25):
         self.runtime, self.interval = PrefixRuntimeClient(engine), interval
         self.watches, self.samples, self.errors, self.controls = {}, [], [], []
-        self.order = []
         self._stop = asyncio.Event()
         self._task = None
         self._sampling = asyncio.Lock()
 
     def watch(self, prefix_id, receipt, ids, sources):
-        if prefix_id not in self.order:
-            self.order.append(prefix_id)
         self.watches[prefix_id] = dict(receipt=receipt, prefix_input_ids=tuple(ids), sources=sources)
 
     async def sample(self):
@@ -627,20 +614,11 @@ class PrefixPageSampler:
     def observation(self):
         return dict(clock="client_monotonic", interval_seconds=self.interval,
             page_basis="native inspected ready causal pages; inflight markers retained",
-            marginal_order=self.order, samples=self.samples, controls=self.controls, errors=self.errors)
+            samples=self.samples, controls=self.controls, errors=self.errors)
 
 
-def marginal_page_counts(prefixes, order, tier):
-    """Exact unique-page increments in the registered first-access order."""
-    assigned, counts = set(), {}
-    for prefix_id in order:
-        pages = set(prefixes.get(prefix_id, {}).get(tier+"_page_ids", ()))
-        counts[prefix_id] = len(pages-assigned)
-        assigned.update(pages)
-    return counts, len(assigned)
-
-
-def integrate_prefix_residency(observation, prefix_id, start, end, page_size, *, protected_prefix_ids=()):
+def integrate_prefix_residency(observation, prefix_id, start, end, page_size):
+    """Integrate one observed prefix, including allocated transfer destinations."""
     samples = observation["samples"]
     before = [row for row in samples if row["timestamp"] <= start and prefix_id in row["prefixes"]]
     after = [row for row in samples if row["timestamp"] >= end and prefix_id in row["prefixes"]]
@@ -652,21 +630,18 @@ def integrate_prefix_residency(observation, prefix_id, start, end, page_size, *,
         for row in rows for key in ("inflight_h2d_tokens", "inflight_d2h_tokens"))
     costs = {}
     for tier in ("gpu", "host"):
-        integral = union_integral = attributed_integral = 0.0
+        ready_integral = pending_integral = 0.0
+        transfer = "inflight_h2d_tokens" if tier == "gpu" else "inflight_d2h_tokens"
         for row, following in zip(rows, rows[1:]):
-            counts, union = marginal_page_counts(row["prefixes"], observation["marginal_order"], tier)
-            pages = set(row["prefixes"][prefix_id][tier+"_page_ids"])
-            already_protected = {page for owner in protected_prefix_ids
-                for page in row["prefixes"].get(owner, {}).get(tier+"_page_ids", ())}
-            integral += len(pages-already_protected)*page_size*(following["timestamp"]-row["timestamp"])
-            attributed_integral += counts[prefix_id]*page_size*(following["timestamp"]-row["timestamp"])
-            union_integral += union*page_size*(following["timestamp"]-row["timestamp"])
-        costs[tier+"_token_seconds"] = integral
-        costs[tier+"_first_access_attributed_token_seconds"] = attributed_integral
-        costs[tier+"_observed_union_token_seconds"] = union_integral
+            prefix = row["prefixes"][prefix_id]
+            elapsed = following["timestamp"]-row["timestamp"]
+            ready_integral += len(set(prefix[tier+"_page_ids"]))*page_size*elapsed
+            pending_integral += prefix["residency"][transfer]*elapsed
+        costs[tier+"_ready_token_seconds"] = ready_integral
+        costs[tier+"_pending_token_seconds"] = pending_integral
+        costs[tier+"_token_seconds"] = ready_integral+pending_integral
     return dict(complete_window_coverage=True, transfer_pending_observed=pending,
-        cost_basis="sampled_ready_causal_KV_pages", protected_prefix_ids=list(protected_prefix_ids),
-        marginal_order=observation["marginal_order"], **costs)
+        cost_basis="sampled_single_prefix_ready_pages_plus_allocated_transfer_destinations", **costs)
 
 
 def trace_generations(trace):
@@ -679,6 +654,16 @@ def read_decisions(trace):
 
 def event_id(turn, event):
     return turn["attempt_id"]+":"+event["step_id"]
+
+
+def actual_page_size(reads, declared=None):
+    sizes = {event["prefix_observation"]["inspection"]["page_size"] for _, event in reads
+        if event.get("prefix_observation") and "inspection" in event["prefix_observation"]}
+    if declared is not None:
+        sizes.add(declared)
+    if len(sizes) != 1:
+        raise ValueError("coverage needs one actual observed native page_size or its explicit declaration")
+    return sizes.pop()
 
 
 def verify_trace(trace):
@@ -700,8 +685,8 @@ def verify_trace(trace):
             raise ValueError("retained source prefix is not the actual contiguous input path")
 
 
-async def replay_arm(trace, config, output, *, gpu_device, intervention=None, horizon_seconds=60,
-                     residency_interval=.25, target=None):
+async def replay_arm(trace, config, output, *, gpu_device, intervention=None, horizon_seconds=180,
+                     ttl_seconds=None, residency_interval=.25, target=None):
     """Replay the complete supplied window; intervention names one READ event."""
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -710,7 +695,7 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
     recipes = {digest(event["sampling"]): event["sampling"] for _, event in trace_generations(trace)}
     engines = {key: SGLangEngineClient(config.engine.base_url, fingerprint,
         timeout=config.engine.timeout_seconds, stream=True,
-        sampling=None if recipe == {"temperature": 0} else SamplingRecipe(**recipe),
+        sampling=bound_recipe(recipe),
         **({"model_scope": config.model.scope.manifest()} if config.model.scope else {}))
         for key, recipe in recipes.items()}
     engine = next(iter(engines.values()))
@@ -718,15 +703,13 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
     info = await engine.info()
     for client in engines.values():
         await client.info()
-    runtime = PrefixRuntimeClient(engine)
+    owner_store = SessionStore(output/"prefix-owners.sqlite")
+    owners = PrefixObserver(owner_store, engine)
+    runtime = owners.runtime
     pages = PrefixPageSampler(engine, interval=residency_interval)
     pool = (await engine.metrics())["pool"]
     page_size = pool["page_size"]
     cache_scope_hash = digest([asdict(fingerprint), info.cache_config_hash])
-    ordered_reads = sorted(read_decisions(trace), key=lambda item: item[1]["source_started_s"])
-    pages.order = list(dict.fromkeys("trace-prefix:"+digest([turn["session_id"], cache_scope_hash,
-        token_hash(event["prefix_input_ids"][:len(event["prefix_input_ids"])//page_size*page_size])])
-        for turn, event in ordered_reads))
     native = NativePoolSampler(config.engine.base_url, gpu_capacity=config.engine.gpu_capacity_tokens,
         host_enabled=config.engine.host_capacity_tokens > 0, model=config.model.name, interval=.1)
     physical = StudyResourceSampler((gpu_device,), listening_processes((urlsplit(config.engine.base_url).port,)), interval=.1)
@@ -741,10 +724,13 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
     active_owners = set()
     report = dict(source="hardware", scope="fixed_reading_dag_replay", intervention=intervention,
         decision_target=target,
-        horizon_seconds=horizon_seconds, engine=to_jsonable(info), config=to_jsonable(config),
+        horizon_seconds=horizon_seconds, ttl_seconds=ttl_seconds,
+        engine=to_jsonable(info), config=to_jsonable(config),
         cache_scope_hash=cache_scope_hash, page_size=page_size,
         trace_digest=digest(trace), input_dag_digest=trace["input_dag_digest"], events=receipts,
-        output_policy="actual new outputs with captured sampling/output budgets; no gold matching",
+        output_policy="fresh responses measure actual native cost; captured outputs preserve the fixed DAG",
+        parse_policy="captured_original_outputs",
+        quality_scope="fixed-input cost attribution only; fresh outputs do not establish new QA quality",
         timing_policy="captured per-turn input-ready arrivals; internal DAG executes causally without fixed model-submit stalls",
         cost_scope="reading DAG/ANSWER, C controls and declared physical process groups; upstream A is frozen",
         status="running", controls=controls)
@@ -778,7 +764,9 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
                 original_epoch = event["original_epoch"]["engine_session_id"]
                 if original_epoch not in epochs:
                     epochs[original_epoch] = await engine.prepare(uuid.uuid4().hex, uuid.uuid4().hex,
-                                                                  info.engine_restart_id)
+                        info.engine_restart_id,
+                        **({"business_session_id": turn["session_id"]}
+                           if info.business_session_identity_supported else {}))
                 epoch = epochs[original_epoch]
                 client = engines[digest(event["sampling"])]
                 submitted = time.monotonic()
@@ -805,11 +793,13 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
                     tick = time.monotonic()
                     task = decode(ReadTask, event["read_task"])
                     by_id = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
-                    parsed = parse_read_result(task, result.text,
+                    parsed = parse_read_result(task, event["original_output_text"],
                         tuple(by_id[key] for key in task.input_unit_ids),
                         tuple(decode(EvidenceClaim, value) for value in event["input_claims"]),
-                        elapsed_ms=result.elapsed_ms, input_tokens=len(event["input_ids"]), output_tokens=len(result.output_ids))
-                    row.update(parse_ms=(time.monotonic()-tick)*1000, parsed_output=to_jsonable(parsed))
+                        elapsed_ms=result.elapsed_ms, input_tokens=len(event["input_ids"]),
+                        output_tokens=len(event["original_output_ids"]))
+                    row.update(parse_ms=(time.monotonic()-tick)*1000, parsed_output=to_jsonable(parsed),
+                               parse_policy="captured_original_outputs")
                 if event["kind"] == "READ":
                     prefix_ids = event["prefix_input_ids"][:len(event["prefix_input_ids"])//page_size*page_size]
                     inspected = dict(cache_scope_hash=cache_scope_hash, prefix_hash=token_hash(prefix_ids),
@@ -836,22 +826,24 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
                         target_prefix_id = source_row["prefix_id"]
                         target_features = features if identity == target["source_event_id"] else PrefixReadObserver._features(
                             plan, source_event["sources"], accesses[target_prefix_id], time.monotonic_ns())
-                        target_pool = target_view["pool"]
-                        target_features.update(gpu_pressure=1-target_pool["free_gpu_tokens"]/target_pool["gpu_capacity_tokens"],
-                            host_pressure=1-target_pool["free_host_tokens"]/target_pool["host_capacity_tokens"] if target_pool["host_capacity_tokens"] else 0,
-                            gpu_prefix_tokens=target_view["residency"]["ready_gpu_prefix_tokens"],
-                            host_load_tokens=target_view["residency"]["host_only_load_tokens"])
+                        target_features.update(PrefixReadObserver._native_features(target_view))
                         decision = row["decision_target"] = dict(prefix_id=target_prefix_id, inspection=target_view,
                             raw_features=target_features, decision_time=time.monotonic(), source_event_id=target["source_event_id"],
                             source_session_id=source_turn["session_id"], retention_control_ms=0,
+                            inspection_control_ms=target_inspect_ms,
                             action_feasible=target_view["residency"]["recoverable_prefix_tokens"] >= target_view["boundary_tokens"])
                     if identity == intervention and row["decision_target"]["action_feasible"]:
                         decision = row["decision_target"]
                         tick = time.monotonic()
-                        decision["retain_receipt"] = await runtime.retain(owner_id=decision["prefix_id"], receipt=source_receipt,
-                            prefix_input_ids=source_event["prefix_input_ids"], sources=source_event["sources"], ttl_seconds=horizon_seconds)
-                        decision["retention_control_ms"] = (time.monotonic()-tick)*1000+target_inspect_ms
-                        active_owners.add(decision["prefix_id"])
+                        # Match the online owner mutation, including its local ledger writes.
+                        decision["retain_receipt"] = await owners.observe(owner_id=decision["prefix_id"],
+                            session_id=source_turn["session_id"], attempt_id=source_turn["attempt_id"],
+                            step_id=source_event["step_id"], receipt=source_receipt,
+                            prefix_input_ids=source_event["prefix_input_ids"], sources=source_event["sources"],
+                            ttl_seconds=ttl_seconds, policy="single_prefix_intervention", policy_choice={})
+                        decision["retention_control_ms"] = (time.monotonic()-tick)*1000
+                        if decision["retain_receipt"]["state"] == "RETAINED":
+                            active_owners.add(decision["prefix_id"])
                 if event["kind"] == "ANSWER":
                     previous = previous_answers.get(turn["session_id"])
                     if previous is not None and previous != original_epoch:
@@ -870,6 +862,11 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
     tasks = [asyncio.create_task(execute_turn(turn)) for turn in ordered_turns]
     try:
         await asyncio.gather(*tasks)
+        decision_time = receipts[target["event_id"]]["decision_target"]["decision_time"]
+        observation_end = decision_time+horizon_seconds
+        await asyncio.sleep(max(0, observation_end-time.monotonic()))
+        await pages.sample()
+        report["observation_window"] = dict(start=decision_time, end=observation_end)
         report["status"] = "completed"
     finally:
         failure = sys.exc_info()[1]
@@ -882,7 +879,7 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
             report.update(status="failed", error=str(failure))
         for prefix_id in active_owners:
             tick = time.monotonic()
-            await runtime.release(prefix_id, info.engine_restart_id)
+            await owners.release(prefix_id, reason="experiment_prefix_cleanup")
             controls.append(dict(operation="experiment_prefix_cleanup", elapsed_ms=(time.monotonic()-tick)*1000))
         for original_id in epochs:
             await retire(original_id)
@@ -892,28 +889,42 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
         await physical.stop()
         for client in engines.values():
             await client.aclose()
+        owner_store.close()
         report.update(resource_window={"start": start, "end": end}, workload_end=workload_end,
             physical_cost=integrate_physical(physical.samples, start, end),
             native_observation=native.observation(), physical_observation=physical.observation(),
             prefix_observation=pages.observation())
         series, coverage = pool_series(native.observation(), start, end)
         report["native_cost"] = {"integrals": occupancy_integral(series), "coverage": coverage}
+        if "observation_window" in report:
+            window = report["observation_window"]
+            report["observation_physical_cost"] = integrate_physical(physical.samples, window["start"], window["end"])
+            series, coverage = pool_series(native.observation(), window["start"], window["end"])
+            report["observation_native_cost"] = dict(integrals=occupancy_integral(series), coverage=coverage)
         write_json(output/"report.json", report)
     return report
 
 
 def choose_windows(trace, *, horizon_seconds, max_candidates, history_steps, max_replay_steps, seed,
-                   max_prefixes_per_decision=1):
+                   max_prefixes_per_decision=1, page_size=None):
     """Select bounded contiguous windows; never remove intervening pressure."""
     turns = sorted(trace["turns"], key=lambda turn: min(event["source_started_s"]
         for event in turn["events"] if event["kind"] != "CPU_REDUCE"))
-    read_events = [(index, turn, event) for index, turn in enumerate(turns)
-                   for event in turn["events"] if event["kind"] == "READ"]
+    read_events = sorted(((index, turn, event) for index, turn in enumerate(turns)
+                          for event in turn["events"] if event["kind"] == "READ"),
+                         key=lambda item: item[2]["source_completed_s"])
+    page_size = actual_page_size([(turn, event) for _, turn, event in read_events], page_size)
     candidates, omitted, known = [], [], defaultdict(dict)
     for index, turn, event in read_events:
         signature = digest(event["prefix_input_ids"])
-        known[turn["session_id"]][signature] = (index, turn, event)
-        targets = sorted(known[turn["session_id"]].values(), key=lambda item: item[2]["source_started_s"], reverse=True)
+        _, body_pages, _ = causal_pages(event, page_size, "")
+        if body_pages:
+            known[turn["session_id"]][signature] = (index, turn, event)
+        else:
+            omitted.append(dict(source_event_id=event_id(turn, event),
+                reason="no_complete_source_body_page", reuse_label=None))
+        targets = sorted(known[turn["session_id"]].values(),
+                         key=lambda item: item[2]["source_completed_s"], reverse=True)
         targets = targets[:max_prefixes_per_decision]
         first = index
         count = sum(len(item["events"]) for item in turns[first:index])
@@ -940,7 +951,7 @@ def choose_windows(trace, *, horizon_seconds, max_candidates, history_steps, max
             if any(gap["start"] < window_end and gap["end"] > window_start
                    for gap in trace.get("unexported_pressure_intervals", ())):
                 omitted.append(dict(event_id=event_id(turn, event), source_event_id=event_id(source_turn, source_event),
-                    reason="completed_failed_native_pressure_has_no_canonical_DAG; window_not_replayed"))
+                    reason="unexported_request_pressure_overlaps_replay_window"))
                 continue
             steps = sum(len(item["events"]) for item in window)
             if steps > max_replay_steps:
@@ -950,6 +961,9 @@ def choose_windows(trace, *, horizon_seconds, max_candidates, history_steps, max
             identity, source_identity = event_id(turn, event), event_id(source_turn, source_event)
             candidates.append(dict(event_id=identity, source_event_id=source_identity,
                 first_turn=begin, last_turn=last, steps=steps,
+                observation_seconds=horizon_seconds,
+                source_observation_window={"start": event["source_completed_s"], "end": deadline},
+                observed_boundary_turn=turns[last]["attempt_id"],
                 source_attempts=[item["attempt_id"] for item in window],
                 priority=digest([seed, identity, source_identity]), turns=window))
     candidates.sort(key=lambda item: item["priority"])
@@ -963,6 +977,56 @@ def choose_windows(trace, *, horizon_seconds, max_candidates, history_steps, max
     return selected, omitted
 
 
+def fit_window_pairs(trace, *, horizon_seconds, history_steps, max_replay_steps, seed,
+                     max_prefixes_per_decision=1, page_size=None):
+    """Pair observed feature buckets across disjoint complete session windows.
+
+    This uses captured pre-intervention state, never retention outcomes. Each
+    selected window will produce all TTL arms; those arms are repeated measures.
+    Older targets without a captured observation at the decision are left to the
+    diagnostic replay path rather than assigned an invented residency bucket.
+    """
+    reads = read_decisions(trace)
+    candidates, omitted = choose_windows(trace, horizon_seconds=horizon_seconds,
+        max_candidates=len(reads)*max_prefixes_per_decision, history_steps=history_steps,
+        max_replay_steps=max_replay_steps, seed=seed,
+        max_prefixes_per_decision=max_prefixes_per_decision, page_size=page_size)
+    events = {event_id(turn, event): event for turn, event in reads}
+    buckets = defaultdict(list)
+    for item in candidates:
+        observed = events[item["event_id"]].get("prefix_observation")
+        if (item["source_event_id"] != item["event_id"] or observed is None
+                or "raw_features" not in observed or "inspection" not in observed):
+            omitted.append(dict(event_id=item["event_id"], source_event_id=item["source_event_id"],
+                reason="fit_needs_captured_target_features_at_decision"))
+            continue
+        features = {name: observed["raw_features"][name] for name in RETENTION_FEATURE_NAMES}
+        scope = observed["inspection"]["cache_scope_hash"]
+        bucket = json.dumps([features, scope], sort_keys=True, separators=(",", ":"))
+        item = {**item, "fit_bucket": bucket, "captured_features": features,
+            "independent_session_ids": sorted({turn["session_id"] for turn in item["turns"]}),
+            "model_calls_per_arm": len(trace_generations(window_trace(trace, item))),
+            "sampling_probability": None, "sampling_weight": 1.0,
+            "sampling_design": "budgeted feature-matched disjoint session windows; group-balanced, not inverse-probability"}
+        buckets[bucket].append(item)
+    pairs, support = {}, []
+    for bucket, cohort in sorted(buckets.items()):
+        possible = ((left, right) for index, left in enumerate(cohort) for right in cohort[index+1:]
+            if not set(left["independent_session_ids"]) & set(right["independent_session_ids"]))
+        pair = min(possible, key=lambda pair: (
+            sum(item["model_calls_per_arm"] for item in pair),
+            tuple(item["priority"] for item in pair)), default=None)
+        support.append(dict(fit_bucket=bucket, observable_windows=len(cohort),
+            independent_pair_available=pair is not None,
+            minimum_independent_groups_per_bucket=MIN_RETENTION_GROUPS))
+        if pair is not None:
+            pairs[bucket] = pair
+    return pairs, dict(buckets=support, omissions=omitted,
+        selection_basis="minimum observable replay calls within matched captured feature buckets, then seeded hash; no reuse or retention benefit selected",
+        minimum_independent_groups_per_bucket=MIN_RETENTION_GROUPS,
+        replay_bucket_note="captured buckets plan support; actual replay features determine fit eligibility")
+
+
 def window_trace(trace, selected):
     result = {**trace, "turns": selected["turns"], "window_selection": {
         key: value for key, value in selected.items() if key != "turns"}}
@@ -972,6 +1036,12 @@ def window_trace(trace, selected):
         for turn in result["turns"]])
     return result
 
+
+
+def exact_target_demand(target, future, *, page_size, scope):
+    key = source_demand_event_key(target["prefix_input_ids"], target["evidence_token_ranges"], page_size, scope)
+    return key is not None and key == source_demand_event_key(
+        future["prefix_input_ids"], future["evidence_token_ranges"], page_size, scope)
 
 def paired_row(trace, native, retained, selection, *, horizon_seconds):
     identity = selection["event_id"]
@@ -997,7 +1067,7 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
         left_use = reuse_pages(target_event, source_events[key], actual["result"]["receipt"], page_size=size, scope=scope)
         right_use = reuse_pages(target_event, source_events[key], retained["events"][key]["result"]["receipt"], page_size=size, scope=scope)
         uses.append(dict(event_id=key, native=left_use, retained=right_use))
-        if left_use["shared_evidence_page_ids"]:
+        if exact_target_demand(target_event, source_events[key], page_size=size, scope=scope):
             future.append((key, actual))
     future.sort(key=lambda item: item[1]["generation_window"]["start"])
     next_key, next_left = future[0] if future else (None, None)
@@ -1009,11 +1079,12 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
         left["decision_time"], ends[0], left["inspection"]["page_size"])
     right_residency = integrate_prefix_residency(retained["prefix_observation"], right["prefix_id"],
         right["decision_time"], ends[1], right["inspection"]["page_size"])
-    eligible = all(value["complete_window_coverage"] and not value["transfer_pending_observed"]
-                   for value in (left_residency, right_residency))
+    eligible = all(value["complete_window_coverage"] for value in (left_residency, right_residency))
     eligible = eligible and native["status"] == retained["status"] == "completed"
-    eligible = eligible and left["action_feasible"] and right["action_feasible"] and "retain_receipt" in right
-    eligible = eligible and bool(causal_pages(target_event, left["inspection"]["page_size"], left["inspection"]["cache_scope_hash"])[1])
+    eligible = (eligible and left["action_feasible"] and right["action_feasible"]
+                and right.get("retain_receipt", {}).get("state") == "RETAINED")
+    body_pages = len(causal_pages(target_event, left["inspection"]["page_size"], left["inspection"]["cache_scope_hash"])[1])
+    eligible = eligible and body_pages > 0
     eligible = eligible and all(arm["physical_cost"]["complete_window_coverage"] and
         arm["native_cost"]["coverage"]["complete_window_coverage"] for arm in (native, retained))
     turn = next(turn for turn in trace["turns"] if any(event_id(turn, event) == identity for event in turn["events"]))
@@ -1029,8 +1100,17 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
     target_delta = next_left["step_wall_ms"]-next_right["step_wall_ms"] if reused else 0
     window_delta = window_costs["native"]-window_costs["retained"]
     row = dict(source="hardware", scope="actual_source_first_single_prefix_intervention",
+        target_demand_rule=TARGET_DEMAND_RULE,
         dataset=turn["dataset"], split=turn["split"], training_eligible=trace["training_eligible"] and eligible,
         event_id=identity, source_event_id=selection["source_event_id"],
+        independent_session_ids=sorted({value["session_id"] for value in trace["turns"]}),
+        independent_sample_id=digest(sorted({value["session_id"] for value in trace["turns"]})),
+        sample_unit="independent session group; overlapping windows and TTL arms are repeated measures",
+        measurement_window_id=digest(selection["source_attempts"]),
+        source_body_page_count=body_pages,
+        predicted_reuse_event_key=source_demand_event_key(target_event["prefix_input_ids"],
+            target_event["evidence_token_ranges"], left["inspection"]["page_size"],
+            left["inspection"]["cache_scope_hash"]),
         partition_eligible=trace["training_eligible"], measurement_eligible=eligible,
         features=left["raw_features"], retained_features=right["raw_features"],
         cache_scope_hash=left["inspection"]["cache_scope_hash"], fingerprint=trace["fingerprint"],
@@ -1045,8 +1125,11 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
         collateral_and_initial_control_cost_difference_ms=window_delta-target_delta,
         affected_turn_ids=affected_ids,
         window_cost_basis="sum of complete component response intervals for all fixed affected turns, including collateral reads/ANSWER and policy controls",
-        reuse_event_basis="future actual inputs demand shared causal pages containing original-source text; GPU/Host utilization recorded separately; system/catalogue-only excluded",
+        reuse_event_basis="target reward requires exact complete source-demand key; partial causal body-page demand remains in causal_reuse and whole-window costs",
         retention_control_ms=right["retention_control_ms"],
+        control_cost_rule=RETENTION_CONTROL_RULE,
+        paired_inspection_control_ms={"native": left["inspection_control_ms"],
+                                     "retained": right["inspection_control_ms"]},
         native_reuse_result=next_left["result"] if reused else None,
         retained_reuse_result=next_right["result"] if reused else None,
         native_prefix_residency=left_residency, retained_prefix_residency=right_residency,
@@ -1065,53 +1148,153 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
     return row
 
 
+def revisit_outcomes(trace, report, selection):
+    """Classify actual source-page demand inside the common observation window."""
+    events = {event_id(turn, event): event for turn, event in read_decisions(trace)}
+    target = events[selection["source_event_id"]]
+    body_pages = len(causal_pages(target, report["page_size"], report["cache_scope_hash"])[1])
+    decision = report["events"][selection["event_id"]]["decision_target"]
+    window = report["observation_window"]
+    counts = dict(gpu_hit=0, host_load=0, recomputed=0)
+    visits = []
+    for identity, future in events.items():
+        actual = report["events"][identity]
+        if not window["start"] < actual["generation_window"]["start"] <= window["end"]:
+            continue
+        use = reuse_pages(target, future, actual["result"]["receipt"],
+            page_size=report["page_size"], scope=report["cache_scope_hash"])
+        demanded = set(use["shared_evidence_page_ids"])
+        if not demanded:
+            continue
+        gpu = set(use["actual_device_evidence_page_ids"])
+        host = set(use["actual_host_evidence_page_ids"])
+        recomputed = demanded-gpu-host
+        pages = dict(gpu_hit=len(gpu), host_load=len(host), recomputed=len(recomputed))
+        for category, count in pages.items():
+            counts[category] += count
+        visits.append(dict(event_id=identity,
+            seconds_after_decision=actual["generation_window"]["start"]-decision["decision_time"],
+            categories=[category for category, count in pages.items() if count], page_counts=pages,
+            demanded_page_ids=sorted(demanded), recomputed_page_ids=sorted(recomputed),
+            step_wall_ms=actual["step_wall_ms"], receipt=actual["result"]["receipt"]))
+    return dict(source_body_page_count=body_pages, no_revisit=not visits if body_pages else None,
+        revisit_events=len(visits), page_counts=counts,
+        event_counts={category: sum(category in visit["categories"] for visit in visits) for category in counts},
+        visits=visits, observation_seconds=window["end"]-window["start"],
+        classification_basis="actual demanded original-source causal pages and native device/host receipt boundaries; mixed visits retain every category")
+
+
 async def replay(args):
     trace = json.loads(Path(args.trace).read_text())
     verify_trace(trace)
-    selected, omitted = choose_windows(trace, horizon_seconds=args.horizon_seconds,
-        max_candidates=args.max_candidates, history_steps=args.history_steps,
-        max_replay_steps=args.max_replay_steps, seed=args.seed,
-        max_prefixes_per_decision=args.max_prefixes_per_decision)
-    planned = sum(2*len(trace_generations(window_trace(trace, item))) for item in selected)
+    config = load_config(args.config)
+    page_size = args.page_size if args.page_size is not None else config.engine.page_size
+    ttls = tuple(args.ttl_seconds)
+    if args.horizon_seconds < max(180, *ttls):
+        raise ValueError("all replay arms require one observation window covering at least 180 seconds and every TTL")
+    if args.selection:
+        selection = json.loads(Path(args.selection).read_text())
+        if selection["source_trace_digest"] != digest(trace):
+            raise ValueError("predeclared retention selection belongs to a different trace")
+        turns = {turn["attempt_id"]: turn for turn in trace["turns"]}
+        selected = [{**item, "turns": [turns[key] for key in item["source_attempts"]]}
+                    for item in selection["selected"]]
+        omitted = []
+    else:
+        selected, omitted = choose_windows(trace, horizon_seconds=args.horizon_seconds,
+            max_candidates=args.max_candidates, history_steps=args.history_steps,
+            max_replay_steps=args.max_replay_steps, seed=args.seed,
+            max_prefixes_per_decision=args.max_prefixes_per_decision, page_size=page_size)
+    arms = {"native": None, **{f"ttl{ttl:g}": ttl for ttl in ttls}}
+    planned = sum(len(arms)*len(trace_generations(window_trace(trace, item))) for item in selected)
     if planned > args.max_total_generations:
         raise ValueError(f"selected replay needs {planned} model calls; declared budget is {args.max_total_generations}")
-    config = load_config(args.config)
     config = replace(config, engine=replace(config.engine, base_url=args.base_url))
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     write_json(output/"selection.json", dict(source_trace_digest=digest(trace),
-        horizon_seconds=args.horizon_seconds, max_candidates=args.max_candidates,
+        horizon_seconds=args.horizon_seconds, ttl_seconds=ttls, arms=arms, max_candidates=args.max_candidates,
         max_prefixes_per_decision=args.max_prefixes_per_decision,
         history_steps=args.history_steps, max_replay_steps=args.max_replay_steps,
         max_total_generations=args.max_total_generations, planned_generations=planned,
         selected=[{key: value for key, value in item.items() if key != "turns"} for item in selected],
         omitted=omitted, initial_cache="explicit cold start of each contiguous recorded workload window",
-        pressure="all intervening turns/steps/input tokens retained; no artificial filler or removed pressure"))
+        pressure="same complete request/DAG window for all TTL arms, including intervening pressure and observed post-horizon boundary"))
     rows = []
     for index, item in enumerate(selected):
         local_trace = window_trace(trace, item)
         directory = output/f"pair-{index:04d}"
         write_json(directory/"trace.json", local_trace)
         reports = {}
-        order = ("native", "retained") if int(item["priority"][-1], 16) % 2 == 0 else ("retained", "native")
+        order = sorted(arms, key=lambda arm: digest([args.seed, item["event_id"], item["source_event_id"], arm]))
         for arm in order:
             reports[arm] = await replay_arm(local_trace, config, directory/arm,
-                gpu_device=args.gpu_device, intervention=item["event_id"] if arm == "retained" else None,
-                horizon_seconds=args.horizon_seconds, residency_interval=args.residency_interval,
+                gpu_device=args.gpu_device, intervention=item["event_id"] if arms[arm] is not None else None,
+                horizon_seconds=args.horizon_seconds, ttl_seconds=arms[arm], residency_interval=args.residency_interval,
                 target={"event_id": item["event_id"], "source_event_id": item["source_event_id"]})
-        row = paired_row(local_trace, reports["native"], reports["retained"], item, horizon_seconds=args.horizon_seconds)
-        row.update(reports={arm: str((directory/arm/"report.json").resolve()) for arm in reports},
-                   report_digests={arm: digest(report) for arm, report in reports.items()}, arm_order=list(order))
-        rows.append(row)
-        write_json(directory/"paired-row.json", row)
+        outcomes = {arm: revisit_outcomes(local_trace, report, item) for arm, report in reports.items()}
+        write_json(directory/"revisit-outcomes.json", outcomes)
+        for arm, ttl in arms.items():
+            if ttl is None:
+                continue
+            row = paired_row(local_trace, reports["native"], reports[arm], item, horizon_seconds=args.horizon_seconds)
+            row.update(observation_seconds=args.horizon_seconds, ttl_seconds=ttl, horizon_seconds=ttl,
+                retention_arm=arm, reuse_outcomes={"native": outcomes["native"], "retained": outcomes[arm]},
+                observation_physical_cost={key: reports[name]["observation_physical_cost"]
+                    for key, name in (("native", "native"), ("retained", arm))},
+                reports={key: str((directory/name/"report.json").resolve())
+                    for key, name in (("native", "native"), ("retained", arm))},
+                report_digests={"native": digest(reports["native"]), "retained": digest(reports[arm])},
+                arm_order=order)
+            rows.append(row)
+            write_json(directory/f"paired-row-{arm}.json", row)
         (output/"paired-rows.jsonl").write_text("".join(json.dumps(value, ensure_ascii=False)+"\n" for value in rows))
-        print(json.dumps({"pair": index, "reused": row["reused"], "training_eligible": row["training_eligible"]}), flush=True)
-    write_json(output/"manifest.json", dict(source="hardware", scope="single_prefix_intervention_collection",
-        trace_digest=digest(trace), input_dag_digest=trace["input_dag_digest"], pairs=len(rows),
+        print(json.dumps({"window": index, "arms": order, "outcomes": {
+            arm: {key: value for key, value in outcome.items() if key not in {"visits", "classification_basis"}}
+            for arm, outcome in outcomes.items()}}), flush=True)
+    write_json(output/"manifest.json", dict(source="hardware", scope="same_window_multi_TTL_single_prefix_interventions",
+        trace_digest=digest(trace), input_dag_digest=trace["input_dag_digest"], windows=len(selected), pairs=len(rows),
+        observation_seconds=args.horizon_seconds, ttl_seconds=ttls,
         eligible_pairs=sum(row["training_eligible"] for row in rows),
         planned_generations=planned, training_data=str((output/"paired-rows.jsonl").resolve()),
+        cost_rule="native report is a shared comparator, charged once per replay window; TTL rows are paired contrasts, not additive execution costs",
         value_claim="no quality claim; measured signed costs may favor native caching"))
     return rows
+
+
+def reassess(args):
+    """Recompute paired labels from saved native reports without model calls."""
+    root = Path(args.replay_root)
+    by_split, by_pair = defaultdict(list), defaultdict(dict)
+    for path in sorted(root.rglob("paired-row-*.json")):
+        previous = json.loads(path.read_text())
+        trace = json.loads((path.parent/"trace.json").read_text())
+        reports = {arm: json.loads(Path(source).read_text()) for arm, source in previous["reports"].items()}
+        for arm, report in reports.items():
+            if digest(report) != previous["report_digests"][arm]:
+                raise ValueError("paired source report changed after collection")
+        selection = trace["window_selection"]
+        derived = paired_row(trace, reports["native"], reports["retained"], selection,
+                             horizon_seconds=previous["observation_seconds"])
+        row = {**previous, **derived, "horizon_seconds": previous["ttl_seconds"],
+            "reuse_outcomes": {arm: revisit_outcomes(trace, report, selection) for arm, report in reports.items()}}
+        write_json(path, row)
+        by_split[path.parent.parent].append(row)
+        by_pair[path.parent]["native"] = row["reuse_outcomes"]["native"]
+        by_pair[path.parent][row["retention_arm"]] = row["reuse_outcomes"]["retained"]
+    for directory, outcomes in by_pair.items():
+        write_json(directory/"revisit-outcomes.json", outcomes)
+    summary = []
+    for directory, rows in by_split.items():
+        (directory/"paired-rows.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in rows))
+        manifest = json.loads((directory/"manifest.json").read_text())
+        manifest.update(eligible_pairs=sum(row["training_eligible"] for row in rows),
+            postprocessing=dict(source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                model_calls=0, basis="original fixed-DAG reports; single-prefix allocated residency includes transfer destinations"))
+        write_json(directory/"manifest.json", manifest)
+        summary.append(dict(directory=str(directory), pairs=len(rows), eligible_pairs=manifest["eligible_pairs"]))
+    print(json.dumps(summary))
+    return summary
 
 
 def fit(args):
@@ -1124,17 +1307,19 @@ def fit(args):
             report = json.loads(Path(path).read_text())
             if digest(report) != row["report_digests"][arm]:
                 raise ValueError("paired source report changed after collection")
-        if row["split"] == args.split and row["partition_eligible"]:
+        if row["split"] == args.split and row["partition_eligible"] and row["source_body_page_count"]:
             frequency.append(row)
         if row["split"] != args.split or not row["training_eligible"]:
-            excluded.append(dict(event_id=row["event_id"], split=row["split"], training_eligible=row["training_eligible"]))
+            excluded.append(dict(event_id=row["event_id"], split=row["split"],
+                source_body_page_count=row["source_body_page_count"], training_eligible=row["training_eligible"]))
             continue
         accepted.append(row)
     model = EmpiricalRetentionModel.fit(accepted, feature_names=args.features, reuse_rows=frequency)
     asset = model.to_dict()
     asset["training_manifest"] = dict(split=args.split, source_path=str(Path(args.records).resolve()),
         source_sha256=hashlib.sha256(Path(args.records).read_bytes()).hexdigest(),
-        accepted=len(accepted), excluded=excluded, source="real_native_fixed_DAG_single_prefix_pairs",
+        accepted=len(accepted), independent_samples=model.independent_samples,
+        sample_unit="session group; TTL arms are paired interventions", excluded=excluded, source="real_native_fixed_DAG_single_prefix_pairs",
         protocol="all real captured inputs and original budgets; fresh outputs are not matched to gold")
     write_json(args.output, asset)
     print(json.dumps({"trained_profiles": len(model.forecasts), "accepted_pairs": len(accepted),
@@ -1142,14 +1327,83 @@ def fit(args):
     return asset
 
 
+def unexported_requests(records_path, failures_path, selected, segments):
+    def outcome(row, attempt_id, path, reason):
+        start, end = row["request_window"]
+        return dict(reason=reason, request_window=dict(start=start, end=end,
+            scope=row.get("failure_window_scope", "request_wall"),
+            attempt_id=attempt_id, task_id=row["task_id"], source_path=str(Path(path).resolve()),
+            measurement_segment_id=row["measurement_segment_id"]))
+
+    with Path(records_path).open() as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("status", "completed") != "completed":
+                continue
+            attempt_id = row["response"]["attempt_id"]
+            if attempt_id not in selected and row["measurement_segment_id"] in segments:
+                yield outcome(row, attempt_id, records_path, "completed_request_not_selected")
+    for row in json.loads(Path(failures_path).read_text()):
+        if row["measurement_segment_id"] in segments:
+            yield outcome(row, row["attempt_id"], failures_path, "failed_request_not_exported")
+
+
+def audit_trace_inputs(trace, template, *, trace_path, config_path):
+    phases = {kind: {"total": 0, "matched": 0, "mismatches": []} for kind in ("READ", "REDUCE")}
+    for turn in trace["turns"]:
+        plan = decode(ContextPlan, turn["context_plan"])
+        units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+        snapshot = SessionSnapshot(turn["session_id"], raw_history=decode(tuple[TurnRecord, ...], turn["actual_history"]))
+        for event in turn["events"]:
+            if event["kind"] not in phases:
+                continue
+            task = decode(ReadTask, event["read_task"])
+            claims = decode(tuple[EvidenceClaim, ...], event["input_claims"])
+            messages = step_messages(plan, task, tuple(units[key] for key in task.input_unit_ids), claims, snapshot)
+            current_hash = template.render(messages).input_hash
+            phase = phases[event["kind"]]
+            phase["total"] += 1
+            if current_hash == event["input_hash"]:
+                phase["matched"] += 1
+            else:
+                phase["mismatches"].append({"event_id": event_id(turn, event),
+                    "recorded_input_hash": event["input_hash"], "current_input_hash": current_hash})
+    provenance = {}
+    for name, path in (("source_trace", trace_path), ("config", config_path),
+                       ("reading_compiler", Path(__file__).resolve().parents[1]/"controller"/"reading.py")):
+        with Path(path).open("rb") as stream:
+            provenance[name] = {"path": str(Path(path).resolve()),
+                "sha256": hashlib.file_digest(stream, "sha256").hexdigest()}
+    return {"scope": "recorded READ and model REDUCE inputs recompiled with current messages and tokenizer",
+        "split": sorted({turn["split"] for turn in trace["turns"]}), **provenance,
+        "fingerprint": asdict(template.fingerprint), "phases": phases,
+        "current_read_inputs_match": not phases["READ"]["mismatches"] if phases["READ"]["total"] else None,
+        "current_reduce_inputs_match": not phases["REDUCE"]["mismatches"] if phases["REDUCE"]["total"] else None,
+        "excluded_scope": "scheduler, CPU reductions and ANSWER protocol", "model_calls": 0}
+
+
+def audit_inputs(args):
+    config = load_config(args.config)
+    result = audit_trace_inputs(json.loads(Path(args.trace).read_text()), create_model_template(config.model),
+        trace_path=args.trace, config_path=args.config)
+    write_json(args.output, result)
+    return result
+
+
 def export(args):
     config = load_config(args.config)
     template = create_model_template(config.model)
     store = SourceLedger(args.state_db)
-    selected = store.committed_attempts(args.attempt_id, limit=args.max_capture_turns)
-    records = source_records(args.records, store=store, attempt_ids={attempt.attempt_id for attempt in selected})
     turns = []
     try:
+        selected = store.committed_attempts(args.attempt_id, limit=args.max_capture_turns)
+        attempt_ids = {attempt.attempt_id for attempt in selected}
+        records = source_records(args.records, store=store, attempt_ids=attempt_ids)
+        segments = {row["measurement_segment_id"] for row in records.values()}
+        if len(segments) > 1:
+            raise ValueError("export requires one measurement segment; select its requests with --attempt-id")
         for attempt in selected:
             metadata = {**records.get(attempt.attempt_id, {}), "max_new_tokens": config.context.max_new_tokens}
             if "response" not in metadata:
@@ -1157,7 +1411,11 @@ def export(args):
             turns.append(export_attempt(store, attempt, template, request_sampling(config.sampling), metadata))
     finally:
         store.close()
-    result = make_trace(turns, config=config, source_db=args.state_db, captured=False)
+    result = make_trace(turns, config=config, source_db=args.state_db, captured=False,
+        case_outcomes=unexported_requests(args.records, args.failed_conversations, attempt_ids, segments))
+    records_path = Path(args.records).resolve()
+    with records_path.open("rb") as stream:
+        result["source_records"] = {"path": str(records_path), "sha256": hashlib.file_digest(stream, "sha256").hexdigest()}
     write_json(args.output, result)
     return result
 
@@ -1176,6 +1434,7 @@ def main():
         else:
             sub.add_argument("--reader-traces", required=True)
         if name == "export":
+            sub.add_argument("--failed-conversations", required=True)
             sub.add_argument("--output", required=True)
         else:
             sub.add_argument("--base-url", required=True, help="Dedicated canonical native reader service")
@@ -1189,12 +1448,15 @@ def main():
             sub.add_argument("--read-output-budget", type=int, default=2048)
     sub = commands.add_parser("replay")
     sub.add_argument("--trace", required=True)
+    sub.add_argument("--selection", help="Predeclared feature-matched independent windows from retention_pair_workflow")
     sub.add_argument("--config", required=True)
     sub.add_argument("--base-url", required=True, help="Dedicated profiling service; each arm clears cache")
     sub.add_argument("--gpu-device", type=int, required=True)
     sub.add_argument("--output-dir", required=True)
-    sub.add_argument("--horizon-seconds", type=float, default=30)
+    sub.add_argument("--horizon-seconds", type=float, default=180, help="Common observation window for every arm; at least 180 seconds")
+    sub.add_argument("--ttl-seconds", type=lambda value: tuple(map(float, value.split(","))), default=(15, 60, 180))
     sub.add_argument("--max-candidates", type=int, default=8)
+    sub.add_argument("--page-size", type=int)
     sub.add_argument("--max-prefixes-per-decision", type=int, default=4)
     sub.add_argument("--history-steps", type=int, default=32)
     sub.add_argument("--max-replay-steps", type=int, default=128)
@@ -1204,9 +1466,13 @@ def main():
     sub = commands.add_parser("fit")
     sub.add_argument("--records", required=True)
     sub.add_argument("--split", choices=("train", "dev"), required=True)
-    sub.add_argument("--features", type=lambda value: value.split(","), default=[
-        "prior_access_count", "revisit", "source_task_relation", "gpu_pressure", "host_pressure"])
+    sub.add_argument("--features", type=lambda value: value.split(","), default=list(RETENTION_FEATURE_NAMES))
     sub.add_argument("--output", required=True)
+    sub = commands.add_parser("reassess")
+    sub.add_argument("--replay-root", required=True)
+    sub = commands.add_parser("audit-inputs")
+    for name in ("trace", "config", "output"):
+        sub.add_argument("--"+name, required=True)
     args = parser.parse_args()
     if args.command == "export":
         export(args)
@@ -1216,6 +1482,10 @@ def main():
         asyncio.run(capture_reader_traces(args))
     elif args.command == "replay":
         asyncio.run(replay(args))
+    elif args.command == "reassess":
+        reassess(args)
+    elif args.command == "audit-inputs":
+        audit_inputs(args)
     else:
         fit(args)
 

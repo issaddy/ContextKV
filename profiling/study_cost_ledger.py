@@ -71,6 +71,16 @@ def merge_ranges(ranges):
     return merged
 
 
+def registration_key(event):
+    return event["run_id"], event["monotonic_timestamp_ns"], event["document_set_id"]
+
+
+def registration_work(events):
+    events = tuple(events)
+    return {"count": len(events), "wall_work_ms": sum(row["registration_ms"] for row in events),
+            "cpu_work_ms": sum(row["registration_cpu_ms"] for row in events)}
+
+
 def uncovered(ranges, start, end):
     missing, cursor = [], start
     for left, right in merge_ranges(ranges):
@@ -139,6 +149,7 @@ def job_index(path, value):
 def build_ledger(paths, *, gpu_devices, start=None, end=None, max_sample_gap=6, clock_domain):
     pending, loaded, documents, aliases, seen_content = list(paths), set(), [], [], {}
     series, sources, calls = [], [], {}
+    registrations = {}
     jobs, missing_links = [], []
     while pending:
         path = Path(pending.pop(0)).resolve()
@@ -162,6 +173,8 @@ def build_ledger(paths, *, gpu_devices, start=None, end=None, max_sample_gap=6, 
                 original_series_integral_added_to_total=False))
             series.append((source, rows))
         for node in objects(value):
+            if node.get("event") == "documents_registered":
+                registrations.setdefault(registration_key(node), {**node, "source_file": str(path)})
             for key in ("physical_samples_path", "wire_path"):
                 if node.get(key):
                     linked = Path(node[key])
@@ -181,6 +194,9 @@ def build_ledger(paths, *, gpu_devices, start=None, end=None, max_sample_gap=6, 
                         for key in ("input_tokens", "output_tokens", "input_hash")):
                     raise ValueError("same native receipt has conflicting token observations")
                 calls[identity] = observed
+    registration = dict(**registration_work(registrations.values()), records=list(registrations.values()),
+        scope="successful document registration call work in supplied records; "
+              "GPU and Host costs use the shared physical sample integral")
     times = [row["timestamp"] for _, rows in series for row in rows]
     if start is None:
         start = min(times) if times else None
@@ -189,7 +205,8 @@ def build_ledger(paths, *, gpu_devices, start=None, end=None, max_sample_gap=6, 
     if start is None or end is None or end <= start:
         return dict(format="contextkv_study_cost_ledger_v1", jobs=jobs, input_files=documents,
             duplicate_content=aliases, physical_total=None,
-            unavailable_reason="no nonempty declared physical observation window", missing_links=missing_links)
+            unavailable_reason="no nonempty declared physical observation window", missing_links=missing_links,
+            registration=registration)
     gpu, host = defaultdict(list), defaultdict(list)
     large_gaps, device_identities = [], defaultdict(set)
     for source, rows in series:
@@ -233,6 +250,7 @@ def build_ledger(paths, *, gpu_devices, start=None, end=None, max_sample_gap=6, 
             output_tokens_complete=all(row["output_tokens"] is not None for row in calls.values()),
             scope="linked actual native request/receipt wires only; unlinked job aggregates are not added"),
         jobs=jobs, input_files=documents, duplicate_content=aliases, physical_sources=sources,
+        registration=registration,
         gaps_over_sampling_budget=large_gaps, max_sample_gap_seconds=max_sample_gap, missing_links=missing_links,
         training_cost_rule="training is indexed with actual reported tokens/wall/ranks; its physical samples join the same unified timeline and are not added again")
 

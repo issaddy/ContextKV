@@ -100,6 +100,7 @@ class TaskState:
     source_scope: tuple[EvidenceKey, ...] = ()
     current_turn_id: int = 0
     query: str = ""
+    effective_source_scope: tuple[EvidenceKey, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,9 @@ class RetrievalState:
     prior_task_states: tuple[TaskState, ...] = ()
     archive_source_keys: tuple[EvidenceKey, ...] = ()
     source_index: Any = None
+    committed_readings: tuple[tuple[str, ReadingOutcome], ...] = ()
+    # None observes the public directory; an explicit tuple bounds supplied sources.
+    source_scope: tuple[EvidenceKey, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +205,18 @@ class EvidenceClaim:
     entity: str = ""
     relation: str = ""
     version: str = ""
+    shared_need_ids: tuple[str, ...] = ()
+
+    def serves(self, need_id):
+        return need_id == self.need_id or need_id in self.shared_need_ids
+
+
+@dataclass(frozen=True)
+class NumericReadScope:
+    scope_id: str
+    need_ids: tuple[str, ...]
+    condition_ids: tuple[str, ...] = ()
+    operations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -216,6 +232,10 @@ class ReadTask:
     output_schema: dict[str, Any] = field(default_factory=dict)
     operation: str = "extract"
     reduction_basis_claim_ids: tuple[str, ...] = ()
+    shared_numeric_scopes: tuple[NumericReadScope, ...] = ()
+    retained_conclusion_tokens: tuple[tuple[str, int], ...] = ()
+    requires_reduction: bool = False
+    condition_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -276,6 +296,15 @@ class ContextBudget:
 
 
 @dataclass(frozen=True)
+class AnswerWindowAllocation:
+    fixed_input_tokens: int
+    conclusion_tokens: int
+    read_output_tokens: int
+    need_tokens: tuple[tuple[str, int], ...] = ()
+    source_metadata_tokens: int = 0
+
+
+@dataclass(frozen=True)
 class ContextPlan:
     plan_id: str
     task_state: TaskState
@@ -296,6 +325,43 @@ class ContextPlan:
     numeric_identity: str = "names"
     read_layout: str = "task_first"
     read_packing: str = "mixed"
+    answer_system_prompt: str | None = None
+    answer_allocation: AnswerWindowAllocation | None = None
+
+
+@dataclass(frozen=True)
+class Message:
+    role: str
+    content: str
+
+
+@dataclass(frozen=True)
+class ContextEpoch:
+    business_session_id: str
+    epoch_no: int
+    engine_session_id: str
+    session_generation: int
+    parent_epoch_no: int | None = None
+    state: str = "PREPARED"
+    reason: str = "initial"
+    engine_restart_id: str = ""
+
+
+@dataclass(frozen=True)
+class CompletionReceipt:
+    rid: str
+    attempt_id: str
+    engine_session_id: str
+    session_generation: int
+    engine_restart_id: str
+    input_hash: str
+    finish_reason: str
+    generation_complete: bool
+    actual_device_hit_tokens: int = 0
+    actual_host_loaded_tokens: int = 0
+    actual_prefill_tokens: int = 0
+    inserted_cache_tokens: int = 0
+    session_ref_registered: bool = False
 
 
 @dataclass(frozen=True)
@@ -303,12 +369,12 @@ class StepRecord:
     attempt_id: str
     step_id: str
     task: ReadTask
-    engine_epoch: Any = None
-    input_messages: tuple[Any, ...] = ()
+    engine_epoch: ContextEpoch | None = None
+    input_messages: tuple[Message, ...] = ()
     input_ids: tuple[int, ...] = ()
     output_ids: tuple[int, ...] = ()
     result: ReadResult | None = None
-    receipt: Any = None
+    receipt: CompletionReceipt | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
 
 
@@ -321,3 +387,4 @@ class ReadingOutcome:
     coverage: tuple[tuple[str, str, str, str], ...] = ()
     open_needs: tuple[OpenNeed, ...] = ()
     auxiliary_usage: dict[str, Any] | None = None
+    answer_representation: str = "existing"

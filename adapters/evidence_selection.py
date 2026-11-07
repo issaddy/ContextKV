@@ -65,7 +65,7 @@ class EvidenceSelector:
                 "source_scope": "known source version and parent section accompany original bodies and dependencies",
                 "semantics": "source relevance and applicability selection; original bodies remain the factual authority"}
 
-    def select(self, turn, prior_context, catalog, fallback, *, required_context, source_record=None):
+    def select(self, turn, prior_context, catalog, *, required_context, source_record=None):
         def record(context):
             if source_record is not None:
                 return source_record(context)
@@ -74,19 +74,16 @@ class EvidenceSelector:
             **({"required_context": [record(s) for s in required_context[c.document_id]]}
                if required_context.get(c.document_id) else {})} for i, c in enumerate(catalog)]
         view = self.resolver.resolve(turn, prior_context, evidence_documents=documents)
-        selection = view.get("source_selection", {})
-        available_ids = selection.get("catalog_ids", [])
-        status = "selected" if "selected_ids" in selection else "failed"
-        contexts = tuple(catalog[i] for i in selection["selected_ids"]) if status == "selected" else fallback
-        if not available_ids:
-            contexts, status = fallback, "unavailable"
+        selection = view["source_selection"]
+        available_ids = selection["catalog_ids"]
+        contexts = tuple(catalog[i] for i in selection["selected_ids"])
         trace = {"strategy": self.manifest["strategy"],
                  "catalog_ids": [catalog[i].document_id for i in available_ids],
                  "required_context_ids": {catalog[i].document_id: [s.document_id for s in
                      required_context.get(catalog[i].document_id, ())] for i in available_ids},
                  "budget_skipped_ids": [catalog[i].document_id for i in selection.get("budget_skipped_ids", [])],
                  "candidate_count": len(catalog), "catalog_count": len(available_ids),
-                 "selected_ids": [c.document_id for c in contexts], "status": status,
+                 "selected_ids": [c.document_id for c in contexts], "status": "selected",
                  "model_called": view["model_called"], "reason": view["reason"],
                  "elapsed_ms": view["elapsed_ms"]}
         return contexts, view, trace

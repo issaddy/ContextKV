@@ -6,11 +6,11 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
-import shutil
 import time
 from urllib.parse import urlsplit
 
 from training.plan_gain_completion import finalize, main as fit_main
+from controller.action_proposals import BOUNDED_CONTINUATION
 from training.plan_gain_rollout import collect, write
 
 
@@ -19,16 +19,20 @@ async def workflow(config, settings):
     from controller.config import load_config
     root = Path(settings["output_dir"])
     root.mkdir(parents=True, exist_ok=False)
-    frozen = root/"inputs"
-    frozen.mkdir()
     provenance = {}
-    for name in ("task_labels", "actual_rollouts", "sources"):
+    inputs = ("actual_rollouts", "sources", "cohort_manifest")
+    if settings.get("mode", "whole_plan") == "observed_actions":
+        inputs += ("observed_states",)
+    else:
+        if not settings.get("task_labels"):
+            raise ValueError("whole_plan requires audited --task-labels")
+        inputs += ("task_labels",)
+    for name in inputs:
         original = Path(settings[name]).resolve()
-        target = frozen/(name+".jsonl")
-        shutil.copyfile(original, target)
-        provenance[name] = {"original": str(original), "snapshot": str(target.resolve()),
-            "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
-        settings[name] = str(target.resolve())
+        with original.open("rb") as source:
+            source_hash = hashlib.file_digest(source, "sha256").hexdigest()
+        provenance[name] = {"path": str(original), "sha256": source_hash}
+        settings[name] = str(original)
     write(root/"input-manifest.json", provenance)
     run = load_config(settings["run_config"])
     reader_url = settings.get("reader_base_url") or run.engine.base_url
@@ -38,14 +42,21 @@ async def workflow(config, settings):
     await sampler.start()
     started = time.monotonic()
     result = {"status": "running", "cohorts": {}, "source_files": provenance,
-        "reader_profile_id": settings["reader_profile_id"], "partition_seed": settings["partition_seed"],
+        "collection_mode": settings.get("mode", "whole_plan"),
+        "continuation_protocol": BOUNDED_CONTINUATION,
+        "reader_profile_id": settings["reader_profile_id"], "cohort_manifest": settings["cohort_manifest"],
         "train_states": settings["train_states"], "dev_states": settings["dev_states"],
         "model_generation_limit": settings["max_generations"]}
     used = 0
     try:
         train_cap = settings["max_generations"]*settings["train_states"]//(settings["train_states"]+settings["dev_states"])
         for split, count in (("train", settings["train_states"]), ("dev", settings["dev_states"])):
+            if count == 0:
+                continue
             cap = train_cap if split == "train" else settings["max_generations"]-used
+            if cap < 1:
+                result["cohorts"][split] = {"status": "generation_budget_unavailable"}
+                continue
             actual = {**settings, "split": split, "limit_tasks": count,
                 "output_dir": str(root/split), "max_generations": cap}
             report = await collect(config, actual)
@@ -53,10 +64,19 @@ async def workflow(config, settings):
             completion = finalize(root/split, root/(split+"-supervision"))
             result["cohorts"][split] = {"collection": report, "supervision": completion}
             write(root/"workflow.json", result)
-        asset = settings.get("asset") or str(root/"plan-gain.json")
-        await asyncio.to_thread(fit_main, ["fit", "--train", str(root/"train-supervision"/"effective-gains.jsonl"),
-            "--dev", str(root/"dev-supervision"/"effective-gains.jsonl"), "--output", asset])
-        result.update(status="completed", asset=asset, actual_model_generations=used)
+        training = result["cohorts"].get("train", {}).get("supervision", {})
+        if training.get("effective_action_records", 0):
+            asset = settings.get("asset") or str(root/"plan-gain.json")
+            fit_args = ["fit", "--train", str(root/"train-supervision"/"effective-gains.jsonl"),
+                "--output", asset]
+            development = result["cohorts"].get("dev", {}).get("supervision", {})
+            if development.get("effective_gain_records", 0):
+                fit_args.extend(["--dev", str(root/"dev-supervision"/"effective-gains.jsonl")])
+            await asyncio.to_thread(fit_main, fit_args)
+            result["asset"] = asset
+        else:
+            result["fit"] = {"status": "skipped", "reason": "no_effective_read_reduce_or_gap_labels"}
+        result.update(status="completed", actual_model_generations=used)
     finally:
         import sys
         error = sys.exc_info()[1]
@@ -76,24 +96,33 @@ def main(argv=None):
         return tuple(map(int, value.split(",")))
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("study-config", "run-config", "reader-profile-id", "judge-config", "judge-base-url",
-                 "task-labels", "actual-rollouts", "sources", "output-dir"):
+                 "actual-rollouts", "sources", "cohort-manifest", "output-dir"):
         parser.add_argument("--"+name, required=True)
+    parser.add_argument("--task-labels", help="Required only for the whole_plan audited control")
     parser.add_argument("--reader-base-url")
+    parser.add_argument("--official-checkout", help="Pinned official RB_llm source checkout; defaults to study scoring configuration")
     parser.add_argument("--asset")
     parser.add_argument("--train-states", type=int, default=8)
     parser.add_argument("--dev-states", type=int, default=4)
-    parser.add_argument("--partition-seed", default="plan-gain-native-train-v1")
-    parser.add_argument("--dev-fraction", type=float, default=.2)
     parser.add_argument("--read-outputs", type=integers, default=(512, 1024, 2048))
     parser.add_argument("--max-generations", type=int, default=1536)
     parser.add_argument("--online-gpu-devices", type=integers, required=True)
     parser.add_argument("--judge-gpu-devices", type=integers, required=True)
     parser.add_argument("--extra-process-roots", type=integers, default=())
-    parser.add_argument("--cache-start", choices=("observed", "cold"), default="observed")
+    parser.add_argument("--cache-start", choices=("observed", "cold", "paired"), default="observed")
     parser.add_argument("--scope-scan", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--mode", choices=("whole_plan", "observed_actions"), default="whole_plan")
+    parser.add_argument("--observed-states", help="Actual observed-state packets registered with the cohort inputs")
     args = parser.parse_args(argv)
-    if min(args.train_states, args.dev_states) < 1 or args.max_generations < 4 or not 0 < args.dev_fraction < 1:
-        raise ValueError("actual train/dev state counts and total generation allocation must be positive")
+    if args.mode == "whole_plan" and not args.task_labels:
+        parser.error("whole_plan requires --task-labels")
+    if args.mode == "observed_actions" and not args.observed_states:
+        parser.error("observed_actions requires --observed-states")
+    if args.cache_start == "paired" and args.mode != "observed_actions":
+        parser.error("paired cache preparation requires observed_actions")
+    if (min(args.train_states, args.dev_states) < 0 or args.train_states+args.dev_states < 1
+            or args.max_generations < 1):
+        raise ValueError("state counts must be nonnegative with at least one requested state and a positive generation allocation")
     config = yaml.safe_load(Path(args.study_config).read_text())
     print(json.dumps(asyncio.run(workflow(config, vars(args))), ensure_ascii=False))
 

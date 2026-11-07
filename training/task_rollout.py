@@ -40,6 +40,13 @@ async def run_actual_rollouts(config, *, output_path=None, min_conversations=100
     retriever = create_retriever("P3", config_path=recipe_path)
     corpus = CorpusIndex.from_jsonl(settings.get("evidence_corpus", "data/multidoc2dial/dev/corpus.jsonl"),
         corpus_id="multidoc2dial", snapshot_id=retriever.corpus_snapshot_id)
+    from adapters.history_state import task_source_catalogue
+    from controller.context_schema import RetrievalState
+    from types import SimpleNamespace
+    from datetime import date
+    task_catalogue = task_source_catalogue(RetrievalState(0, source_index=SimpleNamespace(
+        _blocks={block.key: block for block in corpus.blocks}, corpus_index=corpus)))
+    task_reference_date = date.today().isoformat()
     serving = ServingRetriever(retriever, corpus_id="multidoc2dial", corpus_index=corpus, events=service.events)
     conversations = {}
     partition = settings.get("rollout_split", "train")
@@ -89,6 +96,8 @@ async def run_actual_rollouts(config, *, output_path=None, min_conversations=100
                 committed = service.store.get_snapshot(session_id)
                 record = {"task_id": row["task_id"], "conversation_id": conversation_id,
                     "turn": row["turn"], "split": partition, "question": row["question"],
+                    "task_catalogue": task_catalogue, "task_reference_date": task_reference_date,
+                    "source_scope": row.get("source_scope", []),
                     "actual_history": actual_history, "snapshot_id": serving.corpus_snapshot_id,
                     "rollout_policy": ("dense5_rebuild_qwen3_32b_nonthinking" if service_config.engine.kind == "sglang"
                                        else "dense5_controller_simulation"),
@@ -142,6 +151,9 @@ def main(argv=None):
     parser.add_argument("--concurrency", type=int, default=8)
     args = parser.parse_args(argv)
     config = yaml.safe_load(Path(args.config).read_text())
+    if "base_study_config" in config:
+        from bench.study import merge_config
+        config = merge_config(yaml.safe_load(Path(config["base_study_config"]).read_text()), config)
     result = asyncio.run(run_actual_rollouts(config, output_path=args.output,
         min_conversations=args.min_conversations, min_turns=args.min_turns,
         limit_turns=args.limit_turns, concurrency=args.concurrency))

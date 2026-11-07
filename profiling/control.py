@@ -29,8 +29,7 @@ async def measure(config, *, samples: int = 100, warmup: int = 10, session_id: s
             t0 = time.perf_counter()
             candidates = build_candidates(snapshot, "Compare the two timeout settings.", blocks,
                                           controller.policy, controller.template,
-                                          measure_evidence_redundancy="redundancy_threshold" in {
-                                              controller.knobs.strategy, controller.knobs.fallback_strategy})
+                                          measure_evidence_redundancy=controller.knobs.strategy == "redundancy_threshold")
             t1 = time.perf_counter()
             valid = tuple(c for c in candidates if c.feasible)
             needs_quote = controller.knobs.strategy in {"cost", "warm_idle"} and len(valid) > 1

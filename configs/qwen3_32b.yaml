@@ -1,4 +1,4 @@
-# Final serving: fixed Qwen3-32B, Dense5 + current evidence/actual QA, native cache.
+# Fixed Qwen3-32B serving; the study configuration selects evidence and execution policy.
 # Launch the shared native NGRAM profile in docs/deployment.md.
 engine:
   kind: sglang
@@ -15,7 +15,6 @@ context:
   max_new_tokens: 1024
 planner:
   strategy: always_rebuild
-shadow: false
 state_dir: runs/qwen3-32b
 sampling:
   temperature: 0.7

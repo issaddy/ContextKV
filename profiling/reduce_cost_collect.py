@@ -268,11 +268,14 @@ async def collect(args):
                 service.store.save_context_plan(attempt.attempt_id, plan)
                 executor = ReadingExecutor(service.store, service.engine, service.template,
                                             events=service.events, request_arrived=arrived)
+                candidate = None if cpu else executor.request_compiler.compile_read(
+                    plan, task, (), selected, snapshot, outputs=(output,))[0]
                 cursor = len(recorder.calls)
                 phase_call_started = time.monotonic()
                 try:
                     record = (await cpu_reduce_phase(service, attempt, task, selected, arrived) if cpu else
-                              await executor._generate_step(attempt.attempt_id, snapshot, plan, task, (), selected))
+                              await executor._generate_step(attempt.attempt_id, snapshot, plan, task, (), selected,
+                                  candidate=candidate, rendered=rendered))
                 except (EngineError, ValueError) as error:
                     if isinstance(error, EngineError) and error.code != "READ_STEP_OUTPUT_TRUNCATED":
                         raise

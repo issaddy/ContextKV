@@ -8,18 +8,9 @@ import json
 from pathlib import Path
 
 from bench.metrics import distribution
-from profiling.retention_trace import (causal_pages, choose_windows, digest, event_id,
-    read_decisions, trace_generations, verify_trace, write_json)
-
-
-def actual_page_size(reads, declared):
-    sizes = {event["prefix_observation"]["inspection"]["page_size"] for _, event in reads
-        if event.get("prefix_observation") and "inspection" in event["prefix_observation"]}
-    if declared is not None:
-        sizes.add(declared)
-    if len(sizes) != 1:
-        raise ValueError("coverage needs one actual observed native page_size or its explicit declaration")
-    return sizes.pop()
+from controller.prefix_retention import session_components, balance_session_rows
+from profiling.retention_trace import (actual_page_size, causal_pages, choose_windows, digest, event_id,
+    read_decisions, revisit_outcomes, trace_generations, verify_trace, write_json)
 
 
 def decision_boundary(event):
@@ -90,7 +81,7 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
     for horizon in horizons:
         all_windows, omissions = choose_windows(trace, horizon_seconds=horizon,
             max_candidates=capacity, max_prefixes_per_decision=max_prefixes_per_decision,
-            history_steps=history_steps, max_replay_steps=max_replay_steps, seed=seed)
+            history_steps=history_steps, max_replay_steps=max_replay_steps, seed=seed, page_size=size)
         selected = all_windows[:max_candidates]
         probability = min(1, max_candidates/len(all_windows)) if all_windows else None
         cases = []
@@ -98,6 +89,7 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
             decision, source = by_id[window["event_id"]], by_id[window["source_event_id"]]
             demand = next_demand(source, decision["decision_s"])
             cases.append(dict(event_id=window["event_id"], source_event_id=window["source_event_id"],
+                independent_session_ids=sorted({turn["session_id"] for turn in window["turns"]}),
                 source_session_id=source["session_id"], decision_session_id=decision["session_id"],
                 source_body_pages=source["source_body_pages"], next_actual_body_demand=demand,
                 within_ttl=demand is not None and demand["gap_seconds"] <= horizon,
@@ -107,6 +99,10 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
                 sampling_weight=1/probability if probability is not None else None))
         identifiable = [case for case in cases if case["source_body_pages"] and case["exact_decision_observation"]]
         sampled = [case for case in identifiable if case["sampled"]]
+        components = session_components(cases)
+        sampled_components = {group for group in components if any(
+            set(case["independent_session_ids"]).intersection(group) for case in sampled)}
+        balanced = balance_session_rows(identifiable, components)
         complete = [row for row in rows if row["exact_decision_observation"] and row["source_body_pages"]
             and bisect_right(turn_starts, row["decision_s"]+horizon) < len(turn_starts)]
         horizon_rows.append(dict(horizon_seconds=horizon,
@@ -117,6 +113,11 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
             descriptive_observed_fraction=(sum(case["within_ttl"] for case in identifiable)/len(identifiable)
                                            if identifiable else None),
             sampled_windows=len(selected), sampled_identifiable_body_windows=len(sampled),
+            independent_samples=len(components), sampled_independent_samples=len(sampled_components),
+            group_balanced_observed_fraction=(sum(case["sampling_weight"]*case["within_ttl"] for case in balanced)
+                /sum(case["sampling_weight"] for case in balanced) if balanced else None),
+            sampled_session_groups=[sorted({turn["session_id"] for turn in window["turns"]}) for window in selected],
+            sample_unit="independent session group; selected windows can overlap and TTL arms are repeated measures",
             sampling_probability=probability,
             sampled_weight_sum=sum(case["sampling_weight"] for case in sampled),
             omission_counts=dict(Counter(row["reason"] for row in omissions)), windows=cases,
@@ -144,9 +145,84 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
         censoring_rule="a full observed post-horizon turn is required; an unseen future demand is not labelled no reuse")
 
 
+def workload_revisit_coverage(trace, report):
+    """Measure repeated body-page demand after earlier completed READs."""
+    reads, first_completed = [], {}
+    for turn, event in read_decisions(trace):
+        identity = event_id(turn, event)
+        actual = report["events"][identity]
+        pages, body, _ = causal_pages(event, report["page_size"], report["cache_scope_hash"])
+        reads.append((identity, actual, pages, body))
+        completed = actual["generation_window"]["end"]
+        for page in body:
+            first_completed[page] = min(first_completed.get(page, completed), completed)
+    window = report["observation_window"]
+    totals = Counter(gpu_hit=0, host_load=0, recomputed=0)
+    visits, observed_reads, first_only_reads = [], 0, 0
+    for identity, actual, pages, body in reads:
+        started = actual["generation_window"]["start"]
+        if not window["start"] < started <= window["end"]:
+            continue
+        observed_reads += 1
+        repeated = {page for page in body if first_completed[page] < started}
+        if not repeated:
+            first_only_reads += 1
+            continue
+        receipt = actual["result"]["receipt"]
+        gpu_end = receipt["actual_device_hit_tokens"]
+        host_end = gpu_end+receipt["actual_host_loaded_tokens"]
+        gpu = {page for page in repeated if pages[page] <= gpu_end}
+        host = {page for page in repeated if gpu_end < pages[page] <= host_end}
+        groups = {"gpu_hit": gpu, "host_load": host, "recomputed": repeated-gpu-host}
+        counts = {name: len(values) for name, values in groups.items()}
+        totals.update(counts)
+        visits.append({"event_id": identity, "generation_window": actual["generation_window"],
+            "page_counts": counts, "page_proof": {name: [
+                {"page_id": page, "first_completed_s": first_completed[page], "token_end": pages[page]}
+                for page in sorted(values)[:3]] for name, values in groups.items()}})
+    return {"scope": "all repeated source-body demand in the observed workload window",
+        "observed_reads": observed_reads, "reads_without_repeated_body_demand": first_only_reads,
+        "revisit_events": len(visits), "no_revisit": not visits, "page_counts": dict(totals),
+        "event_counts": {name: sum(visit["page_counts"][name] > 0 for visit in visits) for name in totals},
+        "visits": visits,
+        "repeat_rule": "the same causal body page completed in a READ strictly before the current READ started",
+        "attribution": "workload coverage only; these totals do not measure intervention-target benefit"}
+
+
+def audit_replay_coverage(root):
+    root = Path(root)
+    windows, unread = [], []
+    for trace_path in sorted(root.rglob("trace.json")):
+        pair = trace_path.parent
+        if not pair.name.startswith("pair-"):
+            continue
+        trace = json.loads(trace_path.read_text())
+        arms = {}
+        for report_path in sorted(pair.glob("*/report.json")):
+            report = json.loads(report_path.read_text())
+            if report["status"] != "completed" or "observation_window" not in report:
+                unread.append({"report": str(report_path), "status": report["status"]})
+                continue
+            target = revisit_outcomes(trace, report, report["decision_target"])
+            arms[report_path.parent.name] = {"report": str(report_path),
+                "observation_window": report["observation_window"],
+                "target": {key: target[key] for key in (
+                    "source_body_page_count", "no_revisit", "revisit_events", "page_counts", "event_counts", "observation_seconds")},
+                "target_event_ids": [visit["event_id"] for visit in target["visits"]],
+                "workload": workload_revisit_coverage(trace, report)}
+        windows.append({"window": str(pair), "trace": str(trace_path), "arms": arms})
+    return {"format": "contextkv_retention_replay_coverage_v1", "replay_root": str(root),
+        "windows": windows, "unread_reports": unread,
+        "reports_read": sum(len(window["arms"]) for window in windows),
+        "scope": "existing completed arms only; target demand and whole-window workload coverage reported separately",
+        "model_calls": 0}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--trace", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--trace")
+    source.add_argument("--replay-root")
     parser.add_argument("--horizons", type=lambda value: tuple(map(float, value.split(","))),
                         default=(1, 2, 5, 8, 15, 30, 60, 120))
     parser.add_argument("--page-size", type=int)
@@ -157,12 +233,18 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
-    report = audit_coverage(json.loads(Path(args.trace).read_text()), horizons=args.horizons,
-        page_size=args.page_size, max_candidates=args.max_candidates,
-        max_prefixes_per_decision=args.max_prefixes_per_decision, history_steps=args.history_steps,
-        max_replay_steps=args.max_replay_steps, seed=args.seed)
+    if args.replay_root:
+        report = audit_replay_coverage(args.replay_root)
+        summary = {"windows": len(report["windows"]), "reports_read": report["reports_read"]}
+    else:
+        report = audit_coverage(json.loads(Path(args.trace).read_text()), horizons=args.horizons,
+            page_size=args.page_size, max_candidates=args.max_candidates,
+            max_prefixes_per_decision=args.max_prefixes_per_decision, history_steps=args.history_steps,
+            max_replay_steps=args.max_replay_steps, seed=args.seed)
+        summary = {key: report[key] for key in (
+            "reads", "sessions", "body_prefixes", "cross_session_next_demands")}
     write_json(args.output, report)
-    print(json.dumps({key: report[key] for key in ("reads", "sessions", "body_prefixes", "cross_session_next_demands")}))
+    print(json.dumps(summary))
     return report
 
 

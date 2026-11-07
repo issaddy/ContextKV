@@ -6,12 +6,12 @@ from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
+import time
 
 from .execution import auxiliary_tokens
 from .plan_policy import (CompleteCost, NativePlanningState, ResourceForecast, StepForecast,
                           native_selection_cost)
-from .reading import (READ_SYSTEM, COVERAGE_READ_SYSTEM, REDUCE_SYSTEM,
-                      SUMMARY_READ_SYSTEM, SUMMARY_REDUCE_SYSTEM, step_generation_kind)
+from .reading import SOURCE_SYSTEM, step_generation_kind, step_system
 from .schema import ConfigFingerprint
 from .serialization import decode
 
@@ -72,14 +72,12 @@ class ExecutionProfiles:
         self.claim_capacity = data.get("claim_capacity")
         if self.claim_capacity is not None:
             from .context_schema import ReadTask
-            from .engine_client import SGLANG_COMMIT
             from .reading import output_schema
             bound = self.claim_capacity
             required = output_schema(ReadTask("capacity", "READ", ("need",)))["properties"]["claims"]["items"]["required"]
             grammar = bound["grammar_contract"]
             if (bound["tokenizer_hash"] != self.fingerprint.tokenizer_hash or
                     bound["required_keys"] != sorted(required) or
-                    grammar["engine_commit"] != SGLANG_COMMIT or
                     grammar["protocol_format_version"] != 2 or grammar["backend"] != "xgrammar"):
                 raise ValueError("claim capacity must bind the actual tokenizer and native claim-key protocol")
         if not data["cache_config_hash"] or not data["reader_checkpoint"] or not data["reader_profile_id"]:
@@ -268,7 +266,9 @@ class ProfiledNativeObserver:
     async def observe(self, plans, state, snapshot, engine, cost_model, arrived, auxiliary_usage, *, selection_started):
         candidates = tuple(candidate for plan in plans for step in plan.steps for candidate in step.variants
                            if candidate.feasible)
+        quote_started = time.monotonic()
         quotes = await engine.quote_batch(candidates, self.profiles.fingerprint)
+        quote_ms = (time.monotonic()-quote_started)*1000
         self.profiles.bind(quotes, self.reader_checkpoint, self.reader_profile_id)
         by_id = {quote.candidate_id: quote for quote in quotes.quotes}
         concurrency = quotes.active_requests+1
@@ -337,17 +337,20 @@ class ProfiledNativeObserver:
                     gpu, host, row["gpu_peak_gib"], row["host_peak_gib"],
                     row["profile_id"], quotes.observed_seq,
                     tuple(reusable.get(candidate.candidate_id, ())), True)
-        prompts = {"READ": READ_SYSTEM, "READ_COVERAGE": COVERAGE_READ_SYSTEM, "REDUCE": REDUCE_SYSTEM,
-            "READ_SUMMARY": SUMMARY_READ_SYSTEM, "REDUCE_SUMMARY": SUMMARY_REDUCE_SYSTEM,
-            "ANSWER": self.answer_system_prompt, "CPU_REDUCE": ""}
         future = {}
         for plan in plans:
             for step in plan.steps:
                 task = step.task
+                if task.kind == "GAP":
+                    future[plan.plan_id, task.step_id] = ()
+                    continue
                 cpu = (plan.context_plan.reading_mode == "typed_reduce" and task.kind == "REDUCE"
                        and task.operation in {"union", "count", "sum", "group"})
                 kind = "CPU_REDUCE" if cpu else step_generation_kind(task.kind, task.operation,
                                                                      plan.context_plan.reading_mode)
+                prompt = ("" if cpu else self.answer_system_prompt if task.kind == "ANSWER" else
+                    SOURCE_SYSTEM if task.kind == "READ" and plan.context_plan.read_layout == "source_first"
+                    else step_system(plan.context_plan, task))
                 outputs = (0,) if cpu else (task.output_budget,) if task.kind == "ANSWER" else tuple(
                     output for output in self.profiles.data["output_budgets"] if output <= task.output_budget)
                 choices = []
@@ -358,7 +361,7 @@ class ProfiledNativeObserver:
                     known_inputs = [len(candidate.input_ids) for candidate in step.variants if candidate.feasible]
                     input_ceiling = max(known_inputs) if known_inputs else task.input_budget
                     row = self.profiles.row(kind, "CPU" if cpu else "REBUILD",
-                        claims_ceiling if cpu else input_ceiling, output, concurrency, 0, 0, prompts[kind],
+                        claims_ceiling if cpu else input_ceiling, output, concurrency, 0, 0, prompt,
                         operation=task.operation if cpu else None,
                         start_definition="rolling_proposals_compilation_start" if task.kind == "ANSWER" else None)
                     if row is not None:
@@ -372,9 +375,56 @@ class ProfiledNativeObserver:
                 future[plan.plan_id, task.step_id] = tuple(choices)
         return NativePlanningState(self.reader_checkpoint, self.reader_profile_id, snapshot, quotes,
             cost_model, resources, future, paid, {**self.paid.last_observation,
+                "native_quote_ms": quote_ms,
                 "current_answer_phase_overlap": overlap_record,
                 "native_admission": admission,
                 "execution_profile_predictions": estimates}), reusable
+
+
+class ObservedNativeObserver:
+    def __init__(self, paid, fingerprint, *, reader_checkpoint, reader_profile_id, store=None):
+        self.paid, self.fingerprint, self.store = paid, fingerprint, store
+        self.reader_checkpoint, self.reader_profile_id = reader_checkpoint, reader_profile_id
+        self.resident_model_manifest = None
+        self.resident_digest = None
+
+    def bind_resident_models(self, manifest):
+        from .resident_models import resident_model_digest
+        self.resident_model_manifest = manifest
+        self.resident_digest = resident_model_digest(manifest)
+
+    async def start(self):
+        await self.paid.start()
+
+    async def aclose(self):
+        await self.paid.aclose()
+
+    async def observe(self, plans, state, snapshot, engine, cost_model, arrived, auxiliary_usage, *, selection_started):
+        candidates = tuple(candidate for plan in plans for step in plan.steps for candidate in step.variants
+                           if candidate.feasible)
+        quote_started = time.monotonic()
+        quotes = await engine.quote_batch(candidates, self.fingerprint)
+        quote_ms = (time.monotonic()-quote_started)*1000
+        if quotes.fingerprint != self.fingerprint:
+            raise ValueError("native quote does not match the actual reader fingerprint")
+        pool = (await engine.metrics())["pool"]
+        reusable = {}
+        status = None
+        if self.store is not None and candidates:
+            from .prefix_retention import PrefixRuntimeClient
+            from .prefix_view import prefix_candidate_view
+            status = await PrefixRuntimeClient(engine).status(quotes.engine_restart_id)
+            views = prefix_candidate_view(candidates, quotes, status,
+                self.store.prefix_owners(active_only=True), page_size=pool["page_size"])
+            reusable = {key: view.prefix_ids for key, view in views.items()}
+        paid = await self.paid.observe(arrived, state, auxiliary_usage)
+        admission = {"gpu_capacity_tokens": pool["gpu_capacity_tokens"], "page_size": pool["page_size"],
+            "native_max_new_tokens_clip": quotes.native_max_new_tokens_clip,
+            "basis": "actual native quote workload/clip and actual engine physical token pool"}
+        return NativePlanningState(self.reader_checkpoint, self.reader_profile_id, snapshot, quotes,
+            cost_model, {}, {}, paid, {**self.paid.last_observation, "native_admission": admission,
+                "native_quote_ms": quote_ms,
+                "resident_model_manifest_digest": self.resident_digest}, prefix_status=status), reusable
 
 
 def load_rolling_runtime(settings, *, template, store, sampling, answer_system_prompt, engine_base_url):
@@ -383,24 +433,51 @@ def load_rolling_runtime(settings, *, template, store, sampling, answer_system_p
     from .plan_policy import PolicyLimits
     from .rolling_policy import RollingPlanRuntime
     checkpoint, profile = settings["reader_checkpoint"], settings["reader_profile_id"]
-    model = PlanGainModel.load(settings["gain_asset"], reader_checkpoint=checkpoint, reader_profile_id=profile)
-    provenance = model.provenance
-    if (provenance["label"] not in {"actual_final_quality_minus_actual_direct_answer_quality",
-            "actual_completion_weighted_final_utility_minus_direct_utility"}
-            or provenance["training_split"] != "train" or provenance["training_records"] < 1
-            or not provenance["input_sha256"] or not provenance["counterfactual_runs_retained"]):
-        raise ValueError("enabled rolling gains require the actual train-split counterfactual asset")
-    if (provenance["label"] == "actual_completion_weighted_final_utility_minus_direct_utility"
-            and (provenance["no_answer_utility"] != 0 or not provenance["raw_missing_quality_preserved"])):
-        raise ValueError("effective utility assets retain missing raw judge Q and their declared no-QA rule")
-    profiles = ExecutionProfiles.load(settings["execution_profile_asset"])
-    if profiles.fingerprint != template.fingerprint or checkpoint != template.fingerprint.model_revision:
-        raise ValueError("rolling gain and execution profiles must bind the actual reader checkpoint")
+    model = None
+    if settings.get("action_policy", "learned") == "learned":
+        model = PlanGainModel.load(settings["gain_asset"], reader_checkpoint=checkpoint, reader_profile_id=profile,
+            reader_fingerprint=template.fingerprint)
+        provenance = model.provenance
+        if (provenance["label"] not in {"actual_final_quality_minus_actual_direct_answer_quality",
+                "actual_completion_weighted_final_utility_minus_direct_utility"}
+                or provenance["training_split"] != "train" or provenance["training_records"] < 1
+                or not provenance["input_sha256"] or not provenance["counterfactual_runs_retained"]):
+            raise ValueError("enabled rolling gains require the actual train-split counterfactual asset")
+        if (provenance["label"] == "actual_completion_weighted_final_utility_minus_direct_utility"
+                and (provenance["no_answer_utility"] != 0 or not provenance["raw_missing_quality_preserved"])):
+            raise ValueError("effective utility assets retain missing raw judge Q and their declared no-QA rule")
+    mode = settings.get("mode", "whole_plan")
+    if checkpoint != template.fingerprint.model_revision:
+        raise ValueError("rolling gains must bind the actual reader checkpoint")
     paid = PhysicalPaidCost(StudyResourceSampler(tuple(settings["gpu_devices"]), tuple(settings["process_ids"]),
                                                interval=settings["sampling_interval_seconds"]))
-    observer = ProfiledNativeObserver(profiles, paid, reader_checkpoint=checkpoint, reader_profile_id=profile,
-        sampling=sampling, answer_system_prompt=answer_system_prompt, engine_base_url=engine_base_url,
-        store=store if settings.get("prefix_directory", False) else None)
+    prefix_store = store if settings.get("prefix_directory", False) else None
+    if mode == "observed_actions":
+        observer = ObservedNativeObserver(paid, template.fingerprint, reader_checkpoint=checkpoint,
+            reader_profile_id=profile, store=prefix_store)
+    else:
+        profiles = ExecutionProfiles.load(settings["execution_profile_asset"])
+        if profiles.fingerprint != template.fingerprint:
+            raise ValueError("execution profiles must bind the actual reader fingerprint")
+        observer = ProfiledNativeObserver(profiles, paid, reader_checkpoint=checkpoint, reader_profile_id=profile,
+            sampling=sampling, answer_system_prompt=answer_system_prompt, engine_base_url=engine_base_url,
+            store=prefix_store)
+    joint = settings.get("joint_context", False)
+    reads = 2 if joint else settings.get("read_choices", 1)
+    limits = PolicyLimits(**{"max_plan_candidates": 3+reads, **settings.get("limits", {})})
     return RollingPlanRuntime(model, observer, reader_checkpoint=checkpoint, reader_profile_id=profile,
-        output_budgets=settings["output_budgets"], limits=PolicyLimits(**settings.get("limits", {})),
-        output_tokens_per_fact=settings.get("output_tokens_per_fact", 64))
+        output_budgets=settings["output_budgets"], limits=limits,
+        output_tokens_per_fact=settings.get("output_tokens_per_fact", 64),
+        mode=mode, observation_path=settings.get("observation_path"),
+        gap_retriever_identity=settings.get("gap_retriever_identity"), gap_limits=settings.get("gap_limits"),
+        joint_context=joint, read_choices=reads)
+
+
+def load_fixed_reading_observer(settings, *, template):
+    from bench.study_resources import StudyResourceSampler
+    from .rolling_policy import FixedReadingObserver
+    if settings["reader_checkpoint"] != template.fingerprint.model_revision:
+        raise ValueError("fixed reading observations must bind the actual reader checkpoint")
+    paid = PhysicalPaidCost(StudyResourceSampler(tuple(settings["gpu_devices"]), tuple(settings["process_ids"]),
+                                               interval=settings["sampling_interval_seconds"]))
+    return FixedReadingObserver(settings, paid, template.fingerprint)

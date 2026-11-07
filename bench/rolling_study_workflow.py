@@ -52,7 +52,7 @@ def configure(args, root):
     run = merge_config(run, native["config_overlay"])
     run_path = root/"run.yaml"
     run_path.write_text(yaml.safe_dump(run, allow_unicode=True, sort_keys=False))
-    settings = dict(mode="rolling_gain", gain_asset=str(Path(args.gain_asset).resolve()),
+    settings = dict(mode="whole_plan", gain_asset=str(Path(args.gain_asset).resolve()),
         execution_profile_asset=str(Path(args.execution_profile).resolve()),
         reader_checkpoint=checkpoint, reader_profile_id=profile,
         gpu_devices=execution["resource_scope"]["gpu_devices"],
@@ -77,7 +77,8 @@ def configure(args, root):
                               "cost_artifact": native["base_artifact"]}}})
     methods.sort(key=lambda method: method.get("comparison") != "actual_reader_bound_plan_gain")
     matrix = merge_config(matrix, {"methods": methods, "selection": {
-        "include_ablations": False, "test_comparators": args.baselines}})
+        "include_ablations": False, "baseline": args.baselines[0],
+        "test_comparators": args.baselines}})
     matrix["resources"]["gpu_devices"] = settings["gpu_devices"]
     matrix["resources"]["process_ids"] = settings["process_ids"]
     config_path = root/"study.yaml"

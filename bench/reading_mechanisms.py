@@ -29,11 +29,11 @@ def source(text, name):
     return block, EvidenceUnit(name, (span,), text, document_family=name)
 
 
-def fixture_set(state, material, *, name):
+def fixture_set(state, material, *, name, disposition="complete"):
     blocks, units = zip(*material)
     support = tuple(SupportBundle(f"fixture:{name}:{need.need_id}", need.need_id,
         tuple(unit.unit_id for unit in units), 1, 1,
-        tuple(span for unit in units for span in unit.source_spans), "complete")
+        tuple(span for unit in units for span in unit.source_spans), disposition)
         for need in state.needs)
     return EvidenceSet(name, units, need_support=support, quality_prediction=1,
                        source_blocks=blocks)
@@ -76,6 +76,7 @@ def save_measurements(output_dir, rows, sampler, physical, start, end, config,
 
 async def run(config_path, output_dir, *, base_url=None, gpu_device=0,
               background_offline_training=False,
+              numeric_need_isolation=False, read_layout="task_first",
               cases=("pair", "correction", "long", "multihop")):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -100,17 +101,21 @@ async def run(config_path, output_dir, *, base_url=None, gpu_device=0,
     active_case = None
     corpus_snapshot_id = "mechanism-fixtures-v1"
 
-    async def answer(case, session, state, material, *, scope="selected_sources", extend=None, expected=None):
+    async def answer(case, session, state, material, *, scope="selected_sources", extend=None, expected=None,
+                     support_disposition="complete"):
         nonlocal active_case
         started = time.monotonic()
         snapshot = service.store.read_snapshot(session, corpus_snapshot_id)
         active_case = {"case": case, "session_id": session, "question": state.raw_question,
             "task_state": to_jsonable(state), "expected": expected,
             "start": started, "initial_qa_count": len(snapshot.raw_history), "initial_version": snapshot.version}
-        evidence_set = fixture_set(state, material, name=f"{case}:set")
+        evidence_set = fixture_set(state, material, name=f"{case}:set", disposition=support_disposition)
         plan = build_read_plan(state, evidence_set, scope, budget,
             template=service.template, snapshot=snapshot,
-            separate_needs=any(need.operation in {"count", "sum"} for need in state.needs),
+            separate_needs=numeric_need_isolation and any(need.operation in {"count", "sum"} for need in state.needs),
+            read_layout=read_layout,
+            read_packing="source_windows" if read_layout == "source_first" else "mixed",
+            answer_system_prompt=config.context.system_prompt,
             numeric_identity="source_ids" if case == "long" else "names")
         source_tokens = sum(len(service.template.tokenizer.encode(block.text,
             add_special_tokens=False)) for block in evidence_set.source_blocks)
@@ -123,6 +128,7 @@ async def run(config_path, output_dir, *, base_url=None, gpu_device=0,
             "background_offline_training": background_offline_training,
             "experiment_role": "controlled_mechanism_execution",
             "measurement_kind": "hardware" if config.engine.kind == "sglang" else "simulation",
+            "numeric_need_isolation": numeric_need_isolation, "read_layout": read_layout,
             "model": "qwen3_32b_nonthinking" if config.engine.kind == "sglang" else "mock",
             "question": state.raw_question, "actual_history": to_jsonable(snapshot.raw_history),
             "task_state": to_jsonable(state), "sources": to_jsonable(evidence_set.source_blocks),
@@ -205,6 +211,7 @@ async def run(config_path, output_dir, *, base_url=None, gpu_device=0,
                         if material else EvidencePool((), auxiliary_usage=usage))
 
             await answer("multihop", "multihop-session", state, (initial,), extend=extend,
+                         support_disposition="partial",
                          expected={"year": 1997, "source_chain": ["institute-parent", "parent-fund", "fund-year"]})
             (output_dir/"multihop-gap-requests.json").write_text(json.dumps(gap_requests, ensure_ascii=False, indent=2)+"\n")
     finally:
@@ -247,12 +254,15 @@ def main(argv=None):
     parser.add_argument("--base-url")
     parser.add_argument("--gpu-device", type=int, default=0)
     parser.add_argument("--background-offline-training", action="store_true")
+    parser.add_argument("--numeric-need-isolation", action="store_true")
+    parser.add_argument("--read-layout", choices=("task_first", "source_first"), default="task_first")
     parser.add_argument("--cases", nargs="+", choices=("pair", "correction", "long", "multihop"),
                         default=["pair", "correction", "long", "multihop"])
     args = parser.parse_args(argv)
     print(json.dumps(asyncio.run(run(args.config, args.output_dir,
         base_url=args.base_url, gpu_device=args.gpu_device,
         background_offline_training=args.background_offline_training,
+        numeric_need_isolation=args.numeric_need_isolation, read_layout=args.read_layout,
         cases=args.cases)), ensure_ascii=False, indent=2))
 
 

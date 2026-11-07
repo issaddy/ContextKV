@@ -6,18 +6,15 @@ import csv
 import io
 import os
 from pathlib import Path
-import re
 import subprocess
 import time
 
 
 def listening_processes(ports):
-    output = subprocess.check_output(["ss", "-lptnH"], text=True)
-    selected = set()
-    for line in output.splitlines():
-        if int(line.split()[3].rsplit(":", 1)[1]) in ports:
-            selected.update(map(int, re.findall(r"pid=(\d+)", line)))
-    return tuple(sorted(selected))
+    import psutil
+    return tuple(sorted({connection.pid for connection in psutil.net_connections(kind="tcp")
+        if connection.status == psutil.CONN_LISTEN and connection.laddr.port in ports
+        and connection.pid is not None}))
 
 
 def descendants(process_ids):
@@ -37,7 +34,7 @@ def descendants(process_ids):
 def physical_sample(gpu_devices, process_ids):
     before = time.monotonic()
     output = subprocess.check_output(["nvidia-smi", "--query-gpu=index,uuid,memory.used",
-        "--format=csv,noheader,nounits"], text=True)
+        "--format=csv,noheader,nounits"], text=True, start_new_session=True)
     devices = [{"index": int(row[0]), "uuid": row[1].strip(), "memory_mib": float(row[2])}
                for row in csv.reader(io.StringIO(output)) if int(row[0]) in gpu_devices]
     pss, exited = [], []

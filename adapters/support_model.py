@@ -9,10 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import combinations
 import json
-from pathlib import Path
 import time
 from typing import Callable, Protocol
 
+from controller.context_budget import resolved_condition
 from controller.context_schema import (EvidencePool, EvidenceUnit, Need, SourceSpan,
     SupportBundle, SupportScores, TaskState)
 
@@ -61,16 +61,19 @@ def query_view(state: TaskState, need: Need, resolve: Callable, *, open_needs=()
     history = [{"turn_id": ref.turn_id, "speaker": ref.speaker,
                 "start": ref.start, "end": ref.end, "text": resolve(ref)}
                for ref in state.working_history]
-    conditions = [{"id": c.condition_id, "relation": c.relation_type,
-                   "key": resolve(c.key_span) if c.key_span else "",
-                   "values": [resolve(ref) for ref in c.value_spans],
-                   "predicate": resolve(c.predicate_span) if c.predicate_span else ""}
+    conditions = [{"id": c.condition_id, **resolved_condition(c, resolve)}
                   for c in state.conditions if c.condition_id in need.condition_ids]
     payload = {"question": state.raw_question, "need_id": need.need_id,
-        "operation": need.operation, "anchors": [resolve(ref) for ref in need.anchor_spans],
+        "operation": need.operation, "scope": need.scope, "anchors": [resolve(ref) for ref in need.anchor_spans],
         "subjects": [resolve(ref) for ref in need.subject_refs], "working_history": history,
-        "conditions": conditions, "version_mode": state.version_intent.mode,
-        "versions": state.version_intent.version_ids}
+        "conditions": conditions, "version_intent": {
+            "mode": state.version_intent.mode,
+            "document_families": state.version_intent.document_families,
+            "version_ids": state.version_intent.version_ids,
+            "resolved_version_ids": state.version_intent.resolved_version_ids,
+            "temporal_relation": state.version_intent.temporal_relation,
+            "time_refs": [resolve(ref) for ref in state.version_intent.time_refs],
+            "source_turns": state.version_intent.source_turns}}
     pending = [item for item in open_needs if item.need_id == need.need_id]
     if pending:
         payload["open_needs"] = [{"need_id": item.need_id, "missing_relation": item.missing_relation,
@@ -191,11 +194,3 @@ class SupportModel:
     def manifest(self):
         return {"backend": self.backend.manifest,
                 "schedule": self.profile.__dict__, "last_schedule": self.last_schedule}
-
-
-def score_support(state, pool, *, model: SupportModel, open_needs=()):
-    return model.score_support(state, pool, open_needs=open_needs)
-
-
-def load_support_manifest(path):
-    return json.loads((Path(path)/"support-model.json").read_text())

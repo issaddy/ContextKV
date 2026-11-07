@@ -17,7 +17,7 @@ import time
 from types import SimpleNamespace
 import uuid
 
-COMMIT = "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b"
+COMMIT = "71de97b264b04dcd514cf904003028aefe9775c8"
 PROTOCOL = "contextkv-v1"
 
 
@@ -98,16 +98,16 @@ def record_admission_gate(req, adder, reason, **details):
     # pin when called from _select_prefill_admission. No match/lock/ACK here.
     diagnostic.observe(reason, dict(observed_at=time.perf_counter(),
         prompt_tokens=len(req.origin_input_ids), full_fill_tokens=len(req.full_untruncated_fill_ids),
-        prefix_tokens=req.prefix_len,
+        prefix_tokens=len(req.prefix_indices),
         host_hit_tokens=req.host_hit_length, generated_tokens=len(req.output_ids),
         max_new_tokens=req.sampling_params.max_new_tokens,
         ignore_eos=req.sampling_params.ignore_eos,
         remaining_total=adder.rem_total_tokens, remaining_current=adder.cur_rem_tokens,
-        total_offset=adder.memory_budget.total_offset, current_offset=adder.memory_budget.current_offset,
+        total_offset=adder.rem_total_token_offset, current_offset=adder.cur_rem_token_offset,
         page_size=adder.page_size,
         remaining_input=adder.rem_input_tokens, remaining_chunk=adder.rem_chunk_tokens,
         new_token_ratio=adder.new_token_ratio, admitted_requests=len(adder.can_run_list),
-        budget_type=type(adder.memory_budget).__name__, **details))
+        budget_type="PrefillAdder0518", **details))
 
 
 def record_admission_outcome(req, adder, admitted_before, result):
@@ -369,7 +369,7 @@ class ContextKVRuntime:
             prompt_window=int(os.environ.get("CONTEXTKV_HOST_ADMISSION_PROMPT_WINDOW", "256")))
         cc = cache.cache_controller
         allocator = getattr(cache, "token_to_kv_pool_allocator", None)
-        config = {"page_size": cache.page_size, "backend": cache._tree_core_backend,
+        config = {"page_size": cache.page_size, "backend": type(cache.tree_core).__name__,
                   "hicache": cc is not None, "protocol": PROTOCOL,
                   "write_policy": getattr(cc, "write_policy", None),
                   "host_memory_mode": getattr(cache, "host_memory_mode", None),
@@ -502,6 +502,7 @@ class ContextKVRuntime:
         req.contextkv_input_hash = token_hash(recv.input_ids)
         req.contextkv_session_ref_registered = False
         req.contextkv_prefill_tokens = 0
+        req.contextkv_inserted_cache_tokens = 0
         if self.admission_diagnostics_enabled:
             req.contextkv_admission_diagnostic = AdmissionDiagnostic()
 
@@ -533,12 +534,13 @@ class ContextKVRuntime:
             finish_reason=kind, generation_complete=complete,
             actual_device_hit_tokens=device, actual_host_loaded_tokens=host,
             actual_prefill_tokens=req.contextkv_prefill_tokens,
-            inserted_cache_tokens=int(req.kv.cache_inserted_len),
+            inserted_cache_tokens=int(req.contextkv_inserted_cache_tokens),
             session_ref_registered=bool(getattr(req, "contextkv_session_ref_registered", False)))
         # Native HTTP output is published back to this owner before delivery.
         # A crash before that publication leaves a terminal receipt only.
         item.update(state="COMPLETED" if complete else "FAILED", terminal=True,
-                    inflight=False, receipt=receipt)
+                    inflight=False, receipt=receipt,
+                    _publish_until=time.monotonic() + self.result_ttl_seconds if complete else 0)
         # Retention follows terminal time: a long-running request must still
         # publish its result after newer admission rejections have accumulated.
         self.attempts.move_to_end(attempt)
@@ -781,8 +783,11 @@ class ContextKVRuntime:
             self._prune_results()
             item = dict(self.attempts.get(attempt, dict(state="UNKNOWN", engine_restart_id=self.restart_id,
                         attempt_id=attempt, inflight=False, terminal=False)))
+            publish_until = item.pop("_publish_until", 0)
             if attempt in self.results:
                 item["result"] = self.results[attempt][2]
+            elif publish_until > time.monotonic():
+                item["result_pending"] = True
             return item
         sid = data.get("engine_session_id")
         operation = self._operation(data.get("operation_id"))
@@ -817,7 +822,14 @@ class ContextKVRuntime:
         running_budget = sum(PrefillAdder._get_running_request_total_token_offset(offset_owner, req)
                              for req in budget_requests)
         waiting = [req for req in self.scheduler.waiting_queue if not req.finished()]
-        running = self.scheduler.collect_inflight_reqs()
+        running = set(self.scheduler.running_batch.reqs)
+        if self.scheduler.last_batch is not None:
+            running.update(self.scheduler.last_batch.reqs)
+        if self.scheduler.cur_batch_for_debug is not None:
+            running.update(self.scheduler.cur_batch_for_debug.reqs)
+        if self.scheduler.enable_overlap:
+            for batch, _ in self.scheduler.result_queue:
+                running.update(batch.reqs)
         if self.scheduler.chunked_req is not None:
             running.add(self.scheduler.chunked_req)
         running.difference_update(waiting)
@@ -828,9 +840,9 @@ class ContextKVRuntime:
                         generated_tokens=len(req.output_ids),
                         max_new_tokens=req.sampling_params.max_new_tokens,
                         ignore_eos=req.sampling_params.ignore_eos,
-                        kv_allocated_tokens=req.kv.kv_allocated_len,
-                        kv_committed_tokens=req.kv.kv_committed_len,
-                        cache_protected_tokens=req.kv.cache_protected_len,
+                        kv_allocated_tokens=req.kv.kv_allocated_len if req.kv is not None else 0,
+                        kv_committed_tokens=req.kv_committed_len,
+                        cache_protected_tokens=req.cache_protected_len,
                         native_finished=req.finished(),
                         last_native_match=dict(req.contextkv_last_native_match)
                             if getattr(req, "contextkv_last_native_match", None) is not None else None)
@@ -850,7 +862,7 @@ class ContextKVRuntime:
         not a promise that the saved tier layout remains valid.
         """
         req.contextkv_last_native_match = dict(observed_time_ns=time.monotonic_ns(),
-            input_tokens=input_tokens, device_prefix_tokens=req.prefix_len,
+            input_tokens=input_tokens, device_prefix_tokens=len(req.prefix_indices),
             host_hit_tokens=req.host_hit_length, matched_prefix_tokens=req.num_matched_prefix_tokens)
         if self.host_admission.mode != "off" and not getattr(req, "contextkv_host_admission_observed", False):
             req.contextkv_host_admission_observed = True
@@ -965,6 +977,7 @@ class ContextKVRuntime:
                       generation_complete=receipt["generation_complete"], **timing)
         size = len(result["text"].encode("utf-8")) + 8*len(result["output_ids"])
         self._drop_result(attempt)
+        item["_publish_until"] = 0
         if size <= self.result_max_bytes:
             self.results[attempt] = (time.monotonic(), size, result)
             self.result_bytes += size
@@ -1044,7 +1057,7 @@ class ContextKVRuntime:
             return dict(mode=mode, info=replacement.info({}), pool=replacement.pool_snapshot())
         if mode == "settle":
             if self.cache.cache_controller is not None:
-                self.cache.flush_pending_backups()
+                self.cache.cache_controller.start_writing()
                 self.cache.writing_check(write_back=True)
             return dict(mode=mode, info=self.info({}), pool=self.pool_snapshot())
         if mode == "pressure":
@@ -1057,7 +1070,7 @@ class ContextKVRuntime:
             # Only settle already-submitted transfers. Session refs are retained;
             # native eviction still decides which referenced/unreferenced leaves go.
             if self.cache.cache_controller is not None:
-                self.cache.flush_pending_backups()
+                self.cache.cache_controller.start_writing()
                 self.cache.writing_check(write_back=True)
                 self.cache.loading_check()
             before = self.pool_snapshot()
@@ -1081,7 +1094,7 @@ class ContextKVRuntime:
             from sglang.srt.mem_cache.base_prefix_cache import EvictParams
             # Profiling fixture only: settle native writes, release soft refs,
             # evict device copies through native policy, then settle write-back.
-            self.cache.flush_pending_backups()
+            self.cache.cache_controller.start_writing()
             self.cache.writing_check(write_back=True)
             for sid, epoch in self.epochs.items():
                 if epoch["state"] != "RETIRED":
@@ -1101,14 +1114,14 @@ def get_runtime(scheduler):
         # Native /flush_cache also resets generations. Rotate the existing
         # restart fence before any control operation or guarded admission.
         return runtime._replace_after_cache_reset(scheduler)
-    from sglang.srt.runtime_context import get_parallel, get_model
+    from sglang.srt.runtime_context import get_parallel, get_model, get_server_args
     from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
+    from sglang.srt.mem_cache.unified_cache.unified_tree_core import UnifiedTreeCore
     parallel = get_parallel()
-    if (parallel.tp_size != 1 or parallel.num_dp_ranks != 1 or parallel.pp_size != 1
+    if (parallel.tp_size != 1 or get_server_args().dp_size != 1 or parallel.pp_size != 1
             or not isinstance(cache, UnifiedRadixCache) or not cache.enable_session_radix_cache
-            or cache._tree_core_backend != "python" or len(cache._components_tuple) != 1
-            or cache.tree_core.is_eagle or cache.enable_storage or cache.linker is not None
-            or cache.buffer_pipeline is not None
+            or not isinstance(cache.tree_core, UnifiedTreeCore) or len(cache._components_tuple) != 1
+            or cache.tree_core.is_eagle or cache.enable_storage
             or scheduler.dllm_config is not None
             or scheduler.rust_server is not None
             or not (scheduler.spec_algorithm.is_none() or scheduler.spec_algorithm.is_ngram())
@@ -1141,10 +1154,10 @@ def get_runtime(scheduler):
         model_scope = scope.manifest()
     except (AssertionError, AttributeError, OSError, ValueError) as exc:
         raise ContextKVError("FINGERPRINT_MISMATCH", "running model config/revision/tokenizer/template differs") from exc
-    from sglang.srt.environ import envs
     # Structured JSON and speculative decoding both change measured execution
     # and output lengths, so bind them to the calibration identity.
-    resolved_args = get_server_args().resolved_dict()
+    from dataclasses import asdict
+    resolved_args = asdict(get_server_args())
     decoder_settings = {name: value for name, value in resolved_args.items()
                         if name.startswith("constrained_json_") or name == "grammar_backend"}
     if not scheduler.spec_algorithm.is_none():
@@ -1155,7 +1168,7 @@ def get_runtime(scheduler):
                 "speculative_adaptive_config"}})
     scheduler.contextkv_runtime = ContextKVRuntime(cache, fp, scheduler=scheduler,
         model_scope=model_scope, decoder_settings=decoder_settings,
-        transfer_tma_enabled=envs.SGLANG_HICACHE_TMA_TRANSFER.get(),
+        transfer_tma_enabled=False,
         result_ttl_seconds=float(os.environ.get("CONTEXTKV_RESULT_TTL_SECONDS", "900")),
         result_max_bytes=int(os.environ.get("CONTEXTKV_RESULT_MAX_BYTES", str(64 << 20))))
     return scheduler.contextkv_runtime

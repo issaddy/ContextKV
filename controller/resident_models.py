@@ -19,11 +19,16 @@ _RUNTIME = frozenset({"budget", "budgets", "strategy", "selection", "reading", "
     "wire_schema", "input_policy", "token_limit_hits", "texts_processed"})
 
 
-def _asset(value):
+def _asset(value, *, strip_runtime=True, model_scope=False):
     if isinstance(value, dict):
-        return {key: _asset(item) for key, item in sorted(value.items()) if key not in _RUNTIME}
+        return {key: ("cuda" if key == "device" and isinstance(item, str)
+                      and item.startswith("cuda:") and item[5:].isdecimal()
+                      else _asset(item, strip_runtime=strip_runtime, model_scope=key == "model_scope"))
+                for key, item in sorted(value.items())
+                if key not in {"engine_restart_id", "base_url"} and not (model_scope and key == "source_path")
+                and (not strip_runtime or key not in _RUNTIME)}
     if isinstance(value, (tuple, list)):
-        return [_asset(item) for item in value]
+        return [_asset(item, strip_runtime=strip_runtime) for item in value]
     return value
 
 
@@ -32,13 +37,14 @@ def resident_model_identity(manifest):
 
     Keep the original manifest in the capture/audit artifact. The extracted
     value binds corpus/index identities, actual model manifests/deployments and
-    observed helper engine identities, independently of request budgets.
+    observed helper engine identities, independently of request budgets, process
+    restarts, service routes and the path used to load a model-scope record.
     """
     raw = to_jsonable(manifest)
     if raw is None:
         return None
     if raw.get("format") == "contextkv_resident_assets_v1":
-        return raw
+        return _asset(raw, strip_runtime=False)
     if "retrieval" not in raw:
         return {"format": "contextkv_resident_assets_v1", "assets": _asset(raw)}
     retrieval = raw["retrieval"]
@@ -60,3 +66,18 @@ def resident_model_identity(manifest):
 def resident_model_digest(manifest):
     identity = resident_model_identity(manifest)
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def evidence_selection_contract(manifest):
+    """Identify A's actual selection policy independently of the resident corpus."""
+    if manifest is None:
+        raise ValueError("observed gains require the actual evidence selection manifest")
+    mode = manifest.get("selection_mode", "support")
+    if mode not in {"ranked", "support"}:
+        raise ValueError("unknown evidence selection mode in the actual manifest")
+    contract = {"mode": mode, "order": manifest.get("evidence_selection_order")}
+    if mode == "support":
+        contract.update(utility=manifest.get("selection_utility"),
+            rerank_retained_sets=manifest.get("rerank_retained_sets", False),
+            support_model=_asset(to_jsonable(manifest.get("support_model"))))
+    return contract

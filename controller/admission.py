@@ -14,6 +14,34 @@ from typing import Callable, Sequence
 from .schema import CacheQuoteBatch
 
 
+def quoted_native_work(quote):
+    """Prefill and Host work for the exact input described by a quote."""
+    host = max(0, min(quote.host_only_load_tokens, quote.native_load_estimate))
+    full_restore = quote.host_only_load_tokens > 0 and host == quote.host_only_load_tokens
+    prefix = min(quote.match_limit, quote.recoverable_prefix_tokens if full_restore
+                 else quote.ready_gpu_prefix_tokens)
+    return max(0, quote.input_len-prefix), host
+
+
+def quote_observation(batch, quote, submitted_at):
+    prefill, host = quoted_native_work(quote)
+    received = batch.client_received_monotonic
+    return {"request_id": batch.request_id, "seq": batch.observed_seq, "input_hash": quote.input_hash,
+            "quote_age_ms": (submitted_at-received)*1000 if received is not None else None,
+            "prefill_tokens": prefill, "host_load_tokens": host}
+
+
+def quote_realization(observation, receipt):
+    if observation is None:
+        return None
+    if observation["input_hash"] != receipt.input_hash:
+        raise ValueError("quote work and completion receipt name different native inputs")
+    return {**observation, "actual_prefill_tokens": receipt.actual_prefill_tokens,
+        "actual_host_loaded_tokens": receipt.actual_host_loaded_tokens,
+        "prefill_error_tokens": receipt.actual_prefill_tokens-observation["prefill_tokens"],
+        "host_load_error_tokens": receipt.actual_host_loaded_tokens-observation["host_load_tokens"]}
+
+
 ForwardFunction = Callable[[int, int, int], tuple[float, bool]]
 DecodeFunction = Callable[[int, int, int], tuple[float, bool]]
 QueuedForwardFunction = Callable[[int, int, int, int], tuple[float, bool]]

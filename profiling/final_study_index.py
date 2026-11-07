@@ -10,6 +10,7 @@ import argparse
 from collections import Counter, defaultdict
 import glob
 import hashlib
+from itertools import product
 import json
 import math
 from pathlib import Path
@@ -190,30 +191,41 @@ def paired_tables(specs):
 
 
 def retention_validation(models, paired):
-    from controller.prefix_retention import EmpiricalRetentionModel
+    from controller.prefix_retention import EmpiricalRetentionModel, session_components, session_group, balance_session_rows
     files, missing = expanded(models)
     dev = [row for row in paired if row["split"] == "dev" and row["training_eligible"]]
+    components = session_components(dev)
     result = []
     for name, path in files:
         raw = load(path)
         model = EmpiricalRetentionModel.from_dict(raw)
-        values, unmatched = [], []
+        matched, unmatched, matched_groups = [], [], set()
         for row in dev:
             try:
-                predicted = model.predict(row["features"], row["cache_scope_hash"], row["horizon_seconds"]).saved_ms
+                forecast = model.predict(row["features"], row["cache_scope_hash"], row["horizon_seconds"])
             except KeyError:
                 unmatched.append(row["event_id"])
                 continue
-            values.append((row["sampling_weight"], predicted, row["full_window_cost_difference_ms"]))
+            matched_groups.add(session_group(row, components))
+            matched.append({**row, "predicted_full_window_ms": forecast.full_window_saved_ms,
+                            "predicted_arm_ms": forecast.saved_ms})
+        values = [(row["sampling_weight"], row["predicted_full_window_ms"], row["predicted_arm_ms"],
+                   row["full_window_cost_difference_ms"]) for row in balance_session_rows(matched, components)]
         weight = sum(item[0] for item in values)
-        policy = sum(w*actual if predicted > 0 else 0 for w, predicted, actual in values)/weight if values else None
+        policy = sum(w*actual if choice > 0 else 0 for w, _, choice, actual in values)/weight if values else None
+        full = [(w, predicted, actual) for w, predicted, _, actual in values if predicted is not None]
         result.append(dict(model=name, **identity(path), fit_split=raw["training_manifest"]["split"],
             evaluation_split="dev", eligible_pairs=len(dev), matched_pairs=len(values),
+            independent_samples=len(components), matched_independent_samples=len(matched_groups),
             prediction_coverage=len(values)/len(dev) if dev else None, unmatched_event_ids=unmatched,
-            weighted_mae_ms=sum(w*abs(predicted-actual) for w, predicted, actual in values)/weight if values else None,
-            selected_positive_predictions=sum(predicted > 0 for _, predicted, _ in values),
-            observed_policy_delta_ms=policy if len(values) == len(dev) else None,
-            matched_subgroup_policy_delta_ms=policy,
+            full_window_prediction_pairs=len(full),
+            weighted_mae_ms=sum(w*abs(predicted-actual) for w, predicted, actual in full)
+                /sum(w for w, _, _ in full) if full else None,
+            prediction_error_scope="complete response window",
+            policy_selection_scope="accept each positive-predicted paired TTL arm independently; group-balanced mean over all matched arms; no per-window TTL selection or online policy evaluation",
+            selected_positive_predictions=sum(choice > 0 for _, _, choice, _ in values),
+            paired_arm_acceptance_delta_ms=policy if len(values) == len(dev) else None,
+            matched_subgroup_paired_arm_delta_ms=policy,
             scope="offline dev cost ablation on existing paired data; no dev fitting; signed Native−Retain; online inspect/inference cost remains in actual joint records"))
     return dict(models=result, unmatched_model_patterns=missing)
 
@@ -223,7 +235,8 @@ def artifact_summary(value):
         return dict(type=type(value).__name__, items=len(value) if isinstance(value, list) else None)
     keys = ("format", "schema_version", "kind", "status", "scope", "source", "identity", "model_identity",
         "reader_checkpoint", "reader_profile_id", "reader_binding", "calibration_status", "calibration_split",
-        "feature_schema", "training_manifest", "measurement_protocol_scope", "current_prompt_joint_qualification",
+        "feature_schema", "training_manifest", "measurement_protocol_scope", "protocol_scopes",
+        "current_read_inputs_match", "current_reduce_inputs_match", "phases",
         "coverage", "source_partition", "sample_counts", "actual_train_samples", "optimizer_steps", "training_wall_ms",
         "total_model_input_tokens", "total_supervised_tokens", "available_kinds", "missing_kinds", "validation",
         "resource_scope", "resident_model_manifest_digest", "selected_protocols", "answer_start_definition",
@@ -238,6 +251,8 @@ def artifact_summary(value):
 def capacity_tables(value, path):
     if isinstance(value, dict) and value.get("format") == "contextkv_two_turn_capacity_workflow_v1":
         rows = value["results"]
+    elif isinstance(value, dict) and "queue_quality" in value:
+        return [], []
     elif isinstance(value, dict) and {"job", "concurrency", "completed_qa"} <= value.keys():
         rows = [value]
     else:
@@ -260,6 +275,208 @@ def capacity_tables(value, path):
     return indexed, comparisons
 
 
+def full_queue_cells(value, path, joint_scope=None):
+    from profiling.runtime_manifest import hardware_identity
+    if not isinstance(value, dict):
+        return []
+    if value.get("format") == "contextkv_full_queue_joint_workflow_v1":
+        rows, root = value["results"], path.parent
+    elif {"job", "datasets", "queue_quality", "paid_native_usage"} <= value.keys():
+        rows, root = [value], path.parents[2]
+    else:
+        return []
+    plan_path = root/"capacity-plan.json"
+    plan = load(plan_path)
+    plan_identity = identity(plan_path)
+    run = load(plan["reader_run"]["path"])
+    run.pop("state_dir", None)
+    run["engine"].pop("base_url", None)
+    def canonical(item):
+        return hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest()
+    binding = dict(frozen_A_config_sha256=plan["source_config"]["sha256"],
+        matrix_sha256=plan["source_matrix"]["sha256"], cohort_sha256=canonical(plan["cohort"]),
+        reader_run_sha256=canonical(run), reader_profile_id=plan["reader_profile_id"],
+        lambda_time=plan["lambda_time"])
+    device_source = {key: binding[key] for key in ("frozen_A_config_sha256", "matrix_sha256")}
+    if joint_scope is not None:
+        registered = [worker for worker in joint_scope["workers"]
+            if Path(worker["config"]).resolve() == Path(plan["source_config"]["path"]).resolve()
+            and Path(worker["matrix"]).resolve() == Path(plan["source_matrix"]["path"]).resolve()]
+        if len(registered) != 1:
+            raise ValueError("full-queue source configuration/matrix is not a worker in the explicit joint scope")
+        for name in ("config", "matrix"):
+            source = plan["source_"+name]
+            if identity(registered[0][name])["sha256"] != source["sha256"]:
+                raise ValueError("registered worker input differs from the full-queue execution source")
+        binding.update(frozen_A_config_sha256=joint_scope["source_config_sha256"],
+            matrix_sha256=joint_scope["source_matrix_sha256"],
+            joint_scope_sha256=joint_scope["manifest"]["sha256"])
+    jobs = {job["name"]: job for job in plan["jobs"]}
+    cells = []
+    for row in rows:
+        job = jobs[row["job"]]
+        missing = {name: track["missing_execution_task_ids"] for name, track in row["datasets"].items()}
+        failed = {name: track["failed_task_ids"] for name, track in row["datasets"].items()}
+        unscored = {name: track["unscored_answer_task_ids"] for name, track in row["datasets"].items()}
+        workload = plan["workload_plans"][str(row["concurrency"])]
+        scope = plan["resource_scope"]
+        hardware = (hardware_identity(row["runtime_hardware"], scope["gpu_devices"])
+                    if row.get("runtime_hardware") is not None else None)
+        resource_identity = {key: scope[key] for key in ("gpu_capacity_tokens", "host_capacity_tokens")}
+        resource_identity.update(gpu_device_count=len(set(scope["gpu_devices"])), hardware=hardware,
+                                 native_cache_config=row.get("native_cache_config"))
+        comparison = {**binding,
+            "resource_scope": resource_identity,
+            "workload_sha256": {name: item["sha256"] for name, item in workload.items()},
+            "complete_slo_seconds": job["complete_slo_seconds"]}
+        acceptance = {}
+        if plan.get("acceptance") is not None:
+            replicate_scope = plan.get("replicate_id") or (joint_scope["manifest"]["sha256"]
+                if joint_scope is not None else plan_identity["sha256"])
+            acceptance = {"acceptance_protocol": plan["acceptance"], "queue_job": job,
+                "replicate_scope": replicate_scope, "repetition": job["repetition"],
+                "required_experiment_cells": plan["experiment_cells"],
+                "planned_repetitions": sorted({entry["repetition"] for entry in plan["jobs"]
+                    if entry["concurrency"] == row["concurrency"]
+                    and entry["method"] in {plan["acceptance"]["baseline"], plan["acceptance"]["candidate"]}})}
+        cells.append({**row, "evaluation_kind": "full_queue_own_P3", "source_file": str(path),
+            "generation_dir": job["output"], "comparison_identity": comparison,
+            "active_assets": {name: plan["assets"][name] for name, active in (
+                ("gain", row["method"].startswith("S3_")), ("value", row["method"].endswith("_value"))) if active}
+                | ({"compilation": plan["compilation_asset"]} if "_contextpilot" in row["method"] else {}),
+            "evaluation_factors": plan.get("method_factors", {}).get(row["method"]),
+            "experiment_design": plan.get("experiment_design", "historical retention design"),
+            "device_source_identity": device_source,
+            "explicit_joint_scope": {"manifest": joint_scope["manifest"], "frozen_A": joint_scope["frozen_A"]}
+                if joint_scope is not None else None,
+            "capacity_plan": plan_identity, "full_workflow_cost": str(root/"capacity-cost.json"),
+            "completion_rate": row["completed_qa"]/row["requested_qa"],
+            "p95_response_count": row["completed_qa"], "missing_execution_task_ids": missing,
+            "failed_task_ids": failed, "unscored_answer_task_ids": unscored,
+            "full_queue_delivered": row["completed_qa"] == row["requested_qa"],
+            "latency_scope": "complete request wall time of delivered responses; failed and blocked tasks are absent from P95",
+            **acceptance})
+    return cells
+
+
+def queue_repetition(cell):
+    return cell.get("replicate_scope"), cell.get("repetition")
+
+
+def full_queue_comparisons(cells):
+    comparisons = []
+    references = {"E0_native": (), "B6_native": ("E0_native", "LlamaIndex_native"),
+        "S3_native": ("E0_native", "B6_native", "LlamaIndex_native"),
+        "B6_contextpilot": ("E0_native", "B6_native", "LlamaIndex_native"),
+        "S3_contextpilot": ("E0_native", "B6_native", "S3_native", "B6_contextpilot", "LlamaIndex_native",
+                              "S3_contextpilot_no_fact_reuse"),
+        "S3_contextpilot_joint_native": ("S3_contextpilot",),
+        "S3_contextpilot_joint_demand": ("S3_contextpilot_joint_native", "B6_native", "LlamaIndex_native"),
+        "Rule_contextpilot_joint_demand": ("S3_contextpilot_joint_demand",),
+        "LlamaIndex_native": (), "S3_contextpilot_no_fact_reuse": (),
+        "B6_value": ("B6_native",), "S3_value": ("S3_native", "B6_value")}
+    for row in cells:
+        baselines = [other for other in cells if other["method"] in references.get(row["method"], ())
+                     and other["concurrency"] == row["concurrency"]
+                     and queue_repetition(other) == queue_repetition(row)]
+        for reference in baselines:
+            missing_resource_fields = [name for name in ("hardware", "native_cache_config")
+                if any(cell["comparison_identity"]["resource_scope"][name] is None for cell in (row, reference))]
+            different_assets = [name for name in row["active_assets"].keys() & reference["active_assets"].keys()
+                if row["active_assets"][name]["sha256"] != reference["active_assets"][name]["sha256"]]
+            same = (not missing_resource_fields and not different_assets
+                    and row["comparison_identity"] == reference["comparison_identity"])
+            complete_scored = all(cell["full_queue_delivered"]
+                and numeric(cell["queue_quality"])
+                and not any(cell["unscored_answer_task_ids"].values()) for cell in (row, reference))
+            relative_p95 = ((row["p95_complete_ms"] / reference["p95_complete_ms"] - 1)
+                if same and complete_scored and numeric(row["p95_complete_ms"])
+                and numeric(reference["p95_complete_ms"]) and reference["p95_complete_ms"] > 0 else None)
+            comparisons.append(dict(concurrency=row["concurrency"], candidate=row["method"], baseline=reference["method"],
+                replicate_scope=row.get("replicate_scope"), repetition=row.get("repetition"),
+                source_file=row["source_file"], baseline_source_file=reference["source_file"],
+                candidate_generation_dir=row["generation_dir"], baseline_generation_dir=reference["generation_dir"],
+                comparable=same, incompatible_identity_fields=[key for key, value in row["comparison_identity"].items()
+                    if value != reference["comparison_identity"][key]] + ["assets."+name for name in sorted(different_assets)],
+                missing_identity_fields=["resource_scope."+name for name in missing_resource_fields],
+                device_source_identity_differs=row["device_source_identity"] != reference["device_source_identity"],
+                differences={field: row[field]-reference[field] if same and numeric(row[field])
+                    and numeric(reference[field]) and (field != "p95_complete_ms" or complete_scored) else None
+                    for field in ("queue_quality", "completion_rate", "completed_qa", "p95_complete_ms")},
+                candidate_completed=row["completed_qa"], baseline_completed=reference["completed_qa"],
+                candidate_declared=row["requested_qa"], baseline_declared=reference["requested_qa"],
+                both_full_queue_delivered=row["full_queue_delivered"] and reference["full_queue_delivered"],
+                both_full_queue_scored=complete_scored,
+                relative_p95_change=relative_p95,
+                quality_not_lower=(row["queue_quality"] >= reference["queue_quality"]
+                                   if same and complete_scored else None),
+                latency_scope="delivered responses only; with incomplete delivery, P95 does not compare the complete declared queue",
+                cost_scope="each cell retains its paid native index, batch costs and whole workflow cost; nested scopes are not added",
+                scope=("registered E0 reference versus current method under shared reader, budgets, arrivals and own-P3 queue"
+                       if reference["method"] == "E0_native" else
+                       "same frozen A, reader budgets, arrivals and own-P3 queue; different actual histories permitted")))
+    return comparisons
+
+
+def full_queue_interactions(cells):
+    """B decision x request compilation contrast; retention is Native in all cells."""
+    methods = ("B6_native", "S3_native", "B6_contextpilot", "S3_contextpilot")
+    groups = defaultdict(lambda: defaultdict(list))
+    for cell in cells:
+        if cell["method"] in methods:
+            key = (cell["concurrency"], json.dumps(cell["comparison_identity"], sort_keys=True), *queue_repetition(cell))
+            groups[key][cell["method"]].append(cell)
+    interactions = []
+    for (concurrency, _, replicate_scope, repetition), group in groups.items():
+        for quartet in product(*(group[method] for method in methods)):
+            e1, e2, e3, e4 = quartet
+            scope = e1["comparison_identity"]["resource_scope"]
+            if any(scope[name] is None for name in ("hardware", "native_cache_config")):
+                continue
+            if (e2["active_assets"]["gain"]["sha256"] != e4["active_assets"]["gain"]["sha256"]
+                    or e3["active_assets"]["compilation"]["sha256"] != e4["active_assets"]["compilation"]["sha256"]):
+                continue
+            complete = all(cell["full_queue_delivered"] and numeric(cell["queue_quality"])
+                and not any(cell["unscored_answer_task_ids"].values()) for cell in quartet)
+            contrasts = {}
+            for metric in ("queue_quality", "completion_rate", "p95_complete_ms"):
+                values = [cell[metric] for cell in quartet]
+                known = all(numeric(value) for value in values) and (metric != "p95_complete_ms" or complete)
+                contrasts[metric] = (dict(B_native=values[1]-values[0], C_fixed=values[2]-values[0],
+                    B_contextpilot=values[3]-values[2], C_gain=values[3]-values[1],
+                    joint=values[3]-values[0], interaction=values[3]-values[1]-values[2]+values[0])
+                    if known else None)
+            interactions.append(dict(concurrency=concurrency, design="B x request_compilation; retention=native",
+                replicate_scope=replicate_scope, repetition=repetition,
+                comparison_identity=e1["comparison_identity"],
+                cells={f"E{index}": dict(method=cell["method"], source_file=cell["source_file"],
+                    generation_dir=cell["generation_dir"]) for index, cell in enumerate(quartet, 1)},
+                contrasts=contrasts, full_queue_delivered_and_scored=complete,
+                formula="interaction = E4 - E2 - E3 + E1",
+                scope="own-P3 full-queue contrasts; P95 contrast uses four queue quantiles, not request-level effects"))
+    return interactions
+
+
+def full_queue_track_tables(cells):
+    lines = []
+    for origin, title in (("public_benchmark", "公开基准数据轨"),
+                          ("public_reference_diagnostic", "公开参考历史诊断轨"),
+                          ("constructed_task", "构造任务机制轨")):
+        selected = [(cell, name, cell["datasets"][name], protocol) for cell in cells
+                    if cell.get("evaluation_kind") == "full_queue_own_P3"
+                    for name, protocol in cell["dataset_protocols"].items() if protocol["origin"] == origin]
+        if not selected:
+            continue
+        lines += ["", "## "+title, "",
+            "| 方法 | 并发 | 数据集 / 原指标 | 交付 / 声明 | 已评分 / 已交付 | 全分母原指标 | 未知区间 | 已评分子集指标 |",
+            "|---|---:|---|---:|---:|---:|---|---:|"]
+        for cell, name, track, protocol in selected:
+            lines.append(f"| {cell['method']} | {cell['concurrency']} | {name} / {protocol['primary_metric']} | "
+                f"{track['completed']}/{track['declared']} | {track['scored']}/{track['completed']} | "
+                f"{track['queue_primary_score']} | {track['queue_score_bounds']} | {track['scored_subset_primary']} |")
+    return lines
+
+
 def markdown(report):
     lines = ["# ContextKV 最终产物索引", "", f"评审基线：`{report['baseline_commit']}`。",
         "仅从指定产物读取已有评分与费用，按原指标名称作算术汇总；缺失值不补零。", "",
@@ -275,23 +492,87 @@ def markdown(report):
     lines += ["", "## 固定 token 的 C 配对", "", "| split | 合格 | 原文复用 | TTL s | 整窗 Native−Retain ms | 目标 ms | 其他与控制 ms |", "|---|---|---|---:|---:|---:|---:|"]
     for row in report["paired_C"]["rows"]:
         lines.append(f"| {row['split']} | {row['training_eligible']} | {row['reused']} | {row['horizon_seconds']} | {row['full_window_cost_difference_ms']} | {row['target_revisit_cost_difference_ms']} | {row['collateral_and_initial_control_cost_difference_ms']} |")
-    lines += ["", "## C 模型开发消融", "", "| 资产 | dev 覆盖 | MAE ms | 完整 dev 策略差 ms |", "|---|---:|---:|---:|"]
+    lines += ["", "## C 模型开发消融", "", "| 资产 | dev 覆盖 | MAE ms | 独立组等权配对臂差 ms |", "|---|---:|---:|---:|"]
     for row in report["retention_dev"]["models"]:
-        lines.append(f"| {row['model']} | {row['matched_pairs']}/{row['eligible_pairs']} | {row['weighted_mae_ms']} | {row['observed_policy_delta_ms']} |")
+        lines.append(f"| {row['model']} | {row['matched_pairs']}/{row['eligible_pairs']} | {row['weighted_mae_ms']} | {row['paired_arm_acceptance_delta_ms']} |")
     lines += ["", "## 实际两轮容量与联合", "", "| 方法 | 并发 / clients | 完成 / 预定 | QA/s（含停顿） | P95 ms |", "|---|---:|---:|---:|---:|"]
     for row in report["capacity"]:
-        lines.append(f"| {row['method']} | {row['concurrency']}/{row['clients']} | {row['completed_qa']}/{row['requested_qa']} | {row['throughput_qa_per_second']} | {row['p95_complete_ms']} |")
+        if row.get("evaluation_kind") != "full_queue_own_P3":
+            lines.append(f"| {row['method']} | {row['concurrency']}/{row['clients']} | {row['completed_qa']}/{row['requested_qa']} | {row['throughput_qa_per_second']} | {row['p95_complete_ms']} |")
+    lines += ["", "## 完整队列联合格", "", "| 方法 | 并发 | 交付 / 声明 | 队列质量 | 队列质量区间 | 成功完整响应 P95 ms |", "|---|---:|---:|---:|---|---:|"]
+    for row in report["capacity"]:
+        if row.get("evaluation_kind") == "full_queue_own_P3":
+            lines.append(f"| {row['method']} | {row['concurrency']} | {row['completed_qa']}/{row['requested_qa']} | {row['queue_quality']} | {row['queue_quality_bounds']} | {row['p95_complete_ms']} |")
+    lines += ["", "## 完整队列对照差", "",
+        "| 候选 / 基线 | 并发 | 质量差（候选−基线） | 完整 P95 相对变化 | 质量不低于基线 |",
+        "|---|---:|---:|---:|---|"]
+    for comparison in report["capacity_comparisons"]:
+        if "relative_p95_change" not in comparison:
+            continue
+        delta = comparison["differences"]["queue_quality"]
+        relative = comparison["relative_p95_change"]
+        quality = comparison["quality_not_lower"]
+        lines.append(f"| {comparison['candidate']} / {comparison['baseline']} | {comparison['concurrency']} | "
+            f"{delta if delta is not None else '未知'} | "
+            f"{format(relative, '.2%') if relative is not None else '未知'} | "
+            f"{('是' if quality else '否') if quality is not None else '未知'} |")
+    lines += ["", "## 预登记的完整队列验收", "",
+        "| 并发 | 配对队列 | 费用与测量完整 | 资源预算 | 质量差及区间 | P95 比率及区间 | 质量验收 | 延迟验收 |",
+        "|---:|---:|---|---|---|---|---|---|"]
+    def point_interval(point, interval):
+        if point is None:
+            return "未知"
+        suffix = f" [{interval[0]:.4f}, {interval[1]:.4f}]" if interval is not None else ""
+        return f"{point:.4f}"+suffix
+
+    for row in report["full_queue_acceptance"]:
+        quality_ci = row["quality_confidence"]
+        lines.append(f"| {row['concurrency']} | {row['paired_queues']}/{row['declared_pair_slots']} | "
+            f"{row['measurement_complete']} | {row['resource_budget_pass']} | "
+            f"{point_interval(row['quality_delta'], quality_ci['interval'] if quality_ci else None)} | "
+            f"{point_interval(row['p95_ratio'], row['p95_ratio_interval'])} | "
+            f"{row['quality_gate']} | {row['latency_gate']} |")
+    lines += ["", "## B/C 四格贡献与交互", "",
+        "| 并发 | 指标 | B（Native 编译） | B（ContextPilot 编译） | 编译（固定 B） | 编译（收益 B） | 联合 E4−E1 | 交互 |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|"]
+    for row in report["factorial_interactions"]:
+        for metric, effects in row["contrasts"].items():
+            values = [effects[name] if effects is not None else "未知"
+                      for name in ("B_native", "B_contextpilot", "C_fixed", "C_gain", "joint", "interaction")]
+            lines.append(f"| {row['concurrency']} | {metric} | " + " | ".join(map(str, values)) + " |")
+    lines += ["", "四格均使用 Native retention；交互＝E4−E2−E3＋E1；质量为正表示互补，延迟为负表示额外降低。"
+        "P95 使用四格各自完整队列的分位数，仅为队列统计量的算术对照。"]
+    lines += full_queue_track_tables(report["capacity"])
+    lines += ["", "分轨保留原指标量纲；混合开发 Q 仍采用登记权重，不将构造题增益表述为公开基准增益。"]
+    lines += ["", "## 完整响应 SLO", "",
+        "| 方法 | 并发 | 数据集 | 完成 / 失败 / 阻断 | SLO 秒 | 达标回答 / 秒 | 观察秒数 |",
+        "|---|---:|---|---|---|---|---:|"]
+    for row in report["capacity"]:
+        if row.get("evaluation_kind") != "full_queue_own_P3":
+            continue
+        for dataset, delivery in row["delivery_metrics"].items():
+            if delivery is None:
+                lines.append(f"| {row['method']} | {row['concurrency']} | {dataset} | 未观测 | — | — | — |")
+                continue
+            lines.append(f"| {row['method']} | {row['concurrency']} | {dataset} | {delivery['statuses']} | "
+                f"{delivery['slo'].get('complete_seconds', '未声明')} | "
+                f"{delivery['latency_slo_goodput_requests_per_second']} | {delivery['observation_seconds']} |")
+    lines += ["", "P95 的样本仅包含已交付响应。未完成与未评分任务按完整声明分母另列，存在交付缺失时不据此声称完整队列延迟改善。"]
     lines += ["", "四格自身 P3 与并发容量保留不同回答、分支和 DAG；它们不替代固定输入的 C 配对。",
         "逐方法相对基线差、共同任务数、相同问题/历史计数及原始成本来源见 JSON。",
         "", "## 成本", "", "物理总量引用已有去重 ledger；嵌套 job、phase 与请求份额不重复相加。",
-        "成本命令保存在 `cost-ledger-command.json`；所有输入 manifest、样本与原始产物留在容器。", ""]
+        "提供原始采样与显式 GPU 设备时，成本命令保存为 `cost-ledger-command.json`；已有账本直接引用。", ""]
     for ledger in report["cost_ledgers"]:
         lines.extend([f"`{ledger['path']}`", "", "```json", json.dumps(ledger["physical_total"], ensure_ascii=False, indent=2), "```", ""])
     return "\n".join(lines)
 
 
 def main(argv=None):
+    from profiling.full_queue_acceptance import evaluate_full_queue
+
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--baseline-commit", required=True, help="Declared baseline source commit; not inferred from the current checkout")
+    parser.add_argument("--gpu-devices", help="Explicit physical device IDs for a requested cost-ledger command")
     parser.add_argument("--artifact", action="append", default=[], help="LABEL=path/glob (JSON/YAML)")
     parser.add_argument("--records", action="append", default=[], help="COHORT=explicit scored/unscored JSONL path/glob")
     parser.add_argument("--paired", action="append", default=[], help="LABEL=paired-rows.jsonl path/glob")
@@ -300,11 +581,21 @@ def main(argv=None):
     parser.add_argument("--cost-ledger", action="append", default=[])
     parser.add_argument("--cost-manifest", action="append", default=[], help="Preserve this explicit glob in the ledger command")
     parser.add_argument("--physical", action="append", default=[])
+    parser.add_argument("--joint-scope", help="Explicit frozen inputs.json registering the workers used by full-queue artifacts")
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
+    if (args.cost_manifest or args.physical) and not args.gpu_devices:
+        parser.error("raw cost-ledger inputs require --gpu-devices")
     root = Path(args.output).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    artifacts, capacity, capacity_comparisons, ledgers = [], [], [], []
+    artifacts, capacity, capacity_comparisons, ledgers, full_cells = [], [], [], [], []
+    joint_scope = None
+    if args.joint_scope:
+        scope = load(args.joint_scope)
+        for name in ("config", "matrix"):
+            if identity(scope["source_"+name])["sha256"] != scope["source_"+name+"_sha256"]:
+                raise ValueError("explicit joint scope source identity differs from the frozen original input")
+        joint_scope = {**scope, "manifest": identity(args.joint_scope)}
     paths, missing = expanded(args.artifact)
     for label, path in paths:
         value = load(path)
@@ -312,6 +603,10 @@ def main(argv=None):
         indexed, comparisons = capacity_tables(value, path)
         capacity.extend(indexed)
         capacity_comparisons.extend(comparisons)
+        full_cells.extend(full_queue_cells(value, path, joint_scope))
+    full_cells = list({row["generation_dir"]: row for row in full_cells}.values())
+    capacity.extend(full_cells)
+    capacity_comparisons.extend(full_queue_comparisons(full_cells))
     for path in args.cost_ledger:
         value = load(path)
         ledgers.append({**identity(path), "physical_total": value["physical_total"],
@@ -319,20 +614,23 @@ def main(argv=None):
     rows, record_import = import_records(args.records)
     summaries, comparisons = record_tables(rows, dict(item.split("=", 1) for item in args.baseline))
     paired, paired_index = paired_tables(args.paired)
-    report = dict(format="contextkv_final_study_index_v1", baseline_commit="7388008f56ec7176668321d00f69bd2f07639f0a",
+    report = dict(format="contextkv_final_study_index_v1", baseline_commit=args.baseline_commit,
         scope="explicit existing manifests and existing numeric scored fields; no generation/judging/gold reinterpretation",
         artifacts=artifacts, unmatched_artifact_patterns=missing, record_import=record_import,
         record_summaries=summaries, common_task_comparisons=comparisons,
         paired_C=paired_index, retention_dev=retention_validation(args.retention_model, paired),
-        capacity=capacity, capacity_comparisons=capacity_comparisons, cost_ledgers=ledgers)
-    command = [".venv-sglang/bin/python", "-m", "profiling.study_cost_ledger"]
-    for path in args.cost_manifest:
-        command += ["--manifest", path]
-    for path in args.physical:
-        command += ["--physical", path]
-    command += ["--gpu-devices", "0,1,2,3,4,5,6,7", "--output", str(root/"full-cost-ledger.json")]
-    write(root/"cost-ledger-command.json", dict(argv=command, shell=shlex.join(command), executed=False,
-        scope="explicit requested files only; unknown sampling intervals remain unknown"))
+        capacity=capacity, capacity_comparisons=capacity_comparisons,
+        full_queue_acceptance=evaluate_full_queue(full_cells),
+        factorial_interactions=full_queue_interactions(full_cells), cost_ledgers=ledgers)
+    if args.cost_manifest or args.physical:
+        command = ["python", "-m", "profiling.study_cost_ledger"]
+        for path in args.cost_manifest:
+            command += ["--manifest", path]
+        for path in args.physical:
+            command += ["--physical", path]
+        command += ["--gpu-devices", args.gpu_devices, "--output", str(root/"full-cost-ledger.json")]
+        write(root/"cost-ledger-command.json", dict(argv=command, shell=shlex.join(command), executed=False,
+            scope="explicit requested files only; unknown sampling intervals remain unknown"))
     write(root/"final-index.json", report)
     (root/"final-index.md").write_text(markdown(report))
     print(json.dumps(dict(artifacts=len(artifacts), result_groups=len(summaries), comparisons=len(comparisons),

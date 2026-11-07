@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
-"""Fetch the pinned SGLang source, apply and syntax-check the integration patch.
+"""Prepare the current SGLang 0.5.18 source integration, reusing installed packages.
 
---source-only downloads the audited files for CPU patch verification. It does NOT
-create an installable engine. Omit it to prepare a complete git checkout on Linux.
+The source revision identifies this patch's applicability, not an environment
+upgrade policy. No torch, CUDA, kernel, or Python dependency is installed here.
+--source-only downloads just the files used for CPU patch/syntax verification.
 """
 from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import hashlib
+import importlib.metadata
+import sys
 from pathlib import Path
 import subprocess
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = json.loads((ROOT / "engine_patches/source_manifest.json").read_text())
-PATCH = ROOT / "engine_patches/0001-contextkv-protocol.patch"
+INTEGRATION = ROOT / "engine_patches/integrations/sglang-0.5.18"
+MANIFEST = json.loads((INTEGRATION / "manifest.json").read_text())
+PATCH = INTEGRATION / MANIFEST["patch"]
 
 
 def run(args, cwd, *, check=True):
@@ -39,7 +44,7 @@ def prepare(checkout: Path, source_only: bool):
     if not source_only:
         head = run(["git", "rev-parse", "HEAD"], checkout).stdout.strip()
         if head != commit:
-            raise RuntimeError(f"Wrong SGLang commit: {head}; expected {commit}")
+            raise RuntimeError(f"SGLang patch applies to a different source revision: {head}; expected {commit}")
     reverse = run(["git", "apply", "--reverse", "--check", str(PATCH)], checkout, check=False)
     already_applied = reverse.returncode == 0
     if source_only and not already_applied:
@@ -59,13 +64,24 @@ def prepare(checkout: Path, source_only: bool):
         run(["git", "apply", str(PATCH)], checkout)
     for rel in MANIFEST["changed_files"]:
         compile((checkout / rel).read_text(), str(checkout / rel), "exec")
-    return {"base_commit": commit, "patch_applies": True, "already_applied": already_applied,
+    packages = {}
+    for name in ("sglang", "torch", "sglang-kernel", "flashinfer-python", "transformers",
+                 "tokenizers", "apache-tvm-ffi"):
+        try:
+            packages[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            packages[name] = None
+    return {"repository": MANIFEST["repository"], "source_tag": MANIFEST["source_tag"],
+            "base_commit": commit, "patch_sha256": hashlib.sha256(PATCH.read_bytes()).hexdigest(),
+            "patch_applies": True, "already_applied": already_applied, "source_only": source_only,
+            "checkout": str(checkout), "python": sys.executable, "installed_packages": packages,
+            "dependency_installation": "none; reuse the selected environment",
             "syntax_checked_files": MANIFEST["changed_files"]}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkout", type=Path, default=ROOT / "vendor/sglang")
+    parser.add_argument("--checkout", type=Path, default=ROOT / "vendor/sglang-0.5.18")
     parser.add_argument("--source-only", action="store_true")
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()

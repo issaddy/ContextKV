@@ -1,6 +1,6 @@
-"""Alternate reader-bound actual-answer preferences and existing utility training.
+"""Train evidence utility on actual answers bound to the fixed reader.
 
-R1 is explicit: a checkpoint/profile gets its own generation cohort and asset.
+A checkpoint/profile gets its own generation cohort and asset.
 The original support encoder/heads remain P0; only the existing graph utility and
 answer-disposition heads are optimized by train_set_utility.
 """
@@ -20,23 +20,33 @@ from urllib.parse import urlparse
 import yaml
 
 from training.reader_data import digest, file_digest, rows, write_rows
+from training.task_data import select_cohort_rows
+
+
+from training.preference_rollout import P1_REWARDS, P1_RUBRIC
 
 
 def reader_binding(config):
+    from controller.config import load_config
+    from training.preference_rollout import query_encoder_binding
     settings = config["evidence_policy_training"]
-    manifest_path = Path(settings["reader_manifest"])
-    manifest = json.loads(manifest_path.read_text())
-    checkpoint = manifest["reader_id"]
-    if manifest["status"] != "trained" or not checkpoint.startswith("contextkv-reader-r1:"):
-        raise ValueError("evidence-policy training requires an explicitly trained R1 checkpoint")
-    return {"reader_checkpoint": checkpoint, "reader_profile_id": settings["reader_profile_id"],
-        "reader_manifest": str(manifest_path.resolve()), "reader_manifest_sha256": file_digest(manifest_path),
-        "scorer_identity": settings["scorer_identity"]}
+    run = load_config(settings["run_config"])
+    scope_path = Path(run.model.scope_path)
+    return {"reader_checkpoint": run.model.revision, "reader_profile_id": settings["reader_profile_id"],
+        "reader_scope": str(scope_path.resolve()), "reader_scope_sha256": file_digest(scope_path),
+        "query_encoder": query_encoder_binding(settings["collection"]),
+        "scorer_identity": {**settings["scorer_identity"], "rubric": P1_RUBRIC}}
 
 
-def cohort_directory(config):
+def cohort_directory(config, *, split=None):
     binding = reader_binding(config)
-    return Path(config["evidence_policy_training"]["output_dir"])/digest(binding)[:20]
+    settings = config["evidence_policy_training"]
+    collection = settings["collection"]
+    if collection.get("existing_cohort_dir"):
+        return Path(collection["existing_cohort_dir"])
+    generation_binding = {key: value for key, value in binding.items() if key != "scorer_identity"}
+    identity = digest([generation_binding, file_digest(collection["cohort_manifest"])])[:20]
+    return Path(settings["output_dir"])/identity/(split or collection["cohort_split"])
 
 
 def qualify_collection_rows(label_rows, source_rows):
@@ -111,6 +121,8 @@ def audit_collection_inputs(config, *, limit=8):
     labels_path = Path(settings["collection"]["turns_path"])
     sources_path = Path(config["training"]["data_dir"])/"sources.jsonl"
     selected, excluded = qualify_collection_rows(rows(labels_path), rows(sources_path))
+    selected = select_cohort_rows(selected, settings["collection"]["cohort_manifest"],
+                                 settings["collection"]["cohort_split"])
     selected = selected[:limit]
     directory = cohort_directory(config)
     directory.mkdir(parents=True, exist_ok=True)
@@ -139,7 +151,7 @@ def validate_reward(row, binding):
         raise ValueError("utility supervision requires native-training actual hardware answers")
     if row["history_origin"] not in {"model_actual", "frozen_actual_rollout"}:
         raise ValueError("utility supervision requires actual generated history")
-    for name in ("reader_checkpoint", "reader_profile_id", "scorer_identity"):
+    for name in ("reader_checkpoint", "reader_profile_id", "scorer_identity", "query_encoder"):
         if row[name] != binding[name]:
             raise ValueError(f"candidate reward belongs to a different {name}")
     history = [{key: turn[key] for key in ("turn_id", "user_text", "assistant_text")}
@@ -153,60 +165,82 @@ def validate_reward(row, binding):
     for value in row["quality_components"].values():
         if not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
             raise ValueError("quality components must be observed normalized answer scores")
-    for name in ("complete_ms", "gpu_gib_seconds", "host_gib_seconds", "total_input_tokens", "total_output_tokens"):
-        if row["cost"][name] is None:
-            raise ValueError("reader-bound utility data retain full physical and token costs")
+
+
+def parent_support_binding(settings):
+    path = Path(settings["parent_support_asset"]).resolve()
+    files = [path/"support-model.json", path/"heads.pt",
+             *sorted(file for file in (path/"encoder").rglob("*") if file.is_file())]
+    return {"path": str(path), "files_sha256": {str(file.relative_to(path)): file_digest(file) for file in files}}
 
 
 def build_reader_bound_pairs(reward_rows, *, binding, weights, minimum_difference=0.01):
-    """Only compare actual answers sharing reader, scorer, history and budgets."""
+    """Rank distinct actual inputs by observed answer quality at equal budgets."""
     grouped = {}
     for row in reward_rows:
         validate_reward(row, binding)
         key = (row["task_id"], digest(row["actual_history"]), row["body_budget"], row["output_budget"])
         grouped.setdefault(key, []).append(row)
+
+    def utility(row):
+        return sum(weights[name]*row["quality_components"][name] for name in weights)
+
     result = []
     for key, group in grouped.items():
-        ranked = sorted(group, key=lambda row: sum(weights[name]*row["quality_components"][name]
-                                                   for name in weights), reverse=True)
+        ranked = sorted(group, key=utility, reverse=True)
         for preferred, dispreferred in combinations(ranked, 2):
             if preferred["input_hash"] == dispreferred["input_hash"]:
                 continue
-            difference = sum(weights[name]*(preferred["quality_components"][name]-dispreferred["quality_components"][name])
-                             for name in weights)
+            difference = utility(preferred)-utility(dispreferred)
             if difference < minimum_difference:
                 continue
             if preferred["task_state"] != dispreferred["task_state"]:
                 raise ValueError("utility interventions must keep the same resolved task state")
+            incremental_cost = {name: (preferred["cost"][name]-dispreferred["cost"][name]
+                if preferred["cost"][name] is not None and dispreferred["cost"][name] is not None else None)
+                for name in ("complete_ms", "gpu_gib_seconds", "host_gib_seconds")}
+            incremental_cost.update({name: preferred[name]-dispreferred[name]
+                for name in ("reader_input_tokens", "reader_output_tokens")})
             result.append({"task_id": key[0], "split": "train", "label_origin": "actual_reader_answers",
+                "conversation_id": preferred["conversation_id"], "cohort_split": preferred["cohort_split"],
+                "cohort_manifest_sha256": preferred["cohort_manifest_sha256"],
                 "task_state": preferred["task_state"], "preferred": preferred, "dispreferred": dispreferred,
-                **binding, "reward_weights": weights, "reward_difference": difference,
+                **binding, "reward_weights": weights,
+                "quality_difference": difference, "incremental_request_cost": incremental_cost,
+                "reward_difference": difference,
                 "comparison_budget": {"body_tokens": key[2], "answer_output_tokens": key[3]},
                 "actual_history_sha256": key[1]})
     return result
 
 
-async def collect_r1_preferences(config, *, limit=None):
+async def collect_fixed_reader_preferences(config, *, limit=None, rescore=False):
     from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
-    from controller.config import create_controller, load_config
-    from training.preference_rollout import collect_preferences
+    from controller.config import create_controller, create_model_template, load_config
+    from controller.session_store import Attempt, load_record
+    from training.preference_rollout import collect_preferences, rescore_saved_answers
     settings, binding = config["evidence_policy_training"], reader_binding(config)
     directory = cohort_directory(config)
     directory.mkdir(parents=True, exist_ok=True)
     run = load_config(settings["run_config"])
     if run.model.revision != binding["reader_checkpoint"] or run.engine.kind != "sglang":
-        raise ValueError("R1 preference collection must use its real merged checkpoint and scoped SGLang profile")
+        raise ValueError("preference collection must use the fixed reader checkpoint and scoped SGLang profile")
     binding_path = directory/"collection_binding.json"
-    bound = {**binding, "run_config_sha256": file_digest(settings["run_config"])}
-    if binding_path.exists() and json.loads(binding_path.read_text())["binding"] != bound:
-        raise ValueError("existing candidate cohort belongs to a different reader/profile/scorer")
-    if (directory/"rewards.jsonl").exists() and not binding_path.exists():
-        raise ValueError("existing unbound rewards cannot be relabelled as current R1")
-    controller = create_controller(replace(run, state_dir=str(directory/"runtime"),
-        planner=replace(run.planner, strategy="always_rebuild")))
-    info = await controller.engine.info()
-    if info.fingerprint.model_revision != binding["reader_checkpoint"] or info.engine_kind != "sglang":
-        raise ValueError("active native reader does not match the trained R1 identity")
+    bound = {**{key: value for key, value in binding.items() if key != "scorer_identity"}, "run_config_sha256": file_digest(settings["run_config"]),
+        "cohort_manifest_sha256": file_digest(settings["collection"]["cohort_manifest"]),
+        "cohort_split": settings["collection"]["cohort_split"]}
+    if binding_path.exists():
+        previous = json.loads(binding_path.read_text())["binding"]
+        if {key: value for key, value in previous.items() if key != "scorer_identity"} != bound:
+            raise ValueError("existing candidate cohort belongs to a different generation binding")
+    elif rescore or (directory/"turns.jsonl").exists():
+        raise ValueError("saved answers require their original generation binding")
+    controller = None
+    if not rescore:
+        controller = create_controller(replace(run, state_dir=str(directory/"runtime"),
+            planner=replace(run.planner, strategy="always_rebuild")))
+        info = await controller.engine.info()
+        if info.fingerprint.model_revision != binding["reader_checkpoint"] or info.engine_kind != "sglang":
+            raise ValueError("active native reader does not match the fixed reader identity")
     import httpx
     async with httpx.AsyncClient(base_url=settings["collection"]["judge_base_url"], timeout=30) as judge:
         response = await judge.post("/context/engine/info", json={})
@@ -214,73 +248,186 @@ async def collect_r1_preferences(config, *, limit=None):
         judge_info = response.json()
     if judge_info["fingerprint"]["model_revision"] != binding["scorer_identity"]["reader_checkpoint"]:
         raise ValueError("actual scorer checkpoint differs from the fixed preference rubric identity")
-    binding_path.write_text(json.dumps({"binding": bound, "engine_info": asdict(info),
-                                       "scorer_engine_info": judge_info}, indent=2)+"\n")
+    if not binding_path.exists():
+        binding_path.write_text(json.dumps({"binding": bound, "engine_info": asdict(info)}, indent=2)+"\n")
     preferences = {**config.get("preferences", {}), **settings["collection"],
         "support_asset": settings["parent_support_asset"],
         "run_config": settings["run_config"], "output_dir": str(directory),
         "preferences_path": str(directory/"collector_preferences.jsonl"), **binding}
     actual = {**config, "preferences": preferences}
-    ports = [urlparse(run.engine.base_url).port, urlparse(preferences["judge_base_url"]).port]
+    ports = [urlparse(preferences["judge_base_url"]).port]
+    if not rescore:
+        ports.append(urlparse(run.engine.base_url).port)
     sampler = StudyResourceSampler(settings["gpu_devices"], listening_processes(ports))
     await sampler.start()
     started = time.monotonic()
     try:
-        result = await collect_preferences(actual, controller=controller, limit=limit)
+        if rescore:
+            import sqlite3
+            db_path = (directory/"runtime"/"sessions.sqlite3").resolve()
+            db = sqlite3.connect(db_path.as_uri()+"?mode=ro", uri=True)
+            def get_attempt(attempt_id):
+                payload, = db.execute("SELECT payload FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+                return load_record(db, Attempt, payload)
+            try:
+                labels = {row["task_id"]: row for row in rows(preferences["turns_path"])}
+                async with httpx.AsyncClient(base_url=preferences["judge_base_url"], timeout=180) as judge:
+                    scored, calls = await rescore_saved_answers(judge, create_model_template(run.model), get_attempt,
+                        labels, directory, preferences, binding["query_encoder"])
+                result = {"scored_answers": len(scored), "unscored_answers": len(calls)-len(scored)}
+            finally:
+                db.close()
+        else:
+            result = await collect_preferences(actual, controller=controller, limit=limit)
     finally:
         ended = time.monotonic()
         await sampler.stop()
-        await controller.aclose()
-        controller.store.close()
+        if controller is not None:
+            await controller.aclose()
+            controller.store.close()
         stamp = time.time_ns()
         observation = json.dumps(sampler.observation(), indent=2)+"\n"
-        (directory/f"collection_physical.{stamp}.json").write_text(observation)
-        (directory/f"collection_cost.{stamp}.json").write_text(json.dumps({"binding": binding,
+        phase = "rescore" if rescore else "collection"
+        (directory/f"{phase}_physical.{stamp}.json").write_text(observation)
+        (directory/f"{phase}_cost.{stamp}.json").write_text(json.dumps({"binding": binding, "scorer_engine_info": judge_info,
             "start": started, "end": ended, "physical": integrate_physical(sampler.samples, started, ended)}, indent=2)+"\n")
-    attach_collection_costs(directory, binding)
+    if (directory/P1_REWARDS).exists():
+        attach_collection_costs(directory, binding)
     return {**result, "binding": binding, "cohort_directory": str(directory)}
 
 
 def attach_collection_costs(directory, binding):
-    """Finish saved successes and failed-case accounting after a partial batch."""
-    from bench.study_resources import integrate_physical
+    """Attribute the observed physical window across all concurrent branches."""
+    from bench.study_resources import attribute_physical, integrate_physical
     directory = Path(directory)
     physical_paths = sorted(directory.glob("collection_physical.*.json"))
     cost_paths = sorted(directory.glob("collection_cost.*.json"))
     samples = sorted((sample for path in physical_paths for sample in json.loads(path.read_text())["samples"]),
                      key=lambda sample: sample["timestamp"])
-    rewards = rows(directory/"rewards.jsonl")
+    rewards = rows(directory/P1_REWARDS)
+    turn_path, failure_path = directory/"turns.jsonl", directory/"failed_cases.jsonl"
+    turns = rows(turn_path) if turn_path.exists() else []
+    failures = rows(failure_path) if failure_path.exists() else []
+    windows = {row["response"]["attempt_id"]: row["request_window"] for row in (*rewards, *turns)
+               if row["request_window"] is not None}
+    windows.update({row["attempt_id"]: row["request_window"] for row in failures if row["request_window"] is not None})
+    shares = attribute_physical(samples, windows)
+    envelopes = {key: integrate_physical(samples, *window) for key, window in windows.items()}
+    attribution = "physical interval occupancy divided across concurrently active successful and failed requests"
+
+    def attach(row, key):
+        envelope = envelopes.get(key)
+        covered = envelope is not None and envelope["complete_window_coverage"]
+        share = {name: shares[key][name] if covered else None
+                 for name in ("gpu_gib_seconds", "host_gib_seconds")}
+        row["physical_window"] = envelope
+        row["request_share"] = {**share, "attribution": attribution, "complete_window_coverage": covered}
+        row["physical_window_scope"] = "non-additive whole-device/process envelope during this request"
+        row["batch_cost_paths"] = [str(path) for path in cost_paths]
+        return share
+
     for row in rewards:
-        if "cost" not in row:
-            start, end = row["request_window"]
-            physical = integrate_physical(samples, start, end)
-            row["cost"] = {"complete_ms": row["response"]["complete_ms"],
-                "total_input_tokens": row["input_total_tokens"], "total_output_tokens": row["output_total_tokens"],
-                "gpu_gib_seconds": physical["gpu_gib_seconds"], "host_gib_seconds": physical["host_gib_seconds"]}
-        validate_reward(row, binding)
-    write_rows(directory/"rewards.jsonl", rewards)
-    failure_path = directory/"failed_cases.jsonl"
+        share = attach(row, row["response"]["attempt_id"])
+        row["cost"] = {"complete_ms": row["response"]["complete_ms"],
+            "total_input_tokens": row["input_total_tokens"], "total_output_tokens": row["output_total_tokens"],
+            **share, "attribution": attribution}
+    write_rows(directory/P1_REWARDS, rewards)
+    for row in failures:
+        share = attach(row, row["attempt_id"])
+        row["physical_cost"] = share if row["request_window"] is not None else None
     if failure_path.exists():
-        failures = rows(failure_path)
-        for row in failures:
-            if row["request_window"] is not None:
-                row["physical_cost"] = integrate_physical(samples, *row["request_window"])
-            row["batch_cost_paths"] = [str(path) for path in cost_paths]
         write_rows(failure_path, failures)
     return rewards
+
+
+def candidate_quality_diagnostics(rewards, *, weights, declared_task_ids):
+    """Describe saved candidate limits; score ties do not identify a deployed choice."""
+    groups = {}
+    declared = set(declared_task_ids)
+    for row in rewards:
+        if row["task_id"] not in declared:
+            raise ValueError("candidate diagnostic task is outside the declared cohort")
+        key = (row["task_id"], digest(row["actual_history"]), row["body_budget"], row["output_budget"],
+               digest({name: row[name] for name in (
+                   "reader_checkpoint", "reader_profile_id", "scorer_identity", "query_encoder")}))
+        groups.setdefault(key, []).append(row)
+    details = []
+    for key, candidates in groups.items():
+        scored = [(row, sum(weights[name]*row["quality_components"][name] for name in weights))
+                  for row in candidates]
+        oracle = max(quality for _, quality in scored)
+        prediction = max(row["evidence_set"]["quality_prediction"] for row, _ in scored)
+        tied = [(row, quality) for row, quality in scored
+                if row["evidence_set"]["quality_prediction"] == prediction]
+        details.append(dict(task_id=key[0], actual_history_sha256=key[1], body_budget=key[2],
+            output_budget=key[3], reader_scorer_query_sha256=key[4], scored_candidates=len(scored),
+            distinct_inputs=len({row["input_hash"] for row, _ in scored}), oracle_quality=oracle,
+            top_prediction=prediction, top_prediction_ties=len(tied),
+            top_prediction_input_hashes=sorted({row["input_hash"] for row, _ in tied}),
+            prediction_regret_interval=[oracle-max(quality for _, quality in tied),
+                                        oracle-min(quality for _, quality in tied)]))
+    observed = {row["task_id"] for row in details}
+    return dict(scope="saved scored candidates grouped by actual state and protocol; not deployed P0/P1 regret or full-queue quality",
+        declared_tasks=len(declared), observed_tasks=len(observed), missing_task_ids=sorted(declared-observed),
+        comparison_groups=len(details), groups=details,
+        available_group_oracle_mean=(sum(row["oracle_quality"] for row in details)/len(details)
+                                     if details else None),
+        available_group_prediction_regret_interval=(
+            [sum(row["prediction_regret_interval"][bound] for row in details)/len(details) for bound in (0, 1)]
+            if details else None))
 
 
 def prepare_preferences(config):
     settings, binding = config["evidence_policy_training"], reader_binding(config)
     directory = cohort_directory(config)
+    collection = settings["collection"]
+    split = collection["cohort_split"]
+    cohort_path = Path(collection["cohort_manifest"])
+    cohort_hash = file_digest(cohort_path)
+    members = {row["task_id"]: row for row in json.loads(cohort_path.read_text())["members"] if row["split"] == split}
     rewards = attach_collection_costs(directory, binding)
-    pairs = build_reader_bound_pairs(rewards, binding=binding, weights=settings["reward_weights"],
-                                    minimum_difference=settings["minimum_reward_difference"])
+    parent = parent_support_binding(settings)
+    for row in rewards:
+        if (row["cohort_split"] != split or row["cohort_manifest_sha256"] != cohort_hash
+                or row["task_id"] not in members or row["conversation_id"] != members[row["task_id"]]["conversation_id"]):
+            raise ValueError("reward is outside the registered collection partition")
+        if Path(row["support_model_asset"]).resolve() != Path(parent["path"]):
+            raise ValueError("reward used a different parent support asset")
+    cost_fields = ("complete_ms", "gpu_gib_seconds", "host_gib_seconds", "total_input_tokens", "total_output_tokens")
+    measured = [row for row in rewards if all(row["cost"][key] is not None for key in cost_fields)]
+    pairs = (build_reader_bound_pairs(rewards, binding=binding, weights=settings["reward_weights"],
+                                     minimum_difference=settings["minimum_reward_difference"])
+             if split == "train" else [])
     write_rows(directory/"preferences.jsonl", pairs)
-    manifest = {"binding": binding, "training_split": "train", "answers": len(rewards), "pairs": len(pairs),
-        "tasks": len({row["task_id"] for row in pairs}), "reward_weights": settings["reward_weights"],
-        "source_rewards_sha256": file_digest(directory/"rewards.jsonl"),
-        "reader_updates": "new checkpoint/profile requires newly executed and scored candidate answers"}
+
+    def candidates(rows_):
+        return {(row["task_id"], row["category"]) for row in rows_ if row["task_id"] in members}
+
+    from training.preference_rollout import saved_rows
+    families = {row["task_id"]: row for row in saved_rows(directory/"candidate_families.jsonl") if row["task_id"] in members}
+    declared = {(identity, category) for identity, family in families.items() for category in family["evidence_sets"]}
+    turns = saved_rows(directory/"turns.jsonl")
+    failed_rows = saved_rows(directory/"failed_cases.jsonl")
+    answered = candidates(turns)
+    scored = candidates(rewards)
+    failed = candidates(failed_rows)-answered
+    skipped = candidates(saved_rows(directory/"skipped_cases.jsonl"))-answered-failed
+    manifest = {"binding": binding, "parent_support_binding": parent,
+        "cohort_split": split, "cohort_manifest_sha256": cohort_hash,
+        "declared_states": len(members), "states_without_candidate_family": sorted(set(members)-families.keys()),
+        "registered_candidates": len(declared), "answered_candidates": len(answered),
+        "scored_candidates": len(scored), "unscored_answers": len(answered-scored),
+        "failed_candidates": len(failed), "skipped_candidates": len(skipped),
+        "recorded_failed_attempts": len({row["attempt_id"] for row in failed_rows if row["task_id"] in members}),
+        "pending_registered_candidates": len(declared-answered-failed-skipped),
+        "scored_answers_without_measured_cost": len(rewards)-len(measured),
+        "answers": len(rewards), "pairs": len(pairs), "paired_states": len({row["task_id"] for row in pairs}),
+        "reward_weights": settings["reward_weights"],
+        "candidate_quality_diagnostics": candidate_quality_diagnostics(rewards,
+            weights=settings["reward_weights"], declared_task_ids=members),
+        "cost_scope": "observed candidate request cost; shared preparation and offline scorer costs stay in collection ledgers",
+        "source_rewards_sha256": file_digest(directory/P1_REWARDS),
+        "preferences_sha256": file_digest(directory/"preferences.jsonl")}
     (directory/"preference_manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
     return manifest
 
@@ -288,26 +435,32 @@ def prepare_preferences(config):
 def train_evidence_policy(config):
     from training.support_model import train_set_utility
     settings, binding = config["evidence_policy_training"], reader_binding(config)
-    directory = cohort_directory(config)
-    pairs = rows(directory/"preferences.jsonl")
+    if settings["collection"]["cohort_split"] != "train":
+        raise ValueError("P1 fitting requires the registered train collection")
+    directory = cohort_directory(config, split="train")
+    prepared = json.loads((directory/"preference_manifest.json").read_text())
+    parent = prepared["parent_support_binding"]
+    pairs = select_cohort_rows(rows(directory/"preferences.jsonl"), settings["collection"]["cohort_manifest"], "train")
     for pair in pairs:
-        for name in ("reader_checkpoint", "reader_profile_id", "scorer_identity"):
+        for name in ("reader_checkpoint", "reader_profile_id", "scorer_identity", "query_encoder"):
             if pair[name] != binding[name]:
                 raise ValueError(f"preference training data use a different {name}")
         for side in ("preferred", "dispreferred"):
             validate_reward(pair[side], binding)
-    if Path(settings["output_asset"]).resolve() == Path(settings["parent_support_asset"]).resolve():
+    if Path(settings["output_asset"]).resolve() == Path(parent["path"]):
         raise ValueError("P1 asset must retain the P0 support asset as a separate checkpoint")
     optimizer = settings["optimizer"]
-    train_set_utility(directory/"preferences.jsonl", settings["parent_support_asset"],
-        settings["output_asset"], device=optimizer["device"], epochs=optimizer["epochs"],
+    train_set_utility(directory/"preferences.jsonl", parent["path"],
+        settings["output_asset"], cohort_manifest=settings["collection"]["cohort_manifest"],
+        device=optimizer["device"], epochs=optimizer["epochs"],
         learning_rate=optimizer["learning_rate"], seed=optimizer["seed"])
     path = Path(settings["output_asset"])/"support-model.json"
     metadata = json.loads(path.read_text())
-    metadata.update(reader_binding=binding, policy_stage="P1_reader_bound_actual_answer_utility",
+    metadata.update(reader_binding=binding, parent_support_binding=parent,
+        preference_objective={"reward_weights": prepared["reward_weights"]}, policy_stage="P1_reader_bound_actual_answer_utility",
         policy_checkpoint="contextkv-evidence-p1:"+file_digest(Path(settings["output_asset"])/"heads.pt"),
         training_preferences_sha256=file_digest(directory/"preferences.jsonl"),
-        evaluation_evidence="separate P0/P1 x R0/R1 frozen-history and P3 runs; no quality claim from training loss")
+        evaluation_evidence="separate planner x reading-protocol frozen-history and P3 runs under fixed Qwen; no quality claim from training loss")
     path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2)+"\n")
     return metadata
 
@@ -320,144 +473,6 @@ def require_policy_reader_binding(asset_path, *, reader_checkpoint, reader_profi
     if binding["reader_checkpoint"] != reader_checkpoint or binding["reader_profile_id"] != reader_profile_id:
         raise ValueError("P1 utility requires the reader checkpoint/profile that generated its rewards")
     return binding
-
-
-async def rollout_next_round(config, *, limit_conversations=None):
-    """Run P1/R1 along its own actual answers, then hand those traces to reader SFT."""
-    from bench.study import merge_config, run_dataset
-    settings, binding = config["evidence_policy_training"], reader_binding(config)
-    require_policy_reader_binding(settings["output_asset"], reader_checkpoint=binding["reader_checkpoint"],
-                                  reader_profile_id=binding["reader_profile_id"])
-    next_round = settings["next_round"]
-    if limit_conversations is None:
-        limit_conversations = next_round["conversations"]
-    policy = json.loads((Path(settings["output_asset"])/"support-model.json").read_text())
-    directory = cohort_directory(config)/"next_reader_rollout"/policy["policy_checkpoint"].split(":")[-1][:20]
-    directory.mkdir(parents=True, exist_ok=True)
-    questions = rows(next_round["questions_path"])
-    if any(row["split"] != "train" for row in questions):
-        raise ValueError("the next reader round must use actual native training conversations")
-    reader_config = yaml.safe_load(Path(next_round["reader_training_config"]).read_text())
-    parent_data_dir = reader_config["reader_training"]["data"]["output_dir"]
-    parent_conversations = {row["conversation_id"] for row in rows(Path(parent_data_dir)/"train.jsonl")}
-    questions = [row for row in questions if row["conversation_id"] in parent_conversations]
-    tasks = [{"dataset": {"name": "reader_policy_train", "revision": "native-training-questions"},
-        "task_id": row["task_id"], "conversation_id": row["conversation_id"], "turn": row["turn"],
-        "Collection": "reader_policy_train/native", "split": "train",
-        "input": [{"speaker": "user", "text": row["question"]}], "contexts": [],
-        "targets": [{"text": row["reference_answer"]}]} for row in questions]
-    tasks_path = directory/"questions.jsonl"
-    write_rows(tasks_path, tasks)
-    matrix = yaml.safe_load(Path(next_round["matrix_path"]).read_text())
-    from adapters.doc2dial import convert, structural_corpus
-    original = Path(config["training"]["multidoc_source"])
-    documents = json.loads((original/"multidoc2dial_doc.json").read_text())
-    corpus, _, _ = convert(documents, json.loads((original/"multidoc2dial_dial_train.json").read_text()),
-        dataset_version="archive-f0c034c24966", source_uri="https://doc2dial.github.io/multidoc2dial/",
-        split="train", source_format="multidoc2dial")
-    corpus_path = directory/"train_passages.jsonl"
-    write_rows(corpus_path, structural_corpus(documents, corpus))
-    spec = {**next_round["dataset"], "inputs": {"train": str(tasks_path)},
-        "corpus_path": str(corpus_path),
-        "split_kind": "native_train_actual_rollout", "weight": 0,
-        "primary_metric": "project_condition_version_score", "normalization": 1.0}
-    retrieval_recipe = yaml.safe_load(Path(spec["retriever_config"]).read_text())
-    retrieval_recipe["device"] = settings["collection"]["encoder_device"]
-    retrieval_path = directory/"retriever.yaml"
-    retrieval_path.write_text(yaml.safe_dump(retrieval_recipe, sort_keys=False))
-    spec["retriever_config"] = str(retrieval_path)
-    matrix["datasets"] = {"reader_policy_train": spec}
-    matrix["resources"]["gpu_devices"] = settings["gpu_devices"]
-    actual = merge_config(config, {"generation": {"run_config": settings["run_config"],
-        "teacher_url": settings["collection"]["judge_base_url"],
-        "helper_run_config": settings["helper_run_config"]},
-        "selection": {"utility": "learned"},
-        "reading": {"layout": settings["collection"]["read_layout"], "packing": settings["collection"]["read_packing"]},
-        "task_model": {"device": settings["collection"]["encoder_device"]},
-        "support_model": {"mode": "trained", "asset": settings["output_asset"],
-            "device": settings["collection"]["device"], "preference_asset": settings["output_asset"]}})
-    from controller.engine_client import EngineError
-    from bench.evidence_policy_comparison import persist_p3_failure, recorded_terminal_budget, terminal_model_budget
-    conversations = sorted({row["conversation_id"] for row in tasks})[:limit_conversations]
-    turns, rollout_specs, failed = [], [], []
-    for conversation in conversations:
-        part = directory/"conversations"/digest(conversation)[:20]
-        part.mkdir(parents=True, exist_ok=True)
-        part_tasks = part/"questions.jsonl"
-        write_rows(part_tasks, [row for row in tasks if row["conversation_id"] == conversation])
-        local_matrix = merge_config(matrix, {"datasets": {"reader_policy_train": {"inputs": {"train": str(part_tasks)}}}})
-        teacher_ledger = actual.get("task_model", {}).get("teacher_record_path",
-            str(Path(actual.get("study", {}).get("output_dir", "runs/study"))/"task_teacher_calls.jsonl"))
-        recorded = recorded_terminal_budget(part)
-        try:
-            if recorded:
-                results = rows(part/"results.unscored.jsonl")
-                failed.append(persist_p3_failure(part, conversation, "; ".join(recorded), teacher_ledger=teacher_ledger))
-            else:
-                results = await run_dataset(actual, local_matrix, {"id": "P1_R1_train", "strategy": "B7"},
-                    "reader_policy_train", "train", part, concurrency=next_round["concurrency"])
-        except ExceptionGroup as group:
-            known, unknown = group.split(terminal_model_budget)
-            if unknown is not None:
-                raise unknown
-            results = rows(part/"results.unscored.jsonl")
-            failed.append(persist_p3_failure(part, conversation, str(known), teacher_ledger=teacher_ledger))
-        except EngineError as exc:
-            if exc.code != "READ_STEP_OUTPUT_TRUNCATED":
-                raise
-            results = rows(part/"results.unscored.jsonl")
-            failed.append(persist_p3_failure(part, conversation, str(exc), teacher_ledger=teacher_ledger))
-        except RuntimeError as exc:
-            if not terminal_model_budget(exc):
-                raise
-            results = rows(part/"results.unscored.jsonl")
-            failed.append(persist_p3_failure(part, conversation, str(exc), teacher_ledger=teacher_ledger))
-        except ValueError as exc:
-            if not terminal_model_budget(exc):
-                raise
-            results = rows(part/"results.unscored.jsonl")
-            failed.append(persist_p3_failure(part, conversation, str(exc), teacher_ledger=teacher_ledger))
-        generation = json.loads((part/"generation_manifest.json").read_text())
-        snapshot_id = generation["retrieval"]["retrieval"]["corpus_snapshot_id"]
-        actual_turns = [{**row, "split": "train", "snapshot_id": snapshot_id, "rollout_policy": "P1_R1_actual_history",
-            "reader_checkpoint": binding["reader_checkpoint"], "reader_profile_id": binding["reader_profile_id"]} for row in results]
-        turn_path = part/"turns.jsonl"
-        write_rows(turn_path, actual_turns)
-        turns.extend(actual_turns)
-        rollout_specs.append({"turns_path": str(turn_path.resolve()),
-            "state_db": str((part/"state"/"sessions.sqlite3").resolve()),
-            "source_partition": "native_multidoc2dial_train", "split": "train",
-            "reader_identity": binding["reader_checkpoint"], "read_protocol_version": 2})
-    write_rows(directory/"turns.jsonl", turns)
-    reader = reader_config["reader_training"]
-    reader.update(initial_adapter=str(Path(settings["reader_manifest"]).parent/"adapter"),
-        output_dir=next_round["reader_output_dir"], merged_model_dir=next_round["reader_merged_dir"])
-    reader["data"].update(output_dir=next_round["reader_data_dir"], rollouts=rollout_specs,
-        export_turns=None, retrieved_read_turns=0, validation_fraction=0)
-    review_path = directory/"reader_p1_review.yaml"
-    review_path.write_text(yaml.safe_dump(reader_config, sort_keys=False))
-    mix_config = yaml.safe_load(Path(next_round["reader_mix_config"]).read_text())
-    mix_config["reader_mix"].update(reader_manifest=settings["reader_manifest"], parent_data_dir=parent_data_dir,
-        new_p1_data_dir=next_round["reader_data_dir"], reader_output_dir=next_round["reader_output_dir"],
-        reader_merged_dir=next_round["reader_merged_dir"])
-    mix_path = directory/"reader_mix.yaml"
-    mix_path.write_text(yaml.safe_dump(mix_config, sort_keys=False))
-    from training.reader_mix import stage_configs
-    _, mixed = stage_configs(mix_config, reader_config)
-    next_path = directory/"reader_next_round.yaml"
-    next_path.write_text(yaml.safe_dump(mixed, sort_keys=False))
-    manifest = {"reader_binding": binding, "planner_asset": settings["output_asset"],
-        "planner_checkpoint": policy["policy_checkpoint"],
-        "actual_turns": len(turns), "actual_conversations": len({row["conversation_id"] for row in turns}),
-        "requested_conversations": conversations, "failed_conversations": failed,
-        "history_policy": "P3 along this P1/R1 pair's own committed answers",
-        "next_reader_config": str(next_path.resolve()),
-        "new_P1_review_config": str(review_path.resolve()), "reader_mix_config": str(mix_path.resolve()),
-        "next_steps": [f"python -m training.reader_mix all --config {mix_path} --p1-config {review_path}",
-                       f"python -m training.train_reader train --config {next_path}"],
-        "supervision": "fresh actual-history/prompt-bound target review required for the new reader round"}
-    (directory/"alternation_manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
-    return manifest
 
 
 async def measured_policy_training(config):
@@ -483,7 +498,7 @@ async def measured_policy_training(config):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("audit", "collect", "prepare", "train", "rollout"))
+    parser.add_argument("command", choices=("audit", "collect", "rescore", "prepare", "train"))
     parser.add_argument("--config", required=True)
     parser.add_argument("--limit", type=int)
     args = parser.parse_args(argv)
@@ -493,12 +508,10 @@ def main(argv=None):
         config = merge_config(yaml.safe_load(Path(config["base_study_config"]).read_text()), config)
     if args.command == "audit":
         result = audit_collection_inputs(config, limit=args.limit or 8)
-    elif args.command == "collect":
-        result = asyncio.run(collect_r1_preferences(config, limit=args.limit))
+    elif args.command in {"collect", "rescore"}:
+        result = asyncio.run(collect_fixed_reader_preferences(config, limit=args.limit, rescore=args.command == "rescore"))
     elif args.command == "prepare":
         result = prepare_preferences(config)
-    elif args.command == "rollout":
-        result = asyncio.run(rollout_next_round(config, limit_conversations=args.limit))
     else:
         result = asyncio.run(measured_policy_training(config))
     print(json.dumps(result, ensure_ascii=False, indent=2))

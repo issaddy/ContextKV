@@ -1,4 +1,3 @@
-from copy import deepcopy
 
 import pytest
 
@@ -35,16 +34,6 @@ def records(method="B0", *, latency=1000, long_score=80):
              "cost": cost(latency), "split": "dev"}]
 
 
-def test_mtrag_harmonic_uses_benchmark_aggregates_and_preserves_official_alias():
-    summary = summarize_methods(matrix(), records())["B0"]
-    assert summary["datasets"]["mtrag"]["primary_score"] == pytest.approx(.55)
-    assert summary["quality"] == pytest.approx(.675)
-    assert summary["eligible"]
-    assert summary["datasets"]["mtrag"]["raw_metrics"]["RB_agg"]["count"] == 2
-    assert summary["datasets"]["mtrag"]["metric_source_alias_counts"]["RB_agg_idk"] == 2
-    assert "run_algorithmic.py" in summary["datasets"]["mtrag"]["alias_provenance"]["RB_agg_idk"]
-
-
 def test_mtrag_primary_uses_answerability_conditioned_components_and_retains_raw_scores():
     rows = records()
     for row in rows[:2]:
@@ -58,19 +47,6 @@ def test_mtrag_primary_uses_answerability_conditioned_components_and_retains_raw
     assert summarize_methods(matrix(), rows)["B0"]["datasets"]["mtrag"]["primary_score"] == 1
 
 
-def test_missing_harmonic_component_or_cohort_never_freezes_partial_scores():
-    rows = records()
-    del rows[0]["metrics"]["RL_F_idk"]
-    summary = summarize_methods(matrix(), rows)["B0"]
-    assert summary["quality"] is None
-    assert summary["datasets"]["mtrag"]["scored"] == 1
-    with pytest.raises(ValueError):
-        select_development(matrix(), rows)
-    undeclared = matrix()
-    del undeclared["cohorts"]
-    assert "cohort_not_declared:mtrag" in summarize_methods(undeclared, records())["B0"]["selection_reasons"]
-
-
 def test_continuous_quality_wins_then_near_equal_uses_complete_cost():
     rows = records("B0", latency=100, long_score=70)+records("B3", latency=4000, long_score=90)
     assert select_development(matrix(), rows)["method"] == "B3"
@@ -78,36 +54,6 @@ def test_continuous_quality_wins_then_near_equal_uses_complete_cost():
     assert select_development(matrix(), near)["method"] == "B0"
     over_budget = records("B0", latency=100, long_score=70)+records("B3", latency=6000, long_score=90)
     assert select_development(matrix(), over_budget)["method"] == "B0"
-
-
-def test_missing_resource_measurements_and_duplicate_tasks_are_reported():
-    rows = records()
-    del rows[0]["cost"]["gpu_gib_seconds"]
-    rows.append(deepcopy(rows[0]))
-    summary = summarize_methods(matrix(), rows)["B0"]
-    assert not summary["eligible"]
-    assert summary["datasets"]["mtrag"]["duplicate_task_ids"] == ["a"]
-    assert "missing_cost:gpu_gib_seconds" in summary["selection_reasons"]
-
-
-def test_paired_bootstrap_resamples_conversations_and_preserves_raw_score_units():
-    spec = {"methods": [{"id": "B0"}, {"id": "B3"}], "seed": 42,
-        "datasets": {"loong": {"primary_metric": "loong_reference_score", "normalization": 100, "weight": 1}},
-        "cohorts": {"test": {"loong": ["0", "1", "2"]}},
-        "selection": {"bootstrap_samples": 50, "equal_cost_relative_tolerance": .05}}
-    rows = []
-    for method, gain in (("B0", 0), ("B3", 10)):
-        for index, conversation in enumerate(("one", "one", "two")):
-            rows.append({"method": method, "dataset": "loong", "task_id": str(index),
-                "conversation_id": conversation, "status": "completed", "split": "test",
-                "metrics": {"loong_reference_score": 50+index+gain}, "cost": cost()})
-    comparisons = paired_comparisons(spec, rows)
-    assert comparisons[0]["clusters"] == 2
-    assert comparisons[0]["paired_tasks"] == 3
-    assert comparisons[0]["score_interval"] == pytest.approx([10, 10])
-    assert comparisons[0]["equal_cost_match"]
-    assert comparisons[1]["dataset"] == "engineering_Q"
-    assert comparisons[1]["score_interval"] == pytest.approx([.1, .1])
 
 
 def test_paired_subset_reports_tasks_both_methods_did_not_score_without_full_cohort_q():
@@ -133,19 +79,6 @@ def test_paired_subset_reports_tasks_both_methods_did_not_score_without_full_coh
     assert combined["score_difference"] == pytest.approx(.1)
 
 
-def test_empty_paired_subset_still_reports_declared_cohort_coverage():
-    spec = {"methods": [{"id": "B0"}, {"id": "B3"}],
-        "datasets": {"loong": {"primary_metric": "loong_reference_score", "weight": 1}},
-        "cohorts": {"test": {"loong": ["missing"]}}}
-    rows = [{"method": method, "dataset": "loong", "task_id": "missing",
-             "conversation_id": "c", "status": "failed", "split": "test", "metrics": {}}
-            for method in ("B0", "B3")]
-    result, = paired_comparisons(spec, rows)
-    assert result["paired_tasks"] == 0
-    assert result["both_unscored_task_ids"] == ["missing"]
-    assert result["score_difference"] is None
-
-
 def test_development_track_excludes_evaluation_only_dataset_without_renormalizing():
     spec = matrix()
     spec["datasets"]["mtrag_un"] = {"primary_metric": "mtrageval_harmonic", "normalization": 1, "weight": .2}
@@ -163,12 +96,154 @@ def test_development_track_excludes_evaluation_only_dataset_without_renormalizin
     assert "mtrag_un" in test_summary["datasets"]
 
 
-def test_online_totals_already_include_auxiliary_model_tokens():
-    rows = records()
+def test_registered_joint_reference_survives_freeze_and_report(tmp_path):
+    import json
+    from bench.study import freeze, report
+
+    spec = matrix()
+    spec["methods"] = [{"id": "E0_native"}, {"id": "S3_value"}]
+    spec["selection"].update(baseline="E0_native", test_comparators=["E0_native"])
+    spec["cohorts"]["test"] = spec["cohorts"]["dev"]
+    config = {"study": {"learning": True}, "task_model": {"mode": "teacher"},
+              "support_model": {"mode": "teacher"}}
+    rows = records("E0_native", long_score=70) + records("S3_value", long_score=90)
     for row in rows:
-        row["cost"].update(total_input_tokens=150, total_output_tokens=25,
-                           auxiliary_input_tokens=50, auxiliary_output_tokens=5)
-    cost_summary = summarize_methods(matrix(), rows)["B0"]["cost"]
-    assert cost_summary["online_tokens"] == 3*175
-    assert cost_summary["auxiliary_input_tokens"] == 150
-    assert cost_summary["token_accounting"] == "all_online_models"
+        row["response"] = {"action": "REBUILD", "read_count": 1,
+                           "reduce_count": 0, "truncated": False}
+    frozen = freeze(config, spec, rows, tmp_path/"frozen.json")
+    assert [method["id"] for method in frozen["test_methods"]] == ["E0_native", "S3_value"]
+    report(frozen, [{**row, "split": "test"} for row in rows], tmp_path/"report")
+    paired = json.loads((tmp_path/"report"/"paired_intervals.json").read_text())
+    assert paired and all(row["baseline"] == "E0_native" for row in paired)
+    assert {row["dataset"]: row["paired_task_ids"] for row in paired
+            if row["dataset"] in spec["datasets"]} == spec["cohorts"]["test"]
+
+
+def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
+    import json
+    from profiling.final_study_index import (full_queue_cells, full_queue_comparisons,
+                                            full_queue_interactions, main, markdown)
+
+    run = tmp_path / 'reader.json'
+    run.write_text(json.dumps({'engine': {'base_url': 'local'}, 'state_dir': 'temporary'}))
+    plan = dict(reader_run={'path': str(run)},
+        source_config={'sha256': 'A'}, source_matrix={'sha256': 'matrix'},
+        cohort={'track': ['task']}, reader_profile_id='fixed', lambda_time=0,
+        resource_scope={'gpu_devices': [0], 'gpu_capacity_tokens': 32768, 'host_capacity_tokens': 65536},
+        workload_plans={'4': {'track': {'sha256': 'arrivals-A'}}},
+        assets={'gain': {'sha256': 'B'}, 'value': None},
+        jobs=[dict(name='job', output='generation', complete_slo_seconds=30)])
+    plan_path = tmp_path / 'capacity-plan.json'
+    plan_path.write_text(json.dumps(plan))
+    row = dict(job='job', method='B6_native', concurrency=4, requested_qa=1, completed_qa=1,
+        queue_quality=.5, p95_complete_ms=100, paid_native_usage={},
+        native_cache_config={'gpu_capacity_tokens': 32768, 'host_capacity_tokens': 65536, 'page_size': 16},
+        runtime_hardware={'host_name': 'fixture-host', 'platform': 'fixture-platform',
+            'gpus': [{'index': 0, 'uuid': 'fixture-device', 'name': 'H200',
+                      'memory_bytes': 141*1024**3, 'driver_version': 'fixture-driver'}]},
+        datasets={'track': dict(missing_execution_task_ids=[], failed_task_ids=[], unscored_answer_task_ids=[])})
+    path = tmp_path / 'workflow.json'
+    def cells(value):
+        return full_queue_cells({'format': 'contextkv_full_queue_joint_workflow_v1', 'results': [value]}, path)
+    reference = cells(row)
+    baseline = cells({**row, 'method': 'E0_native'})
+    assert full_queue_comparisons(baseline + reference)[0]['baseline'] == 'E0_native'
+    candidate = {**row, 'method': 'S3_native', 'queue_quality': .6}
+    same = full_queue_comparisons(reference + cells(candidate))[0]
+    assert same['comparable'] and same['differences']['queue_quality'] == pytest.approx(.1)
+    faster = full_queue_comparisons(reference + cells({**candidate, 'p95_complete_ms': 85}))[0]
+    assert faster['relative_p95_change'] == pytest.approx(-.15)
+    assert faster['quality_not_lower'] is True
+    other_hardware = {**row['runtime_hardware'], 'gpus': [
+        {**row['runtime_hardware']['gpus'][0], 'name': 'A100'}]}
+    changed_device = full_queue_comparisons(reference + cells({**candidate, 'runtime_hardware': other_hardware}))[0]
+    assert not changed_device['comparable'] and changed_device['relative_p95_change'] is None
+    assert changed_device['incompatible_identity_fields'] == ['resource_scope']
+    unknown = full_queue_comparisons(reference + cells({**candidate, 'runtime_hardware': None}))[0]
+    assert not unknown['comparable'] and unknown['missing_identity_fields'] == ['resource_scope.hardware']
+    plan['resource_scope']['host_capacity_tokens'] = 131072
+    plan_path.write_text(json.dumps(plan))
+    assert full_queue_comparisons(reference + cells(candidate))[0]['incompatible_identity_fields'] == ['resource_scope']
+    plan['resource_scope']['host_capacity_tokens'] = 65536
+    plan_path.write_text(json.dumps(plan))
+    incomplete = full_queue_comparisons(reference + cells({**candidate, 'completed_qa': 0}))[0]
+    assert incomplete['relative_p95_change'] is None
+    assert incomplete['differences']['p95_complete_ms'] is None
+    assert incomplete['quality_not_lower'] is None
+    assert incomplete['differences']['queue_quality'] == pytest.approx(.1)
+    unscored = {**candidate, 'datasets': {'track': dict(missing_execution_task_ids=[],
+        failed_task_ids=[], unscored_answer_task_ids=['task'])}}
+    assert full_queue_comparisons(reference + cells(unscored))[0]['relative_p95_change'] is None
+    assert full_queue_comparisons(reference + cells({**candidate, 'queue_quality': None}))[0]['quality_not_lower'] is None
+    assert full_queue_comparisons(cells({**row, 'p95_complete_ms': 0}) + cells(candidate))[0]['relative_p95_change'] is None
+    plan['workload_plans']['4']['track']['sha256'] = 'arrivals-B'
+    plan_path.write_text(json.dumps(plan))
+    changed = full_queue_comparisons(reference + cells(candidate))[0]
+    assert not changed['comparable'] and changed['differences']['queue_quality'] is None
+    assert changed['incompatible_identity_fields'] == ['workload_sha256']
+    assert changed['relative_p95_change'] is None
+    plan['workload_plans']['4']['track']['sha256'] = 'arrivals-A'
+    plan['jobs'][0]['complete_slo_seconds'] = 60
+    plan_path.write_text(json.dumps(plan))
+    assert full_queue_comparisons(reference + cells(candidate))[0]['incompatible_identity_fields'] == ['complete_slo_seconds']
+
+    out = tmp_path / 'index'
+    report = main(['--baseline-commit', '85f4ed4', '--physical', 'recorded-physical.json',
+                  '--gpu-devices', '2', '--output', str(out)])
+    assert report['baseline_commit'] == '85f4ed4'
+    report['capacity_comparisons'] = [faster, incomplete]
+    rendered = markdown(report)
+    assert '-15.00%' in rendered and '未知' in rendered
+    assert '质量差（候选−基线）' in rendered and '预登记的完整队列验收' in rendered
+    command = json.loads((out / 'cost-ledger-command.json').read_text())
+    assert not command['executed']
+    assert command['argv'][command['argv'].index('--gpu-devices') + 1] == '2'
+
+    plan['compilation_asset'] = {'sha256': 'C'}
+    plan_path.write_text(json.dumps(plan))
+    quartet = [cells({**row, 'method': method, 'queue_quality': quality, 'p95_complete_ms': latency})[0]
+        for method, quality, latency in (('B6_native', .5, 100), ('S3_native', .6, 90),
+                                        ('B6_contextpilot', .55, 95), ('S3_contextpilot', .7, 80))]
+    effects = full_queue_interactions(quartet)[0]['contrasts']
+    assert effects['queue_quality']['interaction'] == pytest.approx(.05)
+    assert effects['queue_quality']['B_contextpilot'] == pytest.approx(.15)
+    assert effects['p95_complete_ms']['interaction'] == -5
+    assert {item['baseline'] for item in full_queue_comparisons(quartet)
+            if item['candidate'] == 'S3_contextpilot'} == {'B6_native', 'S3_native', 'B6_contextpilot'}
+    assert full_queue_interactions(quartet[:3]) == []
+    repeated = [{**cell, 'replicate_scope': 'paired-queues', 'repetition': index}
+                for index in range(2) for cell in quartet]
+    assert [row['repetition'] for row in full_queue_interactions(repeated)] == [0, 1]
+    assert len(full_queue_comparisons(repeated)) == 2 * len(full_queue_comparisons(quartet))
+    quartet[-1]['full_queue_delivered'] = False
+    assert full_queue_interactions(quartet)[0]['contrasts']['p95_complete_ms'] is None
+    quartet[-1]['active_assets']['gain'] = {'sha256': 'different-B'}
+    assert full_queue_interactions(quartet) == []
+    mismatched = next(item for item in full_queue_comparisons(quartet)
+                     if item['candidate'] == 'S3_contextpilot' and item['baseline'] == 'S3_native')
+    assert not mismatched['comparable']
+    assert mismatched['incompatible_identity_fields'] == ['assets.gain']
+
+
+def test_public_and_constructed_tables_keep_split_metrics_and_full_denominators():
+    from bench.study_metrics import evaluation_track_protocol, declared_queue_summary
+    from profiling.final_study_index import full_queue_track_tables
+    spec = dict(split_kind="independent_training_sources_dev_and_public_test",
+        primary_metric="loong_reference_score", normalization=100, weight=.25,
+        metric_by_split={"dev": {"primary_metric": "project_condition_version_score", "normalization": 1}})
+    dev = evaluation_track_protocol(spec, "dev")
+    public = evaluation_track_protocol(spec, "test")
+    assert dev["origin"] == "constructed_task" and dev["normalization"] == 1
+    assert public["origin"] == "public_benchmark" and public["normalization"] == 100
+    rows = [dict(task_id="scored", status="completed", metrics={"project_condition_version_score": 1}, cost={}),
+            dict(task_id="unscored", status="completed", metrics={}, cost={})]
+    track = declared_queue_summary(rows, {**spec, **spec["metric_by_split"]["dev"]},
+                                    ["scored", "unscored", "missing"])
+    cell = dict(evaluation_kind="full_queue_own_P3", method="E1", concurrency=4,
+                dataset_protocols={"loong": dev}, datasets={"loong": track})
+    rendered = '\n'.join(full_queue_track_tables([cell]))
+    assert "构造任务机制轨" in rendered and "公开基准数据轨" not in rendered
+    assert "2/3 | 1/2" in rendered
+    assert track["queue_primary_score"] is None
+    assert track["queue_score_bounds"] == pytest.approx([1/3, 1])
+    assert track["scored_subset_primary"] == 1

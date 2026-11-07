@@ -22,7 +22,7 @@ from controller.config import create_controller, load_config
 from controller.context_schema import ContextBudget, EvidenceUnit, Need, SourceSpan, TaskState, TextRef, VersionIntent
 from controller.evidence import make_evidence
 from controller.prefix_retention import PrefixRuntimeClient
-from controller.reading import build_read_plan, stable_prefix_input_ids, stable_source_payload
+from controller.reading import build_read_plan, stable_source_payload
 from controller.serialization import to_jsonable
 from controller.templates import longest_common_prefix, token_hash
 
@@ -71,7 +71,7 @@ def build_case(case, snapshot, template):
     budget = ContextBudget(window_tokens=32768, body_tokens=4096, history_tokens=4096,
         output_tokens=512, read_input_tokens=12288, read_output_tokens=2048, max_steps=16)
     return build_read_plan(state, evidence, "selected_sources", budget, template=template,
-                           snapshot=snapshot, read_layout="source_first")
+                           snapshot=snapshot, read_layout="source_first", read_packing="source_windows")
 
 
 async def read_proofs(service, plan, steps):
@@ -81,9 +81,9 @@ async def read_proofs(service, plan, steps):
         if step.task.kind != "READ":
             continue
         _, step, _ = service.store.execution_step(step.attempt_id, step.step_id)
-        units = tuple(unit for unit in plan.selected_set.selected_units if unit.unit_id in step.task.input_unit_ids)
-        rendered = service.template.render(step.input_messages)
-        prefix = stable_prefix_input_ids(service.template, plan, step.task, units, rendered)
+        by_id = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+        units = tuple(by_id[identity] for identity in step.task.input_unit_ids)
+        prefix = step.input_ids[:step.metrics["source_view"]["source_prefix_tokens"]]
         source_payload, _ = stable_source_payload(units)
         sources = [{"source_unit": item["source_unit"], "source_spans": item["source_spans"]}
                    for item in source_payload]
@@ -217,6 +217,10 @@ async def run(args):
     output = Path(args.output_dir)
     config = load_config(args.config)
     config = replace(config, engine=replace(config.engine, base_url=args.base_url))
+    if args.mechanism == "contextpilot":
+        return await run_compilation_probe(config, output, gpu_device=args.gpu_device,
+            checkout=args.contextpilot_checkout,
+            background_offline_training=args.background_offline_training)
     arms = {}
     for arm in ("native", "fixed_ttl"):
         arms[arm] = await run_arm(config, output/arm, arm=arm,
@@ -230,6 +234,170 @@ async def run(args):
     return manifest
 
 
+def compilation_plan(service, case, reverse):
+    """Sum requires real extraction/computation; lookup has fully visible sources."""
+    operation = "sum" if case.startswith("sum") else "lookup"
+    question = ("What is the total quantity, in units, of all approved records in the supplied registry?"
+        if operation == "sum" else "Which desks review Record A and Record B?")
+    state = TaskState("compilation:"+operation, question,
+        needs=(Need("result", (TextRef(1, "user", 0, len(question)),), operation,
+                    scope="all_supplied_documents" if operation == "sum" else "selected_sources"),),
+        current_turn_id=1)
+    materials = []
+    for name, quantity, desk in (("A", 3, "Blue"), ("B", 5, "Green")):
+        text = (f"Lumen registry. Record {name} is approved. Its quantity is {quantity} units. "
+                f"The {desk} Desk reviews Record {name}.")
+        block = make_evidence(text, "registry-"+name, corpus_id="compilation-probe", version="v1")
+        unit = EvidenceUnit(name, (SourceSpan("span:"+name, block.key, 0, len(text)),), text,
+                            need_ids=("result",), document_family="registry-"+name)
+        materials.append((block, unit))
+    if reverse:
+        materials.reverse()
+    evidence = fixture_set(state, materials, name="compilation-material")
+    snapshot = service.store.read_snapshot(case, "compilation-probe-v1")
+    return build_read_plan(state, evidence,
+        "all_supplied_documents" if operation == "sum" else "selected_sources",
+        ContextBudget(window_tokens=32768, body_tokens=4096, history_tokens=4096,
+            output_tokens=1024, read_input_tokens=12288, read_output_tokens=2048, max_steps=16),
+        template=service.template, snapshot=snapshot, read_layout="source_first", read_packing="mixed")
+
+
+async def run_compilation_probe(config, output, *, gpu_device, checkout, background_offline_training):
+    """Paired Native/ContextPilot compilation, with no retention intervention."""
+    reports = {}
+    for arm in ("native", "contextpilot"):
+        directory = output/arm
+        directory.mkdir(parents=True, exist_ok=False)
+        current = replace(config, state_dir=str(directory/"state"), prefix_retention={"mode": "native"},
+            cache_compilation={"mode": arm, **({"checkout": checkout} if arm == "contextpilot" else {})},
+            context=replace(config.context, max_new_tokens=1024),
+            planner=replace(config.planner, strategy="always_rebuild"))
+        service = create_controller(current)
+        cold = await service.engine.profile_prepare("cold")
+        info = await service.engine.info()
+        native = NativePoolSampler(current.engine.base_url, gpu_capacity=current.engine.gpu_capacity_tokens,
+            host_enabled=current.engine.host_capacity_tokens > 0, model=current.model.name, interval=.1)
+        physical = StudyResourceSampler((gpu_device,), listening_processes((urlsplit(current.engine.base_url).port,)),
+                                       interval=.1)
+        quotes = []
+        quote_batch = service.engine.quote_batch
+
+        async def observed_quote(candidates, fingerprint):
+            started = time.monotonic()
+            batch = await quote_batch(candidates, fingerprint)
+            groups = {}
+            for candidate in candidates:
+                if candidate.feasible:
+                    key = (candidate.context_plan_id, candidate.generation_kind, candidate.action,
+                           candidate.output_budget, candidate.layout_id.removesuffix(":contextpilot"))
+                    groups.setdefault(key, []).append(candidate)
+            preferred = [service.request_compiler.choose_variant(group, batch) for group in groups.values()]
+            quotes.append({"start": started, "end": time.monotonic(),
+                "candidates": to_jsonable(candidates), "batch": to_jsonable(batch),
+                "native_preferred": [{"candidate_id": candidate.candidate_id, "input_hash": candidate.input_hash}
+                                     for candidate in preferred]})
+            return batch
+
+        service.engine.quote_batch = observed_quote
+        await native.start()
+        await physical.start()
+        start = time.monotonic()
+        rows = []
+        cases = (("sum-original", False), ("sum-reversed", True),
+                 ("lookup-original", False), ("lookup-reversed", True))
+        active = None
+        try:
+            for case, reverse in cases:
+                tick, quote_start = time.monotonic(), len(quotes)
+                active = {"case": case, "start": tick, "quote_start": quote_start}
+                plan = compilation_plan(service, case, reverse)
+                response = await service.serve_turn(case, plan.task_state.raw_question, context_plans=(plan,),
+                    corpus_snapshot_id="compilation-probe-v1", request_id=case)
+                attempt = service.store.get_attempt(response.attempt_id)
+                steps = service.store.execution_steps(response.attempt_id)
+                executed = [{"kind": step.task.kind, "receipt": to_jsonable(step.receipt),
+                    "source_view": step.metrics.get("source_view"), "input_ids": step.input_ids}
+                    for step in steps if step.receipt is not None]
+                events = [json.loads(line) for line in service.events.path.read_text().splitlines()]
+                answer_events = [event for event in events if event["event"] == "answer_source_executed"
+                                 and event["attempt_id"] == attempt.attempt_id]
+                executed.append({"kind": "ANSWER", "receipt": to_jsonable(attempt.result.receipt),
+                    "source_view": answer_events[-1]["source_view"], "input_ids": attempt.plan.candidate.input_ids})
+                for row in executed:
+                    receipt = row["receipt"]
+                    matched = [candidate for observed in quotes[quote_start:] for candidate in observed["candidates"]
+                        if candidate["input_hash"] == receipt["input_hash"]]
+                    row["quoted_execution_hash_matches"] = bool(matched) and token_hash(row["input_ids"]) == receipt["input_hash"]
+                    row["native_preferred_hash_matches"] = any(preferred["input_hash"] == receipt["input_hash"]
+                        for observed in quotes[quote_start:] for preferred in observed["native_preferred"])
+                    row["quoted_candidates"] = matched
+                    row["actual_body_device_hit_tokens"] = sum(max(0, min(last,
+                        receipt["actual_device_hit_tokens"])-first)
+                        for first, last in row["source_view"]["body_token_ranges"])
+                snapshot = service.store.get_snapshot(case)
+                rows.append(dict(case=case, status="completed", arm=arm, scope="native_compilation_probe",
+                    question=plan.task_state.raw_question, actual_history=[], initial_plan=to_jsonable(plan),
+                    response=to_jsonable(response), answer=response.assistant_text,
+                    attempt=to_jsonable(attempt), steps=to_jsonable(steps), executions=to_jsonable(executed),
+                    quotes=quotes[quote_start:], qa_increment=len(snapshot.raw_history), version_increment=snapshot.version,
+                    total_input_tokens=response.total_input_tokens, total_output_tokens=response.total_output_tokens,
+                    elapsed_ms=(time.monotonic()-tick)*1000,
+                    resource_window={"start": tick, "end": time.monotonic()}))
+                print(json.dumps({"arm": arm, "case": case, "read_count": response.read_count,
+                                  "answer": response.assistant_text}), flush=True)
+                active = None
+        finally:
+            error = sys.exc_info()[1]
+            end = time.monotonic()
+            if active is not None:
+                attempt = service.store.find_request(active["case"], active["case"])
+                staged = service.store.execution_steps_with_stage(attempt.attempt_id) if attempt else ()
+                steps = tuple(step for _, step in staged)
+                unknown = any(stage == "SUBMITTED" for stage, _ in staged) or (
+                    attempt is not None and attempt.stage == "SUBMITTED" and attempt.result is None)
+                generated = tuple(step for step in steps if step.receipt is not None)
+                final_input = len(attempt.plan.candidate.input_ids) if attempt and attempt.result else 0
+                final_output = len(attempt.result.output_ids) if attempt and attempt.result else 0
+                snapshot = service.store.get_snapshot(active["case"]) if attempt else None
+                rows.append(dict(case=active["case"], status="failed", error=str(error),
+                    attempt=to_jsonable(attempt), steps=to_jsonable(steps), executions=[],
+                    quotes=quotes[active["quote_start"]:], token_accounting_status="unresolved_generation" if unknown else "complete_receipts",
+                    total_input_tokens=None if unknown else sum(len(step.input_ids) for step in generated)+final_input,
+                    total_output_tokens=None if unknown else sum(len(step.output_ids) for step in generated)+final_output,
+                    qa_increment=len(snapshot.raw_history) if snapshot else 0,
+                    version_increment=snapshot.version if snapshot else 0,
+                    elapsed_ms=(end-active["start"])*1000,
+                    resource_window={"start": active["start"], "end": end}))
+            await service.aclose()
+            service.store.close()
+            await native.stop()
+            await physical.stop()
+            report = save_measurements(directory, rows, native, physical, start, end, current,
+                requested=[case for case, _ in cases], background_offline_training=background_offline_training)
+            report.update(scope="native_compilation_probe", training_eligible=False,
+                attribution="four controlled one-turn QA requests; not complete-queue quality or latency benefit",
+                cold_start=cold, engine_info=to_jsonable(info), error=str(error) if error else None,
+                all_executions_quote_bound=all(execution["quoted_execution_hash_matches"] and execution["native_preferred_hash_matches"]
+                    for row in rows for execution in row["executions"]),
+                compiled_permutation_roles=sorted({candidate["generation_kind"] for observed in quotes
+                    for candidate in observed["candidates"] if "contextpilot" in candidate["layout_id"]}),
+                body_hit_roles=sorted({execution["kind"] for row in rows for execution in row["executions"]
+                                      if execution["actual_body_device_hit_tokens"] > 0}),
+                observed_index_roles=sorted({execution["kind"] for row in rows for execution in row["executions"]
+                    if (execution["source_view"] or {}).get("index_request_id") is not None}))
+            (directory/"manifest.json").write_text(json.dumps(report, ensure_ascii=False, indent=2)+"\n")
+            (directory/"native-pool-observation.json").write_text(json.dumps(native.observation(), indent=2)+"\n")
+            (directory/"physical-resource-observation.json").write_text(json.dumps(physical.observation(), indent=2)+"\n")
+            reports[arm] = report
+    manifest = {"scope": "native_compilation_probe", "training_eligible": False, "arms": reports,
+        "mechanism_qualified": all(report["status"] == "completed" and report["all_executions_quote_bound"]
+            for report in reports.values())
+            and {"READ", "ANSWER"} <= set(reports["contextpilot"]["observed_index_roles"])
+            and {"READ", "ANSWER"} <= set(reports["contextpilot"]["compiled_permutation_roles"])}
+    (output/"manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
+    return manifest
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
@@ -237,8 +405,13 @@ def main():
     parser.add_argument("--gpu-device", type=int, required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--ttl-seconds", type=float, default=60)
+    parser.add_argument("--mechanism", choices=("semantic", "contextpilot"), default="semantic")
+    parser.add_argument("--contextpilot-checkout")
     parser.add_argument("--background-offline-training", action="store_true")
-    report = asyncio.run(run(parser.parse_args()))
+    args = parser.parse_args()
+    if args.mechanism == "contextpilot" and not args.contextpilot_checkout:
+        parser.error("--mechanism contextpilot requires --contextpilot-checkout")
+    report = asyncio.run(run(args))
     return 0 if report["mechanism_qualified"] else 1
 
 

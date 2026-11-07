@@ -6,23 +6,59 @@ scores.  A new reader checkpoint/profile gets a separate gain-data cohort.
 """
 from __future__ import annotations
 
+from controller.action_proposals import BOUNDED_CONTINUATION, validate_action_counts
+from controller.plan_gain_protocol import validate_input_protocol
+
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
 import math
 from pathlib import Path
 import time
 
-from controller.plan_policy import FEATURE_NAMES, PlanCandidate, plan_features
+from controller.plan_policy import (FEATURE_NAMES, OBSERVED_FEATURE_NAMES, OBSERVED_FEATURE_SCHEMA, CompleteCost, LEGACY_PLAN_KINDS,
+                                     NATIVE_COST_FEATURE_NAMES, NATIVE_COST_SCHEMA, PLAN_KINDS, PlanCandidate, complete_plan, plan_features)
 from controller.context_schema import ReadingOutcome
+from controller.resident_models import evidence_selection_contract
 from controller.schema import SessionSnapshot
-from controller.serialization import to_jsonable
+from controller.serialization import to_jsonable, decode
+
+
+COST_FIELDS = ("complete_ms", "gpu_gib_seconds", "host_gib_seconds",
+               "total_input_tokens", "total_output_tokens")
+COST_TARGETS = ("branch_complete_cost", "incremental_complete_cost")
+
+
+def observed_cost_targets(direct, counterfactual):
+    """Actual future response costs exclude common paid state, preparation and cleanup."""
+    measured = []
+    for branch in (direct, counterfactual):
+        cost = branch["remaining_cost"]
+        if cost is None or any(not isinstance(cost[name], (int, float))
+                or not math.isfinite(cost[name]) or cost[name] < 0 for name in COST_FIELDS):
+            raise ValueError("observed actions require measured nonnegative remaining complete response costs")
+        measured.append({name: cost[name] for name in COST_FIELDS})
+    baseline, future = measured
+    delta = {name: counterfactual["cost"][name]-direct["cost"][name] for name in COST_FIELDS}
+    if any(not math.isclose(delta[name], future[name]-baseline[name], rel_tol=1e-9, abs_tol=1e-9)
+           for name in COST_FIELDS):
+        raise ValueError("observed paired costs must share the same paid state and preparation")
+    return {"branch_complete_cost": future, "direct_complete_cost": baseline,
+            "incremental_complete_cost": delta}
 
 
 def _digest(value):
     return hashlib.sha256(json.dumps(to_jsonable(value), ensure_ascii=False,
         sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _fit_selection_contract(manifests):
+    contracts = (evidence_selection_contract(manifest) for manifest in manifests)
+    first = next(contracts, None)
+    if any(contract != first for contract in contracts):
+        raise ValueError("observed gains require one actual evidence selection contract")
+    return first
 
 
 def actual_history(snapshot: SessionSnapshot):
@@ -33,8 +69,14 @@ def actual_history(snapshot: SessionSnapshot):
 def working_state_key(state: ReadingOutcome, snapshot: SessionSnapshot):
     return _digest({"task_state": state.plan.task_state, "results": state.results,
         "claims": state.claims, "coverage": state.coverage, "open_needs": state.open_needs,
-        "available_sources": tuple((unit.unit_id, unit.text, unit.source_spans, unit.dependencies)
-            for unit in state.plan.selected_set.selected_units),
+        "available_sources": state.plan.selected_set,
+        "source_blocks": snapshot.archive, "reference_map": snapshot.reference_map,
+        "corpus_snapshot_id": snapshot.corpus_snapshot_id,
+        "read_geometry": state.plan.steps, "answer_plan": state.plan.answer_plan,
+        "budget": state.plan.budget, "layouts": state.plan.layouts,
+        "reading_options": {name: getattr(state.plan, name) for name in (
+            "reading_mode", "separate_needs", "numeric_identity", "read_layout", "read_packing",
+            "answer_system_prompt", "answer_allocation")},
         "coverage_scope": state.plan.coverage_scope, "required_scope": state.plan.coverage_units,
         "actual_history": actual_history(snapshot)})
 
@@ -51,6 +93,11 @@ def build_gain_record(plan: PlanCandidate, state: ReadingOutcome, snapshot: Sess
     """
     expected_state = working_state_key(state, snapshot)
     expected_history = actual_history(snapshot)
+    protocol = validate_input_protocol(direct.get("input_protocol"))
+    if protocol["reader_fingerprint"]["model_revision"] != plan.reader_checkpoint:
+        raise ValueError("input protocol belongs to a different actual reader checkpoint")
+    if counterfactual.get("input_protocol") != protocol:
+        raise ValueError("paired gain answers differ in their actual input protocol")
     for branch in (direct, counterfactual):
         if branch["measurement_kind"] != "hardware" or branch["history_origin"] not in {
                 "model_actual", "frozen_actual_rollout"}:
@@ -77,22 +124,51 @@ def build_gain_record(plan: PlanCandidate, state: ReadingOutcome, snapshot: Sess
     for name in ("split", "reader_checkpoint", "reader_profile_id", "comparison_budget", "scorer_identity"):
         if direct[name] != counterfactual[name]:
             raise ValueError(f"direct and counterfactual answers differ in {name}")
+    observed = direct.get("observed_state_binding")
+    if observed != counterfactual.get("observed_state_binding"):
+        raise ValueError("direct and counterfactual answers differ in their observed paid/native state")
+    if observed is not None:
+        if (observed["state_key"] != expected_state or observed["actual_history"] != expected_history
+                or observed["reader_checkpoint"] != plan.reader_checkpoint
+                or observed["reader_profile_id"] != direct["reader_profile_id"]):
+            raise ValueError("observed decision binding differs from the actual frozen reader/history state")
+        expected = {"READ": 0, "REDUCE": 0, "GAP_RETRIEVAL": 0, "ANSWER": 1}
+        if direct["new_action_counts"] != expected:
+            raise ValueError("observed direct baseline must perform only one new ANSWER")
+        if observed.get("continuation_protocol") != BOUNDED_CONTINUATION:
+            raise ValueError("observed gain labels use a different continuation protocol")
+        validate_action_counts(plan.semantic_kind, counterfactual["new_action_counts"])
     if direct["semantic_kind"] != "direct_answer" or direct["read_count"] != 0:
         raise ValueError("DeltaQ baseline must be direct ANSWER without newly paid reading")
     if counterfactual["plan_id"] != plan.plan_id:
         raise ValueError("counterfactual answer must execute the labelled complete plan")
-    return {"schema_version": 1, "record_id": _digest([expected_state, plan.plan_id,
-            direct["native_receipts"], counterfactual["native_receipts"]]),
+    paid = None if observed is None else decode(CompleteCost, observed["paid_cost"])
+    record = {"schema_version": 1, "record_id": _digest([expected_state, plan.plan_id,
+            direct["native_receipts"], counterfactual["native_receipts"], direct["scorer_identity"],
+            direct["quality"], counterfactual["quality"]]),
         "source": "actual_answer_counterfactual", "split": direct["split"],
+        "cohort_split": direct["cohort_split"], "cohort_manifest_sha256": direct["cohort_manifest_sha256"],
         "state_key": expected_state, "actual_history_sha256": _digest(expected_history),
         "reader_checkpoint": direct["reader_checkpoint"], "reader_profile_id": direct["reader_profile_id"],
+        "input_protocol": protocol,
         "scorer_identity": direct["scorer_identity"], "comparison_budget": direct["comparison_budget"],
         "plan_id": plan.plan_id, "semantic_kind": plan.semantic_kind,
-        "features": plan_features(plan, state, output_budgets=counterfactual.get("output_budgets")),
+        "features": plan_features(plan, state, output_budgets=counterfactual.get("output_budgets"), paid_cost=paid),
         "quality_direct": direct["quality"], "quality_counterfactual": counterfactual["quality"],
         "delta_q": counterfactual["quality"]-direct["quality"],
+        "incremental_complete_cost": {name: counterfactual["cost"][name]-direct["cost"][name]
+            for name in ("complete_ms", "gpu_gib_seconds", "host_gib_seconds",
+                         "total_input_tokens", "total_output_tokens")},
+        "observed_state_binding": observed,
         "direct_run": direct, "counterfactual_run": counterfactual,
         "plan": to_jsonable(plan), "working_state": to_jsonable(state)}
+    if observed is not None:
+        direct_plan = complete_plan(replace(state.plan, plan_id=direct["plan_id"],
+            steps=tuple(step.task for step in state.steps)), (), semantic_kind="direct_answer",
+            reader_checkpoint=plan.reader_checkpoint)
+        record["direct_features"] = plan_features(direct_plan, state, output_budgets=direct.get("output_budgets"), paid_cost=paid)
+        record["cost_targets"] = observed_cost_targets(direct, counterfactual)
+    return record
 
 
 @dataclass(frozen=True)
@@ -106,27 +182,91 @@ class PlanGainModel:
     coefficients: tuple[float, ...]
     intercept: float
     provenance: dict
+    cost_models: dict = field(default_factory=dict)
+    cost_provenance: dict = field(default_factory=dict)
+
+    def supports_semantic_kind(self, kind, *, costs=False):
+        if costs:
+            return bool(self.cost_models) and kind in self.cost_provenance["trained_semantic_kinds"]
+        declared = self.provenance["trained_semantic_kinds"]
+        return kind == "direct_answer" or (kind in declared and kind in self.feature_names)
+
+    def _check_action(self, features, *, costs=False):
+        for kind in PLAN_KINDS:
+            if features.get(kind, 0) > .5 and (not self.supports_semantic_kind(kind, costs=costs)
+                    or kind not in self.feature_names):
+                raise ValueError(f"asset has not learned semantic action {kind}")
+
+    def _linear(self, features, coefficients, intercept):
+        return intercept+sum(weight*(features[name]-center)/scale for name, center, scale, weight
+            in zip(self.feature_names, self.center, self.scale, coefficients, strict=True))
 
     def predict(self, features):
-        value = self.intercept+sum(weight*(features[name]-center)/scale for name, center, scale, weight
-            in zip(self.feature_names, self.center, self.scale, self.coefficients, strict=True))
+        self._check_action(features)
+        if self.provenance.get("direct_baseline_identity", False) and features.get("direct_answer", 0) > .5:
+            return 0.0
+        value = self._linear(features, self.coefficients, self.intercept)
         return min(1.0, max(-1.0, value))
+
+    def predict_costs(self, features):
+        """Predict the cost targets declared by this asset."""
+        if not self.cost_models:
+            raise ValueError("asset has no measured observed-action complete-cost heads")
+        self._check_action(features, costs=True)
+        if self.cost_provenance.get("feature_schema") == NATIVE_COST_SCHEMA:
+            scaled = tuple(features[key]/scale for key, scale in zip(self.cost_provenance["feature_names"],
+                self.cost_provenance["scale"], strict=True))
+            return {"branch_complete_cost": {name: head["intercept"]+sum(
+                coefficient*value for value, coefficient in zip(scaled, head["coefficients"], strict=True))
+                for name, head in self.cost_models["branch_complete_cost"].items()}}
+        result = {}
+        for target in COST_TARGETS:
+            result[target] = {}
+            for name in COST_FIELDS:
+                head = self.cost_models[target][name]
+                value = self._linear(features, head["coefficients"], head["intercept"])
+                if target == "incremental_complete_cost" and features.get("direct_answer", 0) > .5:
+                    value = 0.0
+                result[target][name] = max(0.0, value) if target == "branch_complete_cost" else value
+        return result
 
     def save(self, path):
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps({"schema_version": 1, "model_type": "reader_bound_plan_gain_ridge",
+        native = self.cost_provenance.get("feature_schema") == NATIVE_COST_SCHEMA
+        target.write_text(json.dumps({"schema_version": 3 if native else 2,
+            "model_type": "reader_bound_plan_gain_cost_ridge",
             **asdict(self)}, ensure_ascii=False, indent=2)+"\n")
 
     @classmethod
-    def load(cls, path, *, reader_checkpoint, reader_profile_id):
+    def load(cls, path, *, reader_checkpoint, reader_profile_id, reader_fingerprint=None):
         data = json.loads(Path(path).read_text())
-        if data.pop("schema_version") != 1 or data.pop("model_type") != "reader_bound_plan_gain_ridge":
+        schema, kind = data.pop("schema_version"), data.pop("model_type")
+        if (schema, kind) not in {(2, "reader_bound_plan_gain_cost_ridge"),
+                                  (3, "reader_bound_plan_gain_cost_ridge")}:
             raise ValueError("unsupported plan gain asset schema")
+        cost_provenance = data["cost_provenance"]
+        if schema == 3 and (cost_provenance["feature_schema"] != NATIVE_COST_SCHEMA
+                or tuple(cost_provenance["feature_names"]) != NATIVE_COST_FEATURE_NAMES):
+            raise ValueError("unsupported native cost feature schema")
         if data["reader_checkpoint"] != reader_checkpoint or data["reader_profile_id"] != reader_profile_id:
             raise ValueError("gain asset requires its measured reader checkpoint and runtime profile")
-        if tuple(data["feature_names"]) != FEATURE_NAMES:
-            raise ValueError("gain asset and online plan feature schemas differ")
+        if (len(set(data["feature_names"])) != len(data["feature_names"])
+                or set(data["feature_names"]) not in (set(FEATURE_NAMES), set(OBSERVED_FEATURE_NAMES))):
+            raise ValueError("gain asset requires a complete current feature schema")
+        protocol = validate_input_protocol(data["provenance"].get("input_protocol"),
+            reader_fingerprint=reader_fingerprint)
+        if protocol["reader_fingerprint"]["model_revision"] != reader_checkpoint:
+            raise ValueError("gain input protocol belongs to a different reader checkpoint")
+        observed = bool(set(data["provenance"]["trained_semantic_kinds"]) - set(LEGACY_PLAN_KINDS))
+        if observed or data["provenance"].get("observed_feature_schema") is not None:
+            if (data["provenance"].get("observed_feature_schema") != OBSERVED_FEATURE_SCHEMA
+                    or tuple(data["feature_names"]) != OBSERVED_FEATURE_NAMES
+                    or data.get("cost_provenance", {}).get("observed_feature_schema") != OBSERVED_FEATURE_SCHEMA):
+                raise ValueError("observed action asset requires the current pre-action budget feature schema")
+            cost_names = data["cost_provenance"].get("feature_names", data["feature_names"])
+            if schema != 3 and not set(OBSERVED_FEATURE_NAMES) <= set(cost_names):
+                raise ValueError("observed cost asset omits pre-action budget features")
         for name in ("feature_names", "center", "scale", "coefficients"):
             data[name] = tuple(data[name])
         return cls(**data)
@@ -139,7 +279,17 @@ def _supervision(rows, *, split):
                    json.dumps(row["scorer_identity"], sort_keys=True)) for row in rows}
     if len(identities) != 1:
         raise ValueError("fit one reader checkpoint/profile and scorer identity per gain asset")
+    limits = {_digest(row["counterfactual_run"]["continuation_gap_limits"]) for row in rows
+              if row.get("observed_state_binding") is not None}
+    if len(limits) > 1:
+        raise ValueError("one bounded gain asset requires the same declared GAP limits")
+    protocols = {_digest(validate_input_protocol(row.get("input_protocol"))) for row in rows}
+    if len(protocols) != 1:
+        raise ValueError("fit one actual source/compiler/reader input protocol per gain asset")
     for row in rows:
+        if any(row[name].get("input_protocol") != row["input_protocol"]
+               for name in ("direct_run", "counterfactual_run")):
+            raise ValueError("gain record input protocol differs from its actual branch evidence")
         if row["delta_q"] != row["quality_counterfactual"]-row["quality_direct"]:
             raise ValueError("gain labels must equal observed counterfactual quality minus direct quality")
         for name, quality in (("direct_run", row["quality_direct"]),
@@ -160,25 +310,155 @@ def _supervision(rows, *, split):
                 or direct["question"] != counterfactual["question"]
                 or histories[0] != histories[1]):
             raise ValueError("gain baseline must use the same actual question/history and direct ANSWER")
-    return next(iter(identities))
+        if row.get("observed_state_binding") is not None:
+            if (row["observed_state_binding"] != direct.get("observed_state_binding")
+                    or row["observed_state_binding"] != counterfactual.get("observed_state_binding")):
+                raise ValueError("observed cost labels must retain their bound paid/native decision state")
+            if (row["observed_state_binding"].get("continuation_protocol") != BOUNDED_CONTINUATION
+                    or direct["continuation_gap_limits"] != counterfactual["continuation_gap_limits"]):
+                raise ValueError("gain branches use different bounded continuation definitions")
+            state = decode(ReadingOutcome, row["working_state"])
+            plan = decode(PlanCandidate, row["plan"])
+            paid = decode(CompleteCost, row["observed_state_binding"]["paid_cost"])
+            expected_features = plan_features(plan, state,
+                output_budgets=counterfactual.get("output_budgets"), paid_cost=paid)
+            direct_plan = complete_plan(replace(state.plan, plan_id=direct["plan_id"],
+                steps=tuple(step.task for step in state.steps)), (), semantic_kind="direct_answer",
+                reader_checkpoint=plan.reader_checkpoint)
+            if row["direct_features"] != plan_features(direct_plan, state,
+                    output_budgets=direct.get("output_budgets"), paid_cost=paid):
+                raise ValueError("direct cost features differ from the bound pre-action paid budget state")
+            if row["features"] != expected_features:
+                raise ValueError("observed features or action one-hot values differ from the bound pre-action paid budget state")
+            if row["cost_targets"] != observed_cost_targets(direct, counterfactual):
+                raise ValueError("cost labels must equal the actual observed complete response costs")
+            if row["incremental_complete_cost"] != row["cost_targets"]["incremental_complete_cost"]:
+                raise ValueError("signed cost difference differs from the paired actual runs")
+    selection_contract = _fit_selection_contract(row[branch].get("source_run", {}).get("resident_model_manifest")
+        for row in rows if row.get("observed_state_binding") is not None
+        for branch in ("direct_run", "counterfactual_run"))
+    return (*next(iter(identities)), selection_contract)
+
+
+def _fit_features(rows):
+    names = tuple(rows[0]["features"])
+    selected = OBSERVED_FEATURE_NAMES if set(names) == set(OBSERVED_FEATURE_NAMES) else FEATURE_NAMES
+    if any(row.get("observed_state_binding") is not None for row in rows) and selected != OBSERVED_FEATURE_NAMES:
+        raise ValueError("observed supervision requires measured pre-action budget features and action one-hot values")
+    if any(set(row["features"]) != set(selected) for row in rows):
+        raise ValueError("fit one complete current feature schema without zero-filling new actions")
+    if any(row["semantic_kind"] not in LEGACY_PLAN_KINDS and row["semantic_kind"] not in selected for row in rows):
+        raise ValueError("single-action labels require their declared action one-hot features")
+    if any(row["features"][kind] != float(kind == row["semantic_kind"])
+           for row in rows for kind in PLAN_KINDS if kind in selected):
+        raise ValueError("declared action one-hot values differ from the actual paired semantic action")
+    return selected
+
+
+def _cost_samples(rows):
+    """One direct observation per actual state/run, independently of pair count."""
+    samples, seen = [], set()
+    for row in rows:
+        if row.get("observed_state_binding") is None:
+            continue
+        samples.append((row["features"], row["cost_targets"]["branch_complete_cost"],
+                        row["cost_targets"]["incremental_complete_cost"]))
+        key = _digest([row["state_key"], row["direct_run"]["native_receipts"]])
+        if key not in seen:
+            seen.add(key)
+            samples.append((row["direct_features"], row["cost_targets"]["direct_complete_cost"],
+                            {name: 0.0 for name in COST_FIELDS}))
+    return samples, len(seen)
+
+
+def _ridge(z, y, ridge):
+    import numpy as np
+    x_mean, y_mean = z.mean(axis=0), y.mean(axis=0)
+    x = z-x_mean
+    coefficients = np.linalg.solve(x.T@x+ridge*np.eye(x.shape[1]), x.T@(y-y_mean))
+    return coefficients, y_mean-x_mean@coefficients
+
+
+
+def fit_cost_heads(samples, feature_names, center, scale, *, ridge=1.0, targets=COST_TARGETS):
+    """Fit complete-cost targets from fully observed samples."""
+    import numpy as np
+    if not samples:
+        return {}, {}
+    cost_x = np.asarray([[sample[0][name] for name in feature_names] for sample in samples], dtype=np.float64)
+    cost_y = np.asarray([[sample[index][name] for index in range(1, 1+len(targets)) for name in COST_FIELDS]
+                         for sample in samples], dtype=np.float64)
+    cost_z = (cost_x-center)/scale
+    weights, bias = _ridge(cost_z, cost_y, ridge)
+    errors = np.mean((cost_z@weights+bias-cost_y)**2, axis=0)
+    models = {target: {name: {"coefficients": weights[:, index*len(COST_FIELDS)+column].tolist(),
+        "intercept": float(bias[index*len(COST_FIELDS)+column])} for column, name in enumerate(COST_FIELDS)}
+        for index, target in enumerate(targets)}
+    mse = {target: {name: float(errors[index*len(COST_FIELDS)+column]) for column, name in enumerate(COST_FIELDS)}
+           for index, target in enumerate(targets)}
+    return models, mse
+
+
+def fit_native_cost_heads(samples, *, ridge):
+    """Fit absolute costs on nonnegative work with an unpenalized intercept."""
+    import numpy as np
+    from scipy.optimize import nnls
+
+    names = NATIVE_COST_FEATURE_NAMES
+    work = np.asarray([[features[name] for name in names] for features, _ in samples], dtype=np.float64)
+    scale = np.maximum(work.max(axis=0), 1.0)
+    design = np.column_stack((np.ones(len(samples)), work/scale))
+    penalty = np.column_stack((np.zeros(len(names)), math.sqrt(ridge)*np.eye(len(names))))
+    augmented = np.vstack((design, penalty))
+    heads, mse = {}, {}
+    for name in COST_FIELDS:
+        targets = np.asarray([cost[name] for _, cost in samples], dtype=np.float64)
+        fitted, _ = nnls(augmented, np.concatenate((targets, np.zeros(len(names)))))
+        heads[name] = {"intercept": float(fitted[0]), "coefficients": fitted[1:].tolist()}
+        mse[name] = float(np.mean((design@fitted-targets)**2))
+    return {"branch_complete_cost": heads}, {"branch_complete_cost": mse}, scale.tolist()
 
 
 def fit_gain(rows, *, ridge=1.0, input_path=None):
     """Closed-form regression; called only by the explicit training command."""
     import numpy as np
-    reader, profile, _ = _supervision(rows, split="train")
+    reader, profile, _, selection_contract = _supervision(rows, split="train")
     started = time.perf_counter()
-    x = np.asarray([[row["features"][name] for name in FEATURE_NAMES] for row in rows], dtype=np.float64)
+    names = _fit_features(rows)
+    cost_samples, direct_count = _cost_samples(rows)
+    features = [row["features"] for row in rows]
+    normalization = (*features, *(sample[0] for sample in cost_samples if sample[0]["direct_answer"] > .5))
+    all_x = np.asarray([[row[name] for name in names] for row in normalization], dtype=np.float64)
+    x = np.asarray([[row[name] for name in names] for row in features], dtype=np.float64)
     y = np.asarray([row["delta_q"] for row in rows], dtype=np.float64)
-    center, scale = x.mean(axis=0), x.std(axis=0)
+    center, scale = all_x.mean(axis=0), all_x.std(axis=0)
     scale[scale == 0] = 1.0
-    z, intercept = (x-center)/scale, float(y.mean())
-    coefficients = np.linalg.solve(z.T@z+ridge*np.eye(z.shape[1]), z.T@(y-intercept))
+    z = (x-center)/scale
+    coefficients, intercept = _ridge(z, y, ridge)
     predicted = np.clip(intercept+z@coefficients, -1, 1)
+    cost_models, cost_provenance = {}, {}
+    if cost_samples:
+        cost_models, cost_mse = fit_cost_heads(cost_samples, names, center, scale, ridge=ridge)
+        cost_provenance = {"source": "actual_observed_action_and_paired_direct_complete_response_costs",
+            "observed_feature_schema": OBSERVED_FEATURE_SCHEMA,
+            "training_samples": len(cost_samples), "action_samples": len(cost_samples)-direct_count,
+            "unique_direct_samples": direct_count,
+            "record_ids": [row["record_id"] for row in rows if row.get("observed_state_binding") is not None],
+            "trained_semantic_kinds": sorted({"direct_answer", *(row["semantic_kind"] for row in rows
+                if row.get("observed_state_binding") is not None)}),
+            "cost_fields": COST_FIELDS, "branch_scope": "new_action_and_complete_ANSWER_excludes_paid_preparation_cleanup",
+            "incremental_scope": "signed_action_plus_ANSWER_minus_direct_ANSWER",
+            "training_mse": cost_mse}
     digest = _digest(rows)
-    return PlanGainModel(reader, profile, "plan-gain:"+digest, FEATURE_NAMES,
-        tuple(center.tolist()), tuple(scale.tolist()), tuple(coefficients.tolist()), intercept,
-        {"label": "actual_final_quality_minus_actual_direct_answer_quality",
+    return PlanGainModel(reader, profile, "plan-gain:"+digest, names,
+        tuple(center.tolist()), tuple(scale.tolist()), tuple(coefficients.tolist()), float(intercept),
+        {"input_protocol": rows[0]["input_protocol"],
+         "evidence_selection_contract": selection_contract,
+         "observed_feature_schema": OBSERVED_FEATURE_SCHEMA if cost_samples else None,
+         "label": "actual_final_quality_minus_actual_direct_answer_quality",
+         "continuation_protocol": BOUNDED_CONTINUATION,
+         "continuation_gap_limits": rows[0]["counterfactual_run"]["continuation_gap_limits"]
+             if rows[0].get("observed_state_binding") is not None else None,
          "training_split": "train", "training_records": len(rows),
          "training_state_count": len({row["state_key"] for row in rows}),
          "record_ids": [row["record_id"] for row in rows], "input_sha256": digest,
@@ -186,22 +466,39 @@ def fit_gain(rows, *, ridge=1.0, input_path=None):
          "scorer_identity": rows[0]["scorer_identity"], "ridge": ridge,
          "training_mse": float(np.mean((predicted-y)**2)),
          "fit_elapsed_ms": (time.perf_counter()-started)*1000,
-         "implementation": "float64 standardized linear ridge; joint complete-plan features",
-         "counterfactual_runs_retained": True})
+         "implementation": "float64 standardized linear ridge; shared pre-action features for quality and complete costs",
+         "counterfactual_runs_retained": True,
+         "trained_semantic_kinds": sorted({row["semantic_kind"] for row in rows}),
+         "direct_baseline_identity": bool(cost_samples)}, cost_models, cost_provenance)
 
 
 def evaluate_gain(model, rows, *, training_state_keys=()):
-    reader, profile, _ = _supervision(rows, split="dev")
+    reader, profile, _, selection_contract = _supervision(rows, split="dev")
     if reader != model.reader_checkpoint or profile != model.reader_profile_id:
         raise ValueError("development gains belong to a different reader checkpoint/profile")
+    if rows[0]["input_protocol"] != model.provenance["input_protocol"]:
+        raise ValueError("development and training gain inputs use different source/compiler/reader scope")
+    if selection_contract != model.provenance.get("evidence_selection_contract"):
+        raise ValueError("development and training gains use different evidence selection contracts")
     if rows[0]["scorer_identity"] != model.provenance["scorer_identity"]:
         raise ValueError("development and training gain labels use different scoring rubrics")
     if set(training_state_keys) & {row["state_key"] for row in rows}:
         raise ValueError("gain development states overlap fitted training states")
     errors = [model.predict(row["features"])-row["delta_q"] for row in rows]
+    cost_report = {}
+    samples, direct_count = _cost_samples(rows)
+    if model.cost_models and samples:
+        for index, target in enumerate(COST_TARGETS, 1):
+            cost_report[target] = {}
+            predicted = [model.predict_costs(features)[target] for features, _, _ in samples]
+            for name in COST_FIELDS:
+                values = [estimate[name]-sample[index][name] for estimate, sample in zip(predicted, samples, strict=True)]
+                cost_report[target][name] = {"mae": sum(abs(value) for value in values)/len(values),
+                                            "mse": sum(value*value for value in values)/len(values)}
     return {"split": "dev", "records": len(rows), "mae": sum(abs(e) for e in errors)/len(errors),
             "mse": sum(e*e for e in errors)/len(errors), "reader_checkpoint": reader,
-            "reader_profile_id": profile, "asset_id": model.asset_id}
+            "reader_profile_id": profile, "asset_id": model.asset_id,
+            "cost_errors": cost_report, "cost_samples": len(samples), "unique_direct_samples": direct_count}
 
 
 def main(argv=None):

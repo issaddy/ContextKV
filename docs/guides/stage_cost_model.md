@@ -1,6 +1,6 @@
 # 完整成本与标定
 
-B在线加载`CostModel`及其数据；`profiling.sglang_probe → profiling.fit → profiling.stage_fit`是生成这些数据的离线工具链。当前成本文件对应H200、Qwen3-32B、32768个GPU KV槽位和16GB Host配置，原始数据与验证范围见[评价记录](../data_and_evaluation.md)。
+在线成本选择使用 `CostModel`。离线工具链 `profiling.sglang_probe → profiling.fit → profiling.stage_fit` 生成绑定实际模型、采样和缓存配置的成本资产。[评价记录](../data_and_evaluation.md)
 
 ## 决策
 
@@ -13,7 +13,7 @@ B在线加载`CostModel`及其数据；`profiling.sglang_probe → profiling.fit
 - decode按实测上下文区间逐token累计；首token已计入forward。
 - 本地候选、报价和提交耗时另计，按动作维护完成观测。
 
-总TTFT原始测点用于校验，在线阶段模型不再重复加总TTFT。动作按预计完整耗时选择；预测成本相等时考虑工作集和输入长度，当前不使用误差带作为切换阈值。缺少观测或超出测量范围时执行配置的固定策略。GPU/Host容量通过准入与等待进入预计耗时，资源占用积分另行评价；当前没有直接最小化占用积分或预测未来回访收益。
+总 TTFT 的原始测点用于校验。在线阶段模型将准备、等待、forward 和 decode 各计一次。成本策略只在具有可用估计的候选之间比较完整成本，预测成本相等时考虑工作集和输入长度。若多个可行候选均无可用估计，决策返回 `uncalibrated_cost`。单一可行候选直接执行。固定策略由配置显式选定。GPU 和 Host 容量通过准入与等待影响预计耗时，资源占用积分单独记录。
 
 ## 原生预算与服务长度
 

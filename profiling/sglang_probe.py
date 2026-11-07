@@ -15,11 +15,11 @@ from pathlib import Path
 import random
 import uuid
 
-from controller.engine_client import EngineError, SGLangEngineClient
+from controller.engine_client import SGLangEngineClient
 from controller.schema import PromptCandidate
 from controller.sampling import request_sampling
 from controller.templates import token_hash
-from profiling.common import Measurement, write_measurements
+from profiling.common import Measurement, prepare_cache_fixture, write_measurements
 from profiling.prefill import PrefillCase, calibration_grid, load_cases
 from profiling.transfers import from_completed_events
 
@@ -52,15 +52,7 @@ class SGLangProbe:
                                          "warmup": self.warmup, **record}) + "\n")
 
     async def _fixture(self, mode):
-        # HTTP completion can precede the last overlapped housekeeping step.
-        # Retry only ENGINE_BUSY, never suppress configuration/admission failures.
-        for attempt in range(20):
-            try:
-                return await self.engine.profile_prepare(mode)
-            except EngineError as error:
-                if error.code != "ENGINE_BUSY" or attempt == 19:
-                    raise
-                await asyncio.sleep(.05)
+        return await prepare_cache_fixture(self.engine, mode)
 
     async def _generate(self, ids, output_tokens):
         info = await self.engine.info()

@@ -1,6 +1,8 @@
 """Version-aware source directory and quota-balanced evidence candidate pools."""
 from __future__ import annotations
 
+from controller.context_budget import condition_references
+
 from dataclasses import dataclass, replace
 from datetime import date
 import re
@@ -10,6 +12,7 @@ import numpy as np
 
 from controller.context_schema import EvidencePool, EvidenceUnit, SourceSpan
 from adapters.table_relations import extract_table_relations
+from controller.source_windows import SOURCE_WINDOW_TOKENS, source_window_spans
 
 
 _TEMPORAL_UNSET = object()
@@ -21,11 +24,16 @@ class PoolProfile:
     per_need_top_k: int = 20
     archive_top_k: int = 12
     primary_pool_size: int = 96
-    unit_tokens: int = 2048
+    unit_tokens: int = SOURCE_WINDOW_TOKENS
+    window_protocol: str = "canonical"
+
+    def __post_init__(self):
+        if self.window_protocol not in {"canonical", "source_rows_pr3"}:
+            raise ValueError("unknown source window protocol")
 
 
 def unit_identity(key, start, end):
-    return f"{key.corpus_id}:{key.document_id}:{key.passage_id}:{key.version}:{start}:{end}"
+    return f"{key.corpus_id}:{key.document_id}:{key.passage_id}:{key.version}:{key.content_sha256}:{start}:{end}"
 
 
 def merge_retrieved_units(*groups):
@@ -47,7 +55,7 @@ class SourceDirectory:
         self.corpus_index, self.search, self.tokenizer = corpus_index, search, tokenizer
         self.task_interpreter = task_interpreter
         self.archive_encoder = archive_encoder
-        self._archive_vectors = {}
+        self._unit_vectors = {}
         self.reference_date = reference_date or date.today().isoformat()
         self.profile = profile or PoolProfile()
         self._units = {}
@@ -78,39 +86,63 @@ class SourceDirectory:
     def _split(self, block):
         metadata = self.corpus_index.source_metadata.get(block.key, {})
         base = block.span[0] if block.span else 0
-        # Keep source rows intact; long prose prefers literal sentence boundaries.
-        regions = [(match.start(), match.end()) for match in re.finditer(r"[^\n]+(?:\n|$)", block.text)]
-        units = []
-        for start, end in regions:
-            offsets = self.tokenizer(block.text[start:end], add_special_tokens=False,
-                                     return_offsets_mapping=True)["offset_mapping"]
-            sentence_ends = {match.end() for match in re.finditer(r"[.!?。！？;；](?:\s+|$)", block.text[start:end])}
-            first = 0
-            while first < len(offsets):
-                last = min(first+self.profile.unit_tokens, len(offsets))
-                boundaries = [index+1 for index in range(first, last)
-                    if offsets[index][1] in sentence_ends and index-first >= self.profile.unit_tokens//2]
-                if last < len(offsets) and boundaries:
-                    last = boundaries[-1]
-                section = offsets[first:last]
-                left = start + section[0][0]
-                right = start + section[-1][1]
-                text = block.text[left:right]
-                unit_id = unit_identity(block.key, base+left, base+right)
-                spans = (SourceSpan(f"span:{unit_id}", block.key, base+left, base+right),)
-                applicability = tuple(sorted(metadata.get("applicability", {}).items()))
-                units.append(EvidenceUnit(unit_id, spans, text, metadata.get("heading", block.title),
-                    metadata.get("table_id"), applicability=applicability,
-                    body_tokens=len(self.tokenizer(text, add_special_tokens=False)["input_ids"]),
-                    document_family=metadata.get("document_family", block.key.document_id),
-                    valid_from=metadata.get("valid_from"), valid_to=metadata.get("valid_to"),
-                    published_at=metadata.get("published_at"), original_passage_ids=(block.key.passage_id,),
-                    version_order=tuple(metadata.get("version_order") or ()), current=metadata.get("current")))
-                if last == len(offsets):
-                    break
-                overlap = 0 if offsets[last-1][1] in sentence_ends else min(32, self.profile.unit_tokens//8)
-                first = max(first+1, last-overlap)
         tables = extract_table_relations(block.text, mode="explicit")
+        # Shared table context must not be grouped with data: otherwise a data
+        # window becomes another data window's header dependency and is excluded
+        # from extraction-output reservation as though it contained only context.
+        boundaries = {0, len(block.text)}
+        for table in tables:
+            anchors = (*table.headers, *table.source_notes,
+                *((table.caption,) if table.caption is not None else ()),
+                *(anchor for row in table.relations for anchor in (*row.parent_path, *row.notes)))
+            for anchor in anchors:
+                left = block.text.rfind("\n", 0, anchor.start) + 1
+                newline = block.text.find("\n", anchor.end)
+                right = len(block.text) if newline < 0 else newline + 1
+                boundaries.update((left, right))
+        if self.profile.window_protocol == "canonical":
+            ordered = sorted(boundaries)
+            windows = tuple((start+left, start+right)
+                for start, end in zip(ordered, ordered[1:])
+                for left, right in source_window_spans(block.text[start:end], self.tokenizer,
+                                                       tokens=self.profile.unit_tokens))
+        else:
+            # Frozen PR3 source-row protocol, including its long-line overlap.
+            windows = []
+            for match in re.finditer(r"[^\n]+(?:\n|$)", block.text):
+                start, end = match.span()
+                offsets = self.tokenizer(block.text[start:end], add_special_tokens=False,
+                    return_offsets_mapping=True)["offset_mapping"]
+                sentence_ends = {match.end() for match in re.finditer(
+                    r"[.!?。！？;；](?:\s+|$)", block.text[start:end])}
+                first = 0
+                while first < len(offsets):
+                    last = min(first+self.profile.unit_tokens, len(offsets))
+                    cuts = [index+1 for index in range(first, last)
+                        if offsets[index][1] in sentence_ends
+                        and index-first >= self.profile.unit_tokens//2]
+                    if last < len(offsets) and cuts:
+                        last = cuts[-1]
+                    section = offsets[first:last]
+                    windows.append((start+section[0][0], start+section[-1][1]))
+                    if last == len(offsets):
+                        break
+                    overlap = (0 if offsets[last-1][1] in sentence_ends
+                               else min(32, self.profile.unit_tokens//8))
+                    first = max(first+1, last-overlap)
+        units = []
+        for left, right in windows:
+            text = block.text[left:right]
+            unit_id = unit_identity(block.key, base+left, base+right)
+            spans = (SourceSpan(f"span:{unit_id}", block.key, base+left, base+right),)
+            applicability = tuple(sorted(metadata.get("applicability", {}).items()))
+            units.append(EvidenceUnit(unit_id, spans, text, metadata.get("heading", block.title),
+                metadata.get("table_id"), applicability=applicability,
+                body_tokens=len(self.tokenizer.encode(text, add_special_tokens=False)),
+                document_family=metadata.get("document_family", block.key.document_id),
+                valid_from=metadata.get("valid_from"), valid_to=metadata.get("valid_to"),
+                published_at=metadata.get("published_at"), original_passage_ids=(block.key.passage_id,),
+                version_order=tuple(metadata.get("version_order") or ()), current=metadata.get("current")))
         for table in tables:
             table_id = f"{block.key.document_id}:{block.key.passage_id}:{block.key.version}:table:{base+table.span.start}"
             for row in table.relations:
@@ -161,14 +193,24 @@ class SourceDirectory:
         keys = tuple(keys)
         if not keys or self.archive_encoder is None:
             return keys[:top_k]
+        vectors = {}
         for key in keys:
-            if key not in self._archive_vectors:
-                vectors = np.asarray(self.archive_encoder([u.text for u in self._units[key]]), dtype=np.float32)
-                vector = vectors.mean(axis=0)
-                self._archive_vectors[key] = vector / np.linalg.norm(vector)
+            vector = self.encode_source_units(self._units[key], self.archive_encoder).mean(axis=0)
+            vectors[key] = vector / np.linalg.norm(vector)
         query_vector = np.asarray(self.archive_encoder([query])[0], dtype=np.float32)
         query_vector /= np.linalg.norm(query_vector)
-        return tuple(sorted(keys, key=lambda key: -float(self._archive_vectors[key] @ query_vector)))[:top_k]
+        return tuple(sorted(keys, key=lambda key: -float(vectors[key] @ query_vector)))[:top_k]
+
+    def encode_source_units(self, units, encode):
+        """Reuse the fixed document encoder's vectors by original source identity."""
+        units = tuple(units)
+        missing = tuple({unit.unit_id: unit for unit in units
+                         if unit.unit_id not in self._unit_vectors}.values())
+        if missing:
+            values = encode([unit.text for unit in missing])
+            self._unit_vectors.update((unit.unit_id, np.asarray(value, dtype=np.float32))
+                for unit, value in zip(missing, values, strict=True))
+        return np.asarray([self._unit_vectors[unit.unit_id] for unit in units], dtype=np.float32)
 
     def candidate_search(self, query, *, top_k=50):
         return tuple(self.search(query, top_k=top_k))
@@ -282,31 +324,21 @@ class SourceDirectory:
             return hits
 
         streams.append(recall(state.query or state.raw_question, profile.current_top_k, "current"))
-        from adapters.history_state import history_text
-        active_ids = {condition.condition_id for condition in state.conditions}
-        inactive = tuple(ref for prior in memory.prior_task_states for condition in prior.conditions
-                         if prior.task_id == state.task_id and condition.condition_id not in active_ids
-                         for ref in condition.value_spans)
+        from adapters.history_state import active_ref_parts, history_text, retired_condition_refs
+        inactive = retired_condition_refs(memory.prior_task_states, state.task_id, state.conditions)
 
         def need_text(ref):
-            text = (state.raw_question[ref.start:ref.end] if ref.turn_id == state.current_turn_id
+            return (state.raw_question[ref.start:ref.end] if ref.turn_id == state.current_turn_id
                     else history_text(ref, memory))
-            intervals = sorted((max(ref.start, old.start)-ref.start, min(ref.end, old.end)-ref.start)
-                for old in inactive if ref.turn_id == old.turn_id and ref.speaker == old.speaker
-                and ref.start < old.end and old.start < ref.end)
-            cursor, pieces = 0, []
-            for start, end in intervals:
-                pieces.append(text[cursor:start])
-                cursor = max(cursor, end)
-            pieces.append(text[cursor:])
-            return "".join(pieces)
 
         for need in state.needs:
-            pieces = [need_text(ref) for ref in (*need.anchor_spans, *need.subject_refs)]
-            pieces.extend(state.raw_question[ref.start:ref.end] if ref.turn_id == state.current_turn_id
-                          else history_text(ref, memory)
-                          for condition in state.conditions for ref in condition.value_spans)
-            streams.append(recall("\n".join(pieces), profile.per_need_top_k, "need", need.need_id))
+            refs = dict.fromkeys((
+                *(piece for ref in (*need.anchor_spans, *need.subject_refs)
+                  for piece in active_ref_parts(ref, inactive)),
+                *(ref for condition in state.conditions if condition.condition_id in need.condition_ids
+                  for ref in condition_references(condition)),
+                *state.version_intent.time_refs))
+            streams.append(recall("\n".join(map(need_text, refs)), profile.per_need_top_k, "need", need.need_id))
         archive = [key for key in memory.archive_source_keys if self._applicable(key, state, memory, temporal_sources=temporal)]
         archive = self.archive_search(state.query or state.raw_question, archive, top_k=profile.archive_top_k)
         streams.append([(key, 0.0, "") for key in archive])
@@ -335,6 +367,11 @@ class SourceDirectory:
         blocks = self.source_fetch(keys)
         return EvidencePool(tuple(unit for block in blocks for unit in self._units[block.key]),
                             blocks, "all_supplied_documents")
+
+    def applicable_scope(self, keys, state, memory):
+        temporal = None if state.version_intent.resolved_version_ids else self._temporal_sources(state, memory)
+        roots = (key for key in keys if self._applicable(key, state, memory, temporal_sources=temporal))
+        return self.full_scope(roots)
 
     @staticmethod
     def open_need_query(state, need):

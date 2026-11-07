@@ -41,7 +41,7 @@ python -m bench.retrieval_eval build \
 
 作者提供`doc_html_ts`时，同次导入将列表嵌套和`text_id`对应的原文坐标写入`metadata.source_lists`。JSONL的`text`仍是原始切片，已有BM25/BGE索引可直接复用。默认直接使用原文；显式设置`metadata.source_list_reading: true`时，`CorpusIndex`加载阶段插入作者的`ul/ol/li`结构，联合选材与生成使用同一阅读正文。列表中的“或”、前提和例外原话均保留，不自动推断逻辑标签。跨章节列表只保留本段完整的嵌套列表，不合并整篇文档或丢弃原话。
 
-这一处理采用[Docling结构化序列化](https://docling-project.github.io/docling/concepts/chunking/)的原则，直接利用现成HTML及坐标，不引入OCR、额外模型或转换依赖。格式化正文参与既有证据身份和实际token计量；引用和缓存不会误用旧的展平正文。质量导出以当前可引用的实际阅读材料为准，另存原始检索结果。公开输入配对诊断未显示HTML标记的净收益，因此结构数据的保留与是否注入模型分开处理，结果见[统一评价](../data_and_evaluation.md)。
+这一处理采用[Docling结构化序列化](https://docling-project.github.io/docling/concepts/chunking/)的原则，直接利用现成HTML及坐标，不引入OCR、额外模型或转换依赖。格式化正文参与既有证据身份和实际token计量。质量导出以当前可引用的实际阅读材料为准，另存原始检索结果。公开输入配对诊断未显示HTML标记的净收益，因此结构数据的保留与是否注入模型分开处理，结果见[统一评价](../data_and_evaluation.md)。
 
 为这一语料生成推荐的实际历史检索配置，以及既有比较配置：
 
@@ -68,14 +68,7 @@ python -m bench.run_sessions --config configs/qwen3_32b.yaml \
   --evidence-corpus data/multidoc2dial/test/passages.jsonl
 ```
 
-它使用已有查询适配器、实际QA稠密检索和每轮重建。原文向量、引用身份及持久化生命周期共用现有实现。以下矩阵保留任务解释与成本策略的历史比较配方，运行时须记录实际解码/解释服务及成本标定配置：
-
-```bash
-python -m bench.b6_joint_sweep --matrix configs/benchmark_multidoc2dial.yaml \
-  --stage test --job-timeout 3600 --output runs/multidoc2dial-system
-```
-
-配置采用`comparison_scope: system`：Native使用last3混合检索，ContextKV使用会话任务解释及完整A/B/C；共享结构化语料、BM25/BGE/重排权重、生成模型和资源预算。各方法沿自身实际历史检索，比较包含选材与执行差异，完整响应涵盖解释、检索、生成和提交。加`--execute`运行计划，实际结果见[统一评价](../data_and_evaluation.md)。
+它使用已有查询适配器、实际 QA 检索和每轮重建。固定 Qwen3-32B 下 P0/P1 规划器 × 阅读协议四格及自身 P3 的当前入口见[运行手册](../study/final_runbook.md)。
 
 保存答案的基础词项评分：
 

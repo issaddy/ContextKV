@@ -1,4 +1,4 @@
-"""Reader SFT data from actual training-partition controller attempts."""
+"""Audit exact native reader traces and independently verify protocol outputs."""
 from __future__ import annotations
 
 import asyncio
@@ -14,6 +14,9 @@ from controller.serialization import to_jsonable
 from controller.session_store import Attempt, load_record
 from controller.templates import token_hash
 
+
+
+REVIEW_PROTOCOL = "observed_output_independent_review_v1"
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -44,27 +47,35 @@ def history_digest(history):
 
 
 def export_reader_traces(config):
-    settings = config["reader_training"]
+    settings = config["reader_audit"]
     output = Path(settings["data"]["output_dir"])
     traces, excluded, sources = [], [], []
+    cohort_path = settings["data"].get("cohort_manifest")
+    members = ({member["task_id"]: member for member in json.loads(Path(cohort_path).read_text())["members"]}
+               if cohort_path else None)
     for spec in settings["data"]["rollouts"]:
-        if spec["split"] != "train":
-            raise ValueError("reader training traces must retain the native training partition")
         database = Path(spec["state_db"]).resolve()
         connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         turns = rows(spec["turns_path"])
+        if spec.get("failed_turns_path") and Path(spec["failed_turns_path"]).exists():
+            turns.extend(rows(spec["failed_turns_path"]))
         if settings["data"].get("export_turns") is not None:
             turns = turns[:settings["data"]["export_turns"]]
         sources.append({**spec, "turns_sha256": file_digest(spec["turns_path"]),
                         "exported_turns": len(turns), "has_execution_steps": "execution_steps" in tables})
         for turn in turns:
-            if turn.get("split", spec["split"]) != "train":
-                raise ValueError(f"non-training actual turn: {turn['task_id']}")
+            if members is not None:
+                member = members[turn["task_id"]]
+                if (turn["conversation_id"] != member["conversation_id"] or turn["turn"] != member["turn"] or
+                        history_digest(turn["actual_history"]) != member["actual_history_sha256"] or
+                        turn["cohort_split"] != member["split"]):
+                    raise ValueError(f"reader trace differs from registered actual state: {turn['task_id']}")
             attempt_id = turn["response"]["attempt_id"]
             payload = connection.execute("SELECT payload FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()[0]
             attempt = load_record(connection, Attempt, payload)
-            history = turn["actual_history"]
+            history = [{key: item[key] for key in ("turn_id", "user_text", "assistant_text")}
+                       for item in turn["actual_history"]]
             plan = attempt.reading_outcome.plan if attempt.reading_outcome is not None else attempt.context_plan
             blocks = {block.key: block for block in attempt.evidence}
             if plan is not None:
@@ -74,10 +85,11 @@ def export_reader_traces(config):
                 "content_sha256": block.key.content_sha256, "source_uri": block.source_uri}
                 for block in blocks.values()]
             common = {"task_id": turn["task_id"], "conversation_id": turn["conversation_id"],
-                "turn": turn["turn"], "attempt_id": attempt_id, "split": "train",
+                "turn": turn["turn"], "attempt_id": attempt_id, "split": turn.get("split", spec["split"]),
                 "source_partition": spec["source_partition"], "actual_history": history,
                 "actual_history_sha256": history_digest(history), "question": turn["question"],
                 "reader_identity": spec["reader_identity"], "snapshot_id": turn["snapshot_id"],
+                "cohort_split": turn.get("cohort_split"), "candidate_category": turn.get("category"),
                 "task_state": to_jsonable(attempt.query_context.task_state) if attempt.query_context is not None else None,
                 "context_plan": to_jsonable(plan), "original_sources": coordinates,
                 "trace_origin": {"turns_path": spec["turns_path"], "state_db": str(database)}}
@@ -103,7 +115,8 @@ def export_reader_traces(config):
                     "actual_output": record.result.raw_output, "actual_output_ids": list(record.output_ids),
                     "read_task": to_jsonable(record.task), "read_result": to_jsonable(record.result),
                     "output_schema": record.task.output_schema,
-                    "read_protocol_version": record.metrics.get("read_protocol_version", spec.get("read_protocol_version", 1)),
+                    "read_protocol_version": record.metrics["read_protocol_version"] if "read_protocol_version" in record.metrics
+                        else record.task.output_schema["properties"]["format_version"]["const"],
                     "generation_metrics": record.metrics})
             if attempt.stage == "COMMITTED":
                 candidate = attempt.plan.candidate
@@ -119,7 +132,7 @@ def export_reader_traces(config):
         connection.close()
     write_rows(output/"traces.jsonl", traces)
     write_rows(output/"export_exclusions.jsonl", excluded)
-    manifest = {"schema_version": 1, "evidence_kind": "actual_training_partition_runtime",
+    manifest = {"schema_version": 1, "evidence_kind": "actual_runtime_outputs",
         "turns": len({row["task_id"] for row in traces}), "examples": len(traces),
         "phases": dict(Counter(row["phase"] for row in traces)), "sources": sources,
         "traces_path": str((output/"traces.jsonl").resolve()), "excluded": len(excluded),
@@ -129,111 +142,8 @@ def export_reader_traces(config):
     return manifest
 
 
-def augment_retrieved_reads(config, *, template=None):
-    """Compile protocol-2 inputs from actually retrieved training originals.
-
-    These are new teacher-generation inputs, not fabricated historical READs.
-    Explicit source edits always require a fresh prompt-bound teacher target.
-    """
-    from dataclasses import replace
-    from adapters.corpus import CorpusIndex
-    from adapters.evidence_pool import SourceDirectory
-    from controller.context_schema import ContextBudget, EvidenceSet, Need, TaskState, TextRef
-    from controller.reading import build_read_plan, step_messages
-    from controller.schema import EvidenceBlock, EvidenceKey, SessionSnapshot, TurnRecord
-    from controller.serialization import decode
-    from controller.templates import HuggingFaceTemplate
-    settings = config["reader_training"]
-    data = settings["data"]
-    root = Path(data["output_dir"])
-    if template is None:
-        from engine_patches.contextkv_model_scope import load_model_scope
-        scope = load_model_scope(settings["base_scope"])
-        template = HuggingFaceTemplate(scope.model_path, None, local_files_only=True,
-                                      model_identity=scope.identity)
-    original = rows(root/"traces.jsonl")
-    answered = [row for row in original if row["phase"] == "ANSWER"][:data.get("retrieved_read_turns", 256)]
-    edits = rows(data["paired_mutations_path"]) if data.get("paired_mutations_path") else []
-    generated = []
-    for trace in answered:
-        variants = [("original", None), *((edit["mutation_id"], edit) for edit in edits if edit["task_id"] == trace["task_id"])]
-        for variant, edit in variants:
-            documents = []
-            changes = []
-            for source in trace["original_sources"]:
-                key = decode(EvidenceKey, source["source_key"])
-                body = source["text"]
-                if edit is not None and source["source_key"] == edit["source_key"]:
-                    start, end = edit["start"]-source["start"], edit["end"]-source["start"]
-                    if body[start:end] != edit["original_text"]:
-                        raise ValueError(f"paired edit differs from training original: {edit['mutation_id']}")
-                    body = body[:start]+edit["replacement"]+body[end:]
-                    key = replace(key, content_sha256=hashlib.sha256(body.encode()).hexdigest(),
-                                  version=edit.get("new_version", key.version))
-                    changes.append({**edit, "changed_source_key": to_jsonable(key),
-                        "changed_end": edit["start"]+len(edit["replacement"])})
-                documents.append(EvidenceBlock(key, source["source_uri"], "", body,
-                    span=(source["start"], source["start"]+len(body)), provenance=(source["source_uri"],)))
-            if edit is not None and not changes:
-                raise ValueError(f"paired edit has no matching actually retrieved training source: {edit['mutation_id']}")
-            history = tuple(decode(TurnRecord, turn) for turn in trace["actual_history"])
-            current = trace["turn"]
-            if trace["task_state"] is None:
-                refs = tuple(TextRef(turn.turn_id, role, 0, len(text)) for turn in history
-                    for role, text in (("user", turn.user_text), ("assistant", turn.assistant_text)))
-                state = TaskState(trace["task_id"], trace["question"], working_history=refs,
-                    needs=(Need("question", anchor_spans=(TextRef(current, "user", 0, len(trace["question"])),)),),
-                    current_turn_id=current)
-            else:
-                state = decode(TaskState, trace["task_state"])
-            corpus = CorpusIndex(documents, corpus_id=documents[0].key.corpus_id, snapshot_id=trace["snapshot_id"])
-            directory = SourceDirectory(corpus, None, template.tokenizer)
-            pool = directory.full_scope(tuple(block.key for block in documents))
-            evidence = EvidenceSet(f"actual-retrieval:{variant}", pool.units, source_blocks=pool.source_blocks)
-            budget = ContextBudget(window_tokens=32768, body_tokens=8192, read_input_tokens=12288,
-                                   read_output_tokens=2048, max_steps=512)
-            snapshot = SessionSnapshot(trace["conversation_id"], len(history), history, archive=tuple(documents))
-            plan = build_read_plan(state, evidence, "all_supplied_documents", budget,
-                template=template, snapshot=snapshot, read_layout="source_first", reading_mode="typed_reduce")
-            by_id = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
-            for step in plan.steps:
-                if step.kind != "READ":
-                    continue
-                messages = step_messages(plan, step, tuple(by_id[identity] for identity in step.input_unit_ids), snapshot=snapshot)
-                prompt = template.render(messages)
-                generated.append({**trace, "example_id": f"{trace['attempt_id']}:replanned:{variant}:{step.step_id}",
-                    "step_id": f"replanned:{variant}:{step.step_id}", "phase": "READ", "messages": to_jsonable(messages),
-                    "prompt_token_hash": prompt.input_hash, "prompt_tokens": len(prompt.input_ids),
-                    "actual_output": "", "actual_output_ids": [], "output_schema": step.output_schema,
-                    "read_task": to_jsonable(step), "read_result": None, "context_plan": to_jsonable(plan),
-                    "read_protocol_version": 2, "read_layout": "source_first", "pair_id": trace["example_id"],
-                    "source_mutations": changes,
-                    "original_sources": [{"source_key": to_jsonable(block.key), "start": block.span[0],
-                        "end": block.span[1], "text": block.text, "content_sha256": block.key.content_sha256,
-                        "source_uri": block.source_uri} for block in documents],
-                    "trace_origin": {**trace["trace_origin"], "input_origin": "actual_retrieval_replanned_protocol_2",
-                        "target_origin": "pending_real_teacher_generation"},
-                    "generation_metrics": {"status": "not_executed_by_original_R0", "input_tokens": 0, "output_tokens": 0}})
-    prior = {row["example_id"]: row for row in original}
-    prior.update((row["example_id"], row) for row in generated)
-    write_rows(root/"traces.jsonl", prior.values())
-    manifest = {"turns": len(answered), "read_examples": len(generated), "read_protocol_version": 2,
-        "read_layout": "source_first", "source_origin": "actual native-training retrieval",
-        "paired_source_edits": len(edits), "targets": "require fresh actual-history/source/prompt-bound teacher review",
-        "public_dev_test_sources_read": []}
-    (root/"retrieved_read_inputs_manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
-    return manifest
-
-
-def reader_target_body(trace, *, answer_output_tokens=1024):
-    """Give the target writer exactly the factual input available to the reader."""
-    return {"phase": trace["phase"], "messages": trace["messages"],
-        "target_output_budget_tokens": trace["read_task"]["output_budget"]
-            if trace["phase"] != "ANSWER" else answer_output_tokens}
-
-
-def reader_review_body(trace, *, answer_output_tokens=1024, target_text=None, reading_steps=()):
-    """Deduplicate literal views while preserving the complete online messages."""
+def reader_review_body(trace, *, answer_output_tokens=1024, reading_steps=()):
+    """Review the observed continuation; originals provide independent verification."""
     messages = trace["messages"]
     contents = [message["content"] for message in messages]
     structured = trace["phase"] != "ANSWER"
@@ -242,137 +152,151 @@ def reader_review_body(trace, *, answer_output_tokens=1024, target_text=None, re
         user_present = any(message["role"] == "user" and turn["user_text"] in message["content"] for message in messages)
         assistant_present = any(message["role"] == "assistant" and turn["assistant_text"] == message["content"] for message in messages)
         if not (user_present and assistant_present):
-            extra_history.append(turn)
+            extra_history.append({key: turn[key] for key in ("turn_id", "user_text", "assistant_text")})
     sources = []
     for source in trace["original_sources"]:
         metadata = {name: value for name, value in source.items() if name != "text"}
-        if structured:
-            metadata["text_view"] = "original window units and claims are preserved in exact messages"
-        elif any(source["text"] in content for content in contents):
+        if any(source["text"] in content for content in contents):
             metadata["text_view"] = "complete original already present in exact messages"
         else:
             metadata["text"] = source["text"]
         sources.append(metadata)
-    body = {"phase": trace["phase"], "question": trace["question"], "messages": messages,
+    body = {"target_output": trace["actual_output"]}
+    body.update(phase=trace["phase"], question=trace["question"], messages=messages)
+    body.update({
         "task_state": trace["task_state"], "additional_actual_history": extra_history,
         "full_actual_history_sha256": trace["actual_history_sha256"],
         "history_view": "actual QA already in exact messages plus unchanged additional_actual_history",
-        "original_sources": sources, "actual_output": trace["actual_output"],
-        "target_output_budget_tokens": trace["read_task"]["output_budget"] if structured else answer_output_tokens}
-    if target_text is not None:
-        body.update(target_text=target_text, reading_steps=trace.get("reading_steps", reading_steps),
-                    source_role="independent verification of the fixed target; not target-generation input")
+        "original_sources": sources,
+        "target_output_budget_tokens": trace["read_task"]["output_budget"] if structured else answer_output_tokens})
+    body.update(reading_steps=trace.get("reading_steps", reading_steps),
+                source_role="messages, input claims and reading_steps are evidence/upstream attribution only; target_output is the observed reader continuation")
     return body
 
 
 async def review_reader_trace(trace, client, *, minimum_quality, reviewer_identity,
                               review_input_budget, record_call, answer_output_tokens=1024,
                               reading_steps=()):
-    """Write from the visible prompt, then check an ANSWER against the full source ledger."""
+    """Audit the actual reader output against its visible input and full originals."""
     structured = trace["phase"] != "ANSWER"
     common = {"example_id": trace["example_id"], "task_id": trace["task_id"],
         "phase": trace["phase"], "step_id": trace["step_id"] if structured else None,
         "actual_history_sha256": trace["actual_history_sha256"],
-        "prompt_token_hash": trace["prompt_token_hash"], "reader_identity": trace["reader_identity"]}
+        "prompt_token_hash": trace["prompt_token_hash"], "reader_identity": trace["reader_identity"],
+        "review_protocol": REVIEW_PROTOCOL}
     assessment = {"quality": {"type": "number", "minimum": 0, "maximum": 1},
         "source_support_verified": {"type": "boolean"}, "correct_task_binding": {"type": "boolean"}}
-    target_properties = {"target": trace["output_schema"] if structured else {"type": "string"}}
-    if structured:
-        target_properties.update(assessment)
-    target_schema = {"type": "object", "properties": target_properties,
-                     "required": list(target_properties), "additionalProperties": False}
-
-    async def complete(stage, system, body, schema):
-        result = await asyncio.to_thread(client.complete,
-            [{"role": "system", "content": system},
-             {"role": "user", "content": json.dumps(body, ensure_ascii=False)}],
-            response_format={"type": "json_schema", "json_schema": {
-                "name": "reader_"+stage, "strict": True, "schema": schema}})
+    async def complete(messages, schema):
+        limit = client.config.max_new_tokens
+        response_format = {"type": "json_schema", "json_schema": {
+            "name": "reader_review", "strict": True, "schema": schema}}
+        result = await asyncio.to_thread(client.complete, messages,
+            response_format=response_format, max_new_tokens=limit,
+            chat_template_kwargs={"enable_thinking": True})
         executed = result.status != "input_over_budget"
-        record_call({"example_id": trace["example_id"], "stage": stage, **asdict(result),
+        record_call({"example_id": trace["example_id"], "stage": "review", "review_protocol": REVIEW_PROTOCOL,
+            "teacher_messages_sha256": digest(messages), "max_new_tokens": limit,
+            "enable_thinking": True, **asdict(result),
             "model_request_executed": executed, "model_input_tokens": result.input_tokens if executed else 0,
             "model_output_tokens": (result.usage.get("completion_tokens")
                 if result.usage is not None else None) if executed else 0})
         return result
 
-    def terminal_record(result, stage):
+    def terminal_record(result):
         if result.status == "input_over_budget":
             return {**common, "status": "input_over_budget", "exclusion_reason": "review_input_over_budget",
-                "review_stage": stage, "review_input_tokens": result.input_tokens,
-                "review_input_budget": review_input_budget, "model_request_executed": False,
-                "target_origin": "not_generated" if stage == "target" else "visible_prompt_target_awaiting_review"}
+                "review_input_tokens": result.input_tokens,
+                "review_input_budget": review_input_budget, "model_request_executed": False}
         if result.status == "completed" and result.finish_reason == "length":
-            return {**common, "status": "teacher_"+stage+"_truncated",
-                "exclusion_reason": "teacher_"+stage+"_truncated", "review_stage": stage,
-                "target_origin": "truncated_output_not_a_training_target" if stage == "target"
-                    else "visible_prompt_target_awaiting_review",
+            return {**common, "status": "teacher_review_truncated",
+                "exclusion_reason": "teacher_review_truncated",
                 "raw_output": result.text, "finish_reason": result.finish_reason,
                 "input_tokens": result.input_tokens, "usage": result.usage,
                 "elapsed_ms": result.elapsed_ms, "model_request_executed": True}
+        if result.status == "completed" and not result.text.strip():
+            return {**common, "status": "teacher_review_empty",
+                "exclusion_reason": "teacher_returned_no_final_output",
+                "input_tokens": result.input_tokens, "usage": result.usage,
+                "elapsed_ms": result.elapsed_ms, "model_request_executed": True}
         if result.status != "completed" or result.finish_reason != "stop":
-            raise RuntimeError(f"reader {stage} unfinished for {trace['example_id']}: {result.status}/{result.finish_reason}")
+            raise RuntimeError(f"reader review unfinished for {trace['example_id']}: {result.status}/{result.finish_reason}")
         return None
 
-    target_system = ("Produce a high-quality supervised continuation for the exact recorded online messages. "
-        "Those messages contain all factual inputs available to the reader. Use their original sources, "
-        "visible Reading conclusions and actual conversation context to answer the current task. "
-        "Follow their active conditions, versions, READ JSON contract and ANSWER citation rules. "
-        "For READ, emit source-grounded facts under their exact need IDs; a window without a new fact has claims=[]. "
-        "Use followups for missing source relations required by the current need. "
-        "For ANSWER, give the supported answer completely and concisely within the supplied output budget. "
-        "Return the requested target fields.")
-    body = reader_target_body(trace, answer_output_tokens=answer_output_tokens)
-    result = await complete("target", target_system, body, target_schema)
-    terminal = terminal_record(result, "target")
+    target_text = trace["actual_output"]
+    target_tokens = len(trace["actual_output_ids"])
+    output_budget = trace["read_task"]["output_budget"] if structured else answer_output_tokens
+    review_properties = {**assessment, "visible_prompt_support": {"type": "boolean"},
+        "reason": {"type": "string", "maxLength": 512},
+        "upstream_errors": {"type": "array", "items": {"type": "object", "properties": {
+            "phase": {"type": "string", "enum": ["READ", "REDUCE"]},
+            "step_id": {"type": "string"}, "reason": {"type": "string"}},
+            "required": ["phase", "step_id", "reason"], "additionalProperties": False}}}
+    review_schema = {"type": "object", "properties": review_properties,
+        "required": list(review_properties), "additionalProperties": False}
+    phase_review = {
+        "READ": ("Assess only atomic facts this CURRENT visible source window can contribute to its active Needs. "
+            "Do not require an answer to the whole question or facts located elsewhere in full originals. An irrelevant "
+            "document window, an isolated heading, or text such as a delivery-method heading without a relevant relation "
+            "can correctly yield empty claims/facts/support/conflicts/open_needs. If no relevant visible fact is omitted "
+            "and no unsupported assertion is made, this empty extraction is correct: source_support_verified, "
+            "visible_prompt_support and correct_task_binding can all be true and quality high. Absence of a claim is "
+            "not hallucination. Respect step_output_schema: never penalize missing followups/open_needs when the schema "
+            "forbids them. Judge completeness against this window, not the entire source archive."),
+        "REDUCE": ("Assess only reasoning over the claims supplied in the CURRENT visible reduction input. Check "
+            "arithmetic, units, deduplication, conditions and parent/source chains. Do not demand facts missing from "
+            "those input claims merely because they occur elsewhere in complete originals. Full originals verify "
+            "asserted facts independently; observed upstream extraction mistakes belong in upstream_errors."),
+        "ANSWER": ("Assess whether the fixed final answer uses the visible evidence/conclusions to address the whole "
+            "current question, with the requested conditions, coverage, values and citations. A phase label, generic "
+            "placeholder or empty shell is not a complete final answer.")}[trace["phase"]]
+    review_system = ("The first body field target_output is the exact raw reader continuation being evaluated. "
+        "For READ/REDUCE, check that it is complete JSON matching step_output_schema; malformed or truncated JSON "
+        "is a step error. Inspect this exact text, not any output embedded in messages or reading_steps. Those other fields are evidence "
+        "or upstream attribution and must never replace the evaluated target. Return assessments only and do not "
+        "rewrite target_output. "+phase_review+" For READ/REDUCE, begin reason with the actual target_output counts "
+        "claims=N, facts=M (zero when absent), then identify the concrete erroneous claim/field or omitted relevant "
+        "fact if rejecting. A nonempty target can never be described as an empty extraction. A heading fragment "
+        "tagged as support for an unrelated Need is not a correct empty extraction. For ANSWER, reason must name "
+        "a specific target answer point and its error or explain which requested point it correctly addresses. "
+        "visible_prompt_support means every asserted "
+        "fact follows from the exact messages; source_support_verified checks those assertions against complete "
+        "original_sources independently. Extra originals/history are verification evidence, never additional required "
+        "content for a READ window or REDUCE input. When an observed READ/REDUCE caused an error, identify it using "
+        "reading_steps in upstream_errors; do not invent attribution. Give a short reason for the lowest score or any "
+        "false assessment, or explain why a valid empty extraction is appropriate. Return the object matching "
+        "review_output_schema.")
+    verification = reader_review_body(trace, answer_output_tokens=answer_output_tokens,
+        reading_steps=reading_steps)
+    verification["review_output_schema"] = review_schema
+    if structured:
+        verification["step_output_schema"] = trace["output_schema"]
+    result = await complete([{"role": "system", "content": review_system},
+        {"role": "user", "content": json.dumps(verification, ensure_ascii=False)}], review_schema)
+    terminal = terminal_record(result)
     if terminal is not None:
-        return terminal
+        return {**terminal, "target_text": target_text, "target_origin": "observed_reader_output"}
     value = json.loads(result.text)
-    target_text = json.dumps(value["target"], ensure_ascii=False, separators=(",", ":")) if structured else value["target"]
-    target_tokens = len(client.tokenizer.encode(target_text, add_special_tokens=False))+1
-    if not structured:
-        review_properties = {**assessment, "visible_prompt_support": {"type": "boolean"},
-            "upstream_errors": {"type": "array", "items": {"type": "object", "properties": {
-                "phase": {"type": "string", "enum": ["READ", "REDUCE"]},
-                "step_id": {"type": "string"}, "reason": {"type": "string"}},
-                "required": ["phase", "step_id", "reason"], "additionalProperties": False}}}
-        review_schema = {"type": "object", "properties": review_properties,
-            "required": list(review_properties), "additionalProperties": False}
-        review_system = ("Evaluate the supplied fixed target_text for the exact recorded reader prompt. "
-            "Return assessments only; the target remains unchanged. visible_prompt_support means its factual "
-            "claims follow from original sources or Reading conclusions inside messages. Additional original_sources "
-            "and additional_actual_history are verification evidence only. Evaluate source_support_verified "
-            "against those full originals independently of visible_prompt_support. If a visible reading conclusion "
-            "is wrong, record the responsible observed READ or REDUCE step in upstream_errors using reading_steps. "
-            "When no observed step establishes that attribution, leave upstream_errors empty. A correct fact found "
-            "only in the verification evidence does not establish visible_prompt_support. Assess task binding, "
-            "conditions, versions, completeness and allowed citations for the fixed target.")
-        result = await complete("review", review_system, reader_review_body(trace,
-            answer_output_tokens=answer_output_tokens, target_text=target_text, reading_steps=reading_steps), review_schema)
-        terminal = terminal_record(result, "review")
-        if terminal is not None:
-            return {**terminal, "target_text": target_text}
-        value = json.loads(result.text)
     accepted = (value["quality"] >= minimum_quality and value["source_support_verified"]
-                and value["correct_task_binding"] and target_tokens <= body["target_output_budget_tokens"]
-                and (structured or value["visible_prompt_support"]))
+                and value["correct_task_binding"] and target_tokens <= output_budget
+                and value["visible_prompt_support"])
     record = {**common, "status": "accepted" if accepted else "rejected",
-        "target_origin": "teacher_visible_runtime_prompt", "target_text": target_text,
-        "target_tokens_including_eos": target_tokens, "target_output_budget": body["target_output_budget_tokens"],
-        "quality": value["quality"], "source_support_verified": value["source_support_verified"],
+        "target_origin": "observed_reader_output",
+        "target_text": target_text,
+        "target_output_tokens": target_tokens, "target_output_budget": output_budget,
+        "quality": value["quality"], "reason": value["reason"],
+        "source_support_verified": value["source_support_verified"],
         "correct_task_binding": value["correct_task_binding"], "reviewer_identity": reviewer_identity,
         "read_protocol_version": trace["read_protocol_version"],
-        "quality_measurement": "same-call visible-target assessment" if structured
-            else "independent assessment of fixed visible-prompt target against original sources"}
-    if not structured:
-        record.update(visible_prompt_support=value["visible_prompt_support"], upstream_errors=value["upstream_errors"],
-                      review_protocol="visible_target_independent_review_v1")
+        "quality_measurement": "actual reader output checked against visible input and complete original sources",
+        "visible_prompt_support": value["visible_prompt_support"], "upstream_errors": value["upstream_errors"],
+        "target_sha256": digest(target_text)}
     return record
 
 
 async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
     from adapters.query_selector import OpenAICompletionClient, SelectorConfig
     from engine_patches.contextkv_model_scope import load_model_scope
-    settings = config["reader_training"]
+    settings = config["reader_audit"]
     data, review = settings["data"], settings["review"]
     root = Path(data["output_dir"])
     trace_rows = rows(root/"traces.jsonl")
@@ -383,8 +307,6 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
                 "step_id": trace["read_task"]["step_id"], "phase": trace["phase"],
                 "operation": trace["read_task"]["operation"], "claims": trace["read_result"]["claims"],
                 "covered_units": trace["read_result"]["covered_units"]})
-    allowed_protocols = data.get("read_protocol_versions", [2])
-    trace_rows = [row for row in trace_rows if row["phase"] == "ANSWER" or row["read_protocol_version"] in allowed_protocols]
     if limit_turns is not None:
         selected = set(dict.fromkeys(row["task_id"] for row in trace_rows))
         selected = set(sorted(selected)[:limit_turns])
@@ -395,7 +317,7 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
         max_new_tokens=review["max_output_tokens"], context_window=review["context_window"],
         timeout_seconds=review["timeout_seconds"], temperature=0)) for url in review["base_urls"]]
     path = root/"reviews.jsonl"
-    done = {row["example_id"] for row in rows(path)} if path.exists() else set()
+    done = {row["example_id"] for row in rows(path) if row.get("review_protocol") == REVIEW_PROTOCOL} if path.exists() else set()
     sink = path.open("a", encoding="utf-8")
     ledger = (root/"review_calls.jsonl").open("a", encoding="utf-8")
     semaphore = asyncio.Semaphore(concurrency)
@@ -425,56 +347,12 @@ async def review_reader_traces(config, *, limit_turns=None, concurrency=8):
         ledger.close()
         for client in clients:
             client.close()
-    saved = rows(path)
-    manifest = {"processed_examples": len(saved),
-        "reviewed_examples": sum(row["status"] in {"accepted", "rejected"} for row in saved),
+    saved = {row["example_id"]: row for row in rows(path) if row.get("review_protocol") == REVIEW_PROTOCOL}
+    manifest = {"review_protocol": REVIEW_PROTOCOL, "processed_examples": len(saved),
+        "reviewed_examples": sum(row["status"] in {"accepted", "rejected"} for row in saved.values()),
         "requested_examples": len(trace_rows),
-        "status_counts": dict(Counter(row["status"] for row in saved)),
+        "status_counts": dict(Counter(row["status"] for row in saved.values())),
         "elapsed_ms": (time.monotonic()-started)*1000, "reviews_path": str(path.resolve()),
         "cost_ledger": str((root/"review_calls.jsonl").resolve()), "reviewer": scope.manifest()}
     (root/"review_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
-    return manifest
-
-
-def prepare_reader_data(config):
-    settings = config["reader_training"]["data"]
-    root = Path(settings["output_dir"])
-    reviews = {row["example_id"]: row for row in rows(settings.get("reviews_path", root/"reviews.jsonl"))}
-    selected, excluded = [], []
-    for trace in rows(root/"traces.jsonl"):
-        review = reviews.get(trace["example_id"])
-        reason = ("not_native_train" if trace["split"] != "train" else
-            "old_read_protocol" if trace["phase"] != "ANSWER" and trace["read_protocol_version"] not in settings["read_protocol_versions"] else
-            "missing_review" if review is None else
-            "review_input_over_budget" if review["status"] == "input_over_budget" else
-            "teacher_target_truncated" if review["status"] == "teacher_target_truncated" else
-            "review_rejected" if review["status"] != "accepted" else
-            "insufficient_quality" if review["quality"] < settings["minimum_quality"] else
-            "unsupported_target" if not review["source_support_verified"] or not review["correct_task_binding"] else
-            "hidden_information_target" if review.get("visible_prompt_support") is False else
-            "actual_history_binding_mismatch" if review["actual_history_sha256"] != trace["actual_history_sha256"] else
-            "prompt_binding_mismatch" if review["prompt_token_hash"] != trace["prompt_token_hash"] else
-            "reader_binding_mismatch" if review["reader_identity"] != trace["reader_identity"] else None)
-        if reason is not None:
-            excluded.append({"example_id": trace["example_id"], "task_id": trace["task_id"], "reason": reason})
-            continue
-        selected.append({**trace, "target_text": review["target_text"], "target_origin": review["target_origin"],
-            "quality": review["quality"], "supervision": review,
-            "data_split": "validation" if int(digest([settings["split_seed"], trace["conversation_id"]])[:8], 16)
-                /16**8 < settings["validation_fraction"] else "train"})
-    for split in ("train", "validation"):
-        write_rows(root/f"{split}.jsonl", [row for row in selected if row["data_split"] == split])
-    write_rows(root/"selection_exclusions.jsonl", excluded)
-    manifest = {"schema_version": 1, "evidence_kind": "reviewed_actual_training_partition_reader_data",
-        "turns": len({row["task_id"] for row in selected}), "examples": len(selected),
-        "training_turns": len({row["task_id"] for row in selected if row["data_split"] == "train"}),
-        "data_splits": dict(Counter(row["data_split"] for row in selected)),
-        "phases": dict(Counter(row["phase"] for row in selected)), "target_origins": dict(Counter(row["target_origin"] for row in selected)),
-        "read_protocol_versions": settings["read_protocol_versions"], "review_filter": settings,
-        "source_traces_sha256": file_digest(root/"traces.jsonl"),
-        "reviews_sha256": file_digest(settings.get("reviews_path", root/"reviews.jsonl")),
-        "selection_exclusions": dict(Counter(row["reason"] for row in excluded)),
-        "validation_origin": "conversation-disjoint heldout from training partition; no official dev/test",
-        "evaluation_results": "separate artifacts; no answer quality improvement inferred from dataset preparation"}
-    (root/"data_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
     return manifest

@@ -27,14 +27,14 @@ class SamplingRecipe:
 
 
 def request_sampling(recipe: SamplingRecipe | None) -> dict:
-    """None preserves the historical wire, including omitted sampler defaults."""
-    return {"temperature": 0} if recipe is None else recipe.record()
+    """Emit the complete configured recipe, including greedy defaults."""
+    return (recipe or SamplingRecipe()).record()
 
 
 def bound_recipe(record: dict | None) -> SamplingRecipe | None:
-    """Parse an offline binding once; missing legacy metadata remains unknown."""
-    if record is None or record == {}:
+    """Parse an offline binding once; missing metadata remains unknown."""
+    if record is None:
         return None
-    if set(record) != {"temperature", "top_p", "top_k", "min_p"} and record != {"temperature": 0}:
-        raise ValueError("sampling binding needs the complete recipe or the legacy temperature: 0 wire")
+    if set(record) != {"temperature", "top_p", "top_k", "min_p"}:
+        raise ValueError("sampling binding needs the complete recipe")
     return SamplingRecipe(**record)

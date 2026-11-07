@@ -2,7 +2,7 @@
 
 All plans and frozen state keys are written before execution. Each experimental
 branch uses Controller.serve_turn, fixed semantic choices, real READ/REDUCE and
-one terminal QA. The shared four-component judge scores the actual answers.
+one terminal QA. The fixed official RB_llm scores the actual answers.
 """
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import asyncio
 from collections import Counter
 from dataclasses import replace
 import hashlib
-import inspect
 import json
 from pathlib import Path
 import threading
@@ -19,17 +18,23 @@ import time
 import sys
 from urllib.parse import urlsplit
 
+from controller.action_proposals import (ALTERNATE_ANSWERS, BOUNDED_CONTINUATION, finite_action_domain,
+    observed_reduction_task, observed_step_outputs)
+from controller.plan_gain_protocol import input_protocol, validate_input_protocol
 from controller.context_schema import EvidenceSet, EvidenceUnit, ReadingOutcome, SourceSpan, TaskState
-from controller.schema import QueryContext, SessionSnapshot, TurnRecord
+from controller.resident_models import evidence_selection_contract
+from controller.schema import (EvidenceBlock, OnlineContext, OnlineMessage, OnlineTurn,
+                               PromptCandidate, QueryContext, SessionSnapshot, TurnRecord, Message)
 from controller.serialization import decode, to_jsonable
+from profiling.common import prepare_cache_fixture
 from training.collect_plan_gains import collect_pair
 from training.plan_gain_protocol import (AuditedTaskInterpreter, EmptyPlannedPremise,
-    FixedCounterfactualRuntime, PlannedReductionConflict, build_counterfactual_plans)
+    FixedCounterfactualRuntime, GapRetrievalRequest, ObservedActionFailure, PlannedReductionConflict,
+    build_counterfactual_plans, build_observed_action_plans, observed_state_binding)
 from training.train_plan_gain import actual_history, working_state_key
 
 
-COMPONENTS = ("necessary_points", "grounding", "conditions_versions", "task_score")
-DEFAULT_WEIGHTS = {"necessary_points": .3, "grounding": .2, "conditions_versions": .2, "task_score": .3}
+RADBENCH_SAMPLING = {"temperature": 0, "top_p": 1, "max_new_tokens": 2048}
 
 
 def digest(value):
@@ -51,11 +56,140 @@ def read_rows(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
 
+def gap_retriever_identity(manifest):
+    from controller.resident_models import resident_model_digest
+    return {"implementation": "StudyEvidenceProvider.extend_for_plan",
+            "resident_model_manifest_digest": resident_model_digest(manifest)}
+
+
+def observed_rows(rows, packets, *, selection=None):
+    """Keep each task's first legal decision for every non-ANSWER action."""
+    from controller.plan_policy import CompleteCost
+    action_kinds = ("read_once", "reduce_once", "gap_retrieval")
+    representation_kinds = tuple("answer_"+kind for kind in ALTERNATE_ANSWERS)
+    kinds = (*action_kinds, *representation_kinds) if any(packet.get("action_domain") for packet in packets) else action_kinds
+    by_task = {row["task_id"]: row for row in rows}
+    chosen, skipped, seen = {}, Counter(), set()
+    requested_families = {}
+    observed_tasks = set()
+    for packet in packets:
+        identity, task_id = packet["observation_id"], packet["task_id"]
+        if identity in seen:
+            skipped["duplicate_observation"] += 1
+            continue
+        seen.add(identity)
+        if task_id not in by_task:
+            skipped["outside_requested_members"] += 1
+            continue
+        families = packet["requested_families"] if packet["decision_mode"] == "branch_terminal" else kinds
+        requested_families.setdefault(task_id, set()).update(families)
+        row = by_task[task_id]
+        if any(packet[name] != row[name] for name in ("cohort_split", "cohort_manifest_sha256")):
+            raise ValueError("observed state belongs to a different registered cohort identity")
+        validate_input_protocol(packet.get("input_protocol"))
+        state = decode(ReadingOutcome, packet["working_state"])
+        if packet["decision_mode"] == "mandatory_coverage":
+            skipped["mandatory_source_coverage_incomplete"] += 1
+            continue
+        snapshot = decode(SessionSnapshot, packet["snapshot"])
+        expected = [{name: turn[name] for name in ("turn_id", "user_text", "assistant_text")}
+                    for turn in row["actual_history"]]
+        if (actual_history(snapshot) != expected or state.plan.task_state.current_turn_id != row["turn"]
+                or state.plan.task_state.raw_question != row["question"]):
+            raise ValueError("observed state differs from the captured actual task/history")
+        from controller.context_schema import RetrievalState
+        from controller.schema import OnlineTurn
+        interpreter = AuditedTaskInterpreter(None)
+        interpreter.bind(row, state.plan.task_state)
+        interpreter.interpret(OnlineTurn(row["conversation_id"], task_id, row["turn"], "training",
+            row["question"], (), (), "P3"), RetrievalState(0, snapshot.raw_history))
+        if not packet["native_condition"]:
+            raise ValueError("observed state requires its recorded native condition")
+        if "direct_answer" not in packet["legal_actions"]:
+            skipped["no_legal_direct_pair"] += 1
+            continue
+        if packet.get("action_domain") and not {"hybrid", "existing"}.intersection(
+                packet["legal_answer_representations"]):
+            skipped["no_legal_reference_answer"] += 1
+            continue
+        observed_tasks.add(task_id)
+        paid = decode(CompleteCost, packet["paid_cost"])
+        binding = observed_state_binding(state, snapshot, paid_cost=paid,
+            native_condition=packet["native_condition"], reader_checkpoint=packet["reader_checkpoint"],
+            reader_profile_id=packet["reader_profile_id"], paid_observation=packet.get("paid_observation"))
+        binding.update(input_protocol=packet["input_protocol"], observation_id=identity, cohort_split=packet["cohort_split"],
+            cohort_manifest_sha256=packet["cohort_manifest_sha256"],
+            resident_model_manifest_digest=packet["resident_model_manifest_digest"],
+            evidence_selection_contract=packet["evidence_selection_contract"])
+        if (domain := packet.get("action_domain")) is not None:
+            if domain != finite_action_domain(domain["output_budgets"], domain["output_tokens_per_fact"]):
+                raise ValueError("observed state uses a different finite candidate protocol")
+            binding["action_domain"] = domain
+        if packet["decision_mode"] == "branch_terminal":
+            binding.update(history_origin=packet["history_origin"], state_origin="branch_terminal",
+                source_capture_attempt_id=packet["source_capture_attempt_id"],
+                source_capture_sha256=packet["source_capture_sha256"], terminal_branch=packet["terminal_branch"],
+                native_condition_scope=packet["native_condition_scope"])
+        key = (packet["decision_seq"], packet["native_condition"]["observed_time_ns"], identity)
+        reduction = observed_reduction_task(state)
+        supplement = ({"family": "reduce_once", "operation": reduction.operation,
+                       "need_ids": reduction.need_ids, "input_claim_ids": reduction.input_claim_ids}
+                      if packet["decision_mode"] != "branch_terminal" and reduction is not None
+                          and reduction.operation == "summarize" else None)
+        candidate = {**row, "task_state": to_jsonable(state.plan.task_state),
+                     "observed_packet": packet, "observed_binding": binding,
+                     "current_protocol_reduce_candidate": supplement}
+        for kind in kinds:
+            if kind not in families:
+                continue
+            if kind in representation_kinds:
+                if kind.removeprefix("answer_") not in packet.get("legal_answer_representations", ()):
+                    continue
+            elif kind == "reduce_once":
+                if reduction is None or (kind not in packet["legal_actions"] and supplement is None):
+                    continue
+            elif kind not in packet["legal_actions"]:
+                continue
+            action = task_id, kind
+            if action in chosen:
+                skipped["additional_legal_observation_for_action"] += 1
+            if action not in chosen or key < chosen[action][0]:
+                chosen[action] = key, candidate
+    result, coverage, missing = [], {}, []
+    for row in rows:
+        task_id = row["task_id"]
+        decisions = {}
+        for kind in kinds:
+            if (task_id, kind) not in chosen:
+                reason = "no_legal_observation" if kind in requested_families.get(task_id, kinds) else "not_requested_for_collection"
+                missing.append({"task_id": task_id, "family": kind, "reason": reason})
+                continue
+            _, candidate = chosen[task_id, kind]
+            identity = candidate["observed_packet"]["observation_id"]
+            if identity not in decisions:
+                decisions[identity] = {**candidate, "observed_action_kinds": []}
+            decisions[identity]["observed_action_kinds"].append(kind)
+            coverage.setdefault(kind, []).append(task_id)
+        result.extend(sorted(decisions.values(), key=lambda value: (
+            value["observed_packet"]["decision_seq"], value["observed_packet"]["observation_id"])))
+    if selection is not None:
+        selection.update(rule="first legal decision_seq/native observed time/observation_id per unique task and action; no future outcomes",
+            selected=[{"task_id": row["task_id"], "observation_id": row["observed_packet"]["observation_id"],
+                       "actions": row["observed_action_kinds"],
+                       "source_observed_actions": row["observed_packet"]["legal_actions"],
+                       "current_protocol_supplements": [row["current_protocol_reduce_candidate"]]
+                           if "reduce_once" in row["observed_action_kinds"]
+                               and "reduce_once" not in row["observed_packet"]["legal_actions"]
+                               and row["current_protocol_reduce_candidate"] is not None else []}
+                      for row in result],
+            observed_task_ids=[row["task_id"] for row in rows if row["task_id"] in observed_tasks],
+            missing_observation_task_ids=[row["task_id"] for row in rows if row["task_id"] not in observed_tasks],
+            action_coverage={kind: coverage.get(kind, []) for kind in kinds},
+            unavailable_actions=missing, skipped_observations=dict(skipped))
+    return result
+
+
 class GenerationLimitReached(ValueError):
-    pass
-
-
-class CompletedJudgeTruncated(ValueError):
     pass
 
 
@@ -140,10 +274,6 @@ class JudgeJournal:
         raw = result.json()
         self.budget.finish(ticket, output_tokens=raw["meta_info"].get("completion_tokens"))
         append(self.path, {"ticket": ticket["index"], "status": "completed", "response": raw})
-        finish = raw["meta_info"].get("finish_reason")
-        finish = finish.get("type") if isinstance(finish, dict) else finish
-        if finish in {"length", "max_tokens"}:
-            raise CompletedJudgeTruncated("actual fixed judge reached its output limit")
         return result
 
 
@@ -165,18 +295,30 @@ def bounded_engine(engine, budget, wire_path):
     return BoundedReader(engine)
 
 
-def audited_cohort(labels, sources, *, split, limit, seed, dev_fraction):
+def audited_cohort(labels, sources, *, split, limit, cohort_manifest):
     from training.train_evidence_policy import qualify_collection_rows
+    from training.task_data import select_cohort_rows
+    from training.reader_data import file_digest, history_digest
+    manifest = json.loads(Path(cohort_manifest).read_text())
+    manifest_hash = file_digest(cohort_manifest)
+    members = {member["task_id"]: member for member in manifest["members"] if member["split"] == split}
+    for row in labels:
+        if row["task_id"] not in members:
+            continue
+        member = members[row["task_id"]]
+        if (row["conversation_id"] != member["conversation_id"] or row["turn"] != member["turn"]
+                or history_digest(row["actual_history"]) != member["actual_history_sha256"]):
+            raise ValueError("gain label differs from the registered actual task/history member")
+        if any(name in row and row[name] != value for name, value in (
+                ("cohort_split", split), ("cohort_manifest_sha256", manifest_hash))):
+            raise ValueError("gain labels retain a different source cohort identity")
+    labels = select_cohort_rows(labels, cohort_manifest, split)
     eligible, excluded = qualify_collection_rows(labels, sources)
     unique = {row["task_id"] for row in labels}
     if len(unique) != len(labels):
         raise ValueError("gain source labels must contain unique actual task IDs")
-    assignments = {row["conversation_id"]: ("dev" if int(digest([seed, row["conversation_id"]])[:16], 16)/2**64
-                   < dev_fraction else "train") for row in labels}
     selected = []
     for row in eligible:
-        if assignments[row["conversation_id"]] != split:
-            continue
         if row["script_history_mismatch"] is not False or "simulation" in row["rollout_policy"]:
             excluded.append({"task_id": row["task_id"], "reason": "history_not_audited_actual_model_rollout"})
             continue
@@ -184,13 +326,136 @@ def audited_cohort(labels, sources, *, split, limit, seed, dev_fraction):
             excluded.append({"task_id": row["task_id"], "reason": "current_turn_not_next_actual_qa"})
             continue
         selected.append(row)
-    selected = selected[:limit]
-    if not selected:
-        raise ValueError("no audited native-training actual-history turns in the declared gain cohort")
-    return selected, {"split": split, "source_partition": "train", "partition_seed": seed,
-        "dev_fraction": dev_fraction, "allocation_unit": "conversation_id", "assignments": assignments,
+    by_task = {row["task_id"]: row for row in selected}
+    selected = [by_task[identity] for identity in members if identity in by_task][:limit]
+    return selected, {"split": split, "source_partition": "train",
+        "cohort_manifest": str(Path(cohort_manifest).resolve()), "cohort_manifest_sha256": manifest_hash,
+        "allocation_unit": "registered conversation_id",
+        "declared_task_ids": list(members),
+        "missing_label_task_ids": [identity for identity in members if identity not in unique],
         "planned_task_ids": [row["task_id"] for row in selected], "exclusions": excluded,
         "source_label_sha256": digest(labels), "source_originals_sha256": digest(sources)}
+
+
+
+def observed_cohort(rollouts, packets, sources, *, split, limit, cohort_manifest):
+    """Bind true P3 decision snapshots to their native capture, without task labels."""
+    from controller.evidence import validate_block
+    from training.reader_data import file_digest, history_digest
+
+    manifest = json.loads(Path(cohort_manifest).read_text())
+    manifest_hash = file_digest(cohort_manifest)
+    members, sessions = {}, {}
+    for member in manifest["members"]:
+        if member["split"] not in {"train", "dev"}:
+            raise ValueError("observed B cohorts require declared train/dev membership")
+        if member["task_id"] in members:
+            raise ValueError("observed cohort task IDs must be unique")
+        members[member["task_id"]] = member
+        previous = sessions.setdefault(member["conversation_id"], member["split"])
+        if previous != member["split"]:
+            raise ValueError("observed B train/development conversations overlap")
+    declared = [key for key, member in members.items() if member["split"] == split]
+    requested = set(declared[:limit])
+    actual, history = {}, {}
+    for row in rollouts:
+        response = row.get("response")
+        attempt = response if response is not None else row.get("attempt")
+        if attempt is not None:
+            identity = attempt["attempt_id"]
+            if identity in actual and actual[identity] != row:
+                raise ValueError("one observed attempt maps to conflicting actual captures")
+            actual[identity] = row
+        if response is not None:
+            key = row["conversation_id"], row["turn"]
+            if key in history and history[key] != row:
+                raise ValueError("observed history has conflicting actual committed turns")
+            history[key] = row
+    originals = {source["source_id"]: source for source in sources}
+    if len(originals) != len(sources):
+        raise ValueError("observed originals require unique source IDs")
+    selected, seen = {}, set()
+    for packet in packets:
+        task_id = packet["task_id"]
+        if task_id not in requested:
+            continue
+        member = members[task_id]
+        capture_attempt_id = packet["attempt_id"]
+        if packet["decision_mode"] == "branch_terminal":
+            capture_attempt_id = packet["source_capture_attempt_id"]
+            branch = packet["terminal_branch"]
+            branch_raw = Path(branch["run_path"]).read_bytes()
+            if (packet["history_origin"] != "frozen_actual_rollout" or capture_attempt_id == packet["attempt_id"]
+                    or hashlib.sha256(branch_raw).hexdigest() != branch["run_sha256"]
+                    or json.loads(branch_raw)["attempt"]["attempt_id"] != packet["attempt_id"]):
+                raise ValueError("terminal decision lacks its unchanged actual branch binding")
+        row = actual.get(capture_attempt_id)
+        if row is None or digest(row) != packet["source_capture_sha256"]:
+            raise ValueError("observed decision lacks its exact bound actual capture row")
+        if (row["task_id"] != task_id or row["conversation_id"] != member["conversation_id"]
+                or row["turn"] != member["turn"] or row["source_partition"] != "train"
+                or row["measurement_kind"] != "hardware" or row["history_origin"] != "model_actual"
+                or any(packet[name] != value or row[name] != value for name, value in (
+                    ("cohort_split", split), ("cohort_manifest_sha256", manifest_hash)))):
+            raise ValueError("observed decision differs from its actual native-train/cohort binding")
+        if "actual_history_sha256" in member and history_digest(row["actual_history"]) != member["actual_history_sha256"]:
+            raise ValueError("observed actual history differs from its registered fixed-history control")
+        state = decode(ReadingOutcome, packet["working_state"])
+        snapshot = decode(SessionSnapshot, packet["snapshot"])
+        row_history = [{name: turn[name] for name in ("turn_id", "user_text", "assistant_text")}
+                       for turn in row["actual_history"]]
+        if (actual_history(snapshot) != row_history
+                or state.plan.task_state.current_turn_id != row["turn"]
+                or state.plan.task_state.raw_question != row["question"]
+                or row["turn"] != len(row["actual_history"])+1):
+            raise ValueError("observed snapshot differs from the actual current question/history")
+        for turn in row["actual_history"]:
+            origin = history.get((row["conversation_id"], turn["turn_id"]))
+            if origin is None or origin["history_origin"] != "model_actual" or origin["measurement_kind"] != "hardware":
+                raise ValueError("observed history requires its actual hardware committed QA chain")
+            receipt = origin["response"]["receipt"]
+            if (origin["question"] != turn["user_text"] or origin["answer"] != turn["assistant_text"]
+                    or not receipt["generation_complete"] or not receipt["input_hash"]):
+                raise ValueError("observed history differs from its actual completed native QA")
+        blocks = {block.key: block for block in (*snapshot.archive, *state.plan.selected_set.source_blocks)}
+        for block in blocks.values():
+            validate_block(block)
+            source = originals.get(block.key.passage_id)
+            if (source is None or source["split"] != "train" or source["version"] != block.key.version
+                    or source["text"] != block.text):
+                raise ValueError("observed source body/version differs from the actual training original")
+        for unit in state.plan.selected_set.selected_units:
+            for span in unit.source_spans:
+                block = blocks[span.source_key]
+                base = block.span[0] if block.span else 0
+                if (not base <= span.start < span.end <= base+len(block.text)
+                        or block.text[span.start-base:span.end-base] != unit.text):
+                    raise ValueError("observed source window differs from original coordinates/text")
+        reference = row["reference"]
+        if reference["task_id"] != task_id or reference["conversation_id"] != row["conversation_id"] or reference["turn"] != row["turn"]:
+            raise ValueError("raw offline reference belongs to a different captured task")
+        for witness in reference["grounding"]:
+            source = originals[witness["passage_id"]]
+            if (source["split"] != "train" or not 0 <= witness["start"] < witness["end"] <= len(source["text"])
+                    or source["text"][witness["start"]:witness["end"]] != witness["quote"]):
+                raise ValueError("raw offline witness differs from the native training original")
+        prepared = {**row, "split": split, "snapshot_id": snapshot.corpus_snapshot_id,
+            "actual_history": actual_history(snapshot),
+            "rollout_policy": row["method"], "task_state": to_jsonable(state.plan.task_state),
+            "reference_answer": reference["targets"][0]["text"],
+            "judge_grounding": reference["grounding"], "grounding_origin": "raw_native_reference_coordinates_checked",
+            "source_capture": row, "task_state_source": "actual_observed_decision"}
+        if task_id in selected and selected[task_id]["source_capture"] != row:
+            raise ValueError("one observed task maps to different actual capture requests")
+        selected[task_id] = prepared
+        seen.add(task_id)
+    values = [selected[key] for key in declared if key in seen]
+    return values, {"split": split, "source_partition": "train", "allocation_unit": "registered conversation_id",
+        "cohort_manifest": str(Path(cohort_manifest).resolve()), "cohort_manifest_sha256": manifest_hash,
+        "declared_task_ids": declared, "planned_task_ids": [row["task_id"] for row in values],
+        "missing_capture_task_ids": [key for key in declared[:limit] if key not in seen],
+        "task_state_source": "actual_observed_decision", "task_label_dependency": False,
+        "source_capture_sha256": digest(rollouts), "source_originals_sha256": digest(sources)}
 
 
 def create_audited_provider(config, template):
@@ -230,27 +495,30 @@ def judge_sources(base, scope_material, row, sources, *, corpus_id):
     from controller.evidence import make_evidence
     by_source = {source["source_id"]: source for source in sources}
     units = {unit.unit_id: unit for unit in base.selected_set.selected_units}
+    blocks = {block.key: block for block in base.selected_set.source_blocks}
     if scope_material is not None:
         units.update((unit.unit_id, unit) for unit in scope_material.selected_units)
-    for number, witness in enumerate(row["verified_grounding"]):
+        for block in scope_material.source_blocks:
+            blocks.setdefault(block.key, block)
+    for number, witness in enumerate(row["judge_grounding"] if row.get("task_state_source") == "actual_observed_decision"
+                                     else row["verified_grounding"]):
         source = by_source[witness["passage_id"]]
         if source["text"][witness["start"]:witness["end"]] != witness["quote"]:
             raise ValueError("offline judge witness differs from the audited training original")
-        block = make_evidence(source["text"], source["source_id"], corpus_id=corpus_id,
-            version=source["version"], source_uri=source["source_uri"])
-        span = SourceSpan("judge-witness:"+str(number), block.key, witness["start"], witness["end"])
+        block = make_evidence(source["text"], source.get("document_family", source["source_id"]),
+            passage_id=source["source_id"], corpus_id=corpus_id, version=source["version"],
+            source_uri=source["source_uri"], title=source.get("title", ""))
+        if source.get("offsets") is not None:
+            block = replace(block, span=tuple(source["offsets"]))
+        blocks.setdefault(block.key, block)
+        start = block.span[0] if block.span else 0
+        span = SourceSpan("judge-witness:"+str(number), block.key, start+witness["start"], start+witness["end"])
         units[span.span_id] = EvidenceUnit(span.span_id, (span,), witness["quote"])
-    return EvidenceSet("offline-judge-material", tuple(units.values()))
-
-
-def planned_model_calls(plan):
-    return sum(step.task.kind == "ANSWER" or not (step.task.kind == "REDUCE"
-        and plan.context_plan.reading_mode == "typed_reduce" and step.task.operation in {"count", "sum", "group", "union"})
-        for step in plan.steps)
+    return EvidenceSet("offline-judge-material", tuple(units.values()), source_blocks=tuple(blocks.values()))
 
 
 def preparation_usage(provider, before, budget, ticket_start):
-    observed = provider._auxiliary_usage(before, ())
+    observed = provider._auxiliary_usage(before)
     calls = [ticket for ticket in budget.tickets[ticket_start:] if ticket["role"] == "support"]
     models = ([row for row in observed["models"] if "support_utility" not in row["roles"]]
               if calls else observed["models"])
@@ -283,39 +551,138 @@ async def retire_completed_failed_steps(service, attempt_id):
     return acknowledgements
 
 
+def pair_cache_recipe(mode, frozen, observed):
+    if mode != "paired":
+        return mode, (), ()
+    record = next((record for record in reversed(frozen.steps)
+        if record.task.kind == "READ" and record.receipt is not None
+        and record.receipt.generation_complete and record.metrics.get("source_view", {}).get("source_prefix_tokens")), None)
+    if record is None:
+        return "cold", (), ()
+    source = record.metrics["source_view"]
+    end = source["source_prefix_tokens"]
+    quotes = observed["native_condition"]["quotes"]
+    host = any(quote["host_only_load_tokens"] and quote["native_load_estimate"] for quote in quotes)
+    return ("host_only" if host else "gpu_ready"), record.input_ids[:end+1], tuple(source["source_ids"])
+
+
+async def prepare_pair_cache(engine, compiler, mode, input_ids, source_ids, *, identity, resources):
+    """Replay one actual source path on an isolated reader before each arm."""
+    from controller.templates import token_hash
+
+    tick = time.monotonic()
+    reset = await prepare_cache_fixture(engine, "cold")
+    info = await engine.info()
+    shape = {"mode": mode, "cache_config_hash": info.cache_config_hash}
+    warmup = None
+    if input_ids:
+        fingerprint = info.fingerprint
+        hashed = token_hash(input_ids)
+        candidate = PromptCandidate(identity, "REBUILD", 0, (), input_ids, hashed,
+            frozenset(), frozenset(), fingerprint=fingerprint, output_budget=1)
+        await engine.quote_batch((candidate,), fingerprint)
+        epoch = await engine.prepare(identity, identity+":prepare", info.engine_restart_id)
+        try:
+            warmup = await engine.generate(input_ids=input_ids, session_id=identity,
+                expected_generation=epoch.session_generation, expected_restart_id=info.engine_restart_id,
+                attempt_id=identity+":prime", fingerprint=fingerprint, max_new_tokens=1)
+        finally:
+            retired = await engine.retire(identity, epoch.session_generation, identity+":retire",
+                info.engine_restart_id, "paired_branch_cache_fixture")
+            if not retired.acknowledged:
+                raise ValueError("paired cache fixture still owns its priming epoch")
+        await prepare_cache_fixture(engine, "host_only" if mode == "host_only" else "settle")
+        if compiler.index is not None:
+            compiler.index.observe_executed(source_ids, fingerprint=fingerprint, cache_config_hash=info.cache_config_hash,
+                receipt=warmup.receipt, input_ids=input_ids)
+        batch = await engine.quote_batch((candidate,), fingerprint)
+        quote, = batch.quotes
+        gpu, host = quote.ready_gpu_prefix_tokens, quote.host_only_load_tokens
+        if (mode == "gpu_ready" and not gpu) or (mode == "host_only" and (gpu or not host)):
+            raise ValueError("paired cache fixture did not realize its declared native tier")
+        shape.update(input_hash=hashed, ready_gpu_prefix_tokens=gpu,
+                     recoverable_prefix_tokens=quote.recoverable_prefix_tokens, host_only_load_tokens=host)
+    ended = time.monotonic()
+    return {"shape": shape, "restart_id": info.engine_restart_id, "cold_reset_pool": reset["pool"],
+        "prime_receipt": to_jsonable(warmup.receipt) if warmup is not None else None,
+        "prime_output_tokens": len(warmup.output_ids) if warmup is not None else 0,
+        "prime_input_tokens": len(input_ids), "complete_ms": (ended-tick)*1000,
+        **await resources.finish("online", tick, ended)}
+
+
 async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, binding, preparation,
-                         resources, cache_start, generation_budget):
+                         resources, cache_start, generation_budget, observed=None,
+                         gap_request=None, gap_provider=None):
     from controller.execution import ReadingBudgetExceeded
     from controller.engine_client import EngineError
     case_dir = Path(case_dir)
     case_dir.mkdir(parents=True)
     state_key = working_state_key(frozen, snapshot)
-    registration = {"registered_at": time.monotonic(), "frozen_state_key": state_key,
+    if observed is not None and (observed["state_key"] != state_key
+            or observed["actual_history"] != actual_history(snapshot)
+            or observed["reader_checkpoint"] != binding["reader_checkpoint"]
+            or observed["reader_profile_id"] != binding["reader_profile_id"]):
+        raise ValueError("observed branch differs from its frozen reader/history binding")
+    continuation_request = gap_request
+    if observed is not None and continuation_request is None and gap_provider is not None:
+        continuation_request = GapRetrievalRequest((), "", gap_retriever_identity(binding["resident_model_manifest"]),
+            binding["continuation_gap_limits"])
+    protocol = input_protocol(service.template.fingerprint)
+    if binding.get("input_protocol", protocol) != protocol:
+        raise ValueError("collection input protocol differs from its actual reader compiler")
+    binding = {**binding, "input_protocol": protocol}
+    fixture_mode, fixture_input, fixture_sources = pair_cache_recipe(cache_start, frozen, observed)
+    registration = {"continuation_protocol": BOUNDED_CONTINUATION, "registered_at": time.monotonic(), "frozen_state_key": state_key,
         "plan_candidate": to_jsonable(plan), "working_state": to_jsonable(frozen), "snapshot": to_jsonable(snapshot),
-        "source_task_id": row["task_id"], "source_native_partition": row["split"], **binding}
+        "continuation_gap_limits": continuation_request.limits if continuation_request is not None else None,
+        "source_task_id": row["task_id"], "source_native_partition": row["split"],
+        "cache_fixture_mode": fixture_mode,
+        "observed_state_binding": observed, "gap_request": gap_request if plan.semantic_kind == "gap_retrieval" else None,
+        **binding}
     write(case_dir/"before.json", registration)
-    session = "gain:"+digest([row["task_id"], plan.plan_id, binding["reader_checkpoint"]])[:24]
+    session = "gain:"+digest([row["task_id"], plan.plan_id, binding["reader_checkpoint"], observed])[:24]
     before = service.store.read_snapshot(session, row["snapshot_id"])
     before = service.store.sync_history(session, snapshot.raw_history, before.version)
-    service.rolling_policy = FixedCounterfactualRuntime(plan)
+    from controller.plan_policy import CompleteCost
+    paid = None if observed is None else decode(CompleteCost, observed["paid_cost"])
+    runtime = FixedCounterfactualRuntime(plan, initial_state=frozen,
+        paid_cost=paid, gap_request=continuation_request, gap_provider=gap_provider,
+        initial_snapshot=snapshot, action_domain=observed.get("action_domain") if observed is not None else None)
+    service.rolling_policy = runtime
     service.bind_resident_models(binding["resident_model_manifest"])
-    if generation_budget.remaining < planned_model_calls(plan)+1:
+    completed = {result.step_id for result in frozen.results}
+    required_calls = sum(step.task.step_id not in completed and (step.task.kind == "ANSWER" or not (
+        step.task.kind == "REDUCE" and plan.context_plan.reading_mode == "typed_reduce"
+        and step.task.operation in {"count", "sum", "group", "union"})) for step in plan.steps)
+    continuation_calls = int(observed is not None and plan.semantic_kind != "direct_answer"
+        and any(need.operation == "infer" for need in frozen.plan.task_state.needs))
+    # Terminal READ and one final judge are reserved before starting this branch.
+    # Support calls additionally claim tickets from the same atomic hard cap.
+    if generation_budget.remaining < required_calls+continuation_calls+1+bool(fixture_input):
         write(case_dir/"not-run.json", {"status": "generation_budget_unavailable", "registered": registration})
         return None
-    if cache_start == "cold":
-        await service.engine.profile_prepare("cold")
+    fixture = (await prepare_pair_cache(service.engine, service.request_compiler, fixture_mode, fixture_input, fixture_sources,
+        identity=session+":cache", resources=resources) if fixture_mode != "observed" else None)
     response = None
     failure = None
     cleanup = []
     started = time.monotonic()
+    response_finished = None
     call_cursor = len(service.engine.calls)
     try:
-        response = await service.serve_turn(session, row["question"], plan.context_plan.selected_set.source_blocks,
+        material = plan.context_plan.selected_set.source_blocks
+        if observed is not None:
+            material = tuple({block.key: block for block in (*snapshot.archive, *material)}.values())
+        response = await service.serve_turn(session, row["question"], material,
             request_id="counterfactual", corpus_snapshot_id=row["snapshot_id"],
             context_plans=(plan.context_plan,), query_context=QueryContext(
-                plan.context_plan.task_state.query or row["question"], "frozen_audited_task",
+                plan.context_plan.task_state.query or row["question"],
+                "actual_observed_task" if observed is not None else "frozen_audited_task",
                 task_state=plan.context_plan.task_state))
-    except (EngineError, ReadingBudgetExceeded, EmptyPlannedPremise, PlannedReductionConflict, GenerationLimitReached) as error:
+        response_finished = time.monotonic()
+    except (EngineError, ReadingBudgetExceeded, EmptyPlannedPremise, PlannedReductionConflict,
+            ObservedActionFailure, GenerationLimitReached) as error:
+        response_finished = time.monotonic()
         failure = {"type": type(error).__name__, "message": str(error)}
         if isinstance(error, EngineError) and error.code != "READ_STEP_OUTPUT_TRUNCATED":
             raise
@@ -325,9 +692,14 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
         active = sys.exc_info()[1]
         if active is not None:
             failure = {"type": type(active).__name__, "message": str(active)}
+        if response_finished is None:
+            response_finished = time.monotonic()
         await service.close_session(session)
         ended = time.monotonic()
-        physical = await resources.finish("online", started, ended)
+        physical = await resources.finish("online", started, response_finished)
+        cleanup_cost = {"complete_ms": (ended-response_finished)*1000,
+            **await resources.finish("online", response_finished, ended),
+            "scope": "branch session retirement after response completion; collection cost only"}
         attempt = service.store.find_request(session, "counterfactual")
         steps = (() if attempt is None else tuple(service.store.execution_step(attempt.attempt_id, step.step_id)[1]
                  for step in service.store.execution_steps(attempt.attempt_id)))
@@ -336,19 +708,37 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
         if response is not None:
             actual_budgets["ANSWER"] = attempt.plan.candidate.output_budget
         calls = service.engine.calls[call_cursor:]
+        native_finished = all(call.get("receipt", {}).get("generation_complete") for call in calls)
+        terminal_failure = (failure is not None and active is None and attempt is not None
+                            and attempt.stage == "FAILED" and native_finished)
+        action_counts = {"READ": sum(step.task.kind == "READ" for step in steps),
+            "REDUCE": sum(step.task.kind == "REDUCE" for step in steps),
+            "GAP_RETRIEVAL": runtime.new_action_counts["GAP_RETRIEVAL"],
+            "ANSWER": sum(call["request"].get("response_schema") is None for call in calls)}
         input_tokens = sum(len(call["request"]["input_ids"]) for call in calls)
         output_tokens = (sum(len(call["result"]["output_ids"]) for call in calls)
                          if all("result" in call for call in calls) else None)
-        execution = {"complete_ms": (ended-started)*1000, **physical,
-            "total_input_tokens": input_tokens, "total_output_tokens": output_tokens,
-            "scope": "actual branch serving and confirmed session retirement"}
+        auxiliary = runtime.new_auxiliary_usage
+        auxiliary_input = None if auxiliary is None else auxiliary["input_tokens"]
+        auxiliary_output = None if auxiliary is None else auxiliary["output_tokens"]
+        execution = {"complete_ms": (response_finished-started)*1000, **physical,
+            "total_input_tokens": input_tokens+auxiliary_input if auxiliary_input is not None else None,
+            "total_output_tokens": output_tokens+auxiliary_output
+                if output_tokens is not None and auxiliary_output is not None else None,
+            "scope": "new action and complete ANSWER through response commit"}
+        prior = ({"complete_ms": 0, "gpu_gib_seconds": 0, "host_gib_seconds": 0,
+                  "total_input_tokens": 0, "total_output_tokens": 0} if paid is None else {
+            "complete_ms": paid.latency_ms, "gpu_gib_seconds": paid.gpu_gib_ms/1000,
+            "host_gib_seconds": paid.host_gib_ms/1000, "total_input_tokens": paid.input_tokens,
+            "total_output_tokens": paid.output_tokens})
         full_cost = {**execution, "scope": "shared_preparation_plus_actual_branch_execution",
-            "complete_ms": execution["complete_ms"]+preparation["complete_ms"],
-            **{name: execution[name]+preparation[name] for name in ("gpu_gib_seconds", "host_gib_seconds")},
-            "total_input_tokens": execution["total_input_tokens"]+preparation["input_tokens"]
-                if preparation["input_tokens"] is not None else None,
-            "total_output_tokens": execution["total_output_tokens"]+preparation["output_tokens"]
-                if output_tokens is not None and preparation["output_tokens"] is not None else None,
+            "complete_ms": prior["complete_ms"]+execution["complete_ms"]+preparation["complete_ms"],
+            **{name: prior[name]+execution[name]+preparation[name]
+               for name in ("gpu_gib_seconds", "host_gib_seconds")},
+            "total_input_tokens": prior["total_input_tokens"]+execution["total_input_tokens"]+preparation["input_tokens"]
+                if preparation["input_tokens"] is not None and execution["total_input_tokens"] is not None else None,
+            "total_output_tokens": prior["total_output_tokens"]+execution["total_output_tokens"]+preparation["output_tokens"]
+                if execution["total_output_tokens"] is not None and preparation["output_tokens"] is not None else None,
             "shared_preparation_cost_id": preparation["shared_cost_id"]}
         output = {"task_id": row["task_id"], "conversation_id": row["conversation_id"],
             "question": row["question"], "actual_history": actual_history(snapshot),
@@ -357,21 +747,45 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
             "frozen_state_key": state_key, "plan_id": plan.plan_id, "semantic_kind": plan.semantic_kind,
             "registered_plan_path": str((case_dir/"before.json").resolve()),
             "status": "completed" if response else "failed", "failure": failure,
+            "termination": {"terminal": terminal_failure or response is not None,
+                "user_paused": isinstance(active, (asyncio.CancelledError, KeyboardInterrupt)),
+                "native_calls_finished": native_finished,
+                "reason": failure["type"] if terminal_failure else "committed_QA" if response else None},
             "metrics": {}, "scoring": {"status": "missing", "identity": binding["scorer_identity"]},
             "answer": response.assistant_text if response else None, "response": to_jsonable(response),
             "steps": to_jsonable(steps), "attempt": to_jsonable(attempt), "cost": full_cost,
             "actual_branch_execution_cost": execution, "executed_output_budgets": actual_budgets,
+            "paid_cost": prior, "cleanup_cost": cleanup_cost, "observed_state_binding": observed,
+            "continuation_protocol": BOUNDED_CONTINUATION,
+            "continuation_gap_limits": continuation_request.limits if continuation_request is not None else None,
+            "pre_action_quote": to_jsonable(runtime.pre_action_quote),
+            "pre_action_input": to_jsonable(runtime.pre_action_input),
+            "compiled_actions": to_jsonable(runtime.decisions),
+            "new_step_ids": tuple(step.step_id for step in steps), "new_action_counts": action_counts,
+            "gap_result": to_jsonable(runtime.gap_result),
             "qa_increment": len(after.raw_history)-len(before.raw_history), "cleanup": cleanup,
             "actual_native_calls": calls,
             "comparison_budget": binding["comparison_budget"], **binding}
+        output["cache_fixture"] = fixture
         write(case_dir/"run.json", output)
     if response is not None and output["qa_increment"] != 1:
         raise ValueError("counterfactual branch did not commit exactly one current QA")
     if response is None and output["qa_increment"] != 0:
         raise ValueError("failed counterfactual branch committed a QA")
-    if response is not None and (attempt.plan.candidate.context_plan_id != plan.plan_id
-            or set(actual_budgets)-{"ANSWER"} != {step.task.step_id for step in plan.steps if step.task.kind != "ANSWER"}):
-        raise ValueError("actual branch execution differs from its pre-registered complete DAG")
+    if response is not None:
+        expected = {step.task.step_id for step in plan.steps
+            if step.task.kind != "ANSWER" and step.task.step_id not in completed}
+        actual = set(actual_budgets)-{"ANSWER"}
+        if observed is None:
+            valid = actual == expected
+        else:
+            from controller.action_proposals import validate_action_counts
+            validate_action_counts(plan.semantic_kind, action_counts)
+            extra = actual-expected
+            valid = (expected <= actual and actual == set(runtime.new_step_ids)
+                     and len(extra) <= 1 and all(key.startswith("bounded-terminal:") for key in extra))
+        if attempt.plan.candidate.context_plan_id != plan.plan_id or not valid:
+            raise ValueError("actual branch execution differs from its registered continuation protocol")
     return output
 
 
@@ -387,46 +801,127 @@ def verify_actual_history(rows, rollouts):
                 raise ValueError("frozen assistant history differs from its actual completed source rollout")
 
 
-async def score_branch(judge, template, row, material, branch, *, path, identity, weights,
+def branch_answer_record(row, before, branch):
+    """Use the same actually executed source projection as final evaluation."""
+    from bench.quality import answer_evaluation_view, official_record
+    attempt, response = branch["attempt"], branch["response"]
+    if response["assistant_text"] != branch["answer"]:
+        raise ValueError("gain scoring answer differs from the actual response")
+    snapshot = decode(SessionSnapshot, before["snapshot"])
+    candidate = decode(PromptCandidate, attempt["plan"]["candidate"])
+    outcome = (decode(ReadingOutcome, attempt["reading_outcome"])
+               if attempt["reading_outcome"] is not None else None)
+    blocks = {block.key: block for block in snapshot.archive}
+    blocks.update((block.key, block) for block in
+                  (decode(EvidenceBlock, raw) for raw in attempt["evidence"]))
+    if outcome is not None:
+        blocks.update((block.key, block) for block in outcome.plan.selected_set.source_blocks)
+    targets = [{"text": row["reference_answer"]}]
+    history = tuple(message for turn in branch["actual_history"] for message in (
+        OnlineMessage("user", turn["user_text"]), OnlineMessage("agent", turn["assistant_text"])))
+    selected = tuple(blocks[key] for key in sorted(candidate.required_blocks))
+    turn = OnlineTurn(branch["conversation_id"], branch["task_id"], row["turn"], row.get("Collection", "training"),
+        branch["question"], history, tuple(OnlineContext(block.key.passage_id, block.text,
+            block.source_uri, block.title) for block in selected), "P3")
+    view = answer_evaluation_view(turn,
+        visible_evidence_manifest=response["visible_evidence_manifest"], audit_evidence=tuple(blocks.values()),
+        reading_outcome=outcome, reference_map=candidate.reference_map,
+        citation_scope=response["citation_scope"])
+    record = official_record(turn, response["assistant_text"])
+    record["contexts"], record["targets"] = view["evaluation_contexts"], targets
+    return record, view
+
+
+def radbench_scorer_identity(contract, fingerprint):
+    return {"kind": "official_RB_llm_actual_answer_judge", "metric": "RB_llm",
+        "fingerprint": fingerprint, "official": contract.identity,
+        "normalization": contract.identity["normalization"],
+        "request_sampling": dict(RADBENCH_SAMPLING), "score_range": [0, 1]}
+
+
+async def score_branch(judge, template, row, before, branch, *, contract, path, identity,
                        resources, judge_window, expected_fingerprint):
-    from training.preference_rollout import _judge
+    if identity != radbench_scorer_identity(contract, expected_fingerprint):
+        raise ValueError("gain label identity differs from its actual official contract and judge")
     base_client = judge.client
-    before = await base_client.post("/context/engine/info", json={})
-    before.raise_for_status()
-    if before.json()["fingerprint"] != expected_fingerprint:
+    check = await base_client.post("/context/engine/info", json={})
+    check.raise_for_status()
+    if check.json()["fingerprint"] != expected_fingerprint:
         raise ValueError("fixed gain scorer changed checkpoint/tokenizer before scoring")
-    # Determine the actual prompt size at the recorded HTTP call, including the
-    # actual generated answer. An oversize prompt is unscored, never truncated.
-    class WindowedJudge:
-        async def post(self, endpoint, **kwargs):
-            if len(kwargs["json"]["input_ids"])+1024 > judge_window:
-                raise JudgeWindowUnavailable("fixed counterfactual judge prompt exceeds its declared model window")
-            return await judge.post(endpoint, **kwargs)
+    official, view = branch_answer_record(row, before, branch)
     start = time.monotonic()
-    judged = record = None
+    quality = record = None
+    judge_path = Path(path).with_name("judge.json")
     try:
-        judged, record = await _judge(WindowedJudge(), template, row, material, branch["answer"])
-        after = await base_client.post("/context/engine/info", json={})
-        after.raise_for_status()
-        if after.json()["fingerprint"] != expected_fingerprint:
+        rendered = template.render((Message("user", contract.prompt(official)),))
+        if len(rendered.input_ids)+RADBENCH_SAMPLING["max_new_tokens"] > judge_window:
+            raise JudgeWindowUnavailable("official RB_llm prompt exceeds its declared model window")
+        response = await judge.post("/generate", json={"input_ids": list(rendered.input_ids),
+            "stream": False, "sampling_params": dict(RADBENCH_SAMPLING)})
+        response.raise_for_status()
+        raw = response.json()
+        record = {"raw_output": raw["text"], "meta_info": raw["meta_info"],
+            "input_tokens": len(rendered.input_ids), "output_tokens": raw["meta_info"].get("completion_tokens"),
+            "elapsed_ms": (time.monotonic()-start)*1000}
+        write(judge_path, {"call": record, "scorer_identity": identity,
+            "official_record": official, "evaluation_view": view})
+        check = await base_client.post("/context/engine/info", json={})
+        check.raise_for_status()
+        if check.json()["fingerprint"] != expected_fingerprint:
             raise ValueError("fixed gain scorer changed checkpoint/tokenizer during scoring")
+        quality = contract.parse(raw["text"])
     finally:
         end = time.monotonic()
         physical = await resources.finish("judge", start, end)
-        write(Path(path).with_name("judge.json"), {"quality_components": judged, "call": record,
-            "physical_cost": physical, "scorer_identity": identity,
+        write(judge_path, {"quality_components": None if quality is None else {"RB_llm": quality},
+            "call": record, "physical_cost": physical, "scorer_identity": identity,
+            "official_record": official, "evaluation_view": view,
             "scope": "offline_judge_separate_from_online_answer_cost"})
-    if set(weights) != set(COMPONENTS) or abs(sum(weights.values())-1) > 1e-9:
-        raise ValueError("counterfactual quality uses four declared normalized component weights")
-    for name in COMPONENTS:
-        if not isinstance(judged[name], (int, float)) or not 0 <= judged[name] <= 1:
-            raise ValueError("actual judge component is outside its declared normalized scale")
-    quality = sum(weights[name]*judged[name] for name in COMPONENTS)
-    branch.update(metrics={"plan_gain_quality": quality}, quality_components=judged,
+    branch.update(metrics={**branch["metrics"], "plan_gain_quality": quality, "RB_llm": quality},
+        quality_components={"RB_llm": quality},
         scoring={"status": "scored", "identity": identity, "judge_cost": {**record, **physical},
-                 "raw_output_path": str(Path(path).with_name("judge.json").resolve())})
+                 "raw_output_path": str(judge_path.resolve())})
     write(path, branch)
     return branch
+
+
+def _filter_observed_initial_steps(plans, frozen, snapshot, compiler, cache_scope, *, domain=None):
+    """Register only actions whose already known first model input fits."""
+    from controller.rolling_policy import compile_step
+
+    completed = {result.step_id for result in frozen.results}
+    kept, omitted = [], []
+    for branch in plans:
+        if branch.semantic_kind in {"read_once", "reduce_once"}:
+            plan = branch.context_plan
+            task = next(step.task for step in branch.steps if step.task.kind in {"READ", "REDUCE"}
+                        and step.task.step_id not in completed)
+            cpu = (plan.reading_mode == "typed_reduce" and task.kind == "REDUCE"
+                   and task.operation in {"count", "sum", "group", "union"})
+            if not cpu:
+                outputs = ((task.output_budget,) if domain is None else observed_step_outputs(plan, task,
+                    compiler.template, output_budgets=domain["output_budgets"],
+                    output_tokens_per_fact=domain["output_tokens_per_fact"], finite=True)[1])
+                variants = compile_step(plan, task, frozen, snapshot, compiler.template,
+                    outputs=outputs, request_compiler=compiler, cache_scope=cache_scope)
+                if domain is not None and task.kind == "REDUCE":
+                    variants = variants[:1]
+                if not any(candidate.feasible for candidate in variants):
+                    omitted.append({"family": branch.semantic_kind, "plan_id": branch.plan_id,
+                        "step_id": task.step_id, "reason": "known_initial_step_context_budget"})
+                    continue
+        kept.append(branch)
+    return tuple(kept), tuple(omitted)
+
+
+def _answer_branches(direct, kinds):
+    from controller.plan_policy import complete_plan
+
+    return tuple(replace(complete_plan(replace(direct.context_plan,
+        plan_id=direct.plan_id+":"+representation), (), semantic_kind="direct_answer",
+        reader_checkpoint=direct.reader_checkpoint, unmet_answer_points=direct.unmet_answer_points),
+        answer_representation=representation)
+        for representation in ALTERNATE_ANSWERS if "answer_"+representation in kinds)
 
 
 async def collect(config, settings, *, controller=None, provider=None, interpreter=None,
@@ -437,38 +932,71 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
     from controller.config import (GenerationProtocol, apply_study_config, create_controller,
                                    create_model_template, load_config)
     from controller.context_schema import RetrievalState
-    from controller.schema import OnlineTurn
+    from bench.official import load_radbench_contract
     from profiling.retention_capture_cost import CaptureRunAccounting
-    from training.preference_rollout import _judge
 
     output = Path(settings["output_dir"])
     output.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
-    labels, source_rows = read_rows(settings["task_labels"]), read_rows(settings["sources"])
-    selected, cohort = audited_cohort(labels, source_rows, split=settings["split"], limit=len(labels),
-        seed=settings["partition_seed"], dev_fraction=settings["dev_fraction"])
-    verify_actual_history(selected, read_rows(settings["actual_rollouts"]))
-    validator = AuditedTaskInterpreter(None)
-    valid, invalid = [], []
-    for row in selected:
-        history = tuple(decode(TurnRecord, turn) for turn in row["actual_history"])
-        state = decode(TaskState, row["task_state"])
-        validator.bind(row, state)
-        try:
-            validator.interpret(OnlineTurn(row["conversation_id"], row["task_id"], row["turn"],
-                "training", row["question"], (), (), "P3"), RetrievalState(0, history))
-        except ValueError as error:
-            invalid.append({"task_id": row["task_id"], "reason": "invalid_audited_task_binding", "error": str(error)})
-        else:
-            valid.append(row)
-    valid = valid[:settings["limit_tasks"]]
+    mode = settings.get("mode", "whole_plan")
+    source_rows = read_rows(settings["sources"])
+    packets = read_rows(settings["observed_states"]) if mode == "observed_actions" else ()
+    if mode == "observed_actions":
+        selected, cohort = observed_cohort(read_rows(settings["actual_rollouts"]), packets, source_rows,
+            split=settings["split"], limit=settings["limit_tasks"], cohort_manifest=settings["cohort_manifest"])
+    else:
+        if not settings.get("task_labels"):
+            raise ValueError("whole_plan requires audited --task-labels")
+        labels = read_rows(settings["task_labels"])
+        selected, cohort = audited_cohort(labels, source_rows, split=settings["split"], limit=len(labels),
+            cohort_manifest=settings["cohort_manifest"])
+        verify_actual_history(selected, read_rows(settings["actual_rollouts"]))
+    valid, invalid = selected, []
+    if mode == "whole_plan":
+        validator = AuditedTaskInterpreter(None)
+        valid = []
+        for row in selected:
+            history = tuple(decode(TurnRecord, turn) for turn in row["actual_history"])
+            state = decode(TaskState, row["task_state"])
+            validator.bind(row, state)
+            try:
+                validator.interpret(OnlineTurn(row["conversation_id"], row["task_id"], row["turn"],
+                    "training", row["question"], (), (), "P3"), RetrievalState(0, history))
+            except ValueError as error:
+                invalid.append({"task_id": row["task_id"], "reason": "invalid_audited_task_binding", "error": str(error)})
+            else:
+                valid.append(row)
+    elif mode != "observed_actions":
+        raise ValueError("gain collection mode must be whole_plan or observed_actions")
+    requested = cohort["declared_task_ids"][:settings["limit_tasks"]]
+    eligible = {row["task_id"]: row for row in valid}
+    valid = [eligible[identity] for identity in requested if identity in eligible]
+    observation_selection = {}
+    if mode == "observed_actions":
+        valid = observed_rows(valid, packets, selection=observation_selection)
     cohort["task_ref_exclusions"] = invalid
-    cohort["planned_task_ids"] = [row["task_id"] for row in valid]
+    cohort["requested_task_ids"] = requested
+    cohort["missing_eligible_task_ids"] = [identity for identity in requested if identity not in eligible]
+    cohort["planned_task_ids"] = list(dict.fromkeys(row["task_id"] for row in valid))
+    cohort["missing_task_ids"] = [identity for identity in requested if identity not in cohort["planned_task_ids"]]
+    if mode == "observed_actions":
+        observation_selection["unavailable_actions"].extend(
+            {"task_id": identity, "family": kind, "reason": "no_eligible_actual_capture"}
+            for identity in requested if identity not in eligible
+            for kind in ("read_once", "reduce_once", "gap_retrieval"))
+        cohort["observation_selection"] = observation_selection
+        cohort["planned_observations"] = len(valid)
     write(output/"cohort.json", cohort)
     if not valid:
-        raise ValueError("no unchanged audited task binding remains for actual gain collection")
+        raise ValueError("no validated task/decision snapshot remains for actual gain collection")
+    if any(row["observed_binding"].get("action_domain") for row in valid if row.get("observed_binding")) and (
+            settings["cache_start"] not in {"paired", "cold"}):
+        raise ValueError("finite action supervision requires paired or cold cache preparation")
     run = load_config(settings["run_config"])
-    run = replace(apply_study_config(run, config), state_dir=str(output/"state"), plan_gain=None,
+    run = apply_study_config(run, config)
+    continuation_gap_limits = ((run.state_observation or run.plan_gain)["gap_limits"]
+                               if mode == "observed_actions" else None)
+    run = replace(run, state_dir=str(output/"state"), plan_gain=None, state_observation=None,
         prefix_retention={"mode": "native"}, planner=replace(run.planner, strategy="always_rebuild"))
     if settings.get("reader_base_url"):
         run = replace(run, engine=replace(run.engine, base_url=settings["reader_base_url"]))
@@ -476,7 +1004,8 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
         raise ValueError("gain supervision collection requires a scoped real SGLang reader")
     judge_run = load_config(settings["judge_config"])
     judge_url = settings["judge_base_url"]
-    weights = settings.get("quality_weights", DEFAULT_WEIGHTS)
+    contract = load_radbench_contract(settings.get("official_checkout") or
+        config.get("scoring", {}).get("official_checkout", "data/mtrag-official"))
     budget = GenerationBudget(settings["max_generations"], output/"all-model-calls.jsonl")
     ports = {urlsplit(run.engine.base_url).port, urlsplit(judge_url).port,
              urlsplit(config["generation"]["teacher_url"]).port}
@@ -504,6 +1033,11 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
             StudyResourceSampler(settings["judge_gpu_devices"], judge_roots, interval=.5))
     own_controller, own_provider, own_judge = controller is None, provider is None, judge_client is None
     all_runs, all_pairs, preparations, unavailable = [], [], [], []
+    def preparation_counts():
+        return {"source_tasks_prepared": len({row["task_id"] for row in preparations}),
+            "source_tasks_planned": len(cohort["planned_task_ids"]),
+            "decision_states_prepared": len(preparations), "decision_states_planned": len(valid)}
+
     status, stop_reason = "completed", None
     active_error = None
     async with accounting:
@@ -521,7 +1055,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
             if own_provider:
                 provider, interpreter = await asyncio.to_thread(create_audited_provider, config, controller.template)
             if not isinstance(interpreter, AuditedTaskInterpreter):
-                raise ValueError("gain preparation requires the unchanged audited-state interpreter")
+                raise ValueError("gain preparation requires the unchanged frozen-state interpreter")
             accounting.resident_model_manifest = to_jsonable(provider.manifest)
             if own_provider:
                 accounting.record_resident_models(settings["study_config"], provider.manifest)
@@ -546,26 +1080,30 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 raise ValueError("fixed scorer actual checkpoint differs from its scoped tokenizer/model")
             if own_judge and judge_info["fingerprint"]["model_revision"] != judge_run.model.revision:
                 raise ValueError("fixed scorer does not match its explicit reader checkpoint")
-            scorer = {"kind": "frozen_four_component_actual_answer_judge",
-                "reader_checkpoint": judge_info["fingerprint"]["model_revision"],
-                "fingerprint": judge_info["fingerprint"], "weights": weights,
-                "implementation_sha256": hashlib.sha256(inspect.getsource(_judge).encode()).hexdigest(),
-                "request_sampling": {"temperature": 0, "max_new_tokens": 1024},
-                "metric": "plan_gain_quality", "score_range": [0, 1]}
+            scorer = radbench_scorer_identity(contract, judge_info["fingerprint"])
             journal_judge = JudgeJournal(judge_client, budget, output/"judge-wire.jsonl")
             common_binding = {"reader_checkpoint": reader_checkpoint,
                 "reader_profile_id": settings["reader_profile_id"], "scorer_identity": scorer,
-                "split": settings["split"], "measurement_kind": "hardware" if info.engine_kind == "sglang" else "simulation",
+                "split": settings["split"], "cohort_split": settings["split"],
+                "cohort_manifest_sha256": cohort["cohort_manifest_sha256"],
+                "measurement_kind": "hardware" if info.engine_kind == "sglang" else "simulation",
                 "resident_model_manifest": to_jsonable(provider.manifest),
-                "task_state_source": "frozen_audited_actual"}
+                "input_protocol": input_protocol(controller.template.fingerprint),
+                "continuation_protocol": BOUNDED_CONTINUATION,
+                "continuation_gap_limits": continuation_gap_limits,
+                "task_state_source": "actual_observed_decision" if mode == "observed_actions" else "frozen_audited_actual",
+                "collection_mode": mode,
+                "counterfactual_cache_start": settings["cache_start"]}
             write(output/"binding.json", {**common_binding, "reader_engine_info": info,
                 "support_engine_info": support_engine_info,
                 "scorer_engine_info": judge_info, "generation_protocol": GenerationProtocol.from_config(run).record(),
                 "source_files": {name: {"path": str(Path(settings[name]).resolve()),
                     "sha256": hashlib.sha256(Path(settings[name]).read_bytes()).hexdigest()}
-                    for name in ("task_labels", "actual_rollouts", "sources", "run_config", "judge_config")},
+                    for name in ("actual_rollouts", "sources", "run_config", "judge_config", "cohort_manifest")
+                        + (("observed_states",) if mode == "observed_actions" else ("task_labels",))},
                 "configuration": config, "collection_settings": settings,
-                "task_inference": "frozen audited training labels; no new task-teacher inference"})
+                "task_inference": ("captured actual TaskState; no task-label dependency or new task inference"
+                    if mode == "observed_actions" else "frozen audited training labels; no new task-teacher inference")})
             for number, row in enumerate(valid):
                 if budget.remaining < 2:
                     status, stop_reason = "generation_budget_exhausted", "no_preparation_and_answer_allocation"
@@ -583,30 +1121,80 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 plans = ()
                 usage_before = {id(model): dict(model.usage) for _, model in provider._usage_sources()
                                 if hasattr(model, "usage")}
+                observed, gap_request = None, None
                 try:
-                    selection = await provider.retrieve(snap, row["question"], row["task_id"])
-                    base = selection.context_plans[0]
-                    if base.task_state != state:
-                        raise ValueError("A candidate preparation changed the audited current task state")
-                    trace = provider.traces[snap.session_id, row["task_id"]]
-                    scope_material = None
-                    if settings["scope_scan"] and state.source_scope:
-                        scope_pool = provider.directory.full_scope(state.source_scope)
-                        scope_material = EvidenceSet("gain-explicit-scope", scope_pool.units,
-                                                     source_blocks=scope_pool.source_blocks)
-                    plans, omitted = build_counterfactual_plans(base, snap, controller.template,
-                        reader_checkpoint=reader_checkpoint, read_outputs=settings["read_outputs"],
-                        scope_material=scope_material)
+                    if mode == "observed_actions":
+                        packet = row["observed_packet"]
+                        validate_input_protocol(packet.get("input_protocol"),
+                            reader_fingerprint=controller.template.fingerprint)
+                        observed = row["observed_binding"]
+                        if (observed["reader_checkpoint"] != reader_checkpoint
+                                or observed["reader_profile_id"] != settings["reader_profile_id"]):
+                            raise ValueError("observed state belongs to a different actual reader checkpoint/profile")
+                        frozen = decode(ReadingOutcome, packet["working_state"])
+                        snap = decode(SessionSnapshot, packet["snapshot"])
+                        base = frozen.plan
+                        actual_manifest = provider.manifest
+                        retriever_identity = gap_retriever_identity(actual_manifest)
+                        if packet["resident_model_manifest_digest"] != retriever_identity["resident_model_manifest_digest"]:
+                            raise ValueError("observed state belongs to different frozen A resident assets")
+                        if observed["evidence_selection_contract"] != evidence_selection_contract(actual_manifest):
+                            raise ValueError("observed state uses a different frozen A evidence selection contract")
+                        gap_request = decode(GapRetrievalRequest, packet["gap_request"]) if packet.get("gap_request") else None
+                        if gap_request is not None and gap_request.retriever_identity != retriever_identity:
+                            raise ValueError("registered GAP retriever differs from the actual collection configuration")
+                        domain = observed.get("action_domain")
+                        plans, omitted = build_observed_action_plans(frozen, snap, controller.template,
+                            reader_checkpoint=reader_checkpoint, gap_request=gap_request,
+                            answer_system_prompt=controller.policy.system_prompt,
+                            read_choices=domain["read_choices"] if domain is not None else 1)
+                        available = {plan.semantic_kind for plan in plans}
+                        reasons = {"read_once": "no_ready_unread_source_step",
+                            "reduce_once": "no_unreduced_extract_basis_for_requested_operation",
+                            "gap_retrieval": "no_registered_gap_request"}
+                        omitted = (*omitted, *({"family": kind, "reason": reason}
+                            for kind, reason in reasons.items() if kind not in available))
+                        plans = tuple(plan for plan in plans if plan.semantic_kind == "direct_answer"
+                                      or plan.semantic_kind in row["observed_action_kinds"])
+                        if domain is not None:
+                            plans = (*plans, *_answer_branches(plans[0], row["observed_action_kinds"]))
+                        if any(plan.semantic_kind in {"read_once", "reduce_once"} for plan in plans):
+                            plans, infeasible = _filter_observed_initial_steps(plans, frozen, snap,
+                                controller.request_compiler, await controller.engine.info(), domain=domain)
+                            omitted = (*omitted, *infeasible)
+                        trace, scope_material = {"source": "recorded_observed_state", "binding": observed,
+                            "source_observed_actions": packet["legal_actions"],
+                            "current_protocol_reduce_candidate": row["current_protocol_reduce_candidate"]
+                                if "reduce_once" in row["observed_action_kinds"] else None}, None
+                    else:
+                        selection = await provider.retrieve(snap, row["question"], row["task_id"])
+                        base = selection.context_plans[0]
+                        if base.task_state != state:
+                            raise ValueError("A candidate preparation changed the audited current task state")
+                        trace = provider.take_trace(snap.session_id, row["task_id"])
+                        scope_material = None
+                        if settings["scope_scan"] and state.source_scope:
+                            scope_pool = provider.directory.full_scope(state.source_scope)
+                            scope_material = EvidenceSet("gain-explicit-scope", scope_pool.units,
+                                                         source_blocks=scope_pool.source_blocks)
+                        frozen = next((seed for seed in selection.initial_outcomes
+                            if seed.plan.plan_id == base.plan_id), None)
+                        if frozen is None:
+                            frozen = ReadingOutcome(base, auxiliary_usage={"input_tokens": 0,
+                                "output_tokens": 0, "compute_ms": 0.0, "models": []})
+                        plans, omitted = build_counterfactual_plans(base, snap, controller.template,
+                            reader_checkpoint=reader_checkpoint, read_outputs=settings["read_outputs"],
+                            scope_material=scope_material, answer_system_prompt=controller.policy.system_prompt,
+                            initial_state=frozen)
                     unavailable.extend({"task_id": row["task_id"], **reason} for reason in omitted)
-                    frozen = ReadingOutcome(base, auxiliary_usage={"input_tokens": 0,
-                        "output_tokens": 0, "compute_ms": 0.0, "models": []})
                     material = judge_sources(base, scope_material, row, source_rows,
                                              corpus_id=config["retrieval"]["corpus_id"])
                     write(task_dir/"registered-family.json", {"registered_at": time.monotonic(),
                         "model_calls_before_branch_execution": len(budget.tickets),
                         "working_state": frozen, "snapshot": snap, "frozen_state_key": working_state_key(frozen, snap),
+                        "observed_state_binding": observed, "gap_request": gap_request,
                         "candidate_plans": plans, "unavailable": omitted,
-                        "offline_judge_material": material, "offline_reference": row["reference_answer"],
+                        "offline_audit_material": material, "offline_reference": row["reference_answer"],
                         "preparation_trace": trace, "source_task": row})
                 except (CompletedSupportTruncated, json.JSONDecodeError) as error:
                     unavailable.append({"task_id": row["task_id"], "reason": "completed_preparation_model_failed",
@@ -627,16 +1215,21 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                     continue
                 comparison = {"body_tokens": base.budget.body_tokens,
                     "answer_output_tokens": base.budget.output_tokens, "window_tokens": base.budget.window_tokens,
-                    "read_output_budget_grid": settings["read_outputs"],
+                    "read_output_budget_grid": settings["read_outputs"] if mode == "whole_plan" else None,
+                    "action_protocol": "whole_registered_plan" if mode == "whole_plan" else BOUNDED_CONTINUATION,
                     "reference_state": "same frozen original material/actual history; direct has zero new READ"}
                 binding = {**common_binding, "comparison_budget": comparison}
+                async def retrieve_gap(plan, request, claims):
+                    if request.retriever_identity != gap_retriever_identity(provider.manifest):
+                        raise ValueError("GAP request is not bound to this actual retriever")
+                    return await provider.extend_for_plan(snap, plan, request.open_needs, claims)
                 baseline = None
                 for branch_number, plan in enumerate(plans):
                     branch_dir = task_dir/f"branch-{branch_number:02d}"
                     packet = {"plan_candidate": to_jsonable(plan), "working_state": to_jsonable(frozen),
                         "snapshot": to_jsonable(snap), "metric": "plan_gain_quality",
                         "normalization": {"scale": 1, "offset": 0,
-                            "protocol_source": "four normalized components weighted by fixed scorer_identity.weights"},
+                            "protocol_source": "official RB_llm extract_rating divides by 10; plan_gain_quality already normalized"},
                         "scorer_identity": scorer, "comparison_budget": comparison,
                         "direct_run": str((task_dir/"branch-00"/"run.json").resolve()),
                         "candidate_run": str((branch_dir/"run.json").resolve()),
@@ -644,7 +1237,8 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                     write(task_dir/f"pair-{branch_number:02d}.before.json", packet)
                     result = await execute_branch(controller, plan, frozen, snap, row, case_dir=branch_dir,
                         binding=binding, preparation=preparation, resources=resources,
-                        cache_start=settings["cache_start"], generation_budget=budget)
+                        cache_start=settings["cache_start"], generation_budget=budget, observed=observed,
+                        gap_request=gap_request, gap_provider=retrieve_gap)
                     if result is None:
                         unavailable.append({"task_id": row["task_id"], "plan_id": plan.plan_id,
                             "reason": "next_complete_branch_unaffordable", "remaining_calls": budget.remaining})
@@ -654,27 +1248,29 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                     if result["status"] != "completed":
                         continue
                     try:
-                        result = await score_branch(journal_judge, judge_template, row, material, result,
-                            path=branch_dir/"run.json", identity=scorer, weights=weights, resources=resources,
+                        result = await score_branch(journal_judge, judge_template, row,
+                            json.loads((branch_dir/"before.json").read_text()), result,
+                            contract=contract, path=branch_dir/"run.json", identity=scorer, resources=resources,
                             judge_window=judge_run.context.max_total_model_tokens,
                             expected_fingerprint=judge_info["fingerprint"])
-                    except (CompletedJudgeTruncated, JudgeWindowUnavailable, json.JSONDecodeError) as error:
+                    except JudgeWindowUnavailable as error:
                         result["scoring"].update(status="failed", error=str(error),
                                                  raw_output_path=str(branch_dir/"judge.json"))
                         write(branch_dir/"run.json", result)
                         continue
-                    if plan.semantic_kind == "direct_answer":
-                        if result["response"]["read_count"] != 0:
+                    if plan.semantic_kind == "direct_answer" and plan.answer_representation == "existing":
+                        if result["new_action_counts"]["READ"] != 0:
                             raise ValueError("gain direct baseline executed a READ")
                         baseline = result
-                    elif baseline is not None and common_binding["measurement_kind"] == "hardware":
+                    elif (baseline is not None and common_binding["measurement_kind"] == "hardware"
+                          and plan.semantic_kind != "direct_answer"):
                         pair = collect_pair(packet, baseline, result)
                         pair["preparation_cost_id"] = preparation["shared_cost_id"]
                         append(output/"gains.jsonl", pair)
                         append(output/"pairs.jsonl", packet)
                         all_pairs.append(pair)
-                write(output/"progress.json", {"tasks_prepared": len(preparations), "runs": len(all_runs),
-                    "pairs": len(all_pairs), "generations": len(budget.tickets), "status": status})
+                write(output/"progress.json", {**preparation_counts(), "runs": len(all_runs),
+                    "pairs": len(all_pairs), "generations": len(budget.tickets), "status": "running"})
                 if budget.remaining < 2:
                     status, stop_reason = "generation_budget_exhausted", "no_complete_reader_and_judge_allocation"
                     break
@@ -694,11 +1290,19 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
             await resources.close()
             write(output/"phase-resources.json", {"online": resources.online.observation(),
                                                    "judge": resources.judge.observation()})
-            write(output/"manifest.json", {"schema_version": 1, "status": status,
+            write(output/"manifest.json", {"schema_version": 1, "status": status, "collection_mode": mode,
                 "error": str(active_error) if active_error is not None else stop_reason,
                 "scope": "actual reader-bound counterfactual supervision collection",
+                "continuation_protocol": BOUNDED_CONTINUATION,
                 "elapsed_ms": (time.monotonic()-started)*1000, "planned_tasks": cohort["planned_task_ids"],
-                "tasks_prepared": len(preparations), "actual_runs": len(all_runs), "actual_gain_pairs": len(all_pairs),
+                "cohort": cohort,
+                **preparation_counts(), "actual_runs": len(all_runs), "actual_gain_pairs": len(all_pairs),
+                "actual_observations": len({row["observed_state_binding"]["observation_id"] for row in all_runs
+                                            if row["observed_state_binding"] is not None}),
+                "actual_action_task_ids": {kind: sorted({row["task_id"] for row in all_runs
+                    if row["semantic_kind"] == kind and row["new_action_counts"][action] >= 1})
+                    for kind, action in (("read_once", "READ"), ("reduce_once", "REDUCE"),
+                                         ("gap_retrieval", "GAP_RETRIEVAL"))},
                 "run_statuses": dict(Counter(row["status"] for row in all_runs)),
                 "semantic_families": dict(Counter(row["semantic_kind"] for row in all_runs)),
                 "unavailable": unavailable, "generations": {"limit": budget.maximum, "actual_calls": len(budget.tickets),
@@ -709,6 +1313,8 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                     "raw_support": str(output/"support-wire.jsonl"),
                     "raw_judge": str(output/"judge-wire.jsonl"), "all_calls": str(output/"all-model-calls.jsonl")},
                 "cost_accounting": "entry physical/native totals count shared preparation once; each branch also records full hypothetical response cost with shared preparation ID; offline judge remains separate"})
+            write(output/"progress.json", {**preparation_counts(), "runs": len(all_runs),
+                "pairs": len(all_pairs), "generations": len(budget.tickets), "status": status})
     entry_path = output/"capture-entry.json"
     if entry_path.exists():
         entry = json.loads(entry_path.read_text())
@@ -731,23 +1337,31 @@ def main(argv=None):
     parser.add_argument("--reader-base-url")
     parser.add_argument("--judge-config", required=True)
     parser.add_argument("--judge-base-url", required=True)
-    parser.add_argument("--task-labels", required=True)
+    parser.add_argument("--official-checkout", help="Pinned official RB_llm source checkout; defaults to study scoring configuration")
+    parser.add_argument("--task-labels", help="Required only for the whole_plan audited control")
+    parser.add_argument("--cohort-manifest", required=True)
     parser.add_argument("--actual-rollouts", required=True)
     parser.add_argument("--sources", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--split", choices=("train", "dev"), required=True)
     parser.add_argument("--limit-tasks", type=int, default=8)
-    parser.add_argument("--partition-seed", default="plan-gain-native-train-v1")
-    parser.add_argument("--dev-fraction", type=float, default=.2)
     parser.add_argument("--read-outputs", type=integers, default=(512, 1024, 2048))
     parser.add_argument("--max-generations", type=int, default=256)
     parser.add_argument("--online-gpu-devices", type=integers, required=True)
     parser.add_argument("--judge-gpu-devices", type=integers, required=True)
     parser.add_argument("--extra-process-roots", type=integers, default=())
-    parser.add_argument("--cache-start", choices=("cold", "observed"), default="observed")
+    parser.add_argument("--cache-start", choices=("cold", "paired", "observed"), default="observed")
     parser.add_argument("--scope-scan", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--mode", choices=("whole_plan", "observed_actions"), default="whole_plan")
+    parser.add_argument("--observed-states", help="Registered observed-state JSONL packets for observed_actions mode")
     args = parser.parse_args(argv)
-    if args.limit_tasks < 1 or args.max_generations < 1 or not 0 < args.dev_fraction < 1 or any(
+    if args.mode == "whole_plan" and not args.task_labels:
+        parser.error("whole_plan requires --task-labels")
+    if args.mode == "observed_actions" and not args.observed_states:
+        parser.error("observed_actions requires --observed-states")
+    if args.cache_start == "paired" and args.mode != "observed_actions":
+        parser.error("paired cache preparation requires observed_actions")
+    if args.limit_tasks < 1 or args.max_generations < 1 or any(
             output < 1 for output in args.read_outputs):
         raise ValueError("collection bounds, output allocations and conversation holdout must be positive")
     config = yaml.safe_load(Path(args.study_config).read_text())

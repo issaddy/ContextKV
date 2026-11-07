@@ -59,6 +59,11 @@ class Attempt:
     reading_outcome: ReadingOutcome | None = None
     reading_elapsed_ms: float = 0.0
     auxiliary_usage: dict | None = None
+    final_step_id: str | None = None
+    cache_config_hash: str | None = None
+    answer_quote: dict | None = None
+    failed_from_stage: str | None = None
+    terminal_receipt: CompletionReceipt | None = None
 
 
 ACTIVE_STAGES = ("STARTED", "PLANNED", "PREPARING", "PREPARED", "SUBMITTED", "RESULT_READY")
@@ -69,6 +74,22 @@ class ReadingProgress:
     expanded: tuple[tuple[str, str, tuple[str, ...], str], ...] = ()
     blocked_open_needs: tuple[OpenNeed, ...] = ()
     auxiliary_usage: dict | None = None
+
+
+@dataclass(frozen=True)
+class DocumentSet:
+    document_set_id: str
+    corpus_snapshot_id: str
+    blocks: tuple[EvidenceBlock, ...]
+    source_metadata: tuple[tuple[EvidenceKey, dict], ...] = ()
+
+    @classmethod
+    def create(cls, blocks, source_metadata=None):
+        blocks = tuple(blocks)
+        metadata = tuple(sorted((source_metadata or {}).items()))
+        digest = sha256(dumps((blocks, metadata)).encode("utf-8")).hexdigest()
+        identity = "documents:"+digest
+        return cls(identity, identity, blocks, metadata)
 
 
 def load_record(connection, cls, payload):
@@ -123,12 +144,17 @@ class SessionStore:
             PRIMARY KEY(session_id, version));
           CREATE TABLE IF NOT EXISTS text_blobs (
             sha256 TEXT PRIMARY KEY, text TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS document_sets (
+            document_set_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS turn_plans (
             attempt_id TEXT PRIMARY KEY REFERENCES attempts(attempt_id), plan TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS execution_steps (
             attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id), step_id TEXT NOT NULL,
             stage TEXT NOT NULL, payload TEXT NOT NULL, generation TEXT,
             PRIMARY KEY(attempt_id,step_id));
+          CREATE TABLE IF NOT EXISTS auxiliary_calls (
+            call_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id), payload TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS auxiliary_calls_by_attempt ON auxiliary_calls(attempt_id);
           CREATE TABLE IF NOT EXISTS reading_progress (
             attempt_id TEXT PRIMARY KEY REFERENCES attempts(attempt_id), payload TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS prefix_owners (
@@ -209,6 +235,39 @@ class SessionStore:
         with self._mutex:
             return self._read(session_id)
 
+    def register_document_set(self, blocks, *, source_metadata=None) -> DocumentSet:
+        documents = DocumentSet.create(blocks, source_metadata)
+        with self._transaction():
+            self.db.execute("INSERT OR IGNORE INTO document_sets VALUES(?,?)",
+                            (documents.document_set_id, self._dump(documents)))
+        return documents
+
+    def load_document_set(self, document_set_id: str) -> DocumentSet:
+        with self._mutex:
+            row = self.db.execute("SELECT payload FROM document_sets WHERE document_set_id=?",
+                                  (document_set_id,)).fetchone()
+            if row is None:
+                raise KeyError(document_set_id)
+            return load_record(self.db, DocumentSet, row[0])
+
+    def committed_readings(self, snapshot: SessionSnapshot):
+        """Project actual committed READ outcomes without another facts ledger."""
+        turns = {turn.turn_id: turn for turn in snapshot.raw_history}
+        readings = []
+        with self._mutex:
+            rows = self.db.execute("SELECT payload FROM attempts WHERE session_id=? AND stage='COMMITTED' "
+                                   "ORDER BY rowid", (snapshot.session_id,)).fetchall()
+            for row in rows:
+                attempt = load_record(self.db, Attempt, row[0])
+                outcome = attempt.reading_outcome
+                if outcome is None or outcome.plan.task_state.current_turn_id not in turns:
+                    continue
+                turn = turns[outcome.plan.task_state.current_turn_id]
+                if ((attempt.query, attempt.result.text) == (turn.user_text, turn.assistant_text)
+                        and turn.evidence_set == outcome.plan.selected_set):
+                    readings.append((attempt.attempt_id, outcome))
+        return tuple(readings)
+
     def _write_snapshot(self, snapshot: SessionSnapshot, expected_version: int):
         payload = self._dump(snapshot)
         changed = self.db.execute("UPDATE sessions SET version=?,snapshot=? WHERE session_id=? AND version=?",
@@ -265,19 +324,30 @@ class SessionStore:
             self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (attempt.stage, self._dump(attempt), attempt.attempt_id))
             return attempt
 
-    def save_context_plan(self, attempt_id: str, context_plan: ContextPlan):
+    def save_context_plan(self, attempt_id: str, context_plan: ContextPlan, *, initial_outcome=None):
         with self._transaction():
+            if initial_outcome is not None:
+                attempt = self.get_attempt(attempt_id)
+                attempt = replace(attempt, context_plan=context_plan, reading_outcome=initial_outcome)
+                self.db.execute("UPDATE attempts SET payload=? WHERE attempt_id=?",
+                                (self._dump(attempt), attempt_id))
             self.db.execute("INSERT INTO turn_plans VALUES(?,?) ON CONFLICT(attempt_id) "
                             "DO UPDATE SET plan=excluded.plan",
                             (attempt_id, self._dump(context_plan)))
 
-    def save_reading_progress(self, attempt_id, context_plan, progress):
+    def save_reading_progress(self, attempt_id, context_plan, progress, *, completed_step=None):
         """Persist the completed gap work and its resulting plan atomically."""
         with self._transaction():
             self.db.execute("INSERT INTO turn_plans VALUES(?,?) ON CONFLICT(attempt_id) "
                             "DO UPDATE SET plan=excluded.plan", (attempt_id, self._dump(context_plan)))
             self.db.execute("INSERT INTO reading_progress VALUES(?,?) ON CONFLICT(attempt_id) "
                             "DO UPDATE SET payload=excluded.payload", (attempt_id, self._dump(progress)))
+            if completed_step is not None:
+                if completed_step.attempt_id != attempt_id:
+                    raise ValueError("completed reading step belongs to a different attempt")
+                self.db.execute("INSERT INTO execution_steps VALUES(?,?,?,?,NULL) "
+                    "ON CONFLICT(attempt_id,step_id) DO UPDATE SET stage=excluded.stage, payload=excluded.payload",
+                    (attempt_id, completed_step.step_id, "COMPLETE", self._dump(completed_step)))
 
     def reading_progress(self, attempt_id):
         with self._mutex:
@@ -345,6 +415,18 @@ class SessionStore:
                 "observed_ns": row["observed_ns"], "payload": load_record(self.db, dict, row["payload"])}
                 for row in self.db.execute(sql+" ORDER BY access_id", params))
 
+    def complete_prefix_access(self, *, owner_id, native_attempt_id, result):
+        """Finish one policy decision without registering another source READ."""
+        with self._transaction():
+            row = self.db.execute("SELECT payload FROM prefix_accesses "
+                "WHERE owner_id=? AND native_attempt_id=?", (owner_id, native_attempt_id)).fetchone()
+            if row is None:
+                raise KeyError((owner_id, native_attempt_id))
+            payload = load_record(self.db, dict, row[0])
+            payload["policy_result"] = result
+            self.db.execute("UPDATE prefix_accesses SET payload=? WHERE owner_id=? AND native_attempt_id=?",
+                (self._dump(payload), owner_id, native_attempt_id))
+
     def add_reading_elapsed(self, attempt_id, elapsed_ms):
         """Accumulate measured execution segments across transport retries."""
         with self._transaction():
@@ -367,6 +449,12 @@ class SessionStore:
                             (self._dump(updated), attempt_id))
             return updated
 
+    def save_auxiliary_call(self, receipt):
+        with self._transaction():
+            self.db.execute("INSERT INTO auxiliary_calls VALUES(?,?,?) "
+                "ON CONFLICT(call_id) DO UPDATE SET payload=excluded.payload",
+                (receipt["call_id"], receipt["attempt_id"], dumps(receipt)))
+
     def context_plan(self, attempt_id: str) -> ContextPlan | None:
         with self._mutex:
             row = self.db.execute("SELECT plan FROM turn_plans WHERE attempt_id=?",
@@ -380,9 +468,16 @@ class SessionStore:
                 "payload=excluded.payload, generation=COALESCE(excluded.generation,generation)",
                 (record.attempt_id, record.step_id, stage, self._dump(record),
                  self._dump(generation) if generation is not None else None))
-            if generation is not None:
+            if generation is not None or (record.engine_epoch is not None and stage == "FAILED"
+                                          and record.metrics.get("terminal_state") != "STALE_RESTART"):
                 self._enqueue(record.engine_epoch.business_session_id, record.engine_epoch,
                               "reading_step_complete", self.get_attempt(record.attempt_id).expected_version)
+
+    def has_submitted_model_step(self, attempt_id):
+        with self._mutex:
+            return self.db.execute("SELECT 1 FROM execution_steps WHERE attempt_id=? AND stage='SUBMITTED' "
+                                   "AND json_type(payload, '$.engine_epoch')='object' LIMIT 1",
+                                   (attempt_id,)).fetchone() is not None
 
     def execution_steps(self, attempt_id: str):
         with self._mutex:
@@ -403,9 +498,6 @@ class SessionStore:
             if row is None:
                 return None
             record = load_record(self.db, StepRecord, row["payload"])
-            record = replace(record, engine_epoch=decode(ContextEpoch, record.engine_epoch),
-                             input_messages=tuple(decode(Message, message) for message in record.input_messages),
-                             receipt=decode(CompletionReceipt, record.receipt) if record.receipt is not None else None)
             generation = load_record(self.db, GenerationResult, row["generation"]) if row["generation"] else None
             return row["stage"], record, generation
 
@@ -482,6 +574,27 @@ class SessionStore:
         self.db.execute("INSERT OR IGNORE INTO retire_outbox(operation_id,session_id,payload,created_ns) VALUES(?,?,?,?)",
                         (operation.operation_id, session_id, dumps(operation), time.monotonic_ns()))
 
+    def promote_completed_step(self, attempt: Attempt) -> Attempt:
+        """Publish one already-paid external answer for the ordinary QA CAS commit."""
+        with self._transaction():
+            current = self.get_attempt(attempt.attempt_id)
+            if current.stage != "STARTED" or attempt.stage != "RESULT_READY" or not attempt.final_step_id:
+                raise StoreError("Only a started outer attempt can promote a completed physical answer")
+            paid = self.execution_step(attempt.attempt_id, attempt.final_step_id)
+            if (paid is None or paid[0] != "COMPLETE" or paid[2] != attempt.result
+                    or paid[1].input_ids != attempt.plan.candidate.input_ids
+                    or paid[1].input_messages != attempt.plan.candidate.messages
+                    or paid[1].engine_epoch.engine_session_id != attempt.epoch.engine_session_id):
+                raise StoreError("External answer must match its durable completed physical step")
+            if (current.session_id, current.request_id, current.request_hash, current.expected_version) != (
+                    attempt.session_id, attempt.request_id, attempt.request_hash, attempt.expected_version):
+                raise StoreError("Attempt identity is immutable")
+            self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?",
+                            (attempt.stage, self._dump(attempt), attempt.attempt_id))
+            self.db.execute("INSERT INTO turn_plans VALUES(?,?) ON CONFLICT(attempt_id) "
+                            "DO UPDATE SET plan=excluded.plan", (attempt.attempt_id, self._dump(attempt.context_plan)))
+            return attempt
+
     def commit_turn_and_outbox(self, attempt_id: str) -> SessionSnapshot:
         attempt = self.get_attempt(attempt_id)
         if attempt.stage == "COMMITTED":
@@ -511,7 +624,8 @@ class SessionStore:
             if attempt.context_plan is not None:
                 steps = attempt.reading_outcome.steps if attempt.reading_outcome is not None else ()
                 reader_tokens = (len(candidate.input_ids)+len(result.output_ids)
-                    +sum(len(step.input_ids)+len(step.output_ids) for step in steps))
+                    +sum(len(step.input_ids)+len(step.output_ids) for step in steps
+                         if step.step_id != attempt.final_step_id))
                 auxiliary = attempt.auxiliary_usage
                 auxiliary_tokens = (0 if auxiliary is None else
                     auxiliary["input_tokens"]+auxiliary["output_tokens"]
@@ -545,8 +659,9 @@ class SessionStore:
                               raw_history_version=history_version, execution=ledger,
                               archive=tuple(archive[k] for k in sorted(archive)),
                               corpus_snapshot_id=candidate.corpus_snapshot_id,
-                              current_epoch=replace(epoch, state="COMMITTED"), history_sync_pending=False,
-                              force_new_epoch_for_recovery=False, must_rebuild=False,
+                              current_epoch=replace(epoch, state="RETIRED" if attempt.final_step_id else "COMMITTED"),
+                              history_sync_pending=False, force_new_epoch_for_recovery=False,
+                              must_rebuild=bool(attempt.final_step_id),
                               reference_map=candidate.reference_map,
                               turns_since_rebuild=0 if candidate.action == "REBUILD" else snap.turns_since_rebuild + 1)
             self._write_snapshot(updated, snap.version)
@@ -557,13 +672,14 @@ class SessionStore:
             return updated
 
     def fail_attempt(self, attempt_id: str, error: str, force_recovery: bool = False,
-                     retire_candidate: bool = True):
+                     retire_candidate: bool = True, terminal_receipt: CompletionReceipt | None = None):
         """Call only before submit, or after engine completion/cancellation is confirmed."""
         with self._transaction():
             attempt = self.get_attempt(attempt_id)
             if attempt.stage in ("COMMITTED", "FAILED"):
                 return
-            updated = replace(attempt, stage="FAILED", error=error)
+            updated = replace(attempt, stage="FAILED", error=error, failed_from_stage=attempt.stage,
+                              terminal_receipt=terminal_receipt)
             self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (updated.stage, self._dump(updated), attempt_id))
             snap = self._read(attempt.session_id)
             if force_recovery:
@@ -617,3 +733,13 @@ class SessionStore:
             if snap.current_epoch:
                 self._enqueue(session_id, snap.current_epoch, "session_closed", snap.version)
             self.db.execute("UPDATE sessions SET closed=1 WHERE session_id=?", (session_id,))
+
+    def reopen_session(self, session_id: str):
+        """Resume a study history under a new attempt identity and engine epoch."""
+        with self._transaction():
+            changed = self.db.execute("UPDATE sessions SET closed=0 WHERE session_id=? AND closed=1",
+                                      (session_id,)).rowcount
+            if changed:
+                snap = self._read(session_id)
+                self._write_snapshot(replace(snap, version=snap.version + 1,
+                    force_new_epoch_for_recovery=True), snap.version)

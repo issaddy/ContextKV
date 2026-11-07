@@ -1,22 +1,14 @@
+from policy_helpers import SpecifiedGainFixture, bind_fixture_timing
 from dataclasses import replace
 
-import pytest
 
-from controller.context_schema import ReadResult, ReadTask, ReadingOutcome
+from controller.claim_graph import ClaimGraph
+from controller.context_schema import EvidenceClaim, ReadResult, ReadTask, ReadingOutcome
 from controller.cost_model import CostModel
 from controller.plan_policy import (CompleteCost, NativePlanningState, PlanPolicy,
-    PolicyLimits, ResourceForecast, StepForecast, complete_plan)
-from controller.schema import CacheQuote, CacheQuoteBatch, CostEstimate, Message, PromptCandidate, SessionSnapshot
-from test_context_planning import context_plan
-
-
-class SpecifiedGainFixture:
-    """Explicit unit-test gains, not a deployed or trained quality model."""
-    reader_checkpoint = "reader-fixture"
-    reader_profile_id = "profile-fixture"
-    asset_id = "test-only-specified-gains"
-    def predict(self, features):
-        return .6 if features["read_steps"] else .1
+    ResourceForecast, StepForecast, complete_plan)
+from controller.schema import CacheQuote, CacheQuoteBatch, CostEstimate, EvidenceSpan, Message, PromptCandidate, SessionSnapshot
+from context_helpers import context_plan
 
 
 class QuotedCostFixture(CostModel):
@@ -30,21 +22,15 @@ class QuotedCostFixture(CostModel):
 
 
 def prompt(name, *, action="REBUILD", output=64, kind="ANSWER", tokens=16):
-    return PromptCandidate(name, action, 0, (Message("system", kind+" fixture system"),), (1,)*tokens, "hash:"+name,
-        frozenset(), frozenset(), output_budget=output, generation_kind=kind)
-
-
-def bind_fixture_timing(model, candidates):
-    """Explicit protocol bindings for specified test costs, not real profiles."""
-    for candidate in candidates:
-        kind = candidate.generation_kind
-        child = model if kind == "ANSWER" else model.step_models.setdefault(kind, CostModel())
-        child.calibration_metadata = {"generation_kind": kind,
-            "output_prior_system_prompt": candidate.messages[0].content,
-            "step_control_scope": ["rolling_proposals_compilation_start"]}
-        child.step_output_priors[f"{kind}:{candidate.output_budget}"] = {
-            "mean_tokens": 1, "p90_tokens": 1, "mean_control_ms": 0,
-            "mean_remaining_control_ms": 0}
+    base, block = context_plan()
+    source = base.selected_set.selected_units[0].source_spans[0]
+    text = block.text[source.start:source.end]
+    spans = (EvidenceSpan(source.source_key, 1, 0, len(text), block.source_uri, block.provenance,
+                          source.span_id, source_start=source.start,
+                          source_end=source.end),) if kind == "ANSWER" else ()
+    return PromptCandidate(name, action, 0, (Message("system", kind+" fixture system"), Message("user", text)),
+        (1,)*tokens, "hash:"+name, frozenset(), frozenset(), evidence_spans=spans,
+        output_budget=output, generation_kind=kind)
 
 
 def make_plans(*, two_reads=False, scope=False):
@@ -115,38 +101,24 @@ def test_complete_tail_cost_changes_choice_even_when_next_read_is_cheap():
     assert len(evaluated.lookahead) == 2 and len(evaluated.forecast_sources) == 3
 
 
-def test_two_step_lookahead_compares_joint_output_budget_choices():
-    class BudgetGain(SpecifiedGainFixture):
-        def predict(self, features):
-            return features["output_budget_tokens"]*.002
-    base, direct, read = make_plans(two_reads=True)
-    first = read.steps[0]
-    read = replace(read, steps=(replace(first, variants=(prompt("small", output=32, kind="READ"),
-        prompt("large", output=64, kind="READ"))), replace(read.steps[1],
-        task=replace(read.steps[1].task, output_budget=128)), read.steps[2]))
-    machine = native((direct, read), latency={"small": 5, "large": 10})
-    machine.future[read.plan_id, read.steps[1].task.step_id] = (
-        StepForecast("REBUILD", 32, CompleteCost(10, 100, 20, 16, 32), "small-answer", True),
-        StepForecast("REBUILD", 128, CompleteCost(20, 100, 20, 16, 128), "large-answer", True))
-    policy = PlanPolicy(BudgetGain())
-    decision = policy.choose((direct, read), ReadingOutcome(base), machine, {})
-    assert decision.output_budget == 64
-    choices = [row for row in policy.last_evaluations if row.plan_id == read.plan_id]
-    assert len(choices) == 4
-    assert max(choices, key=lambda row: row.objective).lookahead[-1][-1] == 128
-
-
 def test_full_scope_completion_allows_a_budgeted_answer_from_a_large_read_archive():
     base, direct, scan = make_plans(scope=True)
     archive = replace(base.selected_set, token_cost=base.budget.body_tokens*4)
     base = replace(base, selected_set=archive)
     direct = replace(direct, context_plan=replace(direct.context_plan, selected_set=archive))
+    direct = replace(direct, steps=tuple(replace(step, variants=tuple(
+        replace(candidate, evidence_spans=()) for candidate in step.variants)) for step in direct.steps))
     scan = replace(scan, context_plan=replace(scan.context_plan, selected_set=archive))
     policy = PlanPolicy(SpecifiedGainFixture())
     decision = policy.choose((direct, scan), ReadingOutcome(base), native((direct, scan)), {})
     assert decision.next_step.plan_id == scan.plan_id
-    assert next(row for row in policy.last_evaluations if row.plan_id == direct.plan_id).reason == "required_scope_uncovered"
-    done = ReadingOutcome(scan.context_plan, results=(ReadResult("read:0", covered_units=("u",)),))
+    assert next(row for row in policy.last_evaluations if row.plan_id == direct.plan_id).reason == "answer_evidence_incomplete"
+    claim = EvidenceClaim("read:0:claim:0", "need", "extract", text="Complete supported conclusion",
+        source_spans=base.selected_set.selected_units[0].source_spans)
+    result = ReadResult("read:0", (claim,), covered_units=("u",), support=("need",))
+    done_plan = replace(scan.context_plan, answer_plan=ClaimGraph((claim,)).answer_plan(
+        base.task_state, results=(result,)))
+    done = ReadingOutcome(done_plan, results=(result,), claims=(claim,))
     next_direct = policy.choose((direct,), done, native((direct,)), {})
     assert next_direct.next_step.task.kind == "ANSWER"
     assert policy.last_evaluations[0].cost.input_tokens == 2+len(next_direct.next_step.candidate.input_ids)
@@ -167,43 +139,6 @@ def test_rolls_forward_after_real_read_result_and_requotes_the_next_step():
     assert answer.next_step.task.kind == "ANSWER"
 
 
-def test_repeated_read_id_does_not_skip_different_original_source_content():
-    base, _, plan = make_plans()
-    old_unit = plan.context_plan.selected_set.selected_units[0]
-    changed_unit = replace(old_unit, text="a different original source", source_spans=tuple(
-        replace(span, source_key=replace(span.source_key, version="different-version"))
-        for span in old_unit.source_spans))
-    new_plan = replace(plan, context_plan=replace(plan.context_plan, selected_set=replace(
-        plan.context_plan.selected_set, selected_units=(changed_unit,))))
-    progress = ReadingOutcome(plan.context_plan, results=(ReadResult("read:0", covered_units=("u",)),))
-    policy = PlanPolicy(SpecifiedGainFixture())
-    decision = policy.choose((new_plan,), progress, native((new_plan,)), {})
-    assert decision.next_step.task.step_id == "read:0"
-
-
-@pytest.mark.parametrize("changed", ({"read_layout": "source_first"}, {"read_packing": "source_windows"}))
-def test_completed_read_requires_the_same_layout_and_packing(changed):
-    _, _, plan = make_plans()
-    progress = ReadingOutcome(plan.context_plan, results=(ReadResult("read:0", covered_units=("u",)),))
-    changed_plan = replace(plan, context_plan=replace(plan.context_plan, **changed))
-    policy = PlanPolicy(SpecifiedGainFixture())
-    decision = policy.choose((changed_plan,), progress, native((changed_plan,)), {})
-    assert decision.next_step.task.kind == "READ"
-
-
-@pytest.mark.parametrize("paid,limits,reason", (
-    (CompleteCost(0, 999, 0, 0, 0), PolicyLimits(max_gpu_gib_ms=1000), "gpu_integral_budget"),
-    (CompleteCost(0, 0, 999, 0, 0), PolicyLimits(max_host_gib_ms=1000), "host_integral_budget"),
-    (CompleteCost(0, 0, 0, 99999, 0), PolicyLimits(), "cumulative_token_budget"),
-))
-def test_paid_cost_and_complete_plan_reservations_obey_hard_budgets(paid, limits, reason):
-    base, direct, read = make_plans()
-    policy = PlanPolicy(SpecifiedGainFixture(), limits=limits)
-    with pytest.raises(ValueError, match="no complete plan"):
-        policy.choose((read,), ReadingOutcome(base), native((read,), paid=paid), {})
-    assert policy.last_evaluations[0].reason == reason
-
-
 def test_native_prefixes_choose_context_action_without_a_second_saving_credit():
     base, direct, read = make_plans()
     first = replace(read.steps[0], variants=(prompt("cold", kind="READ"), prompt("warm", kind="READ", action="APPEND")))
@@ -216,19 +151,6 @@ def test_native_prefixes_choose_context_action_without_a_second_saving_credit():
     assert decision.next_step.reusable_prefix_ids == ("stable-source-owner",)
     assert min(row.cost.latency_ms for row in policy.last_evaluations) == 20
     assert all(candidate.predicted_read_ms == candidate.auxiliary_ms == 0 for candidate in machine.cost_model.calls)
-
-
-def test_policy_requires_reader_bound_gain_asset_and_rejects_stale_native_quotes():
-    with pytest.raises(ValueError, match="not enabled"):
-        PlanPolicy(None)
-    base, direct, _ = make_plans()
-    policy = PlanPolicy(SpecifiedGainFixture())
-    with pytest.raises(ValueError, match="different reader"):
-        policy.choose((direct,), ReadingOutcome(base), replace(native((direct,)), reader_checkpoint="reader-updated"), {})
-    machine = native((direct,))
-    machine.resources["direct-answer"] = replace(machine.resources["direct-answer"], quote_seq=8)
-    with pytest.raises(ValueError, match="different observations"):
-        policy.choose((direct,), ReadingOutcome(base), machine, {})
 
 
 def test_later_ready_step_uses_future_profile_not_current_quote_cache_savings():

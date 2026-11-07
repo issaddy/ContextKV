@@ -8,7 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .context_schema import (EvidenceKey, EvidenceBlock, TaskState, EvidenceSet, SupportBundle,
-                             AnswerPlan)
+                             AnswerPlan, Message as Message, ContextEpoch as ContextEpoch,
+                             CompletionReceipt as CompletionReceipt)
 
 
 def _tuples(instance, *names: str) -> None:
@@ -35,17 +36,14 @@ class EvidenceSpan:
     alias_declaration: tuple[int, int, int] | None = None
     source_start: int | None = None
     source_end: int | None = None
+    source_declaration: tuple[int, int, int] | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "provenance")
         if self.alias_declaration is not None:
             _tuples(self, "alias_declaration")
-
-
-@dataclass(frozen=True)
-class Message:
-    role: str
-    content: str
+        if self.source_declaration is not None:
+            _tuples(self, "source_declaration")
 
 
 @dataclass(frozen=True)
@@ -124,18 +122,6 @@ class ExecutionLedger:
 
 
 @dataclass(frozen=True)
-class ContextEpoch:
-    business_session_id: str
-    epoch_no: int
-    engine_session_id: str
-    session_generation: int
-    parent_epoch_no: int | None = None
-    state: str = "PREPARED"
-    reason: str = "initial"
-    engine_restart_id: str = ""
-
-
-@dataclass(frozen=True)
 class SessionSnapshot:
     session_id: str
     version: int = 0
@@ -191,8 +177,18 @@ class PromptCandidate:
     generation_kind: str = "ANSWER"
     cost_prediction_eligible: bool = True
 
+    read_unit_order: tuple[str, ...] = ()
+    source_ids: tuple[str, ...] = ()
+    read_task_hash: str | None = None
+    source_body_token_ranges: tuple[tuple[int, int], ...] | None = None
+    source_prefix_tokens: int = 0
+    representation: str = "existing"
+
     def __post_init__(self) -> None:
-        _tuples(self, "messages", "input_ids", "evidence_spans", "evidence_resolution")
+        _tuples(self, "messages", "input_ids", "evidence_spans", "evidence_resolution",
+                "read_unit_order", "source_ids")
+        if self.source_body_token_ranges is not None:
+            _tuples(self, "source_body_token_ranges")
         _references(self)
         object.__setattr__(self, "visible_blocks", frozenset(self.visible_blocks))
         object.__setattr__(self, "required_blocks", frozenset(self.required_blocks))
@@ -285,29 +281,13 @@ class CacheQuoteBatch:
     native_max_new_tokens_clip: int | None = None
     native_running_budget_tokens: float | None = None
     native_running_budget_requests: tuple[NativeRequestSummary, ...] | None = None
+    client_received_monotonic: float | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "quotes")
         for name in ("native_running_requests", "native_waiting_requests", "native_running_budget_requests"):
             if getattr(self, name) is not None:
                 _tuples(self, name)
-
-
-@dataclass(frozen=True)
-class CompletionReceipt:
-    rid: str
-    attempt_id: str
-    engine_session_id: str
-    session_generation: int
-    engine_restart_id: str
-    input_hash: str
-    finish_reason: str
-    generation_complete: bool
-    actual_device_hit_tokens: int = 0
-    actual_host_loaded_tokens: int = 0
-    actual_prefill_tokens: int = 0
-    inserted_cache_tokens: int = 0
-    session_ref_registered: bool = False
 
 
 @dataclass(frozen=True)

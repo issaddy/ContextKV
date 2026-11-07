@@ -419,15 +419,18 @@ async def benchmark(args, config):
         turn, result = item.online_turn, item.result
         try:
             snapshot = service.store.read_snapshot(f"{run_prefix}:{turn.conversation_id}")
+            attempt = service.store.get_attempt(result.attempt_id)
             export_evaluation(turn, result.assistant_text,
                           official_path=Path(config.state_dir) / f"official-{run_prefix}.jsonl",
                           audit_path=Path(config.state_dir) / f"audit-{run_prefix}.jsonl",
                           visible_evidence_manifest=snapshot.execution.evidence_spans,
-                          audit_evidence=tuple(b for b in snapshot.archive if b.key in snapshot.execution.visible_blocks),
+                          audit_evidence=snapshot.archive,
                           input_ids=snapshot.execution.last_input_ids, output_ids=snapshot.execution.last_output_ids,
                           branch_reason=result.branch_reason,
                           measurement_kind="simulation" if config.engine.kind == "mock" else "hardware",
-                          truncated=result.truncated, citation_scope=result.citation_scope)
+                          truncated=result.truncated, citation_scope=result.citation_scope,
+                          reading_outcome=attempt.reading_outcome,
+                          reference_map=attempt.plan.candidate.reference_map)
         except Exception as exc:
             # Serving and the runner have committed this answer. Preserve the
             # actual next-turn history; fail artifact delivery after saving the

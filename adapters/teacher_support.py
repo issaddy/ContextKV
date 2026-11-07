@@ -8,8 +8,9 @@ import time
 import httpx
 
 from adapters.support_model import SetPrediction, SupportPrediction
+from controller.auxiliary_spend import auxiliary_call
 from controller.schema import Message
-from controller.serialization import to_jsonable
+from controller.serialization import dumps, to_jsonable
 
 
 class TeacherSupportBackend:
@@ -22,12 +23,15 @@ class TeacherSupportBackend:
         self.record_path = Path(record_path) if record_path else None
         self.manifest = {"backend": "frozen_qwen3_support_utility_teacher",
             "reader_model": "qwen3_32b_nonthinking", "base_url": base_url,
+            "prediction_protocol": "support_span_membership_v1",
             "batch_size": batch_size, "window_tokens": window_tokens}
         self.usage = {"calls": 0, "examples": 0, "input_tokens": 0, "output_tokens": 0,
                       "compute_ms": 0.0, "support_ms": 0.0, "utility_ms": 0.0, "oversized_examples": 0}
         self.records = []
         self._sets = {}
         self._queries = {}
+        self._predictions = {}
+        self.usage["cache_hits"] = 0
 
     def _generate(self, system, payload, schema, kind, output_tokens):
         messages = (Message("system", system), Message("user", json.dumps(payload, ensure_ascii=False)))
@@ -36,11 +40,15 @@ class TeacherSupportBackend:
             self.usage["oversized_examples"] += 1
             return None
         started = time.perf_counter()
-        response = self.client.post("/generate", json={"input_ids": list(rendered.input_ids),
-            "stream": False, "sampling_params": {"temperature": 0, "max_new_tokens": output_tokens,
-                                                 "json_schema": json.dumps(schema)}})
-        response.raise_for_status()
-        raw = response.json()
+        with auxiliary_call(kind) as receipt:
+            response = self.client.post("/generate", json={"input_ids": list(rendered.input_ids),
+                "stream": False, "sampling_params": {"temperature": 0, "max_new_tokens": output_tokens,
+                                                     "json_schema": json.dumps(schema)}})
+            receipt.update(status="RESPONSE_ERROR", http_status=response.status_code)
+            response.raise_for_status()
+            raw = response.json()
+            receipt.update(status="RETURNED", input_tokens=len(rendered.input_ids),
+                           output_tokens=raw["meta_info"]["completion_tokens"])
         elapsed = (time.perf_counter()-started)*1000
         self.usage["calls"] += 1
         self.usage["input_tokens"] += len(rendered.input_ids)
@@ -48,7 +56,9 @@ class TeacherSupportBackend:
         self.usage[kind+"_ms"] += elapsed
         self.usage["compute_ms"] += elapsed
         record = {"kind": kind, "raw_output": raw["text"], "meta_info": raw["meta_info"],
+                  "prediction_protocol": self.manifest["prediction_protocol"],
                   "input_tokens": len(rendered.input_ids), "elapsed_ms": elapsed,
+                  "messages": to_jsonable(messages), "response_schema": schema, "output_limit": output_tokens,
                   "source_span_catalog": payload.get("span_catalog", {})}
         self.records.append(record)
         if self.record_path:
@@ -58,11 +68,25 @@ class TeacherSupportBackend:
         return json.loads(raw["text"])
 
     def predict(self, examples):
+        keys, pending = [], {}
+        for example in examples:
+            self._queries.setdefault(example.task_id, {})[example.need_id] = example.query
+            view = to_jsonable(example)
+            for unit in (*view["units"], *view["dependencies"]):
+                unit.pop("retrieval_score")
+            key = (example.task_id, dumps(view))
+            keys.append(key)
+            if key not in self._predictions:
+                pending[key] = example
+        self.usage["cache_hits"] += len(examples)-len(pending)
+        if pending:
+            self._predictions.update(zip(pending, self._predict_uncached(tuple(pending.values())), strict=True))
+        return tuple(self._predictions[key] for key in keys)
+
+    def _predict_uncached(self, examples):
         results = [None]*len(examples)
         for start in range(0, len(examples), self.batch_size):
             batch = examples[start:start+self.batch_size]
-            for example in batch:
-                self._queries.setdefault(example.task_id, {})[example.need_id] = example.query
             units = {unit.unit_id: unit for example in batch for unit in (*example.units, *example.dependencies)}
             original_spans = {span.span_id: span for unit in units.values() for span in unit.source_spans}
             spans = {f"s{index}": span for index, span in enumerate(original_spans.values())}
@@ -70,6 +94,7 @@ class TeacherSupportBackend:
             rendered_units = []
             for unit in units.values():
                 rendered = to_jsonable(unit)
+                rendered.pop("retrieval_score")
                 for span in rendered["source_spans"]:
                     span["span_id"] = aliases[span["span_id"]]
                 rendered_units.append(rendered)
@@ -77,16 +102,17 @@ class TeacherSupportBackend:
             item = {"type": "object", "properties": {
                 **{name: scalar for name in ("applicability", "direct_support", "joint_support", "bridge_value")},
                 "disposition": {"type": "string", "enum": ["complete", "partial", "background", "contradict"]},
-                "span_ids": {"type": "array", "items": {"type": "string", "enum": list(spans)}},
                 "missing_relation": {"type": "string"}},
                 "required": ["applicability", "direct_support", "joint_support", "bridge_value",
-                             "disposition", "span_ids", "missing_relation"], "additionalProperties": False}
+                             "disposition", "span_selection", "missing_relation"], "additionalProperties": False}
             by_index = {}
             for index, example in enumerate(batch):
-                allowed = [aliases[span.span_id] for unit in (*example.units, *example.dependencies)
-                           for span in unit.source_spans]
+                allowed = list(dict.fromkeys(aliases[span.span_id]
+                    for unit in (*example.units, *example.dependencies) for span in unit.source_spans))
                 by_index[str(index)] = {**item, "properties": {**item["properties"],
-                    "span_ids": {"type": "array", "items": {"type": "string", "enum": allowed}}}}
+                    "span_selection": {"type": "object", "properties": {
+                        span_id: {"type": "boolean"} for span_id in allowed},
+                        "required": allowed, "additionalProperties": False}}}
             schema = {"type": "object", "properties": {"predictions": {"type": "object",
                 "properties": by_index, "required": list(by_index), "additionalProperties": False}},
                 "required": ["predictions"], "additionalProperties": False}
@@ -99,21 +125,24 @@ class TeacherSupportBackend:
                 "History identifies the task and conditions, not facts. Distinguish complete, partial, "
                 "background and contradict. Applicability tests current conditions and version. "
                 "Joint support tests combined premises. A partial source can have high bridge value. "
-                "Select supporting original span_ids and name missing relations. Return one prediction "
+                "Score factual support, not retrieval relevance. A complete prediction has an empty missing_relation. "
+                "Set every allowed original span_selection ID to true or false and name missing relations. Return one prediction "
                 "for every index in the requested JSON.", payload, schema, "support", self.output_tokens)
             if output is None:
                 continue
             for index_text, value in output["predictions"].items():
                 index = int(index_text)
-                selected_ids = value.pop("span_ids")
-                selected_spans = tuple(spans[span_id] for span_id in selected_ids)
+                selection = value.pop("span_selection")
+                selected_spans = tuple(spans[span_id] for span_id, selected in selection.items() if selected)
                 results[start+index] = SupportPrediction(source_spans=selected_spans, **value)
             self.usage["examples"] += len(batch)
         return tuple(results)
 
     def predict_set(self, state, units, supports, *, context=(0.0,)*8):
-        key = (state.task_id, state.current_turn_id, state.raw_question,
-               tuple(unit.unit_id for unit in units), tuple(context))
+        payload = {"task": to_jsonable(state), "units": to_jsonable(units),
+            "working_views": self._queries.get(state.task_id, {}),
+            "support_graph": to_jsonable(supports), "candidate_context": context}
+        key = (state.task_id, dumps(payload))
         if key in self._sets:
             return self._sets[key]
         schema = {"type": "object", "properties": {
@@ -125,9 +154,7 @@ class TeacherSupportBackend:
             "missing prerequisites and redundancy. History and prior answers are not sources. "
             "Use retrieval_gap when missing evidence could exist outside the selected set. "
             "Return continuous quality and answer disposition in JSON.",
-            {"task": to_jsonable(state), "units": to_jsonable(units),
-             "working_views": self._queries.get(state.task_id, {}),
-             "support_graph": to_jsonable(supports), "candidate_context": context},
+            payload,
             schema, "utility", 256)
         if output is None:
             raise ValueError("teacher utility input exceeds the model window")
@@ -137,9 +164,15 @@ class TeacherSupportBackend:
 
     def release_task(self, task_id):
         self._queries.pop(task_id, None)
+        for key in tuple(self._predictions):
+            if key[0] == task_id:
+                del self._predictions[key]
         for key in tuple(self._sets):
             if key[0] == task_id:
                 del self._sets[key]
 
     def close(self):
+        self._predictions.clear()
+        self._sets.clear()
+        self._queries.clear()
         self.client.close()

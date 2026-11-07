@@ -1,0 +1,62 @@
+{
+  "c1-fixed": {
+    "run": "runs/study-20261106-resume/final-joint-6888cf8-001/run-c1-fixed",
+    "window": [
+      17380970.797860935,
+      17392830.579481687
+    ],
+    "physical": {
+      "gpu_gib_seconds": 1898500.1105222672,
+      "host_gib_seconds": 637673.8883067364,
+      "complete_window_coverage": true
+    },
+    "drain_seconds": 6.951428804546595,
+    "native_idle": true,
+    "processes_exited": true
+  },
+  "c4-fixed": {
+    "run": "runs/study-20261106-resume/final-joint-6888cf8-001/run-c4-fixed",
+    "window": [
+      17380970.909166712,
+      17392831.35951397
+    ],
+    "physical": {
+      "gpu_gib_seconds": 1900428.8730988458,
+      "host_gib_seconds": 584669.8767863484,
+      "complete_window_coverage": true
+    },
+    "drain_seconds": 6.783947356045246,
+    "native_idle": true,
+    "processes_exited": true
+  },
+  "c1-gain": {
+    "run": "runs/study-20261106-resume/final-joint-6888cf8-001/reuse-completion/run-c1-gain",
+    "window": [
+      17385818.45476572,
+      17392832.84121262
+    ],
+    "physical": {
+      "gpu_gib_seconds": 1127786.554621679,
+      "host_gib_seconds": 332028.5844503537,
+      "complete_window_coverage": true
+    },
+    "drain_seconds": 7.104930855333805,
+    "native_idle": true,
+    "processes_exited": true
+  },
+  "c4-gain": {
+    "run": "runs/study-20261106-resume/final-joint-6888cf8-001/reuse-completion/run-c4-gain",
+    "window": [
+      17385818.642777428,
+      17392834.79279668
+    ],
+    "physical": {
+      "gpu_gib_seconds": 1124713.2512372455,
+      "host_gib_seconds": 330074.1705164961,
+      "complete_window_coverage": true
+    },
+    "drain_seconds": 7.967163257300854,
+    "native_idle": true,
+    "processes_exited": true
+  }
+}

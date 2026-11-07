@@ -113,14 +113,28 @@ class RunConfig:
     cost_model: CostSettings = field(default_factory=CostSettings)
     state_dir: str = "runs/local"
     calibration_path: str | None = None
-    shadow: bool = False
     sampling: SamplingRecipe | None = None
     prefix_retention: dict = field(default_factory=lambda: {"mode": "native"})
+    cache_compilation: dict = field(default_factory=lambda: {"mode": "native"})
     plan_gain: dict | None = None
+    state_observation: dict | None = None
+    dialogue_mode: str = "contextkv"
+    dialogue_history_tokens: int = 8192
 
     def __post_init__(self):
+        if self.dialogue_mode not in {"contextkv", "llamaindex"}:
+            raise ValueError("dialogue_mode must be contextkv or llamaindex")
+        if self.dialogue_history_tokens < 1:
+            raise ValueError("dialogue_history_tokens must be positive")
+        if self.dialogue_mode == "llamaindex" and (self.plan_gain is not None
+                or self.cache_compilation["mode"] != "native"
+                or self.prefix_retention["mode"] != "native"
+                or self.state_observation is not None):
+            raise ValueError("LlamaIndex reference requires native execution without ContextKV policies")
         if self.engine.kind not in ("mock", "sglang"):
             raise ValueError("engine.kind must be mock or sglang")
+        if self.cache_compilation["mode"] not in {"native", "contextpilot"}:
+            raise ValueError("cache_compilation.mode must be native or contextpilot")
         if self.context.max_new_tokens >= self.context.max_total_model_tokens:
             raise ValueError("output budget must be smaller than the total context budget")
         if self.engine.page_size < 1 or min(self.engine.gpu_capacity_tokens, self.engine.host_capacity_tokens) < 0:
@@ -137,11 +151,27 @@ class RunConfig:
                 self.ablation.decode_cost, self.ablation.control_cost)):
             raise ValueError("cost-term ablations require frozen calibration; total residuals would restore excluded costs")
         if self.plan_gain is not None:
-            if self.plan_gain["mode"] != "rolling_gain" or self.shadow:
-                raise ValueError("plan_gain enables reader-bound rolling execution without shadow fallback")
-            for name in ("gain_asset", "execution_profile_asset", "reader_checkpoint", "reader_profile_id"):
+            if self.plan_gain["mode"] not in {"whole_plan", "observed_actions"}:
+                raise ValueError("plan_gain.mode must be whole_plan or observed_actions")
+            if self.plan_gain.get("read_choices", 1) not in {1, 2}:
+                raise ValueError("plan_gain.read_choices must be 1 or 2")
+            action_policy = self.plan_gain.get("action_policy", "learned")
+            if action_policy not in {"learned", "rule"}:
+                raise ValueError("plan_gain.action_policy must be learned or rule")
+            rule = action_policy == "rule"
+            if rule and not self.plan_gain.get("joint_context"):
+                raise ValueError("the rule comparator requires joint_context")
+            required = ("reader_checkpoint", "reader_profile_id")
+            if not rule:
+                required += ("gain_asset",)
+            if self.plan_gain["mode"] != "observed_actions":
+                required += ("execution_profile_asset",)
+            for name in required:
                 if not self.plan_gain[name]:
                     raise ValueError(f"rolling plan policy requires explicit {name}")
+        if self.prefix_retention["mode"] == "demand" and not (
+                self.plan_gain is not None and self.plan_gain.get("joint_context")):
+            raise ValueError("demand retention requires joint context decisions")
 
 
 def load_config(path: str | Path | None = None) -> RunConfig:
@@ -159,13 +189,18 @@ def apply_study_config(config: RunConfig, study):
     artifact = execution.get("cost_artifact", config.cost_model.artifact)
     return replace(config, context=replace(config.context,
         max_total_model_tokens=execution["window_tokens"], max_new_tokens=execution["output_tokens"],
-        system_prompt=config.context.system_prompt or (None if strategy == "B0" else PLAN_SYSTEM_PROMPT)),
+        system_prompt=config.context.system_prompt or (None if strategy == "B0"
+            or execution.get("dialogue_mode", config.dialogue_mode) == "llamaindex" else PLAN_SYSTEM_PROMPT)),
         planner=replace(config.planner, strategy="cost" if strategy == "B7" else "always_rebuild",
             lambda_time=execution["lambda_time"], lambda_gpu=execution["lambda_gpu"],
             lambda_host=execution["lambda_host"]),
         cost_model=replace(config.cost_model, artifact=artifact),
         prefix_retention=execution.get("prefix_retention", config.prefix_retention),
-        plan_gain=execution.get("plan_gain", config.plan_gain))
+        cache_compilation=execution.get("cache_compilation", config.cache_compilation),
+        plan_gain=execution.get("plan_gain", config.plan_gain),
+        state_observation=execution.get("state_observation", config.state_observation),
+        dialogue_mode=execution.get("dialogue_mode", config.dialogue_mode),
+        dialogue_history_tokens=execution.get("history_tokens", config.dialogue_history_tokens))
 
 
 def assemble_cost_model(config, *, artifact=None, measurements=None,
@@ -194,9 +229,7 @@ def assemble_cost_model(config, *, artifact=None, measurements=None,
     else:
         model = CostModel(**settings, **overrides)
     protocol = GenerationProtocol.from_config(config)
-    model.configure_sampling(protocol.sampling,
-        fallback_mean=settings.get("default_output_tokens", 128),
-        fallback_p90=settings.get("p90_output_tokens", 256), system_prompt=protocol.system_prompt)
+    model.configure_sampling(protocol.sampling, system_prompt=protocol.system_prompt)
     return model
 
 
@@ -222,7 +255,6 @@ def load_cost_model(config, *, artifact_path=None, max_new_tokens=None):
                 include_decode_cost=model.include_decode_cost, include_control_cost=model.include_control_cost)
         for kind, child in model.step_models.items():
             child.configure_sampling(GenerationProtocol.from_config(config).sampling,
-                fallback_mean=child.default_output_tokens, fallback_p90=child.p90_output_tokens,
                 system_prompt=prompts[kind])
     return model
 
@@ -267,15 +299,28 @@ def create_controller(config: RunConfig) -> Controller:
         from .plan_profiles import load_rolling_runtime
         from .candidates import PLAN_SYSTEM_PROMPT
         from .sampling import request_sampling
-        rolling = load_rolling_runtime(config.plan_gain, template=template, store=store,
+        settings = config.plan_gain
+        rolling = load_rolling_runtime(settings, template=template, store=store,
             sampling=request_sampling(config.sampling),
             answer_system_prompt=config.context.system_prompt or PLAN_SYSTEM_PROMPT,
             engine_base_url=config.engine.base_url)
-    return Controller(store, engine, template=template,
-                      policy=config.context, knobs=config.planner, cost_model=model, shadow=config.shadow,
+    state_observer = None
+    if config.state_observation is not None:
+        from .plan_profiles import load_fixed_reading_observer
+        state_observer = load_fixed_reading_observer(config.state_observation, template=template)
+    from .request_compiler import RequestCompiler
+    index = None
+    if config.cache_compilation["mode"] == "contextpilot":
+        from adapters.contextpilot import SourceOrderIndex
+        index = SourceOrderIndex(config.cache_compilation["checkout"])
+    return Controller(store, engine, template=template, request_compiler=RequestCompiler(template, index),
+                      policy=config.context, knobs=config.planner, cost_model=model,
                       epoch_retirement=config.ablation.epoch_retirement,
                       online_calibration=config.cost_model.online_calibration,
                       prefix_settings=config.prefix_retention,
+                      dialogue_mode=config.dialogue_mode,
+                      dialogue_history_tokens=config.dialogue_history_tokens,
                       rolling_policy=rolling,
+                      state_observer=state_observer,
                       events=EventLog(state_dir / "events.jsonl",
                                       engine_kind=config.engine.kind))

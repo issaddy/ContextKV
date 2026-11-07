@@ -1,24 +1,61 @@
 schema_version: 1
 study_config: configs/study.yaml
-baseline_commit: 7388008f56ec7176668321d00f69bd2f07639f0a
+baseline_commit: 85f4ed4
 seed: 42
 protocol: P3
 selection:
+  baseline: B0
   development_weights: {multidoc2dial: 0.30, mtrag: 0.25, versionqa: 0.20, loong: 0.25}
   near_equal_quality: 0.002
   equal_cost_relative_tolerance: 0.05
   bootstrap_samples: 5000
   objective: continuous_quality
-  include_ablations: true
-  lambda_time_grid: [0.0, 0.000001, 0.00001, 0.0001]
+  include_ablations: false
+  lambda_time_grid: []
   test_comparators: [B0, Btoken, B3, B6, Lmap]
+# capacity_workflow materializes these recipes against the frozen A and declared IDs.
+# Legacy methods below remain available for historical/local diagnostics.
+final_evaluation:
+  workflow: bench.capacity_workflow
+  protocol: P3
+  declared_qa: 350
+  declared_sessions: 77
+  concurrency: [1, 4]
+  baseline: B6_native
+  acceptance:
+    candidate: S3_contextpilot_joint_demand
+    quality_improvement: 0.05
+    quality_noninferiority: 0.002
+    p95_ratio: 0.85
+  factorial:
+    E1: {method: B6_native, B: fixed, compilation: native, retention: native}
+    E2: {method: S3_native, B: gain, compilation: native, retention: native}
+    E3: {method: B6_contextpilot, B: fixed, compilation: contextpilot, retention: native}
+    E4: {method: S3_contextpilot, B: gain, compilation: contextpilot, retention: native}
+  joint_context:
+    E5: {method: S3_contextpilot_joint_native, reference: E4, representation: finite, retention: native}
+    E6: {method: S3_contextpilot_joint_demand, reference: E5, representation: finite, retention: demand}
+  external_reference:
+    method: LlamaIndex_native
+    dialogue_mode: llamaindex
+    retrieval: hybrid_rerank
+    synthesis: history_condense_compact_refine
+    compilation: native
+    retention: native
+  principal_ablation:
+    method: S3_contextpilot_no_fact_reuse
+    reference: S3_contextpilot
+    overrides: {reading: {fact_reuse: false}}
+  optional_methods: [E0_native, B6_value, S3_value, Rule_contextpilot_joint_demand]
+  arrival_plan: configs/study_dev_arrivals.json
+  cost_scope: all_online_and_physical_costs
 resources:
   gpu_capacity_tokens: 32768
   host_capacity_tokens: 61056
   gpu_devices: [0, 1]
   p95_complete_ms: 120000
   max_online_tokens: 200000000
-  concurrency: [1, 4, 8]
+  concurrency: [1, 4]
 datasets:
   multidoc2dial:
     inputs:
@@ -79,22 +116,30 @@ datasets:
     coverage_mode: all_supplied_documents
     primary_metric: loong_reference_score
     normalization: 100.0
+    metric_by_split:
+      dev:
+        primary_metric: project_condition_version_score
+        normalization: 1.0
+        scoring:
+          project_weights: {correctness: 1.0}
+          project_track: constructed_long_dev_correctness
+          project_reference_only: true
     weight: 0.25
 methods:
   - {id: B0, strategy: B0, description: Dense5_REBUILD}
   - {id: Btoken, strategy: Btoken, description: relevance_token_budget}
-  - {id: B1, strategy: B1, description: task_history_version}
-  - {id: B2, strategy: B2, description: applicable_single_support}
-  - {id: B3, strategy: B3, description: single_pair_triple_search}
-  - {id: B5, strategy: B5, description: answer_plan}
+  - id: B3
+    strategy: B3
+    description: single_pair_triple_search
+    overrides: {selection: {mode: support}}
   - {id: B6, strategy: B6, description: coverage_READ_REDUCE_multihop}
   - {id: B7, strategy: B7, description: native_KV_complete_cost_no_new_training}
   - {id: Lmap, strategy: Lmap, description: full_scope_map_reduce}
 ablations:
-  support_orders: [[1], [1, 2], [1, 2, 3]]
-  reading: [coverage_only, claims, typed_reduce]
-  layouts: [existing, need_order, stable_evidence]
-  output_tokens: [512, 1024, 2048]
-  body_tokens: [2048, 4096, 8192]
-  workloads: [concurrent, pauses, topic_switch, source_revisit]
-  cache: [identical_tokens_native, identical_semantics_actions]
+  support_orders: []
+  reading: []
+  layouts: []
+  output_tokens: []
+  body_tokens: []
+  workloads: []
+  cache: []

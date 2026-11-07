@@ -1,0 +1,6 @@
+if customized_info is not None:
+    for k, v in customized_info.items():
+        if k not in state.customized_info_accumulated:
+            state.customized_info_accumulated[k] = []
+        state.customized_info_accumulated[k].extend(v[i])
+        meta_info[k] = state.customized_info_accumulated[k]

@@ -19,7 +19,6 @@ from controller.templates import token_hash as token_hash
 from controller.templates import citation_regex
 
 PROTOCOL_VERSION = "contextkv-v1"
-SGLANG_COMMIT = "3f36fc08331f64cd63c4fbbdf39cc402f38bb38b"
 
 
 class EngineError(RuntimeError):
@@ -88,6 +87,7 @@ class EpochStatus:
     terminal: bool = False
     result: GenerationResult | None = None
     receipt: CompletionReceipt | None = None
+    result_pending: bool = False
 
 
 class Engine(Protocol):
@@ -136,7 +136,10 @@ class SGLangEngineClient:
         try:
             response = await self._client.post(path, json=body)
         except httpx.TransportError as exc:
-            raise UnknownOutcomeError("TRANSPORT_ERROR", str(exc)) from exc
+            request = exc.request
+            message = f"{type(exc).__name__} {request.method} {request.url.path}"
+            detail = str(exc)
+            raise UnknownOutcomeError("TRANSPORT_ERROR", f"{message}: {detail}" if detail else message) from exc
         try:
             data = response.json()
         except ValueError as exc:
@@ -159,10 +162,9 @@ class SGLangEngineClient:
         required = (data.get("protocol_version") == PROTOCOL_VERSION
                     and data.get("guarded_generate_supported") is True
                     and data.get("scheduler_owned") is True
-                    and data.get("completion_status_supported") is True
-                    and data.get("sglang_commit") == SGLANG_COMMIT)
+                    and data.get("completion_status_supported") is True)
         if not required:
-            raise EngineError("UNSUPPORTED_ENGINE", "fixed-commit scheduler-owned contextkv-v1 patch required")
+            raise EngineError("UNSUPPORTED_ENGINE", "scheduler-owned contextkv-v1 quote/generation protocol required")
         if data.get("fingerprint") != asdict(self.fingerprint):
             raise EngineError("FINGERPRINT_MISMATCH", "engine model/tokenizer/template/namespace differ")
         if self._expected_model_scope is not None:
@@ -185,7 +187,7 @@ class SGLangEngineClient:
             "candidates": [{"candidate_id": c.candidate_id, "input_ids": list(c.input_ids),
                             "input_hash": c.input_hash, "snapshot_version": c.snapshot_version}
                            for c in candidates]})
-        return decode(CacheQuoteBatch, data)
+        return decode(CacheQuoteBatch, {**data, "client_received_monotonic": time.monotonic()})
 
     def _check_fingerprint(self, fingerprint):
         if fingerprint != self.fingerprint:
@@ -296,7 +298,10 @@ class SGLangEngineClient:
                     if receipt:
                         final = item
         except httpx.TransportError as exc:
-            raise UnknownOutcomeError("TRANSPORT_ERROR", str(exc)) from exc
+            request = exc.request
+            message = f"{type(exc).__name__} {request.method} {request.url.path}"
+            detail = str(exc)
+            raise UnknownOutcomeError("TRANSPORT_ERROR", f"{message}: {detail}" if detail else message) from exc
         if not done or final is None or data_lines:
             raise UnknownOutcomeError("INCOMPLETE_STREAM", "complete receipt and SSE DONE required; inspect attempt status")
         if final.get("output_ids") != output_ids:

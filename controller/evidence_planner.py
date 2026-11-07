@@ -14,7 +14,6 @@ class SearchProfile:
     beam_width: int = 4
     max_actions: int = 12
     retained_sets: int = 3
-    gap_search_rounds: int = 1
 
 
 def render_unit_union(units: tuple[EvidenceUnit, ...]) -> str:
@@ -66,14 +65,38 @@ def unresolved_needs(state: TaskState, evidence_set: EvidenceSet):
                  if support is None or support.disposition != "complete")
 
 
+def best_need_supports(state, units, supports):
+    """Keep support utility and the published reranker's ordering separate.
+
+    All primary members of a complementary bundle must be present. Its best
+    primary anchor defines relevance; a necessary bridge may have low standalone
+    relevance. Closure-only dependencies cannot add relevance. Each Need first
+    maximizes existing support, then its complete contract, then relevance.
+    """
+    by_id = {unit.unit_id: unit for unit in units}
+
+    def relevance(support):
+        return (max(by_id[identity].retrieval_score for identity in support.unit_ids)
+                if support.applicability*support.joint_support > 0 else 0.0)
+
+    best = []
+    for need in state.needs:
+        available = tuple(support for support in supports if support.need_id == need.need_id)
+        if available:
+            best.append(min(available, key=lambda support: (
+                -support.applicability*support.joint_support, support.disposition != "complete",
+                -relevance(support), support.bundle_id)))
+    return tuple(best), sum(relevance(support) for support in best)/max(1, len(state.needs))
+
+
 class BudgetedEvidencePlanner:
     def __init__(self, tokenizer, utility_model, *, profile=SearchProfile(),
-                 measure_context=None, measure_body=None, passage_exclusions=frozenset()):
+                 measure_contexts=None, measure_bodies=None, passage_exclusions=frozenset()):
         self.tokenizer = tokenizer
         self.utility_model = utility_model
         self.profile = profile
-        self.measure_context = measure_context
-        self.measure_body = measure_body
+        self.measure_contexts = measure_contexts
+        self.measure_bodies = measure_bodies
         self.passage_exclusions = frozenset(passage_exclusions)
         self.trace = ()
 
@@ -86,27 +109,25 @@ class BudgetedEvidencePlanner:
         frontier = [frozenset()]
         visited, retained, trace = set(), {}, []
         candidate_cache = {}
+        measurement_cache = {}
+        relevance = {}
 
-        def evaluate(ids):
-            ordered = tuple(sorted(ids, key=lambda uid: (-by_id[uid].retrieval_score, uid)))
-            units = close_dependencies(ordered, by_id)
-            closed_ids = frozenset(u.unit_id for u in units)
+        def completeness(candidate):
+            return sum(support.disposition == "complete" and support.applicability*support.joint_support > 0
+                       for support in candidate.need_support)
+
+        def order(candidate):
+            return (-candidate.quality_prediction, -completeness(candidate), -relevance[candidate.set_id],
+                    candidate.token_cost, candidate.set_id)
+
+        def evaluate(ids, units, closed_ids, measurement_key):
             if closed_ids in candidate_cache:
                 return candidate_cache[closed_ids]
-            body_tokens = (self.measure_body(units) if self.measure_body is not None else
-                           len(self.tokenizer.encode(render_unit_union(units), add_special_tokens=False)))
-            if body_tokens > budget.body_tokens:
+            body_tokens = measurement_cache[measurement_key]
+            if body_tokens is None:
                 return None
-            if budget.max_passages is not None and len(_passages(units)-self.passage_exclusions) > budget.max_passages:
-                return None
-            if self.measure_context is not None:
-                input_tokens = self.measure_context(state, units)
-                if input_tokens + budget.output_tokens > budget.window_tokens:
-                    return None
             available = tuple(s for s in supports if set(s.unit_ids) <= closed_ids)
-            best = tuple(max((s for s in available if s.need_id == need.need_id),
-                            key=lambda s: s.joint_support*s.applicability)
-                         for need in state.needs if any(s.need_id == need.need_id for s in available))
+            best, source_relevance = best_need_supports(state, units, available)
             prediction = self.utility_model.predict_set(state, units, available)
             set_id = json.dumps([state.task_id, sorted(closed_ids)], ensure_ascii=False,
                                 separators=(",", ":"))
@@ -116,25 +137,58 @@ class BudgetedEvidencePlanner:
                 best, prediction.quality, body_tokens, prediction.disposition,
                 source_blocks=blocks)
             candidate_cache[closed_ids] = candidate
+            relevance[set_id] = source_relevance
             return candidate
 
         for depth in range(self.profile.max_actions):
-            proposals = {}
+            proposals, pending, unmeasured = {}, [], {}
             for ids in frontier:
                 for action in actions:
                     expanded = ids | frozenset(action)
                     if expanded == ids or expanded in visited:
                         continue
                     visited.add(expanded)
-                    candidate = evaluate(expanded)
-                    if candidate is not None:
-                        closed = frozenset(u.unit_id for u in candidate.selected_units)
-                        proposals[closed] = candidate
-                        retained[closed] = candidate
-            ordered = sorted(proposals.items(), key=lambda item: (
-                -item[1].quality_prediction, item[1].token_cost, item[1].set_id))
+                    ordered_ids = tuple(sorted(expanded, key=lambda uid: (-by_id[uid].retrieval_score, uid)))
+                    units = close_dependencies(ordered_ids, by_id)
+                    closed = frozenset(unit.unit_id for unit in units)
+                    key = tuple(unit.unit_id for unit in units)
+                    pending.append((expanded, units, closed, key))
+                    if closed not in candidate_cache and key not in measurement_cache:
+                        unmeasured.setdefault(key, units)
+            if unmeasured:
+                groups = tuple(unmeasured.values())
+                body_sizes = (self.measure_bodies(groups) if self.measure_bodies is not None else
+                    tuple(len(ids) for ids in self.tokenizer(
+                        [render_unit_union(units) for units in groups], add_special_tokens=False,
+                        return_attention_mask=False, return_token_type_ids=False)["input_ids"]))
+                admissible = {}
+                for (key, units), body_tokens in zip(unmeasured.items(), body_sizes, strict=True):
+                    if (body_tokens > budget.body_tokens or (budget.max_passages is not None
+                            and len(_passages(units)-self.passage_exclusions) > budget.max_passages)):
+                        measurement_cache[key] = None
+                    else:
+                        measurement_cache[key] = body_tokens
+                        admissible[key] = units
+                if self.measure_contexts is not None and admissible:
+                    sizes = self.measure_contexts(state, tuple(admissible.values()))
+                    for key, input_tokens in zip(admissible, sizes, strict=True):
+                        if input_tokens + budget.output_tokens > budget.window_tokens:
+                            measurement_cache[key] = None
+            # Measurement is independent within a depth. Utility, first closure
+            # ownership and beam ranking retain the original traversal order.
+            for proposal in pending:
+                candidate = evaluate(*proposal)
+                if candidate is not None:
+                    closed = frozenset(u.unit_id for u in candidate.selected_units)
+                    proposals[closed] = candidate
+                    retained[closed] = candidate
+            ordered = sorted(proposals.items(), key=lambda item: order(item[1]))
             trace.append({"depth": depth, "proposed": len(proposals),
-                          "frontier": [c.set_id for _, c in ordered[:self.profile.beam_width]]})
+                          "frontier": [c.set_id for _, c in ordered[:self.profile.beam_width]],
+                          "frontier_complete_needs": [completeness(c)
+                              for _, c in ordered[:self.profile.beam_width]],
+                          "frontier_relevance": [relevance[c.set_id]
+                              for _, c in ordered[:self.profile.beam_width]]})
             frontier = [ids for ids, _ in ordered[:self.profile.beam_width]]
             if not frontier:
                 break
@@ -142,42 +196,30 @@ class BudgetedEvidencePlanner:
             prediction = self.utility_model.predict_set(state, (), ())
             retained[frozenset()] = EvidenceSet(json.dumps([state.task_id, []]), (),
                 quality_prediction=prediction.quality, disposition=prediction.disposition)
-        # Keep the quality/length frontier, then add distinct high quality sets
-        # when dominance leaves fewer than the requested number of candidates.
-        ranked = sorted(retained.values(), key=lambda c: (
-            -c.quality_prediction, c.token_cost, c.set_id))
+            relevance[retained[frozenset()].set_id] = 0.0
+        # Whole-plan controls retain utility/completeness/relevance/length
+        # tradeoffs. Shorter tied support alone cannot dominate a better anchor.
+        ranked = sorted(retained.values(), key=order)
         pareto = [candidate for candidate in ranked if not any(
             other.quality_prediction >= candidate.quality_prediction
+            and completeness(other) >= completeness(candidate)
+            and relevance[other.set_id] >= relevance[candidate.set_id]
             and other.token_cost <= candidate.token_cost
             and (other.quality_prediction > candidate.quality_prediction
+                 or completeness(other) > completeness(candidate)
+                 or relevance[other.set_id] > relevance[candidate.set_id]
                  or other.token_cost < candidate.token_cost) for other in ranked)]
         ordered = pareto + [c for c in ranked if c not in pareto]
         elapsed = (time.perf_counter()-started)*1000
         self.trace = tuple(trace)
         return tuple(replace(c, search_ms=elapsed) for c in ordered[:min(3, self.profile.retained_sets)])
 
-    def search_with_gaps(self, state, pool, scores, budget, *, score_model, retrieve_gap):
-        sets = self.search_sets(state, pool, scores, budget)
-        traces = [*pool.trace]
-        for round_no in range(self.profile.gap_search_rounds):
-            gaps = unresolved_needs(state, sets[0])
-            if not gaps:
-                break
-            additions = tuple(unit for gap in gaps for unit in retrieve_gap(state, gap))
-            merged = {u.unit_id: u for u in (*pool.units, *additions)}
-            traces.append({"gap_round": round_no, "open_needs": [g.need_id for g in gaps],
-                           "added_units": [u.unit_id for u in additions]})
-            pool = replace(pool, units=tuple(merged.values()), trace=tuple(traces))
-            scores = score_model.score_support(state, pool)
-            sets = self.search_sets(state, pool, scores, budget)
-        return pool, scores, sets
-
 
 def search_sets(state, pool, scores, budget, *, tokenizer, utility_model,
-                profile=SearchProfile(), measure_context=None, measure_body=None,
+                profile=SearchProfile(), measure_contexts=None, measure_bodies=None,
                 passage_exclusions=frozenset()):
     return BudgetedEvidencePlanner(tokenizer, utility_model, profile=profile,
-        measure_context=measure_context, measure_body=measure_body,
+        measure_contexts=measure_contexts, measure_bodies=measure_bodies,
         passage_exclusions=passage_exclusions).search_sets(state, pool, scores, budget)
 
 
