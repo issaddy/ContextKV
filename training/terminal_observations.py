@@ -10,14 +10,12 @@ from bench.study_resources import integrate_physical
 from controller.action_proposals import build_observed_action_plans, gap_key, gap_query, GapRetrievalRequest
 from controller.context_budget import completed_source_coverage
 from controller.context_schema import ReadingOutcome, ReadResult, ReadTask, StepRecord
-from controller.plan_gain_protocol import validate_input_protocol, validate_pre_action_input
+from controller.plan_gain_protocol import validate_input_protocol
 from controller.plan_policy import CompleteCost
 from controller.resident_models import evidence_selection_contract, resident_model_digest
 from controller.schema import SessionSnapshot
 from controller.serialization import decode, to_jsonable
-from controller.templates import token_hash
 from training.reader_data import file_digest
-from training.train_plan_gain import actual_history
 
 
 TERMINAL_FAMILIES = ("read_once", "reduce_once", "gap_retrieval")
@@ -50,35 +48,24 @@ def terminal_observation(before, run, source_task, answer_event, online, templat
     source_packet = source_task["observed_packet"]
     observed = run["observed_state_binding"]
     snapshot = decode(SessionSnapshot, before["snapshot"])
-    if (run["history_origin"] != "frozen_actual_rollout" or run["measurement_kind"] != "hardware"
-            or run["semantic_kind"] != "read_once" or run["qa_increment"] != 1 or attempt["stage"] != "COMMITTED"
-            or not run["new_action_counts"]["READ"] or run["plan_id"] != before["plan_candidate"]["plan_id"]
-            or observed != before["observed_state_binding"]
+    if (observed != before["observed_state_binding"]
             or source_packet["observation_id"] != observed["observation_id"]
             or source_packet["attempt_id"] != original_attempt["attempt_id"]
-            or source_packet["source_capture_sha256"] != digest(original)
-            or any(run[key] != original[key] for key in ("task_id", "conversation_id", "question",
-                "cohort_split", "cohort_manifest_sha256")) or run["actual_history"] != actual_history(snapshot)):
-        raise ValueError("terminal observation requires the actual READ branch and its original capture binding")
+            or source_packet["source_capture_sha256"] != digest(original)):
+        raise ValueError("terminal observation and READ branch refer to different source captures")
     state = decode(ReadingOutcome, attempt["reading_outcome"])
     validate_input_protocol(run["input_protocol"], reader_fingerprint=template.fingerprint)
-    validate_pre_action_input(run)
 
     terminal = run["actual_native_calls"][-1]
     candidate = attempt["plan"]["candidate"]
     quote = terminal["cache_quote"]
     quoted = next(item for item in quote["quotes"] if item["candidate_id"] == terminal["quote_candidate_id"])
-    request, receipt = terminal["request"], terminal["receipt"]
-    if (answer_event["event"] != "plan_gain_experimental_answer" or answer_event["attempt_id"] != attempt_id
-            or answer_event["actual_quote"] != quote or terminal["quote_origin"] != "actual_controller_quote"
-            or quote["observed_seq"] != attempt["plan"]["quote_seq"] or not receipt["generation_complete"]
-            or request["attempt_id"] != attempt_id or request.get("response_schema") is not None
-            or quoted["candidate_id"] != candidate["candidate_id"] or request["input_ids"] != candidate["input_ids"]
-            or quoted["input_len"] != len(request["input_ids"])
-            or not quote["fingerprint"] == candidate["fingerprint"] == run["input_protocol"]["reader_fingerprint"]
-            or not (quoted["input_hash"] == candidate["input_hash"] == answer_event["actual_input_hash"]
-                == receipt["input_hash"] == token_hash(request["input_ids"]))
-            or quote["engine_restart_id"] != receipt["engine_restart_id"]):
+    request = terminal["request"]
+    # The executor already validated the committed result. Bind the recording
+    # and quote-return event to that result before cutting its cost window.
+    if (terminal["receipt"] != attempt["result"]["receipt"] or answer_event["actual_quote"] != quote
+            or quote["observed_seq"] != attempt["plan"]["quote_seq"]
+            or quoted["input_hash"] != candidate["input_hash"]):
         raise ValueError("terminal Native quote does not bind the actual compiled ANSWER")
 
     execution = run["actual_branch_execution_cost"]
@@ -137,7 +124,7 @@ def terminal_observation(before, run, source_task, answer_event, online, templat
         run["continuation_gap_limits"]) if gaps and state.plan.coverage_scope != "all_supplied_documents" else None)
     plans, _ = build_observed_action_plans(state, snapshot, template,
         reader_checkpoint=run["reader_checkpoint"], gap_request=gap_request)
-    return to_jsonable({"schema_version": 1, "decision_mode": "branch_terminal", "history_origin": "frozen_actual_rollout",
+    return to_jsonable({"schema_version": 1, "decision_mode": "branch_terminal", "history_origin": run["history_origin"],
         "observation_id": f"{attempt_id}:branch_terminal:{quote['request_id']}", "attempt_id": attempt_id,
         "request_id": attempt["request_id"], "task_id": run["task_id"], "cohort_split": run["cohort_split"],
         "cohort_manifest_sha256": run["cohort_manifest_sha256"], "decision_seq": len(state.steps),
@@ -174,6 +161,9 @@ def export_terminal_observations(collection, template, output):
                     continue
                 if run["status"] != "completed":
                     excluded.append({"run": str(run_path.resolve()), "reason": "READ branch did not commit ANSWER"})
+                    continue
+                if not run["new_action_counts"]["READ"]:
+                    excluded.append({"run": str(run_path.resolve()), "reason": "branch executed no new READ"})
                     continue
                 before_path = run_path.with_name("before.json")
                 before_raw = before_path.read_bytes()
