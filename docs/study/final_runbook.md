@@ -1,12 +1,14 @@
 # 当前课题运行入口
 
-`test-0523` 当前使用容器默认 `python3`。长文共享提取得到 36 条、666 kg，多跳得到 1997。旧中断参照的 64 个答案已完成官方重评，完整 350 题分母和已付成本保留；修正后 A 的固定 B＋Native 队列仍在运行。B 已完成 48/24 个训练/开发历史轮次、登记的 8/4 个决策状态配对，以及全部 25 个分支答案的官方重评和小批次收益拟合。完整队列质量与 P95 尚未完成。
+`test-0523` 当前使用容器默认 `python3`。长文共享提取得到 36 条、666 kg，多跳得到 1997。旧中断参照的 64 个答案已完成官方重评，完整 350 题分母和已付成本保留；原 support A 的固定 B＋Native 参照继续运行，当前推进 ranked 候选 A 的完整 P3 比较。B 已完成 48/24 个训练/开发历史轮次、登记的 8/4 个决策状态配对，以及全部 25 个分支答案的官方重评和小批次收益拟合。完整队列质量与 P95 尚未完成。
 
 Host 固定 token 配对已验证真实回载与重算：同一请求下，Native 回载 128、重算 129 tokens；独立前缀保留回载 256、重算 1 token。业务 epoch 退役后 owner 仍保留 Host 前缀。该结果验证生命周期，主实验保留策略仍为 Native；成功与初次接口失败的费用分别保存。
 
-已完成的 c1 MultiDoc2Dial：固定 B＋Native 交付 196/209，完整分母 RB_llm 为 0.688038；LlamaIndex Native 交付 209/209，为 0.806220。当前主线在该公开轨落后，尚未达到研究验收。两者 MT-RAG 各生成 41 个答案；DeBERTa tokenizer 的真实位置上限适配后，82 个答案的 algorithmic 阶段已离线补齐，没有重跑问答或已完成的 judge 调用。各有 1 个 RAGAS 分量缺失，不能将其当零分或完整质量结果。c1 尚未运行的 versionqa/loong 后续按原队列补齐，正在运行的其它格继续保留自己的实际 P3。
+已完成的 c1 MultiDoc2Dial：support A＋固定 B＋Native 交付 196/209，完整分母 RB_llm 为 0.688038；LlamaIndex Native 交付 209/209，为 0.806220。两者 MT-RAG 各 41 个答案已完整评分，harmonic 分别为 0.524363、0.557842。DeBERTa 位置上限适配后复用既有答案补齐 algorithmic；两项截断的 RAGAS 输出另以 4096 上限补齐，新旧 NLI 输入相同、旧文本为新输出前缀，其余分量未改。原调用和补齐费用分别保留。新批次显式设置 `scoring.ragas_json_schema: true`、`scoring.ragas_max_tokens: 4096`，只作用于 RAGAS 结构输出，RB 仍为 2048。c1 尚未运行的 versionqa/loong 和外部 c4 仍须补齐。
 
-30 个双方完成、空历史相同的首轮题中，当前主线 RB_llm 低 7 个百分点。保存候选池的原文见证审计也观察到支持选材删去高排名材料；这支持优先比较已有 ranked 取材，尚不是它的答题收益。该对照仅设置 `selection.mode: ranked`，可通过现有 `bench.evidence_policy_comparison frozen --cells P0_source_first_shared` 在同一记录池、TaskState 和预算上执行新答案，再与已保存 support 答案配对。它不重做初始检索，不能据此报告无支持教师的端到端延迟收益。
+30 个预声明、空历史相同的首轮题已完成 ranked 固定输入对照：RB_llm 为 0.846667，原 support 为 0.776667（12 胜、13 平、5 负），与 LlamaIndex 均分相同。对照通过 `bench.evidence_policy_comparison frozen --cells P0_source_first_shared` 仅设置 `selection.mode: ranked`，原记录池、TaskState、预算和历史逐条一致，两种选材均由固定 B 直接 ANSWER。该结果不包含初始检索，不能当作完整 P3 或端到端提速。30 个请求费用窗口完整；批次另按真实末采样时刻报告可观测积分，后续代码已修正结束戳与停止采样的顺序。
+
+旧 support A 的 ContextPilot 队列已停止扩跑，203 个完成答案、1 次失败及全部已付费用留在 `external-contextpilot-fixed-002`；这些结果只解释旧 A。最终四格将绑定选定 A 及其对应的 B 资产，不能将旧 support 资产直接用于 ranked 状态。
 
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 

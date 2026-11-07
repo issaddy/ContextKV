@@ -208,20 +208,23 @@ RAGAS_SCHEMA_MARKER = (
 )
 
 
-def with_ragas_output_schema(payload):
+def with_ragas_output_schema(payload, *, ragas_max_tokens=None):
     """Use the original RAGAS Pydantic contract as the native output grammar."""
     for message in reversed(payload["messages"]):
         content = message["content"]
         if RAGAS_SCHEMA_MARKER in content:
             encoded = content.split(RAGAS_SCHEMA_MARKER, 1)[1].lstrip()
             schema, _ = json.JSONDecoder().raw_decode(encoded)
-            return {**payload, "response_format": {"type": "json_schema", "json_schema": {
+            structured = {**payload, "response_format": {"type": "json_schema", "json_schema": {
                 "name": "ragas_prompt_schema", "schema": schema}}}
+            if ragas_max_tokens is not None:
+                structured["max_completion_tokens"] = ragas_max_tokens
+            return structured
     return payload
 
 
 def create_http_judge(model, endpoint, *, max_tokens=2048, enable_thinking=None,
-                      ragas_json_schema=False):
+                      ragas_json_schema=False, ragas_max_tokens=None):
     """Adapt the upstream string call and RAGAS interface to one cached HTTP client."""
     from langchain_openai import ChatOpenAI
     from ragas.llms import LangchainLLMWrapper
@@ -233,7 +236,7 @@ def create_http_judge(model, endpoint, *, max_tokens=2048, enable_thinking=None,
     class RagasStructuredChatOpenAI(ChatOpenAI):
         def _get_request_payload(self, input_, *, stop=None, **kwargs):
             payload = super()._get_request_payload(input_, stop=stop, **kwargs)
-            return with_ragas_output_schema(payload)
+            return with_ragas_output_schema(payload, ragas_max_tokens=ragas_max_tokens)
 
     extra = {} if enable_thinking is None else {
         "chat_template_kwargs": {"enable_thinking": enable_thinking}}
@@ -382,7 +385,7 @@ def score_http_stages(official, model, input_path, output_directory, *, answerab
 
 def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_revision,
                        endpoint, max_tokens=2048, enable_thinking=None, answerability_adjustment=True,
-                       metrics=("RB_llm", "RL_F"), ragas_json_schema=False):
+                       metrics=("RB_llm", "RL_F"), ragas_json_schema=False, ragas_max_tokens=None):
     """Offline official RB_llm/RL_F/IDK over frozen answers, with resumable HTTP calls.
 
     Run in the isolated evaluator environment. This function does not start a
@@ -394,6 +397,9 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
         raise ValueError("official source checkout is not the frozen MTRAG revision")
     if not model or not judge_revision or not endpoint:
         raise ValueError("HTTP scoring requires model, judge revision and endpoint")
+    if ragas_max_tokens is not None and (
+            not ragas_json_schema or type(ragas_max_tokens) is not int or ragas_max_tokens <= 0):
+        raise ValueError("ragas_max_tokens requires ragas_json_schema and a positive integer budget")
     output = Path(output_directory).resolve()
     output.mkdir(parents=True, exist_ok=True)
     identity = {"input_sha256": sha256(Path(input_path).read_bytes()).hexdigest(),
@@ -405,6 +411,8 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
         identity["answerability_adjustment"] = False
     if ragas_json_schema:
         identity["ragas_json_schema"] = "original_prompt_Pydantic_contract"
+    if ragas_max_tokens is not None:
+        identity["ragas_max_tokens"] = ragas_max_tokens
     identity_path = output / "identity.json"
     if not identity_path.exists() and any(output.glob("*.jsonl")):
         raise ValueError("existing scoring files have no bound identity; use a new directory")
@@ -428,7 +436,7 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     loader = official.load_chat_openai_llm
     official.load_chat_openai_llm = lambda name, max_new_tokens=None: create_http_judge(
         name, endpoint, max_tokens=max_tokens, enable_thinking=enable_thinking,
-        ragas_json_schema=ragas_json_schema)
+        ragas_json_schema=ragas_json_schema, ragas_max_tokens=ragas_max_tokens)
     try:
         result = score_http_stages(official, model, input_path, output,
                                    answerability_adjustment=answerability_adjustment, metrics=metrics)
@@ -462,6 +470,8 @@ def main(argv=None):
     parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--ragas-json-schema", action="store_true",
                         help="Constrain RAGAS output with its original prompt's Pydantic JSON schema")
+    parser.add_argument("--ragas-max-tokens", type=int,
+                        help="Output budget for requests matched by --ragas-json-schema")
     parser.add_argument("--answerability-adjustment", action=argparse.BooleanOptionalAction, default=True,
                         help="Disable for datasets without the MT-RAG answerability labels; score raw RB_llm and RL_F only")
     args = parser.parse_args(argv)
@@ -499,7 +509,7 @@ def main(argv=None):
             judge_revision=args.judge_revision, endpoint=args.endpoint,
             max_tokens=args.max_tokens, enable_thinking=args.enable_thinking,
             answerability_adjustment=args.answerability_adjustment, metrics=args.metrics,
-            ragas_json_schema=args.ragas_json_schema)
+            ragas_json_schema=args.ragas_json_schema, ragas_max_tokens=args.ragas_max_tokens)
     else:
         if not args.checkout:
             parser.error("evaluation requires --checkout")

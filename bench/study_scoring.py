@@ -137,6 +137,7 @@ async def _official_scores(config, spec, directory, settings):
     checkout = settings.get("official_checkout", "data/mtrag-official")
     target = directory/"official"
     journal = directory/"official.judge-http.jsonl"
+    ragas_max_tokens = settings.get("ragas_max_tokens") if "RL_F" in metrics else None
     with record_judge_http(judge["base_url"], journal) as (endpoint, calls):
         command = [python, "-m", "bench.official", "generation-http", "--checkout", checkout,
             "--input", str(prepared), "--output", str(target), "--model", judge["model"],
@@ -147,6 +148,8 @@ async def _official_scores(config, spec, directory, settings):
             command.append("--no-answerability-adjustment")
         if settings.get("ragas_json_schema", False):
             command.append("--ragas-json-schema")
+        if ragas_max_tokens is not None:
+            command.extend(("--ragas-max-tokens", str(ragas_max_tokens)))
         receipt = await _command(command, directory, "official-generation")
     records = load_jsonl(target/"scores.jsonl")
     raw_outputs = [str(target/"scores.jsonl"), str(journal), str(target/"identity.json"),
@@ -176,6 +179,8 @@ async def _official_scores(config, spec, directory, settings):
         "official_source": json.loads((Path(checkout)/"contextkv-source.json").read_text()),
         "requested_metrics": metrics, "answerability_adjustment": primary == "mtrageval_harmonic",
         "metric_scope": "project_RB_llm" if primary == "RB_llm" else "MTRAGEval_generation_components"}
+    if ragas_max_tokens is not None:
+        identity["ragas_max_tokens"] = ragas_max_tokens
     journal_records = load_jsonl(journal) if journal.exists() else []
     call_cost = {"http_calls": len(journal_records), "new_http_calls": len(calls),
         "elapsed_ms": sum(call["elapsed_ms"] for call in journal_records),
