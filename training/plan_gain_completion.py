@@ -454,8 +454,18 @@ def main(argv=None):
             raise ValueError("effective gain development uses a different actual scorer")
         if {row["conversation_id"] for row in development} & set(model.provenance["training_conversations"]):
             raise ValueError("effective development conversations overlap fitted training conversations")
-        report = {"records": len(development), "mae": sum(abs(model.predict(row["features"])-row["effective_delta_q"])
-            for row in development)/len(development), "reader_checkpoint": model.reader_checkpoint,
+        errors, untrained = [], Counter()
+        for row in development:
+            kind = row["semantic_kind"]
+            if model.supports_semantic_kind(kind):
+                errors.append(abs(model.predict(row["features"])-row["effective_delta_q"]))
+            else:
+                untrained[kind] += 1
+        known_action_mae = sum(errors)/len(errors) if errors else None
+        report = {"records": len(development), "predictable_records": len(errors),
+            "prediction_coverage": len(errors)/len(development) if development else None,
+            "untrained_action_counts": dict(untrained), "known_action_mae": known_action_mae,
+            "mae": None if untrained else known_action_mae, "reader_checkpoint": model.reader_checkpoint,
             "reader_profile_id": model.reader_profile_id, "asset_id": model.asset_id, "utility_rule": RULE}
         Path(args.output+".development.json").write_text(json.dumps(report, indent=2)+"\n")
     print(json.dumps({"asset": args.output, "asset_id": model.asset_id, "training_records": model.provenance["training_records"]}))
