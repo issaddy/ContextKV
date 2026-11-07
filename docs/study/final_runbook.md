@@ -10,6 +10,8 @@ Host 固定 token 配对已验证真实回载与重算：同一请求下，Nativ
 
 旧 support A 的 ContextPilot 队列已停止扩跑，203 个完成答案、1 次失败及全部已付费用留在 `external-contextpilot-fixed-002`；这些结果只解释旧 A。最终四格将绑定选定 A 及其对应的 B 资产，不能将旧 support 资产直接用于 ranked 状态。
 
+`3abfde2` 补齐所选来源的版本过滤、必需数值归约、选择报价到执行的传递，以及无 ContextPlan 的直接 ANSWER 来源编排。7 项受影响集成检查通过；容器未安装 pytest-asyncio，5 项异步检查由 `asyncio.run` 直接执行原用例，其余 2 项由 pytest 执行。`d09c1cd` 修复 Native 对尚未分配 KV 的排队请求报价崩溃，GPU 0 服务已恢复，失败输出与费用保留。
+
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 
 后续运行使用容器默认 `python3`，不再新建虚拟环境；此前批次保留其真实解释器记录。跨机器仅同步代码、配置和轻量结果／成本记录，训练模型及大日志留在实验容器。
