@@ -502,12 +502,6 @@ def judge_sources(base, scope_material, row, sources, *, corpus_id):
     return EvidenceSet("offline-judge-material", tuple(units.values()), source_blocks=tuple(blocks.values()))
 
 
-def planned_model_calls(plan):
-    return sum(step.task.kind == "ANSWER" or not (step.task.kind == "REDUCE"
-        and plan.context_plan.reading_mode == "typed_reduce" and step.task.operation in {"count", "sum", "group", "union"})
-        for step in plan.steps)
-
-
 def preparation_usage(provider, before, budget, ticket_start):
     observed = provider._auxiliary_usage(before, ())
     calls = [ticket for ticket in budget.tickets[ticket_start:] if ticket["role"] == "support"]

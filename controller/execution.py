@@ -477,7 +477,7 @@ class ReadingExecutor:
                 result=ReadResult(task.step_id, raw_output=generation.text,
                     input_tokens=len(rendered.input_ids), output_tokens=len(generation.output_ids)))
             self.store.save_execution_step(record, "RESULT_READY", generation)
-            receipt = generation.receipt
+            receipt = record.receipt
             if (receipt.rid, receipt.attempt_id, receipt.engine_session_id,
                     receipt.session_generation, receipt.engine_restart_id, receipt.input_hash) != (
                     identity, identity, epoch.engine_session_id, epoch.session_generation,
@@ -485,9 +485,9 @@ class ReadingExecutor:
                 raise EngineError("READ_STEP_RECEIPT_MISMATCH")
             if not generation.generation_complete or not receipt.generation_complete:
                 raise EngineError("READ_STEP_INCOMPLETE")
-            info = await self.engine.info()
             observed = self.request_compiler.observe_executed(candidate, receipt,
-                cache_config_hash=info.cache_config_hash, engine_restart_id=info.engine_restart_id)
+                cache_config_hash=record.metrics["cache_config_hash"],
+                engine_restart_id=record.engine_epoch.engine_restart_id)
             record = replace(record, metrics={**record.metrics, "source_view": observed})
             self.store.save_execution_step(record, "RESULT_READY", generation)
             if not text_callback and generation.finish_reason in {"length", "max_tokens"}:

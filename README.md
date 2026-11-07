@@ -13,20 +13,17 @@ READ/REDUCE/ANSWER；在选择前编译实际来源排列并取得 Native 报价
 
 | 主线 | 当前入口 |
 |---|---|
-| A：实际历史、选材与阅读协议 | `adapters.study_retrieval`、`bench.evidence_policy_comparison` |
+| A：实际历史、证据选择与事实复用 | `adapters.study_retrieval`、`controller.fact_reuse` |
 | B：显式阅读动作与完整成本 | `controller.action_policy`、`controller.rolling_policy`、`training.plan_gain_rollout`、`training.plan_gain_completion` |
 | C：请求编译与缓存协同 | `controller.request_compiler`、作者 ContextPilot index/reorder；`controller.prefix_retention` 为可选保护 |
 | 评价与总成本 | `bench.study_scoring`、`bench.reassess_saved`、`profiling.study_cost_ledger` |
 
-保留共享数值阅读 / `numeric_need_isolation`、显式动作 / `whole_plan` 固定计划、
-Native / 固定 TTL，以及 P0/P1 规划器 × 阅读协议 的真实对照。四格先使用冻结实际输入，
-协议对照为 `task_first + numeric_need_isolation` 与 `source_first + 共享提取`，随后沿各自真实生成历史执行 P3。质量使用全部声明任务的官方分母，失败与未完成任务的
-已付调用、辅助计算和物理驻留费用一起记录。
+主比较在并发 1 和 4 下执行固定／收益 B × Native／ContextPilot 编译四格，另有 LlamaIndex 外部参照与关闭跨轮事实复用的对照。每格使用声明的 350 题、77 会话及各自真实 P3 历史。质量使用完整官方分母，成本包含失败请求、辅助计算及实际 GPU/Host 驻留。
+
+`numeric_need_isolation`、`whole_plan`、支持模型及 TTL/value 保留为显式对照入口，默认主线不加载它们。
 
 ```bash
-uv sync --extra retrieval --extra evaluation --extra tokenizer --locked
-uv run python -m bench.run_sessions --config configs/demo.yaml demo
-uv run ruff check controller adapters bench profiling tests scripts engine_patches training
+python3 -m bench.run_sessions --config configs/demo.yaml demo
 ```
 
 CPU 测试保留核心阅读、数值归约、来源链、目标可见性、动作决策和前缀接口冒烟。

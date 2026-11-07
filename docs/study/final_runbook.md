@@ -1,6 +1,6 @@
 # 当前课题运行入口
 
-`test-0523` 使用容器默认 `python3`，Qwen3-32B 权重固定。当前优先收口统一业务链：跨轮事实调度、READ 输出分包、部分证据下的停止决策，以及资料身份和执行恢复。完成整链审核及短原生验证后，再冻结联合比较。
+`test-0523` 使用容器默认 `python3`，Qwen3-32B 权重固定。统一业务链已接通资料登记、跨轮事实复用、预算化阅读、Native 报价、执行及缓存反馈。本轮已完成依赖、分包、停止决策和恢复接线修正；后续更新受影响监督并完成完整队列实测。
 
 原协议运行位于 `runs/study-20261106-resume/final-joint-6888cf8-001`，使用 350 题／77 会话和共同到达序列。固定 B 的 c1/c4 使用 GPU 0/1、3/5；收益 B 使用 4/6、2/7，每组一张 reader 卡和一张 helper＋BGE 卡。四组已收尾，协调器和评价进程退出，原生请求清空；整段物理窗口和收尾费用按并集计量，四组覆盖均完整，见 `engineering-stop-summary.json`。计划、答案和费用保留，模型及大日志留在容器。这批记录只解释原实现，不与新协议结果混成正式四格。
 
@@ -34,7 +34,7 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/launch_sglang.sh --host 127.0.0.1 --port 300
 
 scope 的 `model_path` 指向 `/data/models/qwen3-32b`，模型/tokenizer 身份沿用真实文件。默认集成为官方 SGLang 0.5.18 源码及项目补丁，CUDA 内核来自现有环境。`engine-source.json`、`engine-environment.txt` 记录实际版本；不要求升级主机驱动。
 
-本次使用 `source runs/study-20261106-resume/default-python/runtime.env`。默认解释器为 `/opt/sglang/bin/python3`；`CUDA_HOME` 使用该运行目录内的 `cuda12-toolkit/root/usr/local/cuda-12.9`，`LD_PRELOAD` 选择实际挂载的 `libcuda.so.560.35.03`，FlashInfer 与 SGLang JIT 使用对应 cu129 工具链。BF16/FA3 显式设置上游 `SGLANG_ENABLE_JIT_DEEPGEMM=0`，补丁使该开关在可选扩展导入前生效；共享 DeepGEMM 包未卸载。`NO_PROXY` 覆盖本机服务地址。旧虚拟环境路径只属于之前批次，当前服务及采集均已使用默认解释器。
+本次使用 `source runs/study-20261106-resume/default-python/runtime.env`。默认解释器为 `/opt/sglang/bin/python3`；`CUDA_HOME` 使用该运行目录内的 `cuda12-toolkit/root/usr/local/cuda-12.9`，`LD_PRELOAD` 选择实际挂载的 `libcuda.so.560.35.03`，FlashInfer 与 SGLang JIT 使用对应 cu129 工具链。BF16/FA3 显式设置上游 `SGLANG_ENABLE_JIT_DEEPGEMM=0`，补丁使该开关在可选扩展导入前生效；共享 DeepGEMM 包未卸载。`NO_PROXY` 覆盖本机服务地址。当前服务与采集使用默认解释器。
 
 BGE 检索、发布重排器及历史编码器在本环境显式使用 `sdpa_backend: math`；对应配置分别位于 retriever YAML 和 `task_model`。两套索引的语料、向量哈希及离线费用见 `runs/study-20261106-resume/offline-index-build`。此后端选择不改变 Qwen 权重或推理设置。
 
@@ -46,7 +46,7 @@ python3 scripts/prepare_contextpilot.py --checkout vendor/contextpilot
 
 study 配置的 `execution.cache_compilation` 取 `{mode: contextpilot, checkout: vendor/contextpilot}`；Native 对照取 `{mode: native}`。`prefix_retention` 默认 `{mode: native}`，与编排开关独立。
 
-LlamaIndex 的统一执行入口与最终编译矩阵已接线；外部参照实测和完整队列比较仍须完成。首次外部运行的 4 次尝试在来源映射处失败，未生成答案，费用保留在 `external-contextpilot-fixed-001`。映射已按上游实际渲染保留的字符修正：正文尾空白被上游移除时，来源结束坐标相应缩短，仍逐字核对原文。B 恢复沿用原 SQLite 和已完成问答，通过已有 `--request-namespace` 为新尝试分配 ID；旧失败记录保存在原测量段，实际历史与已付成本继续保留。导出时保留 `measurements/<segment>/generation_manifest.json`，模型身份由实际捕获资产派生，原 digest 和来源 hash 留在 `capture_resident_binding`。下表的入口存在不表示对应实验已完成。
+LlamaIndex 复用统一引擎、来源投影和成本账本。恢复按原 SQLite 和实际请求 ID 继续，已经支付的步骤不重发；新的尝试使用新的请求命名空间。
 
 | 任务 | 当前入口 | 必须保留的对照与产物 |
 |---|---|---|
@@ -75,7 +75,7 @@ B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v4` 及 GAP �
 
 B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_support_state_v2`，使用实际已付资源和剩余额度；旧特征资产不能直接用于该决策。
 
-当前 B 资产还必须携带 `input_protocol`：`merged_source_windows_actual_coverage_reused_facts_compiled_choice`、实际窗口粒度和完整 reader fingerprint。采集、分支、配对及加载全链核对该身份；旧资产缺少绑定时须按当前协议重采/重拟合，不改名复用。实际 seed、已读覆盖、编译选中排列及报价的 `pre_action_input` 一并保留；事实复用消融仍使用相同 B 模型，实际状态反映关闭复用。
+当前 B 资产还必须携带 `input_protocol`：`merged_source_windows_actual_coverage_reused_facts_compiled_choice`、`read_output_reservation`、实际窗口粒度和 reader fingerprint。采集、分支、配对及加载全链核对该身份；旧资产缺少绑定时须按当前协议重采/重拟合，不改名复用。实际 seed、已读覆盖、编译选中排列及报价的 `pre_action_input` 一并保留；事实复用消融仍使用相同 B 模型，实际状态反映关闭复用。
 
 动作收益资产的 `evidence_selection_contract` 来自实际 A manifest，绑定选材模式和顺序，以及 `support` 使用的效用、保留集合重排和支持模型记录身份。观测包和实际分支使用同一合同，开发集及线上提供器须与拟合资产匹配。语料、索引、B6/B7 和服务地址独立记录。只缺该合同的旧资产可用保留了实际分支 manifest 的配对记录重新拟合，旧观测包可从原 capture 重新导出。
 
@@ -91,9 +91,9 @@ B 固定流程观测使用 `execution.state_observation`，从真实请求开始
 
 已有实际 READ 分支可用 `training.collect_plan_gains --terminal-branches GAIN_ROOT --reader-config READER_YAML --output NEW_PACKETS` 导出终端状态。该入口使用原先保存的报价事件和物理样本切分已付成本，排除尚未发生的 ANSWER 费用；来源标为 `frozen_actual_rollout`，原 P3 与实际分支身份均保留。新配对沿用原 `actual-rollouts`、sources 和 cohort，使用新输出目录。
 `bench.study` 的成功/失败记录保留原始 `reference`、原始数据分区和 observer cohort 绑定，仅供离线审计与评分。导出器将 packet 绑定到完整实际 capture 行的 hash；B 采集核验 native-train 原始正文、版本、窗口坐标与 raw grounding 引文，开发会话独立隔离。原始参考不会进入 A/B/C 的在线输入。正式 dev 队列不能作为 B 训练数据。
-真实检索后的初始状态也可配对 DIRECT 与首次 READ。离线 DIRECT 在当前材料上强制 ANSWER，线上停止须通过实际覆盖或结论充分性检查。确认终止而未提交回答的真实分支计效用 0，包含生成前终止，原始评分保留为空。
+真实检索后的初始状态可配对 DIRECT 与首次 READ。线上和离线 DIRECT 均可基于普通选材范围回答已知部分并说明缺口；全资料与统计任务保留覆盖和运算要求。确定终止而未提交回答的分支效用为 0，原始评分为空。
 进度分别记录去重源任务数和决策快照数，不将多个动作快照重复计为训练任务。
-`observed_actions` 沿用源动作的输出份额，不扫描 `read-outputs`；有效观测数单独记录，声明分母来自所用 cohort。当前 B 小批次为 8/4 个源任务，48/24 个历史轮次不计作独立训练/开发状态。
+`observed_actions` 沿用源动作的输出份额，不扫描 `read-outputs`；有效观测数单独记录，声明分母来自所用 cohort。历史轮次不计作独立训练/开发状态。
 新成本拟合读取各分支 `run.json.pre_action_quote`，质量与成本分别归一化；`cold` 数据只能说明冷启动费用，`observed` 保留实际分支起点，不声称恢复源缓存。
 B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
 `--cohort-manifest` 指向同一文件；不再使用 `--partition-seed` 或 `--dev-fraction`
@@ -105,8 +105,6 @@ manifest 记录。
 B 收益的唯一默认质量目标为固定官方 RB_llm，使用与最终评价相同的真实对话和实际证据投影。`--official-checkout` 可指定已有官方源码目录，默认沿 study 的 `scoring.official_checkout`。`plan_gain_quality` 保存作者已归一化的 RB 值；不把它当作必要点覆盖率。P1 的 `necessary_points_grounding_conditions_versions_task_v3` 保留为独立四项诊断，旧 B 自定义四分结果仅作历史记录。
 
 重评产生新标签和实际 scorer 身份，保留原 `before.json`、原始回答与执行成本，不回写原执行登记。实际观察到的评分条件误判随原文审计保留；不能据一次 judge 的分差声称正确性改进。
-
-当前小批次资产位于 `runs/study-20261106-resume/b-pilot/gain-official-018b710/`：4 次既有官方调用经实际输入和采样核对后复用，新增 21 次评分，未重生成问答。拟合使用 9 个 train、4 个 dev 配对；训练覆盖 8 个 READ、1 个 GAP，REDUCE 无样本。开发保存候选上的模型选择为 2 次 DIRECT、2 次 READ，按同一实测质量与费用目标应为 3 次 DIRECT、1 次 READ；其中官方评分的条件误判另有原文审计。该诊断尚不能证明在线策略收益。`summary.json` 保存逐状态选择和费用，模型文件留在实验容器；后续比较绑定实际资产，旧自定义评分模型不部署。
 
 机制重放示例（显式指定实际服务配置和新输出目录）：
 
@@ -182,7 +180,7 @@ python3 -m training.a_workflow compare --comparison-config COMPARISON.yaml \
 正式开发队列为 `runs/study/formal-dev-queue.matrix.json`，声明 350 题、77 会话；
 运行及评分直接使用其中 IDs，再在相同清单上重跑 baseline 与候选；辅助学习的
 200/40 划分用于辅助训练，不能替代正式开发队列。
-冻结 A 采用 P0 共享协议；模型、支持策略、查询资产、阅读协议与预算由
+冻结 A 采用 ranked 选材与共享阅读；模型、查询资产、阅读协议与预算由
 本次冻结 A 的 manifest 及实际运行配置绑定。
 P1 效用输入使用零上下文 `evidence_set_only`，不使用实际 READ 后长度。
 B 从冻结 A 的真实观察采集动作分支；失败尝试中已完成步骤的观察通过真实 Attempt ID

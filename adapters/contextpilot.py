@@ -106,10 +106,9 @@ class SourceOrderIndex:
     coordinates and content identity. This adapter never changes a prompt, reads
     source bodies, or treats a context-index match as physical cache residency.
     """
-    def __init__(self, checkout, *, enabled=True):
+    def __init__(self, checkout):
         from threading import RLock
-        self.enabled = enabled
-        self._index_type = load_contextpilot_index(checkout) if enabled else None
+        self._index_type = load_contextpilot_index(checkout)
         self._scopes = {}
         self._executed = {}
         self._lock = RLock()
@@ -146,7 +145,7 @@ class SourceOrderIndex:
         original, encoded = self._encode(source_ids)
         with self._lock:
             index = self._scopes.get(scope)
-            if not self.enabled or index is None or not encoded:
+            if index is None or not encoded:
                 return (original,)
             path, node_id, overlap, _ = index.search(list(encoded), update_access=False)
             if node_id < 0 or not overlap:
@@ -175,7 +174,7 @@ class SourceOrderIndex:
         if (not receipt.generation_complete or not input_ids
                 or token_hash(input_ids) != receipt.input_hash or not receipt.attempt_id):
             raise ValueError("source index requires a completed actual input-bound receipt")
-        if not self.enabled or not original:
+        if not original:
             return None
         key = (scope, receipt.attempt_id)
         binding = (receipt.input_hash, original)
@@ -198,13 +197,6 @@ class SourceOrderIndex:
                 _, _, request_id = index.insert(list(encoded), path, len(input_ids))
             self._executed[key] = (*binding, request_id)
             return request_id
-
-    def invalidate_scope(self, *, fingerprint, cache_config_hash, engine_restart_id):
-        """Forget ordering hints when the caller invalidates a native cache scope."""
-        scope = self.cache_scope(fingerprint, cache_config_hash, engine_restart_id)
-        with self._lock:
-            self._scopes.pop(scope, None)
-            self._executed = {key: value for key, value in self._executed.items() if key[0] != scope}
 
 
 @lru_cache(maxsize=None)

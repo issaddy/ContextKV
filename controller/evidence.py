@@ -135,25 +135,6 @@ def allows_version_comparison(query: str, policy: EvidencePolicy) -> bool:
         r"\b(compare|comparison|versus|vs\.?|difference)\b|对比|比较|差异|新旧", query, re.I))
 
 
-def select_shared_required_evidence(query: str, retrieved: Iterable[EvidenceBlock],
-                                   snapshot: SessionSnapshot,
-                                   policy: EvidencePolicy | None = None
-                                   ) -> tuple[EvidenceBlock, ...]:
-    retrieved = tuple(retrieved)
-    archive = evidence_index(retrieved, committed=snapshot.archive)
-    return resolve_required_evidence(query, (block.key for block in retrieved),
-                                     archive, snapshot, policy)
-
-
-def resolve_required_evidence(query: str, current: Iterable[EvidenceKey],
-                              archive: Mapping[EvidenceKey, EvidenceBlock],
-                              snapshot: SessionSnapshot,
-                              policy: EvidencePolicy | None = None
-                              ) -> tuple[EvidenceBlock, ...]:
-    """Resolve revisits and dependencies using the already validated turn index."""
-    return resolve_required_evidence_with_reasons(query, current, archive, snapshot, policy)[0]
-
-
 def resolve_required_evidence_with_reasons(query: str, current: Iterable[EvidenceKey],
                               archive: Mapping[EvidenceKey, EvidenceBlock],
                               snapshot: SessionSnapshot,
