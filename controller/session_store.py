@@ -12,7 +12,7 @@ import time
 import uuid
 
 from .evidence import merge_evidence_block
-from .schema import (ContextEpoch, EvidenceBlock, EvidenceKey, ExecutionLedger, GenerationResult, Message, QueryContext,
+from .schema import (CompletionReceipt, ContextEpoch, EvidenceBlock, EvidenceKey, ExecutionLedger, GenerationResult, Message, QueryContext,
                      Plan, RetireOperation, SessionSnapshot, TurnRecord)
 from .serialization import decode, dumps, loads
 from .context_schema import ContextPlan, OpenNeed, ReadingOutcome, StepRecord
@@ -61,6 +61,9 @@ class Attempt:
     auxiliary_usage: dict | None = None
     final_step_id: str | None = None
     cache_config_hash: str | None = None
+    answer_quote: dict | None = None
+    failed_from_stage: str | None = None
+    terminal_receipt: CompletionReceipt | None = None
 
 
 ACTIVE_STAGES = ("STARTED", "PLANNED", "PREPARING", "PREPARED", "SUBMITTED", "RESULT_READY")
@@ -149,6 +152,9 @@ class SessionStore:
             attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id), step_id TEXT NOT NULL,
             stage TEXT NOT NULL, payload TEXT NOT NULL, generation TEXT,
             PRIMARY KEY(attempt_id,step_id));
+          CREATE TABLE IF NOT EXISTS auxiliary_calls (
+            call_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id), payload TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS auxiliary_calls_by_attempt ON auxiliary_calls(attempt_id);
           CREATE TABLE IF NOT EXISTS reading_progress (
             attempt_id TEXT PRIMARY KEY REFERENCES attempts(attempt_id), payload TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS prefix_owners (
@@ -443,6 +449,12 @@ class SessionStore:
                             (self._dump(updated), attempt_id))
             return updated
 
+    def save_auxiliary_call(self, receipt):
+        with self._transaction():
+            self.db.execute("INSERT INTO auxiliary_calls VALUES(?,?,?) "
+                "ON CONFLICT(call_id) DO UPDATE SET payload=excluded.payload",
+                (receipt["call_id"], receipt["attempt_id"], dumps(receipt)))
+
     def context_plan(self, attempt_id: str) -> ContextPlan | None:
         with self._mutex:
             row = self.db.execute("SELECT plan FROM turn_plans WHERE attempt_id=?",
@@ -456,9 +468,16 @@ class SessionStore:
                 "payload=excluded.payload, generation=COALESCE(excluded.generation,generation)",
                 (record.attempt_id, record.step_id, stage, self._dump(record),
                  self._dump(generation) if generation is not None else None))
-            if generation is not None:
+            if generation is not None or (record.engine_epoch is not None and stage == "FAILED"
+                                          and record.metrics.get("terminal_state") != "STALE_RESTART"):
                 self._enqueue(record.engine_epoch.business_session_id, record.engine_epoch,
                               "reading_step_complete", self.get_attempt(record.attempt_id).expected_version)
+
+    def has_submitted_model_step(self, attempt_id):
+        with self._mutex:
+            return self.db.execute("SELECT 1 FROM execution_steps WHERE attempt_id=? AND stage='SUBMITTED' "
+                                   "AND json_type(payload, '$.engine_epoch')='object' LIMIT 1",
+                                   (attempt_id,)).fetchone() is not None
 
     def execution_steps(self, attempt_id: str):
         with self._mutex:
@@ -653,13 +672,14 @@ class SessionStore:
             return updated
 
     def fail_attempt(self, attempt_id: str, error: str, force_recovery: bool = False,
-                     retire_candidate: bool = True):
+                     retire_candidate: bool = True, terminal_receipt: CompletionReceipt | None = None):
         """Call only before submit, or after engine completion/cancellation is confirmed."""
         with self._transaction():
             attempt = self.get_attempt(attempt_id)
             if attempt.stage in ("COMMITTED", "FAILED"):
                 return
-            updated = replace(attempt, stage="FAILED", error=error)
+            updated = replace(attempt, stage="FAILED", error=error, failed_from_stage=attempt.stage,
+                              terminal_receipt=terminal_receipt)
             self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (updated.stage, self._dump(updated), attempt_id))
             snap = self._read(attempt.session_id)
             if force_recovery:

@@ -409,6 +409,7 @@ class ObservedNativeObserver:
             raise ValueError("native quote does not match the actual reader fingerprint")
         pool = (await engine.metrics())["pool"]
         reusable = {}
+        status = None
         if self.store is not None and candidates:
             from .prefix_retention import PrefixRuntimeClient
             from .prefix_view import prefix_candidate_view
@@ -423,7 +424,7 @@ class ObservedNativeObserver:
         return NativePlanningState(self.reader_checkpoint, self.reader_profile_id, snapshot, quotes,
             cost_model, {}, {}, paid, {**self.paid.last_observation, "native_admission": admission,
                 "native_quote_ms": quote_ms,
-                "resident_model_manifest_digest": self.resident_digest}), reusable
+                "resident_model_manifest_digest": self.resident_digest}, prefix_status=status), reusable
 
 
 def load_rolling_runtime(settings, *, template, store, sampling, answer_system_prompt, engine_base_url):
@@ -432,17 +433,19 @@ def load_rolling_runtime(settings, *, template, store, sampling, answer_system_p
     from .plan_policy import PolicyLimits
     from .rolling_policy import RollingPlanRuntime
     checkpoint, profile = settings["reader_checkpoint"], settings["reader_profile_id"]
-    model = PlanGainModel.load(settings["gain_asset"], reader_checkpoint=checkpoint, reader_profile_id=profile,
-        reader_fingerprint=template.fingerprint)
-    provenance = model.provenance
-    if (provenance["label"] not in {"actual_final_quality_minus_actual_direct_answer_quality",
-            "actual_completion_weighted_final_utility_minus_direct_utility"}
-            or provenance["training_split"] != "train" or provenance["training_records"] < 1
-            or not provenance["input_sha256"] or not provenance["counterfactual_runs_retained"]):
-        raise ValueError("enabled rolling gains require the actual train-split counterfactual asset")
-    if (provenance["label"] == "actual_completion_weighted_final_utility_minus_direct_utility"
-            and (provenance["no_answer_utility"] != 0 or not provenance["raw_missing_quality_preserved"])):
-        raise ValueError("effective utility assets retain missing raw judge Q and their declared no-QA rule")
+    model = None
+    if settings.get("action_policy", "learned") == "learned":
+        model = PlanGainModel.load(settings["gain_asset"], reader_checkpoint=checkpoint, reader_profile_id=profile,
+            reader_fingerprint=template.fingerprint)
+        provenance = model.provenance
+        if (provenance["label"] not in {"actual_final_quality_minus_actual_direct_answer_quality",
+                "actual_completion_weighted_final_utility_minus_direct_utility"}
+                or provenance["training_split"] != "train" or provenance["training_records"] < 1
+                or not provenance["input_sha256"] or not provenance["counterfactual_runs_retained"]):
+            raise ValueError("enabled rolling gains require the actual train-split counterfactual asset")
+        if (provenance["label"] == "actual_completion_weighted_final_utility_minus_direct_utility"
+                and (provenance["no_answer_utility"] != 0 or not provenance["raw_missing_quality_preserved"])):
+            raise ValueError("effective utility assets retain missing raw judge Q and their declared no-QA rule")
     mode = settings.get("mode", "whole_plan")
     if checkpoint != template.fingerprint.model_revision:
         raise ValueError("rolling gains must bind the actual reader checkpoint")
@@ -459,11 +462,15 @@ def load_rolling_runtime(settings, *, template, store, sampling, answer_system_p
         observer = ProfiledNativeObserver(profiles, paid, reader_checkpoint=checkpoint, reader_profile_id=profile,
             sampling=sampling, answer_system_prompt=answer_system_prompt, engine_base_url=engine_base_url,
             store=prefix_store)
+    joint = settings.get("joint_context", False)
+    reads = 2 if joint else settings.get("read_choices", 1)
+    limits = PolicyLimits(**{"max_plan_candidates": 3+reads, **settings.get("limits", {})})
     return RollingPlanRuntime(model, observer, reader_checkpoint=checkpoint, reader_profile_id=profile,
-        output_budgets=settings["output_budgets"], limits=PolicyLimits(**settings.get("limits", {})),
+        output_budgets=settings["output_budgets"], limits=limits,
         output_tokens_per_fact=settings.get("output_tokens_per_fact", 64),
         mode=mode, observation_path=settings.get("observation_path"),
-        gap_retriever_identity=settings.get("gap_retriever_identity"), gap_limits=settings.get("gap_limits"))
+        gap_retriever_identity=settings.get("gap_retriever_identity"), gap_limits=settings.get("gap_limits"),
+        joint_context=joint, read_choices=reads)
 
 
 def load_fixed_reading_observer(settings, *, template):

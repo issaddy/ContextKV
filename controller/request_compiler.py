@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from hashlib import sha256
 import json
 
+from .admission import quoted_native_work
 from .candidates import build_candidates, build_plan_candidates
 from .context_schema import SourceSpan
 from .engine_client import EngineInfo
@@ -11,9 +13,27 @@ from .prefix_view import actual_source_geometry, source_fragment_id
 from .reading import output_schema, step_generation_kind, step_messages
 from .schema import CacheQuoteBatch, CompletionReceipt, EvidenceSpan, PromptCandidate
 from .serialization import dumps
+from .source_prompt import SOURCE_ENCODING, source_envelope, source_evidence_spans, stable_source_payload
 
 
 _ANSWER_BODY_ENCODING = "answer-evidence-body:v1"
+
+
+def read_task_hash(task):
+    return sha256(dumps(task).encode()).hexdigest()
+
+
+def unique_answer_inputs(candidates):
+    unique, alternatives = {}, []
+    for candidate in candidates:
+        if not candidate.feasible:
+            alternatives.append(candidate)
+            continue
+        key = (candidate.context_plan_id, candidate.evidence_set_id, candidate.working_history_id,
+               candidate.action, candidate.input_hash, candidate.output_budget, candidate.evidence_spans,
+               candidate.reference_map, candidate.required_blocks, candidate.quality_prediction)
+        unique.setdefault(key, candidate)
+    return (*unique.values(), *alternatives)
 
 
 class RequestCompiler:
@@ -34,8 +54,16 @@ class RequestCompiler:
         return ((tuple(source_ids),) if self.index is None else
                 self.index.propose_orders(source_ids, **self._scope(cache_scope)))
 
+    def bind_geometry(self, candidate, rendered):
+        geometry = actual_source_geometry(self.template, candidate, rendered)
+        return replace(candidate, evidence_body_tokens=geometry["body_tokens"],
+                       source_body_token_ranges=geometry["body_token_ranges"],
+                       source_prefix_tokens=geometry["source_prefix_tokens"])
+
     @staticmethod
     def _read_id(unit, layout):
+        if layout == "source_first":
+            return source_fragment_id(unit.source_spans, unit.text, SOURCE_ENCODING)
         return source_fragment_id(unit.source_spans, json.dumps(unit.text, ensure_ascii=False)[1:-1],
                                   "read-json:"+layout)
 
@@ -57,12 +85,18 @@ class RequestCompiler:
             current = replace(task, input_unit_ids=unit_order,
                 output_schema=output_schema(task, ordered, claims, reading_mode=plan.reading_mode,
                                             numeric_identity=plan.numeric_identity))
+            source_prompt, canonical_spans = None, ()
+            if task.kind == "READ" and plan.read_layout == "source_first":
+                sources, aliases = stable_source_payload(ordered)
+                content, bodies = source_envelope(sources)
+                source_prompt = content, aliases
+                canonical_spans = source_evidence_spans(ordered, bodies, blocks, 1)
             for output in outputs:
                 actual = replace(current, output_budget=output)
-                messages = step_messages(plan, actual, ordered, claims, snapshot)
-                rendered = self.template.render(messages)
-                spans, cursor = [], 0
-                if ordered:
+                messages = step_messages(plan, actual, ordered, claims, snapshot, source_prompt=source_prompt)
+                rendered = self.template.render(messages, with_offsets=bool(ordered))
+                spans, cursor = list(canonical_spans), 0
+                if ordered and source_prompt is None:
                     body_message = messages[1].content
                     for unit in ordered:
                         literal = json.dumps(unit.text, ensure_ascii=False)
@@ -88,14 +122,15 @@ class RequestCompiler:
                     corpus_snapshot_id=snapshot.corpus_snapshot_id, context_plan_id=plan.plan_id,
                     evidence_set_id=plan.selected_set.set_id, output_budget=output,
                     generation_kind=step_generation_kind(task.kind, task.operation, plan.reading_mode),
-                    read_unit_order=unit_order, source_ids=tuple(order),
+                    read_unit_order=unit_order, source_ids=tuple(order), read_task_hash=read_task_hash(actual),
                     layout_id="existing" if order_index == 0 else "existing:contextpilot")
-                geometry = actual_source_geometry(self.template, candidate)
-                candidates.append(replace(candidate, evidence_body_tokens=geometry["body_tokens"]))
+                candidates.append(self.bind_geometry(candidate, rendered))
         return tuple(candidates)
 
     @staticmethod
-    def _answer_unit_ids(unit, blocks):
+    def _answer_unit_ids(unit, blocks, source_first):
+        if source_first:
+            return (source_fragment_id(unit.source_spans, unit.text, SOURCE_ENCODING),)
         ids = []
         for span in unit.source_spans:
             block = blocks[span.source_key]
@@ -104,15 +139,15 @@ class RequestCompiler:
             ids.append(source_fragment_id((span,), body, _ANSWER_BODY_ENCODING))
         return tuple(ids)
 
-    def _answer_orders(self, units, blocks, cache_scope):
+    def _answer_orders(self, units, blocks, cache_scope, *, source_first):
         identities = tuple(dict.fromkeys(identity for unit in units
-            for identity in self._answer_unit_ids(unit, blocks)))
+            for identity in self._answer_unit_ids(unit, blocks, source_first)))
         orders = self._orders(identities, cache_scope)
         proposed = [tuple(units)]
         if len(orders) > 1:
             rank = {identity: index for index, identity in enumerate(orders[1])}
             ordered = tuple(sorted(units, key=lambda unit: min(
-                rank[identity] for identity in self._answer_unit_ids(unit, blocks))))
+                rank[identity] for identity in self._answer_unit_ids(unit, blocks, source_first))))
             if ordered != tuple(units):
                 proposed.append(ordered)
         return tuple(proposed)
@@ -128,7 +163,7 @@ class RequestCompiler:
 
     def compile_answers(self, snapshot, query, plan=None, *, policy=None, outcome=None,
                         layouts=None, actions=("REBUILD", "APPEND"), cache_scope=None,
-                        **direct_options):
+                        representations=("existing",), **direct_options):
         """Delegate semantic/history/conclusion compilation to the existing builder.
 
         Source permutations occur after the builders choose original material.
@@ -140,16 +175,19 @@ class RequestCompiler:
             candidates = build_candidates(snapshot, query, policy=policy, template=self.template,
                 source_orderer=(None if self.index is None else
                                 lambda blocks: self._answer_block_orders(blocks, cache_scope)),
-                **direct_options)
+                bind_geometry=self.bind_geometry, **direct_options)
         else:
             blocks.update((block.key, block) for block in plan.selected_set.source_blocks)
-            candidates = build_plan_candidates(snapshot, query, plan, self.template, policy=policy,
-                outcome=outcome, layouts=layouts, actions=actions,
-                source_orderer=lambda units, blocks: self._answer_orders(units, blocks, cache_scope))
+            candidates = tuple(candidate for representation in representations
+                for candidate in build_plan_candidates(snapshot, query, plan, self.template, policy=policy,
+                    outcome=outcome, layouts=layouts, actions=actions, bind_geometry=self.bind_geometry,
+                    representation=representation,
+                    source_orderer=lambda units, blocks: self._answer_orders(units, blocks, cache_scope,
+                        source_first=plan.read_layout == "source_first")))
         result = []
         for candidate in candidates:
-            ids = []
-            for span in candidate.evidence_spans:
+            groups = {}
+            for index, span in enumerate(candidate.evidence_spans):
                 body = candidate.messages[span.message_index].content[span.start:span.end]
                 if span.source_start is None:
                     block = blocks[span.key]
@@ -158,10 +196,11 @@ class RequestCompiler:
                 else:
                     start, end = span.source_start, span.source_end
                 source = SourceSpan("", span.key, start, end)
-                ids.append(source_fragment_id((source,), body, _ANSWER_BODY_ENCODING))
-            candidate = replace(candidate, source_ids=tuple(dict.fromkeys(ids)))
-            geometry = actual_source_geometry(self.template, candidate)
-            result.append(replace(candidate, evidence_body_tokens=geometry["body_tokens"]))
+                key = span.source_declaration if span.source_declaration is not None else index
+                encoding = SOURCE_ENCODING if span.source_declaration is not None else _ANSWER_BODY_ENCODING
+                groups.setdefault(key, ([], body, encoding))[0].append(source)
+            ids = (source_fragment_id(sources, body, encoding) for sources, body, encoding in groups.values())
+            result.append(replace(candidate, source_ids=tuple(dict.fromkeys(ids))))
         return tuple(result)
 
     @staticmethod
@@ -183,11 +222,7 @@ class RequestCompiler:
             if (quote.input_hash != candidate.input_hash or quote.input_len != len(candidate.input_ids)
                     or candidate.fingerprint != quote_batch.fingerprint):
                 raise ValueError("variant quote differs from its compiled input")
-            loaded = max(0, min(quote.host_only_load_tokens, quote.native_load_estimate))
-            full_restore = quote.host_only_load_tokens > 0 and loaded == quote.host_only_load_tokens
-            prefix = min(quote.match_limit, quote.recoverable_prefix_tokens if full_restore
-                         else quote.ready_gpu_prefix_tokens)
-            work = (max(0, len(candidate.input_ids)-prefix), loaded, len(candidate.input_ids), index)
+            work = (*quoted_native_work(quote), len(candidate.input_ids), index)
             choices.append((work, candidate))
         if not choices:
             raise ValueError("no feasible compiled source permutation")
@@ -205,6 +240,7 @@ class RequestCompiler:
                 or receipt.input_hash != candidate.input_hash or not receipt.generation_complete):
             raise ValueError("executed source observation differs from the compiled request/scope")
         geometry = actual_source_geometry(self.template, candidate)
+        geometry.pop("causal_prefix_input_ids")
         request_id = None
         if self.index is not None and candidate.source_ids:
             request_id = self.index.observe_executed(candidate.source_ids,

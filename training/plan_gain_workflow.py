@@ -65,7 +65,7 @@ async def workflow(config, settings):
             result["cohorts"][split] = {"collection": report, "supervision": completion}
             write(root/"workflow.json", result)
         training = result["cohorts"].get("train", {}).get("supervision", {})
-        if training.get("effective_gain_records", 0):
+        if training.get("effective_action_records", 0):
             asset = settings.get("asset") or str(root/"plan-gain.json")
             fit_args = ["fit", "--train", str(root/"train-supervision"/"effective-gains.jsonl"),
                 "--output", asset]
@@ -75,7 +75,7 @@ async def workflow(config, settings):
             await asyncio.to_thread(fit_main, fit_args)
             result["asset"] = asset
         else:
-            result["fit"] = {"status": "skipped", "reason": "no_effective_training_gains"}
+            result["fit"] = {"status": "skipped", "reason": "no_effective_read_reduce_or_gap_labels"}
         result.update(status="completed", actual_model_generations=used)
     finally:
         import sys
@@ -109,7 +109,7 @@ def main(argv=None):
     parser.add_argument("--online-gpu-devices", type=integers, required=True)
     parser.add_argument("--judge-gpu-devices", type=integers, required=True)
     parser.add_argument("--extra-process-roots", type=integers, default=())
-    parser.add_argument("--cache-start", choices=("observed", "cold"), default="observed")
+    parser.add_argument("--cache-start", choices=("observed", "cold", "paired"), default="observed")
     parser.add_argument("--scope-scan", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--mode", choices=("whole_plan", "observed_actions"), default="whole_plan")
     parser.add_argument("--observed-states", help="Actual observed-state packets registered with the cohort inputs")
@@ -118,6 +118,8 @@ def main(argv=None):
         parser.error("whole_plan requires --task-labels")
     if args.mode == "observed_actions" and not args.observed_states:
         parser.error("observed_actions requires --observed-states")
+    if args.cache_start == "paired" and args.mode != "observed_actions":
+        parser.error("paired cache preparation requires observed_actions")
     if (min(args.train_states, args.dev_states) < 0 or args.train_states+args.dev_states < 1
             or args.max_generations < 1):
         raise ValueError("state counts must be nonnegative with at least one requested state and a positive generation allocation")

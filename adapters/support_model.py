@@ -12,6 +12,7 @@ import json
 import time
 from typing import Callable, Protocol
 
+from controller.context_budget import resolved_condition
 from controller.context_schema import (EvidencePool, EvidenceUnit, Need, SourceSpan,
     SupportBundle, SupportScores, TaskState)
 
@@ -60,10 +61,7 @@ def query_view(state: TaskState, need: Need, resolve: Callable, *, open_needs=()
     history = [{"turn_id": ref.turn_id, "speaker": ref.speaker,
                 "start": ref.start, "end": ref.end, "text": resolve(ref)}
                for ref in state.working_history]
-    conditions = [{"id": c.condition_id, "relation": c.relation_type,
-                   "key": resolve(c.key_span) if c.key_span else "",
-                   "values": [resolve(ref) for ref in c.value_spans],
-                   "predicate": resolve(c.predicate_span) if c.predicate_span else ""}
+    conditions = [{"id": c.condition_id, **resolved_condition(c, resolve)}
                   for c in state.conditions if c.condition_id in need.condition_ids]
     payload = {"question": state.raw_question, "need_id": need.need_id,
         "operation": need.operation, "scope": need.scope, "anchors": [resolve(ref) for ref in need.anchor_spans],

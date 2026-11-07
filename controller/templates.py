@@ -9,6 +9,8 @@ from typing import Iterable, Mapping, Protocol
 
 from .evidence import EvidenceError, evidence_index
 from .schema import ConfigFingerprint, EvidenceBlock, EvidenceKey, EvidenceSpan, Message, QueryContext
+from .serialization import to_jsonable
+from .source_prompt import BODY_START
 
 
 SYSTEM_PROMPT = (
@@ -66,12 +68,14 @@ class RenderedPrompt:
     text: str
     input_ids: tuple[int, ...]
     input_hash: str
+    offsets: tuple[tuple[int, int], ...] | None = None
 
 
 class Template(Protocol):
     fingerprint: ConfigFingerprint
-    def render(self, messages: tuple[Message, ...]) -> RenderedPrompt: ...
-    def render_many(self, conversations: tuple[tuple[Message, ...], ...]) -> tuple[RenderedPrompt, ...]: ...
+    def render(self, messages: tuple[Message, ...], *, with_offsets: bool = False) -> RenderedPrompt: ...
+    def render_many(self, conversations: tuple[tuple[Message, ...], ...], *,
+                    with_offsets: bool = False) -> tuple[RenderedPrompt, ...]: ...
 
 
 class ByteTokenizer:
@@ -91,18 +95,20 @@ class ByteTemplate:
         self.tokenizer = ByteTokenizer()
         self.fingerprint = ConfigFingerprint(namespace_hash=namespace_hash)
 
-    def render(self, messages: tuple[Message, ...]) -> RenderedPrompt:
+    def render(self, messages: tuple[Message, ...], *, with_offsets=False) -> RenderedPrompt:
         for message in messages:
             if message.role not in {"system", "user", "assistant"}:
                 raise ValueError("unsupported chat role")
         text = "".join(f"<|{m.role}|>\n{m.content}\n<|end|>\n" for m in messages)
         text += "<|assistant|>\n"
         ids = self.tokenizer.encode(text)
-        return RenderedPrompt(text, ids, token_hash(ids))
+        offsets = (tuple((index, index+1) for index, char in enumerate(text) for _ in char.encode("utf-8"))
+                   if with_offsets else None)
+        return RenderedPrompt(text, ids, token_hash(ids), offsets)
 
-    def render_many(self, conversations: tuple[tuple[Message, ...], ...]) -> tuple[RenderedPrompt, ...]:
-        # Calling render preserves custom templates that override it.
-        return tuple(self.render(messages) for messages in conversations)
+    def render_many(self, conversations: tuple[tuple[Message, ...], ...], *, with_offsets=False) -> tuple[RenderedPrompt, ...]:
+        return tuple(self.render(messages, with_offsets=True) if with_offsets else self.render(messages)
+                     for messages in conversations)
 
 
 def _batch_boundary(backend: dict, split_special_tokens: bool) -> str | None:
@@ -168,17 +174,21 @@ class HuggingFaceTemplate:
         kwargs = dict(add_generation_prompt=True, enable_thinking=self.enable_thinking)
         return self.tokenizer.apply_chat_template(chat, tokenize=False, **kwargs)
 
-    def render(self, messages: tuple[Message, ...]) -> RenderedPrompt:
+    def render(self, messages: tuple[Message, ...], *, with_offsets=False) -> RenderedPrompt:
         text = self._render_text(messages)
         # The chat template includes its special tokens. Tokenize that exact
         # rendered text once, without inserting another BOS/EOS sequence.
-        ids = tuple(self.tokenizer.encode(text, add_special_tokens=False))
-        return RenderedPrompt(text, ids, token_hash(ids))
+        encoded = self.tokenizer(text, add_special_tokens=False, return_offsets_mapping=with_offsets,
+                                 return_attention_mask=False, return_token_type_ids=False)
+        ids = tuple(encoded["input_ids"])
+        offsets = tuple(encoded["offset_mapping"]) if with_offsets else None
+        return RenderedPrompt(text, ids, token_hash(ids), offsets)
 
-    def render_many(self, conversations: tuple[tuple[Message, ...], ...]) -> tuple[RenderedPrompt, ...]:
+    def render_many(self, conversations: tuple[tuple[Message, ...], ...], *, with_offsets=False) -> tuple[RenderedPrompt, ...]:
         """Render full prompts and reuse only proven AddedToken-delimited segments."""
         if type(self).render is not HuggingFaceTemplate.render:
-            return tuple(self.render(messages) for messages in conversations)
+            return tuple(self.render(messages, with_offsets=True) if with_offsets else self.render(messages)
+                         for messages in conversations)
         texts = tuple(self._render_text(messages) for messages in conversations)
         if not texts:
             return ()
@@ -188,13 +198,26 @@ class HuggingFaceTemplate:
             chunks = [([part[0]] if part[0] else []) + [marker + text for text in part[1:]] for part in parts]
             unique = tuple(dict.fromkeys(chunk for conversation in chunks for chunk in conversation))
             encoded = self.tokenizer(list(unique), add_special_tokens=False, return_attention_mask=False,
-                                     return_token_type_ids=False)["input_ids"]
-            by_text = dict(zip(unique, encoded))
+                                     return_token_type_ids=False, return_offsets_mapping=with_offsets)
+            by_text = dict(zip(unique, encoded["input_ids"]))
             ids = [[token for chunk in conversation for token in by_text[chunk]] for conversation in chunks]
+            offsets = [None]*len(texts)
+            if with_offsets:
+                offset_by_text = dict(zip(unique, encoded["offset_mapping"]))
+                offsets = []
+                for conversation in chunks:
+                    cursor, shifted = 0, []
+                    for chunk in conversation:
+                        shifted.extend((cursor+start, cursor+end) for start, end in offset_by_text[chunk])
+                        cursor += len(chunk)
+                    offsets.append(tuple(shifted))
         else:
-            ids = self.tokenizer(list(texts), add_special_tokens=False, return_attention_mask=False,
-                                 return_token_type_ids=False)["input_ids"]
-        return tuple(RenderedPrompt(text, tuple(tokens), token_hash(tokens)) for text, tokens in zip(texts, ids))
+            encoded = self.tokenizer(list(texts), add_special_tokens=False, return_attention_mask=False,
+                                     return_token_type_ids=False, return_offsets_mapping=with_offsets)
+            ids = encoded["input_ids"]
+            offsets = [tuple(row) for row in encoded["offset_mapping"]] if with_offsets else [None]*len(texts)
+        return tuple(RenderedPrompt(text, tuple(tokens), token_hash(tokens), offsets_row)
+                     for text, tokens, offsets_row in zip(texts, ids, offsets, strict=True))
 
 
 TemplateAdapter = ByteTemplate
@@ -404,6 +427,13 @@ def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSp
     occupied: dict[int, list[tuple[int, int]]] = {}
     roots = {(span.reference_id, span.message_index, span.start, span.end): span
              for span in spans if span.body_reference_id is None}
+
+    def declaration(span):
+        index, start, end = span.source_declaration
+        if index != span.message_index or not 0 <= start < end <= len(messages[index].content):
+            raise EvidenceError("original source declaration is outside its message")
+        return json.loads(messages[index].content[start:end])
+
     for span in spans:
         block = archive.get(span.key)
         if block is None or not 0 <= span.message_index < len(messages):
@@ -422,10 +452,17 @@ def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSp
             raise EvidenceError("evidence provenance mismatch")
         if ref_map.get(span.reference_id) != span.key:
             raise EvidenceError("evidence reference mapping mismatch")
+        source = declaration(span) if span.source_declaration is not None else None
+        if source is not None and not any((item["source_key"], item["start"], item["end"]) ==
+                (to_jsonable(span.key), span.source_start, span.source_end) for item in source["source_spans"]):
+            raise EvidenceError("original source declaration differs from its coordinates")
         if span.body_reference_id is None:
             if span.alias_declaration is not None:
                 raise EvidenceError("alias declaration requires a physical body reference")
-            if not message.content[:span.start].endswith(_evidence_header(block, span.reference_id)):
+            header_matches = (message.content[span.source_declaration[2]:span.start] == BODY_START
+                if source is not None else
+                message.content[:span.start].endswith(_evidence_header(block, span.reference_id)))
+            if not header_matches:
                 raise EvidenceError("evidence identity/provenance header missing from prompt")
             for start, end in occupied.get(span.message_index, ()):
                 if span.start < end and start < span.end:
@@ -435,13 +472,17 @@ def verify_evidence_spans(messages: tuple[Message, ...], spans: tuple[EvidenceSp
             owner = roots.get((span.body_reference_id, span.message_index, span.start, span.end))
             if owner is None or (owner.message_index, owner.start, owner.end) != (span.message_index, span.start, span.end):
                 raise EvidenceError("evidence alias requires the referenced complete physical body")
-            if span.alias_declaration is None:
-                raise EvidenceError("evidence alias declaration missing")
-            index, start, end = span.alias_declaration
-            if (not 0 <= index < len(messages) or messages[index].role != "user"
-                    or not 0 <= start < end <= len(messages[index].content)
-                    or messages[index].content[start:end] != _evidence_alias(block, span.reference_id, span.body_reference_id)):
-                raise EvidenceError("evidence alias identity/provenance declaration mismatch")
+            if source is not None:
+                if source.get("body_source_unit", source["source_unit"]) != declaration(owner)["source_unit"]:
+                    raise EvidenceError("original source alias differs from its physical body")
+            else:
+                if span.alias_declaration is None:
+                    raise EvidenceError("evidence alias declaration missing")
+                index, start, end = span.alias_declaration
+                if (not 0 <= index < len(messages) or messages[index].role != "user"
+                        or not 0 <= start < end <= len(messages[index].content)
+                        or messages[index].content[start:end] != _evidence_alias(block, span.reference_id, span.body_reference_id)):
+                    raise EvidenceError("evidence alias identity/provenance declaration mismatch")
         if not message.content[span.end:].startswith("\n</evidence_body>\n"):
             raise EvidenceError("evidence body delimiter missing from prompt")
         visible.add(span.key)

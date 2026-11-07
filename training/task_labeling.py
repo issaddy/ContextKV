@@ -211,7 +211,8 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
                 messages = tuple(message for old in history for message in (
                     OnlineMessage("user", old.user_text), OnlineMessage("assistant", old.assistant_text)))
                 turn = OnlineTurn(conversation_id, row["task_id"], row["turn"], row["snapshot_id"], row["question"], messages, (), "P3")
-                state = await run_retrieval_worker(interpreter.interpret, turn, memory)
+                interpretation = await run_retrieval_worker(interpreter.interpret_result, turn, memory)
+                state = interpretation.state
                 if "source_scope" in row:
                     state = replace(state, source_scope=tuple(decode(EvidenceKey, key) for key in row["source_scope"]))
                 verification = await run_retrieval_worker(verify_grounding, row, state, memory, client,
@@ -230,10 +231,10 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
                         rejected.write(json.dumps({"task_id": row["task_id"], "invocation_id": invocation,
                             "task_state": to_jsonable(state), **verification}, ensure_ascii=False)+"\n")
                     continue
-                record = {**row, **verification, "prediction": to_jsonable(interpreter.last_prediction),
+                record = {**row, **verification, "prediction": to_jsonable(interpretation.model.prediction),
                     "task_catalogue": task_source_catalogue(memory),
-                    "task_state": to_jsonable(state), "teacher_metrics": interpreter.last_metrics,
-                    "teacher_raw_output": interpreter.model.last_raw_output,
+                    "task_state": to_jsonable(state), "teacher_metrics": interpretation.metrics,
+                    "teacher_raw_output": interpretation.model.raw_output,
                     "label_origin": "frozen_qwen3_32b_actual_history_teacher",
                     "script_history_review_status": "reviewed"}
                 sink.write(json.dumps(record, ensure_ascii=False)+"\n")

@@ -115,7 +115,9 @@ async def test_failed_read_lowers_utility_keeps_raw_q_missing_and_paid_signed_co
     mixed = fit_effective([no_qa_pair, rescored_pair])
     assert mixed.provenance["scorer_identity"] == new_scorer
     assert mixed.provenance["training_records"] == 2
-    assert mixed.cost_provenance["training_samples"] == 4
+    assert mixed.cost_provenance["training_samples"] == 1
+    assert mixed.provenance["measured_paid_cost_outcomes"] == {"committed_QA": 1, "confirmed_terminal_no_QA": 3}
+    assert not mixed.supports_semantic_kind("read_once", costs=True)
     from training.collect_plan_gains import served_branch
     adapted = served_branch(rescored_run, semantic_kind="direct_answer", plan_id=rescored_run["plan_id"],
         metric="plan_gain_quality", normalization={"scale": 1, "offset": 0, "protocol_source": "fixture"},

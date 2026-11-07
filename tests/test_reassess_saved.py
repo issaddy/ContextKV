@@ -20,7 +20,8 @@ def test_declared_queue_keeps_failed_absent_tasks_and_all_paid_costs():
     rows = [saved("answer"), saved("failure", status="failed", score=None)]
     result = declared_queue_summary(rows, {"primary_metric": "RB_llm"},
                                     ["answer", "failure", "not_started"])
-    assert result["queue_primary_score"] == pytest.approx(.8/3)
+    assert result["queue_primary_score"] is None
+    assert result["queue_score_bounds"] == pytest.approx([.8/3, 1.8/3])
     assert result["scored_subset_primary"] == .8
     assert result["completion_rate"] == pytest.approx(1/3)
     assert result["missing_execution_task_ids"] == ["not_started"]

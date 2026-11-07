@@ -6,7 +6,7 @@ from hashlib import sha256
 import json
 
 from .claim_graph import ClaimGraph
-from .context_budget import _covers, bind_answer_window, text_ref_sources, text_ref_text
+from .context_budget import _covers, bind_answer_window, resolved_condition, text_ref_sources, text_ref_text
 from .context_schema import (NumericReadScope, ReadResult, ReadTask,
                              ReadingOutcome)
 from .serialization import dumps, to_jsonable
@@ -25,10 +25,7 @@ def _resolve(ref, state, history):
 
 
 def condition_view(condition, state, history):
-    return {"relation": condition.relation_type,
-            "key": _resolve(condition.key_span, state, history) if condition.key_span else "",
-            "values": [_resolve(ref, state, history) for ref in condition.value_spans],
-            "predicate": _resolve(condition.predicate_span, state, history) if condition.predicate_span else ""}
+    return resolved_condition(condition, lambda ref: _resolve(ref, state, history))
 
 
 def _condition_view(identity, state, history):
@@ -108,7 +105,8 @@ def read_contracts(memory):
     if not memory.committed_readings:
         return ()
     blocks = memory.source_index._blocks
-    scope = None if memory.source_scope is None else set(memory.source_scope)
+    scope = (None if memory.source_scope is None else
+             {block.key for block in memory.source_index.source_fetch(memory.source_scope)})
     contracts = []
     for attempt_id, outcome in memory.committed_readings:
         for record in outcome.steps:
@@ -131,11 +129,12 @@ def _applicable(contract, state, memory):
     source = memory.source_index
     if not _valid_units(contract.units, source._blocks):
         return False
-    scope = set(state.source_scope)
-    return all(span.source_key in source._blocks and (not scope or span.source_key in scope)
-               and source._applicable(span.source_key, state, memory)
-               for span in (*tuple(span for unit in contract.units for span in unit.source_spans),
-                            *tuple(span for atom in contract.atoms for span in atom.source_spans)))
+    keys = {span.source_key for item in (*contract.units, *contract.atoms) for span in item.source_spans}
+    scope = state.effective_source_scope
+    if scope is None:
+        roots = state.source_scope or tuple(key for key in keys if key in source._blocks)
+        scope = tuple(block.key for block in source.applicable_scope(roots, state, memory).source_blocks)
+    return keys.issubset(scope)
 
 
 def build_reuse_seed(plan, bindings, contracts, memory):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .serialization import to_jsonable
+from .source_prompt import SOURCE_ENCODING
 from .source_windows import SOURCE_WINDOW_LINES, SOURCE_WINDOW_TOKENS
 
 
@@ -11,6 +12,9 @@ def input_protocol(fingerprint):
         "semantics": "merged_source_windows_actual_coverage_reused_facts_compiled_choice",
         "read_output_reservation": "per_line_fact_wire_and_body_tokens",
         "answer_layout": "sources_before_history_for_source_first",
+        "shared_source_protocol": SOURCE_ENCODING,
+        "task_projection": "resolved_conditions_and_effective_version_scope_v1",
+        "completion_admission": "mandatory_future_work_v1",
         "source_windows": {"tokens": SOURCE_WINDOW_TOKENS, "nonempty_lines": SOURCE_WINDOW_LINES},
         "source_identity": "content_hash_and_original_coordinates",
         "reader_fingerprint": to_jsonable(fingerprint),

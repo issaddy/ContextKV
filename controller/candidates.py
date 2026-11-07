@@ -34,6 +34,12 @@ PLAN_SYSTEM_PROMPT = (
 )
 
 
+def render_candidate_prompts(template, messages, *, with_offsets=False):
+    distinct = tuple(dict.fromkeys(messages))
+    rendered = dict(zip(distinct, template.render_many(distinct, with_offsets=with_offsets), strict=True))
+    return tuple(rendered[conversation] for conversation in messages)
+
+
 def build_candidates(snapshot: SessionSnapshot, query: str,
                      retrieved: Iterable[EvidenceBlock], policy: EvidencePolicy | None = None,
                      template: Template | None = None, *,
@@ -41,6 +47,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
                      query_context: QueryContext | None = None,
                      measure_evidence_redundancy: bool = False,
                      source_orderer=None,
+                     bind_geometry=None,
                      ) -> tuple[PromptCandidate, ...]:
     """No archive/seen/epoch/template state is changed by candidate generation."""
     started = time.perf_counter()
@@ -128,7 +135,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         candidate_id = f"{snapshot.session_id}:{snapshot.version}:{action}"
         if layout != "existing":
             candidate_id += ":contextpilot"
-        return PromptCandidate(
+        compiled = PromptCandidate(
             candidate_id=candidate_id, action=action,
             snapshot_version=snapshot.version, messages=messages, input_ids=rendered.input_ids,
             input_hash=rendered.input_hash, visible_blocks=visible, required_blocks=required_keys,
@@ -138,6 +145,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
             corpus_snapshot_id=snapshot.corpus_snapshot_id, fingerprint=template.fingerprint,
             evidence_resolution=resolution, evidence_body_tokens=total_body_tokens,
             nonrequired_evidence_body_tokens=nonrequired_body_tokens, layout_id=layout)
+        return bind_geometry(compiled, rendered) if bind_geometry is not None else compiled
 
     def user_variants(blocks, *, message_index, reused=(), visible_bodies=None):
         blocks = tuple(blocks)
@@ -195,17 +203,20 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         messages = rebuild_answer_messages(system_message, history, source_text, task_text, source_first=True)
         prompts.append((layout, "REBUILD", messages, spans, frozenset(span.key for span in spans), None))
     conversations = tuple(prompt[2] for prompt in prompts)
-    rendered = template.render_many(conversations)
+    rendered = render_candidate_prompts(template, conversations, with_offsets=bind_geometry is not None)
     return tuple(candidate(*prompt, output) for prompt, output in zip(prompts, rendered, strict=True))
 
 
 def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, outcome=None,
-                            layouts=None, actions=("REBUILD", "APPEND"), source_orderer=None):
+                            layouts=None, actions=("REBUILD", "APPEND"), source_orderer=None,
+                            bind_geometry=None, representation="existing"):
     """Prepare actual prompts and their shared candidate finalizer."""
     from .context_budget import (append_legal, measure_window, task_instruction,
                                  working_history_messages, evidence_interval_covered, _covers)
+    from .context_schema import AnswerPlan
     from .schema import EvidenceSpan
     from .serialization import dumps
+    from .source_prompt import SOURCE_SYSTEM, source_envelope, source_evidence_spans, stable_source_payload
     from .templates import _evidence_alias, _evidence_header
 
     policy = policy or CandidatePolicy()
@@ -214,8 +225,12 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
     state, selected = plan.task_state, plan.selected_set
     claims = () if outcome is None else outcome.claims
     answer_plan = plan.answer_plan if outcome is None else outcome.plan.answer_plan
+    if representation == "raw":
+        claims, answer_plan = (), AnswerPlan(())
     blocks = {b.key: b for b in (*snapshot.archive, *selected.source_blocks)}
-    units = selected.selected_units
+    units = () if representation in {"facts", "reduced"} else selected.selected_units
+    retrieval_rank = {unit.unit_id: index for index, unit in enumerate(
+        sorted(units, key=lambda unit: -unit.retrieval_score), 1)}
     required = frozenset(span.source_key for unit in units for span in unit.source_spans)
     source_keys = {*blocks, *(span.source_key for unit in units for span in unit.source_spans),
                    *(span.source_key for point in answer_plan.points for span in point.source_spans)}
@@ -224,13 +239,16 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
     history = working_history_messages(state, snapshot)
     history_id = dumps(state.working_history)
     system_text = plan.answer_system_prompt if policy.system_prompt is None else policy.system_prompt
-    system = Message("system", PLAN_SYSTEM_PROMPT if system_text is None else system_text)
+    answer_instructions = PLAN_SYSTEM_PROMPT if system_text is None else system_text
+    source_first = plan.read_layout == "source_first"
+    system = SOURCE_SYSTEM if source_first else Message("system", answer_instructions)
     previous = (() if snapshot.execution is None else
                 snapshot.execution.last_input_ids + snapshot.execution.last_output_ids)
     final_claim_ids = {cid for point in answer_plan.points for cid in point.claim_ids}
     from .claim_graph import ClaimGraph
     graph = ClaimGraph(claims)
     conclusion_keys = frozenset(span.source_key for point in answer_plan.points for span in point.source_spans)
+    required |= conclusion_keys
     conclusions = graph.conclusion_table(answer_plan, references)
     if outcome is not None:
         conclusions["open_needs"] = outcome.open_needs
@@ -238,11 +256,21 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
         f"original sources = {len({span.source_key for span in graph.source_spans(claim.claim_id)})}."
         for claim in claims if claim.claim_id in final_claim_ids and claim.kind == "derived"
         and claim.operation in {"count", "sum"})
-    context = ("\nCurrent task and active conditions:\n" + task_instruction(state, snapshot)
-        + "\nReading conclusions (shared scopes and complete source paths):\n" + dumps(conclusions)
-        + "\nComputed results for the complete reading scope:\n" + computed)
+    context = "\nCurrent task and active conditions:\n" + task_instruction(state, snapshot)
+    if representation != "raw":
+        context += ("\nReading conclusions (shared scopes and complete source paths):\n" + dumps(conclusions)
+            + "\nComputed results for the complete reading scope:\n" + computed)
 
     def compile_sources(ordered, message_index):
+        if source_first:
+            sources, _ = stable_source_payload(ordered)
+            content, bodies = source_envelope(sources)
+            spans = source_evidence_spans(ordered, bodies, blocks, message_index, by_key)
+            citations = tuple((by_key[span.source_key], span.start, span.end, location["source_span"],
+                               retrieval_rank[unit.unit_id])
+                for unit, source in zip(ordered, sources, strict=True)
+                for span, location in zip(unit.source_spans, source["source_spans"], strict=True))
+            return content, spans, citations
         content, spans, physical = "", [], {}
         for unit in ordered:
             for source in unit.source_spans:
@@ -271,11 +299,20 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
                 spans.append(EvidenceSpan(block.key, message_index, start, end,
                     block.source_uri, block.provenance, ref,
                     source_start=source.start, source_end=source.end))
-        return content, tuple(spans)
+        citations = tuple((by_key[span.source_key], span.start, span.end)
+                          for unit in ordered for span in unit.source_spans)
+        return content, tuple(spans), citations
 
-    def compile_question(ordered, reused=frozenset()):
-        content = "\nSource spans [citation_id,start,end]: " + dumps(tuple(
-            (by_key[span.source_key], span.start, span.end) for unit in ordered for span in unit.source_spans))
+    def compile_question(ordered, citations, reused=frozenset()):
+        if source_first:
+            content = ("\nAnswer instructions:\n" + answer_instructions
+                       + "\nSource spans [citation_id,start,end,source_span,retrieval_rank]: " + dumps(citations))
+        else:
+            content = "\nSource spans [citation_id,start,end]: " + dumps(citations)
+        if representation == "raw":
+            content += "\nUse the supplied original sources to answer this question."
+        elif representation in {"facts", "reduced"}:
+            content += "\nUse the reading conclusions below and cite their original sources."
         if reused:
             content += "\nPreviously supplied sources: " + ", ".join(by_key[k] for k in sorted(reused))
         content += context
@@ -287,14 +324,16 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
         return content
 
     def compile_rebuild(ordered):
-        source_first = plan.read_layout == "source_first"
-        source_text, spans = compile_sources(ordered, 1 if source_first else len(history)+1)
-        task_text = compile_question(ordered)
+        source_text, spans, citations = compile_sources(ordered, 1 if source_first else len(history)+1)
+        task_text = compile_question(ordered, citations)
         return rebuild_answer_messages(system, history, source_text, task_text, source_first=source_first), spans
+
+    raw_fixed_tokens = (len(template.render(compile_rebuild(())[0]).input_ids)
+                        if representation == "raw" else None)
 
     # Full-scope reading retains every source in the step graph. The final window
     # carries root conclusions and a budgeted set of original supporting units.
-    if plan.coverage_scope == "all_supplied_documents" or outcome is not None:
+    if units and representation != "raw" and (plan.coverage_scope == "all_supplied_documents" or outcome is not None):
         empty, _ = compile_rebuild(())
         fixed_input_tokens = len(template.render(empty).input_ids)
         excerpt_budget = min(plan.budget.body_tokens,
@@ -408,8 +447,8 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
                 execution = snapshot.execution
                 missing = tuple(u for u in ordered if any(not evidence_interval_covered(snapshot, s)
                                                            for s in u.source_spans))
-                source_text, new_spans = compile_sources(missing, len(execution.messages))
-                task_text = compile_question(missing, execution.visible_blocks)
+                source_text, new_spans, citations = compile_sources(missing, len(execution.messages))
+                task_text = compile_question(missing, citations, execution.visible_blocks)
                 current = Message("user", source_text + task_text)
                 variants.append(("APPEND", (*execution.messages, current),
                     (*execution.evidence_spans, *new_spans), visible_originals((*execution.evidence_spans, *new_spans)),
@@ -421,6 +460,8 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
             window = measure_window(template, messages, plan.budget, rendered, history=history)
             if not window.feasible:
                 reason = "context_window_budget"
+            if raw_fixed_tokens is not None and window.input_tokens-raw_fixed_tokens > plan.budget.body_tokens:
+                reason = "original_source_budget"
             if window.history_tokens > plan.budget.history_tokens:
                 reason = "working_history_budget"
             if (action == "APPEND" and (snapshot.must_rebuild or snapshot.force_new_epoch_for_recovery
@@ -434,8 +475,11 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
                     reason = "system_prompt_changed"
                 elif snapshot.execution.history_version != snapshot.raw_history_version:
                     reason = "history_sync_requires_rebuild"
-            candidates.append(PromptCandidate(
-                candidate_id=dumps([plan.plan_id, selected.set_id, history_id, layout, action]),
+            identity = [plan.plan_id, selected.set_id, history_id, layout, action]
+            if representation != "existing":
+                identity.append(representation)
+            compiled = PromptCandidate(
+                candidate_id=dumps(identity),
                 action=action, snapshot_version=snapshot.version, messages=messages,
                 input_ids=rendered.input_ids, input_hash=rendered.input_hash,
                 visible_blocks=visible, required_blocks=required,
@@ -451,18 +495,22 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
                 need_support=selected.need_support,
                 output_budget=plan.budget.output_tokens, predicted_read_ms=plan.predicted_cost_ms,
                 auxiliary_ms=sum(value for _, value in plan.auxiliary_ms),
-                cost_prediction_eligible=plan.cost_prediction_eligible if outcome is None else True))
+                cost_prediction_eligible=plan.cost_prediction_eligible if outcome is None else True,
+                representation=representation)
+            candidates.append(bind_geometry(compiled, rendered) if bind_geometry is not None else compiled)
         return tuple(candidates)
 
     return tuple(prompt[2] for prompt in prompts), finish
 
 
 def build_plan_candidates(snapshot, query, plan, template, *, policy=None, outcome=None,
-                          layouts=None, actions=("REBUILD", "APPEND"), source_orderer=None):
+                          layouts=None, actions=("REBUILD", "APPEND"), source_orderer=None,
+                          bind_geometry=None, representation="existing"):
     """Compile each legal action/layout for one semantic evidence plan."""
     messages, finish = _plan_candidate_builder(snapshot, query, plan, template,
-        policy=policy, outcome=outcome, layouts=layouts, actions=actions, source_orderer=source_orderer)
-    return finish(template.render_many(messages))
+        policy=policy, outcome=outcome, layouts=layouts, actions=actions, source_orderer=source_orderer,
+        bind_geometry=bind_geometry, representation=representation)
+    return finish(render_candidate_prompts(template, messages, with_offsets=bind_geometry is not None))
 
 
 def measure_plan_contexts(snapshot, query, plans, template, *, policy=None):

@@ -35,6 +35,33 @@ def resolve_text(ref, state, snapshot):
         current_turn_id=state.current_turn_id, current_user_text=state.raw_question))
 
 
+def condition_references(condition):
+    return tuple(ref for ref in (condition.key_span, *condition.value_spans, condition.predicate_span)
+                 if ref is not None)
+
+
+def resolved_condition(condition, resolve):
+    return {"relation": condition.relation_type,
+        "key": resolve(condition.key_span) if condition.key_span else "",
+        "values": [resolve(ref) for ref in condition.value_spans],
+        "predicate": resolve(condition.predicate_span) if condition.predicate_span else ""}
+
+
+def resolved_task_view(state, history, *, need_ids=None):
+    sources = text_ref_sources(history, current_turn_id=state.current_turn_id,
+                               current_user_text=state.raw_question)
+    needs = tuple(need for need in state.needs if need_ids is None or need.need_id in need_ids)
+    active = {identity for need in needs for identity in need.condition_ids}
+    conditions = [{"id": condition.condition_id,
+                   **resolved_condition(condition, lambda ref: text_ref_text(ref, sources))}
+                  for condition in state.conditions if condition.condition_id in active]
+    version = to_jsonable(state.version_intent)
+    if state.version_intent.time_refs:
+        version["time_text"] = [text_ref_text(ref, sources) for ref in state.version_intent.time_refs]
+    return {"task_id": state.task_id, "conditions": conditions, "needs": to_jsonable(needs),
+            "version_intent": version}
+
+
 def working_history_messages(state, snapshot):
     return tuple(Message(ref.speaker,
         f"[turn={ref.turn_id} speaker={ref.speaker} chars={ref.start}:{ref.end}]\n"
@@ -42,13 +69,7 @@ def working_history_messages(state, snapshot):
 
 
 def task_instruction(state, snapshot):
-    conditions = [{"id": c.condition_id, "relation": c.relation_type,
-        "values": [resolve_text(ref, state, snapshot) for ref in c.value_spans],
-        "predicate": resolve_text(c.predicate_span, state, snapshot) if c.predicate_span else "",
-        "supersedes": c.supersedes} for c in state.conditions]
-    return json.dumps({"task_id": state.task_id, "conditions": conditions,
-        "needs": to_jsonable(state.needs), "version_intent": to_jsonable(state.version_intent)},
-        ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(resolved_task_view(state, snapshot.raw_history), ensure_ascii=False, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -62,6 +83,83 @@ class WindowCost:
     @property
     def feasible(self):
         return self.input_tokens + self.output_tokens <= self.window_tokens
+
+
+@dataclass(frozen=True)
+class CompletionReserve:
+    """Known current allocation and the minimum registered work after it."""
+    action_input_tokens: int
+    action_output_tokens: int
+    future_input_tokens: int
+    future_output_tokens: int
+    future_steps: int
+
+    @property
+    def input_tokens(self):
+        return self.action_input_tokens + self.future_input_tokens
+
+    @property
+    def output_tokens(self):
+        return self.action_output_tokens + self.future_output_tokens
+
+    @property
+    def steps(self):
+        return 1 + self.future_steps
+
+
+def completion_reserve(plan, results, task, candidate=None, *, read_all=False):
+    """Reserve the final envelope and already declared mandatory continuation.
+
+    Only the current compiled input is exact. Future READs contribute source
+    work and their output limits, before later facts and prompts exist.
+    """
+    from .reading import numeric_selection_step_id
+
+    current_input = len(candidate.input_ids) if candidate is not None else 0
+    current_output = candidate.output_budget if candidate is not None else 0
+    if task is not None and task.kind == "ANSWER":
+        return CompletionReserve(current_input, current_output, 0, 0, 0)
+
+    full_scope = plan.coverage_scope == "all_supplied_documents"
+    typed = plan.reading_mode == "typed_reduce"
+    numeric = {need.need_id: need.operation for need in plan.task_state.needs
+               if typed and need.operation in {"count", "sum", "group"}}
+    exhaustive = set(numeric) | {need.need_id for need in plan.task_state.needs
+                                 if need.scope == "all_supplied_documents"}
+    completed = {result.step_id for result in results}
+    reductions = tuple(result.reduction for result in results if result.reduction is not None)
+    completed.update(item.step_id for item in reductions)
+    current_id = task.step_id if task is not None else None
+    outstanding = tuple(step for step in plan.steps if step.step_id not in completed
+                        and step.step_id != current_id)
+    reads = tuple(step for step in outstanding if step.kind == "READ"
+                  and (read_all or full_scope or exhaustive.intersection(step.need_ids)))
+    if full_scope and typed:
+        numeric.update((need.need_id, "union") for need in plan.task_state.needs
+                       if need.operation == "enumerate")
+    required_ops = {*numeric.values(), "numeric_select"} if numeric else set()
+    scheduled = tuple(step for step in outstanding if step.kind == "REDUCE"
+                      and (read_all or step.operation in required_ops))
+    scheduled_ops = {(need, step.operation) for step in (*scheduled, *((task,) if task is not None else ()))
+                     if step.kind == "REDUCE" for need in step.need_ids}
+    finished_ops = {(need, item.operation) for item in reductions for need in item.need_ids}
+    selectors = sum(numeric_selection_step_id(plan, need) not in completed | {None}
+                    and (need, "numeric_select") not in scheduled_ops for need in numeric)
+    aggregates = sum((need, operation) not in scheduled_ops and
+                     ((need, operation) not in finished_ops
+                      or any(need in step.need_ids for step in reads)
+                      or (task is not None and task.kind == "READ" and need in task.need_ids))
+                     for need, operation in numeric.items())
+    units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+    body_tokens = sum(sum({units[key].text: units[key].body_tokens
+                           for key in step.input_unit_ids}.values()) for step in reads)
+    cpu_ops = {"union", "count", "sum", "group"} if typed else set()
+    output_tokens = (sum(step.output_budget for step in (*reads, *scheduled)
+                         if step.operation not in cpu_ops or step.kind == "READ")
+                     + selectors*plan.budget.read_output_tokens)
+    return CompletionReserve(current_input, current_output,
+        plan.answer_allocation.fixed_input_tokens+body_tokens, plan.budget.output_tokens+output_tokens,
+        1+len(reads)+len(scheduled)+selectors+aggregates)
 
 
 def measure_window(template, messages, budget, rendered, *, history=(), source_text=""):
@@ -208,6 +306,12 @@ def direct_answer_reason(state, candidate, *, require_complete_evidence=True):
     report gaps in a selected-source scope. Explicit full-source scopes and
     statistical views keep their completion requirements in either mode.
     """
+    return next(iter(answer_evidence_gaps(state, candidate,
+        require_complete_evidence=require_complete_evidence).values()), None)
+
+
+def answer_evidence_gaps(state, candidate=None, *, require_complete_evidence=True):
+    """Return unresolved Needs for the facts alone or the actual ANSWER input."""
     from .reading import numeric_selection_step_id
 
     plan = state.plan
@@ -215,6 +319,8 @@ def direct_answer_reason(state, candidate, *, require_complete_evidence=True):
     tasks = {task.step_id: task for task in plan.steps}
     points = {point.need_id: point for point in plan.answer_plan.points}
     results = tuple(state.results)
+    raw = candidate is not None and candidate.representation == "raw"
+    gaps = {}
     for need in plan.task_state.needs:
         full_scope = plan.coverage_scope == "all_supplied_documents" or need.scope == "all_supplied_documents"
         numeric = need.operation in {"count", "sum", "group"}
@@ -227,8 +333,9 @@ def direct_answer_reason(state, candidate, *, require_complete_evidence=True):
         facts_complete = bool(required) and completed_source_coverage(plan, read_results, required)
         point = points.get(need.need_id)
         if numeric:
-            if not facts_complete:
-                return "numeric_fact_scope_incomplete"
+            if not facts_complete or raw:
+                gaps[need.need_id] = "numeric_fact_scope_incomplete"
+                continue
             selector_id = numeric_selection_step_id(plan, need.need_id)
             selection = next((result.reduction for result in reversed(results) if result.reduction is not None
                 and result.reduction.step_id == selector_id), None) if selector_id is not None else None
@@ -236,13 +343,14 @@ def direct_answer_reason(state, candidate, *, require_complete_evidence=True):
                 {claim.claim_id for result in read_results for claim in result.claims
                  if claim.kind == "extract" and claim.serves(need.need_id)})
             if selector_id is not None and selection is None:
-                return "numeric_selection_incomplete"
+                gaps[need.need_id] = "numeric_selection_incomplete"
+                continue
             if not any(result.reduction is not None and need.need_id in result.reduction.need_ids
                     and result.reduction.operation == need.operation
                     and set(result.reduction.basis_claim_ids) == basis
                     and point is not None and set(result.reduction.frontier_claim_ids) <= set(point.claim_ids)
                     for result in results):
-                return "numeric_operation_incomplete"
+                gaps[need.need_id] = "numeric_operation_incomplete"
             continue
         supported = any(need.need_id in result.support for result in read_results)
         reduced = any(result.reduction is not None and need.need_id in result.reduction.need_ids
@@ -250,14 +358,15 @@ def direct_answer_reason(state, candidate, *, require_complete_evidence=True):
         conclusion_complete = (point is not None and bool(point.claim_ids) and (supported or reduced)
             and not any(gap.need_id == need.need_id for gap in state.open_needs)
             and (not full_scope or facts_complete))
-        if conclusion_complete:
+        if conclusion_complete and not raw:
             continue
         support = next((item for item in plan.selected_set.need_support if item.need_id == need.need_id), None)
         source_sufficient = full_scope or (support.disposition == "complete" if support is not None
                                          else plan.selected_set.disposition == "answer")
-        if not source_sufficient or not required or not actual_source_coverage(candidate, required):
-            return "answer_evidence_incomplete"
-    return None
+        if (not source_sufficient or not required or candidate is None
+                or not actual_source_coverage(candidate, required)):
+            gaps[need.need_id] = "answer_evidence_incomplete"
+    return gaps
 
 
 def evidence_interval_covered(snapshot, source):

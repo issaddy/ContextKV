@@ -1,7 +1,7 @@
 """Task interpretation from model-selected spans in committed, actual QA."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -10,10 +10,10 @@ import time
 import numpy as np
 
 from controller.context_schema import Condition, Need, RetrievalState, TaskState, TextRef, VersionIntent
-from controller.context_budget import text_ref_sources, text_ref_text
+from controller.context_budget import condition_references, text_ref_sources, text_ref_text
 from controller.schema import OnlineTurn
 from controller.serialization import decode
-from controller.fact_reuse import ReadReuse, read_contracts
+from controller.fact_reuse import ReadContract, ReadReuse, read_contracts
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,21 @@ class TaskPrediction:
     resume_task_id: str = ""
     source_scope: tuple = ()
     read_reuse: tuple[ReadReuse, ...] = ()
+
+
+@dataclass(frozen=True)
+class TaskModelResult:
+    prediction: TaskPrediction
+    metrics: dict = field(default_factory=dict)
+    read_contracts: tuple[ReadContract, ...] = ()
+    raw_output: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskInterpretation:
+    state: TaskState
+    model: TaskModelResult
+    metrics: dict
 
 
 def history_text(ref: TextRef, memory: RetrievalState, turn: OnlineTurn | None = None) -> str:
@@ -65,8 +80,8 @@ def validate_task_refs(prediction, turn, memory):
                     for name in ("anchor_spans", "subject_refs") for offset, ref in enumerate(getattr(need, name)))
     refs.extend((f"version_intent.time_refs[{index}]", ref)
                 for index, ref in enumerate(prediction.version_intent.time_refs))
-    for field, ref in refs:
-        text_ref_text(ref, sources, field=field)
+    for name, ref in refs:
+        text_ref_text(ref, sources, field=name)
 
 
 TASK_MAX_OBJECTS = 8
@@ -140,24 +155,24 @@ def decode_indexed_task_refs(value, windows):
     return value
 
 
-def active_ref_text(ref, memory, turn, excluded):
-    text = history_text(ref, memory, turn)
-    intervals = sorted((max(ref.start, old.start)-ref.start, min(ref.end, old.end)-ref.start)
+def active_ref_parts(ref, excluded):
+    intervals = sorted((max(ref.start, old.start), min(ref.end, old.end))
                        for old in excluded if ref.turn_id == old.turn_id and ref.speaker == old.speaker
                        and ref.start < old.end and old.start < ref.end)
-    pieces, cursor = [], 0
+    cursor = ref.start
     for start, end in intervals:
-        pieces.append(text[cursor:start])
+        if cursor < start:
+            yield replace(ref, start=cursor, end=start)
         cursor = max(cursor, end)
-    pieces.append(text[cursor:])
-    return "".join(pieces)
+    if cursor < ref.end:
+        yield replace(ref, start=cursor)
 
 
 def retired_condition_refs(prior_states, task_id, active_conditions):
     active_ids = {condition.condition_id for condition in active_conditions}
     return tuple(ref for state in prior_states if state.task_id == task_id
         for condition in state.conditions if condition.condition_id not in active_ids
-        for ref in (*condition.value_spans, condition.key_span, condition.predicate_span) if ref is not None)
+        for ref in condition_references(condition))
 
 
 class HistoryIndex:
@@ -213,7 +228,7 @@ class HistoryIndex:
             for need in active.needs:
                 active_refs.update((*need.anchor_spans, *need.subject_refs))
             for condition in active.conditions:
-                active_refs.update(condition.value_spans)
+                active_refs.update(condition_references(condition))
         active = [w for w in ranked if any(
             w.ref.turn_id == ref.turn_id and w.ref.speaker == ref.speaker
             and w.ref.start < ref.end and ref.start < w.ref.end for ref in active_refs)]
@@ -283,9 +298,11 @@ def task_graph_history(prior_task_states, relation, resume_task_id):
 class TaskInterpreter:
     def __init__(self, model, history_index: HistoryIndex):
         self.model, self.history_index = model, history_index
-        self.last_metrics = {}
 
     def interpret(self, turn: OnlineTurn, memory: RetrievalState) -> TaskState:
+        return self.interpret_result(turn, memory).state
+
+    def interpret_result(self, turn: OnlineTurn, memory: RetrievalState) -> TaskInterpretation:
         started = time.perf_counter()
         windows = self.history_index.select(turn.query, memory, current_turn_id=turn.turn)
         source = memory.source_index
@@ -299,36 +316,35 @@ class TaskInterpreter:
             elif hasattr(source, "observed_source_scope"):
                 view.observed_source_scope = source.observed_source_scope
             memory = replace(memory, source_index=view)
-        prediction = self.model.predict(turn, windows, memory)
+        predict_result = getattr(self.model, "predict_result", None)
+        result = (predict_result(turn, windows, memory) if predict_result is not None else
+                  TaskModelResult(self.model.predict(turn, windows, memory)))
+        prediction = result.prediction
         if memory.source_index is not None and hasattr(memory.source_index, "observed_source_scope"):
             prediction = replace(prediction, source_scope=memory.source_index.observed_source_scope)
-        self.last_prediction = prediction
-        self.last_read_contracts = self.model.last_read_contracts if isinstance(self.model, TeacherTaskModel) else ()
         validate_task_refs(prediction, turn, memory)
         base = task_base_state(memory.prior_task_states, prediction.relation, prediction.resume_task_id)
         conditions = apply_condition_updates(base.conditions if base else (), prediction.conditions)
         needs = prediction.needs or (base.needs if base else ())
         needs = apply_need_condition_updates(needs, prediction.conditions)
-        spans = tuple(dict.fromkeys((*prediction.history_spans,
-            *(ref for need in needs for ref in (*need.anchor_spans, *need.subject_refs)),
-            *(ref for condition in conditions for ref in condition.value_spans))))
-        working = tuple(ref for ref in spans if ref.turn_id != turn.turn)
         excluded = retired_condition_refs(memory.prior_task_states, base.task_id if base else None, conditions)
-        parts = [turn.query]
-        parts.extend(active_ref_text(ref, memory, turn, excluded)
-                     for need in needs for ref in (*need.anchor_spans, *need.subject_refs))
-        parts.extend(history_text(ref, memory, turn) for condition in conditions for ref in condition.value_spans)
-        parts.extend(history_text(ref, memory, turn) for ref in prediction.version_intent.time_refs)
+        spans = tuple(dict.fromkeys((
+            *(piece for ref in (*prediction.history_spans,
+                *(anchor for need in needs for anchor in (*need.anchor_spans, *need.subject_refs)))
+                for piece in active_ref_parts(ref, excluded)),
+            *(ref for condition in conditions for ref in condition_references(condition)),
+            *prediction.version_intent.time_refs)))
+        working = tuple(ref for ref in spans if ref.turn_id != turn.turn)
+        parts = [turn.query, *(history_text(ref, memory, turn) for ref in spans)]
         if prediction.version_intent.temporal_relation in {"before", "after"}:
             parts.append(prediction.version_intent.temporal_relation.upper())
-        parts.extend(active_ref_text(ref, memory, turn, excluded) for ref in working)
         state = TaskState(base.task_id if base else turn.task_id, turn.query, working, conditions, needs,
                           prediction.version_intent, prediction.source_scope, turn.turn,
                           "\n".join(dict.fromkeys(parts)))
-        self.last_metrics = {"task_model_ms": (time.perf_counter()-started)*1000,
-                             "history_windows": len(windows), "history_tokens": sum(w.tokens for w in windows),
-                             "model_metrics": getattr(self.model, "last_metrics", {})}
-        return state
+        metrics = {"task_model_ms": (time.perf_counter()-started)*1000,
+                   "history_windows": len(windows), "history_tokens": sum(w.tokens for w in windows),
+                   "model_metrics": result.metrics}
+        return TaskInterpretation(state, replace(result, prediction=prediction), metrics)
 
 
 def interpret(turn: OnlineTurn, memory: RetrievalState) -> TaskState:
@@ -720,13 +736,14 @@ class TeacherTaskModel:
                 "transport": self.client.manifest}
 
     def predict(self, turn, windows, memory):
+        return self.predict_result(turn, windows, memory).prediction
+
+    def predict_result(self, turn, windows, memory):
         body, ref_windows, latest, aliases, contracts = budget_teacher_input(self.client, turn, windows, memory)
-        self.last_read_contracts = contracts
         read_aliases = {f"r{index}": contract for index, contract in enumerate(contracts)}
         task_alias, condition_alias, need_alias, version_alias, family_alias = aliases
         current_conditions = {f"c{i}": f"{turn.task_id}:c{i}" for i in range(TASK_MAX_OBJECTS)}
         current_needs = {f"n{i}": f"{turn.task_id}:n{i}" for i in range(TASK_MAX_OBJECTS)}
-        self.last_text_ref_windows = ref_windows
         observed_turns = {window["turn_id"] for window in ref_windows.values()}
         observed_turns.update(turn_id for state in latest.values() for turn_id in state.version_intent.source_turns)
         version_turns = tuple(row.turn_id for row in memory.committed_history if row.turn_id in observed_turns)
@@ -828,7 +845,6 @@ class TeacherTaskModel:
                 branches.append({"type": "object", "properties": branch, "required": list(branch),
                                  "additionalProperties": False})
         schema = {"type": "object", "anyOf": branches, "$defs": definitions}
-        self.last_response_schema = schema
         messages = teacher_messages(body)
         completion = self.client.complete(messages, response_format={"type": "json_schema", "json_schema": {
                 "name": "contextkv_task_spans", "strict": True, "schema": schema}})
@@ -845,15 +861,17 @@ class TeacherTaskModel:
                     "read_contract_origins": {alias: {"attempt_id": contract.attempt_id,
                         "step_id": contract.step_id} for alias, contract in read_aliases.items()},
                     "raw_response": completion.raw_response}, ensure_ascii=False)+"\n")
+        metrics = {"input_tokens": completion.input_tokens, "usage": completion.usage,
+                   "elapsed_ms": completion.elapsed_ms}
+        if completion.status != "input_over_budget":
+            usage = completion.usage or {}
+            self.usage["tasks"] += 1
+            self.usage["input_tokens"] += usage.get("prompt_tokens", completion.input_tokens
+                if completion.status == "completed" else 0) or 0
+            self.usage["output_tokens"] += usage.get("completion_tokens") or 0
+            self.usage["elapsed_ms"] += completion.elapsed_ms
         if completion.status != "completed" or completion.finish_reason != "stop":
             raise RuntimeError(f"task interpretation unfinished: {completion.status}/{completion.finish_reason}")
-        self.last_metrics = {"input_tokens": completion.input_tokens, "usage": completion.usage,
-                             "elapsed_ms": completion.elapsed_ms}
-        self.usage["tasks"] += 1
-        self.usage["input_tokens"] += completion.input_tokens
-        self.usage["output_tokens"] += completion.usage["completion_tokens"]
-        self.usage["elapsed_ms"] += completion.elapsed_ms
-        self.last_raw_output = completion.text
         value = decode_indexed_task_refs(json.loads(completion.text), ref_windows)
         removals = value.pop("condition_removals")
         value["conditions"] = [{"condition_id": key, **value["conditions"][key]}
@@ -885,4 +903,4 @@ class TeacherTaskModel:
             for alias in value["version_intent"]["resolved_version_ids"]]
         value["version_intent"]["document_families"] = [{alias: identity for identity, alias in family_alias.items()}[alias]
             for alias in value["version_intent"]["document_families"]]
-        return decode(TaskPrediction, value)
+        return TaskModelResult(decode(TaskPrediction, value), metrics, contracts, completion.text)

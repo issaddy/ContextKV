@@ -6,11 +6,14 @@ import json
 import time
 
 from .action_proposals import claim_predecessor_steps
+from .admission import quote_observation, quote_realization
 from .claim_graph import ClaimGraph, claim_frontier
+from .context_budget import bind_answer_window, completion_reserve
 from .context_schema import ReadResult, ReadingOutcome, ReductionState, StepRecord
 from .engine_client import EngineError
 from .reading import (advance_read_plan, build_read_plan, output_schema, parse_read_result,
                       step_generation_kind, step_messages, unresolved_needs)
+from .request_compiler import read_task_hash
 from .reduction import reduce_claims
 from .schema import ContextEpoch
 from .serialization import to_jsonable
@@ -199,8 +202,23 @@ def require_online_tokens(limit, spent, reserve, phase):
         raise ReadingBudgetExceeded(f"{phase}: online token allocation {limit} cannot admit {reserve} after {spent} spent")
 
 
+def require_complete_time(limit, arrived, phase):
+    if limit is not None and arrived is not None and (time.monotonic()-arrived)*1000 >= limit:
+        raise ReadingBudgetExceeded(f"{phase}: complete-time allocation {limit} ms exhausted")
+
+
+def require_completion(plan, results, spent, steps_paid, task, candidate=None, *, read_all=False, arrived=None):
+    phase = task.kind if task is not None else "GAP"
+    reserve = completion_reserve(plan, results, task, candidate, read_all=read_all)
+    if steps_paid+reserve.steps > plan.budget.max_steps:
+        raise ReadingBudgetExceeded(f"{phase}: remaining required steps exceed the complete request allocation")
+    require_online_tokens(plan.budget.max_total_tokens, spent, reserve.input_tokens+reserve.output_tokens, phase)
+    require_complete_time(plan.budget.max_complete_ms, arrived, phase)
+    return reserve
+
+
 def step_token_spend(stage, record):
-    if stage == "SUBMITTED":
+    if stage in {"SUBMITTED", "FAILED"}:
         return None
     if stage in {"RESULT_READY", "COMPLETE"}:
         return len(record.input_ids)+len(record.output_ids)
@@ -271,8 +289,6 @@ class ReadingExecutor:
         completed.update(result.reduction.step_id for result in state.results if result.reduction is not None)
         if not set(task.predecessor_step_ids) <= completed:
             raise ValueError("the selected logical step has unfinished predecessors")
-        if len(state.steps)+2 > plan.budget.max_steps:
-            raise ReadingBudgetExceeded("selected step leaves no terminal ANSWER allocation")
         self.store.save_context_plan(attempt_id, plan)
         units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
         if candidate is not None and task.kind == "READ":
@@ -286,35 +302,42 @@ class ReadingExecutor:
             reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
         cpu = (plan.reading_mode == "typed_reduce" and task.kind == "REDUCE"
                and task.operation in {"union", "count", "sum", "group"})
+        persisted = self.store.execution_step(attempt_id, task.step_id)
+        reserve = None
+        if persisted is None or persisted[0] in {"PLANNED", "PREPARED"}:
+            usage = 0 if initial_auxiliary_usage is None else auxiliary_tokens(initial_auxiliary_usage)
+            gap = auxiliary_tokens(state.auxiliary_usage)
+            spent = (usage+gap+sum(len(row.input_ids)+len(row.output_ids) for row in state.steps)
+                     if usage is not None and gap is not None else None)
+            reserve = require_completion(plan, state.results, spent, len(state.steps), task, candidate,
+                                         arrived=self.request_arrived)
         if cpu:
             tick = time.monotonic()
             native_workload = await self.engine.metrics()
-            claim = aggregate_numeric_view(task, selected_claims, plan, state.results)
+            try:
+                claim = aggregate_numeric_view(task, selected_claims, plan, state.results)
+            except ValueError as exc:
+                self.store.save_execution_step(StepRecord(attempt_id, task.step_id, task,
+                    metrics={"cpu_reduce_ms": (time.monotonic()-tick)*1000,
+                             "completion_reserve": to_jsonable(reserve), "error": str(exc)}), "FAILED")
+                raise
             ended = time.monotonic()
             result = ReadResult(task.step_id, (claim,), elapsed_ms=(ended-tick)*1000)
             record = StepRecord(attempt_id, task.step_id, task, result=result,
                                 metrics={"cpu_reduce_ms": result.elapsed_ms,
+                                         "completion_reserve": to_jsonable(reserve),
                                          "native_workload": native_workload,
                                          "phase_window": {"start": tick, "end": ended,
                                              "clock": "client_monotonic", "scope": "step_wall"},
                                          "request_arrived_monotonic": self.request_arrived})
         else:
-            rendered = self.template.render(step_messages(plan, task, selected_units, selected_claims, snapshot))
-            if candidate is None or (candidate.input_ids, candidate.output_budget) != (
-                    rendered.input_ids, task.output_budget):
-                raise ValueError("selected quote input/output differs from the executed logical step")
-            if candidate.messages != step_messages(plan, task, selected_units, selected_claims, snapshot):
-                raise ValueError("selected READ schema differs from its bound unit order")
+            if candidate is None or candidate.read_task_hash != read_task_hash(task):
+                raise ValueError("compiled READ or REDUCE differs from the selected logical step")
             if candidate.action != "REBUILD":
                 raise ValueError("internal reading steps use independent native REBUILD epochs")
-            usage = (0 if initial_auxiliary_usage is None else auxiliary_tokens(initial_auxiliary_usage))
-            gap = auxiliary_tokens(state.auxiliary_usage)
-            tokens = (usage+gap+sum(len(row.input_ids)+len(row.output_ids) for row in state.steps)
-                      if usage is not None and gap is not None else None)
-            require_online_tokens(plan.budget.max_total_tokens, tokens,
-                len(rendered.input_ids)+task.output_budget, task.kind)
             record = await self._generate_step(attempt_id, snapshot, plan, task, selected_units, selected_claims,
-                results=state.results, candidate=candidate, rendered=rendered, quote=quote, quote_ms=quote_ms)
+                results=state.results, candidate=candidate, quote=quote, quote_ms=quote_ms,
+                reserve=reserve)
         if cpu:
             record = completed_reduction_record(record, task, selected_claims, state.results)
             self.store.save_execution_step(record, "COMPLETE")
@@ -342,11 +365,11 @@ class ReadingExecutor:
         return ReadingOutcome(plan, results, (*state.steps, record), tuple(graph.claims.values()),
             tuple(dict.fromkeys(coverage)), unresolved, auxiliary_usage=state.auxiliary_usage)
 
-    async def _observe_prefix(self, plan, task, units, rendered, record):
+    async def _observe_prefix(self, plan, task, units, record):
         if self.observe_prefix is None or task.kind != "READ" or plan.read_layout != "source_first":
             return record
         started = time.monotonic()
-        receipt = await self.observe_prefix(plan, task, units, rendered, record)
+        receipt = await self.observe_prefix(plan, task, units, record)
         elapsed_ms = (time.monotonic()-started)*1000
         observe_control = getattr(self.observe_prefix, "observe_control", None)
         if observe_control is not None:
@@ -367,23 +390,20 @@ class ReadingExecutor:
 
     async def finish_completed_step(self, plan, record):
         """Finish prefix observation and retirement using the paid, saved input."""
-        rendered = self.template.render(record.input_messages)
-        if rendered.input_ids != record.input_ids:
-            raise ValueError("persisted completed step differs from the current template")
         by_id = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
         units = tuple(by_id[identity] for identity in record.task.input_unit_ids)
-        record = await self._observe_prefix(plan, record.task, units, rendered, record)
+        record = await self._observe_prefix(plan, record.task, units, record)
         await self._retire_step(record)
         return record
 
     async def _generate_step(self, attempt_id, snapshot, plan, task, units, claims, *, results=(),
-                             candidate, rendered, text_callback=False, quote=None, quote_ms=None):
+                             candidate, text_callback=False, quote=None, quote_ms=None, reserve=None):
         step_started = time.monotonic()
         identity = f"{attempt_id}:{task.step_id}"
         messages = candidate.messages
-        if len(rendered.input_ids) > task.input_budget:
+        if len(candidate.input_ids) > task.input_budget:
             raise ReadingBudgetExceeded(f"{task.step_id} input exceeds {task.input_budget}")
-        if len(rendered.input_ids) + task.output_budget > plan.budget.window_tokens:
+        if len(candidate.input_ids) + task.output_budget > plan.budget.window_tokens:
             raise ReadingBudgetExceeded(f"{task.step_id} exceeds the model window")
         persisted = self.store.execution_step(attempt_id, task.step_id)
         generation = None
@@ -391,12 +411,13 @@ class ReadingExecutor:
             info = await self.engine.info()
             epoch = ContextEpoch(snapshot.session_id, 0, f"step-{identity}", 0,
                                  reason=task.kind.lower(), engine_restart_id=info.engine_restart_id)
-            record = StepRecord(attempt_id, task.step_id, task, epoch, messages, rendered.input_ids)
+            record = StepRecord(attempt_id, task.step_id, task, epoch, messages, candidate.input_ids)
             record = replace(record, metrics={"generation_kind":
                 step_generation_kind(task.kind, task.operation, plan.reading_mode),
                 "external_dialogue": text_callback,
                 "read_protocol_version": (None if text_callback else
                     task.output_schema["properties"]["format_version"]["const"]),
+                "completion_reserve": to_jsonable(reserve),
                 "request_arrived_monotonic": self.request_arrived,
                 "phase_started_monotonic": step_started})
             self.store.save_execution_step(record, "PLANNED")
@@ -404,7 +425,7 @@ class ReadingExecutor:
         else:
             stage, record, generation = persisted
             epoch = record.engine_epoch
-            if record.task != task or record.input_ids != rendered.input_ids:
+            if record.task != task or record.input_ids != candidate.input_ids:
                 raise ValueError("persisted step input differs from the reading plan")
             if stage == "COMPLETE":
                 return record if text_callback else await self.finish_completed_step(plan, record)
@@ -421,12 +442,21 @@ class ReadingExecutor:
             self.store.save_execution_step(record, "PREPARED")
             stage = "PREPARED"
         if stage == "SUBMITTED":
-            status = await self.engine.status(engine_session_id=epoch.engine_session_id,
-                attempt_id=identity, expected_restart_id=epoch.engine_restart_id)
-            if status.result is None:
-                if status.terminal and status.state in {"FAILED", "CANCELLED", "REJECTED", "RETIRED"}:
-                    raise EngineError("READ_STEP_FAILED", status.state)
+            try:
+                status = await self.engine.status(engine_session_id=epoch.engine_session_id,
+                    attempt_id=identity, expected_restart_id=epoch.engine_restart_id)
+            except EngineError as exc:
+                if exc.code == "STALE_RESTART":
+                    self.store.save_execution_step(replace(record, metrics={
+                        **record.metrics, "terminal_state": exc.code}), "FAILED")
+                raise
+            if status.result is None and (not status.terminal or status.result_pending):
                 raise EngineError("READ_STEP_OUTCOME_PENDING", status.state)
+            if status.result is None:
+                self.store.save_execution_step(replace(record, receipt=status.receipt, metrics={
+                    **record.metrics, "terminal_state": status.state, "output_tokens": None}), "FAILED")
+                raise EngineError("READ_STEP_RESULT_UNAVAILABLE" if status.state == "COMPLETED"
+                                  else "READ_STEP_FAILED", status.state)
             generation = status.result
         elif stage == "PREPARED":
             if quote is None:
@@ -436,8 +466,8 @@ class ReadingExecutor:
             if quote.engine_restart_id != epoch.engine_restart_id:
                 raise EngineError("READ_STEP_QUOTE_RESTART")
             matching = tuple(row for row in quote.quotes if row.candidate_id == candidate.candidate_id)
-            if (len(matching) != 1 or matching[0].input_hash != rendered.input_hash
-                    or matching[0].input_len != len(rendered.input_ids)
+            if (len(matching) != 1 or matching[0].input_hash != candidate.input_hash
+                    or matching[0].input_len != len(candidate.input_ids)
                     or quote.fingerprint != candidate.fingerprint):
                 raise EngineError("READ_STEP_QUOTE_INPUT_MISMATCH")
             record = replace(record, metrics={**record.metrics,
@@ -448,11 +478,12 @@ class ReadingExecutor:
             self.store.save_execution_step(record, "PREPARED")
             submitted = time.monotonic()
             record = replace(record, metrics={**record.metrics,
+                "native_quote_work": quote_observation(quote, matching[0], submitted),
                 "submitted_from_arrival_ms": (submitted-self.request_arrived)*1000
                     if self.request_arrived is not None else None})
             self.store.save_execution_step(record, "SUBMITTED")
             request = (candidate_request(candidate, task.output_budget) if text_callback
-                       else step_request(rendered, task))
+                       else step_request(candidate, task))
             generation = await self.engine.generate(**request,
                 session_id=epoch.engine_session_id, expected_generation=epoch.session_generation,
                 expected_restart_id=epoch.engine_restart_id, attempt_id=identity,
@@ -475,27 +506,28 @@ class ReadingExecutor:
             record = replace(record, output_ids=generation.output_ids,
                 receipt=generation.receipt, metrics=metrics,
                 result=ReadResult(task.step_id, raw_output=generation.text,
-                    input_tokens=len(rendered.input_ids), output_tokens=len(generation.output_ids)))
+                    input_tokens=len(candidate.input_ids), output_tokens=len(generation.output_ids)))
             self.store.save_execution_step(record, "RESULT_READY", generation)
             receipt = record.receipt
             if (receipt.rid, receipt.attempt_id, receipt.engine_session_id,
                     receipt.session_generation, receipt.engine_restart_id, receipt.input_hash) != (
                     identity, identity, epoch.engine_session_id, epoch.session_generation,
-                    epoch.engine_restart_id, rendered.input_hash):
+                    epoch.engine_restart_id, candidate.input_hash):
                 raise EngineError("READ_STEP_RECEIPT_MISMATCH")
             if not generation.generation_complete or not receipt.generation_complete:
                 raise EngineError("READ_STEP_INCOMPLETE")
+            native_work = quote_realization(record.metrics.get("native_quote_work"), receipt)
             observed = self.request_compiler.observe_executed(candidate, receipt,
                 cache_config_hash=record.metrics["cache_config_hash"],
                 engine_restart_id=record.engine_epoch.engine_restart_id)
-            record = replace(record, metrics={**record.metrics, "source_view": observed})
+            record = replace(record, metrics={**record.metrics, "source_view": observed, "native_quote_work": native_work})
             self.store.save_execution_step(record, "RESULT_READY", generation)
             if not text_callback and generation.finish_reason in {"length", "max_tokens"}:
                 raise EngineError("READ_STEP_OUTPUT_TRUNCATED", task.step_id)
             parse_started = time.monotonic()
             result = (record.result if text_callback else
                 parse_read_result(task, generation.text, units, claims,
-                    elapsed_ms=generation.elapsed_ms or 0, input_tokens=len(rendered.input_ids),
+                    elapsed_ms=generation.elapsed_ms or 0, input_tokens=len(candidate.input_ids),
                     output_tokens=len(generation.output_ids)))
             record = replace(record, result=result,
                              metrics={**record.metrics, "parse_ms": (time.monotonic()-parse_started)*1000})
@@ -515,7 +547,7 @@ class ReadingExecutor:
                                 else claim_frontier(claims, result.claims))
                     record = completed_reduction_record(record, task, claims, results, frontier=frontier)
             self.store.save_execution_step(record, "COMPLETE")
-            record = await self._observe_prefix(plan, task, units, rendered, record)
+            record = await self._observe_prefix(plan, task, units, record)
             retire_started = time.monotonic()
             await self._retire_step(record)
             step_ended = time.monotonic()
@@ -533,13 +565,12 @@ class ReadingExecutor:
     async def execute_reads(self, attempt_id, snapshot, plan, *, initial_auxiliary_usage=None,
                             initial_outcome=None):
         from .evidence_planner import _passages, close_dependencies
-        if self.observe_state is not None and self.store.execution_steps(attempt_id):
-            raise ValueError("fixed state observation requires a newly executed attempt, not saved post-step state")
         if (plan.budget.max_passages is not None
                 and len(_passages(plan.selected_set.selected_units)) > plan.budget.max_passages):
             raise ReadingBudgetExceeded("initial plan exceeds the original passage allocation")
         seed = seed_reading_outcome(self.store, attempt_id, plan, initial_outcome)
-        plan = seed.plan
+        plan = (bind_answer_window(seed.plan, self.template, snapshot)
+                if seed.plan.answer_allocation is None else seed.plan)
         self.store.save_context_plan(attempt_id, plan)
         units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
         graph, results, records, coverage = ClaimGraph(seed.claims), list(seed.results), [], list(seed.coverage)
@@ -555,7 +586,13 @@ class ReadingExecutor:
         initial_tokens = (0 if initial_auxiliary_usage is None else auxiliary_tokens(initial_auxiliary_usage))
         reader_spend = {record.step_id: step_token_spend(stage, record)
                        for stage, record in self.store.execution_steps_with_stage(attempt_id)}
+        recovering = bool(reader_spend)
         started = time.monotonic()
+        arrived = self.request_arrived if self.request_arrived is not None else started
+
+        def paid_steps():
+            gaps = {name.split(":", 2)[1] for name, _ in plan.auxiliary_ms if name.startswith("gap:")}
+            return len(records)+len(gaps)
 
         def refresh_usage():
             nonlocal plan
@@ -617,16 +654,13 @@ class ReadingExecutor:
                 output_schema=output_schema(task, tuple(units[identity] for identity in candidate.read_unit_order),
                     selected_claims, reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
             selected_units = tuple(units[identity] for identity in task.input_unit_ids)
-            rendered = self.template.render(candidate.messages)
-            if len(records) + 1 >= plan.budget.max_steps:
-                raise ReadingBudgetExceeded("reading exhausted the request step allocation")
-            if persisted is None or persisted[0] in {"PLANNED", "PREPARED"}:
-                require_online_tokens(plan.budget.max_total_tokens, refresh_usage(),
-                    len(rendered.input_ids)+task.output_budget, task.kind)
+            reserve = (require_completion(plan, results, refresh_usage(), paid_steps(), task, candidate,
+                                          read_all=True, arrived=arrived)
+                       if persisted is None or persisted[0] in {"PLANNED", "PREPARED"} else None)
             try:
                 record = await self._generate_step(attempt_id, snapshot, plan, task,
-                    selected_units, selected_claims, results=tuple(results), candidate=candidate, rendered=rendered,
-                    quote=quote, quote_ms=quote_ms)
+                    selected_units, selected_claims, results=tuple(results), candidate=candidate,
+                    quote=quote, quote_ms=quote_ms, reserve=reserve)
             finally:
                 saved = self.store.execution_step(attempt_id, task.step_id)
                 if saved is not None:
@@ -653,7 +687,7 @@ class ReadingExecutor:
                 await run_model(child, (), inputs)
 
         async def observe_current():
-            if self.observe_state is not None:
+            if self.observe_state is not None and not recovering:
                 state = ReadingOutcome(plan, tuple(results), tuple(records), tuple(graph.claims.values()),
                     tuple(coverage), unresolved_needs(results), auxiliary_usage=gap_auxiliary_usage)
                 await self.observe_state(state, expanded)
@@ -665,7 +699,8 @@ class ReadingExecutor:
                 open_needs = tuple(need for need in unresolved_needs(results)
                     if (need.need_id, need.missing_relation, need.bound_entities, need.temporal_scope) not in expanded)
                 if open_needs and self.extend_open_needs is not None:
-                    require_online_tokens(plan.budget.max_total_tokens, refresh_usage(), 1, "OpenNeed")
+                    reserve = require_completion(plan, results, refresh_usage(), paid_steps(), None,
+                                                 read_all=True, arrived=arrived)
                     gap_started = time.monotonic()
                     extension_pool = await self.extend_open_needs(plan, open_needs, tuple(graph.claims.values()))
                     gap_elapsed = (time.monotonic()-gap_started)*1000
@@ -690,7 +725,8 @@ class ReadingExecutor:
                     refresh_usage()
                     self.store.save_reading_progress(attempt_id, plan, ReadingProgress(
                         tuple(sorted(expanded)), tuple(blocked_open_needs.values()), gap_auxiliary_usage))
-                    require_online_tokens(plan.budget.max_total_tokens, plan.online_tokens_spent, 1, "OpenNeed result")
+                    require_online_tokens(plan.budget.max_total_tokens, plan.online_tokens_spent,
+                        reserve.input_tokens+reserve.output_tokens, "OpenNeed result")
                     combined = {**{unit.unit_id: unit for unit in new_units}, **units}
                     closure = close_dependencies(tuple(unit.unit_id for unit in new_units
                                                         if unit.unit_id not in units), combined)
@@ -740,7 +776,6 @@ class ReadingExecutor:
                         plan = replace(plan, steps=plan.steps+steps,
                             coverage_units=tuple(dict.fromkeys((*plan.coverage_units, *extension.coverage_units))),
                             selected_set=selected_set)
-                        from .context_budget import bind_answer_window
                         plan = bind_answer_window(replace(plan, answer_allocation=None), self.template,
                             snapshot, preserve_step_ids=tuple(record.step_id for record in records))
                         self.store.save_reading_progress(attempt_id, plan, ReadingProgress(
@@ -753,11 +788,6 @@ class ReadingExecutor:
             for task in ready:
                 if task.step_id in {result.step_id for result in results}:
                     continue
-                if len(records) + 1 >= plan.budget.max_steps:
-                    raise ReadingBudgetExceeded("reading exhausted the request step allocation")
-                if (plan.budget.max_complete_ms is not None
-                        and (time.monotonic()-started)*1000 > plan.budget.max_complete_ms):
-                    raise ReadingBudgetExceeded("reading exhausted the complete-time allocation")
                 selected_units = tuple(units[unit_id] for unit_id in task.input_unit_ids)
                 selected_claims = tuple(graph.claims[claim_id] for claim_id in task.input_claim_ids)
                 persisted = self.store.execution_step(attempt_id, task.step_id)
@@ -776,6 +806,8 @@ class ReadingExecutor:
                     continue
                 if (plan.reading_mode == "typed_reduce" and task.kind == "REDUCE"
                         and task.operation in {"union", "count", "sum", "group"}):
+                    reserve = require_completion(plan, results, refresh_usage(), paid_steps(), task,
+                                                 read_all=True, arrived=arrived)
                     tick = time.monotonic()
                     native_workload = await self.engine.metrics()
                     try:
@@ -783,12 +815,13 @@ class ReadingExecutor:
                     except ValueError as exc:
                         self.store.save_execution_step(StepRecord(attempt_id, task.step_id, task,
                             metrics={"cpu_reduce_ms": (time.monotonic()-tick)*1000,
-                                     "error": str(exc)}), "FAILED")
+                                     "completion_reserve": to_jsonable(reserve), "error": str(exc)}), "FAILED")
                         raise
                     ended = time.monotonic()
                     result = ReadResult(task.step_id, (claim,), elapsed_ms=(ended-tick)*1000)
                     record = StepRecord(attempt_id, task.step_id, task, result=result,
                                         metrics={"cpu_reduce_ms": result.elapsed_ms,
+                                            "completion_reserve": to_jsonable(reserve),
                                             "native_workload": native_workload,
                                             "phase_window": {"start": tick, "end": ended,
                                                 "clock": "client_monotonic", "scope": "step_wall"}})

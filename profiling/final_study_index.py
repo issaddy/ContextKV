@@ -287,6 +287,7 @@ def full_queue_cells(value, path, joint_scope=None):
         return []
     plan_path = root/"capacity-plan.json"
     plan = load(plan_path)
+    plan_identity = identity(plan_path)
     run = load(plan["reader_run"]["path"])
     run.pop("state_dir", None)
     run["engine"].pop("base_url", None)
@@ -328,6 +329,16 @@ def full_queue_cells(value, path, joint_scope=None):
             "resource_scope": resource_identity,
             "workload_sha256": {name: item["sha256"] for name, item in workload.items()},
             "complete_slo_seconds": job["complete_slo_seconds"]}
+        acceptance = {}
+        if plan.get("acceptance") is not None:
+            replicate_scope = plan.get("replicate_id") or (joint_scope["manifest"]["sha256"]
+                if joint_scope is not None else plan_identity["sha256"])
+            acceptance = {"acceptance_protocol": plan["acceptance"], "queue_job": job,
+                "replicate_scope": replicate_scope, "repetition": job["repetition"],
+                "required_experiment_cells": plan["experiment_cells"],
+                "planned_repetitions": sorted({entry["repetition"] for entry in plan["jobs"]
+                    if entry["concurrency"] == row["concurrency"]
+                    and entry["method"] in {plan["acceptance"]["baseline"], plan["acceptance"]["candidate"]}})}
         cells.append({**row, "evaluation_kind": "full_queue_own_P3", "source_file": str(path),
             "generation_dir": job["output"], "comparison_identity": comparison,
             "active_assets": {name: plan["assets"][name] for name, active in (
@@ -338,12 +349,13 @@ def full_queue_cells(value, path, joint_scope=None):
             "device_source_identity": device_source,
             "explicit_joint_scope": {"manifest": joint_scope["manifest"], "frozen_A": joint_scope["frozen_A"]}
                 if joint_scope is not None else None,
-            "capacity_plan": identity(plan_path), "full_workflow_cost": str(root/"capacity-cost.json"),
+            "capacity_plan": plan_identity, "full_workflow_cost": str(root/"capacity-cost.json"),
             "completion_rate": row["completed_qa"]/row["requested_qa"],
             "p95_response_count": row["completed_qa"], "missing_execution_task_ids": missing,
             "failed_task_ids": failed, "unscored_answer_task_ids": unscored,
             "full_queue_delivered": row["completed_qa"] == row["requested_qa"],
-            "latency_scope": "complete request wall time of delivered responses; failed and blocked tasks are absent from P95"})
+            "latency_scope": "complete request wall time of delivered responses; failed and blocked tasks are absent from P95",
+            **acceptance})
     return cells
 
 
@@ -354,6 +366,9 @@ def full_queue_comparisons(cells):
         "B6_contextpilot": ("E0_native", "B6_native", "LlamaIndex_native"),
         "S3_contextpilot": ("E0_native", "B6_native", "S3_native", "B6_contextpilot", "LlamaIndex_native",
                               "S3_contextpilot_no_fact_reuse"),
+        "S3_contextpilot_joint_native": ("S3_contextpilot",),
+        "S3_contextpilot_joint_demand": ("S3_contextpilot_joint_native", "B6_native", "LlamaIndex_native"),
+        "Rule_contextpilot_joint_demand": ("S3_contextpilot_joint_demand",),
         "LlamaIndex_native": (), "S3_contextpilot_no_fact_reuse": (),
         "B6_value": ("B6_native",), "S3_value": ("S3_native", "B6_value")}
     for row in cells:
@@ -494,8 +509,22 @@ def markdown(report):
             f"{delta if delta is not None else '未知'} | "
             f"{format(relative, '.2%') if relative is not None else '未知'} | "
             f"{('是' if quality else '否') if quality is not None else '未知'} |")
-    lines += ["", "P95 相对变化为（候选 / 基线 − 1），负值表示降低；仅在身份一致、完整交付且全部质量已评分时报告。"
-        "质量不低于基线仅比较现有点估计，不代表统计等质量结论；本表不判定同预算、资源收益或研究目标达成。"]
+    lines += ["", "## 预登记的完整队列验收", "",
+        "| 并发 | 配对队列 | 费用与测量完整 | 资源预算 | 质量差及区间 | P95 比率及区间 | 质量验收 | 延迟验收 |",
+        "|---:|---:|---|---|---|---|---|---|"]
+    def point_interval(point, interval):
+        if point is None:
+            return "未知"
+        suffix = f" [{interval[0]:.4f}, {interval[1]:.4f}]" if interval is not None else ""
+        return f"{point:.4f}"+suffix
+
+    for row in report["full_queue_acceptance"]:
+        quality_ci = row["quality_confidence"]
+        lines.append(f"| {row['concurrency']} | {row['paired_queues']}/{row['declared_pair_slots']} | "
+            f"{row['measurement_complete']} | {row['resource_budget_pass']} | "
+            f"{point_interval(row['quality_delta'], quality_ci['interval'] if quality_ci else None)} | "
+            f"{point_interval(row['p95_ratio'], row['p95_ratio_interval'])} | "
+            f"{row['quality_gate']} | {row['latency_gate']} |")
     lines += ["", "## B/C 四格贡献与交互", "",
         "| 并发 | 指标 | B（Native 编译） | B（ContextPilot 编译） | 编译（固定 B） | 编译（收益 B） | 联合 E4−E1 | 交互 |",
         "|---:|---|---:|---:|---:|---:|---:|---:|"]
@@ -532,6 +561,8 @@ def markdown(report):
 
 
 def main(argv=None):
+    from profiling.full_queue_acceptance import evaluate_full_queue
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline-commit", required=True, help="Declared baseline source commit; not inferred from the current checkout")
     parser.add_argument("--gpu-devices", help="Explicit physical device IDs for a requested cost-ledger command")
@@ -582,6 +613,7 @@ def main(argv=None):
         record_summaries=summaries, common_task_comparisons=comparisons,
         paired_C=paired_index, retention_dev=retention_validation(args.retention_model, paired),
         capacity=capacity, capacity_comparisons=capacity_comparisons,
+        full_queue_acceptance=evaluate_full_queue(full_cells),
         factorial_interactions=full_queue_interactions(full_cells), cost_ledgers=ledgers)
     if args.cost_manifest or args.physical:
         command = ["python", "-m", "profiling.study_cost_ledger"]

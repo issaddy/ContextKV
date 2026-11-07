@@ -87,6 +87,7 @@ class EpochStatus:
     terminal: bool = False
     result: GenerationResult | None = None
     receipt: CompletionReceipt | None = None
+    result_pending: bool = False
 
 
 class Engine(Protocol):
@@ -186,7 +187,7 @@ class SGLangEngineClient:
             "candidates": [{"candidate_id": c.candidate_id, "input_ids": list(c.input_ids),
                             "input_hash": c.input_hash, "snapshot_version": c.snapshot_version}
                            for c in candidates]})
-        return decode(CacheQuoteBatch, data)
+        return decode(CacheQuoteBatch, {**data, "client_received_monotonic": time.monotonic()})
 
     def _check_fingerprint(self, fingerprint):
         if fingerprint != self.fingerprint:

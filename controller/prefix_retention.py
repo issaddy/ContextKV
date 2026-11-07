@@ -16,7 +16,7 @@ from controller.serialization import to_jsonable
 
 
 RETENTION_FEATURE_NAMES = ("access_state", "native_residency", "pressure_concurrency")
-TARGET_DEMAND_RULE = "exact_complete_causal_prefix_and_body_ranges_v1"
+TARGET_DEMAND_RULE = "canonical_source_prefix_and_body_ranges_v2"
 MIN_RETENTION_GROUPS = 2
 RETENTION_CONTROL_RULE = "owner_call_only_fixed_decision_once_v1"
 
@@ -50,34 +50,6 @@ def balance_session_rows(rows, components):
         totals[session_group(row, components)] += row.get("sampling_weight", 1.0)
     return [{**row, "sampling_weight": row.get("sampling_weight", 1.0)/totals[session_group(row, components)]}
             for row in rows]
-
-def source_token_ranges(template, rendered, messages, units):
-    """Locate encoded original-source text, excluding shared instructions/catalogue."""
-    from controller.templates import ByteTokenizer, longest_common_prefix
-    if type(template.tokenizer) is ByteTokenizer:
-        offsets = [(index, index+1) for index, char in enumerate(rendered.text) for _ in char.encode("utf-8")]
-    else:
-        encoded = template.tokenizer(rendered.text, add_special_tokens=False, return_offsets_mapping=True)
-        if tuple(encoded["input_ids"]) != tuple(rendered.input_ids):
-            raise ValueError("source-body offset tokenizer differs from actual rendered input")
-        offsets = encoded["offset_mapping"]
-    content = messages[1].content
-    message_start = rendered.text.index(content)
-    ranges, cursor = [], 0
-    for unit in units:
-        literal = json.dumps(unit.text, ensure_ascii=False)
-        marker = '"text":'+literal
-        found = content.index(marker, cursor)
-        first = message_start+found+len('"text":')+1
-        last = first+len(literal)-2
-        tokens = [index for index, (start, end) in enumerate(offsets) if end > first and start < last and end > start]
-        if tokens:
-            ranges.append([tokens[0], tokens[-1]+1])
-        cursor = found+len(marker)
-    system = template.render((messages[0],)).input_ids
-    return ranges, longest_common_prefix(system, rendered.input_ids)
-
-
 
 def source_demand_event_key(prefix_input_ids, evidence_token_ranges, page_size, scope):
     """The next READ demanding this known source-containing causal prefix."""
@@ -136,7 +108,7 @@ class RetentionRequest:
             raise ValueError("retention forecast differs from the executing reader/cache scope")
         # A soft owner protects one complete path in both native tiers. Native
         # receipts, rather than this logical capacity, describe physical replicas.
-        path = frozenset(receipt["gpu_page_ids"]) | frozenset(receipt["host_page_ids"])
+        path = owner_pages(receipt)
         if len(path)*receipt["page_size"] != receipt["boundary_tokens"]:
             raise ValueError("retention needs the full recoverable causal page path")
         return cls(receipt["owner_id"], forecast, path, receipt["page_size"], reuse_event_key)
@@ -236,6 +208,10 @@ def _allocate_retention_greedy(requests, *, protection_budget_tokens,
         cover(selected)
         choices.append(choice)
     return tuple(choices)
+
+
+def owner_pages(receipt):
+    return frozenset(receipt["gpu_page_ids"]) | frozenset(receipt["host_page_ids"])
 
 
 def retainable_prefix(receipt):
@@ -533,14 +509,14 @@ class PrefixObserver:
 
 class PrefixReadObserver:
     """ReadingExecutor callback for source-first, actually executed READs."""
-    def __init__(self, store, engine, template, settings):
-        self.store, self.engine, self.template, self.settings = store, engine, template, settings
+    def __init__(self, store, engine, settings):
+        self.store, self.engine, self.settings = store, engine, settings
         self.owners = PrefixObserver(store, engine)
         self.runtime = self.owners.runtime
         self._allocation_lock = asyncio.Lock()
         self._control_observations = deque(maxlen=32)
-        if settings["mode"] not in {"fixed_ttl", "value"}:
-            raise ValueError("prefix callback requires fixed_ttl or value mode")
+        if settings["mode"] not in {"fixed_ttl", "value", "demand"}:
+            raise ValueError("prefix callback requires fixed_ttl, value or demand mode")
         self.model = None
         if settings["mode"] == "value":
             raw = Path(settings["model_path"]).read_bytes()
@@ -571,6 +547,121 @@ class PrefixReadObserver:
         if "predicted_set_value_before_control_ms" in receipt:
             receipt["predicted_set_net_value_ms"] = receipt["predicted_set_value_before_control_ms"]-elapsed_ms
             receipt["set_value_scope"] = "deduplicated expected savings and residency prices minus this complete observed callback once; not a measured set-intervention benefit"
+
+    async def demand_options(self, plans, state, session_id, batch, *, prefix_status=None):
+        """Allocate short leases for exact, already compiled continuations."""
+        from .admission import quoted_native_work
+        from .context_budget import answer_evidence_gaps
+        from .demand import DemandLease, JointOption, joint_options
+        from .templates import longest_common_prefix
+
+        own = {row.owner_id for row in self.store.prefix_owners(session_id, active_only=True)
+               if row.policy == "joint_demand"}
+        sources = {}
+        for record in state.steps:
+            observed = record.metrics.get("evidence_prefix", {})
+            if (observed.get("demand_observation") and observed["engine_restart_id"] == batch.engine_restart_id
+                    and observed["cache_config_hash"] == batch.cache_config_hash):
+                sources[observed["owner_id"]] = (record, observed)
+        if not own and not sources:
+            return joint_options(plans, state)
+        statuses = prefix_status if prefix_status is not None else await self.runtime.status(batch.engine_restart_id)
+        active = {row["owner_id"]: row for row in statuses["prefixes"]}
+        own &= active.keys()
+        shared = set().union(*(owner_pages(row) for key, row in active.items() if key not in own))
+        quotes = {quote.candidate_id: quote for quote in batch.quotes}
+        limit = self.settings["protection_budget_tokens"]
+        page_size = next(iter(sources.values()))[1]["page_size"] if sources else 0
+        all_need_ids = {need.need_id for need in state.plan.task_state.needs}
+        paths = {owner: owner_pages(inspection) for owner, (_, inspection) in sources.items()}
+
+        def work(candidate):
+            return sum(quoted_native_work(quotes[candidate.candidate_id]))+candidate.output_budget
+
+        matched_paths = {}
+        raw_support = {}
+
+        def matching_sources(compiled):
+            key = compiled.candidate_id
+            if key not in matched_paths:
+                quote = quotes[key]
+                matched_paths[key] = tuple((owner, record.step_id, inspection["boundary_tokens"], paths[owner])
+                    for owner, (record, inspection) in sources.items()
+                    if (boundary := inspection["boundary_tokens"]) <= min(quote.recoverable_prefix_tokens, quote.match_limit)
+                    and len(paths[owner])*page_size == boundary
+                    and longest_common_prefix(compiled.input_ids, record.input_ids[:boundary]) >= boundary)
+            return matched_paths[key]
+
+        def allocate(demand, task, candidate, actions):
+            targets = {}
+            unmet = {need.need_id: need.priority for need in demand.needs}
+            for target, compiled in actions:
+                if compiled is None:
+                    continue
+                priority = sum(unmet.get(need, 0) for need in target.need_ids
+                               if target.step_id in demand.remaining_read_ids)
+                if compiled.representation == "raw":
+                    key = compiled.candidate_id
+                    if key not in raw_support:
+                        raw_support[key] = all_need_ids-answer_evidence_gaps(state, compiled).keys()
+                    priority = sum(unmet[need] for need in (unmet.keys()-set(task.need_ids)) & raw_support[key])
+                if priority and (target.step_id not in targets or work(compiled) < work(targets[target.step_id][0])):
+                    targets[target.step_id] = compiled, priority
+
+            proposed = []
+            for target, (compiled, priority) in targets.items():
+                quote = quotes[compiled.candidate_id]
+                pressure = (work(candidate) if candidate is not None else 0)+work(compiled)-batch.free_gpu_tokens
+                risk = min(max(0, pressure), quote.evictable_gpu_prefix_tokens or 0)
+                if not risk:
+                    continue
+                for owner, step_id, boundary, path in matching_sources(compiled):
+                    exposed = min(boundary, risk)
+                    proposed.append((exposed, owner, step_id, target, path, priority))
+            protected, covered, selected = set(shared), set(), {}
+            exposed_by_target = {}
+            for risk, owner, step, target, path, priority in sorted(proposed,
+                    key=lambda row: (-row[5], -row[0], len(row[4]-shared), row[1], row[3])):
+                exposed_by_target.setdefault(target, risk)
+                if target in covered or len(protected | path)*page_size > limit:
+                    continue
+                protected.update(path)
+                covered.add(target)
+                selected.setdefault(owner, DemandLease(owner, step, target, risk))
+            return JointOption(demand, tuple(lease for key, lease in selected.items() if key not in own),
+                tuple(sorted(own-selected.keys())), len(protected-shared)*page_size,
+                sum(risk for target, risk in exposed_by_target.items() if target not in covered))
+
+        return joint_options(plans, state, allocate=allocate)
+
+    async def apply_demand(self, option, state, session_id, *, batch):
+        started = time.monotonic()
+        steps = {record.step_id: record for record in state.steps}
+        receipts = {}
+        async with self._allocation_lock:
+            for owner in option.release:
+                receipts[owner] = await self.owners.release(owner, reason="joint_remaining_demand")
+            if option.retain:
+                status = await self.runtime.status(batch.engine_restart_id)
+                protected = set().union(*(owner_pages(row) for row in status["prefixes"]))
+            for lease in option.retain:
+                record = steps[lease.source_step_id]
+                observed = record.metrics["evidence_prefix"]
+                next_pages = protected | owner_pages(observed)
+                if len(next_pages)*observed["page_size"] > self.settings["protection_budget_tokens"]:
+                    receipts[lease.owner_id] = {"state": "UNRETAINED", "reason": "shared_protection_budget"}
+                    continue
+                receipts[lease.owner_id] = await self.owners.observe(owner_id=lease.owner_id,
+                    session_id=session_id, attempt_id=record.attempt_id, step_id=record.step_id,
+                    receipt=record.receipt, prefix_input_ids=record.input_ids[:observed["boundary_tokens"]],
+                    sources=tuple(observed["sources"]), ttl_seconds=self.settings["ttl_seconds"],
+                    policy="joint_demand", policy_choice={**asdict(lease), "observed_quote_seq": batch.observed_seq,
+                        "protected_tokens": option.protected_tokens})
+                if receipts[lease.owner_id]["state"] == "RETAINED":
+                    protected.update(owner_pages(receipts[lease.owner_id]))
+        return {"elapsed_ms": (time.monotonic()-started)*1000,
+                "owner_status": {owner: {key: ack[key] for key in ("state", "reason", "boundary_tokens", "expires_at")
+                                         if key in ack} for owner, ack in receipts.items()}}
 
     @staticmethod
     def _features(plan, sources, accesses, now):
@@ -660,23 +751,24 @@ class PrefixReadObserver:
             interpolate("extra_host_seconds_per_page"), right.cache_scope_hash, right.evidence_digest,
             expected_collateral_saved_ms=interpolate("expected_collateral_saved_ms"))
 
-    async def __call__(self, plan, task, units, rendered, record):
+    async def __call__(self, plan, task, units, record):
         # Observation and the resulting owner changes must see one allocation
         # order, including callbacks restoring an already completed READ.
         async with self._allocation_lock:
             control = dict(retain_ms=0.0, release_ms=0.0, retain_calls=0, release_calls=0)
-            result = await self._observe_and_allocate(plan, task, units, rendered, record, control)
+            result = await self._observe_and_allocate(plan, task, units, record, control)
             return {**result, "prefix_owner_control": control}
 
-    async def _observe_and_allocate(self, plan, task, units, rendered, record, control):
-        from controller.reading import stable_prefix_input_ids, stable_prefix_messages, stable_source_payload
+    async def _observe_and_allocate(self, plan, task, units, record, control):
+        from controller.source_prompt import stable_source_payload
         session_id = record.engine_epoch.business_session_id
         info = await self.engine.info()
         if info.engine_restart_id != record.receipt.engine_restart_id:
             await self.owners.reconcile(session_id)
             return dict(state="LOST", reason="engine_restart", engine_restart_id=info.engine_restart_id,
                         source_attempt_id=record.receipt.attempt_id)
-        prefix_ids = stable_prefix_input_ids(self.template, plan, task, units, rendered)
+        source_view = record.metrics["source_view"]
+        prefix_ids = record.input_ids[:source_view["source_prefix_tokens"]]
         source_payload, _ = stable_source_payload(units)
         sources = tuple({"source_unit": source["source_unit"], "source_spans": source["source_spans"],
                          "document_family": source["document_family"], "applicability": to_jsonable(source["applicability"])}
@@ -699,9 +791,11 @@ class PrefixReadObserver:
                 receipt=asdict(record.receipt), inspection=inspected, features=features,
                 clock="client_monotonic_nanoseconds"))
         if access is not None:
+            completed = access["payload"].get("policy_result")
+            if completed is not None and self.settings["mode"] == "demand":
+                return completed
             updated = await self.owners.reconcile(session_id)
             owner = next((row for row in updated if row.owner_id == owner_id), self.store.prefix_owner(owner_id))
-            completed = access["payload"].get("policy_result")
             if completed is not None:
                 return owner.last_status if owner is not None else completed
             accepted = (self.settings["mode"] == "fixed_ttl"
@@ -713,7 +807,7 @@ class PrefixReadObserver:
                     native_attempt_id=record.receipt.attempt_id, result=owner.last_status)
                 return owner.last_status
         prefix_ids = prefix_ids[:inspected["boundary_tokens"]]
-        ranges, _ = source_token_ranges(self.template, rendered, stable_prefix_messages(plan, task, units), units)
+        ranges = source_view["body_token_ranges"]
         event = source_demand_event_key(prefix_ids, ranges, inspected["page_size"], inspected["cache_scope_hash"])
         if event is None:
             result = {**inspected, "state": "UNRETAINED", "reason": "no_complete_source_body_page"}
@@ -722,7 +816,9 @@ class PrefixReadObserver:
             return result
         arguments = dict(owner_id=owner_id, session_id=session_id, attempt_id=record.attempt_id,
             step_id=record.step_id, receipt=record.receipt, prefix_input_ids=prefix_ids, sources=sources)
-        if self.settings["mode"] == "fixed_ttl":
+        if self.settings["mode"] == "demand":
+            result = {**inspected, "demand_observation": retainable_prefix(inspected)}
+        elif self.settings["mode"] == "fixed_ttl":
             choice = dict(qualification_only=True, features=features, reuse_event_key=event)
             started = time.monotonic()
             result = await self.owners.observe(**arguments, ttl_seconds=self.settings["ttl_seconds"],

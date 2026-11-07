@@ -539,7 +539,8 @@ class ContextKVRuntime:
         # Native HTTP output is published back to this owner before delivery.
         # A crash before that publication leaves a terminal receipt only.
         item.update(state="COMPLETED" if complete else "FAILED", terminal=True,
-                    inflight=False, receipt=receipt)
+                    inflight=False, receipt=receipt,
+                    _publish_until=time.monotonic() + self.result_ttl_seconds if complete else 0)
         # Retention follows terminal time: a long-running request must still
         # publish its result after newer admission rejections have accumulated.
         self.attempts.move_to_end(attempt)
@@ -782,8 +783,11 @@ class ContextKVRuntime:
             self._prune_results()
             item = dict(self.attempts.get(attempt, dict(state="UNKNOWN", engine_restart_id=self.restart_id,
                         attempt_id=attempt, inflight=False, terminal=False)))
+            publish_until = item.pop("_publish_until", 0)
             if attempt in self.results:
                 item["result"] = self.results[attempt][2]
+            elif publish_until > time.monotonic():
+                item["result_pending"] = True
             return item
         sid = data.get("engine_session_id")
         operation = self._operation(data.get("operation_id"))
@@ -973,6 +977,7 @@ class ContextKVRuntime:
                       generation_complete=receipt["generation_complete"], **timing)
         size = len(result["text"].encode("utf-8")) + 8*len(result["output_ids"])
         self._drop_result(attempt)
+        item["_publish_until"] = 0
         if size <= self.result_max_bytes:
             self.results[attempt] = (time.monotonic(), size, result)
             self.result_bytes += size

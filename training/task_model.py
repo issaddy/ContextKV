@@ -8,7 +8,7 @@ from pathlib import Path
 import random
 import time
 
-from adapters.history_state import HistoryIndex, TaskPrediction, task_source_catalogue, task_catalogue_candidates, TASK_MAX_OBJECTS, TASK_MAX_REFS, TASK_MAX_VERSION_TURNS, task_graph_history, validate_task_anchors, observed_task_sources, budget_task_catalogue
+from adapters.history_state import HistoryIndex, TaskModelResult, TaskPrediction, task_source_catalogue, task_catalogue_candidates, TASK_MAX_OBJECTS, TASK_MAX_REFS, TASK_MAX_VERSION_TURNS, task_graph_history, validate_task_anchors, observed_task_sources, budget_task_catalogue
 from controller.context_schema import Condition, Need, RetrievalState, TextRef, VersionIntent
 from controller.schema import OnlineTurn, TurnRecord
 from controller.serialization import decode
@@ -496,6 +496,9 @@ class TaskModel:
         self.network.to("cpu")
 
     def predict(self, turn, windows, memory, *, catalogue=None):
+        return self.predict_result(turn, windows, memory, catalogue=catalogue).prediction
+
+    def predict_result(self, turn, windows, memory, *, catalogue=None):
         import torch
         self._synchronize()
         started = time.perf_counter()
@@ -513,9 +516,9 @@ class TaskModel:
         self.usage["input_tokens"] += len(encoded["input_ids"])
         self.usage["elapsed_ms"] += elapsed
         self.usage["task_ms"] += elapsed
-        self.last_metrics = {"input_tokens": len(encoded["input_ids"]), "output_tokens": 0, "elapsed_ms": elapsed,
+        metrics = {"input_tokens": len(encoded["input_ids"]), "output_tokens": 0, "elapsed_ms": elapsed,
             "input_omissions": encoded["input_omissions"]}
-        return prediction
+        return TaskModelResult(prediction, metrics)
 
 
 def train_task(config):

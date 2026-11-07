@@ -36,11 +36,14 @@ class EvidenceSpan:
     alias_declaration: tuple[int, int, int] | None = None
     source_start: int | None = None
     source_end: int | None = None
+    source_declaration: tuple[int, int, int] | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "provenance")
         if self.alias_declaration is not None:
             _tuples(self, "alias_declaration")
+        if self.source_declaration is not None:
+            _tuples(self, "source_declaration")
 
 
 @dataclass(frozen=True)
@@ -176,10 +179,16 @@ class PromptCandidate:
 
     read_unit_order: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
+    read_task_hash: str | None = None
+    source_body_token_ranges: tuple[tuple[int, int], ...] | None = None
+    source_prefix_tokens: int = 0
+    representation: str = "existing"
 
     def __post_init__(self) -> None:
         _tuples(self, "messages", "input_ids", "evidence_spans", "evidence_resolution",
                 "read_unit_order", "source_ids")
+        if self.source_body_token_ranges is not None:
+            _tuples(self, "source_body_token_ranges")
         _references(self)
         object.__setattr__(self, "visible_blocks", frozenset(self.visible_blocks))
         object.__setattr__(self, "required_blocks", frozenset(self.required_blocks))
@@ -272,6 +281,7 @@ class CacheQuoteBatch:
     native_max_new_tokens_clip: int | None = None
     native_running_budget_tokens: float | None = None
     native_running_budget_requests: tuple[NativeRequestSummary, ...] | None = None
+    client_received_monotonic: float | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "quotes")

@@ -22,7 +22,7 @@ from controller.config import create_controller, load_config
 from controller.context_schema import ContextBudget, EvidenceUnit, Need, SourceSpan, TaskState, TextRef, VersionIntent
 from controller.evidence import make_evidence
 from controller.prefix_retention import PrefixRuntimeClient
-from controller.reading import build_read_plan, stable_prefix_input_ids, stable_source_payload
+from controller.reading import build_read_plan, stable_source_payload
 from controller.serialization import to_jsonable
 from controller.templates import longest_common_prefix, token_hash
 
@@ -83,8 +83,7 @@ async def read_proofs(service, plan, steps):
         _, step, _ = service.store.execution_step(step.attempt_id, step.step_id)
         by_id = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
         units = tuple(by_id[identity] for identity in step.task.input_unit_ids)
-        rendered = service.template.render(step.input_messages)
-        prefix = stable_prefix_input_ids(service.template, plan, step.task, units, rendered)
+        prefix = step.input_ids[:step.metrics["source_view"]["source_prefix_tokens"]]
         source_payload, _ = stable_source_payload(units)
         sources = [{"source_unit": item["source_unit"], "source_spans": item["source_spans"]}
                    for item in source_payload]

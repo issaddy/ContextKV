@@ -100,6 +100,7 @@ class TaskState:
     source_scope: tuple[EvidenceKey, ...] = ()
     current_turn_id: int = 0
     query: str = ""
+    effective_source_scope: tuple[EvidenceKey, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -386,3 +387,4 @@ class ReadingOutcome:
     coverage: tuple[tuple[str, str, str, str], ...] = ()
     open_needs: tuple[OpenNeed, ...] = ()
     auxiliary_usage: dict[str, Any] | None = None
+    answer_representation: str = "existing"

@@ -22,11 +22,19 @@ final_evaluation:
   declared_sessions: 77
   concurrency: [1, 4]
   baseline: B6_native
+  acceptance:
+    candidate: S3_contextpilot_joint_demand
+    quality_improvement: 0.05
+    quality_noninferiority: 0.002
+    p95_ratio: 0.85
   factorial:
     E1: {method: B6_native, B: fixed, compilation: native, retention: native}
     E2: {method: S3_native, B: gain, compilation: native, retention: native}
     E3: {method: B6_contextpilot, B: fixed, compilation: contextpilot, retention: native}
     E4: {method: S3_contextpilot, B: gain, compilation: contextpilot, retention: native}
+  joint_context:
+    E5: {method: S3_contextpilot_joint_native, reference: E4, representation: finite, retention: native}
+    E6: {method: S3_contextpilot_joint_demand, reference: E5, representation: finite, retention: demand}
   external_reference:
     method: LlamaIndex_native
     dialogue_mode: llamaindex
@@ -38,8 +46,8 @@ final_evaluation:
     method: S3_contextpilot_no_fact_reuse
     reference: S3_contextpilot
     overrides: {reading: {fact_reuse: false}}
-  optional_methods: [E0_native, B6_value, S3_value]
-  arrival_plan: explicit_fixed_arrivals_required
+  optional_methods: [E0_native, B6_value, S3_value, Rule_contextpilot_joint_demand]
+  arrival_plan: configs/study_dev_arrivals.json
   cost_scope: all_online_and_physical_costs
 resources:
   gpu_capacity_tokens: 32768

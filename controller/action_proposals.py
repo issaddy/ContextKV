@@ -11,6 +11,51 @@ from .reading import numeric_reduction_inputs, numeric_selection_step_id, numeri
 from .serialization import dumps
 
 
+FINITE_ACTION_DOMAIN = "two_reads_shared_outputs_terminal_representations_v1"
+ALTERNATE_ANSWERS = ("raw", "facts", "reduced")
+
+
+def finite_action_domain(output_budgets, output_tokens_per_fact):
+    return {"protocol": FINITE_ACTION_DOMAIN, "read_choices": 2,
+            "output_budgets": sorted(set(output_budgets)), "output_tokens_per_fact": output_tokens_per_fact}
+
+
+def observed_step_outputs(plan, task, template, *, output_budgets, output_tokens_per_fact, finite):
+    from .reading import read_output_reservation
+
+    units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+    dependencies = {identity for unit in units.values() for identity in unit.dependencies}
+    reserved = read_output_reservation(plan.task_state, task,
+        tuple(units[identity] for identity in task.input_unit_ids), template.tokenizer,
+        dependency_ids=dependencies, output_tokens_per_fact=output_tokens_per_fact, reading_mode=plan.reading_mode)
+    outputs = tuple(value for value in output_budgets if reserved <= value <= task.output_budget)
+    return reserved, (min(outputs),) if finite and outputs else outputs
+
+
+def observed_answer_options(state, *, joint, finite):
+    from .context_budget import answer_evidence_gaps
+
+    options = {"layouts": ("existing",), "actions": ("REBUILD",)} if finite else {}
+    if joint:
+        representations = ["hybrid"]
+        if not answer_evidence_gaps(state):
+            roots = {identity for point in state.plan.answer_plan.points for identity in point.claim_ids}
+            derived = any(claim.claim_id in roots and claim.kind == "derived" for claim in state.claims)
+            representations.append("reduced" if derived else "facts")
+        if not any(need.operation in {"count", "sum", "group"} for need in state.plan.task_state.needs):
+            representations.append("raw")
+        options["representations"] = tuple(representations)
+    return options
+
+
+def eligible_observed_answers(state, candidates):
+    from .context_budget import answer_evidence_gaps
+    from .request_compiler import unique_answer_inputs
+
+    return unique_answer_inputs(tuple(candidate for candidate in candidates
+        if candidate.representation not in ALTERNATE_ANSWERS or not answer_evidence_gaps(state, candidate)))
+
+
 def gap_key(need):
     return need.need_id, need.missing_relation, need.bound_entities, need.temporal_scope
 
@@ -118,8 +163,9 @@ def observed_reduction_task(frozen):
 
 
 def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint,
-                                gap_request=None, answer_system_prompt=None, include_gap_step=False):
-    """Register at most one ready READ, one current-basis REDUCE and one GAP."""
+                                gap_request=None, answer_system_prompt=None, include_gap_step=False,
+                                read_choices=1):
+    """Register a bounded set of ready READs, one current-basis REDUCE and one GAP."""
     base = bind_answer_window(frozen.plan, template, snapshot, answer_system_prompt,
                              preserve_step_ids=tuple(record.step_id for record in frozen.steps))
     result_ids = {result.step_id for result in frozen.results}
@@ -131,16 +177,24 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
     completed = {result.step_id for result in frozen.results}
     completed.update(result.reduction.step_id for result in frozen.results if result.reduction is not None)
     branches = []
+    unmet = tuple(need.need_id for need in base.task_state.needs
+                  if not any(claim.serves(need.need_id) for claim in frozen.claims))
 
-    def add(kind, tasks):
-        plan = replace(base, plan_id=base.plan_id+":observed:"+identity+":"+kind, steps=(*historic, *tasks))
-        branches.append(complete_plan(plan, (), semantic_kind=kind, reader_checkpoint=reader_checkpoint))
+    def add(kind, tasks, suffix=""):
+        plan = replace(base, plan_id=base.plan_id+":observed:"+identity+":"+kind+suffix, steps=(*historic, *tasks))
+        branches.append(complete_plan(plan, (), semantic_kind=kind, reader_checkpoint=reader_checkpoint,
+                                      unmet_answer_points=unmet))
 
     add("direct_answer", ())
     ready = tuple(task for task in base.steps if task.kind == "READ" and task.step_id not in completed
                   and set(task.predecessor_step_ids) <= completed)
-    if ready:
-        add("read_once", (bind_read_parents(ready[0], frozen),))
+    if read_choices > 1:
+        from .demand import DemandState
+        demand = DemandState.from_outcome(frozen)
+        ready = tuple(sorted(ready, key=lambda task: -sum(need.priority for need in demand.needs
+                                                          if need.need_id in task.need_ids)))
+    for index, task in enumerate(ready[:read_choices]):
+        add("read_once", (bind_read_parents(task, frozen),), ":"+task.step_id if index else "")
     reduction = observed_reduction_task(replace(frozen, plan=base))
     if reduction is not None:
         if reduction.operation not in {"union", "count", "sum", "group"}:

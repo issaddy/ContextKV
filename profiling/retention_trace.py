@@ -27,15 +27,15 @@ from controller.config import create_controller, create_model_template, load_con
 from controller.context_schema import ContextBudget, ContextPlan, EvidenceClaim, EvidenceSet, Need, ReadTask, TaskState, TextRef
 from controller.engine_client import EngineError, SGLangEngineClient
 from controller.prefix_retention import (EmpiricalRetentionModel, PrefixObserver, PrefixReadObserver, PrefixRuntimeClient, TARGET_DEMAND_RULE,
-    RETENTION_FEATURE_NAMES, RETENTION_CONTROL_RULE, MIN_RETENTION_GROUPS, source_token_ranges, source_demand_event_key)
-from controller.reading import (build_read_plan, parse_read_result, stable_prefix_input_ids,
-                                stable_prefix_messages, stable_source_payload, step_messages)
+    RETENTION_FEATURE_NAMES, RETENTION_CONTROL_RULE, MIN_RETENTION_GROUPS, source_demand_event_key)
+from controller.reading import (build_read_plan, parse_read_result, stable_prefix_messages,
+                                stable_source_payload, step_messages)
 from controller.reduction import reduce_claims
 from controller.sampling import bound_recipe, request_sampling
 from controller.schema import ConfigFingerprint, PromptCandidate, SessionSnapshot, TurnRecord
 from controller.serialization import decode, to_jsonable
 from controller.session_store import SessionStore, load_record
-from controller.templates import candidate_request, step_request, token_hash
+from controller.templates import candidate_request, longest_common_prefix, step_request, token_hash
 from engine_patches.contextkv_runtime import executed_prefix_hashes
 from profiling.retention_capture_cost import CaptureRunAccounting, load_resident_provider
 
@@ -185,10 +185,12 @@ def annotated_generation(plan, step, template):
     if step.task.kind == "READ":
         by_id = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
         units = tuple(by_id[identity] for identity in step.task.input_unit_ids)
-        if step.input_messages[:2] != stable_prefix_messages(plan, step.task, units):
+        if step.input_messages[:2] != stable_prefix_messages(units):
             raise ValueError("source READ is not the current canonical source_first prefix; recapture it natively")
-        prefix = stable_prefix_input_ids(template, plan, step.task, units, rendered)
-        ranges, system_tokens = source_token_ranges(template, rendered, step.input_messages, units)
+        source_view = step.metrics["source_view"]
+        prefix = step.input_ids[:source_view["source_prefix_tokens"]]
+        ranges = [list(interval) for interval in source_view["body_token_ranges"]]
+        system_tokens = longest_common_prefix(template.render((step.input_messages[0],)).input_ids, step.input_ids)
         sources, _ = stable_source_payload(units)
         result.update(prefix_input_ids=list(prefix), evidence_token_ranges=ranges, fixed_system_prefix_tokens=system_tokens, sources=[
             {"source_unit": item["source_unit"], "source_spans": item["source_spans"],
@@ -319,12 +321,12 @@ class RecordingEngine:
 
 class CapturePrefixObserver:
     """Record post-READ native state, without retaining any prefix."""
-    def __init__(self, engine, template):
-        self.runtime, self.template = PrefixRuntimeClient(engine), template
+    def __init__(self, engine):
+        self.runtime = PrefixRuntimeClient(engine)
         self.accesses = defaultdict(list)
 
-    async def __call__(self, plan, task, units, rendered, record):
-        ids = stable_prefix_input_ids(self.template, plan, task, units, rendered)
+    async def __call__(self, plan, task, units, record):
+        ids = record.input_ids[:record.metrics["source_view"]["source_prefix_tokens"]]
         sources, _ = stable_source_payload(units)
         sources = [{"source_unit": item["source_unit"], "source_spans": item["source_spans"],
                     "document_family": item["document_family"], "applicability": to_jsonable(item["applicability"])} for item in sources]
@@ -422,7 +424,7 @@ async def capture(args):
             resident_provider, accounting.resident_model_manifest = await asyncio.to_thread(
                 load_resident_provider, args.study_config, service.template)
             accounting.record_resident_models(args.study_config, accounting.resident_model_manifest)
-        service.observe_prefix = CapturePrefixObserver(service.engine, service.template)
+        service.observe_prefix = CapturePrefixObserver(service.engine)
         recorder = RecordingEngine(service.engine)
         service.engine = recorder
         accounting.calls = recorder.calls
@@ -503,7 +505,7 @@ async def capture_reader_traces(args):
             resident_provider, accounting.resident_model_manifest = await asyncio.to_thread(
                 load_resident_provider, args.study_config, service.template)
             accounting.record_resident_models(args.study_config, accounting.resident_model_manifest)
-        service.observe_prefix = CapturePrefixObserver(service.engine, service.template)
+        service.observe_prefix = CapturePrefixObserver(service.engine)
         recorder = RecordingEngine(service.engine)
         service.engine = recorder
         accounting.calls = recorder.calls

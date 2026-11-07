@@ -153,12 +153,25 @@ class RunConfig:
         if self.plan_gain is not None:
             if self.plan_gain["mode"] not in {"whole_plan", "observed_actions"}:
                 raise ValueError("plan_gain.mode must be whole_plan or observed_actions")
-            required = ("gain_asset", "reader_checkpoint", "reader_profile_id")
+            if self.plan_gain.get("read_choices", 1) not in {1, 2}:
+                raise ValueError("plan_gain.read_choices must be 1 or 2")
+            action_policy = self.plan_gain.get("action_policy", "learned")
+            if action_policy not in {"learned", "rule"}:
+                raise ValueError("plan_gain.action_policy must be learned or rule")
+            rule = action_policy == "rule"
+            if rule and not self.plan_gain.get("joint_context"):
+                raise ValueError("the rule comparator requires joint_context")
+            required = ("reader_checkpoint", "reader_profile_id")
+            if not rule:
+                required += ("gain_asset",)
             if self.plan_gain["mode"] != "observed_actions":
                 required += ("execution_profile_asset",)
             for name in required:
                 if not self.plan_gain[name]:
                     raise ValueError(f"rolling plan policy requires explicit {name}")
+        if self.prefix_retention["mode"] == "demand" and not (
+                self.plan_gain is not None and self.plan_gain.get("joint_context")):
+            raise ValueError("demand retention requires joint context decisions")
 
 
 def load_config(path: str | Path | None = None) -> RunConfig:

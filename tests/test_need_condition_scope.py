@@ -125,6 +125,42 @@ class NeedConditionScopeTests(unittest.TestCase):
                 self.assertNotIn("2023", state.query)
                 self.assertIn("2024", state.query)
 
+    def test_key_only_condition_reaches_compiled_read_and_answer(self):
+        from controller.context_schema import ContextPlan, EvidenceSet, ReadTask
+        from controller.request_compiler import RequestCompiler
+        from controller.schema import SessionSnapshot
+        from controller.templates import ByteTemplate
+
+        previous = "For wholesale customers only, list the policy."
+        base = interpret(TaskPrediction("standalone", conditions=(
+            Condition("wholesale", key_span=reference("wholesale customers only", question=previous)),),
+            needs=(Need("n", (reference("list the policy", question=previous),),
+                        condition_ids=("wholesale",)),)), question=previous)
+        history = (TurnRecord(1, previous, "Policy listed."),)
+        snapshot = SessionSnapshot("s", raw_history=history)
+        memory = RetrievalState(1, history, (base,))
+        compiler = RequestCompiler(ByteTemplate())
+        for change, literal in (((), "wholesale customers only"), ((
+                Condition("retail", key_span=TextRef(2, "user", 0, 6), target_refs=("wholesale",),
+                          update="REPLACE"),), "Retail"), ((
+                Condition("remove", predicate_span=TextRef(2, "user", 0, 6), target_refs=("wholesale",),
+                          update="REMOVE"),), None)):
+            question = "Retail fee?" if change and literal else "What is the fee?"
+            state = interpret(TaskPrediction("followup", history_spans=(TextRef(1, "user", 0, len(previous)),),
+                              conditions=change), question=question, turn=2, memory=memory)
+            plan = ContextPlan("p", state, EvidenceSet("s", ()), read_layout="source_first")
+            task = ReadTask("read", "READ", ("n",), input_budget=8192)
+            reading, = compiler.compile_read(plan, task, (), (), snapshot, outputs=(512,))
+            answer, = compiler.compile_answers(snapshot, question, plan, layouts=("existing",), actions=("REBUILD",))
+            for candidate in (reading, answer):
+                text = bytes(candidate.input_ids).decode()
+                self.assertEqual("wholesale customers only" in text, not change)
+                if literal:
+                    self.assertIn(f'"key":"{literal}"', text)
+                else:
+                    self.assertIn('"conditions":[]', text)
+            self.assertEqual("wholesale customers only" in state.query, not change)
+
 
 if __name__ == "__main__":
     unittest.main()

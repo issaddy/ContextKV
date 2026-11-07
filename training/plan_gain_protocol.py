@@ -8,12 +8,13 @@ from __future__ import annotations
 from dataclasses import replace
 import time
 
-from adapters.history_state import TaskPrediction, validate_task_refs
+from adapters.history_state import TaskInterpretation, TaskModelResult, TaskPrediction, validate_task_refs
 from controller.action_proposals import (GapRetrievalRequest as GapRetrievalRequest,
     build_observed_action_plans as build_observed_action_plans, gap_query as gap_query,
-    BOUNDED_CONTINUATION, bind_read_parents, continuation_gap, continuation_read, gap_key, gap_retrieval_plan)
+    ALTERNATE_ANSWERS, BOUNDED_CONTINUATION, bind_read_parents, continuation_gap, continuation_read,
+    gap_key, gap_retrieval_plan, observed_step_outputs)
 from controller.context_schema import EvidencePool, ReadingOutcome, ReadTask
-from controller.context_budget import bind_answer_window
+from controller.context_budget import bind_answer_window, direct_answer_reason
 from controller.plan_policy import CompleteCost, complete_plan
 from controller.reading import build_read_plan
 from controller.rolling_policy import (RollingResult, ZERO_AUX, _reduction_tasks,
@@ -54,10 +55,6 @@ class AuditedTaskInterpreter:
         self.history_index = history_index
         self.model = self
         self.usage = {"input_tokens": 0, "output_tokens": 0, "elapsed_ms": 0.0}
-        self.last_metrics = {"task_model_ms": 0.0}
-        # A frozen TaskState makes no new cross-turn extraction judgments.
-        self.last_prediction = TaskPrediction("NEW")
-        self.last_read_contracts = ()
         self.row = None
         self.manifest = {"kind": "frozen_audited_actual_history_task_state", "inference_calls": 0}
 
@@ -80,6 +77,10 @@ class AuditedTaskInterpreter:
             version_intent = self.state.version_intent
         validate_task_refs(Refs, turn, memory)
         return self.state
+
+    def interpret_result(self, turn, memory):
+        return TaskInterpretation(self.interpret(turn, memory), TaskModelResult(TaskPrediction("NEW")),
+                                  {"task_model_ms": 0.0})
 
 
 def read_geometry(base, budget, template, snapshot, *, separate_needs=None):
@@ -190,12 +191,13 @@ class FixedCounterfactualRuntime:
     """Execute one pre-registered semantic plan; bind only generated fact IDs."""
     def __init__(self, planned, *, action="REBUILD", layout="existing", initial_state=None,
                  paid_cost: CompleteCost | None = None, gap_request=None, gap_provider=None,
-                 initial_snapshot=None):
+                 initial_snapshot=None, action_domain=None):
         self.planned, self.action, self.layout = planned, action, layout
         self.native = self
         self.decisions = []
         self.initial_state, self.paid_cost = initial_state, paid_cost
         self.initial_snapshot = initial_snapshot
+        self.action_domain = action_domain
         self.gap_request, self.gap_provider = gap_request, gap_provider
         self.gap_result = None
         self.pre_action_quote = None
@@ -257,6 +259,8 @@ class FixedCounterfactualRuntime:
                 raise ReadingBudgetExceeded("paid state plus bounded GAP exceeds complete latency")
             if len(state.steps)+self.new_action_counts["GAP_RETRIEVAL"]+2 > plan.budget.max_steps:
                 raise ReadingBudgetExceeded("bounded GAP leaves no terminal ANSWER allocation")
+            require_online_tokens(plan.budget.max_total_tokens, plan.online_tokens_spent,
+                plan.answer_allocation.fixed_input_tokens+plan.budget.output_tokens, "bounded GAP")
             self.gap_request = request
             from controller.evidence_planner import _passages, close_dependencies
             from controller.execution import auxiliary_tokens, merge_auxiliary_usage
@@ -291,7 +295,7 @@ class FixedCounterfactualRuntime:
             plan = replace(plan, online_tokens_spent=plan.online_tokens_spent+auxiliary_tokens(pool.auxiliary_usage))
             state = replace(state, plan=plan)
             require_online_tokens(plan.budget.max_total_tokens, plan.online_tokens_spent,
-                                  plan.budget.output_tokens, "bounded GAP and ANSWER")
+                plan.answer_allocation.fixed_input_tokens+plan.budget.output_tokens, "bounded GAP and ANSWER")
             events.emit("plan_gain_experimental_gap", attempt_id=attempt_id, **self.gap_result)
             return pool
         if self.planned.semantic_kind == "gap_retrieval":
@@ -385,15 +389,25 @@ class FixedCounterfactualRuntime:
             plan = replace(plan, steps=tuple(task if old.step_id == task.step_id else old for old in plan.steps))
             cpu = plan.reading_mode == "typed_reduce" and task.kind == "REDUCE" and task.operation in {"count", "sum", "group", "union"}
             cache_scope = None if cpu else await engine.info()
+            outputs = (task.output_budget,)
+            if self.action_domain is not None and not cpu and not self.new_step_ids and not continued:
+                outputs = observed_step_outputs(plan, task, template,
+                    output_budgets=self.action_domain["output_budgets"],
+                    output_tokens_per_fact=self.action_domain["output_tokens_per_fact"], finite=True)[1]
             variants = () if cpu else compile_step(plan, task, state, snapshot, template,
-                outputs=(task.output_budget,), request_compiler=executor.request_compiler, cache_scope=cache_scope)
-            if variants and not any(candidate.feasible for candidate in variants):
+                outputs=outputs, request_compiler=executor.request_compiler, cache_scope=cache_scope)
+            if self.action_domain is not None and task.kind == "REDUCE":
+                variants = variants[:1]
+            variants = tuple(candidate for candidate in variants if candidate.feasible)
+            if not cpu and not variants:
                 from controller.execution import ReadingBudgetExceeded
                 raise ReadingBudgetExceeded("actual generated facts exceed the pre-registered execution window")
             quote_started = time.monotonic()
             quote = None if cpu else await engine.quote_batch(variants, template.fingerprint)
             quote_ms = None if cpu else (time.monotonic()-quote_started)*1000
             candidate = None if cpu else executor.request_compiler.choose_variant(variants, quote)
+            if candidate is not None:
+                task = replace(task, output_budget=candidate.output_budget)
             if not self.new_step_ids and self.pre_action_quote is None:
                 self.pre_action_quote = {
                     "batch": await engine.quote_batch((), template.fingerprint) if cpu else quote,
@@ -415,19 +429,25 @@ class FixedCounterfactualRuntime:
             plan = state.plan
             self.new_step_ids = (*self.new_step_ids, task.step_id)
             self.new_action_counts[task.kind] += 1
-        if plan.coverage_scope == "all_supplied_documents" and not set(plan.coverage_units) <= {
+        if self.action_domain is None and plan.coverage_scope == "all_supplied_documents" and not set(plan.coverage_units) <= {
                 unit for result in state.results for unit in result.covered_units}:
             raise ValueError("predeclared scope scan did not complete its original scope")
         phase_started = time.monotonic()
         if (observed and plan.budget.max_complete_ms is not None
                 and self.paid_cost.latency_ms+(phase_started-arrived)*1000 > plan.budget.max_complete_ms):
             raise ReadingBudgetExceeded("observed paid state plus action exhausts the complete request allocation")
-        candidates = compile_answers(snapshot, (plan,), state)
+        representation = self.planned.answer_representation
+        options = (dict(layouts=(self.layout,), actions=(self.action,), representations=(representation,))
+                   if self.action_domain is not None else {})
+        candidates = compile_answers(snapshot, (plan,), state, **options)
         matching = [candidate for candidate in candidates if candidate.feasible
                     and candidate.action == self.action
                     and candidate.layout_id in {self.layout, self.layout+":contextpilot"}]
+        if self.action_domain is not None:
+            matching = [candidate for candidate in matching if direct_answer_reason(state, candidate,
+                require_complete_evidence=representation in ALTERNATE_ANSWERS) is None]
         if not matching:
-            raise ValueError("predeclared terminal action/layout has no feasible actual input")
+            raise ReadingBudgetExceeded("predeclared terminal action/layout has no feasible actual input")
         quotes = await engine.quote_batch(tuple(matching), template.fingerprint)
         candidate = executor.request_compiler.choose_variant(matching, quotes)
         if self.planned.semantic_kind == "direct_answer":
@@ -439,5 +459,5 @@ class FixedCounterfactualRuntime:
             selection="predeclared_semantic_branch_actual_compiler_choice", gain_prediction=None)
         self.decisions = records
         self.new_action_counts["ANSWER"] = 1
-        return RollingResult(state, Plan(candidate, quote_seq=quotes.observed_seq,
+        return RollingResult(replace(state, answer_representation=representation), Plan(candidate, quote_seq=quotes.observed_seq,
             reason="actual_counterfactual_fixed_plan"), quotes, tuple(records), phase_started)

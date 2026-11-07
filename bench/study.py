@@ -151,6 +151,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     from bench.study_workloads import WorkloadDispatcher
 
     spec = matrix["datasets"][dataset_name]
+    online_started = time.monotonic()
     declared_tasks = matrix.get("cohorts", {}).get(split, {}).get(dataset_name)
     source_rows = dataset_rows(spec, split, task_ids=declared_tasks)
     reuse_provider = spec.get("reuse_provider", False)
@@ -282,7 +283,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             output_ids=response.output_ids, truncated=response.truncated,
             citation_scope=response.citation_scope, measurement_kind="hardware",
             reading_outcome=attempt.reading_outcome, reference_map=attempt.plan.candidate.reference_map)
-        trace = provider.traces.pop((session_id, task_id), {})
+        trace = provider.take_trace(session_id, task_id)
         internal_ms = [step["elapsed_ms"] for step in response.step_metrics if "elapsed_ms" in step]
         model_work_ms = (response.engine_elapsed_ms+sum(internal_ms)
                          if response.engine_elapsed_ms is not None
@@ -503,6 +504,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         provider.close()
         await service.aclose()
         service.store.close()
+        write_json(segment/"online_window.json", {"start": online_started, "end": time.monotonic(),
+            "clock": "client_monotonic", "scope": "online preparation through dataset cleanup"})
     return ordered
 
 

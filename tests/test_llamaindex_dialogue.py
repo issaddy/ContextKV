@@ -47,7 +47,7 @@ async def test_real_compact_refine_shares_qa_ledger_and_committed_history(tmp_pa
             return EvidenceSelection((block, other), (block.key, other.key), auxiliary_usage={
                 "input_tokens": 7, "output_tokens": 0, "compute_ms": 1.0, "models": []})
 
-        def finish_request(self, task_id):
+        def finish_request(self, session_id, task_id):
             pass
 
     engine, provider = DialogueEngine(), Provider()

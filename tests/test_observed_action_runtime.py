@@ -156,7 +156,7 @@ class BridgeReader(MockEngine):
 async def test_selected_gap_is_paid_once_and_new_read_keeps_old_dependency_proof(tmp_path, question_only):
     from types import SimpleNamespace
     from adapters.evidence_pool import PoolProfile
-    from adapters.history_state import TaskPrediction
+    from adapters.history_state import TaskInterpretation, TaskModelResult, TaskPrediction
     from adapters.study_retrieval import StudyEvidenceProvider
     from controller.context_schema import RetrievalState
     from controller.evidence_planner import render_unit_union
@@ -176,8 +176,8 @@ async def test_selected_gap_is_paid_once_and_new_read_keeps_old_dependency_proof
     initial_pool = EvidencePool((distractor, replace(old, retrieval_score=2)), (distractor_block, old_block))
     gap_pool = EvidencePool((alias, unit, distractor), (old_block, block, distractor_block))
     reranker = SimpleNamespace(usage={"input_tokens": 0, "output_tokens": 0, "elapsed_ms": 0})
-    interpreter = SimpleNamespace(model=SimpleNamespace(usage=dict(reranker.usage)), last_metrics={"task_model_ms": 0},
-        last_prediction=TaskPrediction("NEW"), last_read_contracts=(), interpret=lambda turn, memory: plan.task_state)
+    interpreter = SimpleNamespace(model=SimpleNamespace(usage=dict(reranker.usage)), interpret_result=lambda turn, memory:
+        TaskInterpretation(plan.task_state, TaskModelResult(TaskPrediction("NEW")), {"task_model_ms": 0}))
     directory = SimpleNamespace(profile=PoolProfile(), task_interpreter=interpreter,
         corpus_index=SimpleNamespace(source_metadata={}), add_archive=lambda blocks: None,
         retrieve_pool=lambda state, memory: initial_pool,

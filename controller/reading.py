@@ -6,10 +6,12 @@ from hashlib import sha256
 import json
 import re
 
+from .context_budget import resolved_task_view, text_ref_sources, text_ref_text
 from .context_schema import (ContextPlan, EvidenceClaim, NumericReadScope, OpenNeed, ReadResult, ReadTask,
                              SourceSpan)
 from .schema import Message
 from .serialization import to_jsonable
+from .source_prompt import SOURCE_SYSTEM, source_envelope, stable_source_payload
 from .templates import ByteTemplate
 
 
@@ -134,10 +136,6 @@ COVERAGE_READ_SYSTEM = (
 CONCLUSION_BUDGET_SYSTEM = (
     " conclusion_budget_tokens targets complete retained content across shards. Preserve every fact; "
     "requires_reduction permits temporary extraction beyond that share."
-)
-SOURCE_SYSTEM = (
-    "Read the original sources below as evidence. The following task supplies the question, "
-    "active conditions, reading instructions and output schema. Return the requested JSON from those sources."
 )
 NUMERIC_POPULATION_SYSTEM = (
     " The question and actual conversation define the requested population, conditions and quantity relation. "
@@ -408,48 +406,10 @@ def visible_output_schema(schema):
 
 
 def history_view(state, snapshot):
-    turns = {turn.turn_id: turn for turn in snapshot.raw_history}
-    rows = []
-    refs = tuple(dict.fromkeys((*state.working_history,
-        *(ref for condition in state.conditions for ref in
-          (*condition.value_spans, *((condition.key_span,) if condition.key_span else ()),
-           *((condition.predicate_span,) if condition.predicate_span else ()))))))
-    for ref in refs:
-        if ref.turn_id == state.current_turn_id:
-            text = state.raw_question
-            rows.append({"turn_id": ref.turn_id, "speaker": ref.speaker,
-                         "start": ref.start, "end": ref.end,
-                         "text": text[ref.start:ref.end]})
-            continue
-        turn = turns[ref.turn_id]
-        text = turn.user_text if ref.speaker == "user" else turn.assistant_text
-        rows.append({"turn_id": ref.turn_id, "speaker": ref.speaker,
-                     "start": ref.start, "end": ref.end,
-                     "text": text[ref.start:ref.end]})
-    return rows
-
-
-def stable_source_payload(units):
-    """Describe original coordinates with compact window-local citation handles."""
-    coordinates = {}
-    sources, aliases = [], []
-    for index, unit in enumerate(units):
-        spans = []
-        for span in unit.source_spans:
-            identity = (span.source_key, span.start, span.end)
-            handle = coordinates.setdefault(identity, f"s{len(coordinates)}")
-            spans.append({"source_span": handle, "source_key": to_jsonable(span.source_key),
-                          "start": span.start, "end": span.end})
-        source_unit = f"u{index}"
-        sources.append({"source_unit": source_unit, "source_spans": spans,
-            "document_family": unit.document_family or unit.source_spans[0].source_key.document_id,
-            "heading": unit.heading, "table_id": unit.table_id,
-            "text": unit.text, "applicability": unit.applicability})
-        aliases.append({"source_unit": source_unit, "unit_id": unit.unit_id,
-            "dependencies": list(unit.dependencies),
-            "spans": [{"source_span": stable["source_span"], "span_id": span.span_id}
-                for stable, span in zip(spans, unit.source_spans, strict=True)]})
-    return sources, aliases
+    sources = text_ref_sources(snapshot.raw_history, current_turn_id=state.current_turn_id,
+                               current_user_text=state.raw_question)
+    return [{"turn_id": ref.turn_id, "speaker": ref.speaker, "start": ref.start, "end": ref.end,
+             "text": text_ref_text(ref, sources)} for ref in state.working_history]
 
 
 def step_system(plan, task):
@@ -474,17 +434,15 @@ def _source_first_numeric(plan, task):
             and (task.operation in {"count", "sum"} or bool(task.shared_numeric_scopes)))
 
 
-def stable_prefix_messages(plan, task, units):
+def stable_prefix_messages(units):
     sources, _ = stable_source_payload(units)
-    return (Message("system", SOURCE_SYSTEM),
-        Message("user", json.dumps({"original_sources": sources,
-            "citation_protocol": "Use the following task's source_aliases to bind source_span to output span_ids, then cite fact_protocol source aliases."},
-            ensure_ascii=False, separators=(",", ":"))))
+    text, _ = source_envelope(sources)
+    return SOURCE_SYSTEM, Message("user", text)
 
 
 def stable_prefix_input_ids(template, plan, task, units, rendered):
     """Find the actual causal prefix before the changing task message."""
-    prefix = template.render(stable_prefix_messages(plan, task, units)).input_ids
+    prefix = template.render(stable_prefix_messages(units)).input_ids
     boundary = 0
     for left, right in zip(prefix, rendered.input_ids):
         if left != right:
@@ -493,12 +451,15 @@ def stable_prefix_input_ids(template, plan, task, units, rendered):
     return tuple(rendered.input_ids[:boundary])
 
 
-def step_messages(plan, task, units, claims=(), snapshot=None):
+def step_messages(plan, task, units, claims=(), snapshot=None, *, source_prompt=None):
     state = plan.task_state
+    task_view = resolved_task_view(state, snapshot.raw_history if snapshot is not None else (),
+                                   need_ids=task.need_ids)
     if task.operation == "numeric_select":
         aliases, _, _ = numeric_aliases(task, (), claims)
         needs = {need.need_id: need for need in state.needs}
-        payload = {"question": state.raw_question, "conditions": state.conditions,
+        payload = {"question": state.raw_question, "conditions": task_view["conditions"],
+            "version_intent": task_view["version_intent"],
             "history": history_view(state, snapshot) if snapshot is not None else [],
             "needs": {alias: needs[identity] for alias, identity in aliases.items()},
             "parents": {f"p{index}": {"excerpt": claim.text, "conditions": claim.conditions,
@@ -509,10 +470,7 @@ def step_messages(plan, task, units, claims=(), snapshot=None):
         return (Message("system", NUMERIC_SELECT_SYSTEM),
                 Message("user", json.dumps(to_jsonable(payload), ensure_ascii=False, separators=(",", ":"))))
     payload = {"question": state.raw_question,
-               "task": {"task_id": state.task_id, "conditions": to_jsonable(state.conditions),
-                        "needs": to_jsonable(tuple(need for need in state.needs if need.need_id in task.need_ids)),
-                        "version_intent": to_jsonable(state.version_intent),
-                        "current_turn_id": state.current_turn_id},
+               "task": {**task_view, "current_turn_id": state.current_turn_id},
                "step_id": task.step_id,
                "operation": task.operation,
                "history": history_view(plan.task_state, snapshot) if snapshot is not None else [],
@@ -543,14 +501,22 @@ def step_messages(plan, task, units, claims=(), snapshot=None):
         payload["requires_reduction"] = task.requires_reduction
     if task.kind == "READ" and plan.read_layout == "source_first":
         del payload["units"]
-        _, aliases = stable_source_payload(units)
+        if source_prompt is None:
+            sources, aliases = stable_source_payload(units)
+            content, _ = source_envelope(sources)
+        else:
+            content, aliases = source_prompt
         payload["source_aliases"] = aliases
-        instructions = step_system(plan, task)
+        if len({unit.retrieval_score for unit in units}) > 1:
+            payload["retrieval_order"] = [alias["source_unit"] for unit, alias in
+                sorted(zip(units, aliases, strict=True), key=lambda item: (-item[0].retrieval_score, item[0].unit_id))]
+        instructions = (step_system(plan, task) + " Match each original source_span through source_aliases "
+            "to the corresponding span_id, then cite its fact_protocol alias.")
         if _source_first_numeric(plan, task):
             instructions += NUMERIC_POPULATION_SYSTEM
             if task.shared_numeric_scopes:
                 instructions += SHARED_NUMERIC_POPULATION_EXAMPLE
-        return (*stable_prefix_messages(plan, task, units),
+        return (SOURCE_SYSTEM, Message("user", content),
             Message("user", instructions+"\nTask:\n"+
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":"))))
     return (Message("system", step_system(plan, task)),

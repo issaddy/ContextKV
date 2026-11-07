@@ -9,13 +9,36 @@ from bench.mock_engine import MockEngine
 from controller.claim_graph import ClaimGraph
 from controller.context_schema import (ContextBudget, ContextPlan, EvidenceClaim, EvidenceSet,
                                        Need, ReadingOutcome, TaskState)
-from controller.execution import ReadingExecutor
+from controller.execution import ReadingBudgetExceeded, ReadingExecutor
 from controller.planner import PlannerKnobs
 from controller.reading import build_read_plan
 from controller.reduction import reduce_claims
 from controller.service import Controller
 from controller.session_store import SessionStore
 from controller.templates import ByteTemplate, verify_evidence_spans
+
+
+@pytest.mark.asyncio
+async def test_fixed_read_keeps_final_input_and_output_budget_before_submission(tmp_path):
+    template = ByteTemplate()
+    block, unit = material("Eligible applicants use the online form.")
+    state = TaskState("t", "How do I apply?", needs=(Need("n", operation="procedure"),), current_turn_id=1)
+    selected = EvidenceSet("s", (unit,), disposition="partial", source_blocks=(block,))
+    plan = build_read_plan(state, selected, "selected_sources", ContextBudget(), template=template)
+    engine = ScriptedReadingEngine([read_output(fact("a"))])
+    store = SessionStore(tmp_path/"state.db")
+    controller = Controller(store, engine, knobs=PlannerKnobs(strategy="always_rebuild"))
+    task, = plan.steps
+    candidate, = controller.request_compiler.compile_read(plan, task, (unit,), (), store.read_snapshot("s"),
+                                                          outputs=(task.output_budget,))
+    limit = len(candidate.input_ids)+task.output_budget+plan.budget.output_tokens
+    plan = replace(plan, budget=replace(plan.budget, max_total_tokens=limit))
+    with pytest.raises(ReadingBudgetExceeded, match="online token allocation"):
+        await controller.serve_turn("s", state.raw_question, context_plans=(plan,), request_id="limited")
+    assert engine.constraints == []
+    assert store.find_request("s", "limited").failed_from_stage == "STARTED"
+    await controller.aclose()
+    store.close()
 
 
 @pytest.mark.asyncio
@@ -86,11 +109,11 @@ async def test_source_prefix_observer_finishes_before_read_epoch_retirement_and_
         request_compiler=RequestCompiler(ByteTemplate(), ReverseIndex()))
     seen = []
 
-    async def observe(current_plan, task, units, rendered, record):
+    async def observe(current_plan, task, units, record):
         assert current_plan.read_layout == "source_first"
         assert engine._epochs[record.engine_epoch.engine_session_id].state == "COMMITTED"
         assert not store.get_snapshot("session").raw_history
-        assert record.input_ids == rendered.input_ids
+        assert record.metrics["source_view"]["input_hash"] == record.receipt.input_hash
         assert units == (other_unit, unit)
         seen.append(record.receipt.attempt_id)
         return {"owner_id": "independent-owner", "state": "RETAINED"}
@@ -104,6 +127,9 @@ async def test_source_prefix_observer_finishes_before_read_epoch_retirement_and_
     assert record.metrics["cache_quote"]["request_id"] == read_quotes[0].request_id
     assert record.metrics["cache_quote"]["quotes"][-1]["input_hash"] == record.receipt.input_hash
     assert record.metrics["quote_ms"] >= 0
+    work = record.metrics["native_quote_work"]
+    assert work["quote_age_ms"] >= 0
+    assert work["prefill_error_tokens"] == record.receipt.actual_prefill_tokens-work["prefill_tokens"]
     assert engine._epochs[record.engine_epoch.engine_session_id].state == "RETIRED"
     assert len(store.get_snapshot("session").raw_history) == 1
     await controller.serve_turn("session", state.raw_question, context_plans=(plan,), request_id="one")

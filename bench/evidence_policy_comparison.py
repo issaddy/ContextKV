@@ -277,7 +277,7 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
             async def retrieve(snapshot):
                 return await provider.retrieve(snapshot, query, task_id)
             async def extend(plan, needs, claims):
-                return await provider.extend_for_plan(before, plan, needs, claims)
+                return await provider.extend_for_plan(before, plan, needs, claims, trace_id=task_id)
             arrived = time.monotonic()
             previous = service.store.find_request(session, task_id)
             response = None
@@ -313,7 +313,7 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
                 "original_preparation_usage": frozen.get("planning_trace", {}).get("auxiliary_usage"),
                 "answer": response.assistant_text if response else None, "response": to_jsonable(response),
                 "qa_increment": len(committed.raw_history)-len(history),
-                "planning_trace": provider.traces.pop((session, task_id), {}),
+                "planning_trace": provider.take_trace(session, task_id),
                 "attempt": to_jsonable(attempt), "step_records": [
                     {"stage": stage, "record": to_jsonable(record)} for stage, record in steps],
                 "request_window": window, "reference": frozen_reference(source, frozen),

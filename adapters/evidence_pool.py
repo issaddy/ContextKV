@@ -1,6 +1,8 @@
 """Version-aware source directory and quota-balanced evidence candidate pools."""
 from __future__ import annotations
 
+from controller.context_budget import condition_references
+
 from dataclasses import dataclass, replace
 from datetime import date
 import re
@@ -322,29 +324,21 @@ class SourceDirectory:
             return hits
 
         streams.append(recall(state.query or state.raw_question, profile.current_top_k, "current"))
-        from adapters.history_state import history_text, retired_condition_refs
+        from adapters.history_state import active_ref_parts, history_text, retired_condition_refs
         inactive = retired_condition_refs(memory.prior_task_states, state.task_id, state.conditions)
 
         def need_text(ref):
-            text = (state.raw_question[ref.start:ref.end] if ref.turn_id == state.current_turn_id
+            return (state.raw_question[ref.start:ref.end] if ref.turn_id == state.current_turn_id
                     else history_text(ref, memory))
-            intervals = sorted((max(ref.start, old.start)-ref.start, min(ref.end, old.end)-ref.start)
-                for old in inactive if ref.turn_id == old.turn_id and ref.speaker == old.speaker
-                and ref.start < old.end and old.start < ref.end)
-            cursor, pieces = 0, []
-            for start, end in intervals:
-                pieces.append(text[cursor:start])
-                cursor = max(cursor, end)
-            pieces.append(text[cursor:])
-            return "".join(pieces)
 
         for need in state.needs:
-            pieces = [need_text(ref) for ref in (*need.anchor_spans, *need.subject_refs)]
-            pieces.extend(state.raw_question[ref.start:ref.end] if ref.turn_id == state.current_turn_id
-                          else history_text(ref, memory)
-                          for condition in state.conditions if condition.condition_id in need.condition_ids
-                          for ref in condition.value_spans)
-            streams.append(recall("\n".join(pieces), profile.per_need_top_k, "need", need.need_id))
+            refs = dict.fromkeys((
+                *(piece for ref in (*need.anchor_spans, *need.subject_refs)
+                  for piece in active_ref_parts(ref, inactive)),
+                *(ref for condition in state.conditions if condition.condition_id in need.condition_ids
+                  for ref in condition_references(condition)),
+                *state.version_intent.time_refs))
+            streams.append(recall("\n".join(map(need_text, refs)), profile.per_need_top_k, "need", need.need_id))
         archive = [key for key in memory.archive_source_keys if self._applicable(key, state, memory, temporal_sources=temporal)]
         archive = self.archive_search(state.query or state.raw_question, archive, top_k=profile.archive_top_k)
         streams.append([(key, 0.0, "") for key in archive])
@@ -373,6 +367,11 @@ class SourceDirectory:
         blocks = self.source_fetch(keys)
         return EvidencePool(tuple(unit for block in blocks for unit in self._units[block.key]),
                             blocks, "all_supplied_documents")
+
+    def applicable_scope(self, keys, state, memory):
+        temporal = None if state.version_intent.resolved_version_ids else self._temporal_sources(state, memory)
+        roots = (key for key in keys if self._applicable(key, state, memory, temporal_sources=temporal))
+        return self.full_scope(roots)
 
     @staticmethod
     def open_need_query(state, need):

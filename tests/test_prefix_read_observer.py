@@ -9,7 +9,7 @@ import pytest
 from controller.context_schema import ContextBudget, EvidenceSet, EvidenceUnit, Need, SourceSpan, StepRecord, TaskState
 from controller.evidence import make_evidence
 from controller.prefix_retention import EmpiricalRetentionModel, PrefixReadObserver, TARGET_DEMAND_RULE, RETENTION_CONTROL_RULE
-from controller.reading import build_read_plan, step_messages
+from controller.reading import build_read_plan
 from controller.schema import CompletionReceipt, ContextEpoch
 from controller.session_store import SessionStore
 from controller.templates import ByteTemplate, token_hash
@@ -61,13 +61,20 @@ def material(template, *, turn=1, question="How do I apply?", native_attempt="na
     plan = build_read_plan(state, EvidenceSet("set", (unit,), source_blocks=(block,)),
         "selected_sources", ContextBudget(), template=template, read_layout="source_first")
     task = plan.steps[0]
-    rendered = template.render(step_messages(plan, task, (unit,)))
+    from controller.request_compiler import RequestCompiler
+    from controller.schema import SessionSnapshot
+
+    compiler = RequestCompiler(template)
+    candidate, = compiler.compile_read(plan, task, (unit,), (), SessionSnapshot("business"),
+                                      outputs=(task.output_budget,))
     receipt = CompletionReceipt(native_attempt, native_attempt, "business-epoch", 1, "engine-1",
-        rendered.input_hash, "stop", True, inserted_cache_tokens=len(rendered.input_ids), session_ref_registered=True)
+        candidate.input_hash, "stop", True, inserted_cache_tokens=len(candidate.input_ids), session_ref_registered=True)
+    source_view = compiler.observe_executed(candidate, receipt, cache_config_hash="test",
+                                            engine_restart_id="engine-1")
     record = StepRecord("turn:"+str(turn), task.step_id, task,
         ContextEpoch("business", 0, "business-epoch", 1, engine_restart_id="engine-1"),
-        input_ids=rendered.input_ids, receipt=receipt)
-    return plan, task, (unit,), rendered, record
+        input_ids=candidate.input_ids, receipt=receipt, metrics={"source_view": source_view})
+    return plan, task, (unit,), record
 
 
 def test_fixed_ttl_recovery_counts_actual_read_once_and_does_not_extend_ttl(tmp_path):
@@ -75,7 +82,7 @@ def test_fixed_ttl_recovery_counts_actual_read_once_and_does_not_extend_ttl(tmp_
         template = ByteTemplate()
         engine = ReadRuntimeChannel(template.fingerprint)
         store = SessionStore(tmp_path/"state.sqlite")
-        callback = PrefixReadObserver(store, engine, template, {"mode": "fixed_ttl", "ttl_seconds": 30})
+        callback = PrefixReadObserver(store, engine, {"mode": "fixed_ttl", "ttl_seconds": 30})
         first = await callback(*material(template))
         recovered = await callback(*material(template))
         assert first["owner_id"] == recovered["owner_id"]
@@ -121,7 +128,7 @@ def test_value_inspects_native_residency_before_protection_and_keeps_measured_ga
         engine = ReadRuntimeChannel(template.fingerprint)
         store = SessionStore(tmp_path/"state.sqlite")
         settings = model_asset(tmp_path/"paired-model.json", native_ms=100, retained_ms=20)
-        result = await PrefixReadObserver(store, engine, template, settings)(*material(template))
+        result = await PrefixReadObserver(store, engine, settings)(*material(template))
         paths = [path for path, _ in engine.calls]
         assert paths[0] == "/context/prefix/status" and paths[-1] == "/context/prefix/retain"
         assert result["retention_choices"][0]["expected_saved_ms"] == 80
@@ -136,7 +143,7 @@ def test_value_does_not_protect_when_native_already_has_the_same_expected_reuse_
         engine = ReadRuntimeChannel(template.fingerprint)
         store = SessionStore(tmp_path/"state.sqlite")
         settings = model_asset(tmp_path/"paired-model.json", native_ms=20, retained_ms=20)
-        result = await PrefixReadObserver(store, engine, template, settings)(*material(template))
+        result = await PrefixReadObserver(store, engine, settings)(*material(template))
         assert result["state"] == "UNRETAINED" and result["policy_choice"]["calibrated"]
         assert not engine.owners and not store.prefix_owners()
         assert all(not path.endswith("/retain") for path, _ in engine.calls)
@@ -183,7 +190,7 @@ def test_complete_callback_cost_is_observed_once_without_changing_sunk_cost_sele
         template = ByteTemplate()
         store = SessionStore(tmp_path/"state.sqlite")
         settings = model_asset(tmp_path/"paired-model.json", native_ms=100, retained_ms=20)
-        callback = PrefixReadObserver(store, ReadRuntimeChannel(template.fingerprint), template, settings)
+        callback = PrefixReadObserver(store, ReadRuntimeChannel(template.fingerprint), settings)
         assert callback.predicted_control_ms() is None
         receipt = await callback(*material(template))
         callback.observe_control(100, receipt)

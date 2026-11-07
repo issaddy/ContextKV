@@ -6,6 +6,7 @@ ownership provenance; neither observation reserves KV or predicts its cost.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from bisect import bisect_left, bisect_right
 import hashlib
 import json
 
@@ -143,36 +144,55 @@ def rendered_message_starts(rendered, messages):
     return tuple(starts)
 
 
-def actual_source_geometry(template, candidate):
-    """Measure body tokens and a causal boundary from actual compiled span offsets.
-
-    Prefix tokens before/between source bodies remain causal context, not evidence.
-    Aliased sources can share physical body tokens; the union counts those once.
-    """
+def rendered_token_ranges(template, rendered, char_ranges):
     from .templates import ByteTokenizer
-    rendered = template.render(candidate.messages)
-    if rendered.input_ids != candidate.input_ids or rendered.input_hash != candidate.input_hash:
-        raise ValueError("source geometry differs from the compiled request")
-    if type(template.tokenizer) is ByteTokenizer:
-        offsets = tuple((index, index+1) for index, char in enumerate(rendered.text)
-                        for _ in char.encode("utf-8"))
+    if rendered.offsets is not None:
+        offsets = rendered.offsets
+    elif type(template.tokenizer) is ByteTokenizer:
+        offsets = ((index, index+1) for index, char in enumerate(rendered.text) for _ in char.encode("utf-8"))
     else:
         encoded = template.tokenizer(rendered.text, add_special_tokens=False, return_offsets_mapping=True)
-        if tuple(encoded["input_ids"]) != candidate.input_ids:
+        if tuple(encoded["input_ids"]) != rendered.input_ids:
             raise ValueError("source geometry tokenizer differs from the compiled request")
         offsets = encoded["offset_mapping"]
-    starts = rendered_message_starts(rendered, candidate.messages)
+    starts, ends, positions = [], [], []
+    for position, (first, last) in enumerate(offsets):
+        if last > first:
+            starts.append(first)
+            ends.append(last)
+            positions.append(position)
     ranges = []
-    for span in candidate.evidence_spans:
-        first, last = starts[span.message_index]+span.start, starts[span.message_index]+span.end
+    for first, last in char_ranges:
         if last <= first:
             continue
-        tokens = [index for index, (start, end) in enumerate(offsets)
-                  if end > first and start < last and end > start]
-        if tokens:
-            ranges.append((tokens[0], tokens[-1]+1))
+        left, right = bisect_right(ends, first), bisect_left(starts, last)
+        if left < right:
+            ranges.append((positions[left], positions[right-1]+1))
+    return ranges
+
+
+def actual_source_geometry(template, candidate, rendered=None):
+    """Measure the source union and its causal boundary on the actual token path."""
+    from .source_prompt import SOURCE_SYSTEM
+
+    ranges, source_prefix_tokens = candidate.source_body_token_ranges, candidate.source_prefix_tokens
+    if ranges is None and candidate.evidence_spans:
+        rendered = template.render(candidate.messages, with_offsets=True) if rendered is None else rendered
+        if rendered.input_ids != candidate.input_ids or rendered.input_hash != candidate.input_hash:
+            raise ValueError("source geometry differs from the compiled request")
+        starts = rendered_message_starts(rendered, candidate.messages)
+        intervals = [
+            (starts[span.message_index]+span.start, starts[span.message_index]+span.end)
+            for span in candidate.evidence_spans]
+        source_first = (candidate.messages[0] == SOURCE_SYSTEM
+                        and candidate.evidence_spans[0].message_index == 1)
+        if source_first:
+            intervals.append((starts[1], starts[1]+len(candidate.messages[1].content)))
+        ranges = rendered_token_ranges(template, rendered, intervals)
+        if source_first:
+            source_prefix_tokens = ranges.pop()[1]
     merged = []
-    for first, last in sorted(set(ranges)):
+    for first, last in sorted(set(ranges or ())):
         if merged and first <= merged[-1][1]:
             merged[-1] = (merged[-1][0], max(last, merged[-1][1]))
         else:
@@ -180,4 +200,5 @@ def actual_source_geometry(template, candidate):
     boundary = max((last for _, last in merged), default=0)
     return {"body_token_ranges": tuple(merged), "body_tokens": sum(last-first for first, last in merged),
             "causal_boundary_tokens": boundary, "causal_prefix_input_ids": candidate.input_ids[:boundary],
-            "causal_prefix_hash": token_hash(candidate.input_ids[:boundary])}
+            "causal_prefix_hash": token_hash(candidate.input_ids[:boundary]),
+            "source_prefix_tokens": source_prefix_tokens}

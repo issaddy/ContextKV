@@ -193,7 +193,7 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     report['capacity_comparisons'] = [faster, incomplete]
     rendered = markdown(report)
     assert '-15.00%' in rendered and '未知' in rendered
-    assert '质量差（候选−基线）' in rendered and '负值表示降低' in rendered
+    assert '质量差（候选−基线）' in rendered and '预登记的完整队列验收' in rendered
     command = json.loads((out / 'cost-ledger-command.json').read_text())
     assert not command['executed']
     assert command['argv'][command['argv'].index('--gpu-devices') + 1] == '2'
@@ -240,5 +240,5 @@ def test_public_and_constructed_tables_keep_split_metrics_and_full_denominators(
     assert "构造任务机制轨" in rendered and "公开基准数据轨" not in rendered
     assert "2/3 | 1/2" in rendered
     assert track["queue_primary_score"] is None
-    assert track["queue_score_bounds"] == pytest.approx([1/3, 2/3])
+    assert track["queue_score_bounds"] == pytest.approx([1/3, 1])
     assert track["scored_subset_primary"] == 1

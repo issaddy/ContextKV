@@ -8,6 +8,7 @@ import time
 import httpx
 
 from adapters.support_model import SetPrediction, SupportPrediction
+from controller.auxiliary_spend import auxiliary_call
 from controller.schema import Message
 from controller.serialization import dumps, to_jsonable
 
@@ -39,11 +40,15 @@ class TeacherSupportBackend:
             self.usage["oversized_examples"] += 1
             return None
         started = time.perf_counter()
-        response = self.client.post("/generate", json={"input_ids": list(rendered.input_ids),
-            "stream": False, "sampling_params": {"temperature": 0, "max_new_tokens": output_tokens,
-                                                 "json_schema": json.dumps(schema)}})
-        response.raise_for_status()
-        raw = response.json()
+        with auxiliary_call(kind) as receipt:
+            response = self.client.post("/generate", json={"input_ids": list(rendered.input_ids),
+                "stream": False, "sampling_params": {"temperature": 0, "max_new_tokens": output_tokens,
+                                                     "json_schema": json.dumps(schema)}})
+            receipt.update(status="RESPONSE_ERROR", http_status=response.status_code)
+            response.raise_for_status()
+            raw = response.json()
+            receipt.update(status="RETURNED", input_tokens=len(rendered.input_ids),
+                           output_tokens=raw["meta_info"]["completion_tokens"])
         elapsed = (time.perf_counter()-started)*1000
         self.usage["calls"] += 1
         self.usage["input_tokens"] += len(rendered.input_ids)

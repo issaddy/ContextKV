@@ -1,6 +1,8 @@
 """Task/support/search/reading assembly shared by serving and study evaluation."""
 from __future__ import annotations
 
+from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import replace
 import threading
 import time
@@ -13,6 +15,7 @@ from adapters.retrieval import run_retrieval_worker
 from adapters.retriever_factory import create_retriever
 from adapters.serving_retrieval import ServingRetriever
 from adapters.support_model import SetPrediction, SupportModel, SupportProfile
+from controller.auxiliary_spend import record_provider_usage
 from controller.candidates import CandidatePolicy, build_plan_candidates, measure_plan_contexts
 from controller.config import load_config
 from controller.context_budget import resolve_text, working_history_messages
@@ -23,7 +26,7 @@ from controller.evidence_planner import (BudgetedEvidencePlanner, SearchProfile,
     best_need_supports, close_dependencies, render_unit_union, unresolved_needs)
 from controller.reading import build_read_plan
 from controller.schema import OnlineMessage, OnlineTurn, QueryContext
-from controller.serialization import to_jsonable
+from controller.serialization import dumps, to_jsonable
 from controller.service import EvidenceSelection
 
 
@@ -82,17 +85,30 @@ class StudyEvidenceProvider:
         self.whole_plan_candidates = plan_gain is not None and plan_gain["mode"] == "whole_plan"
         self.corpus_snapshot_id = serving.corpus_snapshot_id
         self.traces = {}
+        self._completed_traces = OrderedDict()
+        self._supplied_indexes = OrderedDict()
         self._lock = threading.Lock()
         self.committed_readings = None
 
-    def finish_request(self, task_id):
-        """Release support predictions after this QA, including its GAP rounds."""
+    def finish_request(self, session_id, task_id):
+        """Release request model state and keep a bounded queue of completed traces."""
         with self._lock:
+            key = session_id, task_id
+            trace = self.traces.get(key)
             if self.support_backend is not None:
-                owners = {task_id, *(trace["support_task_id"] for (_, request_id), trace in self.traces.items()
-                    if request_id == task_id and "support_task_id" in trace)}
-                for owner in owners:
-                    self.support_backend.release_task(owner)
+                self.support_backend.release_task(trace.get("support_task_id", task_id) if trace else task_id)
+            if trace is not None:
+                self._completed_traces[key] = None
+                self._completed_traces.move_to_end(key)
+                if len(self._completed_traces) > 64:
+                    oldest, _ = self._completed_traces.popitem(last=False)
+                    self.traces.pop(oldest, None)
+
+    def take_trace(self, session_id, task_id):
+        with self._lock:
+            key = session_id, task_id
+            self._completed_traces.pop(key, None)
+            return self.traces.pop(key, {})
 
     @property
     def manifest(self):
@@ -155,11 +171,9 @@ class StudyEvidenceProvider:
         return await run_retrieval_worker(self._retrieve, snapshot, query, request_id)
 
     def _baseline_retrieve(self, snapshot, query, request_id):
-        with self._lock:
-            before = {id(model): dict(model.usage) for _, model in self._usage_sources()
-                      if hasattr(model, "usage")}
+        with self._measure_auxiliary_usage() as before:
             selection = self.serving._retrieve(snapshot, query, request_id, time.monotonic())
-            usage = self._auxiliary_usage(before, ())
+            usage = self._auxiliary_usage(before)
             self.traces[snapshot.session_id, request_id] = {"auxiliary_usage": usage}
             return replace(selection, auxiliary_usage=usage)
 
@@ -176,9 +190,7 @@ class StudyEvidenceProvider:
                            source_metadata=None, coverage_scope="selected_sources"):
         """Rank the upstream condensed query; upstream compact owns synthesis."""
         started = time.perf_counter()
-        with self._lock:
-            before = {id(model): dict(model.usage) for _, model in self._usage_sources()
-                      if hasattr(model, "usage")}
+        with self._measure_auxiliary_usage() as before:
             top_k = self.config.get("selection", {}).get("max_passages") or 5
             if supplied_blocks is None:
                 contexts = self.serving.candidate_search(query,
@@ -198,17 +210,19 @@ class StudyEvidenceProvider:
                         for unit in sorted(ranked.units, key=lambda unit: -unit.retrieval_score)
                         for span in unit.source_spans))[:top_k]
                 blocks = self.directory.source_fetch(priority)
-            usage = self._auxiliary_usage(before, ())
+            usage = self._auxiliary_usage(before)
             self.traces[snapshot.session_id, request_id] = {
                 "retrieval_query": query, "dialogue_mode": "llamaindex", "auxiliary_usage": usage,
                 "retrieval_ms": (time.perf_counter()-started)*1000,
                 "retrieval_priority": to_jsonable(priority), "coverage_scope": coverage_scope}
             return EvidenceSelection(blocks, priority, auxiliary_usage=usage)
 
-    async def extend_for_plan(self, snapshot, plan, open_needs, claims):
+    async def extend_for_plan(self, snapshot, plan, open_needs, claims, *, supplied_blocks=None,
+                              source_metadata=None, trace_id=None):
         """Resume directed gap selection from a persisted plan and committed QA."""
         return await run_retrieval_worker(self._select_gap, snapshot, None, plan,
-                                          open_needs, claims, None)
+                                          open_needs, claims, None, supplied_blocks=supplied_blocks,
+                                          source_metadata=source_metadata, trace_id=trace_id)
 
     def _usage_sources(self):
         sources = []
@@ -226,7 +240,18 @@ class StudyEvidenceProvider:
             sources.append(("support_utility", self.support_backend))
         return sources
 
-    def _auxiliary_usage(self, before, auxiliary):
+    @contextmanager
+    def _measure_auxiliary_usage(self):
+        with self._lock:
+            before = {id(model): dict(model.usage) for _, model in self._usage_sources()
+                      if hasattr(model, "usage")}
+            try:
+                yield before
+            except BaseException:
+                record_provider_usage(self._auxiliary_usage(before))
+                raise
+
+    def _auxiliary_usage(self, before):
         grouped = {}
         for role, model in self._usage_sources():
             entry = grouped.setdefault(id(model), {"roles": [], "model": model})
@@ -251,9 +276,7 @@ class StudyEvidenceProvider:
     def _retrieve(self, snapshot, query, request_id, *, supplied_blocks=None, supplied_metadata=None,
                   supplied_coverage_scope="all_supplied_documents"):
         started = time.perf_counter()
-        with self._lock:
-            usage_baseline = {id(model): dict(model.usage) for _, model in self._usage_sources()
-                              if hasattr(model, "usage")}
+        with self._measure_auxiliary_usage() as usage_baseline:
             usage_before = dict(getattr(self.support_backend, "usage", {}))
             if supplied_blocks is not None:
                 if supplied_metadata is not None:
@@ -264,6 +287,7 @@ class StudyEvidenceProvider:
                 memory = replace(memory, source_scope=tuple(block.key for block in supplied_blocks))
             if self.committed_readings is not None:
                 memory = replace(memory, committed_readings=self.committed_readings(snapshot))
+            interpretation = None
             if self.strategy in {"B0", "Btoken"}:
                 refs = tuple(ref for row in snapshot.raw_history for ref in (
                     TextRef(row.turn_id, "user", 0, len(row.user_text)),
@@ -277,16 +301,32 @@ class StudyEvidenceProvider:
                     OnlineMessage("user", row.user_text), OnlineMessage("assistant", row.assistant_text)))
                 turn = OnlineTurn(snapshot.session_id, request_id, len(snapshot.raw_history)+1,
                     self.serving.corpus_id, query, history, (), "P3")
-                state = self.directory.task_interpreter.interpret(turn, memory)
-                auxiliary = (("task", self.directory.task_interpreter.last_metrics["task_model_ms"]),)
+                interpretation = self.directory.task_interpreter.interpret_result(turn, memory)
+                state = interpretation.state
+                auxiliary = (("task", interpretation.metrics["task_model_ms"]),)
             if supplied_blocks is not None:
                 state = replace(state, source_scope=tuple(block.key for block in supplied_blocks))
+            reading = self.config.get("reading", {}).get("enabled", True) and self.strategy in {"B6", "B7", "Lmap"}
+            coverage = (supplied_coverage_scope if supplied_blocks is not None else
+                        self.config.get("reading", {}).get("coverage_mode", "selected_sources"))
+            if not reading:
+                coverage = "selected_sources"
+            elif state.source_scope and any(need.scope == "all_supplied_documents" for need in state.needs):
+                coverage = "all_supplied_documents"
+            full_scope_read = reading and coverage == "all_supplied_documents"
+            scoped_pool = None
+            if supplied_blocks is not None or state.source_scope or full_scope_read:
+                keys = state.source_scope
+                if full_scope_read and supplied_blocks is None and not keys:
+                    document_ids = self.config.get("reading", {}).get("document_ids", ())
+                    keys = tuple(block.key for block in self.directory.corpus_index.blocks
+                                 if not document_ids or block.key.document_id in document_ids)
+                scoped_pool = self.directory.applicable_scope(keys, state, memory)
+                state = replace(state, effective_source_scope=tuple(block.key for block in scoped_pool.source_blocks))
             self.traces.setdefault((snapshot.session_id, request_id), {})["support_task_id"] = state.task_id
-            interpreter = self.directory.task_interpreter
             reuse_enabled = self.config.get("reading", {}).get("fact_reuse", True)
-            bindings = (interpreter.last_prediction.read_reuse
-                if interpreter is not None and self.strategy not in {"B0", "Btoken"} and reuse_enabled else ())
-            contracts = interpreter.last_read_contracts if bindings else ()
+            bindings = interpretation.model.prediction.read_reuse if interpretation and reuse_enabled else ()
+            contracts = interpretation.model.read_contracts if bindings else ()
             preliminary = ContextPlan(state.task_id+":reuse", state, EvidenceSet("reuse", ()), budget=self.budget)
             seed = build_reuse_seed(preliminary, bindings, contracts, memory)
             covered = complete_reuse_ranges(seed)
@@ -297,7 +337,7 @@ class StudyEvidenceProvider:
                 if not results:
                     continue
                 if need.scope == "all_supplied_documents":
-                    required = self.directory.full_scope(state.source_scope).units if state.source_scope else ()
+                    required = scoped_pool.units if scoped_pool is not None else ()
                     ranges = {}
                     for span in covered.get(need.need_id, ()):
                         ranges.setdefault(span.source_key, []).append((span.start, span.end))
@@ -306,35 +346,16 @@ class StudyEvidenceProvider:
                         continue
                 satisfied.add(need.need_id)
             active_state = replace(state, needs=tuple(need for need in state.needs if need.need_id not in satisfied))
-            reading = self.config.get("reading", {}).get("enabled", True) and self.strategy in {"B6", "B7", "Lmap"}
-            coverage = (supplied_coverage_scope if supplied_blocks is not None else
-                        self.config.get("reading", {}).get("coverage_mode", "selected_sources"))
-            if not reading:
-                coverage = "selected_sources"
-            elif (any(need.scope == "all_supplied_documents" for need in state.needs)
-                    and (supplied_blocks is not None or state.source_scope)):
-                # Exhaustive Needs scan their declared source boundary; the
-                # operation alone never expands a task to the whole corpus.
-                coverage = "all_supplied_documents"
-            full_scope_read = reading and coverage == "all_supplied_documents"
-            if supplied_blocks is not None:
-                pool = (self.directory.full_scope(state.source_scope) if full_scope_read
-                        else self._applicable_supplied_pool(state, memory))
-            elif full_scope_read:
-                document_ids = self.config.get("reading", {}).get("document_ids", ())
-                keys = state.source_scope or tuple(block.key for block in self.directory.corpus_index.blocks
-                    if not document_ids or block.key.document_id in document_ids)
-                pool = self.directory.full_scope(keys)
+            if scoped_pool is not None:
+                pool = scoped_pool
             elif active_state.needs:
                 pool = self.directory.retrieve_pool(active_state, memory)
             else:
                 pool = EvidencePool((), (), "selected_sources")
-            if full_scope_read:
-                state = replace(state, source_scope=tuple(block.key for block in pool.source_blocks))
             selection = self.config.get("selection", {})
             policy = CandidatePolicy(max_total_model_tokens=self.budget.window_tokens,
                                      max_new_tokens=self.budget.output_tokens)
-            if supplied_blocks is not None and not full_scope_read:
+            if scoped_pool is not None and not full_scope_read:
                 pool = (self._rank_supplied(active_state, snapshot, pool) if active_state.needs else
                         EvidencePool((), (), "selected_sources"))
 
@@ -489,14 +510,14 @@ class StudyEvidenceProvider:
                 "oversized_support_inputs": to_jsonable(getattr(self.support_backend, "oversized_inputs", ())),
                 "support_model_usage": {name: value-usage_before.get(name, 0)
                     for name, value in getattr(self.support_backend, "usage", {}).items()},
-                "task_metrics": (self.directory.task_interpreter.last_metrics
-                    if self.strategy not in {"B0", "Btoken"} else None),
-                "auxiliary_usage": self._auxiliary_usage(usage_baseline, auxiliary),
+                "task_metrics": interpretation.metrics if interpretation is not None else None,
+                "auxiliary_usage": self._auxiliary_usage(usage_baseline),
                 "context_plans": to_jsonable(plans), "planning_ms": (time.perf_counter()-started)*1000}
             self.traces[snapshot.session_id, request_id] = trace
 
             async def extend(plan, open_needs, claims):
-                return await self.extend_for_plan(snapshot, plan, open_needs, claims)
+                return await run_retrieval_worker(self._select_gap, snapshot, None, plan,
+                    open_needs, claims, trace, supplied_blocks=supplied_blocks, source_metadata=supplied_metadata)
 
             selected_blocks = tuple({block.key: block for plan in plans for block in plan.selected_set.source_blocks}.values())
             context = QueryContext(state.query or query, "task_state", task_state=state)
@@ -526,13 +547,6 @@ class StudyEvidenceProvider:
         blocks = tuple(block for block in pool.source_blocks if block.key in keys)
         return EvidenceSet(f"{state.task_id}:relevance", chosen, token_cost=token_cost, source_blocks=blocks)
 
-    def _applicable_supplied_pool(self, state, memory):
-        temporal = (None if state.version_intent.resolved_version_ids
-                    else self.directory._temporal_sources(state, memory))
-        keys = tuple(key for key in state.source_scope
-                     if self.directory._applicable(key, state, memory, temporal_sources=temporal))
-        return self.directory.full_scope(keys)
-
     def _rank_supplied(self, state, snapshot, pool, *, query_override=None):
         from adapters.hybrid_retrieval import DenseIndex, HybridRetriever, LocalBGE, search_variants
         from adapters.retrieval import BM25SRetriever
@@ -552,12 +566,21 @@ class StudyEvidenceProvider:
             messages = [message for row in snapshot.raw_history for message in (
                 {"speaker": "user", "text": row.user_text}, {"speaker": "assistant", "text": row.assistant_text})]
             query, _ = query_view(state.raw_question, messages, query_encoder.tokenizer, limit=8192)
-        contexts = tuple(OnlineContext(unit.unit_id, unit.text, title=unit.heading) for unit in pool.units)
-        encoded = self.directory.encode_source_units(pool.units, self.frozen_history.encode)
-        dense = DenseIndex(contexts, encoded, {"corpus_snapshot_id": snapshot.corpus_snapshot_id,
-                                            "encoder": self.frozen_history.manifest})
-        sparse = BM25SRetriever({context.document_id: {"text": context.text, "title": context.title}
-            for context in contexts}, corpus_snapshot_id=snapshot.corpus_snapshot_id)
+        index_key = (snapshot.corpus_snapshot_id, dumps(self.frozen_history.manifest),
+                     tuple((unit.unit_id, unit.heading) for unit in pool.units))
+        indexes = self._supplied_indexes.get(index_key)
+        if indexes is None:
+            contexts = tuple(OnlineContext(unit.unit_id, unit.text, title=unit.heading) for unit in pool.units)
+            encoded = self.directory.encode_source_units(pool.units, self.frozen_history.encode)
+            dense = DenseIndex(contexts, encoded, {"corpus_snapshot_id": snapshot.corpus_snapshot_id,
+                                                 "encoder": self.frozen_history.manifest})
+            sparse = BM25SRetriever({context.document_id: {"text": context.text, "title": context.title}
+                for context in contexts}, corpus_snapshot_id=snapshot.corpus_snapshot_id)
+            indexes = self._supplied_indexes[index_key] = (sparse, dense)
+            if len(self._supplied_indexes) > 8:
+                self._supplied_indexes.popitem(last=False)
+        self._supplied_indexes.move_to_end(index_key)
+        sparse, dense = indexes
         retriever = self.serving.retriever
         reranker = getattr(retriever, "reranker", None)
         stages = search_variants(query, sparse, dense, query_encoder, reranker,
@@ -568,19 +591,24 @@ class StudyEvidenceProvider:
         return replace(pool, units=tuple(replace(unit, retrieval_score=scores.get(unit.unit_id, 0.0)) for unit in pool.units),
                        retrieval_ms=pool.retrieval_ms+(time.perf_counter()-started)*1000)
 
-    def _select_gap(self, snapshot, memory, plan, open_needs, claims, parent_trace):
+    def _select_gap(self, snapshot, memory, plan, open_needs, claims, parent_trace, *,
+                    supplied_blocks=None, source_metadata=None, trace_id=None):
         started = time.perf_counter()
-        with self._lock:
-            usage_before = {id(model): dict(model.usage) for _, model in self._usage_sources()
-                            if hasattr(model, "usage")}
+        with self._measure_auxiliary_usage() as usage_before:
             source_started = time.perf_counter()
             if memory is None:
                 restore_source_metadata(self.directory, plan.selected_set.selected_units)
+                if source_metadata is not None:
+                    self.directory.corpus_index.source_metadata.update(source_metadata)
+                if supplied_blocks is not None:
+                    self.directory.add_archive(supplied_blocks)
                 self.directory.add_archive(plan.selected_set.source_blocks)
                 memory = self.serving.retrieval_state(snapshot)
             if parent_trace is None:
-                parent_trace = self.traces.setdefault((snapshot.session_id, plan.task_state.task_id),
-                    {"task_state": to_jsonable(plan.task_state), "resumed_from_plan": plan.plan_id})
+                parent_trace = {"task_state": to_jsonable(plan.task_state), "resumed_from_plan": plan.plan_id,
+                                "support_task_id": plan.task_state.task_id}
+                if trace_id is not None:
+                    parent_trace = self.traces.setdefault((snapshot.session_id, trace_id), parent_trace)
             state = plan.task_state
             gaps = {need.need_id for need in open_needs}
             state = replace(state, needs=tuple(need for need in state.needs if need.need_id in gaps))
@@ -603,16 +631,18 @@ class StudyEvidenceProvider:
                         return False
                 return True
 
-            if state.source_scope:
-                fresh_pool = (self.directory.full_scope(state.source_scope)
-                    if plan.coverage_scope == "all_supplied_documents" else self._applicable_supplied_pool(state, memory))
+            scoped = state.effective_source_scope is not None
+            if scoped:
+                fresh_pool = self.directory.full_scope(state.effective_source_scope)
+            elif state.source_scope:
+                fresh_pool = self.directory.applicable_scope(state.source_scope, state, memory)
             else:
                 fresh_pool = self.directory.retrieve_gap_pool(state, memory, open_needs)
             fresh_units = tuple(unit for unit in fresh_pool.units if not already_read(unit))
-            phases = (("source_directory", (time.perf_counter()-source_started)*1000),) if state.source_scope else (
+            phases = (("source_directory", (time.perf_counter()-source_started)*1000),) if scoped or state.source_scope else (
                 ("retrieval", fresh_pool.retrieval_ms),)
             if not fresh_units:
-                usage = self._auxiliary_usage(usage_before, phases)
+                usage = self._auxiliary_usage(usage_before)
                 return replace(fresh_pool, units=(), source_blocks=(), auxiliary_ms=phases,
                                auxiliary_usage=usage)
             if plan.coverage_scope == "all_supplied_documents":
@@ -622,7 +652,7 @@ class StudyEvidenceProvider:
                 blocks = tuple(block for block in fresh_pool.source_blocks if block.key in source_keys)
                 phases = (("source_directory", (time.perf_counter()-source_started)*1000),)
                 return replace(fresh_pool, units=material, source_blocks=blocks, auxiliary_ms=phases,
-                               auxiliary_usage=self._auxiliary_usage(usage_before, phases))
+                               auxiliary_usage=self._auxiliary_usage(usage_before))
             old_ids = {unit.unit_id for unit in previous}
             recalled = tuple(replace(unit, need_ids=()) if already_read(unit) and unit.unit_id not in old_ids
                              else unit for unit in fresh_pool.units)
@@ -683,7 +713,7 @@ class StudyEvidenceProvider:
             selected_blocks = tuple(block for block in blocks if block.key in source_keys)
             phases = (("retrieval", context_pool.retrieval_ms), ("support", scores.scoring_ms),
                       ("search", search_ms))
-            usage = self._auxiliary_usage(usage_before, phases)
+            usage = self._auxiliary_usage(usage_before)
             gap_trace = {"open_needs": to_jsonable(open_needs), "candidate_pool": to_jsonable(context_pool),
                 "support_scores": to_jsonable(scores), "selected_set": to_jsonable(chosen),
                 "support_schedule": to_jsonable(schedule), "selection_mode": self.selection_mode,

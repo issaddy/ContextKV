@@ -89,6 +89,10 @@ def _primary(rows, spec):
     if not rows:
         return None
     means = [statistics.fmean(_metric(row, name, spec)[0] for row in rows) for name in _required(spec)]
+    return _primary_components(means, spec)
+
+
+def _primary_components(means, spec):
     if spec["primary_metric"] == "mtrageval_harmonic":
         return 0.0 if any(value == 0 for value in means) else len(means)/sum(1/value for value in means)
     return means[0]
@@ -121,8 +125,8 @@ def _cost_summary(rows):
 def declared_queue_summary(rows, spec, task_ids):
     """Delivered quality over the declared queue, with all paid requests retained.
 
-    Requests without a completed answer deliver zero quality. A completed answer
-    without a score remains unknown; its possible range is reported separately.
+    Confirmed failures and blocked requests deliver zero quality. Missing
+    execution and missing scores retain their possible range.
     This queue measure accompanies the original benchmark and scored-subset means.
     """
     expected = set(map(str, task_ids))
@@ -133,6 +137,9 @@ def declared_queue_summary(rows, spec, task_ids):
     completed = [row for row in selected if row["status"] == "completed"]
     scored = [row for row in completed if _scored(row, spec)]
     unknown = [row for row in completed if not _scored(row, spec)]
+    missing_execution = expected-by_id.keys()
+    unresolved = [str(row["task_id"]) for row in selected if row["status"] not in {"completed", "failed", "blocked"}]
+    unknown_execution_count = len(missing_execution)+len(unresolved)
     maximum = spec.get("normalization", 1.0)
     components = {}
     for name in _required(spec):
@@ -140,16 +147,14 @@ def declared_queue_summary(rows, spec, task_ids):
         observed = [value for value in values if value is not None]
         missing = len(values)-len(observed)
         components[name] = {"observed_count": len(observed), "unscored_answers": missing,
-            "bounds": [(sum(observed)+fill*missing)/len(expected)
+            "bounds": [(sum(observed)+fill*(missing+unknown_execution_count))/len(expected)
                        for fill in (0, maximum)] if expected else [None, None]}
 
     def aggregate(index):
         values = [value["bounds"][index] for value in components.values()]
         if not expected:
             return None
-        if spec["primary_metric"] == "mtrageval_harmonic":
-            return 0.0 if 0 in values else len(values)/sum(1/value for value in values)
-        return values[0]
+        return _primary_components(values, spec)
 
     paid = {}
     for name in ("total_input_tokens", "total_output_tokens", "gpu_gib_seconds",
@@ -163,14 +168,15 @@ def declared_queue_summary(rows, spec, task_ids):
             "unmeasured_task_ids": [str(row["task_id"]) for row, value in observed if value is None]}
     return {"declared": len(expected), "recorded": len(selected), "completed": len(completed),
         "scored": len(scored), "completion_rate": len(completed)/len(expected) if expected else None,
-        "missing_execution_task_ids": sorted(expected-by_id.keys()),
-        "failed_task_ids": [str(row["task_id"]) for row in selected if row["status"] != "completed"],
+        "missing_execution_task_ids": sorted(missing_execution), "unresolved_task_ids": sorted(unresolved),
+        "failed_task_ids": [str(row["task_id"]) for row in selected if row["status"] == "failed"],
+        "blocked_task_ids": [str(row["task_id"]) for row in selected if row["status"] == "blocked"],
         "unscored_answer_task_ids": [str(row["task_id"]) for row in unknown],
-        "queue_primary_score": aggregate(0) if not unknown else None,
+        "queue_primary_score": aggregate(0) if not unknown and not unknown_execution_count else None,
         "queue_score_bounds": [aggregate(0), aggregate(1)], "components": components,
         "scored_subset_primary": _primary(scored, spec), "cost": _cost_summary(selected),
         "paid_cost": paid,
-        "quality_rule": "declared task denominator; no completed answer contributes zero; unscored completed answers remain unknown",
+        "quality_rule": "declared task denominator; confirmed non-delivery is zero; missing outcomes and scores remain unknown",
         "cost_rule": "all saved requests including failures; observed totals retain unmeasured task IDs"}
 
 
@@ -277,6 +283,50 @@ def select_development(matrix, rows):
 def _interval(values, confidence):
     alpha = (1-confidence)/2
     return [_quantile(values, alpha), _quantile(values, 1-alpha)]
+
+
+def declared_queue_quality_interval(matrix, pairs, *, split="dev"):
+    """Paired conversation bootstrap of the declared, fixed-weight quality difference."""
+    specs = _track_specs(matrix, split)
+    selection = matrix["selection"]
+    samples, confidence = selection.get("bootstrap_samples", 5000), selection.get("confidence", .95)
+    rng = random.Random(matrix["seed"])
+    arms = [{(row["dataset"], str(row["task_id"])): row for row in rows} for pair in pairs for rows in pair]
+    draws, cluster_counts = [0.0]*samples, {}
+    for dataset, spec in specs.items():
+        components = _required(spec)
+        width = len(components)
+        clusters = defaultdict(lambda: [0]*(1+len(arms)*width))
+        for task_id in matrix["cohorts"][split][dataset]:
+            key = dataset, str(task_id)
+            if any(key not in arm for arm in arms):
+                return None
+            rows = [arm[key] for arm in arms]
+            conversation = rows[0]["conversation_id"]
+            if not conversation or any(row["conversation_id"] != conversation for row in rows):
+                raise ValueError("paired declared tasks must belong to the same conversation")
+            cluster = clusters[conversation]
+            cluster[0] += 1
+            for arm, row in enumerate(rows):
+                if row["status"] in {"failed", "blocked"}:
+                    continue
+                if not _scored(row, spec):
+                    return None
+                for i, name in enumerate(components, 1+arm*width):
+                    cluster[i] += _metric(row, name, spec)[0]
+        cluster_counts[dataset] = len(clusters)
+        if len(clusters) < 2:
+            return None
+        populations = [clusters[key] for key in sorted(clusters)]
+        weight = spec["weight"]/spec["normalization"]
+        for draw in range(samples):
+            n, *scores = map(sum, zip(*rng.choices(populations, k=len(populations))))
+            quality = [_primary_components([value/n for value in scores[start:start+width]], spec)
+                       for start in range(0, len(scores), width)]
+            draws[draw] += weight*statistics.fmean(right-left for left, right in zip(quality[::2], quality[1::2]))
+    return {"interval": _interval(draws, confidence), "confidence": confidence,
+            "bootstrap_samples": samples, "clusters_by_dataset": cluster_counts,
+            "resampling_unit": "paired_conversation_within_fixed_dataset"}
 
 
 def paired_comparisons(matrix, rows, baseline=None, split="test", *, samples=None, seed=None):

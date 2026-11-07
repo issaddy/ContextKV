@@ -23,6 +23,88 @@ class Interrupted(RuntimeError):
     pass
 
 
+@pytest.mark.asyncio
+async def test_native_read_response_error_recovers_once_by_persisted_submission(tmp_path):
+    from controller.engine_client import EngineError
+
+    controller, store, engine, _, plan = setup_controller(tmp_path)
+    controller.rolling_policy = None
+    plan = replace(plan, selected_set=replace(plan.selected_set, disposition="partial"))
+    generate = engine.generate
+
+    async def lose_first_response(**kwargs):
+        result = await generate(**kwargs)
+        if len(engine.constraints) == 1:
+            raise EngineError("INVALID_ENGINE_RESPONSE")
+        return result
+
+    engine.generate = lose_first_response
+    with pytest.raises(EngineError, match="INVALID_ENGINE_RESPONSE"):
+        await controller.serve_turn("s", "How?", context_plans=(plan,), request_id="r")
+    pending = store.pending_attempt("s")
+    assert store.has_submitted_model_step(pending.attempt_id)
+    result = await controller.serve_turn("s", "How?", context_plans=(plan,), request_id="r")
+    assert result.attempt_id == pending.attempt_id
+    assert result.read_count == 1
+    assert len(engine.constraints) == 2
+    assert len(store.get_snapshot("s").raw_history) == 1
+    await controller.aclose()
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_truncated_teacher_completion_is_charged_before_task_parsing(tmp_path):
+    import httpx
+
+    from adapters.history_state import TeacherTaskModel
+    from adapters.query_selector import OpenAICompletionClient, SelectorConfig
+    from adapters.retrieval import run_retrieval_worker
+    from controller.context_schema import RetrievalState
+    from controller.schema import OnlineTurn
+    from controller.templates import ByteTokenizer
+    from profiling.native_usage_index import index
+
+    class Tokenizer(ByteTokenizer):
+        chat_template = "test"
+
+        def apply_chat_template(self, messages, **kwargs):
+            return self.encode("".join(message["content"] for message in messages))
+
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json={
+        "choices": [{"message": {"content": "{"}, "finish_reason": "length"}],
+        "usage": {"prompt_tokens": 8000, "completion_tokens": 2048}}))
+    client = OpenAICompletionClient(SelectorConfig("http://teacher", "teacher", "fixture",
+        max_input_tokens=16000, max_new_tokens=2048), tokenizer=Tokenizer(), transport=transport)
+    model = TeacherTaskModel(client)
+    controller, store, engine, _, _ = setup_controller(tmp_path)
+
+    async def retrieve(snapshot):
+        turn = OnlineTurn(snapshot.session_id, "r", 1, "corpus", "How?", (), (), "P3")
+        await run_retrieval_worker(model.predict, turn, (), RetrievalState(0))
+
+    with pytest.raises(RuntimeError, match="unfinished: completed/length"):
+        await controller.serve_turn("s", "How?", request_id="r", evidence_provider=retrieve)
+    attempt = store.find_request("s", "r")
+    assert attempt.stage == "FAILED" and attempt.retrieval_ms > 0
+    assert attempt.auxiliary_usage["input_tokens"] == model.usage["input_tokens"] == 8000
+    assert attempt.auxiliary_usage["output_tokens"] == model.usage["output_tokens"] == 2048
+    records = store.db.execute("SELECT payload FROM auxiliary_calls WHERE attempt_id=?",
+                               (attempt.attempt_id,)).fetchall()
+    receipts = [json.loads(record["payload"]) for record in records]
+    group, receipt = receipts
+    assert receipt["finish_reason"] == "length" and receipt["group_id"] == group["call_id"]
+    ledger = index([str(store.path)])
+    usage = ledger["auxiliary"]
+    assert usage["unique_calls"] == 1
+    assert usage["totals"]["input_tokens"]["observed"] == 8000
+    assert usage["totals"]["output_tokens"]["observed"] == 2048
+    assert ledger["online_token_ledger"]["total_tokens"] == 10048
+    assert not engine.constraints
+    client.close()
+    await controller.aclose()
+    store.close()
+
+
 class EmptySelectionEngine(NumericEngine):
     async def generate(self, *, response_schema=None, **kwargs):
         if response_schema["properties"]["format_version"]["const"] != 7:
@@ -224,9 +306,9 @@ async def test_rolling_complete_read_resumes_prefix_callback_before_retirement(t
     arrived = time.monotonic()
     callbacks = []
 
-    async def prefix(current_plan, task, units, rendered, record):
+    async def prefix(current_plan, task, units, record):
         callbacks.append(record.step_id)
-        assert rendered.input_ids == record.input_ids
+        assert record.input_ids == candidate.input_ids
         if len(callbacks) == 1:
             raise Interrupted()
         return {"owner_id": "recovered-prefix", "state": "RETAINED"}

@@ -90,6 +90,12 @@ def paid_execution_index(rows, roots, destination):
     native = index(databases)
     write(destination, native)
     return {"path": str(destination), **native["totals"], "by_kind": native["by_kind"],
+        "partial_native_calls": len(native["partial_native_calls"]), "native_work": native["native_work"],
+        "native_quote_checks": native["native_quote_checks"],
+        "online_token_ledger": native["online_token_ledger"],
+        "cpu_reduce_ms": native["CPU"]["reduce_ms"],
+        "auxiliary_calls": {key: value for key, value in native["auxiliary"].items()
+                            if key not in {"calls", "provider_phases"}},
         "confirmed_pre_submission_steps": len(native["pre_submission_steps"]),
         "unmeasured_inventory": native["inventory_reasons"],
         "physical_batch_files": sorted({str(path) for directory in directories

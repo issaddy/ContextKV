@@ -71,6 +71,16 @@ def merge_ranges(ranges):
     return merged
 
 
+def registration_key(event):
+    return event["run_id"], event["monotonic_timestamp_ns"], event["document_set_id"]
+
+
+def registration_work(events):
+    events = tuple(events)
+    return {"count": len(events), "wall_work_ms": sum(row["registration_ms"] for row in events),
+            "cpu_work_ms": sum(row["registration_cpu_ms"] for row in events)}
+
+
 def uncovered(ranges, start, end):
     missing, cursor = [], start
     for left, right in merge_ranges(ranges):
@@ -164,8 +174,7 @@ def build_ledger(paths, *, gpu_devices, start=None, end=None, max_sample_gap=6, 
             series.append((source, rows))
         for node in objects(value):
             if node.get("event") == "documents_registered":
-                identity = (node["run_id"], node["monotonic_timestamp_ns"], node["document_set_id"])
-                registrations.setdefault(identity, {**node, "source_file": str(path)})
+                registrations.setdefault(registration_key(node), {**node, "source_file": str(path)})
             for key in ("physical_samples_path", "wire_path"):
                 if node.get(key):
                     linked = Path(node[key])
@@ -185,10 +194,7 @@ def build_ledger(paths, *, gpu_devices, start=None, end=None, max_sample_gap=6, 
                         for key in ("input_tokens", "output_tokens", "input_hash")):
                     raise ValueError("same native receipt has conflicting token observations")
                 calls[identity] = observed
-    registration = dict(count=len(registrations),
-        wall_work_ms=sum(row["registration_ms"] for row in registrations.values()),
-        cpu_work_ms=sum(row["registration_cpu_ms"] for row in registrations.values()),
-        records=list(registrations.values()),
+    registration = dict(**registration_work(registrations.values()), records=list(registrations.values()),
         scope="successful document registration call work in supplied records; "
               "GPU and Host costs use the shared physical sample integral")
     times = [row["timestamp"] for _, rows in series for row in rows]

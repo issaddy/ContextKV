@@ -113,16 +113,17 @@ def test_reused_bridge_preserves_gap_and_teacher_binds_only_visible_contracts():
     index = SimpleNamespace(tokenizer=client.tokenizer, select=lambda *args, **kwargs: ())
     interpreter = TaskInterpreter(teacher, index)
     try:
-        state = interpreter.interpret(OnlineTurn('s', 'now', 2, 'corpus', "Where is its owner's headquarters?", (), (), 'P3'), memory)
+        interpretation = interpreter.interpret_result(
+            OnlineTurn('s', 'now', 2, 'corpus', "Where is its owner's headquarters?", (), (), 'P3'), memory)
         assert client.calls == 1
     finally:
         client.close()
-    seed = build_reuse_seed(ContextPlan('now', state, EvidenceSet('empty', ())),
-        interpreter.last_prediction.read_reuse, interpreter.last_read_contracts, memory)
+    seed = build_reuse_seed(ContextPlan('now', interpretation.state, EvidenceSet('empty', ())),
+        interpretation.model.prediction.read_reuse, interpretation.model.read_contracts, memory)
     assert seed.open_needs[0].need_id == 'now:n0'
     assert seed.open_needs[0].bound_entities == ('B',)
     assert seed.open_needs[0].parent_claim_ids == (seed.claims[0].claim_id,)
-    assert contracts[0].read_id == interpreter.last_prediction.read_reuse[0].read_id
+    assert contracts[0].read_id == interpretation.model.prediction.read_reuse[0].read_id
     contract_ids = observed['schema']['$defs']['Need_0_0_n0']['properties']['read_reuse']
     assert set(contract_ids['properties']) == {'r0'} and contract_ids['additionalProperties'] is False
 
@@ -321,7 +322,7 @@ def test_supplied_scope_projects_interpreter_directory_and_whole_read_contracts(
         assert state.source_scope == (block.key,) and state.conditions == (condition,)
         raise Interpreted
 
-    directory.task_interpreter = SimpleNamespace(interpret=observe_interpretation)
+    directory.task_interpreter = SimpleNamespace(interpret_result=observe_interpretation)
     serving = SimpleNamespace(corpus_snapshot_id='fixture', corpus_id='fixture',
         retrieval_state=lambda snapshot: memory)
     provider = StudyEvidenceProvider({'study': {'strategy': 'B6'}}, ByteTemplate(), serving, directory)

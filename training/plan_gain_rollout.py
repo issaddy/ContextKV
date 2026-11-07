@@ -18,7 +18,8 @@ import time
 import sys
 from urllib.parse import urlsplit
 
-from controller.action_proposals import observed_reduction_task, BOUNDED_CONTINUATION
+from controller.action_proposals import (ALTERNATE_ANSWERS, BOUNDED_CONTINUATION, finite_action_domain,
+    observed_reduction_task, observed_step_outputs)
 from controller.plan_gain_protocol import input_protocol, validate_input_protocol
 from controller.context_schema import EvidenceSet, EvidenceUnit, ReadingOutcome, SourceSpan, TaskState
 from controller.resident_models import evidence_selection_contract
@@ -63,7 +64,9 @@ def gap_retriever_identity(manifest):
 def observed_rows(rows, packets, *, selection=None):
     """Keep each task's first legal decision for every non-ANSWER action."""
     from controller.plan_policy import CompleteCost
-    kinds = ("read_once", "reduce_once", "gap_retrieval")
+    action_kinds = ("read_once", "reduce_once", "gap_retrieval")
+    representation_kinds = tuple("answer_"+kind for kind in ALTERNATE_ANSWERS)
+    kinds = (*action_kinds, *representation_kinds) if any(packet.get("action_domain") for packet in packets) else action_kinds
     by_task = {row["task_id"]: row for row in rows}
     chosen, skipped, seen = {}, Counter(), set()
     requested_families = {}
@@ -104,6 +107,10 @@ def observed_rows(rows, packets, *, selection=None):
         if "direct_answer" not in packet["legal_actions"]:
             skipped["no_legal_direct_pair"] += 1
             continue
+        if packet.get("action_domain") and not {"hybrid", "existing"}.intersection(
+                packet["legal_answer_representations"]):
+            skipped["no_legal_reference_answer"] += 1
+            continue
         observed_tasks.add(task_id)
         paid = decode(CompleteCost, packet["paid_cost"])
         binding = observed_state_binding(state, snapshot, paid_cost=paid,
@@ -113,6 +120,10 @@ def observed_rows(rows, packets, *, selection=None):
             cohort_manifest_sha256=packet["cohort_manifest_sha256"],
             resident_model_manifest_digest=packet["resident_model_manifest_digest"],
             evidence_selection_contract=packet["evidence_selection_contract"])
+        if (domain := packet.get("action_domain")) is not None:
+            if domain != finite_action_domain(domain["output_budgets"], domain["output_tokens_per_fact"]):
+                raise ValueError("observed state uses a different finite candidate protocol")
+            binding["action_domain"] = domain
         if packet["decision_mode"] == "branch_terminal":
             binding.update(history_origin=packet["history_origin"], state_origin="branch_terminal",
                 source_capture_attempt_id=packet["source_capture_attempt_id"],
@@ -130,7 +141,10 @@ def observed_rows(rows, packets, *, selection=None):
         for kind in kinds:
             if kind not in families:
                 continue
-            if kind == "reduce_once":
+            if kind in representation_kinds:
+                if kind.removeprefix("answer_") not in packet.get("legal_answer_representations", ()):
+                    continue
+            elif kind == "reduce_once":
                 if reduction is None or (kind not in packet["legal_actions"] and supplement is None):
                     continue
             elif kind not in packet["legal_actions"]:
@@ -536,6 +550,65 @@ async def retire_completed_failed_steps(service, attempt_id):
     return acknowledgements
 
 
+def pair_cache_recipe(mode, frozen, observed):
+    if mode != "paired":
+        return mode, (), ()
+    record = next((record for record in reversed(frozen.steps)
+        if record.task.kind == "READ" and record.receipt is not None
+        and record.receipt.generation_complete and record.metrics.get("source_view", {}).get("source_prefix_tokens")), None)
+    if record is None:
+        return "cold", (), ()
+    source = record.metrics["source_view"]
+    end = source["source_prefix_tokens"]
+    quotes = observed["native_condition"]["quotes"]
+    host = any(quote["host_only_load_tokens"] and quote["native_load_estimate"] for quote in quotes)
+    return ("host_only" if host else "gpu_ready"), record.input_ids[:end+1], tuple(source["source_ids"])
+
+
+async def prepare_pair_cache(engine, compiler, mode, input_ids, source_ids, *, identity, resources):
+    """Replay one actual source path on an isolated reader before each arm."""
+    from controller.templates import token_hash
+
+    tick = time.monotonic()
+    reset = await engine.profile_prepare("cold")
+    info = await engine.info()
+    shape = {"mode": mode, "cache_config_hash": info.cache_config_hash}
+    warmup = None
+    if input_ids:
+        fingerprint = info.fingerprint
+        hashed = token_hash(input_ids)
+        candidate = PromptCandidate(identity, "REBUILD", 0, (), input_ids, hashed,
+            frozenset(), frozenset(), fingerprint=fingerprint, output_budget=1)
+        await engine.quote_batch((candidate,), fingerprint)
+        epoch = await engine.prepare(identity, identity+":prepare", info.engine_restart_id)
+        try:
+            warmup = await engine.generate(input_ids=input_ids, session_id=identity,
+                expected_generation=epoch.session_generation, expected_restart_id=info.engine_restart_id,
+                attempt_id=identity+":prime", fingerprint=fingerprint, max_new_tokens=1)
+        finally:
+            retired = await engine.retire(identity, epoch.session_generation, identity+":retire",
+                info.engine_restart_id, "paired_branch_cache_fixture")
+            if not retired.acknowledged:
+                raise ValueError("paired cache fixture still owns its priming epoch")
+        await engine.profile_prepare("host_only" if mode == "host_only" else "settle")
+        if compiler.index is not None:
+            compiler.index.observe_executed(source_ids, fingerprint=fingerprint, cache_config_hash=info.cache_config_hash,
+                receipt=warmup.receipt, input_ids=input_ids)
+        batch = await engine.quote_batch((candidate,), fingerprint)
+        quote, = batch.quotes
+        gpu, host = quote.ready_gpu_prefix_tokens, quote.host_only_load_tokens
+        if (mode == "gpu_ready" and not gpu) or (mode == "host_only" and (gpu or not host)):
+            raise ValueError("paired cache fixture did not realize its declared native tier")
+        shape.update(input_hash=hashed, ready_gpu_prefix_tokens=gpu,
+                     recoverable_prefix_tokens=quote.recoverable_prefix_tokens, host_only_load_tokens=host)
+    ended = time.monotonic()
+    return {"shape": shape, "restart_id": info.engine_restart_id, "cold_reset_pool": reset["pool"],
+        "prime_receipt": to_jsonable(warmup.receipt) if warmup is not None else None,
+        "prime_output_tokens": len(warmup.output_ids) if warmup is not None else 0,
+        "prime_input_tokens": len(input_ids), "complete_ms": (ended-tick)*1000,
+        **await resources.finish("online", tick, ended)}
+
+
 async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, binding, preparation,
                          resources, cache_start, generation_budget, observed=None,
                          gap_request=None, gap_provider=None):
@@ -557,10 +630,12 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
     if binding.get("input_protocol", protocol) != protocol:
         raise ValueError("collection input protocol differs from its actual reader compiler")
     binding = {**binding, "input_protocol": protocol}
+    fixture_mode, fixture_input, fixture_sources = pair_cache_recipe(cache_start, frozen, observed)
     registration = {"continuation_protocol": BOUNDED_CONTINUATION, "registered_at": time.monotonic(), "frozen_state_key": state_key,
         "plan_candidate": to_jsonable(plan), "working_state": to_jsonable(frozen), "snapshot": to_jsonable(snapshot),
         "continuation_gap_limits": continuation_request.limits if continuation_request is not None else None,
         "source_task_id": row["task_id"], "source_native_partition": row["split"],
+        "cache_fixture_mode": fixture_mode,
         "observed_state_binding": observed, "gap_request": gap_request if plan.semantic_kind == "gap_retrieval" else None,
         **binding}
     write(case_dir/"before.json", registration)
@@ -571,7 +646,7 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
     paid = None if observed is None else decode(CompleteCost, observed["paid_cost"])
     runtime = FixedCounterfactualRuntime(plan, initial_state=frozen,
         paid_cost=paid, gap_request=continuation_request, gap_provider=gap_provider,
-        initial_snapshot=snapshot)
+        initial_snapshot=snapshot, action_domain=observed.get("action_domain") if observed is not None else None)
     service.rolling_policy = runtime
     service.bind_resident_models(binding["resident_model_manifest"])
     completed = {result.step_id for result in frozen.results}
@@ -582,11 +657,11 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
         and any(need.operation == "infer" for need in frozen.plan.task_state.needs))
     # Terminal READ and one final judge are reserved before starting this branch.
     # Support calls additionally claim tickets from the same atomic hard cap.
-    if generation_budget.remaining < required_calls+continuation_calls+1:
+    if generation_budget.remaining < required_calls+continuation_calls+1+bool(fixture_input):
         write(case_dir/"not-run.json", {"status": "generation_budget_unavailable", "registered": registration})
         return None
-    if cache_start == "cold":
-        await service.engine.profile_prepare("cold")
+    fixture = (await prepare_pair_cache(service.engine, service.request_compiler, fixture_mode, fixture_input, fixture_sources,
+        identity=session+":cache", resources=resources) if fixture_mode != "observed" else None)
     response = None
     failure = None
     cleanup = []
@@ -690,6 +765,7 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
             "qa_increment": len(after.raw_history)-len(before.raw_history), "cleanup": cleanup,
             "actual_native_calls": calls,
             "comparison_budget": binding["comparison_budget"], **binding}
+        output["cache_fixture"] = fixture
         write(case_dir/"run.json", output)
     if response is not None and output["qa_increment"] != 1:
         raise ValueError("counterfactual branch did not commit exactly one current QA")
@@ -808,7 +884,7 @@ async def score_branch(judge, template, row, before, branch, *, contract, path, 
     return branch
 
 
-def _filter_observed_initial_steps(plans, frozen, snapshot, compiler, cache_scope):
+def _filter_observed_initial_steps(plans, frozen, snapshot, compiler, cache_scope, *, domain=None):
     """Register only actions whose already known first model input fits."""
     from controller.rolling_policy import compile_step
 
@@ -822,14 +898,29 @@ def _filter_observed_initial_steps(plans, frozen, snapshot, compiler, cache_scop
             cpu = (plan.reading_mode == "typed_reduce" and task.kind == "REDUCE"
                    and task.operation in {"count", "sum", "group", "union"})
             if not cpu:
+                outputs = ((task.output_budget,) if domain is None else observed_step_outputs(plan, task,
+                    compiler.template, output_budgets=domain["output_budgets"],
+                    output_tokens_per_fact=domain["output_tokens_per_fact"], finite=True)[1])
                 variants = compile_step(plan, task, frozen, snapshot, compiler.template,
-                    outputs=(task.output_budget,), request_compiler=compiler, cache_scope=cache_scope)
+                    outputs=outputs, request_compiler=compiler, cache_scope=cache_scope)
+                if domain is not None and task.kind == "REDUCE":
+                    variants = variants[:1]
                 if not any(candidate.feasible for candidate in variants):
                     omitted.append({"family": branch.semantic_kind, "plan_id": branch.plan_id,
                         "step_id": task.step_id, "reason": "known_initial_step_context_budget"})
                     continue
         kept.append(branch)
     return tuple(kept), tuple(omitted)
+
+
+def _answer_branches(direct, kinds):
+    from controller.plan_policy import complete_plan
+
+    return tuple(replace(complete_plan(replace(direct.context_plan,
+        plan_id=direct.plan_id+":"+representation), (), semantic_kind="direct_answer",
+        reader_checkpoint=direct.reader_checkpoint, unmet_answer_points=direct.unmet_answer_points),
+        answer_representation=representation)
+        for representation in ALTERNATE_ANSWERS if "answer_"+representation in kinds)
 
 
 async def collect(config, settings, *, controller=None, provider=None, interpreter=None,
@@ -897,6 +988,9 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
     write(output/"cohort.json", cohort)
     if not valid:
         raise ValueError("no validated task/decision snapshot remains for actual gain collection")
+    if any(row["observed_binding"].get("action_domain") for row in valid if row.get("observed_binding")) and (
+            settings["cache_start"] not in {"paired", "cold"}):
+        raise ValueError("finite action supervision requires paired or cold cache preparation")
     run = load_config(settings["run_config"])
     run = apply_study_config(run, config)
     continuation_gap_limits = ((run.state_observation or run.plan_gain)["gap_limits"]
@@ -1048,9 +1142,11 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                         gap_request = decode(GapRetrievalRequest, packet["gap_request"]) if packet.get("gap_request") else None
                         if gap_request is not None and gap_request.retriever_identity != retriever_identity:
                             raise ValueError("registered GAP retriever differs from the actual collection configuration")
+                        domain = observed.get("action_domain")
                         plans, omitted = build_observed_action_plans(frozen, snap, controller.template,
                             reader_checkpoint=reader_checkpoint, gap_request=gap_request,
-                            answer_system_prompt=controller.policy.system_prompt)
+                            answer_system_prompt=controller.policy.system_prompt,
+                            read_choices=domain["read_choices"] if domain is not None else 1)
                         available = {plan.semantic_kind for plan in plans}
                         reasons = {"read_once": "no_ready_unread_source_step",
                             "reduce_once": "no_unreduced_extract_basis_for_requested_operation",
@@ -1059,9 +1155,11 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                             for kind, reason in reasons.items() if kind not in available))
                         plans = tuple(plan for plan in plans if plan.semantic_kind == "direct_answer"
                                       or plan.semantic_kind in row["observed_action_kinds"])
+                        if domain is not None:
+                            plans = (*plans, *_answer_branches(plans[0], row["observed_action_kinds"]))
                         if any(plan.semantic_kind in {"read_once", "reduce_once"} for plan in plans):
                             plans, infeasible = _filter_observed_initial_steps(plans, frozen, snap,
-                                controller.request_compiler, await controller.engine.info())
+                                controller.request_compiler, await controller.engine.info(), domain=domain)
                             omitted = (*omitted, *infeasible)
                         trace, scope_material = {"source": "recorded_observed_state", "binding": observed,
                             "source_observed_actions": packet["legal_actions"],
@@ -1072,7 +1170,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                         base = selection.context_plans[0]
                         if base.task_state != state:
                             raise ValueError("A candidate preparation changed the audited current task state")
-                        trace = provider.traces[snap.session_id, row["task_id"]]
+                        trace = provider.take_trace(snap.session_id, row["task_id"])
                         scope_material = None
                         if settings["scope_scan"] and state.source_scope:
                             scope_pool = provider.directory.full_scope(state.source_scope)
@@ -1159,11 +1257,12 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                                                  raw_output_path=str(branch_dir/"judge.json"))
                         write(branch_dir/"run.json", result)
                         continue
-                    if plan.semantic_kind == "direct_answer":
+                    if plan.semantic_kind == "direct_answer" and plan.answer_representation == "existing":
                         if result["new_action_counts"]["READ"] != 0:
                             raise ValueError("gain direct baseline executed a READ")
                         baseline = result
-                    elif baseline is not None and common_binding["measurement_kind"] == "hardware":
+                    elif (baseline is not None and common_binding["measurement_kind"] == "hardware"
+                          and plan.semantic_kind != "direct_answer"):
                         pair = collect_pair(packet, baseline, result)
                         pair["preparation_cost_id"] = preparation["shared_cost_id"]
                         append(output/"gains.jsonl", pair)
@@ -1250,7 +1349,7 @@ def main(argv=None):
     parser.add_argument("--online-gpu-devices", type=integers, required=True)
     parser.add_argument("--judge-gpu-devices", type=integers, required=True)
     parser.add_argument("--extra-process-roots", type=integers, default=())
-    parser.add_argument("--cache-start", choices=("cold", "observed"), default="observed")
+    parser.add_argument("--cache-start", choices=("cold", "paired", "observed"), default="observed")
     parser.add_argument("--scope-scan", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--mode", choices=("whole_plan", "observed_actions"), default="whole_plan")
     parser.add_argument("--observed-states", help="Registered observed-state JSONL packets for observed_actions mode")
@@ -1259,6 +1358,8 @@ def main(argv=None):
         parser.error("whole_plan requires --task-labels")
     if args.mode == "observed_actions" and not args.observed_states:
         parser.error("observed_actions requires --observed-states")
+    if args.cache_start == "paired" and args.mode != "observed_actions":
+        parser.error("paired cache preparation requires observed_actions")
     if args.limit_tasks < 1 or args.max_generations < 1 or any(
             output < 1 for output in args.read_outputs):
         raise ValueError("collection bounds, output allocations and conversation holdout must be positive")

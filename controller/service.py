@@ -14,6 +14,7 @@ from typing import Awaitable, Callable
 from weakref import WeakValueDictionary
 
 from .candidates import CandidatePolicy
+from .admission import quote_observation, quote_realization
 from .cost_model import CostModel
 from .engine_client import Engine, EngineError, EngineInfo, PrepareAck, UnknownOutcomeError
 from .events import EventLog
@@ -24,7 +25,9 @@ from .serialization import dumps
 from .session_store import (Attempt, IdempotencyConflict, PendingAttempt, SessionStore, StoreError, VersionConflict)
 from .templates import ByteTemplate, candidate_request
 from .context_schema import ContextBudget, ContextPlan, EvidenceSet, ReadTask, ReadingOutcome, TaskState
-from .request_compiler import RequestCompiler
+from .request_compiler import RequestCompiler, unique_answer_inputs
+from .auxiliary_spend import capture_auxiliary_spend, reconcile_auxiliary_usage
+from .execution import merge_auxiliary_usage
 
 
 class ContextOverflow(ValueError):
@@ -94,6 +97,7 @@ class TurnResponse:
     online_token_budget_limit: int | None = None
     online_token_budget_verified: bool | None = None
     answer_phase_window: dict | None = None
+    answer_native_quote_work: dict | None = None
 
 
 class Controller:
@@ -123,7 +127,7 @@ class Controller:
         self.observe_prefix = None
         if prefix_settings is not None and prefix_settings["mode"] != "native":
             from .prefix_retention import PrefixReadObserver
-            self.observe_prefix = PrefixReadObserver(store, engine, self.template, prefix_settings)
+            self.observe_prefix = PrefixReadObserver(store, engine, prefix_settings)
         self._active_generations = 0
         self._postplan_control_ms = {action: deque(maxlen=32) for action in ("APPEND", "REBUILD")}
         self._calibration_identity = None
@@ -337,7 +341,31 @@ class Controller:
                             auxiliary_input_tokens=auxiliary_input, auxiliary_output_tokens=auxiliary_output,
                             auxiliary_usage=attempt.auxiliary_usage,
                             online_token_budget_limit=token_limit, online_token_budget_verified=budget_verified,
-                            answer_phase_window=answer_phase_window)
+                            answer_phase_window=answer_phase_window,
+                            answer_native_quote_work=quote_realization(attempt.answer_quote, receipt))
+
+    async def _retrieve_with_cost(self, attempt_id, phase, provider, *args):
+        started = time.monotonic()
+        with capture_auxiliary_spend(self.store, attempt_id, phase) as observation:
+            try:
+                selection = await provider(*args)
+                observation["provider_usage"] = selection.auxiliary_usage
+            except BaseException:
+                current = self.store.get_attempt(attempt_id)
+                usage = reconcile_auxiliary_usage(observation)
+                if phase == "gap" and current.auxiliary_usage is not None:
+                    usage = merge_auxiliary_usage(current.auxiliary_usage, usage)
+                elapsed = (time.monotonic()-started)*1000
+                self.store.save_retrieval(attempt_id, evidence=current.evidence,
+                    retrieval_priority=current.retrieval_priority, query_context=current.query_context,
+                    retrieval_ms=elapsed if phase == "retrieval" else current.retrieval_ms,
+                    auxiliary_usage=usage)
+                self.events.emit("retrieval_failed", attempt_id=attempt_id, phase=phase, retrieval_ms=elapsed)
+                raise
+        if observation["calls"]:
+            selection = replace(selection, auxiliary_usage=reconcile_auxiliary_usage(
+                observation, selection.auxiliary_usage))
+        return selection
 
     async def _serve_dialogue_attempt(self, attempt, snapshot, query, evidence, provider, budget,
                                       arrived, migrating):
@@ -376,7 +404,8 @@ class Controller:
                 return evidence
             if provider is not None:
                 tick = time.monotonic()
-                selection = await provider(snapshot, condensed_query)
+                selection = await self._retrieve_with_cost(attempt.attempt_id, "retrieval", provider,
+                                                           snapshot, condensed_query)
                 retrieval_ms += (time.monotonic()-tick)*1000
                 evidence = tuple(selection.evidence)
                 auxiliary_usage = (selection.auxiliary_usage if selection.auxiliary_usage is not None else
@@ -392,7 +421,7 @@ class Controller:
                 raise ContextOverflow("LlamaIndex exhausted the common request step allocation")
             if budget.max_complete_ms is not None and (time.monotonic()-arrived)*1000 > budget.max_complete_ms:
                 raise ContextOverflow("LlamaIndex exhausted the common complete-time allocation")
-            rendered = self.template.render(call.messages)
+            rendered = self.template.render(call.messages, with_offsets=bool(call.evidence_spans))
             current_sources = frozenset(span.key for span in call.evidence_spans)
             seen_sources.update(current_sources)
             candidate = PromptCandidate(call.step_id, "REBUILD", snapshot.version,
@@ -402,6 +431,7 @@ class Controller:
                 fingerprint=self.template.fingerprint, output_budget=call.output_budget,
                 generation_kind="LLAMAINDEX_"+call.stage.upper(), cost_prediction_eligible=False,
                 layout_id="llamaindex_native")
+            candidate = self.request_compiler.bind_geometry(candidate, rendered)
             spent = sum(len(record.input_ids)+len(record.output_ids) for record in records)
             auxiliary = 0 if auxiliary_usage is None else auxiliary_tokens(auxiliary_usage)
             require_online_tokens(budget.max_total_tokens,
@@ -410,7 +440,7 @@ class Controller:
             task = ReadTask(call.step_id, candidate.generation_kind,
                 input_budget=budget.window_tokens-call.output_budget, output_budget=call.output_budget)
             record = await executor._generate_step(attempt.attempt_id, snapshot, plan, task, (), (),
-                candidate=candidate, rendered=rendered, text_callback=True)
+                candidate=candidate, text_callback=True)
             records.append(record)
             candidates.append(candidate)
             return record.result.raw_output
@@ -575,13 +605,8 @@ class Controller:
                     initial_outcomes = ((attempt.reading_outcome,) if attempt.reading_outcome is not None else ())
                 elif evidence_provider is not None:
                     retrieval_started = time.monotonic()
-                    try:
-                        selection = await evidence_provider(working_snap)
-                    except BaseException as exc:
-                        self.events.emit("retrieval_failed", business_session_id=session_id,
-                                         attempt_id=attempt.attempt_id, error=str(exc),
-                                         retrieval_ms=(time.monotonic()-retrieval_started)*1000)
-                        raise
+                    selection = await self._retrieve_with_cost(attempt.attempt_id, "retrieval",
+                                                               evidence_provider, working_snap)
                     retrieval_ms = (time.monotonic()-retrieval_started)*1000
                     retrieval_segment_ms = retrieval_ms
                     evidence = tuple(selection.evidence)
@@ -614,6 +639,9 @@ class Controller:
                                  if recovery else working_snap)
                 if resume_context_plan is not None and open_need_provider is None and extend_for_plan is not None:
                     open_need_provider = partial(extend_for_plan, planning_snap)
+                gap_provider = open_need_provider or self.extend_open_needs
+                if gap_provider is not None:
+                    gap_provider = partial(self._retrieve_with_cost, attempt.attempt_id, "gap", gap_provider)
                 if context_plans:
                     from .context_budget import bind_answer_window
                     recorded_ids = tuple(dict.fromkeys((*(record.step_id for record in
@@ -635,12 +663,13 @@ class Controller:
                     self.events.emit("reading_plan_cost_quotes", attempt_id=attempt.attempt_id,
                                      trace=read_cost_trace)
                 measure_redundancy = self.knobs.strategy == "redundancy_threshold"
-                def compile_candidates(snapshot, plans, outcome=None):
+                def compile_candidates(snapshot, plans, outcome=None, **compile_options):
                     if plans:
                         return tuple(candidate for context_plan in plans for candidate in
                             self.request_compiler.compile_answers(snapshot, query, context_plan,
                                 policy=self.policy, outcome=outcome or next((seed for seed in initial_outcomes
-                                    if seed.plan.plan_id == context_plan.plan_id), None), cache_scope=info))
+                                    if seed.plan.plan_id == context_plan.plan_id), None), cache_scope=info,
+                                **compile_options))
                     return self.request_compiler.compile_answers(snapshot, query, retrieved=evidence,
                         policy=self.policy, cache_scope=info,
                         retrieval_priority=retrieval_priority, query_context=query_context,
@@ -671,7 +700,7 @@ class Controller:
                         rolling_result = await self.rolling_policy.run(attempt.attempt_id, planning_snap,
                             context_plans, executor, self.engine, self.template, self.cost_model,
                             compile_candidates, arrived=arrived, auxiliary_usage=auxiliary_usage, events=self.events,
-                            open_need_provider=open_need_provider or self.extend_open_needs,
+                            open_need_provider=gap_provider,
                             initial_outcomes=initial_outcomes)
                     finally:
                         reading_segment_ms = (time.monotonic()-reading_started)*1000
@@ -680,7 +709,7 @@ class Controller:
                     context_plans = (reading_outcome.plan,)
                     answer_phase_started = rolling_result.answer_phase_started
                 candidates = ((rolling_result.plan.candidate,) if rolling_result is not None else
-                              compile_candidates(planning_snap, context_plans))
+                              unique_answer_inputs(compile_candidates(planning_snap, context_plans)))
                 valid = tuple(c for c in candidates if c.feasible)
                 if not valid:
                     raise ContextOverflow("shared_context_policy_overflow: required evidence and full QA exceed budget")
@@ -692,7 +721,7 @@ class Controller:
                     # At most one re-quote after a restart; native admission remains authoritative.
                     info = await self.engine.info()
                     planning_snap = replace(working_snap, force_new_epoch_for_recovery=True, must_rebuild=True)
-                    candidates = compile_candidates(planning_snap, context_plans)
+                    candidates = unique_answer_inputs(compile_candidates(planning_snap, context_plans))
                     valid = tuple(c for c in candidates if c.feasible)
                     quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
                     if quotes.engine_restart_id != info.engine_restart_id:
@@ -719,7 +748,7 @@ class Controller:
                     raise ContextOverflow(plan.reason)
                 selected_context_plan = None
                 if context_plans:
-                    from .execution import ReadingExecutor, merge_auxiliary_usage, require_online_tokens
+                    from .execution import ReadingExecutor, require_complete_time, require_online_tokens
                     selected_context_plan = next(context_plan for context_plan in context_plans
                         if context_plan.plan_id == plan.candidate.context_plan_id)
                     if rolling_result is None:
@@ -736,7 +765,7 @@ class Controller:
                                 self.engine, self.cost_model, compile_candidates, arrived=arrived,
                                 auxiliary_usage=auxiliary_usage, expanded=expanded, startup_ms=observation_startup_ms)
                         executor = ReadingExecutor(self.store, self.engine, self.template,
-                            extend_open_needs=open_need_provider or self.extend_open_needs, events=self.events,
+                            extend_open_needs=gap_provider, events=self.events,
                             request_arrived=arrived, observe_prefix=self.observe_prefix,
                             request_compiler=self.request_compiler,
                             observe_state=observe_fixed_state if self.state_observer is not None else None)
@@ -775,7 +804,8 @@ class Controller:
                                                 must_rebuild=True)
                     if rolling_result is None:
                         answer_phase_started = time.monotonic()
-                        candidates = compile_candidates(planning_snap, (selected_context_plan,), reading_outcome)
+                        candidates = unique_answer_inputs(compile_candidates(
+                            planning_snap, (selected_context_plan,), reading_outcome))
                         valid = tuple(candidate for candidate in candidates if candidate.feasible)
                         if not valid:
                             raise ContextOverflow("ANSWER plan exceeds the context allocation")
@@ -792,6 +822,7 @@ class Controller:
                     require_online_tokens(selected_context_plan.budget.max_total_tokens,
                         selected_context_plan.online_tokens_spent,
                         len(plan.candidate.input_ids)+plan.candidate.output_budget, "ANSWER")
+                    require_complete_time(selected_context_plan.budget.max_complete_ms, arrived, "ANSWER")
                     query_context = QueryContext(selected_context_plan.task_state.query or query,
                         "task_state", task_state=selected_context_plan.task_state)
                     selected_sources = {span.source_key for unit in selected_context_plan.selected_set.selected_units
@@ -831,9 +862,12 @@ class Controller:
                 else:
                     attempt = self.store.save_attempt(planned)
                     epoch = snap.current_epoch
-                attempt = self.store.submit_attempt(attempt, epoch)
                 generation = candidate_request(plan.candidate, self.policy.max_new_tokens)
                 submitted = time.monotonic()
+                if quotes is not None:
+                    quote = next(row for row in quotes.quotes if row.candidate_id == plan.candidate.candidate_id)
+                    attempt = replace(attempt, answer_quote=quote_observation(quotes, quote, submitted))
+                attempt = self.store.submit_attempt(attempt, epoch)
                 self._active_generations += 1
                 try:
                     result = await self.engine.generate(**generation, session_id=epoch.engine_session_id,
@@ -851,9 +885,7 @@ class Controller:
             except BaseException as exc:
                 current = self.store.get_attempt(attempt.attempt_id)
                 reading_pending = (current.stage == "STARTED"
-                    and self.store.context_plan(attempt.attempt_id) is not None
-                    and (isinstance(exc, (UnknownOutcomeError, asyncio.CancelledError))
-                         or isinstance(exc, EngineError) and exc.code == "READ_STEP_OUTCOME_PENDING"))
+                    and self.store.has_submitted_model_step(attempt.attempt_id))
                 if reading_pending:
                     self.events.emit("reading_recovery_required", business_session_id=session_id,
                                      attempt_id=attempt.attempt_id, error=str(exc))
@@ -950,11 +982,14 @@ class Controller:
         if status.result is not None:
             self.store.save_attempt(replace(attempt, stage="RESULT_READY", result=status.result))
             return await self._recover(session_id, abandon=abandon)
-        if status.inflight or not status.terminal:
+        if status.inflight or status.result_pending or not status.terminal:
             raise PendingAttempt("Engine outcome is unresolved; wait for completion/cancellation or restart before retry")
-        if not abandon and status.state not in ("FAILED", "CANCELLED", "RETIRED", "REJECTED"):
-            raise PendingAttempt("Completed result is unavailable; explicit abandonment required")
-        self.store.fail_attempt(attempt.attempt_id, f"terminal_engine_state:{status.state}", force_recovery=True)
+        reason = ("terminal_answer_result_unavailable" if status.state == "COMPLETED"
+                  else f"terminal_engine_state:{status.state}")
+        self.store.fail_attempt(attempt.attempt_id, reason, force_recovery=True,
+                                terminal_receipt=status.receipt)
+        self.events.emit("attempt_failed", business_session_id=session_id, attempt_id=attempt.attempt_id,
+                         error=reason)
         await self._flush_retirements()
         return None
 

@@ -12,6 +12,8 @@ from threading import Lock
 
 import httpx
 
+from controller.auxiliary_spend import auxiliary_call
+
 CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
 
 
@@ -100,21 +102,31 @@ class OpenAICompletionClient:
             body["response_format"] = response_format
         base = self.config.base_url.rstrip("/")
         url = base + ("/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
-        response = None
-        try:
-            response = self.client.post(url, json=body)
-            response.raise_for_status()
-            raw = response.json()
-            choice = raw["choices"][0]
-            text, finish = choice["message"]["content"], choice.get("finish_reason")
-            if not isinstance(text, str):
-                raise ValueError("completion content must be text")
-            return CompletionResult("completed", text, finish, count, raw.get("usage"), raw,
-                                    (time.perf_counter()-started)*1000)
-        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
-            return CompletionResult("failed", input_tokens=count,
-                raw_response=response.text if response is not None else None,
-                elapsed_ms=(time.perf_counter()-started)*1000, error=f"{type(exc).__name__}: {exc}")
+        response, usage = None, None
+        with auxiliary_call(self.config.model) as receipt:
+            try:
+                response = self.client.post(url, json=body)
+                raw = response.json()
+                usage = raw.get("usage")
+                if usage is not None:
+                    receipt.update(input_tokens=usage.get("prompt_tokens"),
+                                   output_tokens=usage.get("completion_tokens"))
+                response.raise_for_status()
+                choice = raw["choices"][0]
+                text, finish = choice["message"]["content"], choice.get("finish_reason")
+                if not isinstance(text, str):
+                    raise ValueError("completion content must be text")
+                receipt.update(status="RETURNED", finish_reason=finish)
+                if receipt["input_tokens"] is None:
+                    receipt["input_tokens"] = count
+                return CompletionResult("completed", text, finish, count, usage, raw,
+                                        (time.perf_counter()-started)*1000)
+            except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+                if response is not None:
+                    receipt.update(status="RESPONSE_ERROR", http_status=response.status_code)
+                return CompletionResult("failed", input_tokens=count, usage=usage,
+                    raw_response=response.text if response is not None else None,
+                    elapsed_ms=(time.perf_counter()-started)*1000, error=f"{type(exc).__name__}: {exc}")
 
     def count_input_tokens(self, messages, *, chat_template_kwargs=None):
         template_kwargs = self.config.chat_template_kwargs if chat_template_kwargs is None else chat_template_kwargs

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from functools import partial
 
 from .session_store import DocumentSet
 
@@ -35,13 +36,7 @@ class DocumentQA:
         await self.start()
         arrived = time.monotonic() if request_arrived is None else request_arrived
         task_id = task_id or request_id
-        memo_task_id = task_id
         try:
-            previous = self.controller.store.find_request(session_id, request_id)
-            if previous is not None:
-                stored = self.controller.store.context_plan(previous.attempt_id) or previous.context_plan
-                if stored is not None:
-                    memo_task_id = stored.task_state.task_id
             snapshot_id = self.provider.corpus_snapshot_id
             source_request_identity = None
             if document_set_id is not None:
@@ -59,21 +54,20 @@ class DocumentQA:
 
             async def retrieve(snapshot, retrieval_query=None):
                 selected_query = query if retrieval_query is None else retrieval_query
-                nonlocal memo_task_id
                 if supplied_blocks is None:
-                    selected = await self.provider.retrieve(snapshot, selected_query, task_id)
-                else:
-                    selected = await self.provider.retrieve_supplied(snapshot, selected_query, task_id, supplied_blocks,
-                        source_metadata=source_metadata, coverage_scope=coverage_scope)
-                if selected.query_context is not None and selected.query_context.task_state is not None:
-                    memo_task_id = selected.query_context.task_state.task_id
-                return selected
+                    return await self.provider.retrieve(snapshot, selected_query, task_id)
+                return await self.provider.retrieve_supplied(snapshot, selected_query, task_id, supplied_blocks,
+                    source_metadata=source_metadata, coverage_scope=coverage_scope)
 
+            extend_for_plan = getattr(self.provider, "extend_for_plan", None)
+            if extend_for_plan is not None:
+                extend_for_plan = partial(extend_for_plan, supplied_blocks=supplied_blocks,
+                                          source_metadata=source_metadata, trace_id=task_id)
             return await self.controller.serve_turn(session_id, query, request_id=request_id,
                 corpus_snapshot_id=snapshot_id, evidence_provider=retrieve,
                 source_request_identity=source_request_identity,
-                extend_for_plan=getattr(self.provider, "extend_for_plan", None),
+                extend_for_plan=extend_for_plan,
                 from_corpus_snapshot_id=from_corpus_snapshot_id, request_arrived=arrived,
                 dialogue_budget=getattr(self.provider, "budget", None))
         finally:
-            self.provider.finish_request(memo_task_id)
+            self.provider.finish_request(session_id, task_id)

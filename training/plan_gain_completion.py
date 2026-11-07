@@ -7,7 +7,8 @@ uses its actually judged Q. Unresolved attempts and unscored QA stay unlabelled.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
+from dataclasses import replace
 import hashlib
 import json
 import math
@@ -15,10 +16,11 @@ from pathlib import Path
 import time
 
 from controller.context_schema import ReadingOutcome
-from controller.action_proposals import BOUNDED_CONTINUATION, validate_action_counts
+from controller.context_budget import completion_reserve
+from controller.action_proposals import ALTERNATE_ANSWERS, BOUNDED_CONTINUATION, validate_action_counts
 from controller.plan_policy import (OBSERVED_FEATURE_SCHEMA, CompleteCost, NATIVE_COST_FEATURE_NAMES,
                                     NATIVE_COST_SCHEMA, PlanCandidate, plan_cost_features, plan_features)
-from controller.schema import CacheQuoteBatch, SessionSnapshot
+from controller.schema import CacheQuoteBatch, PromptCandidate, SessionSnapshot
 from controller.serialization import decode
 from controller.plan_gain_protocol import validate_input_protocol, validate_pre_action_input
 from training.train_plan_gain import (COST_FIELDS, PlanGainModel, _fit_features, _fit_selection_contract, _ridge,
@@ -79,6 +81,25 @@ def _native_finished(call):
             and terminal.get("state") in {"FAILED", "CANCELLED", "RETIRED", "REJECTED"})
 
 
+def _cache_fixture_shape(before, run):
+    fixture = run.get("cache_fixture")
+    if fixture is None:
+        raise ValueError("finite supervision requires an actual paired cache fixture")
+    shape = fixture["shape"]
+    if shape["mode"] != before["cache_fixture_mode"]:
+        raise ValueError("actual cache fixture differs from the registered mode")
+    first = run.get("pre_action_quote")
+    if first is not None:
+        batch = first["batch"]
+        if (batch["engine_restart_id"] != fixture["restart_id"]
+                or batch["cache_config_hash"] != shape["cache_config_hash"]
+                or batch["active_requests"] != 0 or batch["queued_requests"] != 0):
+            raise ValueError("first action did not execute under its isolated paired cache fixture")
+        if shape["mode"] == "cold" and any(quote["raw_match_tokens"] for quote in batch["quotes"]):
+            raise ValueError("cold branch has a matching prefix before its first action")
+    return shape
+
+
 def _measured(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
@@ -135,6 +156,12 @@ def completion_record(before, run):
     if observed is not None and run.get("resident_model_manifest") != before.get("resident_model_manifest"):
         raise ValueError("observed completion changed its registered resident model manifest")
     validate_pre_action_input(run)
+    fixture_shape = (_cache_fixture_shape(before, run) if observed is not None
+                     and observed.get("action_domain") is not None else None)
+    if (planned.semantic_kind == "direct_answer" and observed is not None
+            and observed.get("action_domain") is not None and run.get("pre_action_input") is not None
+            and run["pre_action_input"]["representation"] != planned.answer_representation):
+        raise ValueError("executed direct answer differs from its registered representation")
     complete, reason = _completion(run, observed=observed is not None)
     if observed is not None:
         counts = run["new_action_counts"]
@@ -182,18 +209,30 @@ def completion_record(before, run):
             covered.setdefault(str(span.source_key), []).append((span.start, span.end))
     required_chars, covered_chars = _size(required), _size(covered)
     paid = None if observed is None else decode(CompleteCost, observed["paid_cost"])
+    features = plan_features(planned, state, paid_cost=paid)
     cost_features = None
     if observed is not None and (native := run.get("pre_action_quote")) is not None:
         batch = decode(CacheQuoteBatch, native["batch"])
         first = (None if native["candidate_id"] is None else
                  next(quote for quote in batch.quotes if quote.candidate_id == native["candidate_id"]))
-        cost_features = plan_cost_features(plan_features(planned, state,
-            output_budgets=run["executed_output_budgets"], paid_cost=paid), batch, first)
+        candidate = decode(PromptCandidate, run["pre_action_input"]) if first is not None else None
+        done = {result.step_id for result in state.results}
+        done.update(result.reduction.step_id for result in state.results if result.reduction is not None)
+        gap = planned.semantic_kind == "gap_retrieval"
+        task = None if gap else next(step.task for step in planned.steps if step.task.step_id not in done)
+        if candidate is not None:
+            features = plan_features(planned, state, output_budgets={task.step_id: candidate.output_budget},
+                                     paid_cost=paid)
+        reserve = completion_reserve(state.plan, state.results, task, candidate)
+        cost_features = plan_cost_features(features, batch, first, reserve,
+            gap_query_chars=len(before["gap_request"]["query"]) if gap else 0)
     return {"schema_version": 2, "source": "actual_plan_completion", "record_id": digest([
             key, run["plan_id"], run["actual_native_calls"], run["qa_increment"], label_scorer, quality]),
         "input_protocol": protocol,
         "state_key": key, "task_id": run["task_id"], "conversation_id": run["conversation_id"],
         "plan_id": planned.plan_id, "semantic_kind": planned.semantic_kind,
+        "answer_representation": planned.answer_representation,
+        "cache_fixture_shape": fixture_shape,
         "collection_mode": "observed_actions" if observed is not None else "whole_plan",
         "reader_checkpoint": run["reader_checkpoint"], "reader_profile_id": run["reader_profile_id"],
         "split": run["split"], "cohort_split": run["cohort_split"],
@@ -205,7 +244,7 @@ def completion_record(before, run):
         "effective_utility": utility, "effective_final_coverage": effective_coverage,
         "utility_rule": RULE, "read_source_char_fraction": covered_chars/required_chars if required_chars else None,
         "read_original_characters": covered_chars, "required_original_characters": required_chars,
-        "features": plan_features(planned, state, paid_cost=paid), "cost_features": cost_features,
+        "features": features, "cost_features": cost_features,
         "pre_registration": before, "actual_run": run}
 
 
@@ -245,8 +284,10 @@ def effective_pair(base, candidate):
     if (base["actual_run"]["cost"]["shared_preparation_cost_id"]
             != candidate["actual_run"]["cost"]["shared_preparation_cost_id"]):
         raise ValueError("effective counterfactuals differ in shared preparation")
+    if base.get("cache_fixture_shape") != candidate.get("cache_fixture_shape"):
+        raise ValueError("effective counterfactuals differ in realized starting cache fixture")
     observed = candidate["observed_state_binding"] is not None
-    if base["semantic_kind"] != "direct_answer":
+    if base["semantic_kind"] != "direct_answer" or base.get("answer_representation", "existing") in ALTERNATE_ANSWERS:
         raise ValueError("effective baseline must be direct ANSWER")
     if observed:
         validate_action_counts("direct_answer", base["actual_run"]["new_action_counts"],
@@ -261,6 +302,7 @@ def effective_pair(base, candidate):
             "semantic_kind", "reader_checkpoint", "reader_profile_id", "split", "features",
             "collection_mode", "observed_state_binding", "cohort_split", "cohort_manifest_sha256", "input_protocol")},
         "scorer_identity": label_scorer,
+        "answer_representation": candidate.get("answer_representation", "existing"),
         "utility_rule": RULE, "no_answer_utility": 0.0,
         "raw_Q_direct": base["raw_judge_Q"], "raw_Q_counterfactual": candidate["raw_judge_Q"],
         "utility_direct": base["effective_utility"], "utility_counterfactual": candidate["effective_utility"],
@@ -297,14 +339,15 @@ def finalize(collection, output):
                 "reader_profile_id", "split", "observed_state_binding")])
             groups.setdefault(group, []).append(record)
         for members in groups.values():
-            direct = {record["record_id"]: record for record in members if record["semantic_kind"] == "direct_answer"}
+            direct = {record["record_id"]: record for record in members if record["semantic_kind"] == "direct_answer"
+                      and record["answer_representation"] not in ALTERNATE_ANSWERS}
             if not direct:
                 continue
             if len(direct) != 1:
                 raise ValueError("effective gain baseline must be the unique direct branch at this frozen decision state")
             base = next(iter(direct.values()))
             for candidate in members:
-                if candidate["semantic_kind"] == "direct_answer":
+                if candidate["record_id"] == base["record_id"]:
                     continue
                 paired = effective_pair(base, candidate)
                 if paired is not None:
@@ -313,6 +356,9 @@ def finalize(collection, output):
     write_rows(target/"effective-gains.jsonl", effective)
     manifest = {"source_collection": str(source.resolve()), "utility_rule": RULE,
         "completion_records": len(completed), "effective_gain_records": len(effective),
+        "effective_action_records": sum(row["semantic_kind"] != "direct_answer" for row in effective),
+        "effective_representation_records": dict(Counter(row["answer_representation"] for row in effective
+            if row["semantic_kind"] == "direct_answer")),
         "completion_counts": dict(Counter(str(record["completion"]) for record in completed)),
         "raw_quality_missing": sum(record["raw_judge_Q"] is None for record in completed),
         "collection_modes": dict(Counter(record["collection_mode"] for record in completed)),
@@ -346,7 +392,12 @@ def fit_effective(training, *, ridge=1.0, path=None):
     if len(limits) != 1:
         raise ValueError("one bounded gain asset requires the same declared GAP limits")
     selection_contract = _observed_selection_contract(training)
+    domains = {digest((row["observed_state_binding"] or {}).get("action_domain")) for row in training}
+    if len(domains) != 1:
+        raise ValueError("effective gain fit uses one registered action domain")
+    domain = (training[0]["observed_state_binding"] or {}).get("action_domain")
     samples, direct_seen, cost_kinds, cache_scopes = [], set(), set(), set()
+    seen_costs, paid_cost_outcomes = set(), Counter()
     cost_record_ids = []
     resident_digests = set()
     for row in training:
@@ -358,6 +409,8 @@ def fit_effective(training, *, ridge=1.0, path=None):
                   "utility_counterfactual", "effective_delta_q", "direct_features", "observed_state_binding", "input_protocol")
         if expected is None or any(row[name] != expected[name] for name in fields):
             raise ValueError("effective target/features differ from the actual fixed-state branch evidence")
+        if row.get("answer_representation", "existing") != expected["answer_representation"]:
+            raise ValueError("effective answer representation differs from the registered branch")
         if expected.get("cost_targets") != row.get("cost_targets"):
             raise ValueError("effective cost labels differ from the paired actual paid branch costs")
         if row["observed_state_binding"] is None:
@@ -368,33 +421,48 @@ def fit_effective(training, *, ridge=1.0, path=None):
             branch = branches[side]
             if branch["cost_features"] is None or any(value is None for value in costs[target].values()):
                 continue
+            if branch["record_id"] in seen_costs:
+                continue
+            seen_costs.add(branch["record_id"])
+            paid_cost_outcomes[branch["completion_reason"]] += 1
+            if branch["completion"] != 1:
+                continue
             if side == "direct":
-                if branch["record_id"] in direct_seen:
-                    continue
                 direct_seen.add(branch["record_id"])
             samples.append((branch["cost_features"], costs[target]))
             cost_kinds.add(branch["semantic_kind"])
             cost_record_ids.append(branch["record_id"])
-            cache_scopes.add(branch["actual_run"]["counterfactual_cache_start"])
+            fixture = branch["cache_fixture_shape"]
+            cache_scopes.add(fixture["mode"] if fixture is not None else branch["actual_run"]["counterfactual_cache_start"])
     started = time.perf_counter()
     names = _fit_features(training)
-    x = np.asarray([[row["features"][name] for name in names] for row in training], dtype=np.float64)
-    y = np.asarray([row["effective_delta_q"] for row in training], dtype=np.float64)
+    actions = [row for row in training if row["semantic_kind"] != "direct_answer"]
+    if not actions:
+        raise ValueError("gain fit requires measured READ, REDUCE or GAP alternatives")
+    x = np.asarray([[row["features"][name] for name in names] for row in actions], dtype=np.float64)
+    y = np.asarray([row["effective_delta_q"] for row in actions], dtype=np.float64)
     center, scale = x.mean(axis=0), x.std(axis=0)
     scale[scale == 0] = 1.0
     coefficients, intercept = _ridge((x-center)/scale, y, ridge)
+    representation_pairs = defaultdict(lambda: defaultdict(list))
+    for row in training:
+        if row.get("answer_representation") in ALTERNATE_ANSWERS:
+            representation_pairs[row["answer_representation"]][row["conversation_id"]].append(row["effective_delta_q"])
+    representation_gains = {name: {"delta_q": sum(sum(values)/len(values) for values in groups.values())/len(groups),
+        "conversations": len(groups), "pairs": sum(map(len, groups.values()))}
+        for name, groups in representation_pairs.items()}
     cost_models, cost_provenance = {}, {}
     if samples:
         cost_models, cost_mse, cost_scale = fit_native_cost_heads(samples, ridge=ridge)
         cost_provenance = {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA, "continuation_protocol": BOUNDED_CONTINUATION,
-            "source": "actual_observed_terminal_branch_and_paired_direct_costs",
+            "source": "actual_observed_delivered_branch_and_paired_direct_costs",
             "prefix_control_scope": "native_excludes_prefix_control",
             "feature_schema": NATIVE_COST_SCHEMA, "feature_names": NATIVE_COST_FEATURE_NAMES,
             "scale": cost_scale,
             "training_cache_starts": sorted(cache_scopes), "training_samples": len(samples),
             "action_samples": len(samples)-len(direct_seen), "unique_direct_samples": len(direct_seen),
             "record_ids": cost_record_ids, "trained_semantic_kinds": sorted(cost_kinds), "cost_fields": COST_FIELDS,
-            "branch_scope": "actual new action through committed ANSWER or confirmed terminal no-QA failure; excludes common paid state/preparation/cleanup",
+            "branch_scope": "actual new action through committed ANSWER; excludes common paid state/preparation/cleanup",
             "incremental_scope": "same_observation_predicted_action_absolute_minus_direct_absolute",
             "training_mse": cost_mse}
     asset_input = (NATIVE_COST_SCHEMA, training) if cost_models else training
@@ -403,6 +471,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
         tuple(coefficients.tolist()), float(intercept),
         {"input_protocol": training[0]["input_protocol"],
          "evidence_selection_contract": selection_contract,
+         "action_domain": domain, "representation_gains": representation_gains,
          "observed_feature_schema": OBSERVED_FEATURE_SCHEMA if any(
              row["observed_state_binding"] is not None for row in training) else None,
          "continuation_protocol": BOUNDED_CONTINUATION,
@@ -417,7 +486,119 @@ def fit_effective(training, *, ridge=1.0, path=None):
          "trained_semantic_kinds": sorted({row["semantic_kind"] for row in training}),
          "direct_baseline_identity": any(row["observed_state_binding"] is not None for row in training),
          "completion_counts": dict(Counter(str(row["completion_counterfactual"]) for row in training)),
+         "measured_paid_cost_outcomes": dict(paid_cost_outcomes),
          "fit_elapsed_ms": (time.perf_counter()-started)*1000}, cost_models, cost_provenance)
+
+
+def calibrate_completion_latency(model, development, *, quantile=.9):
+    """One-sided latency residuals, grouped by independent held-out conversation."""
+    if {row["conversation_id"] for row in development} & set(model.provenance["training_conversations"]):
+        raise ValueError("completion reserve calibration overlaps fitted training conversations")
+    grouped, seen = defaultdict(dict), set()
+    for row in development:
+        for side in ("direct", "counterfactual"):
+            raw = row[side]
+            if raw["record_id"] in seen:
+                continue
+            seen.add(raw["record_id"])
+            branch = completion_record(raw["pre_registration"], raw["actual_run"])
+            kind = branch["semantic_kind"]
+            actual = branch["actual_run"]["actual_branch_execution_cost"]["complete_ms"]
+            if (branch["completion"] != 1 or branch["cost_features"] is None or not _measured(actual)
+                    or not model.supports_semantic_kind(kind, costs=True)):
+                continue
+            estimate = model.predict_costs(branch["cost_features"])["branch_complete_cost"]["complete_ms"]
+            conversation = branch["conversation_id"]
+            grouped[kind][conversation] = max(grouped[kind].get(conversation, 0.0), actual-estimate)
+    calibration = {}
+    for kind, residuals in sorted(grouped.items()):
+        ordered = sorted(residuals.values())
+        exceeded = []
+        for conversation, residual in residuals.items():
+            other = sorted(value for key, value in residuals.items() if key != conversation)
+            if len(other) >= 2:
+                exceeded.append(residual > other[math.ceil(quantile*len(other))-1])
+        calibration[kind] = {"conversations": sorted(residuals), "quantile": quantile,
+            "latency_margin_ms": ordered[math.ceil(quantile*len(ordered))-1] if len(ordered) >= 2 else None,
+            "uncalibrated_underestimation_rate": sum(value > 0 for value in ordered)/len(ordered),
+            "leave_one_conversation_out_exceedance": sum(exceeded)/len(exceeded) if exceeded else None}
+    return replace(model, asset_id=model.asset_id+":"+digest(calibration)[:16],
+        cost_provenance={**model.cost_provenance, "completion_reserve_calibration": calibration})
+
+
+def evaluate_paired_decisions(model, development):
+    from controller.action_policy import observed_quality_gain
+
+    states, signs = defaultdict(dict), defaultdict(list)
+    untrained = Counter()
+    for row in development:
+        kind = row["semantic_kind"]
+        representation = row.get("answer_representation", "existing")
+        family = representation if kind == "direct_answer" else kind
+        predicted = observed_quality_gain(model, kind, representation, row["features"])
+        if predicted is None:
+            untrained[family] += 1
+        else:
+            actual = row["effective_delta_q"]
+            signs[family].append((abs(predicted-actual), (predicted > 0)-(predicted < 0) ==
+                                  (actual > 0)-(actual < 0)))
+        if row["observed_state_binding"] is None:
+            continue
+        key = digest([row["state_key"], row["observed_state_binding"]["observation_id"],
+                      row["direct"]["record_id"]])
+        states[key].update((row[side]["record_id"], row[side]) for side in ("direct", "counterfactual"))
+
+    regrets, unavailable = [], Counter()
+    calibration = model.cost_provenance.get("completion_reserve_calibration", {})
+    for branches in states.values():
+        measured, predictions = {}, {}
+        for identity, branch in branches.items():
+            run = branch["actual_run"]
+            budget = branch["pre_registration"]["working_state"]["plan"]["budget"]
+            actual = run["actual_branch_execution_cost"]
+            paid = branch["observed_state_binding"]["paid_cost"]
+            features = branch["cost_features"]
+            kind = branch["semantic_kind"]
+            representation = branch.get("answer_representation", "existing")
+            weights = {"complete_ms": budget["lambda_time"], "gpu_gib_seconds": 1000*budget["lambda_gpu"],
+                       "host_gib_seconds": 1000*budget["lambda_host"]}
+            if not all(_measured(actual[name]) for name, weight in weights.items() if weight):
+                continue
+            measured[identity] = branch["effective_utility"]-sum(
+                weight*actual[name] for name, weight in weights.items() if weight)
+            gain = observed_quality_gain(model, kind, representation, branch["features"])
+            if gain is None or features is None or not model.supports_semantic_kind(kind, costs=True):
+                continue
+            cost = model.predict_costs(features)["branch_complete_cost"]
+            max_ms, max_tokens = budget["max_complete_ms"], budget["max_total_tokens"]
+            margin = calibration.get(kind, {}).get("latency_margin_ms")
+            if max_ms is not None and (margin is None or paid["latency_ms"]+cost["complete_ms"]+margin > max_ms):
+                continue
+            first = run.get("pre_action_input")
+            reserved = (features["first_input_tokens"]+features["future_input_tokens"]
+                +features["future_output_tokens"]+(first["output_budget"] if first is not None else 0))
+            if ((max_tokens is not None and paid["input_tokens"]+paid["output_tokens"]+reserved > max_tokens)
+                    or branch["features"]["paid_steps"]+features["future_steps"]+1 > budget["max_steps"]):
+                continue
+            quoted_work = features["first_prefill_tokens"]+features["first_host_load_tokens"]
+            if branch["observed_state_binding"].get("action_domain") is None:
+                quoted_work = 0
+            predictions[identity] = (gain-sum(weight*cost[name] for name, weight in weights.items()),
+                -quoted_work, -cost["complete_ms"], -cost["gpu_gib_seconds"], -cost["host_gib_seconds"],
+                branch["plan_id"])
+        if len(measured) < 2 or not predictions:
+            unavailable["missing_measured_comparison_or_admitted_prediction"] += 1
+            continue
+        selected = max(predictions, key=predictions.get)
+        regrets.append(max(measured.values())-measured[selected])
+    return {"by_family": {kind: {"records": len(rows), "mae": sum(row[0] for row in rows)/len(rows),
+                                  "sign_agreement": sum(row[1] for row in rows)/len(rows)}
+                          for kind, rows in sorted(signs.items())},
+            "untrained_family_counts": dict(untrained),
+            "paired_decision_states": len(states), "evaluated_decision_states": len(regrets),
+            "unavailable_states": dict(unavailable),
+            "mean_paired_objective_regret": sum(regrets)/len(regrets) if regrets else None,
+            "scope": "measured branches at each held-out frozen state and realized starting cache fixture"}
 
 
 def main(argv=None):
@@ -436,7 +617,6 @@ def main(argv=None):
         print(json.dumps(finalize(args.collection, args.output), ensure_ascii=False))
         return
     model = fit_effective(rows(args.train), ridge=args.ridge, path=args.train)
-    model.save(args.output)
     if args.dev:
         development = rows(args.dev)
         if any(row["split"] != "dev" or row["reader_checkpoint"] != model.reader_checkpoint or
@@ -451,20 +631,18 @@ def main(argv=None):
             raise ValueError("effective gain development uses a different actual scorer")
         if {row["conversation_id"] for row in development} & set(model.provenance["training_conversations"]):
             raise ValueError("effective development conversations overlap fitted training conversations")
-        errors, untrained = [], Counter()
-        for row in development:
-            kind = row["semantic_kind"]
-            if model.supports_semantic_kind(kind):
-                errors.append(abs(model.predict(row["features"])-row["effective_delta_q"]))
-            else:
-                untrained[kind] += 1
-        known_action_mae = sum(errors)/len(errors) if errors else None
-        report = {"records": len(development), "predictable_records": len(errors),
-            "prediction_coverage": len(errors)/len(development) if development else None,
-            "untrained_action_counts": dict(untrained), "known_action_mae": known_action_mae,
-            "mae": None if untrained else known_action_mae, "reader_checkpoint": model.reader_checkpoint,
-            "reader_profile_id": model.reader_profile_id, "asset_id": model.asset_id, "utility_rule": RULE}
+        if any((row["observed_state_binding"] or {}).get("action_domain") != model.provenance["action_domain"]
+               for row in development):
+            raise ValueError("effective development differs from the fitted candidate domain")
+        if model.cost_models:
+            model = calibrate_completion_latency(model, development)
+        report = {"records": len(development), **evaluate_paired_decisions(model, development),
+            "reader_checkpoint": model.reader_checkpoint,
+            "reader_profile_id": model.reader_profile_id, "asset_id": model.asset_id, "utility_rule": RULE,
+            "completion_reserve_calibration": model.cost_provenance.get("completion_reserve_calibration")}
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output+".development.json").write_text(json.dumps(report, indent=2)+"\n")
+    model.save(args.output)
     print(json.dumps({"asset": args.output, "asset_id": model.asset_id, "training_records": model.provenance["training_records"]}))
 
 

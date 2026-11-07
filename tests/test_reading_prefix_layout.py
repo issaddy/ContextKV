@@ -158,22 +158,23 @@ def test_full_scope_provider_builds_one_scan_without_support_or_set_search():
     from unittest.mock import Mock
     from adapters.evidence_pool import SourceDirectory
     from adapters.study_retrieval import StudyEvidenceProvider
-    from controller.context_schema import RetrievalState
+    from controller.context_schema import RetrievalState, VersionIntent
     from controller.schema import SessionSnapshot
 
     template = ByteTemplate()
-    blocks = tuple(make_evidence(f'Record R{i} weighs {i+1} kg.', f'ledger-{i}') for i in range(2))
+    blocks = tuple(make_evidence(f'Record R{i} weighs {i+1} kg.', 'ledger', version=f'v{i+1}')
+                   for i in range(2))
     state = TaskState('task', 'Count every record and describe the ledger.', needs=(
         Need('n', operation='count', scope='all_supplied_documents'),
         Need('description', operation='lookup', scope='selected_sources')),
-        source_scope=tuple(block.key for block in blocks), current_turn_id=1)
+        source_scope=tuple(block.key for block in blocks), current_turn_id=1,
+        version_intent=VersionIntent('explicit', version_ids=('v2',)))
     for coverage, supplied in ((coverage, supplied)
             for coverage in ('all_supplied_documents', 'selected_sources') for supplied in (True, False)):
         corpus = SimpleNamespace(blocks=blocks, source_metadata={})
-        from adapters.history_state import TaskPrediction
-        interpreter = SimpleNamespace(model=SimpleNamespace(), last_metrics={'task_model_ms': 0},
-                                      last_prediction=TaskPrediction('NEW'), last_read_contracts=(),
-                                      interpret=lambda turn, memory: state)
+        from adapters.history_state import TaskInterpretation, TaskModelResult, TaskPrediction
+        interpreter = SimpleNamespace(model=SimpleNamespace(), interpret_result=lambda turn, memory:
+            TaskInterpretation(state, TaskModelResult(TaskPrediction('NEW')), {'task_model_ms': 0}))
         directory = SourceDirectory(corpus, None, template.tokenizer, task_interpreter=interpreter)
         directory.retrieve_pool = Mock(side_effect=AssertionError('full scope has no retrieval choice'))
         serving = SimpleNamespace(corpus_snapshot_id='corpus', corpus_id='corpus', retriever=SimpleNamespace(),
@@ -191,6 +192,9 @@ def test_full_scope_provider_builds_one_scan_without_support_or_set_search():
         assert reading.coverage_scope == 'all_supplied_documents'
         assert reading.task_state.needs == state.needs
         assert set(reading.task_state.source_scope) == {block.key for block in blocks}
+        assert reading.task_state.effective_source_scope == (blocks[1].key,)
+        assert {span.source_key for unit in reading.selected_set.selected_units
+                for span in unit.source_spans} == {blocks[1].key}
         assert set(reading.coverage_units) == {unit.unit_id for unit in reading.selected_set.selected_units}
         assert len(reading.steps) == 1
         trace = provider.traces['session', 'request']
@@ -236,7 +240,7 @@ def test_request_compiler_binds_read_order_and_actual_encoded_source_geometry():
         ordered = tuple(lookup[identity] for identity in candidate.read_unit_order)
         bound = replace(task, input_unit_ids=candidate.read_unit_order)
         assert template.render(step_messages(current, bound, ordered, snapshot=snapshot)).input_ids == candidate.input_ids
-        expected = sum(len(json.dumps(item.text, ensure_ascii=False)[1:-1].encode()) for item in ordered)
+        expected = sum(len(item.text.encode()) for item in ordered)
         geometry = actual_source_geometry(template, candidate)
         assert geometry['body_tokens'] == candidate.evidence_body_tokens == expected
         assert geometry['causal_prefix_input_ids'] == candidate.input_ids[:geometry['causal_boundary_tokens']]
@@ -298,6 +302,11 @@ def test_request_compiler_answer_reorders_only_actual_excerpts_and_preserves_tas
     native = RequestCompiler(template)
     baseline, = native.compile_answers(snapshot, state.raw_question, current,
                                        layouts=('existing',), actions=('REBUILD',))
+    task = ReadTask('read', 'READ', ('extract',), ('0', '1'), input_budget=32000, output_budget=1024)
+    reading, = native.compile_read(current, task, units, (), snapshot, outputs=(1024,))
+    assert reading.messages[:2] == baseline.messages[:2]
+    assert reading.source_ids == baseline.source_ids
+    assert longest_common_prefix(reading.input_ids, baseline.input_ids) >= reading.source_prefix_tokens
     variants = RequestCompiler(template, ReverseIndex()).compile_answers(snapshot, state.raw_question, current,
         layouts=('existing',), actions=('REBUILD',), cache_scope=scope)
     assert len(variants) == 2 and variants[0].input_ids == baseline.input_ids

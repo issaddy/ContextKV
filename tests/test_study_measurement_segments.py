@@ -54,8 +54,11 @@ async def test_explicit_request_namespace_resumes_failed_p3_without_changing_tas
         def close(self):
             pass
 
-        def finish_request(self, task_id):
+        def finish_request(self, session_id, task_id):
             pass
+
+        def take_trace(self, session_id, task_id):
+            return self.traces.pop((session_id, task_id), {})
 
     class Sampler:
         def __init__(self, *args, **kwargs):
@@ -130,16 +133,19 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
                                  "datasets": {"track": str(path)}}))
     assert read_workload_manifest(index)["track"] == manifest
     expected = ("B6_native", "S3_native", "B6_contextpilot", "S3_contextpilot",
+                "S3_contextpilot_joint_native", "S3_contextpilot_joint_demand",
                 "LlamaIndex_native", "S3_contextpilot_no_fact_reuse")
     assert full_queue_methods(1) == full_queue_methods(4) == expected
     from pathlib import Path
     import yaml
     declaration = yaml.safe_load(Path("configs/study_matrix.yaml").read_text())["final_evaluation"]
     assert tuple(cell["method"] for cell in declaration["factorial"].values()) == expected[:4]
+    assert tuple(cell["method"] for cell in declaration["joint_context"].values()) == expected[4:6]
     specs = {spec["id"]: spec for spec in full_queue_method_specs(expected,
         {"gain_asset": "measured-B"}, {"mode": "contextpilot", "checkout": "pinned-author"})}
     assert all(spec["overrides"]["execution"]["prefix_retention"] == {"mode": "native"}
-               for spec in specs.values())
+               for method, spec in specs.items() if method != expected[5])
+    assert specs[expected[5]]["overrides"]["execution"]["prefix_retention"]["mode"] == "demand"
     assert specs["B6_native"]["overrides"]["execution"]["plan_gain"] is None
     assert specs["B6_contextpilot"]["overrides"]["execution"]["cache_compilation"]["mode"] == "contextpilot"
     assert specs["LlamaIndex_native"]["overrides"]["execution"]["dialogue_mode"] == "llamaindex"

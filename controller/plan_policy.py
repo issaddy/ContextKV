@@ -61,6 +61,7 @@ class PlanCandidate:
     reader_checkpoint: str
     unmet_answer_points: tuple[str, ...] = ()
     required_coverage: tuple[str, ...] = ()
+    answer_representation: str = "existing"
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,7 @@ class NativePlanningState:
     future: Mapping[tuple[str, str], tuple[StepForecast, ...]]
     paid_cost: CompleteCost
     paid_observation: dict | None = None
+    prefix_status: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -311,29 +313,28 @@ def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=
     return {name: float(values[name]) for name in names}
 
 
-NATIVE_COST_SCHEMA = "pre_action_native_nonnegative_work_v2"
+NATIVE_COST_SCHEMA = "pre_action_native_nonnegative_work_v3"
 NATIVE_COST_PLAN_FEATURES = ("direct_answer", "read_once", "reduce_once", "gap_retrieval",
                              "existing_claim_chars", "output_budget_tokens")
 NATIVE_COST_FEATURE_NAMES = (*NATIVE_COST_PLAN_FEATURES, "first_input_tokens", "first_prefill_tokens",
-                             "first_host_load_tokens", "active_requests", "queued_requests")
+                             "first_host_load_tokens", "active_requests", "queued_requests",
+                             "future_input_tokens", "future_output_tokens", "future_steps", "gap_query_chars")
 
 
-def plan_cost_features(features, batch, first_quote):
+def plan_cost_features(features, batch, first_quote, reserve, *, gap_query_chars=0):
     """Use branch work known before the first action and actual Native pressure."""
+    from .admission import quoted_native_work
+
     input_tokens, prefill_tokens, host_load = 0, 0, 0
     if first_quote is not None:
         input_tokens = first_quote.input_len
-        host_load = max(0, min(first_quote.host_only_load_tokens, first_quote.native_load_estimate))
-        # As in CostModel.predict_native, only a full Host restore exposes the
-        # contiguous recoverable prefix beyond the ready GPU prefix.
-        full_restore = host_load > 0 and host_load == first_quote.host_only_load_tokens
-        usable_prefix = min(first_quote.match_limit, first_quote.recoverable_prefix_tokens
-                            if full_restore else first_quote.ready_gpu_prefix_tokens)
-        prefill_tokens = max(0, input_tokens-usable_prefix)
+        prefill_tokens, host_load = quoted_native_work(first_quote)
     values = {**{name: features[name] for name in NATIVE_COST_PLAN_FEATURES},
         "first_input_tokens": input_tokens, "first_prefill_tokens": prefill_tokens,
         "first_host_load_tokens": host_load, "active_requests": batch.active_requests,
-        "queued_requests": batch.queued_requests}
+        "queued_requests": batch.queued_requests, "future_input_tokens": reserve.future_input_tokens,
+        "future_output_tokens": reserve.future_output_tokens, "future_steps": reserve.future_steps,
+        "gap_query_chars": gap_query_chars}
     return values
 
 
@@ -354,8 +355,8 @@ def complete_plan(context_plan, answer_variants, *, semantic_kind, reader_checkp
 
 
 class PlanPolicy:
-    def __init__(self, gain_model: GainModel, *, limits=PolicyLimits()):
-        if gain_model is None:
+    def __init__(self, gain_model: GainModel | None, *, limits=PolicyLimits(), rule_baseline=False):
+        if gain_model is None and not rule_baseline:
             raise ValueError("plan-gain policy is not enabled without a reader-bound trained gain asset")
         self.gain_model, self.limits = gain_model, limits
         self.last_evaluations = ()
@@ -480,9 +481,11 @@ class PlanPolicy:
             (limits.max_host_peak_gib, cost.host_peak_gib, "host_capacity_budget"))
         return next((reason for limit, value, reason in checks if limit is not None and value > limit), None)
 
-    def choose_observed_actions(self, plans, state, native, reusable_prefixes, *, read_control=None):
+    def choose_observed_actions(self, plans, state, native, reusable_prefixes, *, read_control=None,
+                                gap_query_chars=0, joint_options=None):
         from .action_policy import choose_observed_action
-        return choose_observed_action(self, plans, state, native, reusable_prefixes, read_control=read_control)
+        return choose_observed_action(self, plans, state, native, reusable_prefixes, read_control=read_control,
+                                      gap_query_chars=gap_query_chars, joint_options=joint_options)
 
     def choose(self, plans, state: ReadingOutcome, native: NativePlanningState, reusable_prefixes, *,
                mandatory_coverage=False):

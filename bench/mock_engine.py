@@ -168,7 +168,8 @@ class MockEngine:
                 free_gpu_tokens=self.gpu_capacity_tokens-gpu, free_host_tokens=self.host_capacity_tokens-host,
                 quotes=tuple(self._quote(c) for c in candidates), fingerprint=fingerprint,
                 evictable_gpu_tokens=sum(s.gpu and not s.refs and not s.h2d for s in self._slots.values()),
-                evictable_host_tokens=sum(s.host and not s.refs and not s.d2h for s in self._slots.values()))
+                evictable_host_tokens=sum(s.host and not s.refs and not s.d2h for s in self._slots.values()),
+                client_received_monotonic=time.monotonic())
 
     async def prepare(self, engine_session_id, operation_id, expected_restart_id, *, business_session_id=None):
         async with self._lock:

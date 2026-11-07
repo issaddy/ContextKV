@@ -213,7 +213,7 @@ def answer_evaluation_view(turn: OnlineTurn, *, visible_evidence_manifest, audit
                 prior_outputs.append({**proof, "raw_output": step.result.raw_output})
         view["reading_conclusions"] = {
             "kind": "llamaindex_raw_prior_outputs", "outputs": prior_outputs}
-    elif reading_outcome is not None:
+    elif reading_outcome is not None and reading_outcome.answer_representation != "raw":
         from controller.claim_graph import ClaimGraph
         graph = ClaimGraph(reading_outcome.claims)
         plan = reading_outcome.plan.answer_plan

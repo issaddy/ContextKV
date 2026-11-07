@@ -85,7 +85,7 @@ class ServingRetriever:
         return EvidenceSelection(blocks, tuple(block.key for block in blocks),
             auxiliary_usage={"input_tokens": 0, "output_tokens": 0, "compute_ms": 0, "models": []})
 
-    def finish_request(self, task_id):
+    def finish_request(self, session_id, task_id):
         """This retriever owns no request-local support predictions."""
         if self.events is not None:
             self.events.emit("retrieval_request_finished", task_id=task_id)
