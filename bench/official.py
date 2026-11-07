@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import ast
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from functools import partial
 import importlib
@@ -19,6 +20,7 @@ import string
 from pathlib import Path
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 from typing import Mapping, Sequence
 from types import SimpleNamespace
 
@@ -256,12 +258,52 @@ def _conversation_fields(messages):
     return previous, messages[-1]["text"]
 
 
-def _structured_radbench(official, operation, *args):
+def _radbench_prompt(official, record):
+    previous, question = _conversation_fields(record["input"])
+    row = {"document": official.extract_document_texts(record["contexts"]),
+           "response": official.extract_texts(record["predictions"]),
+           "reference_answer": official.extract_reference(record["targets"]),
+           "previous_conversation": previous, "current_question": question}
+    # The author's formatter only consumes DataFrame.iterrows().
+    return official.format_conversation_radbench(SimpleNamespace(iterrows=lambda: iter(((0, row),))))[0]
+
+
+def _structured_radbench(official, operation, provider, model, input_path, output_path, *, workers, task_ids):
     extract, split = official.extract_conversation, official.split_conversation
     official.extract_conversation = lambda messages: messages
     official.split_conversation = _conversation_fields
     try:
-        return operation(*args)
+        rows = load_jsonl(input_path)
+        score = partial(operation, provider, model)
+        shards = [rows]
+        if workers == 2 and len(rows) > 1:
+            # Identical prompts must share a worker so a cold SQLite cache key
+            # has one writer, with later occurrences taking the existing hit.
+            groups = defaultdict(list)
+            for row in rows:
+                groups[_radbench_prompt(official, row)].append(row)
+            shards = [[], []]
+            for group in sorted(groups.values(), key=len, reverse=True):
+                min(shards, key=len).extend(group)
+            shards = [shard for shard in shards if shard]
+        if len(shards) == 1:
+            score(input_path, output_path)
+        else:
+            with TemporaryDirectory(prefix="rb-llm-", dir=Path(output_path).parent) as temporary:
+                root = Path(temporary)
+                inputs, outputs = [], []
+                for index, shard in enumerate(shards):
+                    source, target = root/f"input-{index}.jsonl", root/f"output-{index}.jsonl"
+                    source.write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in shard))
+                    inputs.append(str(source))
+                    outputs.append(str(target))
+                with ThreadPoolExecutor(max_workers=len(shards)) as pool:
+                    list(pool.map(score, inputs, outputs))
+                scored = [row for target in outputs for row in load_jsonl(target)]
+            order = {task_id: index for index, task_id in enumerate(task_ids)}
+            scored.sort(key=lambda row: order[row["task_id"]])
+            Path(output_path).write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in scored))
+        return {"workers": len(shards), "shard_tasks": [len(shard) for shard in shards]}
     finally:
         official.extract_conversation, official.split_conversation = extract, split
 
@@ -280,16 +322,10 @@ def load_radbench_contract(checkout):
         if isinstance(node, ast.FunctionDef) and node.name in names], type_ignores=[])
     namespace = {"ast": ast, "re": re}
     exec(compile(functions, str(path), "exec"), namespace)
+    official = SimpleNamespace(**namespace)
 
     def prompt(record):
-        previous, question = _conversation_fields(record["input"])
-        row = {"document": namespace["extract_document_texts"](record["contexts"]),
-               "response": namespace["extract_texts"](record["predictions"]),
-               "reference_answer": namespace["extract_reference"](record["targets"]),
-               "previous_conversation": previous, "current_question": question}
-        # The author's formatter only consumes DataFrame.iterrows(); no pandas is needed.
-        rows = SimpleNamespace(iterrows=lambda: iter(((0, row),)))
-        return namespace["format_conversation_radbench"](rows)[0]
+        return _radbench_prompt(official, record)
 
     identity = {"metric": "RB_llm", "source_commit": source["commit"],
                 "source_files": {relative: sha256((root / relative).read_bytes()).hexdigest()
@@ -325,7 +361,7 @@ def condition_metrics(official, rows, metrics):
 
 
 def score_http_stages(official, model, input_path, output_directory, *, answerability_adjustment=True,
-                      metrics=("RB_llm", "RL_F")):
+                      metrics=("RB_llm", "RL_F"), rb_llm_workers=2):
     """Reuse upstream metric functions; atomically retain each completed stage."""
     output = Path(output_directory)
     output.mkdir(parents=True, exist_ok=True)
@@ -345,7 +381,8 @@ def score_http_stages(official, model, input_path, output_directory, *, answerab
         name, function = operations[metric]
         operation = getattr(official, function)
         if metric == "RB_llm":
-            operation = partial(_structured_radbench, official, operation)
+            operation = partial(_structured_radbench, official, operation,
+                                workers=rb_llm_workers, task_ids=task_ids)
         stages.append((name, metric, operation))
     if has_underspecified:
         stages.append(("underspecified", "underspecified_eval", lambda provider, name, inp, out:
@@ -353,16 +390,23 @@ def score_http_stages(official, model, input_path, output_directory, *, answerab
     previous = Path(input_path)
     scored_by_id = {row["task_id"]: row for row in rows}
     reused_stages = []
+    rb_llm_execution = None
     for name, metric, operation in stages:
         target = output / f"{name}.jsonl"
+        provenance = output / "rb_llm.execution.json"
         if target.exists():
             reused_stages.append(name)
+            if name == "rb_llm" and provenance.exists():
+                rb_llm_execution = json.loads(provenance.read_text())
         else:
             pending = target.with_suffix(".pending.jsonl")
-            operation("vllm", model, str(previous), str(pending))
+            execution = operation("vllm", model, str(previous), str(pending))
             scored_ids = [r["task_id"] for r in load_jsonl(pending)]
             if sorted(scored_ids) != sorted(task_ids):
                 raise ValueError(f"official {name} output changed the task cohort")
+            if name == "rb_llm":
+                rb_llm_execution = execution
+                provenance.write_text(json.dumps(execution, indent=2)+"\n")
             pending.replace(target)
         # A completed stage may have been requested alone. Merge its own
         # metric rather than assuming the last cached file contains all stages.
@@ -380,12 +424,14 @@ def score_http_stages(official, model, input_path, output_directory, *, answerab
     pending.replace(target)
     return {"tasks": len(scored), "stages": [name for name, _, _ in stages], "reused_stages": reused_stages,
             "requested_metrics": list(metrics),
+            "rb_llm_execution": rb_llm_execution,
             "conditioned_suffix": suffix, "output": str(target)}
 
 
 def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_revision,
                        endpoint, max_tokens=2048, enable_thinking=None, answerability_adjustment=True,
-                       metrics=("RB_llm", "RL_F"), ragas_json_schema=False, ragas_max_tokens=None):
+                       metrics=("RB_llm", "RL_F"), ragas_json_schema=False, ragas_max_tokens=None,
+                       rb_llm_workers=2):
     """Offline official RB_llm/RL_F/IDK over frozen answers, with resumable HTTP calls.
 
     Run in the isolated evaluator environment. This function does not start a
@@ -397,6 +443,8 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
         raise ValueError("official source checkout is not the frozen MTRAG revision")
     if not model or not judge_revision or not endpoint:
         raise ValueError("HTTP scoring requires model, judge revision and endpoint")
+    if rb_llm_workers not in {1, 2}:
+        raise ValueError("RB_llm requires one or two workers")
     if ragas_max_tokens is not None and (
             not ragas_json_schema or type(ragas_max_tokens) is not int or ragas_max_tokens <= 0):
         raise ValueError("ragas_max_tokens requires ragas_json_schema and a positive integer budget")
@@ -439,10 +487,12 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
         ragas_json_schema=ragas_json_schema, ragas_max_tokens=ragas_max_tokens)
     try:
         result = score_http_stages(official, model, input_path, output,
-                                   answerability_adjustment=answerability_adjustment, metrics=metrics)
+                                   answerability_adjustment=answerability_adjustment, metrics=metrics,
+                                   rb_llm_workers=rb_llm_workers)
     finally:
         official.load_chat_openai_llm = loader
     receipt = {**result, **identity, "status": "completed", "endpoint": endpoint,
+               "rb_llm_workers_requested": rb_llm_workers,
                "endpoint_scope": "current invocation; reused stages may have run on a different endpoint",
                "adapter_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
                "backend": "OpenAI-compatible HTTP via the official vllm client branch",
@@ -472,6 +522,8 @@ def main(argv=None):
                         help="Constrain RAGAS output with its original prompt's Pydantic JSON schema")
     parser.add_argument("--ragas-max-tokens", type=int,
                         help="Output budget for requests matched by --ragas-json-schema")
+    parser.add_argument("--rb-llm-workers", type=int, choices=(1, 2), default=2,
+                        help="Parallel RB_llm shards for generation-http")
     parser.add_argument("--answerability-adjustment", action=argparse.BooleanOptionalAction, default=True,
                         help="Disable for datasets without the MT-RAG answerability labels; score raw RB_llm and RL_F only")
     args = parser.parse_args(argv)
@@ -509,7 +561,8 @@ def main(argv=None):
             judge_revision=args.judge_revision, endpoint=args.endpoint,
             max_tokens=args.max_tokens, enable_thinking=args.enable_thinking,
             answerability_adjustment=args.answerability_adjustment, metrics=args.metrics,
-            ragas_json_schema=args.ragas_json_schema, ragas_max_tokens=args.ragas_max_tokens)
+            ragas_json_schema=args.ragas_json_schema, ragas_max_tokens=args.ragas_max_tokens,
+            rb_llm_workers=args.rb_llm_workers)
     else:
         if not args.checkout:
             parser.error("evaluation requires --checkout")

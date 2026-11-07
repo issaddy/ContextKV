@@ -4,6 +4,10 @@
 
 正式运行位于 `runs/study-20261106-resume/final-joint-6888cf8-001`，沿用 `6888cf8` 的 A 与阅读协议。固定 B 的 c1、c4 两组依次运行 Native、ContextPilot 和 LlamaIndex Native，使用 GPU 0/1、3/5。收益 B 在 `reuse-completion/run-c1-gain`、`reuse-completion/run-c4-gain` 运行 Native、ContextPilot 及关闭跨轮事实复用的对照，使用 GPU 4/6、2/7。四组均为一张 reader 卡和一张 helper＋BGE 卡，共用 350 题／77 会话、到达序列和生成条件。当前联合输入为 `reuse-completion/joint-inputs.json`；各组计划和启动记录保存实际配置及提交，模型和大日志留在容器。
 
+当前正式固定 B＋Native 的 MultiDoc2Dial 已完成：c1、c4 均交付并评分 209/209，完整分母 RB_llm 分别为 0.799522、0.774641。结果位于 `fixed-native-multidoc-scores.json`，仅代表这一公开轨道。
+
+后续 `bench.official generation-http` 的 RB_llm 默认分两路调用原作者函数，按原题目顺序合并；相同提示共用一个分片和原 SQLite 缓存。`--rb-llm-workers 1` 可选择串行，实际分片数记录在 `rb_llm.execution.json`。IDK、RAGAS 与全队列条件化流程不变。已用现有 209 题缓存核对串行、并行输出及顺序完全一致，HTTP 与模型调用均为 0；没有重跑已完成评分。
+
 长文共享提取已得到 36 条、666 kg，多跳得到 1997。旧中断参照的 64 个答案已完成官方重评，完整声明分母与费用保留。
 
 Host 固定 token 配对已验证真实回载与重算：同一请求下，Native 回载 128、重算 129 tokens；独立前缀保留回载 256、重算 1 token。业务 epoch 退役后 owner 仍保留 Host 前缀。该结果验证生命周期，主实验保留策略仍为 Native；成功与初次接口失败的费用分别保存。
@@ -12,7 +16,7 @@ Host 固定 token 配对已验证真实回载与重算：同一请求下，Nativ
 
 30 个预声明、空历史相同的首轮题已完成 ranked 固定输入对照：RB_llm 为 0.846667，原 support 为 0.776667（12 胜、13 平、5 负），与 LlamaIndex 均分相同。对照通过 `bench.evidence_policy_comparison frozen --cells P0_source_first_shared` 仅设置 `selection.mode: ranked`，原记录池、TaskState、预算和历史逐条一致，两种选材均由固定 B 直接 ANSWER。该结果不包含初始检索，不能当作完整 P3 或端到端提速。30 个请求费用窗口完整；批次另按真实末采样时刻报告可观测积分，后续代码已修正结束戳与停止采样的顺序。
 
-ranked 的 c1 MultiDoc2Dial 完整 P3 已交付并评分 209/209，RB_llm 为 0.788038，比原 support 的完整分母结果高 0.10；LlamaIndex 为 0.806220。两次项目方法的在线批次物理窗口均完整：ranked 3727.844 秒、618329.213 GPU GiB·s、172118.183 Host GiB·s；support 14022.922 秒、2315683.243 GPU GiB·s、617252.311 Host GiB·s，包含其失败请求。这里报告的是该公开轨道的整批成本，完整 350 题目标尚未验收。
+此前资格比较中，ranked 的 c1 MultiDoc2Dial 完整 P3 已交付并评分 209/209，RB_llm 为 0.788038，比原 support 的完整分母结果高 0.10；LlamaIndex 为 0.806220。两次项目方法的在线批次物理窗口均完整：ranked 3727.844 秒、618329.213 GPU GiB·s、172118.183 Host GiB·s；support 14022.922 秒、2315683.243 GPU GiB·s、617252.311 Host GiB·s，包含其失败请求。这些旧配置结果单列，完整 350 题目标尚未验收。
 
 旧 support A 的 ContextPilot 队列、support Native 与 ranked 资格比较队列均已结束扩跑；原答案、失败和完整已付费用保留在各自运行目录。这些历史配置单列，不并入当前正式四格。
 
