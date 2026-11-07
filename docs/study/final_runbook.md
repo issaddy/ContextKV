@@ -2,7 +2,7 @@
 
 `test-0523` 使用容器默认 `python3`，Qwen3-32B 权重保持固定。主链已接通；当前工作是补齐 B 的 GAP 监督，并完成冻结 ranked A 的联合比较。完整 350 题质量与 P95 尚未验收。
 
-正式运行位于 `runs/study-20261106-resume/final-joint-6888cf8-001`，代码冻结为 `6888cf8`。固定 B 的 c1、c4 两组已启动，各依次运行 Native、ContextPilot 和 LlamaIndex Native；分别使用 GPU 0/1、3/5，每组一张 reader 卡和一张 helper＋BGE 卡。收益 B 两组使用同样的两卡配额、350 题／77 会话、到达序列和生成条件，待监督补齐后启动。`inputs/inputs.json`、各组 `capacity-plan.json` 记录实际配置；模型和大日志留在容器。
+正式运行位于 `runs/study-20261106-resume/final-joint-6888cf8-001`，沿用 `6888cf8` 的 A 与阅读协议；后续 `a2455a1` 统一离线 GAP 新增额度并删去线上重复检查。固定 B 的 c1、c4 两组依次运行 Native、ContextPilot 和 LlamaIndex Native，使用 GPU 0/1、3/5。收益 B 两组也已启动，使用 GPU 4/6、2/7，依次运行 Native、ContextPilot 及关闭跨轮事实复用的对照。四组均为一张 reader 卡和一张 helper＋BGE 卡，共用 350 题／77 会话、到达序列和生成条件。`inputs/inputs.json`、各组 `capacity-plan.json` 和启动记录保存实际配置及提交；模型和大日志留在容器。
 
 长文共享提取已得到 36 条、666 kg，多跳得到 1997。旧中断参照的 64 个答案已完成官方重评，完整声明分母与费用保留。
 
