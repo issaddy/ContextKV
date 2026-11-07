@@ -283,7 +283,10 @@ def prepare_full_queue(args, root):
         endpoints = [run.engine.base_url]
         if config["generation"].get("teacher_url"):
             endpoints.append(config["generation"]["teacher_url"])
-        roots = sorted({os.getpid(), *listening_processes([urlparse(url).port for url in endpoints])})
+        roots = set(listening_processes([urlparse(url).port for url in endpoints]))
+        if not args.prepare_only:
+            roots.add(os.getpid())
+        roots = sorted(roots)
     scope = dict(gpu_devices=args.online_gpu_devices, process_roots=roots,
         native_endpoint=run.engine.base_url, gpu_capacity_tokens=run.engine.gpu_capacity_tokens,
         host_capacity_tokens=run.engine.host_capacity_tokens,
