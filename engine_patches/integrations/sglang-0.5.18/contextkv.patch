@@ -1044,7 +1044,7 @@ new file mode 100644
 +                        generated_tokens=len(req.output_ids),
 +                        max_new_tokens=req.sampling_params.max_new_tokens,
 +                        ignore_eos=req.sampling_params.ignore_eos,
-+                        kv_allocated_tokens=req.kv.kv_allocated_len,
++                        kv_allocated_tokens=req.kv.kv_allocated_len if req.kv is not None else 0,
 +                        kv_committed_tokens=req.kv_committed_len,
 +                        cache_protected_tokens=req.cache_protected_len,
 +                        native_finished=req.finished(),
