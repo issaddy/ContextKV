@@ -568,7 +568,7 @@ async def test_actual_snapshot_cohort_needs_no_task_labels_and_keeps_native_witn
         {'run_path': str(run_path), 'run_sha256': file_digest(run_path)})
     assert terminal['attempt_id'] == run['attempt']['attempt_id'] != terminal['source_capture_attempt_id']
     assert terminal['native_condition_scope'] == 'actual_terminal_answer_only'
-    assert terminal['requested_families'] == ['reduce_once', 'gap_retrieval']
+    assert terminal['requested_families'] == ['read_once', 'reduce_once', 'gap_retrieval']
     assert terminal['paid_cost']['gpu_gib_ms'] == pytest.approx(2000+2000*(end-start))
     assert terminal['paid_cost']['gpu_peak_gib'] == 2  # the later ANSWER-side sample is only a boundary witness
     paid_tokens = sum(terminal['paid_cost'][key] for key in ('input_tokens', 'output_tokens'))

@@ -20,6 +20,9 @@ from training.reader_data import file_digest
 from training.train_plan_gain import actual_history
 
 
+TERMINAL_FAMILIES = ("read_once", "reduce_once", "gap_retrieval")
+
+
 def restore_read_catalog(state, original_plan):
     """Retain actual terminal tasks and the original, still-unread READ packs."""
     tasks = {task.step_id: task for task in state.plan.steps}
@@ -147,7 +150,7 @@ def terminal_observation(before, run, source_task, answer_event, online, templat
         "input_protocol": run["input_protocol"], "resident_model_manifest_digest": resident_digest,
         "evidence_selection_contract": evidence_selection_contract(resident),
         "gap_request": gap_request, "legal_actions": [plan.semantic_kind for plan in plans],
-        "requested_families": ["reduce_once", "gap_retrieval"]})
+        "requested_families": TERMINAL_FAMILIES})
 
 
 def export_terminal_observations(collection, template, output):
@@ -188,7 +191,7 @@ def export_terminal_observations(collection, template, output):
         stream.writelines(json.dumps(packet, ensure_ascii=False, allow_nan=False)+"\n" for packet in packets)
     coverage = {split: {action: sorted({packet["task_id"] for packet in packets
         if packet["cohort_split"] == split and action in packet["legal_actions"]})
-        for action in ("reduce_once", "gap_retrieval")} for split in ("train", "dev")}
+        for action in TERMINAL_FAMILIES} for split in ("train", "dev")}
     Path(str(output)+".manifest.json").write_text(json.dumps({"scope": "actual READ branch terminal states",
         "packets": len(packets), "action_coverage": coverage, "excluded": excluded,
         "output": str(output.resolve())}, indent=2)+"\n")
