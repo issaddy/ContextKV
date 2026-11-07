@@ -10,8 +10,9 @@ from typing import Iterable
 from .evidence import (EvidenceError, EvidencePolicy, allows_version_comparison, assign_references,
                        evidence_index, resolve_required_evidence_with_reasons, version_conflicts)
 from .schema import EvidenceBlock, EvidenceKey, Message, PromptCandidate, QueryContext, SessionSnapshot
-from .templates import (SYSTEM_PROMPT, ByteTemplate, Template, current_user_message,
-                        current_source_guide, longest_common_prefix, render_evidence_relations, verify_rendered_evidence)
+from .templates import (SYSTEM_PROMPT, ByteTemplate, Template, current_source_guide,
+                        current_user_parts, longest_common_prefix, rebuild_answer_messages,
+                        render_evidence_relations, verify_rendered_evidence)
 
 
 CandidatePolicy = EvidencePolicy
@@ -146,13 +147,13 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
             original = blocks if policy.layout == "contextpilot" else tuple(sorted(blocks, key=lambda b: b.key))
             orders = source_orderer(original)
         for index, ordered in enumerate(orders):
-            current, spans = current_user_message(query, ordered, references,
+            source_text, task_text, spans = current_user_parts(query, ordered, references,
                 message_index=message_index, reused=reused, layout=policy.layout,
                 retrieval_priority=retrieval_priority, table_annotations=table_annotations,
                 evidence_relations=evidence_relations, citation_scope=required_keys, source_guide=source_guide,
                 query_context=query_context, visible_bodies=visible_bodies, origin_guide=origin_guide,
                 preserve_source_order=source_orderer is not None)
-            yield "existing" if index == 0 else "existing:contextpilot", current, spans
+            yield "existing" if index == 0 else "existing:contextpilot", source_text, task_text, spans
 
     execution = snapshot.execution
     if execution is not None:
@@ -182,16 +183,17 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
         for span in execution.evidence_spans:
             if span.body_reference_id is None and span.key in visible:
                 visible_bodies.setdefault(archive[span.key].text, span)
-        for layout, current, spans in user_variants(missing, message_index=len(execution.messages),
+        for layout, source_text, task_text, spans in user_variants(missing, message_index=len(execution.messages),
                 reused=required_keys & visible, visible_bodies=visible_bodies):
+            current = Message("user", source_text + task_text)
             prompts.append((layout, "APPEND", (*execution.messages, current), (*execution.evidence_spans, *spans),
                             visible | frozenset(span.key for span in spans), reason))
 
-    messages = [system_message]
-    for turn in snapshot.raw_history:
-        messages.extend((Message("user", turn.user_text), Message("assistant", turn.assistant_text)))
-    for layout, current, spans in user_variants(required, message_index=len(messages)):
-        prompts.append((layout, "REBUILD", (*messages, current), spans, frozenset(span.key for span in spans), None))
+    history = tuple(message for turn in snapshot.raw_history for message in
+                    (Message("user", turn.user_text), Message("assistant", turn.assistant_text)))
+    for layout, source_text, task_text, spans in user_variants(required, message_index=1):
+        messages = rebuild_answer_messages(system_message, history, source_text, task_text, source_first=True)
+        prompts.append((layout, "REBUILD", messages, spans, frozenset(span.key for span in spans), None))
     conversations = tuple(prompt[2] for prompt in prompts)
     rendered = template.render_many(conversations)
     return tuple(candidate(*prompt, output) for prompt, output in zip(prompts, rendered, strict=True))
@@ -240,7 +242,7 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
         + "\nReading conclusions (shared scopes and complete source paths):\n" + dumps(conclusions)
         + "\nComputed results for the complete reading scope:\n" + computed)
 
-    def compile_user(ordered, message_index, reused=frozenset()):
+    def compile_sources(ordered, message_index):
         content, spans, physical = "", [], {}
         for unit in ordered:
             for source in unit.source_spans:
@@ -269,7 +271,10 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
                 spans.append(EvidenceSpan(block.key, message_index, start, end,
                     block.source_uri, block.provenance, ref,
                     source_start=source.start, source_end=source.end))
-        content += "\nSource spans [citation_id,start,end]: " + dumps(tuple(
+        return content, tuple(spans)
+
+    def compile_question(ordered, reused=frozenset()):
+        content = "\nSource spans [citation_id,start,end]: " + dumps(tuple(
             (by_key[span.source_key], span.start, span.end) for unit in ordered for span in unit.source_spans))
         if reused:
             content += "\nPreviously supplied sources: " + ", ".join(by_key[k] for k in sorted(reused))
@@ -279,19 +284,25 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
         content += "\nCitations allowed for this answer: " + (
             ", ".join(f"[{by_key[k]}]" for k in sorted(allowed)) or "none") + ".\n"
         content += f"\nQuestion:\n{query}\n"
-        return Message("user", content), tuple(spans)
+        return content
+
+    def compile_rebuild(ordered):
+        source_first = plan.read_layout == "source_first"
+        source_text, spans = compile_sources(ordered, 1 if source_first else len(history)+1)
+        task_text = compile_question(ordered)
+        return rebuild_answer_messages(system, history, source_text, task_text, source_first=source_first), spans
 
     # Full-scope reading retains every source in the step graph. The final window
     # carries root conclusions and a budgeted set of original supporting units.
     if plan.coverage_scope == "all_supplied_documents" or outcome is not None:
-        empty, _ = compile_user((), len(history)+1)
-        fixed_input_tokens = len(template.render((system, *history, empty)).input_ids)
+        empty, _ = compile_rebuild(())
+        fixed_input_tokens = len(template.render(empty).input_ids)
         excerpt_budget = min(plan.budget.body_tokens,
             max(0, plan.budget.window_tokens-plan.budget.output_tokens-fixed_input_tokens))
 
         def excerpt_tokens(proposed):
-            message, _ = compile_user(proposed, len(history)+1)
-            return len(template.render((system, *history, message)).input_ids)-fixed_input_tokens
+            messages, _ = compile_rebuild(proposed)
+            return len(template.render(messages).input_ids)-fixed_input_tokens
 
         def supports_point(unit, point):
             return any(source.source_key == leaf.source_key and source.start < leaf.end
@@ -389,15 +400,17 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
             actual_layout = layout if order_index == 0 else layout+":contextpilot"
             variants = []
             if "REBUILD" in actions:
-                current, spans = compile_user(ordered, len(history)+1)
-                variants.append(("REBUILD", (system, *history, current), spans, visible_originals(spans), None))
+                messages, spans = compile_rebuild(ordered)
+                variants.append(("REBUILD", messages, spans, visible_originals(spans), None))
             if snapshot.execution is not None and "APPEND" in actions:
                 legal, reason = append_legal(snapshot, state, required,
                                             tuple(span for unit in units for span in unit.source_spans))
                 execution = snapshot.execution
                 missing = tuple(u for u in ordered if any(not evidence_interval_covered(snapshot, s)
                                                            for s in u.source_spans))
-                current, new_spans = compile_user(missing, len(execution.messages), execution.visible_blocks)
+                source_text, new_spans = compile_sources(missing, len(execution.messages))
+                task_text = compile_question(missing, execution.visible_blocks)
+                current = Message("user", source_text + task_text)
                 variants.append(("APPEND", (*execution.messages, current),
                     (*execution.evidence_spans, *new_spans), visible_originals((*execution.evidence_spans, *new_spans)),
                     None if legal else reason))

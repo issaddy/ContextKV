@@ -36,6 +36,8 @@ flowchart TD
 
 从真实 ANSWER 窗口扣除任务、历史、输出和来源元数据后，再分配结论份额。READ 同时按实际输入和结构化输出预留打包窗口及依赖；预留考虑事实结构、非空行和正文长度。最终 ANSWER 先编译有效结论与来源链，再使用剩余空间容纳原文摘录。逐步账本区分实际可见原文与已读结论的来源。[窗口分配](../controller/context_budget.py) · [阅读计划](../controller/reading.py)
 
+source-first ANSWER 的实际顺序为系统、稳定原文、工作历史、当前任务与完整结论。原文直接入口与阅读后回答共用消息组装；选材测量和最终窗口使用相同布局。APPEND 延续已提交的 token 前缀，新增资料与当前任务追加在其后。
+
 同来源、版本与条件的数值 Need 共享提取。各 Need 的 `numeric_select` 按原事实 ID 生成布尔选择，按实际输入和输出容量有限分包，最后一包登记完整基底和已选事实。CPU 执行 `union/count/sum/group` 并保留来源父链，模型执行必要的 `summarize/compare/infer`。模型归约按有限输入分包，只有能合并至少两个完整结果才继续合并；未合并的结果也可进入 ANSWER。全资料覆盖与统计操作按任务要求完成；所选来源读完后的必要数值运算同样走固定规则。可选 REDUCE 受收益资产覆盖约束。[执行与归约](../controller/execution.py)
 
 固定 B 在原文实际完整可见或结论充分时跳过阅读。收益 B 在当前状态比较直接 ANSWER、下一 READ、当前 REDUCE 与一次 GAP。普通所选来源任务可回答已有依据的部分并说明缺口；全资料和统计任务仍检查覆盖与运算。选中 GAP 后才检索，未读范围为候选根，实际 READ 保留旧依赖，原 passage 额度只扣新增来源。每次执行后重新观察事实、缺口、预算和缓存状态。[动作决策](../controller/action_policy.py) · [滚动执行](../controller/rolling_policy.py)
@@ -55,6 +57,8 @@ flowchart TD
 ## 提交、评价与成本
 
 一个用户 attempt 可以包含多个内部步骤。最终回答、真实会话状态与旧 epoch 退役记录在一次提交中保存；下一轮据此读取实际 QA、已提交事实与来源目录。固定到达时间统一用于累计预算和完整响应，包含历史依赖及并发槽前等待。账本分别记录生成及辅助 token、完整响应、GPU/Host 物理积分和 unique KV 页；未测量的辅助用量保留空值。[服务与提交](../controller/service.py) · [账本](../controller/session_store.py)
+
+资料登记事件记录实际时间窗口和 CPU 用量，完整成本索引按事件身份排重。登记工作量单列，GPU/Host 费用使用共用采样积分。
 
 ### 故障恢复
 

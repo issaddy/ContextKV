@@ -345,6 +345,7 @@ class StudyEvidenceProvider:
                     blocks = tuple(block for block in pool.source_blocks if block.key in source_keys)
                     evidence_set = EvidenceSet("measurement", units, source_blocks=blocks)
                     plans.append(ContextPlan("measurement", state, evidence_set, budget=self.budget,
+                        read_layout=self.config.get("reading", {}).get("layout", "task_first"),
                         answer_system_prompt=self.answer_system_prompt if self.selection_mode == "ranked" else None))
                 return measure_plan_contexts(snapshot, query, plans, self.template, policy=policy)
 
@@ -420,7 +421,9 @@ class StudyEvidenceProvider:
                             read_packing=self.config.get("reading", {}).get("packing", "source_windows"
                                 if self.config.get("reading", {}).get("layout") == "source_first" else "mixed"))
                         if reading else ContextPlan(f"{request_id}:{selected.set_id}", state, selected,
-                            coverage, budget=self.budget))
+                            coverage, budget=self.budget,
+                            read_layout=self.config.get("reading", {}).get("layout", "task_first"),
+                            answer_system_prompt=self.answer_system_prompt))
                 plan = replace(plan, task_state=state)
                 if self.strategy == "Lmap":
                     plan = replace(plan, steps=tuple(replace(step, operation="summarize", shared_numeric_scopes=(),

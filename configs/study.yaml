@@ -1,7 +1,7 @@
 study:
   baseline_commit: 85f4ed4
   reader: qwen3_32b_nonthinking
-  strategy: B7
+  strategy: B6
   output_dir: runs/study
   seed: 42
   learning: false

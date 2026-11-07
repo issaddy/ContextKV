@@ -18,13 +18,15 @@ class DocumentQA:
     def register_documents(self, blocks, *, source_metadata=None):
         started, cpu_started = time.monotonic(), time.thread_time()
         documents = self.controller.store.register_document_set(blocks, source_metadata=source_metadata)
+        document_count = len({(block.key.corpus_id, block.key.document_id, block.key.version)
+                              for block in documents.blocks})
+        input_chars = sum(len(block.text) for block in documents.blocks)
+        ended, cpu_ended = time.monotonic(), time.thread_time()
         self.controller.events.emit("documents_registered", document_set_id=documents.document_set_id,
             corpus_snapshot_id=documents.corpus_snapshot_id, block_count=len(documents.blocks),
-            document_count=len({(block.key.corpus_id, block.key.document_id, block.key.version)
-                                for block in documents.blocks}),
-            input_chars=sum(len(block.text) for block in documents.blocks),
-            registration_cpu_ms=(time.thread_time()-cpu_started)*1000,
-            registration_ms=(time.monotonic()-started)*1000)
+            document_count=document_count, input_chars=input_chars,
+            registration_window={"start": started, "end": ended, "clock": "client_monotonic"},
+            registration_cpu_ms=(cpu_ended-cpu_started)*1000, registration_ms=(ended-started)*1000)
         return documents
 
     async def ask(self, session_id, query, request_id, *, task_id=None, supplied_blocks=None,

@@ -267,7 +267,14 @@ def current_source_guide(query: str, blocks: Iterable[EvidenceBlock],
             + json.dumps(rows, ensure_ascii=False, separators=(",", ":"))) if rows else ""
 
 
-def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
+def rebuild_answer_messages(system, history, source_text, task_text, *, source_first):
+    """Place a stable source payload ahead of history when the layout permits."""
+    if source_first and source_text:
+        return system, Message("user", source_text), *history, Message("user", task_text)
+    return system, *history, Message("user", source_text + task_text)
+
+
+def current_user_parts(query: str, blocks: Iterable[EvidenceBlock],
                          references: tuple[tuple[str, EvidenceKey], ...], *,
                          message_index: int,
                          reused: Iterable[EvidenceKey] = (), layout: str = "stable_key",
@@ -279,7 +286,7 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
                          citation_scope: Iterable[EvidenceKey] | None = None,
                          visible_bodies: Mapping[str, EvidenceSpan] | None = None,
                          preserve_source_order: bool = False,
-                         ) -> tuple[Message, tuple[EvidenceSpan, ...]]:
+                         ) -> tuple[str, str, tuple[EvidenceSpan, ...]]:
     by_key = {key: reference for reference, key in references}
     blocks, reused = tuple(blocks), tuple(reused)
     allowed = tuple(sorted(citation_scope if citation_scope is not None else
@@ -332,6 +339,7 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
         spans.append(span)
         bodies.setdefault(block.text, span)
         content += "\n</evidence_body>\n"
+    source_text, content = content, ""
     if layout == "contextpilot" or query_context is not None:
         from adapters.contextpilot import retrieval_order_annotation
         priority = tuple(dict.fromkeys(key for key in retrieval_priority if key in allowed))
@@ -366,7 +374,7 @@ def current_user_message(query: str, blocks: Iterable[EvidenceBlock],
     if origin_guide:
         content += "\n" + origin_guide + "\n"
     content += f"\nQuestion:\n{query}\n"
-    return Message("user", content), tuple(spans)
+    return source_text, content, tuple(spans)
 
 
 def verify_rendered_evidence(messages: tuple[Message, ...], spans: tuple[EvidenceSpan, ...],

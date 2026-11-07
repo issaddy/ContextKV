@@ -48,6 +48,8 @@ LlamaIndex 复用统一引擎、来源投影和成本账本。恢复按原 SQLit
 | 官方评分与离线重评 | `bench.study_scoring`、`bench.reassess_saved` | 全声明题目分母，失败、未完成、未评分及其已付费用 |
 | 全成本账本 | `profiling.study_cost_ledger` | 原始调用/采样引用、窗口并集、共享份额与未知覆盖 |
 
+将服务的 `state/events.jsonl` 作为 `profiling.study_cost_ledger --manifest` 输入，资料登记次数、累计墙钟工作量和 CPU 工作量在 `registration` 中单列；物理费用使用共用采样积分。
+
 配置入口为 `configs/study.yaml`、`study_matrix.yaml`、`evidence_policy_comparison.yaml`；
 P1 支持策略配置为 `configs/evidence_policy_fixed_qwen.yaml`。
 `bench.study prepare` 的公开 VersionQA 资产从 `assets.versionqa.source/questions` 指定的原文和 CSV 构建，复用 `bench.versionqa` 与 BM25/BGE 索引入口；其公开测试题与构造机制开发题分别登记。
@@ -61,7 +63,7 @@ B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v4` 及 GAP �
 
 B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_support_state_v2`，使用实际已付资源和剩余额度。
 
-当前 B 资产还必须携带 `input_protocol`：`merged_source_windows_actual_coverage_reused_facts_compiled_choice`、`read_output_reservation`、实际窗口粒度和 reader fingerprint。采集、分支、配对及加载全链核对该身份。实际 seed、已读覆盖、编译选中排列及报价的 `pre_action_input` 一并保留；事实复用消融仍使用相同 B 模型，实际状态反映关闭复用。
+当前 B 资产还必须携带 `input_protocol`：`merged_source_windows_actual_coverage_reused_facts_compiled_choice`、`read_output_reservation`、`answer_layout`、实际窗口粒度和 reader fingerprint。采集、分支、配对及加载全链核对该身份。实际 seed、已读覆盖、编译选中排列及报价的 `pre_action_input` 一并保留；事实复用消融仍使用相同 B 模型，实际状态反映关闭复用。
 
 动作收益资产的 `evidence_selection_contract` 来自实际 A manifest，绑定选材模式和顺序，以及 `support` 使用的效用、保留集合重排和支持模型记录身份。观测包和实际分支使用同一合同，开发集及线上提供器须与拟合资产匹配。语料、索引、B6/B7 和服务地址独立记录。
 

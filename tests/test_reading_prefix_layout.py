@@ -267,38 +267,76 @@ def test_request_compiler_binds_read_order_and_actual_encoded_source_geometry():
 
 
 def test_request_compiler_answer_reorders_only_actual_excerpts_and_preserves_task():
+    from controller.context_schema import TextRef
     from controller.engine_client import EngineInfo
+    from controller.prefix_view import actual_source_geometry
     from controller.request_compiler import RequestCompiler
-    from controller.schema import SessionSnapshot
+    from controller.schema import ExecutionLedger, Message, SessionSnapshot, TurnRecord
+    from controller.templates import longest_common_prefix, verify_evidence_spans
 
     class ReverseIndex:
         def propose_orders(self, identities, **scope):
             return (tuple(identities), tuple(reversed(identities)))
 
     template = ByteTemplate()
-    blocks = tuple(make_evidence(f'Row {index} has a complete source fact.', str(index)) for index in range(2))
+    body = '记录 S01：12 kg。\n' + 'A complete original source row. ' * 10
+    blocks = tuple(make_evidence(body, str(index)) for index in range(2))
     units = tuple(EvidenceUnit(str(index), (SourceSpan(str(index), block.key, 0, len(block.text)),), block.text)
                   for index, block in enumerate(blocks))
-    state = TaskState('task', 'Extract the source facts.', needs=(Need('extract', operation='extract'),))
-    current = ContextPlan('plan', state, EvidenceSet('sources', units, source_blocks=blocks))
-    snapshot = SessionSnapshot('s')
+    first = TurnRecord(1, 'Earlier question', 'Earlier answer')
+    second = TurnRecord(2, 'Different follow-up', 'Different answer')
+    state = TaskState('task', 'Extract the source facts.', needs=(Need('extract', operation='extract'),),
+        current_turn_id=2, working_history=(TextRef(1, 'user', 0, len(first.user_text)),))
+    current = ContextPlan('plan', state, EvidenceSet('sources', units, source_blocks=blocks),
+                          read_layout='source_first')
+    snapshot = SessionSnapshot('s', raw_history=(first,))
+    later = replace(snapshot, raw_history=(first, second))
+    next_state = replace(state, raw_question='Extract the measured value.', current_turn_id=3,
+        working_history=(TextRef(2, 'user', 0, len(second.user_text)),))
+    next_plan = replace(current, task_state=next_state)
     scope = EngineInfo('restart', fingerprint=template.fingerprint)
-    baseline = RequestCompiler(template).compile_answers(snapshot, state.raw_question, current,
-                                                        layouts=('existing',), actions=('REBUILD',))
+    native = RequestCompiler(template)
+    baseline, = native.compile_answers(snapshot, state.raw_question, current,
+                                       layouts=('existing',), actions=('REBUILD',))
     variants = RequestCompiler(template, ReverseIndex()).compile_answers(snapshot, state.raw_question, current,
         layouts=('existing',), actions=('REBUILD',), cache_scope=scope)
-    assert len(variants) == 2 and variants[0].input_ids == baseline[0].input_ids
+    assert len(variants) == 2 and variants[0].input_ids == baseline.input_ids
     assert variants[1].layout_id == 'existing:contextpilot'
-    assert variants[0].messages[:-1] == variants[1].messages[:-1]
+    assert variants[0].messages[0] == variants[1].messages[0]
+    assert variants[0].messages[1] != variants[1].messages[1]
+    assert variants[0].messages[2:-1] == variants[1].messages[2:-1]
     suffix = '\nCurrent task and active conditions:\n'
     assert variants[0].messages[-1].content.split(suffix)[1] == variants[1].messages[-1].content.split(suffix)[1]
     assert set(variants[0].source_ids) == set(variants[1].source_ids)
     assert variants[0].required_blocks == variants[1].required_blocks
     for candidate in variants:
-        assert candidate.evidence_body_tokens == sum(len(block.text.encode()) for block in blocks)
-        assert {span.key for span in candidate.evidence_spans} == {block.key for block in blocks}
+        assert candidate.evidence_body_tokens == len(blocks[0].text.encode())
+        assert all(span.message_index == 1 for span in candidate.evidence_spans)
+        assert verify_evidence_spans(candidate.messages, candidate.evidence_spans, blocks,
+                                     candidate.reference_map) == {block.key for block in blocks}
 
-    from controller.schema import ExecutionLedger, Message
+    compiled, = native.compile_answers(later, next_state.raw_question, next_plan,
+                                       layouts=('existing',), actions=('REBUILD',))
+    assert baseline.messages[2:-1] != compiled.messages[2:-1]
+    boundary = actual_source_geometry(template, baseline)['causal_boundary_tokens']
+    assert longest_common_prefix(baseline.input_ids, compiled.input_ids) >= boundary
+
+    control, following = tuple(native.compile_answers(history, task.raw_question,
+        replace(current, task_state=task, read_layout='task_first'),
+        layouts=('existing',), actions=('REBUILD',))[0]
+        for history, task in ((snapshot, state), (later, next_state)))
+    assert control.messages[1].content.endswith(first.user_text)
+    body_start = actual_source_geometry(template, control)['body_token_ranges'][0][0]
+    assert longest_common_prefix(control.input_ids, following.input_ids) < body_start
+
+    direct, followup = tuple(native.compile_answers(history, task.raw_question, retrieved=blocks)[0]
+                            for history, task in ((snapshot, state), (later, next_state)))
+    assert direct.messages[2:-1] != followup.messages[2:-1]
+    assert longest_common_prefix(direct.input_ids, followup.input_ids) >= actual_source_geometry(
+        template, direct)['causal_boundary_tokens']
+    assert verify_evidence_spans(direct.messages, direct.evidence_spans, blocks,
+                                 direct.reference_map) == {block.key for block in blocks}
+
     prior_block = make_evidence("Earlier reference remains in the committed input.", "prior")
     prior = RequestCompiler(template).compile_answers(snapshot, "First question", retrieved=(prior_block,))[0]
     execution = ExecutionLedger(1, "engine", 0, (*prior.messages, Message("assistant", "First answer")),
@@ -314,7 +352,10 @@ def test_request_compiler_answer_reorders_only_actual_excerpts_and_preserves_tas
         assert original.input_ids == base.input_ids
         assert reordered.layout_id == "existing:contextpilot"
         assert reordered.reference_map == base.reference_map and reordered.required_blocks == base.required_blocks
-        assert reordered.messages[:-1] == original.messages[:-1]
+        if base.action == "APPEND":
+            assert reordered.messages[:-1] == original.messages[:-1] == execution.messages
+        else:
+            assert reordered.messages[2:] == original.messages[2:]
         offset = len(prior.evidence_spans) if base.action == "APPEND" else 0
         assert reordered.evidence_spans[:offset] == prior.evidence_spans[:offset]
         assert reordered.source_ids[offset:] == original.source_ids[offset:][::-1]
