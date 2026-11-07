@@ -220,8 +220,9 @@ def _completed_steps(plan, state):
         old = executed.get(task.step_id)
         if task.step_id not in results or old is None:
             continue
-        if replace(old, input_budget=0, output_budget=0, output_schema={}) != replace(
-                task, input_budget=0, output_budget=0, output_schema={}):
+        # A new window allocation does not undo completed reading.
+        if replace(old, input_budget=0, output_budget=0, output_schema={}, retained_conclusion_tokens=()) != replace(
+                task, input_budget=0, output_budget=0, output_schema={}, retained_conclusion_tokens=()):
             continue
         if any(identity not in old_units or identity not in new_units or
                old_units[identity].source_spans != new_units[identity].source_spans or
