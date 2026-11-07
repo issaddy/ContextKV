@@ -107,6 +107,29 @@ def merge_offline_labels(predictions: Sequence[Mapping], references: Sequence[Ma
     return result
 
 
+# BERTScore passes model_max_length straight to encode. The author's DeBERTa
+# tokenizer does not declare it, so use the paired model's position limit.
+_ALGORITHMIC_RUNNER = """
+import runpy
+import sys
+from bert_score import scorer
+from transformers import AutoConfig
+
+original_get_tokenizer = scorer.get_tokenizer
+
+def get_tokenizer(model_type, use_fast=False):
+    tokenizer = original_get_tokenizer(model_type, use_fast=use_fast)
+    if model_type == "microsoft/deberta-xlarge-mnli":
+        tokenizer.model_max_length = AutoConfig.from_pretrained(model_type).max_position_embeddings
+        print(f"BERTScore {model_type} model_max_length={tokenizer.model_max_length}", flush=True)
+    return tokenizer
+
+scorer.get_tokenizer = get_tokenizer
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
+
 def evaluator_command(checkout: str | Path, mode: str, input_path: str | Path,
                       output_path: str | Path, *, python: str = sys.executable,
                       provider: str | None = None, model: str | None = None) -> list[str]:
@@ -117,7 +140,7 @@ def evaluator_command(checkout: str | Path, mode: str, input_path: str | Path,
     if mode == "retrieval":
         return [python, str(scripts / "run_retrieval_eval.py"), "--input_file", inp, "--output_file", out]
     if mode == "algorithmic":
-        return [python, str(scripts / "run_algorithmic.py"), "-i", inp, "-o", out,
+        return [python, "-c", _ALGORITHMIC_RUNNER, str(scripts / "run_algorithmic.py"), "-i", inp, "-o", out,
                 "-e", str(scripts / "config.yaml")]
     if mode == "generation":
         if provider not in {"hf", "vllm"} or not model:

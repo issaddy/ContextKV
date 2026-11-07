@@ -153,10 +153,14 @@ async def _official_scores(config, spec, directory, settings):
                    str(directory/"official-generation.execution.json")]
     if primary == "mtrageval_harmonic":
         algorithmic = directory/"official.algorithmic.jsonl"
-        command = [python, "-m", "bench.official", "algorithmic", "--checkout", checkout,
-            "--input", str(prepared), "--output", str(algorithmic), "--python", python]
         if not algorithmic.exists():
+            pending = algorithmic.with_suffix(".pending.jsonl")
+            command = [python, "-m", "bench.official", "algorithmic", "--checkout", checkout,
+                "--input", str(prepared), "--output", str(pending), "--python", python]
             await _command(command, directory, "official-algorithmic")
+            if sorted(row["task_id"] for row in load_jsonl(pending)) != sorted(row["task_id"] for row in merged):
+                raise ValueError("official algorithmic output changed the task cohort")
+            pending.replace(algorithmic)
         algorithmic_rows = {row["task_id"]: row for row in load_jsonl(algorithmic)}
         for row in records:
             row["metrics"] = {**row["metrics"], **algorithmic_rows[row["task_id"]]["metrics"]}
