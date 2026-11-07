@@ -201,11 +201,12 @@ def completed_source_coverage(plan, results, required):
                for unit in required for span in unit.source_spans)
 
 
-def direct_answer_reason(state, candidate):
-    """Require sufficient current conclusions or complete visible source ranges.
+def direct_answer_reason(state, candidate, *, require_complete_evidence=True):
+    """Distinguish skipping READ from delivering an answer with evidence gaps.
 
-    Statistical views additionally require their complete extraction basis and
-    this turn's deterministic reduction; visible originals cannot replace it.
+    Skipping READ requires sufficient evidence for every Need. An ANSWER may
+    report gaps in a selected-source scope. Explicit full-source scopes and
+    statistical views keep their completion requirements in either mode.
     """
     from .reading import numeric_selection_step_id
 
@@ -216,13 +217,16 @@ def direct_answer_reason(state, candidate):
     results = tuple(state.results)
     for need in plan.task_state.needs:
         full_scope = plan.coverage_scope == "all_supplied_documents" or need.scope == "all_supplied_documents"
+        numeric = need.operation in {"count", "sum", "group"}
+        if not require_complete_evidence and not full_scope and not numeric:
+            continue
         required = tuple(units[identity] for identity in plan.coverage_units) if full_scope else tuple(
             unit for unit in units.values() if not unit.need_ids or need.need_id in unit.need_ids)
         read_results = tuple(result for result in results if result.step_id in tasks
             and tasks[result.step_id].kind == "READ" and need.need_id in tasks[result.step_id].need_ids)
         facts_complete = bool(required) and completed_source_coverage(plan, read_results, required)
         point = points.get(need.need_id)
-        if need.operation in {"count", "sum", "group"}:
+        if numeric:
             if not facts_complete:
                 return "numeric_fact_scope_incomplete"
             selector_id = numeric_selection_step_id(plan, need.need_id)

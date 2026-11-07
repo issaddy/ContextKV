@@ -60,6 +60,7 @@ class Attempt:
     reading_elapsed_ms: float = 0.0
     auxiliary_usage: dict | None = None
     final_step_id: str | None = None
+    cache_config_hash: str | None = None
 
 
 ACTIVE_STAGES = ("STARTED", "PLANNED", "PREPARING", "PREPARED", "SUBMITTED", "RESULT_READY")

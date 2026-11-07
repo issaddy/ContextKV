@@ -566,7 +566,7 @@ def _split_unit(unit, char_end, sequence):
 
 def read_output_reservation(state, task, units, tokenizer, *, dependency_ids=(),
                             output_tokens_per_fact=64, reading_mode="typed_reduce"):
-    """Reserve complete fact rows once per shared scope, or once per isolated Need."""
+    """Estimate fact wire and content once per shared scope or isolated Need."""
     if (task.kind != "READ" or task.operation == "summarize" or output_tokens_per_fact is None
             or not state.needs or reading_mode == "coverage_only"):
         return 0
@@ -597,16 +597,16 @@ def read_output_reservation(state, task, units, tokenizer, *, dependency_ids=(),
         for need in needs:
             if need.need_id in shared_ids:
                 continue
-            entries = (max(1, len({line for line in unit.text.splitlines() if line.strip()}))
-                if need.operation in {"enumerate", "procedure", "count", "sum", "group"} else 1)
+            entries = max(1, len({line for line in unit.text.splitlines() if line.strip()}))
             fact = {"n": next(alias for alias, identity in aliases.items() if identity == need.need_id),
                     "t": "", "e": "", "r": "", "v": None, "u": "",
                     "c": [condition_refs[identity] for identity in need.condition_ids], "f": [],
                     "s": [alias for alias, identity in sources.items()
                           if identity in {span.span_id for span in unit.source_spans}],
                     "p": [f"p{index}" for index in range(len(task.input_claim_ids))]}
-            total += entries*(len(encode(json.dumps(fact), add_special_tokens=False))
-                              +output_tokens_per_fact+1)
+            body_tokens = len(encode(unit.text, add_special_tokens=False))
+            total += entries*(len(encode(json.dumps(fact), add_special_tokens=False))+1)
+            total += max(entries*output_tokens_per_fact, body_tokens)
     return total
 
 
@@ -688,7 +688,7 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
 
     def input_size(units):
         task = replace(prototype, step_id=f"{_step_prefix}read:{len(packs)}")
-        return len(template.render(step_messages(plan, task, pack_closure(units), input_claims,
+        return len(template.render(step_messages(plan, task, units, input_claims,
                                                  snapshot=snapshot)).input_ids)
 
     def output_size(units):
@@ -697,7 +697,8 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
             reading_mode=reading_mode)
 
     def fits(units):
-        return input_size(units) <= maximum and output_size(units) <= output_budget
+        closed = pack_closure(units)
+        return input_size(closed) <= maximum and output_size(closed) <= output_budget
 
     def finish_pack():
         nonlocal pack

@@ -564,7 +564,8 @@ class PlanPolicy:
                     cost += option.cost
                 reason = self._constraint(cost, state.plan.budget)
                 if ordered[0].task.kind == "ANSWER":
-                    reason = direct_answer_reason(state, route[0].candidate) or reason
+                    reason = direct_answer_reason(
+                        state, route[0].candidate, require_complete_evidence=False) or reason
                 budgets = {step.task.step_id: option.output_budget for step, option in zip(ordered, route, strict=True)}
                 gain = (0.0 if mandatory_coverage or plan.semantic_kind == "direct_answer" else self.gain_model.predict(
                     plan_features(plan, state, output_budgets=budgets)))

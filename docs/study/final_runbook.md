@@ -1,36 +1,18 @@
 # 当前课题运行入口
 
-`test-0523` 使用容器默认 `python3`，Qwen3-32B 权重保持固定。主链及 B 三类动作监督已接通；当前推进冻结 ranked A 的联合比较，并修正实测暴露的执行问题。完整 350 题质量与 P95 尚未验收。
+`test-0523` 使用容器默认 `python3`，Qwen3-32B 权重固定。当前优先收口统一业务链：跨轮事实调度、READ 输出分包、部分证据下的停止决策，以及资料身份和执行恢复。完成整链审核及短原生验证后，再冻结联合比较。
 
-正式运行位于 `runs/study-20261106-resume/final-joint-6888cf8-001`，沿用 `6888cf8` 的 A 与阅读协议。固定 B 的 c1、c4 两组依次运行 Native、ContextPilot 和 LlamaIndex Native，使用 GPU 0/1、3/5。收益 B 在 `reuse-completion/run-c1-gain`、`reuse-completion/run-c4-gain` 运行 Native、ContextPilot 及关闭跨轮事实复用的对照，使用 GPU 4/6、2/7。四组均为一张 reader 卡和一张 helper＋BGE 卡，共用 350 题／77 会话、到达序列和生成条件。当前联合输入为 `reuse-completion/joint-inputs.json`；各组计划和启动记录保存实际配置及提交，模型和大日志留在容器。
+原协议运行位于 `runs/study-20261106-resume/final-joint-6888cf8-001`，使用 350 题／77 会话和共同到达序列。固定 B 的 c1/c4 使用 GPU 0/1、3/5；收益 B 使用 4/6、2/7，每组一张 reader 卡和一张 helper＋BGE 卡。四组已收尾，协调器和评价进程退出，原生请求清空；整段物理窗口和收尾费用按并集计量，四组覆盖均完整，见 `engineering-stop-summary.json`。计划、答案和费用保留，模型及大日志留在容器。这批记录只解释原实现，不与新协议结果混成正式四格。
 
-当前正式固定 B＋Native 的 MultiDoc2Dial 已完成：c1、c4 均交付并评分 209/209，完整分母 RB_llm 分别为 0.799522、0.774641。结果位于 `fixed-native-multidoc-scores.json`，仅代表这一公开轨道。
+固定 B＋Native 的 MultiDoc2Dial 已交付并评分 209/209：c1 RB_llm 为 0.799522，c4 为 0.774641，见该目录的 `fixed-native-multidoc-scores.json`。完整 350 题质量与 P95 目标尚未验收。
 
-后续 `bench.official generation-http` 的 RB_llm 默认分两路调用原作者函数，按原题目顺序合并；相同提示共用一个分片和原 SQLite 缓存。`--rb-llm-workers 1` 可选择串行，实际分片数记录在 `rb_llm.execution.json`。IDK、RAGAS 与全队列条件化流程不变。已用现有 209 题缓存核对串行、并行输出及顺序完全一致，HTTP 与模型调用均为 0；没有重跑已完成评分。
+B 的小批资产摘要在 `b-ranked-gap-native-4t3/summary.json`：24 个训练配对、20 个状态，覆盖 READ/REDUCE/GAP；开发 10 个配对、8 个状态，质量 MAE 为 0.287940。非负工作量成本头修复了空闲容量导致预测截零的问题，24/10 标签和质量权重未改。新的 READ 分包身份已加入监督协议，下一批仅重做实际输入或动作改变的监督，不把旧资产标成新协议。
 
-长文共享提取已得到 36 条、666 kg，多跳得到 1997。旧中断参照的 64 个答案已完成官方重评，完整声明分母与费用保留。
+工程修复依据：`work-cost/reuse-completion-replay.json` 保存 23 个真实状态、53 个候选的逻辑复用修复回放；`engineering-closure-read-packing.json` 保存 8 个截断包与 40 个已完成请求的 CPU 分包检查。原失败和全部已付调用保留。初次成本诊断中断的物理尾段缺失明确记录在 `cost-extrapolation-summary.json`；随后收尾费用以原窗口和 shutdown 窗口并集计量。
 
-Host 固定 token 配对已验证真实回载与重算：同一请求下，Native 回载 128、重算 129 tokens；独立前缀保留回载 256、重算 1 token。业务 epoch 退役后 owner 仍保留 Host 前缀。该结果验证生命周期，主实验保留策略仍为 Native；成功与初次接口失败的费用分别保存。
+READ/统计与缓存机制已有局部实测：共享长文得到 count=36、sum=666 kg，多跳得到 1997；固定输入 Host 配对中 Native 回载128、重算129 tokens，独立保留回载256、重算1 token。这些结果不代表完整队列收益；主矩阵保留策略仍为 Native，C 的主变量是请求编译。
 
-已完成的 c1 MultiDoc2Dial：support A＋固定 B＋Native 交付 196/209，完整分母 RB_llm 为 0.688038；LlamaIndex Native 交付 209/209，为 0.806220。两者 MT-RAG 各 41 个答案已完整评分，harmonic 分别为 0.524363、0.557842。DeBERTa 位置上限适配后复用既有答案补齐 algorithmic；两项截断的 RAGAS 输出另以 4096 上限补齐，新旧 NLI 输入相同、旧文本为新输出前缀，其余分量未改。原调用和补齐费用分别保留。新批次显式设置 `scoring.ragas_json_schema: true`、`scoring.ragas_max_tokens: 4096`，只作用于 RAGAS 结构输出，RB 仍为 2048。c1 尚未运行的 versionqa/loong 和外部 c4 仍须补齐。
-
-30 个预声明、空历史相同的首轮题已完成 ranked 固定输入对照：RB_llm 为 0.846667，原 support 为 0.776667（12 胜、13 平、5 负），与 LlamaIndex 均分相同。对照通过 `bench.evidence_policy_comparison frozen --cells P0_source_first_shared` 仅设置 `selection.mode: ranked`，原记录池、TaskState、预算和历史逐条一致，两种选材均由固定 B 直接 ANSWER。该结果不包含初始检索，不能当作完整 P3 或端到端提速。30 个请求费用窗口完整；批次另按真实末采样时刻报告可观测积分，后续代码已修正结束戳与停止采样的顺序。
-
-此前资格比较中，ranked 的 c1 MultiDoc2Dial 完整 P3 已交付并评分 209/209，RB_llm 为 0.788038，比原 support 的完整分母结果高 0.10；LlamaIndex 为 0.806220。两次项目方法的在线批次物理窗口均完整：ranked 3727.844 秒、618329.213 GPU GiB·s、172118.183 Host GiB·s；support 14022.922 秒、2315683.243 GPU GiB·s、617252.311 Host GiB·s，包含其失败请求。这些旧配置结果单列，完整 350 题目标尚未验收。
-
-旧 support A 的 ContextPilot 队列、support Native 与 ranked 资格比较队列均已结束扩跑；原答案、失败和完整已付费用保留在各自运行目录。这些历史配置单列，不并入当前正式四格。
-
-当前实现已补齐来源版本过滤、必需数值归约、选择报价到执行的传递，以及直接 ANSWER 的来源编排。Native 对尚未分配 KV 的排队请求也已正确报价；原失败费用保留。
-
-最新 READ 提示合并重复事实引用，清单逐项保留必要限定；`union/group` 只去重完整相同的事实。一次原截断步骤回放保留原来源、顺序、schema、采样和 2048 上限，输出由 length/2048 变为 stop/1315，解析出 13 条事实；稳定来源消息与任务 payload 均相同。
-
-ranked B 的小批次已完成：声明 8/4 个源任务，实际历史 48/24 轮。初始已知超窗动作从拟合中排除，原失败费用保留；复用 11 个真实 READ 后状态，合并得到 18/10 个训练／开发配对，分别来自 14/8 个状态和 7/4 个源任务。当前训练含 READ、REDUCE，开发集还有 1 个未训练 GAP；预测覆盖为 9/10，已覆盖动作 MAE 为 0.157019，整体 MAE 留空。原生分支未重跑；旧工作流只因开发评估遇到未训练 GAP 而报错的部分已用 CPU 补齐。数据、来源及成本摘要在 `runs/study-20261106-resume/b-ranked-3abfde2/summary.json`，模型仍留在实验容器。
-
-GAP 补充采集位于 `b-ranked-gap-native-4t3`：按原始训练问题的跨轮指代和来源切换预选 4 个第三轮目标，完成 12 个真实 P3 轮次，得到 4 个 READ 配对及其真实终端状态中的 2 个 GAP 配对。合并后有 24 个训练配对、20 个状态、11 个实际源任务，覆盖 READ 18、REDUCE 4、GAP 2。原开发 4 会话、10 个配对未改动，预测覆盖 10/10，质量 MAE 为 0.287940。当前资产为 `gain-work-cost/plan-gain.json`；它复用全部原标签和质量权重，只从原生报价重算工作量并在 CPU 上重拟合成本。
-
-初次收益 B 运行暴露了成本外推错误：空闲容量被当成负费用，118 个已记录候选中有 35 个未来费用被截零。`2d539eb` 改用非负工作量成本头，同一批报价重算后零费用为 0；这只是预测修复，最终收益仍待完整队列。两组原运行已停止，答案与原生调用保留。组信号同时打断采样子进程，整体物理尾段缺失；`cost-extrapolation-diagnosis.json` 和各组 `observed-physical-coverage.json` 显式记录已观测范围与未知尾段。`e83abd5` 将采样子进程独立于协调器退出信号，收尾仍等待真实采样完成。
-
-随后发现结论预算重分配使逻辑复用 READ 被误判为未完成，动作候选因而多出历史步骤。`5119e7a` 将 `retained_conclusion_tokens` 与其它预算字段一并排除出已执行计算身份，保留 Need、条件、父事实及原文一致性。23 个真实失败状态、53 个候选的 CPU 重放全部恢复；24/10 个训练／开发配对的特征与标签未变，无需重采或重训。该轮停止单独测量至原生请求归零，协调器与收尾物理窗口均完整，费用按窗口并集计量。记录在 `work-cost/reuse-completion-replay.json`、`reuse-training-review.json` 和各组 `reuse-stop-cost.json`。
+`bench.official generation-http` 的 RB_llm 默认以两路调用作者函数，相同提示留在同一分片并共用原 SQLite 缓存，结果按原题目顺序合并。`--rb-llm-workers 1` 使用串行；实际分片数见 `rb_llm.execution.json`。已有209题缓存核对串并结果和顺序完全一致，新增模型调用为0；IDK、RAGAS 和全分母评分规则不变。
 
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 

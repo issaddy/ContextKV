@@ -281,7 +281,7 @@ class RollingPlanRuntime:
         return merge_auxiliary_usage(dict(ZERO_AUX), *usage)
 
     async def _finish_gap(self, record, pool, state, snapshot, template, executor, expanded, events):
-        from .action_proposals import GapRetrievalRequest, gap_retrieval_plan
+        from .action_proposals import GapRetrievalRequest, claim_predecessor_steps, gap_retrieval_plan
         from .context_budget import bind_answer_window
         from .evidence_planner import _passages, close_dependencies
         from .execution import ReadingBudgetExceeded
@@ -320,9 +320,9 @@ class RollingPlanRuntime:
                 reading_mode=old.reading_mode, separate_needs=old.separate_needs,
                 numeric_identity=old.numeric_identity, read_layout=old.read_layout, read_packing=old.read_packing,
                 answer_system_prompt=old.answer_system_prompt)
-            fresh = tuple(replace(task, step_id="gapread:"+record.step_id+":"+task.step_id, input_claim_ids=parents,
-                predecessor_step_ids=tuple(dict.fromkeys((record.step_id, *(parent.rsplit(":claim:", 1)[0]
-                    for parent in parents))))) for task in gap.steps)
+            predecessors = (record.step_id, *claim_predecessor_steps(state.results, parents))
+            fresh = tuple(replace(task, step_id="gapread:"+record.step_id+":"+task.step_id,
+                input_claim_ids=parents, predecessor_step_ids=predecessors) for task in gap.steps)
             added_coverage = gap.coverage_units
             selected = replace(selected, selected_units=tuple({**{unit.unit_id: unit for unit in old.selected_set.selected_units},
                 **{unit.unit_id: unit for unit in gap.selected_set.selected_units}}.values()))
@@ -637,7 +637,7 @@ class RollingPlanRuntime:
             plan = chosen.context_plan
             if decision.next_step.task.kind == "ANSWER":
                 from .context_budget import direct_answer_reason
-                reason = direct_answer_reason(state, decision.next_step.candidate)
+                reason = direct_answer_reason(state, decision.next_step.candidate, require_complete_evidence=False)
                 if reason is not None:
                     raise ValueError(f"terminal ANSWER has not completed its evidence: {reason}")
                 spent = native.paid_cost.input_tokens+native.paid_cost.output_tokens
@@ -732,16 +732,22 @@ class RollingPlanRuntime:
                             numeric_identity=state.plan.numeric_identity, read_layout=state.plan.read_layout,
                             read_packing=state.plan.read_packing,
                             answer_system_prompt=state.plan.answer_system_prompt)
-                        predecessors = tuple(dict.fromkeys(parent.rsplit(":claim:", 1)[0] for parent in parents))
+                        from .action_proposals import claim_predecessor_steps
+                        predecessors = claim_predecessor_steps(state.results, parents)
+                        physical = {record.step_id for record in state.steps}
+                        completed = {result.step_id for result in state.results}
+                        imported = tuple(task for task in state.plan.steps
+                            if task.kind == "READ" and task.step_id in completed and task.step_id not in physical)
+                        history = (*imported, *(record.task for record in state.steps))
+                        fresh = tuple(replace(task, predecessor_step_ids=predecessors) for task in gap.steps)
                         gap = replace(gap, plan_id=f"gap:{len(expanded)}:{state.plan.plan_id}",
-                            steps=tuple(record.task for record in state.steps)+tuple(replace(task,
-                                predecessor_step_ids=predecessors) for task in gap.steps),
+                            steps=(*history, *fresh),
                             selected_set=replace(selected, selected_units=tuple({**previous,
                                 **{unit.unit_id: unit for unit in gap.selected_set.selected_units}}.values())),
                             auxiliary_ms=state.plan.auxiliary_ms)
                         from .context_budget import bind_answer_window
                         gap = bind_answer_window(replace(gap, answer_allocation=None), template, snapshot,
-                            preserve_step_ids=tuple(record.step_id for record in state.steps))
+                            preserve_step_ids=tuple(task.step_id for task in history))
                         gap = namespace_plan(gap)
                         context_plans = (gap, *tuple(item for item in context_plans
                             if item.plan_id != state.plan.plan_id)[:self.policy.limits.max_plan_candidates-2])
@@ -799,8 +805,6 @@ class FixedReadingObserver:
                     if self.gap_retriever_identity is not None else None),
                 "after_step_id": state.steps[-1].step_id if state.steps else None,
                 "after_step_kind": state.steps[-1].task.kind if state.steps else None,
-                # Offline registration permits a forced DIRECT on a partial state.
-                # The live ANSWER separately requires sufficient evidence.
                 "legal_actions": [plan.semantic_kind for plan in plans],
                 "observation_overhead": {"clock": "client_monotonic", "start": started,
                     "pre_arrival_startup_ms": startup_ms,

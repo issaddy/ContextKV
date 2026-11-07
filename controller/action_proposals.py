@@ -28,6 +28,12 @@ def gap_query(state, open_needs):
     return "\n\n".join(SourceDirectory.open_need_query(state, need) for need in open_needs)
 
 
+def claim_predecessor_steps(results, claim_ids):
+    """Resolve current producers from results, including logical reuse steps."""
+    producers = {claim.claim_id: result.step_id for result in results for claim in result.claims}
+    return tuple(dict.fromkeys(producers[identity] for identity in claim_ids if identity in producers))
+
+
 def bind_read_parents(task, state):
     """Give the next READ the facts that establish its unresolved relations."""
     parents = tuple(dict.fromkeys((*task.input_claim_ids,
@@ -95,9 +101,8 @@ def observed_reduction_task(frozen):
                     else set(inputs) <= set(result.reduction.basis_claim_ids))
                for result in frozen.results):
             continue
-        producers = {claim.claim_id: result.step_id for result in frozen.results for claim in result.claims}
-        predecessors = (selection.step_id,) if shared_numeric else tuple(
-            dict.fromkeys(producers[claim] for claim in inputs if claim in producers))
+        predecessors = ((selection.step_id,) if shared_numeric
+                        else claim_predecessor_steps(frozen.results, inputs))
         identity = hashlib.sha256(dumps((need.need_id, operation, inputs, predecessors)).encode()).hexdigest()[:16]
         return ReadTask("policy:observed:reduce:"+need.need_id+":"+identity, "REDUCE", (need.need_id,),
             input_claim_ids=inputs, reduction_basis_claim_ids=inputs,
@@ -155,8 +160,10 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
                                                    for name in ("max_units", "max_passages")):
             raise ValueError("registered GAP requires retriever identity and positive limits")
         parents = tuple(dict.fromkeys(parent for need in gap_request.open_needs for parent in need.parent_claim_ids))
+        predecessors = tuple(dict.fromkeys((*(record.step_id for record in frozen.steps),
+                                            *claim_predecessor_steps(frozen.results, parents))))
         task = ReadTask("policy:gap:"+identity, "GAP", tuple(dict.fromkeys(need.need_id for need in gap_request.open_needs)),
-            input_claim_ids=parents, predecessor_step_ids=tuple(record.step_id for record in frozen.steps),
+            input_claim_ids=parents, predecessor_step_ids=predecessors,
             input_budget=0, output_budget=0, operation="retrieve")
         add("gap_retrieval", (task,) if include_gap_step else ())
     return tuple(branches), ()

@@ -9,6 +9,7 @@ def input_protocol(fingerprint):
     """Bind semantics and actual tokenizer/template scope, independently of continuation."""
     return {
         "semantics": "merged_source_windows_actual_coverage_reused_facts_compiled_choice",
+        "read_output_reservation": "per_line_fact_wire_and_body_tokens",
         "source_windows": {"tokens": SOURCE_WINDOW_TOKENS, "nonempty_lines": SOURCE_WINDOW_LINES},
         "source_identity": "content_hash_and_original_coordinates",
         "reader_fingerprint": to_jsonable(fingerprint),

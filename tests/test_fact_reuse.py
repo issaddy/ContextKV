@@ -346,7 +346,7 @@ def test_committed_reading_reopens_with_canonical_native_types_for_next_turn(tmp
     from reading_helpers import ScriptedReadingEngine, fact, material, read_output
 
     async def commit_actual_read():
-        block, unit = material('Eligible applicants use the online form.\n'*100)
+        block, unit = material('Eligible applicants use the online form.\n')
         state = TaskState('task', 'How do eligible applicants apply?',
             needs=(Need('n', (TextRef(1, 'user', 0, 32),), operation='procedure'),), current_turn_id=1)
         template = ByteTemplate()

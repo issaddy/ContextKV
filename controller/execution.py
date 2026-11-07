@@ -5,6 +5,7 @@ from dataclasses import replace
 import json
 import time
 
+from .action_proposals import claim_predecessor_steps
 from .claim_graph import ClaimGraph, claim_frontier
 from .context_schema import ReadResult, ReadingOutcome, ReductionState, StepRecord
 from .engine_client import EngineError
@@ -168,7 +169,7 @@ def reduction_schedule(plan, task, basis, results, snapshot, template):
         "merged" if len(bundles) == 1 else "forest")
 
 
-def logical_reduction_task(plan, task, basis):
+def logical_reduction_task(plan, task, basis, results):
     """Recover the existing logical reduction from its finite call identity."""
     identity = task.step_id.split(":part:0:", 1)[0].split(":merge:", 1)[0]
     shares = task.retained_conclusion_tokens
@@ -177,9 +178,9 @@ def logical_reduction_task(plan, task, basis):
     elif plan.answer_allocation is not None:
         shares = tuple((need, tokens) for need, tokens in plan.answer_allocation.need_tokens
                        if need in task.need_ids)
-    return replace(task, step_id=identity,
-        input_claim_ids=tuple(claim.claim_id for claim in basis),
-        predecessor_step_ids=tuple(dict.fromkeys(claim.claim_id.rsplit(":claim:", 1)[0] for claim in basis)),
+    parents = tuple(claim.claim_id for claim in basis)
+    return replace(task, step_id=identity, input_claim_ids=parents,
+        predecessor_step_ids=claim_predecessor_steps(results, parents),
         retained_conclusion_tokens=shares)
 
 
@@ -484,8 +485,9 @@ class ReadingExecutor:
                 raise EngineError("READ_STEP_RECEIPT_MISMATCH")
             if not generation.generation_complete or not receipt.generation_complete:
                 raise EngineError("READ_STEP_INCOMPLETE")
+            info = await self.engine.info()
             observed = self.request_compiler.observe_executed(candidate, receipt,
-                cache_scope=await self.engine.info())
+                cache_config_hash=info.cache_config_hash, engine_restart_id=info.engine_restart_id)
             record = replace(record, metrics={**record.metrics, "source_view": observed})
             self.store.save_execution_step(record, "RESULT_READY", generation)
             if not text_callback and generation.finish_reason in {"length", "max_tokens"}:
@@ -502,7 +504,7 @@ class ReadingExecutor:
                 by_id.update((claim.claim_id, claim) for claim in claims)
                 basis = (tuple(by_id[identity] for identity in task.reduction_basis_claim_ids)
                          if task.reduction_basis_claim_ids else claims)
-                logical = logical_reduction_task(plan, task, basis)
+                logical = logical_reduction_task(plan, task, basis, results)
                 pending, frontier, mode = reduction_schedule(
                     plan, logical, basis, (*results, result), snapshot, self.template)
                 if pending is None:
@@ -705,6 +707,7 @@ class ReadingExecutor:
                     if novel:
                         parents = tuple(dict.fromkeys(parent for need in open_needs
                                                        for parent in need.parent_claim_ids))
+                        predecessors = claim_predecessor_steps(results, parents)
                         extension = build_read_plan(plan.task_state,
                             replace(plan.selected_set, selected_units=closure, source_blocks=source_blocks), plan.coverage_scope,
                             plan.budget, template=self.template, snapshot=snapshot,
@@ -717,8 +720,7 @@ class ReadingExecutor:
                         steps = []
                         for step in extension.steps:
                             step = replace(step, step_id=prefix+step.step_id,
-                                input_claim_ids=parents, predecessor_step_ids=tuple(dict.fromkeys(
-                                    parent.rsplit(":claim:", 1)[0] for parent in parents)))
+                                input_claim_ids=parents, predecessor_step_ids=predecessors)
                             steps.append(replace(step, output_schema=output_schema(step,
                                 tuple(extension_units[unit_id] for unit_id in step.input_unit_ids),
                                 tuple(graph.claims[parent] for parent in parents),

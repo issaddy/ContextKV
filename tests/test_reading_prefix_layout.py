@@ -242,7 +242,8 @@ def test_request_compiler_binds_read_order_and_actual_encoded_source_geometry():
         assert geometry['causal_prefix_input_ids'] == candidate.input_ids[:geometry['causal_boundary_tokens']]
     selected = variants[1]
     receipt = CompletionReceipt('rid', 'attempt', 'engine', 0, 'restart', selected.input_hash, 'length', True)
-    observed = compiler.observe_executed(selected, receipt, cache_scope=scope)
+    observed = compiler.observe_executed(selected, receipt, cache_config_hash=scope.cache_config_hash,
+                                         engine_restart_id=scope.engine_restart_id)
     assert observed['index_request_id'] == 'actual-request'
     assert index.observed[0][0] == selected.source_ids
     assert index.observed[0][1]['input_ids'] == selected.input_ids

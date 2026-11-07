@@ -193,23 +193,22 @@ class RequestCompiler:
             raise ValueError("no feasible compiled source permutation")
         return min(choices, key=lambda row: row[0])[1]
 
-    def observe_executed(self, candidate, receipt: CompletionReceipt, *, cache_scope):
+    def observe_executed(self, candidate, receipt: CompletionReceipt, *, cache_config_hash, engine_restart_id):
         """Describe actual causal/body geometry and optionally register its source order.
 
         No KV retain, lease, expiry, quality gate, or alternative compilation occurs.
         """
-        scope = self._scope(cache_scope)
         if not isinstance(receipt, CompletionReceipt):
             raise TypeError("source observation requires CompletionReceipt")
         if (candidate.fingerprint != self.template.fingerprint
-                or receipt.engine_restart_id != scope["engine_restart_id"]
+                or receipt.engine_restart_id != engine_restart_id
                 or receipt.input_hash != candidate.input_hash or not receipt.generation_complete):
             raise ValueError("executed source observation differs from the compiled request/scope")
         geometry = actual_source_geometry(self.template, candidate)
         request_id = None
         if self.index is not None and candidate.source_ids:
             request_id = self.index.observe_executed(candidate.source_ids,
-                fingerprint=candidate.fingerprint, cache_config_hash=scope["cache_config_hash"],
+                fingerprint=candidate.fingerprint, cache_config_hash=cache_config_hash,
                 receipt=receipt, input_ids=candidate.input_ids)
         return {"candidate_id": candidate.candidate_id, "input_hash": candidate.input_hash,
                 "source_ids": candidate.source_ids, "evidence_spans": candidate.evidence_spans,

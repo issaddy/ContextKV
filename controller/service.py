@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass, replace
+from functools import partial
 import hashlib
 import logging
 import time
@@ -273,6 +274,16 @@ class Controller:
             raise EngineError("INVALID_OUTPUT_IDS")
         if len(result.output_ids) > (candidate.output_budget or self.policy.max_new_tokens):
             raise EngineError("OUTPUT_BUDGET_EXCEEDED")
+        if attempt.final_step_id is None and not attempt.cache_config_hash:
+            raise EngineError("MISSING_ANSWER_CACHE_SCOPE")
+
+    def _observe_answer_source(self, attempt: Attempt):
+        # The upstream dialogue final step was observed by ReadingExecutor.
+        if attempt.final_step_id is not None:
+            return
+        source_view = self.request_compiler.observe_executed(attempt.plan.candidate, attempt.result.receipt,
+            cache_config_hash=attempt.cache_config_hash, engine_restart_id=attempt.epoch.engine_restart_id)
+        self.events.emit("answer_source_executed", attempt_id=attempt.attempt_id, source_view=source_view)
 
     def _response(self, attempt: Attempt, *, elapsed_ms=None, replay=False,
                   timing: ClientTiming | None = None, control_ms=None, answer_phase_window=None) -> TurnResponse:
@@ -465,6 +476,8 @@ class Controller:
                          open_need_provider: Callable | None = None,
                          auxiliary_usage: dict | None = None,
                          evidence_provider: Callable[..., Awaitable[EvidenceSelection]] | None = None,
+                         source_request_identity: tuple[str, str] | None = None,
+                         extend_for_plan: Callable | None = None,
                          from_corpus_snapshot_id: str | None = None,
                          request_arrived: float | None = None,
                          dialogue_budget: ContextBudget | None = None) -> TurnResponse:
@@ -484,6 +497,8 @@ class Controller:
         # attempt rather than re-retrieving against newer history or rankings.
         content = (("retrieved_query", query, corpus_snapshot_id) if evidence_provider is not None else
                    (query, evidence, corpus_snapshot_id, reference_history, retrieval_priority))
+        if source_request_identity is not None:
+            content = (*content, source_request_identity)
         if self.dialogue_mode != "contextkv":
             content = (*content, self.dialogue_mode)
         if query_context is not None:
@@ -498,7 +513,7 @@ class Controller:
             resume_context_plan = None
             if previous:
                 matches = previous.request_hash == request_hash
-                if not matches and evidence_provider is not None:
+                if not matches and evidence_provider is not None and source_request_identity is None:
                     # A committed retry belongs to the snapshot it originally
                     # read, even when this worker now serves a newer index.
                     original_snapshot = (previous.plan.candidate.corpus_snapshot_id if previous.plan is not None
@@ -598,6 +613,8 @@ class Controller:
                 recovery = snap.current_epoch is not None and snap.current_epoch.engine_restart_id != info.engine_restart_id
                 planning_snap = (replace(working_snap, force_new_epoch_for_recovery=True, must_rebuild=True)
                                  if recovery else working_snap)
+                if resume_context_plan is not None and open_need_provider is None and extend_for_plan is not None:
+                    open_need_provider = partial(extend_for_plan, planning_snap)
                 if context_plans:
                     from .context_budget import bind_answer_window
                     recorded_ids = tuple(dict.fromkeys((*(record.step_id for record in
@@ -672,9 +689,7 @@ class Controller:
                                or self.request_compiler.index is not None) and len(valid) > 1
                 quotes = (rolling_result.quotes if rolling_result is not None else
                           await self.engine.quote_batch(valid, self.template.fingerprint) if needs_quote else None)
-                if quotes is not None and quotes.engine_restart_id != info.engine_restart_id:
-                    if rolling_result is not None:
-                        raise EngineError("ROLLING_QUOTE_RESTART_CHANGED")
+                if rolling_result is None and quotes is not None and quotes.engine_restart_id != info.engine_restart_id:
                     # At most one re-quote after a restart; native admission remains authoritative.
                     info = await self.engine.info()
                     planning_snap = replace(working_snap, force_new_epoch_for_recovery=True, must_rebuild=True)
@@ -758,6 +773,8 @@ class Controller:
                         reading_outcome.auxiliary_usage)
                     self.store.save_context_plan(attempt.attempt_id, selected_context_plan)
                     info = await self.engine.info()
+                    if rolling_result is not None and quotes.engine_restart_id != info.engine_restart_id:
+                        raise EngineError("ROLLING_QUOTE_RESTART_CHANGED")
                     if (planning_snap.current_epoch is not None
                             and planning_snap.current_epoch.engine_restart_id != info.engine_restart_id):
                         planning_snap = replace(planning_snap, force_new_epoch_for_recovery=True,
@@ -807,7 +824,7 @@ class Controller:
                                   retrieval_priority=retrieval_priority, retrieval_ms=retrieval_ms,
                                   query_context=query_context, context_plan=selected_context_plan,
                                   reading_outcome=reading_outcome, reading_elapsed_ms=reading_elapsed_ms,
-                                  auxiliary_usage=auxiliary_usage)
+                                  auxiliary_usage=auxiliary_usage, cache_config_hash=info.cache_config_hash)
                 # No-C ablation keeps the native session across text rebuilds.
                 # History protocol changes and failed attempts still need safe recovery.
                 new_epoch = (snap.current_epoch is None or snap.history_sync_pending
@@ -835,10 +852,7 @@ class Controller:
                 # Persist before validation so malformed/partial results remain auditable.
                 attempt = self.store.save_attempt(replace(attempt, stage="RESULT_READY", result=result))
                 self._validate(attempt, result)
-                source_view = self.request_compiler.observe_executed(plan.candidate, result.receipt,
-                    cache_scope=info)
-                self.events.emit("answer_source_executed", attempt_id=attempt.attempt_id,
-                                 source_view=source_view)
+                self._observe_answer_source(attempt)
                 snapshot = self.store.commit_turn_and_outbox(attempt.attempt_id)
             except BaseException as exc:
                 current = self.store.get_attempt(attempt.attempt_id)
@@ -910,6 +924,7 @@ class Controller:
                 self.store.fail_attempt(attempt.attempt_id, "invalid_completed_result", force_recovery=True)
                 await self._flush_retirements()
                 return None
+            self._observe_answer_source(attempt)
             committed = self.store.commit_turn_and_outbox(attempt.attempt_id)
             self.cost_model.observe_output(len(attempt.result.output_ids))
             self.events.emit("attempt_recovered", attempt_id=attempt.attempt_id, ledger_version=committed.version)

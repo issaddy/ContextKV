@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import time
 
+from .session_store import DocumentSet
+
 
 class DocumentQA:
     def __init__(self, controller, provider):
@@ -39,6 +41,7 @@ class DocumentQA:
                 if stored is not None:
                     memo_task_id = stored.task_state.task_id
             snapshot_id = self.provider.corpus_snapshot_id
+            source_request_identity = None
             if document_set_id is not None:
                 if supplied_blocks is not None or source_metadata is not None:
                     raise ValueError("registered documents cannot be combined with inline documents or metadata")
@@ -46,8 +49,11 @@ class DocumentQA:
                 supplied_blocks = documents.blocks
                 source_metadata = dict(documents.source_metadata)
                 snapshot_id = documents.corpus_snapshot_id
+                source_request_identity = documents.document_set_id, coverage_scope
             elif supplied_blocks is not None:
                 supplied_blocks = tuple(supplied_blocks)
+                documents = DocumentSet.create(supplied_blocks, source_metadata)
+                source_request_identity = documents.document_set_id, coverage_scope
 
             async def retrieve(snapshot, retrieval_query=None):
                 selected_query = query if retrieval_query is None else retrieval_query
@@ -63,6 +69,8 @@ class DocumentQA:
 
             return await self.controller.serve_turn(session_id, query, request_id=request_id,
                 corpus_snapshot_id=snapshot_id, evidence_provider=retrieve,
+                source_request_identity=source_request_identity,
+                extend_for_plan=getattr(self.provider, "extend_for_plan", None),
                 from_corpus_snapshot_id=from_corpus_snapshot_id, request_arrived=arrived,
                 dialogue_budget=getattr(self.provider, "budget", None))
         finally:

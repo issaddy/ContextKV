@@ -75,7 +75,7 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
         for candidate in variants:
             task = first.task
             output = task.output_budget if candidate is None else candidate.output_budget
-            reason = (direct_answer_reason(state, candidate)
+            reason = (direct_answer_reason(state, candidate, require_complete_evidence=False)
                       if task.kind == "ANSWER" else None)
             current = CompleteCost(0, 0, 0, 0, 0)
             peaks = [native.paid_cost]

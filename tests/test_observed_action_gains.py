@@ -207,7 +207,7 @@ async def test_bounded_infer_bridge_reads_terminal_once_and_empty_gap_stops(tmp_
     async def retrieve(plan, request, claims):
         calls.append(request)
         assert request.open_needs and request.open_needs[0].missing_relation == "qualifying record"
-        block = make_evidence("R3 qualifies. "*220, "R3")
+        block = make_evidence("R3 qualifies.", "R3")
         unit = EvidenceUnit("R3", (SourceSpan("R3", block.key, 0, len(block.text)),), block.text)
         return EvidencePool((unit,) if terminal_material else (), (block,) if terminal_material else (),
             auxiliary_usage=dict(ZERO_AUX))
