@@ -16,7 +16,9 @@ import statistics
 
 from bench.study_resources import integrate_physical
 from controller.serialization import to_jsonable
+from controller.templates import longest_common_prefix
 from profiling.retention_trace import SourceLedger
+from profiling.study_cost_ledger import merge_ranges
 
 
 METRICS = ("latency_ms", "gpu_gib_ms", "host_gib_ms")
@@ -208,6 +210,33 @@ def observed_choice_trace(store, event, attempt, task, candidate, prefix_control
         "terminal_stage": attempt.stage}
 
 
+def read_answer_body_reuse(attempt, answer_source):
+    """Attribute shared body positions to the ANSWER receipt's observed tier."""
+    answer, receipt = attempt.plan.candidate, attempt.result.receipt
+    intervals, reads = [], []
+    for step in attempt.reading_outcome.steps:
+        if (step.task.kind != "READ" or step.receipt is None
+                or step.receipt.engine_restart_id != receipt.engine_restart_id):
+            continue
+        source = step.metrics["source_view"]
+        boundary = longest_common_prefix(step.input_ids, answer.input_ids)
+        overlap = [(max(left, first), min(right, last, boundary))
+                   for left, right in source["body_token_ranges"]
+                   for first, last in answer_source["body_token_ranges"]
+                   if max(left, first) < min(right, last, boundary)]
+        if overlap:
+            intervals.extend(overlap)
+            reads.append(step.step_id)
+    shared = merge_ranges(intervals)
+    device_end = receipt.actual_device_hit_tokens
+    host_end = device_end+receipt.actual_host_loaded_tokens
+    matched = sum(last-first for first, last in shared)
+    device = sum(max(0, min(last, device_end)-first) for first, last in shared)
+    host = sum(max(0, min(last, host_end)-max(first, device_end)) for first, last in shared)
+    return {"read_step_ids": reads, "matching_body_tokens": matched, "device_hit_body_tokens": device,
+            "host_loaded_body_tokens": host, "prefilled_body_tokens": matched-device-host}
+
+
 def audit_directory(directory):
     directory = Path(directory).resolve()
     journal_path = directory/"state"/"events.jsonl"
@@ -219,6 +248,8 @@ def audit_directory(directory):
     events = [json.loads(line) for line in journal if line.strip()]
     decisions = [row for row in events if row["event"] in {"rolling_plan_decision", "rolling_required_scope_step"}]
     commits = {row["attempt_id"]: row for row in events if row["event"] == "ledger_committed"}
+    answer_sources = {row["attempt_id"]: row["source_view"] for row in events
+                      if row["event"] == "answer_source_executed"}
     recovered = {row["attempt_id"]: row for row in events if row["event"] == "attempt_recovered"}
     failures = {row["attempt_id"]: row for row in events if row["event"] == "attempt_failed"}
     controls = {(row["attempt_id"], row["choice"], row["quote_seq"]):
@@ -269,6 +300,12 @@ def audit_directory(directory):
                 key = candidate["candidate_id"] if candidate is not None else task["step_id"]
                 control = controls.get((attempt.attempt_id, key, event["quote"]["observed_seq"]))
                 row["trajectory"] = observed_choice_trace(store, event, attempt, task, candidate, control)
+                answer_source = answer_sources.get(attempt.attempt_id)
+                if (task["kind"] == "ANSWER" and attempt.stage == "COMMITTED" and answer_source is not None
+                        and candidate["input_hash"] == answer_source["input_hash"]
+                        and attempt.reading_outcome is not None and event["engine_kind"] == "sglang"):
+                    row["trajectory"]["read_answer_body_reuse"] = read_answer_body_reuse(
+                        attempt, answer_source)
             if event.get("engine_kind") != "sglang":
                 row["unmatched_reasons"].append("source_is_not_actual_sglang_hardware")
                 continue
@@ -377,11 +414,14 @@ def trajectory_examples(rows):
         if not trace or row["unmatched_reasons"] == ["source_is_not_actual_sglang_hardware"]:
             continue
         work = trace["selected_native_work"] or {}
+        body = trace.get("read_answer_body_reuse", {})
         tags = {
             "observed_prefill": work.get("actual_prefill_tokens", 0),
             "observed_gpu_prefix_hit": work.get("actual_device_hit_tokens", 0),
             "observed_host_reload": work.get("actual_host_loaded_tokens", 0),
             "read_added_evidence": row["logical_kind"] == "READ" and trace["new_claim_ids"],
+            "answer_reused_read_body_on_gpu": body.get("device_hit_body_tokens", 0),
+            "answer_reloaded_read_body_from_host": body.get("host_loaded_body_tokens", 0),
             "applied_demand_retention": any(owner.get("state") == "RETAINED" for owner in
                 (trace["prefix_control"] or {}).get("owner_status", {}).values()),
         }
@@ -407,12 +447,19 @@ def main(argv=None):
     destination.mkdir(parents=True, exist_ok=False)
     (destination/"predictions.jsonl").write_text("".join(json.dumps(to_jsonable(row), ensure_ascii=False, allow_nan=False)+"\n" for row in rows))
     remaining = [row for row in rows if row.get("prediction_scope") == "fixed_bounded_rollout"]
+    body_reuse = {(row["generation_dir"], row["attempt_id"]): trace["read_answer_body_reuse"]
+                  for row in rows if (trace := row.get("trajectory")) and "read_answer_body_reuse" in trace}.values()
     summary = {"format": "contextkv_rolling_prediction_error_audit_v1", "source_directories": sources,
         "summaries": summaries([row for row in rows if row.get("prediction_scope") is None]),
         "observed_rollout_remaining": summaries(remaining),
         "mandatory_scope_decisions": dict(Counter(row["kind"] for row in rows
             if row.get("prediction_scope") == "mandatory_scope_reservation")),
         "trajectory_examples": trajectory_examples(rows),
+        "read_answer_body_reuse": {"answers_checked": len(body_reuse),
+            "answers_with_shared_body": sum(row["matching_body_tokens"] > 0 for row in body_reuse),
+            **{key: sum(row[key] for row in body_reuse) for key in ("matching_body_tokens",
+                "device_hit_body_tokens", "host_loaded_body_tokens", "prefilled_body_tokens")},
+            "scope": "unique matching source-body positions per answer and native receipt tier, without owner attribution"},
         "delivered_latency_reserve_underestimated": sum(row.get("latency_reserve_underestimated") is True for row in remaining),
         "delivered_latency_reserve_checked": sum("latency_reserve_underestimated" in row for row in remaining),
         "error_sign": "prediction minus actual",
