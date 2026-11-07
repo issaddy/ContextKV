@@ -1,8 +1,8 @@
 # 当前课题运行入口
 
-`test-0523` 使用容器默认 `python3`，Qwen3-32B 权重保持固定。主链已接通；当前工作是补齐 B 的 GAP 监督，并完成冻结 ranked A 的联合比较。完整 350 题质量与 P95 尚未验收。
+`test-0523` 使用容器默认 `python3`，Qwen3-32B 权重保持固定。主链及 B 三类动作监督已接通；当前推进冻结 ranked A 的联合比较，并修正实测暴露的执行问题。完整 350 题质量与 P95 尚未验收。
 
-正式运行位于 `runs/study-20261106-resume/final-joint-6888cf8-001`，沿用 `6888cf8` 的 A 与阅读协议。固定 B 的 c1、c4 两组依次运行 Native、ContextPilot 和 LlamaIndex Native，使用 GPU 0/1、3/5。收益 B 使用修正后的成本头，在 `work-cost/run-c1-gain`、`work-cost/run-c4-gain` 运行 Native、ContextPilot 及关闭跨轮事实复用的对照，使用 GPU 4/6、2/7。四组均为一张 reader 卡和一张 helper＋BGE 卡，共用 350 题／77 会话、到达序列和生成条件。当前联合输入为 `work-cost/joint-inputs.json`；各组计划和启动记录保存实际配置及提交，模型和大日志留在容器。
+正式运行位于 `runs/study-20261106-resume/final-joint-6888cf8-001`，沿用 `6888cf8` 的 A 与阅读协议。固定 B 的 c1、c4 两组依次运行 Native、ContextPilot 和 LlamaIndex Native，使用 GPU 0/1、3/5。收益 B 在 `reuse-completion/run-c1-gain`、`reuse-completion/run-c4-gain` 运行 Native、ContextPilot 及关闭跨轮事实复用的对照，使用 GPU 4/6、2/7。四组均为一张 reader 卡和一张 helper＋BGE 卡，共用 350 题／77 会话、到达序列和生成条件。当前联合输入为 `reuse-completion/joint-inputs.json`；各组计划和启动记录保存实际配置及提交，模型和大日志留在容器。
 
 长文共享提取已得到 36 条、666 kg，多跳得到 1997。旧中断参照的 64 个答案已完成官方重评，完整声明分母与费用保留。
 
@@ -25,6 +25,8 @@ ranked B 的小批次已完成：声明 8/4 个源任务，实际历史 48/24 �
 GAP 补充采集位于 `b-ranked-gap-native-4t3`：按原始训练问题的跨轮指代和来源切换预选 4 个第三轮目标，完成 12 个真实 P3 轮次，得到 4 个 READ 配对及其真实终端状态中的 2 个 GAP 配对。合并后有 24 个训练配对、20 个状态、11 个实际源任务，覆盖 READ 18、REDUCE 4、GAP 2。原开发 4 会话、10 个配对未改动，预测覆盖 10/10，质量 MAE 为 0.287940。当前资产为 `gain-work-cost/plan-gain.json`；它复用全部原标签和质量权重，只从原生报价重算工作量并在 CPU 上重拟合成本。
 
 初次收益 B 运行暴露了成本外推错误：空闲容量被当成负费用，118 个已记录候选中有 35 个未来费用被截零。`2d539eb` 改用非负工作量成本头，同一批报价重算后零费用为 0；这只是预测修复，最终收益仍待完整队列。两组原运行已停止，答案与原生调用保留。组信号同时打断采样子进程，整体物理尾段缺失；`cost-extrapolation-diagnosis.json` 和各组 `observed-physical-coverage.json` 显式记录已观测范围与未知尾段。`e83abd5` 将采样子进程独立于协调器退出信号，收尾仍等待真实采样完成。
+
+随后发现结论预算重分配使逻辑复用 READ 被误判为未完成，动作候选因而多出历史步骤。`5119e7a` 将 `retained_conclusion_tokens` 与其它预算字段一并排除出已执行计算身份，保留 Need、条件、父事实及原文一致性。23 个真实失败状态、53 个候选的 CPU 重放全部恢复；24/10 个训练／开发配对的特征与标签未变，无需重采或重训。该轮停止单独测量至原生请求归零，协调器与收尾物理窗口均完整，费用按窗口并集计量。记录在 `work-cost/reuse-completion-replay.json`、`reuse-training-review.json` 和各组 `reuse-stop-cost.json`。
 
 要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
 
