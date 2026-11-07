@@ -350,7 +350,6 @@ class RollingPlanRuntime:
     async def _run_gap(self, attempt_id, task, request, state, snapshot, template, executor, expanded,
                        provider, events, arrived):
         from .action_proposals import gap_key, gap_retrieval_plan
-        from .evidence_planner import _passages
         from .execution import require_online_tokens
         from .session_store import ReadingProgress
         tick = time.monotonic()
@@ -370,12 +369,6 @@ class RollingPlanRuntime:
             metrics={**record.metrics, "auxiliary_usage": pool.auxiliary_usage,
                 "phase_window": {"start": tick, "end": ended, "clock": "client_monotonic", "scope": "gap_retrieval"}})
         executor.store.save_execution_step(record, "RESULT_READY")
-        prior_passages = _passages(read_base.selected_set.selected_units)
-        if (len(pool.units) > request.limits["max_units"]
-                or len(_passages(pool.units)-prior_passages) > request.limits["max_passages"]):
-            from .execution import ReadingBudgetExceeded
-
-            raise ReadingBudgetExceeded("actual GAP material exceeds its registered retrieval limits")
         return await self._finish_gap(record, pool, state, snapshot, template, executor, expanded, events)
 
     def proposals(self, context_plans, state, snapshot, template, compile_answers, *,

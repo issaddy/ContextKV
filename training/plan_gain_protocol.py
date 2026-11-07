@@ -264,7 +264,8 @@ class FixedCounterfactualRuntime:
                 self.pre_action_quote = {"batch": await engine.quote_batch((), template.fingerprint), "candidate_id": None}
             tick = time.monotonic()
             self.new_action_counts["GAP_RETRIEVAL"] = 1
-            pool = await self.gap_provider(gap_retrieval_plan(state, request), request, state.claims)
+            read_base = gap_retrieval_plan(state, request)
+            pool = await self.gap_provider(read_base, request, state.claims)
             elapsed = (time.monotonic()-tick)*1000
             if not isinstance(pool, EvidencePool):
                 raise TypeError("GAP action requires measured EvidencePool material")
@@ -272,8 +273,9 @@ class FixedCounterfactualRuntime:
             self.gap_result = {"request": self.gap_request, "pool": pool, "elapsed_ms": elapsed}
             if auxiliary_tokens(pool.auxiliary_usage) is None:
                 raise ObservedActionFailure("actual GAP auxiliary token cost is unmeasured")
+            prior_passages = _passages(read_base.selected_set.selected_units)
             if (len(pool.units) > self.gap_request.limits["max_units"]
-                    or len(_passages(pool.units)) > self.gap_request.limits["max_passages"]):
+                    or len(_passages(pool.units)-prior_passages) > self.gap_request.limits["max_passages"]):
                 raise ObservedActionFailure("actual GAP material exceeds its registered retrieval limits")
             units = {unit.unit_id: unit for unit in (*plan.selected_set.selected_units, *pool.units)}
             closure = close_dependencies(tuple(units), units)
