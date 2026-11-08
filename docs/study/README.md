@@ -19,7 +19,7 @@
 | 完整问答中的需求保留 | 固定三次 READ 的输入，两组都引用三份原文并答出 15 kg。短租将 896 token 的 Host 回载转为 GPU 命中，重访后释放。复用回执后省去旧路径的 52.6 ms READ 后观测，新配对的完整响应为 Native 12.256 秒、需求保留 12.242 秒。 | `qa-pressure-f01fa8a.4D7Jfl/pair.json`、`qa-pressure-4ada1d4.jsnU48/pair.json` |
 | READ 与 ANSWER 共用正文前缀 | 已提交的 VersionQA 轨迹中，最终回答实际命中先前阅读所见的正文页。 | `read-answer-prefix-evidence.json` |
 | 目录与窗口成本 | 实际 MT-RAG 目录、Qwen tokenizer 和两轮问答分别记录目录分词、初始化及完整响应变化。E1／E6 两轮配对均采用原文回答。 | `task-catalogue-evidence.json`、`mtrag-short-evidence.json`、`mtrag-e1-e6-short-evidence.json` |
-| 收益监督 | 按原始观测状态重采受 READ 输出上限规则影响的配对，并使用同一开发集重新校准。 | `gain-focused-evidence.json` |
+| 收益决策 | 当前收益资产使用 24 个去重训练配对。开发集 13 个配对覆盖 7 个可评估决策状态，选中动作相对直接回答的平均目标差为 0。两道补采多跳题的直接回答已经满分，追加 READ 没有提高质量。 | `distinct-material-and-fixed-retention-evidence.json` |
 | 必做路径耗时预留 | Qwen3-32B 单并发下，两条受控统计会话产生 8 条实测余程。第三条独立会话正确计数并提交，耗时 3.35 秒，READ、筛选、CPU 归约和 ANSWER 的实际余程均在预留内。 | `completion-timing-f5c5bb1/evidence.json` |
 
 ## 完整队列验收

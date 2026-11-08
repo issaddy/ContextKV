@@ -22,6 +22,10 @@ SGLang RadixAttention 和 HiCache 提供精确因果前缀匹配、GPU/Host 驻�
 
 E1–E5 使用 Native 保留，E6 用剩余证据需求分配短租。可选 TTL/value 在同一原生容量管理上估计保护价值。保留目标借鉴有预算的覆盖和分层替换，在共同观察窗核算共享页、增量驻留和控制成本。[预算最大覆盖](https://doi.org/10.1016/S0020-0190(99)00031-9) · [RAGCache](https://arxiv.org/abs/2404.12457)
 
+AdaCache 同时用选择性重算复用文档块 KV，并按生成置信度扩展检索上下文。ContextKV 从多轮任务的条件、版本和来源依赖生成下一步候选，用原生精确前缀报价比较读、算和答，并按尚需原文的后续动作分配保留。两者在上下文选择与缓存联合决策上直接相关。ContextKV 的验收量是完整响应 P95 与有来源的最终回答质量。[AdaCache（ICLR 2026）](https://openreview.net/forum?id=Bmvx8ybDzo)
+
+Prompt Cache 通过预定义模块复用注意力状态，CacheBlend 通过选择性重算融合文档块 KV，Cache-Craft 管理和复用预计算的块缓存。它们覆盖了精确前缀之外的复用机会。LLMLingua-2 在输入 token 层选择保留内容，ContextKV 的表示选择以有原文来源和需求覆盖的事实为单位，并将原文和事实表示的实际请求交给同一报价接口。[Prompt Cache](https://proceedings.mlsys.org/paper_files/paper/2024/hash/a66caa1703fe34705a4368c3014c1966-Abstract-Conference.html) · [CacheBlend](https://arxiv.org/abs/2405.16444) · [Cache-Craft](https://arxiv.org/abs/2502.15734) · [LLMLingua-2](https://aclanthology.org/2024.findings-acl.57/)
+
 ## 外部参照与公开评价
 
 `LlamaIndex_native` 调用上游 Memory、历史问题凝练与 compact/refine，检索使用 BM25＋dense 和发布版 reranker，生成交给统一账本下的固定 Qwen。外部比较保留各自实际历史，框架调用与检索成本进入完整账本。[上游问题凝练](https://github.com/run-llama/llama_index/blob/v0.14.25/llama-index-core/llama_index/core/chat_engine/condense_question.py) · [上游 compact/refine](https://github.com/run-llama/llama_index/blob/v0.14.25/llama-index-core/llama_index/core/response_synthesizers/compact_and_refine.py)
