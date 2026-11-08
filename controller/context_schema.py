@@ -362,6 +362,7 @@ class CompletionReceipt:
     actual_prefill_tokens: int = 0
     inserted_cache_tokens: int = 0
     session_ref_registered: bool = False
+    actual_output_tokens: int | None = None
 
 
 @dataclass(frozen=True)

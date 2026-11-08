@@ -226,8 +226,11 @@ def require_completion(plan, results, spent, steps_paid, task, candidate=None, *
 
 
 def step_token_spend(stage, record):
-    if stage in {"SUBMITTED", "FAILED"}:
+    if stage == "SUBMITTED":
         return None
+    if stage == "FAILED":
+        count = record.receipt.actual_output_tokens if record.receipt is not None else None
+        return len(record.input_ids)+count if count is not None else None
     if stage in {"RESULT_READY", "COMPLETE"}:
         return len(record.input_ids)+len(record.output_ids)
     return 0

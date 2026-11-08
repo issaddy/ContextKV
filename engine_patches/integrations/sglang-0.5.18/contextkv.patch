@@ -205,7 +205,7 @@ diff --git a/python/sglang/srt/managers/contextkv_runtime.py b/python/sglang/srt
 new file mode 100644
 --- /dev/null
 +++ b/python/sglang/srt/managers/contextkv_runtime.py
-@@ -0,0 +1,1174 @@
+@@ -0,0 +1,1175 @@
 +"""Scheduler-owned ContextKV protocol, for the pinned SGLang Python backend.
 +
 +This module deliberately has no background thread or GPU synchronizations. It is
@@ -736,12 +736,16 @@ new file mode 100644
 +        host = int(req.cached_tokens_host)
 +        if device == 0 and host == 0:
 +            device = int(req.cached_tokens)
++        output_count = len(getattr(req, "output_ids", ()))
++        if getattr(req, "finished_len", None) is not None:
++            output_count = min(output_count, req.finished_len)
 +        receipt = dict(rid=req.rid, attempt_id=attempt,
 +            engine_session_id=req.session_id, session_generation=req.session_generation,
 +            engine_restart_id=self.restart_id, input_hash=req.contextkv_input_hash,
 +            finish_reason=kind, generation_complete=complete,
 +            actual_device_hit_tokens=device, actual_host_loaded_tokens=host,
 +            actual_prefill_tokens=req.contextkv_prefill_tokens,
++            actual_output_tokens=output_count,
 +            inserted_cache_tokens=int(req.contextkv_inserted_cache_tokens),
 +            session_ref_registered=bool(getattr(req, "contextkv_session_ref_registered", False)))
 +        # Native HTTP output is published back to this owner before delivery.
@@ -754,9 +758,6 @@ new file mode 100644
 +        self.attempts.move_to_end(attempt)
 +        req.customized_info = dict(req.customized_info or {})
 +        req.customized_info["contextkv_receipt"] = [receipt]
-+        output_count = len(getattr(req, "output_ids", ()))
-+        if getattr(req, "finished_len", None) is not None:
-+            output_count = min(output_count, req.finished_len)
 +        timing = native_timing(getattr(req, "time_stats", None), output_count)
 +        req.customized_info["contextkv_timing"] = [timing]
 +        diagnostic = getattr(req, "contextkv_admission_diagnostic", None)
@@ -1380,6 +1381,7 @@ new file mode 100644
 +        result_ttl_seconds=float(os.environ.get("CONTEXTKV_RESULT_TTL_SECONDS", "900")),
 +        result_max_bytes=int(os.environ.get("CONTEXTKV_RESULT_MAX_BYTES", str(64 << 20))))
 +    return scheduler.contextkv_runtime
+
 diff --git a/python/sglang/srt/managers/io_struct.py b/python/sglang/srt/managers/io_struct.py
 --- a/python/sglang/srt/managers/io_struct.py
 +++ b/python/sglang/srt/managers/io_struct.py

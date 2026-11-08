@@ -78,7 +78,8 @@ def index(patterns):
             work["quote_work"] = quote_realization(quote, receipt)
         if outputs is None or value.get("generation_complete") is not True:
             incomplete[key] = {**location, **work, "kind": kind, "native_identity": key,
-                "input_tokens": len(inputs), "output_tokens": None if outputs is None else len(outputs),
+                "input_tokens": len(inputs),
+                "output_tokens": value.get("actual_output_tokens") if outputs is None else len(outputs),
                 "receipt": value}
             return
         signature = kind, actual_hash, token_hash(outputs), len(inputs), len(outputs)

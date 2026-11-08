@@ -528,12 +528,16 @@ class ContextKVRuntime:
         host = int(req.cached_tokens_host)
         if device == 0 and host == 0:
             device = int(req.cached_tokens)
+        output_count = len(getattr(req, "output_ids", ()))
+        if getattr(req, "finished_len", None) is not None:
+            output_count = min(output_count, req.finished_len)
         receipt = dict(rid=req.rid, attempt_id=attempt,
             engine_session_id=req.session_id, session_generation=req.session_generation,
             engine_restart_id=self.restart_id, input_hash=req.contextkv_input_hash,
             finish_reason=kind, generation_complete=complete,
             actual_device_hit_tokens=device, actual_host_loaded_tokens=host,
             actual_prefill_tokens=req.contextkv_prefill_tokens,
+            actual_output_tokens=output_count,
             inserted_cache_tokens=int(req.contextkv_inserted_cache_tokens),
             session_ref_registered=bool(getattr(req, "contextkv_session_ref_registered", False)))
         # Native HTTP output is published back to this owner before delivery.
@@ -546,9 +550,6 @@ class ContextKVRuntime:
         self.attempts.move_to_end(attempt)
         req.customized_info = dict(req.customized_info or {})
         req.customized_info["contextkv_receipt"] = [receipt]
-        output_count = len(getattr(req, "output_ids", ()))
-        if getattr(req, "finished_len", None) is not None:
-            output_count = min(output_count, req.finished_len)
         timing = native_timing(getattr(req, "time_stats", None), output_count)
         req.customized_info["contextkv_timing"] = [timing]
         diagnostic = getattr(req, "contextkv_admission_diagnostic", None)
