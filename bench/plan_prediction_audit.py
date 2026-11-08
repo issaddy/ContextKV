@@ -18,14 +18,16 @@ from bench.study_resources import integrate_physical
 from controller.completion_timing import timing_point
 from controller.context_budget import CompletionReserve
 from controller.context_schema import ReadTask
+from controller.execution import step_token_spend
 from controller.schema import CacheQuoteBatch
 from controller.serialization import decode, to_jsonable
-from controller.templates import longest_common_prefix
+from controller.templates import longest_common_prefix, token_hash
 from profiling.retention_trace import SourceLedger
 from profiling.study_cost_ledger import merge_ranges
 
 
 METRICS = ("latency_ms", "gpu_gib_ms", "host_gib_ms")
+TOKEN_METRICS = ("input_tokens", "output_tokens")
 
 
 def source(path):
@@ -129,18 +131,62 @@ def calibration_ids(directory):
     return identities, provenance, "missing_artifact_files:"+str(missing) if missing else "actual_declared_asset_observation_ids"
 
 
-def observed_remaining(row, event, attempt, terminal, observations, option):
-    forecast = option.get("rollout_expected_cost")
+def terminal_tokens(store, attempt):
+    """Sum actual native and provider phases once per terminal attempt."""
+    calls = []
+    for stage, step in store.execution_steps_with_stage(attempt.attempt_id):
+        if step.engine_epoch is None or stage in {"PLANNED", "PREPARED"}:
+            continue
+        if step.receipt is None or step.receipt.input_hash != token_hash(step.input_ids):
+            calls.append((None, None))
+            continue
+        spent = step_token_spend(stage, step)
+        inputs = len(step.input_ids)
+        calls.append((inputs, spent-inputs if spent is not None else None))
+    phases = store.db.execute("SELECT json_extract(payload,'$.input_tokens'), "
+        "json_extract(payload,'$.output_tokens') FROM auxiliary_calls WHERE attempt_id=? "
+        "AND json_extract(payload,'$.kind')='provider_usage'", (attempt.attempt_id,)).fetchall()
+    calls.extend(tuple(phase) for phase in phases)
+    if not phases and attempt.auxiliary_usage is not None:
+        calls.append(tuple(attempt.auxiliary_usage[name] for name in TOKEN_METRICS))
+
+    if attempt.final_step_id is None:
+        result = attempt.result
+        receipt = result.receipt if result is not None else attempt.terminal_receipt
+        if receipt is not None:
+            candidate = attempt.plan.candidate
+            if receipt.input_hash == candidate.input_hash:
+                output = len(result.output_ids) if result is not None else receipt.actual_output_tokens
+                calls.append((len(candidate.input_ids), output))
+            else:
+                calls.append((None, None))
+        elif attempt.failed_from_stage == "SUBMITTED":
+            calls.append((None, None))
+
+    inputs, outputs = zip(*calls) if calls else ((), ())
+    return {"input_tokens": sum(inputs) if None not in inputs else None,
+            "output_tokens": sum(outputs) if None not in outputs else None}
+
+
+def observed_remaining(row, event, attempt, terminal, observations, option, tokens):
     row["actual_scope"] = "online_replanning_until_actual_terminal_state"
     row["terminal_state"] = attempt.stage
     row["completion_reserve"] = option.get("completion_reserve")
     row["completion_cost"] = option.get("completion_cost")
     latency_reserve = option.get("completion_latency_ms")
     row["completion_latency_ms"] = latency_reserve
-    row["prediction"] = forecast
+    row["prediction"] = option.get("rollout_expected_cost")
     paid = event.get("physical_paid_observation")
-    if paid is None or terminal is None or attempt.stage not in {"COMMITTED", "FAILED"}:
+    if terminal is None:
         row["unmatched_reasons"].append("paid_boundary_or_authoritative_terminal_event_missing")
+        return
+    for name, actual in tokens.items():
+        if actual is not None and actual >= event["paid_cost"][name]:
+            row["actual"][name] = actual-event["paid_cost"][name]
+        else:
+            row["unmatched_reasons"].append(f"unmeasured_terminal_{name}")
+    if paid is None:
+        row["unmatched_reasons"].append("paid_physical_boundary_missing")
         return
     start = paid["end"]
     window = terminal.get("answer_phase_window")
@@ -156,18 +202,6 @@ def observed_remaining(row, event, attempt, terminal, observations, option):
     else:
         row["actual"].update({key: physical[key] for key in ("gpu_gib_ms", "host_gib_ms")})
         row["physical_match"] = physical
-    if attempt.stage == "COMMITTED" and attempt.result is not None:
-        steps = attempt.reading_outcome.steps if attempt.reading_outcome else ()
-        usage = attempt.auxiliary_usage or {"input_tokens": 0, "output_tokens": 0}
-        for name, answer_tokens, step_field in (("input_tokens", attempt.plan.candidate.input_ids, "input_ids"),
-                ("output_tokens", attempt.result.output_ids, "output_ids")):
-            if usage[name] is None:
-                continue
-            actual = usage[name]+len(answer_tokens)+sum(len(getattr(step, step_field)) for step in steps)
-            if actual >= event["paid_cost"][name]:
-                row["actual"][name] = actual-event["paid_cost"][name]
-    if forecast is not None:
-        row["errors"] = {key: forecast[key]-value for key, value in row["actual"].items()}
     if latency_reserve is not None and attempt.stage == "COMMITTED":
         row["latency_reserve_underestimated"] = row["actual"]["latency_ms"] > latency_reserve
 
@@ -289,7 +323,7 @@ def audit_directory(directory):
     fitted_ids, assets, overlap_basis = calibration_ids(directory)
     store = SourceLedger(database_path)
     store.db.execute("BEGIN")
-    rows = []
+    rows, terminal_usage = [], {}
     try:
         for number, event in enumerate(decisions):
             required = event["event"] == "rolling_required_scope_step"
@@ -330,10 +364,23 @@ def audit_directory(directory):
                 row["unmatched_reasons"].append("source_is_not_actual_sglang_hardware")
                 continue
             if required or event["decision_mode"] == "observed_actions":
-                terminal = ((commits.get(attempt.attempt_id) or recovered.get(attempt.attempt_id))
-                            if attempt.stage == "COMMITTED" else failures.get(attempt.attempt_id))
+                terminal = None
+                if attempt.stage == "COMMITTED":
+                    terminal = commits.get(attempt.attempt_id) or recovered.get(attempt.attempt_id)
+                elif attempt.stage == "FAILED":
+                    failure = failures.get(attempt.attempt_id)
+                    if attempt.failed_at_ns is not None:
+                        terminal = {"monotonic_timestamp_ns": attempt.failed_at_ns}
+                    elif failure is not None and failure["error"] == attempt.error:
+                        terminal = failure
                 option = event if required else event["option_diagnostics"].get(key, {})
-                observed_remaining(row, event, attempt, terminal, observations, option)
+                if terminal is not None and attempt.attempt_id not in terminal_usage:
+                    terminal_usage[attempt.attempt_id] = terminal_tokens(store, attempt)
+                observed_remaining(row, event, attempt, terminal, observations, option,
+                                   terminal_usage.get(attempt.attempt_id, {}))
+                forecast = row["prediction"]
+                if forecast is not None:
+                    row["errors"] = {key: forecast[key]-value for key, value in row["actual"].items()}
                 if attempt.stage == "COMMITTED":
                     row["timing_observation"] = timing_observation(
                         event, attempt, task, candidate, option, row["actual"].get("latency_ms"))
@@ -414,7 +461,7 @@ def summaries(rows):
         heldout = [row for row in selected if row["heldout_qualified"]]
         def metric_errors(qualified):
             metrics = {}
-            for metric in METRICS:
+            for metric in (*METRICS, *TOKEN_METRICS):
                 errors = [row["errors"][metric] for row in qualified if metric in row["errors"]]
                 metrics[metric] = {"count": len(errors),
                     "mae": statistics.fmean(abs(value) for value in errors) if errors else None,

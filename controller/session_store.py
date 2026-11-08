@@ -64,6 +64,7 @@ class Attempt:
     answer_quote: dict | None = None
     failed_from_stage: str | None = None
     terminal_receipt: CompletionReceipt | None = None
+    failed_at_ns: int | None = None
 
 
 ACTIVE_STAGES = ("STARTED", "PLANNED", "PREPARING", "PREPARED", "SUBMITTED", "RESULT_READY")
@@ -692,7 +693,7 @@ class SessionStore:
             if attempt.stage in ("COMMITTED", "FAILED"):
                 return
             updated = replace(attempt, stage="FAILED", error=error, failed_from_stage=attempt.stage,
-                              terminal_receipt=terminal_receipt)
+                              terminal_receipt=terminal_receipt, failed_at_ns=time.monotonic_ns())
             self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (updated.stage, self._dump(updated), attempt_id))
             self._enqueue_demand_release(attempt.session_id, "attempt_failed", attempt_id=attempt_id)
             snap = self._read(attempt.session_id)

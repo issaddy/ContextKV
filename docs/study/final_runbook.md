@@ -66,7 +66,7 @@ B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_suppor
 
 当前 B 资产携带 `input_protocol`，绑定实际窗口粒度、任务投影、共享来源格式 `canonical-source-envelope:v1` 和 reader fingerprint。采集、分支、配对及加载全链核对该身份。实际 seed、已读覆盖、编译选中排列及报价的 `pre_action_input` 一并保留。保留策略标定也使用当前格式采集的原生前缀轨迹。
 
-`training.plan_gain_completion fit --dev` 按动作从独立开发会话标定完成延迟的单侧低估余量。开发报告列出各动作与表示的收益符号一致率、同状态实测分支的选择后悔值、未校准低估率及逐会话留一超限率。`bench.plan_prediction_audit --root ... --output ...` 从实际已付边界重算滚动决策至终止的余程。
+`training.plan_gain_completion fit --dev` 按动作从独立开发会话标定完成延迟的单侧低估余量。开发报告列出各动作与表示的收益符号一致率、同状态实测分支的选择后悔值、未校准低估率及逐会话留一超限率。`bench.plan_prediction_audit --root ... --output ...` 从实际已付边界重算滚动决策至终止的余程。失败余程以账本确认失败的时间为终点，按原生回执和辅助阶段汇总扣除决策前已付 token。
 
 在独立于正式评价队列的开发会话上运行同一策略。用 `python3 -m bench.plan_prediction_audit --root CALIBRATION-RUN --output NEW-AUDIT --timing-calibration` 导出 `completion-timing.json`，在 `execution.plan_gain.completion_timing_asset` 指向该文件。设置 `execution.max_complete_ms` 后，必做步骤和规则对照按同一 reader、动作策略、保留方式及设备上的可比工作量预留时间。每个匹配会话只贡献一条最慢实测余程，至少两个会话才启用经验 P95，额度判断使用已付时间加余程预留。正式队列另按实际交付时延计算 P95。
 
