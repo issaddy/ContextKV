@@ -24,6 +24,7 @@ async def test_explicit_request_namespace_resumes_failed_p3_without_changing_tas
     import yaml
     from adapters import study_retrieval
     from bench import native_metrics, study_resources
+    from bench.capacity_workflow import declared_execution_rows
     from bench.mock_engine import MockEngine
     from bench.study import run_dataset, saved_study_rows
     from controller.context_schema import TaskState
@@ -92,12 +93,21 @@ async def test_explicit_request_namespace_resumes_failed_p3_without_changing_tas
     config = {"generation": {"run_config": str(run)}, "task_model": {"mode": "fixture"},
         "support_model": {"mode": "fixture"}, "study": {"strategy": "B0"},
         "execution": dict(window_tokens=32768, output_tokens=1024, lambda_time=0, lambda_gpu=0, lambda_host=0)}
-    matrix = {"datasets": {"track": {"input": str(tasks)}}, "resources": {"gpu_devices": [], "process_ids": []}}
+    matrix = {"datasets": {"track": {"input": str(tasks), "continue_conversation_failures": True}},
+              "resources": {"gpu_devices": [], "process_ids": []}}
     method = {"id": "B0", "strategy": "B0"}
-    with pytest.raises(ExceptionGroup):
-        await run_dataset(config, matrix, method, "track", "train", tmp_path, limit_turns=2)
+    initial = await run_dataset(config, matrix, method, "track", "train", tmp_path)
+    assert [row["task_id"] for row in initial] == ["task:1"]
     first_segments = json.loads((tmp_path/"measurement_segments.json").read_text())["segments"]
     first_raw = {p: (tmp_path/p/"generation_manifest.json").read_bytes() for p in first_segments}
+    failed = tmp_path/"failed_conversations.json"
+    original_failure = failed.read_bytes()
+    await run_dataset(config, matrix, method, "track", "train", tmp_path)
+    assert failed.read_bytes() == original_failure
+    indexed, _, _ = declared_execution_rows({"output": tmp_path.parent, "method": tmp_path.name,
+                                               "datasets": ["."]})
+    assert {row["task_id"]: row["status"] for row in indexed} == {
+        "task:1": "completed", "task:2": "failed", "task:3": "blocked"}
     rows = await run_dataset(config, matrix, method, "track", "train", tmp_path,
                              limit_turns=2, request_namespace="condition-schema-v1")
     assert calls == [("task:1", 0), ("task:2", 1), ("task:2", 1)]

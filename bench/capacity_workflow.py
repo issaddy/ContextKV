@@ -507,10 +507,11 @@ def declared_execution_rows(job):
         if failures.exists():
             failure_ledgers[dataset] = str(failures)
         failed = json.loads(failures.read_text()) if failures.exists() else []
+        failed = [row for row in failed if str(row["task_id"]) not in results]
         dispatch_path = track/"workload_dispatch.json"
         dispatch = json.loads(dispatch_path.read_text()) if dispatch_path.exists() else None
         delivery[dataset] = delivery_summary([row for row in results.values() if row["status"] == "completed"],
-            [row for row in failed if str(row["task_id"]) not in results], dispatch,
+            failed, dispatch,
             complete_slo_seconds=job.get("complete_slo_seconds"))
         for row in failed:
             stage = (row.get("attempt") or {}).get("stage")
@@ -519,6 +520,10 @@ def declared_execution_rows(job):
         if dispatch is not None:
             for task_id, row in dispatch["cancelled"].items():
                 results.setdefault(str(task_id), {**row, "status": "blocked"})
+        for failure in failed:
+            for task_id in failure.get("blocked_task_ids", ()):
+                results.setdefault(str(task_id), {"task_id": task_id,
+                    "conversation_id": failure["conversation_id"], "status": "blocked"})
         rows.extend({**row, "dataset": dataset, "generation_dir": str(track)} for row in results.values())
     return rows, failure_ledgers, delivery
 

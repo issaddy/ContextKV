@@ -251,6 +251,12 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     failures = {row["conversation_id"]: row
         for path in (directory/"terminal_read_failures").glob("*.json")
         for row in [json.loads(path.read_text())]} if reuse_provider else {}
+    failure_path = directory/"failed_conversations.json"
+    if continue_conversation_failures and not reuse_provider and failure_path.exists():
+        pending = set(expected)-results.keys()
+        failures = {row["conversation_id"]: row for row in json.loads(failure_path.read_text())
+            if row["task_id"] in pending and row["request_id"] == actual_request_id(row["task_id"])
+            and (row.get("attempt") or {}).get("stage") == "FAILED"}
     semaphore = asyncio.Semaphore(concurrency)
     physical = StudyResourceSampler(devices, process_ids)
     native = NativePoolSampler(run.engine.base_url, gpu_capacity=allocator["pool"]["gpu_capacity_tokens"],
@@ -376,6 +382,10 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         await service.close_session(session_id)
 
     async def isolated_conversation(sid):
+        if sid in failures:
+            if dispatcher is not None:
+                await dispatcher.cancel_conversation(sid, failures[sid]["error"])
+            return
         client_started = time.monotonic()
         try:
             await conversation(sid)
@@ -512,7 +522,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                     failure_key = digest(failure["conversation_id"])[:20]
                     write_json(directory/"terminal_read_failures"/(failure_key+".json"), failure)
             write_json(segment/"failed_conversations.json", [failures[sid] for _, sid in failure_windows])
-            write_json(directory/"failed_conversations.json", list(failures.values()))
+            write_json(failure_path, list(failures.values()))
         if dispatcher is not None:
             write_json(directory/"workload_dispatch.json", dict(origin=dispatcher.origin,
                 clock="client_monotonic", observation_window=dispatch_window,
