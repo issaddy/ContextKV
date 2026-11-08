@@ -197,13 +197,19 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     observer = PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
                                   {"mode": "demand", "protection_budget_tokens": 4})
 
-    async def after_gap(target):
+    async def after_gap(target, active=()):
         read = PlanCandidate("next", "read_once", plan, (PlanStep(later, (target,)),), "reader")
         return (await observer.demand_options((gap, read), state, "session", batch,
-            prefix_status={"prefixes": []}))["gap"]
+            prefix_status={"prefixes": active}))["gap"]
 
     shared = await after_gap(candidate)
     lease, = shared.retain
     assert (lease.source_step_id, lease.target_step_id, lease.boundary_tokens) == ("old", "later", 2)
     assert shared.protected_tokens == 2
+    page = "scope:" + token_hash(ids[:2])
+    existing = {"owner_id": "another-session", "gpu_page_ids": [page], "host_page_ids": [],
+                "referenced_page_ids": [page], "reference_present": True}
+    reused = await after_gap(candidate, (existing,))
+    assert reused.retain == ()
+    assert reused.protected_tokens == reused.uncovered_risk_tokens == 0
     assert (await after_gap(replace(candidate, source_body_token_ranges=((2, 4),)))).retain == ()

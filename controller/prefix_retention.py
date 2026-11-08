@@ -215,6 +215,11 @@ def owner_pages(receipt):
     return frozenset(receipt["gpu_page_ids"]) | frozenset(receipt["host_page_ids"])
 
 
+def referenced_gpu_pages(receipts):
+    return {page for row in receipts if row["reference_present"]
+            for page in set(row["gpu_page_ids"]).intersection(row["referenced_page_ids"])}
+
+
 def shared_body_page(left, right, boundary, page_size):
     for first, last in left:
         for other_first, other_last in right:
@@ -579,7 +584,9 @@ class PrefixReadObserver:
         statuses = prefix_status if prefix_status is not None else await self.runtime.status(batch.engine_restart_id)
         active = {row["owner_id"]: row for row in statuses["prefixes"]}
         own &= active.keys()
-        shared = set().union(*(owner_pages(row) for key, row in active.items() if key not in own))
+        other_owners = tuple(row for key, row in active.items() if key not in own)
+        shared = set().union(*(owner_pages(row) for row in other_owners))
+        shared_gpu = referenced_gpu_pages(other_owners)
         quotes = {quote.candidate_id: quote for quote in batch.quotes}
         limit = self.settings["protection_budget_tokens"]
         page_size = next(iter(sources.values()))[1]["page_size"] if sources else 0
@@ -637,19 +644,27 @@ class PrefixReadObserver:
                 for owner, step_id, boundary, path in matching_sources(compiled):
                     exposed = min(boundary, risk)
                     proposed.append((exposed, owner, step_id, target, path, priority, boundary))
-            protected, covered, selected = set(shared), set(), {}
-            exposed_by_target = {}
+            protected, protected_gpu = set(shared), set(shared_gpu)
+            covered, selected = set(), {}
             for risk, owner, step, target, path, priority, boundary in sorted(proposed,
-                    key=lambda row: (-row[5], -row[0], len(row[4]-shared), row[1], row[3])):
-                exposed_by_target.setdefault(target, risk)
+                    key=lambda row: (-row[5], -max(0, row[0]-len(row[4] & shared_gpu)*page_size),
+                                     len(row[4]-shared), -row[0], row[1], row[3])):
                 if target in covered or len(protected | path)*page_size > limit:
                     continue
-                protected.update(path)
                 covered.add(target)
-                selected.setdefault(owner, DemandLease(owner, step, target, boundary, risk))
+                added_risk_coverage = risk-len(path & protected_gpu)*page_size
+                if added_risk_coverage > 0:
+                    protected.update(path)
+                    protected_gpu.update(path)
+                    selected[owner] = DemandLease(owner, step, target, boundary, added_risk_coverage)
+            exposed_by_target, protected_by_target = {}, {}
+            for risk, _, _, target, path, _, _ in proposed:
+                exposed_by_target[target] = max(exposed_by_target.get(target, 0), risk)
+                protected_by_target[target] = max(protected_by_target.get(target, 0),
+                    min(risk, len(path & protected_gpu)*page_size))
             return JointOption(demand, tuple(lease for key, lease in selected.items() if key not in own),
                 tuple(sorted(own-selected.keys())), len(protected-shared)*page_size,
-                sum(risk for target, risk in exposed_by_target.items() if target not in covered))
+                sum(risk-protected_by_target[target] for target, risk in exposed_by_target.items()))
 
         return joint_options(plans, state, allocate=allocate)
 
@@ -663,12 +678,15 @@ class PrefixReadObserver:
             if option.retain:
                 status = await self.runtime.status(batch.engine_restart_id)
                 protected = set().union(*(owner_pages(row) for row in status["prefixes"]))
+                protected_gpu = referenced_gpu_pages(status["prefixes"])
             for lease in option.retain:
                 record = steps[lease.source_step_id]
                 observed = record.metrics["evidence_prefix"]
                 prefix = record.input_ids[:lease.boundary_tokens]
                 page_size, scope = observed["page_size"], observed["cache_scope_hash"]
                 pages = {scope+":"+value for value in executed_prefix_hashes(prefix, page_size).values()}
+                if pages <= protected_gpu:
+                    continue
                 next_pages = protected | pages
                 if len(next_pages)*observed["page_size"] > self.settings["protection_budget_tokens"]:
                     receipts[lease.owner_id] = {"state": "UNRETAINED", "reason": "shared_protection_budget"}
@@ -682,6 +700,7 @@ class PrefixReadObserver:
                         "protected_tokens": option.protected_tokens})
                 if receipts[lease.owner_id]["state"] == "RETAINED":
                     protected.update(owner_pages(receipts[lease.owner_id]))
+                    protected_gpu.update(referenced_gpu_pages((receipts[lease.owner_id],)))
         return {"elapsed_ms": (time.monotonic()-started)*1000,
                 "owner_status": {owner: {key: ack[key] for key in ("state", "reason", "boundary_tokens", "expires_at")
                                          if key in ack} for owner, ack in receipts.items()}}
