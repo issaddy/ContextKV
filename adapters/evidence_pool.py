@@ -5,6 +5,7 @@ from controller.context_budget import condition_references
 
 from dataclasses import dataclass, replace
 from datetime import date
+from functools import cached_property
 import re
 import time
 
@@ -61,16 +62,27 @@ class SourceDirectory:
         self._units = {}
         self._blocks = {b.key: b for b in corpus_index.blocks}
         self._family_members, self._family_by_key, self._version_members = {}, {}, {}
-        for block in corpus_index.blocks:
-            self._index_family(block.key)
-            self._units[block.key] = self._split(block)
-        self._unit_metadata = {key: dict(corpus_index.source_metadata.get(key, {})) for key in self._units}
-        for key, units in tuple(self._units.items()):
-            dependency_ids = tuple(unit.unit_id for dependency in self._blocks[key].dependencies
-                                   for unit in self._units[dependency])
-            self._units[key] = tuple(replace(unit, dependencies=tuple(dict.fromkeys(
-                (*unit.dependencies, *dependency_ids)))) for unit in units)
-        self.units_by_id = {unit.unit_id: unit for units in self._units.values() for unit in units}
+        for key in self._blocks:
+            self._index_family(key)
+        self._unit_metadata = {key: dict(corpus_index.source_metadata.get(key, {})) for key in self._blocks}
+
+    def _base_units(self, key):
+        if key not in self._units:
+            self._units[key] = self._split(self._blocks[key])
+        return self._units[key]
+
+    def _source_units(self, key):
+        units = self._base_units(key)
+        dependencies = self._blocks[key].dependencies
+        if not dependencies:
+            return units
+        identities = tuple(unit.unit_id for dependency in dependencies for unit in self._base_units(dependency))
+        return tuple(replace(unit, dependencies=tuple(dict.fromkeys((*unit.dependencies, *identities))))
+                     for unit in units)
+
+    @cached_property
+    def units_by_id(self):
+        return {unit.unit_id: unit for key in self._blocks for unit in self._source_units(key)}
 
     def _index_family(self, key):
         family = self.corpus_index.source_metadata.get(key, {}).get("document_family", key.document_id)
@@ -178,13 +190,9 @@ class SourceDirectory:
             if block.key not in self._blocks or self._unit_metadata[block.key] != metadata:
                 self._blocks[block.key] = block
                 self._index_family(block.key)
-                self._units[block.key] = self._split(block)
+                self._units.pop(block.key, None)
                 self._unit_metadata[block.key] = dict(metadata)
-        for block in blocks:
-            dependency_ids = tuple(unit.unit_id for dependency in block.dependencies for unit in self._units[dependency])
-            self._units[block.key] = tuple(replace(unit, dependencies=tuple(dict.fromkeys(
-                (*unit.dependencies, *dependency_ids)))) for unit in self._units[block.key])
-        self.units_by_id = {unit.unit_id: unit for group in self._units.values() for unit in group}
+                self.__dict__.pop("units_by_id", None)
 
     def archive_lookup(self, keys):
         return tuple(self._blocks[key] for key in keys)
@@ -195,7 +203,7 @@ class SourceDirectory:
             return keys[:top_k]
         vectors = {}
         for key in keys:
-            vector = self.encode_source_units(self._units[key], self.archive_encoder).mean(axis=0)
+            vector = self.encode_source_units(self._source_units(key), self.archive_encoder).mean(axis=0)
             vectors[key] = vector / np.linalg.norm(vector)
         query_vector = np.asarray(self.archive_encoder([query])[0], dtype=np.float32)
         query_vector /= np.linalg.norm(query_vector)
@@ -360,12 +368,12 @@ class SourceDirectory:
         blocks = self.source_fetch(selected)
         units = tuple(replace(unit, retrieval_score=scores.get(block.key, 0.0),
                               need_ids=tuple(sorted(needs.get(block.key, ()))))
-                      for block in blocks for unit in self._units[block.key])
+                      for block in blocks for unit in self._source_units(block.key))
         return EvidencePool(units, blocks, "selected_sources", (time.perf_counter()-started)*1000, tuple(trace))
 
     def full_scope(self, keys):
         blocks = self.source_fetch(keys)
-        return EvidencePool(tuple(unit for block in blocks for unit in self._units[block.key]),
+        return EvidencePool(tuple(unit for block in blocks for unit in self._source_units(block.key)),
                             blocks, "all_supplied_documents")
 
     def applicable_scope(self, keys, state, memory):
@@ -391,7 +399,7 @@ class SourceDirectory:
             keys = tuple(scored)
             for block in self.source_fetch(keys):
                 blocks[block.key] = block
-                for unit in self._units[block.key]:
+                for unit in self._source_units(block.key):
                     units.append(replace(unit, need_ids=(need.need_id,),
                         retrieval_score=scored.get(block.key, unit.retrieval_score)))
             trace.append({"origin": "open_need", "query": query, "need_id": need.need_id,
