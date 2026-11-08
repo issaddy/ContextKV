@@ -271,7 +271,7 @@ python3 -m bench.capacity_workflow --full-queue --methods B6_native \
 分设备结果用 `profiling.final_study_index --baseline-commit "$E0_SOURCE_COMMIT" --joint-scope joint-frozen-A/inputs.json`
 汇总，逐个 `--artifact NAME=WORKFLOW.json` 指定各设备结果。共同输入、实际 worker 配置、
 cohort、reader 与预算确定对照条件，各格分别列出实际启用的 B/C 资产。
-报告保留全分母质量、完成率、已交付完整响应 P95、逐数据集 SLO goodput 与成本出处。比较身份同时核对到达计划哈希和 SLO；提供 `--cost-manifest`/`--physical` 生成成本命令时，必须通过 `--gpu-devices` 声明实际设备，不默认包含整机。
+报告保留全分母质量、完成率、已交付完整响应 P95、逐数据集 SLO goodput 与成本出处。比较身份核对到达计划、SLO、执行源码和双方共同适用的资产。提供 `--cost-manifest`/`--physical` 生成成本命令时，通过 `--gpu-devices` 声明实际设备。
 
 联合汇总的 `dataset_protocols` 来自矩阵已有 `split_kind` 与分区指标声明；Markdown 将公开基准、参考历史诊断和构造机制任务分表。每轨原指标、完整题目分母、已评分子集与未知区间同时呈现，混合开发 Q 的登记权重保持不变。
 

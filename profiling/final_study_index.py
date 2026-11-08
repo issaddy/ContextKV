@@ -298,7 +298,8 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
     binding = dict(frozen_A_config_sha256=plan["source_config"]["sha256"],
         matrix_sha256=plan["source_matrix"]["sha256"], cohort_sha256=canonical(plan["cohort"]),
         reader_run_sha256=canonical(run), reader_profile_id=plan["reader_profile_id"],
-        lambda_time=plan["lambda_time"], execution_commit=plan.get("execution_commit"))
+        lambda_time=plan["lambda_time"], execution_commit=plan.get("execution_commit"),
+        execution_sources_sha256=plan.get("execution_sources_sha256"))
     device_source = {key: binding[key] for key in ("frozen_A_config_sha256", "matrix_sha256")}
     if joint_scope is not None:
         registered = [worker for worker in joint_scope["workers"]
@@ -349,8 +350,10 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
                     and entry["method"] in {plan["acceptance"]["baseline"], plan["acceptance"]["candidate"]}})}
         cells.append({**row, "evaluation_kind": "full_queue_own_P3", "source_file": str(path),
             "generation_dir": job["output"], "comparison_identity": comparison,
-            "active_assets": {name: plan["assets"][name] for name, active in (
-                ("gain", row["method"].startswith("S3_")), ("value", row["method"].endswith("_value"))) if active}
+            "active_assets": {name: plan["assets"].get(name) for name, active in (
+                ("gain", row["method"].startswith("S3_")), ("value", row["method"].endswith("_value")),
+                ("completion_timing", row["method"].startswith(("S3_", "Rule_"))),
+                ("demand_pricing", row["method"].endswith("_demand"))) if active}
                 | ({"compilation": plan["compilation_asset"]} if "_contextpilot" in row["method"] else {}),
             "evaluation_factors": plan.get("method_factors", {}).get(row["method"]),
             "experiment_design": plan.get("experiment_design", "historical retention design"),
@@ -369,6 +372,12 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
 
 def queue_repetition(cell):
     return cell.get("replicate_scope"), cell.get("repetition")
+
+
+def shared_asset_differences(left, right):
+    left, right = left["active_assets"], right["active_assets"]
+    return sorted(name for name in left.keys() & right.keys()
+                  if (left[name] or {}).get("sha256") != (right[name] or {}).get("sha256"))
 
 
 def full_queue_comparisons(cells):
@@ -390,8 +399,7 @@ def full_queue_comparisons(cells):
         for reference in baselines:
             missing_resource_fields = [name for name in ("hardware", "native_cache_config")
                 if any(cell["comparison_identity"]["resource_scope"][name] is None for cell in (row, reference))]
-            different_assets = [name for name in row["active_assets"].keys() & reference["active_assets"].keys()
-                if row["active_assets"][name]["sha256"] != reference["active_assets"][name]["sha256"]]
+            different_assets = shared_asset_differences(row, reference)
             same = (not missing_resource_fields and not different_assets
                     and row["comparison_identity"] == reference["comparison_identity"])
             complete_scored = all(cell["full_queue_delivered"]
@@ -405,7 +413,7 @@ def full_queue_comparisons(cells):
                 source_file=row["source_file"], baseline_source_file=reference["source_file"],
                 candidate_generation_dir=row["generation_dir"], baseline_generation_dir=reference["generation_dir"],
                 comparable=same, incompatible_identity_fields=[key for key, value in row["comparison_identity"].items()
-                    if value != reference["comparison_identity"][key]] + ["assets."+name for name in sorted(different_assets)],
+                    if value != reference["comparison_identity"][key]] + ["assets."+name for name in different_assets],
                 missing_identity_fields=["resource_scope."+name for name in missing_resource_fields],
                 device_source_identity_differs=row["device_source_identity"] != reference["device_source_identity"],
                 differences={field: row[field]-reference[field] if same and numeric(row[field])
@@ -441,8 +449,7 @@ def full_queue_interactions(cells):
             scope = e1["comparison_identity"]["resource_scope"]
             if any(scope[name] is None for name in ("hardware", "native_cache_config")):
                 continue
-            if (e2["active_assets"]["gain"]["sha256"] != e4["active_assets"]["gain"]["sha256"]
-                    or e3["active_assets"]["compilation"]["sha256"] != e4["active_assets"]["compilation"]["sha256"]):
+            if shared_asset_differences(e2, e4) or shared_asset_differences(e3, e4):
                 continue
             complete = all(cell["full_queue_delivered"] and numeric(cell["queue_quality"])
                 and not any(cell["unscored_answer_task_ids"].values()) for cell in quartet)

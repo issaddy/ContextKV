@@ -111,8 +111,11 @@ def evaluate_full_queue(cells):
             if contract != _pair_contract(right):
                 pair_issues.append({"replicate": slot, "reason": "reader_scorer_or_resident_A_differs"})
                 continue
-            assets = [{name: item["sha256"] for name, item in cell["active_assets"].items()}
+            assets = [{name: item["sha256"] if item is not None else None for name, item in cell["active_assets"].items()}
                       for cell in (left, right)]
+            if any(assets[0][name] != assets[1][name] for name in assets[0].keys() & assets[1].keys()):
+                pair_issues.append({"replicate": slot, "reason": "shared_assets_differ"})
+                continue
             contracts.add(json.dumps((contract, assets), sort_keys=True))
             pairs.append((left, right))
         if len(contracts) > 1:

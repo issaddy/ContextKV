@@ -423,8 +423,13 @@ def prepare_full_queue(args, root):
         "cost_basis": "unique native receipts plus provider phase totals, and global online physical occupancy"}
     revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=args.project_root,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout.strip() or None
+    project = Path(args.project_root).resolve()
+    sources = {path.relative_to(project).as_posix(): snapshot(path)["sha256"]
+        for folder in ("adapters", "bench", "controller", "engine_patches", "profiling", "training")
+        for path in (project/folder).rglob("*.py")}
     manifest = dict(format="contextkv_full_queue_joint_plan_v1", scope="full declared P3 development queue",
-        execution_commit=revision,
+        execution_commit=revision, execution_sources_sha256=hashlib.sha256(
+            json.dumps(sources, sort_keys=True).encode()).hexdigest(),
         source_config=snapshot(args.config), source_matrix=snapshot(args.matrix),
         source_cohorts=snapshot(args.cohorts) if args.cohorts is not None else None,
         reader_profile_id=profile, reader_run=snapshot(run_path), resource_scope=scope,

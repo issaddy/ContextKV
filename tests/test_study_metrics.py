@@ -190,6 +190,10 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     plan['execution_commit'] = 'new-release'
     plan_path.write_text(json.dumps(plan))
     assert full_queue_comparisons(reference + cells(candidate))[0]['incompatible_identity_fields'] == ['execution_commit']
+    plan.pop('execution_commit')
+    plan['execution_sources_sha256'] = 'different-working-tree'
+    plan_path.write_text(json.dumps(plan))
+    assert full_queue_comparisons(reference + cells(candidate))[0]['incompatible_identity_fields'] == ['execution_sources_sha256']
 
     out = tmp_path / 'index'
     report = main(['--baseline-commit', '85f4ed4', '--physical', 'recorded-physical.json',
@@ -227,6 +231,17 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
                      if item['candidate'] == 'S3_contextpilot' and item['baseline'] == 'S3_native')
     assert not mismatched['comparable']
     assert mismatched['incompatible_identity_fields'] == ['assets.gain']
+
+    e5 = cells({**row, 'method': 'S3_contextpilot_joint_native'})
+    e6 = {**row, 'method': 'S3_contextpilot_joint_demand'}
+    rule = cells({**row, 'method': 'Rule_contextpilot_joint_demand'})
+    plan['assets']['demand_pricing'] = {'sha256': 'pricing'}
+    plan_path.write_text(json.dumps(plan))
+    assert full_queue_comparisons(e5 + cells(e6))[0]['comparable']
+    assert full_queue_comparisons(cells(e6) + rule)[0]['incompatible_identity_fields'] == ['assets.demand_pricing']
+    plan['assets']['completion_timing'] = {'sha256': 'timing'}
+    plan_path.write_text(json.dumps(plan))
+    assert full_queue_comparisons(e5 + cells(e6))[0]['incompatible_identity_fields'] == ['assets.completion_timing']
 
 
 def test_public_and_constructed_tables_keep_split_metrics_and_full_denominators():
