@@ -18,6 +18,7 @@
 | READ 与 ANSWER 共用正文前缀 | 已提交的 VersionQA 轨迹中，最终回答实际命中先前阅读所见的正文页。 | `read-answer-prefix-evidence.json` |
 | 目录与窗口成本 | 实际 MT-RAG 目录、Qwen tokenizer 和两轮问答分别记录目录分词、初始化及完整响应变化。E1／E6 两轮配对均采用原文回答。 | `task-catalogue-evidence.json`、`mtrag-short-evidence.json`、`mtrag-e1-e6-short-evidence.json` |
 | 收益监督 | 按原始观测状态重采受 READ 输出上限规则影响的配对，并使用同一开发集重新校准。 | `gain-focused-evidence.json` |
+| 必做路径耗时预留 | Qwen3-32B 单并发下，两条受控统计会话产生 8 条实测余程。第三条独立会话正确计数并提交，耗时 3.35 秒，READ、筛选、CPU 归约和 ANSWER 的实际余程均在预留内。 | `completion-timing-f5c5bb1/evidence.json` |
 
 ## 完整队列验收
 
