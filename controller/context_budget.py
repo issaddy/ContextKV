@@ -113,7 +113,7 @@ def completion_reserve(plan, results, task, candidate=None, *, read_all=False):
     Only the current compiled input is exact. Future READs contribute source
     work and their output limits, before later facts and prompts exist.
     """
-    from .reading import numeric_selection_step_id
+    from .reading import numeric_selection_step_ids
 
     current_input = len(candidate.input_ids) if candidate is not None else 0
     current_output = candidate.output_budget if candidate is not None else 0
@@ -143,8 +143,9 @@ def completion_reserve(plan, results, task, candidate=None, *, read_all=False):
     scheduled_ops = {(need, step.operation) for step in (*scheduled, *((task,) if task is not None else ()))
                      if step.kind == "REDUCE" for need in step.need_ids}
     finished_ops = {(need, item.operation) for item in reductions for need in item.need_ids}
-    selectors = sum(numeric_selection_step_id(plan, need) not in completed | {None}
-                    and (need, "numeric_select") not in scheduled_ops for need in numeric)
+    selector_ids = numeric_selection_step_ids(plan)
+    selectors = len({selector_ids[need] for need in numeric.keys() & selector_ids.keys()
+                     if (need, "numeric_select") not in scheduled_ops} - completed)
     aggregates = sum((need, operation) not in scheduled_ops and
                      ((need, operation) not in finished_ops
                       or any(need in step.need_ids for step in reads)
@@ -343,9 +344,10 @@ def direct_answer_reason(state, candidate, *, require_complete_evidence=True):
 
 def answer_evidence_gaps(state, candidate=None, *, require_complete_evidence=True):
     """Return unresolved Needs for the facts alone or the actual ANSWER input."""
-    from .reading import numeric_selection_step_id
+    from .reading import numeric_selection_step_ids
 
     plan = state.plan
+    selector_ids = numeric_selection_step_ids(plan)
     points = {point.need_id: point for point in plan.answer_plan.points}
     results = tuple(state.results)
     open_need_ids = {gap.need_id for gap in state.open_needs}
@@ -367,7 +369,7 @@ def answer_evidence_gaps(state, candidate=None, *, require_complete_evidence=Tru
             if need.need_id in open_need_ids:
                 gaps[need.need_id] = "numeric_fields_incomplete"
                 continue
-            selector_id = numeric_selection_step_id(plan, need.need_id)
+            selector_id = selector_ids.get(need.need_id)
             selection = next((result.reduction for result in reversed(results) if result.reduction is not None
                 and result.reduction.step_id == selector_id), None) if selector_id is not None else None
             basis = (set(selection.basis_claim_ids) if selection is not None else

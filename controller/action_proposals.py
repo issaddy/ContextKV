@@ -7,7 +7,7 @@ import hashlib
 from .context_budget import answer_evidence_gaps, bind_answer_window
 from .context_schema import OpenNeed, ReadTask
 from .plan_policy import complete_plan
-from .reading import numeric_reduction_inputs, numeric_selection_step_id, numeric_selection_task
+from .reading import numeric_reduction_inputs, numeric_selection_step_ids, numeric_selection_tasks
 from .serialization import dumps
 
 
@@ -141,29 +141,26 @@ def observed_reduction_task(frozen):
     base = frozen.plan
     if base.reading_mode == "coverage_only":
         return None
-    shared_needs = {need_id for task in base.steps if task.kind == "READ"
-                    for scope in task.shared_numeric_scopes for need_id in scope.need_ids}
+    selector = next(numeric_selection_tasks(base, frozen.results, frozen.claims), None)
+    if selector is not None:
+        return selector
+    selector_ids = numeric_selection_step_ids(base)
     unresolved = {gap.need_id for gap in frozen.open_needs}
-    for need in base.task_state.needs:
-        if need.need_id in shared_needs and need.need_id not in unresolved:
-            selector = numeric_selection_task(base, frozen.results, frozen.claims, need_id=need.need_id)
-            if selector is not None:
-                return selector
     typed = {"enumerate", "count", "sum", "group", "compare", "infer"}
     needs = sorted(base.task_state.needs, key=lambda need: need.operation not in typed)
     for need in needs:
         if need.operation in {"count", "sum", "group"} and need.need_id in unresolved:
             continue
         summarize = need.operation not in typed
-        shared_numeric = need.need_id in shared_needs
+        selector_id = selector_ids.get(need.need_id)
+        shared_numeric = selector_id is not None
         if shared_numeric:
-            selector_id = numeric_selection_step_id(base, need.need_id)
             selection = next((result for result in reversed(frozen.results)
                 if result.step_id == selector_id or
                 (result.reduction is not None and result.reduction.step_id == selector_id)), None)
             if selection is None:
                 continue
-            claims = numeric_reduction_inputs(base, need.need_id, frozen.results)
+            claims = numeric_reduction_inputs(need.need_id, frozen.results, selector_id)
             same_selection = {record.step_id for record in frozen.steps
                               if selection.step_id in record.task.predecessor_step_ids}
         else:

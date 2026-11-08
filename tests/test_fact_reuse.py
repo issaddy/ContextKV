@@ -41,7 +41,7 @@ def source_read(*, operation="sum", quantity=True, bridge=False):
 
 
 def test_atomic_reuse_shares_facts_recomputes_views_and_never_copies_old_costs():
-    from controller.reading import advance_read_plan, build_read_plan, numeric_selection_task
+    from controller.reading import advance_read_plan, build_read_plan, numeric_selection_tasks
     memory, contracts, _ = source_read()
     needs = (Need("count", operation="count"), Need("sum", operation="sum"))
     plan = ContextPlan("now", TaskState("now", "Count and sum records.", needs=needs), EvidenceSet("empty", ()))
@@ -53,7 +53,7 @@ def test_atomic_reuse_shares_facts_recomputes_views_and_never_copies_old_costs()
     assert not seed.steps and all(not result.input_tokens and not result.output_tokens for result in seed.results)
     assert set(complete_reuse_ranges(seed)) == {"count", "sum"}
     assert all(step.step_id.startswith("policy:reuse:") for step in seed.plan.steps)
-    assert numeric_selection_task(seed.plan, seed.results, need_id="sum") is not None
+    assert any("sum" in task.need_ids for task in numeric_selection_tasks(seed.plan, seed.results))
     assert all(step.operation == "numeric_select" for step in advance_read_plan(seed.plan, seed.results))
     partial = build_reuse_seed(plan, (ReadReuse("sum", contracts[0].read_id, "facts"),), contracts, memory)
     assert partial.claims and not partial.coverage and complete_reuse_ranges(partial) == {"sum": ()}

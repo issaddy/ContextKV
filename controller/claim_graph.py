@@ -47,10 +47,6 @@ class ClaimGraph:
 
     def answer_plan(self, state, disposition="answer", results=()):
         reductions = tuple(result.reduction for result in results if result.reduction is not None)
-        active = tuple(reduction for index, reduction in enumerate(reductions)
-            if not any(reduction.need_ids == later.need_ids and reduction.operation == later.operation
-                and set(reduction.basis_claim_ids) <= set(later.basis_claim_ids)
-                for later in reductions[index+1:]))
         completed_claims = set()
         todo = [identity for reduction in reductions for identity in reduction.frontier_claim_ids]
         while todo:
@@ -65,7 +61,11 @@ class ClaimGraph:
             need_reductions = tuple(item for item in reductions if need.need_id in item.need_ids)
             managed = {identity for item in need_reductions
                        for identity in (*item.basis_claim_ids, *item.frontier_claim_ids)}
-            frontier = {identity for item in active if need.need_id in item.need_ids
+            active = tuple(item for index, item in enumerate(need_reductions)
+                if not any(item.operation == later.operation
+                           and set(item.basis_claim_ids) <= set(later.basis_claim_ids)
+                           for later in need_reductions[index+1:]))
+            frontier = {identity for item in active
                         for identity in item.frontier_claim_ids}
             current = tuple(claim for claim in self.claims.values()
                 if claim.serves(need.need_id) and (claim.claim_id in frontier

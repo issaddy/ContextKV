@@ -193,7 +193,7 @@ async def test_one_read_two_cpu_views_with_absent_and_zero_mass_and_durable_repl
     outcome = await executor.execute_reads(attempt.attempt_id, snapshot, plan)
     extracts = tuple(claim for claim in outcome.claims if claim.kind == "extract")
     derived = {claim.operation: claim for claim in outcome.claims if claim.kind == "derived" and claim.operation in {"count", "sum"}}
-    assert engine.reads == 1 and engine.selections == 2 and len(extracts) == 3
+    assert engine.reads == 1 and engine.selections == 1 and len(extracts) == 3
     assert derived["count"].value == 3
     assert (derived["sum"].value, derived["sum"].unit) == ("1000", "g")
     by_id = {claim.claim_id: claim for claim in outcome.claims}
@@ -207,8 +207,8 @@ async def test_one_read_two_cpu_views_with_absent_and_zero_mass_and_durable_repl
     assert [point.claim_ids for point in outcome.plan.answer_plan.points] == [
         (derived["count"].claim_id,), (derived["sum"].claim_id,)]
     replay = await executor.execute_reads(attempt.attempt_id, snapshot, outcome.plan)
-    assert replay.claims == outcome.claims and engine.reads == 1 and engine.selections == 2
-    assert len(store.execution_steps(attempt.attempt_id)) == 5
+    assert replay.claims == outcome.claims and engine.reads == 1 and engine.selections == 1
+    assert len(store.execution_steps(attempt.attempt_id)) == 4
 
 
 def test_count_reduction_does_not_consume_unfinished_sum_view_or_rolling_basis():

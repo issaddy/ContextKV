@@ -294,7 +294,7 @@ async def test_gap_for_numeric_need_does_not_continue_an_unrelated_infer_need(tm
 async def test_observed_numeric_actions_keep_factory_bound_shared_and_selected_basis(tmp_path, stage):
     from controller.action_proposals import observed_reduction_task
     from controller.plan_policy import complete_plan
-    from controller.reading import build_read_plan, numeric_selection_task, parse_read_result
+    from controller.reading import build_read_plan, numeric_selection_tasks, parse_read_result
     from training.plan_gain_protocol import FixedCounterfactualRuntime
 
     service, native, _, captured, snapshot, observed, _, _, _, _, _ = await frozen_fixture(tmp_path)
@@ -310,14 +310,12 @@ async def test_observed_numeric_actions_keep_factory_bound_shared_and_selected_b
     frozen = ReadingOutcome(base, claims=(original,), results=(result,),
         steps=(StepRecord('capture', read.step_id, read, result=result),), auxiliary_usage=dict(ZERO_AUX))
     if stage == 'sum':
-        # Both selectors have completed; CPU sum must consume selector-derived facts.
-        for need_id in ('sum', 'count'):
-            selector = numeric_selection_task(base, frozen.results, frozen.claims, need_id=need_id)
-            selected = parse_read_result(selector, json.dumps({'format_version': 7,
-                'views': {'n0': {'p0': True}}}), claims=(original,))
-            frozen = replace(frozen, claims=(*frozen.claims, *selected.claims),
-                results=(*frozen.results, selected),
-                steps=(*frozen.steps, StepRecord('capture', selector.step_id, selector, result=selected)))
+        selector, = numeric_selection_tasks(base, frozen.results, frozen.claims)
+        selected = parse_read_result(selector, json.dumps({'format_version': 7,
+            'views': {'n0': {'p0': True}, 'n1': {'p0': True}}}), claims=(original,))
+        frozen = replace(frozen, claims=(*frozen.claims, *selected.claims),
+            results=(*frozen.results, selected),
+            steps=(*frozen.steps, StepRecord('capture', selector.step_id, selector, result=selected)))
     task = observed_reduction_task(frozen)
     assert task.operation == stage
     expected = tuple(claim for claim in frozen.claims if claim.claim_id in task.input_claim_ids)

@@ -62,7 +62,7 @@ def namespace_plan(plan):
 
 def _reduction_tasks(plan, state):
     """Declare reductions, waiting for the selected frontier of shared numeric views."""
-    from .reading import numeric_reduction_inputs, numeric_selection_step_id, numeric_selection_task
+    from .reading import numeric_reduction_inputs, numeric_selection_step_ids, numeric_selection_tasks
 
     if plan.reading_mode == "coverage_only":
         return ()
@@ -72,30 +72,29 @@ def _reduction_tasks(plan, state):
     summarize = all(task.operation == "summarize" for task in plan.steps if task.kind == "READ")
     completed = {result.step_id for result in state.results}
     completed.update(result.reduction.step_id for result in state.results if result.reduction is not None)
-    shared_needs = {need_id for task in plan.steps if task.kind == "READ"
-                    for scope in task.shared_numeric_scopes for need_id in scope.need_ids}
+    selector_ids = numeric_selection_step_ids(plan)
     unresolved = {gap.need_id for gap in state.open_needs}
     planned_ids = {task.step_id for task in plan.steps}
-    tasks = []
+    tasks = [task for task in numeric_selection_tasks(plan, state.results, state.claims)
+             if task.step_id not in planned_ids]
     for need in plan.task_state.needs:
         if not summarize and need.operation not in {"enumerate", "compare", "count", "sum", "group", "infer"}:
             continue
         if not summarize and need.operation in {"count", "sum", "group"} and need.need_id in unresolved:
             continue
-        shared_numeric = need.need_id in shared_needs
+        selector_id = selector_ids.get(need.need_id)
+        shared_numeric = selector_id is not None
         if shared_numeric:
-            selector_id = numeric_selection_step_id(plan, need.need_id)
-            selector = numeric_selection_task(plan, state.results, state.claims, need_id=need.need_id)
-            if selector is not None and selector.step_id not in planned_ids:
-                tasks.append(selector)
             selection = next((result for result in reversed(state.results)
                 if result.step_id == selector_id or
                 (result.reduction is not None and result.reduction.step_id == selector_id)), None)
             if selection is None:
                 continue
-            tasks.extend(record.task for record in state.steps
+            selector_steps = tuple(record.task for record in state.steps
                 if record.step_id not in planned_ids and record.task.operation == "numeric_select"
                 and (record.step_id == selection.step_id or record.step_id.startswith(selector_id+":part:")))
+            tasks.extend(selector_steps)
+            planned_ids.update(task.step_id for task in selector_steps)
         predecessors = (selection.step_id,) if shared_numeric else read_ids
         if any(task.kind == "REDUCE" and need.need_id in task.need_ids
                and task.predecessor_step_ids == predecessors for task in plan.steps):
@@ -103,7 +102,7 @@ def _reduction_tasks(plan, state):
         operation = "summarize" if summarize else "union" if need.operation == "enumerate" else need.operation
         identity = hashlib.sha256(dumps((read_ids, need.need_id, operation)).encode()).hexdigest()[:24]
         if shared_numeric:
-            claims = tuple(claim.claim_id for claim in numeric_reduction_inputs(plan, need.need_id, state.results))
+            claims = tuple(claim.claim_id for claim in numeric_reduction_inputs(need.need_id, state.results, selector_id))
         else:
             extracted = {claim.claim_id for result in state.results if result.step_id in read_ids
                          for claim in result.claims}
