@@ -134,7 +134,8 @@ def _with_observed_sources(plan, state):
         plan = replace(plan, coverage_scope=state.plan.coverage_scope, coverage_units=state.plan.coverage_units)
     disposition = (("partial" if state.claims else "retrieval_gap") if state.open_needs
                    else plan.selected_set.disposition)
-    return replace(plan, selected_set=replace(plan.selected_set, selected_units=tuple(units.values()),
+    return replace(plan, online_tokens_spent=state.plan.online_tokens_spent,
+        selected_set=replace(plan.selected_set, selected_units=tuple(units.values()),
         source_blocks=tuple(blocks.values())), answer_plan=ClaimGraph(state.claims).answer_plan(
             plan.task_state, disposition, state.results) if state.claims else replace(plan.answer_plan, disposition=disposition))
 
@@ -541,11 +542,14 @@ class RollingPlanRuntime:
                     state = await executor.execute_one(attempt_id, snapshot, state.plan, record.task, state,
                         initial_auxiliary_usage=auxiliary_usage, candidate=variants[0])
         decisions = []
+        from .execution import reading_tokens_spent
         prefix_observer = executor.observe_prefix
         demand_retention = (self.joint_context and
                             getattr(prefix_observer, "settings", {}).get("mode") == "demand")
         while True:
             selection_started = time.monotonic()
+            spent = reading_tokens_spent(state.steps, auxiliary_usage, state.auxiliary_usage)
+            state = replace(state, plan=replace(state.plan, online_tokens_spent=spent))
             cache_scope = await engine.info()
             observed = self.mode == "observed_actions"
             required_step = self._required_scope_step(state) if observed else None

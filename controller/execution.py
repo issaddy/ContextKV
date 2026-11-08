@@ -193,6 +193,14 @@ def auxiliary_tokens(usage):
     return usage["input_tokens"]+usage["output_tokens"]
 
 
+def reading_tokens_spent(records, initial_auxiliary_usage, gap_usage):
+    initial = 0 if initial_auxiliary_usage is None else auxiliary_tokens(initial_auxiliary_usage)
+    gap = auxiliary_tokens(gap_usage)
+    if initial is None or gap is None:
+        return None
+    return initial+gap+sum(len(record.input_ids)+len(record.output_ids) for record in records)
+
+
 def require_online_tokens(limit, spent, reserve, phase):
     if limit is None:
         return
@@ -305,10 +313,7 @@ class ReadingExecutor:
         persisted = self.store.execution_step(attempt_id, task.step_id)
         reserve = None
         if persisted is None or persisted[0] in {"PLANNED", "PREPARED"}:
-            usage = 0 if initial_auxiliary_usage is None else auxiliary_tokens(initial_auxiliary_usage)
-            gap = auxiliary_tokens(state.auxiliary_usage)
-            spent = (usage+gap+sum(len(row.input_ids)+len(row.output_ids) for row in state.steps)
-                     if usage is not None and gap is not None else None)
+            spent = reading_tokens_spent(state.steps, initial_auxiliary_usage, state.auxiliary_usage)
             reserve = require_completion(plan, state.results, spent, len(state.steps), task, candidate,
                                          arrived=self.request_arrived)
         if cpu:
@@ -359,10 +364,7 @@ class ReadingExecutor:
         executed = {row.step_id: row.task for row in (*state.steps, record)}
         tasks = {row.step_id: row for row in plan.steps}
         tasks.update(executed)
-        usage = (0 if initial_auxiliary_usage is None else auxiliary_tokens(initial_auxiliary_usage))
-        gap = auxiliary_tokens(state.auxiliary_usage)
-        spent = (usage+gap+sum(len(row.input_ids)+len(row.output_ids) for row in (*state.steps, record))
-                 if usage is not None and gap is not None else None)
+        spent = reading_tokens_spent((*state.steps, record), initial_auxiliary_usage, state.auxiliary_usage)
         plan = replace(plan, steps=tuple(tasks.values()), answer_plan=answer_plan, online_tokens_spent=spent)
         self.store.save_context_plan(attempt_id, plan)
         return ReadingOutcome(plan, results, (*state.steps, record), tuple(graph.claims.values()),

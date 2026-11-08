@@ -330,14 +330,20 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
 
     raw_fixed_tokens = (len(template.render(compile_rebuild(())[0]).input_ids)
                         if representation == "raw" else None)
+    input_limit = plan.budget.window_tokens-plan.budget.output_tokens
+    if (outcome is not None and plan.budget.max_total_tokens is not None
+            and plan.online_tokens_spent is not None):
+        input_limit = min(input_limit, plan.budget.max_total_tokens-plan.online_tokens_spent
+                          -plan.budget.output_tokens)
 
     # Full-scope reading retains every source in the step graph. The final window
     # carries root conclusions and a budgeted set of original supporting units.
     if units and representation != "raw" and (plan.coverage_scope == "all_supplied_documents" or outcome is not None):
         empty, _ = compile_rebuild(())
         fixed_input_tokens = len(template.render(empty).input_ids)
-        excerpt_budget = min(plan.budget.body_tokens,
-            max(0, plan.budget.window_tokens-plan.budget.output_tokens-fixed_input_tokens))
+        excerpt_budget = min(plan.budget.body_tokens, max(0, input_limit-fixed_input_tokens))
+        if not excerpt_budget:
+            units = ()
 
         def excerpt_tokens(proposed):
             messages, _ = compile_rebuild(proposed)
@@ -460,6 +466,8 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
             window = measure_window(template, messages, plan.budget, rendered, history=history)
             if not window.feasible:
                 reason = "context_window_budget"
+            elif window.input_tokens > input_limit:
+                reason = "cumulative_token_budget"
             if raw_fixed_tokens is not None and window.input_tokens-raw_fixed_tokens > plan.budget.body_tokens:
                 reason = "original_source_budget"
             if window.history_tokens > plan.budget.history_tokens:
