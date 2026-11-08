@@ -634,37 +634,47 @@ class PrefixReadObserver:
                 if priority and (target.step_id not in targets or work(compiled) < work(targets[target.step_id][0])):
                     targets[target.step_id] = compiled, priority
 
-            proposed = []
+            paths, demands = {}, {}
             for target, (compiled, priority) in targets.items():
                 quote = quotes[compiled.candidate_id]
                 pressure = (work(candidate) if candidate is not None else 0)+work(compiled)-batch.free_gpu_tokens
                 risk = min(max(0, pressure), quote.evictable_gpu_prefix_tokens or 0)
                 if not risk:
                     continue
-                for owner, step_id, boundary, path in matching_sources(compiled):
-                    exposed = min(boundary, risk)
-                    proposed.append((exposed, owner, step_id, target, path, priority, boundary))
+                matches = matching_sources(compiled)
+                if matches:
+                    _, _, boundary, path = max(matches, key=lambda match: match[2])
+                    demands[target] = (min(boundary, risk), priority, path)
+                    paths.update((owner, (step, end, pages)) for owner, step, end, pages in matches)
+
+            def coverage(pages):
+                return {target: min(risk, len(path & pages)*page_size)
+                        for target, (risk, _, path) in demands.items()}
+
             protected, protected_gpu = set(shared), set(shared_gpu)
-            covered, selected = set(), {}
-            for risk, owner, step, target, path, priority, boundary in sorted(proposed,
-                    key=lambda row: (-row[5], -max(0, row[0]-len(row[4] & shared_gpu)*page_size),
-                                     len(row[4]-shared), -row[0], row[1], row[3])):
-                if target in covered or len(protected | path)*page_size > limit:
-                    continue
-                covered.add(target)
-                added_risk_coverage = risk-len(path & protected_gpu)*page_size
-                if added_risk_coverage > 0:
-                    protected.update(path)
-                    protected_gpu.update(path)
-                    selected[owner] = DemandLease(owner, step, target, boundary, added_risk_coverage)
-            exposed_by_target, protected_by_target = {}, {}
-            for risk, _, _, target, path, _, _ in proposed:
-                exposed_by_target[target] = max(exposed_by_target.get(target, 0), risk)
-                protected_by_target[target] = max(protected_by_target.get(target, 0),
-                    min(risk, len(path & protected_gpu)*page_size))
+            covered, selected = coverage(protected_gpu), {}
+            while paths:
+                choices = []
+                for owner, (_, _, path) in paths.items():
+                    extra_pages = len(path-protected)
+                    if (len(protected)+extra_pages)*page_size > limit:
+                        continue
+                    after = coverage(protected_gpu | path)
+                    gains = {target: after[target]-before for target, before in covered.items()}
+                    value = sum(gain*demands[target][1] for target, gain in gains.items())
+                    if value > 0:
+                        choices.append(((value, -extra_pages, owner in own, owner), owner, after, gains))
+                if not choices:
+                    break
+                _, owner, covered, gains = max(choices, key=lambda choice: choice[0])
+                step, boundary, path = paths.pop(owner)
+                target = max(gains, key=lambda key: (gains[key]*demands[key][1], key))
+                protected.update(path)
+                protected_gpu.update(path)
+                selected[owner] = DemandLease(owner, step, target, boundary, gains[target])
             return JointOption(demand, tuple(lease for key, lease in selected.items() if key not in own),
                 tuple(sorted(own-selected.keys())), len(protected-shared)*page_size,
-                sum(risk-protected_by_target[target] for target, risk in exposed_by_target.items()))
+                sum(risk-covered[target] for target, (risk, _, _) in demands.items()))
 
         return joint_options(plans, state, allocate=allocate)
 

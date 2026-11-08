@@ -179,8 +179,9 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     from controller.schema import CacheQuote, CacheQuoteBatch, PromptCandidate
 
     old, later = (ReadTask(name, "READ", ("n",)) for name in ("old", "later"))
-    plan = ContextPlan("plan", TaskState("task", "question", needs=(Need("n"),)),
-                       EvidenceSet("evidence", ()), steps=(old, later))
+    tail = ReadTask("tail", "READ", ("other",))
+    plan = ContextPlan("plan", TaskState("task", "question", needs=(Need("n", operation="count"), Need("other"))),
+                       EvidenceSet("evidence", ()), steps=(old, later, tail))
     record = StepRecord("attempt", old.step_id, old, input_ids=(1, 2, 3, 4), metrics={
         "source_view": {"body_token_ranges": ((0, 4),)},
         "evidence_prefix": {"demand_observation": True, "engine_restart_id": "restart",
@@ -213,3 +214,14 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     assert reused.retain == ()
     assert reused.protected_tokens == reused.uncovered_risk_tokens == 0
     assert (await after_gap(replace(candidate, source_body_token_ranges=((2, 4),)))).retain == ()
+
+    long_ids = (1, 2, 3, 4, 7)
+    long_candidate = replace(candidate, candidate_id="tail", input_ids=long_ids, input_hash=token_hash(long_ids))
+    long_quote = CacheQuote("tail", long_candidate.input_hash, 5, 4,
+        ready_gpu_prefix_tokens=4, recoverable_prefix_tokens=4, evictable_gpu_prefix_tokens=4)
+    reads = (PlanCandidate(step.step_id, "read_once", plan, (PlanStep(step, (compiled,)),), "reader")
+             for step, compiled in ((later, candidate), (tail, long_candidate)))
+    joint = (await observer.demand_options((gap, *reads), state, "session", replace(batch, quotes=(quote, long_quote)),
+        prefix_status={"prefixes": ()}))["gap"]
+    assert [lease.boundary_tokens for lease in joint.retain] == [4]
+    assert joint.protected_tokens == 4 and joint.uncovered_risk_tokens == 0
