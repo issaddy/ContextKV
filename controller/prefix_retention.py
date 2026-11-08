@@ -75,6 +75,7 @@ class PrefixForecast:
     expected_collateral_saved_ms: float = 0.0
     native_window_cost_ms: float | None = None
     retained_window_cost_ms: float | None = None
+    source_token_range: tuple[int, int] | None = None
 
     @property
     def target_saved_ms(self):
@@ -356,12 +357,14 @@ class EmpiricalRetentionModel:
             retained_target = sum(row.get("sampling_weight", 1.0)*row["retained_reuse_cost_ms"] for row in reused)/reused_weight if reused else None
             control = sum(row.get("sampling_weight", 1.0)*row["retention_control_ms"] for row in cohort)/control_weight
             target_gain = probability*(native_target-retained_target) if probability else 0
+            source_tokens = [row["gpu_page_count"]*row["page_size"] for row in cohort]
             forecasts[key] = PrefixForecast(cohort[0]["horizon_seconds"], probability,
                 native_target, retained_target,
                 gpu_seconds/(gpu_pages*cohort[0]["page_size"]) if gpu_pages else 0,
                 host_seconds/(host_pages*cohort[0]["page_size"]) if host_pages else 0,
                 cohort[0]["cache_scope_hash"], evidence,
-                control, native_window-retained_window-target_gain+control, native_window, retained_window)
+                control, native_window-retained_window-target_gain+control, native_window, retained_window,
+                (min(source_tokens), max(source_tokens)))
         if not forecasts:
             raise ValueError("retention fit has no supported feature/scope/TTL bucket: each needs at least "
                              f"{MIN_RETENTION_GROUPS} independent session groups and observed reuse outcomes")
@@ -534,8 +537,9 @@ class PrefixReadObserver:
         if settings["mode"] not in {"fixed_ttl", "value", "demand"}:
             raise ValueError("prefix callback requires fixed_ttl, value or demand mode")
         self.model = None
-        if settings["mode"] == "value":
-            raw = Path(settings["model_path"]).read_bytes()
+        model_path = settings["model_path"] if settings["mode"] == "value" else settings.get("pricing_asset")
+        if model_path:
+            raw = Path(model_path).read_bytes()
             self.model = EmpiricalRetentionModel.from_dict(json.loads(raw))
             if not self.model.forecasts:
                 raise ValueError("retention value needs paired native observations")
@@ -567,6 +571,7 @@ class PrefixReadObserver:
     async def demand_options(self, plans, state, session_id, batch, *, prefix_status=None):
         """Allocate short leases for exact, already compiled continuations."""
         from .admission import quoted_native_work
+        from .action_proposals import continuation_read
         from .context_budget import answer_evidence_gaps
         from .demand import DemandLease, JointOption, joint_options
         from .templates import longest_common_prefix
@@ -591,6 +596,8 @@ class PrefixReadObserver:
         limit = self.settings["protection_budget_tokens"]
         page_size = next(iter(sources.values()))[1]["page_size"] if sources else 0
         all_need_ids = {need.need_id for need in state.plan.task_state.needs}
+        continuation = continuation_read(state, state.plan) if self.model is not None else None
+        source_records = {record.step_id: inspection for record, inspection in sources.values()}
 
         def work(candidate):
             return sum(quoted_native_work(quotes[candidate.candidate_id]))+candidate.output_budget
@@ -652,7 +659,8 @@ class PrefixReadObserver:
                         for target, (risk, _, path) in demands.items()}
 
             protected, protected_gpu = set(shared), set(shared_gpu)
-            covered, selected = coverage(protected_gpu), {}
+            initial_coverage = coverage(protected_gpu)
+            covered, selected = initial_coverage, {}
             while paths:
                 choices = []
                 for owner, (_, _, path) in paths.items():
@@ -672,11 +680,44 @@ class PrefixReadObserver:
                 protected.update(path)
                 protected_gpu.update(path)
                 selected[owner] = DemandLease(owner, step, target, boundary, gains[target])
+            saved_ms, evidence = None, None
+            if continuation is not None and not active and len(selected) == 1 and set(demands) == {continuation.step_id}:
+                lease, = selected.values()
+                compiled, _ = targets[continuation.step_id]
+                inspected = source_records[lease.source_step_id]
+                full_boundary = compiled.source_prefix_tokens//page_size*page_size
+                if lease.boundary_tokens == full_boundary == inspected["boundary_tokens"]:
+                    forecast = self._demand_forecast(inspected, batch)
+                    if forecast is not None:
+                        saved_ms = forecast.saved_ms-lease.boundary_tokens*(
+                            self.settings.get("lambda_gpu", 0)*forecast.extra_gpu_seconds_per_page
+                            + self.settings.get("lambda_host", 0)*forecast.extra_host_seconds_per_page)
+                        evidence = forecast.evidence_digest
+                        if saved_ms <= 0:
+                            selected.clear()
+                            protected, covered = shared, initial_coverage
             return JointOption(demand, tuple(lease for key, lease in selected.items() if key not in own),
                 tuple(sorted(own-selected.keys())), len(protected-shared)*page_size,
-                sum(risk-covered[target] for target, (risk, _, _) in demands.items()))
+                sum(risk-covered[target] for target, (risk, _, _) in demands.items()), saved_ms, evidence)
 
         return joint_options(plans, state, allocate=allocate)
+
+    def _demand_forecast(self, inspected, batch):
+        features = inspected.get("retention_features")
+        if features is None:
+            return None
+        current = {**inspected, "pool": {**inspected["pool"], "free_gpu_tokens": batch.free_gpu_tokens,
+                   "free_host_tokens": batch.free_host_tokens},
+                   "residency": {"ready_gpu_prefix_tokens": inspected["boundary_tokens"],
+                                 "host_only_load_tokens": 0},
+                   "workload": {"active_requests": batch.active_requests, "queued_requests": batch.queued_requests}}
+        bucket = self.model.feature_bucket({**features, **self._native_features(current)})
+        forecast = self.model.forecasts.get(self.model._key(bucket, inspected["cache_scope_hash"],
+                                                            self.settings["ttl_seconds"]))
+        if forecast is not None and forecast.source_token_range is not None:
+            low, high = forecast.source_token_range
+            if low <= inspected["boundary_tokens"] <= high:
+                return forecast
 
     async def apply_demand(self, option, state, session_id, *, batch):
         started = time.monotonic()
@@ -878,7 +919,7 @@ class PrefixReadObserver:
         arguments = dict(owner_id=owner_id, session_id=session_id, attempt_id=record.attempt_id,
             step_id=record.step_id, receipt=record.receipt, prefix_input_ids=prefix_ids, sources=sources)
         if self.settings["mode"] == "demand":
-            result = {**inspected, "demand_observation": retainable_prefix(inspected)}
+            result = {**inspected, "demand_observation": retainable_prefix(inspected), "retention_features": features}
         elif self.settings["mode"] == "fixed_ttl":
             choice = dict(qualification_only=True, features=features, reuse_event_key=event)
             started = time.monotonic()

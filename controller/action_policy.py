@@ -213,7 +213,11 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
             cost = branch if native_cost else regression_cost(predicted["incremental_complete_cost"])
             if not native_cost and control_ms is not None:
                 cost = replace(cost, latency_ms=cost.latency_ms+control_ms)
+            saved_ms = (min(cost.latency_ms, delta.retention_saved_ms)
+                        if native_cost and model.cost_provenance["prefix_control_scope"] == "native_excludes_prefix_control"
+                        and delta is not None and (delta.retention_saved_ms or 0) > 0 else 0.0)
             objective = gain-policy._penalty(cost, state.plan.budget)
+            objective += state.plan.budget.lambda_time*saved_ms
             policy.last_option_diagnostics[key] = {"plan_id": plan.plan_id, "features": features,
                 "semantic_kind": plan.semantic_kind, "empirical_completion_latency_ms": empirical_ms,
                 "cost_features": cost_features,
@@ -222,7 +226,7 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                 "completion_cost": completion_cost, "latency_residual_margin_ms": margin,
                 "completion_latency_ms": latency_ms if margin is not None or empirical_ms is not None else None,
                 "native_quote_role": "pre_action_cost_features" if native_cost else "actual_known_input_admission_and_audit",
-                "first_read_prefix_control": control,
+                "first_read_prefix_control": control, "retention_saving_applied_ms": saved_ms,
                 "joint_context": delta.trace() if delta is not None else None, "reason": reason or "eligible"}
             evaluation = PlanEvaluation(plan.plan_id, gain, objective, cumulative, reason is None,
                 reason or "reader_bound_observed_action_regression", ((task.step_id,

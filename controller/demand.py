@@ -69,12 +69,15 @@ class JointOption:
     release: tuple[str, ...] = ()
     protected_tokens: int = 0
     uncovered_risk_tokens: int = 0
+    retention_saved_ms: float | None = None
+    retention_evidence: str | None = None
 
     def trace(self):
         return {"needs": tuple((need.need_id, need.reason) for need in self.demand.needs),
                 "remaining_read_ids": self.demand.remaining_read_ids,
                 "retain": self.retain, "release": self.release,
-                "protected_tokens": self.protected_tokens, "uncovered_risk_tokens": self.uncovered_risk_tokens}
+                "protected_tokens": self.protected_tokens, "uncovered_risk_tokens": self.uncovered_risk_tokens,
+                "retention_saved_ms": self.retention_saved_ms, "retention_evidence": self.retention_evidence}
 
 
 def joint_options(plans, state, *, allocate=None):

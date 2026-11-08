@@ -185,7 +185,8 @@ def full_queue_methods(concurrency, methods=None):
     return tuple(methods) if methods is not None else FULL_QUEUE_METHODS
 
 
-def full_queue_method_specs(selected, gain_settings, compilation, value_policy=None, *, rule_settings=None):
+def full_queue_method_specs(selected, gain_settings, compilation, value_policy=None, *, rule_settings=None,
+                            demand_pricing=None):
     """Keep compilation, B decisions and optional retention as separate factors."""
     specs = []
     for method in selected:
@@ -201,7 +202,7 @@ def full_queue_method_specs(selected, gain_settings, compilation, value_policy=N
         if method.endswith("_value"):
             retention = deepcopy(value_policy)
         elif method.endswith("_demand"):
-            retention = dict(mode="demand", ttl_seconds=15, protection_budget_tokens=8192)
+            retention = dict(mode="demand", ttl_seconds=15, protection_budget_tokens=8192, **(demand_pricing or {}))
         overrides = {"execution": {
             "dialogue_mode": "llamaindex" if external else "contextkv",
             "plan_gain": rolling,
@@ -299,6 +300,11 @@ def prepare_full_queue(args, root):
         max_units=args.gap_max_units, max_passages=args.gap_max_passages)
     declared_compilation = deepcopy(execution.get("cache_compilation") or {})
     completion_timing = (execution.get("plan_gain") or {}).get("completion_timing_asset")
+    retention_settings = execution.get("prefix_retention") or {}
+    pricing_asset = retention_settings.get("pricing_asset")
+    demand_pricing = (dict(pricing_asset=str(Path(pricing_asset).resolve()),
+        lambda_gpu=retention_settings.get("lambda_gpu", 0), lambda_host=retention_settings.get("lambda_host", 0))
+        if pricing_asset and any(method.endswith("_demand") for method in selected_methods) else None)
     execution.update(cache_start="cold", state_observation=None, plan_gain=None,
                      prefix_retention={"mode": "native"}, cache_compilation={"mode": "native"},
                      dialogue_mode="contextkv")
@@ -330,7 +336,7 @@ def prepare_full_queue(args, root):
     if needs_compilation and compilation is None:
         raise ValueError("ContextPilot methods require --contextpilot-checkout or execution.cache_compilation.checkout")
     matrix["methods"] = full_queue_method_specs(selected_methods, gain_settings, compilation, value_policy,
-                                                rule_settings=rule_settings)
+                                                rule_settings=rule_settings, demand_pricing=demand_pricing)
     reference = "B6_native" if "B6_native" in selected_methods else matrix["methods"][0]["id"]
     matrix["selection"].update(include_ablations=False, baseline=reference,
                                test_comparators=[reference])
@@ -423,6 +429,7 @@ def prepare_full_queue(args, root):
         reader_profile_id=profile, reader_run=snapshot(run_path), resource_scope=scope,
         assets={"gain": snapshot(gain_path) if needs_gain else None,
                 "value": snapshot(args.value_model) if needs_value else None,
+                "demand_pricing": snapshot(demand_pricing["pricing_asset"]) if demand_pricing is not None else None,
                 "completion_timing": snapshot(rolling_settings["completion_timing_asset"])
                 if completion_timing is not None else None},
         cohort=cohorts, workload_plans=workload_plans, acceptance=acceptance, replicate_id=args.replicate_id,
