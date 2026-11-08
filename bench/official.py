@@ -109,15 +109,16 @@ def merge_offline_labels(predictions: Sequence[Mapping], references: Sequence[Ma
     return result
 
 
-# BERTScore passes model_max_length straight to encode. The author's DeBERTa
-# tokenizer does not declare it, so use the paired model's position limit.
+# Keep BERTScore's empty input as a special-token-only sequence and use
+# the paired DeBERTa model's position limit.
 _ALGORITHMIC_RUNNER = """
 import runpy
 import sys
-from bert_score import scorer
+from bert_score import scorer, utils
 from transformers import AutoConfig
 
 original_get_tokenizer = scorer.get_tokenizer
+original_sent_encode = utils.sent_encode
 
 def get_tokenizer(model_type, use_fast=False):
     tokenizer = original_get_tokenizer(model_type, use_fast=use_fast)
@@ -126,7 +127,13 @@ def get_tokenizer(model_type, use_fast=False):
         print(f"BERTScore {model_type} model_max_length={tokenizer.model_max_length}", flush=True)
     return tokenizer
 
+def sent_encode(tokenizer, text):
+    if not text.strip():
+        return tokenizer.encode("", add_special_tokens=True)
+    return original_sent_encode(tokenizer, text)
+
 scorer.get_tokenizer = get_tokenizer
+utils.sent_encode = sent_encode
 sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name="__main__")
 """
