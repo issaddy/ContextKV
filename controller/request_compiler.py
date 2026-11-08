@@ -93,7 +93,8 @@ class RequestCompiler:
                 canonical_spans = source_evidence_spans(ordered, bodies, blocks, 1)
             for output in outputs:
                 actual = replace(current, output_budget=output)
-                messages = step_messages(plan, actual, ordered, claims, snapshot, source_prompt=source_prompt)
+                messages = step_messages(plan, actual, ordered, claims, snapshot,
+                                         source_prompt=source_prompt, schema=current.output_schema)
                 rendered = self.template.render(messages, with_offsets=bool(ordered))
                 spans, cursor = list(canonical_spans), 0
                 if ordered and source_prompt is None:

@@ -451,8 +451,11 @@ def stable_prefix_input_ids(template, plan, task, units, rendered):
     return tuple(rendered.input_ids[:boundary])
 
 
-def step_messages(plan, task, units, claims=(), snapshot=None, *, source_prompt=None):
+def step_messages(plan, task, units, claims=(), snapshot=None, *, source_prompt=None, schema=None):
     state = plan.task_state
+    if schema is None:
+        schema = output_schema(task, units, claims, reading_mode=plan.reading_mode,
+                               numeric_identity=plan.numeric_identity)
     task_view = resolved_task_view(state, snapshot.raw_history if snapshot is not None else (),
                                    need_ids=task.need_ids)
     if task.operation == "numeric_select":
@@ -466,7 +469,7 @@ def step_messages(plan, task, units, claims=(), snapshot=None, *, source_prompt=
                                     "version": claim.version, "entity": claim.entity,
                                     "relation": claim.relation, "value": claim.value, "unit": claim.unit}
                         for index, claim in enumerate(claims)},
-            "output_schema": visible_output_schema(output_schema(task, claims=claims))}
+            "output_schema": visible_output_schema(schema)}
         return (Message("system", NUMERIC_SELECT_SYSTEM),
                 Message("user", json.dumps(to_jsonable(payload), ensure_ascii=False, separators=(",", ":"))))
     payload = {"question": state.raw_question,
@@ -486,8 +489,7 @@ def step_messages(plan, task, units, claims=(), snapshot=None, *, source_prompt=
                            "entity": claim.entity, "relation": claim.relation,
                            "version": claim.version, "operation": claim.operation}
                           for claim in claims]}
-    payload["output_schema"] = visible_output_schema(output_schema(task, units, claims,
-        reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
+    payload["output_schema"] = visible_output_schema(schema)
     needs, sources, parents = numeric_aliases(task, units, claims)
     payload["fact_protocol"] = {"format_version": _read_protocol_version(task),
         "needs": needs, "sources": sources, "parents": parents,

@@ -419,6 +419,7 @@ class ReadingExecutor:
             raise ReadingBudgetExceeded(f"{task.step_id} exceeds the model window")
         persisted = self.store.execution_step(attempt_id, task.step_id)
         generation = None
+        info = None
         if persisted is None:
             info = await self.engine.info()
             epoch = ContextEpoch(snapshot.session_id, 0, f"step-{identity}", 0,
@@ -446,7 +447,8 @@ class ReadingExecutor:
             if stage == "COMPLETE":
                 return record if text_callback else await self.finish_completed_step(plan, record)
         if stage == "PLANNED":
-            info = await self.engine.info()
+            if info is None:
+                info = await self.engine.info()
             prepared_at = time.monotonic()
             ack = await self.engine.prepare(epoch.engine_session_id, f"prepare:{identity}",
                 epoch.engine_restart_id,

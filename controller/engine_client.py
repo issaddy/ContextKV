@@ -5,7 +5,7 @@ must be negotiated before any epoch guard fields are transmitted.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import time
 import json
 from typing import Protocol, Sequence
@@ -182,12 +182,22 @@ class SGLangEngineClient:
     async def quote_batch(self, candidates, fingerprint):
         await self._ready()
         self._check_fingerprint(fingerprint)
+        unique, aliases = {}, []
+        for candidate in candidates:
+            key = (candidate.snapshot_version, candidate.input_hash, candidate.input_ids)
+            original = unique.setdefault(key, candidate)
+            aliases.append((candidate.candidate_id, original.candidate_id))
         data = await self._post("/cache/quote", {
             "request_id": uuid.uuid4().hex, "fingerprint": asdict(fingerprint),
             "candidates": [{"candidate_id": c.candidate_id, "input_ids": list(c.input_ids),
                             "input_hash": c.input_hash, "snapshot_version": c.snapshot_version}
-                           for c in candidates]})
-        return decode(CacheQuoteBatch, {**data, "client_received_monotonic": time.monotonic()})
+                           for c in unique.values()]})
+        batch = decode(CacheQuoteBatch, {**data, "client_received_monotonic": time.monotonic()})
+        if len(unique) == len(aliases):
+            return batch
+        quotes = {quote.candidate_id: quote for quote in batch.quotes}
+        return replace(batch, quotes=tuple(quotes[original] if identity == original else
+            replace(quotes[original], candidate_id=identity) for identity, original in aliases))
 
     def _check_fingerprint(self, fingerprint):
         if fingerprint != self.fingerprint:
