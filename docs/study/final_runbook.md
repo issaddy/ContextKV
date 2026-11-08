@@ -94,6 +94,7 @@ B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
 `--cohort-manifest` 指向同一会话划分，实际采集数量从声明分区内选择并单独记录。
 `plan_gain_workflow` 可将 `--train-states` 或 `--dev-states` 设为 0，只补所需分区；无有效训练标签时保留采集结果并跳过拟合，开发标签可随后独立补采。
 训练与校准按两条实际分支的来源暴露隔离，含已归档历史、登记范围和 GAP 补入资料。合并多批标签时，用 `training.plan_gain_completion fit` 的 `--source-catalogue` 分别登记原始和派生目录，按底层原文族判断重叠。
+留出报告在同一状态上给出相对已测最优动作的遗憾，以及相对直接回答的实测目标差和配对状态数。
 模型 scope 位于 `configs/model_scopes/`。Reader、策略身份、来源与费用由本次阶段
 manifest 记录。
 

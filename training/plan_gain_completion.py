@@ -572,13 +572,13 @@ def evaluate_paired_decisions(model, development):
                                   (actual > 0)-(actual < 0)))
         if row["observed_state_binding"] is None:
             continue
-        key = digest([row["state_key"], row["observed_state_binding"]["observation_id"],
-                      row["direct"]["record_id"]])
+        key = (row["state_key"], row["observed_state_binding"]["observation_id"],
+               row["direct"]["record_id"])
         states[key].update((row[side]["record_id"], row[side]) for side in ("direct", "counterfactual"))
 
-    regrets, unavailable = [], Counter()
+    regrets, direct_deltas, unavailable = [], [], Counter()
     calibration = model.cost_provenance.get("completion_reserve_calibration", {})
-    for branches in states.values():
+    for (_, _, direct), branches in states.items():
         measured, predictions = {}, {}
         for identity, branch in branches.items():
             run = branch["actual_run"]
@@ -619,6 +619,8 @@ def evaluate_paired_decisions(model, development):
             continue
         selected = max(predictions, key=predictions.get)
         regrets.append(max(measured.values())-measured[selected])
+        if direct in measured:
+            direct_deltas.append(measured[selected]-measured[direct])
     return {"by_family": {kind: {"records": len(rows), "mae": sum(row[0] for row in rows)/len(rows),
                                   "sign_agreement": sum(row[1] for row in rows)/len(rows)}
                           for kind, rows in sorted(signs.items())},
@@ -626,6 +628,8 @@ def evaluate_paired_decisions(model, development):
             "paired_decision_states": len(states), "evaluated_decision_states": len(regrets),
             "unavailable_states": dict(unavailable),
             "mean_paired_objective_regret": sum(regrets)/len(regrets) if regrets else None,
+            "paired_direct_reference_states": len(direct_deltas),
+            "mean_paired_objective_delta_vs_direct": sum(direct_deltas)/len(direct_deltas) if direct_deltas else None,
             "scope": "measured branches at each held-out frozen state and realized starting cache fixture"}
 
 
