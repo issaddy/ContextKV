@@ -281,7 +281,7 @@ cohort、reader 与预算确定对照条件，各格分别列出实际启用的 
 每个数据轨按声明设备、实际端点和本次进程绑定资源范围。滚动决策与该轨计量器共用这一范围，冻结矩阵保留显式指定的附加进程。
 
 每格按自己的 P3 历史执行原 350 题。确认失败或阻断计零，缺失执行记录与未评分答案保留质量区间。在线费用以唯一原生回执和检索阶段汇总计算 token，以初始化至清理的全局窗口计算 GPU/Host 占用，登记 CPU 工时与离线评分费用单列。`bench.plan_prediction_audit` 将所选报价、实际预填充和回载、读取新增事实、owner 变更和最终交付串到同一尝试。`--source-manifest` 用于两轮容量诊断。
-每格先生成并保存所有数据轨的答案、来源和费用，再离线评分。评分中断后用 `python3 -m bench.study_scoring --generation-dir` 读取原始记录补评分，再用 `profiling.final_study_index --refresh-saved-queues` 按原观察窗口重建验收汇总。
+每格先生成并保存所有数据轨的答案、来源和费用，再离线评分。评分中断后用 `python3 -m bench.study_scoring --generation-dir` 读取原始记录补评分。使用 `profiling.final_study_index --refresh-saved-queues` 重建验收汇总，父流程未写摘要时也纳入已保存的逐题结果和原始账本。
 向 `capacity_workflow` 进程发送 `SIGINT` 或 `SIGTERM` 可结束队列。当前格保存实际交付、原生回执和截至停止时的资源窗口，`workflow.json` 标记为 `interrupted`，声明分母沿用原计划。
 同一轮 READ 与 ANSWER 的共享因果正文按回答中的 token 位置取并集，再按最终原生回执区分 GPU 命中、Host 回载与预填充。
 

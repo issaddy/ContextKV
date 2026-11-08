@@ -319,6 +319,10 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
         from bench.capacity_workflow import refresh_saved_full_queue
 
         cost = load(root/"capacity-cost.json")
+        if value.get("format") == "contextkv_full_queue_joint_workflow_v1":
+            summarized = {row["job"] for row in rows}
+            rows = [*rows, *({"job": name, "execution_status": "incomplete_saved_artifacts"}
+                for name, job in jobs.items() if name not in summarized and Path(job["output"]).is_dir())]
         rows = [refresh_saved_full_queue(jobs[row["job"]], row, cost, refresh_to/(
             canonical(jobs[row["job"]]["output"])+".json")) for row in rows]
     cells = []
