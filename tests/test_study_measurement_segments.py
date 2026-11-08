@@ -25,7 +25,7 @@ async def test_explicit_request_namespace_resumes_failed_p3_without_changing_tas
     from adapters import study_retrieval
     from bench import native_metrics, study_resources
     from bench.mock_engine import MockEngine
-    from bench.study import run_dataset
+    from bench.study import run_dataset, saved_study_rows
     from controller.context_schema import TaskState
     from controller.evidence import make_evidence
     from controller.planner import PlannerKnobs
@@ -115,6 +115,9 @@ async def test_explicit_request_namespace_resumes_failed_p3_without_changing_tas
     assert manifest["request_namespace"] == "condition-schema-v1"
     assert manifest["task_ids"] == ["task:1", "task:2", "task:3"]
     assert manifest["scheduled_task_ids"] == ["task:1", "task:2"]
+    export = tmp_path/"results.unscored.jsonl"
+    export.write_text(export.read_text().splitlines()[0]+"\n")
+    assert [row["task_id"] for row in saved_study_rows(tmp_path)] == ["task:1", "task:2"]
     store.close()
 
 

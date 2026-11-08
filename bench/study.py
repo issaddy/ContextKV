@@ -30,6 +30,16 @@ def read_jsonl(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
 
+def saved_study_rows(directory):
+    """Read committed turns before using the derived export of an older run."""
+    directory = Path(directory)
+    records = sorted((directory/"records").glob("*.json"))
+    if records:
+        return [json.loads(path.read_text()) for path in records]
+    export = directory/"results.unscored.jsonl"
+    return read_jsonl(export) if export.exists() else []
+
+
 def write_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

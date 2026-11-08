@@ -27,7 +27,7 @@ from bench.native_metrics import NativePoolSampler, pool_series
 from bench.plan_result_summary import batch_ledger
 from bench.reassess_saved import paid_execution_index
 from bench.rolling_study_workflow import configure
-from bench.study import dataset_rows, merge_config, read_jsonl, write_json, write_jsonl
+from bench.study import dataset_rows, merge_config, read_jsonl, saved_study_rows, write_json, write_jsonl
 from bench.study_metrics import (_cost_summary, _quantile, _track_specs, declared_queue_summary,
                                  evaluation_track_protocol)
 from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
@@ -486,9 +486,8 @@ def declared_execution_rows(job):
     rows, failure_ledgers, delivery = [], {}, {}
     for dataset in job["datasets"]:
         track = directory/dataset
-        scored, unscored = track/"results.scored.jsonl", track/"results.unscored.jsonl"
-        raw = (read_jsonl(unscored) if unscored.exists() else
-               [json.loads(path.read_text()) for path in sorted((track/"records").glob("*.json"))])
+        scored = track/"results.scored.jsonl"
+        raw = saved_study_rows(track)
         results = {str(row["task_id"]): row for row in raw}
         if len(results) != len(raw):
             raise ValueError("duplicate saved executions in a declared track")
@@ -497,7 +496,13 @@ def declared_execution_rows(job):
             scores = {str(row["task_id"]): row for row in labelled}
             if len(scores) != len(labelled):
                 raise ValueError("duplicate saved scores in a declared track")
-            results.update(scores)
+            if not results:
+                results = scores
+            else:
+                for task_id in results.keys() & scores.keys():
+                    actual, score = results[task_id], scores[task_id]
+                    if actual["response"]["attempt_id"] == score["response"]["attempt_id"]:
+                        results[task_id] = {**actual, "metrics": score["metrics"], "scoring": score["scoring"]}
         failures = track/"failed_conversations.json"
         if failures.exists():
             failure_ledgers[dataset] = str(failures)

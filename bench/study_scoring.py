@@ -663,7 +663,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
     matrix = yaml.safe_load(Path(args.matrix).read_text())
     config = yaml.safe_load(Path(args.config or matrix["study_config"]).read_text())
-    rows = load_jsonl(args.rows or Path(args.generation_dir)/"results.unscored.jsonl")
+    if args.rows:
+        rows = load_jsonl(args.rows)
+    else:
+        from bench.study import saved_study_rows
+        rows = [row for row in saved_study_rows(args.generation_dir) if row["status"] == "completed"]
     asyncio.run(score_dataset(config, matrix["datasets"][args.dataset], rows, args.generation_dir,
         expected_task_ids=matrix.get("cohorts", {}).get(args.split, {}).get(args.dataset), split=args.split))
     print((Path(args.generation_dir)/"scoring/manifest.json").read_text())
