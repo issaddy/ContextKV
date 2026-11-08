@@ -8,7 +8,6 @@ training:
   data_dir: runs/study/data
   task_labels: runs/study/auxiliary/task-labels/task_labels.jsonl
   task_eval_labels: runs/study/auxiliary/task-labels/task_labels.jsonl
-  task_source_paths: [runs/study/data/sources.jsonl]
   task_dense_index: data/multidoc2dial/bge-m3-sections
   retriever_overrides:
     query_adapter_path: null

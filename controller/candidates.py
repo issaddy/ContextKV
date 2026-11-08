@@ -45,7 +45,6 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
                      template: Template | None = None, *,
                      retrieval_priority: tuple[EvidenceKey, ...] | None = None,
                      query_context: QueryContext | None = None,
-                     measure_evidence_redundancy: bool = False,
                      source_orderer=None,
                      bind_geometry=None,
                      ) -> tuple[PromptCandidate, ...]:
@@ -106,28 +105,8 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
     previous = (() if snapshot.execution is None else
                 snapshot.execution.last_input_ids + snapshot.execution.last_output_ids)
     prompts = []
-    body_lengths = {}
-
     def candidate(layout, action, messages, spans, visible, reason, rendered):
         verify_rendered_evidence(messages, spans, rendered.text)
-        total_body_tokens = nonrequired_body_tokens = None
-        if measure_evidence_redundancy:
-            # Count each complete body independently with the generation tokenizer.
-            # This is a text redundancy proxy, not a prompt-token or KV subtraction.
-            # Alias identities share one physical span. A body used by any
-            # required source is required, even when its original owner is historical.
-            total_body_tokens = nonrequired_body_tokens = 0
-            physical = {}
-            for span in spans:
-                physical.setdefault((span.message_index, span.start, span.end), set()).add(span.key)
-            for (index, start, end), keys in physical.items():
-                body = messages[index].content[start:end]
-                if body not in body_lengths:
-                    body_lengths[body] = len(template.tokenizer.encode(body, add_special_tokens=False))
-                count = body_lengths[body]
-                total_body_tokens += count
-                if not keys & required_keys:
-                    nonrequired_body_tokens += count
         if not required_keys <= visible:
             reason = "required_evidence_not_visible"
         if len(rendered.input_ids) + policy.max_new_tokens > policy.max_total_model_tokens:
@@ -143,8 +122,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
             reason=reason, evidence_spans=spans, reference_map=references,
             theoretical_lcp=longest_common_prefix(rendered.input_ids, previous),
             corpus_snapshot_id=snapshot.corpus_snapshot_id, fingerprint=template.fingerprint,
-            evidence_resolution=resolution, evidence_body_tokens=total_body_tokens,
-            nonrequired_evidence_body_tokens=nonrequired_body_tokens, layout_id=layout)
+            evidence_resolution=resolution, layout_id=layout)
         return bind_geometry(compiled, rendered) if bind_geometry is not None else compiled
 
     def user_variants(blocks, *, message_index, reused=(), visible_bodies=None):

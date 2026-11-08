@@ -19,8 +19,8 @@ from controller.auxiliary_spend import record_provider_usage
 from controller.candidates import CandidatePolicy, build_plan_candidates, measure_plan_contexts
 from controller.config import load_config
 from controller.context_budget import resolve_text, working_history_messages
-from controller.context_schema import (AnswerPlan, AnswerPoint, ContextBudget, ContextPlan,
-    EvidencePool, EvidenceSet, Need, SupportScores, TaskState, TextRef)
+from controller.context_schema import (DEFAULT_FULL_SCOPE_OUTPUT_TOKENS, AnswerPlan, AnswerPoint,
+    ContextBudget, ContextPlan, EvidencePool, EvidenceSet, Need, SupportScores, TaskState, TextRef)
 from controller.fact_reuse import build_reuse_seed, complete_reuse_ranges
 from controller.evidence_planner import (BudgetedEvidencePlanner, SearchProfile, _passages,
     best_need_supports, close_dependencies, render_unit_union, unresolved_needs)
@@ -79,7 +79,7 @@ class StudyEvidenceProvider:
         self.support_backend = support_backend if self.selection_mode == "support" else None
         self.budget = study_budget(config)
         self.full_scope_budget = replace(self.budget, read_output_tokens=config.get("reading", {}).get(
-            "full_scope_output_tokens", self.budget.read_output_tokens))
+            "full_scope_output_tokens", DEFAULT_FULL_SCOPE_OUTPUT_TOKENS))
         run_config = config.get("generation", {}).get("run_config")
         runtime = load_config(run_config) if run_config else None
         self.answer_system_prompt = runtime.context.system_prompt if runtime else None

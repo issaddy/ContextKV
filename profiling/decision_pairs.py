@@ -58,8 +58,7 @@ def select_cases(cases, *, limit=None, selection="database_order", seed=42):
         return tuple(cases[:limit])
     if selection != "stratified":
         raise ValueError("unknown case selection")
-    # Age 0/1/2+ distinguishes recent rebuilds from decisions where the default
-    # stability gate can open. Each nonempty stratum gets a turn before repeats.
+    # Each session and epoch-age stratum gets a turn before repeats.
     groups = defaultdict(list)
     for case in cases:
         groups[(case.conversation_id, min(case.snapshot.turns_since_rebuild, 2))].append(case)
@@ -95,7 +94,6 @@ def freeze_cases(database, manifest, split, template, *, limit=None, selection="
     # Read only the recorded candidate policy. Historical manifests must remain
     # inspectable without turning their retired model into a runnable config.
     policy_config = decode(CandidatePolicy, manifest["config"].get("context", {}))
-    planner = decode(PlannerKnobs, manifest["config"].get("planner", {}))
     if asdict(template.fingerprint) != manifest["fingerprint"]:
         raise ValueError("freezing tokenizer/template differs from the source run")
     vocabulary = (range(256) if isinstance(template, ByteTemplate) else
@@ -129,8 +127,7 @@ def freeze_cases(database, manifest, split, template, *, limit=None, selection="
             snapshot = load_record(connection, SessionSnapshot, old[0])
             candidates = build_candidates(snapshot, attempt.query, attempt.evidence, policy_config, template,
                                           retrieval_priority=attempt.retrieval_priority,
-                                          query_context=attempt.query_context,
-                                          measure_evidence_redundancy=planner.strategy == "redundancy_threshold")
+                                          query_context=attempt.query_context)
             original = next((c for c in candidates if c.action == attempt.plan.candidate.action), None)
             if original is None or original.input_hash != attempt.plan.candidate.input_hash:
                 skipped.append({"attempt_id": attempt.attempt_id, "reason": "source_candidate_changed"})

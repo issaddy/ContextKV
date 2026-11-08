@@ -56,7 +56,6 @@ selection:
   retained_sets: 3
   initial_gap_search_rounds: 1
   body_tokens: 8192
-  body_budget_grid: [2048, 4096, 8192]
   layouts: [existing, need_order, stable_evidence]
 reading:
   enabled: true
@@ -67,10 +66,7 @@ reading:
   output_tokens: 2048
   full_scope_output_tokens: 8192
   output_tokens_per_fact: 64
-  output_budget_options: [512, 1024, 2048, 4096, 8192]
   coverage_mode: selected_sources
-  coverage_modes: [selected_sources, all_supplied_documents]
-  reduction_operations: [union, compare, count, sum, group, infer]
 execution:
   cache_start: cold
   window_tokens: 32768
@@ -78,14 +74,10 @@ execution:
   output_tokens: 1024
   max_steps: 512
   max_total_tokens: 4194304
-  actions: [REBUILD, APPEND]
-  complete_cost: true
-  step_records: true
   lambda_time: 0.00001
   lambda_gpu: 0.0
   lambda_host: 0.0
 training:
-  enabled: false
   cohort_manifest: runs/study/auxiliary/cohorts/full/cohort_manifest.json
   data_dir: runs/study/data
   multidoc_source: data/multidoc2dial/source
@@ -102,7 +94,6 @@ training:
   support_labels: runs/study/data/support_labels.jsonl
   support_teacher_labels: runs/study/data/support_teacher_labels.jsonl
   support_output: models/study-support
-  preference_output: models/study-support-preference
   preferences: runs/study/data/preferences.jsonl
   device: cuda:0
   dtype: bfloat16
@@ -111,9 +102,6 @@ training:
   head_lr: 0.0001
   min_rollout_conversations: 31
   min_rollout_turns: 200
-  preference_turns: 200
-  integration_turns: 200
-  preference_candidate_types: [relevance, direct, complementary, redundant, wrong_condition_version, deleted_premise]
   reward_weights:
     necessary_points: 0.35
     grounding: 0.25

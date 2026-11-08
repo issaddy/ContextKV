@@ -15,7 +15,7 @@ import yaml
 from bench.study import dataset_rows, merge_config, method_config, run_dataset
 from controller.reading import READ_PROTOCOL_VERSION, SHARED_NUMERIC_PROTOCOL_VERSION, NUMERIC_SELECT_PROTOCOL_VERSION
 from controller.serialization import decode, to_jsonable
-from controller.context_schema import TaskState
+from controller.context_schema import DEFAULT_FULL_SCOPE_OUTPUT_TOKENS, TaskState
 from controller.schema import OnlineContext, OnlineMessage, OnlineTurn, TurnRecord
 from training.reader_data import digest, file_digest, rows, write_rows
 
@@ -74,10 +74,14 @@ def cell_method(policy, protocol):
 
 
 def allocation_identity(config):
+    reading = config["reading"]
+    read_budgets = {name: reading[name] for name in (
+        "input_target_tokens", "output_tokens", "output_tokens_per_fact")}
+    read_budgets["full_scope_output_tokens"] = reading.get(
+        "full_scope_output_tokens", DEFAULT_FULL_SCOPE_OUTPUT_TOKENS)
     return {"execution": {name: config["execution"][name] for name in (
         "window_tokens", "history_tokens", "output_tokens", "max_steps", "max_total_tokens")},
-        "reading_targets_and_options": {name: config["reading"][name] for name in (
-            "input_target_tokens", "output_tokens", "output_tokens_per_fact", "output_budget_options")},
+        "reading": read_budgets,
         "output_allocation": "shared total limits; READ/REDUCE output shares may be redistributed by the existing allocator"}
 
 

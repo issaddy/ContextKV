@@ -254,9 +254,11 @@ def compilation_source_identity(checkout):
 
 def prepare_full_queue(args, root):
     from controller.config import load_config
+    from controller.context_schema import DEFAULT_FULL_SCOPE_OUTPUT_TOKENS
     from training.train_plan_gain import PlanGainModel
 
     config = yaml.safe_load(Path(args.config).read_text())
+    config.setdefault("reading", {}).setdefault("full_scope_output_tokens", DEFAULT_FULL_SCOPE_OUTPUT_TOKENS)
     matrix = yaml.safe_load(Path(args.matrix).read_text())
     registered = matrix["final_evaluation"]
     arrival_path = Path(args.arrival_plan or registered["arrival_plan"])

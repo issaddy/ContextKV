@@ -1,7 +1,7 @@
 """Feasible candidates compete on full cost, then their KV working set."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from typing import Iterable, Mapping
 
 from .cost_model import CostModel
@@ -16,46 +16,28 @@ class PlannerKnobs:
     strategy: str = "cost"
     fixed_token_threshold: int = 8192
     concurrency: int = 1
-    period: int = 4
-    warm_ratio: float = .5
-    redundancy_threshold: float = .4
+    # Old manifests carried these options even for current strategies.
+    period: InitVar[int | None] = None
+    warm_ratio: InitVar[float | None] = None
+    redundancy_threshold: InitVar[float | None] = None
     lambda_time: float = 1.0
     lambda_gpu: float = 0.0
     lambda_host: float = 0.0
     max_complete_ms: float | None = None
 
-    def __post_init__(self) -> None:
-        supported = {"cost", "always_append", "always_rebuild", "fixed_threshold",
-                     "fixed_period", "warm_idle", "redundancy_threshold"}
+    def __post_init__(self, period, warm_ratio, redundancy_threshold) -> None:
+        supported = {"cost", "always_append", "always_rebuild", "fixed_threshold"}
         if self.strategy not in supported:
             raise ValueError("unknown planner strategy")
         if self.fixed_token_threshold < 0:
             raise ValueError("planner thresholds must be nonnegative")
-        if self.period < 1 or not 0 <= self.warm_ratio <= 1:
-            raise ValueError("period must be positive and warm_ratio must be in [0, 1]")
-        if not 0 <= self.redundancy_threshold <= 1:
-            raise ValueError("redundancy_threshold must be in [0, 1]")
 
 
-def _fixed(append, rebuild, strategy, knobs, session, quotes=None):
+def _fixed(append, rebuild, strategy, knobs):
     if strategy == "always_rebuild":
         return rebuild
     if strategy == "always_append":
         return append
-    if strategy == "fixed_period":
-        return rebuild if session.turns_since_rebuild + 1 >= knobs.period else append
-    if strategy == "redundancy_threshold":
-        if append.evidence_body_tokens is None or append.nonrequired_evidence_body_tokens is None:
-            raise ValueError("redundancy_threshold requires measured evidence body tokens")
-        ratio = append.nonrequired_evidence_body_tokens / max(1, append.evidence_body_tokens)
-        return rebuild if ratio > knobs.redundancy_threshold else append
-    if strategy == "warm_idle":
-        quote = next(q for q in quotes.quotes if q.candidate_id == append.candidate_id)
-        # GPU-ready only: pending transfers and merely recoverable host copies
-        # cannot inflate the observed warm signal.  This is an adaptation of a
-        # warm/idle gate, not a reproduction of ReCAP's context graph.
-        ratio = quote.ready_gpu_prefix_tokens / max(1, quote.match_limit)
-        return append if ratio >= knobs.warm_ratio else rebuild
     return rebuild if len(append.input_ids) > knobs.fixed_token_threshold else append
 
 
@@ -91,7 +73,7 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
                 knobs: PlannerKnobs | None = None, *, concurrency: int | None = None,
                 control_ms: float | Mapping[str, float] = 0.0,
                 queue_ms: float = 0.0) -> Plan | NoFeasiblePlan:
-    """Select builder-produced candidates; cost/warm comparisons receive a quote batch."""
+    """Select compiled candidates using fixed rules or an actual cost quote batch."""
     knobs = knobs or PlannerKnobs()
     candidates = tuple(candidates)
     # build_candidates owns snapshot, evidence and action construction.
@@ -115,8 +97,8 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
             return NoFeasiblePlan("required_rebuild_unavailable")
     if len(valid) == 1:
         return Plan(valid[0], reason="only_feasible_candidate")
-    if quotes is None and knobs.strategy in {"cost", "warm_idle"}:
-        raise ValueError(f"{knobs.strategy} comparison requires a quote batch")
+    if quotes is None and knobs.strategy == "cost":
+        raise ValueError("cost comparison requires a quote batch")
     def fixed_choice(strategy):
         groups = {}
         for candidate in valid:
@@ -129,7 +111,7 @@ def choose_plan(candidates: Iterable[PromptCandidate], quotes: CacheQuoteBatch |
                 selected.append(next(iter(actions.values())))
             else:
                 selected.append(_fixed(actions.get("APPEND"), actions.get("REBUILD"),
-                                       strategy, knobs, session, quotes))
+                                       strategy, knobs))
         return min(selected, key=lambda c: (-c.quality_prediction, len(c.input_ids), c.candidate_id))
 
     if knobs.strategy != "cost":

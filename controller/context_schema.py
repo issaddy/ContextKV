@@ -10,6 +10,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+DEFAULT_FULL_SCOPE_OUTPUT_TOKENS = 8192
+
+
 @dataclass(frozen=True, order=True)
 class EvidenceKey:
     corpus_id: str

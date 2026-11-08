@@ -685,7 +685,6 @@ class Controller:
                         initial_outcomes=initial_outcomes, request_compiler=self.request_compiler)
                     self.events.emit("reading_plan_cost_quotes", attempt_id=attempt.attempt_id,
                                      trace=read_cost_trace)
-                measure_redundancy = self.knobs.strategy == "redundancy_threshold"
                 def compile_candidates(snapshot, plans, outcome=None, **compile_options):
                     if plans:
                         return tuple(candidate for context_plan in plans for candidate in
@@ -695,8 +694,7 @@ class Controller:
                                 **compile_options))
                     return self.request_compiler.compile_answers(snapshot, query, retrieved=evidence,
                         policy=self.policy, cache_scope=info,
-                        retrieval_priority=retrieval_priority, query_context=query_context,
-                        measure_evidence_redundancy=measure_redundancy)
+                        retrieval_priority=retrieval_priority, query_context=query_context)
 
                 def fixed_source_order(candidates, quotes):
                     if self.request_compiler.index is None or self.knobs.strategy == "cost":
@@ -739,7 +737,7 @@ class Controller:
                     valid = tuple(c for c in candidates if c.feasible)
                     if not valid:
                         raise ContextOverflow("shared_context_policy_overflow: required evidence and full QA exceed budget")
-                    needs_quote = (self.knobs.strategy in {"cost", "warm_idle"}
+                    needs_quote = (self.knobs.strategy == "cost"
                                    or self.request_compiler.index is not None) and len(valid) > 1
                     if needs_quote:
                         quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
