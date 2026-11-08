@@ -96,8 +96,10 @@ BRIDGE_READ_SYSTEM = (
 REDUCE_SYSTEM = (
     "Combine the supplied claims for the requested operation and current conditions. Return JSON. "
     "Each derived claim names the input parent_claim_ids used. Preserve conflicting conditions "
-    "and versions. Only input claims provide facts. Attach a new conclusion's missing relations "
-    "to its followups; top-level open_needs refer to supplied input claims."
+    "and versions. Only input claims provide facts. For a comparison, use the matching input "
+    "values to state the requested difference or relationship. Put a Need in support when the "
+    "result establishes its requested conclusion. Emit followups or open_needs only for input "
+    "facts still required to answer. Top-level open_needs refer to supplied input claims."
 )
 NUMERIC_SELECT_SYSTEM = (
     "Select the parent facts that establish each numeric Need under the question and active conditions. "
