@@ -305,6 +305,26 @@ def completed_source_coverage(plan, results, required):
                for unit in required for span in unit.source_spans)
 
 
+def required_source_units(plan, need):
+    full_scope = plan.coverage_scope == "all_supplied_documents" or need.scope == "all_supplied_documents"
+    coverage = set(plan.coverage_units) if full_scope else None
+    return tuple(unit for unit in plan.selected_set.selected_units
+                 if (coverage is None or unit.unit_id in coverage)
+                 and (not unit.need_ids or need.need_id in unit.need_ids))
+
+
+def need_read_results(plan, results, need_id):
+    reads = {task.step_id for task in plan.steps if task.kind == "READ" and need_id in task.need_ids}
+    return tuple(result for result in results if result.step_id in reads)
+
+
+def incomplete_full_coverage(plan, results):
+    return any(not completed_source_coverage(plan, need_read_results(plan, results, need.need_id),
+                                              required_source_units(plan, need))
+               for need in plan.task_state.needs
+               if plan.coverage_scope == "all_supplied_documents" or need.scope == "all_supplied_documents")
+
+
 def direct_answer_reason(state, candidate, *, require_complete_evidence=True):
     """Distinguish skipping READ from delivering an answer with evidence gaps.
 
@@ -321,8 +341,6 @@ def answer_evidence_gaps(state, candidate=None, *, require_complete_evidence=Tru
     from .reading import numeric_selection_step_id
 
     plan = state.plan
-    units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
-    tasks = {task.step_id: task for task in plan.steps}
     points = {point.need_id: point for point in plan.answer_plan.points}
     results = tuple(state.results)
     raw = candidate is not None and candidate.representation == "raw"
@@ -332,10 +350,8 @@ def answer_evidence_gaps(state, candidate=None, *, require_complete_evidence=Tru
         numeric = need.operation in {"count", "sum", "group"}
         if not require_complete_evidence and not full_scope and not numeric:
             continue
-        required = tuple(units[identity] for identity in plan.coverage_units) if full_scope else tuple(
-            unit for unit in units.values() if not unit.need_ids or need.need_id in unit.need_ids)
-        read_results = tuple(result for result in results if result.step_id in tasks
-            and tasks[result.step_id].kind == "READ" and need.need_id in tasks[result.step_id].need_ids)
+        required = required_source_units(plan, need)
+        read_results = need_read_results(plan, results, need.need_id)
         facts_complete = bool(required) and completed_source_coverage(plan, read_results, required)
         point = points.get(need.need_id)
         if numeric:

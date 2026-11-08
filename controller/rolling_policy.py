@@ -223,10 +223,8 @@ class RollingPlanRuntime:
 
     @staticmethod
     def _mandatory_coverage(state):
-        from .context_budget import completed_source_coverage
-        units = {unit.unit_id: unit for unit in state.plan.selected_set.selected_units}
-        return (state.plan.coverage_scope == "all_supplied_documents" and not completed_source_coverage(
-            state.plan, state.results, tuple(units[identity] for identity in state.plan.coverage_units)))
+        from .context_budget import incomplete_full_coverage
+        return incomplete_full_coverage(state.plan, state.results)
 
     def _gap_request(self, state, expanded, provider):
         from .action_proposals import GapRetrievalRequest, gap_key, gap_query, gap_scope_available
@@ -456,7 +454,8 @@ class RollingPlanRuntime:
 
     def _required_scope_step(self, state):
         plan = state.plan
-        full_scope = plan.coverage_scope == "all_supplied_documents"
+        full_scope = plan.coverage_scope == "all_supplied_documents" or any(
+            need.scope == "all_supplied_documents" for need in plan.task_state.needs)
         numeric_operations = {"count", "sum", "group"}
         numeric = plan.reading_mode == "typed_reduce" and any(
             need.operation in numeric_operations for need in plan.task_state.needs)

@@ -606,13 +606,17 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
     from .context_budget import allocate_answer_window, bind_answer_window
     plan = replace(plan, answer_allocation=allocate_answer_window(plan, template, snapshot))
     if separate_needs and len(state.needs) > 1:
+        from .evidence_planner import close_dependencies
+        by_id = {unit.unit_id: unit for unit in evidence_set.selected_units}
         plans = []
         for index, need in enumerate(state.needs):
             prefix = f"need:{index}:"
+            applicable = close_dependencies(tuple(unit.unit_id for unit in by_id.values()
+                if not unit.need_ids or need.need_id in unit.need_ids), by_id)
             units = tuple(replace(unit, unit_id=prefix+unit.unit_id,
                 source_spans=tuple(replace(span, span_id=prefix+span.span_id) for span in unit.source_spans),
                 dependencies=tuple(prefix+uid for uid in unit.dependencies), need_ids=(need.need_id,))
-                for unit in evidence_set.selected_units)
+                for unit in applicable)
             plans.append(build_read_plan(replace(state, needs=(need,)),
                 replace(evidence_set, selected_units=units), coverage_scope, budget, template=template,
                 snapshot=snapshot, input_claims=input_claims, output_tokens_per_fact=output_tokens_per_fact,
@@ -778,16 +782,18 @@ def numeric_selection_step_id(plan, need_id):
 
 
 def numeric_selection_task(plan, results, claims=None, *, need_id):
-    """Select evidence for one Need over the complete current READ set."""
-    read_ids, need_ids = _numeric_read_views(plan)
+    """Select evidence for one Need from its compatible extraction scope."""
+    read_ids, _ = _numeric_read_views(plan)
     step_id = numeric_selection_step_id(plan, need_id)
     completed = {result.step_id for result in results}
     completed.update(result.reduction.step_id for result in results if result.reduction is not None)
     if step_id is None or step_id in completed or not set(read_ids) <= completed:
         return None
+    scope = next(scope for scope in numeric_read_scopes(plan.task_state, plan.selected_set.selected_units)
+                 if need_id in scope.need_ids)
     extracted = tuple(claim for result in results if result.step_id in read_ids
                       for claim in result.claims if claim.kind == "extract"
-                      and any(claim.serves(shared_id) for shared_id in need_ids))
+                      and any(claim.serves(shared_id) for shared_id in scope.need_ids))
     if claims is not None:
         basis_ids = {claim.claim_id for claim in extracted}
         extracted = tuple(claim for claim in claims if claim.claim_id in basis_ids)
@@ -796,8 +802,7 @@ def numeric_selection_task(plan, results, claims=None, *, need_id):
     task = ReadTask(step_id, "REDUCE", (need_id,), input_claim_ids=basis,
         reduction_basis_claim_ids=basis, predecessor_step_ids=read_ids,
         input_budget=plan.budget.window_tokens-output_budget, output_budget=output_budget,
-        operation="numeric_select",
-        shared_numeric_scopes=numeric_read_scopes(plan.task_state, plan.selected_set.selected_units))
+        operation="numeric_select", shared_numeric_scopes=(scope,))
     return replace(task, output_schema=output_schema(task, claims=extracted))
 
 

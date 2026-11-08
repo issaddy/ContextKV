@@ -1,7 +1,7 @@
 """Project current evidence obligations onto the same finite native request set."""
 from dataclasses import dataclass
 
-from .context_budget import answer_evidence_gaps
+from .context_budget import answer_evidence_gaps, required_source_units
 from .context_schema import OpenNeed, SourceSpan
 
 
@@ -24,7 +24,6 @@ class DemandState:
     def from_outcome(cls, state):
         gaps = answer_evidence_gaps(state)
         plan = state.plan
-        exhaustive = set(plan.coverage_units)
         predecessors = {identity for need in plan.task_state.needs if need.need_id in gaps
                         for identity in need.predecessor_need_ids}
         needs = []
@@ -32,9 +31,8 @@ class DemandState:
             if need.need_id not in gaps:
                 continue
             full = plan.coverage_scope == "all_supplied_documents" or need.scope == "all_supplied_documents"
-            sources = tuple(dict.fromkeys(span for unit in plan.selected_set.selected_units
-                if (unit.unit_id in exhaustive if full else not unit.need_ids or need.need_id in unit.need_ids)
-                for span in unit.source_spans))
+            sources = tuple(dict.fromkeys(span for unit in required_source_units(plan, need)
+                                          for span in unit.source_spans))
             fields = tuple(gap for gap in state.open_needs if gap.need_id == need.need_id)
             priority = 1 + int(full or need.operation in {"count", "sum", "group"}) + int(need.need_id in predecessors)
             needs.append(NeedDemand(need.need_id, gaps[need.need_id], sources, fields,

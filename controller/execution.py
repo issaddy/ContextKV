@@ -8,7 +8,7 @@ import time
 from .action_proposals import claim_predecessor_steps
 from .admission import quote_observation, quote_realization
 from .claim_graph import ClaimGraph, claim_frontier
-from .context_budget import bind_answer_window, completion_reserve
+from .context_budget import bind_answer_window, completion_reserve, incomplete_full_coverage, required_source_units
 from .context_schema import ReadResult, ReadingOutcome, ReductionState, StepRecord
 from .engine_client import EngineError
 from .reading import (advance_read_plan, build_read_plan, output_schema, parse_read_result,
@@ -34,19 +34,16 @@ def reduction_basis_ids(task, inputs, results):
 def aggregate_numeric_view(task, inputs, plan, results):
     claim = reduce_claims(task.operation, inputs,
         claim_id=f"{task.step_id}:claim:0", need_id=task.need_ids[0])
-    if not inputs and task.operation == "group":
-        claim = replace(claim, source_spans=tuple(dict.fromkeys(span
-            for unit in plan.selected_set.selected_units for span in unit.source_spans)))
-    elif not inputs and task.operation in {"count", "sum"}:
-        selections = [result.reduction for result in results if result.reduction is not None
+    if inputs:
+        return claim
+    selection = next((result.reduction for result in reversed(results) if result.reduction is not None
                       and result.reduction.operation == "numeric_select"
-                      and {result.reduction.step_id, result.step_id}.intersection(task.predecessor_step_ids)]
-        if selections:
-            # The empty view is proved by the completed selection over the read scope.
-            claim = replace(claim, parent_claim_ids=selections[-1].basis_claim_ids,
-                source_spans=tuple(dict.fromkeys(span for unit in plan.selected_set.selected_units
-                                                 for span in unit.source_spans)))
-    return claim
+                      and {result.reduction.step_id, result.step_id}.intersection(task.predecessor_step_ids)), None)
+    if selection is None and task.operation != "group":
+        return claim
+    need = next(need for need in plan.task_state.needs if need.need_id == task.need_ids[0])
+    sources = tuple(dict.fromkeys(span for unit in required_source_units(plan, need) for span in unit.source_spans))
+    return replace(claim, parent_claim_ids=selection.basis_claim_ids if selection else (), source_spans=sources)
 
 
 def completed_reduction_record(record, task, basis, results=(), *, frontier=None, mode=None):
@@ -858,10 +855,8 @@ class ReadingExecutor:
                     await run_model(task, selected_units, selected_claims)
                 await observe_current()
             self.store.save_context_plan(attempt_id, plan)
-        if plan.coverage_scope == "all_supplied_documents":
-            from .context_budget import completed_source_coverage
-            if not completed_source_coverage(plan, results, tuple(units[identity] for identity in plan.coverage_units)):
-                raise ValueError("full-document coverage is incomplete")
+        if incomplete_full_coverage(plan, results):
+            raise ValueError("full-document coverage is incomplete")
         unresolved = unresolved_needs(results)
         disposition = plan.selected_set.disposition
         if unresolved:

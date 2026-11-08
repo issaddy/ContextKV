@@ -363,8 +363,9 @@ class StudyEvidenceProvider:
                 results = tuple(result for result in seed.results if need.need_id in result.support)
                 if not results:
                     continue
-                if need.scope == "all_supplied_documents":
-                    required = scoped_pool.units if scoped_pool is not None else ()
+                if full_scope_read or need.scope == "all_supplied_documents":
+                    required = tuple(unit for unit in scoped_pool.units
+                                     if not unit.need_ids or need.need_id in unit.need_ids) if scoped_pool else ()
                     ranges = {}
                     for span in covered.get(need.need_id, ()):
                         ranges.setdefault(span.source_key, []).append((span.start, span.end))

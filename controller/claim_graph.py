@@ -41,6 +41,8 @@ class ClaimGraph:
         for leaf in self.leaf_claims(claim_id):
             for span in leaf.source_spans:
                 spans[span.span_id] = span
+        for span in self.claims[claim_id].source_spans:
+            spans.setdefault(span.span_id, span)
         return tuple(spans.values())
 
     def answer_plan(self, state, disposition="answer", results=()):

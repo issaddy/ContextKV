@@ -417,7 +417,20 @@ class SourceDirectory:
         admit = self._source_admission(state, memory)
         roots = {key: matching for key in keys if (matching := admit(key)) is not None}
         pool = self.full_scope(roots)
-        restricted = {key: matching for key, matching in roots.items() if len(matching) < len(state.needs)}
+        if all(len(matching) == len(state.needs) for matching in roots.values()):
+            return pool
+        memberships = {key: set(matching) for key, matching in roots.items()}
+        pending = list(roots)
+        while pending:
+            key = pending.pop()
+            for dependency in self._blocks[key].dependencies:
+                members = memberships.setdefault(dependency, set())
+                added = memberships[key]-members
+                if added:
+                    members.update(added)
+                    pending.append(dependency)
+        restricted = {key: tuple(need.need_id for need in state.needs if need.need_id in matching)
+                      for key, matching in memberships.items() if len(matching) < len(state.needs)}
         return replace(pool, units=tuple(replace(unit, need_ids=restricted[unit.source_spans[0].source_key])
             if unit.source_spans[0].source_key in restricted else unit for unit in pool.units))
 
