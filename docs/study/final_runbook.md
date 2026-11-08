@@ -216,7 +216,7 @@ C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观�
 
 冻结 A 后，联合开发验收使用 `bench.capacity_workflow --full-queue`。默认同时执行 c1/c4，每个并发运行 E1 `B6_native`、E2 `S3_native`、E3 `B6_contextpilot`、E4 `S3_contextpilot`；四格为固定/收益 B × Native/ContextPilot 编译，`prefix_retention` 均为 Native。共同基线为实际存在的 `B6_native`，独立选中其他方法时使用所选首项；冻结与配对汇总读取同一参照。
 
-E5 `S3_contextpilot_joint_native` 在 E4 上增加有限回答表示。E6 `S3_contextpilot_joint_demand` 在 E5 上增加按剩余需求分配的 15 秒独立软租，共享保护上限为 8192 token。三格使用同一编译器、两个就绪 READ 的候选域和相同预算。显式选择 `Rule_contextpilot_joint_demand` 可运行基于覆盖和 Native 报价的规则对照，单独运行时提供 `--reader-profile-id`。
+E5 `S3_contextpilot_joint_native` 在 E4 上增加有限回答表示。没有阅读结论或已记录缺口时，相同原文和历史的 raw 与 hybrid 共用候选，原文顺序由编译器选择。E6 `S3_contextpilot_joint_demand` 在 E5 上增加按剩余需求分配的 15 秒独立软租，共享保护上限为 8192 token。三格使用同一编译器、两个就绪 READ 的候选域和相同预算。显式选择 `Rule_contextpilot_joint_demand` 可运行基于覆盖和 Native 报价的规则对照，单独运行时提供 `--reader-profile-id`。
 
 每个并发还执行 `LlamaIndex_native` 和 `S3_contextpilot_no_fact_reuse`。外部方法通过统一 Controller 使用上游 history condense＋compact/refine，物化各数据集 `hybrid_rerank`、`query_mode: current`、无 query adapter/selector 的检索 YAML（`evidence_selection: ranked`、单查询融合、resolved rerank、`source_window: false`）；`--external-reranker` 显式选择发布版 checkpoint，默认 `models/bge-reranker-v2-m3`。其任务/支持规划关闭，Native 编译与保留相同。主消融与 E4 仅相差 `reading.fact_reuse: false`；仍保留实际历史和本轮共享提取。
 

@@ -52,8 +52,25 @@ def observed_answer_options(state, *, joint, finite):
 def eligible_observed_answers(state, candidates):
     from .request_compiler import unique_answer_inputs
 
-    return unique_answer_inputs(tuple(candidate for candidate in candidates
-        if candidate.representation not in ALTERNATE_ANSWERS or not answer_evidence_gaps(state, candidate)))
+    eligible = tuple(candidate for candidate in candidates
+        if candidate.representation not in ALTERNATE_ANSWERS or not answer_evidence_gaps(state, candidate))
+    duplicates = equivalent_raw_answers(state, eligible)
+    return unique_answer_inputs(tuple(candidate for candidate in eligible if candidate.candidate_id not in duplicates))
+
+
+def equivalent_raw_answers(state, candidates):
+    """Keep source order as a compiler choice when the answer material is the same."""
+    if state.open_needs or any(point.claim_ids for point in state.plan.answer_plan.points):
+        return set()
+
+    def material(candidate):
+        return (candidate.action, candidate.working_history_id, candidate.output_budget,
+                frozenset(candidate.source_ids), candidate.reference_map)
+
+    reference = {material(candidate) for candidate in candidates
+                 if candidate.feasible and candidate.representation in {"existing", "hybrid"}}
+    return {candidate.candidate_id for candidate in candidates
+            if candidate.representation == "raw" and material(candidate) in reference}
 
 
 def gap_key(need):

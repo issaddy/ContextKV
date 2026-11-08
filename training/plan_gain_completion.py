@@ -17,7 +17,7 @@ import time
 
 from controller.context_schema import ReadingOutcome
 from controller.context_budget import completion_reserve
-from controller.action_proposals import ALTERNATE_ANSWERS, BOUNDED_CONTINUATION, validate_action_counts
+from controller.action_proposals import ALTERNATE_ANSWERS, BOUNDED_CONTINUATION, equivalent_raw_answers, validate_action_counts
 from controller.plan_policy import (OBSERVED_FEATURE_SCHEMA, CompleteCost, NATIVE_COST_FEATURE_NAMES,
                                     NATIVE_COST_SCHEMA, PlanCandidate, plan_cost_features, plan_features)
 from controller.schema import CacheQuoteBatch, PromptCandidate, SessionSnapshot
@@ -405,11 +405,25 @@ def source_family_catalogue(paths):
     return result
 
 
+def distinct_action_pairs(records):
+    for row in records:
+        if row.get("answer_representation") == "raw":
+            direct, raw = (row[arm]["actual_run"].get("pre_action_input") for arm in ("direct", "counterfactual"))
+            if direct is not None and raw is not None:
+                state = decode(ReadingOutcome, row["direct"]["pre_registration"]["working_state"])
+                candidates = tuple(decode(PromptCandidate, value) for value in (direct, raw))
+                if equivalent_raw_answers(state, candidates):
+                    continue
+        yield row
+
+
 def fit_effective(training, *, ridge=1.0, path=None):
     import numpy as np
     if not training or any(row["split"] != "train" or row["source"] != "actual_completion_weighted_counterfactual"
                            or row["utility_rule"] != RULE for row in training):
         raise ValueError("effective gain fit uses actual train-only completion-weighted counterfactuals")
+    declared_pairs = len(training)
+    training = list(distinct_action_pairs(training))
     binding = {(row["reader_checkpoint"], row["reader_profile_id"]) for row in training}
     if len(binding) != 1:
         raise ValueError("effective gain asset binds one actual reader/profile")
@@ -507,6 +521,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
          "resident_model_manifest_digests": sorted(resident_digests),
          "label": LABEL, "utility_rule": RULE, "no_answer_utility": 0.0, "raw_missing_quality_preserved": True,
          "training_split": "train", "training_records": len(training), "counterfactual_runs_retained": True,
+         "equivalent_representation_pairs": declared_pairs-len(training),
          "input_sha256": digest(training), "input_path": str(Path(path).resolve()) if path else None,
          "training_state_keys": sorted({row["state_key"] for row in training}),
          "training_conversations": sorted({row["conversation_id"] for row in training}),
@@ -523,7 +538,7 @@ def calibrate_completion_latency(model, development, *, quantile=.9):
     if {row["conversation_id"] for row in development} & set(model.provenance["training_conversations"]):
         raise ValueError("completion reserve calibration overlaps fitted training conversations")
     grouped, seen = defaultdict(dict), set()
-    for row in development:
+    for row in distinct_action_pairs(development):
         for side in ("direct", "counterfactual"):
             raw = row[side]
             if raw["record_id"] in seen:
@@ -559,7 +574,8 @@ def evaluate_paired_decisions(model, development):
 
     states, signs = defaultdict(dict), defaultdict(list)
     untrained = Counter()
-    for row in development:
+    eligible = tuple(distinct_action_pairs(development))
+    for row in eligible:
         kind = row["semantic_kind"]
         representation = row.get("answer_representation", "existing")
         family = representation if kind == "direct_answer" else kind
@@ -625,6 +641,7 @@ def evaluate_paired_decisions(model, development):
                                   "sign_agreement": sum(row[1] for row in rows)/len(rows)}
                           for kind, rows in sorted(signs.items())},
             "untrained_family_counts": dict(untrained),
+            "equivalent_representation_pairs": len(development)-len(eligible),
             "paired_decision_states": len(states), "evaluated_decision_states": len(regrets),
             "unavailable_states": dict(unavailable),
             "mean_paired_objective_regret": sum(regrets)/len(regrets) if regrets else None,
