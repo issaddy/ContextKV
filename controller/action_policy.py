@@ -35,7 +35,10 @@ def observed_quality_gain(model, kind, representation, features):
     if representation not in ALTERNATE_ANSWERS:
         return 0.0
     record = model.provenance.get("representation_gains", {}).get(representation)
-    return record["delta_q"] if record is not None else None
+    if record is not None:
+        return record["delta_q"]
+    # These inputs retain the verified complete conclusion frontier of hybrid.
+    return 0.0 if representation in {"facts", "reduced"} else None
 
 
 def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, read_control=None,
