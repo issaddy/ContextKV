@@ -496,16 +496,18 @@ class PrefixObserver:
     async def release(self, owner_id, *, reason):
         async with self._lock:
             record = self.store.prefix_owner(owner_id)
-            info = await self.engine.info()
-            if info.engine_restart_id != record.receipt.engine_restart_id:
-                updated = replace(record, stage="LOST", last_status={"reason": "engine_restart",
-                    "engine_restart_id": info.engine_restart_id}, updated_ns=time.monotonic_ns())
-                self.store.save_prefix_owner(updated, "runtime_restarted")
-                return updated.last_status
             if record.stage != "RELEASING":
                 record = replace(record, stage="RELEASING", updated_ns=time.monotonic_ns())
                 self.store.save_prefix_owner(record, "release_requested", details={"reason": reason})
-            ack = await self.runtime.release(owner_id, info.engine_restart_id)
+            try:
+                ack = await self.runtime.release(owner_id, record.receipt.engine_restart_id)
+            except EngineError as exc:
+                if exc.code != "STALE_RESTART":
+                    raise
+                status = {"state": "LOST", "reason": "engine_restart"}
+                self.store.save_prefix_owner(replace(record, stage="LOST", last_status=status,
+                    updated_ns=time.monotonic_ns()), "runtime_restarted")
+                return status
             self.store.save_prefix_owner(replace(record, stage="RELEASED", last_status=ack,
                 updated_ns=time.monotonic_ns()), "release_acknowledged")
             return ack
@@ -521,9 +523,10 @@ class PrefixObserver:
                         "engine_restart_id": info.engine_restart_id}, updated_ns=time.monotonic_ns())
                     self.store.save_prefix_owner(current, "runtime_restarted")
                 else:
-                    status = await self.runtime.status(info.engine_restart_id, record.owner_id)
-                    if status["state"] == "RETAINED" and record.stage == "RELEASING":
+                    if record.stage == "RELEASING":
                         status = await self.runtime.release(record.owner_id, info.engine_restart_id)
+                    else:
+                        status = await self.runtime.status(info.engine_restart_id, record.owner_id)
                     stage = "RETAINED" if status["state"] == "RETAINED" else "RELEASED"
                     current = replace(record, stage=stage, last_status=status,
                         runtime_receipt=status if stage == "RETAINED" else record.runtime_receipt,
@@ -797,15 +800,10 @@ class PrefixReadObserver:
             for owner in self.store.prefix_owners(session_id, stage="RELEASING"):
                 if owner.policy != "joint_demand":
                     continue
-                started = time.monotonic()
                 try:
-                    status = await self.owners.release(owner.owner_id, reason="terminal_demand")
-                except EngineError as exc:
-                    if not isinstance(exc, UnknownOutcomeError) and exc.code != "STALE_RESTART":
-                        raise
-                    status = {"state": "RELEASING", "error": str(exc)}
-                events.emit("joint_prefix_terminal_release", attempt_id=owner.attempt_id,
-                    owner_id=owner.owner_id, status=status, elapsed_ms=(time.monotonic()-started)*1000)
+                    await self.owners.release(owner.owner_id, reason="terminal_demand")
+                except UnknownOutcomeError as exc:
+                    events.emit("joint_prefix_release_retry", owner_id=owner.owner_id, error=str(exc))
 
     @staticmethod
     def _features(plan, sources, accesses, now):
