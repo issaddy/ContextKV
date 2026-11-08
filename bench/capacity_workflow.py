@@ -503,7 +503,7 @@ def declared_execution_rows(job):
     return rows, failure_ledgers, delivery
 
 
-def summarize_full_queue(job):
+def summarize_full_queue(job, *, native_path=None):
     from controller.resident_models import resident_model_digest
     from profiling.study_cost_ledger import registration_key, registration_work
 
@@ -564,7 +564,7 @@ def summarize_full_queue(job):
         "failure_ledgers": failure_ledgers,
         "delivery_metrics": delivery,
         "cost_batches": batch_ledger(batch_tracks),
-        "paid_native_usage": paid_execution_index(rows, [directory], Path(job["output"])/"native.json")}
+        "paid_native_usage": paid_execution_index(rows, [directory], native_path or Path(job["output"])/"native.json")}
 
 
 def full_queue_occupancy(windows, physical, native):
@@ -596,6 +596,20 @@ def full_queue_occupancy(windows, physical, native):
         "physical_coverage": bool(merged) and all(row["complete_window_coverage"] for row in physical_costs)
             and all(device_coverage),
         "native_coverage": bool(merged) and all(row["complete_window_coverage"] for row in native_costs)}
+
+
+def refresh_saved_full_queue(job, original, cost, native_path):
+    """Rebuild a scored cell from its saved records and original observation."""
+    summary = summarize_full_queue(job, native_path=native_path)
+    occupancy = full_queue_occupancy(summary["online_windows"],
+        cost["physical_observation"], cost["native_observation"])
+    finalized = (all(summary["online_windows"].values())
+        and set(summary["scorer_contracts"]) == set(summary["datasets"])
+        and summary["queue_quality"] is not None
+        and not summary["unexpected_execution_task_ids"])
+    return {**original, **summary, "online_occupancy": occupancy,
+        "original_execution_status": original["execution_status"],
+        "execution_status": "completed" if finalized else original["execution_status"]}
 
 
 def summarize_job(job):

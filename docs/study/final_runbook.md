@@ -268,7 +268,7 @@ cohort、reader 与预算确定对照条件，各格分别列出实际启用的 
 每格执行前自动记录本机硬件和服务的原生缓存配置，随结果进入比较身份；只在声明的实际测量主机执行此工作流。资源容量、设备数量、GPU 型号/显存/驱动或原生缓存配置不同，以及观测缺失时，不报告可比差值。
 
 每格按自己的 P3 历史执行原 350 题。确认失败或阻断计零，缺失执行记录与未评分答案保留质量区间。在线费用以唯一原生回执和检索阶段汇总计算 token，以初始化至清理的全局窗口计算 GPU/Host 占用，登记 CPU 工时与离线评分费用单列。`bench.plan_prediction_audit` 将所选报价、实际预填充和回载、读取新增事实、owner 变更和最终交付串到同一尝试。`--source-manifest` 用于两轮容量诊断。
-每格先生成并保存所有数据轨的答案、来源和费用，再离线评分。评分中断后用 `python3 -m bench.study_scoring --generation-dir` 读取原始记录补评分。
+每格先生成并保存所有数据轨的答案、来源和费用，再离线评分。评分中断后用 `python3 -m bench.study_scoring --generation-dir` 读取原始记录补评分，再用 `profiling.final_study_index --refresh-saved-queues` 按原观察窗口重建验收汇总。
 同一轮 READ 与 ANSWER 的共享因果正文按回答中的 token 位置取并集，再按最终原生回执区分 GPU 命中、Host 回载与预填充。
 
 C 的离线 `retention_trace export` 需显式提供 `--failed-conversations`（零失败为 `[]`）。

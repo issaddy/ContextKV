@@ -275,7 +275,7 @@ def capacity_tables(value, path):
     return indexed, comparisons
 
 
-def full_queue_cells(value, path, joint_scope=None):
+def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
     from profiling.runtime_manifest import hardware_identity
     if not isinstance(value, dict):
         return []
@@ -312,6 +312,12 @@ def full_queue_cells(value, path, joint_scope=None):
             matrix_sha256=joint_scope["source_matrix_sha256"],
             joint_scope_sha256=joint_scope["manifest"]["sha256"])
     jobs = {job["name"]: job for job in plan["jobs"]}
+    if refresh_to is not None:
+        from bench.capacity_workflow import refresh_saved_full_queue
+
+        cost = load(root/"capacity-cost.json")
+        rows = [refresh_saved_full_queue(jobs[row["job"]], row, cost, refresh_to/(
+            canonical(jobs[row["job"]]["output"])+".json")) for row in rows]
     cells = []
     for row in rows:
         job = jobs[row["job"]]
@@ -582,6 +588,8 @@ def main(argv=None):
     parser.add_argument("--cost-manifest", action="append", default=[], help="Preserve this explicit glob in the ledger command")
     parser.add_argument("--physical", action="append", default=[])
     parser.add_argument("--joint-scope", help="Explicit frozen inputs.json registering the workers used by full-queue artifacts")
+    parser.add_argument("--refresh-saved-queues", action="store_true",
+        help="Rebuild finalized full-queue summaries from saved answers, scores, and original resource observations")
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     if (args.cost_manifest or args.physical) and not args.gpu_devices:
@@ -603,7 +611,8 @@ def main(argv=None):
         indexed, comparisons = capacity_tables(value, path)
         capacity.extend(indexed)
         capacity_comparisons.extend(comparisons)
-        full_cells.extend(full_queue_cells(value, path, joint_scope))
+        full_cells.extend(full_queue_cells(value, path, joint_scope,
+            refresh_to=root/"refreshed-native" if args.refresh_saved_queues else None))
     full_cells = list({row["generation_dir"]: row for row in full_cells}.values())
     capacity.extend(full_cells)
     capacity_comparisons.extend(full_queue_comparisons(full_cells))
