@@ -18,6 +18,10 @@ def build_controlled_tasks(config):
     settings = config.get("training", {})
     source_path = Path(settings.get("data_dir", "runs/study/data"))/"sources.jsonl"
     originals = sorted(read_jsonl(source_path), key=lambda row: row["source_id"])
+    policy_originals = {}
+    for original in originals:
+        policy_originals.setdefault(original["document_family"], original)
+    policy_originals = tuple(policy_originals.values())
     briefings = sorted(originals, key=lambda row: (-len(row["text"]), row["source_id"]))
     destination = Path(settings.get("controlled_dir", "runs/study/constructed_train"))
     families = settings.get("controlled_families", 24)
@@ -25,7 +29,7 @@ def build_controlled_tasks(config):
     for index in range(families):
         family = f"constructed-train-policy-{index:03}"
         program, other = f"Training Program {index+1}", f"Briefing Program {index+1}"
-        original = originals[(index+100) % len(originals)]
+        original = policy_originals[(index+100) % len(policy_originals)]
         excerpt = original["text"][:1500]
         scope, facts = [], {}
         for version, start, end, delta in (("2018", "2018-01-01", "2024-01-01", 0),
