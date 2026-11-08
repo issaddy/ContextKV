@@ -586,7 +586,7 @@ class PrefixReadObserver:
         from .demand import DemandLease, JointOption, joint_options
         from .templates import longest_common_prefix
 
-        own = {row.owner_id for row in self.store.prefix_owners(session_id, active_only=True)
+        own = {row.owner_id: row for row in self.store.prefix_owners(session_id, active_only=True)
                if row.policy == "joint_demand"}
         sources = {}
         for record in state.steps:
@@ -598,13 +598,16 @@ class PrefixReadObserver:
             return joint_options(plans, state)
         statuses = prefix_status if prefix_status is not None else await self.runtime.status(batch.engine_restart_id)
         active = {row["owner_id"]: row for row in statuses["prefixes"]}
-        own &= active.keys()
+        own = {key: record for key, record in own.items() if key in active}
+        if not own and not sources:
+            return joint_options(plans, state)
         other_owners = tuple(row for key, row in active.items() if key not in own)
         shared = set().union(*(owner_pages(row) for row in other_owners))
         shared_gpu = referenced_gpu_pages(other_owners)
         quotes = {quote.candidate_id: quote for quote in batch.quotes}
         limit = self.settings["protection_budget_tokens"]
-        page_size = next(iter(sources.values()))[1]["page_size"] if sources else 0
+        page_size = (next(iter(sources.values()))[1]["page_size"] if sources
+                     else active[next(iter(own))]["page_size"])
         all_need_ids = {need.need_id for need in state.plan.task_state.needs}
         continuation = continuation_read(state, state.plan) if self.model is not None else None
         source_records = {record.step_id: inspection for record, inspection in sources.values()}
@@ -639,14 +642,21 @@ class PrefixReadObserver:
             return matched_paths[key]
 
         def allocate(demand, task, candidate, actions):
-            if not demand.needs or not sources:
-                return JointOption(demand, release=tuple(sorted(own)))
             current = quotes[candidate.candidate_id] if candidate is not None else None
+            # The action is quoted but has not yet acquired its Native lock.
+            keep = {key for key, record in own.items()
+                    if current is not None and active[key]["reference_present"]
+                    and len(record.prefix_input_ids) <= current.recoverable_prefix_tokens
+                    and candidate.input_ids[:len(record.prefix_input_ids)] == record.prefix_input_ids}
+            kept = tuple(active[key] for key in keep)
+            base_pages = shared.union(*(owner_pages(row) for row in kept))
+            base_gpu = shared_gpu | referenced_gpu_pages(kept)
             current_growth = (current.input_len-current.ready_gpu_prefix_tokens+candidate.output_budget
                               if current is not None else 0)
             pressure = max(0, current_growth+concurrent_growth-batch.free_gpu_tokens)
-            if not pressure:
-                return JointOption(demand, release=tuple(sorted(own)))
+            if not pressure or not demand.needs or not sources:
+                return JointOption(demand, release=tuple(sorted(own.keys()-keep)),
+                                   protected_tokens=len(base_pages-shared)*page_size)
             current_prefix = candidate.input_ids[:current.ready_gpu_prefix_tokens] if current is not None else ()
             targets = {}
             unmet = {need.need_id: need.priority for need in demand.needs}
@@ -688,7 +698,7 @@ class PrefixReadObserver:
                 return {target: min(risk, len(path & pages)*page_size)
                         for target, (risk, _, path) in demands.items()}
 
-            protected, protected_gpu = set(shared), set(shared_gpu)
+            protected, protected_gpu = set(base_pages), set(base_gpu)
             initial_coverage = coverage(protected_gpu)
             covered, selected = initial_coverage, {}
             while paths:
@@ -727,11 +737,11 @@ class PrefixReadObserver:
                         evidence = forecast.evidence_digest
                         if net_ms <= 0:
                             selected.clear()
-                            protected, covered = shared, initial_coverage
+                            protected, covered = base_pages, initial_coverage
                         elif continuation is not None and target == continuation.step_id:
                             saved_ms = net_ms
             return JointOption(demand, tuple(lease for key, lease in selected.items() if key not in own),
-                tuple(sorted(own-selected.keys())), len(protected-shared)*page_size,
+                tuple(sorted(own.keys()-keep-selected.keys())), len(protected-shared)*page_size,
                 sum(risk-covered[target] for target, (risk, _, _) in demands.items()), saved_ms, evidence)
 
         return joint_options(plans, state, allocate=allocate)

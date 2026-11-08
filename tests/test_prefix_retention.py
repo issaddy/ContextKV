@@ -216,6 +216,15 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     assert reused.protected_tokens == reused.uncovered_risk_tokens == 0
     assert (await after_gap(replace(candidate, source_body_token_ranges=((2, 4),)))).retain == ()
 
+    owner = SimpleNamespace(owner_id=lease.owner_id, policy="joint_demand", prefix_input_ids=ids[:2])
+    observer.store = SimpleNamespace(prefix_owners=lambda *args, **kwargs: (owner,))
+    read = PlanCandidate("next", "read_once", plan, (PlanStep(later, (candidate,)),), "reader")
+    options = await observer.demand_options((gap, read), state, "session", replace(batch, free_gpu_tokens=16),
+        prefix_status={"prefixes": ({**existing, "owner_id": owner.owner_id},)})
+    assert options[candidate.candidate_id].release == ()
+    assert options[candidate.candidate_id].protected_tokens == 2
+    assert options["gap"].release == (owner.owner_id,)
+
     long_ids = (1, 2, 3, 4, 7)
     long_candidate = replace(candidate, candidate_id="tail", input_ids=long_ids, input_hash=token_hash(long_ids))
     long_quote = CacheQuote("tail", long_candidate.input_hash, 5, 4,
