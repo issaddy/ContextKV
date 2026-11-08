@@ -380,7 +380,7 @@ def retrieval_state(snapshot, source_index):
 
 
 
-TASK_NEED_SEMANTICS_VERSION = "task_need_semantics_v3_anchored_owned_graph"
+TASK_NEED_SEMANTICS_VERSION = "task_need_semantics_v4_distinct_results"
 TASK_NEED_SEMANTICS = (
     "Every Need must cite at least one actual visible request anchor. Every materialized condition "
     "must cite an actual key, value or predicate; a removal must cite its update predicate. "
@@ -393,7 +393,7 @@ TASK_NEED_SEMANTICS = (
     "whose object the current request resumes, including across an intervening topic. "
     "Earlier assistant text establishes conversational intent; original sources establish answer facts.\n"
     "Need operation semantics:\n"
-    "- lookup: retrieve a directly stated fact or relation answering a requested point.\n"
+    "- lookup: retrieve a stated fact or relation, including a stated amount, limit, or eligibility threshold.\n"
     "- procedure: identify the actions, prerequisites and ordered steps for carrying out a task. "
     "Requests for required actions or how to complete a process request a procedure, "
     "even when one relevant source states the answer directly.\n"
@@ -405,8 +405,8 @@ TASK_NEED_SEMANTICS = (
     "- count: compute the number of distinct matching entities or records in the requested range.\n"
     "- sum: add the requested quantities, respecting units and the requested matching range.\n"
     "- group: partition or aggregate the requested items by the requested grouping keys.\n"
-    "Choose each Need's operation from the user's requested result, not from how many documents exist "
-    "or whether a reader could retrieve the answer. Keep separately requested results as separate Needs.\n"
+    "Create one Need per distinct requested result. An instruction to present or format a result already "
+    "requested belongs to that result's Need. 'How many' can ask for a stated value rather than a count of records.\n"
     "Need condition links:\n"
     "- condition_ids names only the active restrictions that apply to that Need. An empty list means "
     "the Need has no condition restriction. Conditions elsewhere in the task do not automatically apply.\n"
