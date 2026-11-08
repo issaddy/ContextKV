@@ -671,7 +671,10 @@ class Controller:
                     bound = {context_plan.plan_id: context_plan for context_plan in context_plans}
                     initial_outcomes = tuple(replace(outcome, plan=bound[outcome.plan.plan_id])
                                              for outcome in initial_outcomes)
-                if context_plans and self.knobs.strategy == "cost" and self.rolling_policy is None:
+                fixed_statistics = (self.rolling_policy is None and len(context_plans) == 1
+                    and bool(context_plans[0].task_state.needs)
+                    and all(need.operation in {"count", "sum", "group"} for need in context_plans[0].task_state.needs))
+                if context_plans and self.knobs.strategy == "cost" and self.rolling_policy is None and not fixed_statistics:
                     from .context_cost import quote_read_costs
                     completed_steps = tuple(record for stage, record in
                         self.store.execution_steps_with_stage(attempt.attempt_id) if stage == "COMPLETE")
@@ -726,26 +729,27 @@ class Controller:
                     reading_outcome = rolling_result.outcome
                     context_plans = (reading_outcome.plan,)
                     answer_phase_started = rolling_result.answer_phase_started
-                candidates = ((rolling_result.plan.candidate,) if rolling_result is not None else
-                              unique_answer_inputs(compile_candidates(planning_snap, context_plans)))
-                valid = tuple(c for c in candidates if c.feasible)
-                if not valid:
-                    raise ContextOverflow("shared_context_policy_overflow: required evidence and full QA exceed budget")
-                needs_quote = (self.knobs.strategy in {"cost", "warm_idle"}
-                               or self.request_compiler.index is not None) and len(valid) > 1
-                quotes = (rolling_result.quotes if rolling_result is not None else
-                          await self.engine.quote_batch(valid, self.template.fingerprint) if needs_quote else None)
-                if rolling_result is None and quotes is not None and quotes.engine_restart_id != info.engine_restart_id:
-                    # At most one re-quote after a restart; native admission remains authoritative.
-                    info = await self.engine.info()
-                    planning_snap = replace(working_snap, force_new_epoch_for_recovery=True, must_rebuild=True)
+                candidates, quotes = (), None
+                if rolling_result is not None:
+                    candidates, quotes = (rolling_result.plan.candidate,), rolling_result.quotes
+                elif not fixed_statistics:
                     candidates = unique_answer_inputs(compile_candidates(planning_snap, context_plans))
                     valid = tuple(c for c in candidates if c.feasible)
-                    quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
-                    if quotes.engine_restart_id != info.engine_restart_id:
-                        raise EngineError("UNSTABLE_RESTART")
-                if rolling_result is None and quotes is not None:
-                    candidates = fixed_source_order(candidates, quotes)
+                    if not valid:
+                        raise ContextOverflow("shared_context_policy_overflow: required evidence and full QA exceed budget")
+                    needs_quote = (self.knobs.strategy in {"cost", "warm_idle"}
+                                   or self.request_compiler.index is not None) and len(valid) > 1
+                    if needs_quote:
+                        quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
+                        if quotes.engine_restart_id != info.engine_restart_id:
+                            info = await self.engine.info()
+                            planning_snap = replace(working_snap, force_new_epoch_for_recovery=True, must_rebuild=True)
+                            candidates = unique_answer_inputs(compile_candidates(planning_snap, context_plans))
+                            valid = tuple(c for c in candidates if c.feasible)
+                            quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
+                            if quotes.engine_restart_id != info.engine_restart_id:
+                                raise EngineError("UNSTABLE_RESTART")
+                        candidates = fixed_source_order(candidates, quotes)
                 # The planner validates this batch once before selecting a candidate.
                 pressure = (max(1, quotes.active_requests + (quotes.queued_requests or 0) + 1) if quotes is not None
                             and quotes.active_requests is not None else max(1, self._active_generations + 1))
@@ -759,15 +763,17 @@ class Controller:
                     statistics.mean(values) if values else default_postplan)
                     for action, values in self._postplan_control_ms.items()}
                 plan_started = time.monotonic()
-                plan = (rolling_result.plan if rolling_result is not None else
-                        choose_plan(candidates, quotes, self.cost_model, planning_snap, self.knobs,
-                                   concurrency=pressure, control_ms=planning_control_ms))
+                plan = rolling_result.plan if rolling_result is not None else None
+                if rolling_result is None and not fixed_statistics:
+                    plan = choose_plan(candidates, quotes, self.cost_model, planning_snap, self.knobs,
+                                       concurrency=pressure, control_ms=planning_control_ms)
                 if isinstance(plan, NoFeasiblePlan):
                     raise ContextOverflow(plan.reason)
                 selected_context_plan = None
                 if context_plans:
                     from .execution import ReadingExecutor, require_complete_time, require_online_tokens
-                    selected_context_plan = next(context_plan for context_plan in context_plans
+                    selected_context_plan = context_plans[0] if fixed_statistics else next(
+                        context_plan for context_plan in context_plans
                         if context_plan.plan_id == plan.candidate.context_plan_id)
                     if rolling_result is None:
                         from .context_budget import direct_answer_reason
@@ -788,7 +794,7 @@ class Controller:
                             request_compiler=self.request_compiler,
                             observe_state=observe_fixed_state if self.state_observer is not None else None)
                         try:
-                            if direct_answer_reason(seed, plan.candidate) is None:
+                            if direct_answer_reason(seed, None if fixed_statistics else plan.candidate) is None:
                                 from .execution import auxiliary_tokens
                                 spent = (auxiliary_tokens(auxiliary_usage) if auxiliary_usage is not None else 0)
                                 reading_outcome = replace(seed, plan=replace(selected_context_plan,

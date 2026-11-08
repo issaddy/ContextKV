@@ -40,7 +40,7 @@ source-first ANSWER 的实际顺序为系统、稳定原文、工作历史、当
 
 同来源、版本与条件的数值 Need 共享提取。引用别名与摘录不符时，解析器可按同一次 READ 中唯一的原文匹配绑定窗口，再从该窗口确定版本和依赖。各 Need 的 `numeric_select` 按原事实 ID 生成布尔选择，按实际输入和输出容量有限分包，最后一包登记完整基底和已选事实。CPU 执行 `union/count/sum/group` 并保留来源父链，模型执行必要的 `summarize/compare/infer`。模型归约按有限输入分包，只有能合并至少两个完整结果才继续合并；未合并的结果也可进入 ANSWER。全资料覆盖与统计操作按任务要求完成；所选来源读完后的必要数值运算同样走固定规则。可选 REDUCE 受收益资产覆盖约束。[执行与归约](../controller/execution.py)
 
-固定 B 在原文实际完整可见或结论充分时跳过阅读。收益 B 在当前状态比较直接 ANSWER、下一 READ、当前 REDUCE 与一次 GAP。普通所选来源任务可回答已有依据的部分并说明缺口；全资料和统计任务仍检查覆盖与运算。选中 GAP 后才检索，未读范围为候选根，实际 READ 保留旧依赖，原 passage 额度只扣新增来源。每次执行后重新观察事实、缺口、预算和缓存状态。[动作决策](../controller/action_policy.py) · [滚动执行](../controller/rolling_policy.py)
+固定 B 在原文实际完整可见或结论充分时跳过阅读。单计划统计题先检查覆盖和已完成运算，再编译最终 ANSWER。收益 B 在当前状态比较直接 ANSWER、下一 READ、当前 REDUCE 与一次 GAP。普通所选来源任务可回答已有依据的部分并说明缺口；全资料和统计任务仍检查覆盖与运算。选中 GAP 后才检索，未读范围为候选根，实际 READ 保留旧依赖，原 passage 额度只扣新增来源。每次执行后重新观察事实、缺口、预算和缓存状态。[动作决策](../controller/action_policy.py) · [滚动执行](../controller/rolling_policy.py)
 
 离线配对在同一已观察状态以当前材料上的 ANSWER 为基准。首动作后，尚未满足的 infer 桥接需求优先接一次就绪的 READ，必要时可先接一次 GAP；每条分支保存实际输入、成本和官方 RB_llm。无提交回答的确定终止按零交付效用标注，原始评分留空。已完成 READ 分支的 ANSWER 前状态可作为独立派生观测，沿用当时的事实、实际终端报价和已付费用。[配对入口](../training/plan_gain_workflow.py)
 
