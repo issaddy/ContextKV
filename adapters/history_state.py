@@ -308,8 +308,7 @@ class TaskInterpreter:
         source = memory.source_index
         if source is not None:
             from types import SimpleNamespace
-            view = SimpleNamespace(task_catalogue=budget_task_catalogue(self.history_index.tokenizer,
-                turn.query, task_source_catalogue(memory), memory.prior_task_states, current_turn_id=turn.turn),
+            view = SimpleNamespace(task_catalogue=task_source_catalogue(memory),
                 reference_date=getattr(source, "reference_date", None), read_contracts=read_contracts(memory))
             if memory.source_scope is not None:
                 view.observed_source_scope = memory.source_scope
@@ -495,7 +494,8 @@ TASK_TEACHER_SYSTEM = ("Interpret the current task using the indexed literal tex
           "as_of intent with a reference to that date.\n\n"+TASK_NEED_SEMANTICS)
 
 
-def budget_task_catalogue(tokenizer, query, catalogue, prior_tasks, max_input_tokens=8192, current_turn_id=0):
+def budget_task_catalogue(tokenizer, query, catalogue, prior_tasks, max_input_tokens=8192, current_turn_id=0,
+                          *, version_alias_only=False):
     """Reserve one third of non-question input for a relevant public directory."""
     import re
     question_tokens = (len(tokenizer(f"Turn {current_turn_id} user: ", add_special_tokens=False)["input_ids"])
@@ -518,12 +518,19 @@ def budget_task_catalogue(tokenizer, query, catalogue, prior_tasks, max_input_to
                 text = json.dumps({"kind": name, "identity": identity, "sources": rows}, ensure_ascii=False)
                 total += len(tokenizer(text, add_special_tokens=False)["input_ids"]) + 1
         return total
-    selected = {}
+    selected, visible_versions = {}, set()
     for family, rows in sorted(catalogue.items(), key=priority):
         unique = list({json.dumps(row, sort_keys=True, ensure_ascii=False): row for row in rows}.values())
+        if version_alias_only and not versioned_catalogue_family(unique):
+            # The teacher sees the version alias, while only versioned families
+            # contribute their title and source metadata to its messages.
+            unique = [row for row in unique if row["version"] not in visible_versions]
+            if not unique:
+                continue
         proposed = {**selected, family: unique}
         if cost(proposed) <= budget:
             selected = proposed
+            visible_versions.update(row["version"] for row in unique)
     return selected
 
 
@@ -558,11 +565,14 @@ def task_source_catalogue(memory):
     return catalogue
 
 
+def versioned_catalogue_family(rows):
+    return len({row["version"] for row in rows}) > 1 or any(
+        row.get("valid_from") or row.get("version_order") for row in rows)
+
+
 def task_catalogue_candidates(catalogue):
     versions = tuple(dict.fromkeys(row["version"] for rows in catalogue.values() for row in rows))
-    families = tuple(family for family, rows in catalogue.items()
-        if len({row["version"] for row in rows}) > 1
-        or any(row.get("valid_from") or row.get("version_order") for row in rows))
+    families = tuple(family for family, rows in catalogue.items() if versioned_catalogue_family(rows))
     return versions, families
 
 
@@ -669,7 +679,7 @@ def budget_teacher_input(client, turn, windows, memory):
     """Select whole observed task closures and history windows under one prompt budget."""
     maximum = min(client.config.max_input_tokens, client.config.context_window-client.config.max_new_tokens)
     catalogue = budget_task_catalogue(client.tokenizer, turn.query, task_source_catalogue(memory),
-        memory.prior_task_states, current_turn_id=turn.turn)
+        memory.prior_task_states, current_turn_id=turn.turn, version_alias_only=True)
 
     def render(tasks, selected_windows, contracts=()):
         payload = teacher_task_payload(turn, selected_windows, memory, tasks, catalogue, contracts)
