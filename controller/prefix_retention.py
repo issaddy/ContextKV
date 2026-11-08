@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 from collections import defaultdict, deque
+from math import ceil
 import time
 from pathlib import Path
 
@@ -604,6 +605,9 @@ class PrefixReadObserver:
         all_need_ids = {need.need_id for need in state.plan.task_state.needs}
         continuation = continuation_read(state, state.plan) if self.model is not None else None
         source_records = {record.step_id: inspection for record, inspection in sources.values()}
+        queued_growth = sum(max(0, request.input_tokens+request.max_new_tokens-request.kv_allocated_tokens)
+                            for request in batch.native_waiting_requests or ())
+        concurrent_growth = ceil(max(0, batch.native_running_budget_tokens or 0))+queued_growth
 
         def work(candidate):
             return sum(quoted_native_work(quotes[candidate.candidate_id]))+candidate.output_budget
@@ -632,6 +636,15 @@ class PrefixReadObserver:
             return matched_paths[key]
 
         def allocate(demand, task, candidate, actions):
+            if not demand.needs or not sources:
+                return JointOption(demand, release=tuple(sorted(own)))
+            current = quotes[candidate.candidate_id] if candidate is not None else None
+            current_growth = (current.input_len-current.ready_gpu_prefix_tokens+candidate.output_budget
+                              if current is not None else 0)
+            pressure = max(0, current_growth+concurrent_growth-batch.free_gpu_tokens)
+            if not pressure:
+                return JointOption(demand, release=tuple(sorted(own)))
+            current_prefix = candidate.input_ids[:current.ready_gpu_prefix_tokens] if current is not None else ()
             targets = {}
             unmet = {need.need_id: need.priority for need in demand.needs}
             for target, compiled in actions:
@@ -651,8 +664,7 @@ class PrefixReadObserver:
             for target, (compiled, priority) in targets.items():
                 quote = quotes[compiled.candidate_id]
                 evictable = quote.evictable_gpu_prefix_tokens or 0
-                pressure = (work(candidate) if candidate is not None else 0)+work(compiled)-batch.free_gpu_tokens
-                risk = min(max(0, pressure), evictable)
+                risk = min(pressure, evictable)
                 if not risk:
                     continue
                 matches = matching_sources(compiled)
@@ -660,6 +672,9 @@ class PrefixReadObserver:
                     continue
                 # Native FULL locks extend from the root to the deepest locked page.
                 locked_pages = (quote.ready_gpu_prefix_tokens-evictable)//page_size
+                if not concurrent_growth:
+                    # The intervening request holds its matched pages during its own allocation.
+                    locked_pages = max(locked_pages, longest_common_prefix(compiled.input_ids, current_prefix)//page_size)
                 _, _, _, path = max(matches, key=lambda match: match[2])
                 evictable_pages = frozenset(path[locked_pages:])
                 if evictable_pages:

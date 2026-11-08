@@ -193,7 +193,8 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
         output_budget=2, source_body_token_ranges=((0, 4),), source_prefix_tokens=4)
     quote = CacheQuote(candidate.candidate_id, candidate.input_hash, 4, 4,
                        ready_gpu_prefix_tokens=2, recoverable_prefix_tokens=2, evictable_gpu_prefix_tokens=2)
-    batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 0, 0, (quote,))
+    batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 0, 0, (quote,),
+                            native_running_budget_tokens=4)
     gap = PlanCandidate("gap", "gap_retrieval", plan, (PlanStep(ReadTask("gap", "GAP")),), "reader")
     observer = PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
                                   {"mode": "demand", "protection_budget_tokens": 4})
