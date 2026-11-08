@@ -67,6 +67,8 @@ B 的 observed 资产另绑定 `observed_feature_schema=pre_action_budget_suppor
 
 `training.plan_gain_completion fit --dev` 按动作从独立开发会话标定完成延迟的单侧低估余量。开发报告列出各动作与表示的收益符号一致率、同状态实测分支的选择后悔值、未校准低估率及逐会话留一超限率。`bench.plan_prediction_audit --root ... --output ...` 从实际已付边界重算滚动决策至终止的余程。
 
+在独立于正式评价队列的开发会话上运行同一策略。用 `python3 -m bench.plan_prediction_audit --root CALIBRATION-RUN --output NEW-AUDIT --timing-calibration` 导出 `completion-timing.json`，在 `execution.plan_gain.completion_timing_asset` 指向该文件。设置 `execution.max_complete_ms` 后，必做步骤和规则对照按同一 reader、动作策略、保留方式及设备上的可比工作量预留时间。每个匹配会话只贡献一条最慢实测余程，至少两个会话才启用经验 P95，额度判断使用已付时间加余程预留。正式队列另按实际交付时延计算 P95。
+
 动作收益资产的 `evidence_selection_contract` 来自实际 A manifest，绑定选材模式和顺序，以及 `support` 使用的效用、保留集合重排和支持模型记录身份。观测包和实际分支使用同一合同，开发集及线上提供器须与拟合资产匹配。语料、索引、B6/B7 和服务地址独立记录。
 
 GAP 离线与线上只排除实际已读来源，统一新增 passage 额度；采集和拟合必须绑定相同协议。

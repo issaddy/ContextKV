@@ -432,6 +432,7 @@ def load_rolling_runtime(settings, *, template, store, sampling, answer_system_p
     from training.train_plan_gain import PlanGainModel
     from .plan_policy import PolicyLimits
     from .rolling_policy import RollingPlanRuntime
+    from .completion_timing import CompletionTiming
     checkpoint, profile = settings["reader_checkpoint"], settings["reader_profile_id"]
     model = None
     if settings.get("action_policy", "learned") == "learned":
@@ -465,12 +466,14 @@ def load_rolling_runtime(settings, *, template, store, sampling, answer_system_p
     joint = settings.get("joint_context", False)
     reads = 2 if joint else settings.get("read_choices", 1)
     limits = PolicyLimits(**{"max_plan_candidates": 3+reads, **settings.get("limits", {})})
+    timing_path = settings.get("completion_timing_asset")
     return RollingPlanRuntime(model, observer, reader_checkpoint=checkpoint, reader_profile_id=profile,
         output_budgets=settings["output_budgets"], limits=limits,
         output_tokens_per_fact=settings.get("output_tokens_per_fact", 64),
         mode=mode, observation_path=settings.get("observation_path"),
         gap_retriever_identity=settings.get("gap_retriever_identity"), gap_limits=settings.get("gap_limits"),
-        joint_context=joint, read_choices=reads)
+        joint_context=joint, read_choices=reads,
+        completion_timing=CompletionTiming.load(timing_path) if timing_path else None)
 
 
 def load_fixed_reading_observer(settings, *, template):

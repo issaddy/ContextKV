@@ -355,10 +355,12 @@ def complete_plan(context_plan, answer_variants, *, semantic_kind, reader_checkp
 
 
 class PlanPolicy:
-    def __init__(self, gain_model: GainModel | None, *, limits=PolicyLimits(), rule_baseline=False):
+    def __init__(self, gain_model: GainModel | None, *, limits=PolicyLimits(), rule_baseline=False,
+                 completion_timing=None):
         if gain_model is None and not rule_baseline:
             raise ValueError("plan-gain policy is not enabled without a reader-bound trained gain asset")
         self.gain_model, self.limits = gain_model, limits
+        self.completion_timing = completion_timing
         self.last_evaluations = ()
         self.last_option_diagnostics = {}
 
@@ -482,10 +484,10 @@ class PlanPolicy:
         return next((reason for limit, value, reason in checks if limit is not None and value > limit), None)
 
     def choose_observed_actions(self, plans, state, native, reusable_prefixes, *, read_control=None,
-                                gap_query_chars=0, joint_options=None):
+                                gap_query_chars=0, joint_options=None, timing_context=None):
         from .action_policy import choose_observed_action
         return choose_observed_action(self, plans, state, native, reusable_prefixes, read_control=read_control,
-                                      gap_query_chars=gap_query_chars, joint_options=joint_options)
+            gap_query_chars=gap_query_chars, joint_options=joint_options, timing_context=timing_context)
 
     def choose(self, plans, state: ReadingOutcome, native: NativePlanningState, reusable_prefixes, *,
                mandatory_coverage=False):

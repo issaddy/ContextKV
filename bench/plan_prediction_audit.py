@@ -15,7 +15,11 @@ from pathlib import Path
 import statistics
 
 from bench.study_resources import integrate_physical
-from controller.serialization import to_jsonable
+from controller.completion_timing import timing_point
+from controller.context_budget import CompletionReserve
+from controller.context_schema import ReadTask
+from controller.schema import CacheQuoteBatch
+from controller.serialization import decode, to_jsonable
 from controller.templates import longest_common_prefix
 from profiling.retention_trace import SourceLedger
 from profiling.study_cost_ledger import merge_ranges
@@ -131,6 +135,8 @@ def observed_remaining(row, event, attempt, terminal, observations, option):
     row["terminal_state"] = attempt.stage
     row["completion_reserve"] = option.get("completion_reserve")
     row["completion_cost"] = option.get("completion_cost")
+    latency_reserve = option.get("completion_latency_ms")
+    row["completion_latency_ms"] = latency_reserve
     row["prediction"] = forecast
     paid = event.get("physical_paid_observation")
     if paid is None or terminal is None or attempt.stage not in {"COMMITTED", "FAILED"}:
@@ -162,8 +168,28 @@ def observed_remaining(row, event, attempt, terminal, observations, option):
                 row["actual"][name] = actual-event["paid_cost"][name]
     if forecast is not None:
         row["errors"] = {key: forecast[key]-value for key, value in row["actual"].items()}
-    if row["completion_cost"] is not None and attempt.stage == "COMMITTED":
-        row["latency_reserve_underestimated"] = row["actual"]["latency_ms"] > row["completion_cost"]["latency_ms"]
+    if latency_reserve is not None and attempt.stage == "COMMITTED":
+        row["latency_reserve_underestimated"] = row["actual"]["latency_ms"] > latency_reserve
+
+
+def timing_observation(event, attempt, task, candidate, option, remaining_ms):
+    if remaining_ms is None or "timing_context" not in event or option.get("completion_reserve") is None:
+        return None
+    batch = decode(CacheQuoteBatch, event["quote"])
+    quote = next(item for item in batch.quotes if item.candidate_id == candidate["candidate_id"]) if candidate else None
+    kind = "mandatory_coverage" if event["event"] == "rolling_required_scope_step" else option["semantic_kind"]
+    gap_query = event["gap_request"]["query"] if task["kind"] == "GAP" else ""
+    point = timing_point(decode(ReadTask, task), decode(CompletionReserve, option["completion_reserve"]),
+        batch, quote, event.get("physical_paid_observation"), event["timing_context"],
+        kind, gap_query_chars=len(gap_query))
+    if point is None:
+        return None
+    session = attempt.session_id
+    if session.startswith("study:"):
+        _, _, dataset, _, conversation = session.split(":", 4)
+        session = f"{dataset}:{conversation}"
+    scope, work = point
+    return {"scope": scope, "work": work, "session_id": session, "remaining_ms": remaining_ms}
 
 
 def observed_choice_trace(store, event, attempt, task, candidate, prefix_control):
@@ -308,6 +334,9 @@ def audit_directory(directory):
                             if attempt.stage == "COMMITTED" else failures.get(attempt.attempt_id))
                 option = event if required else event["option_diagnostics"].get(key, {})
                 observed_remaining(row, event, attempt, terminal, observations, option)
+                if attempt.stage == "COMMITTED":
+                    row["timing_observation"] = timing_observation(
+                        event, attempt, task, candidate, option, row["actual"].get("latency_ms"))
                 continue
             prediction, reason = selected_prediction(event)
             if reason:
@@ -428,6 +457,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", action="append", required=True, help="Saved study/workflow root; discovers state/events.jsonl")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--timing-calibration", action="store_true",
+                        help="Export completion timing observations from dedicated calibration sessions")
     args = parser.parse_args(argv)
     directories = sorted({path.parent.parent for root in args.root for path in Path(root).resolve().rglob("state/events.jsonl")})
     rows, sources = [], []
@@ -440,6 +471,14 @@ def main(argv=None):
     (destination/"predictions.jsonl").write_text("".join(json.dumps(to_jsonable(row), ensure_ascii=False, allow_nan=False)+"\n" for row in rows))
     remaining = [row for row in rows if row.get("prediction_scope") == "fixed_bounded_rollout"]
     mandatory = [row for row in rows if row.get("prediction_scope") == "mandatory_scope_reservation"]
+    if args.timing_calibration:
+        timing = defaultdict(list)
+        for row in (*remaining, *mandatory):
+            if sample := row.get("timing_observation"):
+                timing[sample["scope"]].append({"observation_id": row["observation_id"],
+                    **{key: sample[key] for key in ("work", "session_id", "remaining_ms")}})
+        (destination/"completion-timing.json").write_text(json.dumps(
+            {"source_directories": sources, "observations": timing}, ensure_ascii=False, allow_nan=False)+"\n")
     body_reuse = {(row["generation_dir"], row["attempt_id"]): trace["read_answer_body_reuse"]
                   for row in rows if (trace := row.get("trajectory")) and "read_answer_body_reuse" in trace}.values()
     summary = {"format": "contextkv_rolling_prediction_error_audit_v1", "source_directories": sources,
@@ -454,8 +493,10 @@ def main(argv=None):
             **{key: sum(row[key] for row in body_reuse) for key in ("matching_body_tokens",
                 "device_hit_body_tokens", "host_loaded_body_tokens", "prefilled_body_tokens")},
             "scope": "unique matching source-body positions per answer and native receipt tier, without owner attribution"},
-        "delivered_latency_reserve_underestimated": sum(row.get("latency_reserve_underestimated") is True for row in remaining),
-        "delivered_latency_reserve_checked": sum("latency_reserve_underestimated" in row for row in remaining),
+        "delivered_latency_reserve_underestimated": sum(row.get("latency_reserve_underestimated") is True
+            for row in (*remaining, *mandatory)),
+        "delivered_latency_reserve_checked": sum("latency_reserve_underestimated" in row
+            for row in (*remaining, *mandatory)),
         "error_sign": "prediction minus actual",
         "physical_unit": "GiB milliseconds", "physical_scope": "whole declared device/process envelope, not marginal or shared",
         "heldout_rule": "exclude exact observation IDs in declared calibration assets; missing asset proof is retained in overlap_check_basis",

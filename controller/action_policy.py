@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from .admission import quoted_native_work
+from .completion_timing import timing_point
 from .plan_policy import (NATIVE_COST_SCHEMA, OBSERVED_FEATURE_SCHEMA, OBSERVED_FEATURE_NAMES, CompleteCost, Decision, NextStep, NoCompletePlan, PlanEvaluation,
                           _completed_steps, plan_cost_features, plan_features)
 from .reading import step_generation_kind
@@ -38,7 +39,7 @@ def observed_quality_gain(model, kind, representation, features):
 
 
 def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, read_control=None,
-                           gap_query_chars=0, joint_options=None):
+                           gap_query_chars=0, joint_options=None, timing_context=None):
     """Price one action plus ANSWER; sunk costs constrain the budget, not its marginal value."""
     plans = tuple(plans)
     if len(plans) > policy.limits.max_plan_candidates:
@@ -56,6 +57,7 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
     quotes = {quote.candidate_id: quote for quote in native.quotes.quotes}
     native_cost = model is not None and model.cost_provenance.get("feature_schema") == NATIVE_COST_SCHEMA
     joint = joint_options is not None
+    time_limit = state.plan.budget.max_complete_ms
     unmet = answer_evidence_gaps(state) if joint else {}
     direct_prediction = None
     direct_cost = None
@@ -97,6 +99,7 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
             reason = (direct_answer_reason(state, candidate, require_complete_evidence=False)
                       if task.kind == "ANSWER" else None)
             peaks = [native.paid_cost]
+            quote = None
             if candidate is not None:
                 quote = quotes[candidate.candidate_id]
                 if (quote.input_hash != candidate.input_hash or quote.input_len != len(candidate.input_ids)
@@ -134,6 +137,12 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
             reserve = completion_reserve(state.plan, state.results, task, candidate)
             if len(state.steps)+reserve.steps > state.plan.budget.max_steps:
                 reason = "cumulative_step_budget"
+            empirical_ms = None
+            if time_limit is not None and policy.completion_timing is not None and reason is None:
+                point = timing_point(task, reserve, native.quotes, quote, native.paid_observation,
+                    timing_context, plan.semantic_kind,
+                    gap_query_chars=gap_query_chars if task.kind == "GAP" else 0)
+                empirical_ms = policy.completion_timing.reserve_ms(point)
             if model is None:
                 # This comparator uses coverage and quoted work, with no fitted quality claim.
                 complete = task.kind == "ANSWER" and not answer_evidence_gaps(state, candidate)
@@ -142,10 +151,10 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                 current_work = sum(quoted_native_work(quote)) if candidate is not None else 0
                 future_work = reserve.input_tokens-(len(candidate.input_ids) if candidate is not None else 0)
                 work = current_work+future_work+reserve.output_tokens
-                cost = native.paid_cost+CompleteCost(0, 0, 0, reserve.input_tokens, reserve.output_tokens,
+                cost = native.paid_cost+CompleteCost(empirical_ms or 0, 0, 0, reserve.input_tokens, reserve.output_tokens,
                     max(peak.gpu_peak_gib for peak in peaks), max(peak.host_peak_gib for peak in peaks))
                 reason = reason or policy._constraint(cost, state.plan.budget)
-                if state.plan.budget.max_complete_ms is not None:
+                if time_limit is not None and empirical_ms is None:
                     reason = reason or "uncalibrated_completion_latency"
                 if policy.limits.max_gpu_gib_ms is not None or policy.limits.max_host_gib_ms is not None:
                     reason = reason or "unmeasured_completion_residency"
@@ -153,7 +162,8 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                     reason or "coverage_and_quoted_work_rule")
                 evaluations.append(evaluation)
                 policy.last_option_diagnostics[key] = {"cost_source": "coverage_and_quoted_work_rule",
-                    "completion_reserve": reserve, "quoted_work_proxy": work,
+                    "completion_reserve": reserve, "quoted_work_proxy": work, "completion_latency_ms": empirical_ms,
+                    "semantic_kind": plan.semantic_kind,
                     "joint_context": delta.trace() if delta is not None else None, "reason": reason or "eligible"}
                 if reason is None:
                     action = "GAP" if task.kind == "GAP" else "CPU" if cpu else candidate.action
@@ -170,7 +180,7 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                 evaluations.append(PlanEvaluation(plan.plan_id, None, None, None, False,
                     "unmeasured_answer_representation"))
                 continue
-            cost_features = (plan_cost_features(features, native.quotes, quote if candidate is not None else None,
+            cost_features = (plan_cost_features(features, native.quotes, quote,
                              reserve, gap_query_chars=gap_query_chars if task.kind == "GAP" else 0)
                              if native_cost else features)
             predicted = model.predict_costs(cost_features)
@@ -185,11 +195,14 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                              host_peak_gib=max(cost.host_peak_gib for cost in peaks))
             margin = model.cost_provenance.get("completion_reserve_calibration", {}).get(
                 plan.semantic_kind, {}).get("latency_margin_ms")
+            latency_ms = branch.latency_ms+(margin or 0)
+            if empirical_ms is not None:
+                latency_ms = max(latency_ms, empirical_ms) if margin is not None else empirical_ms
             completion_cost = replace(branch, input_tokens=reserve.input_tokens, output_tokens=reserve.output_tokens,
-                                      latency_ms=branch.latency_ms+(margin if margin is not None else 0.0))
+                                      latency_ms=latency_ms)
             cumulative = native.paid_cost+completion_cost
             reason = reason or policy._constraint(cumulative, state.plan.budget)
-            if native_cost and state.plan.budget.max_complete_ms is not None and margin is None:
+            if native_cost and time_limit is not None and margin is None and empirical_ms is None:
                 reason = reason or "uncalibrated_completion_latency"
             if (native_cost and plan.semantic_kind == "direct_answer" and representation not in ALTERNATE_ANSWERS
                     and reason is None):
@@ -202,10 +215,12 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                 cost = replace(cost, latency_ms=cost.latency_ms+control_ms)
             objective = gain-policy._penalty(cost, state.plan.budget)
             policy.last_option_diagnostics[key] = {"plan_id": plan.plan_id, "features": features,
+                "semantic_kind": plan.semantic_kind, "empirical_completion_latency_ms": empirical_ms,
                 "cost_features": cost_features,
                 "cost_source": "observed_action_paired_run_regression", "predicted_costs": predicted,
                 "rollout_expected_cost": branch, "completion_reserve": reserve,
                 "completion_cost": completion_cost, "latency_residual_margin_ms": margin,
+                "completion_latency_ms": latency_ms if margin is not None or empirical_ms is not None else None,
                 "native_quote_role": "pre_action_cost_features" if native_cost else "actual_known_input_admission_and_audit",
                 "first_read_prefix_control": control,
                 "joint_context": delta.trace() if delta is not None else None, "reason": reason or "eligible"}

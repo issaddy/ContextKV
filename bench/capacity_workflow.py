@@ -298,6 +298,7 @@ def prepare_full_queue(args, root):
     gap_limits = full_queue_gap_limits(execution, gain,
         max_units=args.gap_max_units, max_passages=args.gap_max_passages)
     declared_compilation = deepcopy(execution.get("cache_compilation") or {})
+    completion_timing = (execution.get("plan_gain") or {}).get("completion_timing_asset")
     execution.update(cache_start="cold", state_observation=None, plan_gain=None,
                      prefix_retention={"mode": "native"}, cache_compilation={"mode": "native"},
                      dialogue_mode="contextkv")
@@ -315,6 +316,8 @@ def prepare_full_queue(args, root):
         sampling_interval_seconds=args.sampling_interval, output_budgets=read_outputs,
         output_tokens_per_fact=config["reading"]["output_tokens_per_fact"],
         prefix_directory=True, gap_limits=gap_limits, read_choices=2)
+    if completion_timing is not None:
+        rolling_settings["completion_timing_asset"] = str(Path(completion_timing).resolve())
     gain_settings = dict(rolling_settings, gain_asset=str(gain_path)) if needs_gain else None
     rule_settings = dict(rolling_settings, action_policy="rule")
     value_policy = dict(mode="value", model_path=str(Path(args.value_model).resolve()),
@@ -419,7 +422,9 @@ def prepare_full_queue(args, root):
         source_cohorts=snapshot(args.cohorts) if args.cohorts is not None else None,
         reader_profile_id=profile, reader_run=snapshot(run_path), resource_scope=scope,
         assets={"gain": snapshot(gain_path) if needs_gain else None,
-                "value": snapshot(args.value_model) if needs_value else None},
+                "value": snapshot(args.value_model) if needs_value else None,
+                "completion_timing": snapshot(rolling_settings["completion_timing_asset"])
+                if completion_timing is not None else None},
         cohort=cohorts, workload_plans=workload_plans, acceptance=acceptance, replicate_id=args.replicate_id,
         experiment_cells={**MAIN_COMPILATION_CELLS, **JOINT_CONTEXT_CELLS},
         experiment_design="E1-E4 fixed/gain B x Native/ContextPilot; E5 finite representation; E6 demand retention; c1 and c4",

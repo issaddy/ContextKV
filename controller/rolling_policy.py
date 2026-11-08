@@ -13,6 +13,7 @@ import time
 
 from .claim_graph import ClaimGraph
 from .context_budget import completion_reserve
+from .completion_timing import timing_point
 from .context_schema import EvidencePool, ReadResult, ReadTask, ReadingOutcome, StepRecord
 from .plan_gain_protocol import input_protocol
 from .plan_policy import (CompleteCost, NoCompletePlan, PlanCandidate, PlanPolicy, PlanStep,
@@ -172,13 +173,14 @@ class RollingPlanRuntime:
     def __init__(self, gain_model, native, *, reader_checkpoint, reader_profile_id,
                  output_budgets, limits=None, replan=None, output_tokens_per_fact=64,
                  mode="whole_plan", observation_path=None, gap_retriever_identity=None, gap_limits=None,
-                 joint_context=False, read_choices=1):
+                 joint_context=False, read_choices=1, completion_timing=None):
         from .plan_policy import PolicyLimits
         if joint_context and mode != "observed_actions":
             raise ValueError("joint context requires rolling observed actions")
         self.read_choices = 2 if joint_context else read_choices
         limits = limits or PolicyLimits(max_plan_candidates=3+self.read_choices)
-        self.policy = PlanPolicy(gain_model, limits=limits, rule_baseline=joint_context)
+        self.policy = PlanPolicy(gain_model, limits=limits, rule_baseline=joint_context,
+                                 completion_timing=completion_timing)
         if gain_model is not None and (reader_checkpoint, reader_profile_id) != (
                 gain_model.reader_checkpoint, gain_model.reader_profile_id):
             raise ValueError("rolling policy gain asset does not bind the configured reader/profile")
@@ -544,8 +546,10 @@ class RollingPlanRuntime:
         decisions = []
         from .execution import reading_tokens_spent
         prefix_observer = executor.observe_prefix
-        demand_retention = (self.joint_context and
-                            getattr(prefix_observer, "settings", {}).get("mode") == "demand")
+        retention_mode = getattr(prefix_observer, "settings", {}).get("mode", "native")
+        model = self.policy.gain_model
+        timing_context = (self.reader_profile_id, model.asset_id if model is not None else "rule", retention_mode)
+        demand_retention = self.joint_context and retention_mode == "demand"
         while True:
             selection_started = time.monotonic()
             spent = reading_tokens_spent(state.steps, auxiliary_usage, state.auxiliary_usage)
@@ -605,8 +609,18 @@ class RollingPlanRuntime:
                         if candidate is not None and not candidate.feasible:
                             reasons.append("model_window")
                             continue
+                        key = candidate.candidate_id if candidate is not None else step.task.step_id
+                        quote = quotes[key] if candidate is not None else None
                         reserve = completion_reserve(plan, state.results, step.task, candidate)
-                        reserved = CompleteCost(0, 0, 0, reserve.input_tokens, reserve.output_tokens)
+                        latency_ms = None
+                        if plan.budget.max_complete_ms is not None and self.policy.completion_timing is not None:
+                            point = timing_point(step.task, reserve, native.quotes, quote, native.paid_observation,
+                                                 timing_context, "mandatory_coverage")
+                            latency_ms = self.policy.completion_timing.reserve_ms(point)
+                        if plan.budget.max_complete_ms is not None and latency_ms is None:
+                            reasons.append("uncalibrated_completion_latency")
+                            continue
+                        reserved = CompleteCost(latency_ms or 0, 0, 0, reserve.input_tokens, reserve.output_tokens)
                         reason = self.policy._constraint(native.paid_cost+reserved, plan.budget)
                         if len(state.steps)+reserve.steps > plan.budget.max_steps:
                             reason = "cumulative_step_budget"
@@ -615,15 +629,14 @@ class RollingPlanRuntime:
                         if reason:
                             reasons.append(reason)
                             continue
-                        key = candidate.candidate_id if candidate is not None else step.task.step_id
                         option = options.get(key)
-                        work = quoted_native_work(quotes[key]) if candidate is not None else (0, 0)
+                        work = quoted_native_work(quote) if quote is not None else (0, 0)
                         rank = (*work, len(candidate.input_ids) if candidate is not None else 0,
                                 option.uncovered_risk_tokens if option is not None else 0)
-                        choices.append((rank, step.task, candidate, reserve, option))
+                        choices.append((rank, step.task, candidate, reserve, latency_ms, option))
                 if not choices:
                     raise NoCompletePlan("required source-scope step exceeds "+", ".join(dict.fromkeys(reasons)))
-                rank, required_step, candidate, reserve, option = min(choices, key=lambda choice: choice[0])
+                rank, required_step, candidate, reserve, latency_ms, option = min(choices, key=lambda choice: choice[0])
                 self._observe_state(attempt_id, executor, state, snapshot, native, None, True)
                 selected = ({"candidate_id": candidate.candidate_id, "generation_kind": candidate.generation_kind,
                     "representation": candidate.representation, "action": candidate.action,
@@ -631,7 +644,8 @@ class RollingPlanRuntime:
                 audit = {"decision_mode": "mandatory_coverage", "step_id": required_step.step_id,
                     "task": required_step, "quote": native.quotes, "paid_cost": native.paid_cost,
                     "selected_candidate": selected, "selection_rank": rank,
-                    "completion_reserve": reserve,
+                    "completion_reserve": reserve, "completion_latency_ms": latency_ms,
+                    "timing_context": timing_context,
                     "joint_context": option.trace() if option is not None else None,
                     "physical_paid_observation": native.paid_observation}
                 decisions.append(audit)
@@ -679,7 +693,7 @@ class RollingPlanRuntime:
             try:
                 decision = (self.policy.choose_observed_actions(plans, state, native, reusable, read_control=read_control,
                                 gap_query_chars=len(gap_request.query) if gap_request is not None else 0,
-                                joint_options=options)
+                                joint_options=options, timing_context=timing_context)
                     if observed else self.policy.choose(plans, state, native, reusable))
             except NoCompletePlan:
                 events.emit("rolling_plan_no_complete", attempt_id=attempt_id,
@@ -701,6 +715,7 @@ class RollingPlanRuntime:
                 raise
             audit = {"observed_at_ms": (time.monotonic()-arrived)*1000,
                 "decision_mode": self.mode, "required_scope_pending": mandatory,
+                "timing_context": timing_context,
                 "gap_request": gap_request,
                 "state_steps": tuple(record.step_id for record in state.steps),
                 "paid_cost": native.paid_cost, "evaluations": self.policy.last_evaluations,
