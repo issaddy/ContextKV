@@ -190,12 +190,13 @@ def summarize_run(payload, *, occupancy=(), transfers=(), quality=(), ttft_slo=N
         if row["status"] == "success" and "visible_evidence_manifest" in result:
             citations["observed_turns"] += 1
             cited = parse_citations(row["assistant_text"])
-            visible = {span["reference_id"] for span in result["visible_evidence_manifest"]}
-            if cited - visible:
+            available = {span["reference_id"] for span in (*result["visible_evidence_manifest"],
+                                                           *result.get("conclusion_source_manifest", ()))}
+            if cited - available:
                 citations["unknown_reference_task_ids"].append(row["task_id"])
             if "citation_scope" in result:
                 citations["scope_observed_turns"] += 1
-                if (cited & visible) - set(result["citation_scope"]):
+                if (cited & available) - set(result["citation_scope"]):
                     citations["out_of_scope_task_ids"].append(row["task_id"])
         if result.get("control_ms") is not None:
             controls.append(result["control_ms"])

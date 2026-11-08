@@ -70,6 +70,6 @@ source-first ANSWER 的实际顺序为系统、稳定原文、工作历史、当
 
 ### 当前比较
 
-评分从实际最终可见原文和结论来源闭包投影，完整原文独立供审计。LlamaIndex 的投影还包括实际中间 compact/refine 输入所见的原文片段。[评分投影](../bench/quality.py)
+问答响应分别返回直接可见原文的 `visible_evidence_manifest` 与结论引用的 `conclusion_source_manifest`。后者将引用 ID 绑定到原文 URI、版本和坐标。评分使用相同的来源闭包，完整原文独立供审计。LlamaIndex 的投影还包括实际中间 compact/refine 输入所见的原文片段。[评分投影](../bench/quality.py)
 
 `bench.capacity_workflow --full-queue` 声明 350 题、77 会话。c1/c4 分别执行 E1–E4 的固定／收益 B × Native／ContextPilot 四格、E5 的有限表示及 E6 的需求保留。每格使用自己的实际 P3 历史、共同到达序列及完整费用口径。外部参照 `LlamaIndex_native` 使用上游历史凝练、混合检索、发布版重排与 compact/refine。`S3_contextpilot_no_fact_reuse` 关闭 E4 的跨轮事实复用。[矩阵](../configs/study_matrix.yaml) · [运行入口](study/final_runbook.md)

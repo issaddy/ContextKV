@@ -55,6 +55,33 @@ def make_evidence(text: str, document_id: str, *, corpus_id: str = "demo",
                          dependencies=dependencies, anchors=anchors)
 
 
+def conclusion_source_manifest(outcome, reference_map):
+    """Original coordinates represented through conclusions or prior synthesis."""
+    if outcome is None:
+        return ()
+    if outcome.plan.reading_mode == "llamaindex":
+        from .serialization import to_jsonable
+
+        sources = []
+        for step in outcome.steps:
+            if step.task.kind not in {"LLAMAINDEX_COMPACT", "LLAMAINDEX_REFINE"}:
+                continue
+            view = step.metrics["source_view"]
+            proof = {"step_id": step.step_id, "generation_kind": step.task.kind, "input_hash": view["input_hash"]}
+            sources.extend({"key": EvidenceKey(**span["key"]), "reference_id": span["reference_id"],
+                "source_start": span["source_start"], "source_end": span["source_end"], "execution_proof": proof}
+                for span in to_jsonable(view.get("evidence_spans", ())))
+        return tuple(sources)
+    if outcome.answer_representation == "raw":
+        return ()
+    by_key = {key: reference for reference, key in reference_map}
+    ranges = dict.fromkeys((span.source_key, span.start, span.end)
+                           for point in outcome.plan.answer_plan.points if point.claim_ids
+                           for span in point.source_spans)
+    return tuple({"key": key, "reference_id": by_key[key], "source_start": start, "source_end": end}
+                 for key, start, end in ranges)
+
+
 def validate_block(block: EvidenceBlock) -> None:
     if content_hash(block.text) != block.key.content_sha256:
         raise EvidenceError("evidence content hash mismatch")

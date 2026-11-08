@@ -17,6 +17,7 @@ from .candidates import CandidatePolicy
 from .admission import quote_observation, quote_realization
 from .cost_model import CostModel
 from .engine_client import Engine, EngineError, EngineInfo, PrepareAck, UnknownOutcomeError
+from .evidence import conclusion_source_manifest
 from .events import EventLog
 from .planner import PlannerKnobs, choose_plan
 from .schema import (ClientTiming, CompletionReceipt, CostEstimate, EvidenceBlock, EvidenceKey,
@@ -98,6 +99,7 @@ class TurnResponse:
     online_token_budget_verified: bool | None = None
     answer_phase_window: dict | None = None
     answer_native_quote_work: dict | None = None
+    conclusion_source_manifest: tuple[dict, ...] = ()
 
 
 class Controller:
@@ -310,6 +312,11 @@ class Controller:
         token_limit = attempt.context_plan.budget.max_total_tokens if attempt.context_plan else None
         budget_verified = (total_input+total_output <= token_limit
             if token_limit is not None and total_input is not None and total_output is not None else None)
+        sources = conclusion_source_manifest(attempt.reading_outcome, plan.candidate.reference_map)
+        if sources:
+            urls = {block.key: block.source_uri for block in (
+                *attempt.reading_outcome.plan.selected_set.source_blocks, *attempt.evidence)}
+            sources = tuple({**row, "source_uri": urls.get(row["key"])} for row in sources)
         return TurnResponse(attempt.session_id, attempt.request_id, attempt.attempt_id, result.text,
                             plan.candidate.action, plan.reason, epoch.epoch_no, attempt.expected_version + 1,
                             result.output_ids, len(plan.candidate.input_ids), len(result.output_ids),
@@ -342,7 +349,8 @@ class Controller:
                             auxiliary_usage=attempt.auxiliary_usage,
                             online_token_budget_limit=token_limit, online_token_budget_verified=budget_verified,
                             answer_phase_window=answer_phase_window,
-                            answer_native_quote_work=quote_realization(attempt.answer_quote, receipt))
+                            answer_native_quote_work=quote_realization(attempt.answer_quote, receipt),
+                            conclusion_source_manifest=sources)
 
     async def _retrieve_with_cost(self, attempt_id, phase, provider, *args):
         started = time.monotonic()
@@ -829,7 +837,7 @@ class Controller:
                                         for span in unit.source_spans}
                     blocks = {block.key: block for block in (*planning_snap.archive, *evidence,
                         *selected_context_plan.selected_set.source_blocks)}
-                    evidence = tuple(blocks[key] for key in sorted(selected_sources))
+                    evidence = tuple(blocks[key] for key in sorted(selected_sources | plan.candidate.required_blocks))
                     points = tuple(replace(point, citation_ids=tuple(ref for ref, key in plan.candidate.reference_map
                         if key in plan.candidate.required_blocks
                         and any(span.source_key == key for span in point.source_spans)))

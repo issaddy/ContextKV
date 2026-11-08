@@ -193,8 +193,10 @@ def evaluation_contexts(turn, manifests, evidence, citation_scope):
 def answer_evaluation_view(turn: OnlineTurn, *, visible_evidence_manifest, audit_evidence,
                            reading_outcome=None, reference_map=(), citation_scope=None) -> dict:
     """Project actual answer inputs and conclusion source leaves for offline scoring."""
+    from controller.evidence import conclusion_source_manifest
+
     view = {}
-    view["conclusion_source_manifest"] = []
+    view["conclusion_source_manifest"] = _jsonable(conclusion_source_manifest(reading_outcome, reference_map))
     view["reading_conclusions"] = None
     if reading_outcome is not None and reading_outcome.plan.reading_mode == "llamaindex":
         prior_outputs = []
@@ -204,11 +206,6 @@ def answer_evaluation_view(turn: OnlineTurn, *, visible_evidence_manifest, audit
             observed = step.metrics.get("source_view", {})
             proof = {"step_id": step.step_id, "generation_kind": step.task.kind,
                      "input_hash": observed["input_hash"]}
-            view["conclusion_source_manifest"].extend(
-                {"key": span["key"], "reference_id": span["reference_id"],
-                 "source_start": span["source_start"], "source_end": span["source_end"],
-                 "execution_proof": proof}
-                for span in _jsonable(observed.get("evidence_spans", ())))
             if step.result is not None:
                 prior_outputs.append({**proof, "raw_output": step.result.raw_output})
         view["reading_conclusions"] = {
@@ -220,12 +217,6 @@ def answer_evaluation_view(turn: OnlineTurn, *, visible_evidence_manifest, audit
         conclusions = graph.conclusion_table(plan, reference_map)
         conclusions["open_needs"] = reading_outcome.open_needs
         view["reading_conclusions"] = _jsonable(conclusions)
-        by_key = {key: reference for reference, key in reference_map}
-        sources = dict.fromkeys(span for point in plan.points for identity in point.claim_ids
-                                for span in graph.source_spans(identity))
-        view["conclusion_source_manifest"] = [
-            {"key": _jsonable(span.source_key), "reference_id": by_key[span.source_key],
-             "source_start": span.start, "source_end": span.end} for span in sources]
     view["evaluation_contexts"] = evaluation_contexts(turn,
         (*_jsonable(visible_evidence_manifest), *view["conclusion_source_manifest"]),
         _jsonable(audit_evidence), citation_scope)
