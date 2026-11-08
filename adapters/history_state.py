@@ -511,29 +511,36 @@ def budget_task_catalogue(tokenizer, query, catalogue, prior_tasks, max_input_to
         words = set(re.findall(r"\w+", " ".join([family, *[str(row.get("title", "")) for row in rows],
             *[str(row["version"]) for row in rows]]).casefold()))
         return (family not in active, -len(words & terms), family)
-    def cost(value):
-        versions, families = task_catalogue_candidates(value)
-        total = 0
-        for name, identities in (("document_families", families), ("version_ids", versions)):
-            for identity in identities:
-                rows = (value[identity] if name == "document_families" else
-                    [{"family": family, **row} for family, rows in value.items() for row in rows if row["version"] == identity])
-                text = json.dumps({"kind": name, "identity": identity, "sources": rows}, ensure_ascii=False)
-                total += len(tokenizer(text, add_special_tokens=False)["input_ids"]) + 1
-        return total
-    selected, visible_versions = {}, set()
+    def cost(kind, identity, rows):
+        text = json.dumps({"kind": kind, "identity": identity, "sources": rows}, ensure_ascii=False)
+        return len(tokenizer(text, add_special_tokens=False)["input_ids"]) + 1
+
+    selected, version_rows, version_costs = {}, {}, {}
+    spent = 0
     for family, rows in sorted(catalogue.items(), key=priority):
-        unique = list({json.dumps(row, sort_keys=True, ensure_ascii=False): row for row in rows}.values())
-        if version_alias_only and not versioned_catalogue_family(unique):
+        versioned = versioned_catalogue_family(rows)
+        if version_alias_only and not versioned:
             # The teacher sees the version alias, while only versioned families
             # contribute their title and source metadata to its messages.
-            unique = [row for row in unique if row["version"] not in visible_versions]
-            if not unique:
+            rows = [row for row in rows if row["version"] not in version_rows]
+            if not rows:
                 continue
-        proposed = {**selected, family: unique}
-        if cost(proposed) <= budget:
-            selected = proposed
-            visible_versions.update(row["version"] for row in unique)
+        unique = list({json.dumps(row, sort_keys=True, ensure_ascii=False): row for row in rows}.values())
+        proposed = {}
+        for row in unique:
+            version = row["version"]
+            if version not in proposed:
+                proposed[version] = list(version_rows.get(version, ()))
+            proposed[version].append({"family": family, **row})
+        proposed_costs = {version: cost("version_ids", version, sources) for version, sources in proposed.items()}
+        added = sum(tokens-version_costs.get(version, 0) for version, tokens in proposed_costs.items())
+        if versioned:
+            added += cost("document_families", family, unique)
+        if spent+added <= budget:
+            selected[family] = unique
+            version_rows.update(proposed)
+            version_costs.update(proposed_costs)
+            spent += added
     return selected
 
 

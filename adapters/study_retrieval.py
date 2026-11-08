@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from dataclasses import replace
 import threading
 import time
-from pathlib import Path
 
 from adapters.corpus import CorpusIndex
 from adapters.evidence_pool import PoolProfile, SourceDirectory, merge_retrieved_units
@@ -807,8 +806,7 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
                 helper.model.name, helper.model.revision, max_input_tokens=24576,
                 max_new_tokens=task_config.get("max_output_tokens", 4096)),
                 tokenizer=template.tokenizer)
-            task_model = TeacherTaskModel(teacher_client, record_path=task_config.get("teacher_record_path",
-                str(Path(config.get("study", {}).get("output_dir", "runs/study"))/"task_teacher_calls.jsonl")))
+            task_model = TeacherTaskModel(teacher_client, record_path=task_config.get("teacher_record_path"))
         else:
             from training.task_model import TaskModel
             task_model = TaskModel(task_config["asset"], base_path=task_config.get("base_path"),
