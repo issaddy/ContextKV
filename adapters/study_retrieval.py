@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 import threading
 import time
 
@@ -245,13 +246,29 @@ class StudyEvidenceProvider:
     @contextmanager
     def _measure_auxiliary_usage(self):
         with self._lock:
-            before = {id(model): dict(model.usage) for _, model in self._usage_sources()
-                      if hasattr(model, "usage")}
+            before = self._usage_snapshot()
             try:
                 yield before
             except BaseException:
                 record_provider_usage(self._auxiliary_usage(before))
                 raise
+
+    def _usage_snapshot(self):
+        return {id(model): dict(model.usage) for _, model in self._usage_sources() if hasattr(model, "usage")}
+
+    def _post_task(self, before, send, url, **kwargs):
+        paused = self._usage_snapshot()
+        self._lock.release()
+        try:
+            return send(url, **kwargs)
+        finally:
+            self._lock.acquire()
+            # Exclude shared model usage accrued by other turns during the HTTP wait.
+            for identity, usage in self._usage_snapshot().items():
+                baseline = before.get(identity, {})
+                previous = paused.get(identity, {})
+                before[identity] = {name: baseline.get(name, 0)+value-previous.get(name, 0)
+                                    for name, value in usage.items()}
 
     def _auxiliary_usage(self, before):
         grouped = {}
@@ -279,7 +296,6 @@ class StudyEvidenceProvider:
                   supplied_coverage_scope="all_supplied_documents"):
         started = time.perf_counter()
         with self._measure_auxiliary_usage() as usage_baseline:
-            usage_before = dict(getattr(self.support_backend, "usage", {}))
             if supplied_blocks is not None:
                 if supplied_metadata is not None:
                     self.directory.corpus_index.source_metadata.update(supplied_metadata)
@@ -303,7 +319,16 @@ class StudyEvidenceProvider:
                     OnlineMessage("user", row.user_text), OnlineMessage("assistant", row.assistant_text)))
                 turn = OnlineTurn(snapshot.session_id, request_id, len(snapshot.raw_history)+1,
                     self.serving.corpus_id, query, history, (), "P3")
-                interpretation = self.directory.task_interpreter.interpret_result(turn, memory)
+                interpreter = self.directory.task_interpreter
+                if self.teacher_client is None:
+                    interpretation = interpreter.interpret_result(turn, memory)
+                else:
+                    complete = partial(self.teacher_client.complete, post=partial(self._post_task, usage_baseline))
+                    predict = partial(self.task_model.predict_result, complete=complete)
+                    interpretation = interpreter.interpret_result(turn, memory, predict_result=predict)
+                    if supplied_metadata is not None:
+                        self.directory.corpus_index.source_metadata.update(supplied_metadata)
+                        self.directory.add_archive(supplied_blocks)
                 state = interpretation.state
                 auxiliary = (("task", interpretation.metrics["task_model_ms"]),)
             if supplied_blocks is not None:
@@ -510,8 +535,6 @@ class StudyEvidenceProvider:
                     "candidate_set_ids": [selected.set_id for selected in material_candidates],
                     "selected_set_ids": [selected.set_id for selected in evidence_sets]},
                 "oversized_support_inputs": to_jsonable(getattr(self.support_backend, "oversized_inputs", ())),
-                "support_model_usage": {name: value-usage_before.get(name, 0)
-                    for name, value in getattr(self.support_backend, "usage", {}).items()},
                 "task_metrics": interpretation.metrics if interpretation is not None else None,
                 "auxiliary_usage": self._auxiliary_usage(usage_baseline),
                 "context_plans": to_jsonable(plans), "planning_ms": (time.perf_counter()-started)*1000}

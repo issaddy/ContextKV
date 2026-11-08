@@ -81,7 +81,7 @@ class OpenAICompletionClient:
                 "chat_template": self.tokenizer.chat_template, "http_calls": self.calls,
                 "input_policy": "count complete messages; no truncation"}
 
-    def complete(self, messages, *, response_format=None, max_new_tokens=None, chat_template_kwargs=None):
+    def complete(self, messages, *, response_format=None, max_new_tokens=None, chat_template_kwargs=None, post=None):
         started = time.perf_counter()
         output_budget = self.config.max_new_tokens if max_new_tokens is None else max_new_tokens
         template_kwargs = self.config.chat_template_kwargs if chat_template_kwargs is None else chat_template_kwargs
@@ -102,10 +102,11 @@ class OpenAICompletionClient:
             body["response_format"] = response_format
         base = self.config.base_url.rstrip("/")
         url = base + ("/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
+        send = self.client.post
         response, usage = None, None
         with auxiliary_call(self.config.model) as receipt:
             try:
-                response = self.client.post(url, json=body)
+                response = send(url, json=body) if post is None else post(send, url, json=body)
                 raw = response.json()
                 usage = raw.get("usage")
                 if usage is not None:

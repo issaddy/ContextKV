@@ -302,7 +302,7 @@ class TaskInterpreter:
     def interpret(self, turn: OnlineTurn, memory: RetrievalState) -> TaskState:
         return self.interpret_result(turn, memory).state
 
-    def interpret_result(self, turn: OnlineTurn, memory: RetrievalState) -> TaskInterpretation:
+    def interpret_result(self, turn: OnlineTurn, memory: RetrievalState, *, predict_result=None) -> TaskInterpretation:
         started = time.perf_counter()
         windows = self.history_index.select(turn.query, memory, current_turn_id=turn.turn)
         source = memory.source_index
@@ -315,7 +315,8 @@ class TaskInterpreter:
             elif hasattr(source, "observed_source_scope"):
                 view.observed_source_scope = source.observed_source_scope
             memory = replace(memory, source_index=view)
-        predict_result = getattr(self.model, "predict_result", None)
+        if predict_result is None:
+            predict_result = getattr(self.model, "predict_result", None)
         result = (predict_result(turn, windows, memory) if predict_result is not None else
                   TaskModelResult(self.model.predict(turn, windows, memory)))
         prediction = result.prediction
@@ -758,7 +759,7 @@ class TeacherTaskModel:
     def predict(self, turn, windows, memory):
         return self.predict_result(turn, windows, memory).prediction
 
-    def predict_result(self, turn, windows, memory):
+    def predict_result(self, turn, windows, memory, *, complete=None):
         body, ref_windows, latest, aliases, contracts = budget_teacher_input(self.client, turn, windows, memory)
         read_aliases = {f"r{index}": contract for index, contract in enumerate(contracts)}
         task_alias, condition_alias, need_alias, version_alias, family_alias = aliases
@@ -866,7 +867,8 @@ class TeacherTaskModel:
                                  "additionalProperties": False})
         schema = {"type": "object", "anyOf": branches, "$defs": definitions}
         messages = teacher_messages(body)
-        completion = self.client.complete(messages, response_format={"type": "json_schema", "json_schema": {
+        complete = self.client.complete if complete is None else complete
+        completion = complete(messages, response_format={"type": "json_schema", "json_schema": {
                 "name": "contextkv_task_spans", "strict": True, "schema": schema}})
         if self.record_path is not None:
             self.record_path.parent.mkdir(parents=True, exist_ok=True)
