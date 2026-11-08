@@ -74,10 +74,13 @@ def _reduction_tasks(plan, state):
     completed.update(result.reduction.step_id for result in state.results if result.reduction is not None)
     shared_needs = {need_id for task in plan.steps if task.kind == "READ"
                     for scope in task.shared_numeric_scopes for need_id in scope.need_ids}
+    unresolved = {gap.need_id for gap in state.open_needs}
     planned_ids = {task.step_id for task in plan.steps}
     tasks = []
     for need in plan.task_state.needs:
         if not summarize and need.operation not in {"enumerate", "compare", "count", "sum", "group", "infer"}:
+            continue
+        if not summarize and need.operation in {"count", "sum", "group"} and need.need_id in unresolved:
             continue
         shared_numeric = need.need_id in shared_needs
         if shared_numeric:

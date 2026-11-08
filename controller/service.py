@@ -832,9 +832,15 @@ class Controller:
                         answer_phase_started = time.monotonic()
                         candidates = unique_answer_inputs(compile_candidates(
                             planning_snap, (selected_context_plan,), reading_outcome))
-                        valid = tuple(candidate for candidate in candidates if candidate.feasible)
+                        reads = tuple(task for task in selected_context_plan.steps if task.kind == "READ")
+                        typed = selected_context_plan.reading_mode == "typed_reduce" and (
+                            not reads or any(task.operation != "summarize" for task in reads))
+                        checked = tuple((candidate, direct_answer_reason(reading_outcome, candidate,
+                            require_complete_evidence=False) if typed else None)
+                            for candidate in candidates if candidate.feasible)
+                        valid = tuple(candidate for candidate, reason in checked if reason is None)
                         if not valid:
-                            raise ContextOverflow("ANSWER plan exceeds the context allocation")
+                            raise ContextOverflow(checked[0][1] if checked else "ANSWER plan exceeds the context allocation")
                         quotes = await self.engine.quote_batch(valid, self.template.fingerprint)
                         if quotes.engine_restart_id != info.engine_restart_id:
                             raise EngineError("UNSTABLE_RESTART")

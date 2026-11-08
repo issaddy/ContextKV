@@ -147,7 +147,8 @@ NUMERIC_POPULATION_SYSTEM = (
     "population. For a requested quantity, the entity, magnitude and unit must be linked in the "
     "same cited source. Do not combine an entity from one source with a number or unit from another. "
     "Omit unrelated background numbers. Return empty facts, or empty claims for a regular numeric "
-    "READ, when this window contains no qualifying row."
+    "READ, when this window contains no qualifying row. Report an open_need when missing evidence "
+    "prevents deciding eligibility or a required quantity."
 )
 SHARED_NUMERIC_POPULATION_EXAMPLE = (
     ' Example only, unrelated to the current sources. g0 groups n0 (count Shipment records) '
@@ -824,6 +825,8 @@ def numeric_reduction_inputs(plan, need_id, results):
 
 def advance_read_plan(plan, results, budget=None):
     """READ completion unlocks one typed reduction per requested operation."""
+    from .context_budget import need_read_complete, reduction_output_budget
+
     budget = budget or plan.budget
     completed = {result.step_id for result in results}
     completed.update(result.reduction.step_id for result in results if result.reduction is not None)
@@ -833,9 +836,11 @@ def advance_read_plan(plan, results, budget=None):
         return pending
     if plan.reading_mode == "coverage_only":
         return ()
+    unresolved = {gap.need_id for gap in unresolved_needs(results)}
     read_ids, numeric_need_ids = _numeric_read_views(plan)
     selectors = tuple(selector for need_id in numeric_need_ids
-                      if (selector := numeric_selection_task(plan, results, need_id=need_id)) is not None)
+                      if need_id not in unresolved
+                      and (selector := numeric_selection_task(plan, results, need_id=need_id)) is not None)
     if selectors:
         return selectors
     summarize = bool(read_ids) and all(step.operation == "summarize"
@@ -844,17 +849,20 @@ def advance_read_plan(plan, results, budget=None):
     for need in plan.task_state.needs:
         if not summarize and need.operation not in {"enumerate", "compare", "count", "sum", "group", "infer"}:
             continue
+        numeric = not summarize and need.operation in {"count", "sum", "group"}
+        if numeric and need.need_id in unresolved:
+            continue
         selector_id = numeric_selection_step_id(plan, need.need_id)
         step_id = f"reduce:{need.need_id}:{selector_id if selector_id is not None else len(read_ids)}"
         if step_id in completed:
             continue
         selected_numeric = selector_id is not None and selector_id in completed
         inputs = numeric_reduction_inputs(plan, need.need_id, results)
-        empty_group = need.operation == "group" and bool(read_ids) and set(read_ids) <= completed
-        if not inputs and not selected_numeric and not empty_group:
+        empty_numeric = (not inputs and selector_id is None and numeric
+                         and need_read_complete(plan, results, need))
+        if not inputs and not selected_numeric and not empty_numeric:
             continue
         operation = "summarize" if summarize else "union" if need.operation == "enumerate" else need.operation
-        from .context_budget import reduction_output_budget
         output_budget = reduction_output_budget(plan, need.need_id)
         task = ReadTask(step_id, "REDUCE", (need.need_id,),
                         input_claim_ids=tuple(claim.claim_id for claim in inputs),

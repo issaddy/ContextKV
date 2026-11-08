@@ -318,6 +318,11 @@ def need_read_results(plan, results, need_id):
     return tuple(result for result in results if result.step_id in reads)
 
 
+def need_read_complete(plan, results, need):
+    required = required_source_units(plan, need)
+    return bool(required) and completed_source_coverage(plan, need_read_results(plan, results, need.need_id), required)
+
+
 def incomplete_full_coverage(plan, results):
     return any(not completed_source_coverage(plan, need_read_results(plan, results, need.need_id),
                                               required_source_units(plan, need))
@@ -343,6 +348,7 @@ def answer_evidence_gaps(state, candidate=None, *, require_complete_evidence=Tru
     plan = state.plan
     points = {point.need_id: point for point in plan.answer_plan.points}
     results = tuple(state.results)
+    open_need_ids = {gap.need_id for gap in state.open_needs}
     raw = candidate is not None and candidate.representation == "raw"
     gaps = {}
     for need in plan.task_state.needs:
@@ -357,6 +363,9 @@ def answer_evidence_gaps(state, candidate=None, *, require_complete_evidence=Tru
         if numeric:
             if not facts_complete or raw:
                 gaps[need.need_id] = "numeric_fact_scope_incomplete"
+                continue
+            if need.need_id in open_need_ids:
+                gaps[need.need_id] = "numeric_fields_incomplete"
                 continue
             selector_id = numeric_selection_step_id(plan, need.need_id)
             selection = next((result.reduction for result in reversed(results) if result.reduction is not None
@@ -378,7 +387,7 @@ def answer_evidence_gaps(state, candidate=None, *, require_complete_evidence=Tru
         reduced = any(result.reduction is not None and need.need_id in result.reduction.need_ids
                       and result.reduction.operation != "numeric_select" for result in results)
         conclusion_complete = (point is not None and bool(point.claim_ids) and (supported or reduced)
-            and not any(gap.need_id == need.need_id for gap in state.open_needs)
+            and need.need_id not in open_need_ids
             and (not full_scope or facts_complete))
         if conclusion_complete and not raw:
             continue

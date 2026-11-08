@@ -143,14 +143,17 @@ def observed_reduction_task(frozen):
         return None
     shared_needs = {need_id for task in base.steps if task.kind == "READ"
                     for scope in task.shared_numeric_scopes for need_id in scope.need_ids}
+    unresolved = {gap.need_id for gap in frozen.open_needs}
     for need in base.task_state.needs:
-        if need.need_id in shared_needs:
+        if need.need_id in shared_needs and need.need_id not in unresolved:
             selector = numeric_selection_task(base, frozen.results, frozen.claims, need_id=need.need_id)
             if selector is not None:
                 return selector
     typed = {"enumerate", "count", "sum", "group", "compare", "infer"}
     needs = sorted(base.task_state.needs, key=lambda need: need.operation not in typed)
     for need in needs:
+        if need.operation in {"count", "sum", "group"} and need.need_id in unresolved:
+            continue
         summarize = need.operation not in typed
         shared_numeric = need.need_id in shared_needs
         if shared_numeric:

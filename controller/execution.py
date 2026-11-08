@@ -34,13 +34,11 @@ def reduction_basis_ids(task, inputs, results):
 def aggregate_numeric_view(task, inputs, plan, results):
     claim = reduce_claims(task.operation, inputs,
         claim_id=f"{task.step_id}:claim:0", need_id=task.need_ids[0])
-    if inputs:
+    if inputs or task.operation not in {"count", "sum", "group"}:
         return claim
     selection = next((result.reduction for result in reversed(results) if result.reduction is not None
                       and result.reduction.operation == "numeric_select"
                       and {result.reduction.step_id, result.step_id}.intersection(task.predecessor_step_ids)), None)
-    if selection is None and task.operation != "group":
-        return claim
     need = next(need for need in plan.task_state.needs if need.need_id == task.need_ids[0])
     sources = tuple(dict.fromkeys(span for unit in required_source_units(plan, need) for span in unit.source_spans))
     return replace(claim, parent_claim_ids=selection.basis_claim_ids if selection else (), source_spans=sources)
