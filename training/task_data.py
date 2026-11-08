@@ -92,6 +92,53 @@ def build_task_data(config):
     return summary
 
 
+def prepare_study_capture(config):
+    """Prepare task-label supervision from an existing real P3 study capture."""
+    from types import SimpleNamespace
+    from adapters.corpus import CorpusIndex
+    from adapters.history_state import task_source_catalogue
+    from controller.context_schema import RetrievalState
+    from training.reader_data import history_digest
+
+    capture = config["task_capture"]
+    output = Path(capture["output_dir"]).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    records = [row for row in read_jsonl(capture["records"]) if row["status"] == "completed"]
+    teacher = {row["task_id"]: row for row in read_jsonl(capture["teacher_calls"])
+               if row["status"] == "completed"}
+    corpus = CorpusIndex.from_jsonl(capture["corpus_path"], corpus_id=capture["corpus_id"],
+                                   snapshot_id=capture["snapshot_id"])
+    source_index = SimpleNamespace(_blocks={block.key: block for block in corpus.blocks}, corpus_index=corpus)
+    catalogue = task_source_catalogue(RetrievalState(0, source_index=source_index))
+    actual, authored, members = [], [], []
+    for row in records:
+        reference = row["reference"]
+        prompt = json.loads(teacher[row["task_id"]]["messages"][-1]["content"])
+        original = {"task_id": row["task_id"], "conversation_id": row["conversation_id"],
+            "turn": row["turn"], "grounding": reference["grounding"],
+            "reference_history": reference["input"][:-1], "reference_answer": reference["targets"][0]["text"]}
+        authored.append(original)
+        actual.append({**row, "task_catalogue": catalogue, "task_reference_date": prompt["reference_date"],
+            "source_scope": reference.get("source_scope", []), "snapshot_id": capture["snapshot_id"],
+            "grounding": original["grounding"], "rollout_policy": "actual_p3_study_capture",
+            "capture_cohort_manifest_sha256": row["cohort_manifest_sha256"]})
+        members.append({"task_id": row["task_id"], "conversation_id": row["conversation_id"],
+            "turn": row["turn"], "split": row["cohort_split"],
+            "actual_history_sha256": history_digest(row["actual_history"])})
+    actual_path, authored_path, cohort_path = (output/"actual-turns.jsonl", output/"original-turns.jsonl",
+                                                output/"cohort.json")
+    write_jsonl(actual_path, actual)
+    write_jsonl(authored_path, authored)
+    cohort_path.write_text(json.dumps({"schema_version": 1, "members": members,
+        "source_capture": str(Path(capture["records"]).resolve()),
+        "source_teacher_calls": str(Path(capture["teacher_calls"]).resolve())}, ensure_ascii=False, indent=2)+"\n")
+    config = {**config, "task_cohort_labeling": {"output_dir": str(output/"labels"),
+        "cohort_manifest": str(cohort_path), "actual_turns_path": str(actual_path),
+        "original_turns_path": str(authored_path), "sources_path": capture["sources_path"],
+        "state_db": capture["state_db"], "existing_labels_path": None}}
+    return prepare_cohort_task_labels(config)
+
+
 def prepare_cohort_task_labels(config):
     """Bind registered states to actual histories, original spans and saved labels."""
     import sqlite3

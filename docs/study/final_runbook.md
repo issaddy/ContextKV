@@ -100,6 +100,7 @@ python3 -m bench.reading_mechanisms --config ACTUAL-RUN.yaml \
 ```
 
 辅助训练配置为 `configs/auxiliary_training.yaml`；BGE 资产按配置复用，标签由以下入口重新准备。
+已有真实 P3 研究队列可用 `python3 -m training.a_workflow prepare-capture --config CAPTURE.yaml --output DIR` 直接准备任务标签输入。`task_capture` 指定 `records`、`teacher_calls`、`corpus_path`、`corpus_id`、`snapshot_id`、`sources_path` 和 `state_db`；按实际采集的数据轨分别执行，再使用输出的 `task_labeling.yaml` 核验原文并生成监督。
 先准备原始任务，再采集实际生成历史、声明会话隔离的 cohort、生成教师标注配置，最后标注和训练。仅在对应任务或支持瓶颈需要辅助训练时执行：
 
 ```bash
