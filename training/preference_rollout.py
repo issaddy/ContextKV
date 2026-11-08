@@ -252,20 +252,23 @@ def build_directory(config, tokenizer):
     data_dir = Path(config.get("training", {}).get("data_dir", "runs/study/data"))
     sources = [json.loads(line) for line in (data_dir/"sources.jsonl").read_text().splitlines()]
     documents = json.loads(Path(settings.get("documents", "data/multidoc2dial/source/multidoc2dial_doc.json")).read_text())
+    dense = DenseIndex.load(settings.get("dense_index", "data/multidoc2dial/bge-m3-sections"))
     corpus_rows = []
     for source in sources:
         domain, document_id = json.loads(source["source_id"])
         corpus_rows.append({**source, "passage_id": source["source_id"],
             "document_id": source["source_id"], "provenance": [source["source_uri"]],
             "metadata": {"domain": domain, "source_document_id": document_id}})
-    records = tuple(structural_corpus(documents, corpus_rows))
+    records = tuple(row for row in structural_corpus(documents, corpus_rows)
+                    if row["passage_id"] in dense.by_id)
     if settings.get("negative_sources_path"):
+        families = {row["document_family"] for row in records}
         additional = [json.loads(line) for line in Path(settings["negative_sources_path"]).read_text().splitlines() if line]
         records += tuple({**source, "passage_id": source.get("passage_id", source["source_id"]),
-                          "document_id": source.get("document_id", source["source_id"])} for source in additional)
+                          "document_id": source.get("document_id", source["source_id"])} for source in additional
+                         if source["document_family"] in families)
     index = CorpusIndex.from_records(records, corpus_id="multidoc2dial",
-        snapshot_id="multidoc2dial-train-archive-f0c034c24966")
-    dense = DenseIndex.load(settings.get("dense_index", "data/multidoc2dial/bge-m3-sections"))
+        snapshot_id=dense.manifest["corpus_snapshot_id"])
     device = settings.get("encoder_device", settings.get("device", config.get("support_model", {}).get("device", "cuda:2")))
     if settings.get("task_asset"):
         from training.task_model import TaskModel
