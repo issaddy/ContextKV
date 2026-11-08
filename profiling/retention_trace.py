@@ -297,13 +297,6 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
         prefix_input_ids=[], sources=[], source_started_s=final_start, source_completed_s=final_end))
     if recorded:
         events[-1]["request"] = recorded_request(recorded)
-    previous_end = arrival
-    for event in events:
-        if event["kind"] == "CPU_REDUCE":
-            event["control_gap_seconds"] = 0
-        else:
-            event["control_gap_seconds"] = max(0, event["source_started_s"]-previous_end)
-            previous_end = event["source_completed_s"]
     return dict(attempt_id=attempt.attempt_id, session_id=attempt.session_id, request_id=attempt.request_id,
         query=attempt.query, arrival_s=arrival, context_plan=to_jsonable(plan),
         actual_history=to_jsonable(before_snapshot(store, attempt).raw_history), events=events,
@@ -775,10 +768,15 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
         output_policy="fresh responses measure actual native cost; captured outputs preserve the fixed DAG",
         parse_policy="captured_original_outputs",
         quality_scope="fixed-input cost attribution only; fresh outputs do not establish new QA quality",
-        timing_policy="captured per-turn input-ready arrivals and GAP delays; model steps execute causally",
+        timing_policy="captured per-step input-ready and target observation floors; causal predecessors may delay dispatch",
         cost_scope="reading DAG/ANSWER, C controls and declared physical process groups; upstream A is frozen",
         status="running", controls=controls)
     report["turn_windows"] = turn_windows
+
+    async def wait_source_time(timestamp):
+        delay = start+timestamp-source_origin-time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
 
     async def retire(original_id):
         epoch = epochs[original_id]
@@ -791,12 +789,14 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
     async def execute_turn(turn):
         arrival = min(event["source_started_s"] for event in turn["events"] if event["kind"] != "CPU_REDUCE")
         deadline = start+arrival-source_origin
-        await asyncio.sleep(max(0, deadline-time.monotonic()))
+        await wait_source_time(arrival)
         turn_windows[turn["attempt_id"]] = dict(start=deadline, dispatched=time.monotonic())
         async with locks[turn["session_id"]]:
             plan = decode(ContextPlan, turn["context_plan"])
             for event in turn["events"]:
                 identity = event_id(turn, event)
+                if event["kind"] != "CPU_REDUCE":
+                    await wait_source_time(event["source_started_s"])
                 if event["kind"] == "GAP":
                     tick = time.monotonic()
                     await asyncio.sleep(event["source_completed_s"]-event["source_started_s"])
@@ -853,11 +853,14 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
                     if target is not None and identity == target["source_event_id"]:
                         pages.watch(prefix_id, result.receipt, event["prefix_input_ids"], event["sources"])
                         await pages.sample()
+                    at_decision = target is not None and identity == target["event_id"]
+                    if at_decision:
+                        await wait_source_time(decision_boundary(event)[0])
                     features = PrefixReadObserver._features(plan, event["sources"], accesses[prefix_id], time.monotonic_ns())
                     accesses[prefix_id].append(dict(observed_ns=time.monotonic_ns(), payload={"turn_id": plan.task_state.current_turn_id}))
                     row.update(prefix_id=prefix_id, inspection=inspected, raw_features=features,
                         decision_time=time.monotonic(), retention_control_ms=0)
-                    if target is not None and identity == target["event_id"]:
+                    if at_decision:
                         source_turn, source_event = next((other_turn, other_event) for other_turn, other_event in read_decisions(trace)
                             if event_id(other_turn, other_event) == target["source_event_id"])
                         source_row = receipts[target["source_event_id"]]

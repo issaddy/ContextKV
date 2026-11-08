@@ -194,7 +194,7 @@ C 的两次容量构造共用原有 TTL15/60/180、owner、页并集和需求去
 E6 可在 `execution.prefix_retention.pricing_asset` 加载同一配对拟合产物。拟合记录完整前缀长度的实测范围，在线按实际 Native 状态和 TTL 选择匹配桶。该资产及其哈希进入冻结清单，`lambda_gpu` 和 `lambda_host` 在此配置中按额外 token·秒定价。
 
 `retention_pair_workflow` 先在同一捕获特征桶内选择两组完整、会话互不相交的训练窗口，并在独立开发轨迹中匹配同桶窗口，再核算 Native 与三个 TTL 的总调用预算。选择清单通过 `retention_trace replay --selection` 原样使用。拟合按重放时的实际特征要求每桶至少两个独立会话组；没有支持桶或开发覆盖时，工作流记录无可用资产状态。窗口数量与期限网格保持不变。
-`retention_trace export` 从已付 READ 账本恢复原生观察、实际时间和来源前缀。GAP 以已付耗时和依赖进入固定轨迹，后续 READ 沿用已登记的输入。`retention_coverage` 分开统计任意正文页重访与完整前缀及正文区间一致的重访。
+`retention_trace export` 从已付 READ 账本恢复原生观察、实际时间和来源前缀。回放按各步原始提交时间与目标观察时间设置最早执行时刻，GAP 沿用原耗时，步骤还需等待其前序完成。`retention_coverage` 分开统计任意正文页重访与完整前缀及正文区间一致的重访。
 
 C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观察窗。`replay` 与
 `retention_pair_workflow` 默认固定 Native、TTL15、TTL60、TTL180 四臂；

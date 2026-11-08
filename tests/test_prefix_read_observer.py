@@ -210,10 +210,11 @@ def test_fit_window_selection_matches_features_and_disjoint_session_groups():
         features = dict(access_state="first" if number == 0 else "recent",
                         native_residency="device", pressure_concurrency="normal:single")
         event = dict(step_id="read", kind="READ", source_started_s=start, source_completed_s=start+1,
-            input_hash=token_hash((1, 2, 3, 4)), predecessor_step_ids=[],
+            input_ids=[1, 2, 3, 4], input_hash=token_hash((1, 2, 3, 4)), predecessor_step_ids=[],
             prefix_input_ids=[1, 2, 3, 4], evidence_token_ranges=[[2, 4]], fixed_system_prefix_tokens=0,
             prefix_observation={"raw_features": features, "inspection": {"page_size": 2, "cache_scope_hash": "scope"}})
-        return dict(attempt_id=f"{session}-{number}", session_id=session, events=[event])
+        return dict(attempt_id=f"{session}-{number}", session_id=session, events=[event],
+                    dataset="versionqa", source_metadata={"conversation_id": session})
 
     trace = {"turns": [turn("a", 0, 0), turn("a", 1, 190), turn("b", 0, 1000), turn("b", 1, 1190)]}
     options = dict(horizon_seconds=180, history_steps=0, max_replay_steps=8, seed=42, page_size=2)
