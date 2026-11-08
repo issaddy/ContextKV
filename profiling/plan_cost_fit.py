@@ -260,7 +260,7 @@ def replay_events(trace_path, report_path):
             events.append(dict(observation_id=identity, generation_kind=kind,
                 context_action=source.get("context_action", "CPU" if cpu else None),
                 input_ids=source.get("input_ids", []), input_tokens=len(source.get("input_ids", [])),
-                output_budget=0 if cpu else source["request"]["max_new_tokens"],
+                output_budget=0 if cpu else actual["output_budget"],
                 output_tokens=0 if cpu else actual["actual_output_tokens"],
                 phase_window={**window, "clock": "client_monotonic", "scope": "step_wall"},
                 receipt=None if cpu else actual["result"]["receipt"], cache_quote=actual.get("cache_quote"),
@@ -272,6 +272,7 @@ def replay_events(trace_path, report_path):
                 split=turn["split"], dataset=turn["dataset"], resource_scope=physical_scope,
                 **resident_binding(report),
                 source_files=list(provenance), source_sha256=provenance,
+                **({"source_exclusion": "controlled_decode_length"} if not cpu and report.get("decode_work_rule") else {}),
                 replay_scope="fixed DAG; ANSWER has no business commit and is excluded"))
     return events, report["physical_observation"]["samples"], windows
 

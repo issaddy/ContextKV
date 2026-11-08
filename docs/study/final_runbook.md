@@ -197,7 +197,7 @@ E6 可在 `execution.prefix_retention.pricing_asset` 加载同一配对拟合产
 `retention_pair_workflow` 先在同一捕获特征桶内选择两组完整、会话互不相交的训练窗口，并在独立开发轨迹中匹配同桶窗口，再核算 Native 与三个 TTL 的总调用预算。选择清单通过 `retention_trace replay --selection` 原样使用。拟合按重放时的实际特征要求每桶至少两个独立会话组；没有支持桶或开发覆盖时，工作流记录无可用资产状态。窗口数量与期限网格保持不变。
 `retention_trace export` 从已付 READ 账本恢复原生观察、实际时间和来源前缀。回放按各步原始提交时间与目标观察时间设置最早执行时刻，GAP 沿用原耗时，步骤还需等待其前序完成。`retention_coverage` 分开统计任意正文页重访与完整前缀及正文区间一致的重访。
 
-C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观察窗。`replay` 与
+C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观察窗。每臂按原记录生成同样数量的解码 token，按已记录的输出推进阅读步骤。配对报告记录解码工作是否一致，正式端到端比较保留原生成条件。`replay` 与
 `retention_pair_workflow` 默认固定 Native、TTL15、TTL60、TTL180 四臂；
 `--horizon-seconds` 只决定共同观察长度，`--ttl-seconds` 只决定保护期限。
 窗口选择要求原始轨迹中存在观察窗之后的真实请求边界，保留其间全部压力；不足时记录

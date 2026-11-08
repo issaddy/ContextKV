@@ -1,7 +1,8 @@
 """Source-first conversation capture and fixed-input C replay/fit.
 
 The replay executes every recorded model input and CPU reduction in its original
-DAG. New outputs are measured, not forced to match the captured reader output.
+DAG. Each arm decodes the captured number of tokens and uses captured outputs
+for the reading DAG.
 It measures C costs; replay output is not a new answer-quality experiment.
 """
 from __future__ import annotations
@@ -38,6 +39,9 @@ from controller.session_store import SessionStore, load_record
 from controller.templates import candidate_request, longest_common_prefix, step_request, token_hash
 from engine_patches.contextkv_runtime import executed_prefix_hashes
 from profiling.retention_capture_cost import CaptureRunAccounting, load_resident_provider
+
+
+REPLAY_DECODE_RULE = "captured_output_token_count_v1"
 
 
 def digest(value):
@@ -382,7 +386,7 @@ def make_trace(turns, *, config, source_db, captured, case_outcomes=()):
             [turn["attempt_id"], [(event["step_id"], event.get("input_hash"), event["predecessor_step_ids"])
                                   for event in turn["events"]]] for turn in turns]),
         quality_scope="none; replay is cache/cost attribution, with frozen actual inputs",
-        output_scope="original output budgets and sampling; new output lengths may differ")
+        output_scope="original output budgets, sampling and emitted token IDs")
 
 
 async def completed_capture_failure(service, recorder, cursor, error):
@@ -765,7 +769,8 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
         engine=to_jsonable(info), config=to_jsonable(config),
         cache_scope_hash=cache_scope_hash, page_size=page_size,
         trace_digest=digest(trace), input_dag_digest=trace["input_dag_digest"], events=receipts,
-        output_policy="fresh responses measure actual native cost; captured outputs preserve the fixed DAG",
+        decode_work_rule=REPLAY_DECODE_RULE,
+        output_policy="fixed captured decode length with unconstrained sampling; captured outputs preserve the fixed DAG",
         parse_policy="captured_original_outputs",
         quality_scope="fixed-input cost attribution only; fresh outputs do not establish new QA quality",
         timing_policy="captured per-step input-ready and target observation floors; causal predecessors may delay dispatch",
@@ -821,20 +826,22 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
                 client = engines[digest(event["sampling"])]
                 submitted = time.monotonic()
                 native_attempt = uuid.uuid4().hex
+                output_tokens = len(event["original_output_ids"])
                 receipts[identity] = dict(state="SUBMITTED", kind=event["kind"], input_hash=event["input_hash"],
                     native_attempt_id=native_attempt, engine_session_id=epoch.engine_session_id,
                     session_generation=epoch.session_generation, engine_restart_id=info.engine_restart_id,
                     window={"start": begun})
                 write_json(output/"progress.json", receipts[identity])
-                result = await client.generate(**event["request"], session_id=epoch.engine_session_id,
+                result = await client.generate(input_ids=event["input_ids"], max_new_tokens=output_tokens,
+                    ignore_eos=True, session_id=epoch.engine_session_id,
                     expected_generation=epoch.session_generation, expected_restart_id=info.engine_restart_id,
                     attempt_id=native_attempt, fingerprint=fingerprint)
                 if result.receipt.input_hash != event["input_hash"]:
                     raise ValueError("paired replay changed the actual generation input")
                 row = dict(state="COMPLETE", kind=event["kind"], input_hash=result.receipt.input_hash,
                     native_attempt_id=native_attempt,
-                    input_tokens=len(event["input_ids"]), output_budget=event["request"]["max_new_tokens"],
-                    original_output_tokens=len(event["original_output_ids"]), actual_output_tokens=len(result.output_ids),
+                    input_tokens=len(event["input_ids"]), output_budget=output_tokens,
+                    original_output_tokens=output_tokens, actual_output_tokens=len(result.output_ids),
                     result=to_jsonable(result), sampling=event["sampling"],
                     generation_window={"start": submitted, "end": time.monotonic()},
                     window={"start": begun}, source_started_s=event["source_started_s"])
@@ -1104,10 +1111,13 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
     if native["input_dag_digest"] != retained["input_dag_digest"] or native["input_dag_digest"] != trace["input_dag_digest"]:
         raise ValueError("paired C reading DAG differs")
     left_hashes, right_hashes = [], []
+    fixed_decode_work = all(arm.get("decode_work_rule") == REPLAY_DECODE_RULE for arm in (native, retained))
     for turn, event in trace_generations(trace):
         key = event_id(turn, event)
         left_hashes.append(native["events"][key]["input_hash"])
         right_hashes.append(retained["events"][key]["input_hash"])
+        fixed_decode_work &= all(arm["events"][key]["actual_output_tokens"] == len(event["original_output_ids"])
+                                 for arm in (native, retained))
     if left_hashes != right_hashes or left_hashes != trace["input_hashes"]:
         raise ValueError("paired C actual model input hashes differ")
     if left["inspection"]["cache_scope_hash"] != right["inspection"]["cache_scope_hash"]:
@@ -1134,7 +1144,7 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
         left["decision_time"], ends[0], left["inspection"]["page_size"])
     right_residency = integrate_prefix_residency(retained["prefix_observation"], right["prefix_id"],
         right["decision_time"], ends[1], right["inspection"]["page_size"])
-    eligible = all(value["complete_window_coverage"] for value in (left_residency, right_residency))
+    eligible = fixed_decode_work and all(value["complete_window_coverage"] for value in (left_residency, right_residency))
     eligible = eligible and native["status"] == retained["status"] == "completed"
     eligible = (eligible and left["action_feasible"] and right["action_feasible"]
                 and right.get("retain_receipt", {}).get("state") == "RETAINED")
@@ -1166,7 +1176,7 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
         predicted_reuse_event_key=source_demand_event_key(target_event["prefix_input_ids"],
             target_event["evidence_token_ranges"], left["inspection"]["page_size"],
             left["inspection"]["cache_scope_hash"]),
-        partition_eligible=trace["training_eligible"], measurement_eligible=eligible,
+        partition_eligible=trace["training_eligible"], measurement_eligible=eligible, fixed_decode_work=fixed_decode_work,
         features=left["raw_features"], retained_features=right["raw_features"],
         cache_scope_hash=left["inspection"]["cache_scope_hash"], fingerprint=trace["fingerprint"],
         horizon_seconds=horizon_seconds, reused=reused, reuse_interval_seconds=reuse_seconds,
@@ -1362,9 +1372,10 @@ def fit(args):
             report = json.loads(Path(path).read_text())
             if digest(report) != row["report_digests"][arm]:
                 raise ValueError("paired source report changed after collection")
-        if row["split"] == args.split and row["partition_eligible"] and row["source_body_page_count"]:
+        if (row["split"] == args.split and row["partition_eligible"] and row["source_body_page_count"]
+                and row.get("fixed_decode_work")):
             frequency.append(row)
-        if row["split"] != args.split or not row["training_eligible"]:
+        if row["split"] != args.split or not row["training_eligible"] or not row.get("fixed_decode_work"):
             excluded.append(dict(event_id=row["event_id"], split=row["split"],
                 source_body_page_count=row["source_body_page_count"], training_eligible=row["training_eligible"]))
             continue
@@ -1375,7 +1386,7 @@ def fit(args):
         source_sha256=hashlib.sha256(Path(args.records).read_bytes()).hexdigest(),
         accepted=len(accepted), independent_samples=model.independent_samples,
         sample_unit="session group; TTL arms are paired interventions", excluded=excluded, source="real_native_fixed_DAG_single_prefix_pairs",
-        protocol="all real captured inputs and original budgets; fresh outputs are not matched to gold")
+        protocol="same real captured inputs and decode lengths across arms; captured outputs preserve the fixed DAG")
     write_json(args.output, asset)
     print(json.dumps({"trained_profiles": len(model.forecasts), "accepted_pairs": len(accepted),
                       "excluded_pairs": len(excluded), "output": args.output}))
