@@ -93,11 +93,17 @@ BRIDGE_READ_SYSTEM = (
     "Extract relevant bridges even when the final answer is absent. Return no claims for "
     "unrelated sources. Only supplied sources establish facts; history and input claims resolve the task."
 )
-REDUCE_SYSTEM = (
+_REDUCE_EVIDENCE = (
     "Combine the supplied claims for the requested operation and current conditions. Return JSON. "
     "Each derived claim names the input parent_claim_ids used. Preserve conflicting conditions "
-    "and versions. Only input claims provide facts. For a comparison, use the matching input "
-    "values to state the requested difference or relationship. Put a Need in support when the "
+    "and versions. Only input claims provide facts."
+)
+REDUCE_SYSTEM = _REDUCE_EVIDENCE + (
+    " Attach a new conclusion's missing relations to its followups; top-level open_needs refer to supplied input claims."
+)
+COMPARE_REDUCE_SYSTEM = _REDUCE_EVIDENCE + (
+    " For a comparison, use the matching input values to state the requested difference or relationship. "
+    "Put a Need in support when the "
     "result establishes its requested conclusion. Emit followups or open_needs only for input "
     "facts still required to answer. Top-level open_needs refer to supplied input claims."
 )
@@ -425,6 +431,8 @@ def step_system(plan, task):
     elif task.kind == "READ" and task.need_ids and all(need.operation == "infer"
             for need in plan.task_state.needs if need.need_id in task.need_ids):
         system = BRIDGE_READ_SYSTEM
+    elif task.kind == "REDUCE" and task.operation == "compare":
+        system = COMPARE_REDUCE_SYSTEM
     else:
         system = READ_SYSTEM if task.kind == "READ" else REDUCE_SYSTEM
     system += SHORT_WIRE_SYSTEM.format(version=_read_protocol_version(task))
