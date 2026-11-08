@@ -290,6 +290,16 @@ class Controller:
             cache_config_hash=attempt.cache_config_hash, engine_restart_id=attempt.epoch.engine_restart_id)
         self.events.emit("answer_source_executed", attempt_id=attempt.attempt_id, source_view=source_view)
 
+    async def _finish_answer_demand(self, attempt):
+        observer = self.observe_prefix
+        if getattr(observer, "settings", {}).get("mode") != "demand":
+            return
+        mutation = await observer.finish_demand(attempt.reading_outcome, attempt.session_id)
+        if mutation is not None:
+            self.events.emit("joint_prefix_control", attempt_id=attempt.attempt_id,
+                choice=attempt.plan.candidate.candidate_id, quote_seq=attempt.plan.quote_seq,
+                phase="after_answer_receipt", **mutation)
+
     def _response(self, attempt: Attempt, *, elapsed_ms=None, replay=False,
                   timing: ClientTiming | None = None, control_ms=None, answer_phase_window=None) -> TurnResponse:
         result, plan, epoch = attempt.result, attempt.plan, attempt.epoch
@@ -889,6 +899,7 @@ class Controller:
                 attempt = self.store.save_attempt(replace(attempt, stage="RESULT_READY", result=result))
                 self._validate(attempt, result)
                 self._observe_answer_source(attempt)
+                await self._finish_answer_demand(attempt)
                 snapshot = self.store.commit_turn_and_outbox(attempt.attempt_id)
             except BaseException as exc:
                 current = self.store.get_attempt(attempt.attempt_id)
@@ -959,6 +970,7 @@ class Controller:
                 await self._flush_retirements()
                 return None
             self._observe_answer_source(attempt)
+            await self._finish_answer_demand(attempt)
             committed = self.store.commit_turn_and_outbox(attempt.attempt_id)
             self.cost_model.observe_output(len(attempt.result.output_ids))
             self.events.emit("attempt_recovered", attempt_id=attempt.attempt_id, ledger_version=committed.version)

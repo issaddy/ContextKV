@@ -670,12 +670,12 @@ class PrefixReadObserver:
 
     async def apply_demand(self, option, state, session_id, *, batch):
         started = time.monotonic()
-        steps = {record.step_id: record for record in state.steps}
         receipts = {}
         async with self._allocation_lock:
             for owner in option.release:
                 receipts[owner] = await self.owners.release(owner, reason="joint_remaining_demand")
             if option.retain:
+                steps = {record.step_id: record for record in state.steps}
                 status = await self.runtime.status(batch.engine_restart_id)
                 protected = set().union(*(owner_pages(row) for row in status["prefixes"]))
                 protected_gpu = referenced_gpu_pages(status["prefixes"])
@@ -704,6 +704,15 @@ class PrefixReadObserver:
         return {"elapsed_ms": (time.monotonic()-started)*1000,
                 "owner_status": {owner: {key: ack[key] for key in ("state", "reason", "boundary_tokens", "expires_at")
                                          if key in ack} for owner, ack in receipts.items()}}
+
+    async def finish_demand(self, outcome, session_id):
+        from .demand import DemandState, JointOption
+
+        release = tuple(owner.owner_id for owner in self.store.prefix_owners(session_id, active_only=True)
+                        if owner.policy == "joint_demand")
+        if release:
+            return await self.apply_demand(JointOption(DemandState((), ()), release=release),
+                                           outcome, session_id, batch=None)
 
     @staticmethod
     def _features(plan, sources, accesses, now):

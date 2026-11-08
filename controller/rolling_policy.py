@@ -708,7 +708,7 @@ class RollingPlanRuntime:
                     for key, value in native.future.items())}
             decisions.append(audit)
             events.emit("rolling_plan_decision", attempt_id=attempt_id, **audit)
-            if demand_retention:
+            if demand_retention and decision.next_step.task.kind != "ANSWER":
                 step = decision.next_step
                 key = step.candidate.candidate_id if step.candidate is not None else step.task.step_id
                 option = options[key]
