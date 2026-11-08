@@ -523,7 +523,7 @@ async def evaluate(config, matrix, output, *, split, frozen=None, methods=None, 
         selected_methods = frozen["test_methods"]
     if methods is not None:
         selected_methods = [m for m in selected_methods if m["id"] in methods]
-    results = []
+    generated = []
     for method in selected_methods:
         for name, dataset in matrix["datasets"].items():
             if split == "dev" and dataset.get("evaluation_only"):
@@ -535,11 +535,17 @@ async def evaluate(config, matrix, output, *, split, frozen=None, methods=None, 
                 concurrency=concurrency, limit_conversations=limit_conversations,
                 workload=workload[name] if isinstance(workload, dict) else workload, question_fn=question_fn,
                 request_namespace=request_namespace)
+            generated.append((name, dataset, directory, rows))
+
+    results = []
+    with (output/"results.jsonl").open("w") as aggregate:
+        for name, dataset, directory, rows in generated:
             if score:
                 rows = await score_dataset(config, dataset, rows, directory,
                     expected_task_ids=matrix.get("cohorts", {}).get(split, {}).get(name))
             results.extend(rows)
-            write_jsonl(output/"results.jsonl", results)
+            aggregate.writelines(dumps(row)+"\n" for row in rows)
+            aggregate.flush()
     return results
 
 
