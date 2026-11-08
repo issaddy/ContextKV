@@ -14,6 +14,7 @@ def input_protocol(fingerprint):
         "answer_layout": "sources_before_history_for_source_first",
         "shared_source_protocol": SOURCE_ENCODING,
         "task_projection": "resolved_conditions_and_effective_version_scope_v1",
+        "numeric_selection": "original_source_excerpts_v1",
         "completion_admission": "mandatory_future_work_v1",
         "source_windows": {"tokens": SOURCE_WINDOW_TOKENS, "nonempty_lines": SOURCE_WINDOW_LINES},
         "source_identity": "content_hash_and_original_coordinates",

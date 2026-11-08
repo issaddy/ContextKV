@@ -109,7 +109,8 @@ COMPARE_REDUCE_SYSTEM = _REDUCE_EVIDENCE + (
 )
 NUMERIC_SELECT_SYSTEM = (
     "Select the parent facts that establish each numeric Need under the question and active conditions. "
-    "Use the original excerpts to check population membership and the requested quantity. "
+    "Each parent is an extracted fact and names its original source excerpts. "
+    "Use those sources to check its entity, population membership, quantity and unit. "
     "When the question names explicit rows or a table, require the literal requested row label "
     "or matching table heading in the cited excerpt; identifiers in unrelated background prose "
     "do not establish that population. "
@@ -472,14 +473,29 @@ def step_messages(plan, task, units, claims=(), snapshot=None, *, source_prompt=
     if task.operation == "numeric_select":
         aliases, _, _ = numeric_aliases(task, (), claims)
         needs = {need.need_id: need for need in state.needs}
+        archive = snapshot.archive if snapshot is not None else ()
+        blocks = {block.key: block for block in (*archive, *plan.selected_set.source_blocks)}
+        excerpts, references = {}, {}
+        for claim in claims:
+            for span in claim.source_spans:
+                key = (span.source_key, span.start, span.end)
+                if key not in references:
+                    block = blocks[span.source_key]
+                    base = block.span[0] if block.span else 0
+                    alias = f"s{len(references)}"
+                    references[key] = alias
+                    excerpts[alias] = block.text[span.start-base:span.end-base]
         payload = {"question": state.raw_question, "conditions": task_view["conditions"],
             "version_intent": task_view["version_intent"],
             "history": history_view(state, snapshot) if snapshot is not None else [],
             "needs": {alias: needs[identity] for alias, identity in aliases.items()},
             "parents": {f"p{index}": {"excerpt": claim.text, "conditions": claim.conditions,
                                     "version": claim.version, "entity": claim.entity,
-                                    "relation": claim.relation, "value": claim.value, "unit": claim.unit}
+                                    "relation": claim.relation, "value": claim.value, "unit": claim.unit,
+                                    "sources": [references[(span.source_key, span.start, span.end)]
+                                                for span in claim.source_spans]}
                         for index, claim in enumerate(claims)},
+            "sources": excerpts,
             "output_schema": visible_output_schema(schema)}
         return (Message("system", NUMERIC_SELECT_SYSTEM),
                 Message("user", json.dumps(to_jsonable(payload), ensure_ascii=False, separators=(",", ":"))))
