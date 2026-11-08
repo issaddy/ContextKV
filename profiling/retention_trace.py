@@ -24,7 +24,7 @@ from bench.metrics import occupancy_integral
 from bench.native_metrics import NativePoolSampler, pool_series
 from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
 from controller.config import create_controller, create_model_template, load_config
-from controller.context_schema import ContextBudget, ContextPlan, EvidenceClaim, EvidenceSet, Need, ReadTask, TaskState, TextRef
+from controller.context_schema import ContextBudget, ContextPlan, EvidenceClaim, EvidenceSet, Need, ReadResult, ReadTask, TaskState, TextRef
 from controller.engine_client import EngineError, SGLangEngineClient
 from controller.prefix_retention import (EmpiricalRetentionModel, PrefixObserver, PrefixReadObserver, PrefixRuntimeClient, TARGET_DEMAND_RULE,
     RETENTION_FEATURE_NAMES, RETENTION_CONTROL_RULE, MIN_RETENTION_GROUPS, source_demand_event_key)
@@ -240,6 +240,8 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
         event.update(read_task=to_jsonable(step.task),
                      original_output_text=generation.text,
                      input_claims=to_jsonable(tuple(parent_claims[key] for key in step.task.input_claim_ids)))
+        if step.metrics.get("output_budget_exhausted"):
+            event["output_budget_exhausted"] = True
         event["prefix_observation"] = step.metrics.get("evidence_prefix")
         recorded = calls.get(step.receipt.attempt_id)
         if recorded:
@@ -685,6 +687,19 @@ def verify_trace(trace):
             raise ValueError("retained source prefix is not the actual contiguous input path")
 
 
+def replay_read_result(plan, event, elapsed_ms):
+    text = event["original_output_text"]
+    cost = dict(elapsed_ms=elapsed_ms, input_tokens=len(event["input_ids"]),
+                output_tokens=len(event["original_output_ids"]))
+    if event.get("output_budget_exhausted"):
+        return ReadResult(event["step_id"], raw_output=text, **cost), "captured_budget_exhausted_read"
+    task = decode(ReadTask, event["read_task"])
+    by_id = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+    return parse_read_result(task, text, tuple(by_id[key] for key in task.input_unit_ids),
+        tuple(decode(EvidenceClaim, value) for value in event["input_claims"]),
+        **cost), "captured_original_outputs"
+
+
 async def replay_arm(trace, config, output, *, gpu_device, intervention=None, horizon_seconds=180,
                      ttl_seconds=None, residency_interval=.25, target=None):
     """Replay the complete supplied window; intervention names one READ event."""
@@ -791,15 +806,9 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
                 receipts[identity] = row
                 if event["kind"] != "ANSWER":
                     tick = time.monotonic()
-                    task = decode(ReadTask, event["read_task"])
-                    by_id = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
-                    parsed = parse_read_result(task, event["original_output_text"],
-                        tuple(by_id[key] for key in task.input_unit_ids),
-                        tuple(decode(EvidenceClaim, value) for value in event["input_claims"]),
-                        elapsed_ms=result.elapsed_ms, input_tokens=len(event["input_ids"]),
-                        output_tokens=len(event["original_output_ids"]))
+                    parsed, parse_policy = replay_read_result(plan, event, result.elapsed_ms)
                     row.update(parse_ms=(time.monotonic()-tick)*1000, parsed_output=to_jsonable(parsed),
-                               parse_policy="captured_original_outputs")
+                               parse_policy=parse_policy)
                 if event["kind"] == "READ":
                     prefix_ids = event["prefix_input_ids"][:len(event["prefix_input_ids"])//page_size*page_size]
                     inspected = dict(cache_scope_hash=cache_scope_hash, prefix_hash=token_hash(prefix_ids),
