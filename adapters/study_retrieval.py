@@ -383,8 +383,7 @@ class StudyEvidenceProvider:
                     token_cost=token_cost, disposition="partial", source_blocks=pool.source_blocks),)
             elif ranked:
                 search_started = time.perf_counter()
-                evidence_sets = (self._relevance_set(state, pool,
-                    lambda state, units: measure_contexts(state, (units,))[0]),)
+                evidence_sets = (self._relevance_set(state, pool, measure_contexts),)
                 search_ms = (time.perf_counter()-search_started)*1000
             else:
                 support_config = self.config.get("support_model", {})
@@ -525,24 +524,44 @@ class StudyEvidenceProvider:
                                      tuple(plans), open_need_provider=extend,
                                      auxiliary_usage=trace["auxiliary_usage"], initial_outcomes=tuple(initial_outcomes))
 
-    def _relevance_set(self, state, pool, measure_context=None, *, budget=None, candidates=None,
+    def _relevance_set(self, state, pool, measure_contexts=None, *, budget=None, candidates=None,
                        passage_exclusions=()):
         budget = self.budget if budget is None else budget
         candidates = pool.units if candidates is None else candidates
         by_id = {unit.unit_id: unit for unit in pool.units}
+        ranked = sorted(candidates, key=lambda unit: (-unit.retrieval_score, unit.unit_id))
+        window_limit = budget.window_tokens-budget.output_tokens if measure_contexts is not None else float("inf")
         chosen, token_cost = (), 0
-        for unit in sorted(candidates, key=lambda item: (-item.retrieval_score, item.unit_id)):
+        cursor, batch_size = 0, 1
+        while cursor < len(ranked):
             if self.strategy == "B0" and len({item.text for item in chosen}) >= 5:
                 break
-            proposed = close_dependencies((*[u.unit_id for u in chosen], unit.unit_id), by_id)
-            size = len(self.template.tokenizer.encode(render_unit_union(proposed), add_special_tokens=False))
-            if size > budget.body_tokens:
-                continue
-            if budget.max_passages is not None and len(_passages(proposed).difference(passage_exclusions)) > budget.max_passages:
-                continue
-            if measure_context is not None and measure_context(state, proposed)+budget.output_tokens > budget.window_tokens:
-                continue
-            chosen, token_cost = proposed, size
+            stop = min(cursor+batch_size, len(ranked))
+            chosen_ids = tuple(unit.unit_id for unit in chosen)
+            selected = set(chosen_ids)
+            proposals = []
+            for index in range(cursor, stop):
+                unit_id = ranked[index].unit_id
+                if unit_id in selected:
+                    continue
+                units = close_dependencies((*chosen_ids, unit_id), by_id)
+                if budget.max_passages is None or len(_passages(units).difference(passage_exclusions)) <= budget.max_passages:
+                    proposals.append((index, units))
+            bodies = [render_unit_union(units) for _, units in proposals]
+            encoded = self.template.tokenizer(bodies, add_special_tokens=False,
+                return_attention_mask=False, return_token_type_ids=False)["input_ids"] if bodies else ()
+            feasible = [(index, units, len(ids)) for (index, units), ids in zip(proposals, encoded, strict=True)
+                        if len(ids) <= budget.body_tokens]
+            contexts = (measure_contexts(state, tuple(units for _, units, _ in feasible))
+                        if measure_contexts is not None and feasible else (0,)*len(feasible))
+            for (index, units, size), context in zip(feasible, contexts, strict=True):
+                if context <= window_limit:
+                    chosen, token_cost = units, size
+                    cursor, batch_size = index+1, 1
+                    break
+            else:
+                # A rejected batch leaves the chosen prefix unchanged.
+                cursor, batch_size = stop, 8
         keys = {span.source_key for unit in chosen for span in unit.source_spans}
         blocks = tuple(block for block in pool.source_blocks if block.key in keys)
         return EvidenceSet(f"{state.task_id}:relevance", chosen, token_cost=token_cost, source_blocks=blocks)
