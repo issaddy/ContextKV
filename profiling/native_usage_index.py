@@ -77,10 +77,11 @@ def index(patterns):
         if quote is not None:
             work["quote_work"] = quote_realization(quote, receipt)
         if outputs is None or value.get("generation_complete") is not True:
-            incomplete[key] = {**location, **work, "kind": kind, "native_identity": key,
+            incomplete.setdefault(key, []).append({**location, **work, "kind": kind, "native_identity": key,
+                "input_hash": actual_hash,
                 "input_tokens": len(inputs),
                 "output_tokens": value.get("actual_output_tokens") if outputs is None else len(outputs),
-                "receipt": value}
+                "receipt": value})
             return
         signature = kind, actual_hash, token_hash(outputs), len(inputs), len(outputs)
         entry = identities.setdefault(key, {"engine_restart_id": key[0], "native_attempt_id": key[1],
@@ -178,7 +179,19 @@ def index(patterns):
             entry.update(**variants[0], status="unique_completed_hash_matched_native_receipt")
             accepted.append(entry)
     kinds = sorted({"ANSWER", "READ", "REDUCE"} | {row["kind"] for row in accepted})
-    partial = [row for key, row in incomplete.items() if key not in identities]
+    partial = []
+    fields = ("kind", "input_hash", "input_tokens", "output_tokens", "actual_prefill_tokens",
+              "actual_host_loaded_tokens", "actual_device_hit_tokens")
+    for key, aliases in incomplete.items():
+        if key in identities:
+            continue
+        measured = {name: {row[name] for row in aliases if row[name] is not None} for name in fields}
+        if any(len(values) > 1 for values in measured.values()):
+            conflicts.append({"engine_restart_id": key[0], "native_attempt_id": key[1],
+                "status": "excluded_conflicting_native_identity", "variants": aliases})
+            continue
+        partial.append({**aliases[0], **{name: next(iter(values), None) for name, values in measured.items()},
+            "locations": [{name: row[name] for name in ("source_index", "table", "rowid")} for row in aliases]})
     provider = {key: row for key, row in auxiliary.items() if row["kind"] == "provider_usage"}
     aux = [row for key, row in auxiliary.items() if key not in provider]
     standalone = [row for row in aux if row.get("group_id") not in provider]

@@ -52,6 +52,33 @@ async def test_native_read_response_error_recovers_once_by_persisted_submission(
     store.close()
 
 
+def test_terminal_native_token_usage_survives_duplicate_ledger_snapshots(tmp_path):
+    from controller.context_schema import CompletionReceipt, StepRecord
+    from controller.templates import token_hash
+    from profiling.native_usage_index import index
+
+    def ledger(name, outputs):
+        store = SessionStore(tmp_path/name)
+        store.read_snapshot("session")
+        attempt = store.begin_attempt("session", "question", "hash", "How?", 0)
+        inputs = (10, 20)
+        receipt = CompletionReceipt("read", "read", "epoch", 1, "restart", token_hash(inputs), "stop", True,
+                                    actual_prefill_tokens=2, actual_output_tokens=outputs)
+        task = ReadTask("read", "READ")
+        store.save_execution_step(StepRecord(attempt.attempt_id, task.step_id, task, input_ids=inputs,
+                                             receipt=receipt), "FAILED")
+        store.close()
+        return str(store.path)
+
+    measured, missing = ledger("a.db", 7), ledger("b.db", None)
+    report = index([measured, missing])
+    assert report["online_token_ledger"]["total_tokens"] == 9
+    partial, = report["partial_native_calls"]
+    assert partial["output_tokens"] == 7 and len(partial["locations"]) == 2
+    conflict = index([measured, ledger("c.db", 8)])
+    assert conflict["online_token_ledger"]["reasons"] == ["conflicting_native_receipts"]
+
+
 @pytest.mark.asyncio
 async def test_truncated_teacher_completion_is_charged_before_task_parsing(tmp_path):
     import httpx
