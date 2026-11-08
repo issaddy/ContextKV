@@ -204,23 +204,28 @@ class SourceDirectory:
         keys = tuple(keys)
         if not keys or self.archive_encoder is None:
             return keys[:top_k]
+        groups = {key: self._source_units(key) for key in keys}
+        self._index_source_units((unit for group in groups.values() for unit in group), self.archive_encoder)
         vectors = {}
-        for key in keys:
-            vector = self.encode_source_units(self._source_units(key), self.archive_encoder).mean(axis=0)
+        for key, units in groups.items():
+            vector = np.mean([self._unit_vectors[unit.unit_id] for unit in units], axis=0)
             vectors[key] = vector / np.linalg.norm(vector)
         query_vector = np.asarray(self.archive_encoder([query])[0], dtype=np.float32)
         query_vector /= np.linalg.norm(query_vector)
         return tuple(sorted(keys, key=lambda key: -float(vectors[key] @ query_vector)))[:top_k]
 
-    def encode_source_units(self, units, encode):
-        """Reuse the fixed document encoder's vectors by original source identity."""
-        units = tuple(units)
+    def _index_source_units(self, units, encode):
         missing = tuple({unit.unit_id: unit for unit in units
                          if unit.unit_id not in self._unit_vectors}.values())
         if missing:
             values = encode([unit.text for unit in missing])
             self._unit_vectors.update((unit.unit_id, np.asarray(value, dtype=np.float32))
                 for unit, value in zip(missing, values, strict=True))
+
+    def encode_source_units(self, units, encode):
+        """Reuse the fixed document encoder's vectors by original source identity."""
+        units = tuple(units)
+        self._index_source_units(units, encode)
         return np.asarray([self._unit_vectors[unit.unit_id] for unit in units], dtype=np.float32)
 
     def candidate_search(self, query, *, top_k=50):

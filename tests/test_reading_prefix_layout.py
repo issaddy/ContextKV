@@ -48,6 +48,25 @@ def test_source_version_and_original_offsets_change_prefix_identity():
     assert template.render(first).input_ids != template.render(second).input_ids
 
 
+def test_archive_search_batches_new_source_windows_and_keeps_their_rank():
+    from types import SimpleNamespace
+    from adapters.evidence_pool import SourceDirectory
+
+    a = make_evidence("Windows filing", "a")
+    b = make_evidence("Linux filing", "b")
+    calls = []
+
+    def encode(texts):
+        calls.append(tuple(texts))
+        return [(1, 0) if "Windows" in text else (0, 1) for text in texts]
+
+    directory = SourceDirectory(SimpleNamespace(blocks=(a, b), source_metadata={}), None,
+                                ByteTemplate().tokenizer, archive_encoder=encode)
+    assert directory.archive_search("Linux", (a.key, b.key)) == (b.key, a.key)
+    assert directory.archive_search("Windows", (a.key, b.key)) == (a.key, b.key)
+    assert calls == [(a.text, b.text), ("Linux",), ("Windows",)]
+
+
 def test_canonical_windows_keep_rows_coordinates_and_prefix_across_task_budgets():
     from types import SimpleNamespace
     from adapters.evidence_pool import SourceDirectory
