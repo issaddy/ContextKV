@@ -711,21 +711,25 @@ class PrefixReadObserver:
                 protected_gpu.update(path)
                 selected[owner] = DemandLease(owner, step, target, boundary, gains[target])
             saved_ms, evidence = None, None
-            if continuation is not None and not active and len(selected) == 1 and set(demands) == {continuation.step_id}:
+            if self.model is not None and not active and len(selected) == len(demands) == 1:
+                target, = demands
                 lease, = selected.values()
-                compiled, _ = targets[continuation.step_id]
+                compiled, _ = targets[target]
                 inspected = source_records[lease.source_step_id]
                 full_boundary = compiled.source_prefix_tokens//page_size*page_size
-                if lease.boundary_tokens == full_boundary == inspected["boundary_tokens"]:
+                if (target in demand.remaining_read_ids
+                        and lease.boundary_tokens == full_boundary == inspected["boundary_tokens"]):
                     forecast = self._demand_forecast(inspected, batch)
                     if forecast is not None:
-                        saved_ms = forecast.saved_ms-lease.boundary_tokens*(
+                        net_ms = forecast.saved_ms-lease.boundary_tokens*(
                             self.settings.get("lambda_gpu", 0)*forecast.extra_gpu_seconds_per_page
                             + self.settings.get("lambda_host", 0)*forecast.extra_host_seconds_per_page)
                         evidence = forecast.evidence_digest
-                        if saved_ms <= 0:
+                        if net_ms <= 0:
                             selected.clear()
                             protected, covered = shared, initial_coverage
+                        elif continuation is not None and target == continuation.step_id:
+                            saved_ms = net_ms
             return JointOption(demand, tuple(lease for key, lease in selected.items() if key not in own),
                 tuple(sorted(own-selected.keys())), len(protected-shared)*page_size,
                 sum(risk-covered[target] for target, (risk, _, _) in demands.items()), saved_ms, evidence)
