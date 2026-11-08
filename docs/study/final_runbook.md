@@ -188,12 +188,13 @@ B 从冻结 A 的真实观察采集动作分支；失败尝试中已完成步骤
 计数与总额同时匹配才得 1 分；
 公开 Loong test 保留官方 loong_reference_score/100，二者通过 metric_by_split 明确区分。
 
-C 使用 `paired_native_retention_v6`、`target_demand_rule=exact_complete_causal_prefix_and_body_ranges_v1` 与 `control_cost_rule=owner_call_only_fixed_decision_once_v1`。训练行保存独立会话集合，train/dev 集合互斥；同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。只有相同完整来源需求重访才标注整次下一 READ 的 target 收益；部分页复用仍记录在原生观察与整窗成本中。新增 owner 的目标收益按完整来源需求去重，容量与驻留按共享页增量；配对外部请求代价进入选择，正 collateral 不另计可叠加收益。单 owner 标签计量实际保留调用（ledger＋retain），inspect 与完整 callback 分别记录。完整集合的真实净效果仍由同轨 Native/value 对照和物理积分验收。
+C 使用 `paired_native_retention_v6`、`target_demand_rule=canonical_source_prefix_and_body_ranges_v2` 与 `control_cost_rule=owner_call_only_fixed_decision_once_v1`。训练行保存原始数据会话集合，train/dev 集合互斥，同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。只有相同完整来源需求重访才标注整次下一 READ 的 target 收益。部分页复用进入原生观察与整窗成本。新增 owner 的目标收益按完整来源需求去重，容量与驻留按共享页增量。配对外部请求代价进入选择，正 collateral 单列。单 owner 标签计量实际保留调用（ledger＋retain），inspect 与完整 callback 分别记录。完整集合的真实净效果仍由同轨 Native/value 对照和物理积分验收。
 
 C 的两次容量构造共用原有 TTL15/60/180、owner、页并集和需求去重目标。配置使用单一 `protection_budget_tokens`（联合入口为 8192），GPU/Host 的 Native 物理配额与 `lambda_gpu` / `lambda_host` 驻留价格保留原含义。
 E6 可在 `execution.prefix_retention.pricing_asset` 加载同一配对拟合产物。拟合记录完整前缀长度的实测范围，在线按实际 Native 状态和 TTL 选择匹配桶。该资产及其哈希进入冻结清单，`lambda_gpu` 和 `lambda_host` 在此配置中按额外 token·秒定价。
 
 `retention_pair_workflow` 先在同一捕获特征桶内选择两组完整、会话互不相交的训练窗口，并在独立开发轨迹中匹配同桶窗口，再核算 Native 与三个 TTL 的总调用预算。选择清单通过 `retention_trace replay --selection` 原样使用。拟合按重放时的实际特征要求每桶至少两个独立会话组；没有支持桶或开发覆盖时，工作流记录无可用资产状态。窗口数量与期限网格保持不变。
+`retention_trace export` 从已付 READ 账本恢复原生观察、实际时间和来源前缀。`retention_coverage` 分开统计任意正文页重访与完整前缀及正文区间一致的重访。
 
 C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观察窗。`replay` 与
 `retention_pair_workflow` 默认固定 Native、TTL15、TTL60、TTL180 四臂；

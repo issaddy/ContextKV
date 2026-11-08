@@ -214,6 +214,16 @@ def trace_source_metadata(metadata):
                      if key in metadata.get("response", {})}}
 
 
+def independent_sessions(turns):
+    def original_session(turn):
+        session = turn["session_id"]
+        if session.startswith("study:"):
+            session = session.split(":", 4)[-1]
+        return digest([turn["dataset"], turn["source_metadata"].get("conversation_id", session)])
+
+    return sorted({original_session(turn) for turn in turns})
+
+
 def export_attempt(store, attempt, template, sampling, metadata, *, recorded_calls=None):
     if attempt.stage != "COMMITTED" or attempt.reading_outcome is None:
         raise ValueError("retention trace requires a committed real reading request")
@@ -222,6 +232,7 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
         raise ValueError("task_first is not stable-evidence training data; use capture to execute source_first first")
     parent_claims = {claim.claim_id: claim for claim in attempt.reading_outcome.claims}
     calls = {row["receipt"]["attempt_id"]: row for row in recorded_calls or ()}
+    accesses = {row["native_attempt_id"]: row for row in store.prefix_accesses(session_id=attempt.session_id)}
     timing = metadata.get("response", {}).get("timing")
     arrival = timing["t_arrive"] if timing is not None else attempt.created_ns/1e9
     events = []
@@ -242,7 +253,17 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
                      input_claims=to_jsonable(tuple(parent_claims[key] for key in step.task.input_claim_ids)))
         if step.metrics.get("output_budget_exhausted"):
             event["output_budget_exhausted"] = True
-        event["prefix_observation"] = step.metrics.get("evidence_prefix")
+        observation = step.metrics.get("evidence_prefix")
+        access = accesses.get(step.receipt.attempt_id)
+        if access is not None:
+            payload = access["payload"]
+            inspection = payload["inspection"]
+            if (inspection["source_attempt_id"] != step.receipt.attempt_id or
+                    token_hash(event["prefix_input_ids"][:inspection["boundary_tokens"]]) != inspection["prefix_hash"]):
+                raise ValueError("saved prefix observation differs from the actual READ source path")
+            observation = {"state": "OBSERVED", "inspection": inspection, "raw_features": payload["features"],
+                           "observed_ns": access["observed_ns"], "policy": "recorded_native_observation"}
+        event["prefix_observation"] = observation
         recorded = calls.get(step.receipt.attempt_id)
         if recorded:
             event["request"] = recorded_request(recorded)
@@ -547,6 +568,7 @@ async def capture_reader_traces(args):
                     continue
                 attempt = service.store.get_attempt(response.attempt_id)
                 metadata = dict(dataset=original.selected_set.source_blocks[0].key.corpus_id,
+                    conversation_id=item["conversation_id"],
                     split=item["split"], source_partition=item["source_partition"],
                     response=to_jsonable(response), scope="study", max_new_tokens=config.context.max_new_tokens,
                     source_example_id=item["example_id"], source_trace_origin=item["trace_origin"],
@@ -914,6 +936,13 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
     return report
 
 
+def decision_boundary(event):
+    observed = event.get("prefix_observation")
+    if observed is not None and observed.get("observed_ns") is not None:
+        return observed["observed_ns"]/1e9, "actual_capture_prefix_observation", True
+    return event["source_completed_s"], "actual_native_READ_completion_pre_control", False
+
+
 def choose_windows(trace, *, horizon_seconds, max_candidates, history_steps, max_replay_steps, seed,
                    max_prefixes_per_decision=1, page_size=None):
     """Select bounded contiguous windows; never remove intervening pressure."""
@@ -940,7 +969,8 @@ def choose_windows(trace, *, horizon_seconds, max_candidates, history_steps, max
         while first > 0 and count < history_steps:
             first -= 1
             count += len(turns[first]["events"])
-        deadline = event["source_completed_s"]+horizon_seconds
+        decision_at, _, _ = decision_boundary(event)
+        deadline = decision_at+horizon_seconds
         last = index
         while last < len(turns) and min(item["source_started_s"] for item in turns[last]["events"]
                 if item["kind"] != "CPU_REDUCE") <= deadline:
@@ -971,7 +1001,7 @@ def choose_windows(trace, *, horizon_seconds, max_candidates, history_steps, max
             candidates.append(dict(event_id=identity, source_event_id=source_identity,
                 first_turn=begin, last_turn=last, steps=steps,
                 observation_seconds=horizon_seconds,
-                source_observation_window={"start": event["source_completed_s"], "end": deadline},
+                source_observation_window={"start": decision_at, "end": deadline},
                 observed_boundary_turn=turns[last]["attempt_id"],
                 source_attempts=[item["attempt_id"] for item in window],
                 priority=digest([seed, identity, source_identity]), turns=window))
@@ -1013,7 +1043,7 @@ def fit_window_pairs(trace, *, horizon_seconds, history_steps, max_replay_steps,
         scope = observed["inspection"]["cache_scope_hash"]
         bucket = json.dumps([features, scope], sort_keys=True, separators=(",", ":"))
         item = {**item, "fit_bucket": bucket, "captured_features": features,
-            "independent_session_ids": sorted({turn["session_id"] for turn in item["turns"]}),
+            "independent_session_ids": independent_sessions(item["turns"]),
             "model_calls_per_arm": len(trace_generations(window_trace(trace, item))),
             "sampling_probability": None, "sampling_weight": 1.0,
             "sampling_design": "budgeted feature-matched disjoint session windows; group-balanced, not inverse-probability"}
@@ -1099,7 +1129,7 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
     turn = next(turn for turn in trace["turns"] if any(event_id(turn, event) == identity for event in turn["events"]))
     source_event = next(event for event in turn["events"] if event_id(turn, event) == identity)
     source_start = source_event["source_started_s"]
-    source_end = source_event["source_completed_s"]+horizon_seconds
+    source_end = decision_boundary(source_event)[0]+horizon_seconds
     affected = [value for value in trace["turns"] if min(event["source_started_s"] for event in value["events"]
         if event["kind"] != "CPU_REDUCE") <= source_end and max(event["source_completed_s"] for event in value["events"]
         if event["kind"] != "CPU_REDUCE") >= source_start]
@@ -1108,12 +1138,12 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
                             for key in affected_ids) for arm, report in (("native", native), ("retained", retained))}
     target_delta = next_left["step_wall_ms"]-next_right["step_wall_ms"] if reused else 0
     window_delta = window_costs["native"]-window_costs["retained"]
+    sessions = independent_sessions(trace["turns"])
     row = dict(source="hardware", scope="actual_source_first_single_prefix_intervention",
         target_demand_rule=TARGET_DEMAND_RULE,
         dataset=turn["dataset"], split=turn["split"], training_eligible=trace["training_eligible"] and eligible,
         event_id=identity, source_event_id=selection["source_event_id"],
-        independent_session_ids=sorted({value["session_id"] for value in trace["turns"]}),
-        independent_sample_id=digest(sorted({value["session_id"] for value in trace["turns"]})),
+        independent_session_ids=sessions, independent_sample_id=digest(sessions),
         sample_unit="independent session group; overlapping windows and TTL arms are repeated measures",
         measurement_window_id=digest(selection["source_attempts"]),
         source_body_page_count=body_pages,

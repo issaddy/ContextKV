@@ -9,12 +9,12 @@ import sys
 from controller.prefix_retention import EmpiricalRetentionModel, session_components, session_group, balance_session_rows
 from controller.config import create_model_template, load_config
 from profiling.retention_coverage import audit_coverage
-from profiling.retention_trace import audit_trace_inputs, digest, fit_window_pairs, verify_trace, write_json
+from profiling.retention_trace import audit_trace_inputs, digest, fit_window_pairs, independent_sessions, verify_trace, write_json
 
 
 def validate_session_partitions(traces):
-    train = {turn["session_id"] for turn in traces["train"]["turns"]}
-    dev = {turn["session_id"] for turn in traces["dev"]["turns"]}
+    train = set(independent_sessions(traces["train"]["turns"]))
+    dev = set(independent_sessions(traces["dev"]["turns"]))
     if train & dev:
         raise ValueError("retention train/dev traces share independent sessions: "+repr(sorted(train & dev)))
 

@@ -9,15 +9,8 @@ from pathlib import Path
 
 from bench.metrics import distribution
 from controller.prefix_retention import session_components, balance_session_rows
-from profiling.retention_trace import (actual_page_size, causal_pages, choose_windows, digest, event_id,
-    read_decisions, revisit_outcomes, trace_generations, verify_trace, write_json)
-
-
-def decision_boundary(event):
-    observed = event.get("prefix_observation")
-    if observed is not None and observed.get("observed_ns") is not None:
-        return observed["observed_ns"]/1e9, "actual_capture_prefix_observation", True
-    return event["source_completed_s"], "actual_native_READ_completion_pre_control", False
+from profiling.retention_trace import (actual_page_size, causal_pages, choose_windows, decision_boundary, digest, event_id,
+    independent_sessions, read_decisions, revisit_outcomes, trace_generations, verify_trace, write_json)
 
 
 def source_families(event):
@@ -34,6 +27,7 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
         raise ValueError("coverage needs actual canonical READ observations")
     size = actual_page_size(reads, page_size)
     rows, by_id, page_reads, session_page_reads = [], {}, defaultdict(list), defaultdict(list)
+    exact_reads = defaultdict(list)
     for index, (turn, event) in enumerate(reads):
         scope = digest([event["fingerprint"], event["original_cache_config_hash"]])
         pages, body, system = causal_pages(event, size, scope)
@@ -48,6 +42,10 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
             body_pages=body, prefix_pages=pages)
         rows.append(row)
         by_id[row["event_id"]] = row
+        if body:
+            signature = digest([row["causal_prefix_signature"], event["evidence_token_ranges"]])
+            row["exact_source_signature"] = signature
+            exact_reads[signature].append((row["submitted_s"], index))
         for page in body:
             page_reads[page].append((row["submitted_s"], index))
             session_page_reads[page, row["session_id"]].append((row["submitted_s"], index))
@@ -76,6 +74,12 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
         row["followup_seconds"] = max(0, trace_end-row["decision_s"])
         row["next_actual_body_demand"] = next_demand(row, row["decision_s"])
         row["next_same_session_body_demand"] = next_demand(row, row["decision_s"], same_session=row["session_id"])
+        visits = exact_reads.get(row.get("exact_source_signature"), ())
+        position = bisect_right(visits, (row["decision_s"], len(rows)))
+        if position < len(visits):
+            submitted, index = visits[position]
+            row["next_exact_source_demand"] = {"event_id": rows[index]["event_id"],
+                "session_id": rows[index]["session_id"], "gap_seconds": submitted-row["decision_s"]}
     horizon_rows = []
     capacity = len(reads)*max_prefixes_per_decision
     for horizon in horizons:
@@ -88,11 +92,14 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
         for window in all_windows:
             decision, source = by_id[window["event_id"]], by_id[window["source_event_id"]]
             demand = next_demand(source, decision["decision_s"])
+            visits = exact_reads.get(source.get("exact_source_signature"), ())
+            position = bisect_right(visits, (decision["decision_s"], len(rows)))
             cases.append(dict(event_id=window["event_id"], source_event_id=window["source_event_id"],
-                independent_session_ids=sorted({turn["session_id"] for turn in window["turns"]}),
+                independent_session_ids=independent_sessions(window["turns"]),
                 source_session_id=source["session_id"], decision_session_id=decision["session_id"],
                 source_body_pages=source["source_body_pages"], next_actual_body_demand=demand,
                 within_ttl=demand is not None and demand["gap_seconds"] <= horizon,
+                exact_demand_within_ttl=position < len(visits) and visits[position][0] <= decision["decision_s"]+horizon,
                 exact_decision_observation=decision["exact_decision_observation"], steps=window["steps"],
                 first_turn=window["first_turn"], last_turn=window["last_turn"],
                 sampled=window in selected, sampling_probability=probability,
@@ -110,13 +117,14 @@ def audit_coverage(trace, *, horizons, page_size=None, max_candidates=8,
             right_censored_source_reads=sum(row["source_body_pages"] and row not in complete for row in rows),
             replay_eligible_windows=len(cases), identifiable_body_windows=len(identifiable),
             observed_demand_within_ttl=sum(case["within_ttl"] for case in identifiable),
+            observed_exact_demand_within_ttl=sum(case["exact_demand_within_ttl"] for case in identifiable),
             descriptive_observed_fraction=(sum(case["within_ttl"] for case in identifiable)/len(identifiable)
                                            if identifiable else None),
             sampled_windows=len(selected), sampled_identifiable_body_windows=len(sampled),
             independent_samples=len(components), sampled_independent_samples=len(sampled_components),
             group_balanced_observed_fraction=(sum(case["sampling_weight"]*case["within_ttl"] for case in balanced)
                 /sum(case["sampling_weight"] for case in balanced) if balanced else None),
-            sampled_session_groups=[sorted({turn["session_id"] for turn in window["turns"]}) for window in selected],
+            sampled_session_groups=[independent_sessions(window["turns"]) for window in selected],
             sample_unit="independent session group; selected windows can overlap and TTL arms are repeated measures",
             sampling_probability=probability,
             sampled_weight_sum=sum(case["sampling_weight"] for case in sampled),
