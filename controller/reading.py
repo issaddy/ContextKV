@@ -923,11 +923,19 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
             memberships = tuple(aliases[alias] for alias in fact["n"])
             if not set(memberships) <= set(scope.need_ids):
                 raise ValueError("numeric fact membership is outside its population scope")
+            span_ids = [source_aliases[alias] for alias in fact["s"]]
+            excerpt = fact["t"] if wire_version == SHARED_NUMERIC_PROTOCOL_VERSION else ""
+            literal = excerpt.strip()
+            if literal and task.kind == "READ" and not any(literal in span_units[sid].text for sid in span_ids):
+                matching = [unit for unit in units if literal in unit.text
+                            and (not unit.need_ids or set(memberships) <= set(unit.need_ids))]
+                if len(matching) == 1:
+                    span_ids = [span.span_id for span in matching[0].source_spans]
             values.append({"need_id": memberships[0], "shared_need_ids": memberships[1:],
-                "text": fact["t"] if wire_version == SHARED_NUMERIC_PROTOCOL_VERSION else "",
+                "text": excerpt,
                 "entity": fact["e"], "relation": fact["r"], "value": fact["v"],
                 "unit": fact["u"], "conditions": scope.condition_ids,
-                "span_ids": [source_aliases[alias] for alias in fact["s"]],
+                "span_ids": span_ids,
                 "parent_claim_ids": [parent_aliases[alias] for alias in fact["p"]], "followups": []})
     parsed, followups = [], []
     for index, value in enumerate(values):

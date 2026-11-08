@@ -260,7 +260,7 @@ def test_condition_scopes_and_source_versions_remain_separate():
     plan = numeric_plan((material("R1 approved mass 1 kg.", "old", "v1"),
                          material("R1 east mass 2 kg.", "new", "v2")), needs)
     task = plan.steps[0]
-    output = response(row("R1", "1", "kg"),
+    output = response({**row("R1", "1", "kg", source="s1"), "t": "R1 approved mass 1 kg."},
                       row("R1", "2", "kg", needs=("n2", "n3"), scope="g1", source="s1"))
     output["support"] = [f"n{index}" for index in range(len(task.need_ids))]
     result = parse_read_result(task, json.dumps(output), plan.selected_set.selected_units)
