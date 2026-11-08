@@ -626,7 +626,7 @@ class PrefixReadObserver:
                 hashes = executed_prefix_hashes(compiled.input_ids[:max(matches, default=0)], page_size)
                 matched_paths[key] = tuple(("demand:"+hashlib.sha256(json.dumps(
                     [session_id, scope, hashes[boundary]], separators=(",", ":")).encode()).hexdigest(),
-                    step_id, boundary, frozenset(scope+":"+value for end, value in hashes.items() if end <= boundary))
+                    step_id, boundary, tuple(scope+":"+value for end, value in hashes.items() if end <= boundary))
                     for boundary, (step_id, scope) in matches.items())
             return matched_paths[key]
 
@@ -649,15 +649,21 @@ class PrefixReadObserver:
             paths, demands = {}, {}
             for target, (compiled, priority) in targets.items():
                 quote = quotes[compiled.candidate_id]
+                evictable = quote.evictable_gpu_prefix_tokens or 0
                 pressure = (work(candidate) if candidate is not None else 0)+work(compiled)-batch.free_gpu_tokens
-                risk = min(max(0, pressure), quote.evictable_gpu_prefix_tokens or 0)
+                risk = min(max(0, pressure), evictable)
                 if not risk:
                     continue
                 matches = matching_sources(compiled)
-                if matches:
-                    _, _, boundary, path = max(matches, key=lambda match: match[2])
-                    demands[target] = (min(boundary, risk), priority, path)
-                    paths.update((owner, (step, end, pages)) for owner, step, end, pages in matches)
+                if not matches:
+                    continue
+                # Native FULL locks extend from the root to the deepest locked page.
+                locked_pages = (quote.ready_gpu_prefix_tokens-evictable)//page_size
+                _, _, _, path = max(matches, key=lambda match: match[2])
+                evictable_pages = frozenset(path[locked_pages:])
+                if evictable_pages:
+                    demands[target] = (min(len(evictable_pages)*page_size, risk), priority, evictable_pages)
+                    paths.update((owner, (step, end, frozenset(pages))) for owner, step, end, pages in matches)
 
             def coverage(pages):
                 return {target: min(risk, len(path & pages)*page_size)
