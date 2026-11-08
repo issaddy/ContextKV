@@ -180,6 +180,9 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     devices = tuple(resource_settings["gpu_devices"])
     if run.plan_gain is not None and run.plan_gain["mode"] == "observed_actions":
         run = replace(run, plan_gain={**run.plan_gain, "gpu_devices": devices, "process_ids": process_ids})
+    if run.state_observation is not None:
+        run = replace(run, state_observation={**run.state_observation,
+            "gpu_devices": devices, "process_ids": process_ids})
     if "answer_system_prompt" in spec:
         run = replace(run, context=replace(run.context, system_prompt=spec["answer_system_prompt"]))
     service = create_controller(run)
