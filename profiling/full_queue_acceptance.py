@@ -83,8 +83,6 @@ def _gate(point_met, interval_met, eligible, missing):
 
 
 def evaluate_full_queue(cells):
-    from bench.capacity_workflow import declared_execution_rows
-
     groups = defaultdict(list)
     for cell in cells:
         if cell.get("acceptance_protocol") is not None:
@@ -102,17 +100,24 @@ def evaluate_full_queue(cells):
                 slots[cell["replicate_scope"], repetition]
             if cell["method"] in methods:
                 slots[cell["replicate_scope"], cell["repetition"]][cell["method"]].append(cell)
-        pair_issues, pairs = [], []
+        pair_issues, pairs, contracts = [], [], set()
         for slot, arms in slots.items():
             counts = {method: len(arms[method]) for method in methods}
             if set(counts.values()) != {1}:
                 pair_issues.append({"replicate": slot, "method_counts": counts, "reason": "missing_or_ambiguous_queue"})
                 continue
             left, right = (arms[method][0] for method in methods)
-            if _pair_contract(left) != _pair_contract(right):
+            contract = _pair_contract(left)
+            if contract != _pair_contract(right):
                 pair_issues.append({"replicate": slot, "reason": "reader_scorer_or_resident_A_differs"})
                 continue
+            assets = [{name: item["sha256"] for name, item in cell["active_assets"].items()}
+                      for cell in (left, right)]
+            contracts.add(json.dumps((contract, assets), sort_keys=True))
             pairs.append((left, right))
+        if len(contracts) > 1:
+            pair_issues.append({"reason": "reader_scorer_or_assets_differ_across_replicates"})
+            pairs.clear()
 
         measurement_complete = bool(pairs) and not pair_issues and all(
             cell_gates[cell["generation_dir"]]["measurement_complete"] for pair in pairs for cell in pair)
@@ -136,6 +141,8 @@ def evaluate_full_queue(cells):
         latency_point = statistics.fmean(ratios) if ratios and len(ratios) == len(pairs) else None
         quality_ci, latency_ci = None, None
         if quality_point is not None:
+            from bench.capacity_workflow import declared_execution_rows
+
             matrix = yaml.safe_load(Path(pairs[0][0]["queue_job"]["matrix"]).read_text())
             quality_ci = declared_queue_quality_interval(matrix, [
                 tuple(declared_execution_rows(cell["queue_job"])[0] for cell in pair) for pair in pairs])

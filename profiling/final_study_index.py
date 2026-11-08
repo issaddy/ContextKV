@@ -296,7 +296,7 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
     binding = dict(frozen_A_config_sha256=plan["source_config"]["sha256"],
         matrix_sha256=plan["source_matrix"]["sha256"], cohort_sha256=canonical(plan["cohort"]),
         reader_run_sha256=canonical(run), reader_profile_id=plan["reader_profile_id"],
-        lambda_time=plan["lambda_time"])
+        lambda_time=plan["lambda_time"], execution_commit=plan.get("execution_commit"))
     device_source = {key: binding[key] for key in ("frozen_A_config_sha256", "matrix_sha256")}
     if joint_scope is not None:
         registered = [worker for worker in joint_scope["workers"]

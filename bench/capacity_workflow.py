@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import resource
+import subprocess
 import sys
 import time
 from types import SimpleNamespace
@@ -232,7 +233,6 @@ def full_queue_gap_limits(execution, gain=None, *, max_units=None, max_passages=
 
 def compilation_source_identity(checkout):
     """Record the verified author tree and actual Python sources used by its index."""
-    import subprocess
     from adapters.contextpilot import _verified_checkout
 
     root = _verified_checkout(str(checkout))
@@ -411,7 +411,10 @@ def prepare_full_queue(args, root):
         "seed": matrix["seed"],
         "p95_completion_rule": "all_declared_tasks_delivered",
         "cost_basis": "unique native receipts plus provider phase totals, and global online physical occupancy"}
+    revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=args.project_root,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout.strip() or None
     manifest = dict(format="contextkv_full_queue_joint_plan_v1", scope="full declared P3 development queue",
+        execution_commit=revision,
         source_config=snapshot(args.config), source_matrix=snapshot(args.matrix),
         source_cohorts=snapshot(args.cohorts) if args.cohorts is not None else None,
         reader_profile_id=profile, reader_run=snapshot(run_path), resource_scope=scope,

@@ -186,6 +186,10 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     plan['jobs'][0]['complete_slo_seconds'] = 60
     plan_path.write_text(json.dumps(plan))
     assert full_queue_comparisons(reference + cells(candidate))[0]['incompatible_identity_fields'] == ['complete_slo_seconds']
+    plan['jobs'][0]['complete_slo_seconds'] = 30
+    plan['execution_commit'] = 'new-release'
+    plan_path.write_text(json.dumps(plan))
+    assert full_queue_comparisons(reference + cells(candidate))[0]['incompatible_identity_fields'] == ['execution_commit']
 
     out = tmp_path / 'index'
     report = main(['--baseline-commit', '85f4ed4', '--physical', 'recorded-physical.json',
