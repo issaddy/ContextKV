@@ -180,6 +180,8 @@ class Controller:
                         self.events.emit("epoch_retire_retry", operation=op, error=str(exc))
                     else:
                         raise
+            if getattr(self.observe_prefix, "settings", {}).get("mode") == "demand":
+                await self.observe_prefix.flush_demand_releases(session_id, events=self.events)
         return acknowledged
 
     def _retire_background(self):
@@ -294,7 +296,7 @@ class Controller:
         observer = self.observe_prefix
         if getattr(observer, "settings", {}).get("mode") != "demand":
             return
-        mutation = await observer.finish_demand(attempt.reading_outcome, attempt.session_id)
+        mutation = await observer.finish_demand(attempt.reading_outcome, attempt.session_id, attempt.attempt_id)
         if mutation is not None:
             self.events.emit("joint_prefix_control", attempt_id=attempt.attempt_id,
                 choice=attempt.plan.candidate.candidate_id, quote_seq=attempt.plan.quote_seq,
@@ -1006,6 +1008,7 @@ class Controller:
             if exc.code != "STALE_RESTART":
                 raise
             self.store.fail_attempt(attempt.attempt_id, "engine_restart", force_recovery=True, retire_candidate=False)
+            self._retire_background()
             return None
         if status.result is not None:
             self.store.save_attempt(replace(attempt, stage="RESULT_READY", result=status.result))

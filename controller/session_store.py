@@ -361,20 +361,30 @@ class SessionStore:
             if previous is not None and (previous.prefix_input_ids, previous.sources,
                     previous.fingerprint) != (record.prefix_input_ids, record.sources, record.fingerprint):
                 raise IdempotencyConflict("prefix owner reused for another causal source path")
-            payload = self._dump(record)
-            self.db.execute("INSERT INTO prefix_owners VALUES(?,?,?,?,?) ON CONFLICT(owner_id) "
-                "DO UPDATE SET session_id=excluded.session_id,stage=excluded.stage,"
-                "engine_restart_id=excluded.engine_restart_id,payload=excluded.payload",
-                (record.owner_id, record.session_id, record.stage, record.receipt.engine_restart_id, payload))
-            self.db.execute("INSERT INTO prefix_owner_events(owner_id,event,payload,created_ns) VALUES(?,?,?,?)",
-                (record.owner_id, event, self._dump({"record": record, "details": details}), time.monotonic_ns()))
+            self._write_prefix_owner(record, event, details=details)
+
+    def _write_prefix_owner(self, record, event, *, details=None):
+        payload = self._dump(record)
+        self.db.execute("INSERT INTO prefix_owners VALUES(?,?,?,?,?) ON CONFLICT(owner_id) "
+            "DO UPDATE SET session_id=excluded.session_id,stage=excluded.stage,"
+            "engine_restart_id=excluded.engine_restart_id,payload=excluded.payload",
+            (record.owner_id, record.session_id, record.stage, record.receipt.engine_restart_id, payload))
+        self.db.execute("INSERT INTO prefix_owner_events(owner_id,event,payload,created_ns) VALUES(?,?,?,?)",
+            (record.owner_id, event, self._dump({"record": record, "details": details}), time.monotonic_ns()))
+
+    def _enqueue_demand_release(self, session_id, reason, *, attempt_id=None):
+        for owner in self.prefix_owners(session_id, active_only=True):
+            if (owner.policy == "joint_demand" and owner.stage != "RELEASING"
+                    and (attempt_id is None or owner.attempt_id == attempt_id)):
+                self._write_prefix_owner(replace(owner, stage="RELEASING", updated_ns=time.monotonic_ns()),
+                    "release_requested", details={"reason": reason})
 
     def prefix_owner(self, owner_id):
         with self._mutex:
             row = self.db.execute("SELECT payload FROM prefix_owners WHERE owner_id=?", (owner_id,)).fetchone()
             return load_record(self.db, PrefixOwnerRecord, row[0]) if row else None
 
-    def prefix_owners(self, session_id=None, *, active_only=False):
+    def prefix_owners(self, session_id=None, *, active_only=False, stage=None):
         with self._mutex:
             where, params = [], []
             if session_id is not None:
@@ -382,6 +392,9 @@ class SessionStore:
                 params.append(session_id)
             if active_only:
                 where.append("stage IN ('RETAINING','RETAINED','RELEASING')")
+            if stage is not None:
+                where.append("stage=?")
+                params.append(stage)
             sql = "SELECT payload FROM prefix_owners" + (" WHERE "+" AND ".join(where) if where else "")
             return tuple(load_record(self.db, PrefixOwnerRecord, row[0]) for row in
                          self.db.execute(sql+" ORDER BY rowid", params))
@@ -681,6 +694,7 @@ class SessionStore:
             updated = replace(attempt, stage="FAILED", error=error, failed_from_stage=attempt.stage,
                               terminal_receipt=terminal_receipt)
             self.db.execute("UPDATE attempts SET stage=?,payload=? WHERE attempt_id=?", (updated.stage, self._dump(updated), attempt_id))
+            self._enqueue_demand_release(attempt.session_id, "attempt_failed", attempt_id=attempt_id)
             snap = self._read(attempt.session_id)
             if force_recovery:
                 self._write_snapshot(replace(snap, version=snap.version + 1, force_new_epoch_for_recovery=True), snap.version)
@@ -732,6 +746,7 @@ class SessionStore:
             snap = self._read(session_id)
             if snap.current_epoch:
                 self._enqueue(session_id, snap.current_epoch, "session_closed", snap.version)
+            self._enqueue_demand_release(session_id, "session_closed")
             self.db.execute("UPDATE sessions SET closed=1 WHERE session_id=?", (session_id,))
 
     def reopen_session(self, session_id: str):

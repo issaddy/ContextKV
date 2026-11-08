@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from controller.schema import CompletionReceipt, ConfigFingerprint
-from controller.engine_client import EngineError
+from controller.engine_client import EngineError, UnknownOutcomeError
 from controller.serialization import to_jsonable
 from controller.templates import token_hash
 from engine_patches.contextkv_runtime import executed_prefix_hashes
@@ -501,8 +501,9 @@ class PrefixObserver:
                     "engine_restart_id": info.engine_restart_id}, updated_ns=time.monotonic_ns())
                 self.store.save_prefix_owner(updated, "runtime_restarted")
                 return updated.last_status
-            record = replace(record, stage="RELEASING", updated_ns=time.monotonic_ns())
-            self.store.save_prefix_owner(record, "release_requested", details={"reason": reason})
+            if record.stage != "RELEASING":
+                record = replace(record, stage="RELEASING", updated_ns=time.monotonic_ns())
+                self.store.save_prefix_owner(record, "release_requested", details={"reason": reason})
             ack = await self.runtime.release(owner_id, info.engine_restart_id)
             self.store.save_prefix_owner(replace(record, stage="RELEASED", last_status=ack,
                 updated_ns=time.monotonic_ns()), "release_acknowledged")
@@ -622,12 +623,12 @@ class PrefixReadObserver:
                     boundary = common//page_size*page_size
                     if shared_body_page(record.metrics["source_view"]["body_token_ranges"],
                             compiled.source_body_token_ranges or (), boundary, page_size):
-                        matches.setdefault(boundary, (record.step_id, inspection["cache_scope_hash"]))
+                        matches.setdefault(boundary, (record.step_id, record.attempt_id, inspection["cache_scope_hash"]))
                 hashes = executed_prefix_hashes(compiled.input_ids[:max(matches, default=0)], page_size)
                 matched_paths[key] = tuple(("demand:"+hashlib.sha256(json.dumps(
-                    [session_id, scope, hashes[boundary]], separators=(",", ":")).encode()).hexdigest(),
+                    [session_id, attempt_id, scope, hashes[boundary]], separators=(",", ":")).encode()).hexdigest(),
                     step_id, boundary, tuple(scope+":"+value for end, value in hashes.items() if end <= boundary))
-                    for boundary, (step_id, scope) in matches.items())
+                    for boundary, (step_id, attempt_id, scope) in matches.items())
             return matched_paths[key]
 
         def allocate(demand, task, candidate, actions):
@@ -767,14 +768,29 @@ class PrefixReadObserver:
                 "owner_status": {owner: {key: ack[key] for key in ("state", "reason", "boundary_tokens", "expires_at")
                                          if key in ack} for owner, ack in receipts.items()}}
 
-    async def finish_demand(self, outcome, session_id):
+    async def finish_demand(self, outcome, session_id, attempt_id):
         from .demand import DemandState, JointOption
 
         release = tuple(owner.owner_id for owner in self.store.prefix_owners(session_id, active_only=True)
-                        if owner.policy == "joint_demand")
+                        if owner.policy == "joint_demand" and owner.attempt_id == attempt_id)
         if release:
             return await self.apply_demand(JointOption(DemandState((), ()), release=release),
                                            outcome, session_id, batch=None)
+
+    async def flush_demand_releases(self, session_id, *, events):
+        async with self._allocation_lock:
+            for owner in self.store.prefix_owners(session_id, stage="RELEASING"):
+                if owner.policy != "joint_demand":
+                    continue
+                started = time.monotonic()
+                try:
+                    status = await self.owners.release(owner.owner_id, reason="terminal_demand")
+                except EngineError as exc:
+                    if not isinstance(exc, UnknownOutcomeError) and exc.code != "STALE_RESTART":
+                        raise
+                    status = {"state": "RELEASING", "error": str(exc)}
+                events.emit("joint_prefix_terminal_release", attempt_id=owner.attempt_id,
+                    owner_id=owner.owner_id, status=status, elapsed_ms=(time.monotonic()-started)*1000)
 
     @staticmethod
     def _features(plan, sources, accesses, now):
