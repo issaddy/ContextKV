@@ -132,7 +132,7 @@ def gap_retrieval_plan(state, request):
     if plan.budget.max_passages is not None:
         cap = min(cap, plan.budget.max_passages)
     return replace(plan, selected_set=replace(plan.selected_set, selected_units=read_units),
-                   budget=replace(plan.budget, max_passages=cap))
+                   budget=replace(plan.budget, max_passages=cap, max_units=request.limits["max_units"]))
 
 
 

@@ -572,7 +572,8 @@ class StudyEvidenceProvider:
                 if unit_id in selected:
                     continue
                 units = close_dependencies((*chosen_ids, unit_id), by_id)
-                if budget.max_passages is None or len(_passages(units).difference(passage_exclusions)) <= budget.max_passages:
+                if ((budget.max_units is None or len(units) <= budget.max_units) and
+                    (budget.max_passages is None or len(_passages(units).difference(passage_exclusions)) <= budget.max_passages)):
                     proposals.append((index, units))
             bodies = [render_unit_union(units) for _, units in proposals]
             encoded = self.template.tokenizer(bodies, add_special_tokens=False,
@@ -745,7 +746,9 @@ class StudyEvidenceProvider:
                 scores = support.score_support(state, context_pool, open_needs=tuple(open_needs))
                 planner = BudgetedEvidencePlanner(self.template.tokenizer, self._search_utility(support),
                     profile=SearchProfile(selection.get("beam_width", 4), selection.get("max_actions", 12),
-                        selection.get("retained_sets", 3)), measure_bodies=new_bodies, passage_exclusions=used_passages)
+                        selection.get("retained_sets", 3)), measure_bodies=new_bodies,
+                    measure_units=lambda groups: tuple(len(read_material(group)) for group in groups),
+                    passage_exclusions=used_passages)
                 evidence_sets = planner.search_sets(state, context_pool, scores, budget)
                 evidence_sets, rerank_ms = self._rerank_sets(state, evidence_sets, scores, support)
                 chosen = next((selected for selected in evidence_sets if any(not already_read(unit)

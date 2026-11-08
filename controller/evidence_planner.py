@@ -91,12 +91,13 @@ def best_need_supports(state, units, supports):
 
 class BudgetedEvidencePlanner:
     def __init__(self, tokenizer, utility_model, *, profile=SearchProfile(),
-                 measure_contexts=None, measure_bodies=None, passage_exclusions=frozenset()):
+                 measure_contexts=None, measure_bodies=None, measure_units=None, passage_exclusions=frozenset()):
         self.tokenizer = tokenizer
         self.utility_model = utility_model
         self.profile = profile
         self.measure_contexts = measure_contexts
         self.measure_bodies = measure_bodies
+        self.measure_units = measure_units
         self.passage_exclusions = frozenset(passage_exclusions)
         self.trace = ()
 
@@ -161,9 +162,12 @@ class BudgetedEvidencePlanner:
                     tuple(len(ids) for ids in self.tokenizer(
                         [render_unit_union(units) for units in groups], add_special_tokens=False,
                         return_attention_mask=False, return_token_type_ids=False)["input_ids"]))
+                unit_sizes = (self.measure_units(groups) if self.measure_units is not None
+                              else tuple(len(units) for units in groups))
                 admissible = {}
-                for (key, units), body_tokens in zip(unmeasured.items(), body_sizes, strict=True):
-                    if (body_tokens > budget.body_tokens or (budget.max_passages is not None
+                for (key, units), body_tokens, unit_count in zip(unmeasured.items(), body_sizes, unit_sizes, strict=True):
+                    if (body_tokens > budget.body_tokens or (budget.max_units is not None and unit_count > budget.max_units)
+                            or (budget.max_passages is not None
                             and len(_passages(units)-self.passage_exclusions) > budget.max_passages)):
                         measurement_cache[key] = None
                     else:

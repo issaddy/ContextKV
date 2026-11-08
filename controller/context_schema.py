@@ -296,6 +296,7 @@ class ContextBudget:
     lambda_time: float = 0.0
     lambda_gpu: float = 0.0
     lambda_host: float = 0.0
+    max_units: int | None = None
 
 
 @dataclass(frozen=True)
