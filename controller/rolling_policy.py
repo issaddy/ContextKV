@@ -513,7 +513,7 @@ class RollingPlanRuntime:
         coverage = (*seed.coverage, *((context_plans[0].coverage_scope, span.source_key.document_id,
                           unit.unit_id, record.step_id)
             for record in records for unit in context_plans[0].selected_set.selected_units
-            if unit.unit_id in record.task.input_unit_ids for span in unit.source_spans))
+            if unit.unit_id in record.result.covered_units for span in unit.source_spans))
         progress = executor.store.reading_progress(attempt_id)
         expanded = set(progress.expanded) if progress is not None else set()
         state = ReadingOutcome(seed.plan, results, records,
