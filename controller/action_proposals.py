@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import hashlib
 
-from .context_budget import bind_answer_window
+from .context_budget import answer_evidence_gaps, bind_answer_window
 from .context_schema import OpenNeed, ReadTask
 from .plan_policy import complete_plan
 from .reading import numeric_reduction_inputs, numeric_selection_step_id, numeric_selection_task
@@ -36,8 +36,6 @@ def observed_step_outputs(plan, task, template, *, output_budgets, output_tokens
 
 
 def observed_answer_options(state, *, joint, finite):
-    from .context_budget import answer_evidence_gaps
-
     options = {"layouts": ("existing",), "actions": ("REBUILD",)} if finite else {}
     if joint:
         representations = ["hybrid"]
@@ -52,7 +50,6 @@ def observed_answer_options(state, *, joint, finite):
 
 
 def eligible_observed_answers(state, candidates):
-    from .context_budget import answer_evidence_gaps
     from .request_compiler import unique_answer_inputs
 
     return unique_answer_inputs(tuple(candidate for candidate in candidates
@@ -207,6 +204,10 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
     add("direct_answer", ())
     ready = tuple(task for task in base.steps if task.kind == "READ" and task.step_id not in completed
                   and set(task.predecessor_step_ids) <= completed)
+    if (ready and base.coverage_scope == "selected_sources"
+            and all(need.operation == "lookup" and need.scope == "selected_sources" for need in base.task_state.needs)
+            and not answer_evidence_gaps(replace(frozen, plan=base))):
+        ready = ()
     if read_choices > 1:
         from .demand import DemandState
         demand = DemandState.from_outcome(frozen)
