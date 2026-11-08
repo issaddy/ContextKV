@@ -15,7 +15,7 @@
 |---|---|---|
 | 缓存状态影响下一步阅读 | 同一统计题和候选输入下，GPU 命中与 Host 回载改变首读来源，三种状态均提交正确结果及来源。 | `cache-tier-decision-evidence.json` |
 | 阅读需求影响缓存 | 同输入压力对照观测到 Host 回载转为 GPU 命中，以及 Host 压力下减少重新预填充。真实 TTL 回放另外覆盖无正文重访窗口。 | `demand-native-evidence.json`、`c-ttl-window/paired-evidence.json` |
-| 完整问答中的需求保留 | 三次 READ 的实际输入在 Native 与需求保留组逐一相同。两组均引用三份原文并答出 15 kg。受控容量竞争下，短租将重访的 896 token 从 Host 回载转为 GPU 命中，重访后释放。完整响应分别为 12.146 和 12.154 秒。 | `qa-pressure-f01fa8a.4D7Jfl/pair.json` |
+| 完整问答中的需求保留 | 固定三次 READ 的输入，两组都引用三份原文并答出 15 kg。短租将 896 token 的 Host 回载转为 GPU 命中，重访后释放。复用回执后省去旧路径的 52.6 ms READ 后观测，新配对的完整响应为 Native 12.256 秒、需求保留 12.242 秒。 | `qa-pressure-f01fa8a.4D7Jfl/pair.json`、`qa-pressure-4ada1d4.jsnU48/pair.json` |
 | READ 与 ANSWER 共用正文前缀 | 已提交的 VersionQA 轨迹中，最终回答实际命中先前阅读所见的正文页。 | `read-answer-prefix-evidence.json` |
 | 目录与窗口成本 | 实际 MT-RAG 目录、Qwen tokenizer 和两轮问答分别记录目录分词、初始化及完整响应变化。E1／E6 两轮配对均采用原文回答。 | `task-catalogue-evidence.json`、`mtrag-short-evidence.json`、`mtrag-e1-e6-short-evidence.json` |
 | 收益监督 | 按原始观测状态重采受 READ 输出上限规则影响的配对，并使用同一开发集重新校准。 | `gain-focused-evidence.json` |
