@@ -325,13 +325,20 @@ class SourceDirectory:
             {_category_value(text_ref_text(ref, texts)) for ref in condition.value_spans})
             for condition in state.conditions if (category := condition.relation_type.upper()) in SOURCE_CATEGORIES
             and condition.value_spans}
+        declared_values = {}
+        if literals:
+            for metadata in self.corpus_index.source_metadata.values():
+                for name, value in metadata.get("applicability", {}).items():
+                    declared_values.setdefault(name.upper(), set()).add(_category_value(value))
         requirements = {}
         for need in state.needs:
             allowed = requirements[need.need_id] = {}
             for identity in need.condition_ids:
                 if identity in literals:
                     category, values = literals[identity]
-                    allowed.setdefault(category, set()).update(values)
+                    grounded = values.intersection(declared_values.get(category, ()))
+                    if grounded:
+                        allowed.setdefault(category, set()).update(grounded)
 
         def admit(key):
             if not self._version_applicable(key, state, memory, temporal):
