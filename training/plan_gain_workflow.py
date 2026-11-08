@@ -71,7 +71,8 @@ async def workflow(config, settings):
                 "--output", asset]
             development = result["cohorts"].get("dev", {}).get("supervision", {})
             if development.get("effective_gain_records", 0):
-                fit_args.extend(["--dev", str(root/"dev-supervision"/"effective-gains.jsonl")])
+                fit_args.extend(["--dev", str(root/"dev-supervision"/"effective-gains.jsonl"),
+                                 "--source-catalogue", settings["sources"]])
             await asyncio.to_thread(fit_main, fit_args)
             result["asset"] = asset
         else:

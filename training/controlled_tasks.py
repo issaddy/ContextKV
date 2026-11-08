@@ -47,7 +47,8 @@ def build_controlled_tasks(config):
                     "published_at": start, "applicability": {"PLATFORM": platform}, "split": "train",
                     "track": "constructed_train", "title": f"{program} {version} {platform}", "text": text,
                     "offsets": [0, len(text)], "source_uri": f"study-training://{source_id}",
-                    "derived_from": {"source_id": original["source_id"], "start": 0, "end": len(excerpt)}}
+                    "derived_from": {"source_id": original["source_id"], "document_family": original["document_family"],
+                                     "start": 0, "end": len(excerpt)}}
                 scope.append(source)
                 facts[version, platform] = {"passage_id": source_id, "start": len(prefix), "end": len(text),
                     "quote": fact, "value": value, "unit": "credits", "version": version, "platform": platform}
@@ -59,7 +60,8 @@ def build_controlled_tasks(config):
             "valid_from": "2024-01-01", "valid_to": None, "applicability": {}, "title": other,
             "text": text, "offsets": [0, len(text)], "source_uri": f"study-training://{brief_id}",
             "split": "train", "track": "constructed_train",
-            "derived_from": {"source_id": briefing["source_id"], "start": 0, "end": min(12000, len(briefing["text"]))}})
+            "derived_from": {"source_id": briefing["source_id"], "document_family": briefing["document_family"],
+                             "start": 0, "end": min(12000, len(briefing["text"]))}})
         scope_ids = [source["source_id"] for source in scope]
         cases = [
             (f"What is the current Windows filing allowance for {program}?", [("2024", "Windows")], "ADD", "current", "at"),

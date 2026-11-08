@@ -377,6 +377,34 @@ def _observed_selection_contract(records):
         for branch in ("direct", "counterfactual"))
 
 
+def exposed_source_families(records, catalogue):
+    families = set()
+    for row in records:
+        for arm in ("direct", "counterfactual"):
+            branch = row[arm]
+            before, run = branch["pre_registration"], branch["actual_run"]
+            keys = [block["key"] for block in before["snapshot"]["archive"]]
+            plans = (before["working_state"]["plan"], (run.get("attempt") or {}).get("context_plan"))
+            for plan in plans:
+                if plan is not None:
+                    keys.extend(block["key"] for block in plan["selected_set"]["source_blocks"])
+                    keys.extend(plan["task_state"]["source_scope"])
+            gap = (run.get("gap_result") or {}).get("pool") or {}
+            keys.extend(block["key"] for block in gap.get("source_blocks", ()))
+            families.update(catalogue.get(key["passage_id"], key["document_id"]) for key in keys)
+    return families
+
+
+def source_family_catalogue(paths):
+    sources = {row["source_id"]: row for path in paths for row in rows(path)}
+    result = {}
+    for identity, row in sources.items():
+        parent = row.get("derived_from", {})
+        result[identity] = parent.get("document_family") or sources.get(
+            parent.get("source_id"), row)["document_family"]
+    return result
+
+
 def fit_effective(training, *, ridge=1.0, path=None):
     import numpy as np
     if not training or any(row["split"] != "train" or row["source"] != "actual_completion_weighted_counterfactual"
@@ -610,15 +638,25 @@ def main(argv=None):
     fit = commands.add_parser("fit")
     fit.add_argument("--train", required=True)
     fit.add_argument("--dev")
+    fit.add_argument("--source-catalogue", action="append", default=[],
+                     help="Original and derived source JSONL catalogues for family-disjoint calibration")
     fit.add_argument("--output", required=True)
     fit.add_argument("--ridge", type=float, default=1.0)
     args = parser.parse_args(argv)
     if args.command == "finalize":
         print(json.dumps(finalize(args.collection, args.output), ensure_ascii=False))
         return
-    model = fit_effective(rows(args.train), ridge=args.ridge, path=args.train)
+    training = rows(args.train)
     if args.dev:
         development = rows(args.dev)
+        catalogue = source_family_catalogue(args.source_catalogue)
+        train_families = exposed_source_families(training, catalogue)
+        dev_families = exposed_source_families(development, catalogue)
+        overlap = train_families & dev_families
+        if overlap:
+            raise ValueError(f"Effective gain train/dev share {len(overlap)} original source families")
+    model = fit_effective(training, ridge=args.ridge, path=args.train)
+    if args.dev:
         if any(row["split"] != "dev" or row["reader_checkpoint"] != model.reader_checkpoint or
                row["reader_profile_id"] != model.reader_profile_id
                or row.get("input_protocol") != model.provenance["input_protocol"]
@@ -639,6 +677,7 @@ def main(argv=None):
         report = {"records": len(development), **evaluate_paired_decisions(model, development),
             "reader_checkpoint": model.reader_checkpoint,
             "reader_profile_id": model.reader_profile_id, "asset_id": model.asset_id, "utility_rule": RULE,
+            "exposed_source_families": {"train": len(train_families), "dev": len(dev_families)},
             "completion_reserve_calibration": model.cost_provenance.get("completion_reserve_calibration")}
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output+".development.json").write_text(json.dumps(report, indent=2)+"\n")
