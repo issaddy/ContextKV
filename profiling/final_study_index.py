@@ -536,8 +536,8 @@ def markdown(report):
             f"{format(relative, '.2%') if relative is not None else '未知'} | "
             f"{('是' if quality else '否') if quality is not None else '未知'} |")
     lines += ["", "## 预登记的完整队列验收", "",
-        "| 并发 | 配对队列 | 费用与测量完整 | 资源预算 | 质量差及区间 | P95 比率及区间 | 质量验收 | 延迟验收 |",
-        "|---:|---:|---|---|---|---|---|---|"]
+        "| 并发 | 完成测量的实验格 | 配对队列 | 费用与测量完整 | 资源预算 | 质量差及区间 | P95 比率及区间 | 质量验收 | 延迟验收 |",
+        "|---:|---|---:|---|---|---|---|---|---|"]
     def point_interval(point, interval):
         if point is None:
             return "未知"
@@ -546,7 +546,12 @@ def markdown(report):
 
     for row in report["full_queue_acceptance"]:
         quality_ci = row["quality_confidence"]
-        lines.append(f"| {row['concurrency']} | {row['paired_queues']}/{row['declared_pair_slots']} | "
+        cells = row["required_cells_measured"]
+        pending = [label for label, measured in cells.items() if not measured]
+        coverage = f"{len(cells)-len(pending)}/{len(cells)}"
+        if pending:
+            coverage += "（缺 " + "、".join(pending) + "）"
+        lines.append(f"| {row['concurrency']} | {coverage} | {row['paired_queues']}/{row['declared_pair_slots']} | "
             f"{row['measurement_complete']} | {row['resource_budget_pass']} | "
             f"{point_interval(row['quality_delta'], quality_ci['interval'] if quality_ci else None)} | "
             f"{point_interval(row['p95_ratio'], row['p95_ratio_interval'])} | "

@@ -175,9 +175,10 @@ MAIN_COMPILATION_CELLS = {
     "E3": "B6_contextpilot", "E4": "S3_contextpilot",
 }
 JOINT_CONTEXT_CELLS = {"E5": "S3_contextpilot_joint_native", "E6": "S3_contextpilot_joint_demand"}
+FORMAL_CELLS = {**MAIN_COMPILATION_CELLS, **JOINT_CONTEXT_CELLS,
+    "LlamaIndex": "LlamaIndex_native", "no_fact_reuse": "S3_contextpilot_no_fact_reuse"}
 RULE_CONTEXT_METHOD = "Rule_contextpilot_joint_demand"
-FULL_QUEUE_METHODS = (*MAIN_COMPILATION_CELLS.values(), *JOINT_CONTEXT_CELLS.values(),
-    "LlamaIndex_native", "S3_contextpilot_no_fact_reuse")
+FULL_QUEUE_METHODS = tuple(FORMAL_CELLS.values())
 OPTIONAL_FULL_QUEUE_METHODS = ("E0_native", "B6_value", "S3_value", RULE_CONTEXT_METHOD)
 
 
@@ -438,7 +439,7 @@ def prepare_full_queue(args, root):
                 "completion_timing": snapshot(rolling_settings["completion_timing_asset"])
                 if completion_timing is not None else None},
         cohort=cohorts, workload_plans=workload_plans, acceptance=acceptance, replicate_id=args.replicate_id,
-        experiment_cells={**MAIN_COMPILATION_CELLS, **JOINT_CONTEXT_CELLS},
+        experiment_cells=FORMAL_CELLS,
         experiment_design="E1-E4 fixed/gain B x Native/ContextPilot; E5 finite representation; E6 demand retention; c1 and c4",
         method_factors={method["id"]: method["evaluation_factors"] for method in matrix["methods"]},
         external_retrievers=external_retrievers, external_reranker=args.external_reranker,
