@@ -940,6 +940,7 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
     started = time.monotonic()
     mode = settings.get("mode", "whole_plan")
     source_rows = read_rows(settings["sources"])
+    sources_by_id = {row["source_id"]: row for row in source_rows}
     packets = read_rows(settings["observed_states"]) if mode == "observed_actions" else ()
     if mode == "observed_actions":
         selected, cohort = observed_cohort(read_rows(settings["actual_rollouts"]), packets, source_rows,
@@ -1222,7 +1223,22 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                 async def retrieve_gap(plan, request, claims):
                     if request.retriever_identity != gap_retriever_identity(provider.manifest):
                         raise ValueError("GAP request is not bound to this actual retriever")
-                    return await provider.extend_for_plan(snap, plan, request.open_needs, claims)
+                    from controller.evidence import make_evidence
+
+                    supplied, metadata = [], {}
+                    for key in plan.task_state.source_scope:
+                        source = sources_by_id[key.passage_id]
+                        block = make_evidence(source["text"], key.document_id, corpus_id=key.corpus_id,
+                            passage_id=key.passage_id, version=source["version"],
+                            source_uri=source["source_uri"], title=source.get("title", ""))
+                        if block.key != key:
+                            raise ValueError("GAP scope source differs from the observed input")
+                        supplied.append(block)
+                        metadata[key] = {name: source[name] for name in ("document_family", "valid_from", "valid_to",
+                            "published_at", "applicability", "table_id", "heading", "current", "version_order")
+                            if name in source}
+                    return await provider.extend_for_plan(snap, plan, request.open_needs, claims,
+                        supplied_blocks=tuple(supplied) if supplied else None, source_metadata=metadata)
                 baseline = None
                 for branch_number, plan in enumerate(plans):
                     branch_dir = task_dir/f"branch-{branch_number:02d}"

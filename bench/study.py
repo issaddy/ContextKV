@@ -155,6 +155,9 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     online_started = time.monotonic()
     declared_tasks = matrix.get("cohorts", {}).get(split, {}).get(dataset_name)
     source_rows = dataset_rows(spec, split, task_ids=declared_tasks)
+    catalogue_path = spec.get("supplied_source_catalogue")
+    supplied_catalogue = ({row["source_id"]: {**row, "document_id": row["source_id"], "source": row["source_uri"]}
+                           for row in read_jsonl(catalogue_path)} if catalogue_path else None)
     reuse_provider = spec.get("reuse_provider", False)
     continue_conversation_failures = spec.get("continue_conversation_failures", False)
 
@@ -260,15 +263,17 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         supplied, metadata = None, None
         if (row.get("coverage_mode") or spec.get("supplied_documents",
                 dataset_name in {"loong", "long_dev", "multihop_dev"})):
+            contexts = (tuple(supplied_catalogue[key] for key in row["scope_source_ids"])
+                        if supplied_catalogue is not None else row["contexts"])
             supplied = tuple(make_evidence(context["text"], context["document_id"],
                 corpus_id=dataset_name, passage_id=context["document_id"],
                 version=context.get("version", "v1"),
                 source_uri=context.get("source") or f"{dataset_name}://{context['document_id']}",
-                title=context.get("title", "")) for context in row["contexts"])
+                title=context.get("title", "")) for context in contexts)
             metadata = {block.key: {key: context[key] for key in (
                 "document_family", "valid_from", "valid_to", "published_at", "applicability",
                 "table_id", "heading", "current", "version_order") if key in context}
-                for block, context in zip(supplied, row["contexts"], strict=True)}
+                for block, context in zip(supplied, contexts, strict=True)}
         response = await qa.ask(session_id, query, request_id, task_id=task_id,
             supplied_blocks=supplied, source_metadata=metadata, request_arrived=start,
             coverage_scope=row.get("coverage_mode", spec.get("coverage_mode", "selected_sources")))

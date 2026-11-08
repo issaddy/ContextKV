@@ -9,7 +9,6 @@ from pathlib import Path
 
 import yaml
 
-from controller.config import create_controller, load_config
 from controller.evidence import make_evidence
 from controller.serialization import to_jsonable
 from training.task_data import read_jsonl, write_jsonl
@@ -100,7 +99,53 @@ def build_controlled_tasks(config):
     return manifest
 
 
+def prepare_gain_capture(config, matrix):
+    """Reuse the policy dialogue prefix and split by the original document family."""
+    settings = config.get("training", {})
+    root = Path(settings.get("controlled_dir", "runs/study/constructed_train")).resolve()
+    original_path = Path(settings.get("data_dir", "runs/study/data"))/"sources.jsonl"
+    originals = {row["source_id"]: row["document_family"] for row in read_jsonl(original_path)}
+    source_path = root/"sources.jsonl"
+    sources = {row["source_id"]: row for row in read_jsonl(source_path)}
+    rows, families = [], {}
+    for row in read_jsonl(root/"questions.jsonl"):
+        if row["turn"] > 9:
+            continue
+        scope = [key for key in row["scope_source_ids"]
+                 if sources[key]["document_family"] == row["source_document_family"]]
+        family, = {originals[sources[key]["derived_from"]["source_id"]] for key in scope}
+        families[row["conversation_id"]] = family
+        rows.append({**row, "scope_source_ids": scope, "Collection": "constructed_train/conditions",
+                     "input": [{"speaker": "user", "text": row["question"]}],
+                     "targets": [{"text": row["reference_answer"]}], "contexts": [],
+                     "coverage_mode": "selected_sources"})
+    native_families = sorted(set(families.values()))
+    if len(native_families) < 2:
+        raise ValueError("condition gain capture needs distinct original source families for train and dev")
+    dev = set(native_families[::5])
+    task_path = root/"gain-tasks.jsonl"
+    write_jsonl(task_path, rows)
+    members = [{"task_id": row["task_id"], "conversation_id": row["conversation_id"], "turn": row["turn"],
+                "split": "dev" if families[row["conversation_id"]] in dev else "train"} for row in rows]
+    cohort_path = root/"gain-cohort.json"
+    cohort_path.write_text(json.dumps({"schema_version": 1, "members": members,
+        "original_family_by_conversation": families}, ensure_ascii=False, indent=2)+"\n")
+    datasets, cohorts = {}, {}
+    for split in ("train", "dev"):
+        track = "condition_gain_"+split
+        datasets[track] = {"input": str(task_path), "supplied_source_catalogue": str(source_path), "protocol": "P3"}
+        cohorts[track] = [row["task_id"] for row in members if row["split"] == split]
+    matrix_path = root/"gain-matrix.json"
+    matrix_path.write_text(json.dumps({"datasets": datasets, "cohorts": {"train": cohorts},
+        "methods": [{"id": "B6_native", "strategy": "B6"}], "resources": matrix["resources"]}, indent=2)+"\n")
+    return {"matrix": str(matrix_path), "cohort": str(cohort_path), "sources": str(source_path),
+            "source_families": {"train": len(native_families)-len(dev), "dev": len(dev)},
+            "tasks": {track: len(ids) for track, ids in cohorts.items()}}
+
+
 async def rollout_controlled(config, *, concurrency=8):
+    from controller.config import create_controller, load_config
+
     settings = config.get("training", {})
     root = Path(settings.get("controlled_dir", "runs/study/constructed_train"))
     sources = {row["source_id"]: row for row in read_jsonl(root/"sources.jsonl")}
@@ -159,13 +204,18 @@ async def rollout_controlled(config, *, concurrency=8):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "rollout"))
+    parser.add_argument("command", choices=("prepare", "prepare-gain", "rollout"))
     parser.add_argument("--config", default="configs/study.yaml")
+    parser.add_argument("--matrix", default="configs/study_matrix.yaml")
     parser.add_argument("--concurrency", type=int, default=8)
     args = parser.parse_args(argv)
     config = yaml.safe_load(Path(args.config).read_text())
-    result = build_controlled_tasks(config) if args.command == "prepare" else asyncio.run(
-        rollout_controlled(config, concurrency=args.concurrency))
+    if args.command == "prepare":
+        result = build_controlled_tasks(config)
+    elif args.command == "prepare-gain":
+        result = prepare_gain_capture(config, yaml.safe_load(Path(args.matrix).read_text()))
+    else:
+        result = asyncio.run(rollout_controlled(config, concurrency=args.concurrency))
     print(json.dumps(result, indent=2))
 
 

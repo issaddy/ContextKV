@@ -81,6 +81,9 @@ B 固定流程观测使用 `execution.state_observation`，在 A 冻结后启用
 已有实际 READ 分支可用 `training.collect_plan_gains --terminal-branches GAIN_ROOT --reader-config READER_YAML --output NEW_PACKETS` 导出终端状态。该入口使用原先保存的报价事件和物理样本切分已付成本，排除尚未发生的 ANSWER 费用；来源标为 `frozen_actual_rollout`，原 P3 与实际分支身份均保留。新配对沿用原 `actual-rollouts`、sources 和 cohort，使用新输出目录。
 `bench.study` 的成功/失败记录保留原始 `reference`、原始数据分区和 observer cohort 绑定，仅供离线审计与评分。导出器将 packet 绑定到完整实际 capture 行的 hash；B 采集核验 native-train 原始正文、版本、窗口坐标与 raw grounding 引文，开发会话独立隔离。原始参考不会进入 A/B/C 的在线输入。正式 dev 队列不能作为 B 训练数据。
 真实检索后的初始状态可配对 DIRECT 与首次 READ。线上和离线 DIRECT 均可基于普通选材范围回答已知部分并说明缺口；全资料与统计任务保留覆盖和运算要求。确定终止而未提交回答的分支效用为 0，原始评分为空。
+
+条件与版本监督复用 `training.controlled_tasks prepare` 生成的政策资料。`python3 -m training.controlled_tasks prepare-gain --config CAPTURE.yaml --matrix RESOURCE-MATRIX.yaml` 导出紧凑的任务、`gain-cohort.json` 和 `gain-matrix.json`。以现有固定 B 观测配置分别对 `condition_gain_train`、`condition_gain_dev` 执行 `bench.study evaluate --split train --unscored`，两次配置的 `cohort_split` 分别设为 `train`、`dev`，均绑定 `gain-cohort.json`。任务按实际 P3 连续执行，训练和校准按底层原文族分开，原文在登记时从共享 `sources.jsonl` 读取。导出各自的观测与逐题记录后，使用同一 RB_llm 配对入口和原始 `sources.jsonl`。
+
 进度分别记录去重源任务数和决策快照数，不将多个动作快照重复计为训练任务。
 `observed_actions` 按观测包里的额度编译首步。混合表示作为唯一直接回答参照，其他合法表示各自执行并评分。动作收益由成对效用拟合，回答表示的偏差按会话等权估计，成本读取各分支实际首步报价。
 `paired` 在专用 SGLang profiling reader 上对每个分支先清空缓存，再按观测记录回放已执行的来源前缀至 GPU 或 Host。缺少可回放来源时使用冷起点。记录配对起点的报价、预热回执和独立费用。E2、E4、E5、E6 读取新资产绑定的输出额度。
