@@ -240,6 +240,12 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
         stage, step, generation = store.execution_step(attempt.attempt_id, raw.step_id)
         if stage != "COMPLETE":
             raise ValueError("source trace has an incomplete internal step")
+        if step.task.kind == "GAP":
+            window = step.metrics["phase_window"]
+            events.append(dict(step_id=step.step_id, kind="GAP", operation=step.task.operation,
+                predecessor_step_ids=list(step.task.predecessor_step_ids),
+                source_started_s=window["start"], source_completed_s=window["end"]))
+            continue
         if not step.input_ids:
             events.append(dict(step_id=step.step_id, kind="CPU_REDUCE", operation=step.task.operation,
                 need_id=step.task.need_ids[0], claim_id=step.result.claims[0].claim_id,
@@ -364,7 +370,7 @@ class CapturePrefixObserver:
 
 
 def make_trace(turns, *, config, source_db, captured, case_outcomes=()):
-    model_events = [event for turn in turns for event in turn["events"] if event["kind"] != "CPU_REDUCE"]
+    model_events = [event for _, event in trace_generations({"turns": turns})]
     hashes = [event["input_hash"] for event in model_events]
     for event in model_events:
         if token_hash(event["input_ids"]) != event["input_hash"]:
@@ -669,7 +675,7 @@ def integrate_prefix_residency(observation, prefix_id, start, end, page_size):
 
 
 def trace_generations(trace):
-    return [(turn, event) for turn in trace["turns"] for event in turn["events"] if event["kind"] != "CPU_REDUCE"]
+    return [(turn, event) for turn in trace["turns"] for event in turn["events"] if "input_ids" in event]
 
 
 def read_decisions(trace):
@@ -757,7 +763,8 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
     locks = defaultdict(asyncio.Lock)
     receipts, controls, turn_windows = {}, [], {}
     start = time.monotonic()
-    source_origin = min(event["source_started_s"] for _, event in trace_generations(trace))
+    source_origin = min(event["source_started_s"] for turn in trace["turns"] for event in turn["events"]
+                        if event["kind"] != "CPU_REDUCE")
     active_owners = set()
     report = dict(source="hardware", scope="fixed_reading_dag_replay", intervention=intervention,
         decision_target=target,
@@ -768,7 +775,7 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
         output_policy="fresh responses measure actual native cost; captured outputs preserve the fixed DAG",
         parse_policy="captured_original_outputs",
         quality_scope="fixed-input cost attribution only; fresh outputs do not establish new QA quality",
-        timing_policy="captured per-turn input-ready arrivals; internal DAG executes causally without fixed model-submit stalls",
+        timing_policy="captured per-turn input-ready arrivals and GAP delays; model steps execute causally",
         cost_scope="reading DAG/ANSWER, C controls and declared physical process groups; upstream A is frozen",
         status="running", controls=controls)
     report["turn_windows"] = turn_windows
@@ -790,6 +797,12 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
             plan = decode(ContextPlan, turn["context_plan"])
             for event in turn["events"]:
                 identity = event_id(turn, event)
+                if event["kind"] == "GAP":
+                    tick = time.monotonic()
+                    await asyncio.sleep(event["source_completed_s"]-event["source_started_s"])
+                    receipts[identity] = dict(kind="GAP", window={"start": tick, "end": time.monotonic()},
+                                              timing_source="recorded_retrieval_duration")
+                    continue
                 if event["kind"] == "CPU_REDUCE":
                     tick = time.monotonic()
                     result = reduce_claims(event["operation"], tuple(decode(EvidenceClaim, value)

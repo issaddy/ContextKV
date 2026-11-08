@@ -248,6 +248,8 @@ def replay_events(trace_path, report_path):
     events, windows = [], []
     for turn in trace["turns"]:
         for source in turn["events"]:
+            if source["kind"] == "GAP":
+                continue
             identity = event_id(turn, source)
             actual = report["events"][identity]
             cpu = source["kind"] == "CPU_REDUCE"
