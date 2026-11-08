@@ -632,10 +632,9 @@ class StudyEvidenceProvider:
                 return True
 
             scoped = state.effective_source_scope is not None
-            if scoped:
-                fresh_pool = self.directory.full_scope(state.effective_source_scope)
-            elif state.source_scope:
-                fresh_pool = self.directory.applicable_scope(state.source_scope, state, memory)
+            if scoped or state.source_scope:
+                scope = state.effective_source_scope if scoped else state.source_scope
+                fresh_pool = self.directory.applicable_scope(scope, state, memory)
             else:
                 fresh_pool = self.directory.retrieve_gap_pool(state, memory, open_needs)
             fresh_units = tuple(unit for unit in fresh_pool.units if not already_read(unit))

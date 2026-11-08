@@ -1,8 +1,6 @@
 """Version-aware source directory and quota-balanced evidence candidate pools."""
 from __future__ import annotations
 
-from controller.context_budget import condition_references
-
 from dataclasses import dataclass, replace
 from datetime import date
 from functools import cached_property
@@ -11,12 +9,17 @@ import time
 
 import numpy as np
 
-from controller.context_schema import EvidencePool, EvidenceUnit, SourceSpan
 from adapters.table_relations import extract_table_relations
+from controller.context_budget import condition_references, text_ref_sources, text_ref_text
+from controller.context_schema import EvidencePool, EvidenceUnit, SourceSpan
 from controller.source_windows import SOURCE_WINDOW_TOKENS, source_window_spans
 
 
-_TEMPORAL_UNSET = object()
+SOURCE_CATEGORIES = frozenset({"PLATFORM", "LOCATION", "REGION", "PRODUCT", "POPULATION"})
+
+
+def _category_value(text):
+    return str(text).strip().rstrip(".,;:!?。！？").casefold()
 
 
 @dataclass(frozen=True)
@@ -283,7 +286,7 @@ class SourceDirectory:
                 metadata.get(key, {}).get("document_family", key.document_id), key.version) in anchored_versions)
         return selected
 
-    def _applicable(self, key, state, memory, *, temporal_sources=_TEMPORAL_UNSET):
+    def _version_applicable(self, key, state, memory, temporal_sources):
         intent = state.version_intent
         metadata = self.corpus_index.source_metadata.get(key, {})
         family = metadata.get("document_family", key.document_id)
@@ -291,8 +294,6 @@ class SourceDirectory:
             return False
         if intent.resolved_version_ids:
             return key.version in intent.resolved_version_ids
-        if temporal_sources is _TEMPORAL_UNSET:
-            temporal_sources = self._temporal_sources(state, memory)
         if temporal_sources is not None:
             return key in temporal_sources
         if intent.mode == "explicit":
@@ -316,17 +317,46 @@ class SourceDirectory:
             return metadata["current"]
         return True
 
+    def _source_admission(self, state, memory):
+        temporal = None if state.version_intent.resolved_version_ids else self._temporal_sources(state, memory)
+        texts = text_ref_sources(memory.committed_history,
+            current_turn_id=state.current_turn_id, current_user_text=state.raw_question)
+        literals = {condition.condition_id: (category,
+            {_category_value(text_ref_text(ref, texts)) for ref in condition.value_spans})
+            for condition in state.conditions if (category := condition.relation_type.upper()) in SOURCE_CATEGORIES
+            and condition.value_spans}
+        requirements = {}
+        for need in state.needs:
+            allowed = requirements[need.need_id] = {}
+            for identity in need.condition_ids:
+                if identity in literals:
+                    category, values = literals[identity]
+                    allowed.setdefault(category, set()).update(values)
+
+        def admit(key):
+            if not self._version_applicable(key, state, memory, temporal):
+                return None
+            declared = self.corpus_index.source_metadata.get(key, {}).get("applicability", {})
+            if not declared or not requirements:
+                return tuple(requirements)
+            scope = {name.upper(): _category_value(value) for name, value in declared.items()}
+            matching = tuple(need_id for need_id, allowed in requirements.items()
+                if all(name not in scope or scope[name] in values for name, values in allowed.items()))
+            return matching or None
+
+        return admit
+
     def retrieve_pool(self, state, memory):
         started = time.perf_counter()
         profile = self.profile
         streams, trace = [], []
-        temporal = None if state.version_intent.resolved_version_ids else self._temporal_sources(state, memory)
+        admit = self._source_admission(state, memory)
 
         def recall(query, top_k, origin, need_id=""):
             contexts = self.candidate_search(query, top_k=top_k)
             keys = self.corpus_index.retrieved_keys(contexts)
             hits = [(key, float(context.score or 0.0), need_id) for key, context in zip(keys, contexts, strict=True)
-                    if self._applicable(key, state, memory, temporal_sources=temporal)]
+                    if (matching := admit(key)) is not None and (not need_id or need_id in matching)]
             trace.append({"origin": origin, "need_id": need_id, "query": query,
                           "retrieved": len(contexts), "applicable": len(hits)})
             return hits
@@ -347,12 +377,11 @@ class SourceDirectory:
                   for ref in condition_references(condition)),
                 *state.version_intent.time_refs))
             streams.append(recall("\n".join(map(need_text, refs)), profile.per_need_top_k, "need", need.need_id))
-        archive = [key for key in memory.archive_source_keys if self._applicable(key, state, memory, temporal_sources=temporal)]
+        archive = [key for key in memory.archive_source_keys if admit(key) is not None]
         archive = self.archive_search(state.query or state.raw_question, archive, top_k=profile.archive_top_k)
         streams.append([(key, 0.0, "") for key in archive])
-        explicit = [key for key in self._blocks if key.version in state.version_intent.version_ids
-                    and self._applicable(key, state, memory, temporal_sources=temporal)]
-        streams.append([(key, 0.0, "") for key in (*state.source_scope, *explicit)])
+        explicit = [key for key in self._blocks if key.version in state.version_intent.version_ids]
+        streams.append([(key, 0.0, "") for key in (*state.source_scope, *explicit) if admit(key) is not None])
         selected, scores, needs = [], {}, {}
         # Round robin reserves each need and archive a place before filling the pool.
         for rank in range(max((len(stream) for stream in streams), default=0)):
@@ -366,8 +395,9 @@ class SourceDirectory:
                 if need_id:
                     needs.setdefault(key, set()).add(need_id)
         blocks = self.source_fetch(selected)
+        restricted = {key: matching for key in selected if len(matching := admit(key)) < len(state.needs)}
         units = tuple(replace(unit, retrieval_score=scores.get(block.key, 0.0),
-                              need_ids=tuple(sorted(needs.get(block.key, ()))))
+                              need_ids=tuple(sorted(needs.get(block.key, restricted.get(block.key, ())))))
                       for block in blocks for unit in self._source_units(block.key))
         return EvidencePool(units, blocks, "selected_sources", (time.perf_counter()-started)*1000, tuple(trace))
 
@@ -377,9 +407,12 @@ class SourceDirectory:
                             blocks, "all_supplied_documents")
 
     def applicable_scope(self, keys, state, memory):
-        temporal = None if state.version_intent.resolved_version_ids else self._temporal_sources(state, memory)
-        roots = (key for key in keys if self._applicable(key, state, memory, temporal_sources=temporal))
-        return self.full_scope(roots)
+        admit = self._source_admission(state, memory)
+        roots = {key: matching for key in keys if (matching := admit(key)) is not None}
+        pool = self.full_scope(roots)
+        restricted = {key: matching for key, matching in roots.items() if len(matching) < len(state.needs)}
+        return replace(pool, units=tuple(replace(unit, need_ids=restricted[unit.source_spans[0].source_key])
+            if unit.source_spans[0].source_key in restricted else unit for unit in pool.units))
 
     @staticmethod
     def open_need_query(state, need):
@@ -389,13 +422,13 @@ class SourceDirectory:
     def retrieve_gap_pool(self, state, memory, open_needs):
         started = time.perf_counter()
         units, blocks, trace = [], {}, []
-        temporal = None if state.version_intent.resolved_version_ids else self._temporal_sources(state, memory)
+        admit = self._source_admission(state, memory)
         for need in open_needs:
             query = self.open_need_query(state, need)
             contexts = self.candidate_search(query, top_k=self.profile.per_need_top_k)
             scored = {key: float(context.score) for key, context in zip(
                 self.corpus_index.retrieved_keys(contexts), contexts, strict=True)
-                if self._applicable(key, state, memory, temporal_sources=temporal)}
+                if (matching := admit(key)) is not None and need.need_id in matching}
             keys = tuple(scored)
             for block in self.source_fetch(keys):
                 blocks[block.key] = block

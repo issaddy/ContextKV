@@ -125,16 +125,17 @@ def read_contracts(memory):
     return tuple(contracts)
 
 
-def _applicable(contract, state, memory):
+def _applicable(contract, need, state, memory):
     source = memory.source_index
     if not _valid_units(contract.units, source._blocks):
         return False
     keys = {span.source_key for item in (*contract.units, *contract.atoms) for span in item.source_spans}
     scope = state.effective_source_scope
-    if scope is None:
-        roots = state.source_scope or tuple(key for key in keys if key in source._blocks)
-        scope = tuple(block.key for block in source.applicable_scope(roots, state, memory).source_blocks)
-    return keys.issubset(scope)
+    if scope is not None and not keys.issubset(scope):
+        return False
+    roots = state.source_scope if scope is None and state.source_scope else tuple(keys)
+    applicable = source.applicable_scope(roots, replace(state, needs=(need,)), memory)
+    return keys.issubset(block.key for block in applicable.source_blocks)
 
 
 def build_reuse_seed(plan, bindings, contracts, memory):
@@ -153,7 +154,7 @@ def build_reuse_seed(plan, bindings, contracts, memory):
         if binding.mode not in {"facts", "complete"}:
             raise ValueError("unknown READ reuse decision")
         need, contract = needs[binding.need_id], by_read[binding.read_id]
-        if not _applicable(contract, state, memory):
+        if not _applicable(contract, need, state, memory):
             continue
         prior_state = contract.outcome.plan.task_state
         origin = f"history:{contract.attempt_id}:"

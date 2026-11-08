@@ -26,7 +26,7 @@ flowchart TD
 
 任务解释从当前问题与实际 QA 提取 Need、主体、前驱和适用条件。条件替换与撤销只影响引用该条件的 Need，工作历史按原坐标移除失效条件。逐 Need 检索、支持、READ 和 ANSWER 使用条件键、值和谓词的同一原文解析规则。READ 和 ANSWER 同时接收实际版本时间原文。教师在预算内以可见窗口的 token 边界引用原文，持久化时还原为消息与半开字符坐标。[任务解释](../adapters/history_state.py) · [任务投影](../controller/context_budget.py)
 
-登记资料的范围在解释前生效，来源目录和复用合同均按本次范围投影。解释后先过滤适用版本，再展开来源依赖。全资料覆盖、GAP 与事实复用共用同一有效资料范围。当前研究配置使用 BM25＋BGE dense 混合召回与发布版 BGE reranker。`selection.mode: ranked` 按重排顺序、依赖闭包、实际 ANSWER 窗口及 passage 额度选材。固定 B 与收益动作 B 消费一个初始材料集合。可选 `selection.mode: support` 另评单段和互补组合，按支持效用、完整 Need 数、相关性和 token 成本选择。`whole_plan` 对照保留多个集合供下游决策。[检索与选材](../adapters/study_retrieval.py)
+登记资料的范围在解释前生效，来源目录和复用合同均按本次范围投影。解释后按版本及各 Need 明确声明的类别条件筛选来源，再展开来源依赖。全资料覆盖、GAP 与事实复用共用这一适用性规则。当前研究配置使用 BM25＋BGE dense 混合召回与发布版 BGE reranker。`selection.mode: ranked` 按重排顺序、依赖闭包、实际 ANSWER 窗口及 passage 额度选材。固定 B 与收益动作 B 消费一个初始材料集合。可选 `selection.mode: support` 另评单段和互补组合，按支持效用、完整 Need 数、相关性和 token 成本选择。`whole_plan` 对照保留多个集合供下游决策。[检索与选材](../adapters/study_retrieval.py)
 
 规范来源窗口按实际 tokenizer、原文坐标和版本定义，当前粒度为 2048 token、最多 8 个非空原文行。超长行按 tokenizer 切分，其他行保留完整。标题、表头与注释随数据窗口的依赖闭包读取。source-first 将当前条件、事实别名和输出协议放在稳定原文之后，多个窗口可合并进一次 READ。[来源窗口](../controller/source_windows.py)
 
