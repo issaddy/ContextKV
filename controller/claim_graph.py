@@ -24,14 +24,17 @@ class ClaimGraph:
         self.claims[claim.claim_id] = claim
 
     def leaf_claims(self, claim_id):
-        claim = self.claims[claim_id]
-        if not claim.parent_claim_ids:
-            return (claim,)
-        leaves = {claim.claim_id: claim} if claim.kind == "extract" else {}
-        for parent in claim.parent_claim_ids:
-            for leaf in self.leaf_claims(parent):
-                leaves[leaf.claim_id] = leaf
-        return tuple(leaves.values())
+        leaves, visited, todo = [], set(), [claim_id]
+        while todo:
+            identity = todo.pop()
+            if identity in visited:
+                continue
+            visited.add(identity)
+            claim = self.claims[identity]
+            if claim.kind == "extract" or not claim.parent_claim_ids:
+                leaves.append(claim)
+            todo.extend(reversed(claim.parent_claim_ids))
+        return tuple(leaves)
 
     def source_spans(self, claim_id):
         spans = {}
@@ -62,12 +65,10 @@ class ClaimGraph:
                        for identity in (*item.basis_claim_ids, *item.frontier_claim_ids)}
             frontier = {identity for item in active if need.need_id in item.need_ids
                         for identity in item.frontier_claim_ids}
-            parents = {parent for claim in self.claims.values()
-                       if claim.claim_id not in pending and claim.serves(need.need_id)
-                       for parent in claim.parent_claim_ids}
-            selected = tuple(claim for claim in self.claims.values()
-                if claim.serves(need.need_id) and (claim.claim_id in frontier-parents
-                    or claim.claim_id not in parents | managed | pending))
+            current = tuple(claim for claim in self.claims.values()
+                if claim.serves(need.need_id) and (claim.claim_id in frontier
+                    or claim.claim_id not in managed | pending))
+            selected = claim_frontier(current, ())
             spans = {span.span_id: span for claim in selected
                      for span in self.source_spans(claim.claim_id)}
             points.append(AnswerPoint(need.need_id, tuple(c.claim_id for c in selected),
@@ -110,5 +111,5 @@ class ClaimGraph:
 def claim_frontier(inputs, outputs):
     """Retain independent conclusions and inputs not consumed by a conclusion."""
     claims = (*inputs, *outputs)
-    parents = {parent for claim in claims for parent in claim.parent_claim_ids}
+    parents = {parent for claim in claims if claim.kind == "derived" for parent in claim.parent_claim_ids}
     return tuple(claim for claim in claims if claim.claim_id not in parents)
