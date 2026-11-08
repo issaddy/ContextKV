@@ -142,7 +142,7 @@ def method_config(config, method, dataset, split):
 
 
 async def run_dataset(config, matrix, method, dataset_name, split, directory, *, concurrency=1,
-                      limit_conversations=None, workload=None, question_fn=None, request_namespace=None):
+                      limit_conversations=None, limit_turns=None, workload=None, question_fn=None, request_namespace=None):
     from adapters.study_retrieval import create_study_retriever
     from controller.evidence import make_evidence
     from bench.native_metrics import NativePoolSampler, pool_series
@@ -166,6 +166,26 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
 
     if workload is not None:
         concurrency = workload.concurrency
+    grouped = {}
+    for number, row in enumerate(source_rows):
+        grouped.setdefault(row["conversation_id"], []).append((number, row))
+    conversations = sorted(grouped)[:limit_conversations]
+    if limit_turns is not None:
+        remaining, scheduled = limit_turns, []
+        for sid in conversations:
+            if remaining <= 0:
+                break
+            grouped[sid] = sorted(grouped[sid], key=lambda item: item[1]["turn"])[:remaining]
+            scheduled.append(sid)
+            remaining -= len(grouped[sid])
+        conversations = scheduled
+    if reuse_provider and (concurrency != 1 or workload is not None
+            or any(len(grouped[sid]) != 1 or grouped[sid][0][1]["turn"] != 1 for sid in conversations)):
+        raise ValueError("reuse_provider requires serial independent one-turn conversations")
+    expected = [row["task_id"] for sid in conversations for _, row in grouped[sid]]
+    if workload is not None and set(workload.dispatch_order) != set(expected):
+        raise ValueError("workload and dataset must contain exactly the same task IDs")
+
     config = method_config(config, method, spec, split)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -199,18 +219,6 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                    if cache_protocol == "cold" and not reuse_provider else None)
     engine_info = await service.engine.info()
     allocator = await service.engine.metrics()
-    grouped = {}
-    for number, row in enumerate(source_rows):
-        grouped.setdefault(row["conversation_id"], []).append((number, row))
-    conversations = sorted(grouped)
-    if limit_conversations is not None:
-        conversations = conversations[:limit_conversations]
-    if reuse_provider and (concurrency != 1 or workload is not None
-            or any(len(grouped[sid]) != 1 or grouped[sid][0][1]["turn"] != 1 for sid in conversations)):
-        raise ValueError("reuse_provider requires serial independent one-turn conversations")
-    expected = [row["task_id"] for sid in conversations for _, row in grouped[sid]]
-    if workload is not None and set(workload.dispatch_order) != set(expected):
-        raise ValueError("workload and dataset must contain exactly the same task IDs")
     generation_manifest = {"config": config, "method": method, "measurement_segment_id": segment_id,
         "dataset": dataset_name, "split": split, "task_ids": [row["task_id"] for row in source_rows],
         "scheduled_task_ids": expected, "cohort_declared": declared_tasks is not None,
@@ -528,7 +536,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
 
 
 async def evaluate(config, matrix, output, *, split, frozen=None, methods=None, datasets=None,
-                   concurrency=1, limit_conversations=None, score=True, workload=None, question_fn=None,
+                   concurrency=1, limit_conversations=None, limit_turns=None, score=True, workload=None, question_fn=None,
                    request_namespace=None):
     from bench.study_scoring import score_dataset
 
@@ -548,7 +556,7 @@ async def evaluate(config, matrix, output, *, split, frozen=None, methods=None, 
                 continue
             directory = output/method["id"]/name
             rows = await run_dataset(config, matrix, method, name, split, directory,
-                concurrency=concurrency, limit_conversations=limit_conversations,
+                concurrency=concurrency, limit_conversations=limit_conversations, limit_turns=limit_turns,
                 workload=workload[name] if isinstance(workload, dict) else workload, question_fn=question_fn,
                 request_namespace=request_namespace)
             generated.append((name, dataset, directory, rows))
@@ -657,7 +665,7 @@ def main(argv=None):
     parser.add_argument("--datasets", nargs="+")
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--limit-conversations", type=int)
-    parser.add_argument("--limit-turns", type=int)
+    parser.add_argument("--limit-turns", type=int, help="Cap rollout turns, or scheduled turns per evaluation method and dataset")
     parser.add_argument("--unscored", action="store_true")
     parser.add_argument("--workload-plan")
     parser.add_argument("--goal-policy")
@@ -708,7 +716,7 @@ def main(argv=None):
         write_json(output/"matrix.json", matrix)
         result = asyncio.run(evaluate(config, matrix, output, split=args.split, frozen=frozen,
             methods=args.methods, datasets=args.datasets, concurrency=args.concurrency,
-            limit_conversations=args.limit_conversations, score=not args.unscored,
+            limit_conversations=args.limit_conversations, limit_turns=args.limit_turns, score=not args.unscored,
             workload=workload, question_fn=goal_policy.question_fn if goal_policy else None,
             request_namespace=args.request_namespace))
         result = {"rows": len(result), "output": str(output.resolve())}

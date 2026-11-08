@@ -34,6 +34,8 @@ study 配置的 `execution.cache_compilation` 取 `{mode: contextpilot, checkout
 
 LlamaIndex 复用统一引擎、来源投影和成本账本。恢复按原 SQLite 和实际请求 ID 继续，已经支付的步骤不重发；新的尝试使用新的请求命名空间。
 
+短端到端运行可在 `python3 -m bench.study evaluate` 的现有配置命令后加 `--methods METHOD --datasets DATASET --limit-conversations 1 --limit-turns 2 --unscored --output NEW_DIR`。按会话顺序运行前两轮，运行清单分别记录实际调度和完整声明队列。
+
 | 任务 | 当前入口 | 必须保留的对照与产物 |
 |---|---|---|
 | 结论预算、共享数值与有限归约 | `bench.reading_mechanisms` | 共享阅读 / `--numeric-need-isolation`；实际 messages、完整来源叶子与阶段账本 |

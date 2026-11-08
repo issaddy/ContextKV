@@ -88,18 +88,18 @@ async def test_explicit_request_namespace_resumes_failed_p3_without_changing_tas
     tasks = tmp_path/"tasks.jsonl"
     tasks.write_text("".join(json.dumps(dict(task_id=f"task:{i}", conversation_id="session", turn=i,
         Collection="fixture", contexts=[], input=[{"speaker": "user", "text": f"Question {i}?"}]))+"\n"
-        for i in (1, 2)))
+        for i in (1, 2, 3)))
     config = {"generation": {"run_config": str(run)}, "task_model": {"mode": "fixture"},
         "support_model": {"mode": "fixture"}, "study": {"strategy": "B0"},
         "execution": dict(window_tokens=32768, output_tokens=1024, lambda_time=0, lambda_gpu=0, lambda_host=0)}
     matrix = {"datasets": {"track": {"input": str(tasks)}}, "resources": {"gpu_devices": [], "process_ids": []}}
     method = {"id": "B0", "strategy": "B0"}
     with pytest.raises(ExceptionGroup):
-        await run_dataset(config, matrix, method, "track", "train", tmp_path)
+        await run_dataset(config, matrix, method, "track", "train", tmp_path, limit_turns=2)
     first_segments = json.loads((tmp_path/"measurement_segments.json").read_text())["segments"]
     first_raw = {p: (tmp_path/p/"generation_manifest.json").read_bytes() for p in first_segments}
     rows = await run_dataset(config, matrix, method, "track", "train", tmp_path,
-                             request_namespace="condition-schema-v1")
+                             limit_turns=2, request_namespace="condition-schema-v1")
     assert calls == [("task:1", 0), ("task:2", 1), ("task:2", 1)]
     assert [row["task_id"] for row in rows] == ["task:1", "task:2"]
     assert rows[1]["request_id"] == "condition-schema-v1:task:2"
@@ -111,7 +111,10 @@ async def test_explicit_request_namespace_resumes_failed_p3_without_changing_tas
     assert store.find_request(session, "task:2").stage == "FAILED"
     assert store.find_request(session, "condition-schema-v1:task:2").stage == "COMMITTED"
     assert len(store.get_snapshot(session).raw_history) == 2
-    assert json.loads((tmp_path/"generation_manifest.json").read_text())["request_namespace"] == "condition-schema-v1"
+    manifest = json.loads((tmp_path/"generation_manifest.json").read_text())
+    assert manifest["request_namespace"] == "condition-schema-v1"
+    assert manifest["task_ids"] == ["task:1", "task:2", "task:3"]
+    assert manifest["scheduled_task_ids"] == ["task:1", "task:2"]
     store.close()
 
 
