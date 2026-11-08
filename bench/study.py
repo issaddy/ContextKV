@@ -6,6 +6,7 @@ import asyncio
 from collections import Counter
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import random
 import time
@@ -168,6 +169,14 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     segment_id = uuid.uuid4().hex
     run = load_config(config["generation"]["run_config"])
     run = replace(apply_study_config(run, config), state_dir=str(directory/"state"))
+    resource_settings = matrix["resources"]
+    ports = [urlparse(run.engine.base_url).port]
+    if config["task_model"].get("mode") == "teacher" or config["support_model"].get("mode") == "teacher":
+        ports.append(urlparse(config["generation"]["teacher_url"]).port)
+    process_ids = tuple(sorted({os.getpid(), *listening_processes(ports), *resource_settings.get("process_ids", ())}))
+    devices = tuple(resource_settings["gpu_devices"])
+    if run.plan_gain is not None and run.plan_gain["mode"] == "observed_actions":
+        run = replace(run, plan_gain={**run.plan_gain, "gpu_devices": devices, "process_ids": process_ids})
     if "answer_system_prompt" in spec:
         run = replace(run, context=replace(run.context, system_prompt=spec["answer_system_prompt"]))
     service = create_controller(run)
@@ -206,6 +215,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         "cache_start_protocol": cache_protocol, "cache_start_record": cache_start,
         "reuse_provider": reuse_provider, "conversation_cache_boundary": "cold" if reuse_provider else None,
         "auxiliary_initialization_ms": initialization_ms,
+        "resource_scope": {"gpu_devices": devices, "process_roots": process_ids},
         "engine": engine_info, "allocator_initial": allocator,
         "model": run.model, "generation_protocol": run.sampling,
         "measurement_kind": "hardware" if run.engine.kind == "sglang" else "simulation"}
@@ -218,12 +228,6 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         for path in (directory/"terminal_read_failures").glob("*.json")
         for row in [json.loads(path.read_text())]} if reuse_provider else {}
     semaphore = asyncio.Semaphore(concurrency)
-    resource_settings = matrix["resources"]
-    ports = [urlparse(run.engine.base_url).port]
-    if config["task_model"].get("mode") == "teacher" or config["support_model"].get("mode") == "teacher":
-        ports.append(urlparse(config["generation"]["teacher_url"]).port)
-    process_ids = (*listening_processes(ports), *resource_settings.get("process_ids", ()))
-    devices = list(resource_settings["gpu_devices"])
     physical = StudyResourceSampler(devices, process_ids)
     native = NativePoolSampler(run.engine.base_url, gpu_capacity=allocator["pool"]["gpu_capacity_tokens"],
         host_enabled=allocator["pool"]["host_capacity_tokens"] > 0, model=run.model.name)

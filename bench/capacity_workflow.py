@@ -291,7 +291,7 @@ def prepare_full_queue(args, root):
         native_endpoint=run.engine.base_url, gpu_capacity_tokens=run.engine.gpu_capacity_tokens,
         host_capacity_tokens=run.engine.host_capacity_tokens,
         host_enabled=run.engine.host_capacity_tokens > 0, model="Qwen3-32B")
-    matrix["resources"].update(gpu_devices=args.online_gpu_devices, process_ids=roots)
+    matrix["resources"].update(gpu_devices=args.online_gpu_devices, process_ids=args.online_process_roots or ())
     execution = config["execution"]
     if args.lambda_time is not None:
         execution["lambda_time"] = args.lambda_time
@@ -312,7 +312,6 @@ def prepare_full_queue(args, root):
             raise ValueError("full-queue read budgets differ from the fitted candidate domain")
     rolling_settings = dict(mode="observed_actions",
         reader_checkpoint=run.model.revision, reader_profile_id=profile,
-        gpu_devices=args.online_gpu_devices, process_ids=roots,
         sampling_interval_seconds=args.sampling_interval, output_budgets=read_outputs,
         output_tokens_per_fact=config["reading"]["output_tokens_per_fact"],
         prefix_directory=True, gap_limits=gap_limits, read_choices=2)
