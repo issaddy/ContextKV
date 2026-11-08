@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import resource
+import signal
 import subprocess
 import sys
 import time
@@ -686,6 +687,14 @@ def summarize_job(job):
         performance_scope="observed completed responses; failure coverage reported separately; shared physical batch counted once, not sum of request shares")
 
 
+async def interrupt_job(process):
+    try:
+        os.killpg(process.pid, signal.SIGINT)
+    except ProcessLookupError:
+        pass
+    return await process.wait()
+
+
 async def run(args):
     root = Path(args.output).resolve()
     root.mkdir(parents=True, exist_ok=False)
@@ -706,6 +715,9 @@ async def run(args):
     state = dict(format=("contextkv_full_queue_joint_workflow_v1" if args.full_queue
                          else "contextkv_two_turn_capacity_workflow_v1"), scope=plan["scope"],
         status="running", requested_qa=plan["requested_qa"], jobs=[], results=[])
+    loop, task = asyncio.get_running_loop(), asyncio.current_task()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signum, task.cancel)
     try:
         for job in plan["jobs"]:
             if deadline is not None and time.time() >= deadline:
@@ -725,21 +737,23 @@ async def run(args):
             directory = root/"jobs"/job["name"]
             directory.mkdir(parents=True, exist_ok=True)
             record = {**job, "command": command, "status": "running", "started_s": time.monotonic()}
-            state["jobs"].append(record)
-            write_json(root/"workflow.json", state)
             with (directory/"process.log").open("wb") as log:
                 process = await asyncio.create_subprocess_exec(*command, cwd=Path(args.project_root).resolve(),
-                    stdout=log, stderr=asyncio.subprocess.STDOUT)
+                    stdout=log, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
                 record["pid"] = process.pid
+                state["jobs"].append(record)
                 write_json(root/"workflow.json", state)
+                stopped = None
                 try:
                     code = await asyncio.wait_for(process.wait(), max(.1, deadline-time.time())) if deadline else await process.wait()
                 except TimeoutError:
-                    process.terminate()
-                    code = await process.wait()
-                    record["deadline_terminated"] = True
+                    stopped = "stopped_at_deadline"
+                    code = await interrupt_job(process)
+                except asyncio.CancelledError:
+                    stopped = state["status"] = "interrupted"
+                    code = await interrupt_job(process)
             record.update(returncode=code, ended_s=time.monotonic(),
-                          status="completed" if code == 0 else "failed_with_existing_raw_preserved")
+                          status=stopped or ("completed" if code == 0 else "failed_with_existing_raw_preserved"))
             summary = summarize_full_queue(job) if args.full_queue else summarize_job(job)
             summary["runtime_hardware"] = hardware
             summary["native_cache_config"] = native_runtime["cache_config"]
@@ -753,6 +767,16 @@ async def run(args):
             print(json.dumps({"job": job["name"], "status": record["status"],
                 "completed": summary["completed_qa"], "requested": job["requested_qa"],
                 "p95_ms": summary["p95_complete_ms"]}), flush=True)
+            if state["status"] == "interrupted":
+                break
+    except asyncio.CancelledError:
+        state["status"] = "interrupted"
+    except Exception:
+        state["status"] = "failed"
+        raise
+    else:
+        if state["status"] == "running":
+            state["status"] = "finished_with_actual_coverage"
     finally:
         end = time.monotonic()
         await native.stop()
@@ -777,9 +801,11 @@ async def run(args):
         counts = Counter()
         for row in state["results"]:
             counts[row["method"]] += row["completed_qa"]
-        state.update(status="finished_with_actual_coverage", completed_by_method=dict(counts),
-            performance_scope=plan["scope"], full_cost=str(root/"capacity-cost.json"))
+        state.update(completed_by_method=dict(counts), performance_scope=plan["scope"],
+            full_cost=str(root/"capacity-cost.json"))
         write_json(root/"workflow.json", state)
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(signum)
     return state
 
 
@@ -845,4 +871,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    if main().get("status") == "interrupted":
+        raise SystemExit(130)

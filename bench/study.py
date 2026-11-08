@@ -393,6 +393,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             except Exception as cleanup_error:
                 failure["cleanup_error"] = {"type": type(cleanup_error).__name__, "message": str(cleanup_error)}
 
+    dispatch_window = None
     try:
         if reuse_provider:
             from bench.evidence_policy_comparison import (persist_p3_failure,
@@ -453,9 +454,12 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             async with asyncio.TaskGroup() as group:
                 for sid in conversations:
                     group.create_task(conversation(sid), name=f"study:{method['id']}:{dataset_name}:{split}:{sid}")
+        if dispatcher is not None:
+            dispatch_window = await dispatcher.finish_arrivals()
     finally:
-        dispatch_window = await dispatcher.finish_arrivals() if dispatcher is not None else None
         measured_end = time.monotonic()
+        if dispatcher is not None and dispatch_window is None:
+            dispatch_window = {"start": dispatcher.origin, "end": measured_end}
         await native.stop()
         await physical.stop()
         observation = native.observation()
