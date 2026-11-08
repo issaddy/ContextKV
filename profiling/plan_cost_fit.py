@@ -414,8 +414,6 @@ def main(argv=None):
     parser.add_argument("--capture-entry", action="append", default=[])
     parser.add_argument("--phase-entry", action="append", default=[], help="Actual standalone model REDUCE capture entry")
     parser.add_argument("--replay-pair", nargs=2, metavar=("TRACE", "NATIVE_REPORT"), action="append", default=[])
-    parser.add_argument("--legacy-records", action="append", default=[],
-        help="Audit old study rows without attributing request-share resource costs to phases")
     parser.add_argument("--reader-checkpoint", required=True)
     parser.add_argument("--reader-profile-id", required=True)
     parser.add_argument("--split", choices=("train", "dev"), default="dev")
@@ -433,16 +431,6 @@ def main(argv=None):
     groups = [capture_events(path) for path in args.capture_entry]
     groups.extend(phase_events(path) for path in args.phase_entry)
     groups.extend(replay_events(*pair) for pair in args.replay_pair)
-    for path in args.legacy_records:
-        provenance = file_provenance((path,))
-        for line in Path(path).read_text().splitlines():
-            row = json.loads(line)
-            outcome = row.get("reading_outcome")
-            steps = outcome["steps"] if outcome is not None else row.get("steps", ())
-            for step in (*steps, {"step_id": "ANSWER", "task": {"kind": "ANSWER"}, "metrics": {}}):
-                ledger.append(dict(observation_id=str(row.get("task_id"))+"/"+step["step_id"],
-                    generation_kind=step["task"]["kind"], source_files=list(provenance), status="excluded",
-                    reason="legacy_request_cost_has_no_linked_absolute_phase_and_continuous_physical_proof"))
     for events, samples, windows in groups:
         for event in events:
             identity = dict(observation_id=event["observation_id"], generation_kind=event["generation_kind"],

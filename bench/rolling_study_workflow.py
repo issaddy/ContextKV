@@ -77,7 +77,7 @@ def configure(args, root):
                               "cost_artifact": native["base_artifact"]}}})
     methods.sort(key=lambda method: method.get("comparison") != "actual_reader_bound_plan_gain")
     matrix = merge_config(matrix, {"methods": methods, "selection": {
-        "include_ablations": False, "baseline": args.baselines[0],
+        "baseline": args.baselines[0],
         "test_comparators": args.baselines}})
     matrix["resources"]["gpu_devices"] = settings["gpu_devices"]
     matrix["resources"]["process_ids"] = settings["process_ids"]
@@ -237,7 +237,6 @@ async def workflow(args):
             load = json.loads(Path(args.load_manifest).read_text())
             diagnostic = yaml.safe_load(Path(load["diagnostic_matrix_path"]).read_text())
             diagnostic["methods"] = chosen
-            diagnostic["selection"]["include_ablations"] = False
             diagnostic["resources"]["gpu_devices"] = profile["resource_scope"]["gpu_devices"]
             path = root/"load-matrix.yaml"
             path.write_text(yaml.safe_dump(diagnostic, allow_unicode=True, sort_keys=False))

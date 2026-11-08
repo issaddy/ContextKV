@@ -125,8 +125,6 @@ def prepare(config, matrix=None):
             "task": config["task_model"]["asset"], "support": config["support_model"]["asset"],
             "preference": config["support_model"]["preference_asset"]}}
     if matrix is not None:
-        from bench.study_jobs import development_variants
-        write_json(output/"development_jobs.json", development_variants(matrix))
         # Evaluation assets are inventoried independently from training builders.
         manifest["datasets"] = {name: {"split_kind": spec["split_kind"],
             "primary_metric": spec["primary_metric"], "weight": spec["weight"],
@@ -725,9 +723,6 @@ def main(argv=None):
         if frozen:
             config, matrix = frozen["config"], frozen["matrix"]
         else:
-            if args.split == "dev" and matrix["selection"].get("include_ablations", False):
-                from bench.study_jobs import development_variants
-                matrix = {**matrix, "methods": development_variants(matrix)}
             missing = [name for name in matrix["datasets"]
                 if (args.datasets is None or name in args.datasets)
                 and name not in matrix.get("cohorts", {}).get(args.split, {})]

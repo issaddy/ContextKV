@@ -129,7 +129,7 @@ def prepare(args, root):
             diagnostic_only=True, include_in_public_quality_aggregate=False)
         job_matrix["datasets"] = {"dynamic_goal_dev": source_spec}
         job_matrix["cohorts"] = {"dev": {"dynamic_goal_dev": [row["task_id"] for row in rows]}}
-        job_matrix["selection"].update(include_ablations=False, development_weights={"dynamic_goal_dev": 1.0})
+        job_matrix["selection"]["development_weights"] = {"dynamic_goal_dev": 1.0}
         matrix_path = directory/"matrix.yaml"
         matrix_path.write_text(yaml.safe_dump(job_matrix, sort_keys=False))
         order = ("S3_native", "B6_native") if concurrency == 4 else ("B6_native", "S3_native")
@@ -339,8 +339,7 @@ def prepare_full_queue(args, root):
     matrix["methods"] = full_queue_method_specs(selected_methods, gain_settings, compilation, value_policy,
                                                 rule_settings=rule_settings, demand_pricing=demand_pricing)
     reference = "B6_native" if "B6_native" in selected_methods else matrix["methods"][0]["id"]
-    matrix["selection"].update(include_ablations=False, baseline=reference,
-                               test_comparators=[reference])
+    matrix["selection"].update(baseline=reference, test_comparators=[reference])
     config_path = root/"frozen-A-study.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
     cohorts = matrix["cohorts"]["dev"]

@@ -20,7 +20,7 @@ SGLang RadixAttention 和 HiCache 提供精确因果前缀匹配、GPU/Host 驻�
 
 文档 KV 依赖前面的完整 token 路径。项目据此把 source-first 请求的稳定原文放在变化的历史和任务之前，READ 与直接 ANSWER 都采用这一排列原则。原文、历史、结论和引用完整进入实际输入，排列候选由 Native 当前报价选择。[ContextPilot 文档排列](https://arxiv.org/html/2511.03475v1#S5) · [RAGCache 知识树](https://arxiv.org/html/2404.12457v2#S5.SS1)
 
-可选 TTL/value 在原生容量管理之上分配额外保护。保留目标借鉴有预算的覆盖和分层替换，在共同观察窗以 Native 为参照，核算共享页、增量驻留和控制成本。主矩阵使用 Native retention。[预算最大覆盖](https://doi.org/10.1016/S0020-0190(99)00031-9) · [RAGCache](https://arxiv.org/abs/2404.12457)
+E1–E5 使用 Native 保留，E6 用剩余证据需求分配短租。可选 TTL/value 在同一原生容量管理上估计保护价值。保留目标借鉴有预算的覆盖和分层替换，在共同观察窗核算共享页、增量驻留和控制成本。[预算最大覆盖](https://doi.org/10.1016/S0020-0190(99)00031-9) · [RAGCache](https://arxiv.org/abs/2404.12457)
 
 ## 外部参照与公开评价
 

@@ -13,6 +13,7 @@
 
 | 观察 | 结果与范围 | 记录 |
 |---|---|---|
+| 实际端到端 | `304866a` 的 VersionQA Native/需求保留各完成四轮，末轮均正确引用两版原文。一个多跳用例经三次 READ、一次 REDUCE，引用三份来源并提交。 | `e2e-304866a.E3dwid/result/results.jsonl`、`e2e-read-304866a.W7ni09/multihop.json` |
 | 缓存状态影响下一步阅读 | 同一统计题和候选输入下，GPU 命中与 Host 回载改变首读来源，三种状态均提交正确结果及来源。 | `cache-tier-decision-evidence.json` |
 | 阅读需求影响缓存 | 同输入压力对照观测到 Host 回载转为 GPU 命中，以及 Host 压力下减少重新预填充。真实 TTL 回放另外覆盖无正文重访窗口。 | `demand-native-evidence.json`、`c-ttl-window/paired-evidence.json` |
 | 完整问答中的需求保留 | 固定三次 READ 的输入，两组都引用三份原文并答出 15 kg。短租将 896 token 的 Host 回载转为 GPU 命中，重访后释放。复用回执后省去旧路径的 52.6 ms READ 后观测，新配对的完整响应为 Native 12.256 秒、需求保留 12.242 秒。 | `qa-pressure-f01fa8a.4D7Jfl/pair.json`、`qa-pressure-4ada1d4.jsnU48/pair.json` |

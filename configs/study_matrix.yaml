@@ -10,11 +10,8 @@ selection:
   equal_cost_relative_tolerance: 0.05
   bootstrap_samples: 5000
   objective: continuous_quality
-  include_ablations: false
-  lambda_time_grid: []
   test_comparators: [B0, Btoken, B3, B6, Lmap]
 # capacity_workflow materializes these recipes against the frozen A and declared IDs.
-# Legacy methods below remain available for historical/local diagnostics.
 final_evaluation:
   workflow: bench.capacity_workflow
   protocol: P3
@@ -135,11 +132,3 @@ methods:
   - {id: B6, strategy: B6, description: coverage_READ_REDUCE_multihop}
   - {id: B7, strategy: B7, description: native_KV_complete_cost_no_new_training}
   - {id: Lmap, strategy: Lmap, description: full_scope_map_reduce}
-ablations:
-  support_orders: []
-  reading: []
-  layouts: []
-  output_tokens: []
-  body_tokens: []
-  workloads: []
-  cache: []

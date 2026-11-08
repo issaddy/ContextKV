@@ -25,7 +25,8 @@ class PlannerKnobs:
     max_complete_ms: float | None = None
 
     def __post_init__(self) -> None:
-        supported = {"cost", "always_append", "always_rebuild", "fixed_threshold", "stable_layout", "normal_rag", "fixed_period", "warm_idle", "contextpilot", "redundancy_threshold"}
+        supported = {"cost", "always_append", "always_rebuild", "fixed_threshold",
+                     "fixed_period", "warm_idle", "redundancy_threshold"}
         if self.strategy not in supported:
             raise ValueError("unknown planner strategy")
         if self.fixed_token_threshold < 0:
@@ -37,9 +38,9 @@ class PlannerKnobs:
 
 
 def _fixed(append, rebuild, strategy, knobs, session, quotes=None):
-    if strategy in {"always_rebuild", "normal_rag"}:
+    if strategy == "always_rebuild":
         return rebuild
-    if strategy in {"always_append", "stable_layout", "contextpilot"}:
+    if strategy == "always_append":
         return append
     if strategy == "fixed_period":
         return rebuild if session.turns_since_rebuild + 1 >= knobs.period else append

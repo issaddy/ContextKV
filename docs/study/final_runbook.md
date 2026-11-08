@@ -6,23 +6,7 @@
 
 跨机器同步代码、配置和轻量结果／成本记录；训练模型及完整日志保存在实验容器。
 
-运行冻结同一 Qwen3-32B 模型权重与解码参数，显式配置端点、协议身份与原生缓存。主机目录、GPU、服务端口和
-输出目录由本次运行配置声明。
-
-引擎准备复用容器当前 Python/CUDA，不安装或替换 PyTorch：
-
-```bash
-export CONTEXTKV_MODEL_SCOPE_PATH=/absolute/path/qwen3-scope.json
-bash scripts/bootstrap_sglang.sh
-source runs/engine-runtime.env
-CUDA_VISIBLE_DEVICES=0 bash scripts/launch_sglang.sh --host 127.0.0.1 --port 30000
-```
-
-scope 的 `model_path` 指向 `/data/models/qwen3-32b`，模型/tokenizer 身份沿用真实文件。默认集成为官方 SGLang 0.5.18 源码及项目补丁，CUDA 内核来自现有环境。`engine-source.json`、`engine-environment.txt` 记录实际版本；不要求升级主机驱动。
-
-本次使用 `source runs/study-20261106-resume/default-python/runtime.env`。默认解释器为 `/opt/sglang/bin/python3`；`CUDA_HOME` 使用该运行目录内的 `cuda12-toolkit/root/usr/local/cuda-12.9`，`LD_PRELOAD` 选择实际挂载的 `libcuda.so.560.35.03`，FlashInfer 与 SGLang JIT 使用对应 cu129 工具链。BF16/FA3 显式设置上游 `SGLANG_ENABLE_JIT_DEEPGEMM=0`，补丁使该开关在可选扩展导入前生效；共享 DeepGEMM 包未卸载。`NO_PROXY` 覆盖本机服务地址。当前服务与采集使用默认解释器。
-
-BGE 检索、发布重排器及历史编码器在本环境显式使用 `sdpa_backend: math`；对应配置分别位于 retriever YAML 和 `task_model`。两套索引的语料、向量哈希及离线费用见 `runs/study-20261106-resume/offline-index-build`。此后端选择不改变 Qwen 权重或推理设置。
+容器、模型路径和启动命令见[部署](../deployment.md)。本次配置声明实际端点、解码参数和资源范围。BGE 的 `sdpa_backend` 在 retriever YAML 和 `task_model` 中配置，索引语料、向量哈希及离线费用随索引记录。
 
 作者 ContextPilot 准备与启用：
 
@@ -148,7 +132,7 @@ python3 -m training.train_models --config configs/auxiliary_training.yaml --stag
 python3 -m training.train_models --config configs/auxiliary_training.yaml --stage support-eval
 ```
 
-`support-eval` 读取显式 `support_eval_asset`、`support_eval_labels`、cohort 和输出目录，核对资产实际训练会话与开发会话隔离，报告支持标量误差、错误 complete、原文 span 选择及真实推理费用。这是独立会话上的教师标签一致性，原文正确性另审；不能据此替代完整问答质量。当前优先分析支持选择是否丢失有效材料，未启动支持学生训练。
+`support-eval` 在独立开发会话上报告支持标量误差、错误 complete、原文 span 选择和推理费用。完整问答质量由候选实际答案与来源单独评价。
 
 `build_examples` 使用固定 Qwen 服务生成支持关系标签。P1 采集将
 `collection.task_asset` 设为实际训练后的 task 资产、`parent_support_asset` 设为实际 support 资产，
@@ -184,8 +168,6 @@ P1 效用输入使用零上下文 `evidence_set_only`，不使用实际 READ 后
 B 从冻结 A 的真实观察采集动作分支；失败尝试中已完成步骤的观察通过真实 Attempt ID
 进入配对，capture 最终状态仅作出处，不作为模型特征或未来质量筛选条件。
 
-默认关闭大型消融 sweep，
-保留 B0/Btoken/B3/B6/B7/Lmap 对照入口和 c1/c4 资源配置。
 20 道 constructed long_dev 使用非官方 `constructed_numeric_exact_v1`：模型仅从实际问题和答案
 抽取最终计数、总额、单位与一致性，不接触 gold；代码按整数、Decimal 和 credits 单位精确比较，
 计数与总额同时匹配才得 1 分；
