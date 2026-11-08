@@ -125,27 +125,20 @@ def calibration_ids(directory):
     return identities, provenance, "missing_artifact_files:"+str(missing) if missing else "actual_declared_asset_observation_ids"
 
 
-def observed_remaining(row, event, attempt, terminal, observations):
-    step, _, _ = event["decision"]
-    key = step["candidate"]["candidate_id"] if step["candidate"] is not None else step["task"]["step_id"]
-    option = event["option_diagnostics"].get(key, {})
+def observed_remaining(row, event, attempt, terminal, observations, option):
     forecast = option.get("rollout_expected_cost")
-    row["prediction_scope"] = "fixed_bounded_rollout"
     row["actual_scope"] = "online_replanning_until_actual_terminal_state"
     row["terminal_state"] = attempt.stage
     row["completion_reserve"] = option.get("completion_reserve")
     row["completion_cost"] = option.get("completion_cost")
     row["prediction"] = forecast
-    if forecast is None:
-        row["unmatched_reasons"].append("recorded_bounded_rollout_forecast_missing")
-        return
     paid = event.get("physical_paid_observation")
     if paid is None or terminal is None or attempt.stage not in {"COMMITTED", "FAILED"}:
         row["unmatched_reasons"].append("paid_boundary_or_authoritative_terminal_event_missing")
         return
     start = paid["end"]
     window = terminal.get("answer_phase_window")
-    end = window["end"] if window is not None else terminal["monotonic_timestamp_ns"]/1e9
+    end = window["commit_at"] if window is not None else terminal["monotonic_timestamp_ns"]/1e9
     if end <= start:
         row["unmatched_reasons"].append("terminal_boundary_does_not_follow_paid_boundary")
         return
@@ -167,7 +160,8 @@ def observed_remaining(row, event, attempt, terminal, observations):
             actual = usage[name]+len(answer_tokens)+sum(len(getattr(step, step_field)) for step in steps)
             if actual >= event["paid_cost"][name]:
                 row["actual"][name] = actual-event["paid_cost"][name]
-    row["errors"] = {key: forecast[key]-value for key, value in row["actual"].items()}
+    if forecast is not None:
+        row["errors"] = {key: forecast[key]-value for key, value in row["actual"].items()}
     if row["completion_cost"] is not None and attempt.stage == "COMMITTED":
         row["latency_reserve_underestimated"] = row["actual"]["latency_ms"] > row["completion_cost"]["latency_ms"]
 
@@ -309,13 +303,11 @@ def audit_directory(directory):
             if event.get("engine_kind") != "sglang":
                 row["unmatched_reasons"].append("source_is_not_actual_sglang_hardware")
                 continue
-            if required:
-                row["completion_reserve"] = event["completion_reserve"]
-                continue
-            if event["decision_mode"] == "observed_actions":
+            if required or event["decision_mode"] == "observed_actions":
                 terminal = ((commits.get(attempt.attempt_id) or recovered.get(attempt.attempt_id))
                             if attempt.stage == "COMMITTED" else failures.get(attempt.attempt_id))
-                observed_remaining(row, event, attempt, terminal, observations)
+                option = event if required else event["option_diagnostics"].get(key, {})
+                observed_remaining(row, event, attempt, terminal, observations, option)
                 continue
             prediction, reason = selected_prediction(event)
             if reason:
@@ -447,13 +439,15 @@ def main(argv=None):
     destination.mkdir(parents=True, exist_ok=False)
     (destination/"predictions.jsonl").write_text("".join(json.dumps(to_jsonable(row), ensure_ascii=False, allow_nan=False)+"\n" for row in rows))
     remaining = [row for row in rows if row.get("prediction_scope") == "fixed_bounded_rollout"]
+    mandatory = [row for row in rows if row.get("prediction_scope") == "mandatory_scope_reservation"]
     body_reuse = {(row["generation_dir"], row["attempt_id"]): trace["read_answer_body_reuse"]
                   for row in rows if (trace := row.get("trajectory")) and "read_answer_body_reuse" in trace}.values()
     summary = {"format": "contextkv_rolling_prediction_error_audit_v1", "source_directories": sources,
         "summaries": summaries([row for row in rows if row.get("prediction_scope") is None]),
         "observed_rollout_remaining": summaries(remaining),
-        "mandatory_scope_decisions": dict(Counter(row["kind"] for row in rows
-            if row.get("prediction_scope") == "mandatory_scope_reservation")),
+        "mandatory_scope_decisions": dict(Counter(row["kind"] for row in mandatory)),
+        "mandatory_scope_actual_remaining": dict(Counter(row["kind"] for row in mandatory
+            if "latency_ms" in row["actual"])),
         "trajectory_examples": trajectory_examples(rows),
         "read_answer_body_reuse": {"answers_checked": len(body_reuse),
             "answers_with_shared_body": sum(row["matching_body_tokens"] > 0 for row in body_reuse),

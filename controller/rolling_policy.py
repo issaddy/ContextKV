@@ -456,15 +456,15 @@ class RollingPlanRuntime:
         plan = state.plan
         full_scope = plan.coverage_scope == "all_supplied_documents"
         numeric_operations = {"count", "sum", "group"}
-        if not full_scope:
-            if plan.reading_mode != "typed_reduce" or not any(
-                    need.operation in numeric_operations for need in plan.task_state.needs):
-                return None
-            completed = {result.step_id for result in state.results}
-            if any(task.kind == "READ" and task.step_id not in completed for task in plan.steps):
-                return None
+        numeric = plan.reading_mode == "typed_reduce" and any(
+            need.operation in numeric_operations for need in plan.task_state.needs)
+        if not full_scope and not numeric:
+            return None
+        completed = {result.step_id for result in state.results}
+        numeric_reads_pending = numeric and any(task.kind == "READ" and task.step_id not in completed
+                                               for task in plan.steps)
         ready = advance_read_plan(plan, state.results)
-        if self._mandatory_coverage(state):
+        if self._mandatory_coverage(state) or numeric_reads_pending:
             task = next((task for task in ready if task.kind == "READ"), None)
             if task is None:
                 raise NoCompletePlan("no ready READ can complete the required source scope")
