@@ -256,6 +256,8 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
         f"original sources = {len({span.source_key for span in graph.source_spans(claim.claim_id)})}."
         for claim in claims if claim.claim_id in final_claim_ids and claim.kind == "derived"
         and claim.operation in {"count", "sum"})
+    if computed:
+        computed += "\nCite one representative source per aggregate. The complete source path is attached to the result."
     context = "\nCurrent task and active conditions:\n" + task_instruction(state, snapshot)
     if representation != "raw":
         context += ("\nReading conclusions (shared scopes and complete source paths):\n" + dumps(conclusions)
