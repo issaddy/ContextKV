@@ -184,6 +184,7 @@ def paired_tables(specs):
             rows.append({**row, "index_label": label, "source_file": str(path)})
     fields = ("split", "dataset", "event_id", "training_eligible", "measurement_eligible", "fixed_decode_work", "reused", "horizon_seconds",
         "cache_scope_hash", "sampling_weight", "full_window_cost_difference_ms", "target_revisit_cost_difference_ms",
+        "target_cost_rule", "target_cache_work_changed", "target_revisit_step_wall_difference_ms",
         "collateral_and_initial_control_cost_difference_ms", "retention_control_ms", "physical_cost",
         "native_prefix_residency", "retained_prefix_residency", "reports", "report_digests")
     return rows, dict(files=sources, unmatched=missing, rows=[{name: row[name] for name in fields if name in row}
@@ -191,9 +192,10 @@ def paired_tables(specs):
 
 
 def retention_validation(models, paired):
-    from controller.prefix_retention import EmpiricalRetentionModel, session_components, session_group, balance_session_rows
+    from controller.prefix_retention import EmpiricalRetentionModel, TARGET_COST_RULE, session_components, session_group, balance_session_rows
     files, missing = expanded(models)
-    dev = [row for row in paired if row["split"] == "dev" and row["training_eligible"] and row.get("fixed_decode_work")]
+    dev = [row for row in paired if row["split"] == "dev" and row["training_eligible"]
+           and row.get("target_cost_rule") == TARGET_COST_RULE and row.get("fixed_decode_work")]
     components = session_components(dev)
     result = []
     for name, path in files:

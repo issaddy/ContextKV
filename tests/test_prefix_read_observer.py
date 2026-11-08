@@ -8,7 +8,7 @@ import pytest
 
 from controller.context_schema import ContextBudget, EvidenceSet, EvidenceUnit, Need, SourceSpan, StepRecord, TaskState
 from controller.evidence import make_evidence
-from controller.prefix_retention import EmpiricalRetentionModel, PrefixReadObserver, TARGET_DEMAND_RULE, RETENTION_CONTROL_RULE
+from controller.prefix_retention import EmpiricalRetentionModel, PrefixReadObserver, TARGET_COST_RULE, TARGET_DEMAND_RULE, RETENTION_CONTROL_RULE
 from controller.reading import build_read_plan
 from controller.schema import CompletionReceipt, ContextEpoch
 from controller.session_store import SessionStore
@@ -103,10 +103,12 @@ def test_fixed_ttl_recovery_counts_actual_read_once_and_does_not_extend_ttl(tmp_
 
 
 def paired_model_rows(*, native_ms, retained_ms):
-    rows = [dict(target_demand_rule=TARGET_DEMAND_RULE, features={"access_state": "first", "native_residency": "device", "pressure_concurrency": "normal:single"},
+    rows = [dict(target_demand_rule=TARGET_DEMAND_RULE, target_cost_rule=TARGET_COST_RULE, fixed_decode_work=True,
+        features={"access_state": "first", "native_residency": "device", "pressure_concurrency": "normal:single"},
         cache_scope_hash="scope", horizon_seconds=30, reused=True,
         native_input_hashes=["fixed-input"], retained_input_hashes=["fixed-input"],
         native_reuse_cost_ms=native_ms, retained_reuse_cost_ms=retained_ms,
+        target_revisit_step_wall_difference_ms=native_ms-retained_ms,
         native_window_cost_ms=native_ms, retained_window_cost_ms=retained_ms,
         retention_control_ms=0, control_cost_rule=RETENTION_CONTROL_RULE,
         gpu_page_count=1, host_page_count=1, page_size=64,

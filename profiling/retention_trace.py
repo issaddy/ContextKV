@@ -27,7 +27,7 @@ from bench.study_resources import StudyResourceSampler, integrate_physical, list
 from controller.config import create_controller, create_model_template, load_config
 from controller.context_schema import ContextBudget, ContextPlan, EvidenceClaim, EvidenceSet, Need, ReadResult, ReadTask, TaskState, TextRef
 from controller.engine_client import EngineError, SGLangEngineClient
-from controller.prefix_retention import (EmpiricalRetentionModel, PrefixObserver, PrefixReadObserver, PrefixRuntimeClient, TARGET_DEMAND_RULE,
+from controller.prefix_retention import (EmpiricalRetentionModel, PrefixObserver, PrefixReadObserver, PrefixRuntimeClient, TARGET_COST_RULE, TARGET_DEMAND_RULE,
     RETENTION_FEATURE_NAMES, RETENTION_CONTROL_RULE, MIN_RETENTION_GROUPS, source_demand_event_key)
 from controller.reading import (build_read_plan, parse_read_result, stable_prefix_messages,
                                 stable_source_payload, step_messages)
@@ -1162,11 +1162,24 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
     affected_ids = [value["attempt_id"] for value in affected]
     window_costs = {arm: sum((report["turn_windows"][key]["end"]-report["turn_windows"][key]["start"])*1000
                             for key in affected_ids) for arm, report in (("native", native), ("retained", retained))}
-    target_delta = next_left["step_wall_ms"]-next_right["step_wall_ms"] if reused else 0
+    native_target = retained_target = None
+    changed_cache_work = None
+    target_delta = target_step_delta = 0
+    if reused:
+        before, after = next_left["result"], next_right["result"]
+        work = ("actual_prefill_tokens", "actual_host_loaded_tokens", "actual_device_hit_tokens")
+        changed_cache_work = any(before["receipt"][name] != after["receipt"][name] for name in work)
+        native_target = before["server_ttft_ms"]
+        retained_target = after["server_ttft_ms"] if changed_cache_work else native_target
+        target_delta = (native_target-retained_target
+                        if native_target is not None and retained_target is not None else None)
+        target_step_delta = next_left["step_wall_ms"]-next_right["step_wall_ms"]
+        eligible = eligible and target_delta is not None
     window_delta = window_costs["native"]-window_costs["retained"]
     sessions = independent_sessions(trace["turns"])
     row = dict(source="hardware", scope="actual_source_first_single_prefix_intervention",
         target_demand_rule=TARGET_DEMAND_RULE,
+        target_cost_rule=TARGET_COST_RULE, target_cache_work_changed=changed_cache_work,
         dataset=turn["dataset"], split=turn["split"], training_eligible=trace["training_eligible"] and eligible,
         event_id=identity, source_event_id=selection["source_event_id"],
         independent_session_ids=sessions, independent_sample_id=digest(sessions),
@@ -1183,11 +1196,11 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
         causal_reuse=uses,
         native_input_hashes=left_hashes, retained_input_hashes=right_hashes,
         input_dag_digest=trace["input_dag_digest"], sampling_weight=selection["sampling_weight"],
-        native_reuse_cost_ms=next_left["step_wall_ms"] if reused else None,
-        retained_reuse_cost_ms=next_right["step_wall_ms"] if reused else None,
+        native_reuse_cost_ms=native_target, retained_reuse_cost_ms=retained_target,
         native_window_cost_ms=window_costs["native"], retained_window_cost_ms=window_costs["retained"],
         full_window_cost_difference_ms=window_delta, target_revisit_cost_difference_ms=target_delta,
-        collateral_and_initial_control_cost_difference_ms=window_delta-target_delta,
+        target_revisit_step_wall_difference_ms=target_step_delta,
+        collateral_and_initial_control_cost_difference_ms=window_delta-target_step_delta,
         affected_turn_ids=affected_ids,
         window_cost_basis="sum of complete component response intervals for all fixed affected turns, including collateral reads/ANSWER and policy controls",
         reuse_event_basis="target reward requires exact complete source-demand key; partial causal body-page demand remains in causal_reuse and whole-window costs",

@@ -19,6 +19,7 @@ from engine_patches.contextkv_runtime import executed_prefix_hashes
 
 RETENTION_FEATURE_NAMES = ("access_state", "native_residency", "pressure_concurrency")
 TARGET_DEMAND_RULE = "canonical_source_prefix_and_body_ranges_v2"
+TARGET_COST_RULE = "native_work_conditioned_server_ttft_v1"
 MIN_RETENTION_GROUPS = 2
 RETENTION_CONTROL_RULE = "owner_call_only_fixed_decision_once_v1"
 
@@ -308,6 +309,8 @@ class EmpiricalRetentionModel:
             raise ValueError("retention fit requires exact complete READ demand labels")
         if any(row.get("control_cost_rule") != RETENTION_CONTROL_RULE for row in rows):
             raise ValueError("retention fit requires owner-call control labels separated from allocation cost")
+        if any(row.get("target_cost_rule") != TARGET_COST_RULE for row in rows):
+            raise ValueError("retention fit requires cache-work-conditioned acquisition labels")
         names = RETENTION_FEATURE_NAMES if feature_names is None else tuple(feature_names)
         schema = cls._schema(rows, names) if feature_schema is None else feature_schema
         model = cls({}, schema)
@@ -356,14 +359,14 @@ class EmpiricalRetentionModel:
             native_target = sum(row.get("sampling_weight", 1.0)*row["native_reuse_cost_ms"] for row in reused)/reused_weight if reused else None
             retained_target = sum(row.get("sampling_weight", 1.0)*row["retained_reuse_cost_ms"] for row in reused)/reused_weight if reused else None
             control = sum(row.get("sampling_weight", 1.0)*row["retention_control_ms"] for row in cohort)/control_weight
-            target_gain = probability*(native_target-retained_target) if probability else 0
+            target_step_delta = probability*mean(reused, "target_revisit_step_wall_difference_ms") if probability else 0
             source_tokens = [row["gpu_page_count"]*row["page_size"] for row in cohort]
             forecasts[key] = PrefixForecast(cohort[0]["horizon_seconds"], probability,
                 native_target, retained_target,
                 gpu_seconds/(gpu_pages*cohort[0]["page_size"]) if gpu_pages else 0,
                 host_seconds/(host_pages*cohort[0]["page_size"]) if host_pages else 0,
                 cohort[0]["cache_scope_hash"], evidence,
-                control, native_window-retained_window-target_gain+control, native_window, retained_window,
+                control, native_window-retained_window-target_step_delta+control, native_window, retained_window,
                 (min(source_tokens), max(source_tokens)))
         if not forecasts:
             raise ValueError("retention fit has no supported feature/scope/TTL bucket: each needs at least "
@@ -378,6 +381,7 @@ class EmpiricalRetentionModel:
     def to_dict(self):
         return {"kind": "paired_native_retention_v6", "feature_schema": self.feature_schema,
                 "target_demand_rule": TARGET_DEMAND_RULE,
+                "target_cost_rule": TARGET_COST_RULE,
                 "control_cost_rule": RETENTION_CONTROL_RULE,
                 "minimum_independent_groups_per_bucket": MIN_RETENTION_GROUPS,
                 "value_basis": "marginal exact source-demand READ saving minus control and paired external-request penalty; full protected-set net measured by set intervention",
@@ -391,6 +395,7 @@ class EmpiricalRetentionModel:
     def from_dict(cls, value):
         if (value["kind"] != "paired_native_retention_v6"
                 or value.get("target_demand_rule") != TARGET_DEMAND_RULE
+                or value.get("target_cost_rule") != TARGET_COST_RULE
                 or value.get("control_cost_rule") != RETENTION_CONTROL_RULE):
             raise ValueError("unknown retention model format")
         return cls({key: PrefixForecast(**row) for key, row in value["forecasts"].items()}, value["feature_schema"],
