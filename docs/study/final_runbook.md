@@ -52,6 +52,7 @@ LlamaIndex 复用统一引擎、来源投影和成本账本。恢复按原 SQLit
 
 配置入口为 `configs/study.yaml`、`study_matrix.yaml`、`evidence_policy_comparison.yaml`；
 P1 支持策略配置为 `configs/evidence_policy_fixed_qwen.yaml`。
+`reading.full_scope_output_tokens` 给全资料必读分片分配 8192 token 的输出额度，各实验组共用。分片仍按实际输入及事实输出预留打包，普通选材阅读沿用 `reading.output_tokens`。
 `bench.study prepare` 的公开 VersionQA 资产从 `assets.versionqa.source/questions` 指定的原文和 CSV 构建，复用 `bench.versionqa` 与 BM25/BGE 索引入口；其公开测试题与构造机制开发题分别登记。
 审计配置为 `configs/reader_audit.yaml` 的 `reader_audit:{base_scope,data,review,resource_sample_seconds}`。
 会话队列使用 `evidence_cohort`；P1 支持策略直接绑定固定生成配置。

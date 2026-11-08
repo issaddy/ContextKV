@@ -78,6 +78,8 @@ class StudyEvidenceProvider:
         self.selection_mode = _selection_mode(config)
         self.support_backend = support_backend if self.selection_mode == "support" else None
         self.budget = study_budget(config)
+        self.full_scope_budget = replace(self.budget, read_output_tokens=config.get("reading", {}).get(
+            "full_scope_output_tokens", self.budget.read_output_tokens))
         run_config = config.get("generation", {}).get("run_config")
         runtime = load_config(run_config) if run_config else None
         self.answer_system_prompt = runtime.context.system_prompt if runtime else None
@@ -116,6 +118,7 @@ class StudyEvidenceProvider:
                 "retrieval": self.serving.manifest,
                 "source_window_profile": to_jsonable(self.directory.profile),
                 "budget": to_jsonable(self.budget), "task_model": getattr(self.task_model, "manifest", None),
+                "full_scope_read_output_tokens": self.full_scope_budget.read_output_tokens,
                 "history_encoder": getattr(self.frozen_history, "manifest", None),
                 "query_encoder_binding": self.query_encoder_identity,
                 "support_model": getattr(self.support_backend, "manifest", None),
@@ -428,7 +431,8 @@ class StudyEvidenceProvider:
             for selected in evidence_sets:
                 current = None
                 read_state = state if full_scope_read else active_state
-                plan = (build_read_plan(read_state, selected, coverage, self.budget, template=self.template, snapshot=snapshot,
+                read_budget = self.full_scope_budget if full_scope_read else self.budget
+                plan = (build_read_plan(read_state, selected, coverage, read_budget, template=self.template, snapshot=snapshot,
                             output_tokens_per_fact=None if self.strategy == "Lmap" else
                                 self.config.get("reading", {}).get("output_tokens_per_fact", 64),
                             reading_mode=self.config.get("reading", {}).get("mode", "typed_reduce"),

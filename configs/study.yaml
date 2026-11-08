@@ -65,6 +65,7 @@ reading:
   packing: source_windows
   input_target_tokens: 12288
   output_tokens: 2048
+  full_scope_output_tokens: 8192
   output_tokens_per_fact: 64
   output_budget_options: [512, 1024, 2048, 4096, 8192]
   coverage_mode: selected_sources
