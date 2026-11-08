@@ -246,7 +246,7 @@ class FixedChoiceCostProbe:
         events.emit("cost_probe_terminal_choice", attempt_id=attempt_id, **audit)
         return RollingResult(replace(state, plan=chosen.context_plan),
             Plan(selected, quote_seq=quotes.observed_seq, reason="fixed_choice_cost_probe"), quotes,
-            (audit,), selection_started)
+            selection_started)
 
 
 async def collect(args):

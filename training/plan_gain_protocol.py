@@ -460,4 +460,4 @@ class FixedCounterfactualRuntime:
         self.decisions = records
         self.new_action_counts["ANSWER"] = 1
         return RollingResult(replace(state, answer_representation=representation), Plan(candidate, quote_seq=quotes.observed_seq,
-            reason="actual_counterfactual_fixed_plan"), quotes, tuple(records), phase_started)
+            reason="actual_counterfactual_fixed_plan"), quotes, phase_started)

@@ -160,8 +160,15 @@ class RollingResult:
     outcome: ReadingOutcome
     plan: Plan
     quotes: object
-    decisions: tuple[dict, ...]
     answer_phase_started: float
+
+
+def _candidate_trace(candidate):
+    if candidate is None:
+        return None
+    return {"candidate_id": candidate.candidate_id, "input_hash": candidate.input_hash,
+            "generation_kind": candidate.generation_kind, "representation": candidate.representation,
+            "action": candidate.action, "output_budget": candidate.output_budget}
 
 
 class RollingPlanRuntime:
@@ -546,7 +553,6 @@ class RollingPlanRuntime:
                             cache_scope=await engine.info())[0]
                     state = await executor.execute_one(attempt_id, snapshot, state.plan, record.task, state,
                         initial_auxiliary_usage=auxiliary_usage, candidate=candidate)
-        decisions = []
         from .execution import reading_tokens_spent
         prefix_observer = executor.observe_prefix
         retention_mode = getattr(prefix_observer, "settings", {}).get("mode", "native")
@@ -641,22 +647,17 @@ class RollingPlanRuntime:
                     raise NoCompletePlan("required source-scope step exceeds "+", ".join(dict.fromkeys(reasons)))
                 rank, required_step, candidate, reserve, latency_ms, option = min(choices, key=lambda choice: choice[0])
                 self._observe_state(attempt_id, executor, state, snapshot, native, None, True)
-                selected = ({"candidate_id": candidate.candidate_id, "generation_kind": candidate.generation_kind,
-                    "representation": candidate.representation, "action": candidate.action,
-                    "output_budget": candidate.output_budget} if candidate is not None else None)
                 audit = {"decision_mode": "mandatory_coverage", "step_id": required_step.step_id,
                     "task": required_step, "quote": native.quotes, "paid_cost": native.paid_cost,
-                    "selected_candidate": selected, "selection_rank": rank,
+                    "selected_candidate": _candidate_trace(candidate), "selection_rank": rank,
                     "completion_reserve": reserve, "completion_latency_ms": latency_ms,
                     "timing_context": timing_context,
                     "joint_context": option.trace() if option is not None else None,
                     "physical_paid_observation": native.paid_observation}
-                decisions.append(audit)
                 events.emit("rolling_required_scope_step", attempt_id=attempt_id, **audit)
                 if option is not None and (option.retain or option.release):
                     mutation = await prefix_observer.apply_demand(option, state, snapshot.session_id,
                         batch=native.quotes)
-                    audit["joint_prefix_control"] = mutation
                     events.emit("joint_prefix_control", attempt_id=attempt_id,
                         choice=candidate.candidate_id if candidate is not None else required_step.step_id,
                         quote_seq=native.quotes.observed_seq, **mutation)
@@ -716,6 +717,9 @@ class RollingPlanRuntime:
                             "feasible": candidate.feasible} for candidate in step.variants)}
                         for step in plan.steps)} for plan in plans))
                 raise
+            step = decision.next_step
+            selected_step = {"plan_id": step.plan_id, "task": step.task,
+                             "candidate": _candidate_trace(step.candidate)}
             audit = {"observed_at_ms": (time.monotonic()-arrived)*1000,
                 "decision_mode": self.mode, "required_scope_pending": mandatory,
                 "timing_context": timing_context,
@@ -723,21 +727,18 @@ class RollingPlanRuntime:
                 "state_steps": tuple(record.step_id for record in state.steps),
                 "paid_cost": native.paid_cost, "evaluations": self.policy.last_evaluations,
                 "option_diagnostics": self.policy.last_option_diagnostics,
-                "decision": decision, "quote": native.quotes,
+                "decision": (selected_step, decision.context_action, decision.output_budget), "quote": native.quotes,
                 "physical_paid_observation": native.paid_observation,
                 "current_resource_forecasts": native.resources,
                 "future_step_forecasts": tuple({"plan_id": key[0], "step_id": key[1], "choices": value}
                     for key, value in native.future.items())}
-            decisions.append(audit)
             events.emit("rolling_plan_decision", attempt_id=attempt_id, **audit)
             if demand_retention and decision.next_step.task.kind != "ANSWER":
-                step = decision.next_step
                 key = step.candidate.candidate_id if step.candidate is not None else step.task.step_id
                 option = options[key]
                 if option.retain or option.release:
                     mutation = await prefix_observer.apply_demand(option, state, snapshot.session_id,
                         batch=native.quotes)
-                    audit["joint_prefix_control"] = mutation
                     events.emit("joint_prefix_control", attempt_id=attempt_id, choice=key,
                         quote_seq=native.quotes.observed_seq, **mutation)
             chosen = next(plan for plan in plans if plan.plan_id == decision.next_step.plan_id)
@@ -760,7 +761,7 @@ class RollingPlanRuntime:
                 selected = Plan(candidate, predicted=estimates, quote_seq=native.quotes.observed_seq,
                     reason=("rolling_joint_rule" if self.policy.gain_model is None else
                         "rolling_observed_action_gain_cost" if observed else "rolling_plan_gain"))
-                return RollingResult(outcome, selected, native.quotes, tuple(decisions), selection_started)
+                return RollingResult(outcome, selected, native.quotes, selection_started)
             if self.mode == "observed_actions" and decision.next_step.task.kind == "GAP":
                 catalog = _with_observed_sources(context_plans[0], state)
                 catalog = replace(catalog, online_tokens_spent=native.paid_cost.input_tokens+native.paid_cost.output_tokens)

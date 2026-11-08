@@ -10,7 +10,7 @@ import argparse
 import asyncio
 from collections import Counter, defaultdict
 from copy import deepcopy
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 import random
@@ -127,9 +127,7 @@ def freeze_cases(database, manifest, split, template, *, limit=None, selection="
                 skipped.append({"attempt_id": attempt.attempt_id, "reason": "initial_turn_has_one_candidate"})
                 continue
             snapshot = load_record(connection, SessionSnapshot, old[0])
-            policy = (replace(policy_config, layout="contextpilot")
-                      if planner.strategy == "contextpilot" else policy_config)
-            candidates = build_candidates(snapshot, attempt.query, attempt.evidence, policy, template,
+            candidates = build_candidates(snapshot, attempt.query, attempt.evidence, policy_config, template,
                                           retrieval_priority=attempt.retrieval_priority,
                                           query_context=attempt.query_context,
                                           measure_evidence_redundancy=planner.strategy == "redundancy_threshold")
