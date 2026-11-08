@@ -157,7 +157,6 @@ class NativePlanningState:
     future: Mapping[tuple[str, str], tuple[StepForecast, ...]]
     paid_cost: CompleteCost
     paid_observation: dict | None = None
-    prefix_status: dict | None = None
 
 
 @dataclass(frozen=True)

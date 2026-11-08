@@ -75,7 +75,7 @@ def prepare(args, root):
         if value["strategy"] == "B7":
             gain = value["overrides"]["execution"]["plan_gain"]
             gain["mode"] = args.gain_mode
-            if args.value_model is not None:
+            if args.value_model is not None and args.gain_mode == "whole_plan":
                 gain["prefix_directory"] = True
         methods.append(value)
     value_policy = None
@@ -322,7 +322,7 @@ def prepare_full_queue(args, root):
         reader_checkpoint=run.model.revision, reader_profile_id=profile,
         sampling_interval_seconds=args.sampling_interval, output_budgets=read_outputs,
         output_tokens_per_fact=config["reading"]["output_tokens_per_fact"],
-        prefix_directory=True, gap_limits=gap_limits, read_choices=2)
+        gap_limits=gap_limits, read_choices=2)
     if completion_timing is not None:
         rolling_settings["completion_timing_asset"] = str(Path(completion_timing).resolve())
     gain_settings = dict(rolling_settings, gain_asset=str(gain_path)) if needs_gain else None

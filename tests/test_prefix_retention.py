@@ -173,6 +173,8 @@ def test_complete_source_demand_identity_and_single_owner_collateral_are_distinc
 
 @pytest.mark.asyncio
 async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared_body():
+    from unittest.mock import AsyncMock
+
     from controller.context_schema import ContextPlan, EvidenceSet, Need, ReadResult, ReadTask, ReadingOutcome, StepRecord, TaskState
     from controller.plan_policy import PlanCandidate, PlanStep
     from controller.prefix_retention import PrefixReadObserver
@@ -198,11 +200,12 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     gap = PlanCandidate("gap", "gap_retrieval", plan, (PlanStep(ReadTask("gap", "GAP")),), "reader")
     observer = PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
                                   {"mode": "demand", "protection_budget_tokens": 4})
+    observer.runtime = SimpleNamespace(status=AsyncMock())
 
     async def after_gap(target, active=()):
         read = PlanCandidate("next", "read_once", plan, (PlanStep(later, (target,)),), "reader")
-        return (await observer.demand_options((gap, read), state, "session", batch,
-            prefix_status={"prefixes": active}))["gap"]
+        observer.runtime.status.return_value = {"prefixes": active}
+        return (await observer.demand_options((gap, read), state, "session", batch))["gap"]
 
     shared = await after_gap(candidate)
     lease, = shared.retain
@@ -219,8 +222,8 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     owner = SimpleNamespace(owner_id=lease.owner_id, policy="joint_demand", prefix_input_ids=ids[:2])
     observer.store = SimpleNamespace(prefix_owners=lambda *args, **kwargs: (owner,))
     read = PlanCandidate("next", "read_once", plan, (PlanStep(later, (candidate,)),), "reader")
-    options = await observer.demand_options((gap, read), state, "session", replace(batch, free_gpu_tokens=16),
-        prefix_status={"prefixes": ({**existing, "owner_id": owner.owner_id},)})
+    observer.runtime.status.return_value = {"prefixes": ({**existing, "owner_id": owner.owner_id},)}
+    options = await observer.demand_options((gap, read), state, "session", replace(batch, free_gpu_tokens=16))
     assert options[candidate.candidate_id].release == ()
     assert options[candidate.candidate_id].protected_tokens == 2
     assert options["gap"].release == (owner.owner_id,)
@@ -231,7 +234,7 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
         ready_gpu_prefix_tokens=4, recoverable_prefix_tokens=4, evictable_gpu_prefix_tokens=4)
     reads = (PlanCandidate(step.step_id, "read_once", plan, (PlanStep(step, (compiled,)),), "reader")
              for step, compiled in ((later, candidate), (tail, long_candidate)))
-    joint = (await observer.demand_options((gap, *reads), state, "session", replace(batch, quotes=(quote, long_quote)),
-        prefix_status={"prefixes": ()}))["gap"]
+    observer.runtime.status.return_value = {"prefixes": ()}
+    joint = (await observer.demand_options((gap, *reads), state, "session", replace(batch, quotes=(quote, long_quote))))["gap"]
     assert [lease.boundary_tokens for lease in joint.retain] == [4]
     assert joint.protected_tokens == 4 and joint.uncovered_risk_tokens == 0

@@ -578,7 +578,7 @@ class PrefixReadObserver:
             receipt["predicted_set_net_value_ms"] = receipt["predicted_set_value_before_control_ms"]-elapsed_ms
             receipt["set_value_scope"] = "deduplicated expected savings and residency prices minus this complete observed callback once; not a measured set-intervention benefit"
 
-    async def demand_options(self, plans, state, session_id, batch, *, prefix_status=None):
+    async def demand_options(self, plans, state, session_id, batch):
         """Allocate short leases for exact, already compiled continuations."""
         from .admission import quoted_native_work
         from .action_proposals import continuation_read
@@ -596,7 +596,7 @@ class PrefixReadObserver:
                 sources[observed["owner_id"]] = (record, observed)
         if not own and not sources:
             return joint_options(plans, state)
-        statuses = prefix_status if prefix_status is not None else await self.runtime.status(batch.engine_restart_id)
+        statuses = await self.runtime.status(batch.engine_restart_id)
         active = {row["owner_id"]: row for row in statuses["prefixes"]}
         own = {key: record for key, record in own.items() if key in active}
         if not own and not sources:

@@ -8,12 +8,24 @@ import json
 from pathlib import Path
 import time
 
+from .engine_client import EngineError
 from .execution import auxiliary_tokens
 from .plan_policy import (CompleteCost, NativePlanningState, ResourceForecast, StepForecast,
                           native_selection_cost)
 from .reading import SOURCE_SYSTEM, step_generation_kind, step_system
 from .schema import ConfigFingerprint
 from .serialization import decode
+
+
+async def _pool_geometry(engine, quotes, previous):
+    """The cache configuration binds capacity and page size across cache resets."""
+    if previous is not None and previous[0] == quotes.cache_config_hash:
+        return previous
+    metrics = await engine.metrics()
+    if metrics["engine_restart_id"] != quotes.engine_restart_id:
+        raise EngineError("STALE_RESTART")
+    pool = metrics["pool"]
+    return quotes.cache_config_hash, pool["gpu_capacity_tokens"], pool["page_size"]
 
 
 def _parent_claim_ceiling(plan, task, state, bound):
@@ -228,6 +240,7 @@ class ProfiledNativeObserver:
     def __init__(self, profiles, paid, *, reader_checkpoint, reader_profile_id, sampling,
                  answer_system_prompt, engine_base_url, store=None):
         self.profiles, self.paid, self.store = profiles, paid, store
+        self.pool_geometry = None
         self.reader_checkpoint, self.reader_profile_id = reader_checkpoint, reader_profile_id
         if profiles.data["sampling_recipe"] != sampling:
             raise ValueError("execution profiles bind the actual request sampling recipe")
@@ -272,9 +285,9 @@ class ProfiledNativeObserver:
         self.profiles.bind(quotes, self.reader_checkpoint, self.reader_profile_id)
         by_id = {quote.candidate_id: quote for quote in quotes.quotes}
         concurrency = quotes.active_requests+1
-        metrics = await engine.metrics()
-        admission = {"gpu_capacity_tokens": metrics["pool"]["gpu_capacity_tokens"],
-            "page_size": metrics["pool"]["page_size"],
+        self.pool_geometry = await _pool_geometry(engine, quotes, self.pool_geometry)
+        _, capacity, page_size = self.pool_geometry
+        admission = {"gpu_capacity_tokens": capacity, "page_size": page_size,
             "native_max_new_tokens_clip": quotes.native_max_new_tokens_clip,
             "profile_service_envelope_ms": max(row["latency_ms"] for row in self.profiles.data["rows"]),
             "basis": "actual native quote workload/clip and actual engine physical token pool"}
@@ -293,9 +306,8 @@ class ProfiledNativeObserver:
             from .prefix_retention import PrefixRuntimeClient
             from .prefix_view import prefix_candidate_view
             status = await PrefixRuntimeClient(engine).status(quotes.engine_restart_id)
-            metrics = await engine.metrics()
             views = prefix_candidate_view(candidates, quotes, status,
-                self.store.prefix_owners(active_only=True), page_size=metrics["pool"]["page_size"])
+                self.store.prefix_owners(active_only=True), page_size=page_size)
             reusable = {key: view.prefix_ids for key, view in views.items()}
         for candidate in candidates:
             quote = by_id[candidate.candidate_id]
@@ -382,8 +394,9 @@ class ProfiledNativeObserver:
 
 
 class ObservedNativeObserver:
-    def __init__(self, paid, fingerprint, *, reader_checkpoint, reader_profile_id, store=None):
-        self.paid, self.fingerprint, self.store = paid, fingerprint, store
+    def __init__(self, paid, fingerprint, *, reader_checkpoint, reader_profile_id):
+        self.paid, self.fingerprint = paid, fingerprint
+        self.pool_geometry = None
         self.reader_checkpoint, self.reader_profile_id = reader_checkpoint, reader_profile_id
         self.resident_model_manifest = None
         self.resident_digest = None
@@ -407,24 +420,16 @@ class ObservedNativeObserver:
         quote_ms = (time.monotonic()-quote_started)*1000
         if quotes.fingerprint != self.fingerprint:
             raise ValueError("native quote does not match the actual reader fingerprint")
-        pool = (await engine.metrics())["pool"]
-        reusable = {}
-        status = None
-        if self.store is not None and candidates:
-            from .prefix_retention import PrefixRuntimeClient
-            from .prefix_view import prefix_candidate_view
-            status = await PrefixRuntimeClient(engine).status(quotes.engine_restart_id)
-            views = prefix_candidate_view(candidates, quotes, status,
-                self.store.prefix_owners(active_only=True), page_size=pool["page_size"])
-            reusable = {key: view.prefix_ids for key, view in views.items()}
+        self.pool_geometry = await _pool_geometry(engine, quotes, self.pool_geometry)
+        _, capacity, page_size = self.pool_geometry
         paid = await self.paid.observe(arrived, state, auxiliary_usage)
-        admission = {"gpu_capacity_tokens": pool["gpu_capacity_tokens"], "page_size": pool["page_size"],
+        admission = {"gpu_capacity_tokens": capacity, "page_size": page_size,
             "native_max_new_tokens_clip": quotes.native_max_new_tokens_clip,
             "basis": "actual native quote workload/clip and actual engine physical token pool"}
         return NativePlanningState(self.reader_checkpoint, self.reader_profile_id, snapshot, quotes,
             cost_model, {}, {}, paid, {**self.paid.last_observation, "native_admission": admission,
                 "native_quote_ms": quote_ms,
-                "resident_model_manifest_digest": self.resident_digest}, prefix_status=status), reusable
+                "resident_model_manifest_digest": self.resident_digest}), {}
 
 
 def load_rolling_runtime(settings, *, template, store, sampling, answer_system_prompt, engine_base_url):
@@ -452,17 +457,16 @@ def load_rolling_runtime(settings, *, template, store, sampling, answer_system_p
         raise ValueError("rolling gains must bind the actual reader checkpoint")
     paid = PhysicalPaidCost(StudyResourceSampler(tuple(settings["gpu_devices"]), tuple(settings["process_ids"]),
                                                interval=settings["sampling_interval_seconds"]))
-    prefix_store = store if settings.get("prefix_directory", False) else None
     if mode == "observed_actions":
         observer = ObservedNativeObserver(paid, template.fingerprint, reader_checkpoint=checkpoint,
-            reader_profile_id=profile, store=prefix_store)
+            reader_profile_id=profile)
     else:
         profiles = ExecutionProfiles.load(settings["execution_profile_asset"])
         if profiles.fingerprint != template.fingerprint:
             raise ValueError("execution profiles must bind the actual reader fingerprint")
         observer = ProfiledNativeObserver(profiles, paid, reader_checkpoint=checkpoint, reader_profile_id=profile,
             sampling=sampling, answer_system_prompt=answer_system_prompt, engine_base_url=engine_base_url,
-            store=prefix_store)
+            store=store if settings.get("prefix_directory", False) else None)
     joint = settings.get("joint_context", False)
     reads = 2 if joint else settings.get("read_choices", 1)
     limits = PolicyLimits(**{"max_plan_candidates": 3+reads, **settings.get("limits", {})})
