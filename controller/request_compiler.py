@@ -11,8 +11,8 @@ from .context_schema import SourceSpan
 from .engine_client import EngineInfo
 from .prefix_view import actual_source_geometry, source_fragment_id
 from .reading import output_schema, step_generation_kind, step_messages
-from .schema import CacheQuoteBatch, CompletionReceipt, EvidenceSpan, PromptCandidate
-from .serialization import dumps
+from .schema import CacheQuoteBatch, CompletionReceipt, ConfigFingerprint, EvidenceSpan, PromptCandidate
+from .serialization import decode, dumps
 from .source_prompt import SOURCE_ENCODING, source_envelope, source_evidence_spans, stable_source_payload
 
 
@@ -126,6 +126,26 @@ class RequestCompiler:
                     layout_id="existing" if order_index == 0 else "existing:contextpilot")
                 candidates.append(self.bind_geometry(candidate, rendered))
         return tuple(candidates)
+
+    def restore_read(self, record, snapshot, plan):
+        """Reattach the compiled source geometry to the ledger's exact input."""
+        bound = record.metrics.get("compiled_input")
+        if bound is None:
+            return None
+        fingerprint = decode(ConfigFingerprint, bound["fingerprint"])
+        if fingerprint != self.template.fingerprint:
+            raise ValueError("saved reading input belongs to a different model template")
+        spans = decode(tuple[EvidenceSpan, ...], bound["evidence_spans"])
+        keys = frozenset(span.key for span in spans)
+        return PromptCandidate(bound["candidate_id"], "REBUILD", snapshot.version,
+            record.input_messages, record.input_ids, bound["input_hash"], keys, keys,
+            evidence_spans=spans, fingerprint=fingerprint, corpus_snapshot_id=snapshot.corpus_snapshot_id,
+            context_plan_id=plan.plan_id, evidence_set_id=plan.selected_set.set_id,
+            layout_id=bound["layout_id"], output_budget=record.task.output_budget,
+            generation_kind=record.metrics["generation_kind"], read_unit_order=record.task.input_unit_ids,
+            read_task_hash=read_task_hash(record.task), source_ids=bound["source_ids"],
+            source_body_token_ranges=decode(tuple[tuple[int, int], ...], bound["source_body_token_ranges"]),
+            source_prefix_tokens=bound["source_prefix_tokens"])
 
     @staticmethod
     def _answer_unit_ids(unit, blocks, source_first):

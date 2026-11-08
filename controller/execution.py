@@ -299,18 +299,21 @@ class ReadingExecutor:
             raise ValueError("the selected logical step has unfinished predecessors")
         self.store.save_context_plan(attempt_id, plan)
         units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
-        if candidate is not None and task.kind == "READ":
+        persisted = self.store.execution_step(attempt_id, task.step_id)
+        if persisted is not None:
+            task = persisted[1].task
+        elif candidate is not None and task.kind == "READ":
             if set(candidate.read_unit_order) != set(task.input_unit_ids) or len(candidate.read_unit_order) != len(task.input_unit_ids):
                 raise ValueError("selected READ order differs from the declared units")
             task = replace(task, input_unit_ids=candidate.read_unit_order)
         selected_units = tuple(units[identity] for identity in task.input_unit_ids)
         claims = {claim.claim_id: claim for claim in state.claims}
         selected_claims = tuple(claims[identity] for identity in task.input_claim_ids)
-        task = replace(task, output_schema=output_schema(task, selected_units, selected_claims,
-            reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
+        if persisted is None:
+            task = replace(task, output_schema=output_schema(task, selected_units, selected_claims,
+                reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
         cpu = (plan.reading_mode == "typed_reduce" and task.kind == "REDUCE"
                and task.operation in {"union", "count", "sum", "group"})
-        persisted = self.store.execution_step(attempt_id, task.step_id)
         reserve = None
         if persisted is None or persisted[0] in {"PLANNED", "PREPARED"}:
             spent = reading_tokens_spent(state.steps, initial_auxiliary_usage, state.auxiliary_usage)
@@ -417,15 +420,19 @@ class ReadingExecutor:
             info = await self.engine.info()
             epoch = ContextEpoch(snapshot.session_id, 0, f"step-{identity}", 0,
                                  reason=task.kind.lower(), engine_restart_id=info.engine_restart_id)
-            record = StepRecord(attempt_id, task.step_id, task, epoch, messages, candidate.input_ids)
-            record = replace(record, metrics={"generation_kind":
+            metrics = {"generation_kind":
                 step_generation_kind(task.kind, task.operation, plan.reading_mode),
                 "external_dialogue": text_callback,
                 "read_protocol_version": (None if text_callback else
                     task.output_schema["properties"]["format_version"]["const"]),
                 "completion_reserve": to_jsonable(reserve),
                 "request_arrived_monotonic": self.request_arrived,
-                "phase_started_monotonic": step_started})
+                "phase_started_monotonic": step_started}
+            if not text_callback:
+                metrics["compiled_input"] = {name: to_jsonable(getattr(candidate, name))
+                    for name in ("candidate_id", "input_hash", "fingerprint", "evidence_spans", "layout_id",
+                                 "source_ids", "source_body_token_ranges", "source_prefix_tokens")}
+            record = StepRecord(attempt_id, task.step_id, task, epoch, messages, candidate.input_ids, metrics=metrics)
             self.store.save_execution_step(record, "PLANNED")
             stage = "PLANNED"
         else:
@@ -644,26 +651,28 @@ class ReadingExecutor:
 
         async def run_model(task, selected_units, selected_claims):
             persisted = self.store.execution_step(attempt_id, task.step_id)
+            candidate = None
             if persisted is not None:
                 task = persisted[1].task
                 selected_units = tuple(units[identity] for identity in task.input_unit_ids)
-            task = replace(task, input_claim_ids=tuple(claim.claim_id for claim in selected_claims),
-                output_schema=output_schema(task, selected_units, selected_claims,
-                    reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
-            variants = self.request_compiler.compile_read(plan, task, selected_units, selected_claims,
-                snapshot, outputs=(task.output_budget,), cache_scope=await self.engine.info())
+                candidate = self.request_compiler.restore_read(persisted[1], snapshot, plan)
             quote, quote_ms = None, None
-            if persisted is None and len(variants) > 1:
-                quote_started = time.monotonic()
-                quote = await self.engine.quote_batch(variants, self.template.fingerprint)
-                quote_ms = (time.monotonic()-quote_started)*1000
-                candidate = self.request_compiler.choose_variant(variants, quote)
-            else:
+            if candidate is None:
+                task = replace(task, input_claim_ids=tuple(claim.claim_id for claim in selected_claims))
+                variants = self.request_compiler.compile_read(plan, task, selected_units, selected_claims,
+                    snapshot, outputs=(task.output_budget,), cache_scope=await self.engine.info())
                 candidate = variants[0]
-            task = replace(task, input_unit_ids=candidate.read_unit_order,
-                output_schema=output_schema(task, tuple(units[identity] for identity in candidate.read_unit_order),
-                    selected_claims, reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
-            selected_units = tuple(units[identity] for identity in task.input_unit_ids)
+                if persisted is None and len(variants) > 1:
+                    quote_started = time.monotonic()
+                    quote = await self.engine.quote_batch(variants, self.template.fingerprint)
+                    quote_ms = (time.monotonic()-quote_started)*1000
+                    candidate = self.request_compiler.choose_variant(variants, quote)
+                selected_units = tuple(units[identity] for identity in candidate.read_unit_order)
+                task = replace(task, input_unit_ids=candidate.read_unit_order,
+                    output_schema=output_schema(task, selected_units, selected_claims,
+                        reading_mode=plan.reading_mode, numeric_identity=plan.numeric_identity))
+            else:
+                selected_claims = tuple(graph.claims[identity] for identity in task.input_claim_ids)
             reserve = (require_completion(plan, results, refresh_usage(), paid_steps(), task, candidate,
                                           read_all=True, arrived=arrived)
                        if persisted is None or persisted[0] in {"PLANNED", "PREPARED"} else None)

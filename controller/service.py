@@ -983,6 +983,8 @@ class Controller:
             self._retire_background()
             return self._response(replace(attempt, stage="COMMITTED"), replay=True)
         if attempt.stage in ("STARTED", "PLANNED", "PREPARING", "PREPARED"):
+            if attempt.stage == "STARTED" and self.store.has_submitted_model_step(attempt.attempt_id):
+                raise PendingAttempt("Retry the original request to recover its submitted reading step")
             if not abandon:
                 raise PendingAttempt("Unfinished preparation: confirm old controller stopped, then recover with abandon=True")
             if attempt.epoch and attempt.epoch.session_generation == 0:

@@ -538,11 +538,13 @@ class RollingPlanRuntime:
                             context_plans = (state.plan,)
                             continue
                         raise ValueError("selected GAP was already submitted; it will not be paid again")
-                    variants = compile_step(state.plan, record.task, state, snapshot, template,
-                        outputs=(record.task.output_budget,), request_compiler=executor.request_compiler,
-                        cache_scope=await engine.info())
+                    candidate = executor.request_compiler.restore_read(record, snapshot, state.plan)
+                    if candidate is None:
+                        candidate = compile_step(state.plan, record.task, state, snapshot, template,
+                            outputs=(record.task.output_budget,), request_compiler=executor.request_compiler,
+                            cache_scope=await engine.info())[0]
                     state = await executor.execute_one(attempt_id, snapshot, state.plan, record.task, state,
-                        initial_auxiliary_usage=auxiliary_usage, candidate=variants[0])
+                        initial_auxiliary_usage=auxiliary_usage, candidate=candidate)
         decisions = []
         from .execution import reading_tokens_spent
         prefix_observer = executor.observe_prefix
