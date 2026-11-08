@@ -64,7 +64,6 @@ Reference histories retain that name; rollout histories retain their policy.
     by_id = {row["source_id"]: row for row in sources}
     directory = Path(output_dir)
     candidates, task_count = [], 0
-    source_ids = list(by_id)
     for turn in turns:
         gold, seen = [], set()
         for grounding in turn["grounding"]:
@@ -106,23 +105,27 @@ Reference histories retain that name; rollout histories retain their policy.
         positive = gold[:3]
         groups = [(size, units, "member_deletion") for size in range(1, len(positive)+1)
                   for units in combinations(positive, size)]
-        source_id = gold[0].source_spans[0].source_key.document_id
-        source_index = source_ids.index(source_id)
-        wrong_source = by_id[source_ids[(source_index+1) % len(source_ids)]]
-        negative_text = wrong_source["text"][:384]
-        negative_key = EvidenceKey("multidoc2dial", wrong_source["source_id"],
-            wrong_source["source_id"], wrong_source["version"],
-            sha256(wrong_source["text"].encode()).hexdigest())
-        negative_id = json.dumps([wrong_source["source_id"], 0, len(negative_text)],
-                                 ensure_ascii=False, separators=(",", ":"))
-        negative = EvidenceUnit(negative_id,
-            (SourceSpan(negative_id, negative_key, 0, len(negative_text)),), negative_text,
-            body_tokens=len(tokenizer.encode(negative_text, add_special_tokens=False)) if tokenizer else 0,
-            document_family=wrong_source["document_family"],
-            original_passage_ids=(wrong_source["source_id"],))
-        groups.extend([(1, (negative,), "other_document"),
-                       (2, (positive[0], negative), "mixed_document"),
-                       (2, (positive[0], positive[0]), "redundant_member")])
+        gold_families = {unit.document_family for unit in gold}
+        negative_sources = [source for source in sources
+                            if source["document_family"] in turn["task_catalogue"]
+                            and source["document_family"] not in gold_families]
+        if negative_sources:
+            selection = int(sha256(turn["task_id"].encode()).hexdigest(), 16)
+            wrong_source = negative_sources[selection % len(negative_sources)]
+            negative_text = wrong_source["text"][:384]
+            negative_key = EvidenceKey("multidoc2dial", wrong_source["source_id"],
+                wrong_source["source_id"], wrong_source["version"],
+                sha256(wrong_source["text"].encode()).hexdigest())
+            negative_id = json.dumps([wrong_source["source_id"], 0, len(negative_text)],
+                                     ensure_ascii=False, separators=(",", ":"))
+            negative = EvidenceUnit(negative_id,
+                (SourceSpan(negative_id, negative_key, 0, len(negative_text)),), negative_text,
+                body_tokens=len(tokenizer.encode(negative_text, add_special_tokens=False)) if tokenizer else 0,
+                document_family=wrong_source["document_family"],
+                original_passage_ids=(wrong_source["source_id"],))
+            groups.extend([(1, (negative,), "other_document"),
+                           (2, (positive[0], negative), "mixed_document")])
+        groups.append((2, (positive[0], positive[0]), "redundant_member"))
         for need_id, query in need_queries:
             for group_index, (size, units, group_kind) in enumerate(groups):
                 example_id = (f"{turn['task_id']}::{need_id}::support::{group_index}"
