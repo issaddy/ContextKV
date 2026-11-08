@@ -78,7 +78,7 @@ C 的完整 callback 实测仍计入同一已付账本；B 的 Native 分支成�
 
 由 `RequestCompiler` 编译每个候选的实际输入，复用 ContextPilot index/reorder 提议来源排列。B 按 Native 报价与剩余预算选择动作，提交同一已报价输入。READ 和 ANSWER 共用原文前缀协议，按原生回执记录预填充与 Host 回载。
 
-`DemandState` 从已观察事实和步骤投影剩余 Need、未覆盖来源与依赖。E6 按就绪后续 READ 与已执行请求的共同因果正文前缀分配短租，所选动作携带保留变更。按后续需求和共享页分别去重，完成回答后释放本轮需求 owner。SGLang Radix/HiCache 负责物理匹配、迁移和淘汰。
+`DemandState` 从已观察事实和步骤投影剩余 Need、未覆盖来源与依赖。E6 复用已完成 READ 的回执与正文范围，以当前 Native 报价确定后续 READ 的共同驻留前缀，所选动作携带保留变更。按后续需求和共享页分别去重，完成回答后释放本轮需求 owner。启用配对估值时采集访问特征。SGLang Radix/HiCache 负责物理匹配、迁移和淘汰。
 
 以下 TTL/value 独立可关，只有相对 Native 的新增净收益成立时启用。
 

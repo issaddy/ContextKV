@@ -554,6 +554,7 @@ class PrefixReadObserver:
             if not self.model.forecasts:
                 raise ValueError("retention value needs paired native observations")
             self.model_digest = hashlib.sha256(raw).hexdigest()
+        self.observe_reads = settings["mode"] != "demand" or self.model is not None
 
     @property
     def control_observation_count(self):
@@ -578,22 +579,21 @@ class PrefixReadObserver:
             receipt["predicted_set_net_value_ms"] = receipt["predicted_set_value_before_control_ms"]-elapsed_ms
             receipt["set_value_scope"] = "deduplicated expected savings and residency prices minus this complete observed callback once; not a measured set-intervention benefit"
 
-    async def demand_options(self, plans, state, session_id, batch):
+    async def demand_options(self, plans, state, session_id, batch, *, page_size):
         """Allocate short leases for exact, already compiled continuations."""
         from .admission import quoted_native_work
         from .action_proposals import continuation_read
         from .context_budget import answer_evidence_gaps
         from .demand import DemandLease, JointOption, joint_options
+        from .prefix_view import native_cache_scope_hash
         from .templates import longest_common_prefix
 
         own = {row.owner_id: row for row in self.store.prefix_owners(session_id, active_only=True)
                if row.policy == "joint_demand"}
-        sources = {}
-        for record in state.steps:
-            observed = record.metrics.get("evidence_prefix", {})
-            if (observed.get("demand_observation") and observed["engine_restart_id"] == batch.engine_restart_id
-                    and observed["cache_config_hash"] == batch.cache_config_hash):
-                sources[observed["owner_id"]] = (record, observed)
+        sources = {record.step_id: record for record in state.steps if record.task.kind == "READ"
+                   and record.receipt is not None and record.receipt.engine_restart_id == batch.engine_restart_id
+                   and record.metrics["cache_config_hash"] == batch.cache_config_hash
+                   and record.metrics["source_view"]["source_prefix_tokens"] >= page_size}
         if not own and not sources:
             return joint_options(plans, state)
         statuses = await self.runtime.status(batch.engine_restart_id)
@@ -606,11 +606,9 @@ class PrefixReadObserver:
         shared_gpu = referenced_gpu_pages(other_owners)
         quotes = {quote.candidate_id: quote for quote in batch.quotes}
         limit = self.settings["protection_budget_tokens"]
-        page_size = (next(iter(sources.values()))[1]["page_size"] if sources
-                     else active[next(iter(own))]["page_size"])
+        scope = native_cache_scope_hash(batch.fingerprint, batch.cache_config_hash)
         all_need_ids = {need.need_id for need in state.plan.task_state.needs}
         continuation = continuation_read(state, state.plan) if self.model is not None else None
-        source_records = {record.step_id: inspection for record, inspection in sources.values()}
         queued_growth = sum(max(0, request.input_tokens+request.max_new_tokens-request.kv_allocated_tokens)
                             for request in batch.native_waiting_requests or ())
         concurrent_growth = ceil(max(0, batch.native_running_budget_tokens or 0))+queued_growth
@@ -627,18 +625,19 @@ class PrefixReadObserver:
                 quote = quotes[key]
                 upper = min(quote.ready_gpu_prefix_tokens, quote.match_limit, compiled.source_prefix_tokens, limit)
                 matches = {}
-                for record, inspection in sources.values():
-                    observed_end = min(upper, inspection["boundary_tokens"])
+                for record in sources.values():
+                    view = record.metrics["source_view"]
+                    observed_end = min(upper, view["source_prefix_tokens"])
                     common = longest_common_prefix(compiled.input_ids, record.input_ids[:observed_end])
                     boundary = common//page_size*page_size
-                    if shared_body_page(record.metrics["source_view"]["body_token_ranges"],
+                    if shared_body_page(view["body_token_ranges"],
                             compiled.source_body_token_ranges or (), boundary, page_size):
-                        matches.setdefault(boundary, (record.step_id, record.attempt_id, inspection["cache_scope_hash"]))
+                        matches.setdefault(boundary, (record.step_id, record.attempt_id))
                 hashes = executed_prefix_hashes(compiled.input_ids[:max(matches, default=0)], page_size)
                 matched_paths[key] = tuple(("demand:"+hashlib.sha256(json.dumps(
                     [session_id, attempt_id, scope, hashes[boundary]], separators=(",", ":")).encode()).hexdigest(),
                     step_id, boundary, tuple(scope+":"+value for end, value in hashes.items() if end <= boundary))
-                    for boundary, (step_id, attempt_id, scope) in matches.items())
+                    for boundary, (step_id, attempt_id) in matches.items())
             return matched_paths[key]
 
         def allocate(demand, task, candidate, actions):
@@ -719,15 +718,16 @@ class PrefixReadObserver:
                 target = max(gains, key=lambda key: (gains[key]*demands[key][1], key))
                 protected.update(path)
                 protected_gpu.update(path)
-                selected[owner] = DemandLease(owner, step, target, boundary, gains[target])
+                selected[owner] = DemandLease(owner, step, target, boundary, gains[target], page_size, scope)
             saved_ms, evidence = None, None
             if self.model is not None and not active and len(selected) == len(demands) == 1:
                 target, = demands
                 lease, = selected.values()
                 compiled, _ = targets[target]
-                inspected = source_records[lease.source_step_id]
+                inspected = sources[lease.source_step_id].metrics.get("evidence_prefix", {})
                 full_boundary = compiled.source_prefix_tokens//page_size*page_size
                 if (target in demand.remaining_read_ids
+                        and inspected.get("demand_observation")
                         and lease.boundary_tokens == full_boundary == inspected["boundary_tokens"]):
                     forecast = self._demand_forecast(inspected, batch)
                     if forecast is not None:
@@ -776,14 +776,13 @@ class PrefixReadObserver:
                 protected_gpu = referenced_gpu_pages(status["prefixes"])
             for lease in option.retain:
                 record = steps[lease.source_step_id]
-                observed = record.metrics["evidence_prefix"]
                 prefix = record.input_ids[:lease.boundary_tokens]
-                page_size, scope = observed["page_size"], observed["cache_scope_hash"]
+                page_size, scope = lease.page_size, lease.cache_scope_hash
                 pages = {scope+":"+value for value in executed_prefix_hashes(prefix, page_size).values()}
                 if pages <= protected_gpu:
                     continue
                 next_pages = protected | pages
-                if len(next_pages)*observed["page_size"] > self.settings["protection_budget_tokens"]:
+                if len(next_pages)*page_size > self.settings["protection_budget_tokens"]:
                     receipts[lease.owner_id] = {"state": "UNRETAINED", "reason": "shared_protection_budget"}
                     continue
                 receipts[lease.owner_id] = await self.owners.observe(owner_id=lease.owner_id,

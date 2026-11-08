@@ -175,20 +175,22 @@ def test_complete_source_demand_identity_and_single_owner_collateral_are_distinc
 async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared_body():
     from unittest.mock import AsyncMock
 
-    from controller.context_schema import ContextPlan, EvidenceSet, Need, ReadResult, ReadTask, ReadingOutcome, StepRecord, TaskState
+    from controller.context_schema import (CompletionReceipt, ContextPlan, EvidenceSet, Need,
+        ReadResult, ReadTask, ReadingOutcome, StepRecord, TaskState)
     from controller.plan_policy import PlanCandidate, PlanStep
     from controller.prefix_retention import PrefixReadObserver
     from controller.schema import CacheQuote, CacheQuoteBatch, PromptCandidate
+    from controller.templates import ByteTemplate
 
     old, later = (ReadTask(name, "READ", ("n",)) for name in ("old", "later"))
     tail = ReadTask("tail", "READ", ("other",))
     plan = ContextPlan("plan", TaskState("task", "question", needs=(Need("n", operation="count"), Need("other"))),
                        EvidenceSet("evidence", ()), steps=(old, later, tail))
-    record = StepRecord("attempt", old.step_id, old, input_ids=(1, 2, 3, 4), metrics={
-        "source_view": {"body_token_ranges": ((0, 4),)},
-        "evidence_prefix": {"demand_observation": True, "engine_restart_id": "restart",
-            "cache_config_hash": "cache", "owner_id": "old", "page_size": 2,
-            "boundary_tokens": 4, "cache_scope_hash": "scope"}})
+    original = (1, 2, 3, 4)
+    receipt = CompletionReceipt("old", "old", "epoch", 1, "restart", token_hash(original), "stop", True)
+    record = StepRecord("attempt", old.step_id, old, input_ids=original, receipt=receipt, metrics={
+        "cache_config_hash": "cache",
+        "source_view": {"body_token_ranges": ((0, 4),), "source_prefix_tokens": 4}})
     state = ReadingOutcome(plan, results=(ReadResult(old.step_id),), steps=(record,))
     ids = (1, 2, 5, 6)
     candidate = PromptCandidate("later", "REBUILD", 0, (), ids, token_hash(ids), frozenset(), frozenset(),
@@ -196,7 +198,7 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     quote = CacheQuote(candidate.candidate_id, candidate.input_hash, 4, 4,
                        ready_gpu_prefix_tokens=2, recoverable_prefix_tokens=2, evictable_gpu_prefix_tokens=2)
     batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 0, 0, (quote,),
-                            native_running_budget_tokens=4)
+                            fingerprint=ByteTemplate().fingerprint, native_running_budget_tokens=4)
     gap = PlanCandidate("gap", "gap_retrieval", plan, (PlanStep(ReadTask("gap", "GAP")),), "reader")
     observer = PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
                                   {"mode": "demand", "protection_budget_tokens": 4})
@@ -205,13 +207,13 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     async def after_gap(target, active=()):
         read = PlanCandidate("next", "read_once", plan, (PlanStep(later, (target,)),), "reader")
         observer.runtime.status.return_value = {"prefixes": active}
-        return (await observer.demand_options((gap, read), state, "session", batch))["gap"]
+        return (await observer.demand_options((gap, read), state, "session", batch, page_size=2))["gap"]
 
     shared = await after_gap(candidate)
     lease, = shared.retain
     assert (lease.source_step_id, lease.target_step_id, lease.boundary_tokens) == ("old", "later", 2)
     assert shared.protected_tokens == 2
-    page = "scope:" + token_hash(ids[:2])
+    page = lease.cache_scope_hash + ":" + token_hash(ids[:2])
     existing = {"owner_id": "another-session", "gpu_page_ids": [page], "host_page_ids": [],
                 "referenced_page_ids": [page], "reference_present": True}
     reused = await after_gap(candidate, (existing,))
@@ -223,7 +225,8 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     observer.store = SimpleNamespace(prefix_owners=lambda *args, **kwargs: (owner,))
     read = PlanCandidate("next", "read_once", plan, (PlanStep(later, (candidate,)),), "reader")
     observer.runtime.status.return_value = {"prefixes": ({**existing, "owner_id": owner.owner_id},)}
-    options = await observer.demand_options((gap, read), state, "session", replace(batch, free_gpu_tokens=16))
+    options = await observer.demand_options((gap, read), state, "session", replace(batch, free_gpu_tokens=16),
+                                            page_size=2)
     assert options[candidate.candidate_id].release == ()
     assert options[candidate.candidate_id].protected_tokens == 2
     assert options["gap"].release == (owner.owner_id,)
@@ -235,6 +238,7 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     reads = (PlanCandidate(step.step_id, "read_once", plan, (PlanStep(step, (compiled,)),), "reader")
              for step, compiled in ((later, candidate), (tail, long_candidate)))
     observer.runtime.status.return_value = {"prefixes": ()}
-    joint = (await observer.demand_options((gap, *reads), state, "session", replace(batch, quotes=(quote, long_quote))))["gap"]
+    joint = (await observer.demand_options((gap, *reads), state, "session",
+        replace(batch, quotes=(quote, long_quote)), page_size=2))["gap"]
     assert [lease.boundary_tokens for lease in joint.retain] == [4]
     assert joint.protected_tokens == 4 and joint.uncovered_risk_tokens == 0

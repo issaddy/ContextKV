@@ -602,7 +602,8 @@ class RollingPlanRuntime:
                 native, _ = await self.native.observe(proposals, state, snapshot, engine, cost_model,
                     arrived, auxiliary_usage, selection_started=selection_started)
                 quotes = {quote.candidate_id: quote for quote in native.quotes.quotes}
-                options = (await prefix_observer.demand_options(proposals, state, snapshot.session_id, native.quotes)
+                options = (await prefix_observer.demand_options(proposals, state, snapshot.session_id, native.quotes,
+                               page_size=native.paid_observation["native_admission"]["page_size"])
                            if demand_retention else {})
                 choices, reasons = [], []
                 for proposal in proposals:
@@ -682,7 +683,8 @@ class RollingPlanRuntime:
             self._observe_state(attempt_id, executor, state, snapshot, native, gap_request, mandatory)
             options = None
             if demand_retention:
-                options = await prefix_observer.demand_options(plans, state, snapshot.session_id, native.quotes)
+                options = await prefix_observer.demand_options(plans, state, snapshot.session_id, native.quotes,
+                    page_size=native.paid_observation["native_admission"]["page_size"])
             elif self.joint_context:
                 from .demand import joint_options
                 options = joint_options(plans, state)

@@ -372,7 +372,8 @@ class ReadingExecutor:
             tuple(dict.fromkeys(coverage)), unresolved, auxiliary_usage=state.auxiliary_usage)
 
     async def _observe_prefix(self, plan, task, units, record):
-        if self.observe_prefix is None or task.kind != "READ" or plan.read_layout != "source_first":
+        if (self.observe_prefix is None or task.kind != "READ" or plan.read_layout != "source_first"
+                or not getattr(self.observe_prefix, "observe_reads", True)):
             return record
         started = time.monotonic()
         receipt = await self.observe_prefix(plan, task, units, record)

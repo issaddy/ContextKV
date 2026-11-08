@@ -14,6 +14,11 @@ from controller.templates import longest_common_prefix, token_hash
 from engine_patches.contextkv_runtime import executed_prefix_hashes
 
 
+def native_cache_scope_hash(fingerprint, cache_config_hash):
+    return hashlib.sha256(json.dumps([asdict(fingerprint), cache_config_hash],
+        sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class PrefixMatchView:
     prefix_id: str
@@ -64,8 +69,7 @@ def prefix_candidate_view(candidates, quote_batch, prefix_status, owner_records=
     if prefix_status["engine_restart_id"] != quote_batch.engine_restart_id:
         raise ValueError("owner status and quote belong to different native restarts")
     fingerprint = asdict(quote_batch.fingerprint)
-    scope = hashlib.sha256(json.dumps([fingerprint, quote_batch.cache_config_hash],
-        sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    scope = native_cache_scope_hash(quote_batch.fingerprint, quote_batch.cache_config_hash)
     owners = {record.owner_id: record for record in owner_records}
     observed = []
     for status in prefix_status["prefixes"]:

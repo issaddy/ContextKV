@@ -58,6 +58,8 @@ class DemandLease:
     target_step_id: str
     boundary_tokens: int
     at_risk_tokens: int
+    page_size: int
+    cache_scope_hash: str
 
 
 @dataclass(frozen=True)
