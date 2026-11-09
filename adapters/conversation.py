@@ -236,7 +236,7 @@ def _bound_revisit_history(client, system, body, users, *, evidence_documents=No
     then whole older user questions and their committed states. Restore complete
     older answers when they fit; omitted answers and turns remain explicit.
     """
-    if not users or not hasattr(client, "catalog_token_lengths") or not hasattr(client, "config"):
+    if not users:
         return system, body, users, None
     budget = client.config.max_input_tokens
 

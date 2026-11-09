@@ -33,7 +33,7 @@ python -m bench.retrieval_eval build \
 
 全部488份文档参与检索。P3任务的`contexts`初始为空，生成时使用本方法实际历史和真实检索结果；targets、grounding与qrels用于离线评价。文档ID采用可逆的`[domain,doc_id]`，发布版本标识语料快照。
 
-输出包括`corpus.jsonl`、`supervision.jsonl`、`tasks.jsonl`、`qrels.tsv`、`split_manifest.json`和`manifest.json`。重复运行会刷新这些派生产物；已保存运行仍以原输入摘要和源版本追溯。参考span按原字符坐标读取，错误坐标仍明确报错，避免引用错段。
+输出包括`corpus.jsonl`、`supervision.jsonl`、`tasks.jsonl`、`qrels.tsv`、`split_manifest.json`和`manifest.json`。重复运行会刷新这些派生产物；已保存运行仍以原输入摘要和源版本追溯。参考span按原字符坐标读取，错误坐标会报错。
 
 `--sections`复用[作者结构化分段原则](https://github.com/IBM/multidoc2dial/blob/2456a5609b447e1a12b716f4d658728f346f3041/scripts/data_preprocessor.py)，按连续相同section ID或标题组织段落。输出`passages.jsonl`的4110段是原文连续切片；拼接后仍完整还原488篇文档。标题路径只辅助检索，不改写正文，也不读取grounding挑选段落。`passage_id`定位段落，`document_id`保留父文档；文档级qrels评价先按父ID折叠排名。
 
@@ -57,7 +57,7 @@ for name in ("dialogue", "hybrid", "conversational"):
     Path(f"data/multidoc2dial/retriever_{name}.yaml").write_text(yaml.safe_dump(cfg))
 ```
 
-两个固定BGE检查点均支持8192；将评分预算设置为其支持长度，避免直接用原1024预算截断较长章节。编码器建索引只做一次，完整正文继续进入生成。全文BM25索引仍可作为简单对照使用。
+两个固定BGE检查点均支持8192；评分预算设为8192可覆盖更长章节。编码器建索引只做一次，完整正文继续进入生成。全文BM25索引仍可作为简单对照使用。
 
 按[部署说明](../deployment.md)启动固定32B原生NGRAM服务后，推荐链路可直接运行：
 
@@ -68,7 +68,7 @@ python -m bench.run_sessions --config configs/qwen3_32b.yaml \
   --evidence-corpus data/multidoc2dial/test/passages.jsonl
 ```
 
-它使用已有查询适配器、实际 QA 检索和每轮重建。固定 Qwen3-32B 下 P0/P1 规划器 × 阅读协议四格及自身 P3 的当前入口见[运行手册](../study/final_runbook.md)。
+它使用已有查询适配器、实际 QA 检索和每轮重建。比较入口见[运行手册](../study/final_runbook.md)。
 
 保存答案的基础词项评分：
 

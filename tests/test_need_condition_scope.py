@@ -3,7 +3,7 @@ from dataclasses import replace
 import json
 import unittest
 
-from adapters.history_state import TaskInterpreter, TaskPrediction
+from adapters.history_state import TaskInterpreter, TaskPrediction, TaskModelResult
 from adapters.support_model import query_view
 from controller.context_schema import Condition, Need, RetrievalState, TextRef, VersionIntent
 from controller.reading import numeric_read_scopes
@@ -30,8 +30,8 @@ def initial_prediction():
 
 def interpret(prediction, *, question=QUESTION, turn=1, memory=None):
     class Model:
-        def predict(self, *args):
-            return prediction
+        def predict_result(self, *args):
+            return TaskModelResult(prediction)
 
     class HistoryIndex:
         def select(self, *args, **kwargs):

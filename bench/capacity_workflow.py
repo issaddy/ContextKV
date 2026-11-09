@@ -337,7 +337,7 @@ def prepare_full_queue(args, root):
     value_policy = dict(mode="value", model_path=str(Path(args.value_model).resolve()),
         horizon_seconds_choices=[15, 60, 180], protection_budget_tokens=8192,
         lambda_gpu=0.0, lambda_host=0.0) if needs_value else None
-    checkout = getattr(args, "contextpilot_checkout", None) or declared_compilation.get("checkout")
+    checkout = args.contextpilot_checkout or declared_compilation.get("checkout")
     needs_compilation = any("_contextpilot" in method for method in selected_methods)
     compilation = ({"mode": "contextpilot", "checkout": str(Path(checkout).resolve())}
                    if needs_compilation and checkout else None)

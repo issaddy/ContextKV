@@ -308,15 +308,16 @@ def test_supplied_scope_projects_interpreter_directory_and_whole_read_contracts(
     captured = {}
 
     class Model:
-        def predict(self, turn, windows, visible):
+        def predict_result(self, turn, windows, visible):
+            from adapters.history_state import TaskModelResult
             captured['memory'] = visible
             assert visible.committed_history == memory.committed_history
             assert visible.prior_task_states == memory.prior_task_states
             assert visible.source_index.observed_source_scope == (block.key,)
             assert set(visible.source_index.task_catalogue) == {block.key.document_id}
             assert visible.source_index.read_contracts == contracts
-            return TaskPrediction('followup', needs=(Need('current:n',
-                (TextRef(2, 'user', 0, len(question)),), condition_ids=(condition.condition_id,)),))
+            return TaskModelResult(TaskPrediction('followup', needs=(Need('current:n',
+                (TextRef(2, 'user', 0, len(question)),), condition_ids=(condition.condition_id,)),)))
 
     history = SimpleNamespace(tokenizer=ByteTemplate().tokenizer, select=lambda *args, **kwargs: ())
     interpreter = TaskInterpreter(Model(), history)

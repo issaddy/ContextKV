@@ -36,4 +36,4 @@ supplement = render_table_relations(existing_reference_id, tables)
 
 相邻的`Note:`、`Remark:`、中文注释或脚注以`source note`保留。行与注释开头具有相同的`†`、`‡`、单星或`[^id]`标记时，建立行级`notes`关联；其余注释保留在表级。遇到普通叙述段落时停止搜集。
 
-这是默认关闭的表格注释对照，不属于当前规范来源窗口主线；没有保留可支持当前协议收益结论的原始实验记录。
+这是默认关闭的表格注释对照。

@@ -225,7 +225,7 @@ async def _run(args):
     try:
         info = await engine.info()
         snapshot = await engine.metrics()
-        case_file = getattr(args, "cases_file", None)
+        case_file = args.cases_file
         if case_file:
             expanded = load_cases(case_file, page_size=snapshot["pool"]["page_size"],
                                   context_limit=config.context.max_total_model_tokens)

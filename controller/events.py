@@ -1,6 +1,5 @@
 """Append-only events with explicit measurement provenance."""
 import json
-import logging
 from pathlib import Path
 import threading
 import time
@@ -17,20 +16,14 @@ class EventLog:
         self.engine_kind = engine_kind
         self._lock = threading.Lock()
         if self.path:
-            try:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-            except OSError as error:
-                logging.getLogger(__name__).error("Diagnostic output failed: %s", error)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def emit(self, event: str, **fields):
         if self.path is None:
             return
-        try:
-            entry = {"event": event, "run_id": self.run_id,
-                     "engine_kind": self.engine_kind, "monotonic_timestamp_ns": time.monotonic_ns(),
-                     **to_jsonable(fields)}
-            line = json.dumps(entry, ensure_ascii=False, allow_nan=False) + "\n"
-            with self._lock, self.path.open("a", encoding="utf-8") as handle:
-                handle.write(line)
-        except Exception as error:
-            logging.getLogger(__name__).error("Diagnostic output failed: %s", error)
+        entry = {"event": event, "run_id": self.run_id,
+                 "engine_kind": self.engine_kind, "monotonic_timestamp_ns": time.monotonic_ns(),
+                 **to_jsonable(fields)}
+        line = json.dumps(entry, ensure_ascii=False, allow_nan=False) + "\n"
+        with self._lock, self.path.open("a", encoding="utf-8") as handle:
+            handle.write(line)

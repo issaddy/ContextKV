@@ -1,6 +1,6 @@
 # 固定版本SDK证据包
 
-`adapters.api_evidence` 是独立离线构建器，将本地Python SDK声明转为普通 `CorpusIndex` records。它不导入SDK，不执行任何源码或答案，不联网，不修改MTRAG索引或默认retriever。构建的相同原文与依赖应同时供给所有被比较方法。
+`adapters.api_evidence` 是独立离线构建器，将本地Python SDK声明转为普通 `CorpusIndex` records。该离线构建器通过解析源码提取原文与依赖；比较方法使用相同的证据包。
 
 ## 输入与运行
 
@@ -34,9 +34,9 @@
 }
 ```
 
-包名、包版本、Git commit、tag和仓库路径都必须显式提供；不从安装说明的最低版本推定唯一目标版本。commit记录声明的源码版本，manifest保留源文件位置与原文跨度；运行时复用提取结果。
+规格显式提供包名、包版本、Git commit、tag和仓库路径。commit记录声明的源码版本，manifest保留源文件位置与原文跨度；运行时复用提取结果。
 
-输出包括 `records.jsonl`、`manifest.json` 和逐源原样复制的 `licenses/*-LICENSE.txt`。manifest保存原文件头、许可声明、输入规格、原文位置、未知项与来源身份状态。`license_id`来自规格声明，构建器不自动判定许可法律适用性。已有输出目录不覆盖。
+输出包括 `records.jsonl`、`manifest.json` 和逐源原样复制的 `licenses/*-LICENSE.txt`。manifest保存原文件头、许可声明、输入规格、原文位置、未知项与来源身份状态。`license_id`来自规格声明，输出使用新目录。
 
 ## 提取与未知范围
 
@@ -45,7 +45,7 @@
 - `span` 是按源文件声明encoding解码后的Unicode字符偏移，半开区间；行号从1开始。CRLF、Unicode及原缩进保留。
 - `api_source.signature`、`docstring`和HTTP表达式附原文span；签名按token定位并保留原格式。`required_declared_parameters`按AST列出必需声明参数，包含声明中的`self`。
 - HTTP配置提取识别函数体中的`*.prepare_request(method=..., url=...)`。直接字符串及同一函数体内唯一、前序、无条件的字符串赋值记录原字面值；动态format、属性、其他请求库及条件改写记为unknown。遍历范围为当前函数体，跳过装饰器、默认值、注解及嵌套函数/class/lambda。
-- 请求的继承方法、导入属性或多次同名声明不会选一个猜测。它们记入 `unknown_symbols`。存在此类未解析请求时仍保存其余有效片段与manifest，CLI返回1；完整构建返回0。明确依赖指向缺失/歧义目标时，已有CorpusIndex验证拒绝发布该包。
+- 请求的继承方法、导入属性和多次同名声明记入 `unknown_symbols`。存在此类未解析请求时仍保存其余有效片段与manifest，CLI返回1；完整构建返回0。明确依赖指向缺失/歧义目标时，已有CorpusIndex验证拒绝发布该包。
 
 ## 依赖与现有证据入口
 
@@ -68,7 +68,7 @@ index = CorpusIndex.from_jsonl(
 blocks = index.resolve(("ibmcloudant:ibmcloudant/cloudant_v1.py#CloudantV1.post_document",))
 ```
 
-证据包可由同一BM25构建入口索引，检索key取`passage_id`，不会把同一源码文件中的多个符号误当重复document。固定`source_uri`保留为原GitHub出处；HTTP通过同一records作为metadata恢复真实document/version和依赖：
+证据包可由同一BM25构建入口索引，检索key取`passage_id`，同一源码文件中的符号各自独立。固定`source_uri`保留为原GitHub出处；HTTP通过同一records作为metadata恢复真实document/version和依赖：
 
 ```bash
 uv run python -m adapters.retrieval build \
@@ -86,5 +86,3 @@ uv run contextkv --config configs/demo.yaml --state-dir runs/sdk-demo-state serv
 ## 将关系传入回答
 
 共享候选构造器将当前required材料的依赖和parent_section渲染为稳定E_ID关联注记，A/R与原生基线共用。APPEND追加当前关系并保留旧正文及span；无关系元数据时沿用普通输入。关系表达语料声明的连接，实际注记token计入预算。
-
-提取与来源合同由`tests/test_api_evidence.py`覆盖；工程接线不替代实际问答质量验证。

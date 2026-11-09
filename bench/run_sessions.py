@@ -374,11 +374,11 @@ async def benchmark(args, config):
     if args.limit_sessions:
         ids = set(sorted({r["conversation_id"] for r in rows})[:args.limit_sessions])
         rows = [r for r in rows if r["conversation_id"] in ids]
-    think_time_by_task, think_time_plan = load_think_time_plan(getattr(args, "think_time_plan", None),
-        expected_sha256=getattr(args, "expected_think_time_plan_sha256", None))
+    think_time_by_task, think_time_plan = load_think_time_plan(args.think_time_plan,
+        expected_sha256=args.expected_think_time_plan_sha256)
     corpus_snapshot = f"{dataset['name']}-{dataset['revision']}"
-    retriever = create_retriever(args.protocol, config_path=getattr(args, "retriever_config", None),
-                                index_path=getattr(args, "retriever_index", None), corpus_path=getattr(args, "corpus", None),
+    retriever = create_retriever(args.protocol, config_path=args.retriever_config,
+                                index_path=args.retriever_index, corpus_path=args.corpus,
                                 corpus_snapshot_id=corpus_snapshot)
     if retriever is not None:
         corpus_snapshot = retriever.corpus_snapshot_id
@@ -448,17 +448,17 @@ async def benchmark(args, config):
                                  "split_manifest": args.split_manifest, "split": args.split,
                                  "domain": args.domain, "selected_sessions": sorted({r["conversation_id"] for r in rows})},
                         workload={"seed": args.seed, "concurrency": args.concurrency,
-                                  "concurrency_scope": getattr(args, "concurrency_scope", "session"),
+                                  "concurrency_scope": args.concurrency_scope,
                                   "think_time": args.think_time,
                                   "think_time_plan": think_time_plan,
                                   "arrival_rate": args.arrival_rate, "arrival_window": args.arrival_window,
                                   "per_turn_timeout": args.per_turn_timeout, "drain_timeout": args.drain_timeout,
-                                  "retriever_config": getattr(args, "retriever_config", None)},
+                                  "retriever_config": args.retriever_config},
                         retrieval=retriever.manifest if retriever else {"kind": "dataset_provided_contexts"})
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
         telemetry_before = await service.engine.metrics()
         report = await run_sessions(rows, handle, protocol=args.protocol, concurrency=args.concurrency,
-                                    concurrency_scope=getattr(args, "concurrency_scope", "session"),
+                                    concurrency_scope=args.concurrency_scope,
                                     think_time=args.think_time, think_time_by_task=think_time_by_task,
                                     arrival_rate=args.arrival_rate,
                                     seed=args.seed, retriever=retriever, drain_timeout=args.drain_timeout,

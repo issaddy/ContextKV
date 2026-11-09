@@ -315,10 +315,8 @@ class TaskInterpreter:
             elif hasattr(source, "observed_source_scope"):
                 view.observed_source_scope = source.observed_source_scope
             memory = replace(memory, source_index=view)
-        if predict_result is None:
-            predict_result = getattr(self.model, "predict_result", None)
-        result = (predict_result(turn, windows, memory) if predict_result is not None else
-                  TaskModelResult(self.model.predict(turn, windows, memory)))
+        predict = self.model.predict_result if predict_result is None else predict_result
+        result = predict(turn, windows, memory)
         prediction = result.prediction
         if memory.source_index is not None and hasattr(memory.source_index, "observed_source_scope"):
             prediction = replace(prediction, source_scope=memory.source_index.observed_source_scope)

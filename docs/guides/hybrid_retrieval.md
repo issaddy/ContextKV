@@ -12,7 +12,7 @@ CLI、HTTP和原生对照共用`adapters/retriever_factory.py`。`configs/retrie
 
 ## 索引与运行
 
-`data/`、`models/`和索引不随Git保存。先准备[固定提交的Cloud passage语料](https://raw.githubusercontent.com/IBM/mt-rag-benchmark/53fef6f5917c7e10c436f697e69a955dbc795d81/corpora/passage_level/cloud.jsonl.zip)，将其中的`cloud.jsonl`放到`data/mtrag-official/cloud.jsonl`；本次语料压缩包SHA-256为`a0c5427013c65556aeddfdc246dd6068f3a7fad08ce6ae7adddaa9e87aae246d`。同时准备任务文件（`python scripts/fetch_mtrag.py --dataset mtrag`），以及`models/bge-m3`中的[BGE-M3](https://huggingface.co/BAAI/bge-m3)和已评测查询适配器。启用重排时另准备`models/bge-reranker-v2-m3`中的[BGE-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3)。效果对照应固定实际模型版本和索引，不能把重新下载的最新版默认视为同一运行环境。
+`data/`、`models/`和索引不随Git保存。先准备[固定提交的Cloud passage语料](https://raw.githubusercontent.com/IBM/mt-rag-benchmark/53fef6f5917c7e10c436f697e69a955dbc795d81/corpora/passage_level/cloud.jsonl.zip)，将其中的`cloud.jsonl`放到`data/mtrag-official/cloud.jsonl`；本次语料压缩包SHA-256为`a0c5427013c65556aeddfdc246dd6068f3a7fad08ce6ae7adddaa9e87aae246d`。同时准备任务文件（`python scripts/fetch_mtrag.py --dataset mtrag`），以及`models/bge-m3`中的[BGE-M3](https://huggingface.co/BAAI/bge-m3)和已评测查询适配器。启用重排时另准备`models/bge-reranker-v2-m3`中的[BGE-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3)。效果对照固定实际模型版本和索引。
 
 ```bash
 python -m adapters.retrieval build --corpus data/mtrag-official/cloud.jsonl \

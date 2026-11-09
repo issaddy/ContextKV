@@ -503,9 +503,7 @@ def search_dialogue_views(literal_query, resolved_query, requirements, sparse, d
     rankings = []
     ranked = contexts
     if reranker is not None:
-        score_many = getattr(reranker, "score_many", None)
-        scores = (score_many(queries, candidates) if score_many is not None else
-                  [reranker.score(query, candidates) for query in queries])
+        scores = reranker.score_many(queries, candidates)
         for values in scores:
             rankings.append([c.document_id for c, _ in sorted(zip(candidates, values, strict=True),
                 key=lambda pair: (-float(pair[1]), pair[0].document_id))])

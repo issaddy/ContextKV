@@ -20,7 +20,7 @@ LlamaIndex 复用统一引擎、来源投影和成本账本。恢复按原 SQLit
 
 短端到端运行可在 `python3 -m bench.study evaluate` 的现有配置命令后加 `--methods METHOD --datasets DATASET --limit-conversations 1 --limit-turns 2 --unscored --output NEW_DIR`。按会话顺序运行前两轮，运行清单分别记录实际调度和完整声明队列。
 
-| 任务 | 当前入口 | 必须保留的对照与产物 |
+| 任务 | 当前入口 | 对照与产物 |
 |---|---|---|
 | 结论预算、共享数值与有限归约 | `bench.reading_mechanisms` | 共享阅读 / `--numeric-need-isolation`；实际 messages、完整来源叶子与阶段账本 |
 | 原生来源前缀机制 | `bench.prefix_read_mechanisms` | 实际 READ epoch、前缀身份与 owner 观察 |
@@ -57,7 +57,7 @@ python3 -m training.plan_gain_completion refresh-features --input OLD-PAIRS.json
 python3 -m training.plan_gain_completion fit --train REFRESHED-TRAIN.jsonl --dev REFRESHED-DEV.jsonl --output GAIN.json
 ```
 
-刷新沿用原注册计划、实际首动作、质量、费用与执行身份。分包、Need 或动作改变后重新采集相应分支。有限候选域 `two_reads_cache_path_organizations_terminal_representations_v2` 的观测包含 `read_organizations`；采集复用捕获的完整组织，在各实际缓存起点重新编译报价。v1 标签对应原动作域；v2 覆盖新增改组动作。
+刷新沿用原注册计划、实际首动作、质量、费用与执行身份。分包、Need 或动作改变后重新采集相应分支。有限候选域 `two_reads_cache_path_organizations_terminal_representations_v2` 的观测包含 `read_organizations`；采集复用捕获的完整组织，在各实际缓存起点重新编译报价。v2 标签覆盖改组动作。
 
 当前 B 资产携带 `input_protocol`，绑定实际窗口粒度、任务投影、共享来源格式 `canonical-source-envelope:v1` 和 reader fingerprint。采集、分支、配对及加载全链核对该身份。实际 seed、已读覆盖、编译选中排列及报价的 `pre_action_input` 一并保留。保留策略标定也使用当前格式采集的原生前缀轨迹。
 
@@ -67,7 +67,7 @@ python3 -m training.plan_gain_completion fit --train REFRESHED-TRAIN.jsonl --dev
 
 动作收益资产的 `evidence_selection_contract` 来自实际 A manifest，绑定选材模式和顺序，以及 `support` 使用的效用、保留集合重排和支持模型记录身份。观测包和实际分支使用同一合同，开发集及线上提供器须与拟合资产匹配。语料、索引、B6/B7 和服务地址独立记录。
 
-GAP 离线与线上只排除实际已读来源，统一新增 passage 额度；采集和拟合必须绑定相同协议。
+GAP 离线与线上只排除实际已读来源，统一新增 passage 额度；采集和拟合绑定相同协议。
 
 B 固定流程观测使用 `execution.state_observation`，在 A 冻结后启用 `joint_context: true`，登记 `output_budgets` 和 `output_tokens_per_fact`。观测记录两个就绪 READ、REDUCE、GAP 及实际可见的回答表示。线上、观测和配对采集使用同一候选域和输出额度。
 四格固定历史入口设置 `policy_comparison.audited_history:{cohort_manifest,cohort_split,actual_rollouts}`，
@@ -124,7 +124,7 @@ python3 -m training.a_workflow prepare-labels --config configs/auxiliary_trainin
 python3 -m training.task_labeling --config runs/study/auxiliary/task-labels/task_labeling.yaml
 ```
 
-采集量是示例，cohort manifest 记录实际数量与 shortfall，不预先宣称达到 200/40。
+采集量是示例，cohort manifest 记录实际数量与 shortfall。
 `task_cohort_labeling.existing_labels_path: null` 表示从零标注；只有存在可复用的真实标签时才指定文件。
 实际 rollout 同时保存 `task_catalogue`、`task_reference_date` 和 `source_scope`，准备与标注直接使用这些观测，不从参考答案或金标补造版本目录。
 `prepare-labels` 可在同一输出目录重跑，复用与当前状态一致的已有标签。`training.task_labeling --limit N` 每次最多新增 N 条，已完成条目不占该额度；全部完成后不再加载模型。
@@ -156,7 +156,7 @@ P1 质量偏好可使用物理成本部分缺失的已评分答案；缺失费�
 
 固定模型协议审计与四格比较示例：
 
-`reader_audit review` 使用 `observed_output_independent_review_v1`，只审核导出 traces 的实际输出；每条只产生审核调用，不重写答案。原始 token 数、输入、来源与阶段归因保留。
+`reader_audit review` 使用 `observed_output_independent_review_v1` 审核导出 traces 的实际输出，保留原始 token 数、输入、来源与阶段归因。
 
 ```bash
 python3 -m training.reader_audit export --config ACTUAL-AUDIT.yaml
@@ -203,7 +203,7 @@ C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观�
 区分无重访、GPU 命中、Host 回载和重算；混合访问同时保留各类页数和事件数。
 训练行中的 `observation_seconds` 是共同计费窗口，`ttl_seconds` / `horizon_seconds`
 是策略保护期限。
-候选前缀必须含完整来源正文页；纯系统或元数据前缀不作为“无重访”训练样本。
+候选前缀含完整来源正文页。
 单前缀配对分别积分 ready 页和传输目标已分配空间：H2D 计入 GPU，D2H 计入 Host。
 `profiling.retention_trace reassess --replay-root COMPLETED_REPLAY` 从已完成重放的原始回执重算派生费用，
 保留原请求、采样窗口和全部已付成本，不产生模型调用。
@@ -214,7 +214,7 @@ E5 `S3_contextpilot_joint_native` 在 E4 上增加有限回答表示。没有阅
 
 每个并发还执行 `LlamaIndex_native` 和 `S3_contextpilot_no_fact_reuse`。外部方法通过统一 Controller 使用上游 history condense＋compact/refine，物化各数据集 `hybrid_rerank`、`query_mode: current`、无 query adapter/selector 的检索 YAML（`evidence_selection: ranked`、单查询融合、resolved rerank、`source_window: false`）；`--external-reranker` 显式选择发布版 checkpoint，默认 `models/bge-reranker-v2-m3`。其任务/支持规划关闭，Native 编译与保留相同。主消融与 E4 仅相差 `reading.fact_reuse: false`；仍保留实际历史和本轮共享提取。
 
-E0_native（原 PR3 task-first/隔离数值）和 `B6_value` / `S3_value` 为显式可选对照，不进入默认主四格，不要求 C value 资产。
+E0_native（task-first/隔离数值）和 `B6_value` / `S3_value` 为可选对照。
 主矩阵使用 `final_evaluation.arrival_plan` 中的固定到达表。`--arrival-plan` 可显式选择另一张到达表或工作负载索引，每个数据集须覆盖声明队列。
 使用已有请求轨迹离线导出固定相对到达（不产生模型调用）：
 
@@ -230,7 +230,7 @@ python3 -m bench.study_workloads --tasks TASKS.jsonl --arrivals DECLARED-ARRIVAL
   --output FIXED-ARRIVALS.json --name DECLARED-NAME --concurrency 4
 ```
 
-`DECLARED-ARRIVALS.json` 必须显式列出每道任务的相对到达秒数，例如 `{"session:1":0,"session:2":30}`；该示例不是已选定的正式负载。保存任务与到达映射哈希，所有方法复用同一声明；原生观测仍由未来真实执行产生。
+`DECLARED-ARRIVALS.json` 显式列出每道任务的相对到达秒数，例如 `{"session:1":0,"session:2":30}`。保存任务与到达映射哈希，所有方法复用同一声明。
 
 来源记录提供全部声明任务的请求开始时间；缺失项保留为未观测。各方案复用同一固定计划及哈希，按各自真实 P3 历史完成依赖；等待前一轮和等待并发槽均计入完整响应。
 `--complete-slo-seconds` 设置事先声明的完整响应 SLO，goodput 按达标完整回答/观察秒数计算，无阈值时不生成 SLO 数值。
@@ -243,7 +243,7 @@ python3 -m bench.capacity_workflow --full-queue \
 ```
 
 主四格共用冻结 A 的模型、支持策略、查询资产、阅读协议与预算；外部方法使用显式登记的发布版检索栈。可用 `--methods B6_native` 等参数将指定方法分配到独立 reader 服务，只生成所选方法的矩阵和任务。
-`B6_native`、`B6_contextpilot` 和 `LlamaIndex_native` 均无需 gain/value；无 S3 方法时显式提供 `--reader-profile-id`。S3 方法只需当前协议 `--gain-asset`；显式选择 `*_value` 才需要 `--value-model`。ContextPilot 方法需要 `--contextpilot-checkout` 或冻结配置的 `execution.cache_compilation.checkout`；准备阶段验证真实 checkout HEAD 与清洁源码，并保存作者 Python 源码内容清单及摘要，而不是把固定 revision 字符串当作源码摘要。
+`B6_native`、`B6_contextpilot` 和 `LlamaIndex_native` 均无需 gain/value；无 S3 方法时显式提供 `--reader-profile-id`。S3 方法只需当前协议 `--gain-asset`；显式选择 `*_value` 才需要 `--value-model`。ContextPilot 方法需要 `--contextpilot-checkout` 或冻结配置的 `execution.cache_compilation.checkout`；准备阶段验证真实 checkout HEAD 与清洁源码，并保存作者 Python 源码内容清单及摘要。
 默认八种方法在两个并发都使用相同 350 题、77 会话 IDs 和各自的实际 P3 历史。
 固定 B 可独立执行，例如：
 
