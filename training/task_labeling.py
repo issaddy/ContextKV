@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter, defaultdict
+from copy import deepcopy
 from dataclasses import asdict, replace
 import json
 from pathlib import Path
@@ -195,7 +196,7 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
         nonlocal generated
         async with semaphore:
             client = clients[number % len(clients)]
-            interpreter = TaskInterpreter(TeacherTaskModel(client, record_path=call_paths["task"]), HistoryIndex(frozen.tokenizer, encode,
+            interpreter = TaskInterpreter(TeacherTaskModel(client, record_path=call_paths["task"]), HistoryIndex(deepcopy(frozen.tokenizer), encode,
                 unit_tokens=384, candidates=16, view_tokens=8192))
             states = []
             for row in sorted(tasks, key=lambda item: item["turn"]):
