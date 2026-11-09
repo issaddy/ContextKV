@@ -206,6 +206,7 @@ C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观�
 每臂的 `observation_window` 和物理/KV 积分覆盖相同长度，并持续采样到窗口结束，
 包括无重访时的空闲驻留。`revisit-outcomes.json` 按实际原文因果页需求与原生回执
 区分无重访、GPU 命中、Host 回载和重算；混合访问同时保留各类页数和事件数。
+对含规范原文的 ANSWER 也按实际提交的 token 路径统计重访，READ 与 ANSWER 分别计数。租约定价继续以精确 READ 重访为监督。
 训练行中的 `observation_seconds` 是共同计费窗口，`ttl_seconds` / `horizon_seconds`
 是策略保护期限。
 候选前缀含完整来源正文页。

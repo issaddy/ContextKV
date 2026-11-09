@@ -29,6 +29,7 @@ from controller.context_schema import ContextBudget, ContextPlan, EvidenceClaim,
 from controller.engine_client import EngineError, SGLangEngineClient
 from controller.prefix_retention import (EmpiricalRetentionModel, PrefixObserver, PrefixReadObserver, PrefixRuntimeClient, TARGET_COST_RULE, TARGET_DEMAND_RULE,
     RETENTION_FEATURE_NAMES, RETENTION_CONTROL_RULE, MIN_RETENTION_GROUPS, source_demand_event_key)
+from controller.prefix_view import actual_source_geometry
 from controller.reading import (build_read_plan, parse_read_result, stable_prefix_messages,
                                 stable_source_payload, step_messages)
 from controller.reduction import reduce_claims
@@ -283,6 +284,8 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
         event["source_completed_s"] = recorded["completed_s"] if recorded else event["source_started_s"]+generation.elapsed_ms/1000
         events.append(event)
     final = attempt.plan.candidate
+    geometry = actual_source_geometry(template, final)
+    final_prefix = final.input_ids[:geometry["source_prefix_tokens"]]
     request = candidate_request(final, metadata["max_new_tokens"])
     if final.input_hash != attempt.result.receipt.input_hash or token_hash(final.input_ids) != final.input_hash:
         raise ValueError("final ANSWER path differs from its actual receipt")
@@ -298,7 +301,9 @@ def export_attempt(store, attempt, template, sampling, metadata, *, recorded_cal
         sampling=recorded["sampling"] if recorded else dict(sampling),
         sampling_evidence="captured_generation_wire" if recorded else "declared_original_run_config",
         fingerprint=asdict(template.fingerprint),
-        prefix_input_ids=[], sources=[], source_started_s=final_start, source_completed_s=final_end))
+        prefix_input_ids=list(final_prefix), evidence_token_ranges=[list(row) for row in geometry["body_token_ranges"]],
+        fixed_system_prefix_tokens=(longest_common_prefix(template.render(final.messages[:1]).input_ids,
+            final_prefix) if final_prefix else 0), sources=[], source_started_s=final_start, source_completed_s=final_end))
     if recorded:
         events[-1]["request"] = recorded_request(recorded)
     return dict(attempt_id=attempt.attempt_id, session_id=attempt.session_id, request_id=attempt.request_id,
@@ -679,6 +684,10 @@ def read_decisions(trace):
     return [(turn, event) for turn, event in trace_generations(trace) if event["kind"] == "READ"]
 
 
+def source_consumers(trace):
+    return [(turn, event) for turn, event in trace_generations(trace) if event["prefix_input_ids"]]
+
+
 def event_id(turn, event):
     return turn["attempt_id"]+":"+event["step_id"]
 
@@ -708,7 +717,7 @@ def verify_trace(trace):
             raise ValueError("trace input lacks its real original execution proof")
         if tuple(event["request"]["input_ids"]) != tuple(event["input_ids"]):
             raise ValueError("wire generation input differs from the fixed trace")
-        if event["kind"] == "READ" and event["input_ids"][:len(event["prefix_input_ids"])] != event["prefix_input_ids"]:
+        if event["input_ids"][:len(event["prefix_input_ids"])] != event["prefix_input_ids"]:
             raise ValueError("retained source prefix is not the actual contiguous input path")
 
 
@@ -1122,7 +1131,7 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
         raise ValueError("paired C actual model input hashes differ")
     if left["inspection"]["cache_scope_hash"] != right["inspection"]["cache_scope_hash"]:
         raise ValueError("paired C reader/cache resource scope differs")
-    source_events = {event_id(turn, event): event for turn, event in read_decisions(trace)}
+    source_events = {event_id(turn, event): event for turn, event in source_consumers(trace)}
     target_event = source_events[selection["source_event_id"]]
     uses, future = [], []
     for key, actual in native["events"].items():
@@ -1131,8 +1140,9 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
         scope, size = left["inspection"]["cache_scope_hash"], left["inspection"]["page_size"]
         left_use = reuse_pages(target_event, source_events[key], actual["result"]["receipt"], page_size=size, scope=scope)
         right_use = reuse_pages(target_event, source_events[key], retained["events"][key]["result"]["receipt"], page_size=size, scope=scope)
-        uses.append(dict(event_id=key, native=left_use, retained=right_use))
-        if exact_target_demand(target_event, source_events[key], page_size=size, scope=scope):
+        consumer = source_events[key]
+        uses.append(dict(event_id=key, consumer_kind=consumer["kind"], native=left_use, retained=right_use))
+        if consumer["kind"] == "READ" and exact_target_demand(target_event, consumer, page_size=size, scope=scope):
             future.append((key, actual))
     future.sort(key=lambda item: item[1]["generation_window"]["start"])
     next_key, next_left = future[0] if future else (None, None)
@@ -1228,7 +1238,7 @@ def paired_row(trace, native, retained, selection, *, horizon_seconds):
 
 def revisit_outcomes(trace, report, selection):
     """Classify actual source-page demand inside the common observation window."""
-    events = {event_id(turn, event): event for turn, event in read_decisions(trace)}
+    events = {event_id(turn, event): event for turn, event in source_consumers(trace)}
     target = events[selection["source_event_id"]]
     body_pages = len(causal_pages(target, report["page_size"], report["cache_scope_hash"])[1])
     decision = report["events"][selection["event_id"]]["decision_target"]
@@ -1250,13 +1260,14 @@ def revisit_outcomes(trace, report, selection):
         pages = dict(gpu_hit=len(gpu), host_load=len(host), recomputed=len(recomputed))
         for category, count in pages.items():
             counts[category] += count
-        visits.append(dict(event_id=identity,
+        visits.append(dict(event_id=identity, consumer_kind=future["kind"],
             seconds_after_decision=actual["generation_window"]["start"]-decision["decision_time"],
             categories=[category for category, count in pages.items() if count], page_counts=pages,
             demanded_page_ids=sorted(demanded), recomputed_page_ids=sorted(recomputed),
             step_wall_ms=actual["step_wall_ms"], receipt=actual["result"]["receipt"]))
     return dict(source_body_page_count=body_pages, no_revisit=not visits if body_pages else None,
         revisit_events=len(visits), page_counts=counts,
+        consumer_counts={kind: sum(visit["consumer_kind"] == kind for visit in visits) for kind in ("READ", "ANSWER")},
         event_counts={category: sum(category in visit["categories"] for visit in visits) for category in counts},
         visits=visits, observation_seconds=window["end"]-window["start"],
         classification_basis="actual demanded original-source causal pages and native device/host receipt boundaries; mixed visits retain every category")

@@ -215,7 +215,8 @@ def audit_replay_coverage(root):
             arms[report_path.parent.name] = {"report": str(report_path),
                 "observation_window": report["observation_window"],
                 "target": {key: target[key] for key in (
-                    "source_body_page_count", "no_revisit", "revisit_events", "page_counts", "event_counts", "observation_seconds")},
+                    "source_body_page_count", "no_revisit", "revisit_events", "page_counts", "event_counts",
+                    "consumer_counts", "observation_seconds")},
                 "target_event_ids": [visit["event_id"] for visit in target["visits"]],
                 "workload": workload_revisit_coverage(trace, report)}
         windows.append({"window": str(pair), "trace": str(trace_path), "arms": arms})
