@@ -6,16 +6,15 @@
 
 ## 零GPU可运行示例
 
-先安装本项目锁定的检索依赖，再将仓库内的合成材料建为固定索引。索引目录已存在时build会拒绝覆盖；重复演示可复用已建索引，并使用新的会话ID或新的state目录。
+在已配置检索依赖的 Python 环境中，将仓库内的合成材料建为固定索引。索引目录已存在时可复用，并使用新的会话 ID 或 state 目录。
 
 ```bash
-uv sync --extra retrieval --locked
-uv run python -m adapters.retrieval build \
+python3 -m adapters.retrieval build \
   --corpus bench/examples/http-corpus.jsonl \
   --index runs/http-demo-index \
   --snapshot synthetic-http-retrieval-v1
 
-uv run contextkv --config configs/demo.yaml --state-dir runs/http-demo-state serve \
+python3 -m controller --config configs/demo.yaml --state-dir runs/http-demo-state serve \
   --port 18080 \
   --retriever-index runs/http-demo-index \
   --evidence-corpus bench/examples/http-evidence.jsonl \
@@ -46,14 +45,14 @@ curl -sS -X POST http://127.0.0.1:18080/sessions/demo/close
 先按[部署说明](../deployment.md)启动与显式scope一致的研究SGLang服务，再使用同一入口：
 
 ```bash
-uv run --extra tokenizer --extra retrieval --extra query-adapter contextkv \
+python3 -m controller \
   --config configs/qwen3_32b.yaml \
   --state-dir runs/http-qwen3-state serve \
   --retriever-config configs/retriever_dialogue.example.yaml \
   --evidence-corpus data/mtrag-official/cloud.jsonl --corpus-id mtrag
 ```
 
-最终推荐配置使用已评测的实际QA查询适配器与BGE稠密检索，选择五个独立正文组。设置`stage: hybrid`可恢复BM25/BGE融合对照。`--retriever-index data/cloud-bm25s`可作为简单BM25对照；它与`--retriever-config`互斥。启动前准备BGE权重及PyTorch环境。模型scope、系统提示、采样和输出预算来自共享RunConfig。
+此示例使用实际 QA 查询适配器与 BGE 稠密检索。设置 `stage: hybrid` 可比较 BM25/BGE 融合；`--retriever-index data/cloud-bm25s` 可作为简单 BM25 对照，与 `--retriever-config` 互斥。课题实验配置和对照见[运行手册](../study/final_runbook.md)。
 
 `--evidence-corpus`读取原文、来源、版本及条件/表头依赖的JSONL；`--corpus-id`是证据命名空间，默认`mtrag`，自有文档填写自己的命名空间。来源字段按`source_uri → source → url`读取，标题支持metadata。MTRAG已有索引配合`--evidence-corpus data/mtrag-official/cloud.jsonl`可补齐原始文档地址，正文、排名和向量保持不变。corpus snapshot来自已加载retriever的manifest；元数据按检索正文精确匹配，依赖保留原文并单独记录。
 

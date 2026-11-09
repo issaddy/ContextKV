@@ -668,7 +668,7 @@ class PrefixReadObserver:
                     key = compiled.candidate_id
                     if key not in raw_support:
                         raw_support[key] = all_need_ids-answer_evidence_gaps(state, compiled).keys()
-                    priority = sum(unmet[need] for need in (unmet.keys()-set(task.need_ids)) & raw_support[key])
+                    priority = sum(unmet[need] for need in unmet.keys() & raw_support[key])
                 if priority and (target.step_id not in targets or work(compiled) < work(targets[target.step_id][0])):
                     targets[target.step_id] = compiled, priority
 

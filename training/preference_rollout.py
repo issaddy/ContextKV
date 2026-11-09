@@ -230,11 +230,15 @@ def load_candidate_family(saved, row, state, budget, cohort_path):
     return pool, scores, sets, path
 
 def query_encoder_binding(settings):
-    """Identify the actual task-query asset or unchanged P0 query adapter."""
+    """Identify the trained query asset, P0 adapter, or unadapted base encoder."""
     if settings.get("task_asset"):
         path = Path(settings["task_asset"]).resolve()
         names = ("task-model.json", "task-heads.pt", "adapter/adapter_config.json", "adapter/adapter_model.safetensors")
         kind = "trained_task_query"
+    elif "query_adapter_path" in settings and settings["query_adapter_path"] is None:
+        path = Path(settings.get("encoder_path", "models/bge-m3")).resolve()
+        names = ("config.json", "tokenizer_config.json")
+        kind = "base_query_encoder"
     else:
         path = Path(settings.get("query_adapter_path", "models/bge-m3-dialogue-query-v1")).resolve()
         names = ("query-adapter.json", "adapter/adapter_config.json", "adapter/adapter_model.safetensors")

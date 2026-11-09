@@ -286,7 +286,7 @@ def create_task_network(base_path, *, adapter_path=None, rank=16, device="cuda",
             return self.group_queries[name](vectors) @ self.group_keys[name](vectors).T / 8
 
         def forward(self, batch, encoded):
-            hidden = self.encoder(**batch).last_hidden_state.detach().float()
+            hidden = self.encoder(**batch).last_hidden_state.float()
             output = {name: head(hidden[:, 0] if name in {"relation", "version", "temporal_relation"} else hidden)
                       for name, head in self.heads.items()}
             output["update"] = output.pop("condition_update")
@@ -735,7 +735,7 @@ def train_task(config):
             "alignment_report": str((output/"retrieval_alignment.jsonl").resolve()),
             "supervised_states": sum(row["query_supervised"] for row in retrieval_alignment),
             "fully_covered_states": sum(row["all_gold_spans_fully_covered"] for row in retrieval_alignment)},
-        "gradient_scope": {"query_lora": "retrieval loss only", "task_heads": "task losses on detached encoder features"},
+        "gradient_scope": {"query_lora": "retrieval and task losses", "task_heads": "task losses"},
         "loss_weights": loss_weights, "retrieval_temperature": temperature,
         "heads": {"span": SPAN_LABELS, "condition_update": UPDATES, "relation": RELATIONS,
                   "operation": OPERATIONS, "version": VERSIONS, "condition_relation": CONDITION_RELATIONS,
@@ -912,7 +912,8 @@ def evaluate_task(config):
             "missing_label_task_ids": sorted(declared-{case["task_id"] for case in cases}),
             "valid_gold_characters": sum(case["gold_characters"] for case in valid),
             "index": {"path": settings["task_dense_index"], "manifest_sha256": file_digest(Path(settings["task_dense_index"])/"manifest.json")},
-            "query_assets": {"P0": query_encoder_binding({"query_adapter_path": task.get("initial_adapter_path", "models/bge-m3-dialogue-query-v1")}),
+            "query_assets": {"P0": query_encoder_binding({"query_adapter_path": task.get("initial_adapter_path", "models/bge-m3-dialogue-query-v1"),
+                                                            "encoder_path": base}),
                 "task_query": query_encoder_binding({"task_asset": settings["task_output"]})},
             "setup_ms": setup_ms, "complete_ms": (time.perf_counter()-retrieval_started)*1000,
             "setup_scope": "fixed index and P0 query model; task model was already loaded for task-head evaluation",

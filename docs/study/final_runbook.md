@@ -120,6 +120,7 @@ python3 -m training.task_labeling --config runs/study/auxiliary/task-labels/task
 实际 rollout 同时保存 `task_catalogue`、`task_reference_date` 和 `source_scope`，准备与标注直接使用这些观测，不从参考答案或金标补造版本目录。
 `prepare-labels` 可在同一输出目录重跑，复用与当前状态一致的已有标签。`training.task_labeling --limit N` 每次最多新增 N 条，已完成条目不占该额度；全部完成后不再加载模型。
 当前配置 `task_model.initial_adapter_path: null` 与 `training.support_parent_asset: null` 从显式 BGE base 初始化；设为非空父路径时只复用真实存在的资产，不自动回退。有效学生与支持资产须由本次训练及开发评价确认。
+无 adapter 的查询基线记录 BGE 基座路径及其配置、tokenizer 配置摘要；有 adapter 时记录 adapter 资产摘要。任务头指标和检索对照分别保存。
 配置默认将实际历史写入 `runs/study/actual-rollout/sessions.sqlite3`。训练与评价共用
 `runs/study/auxiliary/task-labels/task_labels.jsonl`，由 cohort manifest 隔离 train/dev。
 

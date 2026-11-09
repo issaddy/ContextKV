@@ -1,7 +1,9 @@
 base_study_config: configs/study.yaml
 task_model:
+  base_path: models/bge-m3
   initial_adapter_path: null
 support_model:
+  base_path: models/bge-reranker-v2-m3
   device: cuda:0
 training:
   cohort_manifest: runs/study/auxiliary/cohorts/full/cohort_manifest.json

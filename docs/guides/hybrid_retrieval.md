@@ -1,6 +1,6 @@
 # 检索与证据配置
 
-CLI、HTTP和原生对照共用`adapters/retriever_factory.py`。推荐配置为`configs/retriever_dialogue.example.yaml`，与`configs/qwen3_32b.yaml`的每轮重建组合；结构化任务解释和成本选择仍可单独配置。
+CLI、HTTP和原生对照共用`adapters/retriever_factory.py`。`configs/retriever_dialogue.example.yaml`展示实际历史查询和稠密检索；课题主线与配对对照见[运行手册](../study/final_runbook.md)。
 
 ## 默认流程
 
@@ -8,7 +8,7 @@ CLI、HTTP和原生对照共用`adapters/retriever_factory.py`。推荐配置为
 2. 按归一化向量内积召回50段，按不同正文及适用范围选至多五组。各来源保留独立引用身份，相同原文按现有机制共享。
 3. 生成使用当前原文和完整实际QA。重建后的共同前缀仍由原生Radix/HiCache复用，回答、历史与引用退役一同走持久化控制器。
 
-查询侧采用CLS与FP32 L2归一化，复用原始BGE-M3文档向量；查询上限8192。最终默认为Dense5，没有32B解释调用或重排调用；BM25S/RRF作为`stage: hybrid`对照保留。模型与索引在启动时加载，逐轮复用；本地GPU检索等待也计入完整响应。可选解释与重排方案分别按实际任务效果和成本选择。
+示例的查询侧采用CLS与FP32 L2归一化，复用原始BGE-M3文档向量；查询上限8192。`stage: hybrid`提供BM25S/RRF融合。模型与索引在启动时加载，逐轮复用；本地GPU检索等待也计入完整响应。
 
 ## 索引与运行
 
@@ -60,9 +60,9 @@ Cloud使用72,442条原始passages；MultiDoc2Dial使用其完整4110段语料�
 
 ## 查询适配器与可选解释
 
-`configs/retriever_dialogue.example.yaml`采用BGE查询侧LoRA，复用原文向量。`query_adapter_path`绑定输入配方、BGE基座与权重。当前权重由MultiDoc2Dial官方训练集22,806个问题学习，冻结用于在线检索，不改变回答模型或文档向量；依赖通过`uv sync --extra tokenizer --extra retrieval --extra query-adapter --locked`安装。
+`configs/retriever_dialogue.example.yaml`展示BGE查询侧LoRA，复用冻结的原文向量。`query_adapter_path`绑定输入配方、BGE基座与权重；实际实验使用配置指定的资产。
 
-对话视图将当前原问题置前，按由近到远加入已提交QA，在8192-token预算内保留完整轮次；生成仍接收实际历史与原文。默认仅运行检索；可配置`selector`，用同一32B维护独立任务状态。选择`stage: hybrid`时，稠密检索使用上述QA视图，BM25S使用当前及前两条用户问题，两路按现有RRF融合；历史回答作为检索线索，生成事实继续取自原文。稠密与混合两种方案已完成固定32B下的既定会话复验，最终按质量优先选择Dense5；Cloud小样本中的混合优势与评分不确定性保留在评价记录。
+对话视图将当前原问题置前，按由近到远加入已提交QA，在8192-token预算内保留完整轮次；生成仍接收实际历史与原文。可配置`selector`维护任务状态。选择`stage: hybrid`时，稠密检索使用上述QA视图，BM25S使用当前及前两条用户问题，两路按RRF融合。
 
 `stage: hybrid_rerank`在同一召回池上增加BGE重排，`reranker_path`可指向原版或已合并的训练检查点。重排查询优先保留当前问题，再加入完整的近期QA，以`reranker_max_length`的一半为查询预算目标；较长的当前问题单独形成查询视图，完整问题/原文对由模型的长度配置处理。默认512-token查询目标、1024-token问题/原文对，与答案支持性重排训练一致。该路径复用现有模型加载和原文选材，逐轮新增一次本地重排，不增加32B辅助调用。
 

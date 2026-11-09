@@ -1,4 +1,4 @@
-# Final Dense5: actual-history query adaptation; see docs/guides/hybrid_retrieval.md.
+# Dense retrieval example with actual-history query adaptation.
 schema_version: 1
 kind: hybrid
 stage: dense
