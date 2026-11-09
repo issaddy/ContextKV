@@ -178,13 +178,15 @@ def compile_route_steps(proposal, state, snapshot, template, *, output_budgets,
             variants = compile_step(proposal.context_plan, task, state, snapshot, template, outputs=outputs,
                                     request_compiler=request_compiler, cache_scope=cache_scope)
         route.append(PlanStep(task, variants, reservation))
+    if compile_answers is None:
+        return tuple(route)
     answers = tuple(step for step in proposal.steps if step.task.kind == "ANSWER")
     if not answers:
         answers = (complete_plan(proposal.context_plan, (), semantic_kind=proposal.semantic_kind,
             reader_checkpoint=proposal.reader_checkpoint).steps[-1],)
     for step in answers:
         variants = step.variants
-        if compile_answers is not None and not variants:
+        if not variants:
             # Only the source projection already visible in this state is known.
             # Generated facts and the actual terminal representation are bound
             # again after the selected action completes.
@@ -304,7 +306,7 @@ class RollingPlanRuntime:
             stream.write(dumps(packet)+"\n")
 
     def action_proposals(self, catalog, state, snapshot, template, compile_answers, gap_request, *,
-                         request_compiler=None, cache_scope=None):
+                         request_compiler=None, cache_scope=None, project_answer=False, gain_model=None):
         from .action_proposals import (build_observed_action_plans, eligible_observed_answers,
                                        observed_answer_options, observed_step_outputs)
         base = _with_observed_sources(catalog, state)
@@ -317,6 +319,9 @@ class RollingPlanRuntime:
         options = observed_answer_options(base_state, joint=self.joint_context, finite=finite)
         result = []
         for plan in plans:
+            if gain_model is not None and not (gain_model.supports_semantic_kind(plan.semantic_kind)
+                    and gain_model.supports_semantic_kind(plan.semantic_kind, costs=True)):
+                continue
             completed = _completed_steps(plan, state)
             steps = []
             for step in plan.steps:
@@ -343,7 +348,7 @@ class RollingPlanRuntime:
                 snapshot, template, output_budgets=self.output_budgets,
                 output_tokens_per_fact=self.output_tokens_per_fact,
                 request_compiler=request_compiler, cache_scope=cache_scope,
-                compile_answers=compile_answers, answer_options=options)))
+                compile_answers=compile_answers if project_answer else None, answer_options=options)))
         return tuple(result)
 
     @staticmethod
@@ -607,6 +612,7 @@ class RollingPlanRuntime:
         demand_retention = self.joint_context and retention_mode == "demand"
         while True:
             selection_started = time.monotonic()
+            answer_demand = demand_retention and any(record.task.kind == "READ" for record in state.steps)
             spent = reading_tokens_spent(state.steps, auxiliary_usage, state.auxiliary_usage)
             catalog = (_with_observed_sources(context_plans[0], state)
                        if self.mode == "observed_actions" else state.plan)
@@ -668,7 +674,7 @@ class RollingPlanRuntime:
                     snapshot, template, output_budgets=self.output_budgets,
                     output_tokens_per_fact=self.output_tokens_per_fact,
                     request_compiler=executor.request_compiler, cache_scope=cache_scope,
-                    compile_answers=compile_answers if self.joint_context else None,
+                    compile_answers=compile_answers if answer_demand else None,
                     answer_options=dict(representations=("hybrid",), layouts=("existing",), actions=("REBUILD",))))
                     for proposal in proposals)
                 native, _ = await self.native.observe(proposals, state, snapshot, engine, cost_model,
@@ -756,7 +762,7 @@ class RollingPlanRuntime:
             gap_request = self._gap_request(state, expanded, open_need_provider)
             plans = (self.action_proposals(context_plans[0], state, snapshot, template,
                 compile_answers, gap_request, request_compiler=executor.request_compiler,
-                cache_scope=cache_scope) if observed else
+                cache_scope=cache_scope, project_answer=answer_demand, gain_model=model) if observed else
                 self.proposals(context_plans, state, snapshot, template, compile_answers,
                     request_compiler=executor.request_compiler, cache_scope=cache_scope))
             if len(plans) > self.policy.limits.max_plan_candidates:

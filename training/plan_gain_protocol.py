@@ -426,9 +426,7 @@ class FixedCounterfactualRuntime:
                 self.compiled_route_steps = compile_route_steps(declared, state, snapshot, template,
                     output_budgets=self.action_domain["output_budgets"] if self.action_domain else outputs,
                     output_tokens_per_fact=self.action_domain["output_tokens_per_fact"] if self.action_domain else 64,
-                    request_compiler=executor.request_compiler, cache_scope=cache_scope,
-                    compile_answers=compile_answers, answer_options=dict(layouts=(self.layout,),
-                        actions=(self.action,), representations=(self.planned.answer_representation,)))
+                    request_compiler=executor.request_compiler, cache_scope=cache_scope)
                 quote_candidates = tuple({candidate.candidate_id: candidate
                     for candidate in (*variants, *(candidate for step in self.compiled_route_steps
                         for candidate in step.variants if candidate.feasible))}.values())

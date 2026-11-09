@@ -239,7 +239,7 @@ class SpecifiedNativeBranch:
 
 
 @pytest.mark.asyncio
-async def test_fixed_observer_quotes_future_sources_without_promoting_them_to_current_answers(tmp_path):
+async def test_fixed_observer_quotes_current_answers_and_pending_reads(tmp_path):
     from controller.execution import ReadingExecutor
     from controller.rolling_policy import FixedReadingObserver
 
@@ -284,7 +284,7 @@ async def test_fixed_observer_quotes_future_sources_without_promoting_them_to_cu
     packet = json.loads(output.read_text())
     assert packet["legal_answer_representations"] == ["hybrid"]
     assert "read_once" in packet["legal_actions"]
-    assert any(candidate.representation == "raw" and candidate.source_body_token_ranges for candidate in quoted)
+    assert not any(candidate.representation == "raw" for candidate in quoted)
     assert not engine._attempts
     store.close()
 
