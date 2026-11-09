@@ -1,5 +1,5 @@
 """Project current evidence obligations onto the same finite native request set."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .context_budget import answer_evidence_gaps, required_source_units
 from .context_schema import OpenNeed, SourceSpan
@@ -60,6 +60,9 @@ class DemandLease:
     at_risk_tokens: int
     page_size: int
     cache_scope_hash: str
+    ttl_seconds: float
+    action: str = "new"
+    consumer_arrival_ms: float | None = None
 
 
 @dataclass(frozen=True)
@@ -69,29 +72,43 @@ class JointOption:
     release: tuple[str, ...] = ()
     protected_tokens: int = 0
     uncovered_risk_tokens: int = 0
-    retention_saved_ms: float | None = None
     retention_evidence: str | None = None
+    keep: tuple[str, ...] = ()
+    arrival_basis: str | None = None
+    retention_allocation_value_ms: float | None = None
+    retention_control_ms: float | None = 0.0
 
     def trace(self):
         return {"needs": tuple((need.need_id, need.reason) for need in self.demand.needs),
                 "remaining_read_ids": self.demand.remaining_read_ids,
-                "retain": self.retain, "release": self.release,
+                "retain": self.retain, "release": self.release, "keep": self.keep,
                 "protected_tokens": self.protected_tokens, "uncovered_risk_tokens": self.uncovered_risk_tokens,
-                "retention_saved_ms": self.retention_saved_ms, "retention_evidence": self.retention_evidence}
+                "retention_evidence": self.retention_evidence,
+                "arrival_basis": self.arrival_basis,
+                "retention_allocation_value_ms": self.retention_allocation_value_ms,
+                "retention_control_ms": self.retention_control_ms}
 
 
 def joint_options(plans, state, *, allocate=None):
     from .plan_policy import _completed_steps
 
-    demand = DemandState.from_outcome(state)
-    # Complete plans carry observed producers before the first new action.
-    actions = []
+    # Project demand and consumers from each candidate's remaining catalogue.
+    options = {}
     for plan in plans:
-        completed = _completed_steps(plan, state)
-        step = next(step for step in plan.steps if step.task.step_id not in completed)
-        variants = tuple(row for row in step.variants if row.feasible)
-        actions.extend((step.task, candidate) for candidate in variants or (None,))
-    return {(candidate.candidate_id if candidate is not None else task.step_id):
-            (allocate(demand.after(task), task, candidate, actions) if allocate is not None
-             else JointOption(demand.after(task)))
-            for task, candidate in actions}
+        projected = replace(state, plan=plan.context_plan)
+        completed = _completed_steps(plan, projected)
+        remaining = tuple(step for step in plan.steps if step.task.step_id not in completed)
+        if not remaining:
+            continue
+        first = remaining[0]
+        variants = tuple(row for row in first.variants if row.feasible)
+        actions = tuple((first.task, candidate) for candidate in variants or (None,))
+        consumers = tuple((step.task, candidate) for step in plan.route_steps
+            if step.task.step_id not in completed
+            for candidate in tuple(row for row in step.variants if row.feasible) or (None,))
+        demand = DemandState.from_outcome(projected)
+        for task, candidate in actions:
+            key = candidate.candidate_id if candidate is not None else task.step_id
+            options[key] = (allocate(demand.after(task), task, candidate, consumers)
+                if allocate is not None else JointOption(demand.after(task)))
+    return options

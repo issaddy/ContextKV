@@ -136,10 +136,12 @@ def test_canonical_table_windows_keep_shared_context_out_of_data_dependencies():
     reading = build_read_plan(state, selected, 'all_supplied_documents',
         ContextBudget(read_output_tokens=4096), template=ByteTemplate(),
         read_layout='source_first', read_packing='source_windows', output_tokens_per_fact=None)
-    assert len(reading.steps) == 1
+    # Packing includes the structured numeric output reservation as well as
+    # source tokens. Every data package must retain the shared table context.
+    assert reading.steps
     assert set(reading.coverage_units) == set(lookup)
     for step in reading.steps:
-        assert set(step.input_unit_ids) & data_ids == data_ids
+        assert set(step.input_unit_ids) & data_ids
         assert set(lookup) - data_ids <= set(step.input_unit_ids)
 
 

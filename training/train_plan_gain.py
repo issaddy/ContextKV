@@ -143,6 +143,7 @@ def build_gain_record(plan: PlanCandidate, state: ReadingOutcome, snapshot: Sess
     if counterfactual["plan_id"] != plan.plan_id:
         raise ValueError("counterfactual answer must execute the labelled complete plan")
     paid = None if observed is None else decode(CompleteCost, observed["paid_cost"])
+    support_mode = ((observed or {}).get("evidence_selection_contract") or {}).get("mode") == "support"
     record = {"schema_version": 1, "record_id": _digest([expected_state, plan.plan_id,
             direct["native_receipts"], counterfactual["native_receipts"], direct["scorer_identity"],
             direct["quality"], counterfactual["quality"]]),
@@ -153,7 +154,8 @@ def build_gain_record(plan: PlanCandidate, state: ReadingOutcome, snapshot: Sess
         "input_protocol": protocol,
         "scorer_identity": direct["scorer_identity"], "comparison_budget": direct["comparison_budget"],
         "plan_id": plan.plan_id, "semantic_kind": plan.semantic_kind,
-        "features": plan_features(plan, state, output_budgets=counterfactual.get("output_budgets"), paid_cost=paid),
+        "features": plan_features(plan, state, output_budgets=counterfactual.get("output_budgets"),
+                                  paid_cost=paid, support_mode=support_mode),
         "quality_direct": direct["quality"], "quality_counterfactual": counterfactual["quality"],
         "delta_q": counterfactual["quality"]-direct["quality"],
         "incremental_complete_cost": {name: counterfactual["cost"][name]-direct["cost"][name]
@@ -166,7 +168,8 @@ def build_gain_record(plan: PlanCandidate, state: ReadingOutcome, snapshot: Sess
         direct_plan = complete_plan(replace(state.plan, plan_id=direct["plan_id"],
             steps=tuple(step.task for step in state.steps)), (), semantic_kind="direct_answer",
             reader_checkpoint=plan.reader_checkpoint)
-        record["direct_features"] = plan_features(direct_plan, state, output_budgets=direct.get("output_budgets"), paid_cost=paid)
+        record["direct_features"] = plan_features(direct_plan, state, output_budgets=direct.get("output_budgets"),
+                                                 paid_cost=paid, support_mode=support_mode)
         record["cost_targets"] = observed_cost_targets(direct, counterfactual)
     return record
 
@@ -320,13 +323,14 @@ def _supervision(rows, *, split):
             state = decode(ReadingOutcome, row["working_state"])
             plan = decode(PlanCandidate, row["plan"])
             paid = decode(CompleteCost, row["observed_state_binding"]["paid_cost"])
+            support_mode = (row["observed_state_binding"].get("evidence_selection_contract") or {}).get("mode") == "support"
             expected_features = plan_features(plan, state,
-                output_budgets=counterfactual.get("output_budgets"), paid_cost=paid)
+                output_budgets=counterfactual.get("output_budgets"), paid_cost=paid, support_mode=support_mode)
             direct_plan = complete_plan(replace(state.plan, plan_id=direct["plan_id"],
                 steps=tuple(step.task for step in state.steps)), (), semantic_kind="direct_answer",
                 reader_checkpoint=plan.reader_checkpoint)
             if row["direct_features"] != plan_features(direct_plan, state,
-                    output_budgets=direct.get("output_budgets"), paid_cost=paid):
+                    output_budgets=direct.get("output_budgets"), paid_cost=paid, support_mode=support_mode):
                 raise ValueError("direct cost features differ from the bound pre-action paid budget state")
             if row["features"] != expected_features:
                 raise ValueError("observed features or action one-hot values differ from the bound pre-action paid budget state")

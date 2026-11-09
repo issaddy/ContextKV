@@ -575,7 +575,9 @@ async def test_actual_snapshot_cohort_needs_no_task_labels_and_keeps_native_witn
     terminal_rows, _ = observed_cohort([previous, capture], [terminal], sources, split='train', limit=1,
         cohort_manifest=manifest)
     chosen, = observed_rows(terminal_rows, [terminal])
-    assert set(chosen['observed_action_kinds']) == {'reduce_once', 'gap_retrieval'}
+    # R3 is still an unresolved numeric field; reducing the partial basis is
+    # illegal until GAP resolves it. Shared numeric selection does not waive it.
+    assert set(chosen['observed_action_kinds']) == {'gap_retrieval'}
     terminal_state = decode(ReadingOutcome, terminal['working_state'])
     from action_helpers import material as source_material
     block, unit = source_material('unread-terminal-source')
@@ -592,24 +594,7 @@ async def test_actual_snapshot_cohort_needs_no_task_labels_and_keeps_native_witn
     assert continuation_read(restored, restored.plan).step_id == unread.step_id
     plans, _ = build_observed_action_plans(terminal_state, snapshot, service.template,
         reader_checkpoint=binding['reader_checkpoint'])
-    from bench.mock_engine import MockEngine
-    generate = native.generate
-
-    async def select_quantities(*, response_schema=None, **kwargs):
-        if response_schema is not None and response_schema['properties']['format_version']['const'] == 7:
-            native.response_text = json.dumps({'format_version': 7, 'views': {
-                alias: {parent: rule.get('const', True) for parent, rule in view['properties'].items()}
-                for alias, view in response_schema['properties']['views']['properties'].items()}})
-            return await MockEngine.generate(native, **kwargs)
-        return await generate(response_schema=response_schema, **kwargs)
-
-    native.generate = select_quantities
-    reduced = await execute_branch(service, next(plan for plan in plans if plan.semantic_kind == 'reduce_once'),
-        terminal_state, snapshot, chosen, case_dir=tmp_path/'terminal-reduce', binding=branch_binding,
-        preparation=prep, resources=Resources(), cache_start='observed', generation_budget=budget,
-        observed=chosen['observed_binding'], gap_request=request)
-    assert reduced['new_action_counts'] == {'READ': 0, 'REDUCE': 1, 'GAP_RETRIEVAL': 0, 'ANSWER': 1}
-    assert len(reduced['actual_native_calls']) == 2
+    assert not any(plan.semantic_kind == 'reduce_once' for plan in plans)
 
     from controller.context_schema import EvidenceSet
     from training.preference_rollout import _judge, P1_RUBRIC

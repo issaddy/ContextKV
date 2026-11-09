@@ -146,22 +146,24 @@ def test_observed_value_uses_existing_support_and_bridge_state_without_future_re
     plan = replace(plan, context_plan=replace(plan.context_plan, selected_set=material))
     bridge = replace(state, open_needs=(OpenNeed("need", "founded", ("R1",),
         parent_claim_ids=(state.claims[0].claim_id,)),))
-    features = plan_features(plan, bridge, paid_cost=paid)
+    features = plan_features(plan, bridge, paid_cost=paid, support_mode=True)
+    ranked = plan_features(plan, bridge, paid_cost=paid, support_mode=False)
+    assert ranked["retrieval_support_needs"] == ranked["retrieval_support_mean"] == ranked["retrieval_bridge_mean"] == 0
     assert features["retrieval_support_needs"] == 1
     assert features["retrieval_support_mean"] == pytest.approx(.4)
     assert features["retrieval_bridge_mean"] == pytest.approx(.3)
     assert features["infer_needs"] == features["observed_bridge_gaps"] == 1
     assert features["observed_terminal_needs"] == 0
     terminal = replace(state, results=(replace(state.results[0], support=("need",)),), open_needs=())
-    completed = plan_features(plan, terminal, paid_cost=paid)
+    completed = plan_features(plan, terminal, paid_cost=paid, support_mode=True)
     assert completed["observed_terminal_needs"] == 1
     assert completed["observed_bridge_gaps"] == 0
     assert completed["existing_claim_chars"] == features["existing_claim_chars"]
     assert completed["remaining_hard_steps"] == features["remaining_hard_steps"]
-    absent = plan_features(replace(plan, context_plan=state.plan), state, paid_cost=paid)
+    absent = plan_features(replace(plan, context_plan=state.plan), state, paid_cost=paid, support_mode=True)
     zero = replace(support, joint_support=0, bridge_value=0)
     known_zero = plan_features(replace(plan, context_plan=replace(plan.context_plan,
-        selected_set=replace(material, need_support=(zero,)))), state, paid_cost=paid)
+        selected_set=replace(material, need_support=(zero,)))), state, paid_cost=paid, support_mode=True)
     assert absent["retrieval_support_needs"] == 0 and known_zero["retrieval_support_needs"] == 1
 
 
@@ -180,3 +182,46 @@ def test_frozen_decision_identity_includes_actual_source_and_reader_geometry():
     assert working_state_key(replace(state, plan=replace(state.plan,
         budget=replace(state.plan.budget, body_tokens=1))), snapshot) != identity
     assert working_state_key(replace(state, claims=()), snapshot) != identity
+
+
+def test_read_value_features_follow_candidate_sources_not_the_whole_material_set():
+    from controller.context_schema import SourceSpan, SupportBundle
+    from controller.evidence import make_evidence
+    from controller.plan_policy import PlanCandidate, PlanStep, plan_features
+    from controller.serialization import decode
+
+    rows, state = paired_records()
+    plan = decode(PlanCandidate, rows[0]["plan"])
+    paid = decode(CompleteCost, rows[0]["observed_state_binding"]["paid_cost"])
+    old = replace(state.plan.selected_set.selected_units[0], retrieval_score=1, need_ids=("need",))
+    block = make_evidence("A new result not previously read.", "new-source")
+    new = replace(old, unit_id="new", text=block.text, retrieval_score=9,
+                  source_spans=(SourceSpan("new-span", block.key, 0, len(block.text)),))
+    material = replace(state.plan.selected_set, selected_units=(old, new),
+        need_support=(SupportBundle("old", "need", (old.unit_id,), 1, .2, bridge_value=.1),
+                      SupportBundle("both", "need", (old.unit_id, new.unit_id), 1, 1, bridge_value=1)))
+    state = replace(state, plan=replace(state.plan, selected_set=material))
+    plan = replace(plan, context_plan=replace(plan.context_plan, selected_set=material))
+    old_features = plan_features(plan, state, paid_cost=paid, support_mode=True)
+    changed = replace(plan, steps=tuple(PlanStep(replace(step.task, input_unit_ids=(new.unit_id,)),
+        step.variants, step.output_reservation) if step.task.step_id == "new-read" else step
+        for step in plan.steps))
+    new_features = plan_features(changed, state, paid_cost=paid, support_mode=True)
+    assert old_features["candidate_retrieval_score_mean"] == 1
+    assert new_features["candidate_retrieval_score_mean"] == 9
+    assert old_features["candidate_retrieval_rank_mean"] == 2
+    assert new_features["candidate_retrieval_rank_mean"] == 1
+    assert old_features["candidate_fact_overlap_fraction"] == old_features["candidate_read_overlap_fraction"] == 1
+    assert new_features["candidate_fact_overlap_fraction"] == new_features["candidate_read_overlap_fraction"] == 0
+    assert old_features["candidate_unmet_needs"] == new_features["candidate_unmet_needs"] == 1
+    assert old_features["candidate_unmet_need_fraction"] == 1
+    assert old_features["retrieval_support_mean"] == .2
+    assert new_features["retrieval_support_needs"] == 0  # No credit for half a bundle.
+    # Another unit alias of the exact same source is still fully redundant.
+    alias = replace(old, unit_id="alias")
+    alias_plan = replace(changed, context_plan=replace(changed.context_plan,
+        selected_set=replace(material, selected_units=(old, alias))),
+        steps=tuple(replace(step, task=replace(step.task, input_unit_ids=(alias.unit_id,)))
+            if step.task.step_id == "new-read" else step for step in changed.steps))
+    alias_features = plan_features(alias_plan, state, paid_cost=paid)
+    assert alias_features["candidate_fact_overlap_fraction"] == alias_features["candidate_read_overlap_fraction"] == 1

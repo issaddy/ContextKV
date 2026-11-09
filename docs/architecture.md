@@ -30,7 +30,7 @@ flowchart TD
 
 规范来源窗口按实际 tokenizer、原文坐标和版本定义，当前粒度为 2048 token、最多 8 个非空原文行。超长行按 tokenizer 切分，其他行保留完整。标题、表头与注释随数据窗口的依赖闭包读取。source-first 将当前条件、事实别名和输出协议放在稳定原文之后，多个窗口可合并进一次 READ。[来源窗口](../controller/source_windows.py)
 
-同会话已提交的 READ 产生可见复用合同。当前任务解释选择适用合同，并核对版本、内容 hash、范围、条件和字段。逻辑复用节点导入原子事实，当前统计仍按本轮 Need 选择和计算。`complete` 按实际原文区间并集核算覆盖，`facts` 只导入事实。历史 claim ID 用于追溯，当前调度依赖取自生产者的 `ReadResult.step_id`，GAP 重建保留已完成逻辑节点。[事实复用](../controller/fact_reuse.py) · [动作提案](../controller/action_proposals.py)
+同会话已提交的 READ 产生可见复用合同。当前任务解释选择适用合同，并核对版本、内容 hash、范围、条件和字段。逻辑复用节点导入原子事实，当前统计仍按本轮 Need 选择和计算。`facts` 导入原子事实及来源；`complete` 同时生成已读覆盖，供当前计划扣除完成区间。历史 claim ID 用于追溯，当前调度依赖取自生产者的 `ReadResult.step_id`，GAP 重建保留已完成逻辑节点。[事实复用](../controller/fact_reuse.py) · [动作提案](../controller/action_proposals.py)
 
 ## B · 阅读、计算与停止
 
@@ -48,11 +48,11 @@ source-first ANSWER 的实际顺序为系统、稳定原文、工作历史、当
 
 ## C · 编译、Native 报价与缓存反馈
 
-`RequestCompiler` 为 source-first READ 和 ANSWER 使用同一系统消息及原文格式。相同原文窗口按相同顺序进入请求时，两类请求的完整来源前缀相同。任务、历史、条件、引用映射与检索排名在来源之后。Native 编译使用原顺序，`cache_compilation.mode: contextpilot` 另使用作者 CPU index/reorder 提出排列。排序按报价比较新增预填充、Host 回载和输入长度。选中动作执行同一已报价输入，APPEND 保持已提交前缀。[请求编译器](../controller/request_compiler.py) · [来源格式](../controller/source_prompt.py)
+`RequestCompiler` 为 source-first READ 和 ANSWER 使用同一系统消息及原文格式。相同原文窗口按相同顺序进入请求时，两类请求的完整来源前缀相同。任务、历史、条件、引用映射与检索排名在来源之后。Native 编译使用原顺序，`cache_compilation.mode: contextpilot` 另使用作者 CPU index/reorder 提出排列。排序按报价比较新增预填充、Host 回载和输入长度。作者索引还返回真实执行过的来源序列：仅连续路径前缀可提出未完成 READ 的局部改组，依赖闭包和原分包器仍负责容量。组织候选沿用两个 READ 的决策额度，完整剩余 READ 分别编译报价，选中目录在执行和租约变更前持久化。选中动作执行同一已报价输入，APPEND 保持已提交前缀。[请求编译器](../controller/request_compiler.py) · [来源格式](../controller/source_prompt.py)
 
 编译时由实际 tokenizer 同时生成 token 与原文区间，候选绑定 READ/REDUCE 的步骤和输出 schema。报价、执行和回执复用编译结果。步骤账本保存正文 token 区间与因果边界，ContextPilot 索引据此登记已执行排列。原生回执记录实际预填充和 Host 回载。与所选报价配对时，记录提交时的报价年龄与工作量差值。Native Radix/HiCache 管理页匹配、迁移和淘汰。[来源前缀](../controller/prefix_view.py)
 
-可选 TTL/value 在独立 owner 的保护预算中比较保留、续租和释放。读取需求按完整因果前缀与正文范围确定，共享页按并集占容量。价值比较相对 Native 的额外节省，扣除控制、驻留和挤出代价；配对 Native、TTL15/60/180 复用同一到达轨迹和观察窗。控制费用进入已付账本，B 可使用实际 callback 均值预测首个 READ 的控制开销。[可选保留策略](../controller/prefix_retention.py)
+可选 TTL/value 在独立 owner 的保护预算中比较保留、续租和释放。读取需求按完整因果前缀与正文范围确定，共享页按并集占容量。价值比较相对 Native 的额外节省，扣除控制、驻留和挤出代价；配对 Native、TTL15/60/180 复用同一到达轨迹和观察窗。控制费用进入已付账本，B 可使用实际 callback 均值按剩余已知 READ 数量预测控制开销。[可选保留策略](../controller/prefix_retention.py)
 
 有限联合决策在同一轮比较有效原文、完整事实或归约结论、原文与结论混合三类实际 ANSWER 输入，并为两个就绪 READ、必要归约和 GAP 留出候选位。原文候选独立检查实际来源覆盖，结论候选检查 Need 和归约依据。各表示共用编译器、Native 报价和完成预算。[候选与滚动执行](../controller/rolling_policy.py)
 
@@ -60,7 +60,17 @@ source-first ANSWER 的实际顺序为系统、稳定原文、工作历史、当
 
 READ 只是对 Need 的一次尝试；结果尚未返回时，覆盖同一 Need 的原文回答仍可使用已读来源前缀。实际结果决定下一轮是否继续保护。
 
-单条就绪后续 READ 的完整前缀匹配单 owner Native 配对资产时，净值扣除控制、驻留价格和配对中观测的外部请求损失，非正值选择空保留。该 READ 同时属于 B 的有界后续时，正净值进入动作排序。逻辑 token、时间和容量准入按各自预留检查。部分前缀和多 owner 使用页并集分配。[动作排序](../controller/action_policy.py)
+剩余请求从候选目录的来源 token 范围投影。keep 使用旧租约剩余期限；renew 复用同 owner；旧租约与 new 共同进入 `allocate_retention()`，未选中的附加保护释放。消费者到达时间由前序步骤、排队和已观察耗时估计。收益按消费者及因果页去重，驻留按逐页时间并集计量。来源观察 callback 和 owner 变更费分别进入预算。
+
+需求保留使用配对资产估算相对 Native 的净值。未配置定价资产时使用 Native；`Rule_contextpilot_joint_demand` 通过 `unpriced_policy: risk_tokens` 启用规则对照。
+
+### 待完成的联合接口
+
+- READ 候选尚未编译未来 ANSWER 的来源消费者，需求投影会遗漏该请求。
+- 完成预算仍缺少 REDUCE 的输入及最终结论输入。
+- 成本头拟合的是首动作加有界后续，需要与多包组织的完整费用口径对齐。
+- 保留净值目前用于租约分配；动作成本尚缺未来驱逐的增量估计。
+
 
 ## 提交、评价与成本
 

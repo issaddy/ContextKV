@@ -201,15 +201,22 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
                             fingerprint=ByteTemplate().fingerprint, native_running_budget_tokens=4)
     gap = PlanCandidate("gap", "gap_retrieval", plan, (PlanStep(ReadTask("gap", "GAP")),), "reader")
     observer = PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
-                                  {"mode": "demand", "protection_budget_tokens": 4})
+                                  {"mode": "demand", "unpriced_policy": "risk_tokens", "ttl_seconds": 15, "protection_budget_tokens": 4})
     observer.runtime = SimpleNamespace(status=AsyncMock())
 
     async def after_gap(target, active=()):
         read = PlanCandidate("next", "read_once", plan, (PlanStep(later, (target,)),), "reader")
         observer.runtime.status.return_value = {"prefixes": active}
-        return (await observer.demand_options((gap, read), state, "session", batch, page_size=2))["gap"]
+        planned_gap = replace(gap, route_steps=(PlanStep(later, (target,)),))
+        return (await observer.demand_options((planned_gap, read), state, "session", batch, page_size=2))["gap"]
 
     shared = await after_gap(candidate)
+    observer.settings.pop("unpriced_policy")
+    observer.runtime.status.reset_mock()
+    native = await after_gap(candidate)
+    assert native.retain == () and native.retention_evidence == "native_unpriced_net_value"
+    observer.runtime.status.assert_not_awaited()
+    observer.settings["unpriced_policy"] = "risk_tokens"
     lease, = shared.retain
     assert (lease.source_step_id, lease.target_step_id, lease.boundary_tokens) == ("old", "later", 2)
     assert shared.protected_tokens == 2
@@ -221,7 +228,8 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     assert reused.protected_tokens == reused.uncovered_risk_tokens == 0
     assert (await after_gap(replace(candidate, source_body_token_ranges=((2, 4),)))).retain == ()
 
-    owner = SimpleNamespace(owner_id=lease.owner_id, policy="joint_demand", prefix_input_ids=ids[:2])
+    owner = SimpleNamespace(owner_id=lease.owner_id, policy="joint_demand", prefix_input_ids=ids[:2],
+        ttl_seconds=15, lease_started_ns=__import__("time").monotonic_ns())
     observer.store = SimpleNamespace(prefix_owners=lambda *args, **kwargs: (owner,))
     read = PlanCandidate("next", "read_once", plan, (PlanStep(later, (candidate,)),), "reader")
     observer.runtime.status.return_value = {"prefixes": ({**existing, "owner_id": owner.owner_id},)}
@@ -238,7 +246,167 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     reads = (PlanCandidate(step.step_id, "read_once", plan, (PlanStep(step, (compiled,)),), "reader")
              for step, compiled in ((later, candidate), (tail, long_candidate)))
     observer.runtime.status.return_value = {"prefixes": ()}
+    gap = replace(gap, route_steps=(PlanStep(later, (candidate,)), PlanStep(tail, (long_candidate,))))
     joint = (await observer.demand_options((gap, *reads), state, "session",
         replace(batch, quotes=(quote, long_quote)), page_size=2))["gap"]
     assert [lease.boundary_tokens for lease in joint.retain] == [4]
     assert joint.protected_tokens == 4 and joint.uncovered_risk_tokens == 0
+
+
+def test_consumer_page_savings_are_unioned_across_owners_and_residence_is_nonnegative():
+    base = PrefixForecast(15, 0, None, None, 5, 0, "scope", "paired")
+    # Each owner can prevent part of the same future request's recomputation.
+    first = RetentionRequest("a", base, frozenset({"root", "a"}), 1,
+        consumer_savings=(("read", (("root", 20), ("a", 20))),))
+    second = RetentionRequest("b", replace(base, horizon_seconds=5, extra_gpu_seconds_per_page=10),
+        frozenset({"root", "b"}), 1,
+        consumer_savings=(("read", (("root", 20), ("b", 20))),))
+    choices = allocate_retention((first, second), protection_budget_tokens=3, lambda_gpu=.1, lambda_host=0)
+    assert len(choices) == 2
+    assert sum(choice.expected_saved_ms for choice in choices) == 60
+    # Shared root uses max(5, 10), despite the shorter lease's higher forecast.
+    assert sum(choice.extra_gpu_token_seconds for choice in choices) == 25
+    assert all(choice.extra_gpu_token_seconds >= 0 for choice in choices)
+
+
+def test_unpriced_risk_is_never_reported_as_milliseconds_and_prefers_shorter_equal_lease():
+    forecast = PrefixForecast(15, 0, None, None, 0, 0, "scope", "risk_rule")
+    renew = RetentionRequest("owner", forecast, frozenset({"page"}), 2,
+        consumer_savings=(("read", (("page", 2),)),), value_unit="risk_tokens")
+    keep = replace(renew, forecast=replace(forecast, horizon_seconds=7))
+    choice, = allocate_retention((renew, keep), protection_budget_tokens=2, lambda_gpu=0, lambda_host=0)
+    assert choice.ttl_seconds == 7
+    assert choice.value == 2 and choice.expected_saved_ms is None
+    assert choice.value_unit == "risk_tokens"
+
+
+@pytest.mark.asyncio
+async def test_demand_keep_avoids_retain_and_renew_uses_same_owner_despite_resident_pages():
+    from unittest.mock import AsyncMock
+    from controller.context_schema import ReadingOutcome, ContextPlan, TaskState, EvidenceSet
+    from controller.demand import DemandState, DemandLease, JointOption
+    from controller.prefix_retention import PrefixReadObserver
+
+    prefix = (1, 2)
+    owner = SimpleNamespace(sources=({"original": "source"},))
+    record = SimpleNamespace(step_id="source", attempt_id="attempt", input_ids=prefix,
+                             receipt=SimpleNamespace(engine_restart_id="restart"))
+    state = ReadingOutcome(ContextPlan("p", TaskState("t", "q"), EvidenceSet("e", ())), steps=(record,))
+    observer = PrefixReadObserver(SimpleNamespace(prefix_owner=lambda key: owner), None,
+        {"mode": "demand", "ttl_seconds": 15, "protection_budget_tokens": 2})
+    page = "scope:" + token_hash(prefix)
+    native = {"owner_id": "lease", "gpu_page_ids": [page], "host_page_ids": [],
+              "reference_present": True, "referenced_page_ids": [page], "state": "RETAINED"}
+    observer.runtime = SimpleNamespace(status=AsyncMock(return_value={"prefixes": (native,)}))
+    observer.owners = SimpleNamespace(observe=AsyncMock(return_value=native), release=AsyncMock())
+    await observer.apply_demand(JointOption(DemandState((), ()), keep=("lease",)), state, "session", batch=None)
+    observer.runtime.status.assert_not_awaited()
+    observer.owners.observe.assert_not_awaited()
+    lease = DemandLease("lease", "source", "future", 2, 2, 2, "scope", 60, "renew")
+    await observer.apply_demand(JointOption(DemandState((), ()), retain=(lease,)), state,
+                                "session", batch=SimpleNamespace(engine_restart_id="restart", observed_seq=1))
+    args = observer.owners.observe.await_args.kwargs
+    assert args["owner_id"] == "lease" and args["ttl_seconds"] == 60
+    assert args["sources"] == owner.sources
+
+
+@pytest.mark.asyncio
+async def test_demand_remaining_lease_competes_with_renewal_at_consumer_arrival():
+    import time
+    from unittest.mock import AsyncMock
+    from controller.context_schema import (CompletionReceipt, ContextPlan, EvidenceSet, Need,
+        ReadResult, ReadTask, ReadingOutcome, StepRecord, TaskState)
+    from controller.plan_policy import PlanCandidate, PlanStep
+    from controller.prefix_retention import PrefixReadObserver
+    from controller.schema import CacheQuote, CacheQuoteBatch, PromptCandidate
+    from controller.templates import ByteTemplate
+
+    source, later = (ReadTask(name, "READ", ("n",)) for name in ("source", "later"))
+    plan = ContextPlan("p", TaskState("t", "q", needs=(Need("n", operation="count"),)),
+                       EvidenceSet("e", ()), steps=(source, later))
+    ids = (1, 2, 3, 4)
+    receipt = CompletionReceipt("source", "source", "epoch", 1, "restart", token_hash(ids), "stop", True)
+    record = StepRecord("attempt", source.step_id, source, input_ids=ids, receipt=receipt, metrics={
+        "cache_config_hash": "cache", "source_view": {"body_token_ranges": ((0, 4),), "source_prefix_tokens": 4}})
+    state = ReadingOutcome(plan, results=(ReadResult(source.step_id),), steps=(record,))
+    candidate = PromptCandidate("later", "REBUILD", 0, (), ids, token_hash(ids), frozenset(), frozenset(),
+        output_budget=2, source_body_token_ranges=((0, 4),), source_prefix_tokens=4)
+    quote = CacheQuote("later", candidate.input_hash, 4, 4, ready_gpu_prefix_tokens=4,
+                       recoverable_prefix_tokens=4, evictable_gpu_prefix_tokens=4)
+    batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 0, 0, (quote,),
+        fingerprint=ByteTemplate().fingerprint, native_running_budget_tokens=4)
+    gap = PlanCandidate("gap", "gap_retrieval", plan, (PlanStep(ReadTask("gap", "GAP")),), "reader",
+                        route_steps=(PlanStep(later, (candidate,)),))
+    observer = PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
+        {"mode": "demand", "unpriced_policy": "risk_tokens", "ttl_seconds": 15, "horizon_seconds_choices": (15, 60, 180),
+         "protection_budget_tokens": 4})
+    observer.runtime = SimpleNamespace(status=AsyncMock(return_value={"prefixes": ()}))
+    first = (await observer.demand_options((gap,), state, "session", batch, page_size=2))["gap"]
+    lease, = first.retain
+    pages = [lease.cache_scope_hash+":"+page for page in executed_prefix_hashes(ids, 2).values()]
+    owner = SimpleNamespace(owner_id=lease.owner_id, policy="joint_demand", prefix_input_ids=ids,
+        step_id="source", ttl_seconds=15, lease_started_ns=time.monotonic_ns()-8_000_000_000)
+    observer.store = SimpleNamespace(prefix_owners=lambda *args, **kwargs: (owner,))
+    observer.runtime.status.return_value = {"prefixes": ({"owner_id": owner.owner_id,
+        "gpu_page_ids": pages, "host_page_ids": [], "referenced_page_ids": pages, "reference_present": True},)}
+    keep = (await observer.demand_options((gap,), state, "session", batch, page_size=2,
+                                         candidate_arrival_ms={"later": 6000}))["gap"]
+    assert keep.keep == (owner.owner_id,) and keep.retain == () and keep.release == ()
+    renew = (await observer.demand_options((gap,), state, "session", batch, page_size=2,
+                                          candidate_arrival_ms={"later": 20000}))["gap"]
+    renewal, = renew.retain
+    assert renewal.owner_id == owner.owner_id and renewal.action == "renew"
+    assert renewal.ttl_seconds == 60 and renewal.consumer_arrival_ms == 20000
+
+
+
+
+@pytest.mark.asyncio
+async def test_demand_priced_multiowner_counts_consumers_not_owner_window_sums(monkeypatch):
+    from unittest.mock import AsyncMock
+    from controller.context_schema import (CompletionReceipt, ContextPlan, EvidenceSet, Need,
+        ReadResult, ReadTask, ReadingOutcome, StepRecord, TaskState)
+    from controller.plan_policy import PlanCandidate, PlanStep
+    import controller.prefix_retention as retention
+    from controller.schema import CacheQuote, CacheQuoteBatch, PromptCandidate
+    from controller.templates import ByteTemplate
+
+    old = tuple(ReadTask("old"+str(i), "READ", ("n",)) for i in range(2))
+    future = tuple(ReadTask("future"+str(i), "READ", ("n",)) for i in range(2))
+    plan = ContextPlan("p", TaskState("t", "q", needs=(Need("n", operation="count"),)),
+        EvidenceSet("e", ()), steps=(*old, *future))
+    records, candidates, quotes = [], [], []
+    for previous, target, ids in zip(old, future, ((1, 2, 3, 4), (1, 2, 5, 6)), strict=True):
+        receipt = CompletionReceipt(previous.step_id, previous.step_id, "epoch", 1, "restart",
+                                    token_hash(ids), "stop", True)
+        records.append(StepRecord("attempt", previous.step_id, previous, input_ids=ids, receipt=receipt, metrics={
+            "cache_config_hash": "cache", "source_view": {"body_token_ranges": ((0, 4),), "source_prefix_tokens": 4},
+            "evidence_prefix": {"boundary_tokens": 4, "demand_observation": True}}))
+        candidates.append(PromptCandidate(target.step_id, "REBUILD", 0, (), ids, token_hash(ids), frozenset(), frozenset(),
+            output_budget=2, source_body_token_ranges=((0, 4),), source_prefix_tokens=4))
+        quotes.append(CacheQuote(target.step_id, token_hash(ids), 4, 4, ready_gpu_prefix_tokens=4,
+                                 recoverable_prefix_tokens=4, evictable_gpu_prefix_tokens=4))
+    state = ReadingOutcome(plan, results=tuple(ReadResult(task.step_id) for task in old), steps=tuple(records))
+    batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 0, 0, tuple(quotes),
+        fingerprint=ByteTemplate().fingerprint, native_running_budget_tokens=4)
+    gap = PlanCandidate("gap", "gap_retrieval", plan, (PlanStep(ReadTask("gap", "GAP")),), "reader",
+        route_steps=tuple(PlanStep(task, (candidate,)) for task, candidate in zip(future, candidates, strict=True)))
+    observer = retention.PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
+        {"mode": "demand", "ttl_seconds": 15, "protection_budget_tokens": 6})
+    observer.runtime = SimpleNamespace(status=AsyncMock(return_value={"prefixes": ()}))
+    observer.model = object()
+    observer._demand_forecast = lambda inspected, batch, horizon: PrefixForecast(horizon, 1, 100, 0,
+        0, 0, "scope", "paired", retention_control_ms=5,
+        native_window_cost_ms=20000, retained_window_cost_ms=0)
+    chosen = []
+    original_allocate = retention.allocate_retention
+    def capture(requests, **kwargs):
+        result = original_allocate(requests, **kwargs)
+        chosen.extend(result)
+        return result
+    monkeypatch.setattr(retention, "allocate_retention", capture)
+    option = (await observer.demand_options((gap,), state, "session", batch, page_size=2))["gap"]
+    assert len(option.retain) == 2 and option.protected_tokens == 6
+    assert sum(choice.expected_saved_ms for choice in chosen) == 190
+    assert option.retention_allocation_value_ms == 190
+    assert option.retention_control_ms == 10  # Two owners; not one call per consumer.

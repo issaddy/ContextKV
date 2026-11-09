@@ -31,8 +31,9 @@ class NativeObservationFixture:
     async def observe(self, plans, state, snapshot, engine, cost_model, arrived, usage, *, selection_started):
         self.states.append(state)
         self.selection_starts.append(selection_started)
-        candidates = tuple(candidate for plan in plans for step in plan.steps for candidate in step.variants
-                           if candidate.feasible)
+        candidates = tuple({candidate.candidate_id: candidate for plan in plans
+            for step in (*plan.steps, *plan.route_steps) for candidate in step.variants
+            if candidate.feasible}.values())
         quotes = await engine.quote_batch(candidates, ByteTemplate().fingerprint)
         quotes = replace(quotes, active_requests=0)
         resource = {candidate.candidate_id: ResourceForecast(2, 3, 1, 1,

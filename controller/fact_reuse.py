@@ -183,9 +183,11 @@ def build_reuse_seed(plan, bindings, contracts, memory):
             parent_claim_ids=tuple(dict.fromkeys(atom_ids[leaf.claim_id]
                 for parent in gap.parent_claim_ids for leaf in original_graph.leaf_claims(parent)
                 if leaf.kind == "extract"))) for gap in contract.open_needs)
-        unit_ids = tuple(unit.unit_id for unit in contract.units) if binding.mode == "complete" else ()
+        complete = binding.mode == "complete"
+        covered_units = contract.units if complete else ()
+        unit_ids = tuple(unit.unit_id for unit in covered_units)
         result = ReadResult(step_id, tuple(atoms), unit_ids,
-            (need.need_id,) if binding.mode == "complete" and not open_needs
+            (need.need_id,) if complete and not open_needs
                 and contract.need_id in contract.record.result.support else (), open_needs=open_needs)
         results.append(result)
         numeric = need.operation in {"count", "sum"}
@@ -194,7 +196,7 @@ def build_reuse_seed(plan, bindings, contracts, memory):
             shared_numeric_scopes=(NumericReadScope(f"reuse:{identity}", (need.need_id,),
                 need.condition_ids, (need.operation,)),) if numeric else (), condition_ids=need.condition_ids,
             requires_reduction=need.operation in {"count", "sum", "group", "infer", "compare", "enumerate"}))
-        for unit in contract.units:
+        for unit in covered_units:
             previous = material.get(unit.unit_id)
             material[unit.unit_id] = replace(unit, need_ids=tuple(dict.fromkeys((
                 *(previous.need_ids if previous is not None else ()), need.need_id))))
@@ -202,7 +204,7 @@ def build_reuse_seed(plan, bindings, contracts, memory):
         source_keys.update(span.source_key for atom in atoms for span in atom.source_spans)
         blocks.update((key, memory.source_index._blocks[key]) for key in source_keys)
         coverage.extend((plan.coverage_scope, span.source_key.document_id, unit.unit_id, step_id)
-            for unit in contract.units if unit.unit_id in unit_ids for span in unit.source_spans)
+            for unit in covered_units for span in unit.source_spans)
     selected = replace(plan.selected_set, selected_units=tuple(material.values()), source_blocks=tuple(blocks.values()))
     results = tuple(replace(result, claims=tuple(graph.claims[claim.claim_id] for claim in result.claims))
                     for result in results)

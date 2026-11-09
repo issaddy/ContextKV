@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 from controller.action_proposals import (ALTERNATE_ANSWERS, BOUNDED_CONTINUATION, finite_action_domain,
     observed_reduction_task, observed_step_outputs)
 from controller.plan_gain_protocol import input_protocol, validate_input_protocol
-from controller.context_schema import EvidenceSet, EvidenceUnit, ReadingOutcome, SourceSpan, TaskState
+from controller.context_schema import ContextPlan, EvidenceSet, EvidenceUnit, ReadingOutcome, SourceSpan, TaskState
 from controller.resident_models import evidence_selection_contract
 from controller.schema import (EvidenceBlock, OnlineContext, OnlineMessage, OnlineTurn,
                                PromptCandidate, QueryContext, SessionSnapshot, TurnRecord, Message)
@@ -551,16 +551,24 @@ async def retire_completed_failed_steps(service, attempt_id):
     return acknowledgements
 
 
-def pair_cache_recipe(mode, frozen, observed):
+def pair_cache_recipe(mode, frozen, observed, *, cache_source=None):
+    if cache_source is not None and mode != "paired":
+        raise ValueError("an explicit executed cache source requires paired replay")
     if mode != "paired":
         return mode, (), ()
-    record = next((record for record in reversed(frozen.steps)
+    record = cache_source or next((record for record in reversed(frozen.steps)
         if record.task.kind == "READ" and record.receipt is not None
         and record.receipt.generation_complete and record.metrics.get("source_view", {}).get("source_prefix_tokens")), None)
     if record is None:
         return "cold", (), ()
     source = record.metrics["source_view"]
     end = source["source_prefix_tokens"]
+    from controller.templates import token_hash
+    if (record.receipt is None or not record.receipt.generation_complete
+            or token_hash(record.input_ids) != record.receipt.input_hash
+            or source.get("input_hash") != record.receipt.input_hash
+            or not source.get("source_ids") or not 0 < end < len(record.input_ids)):
+        raise ValueError("paired cache source requires a completed token-bound executed source prefix")
     quotes = observed["native_condition"]["quotes"]
     host = any(quote["host_only_load_tokens"] and quote["native_load_estimate"] for quote in quotes)
     return ("host_only" if host else "gpu_ready"), record.input_ids[:end+1], tuple(source["source_ids"])
@@ -612,7 +620,7 @@ async def prepare_pair_cache(engine, compiler, mode, input_ids, source_ids, *, i
 
 async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, binding, preparation,
                          resources, cache_start, generation_budget, observed=None,
-                         gap_request=None, gap_provider=None):
+                         gap_request=None, gap_provider=None, cache_source=None):
     from controller.execution import ReadingBudgetExceeded
     from controller.engine_client import EngineError
     case_dir = Path(case_dir)
@@ -631,12 +639,14 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
     if binding.get("input_protocol", protocol) != protocol:
         raise ValueError("collection input protocol differs from its actual reader compiler")
     binding = {**binding, "input_protocol": protocol}
-    fixture_mode, fixture_input, fixture_sources = pair_cache_recipe(cache_start, frozen, observed)
+    fixture_mode, fixture_input, fixture_sources = pair_cache_recipe(cache_start, frozen, observed,
+                                                                    cache_source=cache_source)
     registration = {"continuation_protocol": BOUNDED_CONTINUATION, "registered_at": time.monotonic(), "frozen_state_key": state_key,
         "plan_candidate": to_jsonable(plan), "working_state": to_jsonable(frozen), "snapshot": to_jsonable(snapshot),
         "continuation_gap_limits": continuation_request.limits if continuation_request is not None else None,
         "source_task_id": row["task_id"], "source_native_partition": row["split"],
         "cache_fixture_mode": fixture_mode,
+        "cache_source": cache_source,
         "observed_state_binding": observed, "gap_request": gap_request if plan.semantic_kind == "gap_retrieval" else None,
         **binding}
     write(case_dir/"before.json", registration)
@@ -745,6 +755,7 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
             "history_origin": "frozen_actual_rollout", "source_rollout_policy": row["rollout_policy"],
             "history_reader_checkpoint": row.get("reader_checkpoint"),
             "frozen_state_key": state_key, "plan_id": plan.plan_id, "semantic_kind": plan.semantic_kind,
+            "registered_context_plan_id": plan.context_plan.plan_id,
             "registered_plan_path": str((case_dir/"before.json").resolve()),
             "status": "completed" if response else "failed", "failure": failure,
             "termination": {"terminal": terminal_failure or response is not None,
@@ -760,6 +771,7 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
             "continuation_gap_limits": continuation_request.limits if continuation_request is not None else None,
             "pre_action_quote": to_jsonable(runtime.pre_action_quote),
             "pre_action_input": to_jsonable(runtime.pre_action_input),
+            "compiled_route_steps": to_jsonable(runtime.compiled_route_steps),
             "compiled_actions": to_jsonable(runtime.decisions),
             "new_step_ids": tuple(step.step_id for step in steps), "new_action_counts": action_counts,
             "gap_result": to_jsonable(runtime.gap_result),
@@ -784,7 +796,7 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
             extra = actual-expected
             valid = (expected <= actual and actual == set(runtime.new_step_ids)
                      and len(extra) <= 1 and all(key.startswith("bounded-terminal:") for key in extra))
-        if attempt.plan.candidate.context_plan_id != plan.plan_id or not valid:
+        if attempt.plan.candidate.context_plan_id != plan.context_plan.plan_id or not valid:
             raise ValueError("actual branch execution differs from its registered continuation protocol")
     return output
 
@@ -1148,7 +1160,11 @@ async def collect(config, settings, *, controller=None, provider=None, interpret
                         plans, omitted = build_observed_action_plans(frozen, snap, controller.template,
                             reader_checkpoint=reader_checkpoint, gap_request=gap_request,
                             answer_system_prompt=controller.policy.system_prompt,
-                            read_choices=domain["read_choices"] if domain is not None else 1)
+                            read_choices=domain["read_choices"] if domain is not None else 1,
+                            request_compiler=controller.request_compiler, cache_scope=await controller.engine.info(),
+                            output_tokens_per_fact=domain["output_tokens_per_fact"] if domain is not None else 64,
+                            read_organizations=tuple(decode(ContextPlan, plan)
+                                for plan in packet.get("read_organizations", ())))
                         available = {plan.semantic_kind for plan in plans}
                         reasons = {"read_once": "no_ready_unread_source_step",
                             "reduce_once": "no_unreduced_extract_basis_for_requested_operation",

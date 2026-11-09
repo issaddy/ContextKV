@@ -217,7 +217,8 @@ def test_count_reduction_does_not_consume_unfinished_sum_view_or_rolling_basis()
     result = parse_read_result(task, json.dumps(response(row("R1", "500", "g"))),
                                plan.selected_set.selected_units)
     tasks = advance_read_plan(plan, (result,))
-    assert len(tasks) == 2 and tasks[0].input_claim_ids == tasks[1].input_claim_ids
+    assert len(tasks) == 1 and tasks[0].operation == "numeric_select"
+    assert set(tasks[0].need_ids) == {"shipment-count", "shipment-mass"}
     count = reduce_claims("count", result.claims, claim_id="count", need_id="shipment-count")
     done = ReadResult("count-step", (count,), reduction=ReductionState("count-step",
         ("shipment-count",), "count", tasks[0].input_claim_ids, ("count",), "merged"))
@@ -227,7 +228,8 @@ def test_count_reduction_does_not_consume_unfinished_sum_view_or_rolling_basis()
     from controller.context_schema import ReadingOutcome
     observed = ReadingOutcome(plan, claims=result.claims, results=(result,))
     rolling = _reduction_tasks(plan, observed)
-    assert len(rolling) == 2 and all(task.input_claim_ids == tasks[0].input_claim_ids for task in rolling)
+    assert len(rolling) == 1 and rolling[0].operation == "numeric_select"
+    assert rolling[0].input_claim_ids == tasks[0].input_claim_ids
 
 
 @pytest.mark.asyncio

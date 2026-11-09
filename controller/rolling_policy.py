@@ -12,7 +12,6 @@ from pathlib import Path
 import time
 
 from .claim_graph import ClaimGraph
-from .context_budget import completion_reserve
 from .completion_timing import timing_point
 from .context_schema import EvidencePool, ReadResult, ReadTask, ReadingOutcome, StepRecord
 from .plan_gain_protocol import input_protocol
@@ -155,6 +154,31 @@ def compile_step(plan, task, state, snapshot, template, *, outputs, request_comp
                                  outputs=outputs, cache_scope=cache_scope)
 
 
+def compile_route_steps(proposal, state, snapshot, template, *, output_budgets,
+                        output_tokens_per_fact=64, request_compiler=None, cache_scope=None):
+    """Compile known pending source consumers using the execution compiler."""
+    from .action_proposals import bind_read_parents, observed_step_outputs
+    done = {result.step_id for result in state.results}
+    existing = {step.task.step_id: step for step in proposal.steps}
+    route = []
+    for task in proposal.context_plan.steps:
+        if task.kind != "READ" or task.step_id in done:
+            continue
+        if task.step_id in existing and existing[task.step_id].variants:
+            route.append(existing[task.step_id])
+            continue
+        task = bind_read_parents(task, state)
+        reservation, outputs = observed_step_outputs(proposal.context_plan, task, template,
+            output_budgets=output_budgets, output_tokens_per_fact=output_tokens_per_fact, finite=True)
+        variants = ()
+        if set(task.predecessor_step_ids) <= done:
+            variants = compile_step(proposal.context_plan, task, state, snapshot, template, outputs=outputs,
+                                    request_compiler=request_compiler, cache_scope=cache_scope)
+        route.append(PlanStep(task, variants, reservation))
+    route.extend(step for step in proposal.steps if step.task.kind == "ANSWER")
+    return tuple(route)
+
+
 @dataclass(frozen=True)
 class RollingResult:
     outcome: ReadingOutcome
@@ -271,7 +295,8 @@ class RollingPlanRuntime:
         base_state = replace(state, plan=base)
         plans, _ = build_observed_action_plans(base_state, snapshot, template,
             reader_checkpoint=self.reader_checkpoint, gap_request=gap_request, include_gap_step=True,
-            read_choices=self.read_choices)
+            read_choices=self.read_choices, request_compiler=request_compiler, cache_scope=cache_scope,
+            output_tokens_per_fact=self.output_tokens_per_fact)
         finite = self.read_choices == 2
         options = observed_answer_options(base_state, joint=self.joint_context, finite=finite)
         result = []
@@ -297,7 +322,11 @@ class RollingPlanRuntime:
                         if self.read_choices == 2 and task.kind == "REDUCE":
                             variants = variants[:1]
                 steps.append(PlanStep(task, variants, reservation))
-            result.append(replace(plan, steps=tuple(steps)))
+            compiled = replace(plan, steps=tuple(steps))
+            result.append(replace(compiled, route_steps=compile_route_steps(compiled, base_state,
+                snapshot, template, output_budgets=self.output_budgets,
+                output_tokens_per_fact=self.output_tokens_per_fact,
+                request_compiler=request_compiler, cache_scope=cache_scope)))
         return tuple(result)
 
     @staticmethod
@@ -576,7 +605,7 @@ class RollingPlanRuntime:
                        for candidate in direct_candidates):
                     required_step = None
             if required_step is not None:
-                from .action_policy import native_admission_reason
+                from .action_policy import native_admission_reason, route_completion_reserve
                 from .admission import quoted_native_work
                 from .execution import reduction_partitions
                 from .session_store import ReadingProgress
@@ -601,10 +630,25 @@ class RollingPlanRuntime:
                         and need_ids.intersection(task.need_ids)), None)
                     if alternate is not None:
                         required = (*required, alternate)
-                proposals = tuple(PlanCandidate(task.step_id, "scope_scan", plan,
-                    (PlanStep(task, () if cpu else compile_step(plan, task, state, snapshot, template,
+                organizations = ((plan,) if cpu or self.read_choices < 2 else
+                    executor.request_compiler.read_organizations(replace(state, plan=plan), snapshot,
+                        cache_scope=cache_scope, limit=self.read_choices,
+                        output_tokens_per_fact=self.output_tokens_per_fact))
+                required_plans = [(task, plan) for task in required]
+                if len(organizations) > 1:
+                    required_plans = [(required_step, plan)]
+                    for organization in organizations[1:]:
+                        next_read = next(task for task in advance_read_plan(organization, state.results)
+                                         if task.kind == "READ")
+                        required_plans.append((next_read, organization))
+                proposals = tuple(PlanCandidate(task.step_id, "scope_scan", organization,
+                    (PlanStep(task, () if cpu else compile_step(organization, task, state, snapshot, template,
                         outputs=(task.output_budget,), request_compiler=executor.request_compiler,
-                        cache_scope=cache_scope)),), self.reader_checkpoint) for task in required)
+                        cache_scope=cache_scope)),), self.reader_checkpoint) for task, organization in required_plans)
+                proposals = tuple(replace(proposal, route_steps=compile_route_steps(proposal, state,
+                    snapshot, template, output_budgets=self.output_budgets,
+                    output_tokens_per_fact=self.output_tokens_per_fact,
+                    request_compiler=executor.request_compiler, cache_scope=cache_scope)) for proposal in proposals)
                 native, _ = await self.native.observe(proposals, state, snapshot, engine, cost_model,
                     arrived, auxiliary_usage, selection_started=selection_started)
                 quotes = {quote.candidate_id: quote for quote in native.quotes.quotes}
@@ -620,7 +664,10 @@ class RollingPlanRuntime:
                             continue
                         key = candidate.candidate_id if candidate is not None else step.task.step_id
                         quote = quotes[key] if candidate is not None else None
-                        reserve = completion_reserve(plan, state.results, step.task, candidate)
+                        option = options.get(key)
+                        owner_control_ms = option.retention_control_ms if option is not None else 0.0
+                        reserve, future_quotes = route_completion_reserve(proposal, state, step.task,
+                                                                         candidate, native.quotes)
                         latency_ms = None
                         if plan.budget.max_complete_ms is not None and self.policy.completion_timing is not None:
                             point = timing_point(step.task, reserve, native.quotes, quote, native.paid_observation,
@@ -629,7 +676,15 @@ class RollingPlanRuntime:
                         if plan.budget.max_complete_ms is not None and latency_ms is None:
                             reasons.append("uncalibrated_completion_latency")
                             continue
-                        reserved = CompleteCost(latency_ms or 0, 0, 0, reserve.input_tokens, reserve.output_tokens)
+                        if plan.budget.max_complete_ms is not None and owner_control_ms is None:
+                            reasons.append("unmeasured_retention_control")
+                            continue
+                        if latency_ms is not None:
+                            latency_ms += owner_control_ms or 0
+                        # Only the additional owner mutation is added here. Native
+                        # hit savings and allocation net value are not rebates.
+                        reserved = CompleteCost(latency_ms if latency_ms is not None else owner_control_ms or 0,
+                            0, 0, reserve.input_tokens, reserve.output_tokens)
                         reason = self.policy._constraint(native.paid_cost+reserved, plan.budget)
                         if len(state.steps)+reserve.steps > plan.budget.max_steps:
                             reason = "cumulative_step_budget"
@@ -638,19 +693,26 @@ class RollingPlanRuntime:
                         if reason:
                             reasons.append(reason)
                             continue
-                        option = options.get(key)
-                        work = quoted_native_work(quote) if quote is not None else (0, 0)
-                        rank = (*work, len(candidate.input_ids) if candidate is not None else 0,
+                        work = sum(quoted_native_work(quote)) if quote is not None else 0
+                        work += reserve.future_input_tokens-sum(row.input_len for row in future_quotes)
+                        work += sum(sum(quoted_native_work(row)) for row in future_quotes)
+                        rank = (work+reserve.output_tokens, reserve.steps,
+                                len(candidate.input_ids) if candidate is not None else 0,
                                 option.uncovered_risk_tokens if option is not None else 0)
-                        choices.append((rank, step.task, candidate, reserve, latency_ms, option))
+                        choices.append((rank, step.task, candidate, reserve, latency_ms, option, proposal.context_plan, reserved))
                 if not choices:
                     raise NoCompletePlan("required source-scope step exceeds "+", ".join(dict.fromkeys(reasons)))
-                rank, required_step, candidate, reserve, latency_ms, option = min(choices, key=lambda choice: choice[0])
+                rank, required_step, candidate, reserve, latency_ms, option, plan, reserved = min(choices, key=lambda choice: choice[0])
                 self._observe_state(attempt_id, executor, state, snapshot, native, None, True)
+                state = replace(state, plan=plan)
+                context_plans = (plan,)
+                executor.store.save_reading_progress(attempt_id, plan,
+                    ReadingProgress(tuple(sorted(expanded)), (), state.auxiliary_usage))
                 audit = {"decision_mode": "mandatory_coverage", "step_id": required_step.step_id,
                     "task": required_step, "quote": native.quotes, "paid_cost": native.paid_cost,
                     "selected_candidate": _candidate_trace(candidate), "selection_rank": rank,
-                    "completion_reserve": reserve, "completion_latency_ms": latency_ms,
+                    "completion_reserve": reserve, "completion_latency_ms": latency_ms, "completion_cost": reserved,
+                    "retention_owner_control_ms": option.retention_control_ms if option is not None else 0.0,
                     "timing_context": timing_context,
                     "joint_context": option.trace() if option is not None else None,
                     "physical_paid_observation": native.paid_observation}
@@ -681,7 +743,9 @@ class RollingPlanRuntime:
                 raise ValueError("semantic alternatives must share the current actual task binding")
             native, reusable = await self.native.observe(plans, state, snapshot, engine, cost_model,
                 arrived, auxiliary_usage, selection_started=selection_started)
-            self._observe_state(attempt_id, executor, state, snapshot, native, gap_request, mandatory)
+            self._observe_state(attempt_id, executor, state, snapshot, native, gap_request, mandatory,
+                metadata={"read_organizations": tuple(plan.context_plan for plan in plans
+                    if plan.semantic_kind == "read_once")})
             options = None
             if demand_retention:
                 options = await prefix_observer.demand_options(plans, state, snapshot.session_id, native.quotes,
@@ -692,7 +756,7 @@ class RollingPlanRuntime:
             control_forecast = getattr(executor.observe_prefix, "predicted_control_ms", None)
             read_control = ({"predicted_ms": control_forecast(), "source": "actual_prefix_control_ms",
                              "observation_count": executor.observe_prefix.control_observation_count,
-                             "scope": "first_READ_only"}
+                             "scope": "per_READ_observed_callback_mean"}
                 if control_forecast is not None and state.plan.read_layout == "source_first" else None)
             try:
                 decision = (self.policy.choose_observed_actions(plans, state, native, reusable, read_control=read_control,
@@ -733,6 +797,15 @@ class RollingPlanRuntime:
                 "future_step_forecasts": tuple({"plan_id": key[0], "step_id": key[1], "choices": value}
                     for key, value in native.future.items())}
             events.emit("rolling_plan_decision", attempt_id=attempt_id, **audit)
+            chosen = next(plan for plan in plans if plan.plan_id == decision.next_step.plan_id)
+            plan = chosen.context_plan
+            if observed and decision.next_step.task.kind != "ANSWER":
+                from .session_store import ReadingProgress
+                plan = _with_observed_sources(plan, state)
+                state = replace(state, plan=plan)
+                context_plans = (plan,)
+                executor.store.save_reading_progress(attempt_id, plan,
+                    ReadingProgress(tuple(sorted(expanded)), (), state.auxiliary_usage))
             if demand_retention and decision.next_step.task.kind != "ANSWER":
                 key = step.candidate.candidate_id if step.candidate is not None else step.task.step_id
                 option = options[key]
@@ -741,8 +814,6 @@ class RollingPlanRuntime:
                         batch=native.quotes)
                     events.emit("joint_prefix_control", attempt_id=attempt_id, choice=key,
                         quote_seq=native.quotes.observed_seq, **mutation)
-            chosen = next(plan for plan in plans if plan.plan_id == decision.next_step.plan_id)
-            plan = chosen.context_plan
             if decision.next_step.task.kind == "ANSWER":
                 from .context_budget import direct_answer_reason
                 reason = direct_answer_reason(state, decision.next_step.candidate, require_complete_evidence=False)
@@ -770,7 +841,7 @@ class RollingPlanRuntime:
                     open_need_provider, events, arrived)
                 context_plans = (state.plan,)
                 continue
-            execution_plan = _with_observed_sources(context_plans[0], state) if self.mode == "observed_actions" else plan
+            execution_plan = plan
             state = await executor.execute_one(attempt_id, snapshot, execution_plan, decision.next_step.task, state,
                 initial_auxiliary_usage=auxiliary_usage, candidate=decision.next_step.candidate, quote=native.quotes,
                 quote_ms=(native.paid_observation or {}).get("native_quote_ms"))
@@ -914,12 +985,15 @@ class FixedReadingObserver:
                 and (task.kind != "ANSWER" or direct_answer_reason(state, candidate,
                     require_complete_evidence=False) is None))
             candidates.extend(variants)
+            candidates.extend(candidate for step in plan.route_steps for candidate in step.variants
+                              if candidate.feasible)
             cpu = (task.kind == "REDUCE" and plan.context_plan.reading_mode == "typed_reduce"
                    and task.operation in {"count", "sum", "group", "union"})
             if variants or cpu or task.kind == "GAP":
                 legal_actions.append(plan.semantic_kind)
         quote_started = time.monotonic()
-        quotes = await engine.quote_batch(tuple(candidates), self.fingerprint)
+        quotes = await engine.quote_batch(tuple({candidate.candidate_id: candidate for candidate in candidates}.values()),
+                                          self.fingerprint)
         quote_ended = time.monotonic()
         paid = await self.paid.observe(arrived, state, auxiliary_usage)
         native = NativePlanningState(self.reader_checkpoint, self.reader_profile_id, snapshot, quotes,
@@ -931,6 +1005,7 @@ class FixedReadingObserver:
                 "after_step_id": state.steps[-1].step_id if state.steps else None,
                 "after_step_kind": state.steps[-1].task.kind if state.steps else None,
                 "legal_actions": tuple(dict.fromkeys(legal_actions)),
+                "read_organizations": tuple(plan.context_plan for plan in plans if plan.semantic_kind == "read_once"),
                 "legal_answer_representations": sorted({candidate.representation for candidate in candidates
                                                          if candidate.generation_kind == "ANSWER"}),
                 "observation_overhead": {"clock": "client_monotonic", "start": started,

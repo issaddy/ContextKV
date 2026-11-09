@@ -41,6 +41,41 @@ def observed_quality_gain(model, kind, representation, features):
     return 0.0 if representation in {"facts", "reduced"} else None
 
 
+def route_completion_reserve(plan, state, task, candidate, batch):
+    """Account the whole remaining organization, with exact known READ inputs.
+
+    Future facts are not invented: uncompiled reductions and the final answer
+    retain the existing reservation. Quotes describe the current native state,
+    not guaranteed hits at a later execution.
+    """
+    reserve = completion_reserve(plan.context_plan, state.results, task, candidate,
+                                 read_all=task is not None and task.kind == "READ")
+    if task is None or task.kind != "READ" or not plan.route_steps:
+        return reserve, ()
+    quotes = {row.candidate_id: row for row in batch.quotes}
+    units = {unit.unit_id: unit for unit in plan.context_plan.selected_set.selected_units}
+    done = {result.step_id for result in state.results} | {task.step_id}
+    added_input = added_output = 0
+    future_quotes = []
+    for step in plan.route_steps:
+        if step.task.kind != "READ" or step.task.step_id in done:
+            continue
+        choices = [(compiled, quotes[compiled.candidate_id]) for compiled in step.variants
+                   if compiled.feasible]
+        if not choices:
+            continue
+        compiled, quote = min(choices, key=lambda pair: (
+            sum(quoted_native_work(pair[1])), len(pair[0].input_ids), pair[0].candidate_id))
+        if quote.input_hash != compiled.input_hash or quote.input_len != len(compiled.input_ids):
+            raise ValueError("remaining READ quote does not bind its compiled input")
+        body = sum({units[key].text: units[key].body_tokens for key in step.task.input_unit_ids}.values())
+        added_input += len(compiled.input_ids)-body
+        added_output += compiled.output_budget-step.task.output_budget
+        future_quotes.append(quote)
+    return replace(reserve, future_input_tokens=reserve.future_input_tokens+added_input,
+                   future_output_tokens=reserve.future_output_tokens+added_output), tuple(future_quotes)
+
+
 def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, read_control=None,
                            gap_query_chars=0, joint_options=None, timing_context=None):
     """Price one action plus ANSWER; sunk costs constrain the budget, not its marginal value."""
@@ -101,6 +136,9 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
             delta = joint_options.get(key) if joint else None
             reason = (direct_answer_reason(state, candidate, require_complete_evidence=False)
                       if task.kind == "ANSWER" else None)
+            owner_control_ms = delta.retention_control_ms if delta is not None else 0.0
+            if model is not None and owner_control_ms is None and delta is not None and delta.retain:
+                reason = reason or "unmeasured_retention_control"
             peaks = [native.paid_cost]
             quote = None
             if candidate is not None:
@@ -137,7 +175,7 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                     peaks.extend(option.cost for option in forecasts)
                 elif policy.limits.max_gpu_peak_gib is not None or policy.limits.max_host_peak_gib is not None:
                     reason = "unmeasured_future_resource_peak"
-            reserve = completion_reserve(state.plan, state.results, task, candidate)
+            reserve, future_quotes = route_completion_reserve(plan, state, task, candidate, native.quotes)
             if len(state.steps)+reserve.steps > state.plan.budget.max_steps:
                 reason = "cumulative_step_budget"
             empirical_ms = None
@@ -152,13 +190,16 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                 useful = task.kind != "ANSWER" and bool(unmet.keys() & set(task.need_ids))
                 rank = 2 if complete else 1 if useful else 0 if task.kind == "ANSWER" else -1
                 current_work = sum(quoted_native_work(quote)) if candidate is not None else 0
-                future_work = reserve.input_tokens-(len(candidate.input_ids) if candidate is not None else 0)
+                future_work = reserve.future_input_tokens-sum(row.input_len for row in future_quotes)
+                future_work += sum(sum(quoted_native_work(row)) for row in future_quotes)
                 work = current_work+future_work+reserve.output_tokens
-                cost = native.paid_cost+CompleteCost(empirical_ms or 0, 0, 0, reserve.input_tokens, reserve.output_tokens,
+                cost = native.paid_cost+CompleteCost((empirical_ms or 0)+(owner_control_ms or 0), 0, 0, reserve.input_tokens, reserve.output_tokens,
                     max(peak.gpu_peak_gib for peak in peaks), max(peak.host_peak_gib for peak in peaks))
                 reason = reason or policy._constraint(cost, state.plan.budget)
                 if time_limit is not None and empirical_ms is None:
                     reason = reason or "uncalibrated_completion_latency"
+                if time_limit is not None and owner_control_ms is None:
+                    reason = reason or "unmeasured_retention_control"
                 if policy.limits.max_gpu_gib_ms is not None or policy.limits.max_host_gib_ms is not None:
                     reason = reason or "unmeasured_completion_residency"
                 evaluation = PlanEvaluation(plan.plan_id, None, rank, cost, reason is None,
@@ -166,7 +207,7 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                 evaluations.append(evaluation)
                 policy.last_option_diagnostics[key] = {"cost_source": "coverage_and_quoted_work_rule",
                     "completion_reserve": reserve, "quoted_work_proxy": work, "completion_latency_ms": empirical_ms,
-                    "semantic_kind": plan.semantic_kind,
+                    "semantic_kind": plan.semantic_kind, "retention_owner_control_ms": owner_control_ms,
                     "joint_context": delta.trace() if delta is not None else None, "reason": reason or "eligible"}
                 if reason is None:
                     action = "GAP" if task.kind == "GAP" else "CPU" if cpu else candidate.action
@@ -174,7 +215,8 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                     decisions.append((evaluation, Decision(NextStep(plan.plan_id, replace(task, output_budget=output),
                         candidate, prefixes), action, output), work, delta))
                 continue
-            features = plan_features(plan, state, output_budgets={task.step_id: output}, paid_cost=native.paid_cost)
+            features = plan_features(plan, state, output_budgets={task.step_id: output}, paid_cost=native.paid_cost,
+                support_mode=model is not None and (model.provenance.get("evidence_selection_contract") or {}).get("mode") == "support")
             representation = candidate.representation if task.kind == "ANSWER" else "existing"
             gain = observed_quality_gain(model, plan.semantic_kind, representation, features)
             if gain is None:
@@ -184,16 +226,27 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                     "unmeasured_answer_representation"))
                 continue
             cost_features = (plan_cost_features(features, native.quotes, quote,
-                             reserve, gap_query_chars=gap_query_chars if task.kind == "GAP" else 0)
+                             reserve, gap_query_chars=gap_query_chars if task.kind == "GAP" else 0,
+                             future_quotes=future_quotes)
                              if native_cost else features)
             predicted = model.predict_costs(cost_features)
             branch = regression_cost(predicted["branch_complete_cost"])
             control = read_control if task.kind == "READ" else None
             control_ms = None if control is None else control["predicted_ms"]
+            read_count = (1+sum(step.task.kind == "READ" and step.task.step_id != task.step_id
+                and step.task.step_id not in {result.step_id for result in state.results}
+                for step in plan.route_steps)) if task.kind == "READ" else 0
             if control_ms is not None:
                 if model.cost_provenance["prefix_control_scope"] != "native_excludes_prefix_control":
                     raise ValueError("READ control addition requires native-only branch cost labels")
+                control_ms *= read_count
                 branch = replace(branch, latency_ms=branch.latency_ms+control_ms)
+            if owner_control_ms:
+                if model.cost_provenance.get("prefix_control_scope") != "native_excludes_prefix_control":
+                    raise ValueError("retention control addition requires native-only branch cost labels")
+                # Demand's post-READ callback only inspects/records sources;
+                # this separate selected retain/renew call is paid once here.
+                branch = replace(branch, latency_ms=branch.latency_ms+owner_control_ms)
             branch = replace(branch, gpu_peak_gib=max(cost.gpu_peak_gib for cost in peaks),
                              host_peak_gib=max(cost.host_peak_gib for cost in peaks))
             margin = model.cost_provenance.get("completion_reserve_calibration", {}).get(
@@ -216,11 +269,12 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
             cost = branch if native_cost else regression_cost(predicted["incremental_complete_cost"])
             if not native_cost and control_ms is not None:
                 cost = replace(cost, latency_ms=cost.latency_ms+control_ms)
-            saved_ms = (min(cost.latency_ms, delta.retention_saved_ms)
-                        if native_cost and model.cost_provenance["prefix_control_scope"] == "native_excludes_prefix_control"
-                        and delta is not None and (delta.retention_saved_ms or 0) > 0 else 0.0)
+            if not native_cost and owner_control_ms:
+                cost = replace(cost, latency_ms=cost.latency_ms+owner_control_ms)
+            # Native quote features already contain the matched-prefix saving.
+            # Allocation net value is auditable, but cannot be another rebate
+            # without a branch cost baseline that predicts future eviction.
             objective = gain-policy._penalty(cost, state.plan.budget)
-            objective += state.plan.budget.lambda_time*saved_ms
             policy.last_option_diagnostics[key] = {"plan_id": plan.plan_id, "features": features,
                 "semantic_kind": plan.semantic_kind, "empirical_completion_latency_ms": empirical_ms,
                 "cost_features": cost_features,
@@ -229,7 +283,9 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                 "completion_cost": completion_cost, "latency_residual_margin_ms": margin,
                 "completion_latency_ms": latency_ms if margin is not None or empirical_ms is not None else None,
                 "native_quote_role": "pre_action_cost_features" if native_cost else "actual_known_input_admission_and_audit",
-                "first_read_prefix_control": control, "retention_saving_applied_ms": saved_ms,
+                "read_callback_control": control,
+                "remaining_read_prefix_control_ms": control_ms, "remaining_read_control_count": read_count,
+                "retention_owner_control_ms": owner_control_ms,
                 "joint_context": delta.trace() if delta is not None else None, "reason": reason or "eligible"}
             evaluation = PlanEvaluation(plan.plan_id, gain, objective, cumulative, reason is None,
                 reason or "reader_bound_observed_action_regression", ((task.step_id,

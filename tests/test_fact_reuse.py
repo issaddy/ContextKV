@@ -57,6 +57,14 @@ def test_atomic_reuse_shares_facts_recomputes_views_and_never_copies_old_costs()
     assert all(step.operation == "numeric_select" for step in advance_read_plan(seed.plan, seed.results))
     partial = build_reuse_seed(plan, (ReadReuse("sum", contracts[0].read_id, "facts"),), contracts, memory)
     assert partial.claims and not partial.coverage and complete_reuse_ranges(partial) == {"sum": ()}
+    assert partial.plan.selected_set.selected_units == ()
+    assert partial.plan.selected_set.source_blocks == tuple(memory.source_index._blocks.values())
+    assert all(claim.source_spans for claim in partial.claims)
+    existing = replace(contracts[0].units[0], need_ids=("count",), retrieval_score=9)
+    selected_plan = replace(plan, selected_set=replace(plan.selected_set, selected_units=(existing,)))
+    selected_seed = build_reuse_seed(selected_plan,
+        (ReadReuse("sum", contracts[0].read_id, "facts"),), contracts, memory)
+    assert selected_seed.plan.selected_set.selected_units == (existing,)
     current = tuple(replace(unit, unit_id="fresh:"+unit.unit_id,
         source_spans=tuple(replace(span, span_id="fresh:"+span.span_id) for span in unit.source_spans))
         for unit in contracts[0].units)

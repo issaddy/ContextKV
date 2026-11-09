@@ -142,7 +142,7 @@ def freeze_cases(database, manifest, split, template, *, limit=None, selection="
                          if len(c.input_ids) > len(history_ids)}
             sentinel = next(token for token in vocabulary if token not in forbidden)
             cases.append(DecisionCase(attempt.attempt_id, conversation, attempt.request_id, snapshot,
-                                      candidates, history_ids + (sentinel,), policy.max_new_tokens,
+                                      candidates, history_ids + (sentinel,), policy_config.max_new_tokens,
                                       attempt.plan.candidate.action))
             if selection == "database_order" and limit is not None and len(cases) >= limit:
                 break

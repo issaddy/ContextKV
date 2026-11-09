@@ -54,6 +54,46 @@ class RequestCompiler:
         return ((tuple(source_ids),) if self.index is None else
                 self.index.propose_orders(source_ids, **self._scope(cache_scope)))
 
+    def read_organizations(self, outcome, snapshot, *, cache_scope, limit, output_tokens_per_fact=64):
+        """Bounded local alternatives, driven by completed source-prefix paths."""
+        from .reading import regroup_pending_reads
+
+        original = outcome.plan
+        if limit < 2 or self.index is None or original.read_layout != "source_first":
+            return (original,)
+        completed = {result.step_id for result in outcome.results}
+        completed.update(record.step_id for record in outcome.steps)
+        pending = {identity for task in original.steps if task.kind == "READ"
+            and task.step_id not in completed and set(task.predecessor_step_ids) <= completed
+            for identity in task.input_unit_ids}
+        by_source = {}
+        for unit in original.selected_set.selected_units:
+            if unit.unit_id in pending:
+                by_source.setdefault(self._read_id(unit, original.read_layout), []).append(unit.unit_id)
+        paths = self.index.executed_paths(tuple(by_source), limit=limit, **self._scope(cache_scope))
+        plans = [original]
+        signatures = {tuple(task.input_unit_ids for task in original.steps if task.kind == "READ")}
+        for path in paths:
+            prefix = []
+            for source in path:
+                if source not in by_source:
+                    break
+                prefix.extend(by_source[source])
+            # Try executed prefixes from longest to shortest.
+            while prefix:
+                candidate = regroup_pending_reads(outcome, tuple(prefix), self.template, snapshot,
+                                                   output_tokens_per_fact=output_tokens_per_fact)
+                if candidate is not None:
+                    signature = tuple(task.input_unit_ids for task in candidate.steps if task.kind == "READ")
+                    if signature not in signatures:
+                        plans.append(candidate)
+                        signatures.add(signature)
+                    break
+                prefix.pop()
+            if len(plans) >= limit:
+                break
+        return tuple(plans)
+
     def bind_geometry(self, candidate, rendered):
         geometry = actual_source_geometry(self.template, candidate, rendered)
         return replace(candidate, evidence_body_tokens=geometry["body_tokens"],

@@ -277,8 +277,9 @@ class ProfiledNativeObserver:
         await self.paid.aclose()
 
     async def observe(self, plans, state, snapshot, engine, cost_model, arrived, auxiliary_usage, *, selection_started):
-        candidates = tuple(candidate for plan in plans for step in plan.steps for candidate in step.variants
-                           if candidate.feasible)
+        candidates = tuple({candidate.candidate_id: candidate for plan in plans
+            for step in (*plan.steps, *plan.route_steps) for candidate in step.variants
+            if candidate.feasible}.values())
         quote_started = time.monotonic()
         quotes = await engine.quote_batch(candidates, self.profiles.fingerprint)
         quote_ms = (time.monotonic()-quote_started)*1000
@@ -413,8 +414,9 @@ class ObservedNativeObserver:
         await self.paid.aclose()
 
     async def observe(self, plans, state, snapshot, engine, cost_model, arrived, auxiliary_usage, *, selection_started):
-        candidates = tuple(candidate for plan in plans for step in plan.steps for candidate in step.variants
-                           if candidate.feasible)
+        candidates = tuple({candidate.candidate_id: candidate for plan in plans
+            for step in (*plan.steps, *plan.route_steps) for candidate in step.variants
+            if candidate.feasible}.values())
         quote_started = time.monotonic()
         quotes = await engine.quote_batch(candidates, self.fingerprint)
         quote_ms = (time.monotonic()-quote_started)*1000

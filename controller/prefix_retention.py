@@ -105,6 +105,10 @@ class RetentionRequest:
     page_ids: frozenset[str]
     page_size: int
     reuse_event_key: str = ""
+    # Per consumer, per causal page marginal savings. Distinct owners cannot
+    # claim the same future request/page twice. Empty uses the legacy scalar.
+    consumer_savings: tuple[tuple[str, tuple[tuple[str, float], ...]], ...] = ()
+    value_unit: str = "milliseconds"
 
     @classmethod
     def from_receipt(cls, receipt, forecast, *, reuse_event_key=""):
@@ -122,25 +126,28 @@ class RetentionRequest:
 class RetentionChoice:
     owner_id: str
     ttl_seconds: float
-    expected_saved_ms: float
+    expected_saved_ms: float | None
     extra_gpu_token_seconds: float
     extra_host_token_seconds: float
     value: float
     marginal_protected_tokens: int
     evidence_digest: str
     reuse_event_key: str = ""
+    value_unit: str = "milliseconds"
 
 
-def allocate_retention(requests, *, protection_budget_tokens, lambda_gpu, lambda_host):
+def allocate_retention(requests, *, protection_budget_tokens, lambda_gpu, lambda_host, baseline_pages=()):
     """Compare value-ordered and capacity-density constructions on the same objective."""
     requests = tuple(requests)
+    if len({request.value_unit for request in requests}) > 1:
+        raise ValueError("retention allocation cannot mix milliseconds and unpriced risk tokens")
     choices = tuple(_allocate_retention_greedy(requests, protection_budget_tokens=protection_budget_tokens,
-        lambda_gpu=lambda_gpu, lambda_host=lambda_host, density=density) for density in (False, True))
+        lambda_gpu=lambda_gpu, lambda_host=lambda_host, baseline_pages=baseline_pages, density=density) for density in (False, True))
     return max(choices, key=lambda selected: sum(choice.value for choice in selected))
 
 
 def _allocate_retention_greedy(requests, *, protection_budget_tokens,
-                              lambda_gpu, lambda_host, density):
+                              lambda_gpu, lambda_host, density, baseline_pages=()):
     """Choose positive marginal value, counting a shared causal page only once.
 
     Value uses the next READ target saving, deduplicated against selected
@@ -150,24 +157,27 @@ def _allocate_retention_greedy(requests, *, protection_budget_tokens,
     One logical capacity bounds protection; native tier placement is unchanged.
     """
     requests = {(request.owner_id, request.forecast.horizon_seconds): request for request in requests}
-    protected_pages = set()
+    protected_pages = set(baseline_pages)
     gpu_leases, host_leases = {}, {}
-    covered_events = {}
+    covered_events, covered_consumer_pages = {}, {}
 
     def cover(request):
         forecast = request.forecast
         event = request.reuse_event_key or request.owner_id
         covered_events[event] = max(covered_events.get(event, 0), forecast.target_saved_ms)
+        for consumer, pages in request.consumer_savings:
+            for page, saving in pages:
+                key = consumer, page
+                covered_consumer_pages[key] = max(covered_consumer_pages.get(key, 0), saving)
         for leases, seconds in ((gpu_leases, forecast.extra_gpu_seconds_per_page),
                                 (host_leases, forecast.extra_host_seconds_per_page)):
             for page in request.page_ids:
-                if page not in leases or forecast.horizon_seconds > leases[page][0]:
-                    leases[page] = forecast.horizon_seconds, seconds
+                previous = leases.get(page, (0, 0))
+                leases[page] = max(forecast.horizon_seconds, previous[0]), max(seconds, previous[1])
         protected_pages.update(request.page_ids)
 
     def added_residency(pages, leases, forecast, seconds, size):
-        return size*sum(seconds if page not in leases else seconds-leases[page][1]
-            for page in pages if page not in leases or forecast.horizon_seconds > leases[page][0])
+        return size*sum(max(0, seconds-leases.get(page, (0, 0))[1]) for page in pages)
 
     choices = []
     while requests:
@@ -175,9 +185,6 @@ def _allocate_retention_greedy(requests, *, protection_budget_tokens,
         for request in requests.values():
             added_tokens = len(request.page_ids-protected_pages)*request.page_size
             forecast = request.forecast
-            if not any(page not in gpu_leases or forecast.horizon_seconds > gpu_leases[page][0]
-                       for page in request.page_ids):
-                continue
             if len(protected_pages | request.page_ids)*request.page_size > protection_budget_tokens:
                 continue
             gpu_integral = added_residency(request.page_ids, gpu_leases, forecast,
@@ -188,24 +195,28 @@ def _allocate_retention_greedy(requests, *, protection_budget_tokens,
             # Credit each target READ once. Include the paired intervention's
             # external-request penalty; positive residual benefits may overlap
             # another target and are not an additional reward.
-            target = forecast.target_saved_ms
-            target -= min(max(target, 0), covered_events.get(event, 0))
+            if request.consumer_savings:
+                target = sum(max(0, saving-covered_consumer_pages.get((consumer, page), 0))
+                    for consumer, pages in request.consumer_savings for page, saving in pages)
+            else:
+                target = forecast.target_saved_ms
+                target -= min(max(target, 0), covered_events.get(event, 0))
             saved = target-forecast.retention_control_ms+min(0.0, forecast.expected_collateral_saved_ms)
             value = saved-lambda_gpu*gpu_integral-lambda_host*host_integral
             if value > 0:
                 choice = RetentionChoice(request.owner_id, forecast.horizon_seconds,
-                    saved, gpu_integral, host_integral, value, added_tokens,
-                    forecast.evidence_digest, event)
+                    saved if request.value_unit == "milliseconds" else None, gpu_integral, host_integral, value, added_tokens,
+                    forecast.evidence_digest, event, request.value_unit)
                 candidates.append(choice)
         if not candidates:
             break
         def priority(item):
             if not density:
-                return (False, item.value, item.value, item.owner_id)
+                return (False, item.value, item.value, -item.ttl_seconds, item.owner_id)
             capacity = item.marginal_protected_tokens
             # Renewing an already covered page can add value without adding capacity.
             return (capacity == 0, item.value/capacity if capacity else item.value,
-                    item.value, item.owner_id)
+                    item.value, -item.ttl_seconds, item.owner_id)
         choice = max(candidates, key=priority)
         selected = requests[choice.owner_id, choice.ttl_seconds]
         requests = {key: request for key, request in requests.items() if request.owner_id != choice.owner_id}
@@ -546,6 +557,8 @@ class PrefixReadObserver:
         self._control_observations = deque(maxlen=32)
         if settings["mode"] not in {"fixed_ttl", "value", "demand"}:
             raise ValueError("prefix callback requires fixed_ttl, value or demand mode")
+        if settings.get("unpriced_policy", "native") not in {"native", "risk_tokens"}:
+            raise ValueError("unpriced demand policy must be native or the explicit risk_tokens comparator")
         self.model = None
         model_path = settings["model_path"] if settings["mode"] == "value" else settings.get("pricing_asset")
         if model_path:
@@ -579,17 +592,21 @@ class PrefixReadObserver:
             receipt["predicted_set_net_value_ms"] = receipt["predicted_set_value_before_control_ms"]-elapsed_ms
             receipt["set_value_scope"] = "deduplicated expected savings and residency prices minus this complete observed callback once; not a measured set-intervention benefit"
 
-    async def demand_options(self, plans, state, session_id, batch, *, page_size):
+    async def demand_options(self, plans, state, session_id, batch, *, page_size, candidate_arrival_ms=None):
         """Allocate short leases for exact, already compiled continuations."""
         from .admission import quoted_native_work
-        from .action_proposals import continuation_read
-        from .context_budget import answer_evidence_gaps
         from .demand import DemandLease, JointOption, joint_options
         from .prefix_view import native_cache_scope_hash
         from .templates import longest_common_prefix
 
         own = {row.owner_id: row for row in self.store.prefix_owners(session_id, active_only=True)
                if row.policy == "joint_demand"}
+        unpriced_policy = self.settings.get("unpriced_policy", "native")
+        if self.model is None and unpriced_policy == "native" and not own:
+            # Without a net-value calibration, supplementary protection has no
+            # justified gain over Native. Avoid even the unneeded status call.
+            return joint_options(plans, state, allocate=lambda demand, *_:
+                JointOption(demand, retention_evidence="native_unpriced_net_value"))
         sources = {record.step_id: record for record in state.steps if record.task.kind == "READ"
                    and record.receipt is not None and record.receipt.engine_restart_id == batch.engine_restart_id
                    and record.metrics["cache_config_hash"] == batch.cache_config_hash
@@ -607,8 +624,6 @@ class PrefixReadObserver:
         quotes = {quote.candidate_id: quote for quote in batch.quotes}
         limit = self.settings["protection_budget_tokens"]
         scope = native_cache_scope_hash(batch.fingerprint, batch.cache_config_hash)
-        all_need_ids = {need.need_id for need in state.plan.task_state.needs}
-        continuation = continuation_read(state, state.plan) if self.model is not None else None
         queued_growth = sum(max(0, request.input_tokens+request.max_new_tokens-request.kv_allocated_tokens)
                             for request in batch.native_waiting_requests or ())
         concurrent_growth = ceil(max(0, batch.native_running_budget_tokens or 0))+queued_growth
@@ -617,7 +632,6 @@ class PrefixReadObserver:
             return sum(quoted_native_work(quotes[candidate.candidate_id]))+candidate.output_budget
 
         matched_paths = {}
-        raw_support = {}
 
         def matching_sources(compiled):
             key = compiled.candidate_id
@@ -640,113 +654,189 @@ class PrefixReadObserver:
                     for boundary, (step_id, attempt_id) in matches.items())
             return matched_paths[key]
 
+        now = time.monotonic_ns()
+        horizons = tuple(sorted(set(self.settings.get("horizon_seconds_choices", (
+            self.settings["ttl_seconds"],)))))
+        elapsed = defaultdict(list)
+        task_kinds = {task.step_id: task.kind for task in state.plan.steps}
+        for result in state.results:
+            if result.elapsed_ms > 0 and result.step_id in task_kinds:
+                elapsed[task_kinds[result.step_id]].append(result.elapsed_ms)
+        means = {kind: sum(values)/len(values) for kind, values in elapsed.items()}
+
+        def remaining(owner):
+            old = own[owner]
+            return max(0, old.ttl_seconds-(now-old.lease_started_ns)/1e9)
+
         def allocate(demand, task, candidate, actions):
             current = quotes[candidate.candidate_id] if candidate is not None else None
-            # The action is quoted but has not yet acquired its Native lock.
-            keep = {key for key, record in own.items()
-                    if current is not None and active[key]["reference_present"]
-                    and len(record.prefix_input_ids) <= current.recoverable_prefix_tokens
-                    and candidate.input_ids[:len(record.prefix_input_ids)] == record.prefix_input_ids}
-            kept = tuple(active[key] for key in keep)
+            # Do not drop a lease backing the selected quote before Native has
+            # locked that request. Its existing expiry is never extended here.
+            immediate = {key for key, record in own.items()
+                if current is not None and active[key]["reference_present"] and remaining(key) > 0
+                and len(record.prefix_input_ids) <= current.recoverable_prefix_tokens
+                and candidate.input_ids[:len(record.prefix_input_ids)] == record.prefix_input_ids}
+            kept = tuple(active[key] for key in immediate)
             base_pages = shared.union(*(owner_pages(row) for row in kept))
             base_gpu = shared_gpu | referenced_gpu_pages(kept)
             current_growth = (current.input_len-current.ready_gpu_prefix_tokens+candidate.output_budget
                               if current is not None else 0)
             pressure = max(0, current_growth+concurrent_growth-batch.free_gpu_tokens)
             if not pressure or not demand.needs or not sources:
-                return JointOption(demand, release=tuple(sorted(own.keys()-keep)),
-                                   protected_tokens=len(base_pages-shared)*page_size)
+                return JointOption(demand, release=tuple(sorted(own.keys()-immediate)),
+                    protected_tokens=len(base_pages-shared)*page_size, keep=tuple(sorted(immediate)))
             current_prefix = candidate.input_ids[:current.ready_gpu_prefix_tokens] if current is not None else ()
             targets = {}
             unmet = {need.need_id: need.priority for need in demand.needs}
+            # Consumer arrival is just the work before that consumer plus queue
+            # and observed progress. It is never the task's complete-response P95.
+            observed = means.get(task.kind)
+            arrival = (observed*(1+batch.queued_requests) if observed is not None else None)
+            seen = {task.step_id}
+            arrivals = {}
             for target, compiled in actions:
+                if target.step_id == task.step_id:
+                    continue
+                if target.step_id not in arrivals:
+                    arrivals[target.step_id] = arrival
+                if target.step_id not in seen:
+                    duration = means.get(target.kind)
+                    arrival = arrival+duration if arrival is not None and duration is not None else None
+                    seen.add(target.step_id)
                 if compiled is None:
                     continue
                 priority = sum(unmet.get(need, 0) for need in target.need_ids
                                if target.step_id in demand.remaining_read_ids)
-                if compiled.representation == "raw":
-                    key = compiled.candidate_id
-                    if key not in raw_support:
-                        raw_support[key] = all_need_ids-answer_evidence_gaps(state, compiled).keys()
-                    priority = sum(unmet[need] for need in unmet.keys() & raw_support[key])
+                if target.kind == "ANSWER" and compiled.source_body_token_ranges:
+                    priority = sum(unmet.values())
+                predicted_arrival = ((candidate_arrival_ms or {}).get(compiled.candidate_id, arrivals[target.step_id]))
                 if priority and (target.step_id not in targets or work(compiled) < work(targets[target.step_id][0])):
-                    targets[target.step_id] = compiled, priority
+                    targets[target.step_id] = compiled, priority, predicted_arrival
 
             paths, demands = {}, {}
-            for target, (compiled, priority) in targets.items():
+            own_gpu = referenced_gpu_pages(tuple(active[key] for key in own))
+            for target, (compiled, priority, arrival_ms) in targets.items():
                 quote = quotes[compiled.candidate_id]
-                evictable = quote.evictable_gpu_prefix_tokens or 0
-                risk = min(pressure, evictable)
-                if not risk:
-                    continue
                 matches = matching_sources(compiled)
                 if not matches:
                     continue
-                # Native FULL locks extend from the root to the deepest locked page.
+                evictable = quote.evictable_gpu_prefix_tokens or 0
                 locked_pages = (quote.ready_gpu_prefix_tokens-evictable)//page_size
                 if not concurrent_growth:
-                    # The intervening request holds its matched pages during its own allocation.
                     locked_pages = max(locked_pages, longest_common_prefix(compiled.input_ids, current_prefix)//page_size)
                 _, _, _, path = max(matches, key=lambda match: match[2])
-                evictable_pages = frozenset(path[locked_pages:])
-                if evictable_pages:
-                    demands[target] = (min(len(evictable_pages)*page_size, risk), priority, evictable_pages)
+                # Existing supplementary leases mask eviction in the quote.
+                # Evaluate their release against Native, along with new leases.
+                evictable_pages = (frozenset(path[locked_pages:]) | (set(path) & own_gpu))-base_gpu
+                risk = min(pressure, len(evictable_pages)*page_size)
+                if risk:
+                    demands[target] = (risk, priority, evictable_pages, arrival_ms)
                     paths.update((owner, (step, end, frozenset(pages))) for owner, step, end, pages in matches)
+            # Include old leases even when their original path is not the longest
+            # observed match. Their remaining TTL competes with renew/new choices.
+            for owner, old in own.items():
+                if owner in immediate:
+                    continue
+                pages = owner_pages(active[owner])
+                if any(pages & row[2] for row in demands.values()):
+                    paths[owner] = old.step_id, len(old.prefix_input_ids), pages
 
-            def coverage(pages):
-                return {target: min(risk, len(path & pages)*page_size)
-                        for target, (risk, _, path) in demands.items()}
-
-            protected, protected_gpu = set(base_pages), set(base_gpu)
-            initial_coverage = coverage(protected_gpu)
-            covered, selected = initial_coverage, {}
-            while paths:
-                choices = []
-                for owner, (_, _, path) in paths.items():
-                    extra_pages = len(path-protected)
-                    if (len(protected)+extra_pages)*page_size > limit:
+            requests, actions_by_option = [], {}
+            # A paired label prices one full source consumer, never an owner's
+            # entire observation window. Uncalibrated geometry stays an explicit
+            # token-risk rule and cannot reduce B's predicted milliseconds.
+            curves = {}
+            for target in demands:
+                compiled = targets[target][0]
+                full = compiled.source_prefix_tokens//page_size*page_size
+                inspection = next((sources[step].metrics.get("evidence_prefix", {})
+                    for step, end, _ in paths.values() if end == full and step in sources
+                    and sources[step].metrics.get("evidence_prefix", {}).get("boundary_tokens") == full
+                    and sources[step].input_ids[:full] == compiled.input_ids[:full]), {})
+                if self.model is not None and inspection.get("demand_observation"):
+                    curves[target] = tuple(forecast for horizon in horizons
+                        if (forecast := self._demand_forecast(inspection, batch, horizon)) is not None)
+            priced = bool(demands) and all(curves.get(target) for target in demands)
+            if not priced and unpriced_policy == "native":
+                return JointOption(demand, release=tuple(sorted(own.keys()-immediate)),
+                    protected_tokens=len(base_pages-shared)*page_size,
+                    uncovered_risk_tokens=sum(row[0] for row in demands.values()),
+                    retention_evidence="native_unpriced_net_value", keep=tuple(sorted(immediate)))
+            for owner, (step, boundary, pages) in paths.items():
+                if owner in immediate:
+                    continue
+                leases = [(horizon, "renew" if owner in own else "new") for horizon in horizons]
+                if owner in own and remaining(owner) > 0:
+                    leases.append((remaining(owner), "keep"))
+                for horizon, action in leases:
+                    events, target_ids, forecasts = [], [], []
+                    for target, (risk, priority, evictable_pages, arrival_ms) in demands.items():
+                        if arrival_ms is not None and arrival_ms >= horizon*1000:
+                            continue
+                        covered = pages & evictable_pages
+                        if not covered:
+                            continue
+                        forecast = None
+                        if priced:
+                            curve = curves[target]
+                            forecast = (self._remaining_forecast(curve, horizon) if action == "keep" else
+                                next((point for point in curve if point.horizon_seconds == horizon), None))
+                            if forecast is None:
+                                continue
+                            # Scale only the target service saving by the fraction
+                            # of its full causal source path at risk. This excludes
+                            # savings already present in the current Native quote.
+                            full_tokens = targets[target][0].source_prefix_tokens//page_size*page_size
+                            per_page = max(0, forecast.target_saved_ms)*min(risk, full_tokens)/max(1, full_tokens)/len(evictable_pages)
+                            forecasts.append(forecast)
+                        else:
+                            per_page = risk*priority/len(evictable_pages)
+                        events.append((target, tuple((page, per_page) for page in sorted(covered))))
+                        target_ids.append(target)
+                    if not events:
                         continue
-                    after = coverage(protected_gpu | path)
-                    gains = {target: after[target]-before for target, before in covered.items()}
-                    value = sum(gain*demands[target][1] for target, gain in gains.items())
-                    if value > 0:
-                        choices.append(((value, -extra_pages, owner in own, owner), owner, after, gains))
-                if not choices:
-                    break
-                _, owner, covered, gains = max(choices, key=lambda choice: choice[0])
-                step, boundary, path = paths.pop(owner)
-                target = max(gains, key=lambda key: (gains[key]*demands[key][1], key))
-                protected.update(path)
-                protected_gpu.update(path)
-                selected[owner] = DemandLease(owner, step, target, boundary, gains[target], page_size, scope)
-            saved_ms, evidence = None, None
-            if self.model is not None and not active and len(selected) == len(demands) == 1:
-                target, = demands
-                lease, = selected.values()
-                compiled, _ = targets[target]
-                inspected = sources[lease.source_step_id].metrics.get("evidence_prefix", {})
-                full_boundary = compiled.source_prefix_tokens//page_size*page_size
-                if (target in demand.remaining_read_ids
-                        and inspected.get("demand_observation")
-                        and lease.boundary_tokens == full_boundary == inspected["boundary_tokens"]):
-                    forecast = self._demand_forecast(inspected, batch)
-                    if forecast is not None:
-                        net_ms = forecast.saved_ms-lease.boundary_tokens*(
-                            self.settings.get("lambda_gpu", 0)*forecast.extra_gpu_seconds_per_page
-                            + self.settings.get("lambda_host", 0)*forecast.extra_host_seconds_per_page)
-                        evidence = forecast.evidence_digest
-                        if net_ms <= 0:
-                            selected.clear()
-                            protected, covered = base_pages, initial_coverage
-                        elif continuation is not None and target == continuation.step_id:
-                            saved_ms = net_ms
-            return JointOption(demand, tuple(lease for key, lease in selected.items() if key not in own),
-                tuple(sorted(own.keys()-keep-selected.keys())), len(protected-shared)*page_size,
-                sum(risk-covered[target] for target, (risk, _, _) in demands.items()), saved_ms, evidence)
+                    # Control belongs to the owner call once. Shared residence
+                    # is unioned by the existing allocator. Positive collateral
+                    # full-window effects are deliberately never added.
+                    forecast = PrefixForecast(horizon, 0, None, None,
+                        max((point.extra_gpu_seconds_per_page for point in forecasts), default=0),
+                        max((point.extra_host_seconds_per_page for point in forecasts), default=0),
+                        scope, "consumer_paired_marginal" if priced else "native_at_risk_token_rule",
+                        retention_control_ms=0 if action == "keep" else max((point.retention_control_ms for point in forecasts), default=0),
+                        expected_collateral_saved_ms=min((point.expected_collateral_saved_ms for point in forecasts), default=0))
+                    request = RetentionRequest(owner, forecast, pages, page_size,
+                        consumer_savings=tuple(events), value_unit="milliseconds" if priced else "risk_tokens")
+                    requests.append(request)
+                    target = max(target_ids, key=lambda key: demands[key][0]*demands[key][1])
+                    actions_by_option[owner, horizon] = DemandLease(owner, step, target, boundary,
+                        min(demands[target][0], len(pages & demands[target][2])*page_size), page_size, scope,
+                        horizon, action, demands[target][3])
+            choices = allocate_retention(requests, protection_budget_tokens=limit,
+                lambda_gpu=self.settings.get("lambda_gpu", 0) if priced else 0,
+                lambda_host=self.settings.get("lambda_host", 0) if priced else 0, baseline_pages=base_pages)
+            selected = {choice.owner_id: actions_by_option[choice.owner_id, choice.ttl_seconds] for choice in choices}
+            protected = base_pages.union(*(paths[owner][2] for owner in selected))
+            kept_ids = immediate | {owner for owner, lease in selected.items() if lease.action == "keep"}
+            uncovered = sum(max(0, risk-min(risk, len(path & protected)*page_size))
+                for risk, _, path, _ in demands.values())
+            # Net protection value ranks leases against Native. It is not a
+            # discount against B's already hit-aware native request quotes: no
+            # fitted B cost baseline currently models future eviction losses.
+            allocation_value = sum(choice.value for choice in choices) if priced else None
+            chosen_forecasts = {(request.owner_id, request.forecast.horizon_seconds): request.forecast
+                                for request in requests}
+            mutations = tuple(lease for lease in selected.values() if lease.action != "keep")
+            owner_control_ms = (sum(chosen_forecasts[lease.owner_id, lease.ttl_seconds].retention_control_ms
+                for lease in mutations) if priced else None) if mutations else 0.0
+            return JointOption(demand, mutations,
+                tuple(sorted(own.keys()-immediate-selected.keys())), len(protected-shared)*page_size,
+                uncovered, "consumer_paired_marginal" if priced else "native_at_risk_token_rule",
+                tuple(sorted(kept_ids)), "candidate_arrival_ms_or_observed_step_means_plus_queue; unknown_when_unobserved",
+                allocation_value, owner_control_ms)
 
         return joint_options(plans, state, allocate=allocate)
 
-    def _demand_forecast(self, inspected, batch):
+    def _demand_forecast(self, inspected, batch, horizon):
         features = inspected.get("retention_features")
         if features is None:
             return None
@@ -757,7 +847,7 @@ class PrefixReadObserver:
                    "workload": {"active_requests": batch.active_requests, "queued_requests": batch.queued_requests}}
         bucket = self.model.feature_bucket({**features, **self._native_features(current)})
         forecast = self.model.forecasts.get(self.model._key(bucket, inspected["cache_scope_hash"],
-                                                            self.settings["ttl_seconds"]))
+                                                            horizon))
         if forecast is not None and forecast.source_token_range is not None:
             low, high = forecast.source_token_range
             if low <= inspected["boundary_tokens"] <= high:
@@ -775,11 +865,13 @@ class PrefixReadObserver:
                 protected = set().union(*(owner_pages(row) for row in status["prefixes"]))
                 protected_gpu = referenced_gpu_pages(status["prefixes"])
             for lease in option.retain:
+                sources = (self.store.prefix_owner(lease.owner_id).sources
+                           if lease.action == "renew" else None)
                 record = steps[lease.source_step_id]
                 prefix = record.input_ids[:lease.boundary_tokens]
                 page_size, scope = lease.page_size, lease.cache_scope_hash
                 pages = {scope+":"+value for value in executed_prefix_hashes(prefix, page_size).values()}
-                if pages <= protected_gpu:
+                if lease.action != "renew" and pages <= protected_gpu:
                     continue
                 next_pages = protected | pages
                 if len(next_pages)*page_size > self.settings["protection_budget_tokens"]:
@@ -788,14 +880,15 @@ class PrefixReadObserver:
                 receipts[lease.owner_id] = await self.owners.observe(owner_id=lease.owner_id,
                     session_id=session_id, attempt_id=record.attempt_id, step_id=record.step_id,
                     receipt=record.receipt, prefix_input_ids=prefix,
-                    sources=({"kind": "executed_source_body_prefix", "prefix_hash": token_hash(prefix)},),
-                    ttl_seconds=self.settings["ttl_seconds"],
+                    sources=(sources if lease.action == "renew" else
+                        ({"kind": "executed_source_body_prefix", "prefix_hash": token_hash(prefix)},)),
+                    ttl_seconds=lease.ttl_seconds,
                     policy="joint_demand", policy_choice={**asdict(lease), "observed_quote_seq": batch.observed_seq,
                         "protected_tokens": option.protected_tokens})
                 if receipts[lease.owner_id]["state"] == "RETAINED":
                     protected.update(owner_pages(receipts[lease.owner_id]))
                     protected_gpu.update(referenced_gpu_pages((receipts[lease.owner_id],)))
-        return {"elapsed_ms": (time.monotonic()-started)*1000,
+        return {"elapsed_ms": (time.monotonic()-started)*1000, "kept_owners": option.keep,
                 "owner_status": {owner: {key: ack[key] for key in ("state", "reason", "boundary_tokens", "expires_at")
                                          if key in ack} for owner, ack in receipts.items()}}
 

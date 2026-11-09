@@ -198,6 +198,37 @@ class SourceOrderIndex:
             self._executed[key] = (*binding, request_id)
             return request_id
 
+    def executed_paths(self, source_ids, *, fingerprint, cache_config_hash, engine_restart_id, limit):
+        """Return actual source paths whose leading windows are available now.
+
+        The author index chooses the preferred overlap. The existing execution
+        bindings recover full paths (not its reordered, possibly partial match).
+        This is a proposal only: token geometry and Native quotes establish reuse.
+        """
+        if limit < 1:
+            return ()
+        scope = self.cache_scope(fingerprint, cache_config_hash, engine_restart_id)
+        original, encoded = self._encode(source_ids)
+        with self._lock:
+            index = self._scopes.get(scope)
+            if index is None or not encoded:
+                return ()
+            _, node_id, overlap, _ = index.search(list(encoded), update_access=False)
+            preferred = tuple(index.metadata[node_id].doc_ids) if node_id >= 0 and overlap else ()
+            available = set(original)
+            paths = {}
+            for (record_scope, _), (_, path, _) in self._executed.items():
+                if record_scope != scope or not path or path[0] not in available:
+                    continue
+                length = 0
+                for identity in path:
+                    if identity not in available:
+                        break
+                    length += 1
+                _, path_encoded = self._encode(path)
+                paths[path] = (path_encoded != preferred, -length)
+            return tuple(sorted(paths, key=paths.get)[:limit])
+
 
 @lru_cache(maxsize=None)
 def _verified_checkout(checkout):

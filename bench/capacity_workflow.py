@@ -204,7 +204,11 @@ def full_queue_method_specs(selected, gain_settings, compilation, value_policy=N
         if method.endswith("_value"):
             retention = deepcopy(value_policy)
         elif method.endswith("_demand"):
-            retention = dict(mode="demand", ttl_seconds=15, protection_budget_tokens=8192, **(demand_pricing or {}))
+            retention = dict(mode="demand", ttl_seconds=15, horizon_seconds_choices=[15, 60, 180],
+                             protection_budget_tokens=8192, **(demand_pricing or {}))
+            # Uncalibrated protection is a separately named rule comparison,
+            # never the default E6 net-value intervention.
+            retention["unpriced_policy"] = "risk_tokens" if rule else "native"
         overrides = {"execution": {
             "dialogue_mode": "llamaindex" if external else "contextkv",
             "plan_gain": rolling,

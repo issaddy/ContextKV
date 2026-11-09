@@ -11,7 +11,7 @@ from .reading import numeric_reduction_inputs, numeric_selection_step_ids, numer
 from .serialization import dumps
 
 
-FINITE_ACTION_DOMAIN = "two_reads_shared_outputs_terminal_representations_v1"
+FINITE_ACTION_DOMAIN = "two_reads_cache_path_organizations_terminal_representations_v2"
 ALTERNATE_ANSWERS = ("raw", "facts", "reduced")
 
 
@@ -197,7 +197,8 @@ def observed_reduction_task(frozen):
 
 def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint,
                                 gap_request=None, answer_system_prompt=None, include_gap_step=False,
-                                read_choices=1):
+                                read_choices=1, request_compiler=None, cache_scope=None,
+                                output_tokens_per_fact=64, read_organizations=None):
     """Register a bounded set of ready READs, one current-basis REDUCE and one GAP."""
     base = bind_answer_window(frozen.plan, template, snapshot, answer_system_prompt,
                              preserve_step_ids=tuple(record.step_id for record in frozen.steps))
@@ -213,10 +214,20 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
     unmet = tuple(need.need_id for need in base.task_state.needs
                   if not any(claim.serves(need.need_id) for claim in frozen.claims))
 
-    def add(kind, tasks, suffix=""):
-        plan = replace(base, plan_id=base.plan_id+":observed:"+identity+":"+kind+suffix, steps=(*historic, *tasks))
-        branches.append(complete_plan(plan, (), semantic_kind=kind, reader_checkpoint=reader_checkpoint,
-                                      unmet_answer_points=unmet))
+    def add(kind, tasks, suffix="", organization=None):
+        organization = organization or base
+        plan = replace(organization, plan_id=organization.plan_id+":observed:"+identity+":"+kind+suffix,
+                       steps=(*historic, *tasks))
+        branch = complete_plan(plan, (), semantic_kind=kind, reader_checkpoint=reader_checkpoint,
+                               unmet_answer_points=unmet)
+        # The executable branch is still one action plus ANSWER. Its context
+        # carries the entire selected remaining plan for budgeting and demand.
+        replacements = {task.step_id: task for task in (*historic, *tasks)}
+        full_steps = tuple(replacements.pop(task.step_id, task) for task in organization.steps)
+        # Action observation IDs belong to PlanCandidate. Persist the stable
+        # organization ID, otherwise every rolling decision grows its catalog ID.
+        full = replace(organization, steps=(*full_steps, *replacements.values()))
+        branches.append(replace(branch, context_plan=full))
 
     add("direct_answer", ())
     ready = tuple(task for task in base.steps if task.kind == "READ" and task.step_id not in completed
@@ -230,8 +241,38 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
         demand = DemandState.from_outcome(frozen)
         ready = tuple(sorted(ready, key=lambda task: -sum(need.priority for need in demand.needs
                                                           if need.need_id in task.need_ids)))
-    for index, task in enumerate(ready[:read_choices]):
-        add("read_once", (bind_read_parents(task, frozen),), ":"+task.step_id if index else "")
+    if read_organizations is not None:
+        def obligations(plan):
+            return {(need, unit, task.operation, task.condition_ids, bind_read_parents(task, frozen).input_claim_ids)
+                    for task in plan.steps if task.kind == "READ" and task.step_id not in completed
+                    for need in task.need_ids for unit in task.input_unit_ids}
+
+        originals = {task.step_id: task for task in base.steps if task.step_id in completed}
+        organizations = [base]
+        for organization in read_organizations:
+            if (organization.task_state != base.task_state or organization.selected_set != base.selected_set
+                    or organization.budget != base.budget or organization.coverage_scope != base.coverage_scope
+                    or organization.read_layout != base.read_layout or organization.reading_mode != base.reading_mode
+                    or organization.coverage_units != base.coverage_units
+                    or {task.step_id: task for task in organization.steps if task.step_id in completed} != originals
+                    or obligations(organization) != obligations(base)):
+                raise ValueError("captured READ organization changed observed state or reading obligations")
+            if organization.steps != base.steps:
+                organizations.append(organization)
+    else:
+        organizations = ((base,) if not ready or request_compiler is None else
+            request_compiler.read_organizations(replace(frozen, plan=base), snapshot, cache_scope=cache_scope,
+                limit=read_choices, output_tokens_per_fact=output_tokens_per_fact))
+    choices = [(base, task) for task in ready[:1]]
+    old_ids = {task.step_id for task in base.steps}
+    for organization in organizations[1:]:
+        task = next((task for task in organization.steps if task.kind == "READ" and task.step_id not in old_ids
+                     and set(task.predecessor_step_ids) <= completed), None)
+        if task is not None:
+            choices.append((organization, task))
+    choices.extend((base, task) for task in ready[1:])
+    for index, (organization, task) in enumerate(choices[:read_choices]):
+        add("read_once", (bind_read_parents(task, frozen),), ":"+task.step_id if index else "", organization)
     reduction = observed_reduction_task(replace(frozen, plan=base))
     if reduction is not None:
         if reduction.operation not in {"union", "count", "sum", "group"}:

@@ -609,7 +609,8 @@ def read_output_reservation(state, task, units, tokenizer, *, dependency_ids=(),
 def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=None, snapshot=None,
                     input_claims=(), output_tokens_per_fact=64, reading_mode="typed_reduce",
                     separate_needs=False, numeric_identity="names", read_layout="task_first",
-                    read_packing="mixed", answer_system_prompt=None, _step_prefix=""):
+                    read_packing="mixed", answer_system_prompt=None, _step_prefix="",
+                    preferred_groups=()):
     template = template or ByteTemplate()
     if read_packing == "source_windows":
         from .source_windows import source_window_spans
@@ -712,6 +713,22 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
     # Final IDs and the actual next step index are known while measuring.
     # A split is emitted into that step immediately; no later renaming or
     # repacking can make its previously measured input longer.
+    # A preferred group is a complete leading sequence from an executed path,
+    # not an arbitrary suffix. Keep its order; dependencies follow in the same
+    # request, so a header/data relationship is never lost by making a package.
+    # Remaining sources go through exactly the ordinary packer below.
+    from .evidence_planner import close_dependencies
+    for identities in preferred_groups:
+        if not identities or any(identity not in source_units for identity in identities):
+            continue
+        closed = close_dependencies(identities, source_units)
+        if (set(identities) <= assigned or input_size(closed) > maximum
+                or output_size(closed) > output_budget):
+            continue
+        if len(packs)+2 > budget.max_steps:
+            raise ValueError("full coverage exceeds the request step allocation")
+        packs.append(closed)
+        assigned.update(unit.unit_id for unit in closed)
     reading_units = evidence_set.selected_units
     if read_packing == "source_windows":
         # Read the data roots first: their closures already read shared headings,
@@ -770,6 +787,94 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
     plan = replace(plan, selected_set=replace(evidence_set, selected_units=units),
                    steps=tuple(steps), coverage_units=tuple(unit.unit_id for unit in units))
     return bind_answer_window(replace(plan, answer_allocation=None), template, snapshot)
+
+
+def regroup_pending_reads(outcome, preferred_group, template, snapshot, *, output_tokens_per_fact=64):
+    """Repack one compatible ready READ group, retaining the rest of its DAG.
+
+    Caller supplies a leading executed source sequence. Coverage, observed
+    producers, and original unit identities remain the same; incompatible Need
+    scopes and not-yet-ready steps are deliberately left alone.
+    """
+    from .context_budget import bind_answer_window
+    from .evidence_planner import close_dependencies
+    from .serialization import dumps
+
+    plan = outcome.plan
+    completed = {result.step_id for result in outcome.results}
+    completed.update(record.step_id for record in outcome.steps)
+    ready = tuple(task for task in plan.steps if task.kind == "READ"
+        and task.step_id not in completed and set(task.predecessor_step_ids) <= completed)
+    by_unit = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+    groups = {}
+    for task in ready:
+        signature = replace(task, step_id="", input_unit_ids=(), output_schema={}, retained_conclusion_tokens=())
+        groups.setdefault(dumps(signature), []).append(task)
+    for tasks in groups.values():
+        available = tuple(dict.fromkeys(identity for task in tasks for identity in task.input_unit_ids))
+        if not set(preferred_group) <= set(available):
+            continue
+        # Reordering one package already belongs to RequestCompiler. A new split
+        # is justified only when it extends an executed prefix across packages.
+        existing_prefix = 0
+        for task in tasks:
+            length = 0
+            for identity in preferred_group:
+                if identity not in task.input_unit_ids:
+                    break
+                length += 1
+            existing_prefix = max(existing_prefix, length)
+        if existing_prefix >= len(preferred_group):
+            continue
+        prototype = tasks[0]
+        material = close_dependencies(available, by_unit)
+        task_state = replace(plan.task_state, needs=tuple(need for need in plan.task_state.needs
+                                                        if need.need_id in prototype.need_ids))
+        claims = {claim.claim_id: claim for claim in outcome.claims}
+        old_ids = {task.step_id for task in tasks}
+        identity = sha256(dumps((tuple(task.step_id for task in tasks), preferred_group)).encode()).hexdigest()[:16]
+        try:
+            packed = build_read_plan(task_state, replace(plan.selected_set, selected_units=material),
+                plan.coverage_scope, plan.budget, template=template, snapshot=snapshot,
+                input_claims=tuple(claims[identity] for identity in prototype.input_claim_ids),
+                output_tokens_per_fact=output_tokens_per_fact, reading_mode=plan.reading_mode,
+                separate_needs=False, numeric_identity=plan.numeric_identity, read_layout=plan.read_layout,
+                read_packing=plan.read_packing, answer_system_prompt=plan.answer_system_prompt,
+                _step_prefix=f"policy:regroup:{identity}:", preferred_groups=(preferred_group,))
+        except ValueError as error:
+            # A different package count can exhaust the declared step budget;
+            # source/schema/claim errors are implementation errors, not misses.
+            if str(error) != "full coverage exceeds the request step allocation":
+                raise
+            continue
+        if not packed.steps or packed.steps[0].input_unit_ids[:len(preferred_group)] != tuple(preferred_group):
+            continue
+        # This local operation cannot change source windows or introduce new
+        # reading obligations. Canonical units that need finer splits stay put.
+        if {unit.unit_id for unit in packed.selected_set.selected_units} != {unit.unit_id for unit in material}:
+            continue
+        replacements = tuple(replace(prototype, step_id=task.step_id, input_unit_ids=task.input_unit_ids,
+            output_schema=output_schema(prototype, tuple(by_unit[uid] for uid in task.input_unit_ids),
+                tuple(claims[uid] for uid in prototype.input_claim_ids), reading_mode=plan.reading_mode,
+                numeric_identity=plan.numeric_identity)) for task in packed.steps)
+        replacement_ids = tuple(task.step_id for task in replacements)
+        steps, inserted = [], False
+        for task in plan.steps:
+            if task.step_id in old_ids:
+                if not inserted:
+                    steps.extend(replacements)
+                    inserted = True
+                continue
+            if task.step_id not in completed and old_ids.intersection(task.predecessor_step_ids):
+                task = replace(task, predecessor_step_ids=tuple(dict.fromkeys(identity
+                    for parent in task.predecessor_step_ids
+                    for identity in (replacement_ids if parent in old_ids else (parent,)))))
+            steps.append(task)
+        if sum(task.step_id not in completed for task in steps)+len(outcome.steps)+1 > plan.budget.max_steps:
+            continue
+        candidate = replace(plan, plan_id=plan.plan_id+":regroup:"+identity, steps=tuple(steps))
+        return bind_answer_window(candidate, template, snapshot, preserve_step_ids=tuple(completed))
+    return None
 
 
 def unresolved_needs(results):

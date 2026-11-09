@@ -9,7 +9,7 @@ from pathlib import Path
 from bench.study_resources import integrate_physical
 from controller.action_proposals import build_observed_action_plans, gap_key, gap_query, gap_scope_available, GapRetrievalRequest
 from controller.context_budget import completed_source_coverage
-from controller.context_schema import ReadingOutcome, ReadResult, ReadTask, StepRecord
+from controller.context_schema import ContextPlan, ReadingOutcome, ReadResult, ReadTask, StepRecord
 from controller.plan_gain_protocol import validate_input_protocol
 from controller.plan_policy import CompleteCost
 from controller.resident_models import evidence_selection_contract, resident_model_digest
@@ -113,7 +113,11 @@ def terminal_observation(before, run, source_task, answer_event, online, templat
         state = replace(state, steps=after_first_read(state.steps, step),
             results=after_first_read(state.results, result),
             plan=replace(state.plan, steps=after_first_read(state.plan.steps, task)))
-    state = restore_read_catalog(state, decode(ReadingOutcome, before["working_state"]).plan)
+    # New branches retain their complete selected organization. Restoring from
+    # the pre-selection state would resurrect packs replaced by a regrouping.
+    catalog = (decode(ContextPlan, before["plan_candidate"]["context_plan"])
+        if "registered_context_plan_id" in run else decode(ReadingOutcome, before["working_state"]).plan)
+    state = restore_read_catalog(state, catalog)
     state = replace(state, plan=replace(state.plan, online_tokens_spent=paid.input_tokens+paid.output_tokens))
     resident = run["resident_model_manifest"]
     resident_digest = resident_model_digest(resident)

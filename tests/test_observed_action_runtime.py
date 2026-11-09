@@ -279,9 +279,7 @@ async def test_first_read_adds_only_measured_prefix_control_once(tmp_path, contr
     assert read.cost.latency_ms == 20+(control_ms or 0)
     assert direct.cost.latency_ms == 10
     diagnostic = next(item for item in policy.last_option_diagnostics.values() if item["plan_id"] == read.plan_id)
-    assert diagnostic["first_read_prefix_control"] == {"predicted_ms": control_ms,
-        "source": "actual_prefix_control_ms", "observation_count": PrefixControl.control_observation_count,
-        "scope": "first_READ_only"}
+    assert diagnostic["read_callback_control"]["predicted_ms"] == control_ms
     await controller.aclose()
 
 

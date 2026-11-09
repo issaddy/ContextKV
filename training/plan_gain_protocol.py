@@ -15,10 +15,10 @@ from controller.action_proposals import (GapRetrievalRequest as GapRetrievalRequ
     gap_key, gap_retrieval_plan, observed_step_outputs)
 from controller.context_schema import EvidencePool, ReadingOutcome, ReadTask
 from controller.context_budget import bind_answer_window, direct_answer_reason
-from controller.plan_policy import CompleteCost, complete_plan
+from controller.plan_policy import CompleteCost, PlanStep, complete_plan
 from controller.reading import build_read_plan
 from controller.rolling_policy import (RollingResult, ZERO_AUX, _reduction_tasks,
-                                       compile_step, namespace_plan)
+                                       compile_route_steps, compile_step, namespace_plan)
 from controller.schema import Plan
 from controller.serialization import decode, to_jsonable
 
@@ -202,6 +202,7 @@ class FixedCounterfactualRuntime:
         self.gap_result = None
         self.pre_action_quote = None
         self.pre_action_input = None
+        self.compiled_route_steps = ()
         self.new_auxiliary_usage = dict(ZERO_AUX)
         self.new_step_ids = ()
         self.new_action_counts = {"READ": 0, "REDUCE": 0, "GAP_RETRIEVAL": 0, "ANSWER": 0}
@@ -306,7 +307,7 @@ class FixedCounterfactualRuntime:
         while pending or (observed and self.planned.semantic_kind != "direct_answer" and not continued):
             if not pending:
                 continued = True
-                ready_terminal = continuation_read(state, self.initial_state.plan)
+                ready_terminal = continuation_read(state, plan)
                 paid_steps = len(state.steps)+self.new_action_counts["GAP_RETRIEVAL"]
                 remaining_steps = plan.budget.max_steps-paid_steps
                 if ready_terminal is not None:
@@ -314,7 +315,10 @@ class FixedCounterfactualRuntime:
                         break
                     task = replace(ready_terminal, step_id="bounded-terminal:"+ready_terminal.step_id,
                         predecessor_step_ids=())
-                    plan = replace(plan, steps=(*plan.steps, task))
+                    plan = replace(plan, steps=tuple(task if previous.step_id == ready_terminal.step_id
+                        else replace(previous, predecessor_step_ids=tuple(task.step_id if identity == ready_terminal.step_id
+                            else identity for identity in previous.predecessor_step_ids))
+                        for previous in plan.steps))
                     state = replace(state, plan=plan)
                 else:
                     gaps = tuple(need for need in continuation_gap(state, used_gap=False)
@@ -402,8 +406,20 @@ class FixedCounterfactualRuntime:
             if not cpu and not variants:
                 from controller.execution import ReadingBudgetExceeded
                 raise ReadingBudgetExceeded("actual generated facts exceed the pre-registered execution window")
+            quote_candidates = variants
+            if observed and task.kind == "READ" and not self.new_step_ids and self.pre_action_quote is None:
+                declared = replace(self.planned, context_plan=plan,
+                    steps=tuple(PlanStep(task, variants) if step.task.step_id == task.step_id else step
+                                for step in self.planned.steps))
+                self.compiled_route_steps = compile_route_steps(declared, state, snapshot, template,
+                    output_budgets=self.action_domain["output_budgets"] if self.action_domain else outputs,
+                    output_tokens_per_fact=self.action_domain["output_tokens_per_fact"] if self.action_domain else 64,
+                    request_compiler=executor.request_compiler, cache_scope=cache_scope)
+                quote_candidates = tuple({candidate.candidate_id: candidate
+                    for candidate in (*variants, *(candidate for step in self.compiled_route_steps
+                        for candidate in step.variants if candidate.feasible))}.values())
             quote_started = time.monotonic()
-            quote = None if cpu else await engine.quote_batch(variants, template.fingerprint)
+            quote = None if cpu else await engine.quote_batch(quote_candidates, template.fingerprint)
             quote_ms = None if cpu else (time.monotonic()-quote_started)*1000
             candidate = None if cpu else executor.request_compiler.choose_variant(variants, quote)
             if candidate is not None:

@@ -33,7 +33,8 @@ def served_branch(row, *, semantic_kind, plan_id, metric, normalization, scorer_
     raw = row["metrics"][metric]
     quality = raw*normalization["scale"]+normalization["offset"]
     attempt = row["attempt"]
-    if row["plan_id"] != plan_id or attempt["plan"]["candidate"]["context_plan_id"] != plan_id:
+    context_id = row.get("registered_context_plan_id", plan_id)
+    if row["plan_id"] != plan_id or attempt["plan"]["candidate"]["context_plan_id"] != context_id:
         raise ValueError("gain branch plan identity differs from its actually executed context plan")
     candidate = attempt["plan"]["candidate"]
     validate_input_protocol(row.get("input_protocol"), reader_fingerprint=candidate["fingerprint"])
@@ -76,6 +77,8 @@ def collect_pair(packet, direct_row, candidate_row):
     state = decode(ReadingOutcome, packet["working_state"])
     snapshot = decode(SessionSnapshot, packet["snapshot"])
     shared = {name: packet[name] for name in ("metric", "normalization", "scorer_identity", "comparison_budget")}
+    if candidate_row.get("registered_context_plan_id", plan.plan_id) != plan.context_plan.plan_id:
+        raise ValueError("gain candidate organization differs from its registered plan")
     direct = served_branch(direct_row, semantic_kind="direct_answer", plan_id=direct_row["plan_id"], **shared)
     candidate = served_branch(candidate_row, semantic_kind=plan.semantic_kind, plan_id=plan.plan_id, **shared)
     record = build_gain_record(plan, state, snapshot, direct, candidate)

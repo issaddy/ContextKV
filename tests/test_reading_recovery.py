@@ -192,15 +192,15 @@ async def test_reused_numeric_atoms_restore_once_and_compute_current_condition_v
     assert computed["count"].value == 1 and computed["sum"].value == "1000"
     assert all(claim.conditions == ("current",) for claim in outcome.claims if claim.operation == "numeric_select")
     assert tuple(claim.conditions for claim in outcome.claims[:2]) == (("old-0",), ("old-1",))
-    assert engine.reads == 0 and engine.selections == 2
+    assert engine.reads == 0 and engine.selections == 1
     assert direct_answer_reason(outcome, None) is None
-    assert len(outcome.steps) == len(store.execution_steps(attempt.attempt_id)) == 4
+    assert len(outcome.steps) == len(store.execution_steps(attempt.attempt_id)) == 3
     assert outcome.plan.online_tokens_spent == sum(len(step.input_ids)+len(step.output_ids) for step in outcome.steps)
     store.save_context_plan(attempt.attempt_id, outcome.plan, initial_outcome=outcome)
     restored = await executor.execute_reads(attempt.attempt_id, snapshot, outcome.plan)
     assert restored.claims == outcome.claims and restored.results == outcome.results
     assert restored.plan.online_tokens_spent == outcome.plan.online_tokens_spent
-    assert len(restored.steps) == 4 and engine.reads == 0 and engine.selections == 2
+    assert len(restored.steps) == 3 and engine.reads == 0 and engine.selections == 1
     store.close()
 
 

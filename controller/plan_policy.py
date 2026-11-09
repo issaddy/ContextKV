@@ -27,10 +27,15 @@ STRUCTURAL_FEATURE_NAMES = ("needs", "conditions", "version_comparison", "open_n
     "planned_coverage", "input_budget_tokens", "output_budget_tokens")
 ACTION_SIZE_FEATURE_NAMES = ("planned_read_chars", "reduce_input_claim_chars", "existing_claim_chars",
                              "working_history_chars", "answer_body_tokens")
-FEATURE_NAMES = (*PLAN_KINDS, *STRUCTURAL_FEATURE_NAMES, *ACTION_SIZE_FEATURE_NAMES)
+CANDIDATE_READ_FEATURE_NAMES = ("candidate_read_units", "candidate_retrieval_score_mean",
+    "candidate_retrieval_score_max", "candidate_retrieval_rank_mean",
+    "candidate_unmet_needs", "candidate_unmet_need_fraction",
+    "candidate_fact_overlap_fraction", "candidate_read_overlap_fraction")
+FEATURE_NAMES = (*PLAN_KINDS, *STRUCTURAL_FEATURE_NAMES, *ACTION_SIZE_FEATURE_NAMES,
+                 *CANDIDATE_READ_FEATURE_NAMES)
 
 
-OBSERVED_FEATURE_SCHEMA = "pre_action_budget_support_state_v2"
+OBSERVED_FEATURE_SCHEMA = "pre_action_candidate_read_value_v3"
 BUDGET_FEATURE_NAMES = ("paid_total_tokens", "paid_complete_ms", "paid_steps",
     "total_tokens_cap", "total_tokens_unbounded", "remaining_total_tokens",
     "hard_steps_cap", "remaining_hard_steps", "complete_ms_cap",
@@ -62,6 +67,9 @@ class PlanCandidate:
     unmet_answer_points: tuple[str, ...] = ()
     required_coverage: tuple[str, ...] = ()
     answer_representation: str = "existing"
+    # Compiled consumers projected from the selected remaining catalog. These
+    # are quoted for route accounting, never extra actions to execute now.
+    route_steps: tuple[PlanStep, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -239,7 +247,73 @@ def _completed_steps(plan, state):
     return completed | {logical for logical, owner in reduction_owners.items() if owner in completed}
 
 
-def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=None, paid_cost: CompleteCost | None = None):
+def _candidate_read_features(plan, state, remaining, *, support_mode=False):
+    """Value inputs for the next action, using only its current source/Need scope.
+
+    Rank is the competition rank among the current selected materials by the
+    recorded retrieval score. It does not depend on compiler/source ordering.
+    Source overlap uses interval unions, including different window aliases.
+    """
+    from .claim_graph import ClaimGraph
+    from .context_budget import answer_evidence_gaps, completed_source_ranges
+
+    task = remaining[0] if remaining and remaining[0].kind == "READ" else None
+    units = plan.context_plan.selected_set.selected_units
+    ids = set(task.input_unit_ids) if task is not None else set()
+    need_ids = set(task.need_ids) if task is not None else set()
+    selected = tuple(unit for unit in units if unit.unit_id in ids)
+    unmet = set(answer_evidence_gaps(state))
+    covered = {need for unit in selected for need in need_ids
+               if not unit.need_ids or need in unit.need_ids} & unmet
+    scores = [unit.retrieval_score for unit in selected]
+    ranks = [1 + sum(other.retrieval_score > unit.retrieval_score for other in units)
+             for unit in selected]
+
+    def intervals(spans):
+        ranges = {}
+        for span in spans:
+            ranges.setdefault(span.source_key, []).append((span.start, span.end))
+        return ranges
+
+    def size(ranges):
+        total = 0
+        for spans in ranges.values():
+            end = -1
+            for left, right in sorted(spans):
+                total += max(0, right-max(left, end))
+                end = max(end, right)
+        return total
+
+    sources = intervals(span for unit in selected for span in unit.source_spans)
+    source_size = size(sources)
+
+    def overlap(ranges):
+        intersection = {key: [(max(a, c), min(b, d)) for a, b in spans
+            for c, d in ranges.get(key, ()) if max(a, c) < min(b, d)]
+            for key, spans in sources.items()}
+        return size(intersection)/source_size if source_size else 0
+
+    graph = ClaimGraph(state.claims)
+    facts = intervals(span for claim in state.claims
+        if any(claim.serves(need_id) for need_id in need_ids)
+        for span in graph.source_spans(claim.claim_id))
+    values = dict(candidate_read_units=len(selected),
+        candidate_retrieval_score_mean=sum(scores)/len(scores) if scores else 0,
+        candidate_retrieval_score_max=max(scores) if scores else 0,
+        candidate_retrieval_rank_mean=sum(ranks)/len(ranks) if ranks else 0,
+        candidate_unmet_needs=len(covered),
+        candidate_unmet_need_fraction=len(covered)/len(unmet) if unmet else 0,
+        candidate_fact_overlap_fraction=overlap(facts),
+        candidate_read_overlap_fraction=overlap(completed_source_ranges(state.plan, state.results)))
+    # Bundles describe complementary evidence; a partial bundle is not support
+    # for this READ. Ranked mode has no support bundles and contributes zeros.
+    support = tuple(item for item in plan.context_plan.selected_set.need_support
+        if item.need_id in need_ids & unmet and item.unit_ids and set(item.unit_ids) <= ids)
+    return values, support if support_mode else ()
+
+
+def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=None,
+                  paid_cost: CompleteCost | None = None, support_mode=False):
     """Structure and current state only; oracle scores never enter features."""
     completed = _completed_steps(plan, state)
     remaining = [step.task for step in plan.steps if step.task.step_id not in completed]
@@ -276,6 +350,8 @@ def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=
         existing_claim_chars=sum(claim_chars(claim) for claim in state.claims),
         working_history_chars=sum(ref.end-ref.start for ref in state.plan.task_state.working_history),
         answer_body_tokens=plan.context_plan.budget.body_tokens)
+    candidate_values, support = _candidate_read_features(plan, state, remaining, support_mode=support_mode)
+    values.update(candidate_values)
     if paid_cost is not None:
         import math
         if any(not math.isfinite(value) or value < 0 for value in
@@ -286,14 +362,13 @@ def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=
         active = {need.need_id for need in needs}
         open_ids = {need.need_id for need in state.open_needs}
         terminal = {identity for result in state.results for identity in result.support}
-        support = [item for item in plan.context_plan.selected_set.need_support if item.need_id in active]
         values.update(infer_needs=sum(need.operation == "infer" for need in needs),
             numeric_needs=sum(need.operation in {"count", "sum", "group"} for need in needs),
             need_predecessors=sum(len(need.predecessor_need_ids) for need in needs),
             observed_terminal_needs=len((terminal & active)-open_ids),
             observed_bridge_gaps=sum(need.need_id in active and bool(need.parent_claim_ids)
                                      for need in state.open_needs),
-            retrieval_support_needs=len(support),
+            retrieval_support_needs=len({item.need_id for item in support}),
             retrieval_support_mean=sum(item.applicability*item.joint_support for item in support)/len(support)
                 if support else 0,
             retrieval_bridge_mean=sum(item.applicability*item.bridge_value for item in support)/len(support)
@@ -312,15 +387,16 @@ def plan_features(plan: PlanCandidate, state: ReadingOutcome, *, output_budgets=
     return {name: float(values[name]) for name in names}
 
 
-NATIVE_COST_SCHEMA = "pre_action_native_nonnegative_work_v3"
+NATIVE_COST_SCHEMA = "pre_action_native_nonnegative_work_v4"
 NATIVE_COST_PLAN_FEATURES = ("direct_answer", "read_once", "reduce_once", "gap_retrieval",
                              "existing_claim_chars", "output_budget_tokens")
 NATIVE_COST_FEATURE_NAMES = (*NATIVE_COST_PLAN_FEATURES, "first_input_tokens", "first_prefill_tokens",
                              "first_host_load_tokens", "active_requests", "queued_requests",
-                             "future_input_tokens", "future_output_tokens", "future_steps", "gap_query_chars")
+                             "future_input_tokens", "future_prefill_tokens", "future_host_load_tokens",
+                             "future_output_tokens", "future_steps", "gap_query_chars")
 
 
-def plan_cost_features(features, batch, first_quote, reserve, *, gap_query_chars=0):
+def plan_cost_features(features, batch, first_quote, reserve, *, gap_query_chars=0, future_quotes=()):
     """Use branch work known before the first action and actual Native pressure."""
     from .admission import quoted_native_work
 
@@ -328,10 +404,17 @@ def plan_cost_features(features, batch, first_quote, reserve, *, gap_query_chars
     if first_quote is not None:
         input_tokens = first_quote.input_len
         prefill_tokens, host_load = quoted_native_work(first_quote)
+    future_quotes = tuple(future_quotes)
+    quoted_inputs = sum(quote.input_len for quote in future_quotes)
+    if quoted_inputs > reserve.future_input_tokens:
+        raise ValueError("future quotes exceed the complete remaining input reserve")
+    future_work = tuple(quoted_native_work(quote) for quote in future_quotes)
     values = {**{name: features[name] for name in NATIVE_COST_PLAN_FEATURES},
         "first_input_tokens": input_tokens, "first_prefill_tokens": prefill_tokens,
         "first_host_load_tokens": host_load, "active_requests": batch.active_requests,
         "queued_requests": batch.queued_requests, "future_input_tokens": reserve.future_input_tokens,
+        "future_prefill_tokens": reserve.future_input_tokens-quoted_inputs+sum(work[0] for work in future_work),
+        "future_host_load_tokens": sum(work[1] for work in future_work),
         "future_output_tokens": reserve.future_output_tokens, "future_steps": reserve.future_steps,
         "gap_query_chars": gap_query_chars}
     return values
