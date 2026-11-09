@@ -477,14 +477,15 @@ async def test_demand_priced_multiowner_counts_consumers_not_owner_window_sums(m
     assert sum(choice.expected_saved_ms for choice in chosen) == 190
     assert option.retention_allocation_value_ms == 190
     assert option.retention_control_ms == 10  # Two owners; not one call per consumer.
-    # A real ANSWER source consumer shares the first path. Existing READ labels
-    # neither price that ANSWER nor disappear when its input joins the route.
+    # A longer ANSWER can consume the whole calibrated READ path.
     answer = ReadTask("answer", "ANSWER", ("n",))
-    answer_input = replace(candidates[0], candidate_id="answer", representation="hybrid", generation_kind="ANSWER")
-    answer_quote = replace(quotes[0], candidate_id="answer")
-    gap = replace(gap, route_steps=(*gap.route_steps, PlanStep(answer, (answer_input,))))
+    answer_ids = (*candidates[0].input_ids, 7, 8)
+    answer_input = replace(candidates[0], candidate_id="answer", representation="hybrid", generation_kind="ANSWER",
+        input_ids=answer_ids, input_hash=token_hash(answer_ids), source_body_token_ranges=((0, 6),), source_prefix_tokens=6)
+    answer_quote = replace(quotes[0], candidate_id="answer", input_hash=answer_input.input_hash, input_len=6, match_limit=6)
+    gap = replace(gap, route_steps=(PlanStep(answer, (answer_input,)),))
     chosen.clear()
     option = (await observer.demand_options((gap,), state, "session",
         replace(batch, quotes=(*batch.quotes, answer_quote)), page_size=2))["gap"]
-    assert len(option.retain) == 2 and option.protected_tokens == 6
-    assert option.retention_allocation_value_ms == 190 and option.retention_control_ms == 10
+    assert len(option.retain) == 1 and option.protected_tokens == 4
+    assert option.retention_allocation_value_ms == 95 and option.retention_control_ms == 5

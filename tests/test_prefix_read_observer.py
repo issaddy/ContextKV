@@ -153,16 +153,16 @@ def test_value_does_not_protect_when_native_already_has_the_same_expected_reuse_
     asyncio.run(run())
 
 
-def test_partial_native_reuse_does_not_duplicate_exact_read_target_reward():
-    from profiling.retention_trace import exact_target_demand, reuse_pages
+def test_source_demand_uses_retained_body_pages_in_a_longer_consumer():
+    from profiling.retention_trace import reuse_pages
     first = {"prefix_input_ids": [1, 2, 3, 4], "evidence_token_ranges": [[0, 4]], "fixed_system_prefix_tokens": 0}
     second = {**first, "prefix_input_ids": [1, 2, 5, 6]}
-    future = dict(first)
+    future = {**first, "prefix_input_ids": [1, 2, 3, 4, 7, 8], "evidence_token_ranges": [[0, 6]]}
     receipt = {"actual_device_hit_tokens": 2, "actual_host_loaded_tokens": 0}
     partial = reuse_pages(second, future, receipt, page_size=2, scope="scope")
     assert partial["shared_evidence_page_ids"] and partial["actual_device_evidence_page_ids"]
-    assert exact_target_demand(first, future, page_size=2, scope="scope")
-    assert not exact_target_demand(second, future, page_size=2, scope="scope")
+    assert partial["demand_category"] == "partial_evidence"
+    assert reuse_pages(first, future, receipt, page_size=2, scope="scope")["demand_category"] == "full_retained_evidence"
 
 
 def test_ttl_arms_do_not_replace_independent_groups_or_publish_an_empty_model(tmp_path):

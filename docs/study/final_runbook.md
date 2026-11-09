@@ -189,7 +189,7 @@ B 从冻结 A 的真实观察采集动作分支；失败尝试中已完成步骤
 计数与总额同时匹配才得 1 分；
 公开 Loong test 保留官方 loong_reference_score/100，二者通过 metric_by_split 明确区分。
 
-C 使用 `paired_native_retention_v6`、`target_demand_rule=canonical_source_prefix_and_body_ranges_v2` 与 `control_cost_rule=owner_call_only_fixed_decision_once_v1`。训练行保存原始数据会话集合，train/dev 集合互斥，同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。相同完整来源需求重访的目标收益取原生工作发生变化时的服务端首 token 时间差，工作相同时取零。完整重访耗时单列，外部请求成本从整窗差额中扣除整次目标重访的耗时差后计算。新增 owner 的目标收益按完整来源需求去重，容量与驻留按共享页增量。单 owner 标签计量实际保留调用（ledger＋retain），inspect 与完整 callback 分别记录。完整集合的真实净效果由同轨 Native/value 对照和物理积分验收。
+C 使用 `paired_native_retention_v7`。训练行保存原始数据会话集合，train/dev 集合互斥，同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。首个覆盖保留前缀全部正文因果页的 READ 或 ANSWER 是目标消费者。目标页实际 GPU、Host 或重算分布变化时，取同一请求的服务端首 token 时间差；分布相同时取零。完整重访耗时单列，外部请求成本从整窗差额中扣除整次目标重访的耗时差后计算。新增 owner 收益按消费者和共享页去重，容量与驻留按共享页增量。单 owner 标签计量实际保留调用（ledger＋retain），inspect 与完整 callback 分别记录。完整集合的真实净效果由同轨 Native/value 对照和物理积分验收。
 
 C 的两次容量构造共用原有 TTL15/60/180、owner、页并集和需求去重目标。配置使用单一 `protection_budget_tokens`（联合入口为 8192），GPU/Host 的 Native 物理配额与 `lambda_gpu` / `lambda_host` 驻留价格保留原含义。
 E6 可在 `execution.prefix_retention.pricing_asset` 加载同一配对拟合产物。拟合记录完整前缀长度的实测范围，在线按实际 Native 状态和 TTL 选择匹配桶。该资产及其哈希进入冻结清单，`lambda_gpu` 和 `lambda_host` 在此配置中按额外 token·秒定价。
@@ -206,7 +206,7 @@ C 的配对重放使用同一请求序列、完整 DAG 和至少 180 秒的观�
 每臂的 `observation_window` 和物理/KV 积分覆盖相同长度，并持续采样到窗口结束，
 包括无重访时的空闲驻留。`revisit-outcomes.json` 按实际原文因果页需求与原生回执
 区分无重访、GPU 命中、Host 回载和重算；混合访问同时保留各类页数和事件数。
-对含规范原文的 ANSWER 也按实际提交的 token 路径统计重访，READ 与 ANSWER 分别计数。租约定价继续以精确 READ 重访为监督。
+READ 与含规范原文的 ANSWER 均按实际提交的 token 路径统计重访，分别计数。
 训练行中的 `observation_seconds` 是共同计费窗口，`ttl_seconds` / `horizon_seconds`
 是策略保护期限。
 候选前缀含完整来源正文页。
@@ -295,7 +295,7 @@ REDUCE 只读已观察材料。源 packet 的 `legal_actions` 保留，补充的
 完成记录的来源覆盖诊断采用注册前来源分母，合并既往与新增已读覆盖；GAP 新来源保留在实际 outcome，不修改注册分母。`whole_plan` 与 `observed_actions` 的资产分别声明实际特征，不交叉标记为动作模型。
 
 C 固定 DAG 回放解析原始输出文本，新的生成响应用于实际 token、耗时和费用；完整窗口
-预测用两臂窗口成本差验证，下一次 READ 的集合收益按事件及共享页去重。
+预测用两臂窗口成本差验证，首个后续消费者的集合收益按请求及共享页去重。
 
 
 ## 当前联合资产

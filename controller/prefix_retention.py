@@ -19,8 +19,8 @@ from engine_patches.contextkv_runtime import executed_prefix_hashes
 
 
 RETENTION_FEATURE_NAMES = ("access_state", "native_residency", "pressure_concurrency")
-TARGET_DEMAND_RULE = "canonical_source_prefix_and_body_ranges_v2"
-TARGET_COST_RULE = "native_work_conditioned_server_ttft_v1"
+TARGET_DEMAND_RULE = "retained_causal_body_pages_v3"
+TARGET_COST_RULE = "native_source_tier_conditioned_server_ttft_v2"
 MIN_RETENTION_GROUPS = 2
 RETENTION_CONTROL_RULE = "owner_call_only_fixed_decision_once_v1"
 
@@ -55,11 +55,15 @@ def balance_session_rows(rows, components):
     return [{**row, "sampling_weight": row.get("sampling_weight", 1.0)/totals[session_group(row, components)]}
             for row in rows]
 
+def body_page_offsets(boundary, ranges, page_size):
+    return frozenset(page for first, last in ranges if first < last
+        for page in range(first//page_size, min((last-1)//page_size+1, boundary//page_size)))
+
+
 def source_demand_event_key(prefix_input_ids, evidence_token_ranges, page_size, scope):
-    """The next READ demanding this known source-containing causal prefix."""
+    """Identity of the executed source-containing causal path."""
     path = executed_prefix_hashes(prefix_input_ids, page_size)
-    body = [page for end, page in path.items()
-            if any(end > first and end-page_size < last for first, last in evidence_token_ranges)]
+    body = body_page_offsets(len(prefix_input_ids), evidence_token_ranges, page_size)
     return json.dumps([scope, list(path.values()), evidence_token_ranges], separators=(",", ":")) if body else None
 
 
@@ -86,7 +90,7 @@ class PrefixForecast:
 
     @property
     def saved_ms(self):
-        """Next READ saving minus control and measured external-request penalty."""
+        """Next source consumer saving minus control and measured external-request penalty."""
         return (self.target_saved_ms-self.retention_control_ms
                 +min(0.0, self.expected_collateral_saved_ms))
 
@@ -150,7 +154,7 @@ def _allocate_retention_greedy(requests, *, protection_budget_tokens,
                               lambda_gpu, lambda_host, density, baseline_pages=()):
     """Choose positive marginal value, counting a shared causal page only once.
 
-    Value uses the next READ target saving, deduplicated against selected
+    Value uses the next source consumer saving, deduplicated against selected
     requests, minus this owner's control, measured external-request penalty and
     incremental residency prices.
     Single-prefix full-window residuals are not additive across protected sets.
@@ -192,7 +196,7 @@ def _allocate_retention_greedy(requests, *, protection_budget_tokens,
             host_integral = added_residency(request.page_ids, host_leases, forecast,
                                             forecast.extra_host_seconds_per_page, request.page_size)
             event = request.reuse_event_key or request.owner_id
-            # Credit each target READ once. Include the paired intervention's
+            # Credit each target consumer once. Include the paired intervention's
             # external-request penalty; positive residual benefits may overlap
             # another target and are not an additional reward.
             if request.consumer_savings:
@@ -318,7 +322,7 @@ class EmpiricalRetentionModel:
         if not rows:
             raise ValueError("retention fit requires paired observations")
         if any(row.get("target_demand_rule") != TARGET_DEMAND_RULE for row in (*rows, *reuse_rows)):
-            raise ValueError("retention fit requires exact complete READ demand labels")
+            raise ValueError("retention fit requires measured causal source-page demand labels")
         if any(row.get("control_cost_rule") != RETENTION_CONTROL_RULE for row in rows):
             raise ValueError("retention fit requires owner-call control labels separated from allocation cost")
         if any(row.get("target_cost_rule") != TARGET_COST_RULE for row in rows):
@@ -391,12 +395,12 @@ class EmpiricalRetentionModel:
         return self.forecasts[self._key(self.feature_bucket(features), cache_scope_hash, horizon_seconds)]
 
     def to_dict(self):
-        return {"kind": "paired_native_retention_v6", "feature_schema": self.feature_schema,
+        return {"kind": "paired_native_retention_v7", "feature_schema": self.feature_schema,
                 "target_demand_rule": TARGET_DEMAND_RULE,
                 "target_cost_rule": TARGET_COST_RULE,
                 "control_cost_rule": RETENTION_CONTROL_RULE,
                 "minimum_independent_groups_per_bucket": MIN_RETENTION_GROUPS,
-                "value_basis": "marginal exact source-demand READ saving minus control and paired external-request penalty; full protected-set net measured by set intervention",
+                "value_basis": "next READ or ANSWER acquisition of the retained causal source pages, minus control and paired external-request penalty",
                 "bin_convention": "left_closed_right_open; None is missing",
                 "independent_samples": self.independent_samples,
                 "sample_unit": "connected session groups; TTL arms and overlapping windows are repeated measures",
@@ -405,7 +409,7 @@ class EmpiricalRetentionModel:
 
     @classmethod
     def from_dict(cls, value):
-        if (value["kind"] != "paired_native_retention_v6"
+        if (value["kind"] != "paired_native_retention_v7"
                 or value.get("target_demand_rule") != TARGET_DEMAND_RULE
                 or value.get("target_cost_rule") != TARGET_COST_RULE
                 or value.get("control_cost_rule") != RETENTION_CONTROL_RULE):
@@ -695,7 +699,6 @@ class PrefixReadObserver:
                     protected_tokens=len(base_pages-shared)*page_size, keep=tuple(sorted(immediate)))
             current_prefix = candidate.input_ids[:current.ready_gpu_prefix_tokens] if current is not None else ()
             targets = {}
-            target_kinds = {target.step_id: target.kind for target, _ in actions}
             unmet = {need.need_id: need.priority for need in demand.needs}
             # Consumer arrival is just the work before that consumer plus queue
             # and observed progress. It is never the task's complete-response P95.
@@ -725,7 +728,7 @@ class PrefixReadObserver:
                 if priority and (target.step_id not in targets or work(compiled) < work(targets[target.step_id][0])):
                     targets[target.step_id] = compiled, priority, predicted_arrival
 
-            paths, demands = {}, {}
+            paths, demands, consumer_paths = {}, {}, {}
             own_gpu = referenced_gpu_pages(tuple(active[key] for key in own))
             for target, (compiled, priority, arrival_ms) in targets.items():
                 quote = quotes[compiled.candidate_id]
@@ -743,6 +746,8 @@ class PrefixReadObserver:
                 risk = min(pressure, len(evictable_pages)*page_size)
                 if risk:
                     demands[target] = (risk, priority, evictable_pages, arrival_ms)
+                    consumer_paths[target] = frozenset(path), body_page_offsets(len(path)*page_size,
+                        compiled.source_body_token_ranges or (), page_size)
                     paths.update((owner, (step, end, frozenset(pages))) for owner, step, end, pages in matches)
             # Include old leases even when their original path is not the longest
             # observed match. Their remaining TTL competes with renew/new choices.
@@ -754,24 +759,13 @@ class PrefixReadObserver:
                     paths[owner] = old.step_id, len(old.prefix_input_ids), pages
 
             requests, actions_by_option = [], {}
-            # A paired label prices one full source consumer, never an owner's
-            # entire observation window. Uncalibrated geometry stays an explicit
-            # token-risk rule and cannot reduce B's predicted milliseconds.
             curves = {}
-            for target in demands:
-                # The current paired service labels describe READ consumers.
-                # ANSWER source demand is still visible to the unpriced rule
-                # and can share a lease justified by a calibrated READ.
-                if target_kinds[target] != "READ":
+            for owner, (step, boundary, _) in paths.items():
+                if self.model is None or step not in sources or owner in immediate:
                     continue
-                compiled = targets[target][0]
-                full = compiled.source_prefix_tokens//page_size*page_size
-                inspection = next((sources[step].metrics.get("evidence_prefix", {})
-                    for step, end, _ in paths.values() if end == full and step in sources
-                    and sources[step].metrics.get("evidence_prefix", {}).get("boundary_tokens") == full
-                    and sources[step].input_ids[:full] == compiled.input_ids[:full]), {})
-                if self.model is not None and inspection.get("demand_observation"):
-                    curves[target] = tuple(forecast for horizon in horizons
+                inspection = sources[step].metrics.get("evidence_prefix", {})
+                if inspection.get("demand_observation") and inspection["boundary_tokens"] == boundary:
+                    curves[owner] = tuple(forecast for horizon in horizons
                         if (forecast := self._demand_forecast(inspection, batch, horizon)) is not None)
             priced = any(curves.values())
             if not priced and unpriced_policy == "native":
@@ -782,6 +776,18 @@ class PrefixReadObserver:
             for owner, (step, boundary, pages) in paths.items():
                 if owner in immediate:
                     continue
+                curve = curves.get(owner, ())
+                if priced and not curve:
+                    continue
+                if priced:
+                    source_body = body_page_offsets(boundary,
+                        sources[step].metrics["source_view"]["body_token_ranges"], page_size)
+                    # The paired effect prices the first consumer of the owner.
+                    # Later requests can already hit pages loaded by that consumer.
+                    first_consumer = next((target for target, (path, body) in consumer_paths.items()
+                        if pages <= path and source_body and source_body <= body), None)
+                    if first_consumer is None:
+                        continue
                 leases = [(horizon, "renew" if owner in own else "new") for horizon in horizons]
                 if owner in own and remaining(owner) > 0:
                     leases.append((remaining(owner), "keep"))
@@ -795,18 +801,13 @@ class PrefixReadObserver:
                             continue
                         forecast = None
                         if priced:
-                            curve = curves.get(target)
-                            if not curve:
+                            if target != first_consumer:
                                 continue
                             forecast = (self._remaining_forecast(curve, horizon) if action == "keep" else
                                 next((point for point in curve if point.horizon_seconds == horizon), None))
                             if forecast is None:
                                 continue
-                            # Scale only the target service saving by the fraction
-                            # of its full causal source path at risk. This excludes
-                            # savings already present in the current Native quote.
-                            full_tokens = targets[target][0].source_prefix_tokens//page_size*page_size
-                            per_page = max(0, forecast.target_saved_ms)*min(risk, full_tokens)/max(1, full_tokens)/len(evictable_pages)
+                            per_page = max(0, forecast.target_saved_ms)*min(risk, boundary)/boundary/len(evictable_pages)
                             forecasts.append(forecast)
                         else:
                             per_page = risk*priority/len(evictable_pages)
