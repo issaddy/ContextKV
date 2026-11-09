@@ -16,13 +16,14 @@ from pathlib import Path
 import time
 
 from controller.context_schema import ReadTask, ReadingOutcome, StepRecord
+from controller.context_budget import COMPLETION_RESERVE_SCOPE, CompletionReserve
 from controller.action_proposals import (ALTERNATE_ANSWERS, BOUNDED_CONTINUATION, bind_read_parents,
     FINITE_ACTION_DOMAIN, equivalent_raw_answers, validate_action_counts)
 from controller.plan_policy import (OBSERVED_FEATURE_SCHEMA, CompleteCost, NATIVE_COST_FEATURE_NAMES,
                                     NATIVE_COST_SCHEMA, PlanCandidate, PlanStep, _completed_steps,
                                     plan_cost_features, plan_features)
 from controller.schema import CacheQuoteBatch, PromptCandidate, SessionSnapshot
-from controller.serialization import decode
+from controller.serialization import decode, to_jsonable
 from controller.plan_gain_protocol import validate_input_protocol, validate_pre_action_input
 from training.train_plan_gain import (COST_FIELDS, PlanGainModel, _fit_features, _fit_selection_contract, _ridge,
     actual_history, fit_native_cost_heads, working_state_key)
@@ -135,7 +136,22 @@ def _completion(run, *, observed):
     return None, "attempt_not_terminal"
 
 
-def completion_record(before, run):
+def read_count_profile(records, *, scope):
+    """Mean new READ count in unique delivered branches, from execution receipts."""
+    groups, seen = defaultdict(lambda: defaultdict(list)), set()
+    for record in records:
+        if (record["observed_state_binding"] is None or record["completion"] != 1
+                or record["record_id"] in seen):
+            continue
+        seen.add(record["record_id"])
+        infer = "with_infer" if record["features"]["infer_needs"] > 0 else "without_infer"
+        groups[record["semantic_kind"]][infer].append(record["actual_run"]["new_action_counts"]["READ"])
+    return {"scope": scope, "source": "actual_run.new_action_counts.READ",
+        "groups": {kind: {infer: {"mean": sum(counts)/len(counts), "samples": len(counts)}
+            for infer, counts in sorted(buckets.items())} for kind, buckets in sorted(groups.items())}}
+
+
+def completion_record(before, run, *, template=None, reconstructed_reserve=None):
     planned = decode(PlanCandidate, before["plan_candidate"])
     state = decode(ReadingOutcome, before["working_state"])
     if run.get("compiled_route_steps"):
@@ -152,7 +168,8 @@ def completion_record(before, run):
         planned = replace(planned, route_steps=route)
     snapshot = decode(SessionSnapshot, before["snapshot"])
     key = working_state_key(state, snapshot)
-    protocol = validate_input_protocol(before.get("input_protocol"))
+    protocol = validate_input_protocol(before.get("input_protocol"),
+        reader_fingerprint=template.fingerprint if template is not None else None)
     if run.get("input_protocol") != protocol:
         raise ValueError("completion branch changed its actual input protocol")
     if (before["frozen_state_key"] != key or run["frozen_state_key"] != key or run["plan_id"] != planned.plan_id
@@ -250,7 +267,7 @@ def completion_record(before, run):
     paid = None if observed is None else decode(CompleteCost, observed["paid_cost"])
     support_mode = ((observed or {}).get("evidence_selection_contract") or {}).get("mode") == "support"
     features = plan_features(planned, state, paid_cost=paid, support_mode=support_mode)
-    cost_features = None
+    cost_features, rebuilt_reserve = None, None
     if observed is not None and (native := run.get("pre_action_quote")) is not None:
         batch = decode(CacheQuoteBatch, native["batch"])
         first = (None if native["candidate_id"] is None else
@@ -263,7 +280,7 @@ def completion_record(before, run):
         if candidate is not None:
             features = plan_features(planned, state, output_budgets={task.step_id: candidate.output_budget},
                                      paid_cost=paid, support_mode=support_mode)
-        from controller.action_policy import route_completion_reserve
+        from controller.action_policy import route_completion_reserve, route_read_choices
         cost_plan = planned
         if "registered_context_plan_id" not in run:
             from training.terminal_observations import restore_read_catalog
@@ -273,7 +290,25 @@ def completion_record(before, run):
             # action, its quality inputs, or inventing future Native quotes.
             restored = restore_read_catalog(replace(state, plan=planned.context_plan), state.plan)
             cost_plan = replace(planned, context_plan=restored.plan)
-        reserve, future_quotes = route_completion_reserve(cost_plan, state, task, candidate, batch)
+        future_quotes = tuple(quote for _, _, quote in route_read_choices(cost_plan, state, task, batch))
+        recorded_reserve = run.get("pre_action_completion_reserve")
+        if recorded_reserve is not None:
+            if run["completion_reserve_scope"] != COMPLETION_RESERVE_SCOPE:
+                raise ValueError("recorded completion reserve uses a different cost feature scope")
+            reserve = decode(CompletionReserve, recorded_reserve)
+        elif template is not None:
+            reserve, _ = route_completion_reserve(cost_plan, state, task, candidate, batch,
+                                                  template=template, snapshot=snapshot)
+            rebuilt_reserve = {"scope": COMPLETION_RESERVE_SCOPE, "reserve": to_jsonable(reserve)}
+        elif reconstructed_reserve is not None:
+            if reconstructed_reserve["scope"] != COMPLETION_RESERVE_SCOPE:
+                raise ValueError("reconstructed completion reserve requires the current template refresh")
+            reserve = decode(CompletionReserve, reconstructed_reserve["reserve"])
+            rebuilt_reserve = reconstructed_reserve
+        else:
+            raise ValueError("missing pre-action completion reserve; refresh-features with --template-config")
+        # The remaining catalog is a pre-action cost covariate. Its quotes do
+        # not change the bounded execution whose actual cost supplies the label.
         cost_features = plan_cost_features(features, batch, first, reserve,
             gap_query_chars=len(before["gap_request"]["query"]) if gap else 0, future_quotes=future_quotes)
     return {"schema_version": 2, "source": "actual_plan_completion", "record_id": digest([
@@ -295,6 +330,9 @@ def completion_record(before, run):
         "utility_rule": RULE, "read_source_char_fraction": covered_chars/required_chars if required_chars else None,
         "read_original_characters": covered_chars, "required_original_characters": required_chars,
         "features": features, "cost_features": cost_features,
+        **({"reconstructed_completion_reserve": rebuilt_reserve} if rebuilt_reserve is not None else {}),
+        "completion_reserve_scope": COMPLETION_RESERVE_SCOPE if cost_features is not None else None,
+        "cost_target_scope": BOUNDED_CONTINUATION if observed is not None else "whole_registered_plan",
         "observed_feature_schema": OBSERVED_FEATURE_SCHEMA if observed is not None else None,
         "pre_registration": before, "actual_run": run}
 
@@ -361,6 +399,7 @@ def effective_pair(base, candidate):
         "completion_direct": base["completion"], "completion_counterfactual": candidate["completion"],
         "direct_features": base["features"], "direct": base, "counterfactual": candidate}
     if observed:
+        result["cost_target_scope"] = BOUNDED_CONTINUATION
         result["cost_targets"] = _cost_targets(base, candidate)
         result["incremental_complete_cost"] = result["cost_targets"]["incremental_complete_cost"]
     return result
@@ -407,6 +446,9 @@ def finalize(collection, output):
     write_rows(target/"effective-gains.jsonl", effective)
     manifest = {"source_collection": str(source.resolve()), "utility_rule": RULE,
         "observed_feature_schema": OBSERVED_FEATURE_SCHEMA,
+        "completion_reserve_scope": COMPLETION_RESERVE_SCOPE,
+        "cost_target_scope": BOUNDED_CONTINUATION if any("cost_targets" in row for row in effective) else None,
+        "read_count_profile": read_count_profile(completed, scope="unique_delivered_observed_branches"),
         "completion_records": len(completed), "effective_gain_records": len(effective),
         "effective_action_records": sum(row["semantic_kind"] != "direct_answer" for row in effective),
         "effective_representation_records": dict(Counter(row["answer_representation"] for row in effective
@@ -423,7 +465,7 @@ def finalize(collection, output):
     return manifest
 
 
-def refresh_features(source, output, *, registration_root=None, recorded_root=None):
+def refresh_features(source, output, *, registration_root=None, recorded_root=None, template=None):
     """Reproject recorded branches without changing actions, labels or costs.
 
     Both embedded pre-registrations and executions are revalidated. This is a
@@ -446,7 +488,7 @@ def refresh_features(source, output, *, registration_root=None, recorded_root=No
                 if not path.is_relative_to(Path(registration_root).resolve()):
                     raise ValueError("registration path escapes the supplied archive root")
                 before = json.loads(path.read_text())
-                branch = completion_record(before, run)
+                branch = completion_record(before, run, template=template)
                 branch["source_files"] = {"registration": str(path),
                     "registration_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                     "run": str(Path(source).resolve()), "run_record_id": row["record_id"], "run_arm": old}
@@ -456,7 +498,8 @@ def refresh_features(source, output, *, registration_root=None, recorded_root=No
                 "utility_direct": row["quality_direct"], "utility_counterfactual": row["quality_counterfactual"],
                 **{field: row.get(field) for field in ("cost_targets", "incremental_complete_cost")}}
         elif row.get("source") == "actual_completion_weighted_counterfactual":
-            branches = {name: completion_record(row[name]["pre_registration"], row[name]["actual_run"])
+            branches = {name: completion_record(row[name]["pre_registration"], row[name]["actual_run"],
+                        template=template, reconstructed_reserve=row[name].get("reconstructed_completion_reserve"))
                         for name in ("direct", "counterfactual")}
             for name, branch in branches.items():
                 if "source_files" in row[name]:
@@ -490,6 +533,11 @@ def refresh_features(source, output, *, registration_root=None, recorded_root=No
         "source_sha256": hashlib.sha256(Path(source).read_bytes()).hexdigest(),
         "output": str(target.resolve()), "records": len(refreshed),
         "observed_feature_schema": OBSERVED_FEATURE_SCHEMA,
+        "completion_reserve_scope": COMPLETION_RESERVE_SCOPE,
+        "cost_target_scope": BOUNDED_CONTINUATION if any("cost_targets" in row for row in refreshed) else None,
+        "read_count_profile": read_count_profile(
+            (row[side] for row in refreshed for side in ("direct", "counterfactual")),
+            scope="unique_delivered_observed_branches"),
         "scope": "unchanged registered actions and actual branch inputs; no new model calls"}
     target.with_suffix(target.suffix+".manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
     return manifest
@@ -619,10 +667,11 @@ def fit_effective(training, *, ridge=1.0, path=None):
     domain, training_domains = fitted_action_domain(training)
     samples, direct_seen, cost_kinds, cache_scopes = [], set(), set(), set()
     seen_costs, paid_cost_outcomes = set(), Counter()
-    cost_record_ids = []
+    cost_record_ids, cost_branches = [], []
     resident_digests = set()
     for row in training:
-        branches = {name: completion_record(row[name]["pre_registration"], row[name]["actual_run"])
+        branches = {name: completion_record(row[name]["pre_registration"], row[name]["actual_run"],
+                    reconstructed_reserve=row[name].get("reconstructed_completion_reserve"))
                     for name in ("direct", "counterfactual")}
         expected = effective_pair(branches["direct"], branches["counterfactual"])
         fields = ("state_key", "conversation_id", "semantic_kind", "reader_checkpoint", "reader_profile_id", "split",
@@ -653,6 +702,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
             samples.append((branch["cost_features"], costs[target]))
             cost_kinds.add(branch["semantic_kind"])
             cost_record_ids.append(branch["record_id"])
+            cost_branches.append(branch)
             fixture = branch["cache_fixture_shape"]
             cache_scopes.add(fixture["mode"] if fixture is not None else branch["actual_run"]["counterfactual_cache_start"])
     started = time.perf_counter()
@@ -676,6 +726,9 @@ def fit_effective(training, *, ridge=1.0, path=None):
     if samples:
         cost_models, cost_mse, cost_scale = fit_native_cost_heads(samples, ridge=ridge)
         cost_provenance = {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA, "continuation_protocol": BOUNDED_CONTINUATION,
+            "completion_reserve_scope": COMPLETION_RESERVE_SCOPE,
+            "cost_target_scope": BOUNDED_CONTINUATION,
+            "read_count_profile": read_count_profile(cost_branches, scope="unique_delivered_cost_training_branches"),
             "source": "actual_observed_delivered_branch_and_paired_direct_costs",
             "prefix_control_scope": "native_excludes_prefix_control",
             "feature_schema": NATIVE_COST_SCHEMA, "feature_names": NATIVE_COST_FEATURE_NAMES,
@@ -724,7 +777,8 @@ def calibrate_completion_latency(model, development, *, quantile=.9):
             if raw["record_id"] in seen:
                 continue
             seen.add(raw["record_id"])
-            branch = completion_record(raw["pre_registration"], raw["actual_run"])
+            branch = completion_record(raw["pre_registration"], raw["actual_run"],
+                reconstructed_reserve=raw.get("reconstructed_completion_reserve"))
             kind = branch["semantic_kind"]
             actual = branch["actual_run"]["actual_branch_execution_cost"]["complete_ms"]
             if (branch["completion"] != 1 or branch["cost_features"] is None or not _measured(actual)
@@ -842,6 +896,7 @@ def main(argv=None):
     refresh.add_argument("--output", required=True)
     refresh.add_argument("--registration-root", help="Local extracted root containing original before.json files")
     refresh.add_argument("--recorded-root", help="Original machine root used in registered_plan_path")
+    refresh.add_argument("--template-config", help="Run config for CPU-only reconstruction with the original reader tokenizer/template")
     fit = commands.add_parser("fit")
     fit.add_argument("--train", required=True)
     fit.add_argument("--dev")
@@ -854,8 +909,15 @@ def main(argv=None):
         print(json.dumps(finalize(args.collection, args.output), ensure_ascii=False))
         return
     if args.command == "refresh-features":
+        template = None
+        if args.template_config:
+            from controller.config import create_model_template, load_config
+            from controller.templates import ByteTemplate
+            config = load_config(args.template_config)
+            template = (ByteTemplate(namespace_hash=config.model.namespace_hash) if config.engine.kind == "mock"
+                        else create_model_template(config.model))
         print(json.dumps(refresh_features(args.input, args.output,
-            registration_root=args.registration_root, recorded_root=args.recorded_root), ensure_ascii=False))
+            registration_root=args.registration_root, recorded_root=args.recorded_root, template=template), ensure_ascii=False))
         return
     training = rows(args.train)
     if args.dev:

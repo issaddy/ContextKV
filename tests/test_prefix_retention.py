@@ -229,7 +229,7 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     assert (await after_gap(replace(candidate, source_body_token_ranges=((2, 4),)))).retain == ()
 
     owner = SimpleNamespace(owner_id=lease.owner_id, policy="joint_demand", prefix_input_ids=ids[:2],
-        ttl_seconds=15, lease_started_ns=__import__("time").monotonic_ns())
+        step_id="old", ttl_seconds=15, lease_started_ns=__import__("time").monotonic_ns())
     observer.store = SimpleNamespace(prefix_owners=lambda *args, **kwargs: (owner,))
     read = PlanCandidate("next", "read_once", plan, (PlanStep(later, (candidate,)),), "reader")
     observer.runtime.status.return_value = {"prefixes": ({**existing, "owner_id": owner.owner_id},)}
@@ -238,6 +238,24 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     assert options[candidate.candidate_id].release == ()
     assert options[candidate.candidate_id].protected_tokens == 2
     assert options["gap"].release == (owner.owner_id,)
+    # The selected ANSWER reuses only the first body page of a longer owner.
+    # Keep that owner through execution instead of unpinning the quoted page.
+    owner.prefix_input_ids = original
+    full_pages = [lease.cache_scope_hash+":"+value for value in executed_prefix_hashes(original, 2).values()]
+    observer.runtime.status.return_value = {"prefixes": ({**existing, "owner_id": owner.owner_id,
+        "gpu_page_ids": full_pages, "referenced_page_ids": full_pages},)}
+    answer = ReadTask("answer", "ANSWER", ("n",))
+    answer_plan = PlanCandidate("answer", "direct_answer", plan, (PlanStep(answer, (candidate,)),), "reader")
+    final = (await observer.demand_options((answer_plan,), state, "session", batch,
+                                           page_size=2))[candidate.candidate_id]
+    assert final.keep == (owner.owner_id,) and final.release == () and final.retain == ()
+    assert final.protected_tokens == 4
+    # A common non-source header alone does not prolong the original-body lease.
+    header = replace(candidate, source_body_token_ranges=((2, 4),))
+    answer_plan = replace(answer_plan, steps=(PlanStep(answer, (header,)),))
+    final = (await observer.demand_options((answer_plan,), state, "session", batch,
+                                           page_size=2))[candidate.candidate_id]
+    assert final.keep == () and final.release == (owner.owner_id,)
 
     long_ids = (1, 2, 3, 4, 7)
     long_candidate = replace(candidate, candidate_id="tail", input_ids=long_ids, input_hash=token_hash(long_ids))
@@ -251,6 +269,55 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
         replace(batch, quotes=(quote, long_quote)), page_size=2))["gap"]
     assert [lease.boundary_tokens for lease in joint.retain] == [4]
     assert joint.protected_tokens == 4 and joint.uncovered_risk_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_future_hybrid_original_body_remains_a_consumer_after_facts_complete():
+    from unittest.mock import AsyncMock
+    from controller.context_schema import (AnswerPlan, AnswerPoint, ContextPlan, EvidenceClaim,
+        EvidenceSet, EvidenceUnit, Need, ReadResult, ReadTask, ReadingOutcome, SourceSpan, StepRecord, TaskState)
+    from controller.demand import DemandState
+    from controller.evidence import make_evidence
+    from controller.plan_policy import PlanCandidate, PlanStep
+    from controller.prefix_retention import PrefixReadObserver
+    from controller.schema import CacheQuote, CacheQuoteBatch, CompletionReceipt, PromptCandidate
+    from controller.templates import ByteTemplate
+
+    block = make_evidence("ABCD", "source")
+    span = SourceSpan("span", block.key, 0, 4)
+    unit = EvidenceUnit("u", (span,), block.text, need_ids=("n",))
+    fact = EvidenceClaim("fact", "n", "extract", "ABCD", source_spans=(span,))
+    source = ReadTask("source", "READ", ("n",), input_unit_ids=("u",))
+    reduce = ReadTask("reduce", "REDUCE", ("n",), input_claim_ids=("fact",), operation="summarize")
+    answer = ReadTask("answer", "ANSWER", ("n",))
+    plan = ContextPlan("plan", TaskState("task", "question", needs=(Need("n"),)),
+        EvidenceSet("evidence", (unit,)), steps=(source, reduce),
+        answer_plan=AnswerPlan((AnswerPoint("n", ("fact",)),)))
+    ids = (1, 2, 3, 4)
+    receipt = CompletionReceipt("source", "source", "epoch", 1, "restart", token_hash(ids), "stop", True)
+    record = StepRecord("attempt", "source", source, input_ids=ids, receipt=receipt, metrics={
+        "cache_config_hash": "cache", "source_view": {"body_token_ranges": ((0, 4),), "source_prefix_tokens": 4}})
+    state = ReadingOutcome(plan, results=(ReadResult("source", (fact,), ("u",), ("n",)),),
+                           steps=(record,), claims=(fact,))
+    assert DemandState.from_outcome(state).needs == ()
+    candidate = PromptCandidate("hybrid", "REBUILD", 0, (), ids, token_hash(ids), frozenset(), frozenset(),
+        output_budget=2, representation="hybrid", source_body_token_ranges=((0, 4),), source_prefix_tokens=4)
+    quote = CacheQuote("hybrid", candidate.input_hash, 4, 4, ready_gpu_prefix_tokens=4,
+                       recoverable_prefix_tokens=4, evictable_gpu_prefix_tokens=4)
+    batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 0, 0, (quote,),
+        fingerprint=ByteTemplate().fingerprint, native_running_budget_tokens=4)
+    proposal = PlanCandidate("reduce", "reduce_once", plan, (PlanStep(reduce),), "reader",
+        route_steps=(PlanStep(answer, (candidate,)),))
+    observer = PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
+        {"mode": "demand", "unpriced_policy": "risk_tokens", "ttl_seconds": 15, "protection_budget_tokens": 4})
+    observer.runtime = SimpleNamespace(status=AsyncMock(return_value={"prefixes": ()}))
+    option = (await observer.demand_options((proposal,), state, "session", batch, page_size=2))["reduce"]
+    lease, = option.retain
+    assert lease.target_step_id == "answer" and lease.boundary_tokens == 4
+    assert option.retention_allocation_value_ms is None
+    facts = replace(candidate, representation="facts", source_body_token_ranges=(), source_prefix_tokens=0)
+    proposal = replace(proposal, route_steps=(PlanStep(answer, (facts,)),))
+    assert (await observer.demand_options((proposal,), state, "session", batch, page_size=2))["reduce"].retain == ()
 
 
 def test_consumer_page_savings_are_unioned_across_owners_and_residence_is_nonnegative():
@@ -410,3 +477,14 @@ async def test_demand_priced_multiowner_counts_consumers_not_owner_window_sums(m
     assert sum(choice.expected_saved_ms for choice in chosen) == 190
     assert option.retention_allocation_value_ms == 190
     assert option.retention_control_ms == 10  # Two owners; not one call per consumer.
+    # A real ANSWER source consumer shares the first path. Existing READ labels
+    # neither price that ANSWER nor disappear when its input joins the route.
+    answer = ReadTask("answer", "ANSWER", ("n",))
+    answer_input = replace(candidates[0], candidate_id="answer", representation="hybrid", generation_kind="ANSWER")
+    answer_quote = replace(quotes[0], candidate_id="answer")
+    gap = replace(gap, route_steps=(*gap.route_steps, PlanStep(answer, (answer_input,))))
+    chosen.clear()
+    option = (await observer.demand_options((gap,), state, "session",
+        replace(batch, quotes=(*batch.quotes, answer_quote)), page_size=2))["gap"]
+    assert len(option.retain) == 2 and option.protected_tokens == 6
+    assert option.retention_allocation_value_ms == 190 and option.retention_control_ms == 10

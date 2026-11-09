@@ -621,6 +621,7 @@ async def prepare_pair_cache(engine, compiler, mode, input_ids, source_ids, *, i
 async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, binding, preparation,
                          resources, cache_start, generation_budget, observed=None,
                          gap_request=None, gap_provider=None, cache_source=None):
+    from controller.context_budget import COMPLETION_RESERVE_SCOPE
     from controller.execution import ReadingBudgetExceeded
     from controller.engine_client import EngineError
     case_dir = Path(case_dir)
@@ -771,6 +772,8 @@ async def execute_branch(service, plan, frozen, snapshot, row, *, case_dir, bind
             "continuation_gap_limits": continuation_request.limits if continuation_request is not None else None,
             "pre_action_quote": to_jsonable(runtime.pre_action_quote),
             "pre_action_input": to_jsonable(runtime.pre_action_input),
+            "pre_action_completion_reserve": to_jsonable(runtime.pre_action_completion_reserve),
+            "completion_reserve_scope": COMPLETION_RESERVE_SCOPE if runtime.pre_action_completion_reserve is not None else None,
             "compiled_route_steps": to_jsonable(runtime.compiled_route_steps),
             "compiled_actions": to_jsonable(runtime.decisions),
             "new_step_ids": tuple(step.step_id for step in steps), "new_action_counts": action_counts,

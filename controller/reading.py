@@ -610,7 +610,7 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
                     input_claims=(), output_tokens_per_fact=64, reading_mode="typed_reduce",
                     separate_needs=False, numeric_identity="names", read_layout="task_first",
                     read_packing="mixed", answer_system_prompt=None, _step_prefix="",
-                    preferred_groups=()):
+                    preferred_groups=(), _read_task=None):
     template = template or ByteTemplate()
     if read_packing == "source_windows":
         from .source_windows import source_window_spans
@@ -675,6 +675,14 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
                             for need in state.needs),
                          requires_reduction=any(need.operation in {
                             "enumerate", "compare", "count", "sum", "group", "infer"} for need in state.needs))
+    if _read_task is not None:
+        # Regroup the current extraction contract. Re-deriving numeric scopes
+        # from only the unread material can change the prompt and fact budget.
+        output_budget = _read_task.output_budget
+        maximum = min(_read_task.input_budget, budget.read_input_tokens, budget.window_tokens-output_budget)
+        prototype = replace(_read_task, step_id=_step_prefix+"READ", input_unit_ids=(), output_schema={},
+            input_budget=maximum, retained_conclusion_tokens=tuple(
+                (need, budget.window_tokens) for need in _read_task.need_ids))
     source_units = {unit.unit_id: unit for unit in evidence_set.selected_units}
     dependency_ids = {dependency for unit in source_units.values() for dependency in unit.dependencies}
     packs, pack, assigned = [], [], set()
@@ -840,7 +848,8 @@ def regroup_pending_reads(outcome, preferred_group, template, snapshot, *, outpu
                 output_tokens_per_fact=output_tokens_per_fact, reading_mode=plan.reading_mode,
                 separate_needs=False, numeric_identity=plan.numeric_identity, read_layout=plan.read_layout,
                 read_packing=plan.read_packing, answer_system_prompt=plan.answer_system_prompt,
-                _step_prefix=f"policy:regroup:{identity}:", preferred_groups=(preferred_group,))
+                _step_prefix=f"policy:regroup:{identity}:", preferred_groups=(preferred_group,),
+                _read_task=prototype)
         except ValueError as error:
             # A different package count can exhaust the declared step budget;
             # source/schema/claim errors are implementation errors, not misses.
@@ -872,7 +881,8 @@ def regroup_pending_reads(outcome, preferred_group, template, snapshot, *, outpu
             steps.append(task)
         if sum(task.step_id not in completed for task in steps)+len(outcome.steps)+1 > plan.budget.max_steps:
             continue
-        candidate = replace(plan, plan_id=plan.plan_id+":regroup:"+identity, steps=tuple(steps))
+        candidate = replace(plan, plan_id=plan.plan_id+":regroup:"+identity, steps=tuple(steps),
+                            answer_allocation=None)
         return bind_answer_window(candidate, template, snapshot, preserve_step_ids=tuple(completed))
     return None
 
@@ -922,14 +932,14 @@ def numeric_selection_step_ids(plan):
     return selectors
 
 
-def numeric_selection_tasks(plan, results, claims=None):
-    """Select all compatible numeric views in one bounded model step."""
+def numeric_selection_tasks(plan, results, claims=None, *, ready_only=True):
+    """Describe numeric selection from actual facts; execution requires ready inputs."""
     read_ids, scopes = _numeric_read_views(plan)
     if not scopes:
         return
     completed = {result.step_id for result in results}
     completed.update(result.reduction.step_id for result in results if result.reduction is not None)
-    if not set(read_ids) <= completed:
+    if ready_only and not set(read_ids) <= completed:
         return
     unresolved = {gap.need_id for gap in unresolved_needs(results)}
     extracted = tuple(claim for result in results if result.step_id in read_ids
@@ -940,7 +950,7 @@ def numeric_selection_tasks(plan, results, claims=None):
     output_budget = plan.budget.read_output_tokens
     for scope in scopes:
         step_id = _selection_id(read_ids, scope)
-        if step_id in completed or unresolved.intersection(scope.need_ids):
+        if step_id in completed or (ready_only and unresolved.intersection(scope.need_ids)):
             continue
         inputs = tuple(claim for claim in extracted if any(claim.serves(need_id) for need_id in scope.need_ids))
         basis = tuple(claim.claim_id for claim in inputs)

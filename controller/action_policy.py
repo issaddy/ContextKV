@@ -10,7 +10,8 @@ from .plan_policy import (NATIVE_COST_SCHEMA, OBSERVED_FEATURE_SCHEMA, OBSERVED_
 from .reading import step_generation_kind
 from .action_proposals import ALTERNATE_ANSWERS, BOUNDED_CONTINUATION
 from .evidence_planner import _passages
-from .context_budget import answer_evidence_gaps, completion_reserve, direct_answer_reason
+from .context_budget import (COMPLETION_RESERVE_SCOPE, answer_evidence_gaps, completion_reserve,
+                             direct_answer_reason)
 
 
 def regression_cost(values):
@@ -41,22 +42,13 @@ def observed_quality_gain(model, kind, representation, features):
     return 0.0 if representation in {"facts", "reduced"} else None
 
 
-def route_completion_reserve(plan, state, task, candidate, batch):
-    """Account the whole remaining organization, with exact known READ inputs.
-
-    Future facts are not invented: uncompiled reductions and the final answer
-    retain the existing reservation. Quotes describe the current native state,
-    not guaranteed hits at a later execution.
-    """
-    reserve = completion_reserve(plan.context_plan, state.results, task, candidate,
-                                 read_all=task is not None and task.kind == "READ")
+def route_read_choices(plan, state, task, batch):
+    """Bind each known future READ to its cheapest current native quote."""
     if task is None or task.kind != "READ" or not plan.route_steps:
-        return reserve, ()
+        return ()
     quotes = {row.candidate_id: row for row in batch.quotes}
-    units = {unit.unit_id: unit for unit in plan.context_plan.selected_set.selected_units}
     done = {result.step_id for result in state.results} | {task.step_id}
-    added_input = added_output = 0
-    future_quotes = []
+    selected = []
     for step in plan.route_steps:
         if step.task.kind != "READ" or step.task.step_id in done:
             continue
@@ -68,16 +60,28 @@ def route_completion_reserve(plan, state, task, candidate, batch):
             sum(quoted_native_work(pair[1])), len(pair[0].input_ids), pair[0].candidate_id))
         if quote.input_hash != compiled.input_hash or quote.input_len != len(compiled.input_ids):
             raise ValueError("remaining READ quote does not bind its compiled input")
-        body = sum({units[key].text: units[key].body_tokens for key in step.task.input_unit_ids}.values())
-        added_input += len(compiled.input_ids)-body
-        added_output += compiled.output_budget-step.task.output_budget
-        future_quotes.append(quote)
-    return replace(reserve, future_input_tokens=reserve.future_input_tokens+added_input,
-                   future_output_tokens=reserve.future_output_tokens+added_output), tuple(future_quotes)
+        selected.append((step.task, compiled, quote))
+    return tuple(selected)
+
+
+def route_completion_reserve(plan, state, task, candidate, batch, *, template=None, snapshot=None):
+    """Account the whole remaining organization, with exact known READ inputs.
+
+    Known facts use the execution compiler; future facts use their allocated
+    output space. Quotes describe the current native state, not guaranteed
+    hits at a later execution.
+    """
+    reads = route_read_choices(plan, state, task, batch)
+    reserve = completion_reserve(plan.context_plan, state.results, task, candidate,
+        read_all=task is not None and task.kind == "READ", template=template,
+        snapshot=snapshot, claims=state.claims,
+        read_inputs={future.step_id: compiled for future, compiled, _ in reads})
+    return reserve, tuple(quote for _, _, quote in reads)
 
 
 def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, read_control=None,
-                           gap_query_chars=0, joint_options=None, timing_context=None):
+                           gap_query_chars=0, joint_options=None, timing_context=None,
+                           template=None, snapshot=None):
     """Price one action plus ANSWER; sunk costs constrain the budget, not its marginal value."""
     plans = tuple(plans)
     if len(plans) > policy.limits.max_plan_candidates:
@@ -94,6 +98,8 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
             raise ValueError("observed action asset requires the current pre-action budget feature schema")
     quotes = {quote.candidate_id: quote for quote in native.quotes.quotes}
     native_cost = model is not None and model.cost_provenance.get("feature_schema") == NATIVE_COST_SCHEMA
+    if native_cost and model.cost_provenance.get("completion_reserve_scope") != COMPLETION_RESERVE_SCOPE:
+        raise ValueError("native cost asset requires feature refresh with the reader tokenizer and refit")
     joint = joint_options is not None
     time_limit = state.plan.budget.max_complete_ms
     unmet = answer_evidence_gaps(state) if joint else {}
@@ -175,7 +181,8 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                     peaks.extend(option.cost for option in forecasts)
                 elif policy.limits.max_gpu_peak_gib is not None or policy.limits.max_host_peak_gib is not None:
                     reason = "unmeasured_future_resource_peak"
-            reserve, future_quotes = route_completion_reserve(plan, state, task, candidate, native.quotes)
+            reserve, future_quotes = route_completion_reserve(plan, state, task, candidate, native.quotes,
+                                                              template=template, snapshot=snapshot)
             if len(state.steps)+reserve.steps > state.plan.budget.max_steps:
                 reason = "cumulative_step_budget"
             empirical_ms = None
@@ -231,11 +238,14 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                              if native_cost else features)
             predicted = model.predict_costs(cost_features)
             branch = regression_cost(predicted["branch_complete_cost"])
-            control = read_control if task.kind == "READ" else None
+            control = read_control if task.kind != "ANSWER" else None
             control_ms = None if control is None else control["predicted_ms"]
-            read_count = (1+sum(step.task.kind == "READ" and step.task.step_id != task.step_id
-                and step.task.step_id not in {result.step_id for result in state.results}
-                for step in plan.route_steps)) if task.kind == "READ" else 0
+            group = "with_infer" if features["infer_needs"] else "without_infer"
+            observed_count = model.cost_provenance.get("read_count_profile", {}).get("groups", {}).get(
+                plan.semantic_kind, {}).get(group)
+            read_count = observed_count["mean"] if observed_count is not None else float(task.kind == "READ")
+            read_count_basis = ("delivered_bounded_branch_mean" if observed_count is not None
+                                else "current_selected_READ_only")
             if control_ms is not None:
                 if model.cost_provenance["prefix_control_scope"] != "native_excludes_prefix_control":
                     raise ValueError("READ control addition requires native-only branch cost labels")
@@ -272,8 +282,8 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
             if not native_cost and owner_control_ms:
                 cost = replace(cost, latency_ms=cost.latency_ms+owner_control_ms)
             # Native quote features already contain the matched-prefix saving.
-            # Allocation net value is auditable, but cannot be another rebate
-            # without a branch cost baseline that predicts future eviction.
+            # Allocation net value also prices control and residency. It is not
+            # the action-conditioned difference between two measured branches.
             objective = gain-policy._penalty(cost, state.plan.budget)
             policy.last_option_diagnostics[key] = {"plan_id": plan.plan_id, "features": features,
                 "semantic_kind": plan.semantic_kind, "empirical_completion_latency_ms": empirical_ms,
@@ -285,6 +295,10 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
                 "native_quote_role": "pre_action_cost_features" if native_cost else "actual_known_input_admission_and_audit",
                 "read_callback_control": control,
                 "remaining_read_prefix_control_ms": control_ms, "remaining_read_control_count": read_count,
+                "read_control_count_basis": read_count_basis,
+                "read_control_count_samples": observed_count["samples"] if observed_count is not None else 0,
+                "cost_target_scope": BOUNDED_CONTINUATION,
+                "route_reserve_scope": "complete_registered_organization",
                 "retention_owner_control_ms": owner_control_ms,
                 "joint_context": delta.trace() if delta is not None else None, "reason": reason or "eligible"}
             evaluation = PlanEvaluation(plan.plan_id, gain, objective, cumulative, reason is None,

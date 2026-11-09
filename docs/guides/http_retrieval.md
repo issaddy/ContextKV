@@ -115,4 +115,4 @@ curl -sS -X POST http://127.0.0.1:18080/sessions/demo/recover \
 
 请求取消会先等待其检索线程结束，再释放会话锁；关闭期间新请求返回503 `SERVICE_SHUTTING_DOWN`。ASGI计数/Event等待已接受请求收尾，随后依次关闭检索器、引擎客户端及SQLite。原生未决生成通过持久attempt恢复，退役维护使用同一drain路径。状态协议见[架构](../architecture.md#故障恢复)。
 
-HTTP与SDK接线的已有验证集中在[工程接线验证](../data_and_evaluation.md)，接口回归位于`tests/test_http_retrieval.py`、`tests/test_api.py`及`tests/test_api_shutdown.py`。
+HTTP与SDK使用同一 Controller 和 SessionStore，工程接线与费用口径见[数据与评价](../data_and_evaluation.md)。

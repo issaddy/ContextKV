@@ -3,6 +3,7 @@ import ast
 from dataclasses import dataclass, field
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -23,8 +24,10 @@ def test_mixed_finished_batch_only_publishes_terminal_request_metadata(tmp_path)
     target.parent.mkdir(parents=True)
     target.write_bytes(original)
     # One application verifies the edited source hunk against the exact official commit.
+    # A fixture under this checkout must not inherit its parent Git worktree.
     subprocess.run(['git', 'apply', '--include='+provenance['output_streamer']['path'], str(patch)],
-                   cwd=tmp_path, check=True, capture_output=True, text=True)
+                   cwd=tmp_path, env={**os.environ, 'GIT_CEILING_DIRECTORIES': str(tmp_path.parent)},
+                   check=True, capture_output=True, text=True)
     parsed = ast.parse(target.read_text())
     native = next(node for node in parsed.body if isinstance(node, ast.ClassDef)
                   and node.name == '_GenerationStreamAccumulator')

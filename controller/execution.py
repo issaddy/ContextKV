@@ -210,9 +210,11 @@ def require_complete_time(limit, arrived, phase):
         raise ReadingBudgetExceeded(f"{phase}: complete-time allocation {limit} ms exhausted")
 
 
-def require_completion(plan, results, spent, steps_paid, task, candidate=None, *, read_all=False, arrived=None):
+def require_completion(plan, results, spent, steps_paid, task, candidate=None, *, read_all=False,
+                       arrived=None, template=None, snapshot=None, claims=()):
     phase = task.kind if task is not None else "GAP"
-    reserve = completion_reserve(plan, results, task, candidate, read_all=read_all)
+    reserve = completion_reserve(plan, results, task, candidate, read_all=read_all,
+                                 template=template, snapshot=snapshot, claims=claims)
     if steps_paid+reserve.steps > plan.budget.max_steps:
         raise ReadingBudgetExceeded(f"{phase}: remaining required steps exceed the complete request allocation")
     require_online_tokens(plan.budget.max_total_tokens, spent, reserve.input_tokens+reserve.output_tokens, phase)
@@ -316,7 +318,7 @@ class ReadingExecutor:
         if persisted is None or persisted[0] in {"PLANNED", "PREPARED"}:
             spent = reading_tokens_spent(state.steps, initial_auxiliary_usage, state.auxiliary_usage)
             reserve = require_completion(plan, state.results, spent, len(state.steps), task, candidate,
-                                         arrived=self.request_arrived)
+                arrived=self.request_arrived, template=self.template, snapshot=snapshot, claims=state.claims)
         if cpu:
             tick = time.monotonic()
             native_workload = await self.engine.metrics()
@@ -675,7 +677,8 @@ class ReadingExecutor:
             else:
                 selected_claims = tuple(graph.claims[identity] for identity in task.input_claim_ids)
             reserve = (require_completion(plan, results, refresh_usage(), paid_steps(), task, candidate,
-                                          read_all=True, arrived=arrived)
+                read_all=True, arrived=arrived, template=self.template, snapshot=snapshot,
+                claims=tuple(graph.claims.values()))
                        if persisted is None or persisted[0] in {"PLANNED", "PREPARED"} else None)
             try:
                 record = await self._generate_step(attempt_id, snapshot, plan, task,
@@ -720,7 +723,8 @@ class ReadingExecutor:
                     if (need.need_id, need.missing_relation, need.bound_entities, need.temporal_scope) not in expanded)
                 if open_needs and self.extend_open_needs is not None:
                     reserve = require_completion(plan, results, refresh_usage(), paid_steps(), None,
-                                                 read_all=True, arrived=arrived)
+                        read_all=True, arrived=arrived, template=self.template, snapshot=snapshot,
+                        claims=tuple(graph.claims.values()))
                     gap_started = time.monotonic()
                     extension_pool = await self.extend_open_needs(plan, open_needs, tuple(graph.claims.values()))
                     gap_elapsed = (time.monotonic()-gap_started)*1000
@@ -827,7 +831,8 @@ class ReadingExecutor:
                 if (plan.reading_mode == "typed_reduce" and task.kind == "REDUCE"
                         and task.operation in {"union", "count", "sum", "group"}):
                     reserve = require_completion(plan, results, refresh_usage(), paid_steps(), task,
-                                                 read_all=True, arrived=arrived)
+                        read_all=True, arrived=arrived, template=self.template, snapshot=snapshot,
+                        claims=tuple(graph.claims.values()))
                     tick = time.monotonic()
                     native_workload = await self.engine.metrics()
                     try:

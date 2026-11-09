@@ -155,8 +155,11 @@ def compile_step(plan, task, state, snapshot, template, *, outputs, request_comp
 
 
 def compile_route_steps(proposal, state, snapshot, template, *, output_budgets,
-                        output_tokens_per_fact=64, request_compiler=None, cache_scope=None):
+                        output_tokens_per_fact=64, request_compiler=None, cache_scope=None,
+                        compile_answers=None, answer_options=None):
     """Compile known pending source consumers using the execution compiler."""
+    if proposal.semantic_kind == "direct_answer":
+        return ()
     from .action_proposals import bind_read_parents, observed_step_outputs
     done = {result.step_id for result in state.results}
     existing = {step.task.step_id: step for step in proposal.steps}
@@ -175,7 +178,20 @@ def compile_route_steps(proposal, state, snapshot, template, *, output_budgets,
             variants = compile_step(proposal.context_plan, task, state, snapshot, template, outputs=outputs,
                                     request_compiler=request_compiler, cache_scope=cache_scope)
         route.append(PlanStep(task, variants, reservation))
-    route.extend(step for step in proposal.steps if step.task.kind == "ANSWER")
+    answers = tuple(step for step in proposal.steps if step.task.kind == "ANSWER")
+    if not answers:
+        answers = (complete_plan(proposal.context_plan, (), semantic_kind=proposal.semantic_kind,
+            reader_checkpoint=proposal.reader_checkpoint).steps[-1],)
+    for step in answers:
+        variants = step.variants
+        if compile_answers is not None and not variants:
+            # Only the source projection already visible in this state is known.
+            # Generated facts and the actual terminal representation are bound
+            # again after the selected action completes.
+            variants = tuple(candidate for candidate in compile_answers(snapshot,
+                (proposal.context_plan,), replace(state, plan=proposal.context_plan),
+                **(answer_options or {})) if candidate.feasible and candidate.source_body_token_ranges)
+        route.append(replace(step, variants=variants))
     return tuple(route)
 
 
@@ -326,7 +342,8 @@ class RollingPlanRuntime:
             result.append(replace(compiled, route_steps=compile_route_steps(compiled, base_state,
                 snapshot, template, output_budgets=self.output_budgets,
                 output_tokens_per_fact=self.output_tokens_per_fact,
-                request_compiler=request_compiler, cache_scope=cache_scope)))
+                request_compiler=request_compiler, cache_scope=cache_scope,
+                compile_answers=compile_answers, answer_options=options)))
         return tuple(result)
 
     @staticmethod
@@ -411,7 +428,7 @@ class RollingPlanRuntime:
         from .session_store import ReadingProgress
         tick = time.monotonic()
         reserve = require_completion(state.plan, state.results, state.plan.online_tokens_spent,
-                                     len(state.steps), task, arrived=arrived)
+            len(state.steps), task, arrived=arrived, template=template, snapshot=snapshot, claims=state.claims)
         record = StepRecord(attempt_id, task.step_id, task, result=ReadResult(task.step_id),
             metrics={"gap_request": to_jsonable(request), "completion_reserve": to_jsonable(reserve),
                      "request_arrived_monotonic": arrived,
@@ -591,7 +608,9 @@ class RollingPlanRuntime:
         while True:
             selection_started = time.monotonic()
             spent = reading_tokens_spent(state.steps, auxiliary_usage, state.auxiliary_usage)
-            state = replace(state, plan=replace(state.plan, online_tokens_spent=spent))
+            catalog = (_with_observed_sources(context_plans[0], state)
+                       if self.mode == "observed_actions" else state.plan)
+            state = replace(state, plan=replace(catalog, online_tokens_spent=spent))
             cache_scope = await engine.info()
             observed = self.mode == "observed_actions"
             required_step = self._required_scope_step(state) if observed else None
@@ -648,7 +667,10 @@ class RollingPlanRuntime:
                 proposals = tuple(replace(proposal, route_steps=compile_route_steps(proposal, state,
                     snapshot, template, output_budgets=self.output_budgets,
                     output_tokens_per_fact=self.output_tokens_per_fact,
-                    request_compiler=executor.request_compiler, cache_scope=cache_scope)) for proposal in proposals)
+                    request_compiler=executor.request_compiler, cache_scope=cache_scope,
+                    compile_answers=compile_answers if self.joint_context else None,
+                    answer_options=dict(representations=("hybrid",), layouts=("existing",), actions=("REBUILD",))))
+                    for proposal in proposals)
                 native, _ = await self.native.observe(proposals, state, snapshot, engine, cost_model,
                     arrived, auxiliary_usage, selection_started=selection_started)
                 quotes = {quote.candidate_id: quote for quote in native.quotes.quotes}
@@ -667,7 +689,7 @@ class RollingPlanRuntime:
                         option = options.get(key)
                         owner_control_ms = option.retention_control_ms if option is not None else 0.0
                         reserve, future_quotes = route_completion_reserve(proposal, state, step.task,
-                                                                         candidate, native.quotes)
+                            candidate, native.quotes, template=template, snapshot=snapshot)
                         latency_ms = None
                         if plan.budget.max_complete_ms is not None and self.policy.completion_timing is not None:
                             point = timing_point(step.task, reserve, native.quotes, quote, native.paid_observation,
@@ -761,7 +783,8 @@ class RollingPlanRuntime:
             try:
                 decision = (self.policy.choose_observed_actions(plans, state, native, reusable, read_control=read_control,
                                 gap_query_chars=len(gap_request.query) if gap_request is not None else 0,
-                                joint_options=options, timing_context=timing_context)
+                                joint_options=options, timing_context=timing_context,
+                                template=template, snapshot=snapshot)
                     if observed else self.policy.choose(plans, state, native, reusable))
             except NoCompletePlan:
                 events.emit("rolling_plan_no_complete", attempt_id=attempt_id,
@@ -806,7 +829,7 @@ class RollingPlanRuntime:
                 context_plans = (plan,)
                 executor.store.save_reading_progress(attempt_id, plan,
                     ReadingProgress(tuple(sorted(expanded)), (), state.auxiliary_usage))
-            if demand_retention and decision.next_step.task.kind != "ANSWER":
+            if demand_retention:
                 key = step.candidate.candidate_id if step.candidate is not None else step.task.step_id
                 option = options[key]
                 if option.retain or option.release:
@@ -868,7 +891,8 @@ class RollingPlanRuntime:
                     from .reading import build_read_plan
                     from .session_store import ReadingProgress
                     require_completion(state.plan, state.results, state.plan.online_tokens_spent,
-                                       len(state.steps), None, arrived=arrived)
+                        len(state.steps), None, arrived=arrived, template=template,
+                        snapshot=snapshot, claims=state.claims)
                     tick = time.monotonic()
                     # A's gap interface counts selected units as already read.
                     # A rolling branch may still have unexecuted initial
@@ -966,6 +990,7 @@ class FixedReadingObserver:
         from .plan_policy import NativePlanningState
         from .action_proposals import observed_answer_options
         started = time.monotonic()
+        state = replace(state, plan=_with_observed_sources(state.plan, state))
         from .context_budget import direct_answer_reason
         direct = compile_answers(snapshot, (state.plan,), state, **observed_answer_options(
             state, joint=self.joint_context, finite=self.read_choices == 2))
@@ -976,7 +1001,7 @@ class FixedReadingObserver:
         plans = (() if mandatory else RollingPlanRuntime.action_proposals(self, state.plan, state,
             snapshot, executor.template, compile_answers, gap, request_compiler=executor.request_compiler,
             cache_scope=await engine.info()))
-        candidates, legal_actions = [], []
+        candidates, legal_actions, legal_answer_representations = [], [], set()
         for plan in plans:
             completed = _completed_steps(plan, state)
             first = next(step for step in plan.steps if step.task.step_id not in completed)
@@ -984,6 +1009,8 @@ class FixedReadingObserver:
             variants = tuple(candidate for candidate in first.variants if candidate.feasible
                 and (task.kind != "ANSWER" or direct_answer_reason(state, candidate,
                     require_complete_evidence=False) is None))
+            if task.kind == "ANSWER":
+                legal_answer_representations.update(candidate.representation for candidate in variants)
             candidates.extend(variants)
             candidates.extend(candidate for step in plan.route_steps for candidate in step.variants
                               if candidate.feasible)
@@ -1006,8 +1033,7 @@ class FixedReadingObserver:
                 "after_step_kind": state.steps[-1].task.kind if state.steps else None,
                 "legal_actions": tuple(dict.fromkeys(legal_actions)),
                 "read_organizations": tuple(plan.context_plan for plan in plans if plan.semantic_kind == "read_once"),
-                "legal_answer_representations": sorted({candidate.representation for candidate in candidates
-                                                         if candidate.generation_kind == "ANSWER"}),
+                "legal_answer_representations": sorted(legal_answer_representations),
                 "observation_overhead": {"clock": "client_monotonic", "start": started,
                     "pre_arrival_startup_ms": startup_ms,
                     "quote_start": quote_started, "quote_end": quote_ended,

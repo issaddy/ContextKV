@@ -10,6 +10,7 @@ from adapters.contextpilot import SourceOrderIndex
 from bench.mock_engine import MockEngine
 from controller.action_policy import route_completion_reserve
 from controller.action_proposals import BOUNDED_CONTINUATION
+from controller.context_budget import COMPLETION_RESERVE_SCOPE
 from controller.context_schema import ContextBudget, EvidenceSet, Need, ReadingOutcome, TaskState
 from controller.cost_model import CostModel
 from controller.demand import DemandState, JointOption, joint_options
@@ -222,6 +223,7 @@ class SpecifiedNativeBranch:
     provenance = {"continuation_protocol": BOUNDED_CONTINUATION,
                   "observed_feature_schema": OBSERVED_FEATURE_SCHEMA}
     cost_provenance = {"feature_schema": NATIVE_COST_SCHEMA,
+        "completion_reserve_scope": COMPLETION_RESERVE_SCOPE,
         "observed_feature_schema": OBSERVED_FEATURE_SCHEMA, "prefix_control_scope": "native_excludes_prefix_control"}
 
     def supports_semantic_kind(self, kind, *, costs=False):
@@ -234,6 +236,57 @@ class SpecifiedNativeBranch:
         cost = dict(complete_ms=100, gpu_gib_seconds=0, host_gib_seconds=0,
                     total_input_tokens=100, total_output_tokens=10)
         return {"branch_complete_cost": cost, "incremental_complete_cost": dict(cost)}
+
+
+@pytest.mark.asyncio
+async def test_fixed_observer_quotes_future_sources_without_promoting_them_to_current_answers(tmp_path):
+    from controller.execution import ReadingExecutor
+    from controller.rolling_policy import FixedReadingObserver
+
+    template, store = ByteTemplate(), SessionStore(tmp_path/"state.db")
+    engine = SourceReader(store)
+    compiler = RequestCompiler(template, author_index())
+    block, unit = material("Material A supports a partial procedure.", "a")
+    plan = build_read_plan(TaskState("t", "How?", needs=(Need("n", operation="procedure"),)),
+        EvidenceSet("s", (unit,), disposition="partial", source_blocks=(block,)), "selected_sources",
+        ContextBudget(read_output_tokens=512), template=template, read_layout="source_first")
+    cohort, output = tmp_path/"cohort.json", tmp_path/"observations.jsonl"
+    cohort.write_text(json.dumps({"members": []}))
+    observer = FixedReadingObserver({"reader_checkpoint": template.fingerprint.model_revision,
+        "reader_profile_id": "profile", "observation_path": str(output), "output_budgets": [512],
+        "gap_limits": {"max_units": 2, "max_passages": 2}, "cohort_split": "train",
+        "cohort_manifest": str(cohort), "joint_context": True}, RecordedPaid(), template.fingerprint)
+    snapshot = store.read_snapshot("session")
+    attempt = store.begin_attempt("session", "run", "hash", plan.task_state.raw_question, 0)
+    state = ReadingOutcome(plan)
+    cache_scope = await engine.info()
+    direct = replace(complete_plan(replace(plan, steps=()), (), semantic_kind="direct_answer",
+        reader_checkpoint=template.fingerprint.model_revision), context_plan=plan)
+    assert compile_route_steps(direct, state, snapshot, template, output_budgets=(512,),
+        request_compiler=compiler, cache_scope=cache_scope) == ()
+    quoted = []
+    quote_batch = engine.quote_batch
+
+    async def capture(candidates, fingerprint):
+        quoted.extend(candidates)
+        return await quote_batch(candidates, fingerprint)
+
+    engine.quote_batch = capture
+
+    def answers(snap, plans, observed, **options):
+        assert observed.claims == state.claims and observed.results == state.results
+        return compiler.compile_answers(snap, plan.task_state.raw_question, plans[0], outcome=observed,
+                                         cache_scope=cache_scope, **options)
+
+    executor = ReadingExecutor(store, engine, template, request_compiler=compiler)
+    await observer.observe(attempt.attempt_id, executor, state, snapshot, engine, CostModel(), answers,
+        arrived=time.monotonic(), auxiliary_usage={}, expanded=set(), startup_ms=0)
+    packet = json.loads(output.read_text())
+    assert packet["legal_answer_representations"] == ["hybrid"]
+    assert "read_once" in packet["legal_actions"]
+    assert any(candidate.representation == "raw" and candidate.source_body_token_ranges for candidate in quoted)
+    assert not engine._attempts
+    store.close()
 
 
 @pytest.mark.asyncio
@@ -270,10 +323,20 @@ async def test_owner_control_added_once_without_rebating_native_hits(tmp_path):
     policy.choose_observed_actions((branch,), state, native, reuse, read_control=control,
                                   joint_options={key: retained})
     after = policy.last_option_diagnostics[key]
-    assert before["rollout_expected_cost"].latency_ms == 110  # Two READ inspections.
-    assert after["rollout_expected_cost"].latency_ms == 117  # One selected owner call.
+    assert before["rollout_expected_cost"].latency_ms == 105  # One known action, not every quoted pack.
+    assert after["rollout_expected_cost"].latency_ms == 112  # One selected owner call.
     assert after["retention_owner_control_ms"] == 7
     assert policy.last_evaluations[0].objective == pytest.approx(before_objective-.07)
+    policy.gain_model.cost_provenance = {**policy.gain_model.cost_provenance,
+        "cost_target_scope": BOUNDED_CONTINUATION,
+        "read_count_profile": {"groups": {"read_once": {
+            "without_infer": {"mean": 1.25, "samples": 4}}}}}
+    policy.choose_observed_actions((branch,), state, native, reuse, read_control=control,
+                                  joint_options={key: retained})
+    measured = policy.last_option_diagnostics[key]
+    assert measured["rollout_expected_cost"].latency_ms == 113.25
+    assert measured["read_control_count_samples"] == 4
+    assert measured["cost_target_scope"] == BOUNDED_CONTINUATION
     store.close()
 
 

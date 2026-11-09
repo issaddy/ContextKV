@@ -672,21 +672,30 @@ class PrefixReadObserver:
             current = quotes[candidate.candidate_id] if candidate is not None else None
             # Do not drop a lease backing the selected quote before Native has
             # locked that request. Its existing expiry is never extended here.
-            immediate = {key for key, record in own.items()
-                if current is not None and active[key]["reference_present"] and remaining(key) > 0
-                and len(record.prefix_input_ids) <= current.recoverable_prefix_tokens
-                and candidate.input_ids[:len(record.prefix_input_ids)] == record.prefix_input_ids}
+            immediate = set()
+            if current is not None:
+                for key, record in own.items():
+                    if not active[key]["reference_present"] or remaining(key) <= 0:
+                        continue
+                    boundary = longest_common_prefix(candidate.input_ids[:current.recoverable_prefix_tokens],
+                        record.prefix_input_ids)//page_size*page_size
+                    if (boundary == len(record.prefix_input_ids) or
+                            record.step_id in sources and shared_body_page(
+                                sources[record.step_id].metrics["source_view"]["body_token_ranges"],
+                                candidate.source_body_token_ranges or (), boundary, page_size)):
+                        immediate.add(key)
             kept = tuple(active[key] for key in immediate)
             base_pages = shared.union(*(owner_pages(row) for row in kept))
             base_gpu = shared_gpu | referenced_gpu_pages(kept)
             current_growth = (current.input_len-current.ready_gpu_prefix_tokens+candidate.output_budget
                               if current is not None else 0)
             pressure = max(0, current_growth+concurrent_growth-batch.free_gpu_tokens)
-            if not pressure or not demand.needs or not sources:
+            if task.kind == "ANSWER" or not pressure or not sources:
                 return JointOption(demand, release=tuple(sorted(own.keys()-immediate)),
                     protected_tokens=len(base_pages-shared)*page_size, keep=tuple(sorted(immediate)))
             current_prefix = candidate.input_ids[:current.ready_gpu_prefix_tokens] if current is not None else ()
             targets = {}
+            target_kinds = {target.step_id: target.kind for target, _ in actions}
             unmet = {need.need_id: need.priority for need in demand.needs}
             # Consumer arrival is just the work before that consumer plus queue
             # and observed progress. It is never the task's complete-response P95.
@@ -708,7 +717,10 @@ class PrefixReadObserver:
                 priority = sum(unmet.get(need, 0) for need in target.need_ids
                                if target.step_id in demand.remaining_read_ids)
                 if target.kind == "ANSWER" and compiled.source_body_token_ranges:
-                    priority = sum(unmet.values())
+                    # Original material remains a consumer even after facts
+                    # have closed the semantic gaps. Facts-only inputs have no
+                    # source body and therefore create no source-prefix demand.
+                    priority = max(1, sum(unmet.get(need, 1) for need in target.need_ids))
                 predicted_arrival = ((candidate_arrival_ms or {}).get(compiled.candidate_id, arrivals[target.step_id]))
                 if priority and (target.step_id not in targets or work(compiled) < work(targets[target.step_id][0])):
                     targets[target.step_id] = compiled, priority, predicted_arrival
@@ -747,6 +759,11 @@ class PrefixReadObserver:
             # token-risk rule and cannot reduce B's predicted milliseconds.
             curves = {}
             for target in demands:
+                # The current paired service labels describe READ consumers.
+                # ANSWER source demand is still visible to the unpriced rule
+                # and can share a lease justified by a calibrated READ.
+                if target_kinds[target] != "READ":
+                    continue
                 compiled = targets[target][0]
                 full = compiled.source_prefix_tokens//page_size*page_size
                 inspection = next((sources[step].metrics.get("evidence_prefix", {})
@@ -756,7 +773,7 @@ class PrefixReadObserver:
                 if self.model is not None and inspection.get("demand_observation"):
                     curves[target] = tuple(forecast for horizon in horizons
                         if (forecast := self._demand_forecast(inspection, batch, horizon)) is not None)
-            priced = bool(demands) and all(curves.get(target) for target in demands)
+            priced = any(curves.values())
             if not priced and unpriced_policy == "native":
                 return JointOption(demand, release=tuple(sorted(own.keys()-immediate)),
                     protected_tokens=len(base_pages-shared)*page_size,
@@ -778,7 +795,9 @@ class PrefixReadObserver:
                             continue
                         forecast = None
                         if priced:
-                            curve = curves[target]
+                            curve = curves.get(target)
+                            if not curve:
+                                continue
                             forecast = (self._remaining_forecast(curve, horizon) if action == "keep" else
                                 next((point for point in curve if point.horizon_seconds == horizon), None))
                             if forecast is None:
@@ -819,9 +838,11 @@ class PrefixReadObserver:
             kept_ids = immediate | {owner for owner, lease in selected.items() if lease.action == "keep"}
             uncovered = sum(max(0, risk-min(risk, len(path & protected)*page_size))
                 for risk, _, path, _ in demands.values())
-            # Net protection value ranks leases against Native. It is not a
-            # discount against B's already hit-aware native request quotes: no
-            # fitted B cost baseline currently models future eviction losses.
+            # B fits actual Native branch cost, including future cache behavior.
+            # These consumer marginals are not conditioned on that branch's
+            # realized continuation and this retention intervention. Allocation
+            # value also folds in control, collateral and residency prices, so
+            # retain it as a lease diagnostic rather than a branch latency delta.
             allocation_value = sum(choice.value for choice in choices) if priced else None
             chosen_forecasts = {(request.owner_id, request.forecast.horizon_seconds): request.forecast
                                 for request in requests}

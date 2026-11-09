@@ -9,7 +9,9 @@ import json
 import pytest
 
 from training.plan_gain_completion import (completion_record, effective_pair, finalize, fit_effective,
-    fitted_action_domain, label_scorer_identity, refresh_features)
+    fitted_action_domain, label_scorer_identity, read_count_profile, refresh_features)
+from controller.action_proposals import BOUNDED_CONTINUATION
+from controller.context_budget import COMPLETION_RESERVE_SCOPE
 from training.plan_gain_rollout import execute_branch
 from training.train_plan_gain import COST_FIELDS
 from training.train_plan_gain import PlanGainModel
@@ -99,6 +101,11 @@ async def test_first_read_quotes_remaining_route_without_executing_every_package
     assert run["new_action_counts"]["READ"] == 1
     assert task.step_id not in run["new_step_ids"]
     record = completion_record(json.loads((path/"before.json").read_text()), run)
+    assert record["cost_target_scope"] == BOUNDED_CONTINUATION
+    assert run["completion_reserve_scope"] == record["completion_reserve_scope"] == COMPLETION_RESERVE_SCOPE
+    assert record["cost_features"]["future_input_tokens"] == run["pre_action_completion_reserve"]["future_input_tokens"]
+    assert read_count_profile([record, record], scope="fixture")["groups"] == {
+        "read_once": {"without_infer": {"mean": 1.0, "samples": 1}}}
     future_quote = next(candidate for step in route if step["task"]["step_id"] == task.step_id
                         for candidate in step["variants"])
     assert record["cost_features"]["future_input_tokens"] >= len(future_quote["input_ids"])
@@ -109,15 +116,19 @@ async def test_first_read_quotes_remaining_route_without_executing_every_package
         for item in legacy_before["plan_candidate"]["context_plan"]["steps"] if item["step_id"] != task.step_id]
     legacy_run.pop("registered_context_plan_id")
     legacy_run.pop("compiled_route_steps")
+    legacy_run.pop("pre_action_completion_reserve")
+    legacy_run.pop("completion_reserve_scope")
     legacy_run["pre_action_quote"]["batch"]["quotes"] = [quote
         for quote in legacy_run["pre_action_quote"]["batch"]["quotes"]
         if quote["candidate_id"] == legacy_run["pre_action_input"]["candidate_id"]]
-    legacy = completion_record(legacy_before, legacy_run)
+    legacy = completion_record(legacy_before, legacy_run, template=service.template)
     assert legacy["features"] == record["features"]
     assert legacy["effective_utility"] == record["effective_utility"]
     assert legacy["actual_run"]["actual_branch_execution_cost"] == record["actual_run"]["actual_branch_execution_cost"]
     assert legacy["cost_features"]["future_steps"] == record["cost_features"]["future_steps"]
-    assert legacy["cost_features"]["future_input_tokens"] < record["cost_features"]["future_input_tokens"]
+    # The same tokenizer reconstructs the full future READ envelope. Without
+    # its native quote, those tokens carry no assumed prefix-hit saving.
+    assert legacy["cost_features"]["future_input_tokens"] == record["cost_features"]["future_input_tokens"]
     assert legacy["cost_features"]["future_prefill_tokens"] == legacy["cost_features"]["future_input_tokens"]
     await service.aclose()
     service.store.close()
@@ -161,6 +172,8 @@ def test_domain_migration_requires_measured_changed_grouping_not_a_version_relab
 
 @pytest.mark.asyncio
 async def test_saved_answer_pair_refresh_reads_its_original_registrations(tmp_path):
+    from controller.templates import ByteTemplate
+
     _, _, values = await measured_fixture(tmp_path, read_failure=False)
     branches = {kind: completion_record(*values[kind]) for kind in values}
     expected = effective_pair(branches["direct_answer"], branches["read_once"])
@@ -168,18 +181,42 @@ async def test_saved_answer_pair_refresh_reads_its_original_registrations(tmp_pa
         "delta_q": expected["effective_delta_q"], "quality_direct": expected["raw_Q_direct"],
         "quality_counterfactual": expected["raw_Q_counterfactual"],
         "cost_targets": expected["cost_targets"], "incremental_complete_cost": expected["incremental_complete_cost"],
-        "direct_run": {"source_run": values["direct_answer"][1]},
-        "counterfactual_run": {"source_run": values["read_once"][1]}}
+        "direct_run": {"source_run": deepcopy(values["direct_answer"][1])},
+        "counterfactual_run": {"source_run": deepcopy(values["read_once"][1])}}
+    for arm in ("direct_run", "counterfactual_run"):
+        row[arm]["source_run"].pop("pre_action_completion_reserve")
+        row[arm]["source_run"].pop("completion_reserve_scope")
     source, target = tmp_path/"saved.jsonl", tmp_path/"refreshed.jsonl"
     source.write_text(json.dumps(row)+"\n")
+    saved_row = json.loads(source.read_text())
     with pytest.raises(ValueError, match="original registrations"):
         refresh_features(source, target)
-    refresh_features(source, target, registration_root=tmp_path, recorded_root=tmp_path)
+    with pytest.raises(ValueError, match="missing pre-action completion reserve"):
+        refresh_features(source, target, registration_root=tmp_path, recorded_root=tmp_path)
+    manifest = refresh_features(source, target, registration_root=tmp_path, recorded_root=tmp_path,
+                                template=ByteTemplate())
     refreshed = json.loads(target.read_text())
     assert refreshed["effective_delta_q"] == expected["effective_delta_q"]
     assert refreshed["cost_targets"] == expected["cost_targets"]
     assert refreshed["features"] == expected["features"]
     assert refreshed["direct"]["source_files"]["run_record_id"] == "saved-fixture-pair"
+    for side, arm, kind in (("direct", "direct_run", "direct_answer"),
+                            ("counterfactual", "counterfactual_run", "read_once")):
+        assert refreshed[side]["actual_run"] == saved_row[arm]["source_run"]
+        assert refreshed[side]["cost_features"] == expected[side]["cost_features"]
+        assert refreshed[side]["reconstructed_completion_reserve"] == {
+            "scope": COMPLETION_RESERVE_SCOPE, "reserve": values[kind][1]["pre_action_completion_reserve"]}
+    assert json.loads(source.read_text()) == saved_row
+    assert manifest["cost_target_scope"] == refreshed["cost_target_scope"] == BOUNDED_CONTINUATION
+    expected_counts = {"direct_answer": {"without_infer": {"mean": 0.0, "samples": 1}},
+                       "read_once": {"without_infer": {"mean": 1.0, "samples": 1}}}
+    assert manifest["read_count_profile"]["groups"] == expected_counts
+    model = fit_effective([refreshed])
+    assert model.cost_provenance["cost_target_scope"] == BOUNDED_CONTINUATION
+    assert model.cost_provenance["completion_reserve_scope"] == COMPLETION_RESERVE_SCOPE
+    assert model.cost_provenance["read_count_profile"] == {
+        "scope": "unique_delivered_cost_training_branches", "source": "actual_run.new_action_counts.READ",
+        "groups": expected_counts}
 
 
 @pytest.mark.asyncio
@@ -229,6 +266,9 @@ async def test_failed_read_lowers_utility_keeps_raw_q_missing_and_paid_signed_co
     result = finalize(collection, tmp_path/"labels")
     assert result["effective_gain_records"] == 1 and result["cost_labelled_actions"] == 1
     assert result["raw_quality_missing"] == 1
+    assert result["cost_target_scope"] == BOUNDED_CONTINUATION
+    assert result["read_count_profile"]["groups"] == {
+        "direct_answer": {"without_infer": {"mean": 0.0, "samples": 1}}}
     labelled = tmp_path/"labels/effective-gains.jsonl"
     saved = json.loads(labelled.read_text())
     original_label = deepcopy(saved)
@@ -278,6 +318,8 @@ async def test_failed_read_lowers_utility_keeps_raw_q_missing_and_paid_signed_co
     assert mixed.provenance["scorer_identity"] == new_scorer
     assert mixed.provenance["training_records"] == 2
     assert mixed.cost_provenance["training_samples"] == 1
+    assert mixed.cost_provenance["read_count_profile"]["groups"] == {
+        "direct_answer": {"without_infer": {"mean": 0.0, "samples": 1}}}
     assert mixed.provenance["measured_paid_cost_outcomes"] == {"committed_QA": 1, "confirmed_terminal_no_QA": 3}
     assert not mixed.supports_semantic_kind("read_once", costs=True)
     from training.collect_plan_gains import served_branch

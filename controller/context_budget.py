@@ -8,6 +8,9 @@ from .schema import Message
 from .serialization import to_jsonable
 
 
+COMPLETION_RESERVE_SCOPE = "known_inputs_and_allocated_future_outputs_v1"
+
+
 class AnswerWindowExceeded(ValueError):
     """A proposal cannot reserve its actual terminal ANSWER envelope."""
 
@@ -107,11 +110,13 @@ class CompletionReserve:
         return 1 + self.future_steps
 
 
-def completion_reserve(plan, results, task, candidate=None, *, read_all=False):
+def completion_reserve(plan, results, task, candidate=None, *, read_all=False,
+                       template=None, snapshot=None, claims=(), read_inputs=None):
     """Reserve the final envelope and already declared mandatory continuation.
 
-    Only the current compiled input is exact. Future READs contribute source
-    work and their output limits, before later facts and prompts exist.
+    Known REDUCE and final fact inputs use the reader's actual compiler. Missing
+    future facts use declared output/conclusion allocations. Without template
+    and snapshot this returns structural work only, not a complete online budget.
     """
     from .reading import numeric_selection_step_ids
 
@@ -133,7 +138,7 @@ def completion_reserve(plan, results, task, candidate=None, *, read_all=False):
     outstanding = tuple(step for step in plan.steps if step.step_id not in completed
                         and step.step_id != current_id)
     reads = tuple(step for step in outstanding if step.kind == "READ"
-                  and (read_all or full_scope or exhaustive.intersection(step.need_ids)))
+                  and (read_all or full_scope or numeric or exhaustive.intersection(step.need_ids)))
     if full_scope and typed:
         numeric.update((need.need_id, "union") for need in plan.task_state.needs
                        if need.operation == "enumerate")
@@ -144,23 +149,189 @@ def completion_reserve(plan, results, task, candidate=None, *, read_all=False):
                      if step.kind == "REDUCE" for need in step.need_ids}
     finished_ops = {(need, item.operation) for item in reductions for need in item.need_ids}
     selector_ids = numeric_selection_step_ids(plan)
-    selectors = len({selector_ids[need] for need in numeric.keys() & selector_ids.keys()
-                     if (need, "numeric_select") not in scheduled_ops} - completed)
+    pending_selectors = {selector_ids[need] for need in numeric.keys() & selector_ids.keys()
+                        if (need, "numeric_select") not in scheduled_ops} - completed
+    selectors = len(pending_selectors)
     aggregates = sum((need, operation) not in scheduled_ops and
                      ((need, operation) not in finished_ops
                       or any(need in step.need_ids for step in reads)
                       or (task is not None and task.kind == "READ" and need in task.need_ids))
                      for need, operation in numeric.items())
     units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
-    body_tokens = sum(sum({units[key].text: units[key].body_tokens
-                           for key in step.input_unit_ids}.values()) for step in reads)
+    read_inputs = read_inputs or {}
+    read_tokens = sum(len(read_inputs[step.step_id].input_ids) if step.step_id in read_inputs else
+        sum({units[key].text: units[key].body_tokens for key in step.input_unit_ids}.values()) for step in reads)
     cpu_ops = {"union", "count", "sum", "group"} if typed else set()
-    output_tokens = (sum(step.output_budget for step in (*reads, *scheduled)
+    output_tokens = (sum(read_inputs[step.step_id].output_budget if step.step_id in read_inputs
+                        else step.output_budget for step in (*reads, *scheduled)
                          if step.operation not in cpu_ops or step.kind == "READ")
                      + selectors*plan.budget.read_output_tokens)
+    future_inputs = plan.answer_allocation.fixed_input_tokens+read_tokens
+    if template is not None and snapshot is not None:
+        future_inputs = _completion_content_inputs(plan, results, task, reads, scheduled,
+            pending_selectors, current_output, template, snapshot, claims, cpu_ops, read_inputs)
     return CompletionReserve(current_input, current_output,
-        plan.answer_allocation.fixed_input_tokens+body_tokens, plan.budget.output_tokens+output_tokens,
+        future_inputs, plan.budget.output_tokens+output_tokens,
         1+len(reads)+len(scheduled)+selectors+aggregates)
+
+
+def _completion_content_inputs(plan, results, current, reads, scheduled, pending_selectors,
+                               current_output, template, snapshot, claims, cpu_ops, read_inputs):
+    """Compile known content and project each unfinished packet through its DAG.
+
+    A READ packet can be consumed once by a reducer and again by ANSWER: these
+    are separate model inputs. Unknown descendants share their ancestors' final
+    Need allocation; that allocation is not a claim that the model will consume
+    every parent. Known parents remain until actual lineage or a deterministic
+    computation establishes the new frontier. Numeric selection retains facts.
+    """
+    from .candidates import build_plan_candidates
+    from .action_proposals import bind_read_parents
+    from .claim_graph import ClaimGraph, claim_frontier
+    from .context_schema import ReadingOutcome, ReadResult, ReductionState
+    from .execution import aggregate_numeric_view, reduction_basis_ids
+    from .reading import numeric_selection_tasks, step_messages, unresolved_needs
+
+    known = {claim.claim_id: claim for result in results for claim in result.claims}
+    known.update((claim.claim_id, claim) for claim in claims)
+    reductions = (*scheduled, *(task for task in numeric_selection_tasks(
+        plan, results, tuple(known.values()), ready_only=False) if task.step_id in pending_selectors))
+    steps = {task.step_id: task for task in (*plan.steps, *reductions)}
+    if current is not None:
+        steps[current.step_id] = current
+    generated = tuple(task for task in (*reads, *reductions, *((current,) if current is not None else ()))
+        if task.kind == "READ" or (task.kind == "REDUCE"
+            and task.operation not in cpu_ops | {"numeric_select"}))
+    capacities = {task.step_id: (current_output if task is current else
+        read_inputs[task.step_id].output_budget if task.step_id in read_inputs else task.output_budget)
+        for task in generated}
+
+    def ancestors(task, *, all_producers=False):
+        pending, found, visited = list(task.predecessor_step_ids), set(), set()
+        while pending:
+            identity = pending.pop()
+            if identity in visited:
+                continue
+            visited.add(identity)
+            if identity in capacities:
+                found.add(identity)
+                if not all_producers:
+                    continue
+            if identity in steps:
+                pending.extend(steps[identity].predecessor_step_ids)
+        return found
+
+    projected_results = list(results)
+    cpu_tasks = [task for task in (*((current,) if current is not None else ()), *scheduled)
+                 if task.kind == "REDUCE" and task.operation in cpu_ops]
+    while cpu_tasks:
+        completed = {result.step_id for result in projected_results}
+        completed.update(result.reduction.step_id for result in projected_results if result.reduction is not None)
+        ready = tuple(task for task in cpu_tasks if set(task.predecessor_step_ids) <= completed
+                      and set(task.input_claim_ids) <= known.keys())
+        if not ready:
+            break
+        for task in ready:
+            parents = tuple(known[identity] for identity in task.input_claim_ids)
+            conclusion = aggregate_numeric_view(task, parents, plan, projected_results)
+            known[conclusion.claim_id] = conclusion
+            frontier = claim_frontier(parents, (conclusion,))
+            reduction = ReductionState(task.step_id, task.need_ids, task.operation,
+                reduction_basis_ids(task, parents, projected_results),
+                tuple(claim.claim_id for claim in frontier), "merged")
+            projected_results.append(ReadResult(task.step_id, claims=(conclusion,), reduction=reduction))
+            cpu_tasks.remove(task)
+    facts = tuple(known.values())
+    graph = ClaimGraph(facts)
+    units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
+    blocks = {block.key: block for block in (*snapshot.archive, *plan.selected_set.source_blocks)}
+    observed = ReadingOutcome(plan, results=tuple(projected_results), claims=facts,
+                              open_needs=unresolved_needs(projected_results))
+    read_tokens = 0
+    for task in reads:
+        if task.step_id in read_inputs:
+            read_tokens += len(read_inputs[task.step_id].input_ids)
+            continue
+        task = bind_read_parents(task, observed)
+        parents = tuple(known[identity] for identity in task.input_claim_ids if identity in known)
+        visible = replace(task, input_claim_ids=tuple(claim.claim_id for claim in parents), output_schema={})
+        messages = step_messages(plan, visible, tuple(units[identity] for identity in task.input_unit_ids),
+                                 parents, snapshot)
+        read_tokens += len(template.render(messages).input_ids)+sum(capacities[identity] for identity in ancestors(task))
+    reduction_inputs = 0
+    for task in reductions:
+        if task.operation in cpu_ops:
+            continue
+        parents = tuple(known[identity] for identity in task.input_claim_ids if identity in known)
+        visible = replace(task, input_claim_ids=tuple(claim.claim_id for claim in parents), output_schema={})
+        messages = step_messages(plan, visible, (), parents, snapshot)
+        pending_inputs = ancestors(task)
+        if task.operation == "numeric_select":
+            # Selection reads original excerpts as well as normalized facts.
+            # These excerpts already exist even when their future claims do not.
+            payload = json.loads(messages[1].content)
+            spans = {(span.source_key, span.start, span.end) for claim in parents for span in claim.source_spans}
+            for identity in steps:
+                if identity not in pending_inputs:
+                    continue
+                source = steps[identity]
+                for unit_id in source.input_unit_ids:
+                    for span in units[unit_id].source_spans:
+                        key = (span.source_key, span.start, span.end)
+                        if key in spans:
+                            continue
+                        block = blocks[span.source_key]
+                        base = block.span[0] if block.span else 0
+                        payload["sources"][f"s{len(spans)}"] = block.text[span.start-base:span.end-base]
+                        spans.add(key)
+            messages = (messages[0], Message("user", json.dumps(payload, ensure_ascii=False, separators=(",", ":"))))
+        reduction_inputs += len(template.render(messages).input_ids)+sum(capacities[identity] for identity in pending_inputs)
+
+    # Divide a shared packet's one output allowance across its Need allocations;
+    # multiple views of the same extraction do not become multiple final bodies.
+    terminal = {}
+    for task in generated:
+        targets = (task.retained_conclusion_tokens or tuple((need, 1) for need in task.need_ids))
+        total = sum(value for _, value in targets)
+        available = min(capacities[task.step_id], total) if task.retained_conclusion_tokens else capacities[task.step_id]
+        remaining = available
+        shares = {}
+        for index, (need, target) in enumerate(targets):
+            share = remaining if index == len(targets)-1 else available*target//total if total else 0
+            shares[need] = share
+            remaining -= share
+        terminal[task.step_id] = shares
+    for task in sorted(generated, key=lambda task: len(ancestors(task, all_producers=True))):
+        if task.kind != "REDUCE":
+            continue
+        for need in task.need_ids:
+            inherited = sum(terminal[identity].pop(need, 0) for identity in ancestors(task, all_producers=True))
+            terminal[task.step_id][need] = max(terminal[task.step_id].get(need, 0), inherited)
+
+    answer = graph.answer_plan(plan.task_state, plan.answer_plan.disposition, projected_results)
+
+    def answer_size(answer_plan):
+        bound = replace(plan, answer_plan=answer_plan)
+        outcome = ReadingOutcome(bound, results=tuple(projected_results), claims=facts,
+                                 open_needs=unresolved_needs(projected_results))
+        candidate, = build_plan_candidates(snapshot, plan.task_state.raw_question, bound, template,
+            outcome=outcome, representation="facts", layouts=("existing",), actions=("REBUILD",))
+        return len(candidate.input_ids)
+
+    final_input = answer_size(answer)
+    empty_input = answer_size(replace(answer, points=tuple(replace(point, claim_ids=(), source_spans=())
+                                                         for point in answer.points)))
+    future_content = sum(sum(shares.values()) for shares in terminal.values())
+    available = max(0, plan.answer_allocation.conclusion_tokens-max(0, final_input-empty_input))
+    known_sources = {(span.source_key, span.start, span.end) for point in answer.points for span in point.source_spans}
+    new_sources = any((span.source_key, span.start, span.end) not in known_sources
+        for task in generated if task.kind == "READ" for identity in task.input_unit_ids
+        for span in units[identity].source_spans)
+    # The one existing source-metadata allocation also covers provenance that
+    # has not appeared in a fact yet. It is shared by the entire final frontier.
+    metadata = plan.answer_allocation.source_metadata_tokens if new_sources else 0
+    final_room = max(0, plan.budget.window_tokens-plan.budget.output_tokens-final_input)
+    return read_tokens+reduction_inputs+final_input+min(min(future_content, available)+metadata, final_room)
 
 
 def measure_window(template, messages, budget, rendered, *, history=(), source_text=""):

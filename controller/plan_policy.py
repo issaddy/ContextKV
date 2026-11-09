@@ -566,10 +566,12 @@ class PlanPolicy:
         return next((reason for limit, value, reason in checks if limit is not None and value > limit), None)
 
     def choose_observed_actions(self, plans, state, native, reusable_prefixes, *, read_control=None,
-                                gap_query_chars=0, joint_options=None, timing_context=None):
+                                gap_query_chars=0, joint_options=None, timing_context=None,
+                                template=None, snapshot=None):
         from .action_policy import choose_observed_action
         return choose_observed_action(self, plans, state, native, reusable_prefixes, read_control=read_control,
-            gap_query_chars=gap_query_chars, joint_options=joint_options, timing_context=timing_context)
+            gap_query_chars=gap_query_chars, joint_options=joint_options, timing_context=timing_context,
+            template=template, snapshot=snapshot)
 
     def choose(self, plans, state: ReadingOutcome, native: NativePlanningState, reusable_prefixes, *,
                mandatory_coverage=False):

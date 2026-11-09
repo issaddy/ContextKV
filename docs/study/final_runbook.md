@@ -46,18 +46,23 @@ P1 支持策略配置为 `configs/evidence_policy_fixed_qwen.yaml`。
 `runs/study/auxiliary/cohorts/full/cohort_manifest.json`；实际运行指向本批预声明的 cohort。
 task/support 配置必填 `training.cohort_manifest`；P1 采集必填
 `collection.cohort_manifest` 和 `cohort_split`，开发采集显式选择 `dev`。
-B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v4` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上与反事实 READ 共用相关父结论绑定，线上执行一个动作后重新观察。成本资产同时记录 `prefix_control_scope=native_excludes_prefix_control`，价值 C 的来源观察控制按剩余已知 READ 数量预留，选中的 owner 变更费另计一次。当前协议的监督使用真实 P3 状态重新配对采集。
+B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v4` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上与反事实 READ 共用相关父结论绑定，线上执行一个动作后重新观察。成本资产同时记录 `prefix_control_scope=native_excludes_prefix_control`，来源观察控制按已交付有界分支的实测 READ 次数均值预留；没有次数样本时只计当前确定执行的 READ，选中的 owner 变更费另计一次。当前协议的监督使用真实 P3 状态配对采集。
 
-B 的 observed 资产另绑定 `observed_feature_schema=pre_action_candidate_read_value_v3`，使用实际已付资源、剩余额度和首个候选 READ 的检索、未满足 Need 覆盖、原文/事实重复特征。成本头绑定 `pre_action_native_nonnegative_work_v4`，输入特征包括剩余 READ 的逐包编译长度和 Native 报价。
+B 的 observed 资产另绑定 `observed_feature_schema=pre_action_candidate_read_value_v3`，使用实际已付资源、剩余额度和首个候选 READ 的检索、未满足 Need 覆盖、原文/事实重复特征。成本头绑定 `pre_action_native_nonnegative_work_v4`，输入特征包括剩余 READ 的逐包编译长度和 Native 报价。`completion_reserve_scope=known_inputs_and_allocated_future_outputs_v1` 绑定完整逻辑输入/输出预留，`cost_target_scope` 保持有界分支语义；`read_count_profile` 只统计参与成本拟合的唯一已交付分支。
 
 执行输入未改变的旧配对可重算特征再拟合：
 
 ```bash
-python3 -m training.plan_gain_completion refresh-features --input OLD-PAIRS.jsonl --output REFRESHED-PAIRS.jsonl
-python3 -m training.plan_gain_completion fit --train REFRESHED-TRAIN.jsonl --dev REFRESHED-DEV.jsonl --output GAIN.json
+python3 -m training.plan_gain_completion refresh-features \
+  --input OLD-TRAIN.jsonl --output REFRESHED-TRAIN.jsonl --template-config READER.yaml
+python3 -m training.plan_gain_completion refresh-features \
+  --input OLD-DEV.jsonl --output REFRESHED-DEV.jsonl --template-config READER.yaml
+python3 -m training.plan_gain_completion fit \
+  --train REFRESHED-TRAIN.jsonl --dev REFRESHED-DEV.jsonl \
+  --source-catalogue ORIGINAL-SOURCES.jsonl --source-catalogue DERIVED-SOURCES.jsonl --output GAIN.json
 ```
 
-刷新沿用原注册计划、实际首动作、质量、费用与执行身份。分包、Need 或动作改变后重新采集相应分支。有限候选域 `two_reads_cache_path_organizations_terminal_representations_v2` 的观测包含 `read_organizations`；采集复用捕获的完整组织，在各实际缓存起点重新编译报价。v2 标签覆盖改组动作。
+刷新只在 CPU 加载原 reader 的 tokenizer 与消息模板，使用动作前的已知事实、原注册计划和实际首步输入重建预算，不用执行后的事实回填。实际动作、质量、费用与原始记录保持不变，派生配对保存重建预留供拟合复用。新采集在首动作前直接保存 `pre_action_completion_reserve`。分包、Need 或动作改变后重新采集相应分支。有限候选域 `two_reads_cache_path_organizations_terminal_representations_v2` 的观测包含 `read_organizations`；采集复用捕获的完整组织，在各实际缓存起点重新编译报价。v2 标签覆盖改组动作。
 
 当前 B 资产携带 `input_protocol`，绑定实际窗口粒度、任务投影、共享来源格式 `canonical-source-envelope:v1` 和 reader fingerprint。采集、分支、配对及加载全链核对该身份。实际 seed、已读覆盖、编译选中排列及报价的 `pre_action_input` 一并保留。保留策略标定也使用当前格式采集的原生前缀轨迹。
 
@@ -298,4 +303,6 @@ C 固定 DAG 回放解析原始输出文本，新的生成响应用于实际 tok
 `/home/relay/songjiayun/ContextKV-joint-20261109/runs/study-20261109-joint/fit-v2/plan-gain.json`。
 本地 `runs/study-20261109-joint/asset-index.json` 保存哈希及开发指标，`gpu-summary.json` 保存真实分支摘要。
 
-资产使用 318 train / 86 dev 配对，其中新增改组配对为 4 train / 4 dev。四个构造任务的 12 个分支官方评分均为 1.0，DIRECT 均更快；开发平均目标相对 DIRECT 为 −0.00423。默认仍为 B6，未定价的保留使用 Native。联合接口待完成项见[架构](../architecture.md#待完成的联合接口)。
+资产使用 318 train / 86 dev 配对，其中新增改组配对为 4 train / 4 dev。四个构造任务的 12 个分支官方评分均为 1.0，DIRECT 均更快；开发平均目标相对 DIRECT 为 −0.00423。这是原 v2 运行结果，本轮代码修改不改变这些实测值。完整输入预留已更新，使用现有配对按上面的 CPU 刷新流程重新拟合后再加载 S3。默认仍为 B6，未定价的保留使用 Native。联合机制及成本范围见[架构](../architecture.md#联合决策的成本范围)。
+
+2026-11-09 本轮实现已接通 READ 改组的结论额度、完整已知输入与未来内容分配、ANSWER 来源需求，以及有界分支 callback 成本。合入 `2282c90` 的清理后，CPU 核心套件为 173 passed、5 subtests passed；LlamaIndex 测试因本次环境未安装可选依赖而跳过。作者版 ContextPilot 索引与 Controller 集成已执行。尚未运行本次改动对应的 Qwen/GPU 队列；下一步按现有配对刷新 B 资产，再执行既定完整队列，质量和 P95 由该次实测判断。

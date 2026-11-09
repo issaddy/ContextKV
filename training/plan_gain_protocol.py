@@ -202,6 +202,7 @@ class FixedCounterfactualRuntime:
         self.gap_result = None
         self.pre_action_quote = None
         self.pre_action_input = None
+        self.pre_action_completion_reserve = None
         self.compiled_route_steps = ()
         self.new_auxiliary_usage = dict(ZERO_AUX)
         self.new_step_ids = ()
@@ -252,21 +253,29 @@ class FixedCounterfactualRuntime:
             expected = 1 if self.planned.semantic_kind in {"read_once", "reduce_once"} else 0
             if len(pending) != expected:
                 raise ValueError("observed branch must contain exactly its registered new action")
+
+        def record_pre_action_reserve(task, candidate, batch):
+            if observed:
+                from controller.action_policy import route_completion_reserve
+                declared = replace(self.planned, context_plan=plan, route_steps=self.compiled_route_steps)
+                self.pre_action_completion_reserve = route_completion_reserve(
+                    declared, state, task, candidate, batch, template=template, snapshot=snapshot)[0]
+
         async def retrieve(request):
             nonlocal plan, state
-            from controller.execution import ReadingBudgetExceeded, require_online_tokens
+            from controller.execution import ReadingBudgetExceeded, require_completion
             if (observed and plan.budget.max_complete_ms is not None and
                     self.paid_cost.latency_ms+(time.monotonic()-arrived)*1000 > plan.budget.max_complete_ms):
                 raise ReadingBudgetExceeded("paid state plus bounded GAP exceeds complete latency")
-            if len(state.steps)+self.new_action_counts["GAP_RETRIEVAL"]+2 > plan.budget.max_steps:
-                raise ReadingBudgetExceeded("bounded GAP leaves no terminal ANSWER allocation")
-            require_online_tokens(plan.budget.max_total_tokens, plan.online_tokens_spent,
-                plan.answer_allocation.fixed_input_tokens+plan.budget.output_tokens, "bounded GAP")
+            reserve = require_completion(plan, state.results, plan.online_tokens_spent,
+                len(state.steps)+self.new_action_counts["GAP_RETRIEVAL"], None,
+                arrived=arrived, template=template, snapshot=snapshot, claims=state.claims)
             self.gap_request = request
             from controller.evidence_planner import _passages, close_dependencies
             from controller.execution import auxiliary_tokens, merge_auxiliary_usage
             if self.pre_action_quote is None:
                 self.pre_action_quote = {"batch": await engine.quote_batch((), template.fingerprint), "candidate_id": None}
+                self.pre_action_completion_reserve = reserve if observed else None
             tick = time.monotonic()
             self.new_action_counts["GAP_RETRIEVAL"] = 1
             read_base = gap_retrieval_plan(state, request)
@@ -295,8 +304,11 @@ class FixedCounterfactualRuntime:
             state = replace(state, plan=plan, auxiliary_usage=usage)
             plan = replace(plan, online_tokens_spent=plan.online_tokens_spent+auxiliary_tokens(pool.auxiliary_usage))
             state = replace(state, plan=plan)
-            require_online_tokens(plan.budget.max_total_tokens, plan.online_tokens_spent,
-                plan.answer_allocation.fixed_input_tokens+plan.budget.output_tokens, "bounded GAP and ANSWER")
+            # The current GAP is already in new_action_counts; reserve.steps
+            # includes that same action once, so exclude it from paid steps here.
+            require_completion(plan, state.results, plan.online_tokens_spent,
+                len(state.steps)+self.new_action_counts["GAP_RETRIEVAL"]-1, None,
+                arrived=arrived, template=template, snapshot=snapshot, claims=state.claims)
             events.emit("plan_gain_experimental_gap", attempt_id=attempt_id, **self.gap_result)
             return pool
         if self.planned.semantic_kind == "gap_retrieval":
@@ -414,7 +426,9 @@ class FixedCounterfactualRuntime:
                 self.compiled_route_steps = compile_route_steps(declared, state, snapshot, template,
                     output_budgets=self.action_domain["output_budgets"] if self.action_domain else outputs,
                     output_tokens_per_fact=self.action_domain["output_tokens_per_fact"] if self.action_domain else 64,
-                    request_compiler=executor.request_compiler, cache_scope=cache_scope)
+                    request_compiler=executor.request_compiler, cache_scope=cache_scope,
+                    compile_answers=compile_answers, answer_options=dict(layouts=(self.layout,),
+                        actions=(self.action,), representations=(self.planned.answer_representation,)))
                 quote_candidates = tuple({candidate.candidate_id: candidate
                     for candidate in (*variants, *(candidate for step in self.compiled_route_steps
                         for candidate in step.variants if candidate.feasible))}.values())
@@ -429,6 +443,7 @@ class FixedCounterfactualRuntime:
                     "batch": await engine.quote_batch((), template.fingerprint) if cpu else quote,
                     "candidate_id": None if cpu else candidate.candidate_id}
                 self.pre_action_input = candidate
+                record_pre_action_reserve(task, candidate, self.pre_action_quote["batch"])
             record = {"step_id": task.step_id, "fact_binding": task.input_claim_ids,
                 "actual_quote": to_jsonable(quote), "compiled_input": candidate,
                 "selection": "predeclared_semantic_branch_actual_compiler_choice",
@@ -469,6 +484,8 @@ class FixedCounterfactualRuntime:
         if self.planned.semantic_kind == "direct_answer":
             self.pre_action_quote = {"batch": quotes, "candidate_id": candidate.candidate_id}
             self.pre_action_input = candidate
+            task = next(step.task for step in self.planned.steps if step.task.kind == "ANSWER")
+            record_pre_action_reserve(task, candidate, quotes)
         events.emit("plan_gain_experimental_answer", attempt_id=attempt_id,
             planned_plan_id=self.planned.plan_id, actual_input_hash=candidate.input_hash,
             actual_quote=quotes, compiled_input=candidate,

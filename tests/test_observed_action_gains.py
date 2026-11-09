@@ -227,15 +227,17 @@ async def test_bounded_infer_bridge_reads_terminal_once_and_empty_gap_stops(tmp_
     assert len(calls) == (0 if existing_terminal or hard_steps == 2 else 1)
     assert run["new_action_counts"] == {"READ": 2 if terminal_material and hard_steps > 2 else 1,
         "REDUCE": 0, "GAP_RETRIEVAL": 0 if existing_terminal or hard_steps == 2 else 1, "ANSWER": 1}
+    from training.plan_gain_completion import completion_record, read_count_profile
+    before = json.loads((tmp_path/"bridge"/"before.json").read_text())
+    labelled = completion_record(before, run)
+    assert read_count_profile([labelled], scope="fixture")["groups"] == {
+        "read_once": {"with_infer": {"mean": run["new_action_counts"]["READ"], "samples": 1}}}
     if hard_steps == 2:
         assert len(run["steps"]) == 1
         assert {claim["entity"] for claim in run["steps"][0]["result"]["claims"]} == {"R1"}
         assert not any(step["step_id"].startswith("bounded-terminal:") for step in run["steps"])
     if terminal_material and hard_steps > 2:
         assert run["steps"][-1]["task"]["input_claim_ids"]
-        from training.plan_gain_completion import completion_record
-        before = json.loads((tmp_path/"bridge"/"before.json").read_text())
-        labelled = completion_record(before, run)
         assert 0 <= labelled["read_source_char_fraction"] <= 1
         assert labelled["read_original_characters"] == labelled["required_original_characters"]
         if existing_terminal:
