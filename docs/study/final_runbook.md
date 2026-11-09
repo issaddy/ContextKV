@@ -299,12 +299,3 @@ C 固定 DAG 回放解析原始输出文本，新的生成响应用于实际 tok
 本地 `runs/study-20261109-joint/asset-index.json` 保存哈希及开发指标，`gpu-summary.json` 保存真实分支摘要。
 
 资产使用 318 train / 86 dev 配对，其中新增改组配对为 4 train / 4 dev。四个构造任务的 12 个分支官方评分均为 1.0，DIRECT 均更快；开发平均目标相对 DIRECT 为 −0.00423。默认仍为 B6，未定价的保留使用 Native。联合接口待完成项见[架构](../architecture.md#待完成的联合接口)。
-
-增补改组标签沿用现有分支执行与官方评分：
-
-```bash
-python3 -m training.collect_regroup_gains --run-config READER.yaml \
-  --base-asset GAIN.json --official-checkout data/mtrag-official --output NEW_OUTPUT
-```
-
-`--resume-from PREVIOUS_OUTPUT` 复用已完成且已评分的整项任务，输出使用新目录。

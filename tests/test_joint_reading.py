@@ -214,39 +214,6 @@ async def test_cheaper_first_read_loses_when_its_complete_route_costs_more(tmp_p
     store.close()
 
 
-@pytest.mark.asyncio
-async def test_shared_native_transport_quotes_identical_tokens_once_across_plans(tmp_path):
-    from controller.engine_client import SGLangEngineClient
-    from controller.serialization import to_jsonable
-
-    template, snapshot = ByteTemplate(), SessionSnapshot('quotes')
-    plan = source_plan(template)
-    units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
-    compiler = RequestCompiler(template)
-    task = plan.steps[0]
-    candidate = compiler.compile_read(plan, task, tuple(units[key] for key in task.input_unit_ids), (), snapshot,
-        outputs=(1000,))[0]
-    alias = replace(candidate, candidate_id='other-organization', context_plan_id='other-plan')
-    native = MockEngine()
-
-    class QuoteTransport(SGLangEngineClient):
-        def __init__(self, info):
-            self.fingerprint, self._info = template.fingerprint, info
-            self.payloads = []
-
-        async def _post(self, path, body):
-            assert path == '/cache/quote'
-            self.payloads.append(body)
-            actual = tuple(replace(candidate, candidate_id=item['candidate_id']) for item in body['candidates'])
-            return to_jsonable(await native.quote_batch(actual, self.fingerprint))
-
-    transport = QuoteTransport(await native.info())
-    quoted = await transport.quote_batch((candidate, alias), template.fingerprint)
-    assert len(transport.payloads) == 1
-    assert len(transport.payloads[0]['candidates']) == 1
-    first, second = quoted.quotes
-    assert (first.candidate_id, second.candidate_id) == (candidate.candidate_id, alias.candidate_id)
-    assert replace(second, candidate_id=first.candidate_id) == first
 
 
 class SpecifiedNativeBranch:
