@@ -1121,7 +1121,10 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
                 if len(matching) == 1:
                     span_ids = [span.span_id for span in matching[0].source_spans]
             entity, number, unit = fact["e"], fact["v"], fact["u"]
-            if literal and task.kind == "READ" and any(literal in span_units[sid].text for sid in span_ids):
+            if wire_version == SHARED_NUMERIC_PROTOCOL_VERSION and task.kind == "READ":
+                if not literal or not any(literal in span_units[sid].text for sid in span_ids):
+                    values.append(None)
+                    continue
                 entity, number, unit = _excerpt_numeric_fact(literal, entity, number, unit)
             values.append({"need_id": memberships[0], "shared_need_ids": memberships[1:],
                 "text": excerpt,
@@ -1131,6 +1134,8 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
                 "parent_claim_ids": [parent_aliases[alias] for alias in fact["p"]], "followups": []})
     parsed, followups = [], []
     for index, value in enumerate(values):
+        if value is None:
+            continue
         if value["need_id"] not in task.need_ids:
             raise ValueError("claim need_id is outside the step")
         claim_spans = {span_id: spans[span_id] for span_id in value["span_ids"]}
