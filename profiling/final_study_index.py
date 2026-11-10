@@ -317,6 +317,7 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
     cells = []
     for row in rows:
         job = jobs[row["job"]]
+        factors = plan["method_factors"][row["method"]]
         missing = {name: track["missing_execution_task_ids"] for name, track in row["datasets"].items()}
         failed = {name: track["failed_task_ids"] for name, track in row["datasets"].items()}
         unscored = {name: track["unscored_answer_task_ids"] for name, track in row["datasets"].items()}
@@ -341,11 +342,12 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
         cells.append({**row, "evaluation_kind": "full_queue_own_P3", "source_file": str(path),
             "generation_dir": job["output"], "comparison_identity": comparison,
             "active_assets": {name: (plan["assets"].get(name) or {}).get("path") for name, active in (
-                ("gain", row["method"].startswith("S3_")), ("value", row["method"].endswith("_value")),
-                ("completion_timing", row["method"].startswith(("S3_", "Rule_"))),
-                ("demand_pricing", row["method"].endswith("_demand"))) if active}
-                | ({"compilation": plan["compilation_policy"]["checkout"]} if "_contextpilot" in row["method"] else {}),
-            "evaluation_factors": plan.get("method_factors", {}).get(row["method"]),
+                ("gain", factors["B"] == "gain"), ("value", factors["retention"] == "value"),
+                ("completion_timing", factors["B"] in {"gain", "rule"}),
+                ("demand_pricing", factors["retention"] == "demand")) if active}
+                | ({"compilation": plan["compilation_policy"]["checkout"]}
+                   if factors["compilation"] == "contextpilot" else {}),
+            "evaluation_factors": factors,
             "experiment_design": plan.get("experiment_design", "historical retention design"),
             "device_source_identity": device_source,
             "explicit_joint_scope": {"manifest": joint_scope["manifest"], "frozen_A": joint_scope["frozen_A"]}
@@ -369,20 +371,38 @@ def shared_asset_differences(left, right):
     return sorted(name for name in left.keys() & right.keys() if left[name] != right[name])
 
 
+def is_queue_reference(candidate, reference):
+    """Select whole-system references and controlled changes from recorded factors."""
+    if candidate["method"] == reference["method"]:
+        return False
+    current, base = candidate["evaluation_factors"], reference["evaluation_factors"]
+    if (base["role"] == "main_baseline"
+            or reference["method"] == candidate.get("acceptance_protocol", {}).get("baseline")):
+        return True
+    if current["dialogue"] != "contextkv":
+        return False
+    if base["role"] in {"external_reference", "historical_reference"}:
+        return current["role"] != "historical_reference"
+    changes = {name for name in current.keys() | base.keys()
+               if name != "role" and current.get(name) != base.get(name)}
+    directions = {
+        "B": {("fixed", "gain"), ("gain", "rule")},
+        "compilation": {("native", "contextpilot")},
+        "retention": {("native", "demand"), ("native", "value")},
+        "fact_reuse": {(False, True)},
+        "representation": {("existing", "finite")},
+        "numeric_record_projection": {(False, True)},
+    }
+    controlled = len(changes) == 1 or changes in (
+        {"B", "compilation"}, {"compilation", "retention"},
+        {"representation", "numeric_record_projection"})
+    return controlled and all((base.get(name), current.get(name)) in directions.get(name, ()) for name in changes)
+
+
 def full_queue_comparisons(cells):
     comparisons = []
-    references = {"E0_native": (), "B6_native": ("E0_native", "LlamaIndex_native"),
-        "S3_native": ("E0_native", "B6_native", "LlamaIndex_native"),
-        "B6_contextpilot": ("E0_native", "B6_native", "LlamaIndex_native"),
-        "S3_contextpilot": ("E0_native", "B6_native", "S3_native", "B6_contextpilot", "LlamaIndex_native",
-                              "S3_contextpilot_no_fact_reuse"),
-        "S3_contextpilot_joint_native": ("S3_contextpilot",),
-        "S3_contextpilot_joint_demand": ("S3_contextpilot_joint_native", "B6_native", "LlamaIndex_native"),
-        "Rule_contextpilot_joint_demand": ("S3_contextpilot_joint_demand",),
-        "LlamaIndex_native": (), "S3_contextpilot_no_fact_reuse": (),
-        "B6_value": ("B6_native",), "S3_value": ("S3_native", "B6_value")}
     for row in cells:
-        baselines = [other for other in cells if other["method"] in references.get(row["method"], ())
+        baselines = [other for other in cells if is_queue_reference(row, other)
                      and other["concurrency"] == row["concurrency"]
                      and queue_repetition(other) == queue_repetition(row)]
         for reference in baselines:
@@ -418,8 +438,8 @@ def full_queue_comparisons(cells):
                 latency_scope="delivered responses only; with incomplete delivery, P95 does not compare the complete declared queue",
                 cost_scope="each cell retains its paid native index, batch costs and whole workflow cost; nested scopes are not added",
                 scope=("registered E0 reference versus current method under shared reader, budgets, arrivals and own-P3 queue"
-                       if reference["method"] == "E0_native" else
-                       "same frozen A, reader budgets, arrivals and own-P3 queue; different actual histories permitted")))
+                       if reference["evaluation_factors"]["role"] == "historical_reference" else
+                       "same reader, data, resource budgets, arrivals and own-P3 queue; method-specific context management and actual histories")))
     return comparisons
 
 

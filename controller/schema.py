@@ -5,7 +5,7 @@ cache capacities are token slots, never reserved process memory.
 """
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass
+from dataclasses import dataclass
 
 from .context_schema import (EvidenceKey, EvidenceBlock, TaskState, EvidenceSet, SupportBundle,
                              AnswerPlan, Message as Message, ContextEpoch as ContextEpoch,
@@ -162,7 +162,6 @@ class PromptCandidate:
     fingerprint: ConfigFingerprint | None = None
     evidence_resolution: tuple[tuple[EvidenceKey, str], ...] = ()
     evidence_body_tokens: int | None = None
-    nonrequired_evidence_body_tokens: InitVar[int | None] = None
     context_plan_id: str = ""
     evidence_set_id: str = ""
     working_history_id: str = ""
@@ -184,7 +183,7 @@ class PromptCandidate:
     source_prefix_tokens: int = 0
     representation: str = "existing"
 
-    def __post_init__(self, nonrequired_evidence_body_tokens) -> None:
+    def __post_init__(self) -> None:
         _tuples(self, "messages", "input_ids", "evidence_spans", "evidence_resolution",
                 "read_unit_order", "source_ids")
         if self.source_body_token_ranges is not None:
@@ -192,22 +191,6 @@ class PromptCandidate:
         _references(self)
         object.__setattr__(self, "visible_blocks", frozenset(self.visible_blocks))
         object.__setattr__(self, "required_blocks", frozenset(self.required_blocks))
-
-
-@dataclass(frozen=True)
-class QuoteRequest:
-    request_id: str
-    snapshot_version: int
-    model_revision: str
-    tokenizer_hash: str
-    template_hash: str
-    namespace_hash: str
-    cache_salt: str | None
-    extra_key: str | None
-    candidates: tuple[PromptCandidate, ...]
-
-    def __post_init__(self) -> None:
-        _tuples(self, "candidates")
 
 
 @dataclass(frozen=True)

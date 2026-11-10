@@ -484,19 +484,19 @@ class StudyEvidenceProvider:
                     points = tuple(AnswerPoint(need.need_id, source_spans=tuple(span for support in selected.need_support
                         if support.need_id == need.need_id for span in support.source_spans)) for need in state.needs)
                     plan = replace(plan, answer_plan=AnswerPlan(points, selected.disposition))
-                if bindings:
+                # A complete current-source projection replaces partial old facts;
+                # an already complete reuse needs neither scanning nor another seed.
+                if (full_scope_read and active_state.needs
+                        and self.config.get("reading", {}).get("numeric_record_projection")):
+                    current = project_named_numeric_records(plan, snapshot)
+                if current is None and seed.results:
                     from controller.fact_reuse import apply_reuse_to_plan
-                    current = build_reuse_seed(plan, bindings, contracts, memory)
-                    current = apply_reuse_to_plan(plan, current, self.template, snapshot,
+                    current = apply_reuse_to_plan(plan, seed, self.template, snapshot,
                         output_tokens_per_fact=None if self.strategy == "Lmap" else
                             self.config.get("reading", {}).get("output_tokens_per_fact", 64))
+                if current is not None:
                     plan = current.plan
                     initial_outcomes.append(current)
-                elif full_scope_read and self.config.get("reading", {}).get("numeric_record_projection"):
-                    current = project_named_numeric_records(plan, snapshot)
-                    if current is not None:
-                        plan = current.plan
-                        initial_outcomes.append(current)
                 if support_model is not None and self._utility_mode() == "learned":
                     quality_started = time.perf_counter()
                     quality_material = quality_sets[selected.set_id]

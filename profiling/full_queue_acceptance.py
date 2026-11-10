@@ -58,18 +58,20 @@ def _gate_cell(cell, policy):
                      "pass": measured[name] <= limit if _number(measured[name]) else None}
               for name, limit in policy["resource_limits"].items()}
     passed = [limit["pass"] for limit in budget.values()]
+    slo = policy.get("p95_slo_ms")
     return {"measurement_complete": not reasons,
             "resource_budget_pass": False if False in passed else None if None in passed else True,
-            "measurement_reasons": reasons, "resource_limits": budget}
+            "measurement_reasons": reasons, "resource_limits": budget,
+            "p95_slo": {"limit": slo, "observed": cell["p95_complete_ms"],
+                        "pass": cell["p95_complete_ms"] <= slo
+                        if slo is not None and _number(cell["p95_complete_ms"]) else None}}
 
 
 def _pair_contract(cell):
     reader = dict(cell.get("reader_runtime") or {})
     if reader.get("model_scope") is not None:
         reader["model_scope"] = {name: value for name, value in reader["model_scope"].items() if name != "source_path"}
-    return (reader, cell["scorer_contracts"],
-            {name: sorted({row["resident_model_digest"] for row in group})
-             for name, group in cell["online_windows"].items()})
+    return reader, cell["scorer_contracts"]
 
 
 def _gate(point_met, interval_met, eligible, missing):
@@ -109,13 +111,17 @@ def evaluate_full_queue(cells):
             left, right = (arms[method][0] for method in methods)
             contract = _pair_contract(left)
             if contract != _pair_contract(right):
-                pair_issues.append({"replicate": slot, "reason": "reader_scorer_or_resident_A_differs"})
+                pair_issues.append({"replicate": slot, "reason": "reader_or_scorer_differs"})
                 continue
             assets = [left["active_assets"], right["active_assets"]]
             if any(assets[0][name] != assets[1][name] for name in assets[0].keys() & assets[1].keys()):
                 pair_issues.append({"replicate": slot, "reason": "shared_assets_differ"})
                 continue
-            contracts.add(json.dumps((contract, assets), sort_keys=True))
+            # Auxiliary models are part of each method. Keep each arm stable
+            # across repeats without requiring RAG to load ContextKV's helpers.
+            residents = [{name: sorted({row["resident_model_digest"] for row in windows})
+                          for name, windows in cell["online_windows"].items()} for cell in (left, right)]
+            contracts.add(json.dumps((contract, assets, residents), sort_keys=True))
             pairs.append((left, right))
         if len(contracts) > 1:
             pair_issues.append({"reason": "reader_scorer_or_assets_differ_across_replicates"})

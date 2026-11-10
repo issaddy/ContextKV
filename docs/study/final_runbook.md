@@ -31,6 +31,8 @@ python3 -m bench.cache_cooperation --config READER.yaml \
 
 普通基线与 LlamaIndex 复用统一引擎、来源投影和成本账本。普通基线配置 `execution.dialogue_mode: rag`，默认比较方法为 `RAG_native context_cache_demand LlamaIndex_native`。普通基线无需 LlamaIndex 依赖，首轮一次回答，追问一次检索改写再回答。恢复按原 SQLite 和实际请求 ID 继续，已经支付的步骤不重发；新的尝试使用新的请求命名空间。
 
+结果索引按运行清单中的方法因素识别比较和实际资产，所需实验格只包含本次选择的方法。主比较固定生成模型、评分与资源配置，各方法的辅助模型分别记录并在重复运行间保持一致。P95 的绝对 SLO 单列报告；质量/P95 的相对目标依据完整队列与资源预算评价，较慢基线超过 SLO 不会使比较失效。
+
 短端到端运行可在 `python3 -m bench.study evaluate` 的现有配置命令后加 `--methods METHOD --datasets DATASET --limit-conversations 1 --limit-turns 2 --unscored --output NEW_DIR`。按会话顺序运行前两轮，运行清单分别记录实际调度和完整声明队列。
 
 | 任务 | 当前入口 | 对照与产物 |

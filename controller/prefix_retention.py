@@ -841,7 +841,11 @@ class PrefixReadObserver:
                                 next((point for point in curve if point.horizon_seconds == horizon), None))
                             if forecast is None:
                                 continue
-                            per_page = max(0, forecast.target_saved_ms)*min(risk, boundary)/boundary/len(evictable_pages)
+                            # The forecast already prices this owner's boundary.
+                            # Divide it over that path, then apply the consumer's
+                            # at-risk share once, including for shorter owners.
+                            risk_share = min(1, risk/(len(evictable_pages)*page_size))
+                            per_page = max(0, forecast.target_saved_ms)/len(pages)*risk_share
                             forecasts.append(forecast)
                         else:
                             # Each causal page is credited to its first future

@@ -468,8 +468,8 @@ async def test_demand_priced_multiowner_counts_consumers_not_owner_window_sums(m
         {"mode": "demand", "ttl_seconds": 15, "protection_budget_tokens": 6})
     observer.runtime = SimpleNamespace(status=AsyncMock(return_value={"prefixes": ()}))
     observer.model = object()
-    observer._demand_forecast = lambda inspected, batch, horizon, boundary: PrefixForecast(horizon, 1, 100, 0,
-        0, 0, "scope", "paired", retention_control_ms=5,
+    observer._demand_forecast = lambda inspected, batch, horizon, boundary: PrefixForecast(horizon, 1,
+        100*boundary/inspected["boundary_tokens"], 0, 0, 0, "scope", "paired", retention_control_ms=5,
         native_window_cost_ms=20000, retained_window_cost_ms=0)
     chosen = []
     original_allocate = retention.allocate_retention
@@ -495,3 +495,60 @@ async def test_demand_priced_multiowner_counts_consumers_not_owner_window_sums(m
         replace(batch, quotes=(*batch.quotes, answer_quote)), page_size=2))["gap"]
     assert len(option.retain) == 1 and option.protected_tokens == 4
     assert option.retention_allocation_value_ms == 95 and option.retention_control_ms == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("pressure", "expected_value"), ((8, 88), (4, 68)))
+async def test_priced_short_owner_competes_at_its_own_boundary_value(pressure, expected_value):
+    from unittest.mock import AsyncMock
+    from controller.context_schema import (CompletionReceipt, ContextPlan, EvidenceSet, Need,
+        ReadResult, ReadTask, ReadingOutcome, StepRecord, TaskState)
+    from controller.plan_policy import PlanCandidate, PlanStep
+    from controller.prefix_retention import PrefixReadObserver
+    from controller.schema import CacheQuote, CacheQuoteBatch, PromptCandidate
+    from controller.templates import ByteTemplate
+
+    originals = {"short": (1, 2, 3, 4), "long": tuple(range(1, 9)), "other": (9, 10, 11, 12)}
+    old = tuple(ReadTask(name, "READ", ("n",)) for name in originals)
+    future = tuple(ReadTask(name, "READ", ("n",)) for name in ("next-long", "next-other"))
+    plan = ContextPlan("p", TaskState("t", "q", needs=(Need("n", operation="count"),)),
+        EvidenceSet("e", ()), steps=(*old, *future))
+    records = []
+    for task in old:
+        ids = originals[task.step_id]
+        receipt = CompletionReceipt(task.step_id, task.step_id, "epoch", 1, "restart",
+                                    token_hash(ids), "stop", True)
+        records.append(StepRecord("attempt", task.step_id, task, input_ids=ids, receipt=receipt, metrics={
+            "cache_config_hash": "cache",
+            "source_view": {"body_token_ranges": ((0, len(ids)),), "source_prefix_tokens": len(ids)},
+            "evidence_prefix": {"boundary_tokens": len(ids), "demand_observation": True,
+                                "source": task.step_id}}))
+    candidates, quotes = [], []
+    for task, source in zip(future, ("long", "other"), strict=True):
+        ids = originals[source]
+        candidates.append(PromptCandidate(task.step_id, "REBUILD", 0, (), ids, token_hash(ids),
+            frozenset(), frozenset(), output_budget=2,
+            source_body_token_ranges=((0, len(ids)),), source_prefix_tokens=len(ids)))
+        quotes.append(CacheQuote(task.step_id, token_hash(ids), len(ids), len(ids),
+            ready_gpu_prefix_tokens=len(ids), recoverable_prefix_tokens=len(ids),
+            evictable_gpu_prefix_tokens=len(ids)))
+    state = ReadingOutcome(plan, results=tuple(ReadResult(task.step_id) for task in old), steps=tuple(records))
+    batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 0, 0, tuple(quotes),
+        fingerprint=ByteTemplate().fingerprint, native_running_budget_tokens=pressure)
+    proposal = PlanCandidate("gap", "gap_retrieval", plan, (PlanStep(ReadTask("gap", "GAP")),), "reader",
+        route_steps=tuple(PlanStep(task, (candidate,)) for task, candidate in zip(future, candidates, strict=True)))
+    observer = PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
+        {"mode": "demand", "ttl_seconds": 15, "protection_budget_tokens": 8})
+    observer.runtime = SimpleNamespace(status=AsyncMock(return_value={"prefixes": ()}))
+    observer.model = object()
+    observer._demand_forecast = lambda inspected, batch, horizon, boundary: PrefixForecast(
+        horizon, 1, {"short": 40, "long": 80, "other": 50}[inspected["source"]], 0,
+        0, 0, "scope", "paired", retention_control_ms=1)
+
+    option = (await observer.demand_options((proposal,), state, "session", batch, page_size=2))["gap"]
+    # Two 4-token paths beat the single 8-token path under the same capacity.
+    # Full pressure: 40 + 50 - two owner calls; half pressure: 20 + 50 - two calls.
+    assert {lease.source_step_id for lease in option.retain} == {"short", "other"}
+    assert option.protected_tokens == 8
+    assert option.retention_allocation_value_ms == expected_value
+    assert option.retention_control_ms == 2

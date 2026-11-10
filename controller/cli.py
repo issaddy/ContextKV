@@ -5,8 +5,11 @@ import asyncio
 from dataclasses import replace
 import json
 from pathlib import Path
-from .config import create_controller, load_config
+import yaml
+from .config import RunConfig, create_controller, create_model_template, load_config
 from .serialization import dumps, to_jsonable
+from .session_store import SessionStore
+from .templates import ByteTemplate
 
 
 def main(argv=None):
@@ -33,7 +36,24 @@ def main(argv=None):
     recover.add_argument("--abandon", action="store_true")
     sub.add_parser("fingerprint", help="Print the model/template fingerprint for the engine patch")
     args = parser.parse_args(argv)
+    if args.command == "inspect":
+        if args.state_dir:
+            state_dir = args.state_dir
+        else:
+            settings = yaml.safe_load(Path(args.config).read_text(encoding="utf-8")) or {}
+            state_dir = settings.get("state_dir", RunConfig.state_dir)
+        store = SessionStore(Path(state_dir) / "sessions.sqlite3")
+        try:
+            print(json.dumps(to_jsonable(store.get_snapshot(args.session_id)), indent=2, ensure_ascii=False))
+        finally:
+            store.close()
+        return
     config = load_config(args.config)
+    if args.command == "fingerprint":
+        template = (ByteTemplate(namespace_hash=config.model.namespace_hash) if config.engine.kind == "mock"
+                    else create_model_template(config.model))
+        print(dumps(template.fingerprint))
+        return
     if args.state_dir:
         config = replace(config, state_dir=args.state_dir)
     system_prompt = args.system_prompt
@@ -53,18 +73,13 @@ def main(argv=None):
             corpus_id=args.corpus_id), host=args.host, port=args.port)
     else:
         service = create_controller(config)
-        if args.command == "inspect":
-            print(json.dumps(to_jsonable(service.store.get_snapshot(args.session_id)), indent=2, ensure_ascii=False))
-        elif args.command == "fingerprint":
-            print(dumps(service.template.fingerprint))
-        else:
-            async def recover_pending():
-                try:
-                    result = await service.recover(args.session_id, abandon=args.abandon)
-                    print(dumps(result))
-                finally:
-                    await service.aclose()
-            asyncio.run(recover_pending())
+        async def recover_pending():
+            try:
+                result = await service.recover(args.session_id, abandon=args.abandon)
+                print(dumps(result))
+            finally:
+                await service.aclose()
+        asyncio.run(recover_pending())
         service.store.close()
 
 if __name__ == "__main__":

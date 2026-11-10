@@ -3,6 +3,8 @@ from dataclasses import replace
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from adapters.evidence_pool import SourceDirectory
 from controller.context_schema import (ContextPlan, EvidenceClaim, EvidenceSet, Need, OpenNeed,
     ReadResult, ReadTask, ReadingOutcome, RetrievalState, StepRecord, TaskState, TextRef, VersionIntent)
@@ -84,6 +86,82 @@ def test_atomic_reuse_shares_facts_recomputes_views_and_never_copies_old_costs()
     assert pending and all(task.need_ids == ('count', 'sum') for task in pending)
     switched = replace(plan, task_state=replace(plan.task_state, version_intent=VersionIntent("explicit", version_ids=("v2",))))
     assert not build_reuse_seed(switched, (ReadReuse("sum", contracts[0].read_id, "complete"),), contracts, memory).claims
+
+
+@pytest.mark.parametrize("current_needs", (("count",), ()))
+def test_selected_source_reuse_keeps_shared_need_membership(current_needs):
+    from controller.context_budget import need_read_complete, required_source_units
+    from controller.reading import build_read_plan
+
+    memory, contracts, block = source_read()
+    count, total = Need("count", operation="count"), Need("sum", operation="sum")
+    state = TaskState("now", "Count and sum records.", needs=(count, total))
+    preliminary = ContextPlan("reuse", state, EvidenceSet("empty", ()))
+    seed = build_reuse_seed(preliminary, (ReadReuse("sum", contracts[0].read_id, "complete"),), contracts, memory)
+    current = replace(contracts[0].units[0], need_ids=current_needs, retrieval_score=9)
+    plan = build_read_plan(replace(state, needs=(count,)), EvidenceSet("current", (current,), source_blocks=(block,)),
+        "selected_sources", preliminary.budget, template=ByteTemplate())
+    plan = replace(plan, task_state=state)
+    applied = apply_reuse_to_plan(plan, seed, ByteTemplate(), SessionSnapshot("s"))
+    expected_needs = ("count", "sum") if current_needs else ()
+    assert applied.plan.selected_set.selected_units == (replace(current, need_ids=expected_needs),)
+    assert required_source_units(applied.plan, total)
+    assert need_read_complete(applied.plan, applied.results, total)
+    assert applied.plan.plan_id == plan.plan_id and applied.plan.coverage_units == plan.coverage_units
+    assert not applied.steps and applied.results == seed.results
+
+
+@pytest.mark.parametrize("mode", ("none", "facts", "complete"))
+def test_full_scope_numeric_projection_and_reuse_choose_one_complete_seed(mode):
+    from adapters.history_state import TaskInterpretation, TaskModelResult, TaskPrediction
+    from adapters.study_retrieval import StudyEvidenceProvider
+
+    template = ByteTemplate()
+    block = make_evidence("Shipment row: item SHIP-1; mass 5 g.\nShipment row: item SHIP-2; mass 0 g.",
+                          "shipments", version="v1")
+    directory = SourceDirectory(SimpleNamespace(blocks=(block,), source_metadata={}), None, template.tokenizer)
+    units = directory.full_scope((block.key,)).units
+    old = TaskState("old", "Read shipment masses.", needs=(Need("old:n", operation="sum"),), current_turn_id=1)
+    task = ReadTask("read:0", "READ", ("old:n",), tuple(unit.unit_id for unit in units))
+    atoms = tuple(EvidenceClaim(f"read:0:{index}", "old:n", "extract", line, value, "g",
+        source_spans=units[0].source_spans, entity=entity, relation="mass", version="v1")
+        for index, (line, entity, value) in enumerate(zip(block.text.splitlines(), ("SHIP-1", "SHIP-2"), ("5", "0"))))
+    result = ReadResult(task.step_id, atoms, task.input_unit_ids, task.need_ids)
+    receipt = CompletionReceipt("rid", "old-attempt", "engine", 1, "restart", "hash", "stop", True)
+    record = StepRecord("old-attempt", task.step_id, task, result=result, receipt=receipt)
+    old_plan = ContextPlan("old", old, EvidenceSet("old", units, source_blocks=(block,)), steps=(task,))
+    memory = RetrievalState(1, (TurnRecord(1, old.raw_question, "The masses are 5 g and 0 g."),), (old,),
+        source_index=directory, committed_readings=(("old-attempt", ReadingOutcome(old_plan, (result,), (record,), atoms)),))
+    contracts = read_contracts(memory)
+    question = "Count the items in the Shipment rows and sum their masses in g."
+
+    def ref(text):
+        start = question.index(text)
+        return TextRef(2, "user", start, start+len(text))
+
+    state = TaskState("current", question, needs=(
+        Need("count", operation="count", subject_refs=(ref("the Shipment rows"),), scope="all_supplied_documents"),
+        Need("sum", (ref("sum their masses in g"),), "sum", (ref("the Shipment rows"),),
+             scope="all_supplied_documents")), source_scope=(block.key,), current_turn_id=2)
+    prediction = TaskPrediction("followup", read_reuse=tuple(
+        ReadReuse(need.need_id, contracts[0].read_id, mode) for need in state.needs))
+    directory.task_interpreter = SimpleNamespace(interpret_result=lambda *_:
+        TaskInterpretation(state, TaskModelResult(prediction, read_contracts=contracts), {"task_model_ms": 0}))
+    serving = SimpleNamespace(corpus_snapshot_id="fixture", corpus_id="fixture", retrieval_state=lambda _: memory)
+    provider = StudyEvidenceProvider({"study": {"strategy": "B7"}, "selection": {"mode": "ranked"},
+        "reading": {"numeric_record_projection": True}}, template, serving, directory)
+    provider._usage_sources = lambda: ()
+    selection = provider._retrieve(SessionSnapshot("s", raw_history=memory.committed_history), question, "current",
+                                   supplied_blocks=(block,))
+    assert len(selection.initial_outcomes) == 1
+    outcome = selection.initial_outcomes[0]
+    assert len(outcome.claims) == 2
+    assert all(claim.serves("count") and claim.serves("sum") for claim in outcome.claims)
+    assert {task.step_id for task in outcome.plan.steps} == {result.step_id for result in outcome.results}
+    if mode == "complete":
+        assert all(task.step_id.startswith("policy:reuse:") for task in outcome.plan.steps)
+    else:
+        assert [task.operation for task in outcome.plan.steps] == ["record_projection"]
 
 
 def test_reused_bridge_preserves_gap_and_teacher_binds_only_visible_contracts():

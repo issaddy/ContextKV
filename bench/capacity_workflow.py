@@ -410,9 +410,10 @@ def prepare_full_queue(args, root):
         "required_concurrency": registered["concurrency"],
         "declared_qa": registered["declared_qa"], "declared_sessions": registered["declared_sessions"],
         "resource_limits": {name: matrix["resources"][name] for name in (
-            "gpu_capacity_tokens", "host_capacity_tokens", "p95_complete_ms", "max_online_tokens",
+            "gpu_capacity_tokens", "host_capacity_tokens", "max_online_tokens",
             "max_gpu_gib", "max_host_gib", "max_gpu_gib_seconds", "max_host_gib_seconds")
             if name in matrix["resources"]},
+        "p95_slo_ms": matrix["resources"].get("p95_complete_ms"),
         "confidence": matrix["selection"].get("confidence", .95),
         "bootstrap_samples": matrix["selection"].get("bootstrap_samples", 5000),
         "seed": matrix["seed"],
@@ -431,7 +432,7 @@ def prepare_full_queue(args, root):
                 "completion_timing": source_file(rolling_settings["completion_timing_asset"])
                 if completion_timing is not None else None},
         cohort=cohorts, workload_plans=workload_plans, acceptance=acceptance, replicate_id=args.replicate_id,
-        experiment_cells=FORMAL_CELLS,
+        experiment_cells={method: method for method in selected_methods},
         experiment_design="ordinary retrieval QA versus ContextKV and LlamaIndex; optional mechanism controls",
         method_factors={method["id"]: method["evaluation_factors"] for method in matrix["methods"]},
         external_retrievers=external_retrievers, external_reranker=args.external_reranker,

@@ -237,7 +237,13 @@ def apply_reuse_to_plan(plan, seed, template, snapshot, *, output_tokens_per_fac
         for span in spans:
             ranges[need_id].setdefault(span.source_key, []).append((span.start, span.end))
     units = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
-    units.update((unit.unit_id, unit) for unit in seed.plan.selected_set.selected_units if unit.unit_id not in units)
+    for unit in seed.plan.selected_set.selected_units:
+        current = units.get(unit.unit_id)
+        if current is None:
+            units[unit.unit_id] = unit
+        else:
+            need_ids = tuple(dict.fromkeys((*current.need_ids, *unit.need_ids))) if current.need_ids and unit.need_ids else ()
+            units[unit.unit_id] = replace(current, need_ids=need_ids)
     claims = {claim.claim_id: claim for claim in seed.claims}
     completed = {result.step_id for result in seed.results}
     imported = tuple(task for task in seed.plan.steps if task.kind == "READ" and task.step_id in completed)

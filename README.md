@@ -5,7 +5,7 @@
 实验固定 Qwen3-32B 权重与解码参数。
 
 业务入口 `DocumentQA` 贯通资料登记、HTTP 问答与 `bench.study`。
-`configs/study.yaml` 使用 `selection.mode: ranked` 按发布版重排与依赖闭包选材。`selection.mode: support` 用于支持模型对照。
+`configs/study.yaml` 使用 `selection.mode: ranked` 按实际检索相关性与依赖闭包选材。检索、查询适配与重排资产由 retriever 配置确定；`selection.mode: support` 用于支持模型对照。
 
 系统按实际问答历史、条件与版本选择原文，复用适用的原子事实，并编译原文、结论及混合表示。
 SGLang 原生报价参与选择下一步阅读、归约或回答，剩余证据需求决定哪些正文前缀应获得短租。
@@ -18,7 +18,9 @@ SGLang 原生报价参与选择下一步阅读、归约或回答，剩余证据�
 | C：请求编译与缓存协同 | `controller.request_compiler`、ContextPilot index/reorder、`controller.demand`、`controller.prefix_retention` |
 | 评价与总成本 | `bench.study_scoring`、`bench.reassess_saved`、`profiling.study_cost_ledger` |
 
-并发 1 和 4 各运行 E1–E6。E1–E4 交叉比较固定／收益决策与 Native／ContextPilot 编译，E5 增加有限表示选择，E6 再增加剩余需求驱动的保留。另有 LlamaIndex 外部参照和跨轮事实复用消融。各格共用 350 题、77 会话与固定到达计划，使用自身实际 P3 历史。验收以 E6 对 E1 的完整队列质量、完整响应 P95 和全部资源成本为准。
+默认在并发 1 和 4 比较普通文档问答 `RAG_native`、完整方案 `context_cache_demand` 与 `LlamaIndex_native`。各方法共用 350 题、77 会话、固定到达计划与资源配额，使用自身实际 P3 历史。目标是同预算提高最终质量，或同质量降低完整响应 P95，所有辅助计算与 GPU/Host 实际占用计入成本。
+
+缓存贡献按需比较 `context_native`、`context_cache_order`、`context_cache_demand`：上下文处理和计算能力相同，只改变缓存组织与需求保留。E1–E6、固定／收益阅读与关闭事实复用保留为机制对照，运行清单只列本次选择的方法。[当前结果与归因](docs/study/final_results.md)
 
 `numeric_need_isolation`、`whole_plan`、支持模型及 TTL/value 保留为显式对照入口，默认主线不加载它们。
 

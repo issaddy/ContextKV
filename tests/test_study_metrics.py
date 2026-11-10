@@ -121,13 +121,17 @@ def test_registered_joint_reference_survives_freeze_and_report(tmp_path):
 
 def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     import json
+    from bench.capacity_workflow import FULL_QUEUE_METHODS, OPTIONAL_FULL_QUEUE_METHODS, full_queue_method_specs
     from profiling.final_study_index import (full_queue_cells, full_queue_comparisons,
                                             full_queue_interactions, main, markdown)
 
+    specs = full_queue_method_specs((*FULL_QUEUE_METHODS, *OPTIONAL_FULL_QUEUE_METHODS),
+        {}, {'checkout': 'C'}, {'mode': 'value'}, rule_settings={})
     plan = dict(source_config={'path': 'A'}, source_matrix={'path': 'matrix'},
         source_arrival_plan={'path': 'arrivals-A'}, reader_profile_id='fixed', lambda_time=0,
         resource_scope={'gpu_devices': [0], 'gpu_capacity_tokens': 32768, 'host_capacity_tokens': 65536},
         assets={'gain': {'path': 'B'}, 'value': None},
+        method_factors={spec['id']: spec['evaluation_factors'] for spec in specs},
         jobs=[dict(name='job', output='generation', complete_slo_seconds=30)])
     plan_path = tmp_path / 'capacity-plan.json'
     plan_path.write_text(json.dumps(plan))
@@ -236,6 +240,19 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     plan_path.write_text(json.dumps(plan))
     assert full_queue_comparisons(e5 + cells(e6))[0]['incompatible_identity_fields'] == ['assets.completion_timing']
 
+    current = [cells({**row, 'method': method})[0] for method in (
+        'RAG_native', 'LlamaIndex_native', 'context_native', 'context_cache_order', 'context_cache_demand')]
+    pairs = {(item['candidate'], item['baseline']) for item in full_queue_comparisons(current)}
+    assert {('context_cache_demand', 'RAG_native'), ('context_cache_demand', 'LlamaIndex_native'),
+            ('context_cache_order', 'context_native'), ('context_cache_demand', 'context_cache_order'),
+            ('context_cache_demand', 'context_native')} <= pairs
+    assert current[-1]['active_assets'] == {'gain': 'B', 'completion_timing': 'timing',
+                                           'demand_pricing': 'pricing', 'compilation': 'C'}
+    # The recorded strategy, rather than its display name, defines the comparison.
+    renamed = [{**cell, 'method': 'renamed-'+cell['method']} for cell in current]
+    assert {(item['candidate'].removeprefix('renamed-'), item['baseline'].removeprefix('renamed-'))
+            for item in full_queue_comparisons(renamed)} == pairs
+
 
 def test_public_and_constructed_tables_keep_split_metrics_and_full_denominators():
     from bench.study_metrics import evaluation_track_protocol, declared_queue_summary
@@ -259,3 +276,56 @@ def test_public_and_constructed_tables_keep_split_metrics_and_full_denominators(
     assert track["queue_primary_score"] is None
     assert track["queue_score_bounds"] == pytest.approx([1/3, 1])
     assert track["scored_subset_primary"] == 1
+
+
+def test_full_queue_acceptance_allows_distinct_helpers_and_reports_slo_separately(tmp_path, monkeypatch):
+    from copy import deepcopy
+    from profiling import full_queue_acceptance as acceptance
+
+    matrix_path = tmp_path / "matrix.yaml"
+    matrix_path.write_text("{}")
+    monkeypatch.setattr("bench.capacity_workflow.declared_execution_rows", lambda _: ([], ()))
+    monkeypatch.setattr(acceptance, "declared_queue_quality_interval", lambda *_: {"interval": [0, 0]})
+    limits = dict(gpu_capacity_tokens=32768, host_capacity_tokens=65536, max_online_tokens=10000)
+    policy = dict(baseline="RAG_native", candidate="context_cache_demand", declared_qa=1,
+        resource_limits=limits, p95_slo_ms=120000, quality_improvement=.05,
+        quality_noninferiority=.002, p95_ratio=.85, seed=42, bootstrap_samples=20, confidence=.95)
+    common = dict(concurrency=1, comparison_identity={"resource_scope": {
+        "hardware": "same-device", "native_cache_config": "same-cache",
+        "gpu_capacity_tokens": 32768, "host_capacity_tokens": 65536}},
+        acceptance_protocol=policy, replicate_scope="queue", repetition=0, planned_repetitions=[0],
+        requested_qa=1, completed_qa=1, unexpected_execution_task_ids=[],
+        datasets={"loong": dict(declared=1, missing_execution_task_ids=[], unresolved_task_ids=[])},
+        queue_quality=.6, queue_quality_bounds=[.6, .6], scorer_contracts={"loong": "official"},
+        execution_status="completed", full_queue_delivered=True,
+        reader_runtime=dict(fingerprint="fixed-Qwen", sglang_commit="fixed-engine"),
+        online_occupancy=dict(hardware_only=True, physical_coverage=True, native_coverage=True,
+            gpu_peak_gib=10, host_peak_gib=10, gpu_gib_seconds=100, host_gib_seconds=100),
+        paid_native_usage={"online_token_ledger": dict(reasons=[], provider_phases=["answer"], total_tokens=1000),
+            "native_work": {name: {"unknown_calls": 0} for name in
+                            ("actual_prefill_tokens", "actual_host_loaded_tokens", "output_tokens")}},
+        queue_job={"matrix": str(matrix_path)}, required_experiment_cells={})
+
+    def arm(method, latency, resident, assets):
+        return {**deepcopy(common), "method": method, "generation_dir": method,
+            "p95_complete_ms": latency, "active_assets": assets,
+            "online_windows": {"loong": [{"resident_model_digest": resident,
+                "engine_pool": dict(gpu_capacity_tokens=32768, host_capacity_tokens=65536)}]}}
+
+    left = arm("RAG_native", 180000, "retriever-only", {})
+    right = arm("context_cache_demand", 120000, "retriever-and-task-helper", {"gain": "B"})
+    report = acceptance.evaluate_full_queue([left, right])[0]
+    assert report["paired_queues"] == 1 and not report["pair_issues"]
+    assert report["resource_budget_pass"] and report["measurement_complete"]
+    assert report["cells"]["RAG_native"]["p95_slo"]["pass"] is False
+    assert report["cells"]["context_cache_demand"]["p95_slo"]["pass"] is True
+    assert report["p95_ratio"] == pytest.approx(2/3)
+    assert report["latency_gate"] == "point_met_single_queue_descriptive"
+
+    # Method-specific helpers may differ between arms, but remain fixed within an arm.
+    repeats = [dict(deepcopy(cell), repetition=1, generation_dir=cell["generation_dir"]+"-r2")
+               for cell in (left, right)]
+    repeats[1]["online_windows"]["loong"][0]["resident_model_digest"] = "changed-task-helper"
+    changed = acceptance.evaluate_full_queue([left, right, *repeats])[0]
+    assert changed["paired_queues"] == 0
+    assert changed["pair_issues"][-1]["reason"] == "reader_scorer_or_assets_differ_across_replicates"

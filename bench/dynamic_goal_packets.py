@@ -8,17 +8,16 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from pathlib import Path
 
 from adapters.corpus import CorpusIndex
 from adapters.evidence_pool import SourceDirectory
-from bench.evidence_diagnosis import (ApplicableScopeReview, OracleAnnotations, RequirementWitnesses,
-                                     WitnessGroup, review_binding)
 from controller.config import create_model_template, load_config
-from controller.context_schema import Condition, ContextPlan, EvidencePool, Need, SourceSpan, TaskState, TextRef, VersionIntent
+from controller.context_schema import (Condition, ContextPlan, EvidenceKey, EvidencePool, Need,
+    SourceSpan, TaskState, TextRef, VersionIntent)
 from controller.evidence import make_evidence
 from controller.serialization import decode, to_jsonable
 
@@ -32,6 +31,48 @@ SCENARIOS = {
     "topic_switch": ("topic_switch",), "source_revisit": ("revisit",),
 }
 REQUIRED_SCENARIOS = ("follow_up", "condition_correction", "topic_switch", "revisit", "version_change")
+
+
+@dataclass(frozen=True)
+class WitnessGroup:
+    witness_id: str
+    spans: tuple[SourceSpan, ...]
+    review_record: str
+
+
+@dataclass(frozen=True)
+class RequirementWitnesses:
+    requirement_id: str
+    alternatives: tuple[WitnessGroup, ...]
+
+
+@dataclass(frozen=True)
+class OracleAnnotations:
+    task_id: str
+    task_state_digest: str
+    actual_history_digest: str
+    requirements: tuple[RequirementWitnesses, ...]
+    review_origin: str
+
+
+@dataclass(frozen=True)
+class ApplicableScopeReview:
+    scope_id: str
+    applicable_source_keys: tuple[EvidenceKey, ...]
+    reviewed_source_keys: tuple[EvidenceKey, ...]
+    review_records: tuple[str, ...]
+    reviewer: str
+    complete: bool
+
+
+def _digest(value):
+    return hashlib.sha256(json.dumps(to_jsonable(value), sort_keys=True,
+        ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def review_binding(plan, actual_history):
+    return {"task_id": plan.task_state.task_id, "task_state_digest": _digest(plan.task_state),
+            "actual_history_digest": _digest(actual_history)}
 
 
 def read_jsonl(path):
