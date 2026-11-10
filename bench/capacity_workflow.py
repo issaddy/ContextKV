@@ -580,14 +580,9 @@ def summarize_full_queue(job, *, native_path=None):
 
 
 def full_queue_occupancy(windows, physical, native):
-    """Integrate physical and native samples over the union of online windows."""
+    """Integrate unique global samples over the union of online windows."""
     from profiling.study_cost_ledger import merge_ranges
 
-    native_samples = [
-        sample for group in windows.values() for row in group
-        for sample in json.loads(Path(row["source"]).with_name("native_resources.json").read_text())["samples"]
-    ]
-    native = {**native, "samples": native_samples, "errors": []}
     merged = merge_ranges((row["start"], row["end"]) for rows in windows.values() for row in rows)
     physical_costs, native_costs, device_coverage = [], [], []
     for start, end in merged:
