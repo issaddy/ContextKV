@@ -18,6 +18,8 @@ from .templates import ByteTemplate
 READ_PROTOCOL_VERSION = 4
 SHARED_NUMERIC_PROTOCOL_VERSION = 5
 NUMERIC_SELECT_PROTOCOL_VERSION = 7
+NUMERIC_LITERAL = r"(?<![A-Za-z0-9_])[+-]?(?:\d+(?:[.,]\d+)*|\.\d+)(?:[eE][+-]?\d+)?"
+SOURCE_IDENTIFIER = r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9_-]*\d[A-Za-z0-9_-]*(?![A-Za-z0-9_])"
 CLAIM_WIRE_FIELDS = {"need_id": "n", "text": "t", "entity": "e", "relation": "r",
     "value": "v", "unit": "u", "conditions": "c", "span_ids": "s",
     "parent_claim_ids": "p", "followups": "f"}
@@ -197,8 +199,7 @@ def _string_array(values=None):
 
 
 def source_identifiers(units):
-    return tuple(dict.fromkeys(match.group() for unit in units for match in re.finditer(
-        r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9_-]*\d[A-Za-z0-9_-]*(?![A-Za-z0-9_])", unit.text)))
+    return tuple(dict.fromkeys(match.group() for unit in units for match in re.finditer(SOURCE_IDENTIFIER, unit.text)))
 
 
 def numeric_read_scopes(state, units):
@@ -263,9 +264,8 @@ def shared_numeric_schema(task, schema, units, claims, numeric_identity):
         schema["properties"]["claims"]["items"]["properties"]["need_id"]["enum"] = regular
     else:
         schema["properties"]["claims"]["maxItems"] = 0
-    number = r"(?<![A-Za-z0-9_])[+-]?(?:\d+(?:[.,]\d+)*|\.\d+)(?:[eE][+-]?\d+)?"
     literals = tuple(dict.fromkeys(match.group() for unit in units
-                                  for match in re.finditer(number, unit.text)))
+                                  for match in re.finditer(NUMERIC_LITERAL, unit.text)))
     properties = {
         "s": {**_string_array(tuple(sources)), "minItems": 1},
         "t": {"type": "string"},
@@ -1029,6 +1029,29 @@ def advance_read_plan(plan, results, budget=None):
     return tuple(reductions)
 
 
+def _excerpt_numeric_fact(excerpt, entity, value, unit):
+    """Bind the record identifier and quantity to their verified source excerpt."""
+    from .reduction import UNIT_FACTORS
+
+    if re.fullmatch(SOURCE_IDENTIFIER, entity):
+        matches = {key for key in re.findall(SOURCE_IDENTIFIER, excerpt) if key.startswith(entity)}
+        if len(matches) == 1:
+            entity = next(iter(matches))
+    if value is None:
+        return entity, value, unit
+    text = excerpt.replace(entity, " ") if entity else excerpt
+    units = {name for name in UNIT_FACTORS if name and name != "1"}
+    if unit:
+        units.add(unit)
+    suffix = "|".join(re.escape(name) for name in sorted(units, key=lambda name: (-len(name), name)))
+    candidates = {(match[1], match[2]) for match in re.finditer(
+        rf"({NUMERIC_LITERAL})\s*({suffix})(?!\w)", text)
+        if not unit or UNIT_FACTORS.get(match[2], match[2]) == UNIT_FACTORS.get(unit, unit)}
+    if len(candidates) == 1:
+        value, unit = next(iter(candidates))
+    return entity, value, unit
+
+
 def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_tokens=0, output_tokens=0):
     data = json.loads(text)
     wire_version = data.get("format_version", 1)
@@ -1097,10 +1120,13 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
                             and (not unit.need_ids or set(memberships) <= set(unit.need_ids))]
                 if len(matching) == 1:
                     span_ids = [span.span_id for span in matching[0].source_spans]
+            entity, number, unit = fact["e"], fact["v"], fact["u"]
+            if literal and task.kind == "READ" and any(literal in span_units[sid].text for sid in span_ids):
+                entity, number, unit = _excerpt_numeric_fact(literal, entity, number, unit)
             values.append({"need_id": memberships[0], "shared_need_ids": memberships[1:],
                 "text": excerpt,
-                "entity": fact["e"], "relation": fact["r"], "value": fact["v"],
-                "unit": fact["u"], "conditions": scope.condition_ids,
+                "entity": entity, "relation": fact["r"], "value": number,
+                "unit": unit, "conditions": scope.condition_ids,
                 "span_ids": span_ids,
                 "parent_claim_ids": [parent_aliases[alias] for alias in fact["p"]], "followups": []})
     parsed, followups = [], []
