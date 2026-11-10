@@ -16,6 +16,7 @@ import resource
 import signal
 import subprocess
 import sys
+from tempfile import TemporaryFile
 import time
 from types import SimpleNamespace
 from urllib.parse import urlparse
@@ -755,12 +756,10 @@ async def run(args):
             else:
                 command += ["--datasets", "dynamic_goal_dev", "--workload-plan", job["workload"],
                             "--goal-policy", job["goal_policy"], "--unscored"]
-            directory = root/"jobs"/job["name"]
-            directory.mkdir(parents=True, exist_ok=True)
             record = {**job, "command": command, "status": "running", "started_s": time.monotonic()}
-            with (directory/"process.log").open("wb") as log:
+            with TemporaryFile() as errors:
                 process = await asyncio.create_subprocess_exec(*command, cwd=Path(args.project_root).resolve(),
-                    stdout=log, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+                    stdout=asyncio.subprocess.DEVNULL, stderr=errors, start_new_session=True)
                 record["pid"] = process.pid
                 state["jobs"].append(record)
                 write_json(root/"workflow.json", state)
@@ -773,6 +772,12 @@ async def run(args):
                 except asyncio.CancelledError:
                     stopped = state["status"] = "interrupted"
                     code = await interrupt_job(process)
+                if code and stopped is None:
+                    errors.seek(0, os.SEEK_END)
+                    errors.seek(max(0, errors.tell()-1024))
+                    lines = errors.read().decode(errors="replace").strip().splitlines()
+                    if lines:
+                        record["error"] = lines[-1]
             record.update(returncode=code, ended_s=time.monotonic(),
                           status=stopped or ("completed" if code == 0 else "failed_with_existing_raw_preserved"))
             summary = summarize_full_queue(job) if args.full_queue else summarize_job(job)
@@ -782,7 +787,6 @@ async def run(args):
                 summary["execution_status"] = record["status"]
                 summary["reader_runtime"] = {name: native_runtime["engine"].get(name)
                     for name in ("fingerprint", "model_scope", "protocol_version", "sglang_commit")}
-            write_json(directory/"capacity-summary.json", summary)
             state["results"].append(summary)
             write_json(root/"workflow.json", state)
             print(json.dumps({"job": job["name"], "status": record["status"],
@@ -807,7 +811,6 @@ async def run(args):
             for summary in state["results"]:
                 summary["online_occupancy"] = full_queue_occupancy(
                     summary["online_windows"], physical_observation, native_observation)
-                write_json(root/"jobs"/summary["job"]/"capacity-summary.json", summary)
         child_end = resource.getrusage(resource.RUSAGE_CHILDREN)
         series, coverage = pool_series(native.observation(), started, end)
         write_json(root/"capacity-cost.json", dict(format=("contextkv_full_queue_joint_cost_v1" if args.full_queue

@@ -578,8 +578,6 @@ class ReadingExecutor:
                 "phase_window": {"start": phase_started, "end": step_ended,
                     "clock": "client_monotonic", "scope": "step_wall"} if phase_started is not None else None})
             self.store.save_execution_step(record, "COMPLETE")
-            if self.events is not None:
-                self.events.emit("reading_step_complete", attempt_id=attempt_id, step=record)
         return record
 
     async def execute_reads(self, attempt_id, snapshot, plan, *, initial_auxiliary_usage=None,

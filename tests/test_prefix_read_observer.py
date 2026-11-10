@@ -166,15 +166,12 @@ def test_source_demand_uses_retained_body_pages_in_a_longer_consumer():
 
 
 def test_ttl_arms_do_not_replace_independent_groups_or_publish_an_empty_model(tmp_path):
-    from profiling.retention_trace import digest, fit
+    from profiling.retention_trace import fit
 
     first = paired_model_rows(native_ms=100, retained_ms=20)[0]
-    report_path = tmp_path/"native-report.json"
-    report_path.write_text('{}')
     rows = [{**first, "horizon_seconds": ttl, "event_id": "read", "split": "train",
         "source": "hardware", "scope": "actual_source_first_single_prefix_intervention",
-        "partition_eligible": True, "training_eligible": True, "source_body_page_count": 1,
-        "reports": {"native": str(report_path)}, "report_digests": {"native": digest({})}}
+        "partition_eligible": True, "training_eligible": True, "source_body_page_count": 1}
         for ttl in (15, 60, 180)]
     records = tmp_path/"pairs.jsonl"
     records.write_text(''.join(json.dumps(row)+'\n' for row in rows))

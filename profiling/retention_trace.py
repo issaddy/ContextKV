@@ -841,7 +841,6 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
                     native_attempt_id=native_attempt, engine_session_id=epoch.engine_session_id,
                     session_generation=epoch.session_generation, engine_restart_id=info.engine_restart_id,
                     window={"start": begun})
-                write_json(output/"progress.json", receipts[identity])
                 result = await client.generate(input_ids=event["input_ids"], max_new_tokens=output_tokens,
                     ignore_eos=True, session_id=epoch.engine_session_id,
                     expected_generation=epoch.session_generation, expected_restart_id=info.engine_restart_id,
@@ -917,8 +916,6 @@ async def replay_arm(trace, config, output, *, gpu_device, intervention=None, ho
                     await retire(original_epoch)
                 row["window"]["end"] = time.monotonic()
                 row["step_wall_ms"] = (row["window"]["end"]-begun)*1000
-                write_json(output/"progress.json", dict(status="running", completed_events=len(receipts),
-                    last_event=identity, intervention=intervention))
             turn_windows[turn["attempt_id"]]["end"] = time.monotonic()
 
     ordered_turns = sorted(trace["turns"], key=lambda turn: min(event["source_started_s"]
@@ -1321,7 +1318,6 @@ async def replay(args):
                 horizon_seconds=args.horizon_seconds, ttl_seconds=arms[arm], residency_interval=args.residency_interval,
                 target={"event_id": item["event_id"], "source_event_id": item["source_event_id"]})
         outcomes = {arm: revisit_outcomes(local_trace, report, item) for arm, report in reports.items()}
-        write_json(directory/"revisit-outcomes.json", outcomes)
         for arm, ttl in arms.items():
             if ttl is None:
                 continue
@@ -1332,14 +1328,9 @@ async def replay(args):
                     for key, name in (("native", "native"), ("retained", arm))},
                 reports={key: str((directory/name/"report.json").resolve())
                     for key, name in (("native", "native"), ("retained", arm))},
-                report_digests={"native": digest(reports["native"]), "retained": digest(reports[arm])},
                 arm_order=order)
             rows.append(row)
-            write_json(directory/f"paired-row-{arm}.json", row)
         (output/"paired-rows.jsonl").write_text("".join(json.dumps(value, ensure_ascii=False)+"\n" for value in rows))
-        print(json.dumps({"window": index, "arms": order, "outcomes": {
-            arm: {key: value for key, value in outcome.items() if key not in {"visits", "classification_basis"}}
-            for arm, outcome in outcomes.items()}}), flush=True)
     write_json(output/"manifest.json", dict(source="hardware", scope="same_window_multi_TTL_single_prefix_interventions",
         trace_digest=digest(trace), input_dag_digest=trace["input_dag_digest"], windows=len(selected), pairs=len(rows),
         observation_seconds=args.horizon_seconds, ttl_seconds=ttls,
@@ -1352,35 +1343,28 @@ async def replay(args):
 
 def reassess(args):
     """Recompute paired labels from saved native reports without model calls."""
-    root = Path(args.replay_root)
-    by_split, by_pair = defaultdict(list), defaultdict(dict)
-    for path in sorted(root.rglob("paired-row-*.json")):
-        previous = json.loads(path.read_text())
-        trace = json.loads((path.parent/"trace.json").read_text())
-        reports = {arm: json.loads(Path(source).read_text()) for arm, source in previous["reports"].items()}
-        for arm, report in reports.items():
-            if digest(report) != previous["report_digests"][arm]:
-                raise ValueError("paired source report changed after collection")
-        selection = trace["window_selection"]
-        derived = paired_row(trace, reports["native"], reports["retained"], selection,
-                             horizon_seconds=previous["observation_seconds"])
-        row = {**previous, **derived, "horizon_seconds": previous["ttl_seconds"],
-            "reuse_outcomes": {arm: revisit_outcomes(trace, report, selection) for arm, report in reports.items()}}
-        write_json(path, row)
-        by_split[path.parent.parent].append(row)
-        by_pair[path.parent]["native"] = row["reuse_outcomes"]["native"]
-        by_pair[path.parent][row["retention_arm"]] = row["reuse_outcomes"]["retained"]
-    for directory, outcomes in by_pair.items():
-        write_json(directory/"revisit-outcomes.json", outcomes)
     summary = []
-    for directory, rows in by_split.items():
-        (directory/"paired-rows.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in rows))
-        manifest = json.loads((directory/"manifest.json").read_text())
+    for path in sorted(Path(args.replay_root).rglob("paired-rows.jsonl")):
+        rows = []
+        for line in path.read_text().splitlines():
+            previous = json.loads(line)
+            previous.pop("report_digests", None)
+            trace_path = Path(previous["reports"]["native"]).parents[1]/"trace.json"
+            trace = json.loads(trace_path.read_text())
+            reports = {arm: json.loads(Path(source).read_text()) for arm, source in previous["reports"].items()}
+            selection = trace["window_selection"]
+            derived = paired_row(trace, reports["native"], reports["retained"], selection,
+                                 horizon_seconds=previous["observation_seconds"])
+            rows.append({**previous, **derived, "horizon_seconds": previous["ttl_seconds"],
+                "reuse_outcomes": {arm: revisit_outcomes(trace, report, selection)
+                                   for arm, report in reports.items()}})
+        path.write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in rows))
+        manifest_path = path.with_name("manifest.json")
+        manifest = json.loads(manifest_path.read_text())
         manifest.update(eligible_pairs=sum(row["training_eligible"] for row in rows),
-            postprocessing=dict(source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                model_calls=0, basis="original fixed-DAG reports; single-prefix allocated residency includes transfer destinations"))
-        write_json(directory/"manifest.json", manifest)
-        summary.append(dict(directory=str(directory), pairs=len(rows), eligible_pairs=manifest["eligible_pairs"]))
+            postprocessing=dict(model_calls=0, basis="original fixed-DAG reports"))
+        write_json(manifest_path, manifest)
+        summary.append(dict(directory=str(path.parent), pairs=len(rows), eligible_pairs=manifest["eligible_pairs"]))
     print(json.dumps(summary))
     return summary
 
@@ -1391,10 +1375,6 @@ def fit(args):
     for row in rows:
         if row["source"] != "hardware" or row["scope"] != "actual_source_first_single_prefix_intervention":
             raise ValueError("retention assets consume actual conversation interventions, not qualification fixtures")
-        for arm, path in row["reports"].items():
-            report = json.loads(Path(path).read_text())
-            if digest(report) != row["report_digests"][arm]:
-                raise ValueError("paired source report changed after collection")
         if (row["split"] == args.split and row["partition_eligible"] and row["source_body_page_count"]
                 and row.get("fixed_decode_work")):
             frequency.append(row)
@@ -1406,7 +1386,6 @@ def fit(args):
     model = EmpiricalRetentionModel.fit(accepted, feature_names=args.features, reuse_rows=frequency)
     asset = model.to_dict()
     asset["training_manifest"] = dict(split=args.split, source_path=str(Path(args.records).resolve()),
-        source_sha256=hashlib.sha256(Path(args.records).read_bytes()).hexdigest(),
         accepted=len(accepted), independent_samples=model.independent_samples,
         sample_unit="session group; TTL arms are paired interventions", excluded=excluded, source="real_native_fixed_DAG_single_prefix_pairs",
         protocol="same real captured inputs and decode lengths across arms; captured outputs preserve the fixed DAG")

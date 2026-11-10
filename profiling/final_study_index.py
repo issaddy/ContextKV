@@ -102,7 +102,7 @@ def import_records(specs):
     files, missing = expanded(specs)
     indexed, provenance, duplicate, conflicts, unsupported = {}, [], [], set(), []
     for cohort, path in files:
-        provenance.append(dict(cohort=cohort, **identity(path)))
+        provenance.append(dict(cohort=cohort, path=str(path)))
         payload = load(path)
         rows = payload if isinstance(payload, list) else payload.get("results", [payload])
         for ordinal, raw in enumerate(rows):
@@ -114,11 +114,11 @@ def import_records(specs):
                 task_id=raw["task_id"], conversation_id=raw.get("conversation_id"), status=raw["status"],
                 metrics=metric_fields(raw.get("metrics", {})), cost=raw.get("cost", {}),
                 question=raw.get("question"), actual_history=raw.get("actual_history"),
-                answer_sha256=hashlib.sha256(raw["answer"].encode()).hexdigest() if isinstance(raw.get("answer"), str) else None,
+                answer=raw.get("answer"),
                 source_files=[str(path)])
             if key in indexed:
                 old = indexed[key]
-                agreement = (old["status"] == row["status"] and old["answer_sha256"] == row["answer_sha256"]
+                agreement = (old["status"] == row["status"] and old["answer"] == row["answer"]
                     and all(old["metrics"][name] == row["metrics"][name] for name in old["metrics"].keys() & row["metrics"].keys()))
                 if not agreement:
                     conflicts.add(key)
@@ -178,7 +178,7 @@ def paired_tables(specs):
     paths, missing = expanded(specs)
     rows, sources = [], []
     for label, path in paths:
-        sources.append(dict(label=label, **identity(path)))
+        sources.append(dict(label=label, path=str(path)))
         payload = load(path)
         for row in payload if isinstance(payload, list) else [payload]:
             rows.append({**row, "index_label": label, "source_file": str(path)})
@@ -186,7 +186,7 @@ def paired_tables(specs):
         "cache_scope_hash", "sampling_weight", "full_window_cost_difference_ms", "target_revisit_cost_difference_ms",
         "target_cost_rule", "target_cache_work_changed", "target_revisit_step_wall_difference_ms",
         "collateral_and_initial_control_cost_difference_ms", "retention_control_ms", "physical_cost",
-        "native_prefix_residency", "retained_prefix_residency", "reports", "report_digests")
+        "native_prefix_residency", "retained_prefix_residency", "reports")
     return rows, dict(files=sources, unmatched=missing, rows=[{name: row[name] for name in fields if name in row}
         | {"index_label": row["index_label"], "source_file": row["source_file"]} for row in rows])
 
@@ -216,7 +216,7 @@ def retention_validation(models, paired):
         weight = sum(item[0] for item in values)
         policy = sum(w*actual if choice > 0 else 0 for w, _, choice, actual in values)/weight if values else None
         full = [(w, predicted, actual) for w, predicted, _, actual in values if predicted is not None]
-        result.append(dict(model=name, **identity(path), fit_split=raw["training_manifest"]["split"],
+        result.append(dict(model=name, path=str(path), fit_split=raw["training_manifest"]["split"],
             evaluation_split="dev", eligible_pairs=len(dev), matched_pairs=len(values),
             independent_samples=len(components), matched_independent_samples=len(matched_groups),
             prediction_coverage=len(values)/len(dev) if dev else None, unmatched_event_ids=unmatched,
@@ -499,10 +499,10 @@ def full_queue_track_tables(cells):
 def markdown(report):
     lines = ["# ContextKV 最终产物索引", "", f"评审基线：`{report['baseline_commit']}`。",
         "仅从指定产物读取已有评分与费用，按原指标名称作算术汇总；缺失值不补零。", "",
-        "## 产物", "", "| 标签 | 文件 | 状态 / 类型 | SHA256 |", "|---|---|---|---|"]
+        "## 产物", "", "| 标签 | 文件 | 状态 / 类型 |", "|---|---|---|"]
     for item in report["artifacts"]:
         summary = item["summary"]
-        lines.append(f"| {item['label']} | `{item['path']}` | {summary.get('status', summary.get('format', summary.get('kind', 'indexed')))} | `{item['sha256']}` |")
+        lines.append(f"| {item['label']} | `{item['path']}` | {summary.get('status', summary.get('format', summary.get('kind', 'indexed')))} |")
     lines += ["", "## 已有逐题结果", "", "| cohort / 数据 / split | 方法 | 完成 / 已记录 | 已有指标均值（评分分母） | P95 ms |", "|---|---|---:|---|---:|"]
     for row in report["record_summaries"]:
         metrics = "; ".join(f"{name}={value['mean']:.6g} ({value['scored_rows']}/{value['completed_rows']})"
@@ -625,7 +625,7 @@ def main(argv=None):
     paths, missing = expanded(args.artifact)
     for label, path in paths:
         value = load(path)
-        artifacts.append(dict(label=label, **identity(path), summary=artifact_summary(value)))
+        artifacts.append(dict(label=label, path=str(path), summary=artifact_summary(value)))
         indexed, comparisons = capacity_tables(value, path)
         capacity.extend(indexed)
         capacity_comparisons.extend(comparisons)
@@ -636,7 +636,7 @@ def main(argv=None):
     capacity_comparisons.extend(full_queue_comparisons(full_cells))
     for path in args.cost_ledger:
         value = load(path)
-        ledgers.append({**identity(path), "physical_total": value["physical_total"],
+        ledgers.append({"path": str(Path(path).resolve()), "physical_total": value["physical_total"],
             "native_tokens": value.get("native_tokens"), "resource_window": value.get("resource_window")})
     rows, record_import = import_records(args.records)
     summaries, comparisons = record_tables(rows, dict(item.split("=", 1) for item in args.baseline))

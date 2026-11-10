@@ -359,7 +359,7 @@ class RollingPlanRuntime:
             if record.task.kind == "GAP" and stage in {"RESULT_READY", "COMPLETE"}]
         return merge_auxiliary_usage(dict(ZERO_AUX), *usage)
 
-    async def _finish_gap(self, record, pool, state, snapshot, template, executor, expanded, events):
+    async def _finish_gap(self, record, pool, state, snapshot, template, executor, expanded):
         from .action_proposals import GapRetrievalRequest, claim_predecessor_steps, gap_retrieval_plan
         from .context_budget import bind_answer_window
         from .evidence_planner import _passages, close_dependencies
@@ -422,8 +422,6 @@ class RollingPlanRuntime:
         state = replace(state, plan=_with_observed_sources(plan, state))
         executor.store.save_reading_progress(record.attempt_id, state.plan,
             ReadingProgress(tuple(sorted(expanded)), (), usage), completed_step=complete)
-        events.emit("rolling_gap_complete", attempt_id=record.attempt_id, step=complete,
-                    returned_unit_ids=tuple(unit.unit_id for unit in pool.units))
         return state
 
     async def _run_gap(self, attempt_id, task, request, state, snapshot, template, executor, expanded,
@@ -450,7 +448,7 @@ class RollingPlanRuntime:
             metrics={**record.metrics, "auxiliary_usage": pool.auxiliary_usage,
                 "phase_window": {"start": tick, "end": ended, "clock": "client_monotonic", "scope": "gap_retrieval"}})
         executor.store.save_execution_step(record, "RESULT_READY")
-        return await self._finish_gap(record, pool, state, snapshot, template, executor, expanded, events)
+        return await self._finish_gap(record, pool, state, snapshot, template, executor, expanded)
 
     def proposals(self, context_plans, state, snapshot, template, compile_answers, *,
                   request_compiler=None, cache_scope=None):
@@ -593,7 +591,7 @@ class RollingPlanRuntime:
                             import json
                             pool = decode(EvidencePool, json.loads(record.result.raw_output))
                             state = await self._finish_gap(record, pool, state, snapshot, template,
-                                executor, expanded, events)
+                                executor, expanded)
                             context_plans = (state.plan,)
                             continue
                         raise ValueError("selected GAP was already submitted; it will not be paid again")
