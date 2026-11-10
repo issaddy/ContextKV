@@ -378,7 +378,7 @@ def retrieval_state(snapshot, source_index):
 
 
 
-TASK_NEED_SEMANTICS_VERSION = "task_need_semantics_v6_distinct_results"
+TASK_NEED_SEMANTICS_VERSION = "task_need_semantics_v7_compact_scope"
 TASK_NEED_SEMANTICS = (
     "Every Need must cite at least one actual visible request anchor. Every materialized condition "
     "must cite an actual key, value or predicate; a removal must cite its update predicate. "
@@ -630,6 +630,7 @@ def teacher_task_payload(turn, windows, memory, prior_tasks, catalogue, contract
     prior_view = to_jsonable(tuple(latest.values()))
     for item in prior_view:
         item["task_id"] = task_alias[item["task_id"]]
+        item["has_supplied_sources"] = bool(item.pop("source_scope"))
         for condition in item["conditions"]:
             condition["condition_id"] = condition_alias[condition["condition_id"]]
             condition["target_refs"] = [condition_alias[identity] for identity in condition["target_refs"]]
@@ -676,7 +677,7 @@ def teacher_task_payload(turn, windows, memory, prior_tasks, catalogue, contract
         "prior_states": prior_view,
         "prior_predecessor_needs": [alias_need(to_jsonable(need)) for identity, need in needs.items()
                                     if identity not in active_needs],
-        "source_scope": to_jsonable(getattr(memory.source_index, "observed_source_scope", ())),
+        "has_supplied_sources": bool(getattr(memory.source_index, "observed_source_scope", ())),
         "source_versions": [{"version_id": alias, "literal_version": value} for value, alias in version_alias.items()],
         "source_families": [{"family_id": alias, "literal_family": family,
             "sources": [{**row, "version_id": version_alias[row["version"]]} for row in catalogue[family]]}
