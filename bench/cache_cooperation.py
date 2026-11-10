@@ -49,17 +49,20 @@ def result_row(result, elapsed):
         output_tokens=len(result.output_ids), server_ttft_ms=result.server_ttft_ms)
 
 
-async def paired_case(engine, template, *, background_tokens, concurrency, directory):
+async def paired_case(engine, template, *, background_tokens, concurrency, directory,
+                      competing_requests=None, competing_tokens=12000):
     source = document(template, "Lumen", 7000, "W-7")
     warm = prompt(template, "read-source", source, "What form does Lumen require?", output=1)
     answer = prompt(template, "answer", source, "Give the Lumen application form code.")
     background = prompt(template, "background", document(template, "Cedar", background_tokens, "C-3"),
                         "What is the form code?", output=1)
+    count = competing_requests or concurrency
     competing = tuple(prompt(template, f"competing-{i}",
-        document(template, f"Birch-{i}", 12000//concurrency, "B-2"),
-        "What is the form code?", output=1) for i in range(concurrency))
+        document(template, f"Birch-{i}", competing_tokens//count, "B-2"),
+        "What is the form code?", output=1) for i in range(count))
     report = dict(background_tokens=background_tokens, concurrency=concurrency,
-        source_tokens=warm.source_prefix_tokens, same_evidence_and_requests=True, arms={})
+        source_tokens=warm.source_prefix_tokens, competing_requests=count,
+        competing_tokens=competing_tokens, same_evidence_and_requests=True, arms={})
     for arm in ("native", "next_use"):
         await prepare_cache_fixture(engine, "cold")
         info = await engine.info()
@@ -112,7 +115,11 @@ async def paired_case(engine, template, *, background_tokens, concurrency, direc
                 lease = options[competing[0].candidate_id]
                 await observer.apply_demand(lease, state, session, batch=quoted)
                 control_ms = (time.monotonic()-control_started)*1000
-            competitors = await asyncio.gather(*(generate(candidate) for candidate in competing))
+            slots = asyncio.Semaphore(concurrency)
+            async def compete(candidate):
+                async with slots:
+                    return await generate(candidate)
+            competitors = await asyncio.gather(*(compete(candidate) for candidate in competing))
             await prepare_cache_fixture(engine, "settle")
             before_answer = await engine.quote_batch((answer,), template.fingerprint)
             final, answer_ms = await generate(answer)
@@ -153,7 +160,8 @@ async def run(args):
         with tempfile.TemporaryDirectory(prefix="contextkv-pair-") as work:
             for background, concurrency in args.cases:
                 case = await paired_case(engine, template, background_tokens=background,
-                                         concurrency=concurrency, directory=Path(work))
+                    concurrency=concurrency, directory=Path(work),
+                    competing_requests=args.competing_requests, competing_tokens=args.competing_tokens)
                 report["cases"].append(case)
                 output.write_text(json.dumps(report, ensure_ascii=False, indent=2)+"\n")
                 print(json.dumps({"background": background, "concurrency": concurrency,
@@ -167,6 +175,8 @@ def main():
     parser.add_argument("--config", required=True)
     parser.add_argument("--base-url")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--competing-requests", type=int)
+    parser.add_argument("--competing-tokens", type=int, default=12000)
     parser.add_argument("--cases", type=lambda value: tuple(tuple(map(int, case.split(":")))
                         for case in value.split(",")), default=((1024, 1), (20000, 1), (20000, 4)))
     asyncio.run(run(parser.parse_args()))
