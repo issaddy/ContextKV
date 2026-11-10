@@ -7,36 +7,16 @@ messages are its exact visible input, including the current compact/refine slice
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from importlib.metadata import version
 from typing import Awaitable, Callable
 
 from controller.evidence import assign_references
-from controller.schema import EvidenceBlock, EvidenceKey, EvidenceSpan, Message, TurnRecord
+from controller.schema import EvidenceBlock, EvidenceSpan, Message, TurnRecord
+from .dialogue import DialogueCall, DialogueResult
 
 
 LLAMAINDEX_SOURCE_COMMIT = "f12d46acab73f5b2243ef49c2f00101617b38ce4"
-
-
-@dataclass(frozen=True)
-class LlamaIndexCall:
-    step_id: str
-    stage: str
-    messages: tuple[Message, ...]
-    output_budget: int
-    source_blocks: tuple[EvidenceBlock, ...]
-    reference_map: tuple[tuple[str, EvidenceKey], ...]
-    evidence_spans: tuple[EvidenceSpan, ...] = ()
-
-
-@dataclass(frozen=True)
-class LlamaIndexDialogueResult:
-    answer: str
-    condensed_query: str
-    source_blocks: tuple[EvidenceBlock, ...]
-    reference_map: tuple[tuple[str, EvidenceKey], ...]
-    calls: tuple[LlamaIndexCall, ...]
-    framework_version: str
 
 
 async def run_dialogue(
@@ -44,14 +24,14 @@ async def run_dialogue(
     history: tuple[TurnRecord, ...],
     *,
     retrieve_callback: Callable[[str], Awaitable[tuple[EvidenceBlock, ...]]],
-    complete_callback: Callable[[LlamaIndexCall], Awaitable[str]],
+    complete_callback: Callable[[DialogueCall], Awaitable[str]],
     tokenizer,
     context_window: int,
     output_tokens: int,
     history_tokens: int,
     system_prompt: str,
     model_name: str = "Qwen3-32B",
-) -> LlamaIndexDialogueResult:
+) -> DialogueResult:
     """Execute one external QA; every model call uses the supplied executor."""
     framework_version = version("llama-index-core")
     from llama_index.core.base.llms.types import ChatMessage, ChatResponse, CompletionResponse, LLMMetadata
@@ -121,7 +101,7 @@ async def run_dialogue(
                 spans.extend(replace(span, message_index=index, start=first+span.start,
                     end=first+span.end) for span in packed_sources[context])
                 stage = "refine" if "<llamaindex_existing_answer>" in message.content else "compact"
-        call = LlamaIndexCall(f"llamaindex:{stage}:{len(calls)}", stage, messages,
+        call = DialogueCall(f"llamaindex:{stage}:{len(calls)}", stage, messages,
             output_tokens, source_blocks, reference_map, tuple(spans))
         calls.append(call)
         return await complete_callback(call)
@@ -208,5 +188,5 @@ async def run_dialogue(
         response = await chat_engine.achat(question)
     finally:
         await database.dispose()
-    return LlamaIndexDialogueResult(str(response), condensed_query, source_blocks, reference_map,
+    return DialogueResult(str(response), condensed_query, source_blocks, reference_map,
                                    tuple(calls), framework_version)

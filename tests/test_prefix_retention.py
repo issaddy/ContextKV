@@ -211,6 +211,12 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
         return (await observer.demand_options((planned_gap, read), state, "session", batch, page_size=2))["gap"]
 
     shared = await after_gap(candidate)
+    observer.runtime.status.reset_mock()
+    uncongested = replace(gap, route_steps=(PlanStep(later, (candidate,)),))
+    available = (await observer.demand_options((uncongested,), state, "session",
+        replace(batch, free_gpu_tokens=64), page_size=2))["gap"]
+    assert available.retain == () and available.retention_evidence == "native_capacity_available"
+    observer.runtime.status.assert_not_awaited()
     observer.allocation = "paired_value"
     observer.runtime.status.reset_mock()
     native = await after_gap(candidate)

@@ -111,8 +111,8 @@ class Controller:
                  rolling_policy=None, state_observer=None, request_compiler=None,
                  dialogue_mode="contextkv", dialogue_history_tokens=8192):
         self.store, self.engine = store, engine
-        if dialogue_mode not in {"contextkv", "llamaindex"}:
-            raise ValueError("dialogue_mode must be contextkv or llamaindex")
+        if dialogue_mode not in {"contextkv", "rag", "llamaindex"}:
+            raise ValueError("dialogue_mode must be contextkv, rag or llamaindex")
         self.dialogue_mode, self.dialogue_history_tokens = dialogue_mode, dialogue_history_tokens
         self.template = template or ByteTemplate()
         self.policy = policy or CandidatePolicy()
@@ -389,8 +389,14 @@ class Controller:
 
     async def _serve_dialogue_attempt(self, attempt, snapshot, query, evidence, provider, budget,
                                       arrived, migrating):
-        """Run upstream dialogue inside the current durable business attempt."""
-        from adapters.llamaindex_dialogue import run_dialogue
+        """Run a conventional QA adapter through the shared native executor."""
+        mode = self.dialogue_mode
+        if mode == "rag":
+            from adapters.rag_dialogue import run_dialogue
+            rendering = {"template": self.template}
+        else:
+            from adapters.llamaindex_dialogue import run_dialogue
+            rendering = {"tokenizer": self.template.tokenizer}
         from .execution import ReadingExecutor, auxiliary_tokens, require_online_tokens
         from .templates import SYSTEM_PROMPT
 
@@ -402,10 +408,10 @@ class Controller:
         if (budget.window_tokens, budget.output_tokens) != (self.policy.max_total_model_tokens,
                                                            self.policy.max_new_tokens):
             raise ValueError("dialogue and controller must use the same model allocation")
-        plan = ContextPlan("llamaindex:"+attempt.attempt_id,
+        plan = ContextPlan(mode+":"+attempt.attempt_id,
             TaskState(attempt.request_id, query, current_turn_id=len(snapshot.raw_history)+1, query=query),
-            EvidenceSet("llamaindex", (), source_blocks=evidence), budget=budget,
-            reading_mode="llamaindex", cost_prediction_eligible=False)
+            EvidenceSet(mode, (), source_blocks=evidence), budget=budget,
+            reading_mode=mode, cost_prediction_eligible=False)
         self.store.save_context_plan(attempt.attempt_id, plan)
         executor = ReadingExecutor(self.store, self.engine, self.template,
             events=self.events, request_arrived=arrived, request_compiler=self.request_compiler)
@@ -432,15 +438,15 @@ class Controller:
                     {"input_tokens": None, "output_tokens": None, "compute_ms": None, "models": []})
             attempt = self.store.save_retrieval(attempt.attempt_id, evidence=evidence,
                 retrieval_priority=tuple(block.key for block in evidence),
-                query_context=QueryContext(condensed_query, "llamaindex_condense"),
+                query_context=QueryContext(condensed_query, mode+"_query"),
                 retrieval_ms=retrieval_ms, auxiliary_usage=auxiliary_usage)
             return evidence
 
         async def complete(call):
             if len(records) >= budget.max_steps:
-                raise ContextOverflow("LlamaIndex exhausted the common request step allocation")
+                raise ContextOverflow("Document QA exhausted the common request step allocation")
             if budget.max_complete_ms is not None and (time.monotonic()-arrived)*1000 > budget.max_complete_ms:
-                raise ContextOverflow("LlamaIndex exhausted the common complete-time allocation")
+                raise ContextOverflow("Document QA exhausted the common complete-time allocation")
             rendered = self.template.render(call.messages, with_offsets=bool(call.evidence_spans))
             current_sources = frozenset(span.key for span in call.evidence_spans)
             seen_sources.update(current_sources)
@@ -449,8 +455,8 @@ class Controller:
                 frozenset(seen_sources), evidence_spans=call.evidence_spans,
                 reference_map=call.reference_map, corpus_snapshot_id=snapshot.corpus_snapshot_id,
                 fingerprint=self.template.fingerprint, output_budget=call.output_budget,
-                generation_kind="LLAMAINDEX_"+call.stage.upper(), cost_prediction_eligible=False,
-                layout_id="llamaindex_native")
+                generation_kind=mode.upper()+"_"+call.stage.upper(), cost_prediction_eligible=False,
+                layout_id=mode+"_native")
             candidate = self.request_compiler.bind_geometry(candidate, rendered)
             spent = sum(len(record.input_ids)+len(record.output_ids) for record in records)
             auxiliary = 0 if auxiliary_usage is None else auxiliary_tokens(auxiliary_usage)
@@ -466,25 +472,26 @@ class Controller:
             return record.result.raw_output
 
         dialogue = await run_dialogue(query, snapshot.raw_history, retrieve_callback=retrieve,
-            complete_callback=complete, tokenizer=self.template.tokenizer,
+            complete_callback=complete, **rendering,
             context_window=budget.window_tokens, output_tokens=budget.output_tokens,
             history_tokens=budget.history_tokens,
             system_prompt=self.policy.system_prompt or SYSTEM_PROMPT)
         if not records or dialogue.calls[-1].stage == "condense":
-            raise ContextOverflow("LlamaIndex returned no physical answer call")
+            raise ContextOverflow("Document QA returned no physical answer call")
         final, candidate = records[-1], candidates[-1]
         generation = self.store.execution_step(attempt.attempt_id, final.step_id)[2]
         if dialogue.answer != generation.text:
-            raise ValueError("upstream final answer differs from the paid physical output")
+            raise ValueError("dialogue answer differs from the paid physical output")
         plan = replace(plan, selected_set=replace(plan.selected_set, source_blocks=dialogue.source_blocks),
             steps=tuple(record.task for record in records))
-        outcome = ReadingOutcome(plan, tuple(record.result for record in records[:-1]), tuple(records[:-1]))
+        outcome = ReadingOutcome(plan, tuple(record.result for record in records[:-1]), tuple(records[:-1]),
+                                 answer_representation="raw")
         previous_epoch = snapshot.current_epoch
         epoch = replace(final.engine_epoch, epoch_no=previous_epoch.epoch_no+1 if previous_epoch else 1,
             parent_epoch_no=previous_epoch.epoch_no if previous_epoch else None,
-            reason="corpus_snapshot_change" if migrating else "llamaindex_native")
+            reason="corpus_snapshot_change" if migrating else mode+"_native")
         attempt = replace(self.store.get_attempt(attempt.attempt_id), stage="RESULT_READY",
-            evidence=dialogue.source_blocks, plan=Plan(candidate, reason="llamaindex_native"),
+            evidence=dialogue.source_blocks, plan=Plan(candidate, reason=mode+"_native"),
             epoch=epoch, result=generation, new_epoch=True, final_step_id=final.step_id,
             branch_reason=epoch.reason, context_plan=plan, reading_outcome=outcome,
             reading_elapsed_ms=sum(record.metrics.get("step_wall_ms", 0.0) or 0.0
@@ -501,7 +508,7 @@ class Controller:
             self.events.emit("ledger_committed", business_session_id=attempt.session_id,
                 attempt_id=attempt.attempt_id, ledger_version=snapshot.version, epoch=epoch.epoch_no,
                 answer_phase_window=answer_window)
-            self.events.emit("llamaindex_dialogue_committed", business_session_id=attempt.session_id,
+            self.events.emit(mode+"_dialogue_committed", business_session_id=attempt.session_id,
                 attempt_id=attempt.attempt_id, ledger_version=snapshot.version,
                 framework_version=dialogue.framework_version, condensed_query=dialogue.condensed_query,
                 call_stages=tuple(call.stage for call in dialogue.calls))
@@ -612,7 +619,7 @@ class Controller:
             reading_outcome = None
             initial_outcomes = ()
             try:
-                if self.dialogue_mode == "llamaindex":
+                if self.dialogue_mode != "contextkv":
                     return await self._serve_dialogue_attempt(attempt, working_snap, query, evidence,
                         evidence_provider, dialogue_budget, arrived, migrating)
                 if resume_context_plan is not None:

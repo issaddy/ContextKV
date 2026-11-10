@@ -60,7 +60,7 @@ source-first ANSWER 的实际顺序为系统、稳定原文、工作历史、当
 
 有限联合决策在同一轮比较有效原文、完整事实或归约结论、原文与结论混合三类实际 ANSWER 输入，并为两个就绪 READ、必要归约和 GAP 留出候选位。原文候选独立检查实际来源覆盖，结论候选检查 Need 和归约依据。各表示共用编译器、Native 报价和完成预算。[候选与滚动执行](../controller/rolling_policy.py)
 
-`DemandState` 从已观察事实和步骤投影剩余 Need、来源范围、缺字段与依赖。每个选项随同请求生成自己的保留增量。需求策略取就绪后续请求与已执行输入的共同因果前缀，按实际 GPU 报价截到页边界，并要求共享部分至少包含一页原文正文。淘汰压力由消费者之前已知步骤的累计新增 KV 和已观测并发负载估算，未来共享因果页只计一次，只对后续请求锁定前仍可被淘汰的页计收益。保护容量按完整因果前缀的共享页并集计量。一个前缀可服务多个后续请求，同一因果页只计第一次未来消费；已覆盖页不再新增收益。中间动作的保留增量在下一步前应用，当前请求要使用的短租保留到该步执行完，再由下一次决策处理。最终 ANSWER 持久化原生回执后，释放本次执行的需求短租并提交本轮状态。执行确认失败或会话关闭时，在同一事务登记释放，由退役流程执行。[需求](../controller/demand.py) · [保留](../controller/prefix_retention.py)
+`DemandState` 从已观察事实和步骤投影剩余 Need、来源范围、缺字段与依赖。每个选项随同请求生成自己的保留增量。需求策略取就绪后续请求与已执行输入的共同因果前缀，按实际 GPU 报价截到页边界，并要求共享部分至少包含一页原文正文。淘汰压力由消费者之前已知步骤的累计新增 KV 和已观测并发负载估算，未来共享因果页只计一次；可见后续工作都能容纳且没有旧租约时，直接使用原生缓存，跳过 owner 查询与分配，只对后续请求锁定前仍可被淘汰的页计收益。保护容量按完整因果前缀的共享页并集计量。一个前缀可服务多个后续请求，同一因果页只计第一次未来消费；已覆盖页不再新增收益。中间动作的保留增量在下一步前应用，当前请求要使用的短租保留到该步执行完，再由下一次决策处理。最终 ANSWER 持久化原生回执后，释放本次执行的需求短租并提交本轮状态。执行确认失败或会话关闭时，在同一事务登记释放，由退役流程执行。[需求](../controller/demand.py) · [保留](../controller/prefix_retention.py)
 
 READ 只是对 Need 的一次尝试；结果尚未返回时，原文回答仍可使用已读来源前缀。保留策略启用且本轮已有 READ 时，编译 raw/hybrid ANSWER 的来源投影供保留策略识别消费者。READ 完成后重新编译实际终端输入。语义缺口已关闭时，raw/hybrid 的原文仍可构成缓存需求，facts-only 输入不产生该需求。
 
@@ -89,4 +89,4 @@ READ 只是对 Need 的一次尝试；结果尚未返回时，原文回答仍可
 
 问答响应分别返回直接可见原文的 `visible_evidence_manifest` 与结论引用的 `conclusion_source_manifest`。后者将引用 ID 绑定到原文 URI、版本和坐标。评分使用相同的来源闭包，完整原文独立供审计。LlamaIndex 的投影还包括实际中间 compact/refine 输入所见的原文片段。[评分投影](../bench/quality.py)
 
-`bench.capacity_workflow --full-queue` 声明 350 题、77 会话。c1/c4 分别执行 E1–E4 的固定／收益 B × Native／ContextPilot 四格、E5 的有限表示及 E6 的需求保留。每格使用自己的实际 P3 历史、共同到达序列及完整费用口径。外部参照 `LlamaIndex_native` 使用上游历史凝练、混合检索、发布版重排与 compact/refine。`S3_contextpilot_no_fact_reuse` 关闭 E4 的跨轮事实复用。[矩阵](../configs/study_matrix.yaml) · [运行入口](study/final_runbook.md)
+`bench.capacity_workflow --full-queue` 默认比较普通文档问答、ContextKV 与 LlamaIndex，主基线为 `RAG_native`。普通流程使用必要历史、基础检索重排、窗口内拼接和一次回答，直接使用 SGLang 原生缓存；追问的检索改写和最终回答都进入同一账本。现有 LlamaIndex 共用执行适配器，保留作者 compact/refine。相同上下文能力的三种缓存配置用于局部归因，其他模块对照按需选择。[矩阵](../configs/study_matrix.yaml) · [普通基线](../adapters/rag_dialogue.py) · [运行入口](study/final_runbook.md)

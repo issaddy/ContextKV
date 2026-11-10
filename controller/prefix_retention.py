@@ -624,6 +624,23 @@ class PrefixReadObserver:
                    and record.metrics["source_view"]["source_prefix_tokens"] >= page_size}
         if not own and not sources:
             return joint_options(plans, state)
+        quotes = {quote.candidate_id: quote for quote in batch.quotes}
+        queued_growth = sum(max(0, request.input_tokens+request.max_new_tokens-request.kv_allocated_tokens)
+                            for request in batch.native_waiting_requests or ())
+        concurrent_growth = ceil(max(0, batch.native_running_budget_tokens or 0))+queued_growth
+        if not own:
+            growth_bounds = []
+            for plan in plans:
+                steps = {}
+                for step in (*plan.steps, *plan.route_steps):
+                    growth = max((quotes[candidate.candidate_id].input_len
+                        -quotes[candidate.candidate_id].ready_gpu_prefix_tokens+candidate.output_budget
+                        for candidate in step.variants if candidate.feasible), default=0)
+                    steps[step.task.step_id] = max(steps.get(step.task.step_id, 0), growth)
+                growth_bounds.append(sum(steps.values()))
+            if concurrent_growth+max(growth_bounds, default=0) <= batch.free_gpu_tokens:
+                return joint_options(plans, state, allocate=lambda demand, *_:
+                    JointOption(demand, retention_evidence="native_capacity_available"))
         statuses = await self.runtime.status(batch.engine_restart_id)
         active = {row["owner_id"]: row for row in statuses["prefixes"]}
         own = {key: record for key, record in own.items() if key in active}
@@ -632,12 +649,8 @@ class PrefixReadObserver:
         other_owners = tuple(row for key, row in active.items() if key not in own)
         shared = set().union(*(owner_pages(row) for row in other_owners))
         shared_gpu = referenced_gpu_pages(other_owners)
-        quotes = {quote.candidate_id: quote for quote in batch.quotes}
         limit = self.settings["protection_budget_tokens"]
         scope = native_cache_scope_hash(batch.fingerprint, batch.cache_config_hash)
-        queued_growth = sum(max(0, request.input_tokens+request.max_new_tokens-request.kv_allocated_tokens)
-                            for request in batch.native_waiting_requests or ())
-        concurrent_growth = ceil(max(0, batch.native_running_budget_tokens or 0))+queued_growth
 
         def work(candidate):
             return sum(quoted_native_work(quotes[candidate.candidate_id]))+candidate.output_budget

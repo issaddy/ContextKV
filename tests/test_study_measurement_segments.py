@@ -151,10 +151,13 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
     expected = ("B6_native", "S3_native", "B6_contextpilot", "S3_contextpilot",
                 "S3_contextpilot_joint_native", "S3_contextpilot_joint_demand",
                 "LlamaIndex_native", "S3_contextpilot_no_fact_reuse")
-    assert full_queue_methods(1) == full_queue_methods(4) == expected
+    assert full_queue_methods(1) == full_queue_methods(4) == (
+        "RAG_native", "context_cache_demand", "LlamaIndex_native")
     from pathlib import Path
     import yaml
     declaration = yaml.safe_load(Path("configs/study_matrix.yaml").read_text())["final_evaluation"]
+    assert declaration["baseline"] == "RAG_native"
+    assert tuple(declaration["main_methods"]) == full_queue_methods(1)
     assert tuple(cell["method"] for cell in declaration["factorial"].values()) == expected[:4]
     assert tuple(cell["method"] for cell in declaration["joint_context"].values()) == expected[4:6]
     specs = {spec["id"]: spec for spec in full_queue_method_specs(expected,

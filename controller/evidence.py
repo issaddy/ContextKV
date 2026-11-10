@@ -59,7 +59,7 @@ def conclusion_source_manifest(outcome, reference_map):
     """Original coordinates represented through conclusions or prior synthesis."""
     if outcome is None:
         return ()
-    if outcome.plan.reading_mode == "llamaindex":
+    if outcome.plan.reading_mode in {"rag", "llamaindex"}:
         from .serialization import to_jsonable
 
         sources = []

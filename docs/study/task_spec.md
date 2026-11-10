@@ -115,26 +115,21 @@ Qwen3-32B 保持固定。BGE 查询侧/任务头、支持/集合效用、B 回�
 
 沿用登记的 350 题、77 会话开发队列，公开 MultiDoc2Dial/MT-RAG 与构造版本/长文轨的分数分别解释，综合权重保持不变。每种方法使用自己的实际 P3 历史；固定历史只用于局部归因。
 
-c1 与 c4 各运行完整 E1–E6。E1–E4 固定为 Native 保留，交叉比较决策与编译。
+主比较为普通文档问答、ContextKV 完整方案与 LlamaIndex，默认只运行这三种方法。固定 Qwen3-32B、语料、基础检索模型、窗口和资源配额，使用共同到达序列及各方法自己的实际历史。
 
-| 配置 | 方法 ID | 用途 |
+| 方法 | 方法 ID | 实际流程 |
 |---|---|---|
-| E1：A＋固定 B＋Native 编译 | `B6_native` | 主线共同参照 |
-| E2：A＋收益 B＋Native 编译 | `S3_native` | B 的贡献 |
-| E3：A＋固定 B＋ContextPilot 编译 | `B6_contextpilot` | 编译的贡献 |
-| E4：A＋收益 B＋ContextPilot 编译 | `S3_contextpilot` | B 与编译的交互 |
-| E5：E4＋有限表示选择 | `S3_contextpilot_joint_native` | 原文、事实与混合表示进入决策的增量 |
-| E6：E5＋需求驱动保留 | `S3_contextpilot_joint_demand` | 需求保留的增量与完整闭环验收 |
+| 普通文档问答主基线 | `RAG_native` | 必要历史 → 检索与重排 → 窗口内常规拼接 → SGLang 原生缓存 → 一次回答 |
+| ContextKV 完整方案 | `context_cache_demand` | 适用证据与事实复用 → 有限阅读和结论 → 缓存感知组织与需求保留 → 回答 |
+| LlamaIndex 外部方法 | `LlamaIndex_native` | 作者历史凝练、混合检索及 compact/refine，使用原生缓存 |
 
-每个并发另执行成熟外部参照 `LlamaIndex_native`：BM25＋dense hybrid、发布版 BGE reranker、真实历史问题凝练及上游 compact/refine，使用相同固定 Qwen、原文、预算、到达计划与 Native 编译/保留。框架调用与检索费用进入同一在线账本；结果作为外部系统比较。
+普通基线首轮直接检索，有历史时先改写检索问题。按相关性去重并填入真实 token 窗口；历史、来源和费用共用已有执行账本。它不加载任务解释、支持效用和动作收益模型，不执行 READ/REDUCE 或额外缓存保留。
 
-跨轮原子事实复用的消融将 `S3_contextpilot_no_fact_reuse` 与 E4 配对；仅设 `reading.fact_reuse: false`，保留本轮共享阅读、任务历史及其余执行条件。
+ContextKV 对普通基线评价整体质量、完整响应 P95 和资源消耗；与 LlamaIndex 比较成熟外部流程。上下文与 KV 的独立贡献使用少量同状态配对：`context_native`、`context_cache_order`、`context_cache_demand` 共用记录投影、有限表示和动作能力，只改变缓存编译与保留。固定阅读、收益阅读和关闭事实复用保留为按需调用的机制对照，不进入默认批次。
 
-E0 `P0_task_first_isolated＋Native` 为可选总体参照；`B6_value` / `S3_value` 为可选 TTL/value 保留对照。固定 B 独立运行无需收益模型。
+普通基线的主比较由 `configs/study_matrix.yaml` 声明。已有固定阅读基线的数值继续作为机制结果保存，不改写为普通文档问答的成绩。
 
-E1–E6 共用冻结 A、队列、到达序列、生成条件与资源配额。E4、E5、E6 共用编译器、预算和收益资产。E2−E1、E3−E1 和 `E4−E2−E3＋E1` 分别衡量收益 B、编译和交互。E5−E4 衡量表示选择，E6−E5 衡量需求保留。E6 对 E1 按实际资源约束、完整队列质量差和完整响应 P95 验收，口径见[运行手册](final_runbook.md)。
-
-全资料轨直接执行完整扫描。评分上下文为实际最终摘录与最终结论的原文来源闭包，完整档案单独保留用于核验。
+ContextKV 的全资料轨执行完整扫描，普通文档问答按原文顺序在实际窗口内拼接。评分上下文为实际最终摘录与最终结论的原文来源闭包，完整档案单独保留用于核验。
 
 A 的规范来源前缀和共享提取可用局部配对分析；C 使用固定 token/DAG 轨迹解释正文命中、回载与重算。
 
@@ -142,4 +137,4 @@ A 的规范来源前缀和共享提取可用局部配对分析；C 使用固定 
 
 ## 交付边界
 
-交付 E1–E6、外部参照和事实复用消融的完整队列结果、逐题答案与来源、步骤账本、冻结收益资产以及质量和成本对照。B 监督资产绑定实际阅读与编译协议、reader 身份和真实会话状态。复现入口见[运行手册](final_runbook.md)。
+交付普通文档问答、ContextKV、LlamaIndex 的质量与成本比较、必要的机制配对、逐题答案与来源、步骤账本、冻结收益资产以及质量和成本对照。B 监督资产绑定实际阅读与编译协议、reader 身份和真实会话状态。复现入口见[运行手册](final_runbook.md)。

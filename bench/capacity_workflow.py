@@ -175,11 +175,14 @@ MAIN_COMPILATION_CELLS = {
 JOINT_CONTEXT_CELLS = {"E5": "S3_contextpilot_joint_native", "E6": "S3_contextpilot_joint_demand"}
 CACHE_COOPERATION_METHODS = ("context_native", "context_cache_order", "context_cache_demand")
 FORMAL_CELLS = {**MAIN_COMPILATION_CELLS, **JOINT_CONTEXT_CELLS,
-    "LlamaIndex": "LlamaIndex_native", "no_fact_reuse": "S3_contextpilot_no_fact_reuse"}
+    "ordinary_qa": "RAG_native", "LlamaIndex": "LlamaIndex_native",
+    "no_fact_reuse": "S3_contextpilot_no_fact_reuse"}
+CONVENTIONAL_METHODS = {"RAG_native": "rag", "LlamaIndex_native": "llamaindex"}
 RULE_CONTEXT_METHOD = "Rule_contextpilot_joint_demand"
-FULL_QUEUE_METHODS = tuple(FORMAL_CELLS.values())
+FULL_QUEUE_METHODS = ("RAG_native", "context_cache_demand", "LlamaIndex_native")
 OPTIONAL_FULL_QUEUE_METHODS = ("E0_native", "B6_value", "S3_value", RULE_CONTEXT_METHOD,
-                              *CACHE_COOPERATION_METHODS)
+    *(method for method in (*FORMAL_CELLS.values(), *CACHE_COOPERATION_METHODS)
+      if method not in FULL_QUEUE_METHODS))
 
 
 def full_queue_methods(concurrency, methods=None):
@@ -196,7 +199,8 @@ def full_queue_method_specs(selected, gain_settings, compilation, value_policy=N
         gain = method.startswith("S3_") or cooperation
         rule = method == RULE_CONTEXT_METHOD
         joint = method in JOINT_CONTEXT_CELLS.values() or rule or cooperation
-        external = method == "LlamaIndex_native"
+        external = method in CONVENTIONAL_METHODS
+        dialogue = CONVENTIONAL_METHODS.get(method, "contextkv")
         contextpilot = "_contextpilot" in method or method in CACHE_COOPERATION_METHODS[1:]
         rolling = deepcopy(gain_settings if gain else rule_settings) if gain or rule else None
         if joint:
@@ -209,11 +213,11 @@ def full_queue_method_specs(selected, gain_settings, compilation, value_policy=N
                              protection_budget_tokens=8192, **(demand_pricing or {}))
             retention.setdefault("allocation", "next_use")
         overrides = {"execution": {
-            "dialogue_mode": "llamaindex" if external else "contextkv",
+            "dialogue_mode": dialogue,
             "plan_gain": rolling,
             "cache_compilation": deepcopy(compilation) if contextpilot else {"mode": "native"},
             "prefix_retention": retention},
-            "reading": {"fact_reuse": method != "S3_contextpilot_no_fact_reuse"}}
+            "reading": {"fact_reuse": not external and method != "S3_contextpilot_no_fact_reuse"}}
         if joint:
             overrides["reading"]["numeric_record_projection"] = True
         if method == "E0_native":
@@ -223,8 +227,9 @@ def full_queue_method_specs(selected, gain_settings, compilation, value_policy=N
                 compilation="contextpilot" if contextpilot else "native",
                 representation="finite" if joint else "existing", retention=retention["mode"],
                 numeric_record_projection=joint,
-                fact_reuse=overrides["reading"]["fact_reuse"], dialogue="llamaindex" if external else "contextkv",
-                role=("external_reference" if external else "fact_reuse_control" if method.endswith("_no_fact_reuse")
+                fact_reuse=overrides["reading"]["fact_reuse"], dialogue=dialogue,
+                role=("main_baseline" if method == "RAG_native" else "external_reference" if external
+                      else "fact_reuse_control" if method.endswith("_no_fact_reuse")
                       else "historical_reference" if method == "E0_native" else "optional_retention" if method.endswith("_value")
                       else "rule_comparator" if rule else "joint_context_increment" if joint
                       else "main_factorial"))))
@@ -323,14 +328,15 @@ def prepare_full_queue(args, root):
         horizon_seconds_choices=[15, 60, 180], protection_budget_tokens=8192,
         lambda_gpu=0.0, lambda_host=0.0) if needs_value else None
     checkout = args.contextpilot_checkout or declared_compilation.get("checkout")
-    needs_compilation = any("_contextpilot" in method for method in selected_methods)
+    needs_compilation = any("_contextpilot" in method or method in CACHE_COOPERATION_METHODS[1:]
+                            for method in selected_methods)
     compilation = ({"mode": "contextpilot", "checkout": str(Path(checkout).resolve())}
                    if needs_compilation and checkout else None)
     if needs_compilation and compilation is None:
         raise ValueError("ContextPilot methods require --contextpilot-checkout or execution.cache_compilation.checkout")
     matrix["methods"] = full_queue_method_specs(selected_methods, gain_settings, compilation, value_policy,
                                                 rule_settings=rule_settings, demand_pricing=demand_pricing)
-    reference = "B6_native" if "B6_native" in selected_methods else matrix["methods"][0]["id"]
+    reference = registered["baseline"] if registered["baseline"] in selected_methods else matrix["methods"][0]["id"]
     matrix["selection"].update(baseline=reference, test_comparators=[reference])
     config_path = root/"frozen-A-study.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
@@ -350,10 +356,10 @@ def prepare_full_queue(args, root):
     matrix_path.write_text(yaml.safe_dump(matrix, sort_keys=False))
     external_matrix_path = None
     external_retrievers = {}
-    if "LlamaIndex_native" in selected_methods:
+    if set(CONVENTIONAL_METHODS).intersection(selected_methods):
         from bench.study import method_config
         external_matrix = deepcopy(matrix)
-        external_method = next(item for item in matrix["methods"] if item["id"] == "LlamaIndex_native")
+        external_method = next(item for item in matrix["methods"] if item["id"] in CONVENTIONAL_METHODS)
         for dataset in datasets:
             effective = method_config(config, external_method, matrix["datasets"][dataset], "dev")
             retriever = yaml.safe_load(Path(effective["retrieval"]["config_path"]).read_text())
@@ -398,7 +404,7 @@ def prepare_full_queue(args, root):
                 name = f"c{concurrency}-{method}{suffix}"
                 jobs.append(dict(name=name, concurrency=concurrency, method=method, repetition=repetition,
                     datasets=datasets, requested_qa=requested, complete_slo_seconds=args.complete_slo_seconds,
-                    matrix=str(external_matrix_path if method == "LlamaIndex_native" else matrix_path),
+                    matrix=str(external_matrix_path if method in CONVENTIONAL_METHODS else matrix_path),
                     workload=str(workload_index.resolve()), output=str(root/"jobs"/name/"generation")))
     acceptance = {**registered["acceptance"], "baseline": registered["baseline"],
         "required_concurrency": registered["concurrency"],
@@ -426,7 +432,7 @@ def prepare_full_queue(args, root):
                 if completion_timing is not None else None},
         cohort=cohorts, workload_plans=workload_plans, acceptance=acceptance, replicate_id=args.replicate_id,
         experiment_cells=FORMAL_CELLS,
-        experiment_design="E1-E4 fixed/gain B x Native/ContextPilot; E5 finite representation; E6 demand retention; c1 and c4",
+        experiment_design="ordinary retrieval QA versus ContextKV and LlamaIndex; optional mechanism controls",
         method_factors={method["id"]: method["evaluation_factors"] for method in matrix["methods"]},
         external_retrievers=external_retrievers, external_reranker=args.external_reranker,
         compilation_policy=compilation,

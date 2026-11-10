@@ -17,9 +17,10 @@ final_evaluation:
   declared_qa: 350
   declared_sessions: 77
   concurrency: [1, 4]
-  baseline: B6_native
+  baseline: RAG_native
+  main_methods: [RAG_native, context_cache_demand, LlamaIndex_native]
   acceptance:
-    candidate: S3_contextpilot_joint_demand
+    candidate: context_cache_demand
     quality_improvement: 0.05
     quality_noninferiority: 0.002
     p95_ratio: 0.85

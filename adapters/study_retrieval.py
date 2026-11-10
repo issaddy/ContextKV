@@ -74,7 +74,8 @@ class StudyEvidenceProvider:
         self.helper_engine_info = helper_engine_info
         self.query_encoder_identity = query_encoder_identity
         self.strategy = config.get("study", {}).get("strategy", "B7")
-        self.external_dialogue = config.get("execution", {}).get("dialogue_mode") == "llamaindex"
+        self.dialogue_mode = config.get("execution", {}).get("dialogue_mode", "contextkv")
+        self.external_dialogue = self.dialogue_mode != "contextkv"
         self.selection_mode = _selection_mode(config)
         self.support_backend = support_backend if self.selection_mode == "support" else None
         self.budget = study_budget(config)
@@ -114,7 +115,7 @@ class StudyEvidenceProvider:
 
     @property
     def manifest(self):
-        return {"strategy": self.strategy, "dialogue_mode": "llamaindex" if self.external_dialogue else "contextkv",
+        return {"strategy": self.strategy, "dialogue_mode": self.dialogue_mode,
                 "retrieval": self.serving.manifest,
                 "source_window_profile": to_jsonable(self.directory.profile),
                 "budget": to_jsonable(self.budget), "task_model": getattr(self.task_model, "manifest", None),
@@ -191,7 +192,7 @@ class StudyEvidenceProvider:
 
     def _external_retrieve(self, snapshot, query, request_id, *, supplied_blocks=None,
                            source_metadata=None, coverage_scope="selected_sources"):
-        """Rank the upstream condensed query; upstream compact owns synthesis."""
+        """Retrieve conventional QA evidence without task or claim planning."""
         started = time.perf_counter()
         with self._measure_auxiliary_usage() as before:
             top_k = self.config.get("selection", {}).get("max_passages") or 5
@@ -215,7 +216,7 @@ class StudyEvidenceProvider:
                 blocks = self.directory.source_fetch(priority)
             usage = self._auxiliary_usage(before)
             self.traces[snapshot.session_id, request_id] = {
-                "retrieval_query": query, "dialogue_mode": "llamaindex", "auxiliary_usage": usage,
+                "retrieval_query": query, "dialogue_mode": self.dialogue_mode, "auxiliary_usage": usage,
                 "retrieval_ms": (time.perf_counter()-started)*1000,
                 "retrieval_priority": to_jsonable(priority), "coverage_scope": coverage_scope}
             return EvidenceSelection(blocks, priority, auxiliary_usage=usage)
@@ -797,7 +798,7 @@ def create_study_retriever(config, template, *, retriever=None, task_interpreter
                            support_backend=None, frozen_history=None):
     retrieval = config["retrieval"]
     strategy = config.get("study", {}).get("strategy", "B7")
-    external = config.get("execution", {}).get("dialogue_mode") == "llamaindex"
+    external = config.get("execution", {}).get("dialogue_mode", "contextkv") != "contextkv"
     if strategy not in STUDY_STRATEGIES:
         raise ValueError(f"unknown study strategy: {strategy}")
     use_support = (_selection_mode(config) == "support" and not external

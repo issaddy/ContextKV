@@ -29,7 +29,7 @@ python3 -m bench.cache_cooperation --config READER.yaml \
 
 默认只运行低压力、单请求竞争、四请求竞争各一对，保存答案、正文获取工作、控制开销和完整时间。预热与竞争工作都计入完整时间；不从这些配对估计整队列 P95。
 
-LlamaIndex 复用统一引擎、来源投影和成本账本。恢复按原 SQLite 和实际请求 ID 继续，已经支付的步骤不重发；新的尝试使用新的请求命名空间。
+普通基线与 LlamaIndex 复用统一引擎、来源投影和成本账本。普通基线配置 `execution.dialogue_mode: rag`，默认比较方法为 `RAG_native context_cache_demand LlamaIndex_native`。普通基线无需 LlamaIndex 依赖，首轮一次回答，追问一次检索改写再回答。恢复按原 SQLite 和实际请求 ID 继续，已经支付的步骤不重发；新的尝试使用新的请求命名空间。
 
 短端到端运行可在 `python3 -m bench.study evaluate` 的现有配置命令后加 `--methods METHOD --datasets DATASET --limit-conversations 1 --limit-turns 2 --unscored --output NEW_DIR`。按会话顺序运行前两轮，运行清单分别记录实际调度和完整声明队列。
 
@@ -43,7 +43,7 @@ LlamaIndex 复用统一引擎、来源投影和成本账本。恢复按原 SQLit
 | B 动作收益 | `training.plan_gain_rollout`、`training.plan_gain_completion`、`training.collect_plan_gains` | DIRECT/READ/REDUCE/GAP 的真实增量执行、当前完整状态、独立最终答案与成对费用 |
 | B 训练与滚动比较 | `training.plan_gain_workflow`、`bench.rolling_study_workflow` | 显式动作与 `whole_plan` 固定计划对照分别登记；保留已付成本与绝对分支预算 |
 | C 固定轨迹配对 | `profiling.retention_trace` | 同模型、同输入、同 DAG 下 Native/固定 TTL/学习保护；共享页与 idle 驻留成本 |
-| 完整联合与外部比较 | `bench.capacity_workflow --full-queue` | c1/c4 的 E1–E6、LlamaIndex Native 参照、跨轮事实复用消融，使用固定到达和连续设备/进程采样 |
+| 完整联合与外部比较 | `bench.capacity_workflow --full-queue` | 普通文档问答、ContextKV、LlamaIndex；模块消融通过 `--methods` 按需选择 |
 | 官方评分与离线重评 | `bench.study_scoring`、`bench.reassess_saved` | 全声明题目分母，失败、未完成、未评分及其已付费用 |
 | 全成本账本 | `profiling.study_cost_ledger` | 原始调用/采样引用、窗口并集、共享份额与未知覆盖 |
 
@@ -286,7 +286,7 @@ cohort、reader 与预算确定对照条件，各格分别列出实际启用的 
 
 联合汇总的 `dataset_protocols` 来自矩阵已有 `split_kind` 与分区指标声明；Markdown 将公开基准、参考历史诊断和构造机制任务分表。每轨原指标、完整题目分母、已评分子集与未知区间同时呈现，混合开发 Q 的登记权重保持不变。
 
-验收以 E6 对 E1 的预登记门槛为准。双方实际资源均通过同一上限后，质量路线要求加权 Q 的增量及置信区间下界达到 0.05。延迟路线要求完整交付、质量差下界至少为 −0.002，且完整 P95 比率及区间上界至多为 0.85。质量区间在各数据集内按配对会话重抽样并保持登记权重。P95 单次队列只给点估计。`--repetitions` 可安排独立整队列重复，分设备运行时为同一重复指定相同的 `--replicate-id`。
+主比较以 ContextKV 完整方案对普通文档问答基线的质量、完整 P95 与资源为准，门槛读取当前矩阵。双方实际资源均通过同一上限后，质量路线要求加权 Q 的增量及置信区间下界达到 0.05。延迟路线要求完整交付、质量差下界至少为 −0.002，且完整 P95 比率及区间上界至多为 0.85。质量区间在各数据集内按配对会话重抽样并保持登记权重。P95 单次队列只给点估计。`--repetitions` 可安排独立整队列重复，分设备运行时为同一重复指定相同的 `--replicate-id`。
 `final_study_index` 输出 E1–E4 的直接对照及交互 `E4−E2−E3＋E1`，另列 E5/E4 表示增量、E6/E5 保留增量、E6/B6 Native 和外部参照。P95 交互使用四格完整队列各自的分位数。
 每格执行前自动记录本机硬件和服务的原生缓存配置，随结果进入比较身份；只在声明的实际测量主机执行此工作流。资源容量、设备数量、GPU 型号/显存/驱动或原生缓存配置不同，以及观测缺失时，不报告可比差值。
 每个数据轨按声明设备、实际端点和本次进程绑定资源范围。滚动决策与该轨计量器共用这一范围，冻结矩阵保留显式指定的附加进程。
