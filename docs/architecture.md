@@ -38,7 +38,7 @@ flowchart TD
 
 source-first ANSWER 的实际顺序为系统、稳定原文、工作历史、当前任务与完整结论。原文直接入口与阅读后回答共用消息组装；选材测量和最终窗口使用相同布局。APPEND 延续已提交的 token 前缀，新增资料与当前任务追加在其后。
 
-同来源、版本与条件的数值 Need 共享提取。引用别名与摘录不符时，解析器可按同一次 READ 中唯一的原文匹配绑定窗口，再从该窗口确定版本和依赖。各 Need 按适用来源及其依赖检查覆盖，同一提取范围共用一次 `numeric_select`，按原事实 ID 为各 Need 分别生成布尔视图。分包使用实际输入和输出容量，最后一包登记完整基底和已选事实。CPU 执行 `union/count/sum/group` 并保留来源父链，模型执行必要的 `summarize/compare/infer`。模型归约按有限输入分包，只有能合并至少两个完整结果才继续合并。ANSWER 保留当前归约未合并的事实以及多跳 READ 引用的前提。全资料覆盖与统计操作按任务要求完成；所选来源读完后的必要数值运算同样走固定规则。可选 REDUCE 受收益资产覆盖约束。[执行与归约](../controller/execution.py)
+同来源、版本与条件的数值 Need 共享提取。解析器在同一次 READ 中用原文摘录或唯一记录 ID 绑定事实，从对应窗口恢复数量、单位、版本与依赖。显式分隔的字段行也可直接产生候选事实。同一范围共用一次 `numeric_select`，按原事实 ID 为各 Need 独立判断对象范围、条件与度量，再生成布尔视图。分包使用实际输入和输出容量，最后一包登记完整基底和已选事实。CPU 执行 `union/count/sum/group` 并保留来源父链，模型执行必要的 `summarize/compare/infer`。模型归约按有限输入分包，只有能合并至少两个完整结果才继续合并。ANSWER 保留当前归约未合并的事实以及多跳 READ 引用的前提。全资料覆盖与统计操作按任务要求完成，所选来源读完后的必要数值运算同样走固定规则。可选 REDUCE 受收益资产覆盖约束。[阅读与原文绑定](../controller/reading.py) · [执行与归约](../controller/execution.py)
 
 固定 B 在原文实际完整可见或结论充分时跳过阅读。收益 B 在当前状态比较直接 ANSWER、下一 READ、当前 REDUCE 与一次 GAP。两者在提交前都检查统计任务的来源覆盖、未解字段和已完成运算。范围已完整覆盖且确无合格记录时，计数和求和输出零值并保留来源证明。普通所选来源任务可回答已有依据的部分并说明缺口。选中 GAP 后才检索，未读范围为候选根，实际 READ 保留旧依赖，原 passage 额度只扣新增来源。每次执行后重新观察事实、缺口、预算和缓存状态。[动作决策](../controller/action_policy.py) · [滚动执行](../controller/rolling_policy.py)
 
@@ -52,7 +52,7 @@ source-first ANSWER 的实际顺序为系统、稳定原文、工作历史、当
 
 `RequestCompiler` 为 source-first READ 和 ANSWER 使用同一系统消息及原文格式。相同原文窗口按相同顺序进入请求时，两类请求的完整来源前缀相同。任务、历史、条件、引用映射与检索排名在来源之后。Native 编译使用原顺序，`cache_compilation.mode: contextpilot` 另使用作者 CPU index/reorder 提出排列。排序按报价比较新增预填充、Host 回载和输入长度。作者索引还返回真实执行过的来源序列：仅连续路径前缀可提出未完成 READ 的局部改组，依赖闭包和原分包器仍负责容量。组织候选沿用两个 READ 的决策额度，完整剩余 READ 分别编译报价，选中目录在执行和租约变更前持久化。选中动作执行同一已报价输入，APPEND 保持已提交前缀。[请求编译器](../controller/request_compiler.py) · [来源格式](../controller/source_prompt.py)
 
-编译时由实际 tokenizer 同时生成 token 与原文区间，候选绑定 READ/REDUCE 的步骤和输出 schema。报价、执行和回执复用编译结果。步骤账本保存正文 token 区间与因果边界，ContextPilot 索引据此登记已执行排列。原生回执记录实际预填充和 Host 回载。与所选报价配对时，记录提交时的报价年龄与工作量差值。Native Radix/HiCache 管理页匹配、迁移和淘汰。[来源前缀](../controller/prefix_view.py)
+编译时由实际 tokenizer 同时生成 token 与原文区间，候选绑定 READ/REDUCE 的步骤和输出 schema。同一轮滚动决策复用完全相同的 READ 消息的 tokenizer 结果，按最新 Native 状态重新报价。步骤账本保存正文 token 区间与因果边界，ContextPilot 索引据此登记已执行排列。原生回执记录实际预填充和 Host 回载。与所选报价配对时，记录提交时的报价年龄与工作量差值。Native Radix/HiCache 管理页匹配、迁移和淘汰。[来源前缀](../controller/prefix_view.py)
 
 可选 TTL/value 在独立 owner 的保护预算中比较保留、续租和释放。读取需求按完整因果前缀与正文范围确定，共享页按并集占容量。价值比较相对 Native 的额外节省，扣除控制、驻留和挤出代价；配对 Native、TTL15/60/180 复用同一到达轨迹和观察窗。控制费用进入已付账本。B 用已交付训练分支的实际 READ 次数均值乘以实测 callback 均值，未有次数观测时只计当前确定执行的 READ；owner 新建和续期单独计一次。[可选保留策略](../controller/prefix_retention.py)
 

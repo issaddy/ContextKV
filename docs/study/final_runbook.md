@@ -298,12 +298,8 @@ C 固定 DAG 回放解析原始输出文本，新的生成响应用于实际 tok
 预测用两臂窗口成本差验证，首个后续消费者的集合收益按请求及共享页去重。
 
 
-## 当前联合资产
+## 正式运行的输入与产物
 
-2026-11-09 的 v2 收益/成本资产位于 GPU 容器工作树：
-`/home/relay/songjiayun/ContextKV-joint-20261109/runs/study-20261109-joint/fit-v2/plan-gain.json`。
-本地 `runs/study-20261109-joint/asset-index.json` 保存哈希及开发指标，`gpu-summary.json` 保存真实分支摘要。
+同一次完整队列比较使用共同的冻结 A、B 资产、执行源码、到达计划和 replicate ID。分设备仅绑定实际的端点、进程和 GPU，在 `--joint-scope` 登记各 worker 的配置及矩阵。配置内的 C 价格资产只进入启用需求保留的格，记录在该格的 `capacity-plan.json`。
 
-资产使用 318 train / 86 dev 配对，其中新增改组配对为 4 train / 4 dev。四个构造任务的 12 个分支官方评分均为 1.0，DIRECT 均更快；开发平均目标相对 DIRECT 为 −0.00423。这是原 v2 运行结果，本轮代码修改不改变这些实测值。完整输入预留已更新，使用现有配对按上面的 CPU 刷新流程重新拟合后再加载 S3。默认仍为 B6，未定价的保留使用 Native。联合机制及成本范围见[架构](../architecture.md#联合决策的成本范围)。
-
-2026-11-09 本轮实现已接通 READ 改组的结论额度、完整已知输入与未来内容分配、ANSWER 来源需求，以及有界分支 callback 成本。合入 `2282c90` 的清理后，CPU 核心套件为 173 passed、5 subtests passed；LlamaIndex 测试因本次环境未安装可选依赖而跳过。作者版 ContextPilot 索引与 Controller 集成已执行。尚未运行本次改动对应的 Qwen/GPU 队列；下一步按现有配对刷新 B 资产，再执行既定完整队列，质量和 P95 由该次实测判断。
+每格从 `capacity-plan.json` 追溯输入，从 `workflow.json` 追溯实际执行与队列指标，从各数据轨的逐题答案、来源、评分记录及原生账本追溯质量和费用。方法对照使用同一 replicate 的同并发格，完整 P95 的区间使用独立整队列重复。重放校准保留每个 TTL 的独立回执及同窗口唯一 Native 对照。
