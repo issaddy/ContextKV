@@ -282,7 +282,7 @@ def prepare_full_queue(args, root):
     scope = dict(gpu_devices=args.online_gpu_devices, process_roots=roots,
         native_endpoint=run.engine.base_url, gpu_capacity_tokens=run.engine.gpu_capacity_tokens,
         host_capacity_tokens=run.engine.host_capacity_tokens,
-        host_enabled=run.engine.host_capacity_tokens > 0, model="Qwen3-32B")
+        host_enabled=run.engine.host_capacity_tokens > 0, model=run.model.name)
     matrix["resources"].update(gpu_devices=args.online_gpu_devices, process_ids=args.online_process_roots or ())
     execution = config["execution"]
     if args.lambda_time is not None:
@@ -580,9 +580,14 @@ def summarize_full_queue(job, *, native_path=None):
 
 
 def full_queue_occupancy(windows, physical, native):
-    """Integrate unique global samples over the union of online windows."""
+    """Integrate physical and native samples over the union of online windows."""
     from profiling.study_cost_ledger import merge_ranges
 
+    native_samples = [
+        sample for group in windows.values() for row in group
+        for sample in json.loads(Path(row["source"]).with_name("native_resources.json").read_text())["samples"]
+    ]
+    native = {**native, "samples": native_samples, "errors": []}
     merged = merge_ranges((row["start"], row["end"]) for rows in windows.values() for row in rows)
     physical_costs, native_costs, device_coverage = [], [], []
     for start, end in merged:
