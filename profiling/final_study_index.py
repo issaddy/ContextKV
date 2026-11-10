@@ -217,6 +217,11 @@ def retention_validation(models, paired):
             except KeyError:
                 unmatched.append(row["event_id"])
                 continue
+            tokens = row["gpu_page_count"]*row["page_size"]
+            if forecast.source_token_range is None or not (
+                    forecast.source_token_range[0] <= tokens <= forecast.source_token_range[1]):
+                unmatched.append(row["event_id"])
+                continue
             matched_groups.add(session_group(row, components))
             matched.append({**row, "predicted_full_window_ms": forecast.full_window_saved_ms,
                             "predicted_arm_ms": forecast.saved_ms})
