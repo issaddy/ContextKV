@@ -1109,6 +1109,14 @@ def project_named_numeric_records(plan, snapshot):
 
     subjects = [tuple(words(resolve_text(ref, state, snapshot)).removeprefix("the ").split())
                 for need in state.needs for ref in need.subject_refs]
+    if not subjects:
+        shared = re.search(
+            r"(?:^|[.!?]\s*)count (?:all )?(?:unique )?\w+ (?:explicitly )?listed in "
+            r"(?:the )?((?:\w+ )+(?:rows|records)) and sum their \w+ in \w+(?=[.!?]|$)",
+            state.raw_question.casefold(),
+        )
+        if shared:
+            subjects = [tuple(shared[1].split())] * 2
     if (len(subjects) != 2 or subjects[0] != subjects[1] or len(subjects[0]) < 2
             or subjects[0][-1] not in {"rows", "records"}):
         return None
