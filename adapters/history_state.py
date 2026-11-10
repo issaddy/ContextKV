@@ -378,7 +378,7 @@ def retrieval_state(snapshot, source_index):
 
 
 
-TASK_NEED_SEMANTICS_VERSION = "task_need_semantics_v5_distinct_results"
+TASK_NEED_SEMANTICS_VERSION = "task_need_semantics_v6_distinct_results"
 TASK_NEED_SEMANTICS = (
     "Every Need must cite at least one actual visible request anchor. Every materialized condition "
     "must cite an actual key, value or predicate; a removal must cite its update predicate. "
@@ -482,19 +482,19 @@ TASK_TEACHER_SYSTEM = ("Interpret the current task using the indexed literal tex
           "resolved_version_ids are the final selected versions, while version_ids/source_turns may identify "
           "anchors for before/after. Preserve the user's temporal_relation and original time_refs. "
           "When dates are unknown, leave date-based resolved_version_ids empty.\n\n"
-          "Example current question window w0: [0]Report [1]the [2]distance [3]in "
-          "[4]kilometers [5]and [6]the [7]duration [8]in [9]minutes[10].\n"
+          "Example current question window w0: [0]Count [1]the [2]entries [3]and [4]sum [5]their "
+          "[6]prices[7]. [8]Report [9]both [10]results[11].\n"
           'Example output: {"relation":"standalone","history_spans":[],"resume_task_id":"",'
           '"version_intent":{"mode":"current","temporal_relation":"at","document_families":[],'
           '"version_ids":[],"resolved_version_ids":[],"time_refs":[],"source_turns":[]},'
           '"conditions":{},"condition_removals":[],"needs":{'
-          '"n0":{"anchor_spans":[{"window_id":"w0","boundary_tokens":[2,4]}],'
-          '"subject_refs":[],"operation":"lookup","condition_ids":[],"predecessor_need_ids":[],"read_reuse":{},'
+          '"n0":{"anchor_spans":[{"window_id":"w0","boundary_tokens":[0,2]}],'
+          '"subject_refs":[],"operation":"count","condition_ids":[],"predecessor_need_ids":[],"read_reuse":{},'
           '"scope":"selected_sources"},'
-          '"n1":{"anchor_spans":[{"window_id":"w0","boundary_tokens":[7,9]}],'
-          '"subject_refs":[],"operation":"lookup","condition_ids":[],"predecessor_need_ids":[],"read_reuse":{},'
+          '"n1":{"anchor_spans":[{"window_id":"w0","boundary_tokens":[4,6]}],'
+          '"subject_refs":[],"operation":"sum","condition_ids":[],"predecessor_need_ids":[],"read_reuse":{},'
           '"scope":"selected_sources"}}}\n'
-          "Here both units specify the requested results. A user request for a named edition supplies "
+          "The final sentence presents the same two results and adds no Need. A user request for a named edition supplies "
           "a VERSION restriction; a user request for the rule in force on a specified date supplies "
           "as_of intent with a reference to that date.\n\n"+TASK_NEED_SEMANTICS)
 
