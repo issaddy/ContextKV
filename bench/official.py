@@ -475,11 +475,16 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     os.environ.setdefault("LANGSMITH_TRACING", "false")
     from langchain_community.cache import SQLiteCache
     from langchain_core.globals import set_llm_cache
+    from ragas.prompt import pydantic_prompt
 
     set_llm_cache(SQLiteCache(database_path=str(output / "judge-cache.sqlite3")))
     sys.path.insert(0, str(root / "scripts/evaluation"))
     official = importlib.import_module("judge_wrapper")
     loader = official.load_chat_openai_llm
+    extract_json = pydantic_prompt.extract_json
+    if ragas_json_schema:
+        # Native structured output is already JSON, including braces inside strings.
+        pydantic_prompt.extract_json = str.strip
     official.load_chat_openai_llm = lambda name, max_new_tokens=None: create_http_judge(
         name, endpoint, max_tokens=max_tokens, enable_thinking=enable_thinking,
         ragas_json_schema=ragas_json_schema, ragas_max_tokens=ragas_max_tokens)
@@ -489,6 +494,7 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
                                    rb_llm_workers=rb_llm_workers)
     finally:
         official.load_chat_openai_llm = loader
+        pydantic_prompt.extract_json = extract_json
     receipt = {**result, **identity, "status": "completed", "endpoint": endpoint,
                "rb_llm_workers_requested": rb_llm_workers,
                "endpoint_scope": "current invocation; reused stages may have run on a different endpoint",
