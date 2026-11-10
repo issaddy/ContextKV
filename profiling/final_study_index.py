@@ -26,6 +26,15 @@ def write(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)+"\n")
 
 
+def result_fields(value):
+    if isinstance(value, dict):
+        return {key: result_fields(item) for key, item in value.items()
+                if key != "sha256" and not key.endswith(("_sha256", "_hash", "_digest", "_digests"))}
+    if isinstance(value, list):
+        return [result_fields(item) for item in value]
+    return value
+
+
 def identity(path):
     path = Path(path).resolve()
     sha = hashlib.sha256()
@@ -658,7 +667,7 @@ def main(argv=None):
         command += ["--gpu-devices", args.gpu_devices, "--output", str(root/"full-cost-ledger.json")]
         write(root/"cost-ledger-command.json", dict(argv=command, shell=shlex.join(command), executed=False,
             scope="explicit requested files only; unknown sampling intervals remain unknown"))
-    write(root/"final-index.json", report)
+    write(root/"final-index.json", result_fields(report))
     (root/"final-index.md").write_text(markdown(report))
     print(json.dumps(dict(artifacts=len(artifacts), result_groups=len(summaries), comparisons=len(comparisons),
         C_pairs=len(paired), capacity_cells=len(capacity), cost_ledgers=len(ledgers), output=str(root)), ensure_ascii=False))
