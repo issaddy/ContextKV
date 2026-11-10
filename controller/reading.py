@@ -5,10 +5,11 @@ from dataclasses import replace
 from hashlib import sha256
 import json
 import re
+import time
 
-from .context_budget import resolved_task_view, text_ref_sources, text_ref_text
+from .context_budget import required_source_units, resolve_text, resolved_task_view, text_ref_sources, text_ref_text
 from .context_schema import (ContextPlan, EvidenceClaim, NumericReadScope, OpenNeed, ReadResult, ReadTask,
-                             SourceSpan)
+                             ReadingOutcome, SourceSpan)
 from .schema import Message
 from .serialization import to_jsonable
 from .source_prompt import SOURCE_SYSTEM, source_envelope, stable_source_payload
@@ -1087,6 +1088,70 @@ def _delimited_numeric_records(units):
                 field, (number, unit) = measures[0]
                 relation = field.partition(number)[0].strip()
                 yield source, text.strip(), ids[0], relation, number, unit
+
+
+def project_named_numeric_records(plan, snapshot):
+    """Scan an explicitly named record population, then use the ordinary numeric reductions."""
+    from .reduction import aligned_claims
+
+    started = time.perf_counter()
+    state = plan.task_state
+    needs = {need.operation: need for need in state.needs}
+    if (plan.coverage_scope != "all_supplied_documents" or plan.reading_mode != "typed_reduce"
+            or len(state.needs) != 2 or set(needs) != {"count", "sum"} or state.conditions
+            or any(need.scope != "all_supplied_documents" or need.condition_ids or need.predecessor_need_ids
+                   for need in state.needs)):
+        return None
+    count, total = needs["count"], needs["sum"]
+
+    def words(text):
+        return " ".join(re.findall(r"\w+", text.casefold()))
+
+    subjects = [tuple(words(resolve_text(ref, state, snapshot)).removeprefix("the ").split())
+                for need in state.needs for ref in need.subject_refs]
+    if (len(subjects) != 2 or subjects[0] != subjects[1] or len(subjects[0]) < 2
+            or subjects[0][-1] not in {"rows", "records"}):
+        return None
+    label = " ".join((*subjects[0][:-1], subjects[0][-1][:-1]))
+    units = required_source_units(plan, count)
+    blocks = plan.selected_set.source_blocks
+    if (units != required_source_units(plan, total)
+            or set(state.source_scope) != {block.key for block in blocks}):
+        return None
+
+    def named(text):
+        heading, sep, _ = text.partition(":")
+        return bool(sep) and words(heading) == label
+
+    expected = {(block.key, line.strip()) for block in blocks for line in block.text.splitlines()
+                if named(line)}
+    records = tuple(row for row in _delimited_numeric_records(units) if named(row[1]))
+    present = {(span.source_key, text) for unit, text, *_ in records for span in unit.source_spans}
+    measures = {(relation, unit) for _, _, _, relation, _, unit in records}
+    if expected != present or len(measures) != 1:
+        return None
+    relation, unit_name = next(iter(measures))
+    field = words(relation)
+    measure = rf"\b{re.escape(field)}(?:s|es)? in {re.escape(words(unit_name))}\b"
+    if not field or not any(re.search(measure, words(resolve_text(ref, state, snapshot)))
+                            for ref in total.anchor_spans):
+        return None
+
+    step_id = f"policy:record-projection:{state.task_id}:{state.current_turn_id}"
+    claims = tuple(EvidenceClaim(f"{step_id}:claim:{index}", count.need_id, "extract",
+        text, value, unit, source_spans=source.source_spans, operation="record_projection",
+        entity=entity, relation=relation, version=source.source_spans[0].source_key.version,
+        shared_need_ids=(total.need_id,))
+        for index, (source, text, entity, relation, value, unit) in enumerate(records))
+    if any(len({claim.value for claim in group}) > 1 for group in aligned_claims(claims)):
+        return None
+    step = ReadTask(step_id, "READ", (count.need_id, total.need_id),
+        tuple(unit.unit_id for unit in units), input_budget=0, output_budget=0,
+        operation="record_projection", retained_conclusion_tokens=plan.answer_allocation.need_tokens,
+        requires_reduction=True)
+    result = ReadResult(step_id, claims, step.input_unit_ids, step.need_ids,
+                        elapsed_ms=(time.perf_counter()-started)*1000)
+    return ReadingOutcome(replace(plan, steps=(step,)), results=(result,), claims=claims)
 
 
 def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_tokens=0, output_tokens=0):

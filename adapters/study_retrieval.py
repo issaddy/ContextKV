@@ -24,7 +24,7 @@ from controller.context_schema import (DEFAULT_FULL_SCOPE_OUTPUT_TOKENS, AnswerP
 from controller.fact_reuse import build_reuse_seed, complete_reuse_ranges
 from controller.evidence_planner import (BudgetedEvidencePlanner, SearchProfile, _passages,
     best_need_supports, close_dependencies, render_unit_union, unresolved_needs)
-from controller.reading import build_read_plan
+from controller.reading import build_read_plan, project_named_numeric_records
 from controller.schema import OnlineMessage, OnlineTurn, QueryContext
 from controller.serialization import dumps, to_jsonable
 from controller.service import EvidenceSelection
@@ -491,6 +491,11 @@ class StudyEvidenceProvider:
                             self.config.get("reading", {}).get("output_tokens_per_fact", 64))
                     plan = current.plan
                     initial_outcomes.append(current)
+                elif full_scope_read and self.config.get("reading", {}).get("numeric_record_projection"):
+                    current = project_named_numeric_records(plan, snapshot)
+                    if current is not None:
+                        plan = current.plan
+                        initial_outcomes.append(current)
                 if support_model is not None and self._utility_mode() == "learned":
                     quality_started = time.perf_counter()
                     quality_material = quality_sets[selected.set_id]

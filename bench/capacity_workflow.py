@@ -216,12 +216,15 @@ def full_queue_method_specs(selected, gain_settings, compilation, value_policy=N
             "cache_compilation": deepcopy(compilation) if contextpilot else {"mode": "native"},
             "prefix_retention": retention},
             "reading": {"fact_reuse": method != "S3_contextpilot_no_fact_reuse"}}
+        if joint:
+            overrides["reading"]["numeric_record_projection"] = True
         if method == "E0_native":
             overrides["reading"].update(layout="task_first", packing="mixed", numeric_need_isolation=True)
         specs.append(dict(id=method, strategy="B7" if gain or rule else "B6", overrides=overrides,
             evaluation_factors=dict(B="gain" if gain else "rule" if rule else "fixed",
                 compilation="contextpilot" if contextpilot else "native",
                 representation="finite" if joint else "existing", retention=retention["mode"],
+                numeric_record_projection=joint,
                 fact_reuse=overrides["reading"]["fact_reuse"], dialogue="llamaindex" if external else "contextkv",
                 role=("external_reference" if external else "fact_reuse_control" if method.endswith("_no_fact_reuse")
                       else "historical_reference" if method == "E0_native" else "optional_retention" if method.endswith("_value")

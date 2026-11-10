@@ -8,12 +8,12 @@ from bench.mock_engine import MockEngine
 from controller.claim_graph import ClaimGraph
 from controller.context_schema import (
     ContextBudget, EvidenceClaim, EvidenceSet, EvidenceUnit, Need, ReadResult, ReductionState,
-    SourceSpan, TaskState,
+    SourceSpan, TaskState, TextRef,
 )
 from controller.evidence import make_evidence
 from controller.execution import ReadingExecutor
 from controller.reading import (
-    advance_read_plan, build_read_plan, parse_read_result,
+    advance_read_plan, build_read_plan, parse_read_result, project_named_numeric_records,
     step_messages,
 )
 from controller.reduction import reduce_claims
@@ -230,6 +230,45 @@ def test_count_reduction_does_not_consume_unfinished_sum_view_or_rolling_basis()
     rolling = _reduction_tasks(plan, observed)
     assert len(rolling) == 1 and rolling[0].operation == "numeric_select"
     assert rolling[0].input_claim_ids == tasks[0].input_claim_ids
+
+
+@pytest.mark.asyncio
+async def test_named_records_enter_rolling_answer_with_cpu_count_and_sum(tmp_path):
+    from controller.rolling_policy import ZERO_AUX
+    from controller.service import EvidenceSelection
+    from test_observed_action_runtime import configured
+
+    controller, store, engine, _, _ = configured(tmp_path)
+    question = "Count the items in the Shipment rows and sum their masses in g."
+    blocks, units = zip(*(material(text, name) for text, name in (
+        ("Shipment row: item SHIP-1; mass 5 g.\nNote: storage limit 90 g.", "first"),
+        ("Shipment row: item SHIP-2; mass 0 g.", "second"))))
+
+    def ref(text):
+        start = question.index(text)
+        return TextRef(1, "user", start, start+len(text))
+
+    state = TaskState("shipments", question, needs=(
+        Need("count", operation="count", subject_refs=(ref("the Shipment rows"),),
+             scope="all_supplied_documents"),
+        Need("sum", (ref("sum their masses in g"),), "sum", (ref("the Shipment rows"),),
+             scope="all_supplied_documents")),
+        source_scope=tuple(block.key for block in blocks), current_turn_id=1)
+    plan = build_read_plan(state, EvidenceSet("all", units, source_blocks=blocks),
+        "all_supplied_documents", ContextBudget(output_tokens=64), template=ByteTemplate())
+
+    async def evidence(snapshot):
+        projected = project_named_numeric_records(plan, snapshot)
+        return EvidenceSelection(blocks, state.source_scope, context_plans=(projected.plan,),
+                                 auxiliary_usage=dict(ZERO_AUX), initial_outcomes=(projected,))
+
+    response = await controller.serve_turn("shipments", question, evidence_provider=evidence, request_id="r")
+    attempt = store.get_attempt(response.attempt_id)
+    outcome = attempt.reading_outcome
+    assert response.read_count == 0 and response.reduce_count == 2 and len(engine.constraints) == 1
+    roots = {claim.operation: claim for claim in outcome.claims if claim.kind == "derived"}
+    assert roots["count"].value == 2 and roots["sum"].value == "5"
+    assert {span.source_key for span in roots["sum"].source_spans} == set(state.source_scope)
 
 
 @pytest.mark.asyncio
