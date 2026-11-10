@@ -383,7 +383,7 @@ async def _version_scores(config, spec, directory, settings):
     weights = settings.get("project_weights", {"correctness": .5, "conditions_versions": .5})
     identity = {"protocol": "contextkv_project_condition_version_rubric", "judge": asdict(judge_config),
         "primary_formula": weights, "metric_source": "bench.judge.OfflineJudge",
-        "score_range": [0, 1]}
+        "score_range": [0, 1], "response_format": "document_answer_evaluation"}
     if "project_track" in settings:
         identity.update(evaluation_track=settings["project_track"], official_benchmark_metric=False)
     if settings.get("project_reference_only", False):

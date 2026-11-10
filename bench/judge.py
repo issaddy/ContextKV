@@ -20,6 +20,20 @@ from bench.official import load_jsonl
 from controller.templates import token_hash
 
 DIMENSIONS = ("correctness", "groundedness", "answerability", "conditions_versions", "citations")
+JUDGE_OUTPUT_PROPERTIES = {
+    "scores": {
+        "type": "object",
+        "properties": {name: {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]}
+                       for name in DIMENSIONS},
+        "required": list(DIMENSIONS),
+        "additionalProperties": False,
+    },
+    "script_history_mismatch": {"type": "boolean"},
+    "reason": {"type": "string"},
+    "unsupported_claims": {"type": "array", "items": {"type": "string"}},
+}
+JUDGE_OUTPUT_SCHEMA = {"type": "object", "properties": JUDGE_OUTPUT_PROPERTIES,
+                       "required": list(JUDGE_OUTPUT_PROPERTIES), "additionalProperties": False}
 CITATION_PARSER_VERSION = "evidence-id-groups-v3"
 _CITATION_GROUP = r"E_[0-9a-f]+(?:\s*,\s*E_[0-9a-f]+)*"
 CITATION_PATTERN = re.compile(rf"\[({_CITATION_GROUP})\]|\(({_CITATION_GROUP})\)")
@@ -171,7 +185,9 @@ class OfflineJudge:
     async def evaluate(self, record: Mapping, *, reference: Mapping | None = None,
                        requirements: Mapping | None = None) -> dict:
         payload = {"model": self.config.model, "temperature": self.config.temperature,
-                   "max_tokens": self.config.max_tokens, "response_format": {"type": "json_object"},
+                   "max_tokens": self.config.max_tokens,
+                   "response_format": {"type": "json_schema", "json_schema": {
+                       "name": "document_answer_evaluation", "strict": True, "schema": JUDGE_OUTPUT_SCHEMA}},
                    "messages": [{"role": "system", "content": self.config.prompt},
                                 {"role": "user", "content": json.dumps(judge_payload(record, reference, requirements), ensure_ascii=False)}]}
         if self.config.enable_thinking is not None:
@@ -180,12 +196,15 @@ class OfflineJudge:
         response.raise_for_status()
         raw = response.json()
         result, scores = parse_judge_response(raw)
+        usage = raw.get("usage", {})
         return {"task_id": record["task_id"], "conversation_id": record["conversation_id"],
                 "answer": record["answer"],
                 **evaluation_binding(record),
                 "scores": scores, "script_history_mismatch": result.get("script_history_mismatch"),
                 "reason": result.get("reason"), "unsupported_claims": result.get("unsupported_claims", []),
-                "judge": asdict(self.config), "judge_response": raw,
+                "judge": asdict(self.config),
+                "judge_cost": {"input_tokens": usage.get("prompt_tokens"),
+                               "output_tokens": usage.get("completion_tokens")},
                 "api_response_id": raw.get("id"),
                 "served_model": raw.get("model"), "revision_provenance": "operator_declared",
                 "reference_targets_supplied": reference is not None,
