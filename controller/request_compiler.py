@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import lru_cache
 from hashlib import sha256
 import json
 
@@ -40,6 +41,13 @@ class RequestCompiler:
     """One compiler for C-on/off; the optional index supplies permutations only."""
     def __init__(self, template, index=None):
         self.template, self.index = template, index
+        self._render_read = template.render
+
+    def with_read_memo(self):
+        """Reuse identical rendered READ inputs within one rolling turn."""
+        compiler = RequestCompiler(self.template, self.index)
+        compiler._render_read = lru_cache(maxsize=48)(self.template.render)
+        return compiler
 
     def _scope(self, cache_scope: EngineInfo | CacheQuoteBatch):
         if not isinstance(cache_scope, (EngineInfo, CacheQuoteBatch)):
@@ -135,7 +143,7 @@ class RequestCompiler:
                 actual = replace(current, output_budget=output)
                 messages = step_messages(plan, actual, ordered, claims, snapshot,
                                          source_prompt=source_prompt, schema=current.output_schema)
-                rendered = self.template.render(messages, with_offsets=bool(ordered))
+                rendered = self._render_read(messages, with_offsets=bool(ordered))
                 spans, cursor = list(canonical_spans), 0
                 if ordered and source_prompt is None:
                     body_message = messages[1].content

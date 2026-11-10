@@ -610,6 +610,7 @@ class RollingPlanRuntime:
         model = self.policy.gain_model
         timing_context = (self.reader_profile_id, model.asset_id if model is not None else "rule", retention_mode)
         demand_retention = self.joint_context and retention_mode == "demand"
+        route_compiler = executor.request_compiler.with_read_memo()
         while True:
             selection_started = time.monotonic()
             answer_demand = demand_retention and any(record.task.kind == "READ" for record in state.steps)
@@ -656,7 +657,7 @@ class RollingPlanRuntime:
                     if alternate is not None:
                         required = (*required, alternate)
                 organizations = ((plan,) if cpu or self.read_choices < 2 else
-                    executor.request_compiler.read_organizations(replace(state, plan=plan), snapshot,
+                    route_compiler.read_organizations(replace(state, plan=plan), snapshot,
                         cache_scope=cache_scope, limit=self.read_choices,
                         output_tokens_per_fact=self.output_tokens_per_fact))
                 required_plans = [(task, plan) for task in required]
@@ -668,12 +669,12 @@ class RollingPlanRuntime:
                         required_plans.append((next_read, organization))
                 proposals = tuple(PlanCandidate(task.step_id, "scope_scan", organization,
                     (PlanStep(task, () if cpu else compile_step(organization, task, state, snapshot, template,
-                        outputs=(task.output_budget,), request_compiler=executor.request_compiler,
+                        outputs=(task.output_budget,), request_compiler=route_compiler,
                         cache_scope=cache_scope)),), self.reader_checkpoint) for task, organization in required_plans)
                 proposals = tuple(replace(proposal, route_steps=compile_route_steps(proposal, state,
                     snapshot, template, output_budgets=self.output_budgets,
                     output_tokens_per_fact=self.output_tokens_per_fact,
-                    request_compiler=executor.request_compiler, cache_scope=cache_scope,
+                    request_compiler=route_compiler, cache_scope=cache_scope,
                     compile_answers=compile_answers if answer_demand else None,
                     answer_options=dict(representations=("hybrid",), layouts=("existing",), actions=("REBUILD",))))
                     for proposal in proposals)
@@ -761,10 +762,10 @@ class RollingPlanRuntime:
             mandatory = self._mandatory_coverage(state)
             gap_request = self._gap_request(state, expanded, open_need_provider)
             plans = (self.action_proposals(context_plans[0], state, snapshot, template,
-                compile_answers, gap_request, request_compiler=executor.request_compiler,
+                compile_answers, gap_request, request_compiler=route_compiler,
                 cache_scope=cache_scope, project_answer=answer_demand, gain_model=model) if observed else
                 self.proposals(context_plans, state, snapshot, template, compile_answers,
-                    request_compiler=executor.request_compiler, cache_scope=cache_scope))
+                    request_compiler=route_compiler, cache_scope=cache_scope))
             if len(plans) > self.policy.limits.max_plan_candidates:
                 raise ValueError("rolling proposals exceed the configured finite candidate set")
             if any(plan.context_plan.task_state != state.plan.task_state for plan in plans):
