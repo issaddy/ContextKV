@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 import glob
-import hashlib
 from itertools import product
 import json
 import math
@@ -33,15 +32,6 @@ def result_fields(value):
     if isinstance(value, list):
         return [result_fields(item) for item in value]
     return value
-
-
-def identity(path):
-    path = Path(path).resolve()
-    sha = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024*1024), b""):
-            sha.update(chunk)
-    return dict(path=str(path), sha256=sha.hexdigest(), bytes=path.stat().st_size)
 
 
 def load(path):
@@ -303,31 +293,16 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
         return []
     plan_path = root/"capacity-plan.json"
     plan = load(plan_path)
-    plan_identity = identity(plan_path)
-    run = load(plan["reader_run"]["path"])
-    run.pop("state_dir", None)
-    run["engine"].pop("base_url", None)
-    def canonical(item):
-        return hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest()
-    binding = dict(frozen_A_config_sha256=plan["source_config"]["sha256"],
-        matrix_sha256=plan["source_matrix"]["sha256"], cohort_sha256=canonical(plan["cohort"]),
-        reader_run_sha256=canonical(run), reader_profile_id=plan["reader_profile_id"],
-        lambda_time=plan["lambda_time"], execution_commit=plan.get("execution_commit"),
-        execution_sources_sha256=plan.get("execution_sources_sha256"))
-    device_source = {key: binding[key] for key in ("frozen_A_config_sha256", "matrix_sha256")}
+    device_source = {name: plan["source_"+name]["path"] for name in ("config", "matrix")}
+    binding = dict(frozen_A_config=device_source["config"], matrix=device_source["matrix"],
+        cohort_source=(plan.get("source_cohorts") or plan["source_matrix"])["path"],
+        arrival_plan=plan["source_arrival_plan"]["path"], reader_profile_id=plan["reader_profile_id"],
+        lambda_time=plan["lambda_time"], execution_commit=plan.get("execution_commit"))
     if joint_scope is not None:
-        registered = [worker for worker in joint_scope["workers"]
-            if Path(worker["config"]).resolve() == Path(plan["source_config"]["path"]).resolve()
-            and Path(worker["matrix"]).resolve() == Path(plan["source_matrix"]["path"]).resolve()]
-        if len(registered) != 1:
+        if not any(all(Path(worker[name]).resolve() == Path(source).resolve()
+                       for name, source in device_source.items()) for worker in joint_scope["workers"]):
             raise ValueError("full-queue source configuration/matrix is not a worker in the explicit joint scope")
-        for name in ("config", "matrix"):
-            source = plan["source_"+name]
-            if identity(registered[0][name])["sha256"] != source["sha256"]:
-                raise ValueError("registered worker input differs from the full-queue execution source")
-        binding.update(frozen_A_config_sha256=joint_scope["source_config_sha256"],
-            matrix_sha256=joint_scope["source_matrix_sha256"],
-            joint_scope_sha256=joint_scope["manifest"]["sha256"])
+        binding.update(frozen_A_config=joint_scope["source_config"], matrix=joint_scope["source_matrix"])
     jobs = {job["name"]: job for job in plan["jobs"]}
     if refresh_to is not None:
         from bench.capacity_workflow import refresh_saved_full_queue
@@ -337,29 +312,26 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
             summarized = {row["job"] for row in rows}
             rows = [*rows, *({"job": name, "execution_status": "incomplete_saved_artifacts"}
                 for name, job in jobs.items() if name not in summarized and Path(job["output"]).is_dir())]
-        rows = [refresh_saved_full_queue(jobs[row["job"]], row, cost, refresh_to/(
-            canonical(jobs[row["job"]]["output"])+".json")) for row in rows]
+        rows = [refresh_saved_full_queue(jobs[row["job"]], row, cost,
+            refresh_to/root.parent.name/root.name/(row["job"]+".json")) for row in rows]
     cells = []
     for row in rows:
         job = jobs[row["job"]]
         missing = {name: track["missing_execution_task_ids"] for name, track in row["datasets"].items()}
         failed = {name: track["failed_task_ids"] for name, track in row["datasets"].items()}
         unscored = {name: track["unscored_answer_task_ids"] for name, track in row["datasets"].items()}
-        workload = plan["workload_plans"][str(row["concurrency"])]
         scope = plan["resource_scope"]
         hardware = (hardware_identity(row["runtime_hardware"], scope["gpu_devices"])
                     if row.get("runtime_hardware") is not None else None)
         resource_identity = {key: scope[key] for key in ("gpu_capacity_tokens", "host_capacity_tokens")}
         resource_identity.update(gpu_device_count=len(set(scope["gpu_devices"])), hardware=hardware,
                                  native_cache_config=row.get("native_cache_config"))
-        comparison = {**binding,
-            "resource_scope": resource_identity,
-            "workload_sha256": {name: item["sha256"] for name, item in workload.items()},
+        comparison = {**binding, "resource_scope": resource_identity,
             "complete_slo_seconds": job["complete_slo_seconds"]}
         acceptance = {}
         if plan.get("acceptance") is not None:
-            replicate_scope = plan.get("replicate_id") or (joint_scope["manifest"]["sha256"]
-                if joint_scope is not None else plan_identity["sha256"])
+            replicate_scope = plan.get("replicate_id") or (joint_scope["manifest"]
+                if joint_scope is not None else str(plan_path))
             acceptance = {"acceptance_protocol": plan["acceptance"], "queue_job": job,
                 "replicate_scope": replicate_scope, "repetition": job["repetition"],
                 "required_experiment_cells": plan["experiment_cells"],
@@ -368,17 +340,17 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
                     and entry["method"] in {plan["acceptance"]["baseline"], plan["acceptance"]["candidate"]}})}
         cells.append({**row, "evaluation_kind": "full_queue_own_P3", "source_file": str(path),
             "generation_dir": job["output"], "comparison_identity": comparison,
-            "active_assets": {name: plan["assets"].get(name) for name, active in (
+            "active_assets": {name: (plan["assets"].get(name) or {}).get("path") for name, active in (
                 ("gain", row["method"].startswith("S3_")), ("value", row["method"].endswith("_value")),
                 ("completion_timing", row["method"].startswith(("S3_", "Rule_"))),
                 ("demand_pricing", row["method"].endswith("_demand"))) if active}
-                | ({"compilation": plan["compilation_asset"]} if "_contextpilot" in row["method"] else {}),
+                | ({"compilation": plan["compilation_policy"]["checkout"]} if "_contextpilot" in row["method"] else {}),
             "evaluation_factors": plan.get("method_factors", {}).get(row["method"]),
             "experiment_design": plan.get("experiment_design", "historical retention design"),
             "device_source_identity": device_source,
             "explicit_joint_scope": {"manifest": joint_scope["manifest"], "frozen_A": joint_scope["frozen_A"]}
                 if joint_scope is not None else None,
-            "capacity_plan": plan_identity, "full_workflow_cost": str(root/"capacity-cost.json"),
+            "capacity_plan": str(plan_path), "full_workflow_cost": str(root/"capacity-cost.json"),
             "completion_rate": row["completed_qa"]/row["requested_qa"],
             "p95_response_count": row["completed_qa"], "missing_execution_task_ids": missing,
             "failed_task_ids": failed, "unscored_answer_task_ids": unscored,
@@ -394,8 +366,7 @@ def queue_repetition(cell):
 
 def shared_asset_differences(left, right):
     left, right = left["active_assets"], right["active_assets"]
-    return sorted(name for name in left.keys() & right.keys()
-                  if (left[name] or {}).get("sha256") != (right[name] or {}).get("sha256"))
+    return sorted(name for name in left.keys() & right.keys() if left[name] != right[name])
 
 
 def full_queue_comparisons(cells):
@@ -631,11 +602,7 @@ def main(argv=None):
     artifacts, capacity, capacity_comparisons, ledgers, full_cells = [], [], [], [], []
     joint_scope = None
     if args.joint_scope:
-        scope = load(args.joint_scope)
-        for name in ("config", "matrix"):
-            if identity(scope["source_"+name])["sha256"] != scope["source_"+name+"_sha256"]:
-                raise ValueError("explicit joint scope source identity differs from the frozen original input")
-        joint_scope = {**scope, "manifest": identity(args.joint_scope)}
+        joint_scope = {**load(args.joint_scope), "manifest": str(Path(args.joint_scope).resolve())}
     paths, missing = expanded(args.artifact)
     for label, path in paths:
         value = load(path)

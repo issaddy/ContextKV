@@ -197,7 +197,7 @@ def main(argv=None):
         for row in rows:
             stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False)+"\n")
     Path(args.output+".manifest.json").write_text(json.dumps({"schema_version": 1,
-        "source_pairs": str(source.resolve()), "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "source_pairs": str(source.resolve()),
         "records": len(rows), "readers": sorted({row["reader_checkpoint"] for row in rows}),
         "splits": sorted({row["split"] for row in rows}), "pairs": manifest}, ensure_ascii=False, indent=2)+"\n")
 

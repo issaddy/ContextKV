@@ -123,7 +123,7 @@ def source_records(path, *, store=None, attempt_ids=None):
                 row = {**row, "status": "completed", "dataset": row["dataset"] if "dataset" in row else "+".join(corpus_ids),
                     "source_status_derivation": dict(contract="training.task_rollout.run_actual_rollouts",
                         state_database=str(store.path), source_record_path=str(Path(path).resolve()),
-                        source_record_sha256=digest(row), stage=actual.stage,
+                        stage=actual.stage,
                         native_receipt=to_jsonable(receipt),
                         native_fingerprint=to_jsonable(actual.plan.candidate.fingerprint),
                         corpus_ids=corpus_ids)}
@@ -1438,14 +1438,9 @@ def audit_trace_inputs(trace, template, *, trace_path, config_path):
             else:
                 phase["mismatches"].append({"event_id": event_id(turn, event),
                     "recorded_input_hash": event["input_hash"], "current_input_hash": current_hash})
-    provenance = {}
-    for name, path in (("source_trace", trace_path), ("config", config_path),
-                       ("reading_compiler", Path(__file__).resolve().parents[1]/"controller"/"reading.py")):
-        with Path(path).open("rb") as stream:
-            provenance[name] = {"path": str(Path(path).resolve()),
-                "sha256": hashlib.file_digest(stream, "sha256").hexdigest()}
     return {"scope": "recorded READ and model REDUCE inputs recompiled with current messages and tokenizer",
-        "split": sorted({turn["split"] for turn in trace["turns"]}), **provenance,
+        "split": sorted({turn["split"] for turn in trace["turns"]}),
+        "source_trace": str(trace_path), "config": str(config_path),
         "fingerprint": asdict(template.fingerprint), "phases": phases,
         "current_read_inputs_match": not phases["READ"]["mismatches"] if phases["READ"]["total"] else None,
         "current_reduce_inputs_match": not phases["REDUCE"]["mismatches"] if phases["REDUCE"]["total"] else None,
@@ -1481,9 +1476,7 @@ def export(args):
         store.close()
     result = make_trace(turns, config=config, source_db=args.state_db, captured=False,
         case_outcomes=unexported_requests(args.records, args.failed_conversations, attempt_ids, segments))
-    records_path = Path(args.records).resolve()
-    with records_path.open("rb") as stream:
-        result["source_records"] = {"path": str(records_path), "sha256": hashlib.file_digest(stream, "sha256").hexdigest()}
+    result["source_records"] = str(Path(args.records).resolve())
     write_json(args.output, result)
     return result
 

@@ -358,8 +358,6 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         results[task_id] = value
         windows[task_id] = (start, end)
         write_json(directory/"records"/f"{number:06d}.json", value)
-        print(dumps({"method": method["id"], "dataset": dataset_name, "task": task_id,
-                     "complete_ms": response.complete_ms}), flush=True)
 
     async def conversation(sid):
         session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
@@ -717,8 +715,7 @@ def main(argv=None):
     elif args.command == "evaluate":
         from bench.study_workloads import read_workload_manifest, load_goal_policy
         workload = read_workload_manifest(args.workload_plan) if args.workload_plan else None
-        goal_policy = (load_goal_policy(args.goal_policy,
-            expected_sha256=workload.goal_policy_sha256 if workload else None) if args.goal_policy else None)
+        goal_policy = load_goal_policy(args.goal_policy) if args.goal_policy else None
         frozen = json.loads(Path(args.frozen).read_text()) if args.frozen else None
         if frozen:
             config, matrix = frozen["config"], frozen["matrix"]

@@ -192,7 +192,7 @@ B 从冻结 A 的真实观察采集动作分支；失败尝试中已完成步骤
 C 使用 `paired_native_retention_v7`。训练行保存原始数据会话集合，train/dev 集合互斥，同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。首个覆盖保留前缀全部正文因果页的 READ 或 ANSWER 是目标消费者。目标页实际 GPU、Host 或重算分布变化时，取同一请求的服务端首 token 时间差；分布相同时取零。完整重访耗时单列，外部请求成本从整窗差额中扣除整次目标重访的耗时差后计算。新增 owner 收益按消费者和共享页去重，容量与驻留按共享页增量。单 owner 标签计量实际保留调用（ledger＋retain），inspect 与完整 callback 分别记录。完整集合的真实净效果由同轨 Native/value 对照和物理积分验收。
 
 C 的两次容量构造共用原有 TTL15/60/180、owner、页并集和需求去重目标。配置使用单一 `protection_budget_tokens`（联合入口为 8192），GPU/Host 的 Native 物理配额与 `lambda_gpu` / `lambda_host` 驻留价格保留原含义。
-E6 可在 `execution.prefix_retention.pricing_asset` 加载同一配对拟合产物。拟合记录完整前缀长度的实测范围，在线按实际 Native 状态和 TTL 选择匹配桶。该资产及其哈希进入冻结清单，`lambda_gpu` 和 `lambda_host` 在此配置中按额外 token·秒定价。
+E6 可在 `execution.prefix_retention.pricing_asset` 加载同一配对拟合产物。拟合记录完整前缀长度的实测范围，在线按实际 Native 状态和 TTL 选择匹配桶。`lambda_gpu` 和 `lambda_host` 按额外 token·秒定价。
 
 `retention_pair_workflow` 先在同一捕获特征桶内选择两组完整、会话互不相交的训练窗口，并在独立开发轨迹中匹配同桶窗口，再核算 Native 与三个 TTL 的总调用预算。选择清单通过 `retention_trace replay --selection` 原样使用。拟合按重放时的实际特征要求每桶至少两个独立会话组；没有支持桶或开发覆盖时，工作流记录无可用资产状态。窗口数量与期限网格保持不变。
 `retention_trace export` 从已付 READ 账本恢复原生观察、实际时间和来源前缀。回放按各步原始提交时间与目标观察时间设置最早执行时刻，GAP 沿用原耗时，步骤还需等待其前序完成。`retention_coverage` 分开统计任意正文页重访与完整前缀及正文区间一致的重访。
@@ -236,9 +236,9 @@ python3 -m bench.study_workloads --tasks TASKS.jsonl --arrivals DECLARED-ARRIVAL
   --output FIXED-ARRIVALS.json --name DECLARED-NAME --concurrency 4
 ```
 
-`DECLARED-ARRIVALS.json` 显式列出每道任务的相对到达秒数，例如 `{"session:1":0,"session:2":30}`。保存任务与到达映射哈希，所有方法复用同一声明。
+`DECLARED-ARRIVALS.json` 显式列出每道任务的相对到达秒数，例如 `{"session:1":0,"session:2":30}`。所有方法复用同一声明。
 
-来源记录提供全部声明任务的请求开始时间；缺失项保留为未观测。各方案复用同一固定计划及哈希，按各自真实 P3 历史完成依赖；等待前一轮和等待并发槽均计入完整响应。
+来源记录提供声明任务的请求开始时间。各方案复用同一到达计划，按各自真实 P3 历史推进，前轮等待和并发排队均计入完整响应。
 `--complete-slo-seconds` 设置事先声明的完整响应 SLO，goodput 按达标完整回答/观察秒数计算，无阈值时不生成 SLO 数值。
 
 ```sh

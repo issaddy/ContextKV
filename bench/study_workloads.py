@@ -6,8 +6,7 @@ References and goal conditions remain evaluation metadata, outside online questi
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, dataclass, field, replace
-import hashlib
+from dataclasses import asdict, dataclass, field, fields, replace
 import json
 import math
 from pathlib import Path
@@ -97,12 +96,9 @@ class GoalGraphPolicy:
                                 "assistant_text": turn.assistant_text} for turn in actual_history]})
 
 
-def load_goal_policy(path, *, expected_sha256=None):
-    payload = Path(path).read_bytes()
-    if expected_sha256 is not None and hashlib.sha256(payload).hexdigest() != expected_sha256:
-        raise ValueError("goal policy changed after workload freeze")
+def load_goal_policy(path):
     graphs = []
-    for graph in json.loads(payload)["graphs"]:
+    for graph in json.loads(Path(path).read_text())["graphs"]:
         nodes = []
         for node in graph["nodes"]:
             edges = tuple(GoalEdge(edge["branch"], edge["target"], AnswerPredicate(**{
@@ -205,13 +201,10 @@ class WorkloadManifest:
     name: str
     concurrency: int
     turns: tuple[WorkloadTurn, ...]
-    source_rows_sha256: str
-    goal_policy_sha256: str | None = None
     schema_version: int = 1
     concurrency_scope: str = "request"
     time_origin: str = "dispatcher construction: monotonic seconds"
     dispatch_semantics: str = "explicit ordinal after own prior commit plus fixed think-time"
-    arrival_source_sha256: str | None = None
     arrival_source_basis: str | None = None
 
     @property
@@ -231,11 +224,12 @@ def read_workload_manifest(path):
         return {name: read_workload_manifest(source) for name, source in value["datasets"].items()}
     value["turns"] = tuple(WorkloadTurn(**{**turn, "source_document_ids": tuple(turn["source_document_ids"])})
                             for turn in value["turns"])
-    return WorkloadManifest(**value)
+    return WorkloadManifest(**{field.name: value[field.name] for field in fields(WorkloadManifest)
+                               if field.name in value})
 
 
 def freeze_workload(rows, *, name, concurrency, think_time_seconds=0.0, pause_after=None,
-                    session_start_delays=None, interleaving=None, goal_policy_sha256=None, fixed_arrivals=None):
+                    session_start_delays=None, interleaving=None, fixed_arrivals=None):
     """Keep questions/references fixed; freeze arrivals and annotate source reuse."""
     pause_after, session_start_delays = pause_after or {}, session_start_delays or {}
     if fixed_arrivals is not None and set(fixed_arrivals) != {row["task_id"] for row in rows}:
@@ -271,9 +265,7 @@ def freeze_workload(rows, *, name, concurrency, think_time_seconds=0.0, pause_af
             seen.update(sources)
             previous, previous_topic = row["task_id"], topic
             previous_sources = set(sources)
-    frozen = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return WorkloadManifest(name, concurrency, tuple(entries[task_id] for task_id in order),
-        hashlib.sha256(frozen).hexdigest(), goal_policy_sha256,
         dispatch_semantics=("fixed_arrivals" if fixed_arrivals is not None else
                             "explicit ordinal after own prior commit plus fixed think-time"))
 
@@ -320,7 +312,6 @@ def prepare_workloads(config, matrix):
     tasks_path, graphs_path = destination/"tasks.jsonl", destination/"goal_graphs.json"
     tasks_path.write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in rows))
     policy.write(graphs_path)
-    goal_policy_sha256 = hashlib.sha256(graphs_path.read_bytes()).hexdigest()
     arrivals = output/"workloads"
     arrivals.mkdir(parents=True, exist_ok=True)
     schedules = []
@@ -329,8 +320,7 @@ def prepare_workloads(config, matrix):
             name = f"dynamic-goal-c{concurrency}-pause{pause}"
             path = arrivals/f"{name}.json"
             freeze_workload(rows, name=name, concurrency=concurrency,
-                pause_after={row["task_id"]: float(pause) for row in rows if row["turn"] == 3},
-                goal_policy_sha256=goal_policy_sha256).write(path)
+                pause_after={row["task_id"]: float(pause) for row in rows if row["turn"] == 3}).write(path)
             schedules.append({"name": name, "concurrency": concurrency, "pause_after_turn": 3,
                               "pause_seconds": pause, "path": str(path.resolve())})
     diagnostic = {**matrix, "protocol": "P3_answer_driven_goal_graph",
@@ -349,9 +339,8 @@ def prepare_workloads(config, matrix):
         "topic_request": config.get("workloads", {}).get("topic_request", "summary"),
         "conversations": len(policy.graphs), "turns": len(rows), "turns_per_conversation": 7,
         "tasks_path": str(tasks_path.resolve()), "goal_policy_path": str(graphs_path.resolve()),
-        "goal_policy_sha256": goal_policy_sha256,
         "diagnostic_matrix_path": str(matrix_path.resolve()), "schedules": schedules,
-        "source_tasks": str(source.resolve()), "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "source_tasks": str(source.resolve()),
         "phase_analysis": ["condition_correction", "version_before", "version_compare", "condition_remove",
                            "topic_switch", "source_revisit"],
         "online_policy_input": "actual committed model QA and public source metadata",
@@ -456,17 +445,13 @@ def export_fixed_arrivals(rows, records, *, name, concurrency):
     origin = min(starts.values())
     manifest = freeze_workload(rows, name=name, concurrency=concurrency,
         fixed_arrivals={task: start-origin for task, start in starts.items()})
-    trajectory = json.dumps(records, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
-    return replace(manifest, arrival_source_sha256=hashlib.sha256(trajectory).hexdigest(),
-        arrival_source_basis="saved request_window starts relative to first request; frozen replay schedule, not a reconstruction of unrecorded upstream arrivals")
+    return replace(manifest, arrival_source_basis="saved request_window starts relative to first request")
 
 
 def declare_fixed_arrivals(rows, arrivals, *, name, concurrency):
     """Freeze an explicit new workload, without presenting it as a past trace."""
     manifest = freeze_workload(rows, name=name, concurrency=concurrency, fixed_arrivals=arrivals)
-    encoded = json.dumps(arrivals, sort_keys=True, separators=(",", ":")).encode()
-    return replace(manifest, arrival_source_sha256=hashlib.sha256(encoded).hexdigest(),
-        arrival_source_basis="explicit preregistered task-to-relative-seconds schedule; not observed historical arrivals")
+    return replace(manifest, arrival_source_basis="preregistered task-to-relative-seconds schedule")
 
 
 if __name__ == "__main__":

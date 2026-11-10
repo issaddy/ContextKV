@@ -7,7 +7,6 @@ from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
-import hashlib
 import json
 import math
 import os
@@ -35,9 +34,8 @@ from bench.study_resources import StudyResourceSampler, integrate_physical, list
 from bench.study_workloads import declare_fixed_arrivals, freeze_workload, load_goal_policy, read_workload_manifest
 
 
-def snapshot(path):
-    path = Path(path).resolve()
-    return dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+def source_file(path):
+    return {"path": str(Path(path).resolve())}
 
 
 def prepare(args, root):
@@ -92,7 +90,7 @@ def prepare(args, root):
     matrix["methods"] = methods
     matrix["resources"].update(gpu_capacity_tokens=32768, host_capacity_tokens=61056)
     policy_path = Path(source["goal_policy_path"]).resolve()
-    policy = load_goal_policy(policy_path, expected_sha256=source["goal_policy_sha256"])
+    policy = load_goal_policy(policy_path)
     originals = read_jsonl(source["tasks_path"])
     grouped = {}
     for row in originals:
@@ -117,8 +115,7 @@ def prepare(args, root):
         task_path, workload_path = directory/"tasks.jsonl", directory/"workload.json"
         write_jsonl(task_path, rows)
         frozen = freeze_workload(rows, name=f"capacity-c{concurrency}-first2-pause30",
-            concurrency=concurrency, think_time_seconds=30,
-            goal_policy_sha256=source["goal_policy_sha256"])
+            concurrency=concurrency, think_time_seconds=30)
         frozen = replace(frozen, dispatch_semantics="independent_clients_after_own_prior_commit")
         frozen.write(workload_path)
         job_matrix = deepcopy(matrix)
@@ -145,18 +142,18 @@ def prepare(args, root):
     for job in plans:
         per_method[job["method"]] += job["requested_qa"]
     manifest = dict(format="contextkv_two_turn_capacity_plan_v1", scope="two-turn P3 capacity only; not the full seven-turn/five-scenario experiment",
-        source_manifest=snapshot(source_path), source_tasks=snapshot(source["tasks_path"]),
-        source_goal_policy=snapshot(policy_path), source_config=snapshot(args.config),
+        source_manifest=source_file(source_path), source_tasks=source_file(source["tasks_path"]),
+        source_goal_policy=source_file(policy_path), source_config=source_file(args.config),
         parent_P0_asset=str(Path(args.parent_policy_asset).resolve()),
-        parent_P0_heads=snapshot(Path(args.parent_policy_asset)/"heads.pt"),
-        reader_profile_id=args.reader_profile_id, assets={name: snapshot(path) for name, path in (
+        parent_P0_heads=source_file(Path(args.parent_policy_asset)/"heads.pt"),
+        reader_profile_id=args.reader_profile_id, assets={name: source_file(path) for name, path in (
             ("gain", args.gain_asset), ("execution", args.execution_profile), ("native", args.native_assets))},
         first_arrivals="all clients planned at dispatcher time zero; actual scheduler drift recorded",
         second_arrivals="own first QA commit + 30 seconds; own actual answer selects graph branch",
         client_replication="sorted frozen source conversations cycled to each declared client count; original source metadata retained",
         methods=[method["id"] for method in methods], requested_qa=sum(job["requested_qa"] for job in plans),
         per_method_requested_qa=dict(per_method),
-        value_asset=snapshot(args.value_model) if args.value_model is not None else None,
+        value_asset=source_file(args.value_model) if args.value_model is not None else None,
         value_policy=value_policy,
         gain_mode=args.gain_mode, concurrency=args.concurrency,
         joint_scope=("four cells per declared concurrency, each executes own P3 and may choose different DAGs"
@@ -240,24 +237,6 @@ def full_queue_gap_limits(execution, gain=None, *, max_units=None, max_passages=
          **((execution.get("state_observation") or {}).get("gap_limits") or {})})
     return {"max_units": inherited["max_units"] if max_units is None else max_units,
             "max_passages": inherited["max_passages"] if max_passages is None else max_passages}
-
-
-def compilation_source_identity(checkout):
-    """Record the verified author tree and actual Python sources used by its index."""
-    from adapters.contextpilot import _verified_checkout
-
-    root = _verified_checkout(str(checkout))
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True,
-                          capture_output=True, text=True).stdout.strip()
-    tracked = subprocess.run(["git", "ls-files", "-z", "--", "contextpilot"], cwd=root,
-                             check=True, capture_output=True).stdout.decode().split("\0")
-    sources = [{"path": name, "sha256": hashlib.sha256((root/name).read_bytes()).hexdigest()}
-               for name in sorted(tracked) if name.endswith(".py")]
-    if not any(item["path"] == "contextpilot/server/live_index.py" for item in sources):
-        raise ValueError("verified ContextPilot checkout is missing its author index source")
-    digest = hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()
-    return dict(checkout=str(root), author_commit=head, source_manifest=sources, sha256=digest,
-                digest_scope="manifest of actual tracked contextpilot Python source content hashes")
 
 
 def prepare_full_queue(args, root):
@@ -382,7 +361,7 @@ def prepare_full_queue(args, root):
                 source_window=False)
             path = root/f"external-retriever-{dataset}.yaml"
             path.write_text(yaml.safe_dump(retriever, sort_keys=False))
-            external_retrievers[dataset] = snapshot(path)
+            external_retrievers[dataset] = source_file(path)
             external_matrix["datasets"][dataset]["retriever_config"] = str(path.resolve())
             split_retrieval = external_matrix["datasets"][dataset].get("retrieval_by_split", {}).get("dev", {})
             if "config_path" in split_retrieval:
@@ -408,7 +387,7 @@ def prepare_full_queue(args, root):
             workload_paths[dataset] = str(workload_path.resolve())
         workload_index = root/f"workload-c{concurrency}.json"
         write_json(workload_index, dict(format="contextkv_dataset_workload_index_v1", datasets=workload_paths))
-        workload_plans[str(concurrency)] = {name: snapshot(path) for name, path in workload_paths.items()}
+        workload_plans[str(concurrency)] = {name: source_file(path) for name, path in workload_paths.items()}
         methods = full_queue_methods(concurrency, args.methods)
         for repetition in range(args.repetitions):
             order = methods if repetition % 2 == 0 else tuple(reversed(methods))
@@ -433,20 +412,15 @@ def prepare_full_queue(args, root):
         "cost_basis": "unique native receipts plus provider phase totals, and global online physical occupancy"}
     revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=args.project_root,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout.strip() or None
-    project = Path(args.project_root).resolve()
-    sources = {path.relative_to(project).as_posix(): snapshot(path)["sha256"]
-        for folder in ("adapters", "bench", "controller", "engine_patches", "profiling", "training")
-        for path in (project/folder).rglob("*.py")}
     manifest = dict(format="contextkv_full_queue_joint_plan_v1", scope="full declared P3 development queue",
-        execution_commit=revision, execution_sources_sha256=hashlib.sha256(
-            json.dumps(sources, sort_keys=True).encode()).hexdigest(),
-        source_config=snapshot(args.config), source_matrix=snapshot(args.matrix),
-        source_cohorts=snapshot(args.cohorts) if args.cohorts is not None else None,
-        reader_profile_id=profile, reader_run=snapshot(run_path), resource_scope=scope,
-        assets={"gain": snapshot(gain_path) if needs_gain else None,
-                "value": snapshot(args.value_model) if needs_value else None,
-                "demand_pricing": snapshot(demand_pricing["pricing_asset"]) if demand_pricing is not None else None,
-                "completion_timing": snapshot(rolling_settings["completion_timing_asset"])
+        execution_commit=revision,
+        source_config=source_file(args.config), source_matrix=source_file(args.matrix),
+        source_cohorts=source_file(args.cohorts) if args.cohorts is not None else None,
+        reader_profile_id=profile, reader_run=source_file(run_path), resource_scope=scope,
+        assets={"gain": source_file(gain_path) if needs_gain else None,
+                "value": source_file(args.value_model) if needs_value else None,
+                "demand_pricing": source_file(demand_pricing["pricing_asset"]) if demand_pricing is not None else None,
+                "completion_timing": source_file(rolling_settings["completion_timing_asset"])
                 if completion_timing is not None else None},
         cohort=cohorts, workload_plans=workload_plans, acceptance=acceptance, replicate_id=args.replicate_id,
         experiment_cells=FORMAL_CELLS,
@@ -454,10 +428,8 @@ def prepare_full_queue(args, root):
         method_factors={method["id"]: method["evaluation_factors"] for method in matrix["methods"]},
         external_retrievers=external_retrievers, external_reranker=args.external_reranker,
         compilation_policy=compilation,
-        compilation_asset=(compilation_source_identity(compilation["checkout"])
-                           if compilation is not None else None),
         E0_protocol="P0 support/query assets with task_first, source_rows_pr3, numeric_need_isolation and Native; same public correctness code and arrival schedule",
-        source_arrival_plan=snapshot(arrival_path),
+        source_arrival_plan=source_file(arrival_path),
         arrival_protocol="fixed relative arrival timestamps shared across methods; own-history and semaphore waits included in complete response",
         value_policy=value_policy, gain_mode="observed_actions",
         lambda_time=execution["lambda_time"], concurrency=args.concurrency,

@@ -530,7 +530,6 @@ def refresh_features(source, output, *, registration_root=None, recorded_root=No
     target.parent.mkdir(parents=True, exist_ok=True)
     write_rows(target, refreshed)
     manifest = {"source": str(Path(source).resolve()),
-        "source_sha256": hashlib.sha256(Path(source).read_bytes()).hexdigest(),
         "output": str(target.resolve()), "records": len(refreshed),
         "observed_feature_schema": OBSERVED_FEATURE_SCHEMA,
         "completion_reserve_scope": COMPLETION_RESERVE_SCOPE,

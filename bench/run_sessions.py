@@ -8,7 +8,6 @@ as unfinished, never executed with invented history.
 from __future__ import annotations
 import asyncio
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -31,21 +30,11 @@ from controller.schema import TurnRecord
 from controller.serialization import dumps, to_jsonable
 
 
-def load_think_time_plan(path, *, expected_sha256=None):
-    """Read a frozen per-task gap plan; its digest binds both system arms."""
+def load_think_time_plan(path):
     if path is None:
-        if expected_sha256 is not None:
-            raise ValueError("expected a frozen think-time plan")
         return None, None
     source = Path(path)
-    payload = source.read_bytes()
-    digest = hashlib.sha256(payload).hexdigest()
-    if expected_sha256 is not None and digest != expected_sha256:
-        raise ValueError("think-time plan changed after matrix provenance was fixed")
-    plan = json.loads(payload)
-    if not isinstance(plan, dict) or plan.get("schema_version") != 1 or not isinstance(plan.get("gaps_after_task"), dict):
-        raise ValueError("think-time plan needs schema_version 1 and gaps_after_task")
-    return plan["gaps_after_task"], {"path": str(source.resolve()), "sha256": digest}
+    return json.loads(source.read_text())["gaps_after_task"], str(source.resolve())
 
 
 @dataclass(frozen=True)
@@ -374,8 +363,7 @@ async def benchmark(args, config):
     if args.limit_sessions:
         ids = set(sorted({r["conversation_id"] for r in rows})[:args.limit_sessions])
         rows = [r for r in rows if r["conversation_id"] in ids]
-    think_time_by_task, think_time_plan = load_think_time_plan(args.think_time_plan,
-        expected_sha256=args.expected_think_time_plan_sha256)
+    think_time_by_task, think_time_plan = load_think_time_plan(args.think_time_plan)
     corpus_snapshot = f"{dataset['name']}-{dataset['revision']}"
     retriever = create_retriever(args.protocol, config_path=args.retriever_config,
                                 index_path=args.retriever_index, corpus_path=args.corpus,

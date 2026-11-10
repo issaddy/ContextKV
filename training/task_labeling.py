@@ -286,7 +286,7 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
             "elapsed_ms": (time.monotonic()-started)*1000,
             "script_history_mismatches": sum(row["script_history_mismatch"] for row in by_id.values()),
             "verified_grounding_spans": sum(len(row["verified_grounding"]) for row in by_id.values()),
-            "source_path": str(turns_path.resolve()), "source_sha256": file_digest(turns_path),
+            "source_path": str(turns_path.resolve()),
             "labels_path": str(output.resolve()), "frozen_history_encoder": frozen.manifest,
             "history_encoder_usage": dict(frozen.usage),
             "teacher_input_tokens": sum(known_inputs) if all(value is not None for value in known_inputs) else None,

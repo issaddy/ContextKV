@@ -124,14 +124,10 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     from profiling.final_study_index import (full_queue_cells, full_queue_comparisons,
                                             full_queue_interactions, main, markdown)
 
-    run = tmp_path / 'reader.json'
-    run.write_text(json.dumps({'engine': {'base_url': 'local'}, 'state_dir': 'temporary'}))
-    plan = dict(reader_run={'path': str(run)},
-        source_config={'sha256': 'A'}, source_matrix={'sha256': 'matrix'},
-        cohort={'track': ['task']}, reader_profile_id='fixed', lambda_time=0,
+    plan = dict(source_config={'path': 'A'}, source_matrix={'path': 'matrix'},
+        source_arrival_plan={'path': 'arrivals-A'}, reader_profile_id='fixed', lambda_time=0,
         resource_scope={'gpu_devices': [0], 'gpu_capacity_tokens': 32768, 'host_capacity_tokens': 65536},
-        workload_plans={'4': {'track': {'sha256': 'arrivals-A'}}},
-        assets={'gain': {'sha256': 'B'}, 'value': None},
+        assets={'gain': {'path': 'B'}, 'value': None},
         jobs=[dict(name='job', output='generation', complete_slo_seconds=30)])
     plan_path = tmp_path / 'capacity-plan.json'
     plan_path.write_text(json.dumps(plan))
@@ -176,13 +172,13 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     assert full_queue_comparisons(reference + cells(unscored))[0]['relative_p95_change'] is None
     assert full_queue_comparisons(reference + cells({**candidate, 'queue_quality': None}))[0]['quality_not_lower'] is None
     assert full_queue_comparisons(cells({**row, 'p95_complete_ms': 0}) + cells(candidate))[0]['relative_p95_change'] is None
-    plan['workload_plans']['4']['track']['sha256'] = 'arrivals-B'
+    plan['source_arrival_plan']['path'] = 'arrivals-B'
     plan_path.write_text(json.dumps(plan))
     changed = full_queue_comparisons(reference + cells(candidate))[0]
     assert not changed['comparable'] and changed['differences']['queue_quality'] is None
-    assert changed['incompatible_identity_fields'] == ['workload_sha256']
+    assert changed['incompatible_identity_fields'] == ['arrival_plan']
     assert changed['relative_p95_change'] is None
-    plan['workload_plans']['4']['track']['sha256'] = 'arrivals-A'
+    plan['source_arrival_plan']['path'] = 'arrivals-A'
     plan['jobs'][0]['complete_slo_seconds'] = 60
     plan_path.write_text(json.dumps(plan))
     assert full_queue_comparisons(reference + cells(candidate))[0]['incompatible_identity_fields'] == ['complete_slo_seconds']
@@ -191,9 +187,6 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     plan_path.write_text(json.dumps(plan))
     assert full_queue_comparisons(reference + cells(candidate))[0]['incompatible_identity_fields'] == ['execution_commit']
     plan.pop('execution_commit')
-    plan['execution_sources_sha256'] = 'different-working-tree'
-    plan_path.write_text(json.dumps(plan))
-    assert full_queue_comparisons(reference + cells(candidate))[0]['incompatible_identity_fields'] == ['execution_sources_sha256']
 
     out = tmp_path / 'index'
     report = main(['--baseline-commit', '85f4ed4', '--physical', 'recorded-physical.json',
@@ -207,7 +200,7 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     assert not command['executed']
     assert command['argv'][command['argv'].index('--gpu-devices') + 1] == '2'
 
-    plan['compilation_asset'] = {'sha256': 'C'}
+    plan['compilation_policy'] = {'checkout': 'C'}
     plan_path.write_text(json.dumps(plan))
     quartet = [cells({**row, 'method': method, 'queue_quality': quality, 'p95_complete_ms': latency})[0]
         for method, quality, latency in (('B6_native', .5, 100), ('S3_native', .6, 90),
@@ -225,7 +218,7 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     assert len(full_queue_comparisons(repeated)) == 2 * len(full_queue_comparisons(quartet))
     quartet[-1]['full_queue_delivered'] = False
     assert full_queue_interactions(quartet)[0]['contrasts']['p95_complete_ms'] is None
-    quartet[-1]['active_assets']['gain'] = {'sha256': 'different-B'}
+    quartet[-1]['active_assets']['gain'] = 'different-B'
     assert full_queue_interactions(quartet) == []
     mismatched = next(item for item in full_queue_comparisons(quartet)
                      if item['candidate'] == 'S3_contextpilot' and item['baseline'] == 'S3_native')
@@ -235,11 +228,11 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     e5 = cells({**row, 'method': 'S3_contextpilot_joint_native'})
     e6 = {**row, 'method': 'S3_contextpilot_joint_demand'}
     rule = cells({**row, 'method': 'Rule_contextpilot_joint_demand'})
-    plan['assets']['demand_pricing'] = {'sha256': 'pricing'}
+    plan['assets']['demand_pricing'] = {'path': 'pricing'}
     plan_path.write_text(json.dumps(plan))
     assert full_queue_comparisons(e5 + cells(e6))[0]['comparable']
     assert full_queue_comparisons(cells(e6) + rule)[0]['incompatible_identity_fields'] == ['assets.demand_pricing']
-    plan['assets']['completion_timing'] = {'sha256': 'timing'}
+    plan['assets']['completion_timing'] = {'path': 'timing'}
     plan_path.write_text(json.dumps(plan))
     assert full_queue_comparisons(e5 + cells(e6))[0]['incompatible_identity_fields'] == ['assets.completion_timing']
 
