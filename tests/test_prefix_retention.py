@@ -201,7 +201,7 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
                             fingerprint=ByteTemplate().fingerprint, native_running_budget_tokens=4)
     gap = PlanCandidate("gap", "gap_retrieval", plan, (PlanStep(ReadTask("gap", "GAP")),), "reader")
     observer = PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
-                                  {"mode": "demand", "unpriced_policy": "risk_tokens", "ttl_seconds": 15, "protection_budget_tokens": 4})
+                                  {"mode": "demand", "ttl_seconds": 15, "protection_budget_tokens": 4})
     observer.runtime = SimpleNamespace(status=AsyncMock())
 
     async def after_gap(target, active=()):
@@ -211,12 +211,12 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
         return (await observer.demand_options((planned_gap, read), state, "session", batch, page_size=2))["gap"]
 
     shared = await after_gap(candidate)
-    observer.settings.pop("unpriced_policy")
+    observer.allocation = "paired_value"
     observer.runtime.status.reset_mock()
     native = await after_gap(candidate)
     assert native.retain == () and native.retention_evidence == "native_unpriced_net_value"
     observer.runtime.status.assert_not_awaited()
-    observer.settings["unpriced_policy"] = "risk_tokens"
+    observer.allocation = "next_use"
     lease, = shared.retain
     assert (lease.source_step_id, lease.target_step_id, lease.boundary_tokens) == ("old", "later", 2)
     assert shared.protected_tokens == 2
@@ -309,7 +309,7 @@ async def test_future_hybrid_original_body_remains_a_consumer_after_facts_comple
     proposal = PlanCandidate("reduce", "reduce_once", plan, (PlanStep(reduce),), "reader",
         route_steps=(PlanStep(answer, (candidate,)),))
     observer = PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
-        {"mode": "demand", "unpriced_policy": "risk_tokens", "ttl_seconds": 15, "protection_budget_tokens": 4})
+        {"mode": "demand", "ttl_seconds": 15, "protection_budget_tokens": 4})
     observer.runtime = SimpleNamespace(status=AsyncMock(return_value={"prefixes": ()}))
     option = (await observer.demand_options((proposal,), state, "session", batch, page_size=2))["reduce"]
     lease, = option.retain
@@ -405,7 +405,7 @@ async def test_demand_remaining_lease_competes_with_renewal_at_consumer_arrival(
     gap = PlanCandidate("gap", "gap_retrieval", plan, (PlanStep(ReadTask("gap", "GAP")),), "reader",
                         route_steps=(PlanStep(later, (candidate,)),))
     observer = PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
-        {"mode": "demand", "unpriced_policy": "risk_tokens", "ttl_seconds": 15, "horizon_seconds_choices": (15, 60, 180),
+        {"mode": "demand", "ttl_seconds": 15, "horizon_seconds_choices": (15, 60, 180),
          "protection_budget_tokens": 4})
     observer.runtime = SimpleNamespace(status=AsyncMock(return_value={"prefixes": ()}))
     first = (await observer.demand_options((gap,), state, "session", batch, page_size=2))["gap"]
@@ -462,7 +462,7 @@ async def test_demand_priced_multiowner_counts_consumers_not_owner_window_sums(m
         {"mode": "demand", "ttl_seconds": 15, "protection_budget_tokens": 6})
     observer.runtime = SimpleNamespace(status=AsyncMock(return_value={"prefixes": ()}))
     observer.model = object()
-    observer._demand_forecast = lambda inspected, batch, horizon: PrefixForecast(horizon, 1, 100, 0,
+    observer._demand_forecast = lambda inspected, batch, horizon, boundary: PrefixForecast(horizon, 1, 100, 0,
         0, 0, "scope", "paired", retention_control_ms=5,
         native_window_cost_ms=20000, retained_window_cost_ms=0)
     chosen = []

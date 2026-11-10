@@ -173,11 +173,13 @@ MAIN_COMPILATION_CELLS = {
     "E3": "B6_contextpilot", "E4": "S3_contextpilot",
 }
 JOINT_CONTEXT_CELLS = {"E5": "S3_contextpilot_joint_native", "E6": "S3_contextpilot_joint_demand"}
+CACHE_COOPERATION_METHODS = ("context_native", "context_cache_order", "context_cache_demand")
 FORMAL_CELLS = {**MAIN_COMPILATION_CELLS, **JOINT_CONTEXT_CELLS,
     "LlamaIndex": "LlamaIndex_native", "no_fact_reuse": "S3_contextpilot_no_fact_reuse"}
 RULE_CONTEXT_METHOD = "Rule_contextpilot_joint_demand"
 FULL_QUEUE_METHODS = tuple(FORMAL_CELLS.values())
-OPTIONAL_FULL_QUEUE_METHODS = ("E0_native", "B6_value", "S3_value", RULE_CONTEXT_METHOD)
+OPTIONAL_FULL_QUEUE_METHODS = ("E0_native", "B6_value", "S3_value", RULE_CONTEXT_METHOD,
+                              *CACHE_COOPERATION_METHODS)
 
 
 def full_queue_methods(concurrency, methods=None):
@@ -190,11 +192,12 @@ def full_queue_method_specs(selected, gain_settings, compilation, value_policy=N
     """Keep compilation, B decisions and optional retention as separate factors."""
     specs = []
     for method in selected:
-        gain = method.startswith("S3_")
+        cooperation = method in CACHE_COOPERATION_METHODS
+        gain = method.startswith("S3_") or cooperation
         rule = method == RULE_CONTEXT_METHOD
-        joint = method in JOINT_CONTEXT_CELLS.values() or rule
+        joint = method in JOINT_CONTEXT_CELLS.values() or rule or cooperation
         external = method == "LlamaIndex_native"
-        contextpilot = "_contextpilot" in method
+        contextpilot = "_contextpilot" in method or method in CACHE_COOPERATION_METHODS[1:]
         rolling = deepcopy(gain_settings if gain else rule_settings) if gain or rule else None
         if joint:
             rolling["joint_context"] = True
@@ -204,9 +207,7 @@ def full_queue_method_specs(selected, gain_settings, compilation, value_policy=N
         elif method.endswith("_demand"):
             retention = dict(mode="demand", ttl_seconds=15, horizon_seconds_choices=[15, 60, 180],
                              protection_budget_tokens=8192, **(demand_pricing or {}))
-            # Uncalibrated protection is a separately named rule comparison,
-            # never the default E6 net-value intervention.
-            retention["unpriced_policy"] = "risk_tokens" if rule else "native"
+            retention.setdefault("allocation", "next_use")
         overrides = {"execution": {
             "dialogue_mode": "llamaindex" if external else "contextkv",
             "plan_gain": rolling,
@@ -264,7 +265,8 @@ def prepare_full_queue(args, root):
     config["generation"]["run_config"] = str(run_path)
     selected_methods = tuple(dict.fromkeys(method for concurrency in args.concurrency
         for method in full_queue_methods(concurrency, args.methods)))
-    needs_gain = any(method.startswith("S3_") for method in selected_methods)
+    needs_gain = any(method.startswith("S3_") or method in CACHE_COOPERATION_METHODS
+                     for method in selected_methods)
     needs_value = any(method.endswith("_value") for method in selected_methods)
     gain_path = Path(args.gain_asset).resolve() if needs_gain else None
     profile = json.loads(gain_path.read_text())["reader_profile_id"] if needs_gain else args.reader_profile_id
@@ -855,7 +857,7 @@ def main(argv=None):
             parser.error("--full-queue requires --matrix, --online-gpu-devices and --reader-base-url")
         methods = {method for concurrency in args.concurrency
                    for method in full_queue_methods(concurrency, args.methods)}
-        if any(method.startswith("S3_") for method in methods):
+        if any(method.startswith("S3_") or method in CACHE_COOPERATION_METHODS for method in methods):
             if not args.gain_asset:
                 parser.error("S3 full-queue methods require --gain-asset")
         elif not args.reader_profile_id:

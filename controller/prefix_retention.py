@@ -83,6 +83,15 @@ class PrefixForecast:
     retained_window_cost_ms: float | None = None
     source_token_range: tuple[int, int] | None = None
 
+    def for_tokens(self, tokens):
+        """Scale measured acquisition work; owner-call overhead stays fixed."""
+        if self.source_token_range is None:
+            return self
+        scale = tokens / (sum(self.source_token_range) / 2)
+        return replace(self,
+            native_reuse_cost_ms=self.native_reuse_cost_ms * scale if self.native_reuse_cost_ms is not None else None,
+            retained_reuse_cost_ms=self.retained_reuse_cost_ms * scale if self.retained_reuse_cost_ms is not None else None)
+
     @property
     def target_saved_ms(self):
         return (self.reuse_probability * (self.native_reuse_cost_ms-self.retained_reuse_cost_ms)
@@ -559,12 +568,13 @@ class PrefixReadObserver:
         self.runtime = self.owners.runtime
         self._allocation_lock = asyncio.Lock()
         self._control_observations = deque(maxlen=32)
+        self._owner_control_observations = deque(maxlen=32)
         if settings["mode"] not in {"fixed_ttl", "value", "demand"}:
             raise ValueError("prefix callback requires fixed_ttl, value or demand mode")
-        if settings.get("unpriced_policy", "native") not in {"native", "risk_tokens"}:
-            raise ValueError("unpriced demand policy must be native or the explicit risk_tokens comparator")
         self.model = None
-        model_path = settings["model_path"] if settings["mode"] == "value" else settings.get("pricing_asset")
+        self.allocation = settings.get("allocation", "next_use")
+        model_path = (settings["model_path"] if settings["mode"] == "value" else
+                      settings.get("pricing_asset") if self.allocation == "paired_value" else None)
         if model_path:
             raw = Path(model_path).read_bytes()
             self.model = EmpiricalRetentionModel.from_dict(json.loads(raw))
@@ -605,10 +615,7 @@ class PrefixReadObserver:
 
         own = {row.owner_id: row for row in self.store.prefix_owners(session_id, active_only=True)
                if row.policy == "joint_demand"}
-        unpriced_policy = self.settings.get("unpriced_policy", "native")
-        if self.model is None and unpriced_policy == "native" and not own:
-            # Without a net-value calibration, supplementary protection has no
-            # justified gain over Native. Avoid even the unneeded status call.
+        if self.model is None and self.allocation == "paired_value" and not own:
             return joint_options(plans, state, allocate=lambda demand, *_:
                 JointOption(demand, retention_evidence="native_unpriced_net_value"))
         sources = {record.step_id: record for record in state.steps if record.task.kind == "READ"
@@ -759,16 +766,20 @@ class PrefixReadObserver:
                     paths[owner] = old.step_id, len(old.prefix_input_ids), pages
 
             requests, actions_by_option = [], {}
+            first_consumer_pages, consumed_pages = {}, set()
+            for target, (_, _, pages, _) in demands.items():
+                first_consumer_pages[target] = pages-consumed_pages
+                consumed_pages.update(consumer_paths[target][0])
             curves = {}
             for owner, (step, boundary, _) in paths.items():
                 if self.model is None or step not in sources or owner in immediate:
                     continue
                 inspection = sources[step].metrics.get("evidence_prefix", {})
-                if inspection.get("demand_observation") and inspection["boundary_tokens"] == boundary:
+                if inspection.get("demand_observation"):
                     curves[owner] = tuple(forecast for horizon in horizons
-                        if (forecast := self._demand_forecast(inspection, batch, horizon)) is not None)
+                        if (forecast := self._demand_forecast(inspection, batch, horizon, boundary)) is not None)
             priced = any(curves.values())
-            if not priced and unpriced_policy == "native":
+            if not priced and self.allocation == "paired_value":
                 return JointOption(demand, release=tuple(sorted(own.keys()-immediate)),
                     protected_tokens=len(base_pages-shared)*page_size,
                     uncovered_risk_tokens=sum(row[0] for row in demands.values()),
@@ -810,6 +821,11 @@ class PrefixReadObserver:
                             per_page = max(0, forecast.target_saved_ms)*min(risk, boundary)/boundary/len(evictable_pages)
                             forecasts.append(forecast)
                         else:
+                            # Each causal page is credited to its first future
+                            # consumer. A later read can reuse that consumer's KV.
+                            covered &= first_consumer_pages[target]
+                            if not covered:
+                                continue
                             per_page = risk*priority/len(evictable_pages)
                         events.append((target, tuple((page, per_page) for page in sorted(covered))))
                         target_ids.append(target)
@@ -852,13 +868,15 @@ class PrefixReadObserver:
                 for lease in mutations) if priced else None) if mutations else 0.0
             return JointOption(demand, mutations,
                 tuple(sorted(own.keys()-immediate-selected.keys())), len(protected-shared)*page_size,
-                uncovered, "consumer_paired_marginal" if priced else "native_at_risk_token_rule",
+                uncovered, "consumer_paired_marginal" if priced else "known_next_use",
                 tuple(sorted(kept_ids)), "candidate_arrival_ms_or_observed_step_means_plus_queue; unknown_when_unobserved",
-                allocation_value, owner_control_ms)
+                allocation_value, owner_control_ms if priced else
+                    len(mutations)*(sum(self._owner_control_observations)/len(self._owner_control_observations)
+                                    if self._owner_control_observations else 0.0))
 
         return joint_options(plans, state, allocate=allocate)
 
-    def _demand_forecast(self, inspected, batch, horizon):
+    def _demand_forecast(self, inspected, batch, horizon, boundary=None):
         features = inspected.get("retention_features")
         if features is None:
             return None
@@ -870,10 +888,8 @@ class PrefixReadObserver:
         bucket = self.model.feature_bucket({**features, **self._native_features(current)})
         forecast = self.model.forecasts.get(self.model._key(bucket, inspected["cache_scope_hash"],
                                                             horizon))
-        if forecast is not None and forecast.source_token_range is not None:
-            low, high = forecast.source_token_range
-            if low <= inspected["boundary_tokens"] <= high:
-                return forecast
+        if forecast is not None:
+            return forecast.for_tokens(boundary or inspected["boundary_tokens"])
 
     async def apply_demand(self, option, state, session_id, *, batch):
         started = time.monotonic()
@@ -899,6 +915,7 @@ class PrefixReadObserver:
                 if len(next_pages)*page_size > self.settings["protection_budget_tokens"]:
                     receipts[lease.owner_id] = {"state": "UNRETAINED", "reason": "shared_protection_budget"}
                     continue
+                owner_started = time.monotonic()
                 receipts[lease.owner_id] = await self.owners.observe(owner_id=lease.owner_id,
                     session_id=session_id, attempt_id=record.attempt_id, step_id=record.step_id,
                     receipt=record.receipt, prefix_input_ids=prefix,
@@ -907,6 +924,7 @@ class PrefixReadObserver:
                     ttl_seconds=lease.ttl_seconds,
                     policy="joint_demand", policy_choice={**asdict(lease), "observed_quote_seq": batch.observed_seq,
                         "protected_tokens": option.protected_tokens})
+                self._owner_control_observations.append((time.monotonic()-owner_started)*1000)
                 if receipts[lease.owner_id]["state"] == "RETAINED":
                     protected.update(owner_pages(receipts[lease.owner_id]))
                     protected_gpu.update(referenced_gpu_pages((receipts[lease.owner_id],)))

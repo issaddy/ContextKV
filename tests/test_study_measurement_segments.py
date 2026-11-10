@@ -162,10 +162,10 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
     assert all(spec["overrides"]["execution"]["prefix_retention"] == {"mode": "native"}
                for method, spec in specs.items() if method != expected[5])
     assert specs[expected[5]]["overrides"]["execution"]["prefix_retention"]["mode"] == "demand"
-    assert specs[expected[5]]["overrides"]["execution"]["prefix_retention"]["unpriced_policy"] == "native"
+    assert specs[expected[5]]["overrides"]["execution"]["prefix_retention"]["allocation"] == "next_use"
     rule = full_queue_method_specs(["Rule_contextpilot_joint_demand"], None,
         {"mode": "contextpilot", "checkout": "pinned-author"}, rule_settings={"action_policy": "rule"})[0]
-    assert rule["overrides"]["execution"]["prefix_retention"]["unpriced_policy"] == "risk_tokens"
+    assert rule["overrides"]["execution"]["prefix_retention"]["allocation"] == "next_use"
     assert specs["B6_native"]["overrides"]["execution"]["plan_gain"] is None
     assert specs["B6_contextpilot"]["overrides"]["execution"]["cache_compilation"]["mode"] == "contextpilot"
     assert specs["LlamaIndex_native"]["overrides"]["execution"]["dialogue_mode"] == "llamaindex"
