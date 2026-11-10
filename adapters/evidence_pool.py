@@ -326,22 +326,33 @@ class SourceDirectory:
         temporal = None if state.version_intent.resolved_version_ids else self._temporal_sources(state, memory)
         texts = text_ref_sources(memory.committed_history,
             current_turn_id=state.current_turn_id, current_user_text=state.raw_question)
-        literals = {condition.condition_id: (category,
-            {_category_value(text_ref_text(ref, texts)) for ref in condition.value_spans})
-            for condition in state.conditions if (category := condition.relation_type.upper()) in SOURCE_CATEGORIES
-            and condition.value_spans}
+        categorical = tuple(condition for condition in state.conditions
+                            if condition.relation_type.upper() in SOURCE_CATEGORIES)
         declared_values = {}
-        if literals:
+        if categorical:
             for metadata in self.corpus_index.source_metadata.values():
                 for name, value in metadata.get("applicability", {}).items():
                     declared_values.setdefault(name.upper(), set()).add(_category_value(value))
+        literals = {}
+        for condition in categorical:
+            category = condition.relation_type.upper()
+            known = declared_values.get(category, ())
+            values = {_category_value(text_ref_text(ref, texts)) for ref in condition.value_spans}
+            if not condition.value_spans and condition.key_span is not None:
+                key = _category_value(text_ref_text(condition.key_span, texts))
+                predicate = _category_value(text_ref_text(condition.predicate_span or condition.key_span, texts))
+                mentions = {value for value in known if value and re.search(
+                    rf"(?<![\w-]){re.escape(value)}(?![\w-])", predicate)}
+                # A leading category in the grounded subject can carry the typed condition.
+                if len(mentions) == 1 and predicate.startswith(key):
+                    values = {value for value in mentions if key == value or key.startswith(value + " ")}
+            literals[condition.condition_id] = category, values.intersection(known)
         requirements = {}
         for need in state.needs:
             allowed = requirements[need.need_id] = {}
             for identity in need.condition_ids:
                 if identity in literals:
-                    category, values = literals[identity]
-                    grounded = values.intersection(declared_values.get(category, ()))
+                    category, grounded = literals[identity]
                     if grounded:
                         allowed.setdefault(category, set()).update(grounded)
 
