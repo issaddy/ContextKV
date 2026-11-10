@@ -698,14 +698,14 @@ class PrefixReadObserver:
             kept = tuple(active[key] for key in immediate)
             base_pages = shared.union(*(owner_pages(row) for row in kept))
             base_gpu = shared_gpu | referenced_gpu_pages(kept)
-            future_pages = set()
+            future_inputs = []
 
             def growth_tokens(compiled):
                 quote = quotes[compiled.candidate_id]
-                path = executed_prefix_hashes(compiled.input_ids, page_size)
-                added = {page for end, page in path.items() if end > quote.ready_gpu_prefix_tokens}-future_pages
-                future_pages.update(path.values())
-                return len(added)*page_size+len(compiled.input_ids)%page_size+compiled.output_budget
+                shared = max((longest_common_prefix(compiled.input_ids, previous)//page_size*page_size
+                              for previous in future_inputs), default=0)
+                future_inputs.append(compiled.input_ids)
+                return len(compiled.input_ids)-max(quote.ready_gpu_prefix_tokens, shared)+compiled.output_budget
 
             current_growth = growth_tokens(candidate) if current is not None else 0
             if task.kind == "ANSWER" or not sources:
