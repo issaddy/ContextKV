@@ -1070,6 +1070,25 @@ def _ground_numeric_fact(fact, cited, units):
                     return source, text, entity, *quantity
 
 
+def _delimited_numeric_records(units):
+    """Project explicit labelled records into candidates for semantic selection."""
+    for source in units:
+        for text in source.text.splitlines():
+            label, separator, body = text.strip().partition(":")
+            fields = tuple(field.strip() for field in body.split(";"))
+            if not label or not separator or len(fields) < 2:
+                continue
+            ids = re.findall(SOURCE_IDENTIFIER, fields[0])
+            if len(ids) != 1:
+                continue
+            measures = [(field, quantity) for field in fields[1:]
+                        if (quantity := _excerpt_quantity(field, "", "")) is not None]
+            if len(measures) == 1:
+                field, (number, unit) = measures[0]
+                relation = field.partition(number)[0].strip()
+                yield source, text.strip(), ids[0], relation, number, unit
+
+
 def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_tokens=0, output_tokens=0):
     data = json.loads(text)
     wire_version = data.get("format_version", 1)
@@ -1125,6 +1144,7 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
             wire_version == READ_PROTOCOL_VERSION and task.shared_numeric_scopes):
         aliases, source_aliases, parent_aliases = numeric_aliases(task, units, claims)
         scopes = {scope.scope_id: scope for scope in task.shared_numeric_scopes}
+        grounded_records = set()
         for fact in data["facts"]:
             scope = scopes[fact["g"]]
             memberships = tuple(aliases[alias] for alias in fact["n"])
@@ -1144,12 +1164,25 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
                     continue
                 source, excerpt, entity, number, unit = grounded
                 span_ids = [span.span_id for span in source.source_spans]
+                grounded_records.add((scope.scope_id, source.unit_id, entity, number, unit))
             values.append({"need_id": memberships[0], "shared_need_ids": memberships[1:],
                 "text": excerpt,
                 "entity": entity, "relation": fact["r"], "value": number,
                 "unit": unit, "conditions": scope.condition_ids,
                 "span_ids": span_ids,
                 "parent_claim_ids": [parent_aliases[alias] for alias in fact["p"]], "followups": []})
+        if wire_version == SHARED_NUMERIC_PROTOCOL_VERSION and task.kind == "READ":
+            for source, excerpt, entity, relation, number, unit in _delimited_numeric_records(units):
+                for scope in scopes.values():
+                    memberships = tuple(need for need in scope.need_ids
+                                        if not source.need_ids or need in source.need_ids)
+                    if not memberships or (scope.scope_id, source.unit_id, entity, number, unit) in grounded_records:
+                        continue
+                    values.append({"need_id": memberships[0], "shared_need_ids": memberships[1:],
+                        "text": excerpt, "entity": entity, "relation": relation, "value": number,
+                        "unit": unit, "conditions": scope.condition_ids,
+                        "span_ids": [span.span_id for span in source.source_spans],
+                        "parent_claim_ids": [], "followups": []})
     parsed, followups = [], []
     for index, value in enumerate(values):
         if value is None:
