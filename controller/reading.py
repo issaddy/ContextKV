@@ -1029,16 +1029,9 @@ def advance_read_plan(plan, results, budget=None):
     return tuple(reductions)
 
 
-def _excerpt_numeric_fact(excerpt, entity, value, unit):
-    """Bind the record identifier and quantity to their verified source excerpt."""
+def _excerpt_quantity(excerpt, entity, unit):
     from .reduction import UNIT_FACTORS
 
-    if re.fullmatch(SOURCE_IDENTIFIER, entity):
-        matches = {key for key in re.findall(SOURCE_IDENTIFIER, excerpt) if key.startswith(entity)}
-        if len(matches) == 1:
-            entity = next(iter(matches))
-    if value is None:
-        return entity, value, unit
     text = excerpt.replace(entity, " ") if entity else excerpt
     units = {name for name in UNIT_FACTORS if name and name != "1"}
     if unit:
@@ -1047,9 +1040,34 @@ def _excerpt_numeric_fact(excerpt, entity, value, unit):
     candidates = {(match[1], match[2]) for match in re.finditer(
         rf"({NUMERIC_LITERAL})\s*({suffix})(?!\w)", text)
         if not unit or UNIT_FACTORS.get(match[2], match[2]) == UNIT_FACTORS.get(unit, unit)}
-    if len(candidates) == 1:
-        value, unit = next(iter(candidates))
-    return entity, value, unit
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def _ground_numeric_fact(fact, cited, units):
+    """Resolve model fields to one observed record and keep its literal source."""
+    excerpt, entity, value, unit = fact["t"].strip(), fact["e"], fact["v"], fact["u"]
+    identifier = re.fullmatch(SOURCE_IDENTIFIER, entity) is not None
+    for sources in (cited, units):
+        matches = [(source, excerpt) for source in sources if excerpt and excerpt in source.text]
+        if len(matches) == 1:
+            source, text = matches[0]
+            if identifier:
+                ids = {key for key in re.findall(SOURCE_IDENTIFIER, text) if key.startswith(entity)}
+                if len(ids) != 1:
+                    continue
+                entity = next(iter(ids))
+            quantity = _excerpt_quantity(text, entity, unit) if value is not None else None
+            return source, text, entity, *(quantity or (value, unit))
+    if identifier:
+        for sources in (cited, units):
+            records = {(source.unit_id, line.strip()): source for source in sources
+                       for line in source.text.splitlines()
+                       if set(re.findall(SOURCE_IDENTIFIER, line)) == {entity}}
+            if len(records) == 1:
+                (_, text), source = next(iter(records.items()))
+                quantity = _excerpt_quantity(text, entity, unit)
+                if quantity is not None:
+                    return source, text, entity, *quantity
 
 
 def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_tokens=0, output_tokens=0):
@@ -1114,18 +1132,18 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
                 raise ValueError("numeric fact membership is outside its population scope")
             span_ids = [source_aliases[alias] for alias in fact["s"]]
             excerpt = fact["t"] if wire_version == SHARED_NUMERIC_PROTOCOL_VERSION else ""
-            literal = excerpt.strip()
-            if literal and task.kind == "READ" and not any(literal in span_units[sid].text for sid in span_ids):
-                matching = [unit for unit in units if literal in unit.text
-                            and (not unit.need_ids or set(memberships) <= set(unit.need_ids))]
-                if len(matching) == 1:
-                    span_ids = [span.span_id for span in matching[0].source_spans]
             entity, number, unit = fact["e"], fact["v"], fact["u"]
             if wire_version == SHARED_NUMERIC_PROTOCOL_VERSION and task.kind == "READ":
-                if not literal or not any(literal in span_units[sid].text for sid in span_ids):
+                eligible = tuple(source for source in units
+                                 if not source.need_ids or set(memberships) <= set(source.need_ids))
+                cited_ids = {span_units[sid].unit_id for sid in span_ids}
+                grounded = _ground_numeric_fact(fact,
+                    tuple(source for source in eligible if source.unit_id in cited_ids), eligible)
+                if grounded is None:
                     values.append(None)
                     continue
-                entity, number, unit = _excerpt_numeric_fact(literal, entity, number, unit)
+                source, excerpt, entity, number, unit = grounded
+                span_ids = [span.span_id for span in source.source_spans]
             values.append({"need_id": memberships[0], "shared_need_ids": memberships[1:],
                 "text": excerpt,
                 "entity": entity, "relation": fact["r"], "value": number,
