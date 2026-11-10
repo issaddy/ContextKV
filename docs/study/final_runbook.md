@@ -16,6 +16,19 @@ python3 scripts/prepare_contextpilot.py --checkout vendor/contextpilot
 
 study 配置的 `execution.cache_compilation` 取 `{mode: contextpilot, checkout: vendor/contextpilot}`；Native 对照取 `{mode: native}`。`prefix_retention` 默认 `{mode: native}`，与编排开关独立。
 
+缓存协同采用相同上下文能力的三种方法：`context_native`、`context_cache_order`、`context_cache_demand`。它们共用收益决策、记录投影、有限表示和结论预算，只分别启用原生缓存、ContextPilot 组织、组织加需求保留。可直接传给 `bench.capacity_workflow --full-queue --methods`，使用同一会话选择配置。
+
+需求保留默认 `allocation: next_use`：从已编译的后续 READ/ANSWER 找到实际原文消费者，有 GPU 容量竞争时分配短租约；共享页和第一次未来消费分别去重，消费结束后释放。控制时间使用实际调用更新，零样本从零开始估计。已有配对估值通过 `allocation: paired_value` 和 `pricing_asset` 显式使用；不同前缀长度按实测单位 token 获取费用缩放，owner 控制费用保持固定。
+
+少量机制配对复用同一原生客户端、报价和生产保留分配器，使用相同原文、预热、竞争请求及最终问题：
+
+```bash
+python3 -m bench.cache_cooperation --config READER.yaml \
+  --base-url http://127.0.0.1:30230 --output runs/cache-cooperation/result.json
+```
+
+默认只运行低压力、单请求竞争、四请求竞争各一对，保存答案、正文获取工作、控制开销和完整时间。预热与竞争工作都计入完整时间；不从这些配对估计整队列 P95。
+
 LlamaIndex 复用统一引擎、来源投影和成本账本。恢复按原 SQLite 和实际请求 ID 继续，已经支付的步骤不重发；新的尝试使用新的请求命名空间。
 
 短端到端运行可在 `python3 -m bench.study evaluate` 的现有配置命令后加 `--methods METHOD --datasets DATASET --limit-conversations 1 --limit-turns 2 --unscored --output NEW_DIR`。按会话顺序运行前两轮，运行清单分别记录实际调度和完整声明队列。

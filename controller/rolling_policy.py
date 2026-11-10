@@ -780,7 +780,8 @@ class RollingPlanRuntime:
             elif self.joint_context:
                 from .demand import joint_options
                 options = joint_options(plans, state)
-            control_forecast = getattr(executor.observe_prefix, "predicted_control_ms", None)
+            control_forecast = (getattr(executor.observe_prefix, "predicted_control_ms", None)
+                if getattr(executor.observe_prefix, "observe_reads", True) else None)
             read_control = ({"predicted_ms": control_forecast(), "source": "actual_prefix_control_ms",
                              "observation_count": executor.observe_prefix.control_observation_count,
                              "scope": "per_READ_observed_callback_mean"}

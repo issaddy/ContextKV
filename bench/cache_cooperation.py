@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import asdict, replace
+from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
@@ -67,12 +67,10 @@ async def paired_case(engine, template, *, background_tokens, concurrency, direc
         store = SessionStore(directory/(session+".sqlite3"))
         observer = PrefixReadObserver(store, engine, dict(mode="demand", allocation="next_use",
             ttl_seconds=15, horizon_seconds_choices=(15, 60, 180), protection_budget_tokens=8192))
-        epochs = []
 
         async def generate(candidate):
             started = time.monotonic()
             epoch = await engine.prepare(uuid.uuid4().hex, uuid.uuid4().hex, info.engine_restart_id)
-            epochs.append(epoch)
             value = await engine.generate(input_ids=candidate.input_ids, session_id=epoch.engine_session_id,
                 expected_generation=epoch.session_generation, expected_restart_id=info.engine_restart_id,
                 attempt_id=uuid.uuid4().hex, fingerprint=template.fingerprint,
@@ -88,11 +86,12 @@ async def paired_case(engine, template, *, background_tokens, concurrency, direc
             await prepare_cache_fixture(engine, "settle")
             quoted = await engine.quote_batch((*competing, answer), template.fingerprint)
             source_task = ReadTask("read-source", "READ", ("form",))
-            next_task = ReadTask("competing", "READ", ("other",))
+            tasks = tuple(ReadTask(candidate.candidate_id, "READ", ("other",)) for candidate in competing)
+            next_task = tasks[0]
             answer_task = ReadTask("answer", "ANSWER", ("form",))
             plan = ContextPlan("context", TaskState("policy", "Find the Lumen form.",
                 needs=(Need("form"), Need("other"))), EvidenceSet("sources", ()),
-                steps=(source_task, next_task, answer_task))
+                steps=(source_task, *tasks, answer_task))
             source_record = StepRecord(session, source_task.step_id, source_task,
                 input_ids=warm.input_ids, receipt=source_result.receipt, metrics={
                     "cache_config_hash": quoted.cache_config_hash,
@@ -102,7 +101,8 @@ async def paired_case(engine, template, *, background_tokens, concurrency, direc
                                    steps=(source_record,))
             route = PlanCandidate("continue", "read_once", plan,
                 (PlanStep(next_task, (competing[0],)),), "fixed-qwen",
-                route_steps=(PlanStep(next_task, (competing[0],)), PlanStep(answer_task, (answer,))))
+                route_steps=(*tuple(PlanStep(task, (candidate,)) for task, candidate in zip(tasks, competing)),
+                             PlanStep(answer_task, (answer,))))
             control_ms, lease = 0.0, None
             if arm == "next_use":
                 control_started = time.monotonic()
@@ -151,7 +151,7 @@ async def run(args):
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
         with tempfile.TemporaryDirectory(prefix="contextkv-pair-") as work:
-            for background, concurrency in ((1024, 1), (20000, 1), (20000, 4)):
+            for background, concurrency in args.cases:
                 case = await paired_case(engine, template, background_tokens=background,
                                          concurrency=concurrency, directory=Path(work))
                 report["cases"].append(case)
@@ -167,6 +167,8 @@ def main():
     parser.add_argument("--config", required=True)
     parser.add_argument("--base-url")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--cases", type=lambda value: tuple(tuple(map(int, case.split(":")))
+                        for case in value.split(",")), default=((1024, 1), (20000, 1), (20000, 4)))
     asyncio.run(run(parser.parse_args()))
 
 

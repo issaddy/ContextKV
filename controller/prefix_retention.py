@@ -698,10 +698,17 @@ class PrefixReadObserver:
             kept = tuple(active[key] for key in immediate)
             base_pages = shared.union(*(owner_pages(row) for row in kept))
             base_gpu = shared_gpu | referenced_gpu_pages(kept)
-            current_growth = (current.input_len-current.ready_gpu_prefix_tokens+candidate.output_budget
-                              if current is not None else 0)
-            pressure = max(0, current_growth+concurrent_growth-batch.free_gpu_tokens)
-            if task.kind == "ANSWER" or not pressure or not sources:
+            future_pages = set()
+
+            def growth_tokens(compiled):
+                quote = quotes[compiled.candidate_id]
+                path = executed_prefix_hashes(compiled.input_ids, page_size)
+                added = {page for end, page in path.items() if end > quote.ready_gpu_prefix_tokens}-future_pages
+                future_pages.update(path.values())
+                return len(added)*page_size+len(compiled.input_ids)%page_size+compiled.output_budget
+
+            current_growth = growth_tokens(candidate) if current is not None else 0
+            if task.kind == "ANSWER" or not sources:
                 return JointOption(demand, release=tuple(sorted(own.keys()-immediate)),
                     protected_tokens=len(base_pages-shared)*page_size, keep=tuple(sorted(immediate)))
             current_prefix = candidate.input_ids[:current.ready_gpu_prefix_tokens] if current is not None else ()
@@ -711,19 +718,23 @@ class PrefixReadObserver:
             # and observed progress. It is never the task's complete-response P95.
             observed = means.get(task.kind)
             arrival = (observed*(1+batch.queued_requests) if observed is not None else None)
-            seen = {task.step_id}
-            arrivals = {}
+            next_steps = {}
             for target, compiled in actions:
+                if target.step_id not in next_steps or (compiled is not None and
+                        work(compiled) < work(next_steps[target.step_id][1])):
+                    next_steps[target.step_id] = target, compiled
+            growth = current_growth
+            pressures = {}
+            for target, compiled in next_steps.values():
                 if target.step_id == task.step_id:
                     continue
-                if target.step_id not in arrivals:
-                    arrivals[target.step_id] = arrival
-                if target.step_id not in seen:
-                    duration = means.get(target.kind)
-                    arrival = arrival+duration if arrival is not None and duration is not None else None
-                    seen.add(target.step_id)
+                pressures[target.step_id] = max(0, growth+concurrent_growth-batch.free_gpu_tokens)
+                predicted_arrival = (candidate_arrival_ms or {}).get(compiled.candidate_id, arrival) if compiled else arrival
+                duration = means.get(target.kind)
+                arrival = arrival+duration if arrival is not None and duration is not None else None
                 if compiled is None:
                     continue
+                growth += growth_tokens(compiled)
                 priority = sum(unmet.get(need, 0) for need in target.need_ids
                                if target.step_id in demand.remaining_read_ids)
                 if target.kind == "ANSWER" and compiled.source_body_token_ranges:
@@ -731,7 +742,6 @@ class PrefixReadObserver:
                     # have closed the semantic gaps. Facts-only inputs have no
                     # source body and therefore create no source-prefix demand.
                     priority = max(1, sum(unmet.get(need, 1) for need in target.need_ids))
-                predicted_arrival = ((candidate_arrival_ms or {}).get(compiled.candidate_id, arrivals[target.step_id]))
                 if priority and (target.step_id not in targets or work(compiled) < work(targets[target.step_id][0])):
                     targets[target.step_id] = compiled, priority, predicted_arrival
 
@@ -750,7 +760,7 @@ class PrefixReadObserver:
                 # Existing supplementary leases mask eviction in the quote.
                 # Evaluate their release against Native, along with new leases.
                 evictable_pages = (frozenset(path[locked_pages:]) | (set(path) & own_gpu))-base_gpu
-                risk = min(pressure, len(evictable_pages)*page_size)
+                risk = min(pressures[target], len(evictable_pages)*page_size)
                 if risk:
                     demands[target] = (risk, priority, evictable_pages, arrival_ms)
                     consumer_paths[target] = frozenset(path), body_page_offsets(len(path)*page_size,
@@ -897,24 +907,12 @@ class PrefixReadObserver:
         async with self._allocation_lock:
             for owner in option.release:
                 receipts[owner] = await self.owners.release(owner, reason="joint_remaining_demand")
-            if option.retain:
-                steps = {record.step_id: record for record in state.steps}
-                status = await self.runtime.status(batch.engine_restart_id)
-                protected = set().union(*(owner_pages(row) for row in status["prefixes"]))
-                protected_gpu = referenced_gpu_pages(status["prefixes"])
+            steps = {record.step_id: record for record in state.steps}
             for lease in option.retain:
                 sources = (self.store.prefix_owner(lease.owner_id).sources
                            if lease.action == "renew" else None)
                 record = steps[lease.source_step_id]
                 prefix = record.input_ids[:lease.boundary_tokens]
-                page_size, scope = lease.page_size, lease.cache_scope_hash
-                pages = {scope+":"+value for value in executed_prefix_hashes(prefix, page_size).values()}
-                if lease.action != "renew" and pages <= protected_gpu:
-                    continue
-                next_pages = protected | pages
-                if len(next_pages)*page_size > self.settings["protection_budget_tokens"]:
-                    receipts[lease.owner_id] = {"state": "UNRETAINED", "reason": "shared_protection_budget"}
-                    continue
                 owner_started = time.monotonic()
                 receipts[lease.owner_id] = await self.owners.observe(owner_id=lease.owner_id,
                     session_id=session_id, attempt_id=record.attempt_id, step_id=record.step_id,
@@ -925,9 +923,6 @@ class PrefixReadObserver:
                     policy="joint_demand", policy_choice={**asdict(lease), "observed_quote_seq": batch.observed_seq,
                         "protected_tokens": option.protected_tokens})
                 self._owner_control_observations.append((time.monotonic()-owner_started)*1000)
-                if receipts[lease.owner_id]["state"] == "RETAINED":
-                    protected.update(owner_pages(receipts[lease.owner_id]))
-                    protected_gpu.update(referenced_gpu_pages((receipts[lease.owner_id],)))
         return {"elapsed_ms": (time.monotonic()-started)*1000, "kept_owners": option.keep,
                 "owner_status": {owner: {key: ack[key] for key in ("state", "reason", "boundary_tokens", "expires_at")
                                          if key in ack} for owner, ack in receipts.items()}}

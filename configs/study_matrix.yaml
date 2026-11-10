@@ -41,6 +41,10 @@ final_evaluation:
     method: S3_contextpilot_no_fact_reuse
     reference: S3_contextpilot
     overrides: {reading: {fact_reuse: false}}
+  cache_cooperation:
+    context_native: {compilation: native, retention: native}
+    context_cache_order: {compilation: contextpilot, retention: native}
+    context_cache_demand: {compilation: contextpilot, retention: demand}
   arrival_plan: configs/study_dev_arrivals.json
   cost_scope: all_online_and_physical_costs
 resources:
