@@ -6,7 +6,8 @@
 | 执行机制与状态 | [架构](../architecture.md) |
 | 方法来源与复用 | [参考方法](../references.md) |
 | 复现入口 | [final_runbook.md](final_runbook.md) |
+| 实测结果与改进重点 | [final_results.md](final_results.md) |
 
 ## 实测与验收
 
-轻量运行记录位于 `runs/study-guide-3db7fb4`，当前联合资产及开发指标见[运行手册](final_runbook.md#当前联合资产)。完整队列的质量与 P95 门槛尚未验收；E1–E6 在并发 1 和 4 下各运行 350 题，使用各自实际 P3 历史，按[预登记口径](final_runbook.md)判定。
+当前交付保留原队列 E1–E4 与后续短队列的逐格质量、延迟、资源和出处。两批结果分别汇报，原登记的整队列 E1/E6 门槛尚未完成验收。 [实测结果](final_results.md) · [验收口径](final_runbook.md)
