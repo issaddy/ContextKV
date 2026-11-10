@@ -66,7 +66,7 @@ def _cost_totals(records):
 
 @contextmanager
 def record_judge_http(endpoint, journal_path):
-    """Journal upstream official scorer calls, including raw completions and usage."""
+    """Record the actual scoring cost and completion status."""
     endpoint = endpoint.rstrip("/")
     if not endpoint.endswith("/v1"):
         endpoint += "/v1"
@@ -83,7 +83,8 @@ def record_judge_http(endpoint, journal_path):
             with httpx.Client(timeout=180) as client:
                 response = client.post(endpoint+path, json=payload)
             raw = response.json()
-            record = {"request": payload, "raw_response": raw, "status_code": response.status_code,
+            record = {"status_code": response.status_code,
+                "finish_reason": next((choice["finish_reason"] for choice in raw.get("choices", ())), None),
                 "elapsed_ms": (time.perf_counter()-started)*1000,
                 "input_tokens": raw.get("usage", {}).get("prompt_tokens"),
                 "output_tokens": raw.get("usage", {}).get("completion_tokens")}
@@ -115,9 +116,9 @@ def record_judge_http(endpoint, journal_path):
 async def _command(arguments, directory, label, *, environment=None):
     started = time.perf_counter()
     result = await asyncio.to_thread(subprocess.run, arguments, text=True, capture_output=True, env=environment)
-    receipt = {"command": arguments, "returncode": result.returncode,
-        "stdout": result.stdout, "stderr": result.stderr,
-        "elapsed_ms": (time.perf_counter()-started)*1000}
+    receipt = {"returncode": result.returncode, "elapsed_ms": (time.perf_counter()-started)*1000}
+    if result.returncode:
+        receipt["error"] = result.stderr.strip().splitlines()[-1:]
     (directory/(label+".execution.json")).write_text(json.dumps(receipt, ensure_ascii=False, indent=2)+"\n")
     result.check_returncode()
     return receipt
@@ -179,8 +180,9 @@ async def _official_scores(config, spec, directory, settings):
         "official_source": json.loads((Path(checkout)/"contextkv-source.json").read_text()),
         "requested_metrics": metrics, "answerability_adjustment": primary == "mtrageval_harmonic",
         "metric_scope": "project_RB_llm" if primary == "RB_llm" else "MTRAGEval_generation_components"}
-    if ragas_max_tokens is not None:
-        identity["ragas_max_tokens"] = ragas_max_tokens
+    scorer = json.loads((target/"identity.json").read_text())
+    if "ragas_max_tokens" in scorer:
+        identity["ragas_max_tokens"] = scorer["ragas_max_tokens"]
     journal_records = load_jsonl(journal) if journal.exists() else []
     call_cost = {"http_calls": len(journal_records), "new_http_calls": len(calls),
         "elapsed_ms": sum(call["elapsed_ms"] for call in journal_records),

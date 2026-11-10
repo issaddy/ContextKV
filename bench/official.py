@@ -9,7 +9,6 @@ import argparse
 import ast
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from hashlib import sha256
 from functools import partial
 import importlib
 import json
@@ -197,15 +196,13 @@ def run_evaluator(checkout, mode, input_path, output_path, *, judge_revision=Non
                 for row in rows))
             input_path = projected
     command = evaluator_command(root, mode, input_path, output_path, **kwargs)
-    env_command = [kwargs.get("python", sys.executable), "-c",
-                   "import importlib.metadata as m,json,sys; print(json.dumps(dict(python=sys.version,packages=sorted([(d.metadata['Name'],d.version) for d in m.distributions()]))))"]
-    environment = json.loads(subprocess.check_output(env_command, text=True))
-    Path(str(output_path) + ".environment.json").write_text(json.dumps(environment, indent=2))
     completed = subprocess.run(command, cwd=root, text=True, capture_output=True)
     receipt = {"mode": mode, "source_commit": DATASET_COMMIT, "command": command,
-               "returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr,
+               "returncode": completed.returncode,
                "status": "completed" if completed.returncode == 0 else "failed",
                "judge_revision": judge_revision, "judge_revision_provenance": "operator_declared" if judge_revision else None}
+    if completed.returncode:
+        receipt["error"] = completed.stderr.strip().splitlines()[-1:]
     Path(str(output_path) + ".execution.json").write_text(json.dumps(receipt, indent=2))
     completed.check_returncode()
     return receipt
@@ -215,6 +212,7 @@ RAGAS_SCHEMA_MARKER = (
     "Please return the output in a JSON format that complies with the following schema "
     "as specified in JSON Schema:\n"
 )
+RAGAS_MAX_TOKENS = 4096
 
 
 def with_ragas_output_schema(payload, *, ragas_max_tokens=None):
@@ -335,9 +333,6 @@ def load_radbench_contract(checkout):
         return _radbench_prompt(official, record)
 
     identity = {"metric": "RB_llm", "source_commit": source["commit"],
-                "source_files": {relative: sha256((root / relative).read_bytes()).hexdigest()
-                    for relative in ("scripts/evaluation/judge_utils.py",
-                                     "scripts/evaluation/judge_wrapper.py")},
                 "conversation_format": "structured_message_boundaries_v1",
                 "normalization": "official_extract_rating_divide_by_10"}
     return SimpleNamespace(prompt=prompt, parse=namespace["extract_rating"], identity=identity)
@@ -444,7 +439,6 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     Run in the isolated evaluator environment. This function does not start a
     server, load weights, regenerate answers or alter official metric prompts.
     """
-    adapter_sha256 = sha256(Path(__file__).read_bytes()).hexdigest()
     root = Path(checkout).resolve()
     source = json.loads((root / "contextkv-source.json").read_text())
     if source["commit"] != DATASET_COMMIT:
@@ -456,9 +450,11 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     if ragas_max_tokens is not None and (
             not ragas_json_schema or type(ragas_max_tokens) is not int or ragas_max_tokens <= 0):
         raise ValueError("ragas_max_tokens requires ragas_json_schema and a positive integer budget")
+    if ragas_json_schema and "RL_F" in metrics and ragas_max_tokens is None:
+        ragas_max_tokens = RAGAS_MAX_TOKENS
     output = Path(output_directory).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    identity = {"input_sha256": sha256(Path(input_path).read_bytes()).hexdigest(),
+    identity = {"input": str(Path(input_path).resolve()),
                 "source_commit": DATASET_COMMIT, "judge_model": model,
                 "judge_revision": judge_revision, "temperature": 0, "top_p": 1,
                 "max_tokens": max_tokens, "enable_thinking": enable_thinking,
@@ -470,15 +466,9 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     if ragas_max_tokens is not None:
         identity["ragas_max_tokens"] = ragas_max_tokens
     identity_path = output / "identity.json"
-    if not identity_path.exists() and any(output.glob("*.jsonl")):
-        raise ValueError("existing scoring files have no bound identity; use a new directory")
     if identity_path.exists() and json.loads(identity_path.read_text()) != identity:
         raise ValueError("scoring directory belongs to different answers or judge settings; use a new directory")
     identity_path.write_text(json.dumps(identity, indent=2)+"\n")
-    from importlib.metadata import distributions
-    environment = {"python": sys.version,
-                   "packages": sorted((d.metadata["Name"], d.version) for d in distributions())}
-    (output / "environment.json").write_text(json.dumps(environment, indent=2)+"\n")
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
     os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
@@ -502,7 +492,6 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     receipt = {**result, **identity, "status": "completed", "endpoint": endpoint,
                "rb_llm_workers_requested": rb_llm_workers,
                "endpoint_scope": "current invocation; reused stages may have run on a different endpoint",
-               "adapter_sha256": adapter_sha256,
                "backend": "OpenAI-compatible HTTP via the official vllm client branch",
                "generation_answers_modified": False,
                "scope": "Official metric functions on the declared task protocol; scorer identity and source/label differences accompany interpretation."}

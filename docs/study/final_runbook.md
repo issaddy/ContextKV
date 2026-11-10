@@ -249,7 +249,7 @@ python3 -m bench.capacity_workflow --full-queue \
 ```
 
 主四格共用冻结 A 的模型、支持策略、查询资产、阅读协议与预算；外部方法使用显式登记的发布版检索栈。可用 `--methods B6_native` 等参数将指定方法分配到独立 reader 服务，只生成所选方法的矩阵和任务。
-`B6_native`、`B6_contextpilot` 和 `LlamaIndex_native` 均无需 gain/value；无 S3 方法时显式提供 `--reader-profile-id`。S3 方法只需当前协议 `--gain-asset`；显式选择 `*_value` 才需要 `--value-model`。ContextPilot 方法需要 `--contextpilot-checkout` 或冻结配置的 `execution.cache_compilation.checkout`；准备阶段验证真实 checkout HEAD 与清洁源码，并保存作者 Python 源码内容清单及摘要。
+`B6_native`、`B6_contextpilot` 和 `LlamaIndex_native` 使用显式 `--reader-profile-id`。S3 方法使用当前协议的 `--gain-asset`，`*_value` 另指定 `--value-model`。通过 `--contextpilot-checkout` 或 `execution.cache_compilation.checkout` 指定 ContextPilot 作者实现路径。
 默认八种方法在两个并发都使用相同 350 题、77 会话 IDs 和各自的实际 P3 历史。
 固定 B 可独立执行，例如：
 
@@ -280,6 +280,7 @@ cohort、reader 与预算确定对照条件，各格分别列出实际启用的 
 
 每格按自己的 P3 历史执行原 350 题。确认失败或阻断计零，缺失执行记录与未评分答案保留质量区间。在线费用以唯一原生回执和检索阶段汇总计算 token，以初始化至清理的全局窗口计算 GPU/Host 占用，登记 CPU 工时与离线评分费用单列。`bench.plan_prediction_audit` 将所选报价、实际预填充和回载、读取新增事实、owner 变更和最终交付串到同一尝试。`--source-manifest` 用于两轮容量诊断。
 每格先生成并保存所有数据轨的答案、来源和费用，再离线评分。评分中断后用 `python3 -m bench.study_scoring --generation-dir` 读取原始记录补评分。使用 `profiling.final_study_index --refresh-saved-queues` 重建验收汇总，父流程未写摘要时也纳入已保存的逐题结果和原始账本。
+MT-RAG 的结构化 RL_F 默认使用独立的 4,096 token 输出额度，评分运行文件 `scoring/official/identity.json` 记录实际额度。
 向 `capacity_workflow` 进程发送 `SIGINT` 或 `SIGTERM` 可结束队列。当前格保存实际交付、原生回执和截至停止时的资源窗口，`workflow.json` 标记为 `interrupted`，声明分母沿用原计划。
 同一轮 READ 与 ANSWER 的共享因果正文按回答中的 token 位置取并集，再按最终原生回执区分 GPU 命中、Host 回载与预填充。
 
