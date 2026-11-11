@@ -333,7 +333,14 @@ class TaskInterpreter:
                 for piece in active_ref_parts(ref, excluded)),
             *(ref for condition in conditions for ref in condition_references(condition)),
             *prediction.version_intent.time_refs)))
-        working = tuple(ref for ref in spans if ref.turn_id != turn.turn)
+        recent_turns = {row.turn_id for row in memory.committed_history[-2:]}
+        working = tuple(dict.fromkeys((
+            *(ref for ref in spans if ref.turn_id != turn.turn),
+            *(piece for window in windows if window.ref.turn_id in recent_turns
+              for piece in active_ref_parts(window.ref, excluded)))))
+        working = tuple(ref for ref in working if not any(
+            other != ref and (other.turn_id, other.speaker) == (ref.turn_id, ref.speaker)
+            and other.start <= ref.start and ref.end <= other.end for other in working))
         parts = [turn.query, *(history_text(ref, memory, turn) for ref in spans)]
         if prediction.version_intent.temporal_relation in {"before", "after"}:
             parts.append(prediction.version_intent.temporal_relation.upper())

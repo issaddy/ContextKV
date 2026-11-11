@@ -18,19 +18,11 @@ from .templates import (SYSTEM_PROMPT, ByteTemplate, Template, current_source_gu
 CandidatePolicy = EvidencePolicy
 
 PLAN_SYSTEM_PROMPT = (
-    "Answer the current question using the active task conditions, supplied original sources, "
-    "and Reading conclusions produced by this request's READ/REDUCE steps. Follow the Answer plan "
-    "and cover its requested information points. Reading conclusions retain a source-linked "
-    "derivation in the execution ledger; count and sum values are computed from their leaf facts. "
-    "Use those conclusions together with the key original excerpts in this window. State the "
-    "operation when presenting a derived result. "
-    "For counts and sums, report the Computed results with their units and covered source scope. "
-    "Key original excerpts are representative samples of the completed reading scope. "
-    "Use working history to resolve the user's referents and preserve the active object, "
-    "platform, time and version. Cite allowed source "
-    "IDs inline in square brackets exactly as [E_...]. State the supported answer and any "
-    "remaining information gap concisely. State the requested results directly; quote or enumerate "
-    "example source rows only when the question asks for them."
+    "Answer the user's current question directly and briefly. Use working history to resolve "
+    "references and conversational continuations, preserving the active conditions and version. "
+    "Use the supplied original sources and Reading conclusions to cover the Answer plan. "
+    "For requested calculations, report the computed values, units and covered scope. "
+    "Cite source IDs inline as [E_...]. Give only the explanation or steps needed for the current question."
 )
 
 

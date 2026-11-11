@@ -37,7 +37,7 @@ python3 -m bench.versionqa --source /path/to/versionrag/data/raw   --questions /
 
 `bench.study prepare` 只准备其公开资料与索引，不联动辅助训练或构造任务生成。构造资料由已有 `training.reading_data` 单独准备。构造版本任务沿用项目条件/版本评分；构造长文任务使用 `constructed_numeric_exact_v1`，最终数量和总额同时匹配才得分。它们不使用 VersionQA 或 Loong 名称。
 
-Loong 的资料准备见 [Loong 接入](guides/loong.md)。当前系统完整保留资料、固定发布顺序，并按论文定义修正 Link the Links 的字段判断；这些输入适配沿用已有 manifest 明示，不作为作者运行脚本的原样复现。评分按已保存 task ID 续跑，复用已付 judge 结果；记录实际 judge，与原作者模型不同的运行按本地评分解释。2WikiMultiHopQA 保留独立准备和评价入口，当前任务不要求追加该实验。
+Loong 的资料准备见 [Loong 接入](guides/loong.md)。输入完整保留资料及发布顺序，并按论文定义修正 Link the Links 的字段判断。普通问答在给定原文内分块检索，LlamaIndex 对完整资料执行 compact/refine，ContextKV 进行预算化阅读与归约。评分按已保存 task ID 续跑，复用已付 judge 结果；记录实际 judge。2WikiMultiHopQA 保留独立准备和评价入口，当前任务不要求追加该实验。
 
 ## 执行与报告
 
