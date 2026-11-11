@@ -815,6 +815,7 @@ def evaluate_task(config):
                      "prediction": to_jsonable(predicted), "expected": to_jsonable(expected)})
         prior.setdefault(row["conversation_id"], []).append(decode(TaskState, row["task_state"]))
     output = Path(settings.get("task_eval_output", "runs/study/task-evaluation"))
+    output.mkdir(parents=True, exist_ok=True)
     summary = {"rows": len(rows), "context": "actual QA with teacher prior task-state replay",
                "labels_path": settings["task_eval_labels"],
                "metrics": {name: sum(row["metrics"][name] for row in rows)/len(rows) for name in rows[0]["metrics"]}}
@@ -826,7 +827,7 @@ def evaluate_task(config):
         retrieval_started = time.perf_counter()
         dense = DenseIndex.load(settings["task_dense_index"])
         baseline = LocalBGE(base, device=device, dtype=settings.get("dtype", "bfloat16"), max_length=8192,
-            query_adapter_path=task.get("initial_adapter_path", "models/bge-m3-dialogue-query-v1"),
+            query_adapter_path=task.get("initial_adapter_path"),
             normalize_float32=True)
         setup_ms = (time.perf_counter()-retrieval_started)*1000
 
@@ -895,7 +896,7 @@ def evaluate_task(config):
             "missing_label_task_ids": sorted(declared-{case["task_id"] for case in cases}),
             "valid_gold_characters": sum(case["gold_characters"] for case in valid),
             "index": {"path": settings["task_dense_index"], "manifest_sha256": file_digest(Path(settings["task_dense_index"])/"manifest.json")},
-            "query_assets": {"P0": query_encoder_binding({"query_adapter_path": task.get("initial_adapter_path", "models/bge-m3-dialogue-query-v1"),
+            "query_assets": {"P0": query_encoder_binding({"query_adapter_path": task.get("initial_adapter_path"),
                                                             "encoder_path": base}),
                 "task_query": query_encoder_binding({"task_asset": settings["task_output"]})},
             "setup_ms": setup_ms, "complete_ms": (time.perf_counter()-retrieval_started)*1000,
