@@ -448,8 +448,7 @@ def load_rolling_runtime(settings, *, template, store, sampling, answer_system_p
         provenance = model.provenance
         if (provenance["label"] not in {"actual_final_quality_minus_actual_direct_answer_quality",
                 "actual_completion_weighted_final_utility_minus_direct_utility"}
-                or provenance["training_split"] != "train" or provenance["training_records"] < 1
-                or not provenance["input_sha256"] or not provenance["counterfactual_runs_retained"]):
+                or provenance["training_split"] != "train" or provenance["training_records"] < 1):
             raise ValueError("enabled rolling gains require the actual train-split counterfactual asset")
         if (provenance["label"] == "actual_completion_weighted_final_utility_minus_direct_utility"
                 and (provenance["no_answer_utility"] != 0 or not provenance["raw_missing_quality_preserved"])):

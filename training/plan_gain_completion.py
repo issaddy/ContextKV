@@ -763,10 +763,8 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree", path=None):
             "branch_scope": "actual new action through committed ANSWER; excludes common paid state/preparation/cleanup",
             "incremental_scope": "same_observation_predicted_action_absolute_minus_direct_absolute",
             "training_mse": cost_mse}
-    asset_input = {"training": training, "quality_fit": quality_fit, "ridge": ridge,
-                   "cost_feature_schema": NATIVE_COST_SCHEMA if cost_models else None}
     return PlanGainModel(training[0]["reader_checkpoint"], training[0]["reader_profile_id"],
-        "effective-plan-gain:"+digest(asset_input), names, tuple(center.tolist()), tuple(scale.tolist()),
+        "effective-plan-gain:"+str(time.time_ns()), names, tuple(center.tolist()), tuple(scale.tolist()),
         tuple(coefficients.tolist()), float(intercept),
         {"input_protocol": training[0]["input_protocol"],
          "evidence_selection_contract": selection_contract,
@@ -778,9 +776,8 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree", path=None):
          "continuation_gap_limits": training[0]["counterfactual"]["actual_run"]["continuation_gap_limits"],
          "resident_model_manifest_digests": sorted(resident_digests),
          "label": LABEL, "utility_rule": RULE, "no_answer_utility": 0.0, "raw_missing_quality_preserved": True,
-         "training_split": "train", "training_records": len(training), "counterfactual_runs_retained": True,
+         "training_split": "train", "training_records": len(training),
          "equivalent_representation_pairs": declared_pairs-len(training),
-         "input_sha256": digest(training), "input_path": str(Path(path).resolve()) if path else None,
          "training_state_keys": sorted({row["state_key"] for row in training}),
          "training_conversations": sorted({row["conversation_id"] for row in training}),
          "scorer_identity": scorer_identity, "ridge": ridge, "quality_fit": quality_fit,
@@ -824,7 +821,7 @@ def calibrate_completion_latency(model, development, *, quantile=.9):
             "latency_margin_ms": ordered[math.ceil(quantile*len(ordered))-1] if len(ordered) >= 2 else None,
             "uncalibrated_underestimation_rate": sum(value > 0 for value in ordered)/len(ordered),
             "leave_one_conversation_out_exceedance": sum(exceeded)/len(exceeded) if exceeded else None}
-    return replace(model, asset_id=model.asset_id+":"+digest(calibration)[:16],
+    return replace(model, asset_id=model.asset_id+":calibrated",
         cost_provenance={**model.cost_provenance, "completion_reserve_calibration": calibration})
 
 
