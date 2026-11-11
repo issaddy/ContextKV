@@ -182,14 +182,7 @@ class HuggingFaceTemplate:
         return tuple(encoded["input_ids"]), tuple(encoded["offset_mapping"])
 
     def render(self, messages: tuple[Message, ...], *, with_offsets=False) -> RenderedPrompt:
-        text = self._render_text(messages)
-        # The chat template includes its special tokens. Tokenize that exact
-        # rendered text once, without inserting another BOS/EOS sequence.
-        encoded = self.tokenizer(text, add_special_tokens=False, return_offsets_mapping=with_offsets,
-                                 return_attention_mask=False, return_token_type_ids=False)
-        ids = tuple(encoded["input_ids"])
-        offsets = tuple(encoded["offset_mapping"]) if with_offsets else None
-        return RenderedPrompt(text, ids, token_hash(ids), offsets)
+        return self._tokenize_texts((self._render_text(messages),), with_offsets=with_offsets)[0]
 
     def render_many(self, conversations: tuple[tuple[Message, ...], ...], *, with_offsets=False) -> tuple[RenderedPrompt, ...]:
         """Render full prompts and reuse only proven AddedToken-delimited segments."""
@@ -197,6 +190,9 @@ class HuggingFaceTemplate:
             return tuple(self.render(messages, with_offsets=True) if with_offsets else self.render(messages)
                          for messages in conversations)
         texts = tuple(self._render_text(messages) for messages in conversations)
+        return self._tokenize_texts(texts, with_offsets=with_offsets)
+
+    def _tokenize_texts(self, texts: tuple[str, ...], *, with_offsets=False) -> tuple[RenderedPrompt, ...]:
         if not texts:
             return ()
         if self._batch_boundary:
