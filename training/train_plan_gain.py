@@ -187,6 +187,7 @@ class PlanGainModel:
     provenance: dict
     cost_models: dict = field(default_factory=dict)
     cost_provenance: dict = field(default_factory=dict)
+    quality_tree: dict | None = None
 
     def supports_semantic_kind(self, kind, *, costs=False):
         if costs:
@@ -208,6 +209,12 @@ class PlanGainModel:
         self._check_action(features)
         if self.provenance.get("direct_baseline_identity", False) and features.get("direct_answer", 0) > .5:
             return 0.0
+        if self.quality_tree is not None:
+            tree, node = self.quality_tree, 0
+            while tree["left"][node] != -1:
+                name = self.feature_names[tree["feature"][node]]
+                node = tree["left"][node] if features[name] <= tree["threshold"][node] else tree["right"][node]
+            return tree["value"][node]
         value = self._linear(features, self.coefficients, self.intercept)
         return min(1.0, max(-1.0, value))
 
@@ -237,8 +244,8 @@ class PlanGainModel:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         native = self.cost_provenance.get("feature_schema") == NATIVE_COST_SCHEMA
-        target.write_text(json.dumps({"schema_version": 3 if native else 2,
-            "model_type": "reader_bound_plan_gain_cost_ridge",
+        target.write_text(json.dumps({"schema_version": 4 if self.quality_tree is not None else 3 if native else 2,
+            "model_type": "reader_bound_plan_gain_cost_tree" if self.quality_tree is not None else "reader_bound_plan_gain_cost_ridge",
             **asdict(self)}, ensure_ascii=False, indent=2)+"\n")
 
     @classmethod
@@ -246,10 +253,11 @@ class PlanGainModel:
         data = json.loads(Path(path).read_text())
         schema, kind = data.pop("schema_version"), data.pop("model_type")
         if (schema, kind) not in {(2, "reader_bound_plan_gain_cost_ridge"),
-                                  (3, "reader_bound_plan_gain_cost_ridge")}:
+                                  (3, "reader_bound_plan_gain_cost_ridge"),
+                                  (4, "reader_bound_plan_gain_cost_tree")}:
             raise ValueError("unsupported plan gain asset schema")
         cost_provenance = data["cost_provenance"]
-        if schema == 3 and (cost_provenance["feature_schema"] != NATIVE_COST_SCHEMA
+        if schema >= 3 and (cost_provenance["feature_schema"] != NATIVE_COST_SCHEMA
                 or tuple(cost_provenance["feature_names"]) != NATIVE_COST_FEATURE_NAMES):
             raise ValueError("unsupported native cost feature schema")
         if data["reader_checkpoint"] != reader_checkpoint or data["reader_profile_id"] != reader_profile_id:
@@ -268,7 +276,7 @@ class PlanGainModel:
                     or data.get("cost_provenance", {}).get("observed_feature_schema") != OBSERVED_FEATURE_SCHEMA):
                 raise ValueError("observed action asset requires the current pre-action budget feature schema")
             cost_names = data["cost_provenance"].get("feature_names", data["feature_names"])
-            if schema != 3 and not set(OBSERVED_FEATURE_NAMES) <= set(cost_names):
+            if schema < 3 and not set(OBSERVED_FEATURE_NAMES) <= set(cost_names):
                 raise ValueError("observed cost asset omits pre-action budget features")
         for name in ("feature_names", "center", "scale", "coefficients"):
             data[name] = tuple(data[name])

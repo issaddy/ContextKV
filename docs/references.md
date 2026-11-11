@@ -12,7 +12,7 @@
 
 B 以当前直接 ANSWER 为基准，比较候选动作接固定后续的最终质量与完整成本。线上只执行选中动作，随后用实际状态重新选择。缺口检索沿未解关系和父事实触发，优先阅读已有就绪来源。此处借鉴计算价值、rollout 和检索与推理交替，实际收益由配对监督与完整队列衡量。[计算价值](https://www2.eecs.berkeley.edu/Pubs/TechRpts/1988/5755.html) · [Rollout](https://web.mit.edu/dimitrib/www/dp_rollout_book.html) · [IRCoT](https://aclanthology.org/2023.acl-long.557/)
 
-质量头使用岭回归，绝对成本头使用非负最小二乘与岭惩罚，直接拟合动作和原生报价所表达的非负工作量。已付成本用于约束预算；同一报价下的绝对分支预测用于计算相对成本。证据充分性用于定位检索、READ、最终窗口与回答各阶段的错误，最终质量使用实际答案及来源评价。[SciPy NNLS](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.nnls.html) · [Sufficient Context](https://arxiv.org/abs/2411.06037) · [ALCE](https://aclanthology.org/2023.emnlp-main.398/)
+质量头复用 scikit-learn 的加权回归树，部署时保存节点数组并直接遍历；线性岭回归作为实际对照。绝对成本头使用非负最小二乘与岭惩罚，直接拟合动作和原生报价所表达的非负工作量。已付成本用于约束预算；同一报价下的绝对分支预测用于计算相对成本。证据充分性用于定位检索、READ、最终窗口与回答各阶段的错误，最终质量使用实际答案及来源评价。[回归树](https://scikit-learn.org/stable/modules/generated/sklearn.tree.DecisionTreeRegressor.html) · [SciPy NNLS](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.nnls.html) · [Sufficient Context](https://arxiv.org/abs/2411.06037) · [ALCE](https://aclanthology.org/2023.emnlp-main.398/)
 
 ## C · 请求编译与原生缓存
 

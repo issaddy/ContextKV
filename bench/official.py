@@ -435,7 +435,7 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
                        rb_llm_workers=2):
     """Offline official RB_llm/RL_F/IDK over frozen answers, with resumable HTTP calls.
 
-    Run in the isolated evaluator environment. This function does not start a
+    Run with the configured Python interpreter. This function does not start a
     server, load weights, regenerate answers or alter official metric prompts.
     """
     root = Path(checkout).resolve()

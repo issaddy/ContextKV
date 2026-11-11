@@ -646,7 +646,7 @@ def fitted_action_domain(records):
     return current, ordered
 
 
-def fit_effective(training, *, ridge=1.0, path=None):
+def fit_effective(training, *, ridge=1.0, quality_head="tree", path=None):
     import numpy as np
     if not training or any(row["split"] != "train" or row["source"] != "actual_completion_weighted_counterfactual"
                            or row["utility_rule"] != RULE for row in training):
@@ -714,12 +714,25 @@ def fit_effective(training, *, ridge=1.0, path=None):
     state_counts = Counter((row["state_key"], row["direct"]["record_id"]) for row in actions)
     weights = np.asarray([1/state_counts[(row["state_key"], row["direct"]["record_id"])]
                           for row in actions], dtype=np.float64)
-    center = np.average(x, axis=0, weights=weights)
-    scale = np.sqrt(np.average((x-center)**2, axis=0, weights=weights))
-    scale[scale == 0] = 1.0
-    coefficients, intercept = _ridge((x-center)/scale, y, ridge, sample_weight=weights)
-    quality_fit = {"definition": "decision_state_weighted_ridge_v1",
-        "objective": "sum_state(mean_candidate_squared_delta_q_error) + ridge * squared_coefficient_norm",
+    quality_tree = None
+    if quality_head == "tree":
+        from sklearn.tree import DecisionTreeRegressor
+        fitted = DecisionTreeRegressor(max_leaf_nodes=4, min_samples_leaf=8, random_state=42).fit(
+            x, y, sample_weight=weights).tree_
+        quality_tree = {"left": fitted.children_left.tolist(), "right": fitted.children_right.tolist(),
+            "feature": fitted.feature.tolist(), "threshold": fitted.threshold.tolist(),
+            "value": fitted.value[:, 0, 0].tolist()}
+        center = scale = coefficients = np.empty(0)
+        intercept = 0.0
+    else:
+        center = np.average(x, axis=0, weights=weights)
+        scale = np.sqrt(np.average((x-center)**2, axis=0, weights=weights))
+        scale[scale == 0] = 1.0
+        coefficients, intercept = _ridge((x-center)/scale, y, ridge, sample_weight=weights)
+    quality_fit = {"definition": "decision_state_weighted_"+quality_head+"_v1",
+        "objective": ("sum_state(mean_candidate_squared_delta_q_error)" if quality_tree is not None else
+                      "sum_state(mean_candidate_squared_delta_q_error) + ridge * squared_coefficient_norm"),
+        **({"max_leaf_nodes": 4, "min_samples_leaf": 8} if quality_tree is not None else {"ridge": ridge}),
         "state_key_fields": ["state_key", "direct.record_id"],
         "decision_states": len(state_counts), "action_samples": len(actions)}
     representation_pairs = defaultdict(lambda: defaultdict(list))
@@ -771,7 +784,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
          "direct_baseline_identity": any(row["observed_state_binding"] is not None for row in training),
          "completion_counts": dict(Counter(str(row["completion_counterfactual"]) for row in training)),
          "measured_paid_cost_outcomes": dict(paid_cost_outcomes),
-         "fit_elapsed_ms": (time.perf_counter()-started)*1000}, cost_models, cost_provenance)
+         "fit_elapsed_ms": (time.perf_counter()-started)*1000}, cost_models, cost_provenance, quality_tree)
 
 
 def calibrate_completion_latency(model, development, *, quantile=.9):
@@ -912,6 +925,7 @@ def main(argv=None):
                      help="Original and derived source JSONL catalogues for registered-family overlap diagnostics")
     fit.add_argument("--output", required=True)
     fit.add_argument("--ridge", type=float, default=1.0)
+    fit.add_argument("--quality-head", choices=("tree", "linear"), default="tree")
     args = parser.parse_args(argv)
     if args.command == "finalize":
         print(json.dumps(finalize(args.collection, args.output), ensure_ascii=False))
@@ -934,7 +948,7 @@ def main(argv=None):
         train_families = exposed_source_families(training, catalogue)
         dev_families = exposed_source_families(development, catalogue)
         overlap = train_families & dev_families
-    model = fit_effective(training, ridge=args.ridge, path=args.train)
+    model = fit_effective(training, ridge=args.ridge, quality_head=args.quality_head, path=args.train)
     if args.dev:
         if any(row["split"] != "dev" or row["reader_checkpoint"] != model.reader_checkpoint or
                row["reader_profile_id"] != model.reader_profile_id
