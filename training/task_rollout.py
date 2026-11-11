@@ -95,7 +95,7 @@ async def run_actual_rollouts(config, *, output_path=None, min_conversations=100
                     corpus_snapshot_id=serving.corpus_snapshot_id, evidence_provider=provide)
                 committed = service.store.get_snapshot(session_id)
                 record = {"task_id": row["task_id"], "conversation_id": conversation_id,
-                    "turn": row["turn"], "split": partition, "question": row["question"],
+                    "turn": committed.raw_history[-1].turn_id, "split": partition, "question": row["question"],
                     "task_catalogue": task_catalogue, "task_reference_date": task_reference_date,
                     "source_scope": row.get("source_scope", []),
                     "actual_history": actual_history, "snapshot_id": serving.corpus_snapshot_id,
