@@ -32,7 +32,7 @@ MT-RAG 与 MTRAG-UN 固定上游 `53fef6f5917c7e10c436f697e69a955dbc795d81`。Cl
 VersionQA 固定上游 `2a2cbe8f285557f99dc7a79d6df7134e1e3eccff`。使用[作者判分规则](https://github.com/danielhuwiler/versionrag/blob/2a2cbe8f285557f99dc7a79d6df7134e1e3eccff/src/evaluation/evaluation_llm.py)，记录实际 judge 模型；更换 judge 后属于同 rubric 的本地评分。资料分段是检索实现，原问题、参考答案与类别保持不变：
 
 ```bash
-python3 -m bench.versionqa --source /path/to/versionrag/data/raw   --questions /path/to/versionrag/data/test/evaluation_set.csv   --tokenizer /path/to/qwen3-32b --output runs/study/evaluation/versionqa
+python3 -m bench.versionqa --source /path/to/versionrag/data/raw   --questions /path/to/versionrag/data/test/evaluation_set.csv   --tokenizer /path/to/qwen3-32b --output data/evaluation/versionqa
 ```
 
 `bench.study prepare` 只准备其公开资料与索引，不联动辅助训练或构造任务生成。构造资料由已有 `training.reading_data` 单独准备。构造版本任务沿用项目条件/版本评分；构造长文任务使用 `constructed_numeric_exact_v1`，最终数量和总额同时匹配才得分。它们不使用 VersionQA 或 Loong 名称。
@@ -45,6 +45,6 @@ Loong 的资料准备见 [Loong 接入](guides/loong.md)。当前系统完整保
 
 每个 job 对应一个数据集、一个方法和一个并发。默认沿会话前后依赖推进，思考间隔为零；已有真实固定到达轨迹时用 `--arrival-plan` 复用。调度方式及端到端计时口径保存在运行清单，不为凑出缓存重访添加延时。
 
-`bench.study_scoring` 按数据集调用对应评分，`bench.reassess_saved` 可对已存答案重评。原指标与完整题目分母、完成率一起报告；评分缺失不冒充零分，确认没有交付的任务在完整队列指标中计零。不同数据集不合成加权 Q，构造任务也不参与公开成绩。
+`bench.study_scoring` 按数据集调用对应评分。原指标与完整题目分母、完成率一起报告；评分缺失不冒充零分，确认没有交付的任务在完整队列指标中计零。不同数据集不合成加权 Q，构造任务也不参与公开成绩。
 
-`profiling.study_cost_ledger` 汇总实际在线调用与物理积分，辅助训练、索引及离线评分单列。GPU/Host 物理驻留与唯一 KV 页分别记录，共享页只计一次，空闲驻留计入总成本。历史结果保留原口径，当前入口不自动加载旧矩阵、旧到达表或旧方法别名。执行命令见 [运行手册](study/final_runbook.md)。
+最终指标由 `bench.capacity_workflow` 汇总，`profiling.final_study_index` 生成对比表。GPU/Host 采样只在内存中积分，长期保存积分结果。评分结束后清理答案、原文副本、judge 明细和状态库。训练采集只保存形成训练输入与标签所需的数据。执行命令见[运行手册](study/final_runbook.md)。

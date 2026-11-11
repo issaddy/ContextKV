@@ -86,7 +86,7 @@ async def workflow(config, settings):
         ended = time.monotonic()
         await sampler.stop()
         result.update(elapsed_ms=(ended-started)*1000, physical_cost=integrate_physical(sampler.samples, started, ended),
-            physical_observation=sampler.observation(), cost_scope="whole sequential workflow; subjob costs retained, overlapping scope is not added twice")
+            cost_scope="whole sequential workflow; subjob costs retained, overlapping scope is not added twice")
         write(root/"workflow.json", result)
     return result
 

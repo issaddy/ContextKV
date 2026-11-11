@@ -107,10 +107,6 @@ def rule_audit(record: Mapping) -> dict:
         flags.append("out_of_scope_citations")
     if record.get("truncated"):
         flags.append("truncated_answer")
-    visible_keys = {json.dumps(s["key"], sort_keys=True) for s in manifests}
-    body_keys = {json.dumps(s["key"], sort_keys=True) for s in record["audit_evidence"]}
-    if visible_keys - body_keys:
-        flags.append("missing_visible_evidence_body")
     return {"task_id": record["task_id"], "flags": flags, "citation_count": len(citations),
             "citation_parser_version": CITATION_PARSER_VERSION,
             "strict_format_citation_count": len(strict_citations),

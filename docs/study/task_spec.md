@@ -78,4 +78,4 @@ MultiDoc2Dial 用 F1/EM；MT-RAG 用作者 MTRAGEval；VersionQA 用作者二值
 
 0–1 质量指标提高 0.05 为 5 个百分点，Loong 在原 0–100 尺度报告差值。完整响应从真实到达计至回答完成，包含排队、检索、任务解释、阅读、归约和控制。在线 token、GPU/Host 物理积分及 unique KV 页分别报告；训练、索引和离线评分费用单列。
 
-交付各方法逐题答案、来源、评分、必要步骤账本、实际配置、收益资产和按数据集的质量/性能/资源对照。执行命令见[运行手册](final_runbook.md)，实测入口见[结果](final_results.md)。
+交付各 benchmark 的质量、完成率、完整响应 P95、在线 token、GPU/Host 占用，以及少量缓存对照指标和实际方法配置。执行命令见[运行手册](final_runbook.md)，实测入口见[结果](final_results.md)。

@@ -1,4 +1,4 @@
-"""Append-only events with explicit measurement provenance."""
+"""Runtime errors and explicit calibration records."""
 import json
 from pathlib import Path
 import threading

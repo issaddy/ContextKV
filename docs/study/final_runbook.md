@@ -12,8 +12,8 @@
 | 实际历史重放 | `configs/study_system_matrix.yaml` |
 | 构造条件/版本及统计任务 | `configs/study_mechanisms.yaml` |
 | 辅助训练 | `configs/auxiliary_training.yaml` |
-| 答案与评分复用 | `bench.reassess_saved`、`bench.study_scoring` |
-| 结果及费用汇总 | `profiling.final_study_index`、`profiling.study_cost_ledger` |
+| 数据集评分 | `bench.study_scoring` |
+| 最终对比汇总 | `profiling.final_study_index` |
 
 代码、配置和必要结果数据可以同步；模型、向量及大文件保留在实验容器。GPU 使用范围为 0、1、2、3，实际服务和辅助模型按配置分配设备。
 
@@ -103,14 +103,17 @@ python3 -m training.plan_gain_completion fit \
 | 支持关系和集合偏好 | `training.build_examples`、`training.train_models --stage support/support-eval`、`training.preference_rollout` |
 | 当前真实状态的动作配对 | `training.collect_plan_gains`、`training.plan_gain_workflow --mode observed_actions` |
 | 固定输入的证据策略对照 | `training.a_workflow compare`、`bench.evidence_policy_comparison` |
-| 完整余程预测诊断 | `bench.plan_prediction_audit` |
 
 辅助训练按会话隔离，沿当前 cohort 复用真实历史。任务学生尚未输出跨轮 READ 合同；只接入查询编码器时使用 `retrieval.task_query_asset` 并保留 teacher 解释。支持模型只由 `selection.mode: support` 加载，缓存配对估值只由 `allocation: paired_value` 加载。
 
 ## 结果与记录
 
-每个 job 对应数据集、方法、并发与重复。`capacity-plan.json` 保存实际选题、配置和方法因素，`workflow.json` 保存执行结果；逐题答案、来源、评分、必要步骤及资源采样用于复算。
+每个 job 对应数据集、方法和并发。`capacity-plan.json` 保存本次配置，`workflow.json` 保存最终指标。
 
-先保存答案再评分，评分中断后继续使用已有答案和 judge 记录。`bench.reassess_saved` 重评已付结果，`profiling.final_study_index --artifact NAME=WORKFLOW.json` 汇总；`--refresh-saved-queues` 只读已有记录重建摘要。
+生成与评分共用一个 `results.jsonl`，评分后仅保留每题分数和必要耗时/token 指标。完整历史、候选池、计划、token 序列和评分原文只在执行或实际训练采集中使用。正式工作流汇总完毕后删除 job 临时目录。
 
-报告各数据集原指标、题目分母、完成率、完整响应 P95、在线 token 和 GPU/Host 积分。辅助训练、索引与离线评分费用单列。保留答案、来源、评分、实际配置和复算所需账本；运行日志按需要清理。[实测与本地资料](final_results.md)
+```bash
+python3 -m profiling.final_study_index --artifact NAME=WORKFLOW.json --output RESULTS
+```
+
+最终报告各 benchmark 的原始质量指标、完成率、完整响应 P95、在线 token、GPU/Host 占用；缓存对照增加 GPU 命中、Host 回载和重算 token。直接比较本次测得的质量差与 P95 降幅。

@@ -286,55 +286,38 @@ async def collect_fixed_reader_preferences(config, *, limit=None, rescore=False)
             await controller.aclose()
             controller.store.close()
         stamp = time.time_ns()
-        observation = json.dumps(sampler.observation(), indent=2)+"\n"
         phase = "rescore" if rescore else "collection"
-        (directory/f"{phase}_physical.{stamp}.json").write_text(observation)
         (directory/f"{phase}_cost.{stamp}.json").write_text(json.dumps({"binding": binding, "scorer_engine_info": judge_info,
             "start": started, "end": ended, "physical": integrate_physical(sampler.samples, started, ended)}, indent=2)+"\n")
-    if (directory/P1_REWARDS).exists():
-        attach_collection_costs(directory, binding)
+    if not rescore and (directory/P1_REWARDS).exists():
+        attach_collection_costs(directory, sampler.samples)
     return {**result, "binding": binding, "cohort_directory": str(directory)}
 
 
-def attach_collection_costs(directory, binding):
-    """Attribute the observed physical window across all concurrent branches."""
-    from bench.study_resources import attribute_physical, integrate_physical
+def attach_collection_costs(directory, samples):
+    """Attach current collection costs to its successful and failed branches."""
+    from bench.study_resources import attribute_physical
     directory = Path(directory)
-    physical_paths = sorted(directory.glob("collection_physical.*.json"))
-    cost_paths = sorted(directory.glob("collection_cost.*.json"))
-    samples = sorted((sample for path in physical_paths for sample in json.loads(path.read_text())["samples"]),
-                     key=lambda sample: sample["timestamp"])
     rewards = rows(directory/P1_REWARDS)
     turn_path, failure_path = directory/"turns.jsonl", directory/"failed_cases.jsonl"
     turns = rows(turn_path) if turn_path.exists() else []
     failures = rows(failure_path) if failure_path.exists() else []
+    start, end = samples[0]["timestamp"], samples[-1]["timestamp"]
     windows = {row["response"]["attempt_id"]: row["request_window"] for row in (*rewards, *turns)
-               if row["request_window"] is not None}
-    windows.update({row["attempt_id"]: row["request_window"] for row in failures if row["request_window"] is not None})
+        if row["request_window"] is not None and start <= row["request_window"][0] <= row["request_window"][1] <= end}
+    windows.update({row["attempt_id"]: row["request_window"] for row in failures
+        if row["request_window"] is not None and start <= row["request_window"][0] <= row["request_window"][1] <= end})
     shares = attribute_physical(samples, windows)
-    envelopes = {key: integrate_physical(samples, *window) for key, window in windows.items()}
-    attribution = "physical interval occupancy divided across concurrently active successful and failed requests"
-
-    def attach(row, key):
-        envelope = envelopes.get(key)
-        covered = envelope is not None and envelope["complete_window_coverage"]
-        share = {name: shares[key][name] if covered else None
-                 for name in ("gpu_gib_seconds", "host_gib_seconds")}
-        row["physical_window"] = envelope
-        row["request_share"] = {**share, "attribution": attribution, "complete_window_coverage": covered}
-        row["physical_window_scope"] = "non-additive whole-device/process envelope during this request"
-        row["batch_cost_paths"] = [str(path) for path in cost_paths]
-        return share
-
     for row in rewards:
-        share = attach(row, row["response"]["attempt_id"])
-        row["cost"] = {"complete_ms": row["response"]["complete_ms"],
-            "total_input_tokens": row["input_total_tokens"], "total_output_tokens": row["output_total_tokens"],
-            **share, "attribution": attribution}
+        key = row["response"]["attempt_id"]
+        if key in shares:
+            row["cost"] = {"complete_ms": row["response"]["complete_ms"],
+                "total_input_tokens": row["input_total_tokens"], "total_output_tokens": row["output_total_tokens"],
+                **shares[key]}
     write_rows(directory/P1_REWARDS, rewards)
     for row in failures:
-        share = attach(row, row["attempt_id"])
-        row["physical_cost"] = share if row["request_window"] is not None else None
+        if row["attempt_id"] in shares:
+            row["physical_cost"] = shares[row["attempt_id"]]
     if failure_path.exists():
         write_rows(failure_path, failures)
     return rewards
@@ -385,7 +368,7 @@ def prepare_preferences(config):
     cohort_path = Path(collection["cohort_manifest"])
     cohort_hash = file_digest(cohort_path)
     members = {row["task_id"]: row for row in json.loads(cohort_path.read_text())["members"] if row["split"] == split}
-    rewards = attach_collection_costs(directory, binding)
+    rewards = rows(directory/P1_REWARDS)
     parent = parent_support_binding(settings)
     for row in rewards:
         if (row["cohort_split"] != split or row["cohort_manifest_sha256"] != cohort_hash
@@ -490,7 +473,6 @@ async def measured_policy_training(config):
         output = Path(settings["output_asset"])
         output.mkdir(parents=True, exist_ok=True)
         invocation = time.time_ns()
-        (output/f"training_physical.{invocation}.json").write_text(json.dumps(sampler.observation(), indent=2)+"\n")
         (output/f"training_cost.{invocation}.json").write_text(json.dumps({"reader_binding": reader_binding(config),
             "start": start, "end": end, "physical": integrate_physical(sampler.samples, start, end)}, indent=2)+"\n")
     return metadata

@@ -757,10 +757,6 @@ class ReadingExecutor:
                             (*units.values(), *novel))) > plan.budget.max_passages):
                         blocked_open_needs.update(((need.need_id, need.missing_relation,
                             need.bound_entities, need.temporal_scope), need) for need in open_needs)
-                        if self.events is not None:
-                            self.events.emit("reading_gap_budget_stop", attempt_id=attempt_id,
-                                reason="original_passage_budget", open_needs=open_needs,
-                                max_passages=plan.budget.max_passages)
                         novel = ()
                     if novel:
                         parents = tuple(dict.fromkeys(parent for need in open_needs

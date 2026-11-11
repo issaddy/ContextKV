@@ -6,7 +6,7 @@ evidence_policy_training:
   output_dir: runs/study/fixed-qwen-preferences
   parent_support_asset: models/study-support-budget-loop
   output_asset: models/study-support-fixed-qwen
-  gpu_devices: [1, 2, 4]
+  gpu_devices: [0, 1, 2, 3]
   scorer_identity:
     kind: frozen_qwen3_32b_actual_history_source_judge
     rubric: necessary_points_grounding_conditions_versions_task_v2
@@ -34,8 +34,8 @@ evidence_policy_training:
     read_output_tokens: 2048
     max_steps: 64
   optimizer:
-    device: cuda:6
-    physical_gpu_devices: [6]
+    device: cuda:3
+    physical_gpu_devices: [3]
     epochs: 3
     learning_rate: 0.0001
     seed: 42

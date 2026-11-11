@@ -74,8 +74,7 @@ def _load_retrieval(service, *, retriever_index, retriever_config, evidence_corp
     from adapters.corpus import CorpusIndex
     from adapters.retriever_factory import create_retriever
 
-    retriever = create_retriever("P3", index_path=retriever_index, config_path=retriever_config,
-        trace_sink=lambda trace: service.events.emit("retrieval_query_view", **trace))
+    retriever = create_retriever("P3", index_path=retriever_index, config_path=retriever_config)
     try:
         index = (CorpusIndex.from_jsonl(evidence_corpus, corpus_id=corpus_id,
                     snapshot_id=retriever.corpus_snapshot_id) if evidence_corpus else None)
@@ -182,12 +181,7 @@ def create_app(controller: Controller | None = None, config: RunConfig | None = 
             if app.state.retrieval is not None:
                 app.state.qa = DocumentQA(service, app.state.retrieval)
                 service.bind_resident_models(app.state.retrieval.manifest)
-                service.events.emit("retrieval_configured", retrieval=app.state.retrieval.manifest)
-            pricing_startup_ms = await service.start()
-            service.events.emit("service_started", engine=info, fingerprint=service.template.fingerprint,
-                pricing_startup_ms=pricing_startup_ms,
-                configuration_source="run_config" if resolved_config is not None else "injected_controller",
-                config=resolved_config)
+            await service.start()
             worker = retry_worker = asyncio.create_task(retries())
             app.state.ready = True
             yield

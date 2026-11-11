@@ -22,15 +22,7 @@ python3 -m bench.retrieval_eval build --corpus data/mtrag-official/cloud.jsonl \
   --device cuda:0 --dtype bfloat16 --batch-size 16
 ```
 
-索引准备完成后，按[部署](../deployment.md)启动生成服务，再运行：
-
-```bash
-python3 -m bench.run_sessions --config configs/qwen3_32b.yaml \
-  --state-dir runs/cloud-dev run data/mtrag/RAG.jsonl --protocol P3 --domain cloud \
-  --split-manifest configs/mtrag_split_manifest.json --split dev \
-  --retriever-config configs/retriever_dialogue.example.yaml \
-  --evidence-corpus data/mtrag-official/cloud.jsonl
-```
+系统评测统一使用 `bench.capacity_workflow`，按数据集选择检索配置和方法，见[运行手册](../study/final_runbook.md)。
 
 Cloud使用72,442条原始passages；MultiDoc2Dial使用其完整4110段语料和对应索引。稀疏/稠密索引共享资料快照。配置中的路径相对工作目录，运行manifest记录实际模型、配置和索引身份。
 

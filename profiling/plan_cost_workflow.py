@@ -64,7 +64,7 @@ async def fit_existing_only(args, output, manifest, checkpoint):
             window={"start": started, "end": end}, elapsed_seconds=end-started,
             own_cpu_seconds=time.process_time()-own_cpu,
             child_cpu_seconds=(child_after.ru_utime+child_after.ru_stime-child_before.ru_utime-child_before.ru_stime),
-            physical_cost=integrate_physical(sampler.samples, started, end), physical_observation=sampler.observation(),
+            physical_cost=integrate_physical(sampler.samples, started, end),
             selected_gpu_devices=[], active_B_reader_excluded=True))
     manifest.update(status="offline_complete", mode="fit_existing_only",
         reader_mutations=0, native_asset_manifest=str(output/"c2-native"/"native-assets.json")

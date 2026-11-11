@@ -528,7 +528,7 @@ def train_task(config):
     from transformers import AutoTokenizer
     from adapters.hybrid_retrieval import DenseIndex, LocalBGE
     from adapters.doc2dial import _identity
-    from training.reader_data import file_digest, write_rows
+    from training.reader_data import file_digest
     settings = config.get("training", {})
     task = config.get("task_model", {})
     base_path = task.get("base_path", "models/bge-m3")
@@ -554,29 +554,14 @@ def train_task(config):
                                settings["cohort_manifest"], "train")
     if not labels:
         raise ValueError("task training requires actual-history teacher labels")
-    retrieval_targets, retrieval_alignment = {}, []
+    retrieval_targets = {}
     for row in labels:
-        positives, coverage = set(), []
+        positives = set()
         for gold in row["verified_grounding"]:
-            matches = [(left, right, index) for left, right, index in sections.get(gold["passage_id"], ())
-                       if left < gold["end"] and gold["start"] < right]
-            positives.update(index for _, _, index in matches)
-            covered, cursor = 0, gold["start"]
-            for left, right, _ in sorted(matches):
-                left, right = max(left, gold["start"]), min(right, gold["end"])
-                covered += max(0, right-max(left, cursor))
-                cursor = max(cursor, right)
-            coverage.append({"passage_id": gold["passage_id"], "start": gold["start"], "end": gold["end"],
-                "overlapping_section_ids": [dense.contexts[index].document_id for _, _, index in matches],
-                "covered_characters": covered, "gold_characters": gold["end"]-gold["start"],
-                "fully_covered": covered == gold["end"]-gold["start"]})
+            positives.update(index for left, right, index in sections.get(gold["passage_id"], ())
+                             if left < gold["end"] and gold["start"] < right)
         retrieval_targets[row["task_id"]] = sorted(positives)
-        retrieval_alignment.append({"task_id": row["task_id"], "cohort_split": row["cohort_split"],
-            "positive_section_ids": [dense.contexts[index].document_id for index in sorted(positives)],
-            "query_supervised": bool(positives), "gold_spans": coverage,
-            "all_gold_spans_fully_covered": bool(coverage) and all(span["fully_covered"] for span in coverage)})
     output.mkdir(parents=True, exist_ok=True)
-    write_rows(output/"retrieval_alignment.jsonl", retrieval_alignment)
     conversations = {}
     for row in labels:
         conversations.setdefault(row["conversation_id"], []).append(row)
@@ -597,8 +582,9 @@ def train_task(config):
     optimizer = torch.optim.AdamW([
         {"params": adapter_params, "lr": settings.get("adapter_lr", 2e-4)},
         {"params": head_params, "lr": settings.get("head_lr", 1e-4)}], weight_decay=.01)
-    logs = []
-    input_not_visible = []
+    steps, input_not_visible = 0, 0
+    trained_tasks = set()
+    final_loss = None
     span_counts = {kind: Counter() for kind in SPAN_KINDS}
     training_usage = {"task_input_tokens": 0, "history_input_tokens": 0,
                       "document_input_tokens": 0, "query_input_tokens": 0}
@@ -627,7 +613,7 @@ def train_task(config):
             try:
                 targets = task_targets(encoded, prediction)
             except TaskInputNotVisible as error:
-                input_not_visible.append({"task_id": row["task_id"], "epoch": epoch, "reason": str(error)})
+                input_not_visible += 1
                 from controller.context_schema import TaskState
                 prior_states.setdefault(row["conversation_id"], []).append(decode(TaskState, row["task_state"]))
                 continue
@@ -697,16 +683,16 @@ def train_task(config):
             torch.nn.utils.clip_grad_norm_(adapter_params, 1.0)
             torch.nn.utils.clip_grad_norm_(head_params, 1.0)
             optimizer.step()
-            logs.append({"epoch": epoch, "task_id": row["task_id"], "loss": float(total.detach()),
-                         "components": {name: float(value.detach()) for name, value in losses.items()}})
+            steps += 1
+            trained_tasks.add(row["task_id"])
+            final_loss = float(total.detach())
             from controller.context_schema import TaskState
             prior_states.setdefault(row["conversation_id"], []).append(decode(TaskState, row["task_state"]))
     output.mkdir(parents=True, exist_ok=True)
-    write_rows(output/"input_not_visible.jsonl", input_not_visible)
-    if not logs:
+    if not steps:
         status = {"status": "not_fitted", "reason": "no visible supervised training steps",
             "declared_training_rows": len(labels), "training_rows": 0, "steps": 0,
-            "input_not_visible_states": len(input_not_visible)}
+            "input_not_visible_states": input_not_visible}
         (output/"training-status.json").write_text(json.dumps(status, indent=2)+"\n")
         return status
     network.encoder.save_pretrained(output/"adapter")
@@ -720,7 +706,7 @@ def train_task(config):
         "document_encoder_manifest": dense.manifest["encoder"], "document_encoder_training": "frozen",
         "rank": task.get("lora_rank", 16), "dtype": dtype,
         "declared_training_rows": len(labels),
-        "training_rows": len({row["task_id"] for row in logs}), "steps": len(logs), "elapsed_ms": (time.perf_counter()-started)*1000,
+        "training_rows": len(trained_tasks), "steps": steps, "elapsed_ms": (time.perf_counter()-started)*1000,
         "complete_ms": (time.perf_counter()-complete_started)*1000,
         "model_setup_ms": (started-complete_started)*1000,
         "input_tokens": sum(training_usage.values()), "token_usage": training_usage,
@@ -732,9 +718,7 @@ def train_task(config):
             "vectors_sha256": file_digest(dense_path/"vectors.npy"),
             "positive_rule": "same original document and nonempty half-open character intersection with verified gold",
             "loss": "uniform positive-section cross entropy against every frozen index row",
-            "alignment_report": str((output/"retrieval_alignment.jsonl").resolve()),
-            "supervised_states": sum(row["query_supervised"] for row in retrieval_alignment),
-            "fully_covered_states": sum(row["all_gold_spans_fully_covered"] for row in retrieval_alignment)},
+            "supervised_states": sum(bool(value) for value in retrieval_targets.values())},
         "gradient_scope": {"query_lora": "retrieval and task losses", "task_heads": "task losses"},
         "loss_weights": loss_weights, "retrieval_temperature": temperature,
         "heads": {"span": SPAN_LABELS, "condition_update": UPDATES, "relation": RELATIONS,
@@ -754,9 +738,9 @@ def train_task(config):
         "training_order": "seeded conversation shuffle per epoch; ascending turns within each conversation",
         "history_supervision": "token-level selected historical spans; current question masked",
         "training_config": settings}
-    manifest["input_not_visible_states"] = len(input_not_visible)
+    manifest["input_not_visible_states"] = input_not_visible
     (output/"task-model.json").write_text(json.dumps(manifest, indent=2)+"\n")
-    (output/"losses.jsonl").write_text("".join(json.dumps(row)+"\n" for row in logs))
+    (output/"training-summary.json").write_text(json.dumps({"steps": steps, "final_loss": final_loss})+"\n")
     return manifest
 
 
@@ -765,7 +749,6 @@ def evaluate_task(config):
     from adapters.hybrid_retrieval import LocalBGE
     from controller.context_schema import TaskState
     from controller.serialization import to_jsonable
-    from training.task_data import write_jsonl
     settings = config["training"]
     task = config.get("task_model", {})
     device = settings.get("device", "cuda")
@@ -832,7 +815,6 @@ def evaluate_task(config):
                      "prediction": to_jsonable(predicted), "expected": to_jsonable(expected)})
         prior.setdefault(row["conversation_id"], []).append(decode(TaskState, row["task_state"]))
     output = Path(settings.get("task_eval_output", "runs/study/task-evaluation"))
-    write_jsonl(output/"predictions.jsonl", rows)
     summary = {"rows": len(rows), "context": "actual QA with teacher prior task-state replay",
                "labels_path": settings["task_eval_labels"],
                "metrics": {name: sum(row["metrics"][name] for row in rows)/len(rows) for name in rows[0]["metrics"]}}

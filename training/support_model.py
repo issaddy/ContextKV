@@ -462,7 +462,8 @@ def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, d
                                   {"params": head_parameters, "lr": learning_rate}])
     network.train()
     started = time.perf_counter()
-    losses, token_count = [], 0
+    optimizer_steps, token_count = 0, 0
+    final_loss = None
     for epoch in range(epochs):
         order = torch.randperm(len(examples)).tolist()
         for start in range(0, len(order), batch_size):
@@ -534,7 +535,8 @@ def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, d
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            losses.append(float(loss.detach()))
+            optimizer_steps += 1
+            final_loss = float(loss.detach())
     if device.startswith("cuda"):
         torch.cuda.synchronize(device)
     metadata = {**backend.manifest,
@@ -556,7 +558,7 @@ def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, d
             "head_learning_rate": learning_rate, "encoder_learning_rate": encoder_learning_rate,
             "label_origins": dict(Counter(row["label_origin"] for row in examples)),
             "oversized_examples": oversized,
-            "losses": losses, "input_tokens": token_count,
+            "final_loss": final_loss, "optimizer_steps": optimizer_steps, "input_tokens": token_count,
             "model_setup_ms": (started-complete_started)*1000,
             "elapsed_ms": (time.perf_counter()-started)*1000},
         "utility_training": {"stage": "support_supervision",
@@ -583,7 +585,7 @@ def _source_membership(example, spans):
 def evaluate_support(config):
     """Replay held-out support inputs; measure label agreement, not source correctness."""
     from training.reader_data import file_digest
-    from training.task_data import read_jsonl, write_jsonl
+    from training.task_data import read_jsonl
 
     settings = config["training"]
     labels_path = Path(settings["support_eval_labels"]).resolve()
@@ -606,7 +608,7 @@ def evaluate_support(config):
     backend = TrainedSupportBackend.load(asset, device=config["support_model"]["device"],
         batch_size=settings.get("support_eval_batch_size", 8))
     setup_ms = (time.perf_counter()-started)*1000
-    predictions, errors = [], {name: [] for name in SUPPORT_SCALARS}
+    errors = {name: [] for name in SUPPORT_SCALARS}
     confusion = {target: dict.fromkeys(SUPPORT_CLASSES, 0) for target in SUPPORT_CLASSES}
     tp = fp = fn = exact = scored = 0
     predict_ms = 0.0
@@ -624,9 +626,6 @@ def evaluate_support(config):
             backend.release_task(task_id)
             for row, example, prediction in zip(batch, examples, actual, strict=True):
                 labels = row["labels"]
-                predictions.append({**{key: row[key] for key in ("example_id", "task_id", "conversation_id",
-                    "need_id", "cohort_split", "cohort_manifest_sha256", "label_origin")},
-                    "labels": labels, "prediction": prediction})
                 if prediction is None:
                     continue
                 scored += 1
@@ -648,7 +647,6 @@ def evaluate_support(config):
     false_complete = sum(confusion[target]["complete"] for target in SUPPORT_CLASSES if target != "complete")
     expected_noncomplete = sum(sum(confusion[target].values()) for target in SUPPORT_CLASSES if target != "complete")
     predicted_complete = sum(confusion[target]["complete"] for target in SUPPORT_CLASSES)
-    write_jsonl(output/"predictions.jsonl", predictions)
     summary = {"scope": "held-out dev teacher-label agreement on fixed support examples",
         "independent_original_source_audit": {"status": "not_evaluated"},
         "split": "dev", "cohort_manifest": str(cohort_path), "cohort_manifest_sha256": file_digest(cohort_path),
@@ -675,8 +673,7 @@ def evaluate_support(config):
             "heads_sha256": file_digest(asset/"heads.pt"), "deployment": deployment,
             "training_partition": training_partition},
         "cost": {"scope": "fixed support input replay, grouped by task; not end-to-end QA",
-            "setup_ms": setup_ms, "predict_wall_ms": predict_ms, "backend_usage": usage},
-        "predictions_path": str(output/"predictions.jsonl")}
+            "setup_ms": setup_ms, "predict_wall_ms": predict_ms, "backend_usage": usage}}
     (output/"summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2)+"\n")
     return summary
 
@@ -736,7 +733,8 @@ cached once before optimizing the graph and disposition heads.
     for name, parameter in network.named_parameters():
         parameter.requires_grad_(not name.startswith(("encoder.", "scalar_heads.", "support_head.", "span_head.")))
     optimizer = torch.optim.AdamW([p for p in network.parameters() if p.requires_grad], lr=learning_rate)
-    losses = []
+    optimizer_steps = 0
+    final_loss = None
     network.train()
     started = time.perf_counter()
     for epoch in range(epochs):
@@ -752,13 +750,14 @@ cached once before optimizing the graph and disposition heads.
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            losses.append(float(loss.detach()))
+            optimizer_steps += 1
+            final_loss = float(loss.detach())
     if device.startswith("cuda"):
         torch.cuda.synchronize(device)
     metadata = {**backend.manifest, "parent_support_asset": str(asset_path),
         "utility_input_scope": "evidence_set_only", "utility_training": {
         "preferences_path": str(preferences_path), "pairs": len(rows), "epochs": epochs,
-        "seed": seed, "learning_rate": learning_rate, "losses": losses,
+        "seed": seed, "learning_rate": learning_rate, "final_loss": final_loss, "optimizer_steps": optimizer_steps,
         "synthetic_fixture_count": sum(bool(row.get("synthetic_fixture")) for row in rows),
         "elapsed_ms": (time.perf_counter()-complete_started)*1000,
         "optimization_ms": (time.perf_counter()-started)*1000,

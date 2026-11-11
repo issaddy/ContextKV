@@ -22,8 +22,6 @@ external-reference = ["llama-index-core>=0.14.25,<0.15"]
 [dependency-groups]
 dev = [
     "jsonschema>=4,<5",
-    "pytest>=8,<10",
-    "pytest-asyncio>=0.25,<2",
     "ruff>=0.11,<1",
 ]
 
@@ -36,11 +34,6 @@ include = ["controller*", "adapters*", "bench*", "profiling*", "engine_patches*"
 
 [tool.setuptools.package-data]
 bench = ["assets/loong/*", "examples/*.json", "examples/*.jsonl", "examples/*.yaml"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]
-asyncio_mode = "auto"
 
 [tool.ruff]
 target-version = "py311"

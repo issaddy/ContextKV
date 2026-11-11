@@ -1,9 +1,8 @@
-"""Continuous benchmark quality, complete-cohort selection and paired intervals."""
+"""Benchmark quality, budgeted selection and method comparisons."""
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 import math
-import random
 import statistics
 
 
@@ -114,7 +113,9 @@ def _cost_summary(rows):
     result = {"mean_complete_ms": statistics.fmean(timings) if complete_timings else None,
         "p95_complete_ms": _quantile(timings, .95) if complete_timings else None}
     for name in ("total_input_tokens", "total_output_tokens", "gpu_gib_seconds", "host_gib_seconds",
-                 "online_compute_ms", "auxiliary_input_tokens", "auxiliary_output_tokens"):
+                 "online_compute_ms", "auxiliary_input_tokens", "auxiliary_output_tokens",
+                 "reader_input_tokens", "reader_output_tokens", "actual_prefill_tokens",
+                 "actual_device_hit_tokens", "actual_host_loaded_tokens"):
         result[name] = _cost_total(rows, name)
     token_fields = (result["total_input_tokens"], result["total_output_tokens"])
     result["online_tokens"] = sum(token_fields) if all(v is not None for v in token_fields) else None
@@ -160,16 +161,12 @@ def declared_queue_summary(rows, spec, task_ids):
             return None
         return _primary_components(values, spec)
 
-    paid = {}
-    for name in ("total_input_tokens", "total_output_tokens", "gpu_gib_seconds",
-                 "host_gib_seconds", "online_compute_ms", "auxiliary_input_tokens",
-                 "auxiliary_output_tokens"):
-        observed = [(row, _number(row.get("cost", {}).get(name))) for row in selected]
-        measured = [(row, value) for row, value in observed if value is not None]
-        paid[name] = {"observed_total": sum(value for _, value in measured),
-            "failed_request_total": sum(value for row, value in measured if row["status"] != "completed"),
-            "measured_requests": len(measured),
-            "unmeasured_task_ids": [str(row["task_id"]) for row, value in observed if value is None]}
+    benchmark_metrics = {}
+    for name in sorted({name for row in completed for name in row.get("metrics", {})}):
+        values = [_number(row.get("metrics", {}).get(name)) for row in completed]
+        values = [value for value in values if value is not None]
+        if values:
+            benchmark_metrics[name] = {"mean": statistics.fmean(values), "scored": len(values)}
     return {"declared": len(expected), "recorded": len(selected), "completed": len(completed),
         "scored": len(scored), "completion_rate": len(completed)/len(expected) if expected else None,
         "missing_execution_task_ids": sorted(missing_execution), "unresolved_task_ids": sorted(unresolved),
@@ -178,8 +175,9 @@ def declared_queue_summary(rows, spec, task_ids):
         "unscored_answer_task_ids": [str(row["task_id"]) for row in unknown],
         "queue_primary_score": aggregate(0) if not unknown and not unknown_execution_count else None,
         "queue_score_bounds": [aggregate(0), aggregate(1)], "components": components,
-        "scored_subset_primary": _primary(scored, spec), "cost": _cost_summary(selected),
-        "paid_cost": paid,
+        "scored_subset_primary": _primary(scored, spec),
+        "benchmark_metrics": benchmark_metrics,
+        "cost": _cost_summary(selected),
         "quality_rule": "declared task denominator; confirmed non-delivery is zero; missing outcomes and scores remain unknown",
         "cost_rule": "all saved requests including failures; observed totals retain unmeasured task IDs"}
 
@@ -287,130 +285,25 @@ def select_development(matrix, rows):
         "selection_objective": "continuous_quality_with_declared_resource_budgets"}
 
 
-def _interval(values, confidence):
-    alpha = (1-confidence)/2
-    return [_quantile(values, alpha), _quantile(values, 1-alpha)]
-
-
-def declared_queue_quality_interval(matrix, pairs, *, split, dataset):
-    """Paired conversation bootstrap for one benchmark's normalized quality."""
-    specs = {dataset: split_metric_spec(matrix["datasets"][dataset], split)}
-    selection = matrix["selection"]
-    samples, confidence = selection.get("bootstrap_samples", 5000), selection.get("confidence", .95)
-    rng = random.Random(matrix["seed"])
-    arms = [{(row["dataset"], str(row["task_id"])): row for row in rows} for pair in pairs for rows in pair]
-    draws, cluster_counts = [0.0]*samples, {}
-    for dataset, spec in specs.items():
-        components = _required(spec)
-        width = len(components)
-        clusters = defaultdict(lambda: [0]*(1+len(arms)*width))
-        for task_id in matrix["cohorts"][split][dataset]:
-            key = dataset, str(task_id)
-            if any(key not in arm for arm in arms):
-                return None
-            rows = [arm[key] for arm in arms]
-            conversation = rows[0]["conversation_id"]
-            if not conversation or any(row["conversation_id"] != conversation for row in rows):
-                raise ValueError("paired declared tasks must belong to the same conversation")
-            cluster = clusters[conversation]
-            cluster[0] += 1
-            for arm, row in enumerate(rows):
-                if row["status"] in {"failed", "blocked"}:
-                    continue
-                if not _scored(row, spec):
-                    return None
-                for i, name in enumerate(components, 1+arm*width):
-                    cluster[i] += _metric(row, name, spec)[0]
-        cluster_counts[dataset] = len(clusters)
-        if len(clusters) < 2:
-            return None
-        populations = [clusters[key] for key in sorted(clusters)]
-        weight = 1/spec["normalization"]
-        for draw in range(samples):
-            n, *scores = map(sum, zip(*rng.choices(populations, k=len(populations))))
-            quality = [_primary_components([value/n for value in scores[start:start+width]], spec)
-                       for start in range(0, len(scores), width)]
-            draws[draw] += weight*statistics.fmean(right-left for left, right in zip(quality[::2], quality[1::2]))
-    return {"interval": _interval(draws, confidence), "confidence": confidence,
-            "bootstrap_samples": samples, "clusters_by_dataset": cluster_counts,
-            "resampling_unit": "paired_conversation_within_fixed_dataset"}
-
-
-def paired_comparisons(matrix, rows, baseline=None, split="test", *, samples=None, seed=None):
-    """Resample whole conversations/documents, retaining paired actual turns."""
-    selection = matrix.get("selection", {})
-    baseline = baseline if baseline is not None else selection.get("baseline", matrix["methods"][0]["id"])
-    samples = samples if samples is not None else selection.get("bootstrap_samples", 5000)
-    rng = random.Random(matrix.get("seed", 42) if seed is None else seed)
-    confidence = selection.get("confidence", .95)
-    rows = [row for row in rows if row["split"] == split]
-    specs = _track_specs(matrix, split)
-    cohorts = matrix.get("cohorts", {}).get(split, {})
-    methods = sorted({row["method"] for row in rows}-{baseline})
-    output = []
-    for method in methods:
-        for dataset, spec in specs.items():
-            declared = dataset in cohorts
-            expected = ({str(task_id) for task_id in cohorts[dataset]} if declared else {
-                str(row["task_id"]) for row in rows
-                if row["dataset"] == dataset and row["method"] in {baseline, method}})
-            left = {str(row["task_id"]): row for row in rows if row["method"] == baseline
-                    and row["dataset"] == dataset and str(row["task_id"]) in expected and _scored(row, spec)}
-            right = {str(row["task_id"]): row for row in rows if row["method"] == method
-                     and row["dataset"] == dataset and str(row["task_id"]) in expected and _scored(row, spec)}
-            common = sorted(left.keys() & right.keys())
-            complete_cohort = declared and bool(expected) and set(common) == expected
-            coverage = {"cohort_declared": declared, "planned_tasks": len(expected) if declared else None,
-                "paired_tasks": len(common), "paired_task_ids": common, "complete_cohort": complete_cohort,
-                "comparison_scope": "declared_cohort" if complete_cohort else "common_scored_subset",
-                "baseline_unscored_task_ids": sorted(expected-left.keys()),
-                "method_unscored_task_ids": sorted(expected-right.keys()),
-                "both_unscored_task_ids": sorted(expected-(left.keys() | right.keys()))}
-            if not common:
-                output.append({"method": method, "baseline": baseline, "dataset": dataset,
-                    **coverage, "score_difference": None, "score_interval": None})
-                continue
-            clusters = defaultdict(list)
-            for task_id in common:
-                row = left[task_id]
-                identity = str(row.get("document_id", row["conversation_id"]))
-                clusters[identity].append(task_id)
-            keys = sorted(clusters)
-            estimated = _primary([right[key] for key in common], spec)-_primary([left[key] for key in common], spec)
-            draws, cost_draws = [], {name: [] for name in (
-                "complete_ms", "gpu_gib_seconds", "host_gib_seconds", "online_compute_ms")}
-            for _ in range(samples):
-                sampled = [task_id for cluster in rng.choices(keys, k=len(keys)) for task_id in clusters[cluster]]
-                draws.append(_primary([right[key] for key in sampled], spec)
-                             - _primary([left[key] for key in sampled], spec))
-                for name in cost_draws:
-                    pairs = [(right[key].get("cost", {}).get(name), left[key].get("cost", {}).get(name)) for key in sampled]
-                    if all(_number(a) is not None and _number(b) is not None for a, b in pairs):
-                        cost_draws[name].append(statistics.fmean(a-b for a, b in pairs))
-            cost_effects = {}
-            for name, cost_values in cost_draws.items():
-                pairs = [(right[key].get("cost", {}).get(name), left[key].get("cost", {}).get(name)) for key in common]
-                cost_effects[name] = {"mean_difference": statistics.fmean(a-b for a, b in pairs),
-                    "interval": _interval(cost_values, confidence) if len(keys) >= 2 else None} if len(cost_values) == samples else None
-            result = {"method": method, "baseline": baseline, "dataset": dataset,
-                "quality_track": "development_selection" if split == "dev" else "final_evaluation",
-                **coverage, "clusters": len(keys), "score_difference": estimated,
-                "score_interval": _interval(draws, confidence) if len(keys) >= 2 else None,
-                "confidence": confidence,
-                "bootstrap_samples": samples, "resampling_unit": "conversation_or_document",
-                "cost_differences": cost_effects,
-                "unpaired_baseline_tasks": sorted(left.keys()-right.keys()),
-                "unpaired_method_tasks": sorted(right.keys()-left.keys())}
-            tolerance = selection.get("equal_cost_relative_tolerance", .05)
-            matched = []
-            for name in ("complete_ms", "online_compute_ms"):
-                if cost_effects[name] is None:
-                    matched.append(None)
-                    continue
-                baseline_mean = statistics.fmean(left[key]["cost"][name] for key in common)
-                method_mean = statistics.fmean(right[key]["cost"][name] for key in common)
-                matched.append(abs(method_mean-baseline_mean) <= tolerance*baseline_mean)
-            result["equal_cost_match"] = all(matched) if None not in matched else None
-            result["equal_cost_relative_tolerance"] = tolerance
-            output.append(result)
-    return output
+def paired_comparisons(matrix, rows, baseline=None, split="test"):
+    """Point comparisons using each benchmark's declared task denominator."""
+    baseline = baseline or matrix["selection"]["baseline"]
+    result = []
+    for dataset, spec in _track_specs(matrix, split).items():
+        expected = matrix["cohorts"][split][dataset]
+        selected = [row for row in rows if row["dataset"] == dataset and row["split"] == split]
+        methods = {row["method"] for row in selected}
+        if baseline not in methods:
+            continue
+        left = declared_queue_summary([row for row in selected if row["method"] == baseline], spec, expected)
+        for method in sorted(methods-{baseline}):
+            right = declared_queue_summary([row for row in selected if row["method"] == method], spec, expected)
+            quality = (right["queue_primary_score"]-left["queue_primary_score"]
+                       if right["queue_primary_score"] is not None and left["queue_primary_score"] is not None else None)
+            a, b = left["cost"]["p95_complete_ms"], right["cost"]["p95_complete_ms"]
+            result.append({"dataset": dataset, "method": method, "baseline": baseline,
+                "primary_metric": spec["primary_metric"], "score_difference": quality,
+                "p95_reduction_percent": (1-b/a)*100 if a and b is not None else None,
+                "baseline_completed": left["completed"], "candidate_completed": right["completed"],
+                "declared": len(expected)})
+    return result

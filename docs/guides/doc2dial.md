@@ -56,16 +56,7 @@ for name in ("dialogue", "hybrid", "conversational"):
 
 两个固定BGE检查点均支持8192；评分预算设为8192可覆盖更长章节。编码器建索引只做一次，完整正文继续进入生成。全文BM25索引仍可作为简单对照使用。
 
-按[部署说明](../deployment.md)启动固定32B原生NGRAM服务后，推荐链路可直接运行：
-
-```bash
-python3 -m bench.run_sessions --config configs/qwen3_32b.yaml \
-  --state-dir runs/multidoc-history run data/multidoc2dial/test/tasks.jsonl \
-  --protocol P3 --retriever-config data/multidoc2dial/retriever_dialogue.yaml \
-  --evidence-corpus data/multidoc2dial/test/passages.jsonl
-```
-
-它使用已有查询适配器、实际 QA 检索和每轮重建。比较入口见[运行手册](../study/final_runbook.md)。
+系统评测统一使用 `bench.capacity_workflow`，按数据集选择检索配置和方法，见[运行手册](../study/final_runbook.md)。
 
 保存答案的基础词项评分：
 

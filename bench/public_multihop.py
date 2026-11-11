@@ -144,7 +144,6 @@ async def build_indexes(output, *, device="cuda:1", physical_device=1):
     finally:
         ended = time.monotonic()
         await sampler.stop()
-        (root/"index_resource_samples.json").write_text(json.dumps(sampler.observation(), indent=2)+"\n")
         (root/"index_cost.json").write_text(json.dumps({"window": [started, ended],
             "physical": integrate_physical(sampler.samples, started, ended), "observed": measured,
             "scope": "offline source indexing; no training or gold-label use"}, indent=2)+"\n")
@@ -176,7 +175,7 @@ def score(source_dir, tasks_path, generation_dir, *, projection=None):
         raise ValueError(f"unknown declared 2Wiki answer projection: {projection}")
     root = Path(generation_dir)
     tasks = {row["task_id"]: row for row in rows(tasks_path)}
-    results = rows(root/"results.unscored.jsonl")
+    results = rows(root/"results.jsonl")
     output = root/"scoring"/"2wiki"
     output.mkdir(parents=True, exist_ok=True)
     predictions, individual = {"answer": {}, "sp": {}, "evidence": {}}, {}
@@ -242,7 +241,7 @@ def score(source_dir, tasks_path, generation_dir, *, projection=None):
             "raw_full_answer_metrics": raw_by_id.get(row["task_id"]),
             "raw_outputs": [str(output/"answer_projection.jsonl"), str(output/"raw_full_answer.scores.jsonl")]}}
         for row in results]
-    write_rows(root/"results.scored.jsonl", scored)
+    write_rows(root/"results.jsonl", scored)
     manifest = {"metric": "official 2Wiki original answer/sp/evidence/joint metrics", "scored": len(gold),
         "planned": len(tasks), "valid_answer_predictions": len(individual),
         "missing_prediction_task_ids": sorted(set(tasks)-set(individual)),
@@ -259,7 +258,7 @@ def score(source_dir, tasks_path, generation_dir, *, projection=None):
                for key in ("raw_full_answer_EM", "raw_full_answer_F1")}},
         "raw_full_answer_normalization": "full original answer with only E_ citation markup removed; official EM/F1",
         "support_projection": "original sentence overlap of actual claim source spans; no gold sentence selection",
-        "raw_answers": str(root/"results.unscored.jsonl"), "official": official,
+        "raw_answers": str(root/"results.jsonl"), "official": official,
         "official_execution": "executed_on_declared_cohort" if gold else "not_executed_empty_cohort",
         "source_script_sha256": file_digest(Path(source_dir)/"evaluate.original.py"),
         "wall_ms": (time.monotonic()-started)*1000, "model_calls": 0,

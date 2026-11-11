@@ -6,8 +6,6 @@ protocol: P3
 selection:
   baseline: RAG_native
   near_equal_quality: 0.002
-  equal_cost_relative_tolerance: 0.05
-  bootstrap_samples: 5000
 final_evaluation:
   baseline: RAG_native
   main_methods:

@@ -6,8 +6,6 @@ protocol: P3
 selection:
   baseline: RAG_native
   near_equal_quality: 0.002
-  equal_cost_relative_tolerance: 0.05
-  bootstrap_samples: 5000
 final_evaluation:
   baseline: RAG_native
   main_methods:
@@ -33,7 +31,7 @@ resources:
 datasets:
   constructed_version:
     inputs:
-      dev: runs/study/evaluation/version_dev/tasks.jsonl
+      dev: data/evaluation/version_dev/tasks.jsonl
     split_kind: constructed
     supplied_documents: true
     coverage_mode: selected_sources
@@ -45,7 +43,7 @@ datasets:
         conditions_versions: 0.5
   constructed_long:
     inputs:
-      dev: runs/study/evaluation/long_dev/tasks.jsonl
+      dev: data/evaluation/long_dev/tasks.jsonl
     split_kind: constructed
     supplied_documents: true
     coverage_mode: all_supplied_documents

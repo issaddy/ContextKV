@@ -48,7 +48,7 @@ source-first ANSWER 的实际顺序为系统、稳定原文、工作历史、当
 
 质量头用岭回归拟合相对直接 ANSWER 的最终质量差。以 `(state_key, direct.record_id)` 为决策单位，每个状态内候选误差取均值，特征标准化使用相同权重，使候选数量不改变该状态的总权重。绝对成本头按唯一已交付真实分支拟合，失败分支继续参与质量监督和费用汇总。完整剩余目录、首步实际输入、预填充与 Host 回载报价、GAP 查询和排队量作为动作前特征；目录中的每个 READ 不因此成为本次已决定的调用。可选动作按有界后续的预测排序，统计所需的 READ 与归约按必做步骤调度。
 
-准入使用独立的完整逻辑 token 与步骤预留：已付费用、当前请求、已登记的必要 READ/REDUCE，以及最终结论通路的 ANSWER 输入和输出。已知事实按实际执行消息与 tokenizer 计量，确定性计算可直接投影其结果；尚未产生的内容使用已有输出上限和保留结论份额。事前终端输入按 facts 表示计量，真正选择 ANSWER 时再按该候选的原文、结论和历史精确计量，补充原文使用实际剩余额度。READ 改组后重新分配未完成部分的结论份额，已完成结果保持原分配。时间与 GPU/Host 费用使用实测资产预测；有限时间预算同时使用独立开发会话的低估余量及可用的真实余程观测。审计用每步已付边界和实际终止时间计算余程。`input_protocol` 绑定实际输入语义；成本资产另标明完整预算特征口径。[收益与成本模型](../training/plan_gain_completion.py) · [预算预留](../controller/context_budget.py) · [余程审计](../bench/plan_prediction_audit.py)
+准入使用独立的完整逻辑 token 与步骤预留：已付费用、当前请求、已登记的必要 READ/REDUCE，以及最终结论通路的 ANSWER 输入和输出。已知事实按实际执行消息与 tokenizer 计量，确定性计算可直接投影其结果；尚未产生的内容使用已有输出上限和保留结论份额。事前终端输入按 facts 表示计量，真正选择 ANSWER 时再按该候选的原文、结论和历史精确计量，补充原文使用实际剩余额度。READ 改组后重新分配未完成部分的结论份额，已完成结果保持原分配。时间与 GPU/Host 费用使用实测资产预测；有限时间预算同时使用独立开发会话的低估余量及可用的真实余程观测。`input_protocol` 绑定实际输入语义；成本资产另标明完整预算特征口径。[收益与成本模型](../training/plan_gain_completion.py) · [预算预留](../controller/context_budget.py)
 
 ## C · 编译、Native 报价与缓存反馈
 
@@ -91,6 +91,10 @@ READ 只是对 Need 的一次尝试；结果尚未返回时，原文回答仍可
 
 ### 当前比较
 
-问答响应分别返回直接可见原文的 `visible_evidence_manifest` 与结论引用的 `conclusion_source_manifest`。后者将引用 ID 绑定到原文 URI、版本和坐标。评分使用相同的来源闭包，完整原文独立供审计。LlamaIndex 的投影还包括实际中间 compact/refine 输入所见的原文片段。[评分投影](../bench/quality.py)
+问答响应分别返回直接可见原文的 `visible_evidence_manifest` 与结论引用的 `conclusion_source_manifest`。后者将引用 ID 绑定到原文 URI、版本和坐标。评分使用相同的来源闭包。评分临时材料在汇总后清理。LlamaIndex 的投影还包括实际中间 compact/refine 输入所见的原文片段。[评分投影](../bench/quality.py)
 
 `bench.capacity_workflow` 默认比较普通文档问答、ContextKV 与 LlamaIndex，主基线为 `RAG_native`。普通流程使用必要历史、基础检索重排、窗口内拼接和一次回答，直接使用 SGLang 原生缓存；追问的检索改写和最终回答都进入同一账本。现有 LlamaIndex 共用执行适配器，保留作者 compact/refine。相同上下文能力的三种缓存配置用于局部归因，其他模块对照按需选择。[矩阵](../configs/study_matrix.yaml) · [普通基线](../adapters/rag_dialogue.py) · [运行入口](study/final_runbook.md)
+
+## 结果输出
+
+运行中的会话状态用于事实复用和执行。正式 benchmark 结束后清理状态库、评分输入和原始采样，只保留质量、完成率、响应 P95、token、GPU/Host 积分和缓存工作量。动作决策不再输出候选池、报价、未来预测和完整输入的事件副本。

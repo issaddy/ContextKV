@@ -6,7 +6,6 @@ from collections import deque
 from dataclasses import dataclass, replace
 from functools import partial
 import hashlib
-import logging
 import time
 import uuid
 import statistics
@@ -157,7 +156,6 @@ class Controller:
         acknowledged = 0
         async with self._retire_lock:
             for op in self.store.outbox(session_id):
-                self.events.emit("epoch_retire_requested", operation=op)
                 try:
                     ack = await self.engine.retire(op.engine_session_id, op.expected_generation,
                                                    op.operation_id, op.engine_restart_id, op.reason)
@@ -167,17 +165,13 @@ class Controller:
                     if not ack.acknowledged or ack.state != "RETIRED":
                         raise EngineError("RETIRE_PENDING")
                     self.store.ack_retire(op.operation_id)
-                    self.events.emit("epoch_retire_acked", operation=op, acknowledgement=ack,
-                                     physical_free_tokens=0)
                     acknowledged += 1
                 except EngineError as exc:
                     if exc.code == "STALE_RESTART":
                         self.store.ack_retire(op.operation_id)
-                        self.events.emit("epoch_retire_acked", operation=op, reason="engine_restart_invalidated_reference", physical_free_tokens=0)
                         acknowledged += 1
                     elif isinstance(exc, UnknownOutcomeError) or exc.code == "RETIRE_PENDING":
                         self.store.retire_failed(op.operation_id, str(exc))
-                        self.events.emit("epoch_retire_retry", operation=op, error=str(exc))
                     else:
                         raise
             if getattr(self.observe_prefix, "settings", {}).get("mode") == "demand":
@@ -288,19 +282,14 @@ class Controller:
         # The upstream dialogue final step was observed by ReadingExecutor.
         if attempt.final_step_id is not None:
             return
-        source_view = self.request_compiler.observe_executed(attempt.plan.candidate, attempt.result.receipt,
+        self.request_compiler.observe_executed(attempt.plan.candidate, attempt.result.receipt,
             cache_config_hash=attempt.cache_config_hash, engine_restart_id=attempt.epoch.engine_restart_id)
-        self.events.emit("answer_source_executed", attempt_id=attempt.attempt_id, source_view=source_view)
 
     async def _finish_answer_demand(self, attempt):
         observer = self.observe_prefix
         if getattr(observer, "settings", {}).get("mode") != "demand":
             return
-        mutation = await observer.finish_demand(attempt.reading_outcome, attempt.session_id, attempt.attempt_id)
-        if mutation is not None:
-            self.events.emit("joint_prefix_control", attempt_id=attempt.attempt_id,
-                choice=attempt.plan.candidate.candidate_id, quote_seq=attempt.plan.quote_seq,
-                phase="after_answer_receipt", **mutation)
+        await observer.finish_demand(attempt.reading_outcome, attempt.session_id, attempt.attempt_id)
 
     def _response(self, attempt: Attempt, *, elapsed_ms=None, replay=False,
                   timing: ClientTiming | None = None, control_ms=None, answer_phase_window=None) -> TurnResponse:
@@ -499,21 +488,11 @@ class Controller:
             retrieval_ms=retrieval_ms, auxiliary_usage=auxiliary_usage)
         attempt = self.store.promote_completed_step(attempt)
         self._validate(attempt, generation)
-        snapshot = self.store.commit_turn_and_outbox(attempt.attempt_id)
+        self.store.commit_turn_and_outbox(attempt.attempt_id)
         committed_at = time.monotonic()
         answer_window = {"start": started, "end": committed_at, "commit_at": committed_at,
             "clock": "client_monotonic", "scope": "answer_until_commit",
             "start_definition": "external_dialogue_start", "end_definition": "external_qa_commit"}
-        try:
-            self.events.emit("ledger_committed", business_session_id=attempt.session_id,
-                attempt_id=attempt.attempt_id, ledger_version=snapshot.version, epoch=epoch.epoch_no,
-                answer_phase_window=answer_window)
-            self.events.emit(mode+"_dialogue_committed", business_session_id=attempt.session_id,
-                attempt_id=attempt.attempt_id, ledger_version=snapshot.version,
-                framework_version=dialogue.framework_version, condensed_query=dialogue.condensed_query,
-                call_stages=tuple(call.stage for call in dialogue.calls))
-        except Exception as error:
-            logging.getLogger(__name__).error("Diagnostic output failed after commit: %s", error)
         self._retire_background()
         submitted = arrived+final.metrics["submitted_from_arrival_ms"]/1000
         timing = ClientTiming(arrived, submitted,
@@ -564,7 +543,6 @@ class Controller:
         request_hash = hashlib.sha256(dumps(content).encode()).hexdigest()
         async with self._lock(session_id):
             entered = time.monotonic()
-            self.events.emit("turn_received", business_session_id=session_id, request_id=request_id)
             previous = self.store.find_request(session_id, request_id)
             resume_context_plan = None
             if previous:
@@ -602,8 +580,6 @@ class Controller:
                 raise ValueError("Session corpus snapshot differs; explicitly provide its current snapshot to transition")
             if reference_history is not None:
                 snap = self.store.sync_history(session_id, reference_history, snap.version)
-                self.events.emit("reference_history_sync", business_session_id=session_id,
-                                 raw_history_version=snap.raw_history_version, pending=snap.history_sync_pending)
             working_snap = (replace(snap, corpus_snapshot_id=corpus_snapshot_id, must_rebuild=True)
                             if migrating else snap)
             attempt = previous if resume_context_plan is not None else self.store.begin_attempt(
@@ -658,8 +634,7 @@ class Controller:
                 if (identity != self._calibration_identity
                         and (self.cost_model.prefill_points or self.cost_model.decode_points
                              or self.cost_model.step_models)):
-                    scope = self.cost_model.check_calibration_scope(info)
-                    self.events.emit("cost_calibration_scope", **scope)
+                    self.cost_model.check_calibration_scope(info)
                     self._calibration_identity = identity
                 recovery = snap.current_epoch is not None and snap.current_epoch.engine_restart_id != info.engine_restart_id
                 planning_snap = (replace(working_snap, force_new_epoch_for_recovery=True, must_rebuild=True)
@@ -687,11 +662,9 @@ class Controller:
                     from .context_cost import quote_read_costs
                     completed_steps = tuple(record for stage, record in
                         self.store.execution_steps_with_stage(attempt.attempt_id) if stage == "COMPLETE")
-                    context_plans, read_cost_trace = await quote_read_costs(context_plans,
+                    context_plans = await quote_read_costs(context_plans,
                         planning_snap, self.template, self.engine, self.cost_model, completed_steps=completed_steps,
                         initial_outcomes=initial_outcomes, request_compiler=self.request_compiler)
-                    self.events.emit("reading_plan_cost_quotes", attempt_id=attempt.attempt_id,
-                                     trace=read_cost_trace)
                 def compile_candidates(snapshot, plans, outcome=None, **compile_options):
                     if plans:
                         return tuple(candidate for context_plan in plans for candidate in
@@ -924,17 +897,9 @@ class Controller:
                 current = self.store.get_attempt(attempt.attempt_id)
                 reading_pending = (current.stage == "STARTED"
                     and self.store.has_submitted_model_step(attempt.attempt_id))
-                if reading_pending:
-                    self.events.emit("reading_recovery_required", business_session_id=session_id,
-                                     attempt_id=attempt.attempt_id, error=str(exc))
-                elif current.stage in ("STARTED", "PLANNED", "PREPARED"):
+                if not reading_pending and current.stage in ("STARTED", "PLANNED", "PREPARED"):
                     self.store.fail_attempt(attempt.attempt_id, str(exc))
                     self._retire_background()
-                else:
-                    # PREPARING can have a lost ACK. SUBMITTED can have a lost result.
-                    # RESULT_READY can have a failed CAS. None permit a blind retry.
-                    self.events.emit("attempt_recovery_required", business_session_id=session_id,
-                                     attempt_id=attempt.attempt_id, stage=current.stage, error=str(exc))
                 self.events.emit("attempt_failed", business_session_id=session_id, attempt_id=attempt.attempt_id, error=str(exc))
                 raise
             committed_at = time.monotonic()
@@ -943,29 +908,22 @@ class Controller:
                 submitted+result.last_token_ms/1000 if result.last_token_ms is not None else None,
                 response_done, committed_at, token_observation="chunk" if result.ttft_ms is not None else "none")
             control_ms = ((submitted-entered) + (committed_at-response_done))*1000 - retrieval_segment_ms - reading_segment_ms
-            answer_phase_window = None
-            try:
-                self._postplan_control_ms[plan.candidate.action].append(
-                    ((submitted-plan_started)+(committed_at-response_done))*1000
-                    -(reading_segment_ms if rolling_result is None else 0.0))
-                self.cost_model.observe_output(len(result.output_ids))
-                selected_estimate = next((e for e in plan.predicted if e.candidate_id == plan.candidate.candidate_id), None)
-                if (self.online_calibration and selected_estimate is not None and selected_estimate.calibrated
-                        and result.server_elapsed_ms is not None and info.engine_kind == "sglang"):
-                    observed_total = (result.server_elapsed_ms+control_ms
-                        +plan.candidate.predicted_read_ms+plan.candidate.auxiliary_ms)
-                    self.cost_model.observe(selected_estimate, observed_total)
-                answer_phase_window = {"start": answer_phase_started, "end": time.monotonic(),
-                                     "commit_at": committed_at,
-                                     "clock": "client_monotonic", "scope": "answer_until_commit",
-                                     "start_definition": ("rolling_proposals_compilation_start" if rolling_result
-                                                          else "final_answer_compilation_start"),
-                                     "end_definition": "response_tail_control_complete_before_audit_write"}
-                self.events.emit("ledger_committed", business_session_id=session_id, attempt_id=attempt.attempt_id,
-                                 ledger_version=snapshot.version, epoch=epoch.epoch_no,
-                                 answer_phase_window=answer_phase_window)
-            except Exception as error:
-                logging.getLogger(__name__).error("Diagnostic output failed after commit: %s", error)
+            self._postplan_control_ms[plan.candidate.action].append(
+                ((submitted-plan_started)+(committed_at-response_done))*1000
+                -(reading_segment_ms if rolling_result is None else 0.0))
+            self.cost_model.observe_output(len(result.output_ids))
+            selected_estimate = next((e for e in plan.predicted if e.candidate_id == plan.candidate.candidate_id), None)
+            if (self.online_calibration and selected_estimate is not None and selected_estimate.calibrated
+                    and result.server_elapsed_ms is not None and info.engine_kind == "sglang"):
+                observed_total = (result.server_elapsed_ms+control_ms
+                    +plan.candidate.predicted_read_ms+plan.candidate.auxiliary_ms)
+                self.cost_model.observe(selected_estimate, observed_total)
+            answer_phase_window = {"start": answer_phase_started, "end": time.monotonic(),
+                                 "commit_at": committed_at,
+                                 "clock": "client_monotonic", "scope": "answer_until_commit",
+                                 "start_definition": ("rolling_proposals_compilation_start" if rolling_result
+                                                      else "final_answer_compilation_start"),
+                                 "end_definition": "response_tail_control_complete"}
             self._retire_background()
             return self._response(replace(attempt, stage="COMMITTED"),
                                   elapsed_ms=(committed_at-arrived)*1000, timing=timing, control_ms=control_ms,
@@ -990,9 +948,8 @@ class Controller:
                 return None
             self._observe_answer_source(attempt)
             await self._finish_answer_demand(attempt)
-            committed = self.store.commit_turn_and_outbox(attempt.attempt_id)
+            self.store.commit_turn_and_outbox(attempt.attempt_id)
             self.cost_model.observe_output(len(attempt.result.output_ids))
-            self.events.emit("attempt_recovered", attempt_id=attempt.attempt_id, ledger_version=committed.version)
             self._retire_background()
             return self._response(replace(attempt, stage="COMMITTED"), replay=True)
         if attempt.stage in ("STARTED", "PLANNED", "PREPARING", "PREPARED"):

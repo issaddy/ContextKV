@@ -12,7 +12,7 @@ async def quote_read_costs(plans, snapshot, template, engine, cost_model, *, com
     plans = tuple(plans)
     compiler = request_compiler or RequestCompiler(template)
     seeds = {outcome.plan.plan_id: outcome for outcome in initial_outcomes}
-    candidates, groups, unquoted = [], [], []
+    candidates, groups, unquoted = [], [], set()
     scope = await engine.info()
     for plan in plans:
         seed = seeds.get(plan.plan_id)
@@ -27,8 +27,7 @@ async def quote_read_costs(plans, snapshot, template, engine, cost_model, *, com
                 continue
             missing = tuple(cid for cid in task.input_claim_ids if cid not in claims)
             if missing:
-                unquoted.append({"plan_id": plan.plan_id, "step_id": task.step_id,
-                                 "unknown_parent_claim_ids": missing})
+                unquoted.add(plan.plan_id)
                 continue
             source = tuple(units[uid] for uid in task.input_unit_ids)
             variants = compiler.compile_read(plan, task, source,
@@ -38,9 +37,8 @@ async def quote_read_costs(plans, snapshot, template, engine, cost_model, *, com
             groups.append((plan.plan_id, task.step_id, variants))
     if not candidates:
         updated = tuple(replace(plan, predicted_cost_ms=0.0,
-            cost_prediction_eligible=not any(item["plan_id"] == plan.plan_id for item in unquoted)) for plan in plans)
-        return updated, {"steps": [], "unquoted": unquoted,
-                         "predicted_read_ms": {p.plan_id: 0.0 for p in updated}}
+            cost_prediction_eligible=plan.plan_id not in unquoted) for plan in plans)
+        return updated
     quotes = await engine.quote_batch(tuple(candidates), template.fingerprint)
     by_id = {quote.candidate_id: quote for quote in quotes.quotes}
     selected = tuple((plan_id, step_id, compiler.choose_variant(variants, quotes))
@@ -51,13 +49,8 @@ async def quote_read_costs(plans, snapshot, template, engine, cost_model, *, com
     updated = []
     for plan in plans:
         plan_estimates = [e for e in estimates if ownership[e.candidate_id] == plan.plan_id]
-        eligible = (not any(item["plan_id"] == plan.plan_id for item in unquoted)
+        eligible = (plan.plan_id not in unquoted
             and all(e.calibrated if e.selection_eligible is None else e.selection_eligible for e in plan_estimates))
         updated.append(replace(plan, predicted_cost_ms=sum(e.cost for e in plan_estimates),
                                cost_prediction_eligible=eligible))
-    return tuple(updated), {"quotes": quotes, "steps": estimates, "unquoted": unquoted,
-        "selected_requests": tuple({"plan_id": plan_id, "step_id": step_id,
-            "candidate_id": candidate.candidate_id, "input_hash": candidate.input_hash,
-            "read_unit_order": candidate.read_unit_order} for plan_id, step_id, candidate in selected),
-        "prediction_scope": "known READ inputs at the current native cache state; content-dependent REDUCE and later OpenNeeds are measured when executed",
-        "predicted_read_ms": {p.plan_id: p.predicted_cost_ms for p in updated}}
+    return tuple(updated)

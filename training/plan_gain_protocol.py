@@ -9,8 +9,7 @@ from dataclasses import replace
 import time
 
 from adapters.history_state import TaskInterpretation, TaskModelResult, TaskPrediction, validate_task_refs
-from controller.action_proposals import (GapRetrievalRequest as GapRetrievalRequest,
-    build_observed_action_plans as build_observed_action_plans, gap_query as gap_query,
+from controller.action_proposals import (GapRetrievalRequest, gap_query,
     ALTERNATE_ANSWERS, BOUNDED_CONTINUATION, bind_read_parents, continuation_gap, continuation_read,
     gap_key, gap_retrieval_plan, observed_step_outputs)
 from controller.context_schema import EvidencePool, ReadingOutcome, ReadTask
@@ -309,7 +308,6 @@ class FixedCounterfactualRuntime:
             require_completion(plan, state.results, plan.online_tokens_spent,
                 len(state.steps)+self.new_action_counts["GAP_RETRIEVAL"]-1, None,
                 arrived=arrived, template=template, snapshot=snapshot, claims=state.claims)
-            events.emit("plan_gain_experimental_gap", attempt_id=attempt_id, **self.gap_result)
             return pool
         if self.planned.semantic_kind == "gap_retrieval":
             pool = await retrieve(self.gap_request)
@@ -447,7 +445,6 @@ class FixedCounterfactualRuntime:
                 "selection": "predeclared_semantic_branch_actual_compiler_choice",
                 "gain_prediction": None, "calibration_claim": None}
             records.append(record)
-            events.emit("plan_gain_experimental_step", attempt_id=attempt_id, **record)
             try:
                 state = await executor.execute_one(attempt_id, snapshot, plan, task, state,
                     initial_auxiliary_usage=auxiliary_usage, candidate=candidate, quote=quote, quote_ms=quote_ms)
@@ -484,10 +481,6 @@ class FixedCounterfactualRuntime:
             self.pre_action_input = candidate
             task = next(step.task for step in self.planned.steps if step.task.kind == "ANSWER")
             record_pre_action_reserve(task, candidate, quotes)
-        events.emit("plan_gain_experimental_answer", attempt_id=attempt_id,
-            planned_plan_id=self.planned.plan_id, actual_input_hash=candidate.input_hash,
-            actual_quote=quotes, compiled_input=candidate,
-            selection="predeclared_semantic_branch_actual_compiler_choice", gain_prediction=None)
         self.decisions = records
         self.new_action_counts["ANSWER"] = 1
         return RollingResult(replace(state, answer_representation=representation), Plan(candidate, quote_seq=quotes.observed_seq,

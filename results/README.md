@@ -1,16 +1,11 @@
-# ContextKV 本地研究记录
+# 实测指标
 
-| 内容 | 位置 |
+[最终指标汇总](container-final-metrics-20261112.json) 保存 65 组队列的质量、完成率、P95、token 和资源结果，以及证据选择、记录投影、阅读重组与缓存保留的机制测量。
+
+| 内容 | JSON 字段 |
 |---|---|
-| 各批次、数据轨与场景的完整实测表及出处 | [measured-results-20261111.md](measured-results-20261111.md) |
-| 完整逐题答案、评分、步骤 SQLite、配对与费用原始记录 | `../runs/paper-evidence-20261109/experiment-records.tar.zst` |
-| 上述归档的路径与文件清单 | `../runs/paper-evidence-20261109/PAPER_RECORDS_MANIFEST.json` |
-| 正式队列、短队列、逐题答案与费用汇总 | `../runs/final-20261110/` |
-| 同输入缓存配对与双层压力结果 | `../runs/cache-cooperation-20261110/` |
-| 阅读、来源链、条件/版本、多跳的机制记录 | `../runs/study-guide-3db7fb4/` |
-| 证据选择、真实历史与动作开发报告 | `../runs/study-20261106-resume/` |
-| 阅读重组与资产刷新结果 | `../runs/study-20261109-joint/` |
-| 阅读分包回放与完整物理窗口测量 | `engineering-closure-read-packing.json`、`engineering-stop-summary.json` |
-| 硬件测点、校准资产与开发结果 | `../runs/research-records/calibration/` |
+| 各 benchmark、方法及并发的结果 | `queues` |
+| 相同请求下 Native 与需求保留的结果 | `cache_cooperation` |
+| 证据选择、确定性计算、READ/ANSWER 前缀复用 | `mechanisms` |
 
-保存的答案、来源、评分、账本和测量结果沿原运行身份使用。归档支持按路径提取，模型权重和检索向量由实验容器保存。
+每组结果保留当时的任务分母、指标定义和方法名称。新评测由 `bench.capacity_workflow` 输出最终指标，使用 `profiling.final_study_index` 生成对比表。

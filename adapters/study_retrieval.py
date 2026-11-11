@@ -87,6 +87,8 @@ class StudyEvidenceProvider:
         plan_gain = config.get("execution", {}).get("plan_gain", runtime.plan_gain if runtime else None)
         self.whole_plan_candidates = plan_gain is not None and plan_gain["mode"] == "whole_plan"
         self.corpus_snapshot_id = serving.corpus_snapshot_id
+        self.capture_trace = bool(config.get("policy_comparison") or
+            config.get("execution", {}).get("state_observation") or (runtime and runtime.state_observation))
         self.traces = {}
         self._completed_traces = OrderedDict()
         self._supplied_indexes = OrderedDict()
@@ -527,23 +529,25 @@ class StudyEvidenceProvider:
                 plans.append(plan)
             auxiliary += (("candidate_quality", candidate_quality_ms),)
             plans = [replace(plan, auxiliary_ms=auxiliary) for plan in plans]
-            trace = {"task_state": to_jsonable(state), "pool": to_jsonable(pool),
-                "support_task_id": state.task_id,
-                "reused_needs": sorted(satisfied),
-                "read_reuse": to_jsonable(bindings),
-                "support_scores": to_jsonable(scores), "search_trace": search_trace,
-                "selection_policy_heads_used": support_model is not None,
-                "support_schedule": to_jsonable(support_model.last_schedule) if support_model else (),
-                "selection_mode": "full_scope" if full_scope_read else "ranked" if ranked else "support",
-                "selection_utility": self._utility_mode(),
-                "rerank_retained_sets": support_model is not None and selection.get("rerank_retained_sets", False),
-                "material_handoff": {"mode": "whole_plan_candidates" if self.whole_plan_candidates else "single_material",
-                    "candidate_set_ids": [selected.set_id for selected in material_candidates],
-                    "selected_set_ids": [selected.set_id for selected in evidence_sets]},
-                "oversized_support_inputs": to_jsonable(getattr(self.support_backend, "oversized_inputs", ())),
-                "task_metrics": interpretation.metrics if interpretation is not None else None,
-                "auxiliary_usage": self._auxiliary_usage(usage_baseline),
-                "context_plans": to_jsonable(plans), "planning_ms": (time.perf_counter()-started)*1000}
+            trace = {"support_task_id": state.task_id, "auxiliary_usage": self._auxiliary_usage(usage_baseline)}
+            if self.capture_trace:
+                trace.update({"task_state": to_jsonable(state), "pool": to_jsonable(pool),
+                    "support_task_id": state.task_id,
+                    "reused_needs": sorted(satisfied),
+                    "read_reuse": to_jsonable(bindings),
+                    "support_scores": to_jsonable(scores), "search_trace": search_trace,
+                    "selection_policy_heads_used": support_model is not None,
+                    "support_schedule": to_jsonable(support_model.last_schedule) if support_model else (),
+                    "selection_mode": "full_scope" if full_scope_read else "ranked" if ranked else "support",
+                    "selection_utility": self._utility_mode(),
+                    "rerank_retained_sets": support_model is not None and selection.get("rerank_retained_sets", False),
+                    "material_handoff": {"mode": "whole_plan_candidates" if self.whole_plan_candidates else "single_material",
+                        "candidate_set_ids": [selected.set_id for selected in material_candidates],
+                        "selected_set_ids": [selected.set_id for selected in evidence_sets]},
+                    "oversized_support_inputs": to_jsonable(getattr(self.support_backend, "oversized_inputs", ())),
+                    "task_metrics": interpretation.metrics if interpretation is not None else None,
+                    "auxiliary_usage": self._auxiliary_usage(usage_baseline),
+                    "context_plans": to_jsonable(plans), "planning_ms": (time.perf_counter()-started)*1000})
             self.traces[snapshot.session_id, request_id] = trace
 
             async def extend(plan, open_needs, claims):
@@ -767,17 +771,19 @@ class StudyEvidenceProvider:
             phases = (("retrieval", context_pool.retrieval_ms), ("support", scores.scoring_ms),
                       ("search", search_ms))
             usage = self._auxiliary_usage(usage_before)
-            gap_trace = {"open_needs": to_jsonable(open_needs), "candidate_pool": to_jsonable(context_pool),
-                "support_scores": to_jsonable(scores), "selected_set": to_jsonable(chosen),
-                "support_schedule": to_jsonable(schedule), "selection_mode": self.selection_mode,
-                "selection_utility": self._utility_mode(),
-                "rerank_retained_sets": rerank,
-                "used_passages": sorted(used_passages), "remaining_passages": budget.max_passages,
-                "auxiliary_usage": usage, "elapsed_ms": (time.perf_counter()-started)*1000}
-            parent_trace.setdefault("gap_rounds", []).append(gap_trace)
+            gap_trace = {}
+            if self.capture_trace:
+                gap_trace = {"open_needs": to_jsonable(open_needs), "candidate_pool": to_jsonable(context_pool),
+                    "support_scores": to_jsonable(scores), "selected_set": to_jsonable(chosen),
+                    "support_schedule": to_jsonable(schedule), "selection_mode": self.selection_mode,
+                    "selection_utility": self._utility_mode(),
+                    "rerank_retained_sets": rerank,
+                    "used_passages": sorted(used_passages), "remaining_passages": budget.max_passages,
+                    "auxiliary_usage": usage, "elapsed_ms": (time.perf_counter()-started)*1000}
+                parent_trace.setdefault("gap_rounds", []).append(gap_trace)
             return replace(fresh_pool, units=selected_units, source_blocks=selected_blocks,
                 retrieval_ms=context_pool.retrieval_ms,
-                trace=(*fresh_pool.trace, gap_trace), auxiliary_ms=phases, auxiliary_usage=usage,
+                trace=(*fresh_pool.trace, gap_trace) if self.capture_trace else (), auxiliary_ms=phases, auxiliary_usage=usage,
                 selected_set=chosen)
 
     def close(self):

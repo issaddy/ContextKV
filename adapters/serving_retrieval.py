@@ -87,8 +87,6 @@ class ServingRetriever:
 
     def finish_request(self, session_id, task_id):
         """This retriever owns no request-local support predictions."""
-        if self.events is not None:
-            self.events.emit("retrieval_request_finished", task_id=task_id)
 
     def _retrieve(self, snapshot, query, request_id, started):
         history = tuple(OnlineMessage(message.role, message.content)
@@ -115,15 +113,6 @@ class ServingRetriever:
                     retrieval_elapsed_ms=(time.monotonic()-started)*1000,
                     error=f"{type(error).__name__}: {error}")
             raise ServingRetrievalError(f"{type(error).__name__}: {error}") from error
-        if self.events is not None:
-            self.events.emit("retrieval_backend_completed", business_session_id=snapshot.session_id,
-                request_id=request_id, snapshot_version=snapshot.version,
-                corpus_snapshot_id=self.corpus_snapshot_id,
-                retrieval_elapsed_ms=(time.monotonic()-started)*1000,
-                ranking=[{"passage_id": c.document_id, "score": c.score} for c in
-                         (retrieved.retrieval_contexts if retrieved.retrieval_contexts is not None else retrieved.contexts)],
-                retrieval_priority=priority, supplied_evidence_keys=tuple(b.key for b in blocks),
-                query_context=retrieved.query_context)
         return EvidenceSelection(blocks, priority, retrieved.query_context)
 
     def close(self):

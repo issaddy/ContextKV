@@ -8,11 +8,10 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
 import json
-import math
 import os
 from pathlib import Path
-import resource
 import signal
+import shutil
 import subprocess
 import sys
 from tempfile import TemporaryFile
@@ -21,13 +20,10 @@ from urllib.parse import urlparse
 
 import yaml
 
-from bench.metrics import TurnTiming, occupancy_integral, summarize_timings
+from bench.metrics import occupancy_integral
 from bench.native_metrics import NativePoolSampler, pool_series
-from bench.plan_result_summary import batch_ledger
-from bench.reassess_saved import paid_execution_index
-from bench.study import declare_cohorts, dataset_rows, read_jsonl, saved_study_rows, write_json
-from bench.study_metrics import (_cost_summary, _track_specs, declared_queue_summary,
-                                 evaluation_track_protocol)
+from bench.study import declare_cohorts, dataset_rows, saved_study_rows, write_json
+from bench.study_metrics import _track_specs, declared_queue_summary
 from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
 from bench.study_workloads import declare_fixed_arrivals, freeze_workload, read_workload_manifest
 
@@ -247,18 +243,8 @@ def prepare(args, root):
                         concurrency=concurrency, method=method, repetition=repetition,
                         requested_qa=len(cohorts[dataset]), requested_sessions=sessions[dataset],
                         protocol=matrix["datasets"][dataset].get("protocol", matrix.get("protocol", "P3")),
-                        complete_slo_seconds=args.complete_slo_seconds,
                         matrix=str(external_matrix_path if method in CONVENTIONAL_METHODS else matrix_path),
                         workload=workload_paths[dataset], output=str(root/"jobs"/name/"generation")))
-    acceptance = {**registered["acceptance"], "baseline": registered["baseline"],
-        "resource_limits": {name: matrix["resources"][name] for name in (
-            "gpu_capacity_tokens", "host_capacity_tokens", "max_online_tokens",
-            "max_gpu_gib", "max_host_gib", "max_gpu_gib_seconds", "max_host_gib_seconds") if name in matrix["resources"]},
-        "p95_slo_ms": matrix["resources"].get("p95_complete_ms"),
-        "confidence": matrix["selection"].get("confidence", .95),
-        "bootstrap_samples": matrix["selection"].get("bootstrap_samples", 5000), "seed": matrix["seed"],
-        "p95_completion_rule": "all_declared_tasks_delivered",
-        "cost_basis": "unique native receipts plus provider phase totals, and global online physical occupancy"}
     revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=args.project_root,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout.strip() or None
     manifest = dict(format="contextkv_dataset_queue_plan_v1", scope="per-dataset complete declared queue", split=split,
@@ -270,8 +256,7 @@ def prepare(args, root):
                 "completion_timing": source_file(rolling_settings["completion_timing_asset"])
                 if completion_timing is not None else None},
         cohort=cohorts, workload_plans=workload_plans, workload_protocols=workload_protocols,
-        acceptance=acceptance, replicate_id=args.replicate_id,
-        experiment_cells={method: method for method in selected_methods},
+        acceptance=registered["acceptance"],
         experiment_design="ordinary retrieval QA versus ContextKV and LlamaIndex; optional mechanism controls",
         method_factors={method["id"]: method["evaluation_factors"] for method in matrix["methods"]},
         external_retrievers=external_retrievers, external_reranker=args.external_reranker,
@@ -284,147 +269,62 @@ def prepare(args, root):
     return manifest
 
 
-def delivery_summary(dataset_rows, failed, dispatch, *, complete_slo_seconds=None):
-    """Request-level delivery status and observed arrival-to-completion window."""
-    timings = [TurnTiming(row["conversation_id"], row["task_id"], "success",
-        row["response"]["output_tokens"], row["request_window"][0],
-        t_response_done=row["request_window"][1], t_commit=row["request_window"][1],
-        truncated=row["response"]["truncated"]) for row in dataset_rows]
-    timings += [TurnTiming(row["conversation_id"], row["task_id"], "failed", 0,
-                row["request_window"][0]) for row in failed]
-    windows = [row["request_window"] for row in (*dataset_rows, *failed)]
-    if dispatch is not None:
-        known = {timing.task_id for timing in timings}
-        timings += [TurnTiming(value["conversation_id"], task_id, "blocked", 0,
-            dispatch["origin"]+value["fixed_arrival_seconds"])
-            for task_id, value in dispatch["cancelled"].items()
-            if task_id not in known and value["fixed_arrival_seconds"] is not None]
-        if dispatch.get("observation_window") is not None:
-            window = dispatch["observation_window"]
-            windows.append([window["start"], window["end"]])
-    if windows:
-        return summarize_timings(timings,
-            window_start=min(window[0] for window in windows),
-            window_end=math.nextafter(max(window[1] for window in windows), math.inf),
-            ttft_slo=0, tpot_slo=0, response_mode="buffered",
-            complete_slo=complete_slo_seconds)
-    return None
+def delivery_summary(dataset_rows, failed, dispatch):
+    return {"completed": len(dataset_rows), "failed": len(failed),
+            "blocked": len(dispatch["cancelled"]) if dispatch is not None else 0}
 
 
 def declared_execution_rows(job):
-    """Combine saved delivery, scoring and dispatch evidence by task identity."""
-    directory = Path(job["output"])/job["method"]
-    rows, failure_ledgers, delivery = [], {}, {}
+    rows, delivery = [], {}
     for dataset in job["datasets"]:
-        track = directory/dataset
-        scored = track/"results.scored.jsonl"
-        raw = saved_study_rows(track)
-        results = {str(row["task_id"]): row for row in raw}
-        if len(results) != len(raw):
-            raise ValueError("duplicate saved executions in a declared track")
-        if scored.exists():
-            labelled = read_jsonl(scored)
-            scores = {str(row["task_id"]): row for row in labelled}
-            if len(scores) != len(labelled):
-                raise ValueError("duplicate saved scores in a declared track")
-            if not results:
-                results = scores
-            else:
-                for task_id in results.keys() & scores.keys():
-                    actual, score = results[task_id], scores[task_id]
-                    if actual["response"]["attempt_id"] == score["response"]["attempt_id"]:
-                        results[task_id] = {**actual, "metrics": score["metrics"], "scoring": score["scoring"]}
-        failures = track/"failed_conversations.json"
-        if failures.exists():
-            failure_ledgers[dataset] = str(failures)
-        failed = json.loads(failures.read_text()) if failures.exists() else []
+        track = Path(job["output"])/job["method"]/dataset
+        results = {str(row["task_id"]): row for row in saved_study_rows(track)}
+        path = track/"failed_conversations.json"
+        failed = json.loads(path.read_text()) if path.exists() else []
         failed = [row for row in failed if str(row["task_id"]) not in results]
+        for row in failed:
+            results[str(row["task_id"])] = {**row, "status": "failed"}
+            for identity in row.get("blocked_task_ids", ()):
+                results.setdefault(str(identity), {"task_id": identity,
+                    "conversation_id": row["conversation_id"], "status": "blocked"})
         dispatch_path = track/"workload_dispatch.json"
         dispatch = json.loads(dispatch_path.read_text()) if dispatch_path.exists() else None
-        delivery[dataset] = delivery_summary([row for row in results.values() if row["status"] == "completed"],
-            failed, dispatch,
-            complete_slo_seconds=job.get("complete_slo_seconds"))
-        for row in failed:
-            stage = (row.get("attempt") or {}).get("stage")
-            status = "unknown" if stage == "COMMITTED" else "failed"
-            results.setdefault(str(row["task_id"]), {**row, "status": status})
         if dispatch is not None:
-            for task_id, row in dispatch["cancelled"].items():
-                results.setdefault(str(task_id), {**row, "status": "blocked"})
-        for failure in failed:
-            for task_id in failure.get("blocked_task_ids", ()):
-                results.setdefault(str(task_id), {"task_id": task_id,
-                    "conversation_id": failure["conversation_id"], "status": "blocked"})
-        rows.extend({**row, "dataset": dataset, "generation_dir": str(track)} for row in results.values())
-    return rows, failure_ledgers, delivery
+            for identity, row in dispatch["cancelled"].items():
+                results.setdefault(str(identity), {**row, "status": "blocked"})
+        delivery[dataset] = delivery_summary(
+            [row for row in results.values() if row["status"] == "completed"], failed, dispatch)
+        rows.extend({**row, "dataset": dataset} for row in results.values())
+    return rows, delivery
 
 
-def summarize_full_queue(job, *, native_path=None):
-    from controller.resident_models import resident_model_digest
-    from profiling.study_cost_ledger import registration_key, registration_work
-
-    directory = Path(job["output"])/job["method"]
-    rows, failure_ledgers, delivery = declared_execution_rows(job)
-    batch_tracks = [{"generation_dir": str(directory/name)} for name in job["datasets"]]
-    windows = {}
-    for name in job["datasets"]:
-        windows[name] = []
-        for path in sorted((directory/name/"measurements").glob("*/online_window.json")):
-            manifest = json.loads((path.parent/"generation_manifest.json").read_text())
-            windows[name].append({**json.loads(path.read_text()), "source": str(path),
-                "resident_model_digest": resident_model_digest(manifest["retrieval"]),
-                "measurement_kind": manifest["measurement_kind"], "engine_pool": {
-                    key: manifest["allocator_initial"]["pool"][key] for key in ("gpu_capacity_tokens", "host_capacity_tokens")}})
-    scoring = {}
-    registration_events, event_sources = {}, []
-    for name in job["datasets"]:
-        events = directory/name/"state"/"events.jsonl"
-        if events.exists():
-            event_sources.append(str(events))
-            with events.open() as stream:
-                for line in stream:
-                    if '"documents_registered"' in line and line.endswith("\n"):
-                        event = json.loads(line)
-                        if event["event"] == "documents_registered":
-                            registration_events[registration_key(event)] = event
-        path = directory/name/"scoring"/"manifest.json"
-        if path.exists():
-            scorer = json.loads(path.read_text())["identity"]
-            for key in ("legacy_paid_scoring_path", "original_full_audit"):
-                scorer.pop(key, None)
-            if "judge" in scorer:
-                scorer["judge"].pop("base_url", None)
-            scoring[name] = scorer
-    matrix = yaml.safe_load(Path(job["matrix"]).read_text())
+def summarize_full_queue(job):
+    rows, delivery = declared_execution_rows(job)
     dataset, split = job["dataset"], job["split"]
+    matrix = yaml.safe_load(Path(job["matrix"]).read_text())
     spec = _track_specs(matrix, split, datasets=[dataset])[dataset]
     track = declared_queue_summary(rows, spec, matrix["cohorts"][split][dataset])
-    quality, normalization = track["queue_primary_score"], spec.get("normalization", 1.0)
-    declared = {(dataset, str(task)) for task in matrix["cohorts"][split][dataset]}
-    extras = sorted({(row["dataset"], str(row["task_id"])) for row in rows}-declared)
+    windows = {dataset: []}
+    directory = Path(job["output"])/job["method"]/dataset
+    for path in sorted((directory/"measurements").glob("*/online_window.json")):
+        windows[dataset].append(json.loads(path.read_text()))
+    quality = track["queue_primary_score"]
     return {"format": "contextkv_dataset_queue_result_v1", "job": job["name"],
-        "method": job["method"], "concurrency": job["concurrency"],
+        "method": job["method"], "concurrency": job["concurrency"], "repetition": job["repetition"],
         "dataset": dataset, "split": split, "protocol": job["protocol"],
-        "requested_qa": job["requested_qa"],
-        "completed_qa": track["completed"], "datasets": {dataset: track},
-        "dataset_protocols": {dataset: evaluation_track_protocol(spec, split)},
-        "queue_quality": quality/normalization if quality is not None else None,
-        "queue_quality_bounds": [bound/normalization for bound in track["queue_score_bounds"]],
-        "quality_scope": "single dataset, normalized original metric, complete declared denominator",
-        "p95_complete_ms": _cost_summary([row for row in rows if (row["dataset"], str(row["task_id"])) in declared])[
-            "p95_complete_ms"],
-        "unexpected_execution_task_ids": extras, "online_windows": windows, "scorer_contracts": scoring,
-        "registration_work": {**registration_work(registration_events.values()), "event_sources": event_sources},
-        "latency_population": "delivered responses; completion counts use the entire declared queue",
-        "failure_ledgers": failure_ledgers,
-        "delivery_metrics": delivery,
-        "cost_batches": batch_ledger(batch_tracks),
-        "paid_native_usage": paid_execution_index(rows, [directory], native_path or Path(job["output"])/"native.json")}
+        "primary_metric": spec["primary_metric"], "normalization": spec.get("normalization", 1),
+        "requested_qa": track["declared"], "completed_qa": track["completed"], "scored_qa": track["scored"],
+        "completion_rate": track["completion_rate"], "quality": quality,
+        "benchmark_metrics": track["benchmark_metrics"],
+        "queue_quality": quality/spec.get("normalization", 1) if quality is not None else None,
+        "queue_quality_bounds": track["queue_score_bounds"],
+        "cost": track["cost"], "p95_complete_ms": track["cost"]["p95_complete_ms"],
+        "online_windows": windows, "delivery_metrics": delivery}
 
 
 def full_queue_occupancy(windows, physical, native):
     """Integrate unique global samples over the union of online windows."""
-    from profiling.study_cost_ledger import merge_ranges
+    from bench.metrics import merge_ranges
 
     merged = merge_ranges((row["start"], row["end"]) for rows in windows.values() for row in rows)
     physical_costs, native_costs, device_coverage = [], [], []
@@ -453,19 +353,6 @@ def full_queue_occupancy(windows, physical, native):
         "native_coverage": bool(merged) and all(row["complete_window_coverage"] for row in native_costs)}
 
 
-def refresh_saved_full_queue(job, original, cost, native_path):
-    """Rebuild a scored cell from its saved records and original observation."""
-    summary = summarize_full_queue(job, native_path=native_path)
-    occupancy = full_queue_occupancy(summary["online_windows"],
-        cost["physical_observation"], cost["native_observation"])
-    finalized = (all(summary["online_windows"].values())
-        and set(summary["scorer_contracts"]) == set(summary["datasets"])
-        and summary["queue_quality"] is not None
-        and not summary["unexpected_execution_task_ids"])
-    return {**original, **summary, "online_occupancy": occupancy,
-        "original_execution_status": original["execution_status"],
-        "execution_status": "completed" if finalized else original["execution_status"]}
-
 
 async def interrupt_job(process):
     try:
@@ -478,7 +365,6 @@ async def interrupt_job(process):
 async def run(args):
     root = Path(args.output).resolve()
     root.mkdir(parents=True, exist_ok=False)
-    cpu_start = time.process_time()
     plan = prepare(args, root)
     if args.prepare_only:
         print(json.dumps({"status": "prepared", "qa": plan["requested_qa"], "plan": str(root/"capacity-plan.json")}))
@@ -491,7 +377,6 @@ async def run(args):
     await native.start()
     started = time.monotonic()
     deadline = datetime.fromisoformat(args.deadline).timestamp() if args.deadline else None
-    child_start = resource.getrusage(resource.RUSAGE_CHILDREN)
     state = dict(format="contextkv_dataset_queue_workflow_v1", scope=plan["scope"], split=plan["split"],
         status="running", requested_qa=plan["requested_qa"], jobs=[], results=[])
     loop, task = asyncio.get_running_loop(), asyncio.current_task()
@@ -502,9 +387,6 @@ async def run(args):
             if deadline is not None and time.time() >= deadline:
                 state["jobs"].append({**job, "status": "not_started_deadline"})
                 continue
-            from profiling.runtime_manifest import collect_local_runtime, collect_server
-            hardware = await asyncio.to_thread(collect_local_runtime, include_torch=False)
-            native_runtime = await collect_server(scope["native_endpoint"], research=True)
             command = [args.python or sys.executable, "-m", "bench.study", "evaluate", "--config", plan["config"],
                 "--matrix", job["matrix"], "--split", job["split"], "--methods", job["method"],
                 "--concurrency", str(job["concurrency"]), "--output", job["output"],
@@ -532,13 +414,9 @@ async def run(args):
                     if lines:
                         record["error"] = lines[-1]
             record.update(returncode=code, ended_s=time.monotonic(),
-                          status=stopped or ("completed" if code == 0 else "failed_with_existing_raw_preserved"))
+                          status=stopped or ("completed" if code == 0 else "failed"))
             summary = summarize_full_queue(job)
-            summary["runtime_hardware"] = hardware
-            summary["native_cache_config"] = native_runtime["cache_config"]
             summary["execution_status"] = record["status"]
-            summary["reader_runtime"] = {name: native_runtime["engine"].get(name)
-                for name in ("fingerprint", "model_scope", "protocol_version", "sglang_commit")}
             state["results"].append(summary)
             write_json(root/"workflow.json", state)
             print(json.dumps({"job": job["name"], "status": record["status"],
@@ -562,22 +440,23 @@ async def run(args):
         for summary in state["results"]:
             summary["online_occupancy"] = full_queue_occupancy(
                 summary["online_windows"], physical_observation, native_observation)
-        child_end = resource.getrusage(resource.RUSAGE_CHILDREN)
         series, coverage = pool_series(native.observation(), started, end)
         write_json(root/"capacity-cost.json", dict(format="contextkv_dataset_queue_cost_v1",
             source="hardware", resource_window=dict(start=started, end=end),
-            resource_scope=scope, physical_observation=physical_observation,
+            resource_scope=scope,
             physical_cost=integrate_physical(physical.samples, started, end),
-            native_observation=native_observation, native_cost={**occupancy_integral(series), **coverage},
-            controller_cpu_seconds=time.process_time()-cpu_start,
-            child_cpu_seconds=child_end.ru_utime+child_end.ru_stime-child_start.ru_utime-child_start.ru_stime,
+            native_cost={**occupancy_integral(series), **coverage},
             cost_scope="full sequential capacity jobs including child provider initialization, pauses, failed requests and idle gaps; nested per-job/response shares are not added"))
         counts = Counter()
         for row in state["results"]:
             counts[row["method"]] += row["completed_qa"]
         state.update(completed_by_method=dict(counts), performance_scope=plan["scope"],
             full_cost=str(root/"capacity-cost.json"))
+        for summary in state["results"]:
+            summary.pop("online_windows", None)
         write_json(root/"workflow.json", state)
+        if (root/"jobs").exists():
+            shutil.rmtree(root/"jobs")
         for signum in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(signum)
     return state
@@ -590,9 +469,7 @@ def main(argv=None):
     parser.add_argument("--split", choices=("dev", "test"), default="test")
     parser.add_argument("--datasets", nargs="+", help="Select datasets available in this split")
     parser.add_argument("--arrival-plan", help="Recorded fixed arrivals or workload manifest; default follows conversation dependencies")
-    parser.add_argument("--complete-slo-seconds", type=float, help="Arrival-to-completion SLO for request goodput")
     parser.add_argument("--repetitions", type=int, default=1, help="Independent queue repetitions per method")
-    parser.add_argument("--replicate-id", help="Shared identifier when splitting one repeat across explicit workers")
     parser.add_argument("--methods", nargs="+", choices=(*FULL_QUEUE_METHODS, *OPTIONAL_FULL_QUEUE_METHODS))
     parser.add_argument("--cohorts", help="Frozen cohort manifest containing the cohorts mapping")
     parser.add_argument("--gain-asset")

@@ -1040,7 +1040,6 @@ async def measured_preferences(config, *, limit=None):
         output = Path(settings["output_dir"])
         output.mkdir(parents=True, exist_ok=True)
         invocation = str(time.time_ns())
-        (output/f"collection_physical.{invocation}.json").write_text(json.dumps(sampler.observation(), indent=2)+"\n")
         cost = {"status": "completed" if completed else "incomplete", "start": started, "end": ended,
             "complete_ms": (ended-started)*1000, "physical": integrate_physical(sampler.samples, started, ended),
             "reader_checkpoint": settings.get("reader_checkpoint"), "reader_profile_id": settings.get("reader_profile_id"),

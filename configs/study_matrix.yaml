@@ -6,8 +6,6 @@ protocol: P1
 selection:
   baseline: RAG_native
   near_equal_quality: 0.002
-  equal_cost_relative_tolerance: 0.05
-  bootstrap_samples: 5000
 final_evaluation:
   baseline: RAG_native
   main_methods:
@@ -82,8 +80,8 @@ datasets:
     max_passages: 10
   versionqa:
     inputs:
-      test: runs/study/evaluation/versionqa/references.jsonl
-    corpus_path: runs/study/evaluation/versionqa/corpus.jsonl
+      test: data/evaluation/versionqa/references.jsonl
+    corpus_path: data/evaluation/versionqa/corpus.jsonl
     corpus_id: versionqa
     retriever_config: configs/study_versionqa_retriever.yaml
     split_kind: public_test

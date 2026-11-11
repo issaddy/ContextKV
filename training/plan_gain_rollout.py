@@ -18,7 +18,7 @@ import time
 import sys
 from urllib.parse import urlsplit
 
-from controller.action_proposals import (ALTERNATE_ANSWERS, BOUNDED_CONTINUATION, finite_action_domain,
+from controller.action_proposals import (GapRetrievalRequest, build_observed_action_plans, ALTERNATE_ANSWERS, BOUNDED_CONTINUATION, finite_action_domain,
     observed_reduction_task, observed_step_outputs)
 from controller.plan_gain_protocol import input_protocol, validate_input_protocol
 from controller.context_schema import ContextPlan, EvidenceSet, EvidenceUnit, ReadingOutcome, SourceSpan, TaskState
@@ -29,8 +29,8 @@ from controller.serialization import decode, to_jsonable
 from profiling.common import prepare_cache_fixture
 from training.collect_plan_gains import collect_pair
 from training.plan_gain_protocol import (AuditedTaskInterpreter, EmptyPlannedPremise,
-    FixedCounterfactualRuntime, GapRetrievalRequest, ObservedActionFailure, PlannedReductionConflict,
-    build_counterfactual_plans, build_observed_action_plans, observed_state_binding)
+    FixedCounterfactualRuntime, ObservedActionFailure, PlannedReductionConflict,
+    build_counterfactual_plans, observed_state_binding)
 from training.train_plan_gain import actual_history, working_state_key
 
 
@@ -461,6 +461,7 @@ def observed_cohort(rollouts, packets, sources, *, split, limit, cohort_manifest
 def create_audited_provider(config, template):
     from adapters.study_retrieval import create_study_retriever
     provider = create_study_retriever(config, template)
+    provider.capture_trace = True
     original = provider.directory.task_interpreter
     interpreter = AuditedTaskInterpreter(original.history_index)
     interpreter.model = original.model

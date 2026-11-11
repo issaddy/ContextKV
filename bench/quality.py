@@ -1,4 +1,4 @@
-"""Offline-only quality evaluation, paired session statistics and audit exports."""
+"""Offline quality evaluation and temporary scorer inputs."""
 from __future__ import annotations
 from collections import defaultdict
 from dataclasses import asdict, is_dataclass
@@ -6,56 +6,12 @@ import csv
 import json
 import math
 from pathlib import Path
-import random
 from statistics import mean
 from typing import Any, Mapping, Sequence
 
 from controller.schema import OnlineTurn
-from bench.metrics import percentile
 
 
-def paired_cluster_bootstrap(candidate: Mapping[str, Sequence[float]],
-                             reference: Mapping[str, Sequence[float]], *, seed: int = 42,
-                             samples: int = 5000, confidence: float = .95,
-                             epsilon: float = .01, estimand: str = "turn_mean") -> dict:
-    """Resample whole conversations, preserving all within-session paired turns.
-
-    Input scores must have been aligned by task_id before grouping by session.
-    No missing method/turn is silently dropped. Scores and epsilon use the same
-    units, normally [0, 1]; pass percentage points only if scores use that scale.
-    """
-    if set(candidate) != set(reference) or not candidate:
-        raise ValueError("paired methods must cover exactly the same nonempty sessions")
-    if samples < 1 or not 0 < confidence < 1 or epsilon < 0:
-        raise ValueError("invalid bootstrap configuration")
-    if estimand not in {"turn_mean", "session_mean"}:
-        raise ValueError("unknown estimand")
-    differences = {}
-    for sid in sorted(candidate):
-        if len(candidate[sid]) != len(reference[sid]) or not candidate[sid]:
-            raise ValueError(f"session {sid}: paired turn coverage differs or is empty")
-        values = [float(a) - float(b) for a, b in zip(candidate[sid], reference[sid])]
-        if not all(math.isfinite(v) for v in values):
-            raise ValueError("non-finite quality scores")
-        differences[sid] = values
-    ids = list(differences)
-
-    def statistic(chosen):
-        return mean(mean(differences[sid]) for sid in chosen) if estimand == "session_mean" else mean(v for sid in chosen for v in differences[sid])
-
-    estimate = statistic(ids)
-    if len(ids) < 2:
-        return {"difference": estimate, "ci_lower": None, "ci_upper": None,
-                "decision": "inconclusive", "reason": "fewer than two independent session clusters",
-                "clusters": len(ids), "epsilon": epsilon, "estimand": estimand}
-    rng = random.Random(seed)
-    values = [statistic(rng.choices(ids, k=len(ids))) for _ in range(samples)]
-    tail = (1 - confidence) / 2
-    low, high = percentile(values, tail), percentile(values, 1 - tail)
-    decision = "noninferior" if low > -epsilon else ("inferior" if high < -epsilon else "inconclusive")
-    return {"difference": estimate, "ci_lower": low, "ci_upper": high, "decision": decision,
-            "clusters": len(ids), "turns": sum(map(len, differences.values())), "epsilon": epsilon,
-            "seed": seed, "bootstrap_samples": samples, "confidence": confidence, "estimand": estimand}
 
 
 def load_qrels(path: str | Path) -> dict[str, dict[str, float]]:
@@ -234,10 +190,8 @@ def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Pat
     full = {"task_id": turn.task_id, "conversation_id": turn.conversation_id, "turn": turn.turn,
             "protocol": turn.protocol, "query": turn.query, "branch_reason": branch_reason, "answer": answer,
             "measurement_kind": measurement_kind, "truncated": truncated,
-            "retrieved_evidence": _jsonable(turn.retrieval_contexts if turn.retrieval_contexts is not None else turn.contexts),
             "visible_evidence_manifest": _jsonable(visible_evidence_manifest),
-            "audit_evidence": _jsonable(audit_evidence), "input_ids": list(input_ids),
-            "output_ids": list(output_ids), "actual_history": _jsonable(turn.history)}
+            "actual_history": _jsonable(turn.history)}
     full.update(answer_evaluation_view(turn,
         visible_evidence_manifest=visible_evidence_manifest, audit_evidence=audit_evidence,
         reading_outcome=reading_outcome, reference_map=reference_map, citation_scope=citation_scope))
@@ -248,8 +202,6 @@ def export_evaluation(turn: OnlineTurn, answer: str, *, official_path: str | Pat
     official = official_record(turn, answer)
     reading = full["evaluation_contexts"]
     if reading != official["contexts"]:
-        official.setdefault("retrieval_contexts", [{"document_id": c.document_id, "source": c.source,
-            "score": c.score or 0.0, "text": c.text, "title": c.title} for c in turn.contexts])
         official["contexts"] = reading
     for path, record in ((official_path, official), (audit_path, full)):
         target = Path(path)

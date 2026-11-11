@@ -119,7 +119,6 @@ def prepare_collection_resume(config, *, pause_receipt, confirmed_stopped, outpu
             entry = _interrupted_record(attempt, steps)
             entry.update(task_id=task_id, category=category,
                 original_batch_cost_paths=[str(path.resolve()) for path in sorted(collection.glob("collection_cost.*.json"))],
-                original_physical_paths=[str(path.resolve()) for path in sorted(collection.glob("collection_physical.*.json"))],
                 candidate_family_sha256=digest(family),
                 evidence_set_sha256=digest(selected), actual_history_sha256=family["actual_history_sha256"],
                 task_state_sha256=family["task_state_sha256"], budget=family["budget"],

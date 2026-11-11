@@ -205,7 +205,6 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
             observation = None
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    (directory/"records").mkdir(exist_ok=True)
     devices = sorted(set((*actual["policy_comparison"]["frozen_shared_gpu_devices"], *reader_spec["gpu_devices"])))
     ports = [urlparse(reader_spec["base_url"]).port]
     if audited and actual["task_model"]["mode"] == "teacher":
@@ -256,7 +255,8 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
     await native.start()
     sources = {row["task_id"]: row for row in (records if not export_answers else dataset_rows(spec, split,
         task_ids=matrix.get("cohorts", {}).get(split, {}).get(dataset)))}
-    results = {row["task_id"]: row for path in (directory/"records").glob("*.json") for row in [json.loads(path.read_text())]}
+    results_path = directory/"results.jsonl"
+    results = {row["task_id"]: row for row in rows(results_path)} if results_path.exists() else {}
     windows = {}
     try:
         for index, frozen in enumerate(records):
@@ -338,7 +338,8 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
             if window is not None:
                 windows[task_id] = window
             results[task_id] = value
-            write_json(directory/"records"/f"{index:06}.json", value)
+            with results_path.open("a") as stream:
+                stream.write(json.dumps(to_jsonable(value), ensure_ascii=False)+"\n")
             if response and export_answers:
                 blocks = {block.key: block for block in committed.archive}
                 selected = [blocks[key] for key in sorted(attempt.plan.candidate.required_blocks)]
@@ -361,8 +362,6 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
         await native.stop()
         await physical.stop()
         stamp = time.time_ns()
-        write_json(directory/f"physical.{stamp}.json", physical.observation())
-        write_json(directory/f"native.{stamp}.json", native.observation())
         write_json(directory/f"batch_cost.{stamp}.json", {"physical": integrate_physical(physical.samples, started, ended),
             "start": started, "end": ended, "initialization_ms": initialization_ms, "policy_identity": identity})
         for task_id, window in windows.items():
@@ -370,12 +369,12 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
             value["cost"].update(integrate_physical(physical.samples, *window))
             series, coverage = pool_series(native.observation(), *window)
             value["native_resource_window"] = {**occupancy_integral(series), **coverage}
-            write_json(directory/"records"/f"{next(i for i, row in enumerate(records) if row['task_id'] == task_id):06}.json", value)
         ordered = [results[row["task_id"]] for row in records if row["task_id"] in results]
-        write_rows(directory/"results.unscored.jsonl", [row for row in ordered if row["status"] == "completed"])
+        write_rows(directory/"results.jsonl", [row for row in ordered if row["status"] == "completed"])
         write_rows(directory/"failed_cases.jsonl", [row for row in ordered if row["status"] == "failed"])
         write_rows(directory/"references.jsonl", [row["reference"] for row in ordered])
         write_json(directory/"generation_manifest.json", {"policy_identity": identity, "config": actual,
+            "capture_training": True,
             "expected_tasks": expected_task_ids if expected_task_ids is not None else [row["task_id"] for row in records],
             "scheduled_task_ids": [row["task_id"] for row in records],
             "completed": sum(row["status"] == "completed" for row in ordered),
