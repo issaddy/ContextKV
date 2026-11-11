@@ -27,7 +27,7 @@
 
 MultiDoc2Dial 任务选择遵循[作者加载器](https://huggingface.co/datasets/IBM/multidoc2dial/blob/main/multidoc2dial.py)：当前 user 的下一条消息须为 agent，且该回复不是 `respond_no_solution`。输入保留此前全部原消息，目标仅为紧接的原 agent 回复；不合并连续同角色文本。现有导出任务需要从原始对话重新生成，原语料与检索索引可复用。步骤见 [MultiDoc2Dial 接入](guides/doc2dial.md)。
 
-MT-RAG 与 MTRAG-UN 固定上游 `53fef6f5917c7e10c436f697e69a955dbc795d81`。Cloud 是已接入的领域子集，报告保留领域和项目会话划分，不能将子集均值称为全 MT-RAG 成绩。
+MT-RAG 与 MTRAG-UN 固定上游 `53fef6f5917c7e10c436f697e69a955dbc795d81`。Cloud 是已接入的领域子集，从发布任务中按本次清单选题，保留会话顺序和领域标识。报告其原始 MTRAGEval 指标。
 
 VersionQA 固定上游 `2a2cbe8f285557f99dc7a79d6df7134e1e3eccff`。使用[作者判分规则](https://github.com/danielhuwiler/versionrag/blob/2a2cbe8f285557f99dc7a79d6df7134e1e3eccff/src/evaluation/evaluation_llm.py)，记录实际 judge 模型；更换 judge 后属于同 rubric 的本地评分。资料分段是检索实现，原问题、参考答案与类别保持不变：
 

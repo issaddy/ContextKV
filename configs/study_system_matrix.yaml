@@ -41,13 +41,13 @@ datasets:
     primary_metric: f1
     normalization: 1.0
   mtrag:
-    input: data/mtrag/RAG.jsonl
-    split_manifest: data/mtrag/split_manifest.json
+    inputs:
+      test: data/mtrag/RAG.jsonl
     corpus_path: data/mtrag-official/cloud.jsonl
     corpus_id: mtrag
     retriever_config: configs/retriever_dialogue.example.yaml
     domain: mt-rag-ibmcloud-elser-512-100-20240502
-    split_kind: project_conversation
+    split_kind: public_test
     primary_metric: mtrageval_harmonic
     normalization: 1.0
     max_passages: 10
