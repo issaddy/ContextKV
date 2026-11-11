@@ -6,6 +6,7 @@ native quote for an input whose facts have not been generated.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 import hashlib
 from pathlib import Path
@@ -615,7 +616,8 @@ class RollingPlanRuntime:
                 from .context_budget import direct_answer_reason
                 raw_options = (dict(representations=("existing", "raw"), layouts=("existing",),
                     actions=("REBUILD",)) if self.joint_context else {})
-                direct_candidates = compile_answers(snapshot, (state.plan,), state, **raw_options)
+                direct_candidates = await asyncio.to_thread(compile_answers, snapshot, (state.plan,), state,
+                                                              **raw_options)
                 if any(candidate.feasible and direct_answer_reason(state, candidate) is None
                        for candidate in direct_candidates):
                     required_step = None
@@ -646,7 +648,7 @@ class RollingPlanRuntime:
                     if alternate is not None:
                         required = (*required, alternate)
                 organizations = ((plan,) if cpu or self.read_choices < 2 else
-                    route_compiler.read_organizations(replace(state, plan=plan), snapshot,
+                    await asyncio.to_thread(route_compiler.read_organizations, replace(state, plan=plan), snapshot,
                         cache_scope=cache_scope, limit=self.read_choices,
                         output_tokens_per_fact=self.output_tokens_per_fact))
                 required_plans = [(task, plan) for task in required]
@@ -660,13 +662,15 @@ class RollingPlanRuntime:
                     (PlanStep(task, () if cpu else compile_step(organization, task, state, snapshot, template,
                         outputs=(task.output_budget,), request_compiler=route_compiler,
                         cache_scope=cache_scope)),), self.reader_checkpoint) for task, organization in required_plans)
-                proposals = tuple(replace(proposal, route_steps=compile_route_steps(proposal, state,
-                    snapshot, template, output_budgets=self.output_budgets,
-                    output_tokens_per_fact=self.output_tokens_per_fact,
-                    request_compiler=route_compiler, cache_scope=cache_scope,
-                    compile_answers=compile_answers if answer_demand else None,
-                    answer_options=dict(representations=("hybrid",), layouts=("existing",), actions=("REBUILD",))))
-                    for proposal in proposals)
+                compiled = []
+                for proposal in proposals:
+                    route = await asyncio.to_thread(compile_route_steps, proposal, state, snapshot, template,
+                        output_budgets=self.output_budgets, output_tokens_per_fact=self.output_tokens_per_fact,
+                        request_compiler=route_compiler, cache_scope=cache_scope,
+                        compile_answers=compile_answers if answer_demand else None,
+                        answer_options=dict(representations=("hybrid",), layouts=("existing",), actions=("REBUILD",)))
+                    compiled.append(replace(proposal, route_steps=route))
+                proposals = tuple(compiled)
                 native, _ = await self.native.observe(proposals, state, snapshot, engine, cost_model,
                     arrived, auxiliary_usage, selection_started=selection_started)
                 quotes = {quote.candidate_id: quote for quote in native.quotes.quotes}
@@ -738,10 +742,10 @@ class RollingPlanRuntime:
                 continue
             mandatory = self._mandatory_coverage(state)
             gap_request = self._gap_request(state, expanded, open_need_provider)
-            plans = (self.action_proposals(context_plans[0], state, snapshot, template,
+            plans = (await asyncio.to_thread(self.action_proposals, context_plans[0], state, snapshot, template,
                 compile_answers, gap_request, request_compiler=route_compiler,
                 cache_scope=cache_scope, project_answer=answer_demand, gain_model=model) if observed else
-                self.proposals(context_plans, state, snapshot, template, compile_answers,
+                await asyncio.to_thread(self.proposals, context_plans, state, snapshot, template, compile_answers,
                     request_compiler=route_compiler, cache_scope=cache_scope))
             if len(plans) > self.policy.limits.max_plan_candidates:
                 raise ValueError("rolling proposals exceed the configured finite candidate set")
