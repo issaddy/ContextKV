@@ -10,6 +10,7 @@ if [[ -f "$CHECKOUT/.contextkv-source-only" ]]; then
 fi
 export SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND=python
 export SGLANG_ENABLE_UNIFIED_RADIX_TREE=1
+export CONTEXTKV_ENABLE_PROFILING=1
 export SGLANG_HICACHE_TMA_TRANSFER="${SGLANG_HICACHE_TMA_TRANSFER:-0}"
 export PYTHONPATH="$CHECKOUT/python${PYTHONPATH:+:$PYTHONPATH}"
 # Optional host admission uses inherited CONTEXTKV_HOST_ADMISSION=off|fixed|conditioned.
