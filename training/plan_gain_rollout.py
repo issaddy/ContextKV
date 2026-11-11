@@ -932,12 +932,8 @@ def _filter_observed_initial_steps(plans, frozen, snapshot, compiler, cache_scop
 
 
 def _answer_branches(direct, kinds):
-    from controller.plan_policy import complete_plan
-
-    return tuple(replace(complete_plan(replace(direct.context_plan,
-        plan_id=direct.plan_id+":"+representation), (), semantic_kind="direct_answer",
-        reader_checkpoint=direct.reader_checkpoint, unmet_answer_points=direct.unmet_answer_points),
-        answer_representation=representation)
+    return tuple(replace(direct, plan_id=direct.plan_id+":"+representation,
+                         answer_representation=representation)
         for representation in ALTERNATE_ANSWERS if "answer_"+representation in kinds)
 
 

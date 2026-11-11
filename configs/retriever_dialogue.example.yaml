@@ -1,12 +1,12 @@
 # Dense retrieval example with actual-history query adaptation.
 schema_version: 1
 kind: hybrid
-stage: dense
+stage: hybrid_rerank
 query_mode: dialogue
 sparse_index: data/cloud-bm25s
 dense_index: data/cloud-bge-m3
 encoder_path: models/bge-m3
-reranker_path: null
+reranker_path: models/bge-reranker-v2-m3
 device: cuda:0
 dtype: bfloat16
 batch_size: 32
