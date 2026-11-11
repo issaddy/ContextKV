@@ -38,8 +38,7 @@ def observed_quality_gain(model, kind, representation, features):
     record = model.provenance.get("representation_gains", {}).get(representation)
     if record is not None:
         return record["delta_q"]
-    # These inputs retain the verified complete conclusion frontier of hybrid.
-    return 0.0 if representation in {"facts", "reduced"} else None
+    return None
 
 
 def route_read_choices(plan, state, task, batch):

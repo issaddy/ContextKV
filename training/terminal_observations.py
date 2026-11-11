@@ -7,7 +7,8 @@ import json
 from pathlib import Path
 
 from bench.study_resources import integrate_physical
-from controller.action_proposals import build_observed_action_plans, gap_key, gap_query, gap_scope_available, GapRetrievalRequest
+from controller.action_proposals import (ALTERNATE_ANSWERS, build_observed_action_plans,
+    gap_key, gap_query, gap_scope_available, GapRetrievalRequest, observed_answer_options)
 from controller.context_budget import completed_source_coverage
 from controller.context_schema import ContextPlan, ReadingOutcome, ReadResult, ReadTask, StepRecord
 from controller.plan_gain_protocol import validate_input_protocol
@@ -15,10 +16,10 @@ from controller.plan_policy import CompleteCost
 from controller.resident_models import evidence_selection_contract, resident_model_digest
 from controller.schema import SessionSnapshot
 from controller.serialization import decode, to_jsonable
-from training.reader_data import file_digest
 
 
-TERMINAL_FAMILIES = ("read_once", "reduce_once", "gap_retrieval")
+TERMINAL_FAMILIES = ("read_once", "reduce_once", "gap_retrieval",
+                     *("answer_"+name for name in ALTERNATE_ANSWERS))
 
 
 def restore_read_catalog(state, original_plan):
@@ -38,7 +39,7 @@ def restore_read_catalog(state, original_plan):
     return replace(state, plan=replace(state.plan, steps=tuple(tasks.values())))
 
 
-def terminal_observation(before, run, source_task, answer_event, online, template, provenance):
+def terminal_observation(before, run, source_task, online, template, provenance):
     from training.plan_gain_rollout import digest
 
     attempt = run["attempt"]
@@ -63,17 +64,17 @@ def terminal_observation(before, run, source_task, answer_event, online, templat
     request = terminal["request"]
     # The executor already validated the committed result. Bind the recording
     # and quote-return event to that result before cutting its cost window.
-    if (terminal["receipt"] != attempt["result"]["receipt"] or answer_event["actual_quote"] != quote
+    if (terminal["receipt"] != attempt["result"]["receipt"]
             or quote["observed_seq"] != attempt["plan"]["quote_seq"]
             or quoted["input_hash"] != candidate["input_hash"]):
         raise ValueError("terminal Native quote does not bind the actual compiled ANSWER")
 
     execution = run["actual_branch_execution_cost"]
     start = execution["window"]["start"]
-    end = answer_event["monotonic_timestamp_ns"] / 1e9
+    end = terminal["started_s"]
     answer_window = run["response"]["answer_phase_window"]
     if (online["clock"] != "client_monotonic" or answer_window["clock"] != "client_monotonic"
-            or not start <= answer_window["start"] <= end <= terminal["started_s"]):
+            or not start <= answer_window["start"] <= end <= execution["window"]["end"]):
         raise ValueError("terminal quote event is outside the measured pre-ANSWER interval")
     samples = sorted(online["samples"], key=lambda sample: sample["timestamp"])
     physical = integrate_physical(samples, start, end)
@@ -130,6 +131,14 @@ def terminal_observation(before, run, source_task, answer_event, online, templat
     plans, _ = build_observed_action_plans(state, snapshot, template,
         reader_checkpoint=run["reader_checkpoint"], gap_request=gap_request,
         read_choices=domain["read_choices"] if domain is not None else 1)
+    from controller.candidates import build_plan_candidates
+    from controller.context_budget import direct_answer_reason
+    options = observed_answer_options(state, joint=True, finite=True)
+    representations = options.pop("representations")
+    legal_answers = sorted({candidate.representation for representation in representations
+        for candidate in build_plan_candidates(snapshot, state.plan.task_state.raw_question,
+            state.plan, template, outcome=state, representation=representation, **options)
+        if candidate.feasible and direct_answer_reason(state, candidate) is None})
     return to_jsonable({"schema_version": 1, "decision_mode": "branch_terminal", "history_origin": run["history_origin"],
         "observation_id": f"{attempt_id}:branch_terminal:{quote['request_id']}", "attempt_id": attempt_id,
         "request_id": attempt["request_id"], "task_id": run["task_id"], "cohort_split": run["cohort_split"],
@@ -142,25 +151,18 @@ def terminal_observation(before, run, source_task, answer_event, online, templat
         "reader_checkpoint": run["reader_checkpoint"], "reader_profile_id": run["reader_profile_id"],
         "input_protocol": run["input_protocol"], "resident_model_manifest_digest": resident_digest,
         "evidence_selection_contract": evidence_selection_contract(resident),
-        "action_domain": domain, "legal_answer_representations": (candidate["representation"],),
+        "action_domain": domain, "legal_answer_representations": legal_answers,
         "gap_request": gap_request, "legal_actions": [plan.semantic_kind for plan in plans],
         "requested_families": TERMINAL_FAMILIES})
 
 
 def export_terminal_observations(collection, template, output):
-    from training.plan_gain_rollout import digest
-
     packets, excluded = [], []
     root = Path(collection)
     phases = (root/"phase-resources.json",) if (root/"phase-resources.json").is_file() else sorted(root.glob("*/phase-resources.json"))
     for phase_path in phases:
         directory = phase_path.parent
         phase = json.loads(phase_path.read_text())["online"]
-        event_path = directory / "state/events.jsonl"
-        with event_path.open() as stream:
-            events = {event["attempt_id"]: event for line in stream if line.strip()
-                for event in (json.loads(line),) if event["event"] == "plan_gain_experimental_answer"}
-        phase_sha = file_digest(phase_path)
         for task in sorted((directory / "tasks").iterdir()):
             for run_path in sorted(task.glob("branch-*/run.json")):
                 raw = run_path.read_bytes()
@@ -176,19 +178,18 @@ def export_terminal_observations(collection, template, output):
                 before_path = run_path.with_name("before.json")
                 before_raw = before_path.read_bytes()
                 family = json.loads((task / "registered-family.json").read_text())
-                event = events[run["attempt"]["attempt_id"]]
                 provenance = {"run_path": str(run_path.resolve()), "run_sha256": hashlib.sha256(raw).hexdigest(),
-                    "before_path": str(before_path.resolve()), "before_sha256": hashlib.sha256(before_raw).hexdigest(),
-                    "events_path": str(event_path.resolve()), "answer_event_sha256": digest(event),
-                    "phase_resources_path": str(phase_path.resolve()), "phase_resources_sha256": phase_sha}
+                    "before_path": str(before_path.resolve()), "phase_resources_path": str(phase_path.resolve())}
                 packets.append(terminal_observation(json.loads(before_raw), run, family["source_task"],
-                    event, phase, template, provenance))
+                    phase, template, provenance))
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x") as stream:
         stream.writelines(json.dumps(packet, ensure_ascii=False, allow_nan=False)+"\n" for packet in packets)
     coverage = {split: {action: sorted({packet["task_id"] for packet in packets
-        if packet["cohort_split"] == split and action in packet["legal_actions"]})
+        if packet["cohort_split"] == split and (
+            action.removeprefix("answer_") in packet["legal_answer_representations"]
+            if action.startswith("answer_") else action in packet["legal_actions"])})
         for action in TERMINAL_FAMILIES} for split in ("train", "dev")}
     Path(str(output)+".manifest.json").write_text(json.dumps({"scope": "actual READ branch terminal states",
         "packets": len(packets), "action_coverage": coverage, "excluded": excluded,
