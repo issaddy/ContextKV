@@ -93,6 +93,6 @@ datasets:
       test: data/loong/set1-v2/tasks.jsonl
     split_kind: public_test
     supplied_documents: true
-    coverage_mode: all_supplied_documents
+    coverage_mode: selected_sources
     primary_metric: loong_reference_score
     normalization: 100.0

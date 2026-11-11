@@ -184,7 +184,7 @@ class StudyEvidenceProvider:
             return replace(selection, auxiliary_usage=usage)
 
     async def retrieve_supplied(self, snapshot, query, request_id, blocks, *, source_metadata=None,
-                                coverage_scope="all_supplied_documents"):
+                                coverage_scope="selected_sources"):
         if self.external_dialogue:
             return await run_retrieval_worker(self._external_retrieve, snapshot, query, request_id,
                 supplied_blocks=tuple(blocks), source_metadata=source_metadata, coverage_scope=coverage_scope)
@@ -307,7 +307,7 @@ class StudyEvidenceProvider:
                 if all(row["compute_ms"] is not None for row in models) else None, "models": models}
 
     def _retrieve(self, snapshot, query, request_id, *, supplied_blocks=None, supplied_metadata=None,
-                  supplied_coverage_scope="all_supplied_documents"):
+                  supplied_coverage_scope="selected_sources"):
         started = time.perf_counter()
         with self._measure_auxiliary_usage() as usage_baseline:
             if supplied_blocks is not None:

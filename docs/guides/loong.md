@@ -27,9 +27,9 @@ python3 -m adapters.loong --questions data/loong/source/loong.jsonl \
 
 ## 完整预算与运行
 
-完整来源通过 `bench.study` 的 `all_supplied_documents` 阅读路径执行；共享数值阅读与
-`numeric_need_isolation` 在相同材料、需求及预算下比较。每题的全部原文保留在来源目录中，
-由 READ 分片和有限 REDUCE 完成。
+每题全部原文保留在来源目录中。各方法在资料内检索相关片段；ContextKV 按 Need 范围分配
+READ 与有限 REDUCE，明确要求全量统计的 Need 使用 `all_supplied_documents` 覆盖范围。
+共享数值阅读与 `numeric_need_isolation` 在相同材料、需求及预算下比较。
 当前执行入口和成本口径见[运行手册](../study/final_runbook.md)。
 
 ## 保存答案的评分
