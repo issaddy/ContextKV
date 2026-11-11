@@ -207,15 +207,26 @@ class StudyEvidenceProvider:
                 if source_metadata is not None:
                     self.directory.corpus_index.source_metadata.update(source_metadata)
                 self.directory.add_archive(supplied_blocks)
-                if coverage_scope == "all_supplied_documents":
+                if coverage_scope == "all_supplied_documents" and self.dialogue_mode == "llamaindex":
                     priority = tuple(block.key for block in supplied_blocks)
+                    blocks = self.directory.source_fetch(priority)
                 else:
+                    from controller.evidence import content_hash
+
                     pool = self.directory.full_scope(tuple(block.key for block in supplied_blocks))
                     ranked = self._rank_supplied(None, snapshot, pool, query_override=query)
-                    priority = tuple(dict.fromkeys(span.source_key
-                        for unit in sorted(ranked.units, key=lambda unit: -unit.retrieval_score)
-                        for span in unit.source_spans))[:top_k]
-                blocks = self.directory.source_fetch(priority)
+                    originals = {block.key: block for block in pool.source_blocks}
+                    windows = {}
+                    for unit in sorted(ranked.units, key=lambda unit: -unit.retrieval_score)[:top_k]:
+                        for span in unit.source_spans:
+                            block = originals[span.source_key]
+                            base = block.span[0] if block.span else 0
+                            text = block.text[span.start-base:span.end-base]
+                            key = replace(block.key, passage_id=f"{block.key.passage_id}:window:{span.start}:{span.end}",
+                                          content_sha256=content_hash(text))
+                            windows[key] = replace(block, key=key, text=text, span=(span.start, span.end), token_ids=())
+                    blocks = tuple(windows.values())
+                    priority = tuple(windows)
             usage = self._auxiliary_usage(before)
             self.traces[snapshot.session_id, request_id] = {
                 "retrieval_query": query, "dialogue_mode": self.dialogue_mode, "auxiliary_usage": usage,
