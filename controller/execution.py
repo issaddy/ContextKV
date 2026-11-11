@@ -411,7 +411,7 @@ class ReadingExecutor:
         step_started = time.monotonic()
         identity = f"{attempt_id}:{task.step_id}"
         messages = candidate.messages
-        if len(candidate.input_ids) > task.input_budget:
+        if task.kind != "READ" and len(candidate.input_ids) > task.input_budget:
             raise ReadingBudgetExceeded(f"{task.step_id} input exceeds {task.input_budget}")
         if len(candidate.input_ids) + task.output_budget > plan.budget.window_tokens:
             raise ReadingBudgetExceeded(f"{task.step_id} exceeds the model window")

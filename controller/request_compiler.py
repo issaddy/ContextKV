@@ -46,7 +46,7 @@ class RequestCompiler:
     def with_read_memo(self):
         """Reuse identical rendered READ inputs within one rolling turn."""
         compiler = RequestCompiler(self.template, self.index)
-        compiler._render_read = lru_cache(maxsize=48)(self.template.render)
+        compiler._render_read = lru_cache(maxsize=None)(self.template.render)
         return compiler
 
     def _scope(self, cache_scope: EngineInfo | CacheQuoteBatch):
@@ -165,7 +165,7 @@ class RequestCompiler:
                 keys = frozenset(source.source_key for unit in ordered for source in unit.source_spans)
                 candidate = PromptCandidate(dumps(candidate_id), "REBUILD", snapshot.version,
                     messages, rendered.input_ids, rendered.input_hash, keys, keys,
-                    feasible=(len(rendered.input_ids) <= task.input_budget
+                    feasible=((task.kind == "READ" or len(rendered.input_ids) <= task.input_budget)
                               and len(rendered.input_ids)+output <= plan.budget.window_tokens),
                     evidence_spans=tuple(spans), fingerprint=self.template.fingerprint,
                     corpus_snapshot_id=snapshot.corpus_snapshot_id, context_plan_id=plan.plan_id,
