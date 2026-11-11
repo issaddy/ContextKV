@@ -165,6 +165,13 @@ def observed_reduction_task(frozen):
                               if selection.step_id in record.task.predecessor_step_ids}
         else:
             claims = tuple(claim for claim in frozen.claims if claim.kind == "extract" and claim.serves(need.need_id))
+            if need.operation in {"infer", "compare"}:
+                parents = {identity for point in base.answer_plan.points
+                    if point.need_id in need.predecessor_need_ids for identity in point.claim_ids}
+                parents.update(identity for gap in frozen.open_needs if gap.need_id == need.need_id
+                               for identity in gap.parent_claim_ids)
+                parents.update(claim.claim_id for claim in claims)
+                claims = tuple(claim for claim in frozen.claims if claim.claim_id in parents)
             read_ids = {task.step_id for task in base.steps if task.kind == "READ" and need.need_id in task.need_ids}
             empty_group = (need.operation == "group" and bool(read_ids)
                            and read_ids <= {result.step_id for result in frozen.results})

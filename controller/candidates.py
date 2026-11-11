@@ -21,6 +21,7 @@ PLAN_SYSTEM_PROMPT = (
     "Answer the user's current question directly and briefly. Use working history to resolve "
     "references and conversational continuations, preserving the active conditions and version. "
     "Use the supplied original sources and Reading conclusions to cover the Answer plan. "
+    "Report the supported result and any unresolved requested points. "
     "For requested calculations, report the computed values, units and covered scope. "
     "Cite source IDs inline as [E_...]. Give only the explanation or steps needed for the current question."
 )

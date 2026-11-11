@@ -509,8 +509,8 @@ def direct_answer_reason(state, candidate, *, require_complete_evidence=True):
     """Distinguish skipping READ from delivering an answer with evidence gaps.
 
     Skipping READ requires sufficient evidence for every Need. An ANSWER may
-    report gaps in a selected-source scope. Explicit full-source scopes and
-    statistical views keep their completion requirements in either mode.
+    report unresolved points after its source scope has been read. Statistical
+    views still require their declared selection and computation.
     """
     return next(iter(answer_evidence_gaps(state, candidate,
         require_complete_evidence=require_complete_evidence).values()), None)
@@ -558,6 +558,8 @@ def answer_evidence_gaps(state, candidate=None, *, require_complete_evidence=Tru
                     and point is not None and set(result.reduction.frontier_claim_ids) <= set(point.claim_ids)
                     for result in results):
                 gaps[need.need_id] = "numeric_operation_incomplete"
+            continue
+        if not require_complete_evidence and full_scope and facts_complete:
             continue
         supported = any(need.need_id in result.support for result in read_results)
         reduced = any(result.reduction is not None and need.need_id in result.reduction.need_ids
