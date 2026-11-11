@@ -540,7 +540,7 @@ def answer_evidence_gaps(state, candidate=None, *, require_complete_evidence=Tru
             if not facts_complete or raw:
                 gaps[need.need_id] = "numeric_fact_scope_incomplete"
                 continue
-            if need.need_id in open_need_ids:
+            if need.operation in {"count", "sum"} and need.need_id in open_need_ids:
                 gaps[need.need_id] = "numeric_fields_incomplete"
                 continue
             selector_id = selector_ids.get(need.need_id)

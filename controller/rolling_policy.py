@@ -80,7 +80,7 @@ def _reduction_tasks(plan, state):
     for need in plan.task_state.needs:
         if not summarize and need.operation not in {"enumerate", "compare", "count", "sum", "group", "infer"}:
             continue
-        if not summarize and need.operation in {"count", "sum", "group"} and need.need_id in unresolved:
+        if not summarize and need.operation in {"count", "sum"} and need.need_id in unresolved:
             continue
         selector_id = selector_ids.get(need.need_id)
         shared_numeric = selector_id is not None

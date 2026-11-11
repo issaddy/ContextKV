@@ -1002,7 +1002,7 @@ def advance_read_plan(plan, results, budget=None):
         if not summarize and need.operation not in {"enumerate", "compare", "count", "sum", "group", "infer"}:
             continue
         numeric = not summarize and need.operation in {"count", "sum", "group"}
-        if numeric and need.need_id in unresolved:
+        if need.operation in {"count", "sum"} and need.need_id in unresolved:
             continue
         selector_id = selector_ids.get(need.need_id)
         step_id = f"reduce:{need.need_id}:{selector_id if selector_id is not None else len(read_ids)}"

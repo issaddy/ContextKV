@@ -149,7 +149,7 @@ def observed_reduction_task(frozen):
     typed = {"enumerate", "count", "sum", "group", "compare", "infer"}
     needs = sorted(base.task_state.needs, key=lambda need: need.operation not in typed)
     for need in needs:
-        if need.operation in {"count", "sum", "group"} and need.need_id in unresolved:
+        if need.operation in {"count", "sum"} and need.need_id in unresolved:
             continue
         summarize = need.operation not in typed
         selector_id = selector_ids.get(need.need_id)
