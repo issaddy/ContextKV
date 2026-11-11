@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import json
 import re
@@ -160,6 +161,7 @@ class HuggingFaceTemplate:
             raise ValueError("model tokenizer must provide an explicit chat template")
         serialized = self.tokenizer.backend_tokenizer.to_str()
         self._batch_boundary = _batch_boundary(json.loads(serialized), self.tokenizer.split_special_tokens)
+        self._encode_segment = lru_cache(maxsize=256)(self._tokenize_segment)
         template_payload = json.dumps({"template": chat_template,
                                       "enable_thinking": enable_thinking}, sort_keys=True)
         self.fingerprint = ConfigFingerprint(
@@ -173,6 +175,11 @@ class HuggingFaceTemplate:
         chat = [{"role": m.role, "content": m.content} for m in messages]
         kwargs = dict(add_generation_prompt=True, enable_thinking=self.enable_thinking)
         return self.tokenizer.apply_chat_template(chat, tokenize=False, **kwargs)
+
+    def _tokenize_segment(self, text: str):
+        encoded = self.tokenizer(text, add_special_tokens=False, return_offsets_mapping=True,
+                                 return_attention_mask=False, return_token_type_ids=False)
+        return tuple(encoded["input_ids"]), tuple(encoded["offset_mapping"])
 
     def render(self, messages: tuple[Message, ...], *, with_offsets=False) -> RenderedPrompt:
         text = self._render_text(messages)
@@ -197,18 +204,15 @@ class HuggingFaceTemplate:
             parts = [text.split(marker) for text in texts]
             chunks = [([part[0]] if part[0] else []) + [marker + text for text in part[1:]] for part in parts]
             unique = tuple(dict.fromkeys(chunk for conversation in chunks for chunk in conversation))
-            encoded = self.tokenizer(list(unique), add_special_tokens=False, return_attention_mask=False,
-                                     return_token_type_ids=False, return_offsets_mapping=with_offsets)
-            by_text = dict(zip(unique, encoded["input_ids"]))
-            ids = [[token for chunk in conversation for token in by_text[chunk]] for conversation in chunks]
+            encoded = {chunk: self._encode_segment(chunk) for chunk in unique}
+            ids = [[token for chunk in conversation for token in encoded[chunk][0]] for conversation in chunks]
             offsets = [None]*len(texts)
             if with_offsets:
-                offset_by_text = dict(zip(unique, encoded["offset_mapping"]))
                 offsets = []
                 for conversation in chunks:
                     cursor, shifted = 0, []
                     for chunk in conversation:
-                        shifted.extend((cursor+start, cursor+end) for start, end in offset_by_text[chunk])
+                        shifted.extend((cursor+start, cursor+end) for start, end in encoded[chunk][1])
                         cursor += len(chunk)
                     offsets.append(tuple(shifted))
         else:
