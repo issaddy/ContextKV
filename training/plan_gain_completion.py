@@ -717,11 +717,15 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree", path=None):
     quality_tree = None
     if quality_head == "tree":
         from sklearn.tree import DecisionTreeRegressor
-        fitted = DecisionTreeRegressor(max_leaf_nodes=4, min_samples_leaf=8, random_state=42).fit(
-            x, y, sample_weight=weights).tree_
-        quality_tree = {"left": fitted.children_left.tolist(), "right": fitted.children_right.tolist(),
-            "feature": fitted.feature.tolist(), "threshold": fitted.threshold.tolist(),
-            "value": fitted.value[:, 0, 0].tolist()}
+        heads = {}
+        for kind in sorted({row["semantic_kind"] for row in actions}):
+            selected = np.asarray([row["semantic_kind"] == kind for row in actions])
+            fitted = DecisionTreeRegressor(max_leaf_nodes=4, min_samples_leaf=8, random_state=42).fit(
+                x[selected], y[selected], sample_weight=weights[selected]).tree_
+            heads[kind] = {"left": fitted.children_left.tolist(), "right": fitted.children_right.tolist(),
+                "feature": fitted.feature.tolist(), "threshold": fitted.threshold.tolist(),
+                "value": fitted.value[:, 0, 0].tolist()}
+        quality_tree = {"by_kind": heads}
         center = scale = coefficients = np.empty(0)
         intercept = 0.0
     else:
@@ -732,7 +736,7 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree", path=None):
     quality_fit = {"definition": "decision_state_weighted_"+quality_head+"_v1",
         "objective": ("sum_state(mean_candidate_squared_delta_q_error)" if quality_tree is not None else
                       "sum_state(mean_candidate_squared_delta_q_error) + ridge * squared_coefficient_norm"),
-        **({"max_leaf_nodes": 4, "min_samples_leaf": 8} if quality_tree is not None else {"ridge": ridge}),
+        **({"max_leaf_nodes_per_action": 4, "min_samples_leaf": 8} if quality_tree is not None else {"ridge": ridge}),
         "state_key_fields": ["state_key", "direct.record_id"],
         "decision_states": len(state_counts), "action_samples": len(actions)}
     representation_pairs = defaultdict(lambda: defaultdict(list))

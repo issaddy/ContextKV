@@ -211,6 +211,9 @@ class PlanGainModel:
             return 0.0
         if self.quality_tree is not None:
             tree, node = self.quality_tree, 0
+            if "by_kind" in tree:
+                kind = next(kind for kind in tree["by_kind"] if features.get(kind, 0) > .5)
+                tree = tree["by_kind"][kind]
             while tree["left"][node] != -1:
                 name = self.feature_names[tree["feature"][node]]
                 node = tree["left"][node] if features[name] <= tree["threshold"][node] else tree["right"][node]
