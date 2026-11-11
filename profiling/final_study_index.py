@@ -68,6 +68,16 @@ def markdown(report):
             f"{METHOD_NAMES.get(row['candidate'], row['candidate'])} / "
             f"{METHOD_NAMES.get(row['reference'], row['reference'])} | "
             f"{row['quality_delta']} | {row['p95_reduction_percent']} |")
+    lines += ["", "| Benchmark | 历史 | 并发 | 方法 | 场景维度 | 场景 | 完成/声明 | 质量 | P95 秒 |",
+              "|---|---|---:|---|---|---|---:|---:|---:|"]
+    for row in report["results"]:
+        for dimension, groups in row.get("groups", {}).items():
+            for label, group in groups.items():
+                p95 = group["p95_complete_ms"]
+                lines.append(f"| {row['dataset']} | {row['protocol']} | {row['concurrency']} | "
+                    f"{METHOD_NAMES.get(row['method'], row['method'])} | "
+                    f"{dimension} | {label} | {group['completed']}/{group['declared']} | "
+                    f"{group['quality']} | {p95/1000 if p95 is not None else None} |")
     return "\n".join(lines)+"\n"
 
 

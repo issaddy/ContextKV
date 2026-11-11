@@ -13,7 +13,7 @@ def prepare_public_assets(config):
     from controller.schema import OnlineContext
 
     settings = config["assets"]["versionqa"]
-    target = Path(config["study"]["output_dir"])/"evaluation"/"versionqa"
+    target = Path(settings.get("output_dir", "data/evaluation/versionqa"))
     retrieval = load_retriever_config(settings["retriever_config"])
     reader = load_config(config["generation"]["run_config"])
     tokenizer = create_model_template(reader.model).tokenizer

@@ -37,7 +37,7 @@ def retain_metrics(directory, rows):
         value = json.loads(manifest.read_text())
         manifest.write_text(json.dumps({name: value[name] for name in (
             "identity", "primary_metric", "split", "normalization", "requested",
-            "generated_answers", "scored", "judge_cost") if name in value}, ensure_ascii=False)+"\n")
+            "generated_answers", "scored", "judge_cost", "groups") if name in value}, ensure_ascii=False)+"\n")
     if scoring.is_dir():
         for path in scoring.iterdir():
             if path.name != "manifest.json":

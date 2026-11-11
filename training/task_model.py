@@ -537,7 +537,7 @@ def train_task(config):
     labels_path = Path(settings.get("task_labels", "runs/study/data/task_labels.jsonl"))
     torch.manual_seed(settings.get("seed", 42))
     tokenizer = AutoTokenizer.from_pretrained(base_path, local_files_only=True)
-    initial_adapter = task.get("initial_adapter_path", "models/bge-m3-dialogue-query-v1")
+    initial_adapter = task.get("initial_adapter_path")
     network = create_task_network(base_path, adapter_path=initial_adapter,
                                   rank=task.get("lora_rank", 16), device=device, dtype=dtype)
     frozen_document = LocalBGE(base_path, device=device, dtype=dtype, max_length=8192)

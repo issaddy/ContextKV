@@ -19,7 +19,8 @@ import time
 import httpx
 
 from bench.official import load_jsonl, merge_offline_labels, reference_overlap
-from bench.study_metrics import RB_AGG_ALIAS_SOURCE, _metric, _required, split_metric_spec
+from bench.study_metrics import (RB_AGG_ALIAS_SOURCE, _metric, _required,
+                                 declared_queue_summary, split_metric_spec)
 
 
 def _write(path, rows):
@@ -487,6 +488,8 @@ def _record_metrics(record, spec, settings):
                 metrics["RB_alg"+suffix] = metrics["RB_agg"+suffix]
     if primary in {"loong_reference_score", "versionqa_accuracy"} and observed(record.get("score")):
         metrics[primary] = record["score"]
+        if primary == "loong_reference_score":
+            metrics["loong_perfect_rate"] = int(record["score"] == 100)
     if primary == "project_condition_version_score" and record.get("scores") is not None:
         dimensions = record["scores"]
         metrics.update({"project_"+key: value for key, value in dimensions.items() if value is not None})
@@ -494,6 +497,29 @@ def _record_metrics(record, spec, settings):
         if all(dimensions.get(name) is not None for name in weights):
             metrics[primary] = sum(weights[name]*dimensions[name] for name in weights)
     return metrics
+
+
+def benchmark_groups(rows, references, spec):
+    groups = {}
+    for reference in references:
+        dimensions = {"domain": reference["Collection"].rsplit("/", 1)[-1]}
+        if "category" in reference:
+            dimensions["category"] = reference["category"]
+        if "level" in reference.get("source_task", {}):
+            dimensions["level"] = reference["source_task"]["level"]
+        for dimension, value in dimensions.items():
+            groups.setdefault(dimension, {}).setdefault(str(value), []).append(reference["task_id"])
+    result = {}
+    for dimension, values in groups.items():
+        result[dimension] = {}
+        for label, identities in values.items():
+            selected = [row for row in rows if row["task_id"] in identities]
+            summary = declared_queue_summary(selected, spec, identities)
+            result[dimension][label] = {name: summary[name] for name in (
+                "declared", "completed", "scored", "completion_rate", "benchmark_metrics")}
+            result[dimension][label].update(quality=summary["queue_primary_score"],
+                p95_complete_ms=summary["cost"]["p95_complete_ms"])
+    return result
 
 
 async def score_dataset(config, dataset_spec, rows, generation_dir, *, expected_task_ids=None, split=None):
@@ -574,6 +600,7 @@ async def score_dataset(config, dataset_spec, rows, generation_dir, *, expected_
         "missing_task_ids": [task_id for task_id in expected
             if task_id not in scored_ids],
         "raw_outputs": outputs, "judge_cost": judge_cost,
+        "groups": benchmark_groups(updated, load_jsonl(Path(generation_dir)/"references.jsonl"), dataset_spec),
         "wall_elapsed_ms": (time.perf_counter()-started)*1000,
         "cost_scope": "offline_scoring_separate_from_online_answer_cost"}
     (directory/"manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")

@@ -309,6 +309,8 @@ def summarize_full_queue(job):
     for path in sorted((directory/"measurements").glob("*/online_window.json")):
         windows[dataset].append(json.loads(path.read_text()))
     quality = track["queue_primary_score"]
+    scoring_path = directory/"scoring"/"manifest.json"
+    scoring = json.loads(scoring_path.read_text()) if scoring_path.exists() else {}
     return {"format": "contextkv_dataset_queue_result_v1", "job": job["name"],
         "method": job["method"], "concurrency": job["concurrency"], "repetition": job["repetition"],
         "dataset": dataset, "split": split, "protocol": job["protocol"],
@@ -316,6 +318,8 @@ def summarize_full_queue(job):
         "requested_qa": track["declared"], "completed_qa": track["completed"], "scored_qa": track["scored"],
         "completion_rate": track["completion_rate"], "quality": quality,
         "benchmark_metrics": track["benchmark_metrics"],
+        "groups": scoring.get("groups", {}), "scoring": {name: scoring[name] for name in (
+            "identity", "judge_cost") if name in scoring},
         "queue_quality": quality/spec.get("normalization", 1) if quality is not None else None,
         "queue_quality_bounds": track["queue_score_bounds"],
         "cost": track["cost"], "p95_complete_ms": track["cost"]["p95_complete_ms"],
