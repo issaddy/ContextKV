@@ -33,7 +33,7 @@ async def run_actual_rollouts(config, *, output_path=None, min_conversations=100
     retriever_config = yaml.safe_load(Path(settings.get("retriever_config",
         "configs/retriever_dialogue.example.yaml")).read_text())
     retriever_config.update(settings.get("retriever_overrides", {}))
-    retriever_config.update(device="cuda:0", stage="dense", query_mode="dialogue", selector=None,
+    retriever_config.update(device=settings.get("retriever_device", "cuda:0"), stage="dense", query_mode="dialogue", selector=None,
         reranker_path=None, source_window=False)
     recipe_path = run_dir/"dense5-retriever.yaml"
     recipe_path.write_text(yaml.safe_dump(retriever_config))

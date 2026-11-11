@@ -1,7 +1,7 @@
 {
   "revision": "local-snapshot:7442623e99dd0b456628ddc48805a4ea11249ee2ee66484b5d1ab44d2940beb8",
   "identity_kind": "local_snapshot_metadata",
-  "model_path": "/media/ssd1/qwen3-32b",
+  "model_path": "/data/models/qwen3-32b",
   "config": {
     "architectures": [
       "Qwen3ForCausalLM"

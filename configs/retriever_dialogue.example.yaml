@@ -18,4 +18,4 @@ cpu_threads: 1
 query_fusion: single
 source_window: false
 selector: null
-query_adapter_path: models/bge-m3-dialogue-query-v1
+query_adapter_path: null

@@ -83,7 +83,7 @@ training:
   reader_config: configs/qwen3_32b.yaml
   retriever_config: configs/study_multidoc_retriever.yaml
   retriever_overrides:
-    query_adapter_path: models/bge-m3-dialogue-query-v1
+    query_adapter_path: null
   evidence_corpus: data/multidoc2dial/test/passages.jsonl
   rollout_paths: []
   teacher_urls: [http://127.0.0.1:30002, http://127.0.0.1:30003]
