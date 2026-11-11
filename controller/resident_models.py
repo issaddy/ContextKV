@@ -16,7 +16,7 @@ _RUNTIME = frozenset({"budget", "budgets", "strategy", "selection", "reading", "
     "window_tokens", "body_tokens", "history_tokens", "output_budget", "input_budget",
     "read_input_tokens", "read_output_tokens", "max_input_tokens", "max_new_tokens", "context_window",
     "max_length", "batch_size", "temperature", "top_p", "top_k", "min_p", "timeout_seconds",
-    "wire_schema", "input_policy", "token_limit_hits", "texts_processed"})
+    "wire_schema", "input_policy", "token_limit_hits", "texts_processed", "profiling_enabled"})
 
 
 def _asset(value, *, strip_runtime=True, model_scope=False):

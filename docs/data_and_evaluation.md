@@ -20,7 +20,7 @@
 | 数据集 | 当前接入范围 | 评分 |
 |---|---|---|
 | [MultiDoc2Dial](https://github.com/IBM/multidoc2dial) | 原 validation/test；开发选择固定会话子集，测试使用原任务 | SQuAD 式 token F1 与 EM，存储范围 0–1 |
-| [MT-RAG](https://github.com/IBM/mt-rag-benchmark) | Cloud 原问题，按会话划分项目 dev/test | 作者 MTRAGEval，保留 RL_F、RB_llm、RB_alg 及官方聚合 |
+| [MT-RAG](https://github.com/IBM/mt-rag-benchmark) | 已发布的 Cloud 原问题，按本次清单选择并保留会话顺序 | 作者 MTRAGEval，保留 RL_F、RB_llm、RB_alg 及官方聚合 |
 | [VersionQA](https://github.com/danielhuwiler/versionrag) | 原 100 个版本问题与公开资料，单轮 | 作者二值正确性 rubric，`versionqa_accuracy` |
 | [Loong](https://github.com/MozerWang/Loong) | Set1 完整资料系统适配；保留原题、原答案，修正 Link 字段 | 作者 0–100 分 rubric；另列 Perfect Rate、领域和难度 |
 | [MTRAG-UN](https://github.com/IBM/mt-rag-benchmark/tree/main/mtragun-human) | 当前发布版选中问题及完整作者历史 | 原 MTRAGEval；独立参考历史诊断 |
