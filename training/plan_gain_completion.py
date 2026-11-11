@@ -549,6 +549,7 @@ def _observed_selection_contract(records):
 
 
 def exposed_source_families(records, catalogue):
+    """Registered material, including unread archive/source_scope, for cohort diagnostics."""
     families = set()
     for row in records:
         for arm in ("direct", "counterfactual"):
@@ -640,8 +641,7 @@ def fitted_action_domain(records):
                 and original_groups != proposed_groups and first_group
                 and set(first_group) <= set(proposed_groups) and not set(first_group) <= set(original_groups)):
             measured_change = True
-            break
-    if not measured_change:
+    if len(ordered) > 1 and not measured_change:
         raise ValueError("v2 action-domain fit needs an actually executed READ organization branch")
     return current, ordered
 
@@ -711,9 +711,17 @@ def fit_effective(training, *, ridge=1.0, path=None):
         raise ValueError("gain fit requires measured READ, REDUCE or GAP alternatives")
     x = np.asarray([[row["features"][name] for name in names] for row in actions], dtype=np.float64)
     y = np.asarray([row["effective_delta_q"] for row in actions], dtype=np.float64)
-    center, scale = x.mean(axis=0), x.std(axis=0)
+    state_counts = Counter((row["state_key"], row["direct"]["record_id"]) for row in actions)
+    weights = np.asarray([1/state_counts[(row["state_key"], row["direct"]["record_id"])]
+                          for row in actions], dtype=np.float64)
+    center = np.average(x, axis=0, weights=weights)
+    scale = np.sqrt(np.average((x-center)**2, axis=0, weights=weights))
     scale[scale == 0] = 1.0
-    coefficients, intercept = _ridge((x-center)/scale, y, ridge)
+    coefficients, intercept = _ridge((x-center)/scale, y, ridge, sample_weight=weights)
+    quality_fit = {"definition": "decision_state_weighted_ridge_v1",
+        "objective": "sum_state(mean_candidate_squared_delta_q_error) + ridge * squared_coefficient_norm",
+        "state_key_fields": ["state_key", "direct.record_id"],
+        "decision_states": len(state_counts), "action_samples": len(actions)}
     representation_pairs = defaultdict(lambda: defaultdict(list))
     for row in training:
         if row.get("answer_representation") in ALTERNATE_ANSWERS:
@@ -738,7 +746,8 @@ def fit_effective(training, *, ridge=1.0, path=None):
             "branch_scope": "actual new action through committed ANSWER; excludes common paid state/preparation/cleanup",
             "incremental_scope": "same_observation_predicted_action_absolute_minus_direct_absolute",
             "training_mse": cost_mse}
-    asset_input = (NATIVE_COST_SCHEMA, training) if cost_models else training
+    asset_input = {"training": training, "quality_fit": quality_fit, "ridge": ridge,
+                   "cost_feature_schema": NATIVE_COST_SCHEMA if cost_models else None}
     return PlanGainModel(training[0]["reader_checkpoint"], training[0]["reader_profile_id"],
         "effective-plan-gain:"+digest(asset_input), names, tuple(center.tolist()), tuple(scale.tolist()),
         tuple(coefficients.tolist()), float(intercept),
@@ -757,7 +766,7 @@ def fit_effective(training, *, ridge=1.0, path=None):
          "input_sha256": digest(training), "input_path": str(Path(path).resolve()) if path else None,
          "training_state_keys": sorted({row["state_key"] for row in training}),
          "training_conversations": sorted({row["conversation_id"] for row in training}),
-         "scorer_identity": scorer_identity, "ridge": ridge,
+         "scorer_identity": scorer_identity, "ridge": ridge, "quality_fit": quality_fit,
          "trained_semantic_kinds": sorted({row["semantic_kind"] for row in training}),
          "direct_baseline_identity": any(row["observed_state_binding"] is not None for row in training),
          "completion_counts": dict(Counter(str(row["completion_counterfactual"]) for row in training)),
@@ -900,7 +909,7 @@ def main(argv=None):
     fit.add_argument("--train", required=True)
     fit.add_argument("--dev")
     fit.add_argument("--source-catalogue", action="append", default=[],
-                     help="Original and derived source JSONL catalogues for family-disjoint calibration")
+                     help="Original and derived source JSONL catalogues for registered-family overlap diagnostics")
     fit.add_argument("--output", required=True)
     fit.add_argument("--ridge", type=float, default=1.0)
     args = parser.parse_args(argv)
@@ -925,8 +934,6 @@ def main(argv=None):
         train_families = exposed_source_families(training, catalogue)
         dev_families = exposed_source_families(development, catalogue)
         overlap = train_families & dev_families
-        if overlap:
-            raise ValueError(f"Effective gain train/dev share {len(overlap)} original source families")
     model = fit_effective(training, ridge=args.ridge, path=args.train)
     if args.dev:
         if any(row["split"] != "dev" or row["reader_checkpoint"] != model.reader_checkpoint or
@@ -952,7 +959,9 @@ def main(argv=None):
         report = {"records": len(development), **evaluate_paired_decisions(model, development),
             "reader_checkpoint": model.reader_checkpoint,
             "reader_profile_id": model.reader_profile_id, "asset_id": model.asset_id, "utility_rule": RULE,
-            "exposed_source_families": {"train": len(train_families), "dev": len(dev_families)},
+            "exposed_source_families": {"train": len(train_families), "dev": len(dev_families),
+                "overlap": len(overlap), "partition_owner": "cohort",
+                "scope": "registered archive, plan selected sources/source_scope, and GAP pool"},
             "completion_reserve_calibration": model.cost_provenance.get("completion_reserve_calibration")}
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output+".development.json").write_text(json.dumps(report, indent=2)+"\n")

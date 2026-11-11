@@ -36,7 +36,7 @@ class Node:
     def __init__(self, ids, parent=None):
         self.key, self.parent, self.children = Key(ids), parent, {}
         self.component_data = [SimpleNamespace(value=list(ids), host_value=list(ids),
-            session_ref=0, lock_ref=0)]
+            session_ref=0, lock_ref=0, host_lock_ref=0)]
         self.contextkv_h2d_pending_id = self.write_through_pending_id = None
 
 
@@ -139,6 +139,117 @@ def test_owner_renewal_is_idempotent_and_ttl_releases_only_its_reference(owner, 
     assert set(component._session_leaves) == {"business"}
 
 
+def test_native_quote_observes_host_locks_gpu_islands_and_pending_backups(owner):
+    runtime, cache, _, prefix, tail, *_ = owner
+    prefix.component_data[0].value = None
+    tail.component_data[0].host_lock_ref = 1
+    view = cache.tree_core.peek_full_prefix(Key((1, 2, 3, 4)))
+    assert view["ready_gpu_prefix_tokens"] == 0 and view["recoverable_prefix_tokens"] == 4
+    assert view["gpu_token_ranges"] == [(2, 4)] and view["host_token_ranges"] == [(0, 4)]
+    assert view["evictable_gpu_token_ranges"] == [(2, 4)]
+    assert view["evictable_host_token_ranges"] == [(0, 2)]
+    prefix.write_through_pending_id = 8
+    tail.component_data[0].lock_ref = 1
+    pending = cache.tree_core.peek_full_prefix(Key((1, 2, 3, 4)))
+    assert pending["recoverable_prefix_tokens"] == 0
+    assert pending["inflight_d2h_token_ranges"] == [(0, 2)]
+    assert pending["host_token_ranges"] == [(2, 4)]
+    assert pending["evictable_gpu_token_ranges"] == pending["evictable_host_token_ranges"] == []
+
+
+def test_native_concurrent_host_growth_deduplicates_input_and_spent_write_allowance(owner):
+    runtime, _, _, prefix, tail, *_ = owner
+    runtime.epochs["session"] = {"business_session_id": "business"}
+    requests = tuple(SimpleNamespace(session_id="session", origin_input_ids=(1, 2, 3, 4, 9),
+        output_ids=(), sampling_params=SimpleNamespace(max_new_tokens=limit),
+        contextkv_host_backup_admitted_pages=0) for limit in (3, 5))
+    assert runtime._host_write_growth(requests, None) == 6  # Existing Host input plus distinct future outputs.
+    prefix.component_data[0].host_value = tail.component_data[0].host_value = None
+    assert runtime._host_write_growth(requests, None) == 10  # Shared four-token input only once.
+    assert runtime._host_write_growth(requests, 2) == 4
+    requests[0].contextkv_host_backup_admitted_pages = 1
+    assert runtime._host_write_growth(requests, 2) == 2
+    prefix.component_data[0].host_value, tail.component_data[0].host_value = [1, 2], [3, 4]
+    prefix.write_through_pending_id = tail.write_through_pending_id = 8
+    assert runtime._host_write_growth(requests, None) == 6  # Pending copies have already allocated their slots.
+
+
+@pytest.mark.asyncio
+async def test_host_only_future_consumer_uses_write_pressure_and_native_admission():
+    from unittest.mock import AsyncMock
+    from controller.context_schema import (ContextPlan, EvidenceSet, Need, ReadResult,
+        ReadTask, ReadingOutcome, StepRecord, TaskState)
+    from controller.plan_policy import PlanCandidate, PlanStep
+    from controller.prefix_retention import PrefixReadObserver
+    from controller.schema import CacheQuote, CacheQuoteBatch, CompletionReceipt, PromptCandidate
+    from controller.templates import ByteTemplate
+
+    source, later = (ReadTask(name, "READ", ("n",)) for name in ("source", "later"))
+    current = ReadTask("current", "READ", ("work",))
+    plan = ContextPlan("p", TaskState("t", "q", needs=(Need("n", operation="count"), Need("work"))),
+        EvidenceSet("e", ()), steps=(source, current, later))
+    ids = (1, 2, 3, 4)
+    receipt = CompletionReceipt("source", "source", "epoch", 1, "restart", token_hash(ids), "stop", True)
+    record = StepRecord("attempt", source.step_id, source, input_ids=ids, receipt=receipt, metrics={
+        "cache_config_hash": "cache", "source_view": {"body_token_ranges": ((0, 4),), "source_prefix_tokens": 4}})
+    state = ReadingOutcome(plan, results=(ReadResult("source"),), steps=(record,))
+    consumer = PromptCandidate("later", "REBUILD", 0, (), ids, token_hash(ids), frozenset(), frozenset(),
+        output_budget=2, source_body_token_ranges=((0, 4),), source_prefix_tokens=4)
+    work_ids = (9, 10, 11, 12)
+    work = replace(consumer, candidate_id="current", input_ids=work_ids, input_hash=token_hash(work_ids))
+    host_quote = CacheQuote("later", consumer.input_hash, 4, 4, recoverable_prefix_tokens=4,
+        host_only_load_tokens=4, native_load_estimate=4,
+        host_token_ranges=((0, 4),), evictable_host_token_ranges=((0, 4),))
+    cold_quote = CacheQuote("current", work.input_hash, 4, 4)
+    batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 64, 0, (cold_quote, host_quote),
+        fingerprint=ByteTemplate().fingerprint, host_write_policy="write_through", active_requests=0, queued_requests=0)
+    proposal = PlanCandidate("read", "read_once", plan, (PlanStep(current, (work,)),), "reader",
+        route_steps=(PlanStep(later, (consumer,)),))
+    observer = PrefixReadObserver(SimpleNamespace(prefix_owners=lambda *args, **kwargs: ()), None,
+        {"mode": "demand", "ttl_seconds": 15, "protection_budget_tokens": 4})
+    observer.runtime = SimpleNamespace(status=AsyncMock(return_value={"prefixes": ()}))
+
+    async def option(quoted=batch):
+        return (await observer.demand_options((proposal,), state, "session", quoted, page_size=2))["current"]
+
+    retained = await option()
+    lease, = retained.retain
+    assert lease.boundary_tokens == lease.at_risk_tokens == retained.protected_tokens == 4
+    assert retained.retention_allocation_value_ms is None
+    observer.runtime.status.reset_mock()
+    assert (await option(replace(batch, free_host_tokens=16))).retention_evidence == "native_capacity_available"
+    observer.runtime.status.assert_not_awaited()
+    assert (await option(replace(batch, host_write_policy="write_back"))).retain == ()
+    assert (await option(replace(batch, host_write_budget_tokens=0))).retain == ()
+    competing, = (await option(replace(batch, host_write_budget_tokens=0,
+        native_host_write_growth_tokens=4))).retain
+    assert competing.at_risk_tokens == 4  # Observed other requests can consume the free Host space.
+    capped, = (await option(replace(batch, host_write_budget_tokens=2))).retain
+    assert capped.at_risk_tokens == 2
+    locked = replace(host_quote, evictable_host_token_ranges=())
+    assert (await option(replace(batch, quotes=(cold_quote, locked)))).retain == ()
+    # A D2H allocation has spent its Host capacity already and cannot be counted
+    # again as a competing write from this request.
+    pending_work = replace(cold_quote, inflight_d2h_tokens=4, inflight_d2h_token_ranges=((0, 4),))
+    assert (await option(replace(batch, free_host_tokens=2, quotes=(pending_work, host_quote)))).retain == ()
+    mixed = replace(host_quote, ready_gpu_prefix_tokens=2, gpu_token_ranges=((0, 2),),
+        evictable_gpu_token_ranges=((0, 2),), evictable_gpu_prefix_tokens=2)
+    mixed_lease, = (await option(replace(batch, free_gpu_tokens=0, quotes=(cold_quote, mixed)))).retain
+    assert mixed_lease.at_risk_tokens == 4  # GPU backup is not a second benefit.
+    # Current Host residency must select a Host-calibrated paired effect.
+    inspected = dict(boundary_tokens=4, page_size=2, cache_scope_hash="scope", host_page_ids=(),
+        retention_features={"access_state": "recent"}, pool={"gpu_capacity_tokens": 64, "host_capacity_tokens": 64})
+    seen = []
+    def bucket(features):
+        seen.append(features)
+        return features["native_residency"]
+    forecast = PrefixForecast(15, 1, 100, 10, 0, 0, "scope", "host-pair")
+    observer.model = SimpleNamespace(feature_bucket=bucket, _key=lambda state, scope, ttl: (state, ttl),
+        forecasts={("host", 15): forecast})
+    assert observer._demand_forecast(inspected, batch, 15, 4, host_quote) == forecast
+    assert seen[0]["host_prefix_tokens"] == seen[0]["host_load_tokens"] == 4
+
+
 def test_shared_pages_are_charged_once_and_native_hits_have_no_added_value():
     forecast = PrefixForecast(10, .8, 100, 10, 5, 5, "cache", "paired-observation-digest")
     a = RetentionRequest("a", forecast, frozenset({"root", "a"}), 64)
@@ -196,7 +307,8 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     candidate = PromptCandidate("later", "REBUILD", 0, (), ids, token_hash(ids), frozenset(), frozenset(),
         output_budget=2, source_body_token_ranges=((0, 4),), source_prefix_tokens=4)
     quote = CacheQuote(candidate.candidate_id, candidate.input_hash, 4, 4,
-                       ready_gpu_prefix_tokens=2, recoverable_prefix_tokens=2, evictable_gpu_prefix_tokens=2)
+                       ready_gpu_prefix_tokens=2, recoverable_prefix_tokens=2, evictable_gpu_prefix_tokens=2,
+                       gpu_token_ranges=((0, 2),), evictable_gpu_token_ranges=((0, 2),))
     batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 0, 0, (quote,),
                             fingerprint=ByteTemplate().fingerprint, native_running_budget_tokens=4)
     gap = PlanCandidate("gap", "gap_retrieval", plan, (PlanStep(ReadTask("gap", "GAP")),), "reader")
@@ -266,7 +378,8 @@ async def test_demand_retains_partial_causal_prefix_only_when_it_contains_shared
     long_ids = (1, 2, 3, 4, 7)
     long_candidate = replace(candidate, candidate_id="tail", input_ids=long_ids, input_hash=token_hash(long_ids))
     long_quote = CacheQuote("tail", long_candidate.input_hash, 5, 4,
-        ready_gpu_prefix_tokens=4, recoverable_prefix_tokens=4, evictable_gpu_prefix_tokens=4)
+        ready_gpu_prefix_tokens=4, recoverable_prefix_tokens=4, evictable_gpu_prefix_tokens=4,
+        gpu_token_ranges=((0, 4),), evictable_gpu_token_ranges=((0, 4),))
     reads = (PlanCandidate(step.step_id, "read_once", plan, (PlanStep(step, (compiled,)),), "reader")
              for step, compiled in ((later, candidate), (tail, long_candidate)))
     observer.runtime.status.return_value = {"prefixes": ()}
@@ -309,7 +422,8 @@ async def test_future_hybrid_original_body_remains_a_consumer_after_facts_comple
     candidate = PromptCandidate("hybrid", "REBUILD", 0, (), ids, token_hash(ids), frozenset(), frozenset(),
         output_budget=2, representation="hybrid", source_body_token_ranges=((0, 4),), source_prefix_tokens=4)
     quote = CacheQuote("hybrid", candidate.input_hash, 4, 4, ready_gpu_prefix_tokens=4,
-                       recoverable_prefix_tokens=4, evictable_gpu_prefix_tokens=4)
+                       recoverable_prefix_tokens=4, evictable_gpu_prefix_tokens=4,
+                       gpu_token_ranges=((0, 4),), evictable_gpu_token_ranges=((0, 4),))
     batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 0, 0, (quote,),
         fingerprint=ByteTemplate().fingerprint, native_running_budget_tokens=4)
     proposal = PlanCandidate("reduce", "reduce_once", plan, (PlanStep(reduce),), "reader",
@@ -405,7 +519,8 @@ async def test_demand_remaining_lease_competes_with_renewal_at_consumer_arrival(
     candidate = PromptCandidate("later", "REBUILD", 0, (), ids, token_hash(ids), frozenset(), frozenset(),
         output_budget=2, source_body_token_ranges=((0, 4),), source_prefix_tokens=4)
     quote = CacheQuote("later", candidate.input_hash, 4, 4, ready_gpu_prefix_tokens=4,
-                       recoverable_prefix_tokens=4, evictable_gpu_prefix_tokens=4)
+                       recoverable_prefix_tokens=4, evictable_gpu_prefix_tokens=4,
+                       gpu_token_ranges=((0, 4),), evictable_gpu_token_ranges=((0, 4),))
     batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 0, 0, (quote,),
         fingerprint=ByteTemplate().fingerprint, native_running_budget_tokens=4)
     gap = PlanCandidate("gap", "gap_retrieval", plan, (PlanStep(ReadTask("gap", "GAP")),), "reader",
@@ -458,7 +573,8 @@ async def test_demand_priced_multiowner_counts_consumers_not_owner_window_sums(m
         candidates.append(PromptCandidate(target.step_id, "REBUILD", 0, (), ids, token_hash(ids), frozenset(), frozenset(),
             output_budget=2, source_body_token_ranges=((0, 4),), source_prefix_tokens=4))
         quotes.append(CacheQuote(target.step_id, token_hash(ids), 4, 4, ready_gpu_prefix_tokens=4,
-                                 recoverable_prefix_tokens=4, evictable_gpu_prefix_tokens=4))
+                                 recoverable_prefix_tokens=4, evictable_gpu_prefix_tokens=4,
+                                 gpu_token_ranges=((0, 4),), evictable_gpu_token_ranges=((0, 4),)))
     state = ReadingOutcome(plan, results=tuple(ReadResult(task.step_id) for task in old), steps=tuple(records))
     batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 0, 0, tuple(quotes),
         fingerprint=ByteTemplate().fingerprint, native_running_budget_tokens=4)
@@ -468,7 +584,7 @@ async def test_demand_priced_multiowner_counts_consumers_not_owner_window_sums(m
         {"mode": "demand", "ttl_seconds": 15, "protection_budget_tokens": 6})
     observer.runtime = SimpleNamespace(status=AsyncMock(return_value={"prefixes": ()}))
     observer.model = object()
-    observer._demand_forecast = lambda inspected, batch, horizon, boundary: PrefixForecast(horizon, 1,
+    observer._demand_forecast = lambda inspected, batch, horizon, boundary, quote: PrefixForecast(horizon, 1,
         100*boundary/inspected["boundary_tokens"], 0, 0, 0, "scope", "paired", retention_control_ms=5,
         native_window_cost_ms=20000, retained_window_cost_ms=0)
     chosen = []
@@ -531,7 +647,8 @@ async def test_priced_short_owner_competes_at_its_own_boundary_value(pressure, e
             source_body_token_ranges=((0, len(ids)),), source_prefix_tokens=len(ids)))
         quotes.append(CacheQuote(task.step_id, token_hash(ids), len(ids), len(ids),
             ready_gpu_prefix_tokens=len(ids), recoverable_prefix_tokens=len(ids),
-            evictable_gpu_prefix_tokens=len(ids)))
+            evictable_gpu_prefix_tokens=len(ids), gpu_token_ranges=((0, len(ids)),),
+            evictable_gpu_token_ranges=((0, len(ids)),)))
     state = ReadingOutcome(plan, results=tuple(ReadResult(task.step_id) for task in old), steps=tuple(records))
     batch = CacheQuoteBatch("quote", 1, 1, "restart", "cache", 0, 0, tuple(quotes),
         fingerprint=ByteTemplate().fingerprint, native_running_budget_tokens=pressure)
@@ -541,7 +658,7 @@ async def test_priced_short_owner_competes_at_its_own_boundary_value(pressure, e
         {"mode": "demand", "ttl_seconds": 15, "protection_budget_tokens": 8})
     observer.runtime = SimpleNamespace(status=AsyncMock(return_value={"prefixes": ()}))
     observer.model = object()
-    observer._demand_forecast = lambda inspected, batch, horizon, boundary: PrefixForecast(
+    observer._demand_forecast = lambda inspected, batch, horizon, boundary, quote: PrefixForecast(
         horizon, 1, {"short": 40, "long": 80, "other": 50}[inspected["source"]], 0,
         0, 0, "scope", "paired", retention_control_ms=1)
 

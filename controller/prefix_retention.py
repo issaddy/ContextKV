@@ -242,9 +242,9 @@ def owner_pages(receipt):
     return frozenset(receipt["gpu_page_ids"]) | frozenset(receipt["host_page_ids"])
 
 
-def referenced_gpu_pages(receipts):
+def referenced_pages(receipts, tier):
     return {page for row in receipts if row["reference_present"]
-            for page in set(row["gpu_page_ids"]).intersection(row["referenced_page_ids"])}
+            for page in set(row[tier+"_page_ids"]).intersection(row["referenced_page_ids"])}
 
 
 def shared_body_page(left, right, boundary, page_size):
@@ -628,17 +628,40 @@ class PrefixReadObserver:
         queued_growth = sum(max(0, request.input_tokens+request.max_new_tokens-request.kv_allocated_tokens)
                             for request in batch.native_waiting_requests or ())
         concurrent_growth = ceil(max(0, batch.native_running_budget_tokens or 0))+queued_growth
+        write_through = batch.host_write_policy == "write_through"
+        concurrent_host_growth = batch.native_host_write_growth_tokens or 0
+        host_pressure_relevant = any(body_page_offsets(quote.recoverable_prefix_tokens,
+            quote.evictable_host_token_ranges, page_size)-body_page_offsets(quote.recoverable_prefix_tokens,
+            quote.gpu_token_ranges, page_size) for quote in quotes.values())
+
+        def host_pages(compiled):
+            quote = quotes[compiled.candidate_id]
+            return body_page_offsets(quote.input_len, (*quote.host_token_ranges,
+                *quote.inflight_d2h_token_ranges), page_size)
+
+        def host_write_bound(compiled):
+            if not write_through:
+                return 0
+            total = (len(compiled.input_ids)+compiled.output_budget-1)//page_size*page_size
+            missing = total-len(host_pages(compiled))*page_size
+            return min(missing, batch.host_write_budget_tokens) if batch.host_write_budget_tokens is not None else missing
+
         if not own:
-            growth_bounds = []
+            gpu_growth_bounds, host_growth_bounds = [], []
             for plan in plans:
-                steps = {}
+                gpu_steps, host_steps = {}, {}
                 for step in (*plan.steps, *plan.route_steps):
                     growth = max((quotes[candidate.candidate_id].input_len
                         -quotes[candidate.candidate_id].ready_gpu_prefix_tokens+candidate.output_budget
                         for candidate in step.variants if candidate.feasible), default=0)
-                    steps[step.task.step_id] = max(steps.get(step.task.step_id, 0), growth)
-                growth_bounds.append(sum(steps.values()))
-            if concurrent_growth+max(growth_bounds, default=0) <= batch.free_gpu_tokens:
+                    gpu_steps[step.task.step_id] = max(gpu_steps.get(step.task.step_id, 0), growth)
+                    host_steps[step.task.step_id] = max(host_steps.get(step.task.step_id, 0),
+                        max((host_write_bound(candidate) for candidate in step.variants if candidate.feasible), default=0))
+                gpu_growth_bounds.append(sum(gpu_steps.values()))
+                host_growth_bounds.append(sum(host_steps.values()))
+            if (concurrent_growth+max(gpu_growth_bounds, default=0) <= batch.free_gpu_tokens
+                    and (not host_pressure_relevant or
+                         concurrent_host_growth+max(host_growth_bounds, default=0) <= batch.free_host_tokens)):
                 return joint_options(plans, state, allocate=lambda demand, *_:
                     JointOption(demand, retention_evidence="native_capacity_available"))
         statuses = await self.runtime.status(batch.engine_restart_id)
@@ -648,7 +671,8 @@ class PrefixReadObserver:
             return joint_options(plans, state)
         other_owners = tuple(row for key, row in active.items() if key not in own)
         shared = set().union(*(owner_pages(row) for row in other_owners))
-        shared_gpu = referenced_gpu_pages(other_owners)
+        shared_gpu = referenced_pages(other_owners, "gpu")
+        shared_host = referenced_pages(other_owners, "host")
         limit = self.settings["protection_budget_tokens"]
         scope = native_cache_scope_hash(batch.fingerprint, batch.cache_config_hash)
 
@@ -661,7 +685,7 @@ class PrefixReadObserver:
             key = compiled.candidate_id
             if key not in matched_paths:
                 quote = quotes[key]
-                upper = min(quote.ready_gpu_prefix_tokens, quote.match_limit, compiled.source_prefix_tokens, limit)
+                upper = min(quote.recoverable_prefix_tokens, quote.match_limit, compiled.source_prefix_tokens, limit)
                 matches = {}
                 for record in sources.values():
                     view = record.metrics["source_view"]
@@ -710,21 +734,34 @@ class PrefixReadObserver:
                         immediate.add(key)
             kept = tuple(active[key] for key in immediate)
             base_pages = shared.union(*(owner_pages(row) for row in kept))
-            base_gpu = shared_gpu | referenced_gpu_pages(kept)
+            base_gpu = shared_gpu | referenced_pages(kept, "gpu")
+            base_host = shared_host | referenced_pages(kept, "host")
             future_inputs = []
+            host_potential_growth = host_write_capacity = host_growth = 0
 
             def growth_tokens(compiled):
+                nonlocal host_potential_growth, host_write_capacity, host_growth
                 quote = quotes[compiled.candidate_id]
                 shared = max((longest_common_prefix(compiled.input_ids, previous)//page_size*page_size
                               for previous in future_inputs), default=0)
                 future_inputs.append(compiled.input_ids)
+                if write_through:
+                    # Native also backs up already-hit GPU ancestors without a
+                    # Host copy. Pending D2H has allocated its Host slots already.
+                    backed = host_pages(compiled) | set(range(shared//page_size))
+                    total = (len(compiled.input_ids)+compiled.output_budget-1)//page_size*page_size
+                    host_potential_growth += total-len(backed)*page_size
+                    host_write_capacity += host_write_bound(compiled)
+                    # A capped request need not back up its whole input. Keep
+                    # the union bound separate from per-request admission caps.
+                    host_growth = min(host_potential_growth, host_write_capacity)
                 return len(compiled.input_ids)-max(quote.ready_gpu_prefix_tokens, shared)+compiled.output_budget
 
             current_growth = growth_tokens(candidate) if current is not None else 0
             if task.kind == "ANSWER" or not sources:
                 return JointOption(demand, release=tuple(sorted(own.keys()-immediate)),
                     protected_tokens=len(base_pages-shared)*page_size, keep=tuple(sorted(immediate)))
-            current_prefix = candidate.input_ids[:current.ready_gpu_prefix_tokens] if current is not None else ()
+            current_prefix = candidate.input_ids[:current.recoverable_prefix_tokens] if current is not None else ()
             targets = {}
             unmet = {need.need_id: need.priority for need in demand.needs}
             # Consumer arrival is just the work before that consumer plus queue
@@ -741,7 +778,8 @@ class PrefixReadObserver:
             for target, compiled in next_steps.values():
                 if target.step_id == task.step_id:
                     continue
-                pressures[target.step_id] = max(0, growth+concurrent_growth-batch.free_gpu_tokens)
+                pressures[target.step_id] = (max(0, growth+concurrent_growth-batch.free_gpu_tokens),
+                                             max(0, host_growth+concurrent_host_growth-batch.free_host_tokens))
                 predicted_arrival = (candidate_arrival_ms or {}).get(compiled.candidate_id, arrival) if compiled else arrival
                 duration = means.get(target.kind)
                 arrival = arrival+duration if arrival is not None and duration is not None else None
@@ -758,49 +796,66 @@ class PrefixReadObserver:
                 if priority and (target.step_id not in targets or work(compiled) < work(targets[target.step_id][0])):
                     targets[target.step_id] = compiled, priority, predicted_arrival
 
-            paths, demands, consumer_paths = {}, {}, {}
-            own_gpu = referenced_gpu_pages(tuple(active[key] for key in own))
+            paths, demands, consumer_paths, path_quotes = {}, {}, {}, {}
             for target, (compiled, priority, arrival_ms) in targets.items():
                 quote = quotes[compiled.candidate_id]
                 matches = matching_sources(compiled)
                 if not matches:
                     continue
-                evictable = quote.evictable_gpu_prefix_tokens or 0
-                locked_pages = (quote.ready_gpu_prefix_tokens-evictable)//page_size
-                if not concurrent_growth:
-                    locked_pages = max(locked_pages, longest_common_prefix(compiled.input_ids, current_prefix)//page_size)
                 _, _, _, path = max(matches, key=lambda match: match[2])
-                # Existing supplementary leases mask eviction in the quote.
-                # Evaluate their release against Native, along with new leases.
-                evictable_pages = (frozenset(path[locked_pages:]) | (set(path) & own_gpu))-base_gpu
-                risk = min(pressures[target], len(evictable_pages)*page_size)
+                def pages_at(ranges):
+                    return {path[index] for index in body_page_offsets(len(path)*page_size, ranges, page_size)}
+                ready_gpu = pages_at(quote.gpu_token_ranges)
+                gpu_pages = pages_at(quote.evictable_gpu_token_ranges)-base_gpu
+                # Losing an existing GPU copy creates reload/recompute risk.
+                # Only Host pages without a ready GPU copy add a second risk:
+                # losing the last reusable copy forces recomputation.
+                host_only = pages_at(quote.evictable_host_token_ranges)-ready_gpu-base_host
+                if not (concurrent_growth or concurrent_host_growth):
+                    current_pages = set(path[:longest_common_prefix(compiled.input_ids, current_prefix)//page_size])
+                    gpu_pages -= current_pages
+                    host_only -= current_pages
+                risk_by_page = {}
+                for pressure, pages in zip(pressures[target], (gpu_pages, host_only), strict=True):
+                    if pressure and pages:
+                        per_page = min(page_size, pressure/len(pages))
+                        risk_by_page.update((page, per_page) for page in pages)
+                risk = sum(risk_by_page.values())
                 if risk:
-                    demands[target] = (risk, priority, evictable_pages, arrival_ms)
+                    demands[target] = (risk, priority, risk_by_page, arrival_ms)
                     consumer_paths[target] = frozenset(path), body_page_offsets(len(path)*page_size,
                         compiled.source_body_token_ranges or (), page_size)
                     paths.update((owner, (step, end, frozenset(pages))) for owner, step, end, pages in matches)
+                    for owner, _, _, _ in matches:
+                        path_quotes.setdefault(owner, quote)
             # Include old leases even when their original path is not the longest
             # observed match. Their remaining TTL competes with renew/new choices.
             for owner, old in own.items():
                 if owner in immediate:
                     continue
                 pages = owner_pages(active[owner])
-                if any(pages & row[2] for row in demands.values()):
+                if any(pages & row[2].keys() for row in demands.values()):
                     paths[owner] = old.step_id, len(old.prefix_input_ids), pages
+                    if owner not in path_quotes:
+                        for target in demands:
+                            if pages <= consumer_paths[target][0]:
+                                path_quotes[owner] = quotes[targets[target][0].candidate_id]
+                                break
 
             requests, actions_by_option = [], {}
             first_consumer_pages, consumed_pages = {}, set()
-            for target, (_, _, pages, _) in demands.items():
-                first_consumer_pages[target] = pages-consumed_pages
+            for target, (_, _, risks, _) in demands.items():
+                first_consumer_pages[target] = risks.keys()-consumed_pages
                 consumed_pages.update(consumer_paths[target][0])
             curves = {}
             for owner, (step, boundary, _) in paths.items():
-                if self.model is None or step not in sources or owner in immediate:
+                if self.model is None or step not in sources or owner in immediate or owner not in path_quotes:
                     continue
                 inspection = sources[step].metrics.get("evidence_prefix", {})
                 if inspection.get("demand_observation"):
                     curves[owner] = tuple(forecast for horizon in horizons
-                        if (forecast := self._demand_forecast(inspection, batch, horizon, boundary)) is not None)
+                        if (forecast := self._demand_forecast(inspection, batch, horizon, boundary,
+                            path_quotes[owner])) is not None)
             priced = any(curves.values())
             if not priced and self.allocation == "paired_value":
                 return JointOption(demand, release=tuple(sorted(own.keys()-immediate)),
@@ -827,10 +882,10 @@ class PrefixReadObserver:
                     leases.append((remaining(owner), "keep"))
                 for horizon, action in leases:
                     events, target_ids, forecasts = [], [], []
-                    for target, (risk, priority, evictable_pages, arrival_ms) in demands.items():
+                    for target, (risk, priority, risk_by_page, arrival_ms) in demands.items():
                         if arrival_ms is not None and arrival_ms >= horizon*1000:
                             continue
-                        covered = pages & evictable_pages
+                        covered = pages & risk_by_page.keys()
                         if not covered:
                             continue
                         forecast = None
@@ -842,10 +897,9 @@ class PrefixReadObserver:
                             if forecast is None:
                                 continue
                             # The forecast already prices this owner's boundary.
-                            # Divide it over that path, then apply the consumer's
-                            # at-risk share once, including for shorter owners.
-                            risk_share = min(1, risk/(len(evictable_pages)*page_size))
-                            per_page = max(0, forecast.target_saved_ms)/len(pages)*risk_share
+                            # Divide it over that path, then apply each page's
+                            # own tier risk once, including for shorter owners.
+                            per_page = max(0, forecast.target_saved_ms)/len(pages)
                             forecasts.append(forecast)
                         else:
                             # Each causal page is credited to its first future
@@ -853,8 +907,9 @@ class PrefixReadObserver:
                             covered &= first_consumer_pages[target]
                             if not covered:
                                 continue
-                            per_page = risk*priority/len(evictable_pages)
-                        events.append((target, tuple((page, per_page) for page in sorted(covered))))
+                            per_page = priority*page_size
+                        events.append((target, tuple((page, per_page*risk_by_page[page]/page_size)
+                            for page in sorted(covered))))
                         target_ids.append(target)
                     if not events:
                         continue
@@ -872,7 +927,7 @@ class PrefixReadObserver:
                     requests.append(request)
                     target = max(target_ids, key=lambda key: demands[key][0]*demands[key][1])
                     actions_by_option[owner, horizon] = DemandLease(owner, step, target, boundary,
-                        min(demands[target][0], len(pages & demands[target][2])*page_size), page_size, scope,
+                        sum(value for page, value in demands[target][2].items() if page in pages), page_size, scope,
                         horizon, action, demands[target][3])
             choices = allocate_retention(requests, protection_budget_tokens=limit,
                 lambda_gpu=self.settings.get("lambda_gpu", 0) if priced else 0,
@@ -880,8 +935,8 @@ class PrefixReadObserver:
             selected = {choice.owner_id: actions_by_option[choice.owner_id, choice.ttl_seconds] for choice in choices}
             protected = base_pages.union(*(paths[owner][2] for owner in selected))
             kept_ids = immediate | {owner for owner, lease in selected.items() if lease.action == "keep"}
-            uncovered = sum(max(0, risk-min(risk, len(path & protected)*page_size))
-                for risk, _, path, _ in demands.values())
+            uncovered = sum(value for _, _, risks, _ in demands.values()
+                for page, value in risks.items() if page not in protected)
             # B fits actual Native branch cost, including future cache behavior.
             # These consumer marginals are not conditioned on that branch's
             # realized continuation and this retention intervention. Allocation
@@ -903,20 +958,25 @@ class PrefixReadObserver:
 
         return joint_options(plans, state, allocate=allocate)
 
-    def _demand_forecast(self, inspected, batch, horizon, boundary=None):
+    def _demand_forecast(self, inspected, batch, horizon, boundary, quote):
         features = inspected.get("retention_features")
         if features is None:
             return None
-        current = {**inspected, "pool": {**inspected["pool"], "free_gpu_tokens": batch.free_gpu_tokens,
+        gpu = body_page_offsets(boundary, quote.gpu_token_ranges, inspected["page_size"])
+        host = body_page_offsets(boundary, quote.host_token_ranges, inspected["page_size"])
+        current = {**inspected, "boundary_tokens": boundary,
+                   "pool": {**inspected["pool"], "free_gpu_tokens": batch.free_gpu_tokens,
                    "free_host_tokens": batch.free_host_tokens},
-                   "residency": {"ready_gpu_prefix_tokens": inspected["boundary_tokens"],
-                                 "host_only_load_tokens": 0},
+                   "residency": {"ready_gpu_prefix_tokens": min(boundary, quote.ready_gpu_prefix_tokens),
+                                 "recoverable_prefix_tokens": min(boundary, quote.recoverable_prefix_tokens),
+                                 "host_only_load_tokens": len(host-gpu)*inspected["page_size"]},
                    "workload": {"active_requests": batch.active_requests, "queued_requests": batch.queued_requests}}
-        bucket = self.model.feature_bucket({**features, **self._native_features(current)})
+        native = self._native_features(current, host_prefix_tokens=len(host)*inspected["page_size"])
+        bucket = self.model.feature_bucket({**features, **native})
         forecast = self.model.forecasts.get(self.model._key(bucket, inspected["cache_scope_hash"],
                                                             horizon))
         if forecast is not None:
-            return forecast.for_tokens(boundary or inspected["boundary_tokens"])
+            return forecast.for_tokens(boundary)
 
     async def apply_demand(self, option, state, session_id, *, batch):
         started = time.monotonic()
@@ -986,7 +1046,7 @@ class PrefixReadObserver:
             condition_updates=tuple(sorted({condition.update for condition in state.conditions})))
 
     @staticmethod
-    def _native_features(inspected):
+    def _native_features(inspected, *, host_prefix_tokens=None):
         pool, residency, workload = inspected["pool"], inspected["residency"], inspected["workload"]
         ready = residency["ready_gpu_prefix_tokens"]
         residency_state = ("device" if ready >= inspected["boundary_tokens"] else
@@ -999,7 +1059,8 @@ class PrefixReadObserver:
             gpu_pressure=1-pool["free_gpu_tokens"]/pool["gpu_capacity_tokens"],
             host_pressure=1-pool["free_host_tokens"]/pool["host_capacity_tokens"] if pool["host_capacity_tokens"] else 0,
             gpu_prefix_tokens=residency["ready_gpu_prefix_tokens"],
-            host_prefix_tokens=len(inspected["host_page_ids"])*inspected["page_size"],
+            host_prefix_tokens=(len(inspected["host_page_ids"])*inspected["page_size"]
+                if host_prefix_tokens is None else host_prefix_tokens),
             host_load_tokens=residency["host_only_load_tokens"],
             active_requests=workload["active_requests"], queued_requests=workload["queued_requests"])
 

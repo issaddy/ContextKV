@@ -329,3 +329,61 @@ def test_full_queue_acceptance_allows_distinct_helpers_and_reports_slo_separatel
     changed = acceptance.evaluate_full_queue([left, right, *repeats])[0]
     assert changed["paired_queues"] == 0
     assert changed["pair_issues"][-1]["reason"] == "reader_scorer_or_assets_differ_across_replicates"
+
+
+def test_retention_validation_uses_online_length_scaling_without_scaling_full_window(tmp_path):
+    import json
+    from controller.prefix_retention import EmpiricalRetentionModel, PrefixForecast, TARGET_COST_RULE
+    from profiling.final_study_index import retention_validation
+
+    features = {"native_residency": "device"}
+    forecast = PrefixForecast(15, 1, 100, 0, 0, 0, "scope", "measured",
+        retention_control_ms=60, native_window_cost_ms=200, retained_window_cost_ms=175,
+        source_token_range=(1000, 1000))
+    key = EmpiricalRetentionModel._key(features, "scope", 15)
+    model = EmpiricalRetentionModel({key: forecast}, {"native_residency": {"kind": "categorical"}},
+                                   independent_samples=2)
+    path = tmp_path / "retention.json"
+    path.write_text(json.dumps({**model.to_dict(), "training_manifest": {"split": "train"}}))
+    pairs = [dict(split="dev", training_eligible=True, fixed_decode_work=True,
+        target_cost_rule=TARGET_COST_RULE, independent_session_ids=[str(tokens)],
+        features=features, cache_scope_hash="scope", horizon_seconds=15,
+        page_size=100, gpu_page_count=tokens//100, event_id=str(tokens),
+        full_window_cost_difference_ms=actual) for tokens, actual in ((500, -5), (2000, 30))]
+    report = retention_validation(["C="+str(path)], pairs)["models"][0]
+    assert report["matched_pairs"] == 2 and report["prediction_coverage"] == 1
+    assert report["within_training_length_pairs"] == 0 and report["outside_training_length_pairs"] == 2
+    # 500 tokens: 50 - 60 < 0; 2000 tokens: 200 - 60 > 0. Control is fixed.
+    assert report["selected_positive_predictions"] == 1
+    assert report["paired_arm_acceptance_delta_ms"] == 15
+    # Complete-window prediction remains the measured 25 ms for both lengths.
+    assert report["weighted_mae_ms"] == 17.5
+
+
+def test_retention_workflow_uses_selected_ttl_observation_window(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from profiling import retention_pair_workflow as workflow
+
+    paths = {}
+    for split in ("train", "dev"):
+        paths[split] = tmp_path/(split+".json")
+        paths[split].write_text(json.dumps({"training_eligible": True, "turns": [
+            {"split": split, "session_id": split, "dataset": "fixture", "source_metadata": {}}]}))
+    monkeypatch.setattr(workflow, "load_config", lambda path: SimpleNamespace(model=None))
+    monkeypatch.setattr(workflow, "create_model_template", lambda model: None)
+    monkeypatch.setattr(workflow, "verify_trace", lambda trace: None)
+    monkeypatch.setattr(workflow, "audit_coverage", lambda trace, **kwargs: {})
+    monkeypatch.setattr(workflow, "audit_trace_inputs", lambda trace, template, **kwargs: {})
+    windows = []
+
+    def pairs(trace, **kwargs):
+        windows.append(kwargs["horizon_seconds"])
+        return {}, {}
+
+    monkeypatch.setattr(workflow, "fit_window_pairs", pairs)
+    plan = workflow.main(["--train-trace", str(paths["train"]), "--dev-trace", str(paths["dev"]),
+        "--config", "fixture", "--base-url", "http://fixture", "--gpu-device", "0",
+        "--output-dir", str(tmp_path/"workflow"), "--ttl-seconds", "15", "--horizon-seconds", "15"])
+    assert windows == [15, 15]
+    assert plan["observation_seconds"] == 15 and plan["ttl_seconds"] == [15]

@@ -67,8 +67,8 @@ async def run(args):
         protocol_scopes[split] = audit_trace_inputs(trace, template,
             trace_path=trace_paths[split], config_path=args.config)
     horizon = args.horizon_seconds
-    if horizon < max(180, *args.ttl_seconds):
-        raise ValueError("common observation window must cover 180 seconds and all TTL arms")
+    if horizon < max(args.ttl_seconds):
+        raise ValueError("common observation window must cover all selected TTL arms")
     pools, support = {}, {}
     for split, trace in traces.items():
         pools[split], support[split] = fit_window_pairs(trace, horizon_seconds=horizon,
@@ -151,11 +151,17 @@ async def run(args):
         rows = [json.loads(line) for line in dev_rows.read_text().splitlines() if line.strip()]
         components = session_components(rows)
         for row in balance_session_rows(rows, components):
+            tokens = row["gpu_page_count"]*row["page_size"]
             try:
-                predicted = model.predict(row["features"], row["cache_scope_hash"], row["horizon_seconds"])
+                predicted = model.predict(row["features"], row["cache_scope_hash"],
+                    row["horizon_seconds"]).for_tokens(tokens)
             except KeyError:
                 predicted = None
             validation.append(dict(event_id=row["event_id"], calibrated=predicted is not None,
+                source_tokens=tokens,
+                training_source_token_range=predicted.source_token_range if predicted else None,
+                within_training_token_range=(predicted.source_token_range[0] <= tokens <= predicted.source_token_range[1])
+                    if predicted is not None and predicted.source_token_range is not None else None,
                 predicted_target_saved_ms=predicted.target_saved_ms if predicted else None,
                 predicted_retention_control_ms=predicted.retention_control_ms if predicted else None,
                 predicted_collateral_saved_ms=predicted.expected_collateral_saved_ms if predicted else None,

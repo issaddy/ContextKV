@@ -137,6 +137,32 @@ def render_document(example):
     return "".join(parts), tuple(locations)
 
 
+def _predicted_source_spans(tags, offsets, sequence_ids, locations):
+    selected = []
+    for token, tag in enumerate(tags):
+        left, right = offsets[token]
+        if tag == 0 or sequence_ids[token] != 1 or right <= left:
+            continue
+        for body_start, body_end, unit in locations:
+            if right <= body_start or left >= body_end:
+                continue
+            for span in unit.source_spans:
+                assert span.end-span.start == len(unit.text)
+                original_start = span.start+max(left, body_start)-body_start
+                original_end = span.start+min(right, body_end)-body_start
+                selected.append(SourceSpan(f"{span.span_id}:support:{original_start}:{original_end}",
+                    span.source_key, original_start, original_end))
+    spans = []
+    for span in selected:
+        if spans and spans[-1].source_key == span.source_key and spans[-1].end == span.start:
+            previous = spans.pop()
+            spans.append(SourceSpan(f"{previous.span_id}:through:{span.end}", previous.source_key,
+                                    previous.start, span.end))
+        else:
+            spans.append(span)
+    return tuple(spans)
+
+
 def _support_input(row):
     return SupportInput(row["task_id"], row["need_id"], row["query"],
         tuple(decode(EvidenceUnit, unit) for unit in row["units"]),
@@ -307,32 +333,12 @@ class TrainedSupportBackend:
             for index, example in enumerate(batch):
                 key = (example.task_id, example.need_id, tuple(u.unit_id for u in example.units))
                 self.embeddings[key] = output["embedding"][index].detach().cpu()
-                selected = []
-                for token, tag in enumerate(span_tags[index]):
-                    left, right = offsets[index, token].tolist()
-                    if tag == 0 or sequence_ids[index][token] != 1 or right <= left:
-                        continue
-                    for body_start, body_end, unit in rendered[index][1]:
-                        if right <= body_start or left >= body_end:
-                            continue
-                        for span in unit.source_spans:
-                            assert span.end-span.start == len(unit.text)
-                            original_start = span.start+max(left, body_start)-body_start
-                            original_end = span.start+min(right, body_end)-body_start
-                            selected.append(SourceSpan(f"{span.span_id}:support:{original_start}:{original_end}",
-                                span.source_key, original_start, original_end))
-                spans = []
-                for span in selected:
-                    if spans and spans[-1].source_key == span.source_key and spans[-1].end == span.start:
-                        previous = spans.pop()
-                        spans.append(SourceSpan(f"{previous.span_id}:through:{span.end}", previous.source_key,
-                                                previous.start, span.end))
-                    else:
-                        spans.append(span)
+                spans = _predicted_source_spans(span_tags[index], offsets[index].tolist(),
+                    sequence_ids[index], rendered[index][1])
                 applicability, direct, joint, bridge = scalars[index]
                 disposition = SUPPORT_CLASSES[statuses[index]]
                 predictions[start+eligible[index]] = SupportPrediction(applicability, direct, joint, bridge,
-                    disposition, tuple(spans))
+                    disposition, spans)
             self.usage["examples"] += len(batch)
         self._synchronize()
         elapsed = (time.perf_counter()-started)*1000
@@ -496,12 +502,18 @@ def train_support(examples_path, parent_asset, output_dir, *, cohort_manifest, d
             loss = (torch.nn.functional.binary_cross_entropy_with_logits(output["scalars"], targets)
                     + torch.nn.functional.cross_entropy(output["support"], status)
                     + span_loss)
+            predicted_scalars = output["scalars"].sigmoid().detach().cpu().tolist()
+            predicted_span_tags = output["spans"].argmax(dim=-1).cpu().tolist()
             for index, row in enumerate(rows):
+                applicability, direct, joint, bridge = predicted_scalars[index]
+                support = direct if len(row["units"]) == 1 else joint
+                spans = _predicted_source_spans(predicted_span_tags[index], offsets[index].tolist(),
+                    encoded.sequence_ids(index), documents[index][1])
                 characters = sum(len(unit["text"]) for unit in row["units"])
                 unique_characters = sum(len(text) for text in {unit["text"] for unit in row["units"]})
                 redundancy = 1-unique_characters/characters if characters else 0.0
-                features = torch.tensor([[*output["scalars"][index, [0, 2, 3]].sigmoid().detach().tolist(),
-                    len(row["units"])/3, len(row["labels"]["source_spans"])/max(1, len(row["units"])),
+                features = torch.tensor([[applicability, support, bridge,
+                    len(row["units"])/3, len(spans)/max(1, len(row["units"])),
                     redundancy, sum(unit["body_tokens"] for unit in row["units"])/32768,
                     row.get("history_fragment_count", 0)/16]], device=device)
                 node_count = len(row["units"])+2

@@ -5,6 +5,7 @@ CPU protocol fixtures and specified judge values test contracts, not GPU gains.
 from copy import deepcopy
 from dataclasses import replace
 import json
+from pathlib import Path
 
 import pytest
 
@@ -149,6 +150,7 @@ def test_domain_migration_requires_measured_changed_grouping_not_a_version_relab
                             "plan_candidate": {"context_plan": {"steps": tasks}}},
             "actual_run": {"compiled_route_steps": [{"task": tasks[0]}], "pre_action_input": {"input_ids": [1]},
                            "new_action_counts": {"READ": 1}}}}
+    assert fitted_action_domain([new]) == (current, [current])
     with pytest.raises(ValueError, match="actually executed READ organization"):
         fitted_action_domain([old, new])
     changed = deepcopy(new)
@@ -168,6 +170,63 @@ def test_domain_migration_requires_measured_changed_grouping_not_a_version_relab
     missing["counterfactual"]["pre_registration"]["plan_candidate"]["context_plan"]["steps"][0]["input_unit_ids"] = ["A", "C"]
     with pytest.raises(ValueError, match="frozen source/Need obligations"):
         fitted_action_domain([old, missing])
+    with pytest.raises(ValueError, match="frozen source/Need obligations"):
+        fitted_action_domain([changed, missing])
+
+
+@pytest.mark.asyncio
+async def test_quality_fit_balances_decision_states_and_keeps_unique_cost_branches(tmp_path):
+    import numpy as np
+
+    _, _, first = await measured_fixture(tmp_path/"first")
+    _, _, second = await measured_fixture(tmp_path/"second", read_failure=False)
+    for before, run in second.values():
+        for record in (before, run):
+            record["observed_state_binding"]["paid_cost"]["latency_ms"] = 1000
+    pairs = [effective_pair(*(completion_record(*values[kind])
+        for kind in ("direct_answer", "read_once"))) for values in (first, second)]
+    model = fit_effective(pairs)
+    repeated = fit_effective([pairs[0], pairs[0], pairs[0], pairs[1]])
+    # More candidates from one frozen decision cannot increase its total weight.
+    np.testing.assert_allclose(repeated.center, model.center)
+    np.testing.assert_allclose(repeated.scale, model.scale)
+    np.testing.assert_allclose(repeated.coefficients, model.coefficients, atol=1e-12)
+    assert repeated.intercept == pytest.approx(model.intercept)
+    assert repeated.provenance["quality_fit"]["decision_states"] == 2
+    assert repeated.provenance["quality_fit"]["action_samples"] == 4
+    assert repeated.cost_provenance["record_ids"] == model.cost_provenance["record_ids"]
+    assert repeated.cost_provenance["training_samples"] == 3
+    assert fit_effective(pairs, ridge=2).asset_id != model.asset_id
+
+
+@pytest.mark.asyncio
+async def test_gain_fit_reports_shared_source_families_and_keeps_conversation_isolation(tmp_path):
+    from training.plan_gain_completion import main
+
+    _, _, train_values = await measured_fixture(tmp_path/"train")
+    _, _, dev_values = await measured_fixture(tmp_path/"dev")
+    for before, run in dev_values.values():
+        before["split"] = run["split"] = run["cohort_split"] = "dev"
+        run["conversation_id"] = "heldout"
+    train, dev = [effective_pair(*(completion_record(*values[kind])
+        for kind in ("direct_answer", "read_once"))) for values in (train_values, dev_values)]
+    train_path, dev_path, asset = tmp_path/"train.jsonl", tmp_path/"dev.jsonl", tmp_path/"gain.json"
+    train_path.write_text(json.dumps(train)+"\n")
+    dev_path.write_text(json.dumps(dev)+"\n")
+    command = ["fit", "--train", str(train_path), "--dev", str(dev_path), "--output", str(asset)]
+    main(command)
+    report = json.loads(Path(str(asset)+".development.json").read_text())
+    families = report["exposed_source_families"]
+    assert families["overlap"] == families["train"] == families["dev"] == 2
+    assert families["partition_owner"] == "cohort"
+    assert "archive" in families["scope"] and "source_scope" in families["scope"]
+    for _, run in dev_values.values():
+        run["conversation_id"] = train["conversation_id"]
+    overlap = effective_pair(*(completion_record(*dev_values[kind])
+        for kind in ("direct_answer", "read_once")))
+    dev_path.write_text(json.dumps(overlap)+"\n")
+    with pytest.raises(ValueError, match="development conversations overlap"):
+        main(command)
 
 
 @pytest.mark.asyncio

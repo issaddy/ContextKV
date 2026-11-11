@@ -134,11 +134,22 @@ class MockEngine:
         limit = max(len(candidate.input_ids)-1, 0)
         limit = limit // self.page_size * self.page_size
         raw = gpu = recoverable = host_only = h2d = d2h = 0
+        ranges = {name: [] for name in ("gpu_token_ranges", "host_token_ranges",
+            "evictable_gpu_token_ranges", "evictable_host_token_ranges", "inflight_d2h_token_ranges")}
         gpu_chain = recover_chain = True
         for _, slot in self._walk(candidate.input_ids[:limit]):
             raw += 1
             gpu_ready = slot.gpu and not slot.h2d
             host_ready = slot.host and not slot.d2h
+            for name, present in (("gpu_token_ranges", gpu_ready), ("host_token_ranges", host_ready),
+                    ("evictable_gpu_token_ranges", gpu_ready), ("evictable_host_token_ranges", host_ready),
+                    ("inflight_d2h_token_ranges", slot.d2h)):
+                if present:
+                    intervals = ranges[name]
+                    if intervals and intervals[-1][1] == raw-1:
+                        intervals[-1] = (intervals[-1][0], raw)
+                    else:
+                        intervals.append((raw-1, raw))
             gpu_chain = gpu_chain and gpu_ready
             recover_chain = recover_chain and (gpu_ready or host_ready)
             gpu += int(gpu_chain)
@@ -151,7 +162,7 @@ class MockEngine:
                           raw_match_tokens=raw, ready_gpu_prefix_tokens=gpu,
                           recoverable_prefix_tokens=recoverable, host_only_load_tokens=host_only,
                           inflight_h2d_tokens=h2d, inflight_d2h_tokens=d2h,
-                          native_load_estimate=host_only, native_estimate_uncertain=bool(h2d or d2h))
+                          native_load_estimate=host_only, native_estimate_uncertain=bool(h2d or d2h), **ranges)
 
     async def quote_batch(self, candidates, fingerprint):
         async with self._lock:

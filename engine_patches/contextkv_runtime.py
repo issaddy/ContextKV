@@ -202,6 +202,8 @@ def peek_full_prefix(tree, key, full_component_type=0):
                   evictable_gpu_prefix_tokens=0,
                   recoverable_prefix_tokens=0, host_only_load_tokens=0,
                   inflight_h2d_tokens=0, inflight_d2h_tokens=0)
+    ranges = {name: [] for name in ("gpu_token_ranges", "host_token_ranges",
+        "evictable_gpu_token_ranges", "evictable_host_token_ranges", "inflight_d2h_token_ranges")}
     gpu_contiguous = recoverable_contiguous = True
     while len(key) > 0:
         child = node.children.get(key.child_key(tree.page_size))
@@ -215,6 +217,17 @@ def peek_full_prefix(tree, key, full_component_type=0):
         d2h_pending = child.write_through_pending_id is not None
         gpu_ready = full.value is not None and not h2d_pending
         host_ready = full.host_value is not None and not d2h_pending
+        first = counts["raw_match_tokens"]
+        for name, present in (("gpu_token_ranges", gpu_ready), ("host_token_ranges", host_ready),
+                ("evictable_gpu_token_ranges", gpu_ready and full.lock_ref == 0),
+                ("evictable_host_token_ranges", host_ready and not h2d_pending and full.host_lock_ref == 0),
+                ("inflight_d2h_token_ranges", d2h_pending and full.host_value is not None)):
+            if present:
+                intervals = ranges[name]
+                if intervals and intervals[-1][1] == first:
+                    intervals[-1] = (intervals[-1][0], first+matched)
+                else:
+                    intervals.append((first, first+matched))
         counts["raw_match_tokens"] += matched
         counts["inflight_h2d_tokens"] += matched if h2d_pending else 0
         counts["inflight_d2h_tokens"] += matched if d2h_pending else 0
@@ -232,7 +245,7 @@ def peek_full_prefix(tree, key, full_component_type=0):
             break
         node = child
         key = key[matched:]
-    return counts
+    return {**counts, **ranges}
 
 
 class HostAdmissionPolicy:
@@ -301,15 +314,22 @@ class HostAdmissionPolicy:
                     other_business_working_set_tokens=max(0, len(businesses)-1)*mean_prompt,
                     window_evicted_host_tokens=sum(n for at, n in self.evictions if at >= cutoff))
 
-    def decide(self, new_tokens, page_size, host_capacity, host_used, now, *, admitted_pages=0):
-        self._prune(now)
+    def pressure_state(self, host_capacity, host_used, now):
+        """Current admission condition, shared by the pure quote and mutation."""
         window = self.window(now)
-        new_pages = -(-new_tokens//page_size)
-        threshold_pages = -(-self.threshold_tokens//page_size)
         above = window["other_business_working_set_tokens"] > host_capacity
         full_evicting = (host_capacity > 0 and host_used >= self.occupancy_threshold*host_capacity
                          and window["window_evicted_host_tokens"] > 0)
         pressure = self.mode == "fixed" or (above and full_evicting)
+        return dict(pressure=pressure, working_set_above_capacity=above,
+                    host_full_and_evicting=full_evicting, **window)
+
+    def decide(self, new_tokens, page_size, host_capacity, host_used, now, *, admitted_pages=0):
+        self._prune(now)
+        state = self.pressure_state(host_capacity, host_used, now)
+        pressure = state["pressure"]
+        new_pages = -(-new_tokens//page_size)
+        threshold_pages = -(-self.threshold_tokens//page_size)
         projected_pages = admitted_pages + new_pages
         skip = self.mode != "off" and pressure and projected_pages > threshold_pages and new_pages > 0
         self.counters["considered_actions"] += 1
@@ -317,11 +337,10 @@ class HostAdmissionPolicy:
         self.counters["skipped_new_tokens" if skip else "allowed_planned_new_tokens"] += new_tokens
         reason = ("request_backup_budget_exceeded" if skip else "already_backed" if new_pages == 0 else
                   "within_request_page_budget" if projected_pages <= threshold_pages else "pressure_not_met")
-        return dict(allowed=not skip, reason=reason, mode=self.mode, pressure=pressure,
-                    working_set_above_capacity=above, host_full_and_evicting=full_evicting,
+        return dict(allowed=not skip, reason=reason, mode=self.mode,
                     new_tokens=new_tokens, new_pages=new_pages, threshold_pages=threshold_pages,
                     request_admitted_pages=admitted_pages, projected_request_pages=projected_pages,
-                    host_capacity_tokens=host_capacity, host_used_tokens=host_used, **window)
+                    host_capacity_tokens=host_capacity, host_used_tokens=host_used, **state)
 
     def snapshot(self, now):
         return dict(config=self.config(), counters=dict(self.counters), **self.window(now),
@@ -799,7 +818,43 @@ class ContextKVRuntime:
                     engine_session_id=sid, session_generation=epoch["generation"] if epoch else None,
                     inflight=bool(epoch and epoch["inflight"]), terminal=bool(epoch and epoch["state"] == "RETIRED"))
 
-    def workload_snapshot(self):
+    def _host_write_growth(self, requests, request_budget_tokens):
+        """Potential write-through growth of currently observed requests only."""
+        from sglang.srt.mem_cache.radix_cache import RadixKey
+
+        page = self.cache.page_size
+        prefixes = []
+        potential = admission = 0
+        for req in requests:
+            # Native finished-request insertion omits the final generated token.
+            total = (len(req.origin_input_ids)+req.sampling_params.max_new_tokens-1)//page*page
+            ids = (*req.origin_input_ids, *req.output_ids)[:total]
+            view = self.cache.tree_core.peek_full_prefix(RadixKey(array("q", ids)))
+            backed = {offset for first, last in (*view["host_token_ranges"], *view["inflight_d2h_token_ranges"])
+                      for offset in range(first//page, last//page)}
+            shared = 0
+            for previous in prefixes:
+                common = 0
+                for left, right in zip(ids, previous):
+                    if left != right:
+                        break
+                    common += 1
+                shared = max(shared, common//page)
+            prefixes.append(ids)
+            missing = total-len(backed)*page
+            potential += total-len(backed | set(range(shared)))*page
+            epoch = self.epochs.get(req.session_id)
+            budget = request_budget_tokens
+            if budget is not None and epoch is not None and epoch.get("business_session_id") is not None:
+                budget = max(0, budget-getattr(req, "contextkv_host_backup_admitted_pages", 0)*page)
+                admission += min(missing, budget)
+            else:
+                # allow_host_backup leaves requests without a registered
+                # business identity under the unmodified Native policy.
+                admission += missing
+        return min(potential, admission)
+
+    def workload_snapshot(self, *, include_host_growth=False, host_write_budget_tokens=None):
         """Scheduler-visible logical work, never uniquely owned physical slots.
 
         Native in-flight collection handles overlap and repeated batch membership.
@@ -811,7 +866,8 @@ class ContextKVRuntime:
             return dict(active_requests=None, queued_requests=None,
                         native_running_requests=None, native_waiting_requests=None,
                         native_new_token_ratio=None, native_max_new_tokens_clip=None,
-                        native_running_budget_tokens=None, native_running_budget_requests=None)
+                        native_running_budget_tokens=None, native_running_budget_requests=None,
+                        native_host_write_growth_tokens=None)
         from sglang.srt.managers.schedule_policy import CLIP_MAX_NEW_TOKENS, PrefillAdder
 
         # Keep the exact current scheduler.running_batch membership. PrefillAdder
@@ -853,7 +909,9 @@ class ContextKVRuntime:
                     native_waiting_requests=[summary(req) for req in waiting],
                     native_new_token_ratio=ratio, native_max_new_tokens_clip=CLIP_MAX_NEW_TOKENS,
                     native_running_budget_tokens=running_budget,
-                    native_running_budget_requests=[summary(req) for req in budget_requests])
+                    native_running_budget_requests=[summary(req) for req in budget_requests],
+                    native_host_write_growth_tokens=(self._host_write_growth((*running, *waiting), host_write_budget_tokens)
+                        if include_host_growth and self.cache_config["write_policy"] == "write_through" else None))
 
     def record_native_match(self, req, input_tokens):
         """Observe a completed native match; overwrite bounded per-request scalars.
@@ -915,6 +973,12 @@ class ContextKVRuntime:
         free_gpu = int(self.cache.token_to_kv_pool_allocator.available_size())
         controller = self.cache.cache_controller
         free_host = int(controller.mem_pool_host.available_size()) if controller is not None else 0
+        host_budget = None
+        if controller is not None and self.host_admission.mode != "off":
+            capacity = int(controller.mem_pool_host.size)
+            pressure = self.host_admission.pressure_state(capacity, capacity-free_host, time.monotonic())
+            if pressure["pressure"]:
+                host_budget = -(-self.host_admission.threshold_tokens//self.cache.page_size)*self.cache.page_size
         for c in candidates:
             ids = c["input_ids"]
             if c["input_hash"] != token_hash(ids):
@@ -942,11 +1006,14 @@ class ContextKVRuntime:
                     observed_time_ns=time.monotonic_ns(), engine_restart_id=self.restart_id,
                     cache_config_hash=self.cache_config_hash,
                     free_gpu_tokens=free_gpu, free_host_tokens=free_host,
+                    host_write_policy=self.cache_config["write_policy"], host_write_budget_tokens=host_budget,
                     gpu_capacity_tokens=int(self.cache.token_to_kv_pool_allocator.size),
                     evictable_gpu_tokens=int(self.cache.full_evictable_size()),
                     evictable_host_tokens=None,
                     quotes=quotes, fingerprint=self.fingerprint, host_quote_supported=True,
-                    **self.workload_snapshot())
+                    **self.workload_snapshot(include_host_growth=any(
+                        row["host_only_load_tokens"] and row["evictable_host_token_ranges"] for row in quotes),
+                        host_write_budget_tokens=host_budget))
 
     def _drop_result(self, attempt):
         item = self.results.pop(attempt, None)

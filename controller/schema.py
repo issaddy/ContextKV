@@ -211,9 +211,17 @@ class CacheQuote:
     # Ready contiguous GPU prefix currently carrying no native FULL hard lock.
     # None means an older engine did not observe it; zero is a measured value.
     evictable_gpu_prefix_tokens: int | None = None
+    # Half-open page-aligned intervals on the matching causal path. Ready
+    # copies, pending backups and each tier's hard locks are observed separately.
+    gpu_token_ranges: tuple[tuple[int, int], ...] = ()
+    host_token_ranges: tuple[tuple[int, int], ...] = ()
+    evictable_gpu_token_ranges: tuple[tuple[int, int], ...] = ()
+    evictable_host_token_ranges: tuple[tuple[int, int], ...] = ()
+    inflight_d2h_token_ranges: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
-        _tuples(self, "uncertainty_reasons")
+        _tuples(self, "uncertainty_reasons", "gpu_token_ranges", "host_token_ranges",
+                "evictable_gpu_token_ranges", "evictable_host_token_ranges", "inflight_d2h_token_ranges")
 
 
 @dataclass(frozen=True)
@@ -265,6 +273,12 @@ class CacheQuoteBatch:
     native_running_budget_tokens: float | None = None
     native_running_budget_requests: tuple[NativeRequestSummary, ...] | None = None
     client_received_monotonic: float | None = None
+    host_write_policy: str | None = None
+    # Current native admission limit for a new request; None is unrestricted.
+    host_write_budget_tokens: int | None = None
+    # Unique known concurrent inputs plus remaining output limits, capped by
+    # each request's unspent backup allowance. This is a write upper bound.
+    native_host_write_growth_tokens: int | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "quotes")

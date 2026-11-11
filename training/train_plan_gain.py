@@ -375,11 +375,15 @@ def _cost_samples(rows):
     return samples, len(seen)
 
 
-def _ridge(z, y, ridge):
+def _ridge(z, y, ridge, *, sample_weight=None):
+    """Weighted squared error with an unpenalized intercept."""
     import numpy as np
-    x_mean, y_mean = z.mean(axis=0), y.mean(axis=0)
+    sample_weight = np.ones(len(z)) if sample_weight is None else np.asarray(sample_weight)
+    x_mean = np.average(z, axis=0, weights=sample_weight)
+    y_mean = np.average(y, axis=0, weights=sample_weight)
     x = z-x_mean
-    coefficients = np.linalg.solve(x.T@x+ridge*np.eye(x.shape[1]), x.T@(y-y_mean))
+    weighted_x = x*sample_weight[:, None]
+    coefficients = np.linalg.solve(x.T@weighted_x+ridge*np.eye(x.shape[1]), weighted_x.T@(y-y_mean))
     return coefficients, y_mean-x_mean@coefficients
 
 

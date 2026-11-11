@@ -5,6 +5,52 @@ from controller.context_schema import Condition, Need, TaskState, TextRef
 from training.task_relations import candidates, targets, apply_edges, graph_items
 
 
+def test_task_evaluation_replays_appended_labels_in_conversation_order(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from controller.schema import TurnRecord
+    from controller.serialization import to_jsonable
+    from training.task_data import write_jsonl
+    import training.task_model as task_model
+
+    observed = []
+
+    class Student:
+        tokenizer = None
+
+        def predict(self, turn, windows, memory, **kwargs):
+            observed.append((turn.task_id, tuple(state.task_id for state in memory.prior_task_states)))
+            return TaskPrediction('standalone')
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(task_model, 'TaskModel', lambda *args, **kwargs: Student())
+    monkeypatch.setattr('adapters.hybrid_retrieval.LocalBGE', lambda *args, **kwargs:
+        SimpleNamespace(tokenizer=None, encode=None, close=lambda: None))
+    monkeypatch.setattr(task_model, 'HistoryIndex', lambda *args, **kwargs:
+        SimpleNamespace(select=lambda *args, **kwargs: ()))
+    monkeypatch.setattr(task_model, 'encode_task', lambda *args, **kwargs: {})
+    monkeypatch.setattr(task_model, 'task_targets', lambda *args: {})
+    rows = []
+    for conversation, turn in [('a', 2), ('b', 1), ('a', 1)]:
+        task_id = f'{conversation}-{turn}'
+        rows.append({'task_id': task_id, 'conversation_id': conversation, 'turn': turn,
+            'split': 'train', 'question': 'Which rule?', 'snapshot_id': 'snapshot',
+            'actual_history': to_jsonable((TurnRecord(1, 'Earlier rule?', 'Actual answer.'),)) if turn == 2 else [],
+            'task_catalogue': {}, 'task_reference_date': None,
+            'prediction': to_jsonable(TaskPrediction('standalone')),
+            'task_state': to_jsonable(TaskState(task_id, 'Which rule?', current_turn_id=turn))})
+    labels, cohort, output = tmp_path/'labels.jsonl', tmp_path/'cohort.json', tmp_path/'evaluation'
+    write_jsonl(labels, rows)
+    cohort.write_text(json.dumps({'members': [{'task_id': row['task_id'],
+        'conversation_id': row['conversation_id'], 'split': 'dev'} for row in rows]}))
+    summary = task_model.evaluate_task({'training': {'task_eval_labels': str(labels),
+        'cohort_manifest': str(cohort), 'task_eval_output': str(output), 'device': 'cpu'}})
+    assert summary['rows'] == 3
+    assert observed == [('a-1', ()), ('a-2', ('a-1',)), ('b-1', ())]
+
+
 def test_owned_edges_history_scope_and_acyclic_decoding():
     a, b, x, y = [TextRef(1, 'user', i, i+1) for i in range(4)]
     old = Condition('old', value_spans=(x,))

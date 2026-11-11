@@ -62,6 +62,22 @@ def test_numeric_support_score_does_not_turn_partial_contract_into_answer():
     assert prediction.disposition == "partial"
 
 
+def test_support_training_and_inference_share_predicted_source_spans():
+    from adapters.support_model import SupportInput
+    from training.support_model import _predicted_source_spans, render_document
+
+    source = make_evidence('0123456789abcdef', 'manual')
+    unit = EvidenceUnit('u', (SourceSpan('source', source.key, 3, 11),), source.text[3:11])
+    _, locations = render_document(SupportInput('task', 'need', 'Which rule?', (unit,)))
+    start = locations[0][0]
+    spans = _predicted_source_spans([1, 1, 2, 0, 1],
+        [(0, 1), (start-1, start+2), (start+2, start+4), (start+4, start+6), (start+6, start+10)],
+        [0, 1, 1, 1, 1], locations)
+    assert [(span.source_key, span.start, span.end) for span in spans] == [
+        (source.key, 3, 7), (source.key, 9, 11)]
+    assert len(spans) == 2 and len(unit.source_spans) == 1
+
+
 def test_compiler_keeps_source_char_offsets_separate_from_prompt_offsets():
     from controller.context_budget import actual_source_coverage
 

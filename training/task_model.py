@@ -785,6 +785,7 @@ def evaluate_task(config):
         return 2*len(predicted & expected)/max(1, len(predicted)+len(expected))
 
     evaluation_rows = select_cohort_rows(read_jsonl(settings["task_eval_labels"]), settings["cohort_manifest"], "dev")
+    evaluation_rows.sort(key=lambda row: (row["conversation_id"], row["turn"]))
     for row in evaluation_rows:
         history = tuple(decode(TurnRecord, value) for value in row["actual_history"])
         memory = RetrievalState(len(history), history, tuple(prior.get(row["conversation_id"], ())),

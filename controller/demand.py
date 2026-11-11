@@ -57,7 +57,7 @@ class DemandLease:
     source_step_id: str
     target_step_id: str
     boundary_tokens: int
-    at_risk_tokens: int
+    at_risk_tokens: float
     page_size: int
     cache_scope_hash: str
     ttl_seconds: float
@@ -71,7 +71,7 @@ class JointOption:
     retain: tuple[DemandLease, ...] = ()
     release: tuple[str, ...] = ()
     protected_tokens: int = 0
-    uncovered_risk_tokens: int = 0
+    uncovered_risk_tokens: float = 0
     retention_evidence: str | None = None
     keep: tuple[str, ...] = ()
     arrival_basis: str | None = None

@@ -208,13 +208,13 @@ def retention_validation(models, paired):
                 unmatched.append(row["event_id"])
                 continue
             tokens = row["gpu_page_count"]*row["page_size"]
-            if forecast.source_token_range is None or not (
-                    forecast.source_token_range[0] <= tokens <= forecast.source_token_range[1]):
-                unmatched.append(row["event_id"])
-                continue
+            within_range = (forecast.source_token_range[0] <= tokens <= forecast.source_token_range[1]
+                            if forecast.source_token_range is not None else None)
+            forecast = forecast.for_tokens(tokens)
             matched_groups.add(session_group(row, components))
             matched.append({**row, "predicted_full_window_ms": forecast.full_window_saved_ms,
-                            "predicted_arm_ms": forecast.saved_ms})
+                            "predicted_arm_ms": forecast.saved_ms,
+                            "within_training_token_range": within_range})
         values = [(row["sampling_weight"], row["predicted_full_window_ms"], row["predicted_arm_ms"],
                    row["full_window_cost_difference_ms"]) for row in balance_session_rows(matched, components)]
         weight = sum(item[0] for item in values)
@@ -224,6 +224,8 @@ def retention_validation(models, paired):
             evaluation_split="dev", eligible_pairs=len(dev), matched_pairs=len(values),
             independent_samples=len(components), matched_independent_samples=len(matched_groups),
             prediction_coverage=len(values)/len(dev) if dev else None, unmatched_event_ids=unmatched,
+            within_training_length_pairs=sum(row["within_training_token_range"] is True for row in matched),
+            outside_training_length_pairs=sum(row["within_training_token_range"] is False for row in matched),
             full_window_prediction_pairs=len(full),
             weighted_mae_ms=sum(w*abs(predicted-actual) for w, predicted, actual in full)
                 /sum(w for w, _, _ in full) if full else None,
