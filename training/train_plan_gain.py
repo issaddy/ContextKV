@@ -210,10 +210,9 @@ class PlanGainModel:
         if self.provenance.get("direct_baseline_identity", False) and features.get("direct_answer", 0) > .5:
             return 0.0
         if self.quality_tree is not None:
-            tree, node = self.quality_tree, 0
-            if "by_kind" in tree:
-                kind = next(kind for kind in tree["by_kind"] if features.get(kind, 0) > .5)
-                tree = tree["by_kind"][kind]
+            heads = self.quality_tree["by_kind"]
+            kind = next(kind for kind in heads if features.get(kind, 0) > .5)
+            tree, node = heads[kind], 0
             while tree["left"][node] != -1:
                 name = self.feature_names[tree["feature"][node]]
                 node = tree["left"][node] if features[name] <= tree["threshold"][node] else tree["right"][node]
@@ -438,7 +437,7 @@ def fit_native_cost_heads(samples, *, ridge):
     return {"branch_complete_cost": heads}, {"branch_complete_cost": mse}, scale.tolist()
 
 
-def fit_gain(rows, *, ridge=1.0, input_path=None):
+def fit_gain(rows, *, ridge=1.0):
     """Closed-form regression; called only by the explicit training command."""
     import numpy as np
     reader, profile, _, selection_contract = _supervision(rows, split="train")
@@ -468,8 +467,7 @@ def fit_gain(rows, *, ridge=1.0, input_path=None):
             "cost_fields": COST_FIELDS, "branch_scope": "new_action_and_complete_ANSWER_excludes_paid_preparation_cleanup",
             "incremental_scope": "signed_action_plus_ANSWER_minus_direct_ANSWER",
             "training_mse": cost_mse}
-    digest = _digest(rows)
-    return PlanGainModel(reader, profile, "plan-gain:"+digest, names,
+    return PlanGainModel(reader, profile, "plan-gain:"+str(time.time_ns()), names,
         tuple(center.tolist()), tuple(scale.tolist()), tuple(coefficients.tolist()), float(intercept),
         {"input_protocol": rows[0]["input_protocol"],
          "evidence_selection_contract": selection_contract,
@@ -480,13 +478,10 @@ def fit_gain(rows, *, ridge=1.0, input_path=None):
              if rows[0].get("observed_state_binding") is not None else None,
          "training_split": "train", "training_records": len(rows),
          "training_state_count": len({row["state_key"] for row in rows}),
-         "record_ids": [row["record_id"] for row in rows], "input_sha256": digest,
-         "input_path": str(Path(input_path).resolve()) if input_path is not None else None,
          "scorer_identity": rows[0]["scorer_identity"], "ridge": ridge,
          "training_mse": float(np.mean((predicted-y)**2)),
          "fit_elapsed_ms": (time.perf_counter()-started)*1000,
          "implementation": "float64 standardized linear ridge; shared pre-action features for quality and complete costs",
-         "counterfactual_runs_retained": True,
          "trained_semantic_kinds": sorted({row["semantic_kind"] for row in rows}),
          "direct_baseline_identity": bool(cost_samples)}, cost_models, cost_provenance)
 
@@ -528,7 +523,7 @@ def main(argv=None):
     parser.add_argument("--ridge", type=float, default=1.0)
     args = parser.parse_args(argv)
     rows = [json.loads(line) for line in Path(args.train).read_text().splitlines() if line.strip()]
-    model = fit_gain(rows, ridge=args.ridge, input_path=args.train)
+    model = fit_gain(rows, ridge=args.ridge)
     model.save(args.output)
     if args.dev:
         development = [json.loads(line) for line in Path(args.dev).read_text().splitlines() if line.strip()]

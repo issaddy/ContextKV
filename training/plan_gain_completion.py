@@ -18,7 +18,7 @@ import time
 from controller.context_schema import ReadTask, ReadingOutcome, StepRecord
 from controller.context_budget import COMPLETION_RESERVE_SCOPE, CompletionReserve
 from controller.action_proposals import (ALTERNATE_ANSWERS, BOUNDED_CONTINUATION, bind_read_parents,
-    FINITE_ACTION_DOMAIN, equivalent_raw_answers, validate_action_counts)
+    equivalent_raw_answers, validate_action_counts)
 from controller.plan_policy import (OBSERVED_FEATURE_SCHEMA, CompleteCost, NATIVE_COST_FEATURE_NAMES,
                                     NATIVE_COST_SCHEMA, PlanCandidate, PlanStep, _completed_steps,
                                     plan_cost_features, plan_features)
@@ -145,8 +145,8 @@ def read_count_profile(records, *, scope):
             continue
         seen.add(record["record_id"])
         infer = "with_infer" if record["features"]["infer_needs"] > 0 else "without_infer"
-        groups[record["semantic_kind"]][infer].append(record["actual_run"]["new_action_counts"]["READ"])
-    return {"scope": scope, "source": "actual_run.new_action_counts.READ",
+        groups[record["semantic_kind"]][infer].append(record["new_action_counts"]["READ"])
+    return {"scope": scope, "source": "new_action_counts.READ",
         "groups": {kind: {infer: {"mean": sum(counts)/len(counts), "samples": len(counts)}
             for infer, counts in sorted(buckets.items())} for kind, buckets in sorted(groups.items())}}
 
@@ -306,7 +306,7 @@ def completion_record(before, run, *, template=None, reconstructed_reserve=None)
             reserve = decode(CompletionReserve, reconstructed_reserve["reserve"])
             rebuilt_reserve = reconstructed_reserve
         else:
-            raise ValueError("missing pre-action completion reserve; refresh-features with --template-config")
+            raise ValueError("missing pre-action completion reserve; finalize with --template-config")
         # The remaining catalog is a pre-action cost covariate. Its quotes do
         # not change the bounded execution whose actual cost supplies the label.
         cost_features = plan_cost_features(features, batch, first, reserve,
@@ -335,25 +335,6 @@ def completion_record(before, run, *, template=None, reconstructed_reserve=None)
         "cost_target_scope": BOUNDED_CONTINUATION if observed is not None else "whole_registered_plan",
         "observed_feature_schema": OBSERVED_FEATURE_SCHEMA if observed is not None else None,
         "pre_registration": before, "actual_run": run}
-
-
-def _cost_targets(base, candidate):
-    """Retain null per dimension; subtract only two actually known costs."""
-    direct = base["actual_run"]["actual_branch_execution_cost"]
-    action = candidate["actual_run"]["actual_branch_execution_cost"]
-    total_direct, total_action = base["actual_run"]["cost"], candidate["actual_run"]["cost"]
-    branch, baseline, delta = {}, {}, {}
-    for name in COST_FIELDS:
-        left, right = direct[name], action[name]
-        for value in (left, right, total_direct[name], total_action[name]):
-            if value is not None and (not _measured(value) or value < 0):
-                raise ValueError("completion costs must be observed nonnegative values or unknown")
-        baseline[name], branch[name] = left, right
-        delta[name] = right-left if left is not None and right is not None else None
-        if (delta[name] is not None and total_direct[name] is not None and total_action[name] is not None
-                and not math.isclose(delta[name], total_action[name]-total_direct[name], rel_tol=1e-9, abs_tol=1e-9)):
-            raise ValueError("completion paired costs do not share paid state and preparation")
-    return {"branch_complete_cost": branch, "direct_complete_cost": baseline, "incremental_complete_cost": delta}
 
 
 def effective_pair(base, candidate):
@@ -400,12 +381,55 @@ def effective_pair(base, candidate):
         "direct_features": base["features"], "direct": base, "counterfactual": candidate}
     if observed:
         result["cost_target_scope"] = BOUNDED_CONTINUATION
-        result["cost_targets"] = _cost_targets(base, candidate)
-        result["incremental_complete_cost"] = result["cost_targets"]["incremental_complete_cost"]
     return result
 
 
-def finalize(collection, output):
+def compact_branch(record):
+    """Keep predictor inputs and measured outcomes after label construction."""
+    names = ("record_id", "conversation_id", "plan_id", "semantic_kind", "answer_representation",
+             "features", "cost_features", "completion", "completion_reason", "effective_utility",
+             "raw_judge_Q", "collection_mode", "reader_checkpoint", "reader_profile_id")
+    result = {name: record[name] for name in names}
+    observed = record["observed_state_binding"]
+    binding = (None if observed is None else {name: observed[name] for name in (
+        "paid_cost", "resident_model_manifest_digest", "action_domain")})
+    run = record["actual_run"]
+    first = run.get("pre_action_input")
+    fixture = record["cache_fixture_shape"]
+    result.update(observed_state_binding=binding,
+        budget=record["pre_registration"]["working_state"]["plan"]["budget"],
+        actual_cost={name: run["actual_branch_execution_cost"][name] for name in COST_FIELDS},
+        new_action_counts=run.get("new_action_counts", {}),
+        cache_start=fixture["mode"] if fixture is not None else run["counterfactual_cache_start"],
+        first_output_tokens=first["output_budget"] if first is not None else 0,
+        continuation_gap_limits=run["continuation_gap_limits"])
+    return result
+
+
+def compact_pair(record):
+    equivalent = False
+    if record.get("answer_representation") == "raw":
+        direct, raw = (record[arm]["actual_run"].get("pre_action_input") for arm in ("direct", "counterfactual"))
+        if direct is not None and raw is not None:
+            state = decode(ReadingOutcome, record["direct"]["pre_registration"]["working_state"])
+            candidates = tuple(decode(PromptCandidate, value) for value in (direct, raw))
+            equivalent = bool(equivalent_raw_answers(state, candidates))
+    contract = _fit_selection_contract(record[arm]["actual_run"].get("resident_model_manifest")
+        for arm in ("direct", "counterfactual")) if record["observed_state_binding"] is not None else None
+    names = ("source", "record_id", "state_key", "task_id", "conversation_id", "semantic_kind",
+        "reader_checkpoint", "reader_profile_id", "split", "features", "collection_mode", "input_protocol",
+        "scorer_identity", "answer_representation", "utility_rule", "raw_Q_direct", "raw_Q_counterfactual",
+        "utility_direct", "utility_counterfactual", "effective_delta_q", "completion_direct", "completion_counterfactual")
+    result = {name: record[name] for name in names}
+    result.update(schema_version=3, direct=compact_branch(record["direct"]),
+        counterfactual=compact_branch(record["counterfactual"]),
+        equivalent_representation=equivalent, evidence_selection_contract=contract,
+        cost_target_scope=BOUNDED_CONTINUATION if record["observed_state_binding"] is not None else "whole_registered_plan")
+    result["observed_state_binding"] = result["counterfactual"]["observed_state_binding"]
+    return result
+
+
+def finalize(collection, output, *, template=None):
     source = Path(collection)
     target = Path(output)
     target.mkdir(parents=True, exist_ok=False)
@@ -417,16 +441,13 @@ def finalize(collection, output):
             if not run_path.exists():
                 continue
             registration, run = json.loads(registration_path.read_text()), json.loads(run_path.read_text())
-            record = completion_record(registration, run)
-            record["source_files"] = {"registration": str(registration_path.resolve()), "run": str(run_path.resolve()),
-                "registration_sha256": hashlib.sha256(registration_path.read_bytes()).hexdigest(),
-                "run_sha256": hashlib.sha256(run_path.read_bytes()).hexdigest()}
-            completed.append(record)
+            record = completion_record(registration, run, template=template)
+            completed.append(compact_branch(record))
             labelled.append(record)
         groups = {}
         for record in labelled:
-            group = digest([record[name] for name in ("state_key", "conversation_id", "reader_checkpoint",
-                "reader_profile_id", "split", "observed_state_binding")])
+            group = tuple(record[name] for name in ("state_key", "conversation_id", "reader_checkpoint",
+                "reader_profile_id", "split")) + (record["actual_run"]["cost"]["shared_preparation_cost_id"],)
             groups.setdefault(group, []).append(record)
         for members in groups.values():
             direct = {record["record_id"]: record for record in members if record["semantic_kind"] == "direct_answer"
@@ -441,13 +462,12 @@ def finalize(collection, output):
                     continue
                 paired = effective_pair(base, candidate)
                 if paired is not None:
-                    effective.append(paired)
-    write_rows(target/"completion.jsonl", completed)
+                    effective.append(compact_pair(paired))
     write_rows(target/"effective-gains.jsonl", effective)
-    manifest = {"source_collection": str(source.resolve()), "utility_rule": RULE,
+    manifest = {"utility_rule": RULE, "record_format": "features_and_measured_outcomes_v1",
         "observed_feature_schema": OBSERVED_FEATURE_SCHEMA,
         "completion_reserve_scope": COMPLETION_RESERVE_SCOPE,
-        "cost_target_scope": BOUNDED_CONTINUATION if any("cost_targets" in row for row in effective) else None,
+        "cost_target_scope": BOUNDED_CONTINUATION if any(row["observed_state_binding"] is not None for row in effective) else None,
         "read_count_profile": read_count_profile(completed, scope="unique_delivered_observed_branches"),
         "completion_records": len(completed), "effective_gain_records": len(effective),
         "effective_action_records": sum(row["semantic_kind"] != "direct_answer" for row in effective),
@@ -457,196 +477,28 @@ def finalize(collection, output):
         "raw_quality_missing": sum(record["raw_judge_Q"] is None for record in completed),
         "collection_modes": dict(Counter(record["collection_mode"] for record in completed)),
         "completion_reasons": dict(Counter(record["completion_reason"] for record in completed)),
-        "cost_labelled_actions": sum("cost_targets" in row and all(
-            value is not None for values in row["cost_targets"].values() for value in values.values()) for row in effective),
+        "cost_labelled_actions": sum(row["observed_state_binding"] is not None and all(
+            value is not None for arm in ("direct", "counterfactual")
+            for value in row[arm]["actual_cost"].values()) for row in effective),
         "raw_quality_policy": "missing raw judge Q preserved; zero is only the predeclared no-QA operational utility",
         "reader_bindings": sorted({(record["reader_checkpoint"], record["reader_profile_id"]) for record in completed})}
     (target/"manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
     return manifest
 
 
-def refresh_features(source, output, *, registration_root=None, recorded_root=None, template=None):
-    """Reproject recorded branches without changing actions, labels or costs.
-
-    Both embedded pre-registrations and executions are revalidated. This is a
-    feature migration only: a new grouping/action needs a new measured branch.
-    The original records remain untouched.
-    """
-    target = Path(output)
-    if target.exists() or target.resolve() == Path(source).resolve():
-        raise ValueError("feature refresh requires a new output file")
-    refreshed = []
-    for row in rows(source):
-        if row.get("source") == "actual_answer_counterfactual":
-            if registration_root is None or recorded_root is None:
-                raise ValueError("saved answer pairs require their original registrations and recorded root")
-            branches = {}
-            for name, old in (("direct", "direct_run"), ("counterfactual", "counterfactual_run")):
-                run = row[old]["source_run"]
-                relative = Path(run["registered_plan_path"]).relative_to(recorded_root)
-                path = (Path(registration_root)/relative).resolve()
-                if not path.is_relative_to(Path(registration_root).resolve()):
-                    raise ValueError("registration path escapes the supplied archive root")
-                before = json.loads(path.read_text())
-                branch = completion_record(before, run, template=template)
-                branch["source_files"] = {"registration": str(path),
-                    "registration_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                    "run": str(Path(source).resolve()), "run_record_id": row["record_id"], "run_arm": old}
-                branches[name] = branch
-            expected_targets = {"effective_delta_q": row["delta_q"],
-                "raw_Q_direct": row["quality_direct"], "raw_Q_counterfactual": row["quality_counterfactual"],
-                "utility_direct": row["quality_direct"], "utility_counterfactual": row["quality_counterfactual"],
-                **{field: row.get(field) for field in ("cost_targets", "incremental_complete_cost")}}
-        elif row.get("source") == "actual_completion_weighted_counterfactual":
-            branches = {name: completion_record(row[name]["pre_registration"], row[name]["actual_run"],
-                        template=template, reconstructed_reserve=row[name].get("reconstructed_completion_reserve"))
-                        for name in ("direct", "counterfactual")}
-            for name, branch in branches.items():
-                if "source_files" in row[name]:
-                    branch["source_files"] = row[name]["source_files"]
-            expected_targets = {field: row.get(field) for field in ("record_id", "effective_delta_q",
-                "raw_Q_direct", "raw_Q_counterfactual", "utility_direct", "utility_counterfactual",
-                "cost_targets", "incremental_complete_cost")}
-        else:
-            raise ValueError("feature refresh requires saved completion pairs with actual registrations and runs")
-        updated = effective_pair(branches["direct"], branches["counterfactual"])
-        if updated is None:
-            raise ValueError("feature refresh cannot manufacture an unmeasured quality label")
-        def same_cost(left, right):
-            if isinstance(left, dict) and isinstance(right, dict):
-                return left.keys() == right.keys() and all(same_cost(left[key], right[key]) for key in left)
-            if isinstance(left, (int, float)) and isinstance(right, (int, float)):
-                return math.isclose(left, right, rel_tol=1e-12, abs_tol=1e-9)
-            return left == right
-        for field, expected in expected_targets.items():
-            # Older answer-pair exports subtracted shared preparation before
-            # forming a delta. Completion pairs subtract measured absolute
-            # branches directly; tolerate only floating point roundoff here.
-            equal = (same_cost(expected, updated.get(field)) if row["source"] == "actual_answer_counterfactual"
-                and field in {"cost_targets", "incremental_complete_cost"} else expected == updated.get(field))
-            if not equal:
-                raise ValueError(f"feature refresh changed recorded branch target or execution identity: {field}")
-        refreshed.append(updated)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    write_rows(target, refreshed)
-    manifest = {"source": str(Path(source).resolve()),
-        "output": str(target.resolve()), "records": len(refreshed),
-        "observed_feature_schema": OBSERVED_FEATURE_SCHEMA,
-        "completion_reserve_scope": COMPLETION_RESERVE_SCOPE,
-        "cost_target_scope": BOUNDED_CONTINUATION if any("cost_targets" in row for row in refreshed) else None,
-        "read_count_profile": read_count_profile(
-            (row[side] for row in refreshed for side in ("direct", "counterfactual")),
-            scope="unique_delivered_observed_branches"),
-        "scope": "unchanged registered actions and actual branch inputs; no new model calls"}
-    target.with_suffix(target.suffix+".manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
-    return manifest
-
-
 def _observed_selection_contract(records):
-    return _fit_selection_contract(row[branch]["actual_run"].get("resident_model_manifest")
-        for row in records if row.get("observed_state_binding") is not None
-        for branch in ("direct", "counterfactual"))
-
-
-def exposed_source_families(records, catalogue):
-    """Registered material, including unread archive/source_scope, for cohort diagnostics."""
-    families = set()
-    for row in records:
-        for arm in ("direct", "counterfactual"):
-            branch = row[arm]
-            before, run = branch["pre_registration"], branch["actual_run"]
-            keys = [block["key"] for block in before["snapshot"]["archive"]]
-            plans = (before["working_state"]["plan"], (run.get("attempt") or {}).get("context_plan"))
-            for plan in plans:
-                if plan is not None:
-                    keys.extend(block["key"] for block in plan["selected_set"]["source_blocks"])
-                    keys.extend(plan["task_state"]["source_scope"])
-            gap = (run.get("gap_result") or {}).get("pool") or {}
-            keys.extend(block["key"] for block in gap.get("source_blocks", ()))
-            families.update(catalogue.get(key["passage_id"], key["document_id"]) for key in keys)
-    return families
-
-
-def source_family_catalogue(paths):
-    sources = {row["source_id"]: row for path in paths for row in rows(path)}
-    result = {}
-    for identity, row in sources.items():
-        parent = row.get("derived_from", {})
-        result[identity] = parent.get("document_family") or sources.get(
-            parent.get("source_id"), row)["document_family"]
-    return result
+    contracts = iter(row["evidence_selection_contract"] for row in records)
+    first = next(contracts, None)
+    if any(contract != first for contract in contracts):
+        raise ValueError("gain records use different evidence selection contracts")
+    return first
 
 
 def distinct_action_pairs(records):
-    for row in records:
-        if row.get("answer_representation") == "raw":
-            direct, raw = (row[arm]["actual_run"].get("pre_action_input") for arm in ("direct", "counterfactual"))
-            if direct is not None and raw is not None:
-                state = decode(ReadingOutcome, row["direct"]["pre_registration"]["working_state"])
-                candidates = tuple(decode(PromptCandidate, value) for value in (direct, raw))
-                if equivalent_raw_answers(state, candidates):
-                    continue
-        yield row
+    return (row for row in records if not row["equivalent_representation"])
 
 
-def compatible_action_domain(left, right):
-    """Only the READ organization expansion may share unchanged action labels."""
-    protocols = {"two_reads_shared_outputs_terminal_representations_v1", FINITE_ACTION_DOMAIN}
-    if left == right:
-        return True
-    return (isinstance(left, dict) and isinstance(right, dict)
-        and left.get("protocol") in protocols and right.get("protocol") in protocols
-        and {key: value for key, value in left.items() if key != "protocol"}
-            == {key: value for key, value in right.items() if key != "protocol"})
-
-
-def fitted_action_domain(records):
-    domains = {digest((row["observed_state_binding"] or {}).get("action_domain")):
-               (row["observed_state_binding"] or {}).get("action_domain") for row in records}
-    ordered = [domains[key] for key in sorted(domains)]
-    if len(ordered) == 1 and (not isinstance(ordered[0], dict)
-                             or ordered[0].get("protocol") != FINITE_ACTION_DOMAIN):
-        return ordered[0], ordered
-    current = next((domain for domain in ordered
-                    if isinstance(domain, dict) and domain.get("protocol") == FINITE_ACTION_DOMAIN), None)
-    if current is None or not all(compatible_action_domain(domain, current) for domain in ordered):
-        raise ValueError("effective gain fit uses incompatible registered action domains")
-
-    def grouping(tasks, completed):
-        return Counter((tuple(sorted(task["need_ids"])), tuple(sorted(task["input_unit_ids"])),
-                        task["operation"], tuple(sorted(task["condition_ids"]))) for task in tasks
-                       if task["kind"] == "READ" and task["step_id"] not in completed)
-
-    def obligations(groups):
-        return {(need, unit, operation, conditions) for needs, units, operation, conditions in groups
-                for need in needs for unit in units}
-
-    measured_change = False
-    for row in records:
-        if (row["observed_state_binding"] or {}).get("action_domain") != current or row["semantic_kind"] != "read_once":
-            continue
-        branch = row["counterfactual"]
-        before, run = branch["pre_registration"], branch["actual_run"]
-        state, proposed = before["working_state"], before["plan_candidate"]["context_plan"]
-        completed = {result["step_id"] for result in state["results"]}
-        original_groups = grouping(state["plan"]["steps"], completed)
-        proposed_groups = grouping(proposed["steps"], completed)
-        if obligations(original_groups) != obligations(proposed_groups):
-            raise ValueError("v2 READ organization changed the frozen source/Need obligations")
-        actual_reads = [step["task"] for step in run.get("steps", ())
-                        if step["step_id"] in run.get("new_step_ids", ()) and step["task"]["kind"] == "READ"]
-        first_group = grouping(actual_reads[:1], set())
-        if (run.get("compiled_route_steps") and run.get("pre_action_input")
-                and run.get("new_action_counts", {}).get("READ", 0) > 0
-                and original_groups != proposed_groups and first_group
-                and set(first_group) <= set(proposed_groups) and not set(first_group) <= set(original_groups)):
-            measured_change = True
-    if len(ordered) > 1 and not measured_change:
-        raise ValueError("v2 action-domain fit needs an actually executed READ organization branch")
-    return current, ordered
-
-
-def fit_effective(training, *, ridge=1.0, quality_head="tree", path=None):
+def fit_effective(training, *, ridge=1.0, quality_head="tree"):
     import numpy as np
     if not training or any(row["split"] != "train" or row["source"] != "actual_completion_weighted_counterfactual"
                            or row["utility_rule"] != RULE for row in training):
@@ -659,36 +511,25 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree", path=None):
     scorer_identity = label_scorer_identity(training)
     if len({digest(validate_input_protocol(row.get("input_protocol"))) for row in training}) != 1:
         raise ValueError("effective gain asset binds one actual source/compiler/reader input protocol")
-    limits = {digest(row["counterfactual"]["actual_run"]["continuation_gap_limits"]) for row in training}
+    limits = {tuple(sorted(row["counterfactual"]["continuation_gap_limits"].items())) for row in training}
     if len(limits) != 1:
         raise ValueError("one bounded gain asset requires the same declared GAP limits")
     selection_contract = _observed_selection_contract(training)
-    domain, training_domains = fitted_action_domain(training)
+    domain = (training[0]["observed_state_binding"] or {}).get("action_domain")
+    training_domains = [domain]
     samples, direct_seen, cost_kinds, cache_scopes = [], set(), set(), set()
     seen_costs, paid_cost_outcomes = set(), Counter()
     cost_record_ids, cost_branches = [], []
     resident_digests = set()
     for row in training:
-        branches = {name: completion_record(row[name]["pre_registration"], row[name]["actual_run"],
-                    reconstructed_reserve=row[name].get("reconstructed_completion_reserve"))
-                    for name in ("direct", "counterfactual")}
-        expected = effective_pair(branches["direct"], branches["counterfactual"])
-        fields = ("state_key", "conversation_id", "semantic_kind", "reader_checkpoint", "reader_profile_id", "split",
-                  "scorer_identity", "features", "raw_Q_direct", "raw_Q_counterfactual", "utility_direct",
-                  "utility_counterfactual", "effective_delta_q", "direct_features", "observed_state_binding", "input_protocol")
-        if expected is None or any(row[name] != expected[name] for name in fields):
-            raise ValueError("effective target/features differ from the actual fixed-state branch evidence")
-        if row.get("answer_representation", "existing") != expected["answer_representation"]:
-            raise ValueError("effective answer representation differs from the registered branch")
-        if expected.get("cost_targets") != row.get("cost_targets"):
-            raise ValueError("effective cost labels differ from the paired actual paid branch costs")
+        branches = {side: row[side] for side in ("direct", "counterfactual")}
         if row["observed_state_binding"] is None:
             continue
         resident_digests.add(row["observed_state_binding"]["resident_model_manifest_digest"])
-        costs = row["cost_targets"]
-        for side, target in (("direct", "direct_complete_cost"), ("counterfactual", "branch_complete_cost")):
+        for side in ("direct", "counterfactual"):
             branch = branches[side]
-            if branch["cost_features"] is None or any(value is None for value in costs[target].values()):
+            cost = branch["actual_cost"]
+            if branch["cost_features"] is None or any(value is None for value in cost.values()):
                 continue
             if branch["record_id"] in seen_costs:
                 continue
@@ -698,12 +539,11 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree", path=None):
                 continue
             if side == "direct":
                 direct_seen.add(branch["record_id"])
-            samples.append((branch["cost_features"], costs[target]))
+            samples.append((branch["cost_features"], cost))
             cost_kinds.add(branch["semantic_kind"])
             cost_record_ids.append(branch["record_id"])
             cost_branches.append(branch)
-            fixture = branch["cache_fixture_shape"]
-            cache_scopes.add(fixture["mode"] if fixture is not None else branch["actual_run"]["counterfactual_cache_start"])
+            cache_scopes.add(branch["cache_start"])
     started = time.perf_counter()
     names = _fit_features(training)
     actions = [row for row in training if row["semantic_kind"] != "direct_answer"]
@@ -773,12 +613,12 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree", path=None):
          "observed_feature_schema": OBSERVED_FEATURE_SCHEMA if any(
              row["observed_state_binding"] is not None for row in training) else None,
          "continuation_protocol": BOUNDED_CONTINUATION,
-         "continuation_gap_limits": training[0]["counterfactual"]["actual_run"]["continuation_gap_limits"],
+         "continuation_gap_limits": training[0]["counterfactual"]["continuation_gap_limits"],
          "resident_model_manifest_digests": sorted(resident_digests),
          "label": LABEL, "utility_rule": RULE, "no_answer_utility": 0.0, "raw_missing_quality_preserved": True,
          "training_split": "train", "training_records": len(training),
          "equivalent_representation_pairs": declared_pairs-len(training),
-         "training_state_keys": sorted({row["state_key"] for row in training}),
+         "training_states": len({row["state_key"] for row in training}),
          "training_conversations": sorted({row["conversation_id"] for row in training}),
          "scorer_identity": scorer_identity, "ridge": ridge, "quality_fit": quality_fit,
          "trained_semantic_kinds": sorted({row["semantic_kind"] for row in training}),
@@ -795,14 +635,12 @@ def calibrate_completion_latency(model, development, *, quantile=.9):
     grouped, seen = defaultdict(dict), set()
     for row in distinct_action_pairs(development):
         for side in ("direct", "counterfactual"):
-            raw = row[side]
-            if raw["record_id"] in seen:
+            branch = row[side]
+            if branch["record_id"] in seen:
                 continue
-            seen.add(raw["record_id"])
-            branch = completion_record(raw["pre_registration"], raw["actual_run"],
-                reconstructed_reserve=raw.get("reconstructed_completion_reserve"))
+            seen.add(branch["record_id"])
             kind = branch["semantic_kind"]
-            actual = branch["actual_run"]["actual_branch_execution_cost"]["complete_ms"]
+            actual = branch["actual_cost"]["complete_ms"]
             if (branch["completion"] != 1 or branch["cost_features"] is None or not _measured(actual)
                     or not model.supports_semantic_kind(kind, costs=True)):
                 continue
@@ -854,9 +692,8 @@ def evaluate_paired_decisions(model, development):
     for (_, direct), branches in states.items():
         measured, predictions = {}, {}
         for identity, branch in branches.items():
-            run = branch["actual_run"]
-            budget = branch["pre_registration"]["working_state"]["plan"]["budget"]
-            actual = run["actual_branch_execution_cost"]
+            budget = branch["budget"]
+            actual = branch["actual_cost"]
             paid = branch["observed_state_binding"]["paid_cost"]
             features = branch["cost_features"]
             kind = branch["semantic_kind"]
@@ -875,9 +712,8 @@ def evaluate_paired_decisions(model, development):
             margin = calibration.get(kind, {}).get("latency_margin_ms")
             if max_ms is not None and (margin is None or paid["latency_ms"]+cost["complete_ms"]+margin > max_ms):
                 continue
-            first = run.get("pre_action_input")
             reserved = (features["first_input_tokens"]+features["future_input_tokens"]
-                +features["future_output_tokens"]+(first["output_budget"] if first is not None else 0))
+                +features["future_output_tokens"]+branch["first_output_tokens"])
             if ((max_tokens is not None and paid["input_tokens"]+paid["output_tokens"]+reserved > max_tokens)
                     or branch["features"]["paid_steps"]+features["future_steps"]+1 > budget["max_steps"]):
                 continue
@@ -913,25 +749,15 @@ def main(argv=None):
     final = commands.add_parser("finalize")
     final.add_argument("--collection", required=True)
     final.add_argument("--output", required=True)
-    refresh = commands.add_parser("refresh-features")
-    refresh.add_argument("--input", required=True)
-    refresh.add_argument("--output", required=True)
-    refresh.add_argument("--registration-root", help="Local extracted root containing original before.json files")
-    refresh.add_argument("--recorded-root", help="Original machine root used in registered_plan_path")
-    refresh.add_argument("--template-config", help="Run config for CPU-only reconstruction with the original reader tokenizer/template")
+    final.add_argument("--template-config", help="Rebuild budget features from the recorded reader inputs on CPU")
     fit = commands.add_parser("fit")
     fit.add_argument("--train", required=True)
     fit.add_argument("--dev")
-    fit.add_argument("--source-catalogue", action="append", default=[],
-                     help="Original and derived source JSONL catalogues for registered-family overlap diagnostics")
     fit.add_argument("--output", required=True)
     fit.add_argument("--ridge", type=float, default=1.0)
     fit.add_argument("--quality-head", choices=("tree", "linear"), default="tree")
     args = parser.parse_args(argv)
     if args.command == "finalize":
-        print(json.dumps(finalize(args.collection, args.output), ensure_ascii=False))
-        return
-    if args.command == "refresh-features":
         template = None
         if args.template_config:
             from controller.config import create_model_template, load_config
@@ -939,17 +765,12 @@ def main(argv=None):
             config = load_config(args.template_config)
             template = (ByteTemplate(namespace_hash=config.model.namespace_hash) if config.engine.kind == "mock"
                         else create_model_template(config.model))
-        print(json.dumps(refresh_features(args.input, args.output,
-            registration_root=args.registration_root, recorded_root=args.recorded_root, template=template), ensure_ascii=False))
+        print(json.dumps(finalize(args.collection, args.output, template=template), ensure_ascii=False))
         return
     training = rows(args.train)
     if args.dev:
         development = rows(args.dev)
-        catalogue = source_family_catalogue(args.source_catalogue)
-        train_families = exposed_source_families(training, catalogue)
-        dev_families = exposed_source_families(development, catalogue)
-        overlap = train_families & dev_families
-    model = fit_effective(training, ridge=args.ridge, quality_head=args.quality_head, path=args.train)
+    model = fit_effective(training, ridge=args.ridge, quality_head=args.quality_head)
     if args.dev:
         if any(row["split"] != "dev" or row["reader_checkpoint"] != model.reader_checkpoint or
                row["reader_profile_id"] != model.reader_profile_id
@@ -965,18 +786,13 @@ def main(argv=None):
             raise ValueError("effective development conversations overlap fitted training conversations")
         trained_domain = model.provenance["action_domain"]
         if any((row["observed_state_binding"] or {}).get("action_domain") != trained_domain
-               and not (isinstance(trained_domain, dict) and trained_domain.get("protocol") == FINITE_ACTION_DOMAIN
-                        and compatible_action_domain((row["observed_state_binding"] or {}).get("action_domain"),
-                                                     trained_domain)) for row in development):
+               for row in development):
             raise ValueError("effective development differs from the fitted candidate domain")
         if model.cost_models:
             model = calibrate_completion_latency(model, development)
         report = {"records": len(development), **evaluate_paired_decisions(model, development),
             "reader_checkpoint": model.reader_checkpoint,
             "reader_profile_id": model.reader_profile_id, "asset_id": model.asset_id, "utility_rule": RULE,
-            "exposed_source_families": {"train": len(train_families), "dev": len(dev_families),
-                "overlap": len(overlap), "partition_owner": "cohort",
-                "scope": "registered archive, plan selected sources/source_scope, and GAP pool"},
             "completion_reserve_calibration": model.cost_provenance.get("completion_reserve_calibration")}
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output+".development.json").write_text(json.dumps(report, indent=2)+"\n")

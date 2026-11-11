@@ -82,19 +82,19 @@ python3 -m bench.cache_cooperation --config READER.yaml \
 
 ## 收益资产与辅助训练
 
-输入及动作语义未改变的已付配对可以在 CPU 刷新预算特征并重新拟合：
+真实分支完成后生成紧凑训练样本，再在 CPU 拟合收益与成本：
 
 ```bash
-python3 -m training.plan_gain_completion refresh-features \
-  --input OLD-TRAIN.jsonl --output TRAIN.jsonl --template-config READER.yaml
-python3 -m training.plan_gain_completion refresh-features \
-  --input OLD-DEV.jsonl --output DEV.jsonl --template-config READER.yaml
+python3 -m training.plan_gain_completion finalize \
+  --collection TRAIN-CAPTURE --output TRAIN-LABELS --template-config READER.yaml
+python3 -m training.plan_gain_completion finalize \
+  --collection DEV-CAPTURE --output DEV-LABELS --template-config READER.yaml
 python3 -m training.plan_gain_completion fit \
-  --train TRAIN.jsonl --dev DEV.jsonl \
-  --source-catalogue SOURCES.jsonl --output GAIN.json
+  --train TRAIN-LABELS/effective-gains.jsonl --dev DEV-LABELS/effective-gains.jsonl \
+  --output GAIN.json
 ```
 
-原始答案、质量与费用标签保留。动作、分包或输入语义改变时补采对应分支。质量按决策状态等权拟合，成本按唯一交付分支拟合；线上执行一个动作后重规划。
+样本保留预测特征、真实质量与费用标签、预算及训练划分。完整上下文和执行记录只用于采集与标注，完成后清理。动作、分包或输入语义改变时补采对应分支。质量按决策状态等权拟合，成本按唯一交付分支拟合；线上执行一个动作后重规划。
 
 | 需要解决的问题 | 入口 |
 |---|---|
