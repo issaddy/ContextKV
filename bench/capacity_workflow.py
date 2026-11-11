@@ -324,7 +324,8 @@ def summarize_full_queue(job):
         "queue_quality": quality/spec.get("normalization", 1) if quality is not None else None,
         "queue_quality_bounds": track["queue_score_bounds"],
         "cost": track["cost"], "p95_complete_ms": track["cost"]["p95_complete_ms"],
-        "online_windows": windows, "delivery_metrics": delivery}
+        "online_windows": windows, "delivery_metrics": delivery,
+        "failures": {row["task_id"]: row["error"] for row in rows if row["status"] == "failed"}}
 
 
 def full_queue_occupancy(windows, physical, native):
