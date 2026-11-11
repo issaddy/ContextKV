@@ -126,8 +126,7 @@ def export_observed_packets(observations, actual_turns, output):
             separators=(",", ":")).encode()).hexdigest()
         generation_dir = (Path(source["generation_dir"]) if source.get("response") is not None
                           else Path(source["state_db"]).parent.parent)
-        manifest_path = (generation_dir/"measurements"/
-                         source["measurement_segment_id"]/"generation_manifest.json")
+        manifest_path = generation_dir/"generation_manifest.json"
         manifest_bytes = manifest_path.read_bytes()
         resident_manifest = json.loads(manifest_bytes)["retrieval"]
         resident_digest = resident_model_digest(resident_manifest)
