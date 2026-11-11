@@ -1,4 +1,4 @@
-# Dense retrieval example with actual-history query adaptation.
+# Hybrid retrieval with query adaptation and relevance reranking.
 schema_version: 1
 kind: hybrid
 stage: hybrid_rerank

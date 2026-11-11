@@ -238,11 +238,13 @@ class HistoryIndex:
             for speaker in ("user", "assistant"):
                 recent_windows.extend(w for w in ranked if w.ref.turn_id == turn_id and w.ref.speaker == speaker)
                 recent_windows = list(dict.fromkeys(recent_windows))
-        # One highest-scoring window per recent message leaves room for remote antecedents.
-        recent_windows = [next(w for w in recent_windows if w.ref.turn_id == turn_id and w.ref.speaker == speaker)
+        # Recent message tails preserve the conversational handoff; semantic
+        # retrieval supplies earlier antecedents and active conditions.
+        recent_windows = [max((w for w in recent_windows if w.ref.turn_id == turn_id and w.ref.speaker == speaker),
+                              key=lambda w: w.ref.end)
                           for turn_id in sorted(recent, reverse=True) for speaker in ("user", "assistant")
                           if any(w.ref.turn_id == turn_id and w.ref.speaker == speaker for w in recent_windows)]
-        candidates = list(dict.fromkeys((*active, *recent_windows, *ranked)))[:self.candidates]
+        candidates = list(dict.fromkeys((*recent_windows, *active, *ranked)))[:self.candidates]
         current_turn_id = current_turn_id or len(memory.committed_history)+1
         used = 2 + len(self.tokenizer(f"Turn {current_turn_id} user: ", add_special_tokens=False)["input_ids"])
         used += len(self.tokenizer(query, add_special_tokens=False)["input_ids"])
