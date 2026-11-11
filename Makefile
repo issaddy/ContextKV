@@ -1,19 +1,21 @@
 .PHONY: install test lint demo serve data
 
+PYTHON ?= python3
+
 install:
-	uv sync --extra retrieval --extra evaluation --locked
+	$(PYTHON) -m pip install -e '.[retrieval,evaluation,tokenizer]'
 
 test:
-	uv run --extra retrieval --extra evaluation pytest -q
+	$(PYTHON) -m pytest -q tests/test_rag_dialogue.py tests/test_fact_reuse.py tests/test_study_metrics.py
 
 lint:
-	uv run ruff check controller adapters bench profiling tests scripts engine_patches
+	$(PYTHON) -m ruff check controller adapters bench profiling tests scripts engine_patches
 
 demo:
-	uv run python -m bench.run_sessions --config configs/demo.yaml demo
+	$(PYTHON) -m bench.run_sessions --config configs/demo.yaml demo
 
 serve:
-	uv run contextkv --config configs/qwen3_32b_cost.yaml serve
+	$(PYTHON) -m controller --config configs/qwen3_32b.yaml serve
 
 data:
-	uv run python scripts/fetch_mtrag.py
+	$(PYTHON) scripts/fetch_mtrag.py

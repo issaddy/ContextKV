@@ -5,10 +5,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
         with:
-          enable-cache: true
-      - run: uv sync --extra retrieval --extra evaluation --extra tokenizer --locked
-      - run: uv run --extra retrieval --extra evaluation --extra tokenizer pytest -q
-      - run: uv run ruff check controller adapters bench profiling tests scripts engine_patches
-      - run: uv run python -m bench.run_sessions --config configs/demo.yaml demo
+          python-version: '3.12'
+      - run: make install
+      - run: python3 -m pip install pytest pytest-asyncio ruff
+      - run: make test lint demo

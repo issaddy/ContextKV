@@ -156,9 +156,18 @@ def cell_config(config, policy, protocol):
 
 
 def frozen_inputs(record):
-    from bench.dynamic_goal_packets import _initial_e0
     from controller.context_schema import ContextPlan, EvidencePool
-    initial, origin, stage = _initial_e0(record)
+    expanded = record["context_plan"]
+    originals = [plan for plan in record["planning_trace"].get("context_plans", ())
+                 if plan["plan_id"] == expanded["plan_id"]]
+    if len(originals) == 1:
+        initial, origin, stage = originals[0], "planning_trace.context_plans:matched_plan_id", "initial"
+    else:
+        initial = expanded
+        runtime_bound = any(task["input_claim_ids"] or task["kind"] == "REDUCE" for task in expanded["steps"]) or any(
+            point["claim_ids"] for point in expanded["answer_plan"]["points"])
+        origin, stage = (("runtime_expanded_context_plan", "runtime_expanded_only") if runtime_bound else
+                         ("record_context_plan_without_runtime_bindings", "initial"))
     return (decode(ContextPlan, initial), decode(EvidencePool, record["candidate_pool"]),
             {"task_origin": origin, "plan_stage": stage, "pool_origin": "actual recorded candidate_pool; not oracle/verified"})
 

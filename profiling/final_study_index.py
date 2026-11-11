@@ -1,9 +1,4 @@
-"""Read existing study artifacts into a final index and arithmetic comparisons.
-
-No generation, judging, gold parsing, model loading, or remote operations occur.
-Separate caller-labelled cohorts remain separate.  All quality numbers come
-from existing numeric metric fields; missing scores keep their denominators.
-"""
+"""Summarize saved answers, per-dataset comparisons, and paid costs."""
 from __future__ import annotations
 
 import argparse
@@ -455,8 +450,8 @@ def full_queue_track_tables(cells):
 
 
 def markdown(report):
-    lines = ["# ContextKV 最终产物索引", "", f"评审基线：`{report['baseline_commit']}`。",
-        "仅从指定产物读取已有评分与费用，按原指标名称作算术汇总；缺失值不补零。", "",
+    lines = ["# ContextKV 最终产物索引", "",
+        "按实际运行清单汇总各数据集的评分、对照方法与费用。", "",
         "## 产物", "", "| 标签 | 文件 | 状态 / 类型 |", "|---|---|---|"]
     for item in report["artifacts"]:
         summary = item["summary"]
@@ -548,7 +543,6 @@ def main(argv=None):
     from profiling.full_queue_acceptance import evaluate_full_queue
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--baseline-commit", required=True, help="Declared baseline source commit; not inferred from the current checkout")
     parser.add_argument("--gpu-devices", help="Explicit physical device IDs for a requested cost-ledger command")
     parser.add_argument("--artifact", action="append", default=[], help="LABEL=path/glob (JSON/YAML)")
     parser.add_argument("--records", action="append", default=[], help="COHORT=explicit scored/unscored JSONL path/glob")
@@ -587,7 +581,7 @@ def main(argv=None):
     rows, record_import = import_records(args.records)
     summaries, comparisons = record_tables(rows, dict(item.split("=", 1) for item in args.baseline))
     paired, paired_index = paired_tables(args.paired)
-    report = dict(format="contextkv_final_study_index_v1", baseline_commit=args.baseline_commit,
+    report = dict(format="contextkv_final_study_index_v1",
         scope="explicit existing manifests and existing numeric scored fields; no generation/judging/gold reinterpretation",
         artifacts=artifacts, unmatched_artifact_patterns=missing, record_import=record_import,
         record_summaries=summaries, common_task_comparisons=comparisons,
@@ -596,7 +590,7 @@ def main(argv=None):
         full_queue_acceptance=evaluate_full_queue(full_cells),
         cost_ledgers=ledgers)
     if args.cost_manifest or args.physical:
-        command = ["python", "-m", "profiling.study_cost_ledger"]
+        command = ["python3", "-m", "profiling.study_cost_ledger"]
         for path in args.cost_manifest:
             command += ["--manifest", path]
         for path in args.physical:

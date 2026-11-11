@@ -13,7 +13,7 @@ curl -fL https://alibaba-research.oss-cn-beijing.aliyuncs.com/loong/doc.zip -o d
 转换器直接读取所声明的问题文件与资料归档，无需解压；中文ZIP文件名按实际UTF-8编码处理。
 
 ```bash
-python -m adapters.loong --questions data/loong/source/loong.jsonl \
+python3 -m adapters.loong --questions data/loong/source/loong.jsonl \
   --documents data/loong/source/doc.zip --output data/loong/set1-v2 --length-set 1
 ```
 
@@ -37,7 +37,7 @@ python -m adapters.loong --questions data/loong/source/loong.jsonl \
 `bench.loong_score`复用作者原始准确性/完整性rubric、问题组装及结构化参考值，使用已有本地completion transport。JSON格式的`--judge-config`采用`SelectorConfig`字段，显式声明模型身份、端点、分词器及完整输入/输出预算。解析分数直接使用作者首匹配规则；续跑复用已保存的评分记录。
 
 ```bash
-python -m bench.loong_score --references data/loong/set1-v2/tasks.jsonl \
+python3 -m bench.loong_score --references data/loong/set1-v2/tasks.jsonl \
   --predictions SAVED-OFFICIAL.jsonl --judge-config LOCAL-JUDGE.json \
   --output runs/loong-scores --workers 4
 ```

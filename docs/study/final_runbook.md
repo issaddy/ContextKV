@@ -1,306 +1,116 @@
 # 当前课题运行入口
 
-统一业务链为 `DocumentQA.ask → StudyEvidenceProvider → Controller → RequestCompiler/ReadingExecutor → SessionStore`。固定 Qwen3-32B 权重，使用容器默认 `python3`。API 的 `/documents` 登记资料，`/sessions/{id}/query` 引用资料集，`bench.study` 重放同一业务链。
+统一业务链为 `DocumentQA.ask → StudyEvidenceProvider → Controller → RequestCompiler/ReadingExecutor → SessionStore`。固定 Qwen3-32B，使用容器默认 `python3`。模块与方法见[架构](../architecture.md)，实验口径见[任务书](task_spec.md)。
 
-要求见 [任务书](task_spec.md)，机制见 [架构](../architecture.md)。以下命令描述实际入口。
+## 运行资产
 
-跨机器同步代码、配置及必要的结果和成本数据。实验容器保存训练资产及评分、来源追溯和成本复算所需的账本。
+| 内容 | 当前入口 |
+|---|---|
+| 模型服务与原生补丁 | [部署](../deployment.md)、`scripts/launch_sglang.sh` |
+| 问答与阅读配置 | `configs/study.yaml`、`configs/qwen3_32b.yaml` |
+| 公开 benchmark | `configs/study_matrix.yaml` |
+| 实际历史重放 | `configs/study_system_matrix.yaml` |
+| 构造条件/版本及统计任务 | `configs/study_mechanisms.yaml` |
+| 辅助训练 | `configs/auxiliary_training.yaml` |
+| 答案与评分复用 | `bench.reassess_saved`、`bench.study_scoring` |
+| 结果及费用汇总 | `profiling.final_study_index`、`profiling.study_cost_ledger` |
 
-容器、模型路径和启动命令见[部署](../deployment.md)。本次配置声明实际端点、解码参数和资源范围。BGE 的 `sdpa_backend` 在 retriever YAML 和 `task_model` 中配置，索引语料、向量哈希及离线费用随索引记录。
+代码、配置和必要结果数据可以同步；模型、向量及大文件保留在实验容器。GPU 使用范围为 0、1、2、3，实际服务和辅助模型按配置分配设备。
 
-作者 ContextPilot 准备与启用：
+ContextPilot 复用作者 CPU 索引与排列：
 
 ```bash
 python3 scripts/prepare_contextpilot.py --checkout vendor/contextpilot
 ```
 
-study 配置的 `execution.cache_compilation` 取 `{mode: contextpilot, checkout: vendor/contextpilot}`；Native 对照取 `{mode: native}`。`prefix_retention` 默认 `{mode: native}`，与编排开关独立。
+`execution.cache_compilation` 使用 `{mode: contextpilot, checkout: vendor/contextpilot}`；`prefix_retention` 使用 `mode: demand`。默认分配器为 `next_use`，期限候选 15/60/180 秒，保护容量 8192 token；源配置可以声明实际取值。`paired_value` 通过 `pricing_asset` 加载已有配对估值。
 
-缓存协同采用相同上下文能力的三种方法：`context_native`、`context_cache_order`、`context_cache_demand`。它们共用收益决策、记录投影、有限表示和结论预算，只分别启用原生缓存、ContextPilot 组织、组织加需求保留。可直接传给 `bench.capacity_workflow --methods`，使用同一会话选择配置。
+## 数据与选题
 
-需求保留默认 `allocation: next_use`：从已编译的后续 READ/ANSWER 找到实际原文消费者，按 GPU/Host 的容量竞争及可淘汰区间分配短租约；仅在 Host 中可恢复的前缀也参与分配。共享页和第一次未来消费分别去重，消费结束后释放。控制时间使用实际调用更新。已有配对估值通过 `allocation: paired_value` 和 `pricing_asset` 显式使用；在线和开发评价共用 `PrefixForecast.for_tokens`，按目标前缀长度缩放获取收益，owner 控制费用及完整观察窗成本保持各自原有统计范围。训练长度内外的记录数单列。完整队列入口沿用源配置声明的分配器、TTL、期限候选、保护容量和资源价格；只有 `paired_value` 将定价资产登记为实际使用。
+优先复用已有原始数据、语料和索引。MultiDoc2Dial 任务按当前 user 紧接的一条有效 agent 回复导出，见[接入说明](../guides/doc2dial.md)；MT-RAG Cloud、VersionQA 和 Loong 使用[数据与评价](../data_and_evaluation.md)所列入口。
 
-少量机制配对复用同一原生客户端、报价和生产保留分配器，使用相同原文、预热、竞争请求及最终问题：
+每个 benchmark 独立选择 50 题，同一 benchmark 的方法共用清单。任务数由清单决定。实际历史重放按会话顺序保留连续问题。`--cohorts` 的 YAML 格式为：
+
+```yaml
+cohorts:
+  test:
+    multidoc2dial: [task-id-1, task-id-2]
+    mtrag: [task-id-1, task-id-2]
+    versionqa: [task-id-1, task-id-2]
+    loong: [task-id-1, task-id-2]
+```
+
+示例中的 ID 替换为对应数据集的实际 task ID。使用 `--datasets` 选择本次数据集，`--split` 默认 `test`。参考历史和实际历史分别运行、分别报告。
+
+## 主比较
+
+默认方法为普通文档问答 `RAG_native`、ContextKV `context_cache_demand` 和 LlamaIndex `LlamaIndex_native`。工作流为普通基线与 LlamaIndex 物化混合召回、发布版重排和常规上下文配置；ContextKV 使用本次冻结的任务、选材和收益资产。
+
+```bash
+python3 -m bench.capacity_workflow \
+  --config "$STUDY_CONFIG" --matrix configs/study_matrix.yaml \
+  --datasets multidoc2dial --cohorts "$COHORTS" \
+  --gain-asset "$B_GAIN" --reader-base-url "$READER_URL" \
+  --online-gpu-devices "$ONLINE_GPUS" \
+  --contextpilot-checkout vendor/contextpilot \
+  --concurrency 1 4 --output "$PUBLIC_OUTPUT"
+```
+
+按数据集分批执行上述命令。默认每种并发运行一次。多轮实际历史使用 `configs/study_system_matrix.yaml`，构造任务使用 `configs/study_mechanisms.yaml --split dev`。MTRAG-UN 按需使用独立配置。
+
+默认调度沿会话前后依赖推进、思考间隔为零；已有真实固定到达记录时传 `--arrival-plan`。只运行普通基线、LlamaIndex 或规则决策时提供 `--reader-profile-id`，完整方案使用 `--gain-asset` 绑定 reader、输入协议和输出额度。
+
+## 机制对照
+
+| 问题 | `--methods` |
+|---|---|
+| 来源排列的收益 | `context_native context_cache_order` |
+| 需求保留的新增收益 | `context_cache_order context_cache_demand` |
+| 动作收益决策 | `Rule_contextpilot_joint_demand context_cache_demand` |
+| 跨轮事实复用 | `context_no_fact_reuse context_cache_demand` |
+
+对照共用未改变的模块及本次选题，完整方案结果可以复用。根据主比较结果选取对应数据集和并发补充。
+
+少量固定输入缓存配对使用相同原文、预热、竞争请求和最终问题：
 
 ```bash
 python3 -m bench.cache_cooperation --config READER.yaml \
-  --base-url http://127.0.0.1:30230 --output runs/cache-cooperation/result.json
+  --base-url "$READER_URL" --output runs/cache-cooperation/result.json
 ```
 
-默认只运行低压力、单请求竞争、四请求竞争各一对，保存答案、正文获取工作、控制开销和完整时间。预热与竞争工作都计入完整时间；不从这些配对估计整队列 P95。
+该入口默认低压力、单请求竞争、四请求竞争各一对，报告正文获取工作、完整时间和控制开销。更细的期限估值沿用 `profiling.retention_trace` 与 `profiling.retention_pair_workflow`，Native/TTL 使用同一请求轨迹和观察窗口，窗口覆盖所选期限。
 
-普通基线与 LlamaIndex 复用统一引擎、来源投影和成本账本。普通基线配置 `execution.dialogue_mode: rag`，默认比较方法为 `RAG_native context_cache_demand LlamaIndex_native`。普通基线无需 LlamaIndex 依赖，首轮一次回答，追问一次检索改写再回答。恢复按原 SQLite 和实际请求 ID 继续，已经支付的步骤不重发；新的尝试使用新的请求命名空间。
+## 收益资产与辅助训练
 
-结果索引按运行清单中的方法因素识别比较和实际资产，所需实验格只包含本次选择的方法。主比较固定生成模型、评分与资源配置，各方法的辅助模型分别记录并在重复运行间保持一致。P95 的绝对 SLO 单列报告；质量/P95 的相对目标依据完整队列与资源预算评价，较慢基线超过 SLO 不会使比较失效。
-
-| 任务 | 当前入口 | 对照与产物 |
-|---|---|---|
-| 结论预算、共享数值与有限归约 | `bench.reading_mechanisms` | 共享阅读 / `--numeric-need-isolation`；实际 messages、完整来源叶子与阶段账本 |
-| 原生来源前缀机制 | `bench.prefix_read_mechanisms` | 实际 READ epoch、前缀身份与 owner 观察 |
-| 阅读协议审计与会话队列 | `training.reader_audit` 的 `export`、`review`；`training.a_workflow` 的 `cohort`、`prepare-labels` | 实际 messages 与完整原文独立核验，无 SFT 输出 |
-| P0/P1 规划器 × 阅读协议 | `training.a_workflow compare`、`bench.evidence_policy_comparison` | task_first+隔离数值 / source_first+共享提取；固定实际输入四格与各自真实 P3 |
-| 证据策略真实候选收益 | `training.preference_rollout` | 实际最终回答、官方质量与完整成本；绑定当前 reader |
-| B 动作收益 | `training.plan_gain_rollout`、`training.plan_gain_completion`、`training.collect_plan_gains` | DIRECT/READ/REDUCE/GAP 的真实增量执行、当前完整状态、独立最终答案与成对费用 |
-| B 训练与滚动比较 | `training.plan_gain_workflow`、`bench.rolling_study_workflow` | 显式动作与 `whole_plan` 固定计划对照分别登记；保留已付成本与绝对分支预算 |
-| C 固定轨迹配对 | `profiling.retention_trace` | 同模型、同输入、同 DAG 下 Native/固定 TTL/学习保护；共享页与 idle 驻留成本 |
-| 完整联合与外部比较 | `bench.capacity_workflow` | 普通文档问答、ContextKV、LlamaIndex；模块消融通过 `--methods` 按需选择 |
-| 数据集评分与离线重评 | `bench.study_scoring`、`bench.reassess_saved` | 全声明题目分母，失败、未完成、未评分及其已付费用 |
-| 全成本账本 | `profiling.study_cost_ledger` | 原始调用/采样引用、窗口并集、共享份额与未知覆盖 |
-
-将服务的 `state/events.jsonl` 作为 `profiling.study_cost_ledger --manifest` 输入，资料登记次数、累计墙钟工作量和 CPU 工作量在 `registration` 中单列；物理费用使用共用采样积分。
-
-配置入口为 `configs/study.yaml`、`study_matrix.yaml`、`evidence_policy_comparison.yaml`；
-P1 支持策略配置为 `configs/evidence_policy_fixed_qwen.yaml`。
-全资料必读分片默认使用 8192 token 的输出额度，正式计划在 `reading.full_scope_output_tokens` 保存实际值。普通选材阅读使用独立的 `reading.output_tokens`。
-`bench.study prepare` 的公开 VersionQA 资产从 `assets.versionqa.source/questions` 指定的原文和 CSV 构建，复用 `bench.versionqa` 与 BM25/BGE 索引入口；其公开测试题与构造机制开发题分别登记。
-审计配置为 `configs/reader_audit.yaml` 的 `reader_audit:{base_scope,data,review,resource_sample_seconds}`。
-会话队列使用 `evidence_cohort`；P1 支持策略直接绑定固定生成配置。
-辅助学习配置中的 200 train / 40 dev 规模使用
-`runs/study/auxiliary/cohorts/full/cohort_manifest.json`；实际运行指向本批预声明的 cohort。
-task/support 配置必填 `training.cohort_manifest`；P1 采集必填
-`collection.cohort_manifest` 和 `cohort_split`，开发采集显式选择 `dev`。
-B 新资产绑定 `infer_bridge_ready_or_one_gap_one_terminal_read_v4` 及 GAP 限额。反事实先执行首动作，优先使用已就绪终端证据，必要时一次 GAP，随后至多一次终端 READ、一次 ANSWER；直接回答分支不续接。线上与反事实 READ 共用相关父结论绑定，线上执行一个动作后重新观察。成本资产同时记录 `prefix_control_scope=native_excludes_prefix_control`，来源观察控制按已交付有界分支的实测 READ 次数均值预留；没有次数样本时只计当前确定执行的 READ，选中的 owner 变更费另计一次。当前协议的监督使用真实 P3 状态配对采集。
-
-B 的 observed 资产另绑定 `observed_feature_schema=pre_action_candidate_read_value_v3`，使用实际已付资源、剩余额度和首个候选 READ 的检索、未满足 Need 覆盖、原文/事实重复特征。成本头绑定 `pre_action_native_nonnegative_work_v4`，输入特征包括剩余 READ 的逐包编译长度和 Native 报价。`completion_reserve_scope=known_inputs_and_allocated_future_outputs_v1` 绑定完整逻辑输入/输出预留，`cost_target_scope` 保持有界分支语义；`read_count_profile` 只统计参与成本拟合的唯一已交付分支。
-
-执行输入未改变的旧配对可重算特征再拟合：
+输入及动作语义未改变的已付配对可以在 CPU 刷新预算特征并重新拟合：
 
 ```bash
 python3 -m training.plan_gain_completion refresh-features \
-  --input OLD-TRAIN.jsonl --output REFRESHED-TRAIN.jsonl --template-config READER.yaml
+  --input OLD-TRAIN.jsonl --output TRAIN.jsonl --template-config READER.yaml
 python3 -m training.plan_gain_completion refresh-features \
-  --input OLD-DEV.jsonl --output REFRESHED-DEV.jsonl --template-config READER.yaml
+  --input OLD-DEV.jsonl --output DEV.jsonl --template-config READER.yaml
 python3 -m training.plan_gain_completion fit \
-  --train REFRESHED-TRAIN.jsonl --dev REFRESHED-DEV.jsonl \
-  --source-catalogue ORIGINAL-SOURCES.jsonl --source-catalogue DERIVED-SOURCES.jsonl --output GAIN.json
+  --train TRAIN.jsonl --dev DEV.jsonl \
+  --source-catalogue SOURCES.jsonl --output GAIN.json
 ```
 
-刷新只在 CPU 加载原 reader 的 tokenizer 与消息模板，使用动作前的已知事实、原注册计划和实际首步输入重建预算，不用执行后的事实回填。实际动作、质量、费用与原始记录保持不变，派生配对保存重建预留供拟合复用。新采集在首动作前直接保存 `pre_action_completion_reserve`。分包、Need 或动作改变后重新采集相应分支。有限候选域 `two_reads_cache_path_organizations_terminal_representations_v2` 的观测包含 `read_organizations`；采集复用捕获的完整组织，在各实际缓存起点重新编译报价。纯当前候选域可按实际动作拟合；合并旧新候选域时，用实际执行过的改组分支绑定扩展后的域。
+原始答案、质量与费用标签保留。动作、分包或输入语义改变时补采对应分支。质量按决策状态等权拟合，成本按唯一交付分支拟合；线上执行一个动作后重规划。
 
-质量头按 `(state_key, direct.record_id)` 归一候选权重，每个状态总权重为 1；特征标准化和岭回归共用该权重。成本头仍按唯一交付分支拟合。资产记录 `quality_fit`、决策状态数、动作数及 ridge，已有相同语义的配对标签可直接重拟合。
+| 需要解决的问题 | 入口 |
+|---|---|
+| READ、REDUCE、ANSWER 的阶段错误 | `training.reader_audit export/review` |
+| 任务和查询适配 | `training.a_workflow prepare-capture/prepare-labels`、`training.task_labeling`、`training.train_models --stage task/task-eval` |
+| 支持关系和集合偏好 | `training.build_examples`、`training.train_models --stage support/support-eval`、`training.preference_rollout` |
+| 当前真实状态的动作配对 | `training.collect_plan_gains`、`training.plan_gain_workflow --mode observed_actions` |
+| 固定输入的证据策略对照 | `training.a_workflow compare`、`bench.evidence_policy_comparison` |
+| 完整余程预测诊断 | `bench.plan_prediction_audit` |
 
-当前 B 资产携带 `input_protocol`，绑定实际窗口粒度、任务投影、共享来源格式 `canonical-source-envelope:v1` 和 reader fingerprint。采集、分支、配对及加载全链核对该身份。实际 seed、已读覆盖、编译选中排列及报价的 `pre_action_input` 一并保留。保留策略标定也使用当前格式采集的原生前缀轨迹。
+辅助训练按会话隔离，沿当前 cohort 复用真实历史。任务学生尚未输出跨轮 READ 合同；只接入查询编码器时使用 `retrieval.task_query_asset` 并保留 teacher 解释。支持模型只由 `selection.mode: support` 加载，缓存配对估值只由 `allocation: paired_value` 加载。
 
-`training.plan_gain_completion fit --dev` 按动作从独立开发会话标定完成延迟的单侧低估余量。开发报告列出各动作与表示的收益符号一致率、同状态实测分支的选择后悔值、未校准低估率及逐会话留一超限率。`bench.plan_prediction_audit --root ... --output ...` 从实际已付边界重算滚动决策至终止的余程。失败余程以账本确认失败的时间为终点，按原生回执和辅助阶段汇总扣除决策前已付 token。
+## 结果与记录
 
-在独立于正式评价队列的开发会话上运行同一策略。用 `python3 -m bench.plan_prediction_audit --root CALIBRATION-RUN --output NEW-AUDIT --timing-calibration` 导出 `completion-timing.json`，在 `execution.plan_gain.completion_timing_asset` 指向该文件。设置 `execution.max_complete_ms` 后，必做步骤和规则对照按同一 reader、动作策略、保留方式及设备上的可比工作量预留时间。每个匹配会话只贡献一条最慢实测余程，至少两个会话才启用经验 P95，额度判断使用已付时间加余程预留。正式队列另按实际交付时延计算 P95。
+每个 job 对应数据集、方法、并发与重复。`capacity-plan.json` 保存实际选题、配置和方法因素，`workflow.json` 保存执行结果；逐题答案、来源、评分、必要步骤及资源采样用于复算。
 
-动作收益资产的 `evidence_selection_contract` 来自实际 A manifest，绑定选材模式和顺序，以及 `support` 使用的效用、保留集合重排和支持模型记录身份。观测包和实际分支使用同一合同，开发集及线上提供器须与拟合资产匹配。语料、索引、B6/B7 和服务地址独立记录。
+先保存答案再评分，评分中断后继续使用已有答案和 judge 记录。`bench.reassess_saved` 重评已付结果，`profiling.final_study_index --artifact NAME=WORKFLOW.json` 汇总；`--refresh-saved-queues` 只读已有记录重建摘要。
 
-GAP 离线与线上只排除实际已读来源，统一新增 passage 额度；采集和拟合绑定相同协议。
-
-B 固定流程观测使用 `execution.state_observation`，在 A 冻结后启用 `joint_context: true`，登记 `output_budgets` 和 `output_tokens_per_fact`。观测记录两个就绪 READ、REDUCE、GAP 及实际可见的回答表示。线上、观测和配对采集使用同一候选域和输出额度。
-四格固定历史入口设置 `policy_comparison.audited_history:{cohort_manifest,cohort_split,actual_rollouts}`，
-各规划器对同一审核任务与真实 QA 执行自己的检索。P1 source-first 格可同时写 B 观测；原候选池重放入口另留作隔离对照。
-`training.collect_plan_gains --observations OBS --actual-turns TURNS --output PACKETS`
-导出后，`training.plan_gain_workflow --mode observed_actions --observed-states PACKETS --cache-start paired`
-沿用源 cohort 身份。主线直接读取真实 P3 capture 的 TaskState/ReadingOutcome，不要求另行准备 `--task-labels`、task/student 或 P1 标签；`whole_plan` 固定历史对照仍需审计标签。cohort 预声明 task、会话与 train/dev 分区，真实 QA 历史在采集后由 snapshot 和已完成原生回执核验，只有固定历史对照才额外校验预先提供的历史 hash。每个源 task 保留各合法动作首次可配对的观测，不按未来质量选点。
-
-已有实际 READ 分支可用 `training.collect_plan_gains --terminal-branches GAIN_ROOT --reader-config READER_YAML --output NEW_PACKETS` 导出终端状态。该入口使用原先保存的报价事件和物理样本切分已付成本，排除尚未发生的 ANSWER 费用；来源标为 `frozen_actual_rollout`，原 P3 与实际分支身份均保留。新配对沿用原 `actual-rollouts`、sources 和 cohort，使用新输出目录。
-`bench.study` 的成功/失败记录保留原始 `reference`、原始数据分区和 observer cohort 绑定，仅供离线审计与评分。导出器将 packet 绑定到完整实际 capture 行的 hash；B 采集核验 native-train 原始正文、版本、窗口坐标与 raw grounding 引文，开发会话独立隔离。原始参考用于离线评分；B 训练使用独立训练分区，正式 dev 用于评价。
-真实检索后的初始状态可配对 DIRECT 与首次 READ。线上和离线 DIRECT 均可基于普通选材范围回答已知部分并说明缺口；全资料与统计任务保留覆盖和运算要求。确定终止而未提交回答的分支效用为 0，原始评分为空。
-
-条件与版本监督复用 `training.controlled_tasks prepare` 生成的政策资料。`python3 -m training.controlled_tasks prepare-gain --config CAPTURE.yaml --matrix RESOURCE-MATRIX.yaml` 导出紧凑的任务、`gain-cohort.json` 和 `gain-matrix.json`。以现有固定 B 观测配置分别对 `condition_gain_train`、`condition_gain_dev` 执行 `bench.study evaluate --split train --unscored`，两次配置的 `cohort_split` 分别设为 `train`、`dev`，均绑定 `gain-cohort.json`。任务按实际 P3 连续执行，训练和校准按底层原文族分开，原文在登记时从共享 `sources.jsonl` 读取。导出各自的观测与逐题记录后，使用同一 RB_llm 配对入口和原始 `sources.jsonl`。
-
-进度分别记录去重源任务数和决策快照数，不将多个动作快照重复计为训练任务。
-`observed_actions` 按观测包里的额度编译首步。混合表示作为唯一直接回答参照，其他合法表示各自执行并评分。动作收益由成对效用拟合，回答表示的偏差按会话等权估计，成本读取各分支实际首步报价。
-`paired` 在专用 SGLang profiling reader 上对每个分支先清空缓存，再按观测记录回放已执行的来源前缀至 GPU 或 Host。缺少可回放来源时使用冷起点。记录配对起点的报价、预热回执和独立费用。收益 B 的方法读取新资产绑定的输出额度，同批次规则 B 消融共用这些额度和 GAP 限额。
-B 的 `training.plan_gain_rollout`、`training.plan_gain_workflow` 均必填
-`--cohort-manifest` 指向同一会话划分，实际采集数量从声明分区内选择并单独记录。
-`plan_gain_workflow` 可将 `--train-states` 或 `--dev-states` 设为 0，只补所需分区；无有效训练标签时保留采集结果并跳过拟合，开发标签可随后独立补采。
-通用训练与开发按会话隔离。合并多批标签时，`training.plan_gain_completion fit --source-catalogue` 用原始和派生目录报告底层原文族的重叠；统计范围包含已归档历史、登记范围和 GAP 材料。原文族分区由 cohort 定义，构造条件/版本轨继续使用 `prepare-gain` 的家族隔离划分。
-留出报告在同一状态上给出相对已测最优动作的遗憾，以及相对直接回答的实测目标差和配对状态数。
-模型 scope 位于 `configs/model_scopes/`。Reader、策略身份、来源与费用由本次阶段
-manifest 记录。
-
-B 收益的唯一默认质量目标为固定官方 RB_llm，使用与最终评价相同的真实对话和实际证据投影。`--official-checkout` 可指定已有官方源码目录，默认沿 study 的 `scoring.official_checkout`。`plan_gain_quality` 保存作者已归一化的 RB 值。P1 的 `necessary_points_grounding_conditions_versions_task_v3` 保留为独立四项诊断。
-
-重评结果单独保存，关联原 `before.json`、回答和执行成本。质量比较使用相同协议的成对评分及原文审计。
-
-机制重放示例（显式指定实际服务配置和新输出目录）：
-
-```bash
-python3 -m bench.reading_mechanisms --config ACTUAL-RUN.yaml \
-  --read-layout source_first --cases pair correction long multihop \
-  --output-dir NEW-OUTPUT/shared
-python3 -m bench.reading_mechanisms --config ACTUAL-RUN.yaml \
-  --read-layout source_first --numeric-need-isolation --cases long \
-  --output-dir NEW-OUTPUT/isolated
-```
-
-辅助训练配置为 `configs/auxiliary_training.yaml`；BGE 资产按配置复用，标签由以下入口重新准备。
-已有真实 P3 研究队列可用 `python3 -m training.a_workflow prepare-capture --config CAPTURE.yaml --output DIR` 直接准备任务标签输入。`task_capture` 指定 `records`、`teacher_calls`、`corpus_path`、`corpus_id`、`snapshot_id`、`sources_path` 和 `state_db`；按实际采集的数据轨分别执行，再使用输出的 `task_labeling.yaml` 核验原文并生成监督。
-先准备原始任务，再采集实际生成历史、声明会话隔离的 cohort、生成教师标注配置，最后标注和训练。仅在对应任务或支持瓶颈需要辅助训练时执行：
-
-```bash
-python3 -m training.a_workflow prepare-data --config configs/auxiliary_training.yaml \
-  --output runs/study/data
-python3 -m training.task_rollout --config configs/auxiliary_training.yaml \
-  --min-conversations 40 --min-turns 300 --concurrency 4
-python3 -m training.a_workflow cohort --config configs/auxiliary_training.yaml \
-  --output runs/study/auxiliary/cohorts
-python3 -m training.a_workflow prepare-labels --config configs/auxiliary_training.yaml \
-  --output runs/study/auxiliary/task-labels
-python3 -m training.task_labeling --config runs/study/auxiliary/task-labels/task_labeling.yaml
-```
-
-采集量是示例，cohort manifest 记录实际数量与 shortfall。
-`task_cohort_labeling.existing_labels_path: null` 表示从零标注；只有存在可复用的真实标签时才指定文件。
-实际 rollout 同时保存 `task_catalogue`、`task_reference_date` 和 `source_scope`，准备与标注直接使用这些观测，不从参考答案或金标补造版本目录。
-`prepare-labels` 可在同一输出目录重跑，复用与当前状态一致的已有标签。`training.task_labeling --limit N` 每次最多新增 N 条，已完成条目不占该额度；全部完成后不再加载模型。
-当前配置 `task_model.initial_adapter_path: null` 与 `training.support_parent_asset: null` 从显式 BGE base 初始化；设为非空父路径时只复用真实存在的资产，不自动回退。有效学生与支持资产须由本次训练及开发评价确认。
-无 adapter 的查询基线记录 BGE 基座路径及其配置、tokenizer 配置摘要；有 adapter 时记录 adapter 资产摘要。任务头指标和检索对照分别保存。
-配置默认将实际历史写入 `runs/study/actual-rollout/sessions.sqlite3`。训练与评价共用
-`runs/study/auxiliary/task-labels/task_labels.jsonl`，由 cohort manifest 隔离 train/dev。
-
-运行时以 `CUDA_VISIBLE_DEVICES` 选择物理设备，配置内使用该进程的 `cuda:0`：
-
-```bash
-python3 -m training.train_models --config configs/auxiliary_training.yaml --stage task
-python3 -m training.train_models --config configs/auxiliary_training.yaml --stage task-eval
-python3 -m training.build_examples --config configs/auxiliary_training.yaml
-python3 -m training.train_models --config configs/auxiliary_training.yaml --stage support
-python3 -m training.train_models --config configs/auxiliary_training.yaml --stage support-eval
-```
-
-`task-eval` 按会话与轮次重放标签，补标的文件追加顺序不改变历史上下文。当前 task student 不输出跨轮 READ 合同；只使用训练后的查询编码器时，设置 `retrieval.task_query_asset` 并保留 teacher 任务解释。
-
-支持监督与上线共用预测 span 解码，集合效用输入使用预测跨度数量，单条材料用 direct support、组合用 joint support。`support-eval` 在独立开发会话上报告支持标量误差、错误 complete、原文 span 选择和推理费用。完整问答质量由候选实际答案与来源单独评价。
-
-`build_examples` 使用固定 Qwen 服务生成支持关系标签。P1 采集将
-`collection.task_asset` 设为实际训练后的 task 资产、`parent_support_asset` 设为实际 support 资产，
-按同一 manifest 分别采集 train/dev；查询资产身份随奖励保存。
-P1 质量偏好可使用物理成本部分缺失的已评分答案；缺失费用保留未知，成本覆盖率单列，不将其作为实测成本收益。
-
-当前辅助配置将新 support 输出接为 P1 父资产与 P0 对照，将新 task 输出同时接入 P1 奖励采集和比较的查询编码器。初始化真实历史的辅助 rollout 使用显式无查询 adapter 的 BGE 基座；若采用已有资产，修改对应显式路径后重新绑定采集身份。
-
-已有候选答案的纯 CPU 诊断随 `python3 -m training.train_evidence_policy prepare --config CONFIG.yaml` 写入 `preference_manifest.json.candidate_quality_diagnostics`。该命令只读取已生成答案、评分和成本资产，按真实历史/预算/reader/scorer/query 分组，给出候选质量上限、最高预测并列时的遗憾区间和声明任务缺失列表，不产生模型训练或推理。输入资产不可用时不产生诊断结果。
-
-固定模型协议审计与四格比较示例：
-
-`reader_audit review` 使用 `observed_output_independent_review_v1` 审核导出 traces 的实际输出，保留原始 token 数、输入、来源与阶段归因。
-
-```bash
-python3 -m training.reader_audit export --config ACTUAL-AUDIT.yaml
-python3 -m training.reader_audit review --config ACTUAL-AUDIT.yaml
-python3 -m training.a_workflow compare --comparison-config COMPARISON.yaml \
-  --policy-asset CURRENT-P1-ASSET --matrix MATRIX.yaml --dataset DATASET \
-  --split dev --phase both --output NEW-OUTPUT/comparison
-```
-
-所有实验按运行前声明的 cohort、reader 身份和资源范围读取结果。质量未测得时保留未知，
-报告分别列出完成子集、正式答案评分和费用观测。
-
-公开任务、系统重放和构造机制任务分别由 `study_matrix.yaml`、`study_system_matrix.yaml`、`study_mechanisms.yaml` 声明；MTRAG-UN 使用 `study_mtrag_un.yaml` 按需运行。每次准备从选中分区冻结实际 task IDs，任务数和会话数随清单计算。公开任务保留作者历史；系统重放使用本方法实际提交的回答。每个数据集独立计分，不生成混合加权 Q。
-
-辅助学习的 200/40 划分仅用于辅助训练。冻结 A 采用 ranked 选材与共享阅读；模型、查询资产、阅读协议与预算由本次冻结 manifest 及实际配置绑定。P1 证据效用输入使用零上下文 `evidence_set_only`，不使用实际 READ 后长度。B 从冻结 A 的真实观察采集动作分支，失败尝试中的已付步骤继续由实际 Attempt ID 追溯。
-
-构造版本和长文分别标记为 `constructed_version`、`constructed_long`。长文评分使用 `constructed_numeric_exact_v1`：从答案抽取最终计数和总额，再按整数、Decimal 与单位比较。公开 Loong 使用作者 `loong_reference_score`，公开 VersionQA 使用作者 `versionqa_accuracy`；构造任务不占用它们的 dev 分区。
-
-C 使用 `paired_native_retention_v7`。训练行保存原始数据会话集合，train/dev 集合互斥，同窗口各 TTL 及共享会话的窗口为重复测量。粗特征为访问状态、原生驻留、压力与并发组合。首个覆盖保留前缀全部正文因果页的 READ 或 ANSWER 是目标消费者。目标页实际 GPU、Host 或重算分布变化时，取同一请求的服务端首 token 时间差；分布相同时取零。完整重访耗时单列，外部请求成本从整窗差额中扣除整次目标重访的耗时差后计算。新增 owner 收益按消费者和共享页去重，容量与驻留按共享页增量。单 owner 标签计量实际保留调用（ledger＋retain），inspect 与完整 callback 分别记录。完整集合的真实净效果由同轨 Native/value 对照和物理积分验收。
-
-C 的两次容量构造共用原有 TTL15/60/180、owner、页并集和需求去重目标。配置使用单一 `protection_budget_tokens`（联合入口为 8192），GPU/Host 的 Native 物理配额与 `lambda_gpu` / `lambda_host` 驻留价格保留原含义。
-需求保留通过 `execution.prefix_retention.allocation: paired_value` 和 `pricing_asset` 加载同一配对拟合产物。拟合记录完整前缀长度的实测范围，在线按实际 Native 状态和 TTL 选择匹配桶。`lambda_gpu` 和 `lambda_host` 按额外 token·秒定价。
-
-`retention_pair_workflow` 先在同一捕获特征桶内选择两组完整、会话互不相交的训练窗口，并在独立开发轨迹中匹配同桶窗口，再核算 Native 与三个 TTL 的总调用预算。选择清单通过 `retention_trace replay --selection` 原样使用。拟合按重放时的实际特征要求每桶至少两个独立会话组；没有支持桶或开发覆盖时，工作流记录无可用资产状态。窗口数量与期限网格保持不变。
-`retention_trace export` 从已付 READ 账本恢复原生观察、实际时间和来源前缀。回放按各步原始提交时间与目标观察时间设置最早执行时刻，GAP 沿用原耗时，步骤还需等待其前序完成。`retention_coverage` 分开统计任意正文页重访与完整前缀及正文区间一致的重访。
-
-C 的配对重放使用同一请求序列、完整 DAG 和共同观察窗。每臂按原记录生成同样数量的解码 token，按已记录的输出推进阅读步骤。配对报告记录解码工作是否一致，正式端到端比较保留原生成条件。`replay` 与
-`retention_pair_workflow` 默认使用 Native、TTL15、TTL60、TTL180 四臂；
-`--horizon-seconds` 决定共同观察长度，覆盖本次 `--ttl-seconds` 选择的最长期限即可；默认四臂使用至少 180 秒，单独 TTL15 可使用 15 秒。
-窗口选择要求原始轨迹中存在观察窗之后的真实请求边界，保留其间全部压力；不足时记录
-不可观察。每个窗口共用一次 Native，与本次选择的 TTL 分别配对；对照费用按唯一 Native 执行汇总。
-
-每臂的 `observation_window` 和物理/KV 积分覆盖相同长度，并持续采样到窗口结束，
-包括无重访时的空闲驻留。`revisit-outcomes.json` 按实际原文因果页需求与原生回执
-区分无重访、GPU 命中、Host 回载和重算；混合访问同时保留各类页数和事件数。
-READ 与含规范原文的 ANSWER 均按实际提交的 token 路径统计重访，分别计数。
-训练行中的 `observation_seconds` 是共同计费窗口，`ttl_seconds` / `horizon_seconds`
-是策略保护期限。
-候选前缀含完整来源正文页。
-单前缀配对分别积分 ready 页和传输目标已分配空间：H2D 计入 GPU，D2H 计入 Host。
-`profiling.retention_trace reassess --replay-root COMPLETED_REPLAY` 从已完成重放的原始回执重算派生费用，
-保留原请求、采样窗口和全部已付成本，不产生模型调用。
-
-`bench.capacity_workflow` 默认运行三种主方法；按需消融由矩阵 `optional_ablations` 声明，完整定义见[任务书](task_spec.md#六实验与验收)：
-
-| 问题 | `--methods` | 实际变化 |
-|---|---|---|
-| 缓存感知编译是否有效 | `context_native context_cache_order` | Native → ContextPilot 编译 |
-| 需求保留是否有新增收益 | `context_cache_order context_cache_demand` | Native → demand 保留 |
-| 动作收益决策是否有效 | `Rule_contextpilot_joint_demand context_cache_demand` | 规则 → 收益决策 |
-| 跨轮事实复用是否有效 | `context_no_fact_reuse context_cache_demand` | 关闭 → 开启事实复用 |
-
-各对照沿用有限回答表示、记录投影及阅读计算链，只改变表中因素。事实复用消融保留实际历史与本轮共享提取；规则 B 在同一准备批次中共用收益资产绑定的输出额度、GAP 限额和其余配置。单独运行规则 B 时提供 `--reader-profile-id`。缓存三方法也可同批运行，Native 到完整方案报告为编译与保留的联合变化。
-
-主比较默认每个并发运行一次；消融按当前待解释机制选择方法与并发，复用同批次、同一重复的完整方案结果。局部缓存配对和既有阅读机制入口用于解释原因，完整队列用于质量与 P95；不将所有局部入口、TTL 或辅助训练选项展开成默认整队列网格。
-
-有限回答表示中，没有阅读结论或已记录缺口时，相同原文和历史的 raw 与 hybrid 共用候选，原文顺序由编译器选择。完整结论覆盖校验通过的 facts 和 reduced 在缺少配对估计时使用零质量差先验，由实际编译成本排序，质量差由整队列测量。需求保留沿用 15/60/180 秒默认选项和 8192 token 默认保护容量，源配置可声明实际取值；规则风险 token 不折算为已报价路线的毫秒收益。
-
-`LlamaIndex_native` 通过统一 Controller 使用上游 history condense＋compact/refine。普通 RAG 与该外部方法物化各数据集 `hybrid_rerank`、`query_mode: current`、无 query adapter/selector 的检索 YAML（`evidence_selection: ranked`、单查询融合、resolved rerank、`source_window: false`）；`--external-reranker` 显式选择发布版 checkpoint，默认 `models/bge-reranker-v2-m3`。两者关闭任务/支持规划，使用 Native 编译与保留。
-
-当前入口只保留三种主方法和上述四个机制对照。旧 E0–E6、固定/收益 B 四格、`*_value` 方法与两轮容量诊断已退出该入口，原结果按原实验身份归档。
-
-### 执行公开测试
-
-```sh
-python3 -m bench.capacity_workflow \
-  --config "$FROZEN_A_STUDY" --matrix configs/study_matrix.yaml \
-  --gain-asset "$B_GAIN" --online-gpu-devices "$ONLINE_GPUS" --reader-base-url "$READER_URL" \
-  --contextpilot-checkout vendor/contextpilot --concurrency 1 4 --output "$PUBLIC_OUTPUT"
-```
-
-默认 `--split test`；`--split dev` 只选择该配置中存在的开发分区。`--datasets multidoc2dial mtrag` 可以选择本次要运行的公开多轮数据。题数从原始输入或显式 `--cohorts` 读取，不要求固定 350 题或 77 会话。源矩阵只声明数据与评价设置，当前入口按所选方法物化执行矩阵，算法配方只在代码中维护一份。
-
-同一命令将 `--matrix` 换成 `configs/study_system_matrix.yaml` 即运行实际历史的多轮系统实验；构造机制诊断使用 `configs/study_mechanisms.yaml --split dev`。MTRAG-UN 仅在检查选中不可答或非独立任务时使用独立配置。
-
-默认调度复用 WorkloadDispatcher：会话内等待前轮完成、零思考间隔，会话间按声明顺序受并发上限调度。已有真实固定到达数据时传 `--arrival-plan`，各方法共用该记录；不要求为每个公开 benchmark 人为指定到达秒数。完整响应包含请求实际到达后的排队与前序等待。已有请求记录可通过当前工具生成固定到达文件：
-
-```sh
-python3 -m bench.study_workloads --tasks TASKS.jsonl --records RECORDED-REQUESTS.jsonl \
-  --output FIXED-ARRIVALS.json --name DECLARED-NAME --concurrency 4
-```
-
-缓存机制的系统配对示例：
-
-```sh
-python3 -m bench.capacity_workflow --methods context_cache_order context_cache_demand \
-  --config "$FROZEN_A_STUDY" --matrix configs/study_system_matrix.yaml --datasets mtrag \
-  --gain-asset "$B_GAIN" --online-gpu-devices "$ONLINE_GPUS" --reader-base-url "$READER_URL" \
-  --contextpilot-checkout vendor/contextpilot --concurrency 4 --output "$CACHE_OUTPUT"
-```
-
-含收益 B 的方法使用当前 `--gain-asset`；仅运行普通 RAG、LlamaIndex 或规则 B 时提供 `--reader-profile-id`。`--online-gpu-devices` 指定实际物理设备，协调器与模型进程的物理积分进入本次成本；检索器设备与声明范围一致。收益 B 的动作限额来自其现有资产，不为 benchmark 另造动作协议。
-
-### 汇总与结果解释
-
-每个 job 对应一个数据集、方法、并发与重复，记录 `dataset/split/protocol`。公开作者历史、项目实际历史及构造任务分别展示。每次先保存答案与原始账本，再评分；评分中断后复用保存的任务答案和已付 judge 记录继续。Loong 同时导出作者的均分、Perfect Rate、领域与难度汇总。
-
-使用 `profiling.final_study_index --artifact NAME=WORKFLOW.json` 汇总；分设备运行时沿用现有 `--joint-scope` 指定共同实验范围，`--replicate-id` 标识同一重复。`--refresh-saved-queues` 从已保存逐题记录重建摘要，无需重新生成答案。索引按数据集、分区、历史协议、并发、模型和资源条件配对，历史混合队列保留为归档引用。
-
-主目标分别在各数据集内判断：同预算提高质量，或同质量降低完整响应 P95。0–1 指标的 0.05 对应 5 个百分点；Loong 在原 0–100 单位报告并按其尺度解释差值。质量区间按同一数据集的会话配对重抽样。单次队列给 P95 点估计；实际需要判断波动时才追加对应成对重复，不把重复次数扩展成默认网格。
-
-报告保留原指标、声明题数、完成率、完整响应 P95、全部在线 token 与 GPU/Host 积分。确认未交付的任务在完整队列指标中计零，未执行或未评分项保留实际状态。辅助模型训练、索引和离线评分费用单列。只保留用于解释结果和重算费用的原始记录。
-
-向工作流发送 `SIGINT` 或 `SIGTERM` 会保存已交付结果、原生回执与实际资源窗口，同一输出目录可继续当前任务。评分结果记录真实 judge：MT-RAG 使用作者指标，VersionQA 用作者二值规则，Loong 用作者百分制规则；更换 judge 的结果按本地评分解释。
-
-C 的离线 `retention_trace export` 需显式提供 `--failed-conversations`（零失败为 `[]`）。
-同测量段内未导出的成功与失败请求墙钟区间进入压力索引，回放不使用与之重叠的窗口。
-`profiling.retention_coverage --replay-root C_OUTPUT --output COVERAGE.json` 只读已有回执，
-分别汇总干预目标与整窗重复来源页的 GPU 命中、Host 回载和重算，不产生模型调用。
-
-B 的 DIRECT/READ/REDUCE/GAP 分支从实际动作前状态报价，分别拟合绝对分支成本，
-同一批次以动作减 DIRECT 计算增量成本和实际质量差，已付共享成本只计一次。
-REDUCE 只读已观察材料。源 packet 的 `legal_actions` 保留，补充的反事实候选单独登记并在执行前重新报价。所选来源读完后，任务必需的 `numeric_select` 和 CPU `count/sum/group` 按固定流程完成。收益资产的样本覆盖只约束可选 REDUCE。
-
-完成记录的来源覆盖诊断采用注册前来源分母，合并既往与新增已读覆盖；GAP 新来源保留在实际 outcome，不修改注册分母。`whole_plan` 与 `observed_actions` 的资产分别声明实际特征，不交叉标记为动作模型。
-
-C 固定 DAG 回放解析原始输出文本，新的生成响应用于实际 token、耗时和费用；完整窗口
-预测用两臂窗口成本差验证，首个后续消费者的集合收益按请求及共享页去重。
-
-
-## 正式运行的输入与产物
-
-同一次单数据集队列比较使用共同的题目、历史协议、生成条件、评分协议、执行源码、语料、调度规则和 replicate ID。ContextKV 机制消融固定未改变的模块资产；普通 RAG、LlamaIndex 和 ContextKV 使用各自实际所需的辅助模型，并在本方法的重复运行间保持一致。分设备绑定实际的端点、进程和 GPU，在 `--joint-scope` 登记各 worker 的配置及矩阵。C 价格资产只进入显式使用 `paired_value` 的 demand 格，实际分配器记录在 `capacity-plan.json` 的 `retention_allocation` 因素。
-
-每格从 `capacity-plan.json` 追溯输入，从 `workflow.json` 追溯实际执行与队列指标，从各数据轨的逐题答案、来源、评分记录及原生账本追溯质量和费用。方法对照使用同一 replicate 的同并发格，完整 P95 的区间使用独立整队列重复。重放校准保留每个 TTL 的独立回执及同窗口唯一 Native 对照。
+报告各数据集原指标、题目分母、完成率、完整响应 P95、在线 token 和 GPU/Host 积分。辅助训练、索引与离线评分费用单列。保留答案、来源、评分、实际配置和复算所需账本；运行日志按需要清理。[实测与本地资料](final_results.md)

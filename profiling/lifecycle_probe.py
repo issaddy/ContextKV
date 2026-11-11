@@ -176,7 +176,7 @@ async def _run(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config",default="configs/qwen3_32b_scope.example.yaml")
+    parser.add_argument("--config",default="configs/qwen3_32b.yaml")
     parser.add_argument("--model-path",default=os.environ.get("CONTEXTKV_MODEL_PATH"))
     parser.add_argument("--base-url")
     parser.add_argument("--report",default="runs/sglang-lifecycle.json")

@@ -7,7 +7,7 @@
 入口为 `extract_sdk_records(source_path, source_spec) -> (records, manifest)`；批量CLI读取JSON规格，先完成提取和现有CorpusIndex依赖闭包验证，再写一个新的目录：
 
 ```sh
-.venv/bin/python -m adapters.api_evidence \
+python3 -m adapters.api_evidence \
   --spec SOURCE_BUNDLE.json \
   --output runs/api-evidence-local
 ```
@@ -71,11 +71,11 @@ blocks = index.resolve(("ibmcloudant:ibmcloudant/cloudant_v1.py#CloudantV1.post_
 证据包可由同一BM25构建入口索引，检索key取`passage_id`，同一源码文件中的符号各自独立。固定`source_uri`保留为原GitHub出处；HTTP通过同一records作为metadata恢复真实document/version和依赖：
 
 ```bash
-uv run python -m adapters.retrieval build \
+python3 -m adapters.retrieval build \
   --corpus data/sdk-evidence/records.jsonl \
   --index runs/sdk-bm25 \
   --snapshot cloudant-0.0.27-watson-7.0.0
-uv run contextkv --config configs/demo.yaml --state-dir runs/sdk-demo-state serve \
+python3 -m controller --config configs/demo.yaml --state-dir runs/sdk-demo-state serve \
   --retriever-index runs/sdk-bm25 \
   --evidence-corpus data/sdk-evidence/records.jsonl \
   --corpus-id official-sdk-preview

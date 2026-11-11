@@ -34,9 +34,9 @@
 使用独立生成服务并设置`CONTEXTKV_ENABLE_PROFILING=1`，运行常规[启动配置](../deployment.md)。`--cases-file`接收`PrefillCase`数组：prompt/prefix/output tokens、concurrency和cache_state；mixed另带device_prefix_tokens。
 
 ```bash
-python -m profiling.sglang_probe --config configs/qwen3_32b_scope.example.yaml   --cases-file CASES.json --output runs/calibration/profile.jsonl
-python -m profiling.fit runs/calibration/profile.jsonl   --profile-manifest runs/calibration/profile.manifest.json   --development-report runs/calibration/development-lengths.json   --output runs/calibration/cost-lookup.json
-python -m profiling.stage_fit   --telemetry selected=runs/calibration/profile.telemetry.jsonl   --measurements runs/calibration/profile.jsonl   --profile-manifest selected=runs/calibration/profile.manifest.json   --base-artifact runs/calibration/cost-lookup.json   --development-report runs/calibration/development-lengths.json   --output runs/calibration/cost-stage.json   --validation runs/calibration/stage-validation.json
+python3 -m profiling.sglang_probe --config configs/qwen3_32b.yaml   --cases-file CASES.json --output runs/calibration/profile.jsonl
+python3 -m profiling.fit runs/calibration/profile.jsonl   --profile-manifest runs/calibration/profile.manifest.json   --development-report runs/calibration/development-lengths.json   --output runs/calibration/cost-lookup.json
+python3 -m profiling.stage_fit   --telemetry selected=runs/calibration/profile.telemetry.jsonl   --measurements runs/calibration/profile.jsonl   --profile-manifest selected=runs/calibration/profile.manifest.json   --base-artifact runs/calibration/cost-lookup.json   --development-report runs/calibration/development-lengths.json   --output runs/calibration/cost-stage.json   --validation runs/calibration/stage-validation.json
 ```
 
 `development-lengths.json`来自同模型、采样和回答协议的已完成开发回答；包含实际输出长度及模型身份。原生telemetry中的run、批次、预热标记和回执直接进入阶段拟合。正式服务关闭profiling。

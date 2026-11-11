@@ -13,16 +13,16 @@
 准备官方文件后运行（validation分区将test替换为validation，输出改为dev）：
 
 ```bash
-python -m adapters.doc2dial \
+python3 -m adapters.doc2dial \
   --documents data/multidoc2dial/source/multidoc2dial_doc.json \
   --dialogues data/multidoc2dial/source/multidoc2dial_dial_test.json \
   --dataset-version archive-f0c034c24966 --source-format multidoc2dial \
   --source-uri https://doc2dial.github.io/multidoc2dial/file/multidoc2dial.zip \
   --split test --output data/multidoc2dial/test --sections
-python -m adapters.retrieval build \
+python3 -m adapters.retrieval build \
   --corpus data/multidoc2dial/test/passages.jsonl --index data/multidoc2dial/bm25-sections \
   --snapshot multidoc2dial-archive-f0c034c24966-structure-v1
-python -m bench.retrieval_eval build \
+python3 -m bench.retrieval_eval build \
   --corpus data/multidoc2dial/test/passages.jsonl --output data/multidoc2dial/bge-m3-sections \
   --snapshot multidoc2dial-archive-f0c034c24966-structure-v1 \
   --encoder-path models/bge-m3 --device cuda:1 --dtype bfloat16 --encoder-max-length 8192
@@ -59,7 +59,7 @@ for name in ("dialogue", "hybrid", "conversational"):
 按[部署说明](../deployment.md)启动固定32B原生NGRAM服务后，推荐链路可直接运行：
 
 ```bash
-python -m bench.run_sessions --config configs/qwen3_32b.yaml \
+python3 -m bench.run_sessions --config configs/qwen3_32b.yaml \
   --state-dir runs/multidoc-history run data/multidoc2dial/test/tasks.jsonl \
   --protocol P3 --retriever-config data/multidoc2dial/retriever_dialogue.yaml \
   --evidence-corpus data/multidoc2dial/test/passages.jsonl
@@ -70,7 +70,7 @@ python -m bench.run_sessions --config configs/qwen3_32b.yaml \
 保存答案的基础词项评分：
 
 ```bash
-python -m bench.official overlap --references data/multidoc2dial/test/tasks.jsonl \
+python3 -m bench.official overlap --references data/multidoc2dial/test/tasks.jsonl \
   --input SAVED-OFFICIAL.jsonl --output runs/multidoc2dial-overlap.json
 ```
 
@@ -80,4 +80,4 @@ python -m bench.official overlap --references data/multidoc2dial/test/tasks.json
 
 已有v1.0.1和v0.9 wOOD读取、完整语料导出及`adapters.dialogue_examples`严格前缀投影继续保留，可用于文档支撑对话研究。v1使用`references`列表，v0.9使用`reference`字典；每个原角色/原文和多标签保持原样。两版本有重叠，不混作独立样本。`respond_no_solution`或空reference只按原标注保留，不推断全语料不可答。
 
-示例入口仍为`python -m adapters.doc2dial --source-format v1 ...`和`python -m adapters.dialogue_examples --supervision ... --output ...`。这些离线原消息投影与 MultiDoc2Dial 公开任务分别使用对应作者格式。
+示例入口仍为`python3 -m adapters.doc2dial --source-format v1 ...`和`python3 -m adapters.dialogue_examples --supervision ... --output ...`。这些离线原消息投影与 MultiDoc2Dial 公开任务分别使用对应作者格式。

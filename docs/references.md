@@ -37,5 +37,5 @@ Prompt Cache 通过预定义模块复用注意力状态，CacheBlend 通过选�
 ## 可选对照入口
 
 - 当前事实复用对照为 `context_no_fact_reuse`，动作决策对照为 `Rule_contextpilot_joint_demand`。辅助训练中的 `selection.mode: support`、`whole_plan` 各保留独立用途。[运行手册](study/final_runbook.md)
-- 缓存编译与需求保留分别通过 `context_native → context_cache_order → context_cache_demand` 比较。历史 value 方法不进入当前 benchmark 入口。[矩阵](../configs/study_matrix.yaml) · [EfficientAgent 适配](third_party/EFFICIENTAGENT_NOTICE.md)
+- 缓存编译与需求保留分别通过 `context_native → context_cache_order → context_cache_demand` 比较。[矩阵](../configs/study_matrix.yaml) · [方法适配](third_party/EFFICIENTAGENT_NOTICE.md)
 - 表格注释可按配置使用 CRAFT 行文本函数，复用范围及表格关系由现有适配说明记录。[CRAFT 说明](third_party/CRAFT_NOTICE.md) · [表格关系](research/table_relations.md)

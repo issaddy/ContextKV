@@ -7,7 +7,6 @@ ssh relay
 ssh songjiayun@infra-wlf3-ge103-1.idchb2az3.hb2.kwaidc.com
 sudo nerdctl exec -it test-0523 bash
 cd /home/relay/songjiayun/ContextKV
-source runs/study-20261106-resume/default-python/runtime.env
 ```
 
 使用默认 `python3`，模型目录为 `/data/models/qwen3-32b`。

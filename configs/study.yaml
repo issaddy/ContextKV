@@ -1,5 +1,4 @@
 study:
-  baseline_commit: 85f4ed4
   reader: qwen3_32b_nonthinking
   strategy: B6
   output_dir: runs/study

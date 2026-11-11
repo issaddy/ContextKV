@@ -549,7 +549,7 @@ def main(argv=None):
     bench.add_argument("--split-manifest")
     bench.add_argument("--split", choices=["dev", "test"], default="test")
     args = parser.parse_args(argv)
-    config = load_config(args.config or ("configs/qwen3_32b_cost.yaml" if args.command == "run" else None))
+    config = load_config(args.config or ("configs/qwen3_32b.yaml" if args.command == "run" else None))
     if args.state_dir:
         config = replace(config, state_dir=args.state_dir)
     system_prompt = args.system_prompt

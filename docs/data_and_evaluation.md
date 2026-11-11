@@ -32,7 +32,7 @@ MT-RAG 与 MTRAG-UN 固定上游 `53fef6f5917c7e10c436f697e69a955dbc795d81`。Cl
 VersionQA 固定上游 `2a2cbe8f285557f99dc7a79d6df7134e1e3eccff`。使用[作者判分规则](https://github.com/danielhuwiler/versionrag/blob/2a2cbe8f285557f99dc7a79d6df7134e1e3eccff/src/evaluation/evaluation_llm.py)，记录实际 judge 模型；更换 judge 后属于同 rubric 的本地评分。资料分段是检索实现，原问题、参考答案与类别保持不变：
 
 ```bash
-python -m bench.versionqa --source /path/to/versionrag/data/raw   --questions /path/to/versionrag/data/test/evaluation_set.csv   --tokenizer /path/to/qwen3-32b --output runs/study/evaluation/versionqa
+python3 -m bench.versionqa --source /path/to/versionrag/data/raw   --questions /path/to/versionrag/data/test/evaluation_set.csv   --tokenizer /path/to/qwen3-32b --output runs/study/evaluation/versionqa
 ```
 
 `bench.study prepare` 只准备其公开资料与索引，不联动辅助训练或构造任务生成。构造资料由已有 `training.reading_data` 单独准备。构造版本任务沿用项目条件/版本评分；构造长文任务使用 `constructed_numeric_exact_v1`，最终数量和总额同时匹配才得分。它们不使用 VersionQA 或 Loong 名称。

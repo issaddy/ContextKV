@@ -195,7 +195,7 @@ def test_final_index_reports_dataset_protocol_and_current_mechanism_controls(tmp
     assert allocation['changed_factors'] == ['retention_allocation']
 
     out = tmp_path/'index'
-    report = main(['--baseline-commit', 'current', '--physical', 'recorded-physical.json',
+    report = main(['--physical', 'recorded-physical.json',
                    '--gpu-devices', '2', '--output', str(out)])
     report['capacity_comparisons'] = [faster, incomplete]
     rendered = markdown(report)
