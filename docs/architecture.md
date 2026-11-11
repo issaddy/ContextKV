@@ -44,7 +44,7 @@ source-first ANSWER 的实际顺序为系统、稳定原文、工作历史、当
 
 联合方案对明确命名同一记录类别的全资料 count/sum 请求先做 CPU 投影。全部原始记录行能按同一字段和单位绑定时，投影登记原文覆盖和事实，随后使用原有 count/sum 归约和 ANSWER 编译。跨轮事实已完整覆盖当前 Need 时直接复用；其余情况先尝试当前原文的完整投影，成功后用该结果统一构成初始事实，避免与部分旧事实重复计数。不适用投影的任务沿用已有事实继续模型 READ 与 `numeric_select`。
 
-固定 B 在原文实际完整可见或结论充分时跳过阅读。收益 B 在当前状态比较直接 ANSWER、下一 READ、当前 REDUCE 与一次 GAP。两者在提交前都检查统计任务的来源覆盖、未解字段和已完成运算。范围已完整覆盖且确无合格记录时，计数和求和输出零值并保留来源证明。普通所选来源任务可回答已有依据的部分并说明缺口。选中 GAP 后才检索，未读范围为候选根，实际 READ 保留旧依赖，原 passage 额度只扣新增来源。每次执行后重新观察事实、缺口、预算和缓存状态。[动作决策](../controller/action_policy.py) · [滚动执行](../controller/rolling_policy.py)
+固定 B 在原文实际完整可见或结论充分时跳过阅读。收益 B 在当前状态比较直接 ANSWER、下一 READ、当前 REDUCE 与一次 GAP。两者在提交前都检查统计任务的来源覆盖、未解字段和已完成运算。范围已完整覆盖且确无合格记录时，计数和求和输出零值并保留来源证明。语义任务在资料范围读完后可回答已有依据的部分并报告未解决点，完整覆盖与问题可回答性分别判断。模型 infer/compare 同时接收当前 Need 的事实、前驱 Need 的结论根及 OpenNeed 指定的父事实。选中 GAP 后才检索，未读范围为候选根，实际 READ 保留旧依赖，原 passage 额度只扣新增来源。每次执行后重新观察事实、缺口、预算和缓存状态。[动作决策](../controller/action_policy.py) · [滚动执行](../controller/rolling_policy.py)
 
 离线配对在同一已观察状态以当前材料上的 ANSWER 为基准。首动作后，尚未满足的 infer 桥接需求优先接一次就绪的 READ，必要时可先接一次 GAP；每条分支保存实际输入、成本和官方 RB_llm。无提交回答的确定终止按零交付效用标注，原始评分留空。已完成 READ 分支的 ANSWER 前状态可作为独立派生观测，沿用当时的事实、实际终端报价和已付费用。[配对入口](../training/plan_gain_workflow.py)
 
@@ -56,7 +56,7 @@ source-first ANSWER 的实际顺序为系统、稳定原文、工作历史、当
 
 ## C · 编译、Native 报价与缓存反馈
 
-`RequestCompiler` 为 source-first READ 和 ANSWER 使用同一系统消息及原文格式。相同原文窗口按相同顺序进入请求时，两类请求的完整来源前缀相同。任务、历史、条件、引用映射与检索排名在来源之后。Native 编译使用原顺序，`cache_compilation.mode: contextpilot` 另使用作者 CPU index/reorder 提出排列。排序按报价比较新增预填充、Host 回载和输入长度。作者索引还返回真实执行过的来源序列：仅连续路径前缀可提出未完成 READ 的局部改组，依赖闭包和原分包器仍负责容量。组织候选沿用两个 READ 的决策额度，完整剩余 READ 分别编译报价，选中目录在执行和租约变更前持久化。选中动作执行同一已报价输入，APPEND 保持已提交前缀。[请求编译器](../controller/request_compiler.py) · [来源格式](../controller/source_prompt.py)
+`RequestCompiler` 为 source-first READ 和 ANSWER 使用同一系统消息及原文格式。相同原文窗口按相同顺序进入请求时，两类请求的完整来源前缀相同。任务、历史、条件、引用映射与检索排名在来源之后。Native 编译使用原顺序，`cache_compilation.mode: contextpilot` 另使用作者 CPU index/reorder 提出排列。排序按报价比较新增预填充、Host 回载和输入长度。作者索引还返回真实执行过的来源序列：仅连续路径前缀可提出未完成 READ 的局部改组，依赖闭包和原分包器仍负责容量。组织候选沿用两个 READ 的决策额度，完整剩余 READ 分别编译报价，选中目录在执行和租约变更前持久化。选中动作执行同一已报价输入。跳过阅读与后续决策共用已编译的合法 ANSWER 候选。APPEND 保持已提交前缀。[请求编译器](../controller/request_compiler.py) · [来源格式](../controller/source_prompt.py)
 
 编译时由实际 tokenizer 同时生成 token 与原文区间，候选绑定 READ/REDUCE 的步骤和输出 schema。同一轮滚动决策复用完全相同的 READ 消息的 tokenizer 结果，按最新 Native 状态重新报价。步骤账本保存正文 token 区间与因果边界，ContextPilot 索引据此登记已执行排列。原生回执记录实际预填充和 Host 回载。与所选报价配对时，记录提交时的报价年龄与工作量差值。Native Radix/HiCache 管理页匹配、迁移和淘汰。[来源前缀](../controller/prefix_view.py)
 
