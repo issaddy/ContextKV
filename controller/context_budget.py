@@ -247,7 +247,7 @@ def _completion_content_inputs(plan, results, current, reads, scheduled, pending
     blocks = {block.key: block for block in (*snapshot.archive, *plan.selected_set.source_blocks)}
     observed = ReadingOutcome(plan, results=tuple(projected_results), claims=facts,
                               open_needs=unresolved_needs(projected_results))
-    read_tokens = 0
+    read_tokens, pending_messages = 0, []
     for task in reads:
         if task.step_id in read_inputs:
             read_tokens += len(read_inputs[task.step_id].input_ids)
@@ -257,7 +257,8 @@ def _completion_content_inputs(plan, results, current, reads, scheduled, pending
         visible = replace(task, input_claim_ids=tuple(claim.claim_id for claim in parents), output_schema={})
         messages = step_messages(plan, visible, tuple(units[identity] for identity in task.input_unit_ids),
                                  parents, snapshot)
-        read_tokens += len(template.render(messages).input_ids)+sum(capacities[identity] for identity in ancestors(task))
+        pending_messages.append(messages)
+        read_tokens += sum(capacities[identity] for identity in ancestors(task))
     reduction_inputs = 0
     for task in reductions:
         if task.operation in cpu_ops:
@@ -285,7 +286,8 @@ def _completion_content_inputs(plan, results, current, reads, scheduled, pending
                         payload["sources"][f"s{len(spans)}"] = block.text[span.start-base:span.end-base]
                         spans.add(key)
             messages = (messages[0], Message("user", json.dumps(payload, ensure_ascii=False, separators=(",", ":"))))
-        reduction_inputs += len(template.render(messages).input_ids)+sum(capacities[identity] for identity in pending_inputs)
+        pending_messages.append(messages)
+        reduction_inputs += sum(capacities[identity] for identity in pending_inputs)
 
     # Divide a shared packet's one output allowance across its Need allocations;
     # multiple views of the same extraction do not become multiple final bodies.
@@ -331,7 +333,8 @@ def _completion_content_inputs(plan, results, current, reads, scheduled, pending
     # has not appeared in a fact yet. It is shared by the entire final frontier.
     metadata = plan.answer_allocation.source_metadata_tokens if new_sources else 0
     final_room = max(0, plan.budget.window_tokens-plan.budget.output_tokens-final_input)
-    return read_tokens+reduction_inputs+final_input+min(min(future_content, available)+metadata, final_room)
+    compiled_inputs = sum(len(prompt.input_ids) for prompt in template.render_many(tuple(pending_messages)))
+    return read_tokens+reduction_inputs+compiled_inputs+final_input+min(min(future_content, available)+metadata, final_room)
 
 
 def measure_window(template, messages, budget, rendered, *, history=(), source_text=""):
