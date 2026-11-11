@@ -24,21 +24,31 @@ final_evaluation:
     quality_improvement: 0.05
     quality_noninferiority: 0.002
     p95_ratio: 0.85
+  main_comparisons:
+    ordinary_qa: {reference: RAG_native, method: context_cache_demand, scope: whole_system}
+    external_method: {reference: LlamaIndex_native, method: context_cache_demand, scope: whole_system}
+  # Select only the pair needed to answer the current mechanism question.
+  optional_ablations:
+    prefix_order: {reference: context_native, method: context_cache_order, factor: compilation}
+    demand_retention: {reference: context_cache_order, method: context_cache_demand, factor: retention}
+    action_decision: {reference: Rule_contextpilot_joint_demand, method: context_cache_demand, factor: B}
+    fact_reuse: {reference: context_no_fact_reuse, method: context_cache_demand, factor: fact_reuse}
+  # Earlier decomposition of fixed/gain B and compilation with existing representations.
   factorial:
     E1: {method: B6_native, B: fixed, compilation: native, retention: native}
     E2: {method: S3_native, B: gain, compilation: native, retention: native}
     E3: {method: B6_contextpilot, B: fixed, compilation: contextpilot, retention: native}
     E4: {method: S3_contextpilot, B: gain, compilation: contextpilot, retention: native}
-  joint_context:
-    E5: {method: S3_contextpilot_joint_native, reference: E4, representation: finite, retention: native}
-    E6: {method: S3_contextpilot_joint_demand, reference: E5, representation: finite, retention: demand}
+  historical_labels:
+    S3_contextpilot_joint_native: context_cache_order
+    S3_contextpilot_joint_demand: context_cache_demand
   external_reference:
     method: LlamaIndex_native
     dialogue_mode: llamaindex
     retrieval: hybrid_rerank
     compilation: native
     retention: native
-  principal_ablation:
+  historical_fact_reuse_control:
     method: S3_contextpilot_no_fact_reuse
     reference: S3_contextpilot
     overrides: {reading: {fact_reuse: false}}

@@ -20,7 +20,7 @@ SGLang 原生报价参与选择下一步阅读、归约或回答，剩余证据�
 
 默认在并发 1 和 4 比较普通文档问答 `RAG_native`、完整方案 `context_cache_demand` 与 `LlamaIndex_native`。各方法共用 350 题、77 会话、固定到达计划与资源配额，使用自身实际 P3 历史。目标是同预算提高最终质量，或同质量降低完整响应 P95，所有辅助计算与 GPU/Host 实际占用计入成本。
 
-缓存贡献按需比较 `context_native`、`context_cache_order`、`context_cache_demand`：上下文处理和计算能力相同，只改变缓存组织与需求保留。E1–E6、固定／收益阅读与关闭事实复用保留为机制对照，运行清单只列本次选择的方法。[当前结果与归因](docs/study/final_results.md)
+缓存贡献按需比较 `context_native`、`context_cache_order`、`context_cache_demand`：上下文处理和计算能力相同，只改变缓存组织与需求保留。`Rule_contextpilot_joint_demand` 与 `context_no_fact_reuse` 分别对照完整方案的动作收益决策与跨轮事实复用；历史四格保留原有归因，当前运行清单只列本次选择的方法。[实验定义](docs/study/task_spec.md#六实验与验收) · [当前结果与归因](docs/study/final_results.md)
 
 `numeric_need_isolation`、`whole_plan`、支持模型及 TTL/value 保留为显式对照入口，默认主线不加载它们。
 

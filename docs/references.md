@@ -16,13 +16,13 @@ B 以当前直接 ANSWER 为基准，比较候选动作接固定后续的最终�
 
 ## C · 请求编译与原生缓存
 
-SGLang RadixAttention 和 HiCache 提供精确因果前缀匹配、GPU/Host 驻留与迁移，项目读取实际 Native 报价和完成回执。主四格中的 ContextPilot 因素复用作者 CPU 重叠索引与排列，候选顺序由项目编译成真实请求后报价。各排列的命中、回载、重算和完整响应以共同负载记录。[RadixAttention](https://arxiv.org/abs/2312.07104) · [HiCache](https://docs.sglang.io/docs/advanced_features/hicache_design) · [ContextPilot](https://arxiv.org/abs/2511.03475) · [复用范围](third_party/CONTEXTPILOT_NOTICE.md)
+SGLang RadixAttention 和 HiCache 提供精确因果前缀匹配、GPU/Host 驻留与迁移，项目读取实际 Native 报价和完成回执。`context_native` / `context_cache_order` 的编译对照复用作者 ContextPilot CPU 重叠索引与排列，候选顺序由项目编译成真实请求后报价。各排列的命中、回载、重算和完整响应以共同负载记录。[RadixAttention](https://arxiv.org/abs/2312.07104) · [HiCache](https://docs.sglang.io/docs/advanced_features/hicache_design) · [ContextPilot](https://arxiv.org/abs/2511.03475) · [复用范围](third_party/CONTEXTPILOT_NOTICE.md)
 
 两层需求保留按当前集成的 `71de97b` 实现读取 FULL 的 `lock_ref`、`host_lock_ref` 和传输完成状态。Host 写入投影沿用原生 write-through 对未备份祖先及新后缀的处理，并扣除已占用的备份空间与请求准入额度；owner 复用原生 session 软优先级。[固定版树与备份](https://github.com/sgl-project/sglang/blob/71de97b264b04dcd514cf904003028aefe9775c8/python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py) · [固定版 session 引用](https://github.com/sgl-project/sglang/blob/71de97b264b04dcd514cf904003028aefe9775c8/python/sglang/srt/mem_cache/unified_cache/session_ref_tracker.py)
 
 文档 KV 依赖前面的完整 token 路径。项目据此把 source-first 请求的稳定原文放在变化的历史和任务之前，READ 与直接 ANSWER 都采用这一排列原则。原文、历史、结论和引用完整进入实际输入，排列候选由 Native 当前报价选择。[ContextPilot 文档排列](https://arxiv.org/html/2511.03475v1#S5) · [RAGCache 知识树](https://arxiv.org/html/2404.12457v2#S5.SS1)
 
-E1–E5 使用 Native 保留，E6 用剩余证据需求分配短租。可选 TTL/value 在同一原生容量管理上估计保护价值。保留目标借鉴有预算的覆盖和分层替换，在共同观察窗核算共享页、增量驻留和控制成本。[预算最大覆盖](https://doi.org/10.1016/S0020-0190(99)00031-9) · [RAGCache](https://arxiv.org/abs/2404.12457)
+`context_native` 和 `context_cache_order` 使用 Native 保留，`context_cache_demand` 用剩余证据需求分配短租。可选 TTL/value 在同一原生容量管理上估计保护价值。保留目标借鉴有预算的覆盖和分层替换，在共同观察窗核算共享页、增量驻留和控制成本。[预算最大覆盖](https://doi.org/10.1016/S0020-0190(99)00031-9) · [RAGCache](https://arxiv.org/abs/2404.12457)
 
 AdaCache 同时用选择性重算复用文档块 KV，并按生成置信度扩展检索上下文。ContextKV 从多轮任务的条件、版本和来源依赖生成下一步候选，用原生精确前缀报价比较读、算和答，并按尚需原文的后续动作分配保留。两者在上下文选择与缓存联合决策上直接相关。ContextKV 的验收量是完整响应 P95 与有来源的最终回答质量。[AdaCache（ICLR 2026）](https://openreview.net/forum?id=Bmvx8ybDzo)
 

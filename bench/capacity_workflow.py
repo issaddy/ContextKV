@@ -172,60 +172,64 @@ MAIN_COMPILATION_CELLS = {
     "E1": "B6_native", "E2": "S3_native",
     "E3": "B6_contextpilot", "E4": "S3_contextpilot",
 }
-JOINT_CONTEXT_CELLS = {"E5": "S3_contextpilot_joint_native", "E6": "S3_contextpilot_joint_demand"}
-CACHE_COOPERATION_METHODS = ("context_native", "context_cache_order", "context_cache_demand")
-FORMAL_CELLS = {**MAIN_COMPILATION_CELLS, **JOINT_CONTEXT_CELLS,
+CONTEXT_METHODS = ("context_native", "context_cache_order", "context_cache_demand", "context_no_fact_reuse")
+FORMAL_CELLS = {**MAIN_COMPILATION_CELLS,
     "ordinary_qa": "RAG_native", "LlamaIndex": "LlamaIndex_native",
     "no_fact_reuse": "S3_contextpilot_no_fact_reuse"}
 CONVENTIONAL_METHODS = {"RAG_native": "rag", "LlamaIndex_native": "llamaindex"}
 RULE_CONTEXT_METHOD = "Rule_contextpilot_joint_demand"
 FULL_QUEUE_METHODS = ("RAG_native", "context_cache_demand", "LlamaIndex_native")
 OPTIONAL_FULL_QUEUE_METHODS = ("E0_native", "B6_value", "S3_value", RULE_CONTEXT_METHOD,
-    *(method for method in (*FORMAL_CELLS.values(), *CACHE_COOPERATION_METHODS)
+    *(method for method in (*FORMAL_CELLS.values(), *CONTEXT_METHODS)
       if method not in FULL_QUEUE_METHODS))
 
 
 def full_queue_methods(concurrency, methods=None):
-    # Both c1 and c4 answer the same factorial question and use the same queue.
+    # Each concurrency uses the same declared queue and selected methods.
     return tuple(methods) if methods is not None else FULL_QUEUE_METHODS
 
 
 def full_queue_method_specs(selected, gain_settings, compilation, value_policy=None, *, rule_settings=None,
-                            demand_pricing=None):
+                            demand_policy=None):
     """Keep compilation, B decisions and optional retention as separate factors."""
     specs = []
     for method in selected:
-        cooperation = method in CACHE_COOPERATION_METHODS
+        cooperation = method in CONTEXT_METHODS
         gain = method.startswith("S3_") or cooperation
         rule = method == RULE_CONTEXT_METHOD
-        joint = method in JOINT_CONTEXT_CELLS.values() or rule or cooperation
+        joint = rule or cooperation
         external = method in CONVENTIONAL_METHODS
         dialogue = CONVENTIONAL_METHODS.get(method, "contextkv")
-        contextpilot = "_contextpilot" in method or method in CACHE_COOPERATION_METHODS[1:]
+        contextpilot = "_contextpilot" in method or method in CONTEXT_METHODS[1:]
         rolling = deepcopy(gain_settings if gain else rule_settings) if gain or rule else None
         if joint:
             rolling["joint_context"] = True
         retention = {"mode": "native"}
         if method.endswith("_value"):
             retention = deepcopy(value_policy)
-        elif method.endswith("_demand"):
-            retention = dict(mode="demand", ttl_seconds=15, horizon_seconds_choices=[15, 60, 180],
-                             protection_budget_tokens=8192, **(demand_pricing or {}))
-            retention.setdefault("allocation", "next_use")
+        elif method.endswith("_demand") or method == "context_no_fact_reuse":
+            declared = demand_policy or {}
+            retention = dict(mode="demand", allocation="next_use", ttl_seconds=15,
+                             horizon_seconds_choices=[15, 60, 180], protection_budget_tokens=8192)
+            retention.update({name: deepcopy(declared[name]) for name in (
+                "allocation", "ttl_seconds", "horizon_seconds_choices", "protection_budget_tokens",
+                "lambda_gpu", "lambda_host") if name in declared})
+            if retention["allocation"] == "paired_value" and declared.get("pricing_asset"):
+                retention["pricing_asset"] = str(Path(declared["pricing_asset"]).resolve())
         overrides = {"execution": {
             "dialogue_mode": dialogue,
             "plan_gain": rolling,
             "cache_compilation": deepcopy(compilation) if contextpilot else {"mode": "native"},
             "prefix_retention": retention},
-            "reading": {"fact_reuse": not external and method != "S3_contextpilot_no_fact_reuse"}}
-        if joint:
-            overrides["reading"]["numeric_record_projection"] = True
+            "reading": {"fact_reuse": not external and not method.endswith("_no_fact_reuse"),
+                        "numeric_record_projection": joint}}
         if method == "E0_native":
             overrides["reading"].update(layout="task_first", packing="mixed", numeric_need_isolation=True)
         specs.append(dict(id=method, strategy="B7" if gain or rule else "B6", overrides=overrides,
             evaluation_factors=dict(B="gain" if gain else "rule" if rule else "fixed",
                 compilation="contextpilot" if contextpilot else "native",
                 representation="finite" if joint else "existing", retention=retention["mode"],
+                retention_allocation=retention.get("allocation"),
                 numeric_record_projection=joint,
                 fact_reuse=overrides["reading"]["fact_reuse"], dialogue=dialogue,
                 role=("main_baseline" if method == "RAG_native" else "external_reference" if external
@@ -270,7 +274,7 @@ def prepare_full_queue(args, root):
     config["generation"]["run_config"] = str(run_path)
     selected_methods = tuple(dict.fromkeys(method for concurrency in args.concurrency
         for method in full_queue_methods(concurrency, args.methods)))
-    needs_gain = any(method.startswith("S3_") or method in CACHE_COOPERATION_METHODS
+    needs_gain = any(method.startswith("S3_") or method in CONTEXT_METHODS
                      for method in selected_methods)
     needs_value = any(method.endswith("_value") for method in selected_methods)
     gain_path = Path(args.gain_asset).resolve() if needs_gain else None
@@ -298,11 +302,7 @@ def prepare_full_queue(args, root):
         max_units=args.gap_max_units, max_passages=args.gap_max_passages)
     declared_compilation = deepcopy(execution.get("cache_compilation") or {})
     completion_timing = (execution.get("plan_gain") or {}).get("completion_timing_asset")
-    retention_settings = execution.get("prefix_retention") or {}
-    pricing_asset = retention_settings.get("pricing_asset")
-    demand_pricing = (dict(pricing_asset=str(Path(pricing_asset).resolve()),
-        lambda_gpu=retention_settings.get("lambda_gpu", 0), lambda_host=retention_settings.get("lambda_host", 0))
-        if pricing_asset and any(method.endswith("_demand") for method in selected_methods) else None)
+    demand_policy = execution.get("prefix_retention") or {}
     execution.update(cache_start="cold", state_observation=None, plan_gain=None,
                      prefix_retention={"mode": "native"}, cache_compilation={"mode": "native"},
                      dialogue_mode="contextkv")
@@ -328,14 +328,16 @@ def prepare_full_queue(args, root):
         horizon_seconds_choices=[15, 60, 180], protection_budget_tokens=8192,
         lambda_gpu=0.0, lambda_host=0.0) if needs_value else None
     checkout = args.contextpilot_checkout or declared_compilation.get("checkout")
-    needs_compilation = any("_contextpilot" in method or method in CACHE_COOPERATION_METHODS[1:]
+    needs_compilation = any("_contextpilot" in method or method in CONTEXT_METHODS[1:]
                             for method in selected_methods)
     compilation = ({"mode": "contextpilot", "checkout": str(Path(checkout).resolve())}
                    if needs_compilation and checkout else None)
     if needs_compilation and compilation is None:
         raise ValueError("ContextPilot methods require --contextpilot-checkout or execution.cache_compilation.checkout")
     matrix["methods"] = full_queue_method_specs(selected_methods, gain_settings, compilation, value_policy,
-                                                rule_settings=rule_settings, demand_pricing=demand_pricing)
+                                                rule_settings=rule_settings, demand_policy=demand_policy)
+    pricing_asset = next((method["overrides"]["execution"]["prefix_retention"].get("pricing_asset")
+        for method in matrix["methods"] if method["evaluation_factors"]["retention"] == "demand"), None)
     reference = registered["baseline"] if registered["baseline"] in selected_methods else matrix["methods"][0]["id"]
     matrix["selection"].update(baseline=reference, test_comparators=[reference])
     config_path = root/"frozen-A-study.yaml"
@@ -428,7 +430,7 @@ def prepare_full_queue(args, root):
         reader_profile_id=profile, reader_run=source_file(run_path), resource_scope=scope,
         assets={"gain": source_file(gain_path) if needs_gain else None,
                 "value": source_file(args.value_model) if needs_value else None,
-                "demand_pricing": source_file(demand_pricing["pricing_asset"]) if demand_pricing is not None else None,
+                "demand_pricing": source_file(pricing_asset) if pricing_asset is not None else None,
                 "completion_timing": source_file(rolling_settings["completion_timing_asset"])
                 if completion_timing is not None else None},
         cohort=cohorts, workload_plans=workload_plans, acceptance=acceptance, replicate_id=args.replicate_id,
@@ -864,7 +866,7 @@ def main(argv=None):
             parser.error("--full-queue requires --matrix, --online-gpu-devices and --reader-base-url")
         methods = {method for concurrency in args.concurrency
                    for method in full_queue_methods(concurrency, args.methods)}
-        if any(method.startswith("S3_") or method in CACHE_COOPERATION_METHODS for method in methods):
+        if any(method.startswith("S3_") or method in CONTEXT_METHODS for method in methods):
             if not args.gain_asset:
                 parser.error("S3 full-queue methods require --gain-asset")
         elif not args.reader_profile_id:

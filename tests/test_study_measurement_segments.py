@@ -135,7 +135,9 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
     import asyncio
     import time
     from bench.study_workloads import WorkloadDispatcher, freeze_workload, read_workload_manifest
-    from bench.capacity_workflow import full_queue_methods, full_queue_method_specs, full_queue_gap_limits
+    from bench.capacity_workflow import (OPTIONAL_FULL_QUEUE_METHODS, full_queue_methods,
+                                        full_queue_method_specs, full_queue_gap_limits)
+    from bench.study import merge_config
     from types import SimpleNamespace
 
     rows = [dict(task_id=f"session:{turn}", conversation_id="session", turn=turn,
@@ -149,8 +151,9 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
                                  "datasets": {"track": str(path)}}))
     assert read_workload_manifest(index)["track"] == manifest
     expected = ("B6_native", "S3_native", "B6_contextpilot", "S3_contextpilot",
-                "S3_contextpilot_joint_native", "S3_contextpilot_joint_demand",
-                "LlamaIndex_native", "S3_contextpilot_no_fact_reuse")
+                "context_native", "context_cache_order", "context_cache_demand",
+                "LlamaIndex_native", "S3_contextpilot_no_fact_reuse", "context_no_fact_reuse",
+                "Rule_contextpilot_joint_demand")
     assert full_queue_methods(1) == full_queue_methods(4) == (
         "RAG_native", "context_cache_demand", "LlamaIndex_native")
     from pathlib import Path
@@ -159,24 +162,54 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
     assert declaration["baseline"] == "RAG_native"
     assert tuple(declaration["main_methods"]) == full_queue_methods(1)
     assert tuple(cell["method"] for cell in declaration["factorial"].values()) == expected[:4]
-    assert tuple(cell["method"] for cell in declaration["joint_context"].values()) == expected[4:6]
-    specs = {spec["id"]: spec for spec in full_queue_method_specs(expected,
-        {"gain_asset": "measured-B"}, {"mode": "contextpilot", "checkout": "pinned-author"})}
+    assert set(declaration["historical_labels"]).isdisjoint(OPTIONAL_FULL_QUEUE_METHODS)
+    common = {"output_budgets": [512, 2048], "gap_limits": {"max_units": 20, "max_passages": 10}}
+    gain_settings = dict(common, gain_asset="measured-B")
+    rule_settings = dict(common, action_policy="rule")
+    compilation = {"mode": "contextpilot", "checkout": "pinned-author"}
+    specs = {spec["id"]: spec for spec in full_queue_method_specs(
+        expected, gain_settings, compilation, rule_settings=rule_settings)}
     assert all(spec["overrides"]["execution"]["prefix_retention"] == {"mode": "native"}
-               for method, spec in specs.items() if method != expected[5])
-    assert specs[expected[5]]["overrides"]["execution"]["prefix_retention"]["mode"] == "demand"
-    assert specs[expected[5]]["overrides"]["execution"]["prefix_retention"]["allocation"] == "next_use"
-    rule = full_queue_method_specs(["Rule_contextpilot_joint_demand"], None,
-        {"mode": "contextpilot", "checkout": "pinned-author"}, rule_settings={"action_policy": "rule"})[0]
-    assert rule["overrides"]["execution"]["prefix_retention"]["allocation"] == "next_use"
+               for method, spec in specs.items() if method not in {
+                   "context_cache_demand", "context_no_fact_reuse", "Rule_contextpilot_joint_demand"})
+    full = specs["context_cache_demand"]["overrides"]
+    assert full["execution"]["prefix_retention"]["mode"] == "demand"
+    assert full["execution"]["prefix_retention"]["allocation"] == "next_use"
+    for pair in declaration["optional_ablations"].values():
+        reference, candidate = (specs[pair[key]]["evaluation_factors"] for key in ("reference", "method"))
+        changed = {name for name in reference if name != "role" and reference[name] != candidate[name]}
+        assert changed == ({"retention", "retention_allocation"} if pair["factor"] == "retention"
+                           else {pair["factor"]})
+    rule = specs["Rule_contextpilot_joint_demand"]["overrides"]
+    assert rule["reading"] == full["reading"]
+    assert {k: v for k, v in rule["execution"].items() if k != "plan_gain"} == {
+        k: v for k, v in full["execution"].items() if k != "plan_gain"}
+    assert {k: v for k, v in rule["execution"]["plan_gain"].items() if k != "action_policy"} == {
+        k: v for k, v in full["execution"]["plan_gain"].items() if k != "gain_asset"}
     assert specs["B6_native"]["overrides"]["execution"]["plan_gain"] is None
     assert specs["B6_contextpilot"]["overrides"]["execution"]["cache_compilation"]["mode"] == "contextpilot"
     assert specs["LlamaIndex_native"]["overrides"]["execution"]["dialogue_mode"] == "llamaindex"
     control = specs["S3_contextpilot_no_fact_reuse"]["overrides"]
     assert control["execution"] == specs["S3_contextpilot"]["overrides"]["execution"]
-    assert control["reading"] == {"fact_reuse": False}
+    assert control["reading"] == {"fact_reuse": False, "numeric_record_projection": False}
+    control = specs["context_no_fact_reuse"]["overrides"]
+    assert control["execution"] == full["execution"]
+    assert control["reading"] == {**full["reading"], "fact_reuse": False}
     fixed = full_queue_method_specs(["B6_native"], None, None)[0]
     assert fixed["overrides"]["execution"]["plan_gain"] is None
+    inherited = merge_config({"reading": {"numeric_record_projection": True}}, fixed["overrides"])
+    assert inherited["reading"]["numeric_record_projection"] is False
+    demand_policy = dict(mode="demand", allocation="paired_value", pricing_asset=str(tmp_path/"pricing.json"),
+        ttl_seconds=30, horizon_seconds_choices=[30, 90], protection_budget_tokens=4096,
+        lambda_gpu=.25, lambda_host=.1)
+    for spec in full_queue_method_specs(
+            ["context_cache_demand", "context_no_fact_reuse", "Rule_contextpilot_joint_demand"],
+            gain_settings, compilation, rule_settings=rule_settings, demand_policy=demand_policy):
+        assert spec["overrides"]["execution"]["prefix_retention"] == demand_policy
+        assert spec["evaluation_factors"]["retention_allocation"] == "paired_value"
+    next_use = full_queue_method_specs(["context_cache_demand"], gain_settings, compilation,
+        demand_policy={**demand_policy, "allocation": "next_use"})[0]
+    assert "pricing_asset" not in next_use["overrides"]["execution"]["prefix_retention"]
     assert full_queue_methods(1, ["S3_native"]) == ("S3_native",)
     gain = SimpleNamespace(provenance={"continuation_gap_limits": {"max_units": 12, "max_passages": 12}})
     execution = {"state_observation": {"gap_limits": {"max_units": 30, "max_passages": 8}}}

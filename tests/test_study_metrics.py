@@ -126,7 +126,8 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
                                             full_queue_interactions, main, markdown)
 
     specs = full_queue_method_specs((*FULL_QUEUE_METHODS, *OPTIONAL_FULL_QUEUE_METHODS),
-        {}, {'checkout': 'C'}, {'mode': 'value'}, rule_settings={})
+        {}, {'checkout': 'C'}, {'mode': 'value'}, rule_settings={},
+        demand_policy={'allocation': 'paired_value', 'pricing_asset': 'pricing'})
     plan = dict(source_config={'path': 'A'}, source_matrix={'path': 'matrix'},
         source_arrival_plan={'path': 'arrivals-A'}, reader_profile_id='fixed', lambda_time=0,
         resource_scope={'gpu_devices': [0], 'gpu_capacity_tokens': 32768, 'host_capacity_tokens': 65536},
@@ -229,8 +230,8 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     assert not mismatched['comparable']
     assert mismatched['incompatible_identity_fields'] == ['assets.gain']
 
-    e5 = cells({**row, 'method': 'S3_contextpilot_joint_native'})
-    e6 = {**row, 'method': 'S3_contextpilot_joint_demand'}
+    e5 = cells({**row, 'method': 'context_cache_order'})
+    e6 = {**row, 'method': 'context_cache_demand'}
     rule = cells({**row, 'method': 'Rule_contextpilot_joint_demand'})
     plan['assets']['demand_pricing'] = {'path': 'pricing'}
     plan_path.write_text(json.dumps(plan))
@@ -241,17 +242,39 @@ def test_final_index_compares_fixed_arrivals_and_declared_slo(tmp_path):
     assert full_queue_comparisons(e5 + cells(e6))[0]['incompatible_identity_fields'] == ['assets.completion_timing']
 
     current = [cells({**row, 'method': method})[0] for method in (
-        'RAG_native', 'LlamaIndex_native', 'context_native', 'context_cache_order', 'context_cache_demand')]
-    pairs = {(item['candidate'], item['baseline']) for item in full_queue_comparisons(current)}
+        'RAG_native', 'LlamaIndex_native', 'context_native', 'context_cache_order',
+        'Rule_contextpilot_joint_demand', 'context_no_fact_reuse', 'context_cache_demand')]
+    comparisons = full_queue_comparisons(current)
+    pairs = {(item['candidate'], item['baseline']) for item in comparisons}
     assert {('context_cache_demand', 'RAG_native'), ('context_cache_demand', 'LlamaIndex_native'),
             ('context_cache_order', 'context_native'), ('context_cache_demand', 'context_cache_order'),
-            ('context_cache_demand', 'context_native')} <= pairs
+            ('context_cache_demand', 'context_native'),
+            ('context_cache_demand', 'Rule_contextpilot_joint_demand'),
+            ('context_cache_demand', 'context_no_fact_reuse')} <= pairs
+    assert ('Rule_contextpilot_joint_demand', 'context_cache_demand') not in pairs
+    effects = {item['baseline']: (item['comparison_kind'], item['changed_factors'])
+               for item in comparisons if item['candidate'] == 'context_cache_demand'}
+    assert effects['Rule_contextpilot_joint_demand'] == ('single_factor', ['B'])
+    assert effects['context_no_fact_reuse'] == ('single_factor', ['fact_reuse'])
+    assert effects['context_cache_order'] == ('single_factor', ['retention'])
+    assert effects['context_native'] == ('joint_factors', ['compilation', 'retention'])
     assert current[-1]['active_assets'] == {'gain': 'B', 'completion_timing': 'timing',
                                            'demand_pricing': 'pricing', 'compilation': 'C'}
     # The recorded strategy, rather than its display name, defines the comparison.
     renamed = [{**cell, 'method': 'renamed-'+cell['method']} for cell in current]
     assert {(item['candidate'].removeprefix('renamed-'), item['baseline'].removeprefix('renamed-'))
             for item in full_queue_comparisons(renamed)} == pairs
+    assert full_queue_comparisons([current[-1], {**current[-1], 'method': 'same-factors'}]) == []
+
+    plan['method_factors']['context_cache_demand'] = full_queue_method_specs(
+        ('context_cache_demand',), {}, {'checkout': 'C'})[0]['evaluation_factors']
+    plan_path.write_text(json.dumps(plan))
+    next_use = cells({**row, 'method': 'context_cache_demand'})[0]
+    assert 'demand_pricing' not in next_use['active_assets']
+    next_use['method'] = 'next_use'
+    allocation = full_queue_comparisons([next_use, current[-1]])[0]
+    assert allocation['comparison_kind'] == 'single_factor'
+    assert allocation['changed_factors'] == ['retention_allocation']
 
 
 def test_public_and_constructed_tables_keep_split_metrics_and_full_denominators():
@@ -304,7 +327,8 @@ def test_full_queue_acceptance_allows_distinct_helpers_and_reports_slo_separatel
         paid_native_usage={"online_token_ledger": dict(reasons=[], provider_phases=["answer"], total_tokens=1000),
             "native_work": {name: {"unknown_calls": 0} for name in
                             ("actual_prefill_tokens", "actual_host_loaded_tokens", "output_tokens")}},
-        queue_job={"matrix": str(matrix_path)}, required_experiment_cells={})
+        queue_job={"matrix": str(matrix_path)},
+        required_experiment_cells={"baseline": "RAG_native", "candidate": "context_cache_demand"})
 
     def arm(method, latency, resident, assets):
         return {**deepcopy(common), "method": method, "generation_dir": method,
@@ -321,6 +345,15 @@ def test_full_queue_acceptance_allows_distinct_helpers_and_reports_slo_separatel
     assert report["cells"]["context_cache_demand"]["p95_slo"]["pass"] is True
     assert report["p95_ratio"] == pytest.approx(2/3)
     assert report["latency_gate"] == "point_met_single_queue_descriptive"
+    ablation = {**right, "required_experiment_cells": {"candidate": "context_cache_demand"}}
+    assert acceptance.evaluate_full_queue([ablation]) == []
+    missing = acceptance.evaluate_full_queue([right])[0]
+    assert missing["pair_issues"][0]["reason"] == "missing_or_ambiguous_queue"
+    assert missing["required_cells_measured"] == {"baseline": False, "candidate": True}
+    split = acceptance.evaluate_full_queue([
+        {**left, "required_experiment_cells": {"baseline": "RAG_native"}}, ablation])[0]
+    assert split["paired_queues"] == 1
+    assert split["required_cells_measured"] == {"baseline": True, "candidate": True}
 
     # Method-specific helpers may differ between arms, but remain fixed within an arm.
     repeats = [dict(deepcopy(cell), repetition=1, generation_dir=cell["generation_dir"]+"-r2")

@@ -346,7 +346,8 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
             "active_assets": {name: (plan["assets"].get(name) or {}).get("path") for name, active in (
                 ("gain", factors["B"] == "gain"), ("value", factors["retention"] == "value"),
                 ("completion_timing", factors["B"] in {"gain", "rule"}),
-                ("demand_pricing", factors["retention"] == "demand")) if active}
+                ("demand_pricing", factors["retention"] == "demand"
+                 and factors.get("retention_allocation") == "paired_value")) if active}
                 | ({"compilation": plan["compilation_policy"]["checkout"]}
                    if factors["compilation"] == "contextpilot" else {}),
             "evaluation_factors": factors,
@@ -373,6 +374,17 @@ def shared_asset_differences(left, right):
     return sorted(name for name in left.keys() & right.keys() if left[name] != right[name])
 
 
+def queue_changed_factors(candidate, reference):
+    current, base = candidate["evaluation_factors"], reference["evaluation_factors"]
+    changes = {name for name in current.keys() | base.keys()
+               if name != "role" and current.get(name) != base.get(name)}
+    if "retention" in changes:
+        # The allocator is part of enabling demand retention. Compare allocators
+        # separately only when both cells already use the same retention mode.
+        changes.discard("retention_allocation")
+    return changes
+
+
 def is_queue_reference(candidate, reference):
     """Select whole-system references and controlled changes from recorded factors."""
     if candidate["method"] == reference["method"]:
@@ -385,12 +397,12 @@ def is_queue_reference(candidate, reference):
         return False
     if base["role"] in {"external_reference", "historical_reference"}:
         return current["role"] != "historical_reference"
-    changes = {name for name in current.keys() | base.keys()
-               if name != "role" and current.get(name) != base.get(name)}
+    changes = queue_changed_factors(candidate, reference)
     directions = {
-        "B": {("fixed", "gain"), ("gain", "rule")},
+        "B": {("fixed", "gain"), ("rule", "gain")},
         "compilation": {("native", "contextpilot")},
         "retention": {("native", "demand"), ("native", "value")},
+        "retention_allocation": {("next_use", "paired_value")},
         "fact_reuse": {(False, True)},
         "representation": {("existing", "finite")},
         "numeric_record_projection": {(False, True)},
@@ -408,6 +420,11 @@ def full_queue_comparisons(cells):
                      and other["concurrency"] == row["concurrency"]
                      and queue_repetition(other) == queue_repetition(row)]
         for reference in baselines:
+            changes = sorted(queue_changed_factors(row, reference))
+            reference_role = reference["evaluation_factors"]["role"]
+            comparison_kind = ("whole_system" if reference_role in {"main_baseline", "external_reference"}
+                else "historical_reference" if reference_role == "historical_reference"
+                else "single_factor" if len(changes) == 1 else "joint_factors")
             missing_resource_fields = [name for name in ("hardware", "native_cache_config")
                 if any(cell["comparison_identity"]["resource_scope"][name] is None for cell in (row, reference))]
             different_assets = shared_asset_differences(row, reference)
@@ -423,6 +440,7 @@ def full_queue_comparisons(cells):
                 replicate_scope=row.get("replicate_scope"), repetition=row.get("repetition"),
                 source_file=row["source_file"], baseline_source_file=reference["source_file"],
                 candidate_generation_dir=row["generation_dir"], baseline_generation_dir=reference["generation_dir"],
+                comparison_kind=comparison_kind, changed_factors=changes,
                 comparable=same, incompatible_identity_fields=[key for key, value in row["comparison_identity"].items()
                     if value != reference["comparison_identity"][key]] + ["assets."+name for name in different_assets],
                 missing_identity_fields=["resource_scope."+name for name in missing_resource_fields],
@@ -530,15 +548,19 @@ def markdown(report):
         if row.get("evaluation_kind") == "full_queue_own_P3":
             lines.append(f"| {row['method']} | {row['concurrency']} | {row['completed_qa']}/{row['requested_qa']} | {row['queue_quality']} | {row['queue_quality_bounds']} | {row['p95_complete_ms']} |")
     lines += ["", "## 完整队列对照差", "",
-        "| 候选 / 基线 | 并发 | 质量差（候选−基线） | 完整 P95 相对变化 | 质量不低于基线 |",
-        "|---|---:|---:|---:|---|"]
+        "| 候选 / 基线 | 并发 | 对照范围 / 变化因素 | 质量差（候选−基线） | 完整 P95 相对变化 | 质量不低于基线 |",
+        "|---|---:|---|---:|---:|---|"]
+    comparison_labels = {"whole_system": "整包", "historical_reference": "历史参照",
+                         "single_factor": "单因素", "joint_factors": "联合变化"}
     for comparison in report["capacity_comparisons"]:
         if "relative_p95_change" not in comparison:
             continue
         delta = comparison["differences"]["queue_quality"]
         relative = comparison["relative_p95_change"]
         quality = comparison["quality_not_lower"]
+        factors = ", ".join(comparison["changed_factors"])
         lines.append(f"| {comparison['candidate']} / {comparison['baseline']} | {comparison['concurrency']} | "
+            f"{comparison_labels[comparison['comparison_kind']]} / {factors} | "
             f"{delta if delta is not None else '未知'} | "
             f"{format(relative, '.2%') if relative is not None else '未知'} | "
             f"{('是' if quality else '否') if quality is not None else '未知'} |")

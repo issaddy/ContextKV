@@ -95,6 +95,10 @@ def evaluate_full_queue(cells):
         first = group[0]
         policy = first["acceptance_protocol"]
         methods = (policy["baseline"], policy["candidate"])
+        declared_methods = {method for cell in group
+                            for method in cell["required_experiment_cells"].values()}
+        if not set(methods) <= declared_methods:
+            continue
         slots = defaultdict(lambda: defaultdict(list))
         cell_gates = {cell["generation_dir"]: _gate_cell(cell, policy) for cell in group}
         for cell in group:
@@ -171,7 +175,8 @@ def evaluate_full_queue(cells):
             "point_met_single_queue_descriptive" if latency_ci is None else "point_met_interval_inconclusive")
         required_cells = {label: any(cell["method"] == method and cell_gates[cell["generation_dir"]]["measurement_complete"]
                                      for cell in group)
-                          for label, method in first["required_experiment_cells"].items()}
+                          for declaration in group
+                          for label, method in declaration["required_experiment_cells"].items()}
         reports.append({"concurrency": first["concurrency"], "comparison_identity": first["comparison_identity"],
             "policy": policy, "required_cells_measured": required_cells, "declared_pair_slots": len(slots),
             "paired_queues": len(pairs), "pair_issues": pair_issues, "measurement_complete": measurement_complete,
