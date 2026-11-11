@@ -299,7 +299,8 @@ class RollingPlanRuntime:
             stream.write(dumps(packet)+"\n")
 
     def action_proposals(self, catalog, state, snapshot, template, compile_answers, gap_request, *,
-                         request_compiler=None, cache_scope=None, project_answer=False, gain_model=None):
+                         request_compiler=None, cache_scope=None, project_answer=False, gain_model=None,
+                         answer_candidates=None):
         from .action_proposals import (build_observed_action_plans, eligible_observed_answers,
                                        observed_answer_options, observed_step_outputs)
         base = _with_observed_sources(catalog, state)
@@ -324,8 +325,9 @@ class RollingPlanRuntime:
                     finite=finite)
                 if task.step_id not in completed and set(task.predecessor_step_ids) <= completed:
                     if task.kind == "ANSWER":
-                        variants = compile_answers(snapshot, (plan.context_plan,),
-                            replace(state, plan=plan.context_plan), **options)
+                        variants = (answer_candidates if answer_candidates is not None else
+                            compile_answers(snapshot, (plan.context_plan,),
+                                replace(state, plan=plan.context_plan), **options))
                         if self.joint_context:
                             variants = eligible_observed_answers(base_state, variants)
                     elif task.kind != "GAP" and not (task.kind == "REDUCE"
@@ -610,17 +612,21 @@ class RollingPlanRuntime:
             state = replace(state, plan=replace(catalog, online_tokens_spent=spent))
             cache_scope = await engine.info()
             observed = self.mode == "observed_actions"
+            answer_candidates = None
             required_step = self._required_scope_step(state) if observed else None
             if (required_step is not None and required_step.kind == "READ"
                     and not any(need.operation in {"count", "sum", "group"} for need in state.plan.task_state.needs)):
                 from .context_budget import direct_answer_reason
-                raw_options = (dict(representations=("existing", "raw"), layouts=("existing",),
-                    actions=("REBUILD",)) if self.joint_context else {})
+                from .action_proposals import observed_answer_options, eligible_observed_answers
+                raw_options = observed_answer_options(state, joint=self.joint_context,
+                                                      finite=self.read_choices == 2)
                 direct_candidates = await asyncio.to_thread(compile_answers, snapshot, (state.plan,), state,
                                                               **raw_options)
+                direct_candidates = eligible_observed_answers(state, direct_candidates)
                 if any(candidate.feasible and direct_answer_reason(state, candidate) is None
                        for candidate in direct_candidates):
                     required_step = None
+                    answer_candidates = direct_candidates
             if required_step is not None:
                 from .action_policy import native_admission_reason, route_completion_reserve
                 from .admission import quoted_native_work
@@ -744,7 +750,8 @@ class RollingPlanRuntime:
             gap_request = self._gap_request(state, expanded, open_need_provider)
             plans = (await asyncio.to_thread(self.action_proposals, context_plans[0], state, snapshot, template,
                 compile_answers, gap_request, request_compiler=route_compiler,
-                cache_scope=cache_scope, project_answer=answer_demand, gain_model=model) if observed else
+                cache_scope=cache_scope, project_answer=answer_demand, gain_model=model,
+                answer_candidates=answer_candidates) if observed else
                 await asyncio.to_thread(self.proposals, context_plans, state, snapshot, template, compile_answers,
                     request_compiler=route_compiler, cache_scope=cache_scope))
             if len(plans) > self.policy.limits.max_plan_candidates:
