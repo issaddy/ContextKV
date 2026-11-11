@@ -11,7 +11,7 @@ cd /home/relay/songjiayun/ContextKV
 
 使用默认 `python3`，模型目录为 `/data/models/qwen3-32b`。
 
-`bootstrap_sglang.sh` 准备官方 SGLang 0.5.18 源码与项目补丁，使用容器现有 Python、PyTorch 和 CUDA 内核。源码提交和实际包版本进入 runtime manifest；课题固定 Qwen 权重、tokenizer 和组间推理条件。
+更新仓库后，运行 `bootstrap_sglang.sh` 将 SGLang overlay 更新到当前项目接口，再启动服务。它复用官方 SGLang 0.5.18 源码和容器现有 Python、PyTorch、CUDA 内核。课题固定 Qwen 权重、tokenizer 和组间推理条件。
 
 ```bash
 export CONTEXTKV_MODEL_SCOPE_PATH=/absolute/path/qwen3-scope.json

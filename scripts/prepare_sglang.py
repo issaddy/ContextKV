@@ -60,6 +60,12 @@ def prepare(checkout: Path, source_only: bool):
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(fetch, MANIFEST["original_files"]))
     if not already_applied:
+        if not source_only:
+            original = set(MANIFEST["original_files"])
+            tracked = [rel for rel in MANIFEST["changed_files"] if rel in original]
+            run(["git", "restore", "--source", commit, "--worktree", "--", *tracked], checkout)
+            for rel in set(MANIFEST["changed_files"])-original:
+                (checkout / rel).unlink(missing_ok=True)
         run(["git", "apply", "--check", str(PATCH)], checkout)
         run(["git", "apply", str(PATCH)], checkout)
     for rel in MANIFEST["changed_files"]:
