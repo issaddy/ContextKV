@@ -508,8 +508,13 @@ def benchmark_groups(rows, references, spec):
             dimensions["category"] = reference["category"]
         if "level" in reference.get("source_task", {}):
             dimensions["level"] = reference["source_task"]["level"]
+        for source, dimension in (("Question Type", "question_type"),
+                                  ("Multi-Turn", "multi_turn"), ("Answerability", "answerability")):
+            if source in reference:
+                dimensions[dimension] = reference[source]
         for dimension, value in dimensions.items():
-            groups.setdefault(dimension, {}).setdefault(str(value), []).append(reference["task_id"])
+            for label in value if isinstance(value, list) else (value,):
+                groups.setdefault(dimension, {}).setdefault(str(label), []).append(reference["task_id"])
     result = {}
     for dimension, values in groups.items():
         result[dimension] = {}
