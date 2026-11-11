@@ -93,6 +93,7 @@ def prepare(args, root):
     from training.train_plan_gain import PlanGainModel
 
     config = yaml.safe_load(Path(args.config).read_text())
+    config.setdefault("scoring", {})["gpu_devices"] = list(args.online_gpu_devices)
     config.setdefault("reading", {}).setdefault("full_scope_output_tokens", DEFAULT_FULL_SCOPE_OUTPUT_TOKENS)
     matrix = yaml.safe_load(Path(args.matrix).read_text())
     registered = matrix["final_evaluation"]
