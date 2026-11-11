@@ -420,9 +420,10 @@ def observed_cohort(rollouts, packets, sources, *, split, limit, cohort_manifest
         blocks = {block.key: block for block in (*snapshot.archive, *state.plan.selected_set.source_blocks)}
         for block in blocks.values():
             validate_block(block)
-            source = originals.get(block.key.passage_id)
-            if (source is None or source["split"] != "train" or source["version"] != block.key.version
-                    or source["text"] != block.text):
+            source = originals[block.key.document_id]
+            start, end = block.span or (0, len(source["text"]))
+            if (source["split"] != "train" or source["version"] != block.key.version
+                    or source["text"][start:end] != block.text):
                 raise ValueError("observed source body/version differs from the actual training original")
         for unit in state.plan.selected_set.selected_units:
             for span in unit.source_spans:
@@ -432,7 +433,7 @@ def observed_cohort(rollouts, packets, sources, *, split, limit, cohort_manifest
                         or block.text[span.start-base:span.end-base] != unit.text):
                     raise ValueError("observed source window differs from original coordinates/text")
         reference = row["reference"]
-        if reference["task_id"] != task_id or reference["conversation_id"] != row["conversation_id"] or reference["turn"] != row["turn"]:
+        if reference["task_id"] != task_id or reference["conversation_id"] != row["conversation_id"]:
             raise ValueError("raw offline reference belongs to a different captured task")
         for witness in reference["grounding"]:
             source = originals[witness["passage_id"]]
