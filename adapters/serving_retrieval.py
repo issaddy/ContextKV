@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from controller.schema import OnlineMessage, OnlineTurn
+from controller.schema import OnlineMessage, OnlineTurn, history_messages
 from controller.context_schema import RetrievalState
 from adapters.conversation import snapshot_context
 from adapters.retrieval import bind_corpus_context, run_retrieval_worker, to_evidence
@@ -59,8 +59,8 @@ class ServingRetriever:
         return tuple(archive[key] for key in keys)
 
     def retrieve_pool(self, snapshot, query, request_id):
-        history = tuple(message for row in snapshot.raw_history for message in (
-            OnlineMessage("user", row.user_text), OnlineMessage("assistant", row.assistant_text)))
+        history = tuple(OnlineMessage(message.role, message.content)
+                        for message in history_messages(snapshot.raw_history))
         turn = OnlineTurn(snapshot.session_id, request_id, len(snapshot.raw_history)+1,
                           self.corpus_id, query, history, (), "P3")
         memory = self.retrieval_state(snapshot)
@@ -91,8 +91,8 @@ class ServingRetriever:
             self.events.emit("retrieval_request_finished", task_id=task_id)
 
     def _retrieve(self, snapshot, query, request_id, started):
-        history = tuple(message for turn in snapshot.raw_history for message in (
-            OnlineMessage("user", turn.user_text), OnlineMessage("assistant", turn.assistant_text)))
+        history = tuple(OnlineMessage(message.role, message.content)
+                        for message in history_messages(snapshot.raw_history))
         turn = OnlineTurn(snapshot.session_id, request_id, len(snapshot.raw_history)+1,
                           self.corpus_id, query, history, (), "P3")
         try:

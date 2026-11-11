@@ -19,12 +19,16 @@ def split_metric_spec(spec, split):
         "scoring": {**spec.get("scoring", {}), **override.get("scoring", {})}}
 
 
-def _track_specs(matrix, split):
-    development = matrix.get("selection", {}).get("development_weights")
-    if split == "dev" and development is not None:
-        return {name: {**split_metric_spec(matrix["datasets"][name], split), "weight": weight}
-                for name, weight in development.items()}
-    return {name: split_metric_spec(spec, split) for name, spec in matrix["datasets"].items()}
+def _track_specs(matrix, split, datasets=None):
+    """Use the selected split and declared dataset identities."""
+    selected = datasets if datasets is not None else matrix.get("cohorts", {}).get(split)
+    if selected is None:
+        selected = [name for name, spec in matrix["datasets"].items()
+                    if ("inputs" not in spec or split in spec["inputs"])
+                    and not spec.get("evaluation_only")]
+    return {name: {"protocol": matrix.get("protocol", "P3"),
+                   **split_metric_spec(matrix["datasets"][name], split)}
+            for name in selected}
 
 
 def evaluation_track_protocol(spec, split):
@@ -34,13 +38,13 @@ def evaluation_track_protocol(spec, split):
         "project_conversation": {"dev": "public_benchmark", "test": "public_benchmark"},
         "project_selected_turn_reference_diagnostic": {
             "dev": "public_reference_diagnostic", "test": "public_reference_diagnostic"},
-        "independent_family_dev_and_public_test": {"dev": "constructed_task", "test": "public_benchmark"},
-        "independent_training_sources_dev_and_public_test": {"dev": "constructed_task", "test": "public_benchmark"},
+        "public_test": {"test": "public_benchmark"},
+        "constructed": {"dev": "constructed_task", "test": "constructed_task"},
     }
     resolved = split_metric_spec(spec, split)
     return {"origin": origins[spec["split_kind"]][split], "split_kind": spec["split_kind"],
             "primary_metric": resolved["primary_metric"], "normalization": resolved["normalization"],
-            "registered_weight": resolved["weight"]}
+            "history_protocol": spec.get("protocol", "P3")}
 
 
 def _number(value):
@@ -205,7 +209,7 @@ def _budget_reasons(matrix, cost):
 
 
 def summarize_methods(matrix, rows, split="dev"):
-    """Retain raw metrics and compute Q only from every configured benchmark."""
+    """Report each benchmark in its original metric; training may declare an objective."""
     rows = [row for row in rows if row["split"] == split]
     methods = [method["id"] for method in matrix["methods"]]
     methods.extend(sorted({row["method"] for row in rows}-set(methods)))
@@ -251,14 +255,17 @@ def summarize_methods(matrix, rows, split="dev"):
                 reasons.append("incomplete_cohort_or_scoring:"+name)
         cost = _cost_summary(method_rows)
         reasons.extend(_budget_reasons(matrix, cost))
-        observed_quality = sum(spec["weight"]*datasets[name]["normalized_score"]
-                      for name, spec in specs.items()) if all(
-            datasets[name]["normalized_score"] is not None for name in specs) else None
+        weights = (matrix.get("selection", {}).get("development_weights") if split == "dev" else None)
+        if weights:
+            observed_quality = (sum(weight*datasets[name]["normalized_score"] for name, weight in weights.items())
+                if all(datasets[name]["normalized_score"] is not None for name in weights) else None)
+        else:
+            observed_quality = next(iter(datasets.values()))["normalized_score"] if len(datasets) == 1 else None
         quality = observed_quality if all(dataset["complete"] for dataset in datasets.values()) else None
         summaries[method] = {"method": method, "split": split, "quality": quality,
             "observed_quality": observed_quality,
             "quality_track": "development_selection" if split == "dev" else "final_evaluation",
-            "track_weights": {name: spec["weight"] for name, spec in specs.items()},
+            "track_weights": weights,
             "excluded_datasets": sorted(set(matrix["datasets"])-set(specs)),
             "datasets": datasets, "cost": cost, "eligible": not reasons,
             "selection_reasons": reasons}
@@ -285,9 +292,9 @@ def _interval(values, confidence):
     return [_quantile(values, alpha), _quantile(values, 1-alpha)]
 
 
-def declared_queue_quality_interval(matrix, pairs, *, split="dev"):
-    """Paired conversation bootstrap of the declared, fixed-weight quality difference."""
-    specs = _track_specs(matrix, split)
+def declared_queue_quality_interval(matrix, pairs, *, split, dataset):
+    """Paired conversation bootstrap for one benchmark's normalized quality."""
+    specs = {dataset: split_metric_spec(matrix["datasets"][dataset], split)}
     selection = matrix["selection"]
     samples, confidence = selection.get("bootstrap_samples", 5000), selection.get("confidence", .95)
     rng = random.Random(matrix["seed"])
@@ -318,7 +325,7 @@ def declared_queue_quality_interval(matrix, pairs, *, split="dev"):
         if len(clusters) < 2:
             return None
         populations = [clusters[key] for key in sorted(clusters)]
-        weight = spec["weight"]/spec["normalization"]
+        weight = 1/spec["normalization"]
         for draw in range(samples):
             n, *scores = map(sum, zip(*rng.choices(populations, k=len(populations))))
             quality = [_primary_components([value/n for value in scores[start:start+width]], spec)
@@ -342,7 +349,6 @@ def paired_comparisons(matrix, rows, baseline=None, split="test", *, samples=Non
     methods = sorted({row["method"] for row in rows}-{baseline})
     output = []
     for method in methods:
-        overall = []
         for dataset, spec in specs.items():
             declared = dataset in cohorts
             expected = ({str(task_id) for task_id in cohorts[dataset]} if declared else {
@@ -407,19 +413,4 @@ def paired_comparisons(matrix, rows, baseline=None, split="test", *, samples=Non
             result["equal_cost_match"] = all(matched) if None not in matched else None
             result["equal_cost_relative_tolerance"] = tolerance
             output.append(result)
-            weight = spec["weight"]/spec.get("normalization", 1.0)
-            overall.append((dataset, estimated*weight, [draw*weight for draw in draws], len(keys), complete_cohort))
-        if len(overall) == len(specs):
-            draws = [sum(component[2][index] for component in overall) for index in range(samples)]
-            complete_cohort = all(component[4] for component in overall)
-            output.append({"method": method, "baseline": baseline,
-                "dataset": "engineering_Q" if complete_cohort else "engineering_Q_common_scored",
-                "complete_cohort": complete_cohort,
-                "comparison_scope": "declared_cohort" if complete_cohort else "common_scored_subset",
-                "quality_track": "development_selection" if split == "dev" else "final_evaluation",
-                "track_weights": {name: spec["weight"] for name, spec in specs.items()},
-                "score_difference": sum(component[1] for component in overall),
-                "score_interval": _interval(draws, confidence) if all(component[3] >= 2 for component in overall) else None,
-                "confidence": confidence,
-                "bootstrap_samples": samples, "resampling_unit": "independent_dataset_conversation_or_document"})
     return output

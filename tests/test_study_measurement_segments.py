@@ -135,7 +135,7 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
     import asyncio
     import time
     from bench.study_workloads import WorkloadDispatcher, freeze_workload, read_workload_manifest
-    from bench.capacity_workflow import (OPTIONAL_FULL_QUEUE_METHODS, full_queue_methods,
+    from bench.capacity_workflow import (FULL_QUEUE_METHODS, OPTIONAL_FULL_QUEUE_METHODS,
                                         full_queue_method_specs, full_queue_gap_limits)
     from bench.study import merge_config
     from types import SimpleNamespace
@@ -150,19 +150,13 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
     index.write_text(json.dumps({"format": "contextkv_dataset_workload_index_v1",
                                  "datasets": {"track": str(path)}}))
     assert read_workload_manifest(index)["track"] == manifest
-    expected = ("B6_native", "S3_native", "B6_contextpilot", "S3_contextpilot",
-                "context_native", "context_cache_order", "context_cache_demand",
-                "LlamaIndex_native", "S3_contextpilot_no_fact_reuse", "context_no_fact_reuse",
-                "Rule_contextpilot_joint_demand")
-    assert full_queue_methods(1) == full_queue_methods(4) == (
-        "RAG_native", "context_cache_demand", "LlamaIndex_native")
+    expected = (*FULL_QUEUE_METHODS, *OPTIONAL_FULL_QUEUE_METHODS)
+    assert FULL_QUEUE_METHODS == ("RAG_native", "context_cache_demand", "LlamaIndex_native")
     from pathlib import Path
     import yaml
     declaration = yaml.safe_load(Path("configs/study_matrix.yaml").read_text())["final_evaluation"]
     assert declaration["baseline"] == "RAG_native"
-    assert tuple(declaration["main_methods"]) == full_queue_methods(1)
-    assert tuple(cell["method"] for cell in declaration["factorial"].values()) == expected[:4]
-    assert set(declaration["historical_labels"]).isdisjoint(OPTIONAL_FULL_QUEUE_METHODS)
+    assert tuple(declaration["main_methods"]) == FULL_QUEUE_METHODS
     common = {"output_budgets": [512, 2048], "gap_limits": {"max_units": 20, "max_passages": 10}}
     gain_settings = dict(common, gain_asset="measured-B")
     rule_settings = dict(common, action_policy="rule")
@@ -186,16 +180,12 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
         k: v for k, v in full["execution"].items() if k != "plan_gain"}
     assert {k: v for k, v in rule["execution"]["plan_gain"].items() if k != "action_policy"} == {
         k: v for k, v in full["execution"]["plan_gain"].items() if k != "gain_asset"}
-    assert specs["B6_native"]["overrides"]["execution"]["plan_gain"] is None
-    assert specs["B6_contextpilot"]["overrides"]["execution"]["cache_compilation"]["mode"] == "contextpilot"
+    assert specs["RAG_native"]["overrides"]["execution"]["plan_gain"] is None
     assert specs["LlamaIndex_native"]["overrides"]["execution"]["dialogue_mode"] == "llamaindex"
-    control = specs["S3_contextpilot_no_fact_reuse"]["overrides"]
-    assert control["execution"] == specs["S3_contextpilot"]["overrides"]["execution"]
-    assert control["reading"] == {"fact_reuse": False, "numeric_record_projection": False}
     control = specs["context_no_fact_reuse"]["overrides"]
     assert control["execution"] == full["execution"]
     assert control["reading"] == {**full["reading"], "fact_reuse": False}
-    fixed = full_queue_method_specs(["B6_native"], None, None)[0]
+    fixed = full_queue_method_specs(["RAG_native"], None, None)[0]
     assert fixed["overrides"]["execution"]["plan_gain"] is None
     inherited = merge_config({"reading": {"numeric_record_projection": True}}, fixed["overrides"])
     assert inherited["reading"]["numeric_record_projection"] is False
@@ -210,7 +200,6 @@ def test_fixed_arrivals_keep_history_and_slot_wait_in_response_time(tmp_path):
     next_use = full_queue_method_specs(["context_cache_demand"], gain_settings, compilation,
         demand_policy={**demand_policy, "allocation": "next_use"})[0]
     assert "pricing_asset" not in next_use["overrides"]["execution"]["prefix_retention"]
-    assert full_queue_methods(1, ["S3_native"]) == ("S3_native",)
     gain = SimpleNamespace(provenance={"continuation_gap_limits": {"max_units": 12, "max_passages": 12}})
     execution = {"state_observation": {"gap_limits": {"max_units": 30, "max_passages": 8}}}
     assert full_queue_gap_limits({"state_observation": None}, gain) == gain.provenance["continuation_gap_limits"]
@@ -281,3 +270,94 @@ def test_cancelled_fixed_tail_remains_observed_and_counts_blocked_requests():
         assert metrics["failure_fraction"] == 1
         assert metrics["latency_slo_goodput_requests_per_second"] == 0
     asyncio.run(run())
+
+
+def test_dataset_queue_preparation_uses_selected_split_protocol_and_workload(tmp_path, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+    import yaml
+    from bench import capacity_workflow as workflow
+    from bench.study import dataset_rows
+    from bench.study_workloads import read_workload_manifest
+
+    inputs = {}
+    for split, count in (('dev', 1), ('test', 2)):
+        path = tmp_path/f'{split}.jsonl'
+        path.write_text(''.join(json.dumps(dict(task_id=f'{split}:{turn}', conversation_id=split,
+            turn=turn, Collection='track', contexts=[], input=[{'speaker': 'user', 'text': 'Question?'}]))+'\n'
+            for turn in range(1, count+1)))
+        inputs[split] = str(path)
+    shared_path, split_path = tmp_path/'shared.jsonl', tmp_path/'splits.json'
+    shared_path.write_text(''.join(Path(path).read_text() for path in inputs.values()))
+    split_path.write_text(json.dumps({'dev': ['dev'], 'test': ['test']}))
+    shared_spec = {'input': str(shared_path), 'split_manifest': str(split_path)}
+    assert [row['task_id'] for row in dataset_rows(shared_spec, 'test', task_ids=['test:2'])] == ['test:2']
+    with pytest.raises(KeyError, match='dev:1'):
+        dataset_rows(shared_spec, 'test', task_ids=['dev:1'])
+    run_path, retriever_path = tmp_path/'reader.yaml', tmp_path/'retriever.yaml'
+    run_path.write_text('engine: {}\n')
+    retriever_path.write_text('{}\n')
+    config_path, matrix_path = tmp_path/'study.yaml', tmp_path/'matrix.yaml'
+    config_path.write_text(yaml.safe_dump(dict(generation={'run_config': str(run_path)},
+        execution={'lambda_time': 0}, reading={'output_tokens_per_fact': 128},
+        retrieval={'config_path': str(retriever_path)})))
+    spec = dict(inputs=inputs, split_kind='native', primary_metric='RB_llm', normalization=1)
+    matrix = dict(seed=42, protocol='P1', selection={'bootstrap_samples': 20},
+        resources={'gpu_capacity_tokens': 32, 'host_capacity_tokens': 64},
+        final_evaluation={'baseline': 'RAG_native', 'main_methods': list(workflow.FULL_QUEUE_METHODS),
+            'acceptance': {'candidate': 'context_cache_demand', 'quality_improvement': .05,
+                           'quality_noninferiority': .002, 'p95_ratio': .85}},
+        datasets={'track': spec, 'second': {**spec, 'protocol': 'P3', 'inputs': {'test': inputs['dev']}}})
+    matrix_path.write_text(yaml.safe_dump(matrix))
+    monkeypatch.setattr('controller.config.load_config', lambda _: SimpleNamespace(
+        engine=SimpleNamespace(base_url='http://fixture:30000', gpu_capacity_tokens=32, host_capacity_tokens=64),
+        model=SimpleNamespace(name='fixed-Qwen', revision='fixed')))
+    args = SimpleNamespace(config=str(config_path), matrix=str(matrix_path), split='test', datasets=None,
+        cohorts=None, arrival_plan=None, reader_base_url='http://fixture:30000', methods=['RAG_native'],
+        gain_asset=None, reader_profile_id='fixed', online_process_roots=(123,), prepare_only=True,
+        online_gpu_devices=(0,), lambda_time=None, gap_max_units=None, gap_max_passages=None,
+        read_outputs=None, sampling_interval=.5, contextpilot_checkout=None,
+        external_reranker='released-reranker', concurrency=[1, 4], repetitions=1,
+        complete_slo_seconds=None, project_root='.', replicate_id=None)
+    root = tmp_path/'test-run'
+    root.mkdir()
+    plan = workflow.prepare(args, root)
+    assert plan['split'] == 'test' and plan['source_arrival_plan'] is None
+    assert len(plan['jobs']) == 4 and plan['requested_qa'] == 6
+    assert {(job['dataset'], job['requested_qa'], job['protocol']) for job in plan['jobs']} == {
+        ('track', 2, 'P1'), ('second', 1, 'P3')}
+    job = next(job for job in plan['jobs'] if job['dataset'] == 'track')
+    workload = read_workload_manifest(job['workload'])
+    assert workload.dispatch_order == ('test:1', 'test:2')
+    assert workload.turns[1].release_after_task_id == 'test:1'
+    assert workload.turns[1].think_time_seconds == 0
+    assert workload.dispatch_semantics != 'fixed_arrivals'
+    assert yaml.safe_load(Path(job['matrix']).read_text())['protocol'] == 'P1'
+
+    # The same runner summarizes the selected test denominator, not the dev cohort.
+    directory = Path(job['output'])/job['method']/job['dataset']
+    directory.mkdir(parents=True)
+    records = [dict(task_id=f'test:{turn}', conversation_id='test', status='completed',
+        metrics={'RB_llm': score}, cost={'complete_ms': 100*turn}, request_window=[0, turn*.1],
+        response={'output_tokens': 1, 'truncated': False})
+        for turn, score in ((1, .5), (2, 1.))]
+    (directory/'results.unscored.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in records))
+    monkeypatch.setattr(workflow, 'paid_execution_index', lambda *args, **kwargs: {})
+    result = workflow.summarize_full_queue(job)
+    assert result['dataset'] == 'track' and result['split'] == 'test' and result['protocol'] == 'P1'
+    assert result['dataset_protocols']['track']['history_protocol'] == 'P1'
+    assert result['requested_qa'] == result['completed_qa'] == 2
+    assert result['queue_quality'] == .75 and result['p95_complete_ms'] == 195
+    assert 'track_weights' not in result
+
+    arrival_path = tmp_path/'arrivals.json'
+    arrival_path.write_text(json.dumps({'format': 'contextkv_fixed_arrivals_v1',
+        'datasets': {'track': {'name': 'fixed-dev', 'seconds': {'dev:1': 3}}}}))
+    args.split, args.datasets, args.arrival_plan = 'dev', ['track'], str(arrival_path)
+    fixed_root = tmp_path/'fixed-dev-run'
+    fixed_root.mkdir()
+    fixed = workflow.prepare(args, fixed_root)
+    assert fixed['split'] == 'dev' and {job['requested_qa'] for job in fixed['jobs']} == {1}
+    restored = read_workload_manifest(fixed['jobs'][0]['workload'])
+    assert restored.dispatch_semantics == 'fixed_arrivals'
+    assert restored.dispatch_order == ('dev:1',) and restored.turns[0].start_delay_seconds == 3

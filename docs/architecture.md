@@ -93,4 +93,4 @@ READ 只是对 Need 的一次尝试；结果尚未返回时，原文回答仍可
 
 问答响应分别返回直接可见原文的 `visible_evidence_manifest` 与结论引用的 `conclusion_source_manifest`。后者将引用 ID 绑定到原文 URI、版本和坐标。评分使用相同的来源闭包，完整原文独立供审计。LlamaIndex 的投影还包括实际中间 compact/refine 输入所见的原文片段。[评分投影](../bench/quality.py)
 
-`bench.capacity_workflow --full-queue` 默认比较普通文档问答、ContextKV 与 LlamaIndex，主基线为 `RAG_native`。普通流程使用必要历史、基础检索重排、窗口内拼接和一次回答，直接使用 SGLang 原生缓存；追问的检索改写和最终回答都进入同一账本。现有 LlamaIndex 共用执行适配器，保留作者 compact/refine。相同上下文能力的三种缓存配置用于局部归因，其他模块对照按需选择。[矩阵](../configs/study_matrix.yaml) · [普通基线](../adapters/rag_dialogue.py) · [运行入口](study/final_runbook.md)
+`bench.capacity_workflow` 默认比较普通文档问答、ContextKV 与 LlamaIndex，主基线为 `RAG_native`。普通流程使用必要历史、基础检索重排、窗口内拼接和一次回答，直接使用 SGLang 原生缓存；追问的检索改写和最终回答都进入同一账本。现有 LlamaIndex 共用执行适配器，保留作者 compact/refine。相同上下文能力的三种缓存配置用于局部归因，其他模块对照按需选择。[矩阵](../configs/study_matrix.yaml) · [普通基线](../adapters/rag_dialogue.py) · [运行入口](study/final_runbook.md)

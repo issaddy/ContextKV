@@ -13,7 +13,7 @@ import uuid
 
 from .evidence import merge_evidence_block
 from .schema import (CompletionReceipt, ContextEpoch, EvidenceBlock, EvidenceKey, ExecutionLedger, GenerationResult, Message, QueryContext,
-                     Plan, RetireOperation, SessionSnapshot, TurnRecord)
+                     Plan, RetireOperation, SessionSnapshot, TurnRecord, history_messages)
 from .serialization import decode, dumps, loads
 from .context_schema import ContextPlan, OpenNeed, ReadingOutcome, StepRecord
 from .prefix_retention import PrefixOwnerRecord
@@ -711,11 +711,12 @@ class SessionStore:
                 raise VersionConflict("History synchronization lost CAS")
             if self.pending_attempt(session_id):
                 raise PendingAttempt("Cannot synchronize history during an unresolved attempt")
-            if tuple((t.user_text, t.assistant_text) for t in snap.raw_history) == tuple((t.user_text, t.assistant_text) for t in history):
+            if history_messages(snap.raw_history) == history_messages(history):
                 return snap
             # P1 can replace an answer with reference history, but evidence used
             # for that same earlier user question remains an observed association.
-            previous = {(turn.turn_id, turn.user_text): turn for turn in snap.raw_history}
+            previous = {(turn.turn_id, turn.user_text): turn for turn in snap.raw_history
+                        if turn.user_text is not None}
             history = tuple(replace(turn, evidence_keys=previous[(turn.turn_id, turn.user_text)].evidence_keys)
                             if (turn.turn_id, turn.user_text) in previous else turn for turn in history)
             updated = replace(snap, version=snap.version + 1, raw_history=history,

@@ -26,7 +26,7 @@ from controller.schema import OnlineTurn
 from adapters.retrieval import run_retrieval_worker
 from controller.config import create_controller, load_config
 from controller.evidence import make_evidence
-from controller.schema import TurnRecord
+from controller.schema import Message, from_history_messages
 from controller.serialization import dumps, to_jsonable
 
 
@@ -385,8 +385,7 @@ async def benchmark(args, config):
     async def handle(turn):
         history = None
         if args.protocol == "P1":
-            history = tuple(TurnRecord(i // 2 + 1, turn.history[i].text, turn.history[i+1].text)
-                            for i in range(0, len(turn.history), 2))
+            history = from_history_messages(tuple(Message(message.speaker, message.text) for message in turn.history))
         session_id = f"{run_prefix}:{turn.conversation_id}"
         if corpus_index:
             retrieval_priority = corpus_index.retrieved_keys(turn.contexts)

@@ -1,0 +1,55 @@
+# Unmodified public questions replayed with each method's own answers; system experiment.
+schema_version: 1
+study_config: configs/study.yaml
+seed: 42
+protocol: P3
+selection:
+  baseline: RAG_native
+  near_equal_quality: 0.002
+  equal_cost_relative_tolerance: 0.05
+  bootstrap_samples: 5000
+final_evaluation:
+  baseline: RAG_native
+  main_methods:
+  - RAG_native
+  - context_cache_demand
+  - LlamaIndex_native
+  acceptance:
+    candidate: context_cache_demand
+    quality_improvement: 0.05
+    quality_noninferiority: 0.002
+    p95_ratio: 0.85
+resources:
+  gpu_capacity_tokens: 32768
+  host_capacity_tokens: 61056
+  gpu_devices:
+  - 0
+  - 1
+  p95_complete_ms: 120000
+  max_online_tokens: 200000000
+  concurrency:
+  - 1
+  - 4
+datasets:
+  multidoc2dial:
+    inputs:
+      dev: data/multidoc2dial/dev/tasks.jsonl
+      test: data/multidoc2dial/test/tasks.jsonl
+    corpus_path: data/multidoc2dial/test/passages.jsonl
+    retriever_config: configs/study_multidoc_retriever.yaml
+    split_kind: native
+    dev_conversations: 32
+    dev_seed: 42
+    primary_metric: f1
+    normalization: 1.0
+  mtrag:
+    input: data/mtrag/RAG.jsonl
+    split_manifest: data/mtrag/split_manifest.json
+    corpus_path: data/mtrag-official/cloud.jsonl
+    corpus_id: mtrag
+    retriever_config: configs/retriever_dialogue.example.yaml
+    domain: mt-rag-ibmcloud-elser-512-100-20240502
+    split_kind: project_conversation
+    primary_metric: mtrageval_harmonic
+    normalization: 1.0
+    max_passages: 10

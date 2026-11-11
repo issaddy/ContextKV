@@ -1,8 +1,7 @@
-"""Pinned Loong reference rubric over saved answers through the existing transport.
+"""Pinned Loong reference rubric and score extraction over saved answers.
 
-The local judge is an explicit substitution for the paper's GPT-4 judge. This is
-not a leaderboard reproduction or a source-faithfulness metric. Failed, absent,
-over-budget or truncated grades stay missing; no regeneration or repair calls.
+The configured judge endpoint preserves the author's question/reference
+construction and score parser.
 """
 from __future__ import annotations
 
@@ -34,15 +33,14 @@ def evaluation_prompt(reference, prediction):
 
 
 def parse_score(text):
-    # Upstream accepts double brackets or a single-bracket fallback. Require
-    # one unambiguous, in-range grade instead of silently using the first.
-    found = re.findall(r"\[\[([0-9]*\.?[0-9]+)\]\]", text)
-    if not found:
-        found = re.findall(r"\[([0-9]*\.?[0-9]+)\]", text)
-    if len(found) != 1:
-        return None
-    value = float(found[0])
-    return value if 0 <= value <= 100 else None
+    # Loong src/utils/metric.py::extract_number at COMMIT.
+    match = re.search(r"\[\[([0-9]*\.?[0-9]+)\]\]", text)
+    if match:
+        return float(match.group(1))
+    match = re.search(r"\[([0-9]*\.?[0-9]+)\]", text)
+    if match:
+        return float(match.group(1))
+    return None
 
 
 def score_answer(reference, prediction, client):
@@ -67,6 +65,14 @@ def summarize(rows):
             "full_cohort_mean_bounds": [sum(values)/len(rows), (sum(values)+100*len(missing))/len(rows)] if rows else None}
 
 
+def grouped_summary(rows):
+    return {"summary": summarize(rows),
+            "by_domain": {name: summarize([row for row in rows if row["domain"] == name])
+                          for name in sorted({row["domain"] for row in rows})},
+            "by_level": {str(level): summarize([row for row in rows if row["level"] == level])
+                         for level in sorted({row["level"] for row in rows})}}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--references", type=Path, required=True)
@@ -83,30 +89,29 @@ def main(argv=None):
     if len(by_id) != len(predictions) or len(ids) != len(references) or by_id.keys()-ids:
         raise ValueError("duplicate or unknown evaluation task IDs")
     config = SelectorConfig(**json.loads(args.judge_config.read_text()))
-    args.output.mkdir(parents=True, exist_ok=False)
+    args.output.mkdir(parents=True, exist_ok=True)
+    target = args.output/"scores.jsonl"
+    results = load_jsonl(target) if target.exists() else []
+    finished = {row["task_id"] for row in results}
     client = OpenAICompletionClient(config)
     try:
-        with ThreadPoolExecutor(max_workers=args.workers) as executor, (args.output/"scores.jsonl").open("w", encoding="utf-8") as output:
+        with ThreadPoolExecutor(max_workers=args.workers) as executor, target.open("a", encoding="utf-8") as output:
             def evaluate(reference):
                 return score_answer(reference, by_id.get(reference["task_id"]), client)
-            results = []
-            for row in executor.map(evaluate, references):
+            pending = [reference for reference in references if reference["task_id"] not in finished]
+            for row in executor.map(evaluate, pending):
                 results.append(row)
                 output.write(json.dumps(row, ensure_ascii=False)+"\n")
                 output.flush()
     finally:
         client.close()
-    report = {"status": "completed", "summary": summarize(results),
-              "by_domain": {name: summarize([r for r in results if r["domain"] == name])
-                            for name in sorted({r["domain"] for r in results})},
-              "by_level": {str(n): summarize([r for r in results if r["level"] == n])
-                           for n in sorted({r["level"] for r in results})},
+    report = {"status": "completed", **grouped_summary(results),
               "protocol": "loong-reference-rubric-local-judge-v1", "upstream_commit": COMMIT,
               "references": str(args.references.resolve()),
               "predictions": str(args.predictions.resolve()),
               "judge": client.manifest, "workers": args.workers, "answer_regeneration": False,
-              "adaptations": "Configured local judge/budgets, one call per answer, explicit missing/truncated grades, unique in-range bracket score; original rubric and question/reference construction retained",
-              "scope": "Reference accuracy/completeness diagnostic; no source-groundedness guarantee or comparability to the original GPT-4 leaderboard"}
+              "adaptations": "Configured judge endpoint and budgets; original rubric, question/reference construction and score extraction retained",
+              "scope": "Reference accuracy/completeness under the configured judge"}
     (args.output/"summary.json").write_text(json.dumps(report, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
     print(json.dumps(report["summary"], ensure_ascii=False))
     return report

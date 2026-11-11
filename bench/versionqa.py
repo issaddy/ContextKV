@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import asdict
 import hashlib
 import json
 from pathlib import Path
@@ -15,6 +16,34 @@ from urllib.parse import quote
 
 
 SOURCE_COMMIT = "2a2cbe8f285557f99dc7a79d6df7134e1e3eccff"
+# Author rubric: src/evaluation/evaluation_llm.py at SOURCE_COMMIT.
+AUTHOR_CORRECTNESS_PROMPT = """You are a strict but fair evaluation judge for AI-generated answers.
+Your task is to compare the model’s answer to the reference answer, and decide whether the model’s answer is factually correct (1) or incorrect (0).
+		•	The reference answer represents the factual truth.
+	•	The model’s answer must include all key facts and meaning from the reference.
+	•	It is acceptable if the model adds extra relevant details, as long as the reference content is accurately and clearly expressed.
+	•	The answer must be semantically correct, complete, and not contradict the reference.
+	•	Slight rewording is allowed if the truth of the reference answer remains fully preserved.
+	•	Do not give credit for partial correctness or vague overlap — the model must clearly and truthfully answer the original question in line with the reference.
+
+	Only output the digit 1 or 0. Do not explain your reasoning.
+"""
+
+
+def score_answer(reference, prediction, client):
+    """Use the author's binary rubric and original question/reference/answer fields."""
+    base = {"task_id": reference["task_id"], "category": reference["category"]}
+    if not prediction:
+        return {**base, "status": "missing_prediction", "score": 0}
+    question = reference["input"][-1]["text"]
+    target, = reference["targets"]
+    prompt = f"Question: {question}\nReference Answer: {target['text']}\nModel Answer: {prediction}\nScore:"
+    completion = client.complete([{"role": "system", "content": AUTHOR_CORRECTNESS_PROMPT},
+                                  {"role": "user", "content": prompt}])
+    answer = completion.text.strip() if completion.status == "completed" and completion.finish_reason == "stop" else None
+    score = int(answer) if answer in {"0", "1"} else None
+    return {**base, "status": "scored" if score is not None else "unscored", "score": score,
+            "completion": asdict(completion)}
 
 
 def _digest(data):

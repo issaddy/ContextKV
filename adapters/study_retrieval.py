@@ -25,7 +25,7 @@ from controller.fact_reuse import build_reuse_seed, complete_reuse_ranges
 from controller.evidence_planner import (BudgetedEvidencePlanner, SearchProfile, _passages,
     best_need_supports, close_dependencies, render_unit_union, unresolved_needs)
 from controller.reading import build_read_plan, project_named_numeric_records
-from controller.schema import OnlineMessage, OnlineTurn, QueryContext
+from controller.schema import OnlineMessage, OnlineTurn, QueryContext, history_messages
 from controller.serialization import dumps, to_jsonable
 from controller.service import EvidenceSelection
 
@@ -308,16 +308,15 @@ class StudyEvidenceProvider:
                 memory = replace(memory, committed_readings=self.committed_readings(snapshot))
             interpretation = None
             if self.strategy in {"B0", "Btoken"}:
-                refs = tuple(ref for row in snapshot.raw_history for ref in (
-                    TextRef(row.turn_id, "user", 0, len(row.user_text)),
-                    TextRef(row.turn_id, "assistant", 0, len(row.assistant_text))))
+                refs = tuple(TextRef(row.turn_id, message.role, 0, len(message.content))
+                    for row in snapshot.raw_history for message in history_messages((row,)))
                 current = len(snapshot.raw_history)+1
                 state = TaskState(request_id, query, refs, needs=(Need("question",
                     (TextRef(current, "user", 0, len(query)),)),), current_turn_id=current, query=query)
                 auxiliary = ()
             else:
-                history = tuple(message for row in snapshot.raw_history for message in (
-                    OnlineMessage("user", row.user_text), OnlineMessage("assistant", row.assistant_text)))
+                history = tuple(OnlineMessage(message.role, message.content)
+                                for message in history_messages(snapshot.raw_history))
                 turn = OnlineTurn(snapshot.session_id, request_id, len(snapshot.raw_history)+1,
                     self.serving.corpus_id, query, history, (), "P3")
                 interpreter = self.directory.task_interpreter
@@ -616,8 +615,8 @@ class StudyEvidenceProvider:
         query_encoder = self.serving.retriever.encoder if isinstance(self.serving.retriever, HybridRetriever) else self.frozen_history
         query = query_override if query_override is not None else state.query or state.raw_question
         if query_override is None and self.strategy in {"B0", "Btoken"}:
-            messages = [message for row in snapshot.raw_history for message in (
-                {"speaker": "user", "text": row.user_text}, {"speaker": "assistant", "text": row.assistant_text})]
+            messages = [{"speaker": message.role, "text": message.content}
+                        for message in history_messages(snapshot.raw_history)]
             query, _ = query_view(state.raw_question, messages, query_encoder.tokenizer, limit=8192)
         index_key = (snapshot.corpus_snapshot_id, dumps(self.frozen_history.manifest),
                      tuple((unit.unit_id, unit.heading) for unit in pool.units))

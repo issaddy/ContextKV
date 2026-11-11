@@ -1,5 +1,7 @@
 """Literal dialogue view for retrieval; never becomes a source or generated task."""
 
+from controller.schema import Message, from_history_messages, history_messages
+
 QUERY_VIEW_VERSION = "literal-dialogue-query-v1"
 QUERY_POOLING = "CLS then FP32 L2 normalization"
 
@@ -9,12 +11,9 @@ def query_view(query, history, tokenizer, *, limit=8192, mode="dialogue"):
         raise ValueError("current question must be nonempty text")
     if mode not in ("current", "dialogue"):
         raise ValueError("unknown query view")
-    if len(history) % 2 or any(
-        m["speaker"] not in (("user",) if i % 2 == 0 else ("agent", "assistant"))
-        or not isinstance(m["text"], str)
-        for i, m in enumerate(history)
-    ):
-        raise ValueError("history must contain completed user/assistant exchanges")
+    records = from_history_messages(tuple(Message(
+        "assistant" if message["speaker"] == "agent" else message["speaker"], message["text"])
+        for message in history))
 
     def count(text):
         return len(tokenizer(text, add_special_tokens=True, truncation=False)["input_ids"])
@@ -22,7 +21,7 @@ def query_view(query, history, tokenizer, *, limit=8192, mode="dialogue"):
     size = count(query)
     if size > limit:
         raise ValueError("current question exceeds encoder budget; not truncated")
-    count_history = len(history) // 2
+    count_history = len(records)
     if mode == "current" or not history:
         return query, {
             "history_turns": [],
@@ -35,10 +34,8 @@ def query_view(query, history, tokenizer, *, limit=8192, mode="dialogue"):
         + "\n\nPrevious conversation (most recent exchange first):\n"
     )
     numbers = list(range(count_history, 0, -1))
-    blocks = [
-        f"Turn {n} user: {history[2 * n - 2]['text']}\nTurn {n} assistant: {history[2 * n - 1]['text']}"
-        for n in numbers
-    ]
+    blocks = ["\n".join(f"Turn {row.turn_id} {message.role}: {message.content}"
+                        for message in history_messages((row,))) for row in reversed(records)]
     while blocks:
         value = prefix + "\n\n".join(blocks)
         size = count(value)

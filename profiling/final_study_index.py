@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 import glob
-from itertools import product
 import json
 import math
 from pathlib import Path
@@ -256,40 +255,13 @@ def artifact_summary(value):
         forecast_profiles=len(value["forecasts"]) if isinstance(value.get("forecasts"), dict) else None)
 
 
-def capacity_tables(value, path):
-    if isinstance(value, dict) and value.get("format") == "contextkv_two_turn_capacity_workflow_v1":
-        rows = value["results"]
-    elif isinstance(value, dict) and "queue_quality" in value:
-        return [], []
-    elif isinstance(value, dict) and {"job", "concurrency", "completed_qa"} <= value.keys():
-        rows = [value]
-    else:
-        return [], []
-    fields = ("job", "method", "concurrency", "clients", "requested_qa", "completed_qa", "submitted_qa", "failed_clients",
-        "completed_qa_coverage", "throughput_qa_per_second", "makespan_seconds_including_pause", "p95_complete_ms",
-        "successful_qa_tokens", "need_support", "source_unit_read_coverage", "batch_costs", "failure_cost_scope")
-    indexed = [{**{field: row[field] for field in fields if field in row}, "source_file": str(path)} for row in rows]
-    by_key = {(row["concurrency"], row["method"]): row for row in rows}
-    comparisons = []
-    for row in rows:
-        reference = by_key.get((row["concurrency"], "B6_native"))
-        if reference is None or row["method"] == "B6_native":
-            continue
-        comparisons.append(dict(concurrency=row["concurrency"], candidate=row["method"], baseline="B6_native",
-            source_file=str(path), differences={field: row[field]-reference[field]
-                if numeric(row.get(field)) and numeric(reference.get(field)) else None for field in (
-                "completed_qa_coverage", "throughput_qa_per_second", "p95_complete_ms")},
-            scope="actual own-P3 two-turn capacity; different answers/branches/DAG permitted; not fixed-token causal C pairing"))
-    return indexed, comparisons
-
-
 def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
     from profiling.runtime_manifest import hardware_identity
     if not isinstance(value, dict):
         return []
-    if value.get("format") == "contextkv_full_queue_joint_workflow_v1":
+    if value.get("format") == "contextkv_dataset_queue_workflow_v1":
         rows, root = value["results"], path.parent
-    elif {"job", "datasets", "queue_quality", "paid_native_usage"} <= value.keys():
+    elif value.get("format") == "contextkv_dataset_queue_result_v1":
         rows, root = [value], path.parents[2]
     else:
         return []
@@ -298,7 +270,8 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
     device_source = {name: plan["source_"+name]["path"] for name in ("config", "matrix")}
     binding = dict(frozen_A_config=device_source["config"], matrix=device_source["matrix"],
         cohort_source=(plan.get("source_cohorts") or plan["source_matrix"])["path"],
-        arrival_plan=plan["source_arrival_plan"]["path"], reader_profile_id=plan["reader_profile_id"],
+        arrival_plan=(plan["source_arrival_plan"]["path"] if plan["source_arrival_plan"] is not None else None),
+        reader_profile_id=plan["reader_profile_id"],
         lambda_time=plan["lambda_time"], execution_commit=plan.get("execution_commit"))
     if joint_scope is not None:
         if not any(all(Path(worker[name]).resolve() == Path(source).resolve()
@@ -310,7 +283,7 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
         from bench.capacity_workflow import refresh_saved_full_queue
 
         cost = load(root/"capacity-cost.json")
-        if value.get("format") == "contextkv_full_queue_joint_workflow_v1":
+        if value.get("format") == "contextkv_dataset_queue_workflow_v1":
             summarized = {row["job"] for row in rows}
             rows = [*rows, *({"job": name, "execution_status": "incomplete_saved_artifacts"}
                 for name, job in jobs.items() if name not in summarized and Path(job["output"]).is_dir())]
@@ -330,28 +303,31 @@ def full_queue_cells(value, path, joint_scope=None, *, refresh_to=None):
         resource_identity.update(gpu_device_count=len(set(scope["gpu_devices"])), hardware=hardware,
                                  native_cache_config=row.get("native_cache_config"))
         comparison = {**binding, "resource_scope": resource_identity,
+            "dataset": job["dataset"], "split": job["split"], "protocol": job["protocol"],
+            "cohort": plan["cohort"][job["dataset"]], "workload": plan["workload_protocols"][job["dataset"]],
             "complete_slo_seconds": job["complete_slo_seconds"]}
         acceptance = {}
         if plan.get("acceptance") is not None:
             replicate_scope = plan.get("replicate_id") or (joint_scope["manifest"]
                 if joint_scope is not None else str(plan_path))
-            acceptance = {"acceptance_protocol": plan["acceptance"], "queue_job": job,
+            acceptance = {"acceptance_protocol": {**plan["acceptance"],
+                    "declared_qa": job["requested_qa"], "declared_sessions": job["requested_sessions"]}, "queue_job": job,
                 "replicate_scope": replicate_scope, "repetition": job["repetition"],
                 "required_experiment_cells": plan["experiment_cells"],
                 "planned_repetitions": sorted({entry["repetition"] for entry in plan["jobs"]
-                    if entry["concurrency"] == row["concurrency"]
-                    and entry["method"] in {plan["acceptance"]["baseline"], plan["acceptance"]["candidate"]}})}
-        cells.append({**row, "evaluation_kind": "full_queue_own_P3", "source_file": str(path),
+                    if entry["concurrency"] == row["concurrency"] and entry["dataset"] == job["dataset"]
+                    and entry["split"] == job["split"] and entry["method"] in {plan["acceptance"]["baseline"], plan["acceptance"]["candidate"]}})}
+        cells.append({**row, "evaluation_kind": "dataset_queue", "source_file": str(path),
             "generation_dir": job["output"], "comparison_identity": comparison,
             "active_assets": {name: (plan["assets"].get(name) or {}).get("path") for name, active in (
-                ("gain", factors["B"] == "gain"), ("value", factors["retention"] == "value"),
+                ("gain", factors["B"] == "gain"),
                 ("completion_timing", factors["B"] in {"gain", "rule"}),
                 ("demand_pricing", factors["retention"] == "demand"
                  and factors.get("retention_allocation") == "paired_value")) if active}
                 | ({"compilation": plan["compilation_policy"]["checkout"]}
                    if factors["compilation"] == "contextpilot" else {}),
             "evaluation_factors": factors,
-            "experiment_design": plan.get("experiment_design", "historical retention design"),
+            "experiment_design": plan["experiment_design"],
             "device_source_identity": device_source,
             "explicit_joint_scope": {"manifest": joint_scope["manifest"], "frozen_A": joint_scope["frozen_A"]}
                 if joint_scope is not None else None,
@@ -395,21 +371,17 @@ def is_queue_reference(candidate, reference):
         return True
     if current["dialogue"] != "contextkv":
         return False
-    if base["role"] in {"external_reference", "historical_reference"}:
-        return current["role"] != "historical_reference"
+    if base["role"] == "external_reference":
+        return True
     changes = queue_changed_factors(candidate, reference)
     directions = {
-        "B": {("fixed", "gain"), ("rule", "gain")},
+        "B": {("rule", "gain")},
         "compilation": {("native", "contextpilot")},
-        "retention": {("native", "demand"), ("native", "value")},
+        "retention": {("native", "demand")},
         "retention_allocation": {("next_use", "paired_value")},
         "fact_reuse": {(False, True)},
-        "representation": {("existing", "finite")},
-        "numeric_record_projection": {(False, True)},
     }
-    controlled = len(changes) == 1 or changes in (
-        {"B", "compilation"}, {"compilation", "retention"},
-        {"representation", "numeric_record_projection"})
+    controlled = len(changes) == 1 or changes == {"compilation", "retention"}
     return controlled and all((base.get(name), current.get(name)) in directions.get(name, ()) for name in changes)
 
 
@@ -418,12 +390,12 @@ def full_queue_comparisons(cells):
     for row in cells:
         baselines = [other for other in cells if is_queue_reference(row, other)
                      and other["concurrency"] == row["concurrency"]
+                     and all(other[key] == row[key] for key in ("dataset", "split", "protocol"))
                      and queue_repetition(other) == queue_repetition(row)]
         for reference in baselines:
             changes = sorted(queue_changed_factors(row, reference))
             reference_role = reference["evaluation_factors"]["role"]
             comparison_kind = ("whole_system" if reference_role in {"main_baseline", "external_reference"}
-                else "historical_reference" if reference_role == "historical_reference"
                 else "single_factor" if len(changes) == 1 else "joint_factors")
             missing_resource_fields = [name for name in ("hardware", "native_cache_config")
                 if any(cell["comparison_identity"]["resource_scope"][name] is None for cell in (row, reference))]
@@ -436,7 +408,8 @@ def full_queue_comparisons(cells):
             relative_p95 = ((row["p95_complete_ms"] / reference["p95_complete_ms"] - 1)
                 if same and complete_scored and numeric(row["p95_complete_ms"])
                 and numeric(reference["p95_complete_ms"]) and reference["p95_complete_ms"] > 0 else None)
-            comparisons.append(dict(concurrency=row["concurrency"], candidate=row["method"], baseline=reference["method"],
+            comparisons.append(dict(dataset=row["dataset"], split=row["split"], protocol=row["protocol"],
+                concurrency=row["concurrency"], candidate=row["method"], baseline=reference["method"],
                 replicate_scope=row.get("replicate_scope"), repetition=row.get("repetition"),
                 source_file=row["source_file"], baseline_source_file=reference["source_file"],
                 candidate_generation_dir=row["generation_dir"], baseline_generation_dir=reference["generation_dir"],
@@ -457,48 +430,8 @@ def full_queue_comparisons(cells):
                                    if same and complete_scored else None),
                 latency_scope="delivered responses only; with incomplete delivery, P95 does not compare the complete declared queue",
                 cost_scope="each cell retains its paid native index, batch costs and whole workflow cost; nested scopes are not added",
-                scope=("registered E0 reference versus current method under shared reader, budgets, arrivals and own-P3 queue"
-                       if reference["evaluation_factors"]["role"] == "historical_reference" else
-                       "same reader, data, resource budgets, arrivals and own-P3 queue; method-specific context management and actual histories")))
+                scope="same dataset, split, history protocol, reader, resource budgets and workload; method-specific context management"))
     return comparisons
-
-
-def full_queue_interactions(cells):
-    """B decision x request compilation contrast; retention is Native in all cells."""
-    methods = ("B6_native", "S3_native", "B6_contextpilot", "S3_contextpilot")
-    groups = defaultdict(lambda: defaultdict(list))
-    for cell in cells:
-        if cell["method"] in methods:
-            key = (cell["concurrency"], json.dumps(cell["comparison_identity"], sort_keys=True), *queue_repetition(cell))
-            groups[key][cell["method"]].append(cell)
-    interactions = []
-    for (concurrency, _, replicate_scope, repetition), group in groups.items():
-        for quartet in product(*(group[method] for method in methods)):
-            e1, e2, e3, e4 = quartet
-            scope = e1["comparison_identity"]["resource_scope"]
-            if any(scope[name] is None for name in ("hardware", "native_cache_config")):
-                continue
-            if shared_asset_differences(e2, e4) or shared_asset_differences(e3, e4):
-                continue
-            complete = all(cell["full_queue_delivered"] and numeric(cell["queue_quality"])
-                and not any(cell["unscored_answer_task_ids"].values()) for cell in quartet)
-            contrasts = {}
-            for metric in ("queue_quality", "completion_rate", "p95_complete_ms"):
-                values = [cell[metric] for cell in quartet]
-                known = all(numeric(value) for value in values) and (metric != "p95_complete_ms" or complete)
-                contrasts[metric] = (dict(B_native=values[1]-values[0], C_fixed=values[2]-values[0],
-                    B_contextpilot=values[3]-values[2], C_gain=values[3]-values[1],
-                    joint=values[3]-values[0], interaction=values[3]-values[1]-values[2]+values[0])
-                    if known else None)
-            interactions.append(dict(concurrency=concurrency, design="B x request_compilation; retention=native",
-                replicate_scope=replicate_scope, repetition=repetition,
-                comparison_identity=e1["comparison_identity"],
-                cells={f"E{index}": dict(method=cell["method"], source_file=cell["source_file"],
-                    generation_dir=cell["generation_dir"]) for index, cell in enumerate(quartet, 1)},
-                contrasts=contrasts, full_queue_delivered_and_scored=complete,
-                formula="interaction = E4 - E2 - E3 + E1",
-                scope="own-P3 full-queue contrasts; P95 contrast uses four queue quantiles, not request-level effects"))
-    return interactions
 
 
 def full_queue_track_tables(cells):
@@ -507,15 +440,15 @@ def full_queue_track_tables(cells):
                           ("public_reference_diagnostic", "公开参考历史诊断轨"),
                           ("constructed_task", "构造任务机制轨")):
         selected = [(cell, name, cell["datasets"][name], protocol) for cell in cells
-                    if cell.get("evaluation_kind") == "full_queue_own_P3"
+                    if cell.get("evaluation_kind") == "dataset_queue"
                     for name, protocol in cell["dataset_protocols"].items() if protocol["origin"] == origin]
         if not selected:
             continue
         lines += ["", "## "+title, "",
-            "| 方法 | 并发 | 数据集 / 原指标 | 交付 / 声明 | 已评分 / 已交付 | 全分母原指标 | 未知区间 | 已评分子集指标 |",
+            "| 方法 | 并发 | 数据集 / 分区 / 历史 / 原指标 | 交付 / 声明 | 已评分 / 已交付 | 全分母原指标 | 未知区间 | 已评分子集指标 |",
             "|---|---:|---|---:|---:|---:|---|---:|"]
         for cell, name, track, protocol in selected:
-            lines.append(f"| {cell['method']} | {cell['concurrency']} | {name} / {protocol['primary_metric']} | "
+            lines.append(f"| {cell['method']} | {cell['concurrency']} | {name} / {cell['split']} / {cell['protocol']} / {protocol['primary_metric']} | "
                 f"{track['completed']}/{track['declared']} | {track['scored']}/{track['completed']} | "
                 f"{track['queue_primary_score']} | {track['queue_score_bounds']} | {track['scored_subset_primary']} |")
     return lines
@@ -539,18 +472,17 @@ def markdown(report):
     lines += ["", "## C 模型开发消融", "", "| 资产 | dev 覆盖 | MAE ms | 独立组等权配对臂差 ms |", "|---|---:|---:|---:|"]
     for row in report["retention_dev"]["models"]:
         lines.append(f"| {row['model']} | {row['matched_pairs']}/{row['eligible_pairs']} | {row['weighted_mae_ms']} | {row['paired_arm_acceptance_delta_ms']} |")
-    lines += ["", "## 实际两轮容量与联合", "", "| 方法 | 并发 / clients | 完成 / 预定 | QA/s（含停顿） | P95 ms |", "|---|---:|---:|---:|---:|"]
+    lines += ["", "## 各数据集完整队列", "",
+        "| 数据集 / 分区 / 历史 | 方法 | 并发 | 交付 / 声明 | 归一化分数 | 分数区间 | 成功完整响应 P95 ms |",
+        "|---|---|---:|---:|---:|---|---:|"]
     for row in report["capacity"]:
-        if row.get("evaluation_kind") != "full_queue_own_P3":
-            lines.append(f"| {row['method']} | {row['concurrency']}/{row['clients']} | {row['completed_qa']}/{row['requested_qa']} | {row['throughput_qa_per_second']} | {row['p95_complete_ms']} |")
-    lines += ["", "## 完整队列联合格", "", "| 方法 | 并发 | 交付 / 声明 | 队列质量 | 队列质量区间 | 成功完整响应 P95 ms |", "|---|---:|---:|---:|---|---:|"]
-    for row in report["capacity"]:
-        if row.get("evaluation_kind") == "full_queue_own_P3":
-            lines.append(f"| {row['method']} | {row['concurrency']} | {row['completed_qa']}/{row['requested_qa']} | {row['queue_quality']} | {row['queue_quality_bounds']} | {row['p95_complete_ms']} |")
+        if row.get("evaluation_kind") == "dataset_queue":
+            lines.append(f"| {row['dataset']} / {row['split']} / {row['protocol']} | {row['method']} | {row['concurrency']} | "
+                f"{row['completed_qa']}/{row['requested_qa']} | {row['queue_quality']} | {row['queue_quality_bounds']} | {row['p95_complete_ms']} |")
     lines += ["", "## 完整队列对照差", "",
-        "| 候选 / 基线 | 并发 | 对照范围 / 变化因素 | 质量差（候选−基线） | 完整 P95 相对变化 | 质量不低于基线 |",
-        "|---|---:|---|---:|---:|---|"]
-    comparison_labels = {"whole_system": "整包", "historical_reference": "历史参照",
+        "| 数据集 / 分区 / 历史 | 候选 / 基线 | 并发 | 对照范围 / 变化因素 | 质量差（候选−基线） | 完整 P95 相对变化 | 质量不低于基线 |",
+        "|---|---|---:|---|---:|---:|---|"]
+    comparison_labels = {"whole_system": "整包",
                          "single_factor": "单因素", "joint_factors": "联合变化"}
     for comparison in report["capacity_comparisons"]:
         if "relative_p95_change" not in comparison:
@@ -559,14 +491,15 @@ def markdown(report):
         relative = comparison["relative_p95_change"]
         quality = comparison["quality_not_lower"]
         factors = ", ".join(comparison["changed_factors"])
-        lines.append(f"| {comparison['candidate']} / {comparison['baseline']} | {comparison['concurrency']} | "
+        lines.append(f"| {comparison['dataset']} / {comparison['split']} / {comparison['protocol']} | "
+            f"{comparison['candidate']} / {comparison['baseline']} | {comparison['concurrency']} | "
             f"{comparison_labels[comparison['comparison_kind']]} / {factors} | "
             f"{delta if delta is not None else '未知'} | "
             f"{format(relative, '.2%') if relative is not None else '未知'} | "
             f"{('是' if quality else '否') if quality is not None else '未知'} |")
     lines += ["", "## 预登记的完整队列验收", "",
-        "| 并发 | 完成测量的实验格 | 配对队列 | 费用与测量完整 | 资源预算 | 质量差及区间 | P95 比率及区间 | 质量验收 | 延迟验收 |",
-        "|---:|---|---:|---|---|---|---|---|---|"]
+        "| 数据集 / 分区 / 历史 | 并发 | 完成测量的实验格 | 配对队列 | 费用与测量完整 | 资源预算 | 质量差及区间 | P95 比率及区间 | 质量验收 | 延迟验收 |",
+        "|---|---:|---|---:|---|---|---|---|---|---|"]
     def point_interval(point, interval):
         if point is None:
             return "未知"
@@ -580,28 +513,19 @@ def markdown(report):
         coverage = f"{len(cells)-len(pending)}/{len(cells)}"
         if pending:
             coverage += "（缺 " + "、".join(pending) + "）"
-        lines.append(f"| {row['concurrency']} | {coverage} | {row['paired_queues']}/{row['declared_pair_slots']} | "
+        lines.append(f"| {row['dataset']} / {row['split']} / {row['protocol']} | "
+            f"{row['concurrency']} | {coverage} | {row['paired_queues']}/{row['declared_pair_slots']} | "
             f"{row['measurement_complete']} | {row['resource_budget_pass']} | "
             f"{point_interval(row['quality_delta'], quality_ci['interval'] if quality_ci else None)} | "
             f"{point_interval(row['p95_ratio'], row['p95_ratio_interval'])} | "
             f"{row['quality_gate']} | {row['latency_gate']} |")
-    lines += ["", "## B/C 四格贡献与交互", "",
-        "| 并发 | 指标 | B（Native 编译） | B（ContextPilot 编译） | 编译（固定 B） | 编译（收益 B） | 联合 E4−E1 | 交互 |",
-        "|---:|---|---:|---:|---:|---:|---:|---:|"]
-    for row in report["factorial_interactions"]:
-        for metric, effects in row["contrasts"].items():
-            values = [effects[name] if effects is not None else "未知"
-                      for name in ("B_native", "B_contextpilot", "C_fixed", "C_gain", "joint", "interaction")]
-            lines.append(f"| {row['concurrency']} | {metric} | " + " | ".join(map(str, values)) + " |")
-    lines += ["", "四格均使用 Native retention；交互＝E4−E2−E3＋E1；质量为正表示互补，延迟为负表示额外降低。"
-        "P95 使用四格各自完整队列的分位数，仅为队列统计量的算术对照。"]
     lines += full_queue_track_tables(report["capacity"])
-    lines += ["", "分轨保留原指标量纲；混合开发 Q 仍采用登记权重，不将构造题增益表述为公开基准增益。"]
+    lines += ["", "每个数据集保留原指标与归一化分数；不同数据集不合成为单一质量分。"]
     lines += ["", "## 完整响应 SLO", "",
         "| 方法 | 并发 | 数据集 | 完成 / 失败 / 阻断 | SLO 秒 | 达标回答 / 秒 | 观察秒数 |",
         "|---|---:|---|---|---|---|---:|"]
     for row in report["capacity"]:
-        if row.get("evaluation_kind") != "full_queue_own_P3":
+        if row.get("evaluation_kind") != "dataset_queue":
             continue
         for dataset, delivery in row["delivery_metrics"].items():
             if delivery is None:
@@ -611,7 +535,7 @@ def markdown(report):
                 f"{delivery['slo'].get('complete_seconds', '未声明')} | "
                 f"{delivery['latency_slo_goodput_requests_per_second']} | {delivery['observation_seconds']} |")
     lines += ["", "P95 的样本仅包含已交付响应。未完成与未评分任务按完整声明分母另列，存在交付缺失时不据此声称完整队列延迟改善。"]
-    lines += ["", "四格自身 P3 与并发容量保留不同回答、分支和 DAG；它们不替代固定输入的 C 配对。",
+    lines += ["", "系统比较按各数据集声明的历史协议执行；固定输入的缓存配对另行解释执行成本。",
         "逐方法相对基线差、共同任务数、相同问题/历史计数及原始成本来源见 JSON。",
         "", "## 成本", "", "物理总量引用已有去重 ledger；嵌套 job、phase 与请求份额不重复相加。",
         "提供原始采样与显式 GPU 设备时，成本命令保存为 `cost-ledger-command.json`；已有账本直接引用。", ""]
@@ -651,9 +575,6 @@ def main(argv=None):
     for label, path in paths:
         value = load(path)
         artifacts.append(dict(label=label, path=str(path), summary=artifact_summary(value)))
-        indexed, comparisons = capacity_tables(value, path)
-        capacity.extend(indexed)
-        capacity_comparisons.extend(comparisons)
         full_cells.extend(full_queue_cells(value, path, joint_scope,
             refresh_to=root/"refreshed-native" if args.refresh_saved_queues else None))
     full_cells = list({row["generation_dir"]: row for row in full_cells}.values())
@@ -673,7 +594,7 @@ def main(argv=None):
         paired_C=paired_index, retention_dev=retention_validation(args.retention_model, paired),
         capacity=capacity, capacity_comparisons=capacity_comparisons,
         full_queue_acceptance=evaluate_full_queue(full_cells),
-        factorial_interactions=full_queue_interactions(full_cells), cost_ledgers=ledgers)
+        cost_ledgers=ledgers)
     if args.cost_manifest or args.physical:
         command = ["python", "-m", "profiling.study_cost_ledger"]
         for path in args.cost_manifest:

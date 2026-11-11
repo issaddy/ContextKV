@@ -45,9 +45,8 @@ def load_jsonl(path):
 def reference_overlap(references, predictions):
     """SQuAD-style answer F1/EM used by MultiDoc2Dial, aligned by task ID.
 
-    This lexical measure supplements task/source evaluation. Missing predictions
-    score zero and remain visible in coverage, as in the upstream evaluator.
-    See IBM/multidoc2dial scripts/sharedtask_eval.py at 2456a5609b447e1a12b716f4d658728f346f3041.
+    Missing predictions score zero and remain visible in coverage.
+    Metric definition: https://aclanthology.org/2021.emnlp-main.498/
     """
     def normalize(text):
         text = text.lower().translate(str.maketrans('', '', string.punctuation))
@@ -82,7 +81,7 @@ def reference_overlap(references, predictions):
         "mean_exact_match": mean(v["exact_match"] for v in scores.values()) if scores else None,
         "domain_mean_f1": {domain: mean(values) for domain, values in domains.items()},
         "conversation_mean_f1": {sid: mean(values) for sid, values in sessions.items()},
-        "scope": "lexical answer overlap on the declared exchange units; not semantic correctness or source faithfulness"}
+        "scope": "answer token F1 and exact match on the original declared task units"}
 
 
 def merge_offline_labels(predictions: Sequence[Mapping], references: Sequence[Mapping]) -> list[dict]:

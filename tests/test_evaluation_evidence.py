@@ -2,6 +2,8 @@
 from dataclasses import replace
 import json
 
+import pytest
+
 from reading_helpers import material
 
 from bench.judge import judge_payload, rule_audit
@@ -118,3 +120,177 @@ def test_external_refine_scoring_keeps_only_actual_prior_and_final_source_slices
     assert not outcome.claims
     assert not rule_audit(audit)["unknown_citations"]
     assert "UNSEEN" not in json.dumps(judge_payload(audit))
+
+
+@pytest.mark.asyncio
+async def test_multidoc_author_f1_and_em_use_existing_offline_overlap(tmp_path):
+    from bench.study import write_jsonl
+    from bench.study_scoring import score_dataset
+
+    references = [dict(task_id=key, Collection="multidoc2dial", conversation_id="dialogue",
+        targets=[{"text": "Another answer."}, {"text": "The red fox."}]) for key in ("one", "two", "absent")]
+    write_jsonl(tmp_path/"references.jsonl", references)
+    write_jsonl(tmp_path/"official.jsonl", [dict(task_id=key, predictions=[{"text": text}])
+        for key, text in (("one", "The red, fox."), ("two", "red"))])
+    rows = [dict(task_id=key, status="completed", split="test") for key in ("one", "two")]
+    result = await score_dataset({}, {"primary_metric": "f1", "normalization": 1}, rows,
+        tmp_path, expected_task_ids=["one", "two", "absent"])
+    assert result[0]["metrics"] == {"f1": 1, "exact_match": 1}
+    assert result[1]["metrics"] == {"f1": pytest.approx(2/3), "exact_match": 0}
+    overlap = json.loads((tmp_path/"scoring/reference-overlap.json").read_text())
+    assert overlap["missing_task_ids"] == ["absent"]
+    assert overlap["tasks"]["absent"] == {"f1": 0, "exact_match": 0}
+    manifest = json.loads((tmp_path/"scoring/manifest.json").read_text())
+    assert manifest["judge_cost"]["model_calls"] == 0
+    assert manifest["missing_execution_task_ids"] == ["absent"]
+
+
+@pytest.mark.asyncio
+async def test_versionqa_uses_author_binary_accuracy_and_original_answer_fields(tmp_path, monkeypatch):
+    from adapters.query_selector import CompletionResult
+    from bench.study import write_jsonl
+    from bench.study_scoring import score_dataset
+    from bench.versionqa import AUTHOR_CORRECTNESS_PROMPT
+
+    requests, configs = [], []
+
+    class Client:
+        manifest = {"model": "judge", "revision": "fixed"}
+
+        def __init__(self, config):
+            configs.append(config)
+
+        def complete(self, messages):
+            requests.append(messages)
+            return CompletionResult("completed", "1" if len(requests) == 1 else "0", "stop",
+                usage={"prompt_tokens": 20, "completion_tokens": 1}, elapsed_ms=5)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("adapters.query_selector.OpenAICompletionClient", Client)
+    references = [dict(task_id=key, category="Version-Specific", input=[{"text": question}],
+        targets=[{"text": target}]) for key, question, target in (
+            ("v1", "What changed in v2?", "The limit became 10."),
+            ("v2", "Which version introduced it?", "Version 2."))]
+    answers = ["The limit became 10 [E_ab].", "Version 1."]
+    write_jsonl(tmp_path/"references.jsonl", references)
+    write_jsonl(tmp_path/"official.jsonl", [dict(task_id=reference["task_id"], predictions=[{"text": answer}])
+        for reference, answer in zip(references, answers)])
+    config = {"scoring": {"judge": {"base_url": "http://judge/v1", "model": "judge", "revision": "fixed"}}}
+    spec = {"primary_metric": "versionqa_accuracy", "normalization": 1}
+    rows = [dict(task_id=reference["task_id"], status="completed", split="test") for reference in references]
+    result = await score_dataset(config, spec, rows, tmp_path, expected_task_ids=["v1", "v2"])
+    assert [row["metrics"]["versionqa_accuracy"] for row in result] == [1, 0]
+    assert requests[0] == [{"role": "system", "content": AUTHOR_CORRECTNESS_PROMPT},
+        {"role": "user", "content": "Question: What changed in v2?\nReference Answer: The limit became 10.\n"
+                                     "Model Answer: The limit became 10 [E_ab].\nScore:"}]
+    assert configs[0].temperature == 0 and configs[0].max_new_tokens == 16
+    assert result[0]["scoring"]["identity"]["protocol"] == "versionqa_author_binary_accuracy"
+    await score_dataset(config, spec, rows, tmp_path, expected_task_ids=["v1", "v2"])
+    assert len(requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_loong_resumes_scores_and_exports_existing_group_summaries(tmp_path, monkeypatch):
+    from adapters.query_selector import CompletionResult
+    from bench.loong_score import main
+    from bench.study import write_jsonl
+    from bench.study_scoring import _loong_scores
+
+    requests = []
+
+    class Client:
+        manifest = {"model": "judge", "revision": "fixed"}
+
+        def __init__(self, config):
+            pass
+
+        def complete(self, messages):
+            requests.append(messages)
+            return CompletionResult("completed", "Rating: [[50]]. The maximum is [[100]].", "stop",
+                usage={"prompt_tokens": 20, "completion_tokens": 2}, elapsed_ms=5)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("adapters.query_selector.OpenAICompletionClient", Client)
+    monkeypatch.setattr("bench.loong_score.OpenAICompletionClient", Client)
+    references = [dict(task_id=key, reference_value="Gold", source_task={"type": "financial", "level": 2,
+        "set": 1, "question": "Compare.", "instruction": "Report both.",
+        "prompt_template": "{docs}\n{question}\n{instruction}"}) for key in ("l1", "l2")]
+    write_jsonl(tmp_path/"references.jsonl", references)
+    write_jsonl(tmp_path/"official.jsonl", [dict(task_id=key, predictions=[{"text": "Answer"}]) for key in ("l1", "l2")])
+    directory = tmp_path/"scoring"
+    saved = dict(task_id="l1", domain="financial", level=2, length_set=1, score=100, status="scored")
+    write_jsonl(directory/"loong.scores.jsonl", [saved])
+    config = {"scoring": {"judge": {"base_url": "http://judge/v1", "model": "judge", "revision": "fixed"}}}
+    records, _, outputs, _ = await _loong_scores(config, {}, directory, config["scoring"])
+    assert len(requests) == 1 and records[0] == saved
+    summary = json.loads((directory/"loong.summary.json").read_text())
+    assert summary["summary"]["observed_mean_0_100"] == 75
+    assert summary["summary"]["observed_perfect_rate"] == .5
+    assert summary["by_domain"]["financial"] == summary["by_level"]["2"] == summary["summary"]
+    assert str(directory/"loong.summary.json") in outputs
+    await _loong_scores(config, {}, directory, config["scoring"])
+    assert len(requests) == 1
+
+    standalone = tmp_path/"standalone"
+    write_jsonl(standalone/"scores.jsonl", records)
+    judge = tmp_path/"judge.json"
+    judge.write_text(json.dumps(config["scoring"]["judge"]))
+    report = main(["--references", str(tmp_path/"references.jsonl"), "--predictions", str(tmp_path/"official.jsonl"),
+                   "--judge-config", str(judge), "--output", str(standalone)])
+    assert report["summary"] == summary["summary"] and len(requests) == 1
+
+
+def test_saved_reports_keep_dataset_metrics_costs_and_actual_message_roles(tmp_path):
+    from bench.plan_result_summary import history_messages, summarize
+    from bench.reassess_saved import reassess
+    from bench.study import write_json
+
+    methods = ["RAG_native", "context_cache_demand"]
+    matrix = {"methods": [{"id": name} for name in methods], "seed": 42,
+        "selection": {"bootstrap_samples": 10},
+        "datasets": {
+            "versionqa": {"primary_metric": "versionqa_accuracy", "normalization": 1},
+            "loong": {"primary_metric": "loong_reference_score", "normalization": 100}},
+        "cohorts": {"test": {"versionqa": ["v1"], "loong": ["l1"]}}}
+    history = [{"turn_id": 1, "user_text": "First question", "assistant_text": None},
+        {"turn_id": 2, "user_text": "Clarification", "assistant_text": "First reply"},
+        {"turn_id": 3, "user_text": None, "assistant_text": "More detail"}]
+    rows = []
+    for method in methods:
+        directory = tmp_path/method
+        write_json(directory/"measurements"/"segment"/"batch_cost.json", {"gpu_gib_seconds": 9})
+        for dataset, task_id, metric, score in (("versionqa", "v1", "versionqa_accuracy", 1),
+                                               ("loong", "l1", "loong_reference_score", 50)):
+            rows.append({"method": method, "dataset": dataset, "task_id": task_id,
+                "conversation_id": task_id, "turn": 1, "split": "test", "status": "completed",
+                "question": "Question", "answer": "Answer", "actual_history": history,
+                "metrics": {metric: score}, "cost": {"complete_ms": 20, "total_input_tokens": 100},
+                "generation_dir": str(directory), "summary_sources": [],
+                "response": {"attempt_id": method+task_id, "read_count": 0, "reduce_count": 0,
+                    "step_metrics": [], "receipt": {"generation_complete": True},
+                    "truncated": False, "idempotent_replay": False}})
+
+    report = reassess(matrix, rows, tmp_path/"reassessment", split="test",
+        baseline=methods[0], history_protocol="fixed_history")
+    assert "track_weights" not in report
+    for method in methods:
+        result = report["methods"][method]
+        assert "queue_quality" not in result
+        assert result["datasets"]["versionqa"]["queue_primary_score"] == 1
+        assert result["datasets"]["loong"]["queue_primary_score"] == 50
+        assert result["datasets"]["loong"]["paid_cost"]["total_input_tokens"]["observed_total"] == 100
+        assert result["cost_batches"][0]["batch"] == {"gpu_gib_seconds": 9}
+    assert all(pair["fixed_input_pair"] for pair in report["history_pairs"])
+
+    summary, selected, pairs = summarize(matrix,
+        {(row["method"], row["dataset"], row["task_id"]): row for row in rows}, methods, "test", None)
+    assert "aggregate" not in summary and len(selected) == 4
+    assert summary["datasets"]["versionqa"]["methods"][methods[0]]["primary"] == 1
+    assert summary["datasets"]["loong"]["methods"][methods[0]]["primary"] == 50
+    assert all(pair["same_actual_history"] for pair in pairs)
+    assert history_messages(rows[0]) == [("user", "First question"), ("user", "Clarification"),
+                                       ("assistant", "First reply"), ("assistant", "More detail")]

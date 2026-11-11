@@ -20,7 +20,7 @@ from adapters.query_selector import OpenAICompletionClient, SelectorConfig
 from adapters.retrieval import run_retrieval_worker
 from controller.config import load_config
 from controller.context_schema import EvidenceKey, RetrievalState
-from controller.schema import OnlineMessage, OnlineTurn, TurnRecord
+from controller.schema import OnlineMessage, OnlineTurn, TurnRecord, history_messages
 from controller.serialization import decode, to_jsonable
 from training.task_data import read_jsonl
 from training.reader_data import file_digest, history_digest
@@ -209,8 +209,8 @@ async def label_rollouts(config, *, turns_path=None, output_path=None, concurren
                 history = tuple(decode(TurnRecord, value) for value in row["actual_history"])
                 memory = RetrievalState(len(history), history, tuple(states),
                     source_index=observed_task_sources(row))
-                messages = tuple(message for old in history for message in (
-                    OnlineMessage("user", old.user_text), OnlineMessage("assistant", old.assistant_text)))
+                messages = tuple(OnlineMessage(message.role, message.content)
+                                 for message in history_messages(history))
                 turn = OnlineTurn(conversation_id, row["task_id"], row["turn"], row["snapshot_id"], row["question"], messages, (), "P3")
                 interpretation = await run_retrieval_worker(interpreter.interpret_result, turn, memory)
                 state = interpretation.state

@@ -13,7 +13,7 @@ import time
 
 from adapters.query_views import correction_cue, named_user_spans
 from adapters.retrieval import retrieval_query
-from controller.schema import QueryContext, TaskFrame
+from controller.schema import Message, QueryContext, TaskFrame, from_history_messages, history_messages
 
 
 VERSION = "conversational-intent-v19"
@@ -216,17 +216,20 @@ def _history_query(turn, context):
     the current question remain verbatim, including corrections not yet resolved.
     This is a retrieval view, not a new semantic interpretation to commit.
     """
-    questions = turn.user_questions
+    history = from_history_messages(tuple(Message(message.speaker, message.text) for message in turn.history))
+    questions = [(row.turn_id, row.user_text) for row in history if row.user_text is not None]
+    questions.append((len(history) + 1, turn.query))
     first = max(0, len(questions) - 3)
     for index in range(len(questions) - 2, first - 1, -1):
-        prior = context.interpretations[index] if index < len(context.interpretations) else None
+        number = questions[index][0]
+        prior = context.interpretations[number-1] if number <= len(context.interpretations) else None
         if prior is not None and prior.relation != "ambiguous":
             if prior.relation == "conversational" and prior.task_frame is None:
                 continue
             active_query = frame_query(prior.task_frame) if prior.relation == "conversational" else prior.query
-            return "\n".join((active_query, *questions[index + 1:])), tuple(
-                range(index + 1, len(questions)))
-    return retrieval_query(questions), tuple(range(first + 1, len(questions)))
+            return "\n".join((active_query, *(text for _, text in questions[index + 1:]))), tuple(
+                number for number, _ in questions[index:-1])
+    return retrieval_query(tuple(text for _, text in questions)), tuple(number for number, _ in questions[first:-1])
 
 
 def _bound_revisit_history(client, system, body, users, *, evidence_documents=None):
@@ -374,7 +377,8 @@ class ConversationResolver:
                 return finish("self_contained_current_question")
             return finish("contextual_history_view_without_auxiliary_model", history_view=True)
 
-        count = len(turn.user_questions)-1
+        history = from_history_messages(tuple(Message(message.speaker, message.text) for message in turn.history))
+        count = len(history)
         revisiting = bool(_REVISIT.search(turn.query))
         first = max(0, count - (count if revisiting else 3))
         prior = context.interpretations[count-1] if 0 < count <= len(context.interpretations) else None
@@ -398,9 +402,11 @@ class ConversationResolver:
         # State at user turn n precedes answer n. Read the actual antecedent
         # assistant message, not the answer produced from that same state.
         optional_history = [{"turn": number,
-            **({"preceding_answer": turn.history[2*number-3].text} if number > 1 else {}),
-            "question": turn.history[2*number-2].text, "state_fields_last_changed": paths}
-            for number, paths in sorted(changes.items()) if number <= first]
+            **({"preceding_answer": history[number-2].assistant_text}
+               if number > 1 and history[number-2].assistant_text is not None else {}),
+            "question": history[number-1].user_text, "state_fields_last_changed": paths}
+            for number, paths in sorted(changes.items()) if number <= first
+            and history[number-1].user_text is not None]
         body = {"current_question": turn.query, "previous_turn": users[-1] if users else None,
                 "earlier_turns": users[:-1]}
         system = INITIALIZE_SYSTEM if initialize else SYSTEM
@@ -559,16 +565,18 @@ class PriorContext:
 
 
 def dialogue_turns(turn, turn_ids=None):
-    """Literal completed QA for discourse resolution, not factual evidence.
+    """Literal historical messages for discourse resolution, not factual evidence.
 
     Default to the existing recent three-turn window. Explicit turn IDs also
     support older selected referents without copying unrelated answer history.
     The caller's OnlineTurn already contains only permitted actual/P1 history.
     """
-    count = len(turn.history) // 2
+    history = from_history_messages(tuple(Message(message.speaker, message.text) for message in turn.history))
+    count = len(history)
     ids = range(max(1, count - 2), count + 1) if turn_ids is None else sorted(set(turn_ids))
-    return [{"turn": n, "question": turn.history[2*n-2].text,
-             "answer": turn.history[2*n-1].text} for n in ids if 1 <= n <= count]
+    return [{"turn": n, **({"question": history[n-1].user_text} if history[n-1].user_text is not None else {}),
+             **({"answer": history[n-1].assistant_text} if history[n-1].assistant_text is not None else {})}
+            for n in ids if 1 <= n <= count]
 
 
 def snapshot_context(turn, snapshot):
@@ -576,9 +584,8 @@ def snapshot_context(turn, snapshot):
         if turn.history:
             raise ValueError("missing committed snapshot for nonempty generated history")
         return PriorContext()
-    history = tuple((t.user_text, t.assistant_text) for t in snapshot.raw_history)
-    supplied = tuple((turn.history[i].text, turn.history[i+1].text)
-                     for i in range(0, len(turn.history), 2))
+    history = history_messages(snapshot.raw_history)
+    supplied = tuple(Message(message.speaker, message.text) for message in turn.history)
     if history != supplied:
         raise ValueError("retrieval history differs from committed snapshot")
     return PriorContext(snapshot.version, tuple(t.query_context for t in snapshot.raw_history))

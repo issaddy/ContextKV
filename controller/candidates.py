@@ -9,7 +9,7 @@ from typing import Iterable
 
 from .evidence import (EvidenceError, EvidencePolicy, allows_version_comparison, assign_references,
                        evidence_index, resolve_required_evidence_with_reasons, version_conflicts)
-from .schema import EvidenceBlock, EvidenceKey, Message, PromptCandidate, QueryContext, SessionSnapshot
+from .schema import EvidenceBlock, EvidenceKey, Message, PromptCandidate, QueryContext, SessionSnapshot, history_messages
 from .templates import (SYSTEM_PROMPT, ByteTemplate, Template, current_source_guide,
                         current_user_parts, longest_common_prefix, rebuild_answer_messages,
                         render_evidence_relations, verify_rendered_evidence)
@@ -175,8 +175,7 @@ def build_candidates(snapshot: SessionSnapshot, query: str,
             prompts.append((layout, "APPEND", (*execution.messages, current), (*execution.evidence_spans, *spans),
                             visible | frozenset(span.key for span in spans), reason))
 
-    history = tuple(message for turn in snapshot.raw_history for message in
-                    (Message("user", turn.user_text), Message("assistant", turn.assistant_text)))
+    history = history_messages(snapshot.raw_history)
     for layout, source_text, task_text, spans in user_variants(required, message_index=1):
         messages = rebuild_answer_messages(system_message, history, source_text, task_text, source_first=True)
         prompts.append((layout, "REBUILD", messages, spans, frozenset(span.key for span in spans), None))

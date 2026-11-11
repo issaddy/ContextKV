@@ -12,7 +12,7 @@ from importlib.metadata import version
 from typing import Awaitable, Callable
 
 from controller.evidence import assign_references
-from controller.schema import EvidenceBlock, EvidenceSpan, Message, TurnRecord
+from controller.schema import EvidenceBlock, EvidenceSpan, Message, TurnRecord, history_messages
 from .dialogue import DialogueCall, DialogueResult
 
 
@@ -181,8 +181,8 @@ async def run_dialogue(
     memory = Memory.from_defaults(token_limit=history_tokens, tokenizer_fn=tokenizer.encode,
         chat_history_token_ratio=1.0, memory_blocks=[], async_engine=database)
     try:
-        await memory.aset([ChatMessage(role=role, content=text) for turn in history
-                           for role, text in (("user", turn.user_text), ("assistant", turn.assistant_text))])
+        await memory.aset([ChatMessage(role=message.role, content=message.content)
+                           for message in history_messages(history)])
         chat_engine = CondenseQuestionChatEngine.from_defaults(query_engine=query_engine,
             llm=condense_llm, memory=memory)
         response = await chat_engine.achat(question)

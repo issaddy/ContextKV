@@ -11,7 +11,7 @@ import numpy as np
 
 from controller.context_schema import Condition, Need, RetrievalState, TaskState, TextRef, VersionIntent
 from controller.context_budget import condition_references, text_ref_sources, text_ref_text
-from controller.schema import OnlineTurn
+from controller.schema import OnlineTurn, history_messages
 from controller.serialization import decode
 from controller.fact_reuse import ReadContract, ReadReuse, read_contracts
 
@@ -186,7 +186,8 @@ class HistoryIndex:
     def index(self, memory: RetrievalState):
         pending = []
         for row in memory.committed_history:
-            for speaker, text in (("user", row.user_text), ("assistant", row.assistant_text)):
+            for message in history_messages((row,)):
+                speaker, text = message.role, message.content
                 identity = (row.turn_id, speaker, text)
                 if identity in self._windows:
                     continue
@@ -206,8 +207,8 @@ class HistoryIndex:
 
     def select(self, query: str, memory: RetrievalState, *, current_turn_id=None) -> tuple[HistoryWindow, ...]:
         self.index(memory)
-        identities = [(row.turn_id, speaker, text) for row in memory.committed_history
-                      for speaker, text in (("user", row.user_text), ("assistant", row.assistant_text))]
+        identities = [(row.turn_id, message.role, message.content) for row in memory.committed_history
+                      for message in history_messages((row,))]
         windows = [w for identity in identities for w in self._windows[identity]]
         if not windows:
             return ()
@@ -223,8 +224,8 @@ class HistoryIndex:
             active_refs.update(active.version_intent.time_refs)
             for row in memory.committed_history:
                 if row.turn_id in active.version_intent.source_turns:
-                    active_refs.update((TextRef(row.turn_id, "user", 0, len(row.user_text)),
-                                        TextRef(row.turn_id, "assistant", 0, len(row.assistant_text))))
+                    active_refs.update(TextRef(row.turn_id, message.role, 0, len(message.content))
+                                       for message in history_messages((row,)))
             for need in active.needs:
                 active_refs.update((*need.anchor_spans, *need.subject_refs))
             for condition in active.conditions:

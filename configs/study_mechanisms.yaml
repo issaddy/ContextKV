@@ -1,0 +1,58 @@
+# Constructed development tasks, independent from public benchmark scores.
+schema_version: 1
+study_config: configs/study.yaml
+seed: 42
+protocol: P3
+selection:
+  baseline: RAG_native
+  near_equal_quality: 0.002
+  equal_cost_relative_tolerance: 0.05
+  bootstrap_samples: 5000
+final_evaluation:
+  baseline: RAG_native
+  main_methods:
+  - RAG_native
+  - context_cache_demand
+  - LlamaIndex_native
+  acceptance:
+    candidate: context_cache_demand
+    quality_improvement: 0.05
+    quality_noninferiority: 0.002
+    p95_ratio: 0.85
+resources:
+  gpu_capacity_tokens: 32768
+  host_capacity_tokens: 61056
+  gpu_devices:
+  - 0
+  - 1
+  p95_complete_ms: 120000
+  max_online_tokens: 200000000
+  concurrency:
+  - 1
+  - 4
+datasets:
+  constructed_version:
+    inputs:
+      dev: runs/study/evaluation/version_dev/tasks.jsonl
+    split_kind: constructed
+    supplied_documents: true
+    coverage_mode: selected_sources
+    primary_metric: project_condition_version_score
+    normalization: 1.0
+    scoring:
+      project_weights:
+        correctness: 0.5
+        conditions_versions: 0.5
+  constructed_long:
+    inputs:
+      dev: runs/study/evaluation/long_dev/tasks.jsonl
+    split_kind: constructed
+    supplied_documents: true
+    coverage_mode: all_supplied_documents
+    primary_metric: project_condition_version_score
+    normalization: 1.0
+    scoring:
+      project_weights:
+        correctness: 1.0
+      project_track: constructed_long_dev_correctness
+      project_reference_only: true

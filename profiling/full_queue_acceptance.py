@@ -1,4 +1,4 @@
-"""Acceptance from predeclared, actual P3 queue pairs."""
+"""Per-dataset acceptance under the declared split and history protocol."""
 from collections import defaultdict
 import json
 import math
@@ -157,7 +157,8 @@ def evaluate_full_queue(cells):
 
             matrix = yaml.safe_load(Path(pairs[0][0]["queue_job"]["matrix"]).read_text())
             quality_ci = declared_queue_quality_interval(matrix, [
-                tuple(declared_execution_rows(cell["queue_job"])[0] for cell in pair) for pair in pairs])
+                tuple(declared_execution_rows(cell["queue_job"])[0] for cell in pair) for pair in pairs],
+                split=first["split"], dataset=first["dataset"])
         if latency_point is not None and len(ratios) >= 2:
             rng = random.Random(policy["seed"])
             draws = [statistics.fmean(rng.choices(ratios, k=len(ratios))) for _ in range(policy["bootstrap_samples"])]
@@ -177,7 +178,8 @@ def evaluate_full_queue(cells):
                                      for cell in group)
                           for declaration in group
                           for label, method in declaration["required_experiment_cells"].items()}
-        reports.append({"concurrency": first["concurrency"], "comparison_identity": first["comparison_identity"],
+        reports.append({"dataset": first["dataset"], "split": first["split"], "protocol": first["protocol"],
+            "concurrency": first["concurrency"], "comparison_identity": first["comparison_identity"],
             "policy": policy, "required_cells_measured": required_cells, "declared_pair_slots": len(slots),
             "paired_queues": len(pairs), "pair_issues": pair_issues, "measurement_complete": measurement_complete,
             "resource_budget_pass": resource_pass, "quality_gate": quality_gate, "latency_gate": latency_gate,

@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 from hashlib import sha256
-from itertools import groupby
 import json
 from pathlib import Path
 from urllib.parse import quote
@@ -144,33 +143,32 @@ def convert(documents, dialogues, *, dataset_version, source_uri, split, source_
 
 
 def benchmark_rows(supervision):
-    """Project complete MultiDoc2Dial exchanges into the shared P3 runner.
+    """Export the author's user-to-next-agent generation tasks and full history.
 
-    Consecutive messages from one speaker form one exchange side, joined by a
-    blank line. Original message IDs and targets remain in offline fields and
-    supervision. A terminal user message without an author answer stays in the
-    source export but has no scored exchange. No gold document is preselected.
+    The IBM dataset loader selects a user message only when its immediate next
+    message is an agent response other than ``respond_no_solution``. That single
+    response is the target; other messages remain unchanged in later history.
+    https://huggingface.co/datasets/IBM/multidoc2dial/blob/66809f999db39c5b260bb447a62844377fb2c854/multidoc2dial.py
     """
     for conversation in supervision:
-        groups = [(role, list(turns)) for role, turns in
-                  groupby(conversation["turns"], key=lambda turn: turn["role"])]
-        if not groups or groups[0][0] != "user" or any(role not in {"user", "agent"} for role, _ in groups):
-            raise ValueError("benchmark conversation must start with a user and use user/agent roles")
+        turns = conversation["turns"]
+        dialogue_id = conversation["source_dialogue_id"]
         history = []
-        for index in range(0, len(groups) - 1, 2):
-            users, agents = groups[index][1], groups[index + 1][1]
-            question = "\n\n".join(t["utterance"] for t in users)
-            answer = "\n\n".join(t["utterance"] for t in agents)
-            number = index // 2 + 1
+        for index, turn in enumerate(turns):
+            history.append({"speaker": turn["role"], "text": turn["utterance"]})
+            if turn["role"] != "user" or index + 1 == len(turns):
+                continue
+            target = turns[index + 1]
+            if target["role"] != "agent" or target["da"] == "respond_no_solution":
+                continue
             yield {"dataset": {"name": conversation["dataset"], "revision": conversation["dataset_version"]},
-                "conversation_id": conversation["conversation_id"],
-                "task_id": f"{conversation['conversation_id']}<::>{number}", "turn": number,
+                "conversation_id": dialogue_id,
+                "task_id": f"{dialogue_id}_{turn['turn_id']}", "turn": turn["turn_id"],
                 "Collection": conversation["dataset"] + "/" + conversation["domain"],
-                "input": [*history, {"speaker": "user", "text": question}], "contexts": [],
-                "targets": [{"text": answer}],
-                "source_turn_ids": {"user": [t["turn_id"] for t in users], "agent": [t["turn_id"] for t in agents]},
-                "grounding": [g for t in agents for g in t["grounding"]]}
-            history = [*history, {"speaker": "user", "text": question}, {"speaker": "agent", "text": answer}]
+                "input": list(history), "contexts": [],
+                "targets": [{"text": target["utterance"]}],
+                "source_turn_ids": {"user": turn["turn_id"], "agent": target["turn_id"]},
+                "grounding": target["grounding"]}
 
 
 def structural_corpus(documents, corpus):
@@ -253,10 +251,10 @@ def main(argv=None):
         (args.output / "qrels.tsv").write_text("query-id\tcorpus-id\tscore\n" + "".join(
             f"{row['task_id']}\t{pid}\t1\n" for row in rows
             for pid in sorted({g["passage_id"] for g in row["grounding"]})))
-        manifest["benchmark"] = {"protocols": ["P3"], "exchanges": len(rows),
-            "grouping": "consecutive_same_speaker_messages_joined_with_blank_line",
-            "terminal_unanswered_user_groups": sum(c["turns"][-1]["role"] == "user" for c in supervision),
-            "reference_scope": "author_exchange_targets_and_grounding_offline_only"}
+        manifest["benchmark"] = {"protocols": ["P1"], "tasks": len(rows),
+            "task_unit": "author_user_followed_by_solution_agent",
+            "history": "all_original_preceding_messages",
+            "reference_scope": "single_adjacent_author_agent_target_and_grounding_offline_only"}
     manifest["status"] = "completed"
     (args.output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: manifest[key] for key in ("status", "documents", "conversations", "turns", "reference_occurrences")}))

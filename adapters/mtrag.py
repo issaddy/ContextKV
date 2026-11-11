@@ -78,19 +78,12 @@ def online_turn(row: Mapping[str, Any], protocol: Protocol = "P2",
                 generated_history: Sequence[OnlineMessage | Mapping[str, Any]] = ()) -> OnlineTurn:
     if protocol not in {"P1", "P2", "P3"}:
         raise ValueError("protocol must be P1, P2 or P3")
-    turn_number = int(row["turn"])
     inputs = row["input"]
-    if turn_number < 1 or len(inputs) != 2 * turn_number - 1:
-        raise ValueError("task input must contain exactly the history up to its numbered turn")
     question = _message(inputs[-1])
     if question.speaker != "user":
         raise ValueError("task input must end at the current user question")
     history = (tuple(_message(m) for m in inputs[:-1]) if protocol == "P1"
                else tuple(_message(m) for m in generated_history))
-    if len(history) != 2 * (turn_number - 1):
-        raise ValueError("generated history must include every prior successfully committed turn")
-    if len(history) % 2 or any(m.speaker != ("user" if i % 2 == 0 else "assistant") for i, m in enumerate(history)):
-        raise ValueError("allowed history must contain complete alternating user/assistant pairs")
     # P3 has no access to even the official current evidence: its retriever fills this separately.
     contexts = () if protocol == "P3" else tuple(clean_context(c) for c in row["contexts"])
     return OnlineTurn(str(row["conversation_id"]), str(row["task_id"]), int(row["turn"]),
@@ -113,8 +106,6 @@ class OnlineSession:
         turns = [int(r["turn"]) for r in self.__rows]
         if len(set(turns)) != len(turns):
             raise ValueError("duplicate turn")
-        if protocol != "P1" and turns != list(range(1, len(turns) + 1)):
-            raise ValueError("generated-history protocols need every turn from 1; selected-turn benchmarks use P1")
         self.__position = 0
         self.__history: tuple[OnlineMessage, ...] = ()
         self.protocol = protocol

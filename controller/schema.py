@@ -76,8 +76,8 @@ class QueryContext:
 @dataclass(frozen=True)
 class TurnRecord:
     turn_id: int
-    user_text: str
-    assistant_text: str
+    user_text: str | None
+    assistant_text: str | None
     assistant_output_ids: tuple[int, ...] = ()
     finish_reason: str = "stop"
     evidence_keys: tuple[EvidenceKey, ...] = ()
@@ -88,6 +88,29 @@ class TurnRecord:
 
     def __post_init__(self) -> None:
         _tuples(self, "assistant_output_ids", "evidence_keys")
+
+
+def history_messages(history: tuple[TurnRecord, ...]) -> tuple[Message, ...]:
+    """Project only messages that actually occurred, retaining their boundaries."""
+    return tuple(Message(role, text) for turn in history for role, text in (
+        ("user", turn.user_text), ("assistant", turn.assistant_text)) if text is not None)
+
+
+def from_history_messages(messages: tuple[Message, ...]) -> tuple[TurnRecord, ...]:
+    """Import an original transcript without merging consecutive speakers."""
+    history = []
+    for message in messages:
+        if message.role == "user":
+            history.append(TurnRecord(len(history) + 1, message.content, None))
+        elif message.role == "assistant":
+            if history and history[-1].assistant_text is None:
+                previous = history[-1]
+                history[-1] = TurnRecord(previous.turn_id, previous.user_text, message.content)
+            else:
+                history.append(TurnRecord(len(history) + 1, None, message.content))
+        else:
+            raise ValueError(f"conversation history requires user/assistant roles, got {message.role!r}")
+    return tuple(history)
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,7 @@
 # ContextKV 实测结果与改进重点
 
+本页保存历史开发实验的实测数值及其原始口径。旧分组任务、混合队列和加权质量不作为修订后的公开 benchmark 成绩；当前任务与评分定义见[数据与评价](../data_and_evaluation.md)。
+
 ## 有效比较与收益归因
 
 固定阅读＋Native 是内部消融参照，真实执行了逐包阅读和归约，但未启用记录投影；它可以衡量整套方法相对该策略的差异，不能单独证明缓存协同收益，也不代表所有实际系统。LlamaIndex 对照使用 compact/refine，并未配置结构化记录的统计引擎。对于表格计数、求和，更强的参照应包括相同输入上的结构化提取＋程序化计算，并计入建表或抽取与来源追踪的成本。具体实现路线见 [LlamaIndex 结构化数据文档](https://developers.llamaindex.ai/python/framework/understanding/putting_it_all_together/structured_data/)。

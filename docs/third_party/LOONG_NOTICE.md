@@ -19,9 +19,9 @@ Legal record names can contain the requested case taxonomy. They remain offline;
 model-visible source addresses and document IDs use opaque digests instead.
 
 The scorer retains question/reference construction and the published rubric;
-it uses a declared local model and budgets, requires a unique in-range score,
-keeps missing/truncated grades visible, and does not regenerate answers or retry
-grades. Local results are not the paper's GPT-4 leaderboard scores. Input protocol
+it uses the author's first-match score parser and a declared judge model and budgets.
+Saved grades are reused when scoring resumes. Results identify the actual judge
+alongside the original rubric. Input protocol
 changes and source resolution failures remain in generated manifests. The public
 questions and document archive retain their source identities and are stored
 outside the package under `data/`.

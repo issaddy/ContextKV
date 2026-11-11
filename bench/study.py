@@ -17,13 +17,11 @@ import yaml
 
 from adapters.mtrag import load_rows
 from bench.quality import export_evaluation
-from bench.study_metrics import paired_comparisons, select_development, summarize_methods
+from bench.study_metrics import _track_specs, paired_comparisons, select_development, summarize_methods
 from controller.config import apply_study_config, create_controller, load_config
-from controller.schema import OnlineContext, OnlineMessage, OnlineTurn, TurnRecord
+from controller.schema import (Message, OnlineContext, OnlineMessage, OnlineTurn,
+                               from_history_messages, history_messages)
 from controller.serialization import dumps, to_jsonable
-
-
-BASELINE = "85f4ed4b1bc84de657691153d74e81a5ae9b4341"
 
 
 def read_jsonl(path):
@@ -76,14 +74,14 @@ def merge_config(base, overrides):
 def dataset_rows(spec, split, task_ids=None):
     path = spec["inputs"][split] if "inputs" in spec else spec["input"]
     rows = load_rows(path)
-    if task_ids is not None:
-        by_id = {row["task_id"]: row for row in rows}
-        return [by_id[task_id] for task_id in task_ids]
     if "split_manifest" in spec:
         allowed = set(json.loads(Path(spec["split_manifest"]).read_text())[split])
         rows = [row for row in rows if row["conversation_id"] in allowed]
     if "domain" in spec:
         rows = [row for row in rows if row["Collection"] == spec["domain"]]
+    if task_ids is not None:
+        by_id = {row["task_id"]: row for row in rows}
+        return [by_id[task_id] for task_id in task_ids]
     if split == "dev" and "dev_conversations" in spec:
         identities = sorted({row["conversation_id"] for row in rows})
         selected = set(random.Random(spec["dev_seed"]).sample(identities, spec["dev_conversations"]))
@@ -96,38 +94,22 @@ def declare_cohorts(matrix, *, splits=("dev", "test"), datasets=None):
     cohorts = dict(matrix.get("cohorts", {}))
     for split in splits:
         cohorts[split] = {**cohorts.get(split, {}), **{name: [row["task_id"] for row in dataset_rows(spec, split)]
-            for name, spec in matrix["datasets"].items()
-            if (datasets is None or name in datasets) and not (split == "dev" and spec.get("evaluation_only"))}}
+            for name, spec in _track_specs(matrix, split, datasets).items()}}
     matrix["cohorts"] = cohorts
     return matrix
 
 
 def prepare(config, matrix=None):
-    from training.task_data import build_task_data
-    from training.reading_data import build_reading_data
-
     output = Path(config["study"]["output_dir"])
     output.mkdir(parents=True, exist_ok=True)
-    task_data = build_task_data(config)
-    reading_data = build_reading_data(config)
     from bench.study_assets import prepare_public_assets
     evaluation_assets = prepare_public_assets(config)
-    baseline = {"commit": BASELINE,
-        "query_adapter": "models/bge-m3-dialogue-query-v1",
-        "generation_config": "configs/qwen3_32b.yaml",
-        "retrieval_config": "configs/study_multidoc_retriever.yaml",
-        "strategy": "Dense5_REBUILD_native_Radix_HiCache"}
-    write_json(output/"baseline.json", baseline)
     write_json(output/"effective_config.json", config)
-    manifest = {"baseline": baseline, "task_data": task_data,
-        "reading_data": reading_data, "evaluation_assets": evaluation_assets,
-        "learning": config["study"].get("learning", True), "configured_assets": {
-            "task": config["task_model"]["asset"], "support": config["support_model"]["asset"],
-            "preference": config["support_model"]["preference_asset"]}}
+    manifest = {"evaluation_assets": evaluation_assets}
     if matrix is not None:
         # Evaluation assets are inventoried independently from training builders.
         manifest["datasets"] = {name: {"split_kind": spec["split_kind"],
-            "primary_metric": spec["primary_metric"], "weight": spec["weight"],
+            "primary_metric": spec["primary_metric"],
             "paths": spec.get("inputs", {"input": spec.get("input")})}
             for name, spec in matrix["datasets"].items()}
     write_json(output/"prepare_manifest.json", manifest)
@@ -272,17 +254,17 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         request_starts[row["task_id"]] = start
         query = row["input"][-1]["text"]
         before = service.store.read_snapshot(session_id, provider.corpus_snapshot_id)
-        protocol = spec.get("protocol", "P3")
-        if protocol == "P1" and not before.raw_history:
-            given = row["input"][:-1]
-            reference_history = tuple(TurnRecord(index//2+1,
-                given[index]["text"], given[index+1]["text"]) for index in range(0, len(given), 2))
+        protocol = spec.get("protocol", matrix.get("protocol", "P3"))
+        if protocol == "P1":
+            reference_history = from_history_messages(tuple(
+                Message("assistant" if item["speaker"] == "agent" else item["speaker"], item["text"])
+                for item in row["input"][:-1]))
             before = service.store.sync_history(session_id, reference_history, before.version)
         decision = question_fn(row, before.raw_history) if question_fn is not None else None
         if decision is not None:
             query = decision.question
-        history = tuple(message for turn in before.raw_history for message in (
-            OnlineMessage("user", turn.user_text), OnlineMessage("assistant", turn.assistant_text)))
+        history = tuple(OnlineMessage(message.role, message.content)
+                        for message in history_messages(before.raw_history))
         task_id = row["task_id"]
         request_id = actual_request_id(task_id)
         supplied, metadata = None, None
@@ -408,7 +390,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 measurement_kind="hardware" if run.engine.kind == "sglang" else "simulation",
                 question=attempt.query if attempt is not None else row["input"][-1]["text"],
                 actual_history=to_jsonable(service.store.get_snapshot(session_id).raw_history),
-                history_origin="author_reference_import" if spec.get("protocol", "P3") == "P1" else "model_actual",
+                history_origin="author_reference_import" if spec.get("protocol", matrix.get("protocol", "P3")) == "P1" else "model_actual",
                 attempt=to_jsonable(attempt),
                 **(service.state_observer.cohort if service.state_observer is not None else {}))
             failures[sid] = failure
@@ -565,11 +547,7 @@ async def evaluate(config, matrix, output, *, split, frozen=None, methods=None, 
         selected_methods = [m for m in selected_methods if m["id"] in methods]
     generated = []
     for method in selected_methods:
-        for name, dataset in matrix["datasets"].items():
-            if split == "dev" and dataset.get("evaluation_only"):
-                continue
-            if datasets is not None and name not in datasets:
-                continue
+        for name, dataset in _track_specs(matrix, split, datasets).items():
             directory = output/method["id"]/name
             rows = await run_dataset(config, matrix, method, name, split, directory,
                 concurrency=concurrency, limit_conversations=limit_conversations, limit_turns=limit_turns,
@@ -597,7 +575,7 @@ def freeze(config, matrix, rows, path):
     test_methods = [by_id[identity] for identity in dict.fromkeys(test_ids)]
     missing = [name for name in matrix["datasets"] if name not in matrix.get("cohorts", {}).get("test", {})]
     matrix = declare_cohorts(matrix, splits=("test",), datasets=missing)
-    frozen = {"schema_version": 1, "baseline_commit": BASELINE, "method_spec": method,
+    frozen = {"schema_version": 1, "baseline_method": matrix["selection"]["baseline"], "method_spec": method,
         "test_methods": test_methods,
         "selected": selected, "matrix": matrix, "config": config,
         "learning": config["study"].get("learning", True),
@@ -619,12 +597,10 @@ def report(frozen, rows, directory):
     write_json(directory/"summaries.json", summaries)
     write_json(directory/"paired_intervals.json", paired)
     text = ["# ContextKV 任务状态驱动证据规划与预算化阅读", "",
-            f"评审基线：`{BASELINE}`。冻结方案：`{frozen['method_spec']['id']}`。", "",
+            f"比较基线：`{frozen['baseline_method']}`。冻结方案：`{frozen['method_spec']['id']}`。", "",
             f"新增训练：{frozen['learning']}。任务后端：{frozen['assets']['task_backend']}；"
             f"支持后端：{frozen['assets']['support_backend']}。", "",
-            "| 方法 | 工程 Q | 状态 |", "|---|---:|---|"]
-    for method, summary in summaries.items():
-        text.append(f"| {method} | {summary.get('quality')} | {summary.get('eligible')} |")
+            "各数据集使用自己的原始指标，分别报告。"]
     text += ["", "## 原始指标与题集", "",
         "| 方法 | 轨道 | 预定 | 完成 | 主指标成功评分 | 主指标 | 原始分数 |",
         "|---|---|---:|---:|---:|---|---:|"]
@@ -691,14 +667,13 @@ def main(argv=None):
     config = yaml.safe_load(Path(args.config).read_text())
     matrix = yaml.safe_load(Path(args.matrix).read_text())
     if args.cohorts:
-        matrix["cohorts"] = json.loads(Path(args.cohorts).read_text())
+        matrix["cohorts"] = json.loads(Path(args.cohorts).read_text())["cohorts"]
     root = Path(config["study"]["output_dir"])
     if args.command == "prepare":
         result = prepare(config, matrix)
     elif args.command == "cohorts":
-        missing = [name for name in matrix["datasets"]
-            if (args.datasets is None or name in args.datasets)
-            and name not in matrix.get("cohorts", {}).get(args.split, {})]
+        missing = [name for name in _track_specs(matrix, args.split, args.datasets)
+            if name not in matrix.get("cohorts", {}).get(args.split, {})]
         matrix = declare_cohorts(matrix, splits=(args.split,), datasets=missing)
         target = Path(args.output or root/"matrix.cohorts.json")
         write_json(target, matrix)
@@ -720,9 +695,8 @@ def main(argv=None):
         if frozen:
             config, matrix = frozen["config"], frozen["matrix"]
         else:
-            missing = [name for name in matrix["datasets"]
-                if (args.datasets is None or name in args.datasets)
-                and name not in matrix.get("cohorts", {}).get(args.split, {})]
+            missing = [name for name in _track_specs(matrix, args.split, args.datasets)
+                if name not in matrix.get("cohorts", {}).get(args.split, {})]
             matrix = declare_cohorts(matrix, splits=(args.split,), datasets=missing)
         output = Path(args.output or root/args.split)
         write_json(output/"matrix.json", matrix)

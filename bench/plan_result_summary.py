@@ -16,6 +16,8 @@ import yaml
 from bench.plan_prediction_audit import audit_directory, summaries as prediction_summaries
 from bench.study import read_jsonl, write_json, write_jsonl
 from bench.study_metrics import _cost_summary, _metric, _number, _primary, _scored, _track_specs
+from controller.schema import TurnRecord, history_messages as project_history_messages
+from controller.serialization import decode
 
 
 def fingerprint(value):
@@ -41,8 +43,8 @@ def response_counts(row):
 
 def history_messages(row):
     history = row.get("actual_history")
-    return ([(turn["turn_id"], turn["user_text"], turn["assistant_text"]) for turn in history]
-            if history is not None else None)
+    return ([(message.role, message.content) for message in project_history_messages(
+        tuple(decode(TurnRecord, turn) for turn in history))] if history is not None else None)
 
 
 def completed(row):
@@ -158,19 +160,7 @@ def summarize(matrix, index, methods, split, datasets):
         inventory[dataset] = {method: {"status_counts": dict(Counter(row["status"] for row in rows.values())),
             "all_completed_cost": _cost_summary([row for row in rows.values() if completed(row)])}
             for method, rows in method_rows.items()}
-    aggregate = {}
-    for method in methods:
-        represented = {name: spec["weight"] for name, spec in specs.items()
-                       if by_dataset[name]["methods"][method]["normalized_primary"] is not None}
-        value = sum(weight*by_dataset[name]["methods"][method]["normalized_primary"]
-                    for name, weight in represented.items())
-        aggregate[method] = {"common_cohort_Q": value if len(represented) == len(specs) and specs else None,
-            "represented_weight": sum(represented.values()), "declared_weights": {name: spec["weight"] for name, spec in specs.items()},
-            "weighted_observed_contribution": value if represented else None,
-            "all_declared_tasks_common_scored": all(track["declared"] and len(track["common_scored_task_ids"]) == track["planned"]
-                                                    for track in by_dataset.values())}
-        aggregate[method]["scope"] = "prespecified common subset, not a replacement for full-cohort benchmark Q"
-    return {"datasets": by_dataset, "aggregate": aggregate, "all_observed_inventory": inventory}, selected, qa
+    return {"datasets": by_dataset, "all_observed_inventory": inventory}, selected, qa
 
 
 def prediction_report(rows, supplied):

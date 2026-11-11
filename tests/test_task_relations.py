@@ -5,6 +5,78 @@ from controller.context_schema import Condition, Need, TaskState, TextRef
 from training.task_relations import candidates, targets, apply_edges, graph_items
 
 
+def test_multidoc_author_tasks_keep_single_targets_and_original_history():
+    from adapters.doc2dial import benchmark_rows
+    from adapters.mtrag import OnlineSession, online_turn
+
+    source = [("user", "First\nquestion"), ("agent", "First answer"),
+        ("agent", "Additional detail"), ("user", "Unanswered question"),
+        ("user", "No solution?"), ("agent", "No solution"),
+        ("user", "Next question"), ("agent", "Next answer"), ("user", "Terminal question")]
+    turns = [{"turn_id": number, "role": role, "utterance": text,
+        "da": "respond_no_solution" if number == 6 else "query" if role == "user" else "respond_solution",
+        "grounding": [{"source": number}]} for number, (role, text) in enumerate(source, 1)]
+    rows = list(benchmark_rows([{"dataset": "multidoc2dial", "dataset_version": "v1",
+        "conversation_id": "internal-export-identity", "source_dialogue_id": "author-dialogue",
+        "domain": "domain", "turns": turns}]))
+    assert [row["task_id"] for row in rows] == ["author-dialogue_1", "author-dialogue_7"]
+    assert [row["turn"] for row in rows] == [1, 7]
+    assert rows[0]["targets"] == [{"text": "First answer"}]
+    assert rows[1]["targets"] == [{"text": "Next answer"}]
+    assert rows[1]["grounding"] == [{"source": 8}]
+    assert rows[1]["input"] == [{"speaker": role, "text": text} for role, text in source[:7]]
+    public = online_turn(rows[1], "P1")
+    assert [(message.speaker, message.text) for message in public.history] == [
+        ("assistant" if role == "agent" else role, text) for role, text in source[:6]]
+    replay = OnlineSession(rows, "P3")
+    assert replay.current().history == ()
+    replay.commit(rows[0]["task_id"], "Actual model answer")
+    assert replay.current().turn == 7
+    assert [(message.speaker, message.text) for message in replay.current().history] == [
+        ("user", "First\nquestion"), ("assistant", "Actual model answer")]
+
+
+def test_original_message_import_and_history_selection_keep_present_roles(tmp_path):
+    from adapters.conversation import dialogue_turns, snapshot_context
+    from adapters.dialogue_query import query_view
+    from adapters.history_state import HistoryIndex
+    from controller.context_budget import text_ref_sources
+    from controller.context_schema import RetrievalState
+    from controller.schema import Message, OnlineMessage, OnlineTurn, from_history_messages, history_messages
+    from controller.session_store import SessionStore
+
+    original = tuple(Message(role, text) for role, text in (
+        ("user", "One"), ("assistant", "Two"), ("assistant", "Three"),
+        ("user", "Four"), ("user", "Five")))
+    history = from_history_messages(original)
+    assert [(row.user_text, row.assistant_text) for row in history] == [
+        ("One", "Two"), (None, "Three"), ("Four", None), ("Five", None)]
+    store = SessionStore(tmp_path / "history.sqlite3")
+    before = store.read_snapshot("public", "corpus")
+    store.sync_history("public", history, before.version)
+    snapshot = store.get_snapshot("public")
+    store.close()
+    assert history_messages(snapshot.raw_history) == original
+    sources = text_ref_sources(snapshot.raw_history)
+    assert sources == {(1, "user"): "One", (1, "assistant"): "Two", (2, "assistant"): "Three",
+                       (3, "user"): "Four", (4, "user"): "Five"}
+
+    class Characters:
+        def __call__(self, text, **kwargs):
+            return {"input_ids": list(text), "offset_mapping": [(i, i+1) for i in range(len(text))]}
+
+    memory = RetrievalState(snapshot.version, snapshot.raw_history)
+    selected = HistoryIndex(Characters(), lambda texts: np.ones((len(texts), 2))).select("Next", memory)
+    assert {(window.ref.turn_id, window.ref.speaker) for window in selected} == set(sources)
+    turn = OnlineTurn("public", "current", 8, "corpus", "Next",
+        tuple(OnlineMessage(message.role, message.content) for message in original), (), "P1")
+    assert snapshot_context(turn, snapshot).snapshot_version == snapshot.version
+    assert dialogue_turns(turn, [2, 3]) == [{"turn": 2, "answer": "Three"}, {"turn": 3, "question": "Four"}]
+    query, _ = query_view("Next", [{"speaker": message.role, "text": message.content} for message in original],
+                         Characters())
+    assert "Turn 2 assistant: Three" in query and "Turn 2 user:" not in query
+
+
 def test_task_evaluation_replays_appended_labels_in_conversation_order(tmp_path, monkeypatch):
     import json
     from types import SimpleNamespace

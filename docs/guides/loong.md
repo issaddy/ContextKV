@@ -34,7 +34,7 @@ python -m adapters.loong --questions data/loong/source/loong.jsonl \
 
 ## 保存答案的评分
 
-`bench.loong_score`复用作者原始准确性/完整性rubric、问题组装及结构化参考值，使用已有本地completion transport。JSON格式的`--judge-config`采用`SelectorConfig`字段，显式声明模型身份、端点、分词器及完整输入/输出预算。默认每份答案只评分一次，无回答重生成或评分修复。
+`bench.loong_score`复用作者原始准确性/完整性rubric、问题组装及结构化参考值，使用已有本地completion transport。JSON格式的`--judge-config`采用`SelectorConfig`字段，显式声明模型身份、端点、分词器及完整输入/输出预算。解析分数直接使用作者首匹配规则；续跑复用已保存的评分记录。
 
 ```bash
 python -m bench.loong_score --references data/loong/set1-v2/tasks.jsonl \

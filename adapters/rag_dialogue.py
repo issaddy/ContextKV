@@ -3,23 +3,24 @@ from __future__ import annotations
 
 from .dialogue import DialogueCall, DialogueResult
 from controller.evidence import assign_references
-from controller.schema import EvidenceSpan, Message
+from controller.schema import EvidenceSpan, Message, history_messages
 
 
 async def run_dialogue(question, history, *, retrieve_callback, complete_callback,
                        template, context_window, output_tokens, history_tokens, system_prompt):
     limit = context_window-output_tokens
-    messages, used = (), 0
+    messages, groups, used = (), [], 0
     for turn in reversed(history):
-        pair = (Message("user", turn.user_text), Message("assistant", turn.assistant_text))
-        cost = len(template.render(pair).input_ids)
+        group = history_messages((turn,))
+        cost = len(template.render(group).input_ids)
         if used+cost > history_tokens:
             break
-        messages = (*pair, *messages)
+        groups.insert(0, group)
+        messages = (*group, *messages)
         used += cost
     system = Message("system", system_prompt)
     while messages and len(template.render((system, *messages, Message("user", question))).input_ids) > limit:
-        messages = messages[2:]
+        messages = messages[len(groups.pop(0)):]
     calls = []
     query = question
     if messages:
@@ -27,7 +28,7 @@ async def run_dialogue(question, history, *, retrieve_callback, complete_callbac
             "conversation. Preserve its conditions and version. Return only the rewritten question.")
         rewrite_messages = (rewrite, *messages, Message("user", question))
         while len(template.render(rewrite_messages).input_ids) > limit and messages:
-            messages = messages[2:]
+            messages = messages[len(groups.pop(0)):]
             rewrite_messages = (rewrite, *messages, Message("user", question))
         call = DialogueCall("rag:condense", "condense", rewrite_messages, output_tokens, (), ())
         calls.append(call)
@@ -53,7 +54,7 @@ async def run_dialogue(question, history, *, retrieve_callback, complete_callbac
         return prompt, tuple(spans)
 
     while messages and len(template.render(render(())[0]).input_ids) > limit:
-        messages = messages[2:]
+        messages = messages[len(groups.pop(0)):]
     pieces = []
     for block in blocks:
         trial = (*pieces, (block, len(block.text)))

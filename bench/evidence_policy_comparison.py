@@ -16,7 +16,7 @@ from bench.study import dataset_rows, merge_config, method_config, run_dataset
 from controller.reading import READ_PROTOCOL_VERSION, SHARED_NUMERIC_PROTOCOL_VERSION, NUMERIC_SELECT_PROTOCOL_VERSION
 from controller.serialization import decode, to_jsonable
 from controller.context_schema import DEFAULT_FULL_SCOPE_OUTPUT_TOKENS, TaskState
-from controller.schema import OnlineContext, OnlineMessage, OnlineTurn, TurnRecord
+from controller.schema import OnlineContext, OnlineMessage, OnlineTurn, TurnRecord, history_messages
 from training.reader_data import digest, file_digest, rows, write_rows
 
 
@@ -334,8 +334,7 @@ async def frozen_cell(config, matrix, dataset, split, records, directory, *, pol
                 blocks = {block.key: block for block in committed.archive}
                 selected = [blocks[key] for key in sorted(attempt.plan.candidate.required_blocks)]
                 online = OnlineTurn(frozen["conversation_id"], task_id, frozen["turn"], source["Collection"], query,
-                    tuple(message for turn in history for message in (OnlineMessage("user", turn.user_text),
-                        OnlineMessage("assistant", turn.assistant_text))),
+                    tuple(OnlineMessage(message.role, message.content) for message in history_messages(history)),
                     tuple(OnlineContext(block.key.passage_id, block.text, block.source_uri, block.title) for block in selected),
                     "frozen_actual_P3_state", query_context=attempt.query_context)
                 export_evaluation(online, response.assistant_text, official_path=directory/"official.jsonl",

@@ -76,8 +76,8 @@ class OrdinaryQATest(unittest.IsolatedAsyncioTestCase):
             store.close()
 
     def test_main_comparison_uses_ordinary_qa(self):
-        from bench.capacity_workflow import full_queue_methods, full_queue_method_specs
-        methods = full_queue_methods(1)
+        from bench.capacity_workflow import FULL_QUEUE_METHODS, full_queue_method_specs
+        methods = FULL_QUEUE_METHODS
         self.assertEqual(methods, ("RAG_native", "context_cache_demand", "LlamaIndex_native"))
         specs = full_queue_method_specs(methods, {"gain_asset": "same-reader"},
                                        {"mode": "contextpilot", "checkout": "vendor/contextpilot"})

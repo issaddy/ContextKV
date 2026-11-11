@@ -109,13 +109,14 @@ def reassess(matrix, rows, output, *, split, baseline, history_protocol,
     started = time.monotonic()
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
-    rows = [row for row in rows if row["split"] == split]
+    specs = _track_specs(matrix, split)
+    rows = [row for row in rows if row["split"] == split and row["dataset"] in specs]
     groups = defaultdict(list)
     for row in rows:
         groups[row["method"], row["dataset"]].append(row)
     updated, score_sources, official_manifests = [], [], {}
     for (method, dataset), group in groups.items():
-        spec = matrix["datasets"][dataset]
+        spec = specs[dataset]
         destination = output/"cells"/method/dataset
         if spec["primary_metric"] == "2wiki_answer_f1":
             write_rows(destination/"results.unscored.jsonl", group)
@@ -137,20 +138,14 @@ def reassess(matrix, rows, output, *, split, baseline, history_protocol,
         "attempt_id": (row.get("response") or {}).get("attempt_id") or row.get("attempt_id"),
     } for row in updated))
     methods = sorted({row["method"] for row in updated})
-    specs = _track_specs(matrix, split)
     summaries = {}
     for method in methods:
         selected = [row for row in updated if row["method"] == method]
-        tracks = {name: declared_queue_summary([row for row in selected if row["dataset"] == name],
-            spec, matrix["cohorts"][split][name]) for name, spec in specs.items()}
-        values = [tracks[name]["queue_primary_score"] for name in specs]
-        summaries[method] = {"datasets": tracks,
-            "queue_quality": sum(spec["weight"]*tracks[name]["queue_primary_score"]
-                /spec.get("normalization", 1.0) for name, spec in specs.items())
-                if all(value is not None for value in values) else None,
-            "queue_quality_bounds": [sum(spec["weight"]*tracks[name]["queue_score_bounds"][bound]
-                /spec.get("normalization", 1.0) for name, spec in specs.items()) for bound in (0, 1)],
-            "cost_batches": batch_ledger(selected)}
+        tracks = {name: {"primary_metric": spec["primary_metric"],
+            "normalization": spec.get("normalization", 1.0),
+            **declared_queue_summary([row for row in selected if row["dataset"] == name],
+                spec, matrix["cohorts"][split][name])} for name, spec in specs.items()}
+        summaries[method] = {"datasets": tracks, "cost_batches": batch_ledger(selected)}
         if execution_roots is not None:
             summaries[method]["paid_native_usage"] = paid_execution_index(selected,
                 execution_roots.get(method, ()), output/"costs"/method/"native.json")
@@ -159,7 +154,6 @@ def reassess(matrix, rows, output, *, split, baseline, history_protocol,
         "methods": summaries, "official_rescoring": official_manifests,
         "scoring_sources": score_sources, "history_pairs": pairs,
         "common_scored_diagnostics": paired_comparisons(matrix, updated, baseline, split),
-        "track_weights": {name: spec["weight"] for name, spec in specs.items()},
         "model_calls": 0, "reassessment_wall_ms": (time.monotonic()-started)*1000,
         "selection": "reference registration only; original freezes and test selections retained"}
     write(output/"report.json", report)
@@ -195,9 +189,9 @@ def main(argv=None):
     write(Path(args.output)/"sources.json", {"matrix": file_identity(args.matrix),
         "results": [file_identity(path) for path in args.rows],
         "paid_cost_assets": [file_identity(path) for path in args.cost_asset]})
-    print(json.dumps({method: {"queue_quality": value["queue_quality"],
-        "datasets": {name: {key: dataset[key] for key in ("declared", "completed", "scored",
-            "queue_primary_score")} for name, dataset in value["datasets"].items()}}
+    print(json.dumps({method: {"datasets": {name: {key: dataset[key] for key in (
+            "primary_metric", "declared", "completed", "scored", "queue_primary_score")}
+            for name, dataset in value["datasets"].items()}}
         for method, value in report["methods"].items()}, ensure_ascii=False))
 
 

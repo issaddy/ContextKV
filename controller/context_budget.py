@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import json
 
-from .schema import Message
+from .schema import Message, history_messages
 from .serialization import to_jsonable
 
 
@@ -16,8 +16,8 @@ class AnswerWindowExceeded(ValueError):
 
 
 def text_ref_sources(history, *, current_turn_id=None, current_user_text=None):
-    sources = {(row.turn_id, speaker): text for row in history for speaker, text in (
-        ("user", row.user_text), ("assistant", row.assistant_text))}
+    sources = {(row.turn_id, message.role): message.content for row in history
+               for message in history_messages((row,))}
     if current_turn_id is not None:
         sources[current_turn_id, "user"] = current_user_text
     return sources
@@ -603,8 +603,8 @@ def append_legal(snapshot, state, required_keys, source_spans):
         return False, "version_intent_changed"
     last_turn = snapshot.raw_history[-1]
     retained = [(ref.turn_id, ref.speaker, ref.start, ref.end) for ref in previous.working_history]
-    retained.extend(((last_turn.turn_id, "user", 0, len(last_turn.user_text)),
-                     (last_turn.turn_id, "assistant", 0, len(last_turn.assistant_text))))
+    retained.extend((last_turn.turn_id, message.role, 0, len(message.content))
+                    for message in history_messages((last_turn,)))
     for turn_id, speaker, start, end in retained:
         ranges = [(ref.start, ref.end) for ref in state.working_history
                   if ref.turn_id == turn_id and ref.speaker == speaker]
