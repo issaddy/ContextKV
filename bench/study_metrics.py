@@ -167,6 +167,15 @@ def declared_queue_summary(rows, spec, task_ids):
         values = [value for value in values if value is not None]
         if values:
             benchmark_metrics[name] = {"mean": statistics.fmean(values), "scored": len(values)}
+    cost = _cost_summary(selected)
+    cost["p95_delivered_ms"] = cost["p95_complete_ms"]
+    timings = sorted(row["cost"]["complete_ms"] for row in completed
+                     if _number(row.get("cost", {}).get("complete_ms")) is not None)
+    position = (len(expected)-1)*.95
+    right = math.ceil(position)
+    cost["p95_complete_ms"] = (timings[math.floor(position)]
+        +(timings[right]-timings[math.floor(position)])*(position-math.floor(position))
+        if expected and len(timings) == len(completed) and right < len(timings) else None)
     return {"declared": len(expected), "recorded": len(selected), "completed": len(completed),
         "scored": len(scored), "completion_rate": len(completed)/len(expected) if expected else None,
         "missing_execution_task_ids": sorted(missing_execution), "unresolved_task_ids": sorted(unresolved),
@@ -177,7 +186,7 @@ def declared_queue_summary(rows, spec, task_ids):
         "queue_score_bounds": [aggregate(0), aggregate(1)], "components": components,
         "scored_subset_primary": _primary(scored, spec),
         "benchmark_metrics": benchmark_metrics,
-        "cost": _cost_summary(selected),
+        "cost": cost,
         "quality_rule": "declared task denominator; confirmed non-delivery is zero; missing outcomes and scores remain unknown",
         "cost_rule": "all saved requests including failures; observed totals retain unmeasured task IDs"}
 
