@@ -148,7 +148,7 @@
         "exact_example_rate": 0.78099173553719
       },
       "train_examples": 1266,
-      "default_use": "main evaluation uses released reranker and ranked selection; unused trained checkpoint removed after metrics retention",
+      "default_use": "main evaluation uses released reranker and ranked selection",
       "training_cost": {
         "complete_ms": 120837.82125264406,
         "input_tokens": 1099681,

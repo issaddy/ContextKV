@@ -110,7 +110,7 @@ python3 -m training.plan_gain_completion fit \
 
 本轮结果见[完整报告](final_results.md)和[指标文件](../../results/evaluation-20261112.json)。容器保留 `runs/current/cohorts.yaml`、`runs/current/config/` 的实际配置及 `runs/current/training/` 的必要监督；当前查询适配器为 `models/study-task-budget-loop`，动作资产为 `models/study-plan-gain.json`。Qwen3-32B 权重不变。
 
-当前容器以 `source runs/current/environment.sh` 选择已安装的 CUDA 12.9 工具链与主机驱动库，仍使用默认 `python3`。任务与支持训练输入各保留一个压缩 JSONL，重新训练时用 `gzip -dc INPUT.jsonl.gz > INPUT.jsonl` 解压；收益训练直接读取紧凑 `plan-gain-train.jsonl`、`plan-gain-dev.jsonl`。本轮临时上下文、重复分支、日志和未使用的支持模型不保留。
+当前容器以 `source runs/current/environment.sh` 选择已安装的 CUDA 12.9 工具链与主机驱动库，仍使用默认 `python3`。任务与支持训练输入各保留一个压缩 JSONL，重新训练时用 `gzip -dc INPUT.jsonl.gz > INPUT.jsonl` 解压；收益训练直接读取紧凑 `plan-gain-train.jsonl`、`plan-gain-dev.jsonl`。
 
 每个 job 对应数据集、方法和并发。`capacity-plan.json` 保存本次配置，`workflow.json` 保存最终指标。
 
