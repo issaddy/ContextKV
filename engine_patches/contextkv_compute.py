@@ -453,7 +453,7 @@ def finish_compute_admission(adder, req):
 
 def attach_compute_batch(forward_batch, batch, model_runner):
     forward_batch.contextkv_translator = model_runner.kv_index_translator
-    forward_batch.contextkv_states = [getattr(req, 'contextkv_compute_state', None) for req in batch.reqs]
+    forward_batch.contextkv_states = tuple(getattr(req, 'contextkv_compute_state', None) for req in batch.reqs)
     forward_batch.contextkv_rows = batch.req_to_token_pool.req_to_token[batch.req_pool_indices]
 
 

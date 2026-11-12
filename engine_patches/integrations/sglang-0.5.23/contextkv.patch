@@ -194,7 +194,29 @@ diff --git a/python/sglang/srt/managers/scheduler_components/output_streamer.py 
 diff --git a/python/sglang/srt/model_executor/forward_batch_info.py b/python/sglang/srt/model_executor/forward_batch_info.py
 --- a/python/sglang/srt/model_executor/forward_batch_info.py
 +++ b/python/sglang/srt/model_executor/forward_batch_info.py
-@@ -1301,6 +1301,8 @@
+@@ -78,7 +78,9 @@
+     from sglang.srt.layers.engram_staging import StagedRows
+     from sglang.srt.layers.layer_boundary.residual.stream import ResidualStream
+     from sglang.srt.layers.logits_processor import LogitsProcessorOutput
++    from sglang.srt.managers.contextkv_compute import RequestState
+     from sglang.srt.managers.schedule_batch import MultimodalInputs, ScheduleBatch
++    from sglang.srt.mem_cache.kv_index_translator import KVIndexTranslator
+     from sglang.srt.mem_cache.kv_loc_plan import Cols, KVLocPlan
+     from sglang.srt.model_executor.model_runner import ModelRunner
+     from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
+@@ -710,6 +712,11 @@
+     # Whether this forward's sequence is sharded across the attn-TP group (SP on)
+     # vs. replicated; stamped per forward, defaults to replicated.
+     attn_tp_sequence_sharded: bool = False
++
++    # Request compute state must survive the eager runner's dataclass copies.
++    contextkv_states: Tuple[Optional[RequestState], ...] = ()
++    contextkv_rows: Optional[torch.Tensor] = None
++    contextkv_translator: Optional[KVIndexTranslator] = None
+
+     # === Runtime-filled (set during the forward pass / cuda graph / managers; not at construction) ===
+     # Preallocated piecewise-graph attention output, set by RadixAttention.
+@@ -1301,6 +1308,8 @@
                  ret.positions % parallel.attn_dcp_size == parallel.attn_dcp_rank
              )
 

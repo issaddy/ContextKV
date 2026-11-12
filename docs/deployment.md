@@ -2,6 +2,17 @@
 
 使用容器默认 `python3` 与已安装的 SGLang 0.5.23。准备脚本在当前 SGLang 源码内应用项目补丁，依赖沿用容器环境。生成模型目录为 `/data/models/qwen3-32b`，模型声明位于 `configs/model_scopes/qwen3-32b.local.json`；共享辅助模型目录在 `configs/study.yaml` 配置。
 
+当前 `test-0523` 使用宿主机 560.35.03 驱动和容器已有 CUDA 12.9；启动会话选择对应库与工具链：
+
+```bash
+export CUDA_HOME=/usr/local/cuda-12.9
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$PWD/vendor/cuda-host:$CUDA_HOME/lib64:$LD_LIBRARY_PATH"
+export SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK=1
+```
+
+`vendor/cuda-host/libcuda.so.1` 指向已有宿主机驱动库。已安装的 `sglang-kernel` 通过实际 Qwen 执行使用，无需重新安装包。
+
 ```bash
 CONTEXTKV_MODEL_SCOPE_PATH=configs/model_scopes/qwen3-32b.local.json bash scripts/bootstrap_sglang.sh
 source runs/engine-runtime.env
