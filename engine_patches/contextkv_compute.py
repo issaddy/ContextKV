@@ -69,7 +69,7 @@ class ComputeRuntime:
             observed_time_ns=time.monotonic_ns())
 
     def _key(self, source_id, ids):
-        return RadixKey(ids, cache_salt='contextkv:independent-block:' + source_id[0])
+        return RadixKey(array('q', ids), cache_salt='contextkv:independent-block:' + source_id[0])
 
     def _match(self, source_id, ids):
         return self.cache.match_prefix(MatchPrefixParams(key=self._key(source_id, ids)))
@@ -129,7 +129,7 @@ class ComputeRuntime:
         prompt = len(ids) - warm - cold
         approximate = cold * build + prompt * score + (prompt + (warm + cold) * ratio) * replay + len(host_pages) * transfer
         native = self.cache.match_prefix(MatchPrefixParams(key=RadixKey(
-            ids, req.extra_key, cache_salt=req.cache_salt)))
+            array('q', ids), req.extra_key, cache_salt=req.cache_salt)))
         exact = (len(ids) - native.device_prefix_len - native.host_hit_length) * prefill + native.host_hit_length * transfer
         expected_output = min(req.sampling_params.max_new_tokens,
                               self.output_tokens_mean or req.sampling_params.max_new_tokens)
@@ -331,7 +331,7 @@ class ComputeRuntime:
             nodes = [block.node for block in state.blocks if not block.owned]
         else:
             match = self.cache.match_prefix(MatchPrefixParams(key=RadixKey(
-                state.input_ids, state.request.extra_key, cache_salt=state.request.cache_salt)))
+                array('q', state.input_ids), state.request.extra_key, cache_salt=state.request.cache_salt)))
             nodes = [match.best_match_node]
         seen, gpu, host = set(), 0, 0
         for node_id in nodes:
