@@ -89,7 +89,8 @@ class ComputeRuntime:
         self._refresh_priorities()
         ids = tuple(req.origin_input_ids)
         page = self.cache.page_size
-        blocks, warm, cold, host_pages = [], 0, 0, set()
+        blocks, warm, cold, host_pages, gpu_nodes = [], 0, 0, set(), set()
+        new_gpu_pins = 0
         for spec in metadata.get('blocks', ()):
             start = int(spec['start'])
             end = int(spec['end'])
@@ -105,6 +106,14 @@ class ComputeRuntime:
             if full and match.host_hit_length:
                 transfer, _ = self.cache.tree_core.build_load_back_spec(match.best_match_node, req=req)
                 host_pages.update(transfer.host_indices.tolist())
+            if full:
+                node = self.cache.tree_core.node_by_id(match.last_device_node)
+                while node.parent is not None and node.id not in gpu_nodes:
+                    gpu_nodes.add(node.id)
+                    component = node.component_data[0]
+                    if component.value is not None and component.lock_ref == 0:
+                        new_gpu_pins += len(component.value)
+                    node = node.parent
             blocks.append((source_id, start, end, match, block_ids))
         costs = dict(metadata.get('costs', {}))
         costs.update(self.costs)
@@ -144,7 +153,8 @@ class ComputeRuntime:
                             if len(match.device_indices)+match.host_hit_length < len(tokens))
             required = cold_work + math.ceil(prompt/page)*page + prompt + math.ceil((warm + cold)*ratio)
             if required > min(self.scheduler.max_req_input_len,
-                    self.allocator.available_size() + self.cache.evictable_size() - req.sampling_params.max_new_tokens - len(host_pages)):
+                    self.allocator.available_size() + self.cache.evictable_size()
+                    - req.sampling_params.max_new_tokens - len(host_pages) - new_gpu_pins):
                 mode = 'exact'
         state = RequestState(req.rid, metadata, ids, [], mode, req, self.pool)
         state.runtime = self
@@ -167,10 +177,8 @@ class ComputeRuntime:
                 full = len(match.device_indices) + match.host_hit_length == len(block_ids)
                 if full:
                     block.node = match.best_match_node
-                    block.lock = self._lock(match.best_match_node)
                     self.source_nodes[source_id] = block.node
                     if match.host_hit_length:
-                        block.host_lock = self.cache.inc_host_lock_ref(block.node).to_dec_params()
                         block.host_tokens = match.host_hit_length
                     else:
                         block.slots = match.device_indices
@@ -199,6 +207,22 @@ class ComputeRuntime:
             req.full_untruncated_fill_ids = array('q', work)
             self._refresh_priorities()
         return state
+
+    def pin(self, state):
+        for block in state.blocks:
+            if not block.owned:
+                block.lock = self._lock(block.node)
+                if block.host_tokens:
+                    block.host_lock = self.cache.inc_host_lock_ref(block.node).to_dec_params()
+
+    def unpin(self, state):
+        for block in state.blocks:
+            if block.lock is not None:
+                self._unlock(block)
+                block.lock = None
+            if block.host_lock is not None:
+                self.cache.dec_host_lock_ref(block.node, block.host_lock)
+                block.host_lock = None
 
     def prepare(self, state):
         for block in state.blocks:
@@ -323,12 +347,7 @@ class ComputeRuntime:
             return
         state.published = True
         self.publish_blocks(state)
-        for block in state.blocks:
-            if not block.owned:
-                self._unlock(block)
-            if block.host_lock is not None:
-                self.cache.dec_host_lock_ref(block.node, block.host_lock)
-                block.host_lock = None
+        self.unpin(state)
         phase_ms = {}
         for phase, first, last, tokens in state.events:
             elapsed = first.elapsed_time(last)
@@ -380,8 +399,28 @@ def get_compute_runtime(scheduler):
 
 
 def admit_compute(scheduler, recv, req):
-    if recv.contextkv_compute is not None:
-        get_compute_runtime(scheduler).admit(req, recv.contextkv_compute)
+    req.contextkv_compute_metadata = recv.contextkv_compute
+    req.contextkv_native_cache_salt = req.cache_salt
+
+
+def prepare_compute_request(scheduler, req):
+    metadata = getattr(req, 'contextkv_compute_metadata', None)
+    if metadata is None:
+        return
+    runtime = get_compute_runtime(scheduler)
+    previous = getattr(req, 'contextkv_compute_state', None)
+    if previous is not None:
+        runtime.unpin(previous)
+        req.origin_input_ids = array('q', previous.input_ids)
+        req.full_untruncated_fill_ids = req.origin_input_ids + req.output_ids
+    req.cache_salt = req.contextkv_native_cache_salt
+    req.skip_radix_cache_insert = False
+    state = runtime.admit(req, metadata)
+    if previous is not None and previous.events:
+        state.events = previous.events
+        for name in state.counters:
+            state.counters[name] += previous.counters[name]
+    runtime.pin(state)
 
 
 def pending_host_tokens(adder, req):
@@ -396,6 +435,16 @@ def commit_host_reserve(adder, req):
         adder.rem_total_token_offset += amount
         adder.cur_rem_token_offset += amount
         adder.contextkv_host_pages = getattr(adder, 'contextkv_host_pages', set()) | state.host_pages
+
+
+def finish_compute_admission(adder, req):
+    state = getattr(req, 'contextkv_compute_state', None)
+    if state is None:
+        return
+    if adder.can_run_list and adder.can_run_list[-1] is req:
+        commit_host_reserve(adder, req)
+    else:
+        state.runtime.unpin(state)
 
 
 def attach_compute_batch(forward_batch, batch):
@@ -456,6 +505,12 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
             work_row = batch.contextkv_rows[index]
             state.runtime.prepare(state)
             state.layer_ids = [layer.self_attn.attn.layer_id for layer in driver.layers]
+            if state.replayed is not None:
+                count = len(state.replayed)
+                state.row[state.replayed] = work_row[state.replay_start:state.replay_start + count]
+                decoded = max(0, int(batch.seq_lens_cpu[index]) - state.work_length)
+                state.row[len(state.input_ids):len(state.input_ids) + decoded] = work_row[
+                    state.work_length:state.work_length + decoded]
             prefilling = (batch.forward_mode.is_extend()
                           and batch.extend_prefix_lens_cpu[index] < state.work_length)
             if prefilling:

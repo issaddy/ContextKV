@@ -103,13 +103,32 @@ diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/manager
 
              if radix_native_session:
                  req.session_generation = self.tree_cache.ensure_session_generation(
-@@ -3330,6 +3343,9 @@
+@@ -2923,6 +2936,11 @@
+             self.handle_embedding_request(tokenized_req)
+
+     def stash_chunked_request(self, req: Req):
++        state = getattr(req, "contextkv_compute_state", None)
++        if state is not None and state.mode == "infoflow":
++            req.prefix_indices = self.req_to_token_pool.req_to_token[
++                req.req_pool_idx, :req.extend_range.end]
++            return
+         maybe_cache_unfinished_req(req, self.tree_cache, chunked=True)
+
+     def process_pending_chunked_abort(self) -> None:
+@@ -3324,12 +3342,16 @@
+                 if loaded_tokens > 0:
+                     req.storage_hit_length = loaded_tokens
+
++            from sglang.srt.managers.contextkv_compute import prepare_compute_request
++            prepare_compute_request(self, req)
+             req.init_next_round_input(self.tree_cache)
+             res = adder.add_one_req(
+                 req,
                  has_chunked_req=(self.chunked_req is not None),
                  truncation_align_size=self.truncation_align_size,
              )
-+            if adder.can_run_list and adder.can_run_list[-1] is req:
-+                from sglang.srt.managers.contextkv_compute import commit_host_reserve
-+                commit_host_reserve(adder, req)
++            from sglang.srt.managers.contextkv_compute import finish_compute_admission
++            finish_compute_admission(adder, req)
 
              if self.enable_lora:
                  running_loras.add(req.lora_id)

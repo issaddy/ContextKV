@@ -27,6 +27,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 exec "${CONTEXTKV_ENGINE_PYTHON:-python3}" "$PROJECT_ROOT/engine_patches/contextkv_model_scope.py" \
   --scope "$CONTEXTKV_MODEL_SCOPE_PATH" --launch \
   --tp 1 --dtype bfloat16 --kv-cache-dtype bfloat16 --context-length 32768 \
+  --max-total-tokens "${CONTEXTKV_GPU_TOKENS:-32768}" \
   --radix-eviction-policy priority \
   --page-size "${CONTEXTKV_PAGE_SIZE:-64}" \
   --enable-metrics ${HICACHE_ARGS[@]+"${HICACHE_ARGS[@]}"} \
