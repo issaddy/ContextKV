@@ -77,6 +77,7 @@ class JointOption:
     arrival_basis: str | None = None
     retention_allocation_value_ms: float | None = None
     retention_control_ms: float | None = 0.0
+    retention_fixed_control_ms: float = 0.0
 
     def trace(self):
         return {"needs": tuple((need.need_id, need.reason) for need in self.demand.needs),
@@ -86,7 +87,8 @@ class JointOption:
                 "retention_evidence": self.retention_evidence,
                 "arrival_basis": self.arrival_basis,
                 "retention_allocation_value_ms": self.retention_allocation_value_ms,
-                "retention_control_ms": self.retention_control_ms}
+                "retention_control_ms": self.retention_control_ms,
+                "retention_fixed_control_ms": self.retention_fixed_control_ms}
 
 
 def joint_options(plans, state, *, allocate=None):

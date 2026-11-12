@@ -45,6 +45,10 @@ Loong 的资料准备见 [Loong 接入](guides/loong.md)。输入完整保留资
 
 每个 job 对应一个数据集、一个方法和一个并发。默认沿会话前后依赖推进，思考间隔为零；已有真实固定到达轨迹时用 `--arrival-plan` 复用。调度方式及端到端计时口径保存在运行清单，不为凑出缓存重访添加延时。
 
+P1 中每题自带作者历史，模型上一题失败不会使下一题缺少输入。执行器在记录失败费用并清理会话后继续下一题；调度器用独立的请求终态门控制顺序，不把失败记成成功提交，也不改变固定到达时间。P3 依赖实际已提交的回答，失败后缺少真实历史的后题仍记为 blocked，不导入参考答案补齐。若 Native 结果仍未终结、会话无法安全清理，则显式记录 `session_cleanup_unresolved`，保留状态库，等待原请求恢复。
+
+`results.jsonl` 保留实际交付答案的评分记录；`failed_conversations.json` 按 task ID 保存失败，即使同一 P1 会话有多次失败也不会覆盖。`task_metrics.jsonl` 合并成功、失败和 blocked 的逐题指标、费用、协议及测量段身份，用于配对评估。失败成本在清理前从持久化 Native step、最终 ANSWER 和辅助调用账本结算：同一个滚动 ANSWER 回执只计一次，provider group 与其子调用不重复求和。缺少最终回执时完整总量保留为空，另存 `accounting.known_lower_bound` 和未知 task ID；未提交的 blocked 题模型调用和已分摊资源费用为零，响应时间为空。队列缺失执行记录时，同样不能把已观察费用称为完整总量。
+
 `bench.study_scoring` 按数据集调用对应评分。原指标与完整题目分母、完成率一起报告；评分缺失不冒充零分，确认没有交付的任务在完整队列指标中计零。不同数据集不合成加权 Q，构造任务也不参与公开成绩。
 
-最终指标由 `bench.capacity_workflow` 汇总，`profiling.final_study_index` 生成对比表。GPU/Host 采样只在内存中积分，长期保存积分结果。评分结束后清理答案、原文副本、judge 明细和状态库。训练采集只保存形成训练输入与标签所需的数据。执行命令见[运行手册](study/final_runbook.md)。
+最终指标由 `bench.capacity_workflow` 汇总，`profiling.final_study_index` 生成对比表。GPU/Host 采样只在内存中积分，长期保存积分结果。评分结束后清理答案、原文副本、judge 明细和已安全关闭的状态库；清理失败的状态库保留用于恢复。训练采集只保存形成训练输入与标签所需的数据。执行命令见[运行手册](study/final_runbook.md)。

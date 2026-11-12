@@ -243,7 +243,8 @@ def choose_observed_action(policy, plans, state, native, reusable_prefixes, *, r
             observed_count = model.cost_provenance.get("read_count_profile", {}).get("groups", {}).get(
                 plan.semantic_kind, {}).get(group)
             read_count = observed_count["mean"] if observed_count is not None else float(task.kind == "READ")
-            read_count_basis = ("delivered_bounded_branch_mean" if observed_count is not None
+            read_count_basis = (model.cost_provenance["read_count_profile"].get("scope", "legacy_delivered_branch_mean")
+                                if observed_count is not None
                                 else "current_selected_READ_only")
             if control_ms is not None:
                 if model.cost_provenance["prefix_control_scope"] != "native_excludes_prefix_control":

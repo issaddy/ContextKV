@@ -358,6 +358,9 @@ class WorkloadDispatcher:
         self._turns = {turn.task_id: turn for turn in manifest.turns}
         self._completed = {task_id: asyncio.Event() for task_id in self._turns}
         self._completion_times = {}
+        self._terminal = {task_id: asyncio.Event() for task_id in self._turns}
+        self._terminal_times = {}
+        self.failed = {}
         self._condition = asyncio.Condition()
         self._next = 0
         self.arrivals = {}
@@ -370,26 +373,38 @@ class WorkloadDispatcher:
         for task_id in self.restored_task_ids:
             self._completion_times[task_id] = 0.0
             self._completed[task_id].set()
+            self._terminal_times[task_id] = 0.0
+            self._terminal[task_id].set()
+        self._skip_completed_ordinals()
+
+    def restore_failed(self, task_ids):
+        """Restore terminal failures without claiming a committed answer."""
+        for task_id in task_ids:
+            self.failed[task_id] = {"reason": "saved_terminal_failure", "restored": True}
+            self._terminal_times[task_id] = 0.0
+            self._terminal[task_id].set()
         self._skip_completed_ordinals()
 
     def _skip_completed_ordinals(self):
         order = self.manifest.dispatch_order
-        while self._next < len(order) and (self._completed[order[self._next]].is_set()
+        while self._next < len(order) and (self._terminal[order[self._next]].is_set()
                                           or order[self._next] in self.cancelled):
             self._next += 1
 
-    async def wait_turn(self, row, actual_history):
+    async def wait_turn(self, row, actual_history, *, predecessor_terminal=False):
         turn = self._turns[row["task_id"]]
         fixed = self.manifest.dispatch_semantics == "fixed_arrivals"
+        events = self._terminal if predecessor_terminal else self._completed
+        times = self._terminal_times if predecessor_terminal else self._completion_times
         if fixed:
             planned = turn.start_delay_seconds
             if turn.release_after_task_id is not None:
-                await self._completed[turn.release_after_task_id].wait()
+                await events[turn.release_after_task_id].wait()
         elif turn.release_after_task_id is None:
             planned = turn.start_delay_seconds
         else:
-            await self._completed[turn.release_after_task_id].wait()
-            planned = self._completion_times[turn.release_after_task_id]+turn.think_time_seconds
+            await events[turn.release_after_task_id].wait()
+            planned = times[turn.release_after_task_id]+turn.think_time_seconds
         await asyncio.sleep(max(0.0, self.origin+planned-time.monotonic()))
         async with self._condition:
             independent = fixed or self.manifest.dispatch_semantics == "independent_clients_after_own_prior_commit"
@@ -405,7 +420,8 @@ class WorkloadDispatcher:
                 "dispatch_delay_seconds": arrival-planned,
                 "measurement_segment_restored_tasks": self.restored_task_ids,
                 "resume_pause_basis": "configured pause reapplied from segment origin" if self.restored_task_ids else None,
-                "committed_history_turns": len(actual_history)}
+                "committed_history_turns": len(actual_history),
+                "predecessor_gate": "terminal_request" if predecessor_terminal else "committed_answer"}
             self.arrivals[turn.task_id] = value
             if not independent:
                 self._next += 1
@@ -418,9 +434,10 @@ class WorkloadDispatcher:
         async with self._condition:
             for turn in self.manifest.turns:
                 if (turn.conversation_id == conversation_id and turn.task_id not in self.arrivals
-                        and not self._completed[turn.task_id].is_set()):
+                        and not self._terminal[turn.task_id].is_set()):
                     self.cancelled[turn.task_id] = dict(reason=reason, completed=False,
                         conversation_id=turn.conversation_id, task_id=turn.task_id,
+                        turn=turn.turn,
                         fixed_arrival_seconds=(turn.start_delay_seconds
                             if self.manifest.dispatch_semantics == "fixed_arrivals" else None))
             self._skip_completed_ordinals()
@@ -436,6 +453,17 @@ class WorkloadDispatcher:
     def complete_turn(self, task_id):
         self._completion_times[task_id] = time.monotonic()-self.origin
         self._completed[task_id].set()
+        self._terminal_times[task_id] = self._completion_times[task_id]
+        self._terminal[task_id].set()
+
+    async def fail_turn(self, task_id, reason):
+        """Release independent P1 successors; P3 still waits for a real commit."""
+        async with self._condition:
+            self.failed[task_id] = {"reason": reason, "restored": False}
+            self._terminal_times[task_id] = time.monotonic()-self.origin
+            self._terminal[task_id].set()
+            self._skip_completed_ordinals()
+            self._condition.notify_all()
 
 
 def export_fixed_arrivals(rows, records, *, name, concurrency):

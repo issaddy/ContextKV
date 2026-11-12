@@ -432,11 +432,15 @@ class PrefixRuntimeClient:
     def __init__(self, engine):
         self.engine = engine
 
-    async def retain(self, *, owner_id, receipt, prefix_input_ids, sources, ttl_seconds):
-        return await self.engine._post("/context/prefix/retain", dict(owner_id=owner_id,
+    async def retain(self, *, owner_id, receipt, prefix_input_ids, sources, ttl_seconds,
+                     protection_budget_tokens=None):
+        body = dict(owner_id=owner_id,
             attempt_id=receipt.attempt_id, input_ids=list(prefix_input_ids), sources=sources,
             ttl_seconds=ttl_seconds, expected_restart_id=receipt.engine_restart_id,
-            fingerprint=asdict(self.engine.fingerprint)))
+            fingerprint=asdict(self.engine.fingerprint))
+        if protection_budget_tokens is not None:
+            body["protection_budget_tokens"] = protection_budget_tokens
+        return await self.engine._post("/context/prefix/retain", body)
 
     async def release(self, owner_id, engine_restart_id):
         return await self.engine._post("/context/prefix/release", dict(owner_id=owner_id,
@@ -488,7 +492,8 @@ class PrefixObserver:
         self._lock = asyncio.Lock()
 
     async def observe(self, *, owner_id, session_id, attempt_id, step_id, receipt,
-                      prefix_input_ids, sources, ttl_seconds, policy, policy_choice):
+                      prefix_input_ids, sources, ttl_seconds, policy, policy_choice,
+                      protection_budget_tokens=None):
         async with self._lock:
             previous = self.store.prefix_owner(owner_id)
             now = time.monotonic_ns()
@@ -503,14 +508,25 @@ class PrefixObserver:
             self.store.save_prefix_owner(record, "retain_requested")
             try:
                 ack = await self.runtime.retain(owner_id=owner_id, receipt=receipt,
-                    prefix_input_ids=prefix_input_ids, sources=sources, ttl_seconds=ttl_seconds)
+                    prefix_input_ids=prefix_input_ids, sources=sources, ttl_seconds=ttl_seconds,
+                    protection_budget_tokens=protection_budget_tokens)
             except EngineError as error:
-                if error.code != "PREFIX_NOT_RESIDENT":
+                reasons = {"PREFIX_NOT_RESIDENT": "prefix_not_resident",
+                           "PREFIX_PROTECTION_BUDGET_EXCEEDED": "shared_protection_budget_exceeded"}
+                if error.code not in reasons:
                     raise
-                ack = dict(owner_id=owner_id, state="UNRETAINED", reason="prefix_not_resident",
+                ack = dict(owner_id=owner_id, state="UNRETAINED", reason=reasons[error.code],
                     engine_restart_id=receipt.engine_restart_id)
-                self.store.save_prefix_owner(replace(record, stage="RELEASED", last_status=ack,
-                    updated_ns=time.monotonic_ns()), "retention_opportunity_lost")
+                # A rejected renewal did not remove the old Native owner. Keep
+                # its original expiry and ledger so terminal cleanup can release
+                # it; never persist an unacknowledged lease extension.
+                if (previous is not None and previous.stage in {"RETAINING", "RETAINED"}
+                        and previous.receipt.engine_restart_id == receipt.engine_restart_id):
+                    self.store.save_prefix_owner(replace(previous, updated_ns=time.monotonic_ns()),
+                        "retention_renewal_rejected", details=ack)
+                else:
+                    self.store.save_prefix_owner(replace(record, stage="RELEASED", last_status=ack,
+                        updated_ns=time.monotonic_ns()), "retention_opportunity_lost")
                 return ack
             record = replace(record, stage="RETAINED", runtime_receipt=ack,
                              last_status=ack, updated_ns=time.monotonic_ns())
@@ -569,12 +585,13 @@ class PrefixReadObserver:
         self._allocation_lock = asyncio.Lock()
         self._control_observations = deque(maxlen=32)
         self._owner_control_observations = deque(maxlen=32)
+        self._demand_control_observations = deque(maxlen=32)
         if settings["mode"] not in {"fixed_ttl", "value", "demand"}:
             raise ValueError("prefix callback requires fixed_ttl, value or demand mode")
         self.model = None
         self.allocation = settings.get("allocation", "next_use")
         model_path = (settings["model_path"] if settings["mode"] == "value" else
-                      settings.get("pricing_asset") if self.allocation == "paired_value" else None)
+                      settings.get("pricing_asset") if settings["mode"] == "demand" else None)
         if model_path:
             raw = Path(model_path).read_bytes()
             self.model = EmpiricalRetentionModel.from_dict(json.loads(raw))
@@ -607,15 +624,21 @@ class PrefixReadObserver:
             receipt["set_value_scope"] = "deduplicated expected savings and residency prices minus this complete observed callback once; not a measured set-intervention benefit"
 
     async def demand_options(self, plans, state, session_id, batch, *, page_size, candidate_arrival_ms=None):
-        """Allocate short leases for exact, already compiled continuations."""
+        """Price exact continuations against Native before allocating any lease.
+
+        Risk tokens identify candidate pages, not a latency saving. Both demand
+        allocation modes need a supported paired-Native price before adding or
+        extending ownership. Unpriced paths stay with Native.
+        """
         from .admission import quoted_native_work
         from .demand import DemandLease, JointOption, joint_options
         from .prefix_view import native_cache_scope_hash
         from .templates import longest_common_prefix
 
+        started = time.monotonic()
         own = {row.owner_id: row for row in self.store.prefix_owners(session_id, active_only=True)
                if row.policy == "joint_demand"}
-        if self.model is None and self.allocation == "paired_value" and not own:
+        if self.model is None and not own:
             return joint_options(plans, state, allocate=lambda demand, *_:
                 JointOption(demand, retention_evidence="native_unpriced_net_value"))
         sources = {record.step_id: record for record in state.steps if record.task.kind == "READ"
@@ -711,6 +734,7 @@ class PrefixReadObserver:
             if result.elapsed_ms > 0 and result.step_id in task_kinds:
                 elapsed[task_kinds[result.step_id]].append(result.elapsed_ms)
         means = {kind: sum(values)/len(values) for kind, values in elapsed.items()}
+        native_options = {}
 
         def remaining(owner):
             old = own[owner]
@@ -736,6 +760,9 @@ class PrefixReadObserver:
             base_pages = shared.union(*(owner_pages(row) for row in kept))
             base_gpu = shared_gpu | referenced_pages(kept, "gpu")
             base_host = shared_host | referenced_pages(kept, "host")
+            key = candidate.candidate_id if candidate is not None else task.step_id
+            native_options[key] = JointOption(demand, release=tuple(sorted(own.keys()-immediate)),
+                protected_tokens=len(base_pages-shared)*page_size, keep=tuple(sorted(immediate)))
             future_inputs = []
             host_potential_growth = host_write_capacity = host_growth = 0
 
@@ -843,10 +870,8 @@ class PrefixReadObserver:
                                 break
 
             requests, actions_by_option = [], {}
-            first_consumer_pages, consumed_pages = {}, set()
-            for target, (_, _, risks, _) in demands.items():
-                first_consumer_pages[target] = risks.keys()-consumed_pages
-                consumed_pages.update(consumer_paths[target][0])
+            native_options[key] = replace(native_options[key],
+                uncovered_risk_tokens=sum(row[0] for row in demands.values()))
             curves = {}
             for owner, (step, boundary, _) in paths.items():
                 if self.model is None or step not in sources or owner in immediate or owner not in path_quotes:
@@ -857,7 +882,7 @@ class PrefixReadObserver:
                         if (forecast := self._demand_forecast(inspection, batch, horizon, boundary,
                             path_quotes[owner])) is not None)
             priced = any(curves.values())
-            if not priced and self.allocation == "paired_value":
+            if not priced:
                 return JointOption(demand, release=tuple(sorted(own.keys()-immediate)),
                     protected_tokens=len(base_pages-shared)*page_size,
                     uncovered_risk_tokens=sum(row[0] for row in demands.values()),
@@ -866,17 +891,16 @@ class PrefixReadObserver:
                 if owner in immediate:
                     continue
                 curve = curves.get(owner, ())
-                if priced and not curve:
+                if not curve:
                     continue
-                if priced:
-                    source_body = body_page_offsets(boundary,
-                        sources[step].metrics["source_view"]["body_token_ranges"], page_size)
-                    # The paired effect prices the first consumer of the owner.
-                    # Later requests can already hit pages loaded by that consumer.
-                    first_consumer = next((target for target, (path, body) in consumer_paths.items()
-                        if pages <= path and source_body and source_body <= body), None)
-                    if first_consumer is None:
-                        continue
+                source_body = body_page_offsets(boundary,
+                    sources[step].metrics["source_view"]["body_token_ranges"], page_size)
+                # The paired effect prices the first consumer of the owner.
+                # Later requests can already hit pages loaded by that consumer.
+                first_consumer = next((target for target, (path, body) in consumer_paths.items()
+                    if pages <= path and source_body and source_body <= body), None)
+                if first_consumer is None:
+                    continue
                 leases = [(horizon, "renew" if owner in own else "new") for horizon in horizons]
                 if owner in own and remaining(owner) > 0:
                     leases.append((remaining(owner), "keep"))
@@ -888,26 +912,17 @@ class PrefixReadObserver:
                         covered = pages & risk_by_page.keys()
                         if not covered:
                             continue
-                        forecast = None
-                        if priced:
-                            if target != first_consumer:
-                                continue
-                            forecast = (self._remaining_forecast(curve, horizon) if action == "keep" else
-                                next((point for point in curve if point.horizon_seconds == horizon), None))
-                            if forecast is None:
-                                continue
-                            # The forecast already prices this owner's boundary.
-                            # Divide it over that path, then apply each page's
-                            # own tier risk once, including for shorter owners.
-                            per_page = max(0, forecast.target_saved_ms)/len(pages)
-                            forecasts.append(forecast)
-                        else:
-                            # Each causal page is credited to its first future
-                            # consumer. A later read can reuse that consumer's KV.
-                            covered &= first_consumer_pages[target]
-                            if not covered:
-                                continue
-                            per_page = priority*page_size
+                        if target != first_consumer:
+                            continue
+                        forecast = (self._remaining_forecast(curve, horizon) if action == "keep" else
+                            next((point for point in curve if point.horizon_seconds == horizon), None))
+                        if forecast is None:
+                            continue
+                        # The forecast already prices this owner's boundary.
+                        # Divide it over that path, then apply each page's
+                        # own tier risk once, including for shorter owners.
+                        per_page = max(0, forecast.target_saved_ms)/len(pages)
+                        forecasts.append(forecast)
                         events.append((target, tuple((page, per_page*risk_by_page[page]/page_size)
                             for page in sorted(covered))))
                         target_ids.append(target)
@@ -919,19 +934,21 @@ class PrefixReadObserver:
                     forecast = PrefixForecast(horizon, 0, None, None,
                         max((point.extra_gpu_seconds_per_page for point in forecasts), default=0),
                         max((point.extra_host_seconds_per_page for point in forecasts), default=0),
-                        scope, "consumer_paired_marginal" if priced else "native_at_risk_token_rule",
-                        retention_control_ms=0 if action == "keep" else max((point.retention_control_ms for point in forecasts), default=0),
+                        scope, "consumer_paired_marginal",
+                        retention_control_ms=0 if action == "keep" else max(
+                            max((point.retention_control_ms for point in forecasts), default=0),
+                            max(self._owner_control_observations, default=0)),
                         expected_collateral_saved_ms=min((point.expected_collateral_saved_ms for point in forecasts), default=0))
                     request = RetentionRequest(owner, forecast, pages, page_size,
-                        consumer_savings=tuple(events), value_unit="milliseconds" if priced else "risk_tokens")
+                        consumer_savings=tuple(events))
                     requests.append(request)
                     target = max(target_ids, key=lambda key: demands[key][0]*demands[key][1])
                     actions_by_option[owner, horizon] = DemandLease(owner, step, target, boundary,
                         sum(value for page, value in demands[target][2].items() if page in pages), page_size, scope,
                         horizon, action, demands[target][3])
             choices = allocate_retention(requests, protection_budget_tokens=limit,
-                lambda_gpu=self.settings.get("lambda_gpu", 0) if priced else 0,
-                lambda_host=self.settings.get("lambda_host", 0) if priced else 0, baseline_pages=base_pages)
+                lambda_gpu=self.settings.get("lambda_gpu", 0),
+                lambda_host=self.settings.get("lambda_host", 0), baseline_pages=base_pages)
             selected = {choice.owner_id: actions_by_option[choice.owner_id, choice.ttl_seconds] for choice in choices}
             protected = base_pages.union(*(paths[owner][2] for owner in selected))
             kept_ids = immediate | {owner for owner, lease in selected.items() if lease.action == "keep"}
@@ -942,21 +959,40 @@ class PrefixReadObserver:
             # realized continuation and this retention intervention. Allocation
             # value also folds in control, collateral and residency prices, so
             # retain it as a lease diagnostic rather than a branch latency delta.
-            allocation_value = sum(choice.value for choice in choices) if priced else None
+            allocation_value = sum(choice.value for choice in choices)
             chosen_forecasts = {(request.owner_id, request.forecast.horizon_seconds): request.forecast
                                 for request in requests}
             mutations = tuple(lease for lease in selected.values() if lease.action != "keep")
-            owner_control_ms = (sum(chosen_forecasts[lease.owner_id, lease.ttl_seconds].retention_control_ms
-                for lease in mutations) if priced else None) if mutations else 0.0
+            owner_control_ms = sum(chosen_forecasts[lease.owner_id, lease.ttl_seconds].retention_control_ms
+                for lease in mutations)
             return JointOption(demand, mutations,
                 tuple(sorted(own.keys()-immediate-selected.keys())), len(protected-shared)*page_size,
-                uncovered, "consumer_paired_marginal" if priced else "known_next_use",
+                uncovered, "consumer_paired_marginal" if choices else "native_nonpositive_net_value",
                 tuple(sorted(kept_ids)), "candidate_arrival_ms_or_observed_step_means_plus_queue; unknown_when_unobserved",
-                allocation_value, owner_control_ms if priced else
-                    len(mutations)*(sum(self._owner_control_observations)/len(self._owner_control_observations)
-                                    if self._owner_control_observations else 0.0))
+                allocation_value, owner_control_ms)
 
-        return joint_options(plans, state, allocate=allocate)
+        options = joint_options(plans, state, allocate=allocate)
+        elapsed_ms = (time.monotonic()-started)*1000
+        # These are measured policy overheads, never token-to-time conversions.
+        # Pay the common decision/inspection cost once for the entire selected
+        # set. Keep this diagnostic separate from branch accounting: the current
+        # decision has already elapsed and READ callbacks are charged by their
+        # executor. It is not an additional predicted generation latency.
+        fixed_ms = max(elapsed_ms, max(self._demand_control_observations, default=0))
+        fixed_ms += max(self._control_observations, default=0)
+        self._demand_control_observations.append(elapsed_ms)
+        for key, option in tuple(options.items()):
+            if option.retention_allocation_value_ms is None:
+                continue
+            net = option.retention_allocation_value_ms-fixed_ms
+            if option.retain and net <= 0:
+                options[key] = replace(native_options[key],
+                    retention_evidence="native_nonpositive_net_value",
+                    retention_allocation_value_ms=net, retention_fixed_control_ms=fixed_ms)
+            else:
+                options[key] = replace(option, retention_allocation_value_ms=net,
+                    retention_fixed_control_ms=fixed_ms)
+        return options
 
     def _demand_forecast(self, inspected, batch, horizon, boundary, quote):
         features = inspected.get("retention_features")
@@ -976,6 +1012,9 @@ class PrefixReadObserver:
         forecast = self.model.forecasts.get(self.model._key(bucket, inspected["cache_scope_hash"],
                                                             horizon))
         if forecast is not None:
+            if (forecast.source_token_range is not None and
+                    not forecast.source_token_range[0] <= boundary <= forecast.source_token_range[1]):
+                return None
             return forecast.for_tokens(boundary)
 
     async def apply_demand(self, option, state, session_id, *, batch):
@@ -998,7 +1037,8 @@ class PrefixReadObserver:
                         ({"kind": "executed_source_body_prefix", "prefix_hash": token_hash(prefix)},)),
                     ttl_seconds=lease.ttl_seconds,
                     policy="joint_demand", policy_choice={**asdict(lease), "observed_quote_seq": batch.observed_seq,
-                        "protected_tokens": option.protected_tokens})
+                        "protected_tokens": option.protected_tokens},
+                    protection_budget_tokens=self.settings["protection_budget_tokens"])
                 self._owner_control_observations.append((time.monotonic()-owner_started)*1000)
         return {"elapsed_ms": (time.monotonic()-started)*1000, "kept_owners": option.keep,
                 "owner_status": {owner: {key: ack[key] for key in ("state", "reason", "boundary_tokens", "expires_at")
@@ -1183,7 +1223,8 @@ class PrefixReadObserver:
             choice = dict(qualification_only=True, features=features, reuse_event_key=event)
             started = time.monotonic()
             result = await self.owners.observe(**arguments, ttl_seconds=self.settings["ttl_seconds"],
-                policy="fixed_ttl_mechanism", policy_choice=choice)
+                policy="fixed_ttl_mechanism", policy_choice=choice,
+                protection_budget_tokens=self.settings.get("protection_budget_tokens"))
             control["retain_ms"] += (time.monotonic()-started)*1000
             control["retain_calls"] += 1
         else:
@@ -1270,13 +1311,15 @@ class PrefixReadObserver:
             started = time.monotonic()
             if owner_id == current_id:
                 current_ack = await self.owners.observe(**current, ttl_seconds=choice.ttl_seconds,
-                    policy="paired_native_value", policy_choice=policy_choice)
+                    policy="paired_native_value", policy_choice=policy_choice,
+                    protection_budget_tokens=self.settings["protection_budget_tokens"])
             else:
                 old = records[owner_id]
                 await self.owners.observe(owner_id=owner_id, session_id=old.session_id,
                     attempt_id=old.attempt_id, step_id=old.step_id, receipt=old.receipt,
                     prefix_input_ids=old.prefix_input_ids, sources=old.sources, ttl_seconds=choice.ttl_seconds,
-                    policy="paired_native_value", policy_choice=policy_choice)
+                    policy="paired_native_value", policy_choice=policy_choice,
+                    protection_budget_tokens=self.settings["protection_budget_tokens"])
             control["retain_ms"] += (time.monotonic()-started)*1000
             control["retain_calls"] += 1
         owner_prediction = sum(next(point.retention_control_ms for point in curves[choice.owner_id]

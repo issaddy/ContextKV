@@ -239,6 +239,7 @@ class ReadTask:
     retained_conclusion_tokens: tuple[tuple[str, int], ...] = ()
     requires_reduction: bool = False
     condition_ids: tuple[str, ...] = ()
+    repair_gaps: tuple[OpenNeed, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -331,6 +332,9 @@ class ContextPlan:
     read_packing: str = "mixed"
     answer_system_prompt: str | None = None
     answer_allocation: AnswerWindowAllocation | None = None
+    # Controller-declared terminal gaps. They permit an explicit partial/IDK
+    # response after bounded recovery; they never establish source coverage.
+    terminal_gaps: tuple[OpenNeed, ...] = ()
 
 
 @dataclass(frozen=True)

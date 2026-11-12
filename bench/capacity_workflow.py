@@ -22,6 +22,7 @@ import yaml
 
 from bench.metrics import occupancy_integral
 from bench.native_metrics import NativePoolSampler, pool_series
+from bench.result_records import execution_metric_rows
 from bench.study import declare_cohorts, dataset_rows, saved_study_rows, write_json
 from bench.study_metrics import _track_specs, declared_queue_summary
 from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
@@ -59,7 +60,7 @@ def full_queue_method_specs(selected, gain_settings, compilation, *, rule_settin
             retention.update({name: deepcopy(declared[name]) for name in (
                 "allocation", "ttl_seconds", "horizon_seconds_choices", "protection_budget_tokens",
                 "lambda_gpu", "lambda_host") if name in declared})
-            if retention["allocation"] == "paired_value" and declared.get("pricing_asset"):
+            if declared.get("pricing_asset"):
                 retention["pricing_asset"] = str(Path(declared["pricing_asset"]).resolve())
         overrides = {"execution": {"dialogue_mode": dialogue, "plan_gain": rolling,
             "cache_compilation": deepcopy(compilation) if contextpilot else {"mode": "native"},
@@ -90,7 +91,7 @@ def full_queue_gap_limits(execution, gain=None, *, max_units=None, max_passages=
 def prepare(args, root):
     from controller.config import load_config
     from controller.context_schema import DEFAULT_FULL_SCOPE_OUTPUT_TOKENS
-    from training.train_plan_gain import PlanGainModel
+    from controller.plan_profiles import load_action_gain_asset
 
     config = yaml.safe_load(Path(args.config).read_text())
     config.setdefault("scoring", {})["gpu_devices"] = list(args.online_gpu_devices)
@@ -136,9 +137,20 @@ def prepare(args, root):
     selected_methods = tuple(dict.fromkeys(args.methods or registered["main_methods"]))
     needs_gain = any(method in CONTEXT_METHODS for method in selected_methods)
     gain_path = Path(args.gain_asset).resolve() if needs_gain else None
-    profile = json.loads(gain_path.read_text())["reader_profile_id"] if needs_gain else args.reader_profile_id
-    gain = (PlanGainModel.load(gain_path, reader_checkpoint=run.model.revision, reader_profile_id=profile)
-        if needs_gain else None)
+    asset = json.loads(gain_path.read_text()) if needs_gain else None
+    profile = asset["reader_profile_id"] if asset is not None else args.reader_profile_id
+    declared_gain = config["execution"].get("plan_gain") or {}
+    admission_settings = {"action_policy": declared_gain.get("action_policy", "validated"),
+        **{name: deepcopy(declared_gain[name]) for name in ("validation_thresholds",) if name in declared_gain}}
+    gain, gain_admission = None, None
+    if needs_gain:
+        if asset["reader_checkpoint"] != run.model.revision:
+            raise ValueError("gain asset requires its measured reader checkpoint and runtime profile")
+        # Preflight needs the declared candidate domain, not executable old
+        # weights. The same loader used by serving enforces policy admission.
+        _, gain_admission, gain = load_action_gain_asset({**admission_settings,
+            "gain_asset": str(gain_path), "reader_checkpoint": run.model.revision,
+            "reader_profile_id": profile, "mode": "observed_actions", "joint_context": True})
     roots = args.online_process_roots
     if not roots:
         endpoints = [run.engine.base_url]
@@ -165,7 +177,7 @@ def prepare(args, root):
                      prefix_retention={"mode": "native"}, cache_compilation={"mode": "native"},
                      dialogue_mode="contextkv")
     read_outputs = args.read_outputs or (2048,)
-    if needs_gain:
+    if gain is not None:
         from controller.action_proposals import finite_action_domain
         domain = gain.provenance["action_domain"]
         read_outputs = args.read_outputs or domain["output_budgets"]
@@ -176,7 +188,7 @@ def prepare(args, root):
         output_tokens_per_fact=config["reading"]["output_tokens_per_fact"], gap_limits=gap_limits, read_choices=2)
     if completion_timing is not None:
         rolling_settings["completion_timing_asset"] = str(Path(completion_timing).resolve())
-    gain_settings = dict(rolling_settings, gain_asset=str(gain_path)) if needs_gain else None
+    gain_settings = dict(rolling_settings, gain_asset=str(gain_path), **admission_settings) if needs_gain else None
     rule_settings = dict(rolling_settings, action_policy="rule")
     checkout = args.contextpilot_checkout or declared_compilation.get("checkout")
     needs_compilation = any(method in (*CONTEXT_METHODS[1:], RULE_CONTEXT_METHOD) for method in selected_methods)
@@ -252,6 +264,7 @@ def prepare(args, root):
         execution_commit=revision, source_config=source_file(args.config), source_matrix=source_file(args.matrix),
         source_cohorts=source_file(args.cohorts) if args.cohorts is not None else None,
         reader_profile_id=profile, reader_run=source_file(run_path), resource_scope=scope,
+        action_policy_preflight=gain_admission,
         assets={"gain": source_file(gain_path) if needs_gain else None,
                 "demand_pricing": source_file(pricing_asset) if pricing_asset is not None else None,
                 "completion_timing": source_file(rolling_settings["completion_timing_asset"])
@@ -270,32 +283,22 @@ def prepare(args, root):
     return manifest
 
 
-def delivery_summary(dataset_rows, failed, dispatch):
-    return {"completed": len(dataset_rows), "failed": len(failed),
-            "blocked": len(dispatch["cancelled"]) if dispatch is not None else 0}
-
-
 def declared_execution_rows(job):
     rows, delivery = [], {}
     for dataset in job["datasets"]:
         track = Path(job["output"])/job["method"]/dataset
-        results = {str(row["task_id"]): row for row in saved_study_rows(track)}
+        completed = saved_study_rows(track)
         path = track/"failed_conversations.json"
         failed = json.loads(path.read_text()) if path.exists() else []
-        failed = [row for row in failed if str(row["task_id"]) not in results]
-        for row in failed:
-            results[str(row["task_id"])] = {**row, "status": "failed"}
-            for identity in row.get("blocked_task_ids", ()):
-                results.setdefault(str(identity), {"task_id": identity,
-                    "conversation_id": row["conversation_id"], "status": "blocked"})
+        completed_ids = {str(row["task_id"]) for row in completed}
+        failed = [row for row in failed if str(row["task_id"]) not in completed_ids]
         dispatch_path = track/"workload_dispatch.json"
         dispatch = json.loads(dispatch_path.read_text()) if dispatch_path.exists() else None
-        if dispatch is not None:
-            for identity, row in dispatch["cancelled"].items():
-                results.setdefault(str(identity), {**row, "status": "blocked"})
-        delivery[dataset] = delivery_summary(
-            [row for row in results.values() if row["status"] == "completed"], failed, dispatch)
-        rows.extend({**row, "dataset": dataset} for row in results.values())
+        merged = execution_metric_rows(track, completed, failures=failed, dispatch=dispatch)
+        delivery[dataset] = {"completed": sum(row["status"] == "completed" for row in merged),
+            "failed": sum(row["status"] == "failed" for row in merged),
+            "blocked": sum(row["status"] == "blocked" for row in merged)}
+        rows.extend({**row, "dataset": dataset} for row in merged)
     return rows, delivery
 
 

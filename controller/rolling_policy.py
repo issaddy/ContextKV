@@ -62,7 +62,8 @@ def namespace_plan(plan):
 
 def _reduction_tasks(plan, state):
     """Declare reductions, waiting for the selected frontier of shared numeric views."""
-    from .reading import numeric_reduction_inputs, numeric_selection_step_ids, numeric_selection_tasks
+    from .reading import (need_read_step_ids, numeric_reduction_inputs, numeric_selection_step_ids,
+                          numeric_selection_tasks)
 
     if plan.reading_mode == "coverage_only":
         return ()
@@ -78,6 +79,9 @@ def _reduction_tasks(plan, state):
     tasks = [task for task in numeric_selection_tasks(plan, state.results, state.claims)
              if task.step_id not in planned_ids]
     for need in plan.task_state.needs:
+        if need.need_id in {gap.need_id for gap in plan.terminal_gaps}:
+            continue
+        need_reads = need_read_step_ids(plan, (need.need_id,))
         if not summarize and need.operation not in {"enumerate", "compare", "count", "sum", "group", "infer"}:
             continue
         if not summarize and need.operation in {"count", "sum"} and need.need_id in unresolved:
@@ -95,21 +99,21 @@ def _reduction_tasks(plan, state):
                 and (record.step_id == selection.step_id or record.step_id.startswith(selector_id+":part:")))
             tasks.extend(selector_steps)
             planned_ids.update(task.step_id for task in selector_steps)
-        predecessors = (selection.step_id,) if shared_numeric else read_ids
+        predecessors = (selection.step_id,) if shared_numeric else need_reads
         if any(task.kind == "REDUCE" and need.need_id in task.need_ids
                and task.predecessor_step_ids == predecessors for task in plan.steps):
             continue
         operation = "summarize" if summarize else "union" if need.operation == "enumerate" else need.operation
-        identity = hashlib.sha256(dumps((read_ids, need.need_id, operation)).encode()).hexdigest()[:24]
+        identity = hashlib.sha256(dumps((need_reads, need.need_id, operation)).encode()).hexdigest()[:24]
         if shared_numeric:
             claims = tuple(claim.claim_id for claim in numeric_reduction_inputs(need.need_id, state.results, selector_id))
         else:
-            extracted = {claim.claim_id for result in state.results if result.step_id in read_ids
+            extracted = {claim.claim_id for result in state.results if result.step_id in need_reads
                          for claim in result.claims}
             claims = tuple(claim.claim_id for claim in state.claims
                            if claim.serves(need.need_id) and claim.kind == "extract"
                            and claim.claim_id in extracted)
-        if not shared_numeric and set(read_ids) <= completed and not claims and need.operation != "group":
+        if not shared_numeric and set(need_reads) <= completed and not claims and need.operation != "group":
             continue
         from .context_budget import reduction_output_budget
         output_budget = reduction_output_budget(plan, need.need_id)
@@ -157,19 +161,33 @@ def compile_step(plan, task, state, snapshot, template, *, outputs, request_comp
 
 def compile_route_steps(proposal, state, snapshot, template, *, output_budgets,
                         output_tokens_per_fact=64, request_compiler=None, cache_scope=None,
-                        compile_answers=None, answer_options=None):
-    """Compile known pending source consumers using the execution compiler."""
+                        compile_answers=None, answer_options=None, quote_lookahead=2):
+    """Quote a bounded near-term frontier, retaining the full route for budgets.
+
+    A Native quote expires as the workload changes. Compiling every remaining
+    READ on every decision produced a quadratic number of stale future quotes.
+    Uncompiled steps remain in the route and in completion_reserve; they are
+    compiled and freshly quoted before execution.
+    """
+    if quote_lookahead < 0:
+        raise ValueError("quote_lookahead must be nonnegative")
     if proposal.semantic_kind == "direct_answer":
         return ()
     from .action_proposals import bind_read_parents, observed_step_outputs
     done = {result.step_id for result in state.results}
     existing = {step.task.step_id: step for step in proposal.steps}
-    route = []
+    route, quoted_future = [], 0
     for task in proposal.context_plan.steps:
         if task.kind != "READ" or task.step_id in done:
             continue
         if task.step_id in existing and existing[task.step_id].variants:
             route.append(existing[task.step_id])
+            continue
+        # Distant obligations need no output-schema or candidate compilation.
+        # Their declared budgets still bound the full remaining work.
+        reservation, variants = task.output_budget, ()
+        if quoted_future >= quote_lookahead or not set(task.predecessor_step_ids) <= done:
+            route.append(PlanStep(task, variants, reservation))
             continue
         task = bind_read_parents(task, state)
         reservation, outputs = observed_step_outputs(proposal.context_plan, task, template,
@@ -178,6 +196,7 @@ def compile_route_steps(proposal, state, snapshot, template, *, output_budgets,
         if set(task.predecessor_step_ids) <= done:
             variants = compile_step(proposal.context_plan, task, state, snapshot, template, outputs=outputs,
                                     request_compiler=request_compiler, cache_scope=cache_scope)
+            quoted_future += 1
         route.append(PlanStep(task, variants, reservation))
     if compile_answers is None:
         return tuple(route)
@@ -217,7 +236,7 @@ class RollingPlanRuntime:
     def __init__(self, gain_model, native, *, reader_checkpoint, reader_profile_id,
                  output_budgets, limits=None, replan=None, output_tokens_per_fact=64,
                  mode="whole_plan", observation_path=None, gap_retriever_identity=None, gap_limits=None,
-                 joint_context=False, read_choices=1, completion_timing=None):
+                 joint_context=False, read_choices=1, completion_timing=None, quote_lookahead=2):
         from .plan_policy import PolicyLimits
         if joint_context and mode != "observed_actions":
             raise ValueError("joint context requires rolling observed actions")
@@ -231,6 +250,9 @@ class RollingPlanRuntime:
         self.reader_checkpoint, self.reader_profile_id = reader_checkpoint, reader_profile_id
         self.native, self.output_budgets, self.replan = native, tuple(output_budgets), replan
         self.output_tokens_per_fact = output_tokens_per_fact
+        if not isinstance(quote_lookahead, int) or isinstance(quote_lookahead, bool) or quote_lookahead < 0:
+            raise ValueError("quote_lookahead must be a nonnegative integer")
+        self.quote_lookahead = quote_lookahead
         if mode not in {"whole_plan", "observed_actions"}:
             raise ValueError("rolling mode must be whole_plan or observed_actions")
         if mode == "observed_actions" and replan is not None:
@@ -244,6 +266,8 @@ class RollingPlanRuntime:
                     output_budgets, output_tokens_per_fact):
                 raise ValueError("rolling gain asset uses a different finite candidate domain")
         self.mode, self.joint_context = mode, joint_context
+        self.action_policy_admission = {"policy": "learned" if gain_model is not None else "rule",
+                                       "admitted": True, "reasons": ()}
         self.observation_path = None if observation_path is None else Path(observation_path)
         self.gap_retriever_identity, self.gap_limits = gap_retriever_identity, gap_limits
         if not self.output_budgets or any(value < 1 for value in self.output_budgets):
@@ -268,7 +292,44 @@ class RollingPlanRuntime:
     @staticmethod
     def _mandatory_coverage(state):
         from .context_budget import incomplete_full_coverage
-        return incomplete_full_coverage(state.plan, state.results)
+        return incomplete_full_coverage(state.plan, state.results, allow_terminal_gaps=True)
+
+    @staticmethod
+    def _refresh_recovery(state, executor, attempt_id, template, snapshot=None):
+        from .read_recovery import recover_failed_reads, schedule_field_repair
+
+        original = state
+        if snapshot is not None and (state.open_needs or any(
+                record.metrics.get("read_recovery_pending") for record in state.steps)):
+            sources = {block.key: block for block in state.plan.selected_set.source_blocks}
+            needed = {span.source_key for unit in state.plan.selected_set.selected_units for span in unit.source_spans}
+            missing = tuple(block for block in snapshot.archive if block.key in needed-sources.keys())
+            if missing:
+                state = replace(state, plan=replace(state.plan, selected_set=replace(state.plan.selected_set,
+                    source_blocks=(*state.plan.selected_set.source_blocks, *missing))))
+        updated = schedule_field_repair(recover_failed_reads(state, template.tokenizer), template.tokenizer)
+        if updated is original:
+            return original
+        previous = {record.step_id: record for record in original.steps}
+        # Save the expanded catalog before the recovery bookkeeping. If the
+        # process exits between writes, deterministic child IDs reconstruct
+        # the same plan and the paid parent is never generated again.
+        executor.store.save_context_plan(attempt_id, updated.plan)
+        for record in updated.steps:
+            if previous.get(record.step_id) != record:
+                executor.store.save_execution_step(record, "COMPLETE")
+        return updated
+
+    async def _execute_with_recovery(self, executor, attempt_id, snapshot, plan, task, state, **kwargs):
+        from .execution import RecoverableReadError
+        from .read_recovery import _replace_records
+
+        try:
+            state = await executor.execute_one(attempt_id, snapshot, plan, task, state, **kwargs)
+        except RecoverableReadError as exc:
+            record = await executor.finish_failed_read(exc.record, exc.reason)
+            state = _replace_records(replace(state, plan=plan), (record,))
+        return self._refresh_recovery(state, executor, attempt_id, executor.template, snapshot)
 
     def _gap_request(self, state, expanded, provider):
         from .action_proposals import GapRetrievalRequest, gap_key, gap_query, gap_scope_available
@@ -293,6 +354,7 @@ class RollingPlanRuntime:
         if self.read_choices == 2:
             from .action_proposals import finite_action_domain
             packet["action_domain"] = finite_action_domain(self.output_budgets, self.output_tokens_per_fact)
+        packet["action_policy_admission"] = self.action_policy_admission
         packet.update(metadata or {})
         self.observation_path.parent.mkdir(parents=True, exist_ok=True)
         with self.observation_path.open("a") as stream:
@@ -343,7 +405,8 @@ class RollingPlanRuntime:
                 snapshot, template, output_budgets=self.output_budgets,
                 output_tokens_per_fact=self.output_tokens_per_fact,
                 request_compiler=request_compiler, cache_scope=cache_scope,
-                compile_answers=compile_answers if project_answer else None, answer_options=options)))
+                compile_answers=compile_answers if project_answer else None, answer_options=options,
+                quote_lookahead=self.quote_lookahead)))
         return tuple(result)
 
     @staticmethod
@@ -506,19 +569,26 @@ class RollingPlanRuntime:
 
     def _required_scope_step(self, state):
         plan = state.plan
-        full_scope = plan.coverage_scope == "all_supplied_documents" or any(
-            need.scope == "all_supplied_documents" for need in plan.task_state.needs)
+        terminal = {gap.need_id for gap in plan.terminal_gaps}
+        needs = tuple(need for need in plan.task_state.needs if need.need_id not in terminal)
+        full_scope = bool(needs) and (plan.coverage_scope == "all_supplied_documents" or any(
+            need.scope == "all_supplied_documents" for need in needs))
         numeric_operations = {"count", "sum", "group"}
-        numeric = plan.reading_mode == "typed_reduce" and any(
-            need.operation in numeric_operations for need in plan.task_state.needs)
+        numeric_ids = {need.need_id for need in needs if plan.reading_mode == "typed_reduce"
+                       and need.operation in numeric_operations}
+        numeric = bool(numeric_ids)
         if not full_scope and not numeric:
             return None
         completed = {result.step_id for result in state.results}
         numeric_reads_pending = numeric and any(task.kind == "READ" and task.step_id not in completed
+                                               and numeric_ids.intersection(task.need_ids)
                                                for task in plan.steps)
         ready = advance_read_plan(plan, state.results)
+        coverage_ids = {need.need_id for need in needs if plan.coverage_scope == "all_supplied_documents"
+                        or need.scope == "all_supplied_documents"}
         if self._mandatory_coverage(state) or numeric_reads_pending:
-            task = next((task for task in ready if task.kind == "READ"), None)
+            task = next((task for task in ready if task.kind == "READ"
+                         and (coverage_ids | numeric_ids).intersection(task.need_ids)), None)
             if task is None:
                 raise NoCompletePlan("no ready READ can complete the required source scope")
             return task
@@ -527,6 +597,7 @@ class RollingPlanRuntime:
             required_operations.add("union")
         return next((task for task in ready if task.kind == "REDUCE"
                      and plan.reading_mode == "typed_reduce"
+                     and set(task.need_ids)-terminal
                      and task.operation in required_operations), None)
 
     async def run(self, attempt_id, snapshot, context_plans, executor, engine, template,
@@ -594,8 +665,11 @@ class RollingPlanRuntime:
                         candidate = compile_step(state.plan, record.task, state, snapshot, template,
                             outputs=(record.task.output_budget,), request_compiler=executor.request_compiler,
                             cache_scope=await engine.info())[0]
-                    state = await executor.execute_one(attempt_id, snapshot, state.plan, record.task, state,
+                    state = await self._execute_with_recovery(executor, attempt_id, snapshot, state.plan, record.task, state,
                         initial_auxiliary_usage=auxiliary_usage, candidate=candidate)
+                    # Recovery may have expanded the durable catalog. Reusing
+                    # the pre-resume catalog here would discard its children.
+                    context_plans = (state.plan,)
         from .execution import reading_tokens_spent
         prefix_observer = executor.observe_prefix
         retention_mode = getattr(prefix_observer, "settings", {}).get("mode", "native")
@@ -603,9 +677,17 @@ class RollingPlanRuntime:
         timing_context = (self.reader_profile_id, model.asset_id if model is not None else "rule", retention_mode)
         demand_retention = self.joint_context and retention_mode == "demand"
         route_compiler = executor.request_compiler.with_read_memo()
+        # Budget projections share exact measurements with the execution
+        # compiler, without retaining every future prompt's token array.
+        template = route_compiler.template
         while True:
             selection_started = time.monotonic()
-            answer_demand = demand_retention and any(record.task.kind == "READ" for record in state.steps)
+            previous = state
+            state = self._refresh_recovery(state, executor, attempt_id, template, snapshot)
+            if state is not previous:
+                context_plans = (state.plan,)
+            answer_demand = (demand_retention and getattr(prefix_observer, "model", None) is not None
+                and any(record.task.kind == "READ" for record in state.steps))
             spent = reading_tokens_spent(state.steps, auxiliary_usage, state.auxiliary_usage)
             catalog = (_with_observed_sources(context_plans[0], state)
                        if self.mode == "observed_actions" else state.plan)
@@ -674,7 +756,8 @@ class RollingPlanRuntime:
                         output_budgets=self.output_budgets, output_tokens_per_fact=self.output_tokens_per_fact,
                         request_compiler=route_compiler, cache_scope=cache_scope,
                         compile_answers=compile_answers if answer_demand else None,
-                        answer_options=dict(representations=("hybrid",), layouts=("existing",), actions=("REBUILD",)))
+                        answer_options=dict(representations=("hybrid",), layouts=("existing",), actions=("REBUILD",)),
+                        quote_lookahead=self.quote_lookahead)
                     compiled.append(replace(proposal, route_steps=route))
                 proposals = tuple(compiled)
                 native, _ = await self.native.observe(proposals, state, snapshot, engine, cost_model,
@@ -729,7 +812,17 @@ class RollingPlanRuntime:
                                 option.uncovered_risk_tokens if option is not None else 0)
                         choices.append((rank, step.task, candidate, option, proposal.context_plan))
                 if not choices:
-                    raise NoCompletePlan("required source-scope step exceeds "+", ".join(dict.fromkeys(reasons)))
+                    from .context_schema import OpenNeed
+                    from .read_recovery import terminalize
+                    gaps = tuple(gap for gap in state.open_needs if gap.need_id in required_step.need_ids)
+                    if not gaps:
+                        gaps = tuple(OpenNeed(need, "required source reading or computation remains incomplete")
+                                     for need in required_step.need_ids)
+                    state = terminalize(state, gaps, "continuation_budget_exhausted: "+
+                                        ",".join(dict.fromkeys(reasons)))
+                    context_plans = (state.plan,)
+                    executor.store.save_context_plan(attempt_id, state.plan)
+                    continue
                 _, required_step, candidate, option, plan = min(choices, key=lambda choice: choice[0])
                 self._observe_state(attempt_id, executor, state, snapshot, native, None, True)
                 state = replace(state, plan=plan)
@@ -739,7 +832,7 @@ class RollingPlanRuntime:
                 if option is not None and (option.retain or option.release):
                     await prefix_observer.apply_demand(option, state, snapshot.session_id,
                         batch=native.quotes)
-                state = await executor.execute_one(attempt_id, snapshot, plan, required_step, state,
+                state = await self._execute_with_recovery(executor, attempt_id, snapshot, plan, required_step, state,
                     initial_auxiliary_usage=auxiliary_usage, candidate=candidate, quote=native.quotes,
                     quote_ms=(native.paid_observation or {}).get("native_quote_ms"))
                 context_plans = (state.plan,)
@@ -813,7 +906,8 @@ class RollingPlanRuntime:
                         auxiliary_ms=0.0), quote, snapshot, batch=native.quotes,
                         concurrency=native.quotes.active_requests+1),)
                 selected = Plan(candidate, predicted=estimates, quote_seq=native.quotes.observed_seq,
-                    reason=("rolling_joint_rule" if self.policy.gain_model is None else
+                    reason=("rolling_validated_rule_fallback" if not self.action_policy_admission["admitted"] else
+                        "rolling_joint_rule" if self.policy.gain_model is None else
                         "rolling_observed_action_gain_cost" if observed else "rolling_plan_gain"))
                 return RollingResult(outcome, selected, native.quotes, selection_started)
             if self.mode == "observed_actions" and decision.next_step.task.kind == "GAP":
@@ -825,9 +919,10 @@ class RollingPlanRuntime:
                 context_plans = (state.plan,)
                 continue
             execution_plan = plan
-            state = await executor.execute_one(attempt_id, snapshot, execution_plan, decision.next_step.task, state,
+            state = await self._execute_with_recovery(executor, attempt_id, snapshot, execution_plan, decision.next_step.task, state,
                 initial_auxiliary_usage=auxiliary_usage, candidate=decision.next_step.candidate, quote=native.quotes,
                 quote_ms=(native.paid_observation or {}).get("native_quote_ms"))
+            context_plans = (state.plan,)
             if self.mode == "observed_actions":
                 from .session_store import ReadingProgress
                 context_plans = (state.plan,)

@@ -469,6 +469,12 @@ class SessionStore:
                 "ON CONFLICT(call_id) DO UPDATE SET payload=excluded.payload",
                 (receipt["call_id"], receipt["attempt_id"], dumps(receipt)))
 
+    def auxiliary_calls(self, attempt_id):
+        """Latest durable receipt per call, including provider aggregate groups."""
+        with self._mutex:
+            return tuple(json.loads(row[0]) for row in self.db.execute(
+                "SELECT payload FROM auxiliary_calls WHERE attempt_id=? ORDER BY rowid", (attempt_id,)))
+
     def context_plan(self, attempt_id: str) -> ContextPlan | None:
         with self._mutex:
             row = self.db.execute("SELECT plan FROM turn_plans WHERE attempt_id=?",

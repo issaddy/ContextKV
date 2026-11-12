@@ -9,7 +9,7 @@ from .action_proposals import claim_predecessor_steps
 from .admission import quote_observation, quote_realization
 from .claim_graph import ClaimGraph, claim_frontier
 from .context_budget import bind_answer_window, completion_reserve, incomplete_full_coverage, required_source_units
-from .context_schema import ReadResult, ReadingOutcome, ReductionState, StepRecord
+from .context_schema import OpenNeed, ReadResult, ReadingOutcome, ReductionState, StepRecord
 from .engine_client import EngineError
 from .reading import (advance_read_plan, build_read_plan, output_schema, parse_read_result,
                       step_generation_kind, step_messages, unresolved_needs)
@@ -60,6 +60,22 @@ class ReadingBudgetExceeded(ValueError):
 
 class OnlineTokenBudgetUnmeasured(ValueError):
     pass
+
+
+class RecoverableReadError(EngineError):
+    """A paid, durable READ failed its extraction contract.
+
+    The caller may admit smaller successor reads using ``record``.  This
+    exception never retries a model call and never treats partial JSON as
+    source coverage.  RESULT_READY keeps the receipt and all paid tokens until
+    the caller explicitly finalizes the failed extraction.
+    """
+
+    def __init__(self, code, record, reason):
+        self.record = record
+        self.step_id = record.step_id
+        self.reason = reason
+        super().__init__(code, record.step_id)
 
 
 def reduction_partitions(plan, task, claims, snapshot, template):
@@ -343,11 +359,9 @@ class ReadingExecutor:
                 raise ValueError("compiled READ or REDUCE differs from the selected logical step")
             if candidate.action != "REBUILD":
                 raise ValueError("internal reading steps use independent native REBUILD epochs")
-            empty_on_limit = (task.kind == "READ" and plan.coverage_scope == "selected_sources"
-                and not any(need.operation in {"count", "sum", "group"} for need in plan.task_state.needs))
             record = await self._generate_step(attempt_id, snapshot, plan, task, selected_units, selected_claims,
                 results=state.results, candidate=candidate, quote=quote, quote_ms=quote_ms,
-                reserve=reserve, empty_on_limit=empty_on_limit)
+                reserve=reserve)
         if cpu:
             record = completed_reduction_record(record, task, selected_claims, state.results)
             self.store.save_execution_step(record, "COMPLETE")
@@ -399,15 +413,54 @@ class ReadingExecutor:
 
     async def finish_completed_step(self, plan, record):
         """Finish prefix observation and retirement using the paid, saved input."""
+        if record.metrics.get("read_failure"):
+            return await self.finish_failed_read(record, record.metrics["read_failure"])
         by_id = {unit.unit_id: unit for unit in plan.selected_set.selected_units}
         units = tuple(by_id[identity] for identity in record.task.input_unit_ids)
         record = await self._observe_prefix(plan, record.task, units, record)
         await self._retire_step(record)
         return record
 
+    async def finish_failed_read(self, record, reason):
+        """Account for an unusable READ without claiming facts or coverage.
+
+        COMPLETE denotes completion of the physical request here, not success
+        of its reading contract.  The rolling caller retains this record in
+        its paid ledger and schedules any recovery under fresh step identities.
+        Retrying this method cannot resubmit the original generation.
+        """
+        if record.task.kind != "READ" or record.receipt is None:
+            raise ValueError("only a paid READ result can be finalized for recovery")
+        saved = self.store.execution_step(record.attempt_id, record.step_id)
+        if saved is not None and saved[0] == "COMPLETE" and saved[1].metrics.get("read_failure"):
+            record = saved[1]
+        else:
+            previous = record.result
+            result = ReadResult(record.step_id,
+                open_needs=tuple(OpenNeed(need, f"READ recovery required: {reason}",
+                    parent_claim_ids=record.task.input_claim_ids) for need in record.task.need_ids),
+                raw_output=previous.raw_output if previous is not None else "",
+                elapsed_ms=record.metrics.get("elapsed_ms") or 0,
+                input_tokens=len(record.input_ids), output_tokens=len(record.output_ids))
+            record = replace(record, result=result, metrics={**record.metrics,
+                "read_failure": reason, "read_recovery_pending": True})
+            self.store.save_execution_step(record, "COMPLETE")
+        if not record.metrics.get("retire_acknowledged"):
+            started = time.monotonic()
+            await self._retire_step(record)
+            ended = time.monotonic()
+            phase_started = record.metrics.get("phase_started_monotonic")
+            record = replace(record, metrics={**record.metrics,
+                "retire_acknowledged": True, "retire_ms": (ended-started)*1000,
+                "step_wall_ms": (ended-phase_started)*1000 if phase_started is not None else None,
+                "phase_window": {"start": phase_started, "end": ended,
+                    "clock": "client_monotonic", "scope": "step_wall"}
+                    if phase_started is not None else None})
+            self.store.save_execution_step(record, "COMPLETE")
+        return record
+
     async def _generate_step(self, attempt_id, snapshot, plan, task, units, claims, *, results=(),
-                             candidate, text_callback=False, quote=None, quote_ms=None, reserve=None,
-                             empty_on_limit=False):
+                             candidate, text_callback=False, quote=None, quote_ms=None, reserve=None):
         step_started = time.monotonic()
         identity = f"{attempt_id}:{task.step_id}"
         messages = candidate.messages
@@ -540,15 +593,26 @@ class ReadingExecutor:
             self.store.save_execution_step(record, "RESULT_READY", generation)
             parse_started = time.monotonic()
             if not text_callback and generation.finish_reason in {"length", "max_tokens"}:
-                if not empty_on_limit:
-                    raise EngineError("READ_STEP_OUTPUT_TRUNCATED", task.step_id)
-                result = replace(record.result, elapsed_ms=generation.elapsed_ms or 0)
                 record = replace(record, metrics={**record.metrics, "output_budget_exhausted": True})
+                self.store.save_execution_step(record, "RESULT_READY", generation)
+                if task.kind == "READ":
+                    raise RecoverableReadError("READ_STEP_OUTPUT_TRUNCATED", record, "truncated_output")
+                raise EngineError("READ_STEP_OUTPUT_TRUNCATED", task.step_id)
             else:
-                result = (record.result if text_callback else
-                    parse_read_result(task, generation.text, units, claims,
-                        elapsed_ms=generation.elapsed_ms or 0, input_tokens=len(candidate.input_ids),
-                        output_tokens=len(generation.output_ids)))
+                try:
+                    result = (record.result if text_callback else
+                        parse_read_result(task, generation.text, units, claims,
+                            elapsed_ms=generation.elapsed_ms or 0, input_tokens=len(candidate.input_ids),
+                            output_tokens=len(generation.output_ids)))
+                except (ValueError, KeyError, TypeError) as exc:
+                    if task.kind != "READ" or text_callback:
+                        raise
+                    record = replace(record, metrics={**record.metrics,
+                        "parse_ms": (time.monotonic()-parse_started)*1000,
+                        "parse_error": f"{type(exc).__name__}: {exc}"})
+                    self.store.save_execution_step(record, "RESULT_READY", generation)
+                    raise RecoverableReadError("READ_STEP_INVALID_OUTPUT", record,
+                        "invalid_structured_output") from exc
             record = replace(record, result=result,
                              metrics={**record.metrics, "parse_ms": (time.monotonic()-parse_started)*1000})
             if task.kind == "REDUCE":
@@ -641,7 +705,7 @@ class ReadingExecutor:
                 record_indices[record.step_id] = len(records)
                 records.append(record)
             for unit in selected_units:
-                if unit.unit_id in covered_unit_ids:
+                if unit.unit_id not in result.covered_units or unit.unit_id in covered_unit_ids:
                     continue
                 covered_unit_ids.add(unit.unit_id)
                 for document_id in dict.fromkeys(span.source_key.document_id for span in unit.source_spans):

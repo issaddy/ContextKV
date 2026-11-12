@@ -59,5 +59,5 @@
     "flashinfer-python": "0.6.17",
     "transformers": "5.12.1"
   },
-  "patch_sha256": "821905a3054e5ae7a69f3d9591d5b636cf344cd45c68440844931683b3bf8b25"
+  "patch_sha256": "61e0a1dc1f2192cb07a38ff8c14c829c0e9041d992f0f767d772c0bb2051cbfe"
 }

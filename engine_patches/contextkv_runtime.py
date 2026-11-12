@@ -637,6 +637,23 @@ class ContextKVRuntime:
         if owner is not None:
             if owner["identity"] != identity:
                 raise ContextKVError("PREFIX_OWNER_CONFLICT")
+        page_hashes = (owner["page_hashes"] if owner is not None else
+                       executed_prefix_hashes(ids, self.cache.page_size))
+        # Dispatch is scheduler-owned and synchronous. The budget check and the
+        # new owner registration therefore cannot be interleaved by a second
+        # controller, unlike a status/choose/retain sequence over HTTP. Count
+        # complete causal paths once across owners and tiers; this is the soft
+        # ownership budget, not a claim about physical GPU/Host allocation.
+        budget = data.get("protection_budget_tokens")
+        if budget is not None:
+            if isinstance(budget, bool) or not isinstance(budget, int) or budget < 0:
+                raise ContextKVError("INVALID_PREFIX_PROTECTION_BUDGET")
+            pages = set().union(*(set(old["page_hashes"].values()) for old in self.prefix_owners.values()))
+            added = set(page_hashes.values())-pages
+            # A reduced quota must still allow renewal/shared ownership of
+            # existing pages, as well as release. Only extra pages are refused.
+            if added and (len(pages)+len(added))*self.cache.page_size > budget:
+                raise ContextKVError("PREFIX_PROTECTION_BUDGET_EXCEEDED")
         # This is an intentional mutating match, unlike /cache/quote. It creates
         # a page-aligned native split and applies pending-transfer relocation.
         result = self.cache.tree_core.match_prefix(MatchPrefixParams(key=RadixKey(ids)))
@@ -655,7 +672,7 @@ class ContextKVRuntime:
         for component in self.cache.session_refs.components:
             component.register_session_leaf(sid, node)
         owner = self.prefix_owners[owner_id] = dict(identity=identity, input_ids=ids,
-            path_hash=path_hash, boundary_tokens=boundary, source_attempt_id=attempt,
+            path_hash=path_hash, page_hashes=page_hashes, boundary_tokens=boundary, source_attempt_id=attempt,
             sources=sources, native_session_id=sid, generation=generation,
             expires_at=time.monotonic()+ttl)
         receipt = self._prefix_receipt(owner_id, owner)
@@ -668,7 +685,8 @@ class ContextKVRuntime:
         ids = owner["input_ids"]
         key = RadixKey(ids)
         view = tree.peek_full_prefix(key)
-        page_hashes = executed_prefix_hashes(ids, self.cache.page_size)
+        page_hashes = (owner["page_hashes"] if "page_hashes" in owner else
+                       executed_prefix_hashes(ids, self.cache.page_size))
         gpu_pages, host_pages, referenced_pages = [], [], []
         current, position = tree.root_node, 0
         while len(key):
