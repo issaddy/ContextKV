@@ -278,6 +278,7 @@ class ComputeRuntime:
             block.node = result.last_device_node
             block.lock = self._lock(block.node)
             block.slots = self._indices(self._match(block.source_id, block.cache_ids))
+            state.row[block.start:block.end] = block.slots[:block.end-block.start]
             block.owned = False
             state.transferred_ranges.append((block.work_start, block.work_end))
             self.source_nodes[block.source_id] = block.node
@@ -583,7 +584,7 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
 
 
 def private_release_segments(req, start, end):
-    """Cold block pages transferred to Radix outlive the producing request."""
+    """Native insert owns the adopted pages and has already freed duplicates."""
     state = getattr(req, 'contextkv_compute_state', None)
     if state is None or state.mode == 'exact':
         return [(start, end)]
