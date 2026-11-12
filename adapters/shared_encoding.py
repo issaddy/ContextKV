@@ -229,9 +229,10 @@ def query_input(tokenizer, history, question, current_turn_id, catalogue=(), max
     offsets = encoded.pop("offset_mapping")
     refs = []
     for start, end in offsets:
-        owner = next(((left, kind) for left, right, kind in owners if left <= start < end <= right), None)
-        refs.append(None if owner is None else TextRef(*owner[1], start-owner[0], end-owner[0]))
-    catalog_positions = [(row, [i for i, (left, right) in enumerate(offsets) if start <= left < right <= end])
+        owner = next(((left, right, kind) for left, right, kind in owners if start < right and left < end), None)
+        refs.append(None if owner is None else TextRef(*owner[2],
+            max(start, owner[0])-owner[0], min(end, owner[1])-owner[0]))
+    catalog_positions = [(row, [i for i, (left, right) in enumerate(offsets) if left < end and start < right])
                          for start, end, row in catalog_spans]
     # The caller supplies the actual retained history; a long current input is
     # split by document/evidence processing rather than silently truncated here.

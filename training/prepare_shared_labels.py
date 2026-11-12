@@ -56,7 +56,11 @@ def task_annotations(raw, history, question, turn):
         text = texts[item["turn_id"], item["speaker"]]
         end = 0
         for _ in range(item.get("occurrence", 0)+1):
-            start = text.index(item["text"], end)
+            try:
+                start = text.index(item["text"], end)
+            except ValueError as error:
+                raise ValueError("task literal reference is absent: " + json.dumps(
+                    {"ref": item, "source_text": text}, ensure_ascii=False)) from error
             end = start+len(item["text"])
         return {"turn_id": item["turn_id"], "speaker": item["speaker"], "start": start, "end": end}
 
