@@ -71,6 +71,7 @@ async def collect(args):
     run = load_config(config["generation"]["run_config"])
     template = create_model_template(run.model)
     engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=run.sampling)
+    await engine.profile_prepare("cold")
     source = [json.loads(line) for line in Path(args.data).read_text().splitlines() if line]
     from adapters.shared_encoding import SharedQueryEncoder, SharedEvidenceEncoder
     query_encoder = SharedQueryEncoder(**config["shared"]["query"])
@@ -87,7 +88,7 @@ async def collect(args):
     limit = asyncio.Semaphore(args.concurrency)
     await sampler.start()
 
-    async def answer(row, units, identity, *, future=(), mode="exact"):
+    async def answer(row, units, identity, *, future=(), mode="exact", output_tokens=None):
         started = time.monotonic()
         request = compile_request(template, row["question"], working_history(queries[row["task_id"]], history(row)), source_blocks(units),
                                   future_sources=source_blocks(future))
@@ -95,7 +96,7 @@ async def collect(args):
         # immutable independent KV; cold branches have distinct exact prefixes.
         scope = f"training:{row['task_id']}:"
         result = await engine.compute(request, session_id=scope, request_id=identity,
-            max_new_tokens=config["execution"]["output_tokens"], mode=mode,
+            max_new_tokens=config["execution"]["output_tokens"] if output_tokens is None else output_tokens, mode=mode,
             cache_namespace=identity, cache_scope=scope,
             recompute_ratio=config["shared"]["runtime"]["recompute_ratio"])
         windows[identity] = started, time.monotonic()
@@ -131,7 +132,7 @@ async def collect(args):
             warm = index % 2 == 1
             native = {}
             if warm:
-                warmup = await answer(row, units, f"warm:{row['task_id']}", future=units, mode="infoflow")
+                warmup = await answer(row, units, f"warm:{row['task_id']}", future=units, mode="infoflow", output_tokens=1)
                 native = warmup["native"]
                 answers.remove(warmup)
             encoded, states = None, []
@@ -164,7 +165,7 @@ async def collect(args):
                         "prefill_token_ms", "transfer_token_ms")}}).cpu().tolist()
                 selected = tuple(unit for unit in observed if unit.unit_id in chosen)
                 item = await answer(row, selected, f"stop:{row['task_id']}:{start}",
-                    future=units if start+len(fresh) < len(units) else (), mode="infoflow" if warm else "exact")
+                    future=units if start+len(fresh) < len(units) else (), mode=config["shared"]["runtime"]["kv_mode"])
                 states.append({"features": features, "complete_scope": True, "answer": item})
             outputs.append((row, states))
 
