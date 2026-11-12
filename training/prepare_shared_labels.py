@@ -27,6 +27,7 @@ operation: lookup/enumerate/procedure/compare/count/sum/mean/min/max/group/infer
 operation names the requested result: grouped totals use sum, grouped counts use count, and group means listing rows by category.
 Split independent requested results into separate Needs. query is a standalone search query for that Need.
 Give each Need one concise contiguous anchor reference; keep subjects and conditions in their own references.
+Every Need anchor must belong to current_message_id; history supplies subject, condition and history_refs.
 join means matching records across separate tables; distinct means counting or aggregating unique entities.
 conditions: [{condition_id,anchor_ref,value_refs,relation_type,update,filter_operator}].
 relation_type: PREDICATE/TIME/VERSION/PLATFORM/LOCATION/SUBJECT; update: ADD/REPLACE/REMOVE/COMPARE.
@@ -92,10 +93,12 @@ def task_label_schema(locations, catalogue):
         return {"type": "array", "items": item}
     string, boolean = {"type": "string"}, {"type": "boolean"}
     ref = word_reference_schema(locations, "message_id")
+    current_id = next(reversed(locations))
+    current_ref = word_reference_schema({current_id: locations[current_id]}, "message_id")
     def ids(values):
         return array({"enum": list(dict.fromkeys(values))}) if values else {"type": "array", "maxItems": 0, "items": string}
     return obj({"rewritten_query": string, "needs": array(obj({
-        "need_id": string, "anchor_refs": {**array(ref), "minItems": 1, "maxItems": 1},
+        "need_id": string, "anchor_refs": {**array(current_ref), "minItems": 1, "maxItems": 1},
         "subject_refs": array(ref), "operation": {"enum": "lookup enumerate procedure compare count sum mean min max group infer".split()},
         "scope": {"enum": ["selected_sources", "all_supplied_documents"]}, "condition_ids": array(string),
         "predecessor_need_ids": array(string), "query": string, "join": boolean, "distinct": boolean})),
