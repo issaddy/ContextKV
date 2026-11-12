@@ -355,3 +355,15 @@ diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
          )
 
      def _run_in_graph_metadata_prep(self, attn_backend, forward_batch) -> None:
+diff --git a/python/sglang/srt/mem_cache/l2_transfer.py b/python/sglang/srt/mem_cache/l2_transfer.py
+--- a/python/sglang/srt/mem_cache/l2_transfer.py
++++ b/python/sglang/srt/mem_cache/l2_transfer.py
+@@ -95,7 +95,7 @@
+             prepared.append(
+                 transfer._replace(
+                     host_indices=host_indices,
+-                    device_indices=device_indices,
++                    device_indices=device_indices.to(dtype=host_indices.dtype),
+                 )
+             )
+         return prepared
