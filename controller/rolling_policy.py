@@ -680,6 +680,8 @@ class RollingPlanRuntime:
         # Budget projections share exact measurements with the execution
         # compiler, without retaining every future prompt's token array.
         template = route_compiler.template
+        executor.template = template
+        executor.request_compiler = route_compiler
         while True:
             selection_started = time.monotonic()
             previous = state

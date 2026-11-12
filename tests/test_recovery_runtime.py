@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
 import unittest
+from unittest.mock import patch
 
 from bench.mock_engine import MockEngine
 from bench.study_costs import failed_request_cost
@@ -146,6 +147,44 @@ class RollingRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         settled = failed_request_cost(self.store, self.store.get_attempt(self.attempt.attempt_id))
         self.assertEqual(settled["reader_input_tokens"], sum(len(record.input_ids) for record in result.outcome.steps))
         self.assertEqual(settled["reader_output_tokens"], sum(len(record.output_ids) for record in result.outcome.steps))
+
+    async def test_routing_and_execution_share_exact_prompt_measurements(self):
+        from controller.action_policy import completion_reserve
+        from controller.execution import require_completion
+        from controller.render_memo import TurnTemplateMemo
+
+        reader = ScriptedReader(self.store, self.engine, self.template, request_arrived=self.arrived)
+        route_templates, admitted = [], []
+        plain = ByteTemplate()
+
+        def observe_route(*args, **kwargs):
+            route_templates.append(kwargs["template"])
+            return completion_reserve(*args, **kwargs)
+
+        def check_admission(*args, **kwargs):
+            template = kwargs["template"]
+            self.assertIsInstance(template, TurnTemplateMemo)
+            self.assertTrue(any(template is seen for seen in route_templates))
+            self.assertIs(reader.request_compiler.template, template)
+            result = require_completion(*args, **kwargs)
+            self.assertEqual(result, require_completion(*args, **{**kwargs, "template": plain}))
+            calls = backend.call_count
+            self.assertEqual(result, require_completion(*args, **kwargs))
+            self.assertEqual(backend.call_count, calls)
+            candidate = args[5]
+            rendered = plain.render(candidate.messages)
+            self.assertEqual(candidate.input_ids, rendered.input_ids)
+            self.assertEqual(candidate.input_hash, rendered.input_hash)
+            admitted.append(result)
+            return result
+
+        with patch.object(self.template, "render_many", wraps=self.template.render_many) as backend, \
+                patch("controller.action_policy.completion_reserve", side_effect=observe_route), \
+                patch("controller.execution.require_completion", side_effect=check_admission):
+            result = await self.execute(reader)
+        self.assertEqual(len(admitted), 3)
+        self.assertTrue(completed_source_coverage(result.outcome.plan, result.outcome.results, (self.unit,)))
+        self.assertIsNot(reader.template, self.template)
 
     async def test_recovery_exhaustion_delivers_explicit_gap_without_fabricated_coverage(self):
         reader = ScriptedReader(self.store, self.engine, self.template, request_arrived=self.arrived, fail_all=True)
