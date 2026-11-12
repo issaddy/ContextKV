@@ -613,9 +613,6 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree"):
             "completion_reserve_scope": COMPLETION_RESERVE_SCOPE,
             "cost_target_scope": BOUNDED_CONTINUATION,
             "cost_target_version": COST_TARGET_VERSION,
-            "estimand": "expected incurred branch cost conditional on pre-action features, including terminal success and failure",
-            "terminal_completion_values": [0, 1],
-            "missing_cost_policy": "exclude incomplete or invalid measured vectors; never impute zero",
             "read_count_profile": read_count_profile(cost_branches,
                 scope="unique_measured_terminal_cost_training_branches", include_terminal_failures=True),
             "source": "actual_observed_terminal_branch_and_paired_direct_costs",
@@ -626,8 +623,6 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree"):
             "action_samples": len(samples)-len(direct_seen), "unique_direct_samples": len(direct_seen),
             "record_ids": cost_record_ids, "trained_semantic_kinds": sorted(cost_kinds), "cost_fields": COST_FIELDS,
             "branch_scope": "actual new action through terminal attempt (committed ANSWER or confirmed no-QA failure); excludes common paid state/preparation/cleanup",
-            "training_completion_counts": dict(Counter(str(branch["completion"]) for branch in cost_branches)),
-            "training_completion_reasons": dict(paid_cost_outcomes),
             "excluded_cost_records": dict(skipped_cost_outcomes),
             "incremental_scope": "same_observation_predicted_action_absolute_minus_direct_absolute",
             "training_mse": cost_mse}
@@ -653,7 +648,6 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree"):
          "direct_baseline_identity": any(row["observed_state_binding"] is not None for row in training),
          "completion_counts": dict(Counter(str(row["completion_counterfactual"]) for row in training)),
          "measured_paid_cost_outcomes": dict(paid_cost_outcomes),
-         "excluded_cost_records": dict(skipped_cost_outcomes),
          "fit_elapsed_ms": (time.perf_counter()-started)*1000}, cost_models, cost_provenance, quality_tree)
 
 
@@ -701,7 +695,7 @@ def evaluate_paired_decisions(model, development):
     from controller.action_policy import observed_quality_gain
 
     require_terminal_cost_target(model)
-    states, signs, family_conversations = defaultdict(dict), defaultdict(list), defaultdict(set)
+    states, signs = defaultdict(dict), defaultdict(list)
     untrained = Counter()
     eligible = tuple(distinct_action_pairs(development))
     for row in eligible:
@@ -715,7 +709,6 @@ def evaluate_paired_decisions(model, development):
             actual = row["effective_delta_q"]
             signs[family].append((abs(predicted-actual), (predicted > 0)-(predicted < 0) ==
                                   (actual > 0)-(actual < 0)))
-            family_conversations[family].add(row["conversation_id"])
         if row["observed_state_binding"] is None:
             continue
         # The actual DIRECT execution identifies the paired decision. A capture
@@ -766,8 +759,7 @@ def evaluate_paired_decisions(model, development):
         regrets.append(max(measured.values())-measured[selected])
         if direct in measured:
             direct_deltas.append(measured[selected]-measured[direct])
-    return {"by_family": {kind: {"records": len(rows), "conversations": len(family_conversations[kind]),
-                                  "mae": sum(row[0] for row in rows)/len(rows),
+    return {"by_family": {kind: {"records": len(rows), "mae": sum(row[0] for row in rows)/len(rows),
                                   "sign_agreement": sum(row[1] for row in rows)/len(rows)}
                           for kind, rows in sorted(signs.items())},
             "untrained_family_counts": dict(untrained),
@@ -778,31 +770,6 @@ def evaluate_paired_decisions(model, development):
             "paired_direct_reference_states": len(direct_deltas),
             "mean_paired_objective_delta_vs_direct": sum(direct_deltas)/len(direct_deltas) if direct_deltas else None,
             "scope": "measured branches at each held-out frozen state and realized starting cache fixture"}
-
-
-def with_heldout_decision_validation(model, development, report):
-    """Bind development evidence to the portable asset without a promotion rule."""
-    require_terminal_cost_target(model)
-    if any(row["split"] != "dev" for row in development):
-        raise ValueError("held-out decision validation requires the declared dev partition")
-    conversations = sorted({row["conversation_id"] for row in development})
-    training = sorted(model.provenance["training_conversations"])
-    if set(conversations) & set(training):
-        raise ValueError("held-out decision validation overlaps training conversations")
-    if report["asset_id"] != model.asset_id:
-        raise ValueError("held-out decision report belongs to a different fitted asset")
-    validation = {"schema_version": 1, "split": "dev",
-        "model_asset_id": model.asset_id,
-        "cost_target_version": model.cost_provenance.get("cost_target_version"),
-        "development_digest": digest(development),
-        "digest_scope": "canonical compact effective-gain rows, in supplied order",
-        "conversation_ids": conversations,
-        "training_conversations_digest": digest(training),
-        "train_conversations_disjoint": True,
-        "latency_calibration_uses_same_development_partition":
-            "completion_reserve_calibration" in model.cost_provenance,
-        "report": report}
-    return replace(model, provenance={**model.provenance, "heldout_decision_validation": validation})
 
 
 def main(argv=None):
@@ -856,7 +823,6 @@ def main(argv=None):
             "reader_checkpoint": model.reader_checkpoint,
             "reader_profile_id": model.reader_profile_id, "asset_id": model.asset_id, "utility_rule": RULE,
             "completion_reserve_calibration": model.cost_provenance.get("completion_reserve_calibration")}
-        model = with_heldout_decision_validation(model, development, report)
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output+".development.json").write_text(json.dumps(report, indent=2)+"\n")
     model.save(args.output)

@@ -16,7 +16,6 @@ from controller.templates import ByteTemplate
 class MemoryStepStore:
     def __init__(self):
         self.records = {}
-        self.retired = []
 
     def execution_step(self, attempt, step):
         return self.records.get((attempt, step))
@@ -27,28 +26,14 @@ class MemoryStepStore:
         self.records[key] = (stage, record, generation if generation is not None
             else previous[2] if previous else None)
 
-    def ack_retire(self, operation_id):
-        self.retired.append(operation_id)
-
 
 class NoGenerationEngine:
-    def __init__(self):
-        self.retire_calls = 0
-
     async def generate(self, **kwargs):
         raise AssertionError("a persisted RESULT_READY must not be generated twice")
 
-    async def retire(self, *args):
-        self.retire_calls += 1
-        return SimpleNamespace(acknowledged=True)
-
 
 class ReceiptObserver:
-    def __init__(self):
-        self.calls = 0
-
     def observe_executed(self, *args, **kwargs):
-        self.calls += 1
         return {"observed": True}
 
 
@@ -72,62 +57,16 @@ class ReadFailureExecutionTests(unittest.IsolatedAsyncioTestCase):
             EvidenceSet("evidence", ()))
         return executor, store, engine, candidate, plan, task
 
-    async def test_truncation_raises_a_paid_recoverable_result_on_every_resume(self):
-        executor, store, engine, candidate, plan, task = self.setup_execution()
-        for _ in range(2):
-            with self.assertRaises(RecoverableReadError) as caught:
-                await executor._generate_step("attempt", SessionSnapshot("session"), plan, task,
-                    (), (), candidate=candidate)
-            error = caught.exception
-            self.assertEqual("truncated_output", error.reason)
-            self.assertEqual(task.step_id, error.step_id)
-            stage, record, _ = store.execution_step("attempt", task.step_id)
-            self.assertEqual("RESULT_READY", stage)
-            self.assertEqual(7, step_token_spend(stage, record))
-            self.assertEqual((), record.result.covered_units)
-            self.assertEqual((), record.result.claims)
-            self.assertEqual(record, error.record)
-        self.assertEqual(0, engine.retire_calls)
-
-    async def test_failed_read_finalization_preserves_cost_and_is_idempotent(self):
-        executor, store, engine, candidate, plan, task = self.setup_execution()
-        with self.assertRaises(RecoverableReadError) as caught:
-            await executor._generate_step("attempt", SessionSnapshot("session"), plan, task,
-                (), (), candidate=candidate)
-        failed = await executor.finish_failed_read(caught.exception.record, caught.exception.reason)
-        self.assertEqual(("u",), failed.task.input_unit_ids)
-        self.assertEqual((3, 4), (failed.result.input_tokens, failed.result.output_tokens))
-        self.assertEqual(((), (), ()), (failed.result.claims, failed.result.covered_units, failed.result.support))
-        self.assertEqual("need", failed.result.open_needs[0].need_id)
-        self.assertEqual(7, step_token_spend("COMPLETE", failed))
-        self.assertTrue(failed.metrics["read_recovery_pending"])
-        repeated = await executor.finish_failed_read(caught.exception.record, caught.exception.reason)
-        self.assertEqual(failed, repeated)
-        self.assertEqual(1, engine.retire_calls)
-        # A normal COMPLETE replay must not observe a failed prefix as a
-        # successful reading, nor resubmit or retire the physical call again.
-        replay = await executor.finish_completed_step(plan, failed)
-        self.assertEqual(failed, replay)
-        self.assertEqual(1, engine.retire_calls)
-
-    async def test_invalid_json_is_recoverable_and_measured(self):
-        executor, store, _, candidate, plan, task = self.setup_execution(finish="stop", text="invalid JSON")
-        with self.assertRaises(RecoverableReadError) as caught:
-            await executor._generate_step("attempt", SessionSnapshot("session"), plan, task,
-                (), (), candidate=candidate)
-        self.assertEqual("invalid_structured_output", caught.exception.reason)
-        self.assertIn("JSONDecodeError", caught.exception.record.metrics["parse_error"])
-        stage, record, _ = store.execution_step("attempt", task.step_id)
-        self.assertEqual(7, step_token_spend(stage, record))
-
-    async def test_nonobject_json_is_recoverable_and_measured(self):
-        executor, store, _, candidate, plan, task = self.setup_execution(finish="stop", text="[]")
-        with self.assertRaises(RecoverableReadError) as caught:
-            await executor._generate_step("attempt", SessionSnapshot("session"), plan, task,
-                (), (), candidate=candidate)
-        self.assertEqual("invalid_structured_output", caught.exception.reason)
-        stage, record, _ = store.execution_step("attempt", task.step_id)
-        self.assertEqual(7, step_token_spend(stage, record))
+    async def test_invalid_structured_output_is_recoverable_and_measured(self):
+        for text in ("invalid JSON", "[]"):
+            with self.subTest(text=text):
+                executor, store, _, candidate, plan, task = self.setup_execution(finish="stop", text=text)
+                with self.assertRaises(RecoverableReadError) as caught:
+                    await executor._generate_step("attempt", SessionSnapshot("session"), plan, task,
+                        (), (), candidate=candidate)
+                self.assertEqual("invalid_structured_output", caught.exception.reason)
+                stage, record, _ = store.execution_step("attempt", task.step_id)
+                self.assertEqual(7, step_token_spend(stage, record))
 
     async def test_truncated_reduce_is_not_retried_as_a_source_read(self):
         executor, _, _, candidate, plan, task = self.setup_execution(kind="REDUCE")

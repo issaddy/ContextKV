@@ -11,8 +11,8 @@ METRIC_FIELDS = (
     "method", "dataset", "split", "protocol", "task_id", "conversation_id", "turn", "status",
     "metrics", "cost", "response", "measurement_kind", "history_origin", "request_window",
     "record_number", "generation_dir", "measurement_segment_id", "workload_arrival",
-    "request_id", "attempt_id", "error_type", "error", "blocked_task_ids", "blocked_tasks",
-    "blocked_by_task_id", "blocked_reason", "cleanup_error", "cleanup_recovery", "failure_window_scope",
+    "request_id", "attempt_id", "error_type", "error",
+    "blocked_by_task_id", "blocked_reason", "cleanup_error", "failure_window_scope",
 )
 
 
@@ -84,11 +84,10 @@ def pending_state_cleanup(state_directory):
         return False
     connection = sqlite3.connect(database.resolve().as_uri()+"?mode=ro", uri=True)
     try:
-        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if "retire_outbox" in tables and connection.execute(
+        if connection.execute(
                 "SELECT 1 FROM retire_outbox WHERE acked=0 LIMIT 1").fetchone():
             return True
-        return bool("prefix_owners" in tables and connection.execute(
+        return bool(connection.execute(
             "SELECT 1 FROM prefix_owners WHERE stage IN ('RETAINING','RETAINED','RELEASING') "
             "AND json_extract(payload, '$.policy')='joint_demand' LIMIT 1").fetchone())
     finally:

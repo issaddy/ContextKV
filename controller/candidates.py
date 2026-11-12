@@ -227,8 +227,6 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
     conclusions = graph.conclusion_table(answer_plan, references)
     if outcome is not None:
         conclusions["open_needs"] = outcome.open_needs
-    if plan.terminal_gaps:
-        conclusions["terminal_gaps"] = plan.terminal_gaps
     computed = "\n".join(f"{claim.need_id}: {claim.operation} = {claim.value} {claim.unit}; "
         f"original sources = {len({span.source_key for span in graph.source_spans(claim.claim_id)})}."
         for claim in claims if claim.claim_id in final_claim_ids and claim.kind == "derived"

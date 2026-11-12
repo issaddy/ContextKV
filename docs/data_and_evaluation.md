@@ -45,9 +45,9 @@ Loong 的资料准备见 [Loong 接入](guides/loong.md)。输入完整保留资
 
 每个 job 对应一个数据集、一个方法和一个并发。默认沿会话前后依赖推进，思考间隔为零；已有真实固定到达轨迹时用 `--arrival-plan` 复用。调度方式及端到端计时口径保存在运行清单，不为凑出缓存重访添加延时。
 
-P1 中每题自带作者历史，模型上一题失败不会使下一题缺少输入。执行器在记录失败费用并清理会话后继续下一题；调度器用独立的请求终态门控制顺序，不把失败记成成功提交，也不改变固定到达时间。P3 依赖实际已提交的回答，失败后缺少真实历史的后题仍记为 blocked，不导入参考答案补齐。若 Native 结果仍未终结、会话无法安全清理，则显式记录 `session_cleanup_unresolved`，保留状态库，等待原请求恢复。
+P1 每题自带作者历史，记录失败费用并确认会话清理后可继续下一题。P3 依赖实际已提交的回答，失败后缺少真实历史的后题记为 blocked。Native 退役或需求租约释放未确认时，保留状态库供原请求恢复。
 
-`results.jsonl` 保留实际交付答案的评分记录；`failed_conversations.json` 按 task ID 保存失败，即使同一 P1 会话有多次失败也不会覆盖。`task_metrics.jsonl` 合并成功、失败和 blocked 的逐题指标、费用、协议及测量段身份，用于配对评估。失败成本在清理前从持久化 Native step、最终 ANSWER 和辅助调用账本结算：同一个滚动 ANSWER 回执只计一次，provider group 与其子调用不重复求和。缺少最终回执时完整总量保留为空，另存 `accounting.known_lower_bound` 和未知 task ID；未提交的 blocked 题模型调用和已分摊资源费用为零，响应时间为空。队列缺失执行记录时，同样不能把已观察费用称为完整总量。
+`results.jsonl` 保留已交付答案，`failed_conversations.json` 按 task ID 保存失败；`task_metrics.jsonl` 合并完整队列的逐题指标。失败费用在清理前从实际调用账本去重结算，缺失总量留空并保留 `accounting.known_lower_bound`。未提交 blocked 题的调用费用为零，响应时间为空。
 
 `bench.study_scoring` 按数据集调用对应评分。原指标与完整题目分母、完成率一起报告；评分缺失不冒充零分，确认没有交付的任务在完整队列指标中计零。不同数据集不合成加权 Q，构造任务也不参与公开成绩。
 

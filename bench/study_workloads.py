@@ -360,7 +360,6 @@ class WorkloadDispatcher:
         self._completion_times = {}
         self._terminal = {task_id: asyncio.Event() for task_id in self._turns}
         self._terminal_times = {}
-        self.failed = {}
         self._condition = asyncio.Condition()
         self._next = 0
         self.arrivals = {}
@@ -380,7 +379,6 @@ class WorkloadDispatcher:
     def restore_failed(self, task_ids):
         """Restore terminal failures without claiming a committed answer."""
         for task_id in task_ids:
-            self.failed[task_id] = {"reason": "saved_terminal_failure", "restored": True}
             self._terminal_times[task_id] = 0.0
             self._terminal[task_id].set()
         self._skip_completed_ordinals()
@@ -420,8 +418,7 @@ class WorkloadDispatcher:
                 "dispatch_delay_seconds": arrival-planned,
                 "measurement_segment_restored_tasks": self.restored_task_ids,
                 "resume_pause_basis": "configured pause reapplied from segment origin" if self.restored_task_ids else None,
-                "committed_history_turns": len(actual_history),
-                "predecessor_gate": "terminal_request" if predecessor_terminal else "committed_answer"}
+                "committed_history_turns": len(actual_history)}
             self.arrivals[turn.task_id] = value
             if not independent:
                 self._next += 1
@@ -456,10 +453,9 @@ class WorkloadDispatcher:
         self._terminal_times[task_id] = self._completion_times[task_id]
         self._terminal[task_id].set()
 
-    async def fail_turn(self, task_id, reason):
+    async def fail_turn(self, task_id):
         """Release independent P1 successors; P3 still waits for a real commit."""
         async with self._condition:
-            self.failed[task_id] = {"reason": reason, "restored": False}
             self._terminal_times[task_id] = time.monotonic()-self.origin
             self._terminal[task_id].set()
             self._skip_completed_ordinals()

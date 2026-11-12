@@ -118,9 +118,7 @@ def _cost_summary(rows):
                  "reader_input_tokens", "reader_output_tokens", "actual_prefill_tokens",
                  "actual_device_hit_tokens", "actual_host_loaded_tokens"):
         result[name] = _cost_total(rows, name)
-        unknown = [row for row in rows if _number(row.get("cost", {}).get(name)) is None]
-        accounting[name] = {"unknown_task_ids": [str(row["task_id"]) for row in unknown],
-            "known_lower_bound": sum((_number(row.get("cost", {}).get(name))
+        accounting[name] = {"known_lower_bound": sum((_number(row.get("cost", {}).get(name))
                 if _number(row.get("cost", {}).get(name)) is not None else
                 _number(row.get("cost", {}).get("accounting", {}).get("known_lower_bound", {}).get(name)) or 0)
                 for row in rows)}
@@ -177,8 +175,7 @@ def declared_queue_summary(rows, spec, task_ids):
             benchmark_metrics[name] = {"mean": statistics.fmean(values), "scored": len(values)}
     cost = _cost_summary(selected)
     if missing_execution:
-        for name, accounting in cost["accounting"].items():
-            accounting["unknown_task_ids"].extend(sorted(missing_execution))
+        for name in cost["accounting"]:
             cost[name] = None
         cost["online_tokens"] = None
     cost["p95_delivered_ms"] = cost["p95_complete_ms"]
@@ -201,7 +198,7 @@ def declared_queue_summary(rows, spec, task_ids):
         "benchmark_metrics": benchmark_metrics,
         "cost": cost,
         "quality_rule": "declared task denominator; confirmed non-delivery is zero; missing outcomes and scores remain unknown",
-        "cost_rule": "all saved requests including failures; observed totals retain unmeasured task IDs"}
+        "cost_rule": "all saved requests including failures; incomplete totals retain known lower bounds"}
 
 
 def _budget_reasons(matrix, cost):

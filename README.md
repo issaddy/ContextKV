@@ -24,11 +24,6 @@ SGLang 原生报价参与选择下一步阅读、归约或回答，剩余证据�
 
 正式评测只保留最终指标与方法配置。评分材料和会话状态用完即清理；训练输入只由实际采集入口生成。
 
-当前机制修复加入数值来源绑定、有界 READ 恢复、按 Need 的阅读依赖、有限 Native 报价、
-动作资产开发集准入与保留净收益门槛。默认 joint observed 策略为 `validated`；不满足准入
-时记录规则回退，无保留定价时使用 Native。实现验证与正式 GPU 成绩分别报告，见
-[机制审查、修复与重新验收](docs/study/mechanism_repair.md)。运行 CPU 回归使用 `make test`。
-
 实际模型运行由本次配置明确声明模型、端点、reader 身份、缓存设置、cohort 和输出目录。
 
 | 文档 | 内容 |
@@ -36,7 +31,6 @@ SGLang 原生报价参与选择下一步阅读、归约或回答，剩余证据�
 | [课题索引](docs/study/README.md) | 当前机制与入口 |
 | [任务要求](docs/study/task_spec.md) | 研究边界 |
 | [运行手册](docs/study/final_runbook.md) | 当前复现入口 |
-| [机制修复](docs/study/mechanism_repair.md) | 缺陷、修改、回归边界与 GPU 验收 |
 | [架构](docs/architecture.md) | 服务与状态链 |
 | [数据与评价](docs/data_and_evaluation.md) | 官方任务、完整分母和成本口径 |
 | [部署](docs/deployment.md) | 原生引擎与 HTTP 接入 |

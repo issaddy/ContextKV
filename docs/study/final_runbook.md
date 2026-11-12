@@ -25,7 +25,7 @@ python3 scripts/prepare_contextpilot.py --checkout vendor/contextpilot
 
 `execution.cache_compilation` 使用 `{mode: contextpilot, checkout: vendor/contextpilot}`；`prefix_retention` 使用 `mode: demand`。默认分配器为 `next_use`，期限候选 15/60/180 秒，保护容量 8192 token；源配置可以声明实际取值。`next_use` 与 `paired_value` 均通过 `pricing_asset` 加载配对估值，没有有效净收益定价时使用 Native。
 
-joint observed 动作默认使用 `action_policy: validated`。同 reader/profile 的旧协议或未通过开发集准入的资产只读取元数据，实际回退规则并记录原因；显式 `learned` 用于严格绑定的研究消融。新协议需要重新采集 frozen branches，见[机制修复与验收](mechanism_repair.md)。更新 Native overlay 后再运行并发软配额实验。
+joint observed 动作默认使用 `action_policy: rule`，不加载收益资产。配置 `action_policy: learned` 显式启用学习策略，资产须匹配 reader、输入协议和成本目标；不兼容时直接报错。新输入协议需要重新采集 frozen branches。更新 Native overlay 后再运行并发软配额实验。
 
 ## 数据与选题
 
@@ -60,7 +60,7 @@ python3 -m bench.capacity_workflow \
 
 按数据集分批执行上述命令。默认每种并发运行一次。多轮实际历史使用 `configs/study_system_matrix.yaml`，构造任务使用 `configs/study_mechanisms.yaml --split dev`。MTRAG-UN 按需使用独立配置。
 
-默认调度沿会话前后依赖推进、思考间隔为零；已有真实固定到达记录时传 `--arrival-plan`。只运行普通基线、LlamaIndex 或规则决策时提供 `--reader-profile-id`，完整方案使用 `--gain-asset` 绑定 reader、输入协议和输出额度。
+默认调度沿会话前后依赖推进、思考间隔为零；已有真实固定到达记录时传 `--arrival-plan`。规则决策及普通基线、LlamaIndex 使用 `--reader-profile-id`。未在配置中指定 `action_policy` 时，`capacity_workflow --gain-asset` 显式选择学习策略，绑定 reader、输入协议和输出额度；未传资产则使用规则策略。配置中的显式策略优先。
 
 ## 机制对照
 
@@ -96,7 +96,7 @@ python3 -m training.plan_gain_completion fit \
   --output GAIN.json
 ```
 
-样本保留预测特征、真实质量与费用标签、预算及训练划分。完整上下文和执行记录只用于采集与标注，完成后清理。动作、分包或输入语义改变时补采对应分支。质量按决策状态等权拟合，成本按具有完整实测费用的唯一终止分支拟合，包含成功与失败、未知费用不补零；线上执行一个动作后重规划。`fit --dev` 把开发报告与资产和隔离会话绑定，仍需独立 test 复验。
+样本保留预测特征、真实质量与费用标签、预算及训练划分。完整上下文和执行记录只用于采集与标注，完成后清理。动作、分包或输入语义改变时补采对应分支。质量按决策状态等权拟合，成本按具有完整实测费用的唯一终止分支拟合，包含成功与失败、未知费用不补零；线上执行一个动作后重规划。`fit --dev` 单独输出开发报告，仍需独立 test 复验。
 
 | 需要解决的问题 | 入口 |
 |---|---|
@@ -116,7 +116,7 @@ python3 -m training.plan_gain_completion fit \
 
 每个 job 对应数据集、方法和并发。`capacity-plan.json` 保存本次配置，`workflow.json` 保存最终指标。
 
-生成与评分共用一个 `results.jsonl`；`task_metrics.jsonl` 按 task_id 合并成功、失败与未提交阻塞题，保留每题分数、耗时、费用已知下界和未知原因。完整历史、候选池、计划、token 序列和评分原文只在执行或实际训练采集中使用。Native 退役或需求租约释放尚未确认时保留恢复状态，确认清理后再删除 job 临时目录。
+生成与评分共用一个 `results.jsonl`；`task_metrics.jsonl` 按 task_id 合并成功、失败与未提交阻塞题，保留每题分数、耗时和费用；不完整费用保留已知下界。完整历史、候选池、计划、token 序列和评分原文只在执行或实际训练采集中使用。Native 退役或需求租约释放尚未确认时保留恢复状态，确认清理后再删除 job 临时目录。
 
 ```bash
 python3 -m profiling.final_study_index --artifact NAME=WORKFLOW.json --output RESULTS

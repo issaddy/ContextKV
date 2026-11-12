@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -434,105 +434,29 @@ class ObservedNativeObserver:
                 "resident_model_manifest_digest": self.resident_digest}), {}
 
 
-@dataclass(frozen=True)
-class GainAssetMetadata:
-    """Audit/configuration metadata only; deliberately has no prediction API."""
-    reader_checkpoint: str
-    reader_profile_id: str
-    asset_id: str
-    provenance: dict
-    cost_provenance: dict
-    source_sha256: str
-
-
-def _gain_training_provenance(provenance):
-    records = provenance.get("training_records")
-    if (provenance.get("label") not in {"actual_final_quality_minus_actual_direct_answer_quality",
-            "actual_completion_weighted_final_utility_minus_direct_utility"}
-            or provenance.get("training_split") != "train" or isinstance(records, bool)
-            or not isinstance(records, int) or records < 1):
-        raise ValueError("enabled rolling gains require the actual train-split counterfactual asset")
-    if (provenance["label"] == "actual_completion_weighted_final_utility_minus_direct_utility"
-            and (provenance.get("no_answer_utility") != 0
-                 or provenance.get("raw_missing_quality_preserved") is not True)):
-        raise ValueError("effective utility assets retain missing raw judge Q and their declared no-QA rule")
-
-
 def load_action_gain_asset(settings, *, reader_fingerprint=None):
-    """Return executable model, admission and non-executable audit metadata.
-
-    Validated policy first audits metadata. Unsupported input semantics or
-    unvalidated research assets then select the rule path without constructing
-    a model. Explicit learned ablations still use the strict model loader.
-    Reader/profile and any available fingerprint mismatch always remain errors.
-    """
+    """Load an explicitly selected learned policy; rule mode needs no asset."""
+    default = "rule" if settings.get("joint_context") and settings.get("mode") == "observed_actions" else "learned"
+    policy = settings.get("action_policy", default)
+    if policy not in {"rule", "learned"}:
+        raise ValueError("action policy must be learned or rule")
+    if policy == "rule":
+        return None
     from training.train_plan_gain import PlanGainModel
-    from .plan_gain_protocol import validate_input_protocol
-    from .serialization import to_jsonable
+    from training.plan_gain_completion import require_terminal_cost_target
 
-    checkpoint, profile = settings["reader_checkpoint"], settings["reader_profile_id"]
-    if reader_fingerprint is not None and checkpoint != reader_fingerprint.model_revision:
-        raise ValueError("rolling gains must bind the actual reader checkpoint")
-    default_policy = ("validated" if settings.get("joint_context") and
-                      settings.get("mode") == "observed_actions" else "learned")
-    action_policy = settings.get("action_policy", default_policy)
-    if action_policy not in {"learned", "validated", "rule"}:
-        raise ValueError("action policy must be learned, validated or rule")
-    if action_policy == "validated" and not (settings.get("joint_context")
-                                               and settings.get("mode") == "observed_actions"):
-        raise ValueError("validated action policy requires joint observed actions")
-    admission = {"policy": action_policy, "admitted": True, "reasons": (),
-                 "validation_checked": False, "loaded_for_prediction": False}
-    if action_policy == "rule":
-        return None, admission, None
-    raw = Path(settings["gain_asset"]).read_bytes()
-    data = json.loads(raw)
-    if (data.get("reader_checkpoint"), data.get("reader_profile_id")) != (checkpoint, profile):
-        raise ValueError("gain asset requires its measured reader checkpoint and runtime profile")
-    provenance, costs = data.get("provenance", {}), data.get("cost_provenance", {})
-    if not isinstance(provenance, dict) or not isinstance(costs, dict):
-        raise ValueError("gain asset provenance must be an object")
-    metadata = GainAssetMetadata(checkpoint, profile, data["asset_id"], provenance, costs,
-                                 hashlib.sha256(raw).hexdigest())
-    protocol = provenance.get("input_protocol")
-    declared_fingerprint = protocol.get("reader_fingerprint") if isinstance(protocol, dict) else None
-    if declared_fingerprint is not None:
-        if (not isinstance(declared_fingerprint, dict)
-                or declared_fingerprint.get("model_revision") != checkpoint):
-            raise ValueError("gain input protocol belongs to a different reader checkpoint")
-        if reader_fingerprint is not None and declared_fingerprint != to_jsonable(reader_fingerprint):
-            raise ValueError("gain asset does not match the actual reader fingerprint")
-    admission.update(asset_id=metadata.asset_id, asset_sha256=metadata.source_sha256)
-    if action_policy == "validated":
-        from .action_admission import validated_action_asset
-        admission = {**admission, **validated_action_asset(metadata, settings.get("validation_thresholds")),
-                     "validation_checked": True, "asset_inspection": "metadata_only"}
-        incompatible, details = [], []
-        for reason, check in (
-            ("input_protocol_requires_recollection", lambda: validate_input_protocol(
-                protocol, reader_fingerprint=reader_fingerprint)),
-            ("invalid_training_provenance", lambda: _gain_training_provenance(provenance)),
-        ):
-            try:
-                check()
-            except ValueError as error:
-                incompatible.append(reason)
-                details.append(str(error))
-        if incompatible or not admission["admitted"]:
-            return None, {**admission, "admitted": False, "policy": "rule",
-                "reasons": tuple(incompatible)+tuple(admission["reasons"]),
-                "compatibility_details": tuple(details)}, metadata
-    try:
-        model = PlanGainModel.load(settings["gain_asset"], reader_checkpoint=checkpoint,
-            reader_profile_id=profile, reader_fingerprint=reader_fingerprint)
-    except ValueError as error:
-        if action_policy != "validated":
-            raise
-        return None, {**admission, "admitted": False, "policy": "rule",
-            "reasons": (*admission["reasons"], "incompatible_gain_asset_schema"),
-            "compatibility_details": (str(error),)}, metadata
-    _gain_training_provenance(model.provenance)
-    return model, {**admission, "loaded_for_prediction": True, "asset_inspection": "strict_model_load"}, metadata
+    model = PlanGainModel.load(settings["gain_asset"], reader_checkpoint=settings["reader_checkpoint"],
+        reader_profile_id=settings["reader_profile_id"], reader_fingerprint=reader_fingerprint)
+    provenance = model.provenance
+    if (provenance["label"] not in {"actual_final_quality_minus_actual_direct_answer_quality",
+            "actual_completion_weighted_final_utility_minus_direct_utility"}
+            or provenance["training_split"] != "train" or provenance["training_records"] < 1):
+        raise ValueError("enabled rolling gains require the actual train-split counterfactual asset")
+    if provenance["label"] == "actual_completion_weighted_final_utility_minus_direct_utility":
+        if provenance["no_answer_utility"] != 0 or not provenance["raw_missing_quality_preserved"]:
+            raise ValueError("effective utility assets retain missing raw judge Q and their declared no-QA rule")
+        require_terminal_cost_target(model)
+    return model
 
 
 def load_rolling_runtime(settings, *, template, store, sampling, answer_system_prompt, engine_base_url):
@@ -541,7 +465,7 @@ def load_rolling_runtime(settings, *, template, store, sampling, answer_system_p
     from .rolling_policy import RollingPlanRuntime
     from .completion_timing import CompletionTiming
     checkpoint, profile = settings["reader_checkpoint"], settings["reader_profile_id"]
-    model, admission, _ = load_action_gain_asset(settings, reader_fingerprint=template.fingerprint)
+    model = load_action_gain_asset(settings, reader_fingerprint=template.fingerprint)
     mode = settings.get("mode", "whole_plan")
     if checkpoint != template.fingerprint.model_revision:
         raise ValueError("rolling gains must bind the actual reader checkpoint")
@@ -561,15 +485,13 @@ def load_rolling_runtime(settings, *, template, store, sampling, answer_system_p
     reads = 2 if joint else settings.get("read_choices", 1)
     limits = PolicyLimits(**{"max_plan_candidates": 3+reads, **settings.get("limits", {})})
     timing_path = settings.get("completion_timing_asset")
-    runtime = RollingPlanRuntime(model, observer, reader_checkpoint=checkpoint, reader_profile_id=profile,
+    return RollingPlanRuntime(model, observer, reader_checkpoint=checkpoint, reader_profile_id=profile,
         output_budgets=settings["output_budgets"], limits=limits,
         output_tokens_per_fact=settings.get("output_tokens_per_fact", 64),
         mode=mode, observation_path=settings.get("observation_path"),
         gap_retriever_identity=settings.get("gap_retriever_identity"), gap_limits=settings.get("gap_limits"),
         joint_context=joint, read_choices=reads, quote_lookahead=settings.get("quote_lookahead", 2),
         completion_timing=CompletionTiming.load(timing_path) if timing_path else None)
-    runtime.action_policy_admission = admission
-    return runtime
 
 
 def load_fixed_reading_observer(settings, *, template):

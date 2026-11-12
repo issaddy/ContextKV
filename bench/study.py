@@ -438,7 +438,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 failure = await record_failure(sid, row, error, client_started,
                     blocked_rows=() if independent_reference_turns else later)
                 if dispatcher is not None:
-                    await dispatcher.fail_turn(row["task_id"], str(error))
+                    await dispatcher.fail_turn(row["task_id"])
                 if independent_reference_turns and "cleanup_error" not in failure:
                     service.store.reopen_session(session_id)
                     continue
@@ -464,15 +464,12 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             # A new measured segment cannot bypass the Native cleanup gate.
             # Its bounded drain is accounted in this segment's physical window,
             # without rewriting the original failed-request latency.
-            started, error = time.monotonic(), None
+            error = None
             try:
                 await close_failed_session(service, unresolved[0]["session_id"])
             except Exception as cleanup_error:
                 error = {"type": type(cleanup_error).__name__, "message": str(cleanup_error)}
-            observation = {"measurement_segment_id": segment_id, "window": [started, time.monotonic()],
-                           "status": "pending" if error else "acknowledged"}
             for failure in unresolved:
-                failure.setdefault("cleanup_recovery", []).append(observation)
                 if error:
                     failure["cleanup_error"] = error
                 else:
@@ -591,7 +588,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 clock="client_monotonic", observation_window=dispatch_window,
                 actual_arrivals=dispatcher.arrivals, cancelled=dispatcher.cancelled,
                 completion_seconds=dispatcher._completion_times,
-                terminal_seconds=dispatcher._terminal_times, failed=dispatcher.failed,
+                terminal_seconds=dispatcher._terminal_times,
                 independent_clients=workload.dispatch_semantics == "independent_clients_after_own_prior_commit"))
         ordered = [results[key] for key in expected if key in results]
         write_jsonl(directory/"results.jsonl", ordered)

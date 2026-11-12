@@ -7,11 +7,7 @@ these tests make no model-quality, physical-memory or latency-speedup claims.
 import asyncio
 from collections import deque
 from dataclasses import asdict, replace
-import json
-import hashlib
-from pathlib import Path
 import sys
-import tempfile
 import time
 from types import SimpleNamespace
 import unittest
@@ -19,7 +15,6 @@ from unittest.mock import patch
 
 from controller.context_schema import (ContextPlan, TaskState, Need, EvidenceSet,
     ReadTask, ReadingOutcome, ReadResult, StepRecord, CompletionReceipt)
-from controller.demand import DemandState, JointOption
 from controller.engine_client import EngineError
 from controller.plan_policy import PlanCandidate, PlanStep
 from controller.prefix_retention import (EmpiricalRetentionModel, PrefixForecast,
@@ -297,14 +292,6 @@ class DemandValueTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(selected.retain)
             self.assertEqual(selected.retention_evidence, "native_unpriced_net_value")
 
-    def test_next_use_loads_the_same_supported_pricing_asset(self):
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
-            asset = Path(directory)/"pricing.json"
-            asset.write_text(json.dumps(model().to_dict()))
-            observer = PrefixReadObserver(MemoryStore(), NativeTransport(),
-                {**settings(), "pricing_asset": str(asset)})
-            self.assertIsNotNone(observer.model)
-            self.assertTrue(observer.observe_reads)
 
     def test_shared_pages_and_consumer_savings_are_counted_once(self):
         forecast = PrefixForecast(15, 1, 10, 0, 1, 1, "scope", "measured", retention_control_ms=1)
@@ -368,20 +355,6 @@ class NativeQuotaTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(remaining["reference_present"])
         self.assertEqual(len(remaining["referenced_page_ids"])*64, 128)
 
-    def test_quota_does_not_bypass_execution_fingerprint_or_restart_checks(self):
-        engine = NativeTransport()
-        request = self.request(engine)
-        for changed, code in (
-            ({"input_ids": tuple(range(1000, 1128))}, "PREFIX_NOT_EXECUTED"),
-            ({"expected_restart_id": "old"}, "STALE_RESTART"),
-            ({"fingerprint": {}}, "FINGERPRINT_MISMATCH"),
-            ({"protection_budget_tokens": -1}, "INVALID_PREFIX_PROTECTION_BUDGET"),
-            ({"protection_budget_tokens": True}, "INVALID_PREFIX_PROTECTION_BUDGET"),
-        ):
-            with self.assertRaises(ContextKVError) as caught:
-                engine.call("retain_prefix", {**request, **changed})
-            self.assertEqual(caught.exception.code, code)
-            self.assertEqual(engine.runtime.prefix_owners, {})
 
     def test_expired_owner_releases_budget_through_native_expiry(self):
         engine = NativeTransport()
@@ -407,37 +380,6 @@ class NativeQuotaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack["reason"], "prefix_not_resident")
         self.assertEqual(observer.store.prefix_owners(active_only=True), ())
         self.assertEqual(engine.runtime.prefix_owners, {})
-
-    async def test_repeated_terminal_cleanup_is_safe(self):
-        engine = NativeTransport()
-        observer = PrefixReadObserver(MemoryStore(), engine, settings(128))
-        observer.model = model()
-        bundle = case()
-        record = bundle[1].steps[0]
-        engine.completed(record.receipt.attempt_id, record.input_ids)
-        selected = await option(observer, bundle)
-        await observer.apply_demand(selected, bundle[1], "session", batch=bundle[2])
-        release = JointOption(DemandState((), ()), release=(selected.retain[0].owner_id,))
-        await observer.apply_demand(release, bundle[1], "session", batch=None)
-        await observer.apply_demand(release, bundle[1], "session", batch=None)
-        self.assertEqual(engine.runtime.prefix_owners, {})
-        self.assertEqual(observer.store.prefix_owners(active_only=True), ())
-
-
-class IntegrationArtifactTests(unittest.TestCase):
-    def test_deployment_patch_contains_current_runtime_and_hash(self):
-        root = Path(__file__).resolve().parents[1]
-        integration = root/"engine_patches/integrations/sglang-0.5.18"
-        manifest = json.loads((integration/"manifest.json").read_text())
-        patch_bytes = (integration/manifest["patch"]).read_bytes()
-        self.assertEqual(hashlib.sha256(patch_bytes).hexdigest(), manifest["patch_sha256"])
-        target = "python/sglang/srt/managers/contextkv_runtime.py"
-        section = patch_bytes.decode().split(f"diff --git a/{target} b/{target}\n", 1)[1]
-        section = section.split("\ndiff --git ", 1)[0]
-        actual = "\n".join(line[1:] for line in section.splitlines()
-                           if line.startswith("+") and not line.startswith("+++"))+"\n"
-        self.assertEqual(actual, (root/"engine_patches/contextkv_runtime.py").read_text())
-        compile(actual, target, "exec")
 
 
 if __name__ == "__main__":

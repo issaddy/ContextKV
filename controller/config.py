@@ -158,13 +158,10 @@ class RunConfig:
             horizon = self.plan_gain.get("quote_lookahead", 2)
             if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 0:
                 raise ValueError("plan_gain.quote_lookahead must be a nonnegative integer")
-            action_policy = self.plan_gain.get("action_policy", "validated" if
+            action_policy = self.plan_gain.get("action_policy", "rule" if
                 self.plan_gain.get("joint_context") and self.plan_gain["mode"] == "observed_actions" else "learned")
-            if action_policy not in {"learned", "rule", "validated"}:
-                raise ValueError("plan_gain.action_policy must be learned, rule or validated")
-            if action_policy == "validated" and not (self.plan_gain.get("joint_context") and
-                    self.plan_gain["mode"] == "observed_actions"):
-                raise ValueError("validated action policy requires joint observed actions")
+            if action_policy not in {"learned", "rule"}:
+                raise ValueError("plan_gain.action_policy must be learned or rule")
             rule = action_policy == "rule"
             if rule and not self.plan_gain.get("joint_context"):
                 raise ValueError("the rule comparator requires joint_context")

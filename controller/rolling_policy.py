@@ -266,8 +266,6 @@ class RollingPlanRuntime:
                     output_budgets, output_tokens_per_fact):
                 raise ValueError("rolling gain asset uses a different finite candidate domain")
         self.mode, self.joint_context = mode, joint_context
-        self.action_policy_admission = {"policy": "learned" if gain_model is not None else "rule",
-                                       "admitted": True, "reasons": ()}
         self.observation_path = None if observation_path is None else Path(observation_path)
         self.gap_retriever_identity, self.gap_limits = gap_retriever_identity, gap_limits
         if not self.output_budgets or any(value < 1 for value in self.output_budgets):
@@ -329,7 +327,7 @@ class RollingPlanRuntime:
         except RecoverableReadError as exc:
             record = await executor.finish_failed_read(exc.record, exc.reason)
             state = _replace_records(replace(state, plan=plan), (record,))
-        return self._refresh_recovery(state, executor, attempt_id, executor.template, snapshot)
+        return state
 
     def _gap_request(self, state, expanded, provider):
         from .action_proposals import GapRetrievalRequest, gap_key, gap_query, gap_scope_available
@@ -354,7 +352,6 @@ class RollingPlanRuntime:
         if self.read_choices == 2:
             from .action_proposals import finite_action_domain
             packet["action_domain"] = finite_action_domain(self.output_budgets, self.output_tokens_per_fact)
-        packet["action_policy_admission"] = self.action_policy_admission
         packet.update(metadata or {})
         self.observation_path.parent.mkdir(parents=True, exist_ok=True)
         with self.observation_path.open("a") as stream:
@@ -667,8 +664,6 @@ class RollingPlanRuntime:
                             cache_scope=await engine.info())[0]
                     state = await self._execute_with_recovery(executor, attempt_id, snapshot, state.plan, record.task, state,
                         initial_auxiliary_usage=auxiliary_usage, candidate=candidate)
-                    # Recovery may have expanded the durable catalog. Reusing
-                    # the pre-resume catalog here would discard its children.
                     context_plans = (state.plan,)
         from .execution import reading_tokens_spent
         prefix_observer = executor.observe_prefix
@@ -908,8 +903,7 @@ class RollingPlanRuntime:
                         auxiliary_ms=0.0), quote, snapshot, batch=native.quotes,
                         concurrency=native.quotes.active_requests+1),)
                 selected = Plan(candidate, predicted=estimates, quote_seq=native.quotes.observed_seq,
-                    reason=("rolling_validated_rule_fallback" if not self.action_policy_admission["admitted"] else
-                        "rolling_joint_rule" if self.policy.gain_model is None else
+                    reason=("rolling_joint_rule" if self.policy.gain_model is None else
                         "rolling_observed_action_gain_cost" if observed else "rolling_plan_gain"))
                 return RollingResult(outcome, selected, native.quotes, selection_started)
             if self.mode == "observed_actions" and decision.next_step.task.kind == "GAP":

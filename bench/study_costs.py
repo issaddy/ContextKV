@@ -35,7 +35,7 @@ def _receipt_key(receipt):
             receipt.session_generation, receipt.rid, receipt.attempt_id)
 
 
-def _native_call(identity, stage, input_ids, output_ids, receipt, generation, metrics):
+def _native_call(stage, input_ids, output_ids, receipt, generation, metrics):
     # A terminal receipt confirms the request's input; a planned/prepared
     # candidate without a submission is not model work.
     observed = generation is not None or receipt is not None
@@ -54,15 +54,14 @@ def _native_call(identity, stage, input_ids, output_ids, receipt, generation, me
     known = {field: number or 0 for field, number in value.items()}
     if output is None:
         known["reader_output_tokens"] = len(generation.output_ids if generation is not None else output_ids)
-    return {"identity": identity, **value, "known": known}
+    return {**value, "known": known}
 
 
 def _auxiliary_groups(calls):
     """Use each aggregate once; children only supply a known lower bound."""
-    by_id = {call["call_id"]: call for call in calls}
-    groups = {key: call for key, call in by_id.items() if call.get("kind") == "provider_usage"}
+    groups = {call["call_id"]: call for call in calls if call.get("kind") == "provider_usage"}
     children = {}
-    for call in by_id.values():
+    for call in calls:
         if call.get("kind") != "provider_usage":
             children.setdefault(call.get("group_id"), []).append(call)
     values = []
@@ -76,15 +75,14 @@ def _auxiliary_groups(calls):
             if field != "compute_ms" and value[field] is not None and value[field] < lower:
                 value[field] = None  # An inconsistent aggregate is not an exact total.
             known[field] = value[field] if value[field] is not None else lower
-        values.append({"identity": identity, **value, "known": known})
+        values.append({**value, "known": known})
     # Older or interrupted journals can contain children without a group row.
     # They are distinct actual calls, not an additional aggregate.
     for members in children.values():
         for call in members:
             value = {field: _number(call.get("elapsed_ms" if field == "compute_ms" else field))
                      for field in ("input_tokens", "output_tokens", "compute_ms")}
-            values.append({"identity": call["call_id"], **value,
-                           "known": {key: number or 0 for key, number in value.items()}})
+            values.append({**value, "known": {key: number or 0 for key, number in value.items()}})
     return values
 
 
@@ -95,13 +93,12 @@ def failed_request_cost(store, attempt):
     for stage, record in stages:
         if record.engine_epoch is None or stage in {"PLANNED", "PREPARED"}:
             continue  # CPU reductions and unsubmitted native preparations.
-        saved = store.execution_step(attempt.attempt_id, record.step_id)
-        generation = saved[2] if saved is not None else None
+        generation = store.execution_step(attempt.attempt_id, record.step_id)[2]
         key = _receipt_key(record.receipt) if record.receipt is not None else ("step", record.step_id)
         if key in seen:
             continue
         seen.add(key)
-        native.append(_native_call(record.step_id, stage, record.input_ids, record.output_ids,
+        native.append(_native_call(stage, record.input_ids, record.output_ids,
                                    record.receipt, generation, record.metrics))
     if attempt is not None:
         generation = attempt.result
@@ -112,24 +109,23 @@ def failed_request_cost(store, attempt):
         key = _receipt_key(receipt) if receipt is not None else ("answer", attempt.attempt_id)
         if key not in seen and (receipt is not None or generation is not None
                                 or final_submitted and not final_recorded):
-            native.append(_native_call("answer", attempt.stage,
+            native.append(_native_call(attempt.stage,
                 attempt.plan.candidate.input_ids if attempt.plan is not None else None,
                 generation.output_ids if generation is not None else (), receipt, generation, {}))
         calls = store.auxiliary_calls(attempt.attempt_id)
         auxiliary = _auxiliary_groups(calls)
         if not calls:
-            # Legacy journals: the final attempt owns the merged auxiliary
-            # usage. Before final planning, durable reading progress owns gaps.
+            # Direct callers can provide aggregate usage without a capture
+            # journal. Before final planning, reading progress owns gap usage.
             usages = [attempt.auxiliary_usage] if attempt.auxiliary_usage is not None else []
             progress = store.reading_progress(attempt.attempt_id)
             if progress is not None and (attempt.stage == "STARTED" or attempt.failed_from_stage == "STARTED"):
                 if progress.auxiliary_usage is not None:
                     usages.append(progress.auxiliary_usage)
-            auxiliary = [{"identity": f"legacy:{index}",
-                **{field: _number(usage.get(field)) for field in ("input_tokens", "output_tokens", "compute_ms")},
+            auxiliary = [{**{field: _number(usage.get(field)) for field in ("input_tokens", "output_tokens", "compute_ms")},
                 "known": {field: _number(usage.get(field)) or 0
                           for field in ("input_tokens", "output_tokens", "compute_ms")}}
-                for index, usage in enumerate(usages)]
+                for usage in usages]
     else:
         auxiliary = []
     totals = {field: _sum([call[field] for call in native]) for field in NATIVE_FIELDS}
@@ -147,13 +143,10 @@ def failed_request_cost(store, attempt):
     lower.pop("compute_ms")
     return {**totals, "online_compute_basis": "durable native generation and auxiliary group receipts",
         "accounting": {"basis": "durable_attempt_step_and_auxiliary_receipts",
-            "native_call_ids": [call["identity"] for call in native],
-            "auxiliary_group_ids": [call["identity"] for call in auxiliary],
-            "known_lower_bound": lower,
-            "unknown_fields": [name for name, value in totals.items() if value is None]}}
+            "known_lower_bound": lower}}
 
 
 def unsubmitted_cost():
     """A blocked task made no call; no per-request memory was attributed to it."""
     return {**dict.fromkeys(ADDITIVE_COST_FIELDS, 0), "complete_ms": None,
-        "accounting": {"basis": "blocked_before_submission", "known_lower_bound": {}, "unknown_fields": []}}
+        "accounting": {"basis": "blocked_before_submission", "known_lower_bound": {}}}

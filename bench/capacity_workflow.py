@@ -68,7 +68,8 @@ def full_queue_method_specs(selected, gain_settings, compilation, *, rule_settin
             "reading": {"fact_reuse": context and method != "context_no_fact_reuse",
                         "numeric_record_projection": context}}
         specs.append(dict(id=method, strategy="B7" if context else "B6", overrides=overrides,
-            evaluation_factors=dict(B="gain" if gain else "rule" if rule else "fixed",
+            evaluation_factors=dict(B=("gain" if rolling["action_policy"] == "learned" else "rule")
+                if context else "fixed",
                 compilation="contextpilot" if contextpilot else "native",
                 representation="finite" if context else "existing", retention=retention["mode"],
                 retention_allocation=retention.get("allocation"), numeric_record_projection=context,
@@ -135,22 +136,22 @@ def prepare(args, root):
     run = load_config(run_path)
     config["generation"]["run_config"] = str(run_path)
     selected_methods = tuple(dict.fromkeys(args.methods or registered["main_methods"]))
-    needs_gain = any(method in CONTEXT_METHODS for method in selected_methods)
-    gain_path = Path(args.gain_asset).resolve() if needs_gain else None
-    asset = json.loads(gain_path.read_text()) if needs_gain else None
-    profile = asset["reader_profile_id"] if asset is not None else args.reader_profile_id
     declared_gain = config["execution"].get("plan_gain") or {}
-    admission_settings = {"action_policy": declared_gain.get("action_policy", "validated"),
-        **{name: deepcopy(declared_gain[name]) for name in ("validation_thresholds",) if name in declared_gain}}
-    gain, gain_admission = None, None
-    if needs_gain:
-        if asset["reader_checkpoint"] != run.model.revision:
-            raise ValueError("gain asset requires its measured reader checkpoint and runtime profile")
-        # Preflight needs the declared candidate domain, not executable old
-        # weights. The same loader used by serving enforces policy admission.
-        _, gain_admission, gain = load_action_gain_asset({**admission_settings,
-            "gain_asset": str(gain_path), "reader_checkpoint": run.model.revision,
-            "reader_profile_id": profile, "mode": "observed_actions", "joint_context": True})
+    context_selected = any(method in CONTEXT_METHODS for method in selected_methods)
+    action_policy = declared_gain.get("action_policy", "learned" if args.gain_asset else "rule")
+    gain_path, gain, profile = None, None, args.reader_profile_id
+    if context_selected:
+        if action_policy == "learned":
+            if not args.gain_asset:
+                raise ValueError("learned action policy requires --gain-asset")
+            gain_path = Path(args.gain_asset).resolve()
+            profile = profile or json.loads(gain_path.read_text())["reader_profile_id"]
+        gain = load_action_gain_asset({"action_policy": action_policy,
+            "gain_asset": str(gain_path) if gain_path is not None else None,
+            "reader_checkpoint": run.model.revision, "reader_profile_id": profile,
+            "mode": "observed_actions", "joint_context": True})
+    if not profile:
+        raise ValueError("execution without a gain asset requires --reader-profile-id")
     roots = args.online_process_roots
     if not roots:
         endpoints = [run.engine.base_url]
@@ -188,7 +189,9 @@ def prepare(args, root):
         output_tokens_per_fact=config["reading"]["output_tokens_per_fact"], gap_limits=gap_limits, read_choices=2)
     if completion_timing is not None:
         rolling_settings["completion_timing_asset"] = str(Path(completion_timing).resolve())
-    gain_settings = dict(rolling_settings, gain_asset=str(gain_path), **admission_settings) if needs_gain else None
+    gain_settings = dict(rolling_settings, action_policy=action_policy) if context_selected else None
+    if gain is not None:
+        gain_settings["gain_asset"] = str(gain_path)
     rule_settings = dict(rolling_settings, action_policy="rule")
     checkout = args.contextpilot_checkout or declared_compilation.get("checkout")
     needs_compilation = any(method in (*CONTEXT_METHODS[1:], RULE_CONTEXT_METHOD) for method in selected_methods)
@@ -264,8 +267,7 @@ def prepare(args, root):
         execution_commit=revision, source_config=source_file(args.config), source_matrix=source_file(args.matrix),
         source_cohorts=source_file(args.cohorts) if args.cohorts is not None else None,
         reader_profile_id=profile, reader_run=source_file(run_path), resource_scope=scope,
-        action_policy_preflight=gain_admission,
-        assets={"gain": source_file(gain_path) if needs_gain else None,
+        assets={"gain": source_file(gain_path) if gain_path is not None else None,
                 "demand_pricing": source_file(pricing_asset) if pricing_asset is not None else None,
                 "completion_timing": source_file(rolling_settings["completion_timing_asset"])
                 if completion_timing is not None else None},
@@ -502,12 +504,6 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.repetitions < 1:
         parser.error("--repetitions must be positive")
-    methods = args.methods or FULL_QUEUE_METHODS
-    if any(method in CONTEXT_METHODS for method in methods):
-        if not args.gain_asset:
-            parser.error("learned ContextKV methods require --gain-asset")
-    elif not args.reader_profile_id:
-        parser.error("methods without a gain asset require --reader-profile-id")
     return asyncio.run(run(args))
 
 

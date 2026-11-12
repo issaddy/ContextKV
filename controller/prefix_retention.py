@@ -121,7 +121,6 @@ class RetentionRequest:
     # Per consumer, per causal page marginal savings. Distinct owners cannot
     # claim the same future request/page twice. Empty uses the legacy scalar.
     consumer_savings: tuple[tuple[str, tuple[tuple[str, float], ...]], ...] = ()
-    value_unit: str = "milliseconds"
 
     @classmethod
     def from_receipt(cls, receipt, forecast, *, reuse_event_key=""):
@@ -139,21 +138,18 @@ class RetentionRequest:
 class RetentionChoice:
     owner_id: str
     ttl_seconds: float
-    expected_saved_ms: float | None
+    expected_saved_ms: float
     extra_gpu_token_seconds: float
     extra_host_token_seconds: float
     value: float
     marginal_protected_tokens: int
     evidence_digest: str
     reuse_event_key: str = ""
-    value_unit: str = "milliseconds"
 
 
 def allocate_retention(requests, *, protection_budget_tokens, lambda_gpu, lambda_host, baseline_pages=()):
     """Compare value-ordered and capacity-density constructions on the same objective."""
     requests = tuple(requests)
-    if len({request.value_unit for request in requests}) > 1:
-        raise ValueError("retention allocation cannot mix milliseconds and unpriced risk tokens")
     choices = tuple(_allocate_retention_greedy(requests, protection_budget_tokens=protection_budget_tokens,
         lambda_gpu=lambda_gpu, lambda_host=lambda_host, baseline_pages=baseline_pages, density=density) for density in (False, True))
     return max(choices, key=lambda selected: sum(choice.value for choice in selected))
@@ -218,8 +214,8 @@ def _allocate_retention_greedy(requests, *, protection_budget_tokens,
             value = saved-lambda_gpu*gpu_integral-lambda_host*host_integral
             if value > 0:
                 choice = RetentionChoice(request.owner_id, forecast.horizon_seconds,
-                    saved if request.value_unit == "milliseconds" else None, gpu_integral, host_integral, value, added_tokens,
-                    forecast.evidence_digest, event, request.value_unit)
+                    saved, gpu_integral, host_integral, value, added_tokens,
+                    forecast.evidence_digest, event)
                 candidates.append(choice)
         if not candidates:
             break

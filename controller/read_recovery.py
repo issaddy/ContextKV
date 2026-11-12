@@ -165,14 +165,13 @@ def recover_failed_reads(state, tokenizer):
                 input_unit_ids=inputs, output_schema={}, predecessor_step_ids=(record.step_id,)))
         metrics = {**record.metrics, "read_recovery_depth": depth,
             "read_recovery_children": tuple(child.step_id for child in children),
-            "read_recovery_pending": bool(children),
-            "read_recovery_exhausted": not bool(children)}
+            "read_recovery_pending": bool(children)}
         state = _replace_records(state, (replace(record, metrics=metrics),))
         if children:
             state = _attach(state, children, new_units)
         else:
             state = terminalize(state, record.result.open_needs, "read_recovery_exhausted")
-    return reconcile_recovery(state)
+    return state
 
 
 def _repairs_gap(gap, result):
@@ -200,10 +199,10 @@ def reconcile_recovery(state):
             resolved.update(gap_key(gap) for gap in task.repair_gaps if _repairs_gap(gap, result))
     updates = []
     by_id = {unit.unit_id: unit for unit in state.plan.selected_set.selected_units}
+    records = {record.step_id: record for record in state.steps}
     for record in state.steps:
         children = record.metrics.get("read_recovery_children", ())
         descendants, pending = set(children), list(children)
-        records = {row.step_id: row for row in state.steps}
         while pending:
             child = records.get(pending.pop())
             for identity in child.metrics.get("read_recovery_children", ()) if child is not None else ():
@@ -217,9 +216,7 @@ def reconcile_recovery(state):
             if gap_key(gap) not in resolved and not (repaired and gap.missing_relation.startswith("READ recovery required:")))
         if gaps != record.result.open_needs or repaired and record.metrics.get("read_recovery_pending"):
             updates.append(replace(record, result=replace(record.result, open_needs=gaps), metrics={
-                **record.metrics, "read_recovery_pending": False if repaired else record.metrics.get("read_recovery_pending", False),
-                "resolved_open_needs": tuple(dict.fromkeys((*record.metrics.get("resolved_open_needs", ()),
-                    *(gap.missing_relation for gap in record.result.open_needs if gap not in gaps))))}))
+                **record.metrics, "read_recovery_pending": False if repaired else record.metrics.get("read_recovery_pending", False)}))
     return _replace_records(state, updates) if updates else state
 
 

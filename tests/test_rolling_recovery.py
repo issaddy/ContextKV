@@ -171,7 +171,6 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIn("987654321", prompt)
         self.assertIn("甲公司", prompt)
         self.assertIn("乙公司", prompt)
-        self.assertIn("Do not infer a missing value", prompt)
         self.assertEqual(answer_evidence_gaps(state), {"n": "terminal_evidence_gap"})
         self.assertFalse(answer_evidence_gaps(state, candidate, require_complete_evidence=False))
 

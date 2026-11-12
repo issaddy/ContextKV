@@ -26,13 +26,6 @@ class NeedDependencyTests(unittest.TestCase):
         result = ReadResult(numeric.step_id, (claim,), ("numeric",))
         return plan, result, claim
 
-    def test_numeric_selection_does_not_wait_for_unrelated_read(self):
-        plan, result, _ = self.fixture()
-        tasks = tuple(numeric_selection_tasks(plan, (result,)))
-        self.assertEqual(1, len(tasks))
-        self.assertEqual(("read:numeric",), tasks[0].predecessor_step_ids)
-        self.assertEqual(("claim:numeric",), tasks[0].input_claim_ids)
-
     def test_unrelated_read_does_not_change_numeric_selector_identity(self):
         plan, _, _ = self.fixture()
         independent = replace(plan, steps=plan.steps[:1])
@@ -55,6 +48,7 @@ class NeedDependencyTests(unittest.TestCase):
         self.assertEqual({"READ", "REDUCE"}, {task.kind for task in ready})
         selection = next(task for task in ready if task.operation == "numeric_select")
         self.assertEqual(("read:numeric",), selection.predecessor_step_ids)
+        self.assertEqual(("claim:numeric",), selection.input_claim_ids)
 
     def test_nonshared_numeric_reduction_uses_only_its_need_reads(self):
         plan, result, _ = self.fixture()

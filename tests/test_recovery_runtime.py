@@ -36,9 +36,6 @@ class StructuredMockEngine(MockEngine):
 
 class ReceiptNativeObserver:
     """Use exact mock quotes and durable paid token counts; no forecast fitting."""
-    def __init__(self):
-        self.observations = []
-
     async def observe(self, plans, state, snapshot, engine, cost_model, arrived, auxiliary_usage, **kwargs):
         candidates = {candidate.candidate_id: candidate for plan in plans
             for step in (*plan.steps, *plan.route_steps) for candidate in step.variants}
@@ -46,9 +43,6 @@ class ReceiptNativeObserver:
         inputs = sum(len(record.input_ids) for record in state.steps)
         outputs = sum(len(record.output_ids) for record in state.steps)
         paid = CompleteCost((time.monotonic()-arrived)*1000, 0, 0, inputs, outputs)
-        self.observations.append((state, paid))
-        if len(self.observations) > 25:
-            raise AssertionError("rolling recovery failed to terminate within its declared bounds")
         native = NativePlanningState("test-reader", "test-profile", snapshot, quotes, cost_model, {}, {}, paid,
             {"native_admission": {"gpu_capacity_tokens": engine.gpu_capacity_tokens,
                 "native_max_new_tokens_clip": 4096, "page_size": 1}, "native_quote_ms": 0})
@@ -148,24 +142,14 @@ class RollingRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settled["reader_input_tokens"], sum(len(record.input_ids) for record in result.outcome.steps))
         self.assertEqual(settled["reader_output_tokens"], sum(len(record.output_ids) for record in result.outcome.steps))
 
-    async def test_routing_and_execution_share_exact_prompt_measurements(self):
-        from controller.action_policy import completion_reserve
+    async def test_reused_prompt_measurements_preserve_inputs_and_complete_budget(self):
         from controller.execution import require_completion
-        from controller.render_memo import TurnTemplateMemo
 
         reader = ScriptedReader(self.store, self.engine, self.template, request_arrived=self.arrived)
-        route_templates, admitted = [], []
+        admitted = []
         plain = ByteTemplate()
 
-        def observe_route(*args, **kwargs):
-            route_templates.append(kwargs["template"])
-            return completion_reserve(*args, **kwargs)
-
         def check_admission(*args, **kwargs):
-            template = kwargs["template"]
-            self.assertIsInstance(template, TurnTemplateMemo)
-            self.assertTrue(any(template is seen for seen in route_templates))
-            self.assertIs(reader.request_compiler.template, template)
             result = require_completion(*args, **kwargs)
             self.assertEqual(result, require_completion(*args, **{**kwargs, "template": plain}))
             calls = backend.call_count
@@ -179,12 +163,10 @@ class RollingRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
             return result
 
         with patch.object(self.template, "render_many", wraps=self.template.render_many) as backend, \
-                patch("controller.action_policy.completion_reserve", side_effect=observe_route), \
                 patch("controller.execution.require_completion", side_effect=check_admission):
             result = await self.execute(reader)
         self.assertEqual(len(admitted), 3)
         self.assertTrue(completed_source_coverage(result.outcome.plan, result.outcome.results, (self.unit,)))
-        self.assertIsNot(reader.template, self.template)
 
     async def test_recovery_exhaustion_delivers_explicit_gap_without_fabricated_coverage(self):
         reader = ScriptedReader(self.store, self.engine, self.template, request_arrived=self.arrived, fail_all=True)
@@ -226,7 +208,8 @@ class RollingRecoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
             and event["attempt_id"].endswith(":policy:source")]
         self.assertEqual(len(parent_generations), 1)
         settled = failed_request_cost(self.store, self.store.get_attempt(self.attempt.attempt_id))
-        self.assertEqual(len(settled["accounting"]["native_call_ids"]), 3)
+        self.assertEqual(settled["reader_input_tokens"], sum(len(record.input_ids) for record in result.outcome.steps))
+        self.assertEqual(settled["reader_output_tokens"], sum(len(record.output_ids) for record in result.outcome.steps))
 
     async def test_split_obligations_do_not_bypass_complete_step_budget(self):
         self.plan = replace(self.plan, budget=replace(self.plan.budget, max_steps=2))

@@ -685,8 +685,7 @@ class ContextKVRuntime:
         ids = owner["input_ids"]
         key = RadixKey(ids)
         view = tree.peek_full_prefix(key)
-        page_hashes = (owner["page_hashes"] if "page_hashes" in owner else
-                       executed_prefix_hashes(ids, self.cache.page_size))
+        page_hashes = owner["page_hashes"]
         gpu_pages, host_pages, referenced_pages = [], [], []
         current, position = tree.root_node, 0
         while len(key):

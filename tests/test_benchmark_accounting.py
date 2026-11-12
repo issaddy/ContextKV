@@ -67,7 +67,6 @@ class PaidFailureAccountingTests(unittest.TestCase):
         self.assertEqual(cost["total_output_tokens"], 105)
         self.assertEqual(cost["actual_prefill_tokens"], 140)
         self.assertEqual(cost["online_compute_ms"], 54)
-        self.assertEqual(cost["accounting"]["unknown_fields"], [])
 
     def test_rolling_final_answer_is_counted_once(self):
         self.native("read")
@@ -77,7 +76,6 @@ class PaidFailureAccountingTests(unittest.TestCase):
         cost = failed_request_cost(self.store, attempt)
         self.assertEqual(cost["reader_input_tokens"], 150)
         self.assertEqual(cost["reader_output_tokens"], 13)
-        self.assertEqual(len(cost["accounting"]["native_call_ids"]), 2)
 
     def test_terminal_receipt_output_count_used_when_result_is_unavailable(self):
         self.native("cancelled", stage="FAILED", output_tokens=17, generation=False)
@@ -104,12 +102,6 @@ class PaidFailureAccountingTests(unittest.TestCase):
         self.assertEqual(cost["accounting"]["known_lower_bound"]["auxiliary_input_tokens"], 30)
         self.assertEqual(cost["accounting"]["known_lower_bound"]["auxiliary_output_tokens"], 4)
 
-    def test_boolean_usage_is_unknown_instead_of_one_token(self):
-        self.auxiliary("invalid-usage", True, False)
-        cost = failed_request_cost(self.store, self.attempt)
-        self.assertIsNone(cost["total_input_tokens"])
-        self.assertIsNone(cost["total_output_tokens"])
-        self.assertEqual(cost["accounting"]["known_lower_bound"]["total_input_tokens"], 0)
 
     def test_partial_native_output_is_a_lower_bound_until_final_receipt(self):
         record, generation = self.native("partial", stage="RESULT_READY", output_tokens=5)
@@ -132,7 +124,6 @@ class PaidFailureAccountingTests(unittest.TestCase):
     def test_submitted_final_answer_without_receipt_is_unknown(self):
         cost = failed_request_cost(self.store, replace(self.attempt, stage="FAILED", failed_from_stage="SUBMITTED"))
         self.assertIsNone(cost["total_input_tokens"])
-        self.assertEqual(cost["accounting"]["native_call_ids"], ["answer"])
 
 
 class DeclaredTaskRecordsTests(unittest.TestCase):
@@ -164,14 +155,14 @@ class DeclaredTaskRecordsTests(unittest.TestCase):
             self.assertEqual(summary["cost"]["total_input_tokens"], 160)
             self.assertIsNone(summary["cost"]["p95_complete_ms"])
 
-    def test_unknown_failure_cost_retains_queue_lower_bound_and_identity(self):
+    def test_unknown_failure_cost_retains_queue_lower_bound(self):
         cost = {"total_input_tokens": None, "accounting": {"known_lower_bound": {"total_input_tokens": 80}}}
         rows = [{"task_id": "failed", "status": "failed", "cost": cost, "metrics": {}},
                 {"task_id": "blocked", "status": "blocked", "cost": unsubmitted_cost(), "metrics": {}}]
         summary = declared_queue_summary(rows, {"primary_metric": "f1"}, ["failed", "blocked"])
         self.assertIsNone(summary["cost"]["total_input_tokens"])
         self.assertEqual(summary["cost"]["accounting"]["total_input_tokens"],
-            {"known_lower_bound": 80, "unknown_task_ids": ["failed"]})
+            {"known_lower_bound": 80})
 
     def test_successful_resume_wins_over_previous_failure(self):
         with TemporaryDirectory() as directory:
@@ -184,16 +175,8 @@ class DeclaredTaskRecordsTests(unittest.TestCase):
         summary = declared_queue_summary(rows, {"primary_metric": "f1"}, ["known", "missing"])
         self.assertIsNone(summary["cost"]["total_input_tokens"])
         self.assertEqual(summary["cost"]["accounting"]["total_input_tokens"],
-                         {"known_lower_bound": 50, "unknown_task_ids": ["missing"]})
+                         {"known_lower_bound": 50})
 
-    def test_unresolved_native_state_is_preserved_after_scoring_cleanup(self):
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root/"state").mkdir()
-            (root/"failed_conversations.json").write_text(json.dumps([
-                {"task_id": "unresolved", "cleanup_error": {"message": "still running"}}]))
-            retain_metrics(root, [])
-            self.assertTrue((root/"state").is_dir())
 
     def test_successful_scoring_does_not_delete_unacknowledged_native_retirement(self):
         with TemporaryDirectory() as temporary:

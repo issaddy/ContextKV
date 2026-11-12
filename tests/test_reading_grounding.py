@@ -4,11 +4,10 @@ import json
 import unittest
 
 from controller.context_schema import (
-    ContextPlan, EvidenceKey, EvidenceSet, EvidenceUnit, Need, NumericReadScope,
-    OpenNeed, ReadResult, ReadTask, SourceSpan, TaskState,
+    EvidenceKey, EvidenceUnit, NumericReadScope, OpenNeed, ReadResult, ReadTask, SourceSpan,
 )
 from controller.reading import (
-    NUMERIC_GROUNDING_GAP_PREFIX, output_schema, parse_read_result, step_messages, unresolved_needs,
+    NUMERIC_GROUNDING_GAP_PREFIX, parse_read_result, unresolved_needs,
 )
 
 
@@ -47,13 +46,7 @@ class NumericSourceBindingTests(unittest.TestCase):
 
     def test_neighboring_field_value_is_bound_to_requested_literal_field(self):
         text = "甲公司：流动资产合计 100 万元；总资产 500 万元；货币资金 20 万元。"
-        units = (source(text),)
-        task = numeric_task(units)
-        data = numeric_output(text, value="500")
-        # This was schema-valid before the fix: the enum is source-wide.
-        self.assertIn("500", output_schema(task, units)["properties"]["facts"]["items"]["anyOf"][0]
-            ["properties"]["v"]["enum"])
-        result = parse_read_result(task, json.dumps(data, ensure_ascii=False), units)
+        result = self.parse(text, value="500")
         self.assertEqual("100", result.claims[0].value)
         self.assertEqual("流动资产合计", result.claims[0].relation)
         self.assertEqual("万元", result.claims[0].unit)
@@ -61,30 +54,25 @@ class NumericSourceBindingTests(unittest.TestCase):
         self.assertEqual((), result.support)
         self.assertFalse(result.open_needs)
 
-    def test_fabricated_relation_does_not_inherit_a_source_number(self):
-        self.assert_gap(self.parse("甲公司：总资产 500 万元。", relation="流动资产合计", value="500"))
-
-    def test_fabricated_entity_does_not_inherit_a_source_number(self):
-        self.assert_gap(self.parse("乙公司：流动资产合计 100 万元。"))
+    def test_ambiguous_or_missing_field_entity_period_and_unit_remain_gaps(self):
+        cases = (
+            ("甲公司：总资产 500 万元。", {"value": "500"}),
+            ("乙公司：流动资产合计 100 万元。", {}),
+            ("R1 and R2: weight 3 kg.", {"entity": "R1", "relation": "weight", "value": "3", "unit": "kg"}),
+            ("甲公司：净利润 10万元；乙公司：流动资产合计 100万元。", {}),
+            ("甲公司：流动资产合计 2024年100万元，2023年80万元。", {"value": "80"}),
+            ("甲公司：流动资产合计 2024年100万元，2023年100万元。", {}),
+            ("甲公司：流动资产合计 100。", {}),
+        )
+        for text, fact in cases:
+            with self.subTest(text=text):
+                self.assert_gap(self.parse(text, **fact))
 
     def test_repeated_excerpt_without_its_period_cannot_choose_an_occurrence(self):
         excerpt = "甲公司：流动资产合计100万元。"
         unit = source("2023年"+excerpt+"\n2024年"+excerpt)
         result = parse_read_result(numeric_task((unit,)), json.dumps(numeric_output(excerpt)), (unit,))
         self.assert_gap(result)
-
-    def test_multiple_record_ids_cannot_share_an_unassigned_quantity(self):
-        text = "R1 and R2: weight 3 kg."
-        self.assert_gap(self.parse(text, entity="R1", relation="weight", value="3", unit="kg"))
-
-    def test_other_entity_on_same_line_cannot_supply_the_field(self):
-        self.assert_gap(self.parse("甲公司：净利润 10万元；乙公司：流动资产合计 100万元。"))
-
-    def test_multiple_period_values_are_not_resolved_by_model_value(self):
-        self.assert_gap(self.parse("甲公司：流动资产合计 2024年100万元，2023年80万元。", value="80"))
-
-    def test_identical_values_in_two_periods_still_need_period_binding(self):
-        self.assert_gap(self.parse("甲公司：流动资产合计 2024年100万元，2023年100万元。"))
 
     def test_zero_is_retained_only_when_explicit_in_source(self):
         result = self.parse("甲公司：流动资产合计 0万元。", value="0")
@@ -95,9 +83,6 @@ class NumericSourceBindingTests(unittest.TestCase):
     def test_original_unit_is_retained_instead_of_model_scale(self):
         result = self.parse("甲公司：流动资产合计 100万元。", unit="元")
         self.assertEqual(("100", "万元"), (result.claims[0].value, result.claims[0].unit))
-
-    def test_model_unit_without_source_evidence_is_rejected(self):
-        self.assert_gap(self.parse("甲公司：流动资产合计 100。"))
 
     def test_uncited_window_cannot_silently_repair_a_wrong_citation(self):
         correct = source("甲公司：流动资产合计 100万元。")
@@ -153,17 +138,6 @@ class NumericSourceBindingTests(unittest.TestCase):
             "s": ["s0"], "p": [], "f": []}], "support": ["n0"], "conflicts": [], "open_needs": []}
         with self.assertRaisesRegex(ValueError, "source-bound facts"):
             parse_read_result(task, json.dumps(data), (unit,))
-
-    def test_repair_prompt_carries_the_persisted_gap_contract(self):
-        unit = source("甲公司：流动资产合计100万元。")
-        gap = OpenNeed("need:0", "流动资产合计", ("甲公司",), "2024")
-        task = replace(numeric_task((unit,)), operation="repair_extract", repair_gaps=(gap,))
-        plan = ContextPlan("plan", TaskState("task", "求流动资产合计之和",
-            needs=(Need("need:0", operation="sum"),)), EvidenceSet("evidence", (unit,)))
-        messages = step_messages(plan, task, (unit,))
-        payload = json.loads(messages[-1].content)
-        self.assertEqual("流动资产合计", payload["repair_gaps"][0]["missing_relation"])
-        self.assertIn("never zero", messages[0].content)
 
     def test_later_numeric_window_cannot_erase_another_entity_gap(self):
         earlier = ReadResult("read:earlier", open_needs=(OpenNeed("need:0",

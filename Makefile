@@ -9,7 +9,7 @@ lint:
 	$(PYTHON) -m ruff check controller adapters bench profiling training scripts engine_patches tests
 
 test:
-	$(PYTHON) -m unittest discover -s tests -v
+	$(PYTHON) -m unittest discover -s tests -q
 
 serve:
 	$(PYTHON) -m controller --config configs/qwen3_32b.yaml serve
