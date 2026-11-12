@@ -19,8 +19,8 @@ from training.shared_collection import numbered_text, numbered_sources, word_ref
 
 TASK_INSTRUCTION = """Label a document-QA request for a shared query encoder. Use only the visible conversation and question.
 Return JSON with rewritten_query, needs, conditions, history_refs, version_intent.
-Every text reference is {message_id,start_word,end_word}, selecting the displayed numbered words.
-Indices are zero-based and end_word is inclusive; start_word must not exceed end_word.
+Every text reference is {message_id,word_boundaries:[a,b]}, selecting the displayed numbered words.
+The two zero-based boundary indices select an inclusive span, in either order.
 Use the ID of the message actually containing the intended words. Do not return words or turn IDs as references.
 needs: [{need_id,anchor_refs,subject_refs,operation,scope,condition_ids,predecessor_need_ids,query,join,distinct}].
 operation: lookup/enumerate/procedure/compare/count/sum/mean/min/max/group/infer; scope: selected_sources/all_supplied_documents.
@@ -40,8 +40,8 @@ Use empty lists for absent restrictions. Do not add facts or conditions from out
 
 FIELD_INSTRUCTION = """Label source evidence for the stated document-QA Needs. Return JSON {bindings:[...]}.
 Each binding is {need_id,role,source,condition_id,relation_group}.
-source is {source_id,start_word,end_word}, selecting the displayed numbered words.
-Indices are zero-based and end_word is inclusive; start_word must not exceed end_word.
+source is {source_id,word_boundaries:[a,b]}, selecting the displayed numbered words.
+The two zero-based boundary indices select an inclusive span, in either order.
 role: source/measure/entity/period/group/filter/unit/version.
 source marks a passage span that supports a Need. The other roles mark original column names, field names,
 entity identifiers, periods, units and constraints required to compute the requested result.

@@ -29,16 +29,14 @@ def numbered_sources(units):
 def word_reference_schema(locations, id_field):
     return {"oneOf": [{"type": "object", "properties": {
         id_field: {"const": identity},
-        "start_word": {"type": "integer", "minimum": 0, "maximum": len(offsets)-1},
-        "end_word": {"type": "integer", "minimum": 0, "maximum": len(offsets)-1}},
-        "required": [id_field, "start_word", "end_word"], "additionalProperties": False}
+        "word_boundaries": {"type": "array", "minItems": 2, "maxItems": 2,
+            "items": {"type": "integer", "minimum": 0, "maximum": len(offsets)-1}}},
+        "required": [id_field, "word_boundaries"], "additionalProperties": False}
         for identity, (_, offsets) in locations.items() if offsets]}
 
 
 def word_offsets(reference, offsets):
-    first, last = reference["start_word"], reference["end_word"]
-    if first > last:
-        raise ValueError("word reference must have start_word <= end_word")
+    first, last = sorted(reference["word_boundaries"])
     return offsets[first][0], offsets[last][1]
 
 
