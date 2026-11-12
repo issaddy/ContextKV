@@ -74,6 +74,9 @@ class ComputeRuntime:
     def _match(self, source_id, ids):
         return self.cache.match_prefix(MatchPrefixParams(key=self._key(source_id, ids)))
 
+    def _indices(self, match):
+        return self.cache.path_device_indices(match.last_device_node)[:match.device_prefix_len]
+
     def _lock(self, node):
         return self.cache.inc_lock_ref(node).to_dec_params()
 
@@ -100,7 +103,7 @@ class ComputeRuntime:
             block_ids += [0] * (-len(block_ids) % page)
             source_id = scope, spec['source_id']
             match = self._match(source_id, block_ids)
-            full = len(match.device_indices) + match.host_hit_length == len(block_ids)
+            full = match.device_prefix_len + match.host_hit_length == len(block_ids)
             warm += end - start if full else 0
             cold += 0 if full else end - start
             if full and match.host_hit_length:
@@ -127,7 +130,7 @@ class ComputeRuntime:
         approximate = cold * build + prompt * score + (prompt + (warm + cold) * ratio) * replay + len(host_pages) * transfer
         native = self.cache.match_prefix(MatchPrefixParams(key=RadixKey(
             ids, req.extra_key, cache_salt=req.cache_salt)))
-        exact = (len(ids) - len(native.device_indices) - native.host_hit_length) * prefill + native.host_hit_length * transfer
+        exact = (len(ids) - native.device_prefix_len - native.host_hit_length) * prefill + native.host_hit_length * transfer
         expected_output = min(req.sampling_params.max_new_tokens,
                               self.output_tokens_mean or req.sampling_params.max_new_tokens)
         exact_decode = costs.get('exact_decode_token_ms', 0.0)
@@ -138,7 +141,7 @@ class ComputeRuntime:
         cold_consumers = {}
         for source_id, start, end, match, block_ids in blocks:
             item = self.demands[session].get(source_id)
-            if item is not None and len(match.device_indices)+match.host_hit_length < len(block_ids):
+            if item is not None and match.device_prefix_len+match.host_hit_length < len(block_ids):
                 consumers = cold_consumers.setdefault(tuple(block_ids), (end-start, set()))[1]
                 consumers.update(item.get('consumer_ids', ()) or range(int(item.get('uses', 0))))
         build_value = sum(length * len(consumers) * build for length, consumers in cold_consumers.values())
@@ -150,7 +153,7 @@ class ComputeRuntime:
                     and approximate + quality_loss * quality_price_ms - build_value < exact
                     else 'exact')
             cold_work = sum(len(tokens) for _, _, _, match, tokens in blocks
-                            if len(match.device_indices)+match.host_hit_length < len(tokens))
+                            if match.device_prefix_len+match.host_hit_length < len(tokens))
             required = cold_work + math.ceil(prompt/page)*page + prompt + math.ceil((warm + cold)*ratio)
             if required > min(self.scheduler.max_req_input_len,
                     self.allocator.available_size() + self.cache.evictable_size()
@@ -174,14 +177,14 @@ class ComputeRuntime:
                 source_positions.update(range(start, end))
                 block = SourceBlock(source_id, start, end)
                 block.cache_ids = block_ids
-                full = len(match.device_indices) + match.host_hit_length == len(block_ids)
+                full = match.device_prefix_len + match.host_hit_length == len(block_ids)
                 if full:
                     block.node = match.best_match_node
                     self.source_nodes[source_id] = block.node
                     if match.host_hit_length:
                         block.host_tokens = match.host_hit_length
                     else:
-                        block.slots = match.device_indices
+                        block.slots = self._indices(match)
                         block.ready = end - start
                         state.counters['device_hit_tokens'] += end - start
                     state.counters['reused_tokens'] += end - start
@@ -231,9 +234,9 @@ class ComputeRuntime:
             if block.host_tokens:
                 original_node = block.node
                 current = self._match(block.source_id, block.cache_ids)
-                if len(current.device_indices) == len(block.cache_ids) and not current.host_hit_length:
+                if current.device_prefix_len == len(block.cache_ids) and not current.host_hit_length:
                     self._unlock(block)
-                    block.node, block.slots = current.last_device_node, current.device_indices
+                    block.node, block.slots = current.last_device_node, self._indices(current)
                     block.lock = self._lock(block.node)
                     block.ready = block.end - block.start
                     self.cache.dec_host_lock_ref(original_node, block.host_lock)
@@ -250,7 +253,7 @@ class ComputeRuntime:
                 loaded.record()
                 state.events.append(('transfer', started, loaded, block.host_tokens))
                 match = self._match(block.source_id, block.cache_ids)
-                block.slots = match.device_indices
+                block.slots = self._indices(match)
                 block.ready = block.end - block.start
                 self._unlock(block)
                 block.node = match.last_device_node
@@ -274,7 +277,7 @@ class ComputeRuntime:
                 value=block.slots.clone(), priority=self._priority(block.source_id)))
             block.node = result.last_device_node
             block.lock = self._lock(block.node)
-            block.slots = self._match(block.source_id, block.cache_ids).device_indices
+            block.slots = self._indices(self._match(block.source_id, block.cache_ids))
             block.owned = False
             state.transferred_ranges.append((block.work_start, block.work_end))
             self.source_nodes[block.source_id] = block.node
@@ -432,8 +435,8 @@ def commit_host_reserve(adder, req):
     state = getattr(req, 'contextkv_compute_state', None)
     if state is not None:
         amount = pending_host_tokens(adder, req)
-        adder.rem_total_token_offset += amount
-        adder.cur_rem_token_offset += amount
+        adder.memory_budget.total_offset += amount
+        adder.memory_budget.current_offset += amount
         adder.contextkv_host_pages = getattr(adder, 'contextkv_host_pages', set()) | state.host_pages
 
 
@@ -447,7 +450,8 @@ def finish_compute_admission(adder, req):
         state.runtime.unpin(state)
 
 
-def attach_compute_batch(forward_batch, batch):
+def attach_compute_batch(forward_batch, batch, model_runner):
+    forward_batch.contextkv_translator = model_runner.kv_index_translator
     forward_batch.contextkv_states = [getattr(req, 'contextkv_compute_state', None) for req in batch.reqs]
     forward_batch.contextkv_rows = batch.req_to_token_pool.req_to_token[batch.req_pool_indices]
 
@@ -473,6 +477,8 @@ def _single_batch(batch, index, offset, length):
     result.orig_seq_lens = batch.orig_seq_lens[index:index + 1]
     result.seq_lens_cpu = batch.seq_lens_cpu[index:index + 1]
     result.seq_lens_sum = int(result.seq_lens_cpu[0])
+    result.max_seq_len_host = result.seq_lens_sum
+    result.num_token_non_padded_cpu = length
     if batch.forward_mode.is_extend():
         result.extend_num_tokens = length
         result.extend_seq_lens = batch.extend_seq_lens[index:index + 1]
@@ -482,6 +488,10 @@ def _single_batch(batch, index, offset, length):
         result.extend_prefix_lens_cpu = [batch.extend_prefix_lens_cpu[index]]
         result.extend_logprob_start_lens_cpu = [batch.extend_logprob_start_lens_cpu[index]]
     from sglang.srt.model_executor.forward_context import get_attn_backend
+    translator = batch.contextkv_translator
+    cols = batch.kv_loc_plan.cols_slice(batch.kv_loc_cols, slice(offset, offset + length))
+    result.out_cache_loc = batch.kv_loc_plan.virtual_write_ids(cols=cols)
+    translator.own_plan(result).bind(result, translator)
     get_attn_backend().init_forward_metadata(result)
     return result
 
@@ -498,9 +508,11 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
     driver = QwenInfoFlow(model, batch)
     for index, (state, length) in enumerate(zip(states, lengths)):
         if state is None or state.mode == 'exact':
+            from sglang.srt.model_executor.forward_context import forward_context, get_forward_context
             one = _single_batch(batch, index, offset, length)
-            result[offset:offset + length] = native_forward(
-                one.input_ids, one.positions, one, None, pp_proxy_tensors)
+            with forward_context(get_forward_context(), forward_batch=one):
+                result[offset:offset + length] = native_forward(
+                    one.input_ids, one.positions, one, None, pp_proxy_tensors)
         else:
             work_row = batch.contextkv_rows[index]
             state.runtime.prepare(state)

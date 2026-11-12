@@ -1,0 +1,24 @@
+{
+  "repository": "https://github.com/sgl-project/sglang",
+  "commit": "297e54fd105e974cdf401e5b4d20253a22c16f90",
+  "source_version": "0.5.23",
+  "patch": "contextkv.patch",
+  "changed_files": [
+    "python/sglang/srt/managers/io_struct.py",
+    "python/sglang/srt/managers/tokenizer_manager.py",
+    "python/sglang/srt/managers/tokenizer_control_mixin.py",
+    "python/sglang/srt/managers/scheduler.py",
+    "python/sglang/srt/managers/schedule_policy.py",
+    "python/sglang/srt/managers/scheduler_components/output_streamer.py",
+    "python/sglang/srt/model_executor/forward_batch_info.py",
+    "python/sglang/srt/models/qwen3.py",
+    "python/sglang/srt/model_executor/model_runner.py",
+    "python/sglang/srt/mem_cache/common.py",
+    "python/sglang/srt/entrypoints/http_server.py"
+  ],
+  "modules": [
+    "infoflow.py",
+    "contextkv_compute.py",
+    "infoflow_attention.py"
+  ]
+}

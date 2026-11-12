@@ -147,8 +147,10 @@ class QwenInfoFlow:
         if get_parallel().attn_tp_size > 1:
             out = tensor_model_parallel_all_reduce(out)
         hidden = hidden + out
-        return hidden + layer.mlp(layer.post_attention_layernorm(hidden),
-                                  forward_batch=self.forward_batch)
+        out = layer.mlp(layer.post_attention_layernorm(hidden), forward_batch=self.forward_batch)
+        if get_parallel().tp_size > 1:
+            out = tensor_model_parallel_all_reduce(out)
+        return hidden + out
 
     def _attend(self, state, layer, query, positions, length):
         keys, values = state.pool.get_kv_buffer(layer.self_attn.attn.layer_id)

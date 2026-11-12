@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -11,7 +12,7 @@ import subprocess
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-INTEGRATION = ROOT / 'engine_patches/integrations/sglang-0.5.18'
+INTEGRATION = ROOT / 'engine_patches/integrations/sglang-0.5.23'
 MANIFEST = json.loads((INTEGRATION / 'manifest.json').read_text())
 PATCH = INTEGRATION / MANIFEST['patch']
 
@@ -23,14 +24,6 @@ def run(args, cwd, *, check=True):
 def prepare(checkout: Path, source_only: bool):
     checkout.mkdir(parents=True, exist_ok=True)
     commit = MANIFEST['commit']
-    if not (checkout / '.git').exists():
-        run(['git', 'init', '-q'], checkout)
-        if source_only:
-            (checkout / '.contextkv-source-only').write_text(commit + '\n')
-        else:
-            run(['git', 'remote', 'add', 'origin', MANIFEST['repository'] + '.git'], checkout)
-            run(['git', 'fetch', '--depth', '1', 'origin', commit], checkout)
-            run(['git', 'checkout', '--detach', 'FETCH_HEAD'], checkout)
     applied = run(['git', 'apply', '--reverse', '--check', str(PATCH)], checkout, check=False).returncode == 0
     if not applied:
         if source_only:
@@ -40,30 +33,28 @@ def prepare(checkout: Path, source_only: bool):
                 target.write_bytes(urllib.request.urlopen(
                     f'https://raw.githubusercontent.com/sgl-project/sglang/{commit}/{rel}', timeout=60).read())
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-                list(pool.map(fetch, MANIFEST['original_files']))
-        else:
-            run(['git', 'restore', '--source', commit, '--worktree', '--', 'python/sglang'], checkout)
+                list(pool.map(fetch, MANIFEST['changed_files']))
+        run(['git', 'apply', '--check', str(PATCH)], checkout)
         run(['git', 'apply', str(PATCH)], checkout)
-    for name in ('contextkv_runtime.py', 'contextkv_model_scope.py'):
-        (checkout / 'python/sglang/srt/managers' / name).unlink(missing_ok=True)
     for module in MANIFEST['modules']:
         source = ROOT / 'engine_patches' / module
         shutil.copyfile(source, checkout / 'python/sglang/srt/managers' / module)
         compile(source.read_text(), str(source), 'exec')
     for rel in MANIFEST['changed_files']:
         compile((checkout / rel).read_text(), rel, 'exec')
-    return dict(checkout=str(checkout), source_commit=commit, source_only=source_only,
+    return dict(checkout=str(checkout), source_version=MANIFEST['source_version'], source_commit=commit, source_only=source_only,
                 protocol='contextkv-compute-v2', patch_applies=True,
                 checked_files=len(MANIFEST['changed_files']) + len(MANIFEST['modules']))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--checkout', type=Path, default=ROOT / 'vendor/sglang-0.5.18')
+    parser.add_argument('--checkout', type=Path, help='Installed SGLang source directory; defaults to the active Python package')
     parser.add_argument('--source-only', action='store_true')
     parser.add_argument('--report', type=Path)
     args = parser.parse_args()
-    report = prepare(args.checkout.resolve(), args.source_only)
+    checkout = args.checkout or Path(importlib.util.find_spec('sglang').origin).resolve().parents[2]
+    report = prepare(checkout.resolve(), args.source_only)
     rendered = json.dumps(report, indent=2)
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)

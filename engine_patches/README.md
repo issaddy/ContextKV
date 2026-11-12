@@ -32,15 +32,14 @@
 
 ## 准备
 
-集成源码为 SGLang 0.5.18 的 `71de97b264b04dcd514cf904003028aefe9775c8`。使用当前容器的 `python3` 与已安装 GPU 依赖：
+集成对应容器现有 SGLang 0.5.23（`297e54fd105e974cdf401e5b4d20253a22c16f90`）。准备脚本定位默认 `python3` 已加载的 SGLang 源码并原地应用补丁：
 
 ```bash
-python3 scripts/prepare_sglang.py --checkout vendor/sglang-0.5.18
 bash scripts/bootstrap_sglang.sh
 source runs/engine-runtime.env
 bash scripts/launch_sglang.sh
 ```
 
-准备脚本应用源码补丁并复制执行模块。`--source-only` 仅下载相关源码和检查补丁语法；完整运行使用完整源码目录。
+准备脚本应用源码补丁并复制执行模块。`--source-only` 仅下载相关源码和检查补丁语法；正式运行直接使用容器已安装的源码。
 
 方法依据与归属见 [NOTICE](NOTICE.md)，项目入口见 [架构](../docs/architecture.md)。

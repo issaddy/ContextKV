@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import asyncio
 import json
 import time
 
@@ -58,7 +59,7 @@ class SGLangEngineClient:
         if response_schema is not None:
             sampling["json_schema"] = json.dumps(response_schema, ensure_ascii=False)
         started = time.perf_counter()
-        data = await self._post("/generate", {
+        body = {
             "rid": request_id, "input_ids": list(request.input_ids), "stream": False,
             "cache_salt": cache_namespace,
             "sampling_params": sampling,
@@ -69,6 +70,12 @@ class SGLangEngineClient:
                 "recompute_ratio": recompute_ratio, "quality_loss": quality_loss,
                 "quality_price_ms": quality_price_ms,
             },
-        })
+        }
+        try:
+            data = await self._post("/generate", body)
+        except (httpx.TimeoutException, asyncio.CancelledError):
+            response = await self._client.post("/abort_request", json={"rid": request_id})
+            response.raise_for_status()
+            raise
         return {"text": data["text"], "output_ids": tuple(data.get("output_ids", ())),
                 "meta": data["meta_info"], "elapsed_ms": (time.perf_counter() - started) * 1000}

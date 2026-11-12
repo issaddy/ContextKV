@@ -2,9 +2,9 @@
 
 The patch context derives
 from [sgl-project/sglang](https://github.com/sgl-project/sglang), commit
-`71de97b264b04dcd514cf904003028aefe9775c8`. The upstream license is reproduced in
+`297e54fd105e974cdf401e5b4d20253a22c16f90`. The upstream license is reproduced in
 `SGLANG_LICENSE`. Source identity and target paths are recorded in
-`integrations/sglang-0.5.18/manifest.json`.
+`integrations/sglang-0.5.23/manifest.json`.
 
 The InfoFlow implementation follows [InfoFlow KV](https://arxiv.org/abs/2603.05353):
 independent chunk KV, inference-consistent global RoPE, query attention-mass

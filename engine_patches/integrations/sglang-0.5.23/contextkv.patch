@@ -1,7 +1,7 @@
 diff --git a/python/sglang/srt/managers/io_struct.py b/python/sglang/srt/managers/io_struct.py
 --- a/python/sglang/srt/managers/io_struct.py
 +++ b/python/sglang/srt/managers/io_struct.py
-@@ -160,6 +160,7 @@
+@@ -177,6 +177,7 @@
  class GenerateReqInput:
      # Request ID(s). If omitted, generated during normalization. For batch
      # requests, a string is expanded to per-item IDs using it as a prefix.
@@ -9,7 +9,7 @@ diff --git a/python/sglang/srt/managers/io_struct.py b/python/sglang/srt/manager
      rid: Optional[Union[str, List[str]]] = field(default=None, kw_only=True)
      # Stable identity shared by requests in the same session. Unlike
      # session_params, this does not alter or reconstruct the prompt.
-@@ -850,6 +851,7 @@
+@@ -964,6 +965,7 @@
              return cache[i]
          sub = GenerateReqInput(
              rid=self.rid[i],
@@ -17,7 +17,7 @@ diff --git a/python/sglang/srt/managers/io_struct.py b/python/sglang/srt/manager
              session_id=self.session_id,
              text=self.text[i] if self.text is not None else None,
              input_ids=self.input_ids[i] if self.input_ids is not None else None,
-@@ -939,6 +941,7 @@
+@@ -1063,6 +1065,7 @@
 
 
  class TokenizedGenerateReqInput(BaseReq, kw_only=True):
@@ -25,7 +25,7 @@ diff --git a/python/sglang/srt/managers/io_struct.py b/python/sglang/srt/manager
      input_text: Optional[Union[str, List[Union[str, List[str]]]]]
      # The input token ids
      input_ids: Optional[array]  # Optional[array[int]]
-@@ -2122,6 +2125,15 @@
+@@ -2426,6 +2429,15 @@
      dump_requests_exclude_meta_keys: Optional[List[str]] = None
 
 
@@ -44,30 +44,56 @@ diff --git a/python/sglang/srt/managers/io_struct.py b/python/sglang/srt/manager
 diff --git a/python/sglang/srt/managers/tokenizer_manager.py b/python/sglang/srt/managers/tokenizer_manager.py
 --- a/python/sglang/srt/managers/tokenizer_manager.py
 +++ b/python/sglang/srt/managers/tokenizer_manager.py
-@@ -1430,6 +1430,7 @@
-                 lora_id=obj.lora_id,
+@@ -1603,6 +1603,7 @@
+                 lora_name=obj.lora_path,
                  input_embeds=input_embeds,
                  positional_embed_overrides=obj.positional_embed_overrides,
 +                contextkv_compute=obj.contextkv_compute,
                  session_id=obj.session_id,
                  session_params=session_params,
                  custom_logit_processor=obj.custom_logit_processor,
-@@ -2301,6 +2302,10 @@
-                     ]
-                 if customized_info is not None:
-                     for k, v in customized_info.items():
-+                        if k == "contextkv_compute":
-+                            if v[i]:
-+                                meta_info[k] = v[i][0]
-+                            continue
-                         if k not in state.customized_info_accumulated:
-                             state.customized_info_accumulated[k] = []
-                         state.customized_info_accumulated[k].extend(v[i])
+@@ -2830,6 +2831,10 @@
+     ) -> None:
+         """Accumulate metadata; subclasses may use finish_reason for terminal data."""
+         for key, values in customized_info.items():
++            if key == "contextkv_compute":
++                if values[index]:
++                    meta_info[key] = values[index][0]
++                continue
+             self._accumulate_request_meta_info(
+                 meta_info,
+                 state,
+diff --git a/python/sglang/srt/managers/tokenizer_control_mixin.py b/python/sglang/srt/managers/tokenizer_control_mixin.py
+--- a/python/sglang/srt/managers/tokenizer_control_mixin.py
++++ b/python/sglang/srt/managers/tokenizer_control_mixin.py
+@@ -109,7 +109,10 @@
+ # Declarative spec: (attr_name_prefix, response_type[, mode])
+ # Each entry creates self.{prefix}_communicator and registers
+ # response_type -> communicator.handle_recv in the dispatch table.
++from sglang.srt.managers.io_struct import ContextKVControlReqInput, ContextKVControlReqOutput
++
+ _COMMUNICATOR_SPECS = [
++    ("contextkv", ContextKVControlReqOutput),
+     ("init_weights_update_group", InitWeightsUpdateGroupReqOutput),
+     ("destroy_weights_update_group", DestroyWeightsUpdateGroupReqOutput),
+     ("update_weights_from_distributed", UpdateWeightsFromDistributedReqOutput),
+@@ -183,6 +186,11 @@
+     FanOutCommunicator, as opposed to data-plane inference requests multiplexed by rid.
+     """
+
++    async def contextkv_control(self, action, payload):
++        self.auto_create_handle_loop()
++        results = await self.contextkv_communicator(ContextKVControlReqInput(action=action, payload=payload))
++        return results[0].payload
++
+     def init_communicators(self: TokenizerManager):
+         dispatch_pairs = []
+         for spec in _COMMUNICATOR_SPECS:
 diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
 --- a/python/sglang/srt/managers/scheduler.py
 +++ b/python/sglang/srt/managers/scheduler.py
-@@ -1529,9 +1529,17 @@
-             get_int_env_var(env_var, default_size) if env_var else None
+@@ -1824,9 +1824,17 @@
+             f"SGLANG_FLASHINFER_PREFILL_SPLIT_TILE_SIZE."
          )
 
 +    def handle_contextkv_control(self, recv_req):
@@ -84,18 +110,18 @@ diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/manager
                  (TokenizedGenerateReqInput, self.handle_generate_request),
                  (TokenizedEmbeddingReqInput, self.handle_embedding_request),
                  (BatchTokenizedGenerateReqInput, self.handle_batch_generate_request),
-@@ -1875,6 +1883,9 @@
+@@ -2222,6 +2230,9 @@
 
-     @scheduler_nvtx_method("scheduler.process_input_requests")
+     @scheduler_stage_method(SCHEDULER_STAGE_PROCESS_REQUESTS)
      def process_input_requests(self, recv_reqs: List):
 +        runtime = getattr(self, "contextkv_compute_runtime", None)
 +        if runtime is not None:
 +            runtime.observe_pool()
          now = time.monotonic()
          self.session_controller.maybe_reap(now)
-         if get_mm().mm_feature_transport == "cuda_vmm":
-@@ -2434,6 +2445,8 @@
-                 multi_item_delimiter_indices=recv_req.multi_item_delimiter_indices,
+
+@@ -3031,6 +3042,8 @@
+                 token_indices_to_pool=recv_req.token_indices_to_pool,
              )
              req.tokenizer = self.tokenizer
 +            from sglang.srt.managers.contextkv_compute import admit_compute
@@ -103,27 +129,16 @@ diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/manager
 
              if radix_native_session:
                  req.session_generation = self.tree_cache.ensure_session_generation(
-@@ -2923,6 +2936,11 @@
-             self.handle_embedding_request(tokenized_req)
-
-     def stash_chunked_request(self, req: Req):
-+        state = getattr(req, "contextkv_compute_state", None)
-+        if state is not None and state.mode == "infoflow":
-+            req.prefix_indices = self.req_to_token_pool.req_to_token[
-+                req.req_pool_idx, :req.extend_range.end]
-+            return
-         maybe_cache_unfinished_req(req, self.tree_cache, chunked=True)
-
-     def process_pending_chunked_abort(self) -> None:
-@@ -3324,12 +3342,16 @@
-                 if loaded_tokens > 0:
-                     req.storage_hit_length = loaded_tokens
+@@ -4257,6 +4270,8 @@
+                     # marks the staged span below once it is surfaced.
+                     req.host_hit_is_storage = False
 
 +            from sglang.srt.managers.contextkv_compute import prepare_compute_request
 +            prepare_compute_request(self, req)
              req.init_next_round_input(self.tree_cache)
-             res = adder.add_one_req(
-                 req,
+             if self.enable_hicache_storage and (
+                 self._prefetch_after_device_hit_loss(req)
+@@ -4272,6 +4287,8 @@
                  has_chunked_req=(self.chunked_req is not None),
                  truncation_align_size=self.truncation_align_size,
              )
@@ -132,10 +147,22 @@ diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/manager
 
              if self.enable_lora:
                  running_loras.add(req.lora_id)
+diff --git a/python/sglang/srt/managers/schedule_policy.py b/python/sglang/srt/managers/schedule_policy.py
+--- a/python/sglang/srt/managers/schedule_policy.py
++++ b/python/sglang/srt/managers/schedule_policy.py
+@@ -1425,6 +1425,8 @@
+                 return AddReqResult.NO_TOKEN
+         request_slot_reserve = self._request_slot_reserve_for_req(req)
+         total_tokens += request_slot_reserve
++        from sglang.srt.managers.contextkv_compute import pending_host_tokens
++        total_tokens += pending_host_tokens(self, req)
+
+         # The temporary pin excludes this prefix from the evictable budget.
+         # Selection itself neither allocates slots nor materializes host hits.
 diff --git a/python/sglang/srt/managers/scheduler_components/output_streamer.py b/python/sglang/srt/managers/scheduler_components/output_streamer.py
 --- a/python/sglang/srt/managers/scheduler_components/output_streamer.py
 +++ b/python/sglang/srt/managers/scheduler_components/output_streamer.py
-@@ -167,6 +167,9 @@
+@@ -203,6 +203,9 @@
                  # because of the one additional delayed token. This "continue" prevented the dummy output.
                  continue
 
@@ -145,58 +172,58 @@ diff --git a/python/sglang/srt/managers/scheduler_components/output_streamer.py 
              acc.accept(req=req)
              self._maybe_log_time_stats(req=req)
 
-@@ -400,7 +403,8 @@
+@@ -251,7 +254,7 @@
+
+     def is_request_level_customized_info_key(self, key: str) -> bool:
+         """Whether a customized-info value is emitted once rather than token-sliced."""
+-        return False
++        return key == "contextkv_compute"
+
+     def _maybe_log_time_stats(self, *, req: Req) -> None:
+         if (
+@@ -490,7 +493,8 @@
          output_ids_ = req.output_ids_through_stop
          self.output_ids.append(output_ids_[send_token_offset:])
          req.send_token_offset = len(output_ids_)
 -        self.prompt_tokens.append(len(req.origin_input_ids))
 +        compute_state = getattr(req, "contextkv_compute_state", None)
 +        self.prompt_tokens.append(len(compute_state.input_ids) if compute_state else len(req.origin_input_ids))
-
-         if not self.rust_server_mode:
-             # Everything below feeds the Python DetokenizerManager /
-@@ -591,6 +595,9 @@
-         current_output_len = len(self.output_ids[-1])
-         if req.customized_info is not None:
-             for key, req_values in req.customized_info.items():
-+                if key == "contextkv_compute":
-+                    self.customized_info.setdefault(key, [[] for _ in self.output_ids[:-1]]).append(req_values)
-+                    continue
-                 if key not in self.customized_info:
-                     self.customized_info[key] = [
-                         [None] * len(prev_output_ids)
+         self.reasoning_tokens.append(req.reasoning_tokens)
+         self.cached_tokens.append(req.cached_tokens)
+         # Index-aligned with the batch items so mixed batches resolve per-item
 diff --git a/python/sglang/srt/model_executor/forward_batch_info.py b/python/sglang/srt/model_executor/forward_batch_info.py
 --- a/python/sglang/srt/model_executor/forward_batch_info.py
 +++ b/python/sglang/srt/model_executor/forward_batch_info.py
-@@ -936,6 +936,8 @@
-                 == model_runner.ps.attn_dcp_rank
+@@ -1301,6 +1301,8 @@
+                 ret.positions % parallel.attn_dcp_size == parallel.attn_dcp_rank
              )
 
 +        from sglang.srt.managers.contextkv_compute import attach_compute_batch
-+        attach_compute_batch(ret, batch)
++        attach_compute_batch(ret, batch, model_runner)
          return ret
 
      def _maybe_init_non_generation_fields(self, batch: ScheduleBatch):
 diff --git a/python/sglang/srt/models/qwen3.py b/python/sglang/srt/models/qwen3.py
 --- a/python/sglang/srt/models/qwen3.py
 +++ b/python/sglang/srt/models/qwen3.py
-@@ -449,6 +449,12 @@
+@@ -503,7 +503,12 @@
+             alt_stream=alt_stream,
          )
 
-
+-    def forward(
 +    def forward(self, input_ids, positions, forward_batch, input_embeds=None, pp_proxy_tensors=None):
 +        from sglang.srt.managers.contextkv_compute import forward_qwen
-+        return forward_qwen(self, super().forward, input_ids, positions, forward_batch,
++        return forward_qwen(self, self._forward_native, input_ids, positions, forward_batch,
 +                            input_embeds, pp_proxy_tensors)
 +
-+
- class Qwen3ForCausalLM(nn.Module):
-     # BitandBytes specific attributes
-     default_bitsandbytes_target_modules = [
++    def _forward_native(
+         self,
+         input_ids,
+         positions,
 diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
 --- a/python/sglang/srt/model_executor/model_runner.py
 +++ b/python/sglang/srt/model_executor/model_runner.py
-@@ -1655,8 +1655,10 @@
+@@ -1988,8 +1988,10 @@
                  if self.device == "cpu"
                  else forward_batch.forward_mode.is_cuda_graph
              )
@@ -208,7 +235,7 @@ diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/sr
                  and self.decode_cuda_graph_runner
                  and self.decode_cuda_graph_runner.can_run_graph(forward_batch)
              )
-@@ -1702,6 +1704,7 @@
+@@ -2035,6 +2037,7 @@
                  )
              elif (
                  forward_batch.forward_mode.is_extend(include_draft_extend_v2=True)
@@ -216,72 +243,40 @@ diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/sr
                  and not isinstance(self.prefill_cuda_graph_runner, EagerRunner)
                  and self.prefill_cuda_graph_runner is not None
                  and self.prefill_cuda_graph_runner.can_run_graph(forward_batch)
-diff --git a/python/sglang/srt/mem_cache/unified_radix_cache.py b/python/sglang/srt/mem_cache/unified_radix_cache.py
---- a/python/sglang/srt/mem_cache/unified_radix_cache.py
-+++ b/python/sglang/srt/mem_cache/unified_radix_cache.py
-@@ -725,10 +725,11 @@
-                 segments.append((kv_indices_full[tail_free_start:], tail_free_start))
-             self.token_to_kv_pool_allocator.free_segments(segments)
-         else:
--            self.token_to_kv_pool_allocator.free_segment(
--                kv_indices[req.cache_protected_len :],
--                start_pos=req.cache_protected_len,
--            )
-+            from sglang.srt.managers.contextkv_compute import private_release_segments
-+            self.token_to_kv_pool_allocator.free_segments([
-+                (kv_indices[first:last], first) for first, last in
-+                private_release_segments(req, req.cache_protected_len, kv_len_to_handle)
-+            ])
-
-         self._dec_req_lock(req, skip_swa=req.swa_prefix_lock_released)
-
-diff --git a/python/sglang/srt/managers/tokenizer_control_mixin.py b/python/sglang/srt/managers/tokenizer_control_mixin.py
---- a/python/sglang/srt/managers/tokenizer_control_mixin.py
-+++ b/python/sglang/srt/managers/tokenizer_control_mixin.py
-@@ -91,7 +91,10 @@
- # Declarative spec: (attr_name_prefix, response_type[, mode])
- # Each entry creates self.{prefix}_communicator and registers
- # response_type -> communicator.handle_recv in the dispatch table.
-+from sglang.srt.managers.io_struct import ContextKVControlReqInput, ContextKVControlReqOutput
-+
- _COMMUNICATOR_SPECS = [
-+    ("contextkv", ContextKVControlReqOutput),
-     ("init_weights_update_group", InitWeightsUpdateGroupReqOutput),
-     ("destroy_weights_update_group", DestroyWeightsUpdateGroupReqOutput),
-     ("update_weights_from_distributed", UpdateWeightsFromDistributedReqOutput),
-@@ -151,6 +154,11 @@
-     FanOutCommunicator, as opposed to data-plane inference requests multiplexed by rid.
-     """
-
-+    async def contextkv_control(self, action, payload):
-+        self.auto_create_handle_loop()
-+        results = await self.contextkv_communicator(ContextKVControlReqInput(action=action, payload=payload))
-+        return results[0].payload
-+
-     def init_communicators(self: TokenizerManager, server_args: ServerArgs):
-         dispatch_pairs = []
-         for spec in _COMMUNICATOR_SPECS:
+diff --git a/python/sglang/srt/mem_cache/common.py b/python/sglang/srt/mem_cache/common.py
+--- a/python/sglang/srt/mem_cache/common.py
++++ b/python/sglang/srt/mem_cache/common.py
+@@ -430,7 +430,8 @@
+         req.refresh_fill_ids()
+         tree_cache.checkpoint(req, up_to=owned_kv_len)
+     # The protected prefix is not this req's to free.
+-    tree_cache.free_kv_row(req.kv, [(req.kv.cache_protected_len, owned_kv_len)])
++    from sglang.srt.managers.contextkv_compute import private_release_segments
++    tree_cache.free_kv_row(req.kv, private_release_segments(req, req.kv.cache_protected_len, owned_kv_len))
+     tree_cache.unlock(req.lock)
+     req.lock = None
+     _release_overallocated_kv_indices(
 diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
 --- a/python/sglang/srt/entrypoints/http_server.py
 +++ b/python/sglang/srt/entrypoints/http_server.py
-@@ -963,6 +963,24 @@
-         return _create_error_response(e)
+@@ -1022,6 +1022,24 @@
+         raise ValueError("decision_layout is set only by /v1/systemone")
 
 
 +@app.post("/context/engine/info")
-+@auth_level(AuthLevel.ADMIN)
++@auth_level(AuthLevel.ADMIN_OPTIONAL)
 +async def contextkv_info(request: Request):
 +    return await _global_state.tokenizer_manager.contextkv_control("info", await request.json())
 +
 +
 +@app.post("/context/metrics")
-+@auth_level(AuthLevel.ADMIN)
++@auth_level(AuthLevel.ADMIN_OPTIONAL)
 +async def contextkv_metrics(request: Request):
 +    return await _global_state.tokenizer_manager.contextkv_control("metrics", await request.json())
 +
 +
 +@app.post("/context/profile/prepare")
-+@auth_level(AuthLevel.ADMIN)
++@auth_level(AuthLevel.ADMIN_OPTIONAL)
 +async def contextkv_prepare(request: Request):
 +    return await _global_state.tokenizer_manager.contextkv_control("profile_prepare", await request.json())
 +
@@ -289,36 +284,3 @@ diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/en
  @app.api_route("/flush_cache", methods=["GET", "POST"])
  @auth_level(AuthLevel.ADMIN_OPTIONAL)
  async def flush_cache(timeout: float = Query(0.0, ge=0.0)):
-diff --git a/python/sglang/srt/layers/deep_gemm_wrapper/configurer.py b/python/sglang/srt/layers/deep_gemm_wrapper/configurer.py
---- a/python/sglang/srt/layers/deep_gemm_wrapper/configurer.py
-+++ b/python/sglang/srt/layers/deep_gemm_wrapper/configurer.py
-@@ -15,6 +15,8 @@
-
-
- def _compute_enable_deep_gemm():
-+    if not envs.SGLANG_ENABLE_JIT_DEEPGEMM.get():
-+        return False
-     sm_version = get_device_sm()
-     if (_is_cuda and sm_version < 90) or (_is_musa and sm_version < 31):
-         return False
-@@ -29,7 +31,7 @@
-     except ImportError:
-         return False
-
--    return envs.SGLANG_ENABLE_JIT_DEEPGEMM.get()
-+    return True
-
-
- ENABLE_JIT_DEEPGEMM = _compute_enable_deep_gemm()
-diff --git a/python/sglang/srt/managers/schedule_policy.py b/python/sglang/srt/managers/schedule_policy.py
---- a/python/sglang/srt/managers/schedule_policy.py
-+++ b/python/sglang/srt/managers/schedule_policy.py
-@@ -1227,6 +1227,8 @@
-         # Shared Mamba pool: fold the new mamba state's shared-gap cost into
-         # `total_tokens` so both `rem_total_tokens` gates reflect the joint budget.
-         total_tokens += self._mamba_gap_budget_for_req(req)
-+        from sglang.srt.managers.contextkv_compute import pending_host_tokens
-+        total_tokens += pending_host_tokens(self, req)
-
-         # adjusting the input_tokens based on host_hit_length and page_size
-         real_input_tokens = cand_extend_input_len - req.host_hit_length

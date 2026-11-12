@@ -1,10 +1,8 @@
 # GPU 部署
 
-使用容器默认 `python3`。生成模型目录为 `/data/models/qwen3-32b`，模型声明位于 `configs/model_scopes/qwen3-32b.local.json`；共享辅助模型目录在 `configs/study.yaml` 配置。
+使用容器默认 `python3` 与已安装的 SGLang 0.5.23。准备脚本在当前 SGLang 源码内应用项目补丁，依赖沿用容器环境。生成模型目录为 `/data/models/qwen3-32b`，模型声明位于 `configs/model_scopes/qwen3-32b.local.json`；共享辅助模型目录在 `configs/study.yaml` 配置。
 
 ```bash
-python3 -m pip install --no-deps -e .
-python3 scripts/prepare_sglang.py --checkout vendor/sglang-0.5.18
 CONTEXTKV_MODEL_SCOPE_PATH=configs/model_scopes/qwen3-32b.local.json bash scripts/bootstrap_sglang.sh
 source runs/engine-runtime.env
 CUDA_VISIBLE_DEVICES=0 bash scripts/launch_sglang.sh --port 30000
