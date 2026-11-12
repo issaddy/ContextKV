@@ -1,11 +1,10 @@
 # 实测指标
 
-[最终指标汇总](container-final-metrics-20261112.json) 保存 65 组队列的质量、完成率、P95、token 和资源结果，以及证据选择、记录投影、阅读重组与缓存保留的机制测量。
+[本轮完整报告](../docs/study/final_results.md)包含四个 benchmark 各自 50 题的普通问答、ContextKV、LlamaIndex 比较，实际多轮历史、各场景、辅助训练、物理资源及缓存配对。
 
-| 内容 | JSON 字段 |
+| 文件 | 内容 |
 |---|---|
-| 各 benchmark、方法及并发的结果 | `queues` |
-| 相同请求下 Native 与需求保留的结果 | `cache_cooperation` |
-| 证据选择、确定性计算、READ/ANSWER 前缀复用 | `mechanisms` |
+| [本轮指标](evaluation-20261112.json) | `queue_results`：39组完成运行，含交付失败；`incomplete_attempts`：12组中断运行的已付费用；`auxiliary`：训练结果；`cache_pairs`：4个缓存配对；`group_continuations`：已有事实续跑 |
+| [已有最终指标](container-final-metrics-20261112.json) | 65组此前的最终指标及证据选择、记录投影、阅读重组、READ/ANSWER 前缀的机制测量，保留各自协议 |
 
-每组结果保留当时的任务分母、指标定义和方法名称。新评测由 `bench.capacity_workflow` 输出最终指标，使用 `profiling.final_study_index` 生成对比表。
+各 benchmark 分别比较；作者历史与方法自身历史分别报告。本轮完整队列分数包含未交付的零质量，已交付但未评分的项目保留缺失区间。中断运行不参与主比较。原始上下文、候选与评分日志在汇总后清理，模型保留在容器。

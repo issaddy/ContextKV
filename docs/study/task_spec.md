@@ -45,7 +45,7 @@ Qwen3-32B 保持固定。训练按已定位的瓶颈选择：
 
 默认使用 teacher 任务解释、ranked 选材与 `next_use` 需求分配。任务学生尚未输出跨轮 READ 复用合同；查询资产可通过 `retrieval.task_query_asset` 单独接入。辅助训练按会话划分 train/dev，200/40 是配置选项，实际规模由有效数据与待解决问题决定。
 
-执行输入不变的既有动作配对可以 CPU 刷新预算特征并重拟合；输入或动作变化时更新对应真实分支。[运行入口](final_runbook.md)
+分支交付后在标注阶段编译预算特征，保留紧凑特征、质量和实际费用，再在 CPU 拟合收益资产；输入或动作变化时采集对应真实分支。[运行入口](final_runbook.md)
 
 ## 五、数据与评价
 
@@ -56,7 +56,7 @@ Qwen3-32B 保持固定。训练按已定位的瓶颈选择：
 | 构造机制任务 | 条件/版本与长文统计的独立开发任务 | `configs/study_mechanisms.yaml` |
 | MTRAG-UN 诊断 | 选中原问题、作者历史及给定材料 | `configs/study_mtrag_un.yaml` |
 
-公开主比较包含 MultiDoc2Dial、MT-RAG Cloud、VersionQA 和 Loong Set1。每个 benchmark 独立选题、评分与报告；下一轮各选 50 题，同一 benchmark 内各方法共用 task ID 清单。实际历史重放按会话顺序选择连续任务。
+公开主比较包含 MultiDoc2Dial、MT-RAG Cloud、VersionQA 和 Loong Set1。每个 benchmark 独立选题、评分与报告；本轮各选 50 题，同一 benchmark 内各方法共用 task ID 清单。实际历史重放按会话顺序选择连续任务。
 
 MultiDoc2Dial 用 F1/EM；MT-RAG 用作者 MTRAGEval；VersionQA 用作者二值 rubric；Loong 用作者百分制 rubric、Perfect Rate 及领域/难度分组。评分记录实际 judge。题目分母来自选中清单，完成率、未评分项和已付成本随结果报告。[数据与评价](../data_and_evaluation.md)
 
