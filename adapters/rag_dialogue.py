@@ -1,7 +1,7 @@
 """History-aware retrieval, ranked context concatenation, one answer call."""
 from __future__ import annotations
 
-from .dialogue import DialogueCall, DialogueResult
+from .dialogue import DialogueCall
 from controller.evidence import assign_references
 from controller.schema import EvidenceSpan, Message, history_messages
 
@@ -21,18 +21,7 @@ async def run_dialogue(question, history, *, retrieve_callback, complete_callbac
     system = Message("system", system_prompt)
     while messages and len(template.render((system, *messages, Message("user", question))).input_ids) > limit:
         messages = messages[len(groups.pop(0)):]
-    calls = []
-    query = question
-    if messages:
-        rewrite = Message("system", "Rewrite the latest question as a standalone retrieval query using the "
-            "conversation. Preserve its conditions and version. Return only the rewritten question.")
-        rewrite_messages = (rewrite, *messages, Message("user", question))
-        while len(template.render(rewrite_messages).input_ids) > limit and messages:
-            messages = messages[len(groups.pop(0)):]
-            rewrite_messages = (rewrite, *messages, Message("user", question))
-        call = DialogueCall("rag:condense", "condense", rewrite_messages, output_tokens, (), ())
-        calls.append(call)
-        query = await complete_callback(call)
+    query = "\n".join([f"{message.role}: {message.content}" for message in messages] + [question])
     retrieved = tuple(await retrieve_callback(query))
     blocks = tuple({block.key: block for block in retrieved}.values())
     references = dict((key, ref) for ref, key in assign_references(block.key for block in blocks))
@@ -74,7 +63,5 @@ async def run_dialogue(question, history, *, retrieve_callback, complete_callbac
     final_messages, spans = render(pieces)
     shown = tuple(block for block, _ in pieces)
     reference_map = tuple((references[block.key], block.key) for block in shown)
-    call = DialogueCall("rag:answer", "answer", final_messages, output_tokens, shown, reference_map, spans)
-    calls.append(call)
-    answer = await complete_callback(call)
-    return DialogueResult(answer, query, shown, reference_map, tuple(calls), "ordinary-rag")
+    call = DialogueCall("rag:answer", final_messages, shown, reference_map, spans)
+    await complete_callback(call)

@@ -65,10 +65,10 @@ class EvidenceHeads(nn.Module):
         self.set_utility = nn.Sequential(nn.Linear(256 * 2 + 2, 128), nn.GELU(), nn.Linear(128, 1))
 
     def field_logits(self, states, need_vectors):
-        # Broadcasting the small head reuses the evidence backbone for every Need.
-        queries = self.query(need_vectors)
-        a = queries[:, None, :].expand(-1, states.shape[0], -1)
-        b = states[None, :, :].expand(queries.shape[0], -1, -1)
+        queries = F.layer_norm(self.query(need_vectors), (states.shape[-1],))
+        tokens = F.layer_norm(states, (states.shape[-1],))
+        a, b = queries[:, None, :], tokens[None, :, :]
+        # The product gives each Need its own token ordering in each BIO/role logit.
         return self.field(b + a + b*a).view(len(queries), len(states), len(FIELD_ROLES), 3)
 
     def utility(self, embeddings, relevance, selected):

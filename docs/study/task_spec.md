@@ -25,7 +25,7 @@ Qwen3-32B 不训练。共享查询与证据骨干的适配器、任务/字段/�
 
 ## 验收
 
-主比较保留普通文档问答、ContextKV、LlamaIndex。MultiDoc2Dial、MT-RAG Cloud、VersionQA、Loong Set1 分别选题和评分；默认每项 10 题，`--limit-turns` 可指定更大或更小的单 benchmark 规模。
+主比较保留普通文档问答、ContextKV、LlamaIndex。普通问答将预算内真实历史与当前问题直接拼接检索，常规组织证据后通过 Native 生成一次答案；LlamaIndex 保留作者的 condense/refine。MultiDoc2Dial、MT-RAG Cloud、VersionQA、Loong Set1 分别选题和评分；默认每项 10 题，`--limit-turns` 可指定更大或更小的单 benchmark 规模。
 
 公开题使用作者参考历史；多轮系统重放使用各方法自己真实提交的历史。完整响应从请求到达计到最终答案完成，包含排队、检索、辅助处理、必要计算与生成。GPU/Host 资源按批次物理占用积分计量。
 

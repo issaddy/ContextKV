@@ -34,7 +34,7 @@ def history(row):
                  for turn, values in sorted(grouped.items()))
 
 
-async def score_answers(rows, endpoint, *, concurrency):
+async def score_answers(rows, endpoint, *, model, concurrency):
     """Use the public F1 for MultiDoc; structured training uses reference correctness."""
     import httpx
     from bench.official import reference_overlap
@@ -51,7 +51,7 @@ async def score_answers(rows, endpoint, *, concurrency):
                 return
             async with semaphore:
                 response = await client.post(endpoint.rstrip("/") + "/v1/chat/completions", json={
-                    "model": "Qwen3-32B", "temperature": 0, "max_tokens": 256,
+                    "model": model, "temperature": 0, "max_tokens": 256,
                     "chat_template_kwargs": {"enable_thinking": False},
                     "response_format": {"type": "json_object"},
                     "messages": [{"role": "system", "content":
@@ -180,7 +180,7 @@ async def collect(args):
     attributed = attribute_physical(sampler.samples, windows)
     for item in answers:
         item["costs"].update(attributed[item["call_id"]])
-    await score_answers(answers, run.engine.base_url, concurrency=args.concurrency)
+    await score_answers(answers, run.engine.base_url, model=run.model.name, concurrency=args.concurrency)
     records = []
     for row, observed in outputs:
         if args.stage == "sets":

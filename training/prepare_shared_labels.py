@@ -135,6 +135,7 @@ def prepare_states(args, tokenizer):
 
 async def prepare_labels(args):
     import httpx
+    from itertools import cycle
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.query_model)
     states = prepare_states(args, tokenizer)
@@ -147,10 +148,11 @@ async def prepare_labels(args):
     output.parent.mkdir(parents=True, exist_ok=True)
     completed = {row["task_id"] for row in (json.loads(line) for line in output.read_text().splitlines() if line.strip())} if output.exists() else set()
     semaphore = asyncio.Semaphore(args.concurrency)
+    endpoints = cycle(args.endpoint)
     async with httpx.AsyncClient(timeout=None) as client:
         async def complete(instruction, value):
             async with semaphore:
-                response = await client.post(args.endpoint.rstrip("/")+"/v1/chat/completions", json={
+                response = await client.post(next(endpoints).rstrip("/")+"/v1/chat/completions", json={
                     "model": args.teacher_model, "messages": [{"role": "system", "content": instruction},
                         {"role": "user", "content": json.dumps(value, ensure_ascii=False)}],
                     "temperature": 0, "max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": False},
@@ -182,8 +184,8 @@ def main():
     parser.add_argument("--source", default="data/multidoc2dial/source")
     parser.add_argument("--states", action="append", default=[], help="Additional source-grounded training states in the same row format")
     parser.add_argument("--query-model", required=True)
-    parser.add_argument("--endpoint", default="http://127.0.0.1:30000")
-    parser.add_argument("--teacher-model", default="Qwen3-32B")
+    parser.add_argument("--endpoint", nargs="+", default=["http://127.0.0.1:30000"])
+    parser.add_argument("--teacher-model", default="/data/models/qwen3-32b")
     parser.add_argument("--output", required=True)
     parser.add_argument("--train-states", type=int, default=24)
     parser.add_argument("--dev-states", type=int, default=8)

@@ -8,15 +8,12 @@ messages are its exact visible input, including the current compact/refine slice
 from __future__ import annotations
 
 from dataclasses import replace
-from importlib.metadata import version
+from itertools import count
 from typing import Awaitable, Callable
 
 from controller.evidence import assign_references
 from controller.schema import EvidenceBlock, EvidenceSpan, Message, TurnRecord, history_messages
-from .dialogue import DialogueCall, DialogueResult
-
-
-LLAMAINDEX_SOURCE_COMMIT = "f12d46acab73f5b2243ef49c2f00101617b38ce4"
+from .dialogue import DialogueCall
 
 
 async def run_dialogue(
@@ -31,9 +28,8 @@ async def run_dialogue(
     history_tokens: int,
     system_prompt: str,
     model_name: str = "Qwen3-32B",
-) -> DialogueResult:
+) -> None:
     """Execute one external QA; every model call uses the supplied executor."""
-    framework_version = version("llama-index-core")
     from llama_index.core.base.llms.types import ChatMessage, ChatResponse, CompletionResponse, LLMMetadata
     from llama_index.core.callbacks import CallbackManager
     from llama_index.core.chat_engine import CondenseQuestionChatEngine
@@ -48,8 +44,8 @@ async def run_dialogue(
     from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    source_blocks, reference_map, condensed_query = (), (), ""
-    calls = []
+    source_blocks, reference_map = (), ()
+    call_ids = count()
 
     # Observe upstream packing without replacing its history or compact algorithm.
     packed_sources = {}
@@ -101,9 +97,8 @@ async def run_dialogue(
                 spans.extend(replace(span, message_index=index, start=first+span.start,
                     end=first+span.end) for span in packed_sources[context])
                 stage = "refine" if "<llamaindex_existing_answer>" in message.content else "compact"
-        call = DialogueCall(f"llamaindex:{stage}:{len(calls)}", stage, messages,
-            output_tokens, source_blocks, reference_map, tuple(spans))
-        calls.append(call)
+        call = DialogueCall(f"llamaindex:{stage}:{next(call_ids)}", messages,
+            source_blocks, reference_map, tuple(spans))
         return await complete_callback(call)
 
     class CallbackLLM(CustomLLM):
@@ -135,9 +130,8 @@ async def run_dialogue(
             raise NotImplementedError("the reference uses asynchronous project retrieval")
 
         async def _aretrieve(self, query_bundle):
-            nonlocal source_blocks, reference_map, condensed_query
-            condensed_query = query_bundle.query_str
-            source_blocks = tuple(await retrieve_callback(condensed_query))
+            nonlocal source_blocks, reference_map
+            source_blocks = tuple(await retrieve_callback(query_bundle.query_str))
             reference_map = assign_references(block.key for block in source_blocks)
             references = {key: reference for reference, key in reference_map}
             nodes = []
@@ -185,8 +179,6 @@ async def run_dialogue(
                            for message in history_messages(history)])
         chat_engine = CondenseQuestionChatEngine.from_defaults(query_engine=query_engine,
             llm=condense_llm, memory=memory)
-        response = await chat_engine.achat(question)
+        await chat_engine.achat(question)
     finally:
         await database.dispose()
-    return DialogueResult(str(response), condensed_query, source_blocks, reference_map,
-                                   tuple(calls), framework_version)

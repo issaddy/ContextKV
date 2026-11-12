@@ -117,6 +117,9 @@ class CooperativeController:
                 output_tokens = self.policy.max_new_tokens if output_tokens is None else output_tokens
                 if len(request.input_ids) + output_tokens > self.policy.max_total_model_tokens:
                     raise ValueError("selected evidence and results exceed the answer window")
+                if (totals["input_tokens"] + totals["output_tokens"] + len(request.input_ids) + output_tokens
+                        > self.settings["max_total_tokens"]):
+                    raise ValueError("the remaining computation exceeds the request token budget")
                 result = await self.engine.compute(request, session_id=session_id,
                     request_id=f"{request_id}:{name}", max_new_tokens=output_tokens,
                     mode=self.settings.get("kv_mode", "auto") if self.dialogue_mode == "contextkv" else "exact",
