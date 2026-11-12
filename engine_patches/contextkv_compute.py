@@ -88,7 +88,8 @@ class ComputeRuntime:
         metadata = dict(metadata)
         session = metadata['session_id']
         scope = metadata.get('cache_scope', 'shared')
-        self.demands[session] = {(scope, item['source_id']): item for item in metadata.get('demand', ())}
+        request_demand = {(scope, item['source_id']): item for item in metadata.get('demand', ())}
+        self.demands[session] = request_demand
         self._refresh_priorities()
         ids = tuple(req.origin_input_ids)
         page = self.cache.page_size
@@ -140,7 +141,7 @@ class ComputeRuntime:
         # another block never finances this block's independent construction.
         cold_consumers = {}
         for source_id, start, end, match, block_ids in blocks:
-            item = self.demands[session].get(source_id)
+            item = request_demand.get(source_id)
             if item is not None and match.device_prefix_len+match.host_hit_length < len(block_ids):
                 consumers = cold_consumers.setdefault(tuple(block_ids), (end-start, set()))[1]
                 consumers.update(item.get('consumer_ids', ()) or range(int(item.get('uses', 0))))
