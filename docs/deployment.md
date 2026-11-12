@@ -33,6 +33,6 @@ python3 -m controller --config configs/study.yaml serve --host 0.0.0.0 --port 80
 
 SGLang 的 `/generate` 同次接收输入、原文块和后续需求。`contextkv_compute.mode` 支持 `exact`、`infoflow`、`auto`。`/context/metrics` 返回必要缓存计数和累计 KV 占用；`/context/profile/prepare` 用于队列起点清缓存。
 
-首次 GPU 运行先用同一小请求比较 exact 与 infoflow，校准独立块构建和完整 prefill 的费用，再运行 auto。已完成一次短输入配对：独立块热复用减少了 prefill 工作，完整响应仍以精确执行更快；auto 使用包含解码的完整费用选择路径。
+首次 GPU 运行先用同一小请求比较 exact 与 infoflow，校准独立块构建和完整 prefill 的费用，再运行 auto。[已完成的短输入配对](../results/infoflow-execution-20261113.json)中，独立块热复用减少了 prefill 工作，完整响应仍以精确执行更快；auto 使用包含解码的完整费用选择路径。
 
 引擎补丁与运行实现见 [SGLang 集成](../engine_patches/README.md)。SSH 工作完成后关闭会话；仍需继续操作时复用现有连接。

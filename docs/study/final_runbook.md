@@ -1,6 +1,6 @@
 # ContextKV 运行手册
 
-当前版本使用共享查询/证据编码、结构化文档计算、多步价值停止和 SGLang InfoFlow 执行。共享索引已建立，SGLang 精确生成、独立块构建、GPU 热复用及 Host 备份已实际跑通；正在完成辅助训练，逐 benchmark 端到端结果尚未生成。
+当前版本使用共享查询/证据编码、结构化文档计算、多步价值停止和 SGLang InfoFlow 执行。共享索引及辅助训练已完成：54 个训练状态、23 个开发状态，集合效用使用 274 次实际答案，停止监督使用 47 条轨迹、92 次终点答案。SGLang 精确生成、独立块构建、GPU 热复用及 Host 备份已实际跑通；逐 benchmark 端到端评测正在运行。
 
 ## 路径与环境
 
@@ -43,7 +43,7 @@ python3 -m training.prepare_shared_labels \
 python3 -m training.shared_training query \
   --model models/qwen3-embedding-0.6b \
   --data data/training/shared/labels.jsonl \
-  --output models/shared-query --device cuda:2
+  --output models/shared-query --device cuda:2 --epochs 5
 
 python3 -m training.shared_index \
   --corpus data/multidoc2dial/test/passages.jsonl \
@@ -55,7 +55,7 @@ python3 -m training.shared_training evidence \
   --model models/jina-reranker-v3.5 \
   --query-model models/qwen3-embedding-0.6b --query-asset models/shared-query \
   --data data/training/shared/labels.jsonl \
-  --output models/shared-evidence --device cuda:3 --field-only
+  --output models/shared-evidence --device cuda:3 --field-only --epochs 3
 
 python3 -m training.collect_shared_values sets \
   --config configs/study.yaml --data data/training/shared/labels.jsonl \
@@ -65,7 +65,7 @@ python3 -m training.shared_training evidence \
   --model models/jina-reranker-v3.5 \
   --query-model models/qwen3-embedding-0.6b --query-asset models/shared-query \
   --init-asset models/shared-evidence --data data/training/shared/sets.jsonl \
-  --output models/shared-evidence --device cuda:3
+  --output models/shared-evidence --device cuda:3 --epochs 3
 
 python3 -m training.collect_shared_values stop \
   --config configs/study.yaml --data data/training/shared/labels.jsonl \
