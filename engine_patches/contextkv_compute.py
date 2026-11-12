@@ -530,8 +530,7 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
                 first = batch.extend_prefix_lens_cpu[index]
                 end = first + length
                 if first == 0:
-                    state.row = torch.zeros(len(state.input_ids) + state.request.sampling_params.max_new_tokens + 1,
-                                            device=input_ids.device, dtype=torch.int64)
+                    state.row = work_row.new_zeros(len(state.input_ids) + state.request.sampling_params.max_new_tokens + 1)
                     state.local_positions = torch.arange(len(state.row), device=input_ids.device)
                     state.prompt = torch.tensor(state.prompt_positions, device=input_ids.device)
                     state.scores = torch.zeros(len(state.input_ids), device=input_ids.device)
