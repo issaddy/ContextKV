@@ -6,7 +6,6 @@ All offsets are Python character offsets in the supplied, unchanged passage.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-import json
 import re
 
 
@@ -125,7 +124,7 @@ def _with_notes(table, notes):
     return replace(table, relations=tuple(relations), source_notes=notes)
 
 
-def extract_table_relations(text: str, *, mode: str = "legacy") -> tuple[TableRelations, ...]:
+def extract_table_relations(text: str) -> tuple[TableRelations, ...]:
     """Extract explicit single-header Markdown or captioned numeric row tables.
 
     Flattened text must have a numbered Table caption, one nonnumeric header,
@@ -133,8 +132,6 @@ def extract_table_relations(text: str, *, mode: str = "legacy") -> tuple[TableRe
     Its unsplit header is retained: lost column boundaries are never reconstructed.
     Ragged rows, missing row labels, and fenced/indented code are left untouched.
     """
-    if mode not in {"legacy", "explicit"}:
-        raise ValueError("table structure mode must be legacy or explicit")
     lines, excluded, offset, fence = [], set(), 0, None
     for raw in text.splitlines(keepends=True):
         line = _span(text, offset, offset + len(raw))
@@ -170,7 +167,7 @@ def extract_table_relations(text: str, *, mode: str = "legacy") -> tuple[TableRe
                     rows.extend(TableRelation(cells[0], column, value, _unit(text, value, column), lines[end])
                                 for column, value in zip(headers[1:], cells[1:]))
                 end += 1
-            if valid and rows:
+            if valid:
                 previous = i - 1
                 while previous >= 0 and not lines[previous].text:
                     previous -= 1
@@ -207,37 +204,5 @@ def extract_table_relations(text: str, *, mode: str = "legacy") -> tuple[TableRe
                 i = end
                 continue
         i += 1
-    if mode == "explicit":
-        from adapters.table_structure import inspect_explicit_structure
-        return inspect_explicit_structure(text, tuple(tables))[0]
-    return tuple(tables)
-
-
-def render_table_relations(reference_id: str, tables: tuple[TableRelations, ...]) -> str:
-    """Render a compact optional current-turn supplement, not replacement evidence."""
-    if not tables:
-        return ""
-    def literal(span):
-        return f"{json.dumps(span.text, ensure_ascii=False)}@{span.start}:{span.end}"
-    output = [f"Table row associations from [{reference_id}] (literal passage character offsets). "
-              "Each row keeps its source scope; this annotation adds no conditions or relationships."]
-    for table in tables:
-        output.append(f"Table@{table.span.start}:{table.span.end} ({table.syntax})")
-        if table.caption:
-            output.append("caption=" + literal(table.caption))
-        output.append(("flattened_header=" if table.syntax in {"captioned_numeric_rows", "unnumbered_numeric_rows"} else "headers=")
-                      + "; ".join(literal(h) for h in table.headers))
-        for relation in table.relations:
-            fields = ["object=" + literal(relation.object)]
-            if table.syntax == "markdown":
-                fields.append("column=" + literal(relation.column))
-            fields.append("value=" + literal(relation.value))
-            if relation.unit:
-                fields.append("unit=" + literal(relation.unit))
-            if relation.parent_path:
-                fields.append("explicit_source_parent_path=" + " > ".join(literal(p) for p in relation.parent_path))
-            if relation.notes:
-                fields.append("marked_source_notes=" + ",".join(f"{n.start}:{n.end}" for n in relation.notes))
-            output.append("; ".join(fields))
-        output.extend("source note (no inferred row scope)=" + literal(note) for note in table.source_notes)
-    return "\n".join(output)
+    from adapters.table_structure import inspect_explicit_structure
+    return inspect_explicit_structure(text, tuple(tables))[0]

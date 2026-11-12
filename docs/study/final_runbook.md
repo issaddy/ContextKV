@@ -1,127 +1,108 @@
-# 当前课题运行入口
+# ContextKV 运行手册
 
-统一业务链为 `DocumentQA.ask → StudyEvidenceProvider → Controller → RequestCompiler/ReadingExecutor → SessionStore`。固定 Qwen3-32B，使用容器默认 `python3`。模块与方法见[架构](../architecture.md)，实验口径见[任务书](task_spec.md)。
+当前版本使用共享查询/证据编码、结构化文档计算、多步价值停止和 SGLang InfoFlow 执行。代码整合与少量 CPU 协议检查已进行；以下辅助训练和真实 GPU 端到端运行尚未执行。
 
-## 运行资产
+## 路径与环境
 
-| 内容 | 当前入口 |
-|---|---|
-| 模型服务与原生补丁 | [部署](../deployment.md)、`scripts/launch_sglang.sh` |
-| 问答与阅读配置 | `configs/study.yaml`、`configs/qwen3_32b.yaml` |
-| 公开 benchmark | `configs/study_matrix.yaml` |
-| 实际历史重放 | `configs/study_system_matrix.yaml` |
-| 构造条件/版本及统计任务 | `configs/study_mechanisms.yaml` |
-| 辅助训练 | `configs/auxiliary_training.yaml` |
-| 数据集评分 | `bench.study_scoring` |
-| 最终对比汇总 | `profiling.final_study_index` |
+- 项目：`/home/relay/songjiayun/ContextKV`
+- 固定生成模型：`/data/models/qwen3-32b`
+- 查询骨干：`models/qwen3-embedding-0.6b`
+- 证据骨干：`models/jina-reranker-v3.5`
+- Python：容器默认 `python3`；GPU 使用 0–3。
+- 配置：`configs/study.yaml`；引擎启动见[部署](../deployment.md)。
 
-代码、配置和必要结果数据可以同步；模型、向量及大文件保留在实验容器。GPU 使用范围为 0、1、2、3，实际服务和辅助模型按配置分配设备。
+代码和必要轻量结果可同步；模型文件、向量数组和大日志留在实验容器。
 
-ContextPilot 复用作者 CPU 索引与排列：
+## 数据与索引
 
-```bash
-python3 scripts/prepare_contextpilot.py --checkout vendor/contextpilot
-```
+各 benchmark 分开准备和选题，使用原始问题、参考答案及对应公开评分：
 
-`execution.cache_compilation` 使用 `{mode: contextpilot, checkout: vendor/contextpilot}`；`prefix_retention` 使用 `mode: demand`。默认分配器为 `next_use`，期限候选 15/60/180 秒，保护容量 8192 token；源配置可以声明实际取值。`next_use` 与 `paired_value` 均通过 `pricing_asset` 加载配对估值，没有有效净收益定价时使用 Native。
+| Benchmark | 任务与资料 | 评分 |
+|---|---|---|
+| MultiDoc2Dial | `data/multidoc2dial/{dev,test}/tasks.jsonl`、`passages.jsonl` | F1、EM |
+| MT-RAG Cloud | `data/mtrag/RAG.jsonl`、`data/mtrag-official/cloud.jsonl` | 作者 MTRAGEval |
+| VersionQA | `data/evaluation/versionqa/references.jsonl`、`corpus.jsonl` | 作者二值 rubric |
+| Loong Set1 | `data/loong/set1-v2/tasks.jsonl`，每题附带文档 | 作者百分制 rubric、Perfect Rate |
 
-joint observed 动作默认使用 `action_policy: rule`，不加载收益资产。配置 `action_policy: learned` 显式启用学习策略，资产须匹配 reader、输入协议和成本目标；不兼容时直接报错。新输入协议需要重新采集 frozen branches。更新 Native overlay 后再运行并发软配额实验。
+导入入口为 `adapters.doc2dial`、`adapters.prepare_data`、`bench.versionqa`、`adapters.loong`。已有原始资料与标准题目直接复用。稠密索引使用冻结 Qwen Embedding，需要与本版骨干重新建立；Loong 的随题资料在注册后建立来源索引。
 
-数值 READ 使用 Need 的显式时间条件或局部补读的目标时期，在带明确列头的 Markdown／制表符表格中定位数值，保留原文与表头来源。局部修复按实体、字段和时期分别关闭缺口；提取与恢复确认共用时期判断，财报版本与数据时期分别处理。
+## 辅助训练
 
-## 数据与选题
-
-优先复用已有原始数据、语料和索引。MultiDoc2Dial 任务按当前 user 紧接的一条有效 agent 回复导出，见[接入说明](../guides/doc2dial.md)；MT-RAG Cloud、VersionQA 和 Loong 使用[数据与评价](../data_and_evaluation.md)所列入口。
-
-每个 benchmark 独立选择 50 题，同一 benchmark 的方法共用清单。任务数由清单决定。实际历史重放按会话顺序保留连续问题。`--cohorts` 的 YAML 格式为：
-
-```yaml
-cohorts:
-  test:
-    multidoc2dial: [task-id-1, task-id-2]
-    mtrag: [task-id-1, task-id-2]
-    versionqa: [task-id-1, task-id-2]
-    loong: [task-id-1, task-id-2]
-```
-
-示例中的 ID 替换为对应数据集的实际 task ID。使用 `--datasets` 选择本次数据集，`--split` 默认 `test`。参考历史和实际历史分别运行、分别报告。
-
-## 主比较
-
-默认方法为普通文档问答 `RAG_native`、ContextKV `context_cache_demand` 和 LlamaIndex `LlamaIndex_native`。工作流为普通基线与 LlamaIndex 物化混合召回、发布版重排和常规上下文配置；ContextKV 使用本次冻结的任务、选材和收益资产。
+固定 Qwen3-32B 作为标签和实际答案生成器。查询训练使用会话对齐与任务关系；证据训练先完成字段/来源头，再加入实际答案集合效用；最后采集多步停止轨迹。
 
 ```bash
-python3 -m bench.capacity_workflow \
-  --config "$STUDY_CONFIG" --matrix configs/study_matrix.yaml \
-  --datasets multidoc2dial --cohorts "$COHORTS" \
-  --gain-asset "$B_GAIN" --reader-base-url "$READER_URL" \
-  --online-gpu-devices "$ONLINE_GPUS" \
-  --contextpilot-checkout vendor/contextpilot \
-  --concurrency 1 4 --output "$PUBLIC_OUTPUT"
+python3 -m training.prepare_shared_labels \
+  --source data/multidoc2dial/source \
+  --query-model models/qwen3-embedding-0.6b \
+  --endpoint http://127.0.0.1:30000 \
+  --output data/training/shared/labels.jsonl \
+  --train-states 24 --dev-states 8 --candidates 6 --concurrency 4
+
+python3 -m training.shared_training query \
+  --model models/qwen3-embedding-0.6b \
+  --data data/training/shared/labels.jsonl \
+  --output models/shared-query --device cuda:2
+
+python3 -m training.shared_index \
+  --corpus data/multidoc2dial/test/passages.jsonl \
+  --snapshot multidoc2dial-test \
+  --model models/qwen3-embedding-0.6b \
+  --output data/indexes/multidoc2dial --device cuda:1 --dtype bfloat16
+
+python3 -m training.shared_training evidence \
+  --model models/jina-reranker-v3.5 \
+  --query-model models/qwen3-embedding-0.6b --query-asset models/shared-query \
+  --data data/training/shared/labels.jsonl \
+  --output models/shared-evidence --device cuda:3 --field-only
+
+python3 -m training.collect_shared_values sets \
+  --config configs/study.yaml --data data/training/shared/labels.jsonl \
+  --output data/training/shared/sets.jsonl --concurrency 4
+
+python3 -m training.shared_training evidence \
+  --model models/jina-reranker-v3.5 \
+  --query-model models/qwen3-embedding-0.6b --query-asset models/shared-query \
+  --init-asset models/shared-evidence --data data/training/shared/sets.jsonl \
+  --output models/shared-evidence --device cuda:3
+
+python3 -m training.collect_shared_values stop \
+  --config configs/study.yaml --data data/training/shared/labels.jsonl \
+  --output data/training/shared/stop.jsonl --concurrency 4
+
+python3 -m training.stop_value data/training/shared/stop.jsonl \
+  --output models/shared-stop.pt --device cuda:2 \
+  --seconds-price 0.001 --tail-price 0.001
 ```
 
-按数据集分批执行上述命令。默认每种并发运行一次。多轮实际历史使用 `configs/study_system_matrix.yaml`，构造任务使用 `configs/study_mechanisms.yaml --split dev`。MTRAG-UN 按需使用独立配置。
+MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出与 `study_matrix.yaml` 中的索引目录对应。独立 corpus 的索引构建可以并行。
 
-默认调度沿会话前后依赖推进、思考间隔为零；已有真实固定到达记录时传 `--arrival-plan`。规则决策及普通基线、LlamaIndex 使用 `--reader-profile-id`。未在配置中指定 `action_policy` 时，`capacity_workflow --gain-asset` 显式选择学习策略，绑定 reader、输入协议和输出额度；未传资产则使用规则策略。配置中的显式策略优先。
+标签集按会话分离 train/dev，包含公开训练来源和新构造的关系/版本训练资料。集合样本保存候选集合、实际质量和完整成本；停止样本保存紧凑表示及多步回报需要的费用。必须完成的数值总体由覆盖规则执行，不学习提前停止。
 
-## 机制对照
+## 少量端到端评测
 
-| 问题 | `--methods` |
-|---|---|
-| 来源排列的收益 | `context_native context_cache_order` |
-| 需求保留的新增收益 | `context_cache_order context_cache_demand` |
-| 动作收益决策 | `Rule_contextpilot_joint_demand context_cache_demand` |
-| 跨轮事实复用 | `context_no_fact_reuse context_cache_demand` |
-
-对照共用未改变的模块及本次选题，完整方案结果可以复用。根据主比较结果选取对应数据集和并发补充。
-
-少量固定输入缓存配对使用相同原文、预热、竞争请求和最终问题：
+默认每个 benchmark、每种方法 10 题；可用 `--limit-turns 50` 改为各自 50 题。三个方法使用相同题目与生成条件，每个 benchmark 单独评分和报告。
 
 ```bash
-python3 -m bench.cache_cooperation --config READER.yaml \
-  --base-url "$READER_URL" --output runs/cache-cooperation/result.json
+python3 -m bench.study evaluate \
+  --config configs/study.yaml --matrix configs/study_matrix.yaml \
+  --split test --limit-turns 10 --concurrency 4 \
+  --output runs/current/public
+
+python3 -m bench.study evaluate \
+  --config configs/study.yaml --matrix configs/study_system_matrix.yaml \
+  --split test --limit-turns 10 --concurrency 4 \
+  --output runs/current/actual-history
 ```
 
-该入口默认低压力、单请求竞争、四请求竞争各一对，报告正文获取工作、完整时间和控制开销。更细的期限估值沿用 `profiling.retention_trace` 与 `profiling.retention_pair_workflow`，Native/TTL 使用同一请求轨迹和观察窗口，窗口覆盖所选期限。
+`--methods ordinary_rag contextkv llamaindex` 和 `--datasets multidoc2dial mtrag versionqa loong` 可指定本次范围。公开评测使用参考历史；实际历史评测在会话内顺序执行，失败轮次结束后，后续轮次使用此前已提交历史。
 
-## 收益资产与辅助训练
+## 保留结果
 
-真实分支完成后生成紧凑训练样本，再在 CPU 拟合收益与成本：
+- `results.jsonl`：逐题答案、来源地址、质量、完整响应、Qwen 输入/输出 token 与缓存计数。
+- `batch_cost.json`：整批 GPU/Host 占用积分和峰值。
+- `scoring/manifest.json`：实际评分协议和评分成本。
+- `summary.json`、`report.md`：各 benchmark 的方法对比与差值。
 
-```bash
-python3 -m training.plan_gain_completion finalize \
-  --collection TRAIN-CAPTURE --output TRAIN-LABELS --template-config READER.yaml
-python3 -m training.plan_gain_completion finalize \
-  --collection DEV-CAPTURE --output DEV-LABELS --template-config READER.yaml
-python3 -m training.plan_gain_completion fit \
-  --train TRAIN-LABELS/effective-gains.jsonl --dev DEV-LABELS/effective-gains.jsonl \
-  --output GAIN.json
-```
+Qwen token 仅统计固定生成模型的调用；辅助编码费用计入完整响应、辅助耗时与物理占用。评分结束后清理临时原文评分输入和会话数据库，不保存候选计划、逐步恢复日志或重复归档。
 
-样本保留预测特征、真实质量与费用标签、预算及训练划分。完整上下文和执行记录只用于采集与标注，完成后清理。动作、分包或输入语义改变时补采对应分支。质量按决策状态等权拟合，成本按具有完整实测费用的唯一终止分支拟合，包含成功与失败、未知费用不补零；线上执行一个动作后重规划。`fit --dev` 单独输出开发报告，仍需独立 test 复验。
-
-| 需要解决的问题 | 入口 |
-|---|---|
-| READ、REDUCE、ANSWER 的阶段错误 | `training.reader_audit export/review` |
-| 任务和查询适配 | `training.a_workflow prepare-capture/prepare-labels`、`training.task_labeling`、`training.train_models --stage task/task-eval` |
-| 支持关系和集合偏好 | `training.build_examples`、`training.train_models --stage support/support-eval`、`training.preference_rollout` |
-| 当前真实状态的动作配对 | `training.collect_plan_gains`、`training.plan_gain_workflow --mode observed_actions` |
-| 固定输入的证据策略对照 | `training.a_workflow compare`、`bench.evidence_policy_comparison` |
-
-辅助训练按会话隔离，沿当前 cohort 复用真实历史。任务学生尚未输出跨轮 READ 合同；只接入查询编码器时使用 `retrieval.task_query_asset` 并保留 teacher 解释。支持模型只由 `selection.mode: support` 加载，需求保留通过 `pricing_asset` 加载缓存配对估值。
-
-## 结果与记录
-
-本轮结果见[完整报告](final_results.md)和[指标文件](../../results/evaluation-20261112.json)。容器保留 `runs/current/cohorts.yaml`、`runs/current/config/` 的实际配置及 `runs/current/training/` 的必要监督；当前查询适配器为 `models/study-task-budget-loop`，动作资产为 `models/study-plan-gain.json`。Qwen3-32B 权重不变。
-
-当前容器以 `source runs/current/environment.sh` 选择已安装的 CUDA 12.9 工具链与主机驱动库，仍使用默认 `python3`。任务与支持训练输入各保留一个压缩 JSONL，重新训练时用 `gzip -dc INPUT.jsonl.gz > INPUT.jsonl` 解压；收益训练直接读取紧凑 `plan-gain-train.jsonl`、`plan-gain-dev.jsonl`。
-
-每个 job 对应数据集、方法和并发。`capacity-plan.json` 保存本次配置，`workflow.json` 保存最终指标。
-
-生成与评分共用一个 `results.jsonl`；`task_metrics.jsonl` 按 task_id 合并成功、失败与未提交阻塞题，保留每题分数、耗时和费用；不完整费用保留已知下界。完整历史、候选池、计划、token 序列和评分原文只在执行或实际训练采集中使用。Native 退役或需求租约释放尚未确认时保留恢复状态，确认清理后再删除 job 临时目录。
-
-```bash
-python3 -m profiling.final_study_index --artifact NAME=WORKFLOW.json --output RESULTS
-```
-
-最终报告各 benchmark 的原始质量指标、完成率、完整响应 P95、在线 token、GPU/Host 占用；缓存对照增加 GPU 命中、Host 回载和重算 token。直接比较本次测得的质量差与 P95 降幅。
+[已有实测结果](final_results.md)及 `results/` 两份 JSON 保留重构前实验结论。本轮效果以以上新资产运行后产生的结果为准。

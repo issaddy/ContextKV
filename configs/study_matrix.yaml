@@ -1,48 +1,29 @@
-# Public questions and author history; per-dataset scores. Recipes live in capacity_workflow.
 schema_version: 1
 study_config: configs/study.yaml
 seed: 42
 protocol: P1
 selection:
-  baseline: RAG_native
+  baseline: ordinary_rag
   near_equal_quality: 0.002
 final_evaluation:
-  baseline: RAG_native
+  baseline: ordinary_rag
   main_methods:
-  - RAG_native
-  - context_cache_demand
-  - LlamaIndex_native
+  - ordinary_rag
+  - contextkv
+  - llamaindex
   acceptance:
-    candidate: context_cache_demand
+    candidate: contextkv
     quality_improvement: 0.05
-    quality_noninferiority: 0.002
     p95_ratio: 0.85
   main_comparisons:
     ordinary_qa:
-      reference: RAG_native
-      method: context_cache_demand
+      reference: ordinary_rag
+      method: contextkv
       scope: whole_system
     external_method:
-      reference: LlamaIndex_native
-      method: context_cache_demand
+      reference: llamaindex
+      method: contextkv
       scope: whole_system
-  optional_ablations:
-    prefix_order:
-      reference: context_native
-      method: context_cache_order
-      factor: compilation
-    demand_retention:
-      reference: context_cache_order
-      method: context_cache_demand
-      factor: retention
-    action_decision:
-      reference: Rule_contextpilot_joint_demand
-      method: context_cache_demand
-      factor: B
-    fact_reuse:
-      reference: context_no_fact_reuse
-      method: context_cache_demand
-      factor: fact_reuse
   cost_scope: all_online_and_physical_costs
 resources:
   gpu_capacity_tokens: 32768
@@ -50,6 +31,8 @@ resources:
   gpu_devices:
   - 0
   - 1
+  - 2
+  - 3
   p95_complete_ms: 120000
   max_online_tokens: 200000000
   concurrency:
@@ -61,33 +44,35 @@ datasets:
       dev: data/multidoc2dial/dev/tasks.jsonl
       test: data/multidoc2dial/test/tasks.jsonl
     corpus_path: data/multidoc2dial/test/passages.jsonl
-    retriever_config: configs/study_multidoc_retriever.yaml
     split_kind: native
     dev_conversations: 32
     dev_seed: 42
     primary_metric: f1
     normalization: 1.0
+    sparse_index: data/indexes/multidoc2dial/sparse
+    dense_index: data/indexes/multidoc2dial/dense
   mtrag:
     inputs:
       test: data/mtrag/RAG.jsonl
     corpus_path: data/mtrag-official/cloud.jsonl
     corpus_id: mtrag
-    retriever_config: configs/retriever_dialogue.example.yaml
     domain: mt-rag-ibmcloud-elser-512-100-20240502
     split_kind: public_test
     primary_metric: mtrageval_harmonic
     normalization: 1.0
     max_passages: 10
+    sparse_index: data/indexes/mtrag/sparse
+    dense_index: data/indexes/mtrag/dense
   versionqa:
     inputs:
       test: data/evaluation/versionqa/references.jsonl
     corpus_path: data/evaluation/versionqa/corpus.jsonl
     corpus_id: versionqa
-    retriever_config: configs/study_versionqa_retriever.yaml
     split_kind: public_test
     primary_metric: versionqa_accuracy
     normalization: 1.0
-  # Original tasks with the documented full-document system input adaptation.
+    sparse_index: data/indexes/versionqa/sparse
+    dense_index: data/indexes/versionqa/dense
   loong:
     inputs:
       test: data/loong/set1-v2/tasks.jsonl
@@ -96,3 +81,17 @@ datasets:
     coverage_mode: selected_sources
     primary_metric: loong_reference_score
     normalization: 100.0
+    corpus_id: loong
+methods:
+- id: ordinary_rag
+  overrides:
+    execution:
+      dialogue_mode: rag
+- id: contextkv
+  overrides:
+    execution:
+      dialogue_mode: contextkv
+- id: llamaindex
+  overrides:
+    execution:
+      dialogue_mode: llamaindex

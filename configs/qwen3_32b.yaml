@@ -1,5 +1,3 @@
-# Fixed Qwen3-32B serving; the study configuration selects evidence and execution policy.
-# Launch the shared native NGRAM profile in docs/deployment.md.
 engine:
   kind: sglang
   base_url: http://127.0.0.1:30000
@@ -7,14 +5,12 @@ engine:
   timeout_seconds: 180
   gpu_capacity_tokens: 32768
   host_capacity_tokens: 61056
-  stream: true
+  stream: false
 model:
   scope_path: configs/model_scopes/qwen3-32b.local.json
 context:
   max_total_model_tokens: 32768
   max_new_tokens: 1024
-planner:
-  strategy: always_rebuild
 state_dir: runs/qwen3-32b
 sampling:
   temperature: 0.7

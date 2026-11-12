@@ -40,9 +40,10 @@ class StopValueHead(nn.Module):
         )
         self.register_buffer("mean", torch.zeros(summary_size + len(STATE_FIELDS)))
         self.register_buffer("scale", torch.ones(summary_size + len(STATE_FIELDS)))
+        self.register_buffer("active", torch.ones(summary_size + len(STATE_FIELDS)))
 
     def forward(self, features):
-        raw = self.network((features - self.mean) / self.scale).reshape(*features.shape[:-1], 2, 5)
+        raw = self.network((features - self.mean) / self.scale * self.active).reshape(*features.shape[:-1], 2, 5)
         values = torch.cat((raw[..., :1].sigmoid(), nn.functional.softplus(raw[..., 1:4])), -1)
         return values, nn.functional.softplus(raw[..., 4])
 

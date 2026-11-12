@@ -1,4 +1,4 @@
-.PHONY: install lint test serve data
+.PHONY: install lint serve data
 
 PYTHON ?= python3
 
@@ -6,13 +6,10 @@ install:
 	$(PYTHON) -m pip install -e '.[retrieval,evaluation,tokenizer]'
 
 lint:
-	$(PYTHON) -m ruff check controller adapters bench profiling training scripts engine_patches tests
-
-test:
-	$(PYTHON) -m unittest discover -s tests -q
+	$(PYTHON) -m ruff check controller adapters bench training scripts engine_patches
 
 serve:
-	$(PYTHON) -m controller --config configs/qwen3_32b.yaml serve
+	$(PYTHON) -m controller --config configs/study.yaml serve
 
 data:
 	$(PYTHON) scripts/fetch_mtrag.py

@@ -1,62 +1,38 @@
-"""Document registration and one business path into the existing QA controller."""
+"""One entry point for registered and benchmark document question answering."""
 from __future__ import annotations
 
 import time
-from functools import partial
-
-from .session_store import DocumentSet
 
 
 class DocumentQA:
     def __init__(self, controller, provider):
         self.controller, self.provider = controller, provider
-        provider.committed_readings = controller.store.committed_readings
+        provider.fact_history = controller.store.committed_facts
 
     async def start(self):
-        """Start the controller lifecycle before an external queue admits requests."""
         return await self.controller.start()
 
     def register_documents(self, blocks, *, source_metadata=None):
         return self.controller.store.register_document_set(blocks, source_metadata=source_metadata)
 
     async def ask(self, session_id, query, request_id, *, task_id=None, supplied_blocks=None,
-                  source_metadata=None, coverage_scope="selected_sources",
-                  from_corpus_snapshot_id=None, request_arrived=None, document_set_id=None):
+                  source_metadata=None, coverage_scope="selected_sources", request_arrived=None,
+                  document_set_id=None):
         await self.start()
-        arrived = time.monotonic() if request_arrived is None else request_arrived
         task_id = task_id or request_id
-        try:
-            snapshot_id = self.provider.corpus_snapshot_id
-            source_request_identity = None
-            if document_set_id is not None:
-                if supplied_blocks is not None or source_metadata is not None:
-                    raise ValueError("registered documents cannot be combined with inline documents or metadata")
-                documents = self.controller.store.load_document_set(document_set_id)
-                supplied_blocks = documents.blocks
-                source_metadata = dict(documents.source_metadata)
-                snapshot_id = documents.corpus_snapshot_id
-                source_request_identity = documents.document_set_id, coverage_scope
-            elif supplied_blocks is not None:
-                supplied_blocks = tuple(supplied_blocks)
-                documents = DocumentSet.create(supplied_blocks, source_metadata)
-                source_request_identity = documents.document_set_id, coverage_scope
+        snapshot_id = self.provider.corpus_snapshot_id
+        if document_set_id is not None:
+            documents = self.controller.store.load_document_set(document_set_id)
+            supplied_blocks, source_metadata = documents.blocks, dict(documents.source_metadata)
+            snapshot_id = documents.corpus_snapshot_id
 
-            async def retrieve(snapshot, retrieval_query=None):
-                selected_query = query if retrieval_query is None else retrieval_query
-                if supplied_blocks is None:
-                    return await self.provider.retrieve(snapshot, selected_query, task_id)
-                return await self.provider.retrieve_supplied(snapshot, selected_query, task_id, supplied_blocks,
-                    source_metadata=source_metadata, coverage_scope=coverage_scope)
+        async def retrieve(snapshot, retrieval_query=None):
+            question = query if retrieval_query is None else retrieval_query
+            if supplied_blocks is None:
+                return await self.provider.retrieve(snapshot, question, task_id)
+            return await self.provider.retrieve_supplied(snapshot, question, task_id, supplied_blocks,
+                source_metadata=source_metadata, coverage_scope=coverage_scope)
 
-            extend_for_plan = getattr(self.provider, "extend_for_plan", None)
-            if extend_for_plan is not None:
-                extend_for_plan = partial(extend_for_plan, supplied_blocks=supplied_blocks,
-                                          source_metadata=source_metadata, trace_id=task_id)
-            return await self.controller.serve_turn(session_id, query, request_id=request_id,
-                corpus_snapshot_id=snapshot_id, evidence_provider=retrieve,
-                source_request_identity=source_request_identity,
-                extend_for_plan=extend_for_plan,
-                from_corpus_snapshot_id=from_corpus_snapshot_id, request_arrived=arrived,
-                dialogue_budget=getattr(self.provider, "budget", None))
-        finally:
-            self.provider.finish_request(session_id, task_id)
+        return await self.controller.serve_turn(session_id, query, request_id=request_id,
+            corpus_snapshot_id=snapshot_id, evidence_provider=retrieve,
+            request_arrived=request_arrived if request_arrived is not None else time.monotonic())

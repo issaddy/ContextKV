@@ -14,7 +14,17 @@ import time
 
 import yaml
 
-from training.reader_data import file_digest, rows, write_rows
+def file_digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def rows(path):
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def write_rows(path, records):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in records))
 
 
 AUTHOR_REVISION = "612bc5039a457880d9e7d84c3b0a4cf154b70e4f"
@@ -104,15 +114,11 @@ def convert(source_dir, output, *, dev_count=40, test_count=40, seed=42):
     (output/"cohort_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
     spec = {"inputs": {split: str(output/split/"tasks.jsonl") for split in ("dev", "test")},
         "corpus_id": "twowiki", "corpus_path": str(output/"passages.jsonl"),
-        "retriever_config": str(output/"retriever.yaml"), "supplied_documents": True,
+        "supplied_documents": True,
         "coverage_mode": "selected_sources", "protocol": "P3", "split_kind": manifest["split_kind"],
         "primary_metric": "2wiki_answer_f1", "normalization": 100.0, "weight": 1,
         "scoring": {"implementation": "official original 2wikimultihop_evaluate.py", "source_dir": str(source_dir)}}
     (output/"study_spec.yaml").write_text(yaml.safe_dump(spec, sort_keys=False))
-    recipe = yaml.safe_load(Path("configs/study_multidoc_retriever.yaml").read_text())
-    recipe.update(sparse_index=str(output/"bm25"), dense_index=str(output/"dense"),
-                  query_adapter_path=None, query_mode="current")
-    (output/"retriever.yaml").write_text(yaml.safe_dump(recipe, sort_keys=False))
     return manifest
 
 
@@ -125,18 +131,19 @@ async def build_indexes(output, *, device="cuda:1", physical_device=1):
     started = time.monotonic()
     measured = {}
     def operation():
-        from adapters.hybrid_retrieval import DenseIndex, LocalBGE
+        from adapters.hybrid_retrieval import DenseIndex
+        from training.shared_index import QwenDocumentEncoder
         from adapters.retrieval import BM25SRetriever, load_beir_corpus
         from controller.schema import OnlineContext
         corpus = load_beir_corpus(root/"passages.jsonl")
         snapshot = "2wiki-"+file_digest(root/"passages.jsonl")[:20]
         sparse = BM25SRetriever(corpus, corpus_snapshot_id=snapshot, cpu_threads=1)
         sparse.save(root/"bm25")
-        encoder = LocalBGE("models/bge-m3", device=device, dtype="bfloat16", batch_size=16, max_length=8192)
+        encoder = QwenDocumentEncoder("models/qwen3-embedding-0.6b", device=device, dtype="bfloat16")
         try:
             dense = DenseIndex.build([OnlineContext(**row) for row in corpus.values()], encoder,
                 root/"dense", corpus_snapshot_id=snapshot, show_progress=False)
-            measured.update(encoder_usage=encoder.usage, dense=dense.manifest, sparse=sparse.manifest)
+            measured.update(dense=dense.manifest, sparse=sparse.manifest)
         finally:
             encoder.close()
     try:
@@ -150,120 +157,46 @@ async def build_indexes(output, *, device="cuda:1", physical_device=1):
     return {"dataset": "2WikiMultihopQA", "index": "complete", "passages": measured["dense"]["passages"]}
 
 
-def project_final_line(text, *, truncated):
-    if truncated is not False:
-        return {"status": "failed", "error": "answer_truncated" if truncated else "answer_truncation_unmeasured"}
-    lines = list(re.finditer(r"(?m)^Final answer:[^\r\n]*", text))
-    if len(lines) != 1:
-        return {"status": "failed", "error": "missing_final_line" if not lines else "multiple_final_lines"}
-    line = lines[0]
-    if text[line.end():].strip():
-        return {"status": "failed", "error": "final_line_not_terminal"}
-    match = re.fullmatch(r"Final answer: (?P<answer>[^\r\n]+)", line.group())
-    if match is None:
-        return {"status": "failed", "error": "invalid_final_line_format"}
-    start, end = line.start()+match.start("answer"), line.start()+match.end("answer")
-    original = text[start:end]
-    answer = re.sub(r"\[E_[A-Za-z0-9_]+\]", "", original).strip()
-    if not answer:
-        return {"status": "failed", "error": "empty_final_answer", "original_field": original, "span": [start, end]}
-    return {"status": "projected", "answer": answer, "original_field": original, "span": [start, end]}
-
-
-def score(source_dir, tasks_path, generation_dir, *, projection=None):
-    if projection not in (None, "final_line"):
-        raise ValueError(f"unknown declared 2Wiki answer projection: {projection}")
+def score(source_dir, tasks_path, generation_dir):
+    import runpy
     root = Path(generation_dir)
-    tasks = {row["task_id"]: row for row in rows(tasks_path)}
     results = rows(root/"results.jsonl")
+    expected = set(json.loads((root/"generation_manifest.json").read_text())["task_ids"])
+    tasks = {row["task_id"]: row for row in rows(tasks_path) if row["task_id"] in expected}
+    evaluator = runpy.run_path(str(Path(source_dir)/"evaluate.original.py"))
+    predictions = {"answer": {}, "sp": {}, "evidence": {}}
+    gold = [{"_id": task["offline_reference"]["original_id"],
+             **{name: task["offline_reference"][name] for name in ("answer", "supporting_facts", "evidences")}}
+            for task in tasks.values()]
+    for row in results:
+        reference = tasks[row["task_id"]]["offline_reference"]
+        if row["status"] != "completed":
+            row["metrics"].update({"2wiki_answer_em": 0., "2wiki_answer_f1": 0.})
+            continue
+        answer = re.sub(r"\[(?:[SC]\d+)(?:\s*,\s*[SC]\d+)*\]", "", row["answer"]).strip()
+        row["metrics"].update({"2wiki_answer_em": float(evaluator["exact_match_score"](answer, reference["answer"]))*100,
+                               "2wiki_answer_f1": evaluator["f1_score"](answer, reference["answer"])[0]*100})
+        original = reference["original_id"]
+        predictions["answer"][original] = answer
+        predictions["sp"][original] = sorted({(sentence["title"], sentence["sentence_id"])
+            for sentence in reference["sentence_spans"] for span in row["sources"]
+            if span["key"]["document_id"] == sentence["source_id"]
+            and span["source_start"] < sentence["end"] and sentence["start"] < span["source_end"]})
+        predictions["evidence"][original] = []
     output = root/"scoring"/"2wiki"
     output.mkdir(parents=True, exist_ok=True)
-    predictions, individual = {"answer": {}, "sp": {}, "evidence": {}}, {}
-    gold = [{"_id": task["offline_reference"]["original_id"],
-             **{name: task["offline_reference"][name]
-                for name in ("answer", "supporting_facts", "evidences")}}
-            for task in tasks.values()]
-    projection_records, raw_scores = {}, []
-    import runpy
-    evaluator = runpy.run_path(str(Path(source_dir)/"evaluate.original.py"))
-    for row in results:
-        if row["status"] != "completed":
-            continue
-        reference = tasks[row["task_id"]]["offline_reference"]
-        original = reference["original_id"]
-        answer = re.sub(r"\[E_[A-Za-z0-9_]+\]", "", row["answer"]).strip()
-        raw_metrics = {"raw_full_answer_EM": float(evaluator["exact_match_score"](answer, reference["answer"]))*100,
-            "raw_full_answer_F1": evaluator["f1_score"](answer, reference["answer"])[0]*100}
-        raw_scores.append({"task_id": row["task_id"], "raw_full_answer": row["answer"], **raw_metrics})
-        if projection == "final_line":
-            projected = project_final_line(row["answer"],
-                truncated=(row.get("response") or {}).get("truncated", row.get("truncated")))
-            projection_records[row["task_id"]] = {"task_id": row["task_id"], **projected,
-                "raw_full_answer_metrics": raw_metrics}
-            if projected["status"] == "failed":
-                continue
-            answer = projected["answer"]
-        outcome = row.get("reading_outcome") or row.get("attempt", {}).get("reading_outcome")
-        claims = outcome["claims"] if outcome is not None else []
-        spans = [span for claim in claims for span in claim["source_spans"]]
-        predicted_sp = sorted({(sentence["title"], sentence["sentence_id"])
-            for sentence in reference["sentence_spans"] for span in spans
-            if span["source_key"]["document_id"] == sentence["source_id"]
-            and span["start"] < sentence["end"] and sentence["start"] < span["end"]})
-        predicted_evidence = [[claim["entity"], claim["relation"], str(claim["value"])] for claim in claims
-                              if claim["kind"] != "derived" and claim["entity"] and claim["relation"] and claim["value"] is not None]
-        predictions["answer"][original], predictions["sp"][original], predictions["evidence"][original] = answer, predicted_sp, predicted_evidence
-        individual[row["task_id"]] = {"2wiki_answer_em": float(evaluator["exact_match_score"](answer, reference["answer"]))*100,
-            "2wiki_answer_f1": evaluator["f1_score"](answer, reference["answer"])[0]*100}
     prediction_path, gold_path = output/"predictions.json", output/"gold.json"
-    prediction_path.write_text(json.dumps(predictions, ensure_ascii=False)+"\n")
-    gold_path.write_text(json.dumps(gold, ensure_ascii=False)+"\n")
-    started = time.monotonic()
-    official = None
-    if gold:
-        completed = subprocess.run([sys.executable, str(Path(source_dir)/"evaluate.original.py"),
-            str(prediction_path), str(gold_path)], capture_output=True, text=True, check=True)
-        (output/"official.stdout.json").write_text(completed.stdout)
-        # The author evaluator prints missing-prediction lines before its JSON.
-        # It keeps every gold task in N, so those answers contribute zero.
-        official = json.loads(completed.stdout[completed.stdout.index("{"):])
-    write_rows(output/"raw_full_answer.scores.jsonl", raw_scores)
-    write_rows(output/"answer_projection.jsonl", projection_records.values())
-    raw_by_id = {row["task_id"]: row for row in raw_scores}
-    scored = [{**row, "metrics": {**row.get("metrics", {}), **individual.get(row["task_id"],
-                    {"2wiki_answer_em": 0.0, "2wiki_answer_f1": 0.0})},
-        "scoring": {"status": "scored",
-            "source": "official 2Wiki answer normalization/EM/F1", "cost_scope": "offline CPU scoring",
-            "answer_prediction": "provided" if row["task_id"] in individual else "missing",
-            "missing_prediction_rule": "author evaluator retains every gold task in its denominator",
-            "answer_projection": projection, "projection_record": projection_records.get(row["task_id"]),
-            "error": projection_records.get(row["task_id"], {}).get("error"),
-            "raw_full_answer_metrics": raw_by_id.get(row["task_id"]),
-            "raw_outputs": [str(output/"answer_projection.jsonl"), str(output/"raw_full_answer.scores.jsonl")]}}
-        for row in results]
-    write_rows(root/"results.jsonl", scored)
-    manifest = {"metric": "official 2Wiki original answer/sp/evidence/joint metrics", "scored": len(gold),
-        "planned": len(tasks), "valid_answer_predictions": len(individual),
-        "missing_prediction_task_ids": sorted(set(tasks)-set(individual)),
-        "missing_generation_task_ids": sorted(set(tasks)-{row["task_id"] for row in results}),
-        "valid_prediction_metrics": {"count": len(individual),
-            **{name: sum(value[name] for value in individual.values())/len(individual) if individual else None
-               for name in ("2wiki_answer_em", "2wiki_answer_f1")}},
-        "answer_projection": projection or "citation_markup_only",
-        "projection_contract": "one exact terminal Final answer: line; original Unicode field then citation removal; no semantic or gold-guided extraction"
-            if projection else "remove only E_ citation markup",
-        "projection_failed_task_ids": [key for key, value in projection_records.items() if value["status"] == "failed"],
-        "raw_full_answer_metrics": {"count": len(raw_scores),
-            **{key: sum(row[key] for row in raw_scores)/len(raw_scores) if raw_scores else None
-               for key in ("raw_full_answer_EM", "raw_full_answer_F1")}},
-        "raw_full_answer_normalization": "full original answer with only E_ citation markup removed; official EM/F1",
-        "support_projection": "original sentence overlap of actual claim source spans; no gold sentence selection",
-        "raw_answers": str(root/"results.jsonl"), "official": official,
-        "official_execution": "executed_on_declared_cohort" if gold else "not_executed_empty_cohort",
-        "source_script_sha256": file_digest(Path(source_dir)/"evaluate.original.py"),
-        "wall_ms": (time.monotonic()-started)*1000, "model_calls": 0,
-        "scope": "author evaluator on all declared gold tasks; valid-projection and raw-answer means are separate diagnostics"}
-    (output/"manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
+    prediction_path.write_text(json.dumps(predictions, ensure_ascii=False))
+    gold_path.write_text(json.dumps(gold, ensure_ascii=False))
+    completed = subprocess.run([sys.executable, str(Path(source_dir)/"evaluate.original.py"),
+        str(prediction_path), str(gold_path)], capture_output=True, text=True, check=True)
+    official = json.loads(completed.stdout[completed.stdout.index("{"):])
+    prediction_path.unlink(); gold_path.unlink()
+    write_rows(root/"results.jsonl", results)
+    manifest = {"dataset": "2WikiMultihopQA", "metric": "author answer/support/evidence metrics",
+                "requested": len(expected), "official": official,
+                "source": OFFICIAL_REPOSITORY, "model_calls": 0}
+    (output/"manifest.json").write_text(json.dumps(manifest, ensure_ascii=False))
     return manifest
 
 
@@ -279,7 +212,6 @@ def main(argv=None):
     parser.add_argument("--generation-dir")
     parser.add_argument("--device", default="cuda:1")
     parser.add_argument("--physical-device", type=int, default=1)
-    parser.add_argument("--projection", choices=("final_line",))
     args = parser.parse_args(argv)
     if args.command == "download":
         result = download(args.source_dir)
@@ -288,7 +220,7 @@ def main(argv=None):
     elif args.command == "index":
         result = asyncio.run(build_indexes(args.output, device=args.device, physical_device=args.physical_device))
     else:
-        result = score(args.source_dir, args.tasks, args.generation_dir, projection=args.projection)
+        result = score(args.source_dir, args.tasks, args.generation_dir)
     print(json.dumps({key: value for key, value in result.items() if key in {"dataset", "population", "scored", "planned", "sampling"}}))
 
 

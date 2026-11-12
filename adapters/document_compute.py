@@ -1,0 +1,750 @@
+"""Source-addressed field projection and relational document computation."""
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from decimal import Decimal
+import operator
+import re
+from typing import Any
+
+from adapters.table_relations import extract_table_relations
+from controller.context_schema import EvidenceClaim, EvidenceUnit, SourceSpan
+from controller.reduction import UNIT_FACTORS, canonical_quantity
+
+
+@dataclass(frozen=True)
+class Cell:
+    text: str
+    source: SourceSpan
+    header: SourceSpan | None = None
+    unit: str = ""
+    qualifiers: tuple[SourceSpan, ...] = ()
+
+
+@dataclass(frozen=True)
+class DocumentTable:
+    table_id: str
+    headers: tuple[str, ...]
+    header_spans: tuple[SourceSpan | None, ...]
+    rows: tuple[tuple[Cell, ...], ...]
+    source: SourceSpan
+    caption: str = ""
+    coverage: tuple[SourceSpan, ...] = ()
+
+
+@dataclass(frozen=True)
+class Field:
+    name: str
+    column: int
+    unit: str = ""
+    unit_source: SourceSpan | None = None
+
+
+@dataclass(frozen=True)
+class Projection:
+    table_id: str
+    fields: tuple[Field, ...]
+    predicates: tuple[Predicate, ...] = ()
+
+
+@dataclass(frozen=True)
+class Predicate:
+    field: str
+    operation: str
+    value: Any
+    unit: str = ""
+    numeric: bool = False
+
+    def __post_init__(self):
+        if isinstance(self.value, (int, float, Decimal)):
+            object.__setattr__(self, "value", str(self.value))
+            object.__setattr__(self, "numeric", True)
+
+
+@dataclass(frozen=True)
+class Join:
+    right_index: int
+    left_fields: tuple[str, ...]
+    right_fields: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DocumentProgram:
+    need_id: str
+    projections: tuple[Projection, ...]
+    population_table_ids: tuple[str, ...]
+    operation: str = "lookup"
+    value_field: str = ""
+    entity_fields: tuple[str, ...] = ()
+    predicates: tuple[Predicate, ...] = ()
+    joins: tuple[Join, ...] = ()
+    group_by: tuple[str, ...] = ()
+    distinct: tuple[str, ...] = ()
+    condition_ids: tuple[str, ...] = ()
+    unresolved_conditions: tuple[str, ...] = ()
+    excluded_table_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DocumentResult:
+    claims: tuple[EvidenceClaim, ...]
+    conclusions: tuple[EvidenceClaim, ...]
+    covered_tables: tuple[str, ...]
+    source_spans: tuple[SourceSpan, ...]
+    complete: bool
+
+
+@dataclass(frozen=True)
+class _Record:
+    fields: dict[str, Cell]
+    sources: tuple[SourceSpan, ...]
+
+
+_COMPARISONS = {"eq": operator.eq, "ne": operator.ne, "lt": operator.lt,
+                "le": operator.le, "gt": operator.gt, "ge": operator.ge}
+_NUMBER = re.compile(r"[+-]?(?:\d+(?:,\d{3})*(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?")
+
+
+def quantity(cell):
+    """Read a numeric cell with its explicit unit; preserve its literal source."""
+    text = cell.text.strip()
+    negative = text.startswith("(") and text.endswith(")")
+    literal = text[1:-1].strip() if negative else text
+    if cell.unit and literal.endswith(cell.unit):
+        literal = literal[:-len(cell.unit)].strip()
+    if not _NUMBER.fullmatch(literal):
+        raise ValueError(f"cell is not a numeric value: {cell.text!r}")
+    unit, value = canonical_quantity(literal, cell.unit)
+    return unit, -value if negative else value
+
+
+def _literal_unit(relation):
+    if relation.unit is not None:
+        return relation.unit.text
+    header = re.search(r"[\[(]([^\])]+)[\])]$", relation.column.text)
+    if header and header[1] in UNIT_FACTORS:
+        return header[1]
+    for unit in sorted(UNIT_FACTORS, key=len, reverse=True):
+        if unit and unit != "1" and relation.value.text.endswith(unit):
+            number = relation.value.text[:-len(unit)].strip()
+            if _NUMBER.fullmatch(number):
+                return unit
+    return ""
+
+
+def _span(block, start, end):
+    base = block.span[0] if block.span else 0
+    key = block.key
+    identity = f"{key.corpus_id}:{key.document_id}:{key.passage_id}:{key.version}:{base+start}:{base+end}"
+    return SourceSpan(identity, key, base+start, base+end)
+
+
+def _unique_spans(spans):
+    return tuple({(s.source_key, s.start, s.end): s for s in spans}.values())
+
+
+def _cell_sources(cell):
+    return (cell.source, *((cell.header,) if cell.header else ()), *cell.qualifiers)
+
+
+def _record_sources(record):
+    return record.sources
+
+
+def _record_key(record, fields):
+    return tuple(record.fields[name].text.strip() for name in fields)
+
+
+def _matches(record, predicate):
+    cell = record.fields[predicate.field]
+    if predicate.operation == "contains":
+        return str(predicate.value) in cell.text
+    if predicate.operation == "in":
+        return cell.text.strip() in predicate.value
+    if predicate.operation == "not_in":
+        return cell.text.strip() not in predicate.value
+    if predicate.numeric:
+        unit, actual = quantity(cell)
+        expected_unit, expected = canonical_quantity(predicate.value, predicate.unit or cell.unit)
+        if unit != expected_unit:
+            raise ValueError("predicate quantities have different units")
+    else:
+        actual, expected = cell.text.strip(), str(predicate.value).strip()
+    return _COMPARISONS[predicate.operation](actual, expected)
+
+
+class DocumentIndex:
+    def __init__(self, tables, blocks=()):
+        self.tables = {table.table_id: table for table in tables}
+        self.blocks = {block.key: block for block in blocks}
+
+    @classmethod
+    def from_blocks(cls, blocks):
+        blocks = tuple(blocks)
+        tables = []
+        for block in blocks:
+            for table in extract_table_relations(block.text):
+                source = _span(block, table.span.start, table.span.end)
+                table_id = f"table:{source.span_id}"
+                headers = tuple(header.text for header in table.headers)
+                header_spans = tuple(_span(block, h.start, h.end) for h in table.headers)
+                columns = {(h.start, h.end): index for index, h in enumerate(table.headers)}
+                flat = table.syntax != "markdown"
+                if flat:
+                    headers = ("", *headers)
+                    header_spans = (None, *header_spans)
+                rows = {}
+                for relation in table.relations:
+                    row_key = relation.row_span.start, relation.row_span.end
+                    notes = (*relation.parent_path, *relation.notes, *table.source_notes)
+                    if table.caption:
+                        notes = (table.caption, *notes)
+                    qualifiers = tuple(_span(block, s.start, s.end) for s in notes)
+                    row = rows.setdefault(row_key, [None] * len(headers))
+                    row[0] = Cell(relation.object.text,
+                        _span(block, relation.object.start, relation.object.end),
+                        None if flat else header_spans[0], qualifiers=qualifiers)
+                    column = columns[relation.column.start, relation.column.end] + int(flat)
+                    row[column] = Cell(relation.value.text,
+                        _span(block, relation.value.start, relation.value.end),
+                        _span(block, relation.column.start, relation.column.end),
+                        _literal_unit(relation), qualifiers)
+                tables.append(DocumentTable(table_id, headers, header_spans,
+                    tuple(tuple(row) for row in rows.values()), source,
+                    table.caption.text if table.caption else block.title))
+        return cls(tables, blocks)
+
+    def project(self, projection):
+        table = self.tables[projection.table_id]
+        records = []
+        for row in table.rows:
+            fields = {field.name: (replace(row[field.column], unit=field.unit,
+                qualifiers=(*row[field.column].qualifiers, field.unit_source))
+                if field.unit_source is not None else row[field.column]) for field in projection.fields}
+            sources = _unique_spans(span for cell in fields.values() for span in _cell_sources(cell))
+            record = _Record(fields, sources)
+            if all(_matches(record, predicate) for predicate in projection.predicates):
+                records.append(record)
+        return tuple(records)
+
+    def binding_units(self, sample_rows=2):
+        """Encode headers and a small literal row sample; compute over all rows later."""
+        units = []
+        for table in self.tables.values():
+            block = self.blocks[table.source.source_key]
+            base = block.span[0] if block.span else 0
+            spans = [span for span in table.header_spans if span is not None]
+            spans.extend(cell.source for row in table.rows[:sample_rows] for cell in row)
+            end = max(span.end for span in spans)
+            source = SourceSpan(f"{table.table_id}:binding", block.key, table.source.start, end)
+            text = block.text[source.start-base:source.end-base]
+            units.append(EvidenceUnit(source.span_id, (source,), text, table.caption, table.table_id))
+            qualifiers = _unique_spans(span for row in table.rows for cell in row for span in cell.qualifiers)
+            for span in qualifiers:
+                if source.start <= span.start and span.end <= source.end:
+                    continue
+                literal = block.text[span.start-base:span.end-base]
+                identity = f"{table.table_id}:qualifier:{span.start}:{span.end}"
+                units.append(EvidenceUnit(identity, (span,), literal, table.caption, table.table_id))
+        return tuple(units)
+
+    def records(self, program):
+        """Materialize only the projected, joined and selected fields."""
+        projected = tuple(self.project(projection) for projection in program.projections)
+        if program.joins:
+            records = projected[0]
+            for join in program.joins:
+                right = {}
+                for record in projected[join.right_index]:
+                    right.setdefault(_record_key(record, join.right_fields), []).append(record)
+                records = tuple(_Record({**left.fields, **match.fields},
+                    _unique_spans((*left.sources, *match.sources))) for left in records
+                    for match in right.get(_record_key(left, join.left_fields), ()))
+        else:
+            records = tuple(record for group in projected for record in group)
+        records = tuple(record for record in records if all(_matches(record, p) for p in program.predicates))
+        if program.distinct:
+            unique = {}
+            for record in records:
+                key = _record_key(record, program.distinct)
+                if key in unique:
+                    previous = unique[key]
+                    if program.value_field and previous.fields[program.value_field].text != record.fields[program.value_field].text:
+                        raise ValueError("distinct entity has conflicting measure values")
+                    record = _Record(previous.fields, _unique_spans((*previous.sources, *record.sources)))
+                unique[key] = record
+            records = tuple(unique.values())
+        return records
+
+    def execute(self, program):
+        """Aggregate the complete bound population, retaining source lineage."""
+        records = self.records(program)
+        used = (0, *(join.right_index for join in program.joins)) if program.joins else range(len(program.projections))
+        covered = tuple(dict.fromkeys(program.projections[index].table_id for index in used))
+        scope = _unique_spans(span for table_id in dict.fromkeys((*covered, *program.excluded_table_ids))
+            for span in (self.tables[table_id].coverage or (self.tables[table_id].source,)))
+        complete = (set(program.population_table_ids) <= set(covered) | set(program.excluded_table_ids)
+                    and not program.unresolved_conditions)
+        claims, groups = [], {}
+        for index, record in enumerate(records):
+            group = _record_key(record, program.group_by)
+            groups.setdefault(group, []).append(index)
+            entity = " / ".join(_record_key(record, program.entity_fields)) if program.entity_fields else str(index)
+            sources = _record_sources(record)
+            value = record.fields[program.value_field].text if program.value_field else {name: c.text for name, c in record.fields.items()}
+            unit = record.fields[program.value_field].unit if program.value_field else ""
+            claims.append(EvidenceClaim(f"document:{program.need_id}:{index}", program.need_id,
+                "extract", text="; ".join(f"{name}={c.text}" for name, c in record.fields.items()),
+                value=value, unit=unit, conditions=program.condition_ids,
+                source_spans=sources, operation="project", entity=entity, relation=program.value_field,
+                version=" / ".join(dict.fromkeys(s.source_key.version for s in sources))))
+        if program.operation == "lookup":
+            return DocumentResult(tuple(claims), tuple(claims), covered, scope, complete)
+        if not groups and not program.group_by:
+            groups[()] = []
+        conclusions = []
+        for group_index, (group, indices) in enumerate(groups.items()):
+            selected = [records[i] for i in indices]
+            unit = ""
+            if program.operation == "count":
+                value = len(selected)
+            elif program.operation in {"sum", "mean", "min", "max"}:
+                quantities = [quantity(record.fields[program.value_field]) for record in selected]
+                units = {unit for unit, _ in quantities}
+                if len(units) > 1:
+                    raise ValueError("aggregation requires compatible units")
+                unit = next(iter(units), "")
+                numbers = [number for _, number in quantities]
+                if program.operation == "sum":
+                    value = sum(numbers, Decimal(0))
+                elif program.operation == "mean":
+                    value = sum(numbers, Decimal(0)) / len(numbers) if numbers else None
+                else:
+                    value = {"min": min, "max": max}[program.operation](numbers) if numbers else None
+                value = str(value) if value is not None else None
+            elif program.operation == "group":
+                value = [{name: cell.text for name, cell in record.fields.items()} for record in selected]
+            else:
+                raise ValueError(f"unknown document operation: {program.operation}")
+            parents = tuple(claims[i].claim_id for i in indices)
+            spans = _unique_spans(span for i in indices for span in claims[i].source_spans) or scope
+            conclusions.append(EvidenceClaim(f"document:{program.need_id}:result:{group_index}",
+                program.need_id, "derived", text=str(value), value=value, unit=unit,
+                conditions=program.condition_ids, source_spans=spans, operation=program.operation,
+                parent_claim_ids=parents, entity=" / ".join(group), relation=program.value_field))
+        return DocumentResult(tuple(claims), tuple(conclusions), covered, scope, complete)
+
+
+def _binding_columns(table, binding):
+    span = binding.source_span
+    if span.source_key != table.source.source_key:
+        return ()
+    headers = tuple((column, None) for column, header in enumerate(table.header_spans)
+        if header is not None and header.start < span.end and span.start < header.end)
+    if headers:
+        return headers
+    return tuple((column, row_index) for row_index, row in enumerate(table.rows)
+        for column, cell in enumerate(row) if cell.source.start < span.end and span.start < cell.source.end)
+
+
+def _condition_predicate(query, condition, field):
+    operation = query.filter_operators[condition.condition_id]
+    values = tuple(query.text((ref,)) for ref in condition.value_spans)
+    if operation == "in":
+        return Predicate(field, operation, values)
+    value = " ".join(values)
+    unit = ""
+    if operation in {"lt", "le", "gt", "ge"}:
+        if _NUMBER.fullmatch(value):
+            value = Decimal(value.replace(",", ""))
+        else:
+            for name in sorted(UNIT_FACTORS, key=len, reverse=True):
+                if name and name != "1" and value.endswith(name):
+                    literal = value[:-len(name)].strip()
+                    if _NUMBER.fullmatch(literal):
+                        value, unit = Decimal(literal.replace(",", "")), name
+                        break
+    return Predicate(field, operation, value, unit)
+
+
+def build_programs(query, evidence, index):
+    """Compile learned source bindings into explicit document operations."""
+    programs = []
+    conditions = {condition.condition_id: condition for condition in query.task.conditions}
+    for need in query.task.needs:
+        if need.operation not in {"count", "sum", "group"}:
+            continue
+        bindings = [binding for binding in evidence.bindings if binding.need_id == need.need_id]
+        joining = need.need_id in query.join_needs
+        projections, mapped_conditions, entities, grouping, join_fields = [], None, (), (), []
+        for table in index.tables.values():
+            located = [(binding, column, row) for binding in bindings
+                       for column, row in _binding_columns(table, binding)]
+            if not located:
+                continue
+            roles = {}
+            for binding, column, row in sorted(located, key=lambda item: -item[0].score):
+                roles.setdefault(binding.role, {}).setdefault(column, (binding, row))
+            fields, local_predicates, keys, local_conditions = {}, [], {}, set()
+            measures = roles.get("measure", {})
+            period = roles.get("period", {})
+            row_measure = next(((column, item) for column, item in measures.items()
+                                if column == 0 and item[1] is not None), None)
+            if row_measure:
+                _, (_, row_index) = row_measure
+                fields["row"] = 0
+                local_predicates.append(Predicate("row", "eq", table.rows[row_index][0].text))
+                measure_column = next((column for column in period if column != 0), None)
+            else:
+                measure_column = next(iter(measures), None)
+            if need.operation == "sum" and measure_column is None and not joining:
+                continue
+            if measure_column is not None:
+                fields["measure"] = measure_column
+            entity_names = []
+            for position, (column, (binding, _)) in enumerate(roles.get("entity", {}).items()):
+                name = f"entity:{position}"
+                fields[name] = column
+                entity_names.append(name)
+                if binding.relation_group:
+                    key = f"join:{binding.relation_group}"
+                    fields[key] = column
+                    keys[binding.relation_group] = key
+            group_names = []
+            for position, column in enumerate(roles.get("group", {})):
+                name = f"group:{position}"
+                fields[name] = column
+                group_names.append(name)
+            for binding, column, row in located:
+                condition_id = binding.condition_id
+                if binding.role not in {"filter", "period"} or not condition_id:
+                    continue
+                condition = conditions[condition_id]
+                if row_measure and binding.role == "period" and row is None:
+                    local_conditions.add(condition_id)
+                    continue
+                name = f"condition:{condition_id}"
+                if name not in fields:
+                    fields[name] = column
+                    local_predicates.append(_condition_predicate(query, condition, name))
+                    local_conditions.add(condition_id)
+            if not fields:
+                continue
+            units = [binding for binding in bindings if binding.role == "unit" and binding.table_id == table.table_id]
+            declared_unit = max(units, key=lambda binding: binding.score) if units else None
+            projections.append(Projection(table.table_id,
+                tuple(Field(name, column, declared_unit.text, declared_unit.source_span)
+                    if name == "measure" and declared_unit is not None else Field(name, column)
+                    for name, column in fields.items()), tuple(local_predicates)))
+            join_fields.append(keys)
+            mapped_conditions = (local_conditions if mapped_conditions is None else
+                mapped_conditions | local_conditions if joining else mapped_conditions & local_conditions)
+            entities = tuple(entity_names) or entities
+            grouping = tuple(group_names) or grouping
+        if not projections:
+            continue
+        joins = []
+        if joining:
+            available = dict(join_fields[0])
+            remaining = set(range(1, len(projections)))
+            while remaining:
+                connected = next((position for position in sorted(remaining)
+                                  if available.keys() & join_fields[position].keys()), None)
+                if connected is None:
+                    break
+                shared = tuple(sorted(available.keys() & join_fields[connected].keys()))
+                joins.append(Join(connected, tuple(available[key] for key in shared),
+                                  tuple(join_fields[connected][key] for key in shared)))
+                available.update(join_fields[connected])
+                remaining.remove(connected)
+            if not joins:
+                continue
+        population = tuple(index.tables) if need.scope == "all_supplied_documents" else tuple(
+            projection.table_id for projection in projections)
+        unresolved = tuple(identity for identity in need.condition_ids
+            if conditions[identity].relation_type != "VERSION" and identity not in mapped_conditions)
+        programs.append(DocumentProgram(need.need_id, tuple(projections), population,
+            operation=need.operation, value_field="measure" if need.operation == "sum" else "",
+            entity_fields=entities, joins=tuple(joins), group_by=grouping,
+            distinct=entities if need.need_id in query.distinct_needs else (),
+            condition_ids=need.condition_ids, unresolved_conditions=unresolved))
+    return tuple(programs)
+
+
+@dataclass(frozen=True)
+class SemanticBinding:
+    blocks: tuple
+    instruction: str
+    schema: dict
+    decode: object
+
+
+def _query_description(query, need_ids):
+    ids = set(need_ids)
+    selected = tuple(need for need in query.task.needs if need.need_id in ids)
+    condition_ids = {identity for need in selected for identity in need.condition_ids}
+    return {"question": query.task.raw_question, "needs": [{"id": need.need_id,
+        "operation": need.operation, "subject": query.text(need.subject_refs),
+        "request": query.text(need.anchor_spans), "conditions": need.condition_ids,
+        "scope": need.scope} for need in selected], "conditions": [{
+            "id": condition.condition_id, "type": condition.relation_type,
+            "field": query.text((condition.key_span,)) if condition.key_span else "",
+            "values": [query.text((ref,)) for ref in condition.value_spans],
+            "predicate": query.text((condition.predicate_span,)) if condition.predicate_span else "",
+            "operator": query.filter_operators[condition.condition_id]}
+            for condition in query.task.conditions if condition.condition_id in condition_ids]}
+
+
+def _literal_source(unit, address):
+    text, cursor = address["text"], 0
+    for _ in range(address["occurrence"] + 1):
+        start = unit.text.index(text, cursor)
+        cursor = start + len(text)
+    origin = unit.source_spans[0]
+    span = SourceSpan(f"{origin.span_id}:{start}:{cursor}", origin.source_key,
+                      origin.start + start, origin.start + cursor)
+    return text, span
+
+
+def semantic_binding_schema(index, need_ids):
+    def array(item):
+        return {"type": "array", "items": item}
+    def obj(properties):
+        return {"type": "object", "properties": properties,
+                "required": list(properties), "additionalProperties": False}
+    string = {"type": "string"}
+    predicate = obj({"field": string, "operation": {"enum": [*list(_COMPARISONS), "in", "contains"]},
+        "value": {"anyOf": [string, {"type": "number"}, array(string)]}, "unit": string})
+    projection = obj({"table_id": {"enum": list(index.tables)}, "fields": array(obj({
+        "name": string, "column": {"type": "integer", "minimum": 0},
+        "unit_span": {"anyOf": [{"type": "null"}, obj({
+            "unit_id": {"enum": [f"S{i+1}" for i in range(len(index.binding_units()))]},
+            "text": {"type": "string", "minLength": 1},
+            "occurrence": {"type": "integer", "minimum": 0}})]}})),
+        "predicates": array(predicate)})
+    return obj({"programs": array(obj({"need_id": {"enum": list(need_ids)},
+        "projections": array(projection), "value_field": string, "entity_fields": array(string),
+        "predicates": array(predicate), "joins": array(obj({
+            "right_index": {"type": "integer", "minimum": 1},
+            "left_fields": array(string), "right_fields": array(string)})),
+        "group_by": array(string), "distinct": array(string), "unresolved_conditions": array(string),
+        "excluded_table_ids": array({"enum": list(index.tables)})}))})
+
+
+def decode_programs(text, query, index):
+    import json
+    needs = {need.need_id: need for need in query.task.needs}
+    result = []
+    fragments = {f"S{i+1}": unit for i, unit in enumerate(index.binding_units())}
+    def field_binding(field):
+        address = field["unit_span"]
+        if address is None:
+            return Field(field["name"], field["column"])
+        text, span = _literal_source(fragments[address["unit_id"]], address)
+        return Field(field["name"], field["column"], text, span)
+    for item in json.loads(text)["programs"]:
+        need = needs[item["need_id"]]
+        projections = tuple(Projection(projection["table_id"],
+            tuple(field_binding(field) for field in projection["fields"]),
+            tuple(Predicate(**predicate) for predicate in projection["predicates"]))
+            for projection in item["projections"])
+        population = tuple(index.tables) if need.scope == "all_supplied_documents" else tuple(
+            projection.table_id for projection in projections)
+        result.append(DocumentProgram(need.need_id, projections, population, need.operation,
+            item["value_field"], tuple(item["entity_fields"]),
+            tuple(Predicate(**predicate) for predicate in item["predicates"]),
+            tuple(Join(join["right_index"], tuple(join["left_fields"]), tuple(join["right_fields"]))
+                  for join in item["joins"]), tuple(item["group_by"]), tuple(item["distinct"]),
+            need.condition_ids, tuple(item["unresolved_conditions"]), tuple(item["excluded_table_ids"])))
+    return tuple(result)
+
+
+def semantic_binding(query, index, need_ids):
+    """Bind a document program from schema and examples, without reading all rows."""
+    from dataclasses import replace
+    import json
+    units = index.binding_units()
+    blocks = tuple(replace(index.blocks[unit.source_spans[0].source_key], text=unit.text,
+        span=(unit.source_spans[0].start, unit.source_spans[0].end), token_ids=()) for unit in units)
+    catalogue = [{"table_id": table.table_id, "columns": [
+        {"column": column, "header": header} for column, header in enumerate(table.headers)],
+        "caption": table.caption, "rows": len(table.rows), "source_start": table.source.start} for table in index.tables.values()]
+    instruction = ("Bind the requested fields and conditions to the supplied table schemas. "
+        "Samples illustrate columns; the CPU will execute over every row of each selected table. "
+        "Return projections and typed filters, explicit equality joins, and requested entity deduplication. "
+        "Use zero-based column indices. Optional unit_span identifies a supplied S source, exact unit text, "
+        "and its zero-based occurrence in that source; "
+        "select only the literal unit in the supplied source. Same-shaped tables use the same field aliases for union; "
+        "join fields identify the actual key correspondence. Include all tables in the requested population. "
+        "For transposed tables select the period column and filter the requested metric row. "
+        "Put explicitly unrelated tables in excluded_table_ids; leave undecided tables unprojected and unexcluded. "
+        "Keep conditions that cannot be bound in unresolved_conditions. Do not calculate totals.\n"
+        + json.dumps({"task": _query_description(query, need_ids), "tables": catalogue,
+                         "sources": [{"unit_id": f"S{i+1}", "table_id": unit.table_id} for i, unit in enumerate(units)]},
+                     ensure_ascii=False, separators=(",", ":")))
+    return SemanticBinding(blocks, instruction, semantic_binding_schema(index, need_ids),
+                           lambda text: decode_programs(text, query, index))
+
+
+@dataclass(frozen=True)
+class SemanticProjection:
+    index: DocumentIndex
+    programs: tuple[DocumentProgram, ...]
+    covered_units: tuple[str, ...]
+    unresolved_need_ids: tuple[str, ...]
+
+
+def semantic_projection_schema(unit_ids, need_ids):
+    def array(item):
+        return {"type": "array", "items": item}
+    def obj(properties):
+        return {"type": "object", "properties": properties, "required": list(properties),
+                "additionalProperties": False}
+    address = obj({"unit_id": {"enum": list(unit_ids)},
+                   "text": {"type": "string", "minLength": 1},
+                   "occurrence": {"type": "integer", "minimum": 0}})
+    optional_address = {"anyOf": [address, {"type": "null"}]}
+    return obj({"covered_units": array({"enum": list(unit_ids)}),
+        "unresolved_need_ids": array({"enum": list(need_ids)}),
+        "records": array(obj({"need_ids": array({"enum": list(need_ids)}), "entity": address,
+            "measure": optional_address, "unit": optional_address,
+            "group": array(address), "qualifiers": array(address)}))})
+
+
+def decode_projection(text, query, units, need_ids, population_unit_ids):
+    import json
+    from controller.context_schema import EvidenceBlock
+    data = json.loads(text)
+    units_by_id = {f"S{index+1}": unit for index, unit in enumerate(units)}
+
+    def source(address):
+        unit = units_by_id[address["unit_id"]]
+        return _literal_source(unit, address)
+
+    tables, programs = [], []
+    needs = {need.need_id: need for need in query.task.needs}
+    for need_id in need_ids:
+        need = needs[need_id]
+        records = [record for record in data["records"] if need_id in record["need_ids"]]
+        group_count = max((len(record["group"]) for record in records), default=0)
+        headers = ("entity", "measure", *(f"group:{i}" for i in range(group_count)))
+        grouped = {identity: [] for identity in data["covered_units"]}
+        for record in records:
+            entity_text, entity_source = source(record["entity"])
+            qualifiers = tuple(source(address)[1] for address in record["qualifiers"])
+            unit_text, unit_source = source(record["unit"]) if record["unit"] else ("", None)
+            if unit_source is not None:
+                qualifiers = (*qualifiers, unit_source)
+            entity = Cell(entity_text, entity_source, qualifiers=qualifiers)
+            measure_text, measure_source = source(record["measure"]) if record["measure"] else ("", entity_source)
+            measure = Cell(measure_text, measure_source, unit=unit_text, qualifiers=qualifiers)
+            groups = tuple(Cell(*source(address), qualifiers=qualifiers) for address in record["group"])
+            grouped[record["entity"]["unit_id"]].append((entity, measure, *groups))
+        projections = []
+        for identity, rows in grouped.items():
+            origin = units_by_id[identity].source_spans[0]
+            table_id = f"projection:{need_id}:{units_by_id[identity].unit_id}"
+            tables.append(DocumentTable(table_id, headers, tuple(None for _ in headers), tuple(rows), origin))
+            projections.append(Projection(table_id, tuple(Field(name, column) for column, name in enumerate(headers))))
+        if need_id not in data["unresolved_need_ids"]:
+            programs.append(DocumentProgram(need_id, tuple(projections),
+                tuple(f"projection:{need_id}:{identity}" for identity in population_unit_ids),
+                operation=need.operation, value_field="measure" if need.operation == "sum" else "",
+                entity_fields=("entity",), group_by=tuple(headers[2:]),
+                distinct=("entity",) if need_id in query.distinct_needs else (),
+                condition_ids=need.condition_ids))
+    blocks = tuple(EvidenceBlock(unit.source_spans[0].source_key, "", unit.heading, unit.text,
+        span=(unit.source_spans[0].start, unit.source_spans[0].end)) for unit in units)
+    return SemanticProjection(DocumentIndex(tables, blocks), tuple(programs), tuple(units_by_id[identity].unit_id for identity in data["covered_units"]),
+                              tuple(data["unresolved_need_ids"]))
+
+
+def semantic_projection(query, units, need_ids, *, population_unit_ids=None):
+    """Read only requested fields and eligibility once; use CPU aggregation afterwards."""
+    import json
+    from controller.context_schema import EvidenceBlock
+    units, need_ids = tuple(units), tuple(need_ids)
+    population = tuple(population_unit_ids) if population_unit_ids is not None else tuple(unit.unit_id for unit in units)
+    blocks = tuple(EvidenceBlock(unit.source_spans[0].source_key, "", unit.heading, unit.text,
+        span=(unit.source_spans[0].start, unit.source_spans[0].end)) for unit in units)
+    instruction = ("Project only the requested document fields. For each qualifying record, return its entity, "
+        "requested measure, literal unit, grouping fields, and the period/condition qualifiers as exact source "
+        "literal references {unit_id,text,occurrence}; text is copied exactly and occurrence is zero-based "
+        "within that source. The CPU resolves the original character spans. "
+        "A record can serve several Need IDs: extract it once and list all applicable IDs. "
+        "Apply each Need's stated entity, period and conditions in this same pass. Retain units and qualifiers "
+        "from source headings or notes. Do not produce totals, summaries or a second selection list. "
+        "List a source as covered after processing its complete supplied text, including when it has no "
+        "qualifying records. Report unresolved Need IDs when required fields or applicability remain unknown.\n"
+        + json.dumps({"task": _query_description(query, need_ids),
+            "sources": [{"unit_id": f"S{index+1}", "title": unit.heading, "characters": len(unit.text)}
+                        for index, unit in enumerate(units)]}, ensure_ascii=False, separators=(",", ":")))
+    return SemanticBinding(blocks, instruction,
+        semantic_projection_schema(tuple(f"S{index+1}" for index in range(len(units))), need_ids),
+        lambda text: decode_projection(text, query, units, need_ids, population))
+
+
+def merge_projections(projections):
+    """Combine independently read source partitions before the single CPU aggregation."""
+    from dataclasses import replace
+    tables, blocks, programs, covered, unresolved = {}, {}, {}, {}, {}
+    for projection in projections:
+        tables.update(projection.index.tables)
+        blocks.update(projection.index.blocks)
+        covered.update(dict.fromkeys(projection.covered_units))
+        unresolved.update(dict.fromkeys(projection.unresolved_need_ids))
+        for program in projection.programs:
+            previous = programs.get(program.need_id)
+            if previous is not None:
+                program = replace(program, projections=(*previous.projections, *program.projections),
+                    population_table_ids=tuple(dict.fromkeys((*previous.population_table_ids, *program.population_table_ids))),
+                    group_by=program.group_by or previous.group_by)
+            programs[program.need_id] = program
+    return SemanticProjection(DocumentIndex(tables.values(), blocks.values()),
+                              tuple(program for need, program in programs.items() if need not in unresolved),
+                              tuple(covered), tuple(unresolved))
+
+
+def combine_populations(parts):
+    """Normalize table and prose projections, then aggregate each Need once."""
+    tables, blocks, grouped = [], {}, {}
+    for part_index, (index, program) in enumerate(parts):
+        blocks.update(index.blocks)
+        rows = []
+        names = ("entity", "measure", *(f"group:{i}" for i in range(len(program.group_by))))
+        for position, record in enumerate(index.records(program)):
+            sources = record.sources
+            entity = " / ".join(_record_key(record, program.entity_fields)) if program.entity_fields else str(position)
+            row = [Cell(entity, sources[0], qualifiers=sources[1:])]
+            if program.value_field:
+                cell = record.fields[program.value_field]
+                unit, value = quantity(cell)
+                row.append(Cell(str(value), cell.source, cell.header, unit, cell.qualifiers))
+            else:
+                row.append(Cell("", sources[0], qualifiers=sources[1:]))
+            row.extend(record.fields[name] for name in program.group_by)
+            rows.append(tuple(row))
+        used = (0, *(join.right_index for join in program.joins)) if program.joins else range(len(program.projections))
+        processed = tuple(dict.fromkeys((*(program.projections[i].table_id for i in used),
+                                        *program.excluded_table_ids)))
+        scope = _unique_spans(span for identity in processed
+            for span in (index.tables[identity].coverage or (index.tables[identity].source,)))
+        identity = f"population:{program.need_id}:{part_index}"
+        if scope:
+            tables.append(DocumentTable(identity, names, tuple(None for _ in names), tuple(rows), scope[0], coverage=scope))
+        entry = grouped.setdefault(program.need_id, {"source": program, "projections": [], "population": [],
+                                                    "unresolved": set()})
+        if scope:
+            entry["projections"].append(Projection(identity, tuple(Field(name, col) for col, name in enumerate(names))))
+            entry["population"].append(identity)
+        entry["population"].extend(set(program.population_table_ids) - set(processed))
+        entry["unresolved"].update(program.unresolved_conditions)
+    programs = []
+    for need_id, entry in grouped.items():
+        source = entry["source"]
+        programs.append(DocumentProgram(need_id, tuple(entry["projections"]), tuple(entry["population"]),
+            operation=source.operation, value_field="measure" if source.value_field else "",
+            entity_fields=("entity",), group_by=tuple(f"group:{i}" for i in range(len(source.group_by))),
+            distinct=("entity",) if source.distinct else (), condition_ids=source.condition_ids,
+            unresolved_conditions=tuple(sorted(entry["unresolved"]))))
+    return DocumentIndex(tables, blocks.values()), tuple(programs)

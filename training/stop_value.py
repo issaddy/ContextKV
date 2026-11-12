@@ -58,6 +58,7 @@ def fit(trajectories, *, epochs=40, learning_rate=1e-3, trace_lambda=0.8,
     model.mean.copy_(features.mean(0))
     scale = features.std(0, unbiased=False)
     model.scale.copy_(torch.where(scale > 0, scale, torch.ones_like(scale)))
+    model.active.copy_((scale > 0).to(model.active.dtype))
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     for _ in range(epochs):
         for trajectory in trajectories:

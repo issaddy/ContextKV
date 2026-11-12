@@ -48,7 +48,8 @@ class ConversationStore:
 
     def read_snapshot(self, session_id, corpus_snapshot_id="default"):
         with self.db:
-            self.db.execute("INSERT OR IGNORE INTO qa_sessions VALUES(?,?)", (session_id, corpus_snapshot_id))
+            self.db.execute("INSERT INTO qa_sessions VALUES(?,?) ON CONFLICT(session_id) "
+                            "DO UPDATE SET corpus_id=excluded.corpus_id", (session_id, corpus_snapshot_id))
         return self.get_snapshot(session_id)
 
     def get_snapshot(self, session_id):

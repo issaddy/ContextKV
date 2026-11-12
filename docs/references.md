@@ -1,43 +1,26 @@
 # 当前方法的复用依据
 
-本文记录主线依赖及可执行的独立对照。任务边界、实现和运行结果分别见 [任务书](study/task_spec.md)、[架构](architecture.md) 和 [运行手册](study/final_runbook.md)。文献结果与本项目实测分开记录。
+| 相关工作 | ContextKV 采用的机制 | 项目实现 |
+|---|---|---|
+| [Qwen3 Embedding](https://arxiv.org/abs/2506.05176)、[RCEM](https://arxiv.org/abs/2606.01697) | 会话表示对齐到独立查询空间；同次编码支撑任务结构和 Need 检索 | `adapters/shared_encoding.py`、`training/shared_training.py` |
+| [Jina-reranker-v3.5](https://huggingface.co/jinaai/jina-reranker-v3.5) | 列表证据共享编码；段落表示用于选材，token 表示用于字段及来源绑定 | `adapters/shared_encoding.py`、`training/shared_heads.py` |
+| [OptiSet](https://arxiv.org/abs/2601.05027) | 生成器效用监督集合选择，学习互补、重复和干扰材料 | `training/collect_shared_values.py`、`EvidenceHeads` |
+| [TableRAG](https://aclanthology.org/2025.emnlp-main.710/) | 结构化字段定位与确定性执行结合语义推理 | `adapters/document_compute.py` |
+| [VersionRAG](https://arxiv.org/abs/2510.08109) | 版本、章节和字段对应关系，版本过滤与前后证据配对 | `adapters/version_structure.py` |
+| [Stop-RAG](https://arxiv.org/abs/2510.14337) | 完整轨迹的多步继续/停止价值学习 | `training/stop_value.py`、`controller/value_policy.py` |
+| [InfoFlow KV](https://arxiv.org/html/2603.05353v3) | 独立块 KV、全局 RoPE、查询注意力驱动的选择性重算 | `engine_patches/infoflow.py`、`engine_patches/infoflow_attention.py` |
+| [SGLang](https://arxiv.org/abs/2312.07104)、[HiCache](https://docs.sglang.io/docs/advanced_features/hicache_design) | 原生执行、精确前缀和 GPU/Host 分层缓存 | `engine_patches/contextkv_compute.py`、SGLang 集成补丁 |
 
-## A · 任务、来源与事实
+任务、字段、集合和停止头是本项目在共享表示上的训练实现。OptiSet 的效用思路落实为固定 Qwen3-32B 的真实答案结果；结构化计算保留原文地址。InfoFlow 的请求私有覆盖层、原生缓存融合和调度由本项目在 SGLang 内实现。
 
-混合检索复用 BM25 与 BGE-M3 dense 表示的 RRF，发布版交叉编码器为 query–passage 相关性重排。当前 ranked 入口按该顺序和来源依赖选材。Need 的主体、条件、版本和支持关系由项目任务与证据接口表达。支持模型及集合效用是可选对照，候选回答偏好监督复用固定 reader 的实际输出。[BGE-M3](https://huggingface.co/BAAI/bge-m3) · [BGE-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3) · [REPLUG](https://arxiv.org/abs/2301.12652)
+论文报告的收益不作为 ContextKV 的实测结果。当前代码的 GPU 实测由运行手册中的同版资产与 benchmark 入口产生。
 
-有限窗口选材借鉴 xQuAD 的显式需求方面覆盖思想，复用项目已有的倒数排名覆盖函数：`F(S) = Σ_j max_{u∈S} 1/rank_j(u)`。保留全问题相关来源作为起点，再按 Need 的边际覆盖选择来源依赖闭包；实际窗口和 passage 额度决定可装入集合。Need 排名来自已有召回归属和相关性顺序，不新增重排调用。[显式查询方面覆盖](https://eprints.gla.ac.uk/44352/)
+## 评价依据
 
-任务学生入口借鉴双线性图边评分，用于关联 Need、主体、条件与前驱。线上主线使用任务解释和来源合同，跨轮复用核对适用条件后导入原子事实。事实的原文坐标和推导父链分别用于来源定位与证明。[双线性边评分](https://nlp.stanford.edu/pubs/dozat2017deep.pdf) · [数据溯源](https://www.research.ed.ac.uk/en/publications/why-and-where-a-characterization-of-data-provenance/)
+- [MultiDoc2Dial](https://github.com/IBM/multidoc2dial)：原始问题、文档和 F1/EM。
+- [MT-RAG](https://github.com/IBM/mt-rag-benchmark)：原始任务及 MTRAGEval。
+- [VersionQA](https://github.com/danielhuwiler/versionrag)：原始版本文档与作者二值正确性 rubric。
+- [Loong](https://github.com/MozerWang/Loong)：作者参考评分 rubric 与 Perfect Rate。
+- [LlamaIndex](https://github.com/run-llama/llama_index)：上游历史凝练与 compact/refine，生成使用相同固定 Qwen。
 
-## B · 计算价值与有界后续
-
-B 以当前直接 ANSWER 为基准，比较候选动作接固定后续的最终质量与完整成本。线上只执行选中动作，随后用实际状态重新选择。缺口检索沿未解关系和父事实触发，优先阅读已有就绪来源。此处借鉴计算价值、rollout 和检索与推理交替，实际收益由配对监督与完整队列衡量。[计算价值](https://www2.eecs.berkeley.edu/Pubs/TechRpts/1988/5755.html) · [Rollout](https://web.mit.edu/dimitrib/www/dp_rollout_book.html) · [IRCoT](https://aclanthology.org/2023.acl-long.557/)
-
-质量头按动作类别复用 scikit-learn 的加权回归树，部署时保存节点数组并直接遍历；线性岭回归作为实际对照。绝对成本头使用非负最小二乘与岭惩罚，直接拟合动作和原生报价所表达的非负工作量。已付成本用于约束预算；同一报价下的绝对分支预测用于计算相对成本。证据充分性用于定位检索、READ、最终窗口与回答各阶段的错误，最终质量使用实际答案及来源评价。[回归树](https://scikit-learn.org/stable/modules/generated/sklearn.tree.DecisionTreeRegressor.html) · [SciPy NNLS](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.nnls.html) · [Sufficient Context](https://arxiv.org/abs/2411.06037) · [ALCE](https://aclanthology.org/2023.emnlp-main.398/)
-
-## C · 请求编译与原生缓存
-
-SGLang RadixAttention 和 HiCache 提供精确因果前缀匹配、GPU/Host 驻留与迁移，项目读取实际 Native 报价和完成回执。`context_native` / `context_cache_order` 的编译对照复用作者 ContextPilot CPU 重叠索引与排列，候选顺序由项目编译成真实请求后报价。各排列的命中、回载、重算和完整响应以共同负载记录。[RadixAttention](https://arxiv.org/abs/2312.07104) · [HiCache](https://docs.sglang.io/docs/advanced_features/hicache_design) · [ContextPilot](https://arxiv.org/abs/2511.03475) · [复用范围](third_party/CONTEXTPILOT_NOTICE.md)
-
-两层需求保留按当前集成的 `71de97b` 实现读取 FULL 的 `lock_ref`、`host_lock_ref` 和传输完成状态。Host 写入投影沿用原生 write-through 对未备份祖先及新后缀的处理，并扣除已占用的备份空间与请求准入额度；owner 复用原生 session 软优先级。[固定版树与备份](https://github.com/sgl-project/sglang/blob/71de97b264b04dcd514cf904003028aefe9775c8/python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py) · [固定版 session 引用](https://github.com/sgl-project/sglang/blob/71de97b264b04dcd514cf904003028aefe9775c8/python/sglang/srt/mem_cache/unified_cache/session_ref_tracker.py)
-
-文档 KV 依赖前面的完整 token 路径。项目据此把 source-first 请求的稳定原文放在变化的历史和任务之前，READ 与直接 ANSWER 都采用这一排列原则。原文、历史、结论和引用完整进入实际输入，排列候选由 Native 当前报价选择。[ContextPilot 文档排列](https://arxiv.org/html/2511.03475v1#S5) · [RAGCache 知识树](https://arxiv.org/html/2404.12457v2#S5.SS1)
-
-`context_native` 和 `context_cache_order` 使用 Native 保留，`context_cache_demand` 用剩余证据需求分配短租。可选 TTL/value 在同一原生容量管理上估计保护价值。保留目标借鉴有预算的覆盖和分层替换，在共同观察窗核算共享页、增量驻留和控制成本。[预算最大覆盖](https://doi.org/10.1016/S0020-0190(99)00031-9) · [RAGCache](https://arxiv.org/abs/2404.12457)
-
-AdaCache 同时用选择性重算复用文档块 KV，并按生成置信度扩展检索上下文。ContextKV 从多轮任务的条件、版本和来源依赖生成下一步候选，用原生精确前缀报价比较读、算和答，并按尚需原文的后续动作分配保留。两者在上下文选择与缓存联合决策上直接相关。ContextKV 的验收量是完整响应 P95 与有来源的最终回答质量。[AdaCache（ICLR 2026）](https://openreview.net/forum?id=Bmvx8ybDzo)
-
-Prompt Cache 通过预定义模块复用注意力状态，CacheBlend 通过选择性重算融合文档块 KV，Cache-Craft 管理和复用预计算的块缓存。它们覆盖了精确前缀之外的复用机会。LLMLingua-2 在输入 token 层选择保留内容，ContextKV 的表示选择以有原文来源和需求覆盖的事实为单位，并将原文和事实表示的实际请求交给同一报价接口。[Prompt Cache](https://proceedings.mlsys.org/paper_files/paper/2024/hash/a66caa1703fe34705a4368c3014c1966-Abstract-Conference.html) · [CacheBlend](https://arxiv.org/abs/2405.16444) · [Cache-Craft](https://arxiv.org/abs/2502.15734) · [LLMLingua-2](https://aclanthology.org/2024.findings-acl.57/)
-
-## 外部参照与公开评价
-
-`LlamaIndex_native` 调用上游 Memory、历史问题凝练与 compact/refine，检索使用 BM25＋dense 和发布版 reranker，生成交给统一账本下的固定 Qwen。外部比较保留各自实际历史，框架调用与检索成本进入完整账本。[上游问题凝练](https://github.com/run-llama/llama_index/blob/v0.14.25/llama-index-core/llama_index/core/chat_engine/condense_question.py) · [上游 compact/refine](https://github.com/run-llama/llama_index/blob/v0.14.25/llama-index-core/llama_index/core/response_synthesizers/compact_and_refine.py)
-
-公开任务及作者评价与构造机制轨分别报告。评分基于实际答案、历史、可见原文和结论来源闭包，保留声明分母与失败记录。[MT-RAG](https://github.com/IBM/mt-rag-benchmark) · [MultiDoc2Dial](https://github.com/IBM/multidoc2dial) · [Loong](https://github.com/MozerWang/Loong) · [2WikiMultihopQA](https://github.com/Alab-NII/2wikimultihop) · [VersionQA](https://github.com/danielhuwiler/versionrag) · [数据与评价](data_and_evaluation.md)
-
-## 可选对照入口
-
-- 当前事实复用对照为 `context_no_fact_reuse`，动作决策对照为 `Rule_contextpilot_joint_demand`。辅助训练中的 `selection.mode: support`、`whole_plan` 各保留独立用途。[运行手册](study/final_runbook.md)
-- 缓存编译与需求保留分别通过 `context_native → context_cache_order → context_cache_demand` 比较。[矩阵](../configs/study_matrix.yaml) · [方法适配](third_party/EFFICIENTAGENT_NOTICE.md)
-- 表格注释可按配置使用 CRAFT 行文本函数，复用范围及表格关系由现有适配说明记录。[CRAFT 说明](third_party/CRAFT_NOTICE.md) · [表格关系](research/table_relations.md)
+模型和源码使用各自发布许可证；SGLang 与 InfoFlow 的源码归属见 `engine_patches/NOTICE.md`，Loong rubric 归属见 `docs/third_party/LOONG_NOTICE.md`。

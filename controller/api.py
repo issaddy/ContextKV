@@ -1,313 +1,103 @@
-"""Local controller HTTP API. Use one worker per state database in normal operation."""
+"""HTTP entry point for the shared document-QA execution path."""
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
+import yaml
 
-from adapters.serving_retrieval import ServingRetriever, ServingRetrievalError
-
-from .config import RunConfig, create_controller
-from .engine_client import EngineError
+from .config import apply_study_config, create_controller, load_config
 from .evidence import make_evidence
 from .qa import DocumentQA
 from .serialization import to_jsonable
-from .service import ContextOverflow, Controller
-from .session_store import StoreError
-
-RETIRE_RETRY_SECONDS = 2
 
 
 class EvidenceInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    document_id: str = Field(min_length=1)
-    text: str = Field(min_length=1)
+    document_id: str
+    text: str
     passage_id: str | None = None
     corpus_id: str = "api"
     version: str = "v1"
     source_uri: str | None = None
     title: str = ""
-    provenance: tuple[str, ...] = ()
-    anchors: tuple[str, ...] = ()
-
-
-class TurnInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    query: str = Field(min_length=1)
-    request_id: str = Field(min_length=1)
-    corpus_snapshot_id: str = "demo-v1"
-    evidence: list[EvidenceInput] = Field(default_factory=list)
-
-
-class RecoverInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    abandon: bool = False
-
-
-class QueryInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    query: str = Field(min_length=1)
-    request_id: str = Field(min_length=1)
-    from_corpus_snapshot_id: str | None = Field(default=None, min_length=1)
-    document_set_id: str | None = None
-    coverage_scope: str = "selected_sources"
-
-
-class RegisteredEvidenceInput(EvidenceInput):
     metadata: dict = Field(default_factory=dict)
 
 
 class RegistrationInput(BaseModel):
-    documents: list[RegisteredEvidenceInput] = Field(min_length=1)
+    documents: list[EvidenceInput]
 
 
-def _load_retrieval(service, *, retriever_index, retriever_config, evidence_corpus, corpus_id,
-                    study_config=None):
-    if study_config is not None:
-        import yaml
-        from pathlib import Path
-        from adapters.study_retrieval import create_study_retriever
-        return create_study_retriever(yaml.safe_load(Path(study_config).read_text()), service.template)
-    from adapters.corpus import CorpusIndex
-    from adapters.retriever_factory import create_retriever
-
-    retriever = create_retriever("P3", index_path=retriever_index, config_path=retriever_config)
-    try:
-        index = (CorpusIndex.from_jsonl(evidence_corpus, corpus_id=corpus_id,
-                    snapshot_id=retriever.corpus_snapshot_id) if evidence_corpus else None)
-        return ServingRetriever(retriever, corpus_id=corpus_id, corpus_index=index, events=service.events)
-    except BaseException:
-        if hasattr(retriever, "close"):
-            retriever.close()
-        raise
+class QueryInput(BaseModel):
+    query: str
+    request_id: str
+    document_set_id: str | None = None
+    coverage_scope: str = "selected_sources"
 
 
-def create_app(controller: Controller | None = None, config: RunConfig | None = None, *,
-               retrieval: ServingRetriever | None = None, retriever_index: str | None = None,
-               retriever_config: str | None = None, evidence_corpus: str | None = None,
-               corpus_id: str = "mtrag", study_config: str | None = None) -> FastAPI:
-    if sum(bool(x) for x in (retriever_index, retriever_config, study_config)) > 1:
-        raise ValueError("choose one retrieval configuration")
-    configured = bool(retriever_index or retriever_config or study_config)
-    if retrieval is not None and (configured or evidence_corpus):
-        raise ValueError("choose an existing serving retriever or retrieval configuration")
-    if evidence_corpus and not configured:
-        raise ValueError("evidence_corpus requires a configured retriever")
-    if not corpus_id.strip():
-        raise ValueError("corpus_id must be nonempty")
-    resolved_config = (config or RunConfig()) if controller is None else None
-    if study_config is not None and resolved_config is not None:
-        import yaml
-        from pathlib import Path
-        from .config import apply_study_config
-        resolved_config = apply_study_config(resolved_config, yaml.safe_load(Path(study_config).read_text()))
-    service = controller if controller is not None else create_controller(resolved_config)
-    active_requests = 0
-    requests_drained = asyncio.Event()
-    requests_drained.set()
-    stopping = False
-    retry_worker = None
-    retry_error = None
-
-    class TrackRequests:
-        """Track the ASGI request lifetime, including its cancellation cleanup."""
-        def __init__(self, app):
-            self.app = app
-
-        async def __call__(self, scope, receive, send):
-            nonlocal active_requests
-            if scope["type"] != "http":
-                return await self.app(scope, receive, send)
-            if stopping:
-                response = JSONResponse(status_code=503, content={"code": "SERVICE_SHUTTING_DOWN",
-                    "detail": "service shutdown is in progress"})
-                return await response(scope, receive, send)
-            active_requests += 1
-            requests_drained.clear()
-            try:
-                await self.app(scope, receive, send)
-            finally:
-                active_requests -= 1
-                if not active_requests:
-                    requests_drained.set()
-
-    async def drain_requests():
-        # A server's graceful deadline may cancel requests without awaiting their
-        # cleanup. Cancellation cannot stop their synchronous retrieval workers.
-        cancelled = None
-        while not requests_drained.is_set():
-            try:
-                await requests_drained.wait()
-            except asyncio.CancelledError as error:
-                cancelled = error
-        if cancelled is not None:
-            raise cancelled
-
-    async def retries():
-        nonlocal retry_error
-        while True:
-            await asyncio.sleep(RETIRE_RETRY_SECONDS)
-            try:
-                await service.drain()
-            except asyncio.CancelledError:
-                # Shutdown cancellation belongs to this worker. Cancellation of
-                # a previously awaited retirement task is a maintenance error.
-                if asyncio.current_task().cancelling():
-                    raise
-                retry_error = "retirement task cancelled"
-            except Exception as error:
-                # The durable outbox remains authoritative. Protocol/transport
-                # failures must not terminate the only periodic retry path.
-                retry_error = f"{type(error).__name__}: {error}"
-            else:
-                retry_error = None
+def create_app(controller=None, config=None, *, retrieval=None,
+               study_config="configs/study.yaml"):
+    study = yaml.safe_load(Path(study_config).read_text())
+    settings = apply_study_config(config or load_config(study["generation"]["run_config"]), study)
+    service = controller or create_controller(settings)
 
     @asynccontextmanager
     async def lifespan(app):
-        nonlocal stopping, retry_worker
-        worker = loader = None
+        from adapters.study_retrieval import create_study_retriever
+        provider = retrieval or await asyncio.to_thread(create_study_retriever, study, service.template)
+        app.state.qa = DocumentQA(service, provider)
+        service.bind_resident_models(provider.manifest)
+        await app.state.qa.start()
         try:
-            info = await service.engine.info()
-            if info.fingerprint != service.template.fingerprint:
-                raise RuntimeError("engine/controller fingerprint mismatch")
-            if configured:
-                loader = asyncio.create_task(asyncio.to_thread(_load_retrieval, service,
-                    retriever_index=retriever_index, retriever_config=retriever_config,
-                    evidence_corpus=evidence_corpus, corpus_id=corpus_id, study_config=study_config))
-                app.state.retrieval = await asyncio.shield(loader)
-            if app.state.retrieval is not None:
-                app.state.qa = DocumentQA(service, app.state.retrieval)
-                service.bind_resident_models(app.state.retrieval.manifest)
-            await service.start()
-            worker = retry_worker = asyncio.create_task(retries())
-            app.state.ready = True
             yield
         finally:
-            stopping = True
-            app.state.ready = False
-            try:
-                await drain_requests()
-            finally:
-                try:
-                    if worker is not None:
-                        worker.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await worker
-                finally:
-                    try:
-                        if loader is not None and app.state.retrieval is None:
-                            # A cancelled startup does not stop its loading thread.
-                            # Reclaim its result before closing; preserve the original
-                            # startup error/cancellation if loading itself failed.
-                            with suppress(Exception):
-                                app.state.retrieval = await asyncio.shield(loader)
-                        if app.state.retrieval is not None:
-                            await asyncio.to_thread(app.state.retrieval.close)
-                    finally:
-                        try:
-                            await service.aclose()
-                        finally:
-                            service.store.close()
+            provider.close()
+            await service.aclose()
+            service.store.close()
 
-    app = FastAPI(title="ContextKV", version="0.1.0", lifespan=lifespan)
-    app.add_middleware(TrackRequests)
-    app.state.controller = service
-    app.state.retrieval = retrieval
-    app.state.ready = False
-
-    @app.exception_handler(StoreError)
-    async def store_error(request, exc):
-        return JSONResponse(status_code=409, content={"detail": str(exc)})
-
-    @app.exception_handler(EngineError)
-    async def engine_error(request, exc):
-        return JSONResponse(status_code=503, content={"detail": str(exc), "code": exc.code})
-
-    @app.exception_handler(ServingRetrievalError)
-    async def retrieval_error(request, exc):
-        return JSONResponse(status_code=503, content={"detail": str(exc), "code": exc.code})
-
-    @app.exception_handler(ContextOverflow)
-    async def overflow(request, exc):
-        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "CONTEXT_OVERFLOW"})
+    app = FastAPI(title="ContextKV", lifespan=lifespan)
 
     @app.get("/health")
     async def health():
-        info = await service.engine.info()
-        adapter = app.state.retrieval
-        running = retry_worker is not None and not retry_worker.done()
-        error = service.retirement_error or retry_error
-        healthy = app.state.ready and running and error is None
-        body = {"status": "ok" if healthy else "degraded", "engine": to_jsonable(info),
-                "pending_retire_operations": len(service.store.outbox()),
-                "retirement_maintenance": {"running": running, "error": error},
-                "retrieval": to_jsonable(adapter.manifest) if adapter is not None else None}
-        return JSONResponse(status_code=200 if healthy else 503, content=body)
+        return {"status": "ok", "engine": to_jsonable(service.engine_info)}
+
+    @app.post("/documents")
+    async def register(body: RegistrationInput):
+        blocks, metadata = [], {}
+        for item in body.documents:
+            values = item.model_dump()
+            fields = values.pop("metadata")
+            block = make_evidence(**values)
+            blocks.append(block)
+            metadata[block.key] = fields
+        registered = app.state.qa.register_documents(blocks, source_metadata=metadata)
+        return {"document_set_id": registered.document_set_id, "documents": len(blocks)}
 
     @app.post("/sessions/{session_id}/query")
     async def query(session_id: str, body: QueryInput):
-        adapter = app.state.retrieval
-        if not app.state.ready or adapter is None:
-            return JSONResponse(status_code=503, content={"code": "RETRIEVAL_NOT_READY",
-                "detail": "query retrieval is not configured or not ready"})
-        if body.from_corpus_snapshot_id is not None:
-            try:
-                service.store.get_snapshot(session_id)
-            except KeyError as exc:
-                raise HTTPException(status_code=404, detail="session not found") from exc
-        try:
-            return to_jsonable(await app.state.qa.ask(session_id, body.query, body.request_id,
-                document_set_id=body.document_set_id, coverage_scope=body.coverage_scope,
-                from_corpus_snapshot_id=body.from_corpus_snapshot_id))
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    @app.post("/documents")
-    async def register_documents(body: RegistrationInput):
-        if not app.state.ready or app.state.retrieval is None:
-            raise HTTPException(status_code=503, detail="query retrieval is not configured or not ready")
-        blocks, metadata = [], {}
-        for document in body.documents:
-            value = document.model_dump()
-            fields = value.pop("metadata")
-            block = make_evidence(**value)
-            blocks.append(block)
-            metadata[block.key] = fields
-        documents = app.state.qa.register_documents(blocks, source_metadata=metadata)
-        return {"document_set_id": documents.document_set_id,
-                "corpus_snapshot_id": documents.corpus_snapshot_id,
-                "documents": len(documents.blocks)}
-
-    @app.post("/sessions/{session_id}/turns")
-    async def turn(session_id: str, body: TurnInput):
-        try:
-            blocks = tuple(make_evidence(**item.model_dump()) for item in body.evidence)
-            return to_jsonable(await service.serve_turn(session_id, body.query, blocks,
-                                  request_id=body.request_id, corpus_snapshot_id=body.corpus_snapshot_id))
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        result = await app.state.qa.ask(session_id, body.query, body.request_id,
+            document_set_id=body.document_set_id, coverage_scope=body.coverage_scope)
+        return {"answer": result.assistant_text,
+                "sources": to_jsonable(result.visible_evidence_manifest),
+                "computations": result.computations,
+                "metrics": {name: getattr(result, name) for name in (
+                    "complete_ms", "total_input_tokens", "total_output_tokens",
+                    "total_device_hit_tokens", "total_host_loaded_tokens", "total_prefill_tokens")}}
 
     @app.get("/sessions/{session_id}")
-    async def state(session_id: str):
-        try:
-            return to_jsonable(service.store.get_snapshot(session_id))
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="session not found") from exc
-
-    @app.post("/sessions/{session_id}/recover")
-    async def recover(session_id: str, body: RecoverInput):
-        result = await service.recover(session_id, abandon=body.abandon)
-        return {"result": to_jsonable(result), "pending": to_jsonable(service.store.pending_attempt(session_id))}
+    async def history(session_id: str):
+        return to_jsonable(service.store.get_snapshot(session_id).raw_history)
 
     @app.post("/sessions/{session_id}/close")
     async def close(session_id: str):
-        try:
-            await service.close_session(session_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="session not found") from exc
-        return {"closed": True, "pending_retire_operations": len(service.store.outbox(session_id))}
+        await service.close_session(session_id)
+        return {"closed": True}
+
+    @app.exception_handler(ValueError)
+    async def invalid_input(request, error):
+        return JSONResponse(status_code=422, content={"error": str(error)})
 
     return app

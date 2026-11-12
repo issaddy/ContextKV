@@ -1,34 +1,27 @@
-# 当前 GPU 部署
+# GPU 部署
 
-进入实验容器：
-
-```bash
-ssh relay
-ssh songjiayun@infra-wlf3-ge103-1.idchb2az3.hb2.kwaidc.com
-sudo nerdctl exec -it test-0523 bash
-cd /home/relay/songjiayun/ContextKV
-```
-
-使用默认 `python3`，模型目录为 `/data/models/qwen3-32b`。
-
-更新仓库后，运行 `bootstrap_sglang.sh` 将 SGLang overlay 更新到当前项目接口，再启动服务。它复用官方 SGLang 0.5.18 源码和容器现有 Python、PyTorch、CUDA 内核。课题固定 Qwen 权重、tokenizer 和组间推理条件。
+使用容器默认 `python3`。生成模型目录为 `/data/models/qwen3-32b`，模型声明位于 `configs/model_scopes/qwen3-32b.local.json`；共享辅助模型目录在 `configs/study.yaml` 配置。
 
 ```bash
-export CONTEXTKV_MODEL_SCOPE_PATH=/absolute/path/qwen3-scope.json
-bash scripts/bootstrap_sglang.sh
+python3 -m pip install --no-deps -e .
+python3 scripts/prepare_sglang.py --checkout vendor/sglang-0.5.18
+CONTEXTKV_MODEL_SCOPE_PATH=configs/model_scopes/qwen3-32b.local.json bash scripts/bootstrap_sglang.sh
 source runs/engine-runtime.env
+CUDA_VISIBLE_DEVICES=0 bash scripts/launch_sglang.sh --port 30000
 ```
 
-启用 Unified Radix 的 Python TreeCore。主比较的 BF16 权重/KV、窗口、GPU/Host 配额、page size、采样和推理参数由运行配置共同冻结。
+启动脚本使用 TP1、BF16、32k 窗口、64-token 页和 HiCache。`CONTEXTKV_HICACHE_GB` 设置 Host 缓存大小；设备使用范围为 0–3。
 
-`CONTEXTKV_MODEL_SCOPE_PATH` 与 `CONTEXTKV_FINGERPRINT_JSON` 取当前本地模型记录和实际 tokenizer/template。启动入口为 `scripts/launch_sglang.sh`，原生参数：
+共享查询与证据编码默认分别使用 GPU 2、3。GPU 1 可安排索引构建或辅助训练。按实际就绪阶段并行，训练完成后加载对应的共享资产。
+
+服务入口：
 
 ```bash
---host 127.0.0.1 --port 30000 --max-total-tokens 32768 \
---mem-fraction-static 0.65 --max-running-requests 8 \
---attention-backend fa3 --chunked-prefill-size 8192 --schedule-policy fcfs \
---speculative-algorithm NGRAM --speculative-ngram-max-bfs-breadth 1 \
---speculative-num-draft-tokens 12 --random-seed 42
+python3 -m controller --config configs/study.yaml serve --host 0.0.0.0 --port 8000
 ```
 
-本机 HTTP 调用设置 `NO_PROXY` 与 `no_proxy` 为 `127.0.0.1,localhost,::1`。GPU 设备和服务端口由运行配置指定。下载与 Git 使用运行环境中的代理。任务结束后关闭对应服务、observer 和 SSH 会话。
+SGLang 的 `/generate` 同次接收输入、原文块和后续需求。`contextkv_compute.mode` 支持 `exact`、`infoflow`、`auto`。`/context/metrics` 返回必要缓存计数和累计 KV 占用；`/context/profile/prepare` 用于队列起点清缓存。
+
+首次 GPU 运行先用同一小请求比较 exact 与 infoflow，校准独立块构建和完整 prefill 的费用，再运行 auto。当前重构尚未完成这一步 GPU 测量。
+
+引擎补丁与运行实现见 [SGLang 集成](../engine_patches/README.md)。SSH 工作完成后关闭会话；仍需继续操作时复用现有连接。

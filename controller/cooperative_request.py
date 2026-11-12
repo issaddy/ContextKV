@@ -1,11 +1,11 @@
 """Compile the selected evidence and its KV demand in one tokenizer pass."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from urllib.parse import quote
 
-from .schema import EvidenceSpan, Message, history_messages
+from .schema import EvidenceSpan, Message, QueryContext, history_messages
 
 
 SYSTEM = (
@@ -16,11 +16,53 @@ SYSTEM = (
 )
 
 
+@dataclass
+class EvidenceSelection:
+    evidence: tuple
+    retrieval_priority: tuple
+    query_context: QueryContext | None = None
+    auxiliary_usage: dict | None = None
+    shared_state: object | None = None
+
+
+def working_history(query, history):
+    task = query.task
+    refs = list(task.working_history)
+    for need in task.needs:
+        refs.extend((*need.anchor_spans, *need.subject_refs))
+    for condition in task.conditions:
+        refs.extend(ref for ref in (condition.key_span, condition.predicate_span, *condition.value_spans)
+                    if ref is not None)
+    selected = {(ref.turn_id, ref.speaker) for ref in refs if ref.turn_id != task.current_turn_id}
+    return tuple(replace(turn,
+        user_text=turn.user_text if (turn.turn_id, "user") in selected else None,
+        assistant_text=turn.assistant_text if (turn.turn_id, "assistant") in selected else None)
+        for turn in history if any((turn.turn_id, role) in selected for role in ("user", "assistant")))
+
+
 def source_address(block):
     key = block.key
     start, end = block.span or (0, len(block.text))
     return "/".join(quote(str(value), safe="") for value in (
         key.corpus_id, key.document_id, key.version, key.passage_id, f"{start}:{end}"))
+
+
+def compact_computations(results):
+    sources, records = {}, []
+    for result in results:
+        references = []
+        for span in result["sources"]:
+            key = span["source_key"]
+            address = (key["corpus_id"], key["document_id"], key["version"],
+                       key["passage_id"], span["start"], span["end"])
+            reference = sources.setdefault(address, f"C{len(sources) + 1}")
+            references.append(reference)
+        records.append({name: result[name] for name in (
+            "need_id", "operation", "fields", "conditions", "results")}
+            | {"sources": references})
+    return {"sources": [{"id": reference, "corpus": address[0], "document": address[1],
+                         "version": address[2], "passage": address[3], "span": address[4:]}
+                        for address, reference in sources.items()], "results": records}
 
 
 @dataclass(frozen=True)
@@ -53,7 +95,7 @@ def compile_request(template, question, history, evidence, *, results=(),
     task = question
     if results:
         task += "\nComputed results with original-source addresses:\n" + json.dumps(
-            results, ensure_ascii=False, separators=(",", ":"))
+            compact_computations(results), ensure_ascii=False, separators=(",", ":"))
     if instruction:
         task += "\n" + instruction
     messages = (Message("system", system_prompt), Message("user", body),

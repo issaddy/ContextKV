@@ -1,0 +1,222 @@
+"""Actual Qwen answers and measured costs for set utility and stopping heads."""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+from pathlib import Path
+import time
+from urllib.parse import urlparse
+
+import yaml
+
+from controller.config import create_model_template, load_config
+from controller.cooperative_request import compile_request, working_history
+from controller.engine_client import SGLangEngineClient
+from controller.schema import EvidenceBlock, EvidenceUnit, TurnRecord
+from controller.serialization import decode
+from training.shared_collection import candidate_sets
+from training.shared_training import conversation
+
+
+def source_blocks(units):
+    return tuple(EvidenceBlock(unit.source_spans[0].source_key,
+        f"{unit.source_spans[0].source_key.corpus_id}://{unit.source_spans[0].source_key.document_id}",
+        unit.heading, unit.text, span=(unit.source_spans[0].start, unit.source_spans[0].end)) for unit in units)
+
+
+def history(row):
+    grouped = {}
+    for turn, role, text in conversation(row):
+        grouped.setdefault(turn, {})[role] = text
+    return tuple(TurnRecord(turn, values.get("user"), values.get("assistant"))
+                 for turn, values in sorted(grouped.items()))
+
+
+async def score_answers(rows, endpoint, *, concurrency):
+    """Use the public F1 for MultiDoc; structured training uses reference correctness."""
+    import httpx
+    from bench.official import reference_overlap
+    semaphore = asyncio.Semaphore(concurrency)
+    async with httpx.AsyncClient(timeout=180) as client:
+        async def score(item):
+            row, answer = item["source"], item["answer"]
+            if row["dataset"] == "multidoc2dial":
+                reference = {"task_id": row["task_id"], "conversation_id": row["conversation_id"],
+                    "Collection": "multidoc2dial", "targets": [{"text": row["reference_answer"]}]}
+                report = reference_overlap([reference], [{"task_id": row["task_id"],
+                                                            "predictions": [{"text": answer}]}])
+                item["quality"] = report["tasks"][row["task_id"]]["f1"]
+                return
+            async with semaphore:
+                response = await client.post(endpoint.rstrip("/") + "/v1/chat/completions", json={
+                    "model": "Qwen3-32B", "temperature": 0, "max_tokens": 256,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "response_format": {"type": "json_object"},
+                    "messages": [{"role": "system", "content":
+                        'Score answer correctness against the reference, including requested entities, '
+                        'conditions, periods, versions, units and every requested result. '
+                        'Return only {"quality": number}, from 0 for incorrect to 1 for fully correct.'},
+                        {"role": "user", "content": json.dumps({"question": row["question"],
+                            "reference": row["reference_answer"], "answer": answer}, ensure_ascii=False)}]})
+                response.raise_for_status()
+                item["quality"] = float(json.loads(response.json()["choices"][0]["message"]["content"])["quality"])
+        await asyncio.gather(*(score(item) for item in rows))
+
+
+async def collect(args):
+    from bench.study_resources import StudyResourceSampler, attribute_physical, listening_processes
+    config = yaml.safe_load(Path(args.config).read_text())
+    run = load_config(config["generation"]["run_config"])
+    template = create_model_template(run.model)
+    engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=run.sampling)
+    source = [json.loads(line) for line in Path(args.data).read_text().splitlines() if line]
+    from adapters.shared_encoding import SharedQueryEncoder, SharedEvidenceEncoder
+    query_encoder = SharedQueryEncoder(**config["shared"]["query"])
+    evidence_encoder = None
+    if args.stage == "stop":
+        # Full-population arithmetic completes by its execution contract. The
+        # learned STOP action is trained on optional evidence expansion.
+        source = [row for row in source if not any(need["operation"] in {
+            "count", "sum", "group", "mean", "min", "max"} for need in row["task_state"]["needs"])]
+        evidence_encoder = SharedEvidenceEncoder(**config["shared"]["evidence"])
+    roots = (os.getpid(), *listening_processes((urlparse(run.engine.base_url).port,)))
+    sampler = StudyResourceSampler(tuple(args.gpu_devices), roots)
+    outputs, answers, windows, queries = [], [], {}, {}
+    limit = asyncio.Semaphore(args.concurrency)
+    await sampler.start()
+
+    async def answer(row, units, identity, *, future=(), mode="exact"):
+        started = time.monotonic()
+        request = compile_request(template, row["question"], working_history(queries[row["task_id"]], history(row)), source_blocks(units),
+                                  future_sources=source_blocks(future))
+        # Every question owns its training source namespace. Warm branches share
+        # immutable independent KV; cold branches have distinct exact prefixes.
+        scope = f"training:{row['task_id']}:"
+        result = await engine.compute(request, session_id=scope, request_id=identity,
+            max_new_tokens=config["execution"]["output_tokens"], mode=mode,
+            cache_namespace=identity, cache_scope=scope,
+            recompute_ratio=config["shared"]["runtime"]["recompute_ratio"])
+        windows[identity] = started, time.monotonic()
+        item = {"source": row, "answer": result["text"], "call_id": identity,
+            "costs": {"seconds": windows[identity][1]-started}, "native": result["meta"]["contextkv_compute"]}
+        answers.append(item)
+        return item
+
+    async def collect_state(row, index):
+        async with limit:
+            units = tuple(decode(EvidenceUnit, unit) for unit in row["units"])
+            query_started = time.monotonic()
+            query = await asyncio.to_thread(query_encoder.encode, conversation(row), row["question"],
+                row["task_id"], row["turn"], catalogue=row.get("catalogue", ()))
+            queries[row["task_id"]] = query
+            paid_seconds = time.monotonic()-query_started
+            if args.stage == "sets":
+                if all(need["operation"] in {"count", "sum", "group", "mean", "min", "max"}
+                       for need in row["task_state"]["needs"]):
+                    outputs.append((row, ()))
+                    return
+                by_id = {unit.unit_id: unit for unit in units}
+                observations = []
+                for number, chosen in enumerate(candidate_sets(by_id)):
+                    item = await answer(row, tuple(by_id[identity] for identity in chosen),
+                                        f"sets:{row['task_id']}:{number}")
+                    observations.append((chosen, item))
+                outputs.append((row, observations))
+                return
+            from adapters.shared_encoding import EvidenceEncoding
+            from controller.value_policy import StopValueHead
+            import torch
+            warm = index % 2 == 1
+            native = {}
+            if warm:
+                warmup = await answer(row, units, f"warm:{row['task_id']}", future=units, mode="infoflow")
+                native = warmup["native"]
+                answers.remove(warmup)
+            encoded, states, paid = None, [], 0
+            batch_size = min(args.batch_size, max(1, len(units) // 2))
+            for start in range(0, len(units), batch_size):
+                first = time.monotonic()
+                fresh = units[start:start + batch_size]
+                new = await asyncio.to_thread(evidence_encoder.encode, query, fresh)
+                if encoded is None:
+                    encoded = new
+                else:
+                    encoded = EvidenceEncoding((*encoded.unit_ids, *new.unit_ids),
+                        torch.cat((encoded.embeddings, new.embeddings)), torch.cat((encoded.relevance, new.relevance)),
+                        (*encoded.bindings, *new.bindings), encoded.heads)
+                observed = units[:start + len(fresh)]
+                chosen = encoded.select(observed, body_tokens=config["selection"]["body_tokens"])
+                transition_id = f"expand:{row['task_id']}:{start}"
+                windows[transition_id] = first, time.monotonic()
+                paid_seconds += windows[transition_id][1]-first
+                if states:
+                    states[-1]["transition_id"] = transition_id
+                count = sum(unit.body_tokens for unit in observed if unit.unit_id in chosen)
+                features = StopValueHead.features(encoded.summary(chosen), {
+                    "remaining_sources": len(units)-len(observed),
+                    "open_needs": sum(need.operation in {"infer", "compare"} for need in query.task.needs),
+                    "required_rows": 0, "processed_rows": 0, "input_tokens": count,
+                    "remaining_tokens": config["execution"]["max_total_tokens"]-paid,
+                    "elapsed_seconds": paid_seconds,
+                    **{name: native.get(name, 0) for name in ("queue_depth", "gpu_ready_tokens", "host_ready_tokens",
+                        "prefill_token_ms", "transfer_token_ms")}}).cpu().tolist()
+                selected = tuple(unit for unit in observed if unit.unit_id in chosen)
+                item = await answer(row, selected, f"stop:{row['task_id']}:{start}",
+                    future=units if start+len(fresh) < len(units) else (), mode="infoflow" if warm else "exact")
+                states.append({"features": features, "complete_scope": True, "answer": item})
+                paid += sum(unit.body_tokens for unit in fresh)
+            outputs.append((row, states))
+
+    try:
+        await asyncio.gather(*(collect_state(row, index) for index, row in enumerate(source)))
+    finally:
+        await sampler.stop()
+        await engine.aclose()
+        query_encoder.close()
+        if evidence_encoder:
+            evidence_encoder.close()
+    attributed = attribute_physical(sampler.samples, windows)
+    for item in answers:
+        item["costs"].update(attributed[item["call_id"]])
+    await score_answers(answers, run.engine.base_url, concurrency=args.concurrency)
+    records = []
+    for row, observed in outputs:
+        if args.stage == "sets":
+            sets = [{"unit_ids": chosen, "quality": item["quality"], "costs": item["costs"]}
+                    for chosen, item in observed]
+            records.append({**row, **({"sets": sets} if sets else {})})
+        else:
+            states = []
+            for state in observed:
+                item = state["answer"]
+                value = {"features": state["features"], "complete_scope": state["complete_scope"],
+                         "stop": {"quality": item["quality"], **item["costs"]}}
+                if "transition_id" in state:
+                    identity = state["transition_id"]
+                    value["transition"] = {"seconds": windows[identity][1]-windows[identity][0], **attributed[identity]}
+                states.append(value)
+            records.append({"task_id": row["task_id"], "conversation_id": row["conversation_id"],
+                            "split": row["split"], "states": states})
+    path = Path(args.output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in records))
+    return {"states": len(records), "answers": len(answers), "output": str(path)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("stage", choices=("sets", "stop"))
+    parser.add_argument("--config", default="configs/study.yaml")
+    parser.add_argument("--data", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--gpu-devices", type=int, nargs="+", default=[0, 1, 2, 3])
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--concurrency", type=int, default=4)
+    args = parser.parse_args()
+    print(json.dumps(asyncio.run(collect(args))))
+
+
+if __name__ == "__main__":
+    main()

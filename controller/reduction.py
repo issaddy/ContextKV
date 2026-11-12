@@ -1,12 +1,8 @@
-"""Typed cross-document operations retain aligned inputs and leaf provenance."""
+"""Exact numeric conversion shared by document projections and aggregation."""
 from __future__ import annotations
 
 from decimal import Decimal
-import json
 import re
-import unicodedata
-
-from .context_schema import EvidenceClaim
 
 
 # Factors use canonical SI units, with time quantities canonicalized to seconds.
@@ -26,66 +22,9 @@ UNIT_FACTORS = {
 }
 
 
-def entity_key(claim):
-    return unicodedata.normalize("NFKC", claim.entity or claim.text).strip().casefold()
-
-
-def aligned_claims(claims):
-    groups = {}
-    for claim in claims:
-        key = (entity_key(claim), claim.conditions, claim.version)
-        groups.setdefault(key, []).append(claim)
-    return tuple(tuple(group) for group in groups.values())
-
-
 def canonical_quantity(value, unit):
     canonical, factor = UNIT_FACTORS.get(unit, (unit, Decimal(1)))
     literal = str(value)
     if re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?", literal):
         literal = literal.replace(",", "")
     return canonical, Decimal(literal) * factor
-
-
-def reduce_claims(operation, claims, *, claim_id, need_id):
-    """Count unique entities and sum one aligned value per entity/condition/version."""
-    claims = tuple(claim for claim in claims if claim.serves(need_id))
-    groups = aligned_claims(claims)
-    parents = tuple(claim.claim_id for claim in claims)
-    spans = {span.span_id: span for claim in claims for span in claim.source_spans}
-    unit = ""
-    if operation == "count":
-        value = len(groups)
-    elif operation == "sum":
-        total = Decimal(0)
-        units = set()
-        for group in groups:
-            converted = [canonical_quantity(claim.value, claim.unit) for claim in group]
-            if len(set(converted)) != 1:
-                raise ValueError(f"conflicting quantities for {group[0].entity}")
-            canonical, number = converted[0]
-            units.add(canonical)
-            total += number
-        if len(units) > 1:
-            raise ValueError(f"sum requires compatible units: {sorted(units)}")
-        unit = next(iter(units), "")
-        value = str(total)
-    elif operation in {"union", "group"}:
-        def facts(group):
-            unique = {}
-            for claim in group:
-                record = {"entity": claim.entity, "relation": claim.relation,
-                    "value": claim.value, "unit": claim.unit, "text": claim.text,
-                    "conditions": claim.conditions, "version": claim.version}
-                unique.setdefault(json.dumps(record, sort_keys=True, ensure_ascii=False), record)
-            return tuple(unique.values())
-        if operation == "union":
-            value = [fact for group in groups for fact in facts(group)]
-        else:
-            value = [{"entity": group[0].entity, "conditions": group[0].conditions,
-                      "version": group[0].version, "facts": facts(group)} for group in groups]
-    else:
-        raise ValueError(f"model reduction required for {operation}")
-    text = f"{operation} of {len(value)} entries" if operation in {"union", "group"} else str(value)
-    return EvidenceClaim(claim_id, need_id, "derived", text=text, value=value,
-                         unit=unit, source_spans=tuple(spans.values()), operation=operation,
-                         parent_claim_ids=parents)

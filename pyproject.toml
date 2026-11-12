@@ -5,19 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "contextkv"
 version = "0.1.0"
-description = "Versioned evidence, cost-aware context planning and KV cache lifecycle research"
+description = "Shared evidence encoding, structured document computation and native KV reuse"
 readme = "README.md"
 license-files = ["docs/third_party/APACHE-2.0.txt", "docs/third_party/*NOTICE.md", "bench/assets/loong/NOTICE.md"]
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.28,<0.29", "PyYAML>=6,<7", "fastapi>=0.115,<1", "uvicorn>=0.34,<1"]
+dependencies = ["httpx", "PyYAML", "fastapi", "uvicorn"]
 
 [project.optional-dependencies]
-tokenizer = ["transformers>=5.12,<6", "tokenizers>=0.22,<0.24", "jinja2>=3.1,<4"]
-retrieval = ["bm25s>=0.3.15,<0.4", "numpy>=2.3,<3"]
-plan-gain-training = ["numpy>=2.3,<3", "scipy>=1.15,<2", "scikit-learn>=1.6,<2"]
-query-adapter = ["peft>=0.21,<1"]
-evaluation = ["jinja2>=3.1,<4", "prometheus-client>=0.21,<1", "jsonschema>=4,<5", "psutil>=7"]
-external-reference = ["llama-index-core>=0.14.25,<0.15"]
+tokenizer = ["transformers", "tokenizers", "jinja2"]
+retrieval = ["bm25s", "numpy"]
+query-adapter = ["peft"]
+evaluation = ["jinja2", "jsonschema", "psutil"]
+external-reference = ["llama-index-core"]
 
 [dependency-groups]
 dev = [
@@ -30,7 +29,7 @@ contextkv = "controller.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["controller*", "adapters*", "bench*", "profiling*", "engine_patches*", "training*"]
+include = ["controller*", "adapters*", "bench*", "engine_patches*", "training*"]
 
 [tool.setuptools.package-data]
 bench = ["assets/loong/*", "examples/*.json", "examples/*.jsonl", "examples/*.yaml"]

@@ -3,28 +3,19 @@
 set -euo pipefail
 CHECKOUT="${SGLANG_CHECKOUT:-vendor/sglang-0.5.18}"
 : "${CONTEXTKV_MODEL_SCOPE_PATH:?Set to an explicit local Qwen3 model scope JSON}"
-: "${CONTEXTKV_FINGERPRINT_JSON:?Set the exact HFTemplateAdapter fingerprint JSON}"
 if [[ -f "$CHECKOUT/.contextkv-source-only" ]]; then
   echo 'A source-only validation directory cannot run SGLang.' >&2
   exit 2
 fi
 export SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND=python
 export SGLANG_ENABLE_UNIFIED_RADIX_TREE=1
-export CONTEXTKV_ENABLE_PROFILING=1
+export SGLANG_ENABLE_JIT_DEEPGEMM=0
 export SGLANG_HICACHE_TMA_TRANSFER="${SGLANG_HICACHE_TMA_TRANSFER:-0}"
 export PYTHONPATH="$CHECKOUT/python${PYTHONPATH:+:$PYTHONPATH}"
-# Optional host admission uses inherited CONTEXTKV_HOST_ADMISSION=off|fixed|conditioned.
-# Off preserves native backup behavior and the previous cache configuration hash.
-# HiCache execution remains native; the research quote classifies FULL GPU/host
-# ready and pending copies without touching transfer queues or native locks.
 HICACHE_ARGS=()
-SESSION_ARGS=()
 JSON_ARGS=()
 if [[ "${CONTEXTKV_JSON_FORMAT:-compact}" == compact ]]; then
   JSON_ARGS=(--constrained-json-disable-any-whitespace)
-fi
-if [[ "${CONTEXTKV_ENABLE_SESSION_RADIX:-1}" == 1 ]]; then
-  SESSION_ARGS=(--enable-session-radix-cache)
 fi
 if [[ "${CONTEXTKV_ENABLE_HICACHE:-1}" == 1 ]]; then
   HICACHE_ARGS=(--enable-hierarchical-cache
@@ -36,6 +27,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 exec "${CONTEXTKV_ENGINE_PYTHON:-python3}" "$PROJECT_ROOT/engine_patches/contextkv_model_scope.py" \
   --scope "$CONTEXTKV_MODEL_SCOPE_PATH" --launch \
   --tp 1 --dtype bfloat16 --kv-cache-dtype bfloat16 --context-length 32768 \
-  --page-size "${CONTEXTKV_PAGE_SIZE:-64}" ${SESSION_ARGS[@]+"${SESSION_ARGS[@]}"} \
+  --radix-eviction-policy priority \
+  --page-size "${CONTEXTKV_PAGE_SIZE:-64}" \
   --enable-metrics ${HICACHE_ARGS[@]+"${HICACHE_ARGS[@]}"} \
   ${JSON_ARGS[@]+"${JSON_ARGS[@]}"} "$@"

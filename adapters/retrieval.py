@@ -157,7 +157,7 @@ class BM25SRetriever:
                                                show_progress=False)
         return result
 
-    def retrieve(self, user_questions: Sequence[str], *, top_k: int = 5) -> tuple[OnlineContext, ...]:
+    def retrieve(self, user_questions: Sequence[str], *, top_k: int = 5, legal_ids=None) -> tuple[OnlineContext, ...]:
         if top_k < 1:
             raise ValueError("top_k must be positive")
         query = retrieval_query(user_questions)
@@ -166,11 +166,15 @@ class BM25SRetriever:
         if not tokens:
             return ()
         scores = self._index.get_scores(tokens)
-        order = deterministic_top_k(scores, top_k, self._np)
+        if legal_ids is None:
+            order = deterministic_top_k(scores, top_k, self._np)
+        else:
+            positions = self._np.asarray([i for i, identity in enumerate(self._ids) if identity in legal_ids], dtype=int)
+            order = positions[deterministic_top_k(scores[positions], top_k, self._np)]
         return tuple(replace(self._contexts[int(i)], score=float(scores[i])) for i in order)
 
-    def candidate_search(self, query, *, top_k=50):
-        return self.retrieve([query], top_k=top_k)
+    def candidate_search(self, query, *, top_k=50, legal_ids=None):
+        return self.retrieve([query], top_k=top_k, legal_ids=legal_ids)
 
     def retrieve_turn(self, turn: OnlineTurn) -> OnlineTurn:
         if turn.protocol != "P3":
