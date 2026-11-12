@@ -29,10 +29,10 @@ resources:
   gpu_capacity_tokens: 32768
   host_capacity_tokens: 61056
   gpu_devices:
-  - 0
-  - 1
-  - 2
-  - 3
+  - 4
+  - 5
+  - 6
+  - 7
   p95_complete_ms: 120000
   max_online_tokens: 200000000
   concurrency:

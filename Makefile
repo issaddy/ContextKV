@@ -3,7 +3,7 @@
 PYTHON ?= python3
 
 install:
-	$(PYTHON) -m pip install -e '.[retrieval,evaluation,tokenizer]'
+	$(PYTHON) -m pip install --no-deps -e .
 
 lint:
 	$(PYTHON) -m ruff check controller adapters bench training scripts engine_patches

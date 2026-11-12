@@ -211,7 +211,7 @@ def main():
     parser.add_argument("--config", default="configs/study.yaml")
     parser.add_argument("--data", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--gpu-devices", type=int, nargs="+", default=[0, 1, 2, 3])
+    parser.add_argument("--gpu-devices", type=int, nargs="+", default=[4, 5, 6, 7])
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--concurrency", type=int, default=4)
     args = parser.parse_args()

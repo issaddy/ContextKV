@@ -5,12 +5,14 @@
 ```bash
 CONTEXTKV_MODEL_SCOPE_PATH=configs/model_scopes/qwen3-32b.local.json bash scripts/bootstrap_sglang.sh
 source runs/engine-runtime.env
-CUDA_VISIBLE_DEVICES=0 bash scripts/launch_sglang.sh --port 30000
+CUDA_VISIBLE_DEVICES=4 bash scripts/launch_sglang.sh --port 30000
 ```
 
-启动脚本使用 TP1、BF16、32k 窗口、64-token 页和 HiCache。`CONTEXTKV_HICACHE_GB` 设置 Host 缓存大小；设备使用范围为 0–3。
+启动脚本使用 TP1、BF16、32k 窗口、64-token 页和 HiCache。`CONTEXTKV_HICACHE_GB` 设置 Host 缓存大小；设备使用范围为 4–7。
 
-共享查询与证据编码默认分别使用 GPU 2、3。GPU 1 可安排索引构建或辅助训练。按实际就绪阶段并行，训练完成后加载对应的共享资产。
+辅助进程设置 `CUDA_VISIBLE_DEVICES=4,5,6,7`，查询与证据编码的逻辑设备 `cuda:2/3` 对应物理 GPU 6、7；物理 GPU 5 用于并行标注或训练。按实际就绪阶段并行，训练完成后加载对应的共享资产。
+
+辅助编码与服务控制进程先设置 `export CUDA_VISIBLE_DEVICES=4,5,6,7`。
 
 服务入口：
 

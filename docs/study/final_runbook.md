@@ -8,7 +8,7 @@
 - 固定生成模型：`/data/models/qwen3-32b`
 - 查询骨干：`models/qwen3-embedding-0.6b`
 - 证据骨干：`models/jina-reranker-v3.5`
-- Python：容器默认 `python3`；GPU 使用 0–3。
+- Python：容器默认 `python3`；GPU 使用 4–7。
 - 配置：`configs/study.yaml`；引擎启动见[部署](../deployment.md)。
 
 代码和必要轻量结果可同步；模型文件、向量数组和大日志留在实验容器。
@@ -31,6 +31,8 @@
 固定 Qwen3-32B 作为标签和实际答案生成器。查询训练使用会话对齐与任务关系；证据训练先完成字段/来源头，再加入实际答案集合效用；最后采集多步停止轨迹。
 
 ```bash
+export CUDA_VISIBLE_DEVICES=4,5,6,7
+
 python3 -m training.prepare_shared_labels \
   --source data/multidoc2dial/source \
   --query-model models/qwen3-embedding-0.6b \
