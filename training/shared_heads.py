@@ -72,7 +72,9 @@ class EvidenceHeads(nn.Module):
         return self.field(b + a + b*a).view(len(queries), len(states), len(FIELD_ROLES), 3)
 
     def utility(self, embeddings, relevance, selected):
-        encoded = self.set_item(embeddings)
+        return self.utility_encoded(self.set_item(embeddings), relevance, selected)
+
+    def utility_encoded(self, encoded, relevance, selected):
         mask = selected.to(encoded.dtype)
         count = mask.sum(-1, keepdim=True)
         summed = mask @ encoded

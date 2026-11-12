@@ -113,6 +113,7 @@ class EvidenceEncoding:
 
     def select(self, units, *, body_tokens):
         """Prune a joint evidence set by generator utility, retaining complementary groups."""
+        import numpy as np
         import torch
         by_id = {unit.unit_id: unit for unit in units}
         positions = {identity: index for index, identity in enumerate(self.unit_ids)}
@@ -132,18 +133,19 @@ class EvidenceEncoding:
             return chosen-removed
 
         with torch.no_grad():
+            encoded = self.heads.set_item(self.embeddings)
             while chosen:
                 candidates = [remove(identity) for identity in self.unit_ids if identity in chosen]
-                masks = self.embeddings.new_zeros((len(candidates) + 1, len(self.unit_ids)))
+                masks = np.zeros((len(candidates) + 1, len(self.unit_ids)), dtype=np.float32)
                 for row, group in enumerate([chosen, *candidates]):
-                    for identity in group:
-                        masks[row, positions[identity]] = 1
-                values = self.heads.utility(self.embeddings, self.relevance, masks)
+                    masks[row, [positions[identity] for identity in group]] = 1
+                values = self.heads.utility_encoded(encoded, self.relevance,
+                    torch.from_numpy(masks).to(self.embeddings.device)).cpu().numpy()
                 cost = sum(by_id[key].body_tokens for key in chosen)
                 gains = values[1:]-values[0]
                 if cost > body_tokens:
-                    freed = gains.new_tensor([sum(by_id[key].body_tokens for key in chosen-group)
-                                              for group in candidates])
+                    freed = np.asarray([sum(by_id[key].body_tokens for key in chosen-group)
+                                        for group in candidates])
                     index = int((gains/freed).argmax())
                 else:
                     index = int(gains.argmax())
