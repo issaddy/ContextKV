@@ -6,6 +6,8 @@
 
 混合检索复用 BM25 与 BGE-M3 dense 表示的 RRF，发布版交叉编码器为 query–passage 相关性重排。当前 ranked 入口按该顺序和来源依赖选材。Need 的主体、条件、版本和支持关系由项目任务与证据接口表达。支持模型及集合效用是可选对照，候选回答偏好监督复用固定 reader 的实际输出。[BGE-M3](https://huggingface.co/BAAI/bge-m3) · [BGE-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3) · [REPLUG](https://arxiv.org/abs/2301.12652)
 
+有限窗口选材借鉴 xQuAD 的显式需求方面覆盖思想，复用项目已有的倒数排名覆盖函数：`F(S) = Σ_j max_{u∈S} 1/rank_j(u)`。保留全问题相关来源作为起点，再按 Need 的边际覆盖选择来源依赖闭包；实际窗口和 passage 额度决定可装入集合。Need 排名来自已有召回归属和相关性顺序，不新增重排调用。[显式查询方面覆盖](https://eprints.gla.ac.uk/44352/)
+
 任务学生入口借鉴双线性图边评分，用于关联 Need、主体、条件与前驱。线上主线使用任务解释和来源合同，跨轮复用核对适用条件后导入原子事实。事实的原文坐标和推导父链分别用于来源定位与证明。[双线性边评分](https://nlp.stanford.edu/pubs/dozat2017deep.pdf) · [数据溯源](https://www.research.ed.ac.uk/en/publications/why-and-where-a-characterization-of-data-provenance/)
 
 ## B · 计算价值与有界后续

@@ -142,6 +142,7 @@ NUMERIC_SELECT_SYSTEM = (
     "Do not infer that count and sum Needs share conditions or populations: evaluate their supplied "
     "scopes independently. A missing requested quantity can qualify for count but not sum. "
     "The controller preserves the original facts and computes count and sum. "
+    "Parent rows use the columns declared in parent_fields; sources contain their original excerpts. "
     "Return compact JSON without optional whitespace."
 )
 SUMMARY_READ_SYSTEM = (
@@ -507,11 +508,11 @@ def step_messages(plan, task, units, claims=(), snapshot=None, *, source_prompt=
             "version_intent": task_view["version_intent"],
             "history": history_view(state, snapshot) if snapshot is not None else [],
             "needs": {alias: needs[identity] for alias, identity in aliases.items()},
-            "parents": {f"p{index}": {"excerpt": claim.text, "conditions": claim.conditions,
-                                    "version": claim.version, "entity": claim.entity,
-                                    "relation": claim.relation, "value": claim.value, "unit": claim.unit,
-                                    "sources": [references[(span.source_key, span.start, span.end)]
-                                                for span in claim.source_spans]}
+            "parent_fields": ("excerpt", "conditions", "version", "entity", "relation", "value", "unit", "sources"),
+            "parents": {f"p{index}": (claim.text, claim.conditions, claim.version, claim.entity,
+                                    claim.relation, claim.value, claim.unit,
+                                    [references[(span.source_key, span.start, span.end)]
+                                     for span in claim.source_spans])
                         for index, claim in enumerate(claims)},
             "sources": excerpts,
             "output_schema": visible_output_schema(schema)}

@@ -581,7 +581,6 @@ class PrefixReadObserver:
         self._allocation_lock = asyncio.Lock()
         self._control_observations = deque(maxlen=32)
         self._owner_control_observations = deque(maxlen=32)
-        self._demand_control_observations = deque(maxlen=32)
         if settings["mode"] not in {"fixed_ttl", "value", "demand"}:
             raise ValueError("prefix callback requires fixed_ttl, value or demand mode")
         self.model = None
@@ -933,7 +932,8 @@ class PrefixReadObserver:
                         scope, "consumer_paired_marginal",
                         retention_control_ms=0 if action == "keep" else max(
                             max((point.retention_control_ms for point in forecasts), default=0),
-                            max(self._owner_control_observations, default=0)),
+                            sum(self._owner_control_observations)/len(self._owner_control_observations)
+                            if self._owner_control_observations else 0),
                         expected_collateral_saved_ms=min((point.expected_collateral_saved_ms for point in forecasts), default=0))
                     request = RetentionRequest(owner, forecast, pages, page_size,
                         consumer_savings=tuple(events))
@@ -974,9 +974,7 @@ class PrefixReadObserver:
         # set. Keep this diagnostic separate from branch accounting: the current
         # decision has already elapsed and READ callbacks are charged by their
         # executor. It is not an additional predicted generation latency.
-        fixed_ms = max(elapsed_ms, max(self._demand_control_observations, default=0))
-        fixed_ms += max(self._control_observations, default=0)
-        self._demand_control_observations.append(elapsed_ms)
+        fixed_ms = elapsed_ms+(self.predicted_control_ms() or 0.0)
         for key, option in tuple(options.items()):
             if option.retention_allocation_value_ms is None:
                 continue

@@ -22,7 +22,7 @@ def input_protocol(fingerprint):
         "answer_layout": "sources_before_history_for_source_first",
         "shared_source_protocol": SOURCE_ENCODING,
         "task_projection": "resolved_conditions_and_effective_version_scope_v1",
-        "numeric_selection": "source_field_period_column_and_atomic_gap_repair_v3",
+        "numeric_selection": "columnar_parents_source_field_period_and_atomic_gap_repair_v4",
         "need_dependencies": "source_membership_read_packets_and_need_local_dependencies_v3",
         "completion_admission": "answerable_direct_or_mandatory_need_closure_v2",
         "read_recovery": {"protocol": "durable_bounded_source_split_and_field_repair_v1",
